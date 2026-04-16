@@ -3,7 +3,7 @@
 const axios       = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
-const GEMINI_MODEL = 'gemini-3.1-pro-preview';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 /**
  * Базовый URL для Gemini API.
@@ -96,10 +96,10 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
       responseMimeType: 'application/json',
     },
     safetySettings: [
-      { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
-      { category: 'HARM_CATEGORY_HATE_SPEECH',        threshold: 'BLOCK_NONE' },
-      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT',  threshold: 'BLOCK_NONE' },
-      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT',  threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_ONLY_HIGH' },
+      { category: 'HARM_CATEGORY_HATE_SPEECH',        threshold: 'BLOCK_ONLY_HIGH' },
+      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT',  threshold: 'BLOCK_ONLY_HIGH' },
+      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT',  threshold: 'BLOCK_ONLY_HIGH' },
     ],
   };
 
@@ -137,7 +137,9 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     } else if (response.status >= 500) {
       msg = `Server error (${response.status})`;
     }
-    throw new Error(`Gemini API error ${response.status}: ${msg}`);
+    // Включаем детали ошибки из ответа API для отладки
+    const detail = response.data?.error?.message || JSON.stringify(response.data).slice(0, 300);
+    throw new Error(`Gemini API error ${response.status}: ${msg} — ${detail}`);
   }
 
   const data      = response.data;
