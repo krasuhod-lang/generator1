@@ -65,8 +65,11 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
   if (timeoutMs < 1000 || timeoutMs > 300000) throw new Error('Invalid timeout');
 
-  // API ключ Gemini зашифрован в base64 для защиты от случайного просмотра
-  const apiKey = Buffer.from('QUl6YVN5RHd0T0NoTlgtQjNoTExBZHhrU2tJa09oV3d3UmZubVZn', 'base64').toString('utf8');
+  // API ключ Gemini — из переменной окружения
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not set in environment variables');
+  }
 
   const endpoint = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
@@ -100,14 +103,16 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     ],
   };
 
-  // Всегда используем прокси для Gemini API
-  const proxyUrl = 'http://76MkBTXZ:3ukb66G1@155.212.59.188:64464';
+  // Прокси для Gemini API (из переменной окружения)
+  const proxyUrl = process.env.GEMINI_PROXY_URL || process.env.HTTPS_PROXY || '';
   let proxyAgent;
-  try {
-    proxyAgent = new HttpsProxyAgent(proxyUrl);
-  } catch (e) {
-    console.warn('[gemini] Неверный прокси, запросы пойдут напрямую:', e.message);
-    proxyAgent = undefined;
+  if (proxyUrl) {
+    try {
+      proxyAgent = new HttpsProxyAgent(proxyUrl);
+    } catch (e) {
+      console.warn('[gemini] Неверный прокси, запросы пойдут напрямую:', e.message);
+      proxyAgent = undefined;
+    }
   }
 
   const axiosCfg   = {
@@ -127,10 +132,10 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
 
   if (response.status !== 200) {
     let msg = `HTTP ${response.status}`;
-    if (status >= 400 && status < 500) {
-      msg = `Client error (${status})`;
-    } else if (status >= 500) {
-      msg = `Server error (${status})`;
+    if (response.status >= 400 && response.status < 500) {
+      msg = `Client error (${response.status})`;
+    } else if (response.status >= 500) {
+      msg = `Server error (${response.status})`;
     }
     throw new Error(`Gemini API error ${response.status}: ${msg}`);
   }

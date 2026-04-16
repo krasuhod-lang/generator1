@@ -264,6 +264,8 @@ async function startTask() {
 const canStart = computed(() =>
   form.input_target_service.trim() &&
   form.input_brand_name.trim() &&
+  form.input_author_name.trim() &&
+  form.input_region.trim() &&
   lsiCount.value >= 5
 );
 </script>

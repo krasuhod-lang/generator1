@@ -73,24 +73,20 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   );
 
   // Сохраняем финальные метрики в task_metrics
+  // total_cost_usd = 0 здесь, т.к. стоимость токенов уже аккумулируется в callLLM.js → persistStageCall()
   await db.query(
     `INSERT INTO task_metrics
-       (task_id, stage_name, metric_data, total_tokens_in, total_tokens_out,
-        total_cost_usd, bm25_score)
-     VALUES ($1, 'stage7_final', $2, 0, 0, 0, $3)
-     ON CONFLICT (task_id, stage_name) DO UPDATE SET
-       metric_data    = EXCLUDED.metric_data,
+       (task_id, lsi_coverage, eeat_score, bm25_score, total_cost_usd)
+     VALUES ($1, $2, $3, $4, 0)
+     ON CONFLICT (task_id) DO UPDATE SET
+       lsi_coverage   = EXCLUDED.lsi_coverage,
+       eeat_score     = EXCLUDED.eeat_score,
        bm25_score     = EXCLUDED.bm25_score,
        updated_at     = NOW()`,
     [
       taskId,
-      JSON.stringify({
-        global_audit:         s7Result?.global_audit     || {},
-        lsi_coverage_percent: globalLSICoverage,
-        eeat_score:           globalEEATScore,
-        bm25:                 { score: bm25.score, interpretation: bm25.interpretation },
-        full_response:        s7Result,
-      }),
+      globalLSICoverage,
+      globalEEATScore,
       bm25.score,
     ]
   );
@@ -99,7 +95,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   await db.query(
     `UPDATE tasks SET
        stage7_result = $1,
-       final_html    = $2,
+       full_html     = $2,
        updated_at    = NOW()
      WHERE id = $3`,
     [JSON.stringify(s7Result || {}), fullHTML, taskId]
