@@ -1,460 +1,603 @@
 <script setup>
-import { ref, reactive, nextTick } from 'vue';
-import { useRouter } from 'vue-router';
-import { useTasksStore } from '../stores/tasks';
+import { ref, reactive, onMounted, computed } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { useTasksStore } from '../stores/tasks.js';
 
+const route  = useRoute();
 const router = useRouter();
-const tasksStore = useTasksStore();
+const store  = useTasksStore();
 
-/* ── Reactive form state ─────────────────────────────────────── */
+const isEdit  = computed(() => !!route.params.id);
+const loading = ref(false);
+const saving  = ref(false);
+const error   = ref('');
+
+// Секции аккордеона
+const openSections = reactive({ s1: true, s2: false, s3: false, s4: false, s5: false });
+function toggle(key) { openSections[key] = !openSections[key]; }
+
+// Форма
 const form = reactive({
-  name: '',
-  input_keyword: '',
-  input_niche: '',
-  input_target_audience: '',
-  input_tone_of_voice: '',
-  input_region: '',
-  input_language: 'русский',
+  input_target_service:  '',
+  input_brand_name:      '',
+  input_author_name:     '',
+  input_region:          '',
+  input_language:        'ru', // Язык
+  input_business_type:   '',   // Тип бизнеса
+  input_site_type:       '',   // Тип сайта
+  input_target_audience: '',   // Целевая аудитория
+  input_business_goal:   '',   // Приоритетная бизнес-цель
+  input_monetization:    '',   // Основной тип монетизации
+  input_project_limits:  '',   // Ограничения проекта
+  input_page_priorities: '',   // Приоритетные типы страниц
+  input_niche_features:  '',   // Особенности ниши
+  input_raw_lsi:         '',
+  input_ngrams:          '',
+  input_tfidf_json:      '[]',
+  input_brand_facts:     '',
   input_competitor_urls: '',
-  input_content_type: '',
-  input_brand_name: '',
-  input_unique_selling_points: '',
-  input_word_count: 3000,
-  input_additional: ''
+  input_min_chars:       800,
+  input_max_chars:       3500,
+  title:                 '',
 });
 
-/* ── Tone / language / content-type options ───────────────────── */
-const toneOptions = ['формальный', 'дружелюбный', 'экспертный', 'разговорный'];
-const languageOptions = ['русский', 'английский', 'украинский'];
-const contentTypeOptions = ['статья', 'лендинг', 'обзор', 'руководство', 'карточка товара'];
+// Загружаем черновик при редактировании
+onMounted(async () => {
+  if (isEdit.value) {
+    loading.value = true;
+    try {
+      const task = await store.fetchTask(route.params.id);
+      if (task) Object.keys(form).forEach(k => { if (task[k] !== undefined) form[k] = task[k]; });
+    } catch (e) {
+      error.value = 'Не удалось загрузить задачу';
+    } finally {
+      loading.value = false;
+    }
+  }
+});
 
-/* ── TZ upload state ─────────────────────────────────────────── */
-const tzLoading = ref(false);
-const tzError = ref('');
-const tzSuccess = ref(false);
-const tzFileName = ref('');
-const isDragOver = ref(false);
-const fileInput = ref(null);
-const highlightedFields = ref(new Set());
+// TF-IDF предпросмотр
+const tfidfParsed = computed(() => {
+  try {
+    const arr = JSON.parse(form.input_tfidf_json);
+    return Array.isArray(arr) ? arr.slice(0, 15) : [];
+  } catch { return []; }
+});
 
-/* ── Submission state ────────────────────────────────────────── */
-const submitting = ref(false);
-const submitError = ref('');
+// LSI счётчик
+const lsiCount = computed(() =>
+  form.input_raw_lsi.split('\n').map(s => s.trim()).filter(Boolean).length
+);
 
-/* ── TZ field mapping (api response key → form key) ──────────── */
-const TZ_FIELD_MAP = {
-  keyword: 'input_keyword',
-  niche: 'input_niche',
-  target_audience: 'input_target_audience',
-  tone_of_voice: 'input_tone_of_voice',
-  region: 'input_region',
-  language: 'input_language',
-  content_type: 'input_content_type',
-  brand_name: 'input_brand_name',
-  unique_selling_points: 'input_unique_selling_points',
-  word_count_target: 'input_word_count',
-  additional_requirements: 'input_additional'
+// Загрузка DOCX
+const docxFile       = ref(null);
+const docxUploading  = ref(false);
+const docxMsg        = ref('');
+const docxError      = ref('');
+
+// LLM-анализ ТЗ (Pre-Stage -1)
+const llmFile      = ref(null);
+const llmUploading = ref(false);
+const llmMsg       = ref('');
+const llmError     = ref('');
+
+// Маппинг полей extracted → form
+const LLM_FIELD_MAP = {
+  niche:            'input_target_service',   // используем как запасной вариант если пустой
+  keyword:          'input_target_service',
+  geo:              'input_region',
+  language:         'input_language',
+  business_type:    'input_business_type',
+  site_type:        'input_site_type',
+  target_audience:  'input_target_audience',
+  business_goal:    'input_business_goal',
+  monetization:     'input_monetization',
+  constraints:      'input_project_limits',
+  priority_page_types: 'input_page_priorities',
+  niche_features:   'input_niche_features',
 };
 
-/* ── TZ parse handler ────────────────────────────────────────── */
-async function handleTzFile(file) {
+async function handleLLMTzUpload(e) {
+  const file = e.target.files[0];
   if (!file) return;
-
-  const allowed = [
-    'application/pdf',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'text/plain'
-  ];
-  const ext = file.name.split('.').pop().toLowerCase();
-  if (!allowed.includes(file.type) && !['pdf', 'docx', 'txt'].includes(ext)) {
-    tzError.value = 'Поддерживаемые форматы: .pdf, .docx, .txt';
-    return;
-  }
-
-  tzFileName.value = file.name;
-  tzError.value = '';
-  tzSuccess.value = false;
-  tzLoading.value = true;
+  llmFile.value  = file;
+  llmMsg.value   = '';
+  llmError.value = '';
+  llmUploading.value = true;
 
   try {
-    const data = await tasksStore.parseTz(file);
+    const result = await store.parseTZWithLLM(file);
+    const ext = result?.extracted || {};
+    let filled = 0;
 
-    const filled = [];
-
-    // Map standard fields
-    for (const [apiKey, formKey] of Object.entries(TZ_FIELD_MAP)) {
-      if (data[apiKey] != null && data[apiKey] !== '') {
-        form[formKey] = data[apiKey];
-        filled.push(formKey);
-      }
+    for (const [extKey, formKey] of Object.entries(LLM_FIELD_MAP)) {
+      const val = ext[extKey];
+      if (val === null || val === undefined || val === '') continue;
+      // Массивы → строка через новую строку
+      const strVal = Array.isArray(val) ? val.join('\n') : String(val);
+      if (!strVal.trim()) continue;
+      // Не перезаписываем уже заполненное поле (кроме явного Intent из keyword)
+      if (extKey === 'niche' && form[formKey]?.trim()) continue;
+      form[formKey] = strVal;
+      filled++;
     }
 
-    // competitor_urls is an array → join with newlines
-    if (Array.isArray(data.competitor_urls) && data.competitor_urls.length > 0) {
-      form.input_competitor_urls = data.competitor_urls.join('\n');
-      filled.push('input_competitor_urls');
+    // competitor_urls — отдельно, т.к. нужно объединить urls и names
+    const urls  = (ext.competitor_urls  || []).join('\n');
+    const names = (ext.competitor_names || []).join('\n');
+    if (urls || names) {
+      form.input_competitor_urls = [urls, names].filter(Boolean).join('\n');
+      filled++;
     }
 
-    // Flash highlight on filled fields
-    highlightedFields.value = new Set(filled);
-    await nextTick();
-    setTimeout(() => {
-      highlightedFields.value = new Set();
-    }, 2000);
+    // known_terms → добавляем к LSI если поле пустое
+    if (ext.known_terms?.length && !form.input_raw_lsi.trim()) {
+      form.input_raw_lsi = ext.known_terms.join('\n');
+      filled++;
+    }
 
-    tzSuccess.value = true;
-    setTimeout(() => {
-      tzSuccess.value = false;
-    }, 4000);
+    // tone_of_voice / additional_notes → brand_facts если пустые
+    if (ext.tone_of_voice && !form.input_brand_facts?.trim()) {
+      form.input_brand_facts = ext.tone_of_voice;
+      filled++;
+    }
+
+    // Открываем секции с заполненными данными
+    if (ext.keyword || ext.niche)        openSections.s1 = true;
+    if (ext.known_terms?.length)         openSections.s2 = true;
+    if (ext.competitor_urls?.length || ext.competitor_names?.length) openSections.s4 = true;
+
+    llmMsg.value = filled > 0
+      ? `ИИ заполнил ${filled} полей. Проверьте и при необходимости скорректируйте.`
+      : 'ТЗ проанализировано, но распознаваемых полей не найдено — заполните вручную.';
   } catch (err) {
-    tzError.value = err.response?.data?.error || 'Ошибка при анализе файла';
+    llmError.value = err.response?.data?.error || err.message || 'Ошибка анализа ТЗ';
   } finally {
-    tzLoading.value = false;
+    llmUploading.value = false;
+    // Сбрасываем input чтобы можно было повторно выбрать тот же файл
+    e.target.value = '';
   }
 }
 
-/* ── Drag & drop handlers ────────────────────────────────────── */
-function onDragOver(e) {
-  e.preventDefault();
-  isDragOver.value = true;
-}
-function onDragLeave() {
-  isDragOver.value = false;
-}
-function onDrop(e) {
-  e.preventDefault();
-  isDragOver.value = false;
-  const file = e.dataTransfer?.files?.[0];
-  handleTzFile(file);
-}
-function onFileSelect(e) {
-  const file = e.target.files?.[0];
-  handleTzFile(file);
-  e.target.value = '';
-}
-function openFilePicker() {
-  fileInput.value?.click();
-}
+async function handleDocxUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  docxFile.value  = file;
+  docxMsg.value   = '';
+  docxError.value = '';
 
-/* ── Submit handler ──────────────────────────────────────────── */
-async function handleSubmit() {
-  submitError.value = '';
-  submitting.value = true;
+  // Если задача ещё не создана — создаём черновик автоматически (без редиректа)
+  if (!isEdit.value) {
+    // Временно подставляем placeholder если поле пустое
+    const hadEmpty = !form.input_target_service.trim();
+    if (hadEmpty) form.input_target_service = 'Черновик';
+    await saveDraft({ silent: true });
+    if (hadEmpty) form.input_target_service = '';
+    if (error.value) return;
+  }
+
+  const taskId = isEdit.value ? route.params.id : store.current?.id;
+  if (!taskId) { docxError.value = 'Не удалось создать черновик'; return; }
+
+  docxUploading.value = true;
   try {
-    const payload = { name: form.name };
-    for (const key of Object.keys(form)) {
-      if (key.startsWith('input_') && form[key] !== '' && form[key] != null) {
-        payload[key] = form[key];
+    const result = await store.uploadTZ(taskId, file);
+    // Подставляем распознанные поля в форму
+    const pf = result?.parsedFields || {};
+    const fieldMap = [
+      'input_target_service',
+      'input_min_chars',
+      'input_max_chars',
+      'input_competitor_urls',
+      'input_raw_lsi',
+      'input_ngrams',
+      'input_tfidf_json',
+    ];
+    let filled = 0;
+    for (const key of fieldMap) {
+      if (pf[key] !== undefined && pf[key] !== '' && pf[key] !== null) {
+        form[key] = pf[key];
+        filled++;
       }
     }
-    const task = await tasksStore.createTask(payload);
-    await tasksStore.startTask(task.id);
-    router.push(`/tasks/${task.id}/monitor`);
+    docxMsg.value = filled > 0
+      ? `ТЗ распознано: заполнено ${filled} полей`
+      : 'Файл загружен (поля не распознаны — заполните вручную)';
+    // Открываем секции с заполненными данными
+    if (pf.input_target_service) openSections.s1 = true;
+    if (pf.input_raw_lsi)        openSections.s2 = true;
+    if (pf.input_competitor_urls) openSections.s4 = true;
+    // Сохраняем распознанные поля на сервер ПЕРЕД router.replace
+    // чтобы при повторном onMounted форма загрузилась уже заполненной
+    if (filled > 0) {
+      try {
+        await store.updateTask(taskId, { ...form });
+      } catch (_) { /* игнорируем ошибку сохранения, поля уже в форме */ }
+    }
+    // Обновляем URL на /edit если задача только что создана
+    if (!isEdit.value && taskId) {
+      router.replace(`/tasks/${taskId}/edit`);
+    }
   } catch (err) {
-    submitError.value = err.response?.data?.error || 'Ошибка создания задачи';
+    docxError.value = err.response?.data?.error || 'Ошибка загрузки файла';
   } finally {
-    submitting.value = false;
+    docxUploading.value = false;
   }
 }
 
-/* ── Highlight helper ────────────────────────────────────────── */
-function fieldClass(fieldKey) {
-  return highlightedFields.value.has(fieldKey)
-    ? 'ring-2 ring-green-400 border-green-400 transition-all duration-500'
-    : '';
+// Сохранить черновик
+async function saveDraft({ silent = false } = {}) {
+  saving.value = true;
+  error.value  = '';
+  try {
+    const payload = { ...form };
+    if (!payload.title) payload.title = payload.input_target_service || 'Черновик';
+
+    if (isEdit.value) {
+      await store.updateTask(route.params.id, payload);
+    } else {
+      const task = await store.createTask(payload);
+      if (!silent) router.replace(`/tasks/${task.id}/edit`);
+    }
+  } catch (e) {
+    error.value = e.response?.data?.error || 'Ошибка сохранения';
+  } finally {
+    saving.value = false;
+  }
 }
+
+// Запустить задачу
+async function startTask() {
+  await saveDraft();
+  if (error.value) return;
+  const id = isEdit.value ? route.params.id : store.current?.id;
+  if (!id) return;
+  try {
+    await store.startTask(id);
+    router.push(`/tasks/${id}/monitor`);
+  } catch (e) {
+    error.value = e.response?.data?.errors?.join('; ') || e.response?.data?.error || 'Ошибка запуска';
+  }
+}
+
+// Валидация кнопки запуска
+const canStart = computed(() =>
+  form.input_target_service.trim() &&
+  form.input_brand_name.trim() &&
+  lsiCount.value >= 5
+);
 </script>
 
 <template>
-  <div class="max-w-4xl mx-auto px-4 py-8">
-    <h1 class="text-2xl font-bold text-gray-800 mb-6">Создать задачу</h1>
+  <div class="min-h-screen bg-gray-950">
+    <!-- Шапка -->
+    <header class="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center gap-4">
+      <RouterLink to="/dashboard" class="btn-ghost text-xs">
+        ← Назад
+      </RouterLink>
+      <span class="text-white font-semibold">{{ isEdit ? 'Редактировать задачу' : 'Новая задача' }}</span>
+    </header>
 
-    <!-- ══════════ TZ UPLOAD DROPZONE ══════════ -->
-    <div class="card mb-8 relative overflow-hidden">
-      <!-- Loading overlay -->
-      <div
-        v-if="tzLoading"
-        class="absolute inset-0 bg-white/80 z-10 flex flex-col items-center justify-center rounded-xl"
-      >
-        <div class="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-        <p class="mt-3 text-blue-700 font-medium">Анализируем ТЗ...</p>
-      </div>
+    <main class="max-w-3xl mx-auto px-6 py-8">
+      <div v-if="loading" class="text-center py-20 text-gray-500">Загрузка...</div>
 
-      <div
-        class="border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all duration-200"
-        :class="[
-          isDragOver
-            ? 'border-blue-500 bg-blue-50'
-            : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'
-        ]"
-        @dragover="onDragOver"
-        @dragleave="onDragLeave"
-        @drop="onDrop"
-        @click="openFilePicker"
-      >
-        <input
-          ref="fileInput"
-          type="file"
-          accept=".pdf,.docx,.txt"
-          class="hidden"
-          @change="onFileSelect"
-        />
+      <div v-else class="space-y-3">
 
-        <!-- Upload icon -->
-        <svg
-          class="mx-auto h-12 w-12 text-gray-400 mb-3"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 48 48"
-          aria-hidden="true"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M24 8v24m0-24l-8 8m8-8l8 8M8 36h32"
-          />
-        </svg>
-
-        <p class="text-lg font-medium text-gray-700 mb-1">
-          Загрузите ТЗ для автозаполнения
-        </p>
-        <p class="text-sm text-gray-400">
-          Перетащите файл сюда или нажмите для выбора — .pdf, .docx, .txt
-        </p>
-
-        <p v-if="tzFileName && !tzLoading" class="mt-3 text-sm text-blue-600 font-medium">
-          📄 {{ tzFileName }}
-        </p>
-      </div>
-
-      <!-- Success toast -->
-      <Transition name="fade">
-        <div
-          v-if="tzSuccess"
-          class="mt-3 bg-green-50 text-green-700 border border-green-200 rounded-lg px-4 py-2 text-sm flex items-center gap-2"
-        >
-          <svg class="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-            <path
-              fill-rule="evenodd"
-              d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-              clip-rule="evenodd"
-            />
-          </svg>
-          Поля заполнены из ТЗ
-        </div>
-      </Transition>
-
-      <!-- Error -->
-      <div
-        v-if="tzError"
-        class="mt-3 bg-red-50 text-red-700 border border-red-200 rounded-lg px-4 py-2 text-sm"
-      >
-        {{ tzError }}
-      </div>
-    </div>
-
-    <!-- ══════════ FORM ══════════ -->
-    <form @submit.prevent="handleSubmit" class="space-y-6">
-      <div
-        v-if="submitError"
-        class="bg-red-50 text-red-700 border border-red-200 rounded-lg px-4 py-3 text-sm"
-      >
-        {{ submitError }}
-      </div>
-
-      <!-- Task name -->
-      <div class="card">
-        <label class="block text-sm font-medium text-gray-700 mb-1">Название задачи *</label>
-        <input
-          v-model="form.name"
-          type="text"
-          required
-          class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-          :class="fieldClass('name')"
-          placeholder="Например: SEO-статья про фитнес"
-        />
-      </div>
-
-      <div class="card space-y-5">
-        <h2 class="text-lg font-semibold text-gray-800 border-b pb-2">Параметры контента</h2>
-
-        <!-- Keyword -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Ключевой запрос *</label>
-          <input
-            v-model="form.input_keyword"
-            type="text"
-            required
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-            :class="fieldClass('input_keyword')"
-            placeholder="Основной ключевой запрос"
-          />
-        </div>
-
-        <!-- Niche -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Ниша бизнеса</label>
-          <input
-            v-model="form.input_niche"
-            type="text"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-            :class="fieldClass('input_niche')"
-            placeholder="Финансы, здоровье, технологии..."
-          />
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
-          <!-- Content type -->
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Тип контента</label>
-            <select
-              v-model="form.input_content_type"
-              class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
-              :class="fieldClass('input_content_type')"
-            >
-              <option value="">— выберите —</option>
-              <option v-for="opt in contentTypeOptions" :key="opt" :value="opt">{{ opt }}</option>
-            </select>
-          </div>
-
-          <!-- Tone of voice -->
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Тон коммуникации</label>
-            <select
-              v-model="form.input_tone_of_voice"
-              class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
-              :class="fieldClass('input_tone_of_voice')"
-            >
-              <option value="">— выберите —</option>
-              <option v-for="opt in toneOptions" :key="opt" :value="opt">{{ opt }}</option>
-            </select>
-          </div>
-
-          <!-- Language -->
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Язык</label>
-            <select
-              v-model="form.input_language"
-              class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
-              :class="fieldClass('input_language')"
-            >
-              <option v-for="opt in languageOptions" :key="opt" :value="opt">{{ opt }}</option>
-            </select>
-          </div>
-
-          <!-- Region -->
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Регион</label>
-            <input
-              v-model="form.input_region"
-              type="text"
-              class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-              :class="fieldClass('input_region')"
-              placeholder="Россия, Украина, весь мир..."
-            />
+        <!-- ── Секция 1: Основные данные ──────────────────────────── -->
+        <div class="card p-0 overflow-hidden">
+          <button
+            @click="toggle('s1')"
+            class="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-800/40 transition-colors"
+          >
+            <span class="font-medium text-white">1. Основные данные</span>
+            <span class="text-gray-400 text-lg">{{ openSections.s1 ? '▲' : '▼' }}</span>
+          </button>
+          <div v-show="openSections.s1" class="px-5 pb-5 space-y-4 border-t border-gray-800">
+            <div class="pt-4">
+              <label class="label">H1 / Целевая услуга <span class="text-red-500">*</span></label>
+              <input v-model="form.input_target_service" type="text" class="input"
+                placeholder="Кредит наличными МФО Алматы" required />
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="label">Название бренда <span class="text-red-500">*</span></label>
+                <input v-model="form.input_brand_name" type="text" class="input" placeholder="FinGroup" />
+              </div>
+              <div>
+                <label class="label">Имя автора <span class="text-red-500">*</span></label>
+                <input v-model="form.input_author_name" type="text" class="input" placeholder="Иван Петров" />
+              </div>
+            </div>
+            <div>
+              <label class="label">Регион <span class="text-red-500">*</span></label>
+              <input v-model="form.input_region" type="text" class="input" placeholder="Алматы, Казахстан" />
+            </div>
+            <div>
+              <label class="label">Язык</label>
+              <select v-model="form.input_language" class="input">
+                <option value="ru">Русский</option>
+                <option value="en">English</option>
+                <option value="kk">Қазақша</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Тип бизнеса</label>
+              <select v-model="form.input_business_type" class="input">
+                <option value="">Не указано</option>
+                <option value="SaaS">SaaS</option>
+                <option value="e-commerce">E-commerce</option>
+                <option value="услуги">Услуги</option>
+                <option value="affiliate">Affiliate</option>
+                <option value="media">Media</option>
+                <option value="marketplace">Marketplace</option>
+                <option value="local business">Local Business</option>
+                <option value="B2B">B2B</option>
+                <option value="B2C">B2C</option>
+                <option value="review-site">Review Site</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Тип сайта</label>
+              <select v-model="form.input_site_type" class="input">
+                <option value="">Не указано</option>
+                <option value="новый">Новый</option>
+                <option value="растущий">Растущий</option>
+                <option value="зрелый">Зрелый</option>
+                <option value="сильный бренд">Сильный бренд</option>
+                <option value="слабый бренд">Слабый бренд</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Целевая аудитория</label>
+              <input v-model="form.input_target_audience" type="text" class="input" placeholder="Малый бизнес, предприниматели" />
+            </div>
+            <div>
+              <label class="label">Приоритетная бизнес-цель</label>
+              <select v-model="form.input_business_goal" class="input">
+                <option value="">Не указано</option>
+                <option value="трафик">Трафик</option>
+                <option value="лиды">Лиды</option>
+                <option value="продажи">Продажи</option>
+                <option value="бренд">Бренд</option>
+                <option value="AI visibility">AI Visibility</option>
+                <option value="topical authority">Topical Authority</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Основной тип монетизации</label>
+              <select v-model="form.input_monetization" class="input">
+                <option value="">Не указано</option>
+                <option value="лиды">Лиды</option>
+                <option value="подписка">Подписка</option>
+                <option value="продажа товаров">Продажа товаров</option>
+                <option value="реклама">Реклама</option>
+                <option value="affiliate">Affiliate</option>
+                <option value="freemium">Freemium</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Ограничения проекта</label>
+              <input v-model="form.input_project_limits" type="text" class="input" placeholder="нет сильного бренда, мало ссылок" />
+            </div>
+            <div>
+              <label class="label">Приоритетные типы страниц</label>
+              <input v-model="form.input_page_priorities" type="text" class="input" placeholder="блог, категории, услуги" />
+            </div>
+            <div>
+              <label class="label">Особенности ниши</label>
+              <input v-model="form.input_niche_features" type="text" class="input" placeholder="YMYL, local-heavy" />
+            </div>
           </div>
         </div>
 
-        <!-- Target audience -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Целевая аудитория</label>
-          <textarea
-            v-model="form.input_target_audience"
-            rows="2"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-y"
-            :class="fieldClass('input_target_audience')"
-            placeholder="Опишите вашу целевую аудиторию"
-          ></textarea>
+        <!-- ── Секция 2: LSI / N-граммы / TF-IDF ─────────────────── -->
+        <div class="card p-0 overflow-hidden">
+          <button
+            @click="toggle('s2')"
+            class="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-800/40 transition-colors"
+          >
+            <span class="font-medium text-white">2. LSI / N-граммы / TF-IDF</span>
+            <span class="text-gray-500 text-xs mr-auto ml-3">{{ lsiCount }} слов</span>
+            <span class="text-gray-400 text-lg">{{ openSections.s2 ? '▲' : '▼' }}</span>
+          </button>
+          <div v-show="openSections.s2" class="px-5 pb-5 space-y-4 border-t border-gray-800">
+            <div class="pt-4">
+              <label class="label">LSI-слова (по одному на строку) <span class="text-red-500">*</span></label>
+              <textarea v-model="form.input_raw_lsi" class="textarea h-40 font-mono text-xs"
+                placeholder="кредит наличными&#10;займ без справок&#10;быстрый кредит&#10;..." />
+              <p class="text-xs text-gray-600 mt-1">Добавлено: {{ lsiCount }} слов (минимум 5)</p>
+            </div>
+            <div>
+              <label class="label">N-граммы (через запятую)</label>
+              <input v-model="form.input_ngrams" type="text" class="input font-mono text-xs"
+                placeholder="кредит наличными, займ без справок, получить кредит онлайн" />
+            </div>
+            <div>
+              <label class="label">TF-IDF веса (JSON)</label>
+              <textarea v-model="form.input_tfidf_json" class="textarea h-24 font-mono text-xs"
+                placeholder='[{"term":"кредит","rangeMin":5,"rangeMax":12}]' />
+              <!-- Предпросмотр -->
+              <div v-if="tfidfParsed.length" class="mt-2 flex flex-wrap gap-2">
+                <span
+                  v-for="item in tfidfParsed"
+                  :key="item.term"
+                  class="text-xs bg-gray-800 border border-gray-700 px-2 py-0.5 rounded font-mono"
+                >
+                  {{ item.term }}
+                  <span class="text-gray-500">{{ item.rangeMin }}–{{ item.rangeMax }}</span>
+                </span>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="label">Мин. символов на блок</label>
+                <input v-model.number="form.input_min_chars" type="number" class="input" min="201" />
+              </div>
+              <div>
+                <label class="label">Макс. символов на блок</label>
+                <input v-model.number="form.input_max_chars" type="number" class="input" />
+              </div>
+            </div>
+          </div>
         </div>
 
-        <!-- Brand name -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Название бренда/компании</label>
-          <input
-            v-model="form.input_brand_name"
-            type="text"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-            :class="fieldClass('input_brand_name')"
-            placeholder="Ваш бренд"
-          />
+        <!-- ── Секция 3: Факты о бренде ───────────────────────────── -->
+        <div class="card p-0 overflow-hidden">
+          <button
+            @click="toggle('s3')"
+            class="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-800/40 transition-colors"
+          >
+            <span class="font-medium text-white">3. Факты о бренде</span>
+            <span class="text-gray-400 text-lg">{{ openSections.s3 ? '▲' : '▼' }}</span>
+          </button>
+          <div v-show="openSections.s3" class="px-5 pb-5 border-t border-gray-800">
+            <div class="pt-4">
+              <label class="label">Факты, цифры, доказательства</label>
+              <textarea v-model="form.input_brand_facts" class="textarea h-36"
+                placeholder="Компания основана в 2010 году. Обслужили 50,000+ клиентов. Ставка от 1.5%/мес. Лицензия №12345..." />
+            </div>
+          </div>
         </div>
 
-        <!-- USP -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">УТП (уникальные торговые преимущества)</label>
-          <textarea
-            v-model="form.input_unique_selling_points"
-            rows="2"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-y"
-            :class="fieldClass('input_unique_selling_points')"
-            placeholder="Чем вы отличаетесь от конкурентов"
-          ></textarea>
+        <!-- ── Секция 4: Конкуренты ───────────────────────────────── -->
+        <div class="card p-0 overflow-hidden">
+          <button
+            @click="toggle('s4')"
+            class="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-800/40 transition-colors"
+          >
+            <span class="font-medium text-white">4. Анализ конкурентов</span>
+            <span class="text-gray-400 text-lg">{{ openSections.s4 ? '▲' : '▼' }}</span>
+          </button>
+          <div v-show="openSections.s4" class="px-5 pb-5 border-t border-gray-800">
+            <div class="pt-4">
+              <label class="label">URL конкурентов (по одному на строку, до 4)</label>
+              <textarea v-model="form.input_competitor_urls" class="textarea h-24 font-mono text-xs"
+                placeholder="https://competitor1.kz&#10;https://competitor2.kz&#10;https://competitor3.kz&#10;https://competitor4.kz" />
+              <p class="text-xs text-gray-600 mt-1">Stage 0 автоматически запускается при старте задачи и анализирует эти страницы</p>
+            </div>
+          </div>
         </div>
 
-        <!-- Competitor URLs -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">URL конкурентов (по одному на строку)</label>
-          <textarea
-            v-model="form.input_competitor_urls"
-            rows="3"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-y font-mono text-sm"
-            :class="fieldClass('input_competitor_urls')"
-            placeholder="https://competitor1.com/page&#10;https://competitor2.com/page"
-          ></textarea>
+        <!-- ── Секция 5: Загрузка ТЗ ─────────────────────────────── -->
+        <div class="card p-0 overflow-hidden">
+          <button
+            @click="toggle('s5')"
+            class="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-800/40 transition-colors"
+          >
+            <span class="font-medium text-white">5. Загрузка ТЗ (DOCX)</span>
+            <span class="text-gray-400 text-lg">{{ openSections.s5 ? '▲' : '▼' }}</span>
+          </button>
+          <div v-show="openSections.s5" class="px-5 pb-5 border-t border-gray-800">
+            <div class="pt-4 space-y-6">
+
+              <!-- ── LLM-анализ ТЗ (Pre-Stage -1) ───────────────────────────── -->
+              <div>
+                <label class="label flex items-center gap-2">
+                  <span>🤖 Анализ ТЗ через ИИ</span>
+                  <span class="text-xs text-gray-500 font-normal">(PDF / DOCX / TXT → автозаполнение формы)</span>
+                </label>
+                <div
+                  class="border-2 border-dashed border-indigo-800 rounded-lg p-8 text-center
+                         hover:border-indigo-500 transition-colors cursor-pointer"
+                  :class="{ 'opacity-50 cursor-not-allowed': llmUploading }"
+                  @click="!llmUploading && $refs.llmTzInput.click()"
+                >
+                  <div class="text-3xl mb-2">🧠</div>
+                  <p class="text-sm text-gray-300 font-medium">
+                    {{ llmFile ? llmFile.name : 'Загрузите ТЗ для автоматического заполнения всех полей' }}
+                  </p>
+                  <p class="text-xs text-gray-500 mt-1">PDF, DOCX, TXT · Макс. 20 MB · ~5–15 сек.</p>
+                </div>
+                <input
+                  ref="llmTzInput"
+                  type="file"
+                  accept=".pdf,.docx,.doc,.txt"
+                  class="hidden"
+                  @change="handleLLMTzUpload"
+                />
+                <div v-if="llmUploading" class="mt-3 flex items-center gap-2 text-indigo-400 text-sm">
+                  <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+                  </svg>
+                  ИИ анализирует ТЗ… это займёт 5–15 секунд
+                </div>
+                <div v-if="llmMsg && !llmUploading" class="mt-3 text-sm text-indigo-300 bg-indigo-950/50 border border-indigo-800 rounded px-3 py-2">
+                  ✓ {{ llmMsg }}
+                </div>
+                <div v-if="llmError" class="mt-3 text-sm text-red-400 bg-red-950/50 border border-red-800 rounded px-3 py-2">
+                  ✗ {{ llmError }}
+                </div>
+              </div>
+
+              <!-- ── Существующая загрузка DOCX (regex-парсер) ──────────────── -->
+              <div>
+                <label class="label">Файл ТЗ для SEO-полей (.docx)</label>
+              <div
+                class="border-2 border-dashed border-gray-700 rounded-lg p-8 text-center
+                       hover:border-indigo-600 transition-colors cursor-pointer"
+                @click="$refs.docxInput.click()"
+              >
+                <div class="text-3xl mb-2">📄</div>
+                <p class="text-sm text-gray-400">
+                  {{ docxFile ? docxFile.name : 'Нажмите или перетащите .docx файл' }}
+                </p>
+                <p class="text-xs text-gray-600 mt-1">Максимум 10 MB</p>
+              </div>
+              <input
+                ref="docxInput"
+                type="file"
+                accept=".docx,.doc"
+                class="hidden"
+                @change="handleDocxUpload"
+              />
+              <!-- Статус загрузки -->
+              <div v-if="docxUploading" class="mt-3 flex items-center gap-2 text-indigo-400 text-sm">
+                <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+                </svg>
+                Распознаю ТЗ...
+              </div>
+              <div v-if="docxMsg && !docxUploading" class="mt-3 text-sm text-green-400 bg-green-950/50 border border-green-800 rounded px-3 py-2">
+                ✓ {{ docxMsg }}
+              </div>
+              <div v-if="docxError" class="mt-3 text-sm text-red-400 bg-red-950/50 border border-red-800 rounded px-3 py-2">
+                ✗ {{ docxError }}
+              </div>
+              </div><!-- /docx block -->
+
+            </div><!-- /space-y-6 -->
+          </div>
         </div>
 
-        <!-- Word count -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Целевое количество слов</label>
-          <input
-            v-model.number="form.input_word_count"
-            type="number"
-            min="100"
-            max="50000"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-            :class="fieldClass('input_word_count')"
-          />
+        <!-- ── Ошибка ──────────────────────────────────────────────── -->
+        <div v-if="error" class="bg-red-950 border border-red-800 text-red-400 text-sm px-4 py-3 rounded-lg">
+          {{ error }}
         </div>
 
-        <!-- Additional -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Дополнительные требования</label>
-          <textarea
-            v-model="form.input_additional"
-            rows="3"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-y"
-            :class="fieldClass('input_additional')"
-            placeholder="Любые дополнительные пожелания..."
-          ></textarea>
+        <!-- ── Кнопки ──────────────────────────────────────────────── -->
+        <div class="flex items-center gap-3 pt-2">
+          <button @click="saveDraft" class="btn-secondary" :disabled="saving">
+            <svg v-if="saving" class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+            </svg>
+            Сохранить черновик
+          </button>
+          <button
+            @click="startTask"
+            class="btn-primary"
+            :disabled="!canStart || saving"
+            :title="!canStart ? 'Заполните обязательные поля (H1, бренд, ≥5 LSI)' : ''"
+          >
+            ▶ Запустить генерацию
+          </button>
+          <span v-if="!canStart" class="text-xs text-gray-600">
+            Заполните: H1, бренд, ≥5 LSI
+          </span>
         </div>
       </div>
-
-      <!-- Submit -->
-      <div class="flex justify-end gap-3">
-        <router-link to="/dashboard" class="btn bg-gray-200 text-gray-700 hover:bg-gray-300">
-          Отмена
-        </router-link>
-        <button
-          type="submit"
-          :disabled="submitting"
-          class="btn-primary px-8"
-        >
-          <span v-if="submitting" class="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></span>
-          {{ submitting ? 'Создаём...' : 'Создать задачу' }}
-        </button>
-      </div>
-    </form>
+    </main>
   </div>
 </template>
-
-<style scoped>
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.3s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-</style>

@@ -1,66 +1,120 @@
-const { callLLM } = require('../llm/callLLM');
+'use strict';
+
+const { callLLM }        = require('../llm/callLLM');
 const { SYSTEM_PROMPTS } = require('../../prompts/systemPrompts');
-const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
-const db = require('../../config/db');
+const { calculateBM25 }  = require('../metrics/bm25');
+const db                 = require('../../config/db');
 
 /**
- * Stage 7 – Final Content Generation
- * Uses all previous stage results to generate the final SEO-optimised content.
+ * Stage 7: Финальный глобальный аудит всей страницы.
+ * Адаптер: deepseek.
+ *
+ * После Stage 7 вычисляем BM25 и сохраняем task_metrics.
+ *
+ * @param {object}   task       — строка tasks из БД
+ * @param {object}   ctx        — { log, progress, taskId }
+ * @param {string[]} allBlocks  — массив финальных HTML-блоков (только непустые)
+ * @param {string[]} allLSI     — дедуплицированный список всех LSI
+ * @returns {{ globalAudit: object, finalHTML: string, globalLSICoverage: number, globalEEATScore: number }}
  */
-async function run(taskId, context, log) {
-  const { task } = context;
-  const provider = task.provider || 'deepseek';
+async function runStage7(task, ctx, allBlocks, allLSI) {
+  const { log, progress, taskId, onTokens } = ctx;
 
-  const allData = {
-    serp: context.results.stage1?.serp,
-    niche: context.results.stage2,
-    entities: context.results.stage3,
-    commercial: context.results.stage4,
-    community: context.results.stage5,
-    eeat: context.results.stage6,
-  };
+  log('Stage 7: Финальный глобальный аудит...', 'info');
+  progress(90, 'stage7');
 
-  const userPrompt = `Keyword: ${task.keyword}
-Niche: ${task.niche || 'not specified'}
-Target audience: ${task.target_audience || 'not specified'}
-Tone of voice: ${task.tone_of_voice || 'not specified'}
-Region: ${task.region || 'not specified'}
-Language: ${task.language || 'russian'}
-Content type: ${task.content_type || 'article'}
-Brand: ${task.brand_name || 'not specified'}
-USP: ${task.unique_selling_points || 'not specified'}
-Target word count: ${task.word_count_target || 'not specified'}
-Additional requirements: ${task.additional_requirements || 'none'}
+  const targetService = task.input_target_service;
+  const brandFacts    = task.input_brand_facts || 'Нет данных';
 
-Full research data:
-${JSON.stringify(allData).slice(0, 15000)}`;
+  const fullHTML = allBlocks.join('\n\n');
 
-  log('Generating final content...');
+  const s7prompt = SYSTEM_PROMPTS.stage7
+    .replace('{{FINAL_HTML}}',        () => fullHTML.substring(0, 30000))
+    .replace('{{TARGET_SERVICE}}',    () => targetService)
+    .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(allLSI))
+    .replace('{{BRAND_FACTS}}',       () => brandFacts);
 
-  const result = await callLLM({
-    systemPrompt: SYSTEM_PROMPTS.stage7,
-    userPrompt,
-    provider,
-    maxTokens: 8192,
+  log(
+    `Stage 7: Глобальный аудит — промпт ${s7prompt.length} символов, ` +
+    `HTML ${fullHTML.length} символов, LSI ${allLSI.length} слов...`,
+    'info'
+  );
+
+  const s7Result = await callLLM(
+    'deepseek',
+    '',
+    s7prompt,
+    { retries: 3, taskId, stageName: 'stage7', callLabel: '7 Global Audit', log, onTokens }
+  ).catch(e => {
+    log(`Stage 7 ОШИБКА: ${e.message}`, 'error');
+    return null;
   });
 
-  let parsed;
-  try { parsed = JSON.parse(autoCloseJSON(result.content)); } catch (_e) { parsed = { raw: result.content }; }
+  log(`Stage 7: ответ получен. Ключи: [${Object.keys(s7Result || {}).join(', ')}]`, 'success');
 
-  // Calculate LSI keyword coverage if entities are available
-  const lsiKeywords = context.results.stage3?.lsi_keywords || [];
-  const contentText = parsed.content_html || parsed.raw || '';
-  if (lsiKeywords.length > 0 && contentText) {
-    parsed.lsi_coverage = calculateCoverage(lsiKeywords, contentText);
-  }
+  // Финальный E-E-A-T score
+  const globalEEATScore = s7Result?.global_audit?.page_quality_score
+    ? parseFloat(s7Result.global_audit.page_quality_score.toFixed(1))
+    : 0;
 
-  await db.query('UPDATE tasks SET stage7_result = $2 WHERE id = $1', [
-    taskId, JSON.stringify(parsed),
-  ]);
+  // Финальное LSI-покрытие всей страницы
+  const finalCov = calculateCoverage(fullHTML, allLSI);
+  const globalLSICoverage = finalCov.percent;
 
-  log('Content generation completed');
-  return parsed;
+  // BM25 score для всей страницы
+  // calculateBM25(query, documentText) — query = allLSI joined, doc = fullHTML
+  const bm25 = calculateBM25(allLSI.join(' '), fullHTML);
+
+  log(
+    `Stage 7: E-E-A-T score=${globalEEATScore}, LSI coverage=${globalLSICoverage}%, ` +
+    `BM25=${bm25.score.toFixed(2)} (${bm25.interpretation})`,
+    'success'
+  );
+
+  // Сохраняем финальные метрики в task_metrics
+  await db.query(
+    `INSERT INTO task_metrics
+       (task_id, stage_name, metric_data, total_tokens_in, total_tokens_out,
+        total_cost_usd, bm25_score)
+     VALUES ($1, 'stage7_final', $2, 0, 0, 0, $3)
+     ON CONFLICT (task_id, stage_name) DO UPDATE SET
+       metric_data    = EXCLUDED.metric_data,
+       bm25_score     = EXCLUDED.bm25_score,
+       updated_at     = NOW()`,
+    [
+      taskId,
+      JSON.stringify({
+        global_audit:         s7Result?.global_audit     || {},
+        lsi_coverage_percent: globalLSICoverage,
+        eeat_score:           globalEEATScore,
+        bm25:                 { score: bm25.score, interpretation: bm25.interpretation },
+        full_response:        s7Result,
+      }),
+      bm25.score,
+    ]
+  );
+
+  // Обновляем tasks: сохраняем финальный HTML и отчёт Stage 7
+  await db.query(
+    `UPDATE tasks SET
+       stage7_result = $1,
+       final_html    = $2,
+       updated_at    = NOW()
+     WHERE id = $3`,
+    [JSON.stringify(s7Result || {}), fullHTML, taskId]
+  );
+
+  log('<strong>Генерация и аудит полностью завершены!</strong>', 'success');
+  progress(98, 'stage7');
+
+  return {
+    globalAudit:       s7Result,
+    finalHTML:         fullHTML,
+    globalLSICoverage,
+    globalEEATScore,
+    bm25,
+  };
 }
 
-module.exports = { run };
+module.exports = { runStage7 };

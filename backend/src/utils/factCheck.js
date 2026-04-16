@@ -1,78 +1,62 @@
-/**
- * Simple fact-checking utility.
- * Compares claims against known data and flags potential issues.
- */
+'use strict';
 
 /**
- * Check an array of claims against a knowledge context.
+ * factCheck — поиск потенциальных галлюцинаций в HTML-контенте.
+ * Перенесено из index.html без изменений (адаптировано под Node.js).
  *
- * @param {string[]} claims – statements to verify
- * @param {string} context – reference text with known-good information
- * @returns {{ verified: string[], unverified: string[], score: number }}
+ * Извлекает числа из текстового содержимого и проверяет,
+ * не выдумал ли LLM цифры, которых нет в фактах бренда.
+ *
+ * @param {string}   htmlContent  — HTML-текст проверяемого блока
+ * @param {string[]} factsArray   — массив строк с фактами бренда
+ * @param {string}   [brandFacts] — дополнительный текст фактов (brandFacts поле)
+ * @param {string}   [rawLSI]     — LSI-список (числа из него считаются «безопасными»)
+ * @returns {number[]} — массив «подозрительных» чисел (возможные галлюцинации)
  */
-function checkFacts(claims, context) {
-  if (!claims || claims.length === 0) {
-    return { verified: [], unverified: [], score: 0 };
-  }
-  if (!context) {
-    return { verified: [], unverified: [...claims], score: 0 };
-  }
+function factCheck(htmlContent, factsArray = [], brandFacts = '', rawLSI = '') {
+  // Снимаем HTML-теги, оставляем только текст
+  const textOnly = htmlContent.replace(/<[^>]+>/g, ' ');
 
-  const lowerContext = context.toLowerCase();
-  const verified = [];
-  const unverified = [];
+  // Все числа в тексте (включая десятичные и разделённые запятой)
+  const allNumbers = (textOnly.match(/\b\d+[\d,.]*\b/g) || [])
+    .map(n => parseFloat(n.replace(/,/g, '.')));
 
-  for (const claim of claims) {
-    if (!claim) continue;
+  if (!factsArray.length && !brandFacts) return [];
 
-    // Extract key terms from the claim (words > 3 chars)
-    const terms = claim
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 3);
+  // Собираем «известные» числа из всех источников данных
+  const knownNumbers = new Set();
 
-    // A claim is "verified" if most key terms appear in the context
-    const matches = terms.filter((t) => lowerContext.includes(t));
-    const ratio = terms.length > 0 ? matches.length / terms.length : 0;
+  const factsText = factsArray.join(' ');
+  const factsNums = (factsText.match(/\b\d+[\d,.]*\b/g) || [])
+    .map(n => parseFloat(n.replace(/,/g, '.')));
+  factsNums.forEach(n => knownNumbers.add(n));
 
-    if (ratio >= 0.6) {
-      verified.push(claim);
-    } else {
-      unverified.push(claim);
+  const brandText  = brandFacts + ' ' + rawLSI;
+  const brandNums  = (brandText.match(/\b\d+[\d,.]*\b/g) || [])
+    .map(n => parseFloat(n.replace(/,/g, '.')));
+  brandNums.forEach(n => knownNumbers.add(n));
+
+  // Числа, которые никогда не считаются галлюцинацией
+  const safeNumbers = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 1000]);
+
+  const hallucinations = [];
+
+  for (const num of allNumbers) {
+    // Пропускаем «безопасные» и годы
+    if (safeNumbers.has(num))               continue;
+    if (num >= 1900 && num <= 2100)         continue;
+
+    if (!knownNumbers.has(num)) {
+      // Допускаем погрешность ±5% относительно известных чисел
+      let found = false;
+      for (const kn of knownNumbers) {
+        if (kn > 0 && Math.abs(num - kn) / kn < 0.05) { found = true; break; }
+      }
+      if (!found) hallucinations.push(num);
     }
   }
 
-  const total = verified.length + unverified.length;
-  const score = total > 0 ? Math.round((verified.length / total) * 100) : 0;
-
-  return { verified, unverified, score };
+  return hallucinations;
 }
 
-/**
- * Extract numeric claims from text (dates, percentages, statistics).
- *
- * @param {string} text
- * @returns {string[]} – extracted numeric claim fragments
- */
-function extractNumericClaims(text) {
-  if (!text) return [];
-
-  const patterns = [
-    /\d{4}\s*(?:год|year|г\.)/gi,
-    /\d+[.,]?\d*\s*%/g,
-    /\d+[.,]?\d*\s*(?:млн|млрд|тыс|million|billion|thousand)/gi,
-    /(?:в|около|более|менее|свыше)\s+\d+/gi,
-  ];
-
-  const claims = new Set();
-  for (const pattern of patterns) {
-    const matches = text.match(pattern);
-    if (matches) {
-      matches.forEach((m) => claims.add(m.trim()));
-    }
-  }
-
-  return [...claims];
-}
-
-module.exports = { checkFacts, extractNumericClaims };
+module.exports = { factCheck };

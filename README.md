@@ -303,13 +303,13 @@ REDIS_URL=redis://redis:6379
 JWT_SECRET=СГЕНЕРИРУЙТЕ_СЕКРЕТНЫЙ_КЛЮЧ_JWT_МИНИМУМ_32_СИМВОЛА
 
 # ── DeepSeek API ───────────────────────────────────────────────
-# Получить: https://platform.deepseek.com → API Keys
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Ключ DeepSeek зашифрован в коде (src/services/llm/deepseek.adapter.js)
+# Для изменения ключа обратитесь к разработчику
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 # ── Gemini API ─────────────────────────────────────────────────
-# Получить: https://aistudio.google.com → Get API Key
-GEMINI_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Ключ Gemini зашифрован в коде (src/services/llm/gemini.adapter.js)
+# Для изменения ключа обратитесь к разработчику
 
 # ОПЦИОНАЛЬНО: замена базового URL Gemini (для собственного прокси-сервера)
 # Формат: https://ваш-прокси.ru/v1beta/models
@@ -338,8 +338,8 @@ VITE_API_BASE_URL=http://localhost:3000
 
 | Ключ | Где получить | Формат |
 |------|-------------|--------|
-| `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) → API Keys | `sk-...` |
-| `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API Key | `AIza...` |
+| `DEEPSEEK_API_KEY` | *Зашифрован в коде* | - |
+| `GEMINI_API_KEY` | *Зашифрован в коде* | - |
 | `JWT_SECRET` | Команда: `openssl rand -hex 32` | любая строка ≥32 символа |
 | `POSTGRES_PASSWORD` | Придумайте сами | любая строка без спец.символов |
 
@@ -351,14 +351,14 @@ cd /opt/seo-genius-v4
 nano .env
 
 # Найдите строки:
-DEEPSEEK_API_KEY=
-GEMINI_API_KEY=
+# DEEPSEEK_API_KEY зашифрован в коде
+# GEMINI_API_KEY зашифрован в коде
 JWT_SECRET=
 POSTGRES_PASSWORD=
 
 # Вставьте значения ПОСЛЕ знака =, без пробелов и кавычек:
-DEEPSEEK_API_KEY=sk-abc123def456...
-GEMINI_API_KEY=AIzaSy...
+# DEEPSEEK_API_KEY уже настроен
+# GEMINI_API_KEY уже настроен
 JWT_SECRET=a1b2c3d4e5f6...
 POSTGRES_PASSWORD=MySecurePassw0rd
 
@@ -614,7 +614,7 @@ SSE {type:"pipeline_done"} → MonitorPage → автоматический redi
 ## FAQ
 
 **Q: Задача зависает в статусе "В очереди"**  
-A: Воркер не запустился. Проверьте: `docker compose logs worker`. Часто причина — неверный `REDIS_URL` или `DEEPSEEK_API_KEY`.
+A: Воркер не запустился. Проверьте: `docker compose logs worker`. Часто причина — неверный `REDIS_URL` (ключи API зашифрованы в коде).
 
 **Q: Ошибка "Gemini API error 403"**  
 A: Неверный API-ключ или IP заблокирован Google. Настройте `HTTPS_PROXY` или `GEMINI_BASE_URL` в `.env`.

@@ -1,53 +1,25 @@
+'use strict';
+
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
-
 /**
- * Standard auth middleware – reads Bearer token from Authorization header.
+ * JWT Auth Middleware.
+ * Ожидает заголовок: Authorization: Bearer <token>
+ * При успехе добавляет req.user = { id, email }
  */
-function auth(req, res, next) {
+module.exports = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
   try {
-    const header = req.headers.authorization;
-    if (!header) {
-      return res.status(401).json({ error: 'Authorization header missing' });
-    }
-
-    const parts = header.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') {
-      return res.status(401).json({ error: 'Invalid authorization format' });
-    }
-
-    const token = parts[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = { id: decoded.id, email: decoded.email };
     next();
   } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token expired' });
-    }
-    return res.status(401).json({ error: 'Invalid token' });
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
-}
-
-/**
- * SSE auth middleware – reads token from query param ?token=...
- */
-function authSSE(req, res, next) {
-  try {
-    const token = req.query.token;
-    if (!token) {
-      return res.status(401).json({ error: 'Token query parameter missing' });
-    }
-
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token expired' });
-    }
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-}
-
-module.exports = { auth, authSSE };
+};

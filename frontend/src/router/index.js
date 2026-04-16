@@ -1,63 +1,28 @@
 import { createRouter, createWebHistory } from 'vue-router';
+import { useAuthStore } from '../stores/auth.js';
 
 const routes = [
-  {
-    path: '/',
-    redirect: '/dashboard'
-  },
-  {
-    path: '/login',
-    name: 'Login',
-    component: () => import('../views/LoginPage.vue'),
-    meta: { guest: true }
-  },
-  {
-    path: '/register',
-    name: 'Register',
-    component: () => import('../views/RegisterPage.vue'),
-    meta: { guest: true }
-  },
-  {
-    path: '/dashboard',
-    name: 'Dashboard',
-    component: () => import('../views/DashboardPage.vue'),
-    meta: { auth: true }
-  },
-  {
-    path: '/tasks/create',
-    name: 'CreateTask',
-    component: () => import('../views/CreateTaskPage.vue'),
-    meta: { auth: true }
-  },
-  {
-    path: '/tasks/:id/monitor',
-    name: 'Monitor',
-    component: () => import('../views/MonitorPage.vue'),
-    meta: { auth: true }
-  },
-  {
-    path: '/tasks/:id/result',
-    name: 'Result',
-    component: () => import('../views/ResultPage.vue'),
-    meta: { auth: true }
-  }
+  { path: '/',         redirect: '/dashboard' },
+  { path: '/login',    component: () => import('../views/LoginPage.vue'),      meta: { guest: true } },
+  { path: '/register', component: () => import('../views/RegisterPage.vue'),   meta: { guest: true } },
+  { path: '/dashboard',component: () => import('../views/DashboardPage.vue'),  meta: { auth: true } },
+  { path: '/tasks/new',component: () => import('../views/CreateTaskPage.vue'), meta: { auth: true } },
+  { path: '/tasks/:id/edit',    component: () => import('../views/CreateTaskPage.vue'), meta: { auth: true } },
+  { path: '/tasks/:id/monitor', component: () => import('../views/MonitorPage.vue'),    meta: { auth: true } },
+  { path: '/tasks/:id/result',  component: () => import('../views/ResultPage.vue'),     meta: { auth: true } },
+  { path: '/:pathMatch(.*)*',   redirect: '/dashboard' },
 ];
 
 const router = createRouter({
   history: createWebHistory(),
-  routes
+  routes,
 });
 
-router.beforeEach((to, _from, next) => {
-  const token = localStorage.getItem('token');
-
-  if (to.meta.auth && !token) {
-    return next('/login');
-  }
-  if (to.meta.guest && token) {
-    return next('/dashboard');
-  }
-  next();
+// Navigation guard
+router.beforeEach((to) => {
+  const auth = useAuthStore();
+  if (to.meta.auth && !auth.isLoggedIn) return '/login';
+  if (to.meta.guest && auth.isLoggedIn)  return '/dashboard';
 });
 
 export default router;

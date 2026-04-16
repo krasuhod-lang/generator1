@@ -1,40 +1,50 @@
-// Approximate per-token pricing (USD) as of 2024
-const PRICING = {
+'use strict';
+
+/**
+ * Тарифы LLM-провайдеров (апрель 2026).
+ * Источник: раздел 10 ТЗ.
+ */
+const PRICES = {
   deepseek: {
-    prompt: 0.00000014, // $0.14 per 1M tokens
-    completion: 0.00000028, // $0.28 per 1M tokens
+    input_cache_miss: 0.000000270,  // $0.27 / 1M tokens
+    input_cache_hit:  0.000000070,  // $0.07 / 1M tokens
+    output:           0.000001100,  // $1.10 / 1M tokens
   },
   gemini: {
-    prompt: 0.000000075, // Gemini 2.0 Flash pricing
-    completion: 0.0000003,
+    input:  0.000001250,  // $1.25 / 1M tokens (≤200K context)
+    output: 0.000005000,  // $5.00 / 1M tokens
   },
 };
 
 /**
- * Calculate cost in USD for a given number of tokens.
+ * Рассчитывает стоимость вызова LLM в USD.
  *
- * @param {{ promptTokens: number, completionTokens: number }} tokens
- * @param {string} [provider='deepseek']
- * @returns {number} cost in USD
+ * @param {'deepseek'|'gemini'} model
+ * @param {number} tokensIn
+ * @param {number} tokensOut
+ * @param {boolean} [cacheHit=false]  — для DeepSeek: был ли кэш-хит
+ * @returns {number} — стоимость в USD
  */
-function calculateCost(tokens, provider = 'deepseek') {
-  const prices = PRICING[provider] || PRICING.deepseek;
-  const promptCost = (tokens.promptTokens || 0) * prices.prompt;
-  const completionCost = (tokens.completionTokens || 0) * prices.completion;
-  return promptCost + completionCost;
+function calcCost(model, tokensIn, tokensOut, cacheHit = false) {
+  if (model === 'deepseek') {
+    const inputRate = cacheHit
+      ? PRICES.deepseek.input_cache_hit
+      : PRICES.deepseek.input_cache_miss;
+    return tokensIn * inputRate + tokensOut * PRICES.deepseek.output;
+  }
+
+  if (model === 'gemini') {
+    return tokensIn * PRICES.gemini.input + tokensOut * PRICES.gemini.output;
+  }
+
+  return 0;
 }
 
 /**
- * Format USD cost as a human-readable string.
- *
- * @param {number} usd
- * @returns {string}
+ * Форматирует стоимость для отображения (напр. "$0.0142").
  */
 function formatCost(usd) {
-  if (usd < 0.01) {
-    return `$${(usd * 100).toFixed(4)}¢`;
-  }
   return `$${usd.toFixed(4)}`;
 }
 
-module.exports = { calculateCost, formatCost };
+module.exports = { calcCost, formatCost, PRICES };

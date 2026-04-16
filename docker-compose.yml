@@ -1,79 +1,114 @@
-version: '3.8'
+version: '3.9'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SEO Genius v4.0 — Docker Compose
+#
+# Переменные окружения берутся из файла .env в корне проекта.
+# Скопируйте .env.example → .env и заполните API-ключи перед запуском.
+#
+# Запуск:  docker compose up -d --build
+# Стоп:    docker compose down
+# Логи:    docker compose logs -f
+# ═══════════════════════════════════════════════════════════════════════════
 
 services:
-  # ── PostgreSQL ────────────────────────────────────────────────
+
+  # ── PostgreSQL 16 ────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: seo_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-seogenius_db}
-      POSTGRES_USER: ${POSTGRES_USER:-seogenius}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB:       ${POSTGRES_DB:-seogenius_db}
+      POSTGRES_USER:     ${POSTGRES_USER:-seogenius}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Миграция применяется автоматически при первом запуске
+      - ./migrations:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seogenius}"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seogenius} -d ${POSTGRES_DB:-seogenius_db}"]
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 20s
 
-  # ── Redis ─────────────────────────────────────────────────────
+  # ── Redis 7 ──────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: seo_redis
     restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+    volumes:
+      - redis_data:/data
     ports:
       - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
-  # ── Backend (Express API) ────────────────────────────────────
+  # ── Backend (Express + API) ──────────────────────────────────────────────
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: seo_backend
     restart: unless-stopped
-    ports:
-      - "${PORT:-3000}:3000"
     env_file: .env
     environment:
+      NODE_ENV: development
+      # БД — используем внутреннее имя сервиса Docker
       DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
+      # Redis — внутреннее имя сервиса Docker (переопределяет .env если там localhost)
       REDIS_URL: redis://redis:6379
+    ports:
+      - "3000:3000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
-      - ./backend/uploads:/app/uploads
+      - uploads:/app/uploads
 
-  # ── Worker (BullMQ) ──────────────────────────────────────────
+  # ── Worker (BullMQ) ──────────────────────────────────────────────────────
+  # Отдельный контейнер для воркера — не блокирует HTTP-сервер
   worker:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: seo_worker
     restart: unless-stopped
-    command: ["node", "src/queue/worker.js"]
     env_file: .env
     environment:
+      NODE_ENV: development
       DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
       REDIS_URL: redis://redis:6379
+    command: node src/queue/worker.js
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - uploads:/app/uploads
 
-  # ── Frontend (Vue 3 + Nginx) ─────────────────────────────────
+  # ── Frontend (Vue 3 SPA → Nginx) ─────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
+      dockerfile: Dockerfile
       args:
+        # URL бэкенда для сборки Vite (используется в api.js)
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000}
     container_name: seo_frontend
     restart: unless-stopped
@@ -82,5 +117,11 @@ services:
     depends_on:
       - backend
 
+# ── Volumes ─────────────────────────────────────────────────────────────────
 volumes:
-  pgdata:
+  pg_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads:
+    driver: local

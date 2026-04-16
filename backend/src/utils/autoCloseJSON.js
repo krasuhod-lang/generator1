@@ -1,90 +1,44 @@
+'use strict';
+
 /**
- * Attempt to repair broken JSON from LLM responses.
- * Tries JSON.parse first, then attempts to close unclosed brackets/braces.
+ * autoCloseJSON — восстановление обрванного JSON.
+ * Перенесено из index.html без изменений.
  *
- * @param {string} raw – raw string that should be JSON
- * @returns {string} – repaired JSON string (still needs JSON.parse by caller)
+ * Закрывает незакрытые строки, объекты и массивы,
+ * убирает trailing comma перед закрытием.
+ *
+ * @param {string} str — сырой (возможно обрванный) JSON-текст
+ * @returns {string}   — JSON-текст с закрытыми скобками
  */
-function autoCloseJSON(raw) {
-  if (!raw || typeof raw !== 'string') return '{}';
+function autoCloseJSON(str) {
+  let t = str.replace(/,\s*$/, '');
+  let inString  = false;
+  let escapeNext = false;
+  const stack   = [];
 
-  let text = raw.trim();
+  for (let i = 0; i < t.length; i++) {
+    const char = t[i];
 
-  // Strip markdown code fences if present
-  if (text.startsWith('```')) {
-    text = text.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
-  }
+    if (escapeNext) { escapeNext = false; continue; }
+    if (char === '\\') { escapeNext = true; continue; }
+    if (char === '"')  { inString = !inString; continue; }
 
-  // Try parsing as-is
-  try {
-    JSON.parse(text);
-    return text;
-  } catch (_e) {
-    // Continue to repair
-  }
-
-  // Remove trailing commas before closing brackets
-  text = text.replace(/,\s*([}\]])/g, '$1');
-
-  // Count open vs close braces and brackets
-  let openBraces = 0;
-  let openBrackets = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-
-    if (escaped) {
-      escaped = false;
-      continue;
+    if (!inString) {
+      if      (char === '{' || char === '[') stack.push(char);
+      else if (char === '}' && stack[stack.length - 1] === '{') stack.pop();
+      else if (char === ']' && stack[stack.length - 1] === '[') stack.pop();
     }
-
-    if (ch === '\\') {
-      escaped = true;
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-
-    if (inString) continue;
-
-    if (ch === '{') openBraces++;
-    else if (ch === '}') openBraces--;
-    else if (ch === '[') openBrackets++;
-    else if (ch === ']') openBrackets--;
   }
 
-  // Close unclosed strings
-  if (inString) {
-    text += '"';
+  // Закрываем незакрытую строку
+  if (inString) t += '"';
+
+  // Закрываем незакрытые объекты/массивы в обратном порядке
+  while (stack.length) {
+    t += (stack.pop() === '{') ? '}' : ']';
   }
 
-  // Remove trailing comma after closing the string
-  text = text.replace(/,\s*$/, '');
-
-  // Append missing closing brackets/braces
-  while (openBrackets > 0) {
-    text += ']';
-    openBrackets--;
-  }
-  while (openBraces > 0) {
-    text += '}';
-    openBraces--;
-  }
-
-  // Final validation attempt
-  try {
-    JSON.parse(text);
-  } catch (_e) {
-    // Last resort: return empty object
-    return '{}';
-  }
-
-  return text;
+  return t;
 }
 
 module.exports = { autoCloseJSON };
