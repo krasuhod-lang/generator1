@@ -84,11 +84,8 @@ async function runPipeline(task, ctx) {
   const { log, progress } = ctx;
   const taskId = task.id;
 
-  // Удобная обёртка — публикует лог + SSE сразу
-  const logAndPublish = (msg, level = 'info') => {
-    log(msg, level);
-    publish(taskId, { type: 'log', msg, level, ts: new Date().toTimeString().substring(0, 8) });
-  };
+  // ctx.log уже публикует через worker.js → publish() + console.log
+  // Не оборачиваем — иначе каждое сообщение будет отправлено дважды
 
   // onTokens — публикует SSE-событие {type:"tokens"} после каждого LLM-вызова
   // Фронтенд обновляет счётчики DeepSeek/Gemini в реальном времени
@@ -103,16 +100,16 @@ async function runPipeline(task, ctx) {
   };
 
   // Обогащённый контекст — все stage-функции получают onTokens
-  const stageCtx = { log: logAndPublish, progress, taskId, onTokens };
+  const stageCtx = { log, progress, taskId, onTokens };
 
-  logAndPublish(`Пайплайн запущен для задачи "${task.input_target_service}"`, 'info');
+  log(`Пайплайн запущен для задачи "${task.input_target_service}"`, 'info');
 
   // ── Stage 0 ──────────────────────────────────────────────────────
   let stage0Result = null;
   try {
     stage0Result = await runStage0(task, stageCtx);
   } catch (e) {
-    logAndPublish(`Stage 0 упал: ${e.message} — продолжаем без Stage 0 данных`, 'warn');
+    log(`Stage 0 упал: ${e.message} — продолжаем без Stage 0 данных`, 'warn');
   }
 
   // ── Stage 1 ──────────────────────────────────────────────────────
@@ -153,7 +150,7 @@ async function runPipeline(task, ctx) {
   const competitorFacts = stage0Result?.competitor_facts || [];
 
   // ── Цикл Stage 4 → 5 → 6 по каждому блоку ───────────────────────
-  logAndPublish('Stage 4–6: Аудит и доработка блоков (последовательно)...', 'info');
+  log('Stage 4–6: Аудит и доработка блоков (последовательно)...', 'info');
 
   const finalBlocks = [];       // финальные HTML-блоки
   const allLSISet   = new Set();  // дедупликация LSI
@@ -166,7 +163,7 @@ async function runPipeline(task, ctx) {
     lsiMust.forEach(term => allLSISet.add(term));
 
     if (!blockItem.html) {
-      logAndPublish(`Блок ${i + 1}: пропуск (Stage 3 не вернул HTML)`, 'warn');
+      log(`Блок ${i + 1}: пропуск (Stage 3 не вернул HTML)`, 'warn');
       await markBlockError(taskId, i, block, 'Stage 3 failed to generate HTML');
       continue;
     }
@@ -181,7 +178,7 @@ async function runPipeline(task, ctx) {
         i, blockItem.html, lsiMust
       ));
     } catch (e) {
-      logAndPublish(`Stage 4 блок ${i + 1} ОШИБКА: ${e.message} — пропускаем аудит`, 'warn');
+      log(`Stage 4 блок ${i + 1} ОШИБКА: ${e.message} — пропускаем аудит`, 'warn');
       finalBlocks.push(blockItem.html);
       await saveContentBlock(taskId, i, block, blockItem.html, 0, 0, null);
       continue;
@@ -207,10 +204,10 @@ async function runPipeline(task, ctx) {
         currentPQ    = s5.pqScore;
         currentAudit = s5.auditLog;
       } catch (e) {
-        logAndPublish(`Stage 5 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 4`, 'warn');
+        log(`Stage 5 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 4`, 'warn');
       }
     } else {
-      logAndPublish(`Блок ${i + 1}: PQ ${pqScore} >= 8, LSI ${Math.round(lsiCovPct)}% >= 80% — рефайн не нужен`, 'success');
+      log(`Блок ${i + 1}: PQ ${pqScore} >= 8, LSI ${Math.round(lsiCovPct)}% >= 80% — рефайн не нужен`, 'success');
     }
 
     // Stage 6: LSI-инъекция (всегда, если покрытие < 100%)
@@ -223,7 +220,7 @@ async function runPipeline(task, ctx) {
       currentHTML     = s6.html;
       lsiCoverageAfter = s6.lsiCoverage;
     } catch (e) {
-      logAndPublish(`Stage 6 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 5`, 'warn');
+      log(`Stage 6 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 5`, 'warn');
       const cov = calculateCoverage(currentHTML, lsiMust);
       lsiCoverageAfter = cov.percent;
     }
@@ -231,10 +228,10 @@ async function runPipeline(task, ctx) {
     // Проверяем оставшиеся water-фразы
     const finalWater = checkAntiWater(currentHTML);
     if (finalWater.length) {
-      logAndPublish(`Блок ${i + 1}: Остались вода-фразы: ${finalWater.join(', ')}`, 'warn');
+      log(`Блок ${i + 1}: Остались вода-фразы: ${finalWater.join(', ')}`, 'warn');
     }
 
-    logAndPublish(`Блок ${i + 1} готов. LSI: ${lsiCoverageAfter}%, PQ: ${currentPQ}`, 'success');
+    log(`Блок ${i + 1} готов. LSI: ${lsiCoverageAfter}%, PQ: ${currentPQ}`, 'success');
 
     // Сохраняем финальный блок в БД
     await saveContentBlock(taskId, i, block, currentHTML, currentPQ, lsiCoverageAfter, currentAudit);
@@ -268,7 +265,7 @@ async function runPipeline(task, ctx) {
       finalBlocks, allLSI
     );
   } catch (e) {
-    logAndPublish(`Stage 7 ОШИБКА: ${e.message} — пайплайн завершён без глобального аудита`, 'warn');
+    log(`Stage 7 ОШИБКА: ${e.message} — пайплайн завершён без глобального аудита`, 'warn');
     s7Result = { finalHTML: finalBlocks.join('\n\n') };
   }
 
@@ -283,7 +280,7 @@ async function runPipeline(task, ctx) {
     finalHTMLLength:    (s7Result.finalHTML || '').length,
   });
 
-  logAndPublish(
+  log(
     `Пайплайн завершён. Блоков: ${finalBlocks.length} | ` +
     `LSI: ${s7Result.globalLSICoverage || 0}% | ` +
     `E-E-A-T: ${s7Result.globalEEATScore || 0} | ` +
