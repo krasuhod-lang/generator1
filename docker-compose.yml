@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: seo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-seogenius_db}
+      POSTGRES_USER: ${POSTGRES_USER:-seogenius}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seogenius}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: seo_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend (Express API) ────────────────────────────────────
+  backend:
+    build: ./backend
+    container_name: seo_backend
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/uploads:/app/uploads
+
+  # ── Worker (BullMQ) ──────────────────────────────────────────
+  worker:
+    build: ./backend
+    container_name: seo_worker
+    restart: unless-stopped
+    command: ["node", "src/queue/worker.js"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Frontend (Vue 3 + Nginx) ─────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000}
+    container_name: seo_frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

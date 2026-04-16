@@ -1,5 +1,4 @@
 const db = require('../config/db');
-const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const sseManager = require('../services/sse/sseManager');
 const pipelineQueue = require('../queue/queue');
@@ -15,31 +14,35 @@ async function createTask(req, res) {
   try {
     const userId = req.user.id;
     const {
-      keyword, niche, target_audience, tone_of_voice, region, language,
-      competitor_urls, content_type, brand_name, unique_selling_points,
-      word_count_target, additional_requirements, provider,
+      name,
+      input_keyword, input_niche, input_target_audience, input_tone_of_voice,
+      input_region, input_language, input_competitor_urls, input_content_type,
+      input_brand_name, input_unique_selling_points, input_word_count,
+      input_additional,
     } = req.body;
 
-    if (!keyword) {
-      return res.status(400).json({ error: 'keyword is required' });
+    if (!name) {
+      return res.status(400).json({ error: 'name is required' });
+    }
+    if (!input_keyword) {
+      return res.status(400).json({ error: 'input_keyword is required' });
     }
 
-    const id = uuidv4();
     const result = await db.query(
       `INSERT INTO tasks
-        (id, user_id, keyword, niche, target_audience, tone_of_voice,
-         region, language, competitor_urls, content_type, brand_name,
-         unique_selling_points, word_count_target, additional_requirements,
-         provider, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending')
+        (user_id, name, input_keyword, input_niche, input_target_audience,
+         input_tone_of_voice, input_region, input_language, input_competitor_urls,
+         input_content_type, input_brand_name, input_unique_selling_points,
+         input_word_count, input_additional, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'pending')
        RETURNING *`,
       [
-        id, userId, keyword, niche || null, target_audience || null,
-        tone_of_voice || null, region || null, language || null,
-        JSON.stringify(competitor_urls || []), content_type || null,
-        brand_name || null, unique_selling_points || null,
-        word_count_target || null, additional_requirements || null,
-        provider || 'deepseek',
+        userId, name, input_keyword, input_niche || null,
+        input_target_audience || null, input_tone_of_voice || null,
+        input_region || null, input_language || 'русский',
+        input_competitor_urls || null, input_content_type || null,
+        input_brand_name || null, input_unique_selling_points || null,
+        input_word_count || 3000, input_additional || null,
       ]
     );
 

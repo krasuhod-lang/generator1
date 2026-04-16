@@ -148,6 +148,7 @@ async function handleSubmit() {
       }
     }
     const task = await tasksStore.createTask(payload);
+    await tasksStore.startTask(task.id);
     router.push(`/tasks/${task.id}/monitor`);
   } catch (err) {
     submitError.value = err.response?.data?.error || 'Ошибка создания задачи';
