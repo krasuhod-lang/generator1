@@ -14,16 +14,63 @@ const GEMINI_BASE_URL =
   (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/models').replace(/\/$/, '');
 
 /**
- * Создаёт httpAgent если HTTPS_PROXY задан в окружении.
- * Формат: http://login:password@ip:port
+ * Собирает proxy URL из переменных окружения.
+ *
+ * Приоритет:
+ *   1. GEMINI_PROXY_URL — полная строка http://login:password@ip:port
+ *   2. GEMINI_PROXY_HOST + GEMINI_PROXY_PORT (+ опционально GEMINI_PROXY_USER / GEMINI_PROXY_PASS)
+ *   3. HTTPS_PROXY / https_proxy — системная переменная
+ *
+ * Возвращает готовую URL-строку или пустую строку.
+ */
+function resolveProxyUrl() {
+  // 1. Полная строка
+  const full = process.env.GEMINI_PROXY_URL || '';
+  if (full) return full;
+
+  // 2. Компоненты
+  const host = process.env.GEMINI_PROXY_HOST || '';
+  const port = process.env.GEMINI_PROXY_PORT || '';
+  if (host && port) {
+    const user = process.env.GEMINI_PROXY_USER || '';
+    const pass = process.env.GEMINI_PROXY_PASS || '';
+    const proto = process.env.GEMINI_PROXY_PROTO || 'http';
+    if (user && pass) {
+      return `${proto}://${user}:${pass}@${host}:${port}`;
+    }
+    return `${proto}://${host}:${port}`;
+  }
+
+  // 3. Системная
+  return process.env.HTTPS_PROXY || process.env.https_proxy || '';
+}
+
+/** Кэшированная URL-строка прокси (вычисляется один раз при старте) */
+const RESOLVED_PROXY_URL = resolveProxyUrl();
+
+// Стартовый лог — показывает, через что пойдут запросы
+if (RESOLVED_PROXY_URL) {
+  // Скрываем пароль в логе
+  try {
+    const u = new URL(RESOLVED_PROXY_URL);
+    if (u.password) u.password = '***';
+    console.log(`[gemini] Прокси включён: ${u.toString()}`);
+  } catch {
+    console.log(`[gemini] Прокси включён: ${RESOLVED_PROXY_URL.replace(/:([^:@]+)@/, ':***@')}`);
+  }
+} else {
+  console.warn('[gemini] ⚠ Прокси НЕ задан! Запросы пойдут напрямую. Задайте GEMINI_PROXY_* в .env');
+}
+
+/**
+ * Создаёт httpAgent из кэшированного proxy URL.
  */
 function buildProxyAgent() {
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || '';
-  if (!proxyUrl) return undefined;
+  if (!RESOLVED_PROXY_URL) return undefined;
   try {
-    return new HttpsProxyAgent(proxyUrl);
+    return new HttpsProxyAgent(RESOLVED_PROXY_URL);
   } catch (e) {
-    console.warn('[gemini] Неверный HTTPS_PROXY, прокси отключён:', e.message);
+    console.warn('[gemini] Неверный прокси, запросы пойдут напрямую:', e.message);
     return undefined;
   }
 }
@@ -103,17 +150,8 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     ],
   };
 
-  // Прокси для Gemini API (из переменной окружения)
-  const proxyUrl = process.env.GEMINI_PROXY_URL || process.env.HTTPS_PROXY || '';
-  let proxyAgent;
-  if (proxyUrl) {
-    try {
-      proxyAgent = new HttpsProxyAgent(proxyUrl);
-    } catch (e) {
-      console.warn('[gemini] Неверный прокси, запросы пойдут напрямую:', e.message);
-      proxyAgent = undefined;
-    }
-  }
+  // Прокси для Gemini API (из кэшированного proxy URL)
+  const proxyAgent = buildProxyAgent();
 
   const axiosCfg   = {
     timeout:        timeoutMs,
