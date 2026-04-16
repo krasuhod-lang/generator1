@@ -41,6 +41,7 @@ export const useTasksStore = defineStore('tasks', () => {
   async function createTask(payload) {
     const { data } = await api.post('/tasks', payload);
     tasks.value.unshift(data.task);
+    current.value = data.task;
     return data.task;
   }
 

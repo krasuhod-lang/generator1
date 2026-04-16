@@ -147,6 +147,31 @@ async function handleLLMTzUpload(e) {
     if (ext.known_terms?.length)         openSections.s2 = true;
     if (ext.competitor_urls?.length || ext.competitor_names?.length) openSections.s4 = true;
 
+    // Автоматически создаём черновик и сохраняем заполненные данные
+    if (filled > 0) {
+      // Гарантируем, что обязательное поле заполнено для создания черновика
+      if (!form.input_target_service.trim()) {
+        form.input_target_service = 'Черновик';
+      }
+
+      if (!isEdit.value && !store.current?.id) {
+        // Новая задача — создаём черновик автоматически
+        await saveDraft({ silent: true });
+        const taskId = store.current?.id;
+        if (taskId) {
+          router.replace(`/tasks/${taskId}/edit`);
+        }
+      } else {
+        // Уже существующая задача — сохраняем обновлённые поля
+        const taskId = isEdit.value ? route.params.id : store.current?.id;
+        if (taskId) {
+          try {
+            await store.updateTask(taskId, { ...form });
+          } catch (_) { /* поля уже в форме, ошибка не критична */ }
+        }
+      }
+    }
+
     llmMsg.value = filled > 0
       ? `ИИ заполнил ${filled} полей. Проверьте и при необходимости скорректируйте.`
       : 'ТЗ проанализировано, но распознаваемых полей не найдено — заполните вручную.';
@@ -167,7 +192,7 @@ async function handleDocxUpload(e) {
   docxError.value = '';
 
   // Если задача ещё не создана — создаём черновик автоматически (без редиректа)
-  if (!isEdit.value) {
+  if (!isEdit.value && !store.current?.id) {
     // Временно подставляем placeholder если поле пустое
     const hadEmpty = !form.input_target_service.trim();
     if (hadEmpty) form.input_target_service = 'Черновик';
@@ -263,6 +288,7 @@ async function startTask() {
 // Валидация кнопки запуска
 const canStart = computed(() =>
   form.input_target_service.trim() &&
+  form.input_target_service.trim() !== 'Черновик' &&
   form.input_brand_name.trim() &&
   form.input_author_name.trim() &&
   form.input_region.trim() &&
