@@ -191,8 +191,8 @@ async function parseTz(req, res) {
     console.error('[tasks] parseTz error:', err.message);
     return res.status(500).json({ error: err.message || 'Failed to parse TZ file' });
   } finally {
-    // Cleanup uploaded file
-    if (filePath) {
+    // Cleanup uploaded file (only if within uploads directory)
+    if (filePath && filePath.startsWith(UPLOADS_DIR)) {
       fs.unlink(filePath, (unlinkErr) => {
         if (unlinkErr) console.error('[tasks] File cleanup error:', unlinkErr.message);
       });
