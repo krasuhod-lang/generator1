@@ -598,6 +598,7 @@ async function uploadTZ(req, res, next) {
       'input_competitor_urls',
       'input_raw_lsi',
       'input_ngrams',
+      'input_tfidf_json',
     ];
     for (const key of fieldMap) {
       if (parsedFields[key] !== undefined && parsedFields[key] !== '') {

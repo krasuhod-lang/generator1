@@ -39,7 +39,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
   const region        = task.input_region        || 'Россия';
   const brandFacts    = task.input_brand_facts   || 'Нет данных';
   const nGrams        = task.input_ngrams        || '';
-  const tfIdfData     = task.input_tfidf_weights || '[]';
+  const tfIdfData     = task.input_tfidf_json || '[]';
   const authorName    = task.input_author_name   || 'Эксперт';
   const minChars      = parseInt(task.input_min_chars) || 800;
   const maxChars      = parseInt(task.input_max_chars) || 3500;
