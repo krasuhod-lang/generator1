@@ -35,10 +35,11 @@ async function loadOwnTask(taskId, userId) {
  */
 function validateTaskForStart(task) {
   const errors = [];
-  if (!task.input_target_service?.trim())
+  if (!task.input_target_service?.trim() || task.input_target_service.trim() === 'Черновик')
     errors.push('Укажите H1 / целевую услугу');
-  if (!task.input_raw_lsi?.trim() || task.input_raw_lsi.trim().split(/\s+/).length < 5)
-    errors.push('Добавьте минимум 5 LSI-слов');
+  const lsiTrimmed = task.input_raw_lsi?.trim() || '';
+  if (!lsiTrimmed || lsiTrimmed.split('\n').map(s => s.trim()).filter(Boolean).length < 5)
+    errors.push('Добавьте минимум 5 LSI-слов (по одному на строку)');
   if (!task.input_brand_name?.trim())
     errors.push('Укажите название бренда');
   if (!task.input_author_name?.trim())
@@ -122,9 +123,8 @@ async function createTask(req, res, next) {
       input_max_chars,
     } = req.body;
 
-    if (!input_target_service?.toString().trim()) {
-      return res.status(400).json({ error: 'input_target_service обязателен' });
-    }
+    // Для черновика допускаем пустое поле — ставим плейсхолдер
+    const targetService = input_target_service?.toString().trim() || 'Черновик';
 
     const minChars = parseInt(input_min_chars) || 800;
     const maxChars = parseInt(input_max_chars) || 3500;
@@ -155,8 +155,8 @@ async function createTask(req, res, next) {
        ) RETURNING *`,
       [
         req.user.id,
-        toText(title) || input_target_service.toString().trim(),
-        input_target_service.toString().trim(),
+        toText(title) || targetService,
+        targetService,
         toText(input_brand_name),
         toText(input_author_name),
         toText(input_region),
