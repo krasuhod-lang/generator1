@@ -683,10 +683,12 @@ async function callExtractorLLM(tzText) {
 
   let rawText = '';
   try {
-    rawText = await callDeepSeek(systemMsg, prompt, llmOptions);
+    const dsResult = await callDeepSeek(systemMsg, prompt, llmOptions);
+    rawText = dsResult.text || '';
   } catch (deepseekErr) {
     console.warn('[parseTZWithLLM] DeepSeek failed, trying Gemini:', deepseekErr.message);
-    rawText = await callGemini(systemMsg, prompt, llmOptions);
+    const gmResult = await callGemini(systemMsg, prompt, llmOptions);
+    rawText = gmResult.text || '';
   }
 
   // Нормализуем и парсим JSON
