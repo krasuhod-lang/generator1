@@ -10,7 +10,7 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   if (typeof systemInstruction !== 'string' || typeof userPrompt !== 'string') {
     throw new Error('systemInstruction and userPrompt must be strings');
   }
-  if (systemInstruction.length > 10000 || userPrompt.length > 50000) {
+  if (systemInstruction.length > 30000 || userPrompt.length > 100000) {
     throw new Error('Input text too long');
   }
 
