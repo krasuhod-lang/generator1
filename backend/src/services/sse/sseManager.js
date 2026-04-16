@@ -29,7 +29,7 @@ function createRedisClient(label) {
   } else {
     client = new Redis({
       host:     process.env.REDIS_HOST     || 'localhost',
-      port:     parseInt(process.env.REDIS_PORT) || 6379,
+      port:     parseInt(process.env.REDIS_PORT, 10) || 6379,
       password: process.env.REDIS_PASSWORD || undefined,
       maxRetriesPerRequest: null,
       lazyConnect: true,
@@ -166,8 +166,7 @@ redisSub.on('message', (channel, message) => {
 function publish(taskId, event) {
   const message = JSON.stringify({ taskId, event });
   redisPub.publish(SSE_CHANNEL, message).catch((err) => {
-    console.error(`[SSE] Redis publish failed for task ${taskId}:`, err.message);
-    // Fallback: доставляем локально (работает если worker и backend в одном процессе)
+    console.warn(`[SSE] Redis publish failed for task ${taskId}, falling back to local delivery:`, err.message);
     _deliverLocally(taskId, event);
   });
 }
@@ -185,7 +184,8 @@ function closeTask(taskId) {
   const taskClients = clients.get(taskId);
   if (!taskClients) return;
 
-  // Шлём финальное событие перед закрытием
+  // Шлём финальное событие перед закрытием (локально, т.к. после этого
+  // соединения закрываются — нет смысла слать через Redis в другие процессы)
   _deliverLocally(taskId, { type: 'closed', taskId, msg: 'Task deleted' });
 
   for (const res of taskClients) {
