@@ -97,6 +97,27 @@ const LLM_FIELD_MAP = {
   niche_features:   'input_niche_features',
 };
 
+// Допустимые значения для select-полей (должны совпадать с <option value="...">)
+const SELECT_OPTIONS = {
+  input_language:      ['ru', 'en', 'kk'],
+  input_business_type: ['SaaS', 'e-commerce', 'услуги', 'affiliate', 'media', 'marketplace', 'local business', 'B2B', 'B2C', 'D2C', 'review-site', 'publisher', 'aggregator', 'expert brand'],
+  input_site_type:     ['новый', 'растущий', 'зрелый', 'сильный бренд', 'слабый бренд'],
+  input_business_goal: ['трафик', 'лиды', 'продажи', 'бренд', 'AI visibility', 'topical authority', 'revenue growth'],
+  input_monetization:  ['лиды', 'подписка', 'продажа товаров', 'реклама', 'affiliate', 'freemium', 'enterprise sales', 'demo', 'consultation', 'booking', 'marketplace fee'],
+};
+
+/**
+ * Нормализует значение для select-поля: находит ближайшее совпадение
+ * по регистронезависимому сравнению. Возвращает '' если нет совпадения.
+ */
+function normalizeSelectValue(formKey, rawValue) {
+  const options = SELECT_OPTIONS[formKey];
+  if (!options) return rawValue; // текстовое поле — без нормализации
+  const lower = rawValue.trim().toLowerCase();
+  const match = options.find(o => o.toLowerCase() === lower);
+  return match || ''; // если нет точного совпадения — не подставляем
+}
+
 async function handleLLMTzUpload(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -118,7 +139,10 @@ async function handleLLMTzUpload(e) {
       if (!strVal.trim()) continue;
       // Не перезаписываем уже заполненное поле (кроме явного Intent из keyword)
       if (extKey === 'niche' && form[formKey]?.trim()) continue;
-      form[formKey] = strVal;
+      // Нормализуем значения для select-полей (регистронезависимое совпадение)
+      const normalized = normalizeSelectValue(formKey, strVal);
+      if (normalized === '' && SELECT_OPTIONS[formKey]) continue; // нет совпадения — пропускаем select
+      form[formKey] = normalized;
       filled++;
     }
 
@@ -361,7 +385,11 @@ const canStart = computed(() =>
                 <option value="local business">Local Business</option>
                 <option value="B2B">B2B</option>
                 <option value="B2C">B2C</option>
+                <option value="D2C">D2C</option>
                 <option value="review-site">Review Site</option>
+                <option value="publisher">Publisher</option>
+                <option value="aggregator">Aggregator</option>
+                <option value="expert brand">Expert Brand</option>
               </select>
             </div>
             <div>
@@ -389,6 +417,7 @@ const canStart = computed(() =>
                 <option value="бренд">Бренд</option>
                 <option value="AI visibility">AI Visibility</option>
                 <option value="topical authority">Topical Authority</option>
+                <option value="revenue growth">Revenue Growth</option>
               </select>
             </div>
             <div>
@@ -401,6 +430,11 @@ const canStart = computed(() =>
                 <option value="реклама">Реклама</option>
                 <option value="affiliate">Affiliate</option>
                 <option value="freemium">Freemium</option>
+                <option value="enterprise sales">Enterprise Sales</option>
+                <option value="demo">Demo</option>
+                <option value="consultation">Consultation</option>
+                <option value="booking">Booking</option>
+                <option value="marketplace fee">Marketplace Fee</option>
               </select>
             </div>
             <div>

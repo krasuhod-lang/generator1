@@ -191,8 +191,12 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       const isNetworkErr = err.code === 'ECONNABORTED' || err.code === 'ECONNRESET'
                         || err.message.includes('timeout') || err.message.includes('Network');
 
-      if (attempt === retries - 1) {
-        log(`${callLabel || stageName} FAILED после ${retries} попыток: ${err.message}`, 'error');
+      // Детерминированные ошибки — повторные попытки бессмысленны
+      const isDeterministic = err.message === 'Input text too long'
+                           || err.message.includes('API_KEY is not set');
+
+      if (isDeterministic || attempt === retries - 1) {
+        log(`${callLabel || stageName} FAILED после ${attempt + 1} попыток: ${err.message}`, 'error');
         throw err;
       }
 
