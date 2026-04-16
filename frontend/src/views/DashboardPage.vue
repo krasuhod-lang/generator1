@@ -3,10 +3,25 @@ import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth.js';
 import { useTasksStore } from '../stores/tasks.js';
+import ResultModal from '../components/ResultModal.vue';
 
 const router = useRouter();
 const auth   = useAuthStore();
 const store  = useTasksStore();
+
+// ── Модалка результатов ────────────────────────────────────────────
+const showResult     = ref(false);
+const resultTaskId   = ref(null);
+
+function openResult(task) {
+  resultTaskId.value = task.id;
+  showResult.value   = true;
+}
+
+function closeResult() {
+  showResult.value   = false;
+  resultTaskId.value = null;
+}
 
 // Инлайн ошибка (заменяет alert)
 const errorMsg = ref(null);
@@ -222,13 +237,13 @@ function fmtCost(usd) {
                   </RouterLink>
 
                   <!-- Результат (completed) -->
-                  <RouterLink
+                  <button
                     v-if="task.status === 'completed'"
-                    :to="`/tasks/${task.id}/result`"
+                    @click="openResult(task)"
                     class="btn-primary text-xs px-3 py-1.5"
                   >
                     📊 Результат
-                  </RouterLink>
+                  </button>
 
                   <!-- Редактировать (draft / failed) -->
                   <RouterLink
@@ -255,5 +270,12 @@ function fmtCost(usd) {
         </table>
       </div>
     </main>
+
+    <!-- Модалка результатов -->
+    <ResultModal
+      :task-id="resultTaskId"
+      :visible="showResult"
+      @close="closeResult"
+    />
   </div>
 </template>

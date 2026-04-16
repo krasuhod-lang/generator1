@@ -3,11 +3,15 @@ import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
 import { useAuthStore } from '../stores/auth.js';
+import ResultModal from '../components/ResultModal.vue';
 
 const route  = useRoute();
 const router = useRouter();
 const store  = useTasksStore();
 const auth   = useAuthStore();
+
+// ── Модалка результатов ────────────────────────────────────────────────────
+const showResult = ref(false);
 
 const taskId = route.params.id;
 
@@ -142,9 +146,9 @@ function handleSSEMessage(msg) {
       progress.value = 100;
       stage.value    = 'done';
       closeSSE();
-      pushLog({ ts: ts(), msg: '✓ Генерация завершена. Переход к результатам...', level: 'success' });
-      // Небольшая задержка — даём пользователю увидеть финальный лог
-      setTimeout(() => router.push(`/tasks/${taskId}/result`), 2500);
+      pushLog({ ts: ts(), msg: '✓ Генерация завершена!', level: 'success' });
+      // Показываем модалку результатов через короткую задержку
+      setTimeout(() => { showResult.value = true; }, 1500);
       break;
 
     case 'error':
@@ -391,12 +395,12 @@ onUnmounted(() => {
 
         <!-- Кнопка перехода к результатам (если задача уже завершена) -->
         <div v-if="done" class="card">
-          <RouterLink
-            :to="`/tasks/${taskId}/result`"
+          <button
+            @click="showResult = true"
             class="btn w-full text-center block"
           >
-            Перейти к результатам →
-          </RouterLink>
+            Открыть результаты →
+          </button>
         </div>
 
         <!-- Ошибка -->
@@ -455,7 +459,7 @@ onUnmounted(() => {
               class="w-2 h-2 rounded-full bg-yellow-500 animate-pulse inline-block"/>
             <span v-else-if="done"  class="w-2 h-2 rounded-full bg-green-400 inline-block"/>
             <span v-else            class="w-2 h-2 rounded-full bg-red-400 inline-block"/>
-            <span v-if="done">Генерация завершена — переход к результатам...</span>
+            <span v-if="done">Генерация завершена</span>
             <span v-else-if="failed">Задача завершилась с ошибкой</span>
             <span v-else-if="reconnectCount > 0">SSE: восстановление соединения...</span>
             <span v-else>Live — SSE подключён</span>
@@ -464,5 +468,12 @@ onUnmounted(() => {
       </div>
 
     </main>
+
+    <!-- Модалка результатов -->
+    <ResultModal
+      :task-id="taskId"
+      :visible="showResult"
+      @close="showResult = false"
+    />
   </div>
 </template>
