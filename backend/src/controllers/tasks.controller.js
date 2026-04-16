@@ -37,7 +37,8 @@ function validateTaskForStart(task) {
   const errors = [];
   if (!task.input_target_service?.trim() || task.input_target_service.trim() === 'Черновик')
     errors.push('Укажите H1 / целевую услугу');
-  if (!task.input_raw_lsi?.trim() || task.input_raw_lsi.trim().split('\n').map(s => s.trim()).filter(Boolean).length < 5)
+  const lsiTrimmed = task.input_raw_lsi?.trim() || '';
+  if (!lsiTrimmed || lsiTrimmed.split('\n').map(s => s.trim()).filter(Boolean).length < 5)
     errors.push('Добавьте минимум 5 LSI-слов (по одному на строку)');
   if (!task.input_brand_name?.trim())
     errors.push('Укажите название бренда');
