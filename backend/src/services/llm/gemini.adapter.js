@@ -3,7 +3,7 @@
 const axios       = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview';
 
 /**
  * Базовый URL для Gemini API.
