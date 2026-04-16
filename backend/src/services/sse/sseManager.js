@@ -3,11 +3,51 @@
 /**
  * SSE Manager — Server-Sent Events для реалтайм-логов задач.
  *
- * Архитектура: Map<taskId → Set<res>>
- * Каждый клиент, открывший GET /api/tasks/:id/stream, добавляется в Set.
- * Worker публикует события через publish(taskId, event).
+ * Архитектура:
+ *   - Локальные SSE-клиенты: Map<taskId → Set<res>>
+ *   - Кросс-процессная доставка: Redis Pub/Sub
+ *
+ * Backend (HTTP-сервер) и Worker (BullMQ) запускаются в отдельных
+ * контейнерах/процессах. publish() отправляет событие в Redis-канал,
+ * а подписчик на стороне backend-процесса пересылает его в локальные
+ * SSE-соединения. Это решает проблему, когда Worker публикует события
+ * в свою in-memory Map, у которой нет клиентов.
  */
 
+const Redis = require('ioredis');
+
+const SSE_CHANNEL = 'sse:events';
+
+// ── Redis-подключения ────────────────────────────────────────────────────────
+// Для Pub/Sub нужны два отдельных соединения (ioredis requirement).
+
+function createRedisClient(label) {
+  const url = process.env.REDIS_URL;
+  let client;
+  if (url) {
+    client = new Redis(url, { maxRetriesPerRequest: null, lazyConnect: true });
+  } else {
+    client = new Redis({
+      host:     process.env.REDIS_HOST     || 'localhost',
+      port:     parseInt(process.env.REDIS_PORT, 10) || 6379,
+      password: process.env.REDIS_PASSWORD || undefined,
+      maxRetriesPerRequest: null,
+      lazyConnect: true,
+    });
+  }
+  client.on('error', (err) => {
+    console.error(`[SSE][Redis:${label}] Error:`, err.message);
+  });
+  client.connect().catch((err) => {
+    console.error(`[SSE][Redis:${label}] Connect failed:`, err.message);
+  });
+  return client;
+}
+
+const redisPub = createRedisClient('pub');
+const redisSub = createRedisClient('sub');
+
+// ── Локальные SSE-клиенты ────────────────────────────────────────────────────
 // taskId (string) → Set<express.Response>
 const clients = new Map();
 
@@ -67,20 +107,11 @@ function subscribe(taskId, res) {
 }
 
 // -----------------------------------------------------------------
-// publish(taskId, event)
-// Вызывается из Worker и pipeline-функций
+// _deliverLocally(taskId, event)
+// Доставляет событие локальным SSE-клиентам текущего процесса
 // -----------------------------------------------------------------
 
-/**
- * Публикует событие всем подписчикам задачи.
- *
- * Формат события (из раздела 7.2 ТЗ):
- * { type: 'log'|'progress'|'block'|'tokens'|'done'|'error', ...payload }
- *
- * @param {string} taskId
- * @param {object} event
- */
-function publish(taskId, event) {
+function _deliverLocally(taskId, event) {
   const taskClients = clients.get(taskId);
   if (!taskClients || taskClients.size === 0) return;
 
@@ -92,11 +123,52 @@ function publish(taskId, event) {
         res.write(payload);
       }
     } catch (err) {
-      // Клиент отвалился во время записи — убираем тихо
       console.error(`[SSE] Failed to write to client for task ${taskId}:`, err.message);
       taskClients.delete(res);
     }
   }
+}
+
+// -----------------------------------------------------------------
+// Redis Pub/Sub subscriber
+// Получает события из Redis и доставляет локальным SSE-клиентам
+// -----------------------------------------------------------------
+
+redisSub.subscribe(SSE_CHANNEL).catch((err) => {
+  console.error('[SSE] Redis subscribe failed:', err.message);
+});
+
+redisSub.on('message', (channel, message) => {
+  if (channel !== SSE_CHANNEL) return;
+  try {
+    const { taskId, event } = JSON.parse(message);
+    _deliverLocally(taskId, event);
+  } catch (err) {
+    console.error('[SSE] Failed to parse Redis message:', err.message);
+  }
+});
+
+// -----------------------------------------------------------------
+// publish(taskId, event)
+// Вызывается из Worker и pipeline-функций.
+// Публикует событие через Redis Pub/Sub → все процессы получают его.
+// -----------------------------------------------------------------
+
+/**
+ * Публикует событие всем подписчикам задачи через Redis Pub/Sub.
+ *
+ * Формат события (из раздела 7.2 ТЗ):
+ * { type: 'log'|'progress'|'block'|'tokens'|'done'|'error', ...payload }
+ *
+ * @param {string} taskId
+ * @param {object} event
+ */
+function publish(taskId, event) {
+  const message = JSON.stringify({ taskId, event });
+  redisPub.publish(SSE_CHANNEL, message).catch((err) => {
+    console.warn(`[SSE] Redis publish failed for task ${taskId}, falling back to local delivery:`, err.message);
+    _deliverLocally(taskId, event);
+  });
 }
 
 // -----------------------------------------------------------------
@@ -112,8 +184,9 @@ function closeTask(taskId) {
   const taskClients = clients.get(taskId);
   if (!taskClients) return;
 
-  // Шлём финальное событие перед закрытием
-  publish(taskId, { type: 'closed', taskId, msg: 'Task deleted' });
+  // Шлём финальное событие перед закрытием (локально, т.к. после этого
+  // соединения закрываются — нет смысла слать через Redis в другие процессы)
+  _deliverLocally(taskId, { type: 'closed', taskId, msg: 'Task deleted' });
 
   for (const res of taskClients) {
     try {
