@@ -1,10 +1,13 @@
 const db = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 const sseManager = require('../services/sse/sseManager');
 const pipelineQueue = require('../queue/queue');
 const tzParser = require('../services/tz/tzParser');
 const tzExtractor = require('../services/tz/tzExtractor');
 const fs = require('fs');
+
+const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
 
 // --- CRUD ---
 
@@ -169,7 +172,10 @@ async function parseTz(req, res) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    filePath = req.file.path;
+    filePath = path.resolve(req.file.path);
+    if (!filePath.startsWith(UPLOADS_DIR)) {
+      return res.status(400).json({ error: 'Invalid file path' });
+    }
 
     // Extract raw text from the uploaded file
     const rawText = await tzParser.parseFile(filePath);
