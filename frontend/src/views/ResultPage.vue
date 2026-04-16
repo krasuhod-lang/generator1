@@ -140,6 +140,8 @@ function parseAudit(block) {
 }
 
 // ── Экспорт HTML ──────────────────────────────────────────────────────────
+const copied = ref(false);
+
 function copyHtml() {
   if (!fullHtml.value) return;
   navigator.clipboard.writeText(fullHtml.value).then(() => {
@@ -147,8 +149,6 @@ function copyHtml() {
     setTimeout(() => { copied.value = false; }, 2000);
   });
 }
-
-const copied = ref(false);
 
 function exportHtml() {
   if (!fullHtml.value) return;

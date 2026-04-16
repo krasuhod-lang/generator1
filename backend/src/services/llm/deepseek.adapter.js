@@ -25,8 +25,11 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
   if (timeoutMs < 1000 || timeoutMs > 300000) throw new Error('Invalid timeout');
 
-  // API ключ DeepSeek зашифрован в base64 для защиты от случайного просмотра
-  const apiKey = Buffer.from('c2stZTNkOWU0MjRlZGY2NDk4NThkOTAxYzJjOTdiOTE5NTg=', 'base64').toString('utf8');
+  // API ключ DeepSeek — из переменной окружения
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    throw new Error('DEEPSEEK_API_KEY is not set in environment variables');
+  }
 
   const body = {
     model: DEEPSEEK_MODEL,
