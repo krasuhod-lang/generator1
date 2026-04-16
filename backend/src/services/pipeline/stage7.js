@@ -73,6 +73,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   );
 
   // Сохраняем финальные метрики в task_metrics
+  // total_cost_usd = 0 здесь, т.к. стоимость токенов уже аккумулируется в callLLM.js → persistStageCall()
   await db.query(
     `INSERT INTO task_metrics
        (task_id, lsi_coverage, eeat_score, bm25_score, total_cost_usd)
