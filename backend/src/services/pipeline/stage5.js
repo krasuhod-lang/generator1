@@ -154,7 +154,7 @@ async function runStage5(
 
   // ── TF-IDF overuse check ────────────────────────────────────────
   let tfIdfArr = [];
-  try { tfIdfArr = JSON.parse(task.input_tfidf_weights || '[]'); } catch { /* ignore */ }
+  try { tfIdfArr = JSON.parse(task.input_tfidf_json || '[]'); } catch { /* ignore */ }
 
   for (const item of tfIdfArr) {
     if (!item.term || !item.rangeMax) continue;
