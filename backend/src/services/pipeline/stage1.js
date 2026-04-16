@@ -2,6 +2,7 @@
 
 const { callLLM }            = require('../llm/callLLM');
 const { SYSTEM_PROMPTS, SYSTEM_PROMPTS_EXT } = require('../../prompts/systemPrompts');
+const { fillPromptVars }     = require('../../utils/fillPromptVars');
 const db                     = require('../../config/db');
 
 /**
@@ -87,9 +88,14 @@ NO markdown. NO extra text.`;
   log(`Stage 1B Intent — промпт ${promptSize1B} символов (~${Math.round(promptSize1B / 4)} токенов)`, 'info');
   log(`Stage 1C Community — промпт ${promptSize1C} символов (~${Math.round(promptSize1C / 4)} токенов)`, 'info');
 
+  // Заполняем плейсхолдеры в system-промптах реальными данными задачи
+  const filledEntity     = fillPromptVars(SYSTEM_PROMPTS_EXT.entityLandscape, task);
+  const filledIntent     = fillPromptVars(SYSTEM_PROMPTS_EXT.commercialIntent, task);
+  const filledCommunity  = fillPromptVars(SYSTEM_PROMPTS_EXT.communityVoice, task);
+
   // Запускаем параллельно — Promise.all с индивидуальным catch
   const [entityResult, intentResult, communityResult] = await Promise.all([
-    callLLM('deepseek', SYSTEM_PROMPTS_EXT.entityLandscape, entityContext, {
+    callLLM('deepseek', filledEntity, entityContext, {
       retries:   3,
       taskId,
       stageName: 'stage1',
@@ -98,7 +104,7 @@ NO markdown. NO extra text.`;
       onTokens,
     }).catch(e => { log(`Stage 1A Entity ОШИБКА: ${e.message}`, 'error'); return null; }),
 
-    callLLM('deepseek', SYSTEM_PROMPTS_EXT.commercialIntent, intentContext, {
+    callLLM('deepseek', filledIntent, intentContext, {
       retries:   3,
       taskId,
       stageName: 'stage1',
@@ -107,7 +113,7 @@ NO markdown. NO extra text.`;
       onTokens,
     }).catch(e => { log(`Stage 1B Intent ОШИБКА: ${e.message}`, 'error'); return null; }),
 
-    callLLM('deepseek', SYSTEM_PROMPTS_EXT.communityVoice, communityContext, {
+    callLLM('deepseek', filledCommunity, communityContext, {
       retries:   3,
       taskId,
       stageName: 'stage1',

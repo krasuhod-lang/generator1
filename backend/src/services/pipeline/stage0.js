@@ -3,6 +3,7 @@
 const { callLLM }             = require('../llm/callLLM');
 const { scrapeCompetitors }   = require('../parser/scraper');
 const { SYSTEM_PROMPTS_EXT }  = require('../../prompts/systemPrompts');
+const { fillPromptVars }      = require('../../utils/fillPromptVars');
 const db                      = require('../../config/db');
 
 /**
@@ -99,7 +100,7 @@ OUTPUT: Return ONLY valid JSON with ALL of these keys:
 - faq_bank: [{question, answer}] (min 5)
 NO markdown. NO extra text outside JSON.`;
 
-  const serpRealityResult = await callLLM('deepseek', SYSTEM_PROMPTS_EXT.serpRealityCheck, serpRealityContext, {
+  const serpRealityResult = await callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
     retries:   3,
     taskId,
     stageName: 'stage0',
@@ -133,7 +134,7 @@ SERP REALITY CHECK RESULT: ${JSON.stringify(serpRealityResult || {}).substring(0
 
 OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_layers (array), topic_clusters (array), competitor_gaps (array), strategic_priorities (array). NO markdown.`;
 
-  const nicheLandscapeResult = await callLLM('deepseek', SYSTEM_PROMPTS_EXT.nicheLandscape, nicheLandscapeContext, {
+  const nicheLandscapeResult = await callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.nicheLandscape, task), nicheLandscapeContext, {
     retries:   3,
     taskId,
     stageName: 'stage0',

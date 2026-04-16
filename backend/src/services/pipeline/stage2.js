@@ -2,6 +2,7 @@
 
 const { callLLM }            = require('../llm/callLLM');
 const { SYSTEM_PROMPTS, SYSTEM_PROMPTS_EXT } = require('../../prompts/systemPrompts');
+const { fillPromptVars }     = require('../../utils/fillPromptVars');
 const db                     = require('../../config/db');
 
 /**
@@ -67,7 +68,7 @@ OUTPUT: Return JSON with buyer_journey_stages (array of stages with queries, con
 
   const buyerJourneyResult = await callLLM(
     'deepseek',
-    SYSTEM_PROMPTS_EXT.buyerJourney,
+    fillPromptVars(SYSTEM_PROMPTS_EXT.buyerJourney, task),
     buyerJourneyContext,
     { retries: 3, taskId, stageName: 'stage2', callLabel: '2A Buyer Journey', log, onTokens }
   ).catch(e => { log(`Stage 2A ОШИБКА: ${e.message}`, 'error'); return null; });
@@ -94,7 +95,7 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
 
   const contentFormatResult = await callLLM(
     'deepseek',
-    SYSTEM_PROMPTS_EXT.contentFormat,
+    fillPromptVars(SYSTEM_PROMPTS_EXT.contentFormat, task),
     contentFormatContext,
     { retries: 3, taskId, stageName: 'stage2', callLabel: '2B Content Format', log, onTokens }
   ).catch(e => { log(`Stage 2B ОШИБКА: ${e.message}`, 'error'); return null; });
