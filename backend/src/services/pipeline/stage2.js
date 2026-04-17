@@ -55,7 +55,7 @@ async function runStage2(task, ctx, stage1Result) {
   const stage1JsonFull = JSON.stringify(stage1Result);
   const lsiForContext  = rawLSI.substring(0, 800);
 
-  // ── Stage 2A: Buyer Journey ──────────────────────────────────────
+  // ── Stage 2A + 2B: Buyer Journey + Content Format (параллельно) ──
   const buyerJourneyContext = `\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 STAGE 1 RESULT: ${stage1JsonFull}
@@ -63,47 +63,43 @@ LSI TERMS (первые 800 символов): ${lsiForContext}
 
 OUTPUT: Return JSON with buyer_journey_stages (array of stages with queries, content_needs, formats, trust_level). NO markdown.`;
 
-  const s2aSize = (SYSTEM_PROMPTS_EXT.buyerJourney + buyerJourneyContext).length;
-  log(`Stage 2A: Buyer Journey Mapper — промпт ${s2aSize} символов (~${Math.round(s2aSize / 4)} токенов)...`, 'info');
-
-  const buyerJourneyResult = await callLLM(
-    'deepseek',
-    fillPromptVars(SYSTEM_PROMPTS_EXT.buyerJourney, task),
-    buyerJourneyContext,
-    { retries: 3, taskId, stageName: 'stage2', callLabel: '2A Buyer Journey', log, onTokens }
-  ).catch(e => { log(`Stage 2A ОШИБКА: ${e.message}`, 'error'); return null; });
-
-  if (!buyerJourneyResult) log('Stage 2A вернул null — продолжаем без Buyer Journey обогащения.', 'warn');
-  else log(`Stage 2A: Buyer Journey получен. Стадий: ${(buyerJourneyResult?.buyer_journey_stages || []).length}`, 'success');
-
-  await new Promise(r => setTimeout(r, 1500));
-
-  // ── Stage 2B: Content Format + AI Search ─────────────────────────
   const contentFormatContext = `\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 BUSINESS TYPE: commercial service
 STAGE 1 RESULT: ${stage1JsonFull}
-BUYER JOURNEY: ${JSON.stringify(buyerJourneyResult || {}).substring(0, 1000)}
 
 AI SEARCH OPPORTUNITY SCANNER CONTEXT:
 ${SYSTEM_PROMPTS_EXT.aiSearchOpportunity.substring(0, 2000)}
 
 OUTPUT: Return JSON with recommended_formats (array), format_priority_order (array), ai_search_opportunities (array). NO markdown.`;
 
+  const s2aSize = (SYSTEM_PROMPTS_EXT.buyerJourney + buyerJourneyContext).length;
   const s2bSize = (SYSTEM_PROMPTS_EXT.contentFormat + contentFormatContext).length;
-  log(`Stage 2B: Content Format + AI Search Agent — промпт ${s2bSize} символов (~${Math.round(s2bSize / 4)} токенов)...`, 'info');
+  log(`Stage 2A Buyer Journey — промпт ${s2aSize} символов (~${Math.round(s2aSize / 4)} токенов)`, 'info');
+  log(`Stage 2B Content Format — промпт ${s2bSize} символов (~${Math.round(s2bSize / 4)} токенов)`, 'info');
+  log('Stage 2A + 2B: Запуск параллельно (Promise.all)...', 'info');
 
-  const contentFormatResult = await callLLM(
-    'deepseek',
-    fillPromptVars(SYSTEM_PROMPTS_EXT.contentFormat, task),
-    contentFormatContext,
-    { retries: 3, taskId, stageName: 'stage2', callLabel: '2B Content Format', log, onTokens }
-  ).catch(e => { log(`Stage 2B ОШИБКА: ${e.message}`, 'error'); return null; });
+  const [buyerJourneyResult, contentFormatResult] = await Promise.all([
+    callLLM(
+      'deepseek',
+      fillPromptVars(SYSTEM_PROMPTS_EXT.buyerJourney, task),
+      buyerJourneyContext,
+      { retries: 3, taskId, stageName: 'stage2', callLabel: '2A Buyer Journey', temperature: 0.3, log, onTokens }
+    ).catch(e => { log(`Stage 2A ОШИБКА: ${e.message}`, 'error'); return null; }),
+
+    callLLM(
+      'deepseek',
+      fillPromptVars(SYSTEM_PROMPTS_EXT.contentFormat, task),
+      contentFormatContext,
+      { retries: 3, taskId, stageName: 'stage2', callLabel: '2B Content Format', temperature: 0.3, log, onTokens }
+    ).catch(e => { log(`Stage 2B ОШИБКА: ${e.message}`, 'error'); return null; }),
+  ]);
+
+  if (!buyerJourneyResult) log('Stage 2A вернул null — продолжаем без Buyer Journey обогащения.', 'warn');
+  else log(`Stage 2A: Buyer Journey получен. Стадий: ${(buyerJourneyResult?.buyer_journey_stages || []).length}`, 'success');
 
   if (!contentFormatResult) log('Stage 2B вернул null — продолжаем без Content Format обогащения.', 'warn');
   else log(`Stage 2B: Content Format получен. Форматов: ${(contentFormatResult?.recommended_formats || []).length}`, 'success');
-
-  await new Promise(r => setTimeout(r, 1500));
 
   // Обогащаем stage1Result данными из 2A и 2B
   const enrichedStage1 = { ...stage1Result };

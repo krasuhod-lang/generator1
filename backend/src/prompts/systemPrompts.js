@@ -7552,6 +7552,7 @@ INPUTS:
 - TARGET_SERVICE: {{TARGET_SERVICE}} (H1 / заголовок)
 - ORIGINAL_LSI_MUST: {{ORIGINAL_LSI_MUST}} (все LSI из всех блоков)
 - BRAND_FACTS: {{BRAND_FACTS}}
+- TFIDF_WEIGHTS: {{TFIDF_WEIGHTS}} (TF-IDF нормы: [{term, rangeMin, rangeMax}])
 
 JSON SCHEMA TO RETURN:
 {
@@ -7561,15 +7562,33 @@ JSON SCHEMA TO RETURN:
     "overall_verdict": "string (2 предложения)"
   },
   "tf_idf_and_spam_report": {
-    "keyword_stuffing_detected": true,
+    "keyword_stuffing_detected": false,
     "spam_issues": ["string"],
     "lsi_integration_quality": "Excellent | Moderate | Unnatural"
   },
-  "eeat_criteria_breakdown": [
-    {"id": 1, "name": "Expertise", "score": 0, "justification": "string"}
+  "eeat_criteria_breakdown": {
+    "experience": {"score": 0, "max": 2, "justification": "string — описание: реальный опыт, кейсы, примеры из практики"},
+    "expertise": {"score": 0, "max": 2, "justification": "string — описание: профессиональные знания, терминология, blockquote эксперта"},
+    "authoritativeness": {"score": 0, "max": 2, "justification": "string — описание: бренд, репутация, конкретные данные компании"},
+    "trustworthiness": {"score": 0, "max": 2, "justification": "string — описание: точность данных, прозрачность, отсутствие обмана"},
+    "content_quality": {"score": 0, "max": 2, "justification": "string — описание: структура, H3, списки, ответ на запрос"}
+  },
+  "tfidf_density_report": [
+    {"term": "string", "actual_count": 0, "range_min": 0, "range_max": 0, "status": "ok | overuse | underuse"}
   ],
   "critical_improvements_needed": ["string"]
 }
+
+SCORING RULES FOR eeat_criteria_breakdown:
+- Каждый критерий оценивается от 0 до 2 баллов (0/0.5/1/1.5/2).
+- page_quality_score = experience + expertise + authoritativeness + trustworthiness + content_quality (max 10).
+- Минимальный целевой page_quality_score: 8.0.
+- Для каждого критерия ОБЯЗАТЕЛЬНО заполни justification с конкретным объяснением оценки.
+
+RULES FOR tfidf_density_report:
+- Для КАЖДОГО термина из TFIDF_WEIGHTS: подсчитай actual_count (сколько раз встречается в тексте).
+- Определи status: "ok" если actual_count в [range_min, range_max], "overuse" если > range_max, "underuse" если < range_min.
+- Включи ВСЕ термины из TFIDF_WEIGHTS, не пропускай ни одного.
 
 NOW ANALYZE THE FINAL HTML AND RETURN JSON ONLY. CRITICAL: DO NOT USE MARKDOWN FORMATTING. OUTPUT RAW JSON STARTING WITH { AND ENDING WITH }.`
     };

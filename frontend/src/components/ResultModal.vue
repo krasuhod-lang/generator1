@@ -64,30 +64,66 @@ const totalCost = computed(() =>
   metrics.value?.total_cost_usd ?? (deepseekCost.value + geminiCost.value)
 );
 
-// E-E-A-T
-const EEAT_CRITERIA = [
-  { key: 'experience',         label: 'Experience'        },
-  { key: 'expertise',          label: 'Expertise'         },
-  { key: 'authoritativeness',  label: 'Authoritativeness' },
-  { key: 'trustworthiness',    label: 'Trustworthiness'   },
-  { key: 'content_depth',      label: 'Content Depth'     },
-  { key: 'factual_accuracy',   label: 'Factual Accuracy'  },
-  { key: 'source_quality',     label: 'Source Quality'    },
-  { key: 'user_intent',        label: 'User Intent Match' },
-  { key: 'readability',        label: 'Readability'       },
-  { key: 'uniqueness',         label: 'Uniqueness'        },
-  { key: 'freshness',          label: 'Freshness'         },
-  { key: 'safety',             label: 'Safety'            },
+// E-E-A-T — детальная разбивка из Stage 7 (новый формат: объект с ключами)
+const EEAT_CRITERIA_NEW = [
+  { key: 'experience',         label: 'Experience',         emoji: '🧑‍💼', maxScore: 2 },
+  { key: 'expertise',          label: 'Expertise',          emoji: '🎓', maxScore: 2 },
+  { key: 'authoritativeness',  label: 'Authoritativeness',  emoji: '🏛️', maxScore: 2 },
+  { key: 'trustworthiness',    label: 'Trustworthiness',    emoji: '🛡️', maxScore: 2 },
+  { key: 'content_quality',    label: 'Content Quality',    emoji: '✍️', maxScore: 2 },
 ];
 
-const eeatDetails = computed(() => {
-  const src = verdict.value?.global_audit?.eeat_breakdown || verdict.value?.eeat_breakdown || {};
-  return EEAT_CRITERIA.map(c => ({ label: c.label, score: src[c.key] ?? 0 }));
+const eeatBreakdown = computed(() => {
+  const src = verdict.value?.eeat_criteria_breakdown;
+  if (!src || typeof src !== 'object') return null;
+
+  // Новый формат — объект с experience/expertise/etc
+  if (src.experience !== undefined || src.expertise !== undefined) {
+    return EEAT_CRITERIA_NEW.map(c => ({
+      label:         c.label,
+      emoji:         c.emoji,
+      score:         parseFloat(src[c.key]?.score) || 0,
+      maxScore:      c.maxScore,
+      justification: src[c.key]?.justification || '',
+    }));
+  }
+
+  // Fallback: старый формат — массив [{id, name, score, justification}]
+  if (Array.isArray(src)) {
+    return src.map(c => ({
+      label:         c.name || '',
+      emoji:         '',
+      score:         parseFloat(c.score) || 0,
+      maxScore:      2,
+      justification: c.justification || '',
+    }));
+  }
+
+  return null;
+});
+
+const eeatTotal = computed(() => {
+  if (!eeatBreakdown.value) return 0;
+  return eeatBreakdown.value.reduce((sum, c) => sum + c.score, 0);
+});
+
+// TF-IDF density report (программные данные из Stage 7)
+const tfIdfDensity = computed(() => {
+  return verdict.value?.computed_tfidf_density || [];
+});
+
+const tfIdfOveruse = computed(() => tfIdfDensity.value.filter(t => t.status === 'overuse').length);
+const tfIdfUnderuse = computed(() => tfIdfDensity.value.filter(t => t.status === 'underuse').length);
+const tfIdfOk = computed(() => tfIdfDensity.value.filter(t => t.status === 'ok').length);
+
+// LSI coverage details (программные данные)
+const lsiDetails = computed(() => {
+  return verdict.value?.computed_lsi_coverage || null;
 });
 
 function eeatBarColor(score) {
-  if (score >= 8) return 'bg-green-500';
-  if (score >= 5) return 'bg-yellow-500';
+  if (score >= 1.5) return 'bg-green-500';
+  if (score >= 1) return 'bg-yellow-500';
   return 'bg-red-500';
 }
 
@@ -213,7 +249,7 @@ function closeModal() {
               <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <div class="card py-3 px-4">
                   <p class="text-xs text-gray-500 uppercase tracking-wide">LSI Coverage</p>
-                  <p class="text-2xl font-bold mt-1" :class="lsiCoverage >= 70 ? 'text-green-400' : lsiCoverage >= 50 ? 'text-yellow-400' : 'text-red-400'">
+                  <p class="text-2xl font-bold mt-1" :class="lsiCoverage >= 80 ? 'text-green-400' : lsiCoverage >= 60 ? 'text-yellow-400' : 'text-red-400'">
                     {{ lsiCoverage }}%
                   </p>
                 </div>
@@ -290,19 +326,80 @@ function closeModal() {
                       </p>
                     </div>
                   </div>
-                  <div>
-                    <p class="text-xs text-gray-400 mb-2">E-E-A-T</p>
-                    <div class="space-y-1.5">
-                      <div v-for="c in eeatDetails" :key="c.label" class="flex items-center gap-2">
-                        <span class="text-[10px] text-gray-500 w-28 truncate">{{ c.label }}</span>
-                        <div class="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                          <div :class="['h-full rounded-full', eeatBarColor(c.score)]"
-                               :style="{ width: (c.score / 10 * 100) + '%' }"/>
+
+                  <!-- E-E-A-T Breakdown (новый детальный формат) -->
+                  <div v-if="eeatBreakdown">
+                    <div class="flex items-center gap-2 mb-2">
+                      <p class="text-xs text-gray-400">E-E-A-T Breakdown</p>
+                      <span class="text-xs font-bold" :class="eeatTotal >= 8 ? 'text-green-400' : eeatTotal >= 6 ? 'text-yellow-400' : 'text-red-400'">
+                        {{ eeatTotal.toFixed(1) }}/10
+                      </span>
+                    </div>
+                    <div class="space-y-2">
+                      <div v-for="c in eeatBreakdown" :key="c.label" class="group">
+                        <div class="flex items-center gap-2">
+                          <span class="text-sm w-5">{{ c.emoji }}</span>
+                          <span class="text-[11px] text-gray-400 w-32 truncate">{{ c.label }}</span>
+                          <div class="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                            <div
+                              :class="['h-full rounded-full transition-all', c.score >= 1.5 ? 'bg-green-500' : c.score >= 1 ? 'bg-yellow-500' : 'bg-red-500']"
+                              :style="{ width: (c.score / c.maxScore * 100) + '%' }"
+                            />
+                          </div>
+                          <span class="text-[11px] font-mono text-gray-300 w-10 text-right">{{ c.score }}/{{ c.maxScore }}</span>
                         </div>
-                        <span class="text-[10px] font-mono text-gray-400 w-5 text-right">{{ c.score }}</span>
+                        <p v-if="c.justification" class="text-[10px] text-gray-600 ml-7 mt-0.5 leading-snug group-hover:text-gray-400 transition-colors">
+                          {{ c.justification }}
+                        </p>
                       </div>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <!-- ══ TF-IDF Density Report ═════════════════════════════════ -->
+              <div v-if="tfIdfDensity.length" class="card">
+                <div class="flex items-center gap-3 mb-3">
+                  <p class="text-xs text-gray-500 uppercase tracking-wide">TF-IDF Плотность</p>
+                  <span class="text-[10px] px-2 py-0.5 rounded-full bg-green-900 text-green-300 font-mono">✓ {{ tfIdfOk }}</span>
+                  <span v-if="tfIdfOveruse" class="text-[10px] px-2 py-0.5 rounded-full bg-red-900 text-red-300 font-mono">↑ {{ tfIdfOveruse }} overuse</span>
+                  <span v-if="tfIdfUnderuse" class="text-[10px] px-2 py-0.5 rounded-full bg-yellow-900 text-yellow-300 font-mono">↓ {{ tfIdfUnderuse }} underuse</span>
+                </div>
+                <div class="overflow-x-auto max-h-64 overflow-y-auto">
+                  <table class="w-full text-xs">
+                    <thead class="sticky top-0">
+                      <tr class="text-left text-gray-500 bg-gray-900">
+                        <th class="py-1.5 px-2">Термин</th>
+                        <th class="py-1.5 px-2 text-center">Факт</th>
+                        <th class="py-1.5 px-2 text-center">Норма</th>
+                        <th class="py-1.5 px-2 text-center">Статус</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="t in tfIdfDensity" :key="t.term" class="border-t border-gray-800 hover:bg-gray-800/50">
+                        <td class="py-1.5 px-2 font-mono text-gray-300">{{ t.term }}</td>
+                        <td class="py-1.5 px-2 text-center font-mono" :class="t.status === 'overuse' ? 'text-red-400 font-bold' : t.status === 'underuse' ? 'text-yellow-400' : 'text-gray-300'">
+                          {{ t.actual_count }}
+                        </td>
+                        <td class="py-1.5 px-2 text-center text-gray-500 font-mono">{{ t.range_min }}–{{ t.range_max }}</td>
+                        <td class="py-1.5 px-2 text-center">
+                          <span v-if="t.status === 'ok'" class="text-green-400">✓</span>
+                          <span v-else-if="t.status === 'overuse'" class="text-red-400 font-bold">↑</span>
+                          <span v-else class="text-yellow-400">↓</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- ══ LSI Coverage Details ══════════════════════════════════ -->
+              <div v-if="lsiDetails && lsiDetails.missing && lsiDetails.missing.length" class="card">
+                <p class="text-xs text-gray-500 uppercase tracking-wide mb-2">LSI — непокрытые термины ({{ lsiDetails.missing.length }})</p>
+                <div class="flex flex-wrap gap-1.5">
+                  <span v-for="term in lsiDetails.missing" :key="term"
+                    class="text-[10px] px-2 py-0.5 rounded-full bg-red-900/50 text-red-300 border border-red-800"
+                  >{{ term }}</span>
                 </div>
               </div>
 
@@ -393,7 +490,7 @@ function closeModal() {
                   >
                     <span class="text-xs text-gray-500 font-mono w-5 text-center">{{ (block.block_index ?? idx) + 1 }}</span>
                     <p class="text-sm text-gray-300 flex-1 truncate">{{ block.h2_title || '(без заголовка)' }}</p>
-                    <span class="text-xs font-mono" :class="block.lsi_coverage >= 70 ? 'text-green-400' : 'text-yellow-400'">
+                    <span class="text-xs font-mono" :class="block.lsi_coverage >= 80 ? 'text-green-400' : 'text-yellow-400'">
                       LSI {{ block.lsi_coverage ?? 0 }}%
                     </span>
                     <span class="text-xs font-mono" :class="block.pq_score >= 8 ? 'text-green-400' : 'text-yellow-400'">
