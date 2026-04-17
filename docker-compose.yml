@@ -68,24 +68,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
       # Redis — внутреннее имя сервиса Docker (переопределяет .env если там localhost)
       REDIS_URL: redis://redis:6379
-      # Прокси для Gemini API (из .env)
-      GEMINI_PROXY_URL: ${GEMINI_PROXY_URL:-}
-      GEMINI_PROXY_HOST: ${GEMINI_PROXY_HOST:-}
-      GEMINI_PROXY_PORT: ${GEMINI_PROXY_PORT:-}
-      GEMINI_PROXY_USER: ${GEMINI_PROXY_USER:-}
-      GEMINI_PROXY_PASS: ${GEMINI_PROXY_PASS:-}
-      GEMINI_PROXY_PROTO: ${GEMINI_PROXY_PROTO:-http}
-      # Запасной прокси
-      GEMINI_PROXY_URL_2: ${GEMINI_PROXY_URL_2:-}
-      GEMINI_PROXY_HOST_2: ${GEMINI_PROXY_HOST_2:-}
-      GEMINI_PROXY_PORT_2: ${GEMINI_PROXY_PORT_2:-}
-      GEMINI_PROXY_USER_2: ${GEMINI_PROXY_USER_2:-}
-      GEMINI_PROXY_PASS_2: ${GEMINI_PROXY_PASS_2:-}
-      GEMINI_PROXY_PROTO_2: ${GEMINI_PROXY_PROTO_2:-http}
-      # Дополнительные прокси (_3, _4, _5)
-      GEMINI_PROXY_URL_3: ${GEMINI_PROXY_URL_3:-}
-      GEMINI_PROXY_URL_4: ${GEMINI_PROXY_URL_4:-}
-      GEMINI_PROXY_URL_5: ${GEMINI_PROXY_URL_5:-}
+      # Прокси для Gemini API — загружаются из .env через env_file
+      # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
     ports:
       - "3000:3000"
     depends_on:
@@ -109,24 +93,8 @@ services:
       NODE_ENV: development
       DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
       REDIS_URL: redis://redis:6379
-      # Прокси для Gemini API (из .env)
-      GEMINI_PROXY_URL: ${GEMINI_PROXY_URL:-}
-      GEMINI_PROXY_HOST: ${GEMINI_PROXY_HOST:-}
-      GEMINI_PROXY_PORT: ${GEMINI_PROXY_PORT:-}
-      GEMINI_PROXY_USER: ${GEMINI_PROXY_USER:-}
-      GEMINI_PROXY_PASS: ${GEMINI_PROXY_PASS:-}
-      GEMINI_PROXY_PROTO: ${GEMINI_PROXY_PROTO:-http}
-      # Запасной прокси
-      GEMINI_PROXY_URL_2: ${GEMINI_PROXY_URL_2:-}
-      GEMINI_PROXY_HOST_2: ${GEMINI_PROXY_HOST_2:-}
-      GEMINI_PROXY_PORT_2: ${GEMINI_PROXY_PORT_2:-}
-      GEMINI_PROXY_USER_2: ${GEMINI_PROXY_USER_2:-}
-      GEMINI_PROXY_PASS_2: ${GEMINI_PROXY_PASS_2:-}
-      GEMINI_PROXY_PROTO_2: ${GEMINI_PROXY_PROTO_2:-http}
-      # Дополнительные прокси (_3, _4, _5)
-      GEMINI_PROXY_URL_3: ${GEMINI_PROXY_URL_3:-}
-      GEMINI_PROXY_URL_4: ${GEMINI_PROXY_URL_4:-}
-      GEMINI_PROXY_URL_5: ${GEMINI_PROXY_URL_5:-}
+      # Прокси для Gemini API — загружаются из .env через env_file
+      # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
     command: node src/queue/worker.js
     depends_on:
       postgres:
