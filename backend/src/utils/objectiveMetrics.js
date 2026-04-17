@@ -24,9 +24,13 @@ function stripTags(html) {
  * даже при высоком PQ-score от LLM.
  *
  * @param {string} html — HTML-контент блока
+ * @param {object} [opts] — дополнительные параметры
+ * @param {boolean} [opts.expertOpinionUsed=true] — было ли уже использовано экспертное мнение
+ * @param {string}  [opts.brandFacts=''] — факты о бренде для проверки упоминания
  * @returns {{ passed: boolean, issues: string[], metrics: object }}
  */
-function checkObjectiveMetrics(html) {
+function checkObjectiveMetrics(html, opts = {}) {
+  const { expertOpinionUsed = true, brandFacts = '' } = opts;
   const issues = [];
   const text = stripTags(html).replace(/\s+/g, ' ').trim();
 
@@ -80,6 +84,19 @@ function checkObjectiveMetrics(html) {
 
   if (paragraphCount < 2) {
     issues.push('Менее 2 абзацев — слишком мало структуры');
+  }
+
+  // Проверка наличия blockquote (если экспертное мнение ещё не использовано)
+  if (!expertOpinionUsed && !hasBlockquote) {
+    issues.push('Нет <blockquote> с экспертным мнением — необходимо для Expertise E-E-A-T');
+  }
+
+  // Проверка упоминания бренда из BRAND_FACTS
+  if (brandFacts && brandFacts !== 'Нет данных') {
+    const brandToken = brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3);
+    if (brandToken && !text.toLowerCase().includes(brandToken.toLowerCase())) {
+      issues.push(`Бренд "${brandToken}" не упомянут — необходимо для Authoritativeness E-E-A-T`);
+    }
   }
 
   return {

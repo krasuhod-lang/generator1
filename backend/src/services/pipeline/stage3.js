@@ -3,6 +3,8 @@
 const { callLLM }           = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }    = require('../../prompts/systemPrompts');
 const db                    = require('../../config/db');
+const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
+const { checkAntiWater }    = require('./stage5');
 
 /**
  * Веса типов блоков для пропорционального распределения символов.
@@ -126,11 +128,42 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       'gemini',
       '',
       s3prompt,
-      { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}"`, temperature: 0.6, log, onTokens }
+      { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}"`, temperature: 0.45, log, onTokens }
     ).catch(e => {
       log(`Stage 3 блок ${i + 1} ОШИБКА: ${e.message}`, 'error');
       return null;
     });
+
+    // Structural pre-check: fast retry if basic E-E-A-T structure is missing
+    if (stage3Result?.html_content) {
+      const preCheck = checkObjectiveMetrics(stage3Result.html_content);
+      const waterPhrases = checkAntiWater(stage3Result.html_content);
+      const needsBlockquote = !expertOpinionUsed && !/<blockquote[\s>]/i.test(stage3Result.html_content);
+      const brandToken = brandFacts !== 'Нет данных' ? brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3) : null;
+      const hasBrand = !brandToken || stage3Result.html_content.toLowerCase().includes(brandToken.toLowerCase());
+
+      if (!preCheck.passed || waterPhrases.length > 0 || needsBlockquote || !hasBrand) {
+        const issues = [
+          ...preCheck.issues,
+          ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
+          ...(needsBlockquote ? ['Нет <blockquote> с экспертным мнением'] : []),
+          ...(!hasBrand ? [`Бренд "${brandToken}" не упомянут`] : []),
+        ];
+        log(`Stage 3 блок ${i + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
+
+        const retryResult = await callLLM(
+          'gemini',
+          '',
+          s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL issues above. Include H3 subheadings, lists, blockquote with expert opinion, brand mention.`,
+          { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
+        ).catch(() => null);
+
+        if (retryResult?.html_content) {
+          log(`Stage 3 блок ${i + 1}: retry успешен (${retryResult.html_content.length} символов)`, 'success');
+          stage3Result = retryResult;
+        }
+      }
+    }
 
     // Fallback для FAQ-блоков
     if ((!stage3Result || !stage3Result.html_content) && block.type === 'faq') {
@@ -263,11 +296,42 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     'gemini',
     '',
     s3prompt,
-    { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}"`, temperature: 0.6, log, onTokens }
+    { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}"`, temperature: 0.45, log, onTokens }
   ).catch(e => {
     log(`Stage 3 блок ${blockIndex + 1} ОШИБКА: ${e.message}`, 'error');
     return null;
   });
+
+  // Structural pre-check: fast retry if basic E-E-A-T structure is missing
+  if (stage3Result?.html_content) {
+    const preCheck = checkObjectiveMetrics(stage3Result.html_content);
+    const waterPhrases = checkAntiWater(stage3Result.html_content);
+    const needsBlockquote = !expertOpinionUsed && !/<blockquote[\s>]/i.test(stage3Result.html_content);
+    const brandToken = brandFacts !== 'Нет данных' ? brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3) : null;
+    const hasBrand = !brandToken || stage3Result.html_content.toLowerCase().includes(brandToken.toLowerCase());
+
+    if (!preCheck.passed || waterPhrases.length > 0 || needsBlockquote || !hasBrand) {
+      const issues = [
+        ...preCheck.issues,
+        ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
+        ...(needsBlockquote ? ['Нет <blockquote> с экспертным мнением'] : []),
+        ...(!hasBrand ? [`Бренд "${brandToken}" не упомянут`] : []),
+      ];
+      log(`Stage 3 блок ${blockIndex + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
+
+      const retryResult = await callLLM(
+        'gemini',
+        '',
+        s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL issues above. Include H3 subheadings, lists, blockquote with expert opinion, brand mention.`,
+        { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
+      ).catch(() => null);
+
+      if (retryResult?.html_content) {
+        log(`Stage 3 блок ${blockIndex + 1}: retry успешен (${retryResult.html_content.length} символов)`, 'success');
+        stage3Result = retryResult;
+      }
+    }
+  }
 
   // Fallback для FAQ-блоков
   if ((!stage3Result || !stage3Result.html_content) && block.type === 'faq') {
