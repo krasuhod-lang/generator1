@@ -14,21 +14,82 @@ const GEMINI_BASE_URL =
   (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/models').replace(/\/$/, '');
 
 /**
+ * Нормализует proxy URL из разных форматов провайдеров.
+ *
+ * Поддерживаемые входные форматы:
+ *   - http://user:pass@host:port       — стандартный URL (без изменений)
+ *   - http://user:pass:host:port        — формат «провайдера» (авто-конвертация)
+ *   - user:pass:host:port               — без протокола (авто-конвертация, добавляется http://)
+ *   - host:port:user:pass               — обратный формат (авто-конвертация)
+ *
+ * @param {string} raw — сырая строка прокси
+ * @returns {string} — нормализованный URL
+ */
+function normalizeProxyUrl(raw) {
+  if (!raw) return '';
+  raw = raw.trim();
+  if (!raw) return '';
+
+  // Если уже содержит @ — это корректный URL
+  if (raw.includes('@')) return raw;
+
+  // Формат с протоколом: http://user:pass:host:port
+  const withProto = raw.match(/^(https?:\/\/)([^:]+):([^:]+):([^:]+):(\d+)$/);
+  if (withProto) {
+    const [, proto, user, pass, host, port] = withProto;
+    const normalized = `${proto}${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+    console.log(`[gemini] Нормализация прокси: ${proto}${user}:***@${host}:${port}`);
+    return normalized;
+  }
+
+  // Формат без протокола: 4 части через двоеточие
+  // user:pass:host:port  ИЛИ  host:port:user:pass
+  const noParts = raw.match(/^([^:]+):([^:]+):([^:]+):([^:]+)$/);
+  if (noParts) {
+    const [, p1, p2, p3, p4] = noParts;
+    // IP-адрес: 4 октета 0-255, разделённых точками
+    const isIP = (s) => /^(\d{1,3}\.){3}\d{1,3}$/.test(s) && s.split('.').every(o => +o >= 0 && +o <= 255);
+    // Hostname: буквы, цифры, точки, дефисы; минимум одна точка и хотя бы одна буква
+    const isHostname = (s) => /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(s) && s.includes('.') && /[a-zA-Z]/.test(s);
+    const isHost = (s) => isIP(s) || isHostname(s);
+    const isPort = (s) => /^\d+$/.test(s);
+
+    let user, pass, host, port;
+    if (isHost(p3) && isPort(p4)) {
+      // user:pass:host:port
+      [user, pass, host, port] = [p1, p2, p3, p4];
+    } else if (isHost(p1) && isPort(p2)) {
+      // host:port:user:pass
+      [host, port, user, pass] = [p1, p2, p3, p4];
+    } else {
+      // Не удалось распознать формат — вернём как есть
+      return raw;
+    }
+    const normalized = `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+    console.log(`[gemini] Нормализация прокси: http://${user}:***@${host}:${port}`);
+    return normalized;
+  }
+
+  return raw;
+}
+
+/**
  * Собирает proxy URL из переменных окружения.
  *
  * @param {string} [suffix='']  — суффикс для переменных ('' для основного, '_2' для запасного)
  *
  * Приоритет:
  *   1. GEMINI_PROXY_URL[suffix] — полная строка http://login:password@ip:port
+ *      Также поддерживается формат провайдера: login:password:ip:port
  *   2. GEMINI_PROXY_HOST[suffix] + GEMINI_PROXY_PORT[suffix] (+ опционально USER / PASS)
  *   3. (только для основного) HTTPS_PROXY / https_proxy — системная переменная
  *
  * Возвращает готовую URL-строку или пустую строку.
  */
 function resolveProxyUrl(suffix = '') {
-  // 1. Полная строка
+  // 1. Полная строка (с автонормализацией формата)
   const full = process.env[`GEMINI_PROXY_URL${suffix}`] || '';
-  if (full) return full;
+  if (full) return normalizeProxyUrl(full);
 
   // 2. Компоненты
   const host = process.env[`GEMINI_PROXY_HOST${suffix}`] || '';
