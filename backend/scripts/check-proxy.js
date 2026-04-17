@@ -112,6 +112,16 @@ function normalizeProxyUrl(raw) {
   return raw;
 }
 
+// ── Встроенные константы (используются если env-переменные не заданы) ──
+const DEFAULT_PROXY = {
+  host:  '155.212.59.188',
+  port:  '64464',
+  user:  '76MkBTXZ',
+  pass:  '3ukb66G1',
+  proto: 'http',
+};
+const DEFAULT_GEMINI_API_KEY = 'AIzaSyB7crSRTwPocoY31vordEKmQFvEsgD0tLQ';
+
 function resolveProxyUrl(suffix = '') {
   const full = process.env[`GEMINI_PROXY_URL${suffix}`] || '';
   if (full) return normalizeProxyUrl(full);
@@ -126,7 +136,13 @@ function resolveProxyUrl(suffix = '') {
     }
     return `${proto}://${host}:${port}`;
   }
-  if (!suffix) return process.env.HTTPS_PROXY || process.env.https_proxy || '';
+  if (!suffix) {
+    const sys = process.env.HTTPS_PROXY || process.env.https_proxy || '';
+    if (sys) return sys;
+    // Встроенный fallback
+    console.log('   ℹ  Env-переменные прокси не заданы — используем встроенный прокси');
+    return `${DEFAULT_PROXY.proto}://${encodeURIComponent(DEFAULT_PROXY.user)}:${encodeURIComponent(DEFAULT_PROXY.pass)}@${DEFAULT_PROXY.host}:${DEFAULT_PROXY.port}`;
+  }
   return '';
 }
 
@@ -210,11 +226,12 @@ async function testProxy(label, proxyUrl, targetUrl, displayUrl) {
     // Тест 1: httpbin (проверка базовой связности через HTTP)
     await testProxy(suffix, url, 'https://httpbin.org/ip');
 
-    // Тест 2: Gemini API (список моделей — если есть API key)
-    if (process.env.GEMINI_API_KEY) {
+    // Тест 2: Gemini API (список моделей)
+    const geminiApiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+    if (geminiApiKey) {
       const geminiBase = 'https://generativelanguage.googleapis.com/v1beta/models';
       // API key добавляется в URL только для HTTP-запроса, не для логирования
-      await testProxy(suffix, url, geminiBase + '?key=' + process.env.GEMINI_API_KEY, geminiBase + '?key=***');
+      await testProxy(suffix, url, geminiBase + '?key=' + geminiApiKey, geminiBase + '?key=***');
     } else {
       console.log(`   ⚠  [${suffix}] → Gemini API — пропускаем (GEMINI_API_KEY не задан)`);
     }
