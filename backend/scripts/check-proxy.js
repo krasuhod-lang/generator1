@@ -64,18 +64,16 @@ for (const sfx of suffixes) {
 }
 
 if (!anyProxyFound) {
-  console.log('   ❌ Ни одна переменная GEMINI_PROXY_* не задана!\n');
-  console.log('   Решение: добавьте в .env файл (в корне проекта):\n');
+  console.log('   ⚠  Переменные GEMINI_PROXY_* не заданы в окружении.');
+  console.log('   ℹ  Будет использован встроенный прокси (fallback).\n');
+  console.log('   Чтобы задать свой прокси, добавьте в .env файл:\n');
   console.log('     # Вариант 1 — полная строка:');
   console.log('     GEMINI_PROXY_URL="http://login:password@ip:port"\n');
   console.log('     # Вариант 2 — компоненты (безопаснее):');
-  console.log('     GEMINI_PROXY_HOST=155.212.59.188');
-  console.log('     GEMINI_PROXY_PORT=64464');
+  console.log('     GEMINI_PROXY_HOST=ip');
+  console.log('     GEMINI_PROXY_PORT=port');
   console.log('     GEMINI_PROXY_USER=your_login');
   console.log('     GEMINI_PROXY_PASS=your_password\n');
-  console.log('   Затем пересоздайте контейнеры:');
-  console.log('     docker compose down && docker compose up -d --build\n');
-  process.exit(1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
