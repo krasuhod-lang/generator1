@@ -8,6 +8,7 @@ const { checkAntiWater }    = require('./stage5');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
+ * Делегирует все проверки в checkObjectiveMetrics() + checkAntiWater().
  * Возвращает массив проблем (пустой = всё ок).
  *
  * @param {string}  html              — HTML-контент блока
@@ -16,19 +17,12 @@ const { checkAntiWater }    = require('./stage5');
  * @returns {string[]} — массив обнаруженных проблем
  */
 function structuralPreCheck(html, expertOpinionUsed, brandFacts) {
-  const preCheck = checkObjectiveMetrics(html);
+  const preCheck = checkObjectiveMetrics(html, { expertOpinionUsed, brandFacts });
   const waterPhrases = checkAntiWater(html);
-  const needsBlockquote = !expertOpinionUsed && !/<blockquote[\s>]/i.test(html);
-  const brandToken = (typeof brandFacts === 'string' && brandFacts !== 'Нет данных')
-    ? brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3)
-    : null;
-  const hasBrand = !brandToken || html.toLowerCase().includes(brandToken.toLowerCase());
 
   return [
     ...preCheck.issues,
     ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
-    ...(needsBlockquote ? ['Нет <blockquote> с экспертным мнением'] : []),
-    ...(!hasBrand ? [`Бренд "${brandToken}" не упомянут`] : []),
   ];
 }
 
@@ -170,7 +164,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
         const retryResult = await callLLM(
           'gemini',
           '',
-          s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL issues above. Include H3 subheadings, lists, blockquote with expert opinion, brand mention.`,
+          s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
           { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
         ).catch(() => null);
 
@@ -328,7 +322,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
       const retryResult = await callLLM(
         'gemini',
         '',
-        s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL issues above. Include H3 subheadings, lists, blockquote with expert opinion, brand mention.`,
+        s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
         { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
       ).catch(() => null);
 
