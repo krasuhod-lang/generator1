@@ -129,8 +129,8 @@ function handleSSEMessage(msg) {
     case 'progress':
       if (msg.percent !== undefined) progress.value = msg.percent;
       if (msg.stage   !== undefined) stage.value    = msg.stage;
-      // Запускаем таймер при первом прогрессе (stage0)
-      if (!generationStartTime.value && msg.percent > 0) {
+      // Запускаем таймер при первом прогрессе
+      if (!generationStartTime.value) {
         startGenerationTimer();
       }
       break;
