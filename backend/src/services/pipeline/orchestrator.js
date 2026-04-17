@@ -291,9 +291,12 @@ async function runPipeline(task, ctx) {
     return currentHTML;
   }
 
-  // ── Pipeline Interleaving Loop ────────────────────────────────────
-  // Стратегия: генерируем блок N, параллельно аудируем блок N-1
-  let pendingAudit = null; // Promise аудита предыдущего блока
+  // ── Pipeline: генерация последовательно, аудиты параллельно ──────
+  // Стратегия: блоки генерируются последовательно (каждому нужен previousContext),
+  // но аудит каждого блока запускается СРАЗУ после его генерации и работает
+  // параллельно с генерацией следующих блоков и аудитами предыдущих.
+  // Stage 3 (Gemini) и Stage 4-6 (DeepSeek) — разные API, не конкурируют.
+  const auditPromises = []; // промисы аудита всех блоков
 
   for (let i = 0; i < taxonomy.length; i++) {
     const block = taxonomy[i];
@@ -301,57 +304,37 @@ async function runPipeline(task, ctx) {
     const blockMinChars    = Math.round(minChars    * (blockWeights[i] / weightSum)) || 600;
     const blockMaxChars    = Math.round(maxChars    * (blockWeights[i] / weightSum)) || 2500;
 
-    // Запускаем генерацию текущего блока (Gemini)
-    const genPromise = generateSingleBlock(task, stageCtx, block, i, taxonomy.length, {
+    // Генерация текущего блока (Gemini) — await, т.к. нужен previousContext для следующего
+    const genResult = await generateSingleBlock(task, stageCtx, block, i, taxonomy.length, {
       targetService, region, brandFacts, nGrams, tfIdfData, authorName,
       s3stage1Json, s3stage2Json, stage0Signals, competitorsData, competitorFactsStr,
       blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
       expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
     });
 
-    // Параллельно ожидаем аудит предыдущего блока (DeepSeek) + генерацию текущего (Gemini)
-    // Разные API → нет конфликта rate limits
-    if (pendingAudit) {
-      const [genResult, auditedHTML] = await Promise.all([genPromise, pendingAudit]);
-
-      // Обработка результата аудита предыдущего блока
-      if (auditedHTML) finalBlocks.push(auditedHTML);
-
-      // Обработка результата генерации текущего блока
-      if (genResult.html) {
-        expertOpinionUsed = genResult.expertOpinionUsed;
-        previousContext   = genResult.previousContext;
-        generatedH2s.push(block.h2);
-      }
-
-      // Запускаем аудит текущего блока (будет ожидаться на следующей итерации или после цикла)
-      pendingAudit = genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block)
-        : Promise.resolve(null);
-    } else {
-      // Первый блок — просто генерируем, аудит запустим в следующей итерации
-      const genResult = await genPromise;
-
-      if (genResult.html) {
-        expertOpinionUsed = genResult.expertOpinionUsed;
-        previousContext   = genResult.previousContext;
-        generatedH2s.push(block.h2);
-      }
-
-      pendingAudit = genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block)
-        : Promise.resolve(null);
+    // Обновляем контекст для генерации следующего блока
+    if (genResult.html) {
+      expertOpinionUsed = genResult.expertOpinionUsed;
+      previousContext   = genResult.previousContext;
+      generatedH2s.push(block.h2);
     }
+
+    // Запускаем аудит сразу (Stage 4→5→6, DeepSeek) — НЕ ждём предыдущие аудиты
+    auditPromises.push(
+      genResult.html
+        ? auditAndRefineBlock(i, genResult.html, block)
+        : Promise.resolve(null)
+    );
 
     // Прогресс: Stage 3-6 занимают ~35-88% в пайплайне
     const pct = 35 + Math.round(((i + 1) / taxonomy.length) * 53);
     progress(pct, 'stage3-6');
   }
 
-  // Ожидаем завершение аудита последнего блока
-  if (pendingAudit) {
-    const lastAuditedHTML = await pendingAudit;
-    if (lastAuditedHTML) finalBlocks.push(lastAuditedHTML);
+  // Ожидаем завершение всех аудитов (результаты в порядке блоков)
+  const auditResults = await Promise.all(auditPromises);
+  for (const html of auditResults) {
+    if (html) finalBlocks.push(html);
   }
 
   if (!finalBlocks.length) {
