@@ -10,7 +10,6 @@
 const {
   Document, Packer, Paragraph, TextRun,
   HeadingLevel, AlignmentType, BorderStyle,
-  Table, TableRow, TableCell, WidthType,
 } = require('docx');
 
 /**

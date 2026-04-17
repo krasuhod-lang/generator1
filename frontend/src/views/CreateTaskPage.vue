@@ -136,9 +136,8 @@ async function handleLLMTzUpload(e) {
     for (const [extKey, formKey] of Object.entries(LLM_FIELD_MAP)) {
       const val = ext[extKey];
       if (val === null || val === undefined || val === '') continue;
-      // Массивы → строка: для описательных полей через ". ", для остальных через "\n"
+      // Массивы → строка: для описательных полей через bullet points, для остальных через "\n"
       const DESCRIPTIVE_FIELDS = ['constraints', 'priority_page_types', 'niche_features', 'audience_segments'];
-      const separator = DESCRIPTIVE_FIELDS.includes(extKey) ? '\n• ' : '\n';
       const strVal = Array.isArray(val)
         ? (DESCRIPTIVE_FIELDS.includes(extKey) ? '• ' + val.join('\n• ') : val.join('\n'))
         : String(val);
