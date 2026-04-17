@@ -1,6 +1,23 @@
 'use strict';
 
 /**
+ * stripTags — многопроходная очистка HTML-тегов.
+ * Используется только для подсчёта метрик (не для вывода / санитизации пользовательского контента).
+ * @param {string} html
+ * @returns {string}
+ */
+function stripTags(html) {
+  let result = html;
+  // Multi-pass to handle nested/malformed tags
+  let prev = '';
+  while (prev !== result) {
+    prev = result;
+    result = result.replace(/<[^>]+>/g, ' ');
+  }
+  return result;
+}
+
+/**
  * objectiveMetrics — программные (не LLM) метрики качества HTML-блока.
  * Используются в orchestrator.js для дополнительной проверки:
  * если объективные метрики не проходят — Stage 5 рефайн запускается
@@ -11,7 +28,7 @@
  */
 function checkObjectiveMetrics(html) {
   const issues = [];
-  const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const text = stripTags(html).replace(/\s+/g, ' ').trim();
 
   // Структурные проверки
   const h3Count       = (html.match(/<h3[\s>]/gi) || []).length;
@@ -28,7 +45,7 @@ function checkObjectiveMetrics(html) {
   const paragraphMatches = html.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
   let longParagraphs = 0;
   for (const p of paragraphMatches) {
-    const pText = p.replace(/<[^>]+>/g, '').trim();
+    const pText = stripTags(p).trim();
     if (pText.length > 500) longParagraphs++;
   }
 
