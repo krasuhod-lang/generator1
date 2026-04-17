@@ -38,6 +38,34 @@ const totalTokens = computed(() =>
 // ── Блоки H2 ───────────────────────────────────────────────────────────────
 const blocks = reactive({});  // { [idx]: { h2, status, lsi, pq } }
 
+// ── Таймер генерации ───────────────────────────────────────────────────────
+const generationStartTime = ref(null);
+const generationElapsed   = ref(0);    // секунды
+const generationTimeFinal = ref(null); // финальное время из pipeline_done
+let   timerInterval       = null;
+
+function startGenerationTimer() {
+  generationStartTime.value = Date.now();
+  timerInterval = setInterval(() => {
+    generationElapsed.value = Math.floor((Date.now() - generationStartTime.value) / 1000);
+  }, 1000);
+}
+
+function stopGenerationTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+}
+
+const generationTimeFormatted = computed(() => {
+  const sec = generationTimeFinal.value ?? generationElapsed.value;
+  if (!sec && !generationStartTime.value) return null;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m}м ${s}с` : `${s}с`;
+});
+
 // ── SSE ────────────────────────────────────────────────────────────────────
 let es              = null;
 let reconnectTimer  = null;
@@ -101,6 +129,10 @@ function handleSSEMessage(msg) {
     case 'progress':
       if (msg.percent !== undefined) progress.value = msg.percent;
       if (msg.stage   !== undefined) stage.value    = msg.stage;
+      // Запускаем таймер при первом прогрессе
+      if (!generationStartTime.value) {
+        startGenerationTimer();
+      }
       break;
 
     case 'taxonomy':
@@ -145,6 +177,10 @@ function handleSSEMessage(msg) {
       done.value     = true;
       progress.value = 100;
       stage.value    = 'done';
+      stopGenerationTimer();
+      if (msg.generationTimeSec) {
+        generationTimeFinal.value = msg.generationTimeSec;
+      }
       closeSSE();
       pushLog({ ts: ts(), msg: '✓ Генерация завершена!', level: 'success' });
       // Показываем модалку результатов через короткую задержку
@@ -153,6 +189,7 @@ function handleSSEMessage(msg) {
 
     case 'error':
       failed.value = true;
+      stopGenerationTimer();
       pushLog({ ts: ts(), msg: `КРИТИЧЕСКАЯ ОШИБКА: ${msg.msg || 'неизвестная ошибка'}`, level: 'error' });
       closeSSE();
       break;
@@ -286,6 +323,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   closeSSE();
+  stopGenerationTimer();
 });
 </script>
 
@@ -326,6 +364,11 @@ onUnmounted(() => {
           <!-- Прогресс блоков -->
           <p v-if="blocksTotal > 0" class="text-xs text-gray-600 mt-2">
             Блоков: {{ blocksDone }} / {{ blocksTotal }}
+          </p>
+          <!-- Время генерации -->
+          <p v-if="generationTimeFormatted" class="text-xs mt-2 flex items-center gap-1.5">
+            <span class="text-gray-500">⏱ Время:</span>
+            <span :class="done ? 'text-green-400' : 'text-indigo-400 animate-pulse'">{{ generationTimeFormatted }}</span>
           </p>
         </div>
 

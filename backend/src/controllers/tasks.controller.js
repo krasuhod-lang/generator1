@@ -415,6 +415,7 @@ async function getResult(req, res, next) {
         title:         task.title,
         status:        task.status,
         created_at:    task.created_at,
+        started_at:    task.started_at,
         completed_at:  task.completed_at,
         input_target_service: task.input_target_service,
         stage7_result: task.stage7_result,

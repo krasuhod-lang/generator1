@@ -4,7 +4,7 @@ const { callDeepSeek } = require('./deepseek.adapter');
 const { callGemini }   = require('./gemini.adapter');
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
-const { calcCost }     = require('../metrics/priceCalculator');
+const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
 
 /**
  * Нормализует ключи JSON-ответа LLM для обратной совместимости
@@ -155,7 +155,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
   const callFn    = adapter === 'gemini' ? callGemini : callDeepSeek;
   const startedAt = new Date();
-  const promptSize = (system + prompt).length;
+  const promptSize = estimateTokens(system + prompt);
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
