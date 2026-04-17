@@ -381,6 +381,8 @@ async function runPipeline(task, ctx) {
     globalEEATScore:    s7Result.globalEEATScore      || 0,
     bm25:               s7Result.bm25                 || {},
     finalHTMLLength:    (s7Result.finalHTML || '').length,
+    eeatBreakdown:      s7Result.eeatBreakdown        || null,
+    tfIdfDensity:       s7Result.tfIdfDensity          || [],
   });
 
   log(
