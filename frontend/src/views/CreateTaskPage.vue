@@ -2,6 +2,7 @@
 import { ref, reactive, onMounted, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
+import AppLayout from '../components/AppLayout.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -95,6 +96,7 @@ const LLM_FIELD_MAP = {
   constraints:      'input_project_limits',
   priority_page_types: 'input_page_priorities',
   niche_features:   'input_niche_features',
+  audience_segments: 'input_target_audience', // дополняет аудиторию
 };
 
 // Допустимые значения для select-полей (должны совпадать с <option value="...">)
@@ -134,11 +136,25 @@ async function handleLLMTzUpload(e) {
     for (const [extKey, formKey] of Object.entries(LLM_FIELD_MAP)) {
       const val = ext[extKey];
       if (val === null || val === undefined || val === '') continue;
-      // Массивы → строка через новую строку
-      const strVal = Array.isArray(val) ? val.join('\n') : String(val);
+      // Массивы → строка: для описательных полей через ". ", для остальных через "\n"
+      const DESCRIPTIVE_FIELDS = ['constraints', 'priority_page_types', 'niche_features', 'audience_segments'];
+      const separator = DESCRIPTIVE_FIELDS.includes(extKey) ? '\n• ' : '\n';
+      const strVal = Array.isArray(val)
+        ? (DESCRIPTIVE_FIELDS.includes(extKey) ? '• ' + val.join('\n• ') : val.join('\n'))
+        : String(val);
       if (!strVal.trim()) continue;
       // Не перезаписываем уже заполненное поле (кроме явного Intent из keyword)
       if (extKey === 'niche' && form[formKey]?.trim()) continue;
+      // audience_segments дополняет target_audience, а не перезаписывает
+      if (extKey === 'audience_segments') {
+        if (form[formKey]?.trim()) {
+          form[formKey] = form[formKey].trim() + '\n\nСегменты аудитории:\n' + strVal;
+        } else {
+          form[formKey] = 'Сегменты аудитории:\n' + strVal;
+        }
+        filled++;
+        continue;
+      }
       // Нормализуем значения для select-полей (регистронезависимое совпадение)
       const normalized = normalizeSelectValue(formKey, strVal);
       if (normalized === '' && SELECT_OPTIONS[formKey]) continue; // нет совпадения — пропускаем select
@@ -318,19 +334,29 @@ const canStart = computed(() =>
   form.input_region.trim() &&
   lsiCount.value >= 5
 );
+
+// Скачивание примера ТЗ
+function downloadExampleTZ() {
+  const link = document.createElement('a');
+  link.href = '/api/tasks/example-tz';
+  link.download = 'Пример_ТЗ_SEO_Genius.docx';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-950">
-    <!-- Шапка -->
-    <header class="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center gap-4">
+  <AppLayout>
+    <!-- Подзаголовок -->
+    <div class="border-b border-gray-800 bg-gray-900/30 px-6 py-3 flex items-center gap-4">
       <RouterLink to="/dashboard" class="btn-ghost text-xs">
         ← Назад
       </RouterLink>
       <span class="text-white font-semibold">{{ isEdit ? 'Редактировать задачу' : 'Новая задача' }}</span>
-    </header>
+    </div>
 
-    <main class="max-w-3xl mx-auto px-6 py-8">
+    <div class="max-w-3xl mx-auto px-6 py-8">
       <div v-if="loading" class="text-center py-20 text-gray-500">Загрузка...</div>
 
       <div v-else class="space-y-3">
@@ -405,7 +431,8 @@ const canStart = computed(() =>
             </div>
             <div>
               <label class="label">Целевая аудитория</label>
-              <input v-model="form.input_target_audience" type="text" class="input" placeholder="Малый бизнес, предприниматели" />
+              <textarea v-model="form.input_target_audience" class="textarea h-24"
+                placeholder="Например: Физические лица 25-45 лет со средним доходом, ищущие быстрое кредитование без визита в банк. Основные боли: сложная процедура одобрения, высокие ставки, необходимость собирать документы." />
             </div>
             <div>
               <label class="label">Приоритетная бизнес-цель</label>
@@ -439,15 +466,18 @@ const canStart = computed(() =>
             </div>
             <div>
               <label class="label">Ограничения проекта</label>
-              <input v-model="form.input_project_limits" type="text" class="input" placeholder="нет сильного бренда, мало ссылок" />
+              <textarea v-model="form.input_project_limits" class="textarea h-24"
+                placeholder="Например: Нет штатных экспертов для E-E-A-T контента. Слабый ссылочный профиль — менее 50 referring domains. Бюджет на контент ограничен." />
             </div>
             <div>
               <label class="label">Приоритетные типы страниц</label>
-              <input v-model="form.input_page_priorities" type="text" class="input" placeholder="блог, категории, услуги" />
+              <textarea v-model="form.input_page_priorities" class="textarea h-20"
+                placeholder="Например: Блог с экспертными статьями для привлечения информационного трафика. Страницы услуг с коммерческим интентом." />
             </div>
             <div>
               <label class="label">Особенности ниши</label>
-              <input v-model="form.input_niche_features" type="text" class="input" placeholder="YMYL, local-heavy" />
+              <textarea v-model="form.input_niche_features" class="textarea h-24"
+                placeholder="Например: YMYL-ниша — Google требует повышенного уровня экспертизы. Сильная локальная привязка — пользователи ищут услуги в конкретном городе." />
             </div>
           </div>
         </div>
@@ -551,6 +581,21 @@ const canStart = computed(() =>
           </button>
           <div v-show="openSections.s5" class="px-5 pb-5 border-t border-gray-800">
             <div class="pt-4 space-y-6">
+
+              <!-- ── Кнопка «Скачать пример задания» ─────────────────────────── -->
+              <div class="flex items-center gap-3 p-4 bg-gray-800/50 border border-gray-700 rounded-lg">
+                <div class="text-2xl">📋</div>
+                <div class="flex-1">
+                  <p class="text-sm text-white font-medium">Не знаете какой формат загружать?</p>
+                  <p class="text-xs text-gray-400 mt-0.5">Скачайте пример ТЗ с правильной структурой полей и образцами данных</p>
+                </div>
+                <button
+                  @click="downloadExampleTZ"
+                  class="btn-secondary text-xs whitespace-nowrap"
+                >
+                  📥 Скачать пример ТЗ
+                </button>
+              </div>
 
               <!-- ── LLM-анализ ТЗ (Pre-Stage -1) ───────────────────────────── -->
               <div>
@@ -660,6 +705,6 @@ const canStart = computed(() =>
           </span>
         </div>
       </div>
-    </main>
-  </div>
+    </div>
+  </AppLayout>
 </template>
