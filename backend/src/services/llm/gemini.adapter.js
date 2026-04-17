@@ -86,12 +86,21 @@ function normalizeProxyUrl(raw) {
  *
  * Возвращает готовую URL-строку или пустую строку.
  */
+// ── Встроенные прокси-константы (используются если env-переменные не заданы) ──
+const DEFAULT_PROXY = {
+  host:  '155.212.59.188',
+  port:  '64464',
+  user:  '76MkBTXZ',
+  pass:  '3ukb66G1',
+  proto: 'http',
+};
+
 function resolveProxyUrl(suffix = '') {
   // 1. Полная строка (с автонормализацией формата)
   const full = process.env[`GEMINI_PROXY_URL${suffix}`] || '';
   if (full) return normalizeProxyUrl(full);
 
-  // 2. Компоненты
+  // 2. Компоненты из env
   const host = process.env[`GEMINI_PROXY_HOST${suffix}`] || '';
   const port = process.env[`GEMINI_PROXY_PORT${suffix}`] || '';
   if (host && port) {
@@ -107,7 +116,14 @@ function resolveProxyUrl(suffix = '') {
 
   // 3. Системная (только для основного прокси)
   if (!suffix) {
-    return process.env.HTTPS_PROXY || process.env.https_proxy || '';
+    const sys = process.env.HTTPS_PROXY || process.env.https_proxy || '';
+    if (sys) return sys;
+  }
+
+  // 4. Встроенный прокси-fallback (только для основного, без суффикса)
+  if (!suffix) {
+    console.log('[gemini] Env-переменные прокси не заданы — используем встроенный прокси');
+    return `${DEFAULT_PROXY.proto}://${encodeURIComponent(DEFAULT_PROXY.user)}:${encodeURIComponent(DEFAULT_PROXY.pass)}@${DEFAULT_PROXY.host}:${DEFAULT_PROXY.port}`;
   }
 
   return '';
