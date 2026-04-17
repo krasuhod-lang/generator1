@@ -92,7 +92,7 @@ function checkObjectiveMetrics(html, opts = {}) {
   }
 
   // Проверка упоминания бренда из BRAND_FACTS
-  if (brandFacts && brandFacts !== 'Нет данных') {
+  if (brandFacts && typeof brandFacts === 'string' && brandFacts !== 'Нет данных') {
     const brandToken = brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3);
     if (brandToken && !text.toLowerCase().includes(brandToken.toLowerCase())) {
       issues.push(`Бренд "${brandToken}" не упомянут — необходимо для Authoritativeness E-E-A-T`);

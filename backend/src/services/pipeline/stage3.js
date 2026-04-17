@@ -7,6 +7,32 @@ const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
 const { checkAntiWater }    = require('./stage5');
 
 /**
+ * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
+ * Возвращает массив проблем (пустой = всё ок).
+ *
+ * @param {string}  html              — HTML-контент блока
+ * @param {boolean} expertOpinionUsed — было ли уже использовано экспертное мнение
+ * @param {string}  brandFacts        — факты о бренде
+ * @returns {string[]} — массив обнаруженных проблем
+ */
+function structuralPreCheck(html, expertOpinionUsed, brandFacts) {
+  const preCheck = checkObjectiveMetrics(html);
+  const waterPhrases = checkAntiWater(html);
+  const needsBlockquote = !expertOpinionUsed && !/<blockquote[\s>]/i.test(html);
+  const brandToken = (typeof brandFacts === 'string' && brandFacts !== 'Нет данных')
+    ? brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3)
+    : null;
+  const hasBrand = !brandToken || html.toLowerCase().includes(brandToken.toLowerCase());
+
+  return [
+    ...preCheck.issues,
+    ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
+    ...(needsBlockquote ? ['Нет <blockquote> с экспертным мнением'] : []),
+    ...(!hasBrand ? [`Бренд "${brandToken}" не упомянут`] : []),
+  ];
+}
+
+/**
  * Веса типов блоков для пропорционального распределения символов.
  * Источник: v3.1 index.html (неизменно).
  */
@@ -136,19 +162,9 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
 
     // Structural pre-check: fast retry if basic E-E-A-T structure is missing
     if (stage3Result?.html_content) {
-      const preCheck = checkObjectiveMetrics(stage3Result.html_content);
-      const waterPhrases = checkAntiWater(stage3Result.html_content);
-      const needsBlockquote = !expertOpinionUsed && !/<blockquote[\s>]/i.test(stage3Result.html_content);
-      const brandToken = brandFacts !== 'Нет данных' ? brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3) : null;
-      const hasBrand = !brandToken || stage3Result.html_content.toLowerCase().includes(brandToken.toLowerCase());
+      const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts);
 
-      if (!preCheck.passed || waterPhrases.length > 0 || needsBlockquote || !hasBrand) {
-        const issues = [
-          ...preCheck.issues,
-          ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
-          ...(needsBlockquote ? ['Нет <blockquote> с экспертным мнением'] : []),
-          ...(!hasBrand ? [`Бренд "${brandToken}" не упомянут`] : []),
-        ];
+      if (issues.length > 0) {
         log(`Stage 3 блок ${i + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
 
         const retryResult = await callLLM(
@@ -304,19 +320,9 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
   // Structural pre-check: fast retry if basic E-E-A-T structure is missing
   if (stage3Result?.html_content) {
-    const preCheck = checkObjectiveMetrics(stage3Result.html_content);
-    const waterPhrases = checkAntiWater(stage3Result.html_content);
-    const needsBlockquote = !expertOpinionUsed && !/<blockquote[\s>]/i.test(stage3Result.html_content);
-    const brandToken = brandFacts !== 'Нет данных' ? brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3) : null;
-    const hasBrand = !brandToken || stage3Result.html_content.toLowerCase().includes(brandToken.toLowerCase());
+    const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts);
 
-    if (!preCheck.passed || waterPhrases.length > 0 || needsBlockquote || !hasBrand) {
-      const issues = [
-        ...preCheck.issues,
-        ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
-        ...(needsBlockquote ? ['Нет <blockquote> с экспертным мнением'] : []),
-        ...(!hasBrand ? [`Бренд "${brandToken}" не упомянут`] : []),
-      ];
+    if (issues.length > 0) {
       log(`Stage 3 блок ${blockIndex + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
 
       const retryResult = await callLLM(
