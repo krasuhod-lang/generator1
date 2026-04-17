@@ -219,7 +219,9 @@ if (PROXY_URLS.length > 0) {
   console.log(`[gemini] Прокси включён (${PROXY_URLS.length} шт):`);
   PROXY_URLS.forEach((u, i) => console.log(`  [${i}] ${safeProxyLog(u)}`));
   // Фоновый тест — не блокирует запуск
-  testProxyConnectivity().catch(() => {});
+  testProxyConnectivity().catch(err => {
+    console.warn(`[gemini] Фоновый тест прокси завершился с ошибкой: ${err.message}`);
+  });
 } else {
   console.warn('[gemini] ⚠ Прокси НЕ задан! Запросы пойдут напрямую. Задайте GEMINI_PROXY_* в .env');
 }
