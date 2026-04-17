@@ -199,7 +199,11 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     if (hasProxies && proxyAgent) {
       console.log(`[gemini] Запрос через прокси [${proxyIdx}] ${safeProxyLog(PROXY_URLS[proxyIdx])}`);
     } else if (hasProxies && !proxyAgent) {
-      console.warn(`[gemini] ⚠ Прокси [${proxyIdx}] не удалось создать — запрос пойдёт НАПРЯМУЮ`);
+      // Прокси задан, но agent не создался (невалидный URL) — НЕ отправляем напрямую!
+      console.warn(`[gemini] ⚠ Прокси [${proxyIdx}] не удалось создать — пропускаем`);
+      lastError = new Error(`Gemini proxy [${proxyIdx}] agent creation failed`);
+      if (attempt < totalAttempts - 1) continue;
+      throw lastError;
     } else {
       console.warn(`[gemini] Запрос НАПРЯМУЮ (прокси не настроен)`);
     }
