@@ -224,6 +224,11 @@ async function runPipeline(task, ctx) {
     if (needsObjFix && !needsRefinement) {
       log(`Блок ${i + 1}: объективные метрики НЕ пройдены (${objMetrics.issues.join('; ')}) — запускаем рефайн`, 'warn');
     }
+    if (needsObjFix) {
+      log(`Блок ${i + 1} метрики: H3=${objMetrics.metrics.h3_count}, списки=${objMetrics.metrics.has_list}, ` +
+          `абзацев=${objMetrics.metrics.paragraph_count}, длинных=${objMetrics.metrics.long_paragraphs}, ` +
+          `ссылки=${objMetrics.metrics.has_links}`, 'info');
+    }
 
     let currentHTML  = blockHtml;
     let currentPQ    = pqScore;

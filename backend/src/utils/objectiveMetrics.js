@@ -24,8 +24,13 @@ function checkObjectiveMetrics(html) {
   // Текстовые проверки
   const charCount = text.length;
 
-  // Проверка длинных абзацев (>500 символов без разрыва = стена текста)
-  const longParagraphs = (html.match(/<p[^>]*>[^<]{500,}<\/p>/gi) || []).length;
+  // Проверка длинных абзацев (>500 символов чистого текста = стена текста)
+  const paragraphMatches = html.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
+  let longParagraphs = 0;
+  for (const p of paragraphMatches) {
+    const pText = p.replace(/<[^>]+>/g, '').trim();
+    if (pText.length > 500) longParagraphs++;
+  }
 
   // Метрики
   const metrics = {
