@@ -65,8 +65,8 @@ async function runStage0(task, ctx) {
     'success'
   );
 
-  // ── Call 1: SERP Reality Check ──────────────────────────────────
-  log('Stage 0 Call 1: SERP Reality Check (10-SERP prompt)...', 'info');
+  // ── Calls 1 & 2: SERP Reality Check + Niche Landscape (параллельно) ──
+  log('Stage 0: SERP Reality Check + Niche Landscape Analyzer (параллельно)...', 'info');
 
   const serpRealityContext = `
 
@@ -100,21 +100,6 @@ OUTPUT: Return ONLY valid JSON with ALL of these keys:
 - faq_bank: [{question, answer}] (min 5)
 NO markdown. NO extra text outside JSON.`;
 
-  const serpRealityResult = await callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
-    retries:   3,
-    taskId,
-    stageName: 'stage0',
-    callLabel: 'SERP Reality Check',
-    temperature: 0.3,
-    log,
-      onTokens,
-  }).catch(e => { log(`Stage 0 Call 1 error: ${e.message}`, 'warn'); return null; });
-
-  progress(4, 'stage0');
-
-  // ── Call 2: Niche Landscape Analyzer ────────────────────────────
-  log('Stage 0 Call 2: Niche Landscape Analyzer (01-Niche prompt)...', 'info');
-
   const nicheLandscapeContext = `
 
 ===== INPUT DATA =====
@@ -131,19 +116,33 @@ PAGE PRIORITIES: ${task.input_page_priorities || '[не указано]'}
 NICHE FEATURES: ${task.input_niche_features || '[не указано]'}
 COMPETITOR CONTENT SUMMARY: ${onlyCompetitors.map(c => c.content.substring(0, 3000)).join(' ')}
 ${ownSiteContent ? `OUR SITE CURRENT STATE: ${ownSiteContent.content.substring(0, 2000)}\n` : ''}
-SERP REALITY CHECK RESULT: ${JSON.stringify(serpRealityResult || {}).substring(0, 2000)}
 
 OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_layers (array), topic_clusters (array), competitor_gaps (array), strategic_priorities (array). NO markdown.`;
 
-  const nicheLandscapeResult = await callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.nicheLandscape, task), nicheLandscapeContext, {
-    retries:   3,
-    taskId,
-    stageName: 'stage0',
-    callLabel: 'Niche Landscape',
-    temperature: 0.3,
-    log,
+  // Запускаем оба вызова параллельно — они используют разные промпты и не зависят друг от друга
+  const [serpRealityResult, nicheLandscapeResult] = await Promise.all([
+    callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
+      retries:   3,
+      taskId,
+      stageName: 'stage0',
+      callLabel: 'SERP Reality Check',
+      temperature: 0.3,
+      log,
       onTokens,
-  }).catch(e => { log(`Stage 0 Call 2 error: ${e.message}`, 'warn'); return null; });
+    }).catch(e => { log(`Stage 0 Call 1 error: ${e.message}`, 'warn'); return null; }),
+
+    callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.nicheLandscape, task), nicheLandscapeContext, {
+      retries:   3,
+      taskId,
+      stageName: 'stage0',
+      callLabel: 'Niche Landscape',
+      temperature: 0.3,
+      log,
+      onTokens,
+    }).catch(e => { log(`Stage 0 Call 2 error: ${e.message}`, 'warn'); return null; }),
+  ]);
+
+  progress(8, 'stage0');
 
   // Fallback если оба вызова провалились
   if (!serpRealityResult && !nicheLandscapeResult) {

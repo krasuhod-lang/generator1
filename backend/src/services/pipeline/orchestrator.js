@@ -5,7 +5,7 @@ const { publish }     = require('../sse/sseManager');
 const { runStage0 }   = require('./stage0');
 const { runStage1 }   = require('./stage1');
 const { runStage2 }   = require('./stage2');
-const { runStage3 }   = require('./stage3');
+const { generateSingleBlock, BLOCK_TYPE_WEIGHTS } = require('./stage3');
 const { runStage4 }   = require('./stage4');
 const { runStage5, checkAntiWater } = require('./stage5');
 const { runStage6 }   = require('./stage6');
@@ -136,37 +136,69 @@ async function runPipeline(task, ctx) {
   // ── Используем enrichedStage1 (stage1 + buyer journey) для Stage 3
   stage1Result = enrichedStage1 || stage1Result;
 
-  // ── Stage 3: генерация блоков ─────────────────────────────────────
-  let stage3Blocks;
-  try {
-    stage3Blocks = await runStage3(
-      task, stageCtx,
-      taxonomy, stage0Result, stage1Result, stage2Raw
-    );
-  } catch (e) {
-    throw new Error(`Stage 3 критическая ошибка: ${e.message}`);
-  }
+  // ── Stage 3–6: Pipeline Interleaving ──────────────────────────────
+  // Вместо: Stage 3 (все блоки) → Stage 4-6 (все блоки последовательно)
+  // Теперь: генерация блока N и аудит блока N-1 запускаются параллельно
+  // Stage 3 использует Gemini, Stage 4 использует DeepSeek — разные API, не конкурируют
+  log('Stage 3–6: Генерация и аудит блоков (pipeline interleaving)...', 'info');
 
   // Собираем competitor_facts из Stage 0 для factCheck
   const competitorFacts = stage0Result?.competitor_facts || [];
 
-  // ── Цикл Stage 4 → 5 → 6 по каждому блоку ───────────────────────
-  log('Stage 4–6: Аудит и доработка блоков (последовательно)...', 'info');
-
   const finalBlocks = [];       // финальные HTML-блоки
   const allLSISet   = new Set();  // дедупликация LSI
 
-  for (let i = 0; i < stage3Blocks.length; i++) {
-    const blockItem = stage3Blocks[i];
-    const block     = blockItem.block;
-    const lsiMust   = block.lsi_must || [];
+  // Подготовка контекста генерации (shared между блоками)
+  const targetService = task.input_target_service;
+  const region        = task.input_region        || 'Россия';
+  const brandFacts    = task.input_brand_facts   || 'Нет данных';
+  const nGrams        = task.input_ngrams        || '';
+  const tfIdfData     = task.input_tfidf_json || '[]';
+  const authorName    = task.input_author_name   || 'Эксперт';
+  const minChars      = parseInt(task.input_min_chars) || 800;
+  const maxChars      = parseInt(task.input_max_chars) || 3500;
+  const totalTarget   = Math.floor((minChars + maxChars) / 2);
 
+  const s3stage1Json = JSON.stringify(stage1Result);
+  const s3stage2Json = JSON.stringify(stage2Raw || {});
+
+  const stage0Signals = stage0Result ? JSON.stringify({
+    content_gaps:              stage0Result.content_gaps              || [],
+    white_space_opportunities: stage0Result.white_space_opportunities || [],
+    search_intents:            stage0Result.search_intents            || [],
+    niche_segments:            stage0Result.niche_segments            || [],
+  }).substring(0, 6000) : 'Нет данных';
+
+  const competitorsData = stage0Result ? JSON.stringify({
+    competitor_facts: stage0Result.competitor_facts || [],
+    trust_triggers:   stage0Result.trust_triggers   || [],
+    dominant_formats: stage0Result.dominant_formats || [],
+    faq_bank:         (stage0Result.faq_bank || []).slice(0, 10),
+  }).substring(0, 6000) : 'Нет данных';
+
+  const competitorFactsStr = stage0Result
+    ? (stage0Result.competitor_facts || []).map(f => f.fact).join('; ').substring(0, 2000)
+    : 'Нет данных';
+
+  const blockWeights = taxonomy.map(b => BLOCK_TYPE_WEIGHTS[b.type] || 1.0);
+  const weightSum    = blockWeights.reduce((s, w) => s + w, 0);
+
+  let expertOpinionUsed = false;
+  let previousContext   = '';
+  const generatedH2s    = [];
+
+  /**
+   * auditAndRefineBlock — запускает Stage 4→5→6 для одного блока.
+   * Вынесен в отдельную функцию для pipeline interleaving.
+   */
+  async function auditAndRefineBlock(i, blockHtml, block) {
+    const lsiMust = block.lsi_must || [];
     lsiMust.forEach(term => allLSISet.add(term));
 
-    if (!blockItem.html) {
+    if (!blockHtml) {
       log(`Блок ${i + 1}: пропуск (Stage 3 не вернул HTML)`, 'warn');
       await markBlockError(taskId, i, block, 'Stage 3 failed to generate HTML');
-      continue;
+      return null;
     }
 
     publish(taskId, { type: 'block_start', blockIndex: i, h2: block.h2, status: 'auditing' });
@@ -176,25 +208,24 @@ async function runPipeline(task, ctx) {
     try {
       ({ auditResult, pqScore, lsiCovPct } = await runStage4(
         task, stageCtx,
-        i, blockItem.html, lsiMust
+        i, blockHtml, lsiMust
       ));
     } catch (e) {
       log(`Stage 4 блок ${i + 1} ОШИБКА: ${e.message} — пропускаем аудит`, 'warn');
-      finalBlocks.push(blockItem.html);
-      await saveContentBlock(taskId, i, block, blockItem.html, 0, 0, null);
-      continue;
+      await saveContentBlock(taskId, i, block, blockHtml, 0, 0, null);
+      return blockHtml;
     }
 
     const needsRefinement = lsiCovPct < 80 || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
 
     // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки)
-    const objMetrics = checkObjectiveMetrics(blockItem.html);
+    const objMetrics = checkObjectiveMetrics(blockHtml);
     const needsObjFix = !objMetrics.passed;
     if (needsObjFix && !needsRefinement) {
       log(`Блок ${i + 1}: объективные метрики НЕ пройдены (${objMetrics.issues.join('; ')}) — запускаем рефайн`, 'warn');
     }
 
-    let currentHTML  = blockItem.html;
+    let currentHTML  = blockHtml;
     let currentPQ    = pqScore;
     let currentAudit = auditResult;
 
@@ -244,8 +275,6 @@ async function runPipeline(task, ctx) {
     // Сохраняем финальный блок в БД
     await saveContentBlock(taskId, i, block, currentHTML, currentPQ, lsiCoverageAfter, currentAudit);
 
-    finalBlocks.push(currentHTML);
-
     publish(taskId, {
       type:          'block_done',
       blockIndex:    i,
@@ -254,9 +283,70 @@ async function runPipeline(task, ctx) {
       pqScore:       currentPQ,
     });
 
+    return currentHTML;
+  }
+
+  // ── Pipeline Interleaving Loop ────────────────────────────────────
+  // Стратегия: генерируем блок N, параллельно аудируем блок N-1
+  let pendingAudit = null; // Promise аудита предыдущего блока
+
+  for (let i = 0; i < taxonomy.length; i++) {
+    const block = taxonomy[i];
+    const blockTargetChars = Math.round(totalTarget * (blockWeights[i] / weightSum)) || 1500;
+    const blockMinChars    = Math.round(minChars    * (blockWeights[i] / weightSum)) || 600;
+    const blockMaxChars    = Math.round(maxChars    * (blockWeights[i] / weightSum)) || 2500;
+
+    // Запускаем генерацию текущего блока (Gemini)
+    const genPromise = generateSingleBlock(task, stageCtx, block, i, taxonomy.length, {
+      targetService, region, brandFacts, nGrams, tfIdfData, authorName,
+      s3stage1Json, s3stage2Json, stage0Signals, competitorsData, competitorFactsStr,
+      blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
+      expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
+    });
+
+    // Параллельно ожидаем аудит предыдущего блока (DeepSeek) + генерацию текущего (Gemini)
+    // Разные API → нет конфликта rate limits
+    if (pendingAudit) {
+      const [genResult, auditedHTML] = await Promise.all([genPromise, pendingAudit]);
+
+      // Обработка результата аудита предыдущего блока
+      if (auditedHTML) finalBlocks.push(auditedHTML);
+
+      // Обработка результата генерации текущего блока
+      if (genResult.html) {
+        expertOpinionUsed = genResult.expertOpinionUsed;
+        previousContext   = genResult.previousContext;
+        generatedH2s.push(block.h2);
+      }
+
+      // Запускаем аудит текущего блока (будет ожидаться на следующей итерации или после цикла)
+      pendingAudit = genResult.html
+        ? auditAndRefineBlock(i, genResult.html, block)
+        : Promise.resolve(null);
+    } else {
+      // Первый блок — просто генерируем, аудит запустим в следующей итерации
+      const genResult = await genPromise;
+
+      if (genResult.html) {
+        expertOpinionUsed = genResult.expertOpinionUsed;
+        previousContext   = genResult.previousContext;
+        generatedH2s.push(block.h2);
+      }
+
+      pendingAudit = genResult.html
+        ? auditAndRefineBlock(i, genResult.html, block)
+        : Promise.resolve(null);
+    }
+
     // Прогресс: Stage 3-6 занимают ~35-88% в пайплайне
-    const pct = 35 + Math.round(((i + 1) / stage3Blocks.length) * 53);
-    progress(pct, 'stage6');
+    const pct = 35 + Math.round(((i + 1) / taxonomy.length) * 53);
+    progress(pct, 'stage3-6');
+  }
+
+  // Ожидаем завершение аудита последнего блока
+  if (pendingAudit) {
+    const lastAuditedHTML = await pendingAudit;
+    if (lastAuditedHTML) finalBlocks.push(lastAuditedHTML);
   }
 
   if (!finalBlocks.length) {
