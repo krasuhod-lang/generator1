@@ -91,6 +91,11 @@ function checkObjectiveMetrics(html, opts = {}) {
     issues.push('Нет <blockquote> с экспертным мнением — необходимо для Expertise E-E-A-T');
   }
 
+  // Проверка лишнего blockquote (если экспертное мнение уже использовано в другом блоке)
+  if (expertOpinionUsed && hasBlockquote) {
+    issues.push('Лишний <blockquote> — экспертное мнение уже использовано в другом блоке (строго 1 раз на статью)');
+  }
+
   // Проверка упоминания бренда из BRAND_FACTS
   if (brandFacts && typeof brandFacts === 'string' && brandFacts !== 'Нет данных') {
     const brandToken = brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3);

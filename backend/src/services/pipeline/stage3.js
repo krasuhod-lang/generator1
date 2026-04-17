@@ -27,6 +27,18 @@ function structuralPreCheck(html, expertOpinionUsed, brandFacts) {
 }
 
 /**
+ * stripExpertBlockquotes — удаляет <blockquote> с экспертным мнением из HTML.
+ * Используется когда expertOpinionUsed === true для обеспечения правила
+ * «экспертное мнение строго 1 раз на всю статью».
+ *
+ * @param {string} html — HTML-контент блока
+ * @returns {string} — HTML без экспертных blockquote
+ */
+function stripExpertBlockquotes(html) {
+  return html.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '').replace(/\n{3,}/g, '\n\n');
+}
+
+/**
  * Веса типов блоков для пропорционального распределения символов.
  * Источник: v3.1 index.html (неизменно).
  */
@@ -198,6 +210,12 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
 
     log(`Stage 3 блок ${i + 1} получен. Размер HTML: ${stage3Result.html_content.length} символов.`, 'success');
 
+    // Enforce single expert opinion: strip blockquotes if expert opinion already used
+    if (expertOpinionUsed && /<blockquote[\s>]/i.test(stage3Result.html_content)) {
+      log(`Stage 3 блок ${i + 1}: экспертное мнение уже использовано — удаляем лишний blockquote`, 'warn');
+      stage3Result.html_content = stripExpertBlockquotes(stage3Result.html_content);
+    }
+
     // Отслеживаем использование экспертного мнения
     if (
       stage3Result.html_content.includes('эксперт:') ||
@@ -354,6 +372,12 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
   }
 
   log(`Stage 3 блок ${blockIndex + 1} получен. Размер HTML: ${stage3Result.html_content.length} символов.`, 'success');
+
+  // Enforce single expert opinion: strip blockquotes if expert opinion already used
+  if (expertOpinionUsed && /<blockquote[\s>]/i.test(stage3Result.html_content)) {
+    log(`Stage 3 блок ${blockIndex + 1}: экспертное мнение уже использовано — удаляем лишний blockquote`, 'warn');
+    stage3Result.html_content = stripExpertBlockquotes(stage3Result.html_content);
+  }
 
   // Отслеживаем использование экспертного мнения
   let updatedExpertUsed = expertOpinionUsed;

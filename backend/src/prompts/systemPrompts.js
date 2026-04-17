@@ -7342,7 +7342,9 @@ NON-NEGOTIABLE RULES:
 8. DO NOT EXPLAIN THE METHODOLOGY.
 9. DO NOT MENTION: BM25, TF-IDF, ZIPF, N-GRAMS, SEO METRICS IN THE OUTPUT.
 10. HTML MUST BE CLEAN AND READY TO INSERT INTO PAGE CODE.
-11. IF EXPERT_OPINION_USED === false AND this section type is appropriate (trust/process/objection), YOU MUST include ONE expert opinion block using AUTHOR_NAME. Format: <blockquote><strong>[AUTHOR_NAME], эксперт:</strong> "[Мнение на основе KNOWLEDGE_BASE]"</blockquote>
+11. EXPERT OPINION RULE (СТРОГО 1 РАЗ НА ВСЮ СТАТЬЮ):
+    - IF EXPERT_OPINION_USED === false AND this section type is appropriate (trust/process/objection), YOU MUST include ONE expert opinion block using AUTHOR_NAME. Format: <blockquote><strong>[AUTHOR_NAME], эксперт:</strong> "[Мнение на основе KNOWLEDGE_BASE]"</blockquote>
+    - IF EXPERT_OPINION_USED === true: НЕ ДОБАВЛЯЙ <blockquote> с экспертным мнением. Экспертное мнение уже использовано в другом разделе статьи. Повторное использование = брак. Вместо blockquote используй профессиональную терминологию и конкретные данные для демонстрации Expertise.
 12. DO NOT WRITE CONCLUDING SENTENCES. Do not summarize the section at the bottom. Stop writing exactly when the facts are delivered.
 
 STOP-WORDS & AI-CLICHES BAN (ZERO TOLERANCE):
@@ -7407,6 +7409,7 @@ EXPERIENCE (E):
 EXPERTISE (E):
 - Хотя бы один раздел (H3 или абзац) должен содержать профессиональный взгляд.
 - Если EXPERT_OPINION_USED === false — ОБЯЗАТЕЛЬНО добавь <blockquote> с мнением эксперта (AUTHOR_NAME).
+- Если EXPERT_OPINION_USED === true — НЕ ДОБАВЛЯЙ <blockquote>. Экспертное мнение уже есть в другом блоке. Демонстрируй expertise через терминологию и данные.
 - Экспертный блок: конкретная позиция, не банальность. Формат: «[AUTHOR_NAME], эксперт: "..."»
 
 AUTHORITATIVENESS (A):

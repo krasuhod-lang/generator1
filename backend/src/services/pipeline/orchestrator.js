@@ -191,7 +191,7 @@ async function runPipeline(task, ctx) {
    * auditAndRefineBlock — запускает Stage 4→5→6 для одного блока.
    * Вынесен в отдельную функцию для pipeline interleaving.
    */
-  async function auditAndRefineBlock(i, blockHtml, block) {
+  async function auditAndRefineBlock(i, blockHtml, block, blockExpertOpinionUsed) {
     const lsiMust = block.lsi_must || [];
     lsiMust.forEach(term => allLSISet.add(term));
 
@@ -242,7 +242,8 @@ async function runPipeline(task, ctx) {
           task, stageCtx,
           i, currentHTML, lsiMust,
           currentAudit, currentPQ,
-          competitorFacts, block.h2
+          competitorFacts, block.h2,
+          blockExpertOpinionUsed
         );
         currentHTML  = s5.html;
         currentPQ    = s5.pqScore;
@@ -304,6 +305,9 @@ async function runPipeline(task, ctx) {
     const blockMinChars    = Math.round(minChars    * (blockWeights[i] / weightSum)) || 600;
     const blockMaxChars    = Math.round(maxChars    * (blockWeights[i] / weightSum)) || 2500;
 
+    // Capture expert opinion state BEFORE this block is generated
+    const blockExpertOpinionUsed = expertOpinionUsed;
+
     // Генерация текущего блока (Gemini) — await, т.к. нужен previousContext для следующего
     const genResult = await generateSingleBlock(task, stageCtx, block, i, taxonomy.length, {
       targetService, region, brandFacts, nGrams, tfIdfData, authorName,
@@ -320,9 +324,10 @@ async function runPipeline(task, ctx) {
     }
 
     // Запускаем аудит сразу (Stage 4→5→6, DeepSeek) — НЕ ждём предыдущие аудиты
+    // blockExpertOpinionUsed передаётся в Stage 5 чтобы не добавлять лишний blockquote
     auditPromises.push(
       genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block)
+        ? auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed)
         : Promise.resolve(null)
     );
 
@@ -339,6 +344,22 @@ async function runPipeline(task, ctx) {
 
   if (!finalBlocks.length) {
     throw new Error('Пайплайн: ни один блок не был сгенерирован');
+  }
+
+  // ── Post-processing: enforce single expert blockquote across all blocks ──
+  // Safety net for the race condition: audits run in parallel,
+  // so multiple blocks may get blockquotes via Stage 5.
+  // Keep only the FIRST block's blockquote, strip from the rest.
+  let expertBlockFound = false;
+  for (let i = 0; i < finalBlocks.length; i++) {
+    if (/<blockquote[\s>]/i.test(finalBlocks[i])) {
+      if (expertBlockFound) {
+        log(`Post-processing: блок ${i + 1} содержит лишний blockquote — удаляем (экспертное мнение уже в предыдущем блоке)`, 'warn');
+        finalBlocks[i] = finalBlocks[i].replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '').replace(/\n{3,}/g, '\n\n');
+      } else {
+        expertBlockFound = true;
+      }
+    }
   }
 
   // ── Stage 7: Глобальный аудит ────────────────────────────────────
