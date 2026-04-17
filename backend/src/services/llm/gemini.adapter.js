@@ -223,7 +223,9 @@ if (PROXY_URLS.length > 0) {
     console.warn(`[gemini] Фоновый тест прокси завершился с ошибкой: ${err.message}`);
   });
 } else {
-  console.warn('[gemini] ⚠ Прокси НЕ задан! Запросы пойдут напрямую. Задайте GEMINI_PROXY_* в .env');
+  console.error('[gemini] ❌ КРИТИЧЕСКАЯ ОШИБКА: Прокси НЕ задан! Все запросы к Gemini API будут заблокированы.');
+  console.error('[gemini]   Задайте GEMINI_PROXY_URL в .env (формат: http://login:password@ip:port или login:password:ip:port)');
+  console.error('[gemini]   Или через компоненты: GEMINI_PROXY_HOST, GEMINI_PROXY_PORT, GEMINI_PROXY_USER, GEMINI_PROXY_PASS');
 }
 
 /**
@@ -323,35 +325,39 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     ],
   };
 
+  // ── Прокси обязателен — без прокси запросы запрещены ──
+  if (PROXY_URLS.length === 0) {
+    throw new Error(
+      'GEMINI_PROXY_URL не задан! Все запросы к Gemini API требуют прокси. ' +
+      'Задайте GEMINI_PROXY_URL в .env (формат: http://login:password@ip:port)'
+    );
+  }
+
   // ── Попытка с текущим активным прокси, при гео-ошибке — переключаемся ──
-  const hasProxies   = PROXY_URLS.length > 0;
-  const totalAttempts = hasProxies ? PROXY_URLS.length : 1; // без прокси — 1 попытка напрямую
+  const totalAttempts = PROXY_URLS.length;
   let lastError = null;
 
   for (let attempt = 0; attempt < totalAttempts; attempt++) {
-    const proxyAgent = hasProxies
-      ? buildProxyAgent((activeProxyIdx + attempt) % PROXY_URLS.length)
-      : undefined;
-    const proxyIdx = hasProxies ? (activeProxyIdx + attempt) % PROXY_URLS.length : -1;
+    const proxyIdx = (activeProxyIdx + attempt) % PROXY_URLS.length;
+    const proxyAgent = buildProxyAgent(proxyIdx);
 
     // Логируем через какой прокси идёт запрос (для диагностики)
-    if (hasProxies && proxyAgent) {
+    if (proxyAgent) {
       console.log(`[gemini] Запрос через прокси [${proxyIdx}] ${safeProxyLog(PROXY_URLS[proxyIdx])}`);
-    } else if (hasProxies && !proxyAgent) {
+    } else {
       // Прокси задан, но agent не создался (невалидный URL) — НЕ отправляем напрямую!
       console.warn(`[gemini] ⚠ Прокси [${proxyIdx}] не удалось создать — пропускаем`);
       lastError = new Error(`Gemini proxy [${proxyIdx}] agent creation failed`);
       if (attempt < totalAttempts - 1) continue;
       throw lastError;
-    } else {
-      console.warn(`[gemini] Запрос НАПРЯМУЮ (прокси не настроен)`);
     }
 
     const axiosCfg = {
       timeout:        timeoutMs,
       headers:        { 'Content-Type': 'application/json' },
       validateStatus: null,
-      ...(proxyAgent ? { httpsAgent: proxyAgent, proxy: false } : {}),
+      httpsAgent:     proxyAgent,
+      proxy:          false,
     };
 
     let response;
@@ -360,7 +366,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     } catch (networkErr) {
       // Сетевая ошибка прокси (timeout, ECONNREFUSED и т.д.)
       // Переключаемся на следующий прокси
-      const proxyLabel = hasProxies ? `прокси [${proxyIdx}] ${safeProxyLog(PROXY_URLS[proxyIdx])}` : 'напрямую';
+      const proxyLabel = `прокси [${proxyIdx}] ${safeProxyLog(PROXY_URLS[proxyIdx])}`;
 
       // Специальная обработка 407 — прокси требует авторизацию
       const is407 = networkErr.message && (networkErr.message.includes('407') || networkErr.message.includes('Proxy Authentication Required'));
@@ -385,7 +391,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
 
     if (response.status === 407) {
       // Прокси вернул 407 как HTTP-ответ (а не как ошибку CONNECT)
-      const proxyLabel = hasProxies ? safeProxyLog(PROXY_URLS[proxyIdx]) : 'напрямую';
+      const proxyLabel = safeProxyLog(PROXY_URLS[proxyIdx]);
       console.error(`[gemini] ❌ Прокси [${proxyIdx}] — HTTP 407: прокси требует авторизацию!`);
       console.error(`[gemini]   Проверьте логин/пароль в GEMINI_PROXY_URL. Формат: login:password:ip:port`);
       const authErr = new Error(`Proxy authentication failed (407) for ${proxyLabel}. Check GEMINI_PROXY_URL credentials.`);
@@ -414,13 +420,12 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
       }
       // Включаем детали ошибки из ответа API для отладки
       const detail = response.data?.error?.message || JSON.stringify(response.data).slice(0, 300);
-      const proxyInfo = hasProxies ? ` [proxy ${proxyIdx}]` : ' [DIRECT/no proxy]';
+      const proxyInfo = ` [proxy ${proxyIdx}]`;
       const fullMsg = `Gemini API error ${response.status}: ${msg} — ${detail}${proxyInfo}`;
 
       // ── Гео-блокировка → переключаем прокси ──────────────────────
       if (isGeoBlockError(detail) && attempt < totalAttempts - 1) {
-        const proxyLabel = hasProxies ? safeProxyLog(PROXY_URLS[proxyIdx]) : 'напрямую';
-        console.warn(`[gemini] Гео-блокировка через ${proxyLabel}. Переключаемся на следующий прокси...`);
+        console.warn(`[gemini] Гео-блокировка через ${safeProxyLog(PROXY_URLS[proxyIdx])}. Переключаемся на следующий прокси...`);
         lastError = new Error(fullMsg);
         lastError.isGeoBlock = true;
         lastError.isDeterministic = true;
@@ -437,7 +442,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     }
 
     // ── Успех! Запоминаем работающий прокси ──────────────────────────
-    if (hasProxies && proxyIdx !== activeProxyIdx) {
+    if (proxyIdx !== activeProxyIdx) {
       console.log(`[gemini] Прокси [${proxyIdx}] работает — запоминаем как активный`);
       activeProxyIdx = proxyIdx;
     }
