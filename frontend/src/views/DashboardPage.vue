@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth.js';
 import { useTasksStore } from '../stores/tasks.js';
 import ResultModal from '../components/ResultModal.vue';
+import AppLayout from '../components/AppLayout.vue';
 
 const router = useRouter();
 const auth   = useAuthStore();
@@ -59,11 +60,6 @@ async function handleDelete(task) {
   }
 }
 
-function handleLogout() {
-  auth.logout();
-  router.push('/login');
-}
-
 // ── Бейдж статуса ──────────────────────────────────────────────────
 const STATUS_META = {
   draft:      { label: 'Черновик',     cls: 'bg-gray-700 text-gray-300' },
@@ -94,24 +90,7 @@ function fmtCost(usd) {
 </style>
 
 <template>
-  <div class="min-h-screen bg-gray-950">
-    <!-- Шапка -->
-    <header class="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <svg viewBox="0 0 32 32" class="w-7 h-7" fill="none">
-          <rect width="32" height="32" rx="8" fill="#6366f1"/>
-          <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="white" stroke-width="2" stroke-linecap="round"/>
-          <circle cx="16" cy="16" r="3" fill="white"/>
-          <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
-        </svg>
-        <span class="font-bold text-white">SEO Genius <span class="text-indigo-400">v4.0</span></span>
-      </div>
-      <div class="flex items-center gap-4">
-        <span class="text-sm text-gray-400">{{ auth.user?.name || auth.user?.email }}</span>
-        <button @click="handleLogout" class="btn-ghost text-xs">Выйти</button>
-      </div>
-    </header>
-
+  <AppLayout>
     <!-- Инлайн ошибка -->
     <transition name="fade">
       <div
@@ -133,7 +112,7 @@ function fmtCost(usd) {
     </transition>
 
     <!-- Контент -->
-    <main class="max-w-7xl mx-auto px-6 py-8">
+    <div class="max-w-7xl mx-auto px-6 py-8">
       <!-- Заголовок + кнопка -->
       <div class="flex items-center justify-between mb-6">
         <div>
@@ -269,7 +248,7 @@ function fmtCost(usd) {
           </tbody>
         </table>
       </div>
-    </main>
+    </div>
 
     <!-- Модалка результатов -->
     <ResultModal
@@ -277,5 +256,5 @@ function fmtCost(usd) {
       :visible="showResult"
       @close="closeResult"
     />
-  </div>
+  </AppLayout>
 </template>

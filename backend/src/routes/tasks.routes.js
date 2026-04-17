@@ -18,6 +18,7 @@ const {
   streamTask,
   uploadTZ,
   parseTZWithLLM,
+  downloadExampleTZ,
 } = require('../controllers/tasks.controller');
 
 const jwt = require('jsonwebtoken');
@@ -111,6 +112,9 @@ router.post('/',   authMiddleware, createTask);  // POST /api/tasks
 
 // Pre-Stage (-1): LLM-извлечение полей из ТЗ (ДОЛЖЕН быть ДО /:id)
 router.post('/parse-tz', authMiddleware, uploadTz.single('file'), parseTZWithLLM); // POST /api/tasks/parse-tz
+
+// Скачать пример ТЗ (DOCX) (ДОЛЖЕН быть ДО /:id)
+router.get('/example-tz', authMiddleware, downloadExampleTZ); // GET /api/tasks/example-tz
 
 // Конкретная задача
 router.get('/:id',         authMiddleware, getTask);    // GET    /api/tasks/:id

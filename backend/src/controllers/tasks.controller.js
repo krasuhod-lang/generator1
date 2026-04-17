@@ -676,7 +676,7 @@ async function callExtractorLLM(tzText) {
   const prompt = TZ_EXTRACTOR_PROMPT.replace('{{TZ_TEXT}}', truncated);
 
   // Системная инструкция — короткая, без лишнего
-  const systemMsg = 'Ты — аналитик ТЗ. Извлекай данные СТРОГО из текста. Возвращай только корректный JSON без markdown-обёрток.';
+  const systemMsg = 'Ты — аналитик ТЗ. Извлекай данные СТРОГО из текста. Возвращай только корректный JSON без markdown-обёрток. ВАЖНО: для полей target_audience, niche_features, constraints, priority_page_types, audience_segments — давай РАЗВЁРНУТЫЕ описания из 2-5 предложений, НЕ одно слово. Описывай подробно, кто аудитория, какие особенности ниши, какие ограничения и почему.';
 
   // Антигаллюцинационные параметры: temperature=0.0, ограниченные токены
   const llmOptions = { temperature: 0.0, maxTokens: 4096, timeoutMs: 60000 };
@@ -734,6 +734,25 @@ async function parseTZWithLLM(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/tasks/example-tz — скачать пример ТЗ (DOCX)
+// ─────────────────────────────────────────────────────────────────────────────
+const { generateExampleTZ } = require('../utils/generateExampleTZ');
+
+async function downloadExampleTZ(req, res, next) {
+  try {
+    const buffer = await generateExampleTZ();
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'Content-Disposition': 'attachment; filename="Example_TZ_SEO_Genius.docx"',
+      'Content-Length': buffer.length,
+    });
+    res.send(buffer);
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   listTasks,
   createTask,
@@ -748,4 +767,5 @@ module.exports = {
   streamTask,
   uploadTZ,
   parseTZWithLLM,
+  downloadExampleTZ,
 };

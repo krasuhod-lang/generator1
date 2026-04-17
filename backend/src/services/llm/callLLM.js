@@ -196,7 +196,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
       // Детерминированные ошибки — повторные попытки бессмысленны
       const isDeterministic = err.message === 'Input text too long'
-                           || err.message.includes('API_KEY is not set');
+                           || err.message.includes('API_KEY is not set')
+                           || err.isDeterministic  // гео-блокировка (все прокси исчерпаны)
+                           || err.isGeoBlock;       // маркер из gemini.adapter
 
       if (isDeterministic || attempt === retries - 1) {
         log(`${callLabel || stageName} FAILED после ${attempt + 1} попыток: ${err.message}`, 'error');

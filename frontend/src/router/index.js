@@ -10,6 +10,9 @@ const routes = [
   { path: '/tasks/:id/edit',    component: () => import('../views/CreateTaskPage.vue'), meta: { auth: true } },
   { path: '/tasks/:id/monitor', component: () => import('../views/MonitorPage.vue'),    meta: { auth: true } },
   { path: '/tasks/:id/result',  component: () => import('../views/ResultPage.vue'),     meta: { auth: true } },
+  { path: '/meta-tags',    component: () => import('../views/MetaTagsPage.vue'),    meta: { auth: true } },
+  { path: '/link-article', component: () => import('../views/LinkArticlePage.vue'), meta: { auth: true } },
+  { path: '/info-article', component: () => import('../views/InfoArticlePage.vue'), meta: { auth: true } },
   { path: '/:pathMatch(.*)*',   redirect: '/dashboard' },
 ];
 
