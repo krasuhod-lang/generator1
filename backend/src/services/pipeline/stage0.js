@@ -105,6 +105,7 @@ NO markdown. NO extra text outside JSON.`;
     taskId,
     stageName: 'stage0',
     callLabel: 'SERP Reality Check',
+    temperature: 0.3,
     log,
       onTokens,
   }).catch(e => { log(`Stage 0 Call 1 error: ${e.message}`, 'warn'); return null; });
@@ -139,6 +140,7 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
     taskId,
     stageName: 'stage0',
     callLabel: 'Niche Landscape',
+    temperature: 0.3,
     log,
       onTokens,
   }).catch(e => { log(`Stage 0 Call 2 error: ${e.message}`, 'warn'); return null; });

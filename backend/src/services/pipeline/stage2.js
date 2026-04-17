@@ -70,7 +70,7 @@ OUTPUT: Return JSON with buyer_journey_stages (array of stages with queries, con
     'deepseek',
     fillPromptVars(SYSTEM_PROMPTS_EXT.buyerJourney, task),
     buyerJourneyContext,
-    { retries: 3, taskId, stageName: 'stage2', callLabel: '2A Buyer Journey', log, onTokens }
+    { retries: 3, taskId, stageName: 'stage2', callLabel: '2A Buyer Journey', temperature: 0.3, log, onTokens }
   ).catch(e => { log(`Stage 2A ОШИБКА: ${e.message}`, 'error'); return null; });
 
   if (!buyerJourneyResult) log('Stage 2A вернул null — продолжаем без Buyer Journey обогащения.', 'warn');
@@ -97,7 +97,7 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
     'deepseek',
     fillPromptVars(SYSTEM_PROMPTS_EXT.contentFormat, task),
     contentFormatContext,
-    { retries: 3, taskId, stageName: 'stage2', callLabel: '2B Content Format', log, onTokens }
+    { retries: 3, taskId, stageName: 'stage2', callLabel: '2B Content Format', temperature: 0.3, log, onTokens }
   ).catch(e => { log(`Stage 2B ОШИБКА: ${e.message}`, 'error'); return null; });
 
   if (!contentFormatResult) log('Stage 2B вернул null — продолжаем без Content Format обогащения.', 'warn');

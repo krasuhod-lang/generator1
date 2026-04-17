@@ -59,7 +59,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust) {
       'gemini',
       '',
       stage6Prompt,
-      { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, log, onTokens }
+      { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens }
     ).catch(e => {
       log(`Stage 6 блок ${blockIndex + 1} цикл ${loopCount} ОШИБКА: ${e.message}`, 'warn');
       return null;

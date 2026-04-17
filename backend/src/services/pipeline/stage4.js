@@ -91,7 +91,7 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
     'deepseek',
     '',
     stage4Prompt,
-    { retries: 3, taskId, stageName: 'stage4', callLabel: `4 E-E-A-T Block ${blockIndex + 1}`, log, onTokens }
+    { retries: 3, taskId, stageName: 'stage4', callLabel: `4 E-E-A-T Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens }
   );
 
   log(`Stage 4 блок ${blockIndex + 1}: ответ получен. Ключи: [${Object.keys(auditResult || {}).join(', ')}]`, 'info');
@@ -126,7 +126,7 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
     'deepseek',
     '',
     reAuditPrompt,
-    { retries: 2, taskId, stageName: 'stage4', callLabel: `4 Re-audit Block ${blockIndex + 1}`, log, onTokens }
+    { retries: 2, taskId, stageName: 'stage4', callLabel: `4 Re-audit Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens }
   );
 
   return {

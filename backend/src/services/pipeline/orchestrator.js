@@ -11,6 +11,7 @@ const { runStage5, checkAntiWater } = require('./stage5');
 const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
+const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -186,12 +187,19 @@ async function runPipeline(task, ctx) {
 
     const needsRefinement = lsiCovPct < 80 || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
 
+    // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки)
+    const objMetrics = checkObjectiveMetrics(blockItem.html);
+    const needsObjFix = !objMetrics.passed;
+    if (needsObjFix && !needsRefinement) {
+      log(`Блок ${i + 1}: объективные метрики НЕ пройдены (${objMetrics.issues.join('; ')}) — запускаем рефайн`, 'warn');
+    }
+
     let currentHTML  = blockItem.html;
     let currentPQ    = pqScore;
     let currentAudit = auditResult;
 
-    // Stage 5: PQ-рефайн (только если нужен)
-    if (needsRefinement) {
+    // Stage 5: PQ-рефайн (если нужен по LLM-аудиту ИЛИ по объективным метрикам)
+    if (needsRefinement || needsObjFix) {
       publish(taskId, { type: 'block_start', blockIndex: i, h2: block.h2, status: 'fixing' });
       try {
         const s5 = await runStage5(

@@ -10,6 +10,7 @@ const { factCheck }         = require('../../utils/factCheck');
  * Источник: v3.1 index.html (СТРОГО НЕТРОНУТО).
  */
 const STOP_PHRASES = [
+  // Оригинальные (v3.1)
   'В современном мире',
   'В наше время',
   'Ни для кого не секрет',
@@ -32,6 +33,29 @@ const STOP_PHRASES = [
   'включая такие города как',
   'как уже упоминалось',
   'если у вас возникают уточняющие вопросы',
+  // Расширение: Яндекс.Баден-Баден / Google HCU маркеры AI-воды
+  'На сегодняшний день',
+  'В настоящее время',
+  'Не является секретом',
+  'Очевидно, что',
+  'Как известно',
+  'В целом можно сказать',
+  'Стоит отметить',
+  'Нельзя не отметить',
+  'Как показывает практика',
+  'С каждым годом',
+  'Всё больше и больше',
+  'Играет важную роль',
+  'Является неотъемлемой частью',
+  'Широкий спектр',
+  'Индивидуальный подход',
+  'Оптимальное решение',
+  'Комплексный подход',
+  'Профессиональная команда',
+  'Многолетний опыт',
+  'Высокий уровень сервиса',
+  'Не секрет, что',
+  'Всем известно',
 ];
 
 /**
@@ -90,6 +114,17 @@ async function runStage5(
   if (waterPhrases.length)   baseSpecialInstruction += `ВОДА-ФРАЗЫ НАЙДЕНЫ: ${waterPhrases.join(', ')} — удали их. `;
   if (hallucinations.length) baseSpecialInstruction += `ГАЛЛЮЦИНАЦИИ: найдены цифры ${hallucinations.join(', ')} — заменить на [NO_DATA] или удалить. `;
 
+  // NON-NEGOTIABLE safety rules (наследуются из Stage 3)
+  baseSpecialInstruction += `
+NON-NEGOTIABLE RULES (нарушение = брак):
+- 100% BAN на <a> ссылки — НЕ ДОБАВЛЯЙ тег <a> ни при каких условиях.
+- STOP-WORDS BAN: НЕ используй фразы: "В современном мире", "Важно отметить", "Стоит учитывать", "Как показывает практика", "На сегодняшний день", "Широкий спектр", "Индивидуальный подход", "Комплексный подход", "Высокий уровень сервиса".
+- ANTI-GEO-SPAM: НЕ вставляй списки городов через запятую.
+- НЕ добавляй резюмирующий абзац "Таким образом...", "В заключение...", "Подводя итог...".
+- НЕ выдумывай числа, цены, сроки — используй [NO_DATA] если данных нет.
+- Разрешённые HTML-теги: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <table>, <thead>, <tbody>, <tr>, <th>, <td>, <blockquote>.
+`;
+
   // ── Цикл PQ-рефайна (макс 3 итерации) ──────────────────────────
   const s5MaxLoops = 3;
   let s5Loop = 0;
@@ -113,7 +148,7 @@ async function runStage5(
       'gemini',
       '',
       s5Prompt,
-      { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, log, onTokens }
+      { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens }
     ).catch(e => {
       log(`Stage 5 блок ${blockIndex + 1} итерация ${s5Loop} ОШИБКА: ${e.message}`, 'warn');
       return null;
@@ -175,7 +210,7 @@ async function runStage5(
         'gemini',
         '',
         tfPrompt,
-        { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, log, onTokens }
+        { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens }
       ).catch(() => null);
 
       if (tfResult?.html_content) currentHTML = tfResult.html_content;

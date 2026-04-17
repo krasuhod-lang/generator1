@@ -45,7 +45,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     'deepseek',
     '',
     s7prompt,
-    { retries: 3, taskId, stageName: 'stage7', callLabel: '7 Global Audit', log, onTokens }
+    { retries: 3, taskId, stageName: 'stage7', callLabel: '7 Global Audit', temperature: 0.2, log, onTokens }
   ).catch(e => {
     log(`Stage 7 ОШИБКА: ${e.message}`, 'error');
     return null;

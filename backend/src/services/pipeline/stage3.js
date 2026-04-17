@@ -97,7 +97,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       .replace('{{TARGET_SERVICE}}',     () => targetService)
       .replace('{{MAIN_QUERY}}',         () => targetService)
       .replace('{{REGION}}',             () => region)
-      .replace('{{AUDIENCE}}',           () => 'Широкая аудитория')
+      .replace('{{AUDIENCE}}',           () => task.input_target_audience || 'Широкая аудитория')
       .replace('{{CURRENT_SECTION_JSON}}',() => JSON.stringify(block))
       .replace('{{STAGE1_JSON}}',        () => s3stage1Json)
       .replace('{{STAGE2_JSON}}',        () => s3stage2Json)
@@ -126,7 +126,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       'gemini',
       '',
       s3prompt,
-      { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}"`, log, onTokens }
+      { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}"`, temperature: 0.6, log, onTokens }
     ).catch(e => {
       log(`Stage 3 блок ${i + 1} ОШИБКА: ${e.message}`, 'error');
       return null;
@@ -163,7 +163,9 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       expertOpinionUsed = true;
     }
 
-    previousContext = stage3Result.html_content.substring(0, 300) + '...';
+    // Передаём расширенный контекст: 800 символов + H2 заголовки всех предыдущих блоков
+    const prevH2s = results.filter(r => r.html).map(r => r.block.h2).join(' | ');
+    previousContext = `[Предыдущие H2: ${prevH2s}]\n${stage3Result.html_content.substring(0, 800)}`;
 
     // Сохраняем черновик блока в task_content_blocks
     await db.query(
