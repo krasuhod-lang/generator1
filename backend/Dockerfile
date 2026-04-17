@@ -11,6 +11,10 @@ COPY . .
 # Создаём папку для загрузок
 RUN mkdir -p /app/uploads
 
+# Entrypoint: диагностика прокси при старте контейнера
+RUN chmod +x /app/docker-entrypoint.sh
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
 EXPOSE 3000
 
 CMD ["node", "server.js"]

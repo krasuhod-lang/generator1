@@ -99,7 +99,8 @@ function resolveProxyUrl(suffix = '') {
     const pass = process.env[`GEMINI_PROXY_PASS${suffix}`] || '';
     const proto = process.env[`GEMINI_PROXY_PROTO${suffix}`] || 'http';
     if (user && pass) {
-      return `${proto}://${user}:${pass}@${host}:${port}`;
+      // URL-encode user/pass — спецсимволы (@, :, #, $) ломают URL без кодирования
+      return `${proto}://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
     }
     return `${proto}://${host}:${port}`;
   }
@@ -223,9 +224,25 @@ if (PROXY_URLS.length > 0) {
     console.warn(`[gemini] Фоновый тест прокси завершился с ошибкой: ${err.message}`);
   });
 } else {
-  console.error('[gemini] ❌ КРИТИЧЕСКАЯ ОШИБКА: Прокси НЕ задан! Все запросы к Gemini API будут заблокированы.');
-  console.error('[gemini]   Задайте GEMINI_PROXY_URL в .env (формат: http://login:password@ip:port или login:password:ip:port)');
-  console.error('[gemini]   Или через компоненты: GEMINI_PROXY_HOST, GEMINI_PROXY_PORT, GEMINI_PROXY_USER, GEMINI_PROXY_PASS');
+  console.error('[gemini] ═══════════════════════════════════════════════════════════════');
+  console.error('[gemini] ❌ КРИТИЧЕСКАЯ ОШИБКА: Прокси НЕ задан!');
+  console.error('[gemini]    Все запросы к Gemini API будут заблокированы.');
+  console.error('[gemini] ');
+  console.error('[gemini]    РЕКОМЕНДУЕМЫЙ СПОСОБ — отдельные компоненты в .env:');
+  console.error('[gemini]      GEMINI_PROXY_HOST=155.212.59.188');
+  console.error('[gemini]      GEMINI_PROXY_PORT=64464');
+  console.error('[gemini]      GEMINI_PROXY_USER=your_login');
+  console.error('[gemini]      GEMINI_PROXY_PASS=your_password');
+  console.error('[gemini] ');
+  console.error('[gemini]    Или полная строка (в кавычках!):');
+  console.error('[gemini]      GEMINI_PROXY_URL="http://login:password@ip:port"');
+  console.error('[gemini] ');
+  console.error('[gemini]    После изменения .env пересоздайте контейнеры:');
+  console.error('[gemini]      docker compose down && docker compose up -d --build');
+  console.error('[gemini] ');
+  console.error('[gemini]    Проверка прокси из контейнера:');
+  console.error('[gemini]      docker exec seo_worker node scripts/check-proxy.js');
+  console.error('[gemini] ═══════════════════════════════════════════════════════════════');
 }
 
 /**
@@ -328,8 +345,15 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   // ── Прокси обязателен — без прокси запросы запрещены ──
   if (PROXY_URLS.length === 0) {
     throw new Error(
-      'GEMINI_PROXY_URL не задан! Все запросы к Gemini API требуют прокси. ' +
-      'Задайте GEMINI_PROXY_URL в .env (формат: http://login:password@ip:port)'
+      'GEMINI_PROXY не задан! Запросы к Gemini API без прокси запрещены.\n' +
+      'Задайте в .env (рекомендуется — компонентами):\n' +
+      '  GEMINI_PROXY_HOST=ip\n' +
+      '  GEMINI_PROXY_PORT=port\n' +
+      '  GEMINI_PROXY_USER=login\n' +
+      '  GEMINI_PROXY_PASS=password\n' +
+      'Или полной строкой: GEMINI_PROXY_URL="http://login:password@ip:port"\n' +
+      'Затем: docker compose down && docker compose up -d --build\n' +
+      'Проверка: docker exec seo_worker node scripts/check-proxy.js'
     );
   }
 
