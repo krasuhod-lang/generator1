@@ -228,13 +228,12 @@ async function testProxy(label, proxyUrl, targetUrl, displayUrl) {
 
     // Тест 2: Gemini API (список моделей)
     const geminiApiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
-    if (geminiApiKey) {
-      const geminiBase = 'https://generativelanguage.googleapis.com/v1beta/models';
-      // API key добавляется в URL только для HTTP-запроса, не для логирования
-      await testProxy(suffix, url, geminiBase + '?key=' + geminiApiKey, geminiBase + '?key=***');
-    } else {
-      console.log(`   ⚠  [${suffix}] → Gemini API — пропускаем (GEMINI_API_KEY не задан)`);
+    if (!process.env.GEMINI_API_KEY) {
+      console.log(`   ℹ  [${suffix}] → Gemini API — используем встроенный ключ`);
     }
+    const geminiBase = 'https://generativelanguage.googleapis.com/v1beta/models';
+    // API key добавляется в URL только для HTTP-запроса, не для логирования
+    await testProxy(suffix, url, geminiBase + '?key=' + geminiApiKey, geminiBase + '?key=***');
 
     console.log('');
   }

@@ -192,9 +192,8 @@ async function testProxyConnectivity() {
   if (PROXY_URLS.length === 0) return;
 
   const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
-  if (!apiKey) {
-    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан — пропускаем тест прокси');
-    return;
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан в env — используем встроенный ключ для теста');
   }
 
   // Лёгкий запрос — список моделей (не тратит токены)
@@ -324,8 +323,8 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
 
   // API ключ Gemini — из переменной окружения или встроенный fallback
   const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set in environment variables');
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан в env — используем встроенный ключ');
   }
 
   const endpoint = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
