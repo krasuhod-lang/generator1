@@ -38,7 +38,7 @@ function normalizeProxyUrl(raw) {
   if (withProto) {
     const [, proto, user, pass, host, port] = withProto;
     const normalized = `${proto}${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
-    console.log(`[gemini] Нормализация прокси: ${raw.replace(pass, '***')} → ${normalized.replace(encodeURIComponent(pass), '***')}`);
+    console.log(`[gemini] Нормализация прокси: ${proto}${user}:***@${host}:${port}`);
     return normalized;
   }
 
@@ -47,14 +47,18 @@ function normalizeProxyUrl(raw) {
   const noParts = raw.match(/^([^:]+):([^:]+):([^:]+):([^:]+)$/);
   if (noParts) {
     const [, p1, p2, p3, p4] = noParts;
-    const isIP = (s) => /^(\d{1,3}\.){3}\d{1,3}$/.test(s) || s.includes('.');
+    // IP-адрес: 4 октета 0-255, разделённых точками
+    const isIP = (s) => /^(\d{1,3}\.){3}\d{1,3}$/.test(s) && s.split('.').every(o => +o >= 0 && +o <= 255);
+    // Hostname: буквы, цифры, точки, дефисы; минимум одна точка и хотя бы одна буква
+    const isHostname = (s) => /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(s) && s.includes('.') && /[a-zA-Z]/.test(s);
+    const isHost = (s) => isIP(s) || isHostname(s);
     const isPort = (s) => /^\d+$/.test(s);
 
     let user, pass, host, port;
-    if (isIP(p3) && isPort(p4)) {
+    if (isHost(p3) && isPort(p4)) {
       // user:pass:host:port
       [user, pass, host, port] = [p1, p2, p3, p4];
-    } else if (isIP(p1) && isPort(p2)) {
+    } else if (isHost(p1) && isPort(p2)) {
       // host:port:user:pass
       [host, port, user, pass] = [p1, p2, p3, p4];
     } else {
@@ -62,7 +66,7 @@ function normalizeProxyUrl(raw) {
       return raw;
     }
     const normalized = `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
-    console.log(`[gemini] Нормализация прокси: ${raw.replace(pass, '***')} → ${normalized.replace(encodeURIComponent(pass), '***')}`);
+    console.log(`[gemini] Нормализация прокси: http://${user}:***@${host}:${port}`);
     return normalized;
   }
 
