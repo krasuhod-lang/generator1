@@ -106,6 +106,8 @@ async function runPipeline(task, ctx) {
 
   log(`Пайплайн запущен для задачи "${task.input_target_service}"`, 'info');
 
+  const pipelineStartedAt = Date.now();
+
   // ── Stage 0 ──────────────────────────────────────────────────────
   let stage0Result = null;
   try {
@@ -377,6 +379,9 @@ async function runPipeline(task, ctx) {
     s7Result = { finalHTML: finalBlocks.join('\n\n') };
   }
 
+  // Время генерации контента (в секундах)
+  const generationTimeSec = Math.round((Date.now() - pipelineStartedAt) / 1000);
+
   // Публикуем итоговое событие
   publish(taskId, {
     type:               'pipeline_done',
@@ -388,13 +393,15 @@ async function runPipeline(task, ctx) {
     finalHTMLLength:    (s7Result.finalHTML || '').length,
     eeatBreakdown:      s7Result.eeatBreakdown        || null,
     tfIdfDensity:       s7Result.tfIdfDensity          || [],
+    generationTimeSec,
   });
 
   log(
     `Пайплайн завершён. Блоков: ${finalBlocks.length} | ` +
     `LSI: ${s7Result.globalLSICoverage || 0}% | ` +
     `E-E-A-T: ${s7Result.globalEEATScore || 0} | ` +
-    `BM25: ${s7Result.bm25?.score?.toFixed(2) || '—'}`,
+    `BM25: ${s7Result.bm25?.score?.toFixed(2) || '—'} | ` +
+    `Время: ${Math.floor(generationTimeSec / 60)}м ${generationTimeSec % 60}с`,
     'success'
   );
 

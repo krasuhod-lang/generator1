@@ -64,6 +64,17 @@ const totalCost = computed(() =>
   metrics.value?.total_cost_usd ?? (deepseekCost.value + geminiCost.value)
 );
 
+// ── Время генерации ────────────────────────────────────────────────────────
+const generationTime = computed(() => {
+  const started   = task.value?.started_at;
+  const completed = task.value?.completed_at;
+  if (!started || !completed) return null;
+  const sec = Math.round((new Date(completed) - new Date(started)) / 1000);
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m}м ${s}с` : `${s}с`;
+});
+
 // E-E-A-T — детальная разбивка из Stage 7 (новый формат: объект с ключами)
 const EEAT_CRITERIA_NEW = [
   { key: 'experience',         label: 'Experience',         emoji: '🧑‍💼', maxScore: 2 },
@@ -246,7 +257,7 @@ function closeModal() {
             <div v-else class="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
 
               <!-- ══ Метрики ═══════════════════════════════════════════════ -->
-              <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div class="grid grid-cols-2 lg:grid-cols-5 gap-3">
                 <div class="card py-3 px-4">
                   <p class="text-xs text-gray-500 uppercase tracking-wide">LSI Coverage</p>
                   <p class="text-2xl font-bold mt-1" :class="lsiCoverage >= 80 ? 'text-green-400' : lsiCoverage >= 60 ? 'text-yellow-400' : 'text-red-400'">
@@ -269,6 +280,12 @@ function closeModal() {
                   <p class="text-xs text-gray-500 uppercase tracking-wide">PQ Score</p>
                   <p class="text-2xl font-bold mt-1" :class="pqScore >= 8 ? 'text-green-400' : pqScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
                     {{ pqScore }}<span class="text-base text-gray-600">/10</span>
+                  </p>
+                </div>
+                <div class="card py-3 px-4">
+                  <p class="text-xs text-gray-500 uppercase tracking-wide">⏱ Время</p>
+                  <p class="text-2xl font-bold text-cyan-400 mt-1">
+                    {{ generationTime || '—' }}
                   </p>
                 </div>
               </div>

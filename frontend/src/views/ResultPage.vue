@@ -72,6 +72,17 @@ const geminiCost   = computed(() => metrics.value?.gemini_cost_usd     ?? 0);
 const totalTokens  = computed(() => metrics.value?.total_tokens ?? (deepseekIn.value + deepseekOut.value + geminiIn.value + geminiOut.value));
 const totalCost    = computed(() => metrics.value?.total_cost_usd ?? (deepseekCost.value + geminiCost.value));
 
+// ── Время генерации ────────────────────────────────────────────────────────
+const generationTime = computed(() => {
+  const started   = task.value?.started_at;
+  const completed = task.value?.completed_at;
+  if (!started || !completed) return null;
+  const sec = Math.round((new Date(completed) - new Date(started)) / 1000);
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m}м ${s}с` : `${s}с`;
+});
+
 // ── Stage 7: вердикт ──────────────────────────────────────────────────────
 const hcuStatus = computed(() => verdict.value?.global_audit?.hcu_status || '—');
 const pqScore   = computed(() => verdict.value?.global_audit?.page_quality_score ?? '—');
@@ -202,8 +213,8 @@ function fmt(n, digits = 0) {
     <!-- Содержимое -->
     <main v-else class="max-w-7xl mx-auto px-6 py-6 space-y-6">
 
-      <!-- ══ Ряд 1: 4 карточки метрик ════════════════════════════════════ -->
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <!-- ══ Ряд 1: 5 карточек метрик ════════════════════════════════════ -->
+      <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
 
         <!-- LSI Coverage -->
         <div class="card flex flex-col gap-1">
@@ -249,6 +260,15 @@ function fmt(n, digits = 0) {
             {{ tfidfStatus.label }}
           </span>
           <p class="text-xs text-gray-600 mt-auto">Анализ плотности</p>
+        </div>
+
+        <!-- Время генерации -->
+        <div class="card flex flex-col gap-1">
+          <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">⏱ Время</p>
+          <p class="text-3xl font-bold text-cyan-400">
+            {{ generationTime || '—' }}
+          </p>
+          <p class="text-xs text-gray-600 mt-1">Генерация контента</p>
         </div>
       </div>
 
