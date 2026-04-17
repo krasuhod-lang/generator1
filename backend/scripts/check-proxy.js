@@ -44,7 +44,12 @@ for (const sfx of suffixes) {
       anyProxyFound = true;
       // Маскируем пароль
       if (key.includes('PASS') || key === 'GEMINI_PROXY_URL') {
-        vals[fullKey] = val.replace(/:([^:@]{1,})@/, ':***@').replace(/^(.{3}).*(.{3})$/, '$1***$2');
+        vals[fullKey] = val.replace(/:([^:@]{1,})@/, ':***@');
+        // Дополнительная маскировка для полного URL — показываем только начало и конец
+        if (vals[fullKey].length > 10) {
+          const masked = vals[fullKey];
+          vals[fullKey] = masked.substring(0, 8) + '***' + masked.substring(masked.length - 6);
+        }
       } else {
         vals[fullKey] = val;
       }
@@ -134,8 +139,13 @@ for (const sfx of suffixes) {
 console.log('2. Собранные proxy URL:\n');
 
 function safeLog(url) {
-  try { const u = new URL(url); if (u.password) u.password = '***'; return u.toString(); }
-  catch { return url.replace(/:([^:@]+)@/, ':***@'); }
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return url.replace(/:([^:@]+)@/, ':***@');
+  }
 }
 
 if (proxyUrls.length === 0) {
@@ -153,7 +163,9 @@ console.log('');
 // 3. Тест подключения
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function testProxy(label, proxyUrl, targetUrl) {
+async function testProxy(label, proxyUrl, targetUrl, displayUrl) {
+  // displayUrl — URL для логирования (без API ключей)
+  const logUrl = displayUrl || targetUrl;
   try {
     const agent = new HttpsProxyAgent(proxyUrl);
     const resp = await axios.get(targetUrl, {
@@ -164,26 +176,26 @@ async function testProxy(label, proxyUrl, targetUrl) {
     });
 
     if (resp.status === 200) {
-      console.log(`   ✅ [${label}] → ${targetUrl} — HTTP 200 OK`);
+      console.log(`   ✅ [${label}] → ${logUrl} — HTTP 200 OK`);
       if (resp.data && typeof resp.data === 'object') {
         const preview = JSON.stringify(resp.data).substring(0, 100);
         console.log(`      Ответ: ${preview}...`);
       }
       return true;
     } else if (resp.status === 407) {
-      console.log(`   ❌ [${label}] → ${targetUrl} — HTTP 407: прокси требует авторизацию!`);
+      console.log(`   ❌ [${label}] → ${logUrl} — HTTP 407: прокси требует авторизацию!`);
       console.log('      Проверьте логин/пароль прокси в .env');
       return false;
     } else {
-      console.log(`   ⚠  [${label}] → ${targetUrl} — HTTP ${resp.status}`);
+      console.log(`   ⚠  [${label}] → ${logUrl} — HTTP ${resp.status}`);
       return false;
     }
   } catch (err) {
     if (err.message && (err.message.includes('407') || err.message.includes('Proxy Authentication'))) {
-      console.log(`   ❌ [${label}] → ${targetUrl} — 407 Proxy Auth Required!`);
+      console.log(`   ❌ [${label}] → ${logUrl} — 407 Proxy Auth Required!`);
       console.log('      Прокси требует авторизацию. Проверьте логин/пароль.');
     } else {
-      console.log(`   ❌ [${label}] → ${targetUrl} — ${err.message}`);
+      console.log(`   ❌ [${label}] → ${logUrl} — ${err.message}`);
     }
     return false;
   }
@@ -200,7 +212,7 @@ async function testProxy(label, proxyUrl, targetUrl) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey) {
       const geminiUrl = 'https://generativelanguage.googleapis.com/v1beta/models?key=' + apiKey;
-      await testProxy(suffix, url, geminiUrl);
+      await testProxy(suffix, url, geminiUrl, 'https://generativelanguage.googleapis.com/v1beta/models?key=***');
     } else {
       console.log(`   ⚠  [${suffix}] → Gemini API — пропускаем (GEMINI_API_KEY не задан)`);
     }
