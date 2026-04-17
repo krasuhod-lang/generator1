@@ -86,7 +86,7 @@ function normalizeProxyUrl(raw) {
  *
  * Возвращает готовую URL-строку или пустую строку.
  */
-// ── Встроенные прокси-константы (используются если env-переменные не заданы) ──
+// ── Встроенные константы (используются если env-переменные не заданы) ──
 const DEFAULT_PROXY = {
   host:  '155.212.59.188',
   port:  '64464',
@@ -94,6 +94,8 @@ const DEFAULT_PROXY = {
   pass:  '3ukb66G1',
   proto: 'http',
 };
+
+const DEFAULT_GEMINI_API_KEY = 'AIzaSyB7crSRTwPocoY31vordEKmQFvEsgD0tLQ';
 
 function resolveProxyUrl(suffix = '') {
   // 1. Полная строка (с автонормализацией формата)
@@ -189,10 +191,9 @@ function logProxyDiagnostics() {
 async function testProxyConnectivity() {
   if (PROXY_URLS.length === 0) return;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан — пропускаем тест прокси');
-    return;
+  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан в env — используем встроенный ключ для теста');
   }
 
   // Лёгкий запрос — список моделей (не тратит токены)
@@ -320,10 +321,10 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
   if (timeoutMs < 1000 || timeoutMs > 300000) throw new Error('Invalid timeout');
 
-  // API ключ Gemini — из переменной окружения
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set in environment variables');
+  // API ключ Gemini — из переменной окружения или встроенный fallback
+  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан в env — используем встроенный ключ');
   }
 
   const endpoint = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
