@@ -198,7 +198,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       const isDeterministic = err.message === 'Input text too long'
                            || err.message.includes('API_KEY is not set')
                            || err.isDeterministic  // гео-блокировка (все прокси исчерпаны)
-                           || err.isGeoBlock;       // маркер из gemini.adapter
+                           || err.isGeoBlock        // маркер из gemini.adapter
+                           || err.message?.includes('User location is not supported'); // geo-block fallback по тексту
 
       if (isDeterministic || attempt === retries - 1) {
         log(`${callLabel || stageName} FAILED после ${attempt + 1} попыток: ${err.message}`, 'error');

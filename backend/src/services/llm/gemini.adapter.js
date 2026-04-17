@@ -195,6 +195,15 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
       : undefined;
     const proxyIdx = hasProxies ? (activeProxyIdx + attempt) % PROXY_URLS.length : -1;
 
+    // Логируем через какой прокси идёт запрос (для диагностики)
+    if (hasProxies && proxyAgent) {
+      console.log(`[gemini] Запрос через прокси [${proxyIdx}] ${safeProxyLog(PROXY_URLS[proxyIdx])}`);
+    } else if (hasProxies && !proxyAgent) {
+      console.warn(`[gemini] ⚠ Прокси [${proxyIdx}] не удалось создать — запрос пойдёт НАПРЯМУЮ`);
+    } else {
+      console.warn(`[gemini] Запрос НАПРЯМУЮ (прокси не настроен)`);
+    }
+
     const axiosCfg = {
       timeout:        timeoutMs,
       headers:        { 'Content-Type': 'application/json' },
@@ -208,7 +217,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     } catch (networkErr) {
       // Сетевая ошибка прокси (timeout, ECONNREFUSED и т.д.)
       // Переключаемся на следующий прокси
-      const proxyLabel = hasProxies ? `прокси [${proxyIdx}]` : 'напрямую';
+      const proxyLabel = hasProxies ? `прокси [${proxyIdx}] ${safeProxyLog(PROXY_URLS[proxyIdx])}` : 'напрямую';
       console.warn(`[gemini] Сетевая ошибка через ${proxyLabel}: ${networkErr.message}`);
       lastError = networkErr;
 
@@ -234,7 +243,8 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
       }
       // Включаем детали ошибки из ответа API для отладки
       const detail = response.data?.error?.message || JSON.stringify(response.data).slice(0, 300);
-      const fullMsg = `Gemini API error ${response.status}: ${msg} — ${detail}`;
+      const proxyInfo = hasProxies ? ` [proxy ${proxyIdx}]` : ' [DIRECT/no proxy]';
+      const fullMsg = `Gemini API error ${response.status}: ${msg} — ${detail}${proxyInfo}`;
 
       // ── Гео-блокировка → переключаем прокси ──────────────────────
       if (isGeoBlockError(detail) && attempt < totalAttempts - 1) {
@@ -242,6 +252,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
         console.warn(`[gemini] Гео-блокировка через ${proxyLabel}. Переключаемся на следующий прокси...`);
         lastError = new Error(fullMsg);
         lastError.isGeoBlock = true;
+        lastError.isDeterministic = true;
         continue;
       }
 
@@ -271,7 +282,12 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   }
 
   // Сюда попадаем только если все прокси перебраны и ни один не сработал
-  throw lastError || new Error('All Gemini proxies exhausted');
+  if (lastError) {
+    lastError.isDeterministic = true;
+    lastError.isGeoBlock = lastError.isGeoBlock || false;
+    throw lastError;
+  }
+  throw new Error('All Gemini proxies exhausted');
 }
 
 module.exports = { callGemini };
