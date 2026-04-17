@@ -140,13 +140,16 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     stageName = 'unknown',
     callLabel = '',
     onLog      = null,
+    log: optLog = null,  // stages передают { log } — принимаем оба варианта
     onTokens   = null,   // callback(model, tokensIn, tokensOut, costUsd) — для SSE
     temperature,
     maxTokens,
   } = opts;
 
+  const logCallback = onLog || optLog;
+
   const log = (msg, level = 'info') => {
-    if (onLog) onLog(msg, level);
+    if (logCallback) logCallback(msg, level);
     else console.log(`[callLLM:${stageName}] [${level}] ${msg}`);
   };
 
