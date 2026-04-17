@@ -12,6 +12,7 @@ const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
 const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
+const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -191,7 +192,7 @@ async function runPipeline(task, ctx) {
    * auditAndRefineBlock — запускает Stage 4→5→6 для одного блока.
    * Вынесен в отдельную функцию для pipeline interleaving.
    */
-  async function auditAndRefineBlock(i, blockHtml, block) {
+  async function auditAndRefineBlock(i, blockHtml, block, blockExpertOpinionUsed) {
     const lsiMust = block.lsi_must || [];
     lsiMust.forEach(term => allLSISet.add(term));
 
@@ -242,7 +243,8 @@ async function runPipeline(task, ctx) {
           task, stageCtx,
           i, currentHTML, lsiMust,
           currentAudit, currentPQ,
-          competitorFacts, block.h2
+          competitorFacts, block.h2,
+          blockExpertOpinionUsed
         );
         currentHTML  = s5.html;
         currentPQ    = s5.pqScore;
@@ -291,9 +293,12 @@ async function runPipeline(task, ctx) {
     return currentHTML;
   }
 
-  // ── Pipeline Interleaving Loop ────────────────────────────────────
-  // Стратегия: генерируем блок N, параллельно аудируем блок N-1
-  let pendingAudit = null; // Promise аудита предыдущего блока
+  // ── Pipeline: генерация последовательно, аудиты параллельно ──────
+  // Стратегия: блоки генерируются последовательно (каждому нужен previousContext),
+  // но аудит каждого блока запускается СРАЗУ после его генерации и работает
+  // параллельно с генерацией следующих блоков и аудитами предыдущих.
+  // Stage 3 (Gemini) и Stage 4-6 (DeepSeek) — разные API, не конкурируют.
+  const auditPromises = []; // промисы аудита всех блоков
 
   for (let i = 0; i < taxonomy.length; i++) {
     const block = taxonomy[i];
@@ -301,61 +306,61 @@ async function runPipeline(task, ctx) {
     const blockMinChars    = Math.round(minChars    * (blockWeights[i] / weightSum)) || 600;
     const blockMaxChars    = Math.round(maxChars    * (blockWeights[i] / weightSum)) || 2500;
 
-    // Запускаем генерацию текущего блока (Gemini)
-    const genPromise = generateSingleBlock(task, stageCtx, block, i, taxonomy.length, {
+    // Capture expert opinion state BEFORE this block is generated
+    const blockExpertOpinionUsed = expertOpinionUsed;
+
+    // Генерация текущего блока (Gemini) — await, т.к. нужен previousContext для следующего
+    const genResult = await generateSingleBlock(task, stageCtx, block, i, taxonomy.length, {
       targetService, region, brandFacts, nGrams, tfIdfData, authorName,
       s3stage1Json, s3stage2Json, stage0Signals, competitorsData, competitorFactsStr,
       blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
       expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
     });
 
-    // Параллельно ожидаем аудит предыдущего блока (DeepSeek) + генерацию текущего (Gemini)
-    // Разные API → нет конфликта rate limits
-    if (pendingAudit) {
-      const [genResult, auditedHTML] = await Promise.all([genPromise, pendingAudit]);
-
-      // Обработка результата аудита предыдущего блока
-      if (auditedHTML) finalBlocks.push(auditedHTML);
-
-      // Обработка результата генерации текущего блока
-      if (genResult.html) {
-        expertOpinionUsed = genResult.expertOpinionUsed;
-        previousContext   = genResult.previousContext;
-        generatedH2s.push(block.h2);
-      }
-
-      // Запускаем аудит текущего блока (будет ожидаться на следующей итерации или после цикла)
-      pendingAudit = genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block)
-        : Promise.resolve(null);
-    } else {
-      // Первый блок — просто генерируем, аудит запустим в следующей итерации
-      const genResult = await genPromise;
-
-      if (genResult.html) {
-        expertOpinionUsed = genResult.expertOpinionUsed;
-        previousContext   = genResult.previousContext;
-        generatedH2s.push(block.h2);
-      }
-
-      pendingAudit = genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block)
-        : Promise.resolve(null);
+    // Обновляем контекст для генерации следующего блока
+    if (genResult.html) {
+      expertOpinionUsed = genResult.expertOpinionUsed;
+      previousContext   = genResult.previousContext;
+      generatedH2s.push(block.h2);
     }
+
+    // Запускаем аудит сразу (Stage 4→5→6, DeepSeek) — НЕ ждём предыдущие аудиты
+    // blockExpertOpinionUsed передаётся в Stage 5 чтобы не добавлять лишний blockquote
+    auditPromises.push(
+      genResult.html
+        ? auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed)
+        : Promise.resolve(null)
+    );
 
     // Прогресс: Stage 3-6 занимают ~35-88% в пайплайне
     const pct = 35 + Math.round(((i + 1) / taxonomy.length) * 53);
     progress(pct, 'stage3-6');
   }
 
-  // Ожидаем завершение аудита последнего блока
-  if (pendingAudit) {
-    const lastAuditedHTML = await pendingAudit;
-    if (lastAuditedHTML) finalBlocks.push(lastAuditedHTML);
+  // Ожидаем завершение всех аудитов (результаты в порядке блоков)
+  const auditResults = await Promise.all(auditPromises);
+  for (const html of auditResults) {
+    if (html) finalBlocks.push(html);
   }
 
   if (!finalBlocks.length) {
     throw new Error('Пайплайн: ни один блок не был сгенерирован');
+  }
+
+  // ── Post-processing: enforce single expert blockquote across all blocks ──
+  // Safety net for the race condition: audits run in parallel,
+  // so multiple blocks may get blockquotes via Stage 5.
+  // Keep only the FIRST block's blockquote, strip from the rest.
+  let expertBlockFound = false;
+  for (let i = 0; i < finalBlocks.length; i++) {
+    if (/<blockquote[\s>]/i.test(finalBlocks[i])) {
+      if (expertBlockFound) {
+        log(`Post-processing: блок ${i + 1} содержит лишний blockquote — удаляем (экспертное мнение уже в предыдущем блоке)`, 'warn');
+        finalBlocks[i] = stripExpertBlockquotes(finalBlocks[i]);
+      } else {
+        expertBlockFound = true;
+      }
+    }
   }
 
   // ── Stage 7: Глобальный аудит ────────────────────────────────────

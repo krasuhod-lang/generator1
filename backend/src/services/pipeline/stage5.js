@@ -4,6 +4,7 @@ const { callLLM }           = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }    = require('../../prompts/systemPrompts');
 const { reAuditBlock }      = require('./stage4');
 const { factCheck }         = require('../../utils/factCheck');
+const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 
 /**
  * STOP_PHRASES — фразы-маркеры "воды".
@@ -90,7 +91,8 @@ async function runStage5(
   task, ctx,
   blockIndex, htmlContent, lsiMust,
   auditResult, pqScore,
-  competitorFacts = [], h2 = ''
+  competitorFacts = [], h2 = '',
+  expertOpinionUsed = false
 ) {
   const { log, taskId, onTokens } = ctx;
 
@@ -134,7 +136,11 @@ NON-NEGOTIABLE RULES (нарушение = брак):
     log(`Stage 5 блок ${blockIndex + 1}: рефайн итерация ${s5Loop}/${s5MaxLoops} (PQ ${currentPQ} < 8). Запрос...`, 'info');
 
     let specialInstruction = baseSpecialInstruction;
-    specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= 8. Добавь экспертное мнение (blockquote), конкретные данные, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
+    if (expertOpinionUsed) {
+      specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= 8. НЕ ДОБАВЛЯЙ <blockquote> — экспертное мнение уже использовано в другом блоке статьи. Демонстрируй Expertise через конкретные данные, терминологию, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
+    } else {
+      specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= 8. Добавь экспертное мнение (blockquote), конкретные данные, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
+    }
 
     const s5Prompt = SYSTEM_PROMPTS.stage5
       .replace('{{TARGET_SERVICE}}',   () => targetService)
@@ -185,6 +191,12 @@ NON-NEGOTIABLE RULES (нарушение = брак):
     log(`Stage 5 блок ${blockIndex + 1}: PQ ${currentPQ} >= 8 ✓ (${s5Loop} итераций)`, 'success');
   } else {
     log(`Stage 5 блок ${blockIndex + 1}: PQ ${currentPQ} после ${s5Loop} итераций — продолжаем с лучшим результатом`, 'warn');
+  }
+
+  // ── Enforce single expert opinion: strip blockquotes if already used ──
+  if (expertOpinionUsed && /<blockquote[\s>]/i.test(currentHTML)) {
+    log(`Stage 5 блок ${blockIndex + 1}: экспертное мнение уже использовано — удаляем лишний blockquote после рефайна`, 'warn');
+    currentHTML = stripExpertBlockquotes(currentHTML);
   }
 
   // ── TF-IDF overuse check ────────────────────────────────────────
