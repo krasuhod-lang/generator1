@@ -12,6 +12,7 @@ const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
 const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
+const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -355,7 +356,7 @@ async function runPipeline(task, ctx) {
     if (/<blockquote[\s>]/i.test(finalBlocks[i])) {
       if (expertBlockFound) {
         log(`Post-processing: блок ${i + 1} содержит лишний blockquote — удаляем (экспертное мнение уже в предыдущем блоке)`, 'warn');
-        finalBlocks[i] = finalBlocks[i].replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '').replace(/\n{3,}/g, '\n\n');
+        finalBlocks[i] = stripExpertBlockquotes(finalBlocks[i]);
       } else {
         expertBlockFound = true;
       }

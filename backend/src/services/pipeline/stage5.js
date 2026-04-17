@@ -4,6 +4,7 @@ const { callLLM }           = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }    = require('../../prompts/systemPrompts');
 const { reAuditBlock }      = require('./stage4');
 const { factCheck }         = require('../../utils/factCheck');
+const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 
 /**
  * STOP_PHRASES — фразы-маркеры "воды".
@@ -195,7 +196,7 @@ NON-NEGOTIABLE RULES (нарушение = брак):
   // ── Enforce single expert opinion: strip blockquotes if already used ──
   if (expertOpinionUsed && /<blockquote[\s>]/i.test(currentHTML)) {
     log(`Stage 5 блок ${blockIndex + 1}: экспертное мнение уже использовано — удаляем лишний blockquote после рефайна`, 'warn');
-    currentHTML = currentHTML.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '').replace(/\n{3,}/g, '\n\n');
+    currentHTML = stripExpertBlockquotes(currentHTML);
   }
 
   // ── TF-IDF overuse check ────────────────────────────────────────

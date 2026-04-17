@@ -5,6 +5,7 @@ const { SYSTEM_PROMPTS }    = require('../../prompts/systemPrompts');
 const db                    = require('../../config/db');
 const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
 const { checkAntiWater }    = require('./stage5');
+const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
@@ -24,18 +25,6 @@ function structuralPreCheck(html, expertOpinionUsed, brandFacts) {
     ...preCheck.issues,
     ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
   ];
-}
-
-/**
- * stripExpertBlockquotes — удаляет <blockquote> с экспертным мнением из HTML.
- * Используется когда expertOpinionUsed === true для обеспечения правила
- * «экспертное мнение строго 1 раз на всю статью».
- *
- * @param {string} html — HTML-контент блока
- * @returns {string} — HTML без экспертных blockquote
- */
-function stripExpertBlockquotes(html) {
-  return html.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi, '').replace(/\n{3,}/g, '\n\n');
 }
 
 /**
