@@ -16,67 +16,132 @@ const GEMINI_BASE_URL =
 /**
  * Собирает proxy URL из переменных окружения.
  *
+ * @param {string} suffix — '' для основного прокси, '_2' для запасного
+ *
  * Приоритет:
- *   1. GEMINI_PROXY_URL — полная строка http://login:password@ip:port
- *   2. GEMINI_PROXY_HOST + GEMINI_PROXY_PORT (+ опционально GEMINI_PROXY_USER / GEMINI_PROXY_PASS)
- *   3. HTTPS_PROXY / https_proxy — системная переменная
+ *   1. GEMINI_PROXY_URL[suffix] — полная строка http://login:password@ip:port
+ *   2. GEMINI_PROXY_HOST[suffix] + GEMINI_PROXY_PORT[suffix] (+ опционально USER / PASS)
+ *   3. (только для основного) HTTPS_PROXY / https_proxy — системная переменная
  *
  * Возвращает готовую URL-строку или пустую строку.
  */
-function resolveProxyUrl() {
+function resolveProxyUrl(suffix = '') {
   // 1. Полная строка
-  const full = process.env.GEMINI_PROXY_URL || '';
+  const full = process.env[`GEMINI_PROXY_URL${suffix}`] || '';
   if (full) return full;
 
   // 2. Компоненты
-  const host = process.env.GEMINI_PROXY_HOST || '';
-  const port = process.env.GEMINI_PROXY_PORT || '';
+  const host = process.env[`GEMINI_PROXY_HOST${suffix}`] || '';
+  const port = process.env[`GEMINI_PROXY_PORT${suffix}`] || '';
   if (host && port) {
-    const user = process.env.GEMINI_PROXY_USER || '';
-    const pass = process.env.GEMINI_PROXY_PASS || '';
-    const proto = process.env.GEMINI_PROXY_PROTO || 'http';
+    const user = process.env[`GEMINI_PROXY_USER${suffix}`] || '';
+    const pass = process.env[`GEMINI_PROXY_PASS${suffix}`] || '';
+    const proto = process.env[`GEMINI_PROXY_PROTO${suffix}`] || 'http';
     if (user && pass) {
       return `${proto}://${user}:${pass}@${host}:${port}`;
     }
     return `${proto}://${host}:${port}`;
   }
 
-  // 3. Системная
-  return process.env.HTTPS_PROXY || process.env.https_proxy || '';
+  // 3. Системная (только для основного прокси)
+  if (!suffix) {
+    return process.env.HTTPS_PROXY || process.env.https_proxy || '';
+  }
+
+  return '';
 }
 
-/** Кэшированная URL-строка прокси (вычисляется один раз при старте) */
-const RESOLVED_PROXY_URL = resolveProxyUrl();
+/**
+ * Маскирует пароль в URL прокси для безопасного логирования.
+ */
+function maskProxyUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return url.replace(/:([^:@]+)@/, ':***@');
+  }
+}
+
+/** Кэшированные URL-строки прокси (вычисляются один раз при старте) */
+const PROXY_PRIMARY  = resolveProxyUrl('');
+const PROXY_BACKUP   = resolveProxyUrl('_2');
+
+/**
+ * Упорядоченный список доступных прокси.
+ * Индекс activeProxyIdx указывает на текущий «предпочитаемый» прокси;
+ * при geo-ошибке сдвигается к следующему.
+ */
+const PROXY_LIST = [PROXY_PRIMARY, PROXY_BACKUP].filter(Boolean);
+
+/** Индекс текущего активного прокси (сдвигается при geo-ошибке) */
+let activeProxyIdx = 0;
 
 // Стартовый лог — показывает, через что пойдут запросы
-if (RESOLVED_PROXY_URL) {
-  // Скрываем пароль в логе
-  try {
-    const u = new URL(RESOLVED_PROXY_URL);
-    if (u.password) u.password = '***';
-    console.log(`[gemini] Прокси включён: ${u.toString()}`);
-  } catch {
-    console.log(`[gemini] Прокси включён: ${RESOLVED_PROXY_URL.replace(/:([^:@]+)@/, ':***@')}`);
-  }
+if (PROXY_LIST.length >= 2) {
+  console.log(`[gemini] Прокси основной: ${maskProxyUrl(PROXY_LIST[0])}`);
+  console.log(`[gemini] Прокси запасной: ${maskProxyUrl(PROXY_LIST[1])}`);
+} else if (PROXY_LIST.length === 1) {
+  console.log(`[gemini] Прокси включён: ${maskProxyUrl(PROXY_LIST[0])}`);
+  console.warn('[gemini] ⚠ Запасной прокси НЕ задан. Задайте GEMINI_PROXY_*_2 в .env');
 } else {
   console.warn('[gemini] ⚠ Прокси НЕ задан! Запросы пойдут напрямую. Задайте GEMINI_PROXY_* в .env');
 }
 
 /**
- * Создаёт httpAgent из кэшированного proxy URL.
+ * Создаёт httpAgent для указанного proxy URL.
  */
-function buildProxyAgent() {
-  if (!RESOLVED_PROXY_URL) return undefined;
+function buildProxyAgent(proxyUrl) {
+  if (!proxyUrl) return undefined;
   try {
-    return new HttpsProxyAgent(RESOLVED_PROXY_URL);
+    return new HttpsProxyAgent(proxyUrl);
   } catch (e) {
-    console.warn('[gemini] Неверный прокси, запросы пойдут напрямую:', e.message);
+    console.warn(`[gemini] Неверный прокси ${maskProxyUrl(proxyUrl)}, пропуск:`, e.message);
     return undefined;
   }
 }
 
 /**
- * Gemini Adapter
+ * Определяет, является ли ответ ошибкой гео-ограничения Google.
+ */
+function isGeoRestrictionError(response) {
+  if (!response || response.status !== 400) return false;
+  const detail = response.data?.error?.message || '';
+  return detail.includes('User location is not supported');
+}
+
+/**
+ * Выполняет один HTTP-запрос к Gemini API с указанным прокси.
+ *
+ * @param {string} endpoint  — URL эндпоинта Gemini
+ * @param {object} payload   — тело запроса
+ * @param {string} proxyUrl  — URL прокси (пустая строка = без прокси)
+ * @param {number} timeoutMs — таймаут
+ * @returns {Promise<import('axios').AxiosResponse>}
+ */
+async function executeGeminiRequest(endpoint, payload, proxyUrl, timeoutMs) {
+  const proxyAgent = buildProxyAgent(proxyUrl);
+
+  const axiosCfg = {
+    timeout:        timeoutMs,
+    headers:        { 'Content-Type': 'application/json' },
+    validateStatus: null,
+    ...(proxyAgent ? { httpsAgent: proxyAgent, proxy: false } : {}),
+  };
+
+  return axios.post(endpoint, payload, axiosCfg);
+}
+
+/**
+ * Gemini Adapter с поддержкой двух прокси (основной + запасной).
+ *
+ * Логика:
+ *   1. Запрос идёт через текущий активный прокси (activeProxyIdx).
+ *   2. Если получаем geo-ошибку (400 «User location is not supported»),
+ *      автоматически переключаемся на следующий прокси и повторяем.
+ *   3. Если все прокси исчерпаны — выбрасываем ошибку.
+ *   4. Удачный прокси запоминается как активный для последующих вызовов.
  *
  * @param {string} systemInstruction  — системный промпт
  * @param {string} userPrompt         — пользовательский промпт
@@ -150,18 +215,49 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     ],
   };
 
-  // Прокси для Gemini API (из кэшированного proxy URL)
-  const proxyAgent = buildProxyAgent();
+  // ── Попытки через доступные прокси ─────────────────────────────────
+  // Если прокси не настроены — идём напрямую (единственная попытка).
+  if (PROXY_LIST.length === 0) {
+    const response = await executeGeminiRequest(endpoint, payload, '', timeoutMs);
+    return handleGeminiResponse(response);
+  }
 
-  const axiosCfg   = {
-    timeout:        timeoutMs,
-    headers:        { 'Content-Type': 'application/json' },
-    validateStatus: null,
-    ...(proxyAgent ? { httpsAgent: proxyAgent, proxy: false } : {}),
-  };
+  // Начинаем с текущего активного прокси, при geo-ошибке переключаемся.
+  const startIdx = activeProxyIdx;
+  let lastGeoError = null;
 
-  const response = await axios.post(endpoint, payload, axiosCfg);
+  for (let i = 0; i < PROXY_LIST.length; i++) {
+    const proxyIdx = (startIdx + i) % PROXY_LIST.length;
+    const proxyUrl = PROXY_LIST[proxyIdx];
 
+    const response = await executeGeminiRequest(endpoint, payload, proxyUrl, timeoutMs);
+
+    // Geo-ограничение → пробуем следующий прокси
+    if (isGeoRestrictionError(response)) {
+      const detail = response.data?.error?.message || '';
+      lastGeoError = new Error(`Gemini API error 400: Client error (400) — ${detail}`);
+      lastGeoError.status = 400;
+      console.warn(`[gemini] Прокси ${proxyIdx + 1} (${maskProxyUrl(proxyUrl)}) — geo-ограничение, переключение...`);
+      continue;
+    }
+
+    // Успешный или иной (не geo) ответ — запоминаем рабочий прокси
+    activeProxyIdx = proxyIdx;
+    if (proxyIdx !== startIdx) {
+      console.log(`[gemini] Активный прокси переключён на ${proxyIdx + 1} (${maskProxyUrl(proxyUrl)})`);
+    }
+
+    return handleGeminiResponse(response);
+  }
+
+  // Все прокси дали geo-ошибку
+  throw lastGeoError || new Error('Gemini API: все прокси вернули geo-ограничение');
+}
+
+/**
+ * Обрабатывает ответ Gemini API (общая логика для любого прокси).
+ */
+function handleGeminiResponse(response) {
   if (response.status === 429 || response.status === 503) {
     const err = new Error(`Gemini rate limit / overload: HTTP ${response.status}`);
     err.status = response.status;

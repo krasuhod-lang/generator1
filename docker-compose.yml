@@ -77,6 +77,13 @@ services:
       GEMINI_PROXY_USER: ${GEMINI_PROXY_USER:-}
       GEMINI_PROXY_PASS: ${GEMINI_PROXY_PASS:-}
       GEMINI_PROXY_PROTO: ${GEMINI_PROXY_PROTO:-http}
+      # Запасной прокси для Gemini API
+      GEMINI_PROXY_URL_2: ${GEMINI_PROXY_URL_2:-}
+      GEMINI_PROXY_HOST_2: ${GEMINI_PROXY_HOST_2:-}
+      GEMINI_PROXY_PORT_2: ${GEMINI_PROXY_PORT_2:-}
+      GEMINI_PROXY_USER_2: ${GEMINI_PROXY_USER_2:-}
+      GEMINI_PROXY_PASS_2: ${GEMINI_PROXY_PASS_2:-}
+      GEMINI_PROXY_PROTO_2: ${GEMINI_PROXY_PROTO_2:-http}
     ports:
       - "3000:3000"
     depends_on:
@@ -107,6 +114,13 @@ services:
       GEMINI_PROXY_USER: ${GEMINI_PROXY_USER:-}
       GEMINI_PROXY_PASS: ${GEMINI_PROXY_PASS:-}
       GEMINI_PROXY_PROTO: ${GEMINI_PROXY_PROTO:-http}
+      # Запасной прокси для Gemini API
+      GEMINI_PROXY_URL_2: ${GEMINI_PROXY_URL_2:-}
+      GEMINI_PROXY_HOST_2: ${GEMINI_PROXY_HOST_2:-}
+      GEMINI_PROXY_PORT_2: ${GEMINI_PROXY_PORT_2:-}
+      GEMINI_PROXY_USER_2: ${GEMINI_PROXY_USER_2:-}
+      GEMINI_PROXY_PASS_2: ${GEMINI_PROXY_PASS_2:-}
+      GEMINI_PROXY_PROTO_2: ${GEMINI_PROXY_PROTO_2:-http}
     command: node src/queue/worker.js
     depends_on:
       postgres:
