@@ -140,10 +140,88 @@ function safeProxyLog(url) {
   }
 }
 
+/**
+ * Диагностика переменных окружения для прокси (помогает найти проблему).
+ */
+function logProxyDiagnostics() {
+  const suffixes = ['', '_2', '_3', '_4', '_5'];
+  const envVars = [];
+  for (const sfx of suffixes) {
+    const url  = process.env[`GEMINI_PROXY_URL${sfx}`] || '';
+    const host = process.env[`GEMINI_PROXY_HOST${sfx}`] || '';
+    const port = process.env[`GEMINI_PROXY_PORT${sfx}`] || '';
+    const user = process.env[`GEMINI_PROXY_USER${sfx}`] || '';
+    const pass = process.env[`GEMINI_PROXY_PASS${sfx}`] || '';
+    if (url || host || port || user || pass) {
+      envVars.push(`  GEMINI_PROXY_URL${sfx}=${url ? '✓ задан' : '(пусто)'} | HOST${sfx}=${host ? '✓' : '-'} PORT${sfx}=${port ? '✓' : '-'} USER${sfx}=${user ? '✓' : '-'} PASS${sfx}=${pass ? '✓' : '-'}`);
+    }
+  }
+  if (envVars.length > 0) {
+    console.log(`[gemini] Переменные окружения прокси:\n${envVars.join('\n')}`);
+  } else {
+    console.warn('[gemini] ⚠ Ни одна переменная GEMINI_PROXY_* не задана!');
+    console.warn('[gemini]   Задайте в .env, например: GEMINI_PROXY_URL=login:password:ip:port');
+    console.warn('[gemini]   Или через компоненты: GEMINI_PROXY_HOST, _PORT, _USER, _PASS');
+  }
+}
+
+/**
+ * Стартовый тест прокси — один лёгкий GET-запрос для проверки связности.
+ * Не блокирует инициализацию — работает в фоне.
+ */
+async function testProxyConnectivity() {
+  if (PROXY_URLS.length === 0) return;
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан — пропускаем тест прокси');
+    return;
+  }
+
+  // Лёгкий запрос — список моделей (не тратит токены)
+  const testUrl = `${GEMINI_BASE_URL}?key=${apiKey}`;
+
+  for (let i = 0; i < PROXY_URLS.length; i++) {
+    const agent = buildProxyAgent(i);
+    if (!agent) continue;
+
+    try {
+      const resp = await axios.get(testUrl, {
+        httpsAgent: agent,
+        proxy:      false,
+        timeout:    15000,
+        validateStatus: null,
+      });
+      if (resp.status === 200) {
+        console.log(`[gemini] ✅ Прокси [${i}] ${safeProxyLog(PROXY_URLS[i])} — работает`);
+      } else if (resp.status === 407) {
+        console.error(`[gemini] ❌ Прокси [${i}] ${safeProxyLog(PROXY_URLS[i])} — ошибка 407: прокси требует авторизацию. Проверьте логин/пароль в GEMINI_PROXY_URL`);
+      } else if (resp.status === 400 && isGeoBlockError(resp.data?.error?.message || '')) {
+        console.warn(`[gemini] ⚠ Прокси [${i}] ${safeProxyLog(PROXY_URLS[i])} — гео-блокировка (IP прокси в запрещённом регионе)`);
+      } else {
+        console.warn(`[gemini] ⚠ Прокси [${i}] ${safeProxyLog(PROXY_URLS[i])} — HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      // Специальная обработка 407 — https-proxy-agent бросает ошибку при CONNECT
+      if (err.message && (err.message.includes('407') || err.message.includes('Proxy Authentication Required'))) {
+        console.error(`[gemini] ❌ Прокси [${i}] ${safeProxyLog(PROXY_URLS[i])} — ошибка 407: прокси требует авторизацию!`);
+        console.error(`[gemini]   Проверьте логин/пароль. Формат: GEMINI_PROXY_URL=login:password:ip:port`);
+      } else {
+        console.warn(`[gemini] ⚠ Прокси [${i}] ${safeProxyLog(PROXY_URLS[i])} — ошибка: ${err.message}`);
+      }
+    }
+  }
+}
+
 // Стартовый лог — показывает, через что пойдут запросы
+logProxyDiagnostics();
 if (PROXY_URLS.length > 0) {
   console.log(`[gemini] Прокси включён (${PROXY_URLS.length} шт):`);
   PROXY_URLS.forEach((u, i) => console.log(`  [${i}] ${safeProxyLog(u)}`));
+  // Фоновый тест — не блокирует запуск
+  testProxyConnectivity().catch(err => {
+    console.warn(`[gemini] Фоновый тест прокси завершился с ошибкой: ${err.message}`);
+  });
 } else {
   console.warn('[gemini] ⚠ Прокси НЕ задан! Запросы пойдут напрямую. Задайте GEMINI_PROXY_* в .env');
 }
@@ -283,14 +361,42 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
       // Сетевая ошибка прокси (timeout, ECONNREFUSED и т.д.)
       // Переключаемся на следующий прокси
       const proxyLabel = hasProxies ? `прокси [${proxyIdx}] ${safeProxyLog(PROXY_URLS[proxyIdx])}` : 'напрямую';
-      console.warn(`[gemini] Сетевая ошибка через ${proxyLabel}: ${networkErr.message}`);
-      lastError = networkErr;
+
+      // Специальная обработка 407 — прокси требует авторизацию
+      const is407 = networkErr.message && (networkErr.message.includes('407') || networkErr.message.includes('Proxy Authentication Required'));
+      if (is407) {
+        console.error(`[gemini] ❌ Прокси [${proxyIdx}] — ошибка 407: прокси требует авторизацию!`);
+        console.error(`[gemini]   Проверьте логин/пароль в GEMINI_PROXY_URL. Формат: login:password:ip:port`);
+        const authErr = new Error(`Proxy authentication failed (407) for ${proxyLabel}. Check GEMINI_PROXY_URL credentials.`);
+        authErr.isProxyAuthError = true;
+        authErr.isDeterministic = true;
+        lastError = authErr;
+      } else {
+        console.warn(`[gemini] Сетевая ошибка через ${proxyLabel}: ${networkErr.message}`);
+        lastError = networkErr;
+      }
 
       if (attempt < totalAttempts - 1) {
         console.log(`[gemini] Переключаемся на следующий прокси...`);
         continue;
       }
-      throw networkErr;
+      throw lastError;
+    }
+
+    if (response.status === 407) {
+      // Прокси вернул 407 как HTTP-ответ (а не как ошибку CONNECT)
+      const proxyLabel = hasProxies ? safeProxyLog(PROXY_URLS[proxyIdx]) : 'напрямую';
+      console.error(`[gemini] ❌ Прокси [${proxyIdx}] — HTTP 407: прокси требует авторизацию!`);
+      console.error(`[gemini]   Проверьте логин/пароль в GEMINI_PROXY_URL. Формат: login:password:ip:port`);
+      const authErr = new Error(`Proxy authentication failed (407) for ${proxyLabel}. Check GEMINI_PROXY_URL credentials.`);
+      authErr.isProxyAuthError = true;
+      authErr.isDeterministic = true;
+      lastError = authErr;
+      if (attempt < totalAttempts - 1) {
+        console.log(`[gemini] Переключаемся на следующий прокси...`);
+        continue;
+      }
+      throw authErr;
     }
 
     if (response.status === 429 || response.status === 503) {
