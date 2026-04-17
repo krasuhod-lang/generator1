@@ -191,11 +191,13 @@ async function testProxy(label, proxyUrl, targetUrl, displayUrl) {
       return false;
     }
   } catch (err) {
-    if (err.message && (err.message.includes('407') || err.message.includes('Proxy Authentication'))) {
+    // Очищаем сообщение ошибки от возможных URL/ключей
+    const safeErrMsg = (err.message || 'unknown error').replace(/key=[^&\s]+/gi, 'key=***');
+    if (safeErrMsg.includes('407') || safeErrMsg.includes('Proxy Authentication')) {
       console.log(`   ❌ [${label}] → ${logUrl} — 407 Proxy Auth Required!`);
       console.log('      Прокси требует авторизацию. Проверьте логин/пароль.');
     } else {
-      console.log(`   ❌ [${label}] → ${logUrl} — ${err.message}`);
+      console.log(`   ❌ [${label}] → ${logUrl} — ${safeErrMsg}`);
     }
     return false;
   }
@@ -209,10 +211,10 @@ async function testProxy(label, proxyUrl, targetUrl, displayUrl) {
     await testProxy(suffix, url, 'https://httpbin.org/ip');
 
     // Тест 2: Gemini API (список моделей — если есть API key)
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (apiKey) {
-      const geminiUrl = 'https://generativelanguage.googleapis.com/v1beta/models?key=' + apiKey;
-      await testProxy(suffix, url, geminiUrl, 'https://generativelanguage.googleapis.com/v1beta/models?key=***');
+    if (process.env.GEMINI_API_KEY) {
+      const geminiBase = 'https://generativelanguage.googleapis.com/v1beta/models';
+      // API key добавляется в URL только для HTTP-запроса, не для логирования
+      await testProxy(suffix, url, geminiBase + '?key=' + process.env.GEMINI_API_KEY, geminiBase + '?key=***');
     } else {
       console.log(`   ⚠  [${suffix}] → Gemini API — пропускаем (GEMINI_API_KEY не задан)`);
     }
