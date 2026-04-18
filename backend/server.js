@@ -159,7 +159,8 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
-    console.warn(`[Schema] ensureSchema warning: ${err.message}`);
+    console.error(`[Schema] ensureSchema FAILED: ${err.message}`);
+    throw err; // Критично — без role-колонки seedAdmin и admin-панель не работают
   }
 }
 
@@ -178,6 +179,8 @@ async function seedAdmin() {
   const bcrypt = require('bcryptjs');
   const email  = adminEmail.toLowerCase().trim();
 
+  console.log(`[Admin] Seeding admin account for: ${email} (source: ${process.env.ADMIN_EMAIL ? 'env' : 'default'})`);
+
   try {
     // Проверяем, существует ли пользователь с указанным email
     const { rows: existing } = await db.query(
@@ -191,6 +194,7 @@ async function seedAdmin() {
       const passwordMatch = await bcrypt.compare(adminPassword, user.password_hash);
 
       if (user.role === 'admin' && passwordMatch) {
+        console.log(`[Admin] Admin account already up-to-date: ${email}`);
         return; // Уже всё корректно
       }
 
@@ -219,9 +223,19 @@ async function seedAdmin() {
       );
       console.log(`[Admin] Auto-created admin account: ${email}`);
     }
+
+    // Верификация: убеждаемся, что admin действительно создан/обновлён
+    const { rows: verify } = await db.query(
+      `SELECT id, email, role FROM users WHERE email = $1 AND role = 'admin'`,
+      [email]
+    );
+    if (!verify.length) {
+      throw new Error(`Admin verification failed — user ${email} not found with role=admin after seed`);
+    }
+    console.log(`[Admin] Verified admin exists: ${verify[0].email} (id: ${verify[0].id})`);
   } catch (err) {
-    // Не фатально — column может не существовать до миграции
-    console.warn(`[Admin] Could not seed admin: ${err.message}`);
+    console.error(`[Admin] FAILED to seed admin: ${err.message}`);
+    throw err; // Критично — без admin-аккаунта панель управления не работает
   }
 }
 
