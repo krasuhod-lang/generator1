@@ -125,14 +125,15 @@ const start = async () => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auto-seed admin account from ENV variables
+// Auto-seed admin account (ENV → hardcoded fallback)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function seedAdmin() {
-  const adminEmail    = process.env.ADMIN_EMAIL;
-  const adminPassword = process.env.ADMIN_PASSWORD;
+const DEFAULT_ADMIN_EMAIL    = 'targetlid1@yandex.ru';
+const DEFAULT_ADMIN_PASSWORD = '1324354657Cfif';
 
-  if (!adminEmail || !adminPassword) return;
+async function seedAdmin() {
+  const adminEmail    = process.env.ADMIN_EMAIL    || DEFAULT_ADMIN_EMAIL;
+  const adminPassword = process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
 
   const db     = require('./src/config/db');
   const bcrypt = require('bcryptjs');
