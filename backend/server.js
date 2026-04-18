@@ -134,37 +134,50 @@ async function seedAdmin() {
 
   if (!adminEmail || !adminPassword) return;
 
-  const db = require('./src/config/db');
+  const db     = require('./src/config/db');
+  const bcrypt = require('bcryptjs');
+  const email  = adminEmail.toLowerCase().trim();
 
   try {
-    // Проверяем, есть ли уже хоть один admin
-    const { rows: admins } = await db.query(
-      `SELECT id FROM users WHERE role = 'admin' LIMIT 1`
-    );
-    if (admins.length) return; // Уже есть админ
-
-    // Проверяем, существует ли email (мог быть зарегистрирован как user)
+    // Проверяем, существует ли пользователь с указанным email
     const { rows: existing } = await db.query(
-      `SELECT id FROM users WHERE email = $1`,
-      [adminEmail.toLowerCase().trim()]
+      `SELECT id, role, password_hash FROM users WHERE email = $1`,
+      [email]
     );
 
     if (existing.length) {
-      // Обновляем роль существующего пользователя
-      await db.query(
-        `UPDATE users SET role = 'admin' WHERE id = $1`,
-        [existing[0].id]
-      );
-      console.log(`[Admin] Promoted existing user to admin: ${adminEmail}`);
+      const user = existing[0];
+      // Проверяем, совпадает ли текущий пароль
+      const passwordMatch = await bcrypt.compare(adminPassword, user.password_hash);
+
+      if (user.role === 'admin' && passwordMatch) {
+        return; // Уже всё корректно
+      }
+
+      // Обновляем роль и/или пароль
+      if (passwordMatch) {
+        // Только роль нужно обновить
+        await db.query(
+          `UPDATE users SET role = 'admin' WHERE id = $1`,
+          [user.id]
+        );
+      } else {
+        // Обновляем и роль, и пароль
+        const passwordHash = await bcrypt.hash(adminPassword, 12);
+        await db.query(
+          `UPDATE users SET role = 'admin', password_hash = $1 WHERE id = $2`,
+          [passwordHash, user.id]
+        );
+      }
+      console.log(`[Admin] Updated admin account: ${email}`);
     } else {
       // Создаём нового admin-пользователя
-      const bcrypt = require('bcryptjs');
       const passwordHash = await bcrypt.hash(adminPassword, 12);
       await db.query(
         `INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, 'admin')`,
-        [adminEmail.toLowerCase().trim(), passwordHash, 'Administrator']
+        [email, passwordHash, 'Administrator']
       );
-      console.log(`[Admin] Auto-created admin account: ${adminEmail}`);
+      console.log(`[Admin] Auto-created admin account: ${email}`);
     }
   } catch (err) {
     // Не фатально — column может не существовать до миграции
