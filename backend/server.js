@@ -109,8 +109,24 @@ app.use((err, req, res, next) => {
 
 const start = async () => {
   try {
+    // Диагностика: логируем, к какой БД подключаемся (без пароля)
+    const dbUrl = process.env.DATABASE_URL;
+    if (dbUrl) {
+      const masked = dbUrl.replace(/:([^@:]+)@/, ':***@');
+      console.log(`[DB] Connecting via DATABASE_URL: ${masked}`);
+    } else {
+      const user = process.env.DB_USER || 'seogenius';
+      const host = process.env.DB_HOST || 'localhost';
+      const port = process.env.DB_PORT || '5432';
+      const name = process.env.DB_NAME || 'seogenius_db';
+      console.log(`[DB] Connecting via individual vars: ${user}@${host}:${port}/${name}`);
+    }
+
     // Проверяем подключение к БД перед стартом
     await testConnection();
+
+    // Применяем миграции, если нужно (idempotent)
+    await ensureSchema();
 
     // Auto-seed администратора из ENV
     await seedAdmin();
@@ -123,6 +139,22 @@ const start = async () => {
     process.exit(1);
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Runtime schema migrations (idempotent — safe to run on every startup)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function ensureSchema() {
+  const db = require('./src/config/db');
+  try {
+    // Migration 003: add role column to users (may not exist if volume predates this migration)
+    await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user' NOT NULL`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
+    console.log('[Schema] ensureSchema OK');
+  } catch (err) {
+    console.warn(`[Schema] ensureSchema warning: ${err.message}`);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Auto-seed admin account (ENV → hardcoded fallback)
