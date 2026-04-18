@@ -2,6 +2,16 @@
 
 require('dotenv').config();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Hardcoded defaults — гарантируют работу даже без .env файла
+// ─────────────────────────────────────────────────────────────────────────────
+const DEFAULT_JWT_SECRET = 'seogenius_jwt_secret_2024_kRas7xQ9';
+
+if (!process.env.JWT_SECRET) {
+  process.env.JWT_SECRET = DEFAULT_JWT_SECRET;
+  console.warn('[Config] ⚠ JWT_SECRET not set in environment — using built-in fallback. Set JWT_SECRET in .env for better security.');
+}
+
 const express    = require('express');
 const cors       = require('cors');
 const helmet     = require('helmet');
@@ -109,6 +119,11 @@ app.use((err, req, res, next) => {
 
 const start = async () => {
   try {
+    // Диагностика: критические переменные окружения
+    console.log(`[Config] JWT_SECRET: ${process.env.JWT_SECRET === DEFAULT_JWT_SECRET ? 'built-in fallback' : 'custom (from env)'}`);
+    console.log(`[Config] ADMIN_EMAIL: ${process.env.ADMIN_EMAIL || '(not set — will use default)'}`);
+    console.log(`[Config] ADMIN_PASSWORD: ${process.env.ADMIN_PASSWORD ? '***set***' : '(not set — will use default)'}`);
+
     // Диагностика: логируем, к какой БД подключаемся (без пароля)
     const dbUrl = process.env.DATABASE_URL;
     if (dbUrl) {
