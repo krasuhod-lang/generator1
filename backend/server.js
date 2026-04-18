@@ -112,8 +112,13 @@ const start = async () => {
     // Диагностика: логируем, к какой БД подключаемся (без пароля)
     const dbUrl = process.env.DATABASE_URL;
     if (dbUrl) {
-      const masked = dbUrl.replace(/:([^@:]+)@/, ':***@');
-      console.log(`[DB] Connecting via DATABASE_URL: ${masked}`);
+      try {
+        const u = new URL(dbUrl);
+        if (u.password) u.password = '***';
+        console.log(`[DB] Connecting via DATABASE_URL: ${u.toString()}`);
+      } catch {
+        console.log('[DB] Connecting via DATABASE_URL (could not parse URL for logging)');
+      }
     } else {
       const user = process.env.DB_USER || 'seogenius';
       const host = process.env.DB_HOST || 'localhost';
@@ -147,7 +152,9 @@ const start = async () => {
 async function ensureSchema() {
   const db = require('./src/config/db');
   try {
-    // Migration 003: add role column to users (may not exist if volume predates this migration)
+    // Миграции в /docker-entrypoint-initdb.d применяются ТОЛЬКО при первом создании volume.
+    // Если volume уже существует и были добавлены новые миграции (003+), их нужно
+    // применить runtime. Все команды идемпотентны (IF NOT EXISTS).
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user' NOT NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
     console.log('[Schema] ensureSchema OK');
