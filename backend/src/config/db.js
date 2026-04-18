@@ -18,8 +18,8 @@ const pool = new Pool(
     : {
         host:     process.env.DB_HOST     || 'localhost',
         port:     parseInt(process.env.DB_PORT) || 5432,
-        database: process.env.DB_NAME     || 'seo_genius',
-        user:     process.env.DB_USER     || 'seo_user',
+        database: process.env.DB_NAME     || 'seogenius_db',
+        user:     process.env.DB_USER     || 'seogenius',
         password: process.env.DB_PASSWORD,
         min:      parseInt(process.env.DB_POOL_MIN) || 2,
         max:      parseInt(process.env.DB_POOL_MAX) || 10,
