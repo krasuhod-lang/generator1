@@ -12,6 +12,7 @@ const { testConnection } = require('./src/config/db');
 
 const authRoutes  = require('./src/routes/auth.routes');
 const tasksRoutes = require('./src/routes/tasks.routes');
+const adminRoutes = require('./src/routes/admin.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -79,6 +80,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/auth',  authRoutes);
 app.use('/api/tasks', tasksRoutes);
+app.use('/api/admin', adminRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -110,6 +112,9 @@ const start = async () => {
     // Проверяем подключение к БД перед стартом
     await testConnection();
 
+    // Auto-seed администратора из ENV
+    await seedAdmin();
+
     app.listen(PORT, () => {
       console.log(`[Server] SEO Genius v4.0 running on port ${PORT} [${process.env.NODE_ENV}]`);
     });
@@ -118,6 +123,54 @@ const start = async () => {
     process.exit(1);
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-seed admin account from ENV variables
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function seedAdmin() {
+  const adminEmail    = process.env.ADMIN_EMAIL;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (!adminEmail || !adminPassword) return;
+
+  const db = require('./src/config/db');
+
+  try {
+    // Проверяем, есть ли уже хоть один admin
+    const { rows: admins } = await db.query(
+      `SELECT id FROM users WHERE role = 'admin' LIMIT 1`
+    );
+    if (admins.length) return; // Уже есть админ
+
+    // Проверяем, существует ли email (мог быть зарегистрирован как user)
+    const { rows: existing } = await db.query(
+      `SELECT id FROM users WHERE email = $1`,
+      [adminEmail.toLowerCase().trim()]
+    );
+
+    if (existing.length) {
+      // Обновляем роль существующего пользователя
+      await db.query(
+        `UPDATE users SET role = 'admin' WHERE id = $1`,
+        [existing[0].id]
+      );
+      console.log(`[Admin] Promoted existing user to admin: ${adminEmail}`);
+    } else {
+      // Создаём нового admin-пользователя
+      const bcrypt = require('bcryptjs');
+      const passwordHash = await bcrypt.hash(adminPassword, 12);
+      await db.query(
+        `INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, 'admin')`,
+        [adminEmail.toLowerCase().trim(), passwordHash, 'Administrator']
+      );
+      console.log(`[Admin] Auto-created admin account: ${adminEmail}`);
+    }
+  } catch (err) {
+    // Не фатально — column может не существовать до миграции
+    console.warn(`[Admin] Could not seed admin: ${err.message}`);
+  }
+}
 
 start();
 
