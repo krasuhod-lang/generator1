@@ -27,6 +27,10 @@ const adminRoutes = require('./src/routes/admin.routes');
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 
+// Доверяем первому прокси (nginx) — нужно для корректной работы
+// express-rate-limit и определения реального IP через X-Forwarded-For
+app.set('trust proxy', 1);
+
 // -----------------------------------------------------------------
 // Middleware
 // -----------------------------------------------------------------
