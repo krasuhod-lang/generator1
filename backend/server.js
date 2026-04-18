@@ -134,22 +134,24 @@ async function seedAdmin() {
 
   if (!adminEmail || !adminPassword) return;
 
+  const db = require('./src/config/db');
+
   try {
     // Проверяем, есть ли уже хоть один admin
-    const { rows: admins } = await require('./src/config/db').query(
+    const { rows: admins } = await db.query(
       `SELECT id FROM users WHERE role = 'admin' LIMIT 1`
     );
     if (admins.length) return; // Уже есть админ
 
     // Проверяем, существует ли email (мог быть зарегистрирован как user)
-    const { rows: existing } = await require('./src/config/db').query(
+    const { rows: existing } = await db.query(
       `SELECT id FROM users WHERE email = $1`,
       [adminEmail.toLowerCase().trim()]
     );
 
     if (existing.length) {
       // Обновляем роль существующего пользователя
-      await require('./src/config/db').query(
+      await db.query(
         `UPDATE users SET role = 'admin' WHERE id = $1`,
         [existing[0].id]
       );
@@ -158,7 +160,7 @@ async function seedAdmin() {
       // Создаём нового admin-пользователя
       const bcrypt = require('bcryptjs');
       const passwordHash = await bcrypt.hash(adminPassword, 12);
-      await require('./src/config/db').query(
+      await db.query(
         `INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, 'admin')`,
         [adminEmail.toLowerCase().trim(), passwordHash, 'Administrator']
       );
