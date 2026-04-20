@@ -16,7 +16,7 @@
 
 // ── Prompt Registry ─────────────────────────────────────────────────
 
-const registry = new Map(); // name → { prompt, version, inputVars, outputSchema, metadata }
+const registry = new Map(); // name → { prompt, version, inputVars, outputSchema, metrics, metadata }
 
 /**
  * registerPrompt — регистрирует промпт в реестре.
@@ -27,6 +27,7 @@ const registry = new Map(); // name → { prompt, version, inputVars, outputSche
  * @param {string}   [config.version]    — версия ('1.0.0')
  * @param {string[]} [config.inputVars]  — список ожидаемых {{VARS}} (для валидации)
  * @param {object}   [config.outputSchema] — JSON-схема ожидаемого ответа
+ * @param {Function} [config.metrics]     — функция (output, extras) => score | object
  * @param {object}   [config.metadata]   — произвольные метаданные
  */
 function registerPrompt(name, config) {
@@ -42,6 +43,7 @@ function registerPrompt(name, config) {
     version:      config.version || '1.0.0',
     inputVars:    config.inputVars || detectedVars,
     outputSchema: config.outputSchema || null,
+    metrics:      config.metrics || null,
     metadata:     config.metadata || {},
     registeredAt: new Date().toISOString(),
   });
@@ -168,6 +170,31 @@ function listPrompts() {
   }));
 }
 
+/**
+ * computeMetrics — вычисляет качественный score для вывода LLM.
+ * Вызывается после успешной generateOutput для логирования quality metrics.
+ *
+ * @param {string} promptName — имя промпта в реестре
+ * @param {object} output     — JSON-ответ LLM
+ * @param {object} [extras]   — дополнительные данные (pqScore, lsiCoverage и т.д.)
+ * @returns {{ score: number|null, breakdown: object }}
+ */
+function computeMetrics(promptName, output, extras = {}) {
+  const entry = registry.get(promptName);
+  if (!entry || !entry.metrics) {
+    return { score: null, breakdown: {} };
+  }
+  try {
+    const result = entry.metrics(output, extras);
+    return {
+      score:     typeof result === 'number' ? result : result.score ?? null,
+      breakdown: typeof result === 'object' ? result : { value: result },
+    };
+  } catch (err) {
+    return { score: null, breakdown: { error: err.message } };
+  }
+}
+
 // ── Предопределённые JSON-схемы ответов ─────────────────────────────
 
 const OUTPUT_SCHEMAS = {
@@ -177,6 +204,7 @@ const OUTPUT_SCHEMAS = {
       html_content:    { type: 'string' },
       eeat_self_check: { type: 'object' },
       audit_report:    { type: 'object' },
+      reasoning:       { type: 'string' },
     },
   },
   stage4: {
@@ -192,6 +220,7 @@ const OUTPUT_SCHEMAS = {
     properties: {
       html_content:    { type: 'string' },
       refinement_log:  { type: 'object' },
+      reasoning:       { type: 'string' },
     },
   },
   stage6: {
@@ -199,6 +228,7 @@ const OUTPUT_SCHEMAS = {
     properties: {
       html_content:   { type: 'string' },
       injection_log:  { type: 'array' },
+      reasoning:      { type: 'string' },
     },
   },
   stage7: {
@@ -222,7 +252,6 @@ const OUTPUT_SCHEMAS = {
 };
 
 // ── Вспомогательные функции ─────────────────────────────────────────
-
 /**
  * extractVars — извлекает все {{VAR_NAME}} из текста промпта.
  * @param {string} text
@@ -243,6 +272,7 @@ module.exports = {
   getPrompt,
   fillAndValidate,
   validateOutput,
+  computeMetrics,
   listPrompts,
   extractVars,
   OUTPUT_SCHEMAS,

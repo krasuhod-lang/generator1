@@ -7824,6 +7824,20 @@ try {
     prompt:       SYSTEM_PROMPTS.stage3,
     version:      '4.0.0',
     outputSchema: OUTPUT_SCHEMAS.stage3,
+    metrics: (output, extras) => {
+      const pqScore        = (extras.pqScore     || 0) / 10;      // 0..1
+      const lsiCoverage    = (extras.lsiCoverage || 0) / 100;     // 0..1
+      const h3Count        = (output.html_content || '').match(/<h3[\s>]/gi)?.length || 0;
+      const structureScore = Math.min(h3Count / 4, 1);            // 4 H3 = perfect
+      const score = pqScore * 0.4 + lsiCoverage * 0.3 + structureScore * 0.3;
+      return {
+        score:         Math.round(score * 100) / 100,
+        pqScore:       extras.pqScore,
+        lsiCoverage:   extras.lsiCoverage,
+        h3Count,
+        structureScore: Math.round(structureScore * 100) / 100,
+      };
+    },
     metadata:     { adapter: 'gemini', temperature: 0.45 },
   });
 
