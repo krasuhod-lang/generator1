@@ -3,10 +3,15 @@
 const { callLLM }              = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }       = require('../../prompts/systemPrompts');
 const { calculateCoverage }    = require('../../utils/calculateCoverage');
+const { computeSemanticCoverage } = require('../../utils/semanticSimilarity');
 
 /**
  * Stage 6: Инъекция LSI — цикл до 100% покрытия (максимум 3 итерации).
  * Адаптер: gemini.
+ *
+ * Улучшение: Гибридный поиск — используем семантическое сходство
+ * для определения лучшего параграфа для инъекции каждого термина.
+ * Это позволяет модели органично встраивать LSI-фразы.
  *
  * @param {object}   task          — строка tasks из БД
  * @param {object}   ctx           — { log, taskId }
@@ -37,11 +42,22 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust) {
 
     log(`Блок ${blockIndex + 1}: LSI ${coverage.percent}% — инъекция (цикл ${loopCount}/${maxLoops})...`, 'warn');
 
-    // Формируем список для инъекции — каждое пропущенное слово по 1 разу
-    const injectList = coverage.missing.map(w => ({
-      слово: w,
-      внедрить_раз: 1,
-    }));
+    // ── Гибридный поиск: семантический анализ для organic placement ──
+    // Вычисляем семантическое сходство пропущенных терминов с параграфами
+    const semanticData = computeSemanticCoverage(currentHTML, coverage.missing);
+
+    // Формируем список для инъекции с семантическими подсказками
+    const injectList = coverage.missing.map(w => {
+      const hint = semanticData.paragraphHints.find(h => h.term === w);
+      return {
+        слово: w,
+        внедрить_раз: 1,
+        // Подсказка для Gemini: куда семантически лучше всего вставить
+        ...(hint && hint.similarity > 0.1
+          ? { semantic_hint: `best fit near paragraph #${hint.bestParagraphIndex} (similarity: ${hint.similarity})` }
+          : {}),
+      };
+    });
 
     const stage6Prompt = SYSTEM_PROMPTS.stage6
       .replace('{{CURRENT_HTML}}',  () => currentHTML)
@@ -51,7 +67,8 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust) {
 
     log(
       `Stage 6 блок ${blockIndex + 1}: инъекция LSI цикл ${loopCount} — ` +
-      `${coverage.missing.length} пропущенных слов, промпт ${stage6Prompt.length} символов...`,
+      `${coverage.missing.length} пропущенных слов (${semanticData.semanticallyCovered.length} семантически покрыты), ` +
+      `промпт ${stage6Prompt.length} символов...`,
       'info'
     );
 
