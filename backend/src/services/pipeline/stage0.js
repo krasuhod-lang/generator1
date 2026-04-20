@@ -32,8 +32,14 @@ async function runStage0(task, ctx) {
   log('Stage 0: Начало глубокого анализа конкурентов...', 'info');
   progress(2, 'stage0');
 
-  // Достаём URL конкурентов (и целевую страницу если есть)
-  const rawUrls = (task.input_competitor_urls || '').split('\n').map(u => u.trim()).filter(Boolean);
+  // Достаём URL конкурентов (и целевую страницу если есть).
+  // Поддерживаем разделители: \n, запятая, точка с запятой, табы.
+  // Сохраняем "сырые" строки — sanitizeUrl внутри scrapeCompetitors решит,
+  // что валидно, что нет, и эмитит понятный invalidUrl-флаг.
+  const rawUrls = (task.input_competitor_urls || '')
+    .split(/[\n;,\t]+/)
+    .map(u => u.trim())
+    .filter(Boolean);
   if (!rawUrls.length) {
     log('Stage 0: URL конкурентов не указаны — пропускаем парсинг', 'warn');
     return null;
@@ -45,7 +51,11 @@ async function runStage0(task, ctx) {
 
   // Логируем в SSE все URL с ошибками или таймаутами — не роняем процесс
   scrapedPages.filter(p => p.timedOut || p.error).forEach(p => {
-    const reason = p.timedOut ? 'Таймаут (>20s)' : `Ошибка: ${p.error}`;
+    let reason;
+    if (p.invalidUrl)    reason = 'Пропущено (не URL)';
+    else if (p.timedOut) reason = 'Таймаут (>30s)';
+    else if (p.sslIssue) reason = `SSL-ошибка: ${p.error}`;
+    else                 reason = `Ошибка: ${p.error}`;
     log(`Stage 0: ${reason} — ${p.url}`, 'warn');
   });
 
@@ -59,9 +69,23 @@ async function runStage0(task, ctx) {
   const ownSiteContent   = competitorContent.find(c => c.isOwnSite)   || null;
   const onlyCompetitors  = competitorContent.filter(c => !c.isOwnSite);
 
+  // Сводка причин потерь — помогает быстро понять, что чинить.
+  const okCount       = competitorContent.filter(c => c.content).length;
+  const invalidCount  = scrapedPages.filter(p => p.invalidUrl).length;
+  const timeoutCount  = scrapedPages.filter(p => p.timedOut).length;
+  const sslCount      = scrapedPages.filter(p => p.sslIssue).length;
+  const otherFailCount = scrapedPages.filter(p => p.error && !p.invalidUrl && !p.timedOut && !p.sslIssue).length;
+
+  const breakdownParts = [];
+  if (invalidCount)    breakdownParts.push(`${invalidCount} невалидных URL`);
+  if (sslCount)        breakdownParts.push(`${sslCount} SSL`);
+  if (timeoutCount)    breakdownParts.push(`${timeoutCount} таймаут`);
+  if (otherFailCount)  breakdownParts.push(`${otherFailCount} прочих ошибок`);
+  const breakdown = breakdownParts.length ? ` (${breakdownParts.join(', ')})` : '';
+
   log(
-    `Stage 0: Спарсено ${competitorContent.filter(c => c.content).length}/${rawUrls.length}` +
-    `${ownSiteContent ? ' (вкл. наш сайт)' : ''}`,
+    `Stage 0: Спарсено ${okCount}/${rawUrls.length}` +
+    `${ownSiteContent ? ' (вкл. наш сайт)' : ''}${breakdown}`,
     'success'
   );
 
