@@ -28,6 +28,75 @@ function structuralPreCheck(html, expertOpinionUsed, brandFacts, structureLimits
 }
 
 /**
+ * extractHtmlContent — пытается достать html_content из ответа LLM,
+ * учитывая частые отклонения от схемы (вложенные ключи, альтернативные имена).
+ * Возвращает строку HTML или null.
+ */
+function extractHtmlContent(result) {
+  if (!result || typeof result !== 'object') return null;
+  // Прямые варианты, нормализованные в callLLM.normalizeKeys
+  const direct = result.html_content || result.htmlcontent || result.html || result.content;
+  if (typeof direct === 'string' && direct.trim().length > 50) return direct;
+
+  // Вложенные варианты, которые иногда возвращает Gemini
+  const nested = result.audit_report?.html_content
+              || result.eeat_self_check?.html_content
+              || result.output?.html_content
+              || result.section?.html_content;
+  if (typeof nested === 'string' && nested.trim().length > 50) return nested;
+
+  return null;
+}
+
+/**
+ * recoverHtmlContent — recovery-retry для Stage 3, когда ответ не содержит html_content.
+ * Просим LLM вернуть ТОЛЬКО html_content, без остальных полей.
+ * Возвращает строку HTML или null.
+ */
+async function recoverHtmlContent(originalPrompt, missingKeys, blockH2, ctx) {
+  const { log, taskId, onTokens } = ctx;
+  const recoveryPrompt = `${originalPrompt}
+
+⚠️ CRITICAL RECOVERY TASK ⚠️
+Your previous response contained ONLY these keys: [${missingKeys.join(', ')}].
+The MANDATORY field "html_content" with the actual HTML of the section was MISSING.
+
+NOW respond with STRICT JSON containing ONLY ONE field:
+{
+  "html_content": "<h2>${blockH2}</h2><p>...full HTML of the section, ending with a closing tag like </p>, </ul>, or </blockquote>...</p>"
+}
+
+DO NOT include eeat_self_check, audit_report, or ANY other fields. ONLY html_content with the full <h2>${blockH2}</h2> section HTML, properly closed.`;
+
+  const recovered = await callLLM(
+    'gemini',
+    '',
+    recoveryPrompt,
+    { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192 }
+  ).catch(e => {
+    log(`Stage 3 recovery: LLM call ОШИБКА — ${e.message}`, 'warn');
+    return null;
+  });
+
+  return extractHtmlContent(recovered);
+}
+
+/**
+ * buildPlaceholderBlock — создаёт минимальный HTML-блок (H2 + 2 параграфа из LSI),
+ * чтобы не терять секцию в финальной статье, если все попытки генерации провалились.
+ * Это последний рубеж: лучше скромный блок с правильным H2, чем дыра в статье.
+ */
+function buildPlaceholderBlock(block) {
+  const h2   = block.h2 || 'Раздел';
+  const lsi  = (block.lsi_must || []).slice(0, 6).filter(Boolean);
+  const lead = lsi.length
+    ? `Этот раздел посвящён теме «${h2.toLowerCase()}». Ниже — ключевые моменты, которые важно учитывать: ${lsi.join(', ')}.`
+    : `Этот раздел посвящён теме «${h2.toLowerCase()}». Ключевые детали уточняйте у наших специалистов.`;
+  const tail = `Подробную консультацию по вопросам, связанным с разделом «${h2.toLowerCase()}», вы можете получить, обратившись к нашим менеджерам.`;
+  return `<h2>${h2}</h2>\n<p>${lead}</p>\n<p>${tail}</p>`;
+}
+
+/**
  * Веса типов блоков для пропорционального распределения символов.
  * Источник: v3.1 index.html (неизменно).
  */
@@ -182,7 +251,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
     }
 
     // Fallback для FAQ-блоков
-    if ((!stage3Result || !stage3Result.html_content) && block.type === 'faq') {
+    if ((!stage3Result || !extractHtmlContent(stage3Result)) && block.type === 'faq') {
       log(`FAQ fallback для блока ${i + 1}`, 'warn');
       const faqItems = (block.lsi_must || []).slice(0, 5);
       let faqHtml = `<h2>${block.h2}</h2>\n<div class="faq-section">\n`;
@@ -193,13 +262,34 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       stage3Result = { html_content: faqHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
     }
 
-    if (!stage3Result?.html_content) {
+    // Recovery: если LLM вернул JSON без html_content — пробуем восстановить отдельным запросом.
+    // Так мы не теряем целый блок из-за усечения ответа или отклонения от схемы.
+    if (stage3Result && !extractHtmlContent(stage3Result)) {
+      const missingKeys = Object.keys(stage3Result);
       log(
-        `Stage 3 блок ${i + 1}: ОШИБКА — html_content отсутствует. Ключи: [${Object.keys(stage3Result || {}).join(', ')}]. Пропуск.`,
-        'error'
+        `Stage 3 блок ${i + 1}: html_content отсутствует (ключи: [${missingKeys.join(', ')}]). Пробуем recovery-retry...`,
+        'warn'
       );
-      results.push({ blockIndex: i, html: null, status: 'error', block });
-      continue;
+      const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx);
+      if (recoveredHtml) {
+        log(`Stage 3 блок ${i + 1}: recovery успешен (${recoveredHtml.length} символов)`, 'success');
+        stage3Result = { html_content: recoveredHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
+      }
+    }
+
+    // Final fallback: лучше placeholder с правильным H2, чем дыра в статье.
+    const extractedHtml = extractHtmlContent(stage3Result);
+    if (!extractedHtml) {
+      log(
+        `Stage 3 блок ${i + 1}: все попытки провалились — используем placeholder (H2 + LSI). ` +
+        `Ключи последнего ответа: [${Object.keys(stage3Result || {}).join(', ')}].`,
+        'warn'
+      );
+      const placeholder = buildPlaceholderBlock(block);
+      stage3Result = { html_content: placeholder, audit_report: { coverage_percentage: 0, dropped_lsi: [] } };
+    } else if (!stage3Result.html_content) {
+      // Нашли HTML во вложенном поле — нормализуем
+      stage3Result.html_content = extractedHtml;
     }
 
     log(`Stage 3 блок ${i + 1} получен. Размер HTML: ${stage3Result.html_content.length} символов.`, 'success');
@@ -361,7 +451,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
   }
 
   // Fallback для FAQ-блоков
-  if ((!stage3Result || !stage3Result.html_content) && block.type === 'faq') {
+  if ((!stage3Result || !extractHtmlContent(stage3Result)) && block.type === 'faq') {
     log(`FAQ fallback для блока ${blockIndex + 1}`, 'warn');
     const faqItems = (block.lsi_must || []).slice(0, 5);
     let faqHtml = `<h2>${block.h2}</h2>\n<div class="faq-section">\n`;
@@ -372,12 +462,32 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     stage3Result = { html_content: faqHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
   }
 
-  if (!stage3Result?.html_content) {
+  // Recovery: если LLM вернул JSON без html_content — пробуем восстановить отдельным запросом.
+  if (stage3Result && !extractHtmlContent(stage3Result)) {
+    const missingKeys = Object.keys(stage3Result);
     log(
-      `Stage 3 блок ${blockIndex + 1}: ОШИБКА — html_content отсутствует. Ключи: [${Object.keys(stage3Result || {}).join(', ')}]. Пропуск.`,
-      'error'
+      `Stage 3 блок ${blockIndex + 1}: html_content отсутствует (ключи: [${missingKeys.join(', ')}]). Пробуем recovery-retry...`,
+      'warn'
     );
-    return { html: null, expertOpinionUsed, previousContext, block };
+    const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx);
+    if (recoveredHtml) {
+      log(`Stage 3 блок ${blockIndex + 1}: recovery успешен (${recoveredHtml.length} символов)`, 'success');
+      stage3Result = { html_content: recoveredHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
+    }
+  }
+
+  // Final fallback: лучше placeholder с правильным H2, чем дыра в статье.
+  const extractedHtml = extractHtmlContent(stage3Result);
+  if (!extractedHtml) {
+    log(
+      `Stage 3 блок ${blockIndex + 1}: все попытки провалились — используем placeholder (H2 + LSI). ` +
+      `Ключи последнего ответа: [${Object.keys(stage3Result || {}).join(', ')}].`,
+      'warn'
+    );
+    const placeholder = buildPlaceholderBlock(block);
+    stage3Result = { html_content: placeholder, audit_report: { coverage_percentage: 0, dropped_lsi: [] } };
+  } else if (!stage3Result.html_content) {
+    stage3Result.html_content = extractedHtml;
   }
 
   log(`Stage 3 блок ${blockIndex + 1} получен. Размер HTML: ${stage3Result.html_content.length} символов.`, 'success');

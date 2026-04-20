@@ -842,6 +842,38 @@ function validateAndRepairTzOutput(obj) {
     }
   }
 
+  // Дополнительная санитизация competitor_urls: оставляем только реальные URL,
+  // строки-названия (например, "Sputnik8", "Трипсе") переносим в competitor_names.
+  // Это защищает Stage 0 от запросов "Invalid URL" к именам брендов.
+  if (Array.isArray(repaired.competitor_urls)) {
+    const { sanitizeUrl } = require('../services/parser/scraper');
+    const validUrls   = [];
+    const movedNames  = [];
+    for (const item of repaired.competitor_urls) {
+      if (typeof item !== 'string') continue;
+      const normalized = sanitizeUrl(item);
+      if (normalized) {
+        validUrls.push(normalized);
+      } else if (item.trim()) {
+        movedNames.push(item.trim());
+      }
+    }
+    repaired.competitor_urls = validUrls;
+    if (movedNames.length) {
+      const existingNames = Array.isArray(repaired.competitor_names) ? repaired.competitor_names : [];
+      // Дедуп по lowercase
+      const seen = new Set(existingNames.map(n => String(n).trim().toLowerCase()));
+      for (const name of movedNames) {
+        const key = name.toLowerCase();
+        if (!seen.has(key)) {
+          existingNames.push(name);
+          seen.add(key);
+        }
+      }
+      repaired.competitor_names = existingNames;
+    }
+  }
+
   return { valid: errors.length === 0, errors, repaired };
 }
 
