@@ -177,6 +177,43 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user' NOT NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
+
+    // Migration 005: pause/resume support — add 'pausing' / 'paused' to task_status enum,
+    // add pipeline_checkpoint column, and partial index. Idempotent via DO blocks /
+    // IF NOT EXISTS. Required because /docker-entrypoint-initdb.d migrations only run
+    // on first volume creation, leaving existing deployments without these values
+    // (causes "invalid input value for enum task_status: 'pausing'" on stop).
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_enum
+          WHERE enumlabel = 'pausing'
+            AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'task_status')
+        ) THEN
+          ALTER TYPE task_status ADD VALUE 'pausing';
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_enum
+          WHERE enumlabel = 'paused'
+            AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'task_status')
+        ) THEN
+          ALTER TYPE task_status ADD VALUE 'paused';
+        END IF;
+      END$$;
+    `);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pipeline_checkpoint JSONB`);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_tasks_pause_status
+        ON tasks(status)
+        WHERE status IN ('paused', 'pausing')
+    `);
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);
