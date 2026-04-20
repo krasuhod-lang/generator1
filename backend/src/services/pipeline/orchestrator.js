@@ -250,8 +250,8 @@ async function runPipeline(task, ctx) {
 
   // Target page analysis data for Stage 3 prompt placeholders
   const serviceNotes = targetPageAnalysis?.service_details || 'Нет';
-  const offerDetails = targetPageAnalysis?.service_details || 'Нет';
-  const proofAssets  = targetPageAnalysis?.proof_assets  || 'Нет';
+  const offerDetails = targetPageAnalysis?.brand_facts     || 'Нет';
+  const proofAssets  = targetPageAnalysis?.proof_assets     || 'Нет';
 
   const blockWeights = taxonomy.map(b => BLOCK_TYPE_WEIGHTS[b.type] || 1.0);
   const weightSum    = blockWeights.reduce((s, w) => s + w, 0);
