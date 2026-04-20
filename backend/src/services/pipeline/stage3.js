@@ -63,10 +63,10 @@ The MANDATORY field "html_content" with the actual HTML of the section was MISSI
 
 NOW respond with STRICT JSON containing ONLY ONE field:
 {
-  "html_content": "<h2>${blockH2}</h2><p>...полный HTML раздела...</p>"
+  "html_content": "<h2>${blockH2}</h2><p>...full HTML of the section, ending with a closing tag like </p>, </ul>, or </blockquote>...</p>"
 }
 
-DO NOT include eeat_self_check, audit_report, or ANY other fields. ONLY html_content with the full <h2>${blockH2}</h2>...</...> section HTML.`;
+DO NOT include eeat_self_check, audit_report, or ANY other fields. ONLY html_content with the full <h2>${blockH2}</h2> section HTML, properly closed.`;
 
   const recovered = await callLLM(
     'gemini',
