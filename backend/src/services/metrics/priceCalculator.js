@@ -67,6 +67,7 @@ function calcCost(model, tokensIn, tokensOut, cacheHit = false) {
  * Форматирует стоимость для отображения (напр. "$0.0142").
  */
 function formatCost(usd) {
+  if (usd < 0.0001) return `$${usd.toFixed(6)}`;
   return `$${usd.toFixed(4)}`;
 }
 
