@@ -110,6 +110,8 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
   log(`Stage 2 Taxonomy: STAGE1_JSON = ${JSON.stringify(enrichedStage1).length} символов (полный контекст)`, 'info');
 
   let stage2Prompt = SYSTEM_PROMPTS.stage2
+    .replace('{{BUSINESS_TYPE}}',   () => task.input_business_type || 'услуги')
+    .replace('{{NICHE_FEATURES}}',  () => task.input_niche_features || 'Нет данных')
     .replace('{{TARGET_SERVICE}}', () => targetService)
     .replace('{{STAGE1_JSON}}',    () => JSON.stringify(enrichedStage1));
 

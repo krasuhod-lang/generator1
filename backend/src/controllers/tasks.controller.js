@@ -683,10 +683,10 @@ async function callExtractorLLM(tzText) {
   const prompt = TZ_EXTRACTOR_PROMPT.replace('{{TZ_TEXT}}', truncated);
 
   // Системная инструкция — короткая, без лишнего
-  const systemMsg = 'Ты — аналитик ТЗ. Извлекай данные СТРОГО из текста. Возвращай только корректный JSON без markdown-обёрток. ВАЖНО: для полей target_audience, niche_features, constraints, priority_page_types, audience_segments — давай РАЗВЁРНУТЫЕ описания из 2-5 предложений, НЕ одно слово. Описывай подробно, кто аудитория, какие особенности ниши, какие ограничения и почему.';
+  const systemMsg = 'Ты — аналитик ТЗ и специалист по сбору бизнес-данных. Извлекай данные СТРОГО из текста. Возвращай только корректный JSON без markdown-обёрток. ВАЖНО: для полей target_audience, niche_features, constraints, priority_page_types, audience_segments, brand_usp, service_process — давай РАЗВЁРНУТЫЕ описания из 2-5 предложений, НЕ одно слово. Описывай подробно: кто аудитория, какие особенности ниши, какие ограничения, какие УТП, как работает процесс. Собирай ВСЕ факты о бренде: цены, условия, гарантии, лицензии, опыт, команда.';
 
-  // Антигаллюцинационные параметры: temperature=0.0, ограниченные токены
-  const llmOptions = { temperature: 0.0, maxTokens: 4096, timeoutMs: 60000 };
+  // Антигаллюцинационные параметры: temperature=0.0, увеличенные токены для детального извлечения
+  const llmOptions = { temperature: 0.0, maxTokens: 6144, timeoutMs: 90000 };
 
   let rawText = '';
   try {

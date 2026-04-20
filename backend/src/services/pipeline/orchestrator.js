@@ -121,6 +121,7 @@ async function runPipeline(task, ctx) {
 
       if (targetPageAnalysis) {
         // Enrich task fields with analysis data (only if fields are empty)
+        // NOTE: Region and Brand Name are NOT auto-filled — user fills them manually
         const updates = {};
 
         if (!task.input_target_audience?.trim() && targetPageAnalysis.target_audience) {
@@ -141,17 +142,17 @@ async function runPipeline(task, ctx) {
           task.input_brand_facts = targetPageAnalysis.brand_facts;
           updates.input_brand_facts = targetPageAnalysis.brand_facts;
         }
-        if (!task.input_brand_name?.trim() && targetPageAnalysis.brand_name) {
-          task.input_brand_name = targetPageAnalysis.brand_name;
-          updates.input_brand_name = targetPageAnalysis.brand_name;
-        }
-        if (!task.input_region?.trim() && targetPageAnalysis.detected_region) {
-          task.input_region = targetPageAnalysis.detected_region;
-          updates.input_region = targetPageAnalysis.detected_region;
-        }
         if (!task.input_business_type?.trim() && targetPageAnalysis.detected_business_type) {
           task.input_business_type = targetPageAnalysis.detected_business_type;
           updates.input_business_type = targetPageAnalysis.detected_business_type;
+        }
+        if (!task.input_business_goal?.trim() && targetPageAnalysis.detected_business_goal) {
+          task.input_business_goal = targetPageAnalysis.detected_business_goal;
+          updates.input_business_goal = targetPageAnalysis.detected_business_goal;
+        }
+        if (!task.input_site_type?.trim() && targetPageAnalysis.detected_site_type) {
+          task.input_site_type = targetPageAnalysis.detected_site_type;
+          updates.input_site_type = targetPageAnalysis.detected_site_type;
         }
 
         // Save enriched fields to DB

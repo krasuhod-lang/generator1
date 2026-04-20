@@ -116,6 +116,8 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
 
     // Подставляем все плейсхолдеры Stage 3
     const s3prompt = SYSTEM_PROMPTS.stage3
+      .replace('{{BUSINESS_TYPE}}',      () => task.input_business_type || 'услуги')
+      .replace('{{NICHE_FEATURES}}',     () => task.input_niche_features || 'Нет данных')
       .replace('{{PAGE_H1}}',            () => targetService)
       .replace('{{TARGET_SERVICE}}',     () => targetService)
       .replace('{{MAIN_QUERY}}',         () => targetService)
@@ -281,6 +283,8 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
   // Подставляем все плейсхолдеры Stage 3
   const s3prompt = SYSTEM_PROMPTS.stage3
+    .replace('{{BUSINESS_TYPE}}',      () => task.input_business_type || 'услуги')
+    .replace('{{NICHE_FEATURES}}',     () => task.input_niche_features || 'Нет данных')
     .replace('{{PAGE_H1}}',            () => targetService)
     .replace('{{TARGET_SERVICE}}',     () => targetService)
     .replace('{{MAIN_QUERY}}',         () => targetService)
