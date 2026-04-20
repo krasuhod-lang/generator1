@@ -100,10 +100,10 @@ function checkObjectiveMetrics(html, opts = {}) {
 
   // Проверка лимита символов (hard cap)
   if (maxChars && charCount > maxChars * 1.15) {
-    issues.push(`Превышен лимит символов: ${charCount} > ${maxChars} (допуск +15%). Сократи текст до ${maxChars} символов, убрав padding и общие фразы`);
+    issues.push(`Превышен лимит символов: ${charCount} > ${Math.round(maxChars * 1.15)} (maxChars ${maxChars} + допуск 15%). Сократи текст до ${maxChars} символов, убрав padding и общие фразы`);
   }
   if (minChars && charCount < minChars * 0.7) {
-    issues.push(`Слишком мало символов: ${charCount} < ${minChars} (минимум −30%). Добавь конкретные факты и детали`);
+    issues.push(`Слишком мало символов: ${charCount} < ${Math.round(minChars * 0.7)} (minChars ${minChars} − допуск 30%). Добавь конкретные факты и детали`);
   }
 
   // Проверка упоминания бренда из BRAND_FACTS

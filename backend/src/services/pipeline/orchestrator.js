@@ -350,10 +350,11 @@ async function runPipeline(task, ctx) {
     }
 
     // ── Post-Stage 6: проверка превышения лимита символов ──────────────
+    const CONDENSATION_THRESHOLD = 1.3; // запуск condensation если cleanText > maxChars × порог
     if (blockMaxChars) {
       const cleanTextLen = stripTags(currentHTML).replace(/\s+/g, ' ').trim().length;
-      if (cleanTextLen > blockMaxChars * 1.3) {
-        log(`Блок ${i + 1}: превышен лимит символов (${cleanTextLen} > ${blockMaxChars} × 1.3 = ${Math.round(blockMaxChars * 1.3)}). Запуск condensation...`, 'warn');
+      if (cleanTextLen > blockMaxChars * CONDENSATION_THRESHOLD) {
+        log(`Блок ${i + 1}: превышен лимит символов (${cleanTextLen} > ${blockMaxChars} × ${CONDENSATION_THRESHOLD} = ${Math.round(blockMaxChars * CONDENSATION_THRESHOLD)}). Запуск condensation...`, 'warn');
 
         try {
           const condensationPrompt = `ROLE: Precision Content Condenser.
