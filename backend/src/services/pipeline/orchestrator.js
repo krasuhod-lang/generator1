@@ -14,6 +14,7 @@ const { calculateCoverage } = require('../../utils/calculateCoverage');
 const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
 const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
+const { getRelatedEntities } = require('../../utils/knowledgeGraph');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -257,6 +258,9 @@ async function runPipeline(task, ctx) {
   const blockWeights = taxonomy.map(b => BLOCK_TYPE_WEIGHTS[b.type] || 1.0);
   const weightSum    = blockWeights.reduce((s, w) => s + w, 0);
 
+  // Knowledge Graph для контекста каждого блока
+  const knowledgeGraph = stage1Result?.knowledge_graph || null;
+
   let expertOpinionUsed = false;
   let previousContext   = '';
   const generatedH2s    = [];
@@ -379,6 +383,14 @@ async function runPipeline(task, ctx) {
     const blockMinChars    = Math.round(minChars    * (blockWeights[i] / weightSum)) || 600;
     const blockMaxChars    = Math.round(maxChars    * (blockWeights[i] / weightSum)) || 2500;
 
+    // Knowledge Graph: извлекаем сущности, релевантные текущему блоку
+    const blockEntities = knowledgeGraph
+      ? getRelatedEntities(knowledgeGraph, block.h2, block.lsi_must || [], 8)
+      : [];
+    const blockEntitiesStr = blockEntities.length > 0
+      ? blockEntities.map(e => `${e.label} [${e.type}]`).join(', ')
+      : '';
+
     // Capture expert opinion state BEFORE this block is generated
     const blockExpertOpinionUsed = expertOpinionUsed;
 
@@ -389,6 +401,7 @@ async function runPipeline(task, ctx) {
       blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
       expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
       serviceNotes, offerDetails, proofAssets,
+      blockEntitiesStr,
     });
 
     // Обновляем контекст для генерации следующего блока

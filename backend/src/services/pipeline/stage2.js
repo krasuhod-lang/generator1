@@ -4,6 +4,7 @@ const { callLLM }            = require('../llm/callLLM');
 const { SYSTEM_PROMPTS, SYSTEM_PROMPTS_EXT } = require('../../prompts/systemPrompts');
 const { fillPromptVars }     = require('../../utils/fillPromptVars');
 const db                     = require('../../config/db');
+const { serializeForPrompt, getEntityClusters } = require('../../utils/knowledgeGraph');
 
 /**
  * routeLSIToBlocks — механический JS-роутинг (fallback если Gemini routing упал).
@@ -109,11 +110,31 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
   // ── Stage 2C: Taxonomy Builder ────────────────────────────────────
   log(`Stage 2 Taxonomy: STAGE1_JSON = ${JSON.stringify(enrichedStage1).length} символов (полный контекст)`, 'info');
 
+  // Serialize Knowledge Graph for Taxonomy context (entity clusters help group H2s)
+  const kgContext = enrichedStage1?.knowledge_graph
+    ? serializeForPrompt(enrichedStage1.knowledge_graph, 2000)
+    : '';
+  const kgClusters = enrichedStage1?.knowledge_graph
+    ? getEntityClusters(enrichedStage1.knowledge_graph)
+    : [];
+
   let stage2Prompt = SYSTEM_PROMPTS.stage2
     .replace('{{BUSINESS_TYPE}}',   () => task.input_business_type || 'услуги')
     .replace('{{NICHE_FEATURES}}',  () => task.input_niche_features || 'Нет данных')
     .replace('{{TARGET_SERVICE}}', () => targetService)
     .replace('{{STAGE1_JSON}}',    () => JSON.stringify(enrichedStage1));
+
+  // Добавляем Knowledge Graph контекст к промпту (не нарушая существующую структуру)
+  if (kgContext) {
+    stage2Prompt += `\n\n===== KNOWLEDGE GRAPH (Entity Relationships) =====\n${kgContext}`;
+    if (kgClusters.length > 0) {
+      const clusterStr = kgClusters.slice(0, 8).map(c =>
+        `• ${c.centroid} (${c.members.length} entities)`
+      ).join('\n');
+      stage2Prompt += `\n\nENTITY CLUSTERS (use for H2 grouping):\n${clusterStr}`;
+    }
+    stage2Prompt += `\nUSE entity clusters above to inform H2 topic grouping. Each H2 should cover a coherent entity cluster.`;
+  }
 
   log(`Stage 2 Taxonomy Builder — итоговый промпт ${stage2Prompt.length} символов (~${Math.round(stage2Prompt.length / 4)} токенов). Запуск...`, 'info');
 

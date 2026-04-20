@@ -4,6 +4,7 @@ const { callLLM }            = require('../llm/callLLM');
 const { SYSTEM_PROMPTS, SYSTEM_PROMPTS_EXT } = require('../../prompts/systemPrompts');
 const { fillPromptVars }     = require('../../utils/fillPromptVars');
 const db                     = require('../../config/db');
+const { buildKnowledgeGraph, serializeForPrompt } = require('../../utils/knowledgeGraph');
 
 /**
  * Вспомогательная функция — безопасно извлекает массив из объекта/массива.
@@ -49,10 +50,12 @@ STAGE 0 RESULT: ${stage0Ctx}
 BRAND FACTS: ${brandFacts.substring(0, 500)}
 
 OUTPUT: Return ONLY valid JSON with these keys:
-- entity_graph: [{entity, type, weight, relations:[]}]
+- entity_graph: [{entity, type, weight, relations:[{target, relation, weight}]}]
+- knowledge_graph: {nodes: [{id, label, type, salience, properties:{}}], edges: [{source, target, relation, weight}]}
 - lsi_clusters: [{cluster_name, keywords:[], intent}]
 - commercial_intents: [{intent, query_example, conversion_potential}]
 - terminology_map: {term: definition}
+IMPORTANT: In knowledge_graph, build REAL semantic relationships between entities (is_a, part_of, used_for, solves, requires, etc).
 NO markdown. NO extra text.`;
 
   // ── Call 1B: Commercial Intent ─────────────────────────────────────
@@ -162,6 +165,15 @@ NO markdown. NO extra text.`;
   if (entityResult?.entity_graph) stage1Result.entity_graph = entityResult.entity_graph;
   if (entityResult?.terminology_map) stage1Result.terminology_map = entityResult.terminology_map;
 
+  // ── Knowledge Graph: объединяем данные из всех агентов ────────────
+  const knowledgeGraph = buildKnowledgeGraph(entityResult, intentResult, communityResult);
+  stage1Result.knowledge_graph = knowledgeGraph;
+  log(
+    `Stage 1 Knowledge Graph: ${knowledgeGraph.nodes.length} узлов, ` +
+    `${knowledgeGraph.edges.length} связей`,
+    'success'
+  );
+
   // Сохраняем в БД
   await db.query(
     `UPDATE tasks SET stage1_result = $1, updated_at = NOW() WHERE id = $2`,
@@ -171,6 +183,7 @@ NO markdown. NO extra text.`;
   log(
     `Stage 1 завершён. LSI кластеров: ${(stage1Result.lsi_clusters || []).length} | ` +
     `entity_graph: ${entityResult ? 'есть' : 'нет'} | ` +
+    `knowledge_graph: ${knowledgeGraph.nodes.length} узлов | ` +
     `commercial_intents: ${safeArr(stage1Result.commercial_intents).length}`,
     'success'
   );

@@ -272,6 +272,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
     expertOpinionUsed, previousContext, previousH2s,
     serviceNotes, offerDetails, proofAssets,
+    blockEntitiesStr,
   } = genContext;
 
   log(`Генерация блока [${blockIndex + 1}/${totalBlocks}]: ${block.h2}...`, 'info');
@@ -282,7 +283,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     : nGrams;
 
   // Подставляем все плейсхолдеры Stage 3
-  const s3prompt = SYSTEM_PROMPTS.stage3
+  let s3prompt = SYSTEM_PROMPTS.stage3
     .replace('{{BUSINESS_TYPE}}',      () => task.input_business_type || 'услуги')
     .replace('{{NICHE_FEATURES}}',     () => task.input_niche_features || 'Нет данных')
     .replace('{{PAGE_H1}}',            () => targetService)
@@ -311,6 +312,11 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     .replace('{{AUTHOR_NAME}}',        () => authorName)
     .replace('{{PREVIOUS_HTML}}',      () => previousContext || 'Это первый блок страницы.')
     .replace('{{COMPETITOR_FACTS}}',   () => competitorFactsStr);
+
+  // Knowledge Graph: добавляем связанные сущности к промпту блока
+  if (blockEntitiesStr) {
+    s3prompt += `\n\nKNOWLEDGE GRAPH ENTITIES (related to this H2 section):\n${blockEntitiesStr}\nNaturally weave these entities into the content where semantically appropriate. Do NOT force-insert — only use if they enrich the section.`;
+  }
 
   log(`Stage 3 блок ${blockIndex + 1}: промпт ${s3prompt.length} символов (~${Math.round(s3prompt.length / 4)} токенов). Запрос...`, 'info');
 

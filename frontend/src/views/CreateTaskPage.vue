@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue';
+import { ref, reactive, onMounted, onBeforeUnmount, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
 import AppLayout from '../components/AppLayout.vue';
@@ -58,6 +58,10 @@ onMounted(async () => {
   }
 });
 
+onBeforeUnmount(() => {
+  if (llmTimer) { clearInterval(llmTimer); llmTimer = null; }
+});
+
 // TF-IDF предпросмотр
 const tfidfParsed = computed(() => {
   try {
@@ -82,6 +86,8 @@ const llmFile      = ref(null);
 const llmUploading = ref(false);
 const llmMsg       = ref('');
 const llmError     = ref('');
+const llmElapsed   = ref(0);
+let   llmTimer     = null;
 
 // Маппинг полей extracted → form
 const LLM_FIELD_MAP = {
@@ -129,6 +135,8 @@ async function handleLLMTzUpload(e) {
   llmMsg.value   = '';
   llmError.value = '';
   llmUploading.value = true;
+  llmElapsed.value = 0;
+  llmTimer = setInterval(() => { llmElapsed.value++; }, 1000);
 
   try {
     const result = await store.parseTZWithLLM(file);
@@ -238,9 +246,12 @@ async function handleLLMTzUpload(e) {
       ? `ИИ заполнил ${filled} полей. Проверьте и при необходимости скорректируйте.`
       : 'ТЗ проанализировано, но распознаваемых полей не найдено — заполните вручную.';
   } catch (err) {
-    llmError.value = err.response?.data?.error || err.message || 'Ошибка анализа ТЗ';
+    llmError.value = err.code === 'ECONNABORTED' || err.message?.includes('timeout')
+      ? 'Превышено время ожидания. Попробуйте файл меньшего размера или повторите позже.'
+      : err.response?.data?.error || err.message || 'Ошибка анализа ТЗ';
   } finally {
     llmUploading.value = false;
+    if (llmTimer) { clearInterval(llmTimer); llmTimer = null; }
     // Сбрасываем input чтобы можно было повторно выбрать тот же файл
     e.target.value = '';
   }
@@ -642,7 +653,7 @@ function downloadExampleTZ() {
                   <p class="text-sm text-gray-300 font-medium">
                     {{ llmFile ? llmFile.name : 'Загрузите ТЗ для автоматического заполнения всех полей' }}
                   </p>
-                  <p class="text-xs text-gray-500 mt-1">PDF, DOCX, TXT · Макс. 20 MB · ~5–15 сек.</p>
+                  <p class="text-xs text-gray-500 mt-1">PDF, DOCX, TXT · Макс. 20 MB</p>
                 </div>
                 <input
                   ref="llmTzInput"
@@ -656,7 +667,7 @@ function downloadExampleTZ() {
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
                   </svg>
-                  ИИ анализирует ТЗ… это займёт 5–15 секунд
+                  ИИ анализирует ТЗ… {{ llmElapsed }} сек.
                 </div>
                 <div v-if="llmMsg && !llmUploading" class="mt-3 text-sm text-indigo-300 bg-indigo-950/50 border border-indigo-800 rounded px-3 py-2">
                   ✓ {{ llmMsg }}

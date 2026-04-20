@@ -5,6 +5,16 @@ const axios = require('axios');
 const DEEPSEEK_ENDPOINT = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1';
 const DEEPSEEK_MODEL    = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
 
+/**
+ * Определяет, является ли модель DeepSeek-R1 (reasoning model).
+ * Для R1 моделей рекомендуется избегать системных промптов —
+ * все инструкции передаются в user prompt.
+ */
+function isReasoningModel(model) {
+  const m = (model || '').toLowerCase();
+  return m.includes('r1') || m.includes('reasoner');
+}
+
 async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   // Валидация входных данных
   if (typeof systemInstruction !== 'string' || typeof userPrompt !== 'string') {
@@ -31,12 +41,35 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     throw new Error('DEEPSEEK_API_KEY is not set in environment variables');
   }
 
+  // ── R1 (reasoning) модель: system prompt → user prompt ────────────
+  // DeepSeek-R1 рекомендует не использовать system prompt.
+  // Все жёсткие SEO-инструкции передаём в user prompt с XML-тегами.
+  const r1Mode = isReasoningModel(DEEPSEEK_MODEL);
+
+  let messages;
+  if (r1Mode && systemInstruction.trim()) {
+    // Объединяем system + user в один user prompt
+    messages = [
+      {
+        role: 'user',
+        content:
+          `<instructions>\n${systemInstruction}\n</instructions>\n\n${userPrompt}`,
+      },
+    ];
+  } else if (systemInstruction.trim()) {
+    messages = [
+      { role: 'system', content: systemInstruction },
+      { role: 'user', content: userPrompt },
+    ];
+  } else {
+    messages = [
+      { role: 'user', content: userPrompt },
+    ];
+  }
+
   const body = {
     model: DEEPSEEK_MODEL,
-    messages: [
-      { role: 'system', content: systemInstruction },
-      { role: 'user', content: userPrompt }
-    ],
+    messages,
     temperature: temperature,
     max_tokens: maxTokens,
   };
@@ -55,8 +88,14 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     });
 
     const data = res.data;
-    const text = data.choices?.[0]?.message?.content || '';
+    let text = data.choices?.[0]?.message?.content || '';
     const usage = data.usage || {};
+
+    // Для R1 моделей: вырезаем <think>…</think> блок рассуждений,
+    // оставляем только финальный ответ для JSON-парсинга.
+    if (r1Mode) {
+      text = stripThinkBlocks(text);
+    }
 
     return {
       text,
@@ -83,4 +122,15 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   }
 }
 
-module.exports = { callDeepSeek };
+/**
+ * stripThinkBlocks — вырезает блоки <think>…</think> из ответа R1 модели.
+ * R1 помещает рассуждения (chain-of-thought) внутрь <think> тегов,
+ * а финальный JSON-ответ — после них.
+ */
+function stripThinkBlocks(text) {
+  if (!text) return text;
+  // Удаляем все <think>...</think> блоки (dotAll flag /s — . включает \n)
+  return text.replace(/<think>.*?<\/think>/gis, '').trim();
+}
+
+module.exports = { callDeepSeek, isReasoningModel };

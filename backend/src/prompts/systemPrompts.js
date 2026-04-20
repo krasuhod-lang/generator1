@@ -7812,3 +7812,61 @@ const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических з
 ВЕРНИ ТОЛЬКО JSON. НАЧНИ С { И ЗАКОНЧИ }. НИКАКОГО ТЕКСТА ДО ИЛИ ПОСЛЕ JSON.`;
 
 module.exports = { SYSTEM_PROMPTS, SYSTEM_PROMPTS_EXT, TZ_EXTRACTOR_PROMPT };
+
+// ── DSPy-inspired Prompt Registration ──────────────────────────────
+// Регистрируем все промпты в реестре для валидации и версионирования.
+// Это не изменяет содержимое промптов — только добавляет metadata layer.
+const { registerPrompt, OUTPUT_SCHEMAS } = require('./promptRegistry');
+
+try {
+  // Stage 3: Content Generation
+  registerPrompt('stage3', {
+    prompt:       SYSTEM_PROMPTS.stage3,
+    version:      '4.0.0',
+    outputSchema: OUTPUT_SCHEMAS.stage3,
+    metadata:     { adapter: 'gemini', temperature: 0.45 },
+  });
+
+  // Stage 4: E-E-A-T Audit
+  registerPrompt('stage4', {
+    prompt:       SYSTEM_PROMPTS.stage4,
+    version:      '4.0.0',
+    outputSchema: OUTPUT_SCHEMAS.stage4,
+    metadata:     { adapter: 'deepseek', temperature: 0.2 },
+  });
+
+  // Stage 5: PQ Refinement
+  registerPrompt('stage5', {
+    prompt:       SYSTEM_PROMPTS.stage5,
+    version:      '4.0.0',
+    outputSchema: OUTPUT_SCHEMAS.stage5,
+    metadata:     { adapter: 'gemini', temperature: 0.35 },
+  });
+
+  // Stage 6: LSI Injection
+  registerPrompt('stage6', {
+    prompt:       SYSTEM_PROMPTS.stage6,
+    version:      '4.0.0',
+    outputSchema: OUTPUT_SCHEMAS.stage6,
+    metadata:     { adapter: 'gemini', temperature: 0.2 },
+  });
+
+  // Stage 7: Global Audit
+  registerPrompt('stage7', {
+    prompt:       SYSTEM_PROMPTS.stage7,
+    version:      '4.0.0',
+    outputSchema: OUTPUT_SCHEMAS.stage7,
+    metadata:     { adapter: 'deepseek', temperature: 0.2 },
+  });
+
+  // Entity Landscape (Stage 1A)
+  registerPrompt('entityLandscape', {
+    prompt:       SYSTEM_PROMPTS_EXT.entityLandscape,
+    version:      '4.0.0',
+    outputSchema: OUTPUT_SCHEMAS.entityLandscape,
+    metadata:     { adapter: 'deepseek', temperature: 0.3 },
+  });
+} catch (regErr) {
+  // Не прерываем загрузку модуля если регистрация упала
+  console.warn('[systemPrompts] Prompt registry registration skipped:', regErr.message);
+}
