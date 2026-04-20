@@ -186,6 +186,9 @@ function computeMetrics(promptName, output, extras = {}) {
   }
   try {
     const result = entry.metrics(output, extras);
+    if (result === null || result === undefined) {
+      return { score: null, breakdown: {} };
+    }
     return {
       score:     typeof result === 'number' ? result : result.score ?? null,
       breakdown: typeof result === 'object' ? result : { value: result },

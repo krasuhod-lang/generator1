@@ -18,7 +18,8 @@
  * @returns {{ passed: boolean, message: string }}
  */
 function assertMinLength(text, min) {
-  const len = (text || '').replace(/<[^>]+>/g, '').length;
+  const stripped = (text || '').replace(/<[^>]*>/g, '').replace(/<[^>]*/g, '');
+  const len = stripped.length;
   return {
     passed:  len >= min,
     message: len >= min
@@ -79,7 +80,7 @@ function assertLSICoverage(html, lsiTerms, minPercent = 70) {
   if (!lsiTerms || !lsiTerms.length) {
     return { passed: true, message: 'OK: no LSI terms to check', coverage: 100, missing: [] };
   }
-  const text    = (html || '').toLowerCase().replace(/<[^>]+>/g, ' ');
+  const text    = (html || '').toLowerCase().replace(/<[^>]*>/g, ' ').replace(/<[^>]*/g, ' ');
   const covered = lsiTerms.filter(term => text.includes(term.toLowerCase()));
   const missing = lsiTerms.filter(term => !text.includes(term.toLowerCase()));
   const coverage = Math.round((covered.length / lsiTerms.length) * 100);
