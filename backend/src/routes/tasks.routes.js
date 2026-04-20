@@ -3,6 +3,7 @@
 const express        = require('express');
 const multer         = require('multer');
 const path           = require('path');
+const rateLimit      = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
 const {
   listTasks,
@@ -10,6 +11,8 @@ const {
   getTask,
   updateTask,
   startTask,
+  pauseTask,
+  resumeTask,
   deleteTask,
   getResult,
   getMetrics,
@@ -102,6 +105,19 @@ const uploadTz = multer({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Rate limiter — ограничение для action-эндпоинтов (start/pause/resume)
+// Максимум 10 запусков/стопов/возобновлений в минуту на IP
+// ─────────────────────────────────────────────────────────────────────────────
+const actionLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много запросов. Попробуйте через минуту.' },
+  skip: (req) => !!req.user,  // bypass for authenticated users (auth check is more specific)
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Роуты tasks — JWT обязателен для всех
 // SSE /stream использует authSSE (поддерживает ?token= query param)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +138,9 @@ router.patch('/:id',       authMiddleware, updateTask); // PATCH  /api/tasks/:id
 router.delete('/:id',      authMiddleware, deleteTask); // DELETE /api/tasks/:id
 
 // Действия над задачей
-router.post('/:id/start',  authMiddleware, startTask);  // POST /api/tasks/:id/start
+router.post('/:id/start',  authMiddleware, actionLimiter, startTask);   // POST /api/tasks/:id/start
+router.post('/:id/pause',  authMiddleware, actionLimiter, pauseTask);   // POST /api/tasks/:id/pause
+router.post('/:id/resume', authMiddleware, actionLimiter, resumeTask);  // POST /api/tasks/:id/resume
 
 // Результаты и данные
 router.get('/:id/result',  authMiddleware, getResult);  // GET /api/tasks/:id/result

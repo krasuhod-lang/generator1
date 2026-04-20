@@ -7430,7 +7430,7 @@ TRUSTWORTHINESS (T):
 - Добавляй disclaimers для сложных/YMYL тем: финансы, здоровье, юридическое.
 
 СТРУКТУРНЫЕ ТРЕБОВАНИЯ ДЛЯ PQ ≥ 8:
-1. Минимум 2-3 H3 внутри каждого H2-блока (кроме FAQ).
+1. Строго от {{MIN_H3_COUNT}} до {{MAX_H3_COUNT}} подзаголовков H3 внутри каждого H2-блока (кроме FAQ).
 2. Каждый H3 = конкретный подвопрос с прямым ответом под ним.
 3. Хотя бы один список (<ul>/<ol>) для улучшения scanability.
 4. Хотя бы одна таблица ИЛИ один blockquote в блоке (если уместно по типу раздела).
@@ -7824,6 +7824,20 @@ try {
     prompt:       SYSTEM_PROMPTS.stage3,
     version:      '4.0.0',
     outputSchema: OUTPUT_SCHEMAS.stage3,
+    metrics: (output, extras) => {
+      const pqScore        = (extras.pqScore     || 0) / 10;      // 0..1
+      const lsiCoverage    = (extras.lsiCoverage || 0) / 100;     // 0..1
+      const h3Count        = (output.html_content || '').match(/<h3[\s>]/gi)?.length || 0;
+      const structureScore = Math.min(h3Count / 4, 1);            // 4 H3 = perfect
+      const score = pqScore * 0.4 + lsiCoverage * 0.3 + structureScore * 0.3;
+      return {
+        score:         Math.round(score * 100) / 100,
+        pqScore:       extras.pqScore,
+        lsiCoverage:   extras.lsiCoverage,
+        h3Count,
+        structureScore: Math.round(structureScore * 100) / 100,
+      };
+    },
     metadata:     { adapter: 'gemini', temperature: 0.45 },
   });
 

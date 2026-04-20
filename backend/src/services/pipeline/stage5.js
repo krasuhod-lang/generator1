@@ -3,7 +3,7 @@
 const { callLLM }           = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }    = require('../../prompts/systemPrompts');
 const { reAuditBlock }      = require('./stage4');
-const { factCheck }         = require('../../utils/factCheck');
+const { factCheck, computeConfidence } = require('../../utils/factCheck');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 
 /**
@@ -191,6 +191,40 @@ NON-NEGOTIABLE RULES (нарушение = брак):
     log(`Stage 5 блок ${blockIndex + 1}: PQ ${currentPQ} >= 8 ✓ (${s5Loop} итераций)`, 'success');
   } else {
     log(`Stage 5 блок ${blockIndex + 1}: PQ ${currentPQ} после ${s5Loop} итераций — продолжаем с лучшим результатом`, 'warn');
+  }
+
+  // ── Logprob confidence check (DeepSeek only) ──────────────────────
+  if (currentHTML.__logprobs) {
+    const confidence = computeConfidence(currentHTML.__logprobs, currentHTML);
+    if (confidence.lowConfidenceCount > 0) {
+      log(`Блок ${blockIndex + 1}: ${confidence.lowConfidenceCount} абзацев с низкой уверенностью — перезапись...`, 'warn');
+      const lowConfParagraphs = confidence.paragraphs
+        .filter(p => !p.confident)
+        .map(p => `Абзац ${p.index + 1}: "${p.text}..." (mean_logprob: ${p.meanLogprob})`)
+        .join('\n');
+
+      const confInstruction = `Следующие абзацы содержат потенциально недостоверные утверждения (модель ИИ не уверена в их точности). Перепиши их, используя ТОЛЬКО подтверждённые факты из BRAND_FACTS. Если факт невозможно подтвердить — перефразируй без конкретных данных:\n${lowConfParagraphs}`;
+
+      const confPrompt = SYSTEM_PROMPTS.stage5
+        .replace('{{TARGET_SERVICE}}',      () => targetService)
+        .replace('{{CURRENT_H2}}',          () => h2)
+        .replace('{{BRAND_FACTS}}',         () => brandFacts)
+        .replace('{{ORIGINAL_HTML}}',       () => currentHTML)
+        .replace('{{AUDIT_REPORT}}',        () => JSON.stringify(currentAudit || {}))
+        .replace('{{SPECIAL_INSTRUCTION}}', () => confInstruction);
+
+      const confResult = await callLLM(
+        'gemini',
+        '',
+        confPrompt,
+        { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens }
+      ).catch(() => null);
+
+      if (confResult?.html_content) {
+        currentHTML = confResult.html_content;
+        log(`Блок ${blockIndex + 1}: low-confidence абзацы переписаны`, 'success');
+      }
+    }
   }
 
   // ── Enforce single expert opinion: strip blockquotes if already used ──

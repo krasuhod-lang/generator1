@@ -67,7 +67,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust) {
 
     log(
       `Stage 6 блок ${blockIndex + 1}: инъекция LSI цикл ${loopCount} — ` +
-      `${coverage.missing.length} пропущенных слов (${semanticData.semanticallyCovered.length} семантически покрыты), ` +
+      `${coverage.missing.length} пропущенных слов (${semanticData.semanticallyCovered.length} семантически покрыты, BM25+TF-IDF hybrid), ` +
       `промпт ${stage6Prompt.length} символов...`,
       'info'
     );

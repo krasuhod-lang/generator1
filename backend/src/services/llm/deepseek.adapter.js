@@ -28,6 +28,7 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     temperature = 0.4,
     maxTokens   = 8000,
     timeoutMs   = 120000,
+    logprobs    = false,
   } = options;
 
   // Проверка параметров
@@ -74,6 +75,11 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     max_tokens: maxTokens,
   };
 
+  if (logprobs) {
+    body.logprobs = true;
+    body.top_logprobs = 3;
+  }
+
   const url = `${DEEPSEEK_ENDPOINT}/chat/completions`;
 
   try {
@@ -97,11 +103,15 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
       text = stripThinkBlocks(text);
     }
 
+    const logprobsData = logprobs ? (data.choices?.[0]?.logprobs?.content || null) : null;
+
     return {
       text,
       tokensIn:  usage.prompt_tokens      || 0,
-      tokensOut: usage.completion_tokens || 0,
-      model:      data.model              || DEEPSEEK_MODEL
+      tokensOut: usage.completion_tokens   || 0,
+      model:     data.model               || DEEPSEEK_MODEL,
+      cacheHitTokens: usage.prompt_cache_hit_tokens || 0,
+      logprobs: logprobsData,
     };
   } catch (err) {
     const status = err.response?.status || 0;

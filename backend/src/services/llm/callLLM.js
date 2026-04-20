@@ -144,6 +144,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     onTokens   = null,   // callback(model, tokensIn, tokensOut, costUsd) — для SSE
     temperature,
     maxTokens,
+    logprobs = false,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -159,12 +160,14 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const result    = await callFn(system, prompt, { temperature, maxTokens });
-      const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut);
+      const result    = await callFn(system, prompt, { temperature, maxTokens, logprobs });
+      const cacheHit  = adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0;
+      const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut, cacheHit);
       const parsed    = normalizeKeys(parseJSON(result.text));
 
+      const cacheNote = cacheHit ? ` | cache_hit: ${result.cacheHitTokens}` : '';
       log(
-        `${callLabel || stageName} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов | $${costUsd.toFixed(6)}`,
+        `${callLabel || stageName} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${cacheNote} | $${costUsd.toFixed(6)}`,
         'success'
       );
 
@@ -183,9 +186,19 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         tokensIn:   result.tokensIn,
         tokensOut:  result.tokensOut,
         costUsd,
-        resultJson: parsed,
+        resultJson: cacheHit
+          ? Object.assign({}, parsed, { _cacheHitTokens: result.cacheHitTokens })
+          : parsed,
         startedAt,
       }).catch(() => {}); // ошибки уже логируются внутри
+
+      if (result.logprobs) {
+        Object.defineProperty(parsed, '__logprobs', {
+          value: result.logprobs,
+          enumerable: false,
+          writable: true,
+        });
+      }
 
       return parsed;
 

@@ -142,11 +142,18 @@ function computeSemanticCoverage(htmlContent, lsiTerms, threshold = 0.15) {
   // Вычисляем IDF
   const idf = computeIDF(allDocs);
 
-  // Строим TF-IDF векторы для каждого параграфа
-  const paragraphVectors = paragraphs.map(p => ({
-    index: p.index,
-    text:  p.text,
-    vec:   buildTfIdfVector(tokenize(p.text), idf),
+  // Average document length (for BM25 normalization)
+  const allParagraphTokens = paragraphs.map(p => tokenize(p.text));
+  const avgDocLen = allParagraphTokens.length > 0
+    ? allParagraphTokens.reduce((s, t) => s + t.length, 0) / allParagraphTokens.length
+    : 10;
+
+  // TF-IDF vectors for each paragraph
+  const paragraphVectors = paragraphs.map((p, i) => ({
+    index:  p.index,
+    text:   p.text,
+    tokens: allParagraphTokens[i],
+    vec:    buildTfIdfVector(allParagraphTokens[i], idf),
   }));
 
   const semanticallyCovered = [];
@@ -157,14 +164,29 @@ function computeSemanticCoverage(htmlContent, lsiTerms, threshold = 0.15) {
     const termTokens = tokenize(term);
     const termVec    = buildTfIdfVector(termTokens, idf);
 
+    // Compute raw scores (cosine + BM25) for each paragraph
+    const rawScores = paragraphVectors.map(pv => ({
+      index:  pv.index,
+      cosine: cosineSimilarity(termVec, pv.vec),
+      bm25:   computeBM25Score(termTokens, pv.tokens, idf, avgDocLen),
+    }));
+
+    // Normalize BM25 scores to 0..1 range
+    const maxBM25 = rawScores.reduce((max, s) => Math.max(max, s.bm25), 1e-10);
+    const scores  = rawScores.map(s => ({
+      index:  s.index,
+      cosine: s.cosine,
+      bm25N:  s.bm25 / maxBM25,
+      hybrid: 0.5 * s.cosine + 0.5 * (s.bm25 / maxBM25),
+    }));
+
+    // Find best paragraph by hybrid score
     let bestSim   = 0;
     let bestIndex = 0;
-
-    for (const pv of paragraphVectors) {
-      const sim = cosineSimilarity(termVec, pv.vec);
-      if (sim > bestSim) {
-        bestSim   = sim;
-        bestIndex = pv.index;
+    for (const s of scores) {
+      if (s.hybrid > bestSim) {
+        bestSim   = s.hybrid;
+        bestIndex = s.index;
       }
     }
 
@@ -174,7 +196,6 @@ function computeSemanticCoverage(htmlContent, lsiTerms, threshold = 0.15) {
       semanticallyMissing.push(term);
     }
 
-    // Всегда сохраняем hint — полезно для Stage 6 инъекции
     paragraphHints.push({
       term,
       bestParagraphIndex: bestIndex,
@@ -187,6 +208,41 @@ function computeSemanticCoverage(htmlContent, lsiTerms, threshold = 0.15) {
     : 100;
 
   return { semanticallyCovered, semanticallyMissing, semanticScore, paragraphHints };
+}
+
+/**
+ * BM25 parameters
+ */
+const BM25_K1 = 1.2;
+const BM25_B  = 0.75;
+
+/**
+ * computeBM25Score — вычисляет BM25 score запроса относительно одного документа.
+ *
+ * @param {string[]} queryTerms — стеммированные токены запроса (LSI-термин)
+ * @param {string[]} docTokens  — стеммированные токены документа (параграфа)
+ * @param {Map<string,number>} idf — IDF-словарь
+ * @param {number} avgDocLen       — средняя длина документа в токенах
+ * @returns {number} — BM25 score (≥0)
+ */
+function computeBM25Score(queryTerms, docTokens, idf, avgDocLen) {
+  if (!docTokens.length || !queryTerms.length) return 0;
+
+  const docLen = docTokens.length;
+  const tfMap  = new Map();
+  for (const t of docTokens) tfMap.set(t, (tfMap.get(t) || 0) + 1);
+
+  const K = BM25_K1 * (1 - BM25_B + BM25_B * (docLen / Math.max(avgDocLen, 1)));
+
+  let score = 0;
+  for (const term of queryTerms) {
+    const tf       = tfMap.get(term) || 0;
+    const idfVal   = idf.get(term)   || 0;
+    const numerator   = tf * (BM25_K1 + 1);
+    const denominator = tf + K;
+    score += idfVal * (numerator / Math.max(denominator, 1e-10));
+  }
+  return score;
 }
 
 /**
@@ -258,6 +314,7 @@ function hybridCoverage(htmlContent, targetWords, lexical, weights = {}) {
 
 module.exports = {
   computeSemanticCoverage,
+  computeBM25Score,
   hybridCoverage,
   splitIntoParagraphs,
   tokenize,

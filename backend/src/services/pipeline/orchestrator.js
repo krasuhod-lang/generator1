@@ -2,6 +2,59 @@
 
 const db              = require('../../config/db');
 const { publish }     = require('../sse/sseManager');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PipelinePausedError — бросается при обнаружении запроса на паузу.
+// Worker перехватывает этот класс отдельно от обычных ошибок.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class PipelinePausedError extends Error {
+  constructor(checkpoint) {
+    super('Pipeline paused by user request');
+    this.name       = 'PipelinePausedError';
+    this.checkpoint = checkpoint;
+  }
+}
+
+/**
+ * savePipelineCheckpoint — сохраняет состояние пайплайна в БД.
+ * @param {string} taskId
+ * @param {object} checkpoint
+ */
+async function savePipelineCheckpoint(taskId, checkpoint) {
+  await db.query(
+    `UPDATE tasks SET pipeline_checkpoint = $1, updated_at = NOW() WHERE id = $2`,
+    [JSON.stringify(checkpoint), taskId]
+  );
+}
+
+/**
+ * checkPauseRequested — проверяет, запрошена ли пауза для задачи.
+ * Читает статус задачи из БД.
+ * @param {string} taskId
+ * @returns {Promise<boolean>}
+ */
+async function checkPauseRequested(taskId) {
+  const { rows } = await db.query(
+    `SELECT status FROM tasks WHERE id = $1`,
+    [taskId]
+  );
+  return rows[0]?.status === 'pausing';
+}
+
+/**
+ * loadDoneBlock — загружает уже готовый блок из task_content_blocks.
+ * @param {string} taskId
+ * @param {number} blockIndex
+ * @returns {Promise<object|null>}
+ */
+async function loadDoneBlock(taskId, blockIndex) {
+  const { rows } = await db.query(
+    `SELECT * FROM task_content_blocks WHERE task_id = $1 AND block_index = $2 AND status = 'done'`,
+    [taskId, blockIndex]
+  );
+  return rows[0] || null;
+}
 const { runStage0 }   = require('./stage0');
 const { runStage1 }   = require('./stage1');
 const { runStage2 }   = require('./stage2');
@@ -11,7 +64,7 @@ const { runStage5, checkAntiWater } = require('./stage5');
 const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
-const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
+const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objectiveMetrics');
 const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
@@ -82,10 +135,10 @@ async function markBlockError(taskId, blockIndex, block, errorMsg) {
  *   Stage 7: Глобальный аудит + BM25 + сохранение метрик
  *
  * @param {object} task — строка из таблицы tasks
- * @param {object} ctx  — { log, progress, job? }
+ * @param {object} ctx  — { log, progress, job?, resumeFrom? }
  */
 async function runPipeline(task, ctx) {
-  const { log, progress } = ctx;
+  const { log, progress, resumeFrom = null } = ctx;
   const taskId = task.id;
 
   // ctx.log уже публикует через worker.js → publish() + console.log
@@ -177,28 +230,45 @@ async function runPipeline(task, ctx) {
 
   // ── Stage 0 ──────────────────────────────────────────────────────
   let stage0Result = null;
-  try {
-    stage0Result = await runStage0(task, stageCtx);
-  } catch (e) {
-    log(`Stage 0 упал: ${e.message} — продолжаем без Stage 0 данных`, 'warn');
+  if (resumeFrom?.stage0Result !== undefined) {
+    stage0Result = resumeFrom.stage0Result;
+    log('Stage 0: восстановлен из checkpoint', 'info');
+  } else {
+    try {
+      stage0Result = await runStage0(task, stageCtx);
+    } catch (e) {
+      log(`Stage 0 упал: ${e.message} — продолжаем без Stage 0 данных`, 'warn');
+    }
   }
 
   // ── Stage 1 ──────────────────────────────────────────────────────
   let stage1Result;
-  try {
-    stage1Result = await runStage1(task, stageCtx, stage0Result);
-  } catch (e) {
-    throw new Error(`Stage 1 критическая ошибка: ${e.message}`);
+  if (resumeFrom?.stage1Result) {
+    stage1Result = resumeFrom.stage1Result;
+    log('Stage 1: восстановлен из checkpoint', 'info');
+  } else {
+    try {
+      stage1Result = await runStage1(task, stageCtx, stage0Result);
+    } catch (e) {
+      throw new Error(`Stage 1 критическая ошибка: ${e.message}`);
+    }
   }
 
   // ── Stage 2 ──────────────────────────────────────────────────────
   let taxonomy, stage2Raw, enrichedStage1;
-  try {
-    ({ taxonomy, stage2Raw, enrichedStage1 } = await runStage2(
-      task, stageCtx, stage1Result
-    ));
-  } catch (e) {
-    throw new Error(`Stage 2 критическая ошибка: ${e.message}`);
+  if (resumeFrom?.taxonomy) {
+    taxonomy       = resumeFrom.taxonomy;
+    stage2Raw      = resumeFrom.stage2Raw      || null;
+    enrichedStage1 = resumeFrom.enrichedStage1 || null;
+    log(`Stage 2: восстановлен из checkpoint (${taxonomy.length} блоков)`, 'info');
+  } else {
+    try {
+      ({ taxonomy, stage2Raw, enrichedStage1 } = await runStage2(
+        task, stageCtx, stage1Result
+      ));
+    } catch (e) {
+      throw new Error(`Stage 2 критическая ошибка: ${e.message}`);
+    }
   }
 
   publish(taskId, { type: 'taxonomy', taxonomy });
@@ -258,12 +328,17 @@ async function runPipeline(task, ctx) {
   const blockWeights = taxonomy.map(b => BLOCK_TYPE_WEIGHTS[b.type] || 1.0);
   const weightSum    = blockWeights.reduce((s, w) => s + w, 0);
 
+  const structureLimits = getStructureLimits(maxChars);
+
   // Knowledge Graph для контекста каждого блока
   const knowledgeGraph = stage1Result?.knowledge_graph || null;
 
-  let expertOpinionUsed = false;
-  let previousContext   = '';
-  const generatedH2s    = [];
+  // Restore state from checkpoint if resuming
+  let expertOpinionUsed = resumeFrom?.expertOpinionUsed || false;
+  let previousContext   = resumeFrom?.previousContext   || '';
+  const generatedH2s    = resumeFrom?.generatedH2s      || [];
+  // How many blocks were already done before this resume
+  const resumeFromBlock = resumeFrom?.resumeFromBlock   ?? 0;
 
   /**
    * auditAndRefineBlock — запускает Stage 4→5→6 для одного блока.
@@ -297,7 +372,7 @@ async function runPipeline(task, ctx) {
     const needsRefinement = lsiCovPct < 80 || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
 
     // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки)
-    const objMetrics = checkObjectiveMetrics(blockHtml);
+    const objMetrics = checkObjectiveMetrics(blockHtml, { structureLimits });
     const needsObjFix = !objMetrics.passed;
     if (needsObjFix && !needsRefinement) {
       log(`Блок ${i + 1}: объективные метрики НЕ пройдены (${objMetrics.issues.join('; ')}) — запускаем рефайн`, 'warn');
@@ -377,8 +452,43 @@ async function runPipeline(task, ctx) {
   // Stage 3 (Gemini) и Stage 4-6 (DeepSeek) — разные API, не конкурируют.
   const auditPromises = []; // промисы аудита всех блоков
 
+  // Базовый checkpoint (обновляется перед каждым блоком)
+  const buildCheckpoint = (blockIndex) => ({
+    stage0Result,
+    stage1Result,
+    stage2Raw,
+    taxonomy,
+    enrichedStage1,
+    expertOpinionUsed,
+    previousContext,
+    generatedH2s: [...generatedH2s],
+    resumeFromBlock: blockIndex,
+  });
+
   for (let i = 0; i < taxonomy.length; i++) {
     const block = taxonomy[i];
+
+    // ── Resume: если этот блок уже готов — загружаем из БД и пропускаем ──
+    if (i < resumeFromBlock) {
+      const doneBlock = await loadDoneBlock(taskId, i);
+      if (doneBlock) {
+        log(`Блок ${i + 1}: восстановлен из БД (уже готов)`, 'info');
+        auditPromises.push(Promise.resolve(doneBlock.html_content));
+        // LSI учёт для Stage 7
+        (block.lsi_must || []).forEach(term => allLSISet.add(term));
+      } else {
+        log(`Блок ${i + 1}: не найден в БД — будет перегенерирован`, 'warn');
+        // Fall through to generate (don't skip)
+      }
+      if (doneBlock) continue;
+    }
+
+    // ── Pause check: перед каждым блоком проверяем запрос на паузу ──
+    if (await checkPauseRequested(taskId)) {
+      const checkpoint = buildCheckpoint(i);
+      await savePipelineCheckpoint(taskId, checkpoint);
+      throw new PipelinePausedError(checkpoint);
+    }
     const blockTargetChars = Math.round(totalTarget * (blockWeights[i] / weightSum)) || 1500;
     const blockMinChars    = Math.round(minChars    * (blockWeights[i] / weightSum)) || 600;
     const blockMaxChars    = Math.round(maxChars    * (blockWeights[i] / weightSum)) || 2500;
@@ -401,7 +511,7 @@ async function runPipeline(task, ctx) {
       blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
       expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
       serviceNotes, offerDetails, proofAssets,
-      blockEntitiesStr,
+      blockEntitiesStr, structureLimits,
     });
 
     // Обновляем контекст для генерации следующего блока
@@ -503,4 +613,4 @@ async function runPipeline(task, ctx) {
   return s7Result;
 }
 
-module.exports = { runPipeline };
+module.exports = { runPipeline, PipelinePausedError };

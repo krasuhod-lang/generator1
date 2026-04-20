@@ -59,4 +59,97 @@ function factCheck(htmlContent, factsArray = [], brandFacts = '', rawLSI = '') {
   return hallucinations;
 }
 
-module.exports = { factCheck };
+/**
+ * CONFIDENCE_THRESHOLD — порог средней log-вероятности.
+ * Если mean_logprob абзаца ниже этого порога, модель "не уверена" в содержании.
+ * -1.5 — эмпирически подобранное значение (logprob = ln(P), P ≈ 22% при -1.5).
+ */
+const CONFIDENCE_THRESHOLD = -1.5;
+
+/** Minimum paragraph text length to include in confidence analysis */
+const MIN_PARAGRAPH_LENGTH = 20;
+
+/** Number of leading characters used to locate a paragraph in the token stream */
+const MATCH_PREFIX_LENGTH = 50;
+
+/**
+ * computeConfidence — вычисляет уверенность модели для каждого абзаца HTML.
+ *
+ * @param {Array<{token:string, logprob:number}>|null} logprobs — массив logprob для каждого токена
+ * @param {string} htmlContent — HTML-контент блока
+ * @returns {{ paragraphs: Array<{index:number, text:string, meanLogprob:number, confident:boolean}>, lowConfidenceCount: number }}
+ */
+function computeConfidence(logprobs, htmlContent) {
+  if (!logprobs || !logprobs.length || !htmlContent) {
+    return { paragraphs: [], lowConfidenceCount: 0 };
+  }
+
+  const paragraphMatches = htmlContent.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
+  if (!paragraphMatches.length) {
+    return { paragraphs: [], lowConfidenceCount: 0 };
+  }
+
+  const fullText = logprobs.map(t => t.token).join('');
+
+  const paragraphs = [];
+  let lowConfidenceCount = 0;
+  let tokenOffset = 0;
+
+  for (let i = 0; i < paragraphMatches.length; i++) {
+    const pHtml = paragraphMatches[i];
+    // Strip HTML tags by replacing angle brackets and everything between them with spaces.
+    // Using two-pass replacement to avoid incomplete-sanitization of nested/malformed tags.
+    const pText = pHtml.replace(/</g, ' \x00').replace(/\x00[^>]*>/g, ' ').replace(/\x00/g, ' ').replace(/\s+/g, ' ').trim();
+
+    if (pText.length < MIN_PARAGRAPH_LENGTH) continue;
+
+    const pTextClean = pText.substring(0, MATCH_PREFIX_LENGTH);
+    const startIdx = fullText.indexOf(pTextClean, tokenOffset);
+
+    if (startIdx === -1) {
+      paragraphs.push({ index: i, text: pText.substring(0, 100), meanLogprob: 0, confident: true });
+      continue;
+    }
+
+    let charCount = 0;
+    let tokenStart = -1;
+    let tokenEnd = -1;
+
+    for (let j = 0; j < logprobs.length; j++) {
+      if (charCount >= startIdx && tokenStart === -1) {
+        tokenStart = j;
+      }
+      charCount += logprobs[j].token.length;
+      if (charCount >= startIdx + pText.length) {
+        tokenEnd = j;
+        break;
+      }
+    }
+
+    if (tokenStart === -1 || tokenEnd === -1) {
+      paragraphs.push({ index: i, text: pText.substring(0, 100), meanLogprob: 0, confident: true });
+      continue;
+    }
+
+    const pTokens = logprobs.slice(tokenStart, tokenEnd + 1);
+    const meanLogprob = pTokens.length > 0
+      ? pTokens.reduce((sum, t) => sum + t.logprob, 0) / pTokens.length
+      : 0;
+
+    const confident = meanLogprob >= CONFIDENCE_THRESHOLD;
+    if (!confident) lowConfidenceCount++;
+
+    paragraphs.push({
+      index: i,
+      text: pText.substring(0, 100),
+      meanLogprob: Math.round(meanLogprob * 1000) / 1000,
+      confident,
+    });
+
+    tokenOffset = startIdx + pText.length;
+  }
+
+  return { paragraphs, lowConfidenceCount };
+}
+
+module.exports = { factCheck, computeConfidence, CONFIDENCE_THRESHOLD };

@@ -22,6 +22,9 @@ const progress = ref(0);
 const stage    = ref('—');
 const done     = ref(false);
 const failed   = ref(false);
+const paused   = ref(false);  // задача на паузе
+const pausing  = ref(false);  // запрос на паузу отправлен, ждём
+const resuming = ref(false);  // запрос на resume отправлен
 
 // ── Токены и стоимость ─────────────────────────────────────────────────────
 const tokens = reactive({
@@ -119,6 +122,8 @@ function handleSSEMessage(msg) {
         stage.value = 'done';
       } else if (msg.status === 'failed') {
         failed.value = true;
+      } else if (msg.status === 'paused') {
+        paused.value = true;
       }
       break;
 
@@ -187,6 +192,29 @@ function handleSSEMessage(msg) {
       setTimeout(() => { showResult.value = true; }, 1500);
       break;
 
+    case 'pausing':
+      pausing.value = true;
+      pushLog({ ts: ts(), msg: `⏸ ${msg.message || 'Останавливаем задачу...'}`, level: 'warn' });
+      break;
+
+    case 'paused':
+      paused.value  = true;
+      pausing.value = false;
+      stopGenerationTimer();
+      pushLog({
+        ts: ts(),
+        msg: `⏹ Задача приостановлена. Готово блоков: ${msg.blocksDone ?? 0} / ${msg.blocksTotal ?? 0}`,
+        level: 'warn',
+      });
+      closeSSE();
+      break;
+
+    case 'resuming':
+      resuming.value = false;
+      paused.value   = false;
+      pushLog({ ts: ts(), msg: `▶ ${msg.message || 'Возобновляем задачу...'}`, level: 'info' });
+      break;
+
     case 'error':
       failed.value = true;
       stopGenerationTimer();
@@ -241,8 +269,8 @@ function connectSSE() {
   };
 
   es.onerror = (event) => {
-    // Не переподключаемся если задача уже завершена
-    if (done.value || failed.value) {
+    // Не переподключаемся если задача уже завершена/остановлена
+    if (done.value || failed.value || paused.value) {
       closeSSE();
       return;
     }
@@ -271,7 +299,7 @@ function connectSSE() {
     });
 
     reconnectTimer = setTimeout(() => {
-      if (!done.value && !failed.value) {
+      if (!done.value && !failed.value && !paused.value) {
         connectSSE();
       }
     }, delay);
@@ -315,9 +343,48 @@ const stageLabel = computed(() => STAGE_LABELS[stage.value] || stage.value);
 const blocksTotal = computed(() => blockList.value.length);
 const blocksDone  = computed(() => blockList.value.filter(b => b.status === 'done').length);
 
+// ── Pause / Resume ────────────────────────────────────────────────────────
+async function handlePause() {
+  if (pausing.value) return;
+  pausing.value = true;
+  try {
+    await store.pauseTask(taskId);
+    pushLog({ ts: ts(), msg: '⏸ Запрос на остановку отправлен...', level: 'warn' });
+  } catch (e) {
+    pausing.value = false;
+    pushLog({ ts: ts(), msg: `Ошибка остановки: ${e.response?.data?.error || e.message}`, level: 'error' });
+  }
+}
+
+async function handleResume() {
+  if (resuming.value) return;
+  resuming.value = true;
+  paused.value   = false;
+  failed.value   = false;
+  try {
+    await store.resumeTask(taskId);
+    pushLog({ ts: ts(), msg: '▶ Возобновляем задачу...', level: 'info' });
+    // Reconnect SSE after a short delay so the new job has time to start
+    setTimeout(() => {
+      connectSSE();
+      startGenerationTimer();
+    }, 1500);
+  } catch (e) {
+    resuming.value = false;
+    paused.value   = true;
+    pushLog({ ts: ts(), msg: `Ошибка возобновления: ${e.response?.data?.error || e.message}`, level: 'error' });
+  }
+}
+
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 onMounted(async () => {
   task.value = await store.fetchTask(taskId).catch(() => null);
+  // Restore paused state from task status
+  if (task.value?.status === 'paused') {
+    paused.value = true;
+  } else if (task.value?.status === 'failed') {
+    failed.value = true;
+  }
   connectSSE();
 });
 
@@ -446,10 +513,45 @@ onUnmounted(() => {
           </button>
         </div>
 
+        <!-- Кнопка "Стоп" — видна когда задача выполняется -->
+        <div v-if="!done && !failed && !paused" class="card">
+          <button
+            @click="handlePause"
+            :disabled="pausing"
+            class="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"
+            :class="pausing
+              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+              : 'bg-red-900/60 hover:bg-red-800 text-red-300 border border-red-700'"
+          >
+            <span v-if="pausing" class="w-3 h-3 rounded-full bg-red-500 animate-pulse inline-block" />
+            <span v-else>⬛</span>
+            <span>{{ pausing ? 'Останавливаем...' : 'Стоп' }}</span>
+          </button>
+        </div>
+
+        <!-- Кнопка "Продолжить" — видна при paused или failed -->
+        <div v-if="paused || failed" class="card space-y-2">
+          <button
+            @click="handleResume"
+            :disabled="resuming"
+            class="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"
+            :class="resuming
+              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+              : 'bg-green-900/60 hover:bg-green-800 text-green-300 border border-green-700'"
+          >
+            <span v-if="resuming" class="w-3 h-3 rounded-full bg-green-500 animate-pulse inline-block" />
+            <span v-else>▶</span>
+            <span>{{ resuming ? 'Возобновляем...' : 'Продолжить' }}</span>
+          </button>
+          <p v-if="paused && blocksTotal > 0" class="text-xs text-center text-gray-600">
+            Готово {{ blocksDone }} из {{ blocksTotal }} блоков
+          </p>
+        </div>
+
         <!-- Ошибка -->
-        <div v-if="failed" class="card border border-red-800">
+        <div v-if="failed && !paused" class="card border border-red-800">
           <p class="text-sm font-semibold text-red-400 mb-2">Задача завершилась с ошибкой</p>
-          <p class="text-xs text-gray-500">Проверьте лог-терминал для деталей.</p>
+          <p class="text-xs text-gray-500">Нажмите «Продолжить» чтобы возобновить, или вернитесь в кабинет.</p>
           <RouterLink to="/dashboard" class="btn mt-3 block text-center w-full">
             ← Вернуться в кабинет
           </RouterLink>

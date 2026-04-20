@@ -11,11 +11,12 @@ const PRICES = {
     output:           0.000001100,  // $1.10 / 1M tokens
   },
   gemini: {
-    // Тиражированная модель: до 200K токенов контекста
-    input_short:  0.000002000,  // $2.00 / 1M tokens (≤200K context)
-    // От 200K токенов контекста
-    input_long:   0.000004000,  // $4.00 / 1M tokens (>200K context)
-    output:       0.000012000,  // $12.00 / 1M tokens
+    // Контекст до 200K токенов
+    input_short:   0.000002000,  // $2.00  / 1M tokens (≤200K context)
+    output_short:  0.000012000,  // $12.00 / 1M tokens (≤200K context)
+    // Контекст свыше 200K токенов
+    input_long:    0.000004000,  // $4.00  / 1M tokens (>200K context)
+    output_long:   0.000018000,  // $18.00 / 1M tokens (>200K context)
   },
 };
 
@@ -54,10 +55,10 @@ function calcCost(model, tokensIn, tokensOut, cacheHit = false) {
   }
 
   if (model === 'gemini') {
-    const inputRate = tokensIn > GEMINI_SHORT_CONTEXT_LIMIT
-      ? PRICES.gemini.input_long
-      : PRICES.gemini.input_short;
-    return tokensIn * inputRate + tokensOut * PRICES.gemini.output;
+    const isLong    = tokensIn > GEMINI_SHORT_CONTEXT_LIMIT;
+    const inputRate  = isLong ? PRICES.gemini.input_long  : PRICES.gemini.input_short;
+    const outputRate = isLong ? PRICES.gemini.output_long : PRICES.gemini.output_short;
+    return tokensIn * inputRate + tokensOut * outputRate;
   }
 
   return 0;
@@ -67,6 +68,7 @@ function calcCost(model, tokensIn, tokensOut, cacheHit = false) {
  * Форматирует стоимость для отображения (напр. "$0.0142").
  */
 function formatCost(usd) {
+  if (usd < 0.0001) return `$${usd.toFixed(6)}`;
   return `$${usd.toFixed(4)}`;
 }
 
