@@ -354,6 +354,13 @@ async function runPipeline(task, ctx) {
       return null;
     }
 
+    // Pause check перед стартом аудита: если пользователь нажал «Стоп»,
+    // не запускаем дорогой Stage 4-5-6 для нового блока.
+    if (await checkPauseRequested(taskId)) {
+      log(`Блок ${i + 1}: запрос на паузу — пропускаем audit, HTML уже сохранён в drafts`, 'warn');
+      return blockHtml;
+    }
+
     publish(taskId, { type: 'block_start', blockIndex: i, h2: block.h2, status: 'auditing' });
 
     // Stage 4: E-E-A-T аудит
@@ -389,6 +396,13 @@ async function runPipeline(task, ctx) {
 
     // Stage 5: PQ-рефайн (если нужен по LLM-аудиту ИЛИ по объективным метрикам)
     if (needsRefinement || needsObjFix) {
+      // Pause check: пользователь мог нажать «Стоп» во время длинного Stage 4 →
+      // не лезем в Stage 5 (до 3 итераций × 30+ секунд каждая).
+      if (await checkPauseRequested(taskId)) {
+        log(`Блок ${i + 1}: запрос на паузу — пропускаем Stage 5/6, отдаём HTML после Stage 4`, 'warn');
+        await saveContentBlock(taskId, i, block, currentHTML, currentPQ, lsiCovPct, currentAudit);
+        return currentHTML;
+      }
       publish(taskId, { type: 'block_start', blockIndex: i, h2: block.h2, status: 'fixing' });
       try {
         const s5 = await runStage5(
@@ -410,6 +424,12 @@ async function runPipeline(task, ctx) {
 
     // Stage 6: LSI-инъекция (всегда, если покрытие < 100%)
     let lsiCoverageAfter = lsiCovPct;
+    // Pause check перед Stage 6: ещё одна точка остановки.
+    if (await checkPauseRequested(taskId)) {
+      log(`Блок ${i + 1}: запрос на паузу — пропускаем Stage 6, сохраняем после Stage 5`, 'warn');
+      await saveContentBlock(taskId, i, block, currentHTML, currentPQ, lsiCovPct, currentAudit);
+      return currentHTML;
+    }
     try {
       const s6 = await runStage6(
         task, stageCtx,
@@ -536,6 +556,15 @@ async function runPipeline(task, ctx) {
 
   // Ожидаем завершение всех аудитов (результаты в порядке блоков)
   const auditResults = await Promise.all(auditPromises);
+
+  // Late pause check: если пользователь нажал «Стоп» уже после того, как все
+  // блоки ушли в for-loop, мы пропустим Stage 7+ и зафиксируем прогресс.
+  if (await checkPauseRequested(taskId)) {
+    const checkpoint = buildCheckpoint(taxonomy.length);
+    await savePipelineCheckpoint(taskId, checkpoint);
+    throw new PipelinePausedError(checkpoint);
+  }
+
   for (const html of auditResults) {
     if (html) finalBlocks.push(html);
   }
