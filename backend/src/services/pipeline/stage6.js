@@ -18,9 +18,11 @@ const { computeSemanticCoverage } = require('../../utils/semanticSimilarity');
  * @param {number}   blockIndex    — индекс блока
  * @param {string}   htmlContent   — HTML блока после Stage 5
  * @param {string[]} lsiMust       — обязательные LSI для этого блока
+ * @param {object}   [blockCharLimits] { minChars, maxChars } — per-block лимиты;
+ *   при инъекции HTML не должен превышать maxChars*1.25, иначе результат отвергается.
  * @returns {{ html: string, lsiCoverage: number, finalCoverage: object }}
  */
-async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust) {
+async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharLimits = null) {
   const { log, taskId, onTokens } = ctx;
 
   const targetService = task.input_target_service;
@@ -29,6 +31,16 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust) {
   let currentHTML = htmlContent;
   let loopCount   = 0;
   const maxLoops  = 3;
+
+  // Length guard: LSI-инъекция должна быть микро-вставкой. Если итерация
+  // увеличивает HTML > 1.25× от исходного ИЛИ выходит за blockMax×1.25 —
+  // отвергаем результат и оставляем pre-injection HTML.
+  const startLength    = htmlContent.length;
+  const expansionCap   = Math.round(startLength * 1.25);
+  const absoluteCap    = blockCharLimits
+    ? Math.round(blockCharLimits.maxChars * 1.25)
+    : Infinity;
+  const maxAllowedChars = Math.min(expansionCap, absoluteCap);
 
   while (loopCount < maxLoops) {
     loopCount++;
@@ -83,6 +95,18 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust) {
     });
 
     if (stage6Result?.html_content) {
+      // Length guard: отвергаем итерацию, если LSI-инъекция раздула HTML.
+      // (LSI-injection — это микро-правка, а не переписывание.)
+      if (stage6Result.html_content.length > maxAllowedChars) {
+        log(
+          `Stage 6 блок ${blockIndex + 1}: цикл ${loopCount} ОТКЛОНЁН — ` +
+          `HTML ${stage6Result.html_content.length} символов > лимит ${maxAllowedChars} ` +
+          `(start=${startLength}, cap=min(start×1.25, blockMax×1.25)). ` +
+          `Оставляем HTML до инъекции (${currentHTML.length} символов).`,
+          'warn'
+        );
+        break;
+      }
       currentHTML = stage6Result.html_content;
       log(`Stage 6 блок ${blockIndex + 1}: цикл ${loopCount} завершён, HTML ${currentHTML.length} символов`, 'success');
     } else {

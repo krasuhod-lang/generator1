@@ -92,7 +92,8 @@ async function runStage5(
   blockIndex, htmlContent, lsiMust,
   auditResult, pqScore,
   competitorFacts = [], h2 = '',
-  expertOpinionUsed = false
+  expertOpinionUsed = false,
+  blockCharLimits = null
 ) {
   const { log, taskId, onTokens } = ctx;
 
@@ -126,6 +127,25 @@ NON-NEGOTIABLE RULES (нарушение = брак):
 - НЕ выдумывай числа, цены, сроки — если данных нет, перефразируй без конкретных цифр или удали предложение. НИКОГДА не выводи текст "[NO_DATA]".
 - Разрешённые HTML-теги: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <table>, <thead>, <tbody>, <tr>, <th>, <td>, <blockquote>.
 `;
+
+  // ── Length-preservation guardrail (per-block char limits ±20%) ─────
+  // Без этого Stage 5 раздувает блоки в 3-4 раза при рефайне.
+  if (blockCharLimits) {
+    const minAllowed = Math.round(blockCharLimits.minChars * 0.8);
+    const maxAllowed = Math.round(blockCharLimits.maxChars * 1.2);
+    baseSpecialInstruction += `
+LENGTH CONTROL (КРИТИЧНО — нарушение = откат итерации):
+- Целевой объём блока: ${blockCharLimits.minChars}–${blockCharLimits.maxChars} символов чистого текста.
+- Допустимый коридор: ${minAllowed}–${maxAllowed} символов (±20%).
+- НЕ раздувай блок: рефайн = точечная правка проблемных мест, а не переписывание с нуля.
+- Сохраняй существующие H3, абзацы и их объём. Добавляй новый текст ТОЛЬКО там, где это нужно для устранения issues из AUDIT_REPORT.
+- Если для устранения issue нужно добавить материал — компенсируй удалением воды/повторов в других местах блока.
+`;
+  }
+
+  const maxAllowedChars = blockCharLimits
+    ? Math.round(blockCharLimits.maxChars * 1.2)
+    : Infinity;
 
   // ── Цикл PQ-рефайна (макс 3 итерации) ──────────────────────────
   const s5MaxLoops = 3;
@@ -161,6 +181,18 @@ NON-NEGOTIABLE RULES (нарушение = брак):
     });
 
     if (s5Result?.html_content) {
+      // Length guard: если итерация раздула HTML за допустимый коридор —
+      // отвергаем результат и оставляем предыдущий best-so-far.
+      // Без этого Stage 5 раздувает блок в 3-4 раза за 1 итерацию (см. логи: 2177 → 7523).
+      if (s5Result.html_content.length > maxAllowedChars) {
+        log(
+          `Stage 5 блок ${blockIndex + 1}: итерация ${s5Loop} ОТКЛОНЕНА — ` +
+          `HTML ${s5Result.html_content.length} символов > лимит ${maxAllowedChars} (cap = blockMax×1.2). ` +
+          `Оставляем предыдущий HTML (${currentHTML.length} символов).`,
+          'warn'
+        );
+        break;
+      }
       currentHTML = s5Result.html_content;
       log(`Stage 5 блок ${blockIndex + 1}: итерация ${s5Loop} — HTML ${currentHTML.length} символов. Повторный аудит...`, 'success');
 

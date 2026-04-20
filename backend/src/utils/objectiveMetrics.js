@@ -129,16 +129,19 @@ function checkObjectiveMetrics(html, opts = {}) {
 
 /**
  * getStructureLimits — возвращает лимиты секций и H3 на основе общего объёма символов.
- * @param {number} totalChars — общее количество символов контента
+ *
+ * Спецификация (запрошено пользователем):
+ *   • < 5000   символов: до 4 H2, в каждом 1–2 H3
+ *   • 5–10K   символов: 4–6 H2,    в каждом 2–3 H3
+ *   • > 10000 символов: 6–8 H2,    в каждом 2–4 H3
+ *
+ * @param {number} totalChars — общее количество символов контента (не на блок)
  * @returns {{ maxSections: number, minSections: number, minH3PerSection: number, maxH3PerSection: number }}
  */
 function getStructureLimits(totalChars) {
-  if (totalChars < 3000)       return { minSections: 3, maxSections: 4,  minH3PerSection: 2, maxH3PerSection: 3 };
-  if (totalChars <= 5000)      return { minSections: 4, maxSections: 5,  minH3PerSection: 2, maxH3PerSection: 3 };
-  if (totalChars <= 7000)      return { minSections: 4, maxSections: 5,  minH3PerSection: 2, maxH3PerSection: 4 };
-  if (totalChars <= 10000)     return { minSections: 5, maxSections: 6,  minH3PerSection: 2, maxH3PerSection: 4 };
-  if (totalChars <= 15000)     return { minSections: 6, maxSections: 8,  minH3PerSection: 3, maxH3PerSection: 5 };
-  /* > 15000 */                return { minSections: 7, maxSections: 10, minH3PerSection: 3, maxH3PerSection: 5 };
+  if (totalChars < 5000)   return { minSections: 2, maxSections: 4, minH3PerSection: 1, maxH3PerSection: 2 };
+  if (totalChars <= 10000) return { minSections: 4, maxSections: 6, minH3PerSection: 2, maxH3PerSection: 3 };
+  /* > 10000 */            return { minSections: 6, maxSections: 8, minH3PerSection: 2, maxH3PerSection: 4 };
 }
 
 module.exports = { checkObjectiveMetrics, getStructureLimits };

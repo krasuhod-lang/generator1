@@ -343,8 +343,11 @@ async function runPipeline(task, ctx) {
   /**
    * auditAndRefineBlock — запускает Stage 4→5→6 для одного блока.
    * Вынесен в отдельную функцию для pipeline interleaving.
+   *
+   * @param {object} [blockCharLimits] { minChars, maxChars } — per-block лимиты для контроля длины
+   *   в Stage 5/6 (±20% от ТЗ). Если не передано — длина не валидируется.
    */
-  async function auditAndRefineBlock(i, blockHtml, block, blockExpertOpinionUsed) {
+  async function auditAndRefineBlock(i, blockHtml, block, blockExpertOpinionUsed, blockCharLimits = null) {
     const lsiMust = block.lsi_must || [];
     lsiMust.forEach(term => allLSISet.add(term));
 
@@ -378,8 +381,15 @@ async function runPipeline(task, ctx) {
 
     const needsRefinement = lsiCovPct < 80 || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
 
-    // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки)
-    const objMetrics = checkObjectiveMetrics(blockHtml, { structureLimits });
+    // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки).
+    // Передаём blockCharLimits с допуском ±20% — длина становится триггером рефайна.
+    const charLimitsForCheck = blockCharLimits
+      ? {
+          minChars: Math.round(blockCharLimits.minChars * 0.8),
+          maxChars: Math.round(blockCharLimits.maxChars * 1.2),
+        }
+      : null;
+    const objMetrics = checkObjectiveMetrics(blockHtml, { structureLimits, charLimits: charLimitsForCheck });
     const needsObjFix = !objMetrics.passed;
     if (needsObjFix && !needsRefinement) {
       log(`Блок ${i + 1}: объективные метрики НЕ пройдены (${objMetrics.issues.join('; ')}) — запускаем рефайн`, 'warn');
@@ -410,7 +420,8 @@ async function runPipeline(task, ctx) {
           i, currentHTML, lsiMust,
           currentAudit, currentPQ,
           competitorFacts, block.h2,
-          blockExpertOpinionUsed
+          blockExpertOpinionUsed,
+          blockCharLimits
         );
         currentHTML  = s5.html;
         currentPQ    = s5.pqScore;
@@ -433,7 +444,8 @@ async function runPipeline(task, ctx) {
     try {
       const s6 = await runStage6(
         task, stageCtx,
-        i, currentHTML, lsiMust
+        i, currentHTML, lsiMust,
+        blockCharLimits
       );
       currentHTML     = s6.html;
       lsiCoverageAfter = s6.lsiCoverage;
@@ -543,9 +555,11 @@ async function runPipeline(task, ctx) {
 
     // Запускаем аудит сразу (Stage 4→5→6, DeepSeek) — НЕ ждём предыдущие аудиты
     // blockExpertOpinionUsed передаётся в Stage 5 чтобы не добавлять лишний blockquote
+    // blockCharLimits — per-block min/max ТЗ для контроля длины в Stage 5/6 (±20%)
+    const blockCharLimits = { minChars: blockMinChars, maxChars: blockMaxChars };
     auditPromises.push(
       genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed)
+        ? auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed, blockCharLimits)
         : Promise.resolve(null)
     );
 

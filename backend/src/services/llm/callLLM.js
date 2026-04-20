@@ -7,6 +7,29 @@ const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
 
 /**
+ * clampPQScore — нормализует PQ-score в допустимый диапазон [0, 10].
+ *
+ * LLM иногда возвращает значения с потерянной десятичной точкой
+ * (например, `72` вместо `7.2`, `750` вместо `7.5`). Восстанавливаем
+ * правдоподобную шкалу делением на 10 / 100, затем clamp в [0, 10].
+ *
+ * @param {*} value — сырое значение pq_score
+ * @returns {number|undefined} нормализованный PQ-score (0..10) или undefined
+ */
+function clampPQScore(value) {
+  if (value === null || value === undefined) return value;
+  let n = typeof value === 'number' ? value : parseFloat(value);
+  if (!Number.isFinite(n)) return value;
+  if (n < 0) n = 0;
+  // Восстанавливаем потерянную десятичную точку
+  if (n > 10 && n <= 100)        n = n / 10;    // 72 → 7.2
+  else if (n > 100 && n <= 1000) n = n / 100;   // 750 → 7.5
+  else if (n > 1000)             n = n / Math.pow(10, String(Math.trunc(n)).length - 1); // 9999 → 9.999
+  if (n > 10) n = 10;
+  return Math.round(n * 10) / 10; // округляем до 1 знака
+}
+
+/**
  * Нормализует ключи JSON-ответа LLM для обратной совместимости
  * (та же логика, что была в index.html).
  */
@@ -17,6 +40,11 @@ function normalizeKeys(parsed) {
   if (parsed.html_content && !parsed.htmlcontent)       parsed.htmlcontent        = parsed.html_content;
   if (parsed.pqscore && !parsed.pq_score)               parsed.pq_score           = parsed.pqscore;
   if (parsed.pq_score && !parsed.pqscore)               parsed.pqscore            = parsed.pq_score;
+
+  // Clamp pq_score / pqscore: LLM иногда теряет десятичную точку (72 вместо 7.2).
+  if (parsed.pq_score !== undefined) parsed.pq_score = clampPQScore(parsed.pq_score);
+  if (parsed.pqscore  !== undefined) parsed.pqscore  = clampPQScore(parsed.pqscore);
+
   if (parsed.mathematicalaudit && !parsed.mathematical_audit)
     parsed.mathematical_audit = parsed.mathematicalaudit;
   if (parsed.mathematical_audit && !parsed.mathematicalaudit)
@@ -28,6 +56,11 @@ function normalizeKeys(parsed) {
       parsed.globalaudit.hcustatus       = parsed.globalaudit.hcu_status;
     if (parsed.globalaudit.page_quality_score && !parsed.globalaudit.pagequalityscore)
       parsed.globalaudit.pagequalityscore = parsed.globalaudit.page_quality_score;
+    // Глобальный page_quality_score тоже clamp'им (та же логика)
+    if (parsed.globalaudit.page_quality_score !== undefined)
+      parsed.globalaudit.page_quality_score = clampPQScore(parsed.globalaudit.page_quality_score);
+    if (parsed.globalaudit.pagequalityscore !== undefined)
+      parsed.globalaudit.pagequalityscore = clampPQScore(parsed.globalaudit.pagequalityscore);
   }
 
   if (parsed.tfidf_and_spam_report && !parsed.tf_idf_and_spam_report)
