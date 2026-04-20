@@ -15,10 +15,16 @@ const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
  * @param {string}  html              — HTML-контент блока
  * @param {boolean} expertOpinionUsed — было ли уже использовано экспертное мнение
  * @param {string}  brandFacts        — факты о бренде
+ * @param {object}  [charLimits]      — { maxChars, minChars } для проверки объёма
  * @returns {string[]} — массив обнаруженных проблем
  */
-function structuralPreCheck(html, expertOpinionUsed, brandFacts) {
-  const preCheck = checkObjectiveMetrics(html, { expertOpinionUsed, brandFacts });
+function structuralPreCheck(html, expertOpinionUsed, brandFacts, charLimits = {}) {
+  const preCheck = checkObjectiveMetrics(html, {
+    expertOpinionUsed,
+    brandFacts,
+    maxChars: charLimits.maxChars,
+    minChars: charLimits.minChars,
+  });
   const waterPhrases = checkAntiWater(html);
 
   return [
@@ -159,7 +165,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
 
     // Structural pre-check: fast retry if basic E-E-A-T structure is missing
     if (stage3Result?.html_content) {
-      const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts);
+      const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, { maxChars: blockMaxChars, minChars: blockMinChars });
 
       if (issues.length > 0) {
         log(`Stage 3 блок ${i + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
@@ -167,7 +173,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
         const retryResult = await callLLM(
           'gemini',
           '',
-          s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
+          s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML. HARD CHAR LIMIT: ${blockMinChars}–${blockMaxChars} characters of clean text.`,
           { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
         ).catch(() => null);
 
@@ -332,7 +338,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
   // Structural pre-check: fast retry if basic E-E-A-T structure is missing
   if (stage3Result?.html_content) {
-    const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts);
+    const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, { maxChars: blockMaxChars, minChars: blockMinChars });
 
     if (issues.length > 0) {
       log(`Stage 3 блок ${blockIndex + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
@@ -340,7 +346,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
       const retryResult = await callLLM(
         'gemini',
         '',
-        s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
+        s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML. HARD CHAR LIMIT: ${blockMinChars}–${blockMaxChars} characters of clean text.`,
         { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
       ).catch(() => null);
 

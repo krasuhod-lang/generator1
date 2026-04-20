@@ -2,6 +2,7 @@
 
 const db              = require('../../config/db');
 const { publish }     = require('../sse/sseManager');
+const { callLLM }     = require('../llm/callLLM');
 const { runStage0 }   = require('./stage0');
 const { runStage1 }   = require('./stage1');
 const { runStage2 }   = require('./stage2');
@@ -11,7 +12,7 @@ const { runStage5, checkAntiWater } = require('./stage5');
 const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
-const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
+const { checkObjectiveMetrics, stripTags } = require('../../utils/objectiveMetrics');
 const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
@@ -269,7 +270,7 @@ async function runPipeline(task, ctx) {
    * auditAndRefineBlock — запускает Stage 4→5→6 для одного блока.
    * Вынесен в отдельную функцию для pipeline interleaving.
    */
-  async function auditAndRefineBlock(i, blockHtml, block, blockExpertOpinionUsed) {
+  async function auditAndRefineBlock(i, blockHtml, block, blockExpertOpinionUsed, blockMaxChars) {
     const lsiMust = block.lsi_must || [];
     lsiMust.forEach(term => allLSISet.add(term));
 
@@ -348,6 +349,51 @@ async function runPipeline(task, ctx) {
       lsiCoverageAfter = cov.percent;
     }
 
+    // ── Post-Stage 6: проверка превышения лимита символов ──────────────
+    if (blockMaxChars) {
+      const cleanTextLen = stripTags(currentHTML).replace(/\s+/g, ' ').trim().length;
+      if (cleanTextLen > blockMaxChars * 1.3) {
+        log(`Блок ${i + 1}: превышен лимит символов (${cleanTextLen} > ${blockMaxChars} × 1.3 = ${Math.round(blockMaxChars * 1.3)}). Запуск condensation...`, 'warn');
+
+        try {
+          const condensationPrompt = `ROLE: Precision Content Condenser.
+
+MISSION: Сократить HTML-контент раздела до ${blockMaxChars} символов чистого текста (без HTML-тегов). Сейчас: ${cleanTextLen} символов.
+
+OUTPUT FORMAT: STRICTLY JSON. NO EXPLANATIONS OUTSIDE JSON.
+{ "html_content": "<h2>...</h2><p>...</p>" }
+
+RULES:
+1. СОХРАНИ всю структуру: H2, H3, списки, таблицы, blockquote.
+2. СОХРАНИ все LSI-термины и ключевые слова.
+3. УДАЛИ: повторяющиеся мысли, padding-фразы, избыточные примеры, общие утверждения без фактов.
+4. НЕ удаляй конкретные факты, цифры, экспертное мнение.
+5. Предпочитай краткие предложения. Каждое предложение = конкретная ценность.
+6. Целевой объём: ${blockMaxChars} символов чистого текста.
+
+ORIGINAL HTML:
+${currentHTML}
+
+NOW CONDENSE AND RETURN JSON ONLY.`;
+
+          const condResult = await callLLM(
+            'gemini',
+            '',
+            condensationPrompt,
+            { retries: 2, taskId, stageName: 'condensation', callLabel: `Condense Block ${i + 1}`, temperature: 0.2, log, onTokens }
+          ).catch(() => null);
+
+          if (condResult?.html_content) {
+            const newLen = stripTags(condResult.html_content).replace(/\s+/g, ' ').trim().length;
+            log(`Блок ${i + 1}: condensation ${cleanTextLen} → ${newLen} символов`, 'success');
+            currentHTML = condResult.html_content;
+          }
+        } catch (e) {
+          log(`Блок ${i + 1}: condensation ОШИБКА: ${e.message}`, 'warn');
+        }
+      }
+    }
+
     // Проверяем оставшиеся water-фразы
     const finalWater = checkAntiWater(currentHTML);
     if (finalWater.length) {
@@ -415,7 +461,7 @@ async function runPipeline(task, ctx) {
     // blockExpertOpinionUsed передаётся в Stage 5 чтобы не добавлять лишний blockquote
     auditPromises.push(
       genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed)
+        ? auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed, blockMaxChars)
         : Promise.resolve(null)
     );
 

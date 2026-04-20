@@ -27,10 +27,12 @@ function stripTags(html) {
  * @param {object} [opts] — дополнительные параметры
  * @param {boolean} [opts.expertOpinionUsed=true] — было ли уже использовано экспертное мнение
  * @param {string}  [opts.brandFacts=''] — факты о бренде для проверки упоминания
+ * @param {number}  [opts.maxChars] — максимальное кол-во символов чистого текста (hard cap)
+ * @param {number}  [opts.minChars] — минимальное кол-во символов чистого текста
  * @returns {{ passed: boolean, issues: string[], metrics: object }}
  */
 function checkObjectiveMetrics(html, opts = {}) {
-  const { expertOpinionUsed = true, brandFacts = '' } = opts;
+  const { expertOpinionUsed = true, brandFacts = '', maxChars, minChars } = opts;
   const issues = [];
   const text = stripTags(html).replace(/\s+/g, ' ').trim();
 
@@ -96,6 +98,14 @@ function checkObjectiveMetrics(html, opts = {}) {
     issues.push('Лишний <blockquote> — экспертное мнение уже использовано в другом блоке (строго 1 раз на статью)');
   }
 
+  // Проверка лимита символов (hard cap)
+  if (maxChars && charCount > maxChars * 1.15) {
+    issues.push(`Превышен лимит символов: ${charCount} > ${maxChars} (допуск +15%). Сократи текст до ${maxChars} символов, убрав padding и общие фразы`);
+  }
+  if (minChars && charCount < minChars * 0.7) {
+    issues.push(`Слишком мало символов: ${charCount} < ${minChars} (минимум −30%). Добавь конкретные факты и детали`);
+  }
+
   // Проверка упоминания бренда из BRAND_FACTS
   if (brandFacts && typeof brandFacts === 'string' && brandFacts !== 'Нет данных') {
     const brandToken = brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3);
@@ -111,4 +121,4 @@ function checkObjectiveMetrics(html, opts = {}) {
   };
 }
 
-module.exports = { checkObjectiveMetrics };
+module.exports = { checkObjectiveMetrics, stripTags };

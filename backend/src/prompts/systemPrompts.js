@@ -7348,6 +7348,7 @@ NON-NEGOTIABLE RULES:
     - IF EXPERT_OPINION_USED === false AND this section type is appropriate (trust/process/objection), YOU MUST include ONE expert opinion block using AUTHOR_NAME. Format: <blockquote><strong>[AUTHOR_NAME], эксперт:</strong> "[Мнение на основе KNOWLEDGE_BASE]"</blockquote>
     - IF EXPERT_OPINION_USED === true: НЕ ДОБАВЛЯЙ <blockquote> с экспертным мнением. Экспертное мнение уже использовано в другом разделе статьи. Повторное использование = брак. Вместо blockquote используй профессиональную терминологию и конкретные данные для демонстрации Expertise.
 12. DO NOT WRITE CONCLUDING SENTENCES. Do not summarize the section at the bottom. Stop writing exactly when the facts are delivered.
+13. CHAR LIMIT IS A HARD CAP. Your html_content MUST contain between {{MIN_CHAR_COUNT}} and {{MAX_CHAR_COUNT}} characters of clean text (HTML tags excluded). Going above MAX_CHAR_COUNT = REJECTION. Prefer concise, fact-dense writing over verbose explanations. Count your output before finalizing.
 
 STOP-WORDS & AI-CLICHES BAN (ZERO TOLERANCE):
 - "В современном мире", "В наше время", "Ни для кого не секрет"
@@ -7561,6 +7562,7 @@ PRIMARY REFINEMENT PRIORITY:
 NON-NEGOTIABLE:
 - Не используй фразы: "в современном мире", "важно отметить", "следует подчеркнуть", "таким образом", "подводя итог", "в заключение".
 - Не добавляй резюмирующие абзацы в конце блока.
+- PRESERVE the original text length. Do NOT add new paragraphs or sentences unless absolutely required to fix E-E-A-T issues. Target similar or smaller char count than ORIGINAL_HTML. Never inflate the text.
 
 JSON SCHEMA TO RETURN:
 {
@@ -7606,6 +7608,7 @@ INJECTION RULES:
 6. Не добавляй новые H2, H3 или H4. Сохраняй исходную структуру.
 7. ANTI-SPAM: NEVER integrate GEO-locations using template phrases like "включая такие города как [City]". NO COMMA-SEPARATED CITY LISTS.
 8. 100% BAN on <a href="..."> links. NEVER add hyperlinks.
+9. LENGTH PRESERVATION: When injecting LSI terms, REPLACE existing generic words/phrases with synonyms containing the LSI term whenever possible, rather than adding new sentences. The output text length must stay within ±10% of the input text length. Do NOT inflate the text.
 
 NOW INJECT THE MISSING LSI AND RETURN JSON ONLY.`,
 
