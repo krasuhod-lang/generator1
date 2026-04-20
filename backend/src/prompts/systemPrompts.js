@@ -7866,7 +7866,7 @@ try {
     outputSchema: OUTPUT_SCHEMAS.entityLandscape,
     metadata:     { adapter: 'deepseek', temperature: 0.3 },
   });
-} catch (_) {
+} catch (regErr) {
   // Не прерываем загрузку модуля если регистрация упала
-  console.warn('[systemPrompts] Prompt registry registration skipped:', _.message);
+  console.warn('[systemPrompts] Prompt registry registration skipped:', regErr.message);
 }

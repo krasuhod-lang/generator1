@@ -273,9 +273,11 @@ function serializeForPrompt(kg, maxChars = 3000) {
 
 // ── Вспомогательные функции ──────────────────────────────────────────
 
+const MAX_ENTITY_ID_LENGTH = 80;
+
 function normalizeId(str) {
   if (!str) return '';
-  return str.toString().toLowerCase().trim().replace(/\s+/g, '_').substring(0, 80);
+  return str.toString().toLowerCase().trim().replace(/\s+/g, '_').substring(0, MAX_ENTITY_ID_LENGTH);
 }
 
 function safeArray(val) {

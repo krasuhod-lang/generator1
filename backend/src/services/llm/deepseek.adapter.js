@@ -123,14 +123,14 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
 }
 
 /**
- * Вырезает блоки <think>…</think> из ответа R1 модели.
+ * stripThinkBlocks — вырезает блоки <think>…</think> из ответа R1 модели.
  * R1 помещает рассуждения (chain-of-thought) внутрь <think> тегов,
  * а финальный JSON-ответ — после них.
  */
 function stripThinkBlocks(text) {
   if (!text) return text;
-  // Удаляем все <think>...</think> блоки (dotAll — . включает \n)
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  // Удаляем все <think>...</think> блоки (dotAll flag /s — . включает \n)
+  return text.replace(/<think>.*?<\/think>/gis, '').trim();
 }
 
 module.exports = { callDeepSeek, isReasoningModel };

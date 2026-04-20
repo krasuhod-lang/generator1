@@ -3,7 +3,7 @@
 const { russianStem } = require('./russianStem');
 
 /**
- * semanticSimilarity.js — Гибридный поиск (BM25 + Vector Similarity)
+ * semanticSimilarity.js — Гибридный поиск (Lexical + Vector Similarity)
  * для семантического покрытия LSI-терминов.
  *
  * Использует TF-IDF векторное представление текста для вычисления
@@ -207,6 +207,7 @@ function computeIDF(docs) {
 
   const idf = new Map();
   for (const [term, count] of df) {
+    // Laplace smoothing (+1) prevents division by zero for rare/absent terms
     idf.set(term, Math.log((N + 1) / (count + 1)) + 1);
   }
   return idf;
