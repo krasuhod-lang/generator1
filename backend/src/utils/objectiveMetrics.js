@@ -30,7 +30,7 @@ function stripTags(html) {
  * @returns {{ passed: boolean, issues: string[], metrics: object }}
  */
 function checkObjectiveMetrics(html, opts = {}) {
-  const { expertOpinionUsed = true, brandFacts = '' } = opts;
+  const { expertOpinionUsed = true, brandFacts = '', structureLimits, charLimits } = opts;
   const issues = [];
   const text = stripTags(html).replace(/\s+/g, ' ').trim();
 
@@ -66,8 +66,24 @@ function checkObjectiveMetrics(html, opts = {}) {
   };
 
   // Валидация
-  if (h3Count < 1) {
+  if (structureLimits) {
+    if (h3Count > structureLimits.maxH3PerSection) {
+      issues.push(`Слишком много H3: ${h3Count} (макс ${structureLimits.maxH3PerSection})`);
+    }
+    if (h3Count < structureLimits.minH3PerSection) {
+      issues.push(`Слишком мало H3: ${h3Count} (мин ${structureLimits.minH3PerSection})`);
+    }
+  } else if (h3Count < 1) {
     issues.push('Нет подзаголовков H3 — текст плохо структурирован');
+  }
+
+  if (charLimits) {
+    if (charCount > charLimits.maxChars) {
+      issues.push(`Превышен лимит символов: ${charCount} (макс ${charLimits.maxChars})`);
+    }
+    if (charCount < charLimits.minChars) {
+      issues.push(`Недостаточно символов: ${charCount} (мин ${charLimits.minChars})`);
+    }
   }
 
   if (!hasList && !hasTable) {
@@ -111,4 +127,18 @@ function checkObjectiveMetrics(html, opts = {}) {
   };
 }
 
-module.exports = { checkObjectiveMetrics };
+/**
+ * getStructureLimits — возвращает лимиты секций и H3 на основе общего объёма символов.
+ * @param {number} totalChars — общее количество символов контента
+ * @returns {{ maxSections: number, minSections: number, minH3PerSection: number, maxH3PerSection: number }}
+ */
+function getStructureLimits(totalChars) {
+  if (totalChars < 3000)       return { minSections: 3, maxSections: 4,  minH3PerSection: 2, maxH3PerSection: 3 };
+  if (totalChars <= 5000)      return { minSections: 4, maxSections: 5,  minH3PerSection: 2, maxH3PerSection: 3 };
+  if (totalChars <= 7000)      return { minSections: 4, maxSections: 5,  minH3PerSection: 2, maxH3PerSection: 4 };
+  if (totalChars <= 10000)     return { minSections: 5, maxSections: 6,  minH3PerSection: 2, maxH3PerSection: 4 };
+  if (totalChars <= 15000)     return { minSections: 6, maxSections: 8,  minH3PerSection: 3, maxH3PerSection: 5 };
+  /* > 15000 */                return { minSections: 7, maxSections: 10, minH3PerSection: 3, maxH3PerSection: 5 };
+}
+
+module.exports = { checkObjectiveMetrics, getStructureLimits };

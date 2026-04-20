@@ -11,7 +11,7 @@ const { runStage5, checkAntiWater } = require('./stage5');
 const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
-const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
+const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objectiveMetrics');
 const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
@@ -258,6 +258,8 @@ async function runPipeline(task, ctx) {
   const blockWeights = taxonomy.map(b => BLOCK_TYPE_WEIGHTS[b.type] || 1.0);
   const weightSum    = blockWeights.reduce((s, w) => s + w, 0);
 
+  const structureLimits = getStructureLimits(maxChars);
+
   // Knowledge Graph для контекста каждого блока
   const knowledgeGraph = stage1Result?.knowledge_graph || null;
 
@@ -297,7 +299,7 @@ async function runPipeline(task, ctx) {
     const needsRefinement = lsiCovPct < 80 || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
 
     // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки)
-    const objMetrics = checkObjectiveMetrics(blockHtml);
+    const objMetrics = checkObjectiveMetrics(blockHtml, { structureLimits });
     const needsObjFix = !objMetrics.passed;
     if (needsObjFix && !needsRefinement) {
       log(`Блок ${i + 1}: объективные метрики НЕ пройдены (${objMetrics.issues.join('; ')}) — запускаем рефайн`, 'warn');
@@ -401,7 +403,7 @@ async function runPipeline(task, ctx) {
       blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
       expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
       serviceNotes, offerDetails, proofAssets,
-      blockEntitiesStr,
+      blockEntitiesStr, structureLimits,
     });
 
     // Обновляем контекст для генерации следующего блока

@@ -5,6 +5,7 @@ const { SYSTEM_PROMPTS, SYSTEM_PROMPTS_EXT } = require('../../prompts/systemProm
 const { fillPromptVars }     = require('../../utils/fillPromptVars');
 const db                     = require('../../config/db');
 const { serializeForPrompt, getEntityClusters } = require('../../utils/knowledgeGraph');
+const { getStructureLimits } = require('../../utils/objectiveMetrics');
 
 /**
  * routeLSIToBlocks — механический JS-роутинг (fallback если Gemini routing упал).
@@ -138,6 +139,14 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
 
   log(`Stage 2 Taxonomy Builder — итоговый промпт ${stage2Prompt.length} символов (~${Math.round(stage2Prompt.length / 4)} токенов). Запуск...`, 'info');
 
+  // Inject structure limits into taxonomy prompt
+  const totalChars = parseInt(task.input_max_chars) || 3500;
+  const structureLimits = getStructureLimits(totalChars);
+  stage2Prompt = stage2Prompt.replace(
+    /AT LEAST \d+ AND AT MOST \d+ OBJECTS/,
+    `AT LEAST ${structureLimits.minSections} AND AT MOST ${structureLimits.maxSections} OBJECTS`
+  );
+
   let extractedTaxonomy = [];
   let s2Attempts = 0;
   let stage2Raw = null;
@@ -173,6 +182,19 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
 
   if (!extractedTaxonomy.length) {
     throw new Error('Stage 2: не удалось получить структуру страницы (taxonomy)');
+  }
+
+  // Trim taxonomy to maxSections if needed (priority: faq > offer > trust > process > pricing > objection > fit > generic)
+  if (extractedTaxonomy.length > structureLimits.maxSections) {
+    const typePriority = { faq: 0, offer: 1, trust: 2, process: 3, pricing: 4, objection: 5, fit: 6, generic: 7 };
+    const sorted = extractedTaxonomy
+      .map((b, idx) => ({ ...b, _origIdx: idx }))
+      .sort((a, b) => (typePriority[a.type] ?? 99) - (typePriority[b.type] ?? 99));
+    const kept = sorted.slice(0, structureLimits.maxSections)
+      .sort((a, b) => a._origIdx - b._origIdx)
+      .map(({ _origIdx, ...rest }) => rest);
+    log(`Stage 2: Обрезка таксономии с ${extractedTaxonomy.length} до ${structureLimits.maxSections} блоков (maxSections)`, 'warn');
+    extractedTaxonomy = kept;
   }
 
   // ── Stage 2.5: Semantic LSI + N-gram routing через Gemini ─────────

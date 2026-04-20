@@ -3,7 +3,7 @@
 const { callLLM }           = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }    = require('../../prompts/systemPrompts');
 const db                    = require('../../config/db');
-const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
+const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objectiveMetrics');
 const { checkAntiWater }    = require('./stage5');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 
@@ -17,8 +17,8 @@ const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
  * @param {string}  brandFacts        — факты о бренде
  * @returns {string[]} — массив обнаруженных проблем
  */
-function structuralPreCheck(html, expertOpinionUsed, brandFacts) {
-  const preCheck = checkObjectiveMetrics(html, { expertOpinionUsed, brandFacts });
+function structuralPreCheck(html, expertOpinionUsed, brandFacts, structureLimits) {
+  const preCheck = checkObjectiveMetrics(html, { expertOpinionUsed, brandFacts, structureLimits });
   const waterPhrases = checkAntiWater(html);
 
   return [
@@ -67,6 +67,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
   const minChars      = parseInt(task.input_min_chars) || 800;
   const maxChars      = parseInt(task.input_max_chars) || 3500;
   const totalTarget   = Math.floor((minChars + maxChars) / 2);
+  const structureLimits = getStructureLimits(maxChars);
 
   // Строим контекст для шаблонов
   const s3stage1Json = JSON.stringify(stage1Result);
@@ -143,7 +144,9 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       .replace('{{EXPERT_OPINION_USED}}',() => expertOpinionUsed.toString())
       .replace('{{AUTHOR_NAME}}',        () => authorName)
       .replace('{{PREVIOUS_HTML}}',      () => previousContext || 'Это первый блок страницы.')
-      .replace('{{COMPETITOR_FACTS}}',   () => competitorFactsStr);
+      .replace('{{COMPETITOR_FACTS}}',   () => competitorFactsStr)
+      .replace('{{MIN_H3_COUNT}}', () => String(structureLimits.minH3PerSection))
+      .replace('{{MAX_H3_COUNT}}', () => String(structureLimits.maxH3PerSection));
 
     log(`Stage 3 блок ${i + 1}: промпт ${s3prompt.length} символов (~${Math.round(s3prompt.length / 4)} токенов). Запрос...`, 'info');
 
@@ -159,7 +162,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
 
     // Structural pre-check: fast retry if basic E-E-A-T structure is missing
     if (stage3Result?.html_content) {
-      const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts);
+      const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, structureLimits);
 
       if (issues.length > 0) {
         log(`Stage 3 блок ${i + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
@@ -272,10 +275,14 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
     expertOpinionUsed, previousContext, previousH2s,
     serviceNotes, offerDetails, proofAssets,
-    blockEntitiesStr,
+    blockEntitiesStr, structureLimits,
   } = genContext;
 
   log(`Генерация блока [${blockIndex + 1}/${totalBlocks}]: ${block.h2}...`, 'info');
+
+  // Compute structureLimits fallback if not passed via genContext
+  const maxChars = parseInt(task.input_max_chars) || 3500;
+  const effectiveLimits = structureLimits || getStructureLimits(maxChars);
 
   // Роутированные n-граммы блока (или global если не роутированы)
   const blockNgrams = (block.ngrams_must && block.ngrams_must.length)
@@ -311,7 +318,9 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     .replace('{{EXPERT_OPINION_USED}}',() => expertOpinionUsed.toString())
     .replace('{{AUTHOR_NAME}}',        () => authorName)
     .replace('{{PREVIOUS_HTML}}',      () => previousContext || 'Это первый блок страницы.')
-    .replace('{{COMPETITOR_FACTS}}',   () => competitorFactsStr);
+    .replace('{{COMPETITOR_FACTS}}',   () => competitorFactsStr)
+    .replace('{{MIN_H3_COUNT}}', () => String(effectiveLimits.minH3PerSection))
+    .replace('{{MAX_H3_COUNT}}', () => String(effectiveLimits.maxH3PerSection));
 
   // Knowledge Graph: добавляем связанные сущности к промпту блока
   if (blockEntitiesStr) {
@@ -332,7 +341,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
   // Structural pre-check: fast retry if basic E-E-A-T structure is missing
   if (stage3Result?.html_content) {
-    const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts);
+    const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, effectiveLimits);
 
     if (issues.length > 0) {
       log(`Stage 3 блок ${blockIndex + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
