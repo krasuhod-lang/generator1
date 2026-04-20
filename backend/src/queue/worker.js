@@ -5,7 +5,7 @@ const { connection } = require('./queue');
 const db             = require('../config/db');
 const { publish }    = require('../services/sse/sseManager');
 
-const { runPipeline } = require('../services/pipeline/orchestrator');
+const { runPipeline, PipelinePausedError } = require('../services/pipeline/orchestrator');
 
 // -----------------------------------------------------------------
 // Вспомогательные функции
@@ -91,9 +91,10 @@ const worker = new Worker(
     try {
       // ── 3. Пайплайн Stage 0 → Stage 7 ────────────────────────────
       await runPipeline(task, {
-        log:      (msg, level) => log(taskId, msg, level),
-        progress: (pct, stage) => progress(taskId, pct, stage),
+        log:        (msg, level) => log(taskId, msg, level),
+        progress:   (pct, stage) => progress(taskId, pct, stage),
         job,
+        resumeFrom: job.data.resumeFrom || null,
       });
 
       // ── 4. Завершение ─────────────────────────────────────────────
@@ -112,7 +113,26 @@ const worker = new Worker(
       });
 
     } catch (pipelineErr) {
-      // ── 5. Обработка ошибки пайплайна ────────────────────────────
+      // ── 5a. Graceful pause (кнопка "Стоп") ───────────────────────
+      if (pipelineErr instanceof PipelinePausedError) {
+        await updateTask(taskId, {
+          status:              'paused',
+          pipeline_checkpoint: JSON.stringify(pipelineErr.checkpoint || {}),
+        });
+
+        log(taskId, 'Задача приостановлена пользователем', 'info');
+
+        publish(taskId, {
+          type:        'paused',
+          blocksDone:  pipelineErr.checkpoint?.resumeFromBlock ?? 0,
+          blocksTotal: pipelineErr.checkpoint?.taxonomy?.length ?? 0,
+        });
+
+        // Не пробрасываем — BullMQ НЕ должен считать это как failed
+        return;
+      }
+
+      // ── 5b. Обработка ошибки пайплайна ───────────────────────────
       const errMsg = pipelineErr.message || String(pipelineErr);
 
       await updateTask(taskId, {

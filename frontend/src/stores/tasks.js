@@ -61,6 +61,20 @@ export const useTasksStore = defineStore('tasks', () => {
     return data;
   }
 
+  // ── Пауза задачи (кнопка "Стоп") ──────────────────────────────────
+  async function pauseTask(id) {
+    const { data } = await api.post(`/tasks/${id}/pause`);
+    _patchInList(id, { status: 'pausing' });
+    return data;
+  }
+
+  // ── Возобновление задачи (кнопка "Продолжить") ────────────────────
+  async function resumeTask(id) {
+    const { data } = await api.post(`/tasks/${id}/resume`);
+    _patchInList(id, { status: 'queued' });
+    return data;
+  }
+
   // ── Удаление задачи ────────────────────────────────────────────────
   async function deleteTask(id) {
     await api.delete(`/tasks/${id}`);
@@ -114,6 +128,7 @@ export const useTasksStore = defineStore('tasks', () => {
   return {
     tasks, current, loading, error,
     fetchTasks, fetchTask, createTask, updateTask,
-    startTask, deleteTask, fetchResult, fetchMetrics, uploadTZ, parseTZWithLLM,
+    startTask, pauseTask, resumeTask, deleteTask,
+    fetchResult, fetchMetrics, uploadTZ, parseTZWithLLM,
   };
 });

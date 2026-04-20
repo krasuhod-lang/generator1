@@ -336,6 +336,99 @@ async function startTask(req, res, next) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/tasks/:id/pause — Graceful pause (кнопка "Стоп")
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function pauseTask(req, res, next) {
+  try {
+    const task = await loadOwnTask(req.params.id, req.user.id);
+
+    if (task.status !== 'processing' && task.status !== 'queued') {
+      return res.status(409).json({
+        error: `Нельзя остановить задачу в статусе "${task.status}"`,
+      });
+    }
+
+    // Устанавливаем статус 'pausing' — orchestrator обнаружит это перед следующим блоком
+    await db.query(
+      `UPDATE tasks SET status = 'pausing', updated_at = NOW() WHERE id = $1`,
+      [task.id]
+    );
+
+    // SSE-уведомление
+    publish(task.id, { type: 'pausing', message: 'Останавливаем после текущего блока...' });
+
+    return res.json({ message: 'Запрос на остановку отправлен', status: 'pausing' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/tasks/:id/resume — Resume paused/failed task (кнопка "Продолжить")
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function resumeTask(req, res, next) {
+  try {
+    const task = await loadOwnTask(req.params.id, req.user.id);
+
+    if (task.status !== 'paused' && task.status !== 'failed') {
+      return res.status(409).json({
+        error: `Нельзя продолжить задачу в статусе "${task.status}"`,
+      });
+    }
+
+    // Удаляем старый Bull job если остался
+    if (task.bull_job_id) {
+      try {
+        const oldJob = await generationQueue.getJob(task.bull_job_id);
+        if (oldJob) await oldJob.remove();
+      } catch (cleanupErr) {
+        console.warn(`[ResumeTask] Не удалось удалить старый Bull job ${task.bull_job_id}:`, cleanupErr.message);
+      }
+    }
+
+    // Загружаем checkpoint из БД
+    const checkpoint = task.pipeline_checkpoint || null;
+    const resumeFromBlock = checkpoint?.resumeFromBlock ?? 0;
+
+    // Добавляем в BullMQ с данными для resume
+    const jobId = `${task.id}-resume-${Date.now()}`;
+    const job = await generationQueue.add(
+      'generate',
+      { taskId: task.id, resumeFrom: checkpoint },
+      {
+        jobId,
+        attempts: 1,  // При resume — 1 попытка (не дублируем)
+      }
+    );
+
+    await db.query(
+      `UPDATE tasks SET status = 'queued', bull_job_id = $1, error_message = NULL, updated_at = NOW() WHERE id = $2`,
+      [String(job.id), task.id]
+    );
+
+    // SSE-уведомление
+    publish(task.id, {
+      type:             'resuming',
+      message:          `Возобновляем с блока ${resumeFromBlock + 1}...`,
+      resumeFromBlock,
+    });
+
+    return res.json({
+      message:          'Задача поставлена на возобновление',
+      status:           'queued',
+      resumeFromBlock,
+    });
+  } catch (err) {
+    if (err.message?.includes('Job') && err.message?.includes('already')) {
+      return res.status(409).json({ error: 'Задача уже в очереди' });
+    }
+    next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/tasks/:id
 // Удалить задачу (ТЗ §13)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -891,6 +984,8 @@ module.exports = {
   getTask,
   updateTask,
   startTask,
+  pauseTask,
+  resumeTask,
   deleteTask,
   getResult,
   getMetrics,

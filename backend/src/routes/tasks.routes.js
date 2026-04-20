@@ -10,6 +10,8 @@ const {
   getTask,
   updateTask,
   startTask,
+  pauseTask,
+  resumeTask,
   deleteTask,
   getResult,
   getMetrics,
@@ -122,7 +124,9 @@ router.patch('/:id',       authMiddleware, updateTask); // PATCH  /api/tasks/:id
 router.delete('/:id',      authMiddleware, deleteTask); // DELETE /api/tasks/:id
 
 // Действия над задачей
-router.post('/:id/start',  authMiddleware, startTask);  // POST /api/tasks/:id/start
+router.post('/:id/start',  authMiddleware, startTask);   // POST /api/tasks/:id/start
+router.post('/:id/pause',  authMiddleware, pauseTask);   // POST /api/tasks/:id/pause
+router.post('/:id/resume', authMiddleware, resumeTask);  // POST /api/tasks/:id/resume
 
 // Результаты и данные
 router.get('/:id/result',  authMiddleware, getResult);  // GET /api/tasks/:id/result
