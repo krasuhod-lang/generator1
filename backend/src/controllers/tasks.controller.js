@@ -121,6 +121,7 @@ async function createTask(req, res, next) {
       input_competitor_urls,
       input_min_chars,
       input_max_chars,
+      input_target_url,
     } = req.body;
 
     // Для черновика допускаем пустое поле — ставим плейсхолдер
@@ -142,7 +143,8 @@ async function createTask(req, res, next) {
          input_project_limits, input_page_priorities, input_niche_features,
          input_raw_lsi, input_ngrams, input_tfidf_json,
          input_brand_facts, input_competitor_urls,
-         input_min_chars, input_max_chars
+         input_min_chars, input_max_chars,
+         input_target_url
        ) VALUES (
          $1, $2, 'draft',
          $3, $4, $5,
@@ -151,7 +153,8 @@ async function createTask(req, res, next) {
          $13, $14, $15,
          $16, $17, $18,
          $19, $20,
-         $21, $22
+         $21, $22,
+         $23
        ) RETURNING *`,
       [
         req.user.id,
@@ -176,6 +179,7 @@ async function createTask(req, res, next) {
         toText(input_competitor_urls),
         minChars,
         maxChars,
+        toText(input_target_url),
       ]
     );
 
@@ -225,6 +229,7 @@ async function updateTask(req, res, next) {
       'input_raw_lsi', 'input_ngrams', 'input_tfidf_json',
       'input_brand_facts', 'input_competitor_urls',
       'input_min_chars', 'input_max_chars',
+      'input_target_url',
     ];
 
     const fields = [];
@@ -600,6 +605,7 @@ async function uploadTZ(req, res, next) {
       'input_raw_lsi',
       'input_ngrams',
       'input_tfidf_json',
+      'input_target_url',
     ];
     for (const key of fieldMap) {
       if (parsedFields[key] !== undefined && parsedFields[key] !== '') {

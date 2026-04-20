@@ -114,7 +114,7 @@ async function runStage5(
 
   let baseSpecialInstruction = '';
   if (waterPhrases.length)   baseSpecialInstruction += `ВОДА-ФРАЗЫ НАЙДЕНЫ: ${waterPhrases.join(', ')} — удали их. `;
-  if (hallucinations.length) baseSpecialInstruction += `ГАЛЛЮЦИНАЦИИ: найдены цифры ${hallucinations.join(', ')} — заменить на [NO_DATA] или удалить. `;
+  if (hallucinations.length) baseSpecialInstruction += `ГАЛЛЮЦИНАЦИИ: найдены цифры ${hallucinations.join(', ')} — удали их или перефразируй предложение без конкретных цифр. `;
 
   // NON-NEGOTIABLE safety rules (наследуются из Stage 3)
   baseSpecialInstruction += `
@@ -123,7 +123,7 @@ NON-NEGOTIABLE RULES (нарушение = брак):
 - STOP-WORDS BAN: НЕ используй фразы: "В современном мире", "Важно отметить", "Стоит учитывать", "Как показывает практика", "На сегодняшний день", "Широкий спектр", "Индивидуальный подход", "Комплексный подход", "Высокий уровень сервиса".
 - ANTI-GEO-SPAM: НЕ вставляй списки городов через запятую.
 - НЕ добавляй резюмирующий абзац "Таким образом...", "В заключение...", "Подводя итог...".
-- НЕ выдумывай числа, цены, сроки — используй [NO_DATA] если данных нет.
+- НЕ выдумывай числа, цены, сроки — если данных нет, перефразируй без конкретных цифр или удали предложение. НИКОГДА не выводи текст "[NO_DATA]".
 - Разрешённые HTML-теги: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <table>, <thead>, <tbody>, <tr>, <th>, <td>, <blockquote>.
 `;
 

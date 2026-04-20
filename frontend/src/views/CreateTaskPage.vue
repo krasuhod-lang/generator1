@@ -39,6 +39,7 @@ const form = reactive({
   input_competitor_urls: '',
   input_min_chars:       800,
   input_max_chars:       3500,
+  input_target_url:      '',   // URL целевой страницы
   title:                 '',
 });
 
@@ -86,6 +87,7 @@ const llmError     = ref('');
 const LLM_FIELD_MAP = {
   niche:            'input_target_service',   // используем как запасной вариант если пустой
   keyword:          'input_target_service',
+  target_page_url:  'input_target_url',
   geo:              'input_region',
   language:         'input_language',
   business_type:    'input_business_type',
@@ -256,6 +258,7 @@ async function handleDocxUpload(e) {
       'input_raw_lsi',
       'input_ngrams',
       'input_tfidf_json',
+      'input_target_url',
     ];
     let filled = 0;
     for (const key of fieldMap) {
@@ -388,6 +391,12 @@ function downloadExampleTZ() {
             <div>
               <label class="label">Регион <span class="text-red-500">*</span></label>
               <input v-model="form.input_region" type="text" class="input" placeholder="Алматы, Казахстан" />
+            </div>
+            <div>
+              <label class="label">URL целевой страницы</label>
+              <input v-model="form.input_target_url" type="url" class="input font-mono text-xs"
+                placeholder="https://example.com/uslugi/kredit-nalichnymi" />
+              <p class="text-xs text-gray-600 mt-1">Страница, на которой будет размещён текст. При запуске задачи контент страницы будет проанализирован для определения аудитории, ниши и фактов о бренде.</p>
             </div>
             <div>
               <label class="label">Язык</label>

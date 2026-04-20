@@ -53,7 +53,7 @@ async function runStage0(task, ctx) {
     url:      p.url,
     content:  p.content || '',
     error:    p.error   || null,
-    isOwnSite: isOwnSite(p.url, task.input_competitor_urls?.split('\n')?.[0]),
+    isOwnSite: isOwnSite(p.url, task.input_target_url || task.input_competitor_urls?.split('\n')?.[0]),
   }));
 
   const ownSiteContent   = competitorContent.find(c => c.isOwnSite)   || null;

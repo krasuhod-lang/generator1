@@ -176,6 +176,7 @@ async function ensureSchema() {
     // применить runtime. Все команды идемпотентны (IF NOT EXISTS).
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user' NOT NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

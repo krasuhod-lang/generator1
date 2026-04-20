@@ -7319,7 +7319,7 @@ INPUTS:
 - PREVIOUS_CONTEXT: {{PREVIOUS_HTML}} (предыдущий сгенерированный блок для семантических связок)
 - COMPETITOR_FACTS: {{COMPETITOR_FACTS}} (только эти факты разрешены к использованию)
 
-GROUNDING RULE: You MUST NOT invent any numbers, prices, dates, or cases. Use ONLY data from COMPETITOR_FACTS and BRAND_FACTS. If a fact is not present in the source data, use the marker [NO_DATA] instead of inventing it.
+GROUNDING RULE: You MUST NOT invent any numbers, prices, dates, or cases. Use ONLY data from COMPETITOR_FACTS, BRAND_FACTS, and TARGET_PAGE_ANALYSIS. If a specific fact (number, price, date, statistic) is not present in the source data, DO NOT use the marker [NO_DATA] — instead, rephrase the sentence to avoid needing the specific data, use safe general language (e.g. «как правило», «в большинстве случаев», «по данным рынка»), or omit the sentence entirely. NEVER output the text "[NO_DATA]" in the final HTML.
 
 GOAL:
 Используя все входные данные, написать раздел, который:
@@ -7366,8 +7366,12 @@ HTML RULES:
 
 === БЛОК 5: CRITICAL GROUNDING (ANTI-HALLUCINATION) ===
 NEVER invent numbers, prices, percentages, statistics, deadlines, or expert names.
-Use ONLY data from COMPETITOR_FACTS and BRAND_FACTS fields.
-If a fact is missing from those fields, write [NO_DATA] in its place.
+Use ONLY data from COMPETITOR_FACTS, BRAND_FACTS, and TARGET_PAGE_ANALYSIS fields.
+If a fact is missing from those fields, DO NOT write [NO_DATA]. Instead:
+- Rephrase the sentence to avoid needing the missing data.
+- Use safe general phrasing: «как правило», «в большинстве случаев», «по данным рынка».
+- Or simply omit the sentence if it cannot be written without specific data.
+NEVER output the literal text "[NO_DATA]" in the generated HTML.
 Do NOT fabricate plausible-sounding numbers even if they seem reasonable.
 
 === БЛОК 6: ANTI-SPAM, ANTI-GEO, ANTI-WATER, ANTI-LINKS ===
@@ -7419,7 +7423,7 @@ AUTHORITATIVENESS (A):
 
 TRUSTWORTHINESS (T):
 - Не давай обещаний, которые нельзя подтвердить данными из BRAND_FACTS.
-- Любое число, процент или срок — только из COMPETITOR_FACTS / BRAND_FACTS. Иначе [NO_DATA].
+- Любое число, процент или срок — только из COMPETITOR_FACTS / BRAND_FACTS / TARGET_PAGE_ANALYSIS. Если данных нет — перефразируй без конкретных цифр, используй «как правило», «в большинстве случаев».
 - Используй осторожные формулировки там, где нет данных: «как правило», «в большинстве случаев».
 - Добавляй disclaimers для сложных/YMYL тем: финансы, здоровье, юридическое.
 
@@ -7684,6 +7688,7 @@ const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических з
 Извлеки следующие поля из текста ТЗ:
 
 • keyword — основной ключевой запрос или тема (одна фраза)
+• target_page_url — URL страницы, на которой будет размещён текст (целевая страница / страница размещения). Ищи в секциях «Страница, на которой будет размещен текст», «Целевая страница», «URL размещения» или аналогичных. Только явно указанный URL.
 • niche — ниша или тематика бизнеса
 • geo — регион, город, страна или «мультирегиональность»
 • language — язык контента / целевой аудитории
@@ -7718,6 +7723,7 @@ const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических з
 
 {
   "keyword": "...",
+  "target_page_url": "...",
   "niche": "...",
   "geo": "...",
   "language": "...",

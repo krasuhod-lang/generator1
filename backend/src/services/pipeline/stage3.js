@@ -269,6 +269,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     s3stage1Json, s3stage2Json, stage0Signals, competitorsData, competitorFactsStr,
     blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
     expertOpinionUsed, previousContext, previousH2s,
+    serviceNotes, offerDetails, proofAssets,
   } = genContext;
 
   log(`Генерация блока [${blockIndex + 1}/${totalBlocks}]: ${block.h2}...`, 'info');
@@ -291,9 +292,9 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     .replace('{{BRAND_FACTS}}',        () => brandFacts)
     .replace('{{KNOWLEDGE_BASE}}',     () => stage0Signals)
     .replace('{{COMPETITOR_SIGNALS}}', () => competitorsData)
-    .replace('{{SERVICE_NOTES}}',      () => 'Нет')
-    .replace('{{OFFER_DETAILS}}',      () => 'Нет')
-    .replace('{{PROOF_ASSETS}}',       () => 'Нет')
+    .replace('{{SERVICE_NOTES}}',      () => serviceNotes || 'Нет')
+    .replace('{{OFFER_DETAILS}}',      () => offerDetails || 'Нет')
+    .replace('{{PROOF_ASSETS}}',       () => proofAssets || 'Нет')
     .replace('{{FAQ_BANK}}',           () => stage0Result ? JSON.stringify(stage0Result.faq_bank || []) : 'Нет')
     .replace('{{TERM_WEIGHTS_JSON}}',  () => tfIdfData)
     .replace('{{SECTION_NGRAMS_JSON}}',() => blockNgrams)
