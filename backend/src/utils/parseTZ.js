@@ -32,7 +32,35 @@ async function parseTZ(filePath) {
     input_raw_lsi:         '',
     input_ngrams:          '',
     input_tfidf_json:      '[]',
+    input_target_url:      '',
   };
+
+  // ── 0. Целевая страница (URL размещения текста) ───────────────────────────
+  // Ищем секцию "Страница, на которой будет размещен текст" или аналогичную
+  const targetPageIdx = lines.findIndex(l =>
+    /Страниц[аы].*(?:на\s+которой|размещ|разместить|будет\s+размещ)/i.test(l) ||
+    /целевая\s+страниц/i.test(l) ||
+    /(?:URL|ссылка)\s+(?:целевой|размещения|продвигаемой)\s+страниц/i.test(l)
+  );
+
+  if (targetPageIdx !== -1) {
+    // URL может быть на этой строке или на следующих
+    for (let i = targetPageIdx; i < Math.min(targetPageIdx + 5, lines.length); i++) {
+      const urlMatch = lines[i].match(/(https?:\/\/[^\s,;]+)/i);
+      if (urlMatch) {
+        result.input_target_url = urlMatch[1].trim();
+        break;
+      }
+    }
+  }
+
+  // Fallback: ищем URL в строке с явным указанием целевой страницы
+  if (!result.input_target_url) {
+    const targetUrlMatch = text.match(/(?:целевая\s+страниц|страниц.*размещ)[^:]*:\s*(https?:\/\/[^\s,;]+)/i);
+    if (targetUrlMatch) {
+      result.input_target_url = targetUrlMatch[1].trim();
+    }
+  }
 
   // ── 1. Главный запрос ────────────────────────────────────────────────────────
   const targetMatch = text.match(/Главный\s+запрос\s*[:\-–—]\s*(.+)/i);

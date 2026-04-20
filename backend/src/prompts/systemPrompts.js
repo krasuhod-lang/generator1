@@ -7201,6 +7201,7 @@ NOW ANALYZE AND RETURN JSON ONLY.`,
 
   // Stage 2: Taxonomy builder
   stage2: `ROLE: Senior Semantic SEO Taxonomy Architect.
+INDUSTRY CONTEXT: Сфера бизнеса — «{{BUSINESS_TYPE}}». Особенности ниши: {{NICHE_FEATURES}}. Учитывай специфику отрасли при создании структуры разделов, выборе H2/H3, типов блоков и trust-якорей.
 
 MISSION: Создать ГЛУБОКУЮ и ПОЛНУЮ структуру страницы (H2/H3) на основе Stage 1 результата.
 
@@ -7263,6 +7264,7 @@ JSON SCHEMA:
 NOW BUILD TAXONOMY AND RETURN JSON ONLY.`,
 
         stage3: `ROLE: Senior Commercial SEO Copywriter, E-E-A-T Content Engineer, BM25/TF-IDF Relevance Analyst, and Conversion-Focused Section Writer.
+INDUSTRY CONTEXT: Ты пишешь контент для сферы бизнеса «{{BUSINESS_TYPE}}». Особенности ниши: {{NICHE_FEATURES}}. Учитывай специфику этой отрасли при выборе тона, терминологии, примеров и аргументации. Контент должен звучать так, будто его написал эксперт именно в этой сфере.
 
 MISSION: Написать HTML-контент для ОДНОГО (текущего) блока H2. Это один раздел всей страницы. Блок должен быть production-ready, релевантным данным из taxonomy, с KPI: минимум 80% покрытия LSI из lsi_must (assigned by Stage 2).
 
@@ -7319,7 +7321,7 @@ INPUTS:
 - PREVIOUS_CONTEXT: {{PREVIOUS_HTML}} (предыдущий сгенерированный блок для семантических связок)
 - COMPETITOR_FACTS: {{COMPETITOR_FACTS}} (только эти факты разрешены к использованию)
 
-GROUNDING RULE: You MUST NOT invent any numbers, prices, dates, or cases. Use ONLY data from COMPETITOR_FACTS and BRAND_FACTS. If a fact is not present in the source data, use the marker [NO_DATA] instead of inventing it.
+GROUNDING RULE: You MUST NOT invent any numbers, prices, dates, or cases. Use ONLY data from COMPETITOR_FACTS, BRAND_FACTS, and TARGET_PAGE_ANALYSIS. If a specific fact (number, price, date, statistic) is not present in the source data, DO NOT use the marker [NO_DATA] — instead, rephrase the sentence to avoid needing the specific data, use safe general language (e.g. «как правило», «в большинстве случаев», «по данным рынка»), or omit the sentence entirely. NEVER output the text "[NO_DATA]" in the final HTML.
 
 GOAL:
 Используя все входные данные, написать раздел, который:
@@ -7366,8 +7368,12 @@ HTML RULES:
 
 === БЛОК 5: CRITICAL GROUNDING (ANTI-HALLUCINATION) ===
 NEVER invent numbers, prices, percentages, statistics, deadlines, or expert names.
-Use ONLY data from COMPETITOR_FACTS and BRAND_FACTS fields.
-If a fact is missing from those fields, write [NO_DATA] in its place.
+Use ONLY data from COMPETITOR_FACTS, BRAND_FACTS, and TARGET_PAGE_ANALYSIS fields.
+If a fact is missing from those fields, DO NOT write [NO_DATA]. Instead:
+- Rephrase the sentence to avoid needing the missing data.
+- Use safe general phrasing: «как правило», «в большинстве случаев», «по данным рынка».
+- Or simply omit the sentence if it cannot be written without specific data.
+NEVER output the literal text "[NO_DATA]" in the generated HTML.
 Do NOT fabricate plausible-sounding numbers even if they seem reasonable.
 
 === БЛОК 6: ANTI-SPAM, ANTI-GEO, ANTI-WATER, ANTI-LINKS ===
@@ -7419,7 +7425,7 @@ AUTHORITATIVENESS (A):
 
 TRUSTWORTHINESS (T):
 - Не давай обещаний, которые нельзя подтвердить данными из BRAND_FACTS.
-- Любое число, процент или срок — только из COMPETITOR_FACTS / BRAND_FACTS. Иначе [NO_DATA].
+- Любое число, процент или срок — только из COMPETITOR_FACTS / BRAND_FACTS / TARGET_PAGE_ANALYSIS. Если данных нет — перефразируй без конкретных цифр, используй «как правило», «в большинстве случаев».
 - Используй осторожные формулировки там, где нет данных: «как правило», «в большинстве случаев».
 - Добавляй disclaimers для сложных/YMYL тем: финансы, здоровье, юридическое.
 
@@ -7665,7 +7671,7 @@ NOW ANALYZE THE FINAL HTML AND RETURN JSON ONLY. CRITICAL: DO NOT USE MARKDOWN F
  * - Каждое извлечённое значение должно быть подтверждено точным фрагментом из текста ТЗ.
  * - Используй низкую «температуру» рассуждений: предпочитай пропустить поле, чем угадывать.
  */
-const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических заданий. Твоя единственная задача — извлечь структурированные данные из предоставленного текста ТЗ и вернуть их в виде строгого JSON.
+const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических заданий и специалист по сбору бизнес-данных. Твоя единственная задача — извлечь МАКСИМАЛЬНО ДЕТАЛИЗИРОВАННЫЕ структурированные данные из предоставленного текста ТЗ и вернуть их в виде строгого JSON. Ты собираешь базу данных фактов о бренде и проекте — каждая деталь важна для создания качественного контента.
 
 ═══════════════════════════════════════════
 АБСОЛЮТНЫЕ ПРАВИЛА (нарушение недопустимо)
@@ -7677,38 +7683,77 @@ const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических з
 5. СПИСКИ: Если поле — список (конкуренты, ограничения, категории), вернуть массив строк. Если одно значение — строку.
 6. СТРОГИЙ JSON: Ответ должен начинаться с { и заканчиваться }. Никакого markdown, никаких комментариев, никакого текста вне JSON.
 7. САМОПРОВЕРКА: Перед выводом мысленно проверь каждое поле: «Это слово/фраза действительно есть в ТЗ?» Если нет — замени на null.
+8. МАКСИМАЛЬНАЯ ДЕТАЛИЗАЦИЯ: Для текстовых полей (target_audience, niche_features, constraints, brand_facts_detailed и др.) давай РАЗВЁРНУТЫЕ описания 2-5 предложений. Чем больше деталей — тем лучше контент.
 
 ═══════════════════════
 ПОЛЯ ДЛЯ ИЗВЛЕЧЕНИЯ
 ═══════════════════════
 Извлеки следующие поля из текста ТЗ:
 
+── ОСНОВНЫЕ ПАРАМЕТРЫ ──
 • keyword — основной ключевой запрос или тема (одна фраза)
+• target_page_url — URL страницы, на которой будет размещён текст (целевая страница / страница размещения). Ищи в секциях «Страница, на которой будет размещен текст», «Целевая страница», «URL размещения» или аналогичных. Только явно указанный URL.
 • niche — ниша или тематика бизнеса
 • geo — регион, город, страна или «мультирегиональность»
 • language — язык контента / целевой аудитории
+
+── БИЗНЕС-ХАРАКТЕРИСТИКИ ──
 • business_type — тип бизнеса (SaaS / e-commerce / услуги / affiliate / media / marketplace / local business / B2B / B2C / D2C / review-site / publisher / aggregator / expert brand — только если прямо указано)
 • site_type — тип сайта (новый / растущий / зрелый / сильный бренд / слабый бренд — только если прямо указано)
 • domain_strength — текущая сила домена (слабый / средний / сильный — только если прямо указано)
-• target_audience — РАЗВЁРНУТОЕ описание целевой аудитории: кто эти люди, их возраст, пол, доход, интересы, боли, потребности, паттерны поведения. НЕ ОДНО СЛОВО, а подробное описание 2-5 предложений. Извлекай всю информацию об аудитории из ТЗ и компонуй в связный текст. Если в ТЗ указаны сегменты — перечисли их с описанием каждого.
 • business_goal — приоритетная бизнес-цель (трафик / лиды / продажи / бренд / AI visibility / topical authority / revenue growth — только если прямо указано)
 • monetization — модель монетизации (лиды / подписка / продажа товаров / реклама / affiliate / freemium / enterprise sales / demo / consultation / booking / marketplace fee — только если прямо указано)
+
+── ЦЕЛЕВАЯ АУДИТОРИЯ (МАКСИМАЛЬНАЯ ДЕТАЛИЗАЦИЯ) ──
+• target_audience — РАЗВЁРНУТОЕ описание целевой аудитории: кто эти люди, их возраст, пол, доход, интересы, боли, потребности, паттерны поведения. НЕ ОДНО СЛОВО, а подробное описание 2-5 предложений. Извлекай всю информацию об аудитории из ТЗ и компонуй в связный текст. Если в ТЗ указаны сегменты — перечисли их с описанием каждого.
+• audience_segments — сегменты аудитории с описанием каждого сегмента (массив строк с развёрнутым описанием, не одно слово, а 1-2 предложения на сегмент)
+
+── ПРОДУКТЫ И УСЛУГИ (БАЗА ДАННЫХ БРЕНДА) ──
 • products_services — основной продукт, услуга или категории (массив строк)
+• brand_usp — уникальные торговые предложения / конкурентные преимущества (массив строк с описанием каждого УТП: не просто «быстрая доставка», а «Доставка за 2 часа в черте города — быстрее, чем у большинства конкурентов»)
+• pricing_info — информация о ценах, тарифах, пакетах (массив строк: «Базовый пакет — от 5000 руб/мес», «Скидка 20% при годовой оплате» и т.д.). Только явно указанные цены.
+• service_process — описание процесса оказания услуги / этапов работы (массив строк с развёрнутым описанием каждого этапа)
+• delivery_conditions — условия доставки / выполнения / сроки (массив строк)
+• guarantees — гарантии, возвратные политики, warranty (массив строк)
+
+── ДОВЕРИЕ И ЭКСПЕРТИЗА ──
+• certifications — лицензии, сертификаты, допуски, аккредитации (массив строк с полными названиями)
+• awards — награды, рейтинги, упоминания в СМИ (массив строк)
+• experience_years — опыт работы на рынке (число или описание, например «более 15 лет» или null)
+• team_info — информация о команде: количество сотрудников, квалификации, ключевые специалисты (строка или null)
+• cases_portfolio — описание кейсов, портфолио, примеров работ (массив строк)
+• reviews_info — информация об отзывах: количество, средний рейтинг, платформы (строка или null)
+• trust_assets — существующие trust-активы (массив строк: лицензии / сертификаты / кейсы / отзывы / исследования / editorial policy / about pages — только явно упомянутые)
+
+── КОНКУРЕНТЫ ──
 • competitor_urls — URL конкурентов (массив строк, только явно упомянутые URL или домены)
 • competitor_names — названия конкурентов без URL (массив строк, только явно упомянутые)
+
+── ОСОБЕННОСТИ НИШИ (МАКСИМАЛЬНАЯ ДЕТАЛИЗАЦИЯ) ──
+• niche_features — РАЗВЁРНУТОЕ описание особенностей ниши. НЕ ОДНО СЛОВО, а подробные описания каждой особенности. Например: «YMYL-ниша — Google требует повышенного уровня экспертизы и доверия, необходимы подтверждённые авторы», «Сильная локальная привязка — пользователи ищут услуги в конкретном городе/районе», «Сезонность — спрос возрастает в определённые месяцы года». Извлекай из ТЗ всё, что характеризует нишу, и описывай подробно. Верни массив строк с развёрнутыми описаниями.
+
+── ОГРАНИЧЕНИЯ И КОНТЕКСТ ──
 • constraints — РАЗВЁРНУТОЕ описание ограничений проекта. Не одно слово, а описательные фразы. Например: «Нет штатных экспертов для создания E-E-A-T контента», «Слабый ссылочный профиль — менее 50 referring domains», «Бюджет ограничен — до 500$/мес на контент». Извлекай из ТЗ все упоминания ограничений и описывай их развёрнуто. Верни массив строк.
 • priority_page_types — приоритетные типы страниц. Описывай развёрнуто: не просто «блог», а «Блог с экспертными статьями для привлечения информационного трафика». Верни массив описательных строк.
-• niche_features — РАЗВЁРНУТОЕ описание особенностей ниши. НЕ ОДНО СЛОВО, а подробные описания каждой особенности. Например: «YMYL-ниша — Google требует повышенного уровня экспертизы и доверия, необходимы подтверждённые авторы», «Сильная локальная привязка — пользователи ищут услуги в конкретном городе/районе», «Сезонность — спрос возрастает в определённые месяцы года». Извлекай из ТЗ всё, что характеризует нишу, и описывай подробно. Верни массив строк с развёрнутыми описаниями.
+
+── КОНТЕНТ И КОММУНИКАЦИЯ ──
 • tone_of_voice — тон коммуникации / стиль контента (дословно из ТЗ)
 • conversion_points — конверсионные точки (массив строк: форма / корзина / trial / demo / call / booking / checkout — только явно упомянутые)
-• audience_segments — сегменты аудитории с описанием каждого сегмента (массив строк с развёрнутым описанием, не одно слово, а 1-2 предложения на сегмент)
+• content_requirements — требования к контенту: объём, формат, частота публикаций, стилистические требования (массив строк)
+
+── ПЛАНИРОВАНИЕ И СТРУКТУРА ──
 • planning_horizon — горизонт планирования (3 / 6 / 12 / 24 месяца — только если прямо указан)
 • existing_site_sections — существующие разделы / структура сайта (массив строк, только если перечислены)
 • existing_formats — существующие форматы контента на сайте (массив строк, только если перечислены)
+
+── ЭКСПЕРТЫ И АВТОРЫ ──
 • experts_authors — авторы, эксперты, редакторы (массив строк, только если названы)
-• trust_assets — существующие trust-активы (массив строк: лицензии / сертификаты / кейсы / отзывы / исследования / editorial policy / about pages — только явно упомянутые)
+
+── COMMUNITY И ТЕРМИНОЛОГИЯ ──
 • community_sources — известные community-источники (массив строк: Reddit / Quora / форумы / YouTube / Telegram / Discord / Facebook groups — только явно упомянутые)
 • known_terms — отраслевая терминология / brand vocabulary (массив строк, только явно перечисленные)
+
+── ДОПОЛНИТЕЛЬНО ──
 • additional_notes — любая другая важная информация из ТЗ, которая не вошла в поля выше (строка или null)
 
 ═══════════════════
@@ -7718,6 +7763,7 @@ const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических з
 
 {
   "keyword": "...",
+  "target_page_url": "...",
   "niche": "...",
   "geo": "...",
   "language": "...",
@@ -7725,22 +7771,34 @@ const TZ_EXTRACTOR_PROMPT = `Ты — аналитик технических з
   "site_type": "...",
   "domain_strength": null,
   "target_audience": "...",
+  "audience_segments": [],
   "business_goal": "...",
   "monetization": "...",
   "products_services": [],
+  "brand_usp": [],
+  "pricing_info": [],
+  "service_process": [],
+  "delivery_conditions": [],
+  "guarantees": [],
+  "certifications": [],
+  "awards": [],
+  "experience_years": null,
+  "team_info": null,
+  "cases_portfolio": [],
+  "reviews_info": null,
+  "trust_assets": [],
   "competitor_urls": [],
   "competitor_names": [],
+  "niche_features": [],
   "constraints": [],
   "priority_page_types": [],
-  "niche_features": [],
   "tone_of_voice": null,
   "conversion_points": [],
-  "audience_segments": [],
+  "content_requirements": [],
   "planning_horizon": null,
   "existing_site_sections": [],
   "existing_formats": [],
   "experts_authors": [],
-  "trust_assets": [],
   "community_sources": [],
   "known_terms": [],
   "additional_notes": null

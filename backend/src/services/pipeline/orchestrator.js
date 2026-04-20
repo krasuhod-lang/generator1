@@ -12,7 +12,8 @@ const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
 const { checkObjectiveMetrics } = require('../../utils/objectiveMetrics');
-const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
+const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
+const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -108,6 +109,71 @@ async function runPipeline(task, ctx) {
 
   const pipelineStartedAt = Date.now();
 
+  // ── Target Page Analysis (анализ целевой страницы) ──────────────
+  // Если указан URL целевой страницы — анализируем контент и обогащаем задачу
+  let targetPageAnalysis = null;
+  if (task.input_target_url?.trim()) {
+    try {
+      log('Target Page Analysis: запуск анализа целевой страницы...', 'info');
+      progress(1, 'target_page_analysis');
+
+      targetPageAnalysis = await analyzeTargetPage(task.input_target_url, stageCtx);
+
+      if (targetPageAnalysis) {
+        // Enrich task fields with analysis data (only if fields are empty)
+        // NOTE: Region and Brand Name are NOT auto-filled — user fills them manually
+        const updates = {};
+
+        if (!task.input_target_audience?.trim() && targetPageAnalysis.target_audience) {
+          task.input_target_audience = targetPageAnalysis.target_audience;
+          updates.input_target_audience = targetPageAnalysis.target_audience;
+        }
+        if (!task.input_niche_features?.trim() && targetPageAnalysis.niche_features?.length) {
+          const nicheStr = targetPageAnalysis.niche_features.map(f => `• ${f}`).join('\n');
+          task.input_niche_features = nicheStr;
+          updates.input_niche_features = nicheStr;
+        }
+        if (!task.input_project_limits?.trim() && targetPageAnalysis.project_limits?.length) {
+          const limitsStr = targetPageAnalysis.project_limits.map(l => `• ${l}`).join('\n');
+          task.input_project_limits = limitsStr;
+          updates.input_project_limits = limitsStr;
+        }
+        if (!task.input_brand_facts?.trim() && targetPageAnalysis.brand_facts) {
+          task.input_brand_facts = targetPageAnalysis.brand_facts;
+          updates.input_brand_facts = targetPageAnalysis.brand_facts;
+        }
+        if (!task.input_business_type?.trim() && targetPageAnalysis.detected_business_type) {
+          task.input_business_type = targetPageAnalysis.detected_business_type;
+          updates.input_business_type = targetPageAnalysis.detected_business_type;
+        }
+        if (!task.input_business_goal?.trim() && targetPageAnalysis.detected_business_goal) {
+          task.input_business_goal = targetPageAnalysis.detected_business_goal;
+          updates.input_business_goal = targetPageAnalysis.detected_business_goal;
+        }
+        if (!task.input_site_type?.trim() && targetPageAnalysis.detected_site_type) {
+          task.input_site_type = targetPageAnalysis.detected_site_type;
+          updates.input_site_type = targetPageAnalysis.detected_site_type;
+        }
+
+        // Save enriched fields to DB
+        const updateKeys = Object.keys(updates);
+        if (updateKeys.length > 0) {
+          const setClauses = updateKeys.map((k, i) => `${k} = $${i + 2}`).join(', ');
+          const setValues  = updateKeys.map(k => updates[k]);
+          await db.query(
+            `UPDATE tasks SET ${setClauses}, updated_at = NOW() WHERE id = $1`,
+            [taskId, ...setValues]
+          );
+          log(`Target Page Analysis: обогащены поля задачи: ${updateKeys.join(', ')}`, 'success');
+        }
+
+        publish(taskId, { type: 'target_page_analyzed', analysis: targetPageAnalysis });
+      }
+    } catch (e) {
+      log(`Target Page Analysis ошибка: ${e.message} — продолжаем без анализа`, 'warn');
+    }
+  }
+
   // ── Stage 0 ──────────────────────────────────────────────────────
   let stage0Result = null;
   try {
@@ -182,6 +248,11 @@ async function runPipeline(task, ctx) {
   const competitorFactsStr = stage0Result
     ? (stage0Result.competitor_facts || []).map(f => f.fact).join('; ').substring(0, 2000)
     : 'Нет данных';
+
+  // Target page analysis data for Stage 3 prompt placeholders
+  const serviceNotes = targetPageAnalysis?.service_details || 'Нет';
+  const offerDetails = targetPageAnalysis?.brand_facts     || 'Нет';
+  const proofAssets  = targetPageAnalysis?.proof_assets     || 'Нет';
 
   const blockWeights = taxonomy.map(b => BLOCK_TYPE_WEIGHTS[b.type] || 1.0);
   const weightSum    = blockWeights.reduce((s, w) => s + w, 0);
@@ -317,6 +388,7 @@ async function runPipeline(task, ctx) {
       s3stage1Json, s3stage2Json, stage0Signals, competitorsData, competitorFactsStr,
       blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
       expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
+      serviceNotes, offerDetails, proofAssets,
     });
 
     // Обновляем контекст для генерации следующего блока
@@ -362,6 +434,16 @@ async function runPipeline(task, ctx) {
       } else {
         expertBlockFound = true;
       }
+    }
+  }
+
+  // ── Post-processing: strip [NO_DATA] markers from all blocks ──
+  // Safety net: even though prompts now instruct LLM to avoid [NO_DATA],
+  // older prompts or edge cases might still produce them.
+  for (let i = 0; i < finalBlocks.length; i++) {
+    if (/\[NO[_\s]?DATA\]/i.test(finalBlocks[i])) {
+      log(`Post-processing: блок ${i + 1} содержит [NO_DATA] — удаляем маркеры`, 'warn');
+      finalBlocks[i] = stripNoDataMarkers(finalBlocks[i]);
     }
   }
 

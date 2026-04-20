@@ -39,6 +39,7 @@ const form = reactive({
   input_competitor_urls: '',
   input_min_chars:       800,
   input_max_chars:       3500,
+  input_target_url:      '',   // URL целевой страницы
   title:                 '',
 });
 
@@ -86,6 +87,7 @@ const llmError     = ref('');
 const LLM_FIELD_MAP = {
   niche:            'input_target_service',   // используем как запасной вариант если пустой
   keyword:          'input_target_service',
+  target_page_url:  'input_target_url',
   geo:              'input_region',
   language:         'input_language',
   business_type:    'input_business_type',
@@ -175,9 +177,30 @@ async function handleLLMTzUpload(e) {
       filled++;
     }
 
-    // tone_of_voice / additional_notes → brand_facts если пустые
-    if (ext.tone_of_voice && !form.input_brand_facts?.trim()) {
-      form.input_brand_facts = ext.tone_of_voice;
+    // Собираем детальные бренд-факты из расширенного TZ-экстрактора
+    const brandFactParts = [];
+    if (ext.tone_of_voice)                       brandFactParts.push(`Тон коммуникации: ${ext.tone_of_voice}`);
+    if (ext.brand_usp?.length)                   brandFactParts.push(`УТП: ${ext.brand_usp.join('; ')}`);
+    if (ext.pricing_info?.length)                brandFactParts.push(`Цены/тарифы: ${ext.pricing_info.join('; ')}`);
+    if (ext.service_process?.length)             brandFactParts.push(`Процесс работы: ${ext.service_process.join('; ')}`);
+    if (ext.delivery_conditions?.length)         brandFactParts.push(`Условия: ${ext.delivery_conditions.join('; ')}`);
+    if (ext.guarantees?.length)                  brandFactParts.push(`Гарантии: ${ext.guarantees.join('; ')}`);
+    if (ext.certifications?.length)              brandFactParts.push(`Лицензии/сертификаты: ${ext.certifications.join('; ')}`);
+    if (ext.awards?.length)                      brandFactParts.push(`Награды: ${ext.awards.join('; ')}`);
+    if (ext.experience_years)                    brandFactParts.push(`Опыт: ${ext.experience_years}`);
+    if (ext.team_info)                           brandFactParts.push(`Команда: ${ext.team_info}`);
+    if (ext.cases_portfolio?.length)             brandFactParts.push(`Кейсы: ${ext.cases_portfolio.join('; ')}`);
+    if (ext.reviews_info)                        brandFactParts.push(`Отзывы: ${ext.reviews_info}`);
+    if (ext.content_requirements?.length)        brandFactParts.push(`Требования к контенту: ${ext.content_requirements.join('; ')}`);
+    if (ext.additional_notes)                    brandFactParts.push(`Доп. информация: ${ext.additional_notes}`);
+
+    if (brandFactParts.length > 0) {
+      const brandFactsStr = brandFactParts.join('\n');
+      if (form.input_brand_facts?.trim()) {
+        form.input_brand_facts = form.input_brand_facts.trim() + '\n\n' + brandFactsStr;
+      } else {
+        form.input_brand_facts = brandFactsStr;
+      }
       filled++;
     }
 
@@ -256,6 +279,7 @@ async function handleDocxUpload(e) {
       'input_raw_lsi',
       'input_ngrams',
       'input_tfidf_json',
+      'input_target_url',
     ];
     let filled = 0;
     for (const key of fieldMap) {
@@ -388,6 +412,12 @@ function downloadExampleTZ() {
             <div>
               <label class="label">Регион <span class="text-red-500">*</span></label>
               <input v-model="form.input_region" type="text" class="input" placeholder="Алматы, Казахстан" />
+            </div>
+            <div>
+              <label class="label">URL целевой страницы</label>
+              <input v-model="form.input_target_url" type="url" class="input font-mono text-xs"
+                placeholder="https://example.com/uslugi/kredit-nalichnymi" />
+              <p class="text-xs text-gray-600 mt-1">Страница, на которой будет размещён текст. При запуске задачи контент страницы будет проанализирован для определения аудитории, ниши и фактов о бренде.</p>
             </div>
             <div>
               <label class="label">Язык</label>
