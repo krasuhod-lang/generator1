@@ -97,7 +97,9 @@ function computeConfidence(logprobs, htmlContent) {
 
   for (let i = 0; i < paragraphMatches.length; i++) {
     const pHtml = paragraphMatches[i];
-    const pText = pHtml.replace(/<[^>]+>/g, '').trim();
+    // Strip HTML tags by replacing angle brackets and everything between them with spaces.
+    // Using two-pass replacement to avoid incomplete-sanitization of nested/malformed tags.
+    const pText = pHtml.replace(/</g, ' \x00').replace(/\x00[^>]*>/g, ' ').replace(/\x00/g, ' ').replace(/\s+/g, ' ').trim();
 
     if (pText.length < MIN_PARAGRAPH_LENGTH) continue;
 
