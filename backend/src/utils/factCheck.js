@@ -66,6 +66,12 @@ function factCheck(htmlContent, factsArray = [], brandFacts = '', rawLSI = '') {
  */
 const CONFIDENCE_THRESHOLD = -1.5;
 
+/** Minimum paragraph text length to include in confidence analysis */
+const MIN_PARAGRAPH_LENGTH = 20;
+
+/** Number of leading characters used to locate a paragraph in the token stream */
+const MATCH_PREFIX_LENGTH = 50;
+
 /**
  * computeConfidence — вычисляет уверенность модели для каждого абзаца HTML.
  *
@@ -93,9 +99,9 @@ function computeConfidence(logprobs, htmlContent) {
     const pHtml = paragraphMatches[i];
     const pText = pHtml.replace(/<[^>]+>/g, '').trim();
 
-    if (pText.length < 20) continue;
+    if (pText.length < MIN_PARAGRAPH_LENGTH) continue;
 
-    const pTextClean = pText.substring(0, 50);
+    const pTextClean = pText.substring(0, MATCH_PREFIX_LENGTH);
     const startIdx = fullText.indexOf(pTextClean, tokenOffset);
 
     if (startIdx === -1) {
