@@ -172,7 +172,7 @@ function computeSemanticCoverage(htmlContent, lsiTerms, threshold = 0.15) {
     }));
 
     // Normalize BM25 scores to 0..1 range
-    const maxBM25 = Math.max(...rawScores.map(s => s.bm25), 1e-10);
+    const maxBM25 = rawScores.reduce((max, s) => Math.max(max, s.bm25), 1e-10);
     const scores  = rawScores.map(s => ({
       index:  s.index,
       cosine: s.cosine,
