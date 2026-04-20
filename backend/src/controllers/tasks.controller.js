@@ -671,8 +671,91 @@ async function extractTextFromFile(filePath, mimetype) {
 }
 
 /**
+ * JSON Schema для валидации ответа TZ-экстрактора (DSPy-inspired Signature).
+ * Каждое поле имеет тип и nullable-статус.
+ */
+const TZ_SCHEMA = {
+  keyword:              { type: 'string',  nullable: true },
+  target_page_url:      { type: 'string',  nullable: true },
+  niche:                { type: 'string',  nullable: true },
+  geo:                  { type: 'string',  nullable: true },
+  language:             { type: 'string',  nullable: true },
+  business_type:        { type: 'string',  nullable: true },
+  site_type:            { type: 'string',  nullable: true },
+  domain_strength:      { type: 'string',  nullable: true },
+  target_audience:      { type: 'string',  nullable: true },
+  audience_segments:    { type: 'array',   nullable: false },
+  business_goal:        { type: 'string',  nullable: true },
+  monetization:         { type: 'string',  nullable: true },
+  products_services:    { type: 'array',   nullable: false },
+  brand_usp:            { type: 'array',   nullable: false },
+  pricing_info:         { type: 'array',   nullable: false },
+  service_process:      { type: 'array',   nullable: false },
+  delivery_conditions:  { type: 'array',   nullable: false },
+  guarantees:           { type: 'array',   nullable: false },
+  certifications:       { type: 'array',   nullable: false },
+  awards:               { type: 'array',   nullable: false },
+  experience_years:     { type: 'string',  nullable: true },
+  team_info:            { type: 'string',  nullable: true },
+  cases_portfolio:      { type: 'array',   nullable: false },
+  reviews_info:         { type: 'string',  nullable: true },
+  trust_assets:         { type: 'array',   nullable: false },
+  competitor_urls:      { type: 'array',   nullable: false },
+  competitor_names:     { type: 'array',   nullable: false },
+  niche_features:       { type: 'array',   nullable: false },
+  constraints:          { type: 'array',   nullable: false },
+  priority_page_types:  { type: 'array',   nullable: false },
+  tone_of_voice:        { type: 'string',  nullable: true },
+  conversion_points:    { type: 'array',   nullable: false },
+  content_requirements: { type: 'array',   nullable: false },
+  planning_horizon:     { type: 'string',  nullable: true },
+  existing_site_sections: { type: 'array', nullable: false },
+  existing_formats:     { type: 'array',   nullable: false },
+  experts_authors:      { type: 'array',   nullable: false },
+  community_sources:    { type: 'array',   nullable: false },
+  known_terms:          { type: 'array',   nullable: false },
+  additional_notes:     { type: 'string',  nullable: true },
+};
+
+/**
+ * DSPy-inspired валидация ответа экстрактора.
+ * Проверяет наличие всех полей и корректность типов.
+ * Возвращает { valid, errors, repaired } — если possible, ремонтирует ответ.
+ */
+function validateAndRepairTzOutput(obj) {
+  const errors = [];
+  const repaired = { ...obj };
+
+  for (const [field, spec] of Object.entries(TZ_SCHEMA)) {
+    if (!(field in repaired)) {
+      repaired[field] = spec.type === 'array' ? [] : null;
+      errors.push(`missing field: ${field}`);
+      continue;
+    }
+    const val = repaired[field];
+    if (val === null || val === undefined) {
+      if (spec.type === 'array') {
+        repaired[field] = [];
+      }
+      continue;
+    }
+    if (spec.type === 'array' && !Array.isArray(val)) {
+      repaired[field] = typeof val === 'string' ? [val] : [];
+      errors.push(`type mismatch for ${field}: expected array`);
+    }
+    if (spec.type === 'string' && Array.isArray(val)) {
+      repaired[field] = val.join('; ');
+      errors.push(`type mismatch for ${field}: expected string, got array`);
+    }
+  }
+
+  return { valid: errors.length === 0, errors, repaired };
+}
+
+/**
  * Вызывает LLM с промптом-экстрактором и возвращает распарсенный JSON.
- * Предпочитает DeepSeek, при ошибке пробует Gemini.
+ * DSPy-inspired: используем self-correction (retry с feedback) при ошибке парсинга/валидации.
+ * Предпочитает DeepSeek (последняя модель), при ошибке пробует Gemini.
  */
 async function callExtractorLLM(tzText) {
   const MAX_TZ_CHARS = 40000; // защита от слишком длинных ТЗ
@@ -682,35 +765,77 @@ async function callExtractorLLM(tzText) {
 
   const prompt = TZ_EXTRACTOR_PROMPT.replace('{{TZ_TEXT}}', truncated);
 
-  // Системная инструкция — короткая, без лишнего
+  // Системная инструкция — оптимизированная для DeepSeek
   const systemMsg = 'Ты — аналитик ТЗ и специалист по сбору бизнес-данных. Извлекай данные СТРОГО из текста. Возвращай только корректный JSON без markdown-обёрток. ВАЖНО: для полей target_audience, niche_features, constraints, priority_page_types, audience_segments, brand_usp, service_process — давай РАЗВЁРНУТЫЕ описания из 2-5 предложений, НЕ одно слово. Описывай подробно: кто аудитория, какие особенности ниши, какие ограничения, какие УТП, как работает процесс. Собирай ВСЕ факты о бренде: цены, условия, гарантии, лицензии, опыт, команда.';
 
-  // Антигаллюцинационные параметры: temperature=0.0, увеличенные токены для детального извлечения
-  const llmOptions = { temperature: 0.0, maxTokens: 6144, timeoutMs: 90000 };
+  // Увеличенный timeout для стабильности; temperature=0 для детерминизма
+  const llmOptions = { temperature: 0.0, maxTokens: 8192, timeoutMs: 150000 };
 
-  let rawText = '';
-  try {
-    const dsResult = await callDeepSeek(systemMsg, prompt, llmOptions);
-    rawText = dsResult.text || '';
-  } catch (deepseekErr) {
-    console.warn('[parseTZWithLLM] DeepSeek failed, trying Gemini:', deepseekErr.message);
-    const gmResult = await callGemini(systemMsg, prompt, llmOptions);
-    rawText = gmResult.text || '';
+  const MAX_RETRIES = 2; // DSPy self-correction: до 2 попыток с feedback
+  let lastErrors = [];
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const currentPrompt = attempt === 0
+      ? prompt
+      : prompt + '\n\n⚠️ ПРЕДЫДУЩАЯ ПОПЫТКА БЫЛА НЕКОРРЕКТНОЙ. Ошибки:\n' +
+        lastErrors.join('\n') +
+        '\n\nИсправь эти ошибки и верни корректный JSON строго по схеме.';
+
+    let rawText = '';
+    try {
+      const dsResult = await callDeepSeek(systemMsg, currentPrompt, llmOptions);
+      rawText = dsResult.text || '';
+    } catch (deepseekErr) {
+      console.warn('[parseTZWithLLM] DeepSeek failed, trying Gemini:', deepseekErr.message);
+      try {
+        const gmResult = await callGemini(systemMsg, currentPrompt, llmOptions);
+        rawText = gmResult.text || '';
+      } catch (geminiErr) {
+        console.error('[parseTZWithLLM] Gemini also failed:', geminiErr.message);
+        throw new Error('Не удалось обработать ТЗ. Сервис LLM временно недоступен, попробуйте позже.');
+      }
+    }
+
+    // Нормализуем и парсим JSON
+    const cleaned = rawText
+      .replace(/```json/gi, '')
+      .replace(/```/g, '')
+      .trim();
+
+    const start = cleaned.indexOf('{');
+    const end   = cleaned.lastIndexOf('}');
+    if (start === -1 || end === -1) {
+      if (attempt < MAX_RETRIES - 1) {
+        lastErrors = ['LLM не вернул JSON-объект. Ответ должен начинаться с { и заканчиваться }.'];
+        continue;
+      }
+      throw new Error('LLM не вернул корректный JSON');
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned.slice(start, end + 1));
+    } catch (parseErr) {
+      if (attempt < MAX_RETRIES - 1) {
+        lastErrors = [`JSON parse error: ${parseErr.message}`];
+        continue;
+      }
+      throw new Error('LLM вернул невалидный JSON');
+    }
+
+    // DSPy-inspired validation + repair
+    const { valid, errors, repaired } = validateAndRepairTzOutput(parsed);
+
+    if (!valid && attempt < MAX_RETRIES - 1) {
+      lastErrors = errors;
+      continue; // retry with feedback
+    }
+
+    return repaired;
   }
 
-  // Нормализуем и парсим JSON
-  const cleaned = rawText
-    .replace(/```json/gi, '')
-    .replace(/```/g, '')
-    .trim();
-
-  const start = cleaned.indexOf('{');
-  const end   = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1) {
-    throw new Error('LLM не вернул корректный JSON');
-  }
-
-  return JSON.parse(cleaned.slice(start, end + 1));
+  // Safety: should not reach here, but if all attempts are exhausted
+  throw new Error('LLM не вернул корректные данные после всех попыток');
 }
 
 /**
