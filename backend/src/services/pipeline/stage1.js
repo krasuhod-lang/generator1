@@ -42,8 +42,14 @@ async function runStage1(task, ctx, stage0Result) {
   // Сжимаем stage0 до разумного контекста
   const stage0Ctx = JSON.stringify(stage0Result || {}).substring(0, 4000);
 
+  // Strategy digest (Pre-Stage 0). Если контекста нет — пусто (graceful).
+  const strategyDigest = (task.__strategyDigest || '').trim();
+  const strategyAppendix = strategyDigest
+    ? `\n\n===== STRATEGY CONTEXT (Pre-Stage 0) =====\n${strategyDigest}\nИспользуй niche map / opportunity portfolio / demand map как фундамент: валидируй и углубляй приведённые сигналы, не выдумывай альтернативные.\n`
+    : '';
+
   // ── Call 1A: Entity Landscape ──────────────────────────────────────
-  const entityContext = `\n\n===== INPUT DATA =====
+  const entityContext = `${strategyAppendix}\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 LSI TERMS (первые 600 символов): ${rawLSI.substring(0, 600)}
 STAGE 0 RESULT: ${stage0Ctx}
@@ -59,7 +65,7 @@ IMPORTANT: In knowledge_graph, build REAL semantic relationships between entitie
 NO markdown. NO extra text.`;
 
   // ── Call 1B: Commercial Intent ─────────────────────────────────────
-  const intentContext = `\n\n===== INPUT DATA =====
+  const intentContext = `${strategyAppendix}\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 STAGE 0 RESULT: ${stage0Ctx}
 LSI TERMS: ${rawLSI.substring(0, 600)}
@@ -71,7 +77,7 @@ OUTPUT: Return ONLY valid JSON with these keys:
 NO markdown. NO extra text.`;
 
   // ── Call 1C: Community Voice ───────────────────────────────────────
-  const communityContext = `\n\n===== INPUT DATA =====
+  const communityContext = `${strategyAppendix}\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 STAGE 0 RESULT: ${stage0Ctx}
 LSI TERMS: ${rawLSI.substring(0, 600)}

@@ -64,11 +64,17 @@ const { runStage5, checkAntiWater } = require('./stage5');
 const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
-const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objectiveMetrics');
+const { checkObjectiveMetrics, getStructureLimits, LSI_COVERAGE_TARGET } = require('../../utils/objectiveMetrics');
 const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 const { analyzeAudienceAndNiche, serializeAnalysisForPrompt } = require('../parser/audienceNicheAnalyzer');
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
+const { runPreStage0, buildStrategyDigest } = require('./preStage0');
+const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
+const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
+const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
+const { resetTaskBudget } = require('../llm/callLLM');
+const { estimateTokens } = require('../metrics/priceCalculator');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -259,6 +265,41 @@ async function runPipeline(task, ctx) {
     publish(taskId, { type: 'audience_niche_analyzed', analysis: audienceNicheAnalysis });
   }
 
+  // ── Pre-Stage 0: Стратегический разведочный слой ──────────────────
+  // Niche Landscape + Market Opportunity + Search Demand Mapper.
+  // Запускается один раз на задачу, через DeepSeek, параллельно.
+  // Результат (STRATEGY_CONTEXT) сохраняется в task.strategy_context
+  // и пробрасывается в Stage 0 через task.__strategyContext.
+  let strategyContext = null;
+  if (resumeFrom?.strategyContext !== undefined) {
+    strategyContext = resumeFrom.strategyContext;
+    log('Pre-Stage 0: восстановлен из checkpoint', 'info');
+  } else {
+    try {
+      strategyContext = await runPreStage0(task, stageCtx, {
+        targetPageAnalysis,
+        audienceNicheAnalysis,
+      });
+    } catch (e) {
+      log(`Pre-Stage 0 ошибка: ${e.message} — продолжаем без стратегического контекста`, 'warn');
+    }
+  }
+  // Прокидываем в task для всех последующих стадий (transient — не сохраняется в DB напрямую).
+  task.__strategyContext = strategyContext;
+  task.__strategyDigest  = buildStrategyDigest(strategyContext);
+
+  if (strategyContext) {
+    publish(taskId, {
+      type:    'strategy_context_ready',
+      summary: {
+        has_niche_map:             !!strategyContext.niche_map,
+        has_opportunity_portfolio: !!strategyContext.opportunity_portfolio,
+        has_demand_map:            !!strategyContext.demand_map,
+        errors:                    strategyContext.errors || [],
+      },
+    });
+  }
+
   // ── Stage 0 ──────────────────────────────────────────────────────
   let stage0Result = null;
   if (resumeFrom?.stage0Result !== undefined) {
@@ -306,6 +347,66 @@ async function runPipeline(task, ctx) {
 
   // ── Используем enrichedStage1 (stage1 + buyer journey) для Stage 3
   stage1Result = enrichedStage1 || stage1Result;
+
+  // ── ARTICLE_KNOWLEDGE_BASE (AKB) ─────────────────────────────────
+  // Один детерминированный документ, который собирает всё «сырое знание»
+  // (Pre-Stage 0 + Stage 0 + Stage 1 + target page + audience-niche).
+  // Уйдёт в Gemini как нативный systemInstruction (опционально через
+  // cachedContents API) для Stage 3 / 5 / 6.
+  // См.: backend/src/utils/articleKnowledgeBase.js
+  try {
+    task.__articleKnowledgeBase = buildArticleKnowledgeBase({
+      task,
+      targetPageAnalysis,
+      strategyContext,
+      stage0Result,
+      stage1Result,
+      knowledgeGraph: stage1Result?.knowledge_graph || null,
+    });
+    const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
+    const akbTokens = estimateTokens(task.__articleKnowledgeBase);
+    log(
+      `ARTICLE_KNOWLEDGE_BASE собран: ${akbBytes} байт (~${akbTokens} токенов). ` +
+      `Будет передаваться как Gemini systemInstruction для Stage 3/5/6.`,
+      'info'
+    );
+  } catch (akbErr) {
+    log(`ARTICLE_KNOWLEDGE_BASE: ошибка сборки — ${akbErr.message}. Продолжаем без AKB.`, 'warn');
+    task.__articleKnowledgeBase = '';
+  }
+
+  // ── Опционально: Gemini Context Caching API ─────────────────────
+  // Включается флагом GEMINI_CONTEXT_CACHE_ENABLED=true. Даёт ~75 % скидку
+  // на cached input tokens, но требует, чтобы AKB был ≥ ~4 КБ.
+  // На cache miss — graceful fallback в callLLM (см. opts.cachedContent).
+  task.__geminiCacheName = null;
+  if (
+    process.env.GEMINI_CONTEXT_CACHE_ENABLED === 'true' &&
+    task.__articleKnowledgeBase &&
+    Buffer.byteLength(task.__articleKnowledgeBase, 'utf8') >= 4096
+  ) {
+    try {
+      const ttl = parseInt(process.env.GEMINI_CONTEXT_CACHE_TTL_SEC, 10) || 900;
+      const cache = await createCachedContent({
+        systemInstruction: task.__articleKnowledgeBase,
+        ttlSeconds:        ttl,
+      });
+      task.__geminiCacheName = cache.name;
+      log(`Gemini cachedContent создан: ${cache.name} (TTL ${cache.ttlSeconds}s).`, 'success');
+    } catch (cacheErr) {
+      log(`Gemini cachedContent не создан — ${cacheErr.message}. Идём без кэша.`, 'warn');
+      task.__geminiCacheName = null;
+    }
+  }
+
+  // ── Per-task token budget (Gemini input tokens) ──────────────────
+  // Защита от runaway-стоимости. Если пользователь не задал лимит — Infinity.
+  const budgetEnv = parseInt(process.env.GEMINI_TASK_TOKEN_BUDGET, 10);
+  task.__tokenBudget = (Number.isFinite(budgetEnv) && budgetEnv > 0) ? budgetEnv : Infinity;
+  resetTaskBudget(taskId);
+  if (Number.isFinite(task.__tokenBudget)) {
+    log(`Gemini token budget на задачу: ${task.__tokenBudget} input-токенов.`, 'info');
+  }
 
   // ── Stage 3–6: Pipeline Interleaving ──────────────────────────────
   // Вместо: Stage 3 (все блоки) → Stage 4-6 (все блоки последовательно)
@@ -410,7 +511,7 @@ async function runPipeline(task, ctx) {
       return blockHtml;
     }
 
-    const needsRefinement = lsiCovPct < 80 || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
+    const needsRefinement = lsiCovPct < LSI_COVERAGE_TARGET || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
 
     // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки).
     // Передаём blockCharLimits с допуском ±20% — длина становится триггером рефайна.
@@ -461,10 +562,10 @@ async function runPipeline(task, ctx) {
         log(`Stage 5 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 4`, 'warn');
       }
     } else {
-      log(`Блок ${i + 1}: PQ ${pqScore} >= 8, LSI ${Math.round(lsiCovPct)}% >= 80% — рефайн не нужен`, 'success');
+      log(`Блок ${i + 1}: PQ ${pqScore} ≥ 8, LSI ${Math.round(lsiCovPct)}% ≥ ${LSI_COVERAGE_TARGET}% — рефайн не нужен`, 'success');
     }
 
-    // Stage 6: LSI-инъекция (всегда, если покрытие < 100%)
+    // Stage 6: LSI-инъекция (всегда, если покрытие < LSI_COVERAGE_TARGET)
     let lsiCoverageAfter = lsiCovPct;
     // Pause check перед Stage 6: ещё одна точка остановки.
     if (await checkPauseRequested(taskId)) {
@@ -523,6 +624,7 @@ async function runPipeline(task, ctx) {
     taxonomy,
     enrichedStage1,
     audienceNicheAnalysis,
+    strategyContext,
     expertOpinionUsed,
     previousContext,
     generatedH2s: [...generatedH2s],
@@ -659,6 +761,45 @@ async function runPipeline(task, ctx) {
     s7Result = { finalHTML: finalBlocks.join('\n\n') };
   }
 
+  // ── Post-Stage 7: «Ограничения проекта → не использовано» ──────────
+  // Строим отчёт о входных данных, не вошедших в финальный HTML.
+  // Чистый JS, без LLM-вызовов: переиспользуем calculateCoverage (стемминг)
+  // + проверки фраз. Сохраняем в tasks.unused_inputs (миграция 006) и шлём SSE.
+  let unusedInputsReport = null;
+  try {
+    unusedInputsReport = buildUnusedInputsReport({
+      task,
+      fullHTML:           s7Result.finalHTML || finalBlocks.join('\n\n'),
+      stage0Result,
+      strategyContext,
+      targetPageAnalysis,
+      tfIdfDensity:       s7Result.tfIdfDensity || [],
+    });
+
+    try {
+      await db.query(
+        `UPDATE tasks SET unused_inputs = $1, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(unusedInputsReport), taskId]
+      );
+    } catch (dbErr) {
+      log(`Unused inputs: не удалось сохранить отчёт в БД (${dbErr.message})`, 'warn');
+    }
+
+    publish(taskId, { type: 'unused_inputs_report', report: unusedInputsReport });
+
+    log(
+      `Ограничения проекта → не использовано: всего ${unusedInputsReport.summary.total_unused_items} элементов ` +
+      `(LSI: ${unusedInputsReport.summary.categories.lsi}, ` +
+      `n-грамм: ${unusedInputsReport.summary.categories.ngrams}, ` +
+      `фактов бренда: ${unusedInputsReport.summary.categories.brand_facts}, ` +
+      `фактов конкурентов: ${unusedInputsReport.summary.categories.competitor_facts}, ` +
+      `FAQ: ${unusedInputsReport.summary.categories.faq_questions})`,
+      'info'
+    );
+  } catch (e) {
+    log(`Unused inputs report ошибка: ${e.message} — пропускаем`, 'warn');
+  }
+
   // Время генерации контента (в секундах)
   const generationTimeSec = Math.round((Date.now() - pipelineStartedAt) / 1000);
 
@@ -673,6 +814,7 @@ async function runPipeline(task, ctx) {
     finalHTMLLength:    (s7Result.finalHTML || '').length,
     eeatBreakdown:      s7Result.eeatBreakdown        || null,
     tfIdfDensity:       s7Result.tfIdfDensity          || [],
+    unusedInputs:       unusedInputsReport             || null,
     generationTimeSec,
   });
 
@@ -684,6 +826,18 @@ async function runPipeline(task, ctx) {
     `Время: ${Math.floor(generationTimeSec / 60)}м ${generationTimeSec % 60}с`,
     'success'
   );
+
+  // ── Cleanup: удаляем Gemini cachedContent (если был создан) ─────
+  // Не блокируем return: на ошибку только лог. На error-путях кэш
+  // протухает по TTL (по умолчанию 15 мин).
+  if (task.__geminiCacheName) {
+    deleteCachedContent(task.__geminiCacheName)
+      .then(ok => {
+        if (ok) log(`Gemini cachedContent удалён: ${task.__geminiCacheName}`, 'info');
+        else    log(`Gemini cachedContent НЕ удалён (истечёт по TTL): ${task.__geminiCacheName}`, 'warn');
+      })
+      .catch(() => {});
+  }
 
   return s7Result;
 }

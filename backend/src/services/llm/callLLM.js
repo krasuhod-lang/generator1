@@ -6,6 +6,53 @@ const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
 
+// ────────────────────────────────────────────────────────────────────
+// Per-task token budget guard
+//
+// Gemini вызовы (Stage 3/5/6) могут раскручиваться до десятков долларов
+// на одну задачу при патологии (бесконечный refine-loop, огромный input).
+// Здесь — мягкий guard: вызывающая сторона передаёт `tokenBudget`
+// (Infinity по умолчанию). Когда бюджет исчерпан — бросаем
+// `BudgetExceededError` с `isDeterministic=true`, чтобы callLLM не
+// плодил ретраи. Внешние стадии могут поймать ошибку и решить, что делать
+// (например, пропустить Stage 6 cycle 2/3).
+//
+// Состояние per-task хранится в Map(taskId → {gemini:number, deepseek:number}).
+// ────────────────────────────────────────────────────────────────────
+
+const tokenBudgetState = new Map(); // taskId → { gemini: tokensConsumed }
+
+class BudgetExceededError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'BudgetExceededError';
+    this.isBudgetExceeded = true;
+    this.isDeterministic  = true;
+  }
+}
+
+/**
+ * resetTaskBudget — обнуляет учёт для taskId. Вызывать в начале runPipeline().
+ */
+function resetTaskBudget(taskId) {
+  if (taskId) tokenBudgetState.delete(taskId);
+}
+
+/**
+ * getTaskBudgetSpent — текущее потребление токенов по адаптеру для задачи.
+ */
+function getTaskBudgetSpent(taskId, adapter = 'gemini') {
+  const st = tokenBudgetState.get(taskId);
+  return st ? (st[adapter] || 0) : 0;
+}
+
+function _accumulateTokens(taskId, adapter, tokensIn) {
+  if (!taskId) return;
+  const st = tokenBudgetState.get(taskId) || { gemini: 0, deepseek: 0 };
+  st[adapter] = (st[adapter] || 0) + tokensIn;
+  tokenBudgetState.set(taskId, st);
+}
+
 /**
  * clampPQScore — нормализует PQ-score в допустимый диапазон [0, 10].
  *
@@ -163,6 +210,13 @@ async function persistStageCall({ taskId, stageName, callLabel, model, promptSiz
  * @param {Function}            [opts.onLog]        — callback(msg, level) для SSE-логов
  * @param {number}              [opts.temperature]
  * @param {number}              [opts.maxTokens]
+ * @param {string}              [opts.cachedContent]— `cachedContents/...` (Gemini only)
+ * @param {Function}            [opts.onCacheMiss]  — callback() при HTTP 404 на cachedContent;
+ *                                                    после вызова callLLM однократно перезапросит
+ *                                                    без cachedContent.
+ * @param {number}              [opts.tokenBudget]  — лимит input-токенов на задачу (для Gemini).
+ *                                                    Infinity по умолчанию. При исчерпании —
+ *                                                    BudgetExceededError (isDeterministic).
  *
  * @returns {Promise<object>}   — распарсенный JSON-ответ
  */
@@ -178,6 +232,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     temperature,
     maxTokens,
     logprobs = false,
+    cachedContent = null,
+    onCacheMiss   = null,
+    tokenBudget   = Infinity,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -191,16 +248,42 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   const startedAt = new Date();
   const promptSize = estimateTokens(system + prompt);
 
+  // Token budget pre-check (Gemini only — на DeepSeek не действует, чтобы
+  // не блокировать дешёвый аналитический трафик).
+  if (adapter === 'gemini' && Number.isFinite(tokenBudget) && taskId) {
+    const spent = getTaskBudgetSpent(taskId, 'gemini');
+    if (spent >= tokenBudget) {
+      throw new BudgetExceededError(
+        `Gemini token budget exhausted for task ${taskId}: ${spent}/${tokenBudget} input tokens. ` +
+        `Skip non-essential calls (Stage 6 cycle, Stage 5 retries) and continue.`
+      );
+    }
+  }
+
+  // Локальная копия cachedContent — может «сгореть» при cache miss.
+  let activeCachedContent = cachedContent;
+
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const result    = await callFn(system, prompt, { temperature, maxTokens, logprobs });
+      const callOpts = { temperature, maxTokens, logprobs };
+      if (adapter === 'gemini' && activeCachedContent) {
+        callOpts.cachedContent = activeCachedContent;
+      }
+
+      const result    = await callFn(system, prompt, callOpts);
       const cacheHit  = adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0;
       const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut, cacheHit);
       const parsed    = normalizeKeys(parseJSON(result.text));
 
+      // Аккумулируем расход для guard'а
+      if (adapter === 'gemini') {
+        _accumulateTokens(taskId, 'gemini', result.tokensIn || 0);
+      }
+
       const cacheNote = cacheHit ? ` | cache_hit: ${result.cacheHitTokens}` : '';
+      const cachedNote = (adapter === 'gemini' && activeCachedContent) ? ' | gemini_cached' : '';
       log(
-        `${callLabel || stageName} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${cacheNote} | $${costUsd.toFixed(6)}`,
+        `${callLabel || stageName} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${cacheNote}${cachedNote} | $${costUsd.toFixed(6)}`,
         'success'
       );
 
@@ -236,6 +319,21 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       return parsed;
 
     } catch (err) {
+      // ── Cache miss / expiry: однократная повторная попытка без кэша ──
+      if (err.isCacheMiss && activeCachedContent) {
+        log(
+          `Gemini cachedContent expired/invalid (${activeCachedContent}). ` +
+          `Повторяем без кэша...`,
+          'warn'
+        );
+        activeCachedContent = null;
+        if (typeof onCacheMiss === 'function') {
+          try { onCacheMiss(); } catch (_) { /* no-op */ }
+        }
+        // Не считаем это попыткой — даём adapter ещё один шанс.
+        continue;
+      }
+
       const isRateLimit  = err.status === 429 || err.status === 503;
       const isNetworkErr = err.code === 'ECONNABORTED' || err.code === 'ECONNRESET'
                         || err.message.includes('timeout') || err.message.includes('Network');
@@ -243,7 +341,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // Детерминированные ошибки — повторные попытки бессмысленны
       const isDeterministic = err.message === 'Input text too long'
                            || err.message.includes('API_KEY is not set')
-                           || err.isDeterministic  // гео-блокировка (все прокси исчерпаны)
+                           || err.isDeterministic  // гео-блокировка (все прокси исчерпаны), budget guard, cache miss и т.д.
                            || err.isGeoBlock        // маркер из gemini.adapter
                            || err.message?.includes('User location is not supported'); // geo-block fallback по тексту
 
@@ -267,4 +365,4 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   }
 }
 
-module.exports = { callLLM };
+module.exports = { callLLM, BudgetExceededError, resetTaskBudget, getTaskBudgetSpent };

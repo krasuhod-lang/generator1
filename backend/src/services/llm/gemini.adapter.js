@@ -5,6 +5,15 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview';
 
+// ────────────────────────────────────────────────────────────────────
+// MAX_GEMINI_INPUT_LENGTH — верхняя граница суммарной длины
+// (systemInstruction + userPrompt) в символах. Ранее было 100 КБ; увеличено
+// до 200 КБ с внедрением AKB: сам AKB (systemInstruction) занимает до ~25 КБ,
+// плюс Stage 5/6 передают currentHTML до ~10-15 КБ в userPrompt. Лимит
+// остаётся защитой от случайной отправки мегабайтного мусора в API.
+// ────────────────────────────────────────────────────────────────────
+const MAX_GEMINI_INPUT_LENGTH = 200000;
+
 /**
  * Базовый URL для Gemini API.
  * Позволяет перенаправить запросы через собственный прокси-сервер (GEMINI_BASE_URL в .env).
@@ -287,18 +296,24 @@ function isGeoBlockError(errMsg) {
 /**
  * Gemini Adapter — с автоматическим переключением прокси при гео-блокировке.
  *
- * @param {string} systemInstruction  — системный промпт
+ * @param {string} systemInstruction  — системный промпт (передаётся в нативное
+ *                                      поле `systemInstruction.parts`, рядом
+ *                                      с обязательным JSON-strict guard)
  * @param {string} userPrompt         — пользовательский промпт
  * @param {object} [options]
  * @param {number} [options.temperature=0.4]
  * @param {number} [options.maxTokens=16384]
  * @param {number} [options.timeoutMs=180000]   — Gemini медленнее, даём 3 мин
+ * @param {string} [options.cachedContent]      — имя кэша (`cachedContents/...`).
+ *                                                Если задан, `systemInstruction`
+ *                                                НЕ отправляется (он уже в кэше).
  *
  * @returns {Promise<{
  *   text:       string,
  *   tokensIn:   number,
  *   tokensOut:  number,
  *   model:      string,
+ *   cacheMiss?: boolean,   // true если cachedContent был запрошен, но кэш истёк
  * }>}
  */
 async function callGemini(systemInstruction, userPrompt, options = {}) {
@@ -306,7 +321,8 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   if (typeof systemInstruction !== 'string' || typeof userPrompt !== 'string') {
     throw new Error('systemInstruction and userPrompt must be strings');
   }
-  if ((systemInstruction + userPrompt).length > 100000) {
+  // Лимит длины повышен: AKB как нативный systemInstruction может быть до ~25 КБ.
+  if ((systemInstruction + userPrompt).length > MAX_GEMINI_INPUT_LENGTH) {
     throw new Error('Input text too long');
   }
 
@@ -314,6 +330,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     temperature = 0.4,
     maxTokens   = 16384,
     timeoutMs   = 180000,
+    cachedContent = null,
   } = options;
 
   // Проверка параметров
@@ -329,22 +346,18 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
 
   const endpoint = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
+  // ── JSON-strict guard (всегда в systemInstruction) ────────────────
+  const JSON_STRICT_GUARD =
+    'You are a strict REST API. Output ONLY valid JSON. Do not wrap in Markdown. ' +
+    'Never use trailing commas. CRITICAL RULES: ' +
+    '1) NEVER use double quotes inside string values (use single quotes \'\' instead). ' +
+    '2) Always enclose JSON keys in double quotes. ' +
+    '3) NEVER use unescaped newlines inside string values.';
+
+  // userPrompt всегда уходит в `contents`. systemInstruction идёт в нативное поле.
   const payload = {
-    systemInstruction: {
-      parts: [{
-        text: "You are a strict REST API. Output ONLY valid JSON. Do not wrap in Markdown. " +
-              "Never use trailing commas. CRITICAL RULES: " +
-              "1) NEVER use double quotes inside string values (use single quotes '' instead). " +
-              "2) Always enclose JSON keys in double quotes. " +
-              "3) NEVER use unescaped newlines inside string values.",
-      }],
-    },
     contents: [{
-      parts: [{
-        text: systemInstruction
-          ? `${systemInstruction}\n\n---\n\n${userPrompt}`
-          : userPrompt,
-      }],
+      parts: [{ text: userPrompt }],
     }],
     generationConfig: {
       temperature,
@@ -358,6 +371,21 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
       { category: 'HARM_CATEGORY_DANGEROUS_CONTENT',  threshold: 'BLOCK_ONLY_HIGH' },
     ],
   };
+
+  if (cachedContent) {
+    // При cache-hit `systemInstruction` НЕ дублируем — он уже в кэше.
+    // Поле верхнего уровня — формат Gemini API.
+    payload.cachedContent = cachedContent;
+  } else {
+    // Нативное поле systemInstruction. Склеиваем JSON-guard и пользовательский
+    // системный промпт (AKB / большую инструкцию). Используем отдельные части,
+    // чтобы порядок был детерминированным и стабильным для implicit cache.
+    const sysParts = [{ text: JSON_STRICT_GUARD }];
+    if (systemInstruction && systemInstruction.trim()) {
+      sysParts.push({ text: systemInstruction });
+    }
+    payload.systemInstruction = { parts: sysParts };
+  }
 
   // ── Прокси обязателен — без прокси запросы запрещены ──
   if (PROXY_URLS.length === 0) {
@@ -479,6 +507,15 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
         err.isGeoBlock = true;
         err.isDeterministic = true;
       }
+      // ── Cache miss / expired (404 + cachedContent в payload) ─────
+      // Маркируем как детерминированную ошибку с флагом isCacheMiss,
+      // чтобы вызывающая сторона могла очистить cacheName и повторить
+      // запрос без кэша.
+      if (cachedContent && (response.status === 404 ||
+          /cachedContent|cached.?content/i.test(detail))) {
+        err.isCacheMiss = true;
+        err.isDeterministic = true;
+      }
       throw err;
     }
 
@@ -507,4 +544,120 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   throw new Error('All Gemini proxies exhausted');
 }
 
-module.exports = { callGemini };
+module.exports = { callGemini, createCachedContent, deleteCachedContent };
+
+// ────────────────────────────────────────────────────────────────────
+// Gemini Context Caching API (`cachedContents`)
+//
+// Документация: https://ai.google.dev/gemini-api/docs/caching
+// Скидка ~75 % на cached input tokens — критично для нашего кейса
+// «один AKB на статью → 6-10 вызовов Stage 3/5/6».
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * createCachedContent — создаёт в Gemini API кэшированный контекст
+ * (нашу AKB как `systemInstruction`).
+ *
+ * @param {object} args
+ * @param {string} args.systemInstruction — текст AKB (пойдёт в кэш).
+ * @param {number} [args.ttlSeconds=900]  — TTL кэша (15 мин по умолчанию;
+ *                                          обычно перекрывает одну статью).
+ * @param {number} [args.timeoutMs=60000]
+ * @returns {Promise<{ name: string, model: string, ttlSeconds: number }>}
+ *          name — `cachedContents/abc123…`, передаётся в callGemini({cachedContent}).
+ */
+async function createCachedContent({ systemInstruction, ttlSeconds = 900, timeoutMs = 60000 }) {
+  if (!systemInstruction || typeof systemInstruction !== 'string') {
+    throw new Error('createCachedContent: systemInstruction must be a non-empty string');
+  }
+  if (PROXY_URLS.length === 0) {
+    throw new Error('createCachedContent: GEMINI_PROXY не задан');
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+
+  // Endpoint для cachedContents: /v1beta/cachedContents
+  // GEMINI_BASE_URL заканчивается на /v1beta/models — отрезаем «/models»
+  const baseRoot = GEMINI_BASE_URL.replace(/\/models$/, '');
+  const endpoint = `${baseRoot}/cachedContents?key=${apiKey}`;
+
+  const JSON_STRICT_GUARD =
+    'You are a strict REST API. Output ONLY valid JSON. Do not wrap in Markdown. ' +
+    'Never use trailing commas. CRITICAL RULES: ' +
+    '1) NEVER use double quotes inside string values (use single quotes \'\' instead). ' +
+    '2) Always enclose JSON keys in double quotes. ' +
+    '3) NEVER use unescaped newlines inside string values.';
+
+  const payload = {
+    model: `models/${GEMINI_MODEL}`,
+    systemInstruction: {
+      parts: [
+        { text: JSON_STRICT_GUARD },
+        { text: systemInstruction },
+      ],
+    },
+    ttl: `${Math.max(60, Math.floor(ttlSeconds))}s`,
+  };
+
+  const proxyAgent = buildProxyAgent(activeProxyIdx) || buildProxyAgent(0);
+  if (!proxyAgent) throw new Error('createCachedContent: proxy agent unavailable');
+
+  const response = await axios.post(endpoint, payload, {
+    timeout:        timeoutMs,
+    headers:        { 'Content-Type': 'application/json' },
+    validateStatus: null,
+    httpsAgent:     proxyAgent,
+    proxy:          false,
+  });
+
+  if (response.status !== 200) {
+    const detail = response.data?.error?.message || JSON.stringify(response.data).slice(0, 300);
+    const err = new Error(`Gemini cachedContents create failed (HTTP ${response.status}): ${detail}`);
+    err.isDeterministic = true;
+    throw err;
+  }
+
+  const name = response.data?.name;
+  if (!name) throw new Error('Gemini cachedContents: response missing `name`');
+
+  return {
+    name,
+    model:      GEMINI_MODEL,
+    ttlSeconds: Math.max(60, Math.floor(ttlSeconds)),
+  };
+}
+
+/**
+ * deleteCachedContent — удаляет кэш в Gemini API.
+ * Безопасно идемпотентен: 404 не считается ошибкой.
+ *
+ * @param {string} cacheName — `cachedContents/abc123…`
+ * @param {number} [timeoutMs=20000]
+ * @returns {Promise<boolean>} — true если удалено / уже не было; false при иной ошибке.
+ */
+async function deleteCachedContent(cacheName, timeoutMs = 20000) {
+  if (!cacheName || typeof cacheName !== 'string') return false;
+  if (PROXY_URLS.length === 0) return false;
+
+  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+  const baseRoot = GEMINI_BASE_URL.replace(/\/models$/, '');
+  const endpoint = `${baseRoot}/${cacheName}?key=${apiKey}`;
+
+  const proxyAgent = buildProxyAgent(activeProxyIdx) || buildProxyAgent(0);
+  if (!proxyAgent) return false;
+
+  try {
+    const response = await axios.delete(endpoint, {
+      timeout:        timeoutMs,
+      validateStatus: null,
+      httpsAgent:     proxyAgent,
+      proxy:          false,
+    });
+    if (response.status === 200 || response.status === 204 || response.status === 404) return true;
+    console.warn(`[gemini] deleteCachedContent: HTTP ${response.status} — ${JSON.stringify(response.data).slice(0, 200)}`);
+    return false;
+  } catch (e) {
+    console.warn(`[gemini] deleteCachedContent error: ${e.message}`);
+    return false;
+  }
+}

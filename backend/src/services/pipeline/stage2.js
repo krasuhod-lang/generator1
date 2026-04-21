@@ -33,7 +33,7 @@ function routeLSIToBlocksFallback(taxonomy, allLSITerms, allNgramTerms) {
 
 /**
  * Stage 2: Buyer Journey (2A) + Content Format (2B) + Taxonomy (2C) + Semantic LSI routing (2.5).
- * Адаптер: deepseek для всех вызовов, Gemini для семантического роутинга.
+ * Адаптер: deepseek для всех вызовов (вся аналитика через DeepSeek).
  *
  * @param {object} task         — строка tasks из БД
  * @param {object} ctx          — { log, progress, taskId }
@@ -57,15 +57,21 @@ async function runStage2(task, ctx, stage1Result) {
   const stage1JsonFull = JSON.stringify(stage1Result);
   const lsiForContext  = rawLSI.substring(0, 800);
 
+  // Strategy digest (Pre-Stage 0). Если контекста нет — пусто.
+  const strategyDigest = (task.__strategyDigest || '').trim();
+  const strategyAppendix = strategyDigest
+    ? `\n\n===== STRATEGY CONTEXT (Pre-Stage 0) =====\n${strategyDigest}\n`
+    : '';
+
   // ── Stage 2A + 2B: Buyer Journey + Content Format (параллельно) ──
-  const buyerJourneyContext = `\n\n===== INPUT DATA =====
+  const buyerJourneyContext = `${strategyAppendix}\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 STAGE 1 RESULT: ${stage1JsonFull}
 LSI TERMS (первые 800 символов): ${lsiForContext}
 
 OUTPUT: Return JSON with buyer_journey_stages (array of stages with queries, content_needs, formats, trust_level). NO markdown.`;
 
-  const contentFormatContext = `\n\n===== INPUT DATA =====
+  const contentFormatContext = `${strategyAppendix}\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 BUSINESS TYPE: commercial service
 STAGE 1 RESULT: ${stage1JsonFull}
@@ -140,6 +146,11 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
     stage2Prompt += `\nUSE entity clusters above to inform H2 topic grouping. Each H2 should cover a coherent entity cluster.`;
   }
 
+  // Инжектируем стратегический дайджест в taxonomy-промпт (additive, без замены жёстких блоков).
+  if (strategyDigest) {
+    stage2Prompt += `\n\n${strategyAppendix.trim()}\nUSE strategy context above to ensure taxonomy covers wedge opportunities, must-have E-E-A-T signals and journey-stage queries.`;
+  }
+
   log(`Stage 2 Taxonomy Builder — итоговый промпт ${stage2Prompt.length} символов (~${Math.round(stage2Prompt.length / 4)} токенов). Запуск...`, 'info');
 
   // Inject structure limits into taxonomy prompt
@@ -204,7 +215,7 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
   const allLSITerms   = rawLSI.split('\n').map(s => s.trim()).filter(Boolean);
   const allNgramTerms = (task.input_ngrams || '').split(',').map(s => s.trim()).filter(Boolean);
 
-  log(`Stage 2.5: Семантический роутинг ${allLSITerms.length} LSI + ${allNgramTerms.length} n-грамм через Gemini...`, 'info');
+  log(`Stage 2.5: Семантический роутинг ${allLSITerms.length} LSI + ${allNgramTerms.length} n-грамм через DeepSeek...`, 'info');
 
   const h2List = extractedTaxonomy.map((b, idx) => ({
     idx,
@@ -247,18 +258,20 @@ OUTPUT JSON SCHEMA:
 
   let semanticRouting = null;
   try {
+    // Stage 2.5 — это аналитический шаг (классификация LSI/n-грамм по блокам),
+    // поэтому используем DeepSeek (политика «аналитика → DeepSeek», Gemini только для генерации).
     semanticRouting = await callLLM(
-      'gemini',
+      'deepseek',
       lsiRoutingSystem,
       lsiRoutingPrompt,
-      { retries: 3, taskId, stageName: 'stage2', callLabel: '2.5 Semantic LSI Routing', log, onTokens }
+      { retries: 3, taskId, stageName: 'stage2', callLabel: '2.5 Semantic LSI Routing', temperature: 0.2, log, onTokens }
     );
   } catch (e) {
     log(`Stage 2.5 routing error: ${e.message} — fallback to JS routing`, 'warn');
   }
 
   if (semanticRouting && semanticRouting.routing && Array.isArray(semanticRouting.routing)) {
-    // Применяем Gemini-роутинг
+    // Применяем DeepSeek-роутинг
     for (const route of semanticRouting.routing) {
       const blockIdx = route.idx;
       if (blockIdx >= 0 && blockIdx < extractedTaxonomy.length) {
@@ -291,7 +304,7 @@ OUTPUT JSON SCHEMA:
     log(`Stage 2.5: семантический роутинг завершён. LSI распределены по ${extractedTaxonomy.length} блокам.`, 'success');
   } else {
     // Fallback: механический JS round-robin
-    log('Stage 2.5: Gemini routing не вернул данные — fallback JS routing', 'warn');
+    log('Stage 2.5: DeepSeek routing не вернул данные — fallback JS routing', 'warn');
     extractedTaxonomy = routeLSIToBlocksFallback(extractedTaxonomy, allLSITerms, allNgramTerms);
   }
 

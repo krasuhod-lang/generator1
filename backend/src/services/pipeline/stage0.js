@@ -92,8 +92,17 @@ async function runStage0(task, ctx) {
   // ── Calls 1 & 2: SERP Reality Check + Niche Landscape (параллельно) ──
   log('Stage 0: SERP Reality Check + Niche Landscape Analyzer (параллельно)...', 'info');
 
-  const serpRealityContext = `
+  // Strategy context digest (Pre-Stage 0). Если не было — пусто.
+  // Не модифицируем «жёсткий» system-промпт, расширяем только user-prompt.
+  const strategyDigest = (task.__strategyDigest || '').trim();
+  const strategyAppendix = strategyDigest
+    ? `\n\n===== STRATEGY CONTEXT (Pre-Stage 0) =====
+Используй карту ниши, портфель возможностей и карту спроса как фундамент:
+не генерируй ландшафт с нуля — валидируй и углубляй приведённые ниже сигналы.
+${strategyDigest}\n`
+    : '';
 
+  const serpRealityContext = `${strategyAppendix}
 ===== COMPETITOR CONTENT DATA (TOP-4 COMPETITORS ONLY) =====
 NICHE: ${task.input_target_service}GEO: ${task.input_region || '[не указано]'}
 LANGUAGE: ${task.input_language || 'ru'}
@@ -124,8 +133,7 @@ OUTPUT: Return ONLY valid JSON with ALL of these keys:
 - faq_bank: [{question, answer}] (min 5)
 NO markdown. NO extra text outside JSON.`;
 
-  const nicheLandscapeContext = `
-
+  const nicheLandscapeContext = `${strategyAppendix}
 ===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${task.input_target_service}
 GEO: ${task.input_region || '[не указано]'}

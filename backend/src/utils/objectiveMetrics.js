@@ -1,6 +1,15 @@
 'use strict';
 
 /**
+ * LSI_COVERAGE_TARGET — единый целевой порог LSI-покрытия по продукту (в %).
+ * Применяется в Stage 4 (триггер рефайна), Stage 6 (выход из цикла инъекций)
+ * и в логах orchestrator. Исторически использовались разные значения (80 и 100),
+ * что приводило к лишним Gemini-вызовам в Stage 6 и несогласованным сообщениям.
+ * Теперь — одна константа.
+ */
+const LSI_COVERAGE_TARGET = 85;
+
+/**
  * stripTags — многопроходная очистка HTML-тегов.
  * Используется только для подсчёта метрик (не для вывода / санитизации пользовательского контента).
  * @param {string} html
@@ -155,4 +164,4 @@ function getStructureLimits(totalChars) {
   /* > 10000 */            return { minSections: 6, maxSections: 8, minH3PerSection: 2, maxH3PerSection: 4 };
 }
 
-module.exports = { checkObjectiveMetrics, getStructureLimits };
+module.exports = { checkObjectiveMetrics, getStructureLimits, LSI_COVERAGE_TARGET };
