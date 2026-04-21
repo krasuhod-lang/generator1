@@ -4,10 +4,11 @@ const { callLLM }              = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }       = require('../../prompts/systemPrompts');
 const { calculateCoverage }    = require('../../utils/calculateCoverage');
 const { computeSemanticCoverage } = require('../../utils/semanticSimilarity');
+const { LSI_COVERAGE_TARGET }  = require('../../utils/objectiveMetrics');
 
 /**
- * Stage 6: Инъекция LSI — цикл до 100% покрытия (максимум 3 итерации).
- * Адаптер: gemini.
+ * Stage 6: Инъекция LSI — цикл до достижения LSI_COVERAGE_TARGET (≥ 85%),
+ * максимум 3 итерации. Адаптер: gemini.
  *
  * Улучшение: Гибридный поиск — используем семантическое сходство
  * для определения лучшего параграфа для инъекции каждого термина.
@@ -48,8 +49,11 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
 
     const coverage = calculateCoverage(currentHTML, lsiMust);
 
-    if (coverage.percent >= 100 || coverage.missing.length === 0) {
-      log(`Блок ${blockIndex + 1}: 100% LSI покрытие достигнуто (цикл ${loopCount})`, 'success');
+    if (coverage.percent >= LSI_COVERAGE_TARGET || coverage.missing.length === 0) {
+      log(
+        `Блок ${blockIndex + 1}: LSI ${coverage.percent}% ≥ ${LSI_COVERAGE_TARGET}% — целевой порог достигнут (цикл ${loopCount})`,
+        'success'
+      );
       return { html: currentHTML, lsiCoverage: coverage.percent, finalCoverage: coverage };
     }
 
@@ -119,7 +123,11 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
 
   // Финальное измерение покрытия
   const finalCoverage = calculateCoverage(currentHTML, lsiMust);
-  log(`Блок ${blockIndex + 1} — финальное LSI покрытие: ${finalCoverage.percent}%`, finalCoverage.percent >= 100 ? 'success' : 'warn');
+  log(
+    `Блок ${blockIndex + 1} — финальное LSI покрытие: ${finalCoverage.percent}% ` +
+    `(цель ≥ ${LSI_COVERAGE_TARGET}%)`,
+    finalCoverage.percent >= LSI_COVERAGE_TARGET ? 'success' : 'warn'
+  );
 
   return {
     html:         currentHTML,

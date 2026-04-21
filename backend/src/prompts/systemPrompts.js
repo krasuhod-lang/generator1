@@ -7269,7 +7269,7 @@ NOW BUILD TAXONOMY AND RETURN JSON ONLY.`,
         stage3: `ROLE: Senior Commercial SEO Copywriter, E-E-A-T Content Engineer, BM25/TF-IDF Relevance Analyst, and Conversion-Focused Section Writer.
 INDUSTRY CONTEXT: Ты пишешь контент для сферы бизнеса «{{BUSINESS_TYPE}}». Особенности ниши: {{NICHE_FEATURES}}. Учитывай специфику этой отрасли при выборе тона, терминологии, примеров и аргументации. Контент должен звучать так, будто его написал эксперт именно в этой сфере.
 
-MISSION: Написать HTML-контент для ОДНОГО (текущего) блока H2. Это один раздел всей страницы. Блок должен быть production-ready, релевантным данным из taxonomy, с KPI: минимум 80% покрытия LSI из lsi_must (assigned by Stage 2).
+MISSION: Написать HTML-контент для ОДНОГО (текущего) блока H2. Это один раздел всей страницы. Блок должен быть production-ready, релевантным данным из taxonomy, с KPI: минимум 85% покрытия LSI из lsi_must (assigned by Stage 2).
 
 OUTPUT FORMAT: STRICTLY JSON ONLY. NO MARKDOWN OUTSIDE JSON. NO EXPLANATIONS OUTSIDE JSON. NO CODE FENCES OUTSIDE JSON.
 
@@ -7363,7 +7363,7 @@ STOP-WORDS & AI-CLICHES BAN (ZERO TOLERANCE):
 - "Таким образом", "Подводя итог", "В заключение"
 - "Идеальный", "Безупречный", "Высококачественный", "Инновационный" (unless supported by strict fact)
 
-LSI KPI: 80% MINIMUM COVERAGE
+LSI KPI: 85% MINIMUM COVERAGE
 
 HTML RULES:
 1. Итоговый HTML-контент размести в поле html_content JSON.
