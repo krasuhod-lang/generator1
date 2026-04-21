@@ -29,6 +29,12 @@
 
 const { callLLM } = require('../llm/callLLM');
 
+// ── Лимиты длины строк для подстановки в промпты ────────────────────
+// Используются и в promptBuilder, и при формировании входного контекста
+// для самого анализатора, поэтому вынесены в модульные константы.
+const MAX_KNOWN_FIELD_CHARS = 2500;  // input_target_audience / niche_features
+const MAX_BRAND_FACTS_CHARS = 2000;  // input_brand_facts
+
 const AUDIENCE_NICHE_PROMPT = `Ты — стратег контент-маркетинга, эксперт по customer research и нишевой аналитике. Твоя задача — провести ГЛУБОКИЙ анализ целевой аудитории и ниши на основе предоставленных данных. От качества этого анализа зависит ВСЯ дальнейшая генерация контента.
 
 ═══════════════════════════════════════════
@@ -222,7 +228,7 @@ async function analyzeAudienceAndNiche(task, ctx, extra = {}) {
   if (targetPageAnalysis?.target_audience) {
     knownAudienceParts.push(`(из анализа страницы): ${targetPageAnalysis.target_audience}`);
   }
-  const knownAudience = knownAudienceParts.join('\n').slice(0, 2500) || 'Нет данных';
+  const knownAudience = knownAudienceParts.join('\n').slice(0, MAX_KNOWN_FIELD_CHARS) || 'Нет данных';
 
   const knownNicheParts = [];
   if (task.input_niche_features?.trim()) {
@@ -235,9 +241,9 @@ async function analyzeAudienceAndNiche(task, ctx, extra = {}) {
         : targetPageAnalysis.niche_features
     }`);
   }
-  const knownNiche = knownNicheParts.join('\n').slice(0, 2500) || 'Нет данных';
+  const knownNiche = knownNicheParts.join('\n').slice(0, MAX_KNOWN_FIELD_CHARS) || 'Нет данных';
 
-  const brandFactsCompact = (task.input_brand_facts || 'Нет данных').slice(0, 2000);
+  const brandFactsCompact = (task.input_brand_facts || 'Нет данных').slice(0, MAX_BRAND_FACTS_CHARS);
 
   const prompt = AUDIENCE_NICHE_PROMPT
     .replace('{{TARGET_SERVICE}}', task.input_target_service || 'Нет данных')
