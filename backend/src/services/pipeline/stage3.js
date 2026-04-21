@@ -6,24 +6,32 @@ const db                    = require('../../config/db');
 const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objectiveMetrics');
 const { checkAntiWater }    = require('./stage5');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
+const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
- * Делегирует все проверки в checkObjectiveMetrics() + checkAntiWater().
+ * Делегирует все проверки в checkObjectiveMetrics() + checkAntiWater() + runNaturalnessChecks().
  * Возвращает массив проблем (пустой = всё ок).
  *
  * @param {string}  html              — HTML-контент блока
  * @param {boolean} expertOpinionUsed — было ли уже использовано экспертное мнение
  * @param {string}  brandFacts        — факты о бренде
+ * @param {object}  [structureLimits] — лимиты H3 на блок
+ * @param {object}  [extra]           — { brandName, mainQuery } для углублённых проверок
  * @returns {string[]} — массив обнаруженных проблем
  */
-function structuralPreCheck(html, expertOpinionUsed, brandFacts, structureLimits) {
-  const preCheck = checkObjectiveMetrics(html, { expertOpinionUsed, brandFacts, structureLimits });
+function structuralPreCheck(html, expertOpinionUsed, brandFacts, structureLimits, extra = {}) {
+  const { brandName = '', mainQuery = '' } = extra;
+  const preCheck = checkObjectiveMetrics(html, {
+    expertOpinionUsed, brandFacts, brandName, structureLimits,
+  });
   const waterPhrases = checkAntiWater(html);
+  const naturalness  = runNaturalnessChecks(html, { mainQuery });
 
   return [
     ...preCheck.issues,
     ...(waterPhrases.length ? [`Стоп-фразы: ${waterPhrases.join(', ')}`] : []),
+    ...naturalness.issues,
   ];
 }
 
@@ -193,6 +201,11 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       .replace('{{MAIN_QUERY}}',         () => targetService)
       .replace('{{REGION}}',             () => region)
       .replace('{{AUDIENCE}}',           () => task.input_target_audience || 'Широкая аудитория')
+      .replace(/\{\{BRAND_NAME\}\}/g,    () => (task.input_brand_name || '').trim() || 'Нет данных')
+      .replace('{{AUDIENCE_PERSONAS}}',  () => (task.__audiencePersonasText  || 'Нет данных').slice(0, 4000))
+      .replace('{{NICHE_DEEP_DIVE}}',    () => (task.__nicheDeepDiveText     || 'Нет данных').slice(0, 4000))
+      .replace('{{CONTENT_VOICE}}',      () => (task.__contentVoiceText      || 'Нет данных').slice(0, 1500))
+      .replace('{{NICHE_TERMINOLOGY}}',  () => (task.__nicheTerminologyText  || 'Нет данных').slice(0, 1000))
       .replace('{{CURRENT_SECTION_JSON}}',() => JSON.stringify(block))
       .replace('{{STAGE1_JSON}}',        () => s3stage1Json)
       .replace('{{STAGE2_JSON}}',        () => s3stage2Json)
@@ -231,7 +244,10 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
 
     // Structural pre-check: fast retry if basic E-E-A-T structure is missing
     if (stage3Result?.html_content) {
-      const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, structureLimits);
+      const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, structureLimits, {
+        brandName: (task.input_brand_name || '').trim(),
+        mainQuery: targetService,
+      });
 
       if (issues.length > 0) {
         log(`Stage 3 блок ${i + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
@@ -388,6 +404,11 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     .replace('{{MAIN_QUERY}}',         () => targetService)
     .replace('{{REGION}}',             () => region)
     .replace('{{AUDIENCE}}',           () => task.input_target_audience || 'Широкая аудитория')
+    .replace(/\{\{BRAND_NAME\}\}/g,    () => (task.input_brand_name || '').trim() || 'Нет данных')
+    .replace('{{AUDIENCE_PERSONAS}}',  () => (task.__audiencePersonasText  || 'Нет данных').slice(0, 4000))
+    .replace('{{NICHE_DEEP_DIVE}}',    () => (task.__nicheDeepDiveText     || 'Нет данных').slice(0, 4000))
+    .replace('{{CONTENT_VOICE}}',      () => (task.__contentVoiceText      || 'Нет данных').slice(0, 1500))
+    .replace('{{NICHE_TERMINOLOGY}}',  () => (task.__nicheTerminologyText  || 'Нет данных').slice(0, 1000))
     .replace('{{CURRENT_SECTION_JSON}}',() => JSON.stringify(block))
     .replace('{{STAGE1_JSON}}',        () => s3stage1Json)
     .replace('{{STAGE2_JSON}}',        () => s3stage2Json)
@@ -431,7 +452,10 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
   // Structural pre-check: fast retry if basic E-E-A-T structure is missing
   if (stage3Result?.html_content) {
-    const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, effectiveLimits);
+    const issues = structuralPreCheck(stage3Result.html_content, expertOpinionUsed, brandFacts, effectiveLimits, {
+      brandName: (task.input_brand_name || '').trim(),
+      mainQuery: targetService,
+    });
 
     if (issues.length > 0) {
       log(`Stage 3 блок ${blockIndex + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');

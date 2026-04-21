@@ -67,6 +67,7 @@ const { calculateCoverage } = require('../../utils/calculateCoverage');
 const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objectiveMetrics');
 const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
+const { analyzeAudienceAndNiche, serializeAnalysisForPrompt } = require('../parser/audienceNicheAnalyzer');
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,6 +227,36 @@ async function runPipeline(task, ctx) {
     } catch (e) {
       log(`Target Page Analysis ошибка: ${e.message} — продолжаем без анализа`, 'warn');
     }
+  }
+
+  // ── Audience & Niche Deep Analysis (всегда, независимо от URL) ────
+  // Углубляет TA и нишу: персоны, JTBD, боли, возражения, тон голоса,
+  // терминология ниши. Прокидывается в Stage 2/3 как
+  // {{AUDIENCE_PERSONAS}}, {{NICHE_DEEP_DIVE}}, {{CONTENT_VOICE}}, {{NICHE_TERMINOLOGY}}.
+  let audienceNicheAnalysis = null;
+  if (resumeFrom?.audienceNicheAnalysis !== undefined) {
+    audienceNicheAnalysis = resumeFrom.audienceNicheAnalysis;
+    log('Audience & Niche Analysis: восстановлен из checkpoint', 'info');
+  } else {
+    try {
+      progress(2, 'audience_niche_analysis');
+      audienceNicheAnalysis = await analyzeAudienceAndNiche(task, stageCtx, { targetPageAnalysis });
+    } catch (e) {
+      log(`Audience & Niche Analysis ошибка: ${e.message} — продолжаем с дефолтными данными`, 'warn');
+    }
+  }
+
+  // Сериализуем результаты в текстовые блоки и кладём на task для всех stage-функций.
+  const {
+    personasText, nicheDeepDiveText, contentVoiceText, nicheTerminologyText,
+  } = serializeAnalysisForPrompt(audienceNicheAnalysis);
+  task.__audiencePersonasText  = personasText;
+  task.__nicheDeepDiveText     = nicheDeepDiveText;
+  task.__contentVoiceText      = contentVoiceText;
+  task.__nicheTerminologyText  = nicheTerminologyText;
+
+  if (audienceNicheAnalysis) {
+    publish(taskId, { type: 'audience_niche_analyzed', analysis: audienceNicheAnalysis });
   }
 
   // ── Stage 0 ──────────────────────────────────────────────────────
@@ -491,6 +522,7 @@ async function runPipeline(task, ctx) {
     stage2Raw,
     taxonomy,
     enrichedStage1,
+    audienceNicheAnalysis,
     expertOpinionUsed,
     previousContext,
     generatedH2s: [...generatedH2s],

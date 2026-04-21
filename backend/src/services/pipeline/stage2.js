@@ -123,6 +123,9 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
     .replace('{{BUSINESS_TYPE}}',   () => task.input_business_type || 'услуги')
     .replace('{{NICHE_FEATURES}}',  () => task.input_niche_features || 'Нет данных')
     .replace('{{TARGET_SERVICE}}', () => targetService)
+    .replace(/\{\{BRAND_NAME\}\}/g, () => (task.input_brand_name || '').trim() || 'Нет данных')
+    .replace('{{AUDIENCE_PERSONAS}}', () => (task.__audiencePersonasText || 'Нет данных').slice(0, 4000))
+    .replace('{{NICHE_DEEP_DIVE}}',   () => (task.__nicheDeepDiveText   || 'Нет данных').slice(0, 4000))
     .replace('{{STAGE1_JSON}}',    () => JSON.stringify(enrichedStage1));
 
   // Добавляем Knowledge Graph контекст к промпту (не нарушая существующую структуру)

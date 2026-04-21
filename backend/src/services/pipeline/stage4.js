@@ -81,6 +81,7 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
     .replace('{{HTML_CONTENT}}',      () => htmlContent)
     .replace('{{TARGET_SERVICE}}',    () => targetService)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(lsiMust))
+    .replace(/\{\{BRAND_NAME\}\}/g,   () => (task.input_brand_name || '').trim() || 'Нет данных')
     .replace('{{BRAND_FACTS}}',       () => brandFacts)
     .replace('{{ORIGINAL_NGRAMS}}',   () => nGrams)
     .replace('{{TARGET_CHAR_COUNT}}', () => String(minChars));
@@ -118,6 +119,7 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
     .replace('{{HTML_CONTENT}}',      () => htmlContent)
     .replace('{{TARGET_SERVICE}}',    () => task.input_target_service)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(lsiMust))
+    .replace(/\{\{BRAND_NAME\}\}/g,   () => (task.input_brand_name || '').trim() || 'Нет данных')
     .replace('{{BRAND_FACTS}}',       () => task.input_brand_facts || 'Нет данных')
     .replace('{{ORIGINAL_NGRAMS}}',   () => task.input_ngrams      || '[]')
     .replace('{{TARGET_CHAR_COUNT}}', () => String(task.input_min_chars || '1500'));
