@@ -68,6 +68,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     .replace('{{FINAL_HTML}}',        () => fullHTML.substring(0, 30000))
     .replace('{{TARGET_SERVICE}}',    () => targetService)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(allLSI))
+    .replace(/\{\{BRAND_NAME\}\}/g,   () => (task.input_brand_name || '').trim() || 'Нет данных')
     .replace('{{BRAND_FACTS}}',       () => brandFacts)
     .replace('{{TFIDF_WEIGHTS}}',     () => tfIdfWeightsStr);
 

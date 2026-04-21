@@ -27,6 +27,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
 
   const targetService = task.input_target_service;
   const brandFacts    = task.input_brand_facts || 'Нет данных';
+  const brandName     = (task.input_brand_name || '').trim() || 'Нет данных';
 
   let currentHTML = htmlContent;
   let loopCount   = 0;
@@ -75,6 +76,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       .replace('{{CURRENT_HTML}}',  () => currentHTML)
       .replace('{{MISSING_LSI}}',   () => JSON.stringify(injectList))
       .replace('{{TARGET_SERVICE}}',() => targetService)
+      .replace(/\{\{BRAND_NAME\}\}/g, () => brandName)
       .replace('{{BRAND_FACTS}}',   () => brandFacts);
 
     log(

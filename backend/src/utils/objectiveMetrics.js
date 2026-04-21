@@ -30,7 +30,7 @@ function stripTags(html) {
  * @returns {{ passed: boolean, issues: string[], metrics: object }}
  */
 function checkObjectiveMetrics(html, opts = {}) {
-  const { expertOpinionUsed = true, brandFacts = '', structureLimits, charLimits } = opts;
+  const { expertOpinionUsed = true, brandFacts = '', brandName = '', structureLimits, charLimits } = opts;
   const issues = [];
   const text = stripTags(html).replace(/\s+/g, ' ').trim();
 
@@ -112,8 +112,19 @@ function checkObjectiveMetrics(html, opts = {}) {
     issues.push('Лишний <blockquote> — экспертное мнение уже использовано в другом блоке (строго 1 раз на статью)');
   }
 
-  // Проверка упоминания бренда из BRAND_FACTS
-  if (brandFacts && typeof brandFacts === 'string' && brandFacts !== 'Нет данных') {
+  // Проверка упоминания бренда:
+  // 1) если передано явное brandName — ищем именно его (надёжный сигнал);
+  // 2) иначе — fallback на первое длинное слово из brand_facts (старое поведение).
+  const trimmedBrand = (brandName || '').trim();
+  if (trimmedBrand && trimmedBrand !== 'Нет данных') {
+    // Берём первое существенное слово бренда (без кавычек/скобок) для подстрочного матча,
+    // чтобы поймать склонённые формы: «Альпы» → «Альпами», «Вкусно» → «Вкусной».
+    const brandStem = trimmedBrand.replace(/["«»()]/g, '').split(/\s+/)
+      .find(w => w.length > 2) || trimmedBrand;
+    if (!text.toLowerCase().includes(brandStem.toLowerCase())) {
+      issues.push(`Бренд "${trimmedBrand}" не упомянут — необходимо для Authoritativeness E-E-A-T`);
+    }
+  } else if (brandFacts && typeof brandFacts === 'string' && brandFacts !== 'Нет данных') {
     const brandToken = brandFacts.split(/[\s,.:;]+/).find(w => w.length > 3);
     if (brandToken && !text.toLowerCase().includes(brandToken.toLowerCase())) {
       issues.push(`Бренд "${brandToken}" не упомянут — необходимо для Authoritativeness E-E-A-T`);
