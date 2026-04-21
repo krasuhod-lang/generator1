@@ -5,6 +5,7 @@ const { SYSTEM_PROMPTS }       = require('../../prompts/systemPrompts');
 const { calculateCoverage }    = require('../../utils/calculateCoverage');
 const { computeSemanticCoverage } = require('../../utils/semanticSimilarity');
 const { LSI_COVERAGE_TARGET }  = require('../../utils/objectiveMetrics');
+const { geminiCallOpts, akbSystem } = require('../../utils/articleKnowledgeBase');
 
 /**
  * Stage 6: Инъекция LSI — цикл до достижения LSI_COVERAGE_TARGET (≥ 85%),
@@ -81,7 +82,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       .replace('{{MISSING_LSI}}',   () => JSON.stringify(injectList))
       .replace('{{TARGET_SERVICE}}',() => targetService)
       .replace(/\{\{BRAND_NAME\}\}/g, () => brandName)
-      .replace('{{BRAND_FACTS}}',   () => brandFacts);
+      .replace('{{BRAND_FACTS}}',   () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts);
 
     log(
       `Stage 6 блок ${blockIndex + 1}: инъекция LSI цикл ${loopCount} — ` +
@@ -92,9 +93,9 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
 
     const stage6Result = await callLLM(
       'gemini',
-      '',
+      akbSystem(task),
       stage6Prompt,
-      { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens }
+      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens })
     ).catch(e => {
       log(`Stage 6 блок ${blockIndex + 1} цикл ${loopCount} ОШИБКА: ${e.message}`, 'warn');
       return null;

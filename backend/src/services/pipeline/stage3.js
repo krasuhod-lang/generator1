@@ -7,6 +7,7 @@ const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objec
 const { checkAntiWater }    = require('./stage5');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
+const { geminiCallOpts, akbSystem } = require('../../utils/articleKnowledgeBase');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
@@ -61,7 +62,7 @@ function extractHtmlContent(result) {
  * Просим LLM вернуть ТОЛЬКО html_content, без остальных полей.
  * Возвращает строку HTML или null.
  */
-async function recoverHtmlContent(originalPrompt, missingKeys, blockH2, ctx) {
+async function recoverHtmlContent(originalPrompt, missingKeys, blockH2, ctx, task) {
   const { log, taskId, onTokens } = ctx;
   const recoveryPrompt = `${originalPrompt}
 
@@ -78,9 +79,9 @@ DO NOT include eeat_self_check, audit_report, or ANY other fields. ONLY html_con
 
   const recovered = await callLLM(
     'gemini',
-    '',
+    akbSystem(task),
     recoveryPrompt,
-    { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192 }
+    geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192 })
   ).catch(e => {
     log(`Stage 3 recovery: LLM call ОШИБКА — ${e.message}`, 'warn');
     return null;
@@ -286,7 +287,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
         `Stage 3 блок ${i + 1}: html_content отсутствует (ключи: [${missingKeys.join(', ')}]). Пробуем recovery-retry...`,
         'warn'
       );
-      const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx);
+      const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx, task);
       if (recoveredHtml) {
         log(`Stage 3 блок ${i + 1}: recovery успешен (${recoveredHtml.length} символов)`, 'success');
         stage3Result = { html_content: recoveredHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
@@ -396,6 +397,15 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     : nGrams;
 
   // Подставляем все плейсхолдеры Stage 3
+  // ── AKB-aware подстановка ─────────────────────────────────────────
+  // Когда AKB доступен (передаётся как Gemini systemInstruction), большие
+  // дублирующие контексты (audience, niche, voice, terminology, brand_facts,
+  // competitor data) заменяются короткими указателями «См. AKB → §N». Это
+  // даёт −60-70 % размера user-prompt'а на каждый блок и резко повышает
+  // implicit cache hit rate Gemini. Если AKB не сформирован — поведение
+  // прежнее (полный текст в плейсхолдере).
+  const akbReady = !!task.__articleKnowledgeBase;
+  const akbRef = (section) => `[См. ARTICLE KNOWLEDGE BASE → ${section}]`;
   let s3prompt = SYSTEM_PROMPTS.stage3
     .replace('{{BUSINESS_TYPE}}',      () => task.input_business_type || 'услуги')
     .replace('{{NICHE_FEATURES}}',     () => task.input_niche_features || 'Нет данных')
@@ -405,19 +415,19 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     .replace('{{REGION}}',             () => region)
     .replace('{{AUDIENCE}}',           () => task.input_target_audience || 'Широкая аудитория')
     .replace(/\{\{BRAND_NAME\}\}/g,    () => (task.input_brand_name || '').trim() || 'Нет данных')
-    .replace('{{AUDIENCE_PERSONAS}}',  () => (task.__audiencePersonasText  || 'Нет данных').slice(0, 4000))
-    .replace('{{NICHE_DEEP_DIVE}}',    () => (task.__nicheDeepDiveText     || 'Нет данных').slice(0, 4000))
-    .replace('{{CONTENT_VOICE}}',      () => (task.__contentVoiceText      || 'Нет данных').slice(0, 1500))
-    .replace('{{NICHE_TERMINOLOGY}}',  () => (task.__nicheTerminologyText  || 'Нет данных').slice(0, 1000))
+    .replace('{{AUDIENCE_PERSONAS}}',  () => akbReady ? akbRef('§2 Audience Personas')      : (task.__audiencePersonasText  || 'Нет данных').slice(0, 4000))
+    .replace('{{NICHE_DEEP_DIVE}}',    () => akbReady ? akbRef('§4 Niche Deep Dive')         : (task.__nicheDeepDiveText     || 'Нет данных').slice(0, 4000))
+    .replace('{{CONTENT_VOICE}}',      () => akbReady ? akbRef('§3 Voice & Terminology')     : (task.__contentVoiceText      || 'Нет данных').slice(0, 1500))
+    .replace('{{NICHE_TERMINOLOGY}}',  () => akbReady ? akbRef('§3 Voice & Terminology')     : (task.__nicheTerminologyText  || 'Нет данных').slice(0, 1000))
     .replace('{{CURRENT_SECTION_JSON}}',() => JSON.stringify(block))
     .replace('{{STAGE1_JSON}}',        () => s3stage1Json)
     .replace('{{STAGE2_JSON}}',        () => s3stage2Json)
-    .replace('{{BRAND_FACTS}}',        () => brandFacts)
-    .replace('{{KNOWLEDGE_BASE}}',     () => stage0Signals)
-    .replace('{{COMPETITOR_SIGNALS}}', () => competitorsData)
-    .replace('{{SERVICE_NOTES}}',      () => serviceNotes || 'Нет')
-    .replace('{{OFFER_DETAILS}}',      () => offerDetails || 'Нет')
-    .replace('{{PROOF_ASSETS}}',       () => proofAssets || 'Нет')
+    .replace('{{BRAND_FACTS}}',        () => akbReady ? akbRef('§1 Brand & Offer')           : brandFacts)
+    .replace('{{KNOWLEDGE_BASE}}',     () => akbReady ? akbRef('§6 SERP Reality & Gaps')     : stage0Signals)
+    .replace('{{COMPETITOR_SIGNALS}}', () => akbReady ? akbRef('§6 SERP Reality & Gaps')     : competitorsData)
+    .replace('{{SERVICE_NOTES}}',      () => akbReady ? akbRef('§1 Brand & Offer (Детали услуги)') : (serviceNotes || 'Нет'))
+    .replace('{{OFFER_DETAILS}}',      () => akbReady ? akbRef('§1 Brand & Offer')           : (offerDetails || 'Нет'))
+    .replace('{{PROOF_ASSETS}}',       () => akbReady ? akbRef('§1 Brand & Offer (proof)')  : (proofAssets || 'Нет'))
     .replace('{{FAQ_BANK}}',           () => stage0Result ? JSON.stringify(stage0Result.faq_bank || []) : 'Нет')
     .replace('{{TERM_WEIGHTS_JSON}}',  () => tfIdfData)
     .replace('{{SECTION_NGRAMS_JSON}}',() => blockNgrams)
@@ -425,11 +435,11 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     .replace('{{TARGET_CHAR_COUNT}}',  () => String(blockTargetChars))
     .replace('{{MIN_CHAR_COUNT}}',     () => String(blockMinChars))
     .replace('{{MAX_CHAR_COUNT}}',     () => String(blockMaxChars))
-    .replace('{{STYLE_PROFILE}}',      () => 'Коммерческий, экспертный, без воды')
+    .replace('{{STYLE_PROFILE}}',      () => akbReady ? akbRef('§9 Style Card') : 'Коммерческий, экспертный, без воды')
     .replace('{{EXPERT_OPINION_USED}}',() => expertOpinionUsed.toString())
     .replace('{{AUTHOR_NAME}}',        () => authorName)
     .replace('{{PREVIOUS_HTML}}',      () => previousContext || 'Это первый блок страницы.')
-    .replace('{{COMPETITOR_FACTS}}',   () => competitorFactsStr)
+    .replace('{{COMPETITOR_FACTS}}',   () => akbReady ? akbRef('§6 SERP Reality & Gaps')     : competitorFactsStr)
     .replace('{{MIN_H3_COUNT}}', () => String(effectiveLimits.minH3PerSection))
     .replace('{{MAX_H3_COUNT}}', () => String(effectiveLimits.maxH3PerSection));
 
@@ -442,9 +452,9 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
   let stage3Result = await callLLM(
     'gemini',
-    '',
+    akbSystem(task),
     s3prompt,
-    { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}"`, temperature: 0.45, log, onTokens }
+    geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}"`, temperature: 0.45, log, onTokens })
   ).catch(e => {
     log(`Stage 3 блок ${blockIndex + 1} ОШИБКА: ${e.message}`, 'error');
     return null;
@@ -462,9 +472,9 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
       const retryResult = await callLLM(
         'gemini',
-        '',
+        akbSystem(task),
         s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
-        { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
+        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens })
       ).catch(() => null);
 
       if (retryResult?.html_content) {
@@ -493,7 +503,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
       `Stage 3 блок ${blockIndex + 1}: html_content отсутствует (ключи: [${missingKeys.join(', ')}]). Пробуем recovery-retry...`,
       'warn'
     );
-    const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx);
+    const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx, task);
     if (recoveredHtml) {
       log(`Stage 3 блок ${blockIndex + 1}: recovery успешен (${recoveredHtml.length} символов)`, 'success');
       stage3Result = { html_content: recoveredHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };

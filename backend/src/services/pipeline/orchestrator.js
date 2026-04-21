@@ -71,6 +71,9 @@ const { analyzeAudienceAndNiche, serializeAnalysisForPrompt } = require('../pars
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
 const { runPreStage0, buildStrategyDigest } = require('./preStage0');
 const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
+const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
+const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
+const { resetTaskBudget } = require('../llm/callLLM');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -343,6 +346,65 @@ async function runPipeline(task, ctx) {
 
   // ── Используем enrichedStage1 (stage1 + buyer journey) для Stage 3
   stage1Result = enrichedStage1 || stage1Result;
+
+  // ── ARTICLE_KNOWLEDGE_BASE (AKB) ─────────────────────────────────
+  // Один детерминированный документ, который собирает всё «сырое знание»
+  // (Pre-Stage 0 + Stage 0 + Stage 1 + target page + audience-niche).
+  // Уйдёт в Gemini как нативный systemInstruction (опционально через
+  // cachedContents API) для Stage 3 / 5 / 6.
+  // См.: backend/src/utils/articleKnowledgeBase.js
+  try {
+    task.__articleKnowledgeBase = buildArticleKnowledgeBase({
+      task,
+      targetPageAnalysis,
+      strategyContext,
+      stage0Result,
+      stage1Result,
+      knowledgeGraph: stage1Result?.knowledge_graph || null,
+    });
+    const akbBytes = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
+    log(
+      `ARTICLE_KNOWLEDGE_BASE собран: ${akbBytes} байт (~${Math.round(akbBytes / 4)} токенов). ` +
+      `Будет передаваться как Gemini systemInstruction для Stage 3/5/6.`,
+      'info'
+    );
+  } catch (akbErr) {
+    log(`ARTICLE_KNOWLEDGE_BASE: ошибка сборки — ${akbErr.message}. Продолжаем без AKB.`, 'warn');
+    task.__articleKnowledgeBase = '';
+  }
+
+  // ── Опционально: Gemini Context Caching API ─────────────────────
+  // Включается флагом GEMINI_CONTEXT_CACHE_ENABLED=true. Даёт ~75 % скидку
+  // на cached input tokens, но требует, чтобы AKB был ≥ ~4 КБ.
+  // На cache miss — graceful fallback в callLLM (см. opts.cachedContent).
+  task.__geminiCacheName = null;
+  if (
+    process.env.GEMINI_CONTEXT_CACHE_ENABLED === 'true' &&
+    task.__articleKnowledgeBase &&
+    Buffer.byteLength(task.__articleKnowledgeBase, 'utf8') >= 4096
+  ) {
+    try {
+      const ttl = parseInt(process.env.GEMINI_CONTEXT_CACHE_TTL_SEC, 10) || 900;
+      const cache = await createCachedContent({
+        systemInstruction: task.__articleKnowledgeBase,
+        ttlSeconds:        ttl,
+      });
+      task.__geminiCacheName = cache.name;
+      log(`Gemini cachedContent создан: ${cache.name} (TTL ${cache.ttlSeconds}s).`, 'success');
+    } catch (cacheErr) {
+      log(`Gemini cachedContent не создан — ${cacheErr.message}. Идём без кэша.`, 'warn');
+      task.__geminiCacheName = null;
+    }
+  }
+
+  // ── Per-task token budget (Gemini input tokens) ──────────────────
+  // Защита от runaway-стоимости. Если пользователь не задал лимит — Infinity.
+  const budgetEnv = parseInt(process.env.GEMINI_TASK_TOKEN_BUDGET, 10);
+  task.__tokenBudget = (Number.isFinite(budgetEnv) && budgetEnv > 0) ? budgetEnv : Infinity;
+  resetTaskBudget(taskId);
+  if (Number.isFinite(task.__tokenBudget)) {
+    log(`Gemini token budget на задачу: ${task.__tokenBudget} input-токенов.`, 'info');
+  }
 
   // ── Stage 3–6: Pipeline Interleaving ──────────────────────────────
   // Вместо: Stage 3 (все блоки) → Stage 4-6 (все блоки последовательно)
@@ -762,6 +824,18 @@ async function runPipeline(task, ctx) {
     `Время: ${Math.floor(generationTimeSec / 60)}м ${generationTimeSec % 60}с`,
     'success'
   );
+
+  // ── Cleanup: удаляем Gemini cachedContent (если был создан) ─────
+  // Не блокируем return: на ошибку только лог. На error-путях кэш
+  // протухает по TTL (по умолчанию 15 мин).
+  if (task.__geminiCacheName) {
+    deleteCachedContent(task.__geminiCacheName)
+      .then(ok => {
+        if (ok) log(`Gemini cachedContent удалён: ${task.__geminiCacheName}`, 'info');
+        else    log(`Gemini cachedContent НЕ удалён (истечёт по TTL): ${task.__geminiCacheName}`, 'warn');
+      })
+      .catch(() => {});
+  }
 
   return s7Result;
 }

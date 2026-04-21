@@ -6,6 +6,7 @@ const { reAuditBlock }      = require('./stage4');
 const { factCheck, computeConfidence } = require('../../utils/factCheck');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
+const { geminiCallOpts, akbSystem } = require('../../utils/articleKnowledgeBase');
 
 /**
  * STOP_PHRASES — фразы-маркеры "воды".
@@ -179,20 +180,21 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= 8. Добавь экспертное мнение (blockquote), конкретные данные, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
     }
 
+    const akbReady = !!task.__articleKnowledgeBase;
     const s5Prompt = SYSTEM_PROMPTS.stage5
       .replace('{{TARGET_SERVICE}}',   () => targetService)
       .replace('{{CURRENT_H2}}',       () => h2)
       .replace(/\{\{BRAND_NAME\}\}/g,  () => brandName)
-      .replace('{{BRAND_FACTS}}',      () => brandFacts)
+      .replace('{{BRAND_FACTS}}',      () => akbReady ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
       .replace('{{ORIGINAL_HTML}}',    () => currentHTML)
       .replace('{{AUDIT_REPORT}}',     () => JSON.stringify(currentAudit))
       .replace('{{SPECIAL_INSTRUCTION}}', () => specialInstruction);
 
     const s5Result = await callLLM(
       'gemini',
-      '',
+      akbSystem(task),
       s5Prompt,
-      { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens }
+      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens })
     ).catch(e => {
       log(`Stage 5 блок ${blockIndex + 1} итерация ${s5Loop} ОШИБКА: ${e.message}`, 'warn');
       return null;
@@ -275,16 +277,16 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         .replace('{{TARGET_SERVICE}}',      () => targetService)
         .replace('{{CURRENT_H2}}',          () => h2)
         .replace(/\{\{BRAND_NAME\}\}/g,     () => brandName)
-        .replace('{{BRAND_FACTS}}',         () => brandFacts)
+        .replace('{{BRAND_FACTS}}',         () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
         .replace('{{ORIGINAL_HTML}}',       () => currentHTML)
         .replace('{{AUDIT_REPORT}}',        () => JSON.stringify(currentAudit || {}))
         .replace('{{SPECIAL_INSTRUCTION}}', () => confInstruction);
 
       const confResult = await callLLM(
         'gemini',
-        '',
+        akbSystem(task),
         confPrompt,
-        { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens }
+        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens })
       ).catch(() => null);
 
       if (confResult?.html_content) {
@@ -315,16 +317,16 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         .replace('{{TARGET_SERVICE}}',      () => targetService)
         .replace('{{CURRENT_H2}}',          () => h2)
         .replace(/\{\{BRAND_NAME\}\}/g,     () => brandName)
-        .replace('{{BRAND_FACTS}}',         () => brandFacts)
+        .replace('{{BRAND_FACTS}}',         () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
         .replace('{{ORIGINAL_HTML}}',       () => currentHTML)
         .replace('{{AUDIT_REPORT}}',        () => '{"mathematical_audit":{"spam_risk_detected":false,"lsi_coverage_percent":85},"pq_score":8,"actionable_next_steps":[]}')
         .replace('{{SPECIAL_INSTRUCTION}}', () => tfInstruction);
 
       const tfResult = await callLLM(
         'gemini',
-        '',
+        akbSystem(task),
         tfPrompt,
-        { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens }
+        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens })
       ).catch(() => null);
 
       if (tfResult?.html_content) currentHTML = tfResult.html_content;
