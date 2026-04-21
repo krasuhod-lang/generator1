@@ -476,16 +476,6 @@ function buildArticleKnowledgeBase(input = {}) {
   return sections.join('\n');
 }
 
-module.exports = {
-  buildArticleKnowledgeBase,
-  buildStyleCard,
-  detectBusinessPreset,
-  geminiCallOpts,
-  akbSystem,
-  // экспортируем для возможных юнит-тестов / переиспользования
-  _internal: { sliceWords, ensureString, formatList },
-};
-
 // ────────────────────────────────────────────────────────────────────
 // Helpers для stage3/5/6 — собирают опции callLLM так, чтобы AKB
 // уезжал в Gemini как нативный systemInstruction (или через cachedContent),
@@ -522,3 +512,13 @@ function akbSystem(task) {
   if (task.__geminiCacheName) return '';
   return task.__articleKnowledgeBase || '';
 }
+
+module.exports = {
+  buildArticleKnowledgeBase,
+  buildStyleCard,
+  detectBusinessPreset,
+  geminiCallOpts,
+  akbSystem,
+  // экспортируем для возможных юнит-тестов / переиспользования
+  _internal: { sliceWords, ensureString, formatList },
+};
