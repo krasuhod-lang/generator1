@@ -21,17 +21,25 @@
 
 const { calculateCoverage } = require('./calculateCoverage');
 
+// Минимальная длина элемента списка для классификации (отбрасываем мусор/одиночные символы).
+const MIN_ITEM_LENGTH = 4;
+// Граница «короткий vs длинный» (в словах): короткие ищутся через stemming, длинные — через substring.
+const SHORT_PHRASE_MAX_WORDS = 3;
+
 /**
  * Чистит HTML до plain-text в нижнем регистре (для подстрочного поиска коротких фраз).
+ * Порядок декодирования важен: `&amp;` декодируется ПОСЛЕДНИМ, чтобы избежать
+ * двойного декодирования (`&amp;lt;` не должен превращаться в `<`).
  */
 function htmlToText(html) {
   return String(html || '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g,   '<')
+    .replace(/&gt;/g,   '>')
     .replace(/&quot;/g, '"')
+    .replace(/&#39;/g,  '\'')
+    .replace(/&amp;/g,  '&')  // ← последним: никакая замена выше не породит новых HTML-entity
     .replace(/\s+/g, ' ')
     .toLowerCase()
     .trim();
@@ -46,7 +54,7 @@ function splitListField(raw) {
   return String(raw)
     .split(/[\n;]+|•+/)
     .map(s => s.replace(/^[-*\s]+/, '').trim())
-    .filter(s => s.length >= 4); // отбрасываем мусор/одиночные символы
+    .filter(s => s.length >= MIN_ITEM_LENGTH);
 }
 
 /**
@@ -57,10 +65,10 @@ function buildCategory(items, fullHtml, plainText) {
   const cleanItems = (items || []).map(s => String(s).trim()).filter(Boolean);
   if (!cleanItems.length) return { items_total: 0, items_unused: [], coverage_percent: 100 };
 
-  // Для коротких терминов (≤ 3 слов) — стемминг через calculateCoverage.
-  // Для длинных фраз — substring-проверка чистого текста (стемминг искажает фразы).
-  const short = cleanItems.filter(s => s.split(/\s+/).length <= 3);
-  const long  = cleanItems.filter(s => s.split(/\s+/).length >  3);
+  // Считаем длину в словах один раз, затем бакетируем (устраняем дубль split).
+  const classified = cleanItems.map(s => ({ text: s, words: s.split(/\s+/).length }));
+  const short = classified.filter(c => c.words <= SHORT_PHRASE_MAX_WORDS).map(c => c.text);
+  const long  = classified.filter(c => c.words >  SHORT_PHRASE_MAX_WORDS).map(c => c.text);
 
   const cov = calculateCoverage(fullHtml, short);
   const unusedShort = cov.missing;
