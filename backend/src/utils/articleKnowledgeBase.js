@@ -361,7 +361,11 @@ function buildArticleKnowledgeBase(input = {}) {
   sections.push('\n## 5. Strategic Context');
   if (strategyContext) {
     // Используем существующий buildStrategyDigest (уже отлажен и применяется в Stage 0/1/2).
-    const digest = buildStrategyDigest(strategyContext, LIMITS.strategyDigest * 6); // *6 ≈ слов→символов грубо
+    // buildStrategyDigest принимает лимит в СИМВОЛАХ. Переводим из слов:
+    // средняя длина русского слова ~5.8 символов + пробел ≈ 6.8, округлили до 6
+    // (консервативно: при недооценке лимита просто получим чуть более короткий
+    // digest, что не ломает AKB). Финальная обрезка по словам — ниже через sliceWords.
+    const digest = buildStrategyDigest(strategyContext, LIMITS.strategyDigest * 6);
     if (digest) {
       sections.push(sliceWords(digest, LIMITS.strategyDigest));
     } else {

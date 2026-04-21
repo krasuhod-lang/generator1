@@ -5,6 +5,15 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview';
 
+// ────────────────────────────────────────────────────────────────────
+// MAX_GEMINI_INPUT_LENGTH — верхняя граница суммарной длины
+// (systemInstruction + userPrompt) в символах. Ранее было 100 КБ; увеличено
+// до 200 КБ с внедрением AKB: сам AKB (systemInstruction) занимает до ~25 КБ,
+// плюс Stage 5/6 передают currentHTML до ~10-15 КБ в userPrompt. Лимит
+// остаётся защитой от случайной отправки мегабайтного мусора в API.
+// ────────────────────────────────────────────────────────────────────
+const MAX_GEMINI_INPUT_LENGTH = 200000;
+
 /**
  * Базовый URL для Gemini API.
  * Позволяет перенаправить запросы через собственный прокси-сервер (GEMINI_BASE_URL в .env).
@@ -313,7 +322,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     throw new Error('systemInstruction and userPrompt must be strings');
   }
   // Лимит длины повышен: AKB как нативный systemInstruction может быть до ~25 КБ.
-  if ((systemInstruction + userPrompt).length > 200000) {
+  if ((systemInstruction + userPrompt).length > MAX_GEMINI_INPUT_LENGTH) {
     throw new Error('Input text too long');
   }
 

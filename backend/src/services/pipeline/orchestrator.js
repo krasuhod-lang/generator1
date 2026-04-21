@@ -74,6 +74,7 @@ const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
 const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { resetTaskBudget } = require('../llm/callLLM');
+const { estimateTokens } = require('../metrics/priceCalculator');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -362,9 +363,10 @@ async function runPipeline(task, ctx) {
       stage1Result,
       knowledgeGraph: stage1Result?.knowledge_graph || null,
     });
-    const akbBytes = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
+    const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
+    const akbTokens = estimateTokens(task.__articleKnowledgeBase);
     log(
-      `ARTICLE_KNOWLEDGE_BASE собран: ${akbBytes} байт (~${Math.round(akbBytes / 4)} токенов). ` +
+      `ARTICLE_KNOWLEDGE_BASE собран: ${akbBytes} байт (~${akbTokens} токенов). ` +
       `Будет передаваться как Gemini systemInstruction для Stage 3/5/6.`,
       'info'
     );
