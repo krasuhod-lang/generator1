@@ -70,6 +70,7 @@ const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 const { analyzeAudienceAndNiche, serializeAnalysisForPrompt } = require('../parser/audienceNicheAnalyzer');
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
 const { runPreStage0, buildStrategyDigest } = require('./preStage0');
+const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -696,6 +697,45 @@ async function runPipeline(task, ctx) {
     s7Result = { finalHTML: finalBlocks.join('\n\n') };
   }
 
+  // ── Post-Stage 7: «Ограничения проекта → не использовано» ──────────
+  // Строим отчёт о входных данных, не вошедших в финальный HTML.
+  // Чистый JS, без LLM-вызовов: переиспользуем calculateCoverage (стемминг)
+  // + проверки фраз. Сохраняем в tasks.unused_inputs (миграция 006) и шлём SSE.
+  let unusedInputsReport = null;
+  try {
+    unusedInputsReport = buildUnusedInputsReport({
+      task,
+      fullHTML:           s7Result.finalHTML || finalBlocks.join('\n\n'),
+      stage0Result,
+      strategyContext,
+      targetPageAnalysis,
+      tfIdfDensity:       s7Result.tfIdfDensity || [],
+    });
+
+    try {
+      await db.query(
+        `UPDATE tasks SET unused_inputs = $1, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(unusedInputsReport), taskId]
+      );
+    } catch (dbErr) {
+      log(`Unused inputs: не удалось сохранить отчёт в БД (${dbErr.message})`, 'warn');
+    }
+
+    publish(taskId, { type: 'unused_inputs_report', report: unusedInputsReport });
+
+    log(
+      `Ограничения проекта → не использовано: всего ${unusedInputsReport.summary.total_unused_items} элементов ` +
+      `(LSI: ${unusedInputsReport.summary.categories.lsi}, ` +
+      `n-грамм: ${unusedInputsReport.summary.categories.ngrams}, ` +
+      `фактов бренда: ${unusedInputsReport.summary.categories.brand_facts}, ` +
+      `фактов конкурентов: ${unusedInputsReport.summary.categories.competitor_facts}, ` +
+      `FAQ: ${unusedInputsReport.summary.categories.faq_questions})`,
+      'info'
+    );
+  } catch (e) {
+    log(`Unused inputs report ошибка: ${e.message} — пропускаем`, 'warn');
+  }
+
   // Время генерации контента (в секундах)
   const generationTimeSec = Math.round((Date.now() - pipelineStartedAt) / 1000);
 
@@ -710,6 +750,7 @@ async function runPipeline(task, ctx) {
     finalHTMLLength:    (s7Result.finalHTML || '').length,
     eeatBreakdown:      s7Result.eeatBreakdown        || null,
     tfIdfDensity:       s7Result.tfIdfDensity          || [],
+    unusedInputs:       unusedInputsReport             || null,
     generationTimeSec,
   });
 
