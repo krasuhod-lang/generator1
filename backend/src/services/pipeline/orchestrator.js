@@ -69,6 +69,7 @@ const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/html
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 const { analyzeAudienceAndNiche, serializeAnalysisForPrompt } = require('../parser/audienceNicheAnalyzer');
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
+const { runPreStage0, buildStrategyDigest } = require('./preStage0');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -257,6 +258,41 @@ async function runPipeline(task, ctx) {
 
   if (audienceNicheAnalysis) {
     publish(taskId, { type: 'audience_niche_analyzed', analysis: audienceNicheAnalysis });
+  }
+
+  // ── Pre-Stage 0: Стратегический разведочный слой ──────────────────
+  // Niche Landscape + Market Opportunity + Search Demand Mapper.
+  // Запускается один раз на задачу, через DeepSeek, параллельно.
+  // Результат (STRATEGY_CONTEXT) сохраняется в task.strategy_context
+  // и пробрасывается в Stage 0 через task.__strategyContext.
+  let strategyContext = null;
+  if (resumeFrom?.strategyContext !== undefined) {
+    strategyContext = resumeFrom.strategyContext;
+    log('Pre-Stage 0: восстановлен из checkpoint', 'info');
+  } else {
+    try {
+      strategyContext = await runPreStage0(task, stageCtx, {
+        targetPageAnalysis,
+        audienceNicheAnalysis,
+      });
+    } catch (e) {
+      log(`Pre-Stage 0 ошибка: ${e.message} — продолжаем без стратегического контекста`, 'warn');
+    }
+  }
+  // Прокидываем в task для всех последующих стадий (transient — не сохраняется в DB напрямую).
+  task.__strategyContext = strategyContext;
+  task.__strategyDigest  = buildStrategyDigest(strategyContext);
+
+  if (strategyContext) {
+    publish(taskId, {
+      type:    'strategy_context_ready',
+      summary: {
+        has_niche_map:             !!strategyContext.niche_map,
+        has_opportunity_portfolio: !!strategyContext.opportunity_portfolio,
+        has_demand_map:            !!strategyContext.demand_map,
+        errors:                    strategyContext.errors || [],
+      },
+    });
   }
 
   // ── Stage 0 ──────────────────────────────────────────────────────
@@ -523,6 +559,7 @@ async function runPipeline(task, ctx) {
     taxonomy,
     enrichedStage1,
     audienceNicheAnalysis,
+    strategyContext,
     expertOpinionUsed,
     previousContext,
     generatedH2s: [...generatedH2s],
