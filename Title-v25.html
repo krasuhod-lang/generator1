@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DrMax Meta-Tags Engineer (Bulk Edition v16)</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        [v-cloak] { display: none !important; }
+        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
+        .inp { width: 100%; background: #0f172a; border: 1px solid #475569; border-radius: 8px; padding: 10px 14px; color: #f8fafc; outline: none; transition: 0.2s; }
+        .inp:focus { border-color: #8b5cf6; box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2); }
+        .btn { background: #8b5cf6; color: white; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s; border: none; }
+        .btn:hover { background: #7c3aed; }
+        .btn:disabled { background: #334155; color: #94a3b8; cursor: not-allowed; }
+        .log-box { font-family: ui-monospace, monospace; font-size: 11px; background: #020617; padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; color: #a5b4fc; border: 1px solid #1f2937;}
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+<div id="app" v-cloak class="max-w-7xl mx-auto p-4 md:p-6">
+    <div class="mb-6 border-b border-slate-700 pb-4 flex justify-between items-end">
+        <div>
+            <h1 class="text-3xl font-black text-violet-400">⚡ DrMax Bulk Meta-Tag Gen (v16)</h1>
+            <p class="text-sm text-slate-400 mt-2">Математический JS-анализ LSI | Вывод сниппетов ТОП-20 | Идеальный CTR</p>
+        </div>
+        <button v-if="batchResults.length > 0" @click="exportCSV" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 shadow-lg">
+            📥 Скачать CSV ({{ batchResults.length }})
+        </button>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 mb-6">
+        
+        <div class="lg:col-span-7 space-y-4">
+            
+            <div class="card grid grid-cols-2 gap-4 pb-4">
+                <div>
+                    <label class="block text-[10px] text-slate-400 mb-1 uppercase">XMLStock URL</label>
+                    <input type="text" v-model="keys.xmlstock" class="inp text-xs text-emerald-400 font-mono">
+                </div>
+                <div>
+                    <label class="block text-[10px] text-slate-400 mb-1 uppercase">Gemini API Key</label>
+                    <input type="password" v-model="keys.gemini" class="inp text-xs" placeholder="AIza...">
+                </div>
+            </div>
+
+            <div class="card space-y-4">
+                <h2 class="font-bold text-violet-400 text-sm uppercase tracking-wider mb-2">📝 Глобальные настройки</h2>
+                
+                <div class="grid grid-cols-2 gap-4 mb-2">
+                    <div class="col-span-2">
+                        <label class="block text-[11px] text-sky-400 font-bold mb-1">Ниша / Продукция магазина (Важно для ИИ)</label>
+                        <input type="text" v-model="inputs.niche" class="inp text-xs border-sky-900 focus:border-sky-500" placeholder="Тормозные системы, амортизаторы, ГРМ, автозапчасти...">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Регион (lr)</label>
+                        <input type="text" v-model="inputs.lr" class="inp text-xs" placeholder="213">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Топоним</label>
+                        <input type="text" v-model="inputs.toponym" class="inp text-xs" placeholder="Москва">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Телефон</label>
+                        <input type="text" v-model="inputs.phone" class="inp text-xs" placeholder="+7(XXX)...">
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Бренд (уйдет в Desc)</label>
+                        <input type="text" v-model="inputs.brand" class="inp text-xs" placeholder="Seniko">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Summary (Общее УТП)</label>
+                        <input type="text" v-model="inputs.summary" class="inp text-xs" placeholder="Опционально...">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs text-slate-300 font-bold mb-1">Список запросов (Каждый с новой строки)</label>
+                    <textarea v-model="inputs.bulk_keywords" rows="6" class="inp text-sm border-violet-900/50 focus:border-violet-500" placeholder="Тормозные диски Acura MDX..."></textarea>
+                    <p class="text-[10px] text-slate-500 mt-1">Всего строк: {{ keywordsList.length }}</p>
+                </div>
+
+                <button @click="startBatchPipeline" :disabled="loading || keywordsList.length === 0 || !keys.xmlstock || !keys.gemini" class="btn w-full mt-4 shadow-lg shadow-violet-900/20 text-lg">
+                    {{ loading ? '⏳ Выполнение Bulk Пайплайна...' : '🚀 Запустить массовую генерацию' }}
+                </button>
+            </div>
+        </div>
+
+        <div class="lg:col-span-5 flex flex-col space-y-4">
+            
+            <div class="card border border-slate-700 bg-slate-800">
+                <h2 class="text-xs font-bold text-slate-400 uppercase mb-2">Прогресс генерации</h2>
+                <div class="w-full bg-slate-900 rounded-full h-4 mb-2 overflow-hidden border border-slate-700">
+                    <div class="bg-violet-500 h-4 rounded-full transition-all duration-500" :style="{ width: progressPercent + '%' }"></div>
+                </div>
+                <div class="flex justify-between text-xs text-slate-300 font-bold">
+                    <span>Готово: {{ progress.current }} из {{ progress.total }}</span>
+                    <span class="text-violet-400">{{ progressPercent }}%</span>
+                </div>
+                <p v-if="loading" class="text-[10px] text-sky-400 mt-2 animate-pulse">Обрабатываем: "{{ progress.activeKw }}"</p>
+            </div>
+
+            <div class="card flex-1 flex flex-col">
+                <h2 class="font-bold text-slate-300 mb-2 text-sm uppercase tracking-wider">📡 System Logs</h2>
+                <div class="log-box flex-1" ref="logContainer">
+                    <div v-for="(log, i) in logs" :key="i" :class="log.type === 'err' ? 'text-red-400' : (log.type === 'ok' ? 'text-emerald-400' : (log.type === 'warn' ? 'text-amber-400' : 'text-slate-400'))">
+                        <span class="text-slate-600">[{{ log.time }}]</span> <span v-html="log.msg"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div v-if="batchResults.length > 0" class="space-y-8 animate-fade-in mt-6">
+        <h2 class="text-2xl font-black text-white border-b border-slate-700 pb-2">Результаты генерации</h2>
+        
+        <div v-for="(item, index) in batchResults" :key="index" class="card bg-slate-900/80 border-2 border-slate-700 relative">
+            <div class="absolute -top-3 -left-3 bg-slate-800 border border-slate-600 text-white font-bold w-8 h-8 flex items-center justify-center rounded-full shadow-lg">{{ index + 1 }}</div>
+            
+            <h3 class="text-xl font-bold text-violet-400 mb-4 ml-6">{{ item.keyword }}</h3>
+            
+            <details class="mb-6 bg-slate-950 p-3 rounded border border-slate-800 cursor-pointer">
+                <summary class="text-xs font-bold text-sky-400 outline-none">🔎 Показать ТОП-20 конкурентов (XMLStock: Title + Desc)</summary>
+                <div class="mt-3 space-y-3 cursor-auto">
+                    <div v-for="(c, idx) in item.serp" :key="idx" class="bg-slate-900 p-3 rounded border border-slate-800">
+                        <div class="flex items-center gap-2 mb-1.5 overflow-hidden">
+                            <span class="bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded text-[9px] font-bold flex-shrink-0">{{ idx + 1 }}</span>
+                            <a :href="c.url" target="_blank" class="text-[10px] text-sky-400 hover:text-sky-300 transition truncate block w-full">{{ c.url }}</a>
+                        </div>
+                        <div class="text-[12px] font-bold text-slate-300 mb-1 leading-snug">{{ c.title }}</div>
+                        <div class="text-[11px] text-slate-500 leading-relaxed">{{ c.snippet }}</div>
+                    </div>
+                </div>
+            </details>
+
+            <div v-if="item.status === 'success'" class="space-y-6">
+                
+                <div class="bg-slate-800/80 p-3 rounded border border-slate-700 text-xs">
+                    <div class="mb-1"><strong class="text-violet-300">Анализ конкурентов:</strong> <span class="text-slate-300">{{ item.metas.niche_analysis }}</span></div>
+                    <div><strong class="text-violet-300">Интент выдачи:</strong> <span class="text-slate-300">{{ item.metas.intent }}</span></div>
+                </div>
+
+                <div class="bg-[#0f172a] p-5 rounded-lg border border-slate-700 hover:border-violet-500 transition-colors">
+                    <div class="mb-4">
+                        <label class="text-[10px] text-slate-500 uppercase font-bold">Title ({{ item.metas.title?.length || 0 }} симв.)</label>
+                        <div class="text-base font-bold text-sky-300 mt-1">{{ item.metas.title }}</div>
+                    </div>
+                    <div class="mb-4">
+                        <label class="text-[10px] text-slate-500 uppercase font-bold">H1</label>
+                        <div class="text-sm font-bold text-white mt-1">{{ item.metas.h1 }}</div>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-slate-500 uppercase font-bold">Description ({{ item.metas.description?.length || 0 }} симв.)</label>
+                        <div class="text-sm text-slate-300 mt-1 leading-relaxed">{{ item.metas.description }}</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-800/50 p-3 rounded border border-slate-700 flex flex-col md:flex-row gap-4">
+                    <div class="flex-1">
+                        <span class="text-[10px] text-emerald-400 uppercase font-bold block mb-1">✅ LSI в Title (>35% выдачи):</span>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="w in item.semantics.title_mandatory_words" :key="w" class="text-[9px] bg-emerald-900/30 text-emerald-400 border border-emerald-800/50 px-1.5 py-0.5 rounded">{{ w }}</span>
+                        </div>
+                    </div>
+                    <div class="flex-1">
+                        <span class="text-[10px] text-emerald-400 uppercase font-bold block mb-1">✅ LSI в Desc (15-35% выдачи):</span>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="w in item.semantics.description_mandatory_words" :key="w" class="text-[9px] bg-emerald-900/30 text-emerald-400 border border-emerald-800/50 px-1.5 py-0.5 rounded">{{ w }}</span>
+                        </div>
+                    </div>
+                    <div class="flex-1">
+                        <span class="text-[10px] text-slate-500 uppercase font-bold block mb-1">❌ Пропущенные LSI (или изменен корень):</span>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="w in (item.metas.lsi_check?.missed_lsi || [])" :key="w" class="text-[9px] bg-slate-800 text-slate-500 border border-slate-700 px-1.5 py-0.5 rounded">{{ w }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div v-else class="text-red-400 text-sm font-bold bg-red-900/20 p-4 rounded border border-red-900/50">
+                ❌ Ошибка генерации: {{ item.error }}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted, nextTick } = Vue;
+
+const setup = () => {
+    const defaultXmlUrl = 'https://xmlstock.com/yandex/xml/?user=11366&key=3d71fa93ec755e54182c64b290d68bed';
+    
+    const keys = ref({ xmlstock: defaultXmlUrl, gemini: '' });
+    const inputs = ref({ bulk_keywords: '', lr: '', toponym: '', brand: '', phone: '', summary: '', niche: 'Тормозные системы, амортизаторы, ГРМ, автозапчасти' });
+
+    const loading = ref(false);
+    const logs = ref([]);
+    const logContainer = ref(null);
+    
+    const progress = ref({ current: 0, total: 0, activeKw: '' });
+    const batchResults = ref([]);
+
+    onMounted(() => {
+        keys.value.gemini = localStorage.getItem('drmax_gemini_b') || '';
+        inputs.value.lr = localStorage.getItem('drmax_lr_b') || '';
+        inputs.value.toponym = localStorage.getItem('drmax_toponym_b') || '';
+        inputs.value.brand = localStorage.getItem('drmax_brand_b') || '';
+        inputs.value.phone = localStorage.getItem('drmax_phone_b') || '';
+        inputs.value.bulk_keywords = localStorage.getItem('drmax_bulk_b') || '';
+        if(localStorage.getItem('drmax_niche_b')) inputs.value.niche = localStorage.getItem('drmax_niche_b');
+        
+        const savedXml = localStorage.getItem('drmax_xmlstock_b');
+        if (savedXml) keys.value.xmlstock = savedXml;
+    });
+
+    const saveState = () => {
+        localStorage.setItem('drmax_xmlstock_b', keys.value.xmlstock);
+        localStorage.setItem('drmax_gemini_b', keys.value.gemini);
+        localStorage.setItem('drmax_lr_b', inputs.value.lr);
+        localStorage.setItem('drmax_toponym_b', inputs.value.toponym);
+        localStorage.setItem('drmax_brand_b', inputs.value.brand);
+        localStorage.setItem('drmax_phone_b', inputs.value.phone);
+        localStorage.setItem('drmax_niche_b', inputs.value.niche);
+        localStorage.setItem('drmax_bulk_b', inputs.value.bulk_keywords);
+    };
+
+    const keywordsList = computed(() => {
+        return inputs.value.bulk_keywords.split('\n').map(k => k.trim()).filter(k => k.length > 0);
+    });
+
+    const progressPercent = computed(() => {
+        if (progress.value.total === 0) return 0;
+        return Math.round((progress.value.current / progress.value.total) * 100);
+    });
+
+    const addLog = (msg, type = 'info') => {
+        const time = new Date().toLocaleTimeString('ru-RU');
+        logs.value.push({ time, msg, type });
+        nextTick(() => {
+            if (logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight;
+        });
+    };
+
+    // --- ШАГ 1: ПАРСИНГ YANDEX ---
+    const fetchYandexSerp = async (kw) => {
+        let baseUrl = keys.value.xmlstock.trim();
+        if(!baseUrl.includes('?')) baseUrl += '?';
+        baseUrl += `&query=${encodeURIComponent(kw)}&groupby=attr%3D%22%22.mode%3Dflat.groups-on-page%3D10.docs-in-group%3D1`;
+        if (inputs.value.lr) baseUrl += `&lr=${inputs.value.lr.trim()}`;
+
+        const maxRetries = 3;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const extracted = [];
+                for (let page = 0; page < 2; page++) {
+                    const pageUrl = `${baseUrl}&page=${page}`;
+                    const res = await fetch(pageUrl);
+                    if (!res.ok) throw new Error(`XMLStock HTTP ${res.status}`);
+                    
+                    const xmlText = await res.text();
+                    const parser = new DOMParser();
+                    const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                    
+                    const errorNode = xmlDoc.querySelector("error");
+                    if (errorNode) throw new Error(`XMLStock API Error: ${errorNode.textContent}`);
+
+                    const docs = xmlDoc.querySelectorAll("doc");
+                    docs.forEach(doc => {
+                        const titleNode = doc.querySelector("title");
+                        const headlineNode = doc.querySelector("headline");
+                        const passagesNodes = doc.querySelectorAll("passages passage");
+                        const urlNode = doc.querySelector("url");
+                        
+                        let title = titleNode ? titleNode.textContent.replace(/<[^>]*>/g, '') : '';
+                        let snippet = '';
+                        let link = urlNode ? urlNode.textContent : '';
+                        
+                        if (headlineNode) snippet += headlineNode.textContent.replace(/<[^>]*>/g, '') + " ";
+                        if (passagesNodes.length > 0) {
+                            passagesNodes.forEach(p => snippet += p.textContent.replace(/<[^>]*>/g, '') + " ");
+                        }
+                        if(title) extracted.push({ title: title.trim(), snippet: snippet.trim(), url: link });
+                    });
+                }
+                
+                if (extracted.length === 0) throw new Error("Пустой SERP (нет результатов)");
+                return extracted;
+
+            } catch (err) {
+                if (attempt < maxRetries) {
+                    addLog(`⚠️ Ошибка XMLStock ("${kw}"): ${err.message}. Повторная попытка ${attempt}/${maxRetries} через 3 сек...`, 'warn');
+                    await new Promise(r => setTimeout(r, 3000));
+                } else {
+                    throw err;
+                }
+            }
+        }
+    };
+
+    // --- ШАГ 2: МАТЕМАТИЧЕСКИЙ РАСЧЕТ LSI И МИКРО-ЛЕММАТИЗАТОР ---
+    const extractSemanticsJS = (kw, serpData) => {
+        addLog(`🔢 Шаг 2 ("${kw}"): JS -> TF-IDF с объединением словоформ...`, 'info');
+        
+        const stopWords = new Set(['и','в','во','не','что','он','на','я','с','со','как','а','то','все','она','так','его','но','да','ты','к','у','же','вы','за','бы','по','только','ее','мне','было','вот','от','меня','еще','нет','о','из','ему','теперь','когда','даже','ну','вдруг','ли','если','уже','или','ни','быть','был','него','до','вас','нибудь','опять','уж','вам','ведь','там','потом','себя','ничего','ей','может','они','тут','где','есть','надо','ней','для','мы','тебя','их','чем','была','сам','чтоб','без','будто','чего','раз','тоже','себе','под','будет','ж','тогда','кто','этот','того','потому','этого','какой','совсем','ним','здесь','этом','один','почти','мой','тем','чтобы','нее','сейчас','были','куда','зачем','всех','никогда','можно','при','наконец','два','об','другой','хоть','после','над','больше','тот','через','эти','нас','про','всего','них','какая','много','разве','три','эту','моя','впрочем','хорошо','свою','этой','перед','иногда','лучше','чуть','том','нельзя','такой','им','более','всегда','конечно','всю','между', 'руб', 'рублей', 'это', 'очень', 'для', 'на']);
+
+        // Микро-лемматизатор для склеивания падежей и синонимов
+        const normalizeWord = (word) => {
+            if (word.startsWith('цен')) return 'цена'; // цена, цены, цене, ценой
+            if (word.startsWith('магазин')) return 'магазин'; // магазин, магазине, магазина
+            if (word.startsWith('интернет')) return 'интернет';
+            if (word.startsWith('доставк')) return 'доставка';
+            if (word.startsWith('купи') || word.startsWith('купл')) return 'купить';
+            if (word.startsWith('тормозн')) return 'тормозной'; // тормозные, тормозного
+            if (word.startsWith('диск')) return 'диск'; // диски, дисков, диска
+            if (word.startsWith('запчаст')) return 'запчасть'; // запчасти, запчастей
+            if (word.startsWith('каталог')) return 'каталог';
+            if (word.startsWith('колодк')) return 'колодка'; // колодки, колодок
+            if (word.startsWith('москв')) return 'москва'; // москве, москву
+            return word;
+        };
+
+        let docCounts = {};
+        let totalDocs = serpData.length;
+
+        // Считаем Document Frequency (DF)
+        serpData.forEach(doc => {
+            let text = (doc.title + " " + doc.snippet).toLowerCase().replace(/[^а-яёa-z0-9]/g, ' ');
+            let words = text.split(/\s+/);
+            
+            // Нормализуем слова и оставляем только уникальные для одного сниппета
+            let normalizedUniqueWords = [...new Set(words.map(w => normalizeWord(w)))];
+            
+            normalizedUniqueWords.forEach(w => {
+                if (w.length > 2 && !stopWords.has(w) && !/^\d+$/.test(w)) {
+                    docCounts[w] = (docCounts[w] || 0) + 1;
+                }
+            });
+        });
+
+        // --- Объявляем массивы для важных и рекомендуемых слов ---
+        let title_raw = [];
+        let desc_raw = [];
+
+        // --- ДОБАВЛЯЕМ ОБРАБОТКУ ГОДОВ (цифровых токенов) ---
+        let yearCounts = {};
+        serpData.forEach(doc => {
+            let text = (doc.title + " " + doc.snippet).toLowerCase();
+            let yearMatch = text.match(/\b20\d{2}\b/g);
+            if (yearMatch) {
+                yearMatch.forEach(y => yearCounts[y] = (yearCounts[y] || 0) + 1);
+            }
+        });
+        for (const [year, count] of Object.entries(yearCounts)) {
+            let percentage = (count / totalDocs) * 100;
+            if (percentage >= 35) {
+                // Добавляем в "важные" слова (для Title)
+                title_raw.push({word: year, count});
+            } else if (percentage >= 15 && percentage < 35) {
+                // Добавляем в "рекомендуемые" слова (для Description)
+                desc_raw.push({word: year, count});
+            }
+        }
+        // --- КОНЕЦ ДОБАВЛЕНИЯ ---
+
+        // Распределяем слова по процентам
+        for (const [word, count] of Object.entries(docCounts)) {
+            let percentage = (count / totalDocs) * 100;
+            if (percentage >= 35) title_raw.push({word, count});
+            else if (percentage >= 15 && percentage < 35) desc_raw.push({word, count});
+        }
+
+        title_raw.sort((a,b) => b.count - a.count);
+        desc_raw.sort((a,b) => b.count - a.count);
+
+        return {
+            title_mandatory_words: title_raw.map(x => x.word).slice(0, 6),
+            description_mandatory_words: desc_raw.map(x => x.word).slice(0, 10)
+        };
+	}
+	// Обрезает до последнего целого слова, без многоточия
+const trimToLastWord = (str, maxLen) => {
+    if (str.length <= maxLen) return str;
+    let trimmed = str.substring(0, maxLen);
+    const lastSpace = trimmed.lastIndexOf(' ');
+    if (lastSpace > 0) {
+        trimmed = trimmed.substring(0, lastSpace);
+    }
+    return trimmed; // не добавляем ...
+};
+
+// Обрезает до последнего завершённого предложения (. ! ?) в пределах maxLen
+// Если такого знака нет — обрезает до последнего слова и добавляет точку
+const trimToLastSentence = (str, maxLen) => {
+    if (str.length <= maxLen) return str;
+    let trimmed = str.substring(0, maxLen);
+    const lastPunctuation = Math.max(trimmed.lastIndexOf('.'), trimmed.lastIndexOf('!'), trimmed.lastIndexOf('?'));
+    if (lastPunctuation > 0) {
+        trimmed = trimmed.substring(0, lastPunctuation + 1);
+    } else {
+        const lastSpace = trimmed.lastIndexOf(' ');
+        if (lastSpace > 0) trimmed = trimmed.substring(0, lastSpace);
+        // не добавляем точку, чтобы не было «Закажите.»
+    }
+    return trimmed;
+};
+
+    // --- ШАГ 3: ГЕНЕРАЦИЯ ИДЕАЛЬНОГО ВАРИАНТА ЧЕРЕЗ LLM ---
+    const generateDrMaxMeta = async (kw, semantics, serpData) => {
+    addLog(`🧠 Шаг 3 ("${kw}"): Gemini -> Копирайтинг и CTR-оптимизация...`, 'info');
+
+    const importantWords = semantics.title_mandatory_words.slice(0, 6);
+    const recommendedWords = semantics.description_mandatory_words.slice(0, 10);
+    const competitorsTitles = serpData.map((c, i) => `[${i+1}] ${c.title}`).join('\n');
+	// Извлекаем год из списка важных слов (если он там есть)
+let currentYear = '';
+const yearInImportant = importantWords.find(w => /20\d{2}/.test(w));
+const yearInRecommended = recommendedWords.find(w => /20\d{2}/.test(w));
+if (yearInImportant) currentYear = yearInImportant;
+else if (yearInRecommended) currentYear = yearInRecommended;
+else {
+    // если год не попал в списки, пробуем найти в первых трёх Title конкурентов
+    const firstTitles = serpData.slice(0,3).map(d => d.title).join(' ');
+    const yearMatch = firstTitles.match(/20\d{2}/);
+    currentYear = yearMatch ? yearMatch[0] : '';
+}
+
+    const sysPrompt = `Ты — Senior Technical SEO-специалист и Data-Driven копирайтер по методологии DrMax.
+Задача: создать идеальные метатеги (Title, Description) и H1, опираясь на предоставленный семантический анализ ТОП-10 конкурентов и поведенческие сигналы.
+
+<Ограничения и правила DrMax>
+
+1. Title (50-60 символов):
+   - Главное ключевое слово в первых 3 словах.
+   - Обязательно используй 2-4 "важных слова" из списка (те, что встречаются в ≥35% конкурентов).
+   - Выбери одну из формул: 
+     a) «Ключ + выгода + срок/гарантия» 
+     b) «Регион + ключ + год + цена» 
+     c) «Сравнение + ключ + преимущество»
+   - Добавь год (если передан) и/или цифру/акцию.
+   - Разделители: вертикальная черта (|), длинное тире (—), скобки. Не используй ёлочки.
+   - Пример: «Кредит под залог недвижимости | Ставка от 9% | Одобрение за 24ч»
+
+2. Meta Description (140-160 символов):
+   - Законченное предложение (не обрывай).
+   - Вплети оставшиеся важные слова и 2-3 рекомендуемых LSI.
+   - Добавь E-E-A-T сигнал (опыт/экспертность/доверие): если есть бренд, годы работы, гарантия — используй.
+   - CTA (призыв к действию) в конце: «Узнайте цены и условия», «Запишитесь онлайн», «Получите расчёт».
+   - Пример: «Нужен кредит под залог? ООО «Финанс Плюс» выдаёт от 500 тыс. руб. до 30 млн. Ставка от 9%. Одобрение за 24 часа. Оставьте заявку онлайн.»
+   - Бренд (если указан во входных данных): ОБЯЗАТЕЛЬНО добавь название бренда в Description, в середине или конце предложения, например: «... от компании "Seniko"». Не ставь бренд в самое начало.
+- Телефон (если указан во входных данных): если определённый интент — transactional или commercial_investigation — добавь телефон в Description в конце, перед CTA. Формат: +7 (XXX) XXX-XX-XX. Пример: «Звоните: +7 (495) 123-45-67.»
+- Если телефон не указан или интент informational — не добавляй вымышленный номер.
+
+3. H1 (до 70 символов):
+   - Понятный человеку, содержит главный ключ.
+   - Не копирует Title (меняй порядок слов или синоним).
+   - Пример: «Кредит под залог недвижимости — быстрое решение»
+
+4. Интент:
+   - Определи один из четырёх типов: transactional, commercial_investigation, informational, navigational.
+   - Кратко обоснуй (например: «в ТОПе много карточек товаров с ценой»).
+
+5. Анти-галлюцинации:
+   - Не придумывай цены, скидки, гарантии, если их нет во входных данных.
+   - Не используй другой год, кроме переданного. Если год не передан — не добавляй.
+   - Не используй ёлочки («») в Title, только прямые кавычки (").
+
+</Ограничения и правила DrMax>
+
+Выходные данные выдай строго в формате JSON, без пояснений, без markdown-обёрток. Структура:
+{
+  "niche_analysis": "Краткий анализ конкурентной ниши (2-3 предложения)",
+  "intent": "transactional | commercial_investigation | informational | navigational",
+  "intent_reason": "почему такой интент",
+  "title": "твой вариант",
+  "title_length": число,
+  "description": "твой вариант",
+  "description_length": число,
+  "h1": "твой вариант",
+  "used_important_words": ["слово1", "слово2"]
+}`;
+
+   const userPrompt = `Аналитика конкурентов:
+- Название/Тема страницы: ${inputs.value.niche || kw}
+- Основное ключевое слово: ${kw}
+- Актуальный год из ТОПа: ${currentYear} (ОБЯЗАТЕЛЬНО используй этот год в Title и Description. Не придумывай другой год!)
+- Важные слова (использовать ОБЯЗАТЕЛЬНО 2-4): ${importantWords.join(', ')}
+- Рекомендуемые слова (LSI, использовать 1-3): ${recommendedWords.join(', ')}
+- Общее УТП (если указано): ${inputs.value.summary || ''}
+- Бренд (только в Description): ${inputs.value.brand || ''}
+- Регион: ${inputs.value.toponym || ''}
+- Телефон (только в Description, если нужен): ${inputs.value.phone || ''}
+
+Примеры Title конкурентов (для анализа интента и формул):
+${competitorsTitles}
+
+Создай метатеги строго по методологии DrMax (формулы, E-E-A-T, поведенческие триггеры).`;
+
+    let retries = 3;
+    let lastError = null;
+    while (retries > 0) {
+        try {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${keys.value.gemini}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    systemInstruction: { parts: [{ text: sysPrompt }] },
+                    contents: [{ parts: [{ text: userPrompt }] }],
+                    generationConfig: { responseMimeType: "application/json", temperature: 0.4 }
+                })
+            });
+            if (!res.ok) {
+                if (res.status === 429 && retries > 1) {
+                    await new Promise(r => setTimeout(r, 6000));
+                    retries--; continue;
+                }
+                throw new Error(`Gemini Error: ${res.status}`);
+            }
+            const data = await res.json();
+            let jsonRaw = data.candidates[0].content.parts[0].text;
+            const jsonMatch = jsonRaw.match(/\{[\s\S]*\}/);
+            const result = JSON.parse(jsonMatch[0]);
+
+            // Валидация длин
+            if (result.title && (result.title.length < 50 || result.title.length > 60)) {
+                addLog(`⚠️ Title не уложился в 50-60 символов (${result.title.length}). Корректируем...`, 'warn');
+                if (result.title.length > 60) result.title = trimToLastWord(result.title, 57);
+                result.title_length = result.title.length;
+            }
+            if (result.description && (result.description.length < 140 || result.description.length > 160)) {
+                addLog(`⚠️ Description не уложился в 140-160 символов (${result.description.length}). Корректируем...`, 'warn');
+                if (result.description.length > 160) result.description = trimToLastSentence(result.description, 157);
+                result.description_length = result.description.length;
+            }
+			// ========== ДОБАВЛЕНИЕ БРЕНДА И ТЕЛЕФОНА (POST-VALIDATION DRMAX) ==========
+// 1. Проверка и добавление бренда (если указан)
+if (inputs.value.brand && result.description) {
+    const brand = inputs.value.brand.trim();
+    if (!result.description.includes(brand)) {
+        addLog(`⚠️ Бренд "${brand}" не найден в Description. Добавляем принудительно.`, 'warn');
+        // Добавляем бренд в конец описания (перед точкой)
+        result.description = result.description.replace(/\.$/, '') + `. Бренд: ${brand}.`;
+        result.description_length = result.description.length;
+    }
+}
+
+// 2. Проверка и добавление телефона (только для коммерческих интентов и если телефон указан)
+const isCommercialIntent = result.intent === 'transactional' || result.intent === 'commercial_investigation';
+if (inputs.value.phone && isCommercialIntent && result.description) {
+    const phone = inputs.value.phone.trim();
+    if (!result.description.includes(phone)) {
+        addLog(`📞 Телефон ${phone} не найден в Description. Добавляем для коммерческого интента.`, 'warn');
+        // Добавляем телефон перед точкой или перед CTA
+        result.description = result.description.replace(/\.$/, '') + `. Звоните: ${phone}.`;
+        result.description_length = result.description.length;
+    }
+}
+
+// 3. Контроль длины Description (если после добавлений стало больше 160)
+if (result.description && result.description.length > 160) {
+    result.description = trimToLastSentence(result.description, 157);
+    result.description_length = result.description.length;
+}
+// ========== КОНЕЦ БЛОКА ПОСТ-ВАЛИДАЦИИ ==========
+
+            return result;
+        } catch (err) {
+            lastError = err;
+            retries--;
+            if (retries > 0) {
+                addLog(`⚠️ Ошибка генерации: ${err.message}. Повтор через 3 сек...`, 'warn');
+                await new Promise(r => setTimeout(r, 3000));
+            }
+        }
+    }
+    throw new Error(`Не удалось сгенерировать метатеги: ${lastError.message}`);
+};
+
+    // --- ГЛАВНЫЙ ЦИКЛ ОБРАБОТКИ (BATCH) ---
+    const startBatchPipeline = async () => {
+        const kws = keywordsList.value;
+        if(kws.length === 0) return;
+
+        saveState();
+        loading.value = true;
+        batchResults.value = [];
+        logs.value = [];
+        progress.value = { current: 0, total: kws.length, activeKw: '' };
+
+        addLog(`🚀 ЗАПУСК BULK ГЕНЕРАЦИИ (${kws.length} запросов)`, 'ok');
+
+        for (let i = 0; i < kws.length; i++) {
+            const kw = kws[i];
+            progress.value.activeKw = kw;
+            addLog(`▶️ Обработка [${i+1}/${kws.length}]: "${kw}"...`, 'info');
+
+            try {
+                // 1. XMLStock (с ретраями)
+                const serp = await fetchYandexSerp(kw);
+                
+                // 2. Semantics (Чистый JS)
+                const semantics = extractSemanticsJS(kw, serp);
+                
+                // 3. Generation
+                const metas = await generateDrMaxMeta(kw, semantics, serp);
+
+                batchResults.value.push({ keyword: kw, serp, semantics, metas, status: 'success' });
+                progress.value.current = i + 1;
+                addLog(`✅ Готово: "${kw}"`, 'ok');
+
+            } catch (err) {
+                addLog(`❌ Критическая ошибка ("${kw}"): ${err.message}`, 'err');
+                batchResults.value.push({ keyword: kw, status: 'error', error: err.message });
+                progress.value.current = i + 1;
+            }
+
+            // Большая пауза между страницами
+            if (i < kws.length - 1) {
+                addLog(`⏳ Охлаждение API (4 сек) перед следующей страницей...`, 'warn');
+                await new Promise(r => setTimeout(r, 4000));
+            }
+        }
+        loading.value = false;
+        addLog(`🎉 BULK ГЕНЕРАЦИЯ ЗАВЕРШЕНА!`, 'ok');
+    };
+
+    // --- ЭКСПОРТ В CSV ---
+    const exportCSV = () => {
+        let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; // BOM
+        csvContent += "Keyword;Intent;Title;H1;Description;Title LSI List;Desc LSI List\n";
+
+        batchResults.value.forEach(res => {
+            if (res.status === 'success') {
+                const intent = `"${(res.metas.intent || '').replace(/"/g, '""')}"`;
+                const cleanTitle = `"${(res.metas.title || '').replace(/"/g, '""')}"`;
+                const cleanH1 = `"${(res.metas.h1 || '').replace(/"/g, '""')}"`;
+                const cleanDesc = `"${(res.metas.description || '').replace(/"/g, '""')}"`;
+                const lsiTitle = `"${(res.semantics.title_mandatory_words || []).join(', ')}"`;
+                const lsiDesc = `"${(res.semantics.description_mandatory_words || []).join(', ')}"`;
+                
+                csvContent += `${res.keyword};${intent};${cleanTitle};${cleanH1};${cleanDesc};${lsiTitle};${lsiDesc}\n`;
+            } else {
+                csvContent += `${res.keyword};ERROR;${res.error};;;;\n`;
+            }
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `SEO_MetaTags_Bulk_${new Date().getTime()}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    return { keys, inputs, loading, logs, logContainer, progress, progressPercent, batchResults, keywordsList, startBatchPipeline, exportCSV };
+};
+
+const app = createApp({ setup });
+app.mount('#app');
+</script>
+</body>
+</html>
