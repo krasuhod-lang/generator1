@@ -151,6 +151,37 @@ async function onApply({ mode: applyMode, html }) {
   }
 }
 
+// Авто-применение результата при `done` — то же поведение, что в EditorCopilotPage:
+// если при старте операции был выделенный фрагмент → автоматически заменяем его
+// результатом; иначе для add_faq/expand_section вставляем ниже курсора. Прочее —
+// оставляем preview, чтобы пользователь решил вручную.
+let _operationStartedWithSelection = false;
+let _lastAutoAppliedOperationId    = null;
+const INSERT_BELOW_ACTIONS = new Set(['add_faq', 'expand_section']);
+
+watch(() => store.currentOperationId, (opId) => {
+  if (opId) {
+    _operationStartedWithSelection = !!(store.selectedHtml || store.selectedText);
+    _lastAutoAppliedOperationId    = null;
+  }
+});
+
+watch(() => store.currentStatus, async (status) => {
+  if (status !== 'done') return;
+  if (mode.value !== 'editor') return;
+  const opId = store.currentOperationId;
+  if (!opId || _lastAutoAppliedOperationId === opId) return;
+  if (!store.streamingText) return;
+
+  if (_operationStartedWithSelection) {
+    _lastAutoAppliedOperationId = opId;
+    await onApply({ mode: 'replace', html: store.streamingText });
+  } else if (INSERT_BELOW_ACTIONS.has(store.action)) {
+    _lastAutoAppliedOperationId = opId;
+    await onApply({ mode: 'insert_below', html: store.streamingText });
+  }
+});
+
 function fmtDate(s) {
   if (!s) return '';
   try {

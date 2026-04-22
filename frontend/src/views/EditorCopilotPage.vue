@@ -25,6 +25,12 @@ const task        = ref(null);
 let saveTimer = null;
 const SAVE_DEBOUNCE_MS = 2500;
 
+// Запоминаем, был ли при старте операции выделенный фрагмент: по требованию
+// пользователя «когда нажимаю Сгенерировать — выделенный фрагмент должен
+// автоматически замениться». Используем эту метку при автозамене на done.
+let _operationStartedWithSelection = false;
+let _lastAutoAppliedOperationId    = null;
+
 onMounted(async () => {
   try {
     await store.loadPresets();
@@ -79,6 +85,40 @@ async function onApply({ mode, html }) {
     });
   }
 }
+
+// При старте новой операции запоминаем, был ли выделенный фрагмент.
+// Это нужно, чтобы на done корректно решить, заменять ли выделение
+// автоматически. Триггеримся на смену operationId, а не на статус,
+// чтобы поймать состояние ДО первого 'streaming'-токена.
+watch(() => store.currentOperationId, (opId) => {
+  if (opId) {
+    _operationStartedWithSelection = !!(store.selectedHtml || store.selectedText);
+    _lastAutoAppliedOperationId    = null;
+  }
+});
+
+// Авто-применение результата при `done` — реализует требование пользователя:
+// «когда нажимаю Сгенерировать — выделенный фрагмент должен автоматически
+// замениться». Если выделения не было — для пресетов с insert-below-семантикой
+// (add_faq, expand_section) вставляем результат ниже курсора. В прочих случаях
+// оставляем preview, чтобы пользователь решил вручную.
+const INSERT_BELOW_ACTIONS = new Set(['add_faq', 'expand_section']);
+
+watch(() => store.currentStatus, async (status) => {
+  if (status !== 'done') return;
+  const opId = store.currentOperationId;
+  if (!opId || _lastAutoAppliedOperationId === opId) return;
+  if (!store.streamingText) return;
+
+  if (_operationStartedWithSelection) {
+    _lastAutoAppliedOperationId = opId;
+    await onApply({ mode: 'replace', html: store.streamingText });
+  } else if (INSERT_BELOW_ACTIONS.has(store.action)) {
+    _lastAutoAppliedOperationId = opId;
+    await onApply({ mode: 'insert_below', html: store.streamingText });
+  }
+  // Иначе — оставляем preview как раньше (пользователь решит).
+});
 </script>
 
 <template>

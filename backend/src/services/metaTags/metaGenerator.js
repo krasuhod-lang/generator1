@@ -13,6 +13,7 @@
 const { callGemini } = require('../llm/gemini.adapter');
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
+const { checkLsiUsage } = require('./semantics');
 
 const TITLE_MIN = 50;
 const TITLE_MAX = 60;
@@ -26,7 +27,7 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 
 1. Title (50–60 символов):
    - Главное ключевое слово в первых 3 словах.
-   - Обязательно используй 2–4 «важных слова» из списка (DF ≥ 35%).
+   - В Title должно поместиться 2–4 «важных слова» из списка (DF ≥ 35%) — это «ядро».
    - Выбери одну из формул:
      a) «Ключ + выгода + срок/гарантия»
      b) «Регион + ключ + год + цена»
@@ -36,7 +37,15 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 
 2. Meta Description (140–160 символов):
    - Законченное предложение (не обрывай на полуслове).
-   - Вплети оставшиеся «важные слова» и 2–3 «рекомендуемых» LSI.
+   - КРИТИЧНОЕ правило покрытия LSI:
+     * ВСЕ «важные слова» из списка (DF ≥ 35%), которые не вошли в Title,
+       ОБЯЗАТЕЛЬНО должны появиться в Description. Каждое важное слово должно
+       быть использовано хотя бы один раз — в Title ИЛИ в Description (а в идеале
+       все важные распределены так, чтобы 100% списка покрыто между двумя тегами).
+     * «Рекомендуемые» LSI (DF 15–35%): впиши в Description МАКСИМУМ возможных
+       слов из списка, насколько позволяет лимит 160 символов и читаемость.
+       Не оставляй ни одно рекомендуемое слово «за бортом», если оно органично
+       вписывается без нарушения языка и длины.
    - Добавь E-E-A-T-сигнал: бренд / годы работы / гарантию — если они переданы.
    - CTA в конце: «Узнайте цены и условия», «Запишитесь онлайн», «Получите расчёт» и т. п.
    - Бренд (если указан): ОБЯЗАТЕЛЬНО добавь название бренда в Description, в середине или конце предложения. НЕ ставь бренд в самое начало.
@@ -92,8 +101,8 @@ function buildUserPrompt({ keyword, semantics, serpData, inputs, year }) {
 - Название/Тема страницы: ${inputs.niche || keyword}
 - Основное ключевое слово: ${keyword}
 - Актуальный год из ТОПа: ${year} (ОБЯЗАТЕЛЬНО используй именно этот год в Title и Description, не придумывай другой!)
-- Важные слова (использовать ОБЯЗАТЕЛЬНО 2–4): ${importantWords.join(', ')}
-- Рекомендуемые слова (LSI, использовать 1–3): ${recommendedWords.join(', ')}
+- Важные слова — ИСПОЛЬЗОВАТЬ ВСЕ 100% (распределить между Title и Description, каждое слово ≥1 раз): ${importantWords.join(', ')}
+- Рекомендуемые LSI — ВПИСАТЬ В DESCRIPTION МАКСИМУМ возможных (по длине/читаемости): ${recommendedWords.join(', ')}
 - Общее УТП (если указано): ${inputs.summary || ''}
 - Бренд (только в Description): ${inputs.brand || ''}
 - Регион: ${inputs.toponym || ''}
@@ -106,10 +115,15 @@ ${competitorsTitles}
 }
 
 /**
- * Постобработка ответа модели: гарантирует длины, бренд и телефон.
+ * Постобработка ответа модели: гарантирует длины, бренд, телефон и 100%-е
+ * покрытие важных LSI-слов между Title и Description.
  * Возвращает объект с полями notes — список применённых корректировок.
+ *
+ * @param {object} result    — распарсенный JSON от Gemini
+ * @param {object} inputs    — { niche, brand, toponym, phone, summary }
+ * @param {object} semantics — { title_mandatory_words, description_mandatory_words }
  */
-function postValidate(result, inputs) {
+function postValidate(result, inputs, semantics = {}) {
   const notes = [];
 
   // 1. Title: укорачиваем, если перебор. Если короче 50 — оставляем как есть,
@@ -143,7 +157,45 @@ function postValidate(result, inputs) {
     notes.push(`Телефон ${phone} добавлен в Description (коммерческий интент).`);
   }
 
-  // 5. Финальный контроль длины Description после всех вставок.
+  // 5. КРИТИЧНОЕ требование: важные LSI (DF ≥ 35%) — все 100% должны быть
+  //    использованы между Title и Description. Если модель пропустила —
+  //    дописываем недостающие в Description в виде хвоста «Также: word1, word2.»
+  //    (укладываемся в DESC_MAX, иначе trim по предложениям).
+  const importantWords = Array.isArray(semantics.title_mandatory_words)
+    ? semantics.title_mandatory_words : [];
+  if (importantWords.length && typeof result.description === 'string'
+      && typeof result.title === 'string') {
+    const combined = `${result.title} ${result.description}`;
+    const { missed_lsi: missedImportant } = checkLsiUsage(combined, importantWords);
+    if (missedImportant.length) {
+      // Снимаем уже существующий хвост "Также: ...", финальные знаки препинания
+      // и пробелы — чтобы пересобрать его аккуратно с учётом новых слов и
+      // не получить артефактов вида "подробности.. Также:".
+      const baseDesc = result.description
+        .replace(/\.\s*Также:[^.]*\.\s*$/, '')
+        .replace(/[\s.!?]+$/, '');
+      const injected = [];
+      for (const word of missedImportant) {
+        const trySuffix = `. Также: ${[...injected, word].join(', ')}.`;
+        if ((baseDesc + trySuffix).length <= DESC_MAX) {
+          injected.push(word);
+        } else {
+          // Дальше слова уже не влезут, suffix только удлиняется.
+          break;
+        }
+      }
+      if (injected.length) {
+        result.description = baseDesc + `. Также: ${injected.join(', ')}.`;
+        notes.push(`В Description дописаны пропущенные важные LSI: ${injected.join(', ')}.`);
+      }
+      const stillMissed = missedImportant.filter((w) => !injected.includes(w));
+      if (stillMissed.length) {
+        notes.push(`⚠️ Не уместились в лимит ${DESC_MAX} важные LSI: ${stillMissed.join(', ')}.`);
+      }
+    }
+  }
+
+  // 6. Финальный контроль длины Description после всех вставок.
   if (typeof result.description === 'string' && result.description.length > DESC_MAX) {
     result.description = trimToLastSentence(result.description, DESC_MAX - 3);
   }
@@ -233,7 +285,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
   const result = parseMetaJson(text);
 
-  const { result: validated, notes } = postValidate(result, inputs);
+  const { result: validated, notes } = postValidate(result, inputs, semantics);
 
   validated.detected_year = year;
   validated.post_validation_notes = notes;
