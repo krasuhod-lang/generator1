@@ -1,13 +1,17 @@
 'use strict';
 
 /**
- * DrMax meta-tag generator: переносит ШАГ 3 (Gemini) из Title-v25.html
- * на сервер. Использует общий callGemini-адаптер (с прокси, JSON-strict guard,
- * квотами и ретраями), благодаря чему работает в той же модели/инфраструктуре,
- * что и Stage 3/5/6 основного пайплайна.
+ * DrMax meta-tag generator (v2 spec — Title + Description + H1).
+ * Использует общий callGemini-адаптер (прокси, JSON-strict guard, квоты,
+ * ретраи) — та же модель/инфраструктура, что и Stage 3/5/6 пайплайна.
  *
- * ВАЖНО (требование заказчика): H1 НЕ генерируется — поле полностью убрано
- * из промпта и ответа.
+ * v2 отличия от v1:
+ *   • H1 ВКЛЮЧЁН (≤70 символов, главный ключ, не копия Title);
+ *   • Description: 140–155 символов (раньше 140–160);
+ *   • Бренд — обязательно в середине/конце, телефон — в формате
+ *     +7 (XXX) XXX-XX-XX перед CTA для коммерческих интентов;
+ *   • Анализ ЦА/ниши (analyzeAudienceAndNiche) пробрасывается в
+ *     user-prompt как `[АНАЛИЗ ЦА И НИШИ]`-блок через inputs.audienceNicheDigest.
  */
 
 const { callGemini } = require('../llm/gemini.adapter');
@@ -18,70 +22,90 @@ const { checkLsiUsage } = require('./semantics');
 const TITLE_MIN = 50;
 const TITLE_MAX = 60;
 const DESC_MIN  = 140;
-const DESC_MAX  = 160;
+const DESC_MAX  = 155;
+const H1_MAX    = 70;
 
-const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Data-Driven копирайтер по методологии DrMax.
-Задача: создать идеальные метатеги (Title и Description) — БЕЗ H1, опираясь на семантический анализ ТОП-выдачи и поведенческие сигналы.
+const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Data-Driven копирайтер.
+Задача: создать идеальные мета-теги (Title, Description) и H1 для веб-страницы,
+опираясь на семантический анализ конкурентов и поведенческие факторы.
 
 <Ограничения и правила DrMax>
 
-1. Title (50–60 символов):
-   - Главное ключевое слово в первых 3 словах.
-   - В Title должно поместиться 2–4 «важных слова» из списка (DF ≥ 35%) — это «ядро».
+1. Title (строго 50–60 символов, включая пробелы):
+   - Главный ключ должен быть в первых 3 словах.
+   - Обязательно используй 2–4 «важных слова» из списка.
    - Выбери одну из формул:
      a) «Ключ + выгода + срок/гарантия»
      b) «Регион + ключ + год + цена»
      c) «Сравнение + ключ + преимущество»
-   - Добавь год (если передан) и/или цифру/акцию.
-   - Разделители: вертикальная черта (|), длинное тире (—), скобки. НЕ используй ёлочки («»).
+   - Добавь {current_year} (если передан) или цифру/акцию из {page_context}.
+   - Разделители: вертикальная черта (|), длинное тире (—). НЕ используй
+     ёлочки («»). Только прямые кавычки (").
+   - Пример: «Кредит под залог недвижимости | Ставка от 9% | Одобрение за 24ч»
 
-2. Meta Description (140–160 символов):
+2. Meta Description (строго 140–155 символов, включая пробелы):
    - Законченное предложение (не обрывай на полуслове).
+   - Вплети оставшиеся «важные слова» и 2–3 слова из {lsi_list}.
    - Правило покрытия LSI (приоритет — читаемость и CTR, не «галочка»):
-     * Стремись покрыть ВСЕ «важные слова» (DF ≥ 35%) между Title и Description —
-       по возможности 100%, но НЕ ценой читаемости. Лучше органично упустить
-       1 слово, чем получить переспам или сноску в духе «Также: слово1, слово2».
-       Запрещено: перечисления голых ключевых слов через запятую без смысла,
-       хвосты «Также: …», «Ключи: …», «Теги: …» и подобные SEO-костыли —
-       за такие конструкции поисковик переписывает сниппет, и CTR падает.
-     * «Рекомендуемые» LSI (DF 15–35%): впиши в Description МАКСИМУМ возможных
-       слов из списка, насколько позволяет лимит 160 символов и читаемость.
-       Не оставляй ни одно рекомендуемое слово «за бортом», если оно органично
-       вписывается без нарушения языка и длины.
-   - Добавь E-E-A-T-сигнал: бренд / годы работы / гарантию — если они переданы.
-   - CTA в конце: «Узнайте цены и условия», «Запишитесь онлайн», «Получите расчёт» и т. п.
-   - Бренд (если указан): ОБЯЗАТЕЛЬНО добавь название бренда в Description, в середине или конце предложения. НЕ ставь бренд в самое начало.
-   - Телефон (если указан): если интент transactional или commercial_investigation — добавь телефон в формате +7 (XXX) XXX-XX-XX в конце, перед CTA. Если интент informational или телефон не передан — НЕ добавляй вымышленный номер.
+     стремись покрыть ВСЕ важные слова между Title и Description, но НЕ ценой
+     читаемости. Лучше органично упустить 1 слово, чем получить переспам.
+     ЗАПРЕЩЕНО: перечисления голых ключевых слов через запятую без смысла,
+     хвосты «Также: …», «Ключи: …», «Теги: …» — за такие конструкции
+     поисковик переписывает сниппет, и CTR падает.
+   - Добавь E-E-A-T-сигнал (опыт / экспертность / доверие), если он есть в
+     {page_context}.
+   - Если передан {brand_name}: ОБЯЗАТЕЛЬНО добавь его в середину или конец
+     текста (например: «… от компании "Seniko"»). НЕ ставь бренд в самое начало.
+   - Если определён интент transactional или commercial_investigation И передан
+     {phone_number}: добавь телефон в формате +7 (XXX) XXX-XX-XX в конце,
+     перед CTA.
+   - ОБЯЗАТЕЛЕН CTA (призыв к действию) в самом конце (например: «Узнайте цены!»,
+     «Оставьте заявку онлайн.», «Запишитесь онлайн.»).
+   - Пример: «Нужен кредит под залог? ООО 'Финанс Плюс' выдаёт от 500 тыс. до
+     30 млн. Ставка 9%. Звоните: +7 (495) 123-45-67. Оставьте заявку онлайн.»
 
-3. Интент:
-   - Определи один из: transactional | commercial_investigation | informational | navigational.
-   - Кратко обоснуй (например: «в ТОПе много карточек товаров с ценой»).
+3. H1 (до 70 символов):
+   - Понятный человеку, содержит главный ключ.
+   - НЕ копирует Title один в один — измени порядок слов или используй синоним.
+   - Пример: «Кредит под залог недвижимости — быстрое решение»
 
-4. Анти-галлюцинации:
-   - Не придумывай цены, скидки, гарантии, если их нет во входных данных.
-   - Не используй другой год, кроме переданного. Если год не передан — НЕ добавляй.
-   - Не используй ёлочки («»), только прямые кавычки (").
-   - НЕ генерируй H1 (это поле не нужно).
+4. Изолированный Интент:
+   - Определи ОДИН из четырёх типов:
+     transactional | commercial_investigation | informational | navigational.
+   - Кратко обоснуй выбор.
+
+5. АНТИ-ГАЛЛЮЦИНАЦИИ (КРИТИЧНО):
+   - НЕ придумывай цены, скидки, гарантии, если их нет в {page_context}.
+   - НЕ придумывай телефон, если {phone_number} пуст.
+   - НЕ используй другой год, кроме {current_year}. Если пусто — не пиши год вообще.
+   - Если внутри текста нужны кавычки, используй одинарные ('), чтобы не
+     сломать JSON-парсер.
 
 </Ограничения и правила DrMax>
 
-Выходные данные — строго JSON, без пояснений и markdown-обёрток. Структура:
+Выдай ответ СТРОГО в формате валидного JSON. Без markdown-обёрток (без \`\`\`json),
+без приветствий и пояснений. Твой ответ должен начинаться с символа { и
+заканчиваться символом }.
+
+Структура JSON:
 {
-  "niche_analysis":      "Краткий анализ конкурентной ниши (2-3 предложения)",
+  "niche_analysis":      "Краткий анализ ниши на основе ключа и контекста (2-3 предложения)",
   "intent":              "transactional | commercial_investigation | informational | navigational",
-  "intent_reason":       "почему такой интент",
-  "title":               "твой вариант",
+  "intent_reason":       "почему выбран именно этот интент",
+  "title":               "твой вариант Title",
   "title_length":        число,
-  "description":         "твой вариант",
+  "description":         "твой вариант Description",
   "description_length":  число,
+  "h1":                  "твой вариант H1",
   "used_important_words": ["слово1", "слово2"],
-  "coverage_self_audit": "Самопроверка одной строкой: все ли важные слова из списка покрыты между Title и Description? Если нет — какие пропущены и почему оставлены (например: «не уместилось без переспама»)."
+  "used_lsi_words":      ["слово1", "слово2"],
+  "coverage_self_audit": "Самопроверка одной строкой: все ли важные слова покрыты между Title, Description и H1? Если нет — какие пропущены и почему оставлены (например: 'не уместилось без переспама')."
 }
 
 Перед тем как выдать JSON, мысленно сверь поле coverage_self_audit со списком
-важных слов: пройди по каждому и убедись, что оно встречается в title или
-description. Если какое-то слово пришлось опустить ради читаемости — честно
-напиши это в coverage_self_audit, не подделывай результат.`;
+важных слов: пройди по каждому и убедись, что оно встречается в title /
+description / h1. Если какое-то слово пришлось опустить ради читаемости —
+честно напиши это в coverage_self_audit, не подделывай результат.`;
 
 /**
  * Извлекает год из найденных LSI; если не нашёл — пробует выцепить из первых
@@ -105,28 +129,76 @@ function buildUserPrompt({ keyword, semantics, serpData, inputs, year }) {
     .map((c, i) => `[${i + 1}] ${c.title}`)
     .join('\n');
 
-  return `Аналитика конкурентов:
-- Название/Тема страницы: ${inputs.niche || keyword}
-- Основное ключевое слово: ${keyword}
-- Актуальный год из ТОПа: ${year} (ОБЯЗАТЕЛЬНО используй именно этот год в Title и Description, не придумывай другой!)
-- Важные слова — ИСПОЛЬЗОВАТЬ ВСЕ 100% (распределить между Title и Description, каждое слово ≥1 раз): ${importantWords.join(', ')}
-- Рекомендуемые LSI — ВПИСАТЬ В DESCRIPTION МАКСИМУМ возможных (по длине/читаемости): ${recommendedWords.join(', ')}
-- Общее УТП (если указано): ${inputs.summary || ''}
-- Бренд (только в Description): ${inputs.brand || ''}
-- Регион: ${inputs.toponym || ''}
-- Телефон (только в Description, если интент коммерческий): ${inputs.phone || ''}
+  // Контекст страницы: бизнес-УТП + регион + название ниши.
+  // Это значение подставляется в промпт под именем {page_context}.
+  const pageContextParts = [];
+  if (inputs.niche)    pageContextParts.push(`Тема страницы: ${inputs.niche}`);
+  if (inputs.toponym)  pageContextParts.push(`Регион: ${inputs.toponym}`);
+  if (inputs.summary)  pageContextParts.push(`УТП / факты: ${inputs.summary}`);
+  const pageContext = pageContextParts.join(' | ') || 'Нет данных';
 
-Примеры Title конкурентов (для анализа интента и формул):
-${competitorsTitles}
+  // Опциональный блок: сжатый анализ ЦА и ниши, выполненный один раз на задачу
+  // (см. pipeline.runMetaTagTaskInner → analyzeAudienceAndNiche). Если анализа
+  // нет (отключён, упал или не передан) — блок просто не выводим.
+  const audienceBlock = (inputs.audienceNicheDigest || '').trim()
+    ? `
 
-Создай метатеги строго по методологии DrMax (формулы, E-E-A-T, поведенческие триггеры). H1 НЕ нужен.`;
+[АНАЛИЗ ЦА И НИШИ — выполнен один раз на задачу до написания тегов]
+${inputs.audienceNicheDigest.trim()}`
+    : '';
+
+  return `[ВХОДНЫЕ ДАННЫЕ]
+- Бренд (brand_name): ${inputs.brand || ''}
+- Телефон (phone_number): ${inputs.phone || ''}
+- Год (current_year): ${year}
+- Главный поисковый запрос (target_keyword): ${keyword}
+- Важные слова из ТОП-10 (important_words_list) — ИСПОЛЬЗОВАТЬ ВСЕ, распределить между Title / Description / H1, каждое ≥1 раз: ${importantWords.join(', ')}
+- LSI-слова (lsi_list) — вплести 2–3 в Description, остальное по возможности: ${recommendedWords.join(', ')}
+- Краткий контекст / УТП страницы (page_context): ${pageContext}
+
+Примеры Title конкурентов из ТОП-выдачи (для анализа интента и формул):
+${competitorsTitles}${audienceBlock}
+
+Создай мета-теги строго по правилам DrMax из system-prompt (формулы Title, длины,
+бренд / телефон / CTA в Description, H1 ≤70 символов и не копия Title).`;
 }
 
 /**
- * Постобработка ответа модели: гарантирует длины, бренд, телефон.
- * Покрытие важных LSI здесь НЕ форсируется — этим занимается оркестратор
- * generateDrMaxMeta (retry-вызовом + мягкой подстановкой), чтобы не ломать
- * читаемость Description «костыльными» хвостами вида «Также: …».
+ * Нормализует телефонный номер к виду «+7 (XXX) XXX-XX-XX».
+ *
+ * Поддерживаемые входные форматы:
+ *   • 11-значный с лидирующей 7 или 8: «+74951234567», «8 (495) 123-45-67»
+ *   • 10-значный (без кода страны):     «4951234567»  → достраиваем «7»
+ *
+ * Если на входе мусор / меньше 10 цифр / нероссийский номер — возвращаем
+ * исходную строку (trim), так как промпт явно запрещает выдумывать номер,
+ * а вшивать неполный — хуже, чем оставить как есть.
+ */
+function formatPhoneRu(raw) {
+  const s = String(raw || '');
+  const digits = s.replace(/\D/g, '');
+  let core = digits;
+  if (core.length === 11 && (core.startsWith('7') || core.startsWith('8'))) {
+    core = `7${core.slice(1)}`;
+  } else if (core.length === 10) {
+    core = `7${core}`;
+  } else {
+    // Пустая строка, <10 цифр, >11 цифр или 11 цифр не с 7/8 → не наш формат.
+    return s.trim();
+  }
+  // core = '7XXXXXXXXXX' (11)
+  const a = core.slice(1, 4);
+  const b = core.slice(4, 7);
+  const c = core.slice(7, 9);
+  const d = core.slice(9, 11);
+  return `+7 (${a}) ${b}-${c}-${d}`;
+}
+
+/**
+ * Постобработка ответа модели: гарантирует длины Title/Description/H1, бренд,
+ * телефон. Покрытие важных LSI здесь НЕ форсируется — этим занимается
+ * оркестратор generateDrMaxMeta (retry-вызовом + мягкой подстановкой), чтобы
+ * не ломать читаемость Description «костыльными» хвостами вида «Также: …».
  *
  * @param {object} result — распарсенный JSON от Gemini
  * @param {object} inputs — { niche, brand, toponym, phone, summary }
@@ -142,27 +214,47 @@ function postValidate(result, inputs) {
   }
   if (typeof result.title === 'string') result.title_length = result.title.length;
 
-  // 2. Description: обрезаем по последнему предложению при превышении.
+  // 2. Description: обрезаем по последнему предложению при превышении (DESC_MAX = 155).
   if (typeof result.description === 'string' && result.description.length > DESC_MAX) {
     result.description = trimToLastSentence(result.description, DESC_MAX - 3);
     notes.push(`Description обрезан до ${result.description.length} симв.`);
   }
 
-  // 3. Force brand в Description.
+  // 3. Force brand в Description (новая v2-формулировка: «… от компании "Brand"»),
+  //    но БЕЗ голого «Бренд: X.» хвоста. Если бренд уже есть — не трогаем.
   const brand = (inputs.brand || '').trim();
   if (brand && typeof result.description === 'string' && !result.description.includes(brand)) {
-    result.description = result.description.replace(/\.$/, '') + `. Бренд: ${brand}.`;
-    notes.push(`Бренд «${brand}» добавлен в Description (отсутствовал).`);
+    const insertion = ` от компании "${brand}"`;
+    const stripped = result.description.replace(/[\s.!?]+$/, '');
+    if ((stripped + insertion + '.').length <= DESC_MAX) {
+      result.description = `${stripped}${insertion}.`;
+      notes.push(`Бренд «${brand}» добавлен в Description (отсутствовал).`);
+    } else {
+      notes.push(`⚠️ Бренд «${brand}» не уместился в Description (лимит ${DESC_MAX}).`);
+    }
   }
 
-  // 4. Force phone для коммерческих интентов.
-  const phone = (inputs.phone || '').trim();
+  // 4. Force phone для коммерческих интентов — в формате +7 (XXX) XXX-XX-XX
+  //    перед CTA (по правилу 2 спеки v2).
+  const rawPhone = (inputs.phone || '').trim();
   const isCommercial =
     result.intent === 'transactional' || result.intent === 'commercial_investigation';
-  if (phone && isCommercial && typeof result.description === 'string'
-      && !result.description.includes(phone)) {
-    result.description = result.description.replace(/\.$/, '') + `. Звоните: ${phone}.`;
-    notes.push(`Телефон ${phone} добавлен в Description (коммерческий интент).`);
+  if (rawPhone && isCommercial && typeof result.description === 'string') {
+    const phone = formatPhoneRu(rawPhone);
+    // Считаем «телефон уже есть», если в Description встречается либо
+    // отформатированная, либо сырая (digits-only) форма.
+    const digitsInDesc = result.description.replace(/\D/g, '');
+    const phoneDigits  = phone.replace(/\D/g, '');
+    if (phoneDigits && !digitsInDesc.includes(phoneDigits)) {
+      const insertion = ` Звоните: ${phone}.`;
+      const stripped = result.description.replace(/[\s.!?]+$/, '') + '.';
+      if ((stripped + insertion).length <= DESC_MAX) {
+        result.description = `${stripped}${insertion}`;
+        notes.push(`Телефон ${phone} добавлен в Description (коммерческий интент).`);
+      } else {
+        notes.push(`⚠️ Телефон ${phone} не уместился в Description (лимит ${DESC_MAX}).`);
+      }
+    }
   }
 
   // 5. Финальный контроль длины Description после всех вставок.
@@ -171,8 +263,20 @@ function postValidate(result, inputs) {
   }
   if (typeof result.description === 'string') result.description_length = result.description.length;
 
-  // Удаляем H1, если модель всё-таки сгенерировала (страховка).
-  if ('h1' in result) delete result.h1;
+  // 6. H1 (v2 — поле теперь поддерживается). Жёсткий лимит 70 символов,
+  //    обрезаем по последнему слову при перепреве. Если модель вернула
+  //    Title и H1 идентично — фиксируем замечание (но не правим: это работа
+  //    промпта/retry, копирование ради уникальности нельзя сделать механически
+  //    без потери читаемости).
+  if (typeof result.h1 === 'string' && result.h1.length > H1_MAX) {
+    result.h1 = trimToLastWord(result.h1, H1_MAX);
+    notes.push(`H1 обрезан до ${result.h1.length} симв. (лимит ${H1_MAX}).`);
+  }
+  if (typeof result.h1 === 'string'
+      && typeof result.title === 'string'
+      && result.h1.trim() === result.title.trim()) {
+    notes.push('⚠️ H1 совпадает с Title — желательна перегенерация для уникальности.');
+  }
 
   // На случай, если модель всё-таки сгенерировала «Также: …» хвост сама —
   // снимаем его, оставляем только осмысленную часть Description.
@@ -361,7 +465,8 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 ОРГАНИЧНО (внутри осмысленного предложения, без перечислений через запятую,
 без хвостов «Также: …» / «Ключи: …»). Сохрани:
 - длину Title 50–60 символов,
-- длину Description 140–160 символов,
+- длину Description 140–155 символов,
+- H1 ≤ 70 символов и НЕ копию Title,
 - CTA в конце Description,
 - бренд / телефон / год по тем же правилам, что и раньше.
 
@@ -403,5 +508,6 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
 module.exports = {
   generateDrMaxMeta,
-  TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX,
+  formatPhoneRu,
+  TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX, H1_MAX,
 };

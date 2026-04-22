@@ -22,6 +22,10 @@ const { fetchYandexSerp }    = require('./xmlstockClient');
 const { extractSemantics, checkLsiUsage } = require('./semantics');
 const { generateDrMaxMeta }  = require('./metaGenerator');
 const { calcCost }           = require('../metrics/priceCalculator');
+const {
+  analyzeAudienceAndNiche,
+  serializeAnalysisForPrompt,
+} = require('../parser/audienceNicheAnalyzer');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -106,6 +110,61 @@ async function pushResult(taskId, item) {
   } catch (err) {
     console.error('[metaTags] pushResult failed:', err.message);
   }
+}
+
+/**
+ * Однократный (на задачу) запуск analyzeAudienceAndNiche — той же функции,
+ * что используется в основном SEO-пайплайне (Stage 1 → 3). Адаптирует поля
+ * meta_tag_tasks (niche / brand / toponym / summary) под task-схему,
+ * которую ожидает анализатор (input_target_service / input_brand_name /
+ * input_region / input_brand_facts).
+ *
+ * Возвращает компактный текст-digest для подстановки в user-prompt
+ * метатегов; '' если анализ не дал результата.
+ *
+ * @param {string} taskId
+ * @param {object} task   — строка meta_tag_tasks
+ * @param {object} inputs — { niche, brand, toponym, phone, summary }
+ * @param {Function} onTokens — (adapter, tIn, tOut, costUsd) для агрегации
+ */
+async function runAudienceNicheForMetaTask(taskId, task, inputs, onTokens) {
+  // analyzeAudienceAndNiche ожидает task.input_*-поля основного пайплайна.
+  // Собираем синтетический объект, не трогая оригинальный task.
+  const syntheticTask = {
+    input_target_service: inputs.niche || (Array.isArray(task.keywords) ? task.keywords[0] : '') || 'Нет данных',
+    input_brand_name:     inputs.brand || '',
+    input_business_type:  '',
+    input_region:         inputs.toponym || 'Россия',
+    input_brand_facts:    inputs.summary || '',
+    input_target_audience: '',
+    input_niche_features:  '',
+  };
+
+  const ctx = {
+    taskId,
+    onTokens,
+    log: (msg, type = 'info') => {
+      // Заворачиваем в наш appendLog, не валим задачу при ошибке записи.
+      appendLog(taskId, msg, type === 'success' ? 'ok' : type).catch(() => {});
+    },
+  };
+
+  const analysis = await analyzeAudienceAndNiche(syntheticTask, ctx);
+  if (!analysis) return '';
+
+  const { personasText, nicheDeepDiveText, contentVoiceText, nicheTerminologyText } =
+    serializeAnalysisForPrompt(analysis);
+
+  // Собираем компактный digest: тон + 1-2 инсайта ниши + 1 короткая персона
+  // + термины. Лимит ~1500 символов, чтобы не раздуть Gemini-промпт.
+  const parts = [];
+  if (contentVoiceText)     parts.push(`▸ Тон/голос:\n${contentVoiceText}`);
+  if (nicheDeepDiveText)    parts.push(`▸ Инсайты ниши:\n${nicheDeepDiveText.slice(0, 600)}`);
+  if (personasText)         parts.push(`▸ Ключевая персона ЦА:\n${personasText.slice(0, 500)}`);
+  if (nicheTerminologyText) parts.push(`▸ Терминология ниши: ${nicheTerminologyText.slice(0, 200)}`);
+
+  const digest = parts.join('\n\n').slice(0, 1500);
+  return digest;
 }
 
 /**
@@ -194,6 +253,10 @@ async function runMetaTagTaskInner(taskId) {
     toponym: task.toponym || '',
     phone:   task.phone   || '',
     summary: task.summary || '',
+    // audienceNicheDigest проставляется ниже, после однократного запуска
+    // analyzeAudienceAndNiche на уровне всей задачи (не на каждый ключ —
+    // экономия токенов, цена $0.02-0.05 на одну meta-tag-задачу).
+    audienceNicheDigest: '',
   };
 
   // Локальные агрегаты — чтобы не дёргать SUM из JSONB на каждом ключе.
@@ -201,6 +264,30 @@ async function runMetaTagTaskInner(taskId) {
   let totalTokensOut = 0;
   let totalCostUsd   = 0;
   let modelUsed      = null;
+
+  // ── Однократный анализ ЦА и ниши до генерации тегов ───────────────
+  // Использует ту же логику, что и основной SEO-пайплайн (см. memory о
+  // audienceNicheAnalyzer / Stage 3). Запускаем один раз на задачу: бренд,
+  // регион и тематика страницы общие для всех ключей в этой партии. Если
+  // упадёт — продолжаем без digest, генерация мета-тегов работоспособна.
+  try {
+    const digest = await runAudienceNicheForMetaTask(taskId, task, inputs, (a, tIn, tOut, cost) => {
+      totalTokensIn  += tIn  || 0;
+      totalTokensOut += tOut || 0;
+      totalCostUsd   += cost || 0;
+    });
+    if (digest) {
+      inputs.audienceNicheDigest = digest;
+      await appendLog(taskId,
+        `🧭 Анализ ЦА и ниши готов (${digest.length} симв.)`, 'ok');
+    } else {
+      await appendLog(taskId,
+        '🧭 Анализ ЦА и ниши пропущен — продолжаем без digest', 'info');
+    }
+  } catch (err) {
+    await appendLog(taskId,
+      `🧭 Анализ ЦА и ниши упал (${err.message}) — продолжаем без digest`, 'warn');
+  }
 
   for (let i = 0; i < keywords.length; i += 1) {
     const kw = String(keywords[i] || '').trim();
