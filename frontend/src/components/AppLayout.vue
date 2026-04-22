@@ -9,6 +9,7 @@ const auth   = useAuthStore();
 
 const TABS = [
   { key: 'seo-text',     label: 'Генератор SEO текста',         icon: '📝', path: '/dashboard' },
+  { key: 'copilot',      label: 'AI-Редактор',                  icon: '🤖', path: '/copilot' },
   { key: 'meta-tags',    label: 'Генератор Мета-тегов',         icon: '🏷️', path: '/meta-tags' },
   { key: 'link-article', label: 'Генератор ссылочной статьи',   icon: '🔗', path: '/link-article' },
   { key: 'info-article', label: 'Генератор информационной статьи', icon: '📰', path: '/info-article' },
@@ -19,6 +20,7 @@ const activeTab = computed(() => {
   if (p.startsWith('/meta-tags'))    return 'meta-tags';
   if (p.startsWith('/link-article')) return 'link-article';
   if (p.startsWith('/info-article')) return 'info-article';
+  if (p.startsWith('/copilot') || /\/tasks\/[^/]+\/copilot/.test(p)) return 'copilot';
   return 'seo-text';
 });
 
