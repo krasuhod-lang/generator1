@@ -186,6 +186,26 @@ async function runStream({ operationId, taskId }) {
 
     const finalText = postProcess(result.text);
     const cost      = calcCost('gemini', result.tokensIn || 0, result.tokensOut || 0);
+
+    // Защита: модель вернула 200 OK, но не прислала ни одного текстового фрагмента
+    // (типичные причины: finishReason=SAFETY/RECITATION/MAX_TOKENS на пустом ответе,
+    // promptFeedback.blockReason, либо thinking-модель отдала только thought-части).
+    // Раньше такие случаи фиксировались как status='done' с пустым result_text — фронтенд
+    // получал «успех», но подставлять в выделенный фрагмент было нечего.
+    // Теперь такой исход трактуем как ошибку, чтобы пользователь увидел причину.
+    if (!finalText || !finalText.trim()) {
+      const reasons = [];
+      if (result.blockReason)   reasons.push(`promptFeedback.blockReason=${result.blockReason}`);
+      if (result.safetyBlocked) reasons.push('safetyRatings.blocked');
+      if (result.finishReason)  reasons.push(`finishReason=${result.finishReason}`);
+      reasons.push(`tokens_in=${result.tokensIn || 0}`, `tokens_out=${result.tokensOut || 0}`);
+      const diag = reasons.join(', ');
+      return _failOp(
+        operationId,
+        `Модель вернула пустой ответ (${diag}). Попробуйте переформулировать запрос или уменьшить выделенный фрагмент.`
+      );
+    }
+
     await _finalize(operationId, {
       status:       'done',
       result_text:  finalText,
