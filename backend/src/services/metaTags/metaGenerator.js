@@ -11,6 +11,7 @@
  */
 
 const { callGemini } = require('../llm/gemini.adapter');
+const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
 
 const TITLE_MIN = 50;
@@ -155,6 +156,40 @@ function postValidate(result, inputs) {
 }
 
 /**
+ * parseMetaJson — устойчивый парсер ответа Gemini для метатегов.
+ *
+ * Покрывает реальные кейсы, которые валили DrMax-генератор:
+ *   - markdown-обёртка ```json … ```
+ *   - вступительная фраза «Конечно! Вот ваш JSON: { ... }»
+ *   - обрыв на полпути (MAX_TOKENS) — autoCloseJSON восстановит хвост
+ *   - одинарные кавычки вокруг ключей (модель иногда нарушает JSON-guard)
+ *
+ * При полной невозможности — кидает осмысленную ошибку с фрагментом
+ * сырого текста, чтобы её было видно в логах задачи.
+ */
+function parseMetaJson(rawText) {
+  const raw = String(rawText || '').trim();
+  if (!raw) throw new Error('Gemini вернул пустой ответ');
+
+  // 1) Снимаем markdown fences
+  let t = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+  // 2) Берём срез от первой { до последней }
+  const fb = t.indexOf('{');
+  const lb = t.lastIndexOf('}');
+  if (fb !== -1 && lb > fb) t = t.substring(fb, lb + 1);
+
+  // 3) Прямой JSON.parse
+  try { return JSON.parse(t); } catch (_) { /* fallback */ }
+
+  // 4) autoCloseJSON — восстановление обрыва
+  try { return JSON.parse(autoCloseJSON(t)); } catch (e) {
+    const snippet = raw.slice(0, 240).replace(/\s+/g, ' ');
+    throw new Error(`Gemini вернул не-JSON ответ: ${e.message}. Фрагмент: «${snippet}»`);
+  }
+}
+
+/**
  * Главная функция: генерирует метатеги по одному ключу.
  *
  * @param {object} args
@@ -184,23 +219,19 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
   // callGemini автоматически:
   //   - добавляет JSON-strict guard в systemInstruction
-  //   - идёт через прокси
+  //   - идёт через прокси (PROXY_URLS обязателен — без него throw)
   //   - ретраит при сетевых ошибках / 5xx
-  // Возвращает { text, tokensIn, tokensOut, model } — text это сырой JSON-string.
+  //   - агрегирует все text-части кандидата
+  // Возвращает { text, tokensIn, tokensOut, model, finishReason } — text это
+  // сырой JSON-string. maxTokens увеличен до 8192: gemini-3.x thinking-модель
+  // расходует часть бюджета на «мысли», 2048 порой обрезает JSON по MAX_TOKENS.
   const { text, tokensIn = 0, tokensOut = 0, model = '' } = await callGemini(
     SYSTEM_PROMPT,
     userPrompt,
-    { temperature: 0.4, maxTokens: 2048, timeoutMs: 90000 },
+    { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 },
   );
 
-  let result;
-  try {
-    result = JSON.parse(text);
-  } catch (_) {
-    const m = String(text || '').match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('Gemini вернул не-JSON ответ');
-    result = JSON.parse(m[0]);
-  }
+  const result = parseMetaJson(text);
 
   const { result: validated, notes } = postValidate(result, inputs);
 
