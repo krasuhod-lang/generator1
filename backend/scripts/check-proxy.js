@@ -118,7 +118,7 @@ const DEFAULT_PROXY = {
   pass:  '3ukb66G1',
   proto: 'http',
 };
-const DEFAULT_GEMINI_API_KEY = 'AIzaSyB7crSRTwPocoY31vordEKmQFvEsgD0tLQ';
+const DEFAULT_GEMINI_API_KEY = 'AIzaSyDwtOChNX-B3hLLAdxkSkIkOhWwwRfnmVg';
 
 function resolveProxyUrl(suffix = '') {
   const full = process.env[`GEMINI_PROXY_URL${suffix}`] || '';

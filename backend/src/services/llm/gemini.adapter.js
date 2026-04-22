@@ -104,7 +104,7 @@ const DEFAULT_PROXY = {
   proto: 'http',
 };
 
-const DEFAULT_GEMINI_API_KEY = 'AIzaSyB7crSRTwPocoY31vordEKmQFvEsgD0tLQ';
+const DEFAULT_GEMINI_API_KEY = 'AIzaSyDwtOChNX-B3hLLAdxkSkIkOhWwwRfnmVg';
 
 function resolveProxyUrl(suffix = '') {
   // 1. Полная строка (с автонормализацией формата)
