@@ -37,11 +37,13 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 
 2. Meta Description (140–160 символов):
    - Законченное предложение (не обрывай на полуслове).
-   - КРИТИЧНОЕ правило покрытия LSI:
-     * ВСЕ «важные слова» из списка (DF ≥ 35%), которые не вошли в Title,
-       ОБЯЗАТЕЛЬНО должны появиться в Description. Каждое важное слово должно
-       быть использовано хотя бы один раз — в Title ИЛИ в Description (а в идеале
-       все важные распределены так, чтобы 100% списка покрыто между двумя тегами).
+   - Правило покрытия LSI (приоритет — читаемость и CTR, не «галочка»):
+     * Стремись покрыть ВСЕ «важные слова» (DF ≥ 35%) между Title и Description —
+       по возможности 100%, но НЕ ценой читаемости. Лучше органично упустить
+       1 слово, чем получить переспам или сноску в духе «Также: слово1, слово2».
+       Запрещено: перечисления голых ключевых слов через запятую без смысла,
+       хвосты «Также: …», «Ключи: …», «Теги: …» и подобные SEO-костыли —
+       за такие конструкции поисковик переписывает сниппет, и CTR падает.
      * «Рекомендуемые» LSI (DF 15–35%): впиши в Description МАКСИМУМ возможных
        слов из списка, насколько позволяет лимит 160 символов и читаемость.
        Не оставляй ни одно рекомендуемое слово «за бортом», если оно органично
@@ -72,8 +74,14 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
   "title_length":        число,
   "description":         "твой вариант",
   "description_length":  число,
-  "used_important_words": ["слово1", "слово2"]
-}`;
+  "used_important_words": ["слово1", "слово2"],
+  "coverage_self_audit": "Самопроверка одной строкой: все ли важные слова из списка покрыты между Title и Description? Если нет — какие пропущены и почему оставлены (например: «не уместилось без переспама»)."
+}
+
+Перед тем как выдать JSON, мысленно сверь поле coverage_self_audit со списком
+важных слов: пройди по каждому и убедись, что оно встречается в title или
+description. Если какое-то слово пришлось опустить ради читаемости — честно
+напиши это в coverage_self_audit, не подделывай результат.`;
 
 /**
  * Извлекает год из найденных LSI; если не нашёл — пробует выцепить из первых
@@ -115,15 +123,15 @@ ${competitorsTitles}
 }
 
 /**
- * Постобработка ответа модели: гарантирует длины, бренд, телефон и 100%-е
- * покрытие важных LSI-слов между Title и Description.
- * Возвращает объект с полями notes — список применённых корректировок.
+ * Постобработка ответа модели: гарантирует длины, бренд, телефон.
+ * Покрытие важных LSI здесь НЕ форсируется — этим занимается оркестратор
+ * generateDrMaxMeta (retry-вызовом + мягкой подстановкой), чтобы не ломать
+ * читаемость Description «костыльными» хвостами вида «Также: …».
  *
- * @param {object} result    — распарсенный JSON от Gemini
- * @param {object} inputs    — { niche, brand, toponym, phone, summary }
- * @param {object} semantics — { title_mandatory_words, description_mandatory_words }
+ * @param {object} result — распарсенный JSON от Gemini
+ * @param {object} inputs — { niche, brand, toponym, phone, summary }
  */
-function postValidate(result, inputs, semantics = {}) {
+function postValidate(result, inputs) {
   const notes = [];
 
   // 1. Title: укорачиваем, если перебор. Если короче 50 — оставляем как есть,
@@ -157,45 +165,7 @@ function postValidate(result, inputs, semantics = {}) {
     notes.push(`Телефон ${phone} добавлен в Description (коммерческий интент).`);
   }
 
-  // 5. КРИТИЧНОЕ требование: важные LSI (DF ≥ 35%) — все 100% должны быть
-  //    использованы между Title и Description. Если модель пропустила —
-  //    дописываем недостающие в Description в виде хвоста «Также: word1, word2.»
-  //    (укладываемся в DESC_MAX, иначе trim по предложениям).
-  const importantWords = Array.isArray(semantics.title_mandatory_words)
-    ? semantics.title_mandatory_words : [];
-  if (importantWords.length && typeof result.description === 'string'
-      && typeof result.title === 'string') {
-    const combined = `${result.title} ${result.description}`;
-    const { missed_lsi: missedImportant } = checkLsiUsage(combined, importantWords);
-    if (missedImportant.length) {
-      // Снимаем уже существующий хвост "Также: ...", финальные знаки препинания
-      // и пробелы — чтобы пересобрать его аккуратно с учётом новых слов и
-      // не получить артефактов вида "подробности.. Также:".
-      const baseDesc = result.description
-        .replace(/\.\s*Также:[^.]*\.\s*$/, '')
-        .replace(/[\s.!?]+$/, '');
-      const injected = [];
-      for (const word of missedImportant) {
-        const trySuffix = `. Также: ${[...injected, word].join(', ')}.`;
-        if ((baseDesc + trySuffix).length <= DESC_MAX) {
-          injected.push(word);
-        } else {
-          // Дальше слова уже не влезут, suffix только удлиняется.
-          break;
-        }
-      }
-      if (injected.length) {
-        result.description = baseDesc + `. Также: ${injected.join(', ')}.`;
-        notes.push(`В Description дописаны пропущенные важные LSI: ${injected.join(', ')}.`);
-      }
-      const stillMissed = missedImportant.filter((w) => !injected.includes(w));
-      if (stillMissed.length) {
-        notes.push(`⚠️ Не уместились в лимит ${DESC_MAX} важные LSI: ${stillMissed.join(', ')}.`);
-      }
-    }
-  }
-
-  // 6. Финальный контроль длины Description после всех вставок.
+  // 5. Финальный контроль длины Description после всех вставок.
   if (typeof result.description === 'string' && result.description.length > DESC_MAX) {
     result.description = trimToLastSentence(result.description, DESC_MAX - 3);
   }
@@ -204,7 +174,60 @@ function postValidate(result, inputs, semantics = {}) {
   // Удаляем H1, если модель всё-таки сгенерировала (страховка).
   if ('h1' in result) delete result.h1;
 
+  // На случай, если модель всё-таки сгенерировала «Также: …» хвост сама —
+  // снимаем его, оставляем только осмысленную часть Description.
+  if (typeof result.description === 'string'
+      && /\.\s*Также:[^.]*\.\s*$/i.test(result.description)) {
+    result.description = result.description
+      .replace(/\.\s*Также:[^.]*\.\s*$/i, '')
+      .replace(/[\s.!?]+$/, '') + '.';
+    result.description_length = result.description.length;
+    notes.push('Удалён хвост «Также: …» из Description (это переспам, снижает CTR).');
+  }
+
   return { result, notes };
+}
+
+/**
+ * Мягкая «последняя соломинка»: если после двух Gemini-попыток в Description
+ * всё ещё пропущены важные LSI — пробуем вставить их в существующий
+ * перечислительный ряд (после первой запятой), чтобы грамматика осталась
+ * корректной. Триггер — наличие запятой в Description: только тогда
+ * добавление «, WORD» читается как продолжение списка, а не как костыль.
+ *
+ * Если в Description нет запятой — НЕ трогаем текст: лучше зафиксировать
+ * пропуск в notes, чем испортить CTR неестественной концовкой.
+ *
+ * @returns {{description: string, injected: string[]}}
+ */
+function trySoftLsiInjection(description, missedWords) {
+  if (typeof description !== 'string' || !description) {
+    return { description, injected: [] };
+  }
+  if (!Array.isArray(missedWords) || !missedWords.length) {
+    return { description, injected: [] };
+  }
+  // Нужна хотя бы одна запятая, чтобы новые слова продолжили существующий
+  // ряд однородных членов и не выглядели как ярлыки/теги.
+  if (!/,\s/.test(description)) {
+    return { description, injected: [] };
+  }
+
+  let base = description.replace(/[\s.!?]+$/, '');
+  const injected = [];
+  for (const word of missedWords) {
+    const candidate = `${base}, ${word}`;
+    const candidateWithPeriod = `${candidate}.`;
+    if (candidateWithPeriod.length <= DESC_MAX) {
+      base = candidate;
+      injected.push(word);
+    } else {
+      // suffix только удлиняется — следующие слова тоже не влезут
+      break;
+    }
+  }
+  if (!injected.length) return { description, injected: [] };
+  return { description: `${base}.`, injected };
 }
 
 /**
@@ -244,53 +267,138 @@ function parseMetaJson(rawText) {
 /**
  * Главная функция: генерирует метатеги по одному ключу.
  *
+ * Стратегия покрытия важных LSI (DF ≥ 35%) — три ступени по убыванию качества:
+ *   1) Первый Gemini-вызов с self-audit полем (Chain-of-Verification в один запрос).
+ *   2) Если важные слова всё-таки пропущены — второй Gemini-вызов с явным
+ *      корректирующим блоком в user-prompt («не использованы: X, Y — перепиши
+ *      органично»). DSPy-style self-correction, как в TZ-extractor.
+ *   3) Если и после второй попытки слова пропущены — мягкая подстановка в
+ *      существующий перечислительный ряд Description (только при наличии
+ *      запятой). Что не помещается / не вписывается — фиксируется в
+ *      post_validation_notes с маркером ⚠️, текст не корраптится.
+ *
  * @param {object} args
  * @param {string} args.keyword
  * @param {object} args.semantics  — результат extractSemantics()
  * @param {Array}  args.serpData
  * @param {object} args.inputs     — { niche, brand, toponym, phone, summary }
- * @returns {Promise<{
- *   niche_analysis: string,
- *   intent: string,
- *   intent_reason: string,
- *   title: string,
- *   title_length: number,
- *   description: string,
- *   description_length: number,
- *   used_important_words: string[],
- *   detected_year: string,
- *   post_validation_notes: string[],
- * }>}
+ * @returns {Promise<object>}
  */
 async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
   const importantWords   = (semantics.title_mandatory_words       || []).slice(0, 6);
   const recommendedWords = (semantics.description_mandatory_words || []).slice(0, 10);
   const year = detectYear(importantWords, recommendedWords, serpData);
 
-  const userPrompt = buildUserPrompt({ keyword, semantics, serpData, inputs, year });
+  const baseUserPrompt = buildUserPrompt({ keyword, semantics, serpData, inputs, year });
 
-  // callGemini автоматически:
-  //   - добавляет JSON-strict guard в systemInstruction
-  //   - идёт через прокси (PROXY_URLS обязателен — без него throw)
-  //   - ретраит при сетевых ошибках / 5xx
-  //   - агрегирует все text-части кандидата
-  // Возвращает { text, tokensIn, tokensOut, model, finishReason } — text это
-  // сырой JSON-string. maxTokens увеличен до 8192: gemini-3.x thinking-модель
-  // расходует часть бюджета на «мысли», 2048 порой обрезает JSON по MAX_TOKENS.
-  const { text, tokensIn = 0, tokensOut = 0, model = '' } = await callGemini(
-    SYSTEM_PROMPT,
-    userPrompt,
-    { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 },
-  );
+  const MAX_ATTEMPTS = 2; // первый вызов + один retry «с уточнением»
+  const allNotes = [];
+  let result = null;
+  let lastMissed = [];
+  let totalTokensIn = 0;
+  let totalTokensOut = 0;
+  let model = '';
+  let attemptsMade = 0;
+  let userPrompt = baseUserPrompt;
 
-  const result = parseMetaJson(text);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    attemptsMade = attempt;
+    // callGemini автоматически: JSON-strict guard в systemInstruction, прокси,
+    // ретраи на сетевых/5xx/429, агрегация text-частей. maxTokens=8192:
+    // gemini-3.x thinking-модель тратит часть бюджета на «мысли».
+    const callRes = await callGemini(
+      SYSTEM_PROMPT,
+      userPrompt,
+      { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 },
+    );
+    totalTokensIn  += callRes.tokensIn  || 0;
+    totalTokensOut += callRes.tokensOut || 0;
+    model = callRes.model || model;
 
-  const { result: validated, notes } = postValidate(result, inputs, semantics);
+    const parsed = parseMetaJson(callRes.text);
+    const { result: validated, notes } = postValidate(parsed, inputs);
+    result = validated;
+    if (attempt > 1) allNotes.push(`— Попытка ${attempt} (перегенерация) —`);
+    allNotes.push(...notes);
 
-  validated.detected_year = year;
-  validated.post_validation_notes = notes;
-  validated._meta = { model, tokensIn, tokensOut };
-  return validated;
+    // Проверяем покрытие важных LSI между Title и Description.
+    if (!importantWords.length
+        || typeof result.title !== 'string'
+        || typeof result.description !== 'string') {
+      lastMissed = [];
+      break;
+    }
+    const combined = `${result.title} ${result.description}`;
+    const { missed_lsi } = checkLsiUsage(combined, importantWords);
+    lastMissed = missed_lsi;
+
+    if (!lastMissed.length) break;
+    if (attempt === MAX_ATTEMPTS) {
+      allNotes.push(
+        `Попытка ${attempt}: после перегенерации остались непокрытые важные LSI: `
+        + `${lastMissed.join(', ')}.`,
+      );
+      break;
+    }
+
+    allNotes.push(
+      `Попытка ${attempt}: пропущены важные LSI: ${lastMissed.join(', ')}. `
+      + 'Запрашиваем органичную перегенерацию у Gemini.',
+    );
+
+    // Корректирующий блок к user-prompt: явно перечисляем пропущенные слова и
+    // запрещаем «костыли» (хвосты «Также: …», голые перечисления).
+    userPrompt = `${baseUserPrompt}
+
+=== УТОЧНЕНИЕ К ПРЕДЫДУЩЕМУ ОТВЕТУ ===
+Предыдущая версия ответа:
+- Title: ${result.title}
+- Description: ${result.description}
+
+В ней НЕ использованы обязательные «важные слова»: ${lastMissed.join(', ')}.
+
+Перепиши Title и Description так, чтобы каждое из этих слов появилось
+ОРГАНИЧНО (внутри осмысленного предложения, без перечислений через запятую,
+без хвостов «Также: …» / «Ключи: …»). Сохрани:
+- длину Title 50–60 символов,
+- длину Description 140–160 символов,
+- CTA в конце Description,
+- бренд / телефон / год по тем же правилам, что и раньше.
+
+Если какое-то слово невозможно вписать без переспама или нарушения
+читаемости — лучше честно опусти его (отметь это в coverage_self_audit),
+чем испортить сниппет ради «галочки».`;
+  }
+
+  // Ступень 3 — мягкая подстановка как «последняя соломинка».
+  if (lastMissed.length) {
+    const soft = trySoftLsiInjection(result.description, lastMissed);
+    if (soft.injected.length) {
+      result.description = soft.description;
+      result.description_length = result.description.length;
+      allNotes.push(
+        `Мягко вшиты в существующий ряд Description пропущенные LSI: `
+        + `${soft.injected.join(', ')}.`,
+      );
+    }
+    const stillMissed = lastMissed.filter((w) => !soft.injected.includes(w));
+    if (stillMissed.length) {
+      allNotes.push(
+        `⚠️ Не удалось органично вписать важные LSI (оставлены ради читаемости/CTR): `
+        + `${stillMissed.join(', ')}. SEO-специалист может решить, нужны ли они для этого ключа.`,
+      );
+    }
+  }
+
+  result.detected_year = year;
+  result.post_validation_notes = allNotes;
+  result._meta = {
+    model,
+    tokensIn: totalTokensIn,
+    tokensOut: totalTokensOut,
+    attempts: attemptsMade,
+  };
+  return result;
 }
 
 module.exports = {
