@@ -42,7 +42,7 @@ onMounted(async () => {
     blocks.value  = data.blocks  || [];
     metrics.value = data.metrics || {};
     verdict.value = data.task?.stage7_result || null;
-    fullHtml.value = data.task?.full_html || '';
+    fullHtml.value = data.task?.full_html_edited || data.task?.full_html || '';
   } catch (e) {
     error.value = e.response?.data?.error || e.message || 'Ошибка загрузки результата';
   } finally {
@@ -51,9 +51,12 @@ onMounted(async () => {
 });
 
 // ── Вычисляемые метрики ────────────────────────────────────────────────────
-const lsiCoverage = computed(() => metrics.value?.lsi_coverage  ?? 0);
-const eeatScore   = computed(() => metrics.value?.eeat_score    ?? 0);
-const bm25Score   = computed(() => metrics.value?.bm25_score    ?? 0);
+// ВАЖНО: PostgreSQL NUMERIC возвращается из node-pg как строка ('0.000000'),
+// поэтому без явного Number(...) последующий `.toFixed(...)` падает с TypeError
+// и вся страница рендерится пустой. Все денежные/метрические поля приводим к Number здесь.
+const lsiCoverage = computed(() => Number(metrics.value?.lsi_coverage ?? 0));
+const eeatScore   = computed(() => Number(metrics.value?.eeat_score   ?? 0));
+const bm25Score   = computed(() => Number(metrics.value?.bm25_score   ?? 0));
 const tfidfStatus = computed(() => {
   const s = verdict.value?.global_audit?.tfidf_spam_report;
   if (!s) return { label: 'OK', cls: 'bg-green-900 text-green-300' };
@@ -63,14 +66,18 @@ const tfidfStatus = computed(() => {
   return { label: `${violations} нарушений`, cls: 'bg-red-900 text-red-300' };
 });
 
-const deepseekIn   = computed(() => metrics.value?.deepseek_tokens_in  ?? 0);
-const deepseekOut  = computed(() => metrics.value?.deepseek_tokens_out ?? 0);
-const deepseekCost = computed(() => metrics.value?.deepseek_cost_usd   ?? 0);
-const geminiIn     = computed(() => metrics.value?.gemini_tokens_in    ?? 0);
-const geminiOut    = computed(() => metrics.value?.gemini_tokens_out   ?? 0);
-const geminiCost   = computed(() => metrics.value?.gemini_cost_usd     ?? 0);
-const totalTokens  = computed(() => metrics.value?.total_tokens ?? (deepseekIn.value + deepseekOut.value + geminiIn.value + geminiOut.value));
-const totalCost    = computed(() => metrics.value?.total_cost_usd ?? (deepseekCost.value + geminiCost.value));
+const deepseekIn   = computed(() => Number(metrics.value?.deepseek_tokens_in  ?? 0));
+const deepseekOut  = computed(() => Number(metrics.value?.deepseek_tokens_out ?? 0));
+const deepseekCost = computed(() => Number(metrics.value?.deepseek_cost_usd   ?? 0));
+const geminiIn     = computed(() => Number(metrics.value?.gemini_tokens_in    ?? 0));
+const geminiOut    = computed(() => Number(metrics.value?.gemini_tokens_out   ?? 0));
+const geminiCost   = computed(() => Number(metrics.value?.gemini_cost_usd     ?? 0));
+const totalTokens  = computed(() => Number(metrics.value?.total_tokens ?? (deepseekIn.value + deepseekOut.value + geminiIn.value + geminiOut.value)));
+const totalCost    = computed(() => {
+  const t = metrics.value?.total_cost_usd;
+  if (t !== undefined && t !== null) return Number(t);
+  return deepseekCost.value + geminiCost.value;
+});
 
 // ── Время генерации ────────────────────────────────────────────────────────
 const generationTime = computed(() => {

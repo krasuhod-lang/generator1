@@ -8,12 +8,20 @@ const { buildPrompt, postProcess } = require('./promptBuilder');
 const { getPreset } = require('./actionPresets');
 
 /**
- * Default model для AI-Copilot редактора. ТЗ требует gemini-3.10-pro-preview;
- * можно переопределить через .env EDITOR_COPILOT_MODEL.
- * Если выбранная модель недоступна / не отвечает — gemini.adapter сам кинет ошибку,
- * которая через streamRunner пробросится в SSE-событие 'error'.
+ * Default model для AI-Copilot редактора.
+ *
+ * По требованию: «логика генерации работает ровно также, как и в создании текстов».
+ * Поэтому модель по умолчанию берётся из GEMINI_MODEL (тот же ключ окружения,
+ * что и в основном пайплайне Stage 3/5/6). Это гарантирует, что прокси/ключ/модель
+ * у редактора совпадают с теми, что уже работают в генерации текстов.
+ *
+ * При желании можно переопределить отдельной переменной EDITOR_COPILOT_MODEL,
+ * но дефолт намеренно следует за основной моделью пайплайна.
  */
-const COPILOT_MODEL = process.env.EDITOR_COPILOT_MODEL || 'gemini-3.10-pro-preview';
+const COPILOT_MODEL =
+  process.env.EDITOR_COPILOT_MODEL ||
+  process.env.GEMINI_MODEL ||
+  'gemini-3.1-pro-preview';
 
 // После завершения операции держим её в in-memory регистре ещё 30 секунд,
 // чтобы поздние подписчики (например, автоматический реконнект EventSource

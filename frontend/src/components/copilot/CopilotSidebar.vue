@@ -8,6 +8,31 @@ const presetMeta = computed(() => store.presets.find(p => p.action === store.act
 
 const showSelectionField  = computed(() => presetMeta.value?.needsSelected);
 const showKeywordField    = computed(() => presetMeta.value?.needsExtra && (presetMeta.value?.extraSchema?.keyword));
+
+// Для каких action user_prompt обязателен (зеркалит actionPresets.validateRequest на бэке).
+const PROMPT_REQUIRED = new Set(['factcheck', 'expand_section', 'custom']);
+
+// Детерминированная проверка перед POST: возвращает текст ошибки или null.
+// Зеркалит серверную валидацию, чтобы пользователь видел подсказку до клика
+// и кнопка не «моргала ошибкой» из-за обычного отсутствия данных.
+const validationHint = computed(() => {
+  const meta = presetMeta.value;
+  if (!meta) return null;
+  if (meta.needsSelected && !(store.selectedText || '').trim()) {
+    return 'Выделите фрагмент в редакторе слева';
+  }
+  if (PROMPT_REQUIRED.has(store.action) && !(store.userPrompt || '').trim()) {
+    return 'Заполните комментарий / промпт';
+  }
+  if (meta.needsExtra && meta.extraSchema?.keyword
+      && !((store.extraParams?.keyword) || '').toString().trim()) {
+    return 'Укажите слово-переспам';
+  }
+  return null;
+});
+
+const canSubmit = computed(() => !store.isBusy && !validationHint.value);
+
 const promptPlaceholder   = computed(() => {
   switch (store.action) {
     case 'factcheck':      return 'Например: «Замени Анапу на Геленджик»';
@@ -21,14 +46,26 @@ const promptPlaceholder   = computed(() => {
 });
 
 async function onSubmit() {
+  // Дополнительная страховка: если по какой-то причине canSubmit=false (например,
+  // валидация перешла в false уже после клика, до отправки) — не уходим в бэк.
+  if (validationHint.value) {
+    store.logs.push({
+      ts: new Date().toISOString(),
+      level: 'warn',
+      message: validationHint.value,
+    });
+    return;
+  }
   try {
     await store.startOperation();
   } catch (e) {
+    const msg = e?.response?.data?.error || e?.message || 'Не удалось запустить операцию';
     store.logs.push({
       ts: new Date().toISOString(),
       level: 'error',
-      message: e.response?.data?.error || e.message,
+      message: msg,
     });
+    store.lastError    = msg;
     store.currentStatus = 'error';
   }
 }
@@ -95,7 +132,9 @@ async function onSubmit() {
       <button
         v-if="!store.isBusy"
         @click="onSubmit"
-        class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-md py-2 transition-colors"
+        :disabled="!canSubmit"
+        :title="validationHint || ''"
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 disabled:text-gray-400 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-md py-2 transition-colors"
       >Сгенерировать</button>
       <button
         v-else
@@ -114,6 +153,16 @@ async function onSubmit() {
         </svg>
       </button>
     </div>
+
+    <!-- Подсказка по незаполненным полям (видна заранее, чтобы клик не валился ошибкой) -->
+    <p v-if="validationHint && !store.isBusy" class="text-xs text-yellow-500">
+      {{ validationHint }}
+    </p>
+
+    <!-- Конкретная ошибка с бэка / сети -->
+    <p v-if="store.currentStatus === 'error' && store.lastError" class="text-xs text-red-400 break-words">
+      {{ store.lastError }}
+    </p>
 
     <!-- Status text -->
     <p

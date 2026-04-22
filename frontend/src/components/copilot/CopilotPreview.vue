@@ -44,8 +44,10 @@ function dismiss()      { store.previewVisible = false; store.streamingText = ''
       Стрим в процессе…
     </div>
 
-    <div v-else-if="store.currentStatus === 'error'" class="text-xs text-red-400">
-      Ошибка генерации. Откройте журнал событий для деталей.
+    <div v-else-if="store.currentStatus === 'error'" class="text-xs text-red-400 break-words">
+      <p class="font-semibold">Ошибка генерации</p>
+      <p v-if="store.lastError" class="mt-1">{{ store.lastError }}</p>
+      <p v-else class="mt-1">Откройте журнал событий для деталей.</p>
     </div>
   </div>
 </template>
