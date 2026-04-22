@@ -116,14 +116,15 @@ async function pushResult(taskId, item) {
  * @param {string} taskId
  */
 async function processMetaTagTask(taskId) {
-  // Лимитируем общее число одновременно бегущих задач. Если очередь занята —
-  // ставим задачу в pending-ожидание (status уже 'pending', чтобы UI это видел).
-  const slotPromise = acquireSlot(taskId);
-  if (runningCount > MAX_CONCURRENT_TASKS || waitQueue.some((w) => w.taskId === taskId)) {
+  // Лимитируем общее число одновременно бегущих задач. Если все слоты заняты —
+  // встаём в FIFO-очередь. Проверку «идём в очередь?» делаем ДО acquireSlot,
+  // чтобы лог отражал реальное состояние, а не уже-инкрементированный счётчик.
+  const willQueue = runningCount >= MAX_CONCURRENT_TASKS;
+  if (willQueue) {
     await appendLog(taskId,
       `⏳ Задача в очереди: уже выполняется ${MAX_CONCURRENT_TASKS} задач(и).`, 'info');
   }
-  await slotPromise;
+  await acquireSlot(taskId);
 
   try {
     await runMetaTagTaskInner(taskId);
