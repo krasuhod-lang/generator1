@@ -122,13 +122,19 @@ function clip(s, max) {
 
 function stripToText(html, max) {
   if (!html) return '';
+  // ВНИМАНИЕ: первым шагом расшифровываем &amp; → &, иначе следующие замены
+  // (&lt; → <, &gt; → >) могут «удвоить» расшифровку строк типа &amp;lt;
+  // и неправильно превратить их в <. Делаем escape-замены ПОСЛЕ &amp;.
+  // Регэксп для script/style допускает пробелы перед `>` (`</script >`),
+  // чтобы не оставить инлайновый JS в выжимке для LLM-промпта.
   const text = String(html)
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script\b[\s\S]*?<\/script\s*>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style\s*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim();
   return text.length > max ? text.slice(0, max) + ' …[обрезано]' : text;

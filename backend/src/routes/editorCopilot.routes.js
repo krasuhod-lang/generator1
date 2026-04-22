@@ -37,23 +37,34 @@ const createLimiter = rateLimit({
   message: { error: 'Слишком много запросов к AI-Copilot. Попробуйте через минуту.' },
 });
 
+// Общий read-лимитер для остальных endpoint'ов (включая SSE) —
+// 240/мин/IP. Достаточно для интерактивного UI с автообновлениями,
+// но защищает от боттов и accidental loops в клиенте.
+const readLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max:      240,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Слишком много запросов к AI-Copilot. Попробуйте позже.' },
+});
+
 // Презенты + модель
-router.get('/presets', authMiddleware, getPresets);
+router.get('/presets', authMiddleware, readLimiter, getPresets);
 
 // Сессия и список операций
-router.get('/:taskId/session',                authMiddleware, getSession);
-router.get('/:taskId/operations',             authMiddleware, listOperations);
-router.get('/:taskId/operations/:opId',       authMiddleware, getOperation);
+router.get('/:taskId/session',                authMiddleware, readLimiter, getSession);
+router.get('/:taskId/operations',             authMiddleware, readLimiter, listOperations);
+router.get('/:taskId/operations/:opId',       authMiddleware, readLimiter, getOperation);
 
 // Создание / отмена / применение
 router.post('/:taskId/operations',            authMiddleware, createLimiter, createOperation);
-router.post('/:taskId/operations/:opId/cancel', authMiddleware, cancelOperation);
-router.post('/:taskId/operations/:opId/apply',  authMiddleware, applyOperation);
+router.post('/:taskId/operations/:opId/cancel', authMiddleware, readLimiter, cancelOperation);
+router.post('/:taskId/operations/:opId/apply',  authMiddleware, readLimiter, applyOperation);
 
 // Ручное сохранение HTML после правок руками (без AI-операции)
-router.post('/:taskId/html-edited',           authMiddleware, saveEditedHtml);
+router.post('/:taskId/html-edited',           authMiddleware, readLimiter, saveEditedHtml);
 
 // SSE-стрим — в отдельном authSSE
-router.get('/:taskId/operations/:opId/stream', authSSE, streamOperation);
+router.get('/:taskId/operations/:opId/stream', authSSE, readLimiter, streamOperation);
 
 module.exports = router;
