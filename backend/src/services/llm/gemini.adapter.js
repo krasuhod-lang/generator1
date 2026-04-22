@@ -104,7 +104,19 @@ const DEFAULT_PROXY = {
   proto: 'http',
 };
 
-const DEFAULT_GEMINI_API_KEY = 'AIzaSyDwtOChNX-B3hLLAdxkSkIkOhWwwRfnmVg';
+// Gemini API key загружается ИСКЛЮЧИТЕЛЬНО из process.env.GEMINI_API_KEY
+// (см. .env / docker-compose env_file). Хардкод запрещён — Google Secret Scanning
+// автоматически отзывает ключи, найденные в публичных репозиториях.
+function requireGeminiApiKey() {
+  const k = (process.env.GEMINI_API_KEY || '').trim();
+  if (!k) {
+    throw new Error(
+      'GEMINI_API_KEY не задан. Добавьте его в .env (см. .env.example) — ' +
+      'ключ нужен для генерации SEO-контента, AI-редактора и мета-тегов.'
+    );
+  }
+  return k;
+}
 
 function resolveProxyUrl(suffix = '') {
   // 1. Полная строка (с автонормализацией формата)
@@ -200,10 +212,13 @@ function logProxyDiagnostics() {
 async function testProxyConnectivity() {
   if (PROXY_URLS.length === 0) return;
 
-  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
-  if (!process.env.GEMINI_API_KEY) {
-    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан в env — используем встроенный ключ для теста');
+  // Если ключ не задан — пропускаем проверку прокси (сам сервис всё равно
+  // упадёт с понятной ошибкой при первой генерации).
+  if (!(process.env.GEMINI_API_KEY || '').trim()) {
+    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан — пропускаем тест прокси');
+    return;
   }
+  const apiKey = requireGeminiApiKey();
 
   // Лёгкий запрос — список моделей (не тратит токены)
   const testUrl = `${GEMINI_BASE_URL}?key=${apiKey}`;
@@ -344,11 +359,8 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
   if (timeoutMs < 1000 || timeoutMs > 300000) throw new Error('Invalid timeout');
 
-  // API ключ Gemini — из переменной окружения или встроенный fallback
-  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
-  if (!process.env.GEMINI_API_KEY) {
-    console.warn('[gemini] ⚠ GEMINI_API_KEY не задан в env — используем встроенный ключ');
-  }
+  // API ключ Gemini — только из переменной окружения (без хардкода)
+  const apiKey = requireGeminiApiKey();
 
   const endpoint = `${GEMINI_BASE_URL}/${model}:generateContent?key=${apiKey}`;
 
@@ -647,7 +659,7 @@ async function streamGenerate(systemInstruction, userPrompt, options = {}) {
     throw new Error('streamGenerate: GEMINI_PROXY не задан');
   }
 
-  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+  const apiKey = requireGeminiApiKey();
   const endpoint = `${GEMINI_BASE_URL}/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const payload = {
@@ -942,7 +954,7 @@ async function createCachedContent({ systemInstruction, ttlSeconds = 900, timeou
     throw new Error('createCachedContent: GEMINI_PROXY не задан');
   }
 
-  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+  const apiKey = requireGeminiApiKey();
 
   // Endpoint для cachedContents: /v1beta/cachedContents
   // GEMINI_BASE_URL заканчивается на /v1beta/models — отрезаем «/models»
@@ -1007,7 +1019,7 @@ async function deleteCachedContent(cacheName, timeoutMs = 20000) {
   if (!cacheName || typeof cacheName !== 'string') return false;
   if (PROXY_URLS.length === 0) return false;
 
-  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+  const apiKey = requireGeminiApiKey();
   const baseRoot = GEMINI_BASE_URL.replace(/\/models$/, '');
   const endpoint = `${baseRoot}/${cacheName}?key=${apiKey}`;
 
