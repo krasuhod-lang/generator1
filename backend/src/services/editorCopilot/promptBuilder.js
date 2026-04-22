@@ -180,7 +180,10 @@ function validateOutput(action, ctx, request, finalText) {
 
   switch (action) {
     case 'factcheck': {
-      // Длина ±15 % от исходного фрагмента
+      // Промпт требует ±15 %, но валидация использует ±30 % — это «зона
+      // допуска» перед корректирующим ретраем: даём модели небольшой
+      // запас по форме, чтобы не отправлять её на ретрай за пограничные
+      // отклонения. Жёсткие требования прописаны в самом промпте.
       if (selectedLen > 0) {
         if (txt.length < selectedLen * 0.7) {
           issues.push(
@@ -242,6 +245,8 @@ function validateOutput(action, ctx, request, finalText) {
     }
 
     case 'enrich_lsi': {
+      // Цель промпта: +20 % максимум. Валидация рубит на +30 % — оставляем
+      // 10 % буфер перед ретраем (см. комментарий выше для factcheck).
       if (selectedLen > 0 && txt.length > selectedLen * 1.30) {
         issues.push(
           `Длина ответа выросла более чем на 30 % (${txt.length} vs ${selectedLen}). ` +
@@ -271,13 +276,16 @@ function validateOutput(action, ctx, request, finalText) {
       if (/<a\s[^>]*href=/i.test(txt)) {
         issues.push('Найден тег <a href=...>. Внешние и внутренние ссылки запрещены — удали их.');
       }
+      // Промпт требует 350–700 слов; валидация рубит за пределами 250–900,
+      // оставляя ~30 % буфер перед ретраем (модели часто промахиваются по
+      // объёму на ±15 %, и такой ответ всё ещё лучше, чем ретрай-без-нужды).
       const cleanText = stripToText(txt, 50_000);
       const wordCount = (cleanText.match(/\S+/g) || []).length;
       if (wordCount < 250) {
-        issues.push(`Слишком короткий раздел: ${wordCount} слов. Минимум — 350.`);
+        issues.push(`Слишком короткий раздел: ${wordCount} слов. Цель — 350–700 (минимум для приёма — 250).`);
       }
       if (wordCount > 900) {
-        issues.push(`Слишком длинный раздел: ${wordCount} слов. Максимум — 700.`);
+        issues.push(`Слишком длинный раздел: ${wordCount} слов. Цель — 350–700 (максимум для приёма — 900).`);
       }
       break;
     }
@@ -293,6 +301,9 @@ function validateOutput(action, ctx, request, finalText) {
           );
         }
       }
+      // anti_spam допускает чуть больший «сжим» (до −40 %) по сравнению с
+      // factcheck (−30 %): замены на местоимения и анафоры объективно
+      // сокращают текст сильнее, чем точечная подмена факта.
       if (selectedLen > 0 && txt.length < selectedLen * 0.6) {
         issues.push(
           `Ответ значительно короче исходного фрагмента (${txt.length} vs ${selectedLen}). ` +
