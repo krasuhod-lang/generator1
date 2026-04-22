@@ -24,6 +24,7 @@ const authRoutes  = require('./src/routes/auth.routes');
 const tasksRoutes = require('./src/routes/tasks.routes');
 const adminRoutes = require('./src/routes/admin.routes');
 const editorCopilotRoutes = require('./src/routes/editorCopilot.routes');
+const metaTagsRoutes      = require('./src/routes/metaTags.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -97,6 +98,7 @@ app.use('/api/auth',  authRoutes);
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/editor-copilot', editorCopilotRoutes);
+app.use('/api/meta-tags',      metaTagsRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -156,6 +158,14 @@ const start = async () => {
 
     // Auto-seed администратора из ENV
     await seedAdmin();
+
+    // После рестарта переводим зависшие meta-tag-задачи в error
+    try {
+      const { recoverStuckMetaTagTasks } = require('./src/services/metaTags/pipeline');
+      await recoverStuckMetaTagTasks();
+    } catch (err) {
+      console.warn('[Server] Meta-tag recovery skipped:', err.message);
+    }
 
     app.listen(PORT, () => {
       console.log(`[Server] SEO Genius v4.0 running on port ${PORT} [${process.env.NODE_ENV}]`);
@@ -299,6 +309,47 @@ async function ensureSchema() {
         END IF;
       END$$;
     `);
+
+    // ─── Migration 008: Bulk Meta-Tag Generator (DrMax v25) ──────────
+    // Идемпотентно создаём ENUM meta_tag_task_status и таблицу
+    // meta_tag_tasks (хранит входные параметры, ход и результаты bulk-
+    // генерации Title+Description по списку ключей через XMLStock + Gemini).
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'meta_tag_task_status') THEN
+          CREATE TYPE meta_tag_task_status AS ENUM (
+            'pending','in_progress','done','error','cancelled'
+          );
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS meta_tag_tasks (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name             TEXT NOT NULL,
+        niche            TEXT,
+        lr               TEXT,
+        toponym          TEXT,
+        brand            TEXT,
+        phone            TEXT,
+        summary          TEXT,
+        keywords         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        status           meta_tag_task_status NOT NULL DEFAULT 'pending',
+        progress_current INTEGER NOT NULL DEFAULT 0,
+        progress_total   INTEGER NOT NULL DEFAULT 0,
+        active_keyword   TEXT,
+        error_message    TEXT,
+        results          JSONB NOT NULL DEFAULT '[]'::jsonb,
+        logs             JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at       TIMESTAMPTZ,
+        completed_at     TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_user_created ON meta_tag_tasks (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_status ON meta_tag_tasks (status)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
