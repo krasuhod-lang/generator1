@@ -41,6 +41,11 @@ function normalizeWord(word) {
   if (word.startsWith('каталог'))  return 'каталог';
   if (word.startsWith('колодк'))   return 'колодка';
   if (word.startsWith('москв'))    return 'москва';
+  // «сайт», «сайта», «сайтов», «сайту», «сайтом», «сайте», «сайты» — один стем.
+  // Без этой нормализации одно и то же слово попадает в title_mandatory_words
+  // несколько раз («сайта» и «сайтов»), а проверка покрытия не засчитывает
+  // «сайтов» в Title как использование «сайта» из списка важных LSI.
+  if (word.startsWith('сайт'))     return 'сайт';
   return word;
 }
 

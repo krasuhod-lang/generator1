@@ -314,9 +314,18 @@ async function runMetaTagTaskInner(taskId) {
       // 3) Gemini → Title + Description (та же модель, что и Stage 3/5/6)
       const metas = await generateDrMaxMeta({ keyword: kw, semantics, serpData: serp, inputs });
 
-      // 4) Проверка фактического использования LSI в готовых метатегах
-      const lsiTitleCheck = checkLsiUsage(metas.title       || '', semantics.title_mandatory_words);
-      const lsiDescCheck  = checkLsiUsage(metas.description || '', semantics.description_mandatory_words);
+      // 4) Проверка фактического использования LSI в готовых метатегах.
+      // ВАЖНО: считаем «использовано» по объединённому тексту Title + Description + H1.
+      // Иначе слово, которое модель уместно вписала в Description (например «google»
+      // или «сайт»), отображается на фронте как пропущенное в Title — что вводит
+      // в заблуждение: для важных LSI достаточно появиться в любом из трёх полей.
+      const combinedMetaText = [
+        metas.title       || '',
+        metas.description || '',
+        metas.h1          || '',
+      ].join(' ');
+      const lsiTitleCheck = checkLsiUsage(combinedMetaText, semantics.title_mandatory_words);
+      const lsiDescCheck  = checkLsiUsage(combinedMetaText, semantics.description_mandatory_words);
       metas.lsi_check = {
         title:       lsiTitleCheck,
         description: lsiDescCheck,
