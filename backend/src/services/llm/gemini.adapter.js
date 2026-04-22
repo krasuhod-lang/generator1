@@ -526,13 +526,50 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     }
 
     const data      = response.data;
-    const text      = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    // ── Извлечение текста: агрегируем ВСЕ part'ы кандидата ────────────
+    // Gemini может разбить ответ на несколько `parts` (особенно длинный
+    // JSON), а thinking-модели иногда вставляют служебный part с флагом
+    // `thought:true` без текста. Берём только текстовые части и склеиваем,
+    // иначе `parts[0].text` может оказаться пустым/частичным → "не-JSON".
+    const candidate = data?.candidates?.[0];
+    const partsArr  = candidate?.content?.parts;
+    let text = '';
+    if (Array.isArray(partsArr)) {
+      for (const p of partsArr) {
+        if (p && p.thought) continue;
+        if (typeof p?.text === 'string') text += p.text;
+      }
+    }
+    const finishReason = candidate?.finishReason || '';
     const tokensIn  = data?.usageMetadata?.promptTokenCount     || 0;
     const tokensOut = data?.usageMetadata?.candidatesTokenCount || 0;
 
-    if (!text) throw new Error('Gemini returned empty response');
+    if (!text) {
+      // Различаем «обрезано лимитом» / «заблокировано» / «пусто» — это
+      // помогает вызывающей стороне (meta-tags, stage*) показать осмысленную
+      // ошибку вместо абстрактного "Gemini вернул не-JSON ответ".
+      if (finishReason === 'MAX_TOKENS') {
+        const err = new Error(
+          `Gemini truncated by MAX_TOKENS (output=${tokensOut} ток.). ` +
+          `Увеличьте maxTokens или сократите промпт.`
+        );
+        err.isDeterministic = true;
+        err.finishReason = finishReason;
+        throw err;
+      }
+      if (finishReason === 'SAFETY' || finishReason === 'RECITATION' || finishReason === 'PROHIBITED_CONTENT') {
+        const err = new Error(`Gemini blocked response (finishReason=${finishReason})`);
+        err.isDeterministic = true;
+        err.finishReason = finishReason;
+        throw err;
+      }
+      throw new Error(`Gemini returned empty response (finishReason=${finishReason || 'UNKNOWN'})`);
+    }
 
-    return { text, tokensIn, tokensOut, model: GEMINI_MODEL };
+    // Если ответ был обрезан лимитом — приклеиваем понятное предупреждение
+    // в meta, чтобы вызывающая сторона могла среагировать (autoCloseJSON
+    // и т.п.). Сам текст возвращаем как есть.
+    return { text, tokensIn, tokensOut, model: GEMINI_MODEL, finishReason };
   }
 
   // Сюда попадаем только если все прокси перебраны и ни один не сработал
@@ -698,6 +735,9 @@ function consumeSseStream(stream, { onChunk, shouldAbort }) {
       const parts = json?.candidates?.[0]?.content?.parts;
       if (Array.isArray(parts)) {
         for (const p of parts) {
+          // thinking-модели могут вставлять служебные thought-части —
+          // пропускаем их, чтобы не светить «мысли» в UI редактора.
+          if (p && p.thought) continue;
           if (typeof p?.text === 'string' && p.text.length) {
             aggregate += p.text;
             try { onChunk(p.text); } catch (e) {

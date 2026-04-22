@@ -226,6 +226,14 @@ async function ensureSchema() {
         WHERE status IN ('paused', 'pausing')
     `);
 
+    // ─── Migration 006: Pre-Stage 0 strategic context + unused-inputs ──
+    // Идемпотентно добавляем JSONB-колонки. Без `strategy_context`
+    // contextBuilder AI-Copilot редактора падает на SELECT с ошибкой
+    // `column "strategy_context" does not exist` (таблица была создана
+    // до миграции 006 — initdb-миграции не применяются повторно).
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS strategy_context JSONB`);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS unused_inputs    JSONB`);
+
     // ─── Migration 007: AI-Copilot редактор готовой статьи ───────────
     // Идемпотентно создаём ENUMs, таблицы editor_copilot_sessions /
     // editor_copilot_operations и колонку tasks.full_html_edited.
