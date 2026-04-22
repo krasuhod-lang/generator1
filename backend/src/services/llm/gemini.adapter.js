@@ -331,6 +331,12 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     maxTokens   = 16384,
     timeoutMs   = 180000,
     cachedContent = null,
+    // plainText=true → НЕ навешиваем JSON_STRICT_GUARD и НЕ форсим
+    // responseMimeType=application/json. Используется фолбэком streamGenerate(),
+    // когда AI-Copilot редактору нужен HTML/Markdown вместо JSON.
+    plainText  = false,
+    // model — позволяет переопределить GEMINI_MODEL (например, EDITOR_COPILOT_MODEL).
+    model      = GEMINI_MODEL,
   } = options;
 
   // Проверка параметров
@@ -344,7 +350,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     console.warn('[gemini] ⚠ GEMINI_API_KEY не задан в env — используем встроенный ключ');
   }
 
-  const endpoint = `${GEMINI_BASE_URL}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const endpoint = `${GEMINI_BASE_URL}/${model}:generateContent?key=${apiKey}`;
 
   // ── JSON-strict guard (всегда в systemInstruction) ────────────────
   const JSON_STRICT_GUARD =
@@ -355,15 +361,21 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     '3) NEVER use unescaped newlines inside string values.';
 
   // userPrompt всегда уходит в `contents`. systemInstruction идёт в нативное поле.
+  const generationConfig = {
+    temperature,
+    maxOutputTokens:  maxTokens,
+  };
+  // Для не-plainText вызовов (основной пайплайн / meta-tags) форсим JSON-выход.
+  // plainText=true (фолбэк AI-Copilot редактора) оставляет свободный текст/HTML.
+  if (!plainText) {
+    generationConfig.responseMimeType = 'application/json';
+  }
+
   const payload = {
     contents: [{
       parts: [{ text: userPrompt }],
     }],
-    generationConfig: {
-      temperature,
-      maxOutputTokens:  maxTokens,
-      responseMimeType: 'application/json',
-    },
+    generationConfig,
     safetySettings: [
       { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_ONLY_HIGH' },
       { category: 'HARM_CATEGORY_HATE_SPEECH',        threshold: 'BLOCK_ONLY_HIGH' },
@@ -377,14 +389,16 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     // Поле верхнего уровня — формат Gemini API.
     payload.cachedContent = cachedContent;
   } else {
-    // Нативное поле systemInstruction. Склеиваем JSON-guard и пользовательский
-    // системный промпт (AKB / большую инструкцию). Используем отдельные части,
-    // чтобы порядок был детерминированным и стабильным для implicit cache.
-    const sysParts = [{ text: JSON_STRICT_GUARD }];
+    // Нативное поле systemInstruction. Для JSON-режима склеиваем JSON-guard и
+    // пользовательский системный промпт; для plainText — только пользовательский.
+    const sysParts = [];
+    if (!plainText) sysParts.push({ text: JSON_STRICT_GUARD });
     if (systemInstruction && systemInstruction.trim()) {
       sysParts.push({ text: systemInstruction });
     }
-    payload.systemInstruction = { parts: sysParts };
+    if (sysParts.length) {
+      payload.systemInstruction = { parts: sysParts };
+    }
   }
 
   // ── Прокси обязателен — без прокси запросы запрещены ──
@@ -569,7 +583,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     // Если ответ был обрезан лимитом — приклеиваем понятное предупреждение
     // в meta, чтобы вызывающая сторона могла среагировать (autoCloseJSON
     // и т.п.). Сам текст возвращаем как есть.
-    return { text, tokensIn, tokensOut, model: GEMINI_MODEL, finishReason };
+    return { text, tokensIn, tokensOut, model, finishReason };
   }
 
   // Сюда попадаем только если все прокси перебраны и ни один не сработал
@@ -590,9 +604,12 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
  *   - вызывает onChunk(deltaText) на каждом текстовом фрагменте;
  *   - возвращает агрегированный текст + точные usage-метрики из Gemini.
  *
- * Если поток-ориентированный режим недоступен (5xx / отсутствие SSE), функция
- * прозрачно деградирует до обычного callGemini() с одним «фиктивным» чанком —
- * фронт всё равно увидит SSE-события от нашего бэкенда.
+ * Если поток-ориентированный режим вернул пустой ответ (типичная причина —
+ * буферизирующий промежуточный прокси или временный сбой `alt=sse` у Gemini)
+ * и при этом нет жёсткого блока (SAFETY/RECITATION/PROHIBITED/blockReason),
+ * функция автоматически повторяет запрос обычным `callGemini({plainText:true})`
+ * и эмитит результат одним «фиктивным» чанком — фронт всё равно увидит
+ * SSE-события от нашего бэкенда, а пользователь получит непустой текст.
  *
  * @param {string}   systemInstruction
  * @param {string}   userPrompt
@@ -707,6 +724,68 @@ async function streamGenerate(systemInstruction, userPrompt, options = {}) {
     }
 
     const result = await consumeSseStream(response.data, { onChunk, shouldAbort });
+
+    // ── Фолбэк на не-потоковый callGemini ──────────────────────────────
+    // Если SSE-канал закрылся без единого текстового кадра (типичная причина —
+    // буферизирующий промежуточный прокси, кратковременный сбой alt=sse у
+    // Gemini, либо пустой ответ модели при не-жёстком finishReason), повторяем
+    // запрос обычным generateContent. Жёсткие блокировки (SAFETY / RECITATION /
+    // PROHIBITED_CONTENT / promptFeedback.blockReason / safetyRatings.blocked)
+    // фолбэком НЕ маскируем — пользователь должен увидеть реальную причину.
+    const isHardBlock = result.safetyBlocked
+      || !!result.blockReason
+      || result.finishReason === 'SAFETY'
+      || result.finishReason === 'RECITATION'
+      || result.finishReason === 'PROHIBITED_CONTENT';
+    const isEmpty = !result.aborted && (!result.text || !result.text.trim());
+
+    if (isEmpty && !isHardBlock) {
+      console.warn(
+        `[gemini-stream] empty SSE response (finishReason=${result.finishReason || 'NONE'}, ` +
+        `tokensIn=${result.tokensIn || 0}). Falling back to non-streaming generateContent.`
+      );
+      try {
+        const fb = await callGemini(systemInstruction, userPrompt, {
+          temperature,
+          maxTokens,
+          // callGemini ограничивает timeoutMs ≤ 300000 — клампим, чтобы не
+          // получить «Invalid timeout» при больших значениях у потока.
+          timeoutMs: Math.min(timeoutMs, 300000),
+          model,
+          plainText: true,
+        });
+        if (fb && fb.text) {
+          // Эмулируем потоковый чанк, чтобы UI редактора получил текст одним
+          // куском — состояние редактора (streamingText / partialText в БД)
+          // обновится так же, как при обычном стриме.
+          try { onChunk(fb.text); } catch (e) {
+            console.warn('[gemini-stream] onChunk (fallback) threw:', e.message);
+          }
+          return {
+            text:          fb.text,
+            tokensIn:      fb.tokensIn  || 0,
+            tokensOut:     fb.tokensOut || 0,
+            aborted:       false,
+            finishReason:  fb.finishReason || result.finishReason || null,
+            blockReason:   null,
+            safetyBlocked: false,
+            model,
+            fallbackUsed:  true,
+          };
+        }
+      } catch (fbErr) {
+        console.warn(`[gemini-stream] non-streaming fallback failed: ${fbErr.message}`);
+        // Прокидываем ошибку фолбэка наружу с понятным контекстом —
+        // у неё обычно есть осмысленный finishReason / detail.
+        const wrap = new Error(
+          `Gemini empty SSE response and fallback failed: ${fbErr.message}`
+        );
+        wrap.isDeterministic = true;
+        if (fbErr.finishReason) wrap.finishReason = fbErr.finishReason;
+        throw wrap;
+      }
+    }
+
     return { ...result, model };
   }
 

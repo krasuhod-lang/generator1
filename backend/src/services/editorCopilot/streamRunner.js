@@ -169,6 +169,15 @@ async function runStream({ operationId, taskId }) {
     });
     clearInterval(dbFlushTimer);
 
+    // Если сработал не-потоковый фолбэк — сообщим об этом в SSE-лог,
+    // чтобы было понятно, почему текст «пришёл одним куском», а не стримился.
+    if (result && result.fallbackUsed) {
+      log('warn',
+        'Стрим Gemini вернул пустой ответ — повторили запрос без потокового режима ' +
+        '(не-стрим callGemini). Текст подставлен в редактор обычным образом.'
+      );
+    }
+
     // Если был abort — фиксируем как cancelled
     if (result.aborted || opMem.abortFlag) {
       await _finalize(operationId, {
