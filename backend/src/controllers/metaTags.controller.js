@@ -15,7 +15,7 @@ const { processMetaTagTask } = require('../services/metaTags/pipeline');
 
 // ─── Валидация входных данных ─────────────────────────────────────
 const MAX_NAME_LEN     = 200;
-const MAX_KEYWORDS     = 200;   // защита от безумных нагрузок (200 ключей × ~4 сек = ~13 мин)
+const MAX_KEYWORDS     = 500;   // потолок: 50 / 100 / 200 / 500 запросов в одной задаче
 const MAX_KEYWORD_LEN  = 300;
 const MAX_FIELD_LEN    = 500;
 
@@ -41,6 +41,7 @@ async function listMetaTagTasks(req, res, next) {
       `SELECT id, name, status, niche,
               progress_current, progress_total, active_keyword,
               jsonb_array_length(COALESCE(keywords, '[]'::jsonb)) AS keywords_count,
+              total_tokens_in, total_tokens_out, total_cost_usd, llm_model,
               error_message, created_at, started_at, completed_at
          FROM meta_tag_tasks
         WHERE user_id = $1
@@ -158,6 +159,7 @@ async function exportMetaTagTaskCsv(req, res, next) {
       'Niche analysis', 'Detected year',
       'Title LSI (≥35%)', 'Description LSI (15–35%)',
       'Used important words', 'Missed LSI',
+      'Tokens in', 'Tokens out', 'Cost USD',
       'Error',
     ];
 
@@ -171,6 +173,7 @@ async function exportMetaTagTaskCsv(req, res, next) {
         const s = it.semantics || {};
         const lsi = m.lsi_check || {};
         const missed = Array.isArray(lsi.missed_lsi) ? lsi.missed_lsi : [];
+        const meta = m._meta || {};
         csv += [
           csvCell(it.keyword),
           csvCell('success'),
@@ -185,6 +188,9 @@ async function exportMetaTagTaskCsv(req, res, next) {
           csvCell((s.description_mandatory_words || []).join(', ')),
           csvCell((m.used_important_words        || []).join(', ')),
           csvCell(missed.join(', ')),
+          csvCell(meta.tokensIn  || 0),
+          csvCell(meta.tokensOut || 0),
+          csvCell(meta.costUsd != null ? Number(meta.costUsd).toFixed(6) : ''),
           csvCell(''),
         ].join(sep) + '\r\n';
       } else {
@@ -193,6 +199,7 @@ async function exportMetaTagTaskCsv(req, res, next) {
           csvCell('error'),
           csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''),
           csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''),
+          csvCell(''), csvCell(''), csvCell(''),
           csvCell(it.error),
         ].join(sep) + '\r\n';
       }

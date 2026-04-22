@@ -348,6 +348,11 @@ async function ensureSchema() {
         completed_at     TIMESTAMPTZ
       )
     `);
+    // Идемпотентно добавляем колонки учёта токенов / стоимости (для существующих БД).
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS total_tokens_in  BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS total_tokens_out BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS total_cost_usd   NUMERIC(12, 6) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS llm_model        TEXT`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_user_created ON meta_tag_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_status ON meta_tag_tasks (status)`);
 

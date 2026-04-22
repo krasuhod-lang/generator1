@@ -96,7 +96,9 @@ function buildTsvAll() {
   const headers = [
     'Keyword','Status','Intent','Title','Title length','Description','Description length',
     'Niche analysis','Detected year','Title LSI (≥35%)','Description LSI (15–35%)',
-    'Used important words','Missed LSI','Error',
+    'Used important words','Missed LSI',
+    'Tokens in','Tokens out','Cost USD',
+    'Error',
   ];
   const cell = (v) => String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' ');
   const rows = [headers.join('\t')];
@@ -106,6 +108,7 @@ function buildTsvAll() {
       const s = it.semantics || {};
       const lsi = m.lsi_check || {};
       const missed = Array.isArray(lsi.missed_lsi) ? lsi.missed_lsi : [];
+      const meta = m._meta || {};
       rows.push([
         cell(it.keyword), 'success', cell(m.intent),
         cell(m.title), cell(m.title_length),
@@ -115,11 +118,15 @@ function buildTsvAll() {
         cell((s.description_mandatory_words || []).join(', ')),
         cell((m.used_important_words        || []).join(', ')),
         cell(missed.join(', ')),
+        cell(meta.tokensIn  || 0),
+        cell(meta.tokensOut || 0),
+        cell(meta.costUsd != null ? Number(meta.costUsd).toFixed(6) : ''),
         '',
       ].join('\t'));
     } else {
       rows.push([
         cell(it.keyword), 'error', '', '', '', '', '', '', '', '', '', '', '',
+        '', '', '',
         cell(it.error),
       ].join('\t'));
     }
@@ -260,6 +267,34 @@ function toggleSerp(idx) {
                class="text-sm text-red-300 bg-red-900/20 border border-red-900/50 p-3 rounded">
             ⚠ {{ task.error_message }}
           </div>
+
+          <!-- Сводка по затратам Gemini -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-gray-800">
+            <div class="bg-gray-950/60 border border-gray-800 rounded p-2">
+              <div class="text-[10px] uppercase text-gray-500 tracking-wider">Модель</div>
+              <div class="text-xs font-mono text-indigo-300 truncate" :title="task.llm_model">
+                {{ task.llm_model || 'gemini-3.1-pro-preview' }}
+              </div>
+            </div>
+            <div class="bg-gray-950/60 border border-gray-800 rounded p-2">
+              <div class="text-[10px] uppercase text-gray-500 tracking-wider">Tokens In</div>
+              <div class="text-sm font-mono text-gray-200">
+                {{ Number(task.total_tokens_in || 0).toLocaleString('ru-RU') }}
+              </div>
+            </div>
+            <div class="bg-gray-950/60 border border-gray-800 rounded p-2">
+              <div class="text-[10px] uppercase text-gray-500 tracking-wider">Tokens Out</div>
+              <div class="text-sm font-mono text-gray-200">
+                {{ Number(task.total_tokens_out || 0).toLocaleString('ru-RU') }}
+              </div>
+            </div>
+            <div class="bg-gray-950/60 border border-emerald-900/40 rounded p-2">
+              <div class="text-[10px] uppercase text-gray-500 tracking-wider">Стоимость</div>
+              <div class="text-sm font-mono text-emerald-300 font-bold">
+                ${{ Number(task.total_cost_usd || 0).toFixed(4) }}
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- ── Результаты (карточки) ── -->
@@ -381,6 +416,14 @@ function toggleSerp(idx) {
                       <ul class="list-disc list-inside space-y-0.5">
                         <li v-for="(n, ni) in it.metas.post_validation_notes" :key="ni">{{ n }}</li>
                       </ul>
+                    </div>
+
+                    <div v-if="it.metas._meta" class="pt-1 border-t border-gray-800 text-[10px] text-gray-500 font-mono flex flex-wrap gap-x-3 gap-y-0.5">
+                      <span>in: <span class="text-gray-300">{{ Number(it.metas._meta.tokensIn || 0).toLocaleString('ru-RU') }}</span></span>
+                      <span>out: <span class="text-gray-300">{{ Number(it.metas._meta.tokensOut || 0).toLocaleString('ru-RU') }}</span></span>
+                      <span v-if="it.metas._meta.costUsd != null">
+                        cost: <span class="text-emerald-300">${{ Number(it.metas._meta.costUsd).toFixed(5) }}</span>
+                      </span>
                     </div>
                   </div>
                 </div>

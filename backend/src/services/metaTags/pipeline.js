@@ -5,19 +5,63 @@
  * Не использует BullMQ (в отличие от основной SEO-задачи) — задачи короткие
  * (≤ 1 мин/ключ), не требуют распределённого worker'а, и кладутся в DB.
  *
- * При рестарте процесса задачи в статусе in_progress останутся «висеть»; recovery
- * на старте простой — мы помечаем их как 'error' (см. server.js → recoverStuckMetaTagTasks).
+ * Параллельность:
+ *   • Внутри одной задачи ключи обрабатываются последовательно (с cool-down),
+ *     чтобы не превышать rate-limit XMLStock и Gemini.
+ *   • Между задачами разных пользователей разрешён ограниченный параллелизм:
+ *     META_TAG_MAX_CONCURRENT (по умолчанию 3). Лишние задачи ставятся в
+ *     in-process очередь и стартуют по мере освобождения слотов.
+ *
+ * Recovery: при рестарте процесса задачи в статусе in_progress
+ * помечаются как 'error' (см. recoverStuckMetaTagTasks), их можно
+ * перезапустить через UI «дублировать» (TODO) или вручную.
  */
 
 const db = require('../../config/db');
 const { fetchYandexSerp }    = require('./xmlstockClient');
 const { extractSemantics, checkLsiUsage } = require('./semantics');
 const { generateDrMaxMeta }  = require('./metaGenerator');
+const { calcCost }           = require('../metrics/priceCalculator');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Задержка между ключами — щадим XMLStock + Gemini (как в beta-версии).
-const COOLDOWN_BETWEEN_KEYWORDS_MS = 4000;
+// Можно переопределить через env, например META_TAG_COOLDOWN_MS=2000.
+const COOLDOWN_BETWEEN_KEYWORDS_MS = (() => {
+  const v = parseInt(process.env.META_TAG_COOLDOWN_MS, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 4000;
+})();
+
+// Глобальный лимит одновременно выполняемых meta-tag задач (между разными
+// пользователями / разными задачами одного пользователя). При превышении
+// задача ждёт в in-process очереди.
+const MAX_CONCURRENT_TASKS = (() => {
+  const v = parseInt(process.env.META_TAG_MAX_CONCURRENT, 10);
+  return Number.isFinite(v) && v >= 1 ? v : 3;
+})();
+
+// ─── In-process очередь и слоты ───────────────────────────────────
+let runningCount = 0;
+const waitQueue = []; // { taskId, resolve }
+
+function acquireSlot(taskId) {
+  if (runningCount < MAX_CONCURRENT_TASKS) {
+    runningCount += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    waitQueue.push({ taskId, resolve });
+  });
+}
+
+function releaseSlot() {
+  runningCount = Math.max(0, runningCount - 1);
+  const next = waitQueue.shift();
+  if (next) {
+    runningCount += 1;
+    next.resolve();
+  }
+}
 
 /**
  * Лог события задачи (в JSONB колонку logs). Не критично если запись упадёт —
@@ -72,6 +116,27 @@ async function pushResult(taskId, item) {
  * @param {string} taskId
  */
 async function processMetaTagTask(taskId) {
+  // Лимитируем общее число одновременно бегущих задач. Если очередь занята —
+  // ставим задачу в pending-ожидание (status уже 'pending', чтобы UI это видел).
+  const slotPromise = acquireSlot(taskId);
+  if (runningCount > MAX_CONCURRENT_TASKS || waitQueue.some((w) => w.taskId === taskId)) {
+    await appendLog(taskId,
+      `⏳ Задача в очереди: уже выполняется ${MAX_CONCURRENT_TASKS} задач(и).`, 'info');
+  }
+  await slotPromise;
+
+  try {
+    await runMetaTagTaskInner(taskId);
+  } finally {
+    releaseSlot();
+  }
+}
+
+/**
+ * Тело обработчика — вынесено отдельно, чтобы acquire/release slot оставался
+ * корректным даже при любом исключении.
+ */
+async function runMetaTagTaskInner(taskId) {
   let task;
   try {
     const { rows } = await db.query(
@@ -99,8 +164,9 @@ async function processMetaTagTask(taskId) {
     return;
   }
 
-  // Помечаем как in_progress + сбрасываем results/logs (на случай повторного
-  // запуска через recovery). started_at ставим только если ещё не задан.
+  // Помечаем как in_progress + сбрасываем results/logs/счётчики токенов
+  // (на случай повторного запуска через recovery). started_at ставим
+  // только если ещё не задан.
   await db.query(
     `UPDATE meta_tag_tasks
         SET status           = 'in_progress',
@@ -110,6 +176,10 @@ async function processMetaTagTask(taskId) {
             results          = '[]'::jsonb,
             logs             = '[]'::jsonb,
             error_message    = NULL,
+            total_tokens_in  = 0,
+            total_tokens_out = 0,
+            total_cost_usd   = 0,
+            llm_model        = NULL,
             started_at       = COALESCE(started_at, NOW())
       WHERE id = $1`,
     [taskId, keywords.length],
@@ -124,6 +194,12 @@ async function processMetaTagTask(taskId) {
     phone:   task.phone   || '',
     summary: task.summary || '',
   };
+
+  // Локальные агрегаты — чтобы не дёргать SUM из JSONB на каждом ключе.
+  let totalTokensIn  = 0;
+  let totalTokensOut = 0;
+  let totalCostUsd   = 0;
+  let modelUsed      = null;
 
   for (let i = 0; i < keywords.length; i += 1) {
     const kw = String(keywords[i] || '').trim();
@@ -147,7 +223,7 @@ async function processMetaTagTask(taskId) {
         `🔢 LSI: важных ${semantics.title_mandatory_words.length}, рекомендованных ${semantics.description_mandatory_words.length}`,
         'info');
 
-      // 3) Gemini → Title + Description
+      // 3) Gemini → Title + Description (та же модель, что и Stage 3/5/6)
       const metas = await generateDrMaxMeta({ keyword: kw, semantics, serpData: serp, inputs });
 
       // 4) Проверка фактического использования LSI в готовых метатегах
@@ -160,8 +236,33 @@ async function processMetaTagTask(taskId) {
         missed_lsi: [...lsiTitleCheck.missed_lsi, ...lsiDescCheck.missed_lsi],
       };
 
+      // 5) Учёт токенов и стоимости (Gemini)
+      const meta = metas._meta || {};
+      const tIn  = Number(meta.tokensIn)  || 0;
+      const tOut = Number(meta.tokensOut) || 0;
+      const cost = calcCost('gemini', tIn, tOut);
+      metas._meta = { ...meta, costUsd: cost };
+      totalTokensIn  += tIn;
+      totalTokensOut += tOut;
+      totalCostUsd   += cost;
+      if (!modelUsed && meta.model) modelUsed = meta.model;
+
+      // Атомарно обновляем агрегаты в БД (видны на фронте по поллингу).
+      await db.query(
+        `UPDATE meta_tag_tasks
+            SET total_tokens_in  = $2,
+                total_tokens_out = $3,
+                total_cost_usd   = $4,
+                llm_model        = COALESCE(llm_model, $5)
+          WHERE id = $1`,
+        [taskId, totalTokensIn, totalTokensOut, totalCostUsd.toFixed(6), modelUsed],
+      );
+
       await pushResult(taskId, { keyword: kw, status: 'success', serp, semantics, metas });
-      await appendLog(taskId, `✅ «${kw}» готово (Title ${metas.title_length}, Desc ${metas.description_length})`, 'ok');
+      await appendLog(taskId,
+        `✅ «${kw}» готово (Title ${metas.title_length}, Desc ${metas.description_length}` +
+        `, ${tIn + tOut} ток., $${cost.toFixed(4)})`,
+        'ok');
     } catch (err) {
       console.error(`[metaTags] generation failed for "${kw}":`, err.message);
       await pushResult(taskId, { keyword: kw, status: 'error', error: err.message });
@@ -181,7 +282,9 @@ async function processMetaTagTask(taskId) {
       WHERE id = $1`,
     [taskId],
   );
-  await appendLog(taskId, '🎉 Bulk-генерация завершена', 'ok');
+  await appendLog(taskId,
+    `🎉 Bulk-генерация завершена · итого ${totalTokensIn + totalTokensOut} ток., $${totalCostUsd.toFixed(4)}`,
+    'ok');
 }
 
 /**

@@ -185,7 +185,7 @@ function formatDate(d) {
             <span>Список запросов (по одному на строку)</span>
             <span class="text-gray-500 normal-case font-normal">
               Строк: <span class="text-indigo-300 font-semibold">{{ keywordsList.length }}</span>
-              <span class="text-gray-600"> · максимум 200</span>
+              <span class="text-gray-600"> · максимум 500 (можно ставить параллельно несколько задач)</span>
             </span>
           </label>
           <textarea v-model="form.keywords" rows="6" class="textarea font-mono text-sm"
@@ -239,6 +239,10 @@ function formatDate(d) {
                 <span>📅 {{ formatDate(t.created_at) }}</span>
                 <span>🔑 {{ t.keywords_count }} запросов</span>
                 <span v-if="t.niche" class="truncate">📂 {{ t.niche }}</span>
+                <span v-if="Number(t.total_tokens_in) + Number(t.total_tokens_out) > 0">
+                  🧮 {{ (Number(t.total_tokens_in) + Number(t.total_tokens_out)).toLocaleString('ru-RU') }} ток.
+                  · <span class="text-emerald-400">${{ Number(t.total_cost_usd).toFixed(4) }}</span>
+                </span>
                 <span v-if="t.error_message" class="text-red-400 truncate" :title="t.error_message">
                   ⚠ {{ t.error_message }}
                 </span>

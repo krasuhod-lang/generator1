@@ -44,7 +44,13 @@ CREATE TABLE IF NOT EXISTS meta_tag_tasks (
   -- Аудит
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   started_at      TIMESTAMPTZ,
-  completed_at    TIMESTAMPTZ
+  completed_at    TIMESTAMPTZ,
+
+  -- Учёт затрат на Gemini (агрегаты по всем успешным ключам задачи)
+  total_tokens_in  BIGINT  NOT NULL DEFAULT 0,
+  total_tokens_out BIGINT  NOT NULL DEFAULT 0,
+  total_cost_usd   NUMERIC(12, 6) NOT NULL DEFAULT 0,
+  llm_model        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_user_created
