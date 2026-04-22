@@ -159,4 +159,243 @@ function postProcess(text) {
   return out.trim();
 }
 
-module.exports = { buildPrompt, postProcess };
+// ────────────────────────────────────────────────────────────────────
+// validateOutput — детерминированные пост-проверки качества ответа модели
+// под каждый action. Возвращает { ok, issues[] }. Если ok=false, streamRunner
+// делает корректирующий ретрай, передавая модели список issues, чтобы она
+// исправила конкретные дефекты (DSPy-style self-correction, как в meta-tag
+// generator). Пустой ответ — всегда невалиден, независимо от action.
+// ────────────────────────────────────────────────────────────────────
+function validateOutput(action, ctx, request, finalText) {
+  const issues = [];
+  const txt = String(finalText || '').trim();
+
+  if (!txt) {
+    issues.push('Ответ пустой. Верни непустой HTML-фрагмент по правилам [OUTPUT CONTRACT].');
+    return { ok: false, issues };
+  }
+
+  const selected = String(request.selected_text || '');
+  const selectedLen = selected.length;
+
+  switch (action) {
+    case 'factcheck': {
+      // Промпт требует ±15 %, но валидация использует ±30 % — это «зона
+      // допуска» перед корректирующим ретраем: даём модели небольшой
+      // запас по форме, чтобы не отправлять её на ретрай за пограничные
+      // отклонения. Жёсткие требования прописаны в самом промпте.
+      if (selectedLen > 0) {
+        if (txt.length < selectedLen * 0.7) {
+          issues.push(
+            `Ответ короче исходного фрагмента более чем на 30 % (${txt.length} vs ${selectedLen}). ` +
+            `Сохрани все предложения, не относящиеся к заменяемому факту.`
+          );
+        }
+        if (txt.length > selectedLen * 1.30) {
+          issues.push(
+            `Ответ длиннее исходного фрагмента более чем на 30 % (${txt.length} vs ${selectedLen}). ` +
+            `Не дописывай новых предложений — только замени факт.`
+          );
+        }
+        // Сохранение HTML-структуры: число основных тегов должно совпасть
+        const selTagCount = countMajorTags(selected);
+        const outTagCount = countMajorTags(txt);
+        if (selTagCount > 0 && Math.abs(selTagCount - outTagCount) > Math.max(1, Math.floor(selTagCount * 0.2))) {
+          issues.push(
+            `Изменилась HTML-структура (теги <p>/<h2>/<h3>/<ul>/<li> в исходнике: ${selTagCount}, в ответе: ${outTagCount}). ` +
+            `Сохрани ту же разметку, только подмени факт.`
+          );
+        }
+        // Сохранение смысла: ≥50 % значимых слов исходника должны остаться
+        const overlap = wordOverlapRatio(selected, txt);
+        if (overlap < 0.5) {
+          issues.push(
+            `Доля общих значимых слов с исходным фрагментом всего ${(overlap * 100).toFixed(0)} %. ` +
+            `Не переписывай предложения целиком — точечно подмени факт, остальное оставь как есть.`
+          );
+        }
+      }
+      break;
+    }
+
+    case 'add_faq': {
+      const detailsCount = (txt.match(/<details\b/gi) || []).length;
+      const summaryCount = (txt.match(/<summary\b/gi) || []).length;
+      if (detailsCount !== 4) {
+        issues.push(`Найдено ${detailsCount} тегов <details>, требуется ровно 4.`);
+      }
+      if (summaryCount !== 4) {
+        issues.push(`Найдено ${summaryCount} тегов <summary>, требуется ровно 4.`);
+      }
+      if (!/<section[^>]*class=["']?faq["']?/i.test(txt) && !/<h2[^>]*>[^<]*вопрос/i.test(txt)) {
+        issues.push('Отсутствует обёртка <section class="faq"> или заголовок <h2> "Вопросы и ответы".');
+      }
+      // Покрытие LSI ≥ 5 слов из lsi_unused
+      const unused = (ctx?.lsi_state?.unused || []).slice(0, 60);
+      if (unused.length) {
+        const used = countLsiUsed(unused, txt);
+        if (used < 5) {
+          issues.push(
+            `Использовано всего ${used} LSI-слов из списка lsi_unused, требуется минимум 5. ` +
+            `Не использованы: ${unused.filter(w => !inText(w, txt)).slice(0, 8).join(', ')}.`
+          );
+        }
+      }
+      break;
+    }
+
+    case 'enrich_lsi': {
+      // Цель промпта: +20 % максимум. Валидация рубит на +30 % — оставляем
+      // 10 % буфер перед ретраем (см. комментарий выше для factcheck).
+      if (selectedLen > 0 && txt.length > selectedLen * 1.30) {
+        issues.push(
+          `Длина ответа выросла более чем на 30 % (${txt.length} vs ${selectedLen}). ` +
+          `Цель — +20 % максимум. Перепиши компактнее.`
+        );
+      }
+      const unused = (ctx?.lsi_state?.unused || []).slice(0, 60);
+      if (unused.length) {
+        const used = countLsiUsed(unused, txt);
+        if (used < 2) {
+          issues.push(
+            `Использовано всего ${used} LSI-слов из списка lsi_unused, минимум — 2 (цель — 4). ` +
+            `Доступные слова: ${unused.slice(0, 12).join(', ')}.`
+          );
+        }
+      }
+      break;
+    }
+
+    case 'expand_section': {
+      if (!/^\s*<h2\b/i.test(txt)) {
+        issues.push('Раздел должен начинаться с тега <h2>.');
+      }
+      if (!/<(?:ul|ol|table)\b/i.test(txt)) {
+        issues.push('Нет ни одного списка (<ul>/<ol>) или таблицы (<table>) — добавь минимум один.');
+      }
+      if (/<a\s[^>]*href=/i.test(txt)) {
+        issues.push('Найден тег <a href=...>. Внешние и внутренние ссылки запрещены — удали их.');
+      }
+      // Промпт требует 350–700 слов; валидация рубит за пределами 250–900,
+      // оставляя ~30 % буфер перед ретраем (модели часто промахиваются по
+      // объёму на ±15 %, и такой ответ всё ещё лучше, чем ретрай-без-нужды).
+      const cleanText = stripToText(txt, 50_000);
+      const wordCount = (cleanText.match(/\S+/g) || []).length;
+      if (wordCount < 250) {
+        issues.push(`Слишком короткий раздел: ${wordCount} слов. Цель — 350–700 (минимум для приёма — 250).`);
+      }
+      if (wordCount > 900) {
+        issues.push(`Слишком длинный раздел: ${wordCount} слов. Цель — 350–700 (максимум для приёма — 900).`);
+      }
+      break;
+    }
+
+    case 'anti_spam': {
+      const kw = String(request.extra_params?.keyword || '').trim();
+      if (kw) {
+        const occ = countOccurrencesAnyForm(kw, txt);
+        if (occ > 2) {
+          issues.push(
+            `Ключ «${kw}» встречается ${occ} раз — нужно ≤ 2. Замени лишние вхождения ` +
+            `синонимом / перифразой / местоимением.`
+          );
+        }
+      }
+      // anti_spam допускает чуть больший «сжим» (до −40 %) по сравнению с
+      // factcheck (−30 %): замены на местоимения и анафоры объективно
+      // сокращают текст сильнее, чем точечная подмена факта.
+      if (selectedLen > 0 && txt.length < selectedLen * 0.6) {
+        issues.push(
+          `Ответ значительно короче исходного фрагмента (${txt.length} vs ${selectedLen}). ` +
+          `Не вырезай вхождения «вглухую» — заменяй на осмысленные синонимы.`
+        );
+      }
+      break;
+    }
+
+    case 'custom':
+    default:
+      // Для custom единственный жёсткий критерий — непустой ответ (уже проверен выше).
+      break;
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+// ── Внутренние утилиты валидации ────────────────────────────────────
+
+function countMajorTags(html) {
+  if (!html) return 0;
+  const m = html.match(/<\/?(?:p|h2|h3|h4|ul|ol|li|strong|em|a|table|tr|td|th)\b/gi);
+  return m ? m.length : 0;
+}
+
+/**
+ * wordOverlapRatio — доля значимых слов исходника, которые остались в ответе.
+ * Используем простую нормализацию: lowercase + длина ≥ 4. Предлоги/союзы
+ * (короткие слова) исключаем, чтобы overlap отражал реальное сохранение смысла.
+ */
+function wordOverlapRatio(src, out) {
+  const norm = (s) => stripToText(s, 50_000)
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .match(/[a-zа-я0-9]{4,}/gi) || [];
+  const srcWords = norm(src);
+  if (!srcWords.length) return 1;
+  const outSet = new Set(norm(out));
+  let kept = 0;
+  for (const w of srcWords) if (outSet.has(w)) kept += 1;
+  return kept / srcWords.length;
+}
+
+function inText(word, text) {
+  if (!word) return false;
+  const stem = String(word).toLowerCase().replace(/ё/g, 'е').slice(0, Math.max(4, Math.floor(word.length * 0.7)));
+  if (!stem) return false;
+  const haystack = stripToText(text, 50_000).toLowerCase().replace(/ё/g, 'е');
+  return haystack.includes(stem);
+}
+
+function countLsiUsed(words, text) {
+  if (!Array.isArray(words) || !words.length) return 0;
+  let used = 0;
+  for (const w of words) if (inText(w, text)) used += 1;
+  return used;
+}
+
+function countOccurrencesAnyForm(word, text) {
+  if (!word) return 0;
+  const stem = String(word).toLowerCase().replace(/ё/g, 'е').slice(0, Math.max(4, Math.floor(word.length * 0.7)));
+  if (!stem) return 0;
+  const haystack = stripToText(text, 50_000).toLowerCase().replace(/ё/g, 'е');
+  // Используем не пересекающуюся итерацию: считаем число НЕ-перекрывающихся вхождений
+  let count = 0, idx = 0;
+  while ((idx = haystack.indexOf(stem, idx)) !== -1) {
+    count += 1;
+    idx += stem.length;
+  }
+  return count;
+}
+
+/**
+ * buildCorrectiveUserPrompt — собирает короткий блок-«дописку» к userPrompt
+ * для корректирующего ретрая. Список issues подставляется как требования,
+ * которые модель должна закрыть. Сам исходный userPrompt тоже передаётся,
+ * чтобы модель не «потеряла» исходную задачу.
+ */
+function buildCorrectiveUserPrompt(originalUser, issues) {
+  const issuesBlock = (Array.isArray(issues) ? issues : [String(issues)])
+    .filter(Boolean)
+    .map((s, i) => `  ${i + 1}) ${s}`)
+    .join('\n');
+  return (
+    String(originalUser || '') +
+    '\n\n[КОРРЕКТИРУЮЩИЙ РЕТРАЙ — обязательные правки]\n' +
+    'Предыдущий ответ не прошёл автоматические проверки. Перепиши ответ так, ' +
+    'чтобы устранить ВСЕ замечания ниже. Возвращать пустой ответ запрещено — ' +
+    'если изменение технически невозможно, верни исходный фрагмент без изменений.\n' +
+    issuesBlock
+  );
+}
+
+module.exports = { buildPrompt, postProcess, validateOutput, buildCorrectiveUserPrompt };

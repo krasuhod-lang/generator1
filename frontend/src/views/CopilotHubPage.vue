@@ -151,13 +151,24 @@ async function onApply({ mode: applyMode, html }) {
   }
 }
 
-// Авто-применение результата при `done` — то же поведение, что в EditorCopilotPage:
-// если при старте операции был выделенный фрагмент → автоматически заменяем его
-// результатом; иначе для add_faq/expand_section вставляем ниже курсора. Прочее —
-// оставляем preview, чтобы пользователь решил вручную.
+// Авто-применение результата при `done` — driven by preset.applyMode из бэкенда:
+//   replace      → всегда заменяем выделение (если выделения не было — preview);
+//   insert_below → всегда вставляем ниже курсора;
+//   auto         → replace, если операция стартовала с выделенным фрагментом,
+//                  иначе insert_below (это поведение для `custom`).
+// Это убирает ранее существовавший хардкод INSERT_BELOW_ACTIONS = {add_faq, expand_section}
+// и делает логику единообразной для всех (включая будущие) actions.
 let _operationStartedWithSelection = false;
 let _lastAutoAppliedOperationId    = null;
-const INSERT_BELOW_ACTIONS = new Set(['add_faq', 'expand_section']);
+
+function _resolveAutoApplyMode(action, startedWithSelection) {
+  const preset = (store.presets || []).find(p => p.action === action);
+  const mode   = preset?.applyMode || 'auto';
+  if (mode === 'replace')      return startedWithSelection ? 'replace' : null;
+  if (mode === 'insert_below') return 'insert_below';
+  if (mode === 'auto')         return startedWithSelection ? 'replace' : 'insert_below';
+  return null;
+}
 
 watch(() => store.currentOperationId, (opId) => {
   if (opId) {
@@ -173,13 +184,11 @@ watch(() => store.currentStatus, async (status) => {
   if (!opId || _lastAutoAppliedOperationId === opId) return;
   if (!store.streamingText) return;
 
-  if (_operationStartedWithSelection) {
-    _lastAutoAppliedOperationId = opId;
-    await onApply({ mode: 'replace', html: store.streamingText });
-  } else if (INSERT_BELOW_ACTIONS.has(store.action)) {
-    _lastAutoAppliedOperationId = opId;
-    await onApply({ mode: 'insert_below', html: store.streamingText });
-  }
+  const applyMode = _resolveAutoApplyMode(store.action, _operationStartedWithSelection);
+  if (!applyMode) return; // Например, action=replace, но выделения не было — оставим preview.
+
+  _lastAutoAppliedOperationId = opId;
+  await onApply({ mode: applyMode, html: store.streamingText });
 });
 
 function fmtDate(s) {

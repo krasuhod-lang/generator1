@@ -97,12 +97,19 @@ watch(() => store.currentOperationId, (opId) => {
   }
 });
 
-// Авто-применение результата при `done` — реализует требование пользователя:
-// «когда нажимаю Сгенерировать — выделенный фрагмент должен автоматически
-// замениться». Если выделения не было — для пресетов с insert-below-семантикой
-// (add_faq, expand_section) вставляем результат ниже курсора. В прочих случаях
-// оставляем preview, чтобы пользователь решил вручную.
-const INSERT_BELOW_ACTIONS = new Set(['add_faq', 'expand_section']);
+// Авто-применение результата при `done` — driven by preset.applyMode из бэкенда:
+//   replace      → всегда заменяем выделение (если выделения не было — preview);
+//   insert_below → всегда вставляем ниже курсора;
+//   auto         → replace, если операция стартовала с выделенным фрагментом,
+//                  иначе insert_below (это поведение для `custom`).
+function _resolveAutoApplyMode(action, startedWithSelection) {
+  const preset = (store.presets || []).find(p => p.action === action);
+  const mode   = preset?.applyMode || 'auto';
+  if (mode === 'replace')      return startedWithSelection ? 'replace' : null;
+  if (mode === 'insert_below') return 'insert_below';
+  if (mode === 'auto')         return startedWithSelection ? 'replace' : 'insert_below';
+  return null;
+}
 
 watch(() => store.currentStatus, async (status) => {
   if (status !== 'done') return;
@@ -110,14 +117,11 @@ watch(() => store.currentStatus, async (status) => {
   if (!opId || _lastAutoAppliedOperationId === opId) return;
   if (!store.streamingText) return;
 
-  if (_operationStartedWithSelection) {
-    _lastAutoAppliedOperationId = opId;
-    await onApply({ mode: 'replace', html: store.streamingText });
-  } else if (INSERT_BELOW_ACTIONS.has(store.action)) {
-    _lastAutoAppliedOperationId = opId;
-    await onApply({ mode: 'insert_below', html: store.streamingText });
-  }
-  // Иначе — оставляем preview как раньше (пользователь решит).
+  const applyMode = _resolveAutoApplyMode(store.action, _operationStartedWithSelection);
+  if (!applyMode) return; // Например, action=replace, но выделения не было — оставим preview.
+
+  _lastAutoAppliedOperationId = opId;
+  await onApply({ mode: applyMode, html: store.streamingText });
 });
 </script>
 
