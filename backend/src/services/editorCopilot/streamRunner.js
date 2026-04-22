@@ -15,6 +15,11 @@ const { getPreset } = require('./actionPresets');
  */
 const COPILOT_MODEL = process.env.EDITOR_COPILOT_MODEL || 'gemini-3.10-pro-preview';
 
+// После завершения операции держим её в in-memory регистре ещё 30 секунд,
+// чтобы поздние подписчики (например, автоматический реконнект EventSource
+// после кратковременного разрыва сети) могли получить snapshot+done.
+const OPERATION_CLEANUP_DELAY_MS = 30_000;
+
 /**
  * In-memory регистр активных операций. Используется для:
  *   1) пересылки SSE-событий клиентам, которые подключаются после старта стрима
@@ -190,7 +195,7 @@ async function runStream({ operationId, taskId }) {
     return _failOp(operationId, e.message || String(e));
   } finally {
     // Через 30 сек после завершения чистим in-memory запись (даём время поздним подписчикам подключиться).
-    setTimeout(() => activeOps.delete(operationId), 30_000);
+    setTimeout(() => activeOps.delete(operationId), OPERATION_CLEANUP_DELAY_MS);
   }
 }
 

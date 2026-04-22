@@ -122,19 +122,23 @@ function clip(s, max) {
 
 function stripToText(html, max) {
   if (!html) return '';
-  // ВНИМАНИЕ: первым шагом расшифровываем &amp; → &, иначе следующие замены
-  // (&lt; → <, &gt; → >) могут «удвоить» расшифровку строк типа &amp;lt;
-  // и неправильно превратить их в <. Делаем escape-замены ПОСЛЕ &amp;.
-  // Регэксп для script/style допускает пробелы перед `>` (`</script >`),
-  // чтобы не оставить инлайновый JS в выжимке для LLM-промпта.
+  // ВАЖНО: порядок декодирования сущностей. Сначала декодируем именованные
+  // (&lt; &gt; &nbsp; и т.п.), а &amp; — В САМОМ КОНЦЕ. Иначе строка вида
+  // "&amp;lt;" сначала превратится в "&lt;", а потом в "<" — двойное
+  // декодирование (CodeQL js/double-escaping). Корректно: "&amp;lt;" →
+  // "&lt;" (после &amp;→&) и больше ничего.
+  // Также tag-filter регэкспы должны допускать любой whitespace внутри
+  // закрывающего тега ("</script\n bar>", "</style >").
   const text = String(html)
-    .replace(/<script\b[\s\S]*?<\/script\s*>/gi, ' ')
-    .replace(/<style\b[\s\S]*?<\/style\s*>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*[^>]*>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*[^>]*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/gi, '&')   // <- последняя замена
     .replace(/\s+/g, ' ')
     .trim();
   return text.length > max ? text.slice(0, max) + ' …[обрезано]' : text;

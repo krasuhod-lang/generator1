@@ -28,7 +28,7 @@ function authSSE(req, res, next) {
   }
 }
 
-// Лимит на создание операции — защита от спама/cost-runaway. 30/мин/IP.
+// Лимит на создание операции — самый строгий, защита от cost-runaway. 30/мин/IP.
 const createLimiter = rateLimit({
   windowMs: 60 * 1000,
   max:      30,
@@ -37,9 +37,9 @@ const createLimiter = rateLimit({
   message: { error: 'Слишком много запросов к AI-Copilot. Попробуйте через минуту.' },
 });
 
-// Общий read-лимитер для остальных endpoint'ов (включая SSE) —
-// 240/мин/IP. Достаточно для интерактивного UI с автообновлениями,
-// но защищает от боттов и accidental loops в клиенте.
+// Общий лимитер для ВСЕХ остальных endpoint'ов (включая SSE) — 240/мин/IP.
+// Применяется как router-level middleware, чтобы покрыть все маршруты этого
+// файла одним вызовом (защита от любого «забытого» эндпоинта).
 const readLimiter = rateLimit({
   windowMs: 60 * 1000,
   max:      240,
@@ -48,23 +48,25 @@ const readLimiter = rateLimit({
   message: { error: 'Слишком много запросов к AI-Copilot. Попробуйте позже.' },
 });
 
+router.use(readLimiter);
+
 // Презенты + модель
-router.get('/presets', authMiddleware, readLimiter, getPresets);
+router.get('/presets', authMiddleware, getPresets);
 
 // Сессия и список операций
-router.get('/:taskId/session',                authMiddleware, readLimiter, getSession);
-router.get('/:taskId/operations',             authMiddleware, readLimiter, listOperations);
-router.get('/:taskId/operations/:opId',       authMiddleware, readLimiter, getOperation);
+router.get('/:taskId/session',                authMiddleware, getSession);
+router.get('/:taskId/operations',             authMiddleware, listOperations);
+router.get('/:taskId/operations/:opId',       authMiddleware, getOperation);
 
-// Создание / отмена / применение
+// Создание / отмена / применение — create имеет дополнительный, более строгий лимитер
 router.post('/:taskId/operations',            authMiddleware, createLimiter, createOperation);
-router.post('/:taskId/operations/:opId/cancel', authMiddleware, readLimiter, cancelOperation);
-router.post('/:taskId/operations/:opId/apply',  authMiddleware, readLimiter, applyOperation);
+router.post('/:taskId/operations/:opId/cancel', authMiddleware, cancelOperation);
+router.post('/:taskId/operations/:opId/apply',  authMiddleware, applyOperation);
 
 // Ручное сохранение HTML после правок руками (без AI-операции)
-router.post('/:taskId/html-edited',           authMiddleware, readLimiter, saveEditedHtml);
+router.post('/:taskId/html-edited',           authMiddleware, saveEditedHtml);
 
 // SSE-стрим — в отдельном authSSE
-router.get('/:taskId/operations/:opId/stream', authSSE, readLimiter, streamOperation);
+router.get('/:taskId/operations/:opId/stream', authSSE, streamOperation);
 
 module.exports = router;

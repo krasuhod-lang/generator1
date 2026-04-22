@@ -4,7 +4,7 @@
  * Загружает initial-HTML из props.modelValue. При выделении публикует
  * { text, html } через эмит. Поддерживает команды replace / insert_below.
  */
-import { onBeforeUnmount, onMounted, watch, ref } from 'vue';
+import { onBeforeUnmount, watch, ref } from 'vue';
 import { useEditor, EditorContent } from '@tiptap/vue-3';
 import StarterKit from '@tiptap/starter-kit';
 import { DOMSerializer } from '@tiptap/pm/model';
@@ -105,7 +105,6 @@ function getCurrentHtml() {
 
 defineExpose({ replaceSelection, insertBelow, getCurrentHtml });
 
-onMounted(() => {});
 onBeforeUnmount(() => {
   if (editor.value) editor.value.destroy();
 });
