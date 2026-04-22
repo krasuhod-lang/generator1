@@ -722,17 +722,21 @@ async function streamGenerate(systemInstruction, userPrompt, options = {}) {
  */
 function consumeSseStream(stream, { onChunk, shouldAbort }) {
   return new Promise((resolve, reject) => {
-    let buffer    = '';
-    let aggregate = '';
-    let tokensIn  = 0;
-    let tokensOut = 0;
-    let aborted   = false;
+    let buffer       = '';
+    let aggregate    = '';
+    let tokensIn     = 0;
+    let tokensOut    = 0;
+    let aborted      = false;
+    let finishReason = null;
+    let blockReason  = null;
+    let safetyBlocked = false;
 
     const flushFrame = (frame) => {
       // Каждый SSE-кадр — JSON-объект GenerateContentResponse
       let json;
       try { json = JSON.parse(frame); } catch (_) { return; }
-      const parts = json?.candidates?.[0]?.content?.parts;
+      const cand = json?.candidates?.[0];
+      const parts = cand?.content?.parts;
       if (Array.isArray(parts)) {
         for (const p of parts) {
           // thinking-модели могут вставлять служебные thought-части —
@@ -745,6 +749,21 @@ function consumeSseStream(stream, { onChunk, shouldAbort }) {
             }
           }
         }
+      }
+      // Запоминаем последний finishReason — нужен для диагностики пустых ответов.
+      if (cand && typeof cand.finishReason === 'string' && cand.finishReason) {
+        finishReason = cand.finishReason;
+      }
+      // safetyRatings на уровне кандидата с blocked=true — тоже признак блокировки.
+      if (Array.isArray(cand?.safetyRatings)) {
+        for (const r of cand.safetyRatings) {
+          if (r && r.blocked === true) { safetyBlocked = true; break; }
+        }
+      }
+      // promptFeedback.blockReason — модель отказалась обрабатывать сам промпт.
+      const pf = json?.promptFeedback;
+      if (pf && typeof pf.blockReason === 'string' && pf.blockReason) {
+        blockReason = pf.blockReason;
       }
       const usage = json?.usageMetadata;
       if (usage) {
@@ -790,7 +809,7 @@ function consumeSseStream(stream, { onChunk, shouldAbort }) {
           if (frame && frame !== '[DONE]') flushFrame(frame);
         }
       }
-      resolve({ text: aggregate, tokensIn, tokensOut, aborted });
+      resolve({ text: aggregate, tokensIn, tokensOut, aborted, finishReason, blockReason, safetyBlocked });
     });
     stream.on('error', (e) => reject(e));
   });
