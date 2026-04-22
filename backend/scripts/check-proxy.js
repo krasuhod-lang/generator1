@@ -118,7 +118,8 @@ const DEFAULT_PROXY = {
   pass:  '3ukb66G1',
   proto: 'http',
 };
-const DEFAULT_GEMINI_API_KEY = 'AIzaSyB7crSRTwPocoY31vordEKmQFvEsgD0tLQ';
+// Gemini API key загружается ИСКЛЮЧИТЕЛЬНО из process.env.GEMINI_API_KEY
+// (хардкод запрещён — Google Secret Scanning отзывает публично доступные ключи).
 
 function resolveProxyUrl(suffix = '') {
   const full = process.env[`GEMINI_PROXY_URL${suffix}`] || '';
@@ -224,10 +225,12 @@ async function testProxy(label, proxyUrl, targetUrl, displayUrl) {
     // Тест 1: httpbin (проверка базовой связности через HTTP)
     await testProxy(suffix, url, 'https://httpbin.org/ip');
 
-    // Тест 2: Gemini API (список моделей)
-    const geminiApiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
-    if (!process.env.GEMINI_API_KEY) {
-      console.log(`   ℹ  [${suffix}] → Gemini API — используем встроенный ключ`);
+    // Тест 2: Gemini API (список моделей) — только если задан ключ в env
+    const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!geminiApiKey) {
+      console.log(`   ⚠  [${suffix}] → Gemini API тест пропущен: GEMINI_API_KEY не задан в .env`);
+      console.log('');
+      continue;
     }
     const geminiBase = 'https://generativelanguage.googleapis.com/v1beta/models';
     // API key добавляется в URL только для HTTP-запроса, не для логирования
