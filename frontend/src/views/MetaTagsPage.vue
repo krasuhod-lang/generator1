@@ -47,7 +47,7 @@ async function handleCreate() {
   submitting.value = true;
   try {
     const payload = {
-      name:     form.value.name?.trim() || `Меттаги · ${new Date().toLocaleString('ru-RU')}`,
+      name:     form.value.name?.trim() || `Метатеги · ${new Date().toLocaleString('ru-RU')}`,
       niche:    form.value.niche.trim(),
       lr:       form.value.lr.trim(),
       toponym:  form.value.toponym.trim(),

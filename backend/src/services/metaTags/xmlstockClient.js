@@ -19,10 +19,14 @@ const XMLSTOCK_URL = (process.env.XMLSTOCK_URL || DEFAULT_XMLSTOCK_URL).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Снимает HTML-теги из текста сниппета/тайтла Яндекса (там бывают <hlword>...</hlword>).
+ * Сжимает пробелы в одну строку. cheerio `.text()` уже корректно убирает
+ * любую XML-разметку (включая вложенные `<hlword>...</hlword>`-маркеры
+ * подсветки от Яндекса), поэтому regex-стриппинг тегов нам не нужен —
+ * это и безопаснее (нет риска неполной санитизации многосимвольных
+ * последовательностей вроде `<scrip<script>t>`), и быстрее.
  */
-function stripTags(s) {
-  return String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+function collapseWs(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -77,21 +81,19 @@ async function fetchYandexSerp(keyword, opts = {}) {
 
         $('doc').each((_, el) => {
           const $doc = $(el);
-          const titleHtml = $doc.find('title').first().html();
-          const titleText = $doc.find('title').first().text();
-          const title = stripTags(titleHtml || titleText);
+          // cheerio `.text()` рекурсивно собирает все текстовые узлы и
+          // полностью игнорирует разметку — `<hlword>цена</hlword>` даст
+          // просто «цена» без следов тегов.
+          const title = collapseWs($doc.find('title').first().text());
           const link  = $doc.find('url').first().text().trim();
-          let snippet = '';
-          const headlineHtml = $doc.find('headline').first().html();
-          const headlineText = $doc.find('headline').first().text();
-          const headline = stripTags(headlineHtml || headlineText);
-          if (headline) snippet += `${headline} `;
-          $doc.find('passages passage').each((__, p) => {
-            const txt = stripTags($(p).html() || $(p).text());
-            if (txt) snippet += `${txt} `;
-          });
+          const headline = collapseWs($doc.find('headline').first().text());
+          const passages = $doc.find('passages passage')
+            .map((__, p) => collapseWs($(p).text()))
+            .get()
+            .filter(Boolean);
+          const snippet = [headline, ...passages].filter(Boolean).join(' ');
           if (title) {
-            extracted.push({ title, snippet: snippet.trim(), url: link });
+            extracted.push({ title, snippet, url: link });
           }
         });
       }
