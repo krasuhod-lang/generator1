@@ -1,10 +1,10 @@
 'use strict';
 
 const db = require('../../config/db');
-const { streamGenerate } = require('../llm/gemini.adapter');
+const { streamGenerate, callGemini } = require('../llm/gemini.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
 const { buildContext } = require('./contextBuilder');
-const { buildPrompt, postProcess } = require('./promptBuilder');
+const { buildPrompt, postProcess, validateOutput, buildCorrectiveUserPrompt } = require('./promptBuilder');
 const { getPreset } = require('./actionPresets');
 
 /**
@@ -194,21 +194,118 @@ async function runStream({ operationId, taskId }) {
     }
 
     const finalText = postProcess(result.text);
-    const cost      = calcCost('gemini', result.tokensIn || 0, result.tokensOut || 0);
+    let acceptedText = finalText;
+    let totalTokensIn  = result.tokensIn  || 0;
+    let totalTokensOut = result.tokensOut || 0;
 
-    // Защита: модель вернула 200 OK, но не прислала ни одного текстового фрагмента
-    // (типичные причины: finishReason=SAFETY/RECITATION/MAX_TOKENS на пустом ответе,
-    // promptFeedback.blockReason, либо thinking-модель отдала только thought-части).
-    // Раньше такие случаи фиксировались как status='done' с пустым result_text — фронтенд
-    // получал «успех», но подставлять в выделенный фрагмент было нечего.
-    // Теперь такой исход трактуем как ошибку, чтобы пользователь увидел причину.
-    if (!finalText || !finalText.trim()) {
+    // ── DSPy-style self-correction ────────────────────────────────────
+    // Если первый ответ непустой, но провалил детерминированные пост-проверки
+    // (validateOutput), делаем ОДИН корректирующий ретрай через не-потоковый
+    // callGemini, передавая модели список конкретных issues. Эмитим финальный
+    // текст одним «фиктивным» чанком — фронт получит обычный поток событий.
+    if (acceptedText && acceptedText.trim()) {
+      const validation = validateOutput(opRow.action, ctx, {
+        selected_text: opRow.selected_text,
+        user_prompt:   opRow.user_prompt,
+        extra_params:  opRow.extra_params,
+      }, acceptedText);
+
+      if (!validation.ok) {
+        log('warn',
+          `Ответ не прошёл пост-проверки (${validation.issues.length} замечаний): ` +
+          validation.issues.slice(0, 3).join(' | ') +
+          (validation.issues.length > 3 ? ' …' : '') +
+          ' — запускаю корректирующий ретрай.'
+        );
+        try {
+          const correctivePrompt = buildCorrectiveUserPrompt(prompt.user, validation.issues);
+          const retry = await callGemini(prompt.system, correctivePrompt, {
+            model:       COPILOT_MODEL,
+            temperature: prompt.modelHints.temperature,
+            maxTokens:   prompt.modelHints.maxTokens,
+            timeoutMs:   180000,
+            plainText:   true,
+          });
+          const retryText = postProcess(retry.text || '');
+          if (retryText && retryText.trim()) {
+            const retryValidation = validateOutput(opRow.action, ctx, {
+              selected_text: opRow.selected_text,
+              user_prompt:   opRow.user_prompt,
+              extra_params:  opRow.extra_params,
+            }, retryText);
+            // Принимаем ретрай, если он прошёл валидацию ИЛИ имеет меньше issues, чем первый.
+            if (retryValidation.ok || retryValidation.issues.length < validation.issues.length) {
+              acceptedText = retryText;
+              totalTokensIn  += retry.tokensIn  || 0;
+              totalTokensOut += retry.tokensOut || 0;
+              log('info',
+                `Корректирующий ретрай принят (issues: ${validation.issues.length} → ${retryValidation.issues.length}). ` +
+                'Финальный текст обновлён.'
+              );
+              // Сообщаем подписчикам обновлённый снапшот целиком (UI заменит partialText).
+              opMem.partialText = acceptedText;
+              _broadcast(operationId, 'snapshot', { text: acceptedText });
+            } else {
+              log('warn',
+                `Корректирующий ретрай не улучшил качество (${retryValidation.issues.length} замечаний осталось). ` +
+                'Использую первый ответ.'
+              );
+              totalTokensIn  += retry.tokensIn  || 0;
+              totalTokensOut += retry.tokensOut || 0;
+            }
+          } else {
+            log('warn', 'Корректирующий ретрай вернул пустой ответ — использую первый ответ.');
+          }
+        } catch (retryErr) {
+          log('warn', `Корректирующий ретрай завершился с ошибкой: ${retryErr.message}. Использую первый ответ.`);
+        }
+      }
+    }
+
+    const cost = calcCost('gemini', totalTokensIn, totalTokensOut);
+
+    // ── Гарантия непустого ответа ─────────────────────────────────────
+    // Если после стрима + фолбэка + корректирующего ретрая текст всё равно
+    // пустой — для actions, которые работают через REPLACE и имеют selected_text,
+    // возвращаем оригинальный фрагмент без изменений (status=done с пометкой
+    // в логах). Это лучше, чем оставить пользователя с error: фрагмент в
+    // редакторе НЕ ломается, а UX подсказывает, что попытка не удалась.
+    // Для actions без selected_text (add_faq, expand_section) — фиксируем error
+    // с диагностикой (фейковый «ниоткуда» контент вставлять некорректно).
+    if (!acceptedText || !acceptedText.trim()) {
       const reasons = [];
       if (result.blockReason)   reasons.push(`promptFeedback.blockReason=${result.blockReason}`);
       if (result.safetyBlocked) reasons.push('safetyRatings.blocked');
       if (result.finishReason)  reasons.push(`finishReason=${result.finishReason}`);
-      reasons.push(`tokens_in=${result.tokensIn || 0}`, `tokens_out=${result.tokensOut || 0}`);
+      reasons.push(`tokens_in=${totalTokensIn}`, `tokens_out=${totalTokensOut}`);
       const diag = reasons.join(', ');
+
+      const presetMeta = getPreset(opRow.action);
+      const fallbackToOriginal = presetMeta
+        && presetMeta.applyMode === 'replace'
+        && opRow.selected_text
+        && String(opRow.selected_text).trim();
+
+      if (fallbackToOriginal) {
+        log('warn',
+          `Модель не вернула пригодного ответа (${diag}). Возвращаю исходный ` +
+          'фрагмент без изменений, чтобы редактор не остался без текста.'
+        );
+        acceptedText = String(opRow.selected_text);
+        await _finalize(operationId, {
+          status:       'done',
+          result_text:  acceptedText,
+          tokens_in:    totalTokensIn,
+          tokens_out:   totalTokensOut,
+          cost_usd:     cost,
+          model_used:   result.model || COPILOT_MODEL,
+          error_message:`Empty model output (${diag}); fragment returned unchanged.`,
+        });
+        _broadcast(operationId, 'usage', { tokens_in: totalTokensIn, tokens_out: totalTokensOut, cost_usd: cost });
+        _broadcast(operationId, 'done',  { status: 'done', result: acceptedText });
+        return;
+      }
+
       return _failOp(
         operationId,
         `Модель вернула пустой ответ (${diag}). Попробуйте переформулировать запрос или уменьшить выделенный фрагмент.`
@@ -217,16 +314,16 @@ async function runStream({ operationId, taskId }) {
 
     await _finalize(operationId, {
       status:       'done',
-      result_text:  finalText,
-      tokens_in:    result.tokensIn  || 0,
-      tokens_out:   result.tokensOut || 0,
+      result_text:  acceptedText,
+      tokens_in:    totalTokensIn,
+      tokens_out:   totalTokensOut,
       cost_usd:     cost,
       model_used:   result.model || COPILOT_MODEL,
       error_message:null,
     });
-    log('info', `Готово. tokens_in=${result.tokensIn} tokens_out=${result.tokensOut} cost=$${cost.toFixed(6)}`);
-    _broadcast(operationId, 'usage', { tokens_in: result.tokensIn || 0, tokens_out: result.tokensOut || 0, cost_usd: cost });
-    _broadcast(operationId, 'done',  { status: 'done', result: finalText });
+    log('info', `Готово. tokens_in=${totalTokensIn} tokens_out=${totalTokensOut} cost=$${cost.toFixed(6)}`);
+    _broadcast(operationId, 'usage', { tokens_in: totalTokensIn, tokens_out: totalTokensOut, cost_usd: cost });
+    _broadcast(operationId, 'done',  { status: 'done', result: acceptedText });
   } catch (e) {
     clearInterval(dbFlushTimer);
     return _failOp(operationId, e.message || String(e));

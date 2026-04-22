@@ -10,6 +10,12 @@
  *   - needsExtra    — нужны ли extra_params (например keyword для anti_spam)
  *   - extraSchema   — { fieldName: 'type:required|optional' } — простая валидация
  *   - displayLabel  — человекочитаемое имя действия
+ *   - applyMode     — как фронт должен интегрировать ответ в редактор:
+ *                       'replace'      — заменить выделение результатом;
+ *                       'insert_below' — вставить ниже курсора;
+ *                       'auto'         — replace при наличии selected_text,
+ *                                        иначе insert_below.
+ *                     Это единый источник правды; UI читает поле через /presets.
  *
  * Поддерживаемые actions:
  *   factcheck, add_faq, enrich_lsi, expand_section, anti_spam, custom
@@ -24,6 +30,7 @@ const PRESETS = {
     needsLsi:      false,
     needsExtra:    false,
     extraSchema:   {},
+    applyMode:     'replace',
   },
   add_faq: {
     displayLabel:  'Добавить FAQ-блок',
@@ -33,6 +40,7 @@ const PRESETS = {
     needsLsi:      true,
     needsExtra:    false,
     extraSchema:   {},
+    applyMode:     'insert_below',
   },
   enrich_lsi: {
     displayLabel:  'Обогатить блок LSI-словами',
@@ -42,6 +50,7 @@ const PRESETS = {
     needsLsi:      true,
     needsExtra:    false,
     extraSchema:   {},
+    applyMode:     'replace',
   },
   expand_section: {
     displayLabel:  'Расширить структуру (новый раздел)',
@@ -51,6 +60,7 @@ const PRESETS = {
     needsLsi:      true,
     needsExtra:    false,
     extraSchema:   {},
+    applyMode:     'insert_below',
   },
   anti_spam: {
     displayLabel:  'Анти-спам (снизить плотность ключа)',
@@ -60,6 +70,7 @@ const PRESETS = {
     needsLsi:      true,
     needsExtra:    true,
     extraSchema:   { keyword: 'string:required' },
+    applyMode:     'replace',
   },
   custom: {
     // Свой запрос. Если пользователь предварительно выделил фрагмент — пресет
@@ -75,6 +86,7 @@ const PRESETS = {
     needsLsi:      true,
     needsExtra:    false,
     extraSchema:   {},
+    applyMode:     'auto',
   },
 };
 
@@ -122,6 +134,7 @@ function listPresets() {
     needsLsi:      p.needsLsi,
     needsExtra:    p.needsExtra,
     extraSchema:   p.extraSchema,
+    applyMode:     p.applyMode || 'auto',
   }));
 }
 
