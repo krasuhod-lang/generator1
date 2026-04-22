@@ -11,6 +11,7 @@ const routes = [
   { path: '/tasks/:id/edit',    component: () => import('../views/CreateTaskPage.vue'), meta: { auth: true } },
   { path: '/tasks/:id/monitor', component: () => import('../views/MonitorPage.vue'),    meta: { auth: true } },
   { path: '/tasks/:id/result',  component: () => import('../views/ResultPage.vue'),     meta: { auth: true } },
+  { path: '/copilot',           component: () => import('../views/CopilotHubPage.vue'), meta: { auth: true } },
   { path: '/tasks/:id/copilot', component: () => import('../views/EditorCopilotPage.vue'), meta: { auth: true } },
   { path: '/meta-tags',    component: () => import('../views/MetaTagsPage.vue'),    meta: { auth: true } },
   { path: '/link-article', component: () => import('../views/LinkArticlePage.vue'), meta: { auth: true } },
