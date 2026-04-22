@@ -518,6 +518,7 @@ async function getResult(req, res, next) {
         input_target_service: task.input_target_service,
         stage7_result: task.stage7_result,
         full_html:     task.full_html,
+        full_html_edited: task.full_html_edited || null,
       },
       blocks,
       metrics: metricsRows[0] || null,

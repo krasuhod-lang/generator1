@@ -187,6 +187,24 @@ function fmt(n, digits = 0) {
       <span class="text-white font-semibold truncate max-w-lg">
         {{ task?.input_target_service || 'Результаты задачи' }}
       </span>
+
+      <!-- Вкладки: Генератор SEO текста (текущая) / AI-Редактор -->
+      <nav class="ml-4 flex gap-1">
+        <span class="text-xs px-3 py-1.5 rounded-md bg-indigo-600 text-white">
+          Генератор SEO текста
+        </span>
+        <RouterLink
+          :to="`/tasks/${taskId}/copilot`"
+          class="text-xs px-3 py-1.5 rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors flex items-center gap-1.5"
+        >
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+          AI-Редактор
+        </RouterLink>
+      </nav>
+
       <span class="badge bg-green-900 text-green-300 ml-auto">✓ Готово</span>
     </header>
 

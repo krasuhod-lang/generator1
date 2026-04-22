@@ -23,6 +23,7 @@ const { testConnection } = require('./src/config/db');
 const authRoutes  = require('./src/routes/auth.routes');
 const tasksRoutes = require('./src/routes/tasks.routes');
 const adminRoutes = require('./src/routes/admin.routes');
+const editorCopilotRoutes = require('./src/routes/editorCopilot.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -95,6 +96,7 @@ app.get('/health', (req, res) => {
 app.use('/api/auth',  authRoutes);
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/editor-copilot', editorCopilotRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -212,6 +214,90 @@ async function ensureSchema() {
       CREATE INDEX IF NOT EXISTS idx_tasks_pause_status
         ON tasks(status)
         WHERE status IN ('paused', 'pausing')
+    `);
+
+    // ─── Migration 007: AI-Copilot редактор готовой статьи ───────────
+    // Идемпотентно создаём ENUMs, таблицы editor_copilot_sessions /
+    // editor_copilot_operations и колонку tasks.full_html_edited.
+    // Без этих сущностей вкладка «AI-Редактор» во фронте не работает.
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS full_html_edited TEXT`);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'editor_copilot_action') THEN
+          CREATE TYPE editor_copilot_action AS ENUM (
+            'factcheck','add_faq','enrich_lsi','expand_section','anti_spam','custom'
+          );
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'editor_copilot_status') THEN
+          CREATE TYPE editor_copilot_status AS ENUM (
+            'pending','streaming','done','error','cancelled'
+          );
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'editor_copilot_apply_mode') THEN
+          CREATE TYPE editor_copilot_apply_mode AS ENUM ('replace','insert_below');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS editor_copilot_sessions (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        task_id           UUID UNIQUE NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        user_id           UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        total_tokens_in   BIGINT      NOT NULL DEFAULT 0,
+        total_tokens_out  BIGINT      NOT NULL DEFAULT 0,
+        total_cost_usd    NUMERIC(12,6) NOT NULL DEFAULT 0,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_copilot_sessions_user_id ON editor_copilot_sessions(user_id)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS editor_copilot_operations (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id      UUID NOT NULL REFERENCES editor_copilot_sessions(id) ON DELETE CASCADE,
+        task_id         UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        action          editor_copilot_action      NOT NULL,
+        selected_text   TEXT,
+        user_prompt     TEXT,
+        extra_params    JSONB,
+        status          editor_copilot_status      NOT NULL DEFAULT 'pending',
+        result_text     TEXT,
+        applied         BOOLEAN                    NOT NULL DEFAULT FALSE,
+        applied_mode    editor_copilot_apply_mode,
+        tokens_in       INTEGER                    NOT NULL DEFAULT 0,
+        tokens_out      INTEGER                    NOT NULL DEFAULT 0,
+        cost_usd        NUMERIC(12,6)              NOT NULL DEFAULT 0,
+        model_used      TEXT,
+        error_message   TEXT,
+        logs            JSONB                      NOT NULL DEFAULT '[]'::jsonb,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at    TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_copilot_ops_task_created ON editor_copilot_operations (task_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_copilot_ops_session ON editor_copilot_operations (session_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_copilot_ops_status ON editor_copilot_operations (status)`);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_copilot_sessions_updated_at') THEN
+          CREATE TRIGGER trg_copilot_sessions_updated_at
+            BEFORE UPDATE ON editor_copilot_sessions
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+        END IF;
+      END$$;
     `);
 
     console.log('[Schema] ensureSchema OK');
