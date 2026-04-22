@@ -9,10 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "axios":       "^1.7.2",
-    "pinia":       "^2.1.7",
-    "vue":         "^3.4.27",
-    "vue-router":  "^4.3.2"
+    "@tiptap/pm":          "^2.4.0",
+    "@tiptap/starter-kit": "^2.4.0",
+    "@tiptap/vue-3":       "^2.4.0",
+    "axios":               "^1.7.2",
+    "dompurify":           "^3.1.6",
+    "pinia":               "^2.1.7",
+    "vue":                 "^3.4.27",
+    "vue-router":          "^4.3.2"
   },
   "devDependencies": {
     "@vitejs/plugin-vue":    "^5.0.4",

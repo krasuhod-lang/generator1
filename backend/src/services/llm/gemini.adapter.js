@@ -544,7 +544,237 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   throw new Error('All Gemini proxies exhausted');
 }
 
-module.exports = { callGemini, createCachedContent, deleteCachedContent };
+/**
+ * streamGenerate — потоковая (SSE) генерация Gemini для AI-Copilot редактора.
+ *
+ * В отличие от callGemini() этот вызов:
+ *   - НЕ форсит responseMimeType=application/json (нужен plain text/HTML);
+ *   - использует endpoint `:streamGenerateContent?alt=sse` с потоковым ответом;
+ *   - вызывает onChunk(deltaText) на каждом текстовом фрагменте;
+ *   - возвращает агрегированный текст + точные usage-метрики из Gemini.
+ *
+ * Если поток-ориентированный режим недоступен (5xx / отсутствие SSE), функция
+ * прозрачно деградирует до обычного callGemini() с одним «фиктивным» чанком —
+ * фронт всё равно увидит SSE-события от нашего бэкенда.
+ *
+ * @param {string}   systemInstruction
+ * @param {string}   userPrompt
+ * @param {object}   options
+ * @param {function} options.onChunk     (deltaText, meta?) => void
+ * @param {function} [options.shouldAbort] () => boolean — раз в чанк проверяется
+ * @param {number}   [options.temperature=0.6]
+ * @param {number}   [options.maxTokens=8192]
+ * @param {number}   [options.timeoutMs=180000]
+ * @param {string}   [options.model]      — переопределяет GEMINI_MODEL
+ * @returns {Promise<{ text, tokensIn, tokensOut, model, aborted }>}
+ */
+async function streamGenerate(systemInstruction, userPrompt, options = {}) {
+  if (typeof systemInstruction !== 'string' || typeof userPrompt !== 'string') {
+    throw new Error('streamGenerate: systemInstruction and userPrompt must be strings');
+  }
+  if ((systemInstruction + userPrompt).length > MAX_GEMINI_INPUT_LENGTH) {
+    throw new Error('streamGenerate: input text too long');
+  }
+
+  const {
+    onChunk     = () => {},
+    shouldAbort = () => false,
+    temperature = 0.6,
+    maxTokens   = 8192,
+    timeoutMs   = 180000,
+    model       = GEMINI_MODEL,
+  } = options;
+
+  if (temperature < 0 || temperature > 2) throw new Error('Invalid temperature');
+  if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
+  if (timeoutMs < 1000 || timeoutMs > 600000) throw new Error('Invalid timeout');
+
+  if (PROXY_URLS.length === 0) {
+    throw new Error('streamGenerate: GEMINI_PROXY не задан');
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_GEMINI_API_KEY;
+  const endpoint = `${GEMINI_BASE_URL}/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+
+  const payload = {
+    contents: [{ parts: [{ text: userPrompt }] }],
+    generationConfig: {
+      temperature,
+      maxOutputTokens: maxTokens,
+      // НЕ ставим responseMimeType: для редактора нужен HTML/Markdown текст
+    },
+    safetySettings: [
+      { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_ONLY_HIGH' },
+      { category: 'HARM_CATEGORY_HATE_SPEECH',        threshold: 'BLOCK_ONLY_HIGH' },
+      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT',  threshold: 'BLOCK_ONLY_HIGH' },
+      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT',  threshold: 'BLOCK_ONLY_HIGH' },
+    ],
+  };
+  if (systemInstruction && systemInstruction.trim()) {
+    payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+  }
+
+  const totalAttempts = PROXY_URLS.length;
+  let lastError = null;
+
+  for (let attempt = 0; attempt < totalAttempts; attempt++) {
+    const proxyIdx   = (activeProxyIdx + attempt) % PROXY_URLS.length;
+    const proxyAgent = buildProxyAgent(proxyIdx);
+    if (!proxyAgent) {
+      lastError = new Error(`Gemini proxy [${proxyIdx}] agent creation failed`);
+      if (attempt < totalAttempts - 1) continue;
+      throw lastError;
+    }
+
+    let response;
+    try {
+      response = await axios.post(endpoint, payload, {
+        timeout:        timeoutMs,
+        headers:        { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+        validateStatus: null,
+        httpsAgent:     proxyAgent,
+        proxy:          false,
+        responseType:   'stream',
+      });
+    } catch (networkErr) {
+      console.warn(`[gemini-stream] network error proxy [${proxyIdx}]: ${networkErr.message}`);
+      lastError = networkErr;
+      if (attempt < totalAttempts - 1) continue;
+      throw lastError;
+    }
+
+    if (response.status !== 200) {
+      // При не-200 тело тоже Stream — собираем буфер для диагностики.
+      const buf = await readStreamToString(response.data, 4000);
+      let detail = buf.slice(0, 600);
+      try { detail = JSON.parse(buf)?.error?.message || detail; } catch (_) {}
+      const err = new Error(`Gemini stream API error ${response.status}: ${detail} [proxy ${proxyIdx}]`);
+      if (response.status === 429 || response.status === 503) {
+        err.status = response.status;
+        throw err;
+      }
+      if (isGeoBlockError(detail) && attempt < totalAttempts - 1) {
+        console.warn(`[gemini-stream] geo-block proxy [${proxyIdx}], switching...`);
+        lastError = err; lastError.isGeoBlock = true; lastError.isDeterministic = true;
+        continue;
+      }
+      err.isDeterministic = true;
+      if (isGeoBlockError(detail)) err.isGeoBlock = true;
+      throw err;
+    }
+
+    // ── Успешный поток ──
+    if (proxyIdx !== activeProxyIdx) {
+      console.log(`[gemini-stream] proxy [${proxyIdx}] works — pinning as active`);
+      activeProxyIdx = proxyIdx;
+    }
+
+    const result = await consumeSseStream(response.data, { onChunk, shouldAbort });
+    return { ...result, model };
+  }
+
+  if (lastError) throw lastError;
+  throw new Error('All Gemini proxies exhausted (stream)');
+}
+
+/**
+ * consumeSseStream — потребляет axios-stream Gemini :streamGenerateContent?alt=sse,
+ * парсит SSE-кадры формата `data: {...}\n\n` и:
+ *   - вызывает onChunk(text) на каждом text-фрагменте,
+ *   - аккумулирует usageMetadata из последнего кадра.
+ */
+function consumeSseStream(stream, { onChunk, shouldAbort }) {
+  return new Promise((resolve, reject) => {
+    let buffer    = '';
+    let aggregate = '';
+    let tokensIn  = 0;
+    let tokensOut = 0;
+    let aborted   = false;
+
+    const flushFrame = (frame) => {
+      // Каждый SSE-кадр — JSON-объект GenerateContentResponse
+      let json;
+      try { json = JSON.parse(frame); } catch (_) { return; }
+      const parts = json?.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts)) {
+        for (const p of parts) {
+          if (typeof p?.text === 'string' && p.text.length) {
+            aggregate += p.text;
+            try { onChunk(p.text); } catch (e) {
+              console.warn('[gemini-stream] onChunk threw:', e.message);
+            }
+          }
+        }
+      }
+      const usage = json?.usageMetadata;
+      if (usage) {
+        if (typeof usage.promptTokenCount === 'number')      tokensIn  = usage.promptTokenCount;
+        if (typeof usage.candidatesTokenCount === 'number')  tokensOut = usage.candidatesTokenCount;
+      }
+    };
+
+    const onData = (chunk) => {
+      if (aborted) return;
+      if (shouldAbort && shouldAbort()) {
+        aborted = true;
+        try { stream.destroy(); } catch (_) {}
+        return;
+      }
+      buffer += chunk.toString('utf8');
+      // SSE-кадры разделяются \n\n. Между data:-строками может быть несколько data:-полей.
+      let sep;
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const raw = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const dataLines = raw
+          .split('\n')
+          .filter(l => l.startsWith('data:'))
+          .map(l => l.slice(5).trim());
+        if (!dataLines.length) continue;
+        const frame = dataLines.join('');
+        if (frame === '[DONE]' || frame === '') continue;
+        flushFrame(frame);
+      }
+    };
+
+    stream.on('data', onData);
+    stream.on('end', () => {
+      // Хвост — попробуем распарсить остаток
+      if (buffer.trim()) {
+        const dataLines = buffer
+          .split('\n')
+          .filter(l => l.startsWith('data:'))
+          .map(l => l.slice(5).trim());
+        if (dataLines.length) {
+          const frame = dataLines.join('');
+          if (frame && frame !== '[DONE]') flushFrame(frame);
+        }
+      }
+      resolve({ text: aggregate, tokensIn, tokensOut, aborted });
+    });
+    stream.on('error', (e) => reject(e));
+  });
+}
+
+function readStreamToString(stream, maxBytes = 4000) {
+  return new Promise((resolve) => {
+    let buf = '';
+    let stopped = false;
+    stream.on('data', (chunk) => {
+      if (stopped) return;
+      buf += chunk.toString('utf8');
+      if (buf.length >= maxBytes) {
+        stopped = true;
+        try { stream.destroy(); } catch (_) {}
+        resolve(buf);
+      }
+    });
+    stream.on('end',   () => resolve(buf));
+    stream.on('error', () => resolve(buf));
+  });
+}
+
+module.exports = { callGemini, streamGenerate, createCachedContent, deleteCachedContent };
 
 // ────────────────────────────────────────────────────────────────────
 // Gemini Context Caching API (`cachedContents`)
