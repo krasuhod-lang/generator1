@@ -14,7 +14,11 @@ export const useCopilotStore = defineStore('copilot', () => {
   // ── Состояние выбора в WYSIWYG ─────────────────────────────────────────
   const selectedText      = ref('');     // plain-text из выделения
   const selectedHtml      = ref('');     // HTML из выделения
-  const action            = ref('factcheck');
+  // Action по умолчанию — 'custom' (свободный запрос). Это самый «безопасный» пресет:
+  // ему достаточно одного user_prompt, не требуется selected_text. Прежний дефолт
+  // 'factcheck' приводил к мгновенной ошибке валидации, если пользователь жал
+  // «Сгенерировать» без выделения текста и без промпта.
+  const action            = ref('custom');
   const userPrompt        = ref('');
   const extraParams       = ref({});     // напр. { keyword: 'Анапа' }
 
@@ -27,6 +31,8 @@ export const useCopilotStore = defineStore('copilot', () => {
   // ── Логи ───────────────────────────────────────────────────────────────
   const logs              = ref([]);     // [{ ts, level, message }]
   const logsDialogOpen    = ref(false);
+  // Последнее сообщение об ошибке (для отображения в UI вне модалки логов).
+  const lastError         = ref('');
 
   // ── Учёт токенов ───────────────────────────────────────────────────────
   const usage             = ref({ tokens_in: 0, tokens_out: 0, cost_usd: 0 });
@@ -52,6 +58,7 @@ export const useCopilotStore = defineStore('copilot', () => {
     currentStatus.value      = 'idle';
     streamingText.value      = '';
     logs.value               = [];
+    lastError.value          = '';
     usage.value              = { tokens_in: 0, tokens_out: 0, cost_usd: 0 };
     previewVisible.value     = false;
   }
@@ -102,6 +109,7 @@ export const useCopilotStore = defineStore('copilot', () => {
     closeStream();
     streamingText.value      = '';
     logs.value               = [];
+    lastError.value          = '';
     usage.value              = { tokens_in: 0, tokens_out: 0, cost_usd: 0 };
     currentStatus.value      = 'pending';
     previewVisible.value     = false;
@@ -152,7 +160,9 @@ export const useCopilotStore = defineStore('copilot', () => {
     es.addEventListener('error', (e) => {
       _safeJson(e.data, (d) => {
         currentStatus.value = 'error';
-        logs.value.push({ ts: new Date().toISOString(), level: 'error', message: d.message || 'stream error' });
+        const msg = d.message || 'stream error';
+        lastError.value = msg;
+        logs.value.push({ ts: new Date().toISOString(), level: 'error', message: msg });
       });
       // EventSource часто эмитит 'error' и при сетевом сбросе без data — не закрываем сразу,
       // браузер сам попытается переподключиться. Закроем по таймауту, если не оживёт.
@@ -215,7 +225,7 @@ export const useCopilotStore = defineStore('copilot', () => {
     // state
     taskId, selectedText, selectedHtml, action, userPrompt, extraParams,
     currentOperationId, currentStatus, streamingText, previewVisible,
-    logs, logsDialogOpen, usage, sessionTotals, history, presets, model,
+    logs, logsDialogOpen, lastError, usage, sessionTotals, history, presets, model,
     // getters
     isBusy, lastOperation,
     // actions
