@@ -21,6 +21,10 @@ export const useCopilotStore = defineStore('copilot', () => {
   const action            = ref('custom');
   const userPrompt        = ref('');
   const extraParams       = ref({});     // напр. { keyword: 'Анапа' }
+  // LLM-провайдер для AI-Copilot редактора. По умолчанию 'gemini' (back-compat).
+  // Передаётся в createOperation → используется в editor_copilot_sessions.llm_provider
+  // (если ещё нет) и наследуется всеми операциями этой сессии.
+  const llmProvider       = ref('gemini');
 
   // ── Текущая операция ───────────────────────────────────────────────────
   const currentOperationId = ref(null);
@@ -119,6 +123,7 @@ export const useCopilotStore = defineStore('copilot', () => {
       selected_text: selectedHtml.value || selectedText.value || null,
       user_prompt:   userPrompt.value || null,
       extra_params:  Object.keys(extraParams.value).length ? extraParams.value : null,
+      llm_provider:  llmProvider.value === 'grok' ? 'grok' : 'gemini',
     };
 
     const { data } = await api.post(`/editor-copilot/${taskId.value}/operations`, body);
@@ -223,7 +228,7 @@ export const useCopilotStore = defineStore('copilot', () => {
 
   return {
     // state
-    taskId, selectedText, selectedHtml, action, userPrompt, extraParams,
+    taskId, selectedText, selectedHtml, action, userPrompt, extraParams, llmProvider,
     currentOperationId, currentStatus, streamingText, previewVisible,
     logs, logsDialogOpen, lastError, usage, sessionTotals, history, presets, model,
     // getters

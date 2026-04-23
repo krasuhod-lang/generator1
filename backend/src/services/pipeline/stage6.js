@@ -5,7 +5,7 @@ const { SYSTEM_PROMPTS }       = require('../../prompts/systemPrompts');
 const { calculateCoverage }    = require('../../utils/calculateCoverage');
 const { computeSemanticCoverage } = require('../../utils/semanticSimilarity');
 const { LSI_COVERAGE_TARGET }  = require('../../utils/objectiveMetrics');
-const { geminiCallOpts, akbSystem } = require('../../utils/articleKnowledgeBase');
+const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 
 /**
  * Stage 6: Инъекция LSI — цикл до достижения LSI_COVERAGE_TARGET (≥ 85%),
@@ -92,7 +92,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
     );
 
     const stage6Result = await callLLM(
-      'gemini',
+      llmProvider(task),
       akbSystem(task),
       stage6Prompt,
       geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens })

@@ -15,6 +15,7 @@
  */
 
 const Redis = require('ioredis');
+const { persistEvent } = require('./taskLogPersister');
 
 const SSE_CHANNEL = 'sse:events';
 
@@ -164,6 +165,11 @@ redisSub.on('message', (channel, message) => {
  * @param {object} event
  */
 function publish(taskId, event) {
+  // Персистим событие в БД (батчем, не блокируя SSE).
+  // taskLogPersister сам решает, что писать (init/closed/heartbeat пропускает).
+  try { persistEvent(taskId, event); } catch (err) {
+    console.warn(`[SSE] persistEvent failed for task ${taskId}:`, err.message);
+  }
   const message = JSON.stringify({ taskId, event });
   redisPub.publish(SSE_CHANNEL, message).catch((err) => {
     console.warn(`[SSE] Redis publish failed for task ${taskId}, falling back to local delivery:`, err.message);

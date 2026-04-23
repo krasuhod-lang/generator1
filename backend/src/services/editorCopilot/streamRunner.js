@@ -2,6 +2,7 @@
 
 const db = require('../../config/db');
 const { streamGenerate, callGemini } = require('../llm/gemini.adapter');
+const { streamGenerateGrok, callGrok, XAI_MODEL } = require('../llm/grok.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
 const { buildContext } = require('./contextBuilder');
 const { buildPrompt, postProcess, validateOutput, buildCorrectiveUserPrompt } = require('./promptBuilder');
@@ -139,7 +140,25 @@ async function runStream({ operationId, taskId }) {
     return _failOp(operationId, `Ошибка сборки промпта: ${e.message}`);
   }
 
-  // 5) Стрим Gemini
+  // ── Резолвинг провайдера для этой операции ─────────────────────
+  // Источник: operation.llm_provider → session.llm_provider → 'gemini'.
+  // По умолчанию 'gemini' для back-compat (миграция 010 даёт DEFAULT 'gemini').
+  let opProvider = (opRow.llm_provider || '').toString().toLowerCase().trim();
+  if (opProvider !== 'grok' && opProvider !== 'gemini') {
+    try {
+      const { rows: sRows } = await db.query(
+        `SELECT llm_provider FROM editor_copilot_sessions WHERE id = $1`,
+        [opRow.session_id]
+      );
+      opProvider = (sRows[0]?.llm_provider || 'gemini').toString().toLowerCase();
+    } catch (_) { opProvider = 'gemini'; }
+  }
+  const provider = (opProvider === 'grok') ? 'grok' : 'gemini';
+  const providerModel = provider === 'grok' ? XAI_MODEL : COPILOT_MODEL;
+  const _streamFn = provider === 'grok' ? streamGenerateGrok : streamGenerate;
+  const _callFn   = provider === 'grok' ? callGrok           : callGemini;
+
+  // 5) Стрим Gemini / Grok (поток или не-потоковый фолбэк для Grok)
   let firstChunkLogged = false;
   let dbFlushTimer = setInterval(async () => {
     try {
@@ -153,14 +172,14 @@ async function runStream({ operationId, taskId }) {
   }, 1500);
 
   try {
-    const result = await streamGenerate(prompt.system, prompt.user, {
-      model:       COPILOT_MODEL,
+    const result = await _streamFn(prompt.system, prompt.user, {
+      model:       providerModel,
       temperature: prompt.modelHints.temperature,
       maxTokens:   prompt.modelHints.maxTokens,
       onChunk: (delta) => {
         if (!firstChunkLogged) {
           firstChunkLogged = true;
-          log('info', 'Первый чанк получен от модели — стримим в UI');
+          log('info', `Первый чанк получен от модели (${provider}) — стримим в UI`);
         }
         opMem.partialText += delta;
         _broadcast(operationId, 'token', { delta });
@@ -173,8 +192,8 @@ async function runStream({ operationId, taskId }) {
     // чтобы было понятно, почему текст «пришёл одним куском», а не стримился.
     if (result && result.fallbackUsed) {
       log('warn',
-        'Стрим Gemini вернул пустой ответ — повторили запрос без потокового режима ' +
-        '(не-стрим callGemini). Текст подставлен в редактор обычным образом.'
+        `Стрим ${provider} вернул пустой ответ или не поддерживает поток — повторили запрос ` +
+        'без потокового режима. Текст подставлен в редактор обычным образом.'
       );
     }
 
@@ -185,8 +204,8 @@ async function runStream({ operationId, taskId }) {
         result_text:  postProcess(result.text),
         tokens_in:    result.tokensIn  || 0,
         tokens_out:   result.tokensOut || 0,
-        cost_usd:     calcCost('gemini', result.tokensIn || 0, result.tokensOut || 0),
-        model_used:   result.model || COPILOT_MODEL,
+        cost_usd:     calcCost(provider, result.tokensIn || 0, result.tokensOut || 0),
+        model_used:   result.model || providerModel,
         error_message:null,
       });
       _broadcast(operationId, 'done', { status: 'cancelled', result: postProcess(result.text) });
@@ -219,8 +238,8 @@ async function runStream({ operationId, taskId }) {
         );
         try {
           const correctivePrompt = buildCorrectiveUserPrompt(prompt.user, validation.issues);
-          const retry = await callGemini(prompt.system, correctivePrompt, {
-            model:       COPILOT_MODEL,
+          const retry = await _callFn(prompt.system, correctivePrompt, {
+            model:       providerModel,
             temperature: prompt.modelHints.temperature,
             maxTokens:   prompt.modelHints.maxTokens,
             timeoutMs:   180000,
@@ -262,7 +281,7 @@ async function runStream({ operationId, taskId }) {
       }
     }
 
-    const cost = calcCost('gemini', totalTokensIn, totalTokensOut);
+    const cost = calcCost(provider, totalTokensIn, totalTokensOut);
 
     // ── Гарантия непустого ответа ─────────────────────────────────────
     // Если после стрима + фолбэка + корректирующего ретрая текст всё равно
@@ -298,7 +317,7 @@ async function runStream({ operationId, taskId }) {
           tokens_in:    totalTokensIn,
           tokens_out:   totalTokensOut,
           cost_usd:     cost,
-          model_used:   result.model || COPILOT_MODEL,
+          model_used:   result.model || providerModel,
           error_message:`Empty model output (${diag}); fragment returned unchanged.`,
         });
         _broadcast(operationId, 'usage', { tokens_in: totalTokensIn, tokens_out: totalTokensOut, cost_usd: cost });
@@ -318,10 +337,10 @@ async function runStream({ operationId, taskId }) {
       tokens_in:    totalTokensIn,
       tokens_out:   totalTokensOut,
       cost_usd:     cost,
-      model_used:   result.model || COPILOT_MODEL,
+      model_used:   result.model || providerModel,
       error_message:null,
     });
-    log('info', `Готово. tokens_in=${totalTokensIn} tokens_out=${totalTokensOut} cost=$${cost.toFixed(6)}`);
+    log('info', `Готово. tokens_in=${totalTokensIn} tokens_out=${totalTokensOut} cost=$${cost.toFixed(6)} provider=${provider}`);
     _broadcast(operationId, 'usage', { tokens_in: totalTokensIn, tokens_out: totalTokensOut, cost_usd: cost });
     _broadcast(operationId, 'done',  { status: 'done', result: acceptedText });
   } catch (e) {

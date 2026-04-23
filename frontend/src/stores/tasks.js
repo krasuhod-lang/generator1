@@ -94,6 +94,16 @@ export const useTasksStore = defineStore('tasks', () => {
     return data.metrics;
   }
 
+  // ── История лог-событий (персистентные SSE-логи) ──────────────────
+  async function fetchTaskLogs(id, { after, limit = 1000 } = {}) {
+    const params = new URLSearchParams();
+    if (after) params.set('after', after);
+    if (limit)  params.set('limit', String(limit));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const { data } = await api.get(`/tasks/${id}/logs${qs}`);
+    return data.logs || [];
+  }
+
   // ── Загрузка DOCX ──────────────────────────────────────────────────
   async function uploadTZ(id, file) {
     const form = new FormData();
@@ -129,6 +139,6 @@ export const useTasksStore = defineStore('tasks', () => {
     tasks, current, loading, error,
     fetchTasks, fetchTask, createTask, updateTask,
     startTask, pauseTask, resumeTask, deleteTask,
-    fetchResult, fetchMetrics, uploadTZ, parseTZWithLLM,
+    fetchResult, fetchMetrics, fetchTaskLogs, uploadTZ, parseTZWithLLM,
   };
 });

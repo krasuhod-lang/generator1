@@ -22,6 +22,7 @@ const routes = [
   { path: '/admin/login',     component: () => import('../views/admin/AdminLoginPage.vue'),      meta: { adminGuest: true } },
   { path: '/admin',           component: () => import('../views/admin/AdminDashboardPage.vue'),  meta: { admin: true } },
   { path: '/admin/users/:id', component: () => import('../views/admin/AdminUserDetailPage.vue'), meta: { admin: true } },
+  { path: '/admin/tasks/:id', component: () => import('../views/admin/AdminTaskDetailPage.vue'), meta: { admin: true } },
 
   { path: '/:pathMatch(.*)*',   redirect: '/dashboard' },
 ];

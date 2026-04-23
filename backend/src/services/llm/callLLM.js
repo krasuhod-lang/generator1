@@ -2,9 +2,12 @@
 
 const { callDeepSeek } = require('./deepseek.adapter');
 const { callGemini }   = require('./gemini.adapter');
+const { callGrok }     = require('./grok.adapter');
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
+const { getCachedResponse, setCachedResponse } = require('./responseCache');
+const responseCacheModule = require('./responseCache');
 
 // ────────────────────────────────────────────────────────────────────
 // Per-task token budget guard
@@ -172,7 +175,9 @@ async function persistStageCall({ taskId, stageName, callLabel, model, promptSiz
        startedAt, completedAt]
     );
 
-    // Обновляем агрегированные метрики
+    // Обновляем агрегированные метрики (grok идёт по той же колонке, что
+    // и Gemini, чтобы не плодить миграции в task_metrics — оба провайдера
+    // занимают слот «text-generation cost».)
     const isDeepSeek = model.startsWith('deepseek');
     const metricsCol = isDeepSeek
       ? { colIn: 'deepseek_tokens_in', colOut: 'deepseek_tokens_out', colCost: 'deepseek_cost_usd' }
@@ -199,7 +204,7 @@ async function persistStageCall({ taskId, stageName, callLabel, model, promptSiz
 /**
  * Главная функция вызова LLM.
  *
- * @param {'deepseek'|'gemini'} adapter   — какой адаптер использовать
+ * @param {'deepseek'|'gemini'|'grok'} adapter   — какой адаптер использовать
  * @param {string}              system    — системный промпт
  * @param {string}              prompt    — пользовательский промпт
  * @param {object}              [opts]
@@ -244,24 +249,56 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     else console.log(`[callLLM:${stageName}] [${level}] ${msg}`);
   };
 
-  const callFn    = adapter === 'gemini' ? callGemini : callDeepSeek;
+  const callFn = adapter === 'gemini'
+    ? callGemini
+    : adapter === 'grok'
+      ? callGrok
+      : callDeepSeek;
+  // Provider-class для метрик и budget guard'а: Grok идёт по той же
+  // дорожке, что и Gemini (платный текстовый провайдер с per-task budget'ом).
+  const providerClass = adapter === 'deepseek' ? 'deepseek' : 'gemini-class';
   const startedAt = new Date();
   const promptSize = estimateTokens(system + prompt);
 
-  // Token budget pre-check (Gemini only — на DeepSeek не действует, чтобы
+  // Token budget pre-check (Gemini/Grok — на DeepSeek не действует, чтобы
   // не блокировать дешёвый аналитический трафик).
-  if (adapter === 'gemini' && Number.isFinite(tokenBudget) && taskId) {
+  if (providerClass === 'gemini-class' && Number.isFinite(tokenBudget) && taskId) {
     const spent = getTaskBudgetSpent(taskId, 'gemini');
     if (spent >= tokenBudget) {
       throw new BudgetExceededError(
-        `Gemini token budget exhausted for task ${taskId}: ${spent}/${tokenBudget} input tokens. ` +
+        `${adapter} token budget exhausted for task ${taskId}: ${spent}/${tokenBudget} input tokens. ` +
         `Skip non-essential calls (Stage 6 cycle, Stage 5 retries) and continue.`
       );
     }
   }
 
   // Локальная копия cachedContent — может «сгореть» при cache miss.
-  let activeCachedContent = cachedContent;
+  // Только для Gemini; Grok не поддерживает cachedContent.
+  let activeCachedContent = adapter === 'gemini' ? cachedContent : null;
+
+  // ── Детерминированный response cache (Redis) ─────────────────────
+  // Ключ: sha256(adapter + model + system + prompt + temperature + maxTokens).
+  // При включённом LLM_RESPONSE_CACHE_ENABLED — экономит деньги на повторных
+  // запусках задачи с тем же входом. Логируем cache_hit/miss через onLog.
+  // Skip lookup entirely when feature flag is off (избегаем async overhead).
+  const cacheResult = responseCacheModule.ENABLED
+    ? await getCachedResponse({
+        adapter,
+        system,
+        prompt,
+        temperature,
+        maxTokens,
+      }).catch(() => null)
+    : null;
+
+  if (cacheResult && cacheResult.cached) {
+    log(`${callLabel || stageName} ✓ (cached, $0.00)`, 'success');
+    if (onTokens) {
+      try { onTokens(adapter, 0, 0, 0, { cacheHit: true }); } catch (_) { /* no-op */ }
+    }
+    if (logCallback) logCallback(`[cache_hit] ${callLabel || stageName}`, 'system');
+    return cacheResult.value;
+  }
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -276,7 +313,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       const parsed    = normalizeKeys(parseJSON(result.text));
 
       // Аккумулируем расход для guard'а
-      if (adapter === 'gemini') {
+      if (providerClass === 'gemini-class') {
         _accumulateTokens(taskId, 'gemini', result.tokensIn || 0);
       }
 
@@ -314,6 +351,11 @@ async function callLLM(adapter, system, prompt, opts = {}) {
           enumerable: false,
           writable: true,
         });
+      }
+
+      // Записываем в response-cache (асинхронно, не блокируем).
+      if (cacheResult && cacheResult.key) {
+        setCachedResponse(cacheResult.key, parsed).catch(() => {});
       }
 
       return parsed;

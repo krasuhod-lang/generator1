@@ -229,4 +229,156 @@ async function getStats(req, res, next) {
   }
 }
 
-module.exports = { adminLogin, listUsers, getUserDetail, getUserTasks, getStats };
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin: per-task detail + logs + global task list (Point 8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/tasks?status=&user=&from=&to=&page=&perPage=
+ * Глобальный список задач с фильтрами и пагинацией. Параметризовано —
+ * НИКАКОЙ конкатенации SQL (см. point 9.1 — pg parameterized queries).
+ */
+async function listAllTasks(req, res, next) {
+  try {
+    const status  = (req.query.status  || '').trim();
+    const userQ   = (req.query.user    || '').trim();
+    const from    = (req.query.from    || '').trim();
+    const to      = (req.query.to      || '').trim();
+    const page    = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const perPage = Math.min(200, Math.max(1, parseInt(req.query.perPage, 10) || 30));
+    const offset  = (page - 1) * perPage;
+
+    const conds = [];
+    const params = [];
+    if (status) {
+      params.push(status);
+      conds.push(`t.status = $${params.length}`);
+    }
+    if (userQ) {
+      // user может быть UUID или подстрокой email — определяем по форме
+      const isUuid = /^[0-9a-f]{8}-/i.test(userQ);
+      if (isUuid) {
+        params.push(userQ);
+        conds.push(`t.user_id = $${params.length}`);
+      } else {
+        params.push(`%${userQ.toLowerCase()}%`);
+        conds.push(`LOWER(u.email) LIKE $${params.length}`);
+      }
+    }
+    if (from) {
+      const d = new Date(from);
+      if (!isNaN(d.getTime())) { params.push(d); conds.push(`t.created_at >= $${params.length}`); }
+    }
+    if (to) {
+      const d = new Date(to);
+      if (!isNaN(d.getTime())) { params.push(d); conds.push(`t.created_at <= $${params.length}`); }
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    params.push(perPage, offset);
+    const limitIdx  = params.length - 1;
+    const offsetIdx = params.length;
+
+    const { rows } = await db.query(
+      `SELECT t.id, t.title, t.status, t.input_target_service,
+              t.llm_provider, t.created_at, t.completed_at,
+              t.user_id, u.email AS user_email,
+              tm.total_cost_usd, tm.total_tokens
+         FROM tasks t
+         JOIN users u ON u.id = t.user_id
+         LEFT JOIN task_metrics tm ON tm.task_id = t.id
+         ${where}
+        ORDER BY t.created_at DESC
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
+    );
+
+    // Total для пагинации (отдельный запрос — без limit/offset)
+    const countParams = params.slice(0, params.length - 2);
+    const { rows: cRows } = await db.query(
+      `SELECT COUNT(*)::int AS total
+         FROM tasks t
+         JOIN users u ON u.id = t.user_id
+         ${where}`,
+      countParams,
+    );
+
+    return res.json({
+      tasks: rows,
+      page,
+      perPage,
+      total: cRows[0]?.total || 0,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/admin/tasks/:id
+ * Полная задача (включая final_html, final_html_edited, метрики,
+ * unused_inputs, провайдер). Без проверки user_id — admin видит всё.
+ */
+async function getAdminTaskDetail(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      `SELECT t.*, u.email AS user_email, u.name AS user_name,
+              tm.total_cost_usd, tm.total_tokens,
+              tm.deepseek_tokens_in, tm.deepseek_tokens_out, tm.deepseek_cost_usd,
+              tm.gemini_tokens_in,   tm.gemini_tokens_out,   tm.gemini_cost_usd,
+              tm.lsi_coverage, tm.eeat_score, tm.naturalness_score
+         FROM tasks t
+         JOIN users u ON u.id = t.user_id
+         LEFT JOIN task_metrics tm ON tm.task_id = t.id
+        WHERE t.id = $1`,
+      [req.params.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Задача не найдена' });
+
+    return res.json({ task: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/admin/tasks/:id/logs?after=&limit=
+ * Те же логи, что и /api/tasks/:id/logs, но без проверки владельца.
+ */
+async function getAdminTaskLogs(req, res, next) {
+  try {
+    const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit, 10) || 500));
+    const after = (req.query.after || '').trim();
+
+    const params = [req.params.id];
+    let whereExtra = '';
+    if (after) {
+      if (/^\d+$/.test(after)) {
+        params.push(parseInt(after, 10));
+        whereExtra = ` AND id > $${params.length}`;
+      } else {
+        const d = new Date(after);
+        if (!isNaN(d.getTime())) {
+          params.push(d);
+          whereExtra = ` AND ts > $${params.length}`;
+        }
+      }
+    }
+    params.push(limit);
+
+    const { rows } = await db.query(
+      `SELECT id, ts, level, stage, event_type, message, payload
+         FROM task_logs
+        WHERE task_id = $1${whereExtra}
+        ORDER BY id ASC
+        LIMIT $${params.length}`,
+      params,
+    );
+
+    return res.json({ logs: rows, count: rows.length });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { adminLogin, listUsers, getUserDetail, getUserTasks, getStats, listAllTasks, getAdminTaskDetail, getAdminTaskLogs };

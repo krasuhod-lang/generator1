@@ -6,7 +6,7 @@ const { reAuditBlock }      = require('./stage4');
 const { factCheck, computeConfidence } = require('../../utils/factCheck');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
-const { geminiCallOpts, akbSystem } = require('../../utils/articleKnowledgeBase');
+const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 
 /**
  * STOP_PHRASES — фразы-маркеры "воды".
@@ -191,7 +191,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       .replace('{{SPECIAL_INSTRUCTION}}', () => specialInstruction);
 
     const s5Result = await callLLM(
-      'gemini',
+      llmProvider(task),
       akbSystem(task),
       s5Prompt,
       geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens })
@@ -283,7 +283,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         .replace('{{SPECIAL_INSTRUCTION}}', () => confInstruction);
 
       const confResult = await callLLM(
-        'gemini',
+        llmProvider(task),
         akbSystem(task),
         confPrompt,
         geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens })
@@ -323,7 +323,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         .replace('{{SPECIAL_INSTRUCTION}}', () => tfInstruction);
 
       const tfResult = await callLLM(
-        'gemini',
+        llmProvider(task),
         akbSystem(task),
         tfPrompt,
         geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens })

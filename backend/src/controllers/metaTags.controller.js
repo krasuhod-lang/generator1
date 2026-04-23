@@ -71,14 +71,18 @@ async function createMetaTagTask(req, res, next) {
       return res.status(400).json({ error: 'Список ключевых запросов пуст' });
     }
 
+    const llmProvider = (typeof body.llm_provider === 'string'
+        && body.llm_provider.toLowerCase().trim() === 'grok')
+      ? 'grok' : 'gemini';
+
     const { rows } = await db.query(
       `INSERT INTO meta_tag_tasks
          (user_id, name, niche, lr, toponym, brand, phone, summary, keywords,
-          status, progress_total)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending', $10)
-       RETURNING id, name, status, progress_total, created_at`,
+          status, progress_total, llm_provider)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending', $10, $11)
+       RETURNING id, name, status, progress_total, llm_provider, created_at`,
       [req.user.id, name, niche, lr, toponym, brand, phone, summary,
-        JSON.stringify(keywords), keywords.length],
+        JSON.stringify(keywords), keywords.length, llmProvider],
     );
     const task = rows[0];
 

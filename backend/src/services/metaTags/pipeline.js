@@ -257,6 +257,9 @@ async function runMetaTagTaskInner(taskId) {
     // analyzeAudienceAndNiche на уровне всей задачи (не на каждый ключ —
     // экономия токенов, цена $0.02-0.05 на одну meta-tag-задачу).
     audienceNicheDigest: '',
+    // LLM-провайдер: 'gemini' (default) | 'grok'. Прокидывается в
+    // generateDrMaxMeta → callGemini/callGrok через args.inputs.
+    llm_provider: (task.llm_provider || 'gemini').toString().toLowerCase() === 'grok' ? 'grok' : 'gemini',
   };
 
   // Локальные агрегаты — чтобы не дёргать SUM из JSONB на каждом ключе.
@@ -333,11 +336,13 @@ async function runMetaTagTaskInner(taskId) {
         missed_lsi: [...lsiTitleCheck.missed_lsi, ...lsiDescCheck.missed_lsi],
       };
 
-      // 5) Учёт токенов и стоимости (Gemini)
+      // 5) Учёт токенов и стоимости (Gemini / Grok).
+      // Провайдер для cost-calc подбирается из inputs.llm_provider, чтобы
+      // тариф и метрики соответствовали реальному вызову.
       const meta = metas._meta || {};
       const tIn  = Number(meta.tokensIn)  || 0;
       const tOut = Number(meta.tokensOut) || 0;
-      const cost = calcCost('gemini', tIn, tOut);
+      const cost = calcCost(inputs.llm_provider || 'gemini', tIn, tOut);
       metas._meta = { ...meta, costUsd: cost };
       totalTokensIn  += tIn;
       totalTokensOut += tOut;

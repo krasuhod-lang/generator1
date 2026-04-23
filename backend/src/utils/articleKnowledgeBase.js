@@ -499,6 +499,8 @@ function buildArticleKnowledgeBase(input = {}) {
  */
 function geminiCallOpts(task, extra = {}) {
   const opts = { ...extra };
+  // cachedContent — только для Gemini. Для Grok игнорируем (cachedContents
+  // у x.ai отсутствует) — callLLM сам пропустит при adapter='grok'.
   if (task?.__geminiCacheName) opts.cachedContent = task.__geminiCacheName;
   if (task?.__tokenBudget)     opts.tokenBudget   = task.__tokenBudget;
   if (task?.__geminiCacheName) {
@@ -509,12 +511,26 @@ function geminiCallOpts(task, extra = {}) {
 
 /**
  * akbSystem — возвращает строку для positional `system` аргумента callLLM.
- * Когда кэш активен — возвращаем '' (AKB уже в кэше), иначе — сам AKB.
+ * Когда Gemini-кэш активен — возвращаем '' (AKB уже в кэше). Для Grok
+ * (или когда кэш не используется) — возвращаем сам AKB как system-promt.
  */
 function akbSystem(task) {
   if (!task) return '';
-  if (task.__geminiCacheName) return '';
+  // Если Gemini cache активен И провайдер всё ещё gemini — кэш покрывает AKB.
+  // Для Grok нет cachedContent, поэтому всегда передаём AKB как system.
+  const provider = (task?.llm_provider || 'gemini').toLowerCase();
+  if (provider === 'gemini' && task.__geminiCacheName) return '';
   return task.__articleKnowledgeBase || '';
+}
+
+/**
+ * llmProvider — нормализованный провайдер для задачи.
+ * Возвращает 'gemini' (default) или 'grok'. Используется как первый
+ * аргумент callLLM() во всех Stage-вызовах текстовой генерации.
+ */
+function llmProvider(task) {
+  const p = (task?.llm_provider || 'gemini').toString().toLowerCase().trim();
+  return p === 'grok' ? 'grok' : 'gemini';
 }
 
 module.exports = {
@@ -523,6 +539,7 @@ module.exports = {
   detectBusinessPreset,
   geminiCallOpts,
   akbSystem,
+  llmProvider,
   // экспортируем для возможных юнит-тестов / переиспользования
   _internal: { sliceWords, ensureString, formatList },
 };

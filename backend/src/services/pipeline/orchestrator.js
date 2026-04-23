@@ -380,7 +380,12 @@ async function runPipeline(task, ctx) {
   // на cached input tokens, но требует, чтобы AKB был ≥ ~4 КБ.
   // На cache miss — graceful fallback в callLLM (см. opts.cachedContent).
   task.__geminiCacheName = null;
+  // Skip Gemini cachedContents API for non-Gemini providers (Grok не имеет
+  // серверного context-cache; LLM_RESPONSE_CACHE_ENABLED Redis-кэш покрывает
+  // Grok отдельно через callLLM).
+  const _provider = (task?.llm_provider || 'gemini').toString().toLowerCase();
   if (
+    _provider === 'gemini' &&
     process.env.GEMINI_CONTEXT_CACHE_ENABLED === 'true' &&
     task.__articleKnowledgeBase &&
     Buffer.byteLength(task.__articleKnowledgeBase, 'utf8') >= 4096
