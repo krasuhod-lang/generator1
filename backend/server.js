@@ -364,6 +364,54 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_user_created ON meta_tag_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_status ON meta_tag_tasks (status)`);
 
+    // ─── Migration 010: LLM provider selection (Gemini | Grok) ───────
+    // Идемпотентно добавляем колонку llm_provider во все таблицы, которые
+    // запускают тяжёлые генеративные вызовы. Без этой колонки падают:
+    //   • POST /api/meta-tags  → INSERT ... llm_provider
+    //   • GET  /api/editor-copilot/* → SELECT ... llm_provider
+    //   • запуск pipeline (tasks)
+    // Whitelisted значения: 'gemini' | 'grok' (см. callLLM.js routing).
+    await db.query(`ALTER TABLE tasks                     ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
+    await db.query(`ALTER TABLE meta_tag_tasks            ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
+    await db.query(`ALTER TABLE editor_copilot_sessions   ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
+    await db.query(`ALTER TABLE editor_copilot_operations ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'tasks_llm_provider_check'
+        ) THEN
+          ALTER TABLE tasks
+            ADD CONSTRAINT tasks_llm_provider_check
+            CHECK (llm_provider IN ('gemini', 'grok'));
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'meta_tag_tasks_llm_provider_check'
+        ) THEN
+          ALTER TABLE meta_tag_tasks
+            ADD CONSTRAINT meta_tag_tasks_llm_provider_check
+            CHECK (llm_provider IN ('gemini', 'grok'));
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'editor_copilot_sessions_llm_provider_check'
+        ) THEN
+          ALTER TABLE editor_copilot_sessions
+            ADD CONSTRAINT editor_copilot_sessions_llm_provider_check
+            CHECK (llm_provider IN ('gemini', 'grok'));
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'editor_copilot_operations_llm_provider_check'
+        ) THEN
+          ALTER TABLE editor_copilot_operations
+            ADD CONSTRAINT editor_copilot_operations_llm_provider_check
+            CHECK (llm_provider IN ('gemini', 'grok'));
+        END IF;
+      END$$;
+    `);
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);
