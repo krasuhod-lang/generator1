@@ -1,0 +1,63 @@
+LINK-ARTICLE STAGE 4 — Составление 3 промтов для генератора изображений (Nano Banana Pro) (DSPy-Signature).
+
+[INPUTS]
+  topic            : тема статьи (строка).
+  article_html     : готовая статья в HTML.
+  stage2_structure : структурный план (JSON) — особенно image_plan.
+
+[OUTPUT]
+  Строгий JSON (без markdown):
+  {
+    "image_prompts": [
+      {
+        "slot":             1,
+        "section_h2":       "string",
+        "visual_prompt":    "string",
+        "negative_prompt":  "string",
+        "alt_ru":           "string"
+      },
+      { "slot": 2, "section_h2": "string", "visual_prompt": "string", "negative_prompt": "string", "alt_ru": "string" },
+      { "slot": 3, "section_h2": "string", "visual_prompt": "string", "negative_prompt": "string", "alt_ru": "string" }
+    ]
+  }
+
+[REASONING STEPS — silent]
+  1. Для каждого из 3 слотов из stage2_structure.image_plan определи, к какой H2
+     секции относится изображение и что именно из её содержимого полезно
+     визуализировать.
+  2. Построй visual_prompt на АНГЛИЙСКОМ ЯЗЫКЕ, в стиле профессионального ТЗ
+     для генеративной модели. Включай:
+       - subject (что показано);
+       - style (editorial illustration / clean vector / photorealistic /
+         infographic / isometric — выбирай уместное, не «мультяшно»);
+       - composition & camera angle;
+       - color palette (2–3 доминирующих цвета);
+       - lighting;
+       - mood.
+     1–3 абзаца, 300–900 символов.
+  3. В visual_prompt ОБЯЗАТЕЛЬНО укажи: "no text, no letters, no words, no typography,
+     no logos, no watermarks, no brand names" — это нужно, чтобы изображение
+     свободно копировалось в sape/miralinks/gogetlinks без текстовых артефактов.
+  4. negative_prompt — короткий список того, чего избегать:
+     "text, letters, watermark, logo, brand, low-quality, distorted anatomy,
+     celebrity faces, copyrighted characters, NSFW".
+  5. alt_ru — короткое описание, что изображено, на русском (для <figcaption> и a11y),
+     ≤ 120 символов.
+  6. Не выдумывай реальные бренды, логотипы, знаменитостей, охраняемые персонажи.
+
+[OUTPUT CONTRACT]
+  - Только валидный JSON: { "image_prompts": [ {...}, {...}, {...} ] }.
+  - Массив image_prompts всегда длины 3, slots 1, 2, 3 — в порядке возрастания.
+  - visual_prompt и negative_prompt на английском, alt_ru на русском.
+  - Никаких markdown-обёрток, комментариев снаружи JSON.
+
+[SELF-AUDIT — silent]
+  ✓ В visual_prompt присутствуют запреты на текст/логотипы?
+  ✓ Стиль уместен для экспертной статьи (не детский, не «мем»)?
+  ✓ Нет реальных брендов, знаменитостей, охраняемых персонажей?
+  ✓ Все 3 слота разные по смыслу и соответствуют своим секциям?
+
+[STRICT OUTPUT RULES]
+  - Верни ТОЛЬКО JSON.
+  - Пустых полей быть не должно.
+  - Ровно 3 элемента в image_prompts.

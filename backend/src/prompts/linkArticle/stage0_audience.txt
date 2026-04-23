@@ -1,0 +1,50 @@
+LINK-ARTICLE STAGE 0 — Анализ целевой аудитории и тона для ссылочной статьи (DSPy-Signature).
+
+[INPUTS]
+  topic           : тема статьи (строка).
+  focus_notes     : на что делаем упор (строка, может быть пустой).
+  strategy_digest : компактная выжимка Pre-Stage 0 (JSON, already-computed).
+
+[OUTPUT]
+  Строгий JSON (без markdown):
+  {
+    "audience_personas": [
+      { "name": "string", "context": "string", "pains": ["string"],
+        "barriers": ["string"], "motivations": ["string"], "reading_level": "beginner|intermediate|expert" }
+    ],
+    "tone_of_voice": {
+      "register":       "formal|neutral|friendly|expert-casual",
+      "sentence_length":"short|medium|long",
+      "do_use":         ["string"],
+      "avoid":          ["string"]
+    },
+    "pain_points":      ["string"],
+    "entry_barriers":   ["string"],
+    "content_voice":    "string"
+  }
+
+[REASONING STEPS — silent]
+  1. Используй `topic` и `strategy_digest` как якорь. Не выходи за границы темы.
+  2. Сформулируй 2–3 персоны, каждую — с конкретным контекстом (кто он, что он делает в момент поиска,
+     что уже знает, что пытается понять/решить).
+  3. Для каждой персоны перечисли реальные боли и барьеры, которые статья обязана снять.
+  4. Определи единый тон голоса: уважительный, экспертный, но без канцеляризма.
+     Если `focus_notes` задают тональность — уважай её.
+  5. Собери pain_points как перечень «вопросов читателя», которые впоследствии лягут в структуру H2.
+
+[OUTPUT CONTRACT]
+  - Только валидный JSON, без комментариев.
+  - Русский язык для содержательных полей.
+  - 2–3 персоны, 4–8 болей, 2–5 барьеров.
+  - Длина строк ≤ 280 символов.
+
+[SELF-AUDIT — silent]
+  ✓ Нет ли выдуманной статистики, цитат, имён реальных людей, брендов?
+  ✓ Все персоны разные (не дубли одной и той же)?
+  ✓ Тон согласуется с темой (нишевый экспертный, а не «инфобизнес»-маркетинг)?
+  ✓ pain_points напрямую выводимы из `topic` + `strategy_digest`?
+
+[STRICT OUTPUT RULES]
+  - Верни ТОЛЬКО JSON. Ничего снаружи.
+  - Нельзя возвращать пустые массивы для `audience_personas` и `pain_points`.
+  - Нельзя ссылаться на несуществующие факты, исследования, проценты.

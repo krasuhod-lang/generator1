@@ -25,6 +25,7 @@ const tasksRoutes = require('./src/routes/tasks.routes');
 const adminRoutes = require('./src/routes/admin.routes');
 const editorCopilotRoutes = require('./src/routes/editorCopilot.routes');
 const metaTagsRoutes      = require('./src/routes/metaTags.routes');
+const linkArticleRoutes   = require('./src/routes/linkArticle.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -99,6 +100,7 @@ app.use('/api/tasks', tasksRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/editor-copilot', editorCopilotRoutes);
 app.use('/api/meta-tags',      metaTagsRoutes);
+app.use('/api/link-article',   linkArticleRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -165,6 +167,14 @@ const start = async () => {
       await recoverStuckMetaTagTasks();
     } catch (err) {
       console.warn('[Server] Meta-tag recovery skipped:', err.message);
+    }
+
+    // После рестарта переводим зависшие link-article-задачи в error
+    try {
+      const { recoverStuckLinkArticleTasks } = require('./src/services/linkArticle/linkArticlePipeline');
+      await recoverStuckLinkArticleTasks();
+    } catch (err) {
+      console.warn('[Server] Link-article recovery skipped:', err.message);
     }
 
     app.listen(PORT, () => {
@@ -411,6 +421,71 @@ async function ensureSchema() {
         END IF;
       END$$;
     `);
+
+    // ─── Migration 012: Link Article Generator ───────────────────────
+    // Генератор ссылочной статьи. Отдельный пайплайн и таблица.
+    // Создаём ENUM и таблицу идемпотентно, чтобы после простого
+    // pull + restart контейнера всё заработало без ручного psql.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'link_article_status') THEN
+          CREATE TYPE link_article_status AS ENUM (
+            'queued', 'running', 'done', 'error'
+          );
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS link_article_tasks (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        topic               TEXT NOT NULL,
+        anchor_text         TEXT NOT NULL,
+        anchor_url          TEXT NOT NULL,
+        focus_notes         TEXT,
+        output_format       VARCHAR(16) NOT NULL DEFAULT 'html',
+        status              link_article_status NOT NULL DEFAULT 'queued',
+        progress_pct        INTEGER NOT NULL DEFAULT 0,
+        current_stage       TEXT,
+        error_message       TEXT,
+        strategy_context    JSONB,
+        stage0_audience     JSONB,
+        stage1_intents      JSONB,
+        stage2_structure    JSONB,
+        article_html        TEXT,
+        article_plain       TEXT,
+        image_prompts       JSONB NOT NULL DEFAULT '[]'::jsonb,
+        deepseek_tokens_in  BIGINT NOT NULL DEFAULT 0,
+        deepseek_tokens_out BIGINT NOT NULL DEFAULT 0,
+        gemini_tokens_in    BIGINT NOT NULL DEFAULT 0,
+        gemini_tokens_out   BIGINT NOT NULL DEFAULT 0,
+        gemini_image_calls  INTEGER NOT NULL DEFAULT 0,
+        cost_usd            NUMERIC(12, 6) NOT NULL DEFAULT 0,
+        logs                JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at          TIMESTAMPTZ,
+        completed_at        TIMESTAMPTZ,
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_user_created ON link_article_tasks (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_status       ON link_article_tasks (status)`);
+
+    // Отдельный журнал событий пайплайна ссылочной статьи.
+    // Inline logs JSONB в link_article_tasks остаётся для UI-ленты,
+    // а эта таблица — для ретроспективного аудита и админ-панели.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS link_article_events (
+        id         BIGSERIAL PRIMARY KEY,
+        task_id    UUID NOT NULL REFERENCES link_article_tasks(id) ON DELETE CASCADE,
+        stage      TEXT,
+        level      VARCHAR(8) NOT NULL DEFAULT 'info',
+        message    TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_events_task_time ON link_article_events (task_id, created_at)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

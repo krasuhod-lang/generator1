@@ -1,0 +1,79 @@
+LINK-ARTICLE STAGE 2 — Структура ссылочной статьи с плейсхолдерами для анкора и изображений (DSPy-Signature).
+
+[INPUTS]
+  topic            : тема статьи (строка).
+  anchor_text      : анкор, который ОБЯЗАН быть в тексте (строка).
+  anchor_url       : URL ссылки (строка).
+  focus_notes      : на что делаем упор (строка).
+  stage0_audience  : Stage 0 output (JSON).
+  stage1_intents   : Stage 1 output (JSON) — обязательный набор user_questions.
+
+[OUTPUT]
+  Строгий JSON (без markdown):
+  {
+    "h1":                   "string",
+    "intro_brief":          "string",
+    "sections": [
+      {
+        "index":                   1,
+        "h2":                      "string",
+        "descriptor":              "string",
+        "covers_user_questions":   ["string"],
+        "must_include_entities":   ["string"],
+        "subsections":             [{ "h3": "string", "descriptor": "string" }],
+        "anchor_insertion":        false,
+        "image_slot":              null
+      }
+    ],
+    "anchor_plan": {
+      "anchor_text":          "string",
+      "anchor_url":           "string",
+      "target_section_index": 1,
+      "natural_context":      "string"
+    },
+    "image_plan": [
+      { "slot": 1, "target_section_index": 0, "what_to_visualize": "string" },
+      { "slot": 2, "target_section_index": 0, "what_to_visualize": "string" },
+      { "slot": 3, "target_section_index": 0, "what_to_visualize": "string" }
+    ],
+    "conclusion_brief":     "string"
+  }
+
+[REASONING STEPS — silent]
+  1. Придумай H1 (≤ 90 символов), который полностью отражает `topic`. Не перегружай ключами.
+  2. Спланируй 5–8 H2-секций так, чтобы вместе они закрывали ВСЕ `user_questions`
+     из Stage 1 (по каждому вопросу — отметь, какая секция его закрывает).
+  3. Назначь H3-подразделы там, где это объективно нужно (по 0–3 на H2).
+  4. ЖЁСТКОЕ ПРАВИЛО (anchor):
+       – Выбери target_section_index = 1 или 2 (то есть H2 №1 либо №2).
+       – Только у этого раздела anchor_insertion = true. У остальных — false.
+       – natural_context объясняет, в какую смысловую мысль встроить `anchor_text`
+         так, чтобы ссылка выглядела естественно, а не «приклеенно».
+  5. ЖЁСТКОЕ ПРАВИЛО (images): ровно 3 image-слота в трёх РАЗНЫХ секциях.
+     what_to_visualize — короткая сценарная подсказка (1 предложение) о том,
+     что полезно визуализировать (процесс, схема, сравнение, концепт).
+  6. Ничего не выдумывай про бренды, статистику, реальные компании, документы.
+  7. Не выходи за рамки `topic` и `focus_notes`.
+
+[OUTPUT CONTRACT]
+  - Только валидный JSON, без markdown.
+  - Русский язык в содержательных полях.
+  - sections: 5–8 элементов.
+  - В sections: ровно один элемент с anchor_insertion=true, и его index ∈ {1, 2}.
+  - В image_plan: ровно 3 элемента с slot = 1, 2, 3.
+  - `image_plan[*].target_section_index` — валидный index из sections, и три слота
+     ссылаются на ТРИ РАЗНЫЕ секции.
+  - anchor_plan.target_section_index совпадает с index того раздела, у которого
+     anchor_insertion = true.
+
+[SELF-AUDIT — silent]
+  ✓ Все user_questions из Stage 1 присутствуют хотя бы в одном covers_user_questions?
+  ✓ anchor_insertion ровно у одной секции, и её index = 1 или 2?
+  ✓ image_plan — ровно 3 слота в 3 разных секциях?
+  ✓ Нет дублей H2 / H3 по смыслу?
+  ✓ Нет выдуманных фактов?
+
+[STRICT OUTPUT RULES]
+  - Верни ТОЛЬКО JSON-объект.
+  - Любое нарушение правил anchor/image — фатально, пересобери структуру.
+  - Не добавляй полей сверх схемы.

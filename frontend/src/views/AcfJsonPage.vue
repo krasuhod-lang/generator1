@@ -28,7 +28,7 @@ const store = useTasksStore();
 const AITUNNEL_API_KEY = 'sk-aitunnel-S81NPYt7iGa9X5Lsx9g4e8D9WXlAh5cm';
 const AITUNNEL_URL     = 'https://api.aitunnel.ru/v1/chat/completions';
 // «Qwen3.5 Plus» из ТЗ — у AITunnel это модель `qwen-plus`.
-const AITUNNEL_MODEL   = 'qwen-plus';
+const AITUNNEL_MODEL   = 'qwen3.5-plus-02-15';
 
 // ── Состояние ──────────────────────────────────────────────────────────────
 const loadingTasks = ref(false);
