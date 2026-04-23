@@ -8,12 +8,19 @@ const { serializeForPrompt, getEntityClusters } = require('../../utils/knowledge
 const { getStructureLimits } = require('../../utils/objectiveMetrics');
 
 /**
- * DeepSeek-адаптер бросает 'Input text too long' при userPrompt.length > 100000.
- * Берём ~90 000 как мягкий потолок Stage 2C, чтобы оставить запас для повторного
- * запроса с дополнительной инструкцией ("[ПОВТОРНЫЙ ЗАПРОС]") и для системных
- * приставок промпта.
+ * DeepSeek-адаптер бросает 'Input text too long' при userPrompt.length > 100000
+ * (backend/src/services/llm/deepseek.adapter.js:23).
+ *
+ * Берём 80 000 как мягкий потолок Stage 2C, чтобы оставить ~20 КБ запаса под:
+ *   • "[ПОВТОРНЫЙ ЗАПРОС] ..." хвост при повторной попытке,
+ *   • разбухание JSON после stringify при обогащении через 2A/2B,
+ *   • unicode-рост при конвертации (байты vs символы).
+ *
+ * HARD_LIMIT — абсолютный предел; если после всех tier'ов промпт всё ещё выше,
+ * применяем аварийное обрезание на уровне самого prompt-строки.
  */
-const STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT = 90000;
+const STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT = 80000;
+const STAGE2_TAXONOMY_PROMPT_HARD_LIMIT = 99000;
 
 /**
  * compactStage1ForTaxonomy — прогрессивная деградация Stage 1 JSON для
@@ -23,6 +30,9 @@ const STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT = 90000;
  * tier 0 — полный объект (как пришло из Stage 1 + 2A/2B обогащения).
  * tier 1 — обрезаем длинные строки и массивы конкурентного контента.
  * tier 2 — оставляем только сущности, интенты, ключи, бренд-факты.
+ * tier 3 — ядро: top-30 entities / top-30 lsi / top-15 ngrams / primary+secondary intents.
+ *          Применяется, когда даже tier 2 не влезает в soft-limit (редкий edge-case —
+ *          большой knowledge_graph + длинные списки сущностей).
  *
  * @param {object} s1
  * @param {number} tier
@@ -88,7 +98,24 @@ function compactStage1ForTaxonomy(s1, tier) {
   for (const k of ESSENTIAL) {
     if (copy[k] !== undefined) slim[k] = copy[k];
   }
-  return slim;
+
+  if (tier <= 2) return slim;
+
+  // ── Tier 3: ядро — только top-N критических массивов ─────────────
+  // Нужен в edge-case'ах, когда сущностей / knowledge_graph само по себе большое.
+  // Выбрасываем knowledge_graph (он уже отдельно подаётся через kgContext),
+  // buyer_journey, content_formats (Stage 2A/2B восстановит смысл из промпта).
+  const core = {};
+  if (Array.isArray(slim.entities))          core.entities          = trimArray(slim.entities, 30);
+  if (Array.isArray(slim.lsi_terms))         core.lsi_terms         = trimArray(slim.lsi_terms, 30);
+  if (Array.isArray(slim.lsi_top))           core.lsi_top           = trimArray(slim.lsi_top, 30);
+  if (Array.isArray(slim.ngrams))            core.ngrams            = trimArray(slim.ngrams, 15);
+  if (Array.isArray(slim.keywords))          core.keywords          = trimArray(slim.keywords, 20);
+  if (Array.isArray(slim.intents))           core.intents           = trimArray(slim.intents, 10);
+  if (slim.primary_intent)                   core.primary_intent    = slim.primary_intent;
+  if (Array.isArray(slim.secondary_intents)) core.secondary_intents = trimArray(slim.secondary_intents, 6);
+  if (slim.brand_facts)                      core.brand_facts       = slim.brand_facts;
+  return core;
 }
 
 /**
@@ -257,14 +284,28 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
   // "Input text too long" ещё до отправки на API.
   let promptTier = 0;
   let stage2Prompt = buildTaxonomyPrompt(promptTier);
-  while (stage2Prompt.length > STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT && promptTier < 2) {
+  while (stage2Prompt.length > STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT && promptTier < 3) {
     promptTier++;
     log(
       `Stage 2 Taxonomy: промпт ${stage2Prompt.length} символов > лимит ${STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT}. ` +
-      `Применяю компакцию tier=${promptTier} (drop большие массивы конкурентов / тексты).`,
+      `Применяю компакцию tier=${promptTier} (drop большие массивы / knowledge_graph / non-core поля).`,
       'warn'
     );
     stage2Prompt = buildTaxonomyPrompt(promptTier);
+  }
+
+  // Аварийный hard-clamp: если даже tier=3 не уложился в 99 КБ (крайне
+  // маловероятно, но возможно при огромных системных промптах), обрезаем
+  // stage2Prompt на уровне строки. Это разрушает конец промпта, поэтому
+  // используем только как последний барьер от крэша — DeepSeek всё равно
+  // отдаст полезный ответ по префиксу инструкций + JSON схеме.
+  if (stage2Prompt.length > STAGE2_TAXONOMY_PROMPT_HARD_LIMIT) {
+    log(
+      `Stage 2 Taxonomy: промпт ${stage2Prompt.length} символов > HARD limit ${STAGE2_TAXONOMY_PROMPT_HARD_LIMIT} ` +
+      `даже после tier=${promptTier}. Применяю аварийное обрезание promt-строки.`,
+      'warn'
+    );
+    stage2Prompt = stage2Prompt.slice(0, STAGE2_TAXONOMY_PROMPT_HARD_LIMIT);
   }
 
   log(`Stage 2 Taxonomy Builder — итоговый промпт ${stage2Prompt.length} символов (~${Math.round(stage2Prompt.length / 4)} токенов, tier=${promptTier}). Запуск...`, 'info');
@@ -297,9 +338,13 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
       // обращение раздуло промпт через "[ПОВТОРНЫЙ ЗАПРОС]" хвост) — поднимаем
       // tier и пересобираем для следующих попыток. Маркируем ошибку как
       // recoverable, чтобы внешний цикл сделал ещё одну попытку.
-      if (/Input text too long/i.test(e.message) && promptTier < 2) {
+      if (/Input text too long/i.test(e.message) && promptTier < 3) {
         promptTier++;
         stage2Prompt = buildTaxonomyPrompt(promptTier);
+        // Также применяем hard-clamp на случай, если даже tier=3 не влез.
+        if (stage2Prompt.length > STAGE2_TAXONOMY_PROMPT_HARD_LIMIT) {
+          stage2Prompt = stage2Prompt.slice(0, STAGE2_TAXONOMY_PROMPT_HARD_LIMIT);
+        }
         log(`Stage 2C Taxonomy: пересобрал промпт с tier=${promptTier} (${stage2Prompt.length} символов) для следующей попытки.`, 'warn');
         return { __recoverable: true };
       }
