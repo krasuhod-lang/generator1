@@ -57,11 +57,14 @@ const deepseekCost = computed(() => metrics.value?.deepseek_cost_usd   ?? 0);
 const geminiIn     = computed(() => metrics.value?.gemini_tokens_in    ?? 0);
 const geminiOut    = computed(() => metrics.value?.gemini_tokens_out   ?? 0);
 const geminiCost   = computed(() => metrics.value?.gemini_cost_usd     ?? 0);
+const grokIn       = computed(() => metrics.value?.grok_tokens_in      ?? 0);
+const grokOut      = computed(() => metrics.value?.grok_tokens_out     ?? 0);
+const grokCost     = computed(() => metrics.value?.grok_cost_usd       ?? 0);
 const totalTokens  = computed(() =>
-  metrics.value?.total_tokens ?? (deepseekIn.value + deepseekOut.value + geminiIn.value + geminiOut.value)
+  metrics.value?.total_tokens ?? (Number(deepseekIn.value) + Number(deepseekOut.value) + Number(geminiIn.value) + Number(geminiOut.value) + Number(grokIn.value) + Number(grokOut.value))
 );
 const totalCost = computed(() =>
-  metrics.value?.total_cost_usd ?? (deepseekCost.value + geminiCost.value)
+  metrics.value?.total_cost_usd ?? (Number(deepseekCost.value) + Number(geminiCost.value) + Number(grokCost.value))
 );
 
 // ── Время генерации ────────────────────────────────────────────────────────
@@ -293,7 +296,7 @@ function closeModal() {
               <!-- ══ Токены и стоимость ════════════════════════════════════ -->
               <div class="card">
                 <p class="text-xs text-gray-500 uppercase tracking-wide mb-3">Расход токенов</p>
-                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div class="bg-gray-800 rounded-lg p-3">
                     <p class="text-xs font-semibold text-gray-400 mb-2">DeepSeek</p>
                     <div class="grid grid-cols-2 gap-1 text-xs font-mono">
@@ -314,6 +317,17 @@ function closeModal() {
                       <span class="text-right text-gray-300">{{ fmt(geminiOut) }}</span>
                       <span class="text-gray-500">Cost:</span>
                       <span class="text-right text-indigo-300">${{ Number(geminiCost).toFixed(4) }}</span>
+                    </div>
+                  </div>
+                  <div class="bg-gray-800 rounded-lg p-3">
+                    <p class="text-xs font-semibold text-gray-400 mb-2">Grok (x.ai)</p>
+                    <div class="grid grid-cols-2 gap-1 text-xs font-mono">
+                      <span class="text-gray-500">In:</span>
+                      <span class="text-right text-gray-300">{{ fmt(grokIn) }}</span>
+                      <span class="text-gray-500">Out:</span>
+                      <span class="text-right text-gray-300">{{ fmt(grokOut) }}</span>
+                      <span class="text-gray-500">Cost:</span>
+                      <span class="text-right text-indigo-300">${{ Number(grokCost).toFixed(4) }}</span>
                     </div>
                   </div>
                   <div class="bg-indigo-950 border border-indigo-800 rounded-lg p-3 flex flex-col justify-between">

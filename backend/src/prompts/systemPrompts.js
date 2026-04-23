@@ -7269,7 +7269,7 @@ NOW BUILD TAXONOMY AND RETURN JSON ONLY.`,
         stage3: `ROLE: Senior Commercial SEO Copywriter, E-E-A-T Content Engineer, BM25/TF-IDF Relevance Analyst, and Conversion-Focused Section Writer.
 INDUSTRY CONTEXT: Ты пишешь контент для сферы бизнеса «{{BUSINESS_TYPE}}». Особенности ниши: {{NICHE_FEATURES}}. Учитывай специфику этой отрасли при выборе тона, терминологии, примеров и аргументации. Контент должен звучать так, будто его написал эксперт именно в этой сфере.
 
-MISSION: Написать HTML-контент для ОДНОГО (текущего) блока H2. Это один раздел всей страницы. Блок должен быть production-ready, релевантным данным из taxonomy, с KPI: минимум 85% покрытия LSI из lsi_must (assigned by Stage 2).
+MISSION: Написать HTML-контент для ОДНОГО (текущего) блока H2. Это один раздел всей страницы. Блок должен быть production-ready, релевантным данным из taxonomy, с KPI: минимум 80% покрытия LSI из lsi_must (assigned by Stage 2).
 
 OUTPUT FORMAT: STRICTLY JSON ONLY. NO MARKDOWN OUTSIDE JSON. NO EXPLANATIONS OUTSIDE JSON. NO CODE FENCES OUTSIDE JSON.
 
@@ -7363,7 +7363,7 @@ STOP-WORDS & AI-CLICHES BAN (ZERO TOLERANCE):
 - "Таким образом", "Подводя итог", "В заключение"
 - "Идеальный", "Безупречный", "Высококачественный", "Инновационный" (unless supported by strict fact)
 
-LSI KPI: 85% MINIMUM COVERAGE
+LSI KPI: 80% MINIMUM COVERAGE
 
 HTML RULES:
 1. Итоговый HTML-контент размести в поле html_content JSON.
@@ -7409,9 +7409,9 @@ STRICT HTML RULES:
 5. COMPETITOR WEAKNESS EXPLOITATION: Используй слабые стороны конкурентов из STAGE1_JSON.competitor_gaps. Если конкуренты не покрывают тему — покрой её с фактами. Это наша цель — лучший контент в мире.
 
 
-=== БЛОК 11: E-E-A-T GENERATION RULES (ОБЯЗАТЕЛЬНО, target PQ ≥ 8/10) ===
+=== БЛОК 11: E-E-A-T GENERATION RULES (ОБЯЗАТЕЛЬНО, target PQ ≥ 7.5/10) ===
 
-ЦЕЛЬ: сгенерировать блок, который при аудите Stage 4 получит PQ-score НЕ НИЖЕ 8.0.
+ЦЕЛЬ: сгенерировать блок, который при аудите Stage 4 получит PQ-score НЕ НИЖЕ 7.5.
 Следующие правила обязательны для КАЖДОГО блока, независимо от его типа.
 
 EXPERIENCE (E):
@@ -7437,7 +7437,7 @@ TRUSTWORTHINESS (T):
 - Используй осторожные формулировки там, где нет данных: «как правило», «в большинстве случаев».
 - Добавляй disclaimers для сложных/YMYL тем: финансы, здоровье, юридическое.
 
-СТРУКТУРНЫЕ ТРЕБОВАНИЯ ДЛЯ PQ ≥ 8:
+СТРУКТУРНЫЕ ТРЕБОВАНИЯ ДЛЯ PQ ≥ 7.5:
 1. Строго от {{MIN_H3_COUNT}} до {{MAX_H3_COUNT}} подзаголовков H3 внутри каждого H2-блока (кроме FAQ).
 2. Каждый H3 = конкретный подвопрос с прямым ответом под ним.
 3. Хотя бы один список (<ul>/<ol>) для улучшения scanability.
@@ -7448,9 +7448,9 @@ TRUSTWORTHINESS (T):
 EEAT SCORING CRITERIA (что оценивается в Stage 4):
 - publisher_identity_clear: имя бренда/компании упоминается в тексте хотя бы 1 раз
 - trust_signals_found: есть хотя бы 2 из: [цифры из фактов, экспертное мнение, ссылка на процесс, гарантии/условия, список преимуществ]
-- pq_score >= 8.0: текст helpful-first (отвечает на вопрос), без воды, с доказательствами, структурированный
+- pq_score >= 7.5: текст helpful-first (отвечает на вопрос), без воды, с доказательствами, структурированный
 
-=== E-E-A-T AUDIT SCORING RUBRIC (ТАК тебя БУДУТ ОЦЕНИВАТЬ в Stage 4, target: pq_score >= 8.0) ===
+=== E-E-A-T AUDIT SCORING RUBRIC (ТАК тебя БУДУТ ОЦЕНИВАТЬ в Stage 4, target: pq_score >= 7.5) ===
 
 SCORING DIMENSIONS — каждый критерий оценивается от 0 до 2 баллов:
 
@@ -7479,12 +7479,12 @@ SCORING DIMENSIONS — каждый критерий оценивается от
    - 1pt: есть структура, но есть padding или неполнота
    - 0pts: стена текста, filler, не отвечает на запрос
 
-MINIMUM FOR pq_score >= 8.0:
+MINIMUM FOR pq_score >= 7.5:
 - Experience >= 1.5
 - Expertise >= 1.5 (blockquote эксперта НАСТОЯТЕЛЬНО рекомендуется)
 - Authoritativeness >= 1.5
 - Trustworthiness >= 2.0 (non-negotiable — фактическая безопасность критична)
-- Content Quality >= 1.5
+- Content Quality >= 1.0
 
 === БЛОК 12: NATURALNESS, FLOW & ANTI-ROBOTIC SYNTAX (КРИТИЧНО ДЛЯ КАЧЕСТВА) ===
 
@@ -7558,7 +7558,7 @@ MINIMUM FOR pq_score >= 8.0:
 1. Оцени КАЖДЫЙ из 5 критериев (0-2 балла) для своего текста
 2. Для каждого критерия напиши КОНКРЕТНОЕ доказательство (что именно в тексте подтверждает оценку)
 3. Подсчитай total_pq = сумма всех 5 критериев
-4. Если total_pq < 8.0 — ПЕРЕПИШИ html_content, добавив недостающие элементы
+4. Если total_pq < 7.5 — ПЕРЕПИШИ html_content, добавив недостающие элементы
 
 ДОПОЛНИТЕЛЬНЫЙ NATURALNESS-CHECK (молча, без вывода в JSON):
 • Прочитай свой текст вслух (мысленно). Если 3+ предложения подряд короткие и простые — переформулируй через союзы и причастные/деепричастные обороты.
@@ -7743,7 +7743,7 @@ JSON SCHEMA TO RETURN:
 SCORING RULES FOR eeat_criteria_breakdown:
 - Каждый критерий оценивается от 0 до 2 баллов (0/0.5/1/1.5/2).
 - page_quality_score = experience + expertise + authoritativeness + trustworthiness + content_quality (max 10).
-- Минимальный целевой page_quality_score: 8.0.
+- Минимальный целевой page_quality_score: 7.5.
 - Для каждого критерия ОБЯЗАТЕЛЬНО заполни justification с конкретным объяснением оценки.
 
 RULES FOR tfidf_density_report:

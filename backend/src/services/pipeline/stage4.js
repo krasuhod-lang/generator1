@@ -9,7 +9,7 @@ const { SYSTEM_PROMPTS } = require('../../prompts/systemPrompts');
  */
 const EEAT_TRUST_ADDENDUM = `
 
-========== E-E-A-T AUDIT SCORING RUBRIC (target: pq_score >= 8.0) ==========
+========== E-E-A-T AUDIT SCORING RUBRIC (target: pq_score >= 7.5) ==========
 
 SCORING DIMENSIONS — evaluate EACH and reflect in pq_score (0-10):
 
@@ -47,15 +47,15 @@ TRUST SIGNALS CHECKLIST — mark each found/missing in trust_signals_found:
 - no_hallucination: нет выдуманных чисел и обещаний
 - helpful_first: текст отвечает на вопрос, не написан «для поисковика»
 
-MINIMUM FOR pq_score >= 8.0:
+MINIMUM FOR pq_score >= 7.5:
 - Experience >= 1.5
 - Expertise >= 1.5 (expert blockquote strongly recommended)
 - Authoritativeness >= 1.5
 - Trustworthiness >= 2.0 (non-negotiable — factual safety is critical)
-- Content Quality >= 1.5
+- Content Quality >= 1.0
 - At least 4 of 7 trust signals found
 
-IF pq_score < 8.0: populate actionable_next_steps with SPECIFIC HTML fixes to reach 8.0.
+IF pq_score < 7.5: populate actionable_next_steps with SPECIFIC HTML fixes to reach 7.5.
 =======================================================================`;
 
 /**

@@ -64,7 +64,7 @@ const { runStage5, checkAntiWater } = require('./stage5');
 const { runStage6 }   = require('./stage6');
 const { runStage7 }   = require('./stage7');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
-const { checkObjectiveMetrics, getStructureLimits, LSI_COVERAGE_TARGET } = require('../../utils/objectiveMetrics');
+const { checkObjectiveMetrics, getStructureLimits, LSI_COVERAGE_TARGET, EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 const { stripExpertBlockquotes, stripNoDataMarkers } = require('../../utils/htmlSanitize');
 const { analyzeTargetPage } = require('../parser/targetPageAnalyzer');
 const { analyzeAudienceAndNiche, serializeAnalysisForPrompt } = require('../parser/audienceNicheAnalyzer');
@@ -516,7 +516,7 @@ async function runPipeline(task, ctx) {
       return blockHtml;
     }
 
-    const needsRefinement = lsiCovPct < LSI_COVERAGE_TARGET || pqScore < 8 || auditResult?.mathematical_audit?.spam_risk_detected;
+    const needsRefinement = lsiCovPct < LSI_COVERAGE_TARGET || pqScore < EEAT_PQ_TARGET || auditResult?.mathematical_audit?.spam_risk_detected;
 
     // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки).
     // Передаём blockCharLimits с допуском ±20% — длина становится триггером рефайна.
@@ -567,7 +567,7 @@ async function runPipeline(task, ctx) {
         log(`Stage 5 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 4`, 'warn');
       }
     } else {
-      log(`Блок ${i + 1}: PQ ${pqScore} ≥ 8, LSI ${Math.round(lsiCovPct)}% ≥ ${LSI_COVERAGE_TARGET}% — рефайн не нужен`, 'success');
+      log(`Блок ${i + 1}: PQ ${pqScore} ≥ ${EEAT_PQ_TARGET}, LSI ${Math.round(lsiCovPct)}% ≥ ${LSI_COVERAGE_TARGET}% — рефайн не нужен`, 'success');
     }
 
     // Stage 6: LSI-инъекция (всегда, если покрытие < LSI_COVERAGE_TARGET)
