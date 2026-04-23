@@ -16,7 +16,7 @@
  *     раздуть таблицу (типичный кейс — taxonomy с 30 блоками с длинными h2).
  */
 
-const db = require('../config/db');
+const db = require('../../config/db');
 
 const FLUSH_INTERVAL_MS = 1000;
 const FLUSH_BATCH_SIZE  = 50;

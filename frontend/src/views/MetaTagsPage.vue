@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import { useMetaTagsStore } from '../stores/metaTags.js';
 
 const router = useRouter();
@@ -17,6 +18,7 @@ const form = ref({
   phone:    '',
   summary:  '',
   keywords: '',
+  llm_provider: 'gemini',
 });
 
 const submitting = ref(false);
@@ -55,6 +57,7 @@ async function handleCreate() {
       phone:    form.value.phone.trim(),
       summary:  form.value.summary.trim(),
       keywords: keywordsList.value,
+      llm_provider: form.value.llm_provider === 'grok' ? 'grok' : 'gemini',
     };
     saveDraft();
     const id = await store.createTask(payload);
@@ -190,6 +193,14 @@ function formatDate(d) {
           </label>
           <textarea v-model="form.keywords" rows="6" class="textarea font-mono text-sm"
                     placeholder="Тормозные диски Acura MDX&#10;Колодки Brembo купить Москва&#10;..."></textarea>
+        </div>
+
+        <div>
+          <LlmProviderSelector
+            v-model="form.llm_provider"
+            :disabled="submitting"
+            hint="Выберите движок генерации мета-тегов. Применяется ко всем ключевым запросам этой задачи."
+          />
         </div>
 
         <div v-if="formError"

@@ -95,14 +95,12 @@ function normalizeProxyUrl(raw) {
  *
  * Возвращает готовую URL-строку или пустую строку.
  */
-// ── Встроенные константы (используются если env-переменные не заданы) ──
-const DEFAULT_PROXY = {
-  host:  '155.212.59.188',
-  port:  '64464',
-  user:  '76MkBTXZ',
-  pass:  '3ukb66G1',
-  proto: 'http',
-};
+// Прокси резолвится только из env (GEMINI_PROXY_*, HTTPS_PROXY).
+// Хардкоженный fallback УБРАН (point 9.1 безопасности): захардкоженные
+// учётки прокси нельзя ротировать без релиза, утекают в публичный репо
+// и тривиально сканятся. Если ни один env-прокси не задан — запросы
+// идут напрямую (или падают с network error в локациях, где Gemini API
+// недоступен — это явный сигнал админу настроить .env).
 
 // Gemini API key загружается ИСКЛЮЧИТЕЛЬНО из process.env.GEMINI_API_KEY
 // (см. .env / docker-compose env_file). Хардкод запрещён — Google Secret Scanning
@@ -141,12 +139,6 @@ function resolveProxyUrl(suffix = '') {
   if (!suffix) {
     const sys = process.env.HTTPS_PROXY || process.env.https_proxy || '';
     if (sys) return sys;
-  }
-
-  // 4. Встроенный прокси-fallback (только для основного, без суффикса)
-  if (!suffix) {
-    console.log('[gemini] Env-переменные прокси не заданы — используем встроенный прокси');
-    return `${DEFAULT_PROXY.proto}://${encodeURIComponent(DEFAULT_PROXY.user)}:${encodeURIComponent(DEFAULT_PROXY.pass)}@${DEFAULT_PROXY.host}:${DEFAULT_PROXY.port}`;
   }
 
   return '';

@@ -99,6 +99,27 @@ export const useAdminStore = defineStore('admin', () => {
     return data.stats;
   }
 
+  // ── Per-task admin views (Point 8) ───────────────────────────────────
+  async function fetchAdminTask(taskId) {
+    const { data } = await adminApi.get(`/admin/tasks/${taskId}`);
+    return data.task;
+  }
+  async function fetchAdminTaskLogs(taskId, { after = null, limit = 500 } = {}) {
+    const q = new URLSearchParams();
+    if (after != null && after !== '') q.set('after', after);
+    if (limit) q.set('limit', limit);
+    const { data } = await adminApi.get(`/admin/tasks/${taskId}/logs?${q.toString()}`);
+    return data; // { logs, count }
+  }
+  async function fetchAdminAllTasks(params = {}) {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v != null && v !== '') q.set(k, v);
+    }
+    const { data } = await adminApi.get(`/admin/tasks?${q.toString()}`);
+    return data; // { tasks, page, perPage, total }
+  }
+
   return {
     adminToken,
     adminUser,
@@ -115,5 +136,8 @@ export const useAdminStore = defineStore('admin', () => {
     fetchUserDetail,
     fetchUserTasks,
     fetchStats,
+    fetchAdminTask,
+    fetchAdminTaskLogs,
+    fetchAdminAllTasks,
   };
 });

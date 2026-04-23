@@ -187,6 +187,7 @@ function fmtCost(usd) {
                 <th class="py-3 px-3 text-gray-400 font-medium">E-E-A-T</th>
                 <th class="py-3 px-3 text-gray-400 font-medium">Стоимость</th>
                 <th class="py-3 px-3 text-gray-400 font-medium">Ошибка</th>
+                <th class="py-3 px-3 text-gray-400 font-medium"></th>
               </tr>
             </thead>
             <tbody>
@@ -218,9 +219,16 @@ function fmtCost(usd) {
                 <td class="py-3 px-3 text-red-400 max-w-[200px] truncate" :title="t.error_message">
                   {{ t.error_message || '—' }}
                 </td>
+                <td class="py-3 px-3">
+                  <button
+                    class="btn-ghost text-xs"
+                    @click="router.push(`/admin/tasks/${t.id}`)"
+                    title="Открыть подробности задачи (результат + логи)"
+                  >Открыть</button>
+                </td>
               </tr>
               <tr v-if="!tasks.length">
-                <td colspan="9" class="py-8 text-center text-gray-500">У пользователя нет задач</td>
+                <td colspan="10" class="py-8 text-center text-gray-500">У пользователя нет задач</td>
               </tr>
             </tbody>
           </table>

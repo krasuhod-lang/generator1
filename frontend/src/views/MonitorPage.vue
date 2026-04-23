@@ -457,10 +457,18 @@ onUnmounted(() => {
         {{ task?.input_target_service || 'Мониторинг задачи' }}
       </span>
 
+      <!-- LLM-провайдер бейдж -->
+      <span
+        v-if="task?.llm_provider"
+        class="badge ml-auto"
+        :class="task.llm_provider === 'grok' ? 'bg-purple-900 text-purple-300' : 'bg-blue-900 text-blue-300'"
+        :title="`Генерация через ${task.llm_provider === 'grok' ? 'xAI Grok' : 'Google Gemini'}`"
+      >{{ task.llm_provider === 'grok' ? 'Grok' : 'Gemini' }}</span>
+
       <!-- Статус-бейдж -->
-      <span v-if="done"   class="badge bg-green-900 text-green-300 ml-auto">✓ Завершено</span>
-      <span v-else-if="failed" class="badge bg-red-900 text-red-300 ml-auto">✗ Ошибка</span>
-      <span v-else class="badge bg-indigo-900 text-indigo-300 ml-auto animate-pulse">⚙ Выполняется</span>
+      <span v-if="done"   class="badge bg-green-900 text-green-300" :class="{ 'ml-auto': !task?.llm_provider }">✓ Завершено</span>
+      <span v-else-if="failed" class="badge bg-red-900 text-red-300" :class="{ 'ml-auto': !task?.llm_provider }">✗ Ошибка</span>
+      <span v-else class="badge bg-indigo-900 text-indigo-300 animate-pulse" :class="{ 'ml-auto': !task?.llm_provider }">⚙ Выполняется</span>
     </header>
 
     <main class="max-w-7xl mx-auto px-6 py-6 grid grid-cols-1 lg:grid-cols-3 gap-5">

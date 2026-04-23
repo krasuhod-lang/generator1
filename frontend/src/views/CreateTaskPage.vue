@@ -3,6 +3,7 @@ import { ref, reactive, onMounted, onBeforeUnmount, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
 import AppLayout from '../components/AppLayout.vue';
+import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -41,6 +42,7 @@ const form = reactive({
   input_max_chars:       3500,
   input_target_url:      '',   // URL целевой страницы
   title:                 '',
+  llm_provider:          'gemini', // 'gemini' | 'grok' (см. backend/services/llm/grok.adapter.js)
 });
 
 // Загружаем черновик при редактировании
@@ -716,6 +718,15 @@ function downloadExampleTZ() {
 
             </div><!-- /space-y-6 -->
           </div>
+        </div>
+
+        <!-- ── LLM-провайдер ─────────────────────────────────────── -->
+        <div class="card px-5 py-4">
+          <LlmProviderSelector
+            v-model="form.llm_provider"
+            :disabled="saving"
+            hint="Выберите движок генерации. Применяется ко всем стадиям пайплайна (Stage 3/5/6) и AI-Copilot редактору после создания задачи."
+          />
         </div>
 
         <!-- ── Ошибка ──────────────────────────────────────────────── -->

@@ -9,6 +9,9 @@ const {
   getUserDetail,
   getUserTasks,
   getStats,
+  listAllTasks,
+  getAdminTaskDetail,
+  getAdminTaskLogs,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -39,5 +42,10 @@ router.get('/users',              apiLimiter, adminAuth, listUsers);
 router.get('/users/:userId',      apiLimiter, adminAuth, getUserDetail);
 router.get('/users/:userId/tasks', apiLimiter, adminAuth, getUserTasks);
 router.get('/stats',              apiLimiter, adminAuth, getStats);
+
+// Per-task admin views (Point 8) — task_logs reused from /api/tasks/:id/logs.
+router.get('/tasks',              apiLimiter, adminAuth, listAllTasks);
+router.get('/tasks/:id',          apiLimiter, adminAuth, getAdminTaskDetail);
+router.get('/tasks/:id/logs',     apiLimiter, adminAuth, getAdminTaskLogs);
 
 module.exports = router;

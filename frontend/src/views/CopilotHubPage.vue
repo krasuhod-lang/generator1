@@ -18,6 +18,7 @@ import { useCopilotStore } from '../stores/copilot.js';
 
 import CopilotEditor      from '../components/copilot/CopilotEditor.vue';
 import CopilotSidebar     from '../components/copilot/CopilotSidebar.vue';
+import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import CopilotPreview     from '../components/copilot/CopilotPreview.vue';
 import CopilotLogsDialog  from '../components/copilot/CopilotLogsDialog.vue';
 import CopilotUsageBar    from '../components/copilot/CopilotUsageBar.vue';
@@ -89,6 +90,11 @@ async function openTask(task) {
     const data = await tasksStore.fetchResult(task.id);
     selectedTask.value = data.task || task;
     articleHtml.value  = data.task?.full_html_edited || data.task?.full_html || '';
+    // Наследуем LLM-провайдер из задачи (или из сохранённой сессии — она
+    // подхватится в loadSession ниже, если бэкенд начнёт его возвращать).
+    if (data.task?.llm_provider === 'grok' || data.task?.llm_provider === 'gemini') {
+      store.llmProvider = data.task.llm_provider;
+    }
     if (!articleHtml.value) {
       editorError.value = 'Статья ещё не сгенерирована. Дождитесь окончания работы основного пайплайна.';
     } else {
@@ -306,6 +312,13 @@ function fmtDate(s) {
 
             <!-- Правая колонка: Sidebar + History -->
             <div class="space-y-4">
+              <div class="card px-4 py-3">
+                <LlmProviderSelector
+                  v-model="store.llmProvider"
+                  :disabled="store.currentStatus === 'streaming' || store.currentStatus === 'pending'"
+                  hint="Применяется к следующей операции; настройка наследуется сессией задачи."
+                />
+              </div>
               <CopilotSidebar />
               <CopilotHistory />
             </div>
