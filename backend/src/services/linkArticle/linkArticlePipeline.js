@@ -247,6 +247,23 @@ const ANCHOR_TEXT_PREFIX_MATCH_LEN = 40;
 // и в user-facing сообщении об ошибке, чтобы они не расходились.
 const ANCHOR_MAX_POSITION_RATIO = 0.20;
 
+// stripTags — вспомогательная функция для извлечения plain-text из HTML-фрагмента.
+// Используется в валидаторах для подсчёта длины и сравнения текста (не для
+// рендера в DOM). Применяется в цикле до стабильности, чтобы обезвредить
+// «наложенные» теги вроде `<<tag>tag>` и удовлетворить проверку CodeQL
+// js/incomplete-multi-character-sanitization.
+function stripTags(s) {
+  if (!s) return '';
+  let out = String(s);
+  const tagRe = /<[^>]+>/g;
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(tagRe, ' ');
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/\s+/g, ' ');
+}
+
 function validateWriterOutput(html, task) {
   const issues = [];
   if (typeof html !== 'string' || html.trim().length < 400) {
@@ -279,7 +296,7 @@ function validateWriterOutput(html, task) {
   } else if (anchorHits.length > 1) {
     issues.push(`Ссылка на ${anchorUrl} встречается ${anchorHits.length} раз — должна быть ровно 1`);
   } else {
-    const innerText = anchorHits[0].inner.replace(/<[^>]+>/g, '').trim();
+    const innerText = stripTags(anchorHits[0].inner).trim();
     const needle = anchorText.toLowerCase().slice(0, Math.min(ANCHOR_TEXT_PREFIX_MATCH_LEN, anchorText.length));
     if (innerText && anchorText && !innerText.toLowerCase().includes(needle)) {
       issues.push(`Текст анкора не совпадает: ожидалось «${anchorText}», получено «${innerText}»`);
@@ -287,10 +304,10 @@ function validateWriterOutput(html, task) {
   }
 
   // Anchor position: первые ANCHOR_MAX_POSITION_RATIO * 100% текста
-  const plain = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const plain = stripTags(html);
   if (anchorHits.length >= 1) {
     const firstAnchorIdx = anchorHits[0].index;
-    const plainUpToAnchor = html.slice(0, firstAnchorIdx).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const plainUpToAnchor = stripTags(html.slice(0, firstAnchorIdx));
     const ratio = plain.length > 0 ? plainUpToAnchor.length / plain.length : 1;
     if (ratio > ANCHOR_MAX_POSITION_RATIO) {
       issues.push(
