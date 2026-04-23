@@ -164,7 +164,8 @@ if (PROXY_URLS.length > 0) {
   console.log(`[grok] Прокси настроен (${PROXY_URLS.length} шт):`);
   PROXY_URLS.forEach((u, i) => console.log(`  [${i}] ${_safeProxyLog(u)}`));
 } else {
-  console.log('[grok] Прокси не задан — запросы пойдут напрямую (если XAI_API_KEY доступен из локации).');
+  console.warn('[grok] ⚠ Прокси НЕ задан. Запросы к x.ai (Grok) из России будут падать.');
+  console.warn('[grok]   Задайте XAI_PROXY_* / LLM_PROXY_* / GEMINI_PROXY_* в .env.');
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -244,16 +245,21 @@ async function callGrok(systemInstruction, userPrompt, options = {}) {
     'Accept':        'application/json',
   };
 
-  // Если прокси настроен — используем тот же ротационный механизм, что и
-  // у Gemini. Без прокси — обычный axios.
+  // Прокси обязателен (как и для Gemini): без прокси x.ai из России
+  // нестабилен, к тому же часть IP-диапазонов RU забанена. Запрос напрямую
+  // запрещён — это специально, чтобы избежать «случайных» обходов.
   if (PROXY_URLS.length === 0) {
-    const resp = await axios.post(url, body, {
-      headers, timeout: timeoutMs, validateStatus: null,
-    }).catch((err) => {
-      const wrap = new Error(`Grok network error: ${err.message}`);
-      throw wrap;
-    });
-    return _parseGrokResponse(resp, model);
+    throw new Error(
+      'Прокси для Grok (x.ai) не задан! Запросы напрямую запрещены.\n' +
+      'Задайте в .env (рекомендуется — компонентами) одну из групп:\n' +
+      '  XAI_PROXY_HOST / XAI_PROXY_PORT / XAI_PROXY_USER / XAI_PROXY_PASS\n' +
+      'или общие для всех LLM:\n' +
+      '  LLM_PROXY_HOST / LLM_PROXY_PORT / LLM_PROXY_USER / LLM_PROXY_PASS\n' +
+      'или полной строкой:\n' +
+      '  XAI_PROXY_URL="http://login:password@ip:port"\n' +
+      'В крайнем случае — переиспользуются GEMINI_PROXY_* (тот же провайдер).\n' +
+      'Затем: docker compose down && docker compose up -d --build'
+    );
   }
 
   const totalAttempts = PROXY_URLS.length;
