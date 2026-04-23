@@ -295,16 +295,25 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
       log(`Stage 2C Taxonomy ОШИБКА: ${e.message}`, 'error');
       // Если DeepSeek-адаптер всё равно отверг по длине (например, повторное
       // обращение раздуло промпт через "[ПОВТОРНЫЙ ЗАПРОС]" хвост) — поднимаем
-      // tier и пересобираем для следующих попыток.
+      // tier и пересобираем для следующих попыток. Маркируем ошибку как
+      // recoverable, чтобы внешний цикл сделал ещё одну попытку.
       if (/Input text too long/i.test(e.message) && promptTier < 2) {
         promptTier++;
         stage2Prompt = buildTaxonomyPrompt(promptTier);
         log(`Stage 2C Taxonomy: пересобрал промпт с tier=${promptTier} (${stage2Prompt.length} символов) для следующей попытки.`, 'warn');
+        return { __recoverable: true };
       }
       return null;
     });
 
-    if (!stage2Raw) continue;
+    // Не было ответа — и это НЕ recoverable length-error → выходим (как раньше).
+    // Без этой проверки мы бы крутились в цикле при любой DeepSeek-ошибке.
+    if (!stage2Raw) break;
+    if (stage2Raw.__recoverable) {
+      // Сбрасываем флаг и продолжаем следующий проход цикла с новым промптом.
+      stage2Raw = null;
+      continue;
+    }
 
     if (stage2Raw?.page_blueprint?.taxonomy) extractedTaxonomy = stage2Raw.page_blueprint.taxonomy;
     else if (stage2Raw?.taxonomy) extractedTaxonomy = stage2Raw.taxonomy;
