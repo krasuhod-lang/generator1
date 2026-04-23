@@ -30,6 +30,11 @@ const { loadLinkArticlePrompt } = require('../../prompts/linkArticle');
 const { generateImage } = require('./nanoBananaPro.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
 const sse = require('../sse/sseManager');
+const {
+  recordTextTokens,
+  recordImageCall,
+  recordEvent,
+} = require('./linkArticleMetrics');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
@@ -49,6 +54,10 @@ const IMAGE_PRICE_USD = (() => {
 
 const IN_PROGRESS = new Set(); // taskId — защита от двойного старта
 
+// Текущая стадия per-task (in-memory) — используется, чтобы recordEvent
+// автоматически прикреплял stage к событию без передачи его во все вызовы.
+const CURRENT_STAGE = new Map();
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function publishEvent(taskId, type, payload = {}) {
@@ -58,22 +67,12 @@ function publishEvent(taskId, type, payload = {}) {
 }
 
 async function appendLog(taskId, msg, level = 'info') {
-  const entry = { time: new Date().toISOString(), msg, level };
-  try {
-    await db.query(
-      `UPDATE link_article_tasks
-          SET logs = COALESCE(logs, '[]'::jsonb) || $2::jsonb,
-              updated_at = NOW()
-        WHERE id = $1`,
-      [taskId, JSON.stringify([entry])],
-    );
-  } catch (err) {
-    console.error('[linkArticle] appendLog failed:', err.message);
-  }
+  const entry = await recordEvent(taskId, msg, level, CURRENT_STAGE.get(taskId) || null);
   publishEvent(taskId, 'log', entry);
 }
 
 async function setStage(taskId, stageName, progressPct) {
+  CURRENT_STAGE.set(taskId, stageName);
   try {
     await db.query(
       `UPDATE link_article_tasks
@@ -98,51 +97,16 @@ async function saveStageResult(taskId, column, data) {
   }
 }
 
-async function addMetrics(taskId, adapter, tokensIn, tokensOut, costUsd) {
-  const col = adapter === 'gemini'
-    ? { in: 'gemini_tokens_in', out: 'gemini_tokens_out' }
-    : { in: 'deepseek_tokens_in', out: 'deepseek_tokens_out' };
-  try {
-    await db.query(
-      `UPDATE link_article_tasks
-          SET ${col.in}   = ${col.in}   + $2,
-              ${col.out}  = ${col.out}  + $3,
-              cost_usd    = cost_usd    + $4,
-              updated_at  = NOW()
-        WHERE id = $1`,
-      [taskId, tokensIn || 0, tokensOut || 0, Number(costUsd || 0).toFixed(6)],
-    );
-  } catch (err) {
-    console.error('[linkArticle] addMetrics failed:', err.message);
-  }
-}
-
-async function addImageMetrics(taskId, imageCalls, costUsd) {
-  try {
-    await db.query(
-      `UPDATE link_article_tasks
-          SET gemini_image_calls = gemini_image_calls + $2,
-              cost_usd           = cost_usd           + $3,
-              updated_at         = NOW()
-        WHERE id = $1`,
-      [taskId, imageCalls, Number(costUsd || 0).toFixed(6)],
-    );
-  } catch (err) {
-    console.error('[linkArticle] addImageMetrics failed:', err.message);
-  }
-}
-
 function buildCallCtx(taskId, stageName) {
   // NB: taskId НЕ передаём внутрь callLLM, чтобы persistStageCall не пытался
   // писать в task_stages (у неё FK на tasks, а link_article_tasks — отдельная
-  // таблица). Собственные метрики кладём через onTokens → addMetrics.
+  // таблица). Собственные метрики кладём через onTokens → recordTextTokens.
   return {
     stageName,
     log: (msg, level = 'info') => appendLog(taskId, msg, level).catch(() => {}),
     onTokens: (adapter, tIn, tOut, cost) => {
       // adapter: 'deepseek' | 'gemini' | 'grok'
-      const provider = adapter === 'deepseek' ? 'deepseek' : 'gemini';
-      addMetrics(taskId, provider, tIn, tOut, cost).catch(() => {});
+      recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
     },
   };
 }
@@ -449,7 +413,7 @@ async function runImageGeneration(taskId, imagePrompts) {
         p.image_base64 = base64;
         p.mime_type    = mimeType;
         p.status       = 'done';
-        await addImageMetrics(taskId, 1, IMAGE_PRICE_USD);
+        await recordImageCall(taskId, IMAGE_PRICE_USD);
         await appendLog(taskId, `🖼 Slot ${p.slot}: изображение сгенерировано`, 'ok');
       } catch (err) {
         p.status = 'error';
@@ -637,6 +601,7 @@ async function processLinkArticleTask(taskId) {
     } catch (_) { /* no-op */ }
   } finally {
     IN_PROGRESS.delete(taskId);
+    CURRENT_STAGE.delete(taskId);
   }
 }
 

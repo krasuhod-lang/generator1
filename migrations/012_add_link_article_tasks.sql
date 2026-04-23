@@ -72,3 +72,19 @@ CREATE INDEX IF NOT EXISTS idx_link_article_user_created
 
 CREATE INDEX IF NOT EXISTS idx_link_article_status
   ON link_article_tasks (status);
+
+-- ── Events (audit stream) ─────────────────────────────────────────
+-- Отдельный журнал событий пайплайна. Inline-массив logs JSONB в
+-- link_article_tasks остаётся «горячей» витриной для UI; сюда льётся
+-- длинный аудит-лог (для админ-панели и ретроспективного разбора).
+CREATE TABLE IF NOT EXISTS link_article_events (
+  id         BIGSERIAL PRIMARY KEY,
+  task_id    UUID NOT NULL REFERENCES link_article_tasks(id) ON DELETE CASCADE,
+  stage      TEXT,
+  level      VARCHAR(8) NOT NULL DEFAULT 'info',  -- info | ok | warn | err
+  message    TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_article_events_task_time
+  ON link_article_events (task_id, created_at);
