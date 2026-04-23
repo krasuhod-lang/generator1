@@ -97,7 +97,9 @@ onMounted(() => {
 .title {
   font-weight: 600;
   font-size: 13px;
-  color: #444;
+  /* Родительская карточка на странице имеет тёмный фон (.card => bg-gray-900),
+     поэтому заголовок делаем светлым, чтобы он был читаем. */
+  color: #e5e7eb;
 }
 .options {
   display: flex;
@@ -113,6 +115,9 @@ onMounted(() => {
   border-radius: 6px;
   cursor: pointer;
   background: #fff;
+  /* Явно задаём тёмный цвет текста внутри белой плашки, чтобы он не наследовал
+     светлый цвет от тёмной темы страницы (иначе текст становится белым на белом). */
+  color: #1f2937;
   transition: all .15s ease;
   min-width: 180px;
 }
@@ -121,8 +126,8 @@ onMounted(() => {
 .option.disabled { cursor: not-allowed; opacity: .6; }
 .option input[type=radio] { margin: 0; }
 .opt-body { display: flex; flex-direction: column; }
-.opt-name { font-weight: 600; font-size: 13px; }
-.opt-meta { font-size: 11px; color: #666; }
-.tooltip { font-size: 13px; color: #999; cursor: help; }
-.hint { font-size: 12px; color: #777; }
+.opt-name { font-weight: 600; font-size: 13px; color: #1f2937; }
+.opt-meta { font-size: 11px; color: #4b5563; }
+.tooltip { font-size: 13px; color: #6b7280; cursor: help; }
+.hint { font-size: 12px; color: #9ca3af; }
 </style>
