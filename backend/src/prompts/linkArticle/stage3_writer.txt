@@ -70,7 +70,12 @@ LINK-ARTICLE STAGE 3 — Написание ссылочной статьи на
       <h2>Заключение</h2>
       <p>…</p>
   - Разрешённые теги: h1, h2, h3, p, ul, ol, li, strong, em, a, blockquote.
-  - Запрещено: <script>, <style>, <iframe>, inline onclick/onerror/onload, data: URL в href.
+  - Запрещено: <script>, <style>, <iframe>, inline onclick/onerror/onload.
+  - Для значений атрибута href запрещены data:-URL (разрешены только http/https).
+    При этом внутри статьи НЕ нужно вручную вставлять <img> — изображения
+    добавляются на бэкенде путём замены плейсхолдеров <!-- IMAGE_SLOT_N -->
+    на <figure><img src="data:image/..."><figcaption/></figure>. Это допустимое
+    исключение для src-атрибута img и не противоречит запрету data: для href.
   - Все внутренние ссылки (кроме anchor) — только https:// и только если это
     общеизвестные официальные ресурсы. Если сомневаешься — не ставь ссылку.
   - Длина статьи: 900–1800 слов (подбирай по глубине темы).

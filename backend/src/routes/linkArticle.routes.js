@@ -50,9 +50,20 @@ const readLimiter = rateLimit({
   message: { error: 'Слишком много запросов. Попробуйте позже.' },
 });
 
-// SSE-поток не ограничиваем внешним rateLimit'ом — одно подключение на задачу,
-// сервер и так их считает через sseManager.
-router.get('/:id/stream',  sseAuth, streamLinkArticleTask);
+const streamLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max:      60, // один пользователь может переподключаться до 60 раз/мин
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Слишком много SSE-подключений. Подождите.' },
+});
+
+// SSE-поток: EventSource не умеет выставлять Authorization, поэтому
+// `sseAuth` принимает токен из query-параметра (?token=). Это документированный
+// trade-off: токен может попасть в логи сервера. Роут ограничен rate-limit'ом,
+// чтобы снизить риск перебора токенов, но для полной защиты рекомендуется
+// использовать короткоживущие токены (security follow-up).
+router.get('/:id/stream',  streamLimiter, sseAuth, streamLinkArticleTask);
 
 router.use(readLimiter);
 

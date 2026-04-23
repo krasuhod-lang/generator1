@@ -235,6 +235,18 @@ function countOccurrences(haystack, needle) {
   return (haystack.match(new RegExp(safe, 'gi')) || []).length;
 }
 
+// Сколько первых символов анкорного текста должно совпадать между тем, что
+// задал пользователь, и тем, что модель поставила внутрь <a>. Нужен запас,
+// потому что модель может добавить/убрать хвостовое слово ради грамматики
+// («купить ВНЖ» ↔ «купить ВНЖ Португалии»). 40 символов — практический
+// компромисс, позволяющий простить окончания и прилагательные.
+const ANCHOR_TEXT_PREFIX_MATCH_LEN = 40;
+
+// Максимально допустимая доля текста перед первой встречей анкора.
+// По требованию задачи — первые 20 % статьи. Используется и в проверке,
+// и в user-facing сообщении об ошибке, чтобы они не расходились.
+const ANCHOR_MAX_POSITION_RATIO = 0.20;
+
 function validateWriterOutput(html, task) {
   const issues = [];
   if (typeof html !== 'string' || html.trim().length < 400) {
@@ -242,33 +254,49 @@ function validateWriterOutput(html, task) {
     return issues;
   }
 
-  // Anchor: ровно один <a href="ANCHOR_URL">ANCHOR_TEXT</a>
   const anchorUrl  = task.anchor_url;
   const anchorText = task.anchor_text;
-  const anchorRegex = new RegExp(
-    `<a\\s+href\\s*=\\s*["']${anchorUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'][^>]*>([\\s\\S]*?)<\\/a>`,
-    'gi',
-  );
-  const anchorMatches = html.match(anchorRegex) || [];
-  if (anchorMatches.length === 0) {
-    issues.push(`Не найдена ссылка <a href="${anchorUrl}">${anchorText}</a>`);
-  } else if (anchorMatches.length > 1) {
-    issues.push(`Ссылка <a href="${anchorUrl}"> встречается ${anchorMatches.length} раз — должна быть ровно 1`);
-  } else {
-    const inner = anchorMatches[0].replace(/<[^>]+>/g, '').trim();
-    if (inner && anchorText && !inner.toLowerCase().includes(anchorText.toLowerCase().slice(0, Math.min(40, anchorText.length)))) {
-      issues.push(`Текст анкора не совпадает: ожидалось «${anchorText}», получено «${inner}»`);
+
+  // Anchor: ровно один <a ...href="ANCHOR_URL"...>...</a>.
+  // Ищем через статический общий regex на любые <a href="...">, затем
+  // сверяем href с ожидаемым URL. Это безопаснее, чем собирать RegExp из
+  // пользовательского URL (избегаем «tainted regex» и false-positive
+  // подсчётов при дополнительных атрибутах вроде rel/target).
+  const ANY_ANCHOR_REGEX = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  const HREF_ATTR_REGEX  = /\shref\s*=\s*("([^"]*)"|'([^']*)')/i;
+  const anchorHits = [];
+  let match;
+  while ((match = ANY_ANCHOR_REGEX.exec(html)) !== null) {
+    const hrefMatch = HREF_ATTR_REGEX.exec(match[1]);
+    const href = hrefMatch ? (hrefMatch[2] || hrefMatch[3] || '') : '';
+    if (href === anchorUrl) {
+      anchorHits.push({ full: match[0], index: match.index, inner: match[2] });
     }
   }
 
-  // Anchor position: первые 20% текста
+  if (anchorHits.length === 0) {
+    issues.push(`Не найдена ссылка <a href="${anchorUrl}">${anchorText}</a>`);
+  } else if (anchorHits.length > 1) {
+    issues.push(`Ссылка на ${anchorUrl} встречается ${anchorHits.length} раз — должна быть ровно 1`);
+  } else {
+    const innerText = anchorHits[0].inner.replace(/<[^>]+>/g, '').trim();
+    const needle = anchorText.toLowerCase().slice(0, Math.min(ANCHOR_TEXT_PREFIX_MATCH_LEN, anchorText.length));
+    if (innerText && anchorText && !innerText.toLowerCase().includes(needle)) {
+      issues.push(`Текст анкора не совпадает: ожидалось «${anchorText}», получено «${innerText}»`);
+    }
+  }
+
+  // Anchor position: первые ANCHOR_MAX_POSITION_RATIO * 100% текста
   const plain = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  const firstAnchorIdx = html.search(anchorRegex);
-  if (firstAnchorIdx >= 0) {
+  if (anchorHits.length >= 1) {
+    const firstAnchorIdx = anchorHits[0].index;
     const plainUpToAnchor = html.slice(0, firstAnchorIdx).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
     const ratio = plain.length > 0 ? plainUpToAnchor.length / plain.length : 1;
-    if (ratio > 0.25) {
-      issues.push(`Анкор стоит слишком глубоко в тексте (${Math.round(ratio * 100)}% — должно быть ≤ 20%)`);
+    if (ratio > ANCHOR_MAX_POSITION_RATIO) {
+      issues.push(
+        `Анкор стоит слишком глубоко в тексте (${Math.round(ratio * 100)}% — ` +
+        `должно быть ≤ ${Math.round(ANCHOR_MAX_POSITION_RATIO * 100)}%)`,
+      );
     }
   }
 
@@ -447,19 +475,36 @@ function escapeHtml(s) {
 }
 
 // HTML → форматированный текст (простой strip-tags с переносами).
+// NB: мы не используем jsdom ради зависимости — это вывод для копипасты
+// в биржевые WYSIWYG-редакторы, поэтому достаточно грубой очистки. Главное:
+// (1) стрипим теги в цикле до идемпотентности — чтобы вложенные конструкции
+//     вида «&lt;script&gt;» не всплыли как новый тег после одного прохода;
+// (2) декодируем `&amp;` ПОСЛЕДНИМ, чтобы не получить double-unescape:
+//     строка `&amp;lt;` должна превратиться в `&lt;`, а не в `<`.
 function buildPlainText(html) {
   if (!html) return '';
   let s = html;
   s = s.replace(/<\/(p|h1|h2|h3|h4|li|figure|figcaption|blockquote)\s*>/gi, '$&\n\n');
   s = s.replace(/<br\s*\/?>(\s*)/gi, '\n');
   s = s.replace(/<li[^>]*>/gi, '• ');
-  s = s.replace(/<[^>]+>/g, '');
+
+  // Strip all remaining tags — loop until stable, чтобы обезвредить «наложенные»
+  // паттерны вроде «<<script>script>» (после первой итерации остаётся «<script>»,
+  // вторая итерация его удалит).
+  const tagRe = /<[^>]+>/g;
+  for (let i = 0; i < 5; i += 1) {
+    const next = s.replace(tagRe, '');
+    if (next === s) break;
+    s = next;
+  }
+
+  // Декодирование HTML-сущностей. Порядок важен: `&amp;` идёт последним.
   s = s.replace(/&nbsp;/g, ' ')
-       .replace(/&amp;/g, '&')
        .replace(/&lt;/g, '<')
        .replace(/&gt;/g, '>')
        .replace(/&quot;/g, '"')
-       .replace(/&#39;/g, "'");
+       .replace(/&#39;/g, "'")
+       .replace(/&amp;/g, '&');
   s = s.replace(/\n{3,}/g, '\n\n').trim();
   return s;
 }
