@@ -8,6 +8,7 @@ const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
+const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
 
 /**
  * STOP_PHRASES — фразы-маркеры "воды".
@@ -189,7 +190,8 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       .replace('{{BRAND_FACTS}}',      () => akbReady ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
       .replace('{{ORIGINAL_HTML}}',    () => currentHTML)
       .replace('{{AUDIT_REPORT}}',     () => JSON.stringify(currentAudit))
-      .replace('{{SPECIAL_INSTRUCTION}}', () => specialInstruction);
+      .replace('{{SPECIAL_INSTRUCTION}}', () => specialInstruction)
+      + STYLE_GROUNDING_CONTRACT;
 
     const s5Result = await callLLM(
       llmProvider(task),

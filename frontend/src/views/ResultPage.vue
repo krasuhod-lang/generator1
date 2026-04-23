@@ -72,11 +72,14 @@ const deepseekCost = computed(() => Number(metrics.value?.deepseek_cost_usd   ??
 const geminiIn     = computed(() => Number(metrics.value?.gemini_tokens_in    ?? 0));
 const geminiOut    = computed(() => Number(metrics.value?.gemini_tokens_out   ?? 0));
 const geminiCost   = computed(() => Number(metrics.value?.gemini_cost_usd     ?? 0));
-const totalTokens  = computed(() => Number(metrics.value?.total_tokens ?? (deepseekIn.value + deepseekOut.value + geminiIn.value + geminiOut.value)));
+const grokIn       = computed(() => Number(metrics.value?.grok_tokens_in      ?? 0));
+const grokOut      = computed(() => Number(metrics.value?.grok_tokens_out     ?? 0));
+const grokCost     = computed(() => Number(metrics.value?.grok_cost_usd       ?? 0));
+const totalTokens  = computed(() => Number(metrics.value?.total_tokens ?? (deepseekIn.value + deepseekOut.value + geminiIn.value + geminiOut.value + grokIn.value + grokOut.value)));
 const totalCost    = computed(() => {
   const t = metrics.value?.total_cost_usd;
   if (t !== undefined && t !== null) return Number(t);
-  return deepseekCost.value + geminiCost.value;
+  return deepseekCost.value + geminiCost.value + grokCost.value;
 });
 
 // ── Время генерации ────────────────────────────────────────────────────────
@@ -300,7 +303,7 @@ function fmt(n, digits = 0) {
       <!-- ══ Ряд 2: Стоимость ═══════════════════════════════════════════ -->
       <div class="card">
         <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-4">Расход токенов и стоимость</p>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
 
           <!-- DeepSeek -->
           <div class="bg-gray-800 rounded-lg p-4">
@@ -325,6 +328,19 @@ function fmt(n, digits = 0) {
               <span class="text-right text-gray-300">{{ fmt(geminiOut) }} tok</span>
               <span class="text-gray-500">Стоимость:</span>
               <span class="text-right text-indigo-300 font-semibold">${{ geminiCost.toFixed(4) }}</span>
+            </div>
+          </div>
+
+          <!-- Grok (x.ai) -->
+          <div class="bg-gray-800 rounded-lg p-4">
+            <p class="text-sm font-semibold text-gray-300 mb-3">Grok (x.ai)</p>
+            <div class="grid grid-cols-2 gap-1.5 text-xs font-mono">
+              <span class="text-gray-500">Input:</span>
+              <span class="text-right text-gray-300">{{ fmt(grokIn) }} tok</span>
+              <span class="text-gray-500">Output:</span>
+              <span class="text-right text-gray-300">{{ fmt(grokOut) }} tok</span>
+              <span class="text-gray-500">Стоимость:</span>
+              <span class="text-right text-indigo-300 font-semibold">${{ grokCost.toFixed(4) }}</span>
             </div>
           </div>
 

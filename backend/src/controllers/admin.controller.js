@@ -326,6 +326,7 @@ async function getAdminTaskDetail(req, res, next) {
               tm.total_cost_usd, tm.total_tokens,
               tm.deepseek_tokens_in, tm.deepseek_tokens_out, tm.deepseek_cost_usd,
               tm.gemini_tokens_in,   tm.gemini_tokens_out,   tm.gemini_cost_usd,
+              tm.grok_tokens_in,     tm.grok_tokens_out,     tm.grok_cost_usd,
               tm.lsi_coverage, tm.eeat_score, tm.naturalness_score
          FROM tasks t
          JOIN users u ON u.id = t.user_id

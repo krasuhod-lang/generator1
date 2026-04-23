@@ -18,13 +18,13 @@ const PRICES = {
     input_long:    0.000004000,  // $4.00  / 1M tokens (>200K context)
     output_long:   0.000018000,  // $18.00 / 1M tokens (>200K context)
   },
-  // x.ai Grok-4 pricing (апрель 2026, публичный прайс x.ai):
-  //   $5.00 / 1M input tokens, $15.00 / 1M output tokens.
-  // Подтверждается в env XAI_INPUT_PRICE_USD_PER_1M / XAI_OUTPUT_PRICE_USD_PER_1M
+  // x.ai Grok pricing (продуктовое требование апрель 2026):
+  //   $2.00 / 1M input tokens, $6.00 / 1M output tokens.
+  // Подтверждается env XAI_INPUT_PRICE_USD_PER_1M / XAI_OUTPUT_PRICE_USD_PER_1M
   // — переопределить при изменении тарифа без правки кода.
   grok: {
-    input:  0.000005000,
-    output: 0.000015000,
+    input:  0.000002000,
+    output: 0.000006000,
   },
 };
 

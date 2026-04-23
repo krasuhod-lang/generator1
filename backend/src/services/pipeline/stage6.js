@@ -6,9 +6,10 @@ const { calculateCoverage }    = require('../../utils/calculateCoverage');
 const { computeSemanticCoverage } = require('../../utils/semanticSimilarity');
 const { LSI_COVERAGE_TARGET }  = require('../../utils/objectiveMetrics');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
+const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
 
 /**
- * Stage 6: Инъекция LSI — цикл до достижения LSI_COVERAGE_TARGET (≥ 85%),
+ * Stage 6: Инъекция LSI — цикл до достижения LSI_COVERAGE_TARGET (≥ 80%),
  * максимум 3 итерации. Адаптер: gemini.
  *
  * Улучшение: Гибридный поиск — используем семантическое сходство
@@ -82,7 +83,8 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       .replace('{{MISSING_LSI}}',   () => JSON.stringify(injectList))
       .replace('{{TARGET_SERVICE}}',() => targetService)
       .replace(/\{\{BRAND_NAME\}\}/g, () => brandName)
-      .replace('{{BRAND_FACTS}}',   () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts);
+      .replace('{{BRAND_FACTS}}',   () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
+      + STYLE_GROUNDING_CONTRACT;
 
     log(
       `Stage 6 блок ${blockIndex + 1}: инъекция LSI цикл ${loopCount} — ` +

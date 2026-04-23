@@ -82,6 +82,9 @@ const metricsJson = computed(() => {
     gemini_tokens_in:    task.value.gemini_tokens_in,
     gemini_tokens_out:   task.value.gemini_tokens_out,
     gemini_cost_usd:     task.value.gemini_cost_usd,
+    grok_tokens_in:      task.value.grok_tokens_in,
+    grok_tokens_out:     task.value.grok_tokens_out,
+    grok_cost_usd:       task.value.grok_cost_usd,
   };
   return JSON.stringify(m, null, 2);
 });

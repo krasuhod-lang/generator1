@@ -175,13 +175,20 @@ async function persistStageCall({ taskId, stageName, callLabel, model, promptSiz
        startedAt, completedAt]
     );
 
-    // Обновляем агрегированные метрики (grok идёт по той же колонке, что
-    // и Gemini, чтобы не плодить миграции в task_metrics — оба провайдера
-    // занимают слот «text-generation cost».)
-    const isDeepSeek = model.startsWith('deepseek');
-    const metricsCol = isDeepSeek
-      ? { colIn: 'deepseek_tokens_in', colOut: 'deepseek_tokens_out', colCost: 'deepseek_cost_usd' }
-      : { colIn: 'gemini_tokens_in',   colOut: 'gemini_tokens_out',   colCost: 'gemini_cost_usd'   };
+    // Обновляем агрегированные метрики. Каждый провайдер пишет в свою
+    // тройку колонок:
+    //   - DeepSeek    → deepseek_tokens_in/out/cost_usd
+    //   - Grok (x.ai) → grok_tokens_in/out/cost_usd
+    //   - Gemini      → gemini_tokens_in/out/cost_usd
+    // До migration 011 Grok сваливался в gemini_*; теперь — отдельно.
+    let metricsCol;
+    if (model.startsWith('deepseek')) {
+      metricsCol = { colIn: 'deepseek_tokens_in', colOut: 'deepseek_tokens_out', colCost: 'deepseek_cost_usd' };
+    } else if (model.startsWith('grok')) {
+      metricsCol = { colIn: 'grok_tokens_in',     colOut: 'grok_tokens_out',     colCost: 'grok_cost_usd'     };
+    } else {
+      metricsCol = { colIn: 'gemini_tokens_in',   colOut: 'gemini_tokens_out',   colCost: 'gemini_cost_usd'   };
+    }
 
     await db.query(
       `INSERT INTO task_metrics (task_id, ${metricsCol.colIn}, ${metricsCol.colOut}, ${metricsCol.colCost}, total_tokens, total_cost_usd)

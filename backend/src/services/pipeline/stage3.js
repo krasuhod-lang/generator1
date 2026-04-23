@@ -8,6 +8,7 @@ const { checkAntiWater }    = require('./stage5');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
+const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
@@ -229,15 +230,16 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       .replace('{{PREVIOUS_HTML}}',      () => previousContext || 'Это первый блок страницы.')
       .replace('{{COMPETITOR_FACTS}}',   () => competitorFactsStr)
       .replace('{{MIN_H3_COUNT}}', () => String(structureLimits.minH3PerSection))
-      .replace('{{MAX_H3_COUNT}}', () => String(structureLimits.maxH3PerSection));
+      .replace('{{MAX_H3_COUNT}}', () => String(structureLimits.maxH3PerSection))
+      + STYLE_GROUNDING_CONTRACT;
 
     log(`Stage 3 блок ${i + 1}: промпт ${s3prompt.length} символов (~${Math.round(s3prompt.length / 4)} токенов). Запрос...`, 'info');
 
     let stage3Result = await callLLM(
       llmProvider(task),
-      '',
+      akbSystem(task),
       s3prompt,
-      { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}"`, temperature: 0.45, log, onTokens }
+      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}"`, temperature: 0.45, log, onTokens })
     ).catch(e => {
       log(`Stage 3 блок ${i + 1} ОШИБКА: ${e.message}`, 'error');
       return null;
@@ -255,9 +257,9 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
 
         const retryResult = await callLLM(
           llmProvider(task),
-          '',
+          akbSystem(task),
           s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
-          { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
+          geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens })
         ).catch(() => null);
 
         if (retryResult?.html_content) {
@@ -447,6 +449,9 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
   if (blockEntitiesStr) {
     s3prompt += `\n\nKNOWLEDGE GRAPH ENTITIES (related to this H2 section):\n${blockEntitiesStr}\nNaturally weave these entities into the content where semantically appropriate. Do NOT force-insert — only use if they enrich the section.`;
   }
+
+  // Style & Grounding Contract: лаконичность предложений + строгая опора на AKB.
+  s3prompt += STYLE_GROUNDING_CONTRACT;
 
   log(`Stage 3 блок ${blockIndex + 1}: промпт ${s3prompt.length} символов (~${Math.round(s3prompt.length / 4)} токенов). Запрос...`, 'info');
 
