@@ -7,7 +7,18 @@
  * что приводило к лишним Gemini-вызовам в Stage 6 и несогласованным сообщениям.
  * Теперь — одна константа.
  */
-const LSI_COVERAGE_TARGET = 85;
+const LSI_COVERAGE_TARGET = 80;
+
+/**
+ * EEAT_PQ_TARGET — единый минимально допустимый page_quality_score (E-E-A-T) по
+ * блоку. Применяется в:
+ *   - Stage 4 (рубрика и порог в системном промпте),
+ *   - Stage 5 (триггер refine-loop, лог-сообщения),
+ *   - orchestrator (триггер рефайна для блока).
+ * Историческое значение было 8.0; снижено до 7.5 по продуктовому требованию,
+ * чтобы блоки принимались, начиная от 7.5/10 в любой модели написания.
+ */
+const EEAT_PQ_TARGET = 7.5;
 
 /**
  * stripTags — многопроходная очистка HTML-тегов.
@@ -164,4 +175,4 @@ function getStructureLimits(totalChars) {
   /* > 10000 */            return { minSections: 6, maxSections: 8, minH3PerSection: 2, maxH3PerSection: 4 };
 }
 
-module.exports = { checkObjectiveMetrics, getStructureLimits, LSI_COVERAGE_TARGET };
+module.exports = { checkObjectiveMetrics, getStructureLimits, LSI_COVERAGE_TARGET, EEAT_PQ_TARGET };

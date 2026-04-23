@@ -8,6 +8,90 @@ const { serializeForPrompt, getEntityClusters } = require('../../utils/knowledge
 const { getStructureLimits } = require('../../utils/objectiveMetrics');
 
 /**
+ * DeepSeek-адаптер бросает 'Input text too long' при userPrompt.length > 100000.
+ * Берём ~90 000 как мягкий потолок Stage 2C, чтобы оставить запас для повторного
+ * запроса с дополнительной инструкцией ("[ПОВТОРНЫЙ ЗАПРОС]") и для системных
+ * приставок промпта.
+ */
+const STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT = 90000;
+
+/**
+ * compactStage1ForTaxonomy — прогрессивная деградация Stage 1 JSON для
+ * включения в taxonomy-промпт Stage 2C. Чем выше tier, тем агрессивнее
+ * выкидываются длинные массивы/тексты.
+ *
+ * tier 0 — полный объект (как пришло из Stage 1 + 2A/2B обогащения).
+ * tier 1 — обрезаем длинные строки и массивы конкурентного контента.
+ * tier 2 — оставляем только сущности, интенты, ключи, бренд-факты.
+ *
+ * @param {object} s1
+ * @param {number} tier
+ */
+function compactStage1ForTaxonomy(s1, tier) {
+  if (!s1 || typeof s1 !== 'object') return s1;
+  if (tier <= 0) return s1;
+
+  // Глубокая копия (через JSON), чтобы не модифицировать исходный объект.
+  let copy;
+  try { copy = JSON.parse(JSON.stringify(s1)); }
+  catch (_) { return s1; }
+
+  // ── Tier 1: режем большие массивы/тексты ─────────────────────────
+  const trimString = (val, max) => (typeof val === 'string' && val.length > max ? val.slice(0, max) : val);
+  const trimArray  = (val, max) => (Array.isArray(val) && val.length > max ? val.slice(0, max) : val);
+
+  if (copy.buyer_journey?.buyer_journey_stages) {
+    copy.buyer_journey.buyer_journey_stages =
+      trimArray(copy.buyer_journey.buyer_journey_stages, 6).map(stage => {
+        const s = { ...stage };
+        if (Array.isArray(s.queries))        s.queries        = trimArray(s.queries, 8);
+        if (Array.isArray(s.content_needs))  s.content_needs  = trimArray(s.content_needs, 8);
+        if (Array.isArray(s.formats))        s.formats        = trimArray(s.formats, 6);
+        return s;
+      });
+  }
+  if (copy.content_formats?.recommended_formats) {
+    copy.content_formats.recommended_formats =
+      trimArray(copy.content_formats.recommended_formats, 8);
+  }
+  if (copy.content_formats?.ai_search_opportunities) {
+    copy.content_formats.ai_search_opportunities =
+      trimArray(copy.content_formats.ai_search_opportunities, 8);
+  }
+  if (Array.isArray(copy.competitor_facts)) {
+    copy.competitor_facts = trimArray(copy.competitor_facts, 30).map(f => {
+      if (typeof f === 'string') return trimString(f, 400);
+      if (f && typeof f === 'object') {
+        const out = { ...f };
+        if (typeof out.fact   === 'string') out.fact   = trimString(out.fact, 400);
+        if (typeof out.source === 'string') out.source = trimString(out.source, 200);
+        return out;
+      }
+      return f;
+    });
+  }
+  // Длинные «сырые» текстовые поля
+  for (const key of ['competitor_text', 'serp_snippets_text', 'raw_competitor_html', 'raw_text']) {
+    if (typeof copy[key] === 'string') copy[key] = trimString(copy[key], 4000);
+  }
+
+  if (tier <= 1) return copy;
+
+  // ── Tier 2: оставляем только опорные поля ────────────────────────
+  const ESSENTIAL = [
+    'entities', 'intents', 'primary_intent', 'secondary_intents',
+    'lsi_terms', 'lsi_top', 'ngrams', 'keywords',
+    'topic_map', 'knowledge_graph',
+    'brand_facts', 'buyer_journey', 'content_formats',
+  ];
+  const slim = {};
+  for (const k of ESSENTIAL) {
+    if (copy[k] !== undefined) slim[k] = copy[k];
+  }
+  return slim;
+}
+
+/**
  * routeLSIToBlocks — механический JS-роутинг (fallback если Gemini routing упал).
  * Каждый термин назначается блоку по круговому принципу (round-robin по индексу).
  */
@@ -125,41 +209,69 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
     ? getEntityClusters(enrichedStage1.knowledge_graph)
     : [];
 
-  let stage2Prompt = SYSTEM_PROMPTS.stage2
-    .replace('{{BUSINESS_TYPE}}',   () => task.input_business_type || 'услуги')
-    .replace('{{NICHE_FEATURES}}',  () => task.input_niche_features || 'Нет данных')
-    .replace('{{TARGET_SERVICE}}', () => targetService)
-    .replace(/\{\{BRAND_NAME\}\}/g, () => (task.input_brand_name || '').trim() || 'Нет данных')
-    .replace('{{AUDIENCE_PERSONAS}}', () => (task.__audiencePersonasText || 'Нет данных').slice(0, 4000))
-    .replace('{{NICHE_DEEP_DIVE}}',   () => (task.__nicheDeepDiveText   || 'Нет данных').slice(0, 4000))
-    .replace('{{STAGE1_JSON}}',    () => JSON.stringify(enrichedStage1));
+  /**
+   * buildTaxonomyPrompt — собирает stage2Prompt из enrichedStage1 с заданным tier
+   * компакции. Используется и для первой попытки (tier=0), и для прогрессивной
+   * деградации при превышении лимита DeepSeek (tier=1, tier=2).
+   */
+  const buildTaxonomyPrompt = (tier) => {
+    const compactedStage1 = compactStage1ForTaxonomy(enrichedStage1, tier);
+    let prompt = SYSTEM_PROMPTS.stage2
+      .replace('{{BUSINESS_TYPE}}',   () => task.input_business_type || 'услуги')
+      .replace('{{NICHE_FEATURES}}',  () => task.input_niche_features || 'Нет данных')
+      .replace('{{TARGET_SERVICE}}', () => targetService)
+      .replace(/\{\{BRAND_NAME\}\}/g, () => (task.input_brand_name || '').trim() || 'Нет данных')
+      .replace('{{AUDIENCE_PERSONAS}}', () => (task.__audiencePersonasText || 'Нет данных').slice(0, tier >= 2 ? 1500 : 4000))
+      .replace('{{NICHE_DEEP_DIVE}}',   () => (task.__nicheDeepDiveText   || 'Нет данных').slice(0, tier >= 2 ? 1500 : 4000))
+      .replace('{{STAGE1_JSON}}',    () => JSON.stringify(compactedStage1));
 
-  // Добавляем Knowledge Graph контекст к промпту (не нарушая существующую структуру)
-  if (kgContext) {
-    stage2Prompt += `\n\n===== KNOWLEDGE GRAPH (Entity Relationships) =====\n${kgContext}`;
-    if (kgClusters.length > 0) {
-      const clusterStr = kgClusters.slice(0, 8).map(c =>
-        `• ${c.centroid} (${c.members.length} entities)`
-      ).join('\n');
-      stage2Prompt += `\n\nENTITY CLUSTERS (use for H2 grouping):\n${clusterStr}`;
+    // Knowledge Graph контекст (тоже сокращаем при tier >= 2)
+    if (kgContext) {
+      const kgChunk = tier >= 2 ? kgContext.slice(0, 800) : kgContext;
+      prompt += `\n\n===== KNOWLEDGE GRAPH (Entity Relationships) =====\n${kgChunk}`;
+      if (kgClusters.length > 0 && tier < 2) {
+        const clusterStr = kgClusters.slice(0, 8).map(c =>
+          `• ${c.centroid} (${c.members.length} entities)`
+        ).join('\n');
+        prompt += `\n\nENTITY CLUSTERS (use for H2 grouping):\n${clusterStr}`;
+      }
+      prompt += `\nUSE entity clusters above to inform H2 topic grouping. Each H2 should cover a coherent entity cluster.`;
     }
-    stage2Prompt += `\nUSE entity clusters above to inform H2 topic grouping. Each H2 should cover a coherent entity cluster.`;
+
+    if (strategyDigest) {
+      prompt += `\n\n${strategyAppendix.trim()}\nUSE strategy context above to ensure taxonomy covers wedge opportunities, must-have E-E-A-T signals and journey-stage queries.`;
+    }
+
+    // Inject structure limits into taxonomy prompt
+    const totalChars = parseInt(task.input_max_chars) || 3500;
+    const structureLimitsLocal = getStructureLimits(totalChars);
+    prompt = prompt.replace(
+      /AT LEAST \d+ AND AT MOST \d+ OBJECTS/,
+      `AT LEAST ${structureLimitsLocal.minSections} AND AT MOST ${structureLimitsLocal.maxSections} OBJECTS`
+    );
+    return prompt;
+  };
+
+  // Подбираем минимальный tier, при котором промпт укладывается в soft-limit
+  // DeepSeek (~90KB). Это гарантирует, что вызов не будет отвергнут с
+  // "Input text too long" ещё до отправки на API.
+  let promptTier = 0;
+  let stage2Prompt = buildTaxonomyPrompt(promptTier);
+  while (stage2Prompt.length > STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT && promptTier < 2) {
+    promptTier++;
+    log(
+      `Stage 2 Taxonomy: промпт ${stage2Prompt.length} символов > лимит ${STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT}. ` +
+      `Применяю компакцию tier=${promptTier} (drop большие массивы конкурентов / тексты).`,
+      'warn'
+    );
+    stage2Prompt = buildTaxonomyPrompt(promptTier);
   }
 
-  // Инжектируем стратегический дайджест в taxonomy-промпт (additive, без замены жёстких блоков).
-  if (strategyDigest) {
-    stage2Prompt += `\n\n${strategyAppendix.trim()}\nUSE strategy context above to ensure taxonomy covers wedge opportunities, must-have E-E-A-T signals and journey-stage queries.`;
-  }
+  log(`Stage 2 Taxonomy Builder — итоговый промпт ${stage2Prompt.length} символов (~${Math.round(stage2Prompt.length / 4)} токенов, tier=${promptTier}). Запуск...`, 'info');
 
-  log(`Stage 2 Taxonomy Builder — итоговый промпт ${stage2Prompt.length} символов (~${Math.round(stage2Prompt.length / 4)} токенов). Запуск...`, 'info');
-
-  // Inject structure limits into taxonomy prompt
+  // structureLimits всё ещё нужен ниже (slicing taxonomy после получения)
   const totalChars = parseInt(task.input_max_chars) || 3500;
   const structureLimits = getStructureLimits(totalChars);
-  stage2Prompt = stage2Prompt.replace(
-    /AT LEAST \d+ AND AT MOST \d+ OBJECTS/,
-    `AT LEAST ${structureLimits.minSections} AND AT MOST ${structureLimits.maxSections} OBJECTS`
-  );
 
   let extractedTaxonomy = [];
   let s2Attempts = 0;
@@ -179,9 +291,20 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
       '',
       stage2Prompt,
       { retries: 2, taskId, stageName: 'stage2', callLabel: `2C Taxonomy attempt ${s2Attempts}`, log, onTokens }
-    ).catch(e => { log(`Stage 2C Taxonomy ОШИБКА: ${e.message}`, 'error'); return null; });
+    ).catch(e => {
+      log(`Stage 2C Taxonomy ОШИБКА: ${e.message}`, 'error');
+      // Если DeepSeek-адаптер всё равно отверг по длине (например, повторное
+      // обращение раздуло промпт через "[ПОВТОРНЫЙ ЗАПРОС]" хвост) — поднимаем
+      // tier и пересобираем для следующих попыток.
+      if (/Input text too long/i.test(e.message) && promptTier < 2) {
+        promptTier++;
+        stage2Prompt = buildTaxonomyPrompt(promptTier);
+        log(`Stage 2C Taxonomy: пересобрал промпт с tier=${promptTier} (${stage2Prompt.length} символов) для следующей попытки.`, 'warn');
+      }
+      return null;
+    });
 
-    if (!stage2Raw) break;
+    if (!stage2Raw) continue;
 
     if (stage2Raw?.page_blueprint?.taxonomy) extractedTaxonomy = stage2Raw.page_blueprint.taxonomy;
     else if (stage2Raw?.taxonomy) extractedTaxonomy = stage2Raw.taxonomy;
