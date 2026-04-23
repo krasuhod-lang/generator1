@@ -122,6 +122,7 @@ async function createTask(req, res, next) {
       input_min_chars,
       input_max_chars,
       input_target_url,
+      llm_provider,
     } = req.body;
 
     // Для черновика допускаем пустое поле — ставим плейсхолдер
@@ -134,6 +135,11 @@ async function createTask(req, res, next) {
       return res.status(400).json({ error: 'Макс. символов должно быть больше мин.' });
     }
 
+    // Whitelist для LLM-провайдера. Невалидное значение → fallback к 'gemini'.
+    const provider = (typeof llm_provider === 'string' && llm_provider.toLowerCase().trim() === 'grok')
+      ? 'grok'
+      : 'gemini';
+
     const { rows } = await db.query(
       `INSERT INTO tasks (
          user_id, title, status,
@@ -144,7 +150,8 @@ async function createTask(req, res, next) {
          input_raw_lsi, input_ngrams, input_tfidf_json,
          input_brand_facts, input_competitor_urls,
          input_min_chars, input_max_chars,
-         input_target_url
+         input_target_url,
+         llm_provider
        ) VALUES (
          $1, $2, 'draft',
          $3, $4, $5,
@@ -154,7 +161,8 @@ async function createTask(req, res, next) {
          $16, $17, $18,
          $19, $20,
          $21, $22,
-         $23
+         $23,
+         $24
        ) RETURNING *`,
       [
         req.user.id,
@@ -180,6 +188,7 @@ async function createTask(req, res, next) {
         minChars,
         maxChars,
         toText(input_target_url),
+        provider,
       ]
     );
 
@@ -230,6 +239,7 @@ async function updateTask(req, res, next) {
       'input_brand_facts', 'input_competitor_urls',
       'input_min_chars', 'input_max_chars',
       'input_target_url',
+      'llm_provider',
     ];
 
     const fields = [];
@@ -239,6 +249,8 @@ async function updateTask(req, res, next) {
     const JSON_FIELDS = new Set(['input_ngrams', 'input_tfidf_json', 'input_competitor_urls']);
     // Поля, которые хранят INTEGER
     const INT_FIELDS  = new Set(['input_min_chars', 'input_max_chars']);
+    // Поля с whitelist-валидацией
+    const ENUM_FIELDS = { llm_provider: new Set(['gemini', 'grok']) };
 
     for (const key of ALLOWED) {
       if (key in req.body) {
@@ -246,6 +258,10 @@ async function updateTask(req, res, next) {
         let val = req.body[key];
         if (INT_FIELDS.has(key))  val = parseInt(val) || null;
         else if (JSON_FIELDS.has(key)) val = toText(val);
+        else if (ENUM_FIELDS[key]) {
+          const lc = (val == null ? '' : String(val).toLowerCase().trim());
+          val = ENUM_FIELDS[key].has(lc) ? lc : 'gemini';
+        }
         values.push(val);
       }
     }
@@ -590,6 +606,53 @@ async function getStages(req, res, next) {
       [req.params.id]
     );
     return res.json({ stages: rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/tasks/:id/logs?after=<ISO>&limit=500
+// История лог-событий задачи (для восстановления MonitorPage после F5).
+// Возвращает события в хронологическом порядке. `after` — ISO timestamp
+// (или ID), события строго ПОСЛЕ него; пустой → с самого начала.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getTaskLogs(req, res, next) {
+  try {
+    await loadOwnTask(req.params.id, req.user.id);
+
+    const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit, 10) || 500));
+    const after = (req.query.after || '').trim();
+
+    const params = [req.params.id];
+    let whereExtra = '';
+    if (after) {
+      // Поддерживаем ISO-timestamp или числовой id (ID — для пагинации,
+      // ts — для «дай новые с момента T»).
+      if (/^\d+$/.test(after)) {
+        params.push(parseInt(after, 10));
+        whereExtra = ` AND id > $${params.length}`;
+      } else {
+        const d = new Date(after);
+        if (!isNaN(d.getTime())) {
+          params.push(d);
+          whereExtra = ` AND ts > $${params.length}`;
+        }
+      }
+    }
+    params.push(limit);
+
+    const { rows } = await db.query(
+      `SELECT id, ts, level, stage, event_type, message, payload
+         FROM task_logs
+        WHERE task_id = $1${whereExtra}
+        ORDER BY id ASC
+        LIMIT $${params.length}`,
+      params,
+    );
+
+    return res.json({ logs: rows, count: rows.length });
   } catch (err) {
     next(err);
   }
@@ -1024,6 +1087,7 @@ module.exports = {
   getMetrics,
   getBlocks,
   getStages,
+  getTaskLogs,
   streamTask,
   uploadTZ,
   parseTZWithLLM,

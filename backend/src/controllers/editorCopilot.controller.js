@@ -37,13 +37,33 @@ async function loadOwnTask(taskId, userId) {
   return rows[0];
 }
 
-async function getOrCreateSession(taskId, userId) {
+async function getOrCreateSession(taskId, userId, llmProvider = null) {
+  // Inherit provider from the task on first creation. Subsequent calls
+  // honour the existing session row (UPDATE ... updated_at = NOW()).
+  // If llmProvider explicitly passed (allowed values 'gemini'|'grok') —
+  // overrides on update too, so user can switch mid-session.
+  let provider = null;
+  if (llmProvider != null) {
+    const lc = String(llmProvider).toLowerCase().trim();
+    provider = (lc === 'grok' || lc === 'gemini') ? lc : null;
+  }
+  if (!provider) {
+    const { rows: tRows } = await db.query(
+      `SELECT llm_provider FROM tasks WHERE id = $1`,
+      [taskId]
+    );
+    provider = (tRows[0]?.llm_provider || 'gemini').toString().toLowerCase();
+    if (provider !== 'grok' && provider !== 'gemini') provider = 'gemini';
+  }
+
   const { rows } = await db.query(
-    `INSERT INTO editor_copilot_sessions (task_id, user_id)
-     VALUES ($1, $2)
-     ON CONFLICT (task_id) DO UPDATE SET updated_at = NOW()
+    `INSERT INTO editor_copilot_sessions (task_id, user_id, llm_provider)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (task_id) DO UPDATE SET
+       updated_at   = NOW(),
+       llm_provider = COALESCE(EXCLUDED.llm_provider, editor_copilot_sessions.llm_provider)
      RETURNING *`,
-    [taskId, userId]
+    [taskId, userId, provider]
   );
   return rows[0];
 }
@@ -153,15 +173,16 @@ async function createOperation(req, res, next) {
       return res.status(400).json({ error: 'Статья ещё не сгенерирована — AI-Copilot недоступен' });
     }
 
-    const session = await getOrCreateSession(taskId, req.user.id);
+    const session = await getOrCreateSession(taskId, req.user.id, req.body.llm_provider);
 
     const { rows } = await db.query(
       `INSERT INTO editor_copilot_operations
-         (session_id, task_id, user_id, action, selected_text, user_prompt, extra_params, status, model_used)
-       VALUES ($1, $2, $3, $4::editor_copilot_action, $5, $6, $7, 'pending', $8)
+         (session_id, task_id, user_id, action, selected_text, user_prompt, extra_params, status, model_used, llm_provider)
+       VALUES ($1, $2, $3, $4::editor_copilot_action, $5, $6, $7, 'pending', $8, $9)
        RETURNING id, status, created_at`,
       [session.id, taskId, req.user.id, action, selected_text, user_prompt,
-       extra_params ? JSON.stringify(extra_params) : null, COPILOT_MODEL]
+       extra_params ? JSON.stringify(extra_params) : null, COPILOT_MODEL,
+       session.llm_provider || 'gemini']
     );
 
     res.status(201).json({ operationId: rows[0].id, status: rows[0].status });

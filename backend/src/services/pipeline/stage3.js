@@ -7,7 +7,7 @@ const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objec
 const { checkAntiWater }    = require('./stage5');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
-const { geminiCallOpts, akbSystem } = require('../../utils/articleKnowledgeBase');
+const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
@@ -78,7 +78,7 @@ NOW respond with STRICT JSON containing ONLY ONE field:
 DO NOT include eeat_self_check, audit_report, or ANY other fields. ONLY html_content with the full <h2>${blockH2}</h2> section HTML, properly closed.`;
 
   const recovered = await callLLM(
-    'gemini',
+    llmProvider(task),
     akbSystem(task),
     recoveryPrompt,
     geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192 })
@@ -234,7 +234,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
     log(`Stage 3 блок ${i + 1}: промпт ${s3prompt.length} символов (~${Math.round(s3prompt.length / 4)} токенов). Запрос...`, 'info');
 
     let stage3Result = await callLLM(
-      'gemini',
+      llmProvider(task),
       '',
       s3prompt,
       { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}"`, temperature: 0.45, log, onTokens }
@@ -254,7 +254,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
         log(`Stage 3 блок ${i + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
 
         const retryResult = await callLLM(
-          'gemini',
+          llmProvider(task),
           '',
           s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
           { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens }
@@ -451,7 +451,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
   log(`Stage 3 блок ${blockIndex + 1}: промпт ${s3prompt.length} символов (~${Math.round(s3prompt.length / 4)} токенов). Запрос...`, 'info');
 
   let stage3Result = await callLLM(
-    'gemini',
+    llmProvider(task),
     akbSystem(task),
     s3prompt,
     geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}"`, temperature: 0.45, log, onTokens })
@@ -471,7 +471,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
       log(`Stage 3 блок ${blockIndex + 1}: pre-check НЕ пройден (${issues.join('; ')}). Быстрый retry...`, 'warn');
 
       const retryResult = await callLLM(
-        'gemini',
+        llmProvider(task),
         akbSystem(task),
         s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
         geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens })

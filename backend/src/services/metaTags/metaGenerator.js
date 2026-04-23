@@ -15,6 +15,7 @@
  */
 
 const { callGemini } = require('../llm/gemini.adapter');
+const { callGrok }   = require('../llm/grok.adapter');
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
 const { checkLsiUsage } = require('./semantics');
@@ -443,10 +444,13 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     attemptsMade = attempt;
-    // callGemini автоматически: JSON-strict guard в systemInstruction, прокси,
-    // ретраи на сетевых/5xx/429, агрегация text-частей. maxTokens=8192:
-    // gemini-3.x thinking-модель тратит часть бюджета на «мысли».
-    const callRes = await callGemini(
+    // callGemini / callGrok автоматически: JSON-strict guard в systemInstruction,
+    // прокси, ретраи на сетевых/5xx/429, агрегация text-частей. maxTokens=8192:
+    // gemini-3.x thinking-модель тратит часть бюджета на «мысли»; для Grok
+    // бюджет тоже хватает с запасом для Title+Description+H1.
+    const provider = (inputs && inputs.llm_provider === 'grok') ? 'grok' : 'gemini';
+    const callFn   = provider === 'grok' ? callGrok : callGemini;
+    const callRes = await callFn(
       SYSTEM_PROMPT,
       userPrompt,
       { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 },

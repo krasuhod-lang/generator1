@@ -18,6 +18,7 @@ const {
   getMetrics,
   getBlocks,
   getStages,
+  getTaskLogs,
   streamTask,
   uploadTZ,
   parseTZWithLLM,
@@ -147,6 +148,7 @@ router.get('/:id/result',  authMiddleware, getResult);  // GET /api/tasks/:id/re
 router.get('/:id/metrics', authMiddleware, getMetrics); // GET /api/tasks/:id/metrics
 router.get('/:id/blocks',  authMiddleware, getBlocks);  // GET /api/tasks/:id/blocks
 router.get('/:id/stages',  authMiddleware, getStages);  // GET /api/tasks/:id/stages
+router.get('/:id/logs',    authMiddleware, getTaskLogs); // GET /api/tasks/:id/logs?after=&limit=
 
 // SSE stream — authSSE принимает ?token= (EventSource не поддерживает заголовки)
 router.get('/:id/stream',  authSSE, streamTask); // GET /api/tasks/:id/stream

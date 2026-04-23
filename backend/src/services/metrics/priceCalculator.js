@@ -18,6 +18,14 @@ const PRICES = {
     input_long:    0.000004000,  // $4.00  / 1M tokens (>200K context)
     output_long:   0.000018000,  // $18.00 / 1M tokens (>200K context)
   },
+  // x.ai Grok-4 pricing (апрель 2026, публичный прайс x.ai):
+  //   $5.00 / 1M input tokens, $15.00 / 1M output tokens.
+  // Подтверждается в env XAI_INPUT_PRICE_USD_PER_1M / XAI_OUTPUT_PRICE_USD_PER_1M
+  // — переопределить при изменении тарифа без правки кода.
+  grok: {
+    input:  0.000005000,
+    output: 0.000015000,
+  },
 };
 
 /** Порог контекста Gemini: до 200 000 токенов — короткий тариф */
@@ -58,6 +66,18 @@ function calcCost(model, tokensIn, tokensOut, cacheHit = false) {
     const isLong    = tokensIn > GEMINI_SHORT_CONTEXT_LIMIT;
     const inputRate  = isLong ? PRICES.gemini.input_long  : PRICES.gemini.input_short;
     const outputRate = isLong ? PRICES.gemini.output_long : PRICES.gemini.output_short;
+    return tokensIn * inputRate + tokensOut * outputRate;
+  }
+
+  if (model === 'grok') {
+    // Env-override: позволяет менять тариф без правки кода (x.ai периодически
+    // меняет цены, особенно для новых моделей вроде grok-code-fast-1).
+    const inputRate  = parseFloat(process.env.XAI_INPUT_PRICE_USD_PER_1M)  > 0
+      ? parseFloat(process.env.XAI_INPUT_PRICE_USD_PER_1M)  / 1_000_000
+      : PRICES.grok.input;
+    const outputRate = parseFloat(process.env.XAI_OUTPUT_PRICE_USD_PER_1M) > 0
+      ? parseFloat(process.env.XAI_OUTPUT_PRICE_USD_PER_1M) / 1_000_000
+      : PRICES.grok.output;
     return tokensIn * inputRate + tokensOut * outputRate;
   }
 

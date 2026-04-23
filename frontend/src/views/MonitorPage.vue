@@ -252,58 +252,65 @@ function connectSSE() {
   const token = auth.token || localStorage.getItem('seo_token');
   if (!token) return;
 
-  es = new EventSource(`/api/tasks/${taskId}/stream?token=${encodeURIComponent(token)}`);
+  // Перед открытием SSE подгружаем события, появившиеся после lastLogId,
+  // — это закрывает «дыру» при кратковременном разрыве соединения.
+  loadHistory().catch(() => {}).finally(() => {
+    if (es) return; // мог быть переподключён за время await
+    es = new EventSource(`/api/tasks/${taskId}/stream?token=${encodeURIComponent(token)}`);
+    es.onopen = onSseOpen;
+    es.onmessage = onSseMessage;
+    es.onerror = onSseError;
+  });
+}
 
-  es.onopen = () => {
-    reconnectCount = 0; // сбрасываем счётчик реконнектов при успешном подключении
-    pushLog({ ts: ts(), msg: `SSE подключён (попытка #${reconnectCount + 1})`, level: 'system' });
-  };
+function onSseOpen() {
+  reconnectCount = 0; // сбрасываем счётчик реконнектов при успешном подключении
+  pushLog({ ts: ts(), msg: `SSE подключён (попытка #${reconnectCount + 1})`, level: 'system' });
+}
 
-  es.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      handleSSEMessage(msg);
-    } catch (e) {
-      console.warn('[SSE] parse error:', e.message, event.data?.substring(0, 100));
-    }
-  };
+function onSseMessage(event) {
+  try {
+    const msg = JSON.parse(event.data);
+    handleSSEMessage(msg);
+  } catch (e) {
+    console.warn('[SSE] parse error:', e.message, event.data?.substring(0, 100));
+  }
+}
 
-  es.onerror = (event) => {
-    // Не переподключаемся если задача уже завершена/остановлена
-    if (done.value || failed.value || paused.value) {
-      closeSSE();
-      return;
-    }
-
-    console.warn('[SSE] onerror event:', event);
+function onSseError(event) {
+  // Не переподключаемся если задача уже завершена/остановлена
+  if (done.value || failed.value || paused.value) {
     closeSSE();
+    return;
+  }
 
-    reconnectCount++;
-    if (reconnectCount > MAX_RECONNECT) {
-      // Исчерпали попытки — показываем ошибку, не блокируем страницу
-      pushLog({
-        ts: ts(),
-        msg: `SSE: превышено ${MAX_RECONNECT} попыток реконнекта. ` +
-             `Обновите страницу или перейдите к результатам вручную.`,
-        level: 'error',
-      });
-      return;
-    }
+  console.warn('[SSE] onerror event:', event);
+  closeSSE();
 
-    // Экспоненциальный бэкофф: 3s, 6s, 12s
-    const delay = RECONNECT_BASE_MS * Math.pow(2, reconnectCount - 1);
+  reconnectCount++;
+  if (reconnectCount > MAX_RECONNECT) {
     pushLog({
       ts: ts(),
-      msg: `SSE: соединение прервано. Реконнект #${reconnectCount}/${MAX_RECONNECT} через ${delay / 1000}s...`,
-      level: 'warn',
+      msg: `SSE: превышено ${MAX_RECONNECT} попыток реконнекта. ` +
+           `Обновите страницу или перейдите к результатам вручную.`,
+      level: 'error',
     });
+    return;
+  }
 
-    reconnectTimer = setTimeout(() => {
-      if (!done.value && !failed.value && !paused.value) {
-        connectSSE();
-      }
-    }, delay);
-  };
+  // Экспоненциальный бэкофф: 3s, 6s, 12s
+  const delay = RECONNECT_BASE_MS * Math.pow(2, reconnectCount - 1);
+  pushLog({
+    ts: ts(),
+    msg: `SSE: соединение прервано. Реконнект #${reconnectCount}/${MAX_RECONNECT} через ${delay / 1000}s...`,
+    level: 'warn',
+  });
+
+  reconnectTimer = setTimeout(() => {
+    if (!done.value && !failed.value && !paused.value) {
+      connectSSE();
+    }
+  }, delay);
 }
 
 // ── Вычисляемые ────────────────────────────────────────────────────────────
@@ -377,6 +384,49 @@ async function handleResume() {
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+// Track last-seen task_log id — passed to /logs?after= and to SSE reconnects
+// so we don't re-replay history we already have.
+const lastLogId = ref(0);
+
+function _formatHistoryTs(ts) {
+  if (!ts) return '--:--:--';
+  try {
+    const d = new Date(ts);
+    return d.toTimeString().substring(0, 8);
+  } catch { return '--:--:--'; }
+}
+
+// Преобразует строку из task_logs в формат, который понимает handleSSEMessage:
+// {type, msg, level, ts, ...payload}.
+function _logRowToEvent(row) {
+  const base = { type: row.event_type || 'log', ts: _formatHistoryTs(row.ts) };
+  if (row.message) base.msg = row.message;
+  if (row.level)   base.level = row.level;
+  if (row.stage)   base.stage = row.stage;
+  if (row.payload && typeof row.payload === 'object') {
+    Object.assign(base, row.payload);
+  }
+  return base;
+}
+
+async function loadHistory() {
+  try {
+    const rows = await store.fetchTaskLogs(taskId, { after: lastLogId.value || undefined, limit: 2000 });
+    if (!Array.isArray(rows) || !rows.length) return;
+    for (const row of rows) {
+      // Восстанавливаем события через тот же handler, что и live-SSE,
+      // — поэтому progress / blocks / tokens / done тоже корректно
+      // ресторятся, не только log-сообщения.
+      handleSSEMessage(_logRowToEvent(row));
+      if (row.id && row.id > lastLogId.value) lastLogId.value = row.id;
+    }
+  } catch (e) {
+    // Не блокируем UI при отсутствии истории — просто логируем.
+    console.warn('[Monitor] history load failed:', e?.message || e);
+  }
+}
+
 onMounted(async () => {
   task.value = await store.fetchTask(taskId).catch(() => null);
   // Restore paused state from task status
@@ -385,6 +435,9 @@ onMounted(async () => {
   } else if (task.value?.status === 'failed') {
     failed.value = true;
   }
+  // Сначала подмёрджим историю (чтобы log-терминал и таблица блоков были
+  // заполнены), потом откроем SSE — он продолжит дописывать живые события.
+  await loadHistory();
   connectSSE();
 });
 
