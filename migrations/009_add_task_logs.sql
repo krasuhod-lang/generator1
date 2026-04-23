@@ -27,9 +27,6 @@ CREATE TABLE IF NOT EXISTS task_logs (
 CREATE INDEX IF NOT EXISTS idx_task_logs_task_ts
   ON task_logs (task_id, ts);
 
-CREATE INDEX IF NOT EXISTS idx_task_logs_task_id_brin
-  ON task_logs USING brin (task_id);
-
 -- TTL helper: удаляет логи старше N дней. Запускается cron'ом или вручную.
 CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
 RETURNS INTEGER LANGUAGE plpgsql AS $$

@@ -118,6 +118,17 @@ const actionLimiter = rateLimit({
   skip: (req) => !!req.user,  // bypass for authenticated users (auth check is more specific)
 });
 
+// Rate limiter для лог-пуллинга /:id/logs (анти-burst, 120 запросов/минуту/IP).
+// Поллится фронтом при reconnect SSE — но не должен использоваться как
+// бесконечный канал чтения. Без skip на req.user (CodeQL js/missing-rate-limiting).
+const logsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много запросов к логам. Подождите минуту.' },
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Роуты tasks — JWT обязателен для всех
 // SSE /stream использует authSSE (поддерживает ?token= query param)
@@ -148,7 +159,7 @@ router.get('/:id/result',  authMiddleware, getResult);  // GET /api/tasks/:id/re
 router.get('/:id/metrics', authMiddleware, getMetrics); // GET /api/tasks/:id/metrics
 router.get('/:id/blocks',  authMiddleware, getBlocks);  // GET /api/tasks/:id/blocks
 router.get('/:id/stages',  authMiddleware, getStages);  // GET /api/tasks/:id/stages
-router.get('/:id/logs',    authMiddleware, getTaskLogs); // GET /api/tasks/:id/logs?after=&limit=
+router.get('/:id/logs',    logsLimiter, authMiddleware, getTaskLogs); // GET /api/tasks/:id/logs?after=&limit=
 
 // SSE stream — authSSE принимает ?token= (EventSource не поддерживает заголовки)
 router.get('/:id/stream',  authSSE, streamTask); // GET /api/tasks/:id/stream

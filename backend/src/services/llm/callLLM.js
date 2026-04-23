@@ -279,7 +279,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   // Ключ: sha256(adapter + model + system + prompt + temperature). При
   // включённом LLM_RESPONSE_CACHE_ENABLED — экономит деньги на повторных
   // запусках задачи с тем же входом. Логируем cache_hit/miss через onLog.
-  const cacheKey = await getCachedResponse({
+  const cacheResult = await getCachedResponse({
     adapter,
     system,
     prompt,
@@ -287,13 +287,13 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     maxTokens,
   }).catch(() => null);
 
-  if (cacheKey && cacheKey.cached) {
+  if (cacheResult && cacheResult.cached) {
     log(`${callLabel || stageName} ✓ (cached, $0.00)`, 'success');
     if (onTokens) {
       try { onTokens(adapter, 0, 0, 0, { cacheHit: true }); } catch (_) { /* no-op */ }
     }
     if (logCallback) logCallback(`[cache_hit] ${callLabel || stageName}`, 'system');
-    return cacheKey.value;
+    return cacheResult.value;
   }
 
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -350,8 +350,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       }
 
       // Записываем в response-cache (асинхронно, не блокируем).
-      if (cacheKey && cacheKey.key) {
-        setCachedResponse(cacheKey.key, parsed).catch(() => {});
+      if (cacheResult && cacheResult.key) {
+        setCachedResponse(cacheResult.key, parsed).catch(() => {});
       }
 
       return parsed;

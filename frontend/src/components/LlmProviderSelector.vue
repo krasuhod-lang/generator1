@@ -74,7 +74,11 @@ const model = computed({
   set: (v) => emit('update:modelValue', v === 'grok' ? 'grok' : 'gemini'),
 });
 
-const uid = Math.random().toString(36).slice(2, 8);
+// Уникальный suffix для name атрибута radio — нужен только для DOM-группировки
+// (а не для безопасности). Используем монотонный счётчик модуля, чтобы исключить
+// CodeQL js/insecure-randomness и сэкономить на crypto.
+let _uidCounter = 0;
+const uid = `s${++_uidCounter}`;
 
 onMounted(() => {
   // Если родитель прислал что-то невалидное — корректируем 1 раз

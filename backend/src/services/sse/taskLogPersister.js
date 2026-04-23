@@ -18,9 +18,10 @@
 
 const db = require('../../config/db');
 
-const FLUSH_INTERVAL_MS = 1000;
-const FLUSH_BATCH_SIZE  = 50;
-const MAX_PAYLOAD_BYTES = 64 * 1024;
+const FLUSH_INTERVAL_MS  = 1000;
+const FLUSH_BATCH_SIZE   = 50;
+const MAX_PAYLOAD_BYTES  = 64 * 1024;
+const MAX_MESSAGE_LENGTH = 4000;
 
 const SKIP_TYPES = new Set(['init', 'closed', 'heartbeat']);
 
@@ -65,8 +66,8 @@ function persistEvent(taskId, event) {
   const level   = (event.level || 'info').toString().slice(0, 16);
   const stage   = event.stage ? String(event.stage).slice(0, 32) : null;
   const message = event.msg
-    ? String(event.msg).slice(0, 4000)
-    : (event.message ? String(event.message).slice(0, 4000) : null);
+    ? String(event.msg).slice(0, MAX_MESSAGE_LENGTH)
+    : (event.message ? String(event.message).slice(0, MAX_MESSAGE_LENGTH) : null);
 
   // Payload — всё событие целиком (минус message/level/stage/type, чтобы
   // не дублировать). Это полезно для типов 'block_done', 'tokens', и т.п.
