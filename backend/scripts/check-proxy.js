@@ -229,12 +229,55 @@ async function testProxy(label, proxyUrl, targetUrl, displayUrl) {
     const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!geminiApiKey) {
       console.log(`   ⚠  [${suffix}] → Gemini API тест пропущен: GEMINI_API_KEY не задан в .env`);
-      console.log('');
-      continue;
+    } else {
+      const geminiBase = 'https://generativelanguage.googleapis.com/v1beta/models';
+      // API key добавляется в URL только для HTTP-запроса, не для логирования
+      await testProxy(suffix, url, geminiBase + '?key=' + geminiApiKey, geminiBase + '?key=***');
     }
-    const geminiBase = 'https://generativelanguage.googleapis.com/v1beta/models';
-    // API key добавляется в URL только для HTTP-запроса, не для логирования
-    await testProxy(suffix, url, geminiBase + '?key=' + geminiApiKey, geminiBase + '?key=***');
+
+    // Тест 3: Grok / x.ai (список моделей) через ТОТ ЖЕ прокси.
+    // По умолчанию у нас один прокси на оба провайдера, поэтому проверяем оба.
+    const xaiApiKey = (process.env.XAI_API_KEY || '').trim();
+    if (!xaiApiKey) {
+      console.log(`   ⚠  [${suffix}] → Grok (x.ai) API тест пропущен: XAI_API_KEY не задан в .env`);
+    } else {
+      const xaiBase = (process.env.XAI_BASE_URL || 'https://api.x.ai/v1').replace(/\/$/, '') + '/models';
+      try {
+        const agent = new HttpsProxyAgent(url);
+        const resp = await axios.get(xaiBase, {
+          httpsAgent: agent,
+          proxy:      false,
+          timeout:    20000,
+          validateStatus: null,
+          headers:    { Authorization: `Bearer ${xaiApiKey}` },
+        });
+        if (resp.status === 200) {
+          const models = (resp.data?.data || []).map(m => m.id).slice(0, 8);
+          console.log(`   ✅ [${suffix}] → ${xaiBase} — HTTP 200 OK`);
+          if (models.length) {
+            console.log(`      Доступные модели x.ai (первые ${models.length}): ${models.join(', ')}`);
+            const wanted = process.env.XAI_MODEL || 'grok-4.20-0309-reasoning';
+            const all = (resp.data?.data || []).map(m => m.id);
+            if (all.includes(wanted)) {
+              console.log(`      ✅ XAI_MODEL=${wanted} доступна вашему ключу`);
+            } else {
+              console.log(`      ⚠  XAI_MODEL=${wanted} НЕ найдена в списке доступных моделей вашего ключа!`);
+              console.log(`         Запросы к этой модели вернут HTTP 404. Поправьте XAI_MODEL в .env.`);
+            }
+          }
+        } else if (resp.status === 401) {
+          console.log(`   ❌ [${suffix}] → ${xaiBase} — HTTP 401: неверный XAI_API_KEY`);
+        } else if (resp.status === 403) {
+          console.log(`   ❌ [${suffix}] → ${xaiBase} — HTTP 403: ключ валиден, но нет прав`);
+        } else {
+          const detail = resp.data?.error?.message || JSON.stringify(resp.data || '').slice(0, 200);
+          console.log(`   ⚠  [${suffix}] → ${xaiBase} — HTTP ${resp.status}: ${detail}`);
+        }
+      } catch (err) {
+        const safeMsg = (err.message || 'unknown').replace(/Bearer\s+\S+/gi, 'Bearer ***');
+        console.log(`   ❌ [${suffix}] → ${xaiBase} — ${safeMsg}`);
+      }
+    }
 
     console.log('');
   }

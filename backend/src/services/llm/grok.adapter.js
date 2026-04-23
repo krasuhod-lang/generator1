@@ -33,7 +33,20 @@ const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const XAI_BASE_URL = (process.env.XAI_BASE_URL || 'https://api.x.ai/v1').replace(/\/$/, '');
-const XAI_MODEL    = process.env.XAI_MODEL || 'grok-4';
+// Default — рассуждающая (reasoning) версия Grok-4. Переопределяется
+// XAI_MODEL в .env. Для reasoning-моделей x.ai НЕ принимает
+// response_format=json_object (см. _isReasoningModel ниже) — поэтому JSON-strict
+// гарантируется только инструкцией в system-промпте.
+const XAI_MODEL    = process.env.XAI_MODEL || 'grok-4.20-0309-reasoning';
+
+// Reasoning-модели: имена с маркером 'reasoning' / 'r1' / суффиксами «-thinking».
+// Нужно знать, чтобы:
+//   1) НЕ форсить response_format=json_object (x.ai вернёт 400 для reasoning),
+//   2) при пустом content попытаться извлечь reasoning_content (некоторые
+//      reasoning-модели кладут финальный ответ в этот альтернативный канал).
+function _isReasoningModel(model) {
+  return /reasoning|thinking|-r1\b|-r2\b/i.test(String(model || ''));
+}
 
 // Лимит длины суммарного входа (защита от отправки мегабайтов в API).
 const MAX_GROK_INPUT_LENGTH = 200000;
@@ -233,8 +246,11 @@ async function callGrok(systemInstruction, userPrompt, options = {}) {
     temperature,
     max_tokens: maxTokens,
   };
-  if (!plainText) {
-    // x.ai поддерживает OpenAI-стиль json_object response_format.
+  // x.ai поддерживает OpenAI-style JSON-mode — НО только для НЕ reasoning моделей.
+  // Для reasoning-моделей (grok-4.20-...-reasoning) сервер вернёт 400
+  // («response_format not supported for reasoning models»). Поэтому JSON-strict
+  // гарантируется только JSON_STRICT_GUARD в system-промпте.
+  if (!plainText && !_isReasoningModel(model)) {
     body.response_format = { type: 'json_object' };
   }
 
@@ -284,23 +300,57 @@ async function callGrok(systemInstruction, userPrompt, options = {}) {
         proxy:          false,
       });
     } catch (networkErr) {
-      console.warn(`[grok] proxy [${proxyIdx}] network error: ${networkErr.message}`);
+      // Подробный лог: куда шли, через какой прокси, какой код/errno.
+      const proxyLabel = `прокси [${proxyIdx}] ${_safeProxyLog(PROXY_URLS[proxyIdx])}`;
+      const errCode = networkErr.code || 'UNKNOWN';
+      const isTimeout = /timeout/i.test(networkErr.message) || errCode === 'ECONNABORTED';
+      const is407 = networkErr.message && (networkErr.message.includes('407') || networkErr.message.includes('Proxy Authentication Required'));
+      const reason = is407
+        ? '407 Proxy Auth Required — неверный логин/пароль прокси'
+        : isTimeout
+          ? `таймаут ${timeoutMs}ms — прокси молчит или x.ai недоступен через этот IP`
+          : errCode === 'ECONNREFUSED' ? 'прокси недоступен (ECONNREFUSED) — проверьте host/port'
+          : errCode === 'ENOTFOUND'    ? 'DNS не разрешает host прокси (ENOTFOUND) — опечатка?'
+          : `network ${errCode}: ${networkErr.message}`;
+      console.error(`[grok] ❌ ${proxyLabel} → ${url} (model=${model}) — ${reason}`);
       lastError = networkErr;
-      if (attempt < totalAttempts - 1) continue;
+      lastError.isDeterministic = is407;
+      if (attempt < totalAttempts - 1) {
+        console.log(`[grok] Переключаемся на следующий прокси...`);
+        continue;
+      }
       throw lastError;
     }
 
     // 5xx / 429 — не маркируем определённой ошибкой, callLLM ретрайнет.
     if (response.status === 429 || response.status === 503) {
-      const err = new Error(`Grok rate limit / overload: HTTP ${response.status}`);
+      const detail = response.data?.error?.message || JSON.stringify(response.data || '').slice(0, 200);
+      console.warn(`[grok] ⚠ HTTP ${response.status} (rate limit / overload) через прокси [${proxyIdx}] (model=${model}) — ${detail}`);
+      const err = new Error(`Grok rate limit / overload: HTTP ${response.status} — ${detail}`);
       err.status = response.status;
+      throw err;
+    }
+    if (response.status === 407) {
+      console.error(`[grok] ❌ HTTP 407 от прокси [${proxyIdx}] ${_safeProxyLog(PROXY_URLS[proxyIdx])} — проверьте логин/пароль прокси (XAI_PROXY_* / LLM_PROXY_* / GEMINI_PROXY_*)`);
+      const err = new Error(`Grok proxy authentication failed (407) [proxy ${proxyIdx}]`);
+      err.isDeterministic = true;
+      lastError = err;
+      if (attempt < totalAttempts - 1) continue;
       throw err;
     }
     if (response.status !== 200) {
       const detail = response.data?.error?.message
                   || response.data?.error
                   || JSON.stringify(response.data || '').slice(0, 300);
-      const fullMsg = `Grok API error ${response.status}: ${detail} [proxy ${proxyIdx}]`;
+      // Детальный лог: status + body + классификация
+      let hint = '';
+      if (response.status === 401) hint = ' — проверьте XAI_API_KEY (неверный/просрочен)';
+      else if (response.status === 403) hint = ' — ключ валиден, но нет доступа к модели/тарифу';
+      else if (response.status === 404) hint = ` — модель «${model}» не найдена в x.ai. Проверьте XAI_MODEL (актуальные имена: grok-4, grok-4.20-0309-reasoning и т.п.)`;
+      else if (response.status === 400 && /response_format/i.test(String(detail))) hint = ` — модель «${model}» не поддерживает JSON-mode. Проверьте, что _isReasoningModel() помечает её корректно.`;
+      else if (response.status >= 500) hint = ' — сбой на стороне x.ai, callLLM повторит запрос';
+      console.error(`[grok] ❌ HTTP ${response.status} от x.ai (model=${model}, proxy=${proxyIdx}): ${detail}${hint}`);
+      const fullMsg = `Grok API error ${response.status}: ${detail} [proxy ${proxyIdx}, model ${model}]${hint}`;
       const err = new Error(fullMsg);
       // 4xx — детерминированная ошибка (auth, model not found, etc.)
       if (response.status >= 400 && response.status < 500) {
@@ -335,7 +385,17 @@ function _parseGrokResponse(resp, requestedModel) {
 
   const data    = resp.data || {};
   const choice  = data.choices?.[0] || {};
-  const text    = choice.message?.content || '';
+  // Reasoning-модели x.ai иногда кладут финальный ответ в `reasoning_content`,
+  // оставляя `content` пустым. Берём content, при пустоте — fallback'ом
+  // reasoning_content (отсекая <think>…</think> блоки если они есть).
+  let text = choice.message?.content || '';
+  if (!text && choice.message?.reasoning_content) {
+    const rc = String(choice.message.reasoning_content);
+    text = rc.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    if (text) {
+      console.log(`[grok] content пуст, использован reasoning_content (${text.length} символов)`);
+    }
+  }
   const usage   = data.usage || {};
   const tokensIn  = usage.prompt_tokens     || 0;
   const tokensOut = usage.completion_tokens || 0;
@@ -343,18 +403,21 @@ function _parseGrokResponse(resp, requestedModel) {
 
   if (!text) {
     if (finishReason === 'length') {
-      const err = new Error(`Grok truncated by max_tokens (output=${tokensOut} tokens). Increase max_tokens.`);
+      console.error(`[grok] ❌ Ответ обрезан max_tokens (output=${tokensOut}, model=${requestedModel}). Увеличьте maxTokens.`);
+      const err = new Error(`Grok truncated by max_tokens (output=${tokensOut} tokens, model=${requestedModel}). Increase max_tokens.`);
       err.isDeterministic = true;
       err.finishReason = finishReason;
       throw err;
     }
     if (finishReason === 'content_filter') {
+      console.error(`[grok] ❌ Ответ заблокирован content_filter (model=${requestedModel})`);
       const err = new Error('Grok blocked response (finish_reason=content_filter)');
       err.isDeterministic = true;
       err.finishReason = finishReason;
       throw err;
     }
-    throw new Error(`Grok returned empty response (finish_reason=${finishReason || 'UNKNOWN'})`);
+    console.error(`[grok] ❌ Пустой ответ x.ai: finish_reason=${finishReason || 'UNKNOWN'}, model=${requestedModel}, usage=${JSON.stringify(usage)}`);
+    throw new Error(`Grok returned empty response (finish_reason=${finishReason || 'UNKNOWN'}, model=${requestedModel})`);
   }
 
   return {
