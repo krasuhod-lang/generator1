@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+ <meta charset="UTF-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1.0">
+ <title>ACF JSON Generator (Pro Version)</title>
+ <script src="https://unpkg.com/vue@3.3.4/dist/vue.global.prod.js"></script>
+ <script src="https://cdn.tailwindcss.com"></script>
+ <style>
+ [v-cloak] { display:none; }
+ body { background: #0b0f19; color: #e5e7eb; font-family: 'Inter', system-ui, sans-serif; }
+ .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 20px; }
+ .inp, .textarea {
+ width: 100%; background: #0b0c10; border: 1px solid #334155; border-radius: 8px;
+ color: #f8fafc; padding: 10px 12px; font-size: 14px; outline: none; transition: border-color 0.2s;
+ }
+ .inp:focus, .textarea:focus { border-color: #38bdf8; box-shadow: 0 0 0 1px #38bdf8; }
+ .btn-green { background: #10b981; color: #fff; padding: 14px 24px; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; transition: all 0.2s; width: 100%; box-shadow: 0 4px 6px -1px rgba(16, 185, 129, 0.2); }
+ .btn-green:hover { background: #059669; }
+ .btn-green:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; box-shadow: none; }
+ .label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; font-weight: 600; }
+ pre { background: #020617; border: 1px solid #1e293b; border-radius: 8px; padding: 16px; overflow-x: auto; color: #a5b4fc; font-size: 13px; max-height: 700px; }
+ ::-webkit-scrollbar { width: 8px; height: 8px; }
+ ::-webkit-scrollbar-track { background: #0f172a; }
+ ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+ ::-webkit-scrollbar-thumb:hover { background: #475569; }
+ </style>
+</head>
+<body>
+<div id="app" v-cloak class="max-w-7xl mx-auto p-4 md:p-8">
+
+ <div class="mb-8">
+ <h1 class="text-3xl font-black text-emerald-400">⚙️ ACF JSON Builder <span class="text-sm bg-emerald-900/50 text-emerald-300 px-2 py-1 rounded ml-2 align-middle">PRO</span></h1>
+ <p class="text-sm text-slate-400 mt-2">Умный маппинг сырого контента в 12 типов блоков WordPress Flexible Content.</p>
+ </div>
+
+ <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+ <div class="lg:col-span-5 space-y-6">
+ 
+ <div class="card border-emerald-900/30">
+ <label class="label text-emerald-400">🔑 AITunnel API Key</label>
+ <input type="password" v-model="geminiKey" @change="saveData" class="inp border-emerald-800/50 focus:border-emerald-500" placeholder="sk-aitunnel-...">
+ </div>
+
+ <div class="card">
+ <h2 class="text-sm font-bold text-white uppercase tracking-wider mb-4 border-b border-slate-700 pb-2">Ввод данных</h2>
+ 
+ <div>
+ <label class="label">Текст, ссылка или краткое описание темы</label>
+ <textarea v-model="inputText" rows="16" class="textarea font-mono text-xs leading-relaxed" placeholder="Вставьте текст статьи, который нужно разбить на блоки (blocks, steps, bens, faq, tabs и т.д.)..."></textarea>
+ </div>
+ </div>
+
+ <button @click="generateJSON" :disabled="loading || !geminiKey || !inputText" class="btn-green flex justify-center items-center">
+ <span v-if="loading" class="animate-spin h-5 w-5 mr-3 border-2 border-white border-t-transparent rounded-full"></span>
+ {{ loadingText }}
+ </button>
+
+ <div v-if="error" class="p-4 bg-red-900/30 border border-red-800 rounded-lg text-red-400 text-sm mt-4 leading-relaxed">
+ 🚨 {{ error }}
+ </div>
+ </div>
+
+ <div class="lg:col-span-7">
+ <div class="card h-full flex flex-col">
+ <div class="flex items-center justify-between mb-4 border-b border-slate-700 pb-2">
+ <h2 class="text-sm font-bold text-sky-400 uppercase tracking-wider flex items-center gap-2">
+ 📦 Готовый JSON
+ <span v-if="resultJson" class="bg-sky-900/50 text-sky-300 text-[10px] px-2 py-0.5 rounded">Валидный</span>
+ </h2>
+ <button v-if="resultJson" @click="copyJson" class="text-xs bg-slate-800 hover:bg-sky-700 hover:text-white text-slate-300 px-4 py-2 rounded transition flex items-center gap-2 font-bold">
+ <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+ Копировать
+ </button>
+ </div>
+ 
+ <div v-if="!resultJson && !loading" class="flex-1 flex flex-col items-center justify-center text-slate-600 text-sm italic border-2 border-dashed border-slate-800 rounded-lg p-8">
+ <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-slate-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
+ Здесь появится готовый массив для импорта
+ </div>
+ 
+ <div v-if="loading" class="flex-1 flex flex-col items-center justify-center text-emerald-500 space-y-4 border-2 border-dashed border-slate-800 rounded-lg p-8">
+ <div class="animate-pulse text-sm font-mono text-center">
+ <p class="mb-2">Идет маппинг контента...</p>
+ <p class="text-slate-500 text-xs">Разбиваем на blocks, steps, faq и bens</p>
+ </div>
+ </div>
+
+ <pre v-if="resultJson && !loading" class="flex-1 m-0 shadow-inner"><code>{{ resultJson }}</code></pre>
+ </div>
+ </div>
+ </div>
+
+</div>
+
+<script>
+const { createApp, ref, onMounted } = Vue;
+
+createApp({
+ setup() {
+ const geminiKey = ref(localStorage.getItem('acfGeminiKey') || 'sk-aitunnel-S81NPYt7iGa9X5Lsx9g4e8D9WXlAh5cm');
+ const inputText = ref('');
+ const loading = ref(false);
+ const loadingText = ref('✨ Сгенерировать ACF JSON');
+ const resultJson = ref('');
+ const error = ref('');
+
+ const saveData = () => localStorage.setItem('acfGeminiKey', geminiKey.value);
+
+ const baseSystemPrompt = `РОЛЬ И ЗАДАЧА:
+Ты — Умный Алгоритм-Роутер контента в JSON-структуры WordPress ACF Flexible Content.
+Твоя цель: Раскидать текст по разным красивым блокам (tabs, steps, bens, faq, price, expert), НО при этом не потерять ни одного слова из оригинального текста.
+
+--- ЗАДАЧА 1: СОХРАННОСТЬ ТЕКСТА (ZERO REWRITE) ---
+- ЗАПРЕЩЕНО переписывать, сжимать или удалять оригинальный текст из тела абзацев.
+- Текст внутри полей text, content, answer должен состоять из 100% оригинальных абзацев.
+- Все текстовые поля должны быть обернуты в валидный HTML (<p>, <ul>, <li>, <strong>).
+- ЗАПРЕЩЕНО дублировать контент. Каждый абзац должен попасть в JSON только 1 раз.
+
+--- ЗАДАЧА 2: УМНАЯ НАРЕЗКА В СЛОЖНЫЕ БЛОКИ (SMART CHUNKING) ---
+Чтобы упаковать сплошной текст в сложные массивы (tabs, steps, bens, faq, expert), используй следующий алгоритм:
+1. Анализируй заголовок раздела И сам текст внутри абзацев.
+2. Выбери подходящий блок (для механизмов -> "tabs", для процесса -> "steps", для плюсов -> "bens", для цитат -> "expert").
+3. Разбей сплошной текст под этим заголовком на абзацы.
+4. РАЗРЕШЕНИЕ НА ГЕНЕРАЦИЮ: Ты ИМЕЕШЬ ПРАВО самостоятельно придумать короткий логичный заголовок для каждого абзаца (в поля title или question).
+5. Вставь оригинальный абзац ЦЕЛИКОМ в поле text, content или answer.
+
+--- ПРАВИЛО ВЫДЕЛЕНИЯ ЭКСПЕРТОВ (EXPERT DETECTOR) ---
+Внимательно сканируй каждый абзац на наличие реальных цитат. 
+КРИТИЧЕСКОЕ ОГРАНИЧЕНИЕ: Блок "expert" разрешено использовать СТРОГО 1 РАЗ на весь итоговый JSON!
+1. Если ты видишь ПРЯМУЮ РЕЧЬ конкретного специалиста с указанием имени (например: "Иванов Дмитрий, эксперт: ...") -> ИЗОЛИРУЙ этот абзац в блок "expert".
+2. ЗАПРЕЩЕНО создавать блок "expert", если в тексте просто встречается слово "эксперты" (например, "Профильные эксперты подтверждают..."). Блок создается только для конкретного лица.
+3. Если ты уже создал один блок "expert", то лимит исчерпан. Все последующие цитаты или упоминания экспертов оставляй внутри обычных текстовых блоков ("blocks" или "tabs").
+
+АЛГОРИТМ ВЫБОРА ОСТАЛЬНЫХ БЛОКОВ:
+- "Преимущества", "Плюсы", "Вызовы", "Конкуренция" -> блок "bens"
+- "Этапы", "Процесс", "Сценарии", "Как мы работаем" -> блок "steps"
+- "Вопросы", "FAQ", "Частые вопросы" -> блок "faq"
+- "Цены", "Стоимость", "Тарифы" -> блок "price"
+- "Механизмы", "Виды", "Аспекты" (если текст можно поделить на равнозначные части) -> блок "tabs"
+- Введение, Выводы, История, общие размышления -> блок "blocks"
+
+--- ДОСТУПНЫЕ ТИПЫ БЛОКОВ (acf_fc_layout) И ИХ СХЕМЫ ---
+
+1. "blocks" (Универсальный сплошной текст)
+{ "acf_fc_layout": "blocks", "title": "Заголовок", "subtitle": "<p>Подзаголовок</p>", "blocks": [ { "block_width": "12", "bg_color": "default", "text": "<p>Текст</p>", "image": "", "url": "" } ], "type": "1", "vert_center": false, "block_equal_height": false }
+
+
+3. "steps" (Этапы процедуры)
+{ "acf_fc_layout": "steps", "title": "Процесс", "subtitle": "Подзаголовок", "items": [ { "title": "Шаг 1", "text": "<p>Текст</p>" } ], "columns": "4" }
+
+4. "bens" (Преимущества)
+{ "acf_fc_layout": "bens", "title": "Преимущества", "color_title": "#000000", "subtitle": "Подзаголовок", "items": [ { "title": "Плюс 1", "image": "", "text": "<p>Текст</p>" } ], "columns": "4", "image": "" }
+
+5. "price" (Прайс-лист)
+{ "acf_fc_layout": "price", "title": "Прайс", "subtitle": "<p>Подзаголовок</p>", "items": [ { "title": "Услуга", "text": "Описание", "price": "5 000 Р" } ] }
+
+6. "faq" (Вопросы и ответы)
+{ "acf_fc_layout": "faq", "title": "FAQ", "subtitle": "<p>Подзаголовок</p>", "faq": [ { "question": "Вопрос?", "answer": "<p>Ответ</p>" } ] }
+
+7. "attention" (Важная вставка)
+{ "acf_fc_layout": "attention", "title": "Внимание", "text": "<p>Выделенный текст</p>", "image": "" }
+
+8. "expert" (Мнение эксперта)
+{ "acf_fc_layout": "expert", "title": "Мнение", "expert": "", "text": "<p>Цитата</p>" }
+
+--- ТЕХНИЧЕСКИЕ ПРАВИЛА ВЫВОДА JSON (КРИТИЧЕСКИ ВАЖНО) ---
+1. Вывод ДОЛЖЕН БЫТЬ строго JSON массивом объектов.
+2. НЕ используй форматирование кода markdown. Выводи только чистый JSON.
+3. Внутри текстовых полей (text, content, answer) КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать символ двойной кавычки. ВООБЩЕ.
+   - Для атрибутов HTML используй ТОЛЬКО одинарные кавычки (например, <a href='link'>).
+   - Для цитат в тексте используй ТОЛЬКО елочки (« ») или одинарные кавычки (' ').`;
+
+ const chunkText = (text, maxLength = 3500) => {
+ const paragraphs = text.split(/\n\n+/); 
+ const chunks = [];
+ let currentChunk = "";
+
+ for (let p of paragraphs) {
+ if ((currentChunk.length + p.length) > maxLength && currentChunk.length > 0) {
+ chunks.push(currentChunk.trim());
+ currentChunk = "";
+ }
+ currentChunk += p + "\n\n";
+ }
+ if (currentChunk.trim().length > 0) {
+ chunks.push(currentChunk.trim());
+ }
+ return chunks;
+ };
+
+ const generateJSON = async () => {
+ if (!geminiKey.value) { error.value = "Введите API ключ!"; return; }
+ if (!inputText.value) { error.value = "Вставьте текст для обработки!"; return; }
+ 
+ loading.value = true;
+ error.value = '';
+ resultJson.value = '';
+
+ try {
+ const chunks = chunkText(inputText.value, 1500);
+ const totalChunks = chunks.length;
+ let finalJsonArray = [];
+ 
+ // Флаг: отслеживаем, использован ли уже эксперт в предыдущих чанках
+ let expertAlreadyUsed = false;
+
+const url = `https://api.aitunnel.ru/v1/chat/completions`;
+
+ for (let i = 0; i < totalChunks; i++) {
+ loadingText.value = totalChunks > 1 
+ ? `Идет обработка: Часть ${i + 1} из ${totalChunks}...` 
+ : `Анализ и сборка JSON...`;
+
+ // Динамически формируем промпт для каждого чанка
+ let currentSystemPrompt = baseSystemPrompt;
+ if (expertAlreadyUsed) {
+    currentSystemPrompt += `\n\n[СИСТЕМНОЕ ВАЖНОЕ УВЕДОМЛЕНИЕ]: В предыдущих частях текста ТЫ УЖЕ СОЗДАЛ блок "expert". Лимит исчерпан! В этой части КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать "acf_fc_layout": "expert". Упаковывай любые цитаты в обычные "blocks".`;
+ }
+
+ const userPrompt = `Обработай следующие данные (это часть текста) и верни массив JSON для ACF:\n\n${chunks[i]}`;
+
+ let response;
+ try {
+     response = await fetch(url, {
+         method: 'POST',
+         headers: { 
+             'Content-Type': 'application/json',
+             // ОЧЕНЬ ВАЖНО: .trim() удалит случайные пробелы и переносы строк, из-за которых падает fetch
+             'Authorization': `Bearer ${geminiKey.value.trim()}`
+         },
+         body: JSON.stringify({
+             model: "qwen3-max", 
+             messages: [
+                 { role: "system", content: currentSystemPrompt },
+                 { role: "user", content: userPrompt }
+             ],
+             temperature: 0.1, 
+             max_tokens: 8192
+         })
+     });
+ } catch (networkError) {
+     // Если падает здесь, значит проблема физически в соединении (VPN, провайдер, кривой ключ)
+     throw new Error(`Сеть недоступна (Failed to fetch). Выключите/включите VPN или проверьте интернет. Детали: ${networkError.message}`);
+ }
+
+ if (!response.ok) {
+     const errText = await response.text();
+     throw new Error(`Ошибка сервера ${response.status}: ${errText}`);
+ }
+
+ const data = await response.json();
+ 
+ if (!data.choices || data.choices.length === 0) {
+ throw new Error("API вернул пустой ответ.");
+ }
+ 
+ if (data.choices[0].finish_reason === 'length') {
+ throw new Error("Текст слишком огромный. ИИ не успел закрыть JSON.");
+ }
+
+ let rawOutput = data.choices[0].message.content;
+
+// Удаляем markdown-обёртки
+rawOutput = rawOutput.replace(/```json/gi, '').replace(/```/g, '');
+
+// Функция безопасного извлечения JSON из грязной строки
+function extractCleanJson(str) {
+    // Находим первую открывающую скобку массива
+    const firstBracket = str.indexOf('[');
+    if (firstBracket === -1) throw new Error('В ответе нет JSON массива.');
+    
+    // Находим последнюю закрывающую скобку (массива или объекта)
+    let lastIndex = -1;
+    let braceCount = 0;
+    let bracketCount = 0;
+    let inString = false;
+    let escape = false;
+    
+    for (let i = firstBracket; i < str.length; i++) {
+        const ch = str[i];
+        if (escape) { escape = false; continue; }
+        if (ch === '\\') { escape = true; continue; }
+        if (ch === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        
+        if (ch === '{') braceCount++;
+        if (ch === '}') braceCount--;
+        if (ch === '[') bracketCount++;
+        if (ch === ']') bracketCount--;
+        
+        if (braceCount === 0 && bracketCount === 0) {
+            lastIndex = i;
+            break;
+        }
+    }
+    
+    if (lastIndex === -1) throw new Error('Не найдено корректное завершение JSON.');
+    return str.substring(firstBracket, lastIndex + 1);
+}
+
+// Извлекаем чистый JSON
+const cleanJson = extractCleanJson(rawOutput);
+const parsedOutput = JSON.parse(cleanJson);
+ 
+ // Приводим к массиву
+ const outputArray = Array.isArray(parsedOutput) ? parsedOutput : [parsedOutput];
+
+ // Финальная программная проверка (защита от галлюцинаций ИИ)
+ for (let block of outputArray) {
+    if (block.acf_fc_layout === 'expert') {
+        if (expertAlreadyUsed) {
+            // Если ИИ все же ослушался — принудительно конвертируем блок expert в обычный blocks
+            block.acf_fc_layout = 'blocks';
+            block.blocks = [{
+                block_width: "12",
+                bg_color: "default",
+                text: block.text || "",
+                image: "",
+                url: ""
+            }];
+            delete block.expert;
+            delete block.text;
+        } else {
+            expertAlreadyUsed = true; // Фиксируем наличие эксперта
+        }
+    }
+    finalJsonArray.push(block);
+ }
+ }
+
+ resultJson.value = JSON.stringify(finalJsonArray, null, 2);
+
+ } catch (err) {
+ console.error("Ошибка парсинга:", err);
+ error.value = "Ошибка: " + err.message;
+ } finally {
+ loading.value = false;
+ loadingText.value = '✨ Сгенерировать ACF JSON'; 
+ }
+ };
+
+ const copyJson = async () => {
+ try {
+ await navigator.clipboard.writeText(resultJson.value);
+ const btn = document.activeElement;
+ const originalHtml = btn.innerHTML;
+ btn.innerHTML = '✅ Скопировано!';
+ setTimeout(() => { btn.innerHTML = originalHtml; }, 2000);
+ } catch (err) {
+ alert('Ошибка копирования: ' + err);
+ }
+ };
+
+ onMounted(() => {
+ if (!geminiKey.value && localStorage.getItem('geminiKey')) {
+ geminiKey.value = localStorage.getItem('geminiKey');
+ }
+ });
+
+ return {
+ geminiKey, inputText,
+ loading, loadingText, resultJson, error,
+ generateJSON, copyJson, saveData
+ };
+ }
+}).mount('#app');
+</script>
+</body>
+</html>
