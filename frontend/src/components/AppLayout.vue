@@ -13,6 +13,7 @@ const TABS = [
   { key: 'meta-tags',    label: 'Генератор Мета-тегов',         icon: '🏷️', path: '/meta-tags' },
   { key: 'link-article', label: 'Генератор ссылочной статьи',   icon: '🔗', path: '/link-article' },
   { key: 'info-article', label: 'Генератор информационной статьи', icon: '📰', path: '/info-article' },
+  { key: 'acf-json',     label: 'Сформировать JSON',               icon: '🧩', path: '/acf-json' },
 ];
 
 const activeTab = computed(() => {
@@ -20,6 +21,7 @@ const activeTab = computed(() => {
   if (p.startsWith('/meta-tags'))    return 'meta-tags';
   if (p.startsWith('/link-article')) return 'link-article';
   if (p.startsWith('/info-article')) return 'info-article';
+  if (p.startsWith('/acf-json'))     return 'acf-json';
   if (p.startsWith('/copilot') || /\/tasks\/[^/]+\/copilot/.test(p)) return 'copilot';
   return 'seo-text';
 });
