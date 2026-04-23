@@ -7,6 +7,7 @@ const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
 const { getCachedResponse, setCachedResponse } = require('./responseCache');
+const responseCacheModule = require('./responseCache');
 
 // ────────────────────────────────────────────────────────────────────
 // Per-task token budget guard
@@ -276,16 +277,19 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   let activeCachedContent = adapter === 'gemini' ? cachedContent : null;
 
   // ── Детерминированный response cache (Redis) ─────────────────────
-  // Ключ: sha256(adapter + model + system + prompt + temperature). При
-  // включённом LLM_RESPONSE_CACHE_ENABLED — экономит деньги на повторных
+  // Ключ: sha256(adapter + model + system + prompt + temperature + maxTokens).
+  // При включённом LLM_RESPONSE_CACHE_ENABLED — экономит деньги на повторных
   // запусках задачи с тем же входом. Логируем cache_hit/miss через onLog.
-  const cacheResult = await getCachedResponse({
-    adapter,
-    system,
-    prompt,
-    temperature,
-    maxTokens,
-  }).catch(() => null);
+  // Skip lookup entirely when feature flag is off (избегаем async overhead).
+  const cacheResult = responseCacheModule.ENABLED
+    ? await getCachedResponse({
+        adapter,
+        system,
+        prompt,
+        temperature,
+        maxTokens,
+      }).catch(() => null)
+    : null;
 
   if (cacheResult && cacheResult.cached) {
     log(`${callLabel || stageName} ✓ (cached, $0.00)`, 'success');
