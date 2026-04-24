@@ -61,11 +61,13 @@ function safeStringify(obj, max = 6000) {
 
 function stripHtml(html) {
   if (typeof html !== 'string') return '';
+  // js/bad-tag-filter-safe: HTML5-парсер допускает атрибуты и whitespace
+  // в закрывающем теге (`</script foo bar>`, `</style\n>`), поэтому матчим
+  // `</tag[^>]*>` — всё, кроме самого '>'. Лимит длины — защита от ReDoS.
+  if (html.length > 5_000_000) return ''; // 5 MB hard cap
   return html
-    // js/bad-tag-filter-safe: closing tag may have whitespace before '>' and any attrs are not legal there,
-    // but we tolerate trailing whitespace ('</script >') which is parsed as a valid closing tag by browsers.
-    .replace(/<script\b[^<]*(?:(?!<\/script\s*>)<[^<]*)*<\/script\s*>/gi, ' ')
-    .replace(/<style\b[^<]*(?:(?!<\/style\s*>)<[^<]*)*<\/style\s*>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
