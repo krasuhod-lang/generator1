@@ -258,6 +258,7 @@ function buildArticleKnowledgeBase(input = {}) {
     stage0Result        = null,
     stage1Result        = null,
     knowledgeGraph      = null,
+    moduleContext       = null,
   } = input;
 
   // Реальные тексты аудитории/ниши приходят как сериализованные
@@ -476,6 +477,23 @@ function buildArticleKnowledgeBase(input = {}) {
   hard.push(`Длина блока (символы): мин ${minChars}, макс ${maxChars}.`);
   if (projectLimits) hard.push(`Ограничения проекта:\n${sliceWords(projectLimits, 200)}`);
   sections.push(hard.join('\n'));
+
+  // ── 11. Module Context (Module 1+2 — детерминированные constraints) ─
+  // Pure-derive поверх Stage 0/1/2 (см. backend/src/utils/moduleContext.js).
+  // Hard-constraints для writer'а: какие сущности обязательны, какие
+  // термины опасны, какой format wedge выбран, какие claims надо доказать.
+  if (moduleContext) {
+    try {
+      const { formatModuleContextForAKB } = require('./moduleContext');
+      const md = formatModuleContextForAKB(moduleContext);
+      if (md && md.trim()) {
+        sections.push('\n## 11. Module Context — hard analytical constraints');
+        sections.push(md);
+      }
+    } catch (_) {
+      // graceful: если файл отсутствует/сломан — просто без §11
+    }
+  }
 
   return sections.join('\n');
 }
