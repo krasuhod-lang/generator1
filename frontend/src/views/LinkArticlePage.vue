@@ -119,14 +119,17 @@ function statusLabel(s) {
 }
 function stageLabel(s) {
   return ({
-    pre_stage0:         'Стратегический анализ',
-    stage0_audience:    'Анализ ЦА',
-    stage1_intents:     'Сущности и интенты',
-    stage2_structure:   'Структура статьи',
-    stage3_writer:      'Написание статьи',
-    stage4_image_prompts: 'Промпты изображений',
-    image_generation:   'Генерация изображений',
-    done:               'Готово',
+    pre_stage0:                 'Стратегический анализ',
+    stage0_audience:            'Анализ ЦА',
+    stage1_intents:             'Сущности и интенты',
+    stage1b_whitespace:         'White-space анализ',
+    stage2_structure:           'Структура статьи',
+    stage3_writer:              'Написание статьи',
+    stage5_eeat_audit:          'E-E-A-T аудит',
+    stage3_writer_eeat_refine:  'E-E-A-T улучшение',
+    stage4_image_prompts:       'Промпты изображений',
+    image_generation:           'Генерация изображений',
+    done:                       'Готово',
   })[s] || s || '—';
 }
 function formatDate(d) {
@@ -257,11 +260,39 @@ async function copyAsHtml() {
 async function copyAsFormattedText() {
   if (!selectedTask.value) return;
   // Копируем отрендеренный узел — это обеспечит «богатое» поведение при вставке в
-  // WYSIWYG-редакторы бирж (sape/miralinks/gogetlinks): изображения base64 уезжают вместе с разметкой.
+  // WYSIWYG-редакторы бирж (sape/miralinks/gogetlinks).
+  //
+  // ВАЖНО: для совместимости с биржевыми WYSIWYG (TinyMCE / CKEditor /
+  // Trumbowyg / contenteditable-on-steroids) приоритет — selection-based copy
+  // (Range + execCommand('copy')). Браузер сам сериализует выделение в
+  // multi-part clipboard payload и встраивает каждый <img src="data:…">
+  // как отдельный image-part, который редакторы корректно принимают как
+  // встроенное изображение.
+  //
+  // ClipboardItem({'text/html': data:image/...}) — оставлен как fallback:
+  // он быстрее и работает в Word/Google Docs, но ряд биржевых редакторов
+  // парсит data:-URL'ы как голый текст и теряет картинки. Поэтому он —
+  // именно fallback для случаев, когда selection-based copy недоступен.
   await nextTick();
   const el = articlePreviewRef.value;
   if (!el) return;
 
+  // ── Path A (приоритет): selection-based copy через execCommand. ─────
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    const ok = document.execCommand('copy');
+    sel.removeAllRanges();
+    if (ok) {
+      flashToast('Форматированный текст скопирован');
+      return;
+    }
+  } catch (_) { /* fallthrough */ }
+
+  // ── Path B (fallback): Async Clipboard API + ClipboardItem. ─────────
   try {
     if (navigator.clipboard && window.ClipboardItem) {
       const htmlContent = el.innerHTML;
@@ -271,21 +302,9 @@ async function copyAsFormattedText() {
       await navigator.clipboard.write([
         new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain }),
       ]);
-      flashToast('Форматированный текст скопирован');
+      flashToast('Форматированный текст скопирован (fallback)');
       return;
     }
-  } catch (_) { /* fallthrough */ }
-
-  // Fallback для старых браузеров — выделяем узел и используем execCommand
-  try {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    document.execCommand('copy');
-    sel.removeAllRanges();
-    flashToast('Форматированный текст скопирован');
   } catch (err) {
     alert('Не удалось скопировать: ' + (err.message || err));
   }
@@ -317,6 +336,29 @@ function flashToast(msg) {
 const renderedImages = computed(() => {
   const arr = Array.isArray(selectedTask.value?.image_prompts) ? selectedTask.value.image_prompts : [];
   return arr.filter((p) => p.status === 'done' && p.image_base64);
+});
+
+// ── E-E-A-T audit projection ─────────────────────────────────────────
+// Бэкенд кладёт total_score в `eeat_score` (NUMERIC) и полный аудит в
+// `eeat_audit` (JSONB). pg возвращает NUMERIC как строку — приводим вручную.
+const eeatScore = computed(() => {
+  const raw = selectedTask.value?.eeat_score;
+  if (raw == null || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+});
+const eeatVerdict = computed(() => selectedTask.value?.eeat_audit?.verdict || '');
+const eeatIssuesCount = computed(() => {
+  const issues = selectedTask.value?.eeat_audit?.issues;
+  return Array.isArray(issues) ? issues.length : 0;
+});
+const eeatBadgeClass = computed(() => {
+  const s = eeatScore.value;
+  if (s == null) return 'border-gray-700 bg-gray-900/40 text-gray-300';
+  if (s >= 8.0)  return 'border-emerald-700 bg-emerald-900/30 text-emerald-200';
+  if (s >= 7.5)  return 'border-lime-700 bg-lime-900/30 text-lime-200';
+  if (s >= 6.0)  return 'border-amber-700 bg-amber-900/30 text-amber-200';
+  return 'border-red-700 bg-red-900/30 text-red-200';
 });
 
 const hasResult = computed(() => !!selectedTask.value?.article_html);
@@ -479,6 +521,16 @@ const hasResult = computed(() => !!selectedTask.value?.article_html);
 
         <!-- Результат -->
         <div v-if="hasResult" class="space-y-4">
+          <!-- E-E-A-T badge (если аудит выполнен) -->
+          <div v-if="eeatScore !== null"
+               class="flex items-center gap-3 px-3 py-2 rounded-lg border"
+               :class="eeatBadgeClass">
+            <span class="text-[11px] uppercase tracking-wider opacity-80">E-E-A-T</span>
+            <span class="text-base font-bold">{{ eeatScore.toFixed(1) }} / 10</span>
+            <span v-if="eeatVerdict" class="text-[11px] uppercase opacity-80">· {{ eeatVerdict }}</span>
+            <span v-if="eeatIssuesCount > 0" class="text-[11px] opacity-80">· {{ eeatIssuesCount }} замечан.</span>
+          </div>
+
           <!-- Кнопки копирования -->
           <div class="flex flex-wrap gap-2">
             <button class="btn-primary" @click="copyAsHtml">

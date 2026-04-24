@@ -35,6 +35,13 @@ const {
   recordImageCall,
   recordEvent,
 } = require('./linkArticleMetrics');
+const {
+  buildLinkArticleKnowledgeBase,
+  lakbCallOpts,
+  pointerOrJson,
+} = require('./linkArticleKnowledgeBase');
+const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
+const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
@@ -50,6 +57,26 @@ const MAX_PARALLEL_IMAGES = (() => {
 const IMAGE_PRICE_USD = (() => {
   const v = parseFloat(process.env.GEMINI_IMAGE_PRICE_USD);
   return Number.isFinite(v) && v >= 0 ? v : 0.04; // дефолтное прайс-ориентир
+})();
+
+// Включает Gemini cachedContents для LAKB. Должен быть GEMINI_PROXY+GEMINI_API_KEY.
+// Минимальный размер кэша у Gemini ≥ 4096 input tokens, поэтому LAKB должна быть
+// достаточно объёмной (мы стремимся к ≥ 8 КБ текста ~ ≥ 4–5К токенов).
+const LINK_ARTICLE_GEMINI_CACHE_ENABLED =
+  String(process.env.LINK_ARTICLE_GEMINI_CACHE_ENABLED || '').toLowerCase() === 'true';
+
+// TTL Gemini кэша. Дефолт 900 сек = 15 минут — хватает на Stage 3 + corrective + Stage 4.
+const LINK_ARTICLE_GEMINI_CACHE_TTL_S = (() => {
+  const v = parseInt(process.env.LINK_ARTICLE_GEMINI_CACHE_TTL_S, 10);
+  return Number.isFinite(v) && v >= 60 && v <= 3600 ? v : 900;
+})();
+
+// Пороговый E-E-A-T балл для запуска корректировочного прохода writer'а.
+// Источник истины — backend/src/utils/objectiveMetrics.js → EEAT_PQ_TARGET.
+const LINK_ARTICLE_EEAT_TARGET = (() => {
+  const env = parseFloat(process.env.LINK_ARTICLE_EEAT_TARGET);
+  if (Number.isFinite(env) && env > 0 && env <= 10) return env;
+  return EEAT_PQ_TARGET;
 })();
 
 const IN_PROGRESS = new Set(); // taskId — защита от двойного старта
@@ -163,7 +190,30 @@ async function runIntents(task, strategy, audience, ctx) {
   );
 }
 
-async function runStructure(task, audience, intents, ctx) {
+// Stage 1B — White-space discovery (DeepSeek).
+// Этот этап отвечает за стратегический content-gap анализ и формирование
+// `article_hierarchy_hints`, которые далее жёстко учитываются Stage 2.
+async function runWhitespace(task, strategy, audience, ctx) {
+  const user = [
+    `[INPUTS]`,
+    `topic: ${task.topic}`,
+    `anchor_text: ${task.anchor_text}`,
+    `anchor_url: ${task.anchor_url}`,
+    `focus_notes: ${task.focus_notes || '[не задано]'}`,
+    `strategy_digest: ${JSON.stringify(strategy).slice(0, 4000)}`,
+    `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
+  ].join('\n');
+
+  return callLLM(
+    'deepseek',
+    loadLinkArticlePrompt('stage1bWS'),
+    user,
+    { retries: 3, temperature: 0.35, callLabel: 'LinkArticle Stage 1B (white-space)', ...ctx },
+  );
+}
+
+async function runStructure(task, audience, intents, whitespace, ctx) {
+  const hints = (whitespace && whitespace.article_hierarchy_hints) || {};
   const user = [
     `[INPUTS]`,
     `topic: ${task.topic}`,
@@ -172,6 +222,7 @@ async function runStructure(task, audience, intents, ctx) {
     `focus_notes: ${task.focus_notes || '[не задано]'}`,
     `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
     `stage1_intents: ${JSON.stringify(intents).slice(0, 8000)}`,
+    `whitespace_hints: ${JSON.stringify(hints).slice(0, 4000)}`,
   ].join('\n');
 
   return callLLM(
@@ -303,7 +354,10 @@ function validateWriterOutput(html, task) {
   return issues;
 }
 
-async function runWriter(task, audience, intents, structure, ctx) {
+async function runWriter(task, audience, intents, structure, whitespace, ctx, opts = {}) {
+  const lakbReady = !!task.__lakb;
+  const eeatIssues = Array.isArray(opts.priorEeatIssues) ? opts.priorEeatIssues : null;
+
   const buildUser = (correctiveIssues = null) => {
     const base = [
       `[INPUTS]`,
@@ -312,10 +366,23 @@ async function runWriter(task, audience, intents, structure, ctx) {
       `anchor_url: ${task.anchor_url}`,
       `focus_notes: ${task.focus_notes || '[не задано]'}`,
       `output_format: ${task.output_format || 'html'}`,
-      `stage0_audience: ${JSON.stringify(audience).slice(0, 3500)}`,
-      `stage1_intents: ${JSON.stringify(intents).slice(0, 5000)}`,
-      `stage2_structure: ${JSON.stringify(structure).slice(0, 8000)}`,
+      // При активном LAKB вместо толстых JSON-дампов отправляем короткие
+      // указатели на разделы LAKB (он уже уехал systemInstruction'ом /
+      // в Gemini cachedContents). Это и есть «кэширование DeepSeek-аналитики
+      // и передача её в Gemini» из требования.
+      `stage0_audience: ${pointerOrJson('§3 Аудитория и тон', audience, lakbReady, 3500)}`,
+      `stage1_intents: ${pointerOrJson('§4 Сущности/интенты/вопросы', intents, lakbReady, 5000)}`,
+      `whitespace_hints: ${pointerOrJson('§5 White-space → article_hierarchy_hints',
+        (whitespace && whitespace.article_hierarchy_hints) || {}, lakbReady, 2500)}`,
+      `stage2_structure: ${pointerOrJson('§6 Структура статьи', structure, lakbReady, 8000)}`,
     ];
+    if (eeatIssues && eeatIssues.length) {
+      base.push('');
+      base.push('[PRIOR_EEAT_ISSUES — корректировочный проход. Закрой каждую issue в новой версии:]');
+      for (const it of eeatIssues.slice(0, 12)) {
+        base.push(`- [${it.severity || 'minor'}|${it.category || 'misc'}] @${it.where || 'article'}: ${it.problem || ''} → ${it.fix_instruction || ''}`);
+      }
+    }
     if (correctiveIssues && correctiveIssues.length) {
       base.push('');
       base.push('[CORRECTIVE PASS — в предыдущем ответе нарушены следующие правила:]');
@@ -326,16 +393,26 @@ async function runWriter(task, audience, intents, structure, ctx) {
     return base.join('\n');
   };
 
+  // first/corrective system: when Gemini cachedContent is active, the cache
+  // already contains LAKB + writer-instructions combined (см. orchestrator).
+  // Иначе — собираем тут.
+  const writerInstructions = loadLinkArticlePrompt('stage3');
+  const systemFull = task.__lakb
+    ? `${task.__lakb}\n\n========================================\n${writerInstructions}`
+    : writerInstructions;
+  const systemArg = task.__geminiCacheName ? '' : systemFull;
+
   // First attempt
   let result = await callLLM(
     'gemini',
-    loadLinkArticlePrompt('stage3'),
+    systemArg,
     buildUser(null),
     {
       retries: 3,
       temperature: 0.5,
       maxTokens: 16384,
-      callLabel: 'LinkArticle Stage 3 (writer)',
+      callLabel: opts.callLabel || 'LinkArticle Stage 3 (writer)',
+      ...lakbCallOpts(task),
       ...ctx,
     },
   );
@@ -347,13 +424,14 @@ async function runWriter(task, audience, intents, structure, ctx) {
     await appendLog(ctx.taskId, `⚠ Статья не прошла валидацию: ${issues.length} проблем — делаем корректировочный прогон`, 'warn');
     const retry = await callLLM(
       'gemini',
-      loadLinkArticlePrompt('stage3'),
+      systemArg,
       buildUser(issues),
       {
         retries: 2,
         temperature: 0.45,
         maxTokens: 16384,
         callLabel: 'LinkArticle Stage 3 (corrective)',
+        ...lakbCallOpts(task),
         ...ctx,
       },
     );
@@ -367,6 +445,43 @@ async function runWriter(task, audience, intents, structure, ctx) {
   }
 
   return { html, selfAudit: result?.self_audit || null, remainingIssues: issues };
+}
+
+// ── Stage 5: E-E-A-T audit (DeepSeek) ──────────────────────────────────
+async function runEeatAudit(task, audience, intents, articleHtml, ctx) {
+  const user = [
+    `[INPUTS]`,
+    `topic: ${task.topic}`,
+    `anchor_text: ${task.anchor_text}`,
+    `anchor_url: ${task.anchor_url}`,
+    `audience_digest: ${JSON.stringify(audience).slice(0, 2500)}`,
+    `intents_digest: ${JSON.stringify({
+      user_questions: (intents && intents.user_questions) || [],
+      entities: (intents && Array.isArray(intents.entities) ? intents.entities.slice(0, 12) : []),
+    }).slice(0, 3500)}`,
+    `article_html: ${articleHtml.slice(0, 14000)}`,
+  ].join('\n');
+
+  const result = await callLLM(
+    'deepseek',
+    loadLinkArticlePrompt('stage5Eeat'),
+    user,
+    { retries: 3, temperature: 0.2, callLabel: 'LinkArticle Stage 5 (E-E-A-T audit)', ...ctx },
+  );
+
+  // Нормализация: total_score в [0, 10], issues — массив, verdict — enum.
+  const norm = result || {};
+  const totalRaw = Number(norm.total_score);
+  if (!Number.isFinite(totalRaw)) {
+    norm.total_score = 0;
+  } else {
+    norm.total_score = Math.max(0, Math.min(10, Math.round(totalRaw * 10) / 10));
+  }
+  if (!Array.isArray(norm.issues)) norm.issues = [];
+  if (!['pass', 'refine', 'reject'].includes(norm.verdict)) {
+    norm.verdict = norm.total_score >= LINK_ARTICLE_EEAT_TARGET ? 'pass' : 'refine';
+  }
+  return norm;
 }
 
 async function runImagePromptsGen(task, structure, articleHtml, ctx) {
@@ -496,6 +611,9 @@ async function processLinkArticleTask(taskId) {
   if (IN_PROGRESS.has(taskId)) return;
   IN_PROGRESS.add(taskId);
 
+  // Tracked across try/catch/finally for cleanup paths.
+  let geminiCacheName = null;
+
   try {
     const { rows } = await db.query(
       `SELECT * FROM link_article_tasks WHERE id = $1`,
@@ -518,30 +636,67 @@ async function processLinkArticleTask(taskId) {
     await appendLog(taskId, '🚀 Старт генерации ссылочной статьи', 'ok');
 
     // 1. Pre-Stage 0
-    await setStage(taskId, 'pre_stage0', 10);
+    await setStage(taskId, 'pre_stage0', 8);
     const ctx = buildCallCtx(taskId, 'link_article');
     const strategy = await runPreStrategy(task, ctx);
     await saveStageResult(taskId, 'strategy_context', strategy);
 
     // 2. Stage 0
-    await setStage(taskId, 'stage0_audience', 22);
+    await setStage(taskId, 'stage0_audience', 18);
     const audience = await runAudience(task, strategy, ctx);
     await saveStageResult(taskId, 'stage0_audience', audience);
 
     // 3. Stage 1
-    await setStage(taskId, 'stage1_intents', 35);
+    await setStage(taskId, 'stage1_intents', 28);
     const intents = await runIntents(task, strategy, audience, ctx);
     await saveStageResult(taskId, 'stage1_intents', intents);
 
-    // 4. Stage 2
+    // 3b. Stage 1B — White-space discovery (DeepSeek)
+    await setStage(taskId, 'stage1b_whitespace', 38);
+    const whitespace = await runWhitespace(task, strategy, audience, ctx);
+    await saveStageResult(taskId, 'whitespace_analysis', whitespace);
+
+    // 4. Stage 2 (структура — с учётом whitespace.article_hierarchy_hints)
     await setStage(taskId, 'stage2_structure', 48);
-    const structure = await runStructure(task, audience, intents, ctx);
+    const structure = await runStructure(task, audience, intents, whitespace, ctx);
     await saveStageResult(taskId, 'stage2_structure', structure);
 
+    // 4b. Build LAKB (LINK-ARTICLE KNOWLEDGE BASE) + optional Gemini cachedContents.
+    //     Это и есть «кэширование DeepSeek-аналитики и передача её в Gemini».
+    task.__lakb = buildLinkArticleKnowledgeBase({
+      task, strategy, audience, intents, whitespace, structure,
+    });
+    await appendLog(taskId, `🧠 LAKB собрана (${task.__lakb.length} символов)`, 'info');
+
+    if (LINK_ARTICLE_GEMINI_CACHE_ENABLED) {
+      try {
+        const writerInstructions = loadLinkArticlePrompt('stage3');
+        // Gemini cachedContents требует ≥ 4096 input-токенов. Объединяем
+        // LAKB + writer-instructions, чтобы один кэш покрывал и system-промпт,
+        // и аналитический контекст. При cache-hit ни то, ни другое не уходит
+        // в каждый вызов второй раз.
+        const cacheText = `${task.__lakb}\n\n========================================\n${writerInstructions}`;
+        const created = await createCachedContent({
+          systemInstruction: cacheText,
+          ttlSeconds: LINK_ARTICLE_GEMINI_CACHE_TTL_S,
+        });
+        task.__geminiCacheName = created.name;
+        geminiCacheName = created.name;
+        await db.query(
+          `UPDATE link_article_tasks SET gemini_cache_name = $2, updated_at = NOW() WHERE id = $1`,
+          [taskId, created.name],
+        );
+        await appendLog(taskId, `💾 Gemini cachedContents создан (${created.name})`, 'ok');
+      } catch (e) {
+        await appendLog(taskId, `⚠ Gemini cachedContents не создался (${e.message}) — продолжаем без кэша`, 'warn');
+        task.__geminiCacheName = null;
+      }
+    }
+
     // 5. Stage 3 (writer, Gemini)
-    await setStage(taskId, 'stage3_writer', 62);
-    const { html: articleHtml, remainingIssues } =
-      await runWriter(task, audience, intents, structure, ctx);
+    await setStage(taskId, 'stage3_writer', 58);
+    let { html: articleHtml, remainingIssues } =
+      await runWriter(task, audience, intents, structure, whitespace, ctx);
     if (!articleHtml) {
       throw new Error('Gemini не сгенерировал статью (пустой article_html)');
     }
@@ -553,8 +708,70 @@ async function processLinkArticleTask(taskId) {
       );
     }
 
+    // 5b. Stage 5 — E-E-A-T audit (DeepSeek). Если total_score ниже целевого
+    //     порога и нет blocker'ов на галлюцинации/anchor → один корректировочный
+    //     проход writer'а с передачей prior_eeat_issues.
+    await setStage(taskId, 'stage5_eeat_audit', 68);
+    let eeatAudit = null;
+    try {
+      eeatAudit = await runEeatAudit(task, audience, intents, articleHtml, ctx);
+      await db.query(
+        `UPDATE link_article_tasks
+            SET eeat_audit = $2, eeat_score = $3, updated_at = NOW()
+          WHERE id = $1`,
+        [taskId, JSON.stringify(eeatAudit), eeatAudit.total_score],
+      );
+      await appendLog(
+        taskId,
+        `🧪 E-E-A-T аудит: total=${eeatAudit.total_score.toFixed(1)} / verdict=${eeatAudit.verdict} / issues=${eeatAudit.issues.length}`,
+        eeatAudit.verdict === 'pass' ? 'ok' : 'info',
+      );
+
+      const needsRefine =
+        eeatAudit.verdict === 'refine' ||
+        (eeatAudit.verdict !== 'reject' && eeatAudit.total_score < LINK_ARTICLE_EEAT_TARGET);
+
+      if (needsRefine && eeatAudit.issues.length) {
+        await setStage(taskId, 'stage3_writer_eeat_refine', 72);
+        await appendLog(
+          taskId,
+          `↻ E-E-A-T < ${LINK_ARTICLE_EEAT_TARGET} — корректировочный прогон writer'а`,
+          'info',
+        );
+        const refined = await runWriter(
+          task, audience, intents, structure, whitespace, ctx,
+          { priorEeatIssues: eeatAudit.issues, callLabel: 'LinkArticle Stage 3 (E-E-A-T refine)' },
+        );
+        if (refined.html) {
+          articleHtml = refined.html;
+          // Re-audit refined version (best-effort; не падаем при ошибке).
+          try {
+            const reaudit = await runEeatAudit(task, audience, intents, articleHtml, ctx);
+            await db.query(
+              `UPDATE link_article_tasks
+                  SET eeat_audit = $2, eeat_score = $3, updated_at = NOW()
+                WHERE id = $1`,
+              [taskId, JSON.stringify(reaudit), reaudit.total_score],
+            );
+            eeatAudit = reaudit;
+            await appendLog(
+              taskId,
+              `🧪 E-E-A-T re-audit: total=${reaudit.total_score.toFixed(1)} / verdict=${reaudit.verdict}`,
+              reaudit.verdict === 'pass' ? 'ok' : 'info',
+            );
+          } catch (e) {
+            await appendLog(taskId, `⚠ Re-audit не выполнился: ${e.message}`, 'warn');
+          }
+        }
+      } else if (eeatAudit.verdict === 'reject') {
+        await appendLog(taskId, `⛔ E-E-A-T verdict=reject — статья требует ручного просмотра`, 'warn');
+      }
+    } catch (e) {
+      await appendLog(taskId, `⚠ E-E-A-T аудит пропущен (${e.message})`, 'warn');
+    }
+
     // 6. Stage 4 (image prompts)
-    await setStage(taskId, 'stage4_image_prompts', 75);
+    await setStage(taskId, 'stage4_image_prompts', 78);
     const imagePrompts = await runImagePromptsGen(task, structure, articleHtml, ctx);
     if (imagePrompts.length < 3) {
       await appendLog(taskId, `⚠ DeepSeek вернул только ${imagePrompts.length} image-промпта вместо 3`, 'warn');
@@ -562,7 +779,7 @@ async function processLinkArticleTask(taskId) {
     await saveStageResult(taskId, 'image_prompts', imagePrompts);
 
     // 7. Image generation (Nano Banana Pro)
-    await setStage(taskId, 'image_generation', 85);
+    await setStage(taskId, 'image_generation', 87);
     const renderedImages = await runImageGeneration(taskId, imagePrompts);
     await saveStageResult(taskId, 'image_prompts', renderedImages);
 
@@ -584,6 +801,12 @@ async function processLinkArticleTask(taskId) {
     );
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
+
+    // 9. Best-effort cleanup Gemini cachedContents (TTL — fallback).
+    if (geminiCacheName) {
+      cleanupGeminiCache(taskId, geminiCacheName);
+      geminiCacheName = null;
+    }
   } catch (err) {
     console.error(`[linkArticle] task ${taskId} failed:`, err);
     try {
@@ -600,9 +823,30 @@ async function processLinkArticleTask(taskId) {
       publishEvent(taskId, 'status', { status: 'error', error: err.message });
     } catch (_) { /* no-op */ }
   } finally {
+    // На любой ветке (success/error) при наличии «висящего» имени кэша —
+    // best-effort удаление; TTL подстрахует, если delete упадёт.
+    if (geminiCacheName) {
+      cleanupGeminiCache(taskId, geminiCacheName);
+      geminiCacheName = null;
+    }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
   }
+}
+
+/**
+ * cleanupGeminiCache — fire-and-forget удаление Gemini cachedContents
+ * и обнуление колонки `gemini_cache_name` в БД. На любой ошибке тихо
+ * логируем — TTL подстрахует.
+ */
+function cleanupGeminiCache(taskId, cacheName) {
+  if (!cacheName) return;
+  deleteCachedContent(cacheName).catch((e) =>
+    console.warn(`[linkArticle] deleteCachedContent ${cacheName}: ${e.message}`));
+  db.query(
+    `UPDATE link_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
+    [taskId],
+  ).catch(() => {});
 }
 
 /**

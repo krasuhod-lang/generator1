@@ -72,6 +72,8 @@ const { getRelatedEntities } = require('../../utils/knowledgeGraph');
 const { runPreStage0, buildStrategyDigest } = require('./preStage0');
 const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
 const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
+const { deriveModuleContext } = require('../../utils/moduleContext');
+const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { resetTaskBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
@@ -348,6 +350,43 @@ async function runPipeline(task, ctx) {
   // ── Используем enrichedStage1 (stage1 + buyer journey) для Stage 3
   stage1Result = enrichedStage1 || stage1Result;
 
+  // ── Module Context (Module 1+2) — детерминированный derive ─────────
+  // Pure-функция поверх stage0/stage1/stage2 — БЕЗ LLM-вызовов.
+  // Содержит mandatory_entities + avoid_ambiguous_terms +
+  // audience_language_clusters + format_wedge + trust_complexity +
+  // claims_to_prove + jtbd_to_close. Сохраняется в tasks.module_context
+  // (миграция 014) и уезжает в AKB как §11 hard analytical constraints.
+  // См.: backend/src/utils/moduleContext.js
+  try {
+    task.__moduleContext = deriveModuleContext({
+      task,
+      stage0Result,
+      stage1Result,
+      stage2Result: { taxonomy, stage2Raw, enrichedStage1 },
+      targetPageAnalysis,
+      strategyContext,
+    });
+    const s = task.__moduleContext._summary || {};
+    log(
+      `Module Context собран: entities=${s.mandatory_entities_n}, ` +
+      `avoid=${s.avoid_ambiguous_terms_n}, lang=${s.audience_language_clusters_n}, ` +
+      `claims=${s.claims_to_prove_n}, jtbd=${s.jtbd_to_close_n}, ` +
+      `trust=${s.trust_level}, format=${s.primary_format || '—'}`,
+      'success'
+    );
+    try {
+      await db.query(
+        `UPDATE tasks SET module_context = $1, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(task.__moduleContext), taskId]
+      );
+    } catch (dbErr) {
+      log(`Module Context: не удалось сохранить в БД (${dbErr.message}) — продолжаем`, 'warn');
+    }
+  } catch (mcErr) {
+    log(`Module Context: ошибка derive — ${mcErr.message}. Продолжаем без него.`, 'warn');
+    task.__moduleContext = null;
+  }
+
   // ── ARTICLE_KNOWLEDGE_BASE (AKB) ─────────────────────────────────
   // Один детерминированный документ, который собирает всё «сырое знание»
   // (Pre-Stage 0 + Stage 0 + Stage 1 + target page + audience-niche).
@@ -362,6 +401,7 @@ async function runPipeline(task, ctx) {
       stage0Result,
       stage1Result,
       knowledgeGraph: stage1Result?.knowledge_graph || null,
+      moduleContext:  task.__moduleContext || null,
     });
     const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
     const akbTokens = estimateTokens(task.__articleKnowledgeBase);
@@ -805,6 +845,28 @@ async function runPipeline(task, ctx) {
     log(`Unused inputs report ошибка: ${e.message} — пропускаем`, 'warn');
   }
 
+  // ── Stage 8 (опц.): Quality Evaluator ─────────────────────────────
+  // Default OFF. Включается ENV STAGE8_EVALUATOR_ENABLED=true. Не блокирует
+  // и не перегенерирует контент; пишет evaluator_report в БД и SSE.
+  // См.: backend/src/services/pipeline/stage8.js
+  let evaluatorReport = null;
+  if (isStage8Enabled()) {
+    try {
+      evaluatorReport = await runStage8Evaluator(
+        task, stageCtx,
+        {
+          finalHTML:     s7Result.finalHTML || finalBlocks.join('\n\n'),
+          moduleContext: task.__moduleContext || null,
+        }
+      );
+      if (evaluatorReport) {
+        publish(taskId, { type: 'evaluator_report', report: evaluatorReport });
+      }
+    } catch (e) {
+      log(`Stage 8 Evaluator: непойманное исключение — ${e.message}`, 'warn');
+    }
+  }
+
   // Время генерации контента (в секундах)
   const generationTimeSec = Math.round((Date.now() - pipelineStartedAt) / 1000);
 
@@ -820,6 +882,7 @@ async function runPipeline(task, ctx) {
     eeatBreakdown:      s7Result.eeatBreakdown        || null,
     tfIdfDensity:       s7Result.tfIdfDensity          || [],
     unusedInputs:       unusedInputsReport             || null,
+    evaluatorReport:    evaluatorReport                || null,
     generationTimeSec,
   });
 
