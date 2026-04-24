@@ -62,8 +62,10 @@ function safeStringify(obj, max = 6000) {
 function stripHtml(html) {
   if (typeof html !== 'string') return '';
   return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    // js/bad-tag-filter-safe: closing tag may have whitespace before '>' and any attrs are not legal there,
+    // but we tolerate trailing whitespace ('</script >') which is parsed as a valid closing tag by browsers.
+    .replace(/<script\b[^<]*(?:(?!<\/script\s*>)<[^<]*)*<\/script\s*>/gi, ' ')
+    .replace(/<style\b[^<]*(?:(?!<\/style\s*>)<[^<]*)*<\/style\s*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
