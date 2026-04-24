@@ -804,14 +804,8 @@ async function processLinkArticleTask(taskId) {
 
     // 9. Best-effort cleanup Gemini cachedContents (TTL — fallback).
     if (geminiCacheName) {
-      const cacheName = geminiCacheName;
+      cleanupGeminiCache(taskId, geminiCacheName);
       geminiCacheName = null;
-      deleteCachedContent(cacheName)
-        .then(() => db.query(
-          `UPDATE link_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
-          [taskId],
-        ).catch(() => {}))
-        .catch((e) => console.warn(`[linkArticle] deleteCachedContent ${cacheName}: ${e.message}`));
     }
   } catch (err) {
     console.error(`[linkArticle] task ${taskId} failed:`, err);
@@ -832,16 +826,27 @@ async function processLinkArticleTask(taskId) {
     // На любой ветке (success/error) при наличии «висящего» имени кэша —
     // best-effort удаление; TTL подстрахует, если delete упадёт.
     if (geminiCacheName) {
-      const cacheName = geminiCacheName;
-      deleteCachedContent(cacheName).catch(() => {});
-      db.query(
-        `UPDATE link_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
-        [taskId],
-      ).catch(() => {});
+      cleanupGeminiCache(taskId, geminiCacheName);
+      geminiCacheName = null;
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
   }
+}
+
+/**
+ * cleanupGeminiCache — fire-and-forget удаление Gemini cachedContents
+ * и обнуление колонки `gemini_cache_name` в БД. На любой ошибке тихо
+ * логируем — TTL подстрахует.
+ */
+function cleanupGeminiCache(taskId, cacheName) {
+  if (!cacheName) return;
+  deleteCachedContent(cacheName).catch((e) =>
+    console.warn(`[linkArticle] deleteCachedContent ${cacheName}: ${e.message}`));
+  db.query(
+    `UPDATE link_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
+    [taskId],
+  ).catch(() => {});
 }
 
 /**
