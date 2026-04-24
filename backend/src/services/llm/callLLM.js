@@ -8,6 +8,7 @@ const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
 const { getCachedResponse, setCachedResponse } = require('./responseCache');
 const responseCacheModule = require('./responseCache');
+const { withProviderSlot } = require('./rateLimiter');
 
 // ────────────────────────────────────────────────────────────────────
 // Per-task token budget guard
@@ -314,7 +315,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         callOpts.cachedContent = activeCachedContent;
       }
 
-      const result    = await callFn(system, prompt, callOpts);
+      const result    = await withProviderSlot(adapter, () => callFn(system, prompt, callOpts));
       const cacheHit  = adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0;
       const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut, cacheHit);
       const parsed    = normalizeKeys(parseJSON(result.text));
