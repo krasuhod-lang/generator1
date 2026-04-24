@@ -487,6 +487,21 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_events_task_time ON link_article_events (task_id, created_at)`);
 
+    // ─── Migration 013: Link Article Generator — Enhancements ────────
+    // Идемпотентно добавляем колонки для:
+    //   - whitespace_analysis: новый Stage 1B (white-space discovery, DeepSeek);
+    //   - eeat_audit / eeat_score: Stage 5 E-E-A-T audit (DeepSeek);
+    //   - gemini_cache_name: имя Gemini cachedContents (LAKB-кэш для Gemini).
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS whitespace_analysis JSONB`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS eeat_audit          JSONB`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS eeat_score          NUMERIC(4, 2)`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS gemini_cache_name   TEXT`);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_article_eeat_score
+        ON link_article_tasks (eeat_score)
+        WHERE eeat_score IS NOT NULL
+    `);
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

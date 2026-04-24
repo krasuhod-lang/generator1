@@ -28,9 +28,11 @@ const PROMPTS = {
   preStage0:    readPromptFile('preStage0_strategy.txt'),
   stage0:       readPromptFile('stage0_audience.txt'),
   stage1:       readPromptFile('stage1_intents.txt'),
+  stage1bWS:    readPromptFile('stage1b_whitespace.txt'),
   stage2:       readPromptFile('stage2_structure.txt'),
   stage3:       readPromptFile('stage3_writer.txt'),
   stage4Images: readPromptFile('stage4_image_prompts.txt'),
+  stage5Eeat:   readPromptFile('stage5_eeat_audit.txt'),
 };
 
 function loadLinkArticlePrompt(name) {
