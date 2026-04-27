@@ -36,6 +36,13 @@ const MAX_OUTPUT_TOKENS = 16384;
 // Размер чанка по умолчанию. Уменьшен с 6000 → 4000 — это оставляет головой
 // запас на JSON-обвязку при MAX_OUTPUT_TOKENS=16384.
 const DEFAULT_CHUNK_LEN = 4000;
+// Минимальный размер чанка при авто-ретрае «finish_reason=length». Делим
+// проблемный чанк пополам, но не уходим ниже 800 симв., чтобы не выродиться
+// в десятки запросов из-за нескольких очень длинных слов/тегов.
+const MIN_RETRY_CHUNK_LEN = 800;
+// Поля JSON-вывода, которые считаются «текстовыми» при сборе фолбэка
+// expert→blocks (сюда модель кладёт оригинальные абзацы).
+const TEXT_FIELD_NAMES = /^(text|content|answer|expert|subtitle)$/i;
 
 // ── Состояние ──────────────────────────────────────────────────────────────
 const loadingTasks = ref(false);
@@ -345,7 +352,7 @@ function collectTextFieldsDeep(node, out) {
   if (typeof node === 'object') {
     for (const k of Object.keys(node)) {
       const v = node[k];
-      if (typeof v === 'string' && /^(text|content|answer|expert|subtitle)$/i.test(k)) {
+      if (typeof v === 'string' && TEXT_FIELD_NAMES.test(k)) {
         if (v.trim()) out.push(v);
       } else if (v && typeof v === 'object') {
         collectTextFieldsDeep(v, out);
@@ -447,7 +454,7 @@ async function processChunk({
   // Авто-ретрай при обрыве по длине: рекурсивно дробим этот же чанк пополам
   // через тот же безопасный сплиттер и обрабатываем подкуски один за другим.
   if (choice.finish_reason === 'length') {
-    const half = Math.max(800, Math.floor(chunkHtmlText.length / 2));
+    const half = Math.max(MIN_RETRY_CHUNK_LEN, Math.floor(chunkHtmlText.length / 2));
     const sub = chunkHtml(chunkHtmlText, half);
     if (sub.length <= 1) {
       throw new Error(
