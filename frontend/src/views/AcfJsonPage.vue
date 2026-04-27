@@ -395,13 +395,43 @@ function buildPreservationPhrases(plain, windowWords = 6, stepWords = 3) {
   return phrases;
 }
 
+// Каноническая форма для сравнения: lowercase, без пунктуации, схлопнутые
+// пробелы. Нужна, чтобы валидатор НЕ ловил ложно-положительные «потери»,
+// когда модель легитимно нормализовала пунктуацию/регистр на границах
+// HTML-блоков (например, добавила точку в конце абзаца, заменила `:` на
+// `.`, убрала артефактный пробел перед точкой, который образовался при
+// strip-tags из `<span>.</span>`). При этом РЕАЛЬНУЮ потерю слов мы
+// по-прежнему ловим — слова сохраняются.
+function canonicalForCompare(s) {
+  if (!s) return '';
+  let t = String(s).toLowerCase();
+  // Убираем всё, что НЕ буква/цифра/пробел (любая пунктуация, включая
+  // ёлочки «», тире —, многоточия, двоеточия, скобки, кавычки и т. п.).
+  // \p{L}\p{N} требует флага u — поддерживается во всех современных браузерах.
+  t = t.replace(/[^\p{L}\p{N}\s]+/gu, ' ');
+  // ё → е, чтобы ё/е-вариативность не давала false-positive.
+  t = t.replace(/ё/g, 'е');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t;
+}
+
 // Возвращает массив пропавших фраз (пусто = всё на месте).
+// Сравниваем по канонической форме (без пунктуации/регистра), но В РЕЗУЛЬТАТ
+// возвращаем оригинальные окна — чтобы пользователю в сообщении об ошибке
+// показать понятный человекочитаемый фрагмент.
 function findMissingPhrases(inputPlain, outputPlain) {
-  const phrases = buildPreservationPhrases(inputPlain);
-  const missing = [];
+  const phrases     = buildPreservationPhrases(inputPlain);
+  const outputCanon = canonicalForCompare(outputPlain);
+  const missing     = [];
   for (const ph of phrases) {
     if (!ph) continue;
-    if (outputPlain.indexOf(ph) === -1) missing.push(ph);
+    const canon = canonicalForCompare(ph);
+    if (!canon) continue;
+    // Окна, состоящие в основном из артефактов strip-tags (короткие
+    // служебные слова + одиночная пунктуация), после канонизации
+    // вырождаются — пропускаем, чтобы не давать шум.
+    if (canon.split(' ').length < 3) continue;
+    if (outputCanon.indexOf(canon) === -1) missing.push(ph);
   }
   return missing;
 }
