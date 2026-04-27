@@ -31,9 +31,23 @@ export const useArticleTopicsStore = defineStore('articleTopics', {
       return data?.task?.id;
     },
 
-    async createDeepDive(parent_task_id, trend_name) {
-      const { data } = await api.post('/article-topics/deep-dive', { parent_task_id, trend_name });
-      return data?.task?.id;
+    async createDeepDive(parent_task_id, trend_name, opts = {}) {
+      // opts.force=true → пересоздать deep-dive поверх существующего
+      // (backend по умолчанию возвращает 409 со списком дубликатов).
+      const payload = { parent_task_id, trend_name };
+      if (opts.force) payload.force = true;
+      try {
+        const { data } = await api.post('/article-topics/deep-dive', payload);
+        return { id: data?.task?.id, duplicates: null };
+      } catch (err) {
+        const body = err.response?.data;
+        if (err.response?.status === 409 && body?.error === 'duplicate_deep_dive') {
+          // Возвращаем структуру с дубликатами — UI спросит пользователя,
+          // и при подтверждении вызовет тот же метод с force=true.
+          return { id: null, duplicates: body.duplicates || [], message: body.message || 'Дубликат' };
+        }
+        throw err;
+      }
     },
 
     async getTask(id) {

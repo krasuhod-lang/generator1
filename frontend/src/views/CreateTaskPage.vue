@@ -57,6 +57,37 @@ onMounted(async () => {
     } finally {
       loading.value = false;
     }
+    return;
+  }
+
+  // Прифилл из query-параметров (используется кнопкой «📝 Создать SEO-статью»
+  // на странице Article Topics — закрывает петлю «foresight → готовая
+  // постановка для генератора статей»). Все ключи опциональны; неизвестные
+  // ключи игнорируем — никаких ошибок при «лишних» query-параметрах.
+  const q = route.query || {};
+  const map = {
+    prefill_target:   'input_target_service',
+    prefill_audience: 'input_target_audience',
+    prefill_region:   'input_region',
+    prefill_brand:    'input_brand_name',
+    prefill_facts:    'input_brand_facts',
+    prefill_title:    'title',
+  };
+  let touched = false;
+  for (const [qk, fk] of Object.entries(map)) {
+    const raw = q[qk];
+    if (raw == null || raw === '') continue;
+    const value = Array.isArray(raw) ? String(raw[0]) : String(raw);
+    if (!value) continue;
+    // Длина: backend всё равно валидирует, но обрезаем заранее, чтобы
+    // не перегружать форму.
+    form[fk] = value.slice(0, 4000);
+    touched = true;
+  }
+  if (touched) {
+    // Раскрываем все секции аккордеона, чтобы юзер сразу увидел
+    // подставленные значения и не тыкал в каждую.
+    Object.keys(openSections).forEach((k) => { openSections[k] = true; });
   }
 });
 

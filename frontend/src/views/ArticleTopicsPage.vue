@@ -15,6 +15,7 @@
  * клик по завершённой задаче — модальное окно с результатом и копированием.
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import { useArticleTopicsStore } from '../stores/articleTopics.js';
 import {
@@ -22,7 +23,8 @@ import {
   renderInlineMarkdown, sectionToPlainText,
 } from '../utils/articleTopicsParser.js';
 
-const store = useArticleTopicsStore();
+const store  = useArticleTopicsStore();
+const router = useRouter();
 
 // ── Форма ────────────────────────────────────────────────────────────
 const DRAFT_KEY = 'article_topics_draft_v1';
@@ -108,7 +110,13 @@ const parsedMain = computed(() => {
     return null;
   }
   try {
-    return parseMainResult(activeTask.value.result_markdown);
+    // Backend в pipeline парсит TRENDS_JSON-сентинельный блок и сохраняет
+    // его в task.trends_json. Если он есть — используем его как primary
+    // источник трендов (с confidence-бейджами и точными именами).
+    return parseMainResult(
+      activeTask.value.result_markdown,
+      activeTask.value.trends_json || null,
+    );
   } catch (_) {
     return null;
   }
@@ -238,12 +246,20 @@ function closeModal() {
   copyError.value    = '';
   trendInput.value   = '';
   deepDiveErr.value  = '';
+  duplicateInfo.value = { open: false, trend: '', items: [] };
   lastCopied.value   = { id: '', mode: '' };
   if (lastCopiedTimer) { clearTimeout(lastCopiedTimer); lastCopiedTimer = null; }
 }
 
+// Состояние диалога-подтверждения дубликата deep-dive.
+// Когда backend возвращает 409 duplicate_deep_dive — кладём сюда
+// найденные задачи и название тренда, а UI показывает баннер с
+// «Открыть существующую» / «Создать всё равно».
+const duplicateInfo = ref({ open: false, trend: '', items: [] });
+
 async function startDeepDive() {
   deepDiveErr.value = '';
+  duplicateInfo.value = { open: false, trend: '', items: [] };
   const trend = (trendInput.value || '').trim();
   if (trend.length < 3) {
     deepDiveErr.value = 'Введите название тренда (от 3 символов).';
@@ -256,16 +272,48 @@ async function startDeepDive() {
   }
   deepDiveBusy.value = true;
   try {
-    const newId = await store.createDeepDive(activeTask.value.id, trend);
+    const res = await store.createDeepDive(activeTask.value.id, trend);
+    // Дубликат — НЕ создаём, показываем UX-диалог. Пользователь либо
+    // открывает существующий результат, либо подтверждает пересоздание.
+    if (res && res.duplicates) {
+      duplicateInfo.value = { open: true, trend, items: res.duplicates };
+      return;
+    }
+    const newId = res && res.id;
     await store.fetchTasks();
     closeModal();
-    // Сразу открываем созданную deep-dive задачу — пользователь увидит её прогресс.
     if (newId) openTask(newId);
   } catch (err) {
     deepDiveErr.value = err.response?.data?.error || err.message || 'Не удалось создать deep-dive';
   } finally {
     deepDiveBusy.value = false;
   }
+}
+
+// Подтвердить пересоздание поверх существующего деп-дайва (force=true).
+async function confirmDuplicateRecreate() {
+  const trend = duplicateInfo.value.trend;
+  if (!trend || !activeTask.value) return;
+  deepDiveBusy.value = true;
+  try {
+    const res = await store.createDeepDive(activeTask.value.id, trend, { force: true });
+    duplicateInfo.value = { open: false, trend: '', items: [] };
+    const newId = res && res.id;
+    await store.fetchTasks();
+    closeModal();
+    if (newId) openTask(newId);
+  } catch (err) {
+    deepDiveErr.value = err.response?.data?.error || err.message || 'Не удалось создать deep-dive';
+  } finally {
+    deepDiveBusy.value = false;
+  }
+}
+
+// Открыть существующий deep-dive из списка дубликатов.
+function openDuplicateExisting(taskId) {
+  duplicateInfo.value = { open: false, trend: '', items: [] };
+  closeModal();
+  openTask(taskId);
 }
 
 // ── Per-row действия ────────────────────────────────────────────────
@@ -316,9 +364,77 @@ const SECTION_META = {
   hubAndSpoke:   { icon: '🕸️', accent: 'border-l-4 border-emerald-500', pill: 'Hub & Spoke' },
   competitorGap: { icon: '🎯', accent: 'border-l-4 border-fuchsia-500', pill: 'Конкурентный gap' },
   quickWin:      { icon: '⚡', accent: 'border-l-4 border-amber-400 bg-amber-950/20',    pill: 'Быстрая победа' },
+  yandex:        { icon: '🅈',  accent: 'border-l-4 border-yellow-500',  pill: 'Яндекс-экосистема' },
+  currentState:  { icon: '📅', accent: 'border-l-4 border-cyan-500',    pill: 'Состояние тренда' },
   other:         { icon: '📄', accent: 'border-l-4 border-gray-700',    pill: '' },
 };
 function sectionMeta(kind) { return SECTION_META[kind] || SECTION_META.other; }
+
+// Бейдж confidence для тренда. Возвращает { label, dotClass, bgClass } или
+// null, если значения нет (тогда UI просто не показывает чип).
+function confidenceBadge(conf) {
+  if (!conf) return null;
+  const c = String(conf).toLowerCase();
+  if (c === 'high')   return { label: 'high',   dotClass: 'bg-emerald-400', bgClass: 'bg-emerald-900/40 text-emerald-200 border border-emerald-700' };
+  if (c === 'medium' || c === 'med') return { label: 'medium', dotClass: 'bg-amber-400',   bgClass: 'bg-amber-900/40 text-amber-200 border border-amber-700' };
+  if (c === 'low')    return { label: 'low',    dotClass: 'bg-rose-400',    bgClass: 'bg-rose-900/40 text-rose-200 border border-rose-700' };
+  return null;
+}
+
+// Скор evaluator-отчёта для отображения ⭐ N/10 в карточке/модалке.
+// Возвращает строку либо null, если evaluator не запускался или дал NaN.
+function evaluatorScore(task) {
+  const s = Number(task && task.evaluator_report && task.evaluator_report.total_score);
+  return Number.isFinite(s) ? s.toFixed(1) : null;
+}
+
+// Открывает /tasks/new с предзаполненными query-параметрами (нишa,
+// аудитория, raw LSI из ключей quick-win и т.п.). CreateTaskPage
+// читает их в onMounted и подставляет в reactive form.
+function createSeoArticleFromTrend(trend) {
+  if (!trend || !trend.name || !activeTask.value) return;
+  // Собираем максимум контекста из текущей main-задачи.
+  const t = activeTask.value;
+  const query = {
+    prefill_target:    `${t.niche || ''} — ${trend.name}`.trim(),
+    prefill_audience:  t.audience  || '',
+    prefill_region:    t.region    || '',
+    prefill_brand:     '', // у article-topic задачи нет бренда — пусть юзер сам впишет.
+    prefill_facts:     [
+      trend.drivers ? `Драйверы: ${trend.drivers}` : '',
+      trend.vector  ? `Вектор:   ${trend.vector}`  : '',
+      trend.signals ? `Сигналы:  ${trend.signals}` : '',
+      trend.confidence ? `Confidence (foresight): ${trend.confidence}` : '',
+    ].filter(Boolean).join('\n'),
+    prefill_title:     trend.name,
+  };
+  router.push({ path: '/tasks/new', query });
+}
+
+// «📝 Создать SEO-статью» из quick-win (deep-dive, секция 4).
+function createSeoArticleFromQuickWin() {
+  if (!activeTask.value) return;
+  const t = activeTask.value;
+  const parsed = parsedDeepDive.value;
+  // Берём всё содержимое секции «Быстрая победа» как brand_facts —
+  // там уже есть H1/title/description/H2 + тезисы + CTA, что является
+  // готовой постановкой для SEO-генератора.
+  let qwBlock = '';
+  if (parsed) {
+    const qw = parsed.sections.find((s) => s.kind === 'quickWin');
+    if (qw) qwBlock = sectionToPlainText(qw);
+  }
+  router.push({
+    path: '/tasks/new',
+    query: {
+      prefill_target:   `${t.niche || ''} — ${t.trend_name || ''}`.trim(),
+      prefill_audience: t.audience || '',
+      prefill_region:   t.region   || '',
+      prefill_facts:    qwBlock.slice(0, 4000), // лимит query-string
+      prefill_title:    t.trend_name || '',
+    },
+  });
+}
 
 /**
  * Возвращает «тело секции» для блочного рендера: вырезает таблицу (она
@@ -486,6 +602,11 @@ const sortedTasks = computed(() =>
                     <span v-if="t.cost_usd && Number(t.cost_usd) > 0">
                       · ${{ Number(t.cost_usd).toFixed(4) }}
                     </span>
+                    <span v-if="evaluatorScore(t)"
+                          class="ml-1 text-amber-300"
+                          :title="'LLM-as-judge score (5 критериев, среднее)'">
+                      · ⭐ {{ evaluatorScore(t) }}/10
+                    </span>
                   </div>
                   <div v-if="t.status === 'error' && t.error_message"
                        class="text-[11px] text-red-300 mt-1 truncate" :title="t.error_message">
@@ -516,6 +637,11 @@ const sortedTasks = computed(() =>
               <span :class="activeTask ? statusClass(activeTask.status) : ''"
                     class="inline-block px-2 py-0.5 text-[11px] rounded border align-middle">
                 {{ activeTask ? statusLabel(activeTask.status) : '...' }}
+              </span>
+              <span v-if="activeTask && evaluatorScore(activeTask)"
+                    class="ml-2 inline-block px-2 py-0.5 text-[11px] rounded border border-amber-700 bg-amber-900/40 text-amber-200 align-middle"
+                    :title="'LLM-as-judge: среднее по 5 критериям (specificity / evidence / actionability / novelty / structure)'">
+                ⭐ {{ evaluatorScore(activeTask) }}/10
               </span>
             </div>
             <div class="text-white truncate mt-1">
@@ -623,22 +749,38 @@ const sortedTasks = computed(() =>
                       <div class="text-white font-semibold text-sm leading-snug break-words">
                         {{ t.name }}
                       </div>
-                      <span v-if="t.stage"
-                            class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded
-                                   bg-gray-800 text-indigo-200 border border-gray-700 flex-shrink-0">
-                        {{ t.stage }}
-                      </span>
+                      <div class="flex items-center gap-1 flex-shrink-0">
+                        <span v-if="confidenceBadge(t.confidence)"
+                              :class="['text-[10px] uppercase tracking-wider px-2 py-0.5 rounded inline-flex items-center gap-1',
+                                       confidenceBadge(t.confidence).bgClass]"
+                              :title="`Confidence: ${confidenceBadge(t.confidence).label}`">
+                          <span :class="['inline-block w-1.5 h-1.5 rounded-full',
+                                          confidenceBadge(t.confidence).dotClass]"></span>
+                          {{ confidenceBadge(t.confidence).label }}
+                        </span>
+                        <span v-if="t.stage"
+                              class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded
+                                     bg-gray-800 text-indigo-200 border border-gray-700">
+                          {{ t.stage }}
+                        </span>
+                      </div>
                     </div>
                     <dl class="text-[11px] text-gray-400 space-y-0.5">
                       <div v-if="t.drivers"><dt class="inline text-gray-500">Драйверы: </dt><dd class="inline text-gray-300">{{ t.drivers }}</dd></div>
                       <div v-if="t.vector"><dt class="inline text-gray-500">Вектор: </dt><dd class="inline text-gray-300">{{ t.vector }}</dd></div>
                       <div v-if="t.signals"><dt class="inline text-gray-500">Сигналы: </dt><dd class="inline text-gray-300">{{ t.signals }}</dd></div>
+                      <div v-if="t.windowMonths"><dt class="inline text-gray-500">Окно (мес.): </dt><dd class="inline text-gray-300">{{ t.windowMonths }}</dd></div>
                     </dl>
-                    <div class="flex items-center gap-2 mt-1">
-                      <button class="btn-primary text-xs flex-1"
+                    <div class="flex items-center gap-2 mt-1 flex-wrap">
+                      <button class="btn-primary text-xs flex-1 min-w-0"
                               :disabled="deepDiveBusy"
                               @click="deepDiveTrend(t.name)">
-                        {{ deepDiveBusy && trendInput === t.name ? '⏳ Запуск...' : '🔍 Углубить этот тренд →' }}
+                        {{ deepDiveBusy && trendInput === t.name ? '⏳ Запуск...' : '🔍 Углубить →' }}
+                      </button>
+                      <button class="btn-ghost text-xs border border-emerald-700 text-emerald-200"
+                              @click="createSeoArticleFromTrend(t)"
+                              title="Открыть форму создания SEO-статьи с предзаполненными полями из тренда">
+                        📝 SEO-статья
                       </button>
                       <button class="btn-ghost text-xs border border-gray-700"
                               @click="copyText(t.name, `trend-${idx}`, 'text')"
@@ -649,6 +791,42 @@ const sortedTasks = computed(() =>
                   </div>
                 </div>
                 <p v-if="deepDiveErr" class="text-xs text-red-300">{{ deepDiveErr }}</p>
+
+                <!-- Дубликат deep-dive: backend вернул 409 — спрашиваем юзера. -->
+                <div v-if="duplicateInfo.open"
+                     class="rounded-lg border border-amber-700 bg-amber-950/40 p-3 space-y-2">
+                  <p class="text-amber-100 text-xs leading-snug">
+                    ⚠️ Вы уже исследовали тренд <strong>«{{ duplicateInfo.trend }}»</strong>
+                    в одном из своих deep-dive. Откройте существующий результат —
+                    или подтвердите пересоздание.
+                  </p>
+                  <ul class="space-y-1">
+                    <li v-for="d in duplicateInfo.items" :key="d.id"
+                        class="flex items-center justify-between gap-2 text-[11px] text-amber-100">
+                      <span class="truncate">
+                        {{ d.trend_name }}
+                        <span class="text-amber-300/80">· {{ d.niche }}</span>
+                        <span class="text-amber-300/60">· {{ new Date(d.created_at).toLocaleDateString() }}</span>
+                        <span class="text-amber-300/80">· {{ d.status }}</span>
+                      </span>
+                      <button class="btn-ghost text-[11px] border border-amber-700 text-amber-100"
+                              @click="openDuplicateExisting(d.id)">
+                        Открыть
+                      </button>
+                    </li>
+                  </ul>
+                  <div class="flex items-center gap-2">
+                    <button class="btn-secondary text-xs"
+                            :disabled="deepDiveBusy"
+                            @click="confirmDuplicateRecreate">
+                      {{ deepDiveBusy ? '⏳ Создаём...' : '↻ Создать всё равно' }}
+                    </button>
+                    <button class="btn-ghost text-xs border border-gray-700"
+                            @click="duplicateInfo = { open: false, trend: '', items: [] }">
+                      Отмена
+                    </button>
+                  </div>
+                </div>
               </section>
 
               <!-- Все секции отчёта -->
@@ -750,6 +928,12 @@ const sortedTasks = computed(() =>
                     <span>{{ sec.title }}</span>
                   </h3>
                   <div class="flex items-center gap-1.5">
+                    <button v-if="sec.kind === 'quickWin'"
+                            class="btn-ghost text-[11px] border border-emerald-700 text-emerald-200"
+                            @click="createSeoArticleFromQuickWin"
+                            title="Открыть форму создания SEO-статьи с предзаполненными полями из «Быстрой победы»">
+                      📝 Создать SEO-статью →
+                    </button>
                     <button class="btn-ghost text-[11px] border border-gray-700"
                             @click="copySection(sec, 'text')">
                       {{ isCopied(`section:${sec.kind || 'other'}:${sec.title}`, 'text')

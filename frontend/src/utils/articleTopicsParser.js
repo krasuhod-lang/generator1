@@ -148,7 +148,8 @@ const PHASE_KEYWORDS = {
   blindSpots:     /(фаза\s*2\.5|blind\s*spot|слепые\s*зон)/i,
   futureSearch:   /(фаза\s*3|future\s*search|topic\s*cluster|прогноз.*sero|поисков)/i,
   lifecycle:      /(фаза\s*4|lifecycle|жизненн)/i,
-  disruption:     /(фаза\s*5|disruption|serp|угроз)/i,
+  disruption:     /(фаза\s*5(?!b)|disruption|serp|угроз)/i,
+  yandex:         /(фаза\s*5b|яндекс-?экосистем|яндекс\s*$)/i,
   metaTrends:     /(фаза\s*6|meta-?trend|мета-?тренд)/i,
   actionPlan:     /(strategic\s*action\s*plan|финальный|action\s*plan)/i,
 };
@@ -224,16 +225,89 @@ export function extractTrendsFromMain(md) {
 
 // ── Парсинг main-результата целиком ───────────────────────────────────
 
+// Sentinel-маркеры машинно-читаемого блока трендов. Промпт `main.txt`
+// просит модель оборачивать TRENDS_JSON в HTML-комментарии. Мы их вырезаем
+// перед рендером, чтобы в «структурном» виде юзер не видел JSON-сырьё.
+const TRENDS_JSON_SENTINEL_RE =
+  /<!--\s*TRENDS_JSON_START\s*-->[\s\S]*?<!--\s*TRENDS_JSON_END\s*-->/i;
+
+/**
+ * Удаляет TRENDS_JSON-блок из markdown (для рендера).
+ */
+export function stripTrendsJsonBlock(md) {
+  return String(md || '').replace(TRENDS_JSON_SENTINEL_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * Объединяет тренды из таблицы Фазы 2 (надёжный fallback) с
+ * `trendsJsonFromBackend` (более точные имена + confidence + stage от модели).
+ *
+ * Контракт:
+ *   - Если `trendsJsonFromBackend.trends` присутствует и непустой — используем
+ *     его как основной источник (порядок, название, confidence, stage).
+ *     Дополнительно подтягиваем поля `drivers`/`vector` из табличного парсера
+ *     там, где имена совпадают по нормализованному виду.
+ *   - Иначе используем только табличный парсер.
+ */
+function _normalizeForMatch(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[*_`«»"']+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _mergeTrends(tableTrends, backendTrendsJson) {
+  const arr = (backendTrendsJson && Array.isArray(backendTrendsJson.trends))
+    ? backendTrendsJson.trends
+    : null;
+  if (!arr || !arr.length) {
+    return tableTrends.map((t) => ({ ...t, source: 'table' }));
+  }
+  // Индексируем табличные тренды для быстрого lookup.
+  const tableByNorm = new Map();
+  for (const t of tableTrends) tableByNorm.set(_normalizeForMatch(t.name), t);
+
+  return arr.map((bt) => {
+    const norm = _normalizeForMatch(bt.name);
+    const fallback = tableByNorm.get(norm) || {};
+    const drivers = Array.isArray(bt.drivers) && bt.drivers.length
+      ? bt.drivers.join(', ')
+      : (fallback.drivers || '');
+    return {
+      name:       String(bt.name || '').trim(),
+      drivers,
+      stage:      bt.stage      || fallback.stage  || '',
+      vector:     bt.vector     || fallback.vector || '',
+      signals:    Array.isArray(bt.signal_ids) && bt.signal_ids.length
+        ? bt.signal_ids.join(', ')
+        : (fallback.signals || ''),
+      confidence: bt.confidence || null,                 // low | medium | high
+      competitorCoverage: bt.competitor_coverage || null,// none | partial | covered
+      windowMonths:        bt.window_months || 0,
+      raw:        bt.name,
+      source:     'json',
+    };
+  });
+}
+
 /**
  * Готовит main-результат к красивому рендеру:
- *   { preamble, sections: [{ kind, title, body, table?, subs? }], trends: [...] }
+ *   { preamble, sections: [{ kind, title, body, table?, subs? }],
+ *     trends: [...], hasTrendsJson: bool }
  *
  * `kind` — один из ключей PHASE_KEYWORDS (или 'other'); используется в UI,
  * чтобы выбрать иконку/акцент для секции и понять, в какой секции таблица.
  * `subs` заполняется только для actionPlan (### ДЕЙСТВИЕ N).
+ *
+ * `trendsJsonFromBackend` (опционально) — объект `{ trends, signals_count,
+ * ru_cis_block_present }`, который backend распарсил из TRENDS_JSON-блока
+ * в pipeline и сохранил в `task.trends_json`. Если передан — используется
+ * как primary источник трендов (с confidence-бейджами в UI).
  */
-export function parseMainResult(md) {
-  const { preamble, sections } = splitByH2(md);
+export function parseMainResult(md, trendsJsonFromBackend = null) {
+  const cleanMd = stripTrendsJsonBlock(md);
+  const { preamble, sections } = splitByH2(cleanMd);
   const enriched = sections.map((s) => {
     const kind = _classifyMainSection(s.title);
     const table = parseFirstMarkdownTable(s.body);
@@ -244,13 +318,20 @@ export function parseMainResult(md) {
     }
     return { kind, title: s.title, body: s.body, table, subs };
   });
-  const trends = extractTrendsFromMain(md);
-  return { preamble, sections: enriched, trends };
+  const tableTrends = extractTrendsFromMain(cleanMd);
+  const trends = _mergeTrends(tableTrends, trendsJsonFromBackend);
+  return {
+    preamble,
+    sections: enriched,
+    trends,
+    hasTrendsJson: !!(trendsJsonFromBackend && Array.isArray(trendsJsonFromBackend.trends) && trendsJsonFromBackend.trends.length),
+  };
 }
 
 // ── Парсинг deep-dive результата ──────────────────────────────────────
 
 const DEEPDIVE_KEYWORDS = {
+  currentState:  /^(\s*0[\.\)]|\s*##\s*0)|состояние\s*тренда|current\s*state/i,
   semanticCore:  /^(\s*1[\.\)]|\s*##\s*1)|семантическ|семантика|long[-\s]?tail/i,
   hubAndSpoke:   /^(\s*2[\.\)]|\s*##\s*2)|hub\s*&?\s*spoke|архитектур|pillar/i,
   competitorGap: /^(\s*3[\.\)]|\s*##\s*3)|конкурентн|gap|пробел/i,
@@ -265,7 +346,8 @@ function _classifyDeepSection(title) {
 }
 
 export function parseDeepDiveResult(md) {
-  const { preamble, sections } = splitByH2(md);
+  const cleanMd = stripTrendsJsonBlock(md);
+  const { preamble, sections } = splitByH2(cleanMd);
   const enriched = sections.map((s) => {
     const kind = _classifyDeepSection(s.title);
     const table = parseFirstMarkdownTable(s.body);
