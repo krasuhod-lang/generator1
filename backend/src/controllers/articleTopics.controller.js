@@ -38,7 +38,11 @@ function clipStr(v, max) {
 function pickEnum(value, allowed) {
   if (!value) return '';
   const s = String(value).trim();
-  return allowed.includes(s) ? s : s.slice(0, 120);
+  // Строгая валидация: при невалидном enum-значении возвращаем пустую строку.
+  // Промпт-шаблон сам подставит «(не указано)», а БД сохранит пустое поле —
+  // вместо записи произвольного 120-символьного мусора, который мог бы
+  // дезориентировать LLM или попасть в логи.
+  return allowed.includes(s) ? s : '';
 }
 
 // ─── GET /api/article-topics ───────────────────────────────────────

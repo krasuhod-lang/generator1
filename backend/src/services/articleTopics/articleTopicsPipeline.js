@@ -57,6 +57,41 @@ function _interpolate(template, values) {
   return out;
 }
 
+/**
+ * Усечение markdown-текста с уважением к структурным границам.
+ *
+ * Тупой `str.slice(maxLen)` мог бы разрезать markdown-таблицу, кодовый
+ * блок или multi-byte UTF-8 последовательность пополам — модель получает
+ * сломанный фрагмент и иногда «доделывает» его странным образом.
+ *
+ * Стратегия: если строка короче лимита — возвращаем как есть; иначе
+ * пытаемся обрезать по последней «безопасной» границе перед лимитом
+ * (двойной перенос строки = граница абзаца/секции). Если такой границы
+ * нет — обрезаем по ближайшему одиночному переносу, и только в худшем
+ * случае — по сырому символьному лимиту. Финальное многоточие сигнализирует
+ * модели, что контекст усечён.
+ */
+function _truncateMarkdown(text, maxLen) {
+  const s = String(text || '');
+  if (s.length <= maxLen) return s;
+
+  // Берём только префикс длиной maxLen и ищем «безопасный» хвост, чтобы
+  // отрезать всё после него. Минимально допустимая длина обрезка — 70%
+  // от лимита: иначе мы сэкономили бы слишком мало контекста.
+  const minKeep = Math.floor(maxLen * 0.7);
+  const head = s.slice(0, maxLen);
+
+  const paraBreak = head.lastIndexOf('\n\n');
+  if (paraBreak >= minKeep) {
+    return head.slice(0, paraBreak).trimEnd() + '\n\n…(контекст усечён)';
+  }
+  const lineBreak = head.lastIndexOf('\n');
+  if (lineBreak >= minKeep) {
+    return head.slice(0, lineBreak).trimEnd() + '\n\n…(контекст усечён)';
+  }
+  return head.trimEnd() + '\n\n…(контекст усечён)';
+}
+
 const SYSTEM_INSTRUCTION =
   'You are a senior strategic foresight analyst and SEO forecaster. ' +
   'Reply in Russian unless the user explicitly asks otherwise. ' +
@@ -106,9 +141,7 @@ async function processArticleTopicTask(taskId) {
           [task.parent_task_id],
         );
         if (parentRows.length && parentRows[0].result_markdown) {
-          // Кратчайший дайджест: первые ~6000 символов родительского отчёта,
-          // чтобы не раздуть контекст deep-dive до десятков тысяч токенов.
-          parentContext = String(parentRows[0].result_markdown).slice(0, 6000);
+          parentContext = _truncateMarkdown(parentRows[0].result_markdown, 6000);
         }
       }
       userPrompt = _interpolate(_loadDeepDivePrompt(), {
