@@ -64,6 +64,7 @@ let queueRunning = false;
 const activeJobId = ref(null);
 const showModal   = ref(false);
 const copyState   = ref('idle'); // idle | copied
+const copyError   = ref('');     // ошибка копирования в модалке (Clipboard API недоступен и т. п.)
 
 const activeJob = computed(() =>
   jobs.value.find((j) => j.id === activeJobId.value) || null,
@@ -714,6 +715,7 @@ function openJob(jobId) {
   if (j.status !== 'done' && j.status !== 'error') return;
   activeJobId.value = jobId;
   copyState.value   = 'idle';
+  copyError.value   = '';
   showModal.value   = true;
 }
 
@@ -721,19 +723,21 @@ function closeModal() {
   showModal.value = false;
   activeJobId.value = null;
   copyState.value = 'idle';
+  copyError.value = '';
 }
 
 // ── Копирование ────────────────────────────────────────────────────────────
 async function copyActiveJson() {
   const j = activeJob.value;
   if (!j || !j.result) return;
+  copyError.value = '';
   try {
     await navigator.clipboard.writeText(j.result);
     copyState.value = 'copied';
     setTimeout(() => { copyState.value = 'idle'; }, 2000);
   } catch (e) {
     // Фолбэк: при отсутствии Clipboard API даём пользователю выделить руками.
-    formError.value = 'Не удалось скопировать автоматически: ' + (e.message || e) + '. Выделите JSON и скопируйте вручную.';
+    copyError.value = 'Не удалось скопировать автоматически: ' + (e.message || e) + '. Выделите JSON и скопируйте вручную.';
   }
 }
 
@@ -967,6 +971,12 @@ function fmtDate(dt) {
         </div>
 
         <div class="flex-1 overflow-auto p-5">
+          <div
+            v-if="copyError"
+            class="bg-amber-950/60 border border-amber-800 text-amber-200 rounded-lg px-4 py-2 text-xs mb-3"
+          >
+            ⚠️ {{ copyError }}
+          </div>
           <div
             v-if="activeJob.status === 'error'"
             class="bg-red-950/60 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-sm whitespace-pre-wrap"
