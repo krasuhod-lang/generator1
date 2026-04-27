@@ -17,6 +17,7 @@ const routes = [
   { path: '/meta-tags/:id',component: () => import('../views/MetaTagsResultPage.vue'), meta: { auth: true } },
   { path: '/link-article', component: () => import('../views/LinkArticlePage.vue'), meta: { auth: true } },
   { path: '/info-article', component: () => import('../views/InfoArticlePage.vue'), meta: { auth: true } },
+  { path: '/article-topics', component: () => import('../views/ArticleTopicsPage.vue'), meta: { auth: true } },
   { path: '/acf-json',     component: () => import('../views/AcfJsonPage.vue'),     meta: { auth: true } },
 
   // Admin routes

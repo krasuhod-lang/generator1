@@ -8,20 +8,22 @@ const router = useRouter();
 const auth   = useAuthStore();
 
 const TABS = [
-  { key: 'seo-text',     label: 'SEO текст',        icon: '📝', path: '/dashboard' },
-  { key: 'copilot',      label: 'AI-редактор',      icon: '🤖', path: '/copilot' },
-  { key: 'meta-tags',    label: 'Мета-теги',        icon: '🏷️', path: '/meta-tags' },
-  { key: 'link-article', label: 'Ссылочная статья', icon: '🔗', path: '/link-article' },
-  { key: 'info-article', label: 'Статья в блог',    icon: '📰', path: '/info-article' },
-  { key: 'acf-json',     label: 'JSON',             icon: '🧩', path: '/acf-json' },
+  { key: 'seo-text',       label: 'SEO текст',        icon: '📝', path: '/dashboard' },
+  { key: 'copilot',        label: 'AI-редактор',      icon: '🤖', path: '/copilot' },
+  { key: 'meta-tags',      label: 'Мета-теги',        icon: '🏷️', path: '/meta-tags' },
+  { key: 'link-article',   label: 'Ссылочная статья', icon: '🔗', path: '/link-article' },
+  { key: 'info-article',   label: 'Статья в блог',    icon: '📰', path: '/info-article' },
+  { key: 'article-topics', label: 'Темы статей',      icon: '🔮', path: '/article-topics' },
+  { key: 'acf-json',       label: 'JSON',             icon: '🧩', path: '/acf-json' },
 ];
 
 const activeTab = computed(() => {
   const p = route.path;
-  if (p.startsWith('/meta-tags'))    return 'meta-tags';
-  if (p.startsWith('/link-article')) return 'link-article';
-  if (p.startsWith('/info-article')) return 'info-article';
-  if (p.startsWith('/acf-json'))     return 'acf-json';
+  if (p.startsWith('/meta-tags'))      return 'meta-tags';
+  if (p.startsWith('/link-article'))   return 'link-article';
+  if (p.startsWith('/info-article'))   return 'info-article';
+  if (p.startsWith('/article-topics')) return 'article-topics';
+  if (p.startsWith('/acf-json'))       return 'acf-json';
   if (p.startsWith('/copilot') || /\/tasks\/[^/]+\/copilot/.test(p)) return 'copilot';
   return 'seo-text';
 });
