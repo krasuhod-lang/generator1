@@ -29,6 +29,13 @@ const AITUNNEL_API_KEY = 'sk-aitunnel-S81NPYt7iGa9X5Lsx9g4e8D9WXlAh5cm';
 const AITUNNEL_URL     = 'https://api.aitunnel.ru/v1/chat/completions';
 // «Qwen3.5 Plus» из ТЗ — у AITunnel это модель `qwen-plus`.
 const AITUNNEL_MODEL   = 'qwen3.5-plus-02-15';
+// Бюджет вывода модели. Поднят с 8192 → 16384, чтобы JSON-обвязка
+// (acf_fc_layout, schema-обёртки, повторение текста дословно) гарантированно
+// помещалась рядом с самим контентом и не приходила обрезанной.
+const MAX_OUTPUT_TOKENS = 16384;
+// Размер чанка по умолчанию. Уменьшен с 6000 → 4000 — это оставляет головой
+// запас на JSON-обвязку при MAX_OUTPUT_TOKENS=16384.
+const DEFAULT_CHUNK_LEN = 4000;
 
 // ── Состояние ──────────────────────────────────────────────────────────────
 const loadingTasks = ref(false);
@@ -111,31 +118,28 @@ async function selectTask(task) {
 }
 
 // ── Чанкование HTML ────────────────────────────────────────────────────────
-// Делим по границам блочных HTML-тегов, чтобы не рвать абзац посередине.
-// Если границ нет — режем по пустым строкам, как в исходном JSON-v2 (2).html.
-function chunkHtml(html, maxLength = 6000) {
-  if (!html) return [];
-  if (html.length <= maxLength) return [html];
-
-  // 1) Пытаемся резать по закрывающим блочным тегам
-  const parts = html.split(/(?<=<\/(?:p|h[1-6]|ul|ol|div|blockquote|table|section|article)>)/i);
-  if (parts.length > 1) {
-    return packParts(parts, maxLength);
-  }
-
-  // 2) Запасной вариант — по двойному переносу строки
-  const byBlanks = html.split(/\n\n+/);
-  if (byBlanks.length > 1) {
-    return packParts(byBlanks.map((p, i, arr) => (i < arr.length - 1 ? p + '\n\n' : p)), maxLength);
-  }
-
-  // 3) Жёсткая нарезка по символам как последний рубеж
-  const chunks = [];
-  for (let i = 0; i < html.length; i += maxLength) {
-    chunks.push(html.slice(i, i + maxLength));
-  }
-  return chunks;
-}
+// Принципы:
+//  • Никогда не режем посередине HTML-тега и посередине слова.
+//  • Иерархия точек разреза (от самой «крупной» к самой «мелкой»):
+//      1) закрывающие блочные теги: </p>, </h1..6>, </ul>, </ol>, </div>,
+//         </blockquote>, </table>, </section>, </article>
+//      2) </li>
+//      3) </tr>
+//      4) граница предложения «. » / «! » / «? »
+//      5) пробел между словами (только если предыдущих границ нет)
+//  • Если кусок всё равно > maxLength, рекурсивно дробим его той же лестницей.
+//  • Инвариант: chunks.join('') === html — проверяется перед запросом.
+const SPLIT_LADDER = [
+  /(?<=<\/(?:p|h[1-6]|ul|ol|div|blockquote|table|section|article)>)/i,
+  /(?<=<\/li>)/i,
+  /(?<=<\/tr>)/i,
+  // Граница предложения: точка/!/? + пробел; исключаем уже закрытые теги, чтобы
+  // не дублировать первую группу. Lookbehind по нескольким символам поддержан
+  // во всех современных браузерах (поддержка Vue 3 — ES2018+).
+  /(?<=[.!?])\s+/,
+  // Любой пробел/перенос — последний рубеж ПЕРЕД hard-slice.
+  /(?<=\s)(?=\S)/,
+];
 
 function packParts(parts, maxLength) {
   const chunks = [];
@@ -151,6 +155,49 @@ function packParts(parts, maxLength) {
   return chunks;
 }
 
+// Разрезает один кусок строки безопасно по лестнице сепараторов.
+// Возвращает массив подкусков, каждый ≤ maxLength по возможности.
+// НИКОГДА не режет по символам внутри слова или внутри тега — если ни один
+// сепаратор не срабатывает, возвращает [piece] (вызывающая сторона решает,
+// что делать; но мы сужаем чанк, прежде чем дойти до этого).
+function splitPiece(piece, maxLength, ladderIdx = 0) {
+  if (piece.length <= maxLength) return [piece];
+
+  for (let idx = ladderIdx; idx < SPLIT_LADDER.length; idx++) {
+    const re = SPLIT_LADDER[idx];
+    const parts = piece.split(re);
+    if (parts.length <= 1) continue;
+
+    // Сначала пакуем как есть.
+    const packed = packParts(parts, maxLength);
+    // Если что-то всё ещё слишком большое — рекурсивно дробим именно этот
+    // подкусок следующим уровнем лестницы.
+    const result = [];
+    for (const p of packed) {
+      if (p.length <= maxLength) {
+        result.push(p);
+      } else {
+        result.push(...splitPiece(p, maxLength, idx + 1));
+      }
+    }
+    // Если на этом уровне получилось хоть какое-то реальное разбиение —
+    // возвращаем результат; иначе пробуем следующий уровень.
+    if (result.length > 1 || result[0].length < piece.length) return result;
+  }
+
+  // Все уровни исчерпаны (нет ни тегов, ни пробелов). Возвращаем как есть —
+  // это единственное «слово» без пробелов; модель попробует его проглотить
+  // целиком. Hard-slice по символам сознательно НЕ применяем, чтобы не
+  // порвать слово/тег.
+  return [piece];
+}
+
+function chunkHtml(html, maxLength = DEFAULT_CHUNK_LEN) {
+  if (!html) return [];
+  if (html.length <= maxLength) return [html];
+  return splitPiece(html, maxLength, 0);
+}
+
 // ── Системный промт (перенос из JSON-v2 (2).html, оставлены только ─────────
 // ── 7 типов блоков, перечисленных в техническом задании) ───────────────────
 const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
@@ -160,6 +207,7 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 --- ЗАДАЧА 1: СОХРАННОСТЬ ТЕКСТА (ZERO REWRITE) ---
 - ЗАПРЕЩЕНО переписывать, сжимать, перефразировать или удалять оригинальный текст из тела абзацев.
 - Текст внутри полей text, content, answer должен состоять из 100% оригинальных абзацев.
+- ЗАПРЕЩЕНО менять, удалять или нормализовать пробелы, переносы строк, неразрывные пробелы и пунктуацию внутри text/content/answer — даже если ты считаешь, что так «красивее» или «грамотнее». Сохраняй пробельную ткань 1-в-1.
 - Все текстовые поля должны быть обернуты в валидный HTML (<p>, <ul>, <li>, <strong>).
 - ЗАПРЕЩЕНО дублировать контент. Каждый абзац должен попасть в JSON только 1 раз.
 - ЗАПРЕЩЕНО придумывать факты, цифры, цены или цитаты, которых нет в исходном тексте.
@@ -246,8 +294,270 @@ function extractCleanJson(str) {
     }
   }
 
-  if (lastIndex === -1) throw new Error('Не найдено корректное завершение JSON.');
+  if (lastIndex === -1) {
+    if (inString) {
+      throw new Error('JSON оборван внутри строки (модель не закрыла кавычку — вероятно, упёрлась в лимит токенов).');
+    }
+    throw new Error('Не найдено корректное завершение JSON.');
+  }
   return str.substring(firstBracket, lastIndex + 1);
+}
+
+// ── Утилиты пост-валидации сохранности текста ─────────────────────────────
+// Снимаем теги, декодируем сущности, нормализуем пробелы.
+function stripTagsAndNormalize(s) {
+  if (!s) return '';
+  // Сначала убираем теги, затем декодируем базовые HTML-сущности.
+  let t = String(s).replace(/<[^>]*>/g, ' ');
+  t = t
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+  // NFC + сворачивание любых пробелов (вкл. неразрывный) в один обычный.
+  try { t = t.normalize('NFC'); } catch (_) { /* старые движки */ }
+  t = t.replace(/[\s\u00A0]+/g, ' ').trim();
+  return t;
+}
+
+// Рекурсивно собирает все строковые значения из произвольной JSON-структуры.
+function collectStrings(node, out) {
+  if (node == null) return;
+  if (typeof node === 'string') { out.push(node); return; }
+  if (Array.isArray(node)) { for (const v of node) collectStrings(v, out); return; }
+  if (typeof node === 'object') {
+    for (const k of Object.keys(node)) collectStrings(node[k], out);
+  }
+}
+
+function outputPlainText(jsonArray) {
+  const all = [];
+  collectStrings(jsonArray, all);
+  return stripTagsAndNormalize(all.join(' '));
+}
+
+// Извлекаем только все text/content/answer/expert (для фолбэка expert→blocks).
+function collectTextFieldsDeep(node, out) {
+  if (node == null) return;
+  if (Array.isArray(node)) { for (const v of node) collectTextFieldsDeep(v, out); return; }
+  if (typeof node === 'object') {
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (typeof v === 'string' && /^(text|content|answer|expert|subtitle)$/i.test(k)) {
+        if (v.trim()) out.push(v);
+      } else if (v && typeof v === 'object') {
+        collectTextFieldsDeep(v, out);
+      }
+    }
+  }
+}
+
+// Делит plain-text на «фразы сохранности»: окна по WINDOW слов с шагом STEP.
+// Короткий хвост остаётся отдельным окном, чтобы не пропустить концовку.
+function buildPreservationPhrases(plain, windowWords = 6, stepWords = 3) {
+  const words = plain.split(' ').filter(Boolean);
+  if (words.length === 0) return [];
+  if (words.length <= windowWords) return [words.join(' ')];
+  const phrases = [];
+  for (let i = 0; i + windowWords <= words.length; i += stepWords) {
+    phrases.push(words.slice(i, i + windowWords).join(' '));
+  }
+  // Гарантируем, что последняя пачка слов покрыта.
+  const lastStart = Math.max(0, words.length - windowWords);
+  const last = words.slice(lastStart).join(' ');
+  if (phrases[phrases.length - 1] !== last) phrases.push(last);
+  return phrases;
+}
+
+// Возвращает массив пропавших фраз (пусто = всё на месте).
+function findMissingPhrases(inputPlain, outputPlain) {
+  const phrases = buildPreservationPhrases(inputPlain);
+  const missing = [];
+  for (const ph of phrases) {
+    if (!ph) continue;
+    if (outputPlain.indexOf(ph) === -1) missing.push(ph);
+  }
+  return missing;
+}
+
+// ── Один HTTP-вызов к AITunnel ────────────────────────────────────────────
+async function callAitunnel({ systemPrompt, userPrompt }) {
+  let response;
+  try {
+    response = await fetch(AITUNNEL_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // .trim() — на случай случайных пробелов/переносов в константе
+        Authorization: `Bearer ${AITUNNEL_API_KEY.trim()}`,
+      },
+      body: JSON.stringify({
+        model: AITUNNEL_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userPrompt },
+        ],
+        temperature: 0.1,
+        max_tokens: MAX_OUTPUT_TOKENS,
+      }),
+    });
+  } catch (networkError) {
+    throw new Error(
+      `Сеть недоступна (Failed to fetch). Проверьте интернет/VPN. Детали: ${networkError.message}`,
+    );
+  }
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Ошибка AITunnel ${response.status}: ${errText}`);
+  }
+  const data = await response.json();
+  if (!data.choices || data.choices.length === 0) {
+    throw new Error('AITunnel вернул пустой ответ.');
+  }
+  return data.choices[0];
+}
+
+function parseModelOutputArray(rawContent) {
+  let raw = rawContent || '';
+  raw = raw.replace(/```json/gi, '').replace(/```/g, '');
+  const cleanJson    = extractCleanJson(raw);
+  const parsedOutput = JSON.parse(cleanJson);
+  return Array.isArray(parsedOutput) ? parsedOutput : [parsedOutput];
+}
+
+// Обрабатывает ОДИН чанк: запрос → авто-ретрай при finish=length →
+// пост-валидация → один корректирующий ре-запрос → возврат массива блоков.
+// На неустранимых пропусках кидает Error со списком потерь.
+async function processChunk({
+  chunkHtmlText,
+  baseSystemPrompt,
+  expertAlreadyUsed,
+  chunkLabel,
+}) {
+  const systemPromptBase = expertAlreadyUsed
+    ? baseSystemPrompt + `\n\n[СИСТЕМНОЕ ВАЖНОЕ УВЕДОМЛЕНИЕ]: В предыдущих частях текста ТЫ УЖЕ СОЗДАЛ блок "expert". Лимит исчерпан! В этой части КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать "acf_fc_layout": "expert". Упаковывай любые цитаты в обычные "blocks".`
+    : baseSystemPrompt;
+
+  const userPrompt = `Обработай следующие данные (это часть HTML-текста статьи) и верни массив JSON для ACF. Сохрани каждый абзац дословно, только распредели по блокам:\n\n${chunkHtmlText}`;
+
+  const choice = await callAitunnel({ systemPrompt: systemPromptBase, userPrompt });
+
+  // Авто-ретрай при обрыве по длине: рекурсивно дробим этот же чанк пополам
+  // через тот же безопасный сплиттер и обрабатываем подкуски один за другим.
+  if (choice.finish_reason === 'length') {
+    const half = Math.max(800, Math.floor(chunkHtmlText.length / 2));
+    const sub = chunkHtml(chunkHtmlText, half);
+    if (sub.length <= 1) {
+      throw new Error(
+        `Модель не смогла закрыть JSON для ${chunkLabel} (длина ${chunkHtmlText.length} симв.) даже при максимальном бюджете и не удаётся безопасно перенарезать (нет границ тегов/предложений/слов). Сократите HTML вручную.`,
+      );
+    }
+    const merged = [];
+    let expertUsedLocal = expertAlreadyUsed;
+    for (let k = 0; k < sub.length; k++) {
+      const subRes = await processChunk({
+        chunkHtmlText: sub[k],
+        baseSystemPrompt,
+        expertAlreadyUsed: expertUsedLocal,
+        chunkLabel: `${chunkLabel} → подчасть ${k + 1}/${sub.length}`,
+      });
+      for (const b of subRes.blocks) {
+        if (b && b.acf_fc_layout === 'expert') expertUsedLocal = true;
+        merged.push(b);
+      }
+    }
+    return { blocks: merged, expertUsedAfter: expertUsedLocal };
+  }
+
+  let outputArray = parseModelOutputArray(choice.message?.content);
+
+  // Пост-валидация сохранности текста.
+  const inputPlain = stripTagsAndNormalize(chunkHtmlText);
+  let outPlain     = outputPlainText(outputArray);
+  let missing      = findMissingPhrases(inputPlain, outPlain);
+
+  if (missing.length > 0) {
+    // Один корректирующий ре-запрос: даём модели список потерянных фрагментов
+    // и просим вернуть их дословно в подходящие text/content/answer.
+    const sample = missing.slice(0, 20);
+    const correctiveSystem = systemPromptBase + `\n\n[ИСПРАВЛЕНИЕ — КРИТИЧНО]
+В предыдущей попытке ты ПОТЕРЯЛ перечисленные ниже фрагменты исходного текста. Верни ИХ ВСЕ ДОСЛОВНО внутри подходящих полей text/content/answer соответствующих блоков. Не перефразируй, не сокращай, не нормализуй пробелы.
+Потерянные фрагменты (по одной строке на фрагмент):
+${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\n• …и ещё ${missing.length - sample.length} фрагмент(ов) — не забудь их тоже.` : ''}`;
+    const correctiveUser = `Сформируй массив JSON ACF заново для того же исходника, СОХРАНИВ ВСЕ потерянные фрагменты дословно. Исходник:\n\n${chunkHtmlText}`;
+    const choice2 = await callAitunnel({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
+    if (choice2.finish_reason !== 'length') {
+      try {
+        const retryArr = parseModelOutputArray(choice2.message?.content);
+        const retryPlain = outputPlainText(retryArr);
+        const retryMissing = findMissingPhrases(inputPlain, retryPlain);
+        if (retryMissing.length === 0) {
+          outputArray = retryArr;
+          outPlain = retryPlain;
+          missing = [];
+        } else if (retryMissing.length < missing.length) {
+          // Прогресс есть, но не идеально — берём лучший вариант и сообщаем.
+          outputArray = retryArr;
+          outPlain = retryPlain;
+          missing = retryMissing;
+        }
+      } catch (parseErr) {
+        // Если корректирующий ответ не распарсился — оставляем исходную ошибку.
+        console.warn('[AcfJson] corrective retry parse failed:', parseErr);
+      }
+    }
+  }
+
+  if (missing.length > 0) {
+    const sample = missing.slice(0, 5).map((m) => `«${m}»`).join('; ');
+    const totalLost = missing.reduce((a, m) => a + m.length, 0);
+    throw new Error(
+      `${chunkLabel}: после ре-запроса в JSON отсутствуют ${missing.length} фрагмент(ов) исходного текста (≈${totalLost} симв.). Примеры: ${sample}. Сгенерированный JSON НЕ применён, чтобы не потерять контент.`,
+    );
+  }
+
+  // Программная защита от галлюцинаций: единственность блока "expert".
+  // ВАЖНО: если блок expert надо превратить в blocks, собираем ВЕСЬ текст из
+  // всех текстовых полей этого блока (text/content/answer/expert/subtitle),
+  // чтобы не потерять ни абзаца независимо от формы, в которой модель его дала.
+  const finalBlocks = [];
+  let expertUsedAfter = expertAlreadyUsed;
+  for (const block of outputArray) {
+    if (block && block.acf_fc_layout === 'expert') {
+      if (expertUsedAfter) {
+        const allTexts = [];
+        collectTextFieldsDeep(block, allTexts);
+        // Если HTML-обёртки не нашлось — оборачиваем сами, чтобы остаться валидными.
+        const joined = allTexts.length
+          ? allTexts.map((t) => (/^\s*<[^>]+>/.test(t) ? t : `<p>${t}</p>`)).join('\n')
+          : '';
+        const converted = {
+          acf_fc_layout: 'blocks',
+          title: block.title || '',
+          subtitle: '',
+          blocks: [{
+            block_width: '12',
+            bg_color:    'default',
+            text:        joined,
+            image:       '',
+            url:         '',
+          }],
+          type: '1',
+          vert_center: false,
+          block_equal_height: false,
+        };
+        finalBlocks.push(converted);
+        continue;
+      } else {
+        expertUsedAfter = true;
+      }
+    }
+    finalBlocks.push(block);
+  }
+
+  return { blocks: finalBlocks, expertUsedAfter };
 }
 
 // ── Главное действие: сформировать JSON ────────────────────────────────────
@@ -263,8 +573,17 @@ async function generateJson() {
 
   generating.value = true;
   try {
-    const chunks = chunkHtml(selectedHtml.value, 6000);
-    const total  = chunks.length;
+    const html = selectedHtml.value;
+    const chunks = chunkHtml(html, DEFAULT_CHUNK_LEN);
+
+    // Инвариант сохранности на уровне сплиттера: конкатенация чанков должна
+    // быть равна исходному HTML, иначе мы где-то «уронили» символы и дальше
+    // никакая пост-валидация уже не поможет.
+    if (chunks.join('') !== html) {
+      throw new Error('Внутренняя ошибка: чанкование изменило исходный HTML (нарушен инвариант chunks.join === html). Прерывание.');
+    }
+
+    const total = chunks.length;
     const finalArray = [];
     let expertAlreadyUsed = false;
 
@@ -273,79 +592,14 @@ async function generateJson() {
         ? `Маппинг контента: часть ${i + 1} из ${total}…`
         : 'Анализ и сборка JSON…';
 
-      let systemPrompt = BASE_SYSTEM_PROMPT;
-      if (expertAlreadyUsed) {
-        systemPrompt += `\n\n[СИСТЕМНОЕ ВАЖНОЕ УВЕДОМЛЕНИЕ]: В предыдущих частях текста ТЫ УЖЕ СОЗДАЛ блок "expert". Лимит исчерпан! В этой части КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать "acf_fc_layout": "expert". Упаковывай любые цитаты в обычные "blocks".`;
-      }
-
-      const userPrompt = `Обработай следующие данные (это часть HTML-текста статьи) и верни массив JSON для ACF. Сохрани каждый абзац дословно, только распредели по блокам:\n\n${chunks[i]}`;
-
-      let response;
-      try {
-        response = await fetch(AITUNNEL_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            // .trim() — на случай случайных пробелов/переносов в константе
-            Authorization: `Bearer ${AITUNNEL_API_KEY.trim()}`,
-          },
-          body: JSON.stringify({
-            model: AITUNNEL_MODEL,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user',   content: userPrompt },
-            ],
-            temperature: 0.1,
-            max_tokens: 8192,
-          }),
-        });
-      } catch (networkError) {
-        throw new Error(
-          `Сеть недоступна (Failed to fetch). Проверьте интернет/VPN. Детали: ${networkError.message}`,
-        );
-      }
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Ошибка AITunnel ${response.status}: ${errText}`);
-      }
-
-      const data = await response.json();
-      if (!data.choices || data.choices.length === 0) {
-        throw new Error('AITunnel вернул пустой ответ.');
-      }
-      if (data.choices[0].finish_reason === 'length') {
-        throw new Error('Текст слишком большой — модель не успела закрыть JSON. Попробуйте сократить HTML.');
-      }
-
-      let raw = data.choices[0].message?.content || '';
-      raw = raw.replace(/```json/gi, '').replace(/```/g, '');
-
-      const cleanJson    = extractCleanJson(raw);
-      const parsedOutput = JSON.parse(cleanJson);
-      const outputArray  = Array.isArray(parsedOutput) ? parsedOutput : [parsedOutput];
-
-      // Программная защита от галлюцинаций: единственность блока "expert"
-      for (const block of outputArray) {
-        if (block && block.acf_fc_layout === 'expert') {
-          if (expertAlreadyUsed) {
-            // Принудительно конвертируем в обычный "blocks"
-            block.acf_fc_layout = 'blocks';
-            block.blocks = [{
-              block_width: '12',
-              bg_color:    'default',
-              text:        block.text || '',
-              image:       '',
-              url:         '',
-            }];
-            delete block.expert;
-            delete block.text;
-          } else {
-            expertAlreadyUsed = true;
-          }
-        }
-        finalArray.push(block);
-      }
+      const { blocks, expertUsedAfter } = await processChunk({
+        chunkHtmlText: chunks[i],
+        baseSystemPrompt: BASE_SYSTEM_PROMPT,
+        expertAlreadyUsed,
+        chunkLabel: `Часть ${i + 1} из ${total}`,
+      });
+      expertAlreadyUsed = expertUsedAfter;
+      for (const b of blocks) finalArray.push(b);
     }
 
     resultJson.value = JSON.stringify(finalArray, null, 2);
@@ -353,6 +607,8 @@ async function generateJson() {
   } catch (err) {
     console.error('[AcfJson] generation error:', err);
     errorMsg.value = 'Ошибка: ' + err.message;
+    // Сознательно не пишем «битый» JSON в resultJson, чтобы пользователь не
+    // импортировал в WordPress контент с потерями.
   } finally {
     generating.value = false;
   }
