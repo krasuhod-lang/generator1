@@ -26,6 +26,7 @@ const adminRoutes = require('./src/routes/admin.routes');
 const editorCopilotRoutes = require('./src/routes/editorCopilot.routes');
 const metaTagsRoutes      = require('./src/routes/metaTags.routes');
 const linkArticleRoutes   = require('./src/routes/linkArticle.routes');
+const articleTopicsRoutes = require('./src/routes/articleTopics.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -101,6 +102,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/editor-copilot', editorCopilotRoutes);
 app.use('/api/meta-tags',      metaTagsRoutes);
 app.use('/api/link-article',   linkArticleRoutes);
+app.use('/api/article-topics', articleTopicsRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -175,6 +177,14 @@ const start = async () => {
       await recoverStuckLinkArticleTasks();
     } catch (err) {
       console.warn('[Server] Link-article recovery skipped:', err.message);
+    }
+
+    // После рестарта — то же для задач генератора тем статей.
+    try {
+      const { recoverStuckArticleTopicTasks } = require('./src/services/articleTopics/articleTopicsPipeline');
+      await recoverStuckArticleTopicTasks();
+    } catch (err) {
+      console.warn('[Server] Article-topics recovery skipped:', err.message);
     }
 
     app.listen(PORT, () => {
@@ -501,6 +511,56 @@ async function ensureSchema() {
         ON link_article_tasks (eeat_score)
         WHERE eeat_score IS NOT NULL
     `);
+
+    // ─── Migration 015: Article Topic Forecaster (Темы статей) ───────
+    // Foresight-генератор тем статей. Один Gemini-вызов → markdown-отчёт.
+    // Поддерживается main / deep_dive (deep_dive ссылается на main).
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'article_topic_status') THEN
+          CREATE TYPE article_topic_status AS ENUM ('queued', 'running', 'done', 'error');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'article_topic_mode') THEN
+          CREATE TYPE article_topic_mode AS ENUM ('main', 'deep_dive');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS article_topic_tasks (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        mode              article_topic_mode NOT NULL DEFAULT 'main',
+        parent_task_id    UUID REFERENCES article_topic_tasks(id) ON DELETE SET NULL,
+        niche             TEXT NOT NULL,
+        region            TEXT NOT NULL DEFAULT '',
+        horizon           TEXT NOT NULL DEFAULT '',
+        audience          TEXT NOT NULL DEFAULT '',
+        market_stage      TEXT NOT NULL DEFAULT '',
+        search_ecosystem  TEXT NOT NULL DEFAULT '',
+        top_competitors   TEXT NOT NULL DEFAULT '',
+        trend_name        TEXT,
+        status            article_topic_status NOT NULL DEFAULT 'queued',
+        error_message     TEXT,
+        result_markdown   TEXT,
+        llm_model         TEXT,
+        gemini_tokens_in  BIGINT NOT NULL DEFAULT 0,
+        gemini_tokens_out BIGINT NOT NULL DEFAULT 0,
+        cost_usd          NUMERIC(12, 6) NOT NULL DEFAULT 0,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at        TIMESTAMPTZ,
+        completed_at      TIMESTAMPTZ,
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_user_created ON article_topic_tasks (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_status       ON article_topic_tasks (status)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_parent       ON article_topic_tasks (parent_task_id) WHERE parent_task_id IS NOT NULL`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

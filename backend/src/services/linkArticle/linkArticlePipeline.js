@@ -546,11 +546,15 @@ function embedImages(html, imagePrompts) {
   for (const p of imagePrompts) {
     const placeholder = `<!-- IMAGE_SLOT_${p.slot} -->`;
     if (p.status === 'done' && p.image_base64) {
+      // Изображение вставляется «чистым»: без figcaption-комментария под картинкой.
+      // alt-атрибут оставляем — он невидим на странице, но нужен для SEO/доступности
+      // и обычно требуется биржевыми проверками. Поведение копирования (как HTML и
+      // как форматированный текст) от этого не страдает: <img> с data:base64 src
+      // переносится в буфер вместе с остальным контентом.
       const alt = escapeHtml(p.alt_ru || '');
       const figure =
         `<figure class="link-article-image">` +
         `<img src="data:${p.mime_type};base64,${p.image_base64}" alt="${alt}" />` +
-        (alt ? `<figcaption>${alt}</figcaption>` : '') +
         `</figure>`;
       out = out.replace(placeholder, figure);
     } else {
