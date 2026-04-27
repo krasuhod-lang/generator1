@@ -8,12 +8,12 @@ const router = useRouter();
 const auth   = useAuthStore();
 
 const TABS = [
-  { key: 'seo-text',     label: 'Генератор SEO текста',         icon: '📝', path: '/dashboard' },
-  { key: 'copilot',      label: 'AI-Редактор',                  icon: '🤖', path: '/copilot' },
-  { key: 'meta-tags',    label: 'Генератор Мета-тегов',         icon: '🏷️', path: '/meta-tags' },
-  { key: 'link-article', label: 'Генератор ссылочной статьи',   icon: '🔗', path: '/link-article' },
-  { key: 'info-article', label: 'Генератор информационной статьи', icon: '📰', path: '/info-article' },
-  { key: 'acf-json',     label: 'Сформировать JSON',               icon: '🧩', path: '/acf-json' },
+  { key: 'seo-text',     label: 'SEO текст',        icon: '📝', path: '/dashboard' },
+  { key: 'copilot',      label: 'AI-редактор',      icon: '🤖', path: '/copilot' },
+  { key: 'meta-tags',    label: 'Мета-теги',        icon: '🏷️', path: '/meta-tags' },
+  { key: 'link-article', label: 'Ссылочная статья', icon: '🔗', path: '/link-article' },
+  { key: 'info-article', label: 'Статья в блог',    icon: '📰', path: '/info-article' },
+  { key: 'acf-json',     label: 'JSON',             icon: '🧩', path: '/acf-json' },
 ];
 
 const activeTab = computed(() => {
