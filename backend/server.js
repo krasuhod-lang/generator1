@@ -562,6 +562,35 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_status       ON article_topic_tasks (status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_parent       ON article_topic_tasks (parent_task_id) WHERE parent_task_id IS NOT NULL`);
 
+    // ─── Migration 016: Article Topics — enhancements (plan B/C) ──────
+    // Добавляем JSONB-колонки для structured trends, evaluator-отчёта и
+    // снимка module-context. Создаём реестр трендов для дедупа и
+    // cross-niche инсайтов. Все команды идемпотентны.
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS trends_json         JSONB`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS evaluator_report    JSONB`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS module_context_used JSONB`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS article_topic_trends (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id         UUID NOT NULL REFERENCES users(id)               ON DELETE CASCADE,
+        task_id         UUID NOT NULL REFERENCES article_topic_tasks(id) ON DELETE CASCADE,
+        name            TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        niche           TEXT NOT NULL DEFAULT '',
+        stage           TEXT,
+        confidence      TEXT,
+        drivers         JSONB DEFAULT '[]'::jsonb,
+        signal_ids      JSONB DEFAULT '[]'::jsonb,
+        vector          TEXT,
+        competitor_coverage TEXT,
+        window_months   INTEGER DEFAULT 0,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_trends_user_norm  ON article_topic_trends (user_id, normalized_name, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_trends_task       ON article_topic_trends (task_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_trends_user_niche ON article_topic_trends (user_id, niche, normalized_name)`);
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

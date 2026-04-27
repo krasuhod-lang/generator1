@@ -21,6 +21,12 @@ const path = require('path');
 const db   = require('../../config/db');
 const { callGemini } = require('../llm/gemini.adapter');
 const { calcCost }   = require('../metrics/priceCalculator');
+const {
+  extractTrendsJsonBlock,
+  persistExtractedTrends,
+  buildSiblingDeepDivesBlock,
+} = require('./articleTopicsTrends');
+const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 
 const PROMPTS_DIR = path.join(__dirname, '..', '..', 'prompts', 'articleTopics');
 
@@ -131,6 +137,7 @@ async function processArticleTopicTask(taskId) {
 
   try {
     let userPrompt;
+    let siblingsCount = 0;
     if (task.mode === 'deep_dive') {
       // Подтягиваем родительский контекст (если есть) — чтобы deep-dive не
       // был оторван от основного анализа.
@@ -144,14 +151,25 @@ async function processArticleTopicTask(taskId) {
           parentContext = _truncateMarkdown(parentRows[0].result_markdown, 6000);
         }
       }
+      // Sibling-awareness: подмешиваем выжимку других deep-dive по этому же
+      // parent-у, чтобы модель не дублировала pillar/cluster страницы.
+      // На любой сбой возвращается заглушка — не блокируем deep-dive.
+      const siblingBlock = await buildSiblingDeepDivesBlock({
+        parentTaskId:  task.parent_task_id,
+        currentTaskId: task.id,
+      });
+      // Грубая оценка количества siblings — для аудита module_context_used.
+      siblingsCount = (siblingBlock.match(/^### Sibling: /gm) || []).length;
+
       userPrompt = _interpolate(_loadDeepDivePrompt(), {
-        TREND_NAME:       task.trend_name || '',
-        NICHE:            task.niche      || '',
-        REGION:           task.region     || '',
-        HORIZON:          task.horizon    || '',
-        AUDIENCE:         task.audience   || '',
-        SEARCH_ECOSYSTEM: task.search_ecosystem || '',
-        PARENT_CONTEXT:   parentContext || '(отсутствует — опирайся только на тренд и нишу)',
+        TREND_NAME:         task.trend_name || '',
+        NICHE:              task.niche      || '',
+        REGION:             task.region     || '',
+        HORIZON:            task.horizon    || '',
+        AUDIENCE:           task.audience   || '',
+        SEARCH_ECOSYSTEM:   task.search_ecosystem || '',
+        PARENT_CONTEXT:     parentContext || '(отсутствует — опирайся только на тренд и нишу)',
+        SIBLING_DEEP_DIVES: siblingBlock,
       });
     } else {
       userPrompt = _interpolate(_loadMainPrompt(), {
@@ -182,6 +200,37 @@ async function processArticleTopicTask(taskId) {
     const tokensOut = Number(result.tokensOut || 0);
     const costUsd   = calcCost('gemini', tokensIn, tokensOut, false);
 
+    // ── Post-processing: вытаскиваем TRENDS_JSON-блок (только для main),
+    // ── сохраняем в trends_json + регистре article_topic_trends.
+    // Все ошибки парсинга/persist — гасим warn'ом, статус задачи не страдает.
+    let trendsJson = null;
+    if (task.mode === 'main') {
+      try {
+        trendsJson = extractTrendsJsonBlock(result.text);
+      } catch (parseErr) {
+        console.warn(`[articleTopics] TRENDS_JSON parse failed for ${taskId}: ${parseErr.message}`);
+      }
+      if (trendsJson && Array.isArray(trendsJson.trends) && trendsJson.trends.length) {
+        // persistExtractedTrends сам ловит свои ошибки.
+        await persistExtractedTrends({
+          taskId,
+          userId: task.user_id,
+          niche:  task.niche,
+          trends: trendsJson.trends,
+        });
+      }
+    }
+
+    // Снимок того, какие inputs реально подмешаны — для последующего
+    // DSPy/MIPROv2 анализа качества (а пока — для отладки в admin-панели).
+    const moduleContextUsed = {
+      mode:              task.mode,
+      siblings_injected: siblingsCount,
+      trends_extracted:  trendsJson && Array.isArray(trendsJson.trends) ? trendsJson.trends.length : 0,
+      ru_cis_block:      trendsJson ? trendsJson.ru_cis_block_present : null,
+      generated_at:      new Date().toISOString(),
+    };
+
     await db.query(
       `UPDATE article_topic_tasks
           SET status = 'done',
@@ -190,11 +239,27 @@ async function processArticleTopicTask(taskId) {
               gemini_tokens_in  = $4,
               gemini_tokens_out = $5,
               cost_usd          = $6,
+              trends_json       = $7,
+              module_context_used = $8,
               completed_at      = NOW(),
               updated_at        = NOW()
         WHERE id = $1`,
-      [taskId, result.text, result.model || null, tokensIn, tokensOut, costUsd],
+      [
+        taskId, result.text, result.model || null, tokensIn, tokensOut, costUsd,
+        trendsJson ? JSON.stringify(trendsJson) : null,
+        JSON.stringify(moduleContextUsed),
+      ],
     );
+
+    // ── Optional Stage-8-style evaluator (DeepSeek LLM-as-judge).
+    // Гейтится ARTICLE_TOPICS_EVALUATOR_ENABLED=true (default OFF — нулевой
+    // оверхед). Запускаем fire-and-forget — отчёт сохранится в
+    // evaluator_report отдельной UPDATE-операцией.
+    Promise.resolve()
+      .then(() => runArticleTopicsEvaluator(taskId, task, result.text))
+      .catch((evalErr) => {
+        console.warn(`[articleTopics] evaluator failed for ${taskId}: ${evalErr && evalErr.message}`);
+      });
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     console.error(`[articleTopics] Task ${taskId} failed:`, msg);

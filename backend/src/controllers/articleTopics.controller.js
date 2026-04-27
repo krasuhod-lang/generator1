@@ -12,6 +12,7 @@
 
 const db = require('../config/db');
 const { processArticleTopicTask } = require('../services/articleTopics/articleTopicsPipeline');
+const { findDuplicateDeepDives } = require('../services/articleTopics/articleTopicsTrends');
 
 // Лимиты длины — чтобы не дать раздуть промпт неосторожным копипастом
 // и не зацепить лимит входа Gemini-адаптера.
@@ -53,6 +54,7 @@ async function listArticleTopicTasks(req, res, next) {
               market_stage, search_ecosystem, top_competitors, trend_name,
               status, error_message, llm_model,
               gemini_tokens_in, gemini_tokens_out, cost_usd,
+              trends_json, evaluator_report,
               created_at, started_at, completed_at
          FROM article_topic_tasks
         WHERE user_id = $1
@@ -133,6 +135,27 @@ async function createArticleTopicDeepDive(req, res, next) {
     const parent = parentRows[0];
     if (parent.status !== 'done') {
       return res.status(409).json({ error: 'Родительская задача ещё не завершена' });
+    }
+
+    // Дедуп-проверка: если у пользователя уже есть deep-dive с тем же
+    // нормализованным именем тренда — возвращаем 409 со списком найденных
+    // задач, чтобы UI мог показать предупреждение и предложить открыть
+    // существующий результат (или явно подтвердить пересоздание через
+    // ?force=1). Дублирование не блокируется жёстко — это soft-warning.
+    if (!body.force) {
+      const duplicates = await findDuplicateDeepDives({
+        userId:    req.user.id,
+        trendName: trend_name,
+        limit:     3,
+      });
+      if (duplicates.length) {
+        return res.status(409).json({
+          error:      'duplicate_deep_dive',
+          message:    'У вас уже есть deep-dive с таким же названием тренда',
+          duplicates,
+          hint:       'Передайте force=true в теле запроса, чтобы создать новый прогон поверх существующего',
+        });
+      }
     }
 
     const { rows } = await db.query(
