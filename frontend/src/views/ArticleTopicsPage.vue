@@ -17,6 +17,10 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import AppLayout from '../components/AppLayout.vue';
 import { useArticleTopicsStore } from '../stores/articleTopics.js';
+import {
+  parseMainResult, parseDeepDiveResult,
+  renderInlineMarkdown, sectionToPlainText,
+} from '../utils/articleTopicsParser.js';
 
 const store = useArticleTopicsStore();
 
@@ -85,19 +89,137 @@ const activeTaskId = ref(null);
 const activeTask   = ref(null);
 const modalLoading = ref(false);
 const modalError   = ref('');
-const copyState    = ref('idle'); // idle | copied
 const copyError    = ref('');
 
 const trendInput   = ref('');
 const deepDiveBusy = ref(false);
 const deepDiveErr  = ref('');
 
+// ── Структурированный рендер результата ───────────────────────────────
+// 'pretty' = разбираем markdown на секции/таблицы/тренды и рисуем
+//            красивыми карточками; 'raw' = старый <pre> с сырым markdown.
+// По умолчанию pretty: задача всей этой страницы — давать готовый к
+// шарингу результат, а не «вот тебе кусок markdown, разбирайся».
+const viewMode = ref('pretty'); // 'pretty' | 'raw'
+
+const parsedMain = computed(() => {
+  if (!activeTask.value || activeTask.value.mode !== 'main' ||
+      activeTask.value.status !== 'done' || !activeTask.value.result_markdown) {
+    return null;
+  }
+  try {
+    return parseMainResult(activeTask.value.result_markdown);
+  } catch (_) {
+    return null;
+  }
+});
+
+const parsedDeepDive = computed(() => {
+  if (!activeTask.value || activeTask.value.mode !== 'deep_dive' ||
+      activeTask.value.status !== 'done' || !activeTask.value.result_markdown) {
+    return null;
+  }
+  try {
+    return parseDeepDiveResult(activeTask.value.result_markdown);
+  } catch (_) {
+    return null;
+  }
+});
+
+// Per-section "copied" feedback — храним id последней скопированной кнопки,
+// чтобы показать ✅ только на нужной кнопке, а не на всех сразу.
+const lastCopied = ref({ id: '', mode: '' }); // mode: 'md' | 'text'
+let lastCopiedTimer = null;
+
+async function copyText(text, id, mode = 'text') {
+  if (!text) return;
+  copyError.value = '';
+  try {
+    await navigator.clipboard.writeText(text);
+    lastCopied.value = { id, mode };
+    if (lastCopiedTimer) clearTimeout(lastCopiedTimer);
+    lastCopiedTimer = setTimeout(() => {
+      lastCopied.value = { id: '', mode: '' };
+    }, 2000);
+  } catch (e) {
+    copyError.value = 'Не удалось скопировать автоматически: ' + (e.message || e) +
+                      '. Выделите текст и скопируйте вручную.';
+  }
+}
+function isCopied(id, mode) {
+  return lastCopied.value.id === id && lastCopied.value.mode === mode;
+}
+
+function copySection(section, mode = 'text') {
+  const id = `section:${section.kind || 'other'}:${section.title}`;
+  if (mode === 'md') {
+    // Реконструируем markdown секции (## заголовок + body), чтобы вставка
+    // в Notion/Obsidian/чат сразу выглядела как ожидается.
+    copyText(`## ${section.title}\n\n${section.body || ''}`.trim(), id, 'md');
+  } else {
+    copyText(sectionToPlainText(section), id, 'text');
+  }
+}
+
+function copyFullResult(mode = 'md') {
+  const md = activeTask.value?.result_markdown;
+  if (!md) return;
+  if (mode === 'md') {
+    copyText(md, 'all', 'md');
+  } else {
+    // plain text: проходим по всем распарсенным секциям.
+    const parsed = parsedMain.value || parsedDeepDive.value;
+    if (!parsed) return copyText(md, 'all', 'text');
+    const parts = [];
+    if (parsed.preamble) parts.push(parsed.preamble);
+    for (const s of parsed.sections) parts.push(sectionToPlainText(s));
+    copyText(parts.join('\n\n'), 'all', 'text');
+  }
+}
+
+/** Готовит «список тем статей» для копирования в редакционный план. */
+function copyArticleTopics() {
+  // Ищем секцию Future Search (Фаза 3) — там макро-темы и long-tail.
+  // Если её нет, fallback — секция трендов.
+  const parsed = parsedMain.value;
+  if (!parsed) return;
+  const target = parsed.sections.find((s) => s.kind === 'futureSearch')
+              || parsed.sections.find((s) => s.kind === 'trends');
+  if (target) copyText(sectionToPlainText(target), 'topics', 'text');
+}
+
+/** Копирует полный план (Action Plan + темы) — самое нужное для команды. */
+function copyActionPlan() {
+  const parsed = parsedMain.value;
+  if (!parsed) return;
+  const ap = parsed.sections.find((s) => s.kind === 'actionPlan');
+  if (ap) copyText(sectionToPlainText(ap), 'plan', 'text');
+}
+
+/** Копирует секцию deep-dive по её kind ('semanticCore' | …). */
+function copyDeepDiveSectionByKind(kind) {
+  const parsed = parsedDeepDive.value;
+  if (!parsed) return;
+  const sec = parsed.sections.find((s) => s.kind === kind);
+  if (sec) copySection(sec, 'text');
+}
+
+/**
+ * Запускает deep-dive по конкретному тренду (клик по кнопке в карточке).
+ * Если уже идёт submit — игнорируем; иначе подставляем имя в trendInput
+ * и переиспользуем существующую логику startDeepDive().
+ */
+async function deepDiveTrend(name) {
+  if (deepDiveBusy.value) return;
+  trendInput.value = name;
+  await startDeepDive();
+}
+
 async function openTask(id) {
   activeTaskId.value = id;
   activeTask.value   = null;
   modalLoading.value = true;
   modalError.value   = '';
-  copyState.value    = 'idle';
   copyError.value    = '';
   trendInput.value   = '';
   deepDiveErr.value  = '';
@@ -113,24 +235,11 @@ async function openTask(id) {
 function closeModal() {
   activeTaskId.value = null;
   activeTask.value   = null;
-  copyState.value    = 'idle';
   copyError.value    = '';
   trendInput.value   = '';
   deepDiveErr.value  = '';
-}
-
-async function copyResult() {
-  const md = activeTask.value?.result_markdown;
-  if (!md) return;
-  copyError.value = '';
-  try {
-    await navigator.clipboard.writeText(md);
-    copyState.value = 'copied';
-    setTimeout(() => { copyState.value = 'idle'; }, 2000);
-  } catch (e) {
-    copyError.value = 'Не удалось скопировать автоматически: ' + (e.message || e) +
-                      '. Выделите текст и скопируйте вручную.';
-  }
+  lastCopied.value   = { id: '', mode: '' };
+  if (lastCopiedTimer) { clearTimeout(lastCopiedTimer); lastCopiedTimer = null; }
 }
 
 async function startDeepDive() {
@@ -191,6 +300,55 @@ function statusClass(s) {
 }
 function modeLabel(m) { return m === 'deep_dive' ? 'Deep-dive' : 'Анализ'; }
 function fmtDate(s)   { return s ? new Date(s).toLocaleString('ru-RU') : '—'; }
+
+// Презентация секций распарсенного отчёта: иконка + цветовой акцент. Ключи
+// совпадают с PHASE_KEYWORDS / DEEPDIVE_KEYWORDS из articleTopicsParser.js.
+const SECTION_META = {
+  signals:       { icon: '📡', accent: 'border-l-4 border-sky-500',     pill: 'Слабые сигналы' },
+  trends:        { icon: '🚀', accent: 'border-l-4 border-indigo-500',  pill: 'Тренды' },
+  blindSpots:    { icon: '🎯', accent: 'border-l-4 border-fuchsia-500', pill: 'Слепые зоны' },
+  futureSearch:  { icon: '🔮', accent: 'border-l-4 border-emerald-500', pill: 'Темы статей' },
+  lifecycle:     { icon: '⏳', accent: 'border-l-4 border-amber-500',   pill: 'Жизненный цикл' },
+  disruption:    { icon: '⚡', accent: 'border-l-4 border-rose-500',    pill: 'Disruption / SERP' },
+  metaTrends:    { icon: '🌐', accent: 'border-l-4 border-violet-500',  pill: 'Мета-тренды' },
+  actionPlan:    { icon: '✅', accent: 'border-l-4 border-emerald-400 bg-emerald-950/20', pill: 'Action Plan' },
+  semanticCore:  { icon: '🔑', accent: 'border-l-4 border-indigo-500',  pill: 'Семантическое ядро' },
+  hubAndSpoke:   { icon: '🕸️', accent: 'border-l-4 border-emerald-500', pill: 'Hub & Spoke' },
+  competitorGap: { icon: '🎯', accent: 'border-l-4 border-fuchsia-500', pill: 'Конкурентный gap' },
+  quickWin:      { icon: '⚡', accent: 'border-l-4 border-amber-400 bg-amber-950/20',    pill: 'Быстрая победа' },
+  other:         { icon: '📄', accent: 'border-l-4 border-gray-700',    pill: '' },
+};
+function sectionMeta(kind) { return SECTION_META[kind] || SECTION_META.other; }
+
+/**
+ * Возвращает «тело секции» для блочного рендера: вырезает таблицу (она
+ * рисуется отдельным `<table>`) и под-секции `### ...` (они рисуются
+ * отдельными карточками), чтобы тот же контент не выводился дважды.
+ */
+function sectionBodyForRender(section) {
+  if (!section) return '';
+  let body = section.body || '';
+  if (section.table && section.table.raw) {
+    body = body.replace(section.table.raw, '');
+  }
+  if (section.subs && section.subs.length) {
+    // Отрезаем всё, начиная с первого ### — оно уже выведено как subs.
+    body = body.split(/\n\s*###\s+/)[0];
+  }
+  return body;
+}
+
+// Безопасно рендерим ячейку markdown-таблицы как HTML (escape + inline md).
+// renderInlineMarkdown сам экранирует HTML, поэтому output безопасен для v-html.
+function renderCell(text) {
+  // Заворачиваем в renderInlineMarkdown, который выдаёт <p>; нам нужен инлайн —
+  // снимем единственный <p>.
+  const html = renderInlineMarkdown(String(text || ''));
+  return html.replace(/^<p[^>]*>/, '').replace(/<\/p>\s*$/, '');
+}
+function renderBlock(text) {
+  return renderInlineMarkdown(String(text || ''));
+}
 
 const sortedTasks = computed(() =>
   [...(store.tasks || [])].sort((a, b) =>
@@ -367,9 +525,31 @@ const sortedTasks = computed(() =>
             </div>
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
+            <!-- Переключатель красивого / сырого вида (только когда есть результат) -->
+            <div v-if="activeTask?.status === 'done' && activeTask?.result_markdown"
+                 class="hidden sm:inline-flex rounded-md border border-gray-700 overflow-hidden text-xs">
+              <button
+                :class="['px-2.5 py-1 transition-colors',
+                         viewMode === 'pretty'
+                           ? 'bg-indigo-600 text-white'
+                           : 'bg-transparent text-gray-300 hover:bg-gray-800']"
+                @click="viewMode = 'pretty'"
+                title="Структурированный вид с копированием по разделам">
+                ✨ Структура
+              </button>
+              <button
+                :class="['px-2.5 py-1 transition-colors border-l border-gray-700',
+                         viewMode === 'raw'
+                           ? 'bg-indigo-600 text-white'
+                           : 'bg-transparent text-gray-300 hover:bg-gray-800']"
+                @click="viewMode = 'raw'"
+                title="Сырой markdown — для Obsidian / Notion">
+                📝 Markdown
+              </button>
+            </div>
             <button v-if="activeTask?.status === 'done' && activeTask?.result_markdown"
-                    class="btn-primary text-xs" @click="copyResult">
-              {{ copyState === 'copied' ? '✅ Скопировано' : '📋 Копировать markdown' }}
+                    class="btn-primary text-xs" @click="copyFullResult('md')">
+              {{ isCopied('all', 'md') ? '✅ Скопировано' : '📋 Весь результат (md)' }}
             </button>
             <button class="btn-ghost border border-gray-700 text-xs" @click="closeModal">✕</button>
           </div>
@@ -395,6 +575,221 @@ const sortedTasks = computed(() =>
                  class="bg-red-950/60 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-sm whitespace-pre-wrap">
               ⚠ {{ activeTask.error_message || 'Неизвестная ошибка' }}
             </div>
+
+            <!-- ── Сырой markdown (по запросу пользователя) ── -->
+            <pre v-else-if="viewMode === 'raw' && activeTask.result_markdown"
+                 class="text-sm text-gray-100 whitespace-pre-wrap font-sans leading-relaxed"
+            >{{ activeTask.result_markdown }}</pre>
+
+            <!-- ── Структурированный вид: MAIN ── -->
+            <div v-else-if="parsedMain" class="space-y-5">
+              <!-- Глобальные кнопки копирования -->
+              <div class="flex flex-wrap gap-2 pb-1">
+                <button class="btn-secondary text-xs" @click="copyArticleTopics"
+                        :disabled="!parsedMain.sections.some((s) => s.kind === 'futureSearch' || s.kind === 'trends')"
+                        title="Темы статей из «Фазы 3 — Future Search & Topic Clustering»">
+                  {{ isCopied('topics', 'text') ? '✅ Скопировано' : '📋 Скопировать темы статей' }}
+                </button>
+                <button class="btn-secondary text-xs" @click="copyActionPlan"
+                        :disabled="!parsedMain.sections.some((s) => s.kind === 'actionPlan')">
+                  {{ isCopied('plan', 'text') ? '✅ Скопировано' : '📋 Скопировать Strategic Action Plan' }}
+                </button>
+                <button class="btn-secondary text-xs" @click="copyFullResult('text')">
+                  {{ isCopied('all', 'text') ? '✅ Скопировано' : '📋 Весь результат как текст' }}
+                </button>
+              </div>
+
+              <!-- 🚀 ТРЕНДЫ — отдельная панель с кнопкой «Углубить» -->
+              <section v-if="parsedMain.trends.length"
+                       class="rounded-xl border border-indigo-700/60 bg-indigo-950/30 p-4 space-y-3">
+                <div class="flex items-center justify-between flex-wrap gap-2">
+                  <h3 class="text-sm font-bold text-indigo-200 uppercase tracking-wider flex items-center gap-2">
+                    🚀 Выбранные тренды
+                    <span class="text-[11px] font-normal text-indigo-300/80 normal-case">
+                      ({{ parsedMain.trends.length }} шт.) · клик «Углубить» запустит Фазу 2
+                    </span>
+                  </h3>
+                  <button class="btn-ghost text-xs border border-indigo-700"
+                          @click="copyText(parsedMain.trends.map((t) => t.name).join('\n'),
+                                           'trend-names', 'text')">
+                    {{ isCopied('trend-names', 'text') ? '✅ Скопировано' : '📋 Только названия' }}
+                  </button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div v-for="(t, idx) in parsedMain.trends" :key="idx"
+                       class="rounded-lg bg-gray-900/70 border border-gray-800 p-3 flex flex-col gap-2">
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="text-white font-semibold text-sm leading-snug break-words">
+                        {{ t.name }}
+                      </div>
+                      <span v-if="t.stage"
+                            class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded
+                                   bg-gray-800 text-indigo-200 border border-gray-700 flex-shrink-0">
+                        {{ t.stage }}
+                      </span>
+                    </div>
+                    <dl class="text-[11px] text-gray-400 space-y-0.5">
+                      <div v-if="t.drivers"><dt class="inline text-gray-500">Драйверы: </dt><dd class="inline text-gray-300">{{ t.drivers }}</dd></div>
+                      <div v-if="t.vector"><dt class="inline text-gray-500">Вектор: </dt><dd class="inline text-gray-300">{{ t.vector }}</dd></div>
+                      <div v-if="t.signals"><dt class="inline text-gray-500">Сигналы: </dt><dd class="inline text-gray-300">{{ t.signals }}</dd></div>
+                    </dl>
+                    <div class="flex items-center gap-2 mt-1">
+                      <button class="btn-primary text-xs flex-1"
+                              :disabled="deepDiveBusy"
+                              @click="deepDiveTrend(t.name)">
+                        {{ deepDiveBusy && trendInput === t.name ? '⏳ Запуск...' : '🔍 Углубить этот тренд →' }}
+                      </button>
+                      <button class="btn-ghost text-xs border border-gray-700"
+                              @click="copyText(t.name, `trend-${idx}`, 'text')"
+                              :title="`Скопировать «${t.name}»`">
+                        {{ isCopied(`trend-${idx}`, 'text') ? '✅' : '📋' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <p v-if="deepDiveErr" class="text-xs text-red-300">{{ deepDiveErr }}</p>
+              </section>
+
+              <!-- Все секции отчёта -->
+              <section v-for="(sec, idx) in parsedMain.sections" :key="idx"
+                       :class="['rounded-xl bg-gray-900/60 p-4 space-y-3', sectionMeta(sec.kind).accent]">
+                <div class="flex items-center justify-between flex-wrap gap-2">
+                  <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                    <span>{{ sectionMeta(sec.kind).icon }}</span>
+                    <span>{{ sec.title }}</span>
+                    <span v-if="sectionMeta(sec.kind).pill"
+                          class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded
+                                 bg-gray-800 text-gray-300 border border-gray-700">
+                      {{ sectionMeta(sec.kind).pill }}
+                    </span>
+                  </h3>
+                  <div class="flex items-center gap-1.5">
+                    <button class="btn-ghost text-[11px] border border-gray-700"
+                            @click="copySection(sec, 'text')"
+                            title="Копировать как plain text (готово для чата/документа)">
+                      {{ isCopied(`section:${sec.kind || 'other'}:${sec.title}`, 'text')
+                          ? '✅ Текст' : '📋 Текст' }}
+                    </button>
+                    <button class="btn-ghost text-[11px] border border-gray-700"
+                            @click="copySection(sec, 'md')"
+                            title="Копировать как markdown (для Notion/Obsidian)">
+                      {{ isCopied(`section:${sec.kind || 'other'}:${sec.title}`, 'md')
+                          ? '✅ MD' : '📋 MD' }}
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Текстовая часть секции (без таблицы и без ### субсекций) -->
+                <div v-if="sec.body"
+                     v-html="renderBlock(sectionBodyForRender(sec))"
+                     class="space-y-2"></div>
+
+                <!-- Таблица секции -->
+                <div v-if="sec.table" class="overflow-x-auto rounded-lg border border-gray-800">
+                  <table class="min-w-full text-xs">
+                    <thead class="bg-gray-800/80">
+                      <tr>
+                        <th v-for="(h, hi) in sec.table.headers" :key="hi"
+                            class="px-3 py-2 text-left text-gray-200 font-semibold whitespace-nowrap"
+                            v-html="renderCell(h)"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(r, ri) in sec.table.rows" :key="ri"
+                          class="border-t border-gray-800 hover:bg-gray-800/40">
+                        <td v-for="(c, ci) in r" :key="ci"
+                            class="px-3 py-2 text-gray-200 align-top"
+                            v-html="renderCell(c)"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- Подсекции (### ДЕЙСТВИЕ N — для actionPlan) -->
+                <div v-if="sec.subs && sec.subs.length" class="space-y-3">
+                  <div v-for="(sub, si) in sec.subs" :key="si"
+                       class="rounded-lg bg-gray-950/60 border border-gray-800 p-3">
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                      <h4 class="text-sm font-semibold text-emerald-200">{{ sub.title }}</h4>
+                      <button class="btn-ghost text-[11px] border border-gray-700"
+                              @click="copyText(`${sub.title}\n\n${sub.body}`,
+                                                `sub:${sec.kind}:${si}`, 'text')">
+                        {{ isCopied(`sub:${sec.kind}:${si}`, 'text') ? '✅' : '📋' }}
+                      </button>
+                    </div>
+                    <div v-html="renderBlock(sub.body)"></div>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <!-- ── Структурированный вид: DEEP-DIVE ── -->
+            <div v-else-if="parsedDeepDive" class="space-y-5">
+              <div class="flex flex-wrap gap-2 pb-1">
+                <button v-for="kind in ['semanticCore','hubAndSpoke','competitorGap','quickWin']"
+                        :key="kind"
+                        class="btn-secondary text-xs"
+                        :disabled="!parsedDeepDive.sections.some((s) => s.kind === kind)"
+                        @click="copyDeepDiveSectionByKind(kind)">
+                  {{ isCopied(`section:${kind}:` +
+                        (parsedDeepDive.sections.find((s) => s.kind === kind)?.title || ''), 'text')
+                      ? '✅ Скопировано'
+                      : '📋 ' + sectionMeta(kind).pill }}
+                </button>
+                <button class="btn-secondary text-xs" @click="copyFullResult('text')">
+                  {{ isCopied('all', 'text') ? '✅ Скопировано' : '📋 Весь результат как текст' }}
+                </button>
+              </div>
+
+              <section v-for="(sec, idx) in parsedDeepDive.sections" :key="idx"
+                       :class="['rounded-xl bg-gray-900/60 p-4 space-y-3', sectionMeta(sec.kind).accent]">
+                <div class="flex items-center justify-between flex-wrap gap-2">
+                  <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                    <span>{{ sectionMeta(sec.kind).icon }}</span>
+                    <span>{{ sec.title }}</span>
+                  </h3>
+                  <div class="flex items-center gap-1.5">
+                    <button class="btn-ghost text-[11px] border border-gray-700"
+                            @click="copySection(sec, 'text')">
+                      {{ isCopied(`section:${sec.kind || 'other'}:${sec.title}`, 'text')
+                          ? '✅ Текст' : '📋 Текст' }}
+                    </button>
+                    <button class="btn-ghost text-[11px] border border-gray-700"
+                            @click="copySection(sec, 'md')">
+                      {{ isCopied(`section:${sec.kind || 'other'}:${sec.title}`, 'md')
+                          ? '✅ MD' : '📋 MD' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="sec.body"
+                     v-html="renderBlock(sectionBodyForRender(sec))"
+                     class="space-y-2"></div>
+
+                <div v-if="sec.table" class="overflow-x-auto rounded-lg border border-gray-800">
+                  <table class="min-w-full text-xs">
+                    <thead class="bg-gray-800/80">
+                      <tr>
+                        <th v-for="(h, hi) in sec.table.headers" :key="hi"
+                            class="px-3 py-2 text-left text-gray-200 font-semibold whitespace-nowrap"
+                            v-html="renderCell(h)"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(r, ri) in sec.table.rows" :key="ri"
+                          class="border-t border-gray-800 hover:bg-gray-800/40">
+                        <td v-for="(c, ci) in r" :key="ci"
+                            class="px-3 py-2 text-gray-200 align-top"
+                            v-html="renderCell(c)"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+
+            <!-- Fallback: парсер не справился, показываем raw -->
             <pre v-else-if="activeTask.result_markdown"
                  class="text-sm text-gray-100 whitespace-pre-wrap font-sans leading-relaxed"
             >{{ activeTask.result_markdown }}</pre>
@@ -402,15 +797,16 @@ const sortedTasks = computed(() =>
           </template>
         </div>
 
-        <!-- Deep-dive triggers — только для main-задачи, успешно завершённой -->
+        <!-- Deep-dive triggers — только для main-задачи, успешно завершённой;
+             свободный ввод тренда (если в таблице нужного нет) -->
         <footer v-if="activeTask?.mode === 'main' && activeTask?.status === 'done'"
                 class="border-t border-gray-800 px-5 py-3 flex-shrink-0 space-y-2">
           <div class="text-xs text-gray-400 uppercase tracking-wider">
-            🔍 Углубить выбранный тренд (Промт 2)
+            🔍 Углубить произвольный тренд (Промт 2)
           </div>
           <div class="flex items-center gap-2">
             <input v-model="trendInput" type="text" class="input flex-1"
-                   placeholder="Название тренда из отчёта выше" />
+                   placeholder="Название тренда из отчёта или своё" />
             <button class="btn-primary text-sm" :disabled="deepDiveBusy" @click="startDeepDive">
               {{ deepDiveBusy ? '⏳' : 'Углубить' }}
             </button>
