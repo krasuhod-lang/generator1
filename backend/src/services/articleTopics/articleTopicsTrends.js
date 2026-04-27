@@ -124,7 +124,7 @@ function extractTrendsJsonBlock(markdown) {
 function normalizeTrendName(name) {
   return String(name || '')
     .toLowerCase()
-    .replace(/[*_`«»"'`]+/g, '')                  // markdown/quote обёртки
+    .replace(/[*_`«»"']+/g, '')                   // markdown/quote обёртки
     .replace(/[\u2010-\u2015\-—–]/g, ' ')         // тире/дефисы → пробел
     .replace(/[^\p{L}\p{N}\s]+/gu, ' ')           // прочая пунктуация
     .replace(/\s+/g, ' ')
@@ -277,19 +277,37 @@ async function buildSiblingDeepDivesBlock({ parentTaskId, currentTaskId, maxSibl
 
   let rows = [];
   try {
-    const r = await db.query(
-      `SELECT id, trend_name, result_markdown
-         FROM article_topic_tasks
-        WHERE parent_task_id = $1
-          AND id            <> $2
-          AND mode           = 'deep_dive'
-          AND status         = 'done'
-          AND result_markdown IS NOT NULL
-        ORDER BY completed_at DESC NULLS LAST
-        LIMIT $3`,
-      [parentTaskId, currentTaskId || '00000000-0000-0000-0000-000000000000', maxSiblings],
-    );
-    rows = r.rows || [];
+    // Если currentTaskId передан — исключаем его явно через `id <> $2`;
+    // иначе строим SQL без этого фильтра, чтобы не зависеть от nil-UUID
+    // как сторожевого значения (более явная и устойчивая логика).
+    if (currentTaskId) {
+      const r = await db.query(
+        `SELECT id, trend_name, result_markdown
+           FROM article_topic_tasks
+          WHERE parent_task_id = $1
+            AND id            <> $2
+            AND mode           = 'deep_dive'
+            AND status         = 'done'
+            AND result_markdown IS NOT NULL
+          ORDER BY completed_at DESC NULLS LAST
+          LIMIT $3`,
+        [parentTaskId, currentTaskId, maxSiblings],
+      );
+      rows = r.rows || [];
+    } else {
+      const r = await db.query(
+        `SELECT id, trend_name, result_markdown
+           FROM article_topic_tasks
+          WHERE parent_task_id = $1
+            AND mode           = 'deep_dive'
+            AND status         = 'done'
+            AND result_markdown IS NOT NULL
+          ORDER BY completed_at DESC NULLS LAST
+          LIMIT $2`,
+        [parentTaskId, maxSiblings],
+      );
+      rows = r.rows || [];
+    }
   } catch (err) {
     console.warn(`[articleTopicsTrends] buildSiblingDeepDivesBlock failed: ${err.message}`);
     return '(нет данных — продолжай без учёта sibling-задач)';

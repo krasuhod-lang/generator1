@@ -57,6 +57,7 @@ onMounted(async () => {
     } finally {
       loading.value = false;
     }
+    // В режиме редактирования query-прифилл не имеет смысла — выходим.
     return;
   }
 

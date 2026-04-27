@@ -395,8 +395,11 @@ function createSeoArticleFromTrend(trend) {
   if (!trend || !trend.name || !activeTask.value) return;
   // Собираем максимум контекста из текущей main-задачи.
   const t = activeTask.value;
+  // Если ниша пустая — не пишем «— название», чтобы не отдавать в форму
+  // строку, начинающуюся с тире.
+  const targetService = [t.niche, trend.name].filter(Boolean).join(' — ');
   const query = {
-    prefill_target:    `${t.niche || ''} — ${trend.name}`.trim(),
+    prefill_target:    targetService,
     prefill_audience:  t.audience  || '',
     prefill_region:    t.region    || '',
     prefill_brand:     '', // у article-topic задачи нет бренда — пусть юзер сам впишет.
@@ -424,10 +427,11 @@ function createSeoArticleFromQuickWin() {
     const qw = parsed.sections.find((s) => s.kind === 'quickWin');
     if (qw) qwBlock = sectionToPlainText(qw);
   }
+  const targetService = [t.niche, t.trend_name].filter(Boolean).join(' — ');
   router.push({
     path: '/tasks/new',
     query: {
-      prefill_target:   `${t.niche || ''} — ${t.trend_name || ''}`.trim(),
+      prefill_target:   targetService,
       prefill_audience: t.audience || '',
       prefill_region:   t.region   || '',
       prefill_facts:    qwBlock.slice(0, 4000), // лимит query-string
