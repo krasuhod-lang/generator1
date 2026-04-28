@@ -22,9 +22,11 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import AppLayout from '../components/AppLayout.vue';
 import { useTasksStore } from '../stores/tasks.js';
+import { useInfoArticleStore } from '../stores/infoArticle.js';
 import api from '../api.js';
 
-const store = useTasksStore();
+const store          = useTasksStore();          // SEO-генератор (/api/tasks)
+const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api/info-article)
 
 // ── API AITunnel (через backend-прокси) ────────────────────────────────────
 // Запрос идёт НЕ напрямую из браузера на api.aitunnel.ru, а через наш
@@ -56,6 +58,9 @@ const loadingTasks = ref(false);
 const loadingHtml  = ref(false);
 const formError    = ref(''); // ошибки формы создания задачи (выбор/загрузка HTML)
 
+// selectedTaskId — составной ключ "${source}:${id}", где source = 'seo' | 'blog'.
+// Это нужно потому, что id'ы из /api/tasks (SEO-генератор) и /api/info-article
+// (блог-статьи) могут совпадать (обе таблицы — независимые SERIAL'ы).
 const selectedTaskId = ref(null);
 const selectedHtml   = ref('');
 
@@ -151,16 +156,39 @@ const activeJob = computed(() =>
   jobs.value.find((j) => j.id === activeJobId.value) || null,
 );
 
-// Только задачи, у которых есть сгенерированный текст
-const eligibleTasks = computed(() =>
-  (store.tasks || [])
+// Только задачи, у которых есть сгенерированный текст. Мерджим два источника:
+//   • SEO-генератор   (useTasksStore)      — HTML лежит в full_html_edited / full_html
+//   • Блог-статьи     (useInfoArticleStore) — HTML лежит в article_html
+// Каждый элемент помечается полем source = 'seo' | 'blog' и нормализованным
+// ключом key = `${source}:${id}` (см. selectedTaskId — id'ы пересекаются).
+const eligibleTasks = computed(() => {
+  const seo = (store.tasks || [])
     .filter((t) => t.status === 'completed')
-    .slice()
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
-);
+    .map((t) => ({
+      key:        `seo:${t.id}`,
+      source:     'seo',
+      id:         t.id,
+      title:      t.title || t.input_target_service || `Задача #${t.id}`,
+      created_at: t.created_at,
+      raw:        t,
+    }));
+  const blog = (infoStore.tasks || [])
+    .filter((t) => t.status === 'completed')
+    .map((t) => ({
+      key:        `blog:${t.id}`,
+      source:     'blog',
+      id:         t.id,
+      title:      t.topic || `Блог-статья #${t.id}`,
+      created_at: t.created_at,
+      raw:        t,
+    }));
+  return [...seo, ...blog].sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at),
+  );
+});
 
 const selectedTask = computed(() =>
-  eligibleTasks.value.find((t) => t.id === selectedTaskId.value) || null,
+  eligibleTasks.value.find((t) => t.key === selectedTaskId.value) || null,
 );
 
 const htmlPreview = computed(() => {
@@ -195,15 +223,20 @@ onMounted(async () => {
 
   loadingTasks.value = true;
   try {
-    await store.fetchTasks();
+    // Загружаем оба источника параллельно: SEO-задачи и блог-статьи.
+    await Promise.all([
+      store.fetchTasks(),
+      infoStore.fetchTasks().catch(() => { /* блог-API может быть недоступен — не валим страницу */ }),
+    ]);
   } catch (e) {
     formError.value = e.response?.data?.error || e.message || 'Не удалось загрузить задачи';
   } finally {
     loadingTasks.value = false;
   }
-  // Освежаем список раз в 15 сек, чтобы новые завершившиеся задачи появлялись
+  // Освежаем оба источника раз в 15 сек, чтобы новые завершившиеся задачи появлялись
   pollTimer = setInterval(() => {
     store.fetchTasks().catch(() => { /* тихо игнорируем фоновый сбой */ });
+    infoStore.fetchTasks().catch(() => { /* тихо игнорируем фоновый сбой */ });
   }, 15000);
 });
 
@@ -214,14 +247,24 @@ onUnmounted(() => {
 // ── Выбор задачи → подгрузка HTML ──────────────────────────────────────────
 async function selectTask(task) {
   if (!task) return;
-  selectedTaskId.value = task.id;
+  selectedTaskId.value = task.key;
   selectedHtml.value   = '';
   formError.value      = '';
   loadingHtml.value    = true;
   try {
-    const data = await store.fetchResult(task.id);
-    // Приоритет: отредактированный HTML (AI-Copilot) → исходный сгенерированный
-    selectedHtml.value = data?.task?.full_html_edited || data?.task?.full_html || '';
+    if (task.source === 'seo') {
+      // SEO-генератор: HTML отдаётся ручкой /api/tasks/:id/result.
+      // Приоритет: отредактированный HTML (AI-Copilot) → исходный сгенерированный.
+      const data = await store.fetchResult(task.id);
+      selectedHtml.value =
+        data?.task?.full_html_edited || data?.task?.full_html || '';
+    } else if (task.source === 'blog') {
+      // Блог-статья: HTML лежит в article_html (см. InfoArticlePage.vue:438).
+      // article_plain — fallback для plain-text копии (используется в JSON, если
+      // нужен plain).
+      const blogTask = await infoStore.getTask(task.id);
+      selectedHtml.value = blogTask?.article_html || '';
+    }
     if (!selectedHtml.value) {
       formError.value = 'У выбранной задачи нет сгенерированного HTML-текста.';
     }
@@ -720,8 +763,11 @@ function addJob() {
 
   const job = {
     id:           nextJobId++,
+    // Происхождение исходной задачи. Сохраняется в localStorage, чтобы
+    // после reload было видно, откуда пришёл HTML (SEO-генератор / блог-статья).
+    source:       selectedTask.value.source,        // 'seo' | 'blog'
     sourceTaskId: selectedTask.value.id,
-    title:        selectedTask.value.title || selectedTask.value.input_target_service || `Задача #${selectedTask.value.id}`,
+    title:        selectedTask.value.title || `Задача #${selectedTask.value.id}`,
     sourceHtml:   selectedHtml.value, // снимок исходника на момент создания
     sourceChars:  selectedHtml.value.length,
     status:       'queued',           // queued | processing | done | error
@@ -900,10 +946,11 @@ function fmtDate(dt) {
           <span>🧩</span> JSON
         </h1>
         <p class="text-sm text-gray-500 mt-1">
-          Многозадачник: выбираете готовую SEO-задачу, нажимаете «Создать задачу JSON»,
-          её HTML уходит в очередь и обрабатывается в фоне моделью Qwen через AITunnel
-          (раскладывается по контейнерам ACF Flexible Content). Готовый JSON открывается
-          в модальном окне с кнопкой копирования. Параллельно можно поставить несколько задач.
+          Многозадачник: выбираете готовую задачу (SEO-генератор или блог-статью),
+          нажимаете «Создать задачу JSON», её HTML уходит в очередь и обрабатывается
+          в фоне моделью Qwen через AITunnel (раскладывается по контейнерам ACF
+          Flexible Content). Готовый JSON открывается в модальном окне с кнопкой
+          копирования. Параллельно можно поставить несколько задач.
         </p>
       </div>
 
@@ -912,7 +959,7 @@ function fmtDate(dt) {
         <div class="lg:col-span-5 space-y-4">
           <div class="card p-0 overflow-hidden">
             <div class="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
-              <h2 class="text-sm font-semibold text-white">Исходные SEO-задачи</h2>
+              <h2 class="text-sm font-semibold text-white">Исходные задачи (SEO + Блог)</h2>
               <span class="text-xs text-gray-500">{{ eligibleTasks.length }}</span>
             </div>
 
@@ -925,21 +972,29 @@ function fmtDate(dt) {
             <ul v-else class="max-h-[60vh] overflow-y-auto divide-y divide-gray-800">
               <li
                 v-for="t in eligibleTasks"
-                :key="t.id"
+                :key="t.key"
                 @click="selectTask(t)"
                 :class="[
                   'px-5 py-3 cursor-pointer transition-colors',
-                  selectedTaskId === t.id
+                  selectedTaskId === t.key
                     ? 'bg-indigo-950/40 border-l-4 border-indigo-500'
                     : 'hover:bg-gray-800/40 border-l-4 border-transparent',
                 ]"
               >
-                <p class="text-sm text-white font-medium truncate">
-                  {{ t.title || t.input_target_service || `Задача #${t.id}` }}
+                <p class="text-sm text-white font-medium truncate flex items-center gap-2">
+                  <span
+                    :class="[
+                      'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
+                      t.source === 'blog'
+                        ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700'
+                        : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
+                    ]"
+                  >{{ t.source === 'blog' ? 'Блог' : 'SEO' }}</span>
+                  <span class="truncate">{{ t.title }}</span>
                 </p>
                 <p class="text-xs text-gray-500 mt-0.5">
                   {{ fmtDate(t.created_at) }}
-                  <span v-if="t.lsi_coverage" class="ml-2">· LSI {{ t.lsi_coverage }}%</span>
+                  <span v-if="t.raw && t.raw.lsi_coverage" class="ml-2">· LSI {{ t.raw.lsi_coverage }}%</span>
                 </p>
               </li>
             </ul>
@@ -1013,8 +1068,17 @@ function fmtDate(dt) {
               >
                 <div class="flex items-start justify-between gap-3">
                   <div class="min-w-0 flex-1">
-                    <p class="text-sm text-white font-medium truncate">
-                      #{{ j.id }} · {{ j.title }}
+                    <p class="text-sm text-white font-medium truncate flex items-center gap-2">
+                      <span
+                        v-if="j.source"
+                        :class="[
+                          'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
+                          j.source === 'blog'
+                            ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700'
+                            : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
+                        ]"
+                      >{{ j.source === 'blog' ? 'Блог' : 'SEO' }}</span>
+                      <span class="truncate">#{{ j.id }} · {{ j.title }}</span>
                     </p>
                     <p class="text-xs text-gray-500 mt-0.5">
                       {{ fmtDate(j.createdAt) }}
