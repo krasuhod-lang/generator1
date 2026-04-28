@@ -258,7 +258,8 @@ function countOccurrences(haystack, needle) {
 
 /**
  * Programmatic validation of writer output: image slots, h1 count, hallucination
- * patterns, and link_plan compliance (ground-truth via auditHtmlAgainstPlan).
+ * patterns, expert opinion, FAQ block, and link_plan compliance (ground-truth via
+ * auditHtmlAgainstPlan).
  */
 function validateWriterOutput(html, linkPlan) {
   const issues = [];
@@ -277,6 +278,48 @@ function validateWriterOutput(html, linkPlan) {
   // h1
   const h1Count = (html.match(/<h1\b/gi) || []).length;
   if (h1Count !== 1) issues.push(`<h1> должен быть ровно 1, найдено: ${h1Count}`);
+
+  // ── Expert opinion (blockquote class="expert-opinion") — ровно 1 ─────
+  // Считаем гибко: атрибут class может быть в одинарных/двойных кавычках,
+  // могут идти другие классы. Главное — наличие хотя бы одного blockquote
+  // с маркером "expert-opinion" в class.
+  const expertBlockRe = /<blockquote\b[^>]*class\s*=\s*["'][^"']*\bexpert-opinion\b[^"']*["'][^>]*>/gi;
+  const expertCount = (html.match(expertBlockRe) || []).length;
+  if (expertCount === 0) {
+    issues.push('Отсутствует обязательный блок «Мнение эксперта» — нужен ровно один <blockquote class="expert-opinion">…</blockquote>');
+  } else if (expertCount > 1) {
+    issues.push(`Блок «Мнение эксперта» (<blockquote class="expert-opinion">) встречается ${expertCount} раз — должен быть ровно 1`);
+  } else {
+    // Проверим, что внутри есть атрибуция (cite/footer/strong "Мнение эксперта")
+    // — мягкая эвристика, чтобы writer не вставил пустой blockquote.
+    const exMatch = html.match(/<blockquote\b[^>]*class\s*=\s*["'][^"']*\bexpert-opinion\b[^"']*["'][^>]*>([\s\S]*?)<\/blockquote>/i);
+    const exBody  = exMatch ? exMatch[1] : '';
+    const hasAttribution = /<cite\b/i.test(exBody) || /<footer\b/i.test(exBody) || /мнение\s+эксперта/i.test(exBody);
+    if (!hasAttribution) {
+      issues.push('Блок «Мнение эксперта» не содержит атрибуции (нужны <cite>, <footer> или фраза «Мнение эксперта»)');
+    }
+  }
+
+  // ── FAQ block: <h2>Часто задаваемые вопросы</h2> + 4–6 H3 после него ─
+  const faqHeadingRe = /<h2\b[^>]*>\s*часто\s+задава(?:е|ю)мые\s+вопрос(?:ы|ов)\s*<\/h2>/gi;
+  const faqHeadings = html.match(faqHeadingRe) || [];
+  if (faqHeadings.length === 0) {
+    issues.push('Отсутствует обязательный FAQ-блок: нужен <h2>Часто задаваемые вопросы</h2> в конце статьи');
+  } else if (faqHeadings.length > 1) {
+    issues.push(`Заголовок «Часто задаваемые вопросы» встречается ${faqHeadings.length} раз — должен быть ровно 1`);
+  } else {
+    // Считаем H3 между FAQ-заголовком и следующим H2 (Заключение / конец).
+    const faqIdx = html.search(faqHeadingRe);
+    const tail   = html.slice(faqIdx + faqHeadings[0].length);
+    const nextH2 = tail.search(/<h2\b/i);
+    const faqBody = nextH2 >= 0 ? tail.slice(0, nextH2) : tail;
+    const faqQuestions = (faqBody.match(/<h3\b/gi) || []).length;
+    if (faqQuestions < 4) {
+      issues.push(`В FAQ-блоке найдено ${faqQuestions} вопросов (<h3>) — должно быть 4–6`);
+    } else if (faqQuestions > 6) {
+      issues.push(`В FAQ-блоке найдено ${faqQuestions} вопросов (<h3>) — должно быть 4–6, лишние сократи`);
+    }
+  }
 
   // hallucination guard
   const plain = stripTagsLoop(html);

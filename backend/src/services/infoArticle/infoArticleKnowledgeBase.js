@@ -176,6 +176,15 @@ function sectionOutline(outline) {
       lines.push(`    ${s.index || '?'}. ${s.h2 || '?'}${flagStr}`);
       if (s.descriptor)   lines.push(`        – ${clip(s.descriptor, 240)}`);
       if (s.jtbd_cluster) lines.push(`        jtbd: ${s.jtbd_cluster}`);
+      if (s.derived_from && typeof s.derived_from === 'object') {
+        const df = s.derived_from;
+        if (asArray(df.entities).length)
+          lines.push(`        derived.entities:   ${df.entities.slice(0, 5).join(' · ')}`);
+        if (asArray(df.subintents).length)
+          lines.push(`        derived.subintents: ${df.subintents.slice(0, 4).join(' · ')}`);
+        if (asArray(df.questions).length)
+          lines.push(`        derived.questions:  ${df.questions.slice(0, 4).join(' · ')}`);
+      }
       if (asArray(s.lsi_focus).length)
         lines.push(`        lsi_focus: ${s.lsi_focus.slice(0, 6).join(' · ')}`);
       if (asArray(s.covers_user_questions).length)
@@ -193,6 +202,33 @@ function sectionOutline(outline) {
       lines.push(`    slot ${p.slot} → section ${p.target_section_index}`);
       if (p.scene_concept)  lines.push(`        scene_concept: ${clip(p.scene_concept, 280)}`);
       if (p.subject_focus)  lines.push(`        subject_focus: ${clip(p.subject_focus, 200)}`);
+    }
+  }
+  // Mandatory expert opinion plan (Stage 2 outline.expert_opinion_slot).
+  // Writer обязан вставить ровно 1 <blockquote class="expert-opinion"> в указанной секции.
+  const eo = outline.expert_opinion_slot;
+  if (eo && typeof eo === 'object') {
+    lines.push('  expert_opinion_slot (ОБЯЗАТЕЛЬНО, ровно 1 <blockquote class="expert-opinion">):');
+    lines.push(`    target_section_index: ${eo.target_section_index ?? '?'}`);
+    if (eo.expert_role)  lines.push(`    expert_role:          ${clip(eo.expert_role, 200)}`);
+    if (eo.focus)        lines.push(`    focus:                ${clip(eo.focus, 240)}`);
+    if (eo.key_insight)  lines.push(`    key_insight:          ${clip(eo.key_insight, 360)}`);
+    if (asArray(eo.tied_to_entities).length)
+      lines.push(`    tied_to_entities:     ${eo.tied_to_entities.slice(0, 6).join(' · ')}`);
+  }
+  // Mandatory FAQ block (Stage 2 outline.faq_block).
+  // Writer обязан отрендерить <h2>Часто задаваемые вопросы</h2> + 4–6 <h3>/<p> пар
+  // ПЕРЕД секцией «Заключение».
+  const fb = outline.faq_block;
+  if (fb && typeof fb === 'object' && asArray(fb.items).length) {
+    lines.push('  faq_block (ОБЯЗАТЕЛЬНО, перед «Заключением»):');
+    lines.push(`    place_after_section_index: ${fb.place_after_section_index ?? '?'}`);
+    lines.push(`    items (${fb.items.length}):`);
+    for (const it of fb.items.slice(0, 6)) {
+      lines.push(`      • Q: ${clip(it.question || '', 220)}`);
+      if (it.answer_brief) lines.push(`        A_brief: ${clip(it.answer_brief, 280)}`);
+      if (asArray(it.tied_to_entities).length)
+        lines.push(`        tied_to_entities: ${it.tied_to_entities.slice(0, 5).join(' · ')}`);
     }
   }
   if (outline.conclusion_brief) lines.push(`  conclusion_brief: ${clip(outline.conclusion_brief, 320)}`);
