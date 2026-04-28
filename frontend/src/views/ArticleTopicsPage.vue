@@ -382,9 +382,19 @@ function confidenceBadge(conf) {
 }
 
 // Скор evaluator-отчёта для отображения ⭐ N/10 в карточке/модалке.
-// Возвращает строку либо null, если evaluator не запускался или дал NaN.
+// Возвращает строку либо null, если evaluator не запускался / поле total_score
+// отсутствует / NaN. ВАЖНО: проверяем существование report и наличие СВОЙСТВА
+// total_score через `'total_score' in report` ДО Number(): иначе для задач,
+// у которых evaluator_report === null (default для всех старых задач, или
+// когда ARTICLE_TOPICS_EVALUATOR_ENABLED=false), `Number(undefined)` хоть и
+// NaN, но `Number(null)` равен 0 и Number.isFinite(0) === true — это давало
+// ложное «⭐ 0.0/10» для каждой задачи, у которой отчёта вообще нет.
 function evaluatorScore(task) {
-  const s = Number(task && task.evaluator_report && task.evaluator_report.total_score);
+  const report = task && task.evaluator_report;
+  if (!report || typeof report !== 'object') return null;
+  const raw = report.total_score;
+  if (raw === null || raw === undefined) return null;
+  const s = Number(raw);
   return Number.isFinite(s) ? s.toFixed(1) : null;
 }
 

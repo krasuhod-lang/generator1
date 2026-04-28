@@ -65,8 +65,14 @@ router.use(aitunnelLimiter);
  *     max_tokens?:  number      // 1..MAX_OUTPUT_TOKENS, по умолчанию 16384
  *   }
  *
- * Возвращает ровно тот же объект choice, что отдаёт AITunnel:
- *   { message: { content: '...' }, finish_reason: 'stop' | 'length' | ... }
+ * Возвращает ровно тот же объект choice, что отдаёт AITunnel, плюс usage:
+ *   {
+ *     choice: { message: { content: '...' }, finish_reason: 'stop' | 'length' | ... },
+ *     usage:  { prompt_tokens, completion_tokens, total_tokens } | null
+ *   }
+ *
+ * `usage` нужен фронту (AcfJsonPage.vue) для расчёта стоимости JSON-задачи
+ * по тарифам Qwen3.5 Plus в ₽ (см. INPUT_PRICE_RUB/OUTPUT_PRICE_RUB там же).
  *
  * При ошибке сети/HTTP — корректный JSON с полем `error`.
  */
@@ -161,8 +167,13 @@ router.post('/aitunnel', auth, async (req, res) => {
     return res.status(502).json({ error: 'AITunnel вернул пустой ответ.' });
   }
 
-  // Возвращаем фронту первый choice — это всё, что использует AcfJsonPage.vue.
-  return res.json({ choice: data.choices[0] });
+  // Возвращаем фронту первый choice + usage (prompt/completion-токены), чтобы
+  // фронт мог посчитать стоимость генерации. AITunnel отдаёт OpenAI-совместимое
+  // поле `usage: { prompt_tokens, completion_tokens, total_tokens }`.
+  return res.json({
+    choice: data.choices[0],
+    usage:  data.usage || null,
+  });
 });
 
 module.exports = router;

@@ -53,6 +53,12 @@ const MIN_RETRY_CHUNK_LEN = 800;
 // expert→blocks (сюда модель кладёт оригинальные абзацы).
 const TEXT_FIELD_NAMES = /^(text|content|answer|expert|subtitle)$/i;
 
+// ── Тарификация AITunnel / Qwen3.5 Plus (для расчёта стоимости задачи) ───
+// Берём из ТЗ заказчика: 57.6 ₽ / 1M входных токенов, 460.8 ₽ / 1M выходных.
+// Контекст модели — 262 144 токенов (информативно, для подсказки в UI).
+const INPUT_PRICE_RUB_PER_1M  = 57.6;
+const OUTPUT_PRICE_RUB_PER_1M = 460.8;
+
 // ── Состояние ──────────────────────────────────────────────────────────────
 const loadingTasks = ref(false);
 const loadingHtml  = ref(false);
@@ -173,7 +179,12 @@ const eligibleTasks = computed(() => {
       raw:        t,
     }));
   const blog = (infoStore.tasks || [])
-    .filter((t) => t.status === 'completed')
+    // Блог-статья завершается со статусом 'done' (см.
+    // backend/src/services/infoArticle/infoArticlePipeline.js:596 — pipeline
+    // выставляет p.status = 'done', а не 'completed'). Принимаем оба значения
+    // на случай будущих изменений: фронт не упадёт, если бэк перейдёт на
+    // 'completed'.
+    .filter((t) => t.status === 'done' || t.status === 'completed')
     .map((t) => ({
       key:        `blog:${t.id}`,
       source:     'blog',
@@ -621,7 +632,12 @@ async function callAitunnel({ systemPrompt, userPrompt }) {
   if (!choice) {
     throw new Error('Backend вернул пустой ответ AITunnel.');
   }
-  return choice;
+  // usage может быть null, если AITunnel почему-то его не вернул (фолбэк
+  // от бэкенда — backend/src/routes/acfJson.routes.js). Нормализуем в нули.
+  const usage = response.data?.usage || {};
+  const tokensIn  = Number(usage.prompt_tokens)     || 0;
+  const tokensOut = Number(usage.completion_tokens) || 0;
+  return { choice, tokensIn, tokensOut };
 }
 
 function parseModelOutputArray(rawContent) {
@@ -647,7 +663,16 @@ async function processChunk({
 
   const userPrompt = `Обработай следующие данные (это часть HTML-текста статьи) и верни массив JSON для ACF. Сохрани каждый абзац дословно, только распредели по блокам:\n\n${chunkHtmlText}`;
 
-  const choice = await callAitunnel({ systemPrompt: systemPromptBase, userPrompt });
+  // Аккумулятор токенов по ВСЕМ под-вызовам этого чанка (вкл. рекурсивный
+  // split при finish=length и корректирующий ре-запрос). Возвращается наверх
+  // в runJob для расчёта суммарной стоимости задачи.
+  let tokensInTotal  = 0;
+  let tokensOutTotal = 0;
+
+  const first = await callAitunnel({ systemPrompt: systemPromptBase, userPrompt });
+  const choice = first.choice;
+  tokensInTotal  += first.tokensIn;
+  tokensOutTotal += first.tokensOut;
 
   // Авто-ретрай при обрыве по длине: рекурсивно дробим этот же чанк пополам
   // через тот же безопасный сплиттер и обрабатываем подкуски один за другим.
@@ -672,8 +697,15 @@ async function processChunk({
         if (b && b.acf_fc_layout === 'expert') expertUsedLocal = true;
         merged.push(b);
       }
+      tokensInTotal  += subRes.tokensIn;
+      tokensOutTotal += subRes.tokensOut;
     }
-    return { blocks: merged, expertUsedAfter: expertUsedLocal };
+    return {
+      blocks:           merged,
+      expertUsedAfter:  expertUsedLocal,
+      tokensIn:         tokensInTotal,
+      tokensOut:        tokensOutTotal,
+    };
   }
 
   let outputArray = parseModelOutputArray(choice.message?.content);
@@ -692,7 +724,10 @@ async function processChunk({
 Потерянные фрагменты (по одной строке на фрагмент):
 ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\n• …и ещё ${missing.length - sample.length} фрагмент(ов) — не забудь их тоже.` : ''}`;
     const correctiveUser = `Сформируй массив JSON ACF заново для того же исходника, СОХРАНИВ ВСЕ потерянные фрагменты дословно. Исходник:\n\n${chunkHtmlText}`;
-    const choice2 = await callAitunnel({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
+    const corrective = await callAitunnel({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
+    const choice2 = corrective.choice;
+    tokensInTotal  += corrective.tokensIn;
+    tokensOutTotal += corrective.tokensOut;
     if (choice2.finish_reason !== 'length') {
       try {
         const retryArr = parseModelOutputArray(choice2.message?.content);
@@ -762,7 +797,12 @@ ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\
     finalBlocks.push(block);
   }
 
-  return { blocks: finalBlocks, expertUsedAfter };
+  return {
+    blocks:           finalBlocks,
+    expertUsedAfter,
+    tokensIn:         tokensInTotal,
+    tokensOut:        tokensOutTotal,
+  };
 }
 
 // ── Главное действие: добавить задачу формирования JSON в очередь ──────────
@@ -792,7 +832,13 @@ function addJob() {
     result:       '',                 // готовый JSON-текст (string)
     error:        '',
     createdAt:    new Date().toISOString(),
+    startedAt:    null,               // выставляется в runJob
     finishedAt:   null,
+    // Метрики генерации (заполняются по мере выполнения):
+    durationMs:   0,                  // длительность running (от startedAt до finishedAt)
+    tokensIn:     0,                  // суммарно prompt_tokens по всем под-вызовам AITunnel
+    tokensOut:    0,                  // суммарно completion_tokens
+    costRub:      0,                  // ₽: tokensIn/1M*INPUT + tokensOut/1M*OUTPUT
   };
   // Новые задачи — наверх списка, чтобы пользователь сразу видел свежесозданное.
   jobs.value.unshift(job);
@@ -815,10 +861,18 @@ function removeJob(jobId) {
 function retryJob(jobId) {
   const j = jobs.value.find((x) => x.id === jobId);
   if (!j || j.status === 'processing') return;
-  j.status   = 'queued';
-  j.progress = 'В очереди…';
-  j.error    = '';
-  j.result   = '';
+  j.status     = 'queued';
+  j.progress   = 'В очереди…';
+  j.error      = '';
+  j.result     = '';
+  // Сбрасываем метрики, чтобы при повторе они начали считаться с нуля
+  // (а не суммировались с предыдущей упавшей попыткой).
+  j.startedAt  = null;
+  j.finishedAt = null;
+  j.durationMs = 0;
+  j.tokensIn   = 0;
+  j.tokensOut  = 0;
+  j.costRub    = 0;
   runQueue();
 }
 
@@ -843,10 +897,17 @@ async function runQueue() {
 // Обработка одной задачи. Использует существующий безопасный сплиттер +
 // post-validation (см. processChunk выше).
 async function runJob(job) {
-  job.status   = 'processing';
-  job.progress = 'Подготовка чанков…';
-  job.error    = '';
-  job.result   = '';
+  job.status     = 'processing';
+  job.progress   = 'Подготовка чанков…';
+  job.error      = '';
+  job.result     = '';
+  job.startedAt  = new Date().toISOString();
+  job.finishedAt = null;
+  job.durationMs = 0;
+  job.tokensIn   = 0;
+  job.tokensOut  = 0;
+  job.costRub    = 0;
+  const t0       = Date.now();
 
   try {
     const html = job.sourceHtml;
@@ -866,7 +927,7 @@ async function runJob(job) {
         : 'Анализ и сборка JSON…';
 
       // eslint-disable-next-line no-await-in-loop
-      const { blocks, expertUsedAfter } = await processChunk({
+      const { blocks, expertUsedAfter, tokensIn, tokensOut } = await processChunk({
         chunkHtmlText:    chunks[i],
         baseSystemPrompt: BASE_SYSTEM_PROMPT,
         expertAlreadyUsed,
@@ -874,18 +935,25 @@ async function runJob(job) {
       });
       expertAlreadyUsed = expertUsedAfter;
       for (const b of blocks) finalArray.push(b);
+      // Накапливаем метрики ПО ХОДУ обработки (а не только в конце), чтобы UI
+      // в карточке задачи показывал растущие токены/₽ во время processing.
+      job.tokensIn  += tokensIn;
+      job.tokensOut += tokensOut;
+      job.costRub    = computeJobCost(job.tokensIn, job.tokensOut);
     }
 
     job.result     = JSON.stringify(finalArray, null, 2);
     job.status     = 'done';
     job.progress   = '';
     job.finishedAt = new Date().toISOString();
+    job.durationMs = Date.now() - t0;
   } catch (err) {
     console.error('[AcfJson] job error:', err);
     job.status     = 'error';
     job.progress   = '';
     job.error      = err && err.message ? err.message : String(err);
     job.finishedAt = new Date().toISOString();
+    job.durationMs = Date.now() - t0;
     // Никогда не пишем «битый» JSON в job.result, чтобы пользователь не
     // случайно скопировал контент с потерями.
   }
@@ -951,6 +1019,41 @@ function fmtDate(dt) {
     day: '2-digit', month: '2-digit', year: '2-digit',
     hour: '2-digit', minute: '2-digit',
   });
+}
+
+// Стоимость одной JSON-задачи в ₽: сумма входных и выходных токенов *
+// тариф / 1 000 000. Возвращает число, округлённое в коде через toFixed
+// при отображении.
+function computeJobCost(tokensIn, tokensOut) {
+  const inN  = Number(tokensIn)  || 0;
+  const outN = Number(tokensOut) || 0;
+  return (inN  / 1_000_000) * INPUT_PRICE_RUB_PER_1M
+       + (outN / 1_000_000) * OUTPUT_PRICE_RUB_PER_1M;
+}
+
+// «12.3 с» / «1 м 05 с» / «12 м 34 с» — компактный формат длительности задачи.
+function fmtDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  if (n < 60_000) return `${(n / 1000).toFixed(1)} с`;
+  const totalSec = Math.round(n / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m} м ${String(s).padStart(2, '0')} с`;
+}
+
+// «1 234» — большое число с пробелами-разделителями (для токенов).
+function fmtNum(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return v.toLocaleString('ru-RU');
+}
+
+// «0.42 ₽» / «12.34 ₽» — стоимость с двумя знаками после запятой.
+function fmtCost(rub) {
+  const v = Number(rub);
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  return `${v.toFixed(2)} ₽`;
 }
 </script>
 
@@ -1068,7 +1171,7 @@ function fmtDate(dt) {
               v-if="!jobs.length"
               class="flex-1 flex flex-col items-center justify-center text-gray-600 text-sm italic border-2 border-dashed border-gray-800 rounded-lg p-8 min-h-[300px]"
             >
-              Здесь появятся задачи. Выберите слева исходный SEO-текст и нажмите «Создать задачу JSON».
+              Здесь появятся задачи. Выберите слева исходный текст (SEO-генератор или Блог-статья) и нажмите «Создать задачу JSON».
             </div>
 
             <ul v-else class="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
@@ -1105,6 +1208,25 @@ function fmtDate(dt) {
                       </span>
                       <span v-if="j.status === 'error'" class="ml-2 text-red-400 truncate">
                         — {{ j.error }}
+                      </span>
+                    </p>
+                    <!--
+                      Метрики генерации (время + стоимость + токены).
+                      Показываем для процессинга (растущие значения), done
+                      и error (последнее зафиксированное состояние).
+                    -->
+                    <p
+                      v-if="(j.status === 'processing' || j.status === 'done' || j.status === 'error')
+                        && (j.tokensIn || j.tokensOut || j.durationMs)"
+                      class="text-[11px] text-gray-500 mt-0.5"
+                    >
+                      <span v-if="j.status === 'processing'" class="text-indigo-300">⏱ идёт…</span>
+                      <span v-else>⏱ {{ fmtDuration(j.durationMs) }}</span>
+                      <span class="mx-1">·</span>
+                      <span class="text-emerald-300">💰 {{ fmtCost(j.costRub) }}</span>
+                      <span class="mx-1">·</span>
+                      <span title="prompt_tokens (вход) + completion_tokens (выход)">
+                        🔤 {{ fmtNum(j.tokensIn) }} → {{ fmtNum(j.tokensOut) }}
                       </span>
                     </p>
                   </div>
@@ -1178,6 +1300,32 @@ function fmtDate(dt) {
             class="bg-amber-950/60 border border-amber-800 text-amber-200 rounded-lg px-4 py-2 text-xs mb-3"
           >
             ⚠️ {{ copyError }}
+          </div>
+          <!--
+            Сводка по метрикам генерации в модалке. Показываем всегда (для
+            done и error), если есть хоть какие-то измерения. Для error это
+            помогает понять, сколько токенов уже было оплачено до сбоя.
+          -->
+          <div
+            v-if="activeJob.tokensIn || activeJob.tokensOut || activeJob.durationMs"
+            class="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs"
+          >
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Длительность</div>
+              <div class="text-white font-semibold">{{ fmtDuration(activeJob.durationMs) }}</div>
+            </div>
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Стоимость</div>
+              <div class="text-emerald-300 font-semibold">{{ fmtCost(activeJob.costRub) }}</div>
+            </div>
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Вход (токены)</div>
+              <div class="text-white font-semibold">{{ fmtNum(activeJob.tokensIn) }}</div>
+            </div>
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Выход (токены)</div>
+              <div class="text-white font-semibold">{{ fmtNum(activeJob.tokensOut) }}</div>
+            </div>
           </div>
           <div
             v-if="activeJob.status === 'error'"
