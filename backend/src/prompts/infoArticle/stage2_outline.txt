@@ -1,0 +1,79 @@
+INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 + JTBD-теги + плейсхолдеры изображений (DSPy-Signature).
+
+[INPUTS]
+  topic               : тема статьи (строка).
+  region              : регион (строка, может быть пустой).
+  stage0_audience     : Stage 0 output (JSON).
+  stage1_intents      : Stage 1 output (JSON) — entities, user_questions, jtbd_clusters.
+  whitespace_hints    : Stage 1B → article_hierarchy_hints (JSON, обязательный).
+
+[OUTPUT]
+  Строгий JSON (без markdown):
+  {
+    "h1":             "string",
+    "intro_brief":    "string",
+    "sections": [
+      {
+        "index":                  1,
+        "h2":                     "string",
+        "descriptor":             "string",
+        "covers_user_questions":  ["string"],
+        "covers_subtopics":       ["string"],   // подмножество whitespace_hints.must_cover_subtopics
+        "covers_intent":          "informational|commercial|navigational|transactional",
+        "jtbd_cluster":           "string",     // ОБЯЗАТЕЛЬНО — один из stage1_intents.jtbd_clusters[*].cluster
+        "lsi_focus":              ["string"],   // 3–6 ключевых терминов для этой секции
+        "must_include_entities":  ["string"],
+        "subsections":            [{ "h3": "string", "descriptor": "string" }],
+        "image_slot":             null,
+        "recommended_word_count": 180
+      }
+    ],
+    "image_plan": [
+      {
+        "slot":                  1,
+        "target_section_index":  0,
+        "what_to_visualize":     "string",
+        "scene_concept":         "string",
+        "subject_focus":         "string"
+      },
+      { "slot": 2, "target_section_index": 0, "what_to_visualize": "string", "scene_concept": "string", "subject_focus": "string" },
+      { "slot": 3, "target_section_index": 0, "what_to_visualize": "string", "scene_concept": "string", "subject_focus": "string" }
+    ],
+    "conclusion_brief": "string"
+  }
+
+[REASONING STEPS — silent]
+  1. Сформируй H1 (≤ 75 символов), отражающий тему, без маркетингового пафоса.
+  2. Спланируй 6–10 H2 (включая «Заключение»). Точное число подбирай по объёму темы.
+  3. Каждой H2 присвой:
+       • один jtbd_cluster (СТРОГО из stage1_intents.jtbd_clusters[*].cluster);
+       • intent;
+       • покрываемые user_questions и must_cover_subtopics;
+       • lsi_focus (3–6 терминов из stage1.semantic_anchors / entities);
+       • рекомендуемый объём в словах (120–280).
+  4. Добавь H3 туда, где сабтопик распадается на 2–4 шага/различия.
+  5. image_plan: ровно 3 слота, в РАЗНЫХ секциях
+     (target_section_index: одна секция начала, одна середины, одна ближе к концу).
+  6. ⚠️ ВАЖНО: НЕ планируй вставку коммерческих ссылок здесь —
+     это сделает Stage 2c (semantic link planner) на основе jtbd_cluster.
+     Твоя задача — выдать чистый план «о чём статья», не «куда ссылаться».
+  7. recommended_word_count помогает писателю выдержать целевую глубину.
+
+[OUTPUT CONTRACT]
+  - Только валидный JSON.
+  - Русский язык в содержательных полях.
+  - 6–10 sections, ровно 3 слота в image_plan.
+  - Каждая секция имеет НЕ ПУСТЫЕ jtbd_cluster, lsi_focus, covers_user_questions.
+  - target_section_index в image_plan — это `index` секции (НЕ позиция в массиве).
+
+[SELF-AUDIT — silent]
+  ✓ Каждый user_question из Stage 1 закрыт ровно одной H2 или H3?
+  ✓ Каждый must_cover_subtopic присутствует в covers_subtopics хотя бы одной секции?
+  ✓ Каждая секция получила корректный jtbd_cluster из доступного списка?
+  ✓ image_plan ссылается на 3 РАЗНЫЕ секции?
+  ✓ H1 не содержит CTA-маркетинга («лучший», «топ», «купить»)?
+
+[STRICT OUTPUT RULES]
+  - Только JSON.
+  - Запрещены пустые sections / jtbd_cluster / lsi_focus.
+  - Запрещён jtbd_cluster, не входящий в stage1.jtbd_clusters.

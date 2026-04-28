@@ -1,0 +1,65 @@
+INFO-ARTICLE STAGE 2B — LSI-набор для статьи (многофазный синтез) (DSPy-Signature).
+
+[INPUTS]
+  topic            : тема статьи (строка).
+  region           : регион (строка, может быть пустой).
+  outline          : Stage 2 → sections (JSON, для контекста H2/lsi_focus).
+  intents          : Stage 1 → entities, semantic_anchors, user_questions (JSON).
+  base_lsi_seed    : уже извлечённый детерминированно базовый набор корней (массив строк).
+                     Может быть пустым. Используется как «нижний слой» — расширяй его.
+  prior_missed     : (опционально, при corrective retry) — массив терминов,
+                     которых не хватило в прошлом ответе. Покрой их обязательно.
+
+[OUTPUT]
+  Строгий JSON (без markdown):
+  {
+    "important": ["string"],            // 18–30 терминов: ОБЯЗАТЕЛЬНЫ к появлению в статье
+    "supporting": ["string"],           // 15–30 поддерживающих терминов (желательны)
+    "banned": ["string"],               // 0–15 терминов, которых НЕ должно быть
+                                        // (off-topic / спам-маркеры / запрещённые бренды)
+    "categories": {                     // классификация important по типу
+      "core_terminology":   ["string"],
+      "actions_processes":  ["string"],
+      "roles_actors":       ["string"],
+      "documents_artifacts":["string"],
+      "metrics_attributes": ["string"]
+    },
+    "coverage_self_audit": {
+      "important_covers_all_h2":   true,        // каждый H2 имеет ≥ 2 important терма из своего lsi_focus
+      "no_off_topic_drift":        true,        // ничего вне `topic`
+      "russian_morphology_safe":   true,        // термины в начальной форме (1–3 слова)
+      "missed_seed_terms":         ["string"]   // если что-то из base_lsi_seed не вошло — перечисли
+    }
+  }
+
+[REASONING STEPS — silent]
+  1. Объедини base_lsi_seed (детерминированный извлечённый список) с extras
+     из intents.entities + intents.semantic_anchors + outline.sections[*].lsi_focus.
+  2. Расширь набор co-occurrence терминами: что обычно идёт «рядом» в нише
+     (синонимы, родственные понятия, типовые шаги/документы/метрики).
+  3. Для каждого H2 убедись, что хотя бы 2 important-терма покрывают его lsi_focus.
+  4. Проставь `banned`: всё, что выглядит как off-topic / спам-маркетинг / прямые
+     названия конкурентов, не относящихся к нише автора.
+  5. Если задан prior_missed — ОБЯЗАТЕЛЬНО включи каждый термин в important
+     (или объясни в coverage_self_audit, почему он отброшен как не-LSI).
+  6. Все термины — на русском, в начальной форме, длиной 1–3 слова. Без знаков
+     препинания, без emoji, без «купить/лучший/топ» (это не LSI, а CTA).
+  7. Выполни self-audit и заполни блок `coverage_self_audit` честно.
+
+[OUTPUT CONTRACT]
+  - Только валидный JSON.
+  - important: 18–30 элементов, supporting: 15–30, banned: 0–15.
+  - Длина любого термина ≤ 60 символов.
+  - Дубликатов между important / supporting / banned быть не должно.
+  - coverage_self_audit заполнен ВСЕГДА (это ground truth для retry-loop).
+
+[SELF-AUDIT — silent]
+  ✓ Каждый H2 из outline.sections имеет ≥ 2 important терма из его lsi_focus?
+  ✓ Все термины на русском, без склонений-обрезков, в начальной форме?
+  ✓ Нет терминов-маркетинга («лучший», «дешевле», «купить сейчас»)?
+  ✓ Если prior_missed задан — все термины из него учтены?
+
+[STRICT OUTPUT RULES]
+  - Только JSON-объект.
+  - Запрещены пустые important / categories.
+  - coverage_self_audit обязателен.
