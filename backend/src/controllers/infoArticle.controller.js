@@ -86,16 +86,28 @@ async function createInfoArticleTask(req, res, next) {
       return res.status(400).json({ error: 'Регион обязателен' });
     }
 
+    // Excel-база коммерческих ссылок ОПЦИОНАЛЬНА.
+    // • Если пользователь загрузил файл и хотя бы одна ссылка прошла нормализацию —
+    //   статья будет сгенерирована с перелинковкой через Stage 2C semantic link planner.
+    // • Если файл не загружен (rawLinks=[]) — задача создаётся в режиме «без перелинковки»:
+    //   pipeline пропускает Stage 5b и не вставляет коммерческих <a>-ссылок.
+    // • Если файл загружен, но ВСЕ ссылки отбракованы — это уже ошибка ввода: возвращаем 400,
+    //   чтобы пользователь поправил Excel, а не получил «втихую» статью без ссылок.
     const rawLinks = Array.isArray(body.commercial_links) ? body.commercial_links : [];
-    if (!rawLinks.length) {
-      return res.status(400).json({ error: 'Нужно загрузить хотя бы одну коммерческую ссылку' });
-    }
-    const { links, dropped, errors } = normalizeCommercialLinks(rawLinks, { limit: MAX_COMMERCIAL_LINKS });
-    if (!links.length) {
-      return res.status(400).json({
-        error: 'Все коммерческие ссылки отбракованы. Проверьте URL/H1.',
-        details: errors.slice(0, 5),
-      });
+    let links = [];
+    let dropped = 0;
+    let errors  = [];
+    if (rawLinks.length) {
+      const norm = normalizeCommercialLinks(rawLinks, { limit: MAX_COMMERCIAL_LINKS });
+      links   = norm.links;
+      dropped = norm.dropped;
+      errors  = norm.errors;
+      if (!links.length) {
+        return res.status(400).json({
+          error: 'Все коммерческие ссылки отбракованы. Проверьте URL/H1 либо отправьте задачу без файла — статья будет сгенерирована без перелинковки.',
+          details: errors.slice(0, 5),
+        });
+      }
     }
 
     const { rows } = await db.query(

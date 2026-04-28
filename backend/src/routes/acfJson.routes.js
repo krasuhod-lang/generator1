@@ -34,7 +34,12 @@ const AITUNNEL_MODEL_DEFAULT = process.env.AITUNNEL_MODEL || 'qwen3.5-plus-02-15
 // Ограничения, чтобы случайный кривой клиент не уронил сервер / бюджет.
 const MAX_PROMPT_LEN     = 200000; // символов на каждый промпт
 const MAX_OUTPUT_TOKENS  = 32000;  // потолок max_tokens, который пропускаем дальше
-const REQUEST_TIMEOUT_MS = 180000; // таймаут до AITunnel
+// Таймаут до AITunnel. ВАЖНО: фронт (frontend/src/views/AcfJsonPage.vue)
+// держит axios-таймаут СТРОГО больше этого значения, чтобы при медленном
+// ответе AITunnel сервер успел отдать осмысленное 502, а не получил гонку
+// с фронтовым axios "timeout of Nms exceeded". См. также nginx
+// proxy_read_timeout=300s (frontend/docker-nginx.conf).
+const REQUEST_TIMEOUT_MS = 240000;
 
 // Rate-limit: формирование JSON может слать десятки чанков подряд,
 // поэтому лимит мягкий, но не безграничный.
@@ -60,8 +65,14 @@ router.use(aitunnelLimiter);
  *     max_tokens?:  number      // 1..MAX_OUTPUT_TOKENS, по умолчанию 16384
  *   }
  *
- * Возвращает ровно тот же объект choice, что отдаёт AITunnel:
- *   { message: { content: '...' }, finish_reason: 'stop' | 'length' | ... }
+ * Возвращает ровно тот же объект choice, что отдаёт AITunnel, плюс usage:
+ *   {
+ *     choice: { message: { content: '...' }, finish_reason: 'stop' | 'length' | ... },
+ *     usage:  { prompt_tokens, completion_tokens, total_tokens } | null
+ *   }
+ *
+ * `usage` нужен фронту (AcfJsonPage.vue) для расчёта стоимости JSON-задачи
+ * по тарифам Qwen3.5 Plus в ₽ (см. INPUT_PRICE_RUB/OUTPUT_PRICE_RUB там же).
  *
  * При ошибке сети/HTTP — корректный JSON с полем `error`.
  */
@@ -156,8 +167,13 @@ router.post('/aitunnel', auth, async (req, res) => {
     return res.status(502).json({ error: 'AITunnel вернул пустой ответ.' });
   }
 
-  // Возвращаем фронту первый choice — это всё, что использует AcfJsonPage.vue.
-  return res.json({ choice: data.choices[0] });
+  // Возвращаем фронту первый choice + usage (prompt/completion-токены), чтобы
+  // фронт мог посчитать стоимость генерации. AITunnel отдаёт OpenAI-совместимое
+  // поле `usage: { prompt_tokens, completion_tokens, total_tokens }`.
+  return res.json({
+    choice: data.choices[0],
+    usage:  data.usage || null,
+  });
 });
 
 module.exports = router;

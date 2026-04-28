@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { useRoute } from 'vue-router';
 import DOMPurify from 'dompurify';
 import readXlsxFile from 'read-excel-file';
 import AppLayout from '../components/AppLayout.vue';
@@ -8,6 +9,7 @@ import { useInfoArticleStore } from '../stores/infoArticle.js';
 
 const store = useInfoArticleStore();
 const auth  = useAuthStore();
+const route = useRoute();
 
 // ── Form state (топик + регион + опционально + Excel) ─────────────────
 const form = ref({
@@ -27,6 +29,32 @@ onMounted(() => {
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
     if (raw) Object.assign(form.value, JSON.parse(raw));
+  } catch (_) { /* ignore */ }
+
+  // Префилл из query-параметров (например, переход из /article-topics →
+  // «Создать статью для блога» после Phase 2 / quick-win). Параметры
+  // перекрывают draft, чтобы свежий контекст из «Тем статей» не терялся.
+  // Поддерживаются: prefill_target → topic, prefill_title → topic (fallback),
+  // prefill_region → region, prefill_brand → brand_name, prefill_facts → brand_facts.
+  try {
+    const q = route.query || {};
+    const pickStr = (v, max) => {
+      const s = Array.isArray(v) ? v[0] : v;
+      return typeof s === 'string' ? s.trim().slice(0, max) : '';
+    };
+    const topic = pickStr(q.prefill_target, 200) || pickStr(q.prefill_title, 200);
+    if (topic) form.value.topic = topic;
+    const region = pickStr(q.prefill_region, 200);
+    if (region) form.value.region = region;
+    const brand = pickStr(q.prefill_brand, 200);
+    if (brand) form.value.brand_name = brand;
+    const facts = pickStr(q.prefill_facts, 4000);
+    if (facts) form.value.brand_facts = facts;
+    if (topic || region || brand || facts) {
+      // Раскроем «опциональный» блок, если что-то предзаполнили — иначе
+      // brand_facts «прячется» под коллапсом и пользователь его не увидит.
+      optionalOpen.value = true;
+    }
   } catch (_) { /* ignore */ }
 });
 function saveDraft() {
@@ -199,8 +227,10 @@ async function handleCreate() {
   const region = form.value.region.trim();
   if (topic.length < 5)  { formError.value = 'Тема должна быть не короче 5 символов'; return; }
   if (!region)           { formError.value = 'Укажите регион'; return; }
-  if (!parsedLinks.value.length) {
-    formError.value = 'Загрузите Excel-файл с коммерческими страницами (url + h1)';
+  // Excel опционален: если файла нет — генерим статью БЕЗ перелинковки.
+  // Парсинг ошибки (parseError ≠ null) при наличии файла остаётся блокирующим.
+  if (parseError.value) {
+    formError.value = 'Сначала исправьте ошибку Excel-парсера или очистите загруженный файл';
     return;
   }
 
@@ -437,17 +467,51 @@ const sanitizedHtml = computed(() => {
 async function copyAsHtml() {
   const html = selectedTask.value?.article_html;
   if (!html) return;
+  const plain = selectedTask.value?.article_plain || html.replace(/<[^>]+>/g, ' ');
+
+  // Path A: Async Clipboard API + ClipboardItem (text/html + text/plain).
+  // Работает только в secure context (HTTPS / localhost) и в современных браузерах.
   try {
     if (navigator.clipboard && window.ClipboardItem) {
-      const blobHtml  = new Blob([html], { type: 'text/html' });
-      const blobPlain = new Blob([selectedTask.value?.article_plain || html.replace(/<[^>]+>/g, ' ')], { type: 'text/plain' });
+      const blobHtml  = new Blob([html],  { type: 'text/html' });
+      const blobPlain = new Blob([plain], { type: 'text/plain' });
       await navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })]);
-    } else if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(html);
+      flashToast('HTML скопирован');
+      return;
     }
-    flashToast('HTML скопирован');
+  } catch (_) { /* fallthrough */ }
+
+  // Path B: writeText — отдаёт HTML как обычный текст. Тоже требует
+  // secure context, но работает там, где нет ClipboardItem.
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(html);
+      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      return;
+    }
+  } catch (_) { /* fallthrough */ }
+
+  // Path C (legacy fallback): document.execCommand('copy') через скрытый
+  // <textarea>. Работает на HTTP / IP-адресах без secure context, что
+  // нужно при доступе к приложению через локальную сеть или просто по IP.
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = html;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) {
+      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      return;
+    }
+    throw new Error('execCommand copy вернул false');
   } catch (err) {
-    alert('Не удалось скопировать: ' + (err.message || err));
+    alert('Не удалось скопировать HTML: ' + (err.message || err));
   }
 }
 
@@ -578,8 +642,9 @@ onUnmounted(() => { stopTicker(); });
             📰 Генератор информационной статьи в блог
           </h1>
           <p class="text-gray-400 text-sm mt-1">
-            Загрузите Excel с коммерческими страницами — модель сама подберёт 1–2 семантически
-            точные ссылки на каждый <code class="text-indigo-300">&lt;h2&gt;</code>, напишет статью и пройдёт E-E-A-T аудит.
+            При загруженном Excel модель сама подберёт 1–2 семантически точных коммерческих ссылки
+            на каждый <code class="text-indigo-300">&lt;h2&gt;</code>. Без Excel — статья создаётся
+            <strong>без перелинковки</strong> (LSI/E-E-A-T/мнение эксперта/FAQ — всё на месте).
           </p>
         </div>
       </div>
@@ -602,9 +667,18 @@ onUnmounted(() => { stopTicker(); });
                    placeholder="Москва, РФ, Лиссабон, …" />
           </div>
 
-          <!-- Excel uploader -->
+          <!-- Excel uploader (опциональный) -->
           <div>
-            <label class="label">Excel с коммерческими страницами <span class="text-red-400">*</span></label>
+            <label class="label">
+              Excel с коммерческими страницами
+              <span class="text-gray-500 text-[11px] font-normal">(опционально)</span>
+            </label>
+            <div v-if="!parsedLinks.length"
+                 class="mb-2 rounded-md border border-amber-700/40 bg-amber-900/10 px-3 py-2 text-[11px] text-amber-200">
+              Без Excel-базы статья будет сгенерирована <strong>без перелинковки</strong>:
+              коммерческие <code>&lt;a href&gt;</code> не вставляются, остальные шаги
+              (LSI, мнение эксперта, FAQ, картинки, E-E-A-T аудит) — в полной силе.
+            </div>
             <div class="rounded-lg border-2 border-dashed transition-colors p-4 text-center"
                  :class="dropActive ? 'border-indigo-500 bg-indigo-900/10' : 'border-gray-700 bg-gray-950'"
                  @dragover.prevent="dropActive = true"

@@ -176,6 +176,15 @@ function sectionOutline(outline) {
       lines.push(`    ${s.index || '?'}. ${s.h2 || '?'}${flagStr}`);
       if (s.descriptor)   lines.push(`        – ${clip(s.descriptor, 240)}`);
       if (s.jtbd_cluster) lines.push(`        jtbd: ${s.jtbd_cluster}`);
+      if (s.derived_from && typeof s.derived_from === 'object') {
+        const df = s.derived_from;
+        if (asArray(df.entities).length)
+          lines.push(`        derived.entities:   ${df.entities.slice(0, 5).join(' · ')}`);
+        if (asArray(df.subintents).length)
+          lines.push(`        derived.subintents: ${df.subintents.slice(0, 4).join(' · ')}`);
+        if (asArray(df.questions).length)
+          lines.push(`        derived.questions:  ${df.questions.slice(0, 4).join(' · ')}`);
+      }
       if (asArray(s.lsi_focus).length)
         lines.push(`        lsi_focus: ${s.lsi_focus.slice(0, 6).join(' · ')}`);
       if (asArray(s.covers_user_questions).length)
@@ -195,6 +204,33 @@ function sectionOutline(outline) {
       if (p.subject_focus)  lines.push(`        subject_focus: ${clip(p.subject_focus, 200)}`);
     }
   }
+  // Mandatory expert opinion plan (Stage 2 outline.expert_opinion_slot).
+  // Writer обязан вставить ровно 1 <blockquote class="expert-opinion"> в указанной секции.
+  const eo = outline.expert_opinion_slot;
+  if (eo && typeof eo === 'object') {
+    lines.push('  expert_opinion_slot (ОБЯЗАТЕЛЬНО, ровно 1 <blockquote class="expert-opinion">):');
+    lines.push(`    target_section_index: ${eo.target_section_index ?? '?'}`);
+    if (eo.expert_role)  lines.push(`    expert_role:          ${clip(eo.expert_role, 200)}`);
+    if (eo.focus)        lines.push(`    focus:                ${clip(eo.focus, 240)}`);
+    if (eo.key_insight)  lines.push(`    key_insight:          ${clip(eo.key_insight, 360)}`);
+    if (asArray(eo.tied_to_entities).length)
+      lines.push(`    tied_to_entities:     ${eo.tied_to_entities.slice(0, 6).join(' · ')}`);
+  }
+  // Mandatory FAQ block (Stage 2 outline.faq_block).
+  // Writer обязан отрендерить <h2>Часто задаваемые вопросы</h2> + 4–6 <h3>/<p> пар
+  // ПЕРЕД секцией «Заключение».
+  const fb = outline.faq_block;
+  if (fb && typeof fb === 'object' && asArray(fb.items).length) {
+    lines.push('  faq_block (ОБЯЗАТЕЛЬНО, перед «Заключением»):');
+    lines.push(`    place_after_section_index: ${fb.place_after_section_index ?? '?'}`);
+    lines.push(`    items (${fb.items.length}):`);
+    for (const it of fb.items.slice(0, 6)) {
+      lines.push(`      • Q: ${clip(it.question || '', 220)}`);
+      if (it.answer_brief) lines.push(`        A_brief: ${clip(it.answer_brief, 280)}`);
+      if (asArray(it.tied_to_entities).length)
+        lines.push(`        tied_to_entities: ${it.tied_to_entities.slice(0, 5).join(' · ')}`);
+    }
+  }
   if (outline.conclusion_brief) lines.push(`  conclusion_brief: ${clip(outline.conclusion_brief, 320)}`);
   return lines.join('\n');
 }
@@ -209,7 +245,17 @@ function sectionLsi(lsi) {
 }
 
 function sectionLinkPlan(linkPlan) {
-  if (!Array.isArray(linkPlan) || !linkPlan.length) return '';
+  if (!Array.isArray(linkPlan) || !linkPlan.length) {
+    // Excel-база коммерческих ссылок не загружена → режим без перелинковки.
+    // Явно сигналим writer'у в §8, чтобы он не «придумывал» внутренние ссылки.
+    return [
+      '§8. ПЛАН ПЕРЕЛИНКОВКИ (Stage 2C)',
+      '  ⚠ Режим БЕЗ ПЕРЕЛИНКОВКИ: Excel-база коммерческих страниц не загружена.',
+      '  • link_plan пуст; коммерческих <a href> в статье быть НЕ должно.',
+      '  • Stage 2C/5b пропущены, требования "1–2 ссылки на H2" / "all_planned_links_inserted"',
+      '    в этом режиме НЕ применяются.',
+    ].join('\n');
+  }
   const lines = ['§8. ПЛАН ПЕРЕЛИНКОВКИ (Stage 2C)'];
   for (const p of linkPlan) {
     lines.push(`  H2 #${p.h2_index} «${clip(p.h2_text, 120)}»`);

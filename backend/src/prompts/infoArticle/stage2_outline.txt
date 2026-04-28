@@ -17,6 +17,11 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
         "index":                  1,
         "h2":                     "string",
         "descriptor":             "string",
+        "derived_from": {                       // ОБЯЗАТЕЛЬНО — трассировка скелета
+          "entities":     ["string"],           // ≥1 сущность из stage1_intents.entities[*].entity
+          "subintents":   ["string"],           // ≥1 интент из stage1_intents.subintents[*].intent
+          "questions":    ["string"]            // ≥1 вопрос из stage1_intents.user_questions[*].question
+        },
         "covers_user_questions":  ["string"],
         "covers_subtopics":       ["string"],   // подмножество whitespace_hints.must_cover_subtopics
         "covers_intent":          "informational|commercial|navigational|transactional",
@@ -28,6 +33,25 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
         "recommended_word_count": 180
       }
     ],
+    "expert_opinion_slot": {                    // ОБЯЗАТЕЛЬНО ровно ОДИН блок мнения эксперта
+      "target_section_index": 0,                // index секции, где будет <blockquote class="expert-opinion">
+      "expert_role":          "string",         // роль/должность эксперта (без выдуманного имени-фамилии),
+                                                // например: «практикующий миграционный юрист с 12-летним опытом»
+      "focus":                "string",         // о чём именно высказывается эксперт (1 предложение)
+      "key_insight":          "string",         // ключевая идея/контр-интуитивное наблюдение «с земли», 1–2 предложения
+      "tied_to_entities":     ["string"]        // ≥1 сущность из stage1_intents.entities, которую опровергает/уточняет insight
+    },
+    "faq_block": {                              // ОБЯЗАТЕЛЬНО блок «Часто задаваемые вопросы» в конце статьи
+      "place_after_section_index": 0,           // index последней содержательной секции; FAQ идёт сразу после неё, ПЕРЕД «Заключением»
+      "items": [                                // 4–6 Q&A
+        {
+          "question":            "string",      // взят/перефразирован строго из stage1_intents.user_questions[*].question
+          "source_question":     "string",      // оригинальный текст вопроса из stage1
+          "answer_brief":        "string",      // 1–2 предложения, направление ответа (writer развернёт до 2–4 предложений)
+          "tied_to_entities":    ["string"]     // ≥1 сущность из stage1_intents.entities
+        }
+      ]
+    },
     "image_plan": [
       {
         "slot":                  1,
@@ -44,36 +68,70 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
 
 [REASONING STEPS — silent]
   1. Сформируй H1 (≤ 75 символов), отражающий тему, без маркетингового пафоса.
-  2. Спланируй 6–10 H2 (включая «Заключение»). Точное число подбирай по объёму темы.
-  3. Каждой H2 присвой:
+  2. Спланируй 6–10 H2 (включая «Заключение» и «Часто задаваемые вопросы»). Точное число подбирай по объёму темы.
+  3. ⚠️ ЖЁСТКАЯ ТРАССИРУЕМОСТЬ СКЕЛЕТА. Каждый H2 (кроме «Заключения» и FAQ-блока)
+     должен быть напрямую выведен из Stage 1: укажи в `derived_from`:
+       • ≥1 entity из stage1_intents.entities[*].entity (точное совпадение строки),
+       • ≥1 subintent из stage1_intents.subintents[*].intent,
+       • ≥1 question из stage1_intents.user_questions[*].question.
+     ЗАПРЕЩЕНО создавать H2, у которого нет якоря в этих трёх массивах.
+     То же — для каждой H3: она должна детализировать одну из перечисленных
+     entities или закрывать одну user_question.
+  4. Каждой H2 присвой:
        • один jtbd_cluster (СТРОГО из stage1_intents.jtbd_clusters[*].cluster);
        • intent;
        • покрываемые user_questions и must_cover_subtopics;
        • lsi_focus (3–6 терминов из stage1.semantic_anchors / entities);
        • рекомендуемый объём в словах (120–280).
-  4. Добавь H3 туда, где сабтопик распадается на 2–4 шага/различия.
-  5. image_plan: ровно 3 слота, в РАЗНЫХ секциях
+  5. Добавь H3 туда, где сабтопик распадается на 2–4 шага/различия.
+  6. ⚠️ EXPERT_OPINION_SLOT (обязательно ровно 1).
+     Выбери `target_section_index` — секция средней-поздней части статьи
+     (НЕ первая, НЕ «Заключение», НЕ FAQ), куда естественно вписать
+     «мнение эксперта». Заполни `expert_role` (без выдуманного ФИО),
+     `focus`, `key_insight` (контр-интуитивное, опытное наблюдение),
+     `tied_to_entities` (минимум 1 сущность из Stage 1).
+  7. ⚠️ FAQ_BLOCK (обязательно).
+     • Возьми 4–6 вопросов из stage1_intents.user_questions, ещё не закрытых
+       целиком в основных секциях, ИЛИ те, которые требуют короткого
+       прямого ответа («Сколько …?», «Можно ли …?», «Сколько стоит …?»,
+       «Сколько занимает …?», «Что выбрать: A или B?»).
+     • `place_after_section_index` = index последней содержательной секции;
+       FAQ ставится между ней и «Заключением».
+     • Каждый item.question — переформулировка, item.source_question —
+       оригинал из Stage 1, item.tied_to_entities — ≥1 entity.
+  8. image_plan: ровно 3 слота, в РАЗНЫХ секциях
      (target_section_index: одна секция начала, одна середины, одна ближе к концу).
-  6. ⚠️ ВАЖНО: НЕ планируй вставку коммерческих ссылок здесь —
+     image_plan не пересекается с FAQ-секцией и «Заключением».
+  9. ⚠️ ВАЖНО: НЕ планируй вставку коммерческих ссылок здесь —
      это сделает Stage 2c (semantic link planner) на основе jtbd_cluster.
      Твоя задача — выдать чистый план «о чём статья», не «куда ссылаться».
-  7. recommended_word_count помогает писателю выдержать целевую глубину.
+ 10. recommended_word_count помогает писателю выдержать целевую глубину.
 
 [OUTPUT CONTRACT]
   - Только валидный JSON.
   - Русский язык в содержательных полях.
   - 6–10 sections, ровно 3 слота в image_plan.
   - Каждая секция имеет НЕ ПУСТЫЕ jtbd_cluster, lsi_focus, covers_user_questions.
+  - Каждая содержательная секция имеет НЕ ПУСТЫЙ derived_from.entities/subintents/questions
+    (исключения — служебные секции «Заключение» и сама FAQ-секция).
   - target_section_index в image_plan — это `index` секции (НЕ позиция в массиве).
+  - expert_opinion_slot — ровно один объект, target_section_index указывает
+    на существующий `index` основной (не служебной) секции.
+  - faq_block.items — массив длиной 4–6.
 
 [SELF-AUDIT — silent]
-  ✓ Каждый user_question из Stage 1 закрыт ровно одной H2 или H3?
+  ✓ Каждый user_question из Stage 1 закрыт ровно одной H2/H3 ИЛИ вошёл в faq_block?
   ✓ Каждый must_cover_subtopic присутствует в covers_subtopics хотя бы одной секции?
+  ✓ Каждая основная секция имеет derived_from с ≥1 entity, ≥1 subintent, ≥1 question?
   ✓ Каждая секция получила корректный jtbd_cluster из доступного списка?
-  ✓ image_plan ссылается на 3 РАЗНЫЕ секции?
+  ✓ image_plan ссылается на 3 РАЗНЫЕ основные секции?
+  ✓ expert_opinion_slot заполнен и target_section_index указывает на основную секцию?
+  ✓ faq_block.items содержит 4–6 элементов; каждый item.source_question есть в stage1.user_questions?
   ✓ H1 не содержит CTA-маркетинга («лучший», «топ», «купить»)?
 
 [STRICT OUTPUT RULES]
   - Только JSON.
   - Запрещены пустые sections / jtbd_cluster / lsi_focus.
   - Запрещён jtbd_cluster, не входящий в stage1.jtbd_clusters.
+  - Запрещены H2/H3, не выводимые из Stage 1 (entities + subintents + user_questions).
+  - Запрещено пропускать expert_opinion_slot или faq_block — оба обязательны.

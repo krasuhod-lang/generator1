@@ -22,9 +22,11 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import AppLayout from '../components/AppLayout.vue';
 import { useTasksStore } from '../stores/tasks.js';
+import { useInfoArticleStore } from '../stores/infoArticle.js';
 import api from '../api.js';
 
-const store = useTasksStore();
+const store          = useTasksStore();          // SEO-генератор (/api/tasks)
+const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api/info-article)
 
 // ── API AITunnel (через backend-прокси) ────────────────────────────────────
 // Запрос идёт НЕ напрямую из браузера на api.aitunnel.ru, а через наш
@@ -51,11 +53,20 @@ const MIN_RETRY_CHUNK_LEN = 800;
 // expert→blocks (сюда модель кладёт оригинальные абзацы).
 const TEXT_FIELD_NAMES = /^(text|content|answer|expert|subtitle)$/i;
 
+// ── Тарификация AITunnel / Qwen3.5 Plus (для расчёта стоимости задачи) ───
+// Берём из ТЗ заказчика: 57.6 ₽ / 1M входных токенов, 460.8 ₽ / 1M выходных.
+// Контекст модели — 262 144 токенов (информативно, для подсказки в UI).
+const INPUT_PRICE_RUB_PER_1M  = 57.6;
+const OUTPUT_PRICE_RUB_PER_1M = 460.8;
+
 // ── Состояние ──────────────────────────────────────────────────────────────
 const loadingTasks = ref(false);
 const loadingHtml  = ref(false);
 const formError    = ref(''); // ошибки формы создания задачи (выбор/загрузка HTML)
 
+// selectedTaskId — составной ключ "${source}:${id}", где source = 'seo' | 'blog'.
+// Это нужно потому, что id'ы из /api/tasks (SEO-генератор) и /api/info-article
+// (блог-статьи) могут совпадать (обе таблицы — независимые SERIAL'ы).
 const selectedTaskId = ref(null);
 const selectedHtml   = ref('');
 
@@ -151,16 +162,44 @@ const activeJob = computed(() =>
   jobs.value.find((j) => j.id === activeJobId.value) || null,
 );
 
-// Только задачи, у которых есть сгенерированный текст
-const eligibleTasks = computed(() =>
-  (store.tasks || [])
+// Только задачи, у которых есть сгенерированный текст. Мерджим два источника:
+//   • SEO-генератор   (useTasksStore)      — HTML лежит в full_html_edited / full_html
+//   • Блог-статьи     (useInfoArticleStore) — HTML лежит в article_html
+// Каждый элемент помечается полем source = 'seo' | 'blog' и нормализованным
+// ключом key = `${source}:${id}` (см. selectedTaskId — id'ы пересекаются).
+const eligibleTasks = computed(() => {
+  const seo = (store.tasks || [])
     .filter((t) => t.status === 'completed')
-    .slice()
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
-);
+    .map((t) => ({
+      key:        `seo:${t.id}`,
+      source:     'seo',
+      id:         t.id,
+      title:      t.title || t.input_target_service || `Задача #${t.id}`,
+      created_at: t.created_at,
+      raw:        t,
+    }));
+  const blog = (infoStore.tasks || [])
+    // Блог-статья завершается со статусом 'done' (см.
+    // backend/src/services/infoArticle/infoArticlePipeline.js:596 — pipeline
+    // выставляет p.status = 'done', а не 'completed'). Принимаем оба значения
+    // на случай будущих изменений: фронт не упадёт, если бэк перейдёт на
+    // 'completed'.
+    .filter((t) => t.status === 'done' || t.status === 'completed')
+    .map((t) => ({
+      key:        `blog:${t.id}`,
+      source:     'blog',
+      id:         t.id,
+      title:      t.topic || `Блог-статья #${t.id}`,
+      created_at: t.created_at,
+      raw:        t,
+    }));
+  return [...seo, ...blog].sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at),
+  );
+});
 
 const selectedTask = computed(() =>
-  eligibleTasks.value.find((t) => t.id === selectedTaskId.value) || null,
+  eligibleTasks.value.find((t) => t.key === selectedTaskId.value) || null,
 );
 
 const htmlPreview = computed(() => {
@@ -195,15 +234,20 @@ onMounted(async () => {
 
   loadingTasks.value = true;
   try {
-    await store.fetchTasks();
+    // Загружаем оба источника параллельно: SEO-задачи и блог-статьи.
+    await Promise.all([
+      store.fetchTasks(),
+      infoStore.fetchTasks().catch(() => { /* блог-API может быть недоступен — не валим страницу */ }),
+    ]);
   } catch (e) {
     formError.value = e.response?.data?.error || e.message || 'Не удалось загрузить задачи';
   } finally {
     loadingTasks.value = false;
   }
-  // Освежаем список раз в 15 сек, чтобы новые завершившиеся задачи появлялись
+  // Освежаем оба источника раз в 15 сек, чтобы новые завершившиеся задачи появлялись
   pollTimer = setInterval(() => {
     store.fetchTasks().catch(() => { /* тихо игнорируем фоновый сбой */ });
+    infoStore.fetchTasks().catch(() => { /* тихо игнорируем фоновый сбой */ });
   }, 15000);
 });
 
@@ -214,14 +258,24 @@ onUnmounted(() => {
 // ── Выбор задачи → подгрузка HTML ──────────────────────────────────────────
 async function selectTask(task) {
   if (!task) return;
-  selectedTaskId.value = task.id;
+  selectedTaskId.value = task.key;
   selectedHtml.value   = '';
   formError.value      = '';
   loadingHtml.value    = true;
   try {
-    const data = await store.fetchResult(task.id);
-    // Приоритет: отредактированный HTML (AI-Copilot) → исходный сгенерированный
-    selectedHtml.value = data?.task?.full_html_edited || data?.task?.full_html || '';
+    if (task.source === 'seo') {
+      // SEO-генератор: HTML отдаётся ручкой /api/tasks/:id/result.
+      // Приоритет: отредактированный HTML (AI-Copilot) → исходный сгенерированный.
+      const data = await store.fetchResult(task.id);
+      selectedHtml.value =
+        data?.task?.full_html_edited || data?.task?.full_html || '';
+    } else if (task.source === 'blog') {
+      // Блог-статья: HTML лежит в article_html (см. InfoArticlePage.vue:438).
+      // article_plain — fallback для plain-text копии (используется в JSON, если
+      // нужен plain).
+      const blogTask = await infoStore.getTask(task.id);
+      selectedHtml.value = blogTask?.article_html || '';
+    }
     if (!selectedHtml.value) {
       formError.value = 'У выбранной задачи нет сгенерированного HTML-текста.';
     }
@@ -542,15 +596,32 @@ async function callAitunnel({ systemPrompt, userPrompt }) {
       max_tokens:  MAX_OUTPUT_TOKENS,
     }, {
       // Чанки могут обрабатываться долго — больше дефолтных 60 сек.
-      timeout: 180_000,
+      // ВАЖНО: значение СТРОГО больше backend REQUEST_TIMEOUT_MS (240с в
+      // backend/src/routes/acfJson.routes.js), иначе фронт всегда «выигрывает»
+      // гонку и показывает axios-овский «timeout exceeded» вместо
+      // осмысленного 502 от backend. Также меньше nginx proxy_read_timeout
+      // (300с в frontend/docker-nginx.conf), чтобы axios остановил запрос
+      // первым, а не получил оборванное соединение.
+      timeout: 270_000,
     });
   } catch (httpError) {
-    // axios: либо нет ответа (сеть до НАШЕГО backend упала), либо
-    // backend вернул не-2xx со своим JSON `{error: '...'}`.
+    // axios: либо нет ответа (сеть до НАШЕГО backend упала / истёк
+    // axios-таймаут), либо backend вернул не-2xx со своим JSON `{error: '...'}`.
     if (httpError.response) {
       const serverMsg = httpError.response.data?.error
         || `HTTP ${httpError.response.status}`;
       throw new Error(`Ошибка прокси AITunnel: ${serverMsg}`);
+    }
+    // Различаем истёкший axios-таймаут (ECONNABORTED) и реальный обрыв сети,
+    // чтобы не вводить пользователя в заблуждение «Failed to fetch», когда
+    // сеть-то жива, а просто AITunnel слишком долго отвечает.
+    const isTimeout = httpError.code === 'ECONNABORTED'
+      || /timeout/i.test(httpError.message || '');
+    if (isTimeout) {
+      throw new Error(
+        'AITunnel не успел ответить за 270 секунд. Попробуйте повторить '
+        + 'запрос — обычно при следующей попытке модель отвечает быстрее.',
+      );
     }
     throw new Error(
       `Сеть до сервера недоступна (Failed to fetch). Детали: ${httpError.message}`,
@@ -561,7 +632,12 @@ async function callAitunnel({ systemPrompt, userPrompt }) {
   if (!choice) {
     throw new Error('Backend вернул пустой ответ AITunnel.');
   }
-  return choice;
+  // usage может быть null, если AITunnel почему-то его не вернул (фолбэк
+  // от бэкенда — backend/src/routes/acfJson.routes.js). Нормализуем в нули.
+  const usage = response.data?.usage || {};
+  const tokensIn  = Number(usage.prompt_tokens)     || 0;
+  const tokensOut = Number(usage.completion_tokens) || 0;
+  return { choice, tokensIn, tokensOut };
 }
 
 function parseModelOutputArray(rawContent) {
@@ -587,7 +663,16 @@ async function processChunk({
 
   const userPrompt = `Обработай следующие данные (это часть HTML-текста статьи) и верни массив JSON для ACF. Сохрани каждый абзац дословно, только распредели по блокам:\n\n${chunkHtmlText}`;
 
-  const choice = await callAitunnel({ systemPrompt: systemPromptBase, userPrompt });
+  // Аккумулятор токенов по ВСЕМ под-вызовам этого чанка (вкл. рекурсивный
+  // split при finish=length и корректирующий ре-запрос). Возвращается наверх
+  // в runJob для расчёта суммарной стоимости задачи.
+  let tokensInTotal  = 0;
+  let tokensOutTotal = 0;
+
+  const first = await callAitunnel({ systemPrompt: systemPromptBase, userPrompt });
+  const choice = first.choice;
+  tokensInTotal  += first.tokensIn;
+  tokensOutTotal += first.tokensOut;
 
   // Авто-ретрай при обрыве по длине: рекурсивно дробим этот же чанк пополам
   // через тот же безопасный сплиттер и обрабатываем подкуски один за другим.
@@ -612,8 +697,15 @@ async function processChunk({
         if (b && b.acf_fc_layout === 'expert') expertUsedLocal = true;
         merged.push(b);
       }
+      tokensInTotal  += subRes.tokensIn;
+      tokensOutTotal += subRes.tokensOut;
     }
-    return { blocks: merged, expertUsedAfter: expertUsedLocal };
+    return {
+      blocks:           merged,
+      expertUsedAfter:  expertUsedLocal,
+      tokensIn:         tokensInTotal,
+      tokensOut:        tokensOutTotal,
+    };
   }
 
   let outputArray = parseModelOutputArray(choice.message?.content);
@@ -632,7 +724,10 @@ async function processChunk({
 Потерянные фрагменты (по одной строке на фрагмент):
 ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\n• …и ещё ${missing.length - sample.length} фрагмент(ов) — не забудь их тоже.` : ''}`;
     const correctiveUser = `Сформируй массив JSON ACF заново для того же исходника, СОХРАНИВ ВСЕ потерянные фрагменты дословно. Исходник:\n\n${chunkHtmlText}`;
-    const choice2 = await callAitunnel({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
+    const corrective = await callAitunnel({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
+    const choice2 = corrective.choice;
+    tokensInTotal  += corrective.tokensIn;
+    tokensOutTotal += corrective.tokensOut;
     if (choice2.finish_reason !== 'length') {
       try {
         const retryArr = parseModelOutputArray(choice2.message?.content);
@@ -702,7 +797,12 @@ ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\
     finalBlocks.push(block);
   }
 
-  return { blocks: finalBlocks, expertUsedAfter };
+  return {
+    blocks:           finalBlocks,
+    expertUsedAfter,
+    tokensIn:         tokensInTotal,
+    tokensOut:        tokensOutTotal,
+  };
 }
 
 // ── Главное действие: добавить задачу формирования JSON в очередь ──────────
@@ -720,8 +820,11 @@ function addJob() {
 
   const job = {
     id:           nextJobId++,
+    // Происхождение исходной задачи. Сохраняется в localStorage, чтобы
+    // после reload было видно, откуда пришёл HTML (SEO-генератор / блог-статья).
+    source:       selectedTask.value.source,        // 'seo' | 'blog'
     sourceTaskId: selectedTask.value.id,
-    title:        selectedTask.value.title || selectedTask.value.input_target_service || `Задача #${selectedTask.value.id}`,
+    title:        selectedTask.value.title || `Задача #${selectedTask.value.id}`,
     sourceHtml:   selectedHtml.value, // снимок исходника на момент создания
     sourceChars:  selectedHtml.value.length,
     status:       'queued',           // queued | processing | done | error
@@ -729,7 +832,13 @@ function addJob() {
     result:       '',                 // готовый JSON-текст (string)
     error:        '',
     createdAt:    new Date().toISOString(),
+    startedAt:    null,               // выставляется в runJob
     finishedAt:   null,
+    // Метрики генерации (заполняются по мере выполнения):
+    durationMs:   0,                  // длительность running (от startedAt до finishedAt)
+    tokensIn:     0,                  // суммарно prompt_tokens по всем под-вызовам AITunnel
+    tokensOut:    0,                  // суммарно completion_tokens
+    costRub:      0,                  // ₽: tokensIn/1M*INPUT + tokensOut/1M*OUTPUT
   };
   // Новые задачи — наверх списка, чтобы пользователь сразу видел свежесозданное.
   jobs.value.unshift(job);
@@ -752,10 +861,18 @@ function removeJob(jobId) {
 function retryJob(jobId) {
   const j = jobs.value.find((x) => x.id === jobId);
   if (!j || j.status === 'processing') return;
-  j.status   = 'queued';
-  j.progress = 'В очереди…';
-  j.error    = '';
-  j.result   = '';
+  j.status     = 'queued';
+  j.progress   = 'В очереди…';
+  j.error      = '';
+  j.result     = '';
+  // Сбрасываем метрики, чтобы при повторе они начали считаться с нуля
+  // (а не суммировались с предыдущей упавшей попыткой).
+  j.startedAt  = null;
+  j.finishedAt = null;
+  j.durationMs = 0;
+  j.tokensIn   = 0;
+  j.tokensOut  = 0;
+  j.costRub    = 0;
   runQueue();
 }
 
@@ -780,10 +897,17 @@ async function runQueue() {
 // Обработка одной задачи. Использует существующий безопасный сплиттер +
 // post-validation (см. processChunk выше).
 async function runJob(job) {
-  job.status   = 'processing';
-  job.progress = 'Подготовка чанков…';
-  job.error    = '';
-  job.result   = '';
+  job.status     = 'processing';
+  job.progress   = 'Подготовка чанков…';
+  job.error      = '';
+  job.result     = '';
+  job.startedAt  = new Date().toISOString();
+  job.finishedAt = null;
+  job.durationMs = 0;
+  job.tokensIn   = 0;
+  job.tokensOut  = 0;
+  job.costRub    = 0;
+  const t0       = Date.now();
 
   try {
     const html = job.sourceHtml;
@@ -803,7 +927,7 @@ async function runJob(job) {
         : 'Анализ и сборка JSON…';
 
       // eslint-disable-next-line no-await-in-loop
-      const { blocks, expertUsedAfter } = await processChunk({
+      const { blocks, expertUsedAfter, tokensIn, tokensOut } = await processChunk({
         chunkHtmlText:    chunks[i],
         baseSystemPrompt: BASE_SYSTEM_PROMPT,
         expertAlreadyUsed,
@@ -811,18 +935,25 @@ async function runJob(job) {
       });
       expertAlreadyUsed = expertUsedAfter;
       for (const b of blocks) finalArray.push(b);
+      // Накапливаем метрики ПО ХОДУ обработки (а не только в конце), чтобы UI
+      // в карточке задачи показывал растущие токены/₽ во время processing.
+      job.tokensIn  += tokensIn;
+      job.tokensOut += tokensOut;
+      job.costRub    = computeJobCost(job.tokensIn, job.tokensOut);
     }
 
     job.result     = JSON.stringify(finalArray, null, 2);
     job.status     = 'done';
     job.progress   = '';
     job.finishedAt = new Date().toISOString();
+    job.durationMs = Date.now() - t0;
   } catch (err) {
     console.error('[AcfJson] job error:', err);
     job.status     = 'error';
     job.progress   = '';
     job.error      = err && err.message ? err.message : String(err);
     job.finishedAt = new Date().toISOString();
+    job.durationMs = Date.now() - t0;
     // Никогда не пишем «битый» JSON в job.result, чтобы пользователь не
     // случайно скопировал контент с потерями.
   }
@@ -889,6 +1020,41 @@ function fmtDate(dt) {
     hour: '2-digit', minute: '2-digit',
   });
 }
+
+// Стоимость одной JSON-задачи в ₽: сумма входных и выходных токенов *
+// тариф / 1 000 000. Возвращает число, округлённое в коде через toFixed
+// при отображении.
+function computeJobCost(tokensIn, tokensOut) {
+  const inN  = Number(tokensIn)  || 0;
+  const outN = Number(tokensOut) || 0;
+  return (inN  / 1_000_000) * INPUT_PRICE_RUB_PER_1M
+       + (outN / 1_000_000) * OUTPUT_PRICE_RUB_PER_1M;
+}
+
+// «12.3 с» / «1 м 05 с» / «12 м 34 с» — компактный формат длительности задачи.
+function fmtDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  if (n < 60_000) return `${(n / 1000).toFixed(1)} с`;
+  const totalSec = Math.round(n / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m} м ${String(s).padStart(2, '0')} с`;
+}
+
+// «1 234» — большое число с пробелами-разделителями (для токенов).
+function fmtNum(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return v.toLocaleString('ru-RU');
+}
+
+// «0.42 ₽» / «12.34 ₽» — стоимость с двумя знаками после запятой.
+function fmtCost(rub) {
+  const v = Number(rub);
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  return `${v.toFixed(2)} ₽`;
+}
 </script>
 
 <template>
@@ -900,10 +1066,11 @@ function fmtDate(dt) {
           <span>🧩</span> JSON
         </h1>
         <p class="text-sm text-gray-500 mt-1">
-          Многозадачник: выбираете готовую SEO-задачу, нажимаете «Создать задачу JSON»,
-          её HTML уходит в очередь и обрабатывается в фоне моделью Qwen через AITunnel
-          (раскладывается по контейнерам ACF Flexible Content). Готовый JSON открывается
-          в модальном окне с кнопкой копирования. Параллельно можно поставить несколько задач.
+          Многозадачник: выбираете готовую задачу (SEO-генератор или блог-статью),
+          нажимаете «Создать задачу JSON», её HTML уходит в очередь и обрабатывается
+          в фоне моделью Qwen через AITunnel (раскладывается по контейнерам ACF
+          Flexible Content). Готовый JSON открывается в модальном окне с кнопкой
+          копирования. Параллельно можно поставить несколько задач.
         </p>
       </div>
 
@@ -912,7 +1079,7 @@ function fmtDate(dt) {
         <div class="lg:col-span-5 space-y-4">
           <div class="card p-0 overflow-hidden">
             <div class="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
-              <h2 class="text-sm font-semibold text-white">Исходные SEO-задачи</h2>
+              <h2 class="text-sm font-semibold text-white">Исходные задачи (SEO + Блог)</h2>
               <span class="text-xs text-gray-500">{{ eligibleTasks.length }}</span>
             </div>
 
@@ -925,21 +1092,29 @@ function fmtDate(dt) {
             <ul v-else class="max-h-[60vh] overflow-y-auto divide-y divide-gray-800">
               <li
                 v-for="t in eligibleTasks"
-                :key="t.id"
+                :key="t.key"
                 @click="selectTask(t)"
                 :class="[
                   'px-5 py-3 cursor-pointer transition-colors',
-                  selectedTaskId === t.id
+                  selectedTaskId === t.key
                     ? 'bg-indigo-950/40 border-l-4 border-indigo-500'
                     : 'hover:bg-gray-800/40 border-l-4 border-transparent',
                 ]"
               >
-                <p class="text-sm text-white font-medium truncate">
-                  {{ t.title || t.input_target_service || `Задача #${t.id}` }}
+                <p class="text-sm text-white font-medium truncate flex items-center gap-2">
+                  <span
+                    :class="[
+                      'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
+                      t.source === 'blog'
+                        ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700'
+                        : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
+                    ]"
+                  >{{ t.source === 'blog' ? 'Блог' : 'SEO' }}</span>
+                  <span class="truncate">{{ t.title }}</span>
                 </p>
                 <p class="text-xs text-gray-500 mt-0.5">
                   {{ fmtDate(t.created_at) }}
-                  <span v-if="t.lsi_coverage" class="ml-2">· LSI {{ t.lsi_coverage }}%</span>
+                  <span v-if="t.raw && t.raw.lsi_coverage" class="ml-2">· LSI {{ t.raw.lsi_coverage }}%</span>
                 </p>
               </li>
             </ul>
@@ -996,7 +1171,7 @@ function fmtDate(dt) {
               v-if="!jobs.length"
               class="flex-1 flex flex-col items-center justify-center text-gray-600 text-sm italic border-2 border-dashed border-gray-800 rounded-lg p-8 min-h-[300px]"
             >
-              Здесь появятся задачи. Выберите слева исходный SEO-текст и нажмите «Создать задачу JSON».
+              Здесь появятся задачи. Выберите слева исходный текст (SEO-генератор или Блог-статья) и нажмите «Создать задачу JSON».
             </div>
 
             <ul v-else class="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
@@ -1013,8 +1188,17 @@ function fmtDate(dt) {
               >
                 <div class="flex items-start justify-between gap-3">
                   <div class="min-w-0 flex-1">
-                    <p class="text-sm text-white font-medium truncate">
-                      #{{ j.id }} · {{ j.title }}
+                    <p class="text-sm text-white font-medium truncate flex items-center gap-2">
+                      <span
+                        v-if="j.source"
+                        :class="[
+                          'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
+                          j.source === 'blog'
+                            ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700'
+                            : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
+                        ]"
+                      >{{ j.source === 'blog' ? 'Блог' : 'SEO' }}</span>
+                      <span class="truncate">#{{ j.id }} · {{ j.title }}</span>
                     </p>
                     <p class="text-xs text-gray-500 mt-0.5">
                       {{ fmtDate(j.createdAt) }}
@@ -1024,6 +1208,25 @@ function fmtDate(dt) {
                       </span>
                       <span v-if="j.status === 'error'" class="ml-2 text-red-400 truncate">
                         — {{ j.error }}
+                      </span>
+                    </p>
+                    <!--
+                      Метрики генерации (время + стоимость + токены).
+                      Показываем для процессинга (растущие значения), done
+                      и error (последнее зафиксированное состояние).
+                    -->
+                    <p
+                      v-if="(j.status === 'processing' || j.status === 'done' || j.status === 'error')
+                        && (j.tokensIn || j.tokensOut || j.durationMs)"
+                      class="text-[11px] text-gray-500 mt-0.5"
+                    >
+                      <span v-if="j.status === 'processing'" class="text-indigo-300">⏱ идёт…</span>
+                      <span v-else>⏱ {{ fmtDuration(j.durationMs) }}</span>
+                      <span class="mx-1">·</span>
+                      <span class="text-emerald-300">💰 {{ fmtCost(j.costRub) }}</span>
+                      <span class="mx-1">·</span>
+                      <span title="prompt_tokens (вход) + completion_tokens (выход)">
+                        🔤 {{ fmtNum(j.tokensIn) }} → {{ fmtNum(j.tokensOut) }}
                       </span>
                     </p>
                   </div>
@@ -1097,6 +1300,32 @@ function fmtDate(dt) {
             class="bg-amber-950/60 border border-amber-800 text-amber-200 rounded-lg px-4 py-2 text-xs mb-3"
           >
             ⚠️ {{ copyError }}
+          </div>
+          <!--
+            Сводка по метрикам генерации в модалке. Показываем всегда (для
+            done и error), если есть хоть какие-то измерения. Для error это
+            помогает понять, сколько токенов уже было оплачено до сбоя.
+          -->
+          <div
+            v-if="activeJob.tokensIn || activeJob.tokensOut || activeJob.durationMs"
+            class="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs"
+          >
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Длительность</div>
+              <div class="text-white font-semibold">{{ fmtDuration(activeJob.durationMs) }}</div>
+            </div>
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Стоимость</div>
+              <div class="text-emerald-300 font-semibold">{{ fmtCost(activeJob.costRub) }}</div>
+            </div>
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Вход (токены)</div>
+              <div class="text-white font-semibold">{{ fmtNum(activeJob.tokensIn) }}</div>
+            </div>
+            <div class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              <div class="text-gray-500">Выход (токены)</div>
+              <div class="text-white font-semibold">{{ fmtNum(activeJob.tokensOut) }}</div>
+            </div>
           </div>
           <div
             v-if="activeJob.status === 'error'"

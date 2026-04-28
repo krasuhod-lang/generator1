@@ -28,14 +28,26 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
       "depth_of_explanation":       0.0,   // 2. Глубина объяснений vs поверхностный пересказ
       "terminology_correctness":    0.0,   // 3. Точность терминов и определений
       "structural_clarity":         0.0,   // 4. Структура: H2/H3, переходы, логика
-      "answer_completeness":        0.0,   // 5. Полнота ответов на user_questions
+      "answer_completeness":        0.0,   // 5. Полнота ответов на user_questions (включая FAQ-блок)
       "balanced_perspective":       0.0,   // 6. Баланс pros/cons, ограничения, контр-примеры
       "evidence_quality":           0.0,   // 7. Качество примеров и обоснований (без галлюцинаций)
       "tone_match":                 0.0,   // 8. Соответствие тону аудитории
       "intent_match":               0.0,   // 9. Соответствие интенту запроса (информационный)
       "freshness_signals":          0.0,   // 10. Актуальность подачи (без выдуманных дат/цифр)
       "trust_indicators":           0.0,   // 11. Безопасность утверждений, прозрачность, отсутствие манипуляций
-      "useful_additional_content":  0.0    // 12. Ценный additional content (списки, чек-листы, выводы)
+      "useful_additional_content":  0.0,   // 12. Ценный additional content (списки, чек-листы, выводы)
+      "expert_opinion_quality":     0.0,   // 13. Качество блока «Мнение эксперта»: содержательный insight,
+                                           //     обезличенная атрибуция, без выдуманных ФИО/регалий.
+                                           //     0 → блок отсутствует.
+      "faq_block_quality":          0.0    // 14. Качество FAQ-блока перед «Заключением»: 4–6 Q&A,
+                                           //     вопросы соответствуют user_questions, ответы по делу.
+                                           //     0 → блок отсутствует или < 4 Q&A.
+    },
+    "structural_requirements": {
+      "expert_opinion_present": true,      // <blockquote class="expert-opinion"> ровно 1
+      "faq_block_present":      true,      // <h2>Часто задаваемые вопросы</h2> ровно 1
+      "faq_questions_count":    4,         // фактическое число <h3> в FAQ-блоке (целевое 4–6)
+      "skeleton_traceable":     true       // каждый H2 выводится из entities + subintents + user_questions Stage 1
     },
     "total_score":          0.0,
     "lsi_coverage_pct":     0.0,    // % important-LSI терминов, фактически встретившихся в тексте
@@ -45,7 +57,7 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
     },
     "issues": [
       {
-        "category":        "experience|expertise|authoritativeness|trustworthiness|hallucination|structure|intent_match|tone|lsi_coverage|tfidf_spam",
+        "category":        "experience|expertise|authoritativeness|trustworthiness|hallucination|structure|intent_match|tone|lsi_coverage|tfidf_spam|expert_opinion|faq_block|skeleton_trace",
         "severity":        "blocker|major|minor",
         "where":           "string",
         "problem":         "string",
@@ -67,17 +79,24 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
   6. issues: список конкретных проблем с категорией / severity / where / fix_instruction.
        Severity:
          - blocker: галлюцинации, отсутствующие ответы на ключевые user_questions,
-                    потеря всех LSI ниже 50%;
+                    потеря всех LSI ниже 50%, ОТСУТСТВИЕ <blockquote class="expert-opinion"> (category="expert_opinion"),
+                    ОТСУТСТВИЕ <h2>Часто задаваемые вопросы</h2> или < 4 Q&A в нём (category="faq_block"),
+                    скелет статьи не выводится из entities/subintents/user_questions Stage 1 (category="skeleton_trace");
          - major:   слабая глубина, плохой intent match, тон выпадает,
-                    spam-плотность по terminам;
+                    spam-плотность по terminам, в expert_opinion придумано ФИО/регалии,
+                    FAQ-вопросы не из stage1.user_questions;
          - minor:   стилистика, повторы, ритм.
   7. total_score = взвешенная сумма scores_4d:
         0.20·experience + 0.25·expertise + 0.20·authoritativeness +
         0.25·trustworthiness + 0.10·page_quality
      Округли до 0.1.
   8. verdict:
-       - "pass"   если total_score ≥ 8.0, нет blocker, lsi_coverage_pct ≥ 80, tfidf_spam_check.passed;
-       - "reject" если есть blocker категории hallucination или ключевой intent_match;
+       - "pass"   если total_score ≥ 8.0, нет blocker, lsi_coverage_pct ≥ 80, tfidf_spam_check.passed,
+                  structural_requirements.expert_opinion_present == true,
+                  structural_requirements.faq_block_present == true И faq_questions_count ≥ 4,
+                  structural_requirements.skeleton_traceable == true;
+       - "reject" если есть blocker категории hallucination или ключевой intent_match
+                  ИЛИ отсутствует expert_opinion / faq_block / skeleton_trace;
        - "refine" в остальных случаях.
 
 [OUTPUT CONTRACT]
@@ -89,10 +108,14 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
 
 [SELF-AUDIT — silent]
   ✓ total_score правильно посчитан по весам?
-  ✓ verdict логически вытекает из scores + наличия blocker + lsi_coverage_pct + spam?
+  ✓ verdict логически вытекает из scores + наличия blocker + lsi_coverage_pct + spam +
+    structural_requirements (expert_opinion/faq_block/skeleton_traceable)?
+  ✓ structural_requirements заполнены реальной проверкой HTML, а не «на глаз»?
   ✓ Не завышены ли оценки из «вежливости»?
   ✓ Все issues несут actionable fix_instruction?
   ✓ Если найдены запрещённые формулы галлюцинации — это blocker hallucination?
+  ✓ Если <blockquote class="expert-opinion"> отсутствует — обязательно blocker expert_opinion?
+  ✓ Если <h2>Часто задаваемые вопросы</h2> отсутствует или < 4 Q&A — обязательно blocker faq_block?
 
 [STRICT OUTPUT RULES]
   - Только JSON-объект.

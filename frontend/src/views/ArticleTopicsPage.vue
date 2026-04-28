@@ -382,15 +382,26 @@ function confidenceBadge(conf) {
 }
 
 // Скор evaluator-отчёта для отображения ⭐ N/10 в карточке/модалке.
-// Возвращает строку либо null, если evaluator не запускался или дал NaN.
+// Возвращает строку либо null, если evaluator не запускался / поле total_score
+// отсутствует / NaN. ВАЖНО: проверяем существование report и наличие СВОЙСТВА
+// total_score через `'total_score' in report` ДО Number(): иначе для задач,
+// у которых evaluator_report === null (default для всех старых задач, или
+// когда ARTICLE_TOPICS_EVALUATOR_ENABLED=false), `Number(undefined)` хоть и
+// NaN, но `Number(null)` равен 0 и Number.isFinite(0) === true — это давало
+// ложное «⭐ 0.0/10» для каждой задачи, у которой отчёта вообще нет.
 function evaluatorScore(task) {
-  const s = Number(task && task.evaluator_report && task.evaluator_report.total_score);
+  const report = task && task.evaluator_report;
+  if (!report || typeof report !== 'object') return null;
+  const raw = report.total_score;
+  if (raw === null || raw === undefined) return null;
+  const s = Number(raw);
   return Number.isFinite(s) ? s.toFixed(1) : null;
 }
 
-// Открывает /tasks/new с предзаполненными query-параметрами (нишa,
-// аудитория, raw LSI из ключей quick-win и т.п.). CreateTaskPage
-// читает их в onMounted и подставляет в reactive form.
+// Открывает /info-article (раздел «Статья для блога») с предзаполненными
+// query-параметрами. Раньше уходило в /tasks/new (классический SEO-пайплайн);
+// теперь после Phase 2 / deep-dive мы сразу запускаем info-article генератор —
+// он умеет работать как с Excel-базой коммерческих ссылок, так и без неё.
 function createSeoArticleFromTrend(trend) {
   if (!trend || !trend.name || !activeTask.value) return;
   // Собираем максимум контекста из текущей main-задачи.
@@ -411,17 +422,17 @@ function createSeoArticleFromTrend(trend) {
     ].filter(Boolean).join('\n'),
     prefill_title:     trend.name,
   };
-  router.push({ path: '/tasks/new', query });
+  router.push({ path: '/info-article', query });
 }
 
-// «📝 Создать SEO-статью» из quick-win (deep-dive, секция 4).
+// «📝 Создать статью для блога» из quick-win (deep-dive, секция 4).
 function createSeoArticleFromQuickWin() {
   if (!activeTask.value) return;
   const t = activeTask.value;
   const parsed = parsedDeepDive.value;
   // Берём всё содержимое секции «Быстрая победа» как brand_facts —
   // там уже есть H1/title/description/H2 + тезисы + CTA, что является
-  // готовой постановкой для SEO-генератора.
+  // готовой постановкой для info-article-генератора.
   let qwBlock = '';
   if (parsed) {
     const qw = parsed.sections.find((s) => s.kind === 'quickWin');
@@ -429,7 +440,7 @@ function createSeoArticleFromQuickWin() {
   }
   const targetService = [t.niche, t.trend_name].filter(Boolean).join(' — ');
   router.push({
-    path: '/tasks/new',
+    path: '/info-article',
     query: {
       prefill_target:   targetService,
       prefill_audience: t.audience || '',
@@ -783,8 +794,8 @@ const sortedTasks = computed(() =>
                       </button>
                       <button class="btn-ghost text-xs border border-emerald-700 text-emerald-200"
                               @click="createSeoArticleFromTrend(t)"
-                              title="Открыть форму создания SEO-статьи с предзаполненными полями из тренда">
-                        📝 SEO-статья
+                              title="Открыть «Статью для блога» с предзаполненными полями из тренда (без Excel — статья пишется без перелинковки)">
+                        📝 Статья для блога
                       </button>
                       <button class="btn-ghost text-xs border border-gray-700"
                               @click="copyText(t.name, `trend-${idx}`, 'text')"
@@ -935,8 +946,8 @@ const sortedTasks = computed(() =>
                     <button v-if="sec.kind === 'quickWin'"
                             class="btn-ghost text-[11px] border border-emerald-700 text-emerald-200"
                             @click="createSeoArticleFromQuickWin"
-                            title="Открыть форму создания SEO-статьи с предзаполненными полями из «Быстрой победы»">
-                      📝 Создать SEO-статью →
+                            title="Открыть «Статью для блога» с предзаполненными полями из «Быстрой победы» (без Excel — статья пишется без перелинковки)">
+                      📝 Создать статью для блога →
                     </button>
                     <button class="btn-ghost text-[11px] border border-gray-700"
                             @click="copySection(sec, 'text')">

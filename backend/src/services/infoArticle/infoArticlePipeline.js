@@ -258,7 +258,8 @@ function countOccurrences(haystack, needle) {
 
 /**
  * Programmatic validation of writer output: image slots, h1 count, hallucination
- * patterns, and link_plan compliance (ground-truth via auditHtmlAgainstPlan).
+ * patterns, expert opinion, FAQ block, and link_plan compliance (ground-truth via
+ * auditHtmlAgainstPlan).
  */
 function validateWriterOutput(html, linkPlan) {
   const issues = [];
@@ -277,6 +278,48 @@ function validateWriterOutput(html, linkPlan) {
   // h1
   const h1Count = (html.match(/<h1\b/gi) || []).length;
   if (h1Count !== 1) issues.push(`<h1> должен быть ровно 1, найдено: ${h1Count}`);
+
+  // ── Expert opinion (blockquote class="expert-opinion") — ровно 1 ─────
+  // Считаем гибко: атрибут class может быть в одинарных/двойных кавычках,
+  // могут идти другие классы. Главное — наличие хотя бы одного blockquote
+  // с маркером "expert-opinion" в class.
+  const expertBlockRe = /<blockquote\b[^>]*class\s*=\s*["'][^"']*\bexpert-opinion\b[^"']*["'][^>]*>/gi;
+  const expertCount = (html.match(expertBlockRe) || []).length;
+  if (expertCount === 0) {
+    issues.push('Отсутствует обязательный блок «Мнение эксперта» — нужен ровно один <blockquote class="expert-opinion">…</blockquote>');
+  } else if (expertCount > 1) {
+    issues.push(`Блок «Мнение эксперта» (<blockquote class="expert-opinion">) встречается ${expertCount} раз — должен быть ровно 1`);
+  } else {
+    // Проверим, что внутри есть атрибуция (cite/footer/strong "Мнение эксперта")
+    // — мягкая эвристика, чтобы writer не вставил пустой blockquote.
+    const exMatch = html.match(/<blockquote\b[^>]*class\s*=\s*["'][^"']*\bexpert-opinion\b[^"']*["'][^>]*>([\s\S]*?)<\/blockquote>/i);
+    const exBody  = exMatch ? exMatch[1] : '';
+    const hasAttribution = /<cite\b/i.test(exBody) || /<footer\b/i.test(exBody) || /мнение\s+эксперта/i.test(exBody);
+    if (!hasAttribution) {
+      issues.push('Блок «Мнение эксперта» не содержит атрибуции (нужны <cite>, <footer> или фраза «Мнение эксперта»)');
+    }
+  }
+
+  // ── FAQ block: <h2>Часто задаваемые вопросы</h2> + 4–6 H3 после него ─
+  const faqHeadingRe = /<h2\b[^>]*>\s*часто\s+задава(?:е|ю)мые\s+вопрос(?:ы|ов)\s*<\/h2>/gi;
+  const faqHeadings = html.match(faqHeadingRe) || [];
+  if (faqHeadings.length === 0) {
+    issues.push('Отсутствует обязательный FAQ-блок: нужен <h2>Часто задаваемые вопросы</h2> в конце статьи');
+  } else if (faqHeadings.length > 1) {
+    issues.push(`Заголовок «Часто задаваемые вопросы» встречается ${faqHeadings.length} раз — должен быть ровно 1`);
+  } else {
+    // Считаем H3 между FAQ-заголовком и следующим H2 (Заключение / конец).
+    const faqIdx = html.search(faqHeadingRe);
+    const tail   = html.slice(faqIdx + faqHeadings[0].length);
+    const nextH2 = tail.search(/<h2\b/i);
+    const faqBody = nextH2 >= 0 ? tail.slice(0, nextH2) : tail;
+    const faqQuestions = (faqBody.match(/<h3\b/gi) || []).length;
+    if (faqQuestions < 4) {
+      issues.push(`В FAQ-блоке найдено ${faqQuestions} вопросов (<h3>) — должно быть 4–6`);
+    } else if (faqQuestions > 6) {
+      issues.push(`В FAQ-блоке найдено ${faqQuestions} вопросов (<h3>) — должно быть 4–6, лишние сократи`);
+    }
+  }
 
   // hallucination guard
   const plain = stripTagsLoop(html);
@@ -318,6 +361,7 @@ async function runWriter(task, args, ctx, opts = {}) {
   const systemArg = task.__geminiCacheName ? '' : systemFull;
 
   const buildUser = (correctiveIssues = null, priorEeatIssues = null, priorLinkIssues = null) => {
+    const noLinks = !Array.isArray(linkPlan) || linkPlan.length === 0;
     const base = [
       `[INPUTS]`,
       `topic: ${task.topic}`,
@@ -332,6 +376,19 @@ async function runWriter(task, args, ctx, opts = {}) {
       `lsi_set: ${pointerOrJson('§7 LSI-набор', lsi, iakbReady, 2500)}`,
       `link_plan: ${pointerOrJson('§8 Перелинковка', linkPlan, iakbReady, 6000)}`,
     ];
+    if (noLinks) {
+      // Excel-база коммерческих ссылок не загружена → пишем статью без перелинковки.
+      // Без этого маркера writer мог бы попытаться придумать фейковые href.
+      base.push('');
+      base.push('[NO_INTERLINKING_MODE]');
+      base.push('  • Коммерческая Excel-база НЕ загружена → link_plan пуст.');
+      base.push('  • НЕ вставляй ни одного <a href="…"> с коммерческой ссылкой.');
+      base.push('  • Игнорируй пункты writer-промта про "вставь все picks", "1–2 ссылки на каждый <h2>",');
+      base.push('    "all_planned_links_inserted" — они НЕ применимы в этом режиме.');
+      base.push('  • В self_audit верни: all_planned_links_inserted=true, links_per_h2_within_bounds=true');
+      base.push('    (оба true = «нечего нарушать»).');
+      base.push('  • Все остальные требования (E-E-A-T, expert_opinion, FAQ, image_slots, LSI) — в силе.');
+    }
     if (priorEeatIssues && priorEeatIssues.length) {
       base.push('');
       base.push('[PRIOR_EEAT_ISSUES — закрой каждую issue в новой версии:]');
@@ -658,11 +715,31 @@ async function processInfoArticleTask(taskId) {
     );
 
     // 7. Stage 2C Semantic Link Planner
+    //
+    // Если пользователь не загрузил Excel — task.commercial_links будет [].
+    // planSemanticLinks fail-safe возвращает пустой link_plan (см. early-exit
+    // на empty_shortlists), статья создаётся в режиме «без перелинковки»:
+    // Stage 5b пропускается, writer не вставляет коммерческих <a>-ссылок.
     await setStage(taskId, 'stage2c_link_plan', 52);
     const links = Array.isArray(task.commercial_links) ? task.commercial_links : [];
-    const planResult = await planSemanticLinks({
-      task, outline, links, callContext: ctx,
-    });
+    const noInterlinking = links.length === 0;
+    if (noInterlinking) {
+      await appendLog(
+        taskId,
+        '🚫 Excel-база не загружена → статья будет сгенерирована БЕЗ перелинковки (Stage 2C/5b пропускаются)',
+        'info',
+      );
+    }
+    const planResult = noInterlinking
+      ? {
+          link_plan: [],
+          graph_pattern: { url_usage_count: {} },
+          deterministic_audit: { mode: 'no_interlinking' },
+          shortlistByH2: {},
+        }
+      : await planSemanticLinks({
+          task, outline, links, callContext: ctx,
+        });
     await saveColumn(taskId, 'link_plan', planResult.link_plan);
     await saveColumn(taskId, 'link_plan_meta', {
       graph_pattern:       planResult.graph_pattern,
@@ -670,9 +747,11 @@ async function processInfoArticleTask(taskId) {
       shortlist_per_h2:    planResult.shortlistByH2,
     });
     const totalPlanned = planResult.link_plan.reduce((acc, p) => acc + (p.picks?.length || 0), 0);
+    const audit = planResult.deterministic_audit || {};
     await appendLog(
       taskId,
-      `🔗 Link planner: ${totalPlanned} ссылок на ${planResult.link_plan.length} H2 (1–2 на блок), ` +
+      `🔗 Link planner: ${totalPlanned} ссылок на ${planResult.link_plan.length} H2 ` +
+      `(глобальный коридор ok: min=${audit.total_min_ok ? 'да' : 'нет'}, max=${audit.total_max_ok ? 'да' : 'нет'}), ` +
       `unique URLs=${Object.keys(planResult.graph_pattern.url_usage_count || {}).length}`,
       'ok',
     );
@@ -716,7 +795,9 @@ async function processInfoArticleTask(taskId) {
       await appendLog(taskId, `⚠ Остались ${writerIssues.length} замечаний после первичного writer`, 'warn');
     }
 
-    // 10. Stage 5 (E-E-A-T) + Stage 5b (link audit) — параллельно
+    // 10. Stage 5 (E-E-A-T) + Stage 5b (link audit) — параллельно.
+    // Stage 5b пропускается, если link_plan пуст (режим «без перелинковки») —
+    // нечего проверять, deterministic-аудит даёт coverage_pct=100.
     await setStage(taskId, 'stage5_audits', 70);
     const [eeatAudit, linkAuditDet] = await Promise.all([
       runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx).catch((e) => {
@@ -726,8 +807,10 @@ async function processInfoArticleTask(taskId) {
       Promise.resolve(auditHtmlAgainstPlan({ html: articleHtml, link_plan: planResult.link_plan })),
     ]);
 
-    let linkAudit = await runLinkAudit(articleHtml, planResult.link_plan, linkAuditDet, ctx)
-      .catch(() => ({ ...linkAuditDet, semantic_violations: [], audit_notes: '' }));
+    let linkAudit = noInterlinking
+      ? { ...linkAuditDet, semantic_violations: [], audit_notes: 'Режим без перелинковки: link_plan пуст, аудит пропущен.' }
+      : await runLinkAudit(articleHtml, planResult.link_plan, linkAuditDet, ctx)
+          .catch(() => ({ ...linkAuditDet, semantic_violations: [], audit_notes: '' }));
 
     if (eeatAudit) {
       await db.query(
@@ -804,8 +887,10 @@ async function processInfoArticleTask(taskId) {
             [taskId, JSON.stringify(reaudit), reaudit.total_score],
           );
           const linkAuditDet2 = auditHtmlAgainstPlan({ html: articleHtml, link_plan: planResult.link_plan });
-          linkAudit = await runLinkAudit(articleHtml, planResult.link_plan, linkAuditDet2, ctx)
-            .catch(() => ({ ...linkAuditDet2, semantic_violations: [], audit_notes: '' }));
+          linkAudit = noInterlinking
+            ? { ...linkAuditDet2, semantic_violations: [], audit_notes: 'Режим без перелинковки: link_plan пуст, аудит пропущен.' }
+            : await runLinkAudit(articleHtml, planResult.link_plan, linkAuditDet2, ctx)
+                .catch(() => ({ ...linkAuditDet2, semantic_violations: [], audit_notes: '' }));
           await saveColumn(taskId, 'link_audit', linkAudit);
           await appendLog(
             taskId,

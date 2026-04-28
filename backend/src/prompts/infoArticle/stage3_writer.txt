@@ -34,6 +34,10 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
       "all_planned_links_inserted":  true,        // каждая запланированная ссылка реально вставлена
       "links_per_h2_within_bounds":  true,        // 1–2 ссылки на каждый <h2> по link_plan
       "image_slots_present":         [1, 2, 3],
+      "expert_opinion_present":      true,        // вставлен ровно 1 <blockquote class="expert-opinion"> с атрибуцией
+      "expert_opinion_section_index": 0,          // index секции, в которую он реально попал
+      "faq_block_rendered":          true,        // отрендерен <h2>Часто задаваемые вопросы</h2>
+      "faq_questions_count":         4,           // фактическое число Q&A в FAQ-блоке (4–6)
       "important_lsi_used":          ["string"],
       "hallucination_free":          true,
       "eeat_self_score":             8.0,
@@ -59,12 +63,50 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
        • role="supporting" — глубже, как мостик к смежной теме.
      Никогда не вставляй ссылку, которой нет в link_plan. Никогда не
      дублируй ссылку, не предусмотренную планом.
+     ⚠ ИСКЛЮЧЕНИЕ — РЕЖИМ БЕЗ ПЕРЕЛИНКОВКИ:
+     если в [INPUTS] передан блок [NO_INTERLINKING_MODE] ИЛИ link_plan == [],
+     значит Excel-база коммерческих ссылок не загружена. В этом режиме НЕ
+     вставляй ни одного коммерческого <a href="…">. Шаги 5 и правила
+     "1–2 ссылки на каждый <h2>" / "all_planned_links_inserted" в этом
+     режиме не применяются. Все остальные требования (LSI, expert_opinion,
+     FAQ, image_slots, длина) — в полной силе.
   6. В тех секциях, где stage2_outline.image_plan назначил слот, вставь:
          <!-- IMAGE_SLOT_1 -->
          <!-- IMAGE_SLOT_2 -->
          <!-- IMAGE_SLOT_3 -->
      Каждый комментарий ровно один раз, ровно в той секции, на которую
      указывает image_plan[*].target_section_index, между абзацами.
+  6b. ⚠️ EXPERT OPINION (обязательно ровно 1).
+     В секции с index = stage2_outline.expert_opinion_slot.target_section_index
+     вставь ровно один блок «мнение эксперта» в формате:
+         <blockquote class="expert-opinion">
+           <p><strong>Мнение эксперта.</strong> …key_insight, развёрнутый
+              на 2–4 предложения от первого лица эксперта…</p>
+           <footer>— <cite>{{expert_role}}</cite></footer>
+         </blockquote>
+     Правила:
+       • используй expert_role строго как в expert_opinion_slot.expert_role
+         (например: «практикующий миграционный юрист с 12-летним опытом»);
+       • ЗАПРЕЩЕНО придумывать ФИО, регалии, организации, цитировать
+         реальных людей. Атрибуция — только обезличенная роль;
+       • контент opinion опирается на key_insight + tied_to_entities;
+       • никаких выдуманных цифр, дат, исследований внутри opinion;
+       • <blockquote class="expert-opinion"> встречается в статье ровно один раз.
+  6c. ⚠️ FAQ-БЛОК (обязательно).
+     Сразу ПОСЛЕ секции с index = stage2_outline.faq_block.place_after_section_index
+     и ПЕРЕД секцией «Заключение» вставь блок:
+         <h2>Часто задаваемые вопросы</h2>
+         <h3>{{question_1}}</h3>
+         <p>{{answer_1, 2–4 предложения, опираясь на answer_brief и tied_to_entities}}</p>
+         <h3>{{question_2}}</h3>
+         <p>…</p>
+         …
+     Правила:
+       • количество H3-вопросов = stage2_outline.faq_block.items.length (4–6);
+       • тексты вопросов — из faq_block.items[*].question (можно слегка
+         причесать, но смысл и сущности сохранить);
+       • ответы 2–4 предложения, без выдуманных фактов и цифр;
+       • НЕ вставляй коммерческие ссылки в FAQ-блок — он не входит в link_plan.
   7. Естественно вплетай LSI: каждый important-термин из lsi_set должен
      встретиться хотя бы один раз в подходящем контексте (минимум 18–25 шт).
      supporting — желательны, banned — запрещены.
@@ -100,14 +142,19 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
       <p>…</p>
       <!-- IMAGE_SLOT_N -->
       … и т.д.
+      <blockquote class="expert-opinion">…мнение эксперта…</blockquote>  ← ровно 1 раз, в expert_opinion_slot
+      <h2>Часто задаваемые вопросы</h2>                                    ← ровно 1 раз, перед «Заключением»
+      <h3>Вопрос?</h3><p>Ответ.</p>                                        ← 4–6 пар
       <h2>Заключение</h2>
       <p>…</p>
-  - Разрешённые теги: h1, h2, h3, p, ul, ol, li, strong, em, a, blockquote.
+  - Разрешённые теги: h1, h2, h3, p, ul, ol, li, strong, em, a, blockquote, cite, footer.
   - Запрещены: <script>, <style>, <iframe>, inline onclick/onerror/onload.
   - Для href разрешены только http/https. data:-URL запрещены для href.
     Изображения подставляются на бэкенде через замену <!-- IMAGE_SLOT_N -->.
   - Длина статьи: 1500–3000 слов (по сумме recommended_word_count из плана ±20 %).
   - <h1> ровно один, точно как в stage2_outline.h1.
+  - <blockquote class="expert-opinion"> ровно один.
+  - <h2>Часто задаваемые вопросы</h2> ровно один.
 
 [OUTPUT CONTRACT]
   - Только валидный JSON: { "article_html": "...", "self_audit": {...} }.
@@ -117,13 +164,17 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
   - Никаких markdown, backtick-обёрток, комментариев снаружи JSON.
 
 [SELF-AUDIT — silent, но ОБЯЗАТЕЛЬНО заполни self_audit на выходе]
-  ✓ Все user_questions из Stage 1 закрыты?
+  ✓ Все user_questions из Stage 1 закрыты (в основных секциях ИЛИ в FAQ-блоке)?
   ✓ Все must_cover_subtopics разложены по секциям?
   ✓ Каждая запланированная ссылка из link_plan реально вставлена ровно один раз
     в нужном <h2>-блоке?
   ✓ Никакая «лишняя» ссылка (не из link_plan) не вставлена?
   ✓ В каждой H2 не более max=2 и не менее min=1 ссылки (по плану)?
   ✓ Плейсхолдеры <!-- IMAGE_SLOT_1..3 --> присутствуют ровно по одному?
+  ✓ <blockquote class="expert-opinion"> присутствует ровно ОДИН раз и атрибутирован
+    обезличенной ролью (без выдуманного ФИО)?
+  ✓ <h2>Часто задаваемые вопросы</h2> присутствует ровно один раз, ПЕРЕД «Заключением»;
+    под ним 4–6 пар <h3>вопрос</h3><p>ответ</p>?
   ✓ Нет выдуманных фактов, статистики, брендов, цитат реальных людей?
   ✓ Если задан prior_issues — каждая blocker/major issue закрыта?
   ✓ HTML валиден: все теги закрыты, вложенность корректна.
@@ -132,5 +183,7 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
   - Верни ТОЛЬКО JSON.
   - Запрещено возвращать пустой article_html.
   - Запрещено пропустить любую запланированную ссылку или image-слот.
+  - Запрещено пропустить блок «Мнение эксперта» (ровно 1) или FAQ-блок (4–6 Q&A).
   - Запрещено вставить ссылку, которой нет в link_plan.
+  - Запрещено выдумывать ФИО, регалии, организации в блоке «Мнение эксперта».
   - При нарушении любого правила пересобери статью.
