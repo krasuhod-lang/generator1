@@ -27,6 +27,7 @@ const editorCopilotRoutes = require('./src/routes/editorCopilot.routes');
 const metaTagsRoutes      = require('./src/routes/metaTags.routes');
 const linkArticleRoutes   = require('./src/routes/linkArticle.routes');
 const articleTopicsRoutes = require('./src/routes/articleTopics.routes');
+const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -103,6 +104,7 @@ app.use('/api/editor-copilot', editorCopilotRoutes);
 app.use('/api/meta-tags',      metaTagsRoutes);
 app.use('/api/link-article',   linkArticleRoutes);
 app.use('/api/article-topics', articleTopicsRoutes);
+app.use('/api/acf-json',       acfJsonRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler

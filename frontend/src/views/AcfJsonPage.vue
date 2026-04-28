@@ -9,9 +9,11 @@
  * Логика и системный промт перенесены из вспомогательного файла
  * `JSON-v2 (2).html` в корне репозитория.
  *
- * ВАЖНО: API-ключ AITunnel зашит прямо в код (по требованию задачи).
- *        НЕ читается из ENV и НЕ оборачивается в backend-прокси —
- *        запросы уходят напрямую из браузера на api.aitunnel.ru.
+ * ВАЖНО: запрос к AITunnel идёт через backend-прокси
+ *        (POST /api/acf-json/aitunnel), а НЕ из браузера напрямую.
+ *        API-ключ и URL хранятся на сервере. Это защищает от
+ *        "Failed to fetch", когда у клиента нет VPN / провайдер
+ *        блокирует api.aitunnel.ru.
  *
  * Главное правило: текст НЕ переписывается — только распределяется
  * по контейнерам ACF из задания (blocks / steps / bens / price / faq /
@@ -20,14 +22,19 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import AppLayout from '../components/AppLayout.vue';
 import { useTasksStore } from '../stores/tasks.js';
+import api from '../api.js';
 
 const store = useTasksStore();
 
-// ── API AITunnel ───────────────────────────────────────────────────────────
-// Ключ зашит в код намеренно (см. требования задачи). Не выносить в ENV.
-const AITUNNEL_API_KEY = 'sk-aitunnel-S81NPYt7iGa9X5Lsx9g4e8D9WXlAh5cm';
-const AITUNNEL_URL     = 'https://api.aitunnel.ru/v1/chat/completions';
-// «Qwen3.5 Plus» из ТЗ — у AITunnel это модель `qwen-plus`.
+// ── API AITunnel (через backend-прокси) ────────────────────────────────────
+// Запрос идёт НЕ напрямую из браузера на api.aitunnel.ru, а через наш
+// backend-роут /api/acf-json/aitunnel. Это критично: AITunnel и/или
+// промежуточные сети у клиента могут быть недоступны (VPN/блокировки
+// провайдера/корпоративный фаервол) — раньше это давало "Failed to fetch".
+// Теперь доступность AITunnel определяется только сервером, где живёт
+// приложение, а IP/VPN пользователя роли не играют.
+// API-ключ и URL хранятся на бэкенде (см. backend/src/routes/acfJson.routes.js).
+// «Qwen3.5 Plus» из ТЗ — у AITunnel это модель `qwen3.5-plus-02-15`.
 const AITUNNEL_MODEL   = 'qwen3.5-plus-02-15';
 // Бюджет вывода модели. Поднят с 8192 → 16384, чтобы JSON-обвязка
 // (acf_fc_layout, schema-обёртки, повторение текста дословно) гарантированно
@@ -520,41 +527,41 @@ function findMissingPhrases(inputPlain, outputPlain) {
   return missing;
 }
 
-// ── Один HTTP-вызов к AITunnel ────────────────────────────────────────────
+// ── Один HTTP-вызов к AITunnel через наш backend-прокси ───────────────────
+// Возвращает первый `choice` ровно в том виде, в котором его отдаёт AITunnel
+// ({ message: { content }, finish_reason }). Сам прокси-роут живёт в
+// backend/src/routes/acfJson.routes.js и держит API-ключ на сервере.
 async function callAitunnel({ systemPrompt, userPrompt }) {
   let response;
   try {
-    response = await fetch(AITUNNEL_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // .trim() — на случай случайных пробелов/переносов в константе
-        Authorization: `Bearer ${AITUNNEL_API_KEY.trim()}`,
-      },
-      body: JSON.stringify({
-        model: AITUNNEL_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userPrompt },
-        ],
-        temperature: 0.1,
-        max_tokens: MAX_OUTPUT_TOKENS,
-      }),
+    response = await api.post('/acf-json/aitunnel', {
+      systemPrompt,
+      userPrompt,
+      model:       AITUNNEL_MODEL,
+      temperature: 0.1,
+      max_tokens:  MAX_OUTPUT_TOKENS,
+    }, {
+      // Чанки могут обрабатываться долго — больше дефолтных 60 сек.
+      timeout: 180_000,
     });
-  } catch (networkError) {
+  } catch (httpError) {
+    // axios: либо нет ответа (сеть до НАШЕГО backend упала), либо
+    // backend вернул не-2xx со своим JSON `{error: '...'}`.
+    if (httpError.response) {
+      const serverMsg = httpError.response.data?.error
+        || `HTTP ${httpError.response.status}`;
+      throw new Error(`Ошибка прокси AITunnel: ${serverMsg}`);
+    }
     throw new Error(
-      `Сеть недоступна (Failed to fetch). Проверьте интернет/VPN. Детали: ${networkError.message}`,
+      `Сеть до сервера недоступна (Failed to fetch). Детали: ${httpError.message}`,
     );
   }
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Ошибка AITunnel ${response.status}: ${errText}`);
+
+  const choice = response.data?.choice;
+  if (!choice) {
+    throw new Error('Backend вернул пустой ответ AITunnel.');
   }
-  const data = await response.json();
-  if (!data.choices || data.choices.length === 0) {
-    throw new Error('AITunnel вернул пустой ответ.');
-  }
-  return data.choices[0];
+  return choice;
 }
 
 function parseModelOutputArray(rawContent) {
