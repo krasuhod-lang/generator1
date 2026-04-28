@@ -245,7 +245,17 @@ function sectionLsi(lsi) {
 }
 
 function sectionLinkPlan(linkPlan) {
-  if (!Array.isArray(linkPlan) || !linkPlan.length) return '';
+  if (!Array.isArray(linkPlan) || !linkPlan.length) {
+    // Excel-база коммерческих ссылок не загружена → режим без перелинковки.
+    // Явно сигналим writer'у в §8, чтобы он не «придумывал» внутренние ссылки.
+    return [
+      '§8. ПЛАН ПЕРЕЛИНКОВКИ (Stage 2C)',
+      '  ⚠ Режим БЕЗ ПЕРЕЛИНКОВКИ: Excel-база коммерческих страниц не загружена.',
+      '  • link_plan пуст; коммерческих <a href> в статье быть НЕ должно.',
+      '  • Stage 2C/5b пропущены, требования "1–2 ссылки на H2" / "all_planned_links_inserted"',
+      '    в этом режиме НЕ применяются.',
+    ].join('\n');
+  }
   const lines = ['§8. ПЛАН ПЕРЕЛИНКОВКИ (Stage 2C)'];
   for (const p of linkPlan) {
     lines.push(`  H2 #${p.h2_index} «${clip(p.h2_text, 120)}»`);
