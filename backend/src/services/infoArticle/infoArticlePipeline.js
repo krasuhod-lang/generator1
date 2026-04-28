@@ -363,6 +363,9 @@ async function runWriter(task, args, ctx, opts = {}) {
       retries: 3,
       temperature: 0.5,
       maxTokens: 16384,
+      // Reasoning-модель + 16K токенов ответа — стабильно нужно 3–5 минут.
+      // Дефолтный 3-минутный таймаут адаптера регулярно срывал генерацию.
+      timeoutMs: 480000,
       callLabel: opts.callLabel || 'InfoArticle Stage 3 (writer)',
       ...iakbCallOpts(task),
       ...ctx,
@@ -382,6 +385,7 @@ async function runWriter(task, args, ctx, opts = {}) {
         retries: 2,
         temperature: 0.45,
         maxTokens: 16384,
+        timeoutMs: 480000,
         callLabel: 'InfoArticle Stage 3 (corrective)',
         ...iakbCallOpts(task),
         ...ctx,

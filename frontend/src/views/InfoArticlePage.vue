@@ -303,6 +303,52 @@ function formatTokens(v) {
   return String(n);
 }
 
+// ── Generation timer ─────────────────────────────────────────────────
+// Один общий «тиктак» 1 раз в секунду, пока на странице есть активная
+// (running/queued) задача. Используется для пересчёта live-секундомера —
+// сами поля started_at/completed_at в БД уже есть (миграция 017), так что
+// никаких изменений на бэкенде не требуется.
+const nowTick = ref(Date.now());
+let tickTimer = null;
+
+function startTicker() {
+  if (tickTimer) return;
+  tickTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
+}
+function stopTicker() {
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+}
+
+function isActiveStatus(s) {
+  return s === 'running' || s === 'queued';
+}
+
+/** Длительность генерации в миллисекундах. Для активных задач — от
+ *  started_at до текущего тика; для done/error — от started_at до completed_at.
+ *  Если started_at ещё не выставлен (queued, бэкенд не успел) — fallback на
+ *  created_at, чтобы цифра не прыгала с «—» на большое число. */
+function taskDurationMs(t) {
+  if (!t) return 0;
+  const startStr = t.started_at || t.created_at;
+  if (!startStr) return 0;
+  const start = Date.parse(startStr);
+  if (!Number.isFinite(start)) return 0;
+  const endStr = isActiveStatus(t.status) ? null : t.completed_at;
+  const end = endStr ? Date.parse(endStr) : nowTick.value;
+  if (!Number.isFinite(end)) return 0;
+  return Math.max(0, end - start);
+}
+
+function formatDuration(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  if (h > 0) return `${h}ч ${pad(m)}м ${pad(s)}с`;
+  return `${pad(m)}:${pad(s)}`;
+}
+
 // ── Active task + SSE ────────────────────────────────────────────────
 const selectedTask = ref(null);
 const streamEvents = ref([]);
@@ -505,6 +551,21 @@ const hasResult = computed(() => !!selectedTask.value?.article_html);
 
 // Live cost (уже считается на бэкенде после каждой стадии).
 const liveCost = computed(() => Number(selectedTask.value?.cost_usd || 0));
+
+// Live длительность генерации текущей задачи (в мс) и её форматированный вид.
+const liveDurationMs = computed(() => taskDurationMs(selectedTask.value));
+const liveDurationLabel = computed(() => formatDuration(liveDurationMs.value));
+
+// Запускаем секундомер пока виден активный таск (текущий или хотя бы один в
+// списке). Это дёшево (один setInterval, ничего не дёргает на бэкенде).
+const hasAnyActiveTask = computed(() => {
+  const list = Array.isArray(store.tasks) ? store.tasks : [];
+  return isActiveStatus(selectedTask.value?.status) || list.some((t) => isActiveStatus(t.status));
+});
+watch(hasAnyActiveTask, (active) => {
+  if (active) startTicker(); else stopTicker();
+}, { immediate: true });
+onUnmounted(() => { stopTicker(); });
 </script>
 
 <template>
@@ -650,6 +711,10 @@ const liveCost = computed(() => Number(selectedTask.value?.cost_usd || 0));
                 <div class="text-sm text-gray-200 truncate">{{ t.topic }}</div>
                 <div class="text-[11px] text-gray-500 mt-0.5">
                   {{ formatDate(t.created_at) }} · {{ formatCost(t.cost_usd) }}
+                  <span class="font-mono"
+                        :class="t.status === 'running' || t.status === 'queued' ? 'text-sky-400' : 'text-gray-500'">
+                    · ⏱ {{ formatDuration(taskDurationMs(t)) }}
+                  </span>
                   <span v-if="t.commercial_links_count">· {{ t.commercial_links_count }} ссылок</span>
                   <span v-if="t.eeat_score">· E-E-A-T {{ Number(t.eeat_score).toFixed(1) }}</span>
                 </div>
@@ -672,6 +737,8 @@ const liveCost = computed(() => Number(selectedTask.value?.cost_usd || 0));
               Регион: <span class="text-gray-300">{{ selectedTask.region || '—' }}</span>
               · {{ selectedTask.commercial_links_count }} коммерч. ссылок
               · Стоимость: <span class="text-gray-300">{{ formatCost(liveCost) }}</span>
+              · Время: <span class="font-mono"
+                             :class="selectedTask.status === 'running' || selectedTask.status === 'queued' ? 'text-sky-300' : 'text-gray-300'">{{ liveDurationLabel }}</span>
             </div>
           </div>
           <span class="text-[11px] px-2 py-0.5 rounded uppercase tracking-wider shrink-0"
@@ -682,7 +749,10 @@ const liveCost = computed(() => Number(selectedTask.value?.cost_usd || 0));
         <div v-if="selectedTask.status === 'running' || selectedTask.status === 'queued'" class="space-y-2">
           <div class="flex justify-between items-center text-xs text-gray-400">
             <span>{{ stageLabel(selectedTask.current_stage) }}</span>
-            <span>{{ selectedTask.progress_pct || 0 }}%</span>
+            <span class="flex items-center gap-3">
+              <span class="font-mono text-sky-300" title="Время с момента старта генерации">⏱ {{ liveDurationLabel }}</span>
+              <span>{{ selectedTask.progress_pct || 0 }}%</span>
+            </span>
           </div>
           <div class="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
             <div class="bg-indigo-500 h-2 transition-all duration-500"
@@ -888,6 +958,14 @@ const liveCost = computed(() => Number(selectedTask.value?.cost_usd || 0));
               <div class="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3 col-span-2">
                 <div class="text-[10px] uppercase text-emerald-300">Total cost</div>
                 <div class="text-base text-emerald-100 font-mono">{{ formatCost(liveCost) }}</div>
+              </div>
+              <div class="bg-sky-900/20 border border-sky-800 rounded-lg p-3 col-span-2">
+                <div class="text-[10px] uppercase text-sky-300">Время генерации</div>
+                <div class="text-base text-sky-100 font-mono">⏱ {{ liveDurationLabel }}</div>
+                <div v-if="selectedTask.started_at" class="text-[10px] text-sky-300/70 mt-0.5">
+                  Старт: {{ formatDate(selectedTask.started_at) }}<span v-if="selectedTask.completed_at">
+                  · Финиш: {{ formatDate(selectedTask.completed_at) }}</span>
+                </div>
               </div>
             </div>
           </div>
