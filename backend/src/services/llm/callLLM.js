@@ -223,6 +223,12 @@ async function persistStageCall({ taskId, stageName, callLabel, model, promptSiz
  * @param {Function}            [opts.onLog]        — callback(msg, level) для SSE-логов
  * @param {number}              [opts.temperature]
  * @param {number}              [opts.maxTokens]
+ * @param {number}              [opts.timeoutMs]    — переопределяет дефолтный
+ *                                                    таймаут адаптера. Полезно
+ *                                                    для тяжёлых writer-стадий
+ *                                                    с большим maxTokens, где
+ *                                                    дефолтные 3 минуты Gemini
+ *                                                    стабильно недостаточны.
  * @param {string}              [opts.cachedContent]— `cachedContents/...` (Gemini only)
  * @param {Function}            [opts.onCacheMiss]  — callback() при HTTP 404 на cachedContent;
  *                                                    после вызова callLLM однократно перезапросит
@@ -244,6 +250,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     onTokens   = null,   // callback(model, tokensIn, tokensOut, costUsd) — для SSE
     temperature,
     maxTokens,
+    timeoutMs,
     logprobs = false,
     cachedContent = null,
     onCacheMiss   = null,
@@ -311,6 +318,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       const callOpts = { temperature, maxTokens, logprobs };
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        callOpts.timeoutMs = timeoutMs;
+      }
       if (adapter === 'gemini' && activeCachedContent) {
         callOpts.cachedContent = activeCachedContent;
       }

@@ -5,6 +5,17 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview';
 
+// Дефолтный таймаут одного HTTP-запроса к Gemini.
+// gemini-3.1-pro-preview — reasoning-модель: при maxTokens=16384 и больших
+// IAKB / writer-промптах (~50 КБ ввода) ответ регулярно занимает 3–5 минут.
+// 180 с уходили в timeout у InfoArticle Stage 3 — поэтому подняли default до
+// 300 с и сделали значение настраиваемым через env. Верхний предел в
+// validateOptions поднят до 600 с (см. ниже).
+const DEFAULT_GEMINI_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.GEMINI_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 1000 && raw <= 600000 ? raw : 300000;
+})();
+
 // ────────────────────────────────────────────────────────────────────
 // MAX_GEMINI_INPUT_LENGTH — верхняя граница суммарной длины
 // (systemInstruction + userPrompt) в символах. Ранее было 100 КБ; увеличено
@@ -310,7 +321,10 @@ function isGeoBlockError(errMsg) {
  * @param {object} [options]
  * @param {number} [options.temperature=0.4]
  * @param {number} [options.maxTokens=16384]
- * @param {number} [options.timeoutMs=180000]   — Gemini медленнее, даём 3 мин
+ * @param {number} [options.timeoutMs=DEFAULT_GEMINI_TIMEOUT_MS] — Gemini медленнее
+ *                                              (reasoning-модель + 16K токенов
+ *                                              ответа). Default 300 с,
+ *                                              переопределяется GEMINI_TIMEOUT_MS.
  * @param {string} [options.cachedContent]      — имя кэша (`cachedContents/...`).
  *                                                Если задан, `systemInstruction`
  *                                                НЕ отправляется (он уже в кэше).
@@ -336,7 +350,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   const {
     temperature = 0.4,
     maxTokens   = 16384,
-    timeoutMs   = 180000,
+    timeoutMs   = DEFAULT_GEMINI_TIMEOUT_MS,
     cachedContent = null,
     // plainText=true → НЕ навешиваем JSON_STRICT_GUARD и НЕ форсим
     // responseMimeType=application/json. Используется фолбэком streamGenerate(),
@@ -349,7 +363,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   // Проверка параметров
   if (temperature < 0 || temperature > 2) throw new Error('Invalid temperature');
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
-  if (timeoutMs < 1000 || timeoutMs > 300000) throw new Error('Invalid timeout');
+  if (timeoutMs < 1000 || timeoutMs > 600000) throw new Error('Invalid timeout');
 
   // API ключ Gemini — только из переменной окружения (без хардкода)
   const apiKey = requireGeminiApiKey();

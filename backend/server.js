@@ -679,6 +679,38 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_events_task_time ON info_article_events (task_id, created_at)`);
 
+    // ─── Migration 009: Persistent monitoring logs (task_logs) ────────
+    // Хранит SSE-события задач для MonitorPage / админки. Без этой таблицы
+    // taskLogPersister молча роняет батчи, а GET /api/tasks/:id/logs отдаёт
+    // 500 ('relation "task_logs" does not exist'). DDL идемпотентен —
+    // безопасно выполнять на каждый старт (см. migrations/009_add_task_logs.sql).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS task_logs (
+        id           BIGSERIAL PRIMARY KEY,
+        task_id      UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        ts           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        level        VARCHAR(16) NOT NULL DEFAULT 'info',
+        stage        VARCHAR(32),
+        event_type   VARCHAR(32) NOT NULL DEFAULT 'log',
+        message      TEXT,
+        payload      JSONB
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_task_logs_task_ts ON task_logs (task_id, ts)`);
+    await db.query(`
+      CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
+      RETURNS INTEGER LANGUAGE plpgsql AS $$
+      DECLARE
+        deleted INTEGER;
+      BEGIN
+        DELETE FROM task_logs
+         WHERE ts < NOW() - (retain_days || ' days')::interval;
+        GET DIAGNOSTICS deleted = ROW_COUNT;
+        RETURN deleted;
+      END;
+      $$;
+    `);
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);
