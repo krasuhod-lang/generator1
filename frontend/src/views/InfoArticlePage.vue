@@ -437,17 +437,51 @@ const sanitizedHtml = computed(() => {
 async function copyAsHtml() {
   const html = selectedTask.value?.article_html;
   if (!html) return;
+  const plain = selectedTask.value?.article_plain || html.replace(/<[^>]+>/g, ' ');
+
+  // Path A: Async Clipboard API + ClipboardItem (text/html + text/plain).
+  // Работает только в secure context (HTTPS / localhost) и в современных браузерах.
   try {
     if (navigator.clipboard && window.ClipboardItem) {
-      const blobHtml  = new Blob([html], { type: 'text/html' });
-      const blobPlain = new Blob([selectedTask.value?.article_plain || html.replace(/<[^>]+>/g, ' ')], { type: 'text/plain' });
+      const blobHtml  = new Blob([html],  { type: 'text/html' });
+      const blobPlain = new Blob([plain], { type: 'text/plain' });
       await navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })]);
-    } else if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(html);
+      flashToast('HTML скопирован');
+      return;
     }
-    flashToast('HTML скопирован');
+  } catch (_) { /* fallthrough */ }
+
+  // Path B: writeText — отдаёт HTML как обычный текст. Тоже требует
+  // secure context, но работает там, где нет ClipboardItem.
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(html);
+      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      return;
+    }
+  } catch (_) { /* fallthrough */ }
+
+  // Path C (legacy fallback): document.execCommand('copy') через скрытый
+  // <textarea>. Работает на HTTP / IP-адресах без secure context, что
+  // нужно при доступе к приложению через локальную сеть или просто по IP.
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = html;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) {
+      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      return;
+    }
+    throw new Error('execCommand copy вернул false');
   } catch (err) {
-    alert('Не удалось скопировать: ' + (err.message || err));
+    alert('Не удалось скопировать HTML: ' + (err.message || err));
   }
 }
 

@@ -44,6 +44,19 @@ const MIN_SEMANTIC_SCORE = (() => {
   const v = parseFloat(process.env.INFO_ARTICLE_MIN_SEMANTIC_SCORE);
   return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.18;
 })();
+// Глобальный коридор: сколько коммерческих ссылок должно быть во всей статье.
+// Введён по требованию заказчика «3–4 ссылки в статье на коммерческие разделы».
+// Per-H2 лимиты выше остаются как страховка, но глобальный коридор —
+// приоритетнее: после применения per-H2-лимитов мы дополнительно срезаем
+// самые слабые ссылки до TOTAL_MAX и добираем недостающие до TOTAL_MIN.
+const TOTAL_MAX_LINKS = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_TOTAL_MAX_LINKS, 10);
+  return Number.isFinite(v) && v >= 1 && v <= 50 ? v : 4;
+})();
+const TOTAL_MIN_LINKS = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_TOTAL_MIN_LINKS, 10);
+  return Number.isFinite(v) && v >= 0 && v <= TOTAL_MAX_LINKS ? v : 3;
+})();
 const SHORTLIST_SIZE = 5;
 
 const STOPWORDS = new Set([
@@ -337,6 +350,101 @@ function postValidate({ link_plan, shortlistByH2, sectionMeta }) {
     });
   }
 
+  // ── Глобальный коридор TOTAL_MIN_LINKS..TOTAL_MAX_LINKS ────────────
+  // Per-H2 лимиты выше уже применены. Теперь приводим суммарное число
+  // ссылок к коридору, требуемому заказчиком («3–4 ссылки на статью»).
+  let totalLinks = fixedPlan.reduce((acc, p) => acc + p.picks.length, 0);
+
+  // 1) Срез: если ссылок больше TOTAL_MAX_LINKS — удаляем самые слабые
+  //    по semantic_score. Сохраняем primary-логику: при равных score
+  //    сначала удаляются supporting (не primary). Допускаем H2 без
+  //    ссылок (per-H2 MIN_LINKS_PER_H2 — мягкий, глобальный коридор
+  //    приоритетнее).
+  if (totalLinks > TOTAL_MAX_LINKS) {
+    const flat = [];
+    fixedPlan.forEach((p, h2Pos) => {
+      p.picks.forEach((pk, pickPos) => {
+        flat.push({ h2Pos, pickPos, pk });
+      });
+    });
+    // Сортируем «худшие сверху»: сначала supporting, потом по возрастанию score.
+    flat.sort((a, b) => {
+      const aPrim = a.pk.role === 'primary' ? 1 : 0;
+      const bPrim = b.pk.role === 'primary' ? 1 : 0;
+      if (aPrim !== bPrim) return aPrim - bPrim; // primary в конец очереди на удаление
+      return (a.pk.semantic_score || 0) - (b.pk.semantic_score || 0);
+    });
+    const toRemove = totalLinks - TOTAL_MAX_LINKS;
+    const removed = flat.slice(0, toRemove);
+    // Удаляем по позициям (от конца, чтобы индексы не съехали).
+    const grouped = new Map();
+    for (const r of removed) {
+      const arr = grouped.get(r.h2Pos) || [];
+      arr.push(r.pickPos);
+      grouped.set(r.h2Pos, arr);
+    }
+    for (const [h2Pos, positions] of grouped) {
+      positions.sort((a, b) => b - a);
+      const sectionPicks = fixedPlan[h2Pos].picks;
+      for (const pos of positions) {
+        const removedPick = sectionPicks[pos];
+        // Уменьшаем счётчик использования URL.
+        const used = urlUsage.get(removedPick.url) || 0;
+        urlUsage.set(removedPick.url, Math.max(0, used - 1));
+        sectionPicks.splice(pos, 1);
+        issues.push({
+          h2_index: fixedPlan[h2Pos].h2_index,
+          kind:     'global_max_trim',
+          url:      removedPick.url,
+          score:    removedPick.semantic_score,
+        });
+      }
+      // После удаления: первый pick должен снова быть primary.
+      if (sectionPicks.length && sectionPicks[0].role !== 'primary') {
+        sectionPicks[0].role = 'primary';
+        for (let i = 1; i < sectionPicks.length; i += 1) sectionPicks[i].role = 'supporting';
+      }
+    }
+    totalLinks = fixedPlan.reduce((acc, p) => acc + p.picks.length, 0);
+  }
+
+  // 2) Добор: если ссылок меньше TOTAL_MIN_LINKS — берём топ-кандидатов из
+  //    объединённого shortlist по убыванию score, по одному за раз, пока
+  //    не наберём TOTAL_MIN_LINKS или пока кандидатов не закончится.
+  //    При этом строго соблюдаем MAX_LINKS_PER_H2 и MAX_REPEATS_PER_URL.
+  if (totalLinks < TOTAL_MIN_LINKS) {
+    const candidates = [];
+    fixedPlan.forEach((p, h2Pos) => {
+      const shortlist = allowedByH2.get(p.h2_index) || [];
+      for (const cand of shortlist) {
+        if (cand.score < MIN_SEMANTIC_SCORE) continue;
+        if (p.picks.some((pk) => pk.url === cand.url)) continue;
+        candidates.push({ h2Pos, h2_index: p.h2_index, cand });
+      }
+    });
+    candidates.sort((a, b) => b.cand.score - a.cand.score);
+
+    for (const c of candidates) {
+      if (totalLinks >= TOTAL_MIN_LINKS) break;
+      const section = fixedPlan[c.h2Pos];
+      if (section.picks.length >= MAX_LINKS_PER_H2) continue;
+      const used = urlUsage.get(c.cand.url) || 0;
+      if (used >= MAX_REPEATS_PER_URL) continue;
+      if (section.picks.some((pk) => pk.url === c.cand.url)) continue;
+      section.picks.push({
+        url:            c.cand.url,
+        h1:             c.cand.h1,
+        anchor_text:    fallbackAnchor(c.cand.h1),
+        role:           section.picks.length === 0 ? 'primary' : 'supporting',
+        semantic_score: c.cand.score,
+        reason:         `Программная подстановка из shortlist (глобальный минимум ${TOTAL_MIN_LINKS} ссылок на статью).`,
+      });
+      urlUsage.set(c.cand.url, used + 1);
+      issues.push({ h2_index: c.h2_index, kind: 'global_min_fill', url: c.cand.url });
+      totalLinks += 1;
+    }
+  }
+
   // Build graph_pattern (deterministic, ground-truth).
   const urlUsageCount = {};
   for (const [u, c] of urlUsage) urlUsageCount[u] = c;
@@ -347,6 +455,9 @@ function postValidate({ link_plan, shortlistByH2, sectionMeta }) {
     no_url_exceeds_repeats:Object.values(urlUsageCount).every((c) => c <= MAX_REPEATS_PER_URL),
     anchors_natural:       fixedPlan.every((p) => p.picks.every((pk) => isCleanAnchor(pk.anchor_text))),
     primary_supporting_logic: fixedPlan.every((p) => !p.picks.length || p.picks[0].role === 'primary'),
+    total_links:           totalLinks,
+    total_min_ok:          totalLinks >= TOTAL_MIN_LINKS,
+    total_max_ok:          totalLinks <= TOTAL_MAX_LINKS,
     issues,
   };
 
@@ -391,6 +502,7 @@ async function planSemanticLinks({ task, outline, links, adapter = 'deepseek', c
     }),
     shortlist_per_h2:    shortlistByH2,
     links_per_h2:        { min: MIN_LINKS_PER_H2, max: MAX_LINKS_PER_H2 },
+    total_links_per_article: { min: TOTAL_MIN_LINKS, max: TOTAL_MAX_LINKS },
     max_repeats_per_url: MAX_REPEATS_PER_URL,
     total_h2_count:      sectionMeta.length,
   };
@@ -583,5 +695,6 @@ module.exports = {
   fallbackAnchor,
   // constants for tests
   MAX_LINKS_PER_H2, MIN_LINKS_PER_H2, MAX_REPEATS_PER_URL, MIN_SEMANTIC_SCORE,
+  TOTAL_MIN_LINKS, TOTAL_MAX_LINKS,
   _internal: { tokenize, stemKey, buildH2Profile, buildLinkProfile, cosine, jaccard, urlSlugTokens },
 };

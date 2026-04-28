@@ -670,9 +670,11 @@ async function processInfoArticleTask(taskId) {
       shortlist_per_h2:    planResult.shortlistByH2,
     });
     const totalPlanned = planResult.link_plan.reduce((acc, p) => acc + (p.picks?.length || 0), 0);
+    const audit = planResult.deterministic_audit || {};
     await appendLog(
       taskId,
-      `🔗 Link planner: ${totalPlanned} ссылок на ${planResult.link_plan.length} H2 (1–2 на блок), ` +
+      `🔗 Link planner: ${totalPlanned} ссылок на ${planResult.link_plan.length} H2 ` +
+      `(глобальный коридор ok: min=${audit.total_min_ok ? 'да' : 'нет'}, max=${audit.total_max_ok ? 'да' : 'нет'}), ` +
       `unique URLs=${Object.keys(planResult.graph_pattern.url_usage_count || {}).length}`,
       'ok',
     );
