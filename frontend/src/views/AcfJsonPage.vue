@@ -585,15 +585,32 @@ async function callAitunnel({ systemPrompt, userPrompt }) {
       max_tokens:  MAX_OUTPUT_TOKENS,
     }, {
       // Чанки могут обрабатываться долго — больше дефолтных 60 сек.
-      timeout: 180_000,
+      // ВАЖНО: значение СТРОГО больше backend REQUEST_TIMEOUT_MS (240с в
+      // backend/src/routes/acfJson.routes.js), иначе фронт всегда «выигрывает»
+      // гонку и показывает axios-овский «timeout exceeded» вместо
+      // осмысленного 502 от backend. Также меньше nginx proxy_read_timeout
+      // (300с в frontend/docker-nginx.conf), чтобы axios остановил запрос
+      // первым, а не получил оборванное соединение.
+      timeout: 270_000,
     });
   } catch (httpError) {
-    // axios: либо нет ответа (сеть до НАШЕГО backend упала), либо
-    // backend вернул не-2xx со своим JSON `{error: '...'}`.
+    // axios: либо нет ответа (сеть до НАШЕГО backend упала / истёк
+    // axios-таймаут), либо backend вернул не-2xx со своим JSON `{error: '...'}`.
     if (httpError.response) {
       const serverMsg = httpError.response.data?.error
         || `HTTP ${httpError.response.status}`;
       throw new Error(`Ошибка прокси AITunnel: ${serverMsg}`);
+    }
+    // Различаем истёкший axios-таймаут (ECONNABORTED) и реальный обрыв сети,
+    // чтобы не вводить пользователя в заблуждение «Failed to fetch», когда
+    // сеть-то жива, а просто AITunnel слишком долго отвечает.
+    const isTimeout = httpError.code === 'ECONNABORTED'
+      || /timeout/i.test(httpError.message || '');
+    if (isTimeout) {
+      throw new Error(
+        'AITunnel не успел ответить за 270 секунд. Попробуйте повторить '
+        + 'запрос — обычно при следующей попытке модель отвечает быстрее.',
+      );
     }
     throw new Error(
       `Сеть до сервера недоступна (Failed to fetch). Детали: ${httpError.message}`,

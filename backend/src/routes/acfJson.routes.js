@@ -34,7 +34,12 @@ const AITUNNEL_MODEL_DEFAULT = process.env.AITUNNEL_MODEL || 'qwen3.5-plus-02-15
 // Ограничения, чтобы случайный кривой клиент не уронил сервер / бюджет.
 const MAX_PROMPT_LEN     = 200000; // символов на каждый промпт
 const MAX_OUTPUT_TOKENS  = 32000;  // потолок max_tokens, который пропускаем дальше
-const REQUEST_TIMEOUT_MS = 180000; // таймаут до AITunnel
+// Таймаут до AITunnel. ВАЖНО: фронт (frontend/src/views/AcfJsonPage.vue)
+// держит axios-таймаут СТРОГО больше этого значения, чтобы при медленном
+// ответе AITunnel сервер успел отдать осмысленное 502, а не получил гонку
+// с фронтовым axios "timeout of Nms exceeded". См. также nginx
+// proxy_read_timeout=300s (frontend/docker-nginx.conf).
+const REQUEST_TIMEOUT_MS = 240000;
 
 // Rate-limit: формирование JSON может слать десятки чанков подряд,
 // поэтому лимит мягкий, но не безграничный.
