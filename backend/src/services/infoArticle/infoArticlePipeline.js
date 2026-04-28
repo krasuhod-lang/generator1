@@ -400,9 +400,11 @@ async function runWriter(task, args, ctx, opts = {}) {
   return { html, selfAudit: result?.self_audit || null, remainingIssues: issues };
 }
 
-// Hint that INFO_ARTICLE_GEMINI_MODEL is configurable (used by gemini.adapter via env);
-// keeps the constant referenced so lint won't strip it.
-runWriter._configuredModel = INFO_ARTICLE_GEMINI_MODEL;
+// Note: INFO_ARTICLE_GEMINI_MODEL / INFO_ARTICLE_DEEPSEEK_MODEL are read at
+// the top of the file from env, exported below for parity with the
+// linkArticle module, and consumed by gemini.adapter.js / deepseek.adapter.js
+// via the same env vars (callLLM reads provider env directly). The exports
+// keep the constants observable for diagnostics / tests.
 
 // ── Stage 5 / 5b: audits ────────────────────────────────────────────
 
@@ -905,4 +907,6 @@ async function recoverStuckInfoArticleTasks() {
 module.exports = {
   processInfoArticleTask,
   recoverStuckInfoArticleTasks,
+  INFO_ARTICLE_GEMINI_MODEL,
+  INFO_ARTICLE_DEEPSEEK_MODEL,
 };

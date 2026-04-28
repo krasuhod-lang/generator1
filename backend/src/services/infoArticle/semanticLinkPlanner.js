@@ -428,6 +428,31 @@ async function planSemanticLinks({ task, outline, links, adapter = 'deepseek', c
  * сравнивает с link_plan и возвращает структурированный отчёт.
  * Не использует LLM — это пост-проверка.
  */
+/**
+ * stripHtmlTagsLoop — iteratively strips HTML tags until the string is stable.
+ * Single-pass `replace(/<[^>]+>/g, '')` is incomplete (CodeQL
+ * js/incomplete-multi-character-sanitization): malformed/nested tags can
+ * survive a single pass and re-form `<script>` after substitution. We use
+ * this only to extract plain text from H2 titles and anchor labels for the
+ * audit comparison (the result is NEVER rendered to the DOM), but we still
+ * loop-strip to satisfy the analyzer and to avoid surprises if this helper
+ * is reused elsewhere.
+ */
+function stripHtmlTagsLoop(s) {
+  let prev = String(s || '');
+  for (let i = 0; i < 5; i += 1) {
+    const next = prev.replace(/<[^>]*>/g, '');
+    if (next === prev) return next;
+    prev = next;
+  }
+  return prev;
+}
+
+/**
+ * auditHtmlAgainstPlan — постфактумная проверка финальной HTML-статьи против
+ * link_plan. Возвращает coverage_pct, missing, misplacements, extras,
+ * repeat_violations, density_violations и общий verdict.
+ */
 function auditHtmlAgainstPlan({ html, link_plan }) {
   const text = typeof html === 'string' ? html : '';
   // Простая стабильная сегментация по <h2>: разрезаем на блоки между <h2>.
@@ -438,7 +463,7 @@ function auditHtmlAgainstPlan({ html, link_plan }) {
   let idx = 0;
   while ((m = re.exec(text)) !== null) {
     idx += 1;
-    const title = m[1].replace(/<[^>]+>/g, '').trim();
+    const title = stripHtmlTagsLoop(m[1]).trim();
     segments.push({ index: idx, title, body: m[2] || '' });
   }
 
@@ -450,7 +475,7 @@ function auditHtmlAgainstPlan({ html, link_plan }) {
     while ((am = aRe.exec(seg.body)) !== null) {
       allAnchors.push({
         href:           am[1],
-        anchor_text:    am[2].replace(/<[^>]+>/g, '').trim(),
+        anchor_text:    stripHtmlTagsLoop(am[2]).trim(),
         h2_owner_index: seg.index,
       });
     }

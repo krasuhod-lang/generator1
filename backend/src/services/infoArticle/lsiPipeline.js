@@ -220,7 +220,15 @@ function measureLsiCoverageInHtml(html, importantTerms) {
   if (!html || !Array.isArray(importantTerms) || !importantTerms.length) {
     return { coveredCount: 0, totalCount: importantTerms?.length || 0, coveragePct: 0, missing: [] };
   }
-  const text = String(html).replace(/<[^>]+>/g, ' ').toLowerCase().replace(/[ёЁ]/g, 'е');
+  // Iterative tag strip — устойчиво к нестед/малформ HTML
+  // (CodeQL js/incomplete-multi-character-sanitization).
+  let stripped = String(html);
+  for (let i = 0; i < 5; i += 1) {
+    const next = stripped.replace(/<[^>]*>/g, ' ');
+    if (next === stripped) break;
+    stripped = next;
+  }
+  const text = stripped.toLowerCase().replace(/[ёЁ]/g, 'е');
   const tokens = tokenize(text);
   const stemSet = new Set(tokens.map(stemKey));
   let covered = 0;
