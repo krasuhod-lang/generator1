@@ -17,7 +17,7 @@
  * по контейнерам ACF из задания (blocks / steps / bens / price / faq /
  * attention / expert).
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import AppLayout from '../components/AppLayout.vue';
 import { useTasksStore } from '../stores/tasks.js';
 
@@ -55,10 +55,84 @@ const selectedHtml   = ref('');
 // Очередь задач формирования JSON. Каждая задача — это локальный фоновый
 // «job», обрабатываемый в браузере (LLM-вызов идёт прямо из фронта на
 // AITunnel). Состояния: queued → processing → done | error.
-// Хранится в памяти страницы (не в БД), как и всё на этой вкладке.
+// Список сохраняется в localStorage, чтобы при обновлении страницы
+// запущенные/завершённые задачи не исчезали (в БД на бэкенд они не пишутся —
+// здесь чистый фронт-only функционал).
 const jobs = ref([]);
 let nextJobId = 1;
 let queueRunning = false;
+
+// ── Персистентность очереди в localStorage ────────────────────────────────
+// Ключ версионируем (`:v1`), чтобы при будущих изменениях схемы job можно было
+// безболезненно сменить ключ и не подсунуть пользователю «битые» данные.
+const JOBS_LS_KEY = 'acfJsonJobs:v1';
+// Храним только последние N задач, чтобы не упереться в лимит localStorage
+// (~5 МБ). sourceHtml + result у одной задачи могут весить десятки КБ.
+const JOBS_LS_MAX = 30;
+
+function loadJobsFromStorage() {
+  try {
+    const raw = localStorage.getItem(JOBS_LS_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    // Отфильтровываем «битые» элементы (null, не-объекты, без id/status) —
+    // localStorage могло быть подправлено вручную или повреждено старой
+    // версией кода. Без этого мог бы сломаться расчёт nextJobId и UI-список.
+    const VALID_STATUSES = new Set(['queued', 'processing', 'done', 'error']);
+    const clean = parsed.filter(
+      (j) =>
+        j
+        && typeof j === 'object'
+        && typeof j.id === 'number'
+        && VALID_STATUSES.has(j.status),
+    );
+    // Задачи в статусе `processing` на момент перезагрузки страницы —
+    // их fetch к AITunnel был оборван браузером. Возвращаем их в очередь,
+    // чтобы `runQueue()` автоматически повторил обработку с нуля
+    // (sourceHtml сохранён в самой задаче).
+    const restored = clean.map((j) => {
+      if (j.status === 'processing') {
+        return {
+          ...j,
+          status: 'queued',
+          progress: 'В очереди (после перезагрузки страницы)…',
+          error: '',
+          result: '',
+          finishedAt: null,
+        };
+      }
+      return j;
+    });
+    jobs.value = restored;
+    // Восстанавливаем счётчик id, чтобы новые задачи не пересекались
+    // с уже сохранёнными по id.
+    const maxId = restored.reduce(
+      (m, j) => (j.id > m ? j.id : m),
+      0,
+    );
+    nextJobId = maxId + 1;
+  } catch (e) {
+    // Тихо игнорируем повреждённое состояние, чтобы вкладка вообще открылась.
+    console.warn('[AcfJson] не удалось восстановить задачи из localStorage:', e);
+  }
+}
+
+function saveJobsToStorage() {
+  try {
+    // Срезаем хвост, держим только самые свежие задачи (jobs.value уже
+    // отсортирован: новые сверху, см. unshift в createJob).
+    const slice = jobs.value.slice(0, JOBS_LS_MAX);
+    localStorage.setItem(JOBS_LS_KEY, JSON.stringify(slice));
+  } catch (e) {
+    // QuotaExceededError и т. п. — не валим UI.
+    console.warn('[AcfJson] не удалось сохранить задачи в localStorage:', e);
+  }
+}
+
+// Глубокий watch — задачи мутируются по полям (status/progress/result),
+// поэтому без deep:true изменения внутри объектов не триггерят сохранение.
+watch(jobs, saveJobsToStorage, { deep: true });
 
 // Модалка с результатом
 const activeJobId = ref(null);
@@ -102,6 +176,16 @@ const canCreateJob = computed(() => Boolean(selectedHtml.value && !loadingHtml.v
 // ── Загрузка задач ─────────────────────────────────────────────────────────
 let pollTimer = null;
 onMounted(async () => {
+  // Сначала восстанавливаем сохранённую очередь JSON-задач (синхронно,
+  // до сетевых запросов), чтобы пользователь сразу увидел свои задачи
+  // после F5 — даже пока загружается список SEO-задач.
+  loadJobsFromStorage();
+  // Если после восстановления есть задачи в статусе `queued` (в т. ч. те,
+  // что были `processing` до перезагрузки), запускаем их обработку.
+  if (jobs.value.some((j) => j.status === 'queued')) {
+    runQueue();
+  }
+
   loadingTasks.value = true;
   try {
     await store.fetchTasks();
