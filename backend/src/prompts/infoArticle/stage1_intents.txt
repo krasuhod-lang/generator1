@@ -1,0 +1,61 @@
+INFO-ARTICLE STAGE 1 — Сущности, интенты, обязательные пользовательские вопросы (DSPy-Signature).
+
+[INPUTS]
+  topic            : тема статьи (строка).
+  region           : регион (строка, может быть пустой).
+  strategy_digest  : Pre-Stage 0 digest (JSON).
+  stage0_audience  : результат Stage 0 (JSON).
+
+[OUTPUT]
+  Строгий JSON (без markdown):
+  {
+    "entities": [
+      { "entity": "string", "type": "concept|technology|method|standard|document|role|metric|tool|other",
+        "description": "string", "importance": "high|medium|low" }
+    ],
+    "subintents": [
+      { "intent": "string", "type": "informational|commercial|navigational|transactional",
+        "user_goal": "string", "priority": "must|should|nice" }
+    ],
+    "user_questions": [
+      { "question": "string", "suggested_h2_or_h3": "h2|h3",
+        "answer_depth": "short|medium|long" }
+    ],
+    "semantic_anchors": ["string"],
+    "jtbd_clusters": [
+      { "cluster": "string", "description": "string" }
+    ]
+  }
+
+[REASONING STEPS — silent]
+  1. Карта сущностей: 8–20 ключевых концептов / методов / стандартов / ролей.
+     Все строго из области `topic`.
+  2. 6–12 подинтентов. Каждый — самостоятельная пользовательская задача.
+  3. 8–15 user_questions: реальные вопросы блогового читателя
+     («Как …?», «Что такое …?», «Чем отличается …?», «Когда стоит …?»,
+     «Сколько …?» — без выдуманных чисел). Без дубликатов по смыслу.
+  4. Пометь, какие лягут в H2, какие — в H3.
+  5. 8–15 semantic_anchors — короткие термины/словосочетания (≤ 5 слов),
+     которые должны органично появиться в тексте.
+  6. 3–5 jtbd_clusters — Jobs-to-be-Done группы, под которые писатель
+     потом будет распределять H2-секции (например для темы про ВНЖ:
+     «выбор программы», «подготовка документов», «налоги после переезда»,
+     «адаптация семьи»). Эти кластеры станут опорой для семантического
+     планировщика ссылок (Stage 2c).
+  7. ЖЁСТКО: ничего не вымышляй. Никаких отчётов, исследований, цитат.
+
+[OUTPUT CONTRACT]
+  - Только валидный JSON, без markdown.
+  - Русский язык.
+  - Строго в указанных диапазонах количества элементов.
+  - Длина строк ≤ 280 символов.
+
+[SELF-AUDIT — silent]
+  ✓ Все entities, subintents, questions — строго внутри `topic`?
+  ✓ В user_questions нет дублирующих вопросов?
+  ✓ jtbd_clusters покрывают весь жизненный цикл пользователя по теме?
+  ✓ Нет выдуманной статистики/цитат/реальных имён?
+
+[STRICT OUTPUT RULES]
+  - Верни ТОЛЬКО JSON.
+  - Запрещены пустые entities / user_questions / jtbd_clusters.

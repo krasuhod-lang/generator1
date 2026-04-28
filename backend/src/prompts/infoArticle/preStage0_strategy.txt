@@ -1,0 +1,64 @@
+INFO-ARTICLE PRE-STAGE 0 — Стратегический контекст темы информационной статьи в блог (DSPy-Signature).
+
+[INPUTS]
+  topic            : тема статьи (строка), обязательно.
+  region           : регион / гео (строка), может быть пустой.
+  brand_name       : бренд автора (строка, может быть пустой).
+  brand_facts      : короткие факты о бренде/нише (строка, может быть пустой).
+  commercial_domains : список доменов, на которые статья будет перелинковываться
+                       (массив строк, ≤ 8 уникальных). Это контекстный сигнал ниши,
+                       а НЕ список тем для упоминания.
+  commercial_h1_sample : 5–10 примеров H1 коммерческих разделов (массив строк) —
+                         нужны, чтобы понять тип бизнеса автора (услуги/товары/курсы).
+
+[OUTPUT]
+  Строгий JSON (без markdown, без пояснений снаружи):
+  {
+    "niche_summary":         "string",            // 1–2 предложения, что за ниша
+    "article_type_hint":     "how-to|listicle|guide|comparison|explainer|case-study",
+    "inferred_brand_role":   "string",            // например «независимый консультант», «агентство», «производитель»
+    "default_brand_name":    "string",            // если brand_name пустой — выведи разумный плейсхолдер из commercial_domains
+    "default_author_persona":"string",            // короткое описание автора (1 фраза)
+    "audience_clusters": [
+      { "name": "string", "intent_bias": "informational|commercial|navigational|transactional",
+        "pains": ["string"], "goals": ["string"] }
+    ],
+    "topical_opportunities": [
+      { "angle": "string", "why_relevant": "string", "priority": "high|medium|low" }
+    ],
+    "demand_signals": [
+      { "query_class": "how-to|definition|comparison|list|review|other",
+        "sample_queries": ["string"], "user_pain": "string" }
+    ]
+  }
+
+[REASONING STEPS — silent, do not output]
+  1. Из commercial_h1_sample и commercial_domains выведи область деятельности
+     автора и его tone-of-voice (B2B/B2C, премиум/масс, услуги/товары).
+  2. Свяжи `topic` с этой нишей. Определи article_type_hint: что именно
+     лучше написать (how-to, листикл, гайд, сравнение, объяснение).
+  3. Если region задан — учитывай локальную специфику (право, климат, привычки).
+  4. Для default_brand_name: если brand_name пустой, возьми чистый домен
+     (без http/www) первого commercial_domains, из него получи разумную
+     торговую марку (Capitalize, без TLD).
+  5. Сформулируй 2–4 аудиторных кластера с конкретными pains/goals.
+  6. Подбери 3–6 сильных углов раскрытия темы; все на 100 % внутри `topic`.
+  7. Сгенерируй 3–6 кластеров демандов — типичные поисковые запросы и боль.
+  8. Не выдумывай статистику, цифры, имена — это стратегический анализ.
+
+[OUTPUT CONTRACT]
+  - Только валидный JSON, без markdown-обёрток, без комментариев.
+  - Все массивы могут быть пустыми, но ключи обязательны.
+  - Русский язык для содержательных полей. Enum-значения — английский.
+  - Любые строки — не длиннее 280 символов.
+
+[SELF-AUDIT — silent, do not output]
+  ✓ article_type_hint логически вытекает из topic + audience_clusters?
+  ✓ default_brand_name вменяемо производен от доменов?
+  ✓ Нет выдуманной статистики, цитат, конкретных брендов помимо default_brand_name?
+  ✓ Все angles/кластеры — на 100 % внутри `topic`?
+
+[STRICT OUTPUT RULES]
+  - Верни ТОЛЬКО JSON. Никаких префиксов/суффиксов, markdown-блоков.
+  - Запрещены пустые niche_summary и audience_clusters.
+  - Длина любой строки ≤ 280 символов.
