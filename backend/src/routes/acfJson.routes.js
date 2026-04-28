@@ -142,6 +142,16 @@ router.post('/aitunnel', auth, async (req, res) => {
       timeout: REQUEST_TIMEOUT_MS,
       // Сами решаем, что считать ошибкой — нужно прокинуть исходный статус.
       validateStatus: () => true,
+      // ВАЖНО: AITunnel должен ходить НАПРЯМУЮ, без прокси. По умолчанию
+      // axios в Node автоматически читает HTTPS_PROXY/HTTP_PROXY из env
+      // и оборачивает запрос в прокси. В этом репо HTTPS_PROXY обычно
+      // задан для Gemini/Grok (см. backend/src/services/llm/*adapter.js),
+      // и тогда вызовы AITunnel начинают идти через прокси, который их
+      // ~через минуту режет таймаутом — фронт получает «модель недоступна».
+      // Явно отключаем proxy, чтобы наш AITunnel-вызов всегда шёл напрямую,
+      // независимо от env (поведение, согласованное с заказчиком: «в прокси
+      // оборачивать не нужно»).
+      proxy: false,
     });
   } catch (networkError) {
     // ECONNREFUSED / ETIMEDOUT / ENOTFOUND / DNS-сбой и т.п. — это уже

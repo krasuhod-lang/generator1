@@ -748,10 +748,12 @@ async function processInfoArticleTask(taskId) {
     });
     const totalPlanned = planResult.link_plan.reduce((acc, p) => acc + (p.picks?.length || 0), 0);
     const audit = planResult.deterministic_audit || {};
+    const tgt   = audit.total_links_target || {};
     await appendLog(
       taskId,
       `🔗 Link planner: ${totalPlanned} ссылок на ${planResult.link_plan.length} H2 ` +
-      `(глобальный коридор ok: min=${audit.total_min_ok ? 'да' : 'нет'}, max=${audit.total_max_ok ? 'да' : 'нет'}), ` +
+      `(целевой коридор ${tgt.min ?? '?'}..${tgt.max ?? '?'}${tgt.basis ? `, ${tgt.basis}` : ''}, ` +
+      `min ok: ${audit.total_min_ok ? 'да' : 'нет'}, max ok: ${audit.total_max_ok ? 'да' : 'нет'}), ` +
       `unique URLs=${Object.keys(planResult.graph_pattern.url_usage_count || {}).length}`,
       'ok',
     );

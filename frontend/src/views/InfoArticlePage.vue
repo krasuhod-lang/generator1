@@ -467,26 +467,35 @@ const sanitizedHtml = computed(() => {
 async function copyAsHtml() {
   const html = selectedTask.value?.article_html;
   if (!html) return;
-  const plain = selectedTask.value?.article_plain || html.replace(/<[^>]+>/g, ' ');
 
-  // Path A: Async Clipboard API + ClipboardItem (text/html + text/plain).
-  // Работает только в secure context (HTTPS / localhost) и в современных браузерах.
+  // ВАЖНО: для «Скопировать как HTML» нам нужно положить в буфер
+  // ИСХОДНУЮ HTML-разметку как обычный текст (text/plain), а НЕ как
+  // text/html-flavor. Если положить text/html, любой WYSIWYG-редактор
+  // (TinyMCE, Gutenberg, Word) при вставке выберет именно этот flavor
+  // и отрисует разметку как форматированный текст — пользователь получит
+  // не код `<h1>…</h1>`, а уже стилизованный заголовок. Поэтому ниже
+  // мы НЕ кладём 'text/html' ни в ClipboardItem, ни как fallback —
+  // только plain text. Для копирования рендеренного представления есть
+  // отдельная кнопка copyAsFormattedText().
+
+  // Path A: writeText — самый надёжный способ положить в буфер
+  // строго plain text. Работает в secure context (HTTPS / localhost).
   try {
-    if (navigator.clipboard && window.ClipboardItem) {
-      const blobHtml  = new Blob([html],  { type: 'text/html' });
-      const blobPlain = new Blob([plain], { type: 'text/plain' });
-      await navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })]);
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(html);
       flashToast('HTML скопирован');
       return;
     }
   } catch (_) { /* fallthrough */ }
 
-  // Path B: writeText — отдаёт HTML как обычный текст. Тоже требует
-  // secure context, но работает там, где нет ClipboardItem.
+  // Path B: ClipboardItem только с text/plain (без text/html), для
+  // окружений, где есть ClipboardItem, но writeText по какой-то причине
+  // недоступен/заблокирован.
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(html);
-      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+    if (navigator.clipboard && window.ClipboardItem) {
+      const blobPlain = new Blob([html], { type: 'text/plain' });
+      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blobPlain })]);
+      flashToast('HTML скопирован');
       return;
     }
   } catch (_) { /* fallthrough */ }
@@ -506,7 +515,7 @@ async function copyAsHtml() {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     if (ok) {
-      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      flashToast('HTML скопирован');
       return;
     }
     throw new Error('execCommand copy вернул false');
