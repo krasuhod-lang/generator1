@@ -27,6 +27,7 @@
 const { callLLM } = require('../llm/callLLM');
 const { loadInfoArticlePrompt } = require('../../prompts/infoArticle');
 const { russianStem } = require('../../utils/russianStem');
+const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 const STOPWORDS = new Set([
   'и','в','во','не','что','он','на','я','с','со','как','а','то','все','она',
@@ -222,13 +223,7 @@ function measureLsiCoverageInHtml(html, importantTerms) {
   }
   // Iterative tag strip — устойчиво к нестед/малформ HTML
   // (CodeQL js/incomplete-multi-character-sanitization).
-  let stripped = String(html);
-  for (let i = 0; i < 5; i += 1) {
-    const next = stripped.replace(/<[^>]*>/g, ' ');
-    if (next === stripped) break;
-    stripped = next;
-  }
-  const text = stripped.toLowerCase().replace(/[ёЁ]/g, 'е');
+  const text = stripHtmlTagsToText(html).toLowerCase().replace(/[ёЁ]/g, 'е');
   const tokens = tokenize(text);
   const stemSet = new Set(tokens.map(stemKey));
   let covered = 0;

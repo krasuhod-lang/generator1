@@ -48,6 +48,7 @@ const {
 const { synthesizeLsiSet, measureLsiCoverageInHtml } = require('./lsiPipeline');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
 const { domainsFromLinks } = require('./excelParser');
+const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 // ── Config via env ───────────────────────────────────────────────────
 
@@ -55,6 +56,11 @@ const INFO_ARTICLE_GEMINI_MODEL =
   process.env.INFO_ARTICLE_GEMINI_MODEL ||
   process.env.GEMINI_MODEL ||
   'gemini-3.1-pro-preview';
+
+const INFO_ARTICLE_DEEPSEEK_MODEL =
+  process.env.INFO_ARTICLE_DEEPSEEK_MODEL ||
+  process.env.DEEPSEEK_MODEL ||
+  'deepseek-chat';
 
 const MAX_PARALLEL_IMAGES = (() => {
   const v = parseInt(process.env.INFO_ARTICLE_MAX_PARALLEL_IMAGES, 10);
@@ -240,15 +246,8 @@ const HALLUCINATION_PATTERNS = [
 ];
 
 function stripTagsLoop(s) {
-  if (!s) return '';
-  let out = String(s);
-  const tagRe = /<[^>]+>/g;
-  for (let i = 0; i < 5; i += 1) {
-    const next = out.replace(tagRe, ' ');
-    if (next === out) break;
-    out = next;
-  }
-  return out.replace(/\s+/g, ' ');
+  // Delegates to shared utility (CodeQL js/incomplete-multi-character-sanitization).
+  return stripHtmlTagsToText(s);
 }
 
 function countOccurrences(haystack, needle) {

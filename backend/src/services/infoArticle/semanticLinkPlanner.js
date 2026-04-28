@@ -429,24 +429,13 @@ async function planSemanticLinks({ task, outline, links, adapter = 'deepseek', c
  * Не использует LLM — это пост-проверка.
  */
 /**
- * stripHtmlTagsLoop — iteratively strips HTML tags until the string is stable.
- * Single-pass `replace(/<[^>]+>/g, '')` is incomplete (CodeQL
- * js/incomplete-multi-character-sanitization): malformed/nested tags can
- * survive a single pass and re-form `<script>` after substitution. We use
- * this only to extract plain text from H2 titles and anchor labels for the
- * audit comparison (the result is NEVER rendered to the DOM), but we still
- * loop-strip to satisfy the analyzer and to avoid surprises if this helper
- * is reused elsewhere.
+ * stripHtmlTagsLoop — re-exported alias of the shared utility.
+ * See backend/src/utils/stripHtmlTags.js for rationale (CodeQL
+ * js/incomplete-multi-character-sanitization). Used here only to extract
+ * plain text from H2 titles and anchor labels for the audit comparison
+ * (the result is never rendered to the DOM).
  */
-function stripHtmlTagsLoop(s) {
-  let prev = String(s || '');
-  for (let i = 0; i < 5; i += 1) {
-    const next = prev.replace(/<[^>]*>/g, '');
-    if (next === prev) return next;
-    prev = next;
-  }
-  return prev;
-}
+const { stripHtmlTagsLoop } = require('../../utils/stripHtmlTags');
 
 /**
  * auditHtmlAgainstPlan — постфактумная проверка финальной HTML-статьи против
