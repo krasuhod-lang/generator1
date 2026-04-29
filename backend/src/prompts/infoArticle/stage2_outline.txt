@@ -55,13 +55,11 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
     "image_plan": [
       {
         "slot":                  1,
-        "target_section_index":  0,
-        "what_to_visualize":     "string",
+        "target_section_index":  0,             // index одной из основных секций — концептуальный «герой» статьи
+        "what_to_visualize":     "string",      // описание главного визуала-обложки
         "scene_concept":         "string",
         "subject_focus":         "string"
-      },
-      { "slot": 2, "target_section_index": 0, "what_to_visualize": "string", "scene_concept": "string", "subject_focus": "string" },
-      { "slot": 3, "target_section_index": 0, "what_to_visualize": "string", "scene_concept": "string", "subject_focus": "string" }
+      }
     ],
     "conclusion_brief": "string"
   }
@@ -99,9 +97,12 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
        FAQ ставится между ней и «Заключением».
      • Каждый item.question — переформулировка, item.source_question —
        оригинал из Stage 1, item.tied_to_entities — ≥1 entity.
-  8. image_plan: ровно 3 слота, в РАЗНЫХ секциях
-     (target_section_index: одна секция начала, одна середины, одна ближе к концу).
-     image_plan не пересекается с FAQ-секцией и «Заключением».
+  8. image_plan: РОВНО 1 слот — это cover-изображение для публикации статьи
+     на сайт (как hero / обложка). target_section_index — index одной из
+     основных содержательных секций (НЕ FAQ, НЕ «Заключение»), концептуально
+     отражающей главный визуальный посыл статьи. Изображение НЕ встраивается
+     в HTML-текст статьи — оно отдаётся отдельным файлом, поэтому планируй
+     один сильный универсальный визуал, а не серию иллюстраций по разделам.
   9. ⚠️ ВАЖНО: НЕ планируй вставку коммерческих ссылок здесь —
      это сделает Stage 2c (semantic link planner) на основе jtbd_cluster.
      Твоя задача — выдать чистый план «о чём статья», не «куда ссылаться».
@@ -110,7 +111,7 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
 [OUTPUT CONTRACT]
   - Только валидный JSON.
   - Русский язык в содержательных полях.
-  - 6–10 sections, ровно 3 слота в image_plan.
+  - 6–10 sections, ровно 1 слот в image_plan (cover-обложка).
   - Каждая секция имеет НЕ ПУСТЫЕ jtbd_cluster, lsi_focus, covers_user_questions.
   - Каждая содержательная секция имеет НЕ ПУСТЫЙ derived_from.entities/subintents/questions
     (исключения — служебные секции «Заключение» и сама FAQ-секция).
@@ -124,7 +125,7 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
   ✓ Каждый must_cover_subtopic присутствует в covers_subtopics хотя бы одной секции?
   ✓ Каждая основная секция имеет derived_from с ≥1 entity, ≥1 subintent, ≥1 question?
   ✓ Каждая секция получила корректный jtbd_cluster из доступного списка?
-  ✓ image_plan ссылается на 3 РАЗНЫЕ основные секции?
+  ✓ image_plan содержит ровно 1 cover-слот, привязанный к основной (не служебной) секции?
   ✓ expert_opinion_slot заполнен и target_section_index указывает на основную секцию?
   ✓ faq_block.items содержит 4–6 элементов; каждый item.source_question есть в stage1.user_questions?
   ✓ H1 не содержит CTA-маркетинга («лучший», «топ», «купить»)?

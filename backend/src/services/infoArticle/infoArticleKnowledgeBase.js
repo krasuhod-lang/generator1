@@ -197,8 +197,8 @@ function sectionOutline(outline) {
     }
   }
   if (asArray(outline.image_plan).length) {
-    lines.push('  image_plan:');
-    for (const p of outline.image_plan.slice(0, 3)) {
+    lines.push('  image_plan (cover-обложка, 1 слот; в HTML НЕ встраивается):');
+    for (const p of outline.image_plan.slice(0, 1)) {
       lines.push(`    slot ${p.slot} → section ${p.target_section_index}`);
       if (p.scene_concept)  lines.push(`        scene_concept: ${clip(p.scene_concept, 280)}`);
       if (p.subject_focus)  lines.push(`        subject_focus: ${clip(p.subject_focus, 200)}`);

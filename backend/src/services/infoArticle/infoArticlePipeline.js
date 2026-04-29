@@ -268,12 +268,10 @@ function validateWriterOutput(html, linkPlan) {
     return issues;
   }
 
-  // image slots
-  for (let i = 1; i <= 3; i += 1) {
-    const c = countOccurrences(html, `<!-- IMAGE_SLOT_${i} -->`);
-    if (c === 0) issues.push(`Отсутствует плейсхолдер <!-- IMAGE_SLOT_${i} -->`);
-    else if (c > 1) issues.push(`Плейсхолдер <!-- IMAGE_SLOT_${i} --> встречается ${c} раз (должен 1)`);
-  }
+  // image slots: для info-article генерируется ровно 1 cover-изображение
+  // (см. runImagePromptsGen / runImageGeneration). В HTML картинка НЕ
+  // встраивается (она остаётся в галерее результата для отдельной публикации
+  // на сайт), поэтому никакие <!-- IMAGE_SLOT_N --> комментарии не требуются.
 
   // h1
   const h1Count = (html.match(/<h1\b/gi) || []).length;
@@ -387,7 +385,7 @@ async function runWriter(task, args, ctx, opts = {}) {
       base.push('    "all_planned_links_inserted" — они НЕ применимы в этом режиме.');
       base.push('  • В self_audit верни: all_planned_links_inserted=true, links_per_h2_within_bounds=true');
       base.push('    (оба true = «нечего нарушать»).');
-      base.push('  • Все остальные требования (E-E-A-T, expert_opinion, FAQ, image_slots, LSI) — в силе.');
+      base.push('  • Все остальные требования (E-E-A-T, expert_opinion, FAQ, LSI) — в силе.');
     }
     if (priorEeatIssues && priorEeatIssues.length) {
       base.push('');
@@ -569,8 +567,11 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx) {
     { retries: 3, temperature: 0.4, callLabel: 'InfoArticle Stage 4 (image prompts)', ...ctx },
   );
   const prompts = Array.isArray(result?.image_prompts) ? result.image_prompts : [];
-  return prompts.slice(0, 3).map((p, idx) => ({
-    slot:            p.slot || idx + 1,
+  // info-article выдаёт ровно 1 cover-изображение (см. stage4_image_prompts.txt).
+  // Если LLM по инерции (cache / старый промт) вернул несколько слотов — берём
+  // первый, перенумеровываем в slot=1, остальные отбрасываем.
+  return prompts.slice(0, 1).map((p) => ({
+    slot:            1,
     section_h2:      String(p.section_h2 || '').slice(0, 200),
     visual_prompt:   String(p.visual_prompt || '').slice(0, 2000),
     negative_prompt: String(p.negative_prompt || '').slice(0, 400),
@@ -616,20 +617,19 @@ function escapeHtml(s) {
 }
 
 function embedImages(html, imagePrompts) {
-  let out = html;
-  for (const p of imagePrompts) {
-    const placeholder = `<!-- IMAGE_SLOT_${p.slot} -->`;
-    if (p.status === 'done' && p.image_base64) {
-      const alt = escapeHtml(p.alt_ru || '');
-      const figure =
-        `<figure class="info-article-image">` +
-        `<img src="data:${p.mime_type};base64,${p.image_base64}" alt="${alt}" />` +
-        `</figure>`;
-      out = out.replace(placeholder, figure);
-    } else {
-      out = out.replace(placeholder, '');
-    }
-  }
+  // info-article: cover-изображение НЕ встраивается в article_html — оно
+  // отдаётся пользователю как отдельный загружаемый файл из галереи (для
+  // публикации на сайт через стандартный uploader блог-движка).
+  // Эта функция теперь просто страхует от leftover-плейсхолдеров на случай,
+  // если writer (по инерции старого промта или Gemini cache) всё же
+  // вставил <!-- IMAGE_SLOT_N --> в HTML.
+  let out = String(html || '');
+  out = out.replace(/<!--\s*IMAGE_SLOT_\d+\s*-->/gi, '');
+  // Также убираем одиночные пустые <p></p>, которые могли остаться вокруг
+  // удалённого плейсхолдера. Параметр imagePrompts оставлен для совместимости
+  // сигнатуры — не используется.
+  void imagePrompts;
+  out = out.replace(/<p>\s*<\/p>/gi, '');
   return out;
 }
 
@@ -652,6 +652,106 @@ function buildPlainText(html) {
        .replace(/&#39;/g, "'")
        .replace(/&amp;/g, '&');
   return s.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * injectMissingLinks — детерминированный пост-инжектор коммерческих ссылок.
+ *
+ * Контекст: writer (Gemini) + один corrective-retry не дают 100% покрытия
+ * link_plan: на 3-4 ссылки на статью одна-две регулярно «теряются». Чтобы
+ * заказчик видел стабильную перелинковку из своего Excel-файла, мы добавляем
+ * детерминированную страховку: для каждой ссылки из linkAudit.missing
+ * программно вставляем `<a href="URL">anchor_text</a>` в нужный H2-сегмент.
+ *
+ * Стратегия вставки:
+ *   1. Находим границы целевой H2-секции (от <h2 ...> до следующего <h2> или
+ *      конца документа), используя НЕ-greedy сегментацию идентичную
+ *      auditHtmlAgainstPlan.
+ *   2. В первом непустом <p>...</p> секции добавляем перед закрывающим </p>
+ *      аккуратную внутри-предложенческую сноску " (см. <a>anchor_text</a>)".
+ *   3. Если <p> в секции нет — оставляем секцию как есть (это аномалия плана,
+ *      writer не написал контент); такая ссылка попадёт в логи как
+ *      «non_injectable» и аудит покажет 95-99% coverage вместо 100%.
+ *
+ * Анкер escape-им на случай служебных символов; URL — атрибут-escape.
+ *
+ * @param {string} html
+ * @param {Array<{h2_index, url, anchor_text}>} missing
+ * @returns {{ html: string, injected: number, skipped: Array }}
+ */
+function injectMissingLinks(html, missing) {
+  if (typeof html !== 'string' || !html || !Array.isArray(missing) || !missing.length) {
+    return { html: html || '', injected: 0, skipped: [] };
+  }
+
+  // Сегментация по <h2>: тождественна auditHtmlAgainstPlan, поэтому индексы
+  // h2_index согласованы.
+  const segRe = /<h2\b[^>]*>([\s\S]*?)<\/h2>([\s\S]*?)(?=<h2\b|$)/gi;
+  const segments = [];
+  let m;
+  let idx = 0;
+  while ((m = segRe.exec(html)) !== null) {
+    idx += 1;
+    segments.push({
+      index: idx,
+      bodyStart: m.index + m[0].length - m[2].length,
+      bodyEnd:   m.index + m[0].length,
+    });
+  }
+  if (!segments.length) return { html, injected: 0, skipped: missing.map((mm) => ({ ...mm, reason: 'no_segments' })) };
+
+  // Группируем missing по h2_index, чтобы при множественных пропусках в одном
+  // <h2> вставлять последовательно (offset-сейф через массив правок).
+  const byIdx = new Map();
+  for (const miss of missing) {
+    if (!miss || !miss.url) continue;
+    const i = Number(miss.h2_index);
+    if (!Number.isInteger(i) || i < 1) continue;
+    const arr = byIdx.get(i) || [];
+    arr.push(miss);
+    byIdx.set(i, arr);
+  }
+
+  // Собираем правки [{ pos, insertText }] и применяем за один проход справа-налево.
+  const edits = [];
+  const skipped = [];
+  for (const [h2Idx, list] of byIdx) {
+    const seg = segments[h2Idx - 1];
+    if (!seg) {
+      for (const miss of list) skipped.push({ ...miss, reason: 'h2_index_out_of_range' });
+      continue;
+    }
+    const segHtml = html.slice(seg.bodyStart, seg.bodyEnd);
+    // Берём первый непустой <p>...</p> внутри секции (а не FAQ-h3'шных).
+    const pMatch = /<p\b[^>]*>([\s\S]*?)<\/p>/i.exec(segHtml);
+    if (!pMatch) {
+      for (const miss of list) skipped.push({ ...miss, reason: 'no_paragraph_in_section' });
+      continue;
+    }
+    // Абсолютная позиция закрывающего </p> в html.
+    const closeRel = pMatch.index + pMatch[0].lastIndexOf('</p>');
+    const closeAbs = seg.bodyStart + closeRel;
+
+    // Сборка вставляемой фразы для всех missing в этом H2.
+    const phrases = list.map((miss) => {
+      const anchor = String(miss.anchor_text || '').trim() || 'подробнее';
+      const url = String(miss.url || '').trim();
+      return ` (см. также <a href="${escapeHtml(url)}">${escapeHtml(anchor)}</a>)`;
+    });
+    edits.push({ pos: closeAbs, insertText: phrases.join('') });
+  }
+
+  // Применяем правки от конца к началу, чтобы сохранить позиции.
+  edits.sort((a, b) => b.pos - a.pos);
+  let out = html;
+  let injected = 0;
+  for (const ed of edits) {
+    out = out.slice(0, ed.pos) + ed.insertText + out.slice(ed.pos);
+    // injectText может содержать несколько (см. также …) — считаем по числу <a>
+    injected += (ed.insertText.match(/<a\b/g) || []).length;
+  }
+
+  return { html: out, injected, skipped };
 }
 
 // ── Main entrypoint ──────────────────────────────────────────────────
@@ -903,11 +1003,44 @@ async function processInfoArticleTask(taskId) {
       }
     }
 
+    // 11b. Детерминированная пост-инъекция пропущенных коммерческих ссылок.
+    //      Writer + 1 corrective-retry не дают 100% покрытия в ~10-20% случаев
+    //      (LLM иногда «забывает» вставить 1-2 ссылки). Чтобы заказчик видел
+    //      стабильную перелинковку из своего Excel-файла, программно дописываем
+    //      пропущенные ссылки в нужный <h2>-сегмент. Делаем это ТОЛЬКО при
+    //      noInterlinking=false и наличии linkAudit.missing.
+    if (!noInterlinking && Array.isArray(linkAudit?.missing) && linkAudit.missing.length) {
+      const inj = injectMissingLinks(articleHtml, linkAudit.missing);
+      if (inj.injected > 0) {
+        articleHtml = inj.html;
+        await appendLog(
+          taskId,
+          `🔧 Программная инъекция: вставлено ${inj.injected} пропущенных ссылок` +
+            (inj.skipped.length ? ` (пропущено ${inj.skipped.length}: ${inj.skipped.map((s) => s.reason).join(',')})` : ''),
+          'ok',
+        );
+        // Re-audit, чтобы пользователь видел финальное coverage_pct=100.
+        const reauditDet = auditHtmlAgainstPlan({ html: articleHtml, link_plan: planResult.link_plan });
+        linkAudit = {
+          ...reauditDet,
+          semantic_violations: linkAudit.semantic_violations || [],
+          audit_notes: (linkAudit.audit_notes ? linkAudit.audit_notes + ' ' : '') + 'После детерминированной инъекции пропущенных ссылок.',
+        };
+        await saveColumn(taskId, 'link_audit', linkAudit);
+      } else if (inj.skipped.length) {
+        await appendLog(
+          taskId,
+          `⚠ Не удалось дописать ${inj.skipped.length} пропущенных ссылок (нет <p> в целевой H2-секции)`,
+          'warn',
+        );
+      }
+    }
+
     // 12. Stage 4 image prompts
     await setStage(taskId, 'stage4_image_prompts', 84);
     const imagePrompts = await runImagePromptsGen(task, outline, articleHtml, audience, ctx);
-    if (imagePrompts.length < 3) {
-      await appendLog(taskId, `⚠ DeepSeek вернул только ${imagePrompts.length} image-промпта вместо 3`, 'warn');
+    if (imagePrompts.length < 1) {
+      await appendLog(taskId, `⚠ DeepSeek не вернул промт обложки (image_prompts пусто)`, 'warn');
     }
     await saveColumn(taskId, 'image_prompts', imagePrompts);
 
@@ -916,7 +1049,10 @@ async function processInfoArticleTask(taskId) {
     const renderedImages = await runImageGeneration(taskId, imagePrompts);
     await saveColumn(taskId, 'image_prompts', renderedImages);
 
-    // 14. Embed + plain text
+    // 14. Финализация HTML + plain text. Cover-изображение НЕ встраивается в
+    //     article_html (сохраняется в image_prompts как отдельный download'ный
+    //     ресурс для публикации на сайт). embedImages() здесь просто чистит
+    //     возможные leftover-плейсхолдеры <!-- IMAGE_SLOT_N --> в HTML.
     const finalHtml  = embedImages(articleHtml, renderedImages);
     const finalPlain = buildPlainText(finalHtml);
 

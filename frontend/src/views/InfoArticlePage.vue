@@ -1013,7 +1013,7 @@ onUnmounted(() => { stopTicker(); });
                      v-html="sanitizedHtml"></article>
 
             <div v-if="renderedImages.length" class="space-y-2">
-              <h3 class="text-sm font-semibold text-indigo-300 uppercase tracking-wider">🖼 Изображения</h3>
+              <h3 class="text-sm font-semibold text-indigo-300 uppercase tracking-wider">🖼 Обложка для публикации на сайт</h3>
               <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div v-for="(img, idx) in renderedImages" :key="img.slot || idx"
                      class="bg-gray-950 border border-gray-800 rounded-lg p-2 space-y-2">
