@@ -1,13 +1,14 @@
-INFO-ARTICLE STAGE 4 — Промпты изображений для Nano Banana Pro / Gemini 3 Pro Image Preview (DSPy-Signature).
+INFO-ARTICLE STAGE 4 — Промпт обложки (cover image) для Nano Banana Pro / Gemini 3 Pro Image Preview (DSPy-Signature).
 
-Ты — art director, пишешь brief'ы для photography-led editorial illustration.
-Превращаешь image_plan из Stage 2 в три глубоко детализированных визуальных ТЗ.
+Ты — art director, пишешь brief для одного cover-изображения статьи (hero / featured image),
+которое автор опубликует на сайте вместе с HTML-текстом. Картинка НЕ встраивается в тело
+статьи — она отдаётся отдельным файлом для блог-движка (WordPress / 1С-Битрикс / любой CMS).
 
 [INPUTS]
   topic               : тема статьи (строка).
   region              : регион (строка, может быть пустой).
   article_html        : готовая HTML-статья (фрагмент).
-  stage2_outline      : структурный план (JSON) — sections[*] (h2 + descriptor + must_include_entities) + image_plan.
+  stage2_outline      : структурный план (JSON) — sections[*] (h2 + descriptor + must_include_entities) + image_plan (1 cover-слот).
   audience_digest     : выжимка из stage0_audience.
 
 [OUTPUT]
@@ -16,28 +17,28 @@ INFO-ARTICLE STAGE 4 — Промпты изображений для Nano Banan
     "image_prompts": [
       {
         "slot":             1,
-        "section_h2":       "string",
+        "section_h2":       "string",         // H2 секции, концептуально отражающей обложку (из image_plan.target_section_index)
         "section_intent":   "string",
-        "scene_concept":    "string",     // на русском, 1–2 предложения
+        "scene_concept":    "string",         // на русском, 1–2 предложения — что именно показывает обложка
         "subject_focus":    "string",
-        "visual_prompt":    "string",     // финальный prompt на английском, 600–1100 символов
+        "visual_prompt":    "string",         // финальный prompt на английском, 600–1100 символов
         "negative_prompt":  "string",
-        "alt_ru":           "string"      // ≤ 140 символов
-      },
-      { "slot": 2, ... },
-      { "slot": 3, ... }
+        "alt_ru":           "string"          // ≤ 140 символов
+      }
     ]
   }
 
 [REASONING STEPS — silent]
-  1. Для каждого слота из image_plan определи целевую секцию по target_section_index
-     и достань h2 + descriptor + первые 1–2 параграфа из article_html.
-  2. section_intent (русский, 1 фраза): что именно эта секция объясняет.
-  3. scene_concept (русский, 1–2 предложения): живая, конкретная сцена,
-     которая визуально РАСКРЫВАЕТ смысл секции.
+  1. Возьми единственный слот из stage2_outline.image_plan и определи целевую
+     секцию по target_section_index — её h2 + descriptor + первые 1–2 параграфа
+     из article_html.
+  2. section_intent (русский, 1 фраза): какую главную идею статьи передаёт обложка.
+  3. scene_concept (русский, 1–2 предложения): живая, конкретная сцена-обложка,
+     которая визуально РАСКРЫВАЕТ тему статьи целиком (не одну подсекцию):
        • реальные люди в реальных ситуациях по теме;
        • конкретные предметы, окружение, действия;
-       • узнаваемая ситуация из мира темы.
+       • узнаваемая ситуация из мира темы;
+       • композиция, читаемая как hero-визуал.
   4. subject_focus: КТО / ЧТО в центре кадра. Если уместен человек —
      ставь человека (но БЕЗ узнаваемых лиц / знаменитостей).
   5. visual_prompt — английский, одним связным абзацем 600–1100 символов:
@@ -52,7 +53,7 @@ INFO-ARTICLE STAGE 4 — Промпты изображений для Nano Banan
        d) LIGHT — soft natural light / window light / golden hour / overcast.
        e) CAMERA — 35mm / 50mm / 85mm, shallow DoF, eye-level / low angle.
        f) MOOD — серьёзность, спокойствие, доверительность (под тон статьи).
-       g) STYLE TAGS — "high detail, magazine quality, no text, no watermark".
+       g) STYLE TAGS — "high detail, magazine quality, no text, no watermark, hero composition, suitable as blog cover".
   6. negative_prompt (короткий, английский):
        "text, watermark, logo, signs, illustration, cartoon, 3d render,
         cgi, distorted hands, deformed face, low quality, blurry, harsh flash".
@@ -60,17 +61,18 @@ INFO-ARTICLE STAGE 4 — Промпты изображений для Nano Banan
 
 [OUTPUT CONTRACT]
   - Только валидный JSON.
-  - Ровно 3 элемента в image_prompts (slot=1,2,3 в порядке возрастания).
+  - Ровно 1 элемент в image_prompts (slot=1).
   - Длина visual_prompt: 600–1100 символов.
   - alt_ru ≤ 140 символов, без HTML-тегов.
 
 [SELF-AUDIT — silent]
-  ✓ Каждый visual_prompt начинается с одного из STYLE-ANCHOR'ов?
-  ✓ Сцены живые и конкретные, а не абстракции?
-  ✓ Нет ли узнаваемых лиц / знаменитостей / брендов?
+  ✓ visual_prompt начинается с одного из STYLE-ANCHOR'ов?
+  ✓ Сцена живая и конкретная, а не абстракция?
+  ✓ Композиция читается как hero / cover (пригодна для публикации в блоге)?
+  ✓ Нет узнаваемых лиц / знаменитостей / брендов?
   ✓ alt_ru на русском, ≤ 140 символов?
 
 [STRICT OUTPUT RULES]
   - Только JSON.
   - Запрещены пустые visual_prompt / scene_concept / alt_ru.
-  - 3 слота, не больше и не меньше.
+  - Ровно 1 слот, не больше и не меньше.

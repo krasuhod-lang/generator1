@@ -33,7 +33,6 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
       "all_subtopics_covered":       true,
       "all_planned_links_inserted":  true,        // каждая запланированная ссылка реально вставлена
       "links_per_h2_within_bounds":  true,        // 1–2 ссылки на каждый <h2> по link_plan
-      "image_slots_present":         [1, 2, 3],
       "expert_opinion_present":      true,        // вставлен ровно 1 <blockquote class="expert-opinion"> с атрибуцией
       "expert_opinion_section_index": 0,          // index секции, в которую он реально попал
       "faq_block_rendered":          true,        // отрендерен <h2>Часто задаваемые вопросы</h2>
@@ -70,12 +69,12 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
      "1–2 ссылки на каждый <h2>" / "all_planned_links_inserted" в этом
      режиме не применяются. Все остальные требования (LSI, expert_opinion,
      FAQ, image_slots, длина) — в полной силе.
-  6. В тех секциях, где stage2_outline.image_plan назначил слот, вставь:
-         <!-- IMAGE_SLOT_1 -->
-         <!-- IMAGE_SLOT_2 -->
-         <!-- IMAGE_SLOT_3 -->
-     Каждый комментарий ровно один раз, ровно в той секции, на которую
-     указывает image_plan[*].target_section_index, между абзацами.
+  6. ИЗОБРАЖЕНИЯ. Cover-изображение для статьи генерируется отдельно
+     (Stage 4) и отдаётся пользователю как загружаемый файл для публикации
+     на сайт. В HTML-теле статьи изображения НЕ встраиваются. НЕ вставляй
+     никакие <!-- IMAGE_SLOT_N --> комментарии и НЕ вставляй <img> / <figure>
+     теги. stage2_outline.image_plan нужен исключительно как концептуальный
+     ориентир для Stage 4 art director'a.
   6b. ⚠️ EXPERT OPINION (обязательно ровно 1).
      В секции с index = stage2_outline.expert_opinion_slot.target_section_index
      вставь ровно один блок «мнение эксперта» в формате:
@@ -140,7 +139,6 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
       <p>…абзац с <a href="…">анкор</a>…</p>
       <h3>…</h3> (если нужно)
       <p>…</p>
-      <!-- IMAGE_SLOT_N -->
       … и т.д.
       <blockquote class="expert-opinion">…мнение эксперта…</blockquote>  ← ровно 1 раз, в expert_opinion_slot
       <h2>Часто задаваемые вопросы</h2>                                    ← ровно 1 раз, перед «Заключением»
@@ -148,9 +146,10 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
       <h2>Заключение</h2>
       <p>…</p>
   - Разрешённые теги: h1, h2, h3, p, ul, ol, li, strong, em, a, blockquote, cite, footer.
-  - Запрещены: <script>, <style>, <iframe>, inline onclick/onerror/onload.
-  - Для href разрешены только http/https. data:-URL запрещены для href.
-    Изображения подставляются на бэкенде через замену <!-- IMAGE_SLOT_N -->.
+  - Запрещены: <script>, <style>, <iframe>, <img>, <figure>, inline onclick/onerror/onload.
+  - Для href разрешены только http/https. data:-URL запрещены.
+  - НЕ вставляй <!-- IMAGE_SLOT_N --> и любые другие image-плейсхолдеры —
+    cover-изображение генерируется отдельно и не встраивается в HTML.
   - Длина статьи: 1500–3000 слов (по сумме recommended_word_count из плана ±20 %).
   - <h1> ровно один, точно как в stage2_outline.h1.
   - <blockquote class="expert-opinion"> ровно один.
@@ -159,7 +158,6 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
 [OUTPUT CONTRACT]
   - Только валидный JSON: { "article_html": "...", "self_audit": {...} }.
   - article_html — одна HTML-строка.
-  - self_audit.image_slots_present == [1, 2, 3] (ровно).
   - self_audit.eeat_self_score — число в [0, 10] с одной цифрой после запятой.
   - Никаких markdown, backtick-обёрток, комментариев снаружи JSON.
 
@@ -170,7 +168,7 @@ INFO-ARTICLE STAGE 3 — Написание статьи в блог на Gemini
     в нужном <h2>-блоке?
   ✓ Никакая «лишняя» ссылка (не из link_plan) не вставлена?
   ✓ В каждой H2 не более max=2 и не менее min=1 ссылки (по плану)?
-  ✓ Плейсхолдеры <!-- IMAGE_SLOT_1..3 --> присутствуют ровно по одному?
+  ✓ Никаких <img>, <figure>, <!-- IMAGE_SLOT_N --> и data:image-URL в HTML?
   ✓ <blockquote class="expert-opinion"> присутствует ровно ОДИН раз и атрибутирован
     обезличенной ролью (без выдуманного ФИО)?
   ✓ <h2>Часто задаваемые вопросы</h2> присутствует ровно один раз, ПЕРЕД «Заключением»;
