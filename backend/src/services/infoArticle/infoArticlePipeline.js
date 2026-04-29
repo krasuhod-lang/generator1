@@ -616,19 +616,18 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
-function embedImages(html, imagePrompts) {
+function embedImages(html, _imagePrompts) {
   // info-article: cover-изображение НЕ встраивается в article_html — оно
   // отдаётся пользователю как отдельный загружаемый файл из галереи (для
   // публикации на сайт через стандартный uploader блог-движка).
   // Эта функция теперь просто страхует от leftover-плейсхолдеров на случай,
   // если writer (по инерции старого промта или Gemini cache) всё же
-  // вставил <!-- IMAGE_SLOT_N --> в HTML.
+  // вставил <!-- IMAGE_SLOT_N --> в HTML. Параметр _imagePrompts оставлен
+  // для совместимости сигнатуры с прошлой версией.
   let out = String(html || '');
   out = out.replace(/<!--\s*IMAGE_SLOT_\d+\s*-->/gi, '');
   // Также убираем одиночные пустые <p></p>, которые могли остаться вокруг
-  // удалённого плейсхолдера. Параметр imagePrompts оставлен для совместимости
-  // сигнатуры — не используется.
-  void imagePrompts;
+  // удалённого плейсхолдера.
   out = out.replace(/<p>\s*<\/p>/gi, '');
   return out;
 }
@@ -677,7 +676,10 @@ function buildPlainText(html) {
  *
  * @param {string} html
  * @param {Array<{h2_index, url, anchor_text}>} missing
- * @returns {{ html: string, injected: number, skipped: Array }}
+ * @returns {{ html: string, injected: number, skipped: Array<{h2_index, url, anchor_text, reason: string}> }}
+ *   html: финальный HTML с дописанными ссылками;
+ *   injected: количество фактически вставленных <a>-тегов;
+ *   skipped: пропуски с причиной (no_segments / h2_index_out_of_range / no_paragraph_in_section).
  */
 function injectMissingLinks(html, missing) {
   if (typeof html !== 'string' || !html || !Array.isArray(missing) || !missing.length) {
@@ -747,7 +749,7 @@ function injectMissingLinks(html, missing) {
   let injected = 0;
   for (const ed of edits) {
     out = out.slice(0, ed.pos) + ed.insertText + out.slice(ed.pos);
-    // injectText может содержать несколько (см. также …) — считаем по числу <a>
+    // insertText может содержать несколько (см. также …) — считаем по числу <a>
     injected += (ed.insertText.match(/<a\b/g) || []).length;
   }
 
@@ -1024,7 +1026,9 @@ async function processInfoArticleTask(taskId) {
         linkAudit = {
           ...reauditDet,
           semantic_violations: linkAudit.semantic_violations || [],
-          audit_notes: (linkAudit.audit_notes ? linkAudit.audit_notes + ' ' : '') + 'После детерминированной инъекции пропущенных ссылок.',
+          audit_notes: (typeof linkAudit.audit_notes === 'string' && linkAudit.audit_notes
+            ? linkAudit.audit_notes + ' '
+            : '') + 'После детерминированной инъекции пропущенных ссылок.',
         };
         await saveColumn(taskId, 'link_audit', linkAudit);
       } else if (inj.skipped.length) {
