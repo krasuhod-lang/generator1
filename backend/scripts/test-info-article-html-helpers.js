@@ -81,7 +81,7 @@ test('embedImages — escapes alt_ru to prevent attribute injection', () => {
     status: 'done', image_base64: 'AA', mime_type: 'image/png',
     alt_ru: '"><script>alert(1)</script>',
   }]);
-  assert.ok(!/<script>/.test(out), 'no raw <script>');
+  assert.ok(!/<script\b/i.test(out), 'no raw <script>');
   assert.ok(/alt="&quot;&gt;&lt;script&gt;/.test(out), 'alt is HTML-escaped');
 });
 
