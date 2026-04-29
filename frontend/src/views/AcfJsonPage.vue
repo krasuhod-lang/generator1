@@ -496,20 +496,53 @@ function stripTagsAndNormalize(s) {
   return t;
 }
 
-// Рекурсивно собирает все строковые значения из произвольной JSON-структуры.
-function collectStrings(node, out) {
+// Поля, которые модель может использовать для пользовательского текста
+// (включая заголовки блоков и FAQ-вопросы). Сравниваем по этим полям, чтобы
+// служебные строки (acf_fc_layout, имена layout'ов, цвета, ширина и т.п.)
+// НЕ вклинивались между текстом соседних блоков и не разрывали окна
+// поиска при пост-валидации сохранности контента.
+const CONTENT_TEXT_FIELDS = /^(text|content|answer|question|expert|subtitle|title|heading|name|caption|description|label)$/i;
+
+// Рекурсивно собирает только строки из контентных полей JSON-структуры.
+function collectContentStrings(node, out) {
   if (node == null) return;
-  if (typeof node === 'string') { out.push(node); return; }
-  if (Array.isArray(node)) { for (const v of node) collectStrings(v, out); return; }
+  if (Array.isArray(node)) { for (const v of node) collectContentStrings(v, out); return; }
   if (typeof node === 'object') {
-    for (const k of Object.keys(node)) collectStrings(node[k], out);
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (typeof v === 'string') {
+        if (CONTENT_TEXT_FIELDS.test(k)) out.push(v);
+      } else if (v && typeof v === 'object') {
+        collectContentStrings(v, out);
+      }
+    }
   }
 }
 
 function outputPlainText(jsonArray) {
   const all = [];
-  collectStrings(jsonArray, all);
+  collectContentStrings(jsonArray, all);
   return stripTagsAndNormalize(all.join(' '));
+}
+
+// Блок-уровневые HTML-теги, по которым бьём вход на сегменты для пост-валидации.
+// Хранится на уровне модуля, чтобы regex не пересоздавался на каждом вызове.
+const BLOCK_BOUNDARY_RE = /<\/?(?:p|h[1-6]|li|blockquote|tr|td|th|div|ul|ol|table|section|article|figure|figcaption|hr|br)\b[^>]*>/gi;
+const SEGMENT_SEP = '\u0001';
+
+// Делит исходный HTML на сегменты по блок-уровневым границам и возвращает
+// массив plain-текстов внутри каждого сегмента. Нужно, чтобы окна для
+// пост-валидации сохранности текста НЕ пересекали границы абзацев/заголовков:
+// иначе на стыке двух соседних блоков (которые модель легитимно разложила
+// в разные элементы ACF) получаются ложно-«потерянные» фразы вида
+// «...конец абзаца. Начало H2...».
+function splitHtmlIntoSegments(html) {
+  if (!html) return [];
+  const withSep = String(html).replace(BLOCK_BOUNDARY_RE, SEGMENT_SEP);
+  return withSep
+    .split(SEGMENT_SEP)
+    .map((part) => stripTagsAndNormalize(part))
+    .filter((s) => s.length > 0);
 }
 
 // Извлекаем только все text/content/answer/expert (для фолбэка expert→blocks).
@@ -566,22 +599,29 @@ function canonicalForCompare(s) {
 }
 
 // Возвращает массив пропавших фраз (пусто = всё на месте).
+// На вход принимаем СЫРОЙ HTML исходника, а не предварительно очищенный
+// plain-текст: разбиваем его на блок-уровневые сегменты и строим окна
+// поиска ВНУТРИ каждого сегмента, чтобы не получить ложно-«потерянные»
+// фразы на границах абзацев/заголовков (например, «...конец абзаца. H2...»).
 // Сравниваем по канонической форме (без пунктуации/регистра), но В РЕЗУЛЬТАТ
 // возвращаем оригинальные окна — чтобы пользователю в сообщении об ошибке
 // показать понятный человекочитаемый фрагмент.
-function findMissingPhrases(inputPlain, outputPlain) {
-  const phrases     = buildPreservationPhrases(inputPlain);
+function findMissingPhrases(inputHtml, outputPlain) {
+  const segments    = splitHtmlIntoSegments(inputHtml);
   const outputCanon = canonicalForCompare(outputPlain);
   const missing     = [];
-  for (const ph of phrases) {
-    if (!ph) continue;
-    const canon = canonicalForCompare(ph);
-    if (!canon) continue;
-    // Окна, состоящие в основном из артефактов strip-tags (короткие
-    // служебные слова + одиночная пунктуация), после канонизации
-    // вырождаются — пропускаем, чтобы не давать шум.
-    if (canon.split(' ').length < 3) continue;
-    if (outputCanon.indexOf(canon) === -1) missing.push(ph);
+  for (const seg of segments) {
+    const phrases = buildPreservationPhrases(seg);
+    for (const ph of phrases) {
+      if (!ph) continue;
+      const canon = canonicalForCompare(ph);
+      if (!canon) continue;
+      // Окна, состоящие в основном из артефактов strip-tags (короткие
+      // служебные слова + одиночная пунктуация), после канонизации
+      // вырождаются — пропускаем, чтобы не давать шум.
+      if (canon.split(' ').length < 3) continue;
+      if (outputCanon.indexOf(canon) === -1) missing.push(ph);
+    }
   }
   return missing;
 }
@@ -715,10 +755,11 @@ async function processChunk({
 
   let outputArray = parseModelOutputArray(choice.message?.content);
 
-  // Пост-валидация сохранности текста.
-  const inputPlain = stripTagsAndNormalize(chunkHtmlText);
+  // Пост-валидация сохранности текста. На вход даём СЫРОЙ HTML чанка —
+  // findMissingPhrases сам разобьёт его на блок-уровневые сегменты и НЕ
+  // будет строить окна поиска через границы абзацев/заголовков.
   let outPlain     = outputPlainText(outputArray);
-  let missing      = findMissingPhrases(inputPlain, outPlain);
+  let missing      = findMissingPhrases(chunkHtmlText, outPlain);
 
   if (missing.length > 0) {
     // Один корректирующий ре-запрос: даём модели список потерянных фрагментов
@@ -737,7 +778,7 @@ ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\
       try {
         const retryArr = parseModelOutputArray(choice2.message?.content);
         const retryPlain = outputPlainText(retryArr);
-        const retryMissing = findMissingPhrases(inputPlain, retryPlain);
+        const retryMissing = findMissingPhrases(chunkHtmlText, retryPlain);
         if (retryMissing.length === 0) {
           outputArray = retryArr;
           outPlain = retryPlain;
