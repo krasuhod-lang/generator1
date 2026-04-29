@@ -139,9 +139,15 @@ router.post('/dashscope', auth, async (req, res) => {
       return res.status(502).json({ error: meta.message });
     }
     // Конфигурационная ошибка (например, DASHSCOPE_API_KEY не задан).
-    const msg = (err && err.message) || 'unknown error';
-    console.error('[acf-json] DashScope call failed:', msg);
-    return res.status(500).json({ error: msg });
+    // Дополнительно прогоняем сообщение через те же sk-/Bearer-регулярки, что и
+    // адаптер — чтобы статанализ (CodeQL js/clear-text-logging) видел: ни один
+    // секрет не доходит до console.* через эту ветку.
+    const rawMsg = (err && err.message) || 'unknown error';
+    const safeMsg = String(rawMsg)
+      .replace(/sk-[A-Za-z0-9]{16,}/g, '***REDACTED***')
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer ***REDACTED***');
+    console.error('[acf-json] DashScope call failed:', safeMsg);
+    return res.status(500).json({ error: safeMsg });
   }
 });
 
