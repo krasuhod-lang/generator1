@@ -529,6 +529,15 @@ function outputPlainText(jsonArray) {
 // Хранится на уровне модуля, чтобы regex не пересоздавался на каждом вызове.
 const BLOCK_BOUNDARY_RE = /<\/?(?:p|h[1-6]|li|blockquote|tr|td|th|div|ul|ol|table|section|article|figure|figcaption|hr|br)\b[^>]*>/gi;
 const SEGMENT_SEP = '\u0001';
+// Заголовки h1–h6 целиком исключаем из пост-валидации сохранности: системный
+// промпт BASE_SYSTEM_PROMPT (см. блок «РАЗРЕШЕНИЕ НА ГЕНЕРАЦИЮ») явно
+// разрешает модели придумывать собственные короткие заголовки в полях
+// title/question при упаковке абзацев в steps/bens/faq и т.п. Если оставить
+// текст заголовков в проверке, любой легитимно перефразированный H2/H3 даёт
+// ложно-«потерянный» фрагмент и блокирует применение JSON. Контракт
+// дословного сохранения распространяется только на текст абзацев (text,
+// content, answer) — что и продолжаем валидировать.
+const HEADING_BLOCK_RE = /<h[1-6]\b[^>]*>[\s\S]*?<\/h[1-6]>/gi;
 
 // Делит исходный HTML на сегменты по блок-уровневым границам и возвращает
 // массив plain-текстов внутри каждого сегмента. Нужно, чтобы окна для
@@ -538,7 +547,10 @@ const SEGMENT_SEP = '\u0001';
 // «...конец абзаца. Начало H2...».
 function splitHtmlIntoSegments(html) {
   if (!html) return [];
-  const withSep = String(html).replace(BLOCK_BOUNDARY_RE, SEGMENT_SEP);
+  // Сначала вырезаем h1–h6 целиком (см. комментарий к HEADING_BLOCK_RE),
+  // затем уже бьём остаток по блок-уровневым границам.
+  const withoutHeadings = String(html).replace(HEADING_BLOCK_RE, ' ');
+  const withSep = withoutHeadings.replace(BLOCK_BOUNDARY_RE, SEGMENT_SEP);
   return withSep
     .split(SEGMENT_SEP)
     .map((part) => stripTagsAndNormalize(part))
