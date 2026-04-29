@@ -577,6 +577,129 @@ const renderedImages = computed(() => {
   return arr.filter((p) => p.status === 'done' && p.image_base64);
 });
 
+// ── Скачивание / копирование сгенерированных изображений ──────────────
+// Изображения приходят с бэкенда уже в base64 (см. nanoBananaPro.adapter.js
+// → infoArticlePipeline.runImageGeneration). Чтобы пользователь мог их
+// сохранить или вставить в любой редактор, поддерживаем оба сценария:
+//   • download — сохранение файла .png/.jpg/.webp (зависит от mime_type);
+//   • copy     — Async Clipboard API (image/png ClipboardItem) → fallback
+//                на копирование data-URL в текст (его потом можно вставить
+//                в html-редактор или Markdown).
+// MIME для PNG в clipboard поддерживается всеми современными браузерами;
+// для image/jpeg/image/webp — нет (Chrome пишет только image/png), поэтому
+// неподдерживаемые типы автоматически перекодируем в PNG через canvas.
+
+function _base64ToBlob(base64, mimeType) {
+  const byteString = atob(base64);
+  // Uint8Array.from с map-функцией заметно быстрее на больших base64
+  // (изображениях 1024x1024+), чем поэлементный цикл.
+  const bytes = Uint8Array.from(byteString, (c) => c.charCodeAt(0));
+  return new Blob([bytes], { type: mimeType || 'image/png' });
+}
+
+function _extForMime(mimeType) {
+  const m = String(mimeType || '').toLowerCase();
+  if (m.includes('jpeg') || m.includes('jpg')) return 'jpg';
+  if (m.includes('webp')) return 'webp';
+  if (m.includes('gif'))  return 'gif';
+  return 'png';
+}
+
+function _imageFilename(img, idx) {
+  const topic = selectedTask.value?.topic || 'image';
+  const slot  = img?.slot || (idx + 1);
+  return `${slug(topic)}-image-${slot}.${_extForMime(img?.mime_type)}`;
+}
+
+function downloadImage(img, idx) {
+  if (!img || !img.image_base64) return;
+  try {
+    const blob = _base64ToBlob(img.image_base64, img.mime_type || 'image/png');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = _imageFilename(img, idx);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    flashToast('Изображение скачивается');
+  } catch (err) {
+    alert('Не удалось скачать изображение: ' + (err.message || err));
+  }
+}
+
+// Перекодирует blob в image/png через canvas. Нужно, когда clipboard не
+// поддерживает исходный mime (jpeg/webp).
+async function _toPngBlob(srcBlob) {
+  const url = URL.createObjectURL(srcBlob);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = (e) => reject(e);
+      i.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width  = img.naturalWidth  || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('canvas.toBlob вернул null'))), 'image/png');
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function copyImage(img) {
+  if (!img || !img.image_base64) return;
+  const mime = img.mime_type || 'image/png';
+  // Path A: ClipboardItem с бинарным image/png. Только secure context.
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      let blob = _base64ToBlob(img.image_base64, mime);
+      // ClipboardItem для image/png поддерживается шире всего; jpeg/webp —
+      // выборочно. Принудительно перекодируем не-PNG в PNG.
+      if (!/png$/i.test(blob.type)) {
+        blob = await _toPngBlob(blob);
+      }
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      flashToast('Изображение скопировано в буфер обмена');
+      return;
+    }
+  } catch (_) { /* fallthrough → копирование data-URL */ }
+
+  // Path B: копируем data-URL текстом — пользователь может вставить его в
+  // html-редактор / Markdown. Работает даже без secure context.
+  try {
+    const dataUrl = `data:${mime};base64,${img.image_base64}`;
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(dataUrl);
+      flashToast('Скопирована ссылка data:URL (вставьте как src="…" в HTML)');
+      return;
+    }
+    // Path C (legacy): textarea + execCommand('copy')
+    const ta = document.createElement('textarea');
+    ta.value = dataUrl;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) {
+      flashToast('Скопирована ссылка data:URL (вставьте как src="…" в HTML)');
+      return;
+    }
+    throw new Error('execCommand copy вернул false');
+  } catch (err) {
+    alert('Не удалось скопировать изображение: ' + (err.message || err));
+  }
+}
+
 // ── Quality / link-plan / E-E-A-T projections ────────────────────────
 const eeatScore = computed(() => {
   const raw = selectedTask.value?.eeat_score;
@@ -898,6 +1021,18 @@ onUnmounted(() => { stopTicker(); });
                        :alt="img.alt_ru || ''"
                        class="w-full h-40 object-cover rounded" />
                   <div class="text-[11px] text-gray-400 truncate" :title="img.alt_ru">{{ img.alt_ru || '—' }}</div>
+                  <div class="flex gap-2">
+                    <button type="button"
+                            class="flex-1 text-[11px] px-2 py-1 rounded border border-gray-700 hover:bg-gray-800 text-gray-200"
+                            @click="downloadImage(img, idx)">
+                      ⬇ Скачать
+                    </button>
+                    <button type="button"
+                            class="flex-1 text-[11px] px-2 py-1 rounded border border-gray-700 hover:bg-gray-800 text-gray-200"
+                            @click="copyImage(img)">
+                      📋 Копировать
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

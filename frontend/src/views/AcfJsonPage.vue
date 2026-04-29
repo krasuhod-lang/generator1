@@ -372,11 +372,140 @@ function chunkHtml(html, maxLength = DEFAULT_CHUNK_LEN) {
   return splitPiece(html, maxLength, 0);
 }
 
+// ── Удаление <h1> из исходного HTML ───────────────────────────────────────
+// Согласно ТЗ, H1 НЕ должен попадать в JSON-вывод ни в каком виде. WordPress
+// показывает заголовок страницы отдельным полем, а внутри Flexible Content
+// дублировать его не нужно. Мы режем H1 из источника ДО чанкования, чтобы:
+//   1) модель физически не видела H1 — не было соблазна положить его в text;
+//   2) пост-валидация сохранности (findMissingPhrases) не считала H1
+//      «пропавшим» — иначе она будет всегда падать.
+// Ремуверы:
+//   • <h1>...</h1> со всем содержимым (greedy lazy + dotAll-эмуляция через [\s\S]).
+//   • Голые <h1> / </h1> на случай битой разметки.
+function stripH1FromHtml(html) {
+  if (!html) return '';
+  let out = String(html);
+  out = out.replace(/<h1\b[^>]*>[\s\S]*?<\/h1\s*>/gi, '');
+  // Хвостовые «осиротевшие» теги h1, если разметка была битой.
+  out = out.replace(/<\/?h1\b[^>]*>/gi, '');
+  return out;
+}
+
+// ── Пост-зачистка JSON-вывода под требования ТЗ ───────────────────────────
+// Делаем три вещи на каждом блоке/item'е:
+//   1) subtitle ВСЕГДА = '' (промт это требует, но подстраховываемся програмно).
+//   2) Срезаем нумерацию-префикс из title / question:
+//        "1. Название" / "2) Название" / "Шаг 3 — Название" / "Этап №4: Название"
+//      → "Название".
+//   3) Удаляем любые остаточные <h1>...</h1> внутри text/content/answer
+//      (на случай, если модель всё-таки протащила H1).
+//   4) Для FAQ убираем дубль вопроса: если answer начинается с <hN>,
+//      и текст этого <hN> совпадает (после канонизации) с question,
+//      этот заголовок вырезается, чтобы вопрос не дублировался.
+const TITLE_NUMBER_PREFIX_RE = /^\s*(?:(?:Шаг|Этап|Раздел|Часть|Глава|Step|Part)\s*№?\s*)?\d+\s*[.):\-—–]?\s*/i;
+
+function stripLeadingNumber(s) {
+  if (typeof s !== 'string') return s;
+  // Не трогаем строки, у которых первый символ — буква без числа (быстрый путь).
+  const m = TITLE_NUMBER_PREFIX_RE.exec(s);
+  if (!m || m[0].length === 0) return s;
+  // Защита: если после среза не осталось содержимого — возвращаем исходник
+  // (значит, "1." был не префиксом, а единственным значимым).
+  const rest = s.slice(m[0].length).trim();
+  if (!rest) return s;
+  return rest;
+}
+
+function stripH1FromString(s) {
+  if (typeof s !== 'string') return s;
+  let out = s.replace(/<h1\b[^>]*>[\s\S]*?<\/h1\s*>/gi, '');
+  out = out.replace(/<\/?h1\b[^>]*>/gi, '');
+  return out;
+}
+
+// Каноническая форма для сравнения вопроса с текстом ведущего <hN> в answer.
+function _canonForFaq(s) {
+  return String(s || '')
+    .replace(/<[^>]+>/g, ' ')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function dedupeFaqQuestion(question, answerHtml) {
+  if (!answerHtml || typeof answerHtml !== 'string') return answerHtml;
+  const qCanon = _canonForFaq(question);
+  if (!qCanon) return answerHtml;
+  // Снимаем ВСЕ ведущие <h2>/<h3>/<h4>/<h5>, которые дублируют question.
+  // Цикл — на случай, если модель навалила сразу несколько (h3 + h4).
+  let out = answerHtml;
+  // Лимит итераций — защита от патологических случаев, когда модель
+  // навалила несколько вложенных «дублей» подряд (например, h3 + h4 +
+  // ещё раз h3 как разные оформления того же вопроса). 4 — с большим
+  // запасом: реально встречается 0–1 повтор.
+  const MAX_DUPLICATE_HEADINGS = 4;
+  const headingRe = /^\s*<(h[2-5])\b[^>]*>([\s\S]*?)<\/\1\s*>/i;
+  for (let i = 0; i < MAX_DUPLICATE_HEADINGS; i += 1) {
+    const m = headingRe.exec(out);
+    if (!m) break;
+    if (_canonForFaq(m[2]) === qCanon) {
+      out = out.slice(m[0].length);
+      continue;
+    }
+    break;
+  }
+  return out;
+}
+
+// Обходим JSON-массив (ACF), чистим поля. Мутирует входной массив.
+function postCleanupAcfArray(arr) {
+  if (!Array.isArray(arr)) return arr;
+  for (const block of arr) {
+    if (!block || typeof block !== 'object') continue;
+    if ('subtitle' in block) block.subtitle = '';
+    if (typeof block.title === 'string') block.title = stripLeadingNumber(block.title);
+    // Контентные поля верхнего уровня (attention, expert).
+    for (const k of ['text', 'content', 'answer']) {
+      if (typeof block[k] === 'string') block[k] = stripH1FromString(block[k]);
+    }
+    // blocks → массив подэлементов с text.
+    if (Array.isArray(block.blocks)) {
+      for (const b of block.blocks) {
+        if (b && typeof b.text === 'string') b.text = stripH1FromString(b.text);
+      }
+    }
+    // items → steps / bens / tabs / price.
+    if (Array.isArray(block.items)) {
+      for (const it of block.items) {
+        if (!it || typeof it !== 'object') continue;
+        if (typeof it.title === 'string') it.title = stripLeadingNumber(it.title);
+        for (const k of ['text', 'content']) {
+          if (typeof it[k] === 'string') it[k] = stripH1FromString(it[k]);
+        }
+      }
+    }
+    // faq → массив { question, answer }.
+    if (Array.isArray(block.faq)) {
+      for (const it of block.faq) {
+        if (!it || typeof it !== 'object') continue;
+        if (typeof it.question === 'string') it.question = stripLeadingNumber(it.question);
+        if (typeof it.answer === 'string') {
+          it.answer = stripH1FromString(it.answer);
+          it.answer = dedupeFaqQuestion(it.question, it.answer);
+        }
+      }
+    }
+  }
+  return arr;
+}
+
 // ── Системный промт (перенос из JSON-v2 (2).html, оставлены только ─────────
 // ── 7 типов блоков, перечисленных в техническом задании) ───────────────────
 const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 Ты — Умный Алгоритм-Роутер контента в JSON-структуры WordPress ACF Flexible Content.
-Твоя цель: Раскидать текст по разным красивым блокам (blocks, steps, bens, price, faq, attention, expert, tabs), НО при этом не потерять ни одного слова из оригинального текста.
+Твоя цель: ВЗЯТЬ готовый HTML-текст и просто РАСПРЕДЕЛИТЬ его по подходящим блокам (blocks, steps, bens, price, faq, attention, expert, tabs). От себя НИЧЕГО не придумывай: ни новых фактов, ни новых заголовков-«украшений», ни новых абзацев. Ты — маршрутизатор, а не автор.
 
 --- ЗАДАЧА 1: СОХРАННОСТЬ ТЕКСТА (ZERO REWRITE) ---
 - ЗАПРЕЩЕНО переписывать, сжимать, перефразировать или удалять оригинальный текст из тела абзацев.
@@ -387,20 +516,33 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 - ЗАПРЕЩЕНО придумывать факты, цифры, цены или цитаты, которых нет в исходном тексте.
 
 --- ЗАДАЧА 1A: СОХРАННОСТЬ ЗАГОЛОВКОВ (ZERO HEADING LOSS) ---
-КРИТИЧЕСКИ ВАЖНО: ВСЕ оригинальные теги <h1>, <h2>, <h3>, <h4>, <h5>, <h6> из исходного HTML должны быть сохранены ДОСЛОВНО, со всем своим текстом, ВНУТРИ HTML-полей text / content / answer соответствующего блока.
-- Поле "title" блока (и поле "question" в faq) — это КОРОТКОЕ НАЗВАНИЕ-ЯРЛЫК для секции, которое ты можешь придумать сам. Оно НЕ заменяет оригинальный заголовок и НЕ освобождает тебя от обязанности сохранить <h2>/<h3> внутри HTML.
+КРИТИЧЕСКИ ВАЖНО: оригинальные теги <h2>, <h3>, <h4>, <h5> из исходного HTML должны быть сохранены ДОСЛОВНО, со всем своим текстом, ВНУТРИ HTML-полей text / content / answer соответствующего блока.
+- Разрешённый набор заголовков: ТОЛЬКО h2, h3, h4, h5. Никаких <h1> и <h6> в выводе быть не должно.
+- ЗАПРЕЩЕНО создавать «подзаголовки» — поле "subtitle" во всех блоках ВСЕГДА должно быть пустой строкой "". Не клади туда никакой текст, никакого <p>, никакого описания.
+- Если в исходном HTML где-то всё-таки попался <h1> — НЕ переноси его в JSON ни в каком виде (ни как заголовок, ни как обычный текст внутри <p>). H1 полностью исключается.
+- Поле "title" блока (и поле "question" в faq) — это КОРОТКОЕ НАЗВАНИЕ-ЯРЛЫК для секции. Оно НЕ заменяет оригинальный заголовок и НЕ освобождает тебя от обязанности сохранить <h2>/<h3>/<h4>/<h5> внутри HTML.
 - Правильно: { "title": "Устройство суппорта", "blocks": [ { "text": "<h2>Устройство тормозного суппорта: что нужно знать перед ремонтом</h2><p>...</p>" } ] }
 - Неправильно: { "title": "Устройство суппорта", "blocks": [ { "text": "<p>...</p>" } ] }   ← <h2> ПОТЕРЯН, это запрещено.
-- Если в исходном HTML был <h1> — оставь его в первом блоке "blocks" вместе с вступительными абзацами (внутри его поля text).
-- Внутри items[].text/content (steps, bens, tabs, faq.answer) тоже сохраняй <h3>-подзаголовок раздела, если он был в источнике — добавь его в начало HTML соответствующего item'а.
+- Внутри items[].text/content (steps, bens, tabs, faq.answer) тоже сохраняй <h3>/<h4>-подзаголовок раздела, если он был в источнике — добавь его в начало HTML соответствующего item'а. ИСКЛЮЧЕНИЕ — см. правило про FAQ ниже.
+
+--- ЗАДАЧА 1B: ЗАПРЕТ НА НУМЕРАЦИЮ ---
+- ЗАПРЕЩЕНО ставить любую нумерацию в полях "title" блоков, "title" item'ов и "question" в faq. Никаких "1.", "2)", "Шаг 1:", "Этап №1", "Раздел 3 —" в начале строки.
+- В items.title (steps, bens, tabs) пиши ТОЛЬКО смысловое короткое название этапа/преимущества/вкладки — без порядкового номера. Порядок и так очевиден из позиции в массиве items.
+- В title секции тоже без префиксов-номеров: пиши «Устройство суппорта», а не «1. Устройство суппорта».
+- Если в исходном <h2>/<h3> уже была нумерация ВНУТРИ текста заголовка — оставь её там как есть (исходник не трогаем), но в "title"/"question" не дублируй.
+
+--- ЗАДАЧА 1C: FAQ БЕЗ ДУБЛИРОВАНИЯ ВОПРОСА ---
+- В блоке faq поле "question" содержит сам вопрос ОДИН раз.
+- Внутри поля "answer" этого же FAQ-item'а ЗАПРЕЩЕНО повторять вопрос — ни как обычный текст, ни тем более как <h2>/<h3>/<h4>. В "answer" должен быть только сам ответ (как минимум одно <p>).
+- Если в исходном HTML вопрос был оформлен как <h3>/<h4> прямо перед абзацем-ответом — текст этого <h3>/<h4> переноси в поле "question" БЕЗ тега, а в "answer" клади только сам абзац-ответ. Сам тег <h3>/<h4> с текстом вопроса в "answer" не дублируется.
 
 --- ЗАДАЧА 2: УМНАЯ НАРЕЗКА В СЛОЖНЫЕ БЛОКИ (SMART CHUNKING) ---
 Чтобы упаковать сплошной текст в сложные массивы (steps, bens, faq, expert, tabs), используй следующий алгоритм:
 1. Анализируй заголовок раздела И сам текст внутри абзацев.
 2. Выбери подходящий блок (для процесса -> "steps", для плюсов -> "bens", для вопросов -> "faq", для цитат -> "expert", для диагностики/признаков с явным разделением на 2-4 пункта -> "tabs").
-3. Разбей сплошной текст под этим заголовком на абзацы.
-4. РАЗРЕШЕНИЕ НА ГЕНЕРАЦИЮ: Ты ИМЕЕШЬ ПРАВО самостоятельно придумать короткий логичный заголовок-ярлык для секции (в поле title блока) и для каждого item'а (в поля title или question внутри items/faq). НО оригинальный <h2>/<h3> из источника всё равно ОСТАЁТСЯ внутри HTML-поля text/content/answer (см. ЗАДАЧА 1A).
-5. Вставь оригинальный абзац ЦЕЛИКОМ в поле text, content или answer (вместе с его подзаголовком, если был).
+3. Разбей сплошной текст под этим заголовком на абзацы — ровно так, как они уже разбиты в исходном HTML. Не объединяй и не дроби абзацы.
+4. РАЗРЕШЕНИЕ НА КОРОТКИЕ ЯРЛЫКИ: Ты ИМЕЕШЬ ПРАВО придумать короткий смысловой заголовок-ярлык для секции (в поле title блока) и для item'а (в поля title или question внутри items/faq) — БЕЗ нумерации, БЕЗ выдуманных фактов. НО оригинальный <h2>/<h3>/<h4>/<h5> из источника всё равно ОСТАЁТСЯ внутри HTML-поля text/content/answer (см. ЗАДАЧА 1A; для faq см. исключение в ЗАДАЧЕ 1C).
+5. Вставь оригинальный абзац ЦЕЛИКОМ в поле text, content или answer (вместе с его подзаголовком, если был и если это не запрещено правилом FAQ).
 
 --- ПРАВИЛО ВЫДЕЛЕНИЯ ЭКСПЕРТОВ (EXPERT DETECTOR) ---
 Внимательно сканируй каждый абзац на наличие реальных цитат.
@@ -420,20 +562,22 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 
 --- ДОСТУПНЫЕ ТИПЫ БЛОКОВ (acf_fc_layout) И ИХ СХЕМЫ ---
 
+ВАЖНО ПРО subtitle ВО ВСЕХ ПРИМЕРАХ НИЖЕ: поле "subtitle" — пустая строка "". Никогда не заполняй его (см. ЗАДАЧА 1A).
+
 1. "blocks" (Универсальный сплошной текст)
-{ "acf_fc_layout": "blocks", "title": "Заголовок", "subtitle": "<p>Подзаголовок</p>", "blocks": [ { "block_width": "12", "bg_color": "default", "text": "<h2>Оригинальный заголовок раздела</h2><p>Текст</p>", "image": "", "url": "" } ], "type": "1", "vert_center": false, "block_equal_height": false }
+{ "acf_fc_layout": "blocks", "title": "Заголовок", "subtitle": "", "blocks": [ { "block_width": "12", "bg_color": "default", "text": "<h2>Оригинальный заголовок раздела</h2><p>Текст</p>", "image": "", "url": "" } ], "type": "1", "vert_center": false, "block_equal_height": false }
 
 2. "steps" (Этапы процедуры)
-{ "acf_fc_layout": "steps", "title": "Процесс", "subtitle": "Подзаголовок", "items": [ { "title": "Шаг 1", "text": "<h3>Оригинальный подзаголовок шага</h3><p>Текст</p>" } ], "columns": "3" }
+{ "acf_fc_layout": "steps", "title": "Процесс", "subtitle": "", "items": [ { "title": "Подготовка инструмента", "text": "<h3>Оригинальный подзаголовок шага</h3><p>Текст</p>" } ], "columns": "3" }
 
 3. "bens" (Преимущества)
-{ "acf_fc_layout": "bens", "title": "Преимущества", "color_title": "#000000", "subtitle": "Подзаголовок", "items": [ { "title": "Плюс 1", "image": "", "text": "<h3>Оригинальный подзаголовок</h3><p>Текст</p>" } ], "columns": "4", "image": "" }
+{ "acf_fc_layout": "bens", "title": "Преимущества", "color_title": "#000000", "subtitle": "", "items": [ { "title": "Гарантия качества", "image": "", "text": "<h3>Оригинальный подзаголовок</h3><p>Текст</p>" } ], "columns": "4", "image": "" }
 
 4. "price" (Прайс-лист)
-{ "acf_fc_layout": "price", "title": "Прайс", "subtitle": "<p>Подзаголовок</p>", "items": [ { "title": "Услуга", "text": "Описание", "price": "5 000 Р" } ] }
+{ "acf_fc_layout": "price", "title": "Прайс", "subtitle": "", "items": [ { "title": "Услуга", "text": "Описание", "price": "5 000 Р" } ] }
 
 5. "faq" (Вопросы и ответы)
-{ "acf_fc_layout": "faq", "title": "FAQ", "subtitle": "<p>Подзаголовок</p>", "faq": [ { "question": "Вопрос?", "answer": "<p>Ответ</p>" } ] }
+{ "acf_fc_layout": "faq", "title": "FAQ", "subtitle": "", "faq": [ { "question": "Сколько служит тормозной суппорт?", "answer": "<p>Ответ без повтора вопроса в виде заголовка.</p>" } ] }
 
 6. "attention" (Важная вставка)
 { "acf_fc_layout": "attention", "title": "Внимание", "text": "<h2>Оригинальный заголовок</h2><p>Выделенный текст</p>", "image": "" }
@@ -442,7 +586,7 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 { "acf_fc_layout": "expert", "title": "Мнение", "expert": 0, "text": "<p>Цитата</p>" }
 
 8. "tabs" (Вкладки/группа карточек: диагностика, признаки, способы проверки)
-{ "acf_fc_layout": "tabs", "title": "Диагностика", "subtitle": "Подзаголовок", "items": [ { "title": "Короткое название вкладки", "content": "<h3>Оригинальный подзаголовок</h3><p>Текст</p>" } ] }
+{ "acf_fc_layout": "tabs", "title": "Диагностика", "subtitle": "", "items": [ { "title": "Визуальный осмотр", "content": "<h3>Оригинальный подзаголовок</h3><p>Текст</p>" } ] }
 
 --- ТЕХНИЧЕСКИЕ ПРАВИЛА ВЫВОДА JSON (КРИТИЧЕСКИ ВАЖНО) ---
 1. Вывод ДОЛЖЕН БЫТЬ строго JSON массивом объектов.
@@ -973,7 +1117,10 @@ async function runJob(job) {
   const t0       = Date.now();
 
   try {
-    const html = job.sourceHtml;
+    // ТЗ: H1 не должен попадать в JSON. Удаляем его из исходного HTML ДО
+    // чанкования, чтобы модель его вообще не видела и пост-валидация
+    // сохранности не считала его «потерянным».
+    const html = stripH1FromHtml(job.sourceHtml);
     const chunks = chunkHtml(html, DEFAULT_CHUNK_LEN);
 
     if (chunks.join('') !== html) {
@@ -1004,6 +1151,11 @@ async function runJob(job) {
       job.tokensOut += tokensOut;
       job.costRub    = computeJobCost(job.tokensIn, job.tokensOut);
     }
+
+    // Пост-зачистка под требования ТЗ: subtitle='', срез нумерации в title/
+    // question, удаление любых остаточных <h1>, дедуп вопроса в FAQ. См.
+    // postCleanupAcfArray() — мутирует массив на месте.
+    postCleanupAcfArray(finalArray);
 
     job.result     = JSON.stringify(finalArray, null, 2);
     job.status     = 'done';
