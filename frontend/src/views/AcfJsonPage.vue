@@ -3,17 +3,17 @@
  * Вкладка «Сформировать JSON»
  *
  * Вспомогательный помощник: берёт HTML сгенерированного на вкладке
- * «Генератор SEO текста» текста и через AITunnel API (модель Qwen)
- * формирует ACF Flexible Content JSON для импорта в WordPress.
+ * «Генератор SEO текста» текста и через DashScope API (Alibaba Model
+ * Studio, модель Qwen3.6-Plus) формирует ACF Flexible Content JSON
+ * для импорта в WordPress.
  *
  * Логика и системный промт перенесены из вспомогательного файла
  * `JSON-v2 (2).html` в корне репозитория.
  *
- * ВАЖНО: запрос к AITunnel идёт через backend-прокси
- *        (POST /api/acf-json/aitunnel), а НЕ из браузера напрямую.
- *        API-ключ и URL хранятся на сервере. Это защищает от
- *        "Failed to fetch", когда у клиента нет VPN / провайдер
- *        блокирует api.aitunnel.ru.
+ * ВАЖНО: запрос идёт через backend-прокси (POST /api/acf-json/dashscope),
+ *        а НЕ из браузера напрямую. API-ключ DASHSCOPE_API_KEY хранится
+ *        ИСКЛЮЧИТЕЛЬНО на сервере (.env), фронт его не видит и не
+ *        может утечь через DevTools/исходники бандла.
  *
  * Главное правило: текст НЕ переписывается — только распределяется
  * по контейнерам ACF из задания (blocks / steps / bens / price / faq /
@@ -28,16 +28,18 @@ import api from '../api.js';
 const store          = useTasksStore();          // SEO-генератор (/api/tasks)
 const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api/info-article)
 
-// ── API AITunnel (через backend-прокси) ────────────────────────────────────
-// Запрос идёт НЕ напрямую из браузера на api.aitunnel.ru, а через наш
-// backend-роут /api/acf-json/aitunnel. Это критично: AITunnel и/или
-// промежуточные сети у клиента могут быть недоступны (VPN/блокировки
-// провайдера/корпоративный фаервол) — раньше это давало "Failed to fetch".
-// Теперь доступность AITunnel определяется только сервером, где живёт
-// приложение, а IP/VPN пользователя роли не играют.
-// API-ключ и URL хранятся на бэкенде (см. backend/src/routes/acfJson.routes.js).
-// «Qwen3.5 Plus» из ТЗ — у AITunnel это модель `qwen3.5-plus-02-15`.
-const AITUNNEL_MODEL   = 'qwen3.5-plus-02-15';
+// ── API DashScope (через backend-прокси) ───────────────────────────────────
+// Запрос идёт НЕ напрямую из браузера на dashscope-intl.aliyuncs.com, а
+// через наш backend-роут /api/acf-json/dashscope. Это критично:
+//   1) API-ключ Alibaba (DASHSCOPE_API_KEY) живёт ТОЛЬКО на сервере (.env)
+//      и никогда не попадает в исходники фронт-бандла / DevTools;
+//   2) если у клиента нет доступа к dashscope-intl.aliyuncs.com (VPN/
+//      блокировки провайдера/корпоративный фаервол), доступность
+//      провайдера определяется сервером, а не браузером пользователя.
+// Адаптер и санитизация ключа в логах — backend/src/services/llm/dashscope.adapter.js.
+// Модель — Qwen3.6-Plus (deep-thinking-capable; в режиме enable_thinking=false
+// работает как обычный синхронный chat/completions, что и нужно для JSON-обвязки).
+const DASHSCOPE_MODEL  = 'qwen3.6-plus';
 // Бюджет вывода модели. Поднят с 8192 → 16384, чтобы JSON-обвязка
 // (acf_fc_layout, schema-обёртки, повторение текста дословно) гарантированно
 // помещалась рядом с самим контентом и не приходила обрезанной.
@@ -53,8 +55,11 @@ const MIN_RETRY_CHUNK_LEN = 800;
 // expert→blocks (сюда модель кладёт оригинальные абзацы).
 const TEXT_FIELD_NAMES = /^(text|content|answer|expert|subtitle)$/i;
 
-// ── Тарификация AITunnel / Qwen3.5 Plus (для расчёта стоимости задачи) ───
+// ── Тарификация Qwen Plus (для расчёта стоимости задачи) ──────────────────
 // Берём из ТЗ заказчика: 57.6 ₽ / 1M входных токенов, 460.8 ₽ / 1M выходных.
+// Это РУБЛЁВЫЙ ОРИЕНТИР для UI-индикатора стоимости (DashScope тарифицирует
+// в USD; реальная стоимость зависит от тарифного плана и курса). Если у вас
+// другой тариф/курс — поправьте константы ниже.
 // Контекст модели — 262 144 токенов (информативно, для подсказки в UI).
 const INPUT_PRICE_RUB_PER_1M  = 57.6;
 const OUTPUT_PRICE_RUB_PER_1M = 460.8;
@@ -71,8 +76,8 @@ const selectedTaskId = ref(null);
 const selectedHtml   = ref('');
 
 // Очередь задач формирования JSON. Каждая задача — это локальный фоновый
-// «job», обрабатываемый в браузере (LLM-вызов идёт прямо из фронта на
-// AITunnel). Состояния: queued → processing → done | error.
+// «job», обрабатываемый в браузере (LLM-вызов идёт через backend-прокси
+// /api/acf-json/dashscope). Состояния: queued → processing → done | error.
 // Список сохраняется в localStorage, чтобы при обновлении страницы
 // запущенные/завершённые задачи не исчезали (в БД на бэкенд они не пишутся —
 // здесь чистый фронт-only функционал).
@@ -106,7 +111,7 @@ function loadJobsFromStorage() {
         && VALID_STATUSES.has(j.status),
     );
     // Задачи в статусе `processing` на момент перезагрузки страницы —
-    // их fetch к AITunnel был оборван браузером. Возвращаем их в очередь,
+    // их fetch к DashScope был оборван браузером. Возвращаем их в очередь,
     // чтобы `runQueue()` автоматически повторил обработку с нуля
     // (sourceHtml сохранён в самой задаче).
     const restored = clean.map((j) => {
@@ -581,17 +586,17 @@ function findMissingPhrases(inputPlain, outputPlain) {
   return missing;
 }
 
-// ── Один HTTP-вызов к AITunnel через наш backend-прокси ───────────────────
-// Возвращает первый `choice` ровно в том виде, в котором его отдаёт AITunnel
+// ── Один HTTP-вызов к DashScope через наш backend-прокси ──────────────────
+// Возвращает первый `choice` в OpenAI-совместимом формате
 // ({ message: { content }, finish_reason }). Сам прокси-роут живёт в
-// backend/src/routes/acfJson.routes.js и держит API-ключ на сервере.
-async function callAitunnel({ systemPrompt, userPrompt }) {
+// backend/src/routes/acfJson.routes.js и держит API-ключ Alibaba на сервере.
+async function callLlm({ systemPrompt, userPrompt }) {
   let response;
   try {
-    response = await api.post('/acf-json/aitunnel', {
+    response = await api.post('/acf-json/dashscope', {
       systemPrompt,
       userPrompt,
-      model:       AITUNNEL_MODEL,
+      model:       DASHSCOPE_MODEL,
       temperature: 0.1,
       max_tokens:  MAX_OUTPUT_TOKENS,
     }, {
@@ -610,16 +615,16 @@ async function callAitunnel({ systemPrompt, userPrompt }) {
     if (httpError.response) {
       const serverMsg = httpError.response.data?.error
         || `HTTP ${httpError.response.status}`;
-      throw new Error(`Ошибка прокси AITunnel: ${serverMsg}`);
+      throw new Error(`Ошибка прокси DashScope: ${serverMsg}`);
     }
     // Различаем истёкший axios-таймаут (ECONNABORTED) и реальный обрыв сети,
     // чтобы не вводить пользователя в заблуждение «Failed to fetch», когда
-    // сеть-то жива, а просто AITunnel слишком долго отвечает.
+    // сеть-то жива, а просто модель слишком долго отвечает.
     const isTimeout = httpError.code === 'ECONNABORTED'
       || /timeout/i.test(httpError.message || '');
     if (isTimeout) {
       throw new Error(
-        'AITunnel не успел ответить за 270 секунд. Попробуйте повторить '
+        'DashScope (Qwen) не успел ответить за 270 секунд. Попробуйте повторить '
         + 'запрос — обычно при следующей попытке модель отвечает быстрее.',
       );
     }
@@ -630,9 +635,9 @@ async function callAitunnel({ systemPrompt, userPrompt }) {
 
   const choice = response.data?.choice;
   if (!choice) {
-    throw new Error('Backend вернул пустой ответ AITunnel.');
+    throw new Error('Backend вернул пустой ответ DashScope.');
   }
-  // usage может быть null, если AITunnel почему-то его не вернул (фолбэк
+  // usage может быть null, если провайдер почему-то его не вернул (фолбэк
   // от бэкенда — backend/src/routes/acfJson.routes.js). Нормализуем в нули.
   const usage = response.data?.usage || {};
   const tokensIn  = Number(usage.prompt_tokens)     || 0;
@@ -669,7 +674,7 @@ async function processChunk({
   let tokensInTotal  = 0;
   let tokensOutTotal = 0;
 
-  const first = await callAitunnel({ systemPrompt: systemPromptBase, userPrompt });
+  const first = await callLlm({ systemPrompt: systemPromptBase, userPrompt });
   const choice = first.choice;
   tokensInTotal  += first.tokensIn;
   tokensOutTotal += first.tokensOut;
@@ -724,7 +729,7 @@ async function processChunk({
 Потерянные фрагменты (по одной строке на фрагмент):
 ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\n• …и ещё ${missing.length - sample.length} фрагмент(ов) — не забудь их тоже.` : ''}`;
     const correctiveUser = `Сформируй массив JSON ACF заново для того же исходника, СОХРАНИВ ВСЕ потерянные фрагменты дословно. Исходник:\n\n${chunkHtmlText}`;
-    const corrective = await callAitunnel({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
+    const corrective = await callLlm({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
     const choice2 = corrective.choice;
     tokensInTotal  += corrective.tokensIn;
     tokensOutTotal += corrective.tokensOut;
@@ -836,7 +841,7 @@ function addJob() {
     finishedAt:   null,
     // Метрики генерации (заполняются по мере выполнения):
     durationMs:   0,                  // длительность running (от startedAt до finishedAt)
-    tokensIn:     0,                  // суммарно prompt_tokens по всем под-вызовам AITunnel
+    tokensIn:     0,                  // суммарно prompt_tokens по всем под-вызовам DashScope
     tokensOut:    0,                  // суммарно completion_tokens
     costRub:      0,                  // ₽: tokensIn/1M*INPUT + tokensOut/1M*OUTPUT
   };
@@ -877,7 +882,7 @@ function retryJob(jobId) {
 }
 
 // Фоновый процессор очереди. Выполняет задачи строго по одной — на API
-// AITunnel ходим из браузера, поэтому параллелить не стоит (rate-limit + UX).
+// DashScope ходим через backend, лимит rate-limit там же (см. acfJson.routes.js).
 async function runQueue() {
   if (queueRunning) return;
   queueRunning = true;
@@ -1068,7 +1073,7 @@ function fmtCost(rub) {
         <p class="text-sm text-gray-500 mt-1">
           Многозадачник: выбираете готовую задачу (SEO-генератор или блог-статью),
           нажимаете «Создать задачу JSON», её HTML уходит в очередь и обрабатывается
-          в фоне моделью Qwen через AITunnel (раскладывается по контейнерам ACF
+          в фоне моделью Qwen3.6-Plus через DashScope (раскладывается по контейнерам ACF
           Flexible Content). Готовый JSON открывается в модальном окне с кнопкой
           копирования. Параллельно можно поставить несколько задач.
         </p>
