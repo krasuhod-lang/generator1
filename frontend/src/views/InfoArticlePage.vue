@@ -467,31 +467,27 @@ const sanitizedHtml = computed(() => {
 async function copyAsHtml() {
   const html = selectedTask.value?.article_html;
   if (!html) return;
-  const plain = selectedTask.value?.article_plain || html.replace(/<[^>]+>/g, ' ');
 
-  // Path A: Async Clipboard API + ClipboardItem (text/html + text/plain).
-  // Работает только в secure context (HTTPS / localhost) и в современных браузерах.
-  try {
-    if (navigator.clipboard && window.ClipboardItem) {
-      const blobHtml  = new Blob([html],  { type: 'text/html' });
-      const blobPlain = new Blob([plain], { type: 'text/plain' });
-      await navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain })]);
-      flashToast('HTML скопирован');
-      return;
-    }
-  } catch (_) { /* fallthrough */ }
+  // ВАЖНО: «Скопировать как HTML» должна класть в буфер именно ИСХОДНЫЙ HTML
+  // как plain-text, чтобы при вставке в WYSIWYG-редактор блог-движка / Word /
+  // Google Docs пользователь получил сам HTML-код (для последующей вставки
+  // через режим «HTML / Текст»), а НЕ отрендеренный «форматированный» вариант.
+  // Раньше мы регистрировали ClipboardItem с MIME 'text/html' — браузер при
+  // вставке выбирал именно эту часть, и большинство блог-редакторов
+  // подставляли уже отформатированный текст вместо разметки. Для копирования
+  // отрендеренного варианта есть отдельная кнопка «Скопировать форматированный
+  // текст» (copyAsFormattedText).
 
-  // Path B: writeText — отдаёт HTML как обычный текст. Тоже требует
-  // secure context, но работает там, где нет ClipboardItem.
+  // Path A: Async Clipboard API — пишем HTML только как text/plain.
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(html);
-      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      flashToast('HTML скопирован (вставьте в режим «Текст / HTML» редактора)');
       return;
     }
   } catch (_) { /* fallthrough */ }
 
-  // Path C (legacy fallback): document.execCommand('copy') через скрытый
+  // Path B (legacy fallback): document.execCommand('copy') через скрытый
   // <textarea>. Работает на HTTP / IP-адресах без secure context, что
   // нужно при доступе к приложению через локальную сеть или просто по IP.
   try {
@@ -506,7 +502,7 @@ async function copyAsHtml() {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     if (ok) {
-      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      flashToast('HTML скопирован (вставьте в режим «Текст / HTML» редактора)');
       return;
     }
     throw new Error('execCommand copy вернул false');
@@ -1009,7 +1005,7 @@ onUnmounted(() => { stopTicker(); });
               <button class="btn-ghost border border-gray-700" @click="downloadHtml">⬇ Скачать .html</button>
             </div>
             <article ref="articlePreviewRef"
-                     class="prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
+                     class="info-article-preview prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
                      v-html="sanitizedHtml"></article>
 
             <div v-if="renderedImages.length" class="space-y-2">
@@ -1189,3 +1185,136 @@ onUnmounted(() => { stopTicker(); });
     </div>
   </AppLayout>
 </template>
+
+<style scoped>
+/*
+ * Стилизация превью статьи. В проекте не подключён @tailwindcss/typography,
+ * поэтому Tailwind preflight сбрасывает margin/font-size у h1-h6, p, ul, ol, и
+ * статья визуально превращается в «полотно текста». Ниже — минимальная
+ * типографика именно для article-превью info-article (другие страницы не
+ * затрагиваются — селекторы scoped + ограничены контейнером .info-article-preview).
+ *
+ * Используем :deep() потому что HTML вставляется через v-html и Vue scoped
+ * style по умолчанию не достаёт до его потомков.
+ */
+.info-article-preview :deep(h1) {
+  font-size: 1.875rem;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0 0 1rem 0;
+  color: #f3f4f6;
+}
+.info-article-preview :deep(h2) {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1.75rem 0 0.75rem 0;
+  color: #e5e7eb;
+}
+.info-article-preview :deep(h3) {
+  font-size: 1.2rem;
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 1.25rem 0 0.5rem 0;
+  color: #e5e7eb;
+}
+.info-article-preview :deep(h4) {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 1rem 0 0.5rem 0;
+  color: #e5e7eb;
+}
+.info-article-preview :deep(p) {
+  margin: 0 0 1rem 0;
+  line-height: 1.7;
+  color: #d1d5db;
+}
+.info-article-preview :deep(ul),
+.info-article-preview :deep(ol) {
+  margin: 0 0 1rem 0;
+  padding-left: 1.5rem;
+  color: #d1d5db;
+  line-height: 1.7;
+}
+.info-article-preview :deep(ul) { list-style: disc; }
+.info-article-preview :deep(ol) { list-style: decimal; }
+.info-article-preview :deep(li) {
+  margin: 0.25rem 0;
+}
+.info-article-preview :deep(a) {
+  color: #93c5fd;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.info-article-preview :deep(a:hover) {
+  color: #bfdbfe;
+}
+.info-article-preview :deep(blockquote) {
+  margin: 1.25rem 0;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid #6366f1;
+  background: rgba(99, 102, 241, 0.08);
+  color: #e5e7eb;
+  font-style: italic;
+}
+.info-article-preview :deep(blockquote.expert-opinion) {
+  border-left-color: #10b981;
+  background: rgba(16, 185, 129, 0.08);
+}
+.info-article-preview :deep(blockquote cite),
+.info-article-preview :deep(blockquote footer) {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: #9ca3af;
+  font-style: normal;
+}
+.info-article-preview :deep(figure) {
+  margin: 1.5rem 0;
+  text-align: center;
+}
+.info-article-preview :deep(figure img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  display: inline-block;
+}
+.info-article-preview :deep(figcaption) {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: #9ca3af;
+}
+.info-article-preview :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+.info-article-preview :deep(th),
+.info-article-preview :deep(td) {
+  border: 1px solid #374151;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  color: #d1d5db;
+}
+.info-article-preview :deep(th) {
+  background: #1f2937;
+  color: #f3f4f6;
+  font-weight: 600;
+}
+.info-article-preview :deep(strong) { color: #f3f4f6; font-weight: 600; }
+.info-article-preview :deep(em)     { font-style: italic; }
+.info-article-preview :deep(code)   {
+  background: #1f2937;
+  color: #fcd34d;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+}
+.info-article-preview :deep(hr) {
+  border: 0;
+  border-top: 1px solid #374151;
+  margin: 1.5rem 0;
+}
+</style>

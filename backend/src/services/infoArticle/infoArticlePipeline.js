@@ -616,19 +616,46 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
-function embedImages(html, _imagePrompts) {
-  // info-article: cover-изображение НЕ встраивается в article_html — оно
-  // отдаётся пользователю как отдельный загружаемый файл из галереи (для
-  // публикации на сайт через стандартный uploader блог-движка).
-  // Эта функция теперь просто страхует от leftover-плейсхолдеров на случай,
-  // если writer (по инерции старого промта или Gemini cache) всё же
-  // вставил <!-- IMAGE_SLOT_N --> в HTML. Параметр _imagePrompts оставлен
-  // для совместимости сигнатуры с прошлой версией.
+function embedImages(html, imagePrompts) {
+  // info-article: cover-изображение встраивается в article_html сразу после <h1>
+  // (если оно сгенерировалось успешно), чтобы при копировании HTML / форматированного
+  // текста картинка уезжала вместе со статьёй (как в link-article). Раньше
+  // изображение отдавалось только как отдельный download'ный файл из галереи
+  // — пользователи теряли его при публикации, потому что многие блог-движки
+  // вставляют HTML «как есть», без отдельной обложки.
+  //
+  // Стратегия:
+  //   1) очищаем возможные leftover-плейсхолдеры <!-- IMAGE_SLOT_N --> и пустые <p></p>
+  //      (на случай, если Gemini по инерции старого промта их оставил);
+  //   2) берём первый успешный image_prompt с непустым image_base64;
+  //   3) если в HTML уже есть тег <img> или <figure> (writer всё-таки вставил) —
+  //      ничего не добавляем, чтобы не задвоить картинку;
+  //   4) иначе вставляем <figure class="info-article-cover"><img src="data:…"/></figure>
+  //      сразу после закрывающего </h1>; если <h1> отсутствует — в самое начало.
   let out = String(html || '');
   out = out.replace(/<!--\s*IMAGE_SLOT_\d+\s*-->/gi, '');
-  // Также убираем одиночные пустые <p></p>, которые могли остаться вокруг
-  // удалённого плейсхолдера.
   out = out.replace(/<p>\s*<\/p>/gi, '');
+
+  const cover = Array.isArray(imagePrompts)
+    ? imagePrompts.find((p) => p && p.status === 'done' && p.image_base64)
+    : null;
+  if (!cover) return out;
+  if (/<img\b|<figure\b/i.test(out)) return out;
+
+  const alt  = escapeHtml(cover.alt_ru || '');
+  const mime = cover.mime_type || 'image/png';
+  const figure =
+    `<figure class="info-article-cover">` +
+    `<img src="data:${mime};base64,${cover.image_base64}" alt="${alt}" />` +
+    `</figure>`;
+
+  // Вставляем после первого закрывающего </h1>; если <h1> нет — префикс к HTML.
+  const h1Re = /<\/h1\s*>/i;
+  if (h1Re.test(out)) {
+    out = out.replace(h1Re, (match) => `${match}\n${figure}`);
+  } else {
+    out = `${figure}\n${out}`;
+  }
   return out;
 }
 
@@ -662,15 +689,17 @@ function buildPlainText(html) {
  * детерминированную страховку: для каждой ссылки из linkAudit.missing
  * программно вставляем `<a href="URL">anchor_text</a>` в нужный H2-сегмент.
  *
- * Стратегия вставки:
+ * Стратегия вставки (несколько уровней fallback'a, чтобы coverage стремился к 100%):
  *   1. Находим границы целевой H2-секции (от <h2 ...> до следующего <h2> или
  *      конца документа), используя НЕ-greedy сегментацию идентичную
  *      auditHtmlAgainstPlan.
- *   2. В первом непустом <p>...</p> секции добавляем перед закрывающим </p>
- *      аккуратную внутри-предложенческую сноску " (см. <a>anchor_text</a>)".
- *   3. Если <p> в секции нет — оставляем секцию как есть (это аномалия плана,
- *      writer не написал контент); такая ссылка попадёт в логи как
- *      «non_injectable» и аудит покажет 95-99% coverage вместо 100%.
+ *   2. Если в секции есть <p>...</p> — вставляем перед закрывающим </p>
+ *      аккуратную внутри-предложенческую сноску " (см. также <a>anchor_text</a>)".
+ *   3. Если <p> нет, но есть <li>...</li> (например, в секции только список) —
+ *      вставляем сноску перед закрывающим </li> первого элемента.
+ *   4. Если ни <p>, ни <li> в секции нет — дописываем новый
+ *      <p>См. также: <a>anchor_text</a>.</p> в конец секции (перед следующим <h2>).
+ *      Это гарантирует, что coverage всегда достигает 100% при любой структуре writer'а.
  *
  * Анкер escape-им на случай служебных символов; URL — атрибут-escape.
  *
@@ -679,7 +708,8 @@ function buildPlainText(html) {
  * @returns {{ html: string, injected: number, skipped: Array<{h2_index, url, anchor_text, reason: string}> }}
  *   html: финальный HTML с дописанными ссылками;
  *   injected: количество фактически вставленных <a>-тегов;
- *   skipped: пропуски с причиной (no_segments / h2_index_out_of_range / no_paragraph_in_section).
+ *   skipped: пропуски с причиной (no_segments / h2_index_out_of_range — реальные
+ *     аномалии плана; «нет контента в секции» больше не приводит к пропуску).
  */
 function injectMissingLinks(html, missing) {
   if (typeof html !== 'string' || !html || !Array.isArray(missing) || !missing.length) {
@@ -724,23 +754,41 @@ function injectMissingLinks(html, missing) {
       continue;
     }
     const segHtml = html.slice(seg.bodyStart, seg.bodyEnd);
-    // Берём первый непустой <p>...</p> внутри секции (а не FAQ-h3'шных).
-    const pMatch = /<p\b[^>]*>([\s\S]*?)<\/p>/i.exec(segHtml);
-    if (!pMatch) {
-      for (const miss of list) skipped.push({ ...miss, reason: 'no_paragraph_in_section' });
-      continue;
-    }
-    // Абсолютная позиция закрывающего </p> в html.
-    const closeRel = pMatch.index + pMatch[0].lastIndexOf('</p>');
-    const closeAbs = seg.bodyStart + closeRel;
 
-    // Сборка вставляемой фразы для всех missing в этом H2.
+    // Сборка фразы-сноски и фразы-нового-параграфа.
     const phrases = list.map((miss) => {
       const anchor = String(miss.anchor_text || '').trim() || 'подробнее';
       const url = String(miss.url || '').trim();
       return ` (см. также <a href="${escapeHtml(url)}">${escapeHtml(anchor)}</a>)`;
     });
-    edits.push({ pos: closeAbs, insertText: phrases.join('') });
+    const standaloneAnchors = list.map((miss) => {
+      const anchor = String(miss.anchor_text || '').trim() || 'подробнее';
+      const url = String(miss.url || '').trim();
+      return `<a href="${escapeHtml(url)}">${escapeHtml(anchor)}</a>`;
+    });
+
+    // Уровень 1: первый <p> в секции — вставляем сноску перед </p>.
+    const pMatch = /<p\b[^>]*>([\s\S]*?)<\/p>/i.exec(segHtml);
+    if (pMatch) {
+      const closeRel = pMatch.index + pMatch[0].lastIndexOf('</p>');
+      const closeAbs = seg.bodyStart + closeRel;
+      edits.push({ pos: closeAbs, insertText: phrases.join('') });
+      continue;
+    }
+
+    // Уровень 2: первый <li> в секции — вставляем сноску перед </li>.
+    const liMatch = /<li\b[^>]*>([\s\S]*?)<\/li>/i.exec(segHtml);
+    if (liMatch) {
+      const closeRel = liMatch.index + liMatch[0].lastIndexOf('</li>');
+      const closeAbs = seg.bodyStart + closeRel;
+      edits.push({ pos: closeAbs, insertText: phrases.join('') });
+      continue;
+    }
+
+    // Уровень 3 (последний): дописываем новый <p> в конец секции —
+    // прямо перед следующим <h2> (или концом документа).
+    const newP = `\n<p>См. также: ${standaloneAnchors.join(', ')}.</p>\n`;
+    edits.push({ pos: seg.bodyEnd, insertText: newP });
   }
 
   // Применяем правки от конца к началу, чтобы сохранить позиции.
@@ -749,7 +797,7 @@ function injectMissingLinks(html, missing) {
   let injected = 0;
   for (const ed of edits) {
     out = out.slice(0, ed.pos) + ed.insertText + out.slice(ed.pos);
-    // insertText может содержать несколько (см. также …) — считаем по числу <a>
+    // insertText может содержать несколько <a> — считаем по числу <a>
     injected += (ed.insertText.match(/<a\b/g) || []).length;
   }
 
@@ -1053,10 +1101,11 @@ async function processInfoArticleTask(taskId) {
     const renderedImages = await runImageGeneration(taskId, imagePrompts);
     await saveColumn(taskId, 'image_prompts', renderedImages);
 
-    // 14. Финализация HTML + plain text. Cover-изображение НЕ встраивается в
-    //     article_html (сохраняется в image_prompts как отдельный download'ный
-    //     ресурс для публикации на сайт). embedImages() здесь просто чистит
-    //     возможные leftover-плейсхолдеры <!-- IMAGE_SLOT_N --> в HTML.
+    // 14. Финализация HTML + plain text. Cover-изображение встраивается в
+    //     article_html сразу после <h1> (см. embedImages), чтобы при копировании
+    //     HTML / форматированного текста картинка уезжала вместе со статьёй.
+    //     image_prompts при этом всё равно сохраняется отдельно — пользователь
+    //     может скачать обложку из галереи, если нужен файл для отдельной публикации.
     const finalHtml  = embedImages(articleHtml, renderedImages);
     const finalPlain = buildPlainText(finalHtml);
 
@@ -1137,4 +1186,8 @@ module.exports = {
   recoverStuckInfoArticleTasks,
   INFO_ARTICLE_GEMINI_MODEL,
   INFO_ARTICLE_DEEPSEEK_MODEL,
+  // Внутренние хелперы — экспортируются исключительно для unit-тестов
+  // (см. backend/scripts/test-info-article-html-helpers.js). Не использовать
+  // снаружи pipeline — публичный контракт пайплайна это processInfoArticleTask.
+  _internal: { embedImages, injectMissingLinks, buildPlainText },
 };
