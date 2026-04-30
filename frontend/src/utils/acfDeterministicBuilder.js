@@ -166,6 +166,10 @@ function looksLikeStepsBody(body) {
 
 // «Похоже ли тело на Price»: есть таблица с цифровым последним столбцом
 // или ul/li, где явно встречается денежный паттерн.
+// Денежный паттерн для эвристики price-блока: «5000», «5 000 руб», «1 234 567 ₽».
+// {0,8} ограничивает «телесную» часть числа максимум 8 разделителями/цифрами
+// после первой — этого хватает для миллионов («1 234 567»), но защищает от
+// false-positive на длинных номерах телефонов / серий документов и т. п.
 const PRICE_RE = /\d[\d\s]{0,8}(?:р\b|руб\b|₽|\$|€)/i;
 function looksLikePriceBody(body) {
   for (const n of body) {
@@ -259,8 +263,10 @@ function stripLeadingNumber(s) {
   return rest;
 }
 
-// Короткий title секции для поля «title» блока. Берём текст <h2>, режем
-// нумерацию, ограничиваем длину (ACF-UI неудобно с длинными ярлыками).
+// Поле text/content имеет ограниченную ширину в ACF-UI WordPress'а:
+// длинные ярлыки переносятся уродливо и плохо читаются в админке. 90 —
+// эмпирический предел: помещается в одну строку при типичной ширине поля
+// и оставляет запас под суффикс «…».
 const TITLE_MAX_LEN = 90;
 function shortTitle(h2Node, fallback) {
   const raw = nodeText(h2Node) || fallback || '';
@@ -388,6 +394,9 @@ function buildStepsBlock(section) {
         textHtml = `<p>${(clone.innerHTML || '').trim()}</p>`;
       } else {
         const full = nodeText(li);
+        // 80 симв. — эмпирическая граница «короткое предложение, годится в title».
+        // Длиннее — не делим, кладём усечённую первую фразу с многоточием,
+        // чтобы title оставался компактным в ACF-UI.
         const dotIdx = full.search(/[.!?](?:\s|$)/);
         if (dotIdx > 0 && dotIdx < 80) {
           titleStr = full.slice(0, dotIdx).trim();
