@@ -260,6 +260,44 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
 });
 
+// ── Диагностика DashScope ──────────────────────────────────────────────────
+// Кнопка «Проверить соединение». Чтобы заказчик не угадывал, что именно
+// пошло не так, когда `processChunk` падает с «Сеть до сервера недоступна
+// (Failed to fetch). Network Error», вызываем GET /api/acf-json/health,
+// который проверяет: задан ли ключ, доступен ли DashScope, какое latency,
+// настроен ли прокси. Возвращаем результат прямо в UI.
+const diag = ref({ state: 'idle', data: null, error: '' }); // state: idle|running|done|error
+
+async function runDiagnostics() {
+  diag.value = { state: 'running', data: null, error: '' };
+  try {
+    const resp = await api.get('/acf-json/health', { timeout: 30_000 });
+    diag.value = { state: 'done', data: resp.data || null, error: '' };
+  } catch (httpError) {
+    // Если сам диагностический запрос упал с Network Error — это уже
+    // 100%-доказательство, что проблема НЕ в DashScope, а в самом
+    // backend-канале (nginx/контейнер/фаервол). Покажем это явно.
+    let msg;
+    if (httpError.response) {
+      // Backend вернул HTTP-ответ (например 500 «apiKey не задан») — данные есть.
+      diag.value = {
+        state: 'done',
+        data:  httpError.response.data || null,
+        error: httpError.response.data?.error || `HTTP ${httpError.response.status}`,
+      };
+      return;
+    }
+    if (httpError.code === 'ECONNABORTED' || /timeout/i.test(httpError.message || '')) {
+      msg = 'Backend не ответил за 30 сек. Скорее всего сервер перегружен или упал — проверьте `docker logs seo_backend`.';
+    } else if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      msg = 'Браузер не в сети (`navigator.onLine === false`). Проверьте интернет-соединение.';
+    } else {
+      msg = `Backend недостижим из браузера: ${httpError.message}. Проверьте, что nginx/контейнер frontend работает и проксирует /api на seo_backend:3000.`;
+    }
+    diag.value = { state: 'error', data: null, error: msg };
+  }
+}
+
 // ── Выбор задачи → подгрузка HTML ──────────────────────────────────────────
 async function selectTask(task) {
   if (!task) return;
@@ -829,8 +867,26 @@ async function callLlm({ systemPrompt, userPrompt }) {
         + 'запрос — обычно при следующей попытке модель отвечает быстрее.',
       );
     }
+    // navigator.onLine отличает «реально нет сети» от «backend ушёл в нирвану».
+    // Это критично: предыдущая формулировка «Сеть до сервера недоступна
+    // (Failed to fetch). Network Error» одинаково звучит в обоих случаях,
+    // и заказчик не может понять, что чинить.
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error(
+        'Браузер сообщает, что интернет-соединение пропало. Проверьте Wi-Fi/VPN и повторите запрос.',
+      );
+    }
+    if (httpError.code === 'ERR_NETWORK') {
+      throw new Error(
+        'Backend недостижим из браузера (ERR_NETWORK). Чаще всего это значит, что '
+        + 'контейнер seo_backend упал или nginx не может проксировать /api. '
+        + 'Нажмите «Проверить соединение» сверху страницы — диагностический запрос '
+        + 'покажет детали. На сервере: `docker logs seo_backend --tail=200`.',
+      );
+    }
     throw new Error(
-      `Сеть до сервера недоступна (Failed to fetch). Детали: ${httpError.message}`,
+      `Сеть до сервера недоступна (Failed to fetch). Детали: ${httpError.message}. `
+      + 'Нажмите «Проверить соединение» сверху, чтобы увидеть, в чём именно проблема.',
     );
   }
 
@@ -1287,6 +1343,58 @@ function fmtCost(rub) {
           Flexible Content). Готовый JSON открывается в модальном окне с кнопкой
           копирования. Параллельно можно поставить несколько задач.
         </p>
+
+        <!-- Диагностика соединения с DashScope.
+             Кнопка появляется ВСЕГДА (а не только после ошибки), чтобы её можно
+             было использовать превентивно: «прежде чем запускать 30 задач,
+             проверим, что коннект жив». При нажатии выводит структурный отчёт:
+             ключ задан / DashScope доступен / latency / прокси. -->
+        <div class="mt-3 flex items-start gap-3 flex-wrap">
+          <button
+            type="button"
+            class="px-3 py-1.5 text-xs rounded border border-gray-700 bg-gray-900 hover:bg-gray-800 text-gray-200 transition-colors"
+            :disabled="diag.state === 'running'"
+            @click="runDiagnostics"
+          >
+            {{ diag.state === 'running' ? '⏳ Проверяю…' : '🔌 Проверить соединение' }}
+          </button>
+
+          <div
+            v-if="diag.state === 'done' && diag.data"
+            class="text-xs flex-1 min-w-[280px] rounded border px-3 py-2"
+            :class="diag.data.reachable && diag.data.apiKey
+              ? 'border-emerald-700 bg-emerald-950/40 text-emerald-200'
+              : 'border-amber-700 bg-amber-950/40 text-amber-200'"
+          >
+            <div class="font-semibold mb-1">
+              {{ diag.data.reachable && diag.data.apiKey
+                ? '✅ Соединение в порядке'
+                : '⚠ Найдены проблемы' }}
+            </div>
+            <ul class="space-y-0.5">
+              <li>backend: <span class="font-mono">{{ diag.data.backend }}</span></li>
+              <li>API-ключ задан: <span class="font-mono">{{ diag.data.apiKey ? `да (${diag.data.apiKeyTail})` : 'НЕТ — добавьте DASHSCOPE_API_KEY в .env' }}</span></li>
+              <li>baseUrl: <span class="font-mono break-all">{{ diag.data.baseUrl }}</span></li>
+              <li>модель: <span class="font-mono">{{ diag.data.model }}</span></li>
+              <li>прокси: <span class="font-mono break-all">{{ diag.data.proxy }}</span></li>
+              <li v-if="diag.data.reachable !== null">
+                DashScope доступен:
+                <span class="font-mono">
+                  {{ diag.data.reachable ? `да (${diag.data.latencyMs} мс)` : 'НЕТ' }}
+                </span>
+              </li>
+              <li v-if="diag.data.error" class="text-rose-300">детали: {{ diag.data.error }}</li>
+            </ul>
+          </div>
+
+          <div
+            v-else-if="diag.state === 'error'"
+            class="text-xs flex-1 min-w-[280px] rounded border border-rose-700 bg-rose-950/40 text-rose-200 px-3 py-2"
+          >
+            <div class="font-semibold mb-1">❌ Backend недостижим</div>
+            <div>{{ diag.error }}</div>
+          </div>
+        </div>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
