@@ -42,9 +42,13 @@ const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api
 //      блокировки провайдера/корпоративный фаервол), доступность
 //      провайдера определяется сервером, а не браузером пользователя.
 // Адаптер и санитизация ключа в логах — backend/src/services/llm/dashscope.adapter.js.
-// Модель — Qwen3.6-Plus (deep-thinking-capable; в режиме enable_thinking=false
-// работает как обычный синхронный chat/completions, что и нужно для JSON-обвязки).
-const DASHSCOPE_MODEL  = 'qwen3.6-plus';
+// Имя модели задаётся ИСКЛЮЧИТЕЛЬНО на сервере через переменную окружения
+// DASHSCOPE_MODEL (см. .env / .env.example и dashscope.adapter.js →
+// DASHSCOPE_MODEL_DEFAULT). Фронт сознательно НЕ передаёт `model` в теле
+// запроса, чтобы избежать рассинхронизации (раньше здесь был хардкод
+// `qwen3.6-plus`, который перекрывал значение из .env и приводил к ошибке
+// «Model not found» на любых корректных конфигурациях). Если нужна другая
+// модель — меняйте только DASHSCOPE_MODEL в .env и перезапускайте backend.
 // Бюджет вывода модели. Поднят с 8192 → 16384, чтобы JSON-обвязка
 // (acf_fc_layout, schema-обёртки, повторение текста дословно) гарантированно
 // помещалась рядом с самим контентом и не приходила обрезанной.
@@ -1093,10 +1097,12 @@ function findMissingHeadings(inputHtml, outputArray) {
 async function callLlm({ systemPrompt, userPrompt }) {
   let response;
   try {
+    // Сознательно НЕ передаём `model`: backend подставит DASHSCOPE_MODEL из env
+    // (см. dashscope.adapter.js → DASHSCOPE_MODEL_DEFAULT). Так у имени модели
+    // остаётся ровно один источник истины — переменная окружения сервера.
     response = await api.post('/acf-json/dashscope', {
       systemPrompt,
       userPrompt,
-      model:       DASHSCOPE_MODEL,
       temperature: 0.1,
       max_tokens:  MAX_OUTPUT_TOKENS,
     }, {
