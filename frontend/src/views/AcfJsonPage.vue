@@ -107,6 +107,18 @@ const formError    = ref(''); // ошибки формы создания зад
 const selectedTaskId = ref(null);
 const selectedHtml   = ref('');
 
+// ── Ручной ввод HTML ─────────────────────────────────────────────────────
+// Если пользователь не выбрал готовую задачу из вкладок «SEO текст» / «Статья
+// в блог», он может вставить произвольный HTML/plain-text сюда и собрать
+// JSON напрямую. Полезно для одноразовой обработки текста, который ещё не
+// был прогнан через SEO-генератор/блог-pipeline (например, статьи из
+// внешних источников или старых заданий, не сохранённых в БД).
+//
+// Источник: source = 'manual'. Заголовок job'а формируется из первого
+// <h1>/<h2> или первых ~60 символов plain-текста — чтобы не показывать
+// «Задача #N» без контекста.
+const manualHtml = ref('');
+
 // Очередь задач формирования JSON. Каждая задача — это локальный фоновый
 // «job», обрабатываемый в браузере (LLM-вызов идёт через backend-прокси
 // /api/acf-json/dashscope). Состояния: queued → processing → done | error.
@@ -260,8 +272,19 @@ const htmlSize = computed(() => {
 });
 
 // Обратная совместимость со старым именем для шаблона.
-// Можно ли запустить новую задачу: HTML загружен и не пуст.
-const canCreateJob = computed(() => Boolean(selectedHtml.value && !loadingHtml.value));
+// Можно ли запустить новую задачу: либо HTML загружен из выбранной задачи,
+// либо пользователь вставил собственный HTML вручную (и не идёт фоновая
+// загрузка task-HTML). Достаточно одного непустого источника.
+const hasManualHtml = computed(() => Boolean(manualHtml.value && manualHtml.value.trim().length > 0));
+const effectiveHtml = computed(() => {
+  // Если выбрана задача — её HTML имеет приоритет (selectedHtml). Иначе —
+  // ручной ввод. Один путь источника, чтобы валидация/добавление job'а
+  // не дублировали логику.
+  if (selectedTask.value && selectedHtml.value) return selectedHtml.value;
+  if (hasManualHtml.value) return manualHtml.value;
+  return '';
+});
+const canCreateJob = computed(() => Boolean(effectiveHtml.value && !loadingHtml.value));
 
 // ── Загрузка задач ─────────────────────────────────────────────────────────
 let pollTimer = null;
@@ -349,29 +372,63 @@ async function selectTask(task) {
   selectedTaskId.value = task.key;
   selectedHtml.value   = '';
   formError.value      = '';
+  // При выборе готовой задачи очищаем поле ручного ввода: иначе у
+  // пользователя осталось бы непрозрачное поведение «вижу свой текст,
+  // а в JSON ушёл HTML задачи». Один источник правды на момент клика.
+  manualHtml.value     = '';
   loadingHtml.value    = true;
   try {
     if (task.source === 'seo') {
-      // SEO-генератор: HTML отдаётся ручкой /api/tasks/:id/result.
+      // SEO-генератор («SEO текст»): HTML отдаётся ручкой /api/tasks/:id/result.
       // Приоритет: отредактированный HTML (AI-Copilot) → исходный сгенерированный.
+      // Это РОВНО та же логика, что и в ResultPage.vue:45 — гарантирует, что
+      // в JSON уйдёт ровно тот текст, который видно пользователю на странице
+      // результата задачи (а не какой-то промежуточный/устаревший вариант).
       const data = await store.fetchResult(task.id);
       selectedHtml.value =
         data?.task?.full_html_edited || data?.task?.full_html || '';
     } else if (task.source === 'blog') {
-      // Блог-статья: HTML лежит в article_html (см. InfoArticlePage.vue:438).
-      // article_plain — fallback для plain-text копии (используется в JSON, если
-      // нужен plain).
+      // Блог-статья («Статья в блог»): HTML лежит в article_html
+      // (см. InfoArticlePage.vue:455 — там показывается тот же article_html
+      // через DOMPurify). Берём его дословно — генератор уже встроил в HTML
+      // обложку и интерлинки, и именно этот HTML должен уходить в JSON.
       const blogTask = await infoStore.getTask(task.id);
       selectedHtml.value = blogTask?.article_html || '';
     }
     if (!selectedHtml.value) {
-      formError.value = 'У выбранной задачи нет сгенерированного HTML-текста.';
+      formError.value =
+        'У выбранной задачи нет сгенерированного HTML-текста. '
+        + 'Возможно, генерация ещё не завершена или статья была удалена. '
+        + 'Можно вставить текст вручную в поле ниже.';
     }
   } catch (e) {
     formError.value = e.response?.data?.error || e.message || 'Не удалось загрузить HTML задачи';
   } finally {
     loadingHtml.value = false;
   }
+}
+
+// Сбросить выбор готовой задачи — чтобы пользователь мог явно перейти в
+// режим ручной вставки (в шаблоне есть кнопка «Вставить текст вручную»).
+function clearSelectedTask() {
+  selectedTaskId.value = '';
+  selectedHtml.value   = '';
+  formError.value      = '';
+}
+
+// Эвристический заголовок для job'а из ручного ввода: первый <h1>/<h2>,
+// иначе — первые ~60 символов plain-текста. Используется только для
+// отображения в очереди справа; в сам JSON заголовок не утекает.
+function deriveManualTitle(html) {
+  if (!html) return 'Ручной ввод';
+  const headingMatch = String(html).match(/<h[12][^>]*>([\s\S]*?)<\/h[12]>/i);
+  if (headingMatch) {
+    const stripped = headingMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (stripped) return stripped.slice(0, 80);
+  }
+  const plain = String(html).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!plain) return 'Ручной ввод';
+  return plain.slice(0, 60) + (plain.length > 60 ? '…' : '');
 }
 
 // ── Чанкование HTML ────────────────────────────────────────────────────────
@@ -1341,24 +1398,30 @@ ${[phrasesBlock, headingsBlock].filter(Boolean).join('\n\n')}`;
 function addJob() {
   formError.value = '';
 
-  if (!selectedTask.value) {
-    formError.value = 'Сначала выберите исходную задачу слева.';
-    return;
-  }
-  if (!selectedHtml.value) {
-    formError.value = 'У выбранной задачи нет HTML — выберите другую.';
+  // Источник: либо выбранная задача из «SEO текст»/«Статья в блог»,
+  // либо ручной ввод HTML (если задача не выбрана). Один из двух обязателен.
+  const isManual    = !selectedTask.value;
+  const sourceHtml  = effectiveHtml.value;
+
+  if (!sourceHtml) {
+    formError.value = isManual
+      ? 'Выберите задачу слева или вставьте HTML/текст в поле «Свой текст».'
+      : 'У выбранной задачи нет HTML — выберите другую или вставьте текст вручную.';
     return;
   }
 
   const job = {
     id:           nextJobId++,
     // Происхождение исходной задачи. Сохраняется в localStorage, чтобы
-    // после reload было видно, откуда пришёл HTML (SEO-генератор / блог-статья).
-    source:       selectedTask.value.source,        // 'seo' | 'blog'
-    sourceTaskId: selectedTask.value.id,
-    title:        selectedTask.value.title || `Задача #${selectedTask.value.id}`,
-    sourceHtml:   selectedHtml.value, // снимок исходника на момент создания
-    sourceChars:  selectedHtml.value.length,
+    // после reload было видно, откуда пришёл HTML (SEO-генератор / блог-
+    // статья / ручная вставка).
+    source:       isManual ? 'manual' : selectedTask.value.source,  // 'seo' | 'blog' | 'manual'
+    sourceTaskId: isManual ? null : selectedTask.value.id,
+    title:        isManual
+      ? deriveManualTitle(sourceHtml)
+      : (selectedTask.value.title || `Задача #${selectedTask.value.id}`),
+    sourceHtml:   sourceHtml, // снимок исходника на момент создания
+    sourceChars:  sourceHtml.length,
     // Режим сборки фиксируется на МОМЕНТ СОЗДАНИЯ задачи: после этого можно
     // менять глобальный jobMode для следующих задач, не задевая уже стоящие
     // в очереди (и сохранённые в localStorage между сессиями).
@@ -1378,6 +1441,13 @@ function addJob() {
   };
   // Новые задачи — наверх списка, чтобы пользователь сразу видел свежесозданное.
   jobs.value.unshift(job);
+
+  // После постановки в очередь очищаем поле ручного ввода, чтобы повторный
+  // клик «Создать задачу JSON» не дублировал ту же задачу по случайности.
+  // Выбор задачи слева НЕ сбрасываем — он живёт до явного перевыбора.
+  if (isManual) {
+    manualHtml.value = '';
+  }
 
   // Запускаем фоновый процессор (если ещё не крутится).
   runQueue();
@@ -1653,10 +1723,12 @@ function fmtCost(rub) {
           <span>🧩</span> JSON
         </h1>
         <p class="text-sm text-gray-500 mt-1">
-          Многозадачник: выбираете готовую задачу (SEO-генератор или блог-статью),
-          нажимаете «Создать задачу JSON», её HTML уходит в очередь и обрабатывается
-          в фоне моделью Qwen3.6-Plus через DashScope (раскладывается по контейнерам ACF
-          Flexible Content). Готовый JSON открывается в модальном окне с кнопкой
+          Многозадачник: выбираете готовую задачу из вкладок «SEO текст» или
+          «Статья в блог» (либо вставляете свой HTML/текст вручную),
+          нажимаете «Создать задачу JSON», её HTML уходит в очередь и
+          обрабатывается в фоне моделью Qwen3.6-Plus через DashScope или
+          программным сборщиком (раскладывается по контейнерам ACF Flexible
+          Content). Готовый JSON открывается в модальном окне с кнопкой
           копирования. Параллельно можно поставить несколько задач.
         </p>
 
@@ -1795,22 +1867,68 @@ function fmtCost(rub) {
             </ul>
           </div>
 
-          <!-- Превью HTML выбранной задачи + переключатель режима + кнопка «Создать задачу JSON» -->
-          <div v-if="selectedTask" class="card">
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="text-sm font-semibold text-white">HTML выбранной задачи</h3>
-              <span v-if="selectedHtml" class="text-xs text-gray-500">
-                {{ htmlSize.chars.toLocaleString('ru-RU') }} симв. · {{ htmlSize.kb }} KB
-              </span>
+          <!-- Превью HTML выбранной задачи + ручной ввод + переключатель режима + кнопка -->
+          <div class="card">
+            <div v-if="selectedTask">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-semibold text-white">
+                  HTML выбранной задачи
+                  <span
+                    :class="[
+                      'ml-2 inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide align-middle',
+                      selectedTask.source === 'blog'
+                        ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700'
+                        : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
+                    ]"
+                  >{{ selectedTask.source === 'blog' ? 'Статья в блог' : 'SEO текст' }}</span>
+                </h3>
+                <div class="flex items-center gap-3">
+                  <span v-if="selectedHtml" class="text-xs text-gray-500">
+                    {{ htmlSize.chars.toLocaleString('ru-RU') }} симв. · {{ htmlSize.kb }} KB
+                  </span>
+                  <button
+                    type="button"
+                    class="text-xs text-gray-500 hover:text-gray-300 underline underline-offset-2"
+                    @click="clearSelectedTask"
+                    title="Снять выбор задачи и переключиться на ручной ввод"
+                  >Снять выбор</button>
+                </div>
+              </div>
+              <div v-if="loadingHtml" class="text-sm text-gray-500 py-6 text-center">
+                Загрузка HTML…
+              </div>
+              <pre
+                v-else-if="selectedHtml"
+                class="text-xs text-gray-400 bg-gray-950 border border-gray-800 rounded-lg p-3 max-h-64 overflow-auto whitespace-pre-wrap break-words"
+              >{{ htmlPreview }}</pre>
+              <p v-else class="text-sm text-gray-500">Нет HTML.</p>
             </div>
-            <div v-if="loadingHtml" class="text-sm text-gray-500 py-6 text-center">
-              Загрузка HTML…
+
+            <!-- Ручной ввод HTML/текста: альтернатива выбору готовой задачи.
+                 Показываем ВСЕГДА, но визуально ослабляем, если задача уже
+                 выбрана (тогда поле не используется и подсказка это поясняет). -->
+            <div :class="selectedTask ? 'mt-4 border-t border-gray-800 pt-3 opacity-70' : ''">
+              <div class="flex items-center justify-between mb-1.5">
+                <h3 class="text-sm font-semibold text-white">
+                  {{ selectedTask ? 'Свой текст (не используется, пока выбрана задача)' : 'Свой текст' }}
+                </h3>
+                <span v-if="hasManualHtml" class="text-xs text-gray-500">
+                  {{ manualHtml.length.toLocaleString('ru-RU') }} симв.
+                </span>
+              </div>
+              <p class="text-[11px] text-gray-500 mb-2">
+                Если ни одна задача из вкладок «SEO текст» и «Статья в блог» не подходит,
+                вставьте сюда HTML (или plain-текст) и нажмите «Создать задачу JSON».
+                Сборка пройдёт ровно так же, как для текста из задачи.
+              </p>
+              <textarea
+                v-model="manualHtml"
+                :disabled="Boolean(selectedTask)"
+                rows="6"
+                placeholder="Вставьте сюда HTML или текст статьи…"
+                class="w-full text-xs text-gray-200 bg-gray-950 border border-gray-800 rounded-lg p-3 font-mono focus:border-indigo-600 focus:outline-none resize-y"
+              ></textarea>
             </div>
-            <pre
-              v-else-if="selectedHtml"
-              class="text-xs text-gray-400 bg-gray-950 border border-gray-800 rounded-lg p-3 max-h-64 overflow-auto whitespace-pre-wrap break-words"
-            >{{ htmlPreview }}</pre>
-            <p v-else class="text-sm text-gray-500">Нет HTML.</p>
 
             <!-- Режим сборки JSON. По умолчанию «Программный»: гарантирует
                  «текст не меняется» байт-в-байт и не ходит в DashScope, что
@@ -1877,7 +1995,7 @@ function fmtCost(rub) {
               v-if="!jobs.length"
               class="flex-1 flex flex-col items-center justify-center text-gray-600 text-sm italic border-2 border-dashed border-gray-800 rounded-lg p-8 min-h-[300px]"
             >
-              Здесь появятся задачи. Выберите слева исходный текст (SEO-генератор или Блог-статья) и нажмите «Создать задачу JSON».
+              Здесь появятся задачи. Выберите слева исходный текст (SEO-генератор или Блог-статья) либо вставьте свой HTML/текст в поле «Свой текст» и нажмите «Создать задачу JSON».
             </div>
 
             <ul v-else class="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
@@ -1901,9 +2019,11 @@ function fmtCost(rub) {
                           'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
                           j.source === 'blog'
                             ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700'
-                            : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
+                            : j.source === 'manual'
+                              ? 'bg-slate-800/80 text-slate-200 border border-slate-600'
+                              : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
                         ]"
-                      >{{ j.source === 'blog' ? 'Блог' : 'SEO' }}</span>
+                      >{{ j.source === 'blog' ? 'Блог' : (j.source === 'manual' ? 'Свой текст' : 'SEO') }}</span>
                       <!--
                         Бейдж режима сборки: пользователю важно сразу видеть,
                         какая задача шла программно, а какая через LLM —
