@@ -930,7 +930,31 @@ function readStreamToString(stream, maxBytes = 4000) {
   });
 }
 
-module.exports = { callGemini, streamGenerate, createCachedContent, deleteCachedContent };
+/**
+ * getGeminiProxyUrls — публичный геттер списка нормализованных GEMINI_PROXY_*
+ * URL-ов (основной + _2…_5 + HTTPS_PROXY). Используется адаптерами, которым
+ * нужна та же fallback-цепочка, что и у текстового Gemini (например,
+ * Nano Banana Pro для генерации обложек), чтобы пользователь, настроивший
+ * прокси один раз через GEMINI_PROXY_*, не получал «прокси не настроен» для
+ * генерации изображений.
+ *
+ * @returns {string[]} список нормализованных URL (может быть пустым)
+ */
+function getGeminiProxyUrls() {
+  // Возвращаем копию, чтобы внешний код не мутировал внутренний список.
+  return PROXY_URLS.slice();
+}
+
+module.exports = {
+  callGemini,
+  streamGenerate,
+  createCachedContent,
+  deleteCachedContent,
+  // Прокси-утилиты — экспортируем, чтобы другие адаптеры (image-gen)
+  // переиспользовали ту же цепочку резолвинга и нормализацию.
+  normalizeProxyUrl,
+  getGeminiProxyUrls,
+};
 
 // ────────────────────────────────────────────────────────────────────
 // Gemini Context Caching API (`cachedContents`)
