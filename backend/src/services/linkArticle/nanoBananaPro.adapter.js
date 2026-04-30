@@ -5,23 +5,33 @@
  *
  * Генерация изображений через Google Generative API, модель по умолчанию
  * `gemini-3-pro-image-preview` (alias «Nano Banana Pro»). Используется
- * ИСКЛЮЧИТЕЛЬНО генератором ссылочной статьи — никакие другие модули
+ * генератором ссылочной статьи И генератором информационной статьи в блог
+ * (последний слайсит ответ до 1 обложки) — никакие другие модули
  * существующего пайплайна на него не завязаны.
  *
  * Ключ берётся из того же GEMINI_API_KEY (см. secrets handling в репозитории):
  * кросс-проектный стандарт — один ключ на все Gemini-сервисы.
  *
  * Прокси обязателен (parity с gemini.adapter.js / grok.adapter.js).
- * Приоритет резолвинга:
- *   1) LINK_ARTICLE_IMAGE_PROXY_URL
- *   2) LLM_PROXY_URL / LLM_PROXY_HOST+PORT (+USER/PASS)
- *   3) GEMINI_PROXY_URL / GEMINI_PROXY_HOST+PORT
- *   4) HTTPS_PROXY / https_proxy
- * Если ни один прокси не задан — выкидываем ошибку (как и остальные адаптеры).
+ * Резолвинг переиспользует gemini.adapter.js, чтобы пользователь, настроивший
+ * прокси один раз для текстового Gemini (включая запасные слоты
+ * `GEMINI_PROXY_URL_2 … _5` и провайдер-формат `login:password:ip:port`),
+ * автоматически получал работающую генерацию обложек. Полная цепочка:
+ *   1) LINK_ARTICLE_IMAGE_PROXY_URL                       (узкая настройка для image-gen)
+ *   2) LLM_PROXY_URL / LLM_PROXY_HOST+PORT (+USER/PASS)   (общий канал для всех LLM)
+ *   3) GEMINI_PROXY_URL[''/_2/_3/_4/_5] / GEMINI_PROXY_HOST+PORT (+USER/PASS)
+ *      — через getGeminiProxyUrls() (та же нормализация и тот же fallback,
+ *      что и у текстовых вызовов Gemini)
+ *   4) HTTPS_PROXY / https_proxy                          (системная переменная)
+ * Если ни один прокси не задан / ни один не парсится — выкидываем ошибку.
  */
 
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const {
+  normalizeProxyUrl,
+  getGeminiProxyUrls,
+} = require('../llm/gemini.adapter');
 
 const IMAGE_MODEL = process.env.LINK_ARTICLE_IMAGE_MODEL || 'gemini-3-pro-image-preview';
 const GEMINI_BASE_URL =
@@ -42,47 +52,75 @@ function requireGeminiApiKey() {
   return k;
 }
 
-function resolveImageProxyUrl() {
-  // 1. Специфичный для Link-Article image-generation прокси
-  if (process.env.LINK_ARTICLE_IMAGE_PROXY_URL) return process.env.LINK_ARTICLE_IMAGE_PROXY_URL.trim();
+/**
+ * Возвращает упорядоченный список (без дубликатов) кандидатов прокси-URL для
+ * генерации изображений. Каждый элемент уже нормализован к виду
+ * `http(s)://[user:pass@]host:port` через normalizeProxyUrl(), поэтому может
+ * быть напрямую передан в HttpsProxyAgent.
+ */
+function resolveImageProxyUrls() {
+  const candidates = [];
 
-  // 2. Общий LLM_PROXY_*
-  if (process.env.LLM_PROXY_URL) return process.env.LLM_PROXY_URL.trim();
-  if (process.env.LLM_PROXY_HOST && process.env.LLM_PROXY_PORT) {
+  // 1. Специфичный для image-gen прокси (узкая настройка под Link/Info-Article).
+  if (process.env.LINK_ARTICLE_IMAGE_PROXY_URL) {
+    candidates.push(process.env.LINK_ARTICLE_IMAGE_PROXY_URL.trim());
+  }
+
+  // 2. Общий LLM_PROXY_* — рекомендованный «один источник для всех LLM».
+  if (process.env.LLM_PROXY_URL) {
+    candidates.push(process.env.LLM_PROXY_URL.trim());
+  } else if (process.env.LLM_PROXY_HOST && process.env.LLM_PROXY_PORT) {
     const u = process.env.LLM_PROXY_USER || '';
     const p = process.env.LLM_PROXY_PASS || '';
     const proto = process.env.LLM_PROXY_PROTO || 'http';
     if (u && p) {
-      return `${proto}://${encodeURIComponent(u)}:${encodeURIComponent(p)}@${process.env.LLM_PROXY_HOST}:${process.env.LLM_PROXY_PORT}`;
+      candidates.push(
+        `${proto}://${encodeURIComponent(u)}:${encodeURIComponent(p)}@${process.env.LLM_PROXY_HOST}:${process.env.LLM_PROXY_PORT}`
+      );
+    } else {
+      candidates.push(`${proto}://${process.env.LLM_PROXY_HOST}:${process.env.LLM_PROXY_PORT}`);
     }
-    return `${proto}://${process.env.LLM_PROXY_HOST}:${process.env.LLM_PROXY_PORT}`;
   }
 
-  // 3. GEMINI_PROXY_* (тот же прокси, что и текстовый Gemini)
-  if (process.env.GEMINI_PROXY_URL) return process.env.GEMINI_PROXY_URL.trim();
-  if (process.env.GEMINI_PROXY_HOST && process.env.GEMINI_PROXY_PORT) {
-    const u = process.env.GEMINI_PROXY_USER || '';
-    const p = process.env.GEMINI_PROXY_PASS || '';
-    const proto = process.env.GEMINI_PROXY_PROTO || 'http';
-    if (u && p) {
-      return `${proto}://${encodeURIComponent(u)}:${encodeURIComponent(p)}@${process.env.GEMINI_PROXY_HOST}:${process.env.GEMINI_PROXY_PORT}`;
-    }
-    return `${proto}://${process.env.GEMINI_PROXY_HOST}:${process.env.GEMINI_PROXY_PORT}`;
+  // 3. Все GEMINI_PROXY_* (основной + _2/_3/_4/_5) через шаренный резолвер
+  //    текстового адаптера. Это покрывает:
+  //      - провайдер-формат GEMINI_PROXY_URL="login:password:ip:port"
+  //        (нормализуется внутрь корректного URL),
+  //      - запасные слоты GEMINI_PROXY_URL_2 … _5,
+  //      - HTTPS_PROXY как нижний системный уровень (он же добавляется ниже,
+  //        но гарантированно попадает и через getGeminiProxyUrls()).
+  for (const u of getGeminiProxyUrls()) {
+    if (u) candidates.push(u);
   }
 
-  // 4. Системный HTTPS_PROXY
-  return (process.env.HTTPS_PROXY || process.env.https_proxy || '').trim();
+  // 4. Системный HTTPS_PROXY — на случай, если getGeminiProxyUrls() пуст
+  //    (например, ни один GEMINI_PROXY_* не задан, но HTTPS_PROXY есть).
+  const sys = (process.env.HTTPS_PROXY || process.env.https_proxy || '').trim();
+  if (sys) candidates.push(sys);
+
+  // Нормализация + дедупликация (сохраняем порядок).
+  const seen = new Set();
+  const out = [];
+  for (const raw of candidates) {
+    const norm = normalizeProxyUrl(raw);
+    if (norm && !seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+  }
+  return out;
 }
 
 function buildProxyAgent() {
-  const url = resolveImageProxyUrl();
-  if (!url) return null;
-  try {
-    return new HttpsProxyAgent(url);
-  } catch (err) {
-    console.warn(`[nanoBananaPro] Неверный прокси URL: ${err.message}`);
-    return null;
+  const urls = resolveImageProxyUrls();
+  for (const url of urls) {
+    try {
+      return new HttpsProxyAgent(url);
+    } catch (err) {
+      console.warn(`[nanoBananaPro] Неверный прокси URL — пропускаем: ${err.message}`);
+    }
   }
+  return null;
 }
 
 /**
@@ -106,7 +144,9 @@ async function generateImage(prompt, opts = {}) {
   const agent  = buildProxyAgent();
   if (!agent) {
     throw new Error(
-      'Nano Banana Pro: прокси не настроен. Задайте GEMINI_PROXY_* / LLM_PROXY_* в .env.'
+      'Nano Banana Pro: прокси не настроен. Задайте один из: ' +
+      'LINK_ARTICLE_IMAGE_PROXY_URL / LLM_PROXY_* / GEMINI_PROXY_* (включая запасные _2…_5) ' +
+      '/ HTTPS_PROXY в .env. Образец — .env.example.'
     );
   }
 
