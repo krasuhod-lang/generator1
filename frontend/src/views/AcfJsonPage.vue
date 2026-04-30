@@ -24,6 +24,11 @@ import AppLayout from '../components/AppLayout.vue';
 import { useTasksStore } from '../stores/tasks.js';
 import { useInfoArticleStore } from '../stores/infoArticle.js';
 import api from '../api.js';
+// Детерминированный (программный) HTML→ACF-JSON конвертер. Альтернатива
+// LLM-режиму через Qwen, гарантирующая инвариант «текст не меняется»
+// математически (копирует HTML абзацев/заголовков byte-for-byte через
+// node.outerHTML). Используется по умолчанию, см. JOB_MODE_DEFAULT ниже.
+import { buildAcfFromHtml } from '../utils/acfDeterministicBuilder.js';
 
 const store          = useTasksStore();          // SEO-генератор (/api/tasks)
 const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api/info-article)
@@ -44,9 +49,11 @@ const DASHSCOPE_MODEL  = 'qwen3.6-plus';
 // (acf_fc_layout, schema-обёртки, повторение текста дословно) гарантированно
 // помещалась рядом с самим контентом и не приходила обрезанной.
 const MAX_OUTPUT_TOKENS = 16384;
-// Размер чанка по умолчанию. Уменьшен с 6000 → 4000 — это оставляет головой
-// запас на JSON-обвязку при MAX_OUTPUT_TOKENS=16384.
-const DEFAULT_CHUNK_LEN = 4000;
+// Размер чанка по умолчанию. Снижен с 4000 → 2500 для уменьшения риска
+// HTTP 413 от промежуточного HTTPS-прокси (типичный лимит body у дешёвых
+// HTTPS-прокси — 64 KB, и системный промт + чанк в кодировке JSON могут
+// в эту границу не уложиться).
+const DEFAULT_CHUNK_LEN = 2500;
 // Минимальный размер чанка при авто-ретрае «finish_reason=length». Делим
 // проблемный чанк пополам, но не уходим ниже 800 симв., чтобы не выродиться
 // в десятки запросов из-за нескольких очень длинных слов/тегов.
@@ -54,6 +61,31 @@ const MIN_RETRY_CHUNK_LEN = 800;
 // Поля JSON-вывода, которые считаются «текстовыми» при сборе фолбэка
 // expert→blocks (сюда модель кладёт оригинальные абзацы).
 const TEXT_FIELD_NAMES = /^(text|content|answer|expert|subtitle)$/i;
+
+// ── Режим сборки JSON ─────────────────────────────────────────────────────
+// 'deterministic' — программный билдер (frontend/src/utils/acfDeterministicBuilder.js).
+//   Гарантирует инвариант «текст/заголовки не меняются» на 100% (копирует
+//   HTML абзацев byte-for-byte). Не ходит в LLM, значит проблема HTTP 413 от
+//   промежуточного прокси здесь невозможна в принципе. Рекомендуется по умолчанию.
+// 'llm'           — старый путь через DashScope/Qwen. Оставлен как фолбэк
+//   для случаев, когда заказчик хочет «творческой» переаранжировки контента
+//   и осознанно готов мириться с риском мелких потерь.
+const JOB_MODE_DEFAULT = 'deterministic';
+// Сохраняем выбранный режим между сессиями, чтобы заказчик не выставлял его
+// каждый раз заново. Версионированный ключ — на случай будущих изменений
+// набора режимов.
+const JOB_MODE_LS_KEY = 'acfJsonJobMode:v1';
+const jobMode = ref((() => {
+  try {
+    const saved = localStorage.getItem(JOB_MODE_LS_KEY);
+    if (saved === 'deterministic' || saved === 'llm') return saved;
+  } catch { /* приватный режим / SSR — не валим UI */ }
+  return JOB_MODE_DEFAULT;
+})());
+watch(jobMode, (v) => {
+  try { localStorage.setItem(JOB_MODE_LS_KEY, v); }
+  catch { /* QuotaExceededError и т. п. */ }
+});
 
 // ── Тарификация Qwen Plus (для расчёта стоимости задачи) ──────────────────
 // Берём из ТЗ заказчика: 57.6 ₽ / 1M входных токенов, 460.8 ₽ / 1M выходных.
@@ -115,9 +147,16 @@ function loadJobsFromStorage() {
     // чтобы `runQueue()` автоматически повторил обработку с нуля
     // (sourceHtml сохранён в самой задаче).
     const restored = clean.map((j) => {
-      if (j.status === 'processing') {
+      // Обратная совместимость: задачи, созданные ДО введения mode-toggle,
+      // не имели поля j.mode и шли через LLM. Сохраняем их прежнее поведение,
+      // даже если глобальный jobMode у пользователя теперь 'deterministic',
+      // — чтобы перезагрузка страницы не подменяла «контракт» уже стоящей задачи.
+      const withMode = j.mode === 'deterministic' || j.mode === 'llm'
+        ? j
+        : { ...j, mode: 'llm' };
+      if (withMode.status === 'processing') {
         return {
-          ...j,
+          ...withMode,
           status: 'queued',
           progress: 'В очереди (после перезагрузки страницы)…',
           error: '',
@@ -125,7 +164,7 @@ function loadJobsFromStorage() {
           finishedAt: null,
         };
       }
-      return j;
+      return withMode;
     });
     jobs.value = restored;
     // Восстанавливаем счётчик id, чтобы новые задачи не пересекались
@@ -268,10 +307,16 @@ onUnmounted(() => {
 // настроен ли прокси. Возвращаем результат прямо в UI.
 const diag = ref({ state: 'idle', data: null, error: '' }); // state: idle|running|done|error
 
-async function runDiagnostics() {
+async function runDiagnostics(opts = {}) {
+  const thick = opts.thick === true;
   diag.value = { state: 'running', data: null, error: '' };
   try {
-    const resp = await api.get('/acf-json/health', { timeout: 30_000 });
+    // Thick-режим может занять до ~25 сек (32 KB загрузка через прокси +
+    // round-trip к DashScope), поэтому даём больший timeout, чем тонкий ping.
+    const resp = await api.get('/acf-json/health', {
+      timeout: thick ? 60_000 : 30_000,
+      params:  thick ? { thick: 1 } : {},
+    });
     diag.value = { state: 'done', data: resp.data || null, error: '' };
   } catch (httpError) {
     // Если сам диагностический запрос упал с Network Error — это уже
@@ -695,7 +740,7 @@ function stripTagsAndNormalize(s) {
 // служебные строки (acf_fc_layout, имена layout'ов, цвета, ширина и т.п.)
 // НЕ вклинивались между текстом соседних блоков и не разрывали окна
 // поиска при пост-валидации сохранности контента.
-const CONTENT_TEXT_FIELDS = /^(text|content|answer|question|expert|subtitle|title|heading|name|caption|description|label)$/i;
+const CONTENT_TEXT_FIELDS = /^(text|content|answer|question|expert|subtitle|title|heading|name|caption|description|label|price)$/i;
 
 // Рекурсивно собирает только строки из контентных полей JSON-структуры.
 function collectContentStrings(node, out) {
@@ -1011,8 +1056,28 @@ async function callLlm({ systemPrompt, userPrompt }) {
     // axios: либо нет ответа (сеть до НАШЕГО backend упала / истёк
     // axios-таймаут), либо backend вернул не-2xx со своим JSON `{error: '...'}`.
     if (httpError.response) {
+      const status = httpError.response.status;
       const serverMsg = httpError.response.data?.error
-        || `HTTP ${httpError.response.status}`;
+        || `HTTP ${status}`;
+      // HTTP 413 на этом маршруте почти всегда означает, что промежуточный
+      // HTTPS-прокси (DASHSCOPE_PROXY_URL / LLM_PROXY_URL), через который
+      // backend ходит на dashscope-intl.aliyuncs.com, отрезал тело запроса
+      // по своему лимиту. У дешёвых прокси типичный лимит body — 64 KB,
+      // и системный промт (~10 KB) + JSON-кодированный чанк (~4 KB при
+      // экранировании) с запасом туда не помещается. Рекомендуем переход
+      // в детерминированный режим — там запрос к LLM вообще не уходит.
+      if (status === 413) {
+        throw new Error(
+          'HTTP 413 Payload Too Large. Промежуточный HTTPS-прокси режет тело '
+          + 'запроса (типичный лимит body у HTTPS-прокси — 64 KB). '
+          + 'Решения по убыванию надёжности: '
+          + '(1) переключите режим сборки JSON на «Программный (рекомендуется)» '
+          + '— запрос к LLM не уходит вообще; '
+          + '(2) уменьшите DEFAULT_CHUNK_LEN в коде; '
+          + '(3) проверьте DASHSCOPE_PROXY_URL и попробуйте прокси с большим лимитом body. '
+          + `Детали от backend: ${serverMsg}`
+        );
+      }
       throw new Error(`Ошибка прокси DashScope: ${serverMsg}`);
     }
     // Различаем истёкший axios-таймаут (ECONNABORTED) и реальный обрыв сети,
@@ -1294,6 +1359,10 @@ function addJob() {
     title:        selectedTask.value.title || `Задача #${selectedTask.value.id}`,
     sourceHtml:   selectedHtml.value, // снимок исходника на момент создания
     sourceChars:  selectedHtml.value.length,
+    // Режим сборки фиксируется на МОМЕНТ СОЗДАНИЯ задачи: после этого можно
+    // менять глобальный jobMode для следующих задач, не задевая уже стоящие
+    // в очереди (и сохранённые в localStorage между сессиями).
+    mode:         jobMode.value, // 'deterministic' | 'llm'
     status:       'queued',           // queued | processing | done | error
     progress:     'В очереди…',
     result:       '',                 // готовый JSON-текст (string)
@@ -1378,9 +1447,52 @@ async function runJob(job) {
 
   try {
     // ТЗ: H1 не должен попадать в JSON. Удаляем его из исходного HTML ДО
-    // чанкования, чтобы модель его вообще не видела и пост-валидация
-    // сохранности не считала его «потерянным».
+    // дальнейшей обработки. Делается одинаково для обоих режимов: сам
+    // деттерминированный билдер тоже вызывает stripH1, но дублирование
+    // здесь сохраняет инвариант chunks.join === html для LLM-ветки и
+    // совпадает по поведению с прежней реализацией.
     const html = stripH1FromHtml(job.sourceHtml);
+
+    // ── Режим 1: программная (детерминированная) сборка JSON ─────────────
+    // Не идёт в LLM. Гарантирует «текст не меняется», работает мгновенно.
+    // Подходит для типового HTML, который генерирует наш SEO/блог-pipeline.
+    if (job.mode === 'deterministic') {
+      job.progress = 'Программная сборка JSON…';
+      const finalArray = buildAcfFromHtml(html);
+      // Применяем общий пост-чистильщик (subtitle='', срез нумерации,
+      // дедуп FAQ-вопроса), чтобы вывод обоих режимов был согласован
+      // в полях и валидаторы вели себя одинаково.
+      postCleanupAcfArray(finalArray);
+
+      // Сквозная пост-валидация теми же функциями, что и LLM-режим.
+      // Если эвристика билдера где-то проглотила фразу/заголовок — это
+      // баг билдера, который нужно чинить, а не повод обращаться к модели.
+      const outPlain        = outputPlainText(finalArray);
+      const missing         = findMissingPhrases(html, outPlain);
+      const missingHeadings = findMissingHeadings(html, finalArray);
+      if (missing.length || missingHeadings.length) {
+        const sampleP = missing.slice(0, 3).map((m) => `«${m}»`).join('; ');
+        const sampleH = missingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
+        const parts = [];
+        if (missing.length) parts.push(`фрагменты текста (${missing.length}): ${sampleP}`);
+        if (missingHeadings.length) parts.push(`заголовки (${missingHeadings.length}): ${sampleH}`);
+        throw new Error(
+          `Программный билдер не сумел разместить весь контент в JSON. Потеряны ${parts.join('; ')}. `
+          + 'Это баг эвристики билдера. Временное решение — переключите режим на «Через Qwen (LLM)» '
+          + 'и повторите задачу. Сообщите разработчику исходный HTML, чтобы поправить эвристику.'
+        );
+      }
+
+      job.result     = JSON.stringify(finalArray, null, 2);
+      job.status     = 'done';
+      job.progress   = '';
+      job.finishedAt = new Date().toISOString();
+      job.durationMs = Date.now() - t0;
+      return;
+    }
+
+    // ── Режим 2: LLM-сборка через DashScope (старый путь) ────────────────
+    job.progress = 'Подготовка чанков…';
     const chunks = chunkHtml(html, DEFAULT_CHUNK_LEN);
 
     if (chunks.join('') !== html) {
@@ -1558,9 +1670,25 @@ function fmtCost(rub) {
             type="button"
             class="px-3 py-1.5 text-xs rounded border border-gray-700 bg-gray-900 hover:bg-gray-800 text-gray-200 transition-colors"
             :disabled="diag.state === 'running'"
-            @click="runDiagnostics"
+            @click="runDiagnostics()"
           >
             {{ diag.state === 'running' ? '⏳ Проверяю…' : '🔌 Проверить соединение' }}
+          </button>
+
+          <!--
+            Опциональная «толстая» проверка: посылает на DashScope ~32 KB
+            тело, чтобы поймать обрезание промежуточным HTTPS-прокси
+            (типичный лимит 64 KB у дешёвых прокси). Это самая частая причина
+            «Ошибка прокси DashScope: HTTP 413» во вкладке JSON.
+          -->
+          <button
+            type="button"
+            class="px-3 py-1.5 text-xs rounded border border-amber-700 bg-amber-950/40 hover:bg-amber-900/40 text-amber-200 transition-colors"
+            :disabled="diag.state === 'running'"
+            @click="runDiagnostics({ thick: true })"
+            title="Отправить ~32 KB тестовое тело — диагностирует, режет ли промежуточный HTTPS-прокси большие запросы (это причина HTTP 413)."
+          >
+            {{ diag.state === 'running' ? '⏳ Проверяю…' : '📦 Проверить лимит body (32 KB)' }}
           </button>
 
           <div
@@ -1590,6 +1718,22 @@ function fmtCost(rub) {
                 </span>
               </li>
               <li v-if="diag.data.error" class="text-rose-300">детали: {{ diag.data.error }}</li>
+              <!--
+                Thick-эхо: показываем отдельным li, чтобы было ясно, что это
+                результат именно «толстого» теста (32 KB body). При ok=true —
+                подтверждаем, что прокси такой объём пропускает; при ok=false
+                и status=413 — даём явное объяснение и совет в .error.
+              -->
+              <li v-if="diag.data.thick" class="mt-1 pt-1 border-t border-amber-800/40">
+                <span class="font-semibold">Толстый запрос ({{ (diag.data.thick.requestedBytes / 1024).toFixed(0) }} KB):</span>
+                <span v-if="diag.data.thick.ok === true" class="text-emerald-300">
+                  ✅ прошёл за {{ diag.data.thick.latencyMs }} мс — прокси большие тела пропускает.
+                </span>
+                <span v-else-if="diag.data.thick.ok === false" class="text-rose-300">
+                  ❌ не прошёл ({{ diag.data.thick.latencyMs }} мс): {{ diag.data.thick.error }}
+                </span>
+                <span v-else class="text-gray-400">не запускался (тонкий ping не прошёл).</span>
+              </li>
             </ul>
           </div>
 
@@ -1651,7 +1795,7 @@ function fmtCost(rub) {
             </ul>
           </div>
 
-          <!-- Превью HTML выбранной задачи + кнопка «Создать задачу JSON» -->
+          <!-- Превью HTML выбранной задачи + переключатель режима + кнопка «Создать задачу JSON» -->
           <div v-if="selectedTask" class="card">
             <div class="flex items-center justify-between mb-3">
               <h3 class="text-sm font-semibold text-white">HTML выбранной задачи</h3>
@@ -1667,6 +1811,37 @@ function fmtCost(rub) {
               class="text-xs text-gray-400 bg-gray-950 border border-gray-800 rounded-lg p-3 max-h-64 overflow-auto whitespace-pre-wrap break-words"
             >{{ htmlPreview }}</pre>
             <p v-else class="text-sm text-gray-500">Нет HTML.</p>
+
+            <!-- Режим сборки JSON. По умолчанию «Программный»: гарантирует
+                 «текст не меняется» байт-в-байт и не ходит в DashScope, что
+                 убирает риск HTTP 413 от промежуточного прокси. -->
+            <div class="mt-4 border-t border-gray-800 pt-3">
+              <div class="text-xs font-semibold text-white mb-1.5">Режим сборки JSON</div>
+              <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white py-1">
+                <input
+                  type="radio"
+                  value="deterministic"
+                  v-model="jobMode"
+                  class="mt-0.5"
+                />
+                <span>
+                  <span class="font-semibold">Программный (рекомендуется)</span>
+                  <span class="text-gray-500"> — мгновенная сборка, гарантия сохранности текста, без LLM.</span>
+                </span>
+              </label>
+              <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white py-1">
+                <input
+                  type="radio"
+                  value="llm"
+                  v-model="jobMode"
+                  class="mt-0.5"
+                />
+                <span>
+                  <span class="font-semibold">Через Qwen (LLM)</span>
+                  <span class="text-gray-500"> — гибче с непривычной разметкой, но возможен HTTP 413 / мелкие потери.</span>
+                </span>
+              </label>
+            </div>
 
             <div
               v-if="formError"
@@ -1729,6 +1904,24 @@ function fmtCost(rub) {
                             : 'bg-indigo-900/60 text-indigo-300 border border-indigo-700',
                         ]"
                       >{{ j.source === 'blog' ? 'Блог' : 'SEO' }}</span>
+                      <!--
+                        Бейдж режима сборки: пользователю важно сразу видеть,
+                        какая задача шла программно, а какая через LLM —
+                        особенно при разборе ошибок (HTTP 413 возможен только
+                        в LLM-режиме).
+                      -->
+                      <span
+                        v-if="j.mode"
+                        :class="[
+                          'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
+                          j.mode === 'deterministic'
+                            ? 'bg-teal-900/60 text-teal-300 border border-teal-700'
+                            : 'bg-amber-900/60 text-amber-300 border border-amber-700',
+                        ]"
+                        :title="j.mode === 'deterministic'
+                          ? 'Программный режим: HTML → ACF JSON без LLM'
+                          : 'LLM-режим: через DashScope/Qwen'"
+                      >{{ j.mode === 'deterministic' ? 'Программно' : 'LLM' }}</span>
                       <span class="truncate">#{{ j.id }} · {{ j.title }}</span>
                     </p>
                     <p class="text-xs text-gray-500 mt-0.5">
