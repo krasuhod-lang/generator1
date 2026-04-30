@@ -45,19 +45,89 @@ const MIN_SEMANTIC_SCORE = (() => {
   return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.18;
 })();
 // Глобальный коридор: сколько коммерческих ссылок должно быть во всей статье.
-// Введён по требованию заказчика «3–4 ссылки в статье на коммерческие разделы».
-// Per-H2 лимиты выше остаются как страховка, но глобальный коридор —
-// приоритетнее: после применения per-H2-лимитов мы дополнительно срезаем
-// самые слабые ссылки до TOTAL_MAX и добираем недостающие до TOTAL_MIN.
-const TOTAL_MAX_LINKS = (() => {
+//
+// ДИНАМИКА «1 ссылка на 2500 символов» (требование заказчика):
+//   target = round(estimatedChars / INFO_ARTICLE_CHARS_PER_LINK),
+//   где estimatedChars = Σ outline.sections.recommended_word_count × 6
+//   (6 — средняя длина русского слова + пробел).
+//   Границы: [TOTAL_MIN_LINKS_FLOOR..TOTAL_MAX_LINKS_CEILING] = [2..12]
+//   плюс физический cap H2_count × MAX_LINKS_PER_H2.
+//
+// ENV-переопределения (имеют приоритет, обратная совместимость):
+//   • INFO_ARTICLE_TOTAL_MIN_LINKS / INFO_ARTICLE_TOTAL_MAX_LINKS — если ОБА
+//     заданы, используются как фиксированный коридор и динамика отключается.
+//   • INFO_ARTICLE_CHARS_PER_LINK — настраивает «частоту» (по умолчанию 2500).
+const ENV_TOTAL_MAX = (() => {
   const v = parseInt(process.env.INFO_ARTICLE_TOTAL_MAX_LINKS, 10);
-  return Number.isFinite(v) && v >= 1 && v <= 50 ? v : 4;
+  return Number.isFinite(v) && v >= 1 && v <= 50 ? v : null;
 })();
-const TOTAL_MIN_LINKS = (() => {
+const ENV_TOTAL_MIN = (() => {
   const v = parseInt(process.env.INFO_ARTICLE_TOTAL_MIN_LINKS, 10);
-  return Number.isFinite(v) && v >= 0 && v <= TOTAL_MAX_LINKS ? v : 3;
+  return Number.isFinite(v) && v >= 0 && v <= 50 ? v : null;
 })();
+const CHARS_PER_LINK = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_CHARS_PER_LINK, 10);
+  return Number.isFinite(v) && v >= 500 && v <= 20000 ? v : 2500;
+})();
+const RUSSIAN_CHARS_PER_WORD = 6;
+const TOTAL_MIN_LINKS_FLOOR   = 2;
+const TOTAL_MAX_LINKS_CEILING = 12;
 const SHORTLIST_SIZE = 5;
+
+/**
+ * Computes the global link corridor for ONE article.
+ *
+ * Если ENV задаёт оба `INFO_ARTICLE_TOTAL_MIN_LINKS` и
+ * `INFO_ARTICLE_TOTAL_MAX_LINKS` — возвращаем их «как есть» (legacy-режим
+ * фиксированного коридора, обратная совместимость с прежними `[3..4]`).
+ *
+ * Иначе считаем динамически: target = round(estimatedChars / CHARS_PER_LINK),
+ * округляем в диапазон `[TOTAL_MIN_LINKS_FLOOR..TOTAL_MAX_LINKS_CEILING]`,
+ * затем срезаем до физического `H2_count × MAX_LINKS_PER_H2` — чтобы план
+ * был реально выполним. min = max(TOTAL_MIN_LINKS_FLOOR, target − 1),
+ * max = min(physicalCap, target + 1) — небольшой коридор «±1» вокруг target.
+ *
+ * @param {object} args
+ * @param {object} args.outline   — Stage 2 result
+ * @param {number} args.h2Count   — число H2-секций (для физического cap)
+ * @returns {{ totalMin: number, totalMax: number, target: number, estimatedChars: number, mode: 'env' | 'dynamic' }}
+ */
+function computeTotalLinksTarget({ outline, h2Count }) {
+  const sections = Array.isArray(outline?.sections) ? outline.sections : [];
+  const totalWords = sections.reduce((acc, s) => {
+    const w = Number(s?.recommended_word_count);
+    return acc + (Number.isFinite(w) && w > 0 ? w : 0);
+  }, 0);
+  const estimatedChars = totalWords * RUSSIAN_CHARS_PER_WORD;
+  const physicalCap = Math.max(0, (h2Count || 0) * MAX_LINKS_PER_H2);
+
+  // Legacy: обе ENV заданы — используем фикс-коридор (для аккуратной
+  // миграции тех, кто уже выставил кастомный диапазон).
+  if (ENV_TOTAL_MIN !== null && ENV_TOTAL_MAX !== null && ENV_TOTAL_MIN <= ENV_TOTAL_MAX) {
+    const totalMax = Math.min(ENV_TOTAL_MAX, physicalCap || ENV_TOTAL_MAX);
+    const totalMin = Math.min(ENV_TOTAL_MIN, totalMax);
+    return {
+      totalMin,
+      totalMax,
+      target: totalMin,
+      estimatedChars,
+      mode: 'env',
+    };
+  }
+
+  // Dynamic: 1 ссылка на CHARS_PER_LINK символов.
+  let target = Math.round(estimatedChars / CHARS_PER_LINK);
+  if (!Number.isFinite(target) || target < TOTAL_MIN_LINKS_FLOOR) target = TOTAL_MIN_LINKS_FLOOR;
+  if (target > TOTAL_MAX_LINKS_CEILING) target = TOTAL_MAX_LINKS_CEILING;
+  if (physicalCap > 0 && target > physicalCap) target = physicalCap;
+
+  let totalMin = Math.max(TOTAL_MIN_LINKS_FLOOR, target - 1);
+  let totalMax = Math.min(TOTAL_MAX_LINKS_CEILING, target + 1);
+  if (physicalCap > 0) totalMax = Math.min(totalMax, physicalCap);
+  if (totalMin > totalMax) totalMin = totalMax;
+
+  return { totalMin, totalMax, target, estimatedChars, mode: 'dynamic' };
+}
 
 const STOPWORDS = new Set([
   'и','в','во','не','что','он','на','с','со','как','а','то','от','для','до',
@@ -261,7 +331,9 @@ function fallbackAnchor(h1) {
 
 // ── Post-validator ───────────────────────────────────────────────────
 
-function postValidate({ link_plan, shortlistByH2, sectionMeta }) {
+function postValidate({ link_plan, shortlistByH2, sectionMeta, totalMin, totalMax }) {
+  const TOTAL_MIN_LINKS = Number.isFinite(totalMin) ? totalMin : TOTAL_MIN_LINKS_FLOOR;
+  const TOTAL_MAX_LINKS = Number.isFinite(totalMax) ? totalMax : TOTAL_MAX_LINKS_CEILING;
   const issues = [];
   const allowedByH2 = new Map();
   for (const [idx, list] of Object.entries(shortlistByH2)) allowedByH2.set(Number(idx), list);
@@ -445,6 +517,48 @@ function postValidate({ link_plan, shortlistByH2, sectionMeta }) {
     }
   }
 
+  // 3) ГАРАНТИРОВАННЫЙ МИНИМУМ (override MIN_SEMANTIC_SCORE).
+  //
+  // Контракт заказчика: «если эксель-файл загружен — перелинковка ОБЯЗАНА
+  // быть». На узких / нестандартных нишах все score'ы могут оказаться ниже
+  // MIN_SEMANTIC_SCORE — тогда ни LLM-pass, ни первый global_min_fill ссылок
+  // не добавят, и пользователь получит статью БЕЗ ссылок, несмотря на
+  // загруженный excel. Здесь мы добираем недостающие ссылки из топов
+  // shortlist'ов ИГНОРИРУЯ MIN_SEMANTIC_SCORE — лучше слабая, но
+  // тематически ближайшая ссылка, чем полное отсутствие перелинковки.
+  // Per-H2 cap и MAX_REPEATS_PER_URL по-прежнему соблюдаются.
+  if (totalLinks < TOTAL_MIN_LINKS) {
+    const fallbackPool = [];
+    fixedPlan.forEach((p, h2Pos) => {
+      const shortlist = allowedByH2.get(p.h2_index) || [];
+      for (const cand of shortlist) {
+        if (p.picks.some((pk) => pk.url === cand.url)) continue;
+        fallbackPool.push({ h2Pos, h2_index: p.h2_index, cand });
+      }
+    });
+    fallbackPool.sort((a, b) => b.cand.score - a.cand.score);
+
+    for (const c of fallbackPool) {
+      if (totalLinks >= TOTAL_MIN_LINKS) break;
+      const section = fixedPlan[c.h2Pos];
+      if (section.picks.length >= MAX_LINKS_PER_H2) continue;
+      const used = urlUsage.get(c.cand.url) || 0;
+      if (used >= MAX_REPEATS_PER_URL) continue;
+      if (section.picks.some((pk) => pk.url === c.cand.url)) continue;
+      section.picks.push({
+        url:            c.cand.url,
+        h1:             c.cand.h1,
+        anchor_text:    fallbackAnchor(c.cand.h1),
+        role:           section.picks.length === 0 ? 'primary' : 'supporting',
+        semantic_score: c.cand.score,
+        reason:         `Гарантированная вставка (Excel загружен → перелинковка обязана быть; MIN_SEMANTIC_SCORE override; score=${(c.cand.score || 0).toFixed(2)}).`,
+      });
+      urlUsage.set(c.cand.url, used + 1);
+      issues.push({ h2_index: c.h2_index, kind: 'guaranteed_min_override', url: c.cand.url, score: c.cand.score });
+      totalLinks += 1;
+    }
+  }
+
   // Build graph_pattern (deterministic, ground-truth).
   const urlUsageCount = {};
   for (const [u, c] of urlUsage) urlUsageCount[u] = c;
@@ -484,6 +598,12 @@ async function planSemanticLinks({ task, outline, links, adapter = 'deepseek', c
     return { link_plan: [], graph_pattern: { url_usage_count: {} }, deterministic_audit: { audit: { issues: [{ kind: 'empty_shortlists' }] } }, llm_raw: null, shortlistByH2 };
   }
 
+  // Динамический коридор «1 ссылка на CHARS_PER_LINK символов» (по умолчанию 2500).
+  // Считается из outline.sections.recommended_word_count, см.
+  // computeTotalLinksTarget. Если ENV TOTAL_MIN/TOTAL_MAX заданы — используется
+  // фикс-коридор (legacy совместимость).
+  const corridor = computeTotalLinksTarget({ outline, h2Count: sectionMeta.length });
+
   // Build user payload — only short-lists, never full 200-link list.
   const system = loadInfoArticlePrompt('stage2cLink');
   const userPayload = {
@@ -502,7 +622,7 @@ async function planSemanticLinks({ task, outline, links, adapter = 'deepseek', c
     }),
     shortlist_per_h2:    shortlistByH2,
     links_per_h2:        { min: MIN_LINKS_PER_H2, max: MAX_LINKS_PER_H2 },
-    total_links_per_article: { min: TOTAL_MIN_LINKS, max: TOTAL_MAX_LINKS },
+    total_links_per_article: { min: corridor.totalMin, max: corridor.totalMax, target: corridor.target },
     max_repeats_per_url: MAX_REPEATS_PER_URL,
     total_h2_count:      sectionMeta.length,
   };
@@ -522,12 +642,14 @@ async function planSemanticLinks({ task, outline, links, adapter = 'deepseek', c
     link_plan: Array.isArray(llmRaw?.link_plan) ? llmRaw.link_plan : [],
     shortlistByH2,
     sectionMeta,
+    totalMin: corridor.totalMin,
+    totalMax: corridor.totalMax,
   });
 
   return {
     link_plan:           post.link_plan,
     graph_pattern:       { url_usage_count: post.url_usage_count },
-    deterministic_audit: post.audit,
+    deterministic_audit: { ...post.audit, corridor },
     llm_raw:             llmRaw,
     shortlistByH2,
   };
@@ -688,6 +810,7 @@ function auditHtmlAgainstPlan({ html, link_plan }) {
 
 module.exports = {
   computeShortlists,
+  computeTotalLinksTarget,
   planSemanticLinks,
   postValidate,
   auditHtmlAgainstPlan,
@@ -695,6 +818,6 @@ module.exports = {
   fallbackAnchor,
   // constants for tests
   MAX_LINKS_PER_H2, MIN_LINKS_PER_H2, MAX_REPEATS_PER_URL, MIN_SEMANTIC_SCORE,
-  TOTAL_MIN_LINKS, TOTAL_MAX_LINKS,
+  CHARS_PER_LINK, TOTAL_MIN_LINKS_FLOOR, TOTAL_MAX_LINKS_CEILING, RUSSIAN_CHARS_PER_WORD,
   _internal: { tokenize, stemKey, buildH2Profile, buildLinkProfile, cosine, jaccard, urlSlugTokens },
 };

@@ -898,10 +898,13 @@ async function processInfoArticleTask(taskId) {
     });
     const totalPlanned = planResult.link_plan.reduce((acc, p) => acc + (p.picks?.length || 0), 0);
     const audit = planResult.deterministic_audit || {};
+    const corridor = audit.corridor || {};
     await appendLog(
       taskId,
       `🔗 Link planner: ${totalPlanned} ссылок на ${planResult.link_plan.length} H2 ` +
-      `(глобальный коридор ok: min=${audit.total_min_ok ? 'да' : 'нет'}, max=${audit.total_max_ok ? 'да' : 'нет'}), ` +
+      `(коридор ${corridor.totalMin ?? '?'}..${corridor.totalMax ?? '?'} ` +
+      `target=${corridor.target ?? '?'} mode=${corridor.mode || '?'} ~${corridor.estimatedChars || 0} симв.; ` +
+      `ok: min=${audit.total_min_ok ? 'да' : 'нет'}, max=${audit.total_max_ok ? 'да' : 'нет'}), ` +
       `unique URLs=${Object.keys(planResult.graph_pattern.url_usage_count || {}).length}`,
       'ok',
     );

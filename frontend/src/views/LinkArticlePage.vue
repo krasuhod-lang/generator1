@@ -226,14 +226,19 @@ const articlePreviewRef = ref(null);
 const sanitizedHtml = computed(() => {
   const html = selectedTask.value?.article_html || '';
   if (!html) return '';
-  // DOMPurify-ALLOWED_URI_REGEXP намеренно допускает data:image/(png|jpeg|jpg|webp)
+  // DOMPurify-ALLOWED_URI_REGEXP намеренно допускает data:image/(png|jpeg|jpg|webp);base64,…
   // для base64 изображений от Nano Banana Pro. Эта конфигурация применяется
   // ИСКЛЮЧИТЕЛЬНО к article_html, сгенерированной нашим бэкендом и видимой
   // только владельцу задачи (user_id-check в контроллере). Никакого
   // user-controlled HTML, который проходил бы через этот sanitize, нет.
+  //
+  // ВАЖНО: data:image/...;base64,… — отдельная ветка регулярки (без
+  // требования закрывающего «:»), потому что реальный data-URI заканчивается
+  // на «,DATA», а не на «:». Старый regex требовал «data:image/png;base64:»
+  // и поэтому DOMPurify вырезал ВСЕ изображения статей.
   return DOMPurify.sanitize(html, {
     ADD_ATTR: ['target'],
-    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|data:image\/(png|jpeg|jpg|webp);base64):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
   });
 });
 
