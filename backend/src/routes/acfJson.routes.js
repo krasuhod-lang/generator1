@@ -77,6 +77,17 @@ router.get('/health', auth, async (req, res) => {
     ? proxyUrl.replace(/:([^:@/]+)@/, ':***@').replace(/(api[_-]?key|access[_-]?token|apikey)=([^&\s"']+)/gi, '$1=***')
     : '';
 
+  // Опциональный thick-echo тест: ?thick=1 → второй вызов с user-prompt
+  // ~32 KB, чтобы понять, режет ли промежуточный HTTPS-прокси тело
+  // запроса. У дешёвых HTTPS-прокси типичный лимит body — 64 KB, и
+  // системный промт + JSON-кодированный чанк туда не помещаются — это
+  // и есть ровно та причина «Ошибка прокси DashScope: HTTP 413», которую
+  // видит пользователь во вкладке «Сформировать JSON». Если тонкий ping
+  // (max_tokens=1) проходит, а thick-echo возвращает 413, проблема
+  // ИМЕННО в прокси, а не в DashScope/ключе/балансе.
+  const thickRequested = String(req.query.thick || '') === '1';
+  const THICK_BYTES = 32 * 1024;
+
   const result = {
     backend:    'ok',
     apiKey:     apiKeyPresent,
@@ -87,6 +98,8 @@ router.get('/health', auth, async (req, res) => {
     reachable:  null,
     latencyMs:  null,
     error:      null,
+    // null = тест не запрашивали; иначе — структурный отчёт.
+    thick:      thickRequested ? { requestedBytes: THICK_BYTES, ok: null, latencyMs: null, error: null } : null,
   };
 
   if (!apiKeyPresent) {
@@ -108,7 +121,6 @@ router.get('/health', auth, async (req, res) => {
     });
     result.reachable = true;
     result.latencyMs = Date.now() - t0;
-    return res.json(result);
   } catch (err) {
     result.reachable = false;
     result.latencyMs = Date.now() - t0;
@@ -127,11 +139,54 @@ router.get('/health', auth, async (req, res) => {
         .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer ***REDACTED***');
       result.error = safeMsg.slice(0, 300);
     }
-    // 200 здесь намеренно: сам диагностический вызов прошёл, проблема —
-    // в downstream (DashScope/прокси), и фронт должен спокойно показать
-    // detail. Это отличает «backend жив, провайдер сдох» от «backend сдох».
-    return res.json(result);
   }
+
+  // Thick-echo запускаем ТОЛЬКО если тонкий ping прошёл — иначе мы и так
+  // знаем, что проблема не в размере body, а в самом канале/ключе/квоте.
+  if (thickRequested && result.reachable) {
+    const t1 = Date.now();
+    try {
+      // 32 KB символов 'a' — гарантированно крупное тело, но не упирается
+      // в MAX_PROMPT_LEN основного маршрута (200 000 симв. на поле).
+      // max_tokens=1 → ответ модели крошечный, значит время round-trip
+      // фактически измеряет именно загрузку тела через прокси.
+      const filler = 'a'.repeat(THICK_BYTES);
+      await callDashscope({
+        systemPrompt: '',
+        userPrompt:   filler,
+        temperature:  0,
+        maxTokens:    1,
+        timeoutMs:    20000,
+      });
+      result.thick.ok = true;
+      result.thick.latencyMs = Date.now() - t1;
+    } catch (err) {
+      result.thick.ok = false;
+      result.thick.latencyMs = Date.now() - t1;
+      const meta = err && err.__dashscope;
+      if (meta && meta.kind === 'http' && meta.status === 413) {
+        result.thick.error = 'HTTP 413 — промежуточный HTTPS-прокси режет тело запроса. '
+          + 'Это и есть корневая причина «Ошибка прокси DashScope: HTTP 413» на вкладке JSON. '
+          + 'Решения: (1) переключите режим сборки JSON на «Программный (рекомендуется)» — '
+          + 'там запрос к LLM не уходит вообще; (2) смените прокси на тот, у которого нет '
+          + 'жёсткого лимита body; (3) уменьшите DEFAULT_CHUNK_LEN.';
+      } else if (meta && meta.kind === 'http') {
+        result.thick.error = `DashScope ответил HTTP ${meta.status}: ${(meta.detail || meta.message || '').slice(0, 200)}`;
+      } else if (meta && meta.kind === 'network') {
+        result.thick.error = `Сетевая ошибка на толстом запросе: ${meta.message}`;
+      } else {
+        const safeMsg = String((err && err.message) || 'unknown error')
+          .replace(/sk-[A-Za-z0-9]{16,}/g, '***REDACTED***')
+          .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer ***REDACTED***');
+        result.thick.error = safeMsg.slice(0, 300);
+      }
+    }
+  }
+
+  // 200 даже при reachable=false: сам диагностический вызов прошёл, проблема —
+  // в downstream (DashScope/прокси), и фронт должен спокойно показать detail.
+  // Это отличает «backend жив, провайдер сдох» от «backend сдох».
+  return res.json(result);
 });
 
 /**
