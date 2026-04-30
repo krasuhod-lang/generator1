@@ -287,6 +287,45 @@ function h2ToHtml(h2Node) {
   return '';
 }
 
+// ── Хелперы для сохранения «остаточного» контента ─────────────────────────
+// Несколько специализированных билдеров (price/steps-ol/expert/tags) умеют
+// извлекать ТОЛЬКО один структурный контейнер из тела секции — таблицу,
+// нумерованный список, blockquote, набор ссылок. Любые СОПУТСТВУЮЩИЕ узлы
+// (вступительные/заключительные <p> и <h3>, развёрнутые объяснения) при
+// этом раньше молча отбрасывались, что ломало инвариант сохранности
+// контента и валидаторы findMissingPhrases / findMissingHeadings.
+//
+// Чтобы это починить детерминированно (и не «угадывать», поместится ли
+// текст внутрь одного из специализированных полей), мы заворачиваем такие
+// «остатки» в отдельный sibling-блок acf_fc_layout="blocks" — точно так же,
+// как orchestrator уже делает для дословного хранения <h2> через
+// h2HoldingMiniBlock. На уровне валидаторов это безопасно: outputPlainText
+// конкатенирует все text/content/answer/blocks-text, дублирования нет.
+
+// Возвращает blocks-блок без H2-префикса для переданных «остаточных» узлов.
+// Возвращает null, если среди узлов нет ничего, кроме пустоты/пробелов.
+function leftoverBlocksBlock(nodes) {
+  if (!nodes || !nodes.length) return null;
+  const meaningful = nodes.filter((n) => nodeText(n).length > 0);
+  if (!meaningful.length) return null;
+  return buildBlocksBlock({ h2: null, body: meaningful });
+}
+
+// Унифицированно оборачивает специализированный «primary» блок остаточными
+// blocks-сиблингами в порядке исходного текста: pre → primary → post.
+// Каждый специализированный билдер (steps/bens/expert/price) теперь
+// возвращает результат этой функции и тем самым гарантированно сохраняет
+// весь текст исходной секции.
+function wrapWithLeftovers(primary, preLeftover, postLeftover) {
+  const out = [];
+  const pre = leftoverBlocksBlock(preLeftover);
+  if (pre) out.push(pre);
+  out.push(primary);
+  const post = leftoverBlocksBlock(postLeftover);
+  if (post) out.push(post);
+  return out;
+}
+
 // ── Билдеры конкретных типов блоков ───────────────────────────────────────
 
 // blocks (универсальный) — H2 + всё тело идёт в text как есть.
@@ -372,13 +411,25 @@ function buildFaqBlock(section) {
 // steps — две формы:
 //   • <ol><li>...</li>...</ol> → каждый <li> = шаг (title=первая строка/<strong>, text=остальное)
 //   • h3+p пары → каждая пара = шаг
-function buildStepsBlock(section) {
+//
+// Внутренний экстрактор: возвращает { items, preLeftover, postLeftover }.
+// Вынесен из buildStepsBlock, чтобы buildBensBlock мог переиспользовать ту
+// же логику и при этом тоже корректно прокидывать остатки тела секции
+// в blocks-сиблинги (раньше bens терял контент так же, как steps).
+function _extractStepLikeItems(body) {
   const items = [];
-  const body = section.body;
+  let preLeftover = [];
+  let postLeftover = [];
 
-  // 1. Если есть <ol>, разбираем его (берём ПЕРВЫЙ ol).
-  const ol = body.find((n) => tag(n) === 'ol');
-  if (ol) {
+  // 1. Если есть <ol>, разбираем его (берём ПЕРВЫЙ ol). Всё, что лежит
+  //    в теле секции ДО и ПОСЛЕ этого <ol> (вступление, поясняющие <p>,
+  //    заключительные <h3>+<p> и т. п.), становится «остатками» для
+  //    sibling blocks-блоков — иначе этот текст безвозвратно терялся.
+  const olIdx = body.findIndex((n) => tag(n) === 'ol');
+  if (olIdx !== -1) {
+    const ol = body[olIdx];
+    preLeftover = body.slice(0, olIdx);
+    postLeftover = body.slice(olIdx + 1);
     for (const li of Array.from(ol.children || [])) {
       if (tag(li) !== 'li') continue;
       // Ищем <strong>/<b> в начале как title; иначе — первое предложение.
@@ -412,7 +463,8 @@ function buildStepsBlock(section) {
       });
     }
   } else {
-    // 2. h3+p пары.
+    // 2. h3+p пары. Сюда же приклеиваются все «сироты» — этот путь сам
+    //    по себе ничего не теряет, поэтому leftover'ы остаются пустыми.
     let i = 0;
     while (i < body.length) {
       const node = body[i];
@@ -450,25 +502,33 @@ function buildStepsBlock(section) {
     }
   }
 
+  return { items, preLeftover, postLeftover };
+}
+
+function buildStepsBlock(section) {
+  const { items, preLeftover, postLeftover } = _extractStepLikeItems(section.body);
+
   // Колонки: 4 (3 в ряд) для 3–6 шагов; 6 (2 в ряд) для 1–2; 3 (4 в ряд) для 7+.
   let columns = '4';
   if (items.length <= 2) columns = '6';
   else if (items.length >= 7) columns = '3';
 
-  return {
+  const primary = {
     acf_fc_layout: 'steps',
     title: shortTitle(section.h2, 'Этапы'),
     subtitle: '',
     items,
     columns,
   };
+  return wrapWithLeftovers(primary, preLeftover, postLeftover);
 }
 
 // bens — структурно близко к steps, но другой набор полей.
 function buildBensBlock(section) {
-  // Переиспользуем разбор из steps, потом пересобираем под bens-схему.
-  const steps = buildStepsBlock(section);
-  const items = steps.items.map((it) => ({
+  // Переиспользуем разбор из steps, чтобы и набор items, и pre/post-остатки
+  // считались одинаково — и bens теперь так же не теряет окружающий текст.
+  const { items: rawItems, preLeftover, postLeftover } = _extractStepLikeItems(section.body);
+  const items = rawItems.map((it) => ({
     title: it.title,
     image: '',
     text: it.text,
@@ -476,7 +536,7 @@ function buildBensBlock(section) {
   let columns = '4';
   if (items.length <= 2) columns = '6';
   else if (items.length >= 7) columns = '3';
-  return {
+  const primary = {
     acf_fc_layout: 'bens',
     title: shortTitle(section.h2, 'Преимущества'),
     color_title: '#000000',
@@ -485,6 +545,7 @@ function buildBensBlock(section) {
     columns,
     image: '',
   };
+  return wrapWithLeftovers(primary, preLeftover, postLeftover);
 }
 
 // Хелпер: «слепок» H2 как полноценный мини-блок blocks для тех типов
@@ -514,14 +575,19 @@ function h2HoldingMiniBlock(h2Node) {
 }
 
 // price — таблица или список с денежными хвостами.
-// Возвращает МАССИВ блоков (mini-blocks с H2 + сам price), чтобы исходный
-// <h2> сохранился дословно — у price-схемы нет HTML-поля для встраивания.
+// Возвращает МАССИВ блоков (mini-blocks с H2 + сам price + опциональные
+// blocks-сиблинги для остаточного текста), чтобы исходный <h2> и любые
+// сопутствующие <p>/<h3> вокруг таблицы/списка сохранились дословно —
+// у price-схемы нет HTML-поля для встраивания произвольного абзаца.
 function buildPriceBlock(section) {
   const items = [];
   const body = section.body;
+  let primaryIdx = -1;
 
-  const table = body.find((n) => tag(n) === 'table');
-  if (table) {
+  const tableIdx = body.findIndex((n) => tag(n) === 'table');
+  if (tableIdx !== -1) {
+    primaryIdx = tableIdx;
+    const table = body[tableIdx];
     const rows = Array.from(table.querySelectorAll('tr'));
     for (const tr of rows) {
       const cells = Array.from(tr.children || []).filter((c) => /^t[hd]$/i.test(c.tagName || ''));
@@ -541,8 +607,10 @@ function buildPriceBlock(section) {
     }
   } else {
     // ul/li с ценой в конце.
-    const list = body.find((n) => tag(n) === 'ul' || tag(n) === 'ol');
-    if (list) {
+    const listIdx = body.findIndex((n) => tag(n) === 'ul' || tag(n) === 'ol');
+    if (listIdx !== -1) {
+      primaryIdx = listIdx;
+      const list = body[listIdx];
       for (const li of Array.from(list.children || [])) {
         if (tag(li) !== 'li') continue;
         const full = nodeText(li);
@@ -563,12 +631,15 @@ function buildPriceBlock(section) {
   // Если ничего не извлеклось — fallback на blocks, чтобы не потерять контент.
   if (!items.length) return [buildBlocksBlock(section)];
 
-  return [{
+  const preLeftover  = primaryIdx >= 0 ? body.slice(0, primaryIdx)     : [];
+  const postLeftover = primaryIdx >= 0 ? body.slice(primaryIdx + 1)    : [];
+  const primary = {
     acf_fc_layout: 'price',
     title: shortTitle(section.h2, 'Прайс'),
     subtitle: '',
     items,
-  }];
+  };
+  return wrapWithLeftovers(primary, preLeftover, postLeftover);
 }
 
 // attention — H2 + всё тело в одно поле text.
@@ -585,10 +656,21 @@ function buildAttentionBlock(section) {
 }
 
 // expert — берём текст <blockquote> или весь body, если blockquote нет.
+// Возвращает МАССИВ: blocks-сиблинги с pre/post-текстом вокруг blockquote
+// (если они есть) + сам expert-блок. Без этих сиблингов любой <p>/<h3>,
+// который шёл до или после blockquote в исходной секции «Мнение эксперта»,
+// безвозвратно терялся (видно по баг-репорту: пропадали h3 «Сертификация
+// и стандарты…», «Ресурс колодок в городском цикле Москвы…»).
 function buildExpertBlock(section) {
-  const blockquote = section.body.find((n) => tag(n) === 'blockquote');
+  const body = section.body;
+  const blockquoteIdx = body.findIndex((n) => tag(n) === 'blockquote' && (n.textContent || '').trim());
   let text;
-  if (blockquote) {
+  let preLeftover = [];
+  let postLeftover = [];
+  if (blockquoteIdx !== -1) {
+    const blockquote = body[blockquoteIdx];
+    preLeftover = body.slice(0, blockquoteIdx);
+    postLeftover = body.slice(blockquoteIdx + 1);
     // Берём ИСХОДНЫЙ blockquote целиком (outerHTML), а не только innerHTML.
     // Это сохраняет атрибут class="expert-opinion" + теги <cite>/<footer>
     // ровно так, как они были в исходнике.
@@ -602,15 +684,16 @@ function buildExpertBlock(section) {
     // Без явной цитаты — кладём всё тело (включая H2 для сохранности заголовка).
     const inner = [];
     if (section.h2) inner.push(section.h2);
-    for (const n of section.body) inner.push(n);
+    for (const n of body) inner.push(n);
     text = nodesToHtml(inner);
   }
-  return {
+  const primary = {
     acf_fc_layout: 'expert',
     title: shortTitle(section.h2, 'Мнение эксперта'),
     expert: 0,
     text,
   };
+  return wrapWithLeftovers(primary, preLeftover, postLeftover);
 }
 
 // tabs — каждый <h3> → таб, последующие p/ul/etc. → content.
@@ -688,6 +771,11 @@ function buildPortfolioBlocks(section) {
 }
 
 // tags — тянем из <a> в теле; если ссылок нет — fallback на blocks.
+// Поскольку tags-виджет рендерит ТОЛЬКО подписи ссылок (без окружающего
+// текста абзацев), мы дополнительно эмитим blocks-сиблинг с исходным
+// телом секции. Получается лёгкое дублирование (ссылка показана и в
+// абзаце, и в виджете тегов), но валидаторы это допускают (substring),
+// а инвариант сохранности контента не нарушается.
 function buildTagsBlock(section) {
   const links = [];
   for (const n of section.body) {
@@ -699,11 +787,18 @@ function buildTagsBlock(section) {
     }
   }
   if (!links.length) return [buildBlocksBlock(section)];
-  return [{
+  const tagsBlock = {
     acf_fc_layout: 'tags',
     title: shortTitle(section.h2, 'Теги'),
     items: links,
-  }];
+  };
+  const out = [];
+  // H2 уже отдельным sibling-блоком добавит orchestrator (см. needsSiblingH2),
+  // поэтому в leftover'ах кладём только body — без дублирования заголовка.
+  const leftover = leftoverBlocksBlock(section.body);
+  if (leftover) out.push(leftover);
+  out.push(tagsBlock);
+  return out;
 }
 
 // ── Публичный API ─────────────────────────────────────────────────────────
@@ -749,8 +844,15 @@ export function buildAcfFromHtml(html) {
     let block;
     switch (layout) {
       case 'faq':       block = buildFaqBlock(section); break;
-      case 'steps':     block = buildStepsBlock(section); break;
-      case 'bens':      block = buildBensBlock(section); break;
+      case 'steps':
+        // steps/bens/expert теперь тоже могут вернуть несколько блоков
+        // (primary + sibling-blocks с pre/post-leftover'ами вокруг
+        //  основного <ol>/<blockquote>) — расплющиваем в общий список.
+        for (const b of buildStepsBlock(section)) out.push(b);
+        continue;
+      case 'bens':
+        for (const b of buildBensBlock(section)) out.push(b);
+        continue;
       case 'price':
         // price/tags/portfolio внутри тоже могут вернуть массив (например,
         // pure-fallback на blocks при пустых items). Sibling-h2 уже выше
@@ -759,9 +861,9 @@ export function buildAcfFromHtml(html) {
         continue;
       case 'attention': block = buildAttentionBlock(section); break;
       case 'expert':
-        block = buildExpertBlock(section);
+        for (const b of buildExpertBlock(section)) out.push(b);
         ctx.expertUsed = true;
-        break;
+        continue;
       case 'tabs':      block = buildTabsBlock(section); break;
       case 'portfolio':
         for (const b of buildPortfolioBlocks(section)) out.push(b);
