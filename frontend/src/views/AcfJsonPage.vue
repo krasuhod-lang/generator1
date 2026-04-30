@@ -1361,6 +1361,8 @@ function fmtCost(rub) {
 
           <div
             v-if="diag.state === 'done' && diag.data"
+            role="status"
+            aria-live="polite"
             class="text-xs flex-1 min-w-[280px] rounded border px-3 py-2"
             :class="diag.data.reachable && diag.data.apiKey
               ? 'border-emerald-700 bg-emerald-950/40 text-emerald-200'
@@ -1389,6 +1391,8 @@ function fmtCost(rub) {
 
           <div
             v-else-if="diag.state === 'error'"
+            role="alert"
+            aria-live="assertive"
             class="text-xs flex-1 min-w-[280px] rounded border border-rose-700 bg-rose-950/40 text-rose-200 px-3 py-2"
           >
             <div class="font-semibold mb-1">❌ Backend недостижим</div>
