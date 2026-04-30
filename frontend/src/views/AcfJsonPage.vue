@@ -808,6 +808,18 @@ function canonicalForCompare(s) {
 function findMissingPhrases(inputHtml, outputPlain) {
   const segments    = splitHtmlIntoSegments(inputHtml);
   const outputCanon = canonicalForCompare(outputPlain);
+  // Канон-формы исходных заголовков (h2–h5). Если фраза-окно полностью
+  // совпадает с каноном какого-то заголовка, пропускаем её — сохранность
+  // заголовков отдельно валидирует findMissingHeadings (с FAQ-исключениями
+  // для случаев, когда <h2>«Часто задаваемые вопросы»</h2> легитимно
+  // превращается в title="FAQ" блока acf_fc_layout="faq" и нигде в выводе
+  // не остаётся дословной 3-словной фразы). Без этой защиты findMissingPhrases
+  // двойно-репортит ту же потерю и блокирует применение JSON.
+  const headingCanons = new Set();
+  for (const h of extractInputHeadings(inputHtml)) {
+    const c = canonicalForCompare(h.text);
+    if (c) headingCanons.add(c);
+  }
   const missing     = [];
   for (const seg of segments) {
     const phrases = buildPreservationPhrases(seg);
@@ -819,6 +831,9 @@ function findMissingPhrases(inputHtml, outputPlain) {
       // служебные слова + одиночная пунктуация), после канонизации
       // вырождаются — пропускаем, чтобы не давать шум.
       if (canon.split(' ').length < 3) continue;
+      // Защита от двойного репорта: фразу-точную-копию заголовка валидирует
+      // findMissingHeadings (см. комментарий выше).
+      if (headingCanons.has(canon)) continue;
       if (outputCanon.indexOf(canon) === -1) missing.push(ph);
     }
   }
@@ -887,6 +902,35 @@ function collectQuestionTexts(node, out) {
   }
 }
 
+// Канон-формы типичных section-label заголовков, под которыми в исходнике
+// идёт FAQ-блок (короткие 1–3-словные «названия секции вопрос-ответ»).
+// Если исходный <hN> совпадает по канону с одним из них И в выводе есть
+// блок acf_fc_layout="faq" — заголовок считается сохранённым по СМЫСЛУ:
+// FAQ-блок имеет своё короткое поле "title" (см. ЗАДАЧА 1A + пример блока
+// 5 в системном промте, где title="FAQ"), и он по схеме не имеет
+// HTML-body, куда можно было бы дословно вложить <h2>«Часто задаваемые
+// вопросы»</h2>. Без этого исключения валидатор блокирует абсолютно
+// нормальный JSON, в котором модель просто использовала короткий ярлык.
+const FAQ_SECTION_LABEL_CANONS = new Set([
+  'часто задаваемые вопросы',
+  'часто задаваемые',
+  'вопросы и ответы',
+  'вопрос ответ',
+  'faq',
+  'частые вопросы',
+  'популярные вопросы',
+]);
+
+function outputHasFaqBlock(outputArray) {
+  if (!Array.isArray(outputArray)) return false;
+  for (const block of outputArray) {
+    if (block && typeof block === 'object' && String(block.acf_fc_layout || '').toLowerCase() === 'faq') {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Возвращает массив { tag, text, raw } исходных заголовков, которые НЕ
 // найдены в выводе ни как <hN>TEXT</hN> в text/content/answer, ни как
 // plain-text question (FAQ-исключение). Пусто = разметка заголовков не
@@ -900,6 +944,7 @@ function findMissingHeadings(inputHtml, outputArray) {
   const questions  = [];
   collectQuestionTexts(outputArray, questions);
   const questionsCanon = questions.map(canonicalForCompare).filter(Boolean);
+  const hasFaqBlock    = outputHasFaqBlock(outputArray);
 
   // Для каждого исходного заголовка собираем индекс его текста, причём
   // сравнение делаем по каноничной форме (как в findMissingPhrases) —
@@ -927,6 +972,12 @@ function findMissingHeadings(inputHtml, outputArray) {
 
     // 2. FAQ-исключение: вопрос мог уехать в "question" БЕЗ тега.
     if (questionsCanon.includes(expectedTextCanon)) continue;
+
+    // 3. FAQ-section-исключение: исходный <hN>«Часто задаваемые вопросы»</hN>
+    //    (или эквивалент) семантически уезжает в title блока faq, у которого
+    //    нет body-поля для дословного <hN>. Принимаем такой заголовок как
+    //    сохранённый, если в выводе действительно есть FAQ-блок.
+    if (hasFaqBlock && FAQ_SECTION_LABEL_CANONS.has(expectedTextCanon)) continue;
 
     missing.push(h);
   }
