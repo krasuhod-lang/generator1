@@ -21,7 +21,9 @@ const rateLimit = require('express-rate-limit');
 const auth      = require('../middleware/auth');
 const {
   callDashscope,
+  DASHSCOPE_BASE_URL,
   DASHSCOPE_MODEL_DEFAULT,
+  _internals,
 } = require('../services/llm/dashscope.adapter');
 
 const router = express.Router();
@@ -46,6 +48,91 @@ const dashscopeLimiter = rateLimit({
 });
 
 router.use(dashscopeLimiter);
+
+/**
+ * GET /api/acf-json/health
+ *
+ * Диагностический endpoint для вкладки «Сформировать JSON». Используется
+ * фронт-кнопкой «Проверить соединение», чтобы быстро понять, на каком уровне
+ * ломается «Сеть до сервера недоступна (Failed to fetch). Network Error»:
+ *   • если этот запрос возвращает 200 → backend жив, проблема была в
+ *     прежнем долгом запросе (timeout / разрыв соединения нгинксом);
+ *   • если возвращает 500 c `apiKey:false` → не задан DASHSCOPE_API_KEY в .env;
+ *   • если `reachable:false` → backend жив, но не может достучаться до
+ *     DashScope (нужно настроить DASHSCOPE_PROXY_*).
+ *
+ * Безопасность: НЕ возвращает сам ключ или Authorization-заголовок,
+ * только факт его наличия (boolean) и хвостовые 4 символа для отладки.
+ * Прокси показывается с маскированным паролем (см. _safeProxyLog в адаптере).
+ */
+router.get('/health', auth, async (req, res) => {
+  const apiKeyRaw = (process.env.DASHSCOPE_API_KEY || '').trim();
+  const apiKeyPresent = apiKeyRaw.length > 0;
+  // Хвостовые символы — только для отладки оператором, не секрет.
+  const apiKeyTail = apiKeyPresent ? apiKeyRaw.slice(-4) : '';
+  const proxyUrl = (() => {
+    try { return _internals._resolveProxyUrl(); } catch { return ''; }
+  })();
+  const proxyMasked = proxyUrl
+    ? proxyUrl.replace(/:([^:@/]+)@/, ':***@').replace(/(api[_-]?key|access[_-]?token|apikey)=([^&\s"']+)/gi, '$1=***')
+    : '';
+
+  const result = {
+    backend:    'ok',
+    apiKey:     apiKeyPresent,
+    apiKeyTail: apiKeyPresent ? `…${apiKeyTail}` : '',
+    baseUrl:    DASHSCOPE_BASE_URL,
+    model:      DASHSCOPE_MODEL_DEFAULT,
+    proxy:      proxyMasked || '(none)',
+    reachable:  null,
+    latencyMs:  null,
+    error:      null,
+  };
+
+  if (!apiKeyPresent) {
+    result.error = 'DASHSCOPE_API_KEY не задан в .env';
+    return res.status(500).json(result);
+  }
+
+  // Минимальный «ping» через chat/completions с max_tokens=1.
+  // Это самый надёжный сигнал: проверяет доступность endpoint'а, проксю,
+  // валидность ключа и квоту аккаунта одним вызовом. Жёсткий timeout 12 сек.
+  const t0 = Date.now();
+  try {
+    await callDashscope({
+      systemPrompt: '',
+      userPrompt:   'ping',
+      temperature:  0,
+      maxTokens:    1,
+      timeoutMs:    12000,
+    });
+    result.reachable = true;
+    result.latencyMs = Date.now() - t0;
+    return res.json(result);
+  } catch (err) {
+    result.reachable = false;
+    result.latencyMs = Date.now() - t0;
+    const meta = err && err.__dashscope;
+    if (meta && meta.kind === 'http') {
+      result.error = `DashScope ответил HTTP ${meta.status}: ${(meta.detail || meta.message || '').slice(0, 300)}`;
+    } else if (meta && meta.kind === 'network') {
+      result.error = `Сетевая ошибка до DashScope: ${meta.message}` +
+        (proxyUrl ? '' : ' (прокси не задан — для России обычно нужен DASHSCOPE_PROXY_URL / LLM_PROXY_URL)');
+    } else if (meta && meta.kind === 'empty') {
+      result.error = `DashScope вернул пустой ответ: ${meta.message}`;
+    } else {
+      // Генерик: санитизируем на всякий случай (как в основном handler'е).
+      const safeMsg = String((err && err.message) || 'unknown error')
+        .replace(/sk-[A-Za-z0-9]{16,}/g, '***REDACTED***')
+        .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer ***REDACTED***');
+      result.error = safeMsg.slice(0, 300);
+    }
+    // 200 здесь намеренно: сам диагностический вызов прошёл, проблема —
+    // в downstream (DashScope/прокси), и фронт должен спокойно показать
+    // detail. Это отличает «backend жив, провайдер сдох» от «backend сдох».
+    return res.json(result);
+  }
+});
 
 /**
  * POST /api/acf-json/dashscope
