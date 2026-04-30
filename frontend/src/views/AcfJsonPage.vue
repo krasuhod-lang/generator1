@@ -825,6 +825,114 @@ function findMissingPhrases(inputHtml, outputPlain) {
   return missing;
 }
 
+// ── Пост-валидация сохранности заголовков (h2/h3/h4/h5) ───────────────────
+// ТЗ: «запрещено менять заголовки... текст упаковываем только в контейнеры».
+// Текстовая пост-валидация (findMissingPhrases) ловит потерю слов, но НЕ
+// ловит случай «модель сохранила текст заголовка, но отбросила сам тег
+// <h2>/<h3>», превратив его в обычный <p>. Тогда при импорте в WordPress
+// разметка статьи деградирует. Поэтому отдельно проверяем, что для каждого
+// исходного <hN>«TEXT</hN> в выводе встречается ЛИБО точно такой же
+// <hN>TEXT</hN> внутри HTML-полей text/content/answer, ЛИБО (для FAQ-
+// исключения, см. ЗАДАЧА 1C) тот же TEXT в plain-виде в поле "question".
+// Извлекает заголовки из исходного HTML-чанка как массив { tag, text, raw }.
+// `tag` — нижний регистр (h2..h5), `text` — без вложенных тегов и сущностей,
+// `raw` — оригинальная сырая подстрока (для показа пользователю).
+function extractInputHeadings(inputHtml) {
+  const out = [];
+  if (!inputHtml) return out;
+  // Локальная копия regex (нужно из-за /g + lastIndex — иначе нельзя
+  // безопасно повторно использовать модуль-уровневый объект).
+  const re = /<(h[2-5])\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
+  let m = re.exec(inputHtml);
+  while (m) {
+    const tag  = m[1].toLowerCase();
+    const text = stripTagsAndNormalize(m[2] || '');
+    if (text) out.push({ tag, text, raw: m[0] });
+    m = re.exec(inputHtml);
+  }
+  return out;
+}
+
+// Собирает HTML-строки из контентных полей (text/content/answer) — там, где
+// согласно системному промту обязаны лежать оригинальные <h2>/<h3>/<h4>/<h5>.
+const HEADING_BEARING_FIELDS = /^(text|content|answer)$/i;
+function collectHeadingBearingHtml(node, out) {
+  if (node == null) return;
+  if (Array.isArray(node)) { for (const v of node) collectHeadingBearingHtml(v, out); return; }
+  if (typeof node === 'object') {
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (typeof v === 'string' && HEADING_BEARING_FIELDS.test(k)) {
+        if (v.trim()) out.push(v);
+      } else if (v && typeof v === 'object') {
+        collectHeadingBearingHtml(v, out);
+      }
+    }
+  }
+}
+
+// Собирает только plain-text значения поля "question" (FAQ-исключение).
+function collectQuestionTexts(node, out) {
+  if (node == null) return;
+  if (Array.isArray(node)) { for (const v of node) collectQuestionTexts(v, out); return; }
+  if (typeof node === 'object') {
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (typeof v === 'string' && /^question$/i.test(k)) {
+        if (v.trim()) out.push(v);
+      } else if (v && typeof v === 'object') {
+        collectQuestionTexts(v, out);
+      }
+    }
+  }
+}
+
+// Возвращает массив { tag, text, raw } исходных заголовков, которые НЕ
+// найдены в выводе ни как <hN>TEXT</hN> в text/content/answer, ни как
+// plain-text question (FAQ-исключение). Пусто = разметка заголовков не
+// деградировала.
+function findMissingHeadings(inputHtml, outputArray) {
+  const heads = extractInputHeadings(inputHtml);
+  if (!heads.length) return [];
+
+  const htmlChunks = [];
+  collectHeadingBearingHtml(outputArray, htmlChunks);
+  const questions  = [];
+  collectQuestionTexts(outputArray, questions);
+  const questionsCanon = questions.map(canonicalForCompare).filter(Boolean);
+
+  // Для каждого исходного заголовка собираем индекс его текста, причём
+  // сравнение делаем по каноничной форме (как в findMissingPhrases) —
+  // это нивелирует мелкую нормализацию пунктуации/регистра и не даёт
+  // ложно-положительных «потерь».
+  const missing = [];
+  for (const h of heads) {
+    const expectedTextCanon = canonicalForCompare(h.text);
+    if (!expectedTextCanon) continue;
+
+    // 1. Ищем точно <tag>...текст...</tag> в HTML-полях.
+    let foundAsTag = false;
+    const sameTagRe = new RegExp(`<${h.tag}\\b[^>]*>([\\s\\S]*?)<\\/${h.tag}\\s*>`, 'gi');
+    for (const html of htmlChunks) {
+      sameTagRe.lastIndex = 0;
+      let mm = sameTagRe.exec(html);
+      while (mm) {
+        const innerCanon = canonicalForCompare(stripTagsAndNormalize(mm[1] || ''));
+        if (innerCanon === expectedTextCanon) { foundAsTag = true; break; }
+        mm = sameTagRe.exec(html);
+      }
+      if (foundAsTag) break;
+    }
+    if (foundAsTag) continue;
+
+    // 2. FAQ-исключение: вопрос мог уехать в "question" БЕЗ тега.
+    if (questionsCanon.includes(expectedTextCanon)) continue;
+
+    missing.push(h);
+  }
+  return missing;
+}
+
 // ── Один HTTP-вызов к DashScope через наш backend-прокси ──────────────────
 // Возвращает первый `choice` в OpenAI-совместимом формате
 // ({ message: { content }, finish_reason }). Сам прокси-роут живёт в
@@ -970,23 +1078,55 @@ async function processChunk({
     };
   }
 
-  let outputArray = parseModelOutputArray(choice.message?.content);
+  let outputArray;
+  try {
+    outputArray = parseModelOutputArray(choice.message?.content);
+  } catch (parseErr) {
+    // Авто-ретрай при невалидном JSON: иногда модель срывается в markdown-
+    // обёртку, добавляет тексты вокруг массива или ломает кавычки. Один
+    // повтор с явной инструкцией «верни ТОЛЬКО валидный JSON-массив» в
+    // 95% случаев чинит это, и мы не валим всю задачу из-за одного чанка.
+    const fixSystem = systemPromptBase + `\n\n[ИСПРАВЛЕНИЕ — JSON-PARSE]\nПредыдущий ответ не распарсился как JSON-массив. Причина: ${(() => { const m = String(parseErr.message || parseErr); return m.length > 200 ? m.slice(0, 200) + '…' : m; })()}.\nВерни СТРОГО валидный JSON-массив объектов и НИЧЕГО кроме него: без markdown-обёрток \`\`\`json, без комментариев, без текста до или после массива.`;
+    const fix = await callLlm({ systemPrompt: fixSystem, userPrompt });
+    tokensInTotal  += fix.tokensIn;
+    tokensOutTotal += fix.tokensOut;
+    if (fix.choice.finish_reason === 'length') {
+      throw new Error(`${chunkLabel}: модель упёрлась в лимит токенов на ре-запросе после JSON-parse error. Попробуйте уменьшить размер исходного HTML.`);
+    }
+    try {
+      outputArray = parseModelOutputArray(fix.choice.message?.content);
+    } catch (parseErr2) {
+      throw new Error(`${chunkLabel}: модель не вернула валидный JSON даже после ре-запроса. Детали: ${parseErr2.message}`);
+    }
+  }
 
   // Пост-валидация сохранности текста. На вход даём СЫРОЙ HTML чанка —
   // findMissingPhrases сам разобьёт его на блок-уровневые сегменты и НЕ
   // будет строить окна поиска через границы абзацев/заголовков.
-  let outPlain     = outputPlainText(outputArray);
-  let missing      = findMissingPhrases(chunkHtmlText, outPlain);
+  let outPlain        = outputPlainText(outputArray);
+  let missing         = findMissingPhrases(chunkHtmlText, outPlain);
+  // Параллельно — пост-валидация сохранности ИСХОДНОЙ РАЗМЕТКИ ЗАГОЛОВКОВ
+  // (h2/h3/h4/h5). Это требование ТЗ: «запрещено менять заголовки... текст
+  // упаковываем только в контейнеры». findMissingPhrases ловит потерю слов,
+  // но допускает превращение <h2>FOO</h2> в <p>FOO</p> — для пользователя это
+  // регрессия, потому что после импорта в WordPress пропадает иерархия.
+  let missingHeadings = findMissingHeadings(chunkHtmlText, outputArray);
 
-  if (missing.length > 0) {
+  if (missing.length > 0 || missingHeadings.length > 0) {
     // Один корректирующий ре-запрос: даём модели список потерянных фрагментов
-    // и просим вернуть их дословно в подходящие text/content/answer.
-    const sample = missing.slice(0, 20);
+    // и/или потерянных заголовков и просим вернуть их дословно В ТЕХ ЖЕ ТЕГАХ.
+    const sampleMissing  = missing.slice(0, 20);
+    const sampleHeadings = missingHeadings.slice(0, 10);
+    const phrasesBlock = sampleMissing.length
+      ? `Потерянные фрагменты текста (по одной строке на фрагмент):\n${sampleMissing.map((m) => `• ${m}`).join('\n')}${missing.length > sampleMissing.length ? `\n• …и ещё ${missing.length - sampleMissing.length} фрагмент(ов) — не забудь их тоже.` : ''}`
+      : '';
+    const headingsBlock = sampleHeadings.length
+      ? `Потерянные заголовки (тег + текст ОБЯЗАТЕЛЬНО сохрани ВНУТРИ полей text / content / answer соответствующего блока):\n${sampleHeadings.map((h) => `• <${h.tag}>${h.text}</${h.tag}>`).join('\n')}${missingHeadings.length > sampleHeadings.length ? `\n• …и ещё ${missingHeadings.length - sampleHeadings.length} заголовок(ов).` : ''}`
+      : '';
     const correctiveSystem = systemPromptBase + `\n\n[ИСПРАВЛЕНИЕ — КРИТИЧНО]
-В предыдущей попытке ты ПОТЕРЯЛ перечисленные ниже фрагменты исходного текста. Верни ИХ ВСЕ ДОСЛОВНО внутри подходящих полей text/content/answer соответствующих блоков. Не перефразируй, не сокращай, не нормализуй пробелы.
-Потерянные фрагменты (по одной строке на фрагмент):
-${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\n• …и ещё ${missing.length - sample.length} фрагмент(ов) — не забудь их тоже.` : ''}`;
-    const correctiveUser = `Сформируй массив JSON ACF заново для того же исходника, СОХРАНИВ ВСЕ потерянные фрагменты дословно. Исходник:\n\n${chunkHtmlText}`;
+В предыдущей попытке ты допустил потери. Верни ВСЁ ПЕРЕЧИСЛЕННОЕ НИЖЕ ДОСЛОВНО внутри подходящих полей text/content/answer. Не перефразируй, не сокращай, не нормализуй пробелы. Заголовки сохраняй именно теми же тегами <h2>/<h3>/<h4>/<h5>, а не оборачивай их в <p>.
+${[phrasesBlock, headingsBlock].filter(Boolean).join('\n\n')}`;
+    const correctiveUser = `Сформируй массив JSON ACF заново для того же исходника, СОХРАНИВ ВСЕ потерянные фрагменты и заголовки дословно. Исходник:\n\n${chunkHtmlText}`;
     const corrective = await callLlm({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
     const choice2 = corrective.choice;
     tokensInTotal  += corrective.tokensIn;
@@ -995,16 +1135,22 @@ ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\
       try {
         const retryArr = parseModelOutputArray(choice2.message?.content);
         const retryPlain = outputPlainText(retryArr);
-        const retryMissing = findMissingPhrases(chunkHtmlText, retryPlain);
-        if (retryMissing.length === 0) {
+        const retryMissing  = findMissingPhrases(chunkHtmlText, retryPlain);
+        const retryHeadings = findMissingHeadings(chunkHtmlText, retryArr);
+        const wasBetter =
+          retryMissing.length + retryHeadings.length
+            < missing.length + missingHeadings.length;
+        if (retryMissing.length === 0 && retryHeadings.length === 0) {
           outputArray = retryArr;
           outPlain = retryPlain;
           missing = [];
-        } else if (retryMissing.length < missing.length) {
+          missingHeadings = [];
+        } else if (wasBetter) {
           // Прогресс есть, но не идеально — берём лучший вариант и сообщаем.
           outputArray = retryArr;
           outPlain = retryPlain;
           missing = retryMissing;
+          missingHeadings = retryHeadings;
         }
       } catch (parseErr) {
         // Если корректирующий ответ не распарсился — оставляем исходную ошибку.
@@ -1018,6 +1164,13 @@ ${sample.map((m) => `• ${m}`).join('\n')}${missing.length > sample.length ? `\
     const totalLost = missing.reduce((a, m) => a + m.length, 0);
     throw new Error(
       `${chunkLabel}: после ре-запроса в JSON отсутствуют ${missing.length} фрагмент(ов) исходного текста (≈${totalLost} симв.). Примеры: ${sample}. Сгенерированный JSON НЕ применён, чтобы не потерять контент.`,
+    );
+  }
+
+  if (missingHeadings.length > 0) {
+    const sample = missingHeadings.slice(0, 5).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
+    throw new Error(
+      `${chunkLabel}: после ре-запроса в JSON отсутствуют ${missingHeadings.length} оригинальный(ых) заголовок(ов) исходного HTML (теги h2–h5). Примеры: ${sample}. Сгенерированный JSON НЕ применён, чтобы не сломать разметку статьи при импорте в WordPress.`,
     );
   }
 

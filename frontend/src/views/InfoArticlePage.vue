@@ -581,6 +581,19 @@ const renderedImages = computed(() => {
   return arr.filter((p) => p.status === 'done' && p.image_base64);
 });
 
+// Все промпты обложки независимо от статуса — нужно, чтобы UI показал
+// блок «Обложка» даже если генерация в процессе или завершилась ошибкой
+// (тогда пользователь увидит понятное сообщение, а не пустоту).
+const allImagePrompts = computed(() => {
+  const arr = Array.isArray(selectedTask.value?.image_prompts) ? selectedTask.value.image_prompts : [];
+  return arr;
+});
+
+// Есть ли хоть один готовый image_base64 в image_prompts. Используется для
+// решения — показывать ли «полный» блок обложки с превью+кнопками или
+// только индикатор статуса генерации.
+const hasAnyRenderedImage = computed(() => renderedImages.value.length > 0);
+
 // ── Скачивание / копирование сгенерированных изображений ──────────────
 // Изображения приходят с бэкенда уже в base64 (см. nanoBananaPro.adapter.js
 // → infoArticlePipeline.runImageGeneration). Чтобы пользователь мог их
@@ -1012,34 +1025,57 @@ onUnmounted(() => { stopTicker(); });
               <button class="btn-ghost border border-gray-700" @click="copyAsFormattedText">📝 Скопировать форматированный текст</button>
               <button class="btn-ghost border border-gray-700" @click="downloadHtml">⬇ Скачать .html</button>
             </div>
-            <article ref="articlePreviewRef"
-                     class="info-article-preview prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
-                     v-html="sanitizedHtml"></article>
 
-            <div v-if="renderedImages.length" class="space-y-2">
+            <!-- 🖼 Обложка статьи: всегда видна, когда есть хоть один промпт.
+                 Показывает либо превью с кнопками «Скачать»/«Копировать», либо
+                 индикатор pending/error — чтобы пользователь сразу понимал
+                 статус генерации обложки, а не считал, что её «нет».
+                 Размещаем ВЫШЕ текста статьи, чтобы кнопки были на виду. -->
+            <div v-if="allImagePrompts.length" class="space-y-2">
               <h3 class="text-sm font-semibold text-indigo-300 uppercase tracking-wider">🖼 Обложка для публикации на сайт</h3>
-              <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+
+              <div v-if="hasAnyRenderedImage" class="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div v-for="(img, idx) in renderedImages" :key="img.slot || idx"
                      class="bg-gray-950 border border-gray-800 rounded-lg p-2 space-y-2">
                   <img :src="`data:${img.mime_type || 'image/png'};base64,${img.image_base64}`"
                        :alt="img.alt_ru || ''"
-                       class="w-full h-40 object-cover rounded" />
+                       class="w-full h-48 object-cover rounded" />
                   <div class="text-[11px] text-gray-400 truncate" :title="img.alt_ru">{{ img.alt_ru || '—' }}</div>
                   <div class="flex gap-2">
                     <button type="button"
-                            class="flex-1 text-[11px] px-2 py-1 rounded border border-gray-700 hover:bg-gray-800 text-gray-200"
+                            class="flex-1 text-xs px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
                             @click="downloadImage(img, idx)">
                       ⬇ Скачать
                     </button>
                     <button type="button"
-                            class="flex-1 text-[11px] px-2 py-1 rounded border border-gray-700 hover:bg-gray-800 text-gray-200"
+                            class="flex-1 text-xs px-2 py-1.5 rounded border border-gray-700 hover:bg-gray-800 text-gray-200"
                             @click="copyImage(img)">
                       📋 Копировать
                     </button>
                   </div>
                 </div>
               </div>
+
+              <!-- Промпт есть, но image_base64 ещё не готов — pending/error. -->
+              <div v-else class="text-xs space-y-1 p-3 rounded border border-gray-800 bg-gray-950">
+                <template v-for="(img, idx) in allImagePrompts" :key="img.slot || idx">
+                  <div v-if="img.status === 'error'" class="text-red-300">
+                    ⚠ Slot {{ img.slot || (idx + 1) }}: ошибка генерации обложки.
+                    <span v-if="img.error" class="text-red-400/70">{{ img.error }}</span>
+                  </div>
+                  <div v-else-if="img.status === 'done'" class="text-yellow-300">
+                    Slot {{ img.slot || (idx + 1) }}: статус «done», но base64 пуст — повторите задачу.
+                  </div>
+                  <div v-else class="text-gray-400">
+                    ⏳ Slot {{ img.slot || (idx + 1) }}: генерация обложки ещё идёт…
+                  </div>
+                </template>
+              </div>
             </div>
+
+            <article ref="articlePreviewRef"
+                     class="info-article-preview prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
+                     v-html="sanitizedHtml"></article>
           </div>
 
           <!-- TAB: Перелинковка -->
