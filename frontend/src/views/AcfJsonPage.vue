@@ -1086,7 +1086,7 @@ async function processChunk({
     // обёртку, добавляет тексты вокруг массива или ломает кавычки. Один
     // повтор с явной инструкцией «верни ТОЛЬКО валидный JSON-массив» в
     // 95% случаев чинит это, и мы не валим всю задачу из-за одного чанка.
-    const fixSystem = systemPromptBase + `\n\n[ИСПРАВЛЕНИЕ — JSON-PARSE]\nПредыдущий ответ не распарсился как JSON-массив. Причина: ${String(parseErr.message || parseErr).slice(0, 200)}.\nВерни СТРОГО валидный JSON-массив объектов и НИЧЕГО кроме него: без markdown-обёрток \`\`\`json, без комментариев, без текста до или после массива.`;
+    const fixSystem = systemPromptBase + `\n\n[ИСПРАВЛЕНИЕ — JSON-PARSE]\nПредыдущий ответ не распарсился как JSON-массив. Причина: ${(() => { const m = String(parseErr.message || parseErr); return m.length > 200 ? m.slice(0, 200) + '…' : m; })()}.\nВерни СТРОГО валидный JSON-массив объектов и НИЧЕГО кроме него: без markdown-обёрток \`\`\`json, без комментариев, без текста до или после массива.`;
     const fix = await callLlm({ systemPrompt: fixSystem, userPrompt });
     tokensInTotal  += fix.tokensIn;
     tokensOutTotal += fix.tokensOut;
