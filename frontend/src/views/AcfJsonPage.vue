@@ -404,7 +404,15 @@ async function selectTask(task) {
       // через DOMPurify). Берём его дословно — генератор уже встроил в HTML
       // обложку и интерлинки, и именно этот HTML должен уходить в JSON.
       const blogTask = await infoStore.getTask(task.id);
-      selectedHtml.value = blogTask?.article_html || '';
+      // ТЗ: при подгрузке блог-статьи в JSON-вкладку из article_html не должен
+      // утекать ни <h1>, ни встроенная обложка (info-article-cover, base64
+      // data: URI весом до сотен КБ). Раньше необработанный article_html
+      // показывался в превью селектора задач — пользователь видел гигантскую
+      // строку base64 и H1 в счётчике символов. Сами job-овые ветки уже
+      // дублируют эту чистку (см. runJob ниже), но нам важно нормализовать
+      // ИМЕННО на этапе подгрузки, чтобы UI и счётчик размера показывали то,
+      // что реально уйдёт в JSON.
+      selectedHtml.value = stripH1FromHtml(stripInlineMediaFromHtml(blogTask?.article_html || ''));
     }
     if (!selectedHtml.value) {
       formError.value =

@@ -473,8 +473,38 @@ const sanitizedHtml = computed(() => {
 });
 
 async function copyAsHtml() {
-  const html = selectedTask.value?.article_html;
-  if (!html) return;
+  const rawHtml = selectedTask.value?.article_html;
+  if (!rawHtml) return;
+
+  // ТЗ: «Скопировать как HTML» должна копировать ТОЛЬКО тело статьи —
+  // без заголовка <h1> и без обложки. Пользователь вставляет полученный
+  // HTML в редактор блога, где заголовок и featured-image задаются
+  // отдельными полями, поэтому дублировать их в теле не нужно (а base64
+  // обложки ещё и раздувает буфер до сотен КБ).
+  // Стрипаем:
+  //   • <h1>…</h1>           — единственный H1 статьи (см. embedImages в
+  //                             backend/src/services/infoArticle/infoArticlePipeline.js,
+  //                             validateWriterOutput гарантирует ровно 1 шт.);
+  //   • <figure …><img …></figure> и одиночные <img>/<picture> — обложку
+  //     info-article-cover с data:image/...;base64,… (embedImages вшивает её
+  //     сразу после </h1>).
+  let html = String(rawHtml);
+  html = html.replace(/<h1\b[^>]*>[\s\S]*?<\/h1\s*>/gi, '');
+  html = html.replace(/<\/?h1\b[^>]*>/gi, '');
+  for (let i = 0; i < 10; i += 1) {
+    const next = html.replace(/<figure\b[^>]*>[\s\S]*?<\/figure\s*>/gi, '');
+    if (next === html) break;
+    html = next;
+  }
+  for (let i = 0; i < 10; i += 1) {
+    const next = html.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
+    if (next === html) break;
+    html = next;
+  }
+  html = html.replace(/<img\b[^>]*\/?>/gi, '');
+  // Подчищаем потенциальные пустые ведущие переводы строк после удалений,
+  // чтобы вставка в редакторе начиналась сразу с первого осмысленного блока.
+  html = html.replace(/^(?:\s|&nbsp;|<br\s*\/?>)+/i, '');
 
   // ВАЖНО: «Скопировать как HTML» должна класть в буфер именно ИСХОДНЫЙ HTML
   // как plain-text, чтобы при вставке в WYSIWYG-редактор блог-движка / Word /
