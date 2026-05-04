@@ -28,7 +28,7 @@ import api from '../api.js';
 // LLM-режиму через Qwen, гарантирующая инвариант «текст не меняется»
 // математически (копирует HTML абзацев/заголовков byte-for-byte через
 // node.outerHTML). Используется по умолчанию, см. JOB_MODE_DEFAULT ниже.
-import { buildAcfFromHtml } from '../utils/acfDeterministicBuilder.js';
+import { buildAcfFromHtml, extractSectionDescriptors } from '../utils/acfDeterministicBuilder.js';
 
 const store          = useTasksStore();          // SEO-генератор (/api/tasks)
 const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api/info-article)
@@ -71,6 +71,12 @@ const TEXT_FIELD_NAMES = /^(text|content|answer|expert|subtitle)$/i;
 //   Гарантирует инвариант «текст/заголовки не меняются» на 100% (копирует
 //   HTML абзацев byte-for-byte). Не ходит в LLM, значит проблема HTTP 413 от
 //   промежуточного прокси здесь невозможна в принципе. Рекомендуется по умолчанию.
+// 'hybrid'        — программный билдер с LLM-классификатором acf_fc_layout.
+//   Делает РОВНО ОДИН запрос к Qwen с компактными дескрипторами секций
+//   (без полного текста), получает массив { index, layout } и передаёт
+//   подсказки в buildAcfFromHtml. Сам текст в LLM НЕ уходит — инвариант
+//   сохранности соблюдается математически. При сетевом сбое классификатора
+//   автоматически откатывается в чистый 'deterministic' (с предупреждением).
 // 'llm'           — старый путь через DashScope/Qwen. Оставлен как фолбэк
 //   для случаев, когда заказчик хочет «творческой» переаранжировки контента
 //   и осознанно готов мириться с риском мелких потерь.
@@ -79,10 +85,11 @@ const JOB_MODE_DEFAULT = 'deterministic';
 // каждый раз заново. Версионированный ключ — на случай будущих изменений
 // набора режимов.
 const JOB_MODE_LS_KEY = 'acfJsonJobMode:v1';
+const VALID_JOB_MODES = new Set(['deterministic', 'hybrid', 'llm']);
 const jobMode = ref((() => {
   try {
     const saved = localStorage.getItem(JOB_MODE_LS_KEY);
-    if (saved === 'deterministic' || saved === 'llm') return saved;
+    if (VALID_JOB_MODES.has(saved)) return saved;
   } catch { /* приватный режим / SSR — не валим UI */ }
   return JOB_MODE_DEFAULT;
 })());
@@ -167,7 +174,7 @@ function loadJobsFromStorage() {
       // не имели поля j.mode и шли через LLM. Сохраняем их прежнее поведение,
       // даже если глобальный jobMode у пользователя теперь 'deterministic',
       // — чтобы перезагрузка страницы не подменяла «контракт» уже стоящей задачи.
-      const withMode = j.mode === 'deterministic' || j.mode === 'llm'
+      const withMode = VALID_JOB_MODES.has(j.mode)
         ? j
         : { ...j, mode: 'llm' };
       if (withMode.status === 'processing') {
@@ -1510,6 +1517,10 @@ function addJob() {
     tokensIn:     0,                  // суммарно prompt_tokens по всем под-вызовам DashScope
     tokensOut:    0,                  // суммарно completion_tokens
     costRub:      0,                  // ₽: tokensIn/1M*INPUT + tokensOut/1M*OUTPUT
+    // Не-фатальные предупреждения (например, деградация гибрида в
+    // детерминированный режим при сбое LLM-классификатора). Массив, чтобы
+    // в будущем было куда копить разные диагностические сообщения.
+    warnings:     [],
   };
   // Новые задачи — наверх списка, чтобы пользователь сразу видел свежесозданное.
   jobs.value.unshift(job);
@@ -1551,6 +1562,7 @@ function retryJob(jobId) {
   j.tokensIn   = 0;
   j.tokensOut  = 0;
   j.costRub    = 0;
+  j.warnings   = [];
   runQueue();
 }
 
@@ -1572,6 +1584,73 @@ async function runQueue() {
   }
 }
 
+// ── LLM-классификатор секций (гибридный режим) ───────────────────────────
+// Делает РОВНО ОДИН запрос к Qwen с компактным дескриптором каждой секции
+// (h2_text, статистики формы, превью первых 200 симв.). В тело запроса НЕ
+// уходит сам текст абзацев — это:
+//   • защищает от нарушения «текст не меняется» (модель физически не видит
+//     контент, который потом будет упакован в JSON);
+//   • держит payload в сотнях байт на секцию → проблема HTTP 413 от
+//     промежуточных прокси невозможна даже на больших статьях.
+// Возвращает Map<index, layout>. На любой ошибке (сеть/таймаут/некорректный
+// JSON от модели) — бросает; вызывающий код (runJob) откатывается в чистый
+// детерминированный режим, чтобы статья всё равно собралась.
+const CLASSIFIER_SYSTEM_PROMPT = `Ты — классификатор секций HTML-статьи в типы блоков WordPress ACF Flexible Content.
+На вход получаешь JSON-массив секций со статистикой формы (без полного текста абзацев).
+Для КАЖДОЙ секции выбери ОДИН acf_fc_layout из набора:
+  blocks, steps, bens, price, faq, attention, expert, tabs.
+
+ПРАВИЛА ВЫБОРА (применять в указанном порядке):
+1. "faq" — h2_text про вопросы/FAQ ("вопросы", "часто задаваемые", "FAQ", "вопрос ответ") И в body есть пары заголовков (h3_count>=2 или h4_count>=2).
+2. "expert" — h2_text про мнение эксперта/специалиста/врача/юриста/мастера И blockquote_present:true. ЛИМИТ: использовать МАКСИМУМ 1 РАЗ на всю статью; если уже использовал — дальше выбирай "blocks".
+3. "price" — h2_text про цены/стоимость/тарифы/прайс ИЛИ money_present:true.
+4. "steps" — h2_text про этапы/шаги/процесс/процедуру/как мы работаем/инструкцию/порядок ИЛИ ol_present:true.
+5. "bens" — h2_text про преимущества/плюсы/выгоды/почему выбирают.
+6. "attention" — h2_text про важно/внимание/осторожно/предупреждение/противопоказания.
+7. "tabs" — h2_text про диагностику/признаки/способы проверки/виды/типы/варианты И h3_count>=2.
+8. "blocks" — fallback: введение, заключение, выводы, история, общие описания и всё, что не подошло выше. Также используй "blocks" для секции с h2_text=="" (вступительный блок без заголовка).
+
+ФОРМАТ ОТВЕТА — СТРОГО JSON-массив, без markdown, без комментариев, без пояснений:
+[{"index":0,"layout":"blocks"},{"index":1,"layout":"steps"}, ...]
+
+КРИТИЧЕСКИ ВАЖНО:
+- Каждой секции из входа должен соответствовать ровно один объект {index,layout} в выходе.
+- index у каждой секции — именно тот, что передан во входе (не пересчитывай).
+- Никаких дополнительных полей, никаких комментариев, никакого текста вне JSON.`;
+
+async function classifySectionsViaLLM(descriptors) {
+  if (!Array.isArray(descriptors) || !descriptors.length) {
+    return { hints: new Map(), tokensIn: 0, tokensOut: 0 };
+  }
+  const userPrompt = JSON.stringify(descriptors);
+  const { choice, tokensIn, tokensOut } = await callLlm({
+    systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+    userPrompt,
+  });
+  const raw = choice?.message?.content || '';
+  // Используем тот же безопасный экстрактор, что и для основной LLM-ветки —
+  // он вытаскивает чистый JSON-массив даже из «грязной» обёртки markdown.
+  let parsed;
+  try {
+    const cleaned = extractCleanJson(raw);
+    parsed = JSON.parse(cleaned);
+  } catch (parseErr) {
+    throw new Error(`LLM-классификатор вернул невалидный JSON: ${parseErr.message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('LLM-классификатор вернул не массив.');
+  }
+  const hints = new Map();
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue;
+    const idx = Number(item.index);
+    const layout = typeof item.layout === 'string' ? item.layout.toLowerCase().trim() : '';
+    if (!Number.isInteger(idx) || !layout) continue;
+    hints.set(idx, layout);
+  }
+  return { hints, tokensIn, tokensOut };
+}
+
 // Обработка одной задачи. Использует существующий безопасный сплиттер +
 // post-validation (см. processChunk выше).
 async function runJob(job) {
@@ -1585,6 +1664,7 @@ async function runJob(job) {
   job.tokensIn   = 0;
   job.tokensOut  = 0;
   job.costRub    = 0;
+  job.warnings   = [];
   const t0       = Date.now();
 
   try {
@@ -1603,9 +1683,44 @@ async function runJob(job) {
     // ── Режим 1: программная (детерминированная) сборка JSON ─────────────
     // Не идёт в LLM. Гарантирует «текст не меняется», работает мгновенно.
     // Подходит для типового HTML, который генерирует наш SEO/блог-pipeline.
-    if (job.mode === 'deterministic') {
+    //
+    // Гибридный режим — РАСШИРЕНИЕ детерминированного: один LLM-вызов
+    // с компактными дескрипторами секций (без полного текста) для уточнения
+    // выбора acf_fc_layout. Сам текст по-прежнему упаковывается программно
+    // через node.outerHTML, поэтому инвариант сохранности соблюдается.
+    if (job.mode === 'deterministic' || job.mode === 'hybrid') {
+      let layoutHints = null;
+
+      if (job.mode === 'hybrid') {
+        try {
+          job.progress = 'LLM-классификатор: анализ секций…';
+          const descriptors = extractSectionDescriptors(html);
+          if (descriptors.length) {
+            const { hints, tokensIn, tokensOut } = await classifySectionsViaLLM(descriptors);
+            layoutHints = hints;
+            // Учитываем токены классификатора в общей стоимости задачи —
+            // пользователь видит реальную цену гибридного режима в UI.
+            job.tokensIn  += tokensIn;
+            job.tokensOut += tokensOut;
+            job.costRub    = computeJobCost(job.tokensIn, job.tokensOut);
+          }
+        } catch (classifyErr) {
+          // Любой сбой классификатора (сеть/таймаут/невалидный JSON от модели)
+          // НЕ блокирует сборку: откатываемся в чистый детерминированный режим.
+          // Сохраняем диагностику в job.warnings, чтобы пользователь видел
+          // причину «деградации» в карточке задачи.
+          console.warn('[AcfJson] LLM-классификатор упал, фолбэк в детерминированный режим:', classifyErr);
+          if (!Array.isArray(job.warnings)) job.warnings = [];
+          job.warnings.push(
+            `Гибридный режим: LLM-классификатор недоступен (${classifyErr.message || classifyErr}). `
+            + 'Сборка прошла на чистой эвристике билдера — текст и заголовки сохранены.'
+          );
+          layoutHints = null;
+        }
+      }
+
       job.progress = 'Программная сборка JSON…';
-      const finalArray = buildAcfFromHtml(html);
+      const finalArray = buildAcfFromHtml(html, layoutHints ? { layoutHints } : undefined);
       // Применяем общий пост-чистильщик (subtitle='', срез нумерации,
       // дедуп FAQ-вопроса), чтобы вывод обоих режимов был согласован
       // в полях и валидаторы вели себя одинаково.
@@ -2027,6 +2142,18 @@ function fmtCost(rub) {
               <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white py-1">
                 <input
                   type="radio"
+                  value="hybrid"
+                  v-model="jobMode"
+                  class="mt-0.5"
+                />
+                <span>
+                  <span class="font-semibold">Гибрид (LLM-классификатор + программная упаковка)</span>
+                  <span class="text-gray-500"> — один лёгкий запрос к Qwen для выбора типа блока (только метаданные секций, не текст). Сам текст упаковывается программно byte-for-byte. Точнее распознаёт нестандартные заголовки. При сетевом сбое классификатора автоматически откатывается в «Программный».</span>
+                </span>
+              </label>
+              <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white py-1">
+                <input
+                  type="radio"
                   value="llm"
                   v-model="jobMode"
                   class="mt-0.5"
@@ -2103,9 +2230,10 @@ function fmtCost(rub) {
                       >{{ j.source === 'blog' ? 'Блог' : (j.source === 'manual' ? 'Свой текст' : 'SEO') }}</span>
                       <!--
                         Бейдж режима сборки: пользователю важно сразу видеть,
-                        какая задача шла программно, а какая через LLM —
-                        особенно при разборе ошибок (HTTP 413 возможен только
-                        в LLM-режиме).
+                        какая задача шла программно, какая через гибрид
+                        (программный билдер + LLM-классификатор), а какая
+                        полностью через LLM — особенно при разборе ошибок
+                        (HTTP 413 возможен только в LLM-режиме).
                       -->
                       <span
                         v-if="j.mode"
@@ -2113,12 +2241,16 @@ function fmtCost(rub) {
                           'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
                           j.mode === 'deterministic'
                             ? 'bg-teal-900/60 text-teal-300 border border-teal-700'
-                            : 'bg-amber-900/60 text-amber-300 border border-amber-700',
+                            : j.mode === 'hybrid'
+                              ? 'bg-sky-900/60 text-sky-300 border border-sky-700'
+                              : 'bg-amber-900/60 text-amber-300 border border-amber-700',
                         ]"
                         :title="j.mode === 'deterministic'
                           ? 'Программный режим: HTML → ACF JSON без LLM'
-                          : 'LLM-режим: через DashScope/Qwen'"
-                      >{{ j.mode === 'deterministic' ? 'Программно' : 'LLM' }}</span>
+                          : j.mode === 'hybrid'
+                            ? 'Гибридный режим: LLM-классификатор выбирает тип блока, упаковка программная (текст не уходит в LLM)'
+                            : 'LLM-режим: через DashScope/Qwen'"
+                      >{{ j.mode === 'deterministic' ? 'Программно' : (j.mode === 'hybrid' ? 'Гибрид' : 'LLM') }}</span>
                       <span class="truncate">#{{ j.id }} · {{ j.title }}</span>
                     </p>
                     <p class="text-xs text-gray-500 mt-0.5">
@@ -2131,6 +2263,21 @@ function fmtCost(rub) {
                         — {{ j.error }}
                       </span>
                     </p>
+                    <!--
+                      Предупреждения (не-фатальные). Сейчас сюда попадает
+                      деградация гибридного режима в чистый детерминированный
+                      при сбое LLM-классификатора. Текст и заголовки в этом
+                      случае всё равно сохранены — это просто инфо.
+                    -->
+                    <template v-if="Array.isArray(j.warnings) && j.warnings.length">
+                      <p
+                        v-for="(w, wIdx) in j.warnings"
+                        :key="wIdx"
+                        class="text-[11px] text-amber-400 mt-0.5"
+                      >
+                        ⚠ {{ w }}
+                      </p>
+                    </template>
                     <!--
                       Метрики генерации (время + стоимость + токены).
                       Показываем для процессинга (растущие значения), done
