@@ -134,7 +134,9 @@ router.get('/health', auth, async (req, res) => {
       result.error = `DashScope ответил HTTP ${meta.status}: ${(meta.detail || meta.message || '').slice(0, 300)}`;
     } else if (meta && meta.kind === 'network') {
       result.error = `Сетевая ошибка до DashScope: ${meta.message}` +
-        (proxyUrl ? '' : ' (прокси не задан — для России обычно нужен DASHSCOPE_PROXY_URL / LLM_PROXY_URL)');
+        (proxyUrl
+          ? ' (проверьте DASHSCOPE_PROXY_URL — он задан, но обрывает соединение)'
+          : ' (Qwen ходит напрямую без прокси; если регион блокирует dashscope-intl.aliyuncs.com, задайте DASHSCOPE_PROXY_URL — общие LLM_PROXY_*/HTTPS_PROXY НЕ используются)');
     } else if (meta && meta.kind === 'empty') {
       result.error = `DashScope вернул пустой ответ: ${meta.message}`;
     } else {

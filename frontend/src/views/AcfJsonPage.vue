@@ -1406,11 +1406,12 @@ async function callLlm({ systemPrompt, userPrompt }) {
       const serverMsg = httpError.response.data?.error
         || `HTTP ${status}`;
       // HTTP 413 на этом маршруте почти всегда означает, что промежуточный
-      // HTTPS-прокси (DASHSCOPE_PROXY_URL / LLM_PROXY_URL), через который
-      // backend ходит на dashscope-intl.aliyuncs.com, отрезал тело запроса
-      // по своему лимиту. У дешёвых прокси типичный лимит body — 64 KB,
-      // и системный промт (~10 KB) + JSON-кодированный чанк (~4 KB при
-      // экранировании) с запасом туда не помещается. Рекомендуем переход
+      // HTTPS-прокси (DASHSCOPE_PROXY_URL — Qwen ходит независимо от других
+      // LLM, общие LLM_PROXY_*/HTTPS_PROXY для DashScope не используются),
+      // через который backend ходит на dashscope-intl.aliyuncs.com, отрезал
+      // тело запроса по своему лимиту. У дешёвых прокси типичный лимит body
+      // — 64 KB, и системный промт (~10 KB) + JSON-кодированный чанк (~4 KB
+      // при экранировании) с запасом туда не помещается. Рекомендуем переход
       // в детерминированный режим — там запрос к LLM вообще не уходит.
       if (status === 413) {
         throw new Error(

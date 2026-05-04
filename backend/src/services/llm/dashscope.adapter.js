@@ -56,12 +56,19 @@ function requireDashscopeApiKey() {
   return k;
 }
 
-// ── Прокси (опционально) ─────────────────────────────────────────────────
-// Приоритет: DASHSCOPE_PROXY_* → LLM_PROXY_* → HTTPS_PROXY.
-// В отличие от Gemini/Grok, здесь прокси НЕ обязателен:
-//   - DashScope intl endpoint обычно доступен напрямую;
-//   - если развёртывание стоит в локации, где `dashscope-intl.aliyuncs.com`
-//     заблокирован, админ задаёт `DASHSCOPE_PROXY_URL` или общий `LLM_PROXY_URL`.
+// ── Прокси (опционально, ТОЛЬКО собственные переменные) ─────────────────
+// DashScope/Qwen намеренно НЕ наследует общие прокси других LLM
+// (`LLM_PROXY_*`, `HTTPS_PROXY`, `GEMINI_PROXY_*`, `XAI_PROXY_*`),
+// чтобы вкладка «Сформировать JSON» оставалась полностью независимой:
+//   - intl-endpoint `dashscope-intl.aliyuncs.com` обычно доступен напрямую;
+//   - проблемы шарингового прокси (TLS-таймауты, обрыв сокета,
+//     413 Payload Too Large) не должны блокировать Qwen, если они
+//     возникают у Gemini/Grok.
+// Если в редкой ситуации требуется именно для DashScope маршрутизировать
+// трафик через прокси — задайте ЯВНО `DASHSCOPE_PROXY_URL`
+// (или связку `DASHSCOPE_PROXY_HOST`+`DASHSCOPE_PROXY_PORT`).
+// Никакого фолбэка на общие переменные больше нет — это сознательное
+// архитектурное решение, не баг.
 function _normalizeProxyUrl(raw) {
   if (!raw || typeof raw !== 'string') return '';
   const s = raw.trim();
@@ -71,7 +78,9 @@ function _normalizeProxyUrl(raw) {
 }
 
 function _resolveProxyUrl() {
-  // 1. Свои переменные DashScope
+  // Только явные DashScope-переменные. Никаких LLM_PROXY_* / HTTPS_PROXY /
+  // GEMINI_PROXY_* — Qwen работает напрямую, чтобы не зависеть от
+  // прокси других провайдеров (см. комментарий выше).
   const dsFull = process.env.DASHSCOPE_PROXY_URL || '';
   if (dsFull) return _normalizeProxyUrl(dsFull);
   const dsHost = process.env.DASHSCOPE_PROXY_HOST || '';
@@ -83,24 +92,6 @@ function _resolveProxyUrl() {
     if (u && p) return `${proto}://${encodeURIComponent(u)}:${encodeURIComponent(p)}@${dsHost}:${dsPort}`;
     return `${proto}://${dsHost}:${dsPort}`;
   }
-
-  // 2. Общие LLM_PROXY_*
-  const llmFull = process.env.LLM_PROXY_URL || '';
-  if (llmFull) return _normalizeProxyUrl(llmFull);
-  const llmHost = process.env.LLM_PROXY_HOST || '';
-  const llmPort = process.env.LLM_PROXY_PORT || '';
-  if (llmHost && llmPort) {
-    const u = process.env.LLM_PROXY_USER || '';
-    const p = process.env.LLM_PROXY_PASS || '';
-    const proto = process.env.LLM_PROXY_PROTO || 'http';
-    if (u && p) return `${proto}://${encodeURIComponent(u)}:${encodeURIComponent(p)}@${llmHost}:${llmPort}`;
-    return `${proto}://${llmHost}:${llmPort}`;
-  }
-
-  // 3. Системная HTTPS_PROXY (если задана)
-  const sysProxy = process.env.HTTPS_PROXY || process.env.https_proxy || '';
-  if (sysProxy) return _normalizeProxyUrl(sysProxy);
-
   return '';
 }
 
