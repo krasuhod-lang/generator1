@@ -826,6 +826,96 @@ function buildTagsBlock(section) {
 }
 
 // ── Публичный API ─────────────────────────────────────────────────────────
+
+// Допустимые значения acf_fc_layout. Используется для валидации внешних
+// подсказок (opts.layoutHints) — любое значение вне списка игнорируется и
+// уступает место эвристике, чтобы LLM-классификатор не мог «прокрасться»
+// и протолкнуть нестандартный layout, который сломает рендер на сайте.
+const VALID_LAYOUTS = new Set([
+  'blocks', 'steps', 'bens', 'price',
+  'faq', 'attention', 'expert', 'tabs',
+  'portfolio', 'tags',
+]);
+
+/**
+ * Извлекает компактные дескрипторы секций для внешнего классификатора
+ * (LLM-режим «гибрид»). Не возвращает полный текст секций — только
+ * короткое превью + статистики формы. Этого достаточно, чтобы модель
+ * выбрала правильный acf_fc_layout, при этом payload остаётся в пределах
+ * сотен байт на секцию (защита от HTTP 413 промежуточных HTTPS-прокси).
+ *
+ * Индексация дескрипторов СТРОГО соответствует индексации секций внутри
+ * `buildAcfFromHtml(html, { layoutHints })` — обе функции вызывают
+ * один и тот же `sliceByH2`, поэтому подсказки можно передавать
+ * напрямую по `index`.
+ *
+ * @param {string} html  — исходный HTML (тот же, что пойдёт в buildAcfFromHtml)
+ * @returns {Array<{
+ *   index: number,
+ *   h2_text: string,
+ *   body_stats: {
+ *     h3_count: number, h4_count: number, p_count: number,
+ *     ol_present: boolean, ul_present: boolean, table_present: boolean,
+ *     blockquote_present: boolean, money_present: boolean,
+ *     total_chars: number,
+ *   },
+ *   text_preview: string,
+ * }>}
+ */
+export function extractSectionDescriptors(html) {
+  const cleaned = stripH1(stripInlineMedia(html || ''));
+  if (!cleaned.trim()) return [];
+  const body = parseHtmlToBody(cleaned);
+  const sections = sliceByH2(body);
+
+  return sections.map((section, index) => {
+    const h2Text = section.h2 ? nodeText(section.h2) : '';
+    let h3Count = 0;
+    let h4Count = 0;
+    let pCount = 0;
+    let olPresent = false;
+    let ulPresent = false;
+    let tablePresent = false;
+    let blockquotePresent = false;
+    let moneyPresent = false;
+    let totalChars = 0;
+    const previewParts = [];
+    for (const n of section.body) {
+      const t = tag(n);
+      if (t === 'h3') h3Count += 1;
+      else if (t === 'h4') h4Count += 1;
+      else if (t === 'p') pCount += 1;
+      else if (t === 'ol') olPresent = true;
+      else if (t === 'ul') ulPresent = true;
+      else if (t === 'table') tablePresent = true;
+      else if (t === 'blockquote' && (n.textContent || '').trim()) blockquotePresent = true;
+      const txt = nodeText(n);
+      totalChars += txt.length;
+      if (previewParts.join(' ').length < 200 && txt) previewParts.push(txt);
+      if (!moneyPresent && (t === 'ul' || t === 'ol' || t === 'table')) {
+        if (PRICE_RE.test(n.textContent || '')) moneyPresent = true;
+      }
+    }
+    const text_preview = previewParts.join(' ').slice(0, 200);
+    return {
+      index,
+      h2_text: h2Text,
+      body_stats: {
+        h3_count: h3Count,
+        h4_count: h4Count,
+        p_count: pCount,
+        ol_present: olPresent,
+        ul_present: ulPresent,
+        table_present: tablePresent,
+        blockquote_present: blockquotePresent,
+        money_present: moneyPresent,
+        total_chars: totalChars,
+      },
+      text_preview,
+    };
+  });
+}
+
 /**
  * Главный экспорт. Принимает HTML-строку, возвращает массив ACF-блоков.
  *
@@ -837,20 +927,71 @@ function buildTagsBlock(section) {
  *   • Поле subtitle ВСЕГДА = '' (требование ТЗ).
  *
  * @param {string} html  — исходный HTML (любого размера)
+ * @param {object} [opts]
+ * @param {Map<number,string>|Array<string|{index:number,layout:string}>} [opts.layoutHints]
+ *   Внешние подсказки выбора acf_fc_layout (от LLM-классификатора в гибридном
+ *   режиме). Индексация СТРОГО по позиции секции из `extractSectionDescriptors`.
+ *   Невалидные значения / нарушение квоты `expert` автоматически отбрасываются
+ *   и заменяются на эвристику. Подсказка НИКОГДА не влияет на сам текст,
+ *   только на выбор контейнера — инвариант сохранности соблюдается.
  * @returns {Array<object>} массив ACF-блоков
  */
-export function buildAcfFromHtml(html) {
+export function buildAcfFromHtml(html, opts = {}) {
   const cleaned = stripH1(stripInlineMedia(html || ''));
   if (!cleaned.trim()) return [];
 
   const body = parseHtmlToBody(cleaned);
   const sections = sliceByH2(body);
 
+  // Нормализуем подсказки в Map<number,string>. Принимаем три формы:
+  //   • Map<number,string>          — самый удобный путь;
+  //   • массив строк по индексу     — layoutHints[i] = 'steps';
+  //   • массив объектов {index,layout} — формат прямого ответа LLM.
+  const hintMap = (() => {
+    const src = opts && opts.layoutHints;
+    if (!src) return null;
+    if (typeof src.get === 'function') return src;
+    if (!Array.isArray(src)) return null;
+    const m = new Map();
+    for (let i = 0; i < src.length; i += 1) {
+      const v = src[i];
+      if (typeof v === 'string') m.set(i, v);
+      else if (
+        v && typeof v === 'object'
+        && Number.isInteger(v.index) && v.index >= 0
+        && typeof v.layout === 'string'
+      ) {
+        // Out-of-range индексы (например, LLM придумал секцию №99) просто
+        // не совпадут ни с одной реальной секцией в основном цикле — это
+        // безопасно и корректно отрабатывает как «подсказки нет», поэтому
+        // здесь верхнюю границу не валидируем (она зависит от sections.length,
+        // которое доступно только в buildAcfFromHtml).
+        m.set(v.index, v.layout);
+      }
+    }
+    return m;
+  })();
+
+  function getHintLayout(idx, ctx) {
+    if (!hintMap) return null;
+    const raw = hintMap.get(idx);
+    if (typeof raw !== 'string') return null;
+    const norm = raw.toLowerCase().trim();
+    if (!VALID_LAYOUTS.has(norm)) return null;
+    // Уважаем квоту 1 expert на статью — даже если LLM подсказала второй.
+    if (norm === 'expert' && ctx.expertUsed) return null;
+    return norm;
+  }
+
   const out = [];
   const ctx = { expertUsed: false };
 
-  for (const section of sections) {
-    const layout = classifySection(section, ctx);
+  for (let sectionIdx = 0; sectionIdx < sections.length; sectionIdx += 1) {
+    const section = sections[sectionIdx];
+    // Подсказка имеет приоритет; если её нет / она невалидна / нарушает
+    // квоту — падаем на исходную эвристику, чтобы статья всё равно собралась.
+    const hinted = getHintLayout(sectionIdx, ctx);
+    const layout = hinted || classifySection(section, ctx);
     // Helper: для типов, у которых внутренние HTML-поля занимают ОТДЕЛЬНЫЕ
     // фрагменты исходных <li>/<td> (а значит, попытка вставить туда же
     // исходный <h2> ломает phrase-windows в findMissingPhrases — окно
