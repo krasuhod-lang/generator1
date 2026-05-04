@@ -201,7 +201,7 @@ router.get('/health', auth, async (req, res) => {
  *   {
  *     systemPrompt: string,     // обязателен (можно пустую строку)
  *     userPrompt:   string,     // обязателен, непустой
- *     model?:       string,     // опц.; по умолчанию DASHSCOPE_MODEL_DEFAULT (qwen3.6-plus)
+ *     model?:       string,     // опц.; по умолчанию DASHSCOPE_MODEL_DEFAULT (читается из process.env.DASHSCOPE_MODEL)
  *     temperature?: number,     // 0..2, по умолчанию 0.1
  *     max_tokens?:  number      // 1..MAX_OUTPUT_TOKENS, по умолчанию 16384
  *   }
