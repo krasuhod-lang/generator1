@@ -177,6 +177,7 @@ function _sanitizeAxiosError(err) {
  * @param {string}   params.userPrompt        — user message (обязателен, непустой)
  * @param {string}  [params.model]            — переопределяет DASHSCOPE_MODEL
  * @param {number}  [params.temperature=0.1]
+ * @param {number}  [params.topP]             — nucleus sampling (0, 1]; не передаётся в body, если undefined
  * @param {number}  [params.maxTokens=16384]
  * @param {number}  [params.timeoutMs]
  * @returns {Promise<{ choice: object, usage: object|null }>}
@@ -190,6 +191,7 @@ async function callDashscope({
   userPrompt,
   model,
   temperature,
+  topP,
   maxTokens,
   timeoutMs,
 } = {}) {
@@ -221,6 +223,14 @@ async function callDashscope({
     // (В стрим-режиме DashScope разделяет delta.reasoning_content и delta.content.)
     enable_thinking: false,
   };
+
+  // top_p — nucleus sampling. Включаем в body только если caller явно передал
+  // валидное значение в (0, 1], иначе оставляем дефолт DashScope. Малые
+  // значения (≤0.1) вместе с temperature=0 нужны вкладке «Сформировать JSON»
+  // для строго детерминированного парсинга HTML без галлюцинаций.
+  if (Number.isFinite(topP) && topP > 0 && topP <= 1) {
+    body.top_p = Number(topP);
+  }
 
   const url = `${DASHSCOPE_BASE_URL}/chat/completions`;
 
