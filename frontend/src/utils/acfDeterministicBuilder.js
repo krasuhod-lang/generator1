@@ -497,7 +497,9 @@ function _extractStepLikeItems(body) {
         // как видимый заголовок шага/преимущества. Иначе пользователь видит
         // ОДИН и тот же подзаголовок дважды (стилизованный + сырой <h3>).
         // Сохранность подтверждается title-канон-исключением в
-        // findMissingHeadings (см. AcfJsonPage.vue).
+        // findMissingHeadings (см. AcfJsonPage.vue). Дополнительная защита
+        // для LLM-режима: dedupeLeadingHeading в postCleanupAcfArray
+        // подчищает такой ведущий <hN>, если LLM всё-таки его сгенерировала.
         items.push({
           title: titleStr,
           text: nodesToHtml(restNodes),
