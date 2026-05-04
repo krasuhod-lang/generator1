@@ -299,17 +299,7 @@ function shortTitle(h2Node, fallback) {
   return s;
 }
 
-// Возвращает HTML-строку открытого+закрытого тега заголовка, побайтно
-// идентичную исходному узлу. Используется для prepend'а исходного <h2>
-// внутрь полей блоков, у которых иначе нет места для дословного хранения
-// (steps/bens/tabs/faq/expert-blockquote/price/portfolio/tags). Без этого
-// валидатор findMissingHeadings из AcfJsonPage.vue репортит «потерянный
-// h2» — короткое поле title не считается дословным сохранением заголовка.
-function h2ToHtml(h2Node) {
-  if (!h2Node) return '';
-  if (h2Node.nodeType === 1) return h2Node.outerHTML;
-  return '';
-}
+// (Хелпер h2ToHtml удалён вместе с механизмом «sibling-h2».)
 
 // ── Хелперы для сохранения «остаточного» контента ─────────────────────────
 // Несколько специализированных билдеров (price/steps-ol/expert/tags) умеют
@@ -425,12 +415,11 @@ function buildFaqBlock(section) {
   };
 }
 
-// (h2 для секций, у которых нет «безвредного» места дословно держать
-// заголовок, выносится во внешний sibling-блок через h2HoldingMiniBlock —
-// см. orchestrator). Внутрь items[0].text/answer вставлять H2 нельзя, потому
-// что это разрывает phrase-windows исходного <li> в пост-валидации
-// findMissingPhrases (окно «strong-часть … обычная часть» одного <li>
-// после такой вставки перестаёт быть смежным в outputPlainText).
+// (Раньше для секций без «безвредного» места дословно держать заголовок
+// эмитился внешний sibling-блок через h2HoldingMiniBlock, но он создавал
+// визуальный дубль с `title` виджета. Сейчас findMissingHeadings принимает
+// заголовок как сохранённый, если его канон совпал с `title` блока — этого
+// достаточно, чтобы инвариант не нарушался без дубля в HTML).
 
 // steps — две формы:
 //   • <ol><li>...</li>...</ol> → каждый <li> = шаг (title=первая строка/<strong>, text=остальное)
@@ -503,12 +492,15 @@ function _extractStepLikeItems(body) {
           restNodes.push(body[j]);
           j += 1;
         }
-        // ВНИМАНИЕ: оригинальный <h3>/<h4> сохраняем ВНУТРИ text — это
-        // зеркальное требование к LLM-режиму (см. ЗАДАЧА 1A в системном
-        // промте). Без этого валидатор findMissingHeadings репортит потерю.
+        // ИСХОДНЫЙ <h3>/<h4> в items[].text НЕ дублируем: его текст уже
+        // лежит в items[].title, а WP-виджет (steps/bens) рендерит title
+        // как видимый заголовок шага/преимущества. Иначе пользователь видит
+        // ОДИН и тот же подзаголовок дважды (стилизованный + сырой <h3>).
+        // Сохранность подтверждается title-канон-исключением в
+        // findMissingHeadings (см. AcfJsonPage.vue).
         items.push({
           title: titleStr,
-          text: nodesToHtml([node, ...restNodes]),
+          text: nodesToHtml(restNodes),
         });
         i = j;
       } else {
@@ -572,31 +564,8 @@ function buildBensBlock(section) {
   return wrapWithLeftovers(primary, preLeftover, postLeftover);
 }
 
-// Хелпер: «слепок» H2 как полноценный мини-блок blocks для тех типов
-// (price/tags), которые НЕ имеют ни одного HTML-поля для дословного
-// хранения <h2>. Дерём text=`<h2>...</h2>` (одна строка) — структурно это
-// валидный блок blocks по схеме методички, и валидатор сохранности
-// заголовков его принимает как «h2 на месте».
-function h2HoldingMiniBlock(h2Node) {
-  if (!h2Node) return null;
-  const html = h2ToHtml(h2Node);
-  if (!html) return null;
-  return {
-    acf_fc_layout: 'blocks',
-    title: shortTitle(h2Node, 'Раздел'),
-    subtitle: '',
-    blocks: [{
-      block_width: '12',
-      bg_color: 'default',
-      text: html,
-      image: '',
-      url: '',
-    }],
-    type: '1',
-    vert_center: false,
-    block_equal_height: false,
-  };
-}
+// (Хелпер h2HoldingMiniBlock удалён вместе с механизмом «sibling-h2».
+// Если потребуется снова — восстановить из истории git.)
 
 // price — таблица или список с денежными хвостами.
 // Возвращает МАССИВ блоков (mini-blocks с H2 + сам price + опциональные
@@ -740,9 +709,11 @@ function buildTabsBlock(section) {
       }
       items.push({
         title: titleStr,
-        // Внутри content сохраняем оригинальный <h3> — зеркало правила
-        // «ZERO HEADING LOSS» из системного промта (см. ЗАДАЧА 1A).
-        content: nodesToHtml([node, ...restNodes]),
+        // Не префиксируем content исходным <h3>/<h4>: в виджете tabs
+        // items[].title рендерится как «название вкладки», и тот же текст
+        // в content отдельным заголовком создаёт визуальный дубль. Канон
+        // title учитывается title-канон-исключением findMissingHeadings.
+        content: nodesToHtml(restNodes),
       });
       i = j;
     } else {
@@ -765,20 +736,22 @@ function buildTabsBlock(section) {
 
 // portfolio — пустая галерея (фото в WP подгружаются вручную). Но H2 и
 // весь сопутствующий текст НЕЛЬЗЯ просто выкинуть — это ломает инвариант
-// сохранности. Поэтому, если в секции есть текстовое содержимое, перед
-// portfolio добавляется blocks-секция с этим текстом. Возвращаем массив,
-// чтобы caller расплющил его в общий список.
+// сохранности. Поэтому, если в секции есть текстовое содержимое или сам
+// заголовок <h2>, перед portfolio добавляется blocks-секция с этим контентом.
+// Ранее <h2> добавлялся отдельным sibling-блоком из orchestrator'а — теперь,
+// когда sibling-механика убрана (она дублировала заголовок виджета),
+// portfolio сам ответственен за дословное сохранение исходного <h2>.
+// Возвращаем массив, чтобы caller расплющил его в общий список.
 function buildPortfolioBlocks(section) {
   const out = [];
-  // Если в секции есть текст ПОМИМО H2 — делаем blocks с этим текстом.
-  // Сам <h2> добавит orchestrator через sibling-h2HoldingMiniBlock.
+  // Если в секции есть текст ИЛИ исходный <h2> — кладём всё в blocks-сиблинг
+  // (включая h2, чтобы заголовок остался дословно сохранён в HTML).
+  // findMissingHeadings также примет h2 через title-канон-исключение, но
+  // для portfolio мы держим заголовок и в HTML — это безопасно (одно
+  // место, не дубль) и читается админом WP так же, как обычный раздел.
   const hasText = section.body.some((n) => nodeText(n).length > 0);
-  if (hasText) {
-    // buildBlocksBlock сам положит h2+body в text — но H2 уже добавлен
-    // sibling'ом. Чтобы не дублировать заголовок дважды, делаем blocks
-    // ТОЛЬКО из body (без h2).
-    const bodyOnlySection = { h2: null, body: section.body };
-    out.push(buildBlocksBlock(bodyOnlySection));
+  if (hasText || section.h2) {
+    out.push(buildBlocksBlock(section));
   }
   out.push({
     acf_fc_layout: 'portfolio',
@@ -817,10 +790,13 @@ function buildTagsBlock(section) {
     items: links,
   };
   const out = [];
-  // H2 уже отдельным sibling-блоком добавит orchestrator (см. needsSiblingH2),
-  // поэтому в leftover'ах кладём только body — без дублирования заголовка.
-  const leftover = leftoverBlocksBlock(section.body);
-  if (leftover) out.push(leftover);
+  // Кладём СЕКЦИЮ (h2 + body) целиком в leftover-blocks, чтобы дословно
+  // сохранить и заголовок, и абзацы (раньше h2 добавлял отдельный
+  // sibling-блок из orchestrator'а — но это создавало визуальный дубль
+  // секционного заголовка с `title` виджета tags).
+  if (section.h2 || (section.body && section.body.length)) {
+    out.push(buildBlocksBlock(section));
+  }
   out.push(tagsBlock);
   return out;
 }
@@ -992,20 +968,14 @@ export function buildAcfFromHtml(html, opts = {}) {
     // квоту — падаем на исходную эвристику, чтобы статья всё равно собралась.
     const hinted = getHintLayout(sectionIdx, ctx);
     const layout = hinted || classifySection(section, ctx);
-    // Helper: для типов, у которых внутренние HTML-поля занимают ОТДЕЛЬНЫЕ
-    // фрагменты исходных <li>/<td> (а значит, попытка вставить туда же
-    // исходный <h2> ломает phrase-windows в findMissingPhrases — окно
-    // соседних слов одного <li> перестаёт быть смежным в outputPlainText),
-    // выносим H2 во ВНЕШНИЙ sibling-блок blocks с одним только <h2>NAME</h2>.
-    // Это надёжнее, чем эвристически искать «где не помешает» внутри блока.
-    const needsSiblingH2 = (layout === 'steps' || layout === 'bens'
-      || layout === 'tabs' || layout === 'faq'
-      || layout === 'price' || layout === 'tags'
-      || layout === 'portfolio') && !!section.h2;
-    if (needsSiblingH2) {
-      const mini = h2HoldingMiniBlock(section.h2);
-      if (mini) out.push(mini);
-    }
+    // ПРИМЕЧАНИЕ: раньше для типов steps/bens/tabs/faq/price/tags/portfolio
+    // мы вставляли отдельный «sibling-h2» blocks-блок с одним только
+    // <h2>NAME</h2>, чтобы дословно сохранить заголовок секции для
+    // findMissingHeadings. Это создавало визуальный дубль: секционный
+    // заголовок отрисовывался ДВАЖДЫ — один раз как мини-блок, второй раз
+    // как `title` соседнего типизированного виджета. Сейчас findMissingHeadings
+    // принимает h2 как сохранённый, если его канон совпал с `title` любого
+    // блока в выводе, поэтому отдельный sibling-блок больше не нужен.
     let block;
     switch (layout) {
       case 'faq':       block = buildFaqBlock(section); break;
