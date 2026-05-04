@@ -665,6 +665,32 @@ function dedupeFaqQuestion(question, answerHtml) {
   return out;
 }
 
+// Дедуп ведущего <hN> в items[].text/content (steps/bens/tabs), который
+// дублирует items[].title. Зеркало dedupeFaqQuestion, но для items: тот же
+// алгоритм, та же канон-форма, тот же MAX_DUPLICATE_HEADINGS. Используется
+// в postCleanupAcfArray, чтобы устранить визуальный дубль подзаголовка
+// шага/преимущества/вкладки (виджет рендерит title как заголовок item'а,
+// и второй такой же `<h3>` в начале text/content смотрится как «двойной
+// заголовок»).
+function dedupeLeadingHeading(label, html) {
+  if (!html || typeof html !== 'string') return html;
+  const labelCanon = _canonForFaq(label);
+  if (!labelCanon) return html;
+  let out = html;
+  const MAX_DUPLICATE_HEADINGS = 4;
+  const headingRe = /^\s*<(h[2-5])\b[^>]*>([\s\S]*?)<\/\1\s*>/i;
+  for (let i = 0; i < MAX_DUPLICATE_HEADINGS; i += 1) {
+    const m = headingRe.exec(out);
+    if (!m) break;
+    if (_canonForFaq(m[2]) === labelCanon) {
+      out = out.slice(m[0].length);
+      continue;
+    }
+    break;
+  }
+  return out;
+}
+
 // Обходим JSON-массив (ACF), чистим поля. Мутирует входной массив.
 function postCleanupAcfArray(arr) {
   if (!Array.isArray(arr)) return arr;
@@ -684,11 +710,23 @@ function postCleanupAcfArray(arr) {
         }
       }
     }
-    // items[].title: срез нумерации (как было).
+    // items[].title: срез нумерации + дедуп ведущего <hN>, который дублирует
+    // items[].title (steps/bens/tabs). Это зеркало dedupeFaqQuestion для
+    // FAQ — без этой пост-чистки LLM-режим иногда оставляет в начале
+    // items[].text/content тот же `<h3>X</h3>`, что и items[].title, и
+    // пользователь видит подзаголовок шага/преимущества/вкладки дважды
+    // (как стилизованный заголовок виджета и как сырой <h3>). Виджет
+    // рендерит items[].title — этого уже достаточно.
     if (Array.isArray(block.items)) {
       for (const it of block.items) {
         if (!it || typeof it !== 'object') continue;
         if (typeof it.title === 'string') it.title = stripLeadingNumber(it.title);
+        if (typeof it.text === 'string') {
+          it.text = dedupeLeadingHeading(it.title, it.text);
+        }
+        if (typeof it.content === 'string') {
+          it.content = dedupeLeadingHeading(it.title, it.content);
+        }
       }
     }
     // Рекурсивная зачистка <h1> по ВСЕМ строковым полям блока. Раньше это
@@ -747,15 +785,21 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 - ЗАПРЕЩЕНО дублировать контент. Каждый абзац должен попасть в JSON только 1 раз.
 - ЗАПРЕЩЕНО придумывать факты, цифры, цены или цитаты, которых нет в исходном тексте.
 
---- ЗАДАЧА 1A: СОХРАННОСТЬ ЗАГОЛОВКОВ (ZERO HEADING LOSS) ---
-КРИТИЧЕСКИ ВАЖНО: оригинальные теги <h2>, <h3>, <h4>, <h5> из исходного HTML должны быть сохранены ДОСЛОВНО, со всем своим текстом, ВНУТРИ HTML-полей text / content / answer соответствующего блока.
+--- ЗАДАЧА 1A: СОХРАННОСТЬ ЗАГОЛОВКОВ (ZERO HEADING LOSS, БЕЗ ДУБЛИРОВАНИЯ) ---
+КРИТИЧЕСКИ ВАЖНО: каждый исходный <h2>/<h3>/<h4>/<h5> должен быть сохранён в выводе семантически ровно один раз — либо как литеральный тег внутри HTML-поля, либо как значение поля title/question. Запрещено визуально дублировать заголовок (одновременно в title и в HTML).
+- Если выбираешь способ (б) ниже и кладёшь литеральный тег в HTML — используй ТОТ ЖЕ уровень тега, что и в источнике. Запрещено «повышать» <h3> до <h2> ради более крупного шрифта.
 - Разрешённый набор заголовков: ТОЛЬКО h2, h3, h4, h5. Никаких <h1> и <h6> в выводе быть не должно.
 - ЗАПРЕЩЕНО создавать «подзаголовки» — поле "subtitle" во всех блоках ВСЕГДА должно быть пустой строкой "". Не клади туда никакой текст, никакого <p>, никакого описания.
 - Если в исходном HTML где-то всё-таки попался <h1> — НЕ переноси его в JSON ни в каком виде (ни как заголовок, ни как обычный текст внутри <p>). H1 полностью исключается.
-- Поле "title" блока (и поле "question" в faq) — это КОРОТКОЕ НАЗВАНИЕ-ЯРЛЫК для секции. Оно НЕ заменяет оригинальный заголовок и НЕ освобождает тебя от обязанности сохранить <h2>/<h3>/<h4>/<h5> внутри HTML.
-- Правильно: { "title": "Устройство суппорта", "blocks": [ { "text": "<h2>Устройство тормозного суппорта: что нужно знать перед ремонтом</h2><p>...</p>" } ] }
-- Неправильно: { "title": "Устройство суппорта", "blocks": [ { "text": "<p>...</p>" } ] }   ← <h2> ПОТЕРЯН, это запрещено.
-- Внутри items[].text/content (steps, bens, tabs, faq.answer) тоже сохраняй <h3>/<h4>-подзаголовок раздела, если он был в источнике — добавь его в начало HTML соответствующего item'а. ИСКЛЮЧЕНИЕ — см. правило про FAQ ниже.
+- Заголовок секции (h2) сохраняется ОДНИМ из двух способов — выбери ОДИН и не дублируй:
+  (а) текст h2 = значение поля "title" блока (для steps/bens/tabs/price/tags/portfolio/faq/blocks/attention/expert) — этого ДОСТАТОЧНО, дополнительный <h2> в HTML НЕ нужен; либо
+  (б) литеральный <h2>...</h2> кладётся в HTML-поле text/content (только если по схеме блока есть подходящее HTML-поле, и при этом "title" остаётся коротким ярлыком ИЛИ совпадает с h2).
+  ЗАПРЕЩЕНО одновременно класть h2 и в "title", и в `<h2>` внутри text — это видимый дубль на странице.
+- Заголовок item'а (h3/h4 в исходнике под секцией с похожим интентом — этап/преимущество/вкладка) сохраняется ОДНИМ из двух способов:
+  (а) текст h3 = значение поля items[].title (steps/bens/tabs) или items[].question (faq) — этого ДОСТАТОЧНО, ДОПОЛНИТЕЛЬНЫЙ <h3> в items[].text/content/answer класть НЕЛЬЗЯ; либо
+  (б) литеральный <h3>...</h3> в начале items[].text/content + items[].title оставлен пустым или сделан КОРОТКИМ ярлыком, СЕМАНТИЧЕСКИ отличным от текста h3.
+  ЗАПРЕЩЕНО одновременно класть h3 и в items[].title, и в `<h3>` внутри text/content — это видимый дубль на странице.
+- Чаще всего удобнее способ (а) — он короче и не создаёт визуальный дубль.
 
 --- ЗАДАЧА 1B: ЗАПРЕТ НА НУМЕРАЦИЮ ---
 - ЗАПРЕЩЕНО ставить любую нумерацию в полях "title" блоков, "title" item'ов и "question" в faq. Никаких "1.", "2)", "Шаг 1:", "Этап №1", "Раздел 3 —" в начале строки.
@@ -773,8 +817,8 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 1. Анализируй заголовок раздела И сам текст внутри абзацев.
 2. Выбери подходящий блок (для процесса -> "steps", для плюсов -> "bens", для вопросов -> "faq", для цитат -> "expert", для диагностики/признаков с явным разделением на 2-4 пункта -> "tabs").
 3. Разбей сплошной текст под этим заголовком на абзацы — ровно так, как они уже разбиты в исходном HTML. Не объединяй и не дроби абзацы.
-4. РАЗРЕШЕНИЕ НА КОРОТКИЕ ЯРЛЫКИ: Ты ИМЕЕШЬ ПРАВО придумать короткий смысловой заголовок-ярлык для секции (в поле title блока) и для item'а (в поля title или question внутри items/faq) — БЕЗ нумерации, БЕЗ выдуманных фактов. НО оригинальный <h2>/<h3>/<h4>/<h5> из источника всё равно ОСТАЁТСЯ внутри HTML-поля text/content/answer (см. ЗАДАЧА 1A; для faq см. исключение в ЗАДАЧЕ 1C).
-5. Вставь оригинальный абзац ЦЕЛИКОМ в поле text, content или answer (вместе с его подзаголовком, если был и если это не запрещено правилом FAQ).
+4. РАЗРЕШЕНИЕ НА КОРОТКИЕ ЯРЛЫКИ: Ты ИМЕЕШЬ ПРАВО придумать короткий смысловой заголовок-ярлык для секции (в поле title блока) и для item'а (в поля title или question внутри items/faq) — БЕЗ нумерации, БЕЗ выдуманных фактов. Если ярлык совпадает по смыслу с исходным <hN>, дополнительно класть тот же <hN> внутрь HTML НЕ нужно (см. ЗАДАЧА 1A способ «а» — без дубля).
+5. Вставь оригинальные абзацы ЦЕЛИКОМ в поле text, content или answer. Если исходный подзаголовок item'а уже сохранён как items[].title — НЕ префиксируй им text/content (см. ЗАДАЧА 1A).
 
 --- ПРАВИЛО ВЫДЕЛЕНИЯ ЭКСПЕРТОВ (EXPERT DETECTOR) ---
 Внимательно сканируй каждый абзац на наличие реальных цитат.
@@ -797,13 +841,16 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 ВАЖНО ПРО subtitle ВО ВСЕХ ПРИМЕРАХ НИЖЕ: поле "subtitle" — пустая строка "". Никогда не заполняй его (см. ЗАДАЧА 1A).
 
 1. "blocks" (Универсальный сплошной текст)
-{ "acf_fc_layout": "blocks", "title": "Заголовок", "subtitle": "", "blocks": [ { "block_width": "12", "bg_color": "default", "text": "<h2>Оригинальный заголовок раздела</h2><p>Текст</p>", "image": "", "url": "" } ], "type": "1", "vert_center": false, "block_equal_height": false }
+{ "acf_fc_layout": "blocks", "title": "Устройство тормозного суппорта: что нужно знать перед ремонтом", "subtitle": "", "blocks": [ { "block_width": "12", "bg_color": "default", "text": "<p>Текст</p>", "image": "", "url": "" } ], "type": "1", "vert_center": false, "block_equal_height": false }
+   ↑ Вариант (а) из ЗАДАЧИ 1A: текст исходного <h2> = title, литерального <h2> в text НЕТ. Если предпочитаешь вариант (б) — делай title коротким ярлыком и клади <h2> в text, но не оба.
 
 2. "steps" (Этапы процедуры)
-{ "acf_fc_layout": "steps", "title": "Процесс", "subtitle": "", "items": [ { "title": "Подготовка инструмента", "text": "<h3>Оригинальный подзаголовок шага</h3><p>Текст</p>" } ], "columns": "3" }
+{ "acf_fc_layout": "steps", "title": "Процесс", "subtitle": "", "items": [ { "title": "Подготовка инструмента", "text": "<p>Текст шага без префиксного <h3>.</p>" } ], "columns": "3" }
+   ↑ items[].title несёт текст исходного <h3>; в items[].text дополнительный <h3> не дублируется.
 
 3. "bens" (Преимущества)
-{ "acf_fc_layout": "bens", "title": "Преимущества", "color_title": "#000000", "subtitle": "", "items": [ { "title": "Гарантия качества", "image": "", "text": "<h3>Оригинальный подзаголовок</h3><p>Текст</p>" } ], "columns": "4", "image": "" }
+{ "acf_fc_layout": "bens", "title": "Преимущества", "color_title": "#000000", "subtitle": "", "items": [ { "title": "Гарантия качества", "image": "", "text": "<p>Текст преимущества.</p>" } ], "columns": "4", "image": "" }
+   ↑ items[].title несёт текст исходного <h3>; в items[].text дополнительный <h3> не дублируется.
 
 4. "price" (Прайс-лист)
 { "acf_fc_layout": "price", "title": "Прайс", "subtitle": "", "items": [ { "title": "Услуга", "text": "Описание", "price": "5 000 Р" } ] }
@@ -812,13 +859,15 @@ const BASE_SYSTEM_PROMPT = `РОЛЬ И ЗАДАЧА:
 { "acf_fc_layout": "faq", "title": "FAQ", "subtitle": "", "faq": [ { "question": "Сколько служит тормозной суппорт?", "answer": "<p>Ответ без повтора вопроса в виде заголовка.</p>" } ] }
 
 6. "attention" (Важная вставка)
-{ "acf_fc_layout": "attention", "title": "Внимание", "text": "<h2>Оригинальный заголовок</h2><p>Выделенный текст</p>", "image": "" }
+{ "acf_fc_layout": "attention", "title": "Внимание", "text": "<p>Выделенный текст без префиксного <h2>.</p>", "image": "" }
+   ↑ Заголовок секции уехал в title; <h2> в text не дублируется.
 
 7. "expert" (Мнение эксперта)
 { "acf_fc_layout": "expert", "title": "Мнение", "expert": 0, "text": "<p>Цитата</p>" }
 
 8. "tabs" (Вкладки/группа карточек: диагностика, признаки, способы проверки)
-{ "acf_fc_layout": "tabs", "title": "Диагностика", "subtitle": "", "items": [ { "title": "Визуальный осмотр", "content": "<h3>Оригинальный подзаголовок</h3><p>Текст</p>" } ] }
+{ "acf_fc_layout": "tabs", "title": "Диагностика", "subtitle": "", "items": [ { "title": "Визуальный осмотр", "content": "<p>Текст вкладки без префиксного <h3>.</p>" } ] }
+   ↑ items[].title несёт текст исходного <h3>; в items[].content дополнительный <h3> не дублируется.
 
 --- ТЕХНИЧЕСКИЕ ПРАВИЛА ВЫВОДА JSON (КРИТИЧЕСКИ ВАЖНО) ---
 1. Вывод ДОЛЖЕН БЫТЬ строго JSON массивом объектов.
@@ -1096,6 +1145,30 @@ function collectQuestionTexts(node, out) {
   }
 }
 
+// Собирает все строки полей "title" (на любой глубине) — это короткие
+// «ярлыки» секций и item'ов в типизированных виджетах (steps/bens/tabs/
+// price/tags/portfolio/faq/blocks/attention/expert). Используется в
+// findMissingHeadings как обобщение FAQ-исключения: если исходный <hN>
+// семантически уехал в title виджета, он считается сохранённым по смыслу.
+// Без этого детерминированный билдер был бы вынужден ДОПОЛНИТЕЛЬНО
+// эмитить тот же <hN> отдельным «sibling-h2» blocks-блоком — и пользователь
+// видел бы заголовок дважды (сам виджет рендерит title как видимый
+// заголовок). См. acfDeterministicBuilder.js (механика needsSiblingH2 удалена).
+function collectTitleTexts(node, out) {
+  if (node == null) return;
+  if (Array.isArray(node)) { for (const v of node) collectTitleTexts(v, out); return; }
+  if (typeof node === 'object') {
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (typeof v === 'string' && /^title$/i.test(k)) {
+        if (v.trim()) out.push(v);
+      } else if (v && typeof v === 'object') {
+        collectTitleTexts(v, out);
+      }
+    }
+  }
+}
+
 // Канон-формы типичных section-label заголовков, под которыми в исходнике
 // идёт FAQ-блок (короткие 1–3-словные «названия секции вопрос-ответ»).
 // Если исходный <hN> совпадает по канону с одним из них И в выводе есть
@@ -1137,7 +1210,10 @@ function findMissingHeadings(inputHtml, outputArray) {
   collectHeadingBearingHtml(outputArray, htmlChunks);
   const questions  = [];
   collectQuestionTexts(outputArray, questions);
+  const titles     = [];
+  collectTitleTexts(outputArray, titles);
   const questionsCanon = questions.map(canonicalForCompare).filter(Boolean);
+  const titlesCanon    = new Set(titles.map(canonicalForCompare).filter(Boolean));
   const hasFaqBlock    = outputHasFaqBlock(outputArray);
 
   // Для каждого исходного заголовка собираем индекс его текста, причём
@@ -1172,6 +1248,15 @@ function findMissingHeadings(inputHtml, outputArray) {
     //    нет body-поля для дословного <hN>. Принимаем такой заголовок как
     //    сохранённый, если в выводе действительно есть FAQ-блок.
     if (hasFaqBlock && FAQ_SECTION_LABEL_CANONS.has(expectedTextCanon)) continue;
+
+    // 4. Title-канон-исключение (обобщение #3 на все типизированные виджеты).
+    //    В steps/bens/tabs/price/tags/portfolio/blocks/attention/expert поле
+    //    "title" (плюс items[].title) — это короткий ярлык секции/элемента,
+    //    который WP-виджет рендерит как видимый заголовок. Если канон
+    //    исходного <hN> совпал с любым таким title — заголовок сохранён по
+    //    смыслу, дополнительный <hN> в HTML-полях создавал бы визуальный
+    //    дубль (см. удалённую механику «sibling-h2» в acfDeterministicBuilder).
+    if (titlesCanon.has(expectedTextCanon)) continue;
 
     missing.push(h);
   }
