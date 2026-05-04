@@ -1643,6 +1643,53 @@ ${[phrasesBlock, headingsBlock, levelsBlock].filter(Boolean).join('\n\n')}`;
     }
   }
 
+  // ── Рекурсивный fallback: если корректирующий ре-запрос НЕ помог ──────
+  // Требование ТЗ: «алгоритм должен дробить большие таблицы/тексты, чтобы
+  // модель физически не могла сэкономить токены на длинном списке». Если
+  // после корректирующего ре-запроса всё ещё есть пропуски (missing /
+  // missingHeadings / levelMismatches), не выбрасываем ошибку сразу —
+  // рекурсивно режем этот чанк пополам тем же безопасным сплиттером и
+  // обрабатываем подкуски один за другим. На малых объёмах Qwen перестаёт
+  // «съедать» строки каталога, потому что ему уже физически некуда
+  // экономить токены. Логика зеркалит существующую ветку
+  // `finish_reason === 'length'` выше — единый паттерн «сломалось →
+  // дробим → переобрабатываем».
+  // Безопасность: если чанк уже близок к минимальному размеру (<= 2 ×
+  // MIN_RETRY_CHUNK_LEN) или сплиттер физически не может разрезать его
+  // (нет границ тегов/предложений/слов — длинная одиночная строка),
+  // продолжаем существующим fail-safe путём (throw ниже). Лучше явная
+  // ошибка, чем тихая потеря контента.
+  const stillBroken =
+    missing.length > 0 || missingHeadings.length > 0 || levelMismatches.length > 0;
+  if (stillBroken && chunkHtmlText.length > MIN_RETRY_CHUNK_LEN * 2) {
+    const half = Math.max(MIN_RETRY_CHUNK_LEN, Math.floor(chunkHtmlText.length / 2));
+    const sub = chunkHtml(chunkHtmlText, half);
+    if (sub.length > 1) {
+      const merged = [];
+      let expertUsedLocal = expertAlreadyUsed;
+      for (let k = 0; k < sub.length; k++) {
+        const subRes = await processChunk({
+          chunkHtmlText: sub[k],
+          baseSystemPrompt,
+          expertAlreadyUsed: expertUsedLocal,
+          chunkLabel: `${chunkLabel} → подчасть ${k + 1}/${sub.length} (после потери фрагментов)`,
+        });
+        for (const b of subRes.blocks) {
+          if (b && b.acf_fc_layout === 'expert') expertUsedLocal = true;
+          merged.push(b);
+        }
+        tokensInTotal  += subRes.tokensIn;
+        tokensOutTotal += subRes.tokensOut;
+      }
+      return {
+        blocks:           merged,
+        expertUsedAfter:  expertUsedLocal,
+        tokensIn:         tokensInTotal,
+        tokensOut:        tokensOutTotal,
+      };
+    }
+  }
+
   if (missing.length > 0) {
     const sample = missing.slice(0, 5).map((m) => `«${m}»`).join('; ');
     const totalLost = missing.reduce((a, m) => a + m.length, 0);
