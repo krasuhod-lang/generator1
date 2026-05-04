@@ -93,6 +93,30 @@ function stripH1(html) {
   return out;
 }
 
+// ── Удаление встроенных media (зеркалит stripInlineMediaFromHtml в AcfJsonPage) ──
+// info-article-cover (<figure><img src="data:..."/></figure>), любые <img>
+// и <picture>. Эти элементы не имеют целевого ACF-поля в наших 7 блоках
+// (blocks/steps/bens/price/faq/attention/expert/tabs), а base64-картинка
+// раздула бы text-поле на сотни КБ. Дублируем здесь страховочно: основной
+// вызов делается в AcfJsonPage.runJob, но билдер должен оставаться
+// самодостаточным, если его дёрнут напрямую из тестов/другого места.
+function stripInlineMedia(html) {
+  if (!html) return '';
+  let out = String(html);
+  for (let i = 0; i < 10; i += 1) {
+    const next = out.replace(/<figure\b[^>]*>[\s\S]*?<\/figure\s*>/gi, '');
+    if (next === out) break;
+    out = next;
+  }
+  for (let i = 0; i < 10; i += 1) {
+    const next = out.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
+    if (next === out) break;
+    out = next;
+  }
+  out = out.replace(/<img\b[^>]*\/?>/gi, '');
+  return out;
+}
+
 // ── Парсинг HTML в DOM (браузерный DOMParser) ─────────────────────────────
 // Оборачиваем в <body>, чтобы DOMParser не пытался достроить <html>/<head>
 // и не мешал детям перепутаться при отсутствии корня.
@@ -816,7 +840,7 @@ function buildTagsBlock(section) {
  * @returns {Array<object>} массив ACF-блоков
  */
 export function buildAcfFromHtml(html) {
-  const cleaned = stripH1(html || '');
+  const cleaned = stripH1(stripInlineMedia(html || ''));
   if (!cleaned.trim()) return [];
 
   const body = parseHtmlToBody(cleaned);
@@ -885,6 +909,7 @@ export const _internals = {
   canon,
   matchesKw,
   stripH1,
+  stripInlineMedia,
   sliceByH2,
   classifySection,
   KW,

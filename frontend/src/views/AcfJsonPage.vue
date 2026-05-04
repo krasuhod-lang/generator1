@@ -535,6 +535,53 @@ function stripH1FromHtml(html) {
   return out;
 }
 
+// ── Удаление встроенных media (картинки/обложки) из исходного HTML ────────
+// info-article-пайплайн (backend/src/services/infoArticle/infoArticlePipeline.js
+// embedImages) вшивает обложку в article_html сразу после <h1> как
+// <figure class="info-article-cover"><img src="data:image/...;base64,…"/></figure>.
+// Для JSON-вкладки это создаёт сразу несколько проблем:
+//   • LLM-режим: тело base64 регулярно > 200 КБ — HTTPS-прокси режут запрос
+//     с 413 Payload Too Large (см. обработчик 413 ниже в callDashscope);
+//   • детерминированный режим: <figure> попадает во «вступительную» секцию
+//     до первого <h2> и через nodesToHtml/outerHTML целиком сваливается в
+//     blocks[0].text как огромный data: URI — JSON раздувается, а WordPress
+//     ACF-админка ломается;
+//   • findMissingPhrases считает alt/контекст обложки «потерянным», блокируя
+//     применение JSON.
+// Поэтому ДО любой дальнейшей обработки удаляем все <figure> с потомком <img>
+// и одиночные <img>. Обложка уже привязана к посту WordPress'ом отдельно
+// (featured image), внутри Flexible Content её дублировать не требуется.
+// Ремуверы:
+//   • <figure …>…<img …>…</figure>      — типовой кейс info-article-cover.
+//   • <figure …>…</figure>                 — без <img> (картинки нет, оставлять
+//                                            пустую figure с подписью бессмысленно
+//                                            для ACF-блоков).
+//   • <img …>                              — одиночный (на случай, если writer
+//                                            вставил картинку без figure).
+//   • <picture>…</picture>                 — современный аналог <img>.
+function stripInlineMediaFromHtml(html) {
+  if (!html) return '';
+  let out = String(html);
+  // <figure …>…</figure> (нежадный, поддержка многострочности через [\s\S]).
+  // ВАЖНО: один вызов replace не справится с вложенными <figure> (их в наших
+  // HTML не бывает), но цикл с лимитом — страховка от бесконечного хвоста
+  // на каком-то экзотическом вводе.
+  for (let i = 0; i < 10; i += 1) {
+    const next = out.replace(/<figure\b[^>]*>[\s\S]*?<\/figure\s*>/gi, '');
+    if (next === out) break;
+    out = next;
+  }
+  // <picture>…</picture> — аналогично.
+  for (let i = 0; i < 10; i += 1) {
+    const next = out.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
+    if (next === out) break;
+    out = next;
+  }
+  // Одиночные/самозакрывающиеся <img …>.
+  out = out.replace(/<img\b[^>]*\/?>/gi, '');
+  return out;
+}
+
 // ── Пост-зачистка JSON-вывода под требования ТЗ ───────────────────────────
 // Делаем три вещи на каждом блоке/item'е:
 //   1) subtitle ВСЕГДА = '' (промт это требует, но подстраховываемся програмно).
@@ -610,39 +657,58 @@ function postCleanupAcfArray(arr) {
     if (!block || typeof block !== 'object') continue;
     if ('subtitle' in block) block.subtitle = '';
     if (typeof block.title === 'string') block.title = stripLeadingNumber(block.title);
-    // Контентные поля верхнего уровня (attention, expert).
-    for (const k of ['text', 'content', 'answer']) {
-      if (typeof block[k] === 'string') block[k] = stripH1FromString(block[k]);
-    }
-    // blocks → массив подэлементов с text.
-    if (Array.isArray(block.blocks)) {
-      for (const b of block.blocks) {
-        if (b && typeof b.text === 'string') b.text = stripH1FromString(b.text);
-      }
-    }
-    // items → steps / bens / tabs / price.
-    if (Array.isArray(block.items)) {
-      for (const it of block.items) {
-        if (!it || typeof it !== 'object') continue;
-        if (typeof it.title === 'string') it.title = stripLeadingNumber(it.title);
-        for (const k of ['text', 'content']) {
-          if (typeof it[k] === 'string') it[k] = stripH1FromString(it[k]);
-        }
-      }
-    }
-    // faq → массив { question, answer }.
+    // FAQ: дедуп ведущего <hN>, дублирующего question. Делается ДО общей
+    // рекурсивной чистки <h1>, потому что dedupeFaqQuestion опирается на
+    // структуру { question, answer } конкретно в block.faq.
     if (Array.isArray(block.faq)) {
       for (const it of block.faq) {
         if (!it || typeof it !== 'object') continue;
         if (typeof it.question === 'string') it.question = stripLeadingNumber(it.question);
         if (typeof it.answer === 'string') {
-          it.answer = stripH1FromString(it.answer);
           it.answer = dedupeFaqQuestion(it.question, it.answer);
         }
       }
     }
+    // items[].title: срез нумерации (как было).
+    if (Array.isArray(block.items)) {
+      for (const it of block.items) {
+        if (!it || typeof it !== 'object') continue;
+        if (typeof it.title === 'string') it.title = stripLeadingNumber(it.title);
+      }
+    }
+    // Рекурсивная зачистка <h1> по ВСЕМ строковым полям блока. Раньше это
+    // делалось whitelist'ом (text/content/answer/blocks[].text/items[].text|content/
+    // faq[].answer|question), но LLM периодически клал <h1> в нестандартные
+    // поля (price.title, кастомные подписи) — там whitelist его не доставал,
+    // и пользователь видел сырой `<h1>…</h1>` после применения JSON.
+    // Рекурсия по объекту/массиву покрывает любую схему ACF без явного списка.
+    deepStripH1(block);
   }
   return arr;
+}
+
+// Рекурсивно проходит по объекту/массиву и применяет stripH1FromString к
+// каждому строковому значению. Не трогает не-строки. Стек-итеративно (без
+// рекурсии вызовов), чтобы не споткнуться о глубокие вложения.
+function deepStripH1(root) {
+  if (!root || typeof root !== 'object') return;
+  const stack = [root];
+  while (stack.length) {
+    const node = stack.pop();
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i += 1) {
+        const v = node[i];
+        if (typeof v === 'string') node[i] = stripH1FromString(v);
+        else if (v && typeof v === 'object') stack.push(v);
+      }
+      continue;
+    }
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (typeof v === 'string') node[k] = stripH1FromString(v);
+      else if (v && typeof v === 'object') stack.push(v);
+    }
+  }
 }
 
 // ── Системный промт (перенос из JSON-v2 (2).html, оставлены только ─────────
@@ -1527,7 +1593,12 @@ async function runJob(job) {
     // деттерминированный билдер тоже вызывает stripH1, но дублирование
     // здесь сохраняет инвариант chunks.join === html для LLM-ветки и
     // совпадает по поведению с прежней реализацией.
-    const html = stripH1FromHtml(job.sourceHtml);
+    // Дополнительно: вырезаем встроенные <figure>/<img>/<picture>
+    // (обложка info-article в data:image base64). См. комментарий
+    // stripInlineMediaFromHtml — без этого LLM-режим валится с 413
+    // от прокси, а детерминированный сваливает обложку в blocks[0].text
+    // целиком как огромный data: URI.
+    const html = stripH1FromHtml(stripInlineMediaFromHtml(job.sourceHtml));
 
     // ── Режим 1: программная (детерминированная) сборка JSON ─────────────
     // Не идёт в LLM. Гарантирует «текст не меняется», работает мгновенно.
