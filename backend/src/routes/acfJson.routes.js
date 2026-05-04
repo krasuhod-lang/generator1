@@ -203,6 +203,7 @@ router.get('/health', auth, async (req, res) => {
  *     userPrompt:   string,     // обязателен, непустой
  *     model?:       string,     // опц.; по умолчанию DASHSCOPE_MODEL_DEFAULT (читается из process.env.DASHSCOPE_MODEL)
  *     temperature?: number,     // 0..2, по умолчанию 0.1
+ *     top_p?:       number,     // (0, 1], опц.; если не передан — DashScope использует свой default
  *     max_tokens?:  number      // 1..MAX_OUTPUT_TOKENS, по умолчанию 16384
  *   }
  *
@@ -223,6 +224,7 @@ router.post('/dashscope', auth, async (req, res) => {
     userPrompt,
     model,
     temperature,
+    top_p: topP,
     max_tokens: maxTokens,
   } = req.body || {};
 
@@ -246,6 +248,19 @@ router.post('/dashscope', auth, async (req, res) => {
     return res.status(400).json({ error: 'temperature must be in [0, 2]' });
   }
 
+  // top_p — опциональный параметр nucleus sampling. Если не передан, не
+  // включаем его в запрос к DashScope (модель использует свой default).
+  // Малые значения (0.1) вместе с temperature=0 делают вывод почти
+  // детерминированным — нужно для строгого парсинга каталогов в JSON
+  // без галлюцинаций / пропусков (см. AcfJsonPage.vue → callLlm).
+  let safeTopP;
+  if (topP !== undefined && topP !== null) {
+    if (!Number.isFinite(topP) || topP <= 0 || topP > 1) {
+      return res.status(400).json({ error: 'top_p must be in (0, 1]' });
+    }
+    safeTopP = Number(topP);
+  }
+
   const safeMaxTokens = Number.isFinite(maxTokens) ? Math.floor(Number(maxTokens)) : 16384;
   if (safeMaxTokens < 1 || safeMaxTokens > MAX_OUTPUT_TOKENS) {
     return res.status(400).json({
@@ -264,6 +279,7 @@ router.post('/dashscope', auth, async (req, res) => {
       userPrompt,
       model:       safeModel,
       temperature: safeTemperature,
+      topP:        safeTopP,
       maxTokens:   safeMaxTokens,
       timeoutMs:   REQUEST_TIMEOUT_MS,
     });
