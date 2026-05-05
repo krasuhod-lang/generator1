@@ -363,7 +363,11 @@ function buildBlocksBlock(section) {
   for (const n of section.body) inner.push(n);
   return {
     acf_fc_layout: 'blocks',
-    title: shortTitle(section.h2, 'Раздел'),
+    // Без фейкового fallback'а «Раздел»: для leftover/intro-блоков (h2:null)
+    // title остаётся пустым — это честнее, чем навязывать заголовок, которого
+    // в исходном HTML нет. Реальные секции с <h2> по-прежнему получают его
+    // текст как title через nodeText(section.h2) внутри shortTitle.
+    title: shortTitle(section.h2, ''),
     subtitle: '',
     blocks: [{
       block_width: '12',
