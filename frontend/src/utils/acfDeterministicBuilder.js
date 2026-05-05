@@ -68,8 +68,9 @@ const KW = {
   expert:    ['мнение эксперт', 'мнение специалист', 'мнение врача',
               'мнение юриста', 'мнение мастера', 'комментарий эксперт',
               'слово эксперт', 'эксперт говорит'],
-  tabs:      ['диагностик', 'признак', 'способы провер', 'варианты',
-              'виды', 'типы'],
+  // tabs (Вкладки) удалены из набора по требованию: соответствующий контент
+  // теперь падает в универсальный blocks-блок (либо в более подходящий
+  // типизированный блок, если совпадает по другим ключевым словам).
   portfolio: ['галер', 'портфолио', 'примеры работ', 'наши работы',
               'фото работ', 'до и после', 'результаты работ'],
   tags:      ['теги', 'смежные услуги', 'другие услуги', 'связанные услуги',
@@ -96,7 +97,7 @@ function stripH1(html) {
 // ── Удаление встроенных media (зеркалит stripInlineMediaFromHtml в AcfJsonPage) ──
 // info-article-cover (<figure><img src="data:..."/></figure>), любые <img>
 // и <picture>. Эти элементы не имеют целевого ACF-поля в наших 7 блоках
-// (blocks/steps/bens/price/faq/attention/expert/tabs), а base64-картинка
+// (blocks/steps/bens/price/faq/attention/expert), а base64-картинка
 // раздула бы text-поле на сотни КБ. Дублируем здесь страховочно: основной
 // вызов делается в AcfJsonPage.runJob, но билдер должен оставаться
 // самодостаточным, если его дёрнут напрямую из тестов/другого места.
@@ -211,13 +212,8 @@ function looksLikeExpertBody(body) {
   return false;
 }
 
-// «Похоже ли тело на Tabs»: ≥2 <h3>, и при этом НЕ FAQ (FAQ имеет приоритет
-// по h2-ключевым словам).
-function looksLikeTabsBody(body) {
-  let h3count = 0;
-  for (const n of body) if (tag(n) === 'h3') h3count += 1;
-  return h3count >= 2;
-}
+// «Похоже ли тело на Tabs» удалено вместе с buildTabsBlock —
+// соответствующий контент теперь упаковывается в blocks-layout.
 
 // ── Классификатор: какой acf_fc_layout выбрать для секции ─────────────────
 function classifySection(section, ctx) {
@@ -246,7 +242,9 @@ function classifySection(section, ctx) {
 
   if (matchesKw(h2Canon, KW.tags)) return 'tags';
 
-  if (matchesKw(h2Canon, KW.tabs) && looksLikeTabsBody(body)) return 'tabs';
+  // tabs (Вкладки) удалены: «Диагностика», «Признаки», «Виды», «Типы»,
+  // «Варианты» теперь падают в дефолтный blocks-блок ниже — текст
+  // сохраняется byte-for-byte, без визуального разбиения на табы.
 
   return 'blocks';
 }
@@ -707,50 +705,9 @@ function buildExpertBlock(section) {
   return wrapWithLeftovers(primary, preLeftover, postLeftover);
 }
 
-// tabs — каждый <h3> → таб, последующие p/ul/etc. → content.
-function buildTabsBlock(section) {
-  const items = [];
-  const body = section.body;
-  let i = 0;
-  while (i < body.length) {
-    const node = body[i];
-    const t = tag(node);
-    if ((t === 'h3' || t === 'h4') && i + 1 < body.length) {
-      const titleStr = stripLeadingNumber(nodeText(node));
-      const restNodes = [];
-      let j = i + 1;
-      while (j < body.length) {
-        const nt = tag(body[j]);
-        if (nt === 'h3' || nt === 'h4') break;
-        restNodes.push(body[j]);
-        j += 1;
-      }
-      items.push({
-        title: titleStr,
-        // Не префиксируем content исходным <h3>/<h4>: в виджете tabs
-        // items[].title рендерится как «название вкладки», и тот же текст
-        // в content отдельным заголовком создаёт визуальный дубль. Канон
-        // title учитывается title-канон-исключением findMissingHeadings.
-        content: nodesToHtml(restNodes),
-      });
-      i = j;
-    } else {
-      if (items.length) {
-        items[items.length - 1].content += nodesToHtml([node]);
-      } else {
-        items.push({ title: 'Раздел', content: nodesToHtml([node]) });
-      }
-      i += 1;
-    }
-  }
-  if (!items.length) return buildBlocksBlock(section);
-  return {
-    acf_fc_layout: 'tabs',
-    title: shortTitle(section.h2, 'Варианты'),
-    subtitle: '',
-    items,
-  };
-}
+// tabs (Вкладки) удалён по требованию: контент таких секций
+// («Диагностика», «Признаки», «Виды», «Типы», «Варианты») теперь
+// упаковывается в универсальный blocks-блок через классификатор.
 
 // portfolio — пустая галерея (фото в WP подгружаются вручную). Но H2 и
 // весь сопутствующий текст НЕЛЬЗЯ просто выкинуть — это ломает инвариант
@@ -827,7 +784,7 @@ function buildTagsBlock(section) {
 // и протолкнуть нестандартный layout, который сломает рендер на сайте.
 const VALID_LAYOUTS = new Set([
   'blocks', 'steps', 'bens', 'price',
-  'faq', 'attention', 'expert', 'tabs',
+  'faq', 'attention', 'expert',
   'portfolio', 'tags',
 ]);
 
@@ -970,7 +927,6 @@ function _buildPerSectionInternal(sections, getHintLayout) {
         for (const b of buildExpertBlock(section)) blocks.push(b);
         ctx.expertUsed = true;
         break;
-      case 'tabs':      blocks.push(buildTabsBlock(section)); break;
       case 'portfolio':
         for (const b of buildPortfolioBlocks(section)) blocks.push(b);
         break;
