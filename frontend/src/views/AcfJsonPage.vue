@@ -511,7 +511,15 @@ function stripInlineMediaFromHtml(html) {
 //   4) Для FAQ убираем дубль вопроса: если answer начинается с <hN>,
 //      и текст этого <hN> совпадает (после канонизации) с question,
 //      этот заголовок вырезается, чтобы вопрос не дублировался.
-const TITLE_NUMBER_PREFIX_RE = /^\s*(?:(?:Шаг|Этап|Раздел|Часть|Глава|Step|Part)\s*№?\s*)?\d+\s*[.):\-—–]?\s*/i;
+// ВНИМАНИЕ: разделитель (`. ) : - — –`) ОБЯЗАТЕЛЕН, если нет ключевого
+// слова-нумератора (Шаг/Этап/Step/...). Иначе обычные заголовки вида
+// «5 типичных ошибок при замене шлангов» теряют ведущую цифру, что
+// ломает пер-секционные валидаторы и обрывает задачу. Также защищает
+// конструкции «5-минутный гайд», «3D-печать», где дефис — часть слова.
+// Совпадает в двух формах:
+//   A) «<keyword> [№]<digits>[<sep>][пробел...]» — для «Шаг 1: », «Этап 2».
+//   B) «<digits><sep>(пробел или конец строки)» — для «1. », «1) », «1: ».
+const TITLE_NUMBER_PREFIX_RE = /^\s*(?:(?:Шаг|Этап|Раздел|Часть|Глава|Step|Part)\s*№?\s*\d+\s*[.):\-—–]?\s*|\d+\s*[.):\-—–](?:\s+|$))/i;
 
 function stripLeadingNumber(s) {
   if (typeof s !== 'string') return s;
@@ -985,12 +993,17 @@ function findMissingPhrases(inputHtml, outputPlain) {
   const segments    = splitHtmlIntoSegments(inputHtml);
   const outputCanon = canonicalForCompare(outputPlain);
   // Канон-формы исходных заголовков (h2–h5). Если фраза-окно полностью
-  // совпадает с каноном какого-то заголовка, пропускаем её — сохранность
-  // заголовков отдельно валидирует findMissingHeadings (с FAQ-исключениями
-  // для случаев, когда <h2>«Часто задаваемые вопросы»</h2> легитимно
-  // превращается в title="FAQ" блока acf_fc_layout="faq" и нигде в выводе
-  // не остаётся дословной 3-словной фразы). Без этой защиты findMissingPhrases
-  // двойно-репортит ту же потерю и блокирует применение JSON.
+  // совпадает с каноном какого-то заголовка ИЛИ является его подстрокой,
+  // пропускаем её — сохранность заголовков отдельно валидирует
+  // findMissingHeadings (с FAQ-исключениями для случаев, когда
+  // <h2>«Часто задаваемые вопросы»</h2> легитимно превращается в
+  // title="FAQ" блока acf_fc_layout="faq" и нигде в выводе не остаётся
+  // дословной 3-словной фразы). Без этой защиты findMissingPhrases
+  // двойно-репортит ту же потерю и блокирует применение JSON, причём
+  // достаточно типичный случай — заголовок «5 типичных ошибок при замене
+  // шлангов и как их избежать»: 6-словные окна типа «5 типичных ошибок
+  // при замене шлангов» являются ПОДСТРОКАМИ полного канона заголовка,
+  // а не точным совпадением, поэтому equality-проверки недостаточно.
   const headingCanons = new Set();
   for (const h of extractInputHeadings(inputHtml)) {
     const c = canonicalForCompare(h.text);
@@ -1010,6 +1023,25 @@ function findMissingPhrases(inputHtml, outputPlain) {
       // Защита от двойного репорта: фразу-точную-копию заголовка валидирует
       // findMissingHeadings (см. комментарий выше).
       if (headingCanons.has(canon)) continue;
+      // Защита от двойного репорта: окно, целиком содержащееся в каноне
+      // какого-то исходного заголовка, — это срез текста заголовка, а не
+      // отдельный фрагмент тела статьи. Сохранность заголовка как такового
+      // отдельно валидирует findMissingHeadings. Быстрый guard по длине
+      // (canon.length + 2 — потому что окно canon оборачивается пробелами
+      // при сравнении) — отсекает невозможные пары без вызова indexOf.
+      let isHeadingSubstring = false;
+      const needleLen = canon.length;
+      for (const hc of headingCanons) {
+        if (hc.length < needleLen) continue;
+        // ` ${canon} ` с обрамлением пробелов — чтобы не матчить через
+        // границы слов («ока» внутри «человек» — нет; «ошибок при»
+        // внутри «...ошибок при...» — да).
+        if ((` ${hc} `).indexOf(` ${canon} `) !== -1) {
+          isHeadingSubstring = true;
+          break;
+        }
+      }
+      if (isHeadingSubstring) continue;
       if (outputCanon.indexOf(canon) === -1) missing.push(ph);
     }
   }
@@ -1700,6 +1732,42 @@ async function classifySectionsViaLLM(descriptors) {
   return { hints, tokensIn, tokensOut };
 }
 
+// Аварийный «сырой» фолбэк на одну секцию: возвращает массив с одним
+// blocks-блоком, в text которого положен ВЕСЬ исходный HTML секции
+// (h2.outerHTML + body) дословно. Используется, когда и программная
+// упаковка, и пер-секционный LLM-фолбэк провалили инвариант сохранности —
+// чтобы вместо обрыва задачи отдать пользователю рабочий JSON, в котором
+// ни один символ контента не потерян (его можно вручную переразложить).
+//
+// Важно для пост-валидаторов:
+//   • title = ПОЛНЫЙ текст исходного <h2> (не shortTitle/stripLeadingNumber):
+//     нужно для title-канон-исключения в findMissingHeadings — иначе оно
+//     не сработает, и финальная сквозная проверка снова поднимет шум.
+//   • postCleanupAcfArray.dedupeLeadingHeading позже срежет ведущий
+//     <h2>X</h2> из text (он совпадёт с title), чтобы в WP-рендере
+//     заголовок не показался дважды; контент (всё, что после <h2>)
+//     остаётся нетронутым.
+function buildRawSectionFallback(sectionHtml) {
+  const safeHtml = typeof sectionHtml === 'string' ? sectionHtml : '';
+  // Извлекаем текст первого <h2> для title (без тегов и мусора).
+  const h2Match = /<h2\b[^>]*>([\s\S]*?)<\/h2\s*>/i.exec(safeHtml);
+  const titleText = h2Match
+    ? stripTagsAndNormalize(h2Match[1] || '')
+    : '';
+  return [{
+    acf_fc_layout: 'blocks',
+    title: titleText || 'Раздел',
+    subtitle: '',
+    blocks: [{
+      block_width: '12',
+      bg_color: 'default',
+      text: safeHtml,
+      image: '',
+      url: '',
+    }],
+  }];
+}
+
 // Обработка одной задачи. Единый Qwen-конвейер:
 //   1) strip H1 + media из исходного HTML;
 //   2) extractSectionDescriptors → дескрипторы H2-секций;
@@ -1812,18 +1880,27 @@ async function runJob(job) {
           `Секция ${i + 1} собрана LLM-фолбэком (программная упаковка не справилась).`
         );
       } catch (sectionErr) {
-        // LLM-фолбэк тоже не справился — это уже фатальная ошибка задачи.
-        // Не молчим и не отдаём «битый» JSON: пусть пользователь увидит,
-        // какая именно секция проблемная, и сообщит исходный HTML.
+        // LLM-фолбэк тоже не справился. Раньше это обрывало ВСЮ задачу,
+        // и пользователь не получал ничего. Теперь — graceful fallback:
+        // вставляем «сырой» blocks-блок с полным sectionHtml. Это гарантирует
+        // byte-for-byte сохранность контента секции (исходный HTML кладётся
+        // в text как есть), а пользователь получает рабочий JSON и
+        // подробный warning по проблемной секции — он сможет вручную
+        // переразложить её, не теряя текста.
+        console.warn(`[AcfJson] section ${i + 1} fallback failed, emitting raw blocks:`, sectionErr);
+        sec.blocks = buildRawSectionFallback(sec.sectionHtml);
         const sampleP = secMissing.slice(0, 3).map((m) => `«${m}»`).join('; ');
         const sampleH = secMissingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
         const parts = [];
         if (secMissing.length) parts.push(`фрагменты текста (${secMissing.length}): ${sampleP}`);
         if (secMissingHeadings.length) parts.push(`заголовки (${secMissingHeadings.length}): ${sampleH}`);
         if (secLevelMismatches.length) parts.push(`перекошенный уровень тегов (${secLevelMismatches.length})`);
-        throw new Error(
-          `Секция ${i + 1} из ${sections.length}: ни программный билдер, ни LLM-фолбэк не смогли собрать её без потерь. `
-          + `Потеряны ${parts.join('; ')}. Детали LLM-фолбэка: ${sectionErr.message || sectionErr}.`
+        if (!Array.isArray(job.warnings)) job.warnings = [];
+        job.warnings.push(
+          `Секция ${i + 1} из ${sections.length}: ни программный билдер, ни LLM-фолбэк не смогли упаковать её в типизированный блок без потерь`
+          + (parts.length ? ` (потери: ${parts.join('; ')})` : '')
+          + `. Содержимое секции вставлено как «сырой» blocks-блок (HTML сохранён дословно). `
+          + `Детали LLM-фолбэка: ${sectionErr.message || sectionErr}.`
         );
       }
     }
@@ -1837,6 +1914,10 @@ async function runJob(job) {
 
     // Финальная сквозная валидация на всём HTML — страховка от того, что
     // postCleanupAcfArray случайно удалит фрагмент. В норме здесь всегда 0.
+    // Если что-то всё же зафиксировано — это ВНУТРЕННЯЯ ошибка постпроцессора
+    // (например, дедупликатор отрезал «лишнее»), но контент секций уже
+    // был сохранён через raw-фолбэк выше: лучше отдать пользователю JSON
+    // с warning, чем обрывать задачу.
     const outPlain        = outputPlainText(finalArray);
     const missing         = findMissingPhrases(html, outPlain);
     const missingHeadings = findMissingHeadings(html, finalArray);
@@ -1848,9 +1929,12 @@ async function runJob(job) {
       if (missing.length) parts.push(`фрагменты текста (${missing.length}): ${sampleP}`);
       if (missingHeadings.length) parts.push(`заголовки (${missingHeadings.length}): ${sampleH}`);
       if (levelMismatches.length) parts.push(`перекошенный уровень тегов (${levelMismatches.length})`);
-      throw new Error(
-        `Финальная пост-валидация JSON выявила потери, которые не были зафиксированы пер-секционной проверкой. Потеряны ${parts.join('; ')}. Это внутренняя ошибка постпроцессора.`
+      if (!Array.isArray(job.warnings)) job.warnings = [];
+      job.warnings.push(
+        `Финальная пост-валидация JSON выявила потери, которые не были зафиксированы пер-секционной проверкой: ${parts.join('; ')}. `
+        + `Это внутренняя ошибка постпроцессора — JSON отдан как есть, но рекомендуется проверить указанные фрагменты вручную.`
       );
+      console.warn('[AcfJson] post-validation issues:', { missing, missingHeadings, levelMismatches });
     }
 
     job.result     = JSON.stringify(finalArray, null, 2);
