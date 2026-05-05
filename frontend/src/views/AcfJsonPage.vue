@@ -28,7 +28,7 @@ import api from '../api.js';
 // LLM-режиму через Qwen, гарантирующая инвариант «текст не меняется»
 // математически (копирует HTML абзацев/заголовков byte-for-byte через
 // node.outerHTML). Используется по умолчанию, см. JOB_MODE_DEFAULT ниже.
-import { buildAcfFromHtml, extractSectionDescriptors } from '../utils/acfDeterministicBuilder.js';
+import { buildAcfSections, extractSectionDescriptors } from '../utils/acfDeterministicBuilder.js';
 
 const store          = useTasksStore();          // SEO-генератор (/api/tasks)
 const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api/info-article)
@@ -53,50 +53,31 @@ const infoStore      = useInfoArticleStore();    // Блог-статьи  (/api
 // (acf_fc_layout, schema-обёртки, повторение текста дословно) гарантированно
 // помещалась рядом с самим контентом и не приходила обрезанной.
 const MAX_OUTPUT_TOKENS = 16384;
-// Размер чанка по умолчанию. Снижен с 4000 → 2500 для уменьшения риска
-// HTTP 413 от промежуточного HTTPS-прокси (типичный лимит body у дешёвых
-// HTTPS-прокси — 64 KB, и системный промт + чанк в кодировке JSON могут
-// в эту границу не уложиться).
-const DEFAULT_CHUNK_LEN = 2500;
-// Минимальный размер чанка при авто-ретрае «finish_reason=length». Делим
-// проблемный чанк пополам, но не уходим ниже 800 симв., чтобы не выродиться
-// в десятки запросов из-за нескольких очень длинных слов/тегов.
-const MIN_RETRY_CHUNK_LEN = 800;
 // Поля JSON-вывода, которые считаются «текстовыми» при сборе фолбэка
 // expert→blocks (сюда модель кладёт оригинальные абзацы).
 const TEXT_FIELD_NAMES = /^(text|content|answer|expert|subtitle)$/i;
 
 // ── Режим сборки JSON ─────────────────────────────────────────────────────
-// 'deterministic' — программный билдер (frontend/src/utils/acfDeterministicBuilder.js).
-//   Гарантирует инвариант «текст/заголовки не меняются» на 100% (копирует
-//   HTML абзацев byte-for-byte). Не ходит в LLM, значит проблема HTTP 413 от
-//   промежуточного прокси здесь невозможна в принципе. Рекомендуется по умолчанию.
-// 'hybrid'        — программный билдер с LLM-классификатором acf_fc_layout.
-//   Делает РОВНО ОДИН запрос к Qwen с компактными дескрипторами секций
-//   (без полного текста), получает массив { index, layout } и передаёт
-//   подсказки в buildAcfFromHtml. Сам текст в LLM НЕ уходит — инвариант
-//   сохранности соблюдается математически. При сетевом сбое классификатора
-//   автоматически откатывается в чистый 'deterministic' (с предупреждением).
-// 'llm'           — старый путь через DashScope/Qwen. Оставлен как фолбэк
-//   для случаев, когда заказчик хочет «творческой» переаранжировки контента
-//   и осознанно готов мириться с риском мелких потерь.
-const JOB_MODE_DEFAULT = 'deterministic';
-// Сохраняем выбранный режим между сессиями, чтобы заказчик не выставлял его
-// каждый раз заново. Версионированный ключ — на случай будущих изменений
-// набора режимов.
-const JOB_MODE_LS_KEY = 'acfJsonJobMode:v1';
-const VALID_JOB_MODES = new Set(['deterministic', 'hybrid', 'llm']);
-const jobMode = ref((() => {
-  try {
-    const saved = localStorage.getItem(JOB_MODE_LS_KEY);
-    if (VALID_JOB_MODES.has(saved)) return saved;
-  } catch { /* приватный режим / SSR — не валим UI */ }
-  return JOB_MODE_DEFAULT;
-})());
-watch(jobMode, (v) => {
-  try { localStorage.setItem(JOB_MODE_LS_KEY, v); }
-  catch { /* QuotaExceededError и т. п. */ }
-});
+// Единственный поддерживаемый режим — 'qwen': полный конвейер
+//   (1) extractSectionDescriptors(html) — нарезка по <h2>;
+//   (2) ОДИН LLM-вызов к Qwen для классификации acf_fc_layout по каждой секции;
+//   (3) программная пер-секционная упаковка через buildAcfSections (текст
+//       копируется byte-for-byte через node.outerHTML — не уходит в LLM);
+//   (4) если конкретная H2-секция не прошла валидацию (потеря текста /
+//       заголовков / перекос уровня) — точечный LLM-фолбэк ровно на эту
+//       секцию с строгим промтом сохранности.
+// Прежние режимы 'deterministic' / 'hybrid' / 'llm' (с глобальным чанкованием)
+// удалены: чистый детерминированный режим иногда не справлялся с
+// нестандартной разметкой, чистый LLM-режим терял ~15% контента и дублировал
+// FAQ из-за разрезания секций по чанкам. Единый «qwen» путь объединяет
+// преимущества обоих: классификация и точечные фолбэки идут через LLM,
+// сам контент упаковывается программно.
+const JOB_MODE_DEFAULT = 'qwen';
+// Множество значений mode, которые могут встретиться в localStorage. Новые
+// значения старее не добавляются — поле сохранено только для обратной
+// совместимости с задачами, созданными до унификации (показ бейджа в UI).
+const VALID_JOB_MODES = new Set(['qwen', 'deterministic', 'hybrid', 'llm']);
+const jobMode = ref(JOB_MODE_DEFAULT);
 
 // ── Тарификация Qwen Plus (для расчёта стоимости задачи) ──────────────────
 // Берём из ТЗ заказчика: 57.6 ₽ / 1M входных токенов, 460.8 ₽ / 1M выходных.
@@ -170,13 +151,16 @@ function loadJobsFromStorage() {
     // чтобы `runQueue()` автоматически повторил обработку с нуля
     // (sourceHtml сохранён в самой задаче).
     const restored = clean.map((j) => {
-      // Обратная совместимость: задачи, созданные ДО введения mode-toggle,
-      // не имели поля j.mode и шли через LLM. Сохраняем их прежнее поведение,
-      // даже если глобальный jobMode у пользователя теперь 'deterministic',
-      // — чтобы перезагрузка страницы не подменяла «контракт» уже стоящей задачи.
+      // Обратная совместимость: задачи, созданные до унификации режимов
+      // (когда в UI был выбор deterministic/hybrid/llm), сохраняли свой
+      // mode в localStorage. Новые задачи всегда создаются с
+      // mode === 'qwen'. Уже завершённые (done/error) задачи мы НЕ
+      // переисполняем, поэтому им хватает только корректного бейджа.
+      // Если поле mode отсутствует или невалидно — выставляем 'qwen',
+      // чтобы при ретрае они пошли по новому единому потоку.
       const withMode = VALID_JOB_MODES.has(j.mode)
         ? j
-        : { ...j, mode: 'llm' };
+        : { ...j, mode: 'qwen' };
       if (withMode.status === 'processing') {
         return {
           ...withMode,
@@ -335,7 +319,7 @@ onUnmounted(() => {
 
 // ── Диагностика DashScope ──────────────────────────────────────────────────
 // Кнопка «Проверить соединение». Чтобы заказчик не угадывал, что именно
-// пошло не так, когда `processChunk` падает с «Сеть до сервера недоступна
+// пошло не так, когда LLM-вызов падает с «Сеть до сервера недоступна
 // (Failed to fetch). Network Error», вызываем GET /api/acf-json/health,
 // который проверяет: задан ли ключ, доступен ли DashScope, какое latency,
 // настроен ли прокси. Возвращаем результат прямо в UI.
@@ -448,87 +432,6 @@ function deriveManualTitle(html) {
   const plain = String(html).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   if (!plain) return 'Ручной ввод';
   return plain.slice(0, 60) + (plain.length > 60 ? '…' : '');
-}
-
-// ── Чанкование HTML ────────────────────────────────────────────────────────
-// Принципы:
-//  • Никогда не режем посередине HTML-тега и посередине слова.
-//  • Иерархия точек разреза (от самой «крупной» к самой «мелкой»):
-//      1) закрывающие блочные теги: </p>, </h1..6>, </ul>, </ol>, </div>,
-//         </blockquote>, </table>, </section>, </article>
-//      2) </li>
-//      3) </tr>
-//      4) граница предложения «. » / «! » / «? »
-//      5) пробел между словами (только если предыдущих границ нет)
-//  • Если кусок всё равно > maxLength, рекурсивно дробим его той же лестницей.
-//  • Инвариант: chunks.join('') === html — проверяется перед запросом.
-const SPLIT_LADDER = [
-  /(?<=<\/(?:p|h[1-6]|ul|ol|div|blockquote|table|section|article)>)/i,
-  /(?<=<\/li>)/i,
-  /(?<=<\/tr>)/i,
-  // Граница предложения: точка/!/? + пробел; исключаем уже закрытые теги, чтобы
-  // не дублировать первую группу. Lookbehind по нескольким символам поддержан
-  // во всех современных браузерах (поддержка Vue 3 — ES2018+).
-  /(?<=[.!?])\s+/,
-  // Любой пробел/перенос — последний рубеж ПЕРЕД hard-slice.
-  /(?<=\s)(?=\S)/,
-];
-
-function packParts(parts, maxLength) {
-  const chunks = [];
-  let cur = '';
-  for (const p of parts) {
-    if (cur.length + p.length > maxLength && cur.length > 0) {
-      chunks.push(cur);
-      cur = '';
-    }
-    cur += p;
-  }
-  if (cur.length > 0) chunks.push(cur);
-  return chunks;
-}
-
-// Разрезает один кусок строки безопасно по лестнице сепараторов.
-// Возвращает массив подкусков, каждый ≤ maxLength по возможности.
-// НИКОГДА не режет по символам внутри слова или внутри тега — если ни один
-// сепаратор не срабатывает, возвращает [piece] (вызывающая сторона решает,
-// что делать; но мы сужаем чанк, прежде чем дойти до этого).
-function splitPiece(piece, maxLength, ladderIdx = 0) {
-  if (piece.length <= maxLength) return [piece];
-
-  for (let idx = ladderIdx; idx < SPLIT_LADDER.length; idx++) {
-    const re = SPLIT_LADDER[idx];
-    const parts = piece.split(re);
-    if (parts.length <= 1) continue;
-
-    // Сначала пакуем как есть.
-    const packed = packParts(parts, maxLength);
-    // Если что-то всё ещё слишком большое — рекурсивно дробим именно этот
-    // подкусок следующим уровнем лестницы.
-    const result = [];
-    for (const p of packed) {
-      if (p.length <= maxLength) {
-        result.push(p);
-      } else {
-        result.push(...splitPiece(p, maxLength, idx + 1));
-      }
-    }
-    // Если на этом уровне получилось хоть какое-то реальное разбиение —
-    // возвращаем результат; иначе пробуем следующий уровень.
-    if (result.length > 1 || result[0].length < piece.length) return result;
-  }
-
-  // Все уровни исчерпаны (нет ни тегов, ни пробелов). Возвращаем как есть —
-  // это единственное «слово» без пробелов; модель попробует его проглотить
-  // целиком. Hard-slice по символам сознательно НЕ применяем, чтобы не
-  // порвать слово/тег.
-  return [piece];
-}
-
-function chunkHtml(html, maxLength = DEFAULT_CHUNK_LEN) {
-  if (!html) return [];
-  if (html.length <= maxLength) return [html];
-  return splitPiece(html, maxLength, 0);
 }
 
 // ── Удаление <h1> из исходного HTML ───────────────────────────────────────
@@ -1415,13 +1318,12 @@ async function callLlm({ systemPrompt, userPrompt }) {
       // в детерминированный режим — там запрос к LLM вообще не уходит.
       if (status === 413) {
         throw new Error(
-          'HTTP 413 Payload Too Large. Промежуточный HTTPS-прокси режет тело '
-          + 'запроса (типичный лимит body у HTTPS-прокси — 64 KB). '
-          + 'Решения по убыванию надёжности: '
-          + '(1) переключите режим сборки JSON на «Программный (рекомендуется)» '
-          + '— запрос к LLM не уходит вообще; '
-          + '(2) уменьшите DEFAULT_CHUNK_LEN в коде; '
-          + '(3) проверьте DASHSCOPE_PROXY_URL и попробуйте прокси с большим лимитом body. '
+          'HTTP 413 Payload Too Large. Промежуточный HTTPS-прокси отрезал тело '
+          + 'запроса (типичный лимит body у HTTPS-прокси — 64 KB). В единном Qwen-режиме '
+          + 'это происходит редко (пер-секционный фолбэк отправляет на DashScope только '
+          + 'одну H2-секцию за раз). Решения: '
+          + '(1) проверьте DASHSCOPE_PROXY_URL и попробуйте прокси с большим лимитом body; '
+          + '(2) разбейте исходную статью на несколько задач с меньшими секциями. '
           + `Детали от backend: ${serverMsg}`
         );
       }
@@ -1481,284 +1383,139 @@ function parseModelOutputArray(rawContent) {
   return Array.isArray(parsedOutput) ? parsedOutput : [parsedOutput];
 }
 
-// Обрабатывает ОДИН чанк: запрос → авто-ретрай при finish=length →
-// пост-валидация → один корректирующий ре-запрос → возврат массива блоков.
-// На неустранимых пропусках кидает Error со списком потерь.
-async function processChunk({
-  chunkHtmlText,
-  baseSystemPrompt,
+// ── Пер-секционный LLM-фолбэк ─────────────────────────────────────────────
+// Вызывается, когда программная упаковка одной H2-секции не прошла
+// валидацию (потеря текста / заголовков / перекос уровня тегов). Просим
+// Qwen собрать ACF-блок(и) для ЭТОЙ ОДНОЙ секции с строгими гарантиями
+// сохранности контента.
+//
+// Важно: payload сравнительно небольшой (одна секция ~1–4 KB), поэтому
+// риск HTTP 413 от промежуточного прокси ≈ 0. Мы не ходим к Qwen с целым
+// HTML статьи — только когда программный билдер реально не справился.
+//
+// Возвращает массив ACF-блоков, который ПРОШЁЛ ту же пост-валидацию по
+// исходному HTML секции. Если LLM сам не смог уложиться в инвариант
+// сохранности — кидает ошибку (вызывающая сторона решит, что делать:
+// поднять задачу как failed, либо вернуть программную версию с пометкой
+// «частичная потеря»).
+const SECTION_USER_TEMPLATE = (sectionHtml, layoutHint, expertAlreadyUsed) => `Перед тобой ОДНА секция HTML-статьи (один <h2> + всё, что между этим <h2> и следующим <h2>).
+Преобразуй её в JSON-массив ACF-блоков по правилам системного промта.
+Не дробь и не объединяй. Каждый <p>/<li>/<table>/<blockquote>/<hN> из исходника обязан попасть в вывод дословно — ровно один раз.
+${layoutHint ? `Подсказка по типу основного блока для этой секции: "${layoutHint}". Если она явно не подходит к содержимому — выбери более подходящий тип из набора { blocks, steps, bens, price, faq, attention, expert, tabs }.` : ''}
+${expertAlreadyUsed ? '\nВНИМАНИЕ: блок "expert" в этой статье уже был использован ранее — здесь использовать его НЕЛЬЗЯ. Любую цитату/мнение оборачивай в обычный "blocks".' : ''}
+
+Исходный HTML секции:
+
+${sectionHtml}`;
+
+async function buildSectionViaLlm({
+  sectionHtml,
+  layoutHint,
   expertAlreadyUsed,
-  chunkLabel,
+  sectionLabel,
 }) {
-  const systemPromptBase = expertAlreadyUsed
-    ? baseSystemPrompt + `\n\n[СИСТЕМНОЕ ВАЖНОЕ УВЕДОМЛЕНИЕ]: В предыдущих частях текста ТЫ УЖЕ СОЗДАЛ блок "expert". Лимит исчерпан! В этой части КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать "acf_fc_layout": "expert". Упаковывай любые цитаты в обычные "blocks".`
-    : baseSystemPrompt;
+  // Системный промт = тот же BASE_SYSTEM_PROMPT (со всеми правилами 0–5
+  // и схемами 8 блоков), плюс контекстная подсказка про expert-квоту.
+  const systemPrompt = expertAlreadyUsed
+    ? BASE_SYSTEM_PROMPT + '\n\n[СИСТЕМНОЕ ВАЖНОЕ УВЕДОМЛЕНИЕ]: В предыдущих секциях статьи блок "expert" УЖЕ создан. В ЭТОЙ секции "acf_fc_layout":"expert" использовать ЗАПРЕЩЕНО. Любую цитату/прямую речь упаковывай в обычные "blocks".'
+    : BASE_SYSTEM_PROMPT;
+  const userPrompt = SECTION_USER_TEMPLATE(sectionHtml, layoutHint, expertAlreadyUsed);
 
-  const userPrompt = `Обработай следующие данные (это часть HTML-текста статьи) и верни массив JSON для ACF. Сохрани каждый абзац дословно, только распредели по блокам:\n\n${chunkHtmlText}`;
-
-  // Аккумулятор токенов по ВСЕМ под-вызовам этого чанка (вкл. рекурсивный
-  // split при finish=length и корректирующий ре-запрос). Возвращается наверх
-  // в runJob для расчёта суммарной стоимости задачи.
   let tokensInTotal  = 0;
   let tokensOutTotal = 0;
 
-  const first = await callLlm({ systemPrompt: systemPromptBase, userPrompt });
-  const choice = first.choice;
+  const first = await callLlm({ systemPrompt, userPrompt });
   tokensInTotal  += first.tokensIn;
   tokensOutTotal += first.tokensOut;
 
-  // Авто-ретрай при обрыве по длине: рекурсивно дробим этот же чанк пополам
-  // через тот же безопасный сплиттер и обрабатываем подкуски один за другим.
-  if (choice.finish_reason === 'length') {
-    const half = Math.max(MIN_RETRY_CHUNK_LEN, Math.floor(chunkHtmlText.length / 2));
-    const sub = chunkHtml(chunkHtmlText, half);
-    if (sub.length <= 1) {
-      throw new Error(
-        `Модель не смогла закрыть JSON для ${chunkLabel} (длина ${chunkHtmlText.length} симв.) даже при максимальном бюджете и не удаётся безопасно перенарезать (нет границ тегов/предложений/слов). Сократите HTML вручную.`,
-      );
-    }
-    const merged = [];
-    let expertUsedLocal = expertAlreadyUsed;
-    for (let k = 0; k < sub.length; k++) {
-      const subRes = await processChunk({
-        chunkHtmlText: sub[k],
-        baseSystemPrompt,
-        expertAlreadyUsed: expertUsedLocal,
-        chunkLabel: `${chunkLabel} → подчасть ${k + 1}/${sub.length}`,
-      });
-      for (const b of subRes.blocks) {
-        if (b && b.acf_fc_layout === 'expert') expertUsedLocal = true;
-        merged.push(b);
-      }
-      tokensInTotal  += subRes.tokensIn;
-      tokensOutTotal += subRes.tokensOut;
-    }
-    return {
-      blocks:           merged,
-      expertUsedAfter:  expertUsedLocal,
-      tokensIn:         tokensInTotal,
-      tokensOut:        tokensOutTotal,
-    };
+  if (first.choice.finish_reason === 'length') {
+    throw new Error(`${sectionLabel}: LLM-фолбэк упёрся в лимит токенов (finish_reason=length). Секция слишком большая для одного вызова.`);
   }
 
-  let outputArray;
+  let blocks;
   try {
-    outputArray = parseModelOutputArray(choice.message?.content);
+    blocks = parseModelOutputArray(first.choice.message?.content);
   } catch (parseErr) {
-    // Авто-ретрай при невалидном JSON: иногда модель срывается в markdown-
-    // обёртку, добавляет тексты вокруг массива или ломает кавычки. Один
-    // повтор с явной инструкцией «верни ТОЛЬКО валидный JSON-массив» в
-    // 95% случаев чинит это, и мы не валим всю задачу из-за одного чанка.
-    const fixSystem = systemPromptBase + `\n\n[ИСПРАВЛЕНИЕ — JSON-PARSE]\nПредыдущий ответ не распарсился как JSON-массив. Причина: ${(() => { const m = String(parseErr.message || parseErr); return m.length > 200 ? m.slice(0, 200) + '…' : m; })()}.\nВерни СТРОГО валидный JSON-массив объектов и НИЧЕГО кроме него: без markdown-обёрток \`\`\`json, без комментариев, без текста до или после массива.`;
+    // Один корректирующий ре-запрос: иногда модель срывается в markdown.
+    const fixSystem = systemPrompt + `\n\n[ИСПРАВЛЕНИЕ — JSON-PARSE]\nПредыдущий ответ не распарсился как JSON-массив. Причина: ${String(parseErr.message || parseErr).slice(0, 200)}.\nВерни СТРОГО валидный JSON-массив объектов и НИЧЕГО кроме него: без markdown-обёрток \`\`\`json, без комментариев.`;
     const fix = await callLlm({ systemPrompt: fixSystem, userPrompt });
     tokensInTotal  += fix.tokensIn;
     tokensOutTotal += fix.tokensOut;
-    if (fix.choice.finish_reason === 'length') {
-      throw new Error(`${chunkLabel}: модель упёрлась в лимит токенов на ре-запросе после JSON-parse error. Попробуйте уменьшить размер исходного HTML.`);
-    }
-    try {
-      outputArray = parseModelOutputArray(fix.choice.message?.content);
-    } catch (parseErr2) {
-      throw new Error(`${chunkLabel}: модель не вернула валидный JSON даже после ре-запроса. Детали: ${parseErr2.message}`);
-    }
+    blocks = parseModelOutputArray(fix.choice.message?.content);
   }
 
-  // Пост-валидация сохранности текста. На вход даём СЫРОЙ HTML чанка —
-  // findMissingPhrases сам разобьёт его на блок-уровневые сегменты и НЕ
-  // будет строить окна поиска через границы абзацев/заголовков.
-  let outPlain        = outputPlainText(outputArray);
-  let missing         = findMissingPhrases(chunkHtmlText, outPlain);
-  // Параллельно — пост-валидация сохранности ИСХОДНОЙ РАЗМЕТКИ ЗАГОЛОВКОВ
-  // (h2/h3/h4/h5). Это требование ТЗ: «запрещено менять заголовки... текст
-  // упаковываем только в контейнеры». findMissingPhrases ловит потерю слов,
-  // но допускает превращение <h2>FOO</h2> в <p>FOO</p> — для пользователя это
-  // регрессия, потому что после импорта в WordPress пропадает иерархия.
-  let missingHeadings = findMissingHeadings(chunkHtmlText, outputArray);
-  // Дополнительно — пост-валидация УРОВНЯ заголовков (h2/h3/h4/h5).
-  // Ловит баг, который findMissingHeadings пропускает из-за title-канон-
-  // исключения: модель может «промоутить» исходный <h3>X</h3> в <h2>X</h2>
-  // внутри text/content (например, ради более крупного шрифта). Текст-канон
-  // X совпадает с каким-нибудь title в выводе → findMissingHeadings молчит,
-  // но иерархия статьи на сайте сломана. Этот валидатор репортит конкретные
-  // перекосы уровня и триггерит тот же корректирующий ре-запрос.
-  let levelMismatches = findHeadingLevelMismatches(chunkHtmlText, outputArray);
+  // Пер-секционная пост-валидация: тот же набор валидаторов, что в
+  // глобальной проверке runJob, но применённый к payload одной секции.
+  const outPlain = outputPlainText(blocks);
+  const missing  = findMissingPhrases(sectionHtml, outPlain);
+  const missingHeadings = findMissingHeadings(sectionHtml, blocks);
+  const levelMismatches = findHeadingLevelMismatches(sectionHtml, blocks);
 
-  if (missing.length > 0 || missingHeadings.length > 0 || levelMismatches.length > 0) {
-    // Один корректирующий ре-запрос: даём модели список потерянных фрагментов
-    // и/или потерянных заголовков и просим вернуть их дословно В ТЕХ ЖЕ ТЕГАХ.
+  if (missing.length || missingHeadings.length || levelMismatches.length) {
+    // Один корректирующий ре-запрос с явным списком потерь — тот же
+    // паттерн, что и в исходном processChunk. Он чинил >90% случаев.
     const sampleMissing  = missing.slice(0, 20);
     const sampleHeadings = missingHeadings.slice(0, 10);
     const sampleLevels   = levelMismatches.slice(0, 10);
-    const phrasesBlock = sampleMissing.length
-      ? `Потерянные фрагменты текста (по одной строке на фрагмент):\n${sampleMissing.map((m) => `• ${m}`).join('\n')}${missing.length > sampleMissing.length ? `\n• …и ещё ${missing.length - sampleMissing.length} фрагмент(ов) — не забудь их тоже.` : ''}`
-      : '';
-    const headingsBlock = sampleHeadings.length
-      ? `Потерянные заголовки (тег + текст ОБЯЗАТЕЛЬНО сохрани ВНУТРИ полей text / content / answer соответствующего блока):\n${sampleHeadings.map((h) => `• <${h.tag}>${h.text}</${h.tag}>`).join('\n')}${missingHeadings.length > sampleHeadings.length ? `\n• …и ещё ${missingHeadings.length - sampleHeadings.length} заголовок(ов).` : ''}`
-      : '';
-    const levelsBlock = sampleLevels.length
-      ? `Заголовки с НЕВЕРНЫМ УРОВНЕМ ТЕГА (ты выдал один уровень, а в источнике другой — это разрушает иерархию статьи):\n${sampleLevels.map((m) => `• выдано <${m.tag}>${m.text}</${m.tag}> — должно быть <${m.expected}>${m.text}</${m.expected}>`).join('\n')}${levelMismatches.length > sampleLevels.length ? `\n• …и ещё ${levelMismatches.length - sampleLevels.length} перекошенный(ых) заголовок(ов).` : ''}`
-      : '';
-    const correctiveSystem = systemPromptBase + `\n\n[ИСПРАВЛЕНИЕ — КРИТИЧНО]
-В предыдущей попытке ты нарушил инвариант сохранности (см. список ниже) — это фатальная ошибка строгого парсера. Верни ВСЁ ПЕРЕЧИСЛЕННОЕ НИЖЕ ДОСЛОВНО внутри подходящих полей text/content/answer.
-- НЕ перефразируй, НЕ сокращай, НЕ нормализуй пробелы.
-- Артикулы (типа «40BD111», «YH-GM01F», «YC-7742»), цены («~18 000 руб.»), материалы и единицы измерения копируй посимвольно — со всеми тильдами «~», слэшами «/», вертикальными чертами «|», неразрывными пробелами и регистром.
-- Запрещено заменять перечисленные ниже фрагменты на «и так далее», «остальные позиции», «...» или любые иные плейсхолдеры.
-- Заголовки сохраняй именно теми же тегами <h2>/<h3>/<h4>/<h5>, а не оборачивай их в <p>. Если в источнике стоит <h3> — в выводе тоже <h3>; «промоутить» <h3> до <h2> или «понижать» <h2> до <h3> КАТЕГОРИЧЕСКИ запрещено.
-- Не дублируй заголовок: если текст h2 уже стоит в "title" блока, то ВТОРОЙ литеральный <h2> с тем же текстом внутри text/content/answer того же блока класть нельзя. Это создаёт два видимых одинаковых заголовка на странице.
-- Перед выдачей ответа мысленно сверь каждый пункт списка ниже со своим JSON и убедись, что он там есть БУКВАЛЬНО.
-${[phrasesBlock, headingsBlock, levelsBlock].filter(Boolean).join('\n\n')}`;
-    const correctiveUser = `Сформируй массив JSON ACF заново для того же исходника, СОХРАНИВ ВСЕ потерянные фрагменты и заголовки дословно и БЕЗ ПЕРЕКОСОВ УРОВНЯ ТЕГОВ. Исходник:\n\n${chunkHtmlText}`;
-    const corrective = await callLlm({ systemPrompt: correctiveSystem, userPrompt: correctiveUser });
-    const choice2 = corrective.choice;
+    const corrective = await callLlm({
+      systemPrompt: systemPrompt + `\n\n[ИСПРАВЛЕНИЕ — КРИТИЧНО]\nВ предыдущей попытке ты нарушил инвариант сохранности контента/заголовков. Верни ВСЕ перечисленные ниже фрагменты дословно внутри подходящих полей text/content/answer и сохрани оригинальные уровни тегов <h2>/<h3>/<h4>/<h5>.\n${sampleMissing.length ? `Потерянные фрагменты текста:\n${sampleMissing.map((m) => `• ${m}`).join('\n')}\n` : ''}${sampleHeadings.length ? `\nПотерянные заголовки:\n${sampleHeadings.map((h) => `• <${h.tag}>${h.text}</${h.tag}>`).join('\n')}\n` : ''}${sampleLevels.length ? `\nЗаголовки с НЕВЕРНЫМ уровнем тега:\n${sampleLevels.map((m) => `• выдано <${m.tag}>${m.text}</${m.tag}> — должно быть <${m.expected}>${m.text}</${m.expected}>`).join('\n')}\n` : ''}`,
+      userPrompt,
+    });
     tokensInTotal  += corrective.tokensIn;
     tokensOutTotal += corrective.tokensOut;
-    if (choice2.finish_reason !== 'length') {
+    if (corrective.choice.finish_reason !== 'length') {
       try {
-        const retryArr = parseModelOutputArray(choice2.message?.content);
+        const retryArr = parseModelOutputArray(corrective.choice.message?.content);
         const retryPlain = outputPlainText(retryArr);
-        const retryMissing  = findMissingPhrases(chunkHtmlText, retryPlain);
-        const retryHeadings = findMissingHeadings(chunkHtmlText, retryArr);
-        const retryLevels   = findHeadingLevelMismatches(chunkHtmlText, retryArr);
-        const wasBetter =
-          retryMissing.length + retryHeadings.length + retryLevels.length
-            < missing.length + missingHeadings.length + levelMismatches.length;
-        if (retryMissing.length === 0 && retryHeadings.length === 0 && retryLevels.length === 0) {
-          outputArray = retryArr;
-          outPlain = retryPlain;
-          missing = [];
-          missingHeadings = [];
-          levelMismatches = [];
-        } else if (wasBetter) {
-          // Прогресс есть, но не идеально — берём лучший вариант и сообщаем.
-          outputArray = retryArr;
-          outPlain = retryPlain;
-          missing = retryMissing;
-          missingHeadings = retryHeadings;
-          levelMismatches = retryLevels;
+        if (
+          findMissingPhrases(sectionHtml, retryPlain).length === 0
+          && findMissingHeadings(sectionHtml, retryArr).length === 0
+          && findHeadingLevelMismatches(sectionHtml, retryArr).length === 0
+        ) {
+          blocks = retryArr;
+        } else {
+          throw new Error('после корректирующего ре-запроса инвариант сохранности всё равно нарушен');
         }
-      } catch (parseErr) {
-        // Если корректирующий ответ не распарсился — оставляем исходную ошибку.
-        console.warn('[AcfJson] corrective retry parse failed:', parseErr);
+      } catch (retryErr) {
+        throw new Error(`${sectionLabel}: LLM-фолбэк не сумел собрать секцию без потерь — ${retryErr.message || retryErr}.`);
       }
+    } else {
+      throw new Error(`${sectionLabel}: корректирующий LLM-фолбэк упёрся в лимит токенов.`);
     }
   }
 
-  // ── Рекурсивный fallback: если корректирующий ре-запрос НЕ помог ──────
-  // Требование ТЗ: «алгоритм должен дробить большие таблицы/тексты, чтобы
-  // модель физически не могла сэкономить токены на длинном списке». Если
-  // после корректирующего ре-запроса всё ещё есть пропуски (missing /
-  // missingHeadings / levelMismatches), не выбрасываем ошибку сразу —
-  // рекурсивно режем этот чанк пополам тем же безопасным сплиттером и
-  // обрабатываем подкуски один за другим. На малых объёмах Qwen перестаёт
-  // «съедать» строки каталога, потому что ему уже физически некуда
-  // экономить токены. Логика зеркалит существующую ветку
-  // `finish_reason === 'length'` выше — единый паттерн «сломалось →
-  // дробим → переобрабатываем».
-  // Безопасность: если чанк уже близок к минимальному размеру (<= 2 ×
-  // MIN_RETRY_CHUNK_LEN) или сплиттер физически не может разрезать его
-  // (нет границ тегов/предложений/слов — длинная одиночная строка),
-  // продолжаем существующим fail-safe путём (throw ниже). Лучше явная
-  // ошибка, чем тихая потеря контента.
-  const stillBroken =
-    missing.length > 0 || missingHeadings.length > 0 || levelMismatches.length > 0;
-  if (stillBroken && chunkHtmlText.length > MIN_RETRY_CHUNK_LEN * 2) {
-    const half = Math.max(MIN_RETRY_CHUNK_LEN, Math.floor(chunkHtmlText.length / 2));
-    const sub = chunkHtml(chunkHtmlText, half);
-    if (sub.length > 1) {
-      const merged = [];
-      let expertUsedLocal = expertAlreadyUsed;
-      for (let k = 0; k < sub.length; k++) {
-        const subRes = await processChunk({
-          chunkHtmlText: sub[k],
-          baseSystemPrompt,
-          expertAlreadyUsed: expertUsedLocal,
-          chunkLabel: `${chunkLabel} → подчасть ${k + 1}/${sub.length} (после потери фрагментов)`,
-        });
-        for (const b of subRes.blocks) {
-          if (b && b.acf_fc_layout === 'expert') expertUsedLocal = true;
-          merged.push(b);
-        }
-        tokensInTotal  += subRes.tokensIn;
-        tokensOutTotal += subRes.tokensOut;
-      }
-      return {
-        blocks:           merged,
-        expertUsedAfter:  expertUsedLocal,
-        tokensIn:         tokensInTotal,
-        tokensOut:        tokensOutTotal,
-      };
-    }
-  }
-
-  if (missing.length > 0) {
-    const sample = missing.slice(0, 5).map((m) => `«${m}»`).join('; ');
-    const totalLost = missing.reduce((a, m) => a + m.length, 0);
-    throw new Error(
-      `${chunkLabel}: после ре-запроса в JSON отсутствуют ${missing.length} фрагмент(ов) исходного текста (≈${totalLost} симв.). Примеры: ${sample}. Сгенерированный JSON НЕ применён, чтобы не потерять контент.`,
-    );
-  }
-
-  if (missingHeadings.length > 0) {
-    const sample = missingHeadings.slice(0, 5).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
-    throw new Error(
-      `${chunkLabel}: после ре-запроса в JSON отсутствуют ${missingHeadings.length} оригинальный(ых) заголовок(ов) исходного HTML (теги h2–h5). Примеры: ${sample}. Сгенерированный JSON НЕ применён, чтобы не сломать разметку статьи при импорте в WordPress.`,
-    );
-  }
-
-  if (levelMismatches.length > 0) {
-    const sample = levelMismatches.slice(0, 5)
-      .map((m) => `<${m.tag}>${m.text}</${m.tag}> вместо <${m.expected}>`)
-      .join('; ');
-    throw new Error(
-      `${chunkLabel}: после ре-запроса в JSON ${levelMismatches.length} заголовок(ов) выданы с НЕВЕРНЫМ уровнем тега (например, <h2> там, где в источнике был <h3>). Примеры: ${sample}. Сгенерированный JSON НЕ применён, чтобы не сломать иерархию статьи при импорте в WordPress.`,
-    );
-  }
-
-  // Программная защита от галлюцинаций: единственность блока "expert".
-  // ВАЖНО: если блок expert надо превратить в blocks, собираем ВЕСЬ текст из
-  // всех текстовых полей этого блока (text/content/answer/expert/subtitle),
-  // чтобы не потерять ни абзаца независимо от формы, в которой модель его дала.
+  // Защита от галлюцинации «второй expert»: если квота уже исчерпана и
+  // модель всё равно вернула expert — конвертируем его в blocks, собрав
+  // все текстовые поля.
   const finalBlocks = [];
-  let expertUsedAfter = expertAlreadyUsed;
-  for (const block of outputArray) {
-    if (block && block.acf_fc_layout === 'expert') {
-      if (expertUsedAfter) {
-        const allTexts = [];
-        collectTextFieldsDeep(block, allTexts);
-        // Если HTML-обёртки не нашлось — оборачиваем сами, чтобы остаться валидными.
-        const joined = allTexts.length
-          ? allTexts.map((t) => (/^\s*<[^>]+>/.test(t) ? t : `<p>${t}</p>`)).join('\n')
-          : '';
-        const converted = {
-          acf_fc_layout: 'blocks',
-          title: block.title || '',
-          subtitle: '',
-          blocks: [{
-            block_width: '12',
-            bg_color:    'default',
-            text:        joined,
-            image:       '',
-            url:         '',
-          }],
-          type: '1',
-          vert_center: false,
-          block_equal_height: false,
-        };
-        finalBlocks.push(converted);
-        continue;
-      } else {
-        expertUsedAfter = true;
-      }
+  for (const block of blocks) {
+    if (block && block.acf_fc_layout === 'expert' && expertAlreadyUsed) {
+      const allTexts = [];
+      collectTextFieldsDeep(block, allTexts);
+      const joined = allTexts.length
+        ? allTexts.map((t) => (/^\s*<[^>]+>/.test(t) ? t : `<p>${t}</p>`)).join('\n')
+        : '';
+      finalBlocks.push({
+        acf_fc_layout: 'blocks',
+        title: block.title || '',
+        subtitle: '',
+        blocks: [{
+          block_width: '12',
+          bg_color:    'default',
+          text:        joined,
+          image:       '',
+          url:         '',
+        }],
+        type: '1',
+        vert_center: false,
+        block_equal_height: false,
+      });
+      continue;
     }
     finalBlocks.push(block);
   }
 
-  return {
-    blocks:           finalBlocks,
-    expertUsedAfter,
-    tokensIn:         tokensInTotal,
-    tokensOut:        tokensOutTotal,
-  };
+  return { blocks: finalBlocks, tokensIn: tokensInTotal, tokensOut: tokensOutTotal };
 }
 
 // ── Главное действие: добавить задачу формирования JSON в очередь ──────────
@@ -1789,10 +1546,14 @@ function addJob() {
       : (selectedTask.value.title || `Задача #${selectedTask.value.id}`),
     sourceHtml:   sourceHtml, // снимок исходника на момент создания
     sourceChars:  sourceHtml.length,
-    // Режим сборки фиксируется на МОМЕНТ СОЗДАНИЯ задачи: после этого можно
-    // менять глобальный jobMode для следующих задач, не задевая уже стоящие
-    // в очереди (и сохранённые в localStorage между сессиями).
-    mode:         jobMode.value, // 'deterministic' | 'llm'
+    // Режим сборки. Сейчас поддерживается только 'qwen' (единый поток
+    // классификатор + программная упаковка + пер-секционный LLM-фолбэк),
+    // но поле сохраняется на каждой задаче для:
+    //   • отображения бейджа в UI (включая старые задачи из localStorage,
+    //     созданные до унификации, у которых mode мог быть deterministic/
+    //     hybrid/llm);
+    //   • будущего расширения (если когда-нибудь добавят альтернативу).
+    mode:         jobMode.value, // 'qwen' (новые задачи всегда так)
     status:       'queued',           // queued | processing | done | error
     progress:     'В очереди…',
     result:       '',                 // готовый JSON-текст (string)
@@ -1939,11 +1700,18 @@ async function classifySectionsViaLLM(descriptors) {
   return { hints, tokensIn, tokensOut };
 }
 
-// Обработка одной задачи. Использует существующий безопасный сплиттер +
-// post-validation (см. processChunk выше).
+// Обработка одной задачи. Единый Qwen-конвейер:
+//   1) strip H1 + media из исходного HTML;
+//   2) extractSectionDescriptors → дескрипторы H2-секций;
+//   3) ОДИН LLM-вызов к Qwen — классификация acf_fc_layout по каждой секции;
+//   4) buildAcfSections — программная пер-секционная упаковка контента
+//      (текст копируется byte-for-byte через node.outerHTML, не уходит в LLM);
+//   5) для каждой секции — пер-секционная валидация. Если что-то потеряно →
+//      точечный LLM-фолбэк buildSectionViaLlm на ОДНУ секцию;
+//   6) глобальный postCleanupAcfArray + сквозная пост-валидация.
 async function runJob(job) {
   job.status     = 'processing';
-  job.progress   = 'Подготовка чанков…';
+  job.progress   = 'Подготовка…';
   job.error      = '';
   job.result     = '';
   job.startedAt  = new Date().toISOString();
@@ -1956,137 +1724,134 @@ async function runJob(job) {
   const t0       = Date.now();
 
   try {
-    // ТЗ: H1 не должен попадать в JSON. Удаляем его из исходного HTML ДО
-    // дальнейшей обработки. Делается одинаково для обоих режимов: сам
-    // деттерминированный билдер тоже вызывает stripH1, но дублирование
-    // здесь сохраняет инвариант chunks.join === html для LLM-ветки и
-    // совпадает по поведению с прежней реализацией.
-    // Дополнительно: вырезаем встроенные <figure>/<img>/<picture>
-    // (обложка info-article в data:image base64). См. комментарий
-    // stripInlineMediaFromHtml — без этого LLM-режим валится с 413
-    // от прокси, а детерминированный сваливает обложку в blocks[0].text
-    // целиком как огромный data: URI.
+    // ТЗ: H1 не должен попадать в JSON. Дополнительно: вырезаем встроенные
+    // <figure>/<img>/<picture> (обложка info-article в data:image base64),
+    // иначе sectionHtml для LLM-фолбэка распухает на сотни KB и ловит 413.
     const html = stripH1FromHtml(stripInlineMediaFromHtml(job.sourceHtml));
 
-    // ── Режим 1: программная (детерминированная) сборка JSON ─────────────
-    // Не идёт в LLM. Гарантирует «текст не меняется», работает мгновенно.
-    // Подходит для типового HTML, который генерирует наш SEO/блог-pipeline.
-    //
-    // Гибридный режим — РАСШИРЕНИЕ детерминированного: один LLM-вызов
-    // с компактными дескрипторами секций (без полного текста) для уточнения
-    // выбора acf_fc_layout. Сам текст по-прежнему упаковывается программно
-    // через node.outerHTML, поэтому инвариант сохранности соблюдается.
-    if (job.mode === 'deterministic' || job.mode === 'hybrid') {
-      let layoutHints = null;
-
-      if (job.mode === 'hybrid') {
-        try {
-          job.progress = 'LLM-классификатор: анализ секций…';
-          const descriptors = extractSectionDescriptors(html);
-          if (descriptors.length) {
-            const { hints, tokensIn, tokensOut } = await classifySectionsViaLLM(descriptors);
-            layoutHints = hints;
-            // Учитываем токены классификатора в общей стоимости задачи —
-            // пользователь видит реальную цену гибридного режима в UI.
-            job.tokensIn  += tokensIn;
-            job.tokensOut += tokensOut;
-            job.costRub    = computeJobCost(job.tokensIn, job.tokensOut);
-          }
-        } catch (classifyErr) {
-          // Любой сбой классификатора (сеть/таймаут/невалидный JSON от модели)
-          // НЕ блокирует сборку: откатываемся в чистый детерминированный режим.
-          // Сохраняем диагностику в job.warnings, чтобы пользователь видел
-          // причину «деградации» в карточке задачи.
-          console.warn('[AcfJson] LLM-классификатор упал, фолбэк в детерминированный режим:', classifyErr);
-          if (!Array.isArray(job.warnings)) job.warnings = [];
-          job.warnings.push(
-            `Гибридный режим: LLM-классификатор недоступен (${classifyErr.message || classifyErr}). `
-            + 'Сборка прошла на чистой эвристике билдера — текст и заголовки сохранены.'
-          );
-          layoutHints = null;
-        }
-      }
-
-      job.progress = 'Программная сборка JSON…';
-      const finalArray = buildAcfFromHtml(html, layoutHints ? { layoutHints } : undefined);
-      // Применяем общий пост-чистильщик (subtitle='', срез нумерации,
-      // дедуп FAQ-вопроса), чтобы вывод обоих режимов был согласован
-      // в полях и валидаторы вели себя одинаково.
-      postCleanupAcfArray(finalArray);
-
-      // Сквозная пост-валидация теми же функциями, что и LLM-режим.
-      // Если эвристика билдера где-то проглотила фразу/заголовок — это
-      // баг билдера, который нужно чинить, а не повод обращаться к модели.
-      const outPlain        = outputPlainText(finalArray);
-      const missing         = findMissingPhrases(html, outPlain);
-      const missingHeadings = findMissingHeadings(html, finalArray);
-      // Перекосы уровня тегов (h3→h2 и т. п.) тоже проверяем — на случай,
-      // если эвристика билдера или будущая правка внутри детерминированного
-      // конвертера случайно нарушит уровень. В норме здесь всегда 0,
-      // потому что builder копирует исходные <hN> через node.outerHTML.
-      const levelMismatches = findHeadingLevelMismatches(html, finalArray);
-      if (missing.length || missingHeadings.length || levelMismatches.length) {
-        const sampleP = missing.slice(0, 3).map((m) => `«${m}»`).join('; ');
-        const sampleH = missingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
-        const sampleL = levelMismatches.slice(0, 3)
-          .map((m) => `<${m.tag}>${m.text}</${m.tag}> вместо <${m.expected}>`)
-          .join('; ');
-        const parts = [];
-        if (missing.length) parts.push(`фрагменты текста (${missing.length}): ${sampleP}`);
-        if (missingHeadings.length) parts.push(`заголовки (${missingHeadings.length}): ${sampleH}`);
-        if (levelMismatches.length) parts.push(`перекошенный уровень тегов (${levelMismatches.length}): ${sampleL}`);
-        throw new Error(
-          `Программный билдер не сумел разместить весь контент в JSON. Потеряны ${parts.join('; ')}. `
-          + 'Это баг эвристики билдера. Временное решение — переключите режим на «Через Qwen (LLM)» '
-          + 'и повторите задачу. Сообщите разработчику исходный HTML, чтобы поправить эвристику.'
-        );
-      }
-
-      job.result     = JSON.stringify(finalArray, null, 2);
-      job.status     = 'done';
-      job.progress   = '';
-      job.finishedAt = new Date().toISOString();
-      job.durationMs = Date.now() - t0;
-      return;
+    // ── Шаг 1: дескрипторы секций ──────────────────────────────────────
+    const descriptors = extractSectionDescriptors(html);
+    if (!descriptors.length) {
+      throw new Error('В исходном HTML не найдено ни одного раздела для конвертации.');
     }
 
-    // ── Режим 2: LLM-сборка через DashScope (старый путь) ────────────────
-    job.progress = 'Подготовка чанков…';
-    const chunks = chunkHtml(html, DEFAULT_CHUNK_LEN);
-
-    if (chunks.join('') !== html) {
-      throw new Error('Внутренняя ошибка: чанкование изменило исходный HTML (нарушен инвариант chunks.join === html).');
-    }
-
-    const total = chunks.length;
-    const finalArray = [];
-    let expertAlreadyUsed = false;
-
-    for (let i = 0; i < total; i++) {
-      job.progress = total > 1
-        ? `Маппинг контента: часть ${i + 1} из ${total}…`
-        : 'Анализ и сборка JSON…';
-
-      // eslint-disable-next-line no-await-in-loop
-      const { blocks, expertUsedAfter, tokensIn, tokensOut } = await processChunk({
-        chunkHtmlText:    chunks[i],
-        baseSystemPrompt: BASE_SYSTEM_PROMPT,
-        expertAlreadyUsed,
-        chunkLabel:       `Часть ${i + 1} из ${total}`,
-      });
-      expertAlreadyUsed = expertUsedAfter;
-      for (const b of blocks) finalArray.push(b);
-      // Накапливаем метрики ПО ХОДУ обработки (а не только в конце), чтобы UI
-      // в карточке задачи показывал растущие токены/₽ во время processing.
+    // ── Шаг 2: LLM-классификация acf_fc_layout по каждой секции ────────
+    let layoutHints = null;
+    try {
+      job.progress = 'LLM-классификатор: анализ секций…';
+      const { hints, tokensIn, tokensOut } = await classifySectionsViaLLM(descriptors);
+      layoutHints = hints;
       job.tokensIn  += tokensIn;
       job.tokensOut += tokensOut;
       job.costRub    = computeJobCost(job.tokensIn, job.tokensOut);
+    } catch (classifyErr) {
+      // Сбой классификатора (сеть/таймаут/невалидный JSON) НЕ блокирует
+      // сборку: программный билдер сам выберет тип блока через эвристику.
+      console.warn('[AcfJson] LLM-классификатор упал, фолбэк на эвристику билдера:', classifyErr);
+      if (!Array.isArray(job.warnings)) job.warnings = [];
+      job.warnings.push(
+        `LLM-классификатор недоступен (${classifyErr.message || classifyErr}). `
+        + 'Тип блока для каждой секции выбран встроенной эвристикой.'
+      );
+      layoutHints = null;
     }
 
-    // Пост-зачистка под требования ТЗ: subtitle='', срез нумерации в title/
-    // question, удаление любых остаточных <h1>, дедуп вопроса в FAQ. См.
-    // postCleanupAcfArray() — мутирует массив на месте.
+    // ── Шаг 3: программная пер-секционная сборка ──────────────────────
+    job.progress = 'Программная сборка JSON…';
+    const sections = buildAcfSections(html, layoutHints ? { layoutHints } : undefined);
+
+    // ── Шаг 4: пер-секционная валидация + LLM-фолбэк ─────────────────
+    // Каждую секцию валидируем независимо. Если потери есть → точечный
+    // LLM-вызов на эту одну секцию. Это ключевое отличие от старого
+    // глобального чанкования: соседние секции не страдают.
+    let expertAlreadyUsed = false;
+    for (let i = 0; i < sections.length; i += 1) {
+      const sec = sections[i];
+
+      // expert-квота: считаем, сколько expert-блоков уже вышло из ПРЕДЫДУЩИХ
+      // секций. Передаём флаг в LLM-фолбэк, чтобы тот не сгенерировал второй.
+      if (!expertAlreadyUsed && sec.blocks.some((b) => b && b.acf_fc_layout === 'expert')) {
+        expertAlreadyUsed = true;
+      }
+
+      // Пер-секционная валидация: сравниваем sectionHtml ↔ outputPlain
+      // блоков именно этой секции. Глобальная валидация тут не подходит —
+      // потеря в секции №3 может «компенсироваться» избыточным выводом
+      // в секции №5, что замаскирует реальный баг.
+      const secOutPlain = outputPlainText(sec.blocks);
+      const secMissing  = findMissingPhrases(sec.sectionHtml, secOutPlain);
+      const secMissingHeadings = findMissingHeadings(sec.sectionHtml, sec.blocks);
+      const secLevelMismatches = findHeadingLevelMismatches(sec.sectionHtml, sec.blocks);
+
+      const broken =
+        secMissing.length > 0
+        || secMissingHeadings.length > 0
+        || secLevelMismatches.length > 0;
+
+      if (!broken) continue;
+
+      // ── LLM-фолбэк на одну секцию ────────────────────────────────────
+      job.progress = `LLM-фолбэк: секция ${i + 1} из ${sections.length}…`;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const { blocks, tokensIn, tokensOut } = await buildSectionViaLlm({
+          sectionHtml:        sec.sectionHtml,
+          layoutHint:         sec.layout,
+          expertAlreadyUsed,
+          sectionLabel:       `Секция ${i + 1} из ${sections.length}`,
+        });
+        sec.blocks = blocks;
+        if (!expertAlreadyUsed && blocks.some((b) => b && b.acf_fc_layout === 'expert')) {
+          expertAlreadyUsed = true;
+        }
+        job.tokensIn  += tokensIn;
+        job.tokensOut += tokensOut;
+        job.costRub    = computeJobCost(job.tokensIn, job.tokensOut);
+        if (!Array.isArray(job.warnings)) job.warnings = [];
+        job.warnings.push(
+          `Секция ${i + 1} собрана LLM-фолбэком (программная упаковка не справилась).`
+        );
+      } catch (sectionErr) {
+        // LLM-фолбэк тоже не справился — это уже фатальная ошибка задачи.
+        // Не молчим и не отдаём «битый» JSON: пусть пользователь увидит,
+        // какая именно секция проблемная, и сообщит исходный HTML.
+        const sampleP = secMissing.slice(0, 3).map((m) => `«${m}»`).join('; ');
+        const sampleH = secMissingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
+        const parts = [];
+        if (secMissing.length) parts.push(`фрагменты текста (${secMissing.length}): ${sampleP}`);
+        if (secMissingHeadings.length) parts.push(`заголовки (${secMissingHeadings.length}): ${sampleH}`);
+        if (secLevelMismatches.length) parts.push(`перекошенный уровень тегов (${secLevelMismatches.length})`);
+        throw new Error(
+          `Секция ${i + 1} из ${sections.length}: ни программный билдер, ни LLM-фолбэк не смогли собрать её без потерь. `
+          + `Потеряны ${parts.join('; ')}. Детали LLM-фолбэка: ${sectionErr.message || sectionErr}.`
+        );
+      }
+    }
+
+    // ── Шаг 5: склейка + глобальная пост-чистка + финальная валидация ──
+    const finalArray = [];
+    for (const sec of sections) {
+      for (const b of sec.blocks) finalArray.push(b);
+    }
     postCleanupAcfArray(finalArray);
+
+    // Финальная сквозная валидация на всём HTML — страховка от того, что
+    // postCleanupAcfArray случайно удалит фрагмент. В норме здесь всегда 0.
+    const outPlain        = outputPlainText(finalArray);
+    const missing         = findMissingPhrases(html, outPlain);
+    const missingHeadings = findMissingHeadings(html, finalArray);
+    const levelMismatches = findHeadingLevelMismatches(html, finalArray);
+    if (missing.length || missingHeadings.length || levelMismatches.length) {
+      const sampleP = missing.slice(0, 3).map((m) => `«${m}»`).join('; ');
+      const sampleH = missingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
+      const parts = [];
+      if (missing.length) parts.push(`фрагменты текста (${missing.length}): ${sampleP}`);
+      if (missingHeadings.length) parts.push(`заголовки (${missingHeadings.length}): ${sampleH}`);
+      if (levelMismatches.length) parts.push(`перекошенный уровень тегов (${levelMismatches.length})`);
+      throw new Error(
+        `Финальная пост-валидация JSON выявила потери, которые не были зафиксированы пер-секционной проверкой. Потеряны ${parts.join('; ')}. Это внутренняя ошибка постпроцессора.`
+      );
+    }
 
     job.result     = JSON.stringify(finalArray, null, 2);
     job.status     = 'done';
@@ -2100,8 +1865,8 @@ async function runJob(job) {
     job.error      = err && err.message ? err.message : String(err);
     job.finishedAt = new Date().toISOString();
     job.durationMs = Date.now() - t0;
-    // Никогда не пишем «битый» JSON в job.result, чтобы пользователь не
-    // случайно скопировал контент с потерями.
+    // Никогда не пишем «битый» JSON в job.result, чтобы пользователь
+    // случайно не скопировал контент с потерями.
   }
 }
 
@@ -2419,47 +2184,27 @@ function fmtCost(rub) {
               ></textarea>
             </div>
 
-            <!-- Режим сборки JSON. По умолчанию «Программный»: гарантирует
-                 «текст не меняется» байт-в-байт и не ходит в DashScope, что
-                 убирает риск HTTP 413 от промежуточного прокси. -->
+            <!-- Информация о режиме сборки JSON. Раньше здесь был выбор
+                 из трёх режимов (Программный / Гибрид / LLM). Теперь
+                 поддерживается ровно один универсальный режим: Qwen
+                 классифицирует тип блока для каждой H2-секции, программный
+                 сборщик упаковывает контент байт-в-байт, и для секций,
+                 которые не сложились программно, точечно вызывается LLM. -->
             <div class="mt-4 border-t border-gray-800 pt-3">
               <div class="text-xs font-semibold text-white mb-1.5">Режим сборки JSON</div>
-              <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white py-1">
-                <input
-                  type="radio"
-                  value="deterministic"
-                  v-model="jobMode"
-                  class="mt-0.5"
-                />
-                <span>
-                  <span class="font-semibold">Программный (рекомендуется)</span>
-                  <span class="text-gray-500"> — мгновенная сборка, гарантия сохранности текста, без LLM.</span>
-                </span>
-              </label>
-              <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white py-1">
-                <input
-                  type="radio"
-                  value="hybrid"
-                  v-model="jobMode"
-                  class="mt-0.5"
-                />
-                <span>
-                  <span class="font-semibold">Гибрид (LLM-классификатор + программная упаковка)</span>
-                  <span class="text-gray-500"> — один лёгкий запрос к Qwen для выбора типа блока (только метаданные секций, не текст). Сам текст упаковывается программно byte-for-byte. Точнее распознаёт нестандартные заголовки. При сетевом сбое классификатора автоматически откатывается в «Программный».</span>
-                </span>
-              </label>
-              <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer hover:text-white py-1">
-                <input
-                  type="radio"
-                  value="llm"
-                  v-model="jobMode"
-                  class="mt-0.5"
-                />
-                <span>
-                  <span class="font-semibold">Через Qwen (LLM)</span>
-                  <span class="text-gray-500"> — гибче с непривычной разметкой, но возможен HTTP 413 / мелкие потери.</span>
-                </span>
-              </label>
+              <p class="text-[11px] text-gray-400 leading-relaxed">
+                Используется единый конвейер на базе Qwen:
+                <span class="text-gray-300">(1)</span> один LLM-вызов классифицирует
+                тип блока (blocks/steps/bens/price/faq/attention/expert/tabs) для
+                каждой H2-секции;
+                <span class="text-gray-300">(2)</span> программный сборщик упаковывает
+                контент <span class="text-gray-300">byte-for-byte</span> через
+                <code class="text-gray-300">node.outerHTML</code> — текст, абзацы,
+                заголовки и спецсимволы НЕ режутся и НЕ переписываются;
+                <span class="text-gray-300">(3)</span> если конкретная секция не
+                сложилась программно, точечно вызывается LLM ровно на эту секцию
+                с строгим инвариантом сохранности.
+              </p>
             </div>
 
             <div
@@ -2526,28 +2271,33 @@ function fmtCost(rub) {
                         ]"
                       >{{ j.source === 'blog' ? 'Блог' : (j.source === 'manual' ? 'Свой текст' : 'SEO') }}</span>
                       <!--
-                        Бейдж режима сборки: пользователю важно сразу видеть,
-                        какая задача шла программно, какая через гибрид
-                        (программный билдер + LLM-классификатор), а какая
-                        полностью через LLM — особенно при разборе ошибок
-                        (HTTP 413 возможен только в LLM-режиме).
+                        Бейдж режима сборки. Все новые задачи всегда идут
+                        в режиме 'qwen' (классификатор + программная сборка
+                        + точечный LLM-фолбэк по секции). Старые значения
+                        (deterministic/hybrid/llm) могут встречаться у задач,
+                        восстановленных из localStorage с прежних версий —
+                        для них показываем исторический ярлык.
                       -->
                       <span
                         v-if="j.mode"
                         :class="[
                           'inline-block text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex-shrink-0',
-                          j.mode === 'deterministic'
-                            ? 'bg-teal-900/60 text-teal-300 border border-teal-700'
-                            : j.mode === 'hybrid'
-                              ? 'bg-sky-900/60 text-sky-300 border border-sky-700'
-                              : 'bg-amber-900/60 text-amber-300 border border-amber-700',
+                          j.mode === 'qwen'
+                            ? 'bg-indigo-900/60 text-indigo-200 border border-indigo-700'
+                            : j.mode === 'deterministic'
+                              ? 'bg-teal-900/60 text-teal-300 border border-teal-700'
+                              : j.mode === 'hybrid'
+                                ? 'bg-sky-900/60 text-sky-300 border border-sky-700'
+                                : 'bg-amber-900/60 text-amber-300 border border-amber-700',
                         ]"
-                        :title="j.mode === 'deterministic'
-                          ? 'Программный режим: HTML → ACF JSON без LLM'
-                          : j.mode === 'hybrid'
-                            ? 'Гибридный режим: LLM-классификатор выбирает тип блока, упаковка программная (текст не уходит в LLM)'
-                            : 'LLM-режим: через DashScope/Qwen'"
-                      >{{ j.mode === 'deterministic' ? 'Программно' : (j.mode === 'hybrid' ? 'Гибрид' : 'LLM') }}</span>
+                        :title="j.mode === 'qwen'
+                          ? 'Qwen-режим: классификатор + программная упаковка byte-for-byte + точечный LLM-фолбэк по секциям'
+                          : j.mode === 'deterministic'
+                            ? 'Программный режим (устаревший): HTML → ACF JSON без LLM'
+                            : j.mode === 'hybrid'
+                              ? 'Гибридный режим (устаревший): LLM-классификатор + программная упаковка'
+                              : 'LLM-режим (устаревший): глобальное чанкование через DashScope/Qwen'"
+                      >{{ j.mode === 'qwen' ? 'Qwen' : (j.mode === 'deterministic' ? 'Программно' : (j.mode === 'hybrid' ? 'Гибрид' : 'LLM')) }}</span>
                       <span class="truncate">#{{ j.id }} · {{ j.title }}</span>
                     </p>
                     <p class="text-xs text-gray-500 mt-0.5">

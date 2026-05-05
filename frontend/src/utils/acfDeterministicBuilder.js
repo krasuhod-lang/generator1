@@ -915,42 +915,86 @@ export function extractSectionDescriptors(html) {
  * @returns {Array<object>} массив ACF-блоков
  */
 export function buildAcfFromHtml(html, opts = {}) {
+  const sections = buildAcfSections(html, opts);
+  const out = [];
+  for (const item of sections) {
+    for (const b of item.blocks) out.push(b);
+  }
+  return out;
+}
+
+// Внутренний пер-секционный сборщик — общая ветка switch, вынесенная из
+// исторического тела buildAcfFromHtml. Принимает массив parsed-секций и
+// функцию выбора подсказки (или null), возвращает массив
+// { sectionIndex, layout, blocks }. Один и тот же контекст ctx
+// (квота expert) пробрасывается между секциями.
+function _buildPerSectionInternal(sections, getHintLayout) {
+  const result = [];
+  const ctx = { expertUsed: false };
+  for (let sectionIdx = 0; sectionIdx < sections.length; sectionIdx += 1) {
+    const section = sections[sectionIdx];
+    const hinted = typeof getHintLayout === 'function'
+      ? getHintLayout(sectionIdx, ctx)
+      : null;
+    const layout = hinted || classifySection(section, ctx);
+    const blocks = [];
+    switch (layout) {
+      case 'faq':       blocks.push(buildFaqBlock(section)); break;
+      case 'steps':
+        for (const b of buildStepsBlock(section)) blocks.push(b);
+        break;
+      case 'bens':
+        for (const b of buildBensBlock(section)) blocks.push(b);
+        break;
+      case 'price':
+        for (const b of buildPriceBlock(section)) blocks.push(b);
+        break;
+      case 'attention': blocks.push(buildAttentionBlock(section)); break;
+      case 'expert':
+        for (const b of buildExpertBlock(section)) blocks.push(b);
+        ctx.expertUsed = true;
+        break;
+      case 'tabs':      blocks.push(buildTabsBlock(section)); break;
+      case 'portfolio':
+        for (const b of buildPortfolioBlocks(section)) blocks.push(b);
+        break;
+      case 'tags':
+        for (const b of buildTagsBlock(section)) blocks.push(b);
+        break;
+      case 'blocks':
+      default:          blocks.push(buildBlocksBlock(section)); break;
+    }
+    result.push({ sectionIndex: sectionIdx, layout, blocks });
+  }
+  return result;
+}
+
+/**
+ * Пер-секционная программная сборка. Возвращает массив объектов
+ * { index, layout, sectionHtml, blocks }, индексация СТРОГО соответствует
+ * extractSectionDescriptors (тот же sliceByH2). Используется в едином
+ * Qwen-режиме AcfJsonPage.runJob: вызывающий код может валидировать каждую
+ * секцию отдельно и при потере контента подменять blocks одной секции
+ * результатом точечного LLM-запроса, не затрагивая остальные секции.
+ *
+ * `sectionHtml` — это исходный HTML именно этой секции (h2.outerHTML +
+ * последовательность outerHTML её body-узлов). Подходит и для скоринга
+ * пер-секционной валидации (findMissingPhrases на этом HTML), и как payload
+ * для пер-секционного LLM-фолбэка (см. AcfJsonPage.buildSectionViaLlm).
+ *
+ * @param {string} html
+ * @param {object} [opts]
+ * @param {Map<number,string>|Array} [opts.layoutHints] — то же, что в
+ *   buildAcfFromHtml.
+ * @returns {Array<{index:number, layout:string, sectionHtml:string, blocks:Array}>}
+ */
+export function buildAcfSections(html, opts = {}) {
   const cleaned = stripH1(stripInlineMedia(html || ''));
   if (!cleaned.trim()) return [];
-
   const body = parseHtmlToBody(cleaned);
   const sections = sliceByH2(body);
-
-  // Нормализуем подсказки в Map<number,string>. Принимаем три формы:
-  //   • Map<number,string>          — самый удобный путь;
-  //   • массив строк по индексу     — layoutHints[i] = 'steps';
-  //   • массив объектов {index,layout} — формат прямого ответа LLM.
-  const hintMap = (() => {
-    const src = opts && opts.layoutHints;
-    if (!src) return null;
-    if (typeof src.get === 'function') return src;
-    if (!Array.isArray(src)) return null;
-    const m = new Map();
-    for (let i = 0; i < src.length; i += 1) {
-      const v = src[i];
-      if (typeof v === 'string') m.set(i, v);
-      else if (
-        v && typeof v === 'object'
-        && Number.isInteger(v.index) && v.index >= 0
-        && typeof v.layout === 'string'
-      ) {
-        // Out-of-range индексы (например, LLM придумал секцию №99) просто
-        // не совпадут ни с одной реальной секцией в основном цикле — это
-        // безопасно и корректно отрабатывает как «подсказки нет», поэтому
-        // здесь верхнюю границу не валидируем (она зависит от sections.length,
-        // которое доступно только в buildAcfFromHtml).
-        m.set(v.index, v.layout);
-      }
-    }
-    return m;
-  })();
-
-  function getHintLayout(idx, ctx) {
+  const hintMap = _normalizeHintMap(opts && opts.layoutHints);
+  const getHintLayout = (idx, ctx) => {
     if (!hintMap) return null;
     const raw = hintMap.get(idx);
     if (typeof raw !== 'string') return null;
@@ -959,62 +1003,51 @@ export function buildAcfFromHtml(html, opts = {}) {
     // Уважаем квоту 1 expert на статью — даже если LLM подсказала второй.
     if (norm === 'expert' && ctx.expertUsed) return null;
     return norm;
-  }
+  };
+  const perSection = _buildPerSectionInternal(sections, getHintLayout);
+  return perSection.map((item) => ({
+    index: item.sectionIndex,
+    layout: item.layout,
+    sectionHtml: _sectionToHtml(sections[item.sectionIndex]),
+    blocks: item.blocks,
+  }));
+}
 
-  const out = [];
-  const ctx = { expertUsed: false };
+// Сериализация одной секции (h2 + body) в HTML-строку. Используется и для
+// LLM-фолбэка (точечный запрос на одну секцию), и для пер-секционной
+// валидации (валидаторам надо видеть только контент текущей секции, а не
+// всей статьи — иначе они не отличат «потерян фрагмент именно этой секции»
+// от «фрагмент перенесён в соседнюю»).
+function _sectionToHtml(section) {
+  const parts = [];
+  if (section.h2) parts.push(section.h2.outerHTML);
+  parts.push(nodesToHtml(section.body));
+  return parts.join('');
+}
 
-  for (let sectionIdx = 0; sectionIdx < sections.length; sectionIdx += 1) {
-    const section = sections[sectionIdx];
-    // Подсказка имеет приоритет; если её нет / она невалидна / нарушает
-    // квоту — падаем на исходную эвристику, чтобы статья всё равно собралась.
-    const hinted = getHintLayout(sectionIdx, ctx);
-    const layout = hinted || classifySection(section, ctx);
-    // ПРИМЕЧАНИЕ: раньше для типов steps/bens/tabs/faq/price/tags/portfolio
-    // мы вставляли отдельный «sibling-h2» blocks-блок с одним только
-    // <h2>NAME</h2>, чтобы дословно сохранить заголовок секции для
-    // findMissingHeadings. Это создавало визуальный дубль: секционный
-    // заголовок отрисовывался ДВАЖДЫ — один раз как мини-блок, второй раз
-    // как `title` соседнего типизированного виджета. Сейчас findMissingHeadings
-    // принимает h2 как сохранённый, если его канон совпал с `title` любого
-    // блока в выводе, поэтому отдельный sibling-блок больше не нужен.
-    let block;
-    switch (layout) {
-      case 'faq':       block = buildFaqBlock(section); break;
-      case 'steps':
-        // steps/bens/expert теперь тоже могут вернуть несколько блоков
-        // (primary + sibling-blocks с pre/post-leftover'ами вокруг
-        //  основного <ol>/<blockquote>) — расплющиваем в общий список.
-        for (const b of buildStepsBlock(section)) out.push(b);
-        continue;
-      case 'bens':
-        for (const b of buildBensBlock(section)) out.push(b);
-        continue;
-      case 'price':
-        // price/tags/portfolio внутри тоже могут вернуть массив (например,
-        // pure-fallback на blocks при пустых items). Sibling-h2 уже выше
-        // добавлен — дочерние билдеры его НЕ дублируют.
-        for (const b of buildPriceBlock(section)) out.push(b);
-        continue;
-      case 'attention': block = buildAttentionBlock(section); break;
-      case 'expert':
-        for (const b of buildExpertBlock(section)) out.push(b);
-        ctx.expertUsed = true;
-        continue;
-      case 'tabs':      block = buildTabsBlock(section); break;
-      case 'portfolio':
-        for (const b of buildPortfolioBlocks(section)) out.push(b);
-        continue;
-      case 'tags':
-        for (const b of buildTagsBlock(section)) out.push(b);
-        continue;
-      case 'blocks':
-      default:          block = buildBlocksBlock(section); break;
+// Нормализация подсказок layout'а в Map<number,string>. Принимаем три формы:
+//   • Map<number,string>            — самый удобный путь;
+//   • массив строк по индексу       — layoutHints[i] = 'steps';
+//   • массив объектов {index,layout} — формат прямого ответа LLM.
+// Out-of-range индексы (LLM придумал секцию №99) безопасны: при сборке
+// просто не совпадут ни с одной реальной секцией.
+function _normalizeHintMap(src) {
+  if (!src) return null;
+  if (typeof src.get === 'function') return src;
+  if (!Array.isArray(src)) return null;
+  const m = new Map();
+  for (let i = 0; i < src.length; i += 1) {
+    const v = src[i];
+    if (typeof v === 'string') m.set(i, v);
+    else if (
+      v && typeof v === 'object'
+      && Number.isInteger(v.index) && v.index >= 0
+      && typeof v.layout === 'string'
+    ) {
+      m.set(v.index, v.layout);
     }
-    out.push(block);
   }
-
-  return out;
+  return m;
 }
 
 // Для тестов / внешнего переиспользования.
