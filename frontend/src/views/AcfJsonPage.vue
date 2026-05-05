@@ -1817,7 +1817,10 @@ function buildRawSectionFallback(sectionHtml) {
     : '';
   return [{
     acf_fc_layout: 'blocks',
-    title: titleText || 'Раздел',
+    // Без фейкового fallback'а «Раздел»: если в исходном HTML секции нет
+    // <h2>, оставляем title пустым, а не подставляем выдуманный ярлык —
+    // структура JSON должна точно соответствовать HTML.
+    title: titleText || '',
     subtitle: '',
     blocks: [{
       block_width: '12',
