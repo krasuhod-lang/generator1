@@ -125,9 +125,14 @@ let queueRunning = false;
 // Ключ версионируем (`:v1`), чтобы при будущих изменениях схемы job можно было
 // безболезненно сменить ключ и не подсунуть пользователю «битые» данные.
 const JOBS_LS_KEY = 'acfJsonJobs:v1';
-// Храним только последние N задач, чтобы не упереться в лимит localStorage
-// (~5 МБ). sourceHtml + result у одной задачи могут весить десятки КБ.
-const JOBS_LS_MAX = 30;
+// Сохраняем ВСЕ задачи пользователя — пользователи жаловались, что после ~30
+// задач старые «исчезают». Раньше тут стоял жёсткий cap = 30 (последние 30
+// в localStorage), всё что не влезло — терялось при перезагрузке. Теперь
+// ничего жёстко не режем: при переполнении квоты localStorage применяем
+// поэтапную деградацию (trim heavy fields → drop oldest), см. saveJobsToStorage.
+// Хард-лимит на абсолютный максимум — защита от «runaway» (тысячи задач
+// с большими sourceHtml зависнут UI). 5000 — заведомо больше реальной нагрузки.
+const JOBS_LS_HARD_MAX = 5000;
 
 function loadJobsFromStorage() {
   try {
@@ -188,15 +193,92 @@ function loadJobsFromStorage() {
 }
 
 function saveJobsToStorage() {
-  try {
-    // Срезаем хвост, держим только самые свежие задачи (jobs.value уже
-    // отсортирован: новые сверху, см. unshift в createJob).
-    const slice = jobs.value.slice(0, JOBS_LS_MAX);
-    localStorage.setItem(JOBS_LS_KEY, JSON.stringify(slice));
-  } catch (e) {
-    // QuotaExceededError и т. п. — не валим UI.
-    console.warn('[AcfJson] не удалось сохранить задачи в localStorage:', e);
+  // Стратегия записи в localStorage с защитой от QuotaExceededError:
+  //   1) Пробуем записать всё как есть (с защитной отсечкой JOBS_LS_HARD_MAX
+  //      на случай runaway-роста).
+  //   2) Если квота переполнена — постепенно выкидываем тяжёлые поля
+  //      (sourceHtml, result, error, progress) у самых старых завершённых
+  //      задач, освобождая место и сохраняя саму запись о задаче.
+  //   3) Если даже после полной зачистки тяжёлых полей не помещается —
+  //      отбрасываем самые старые задачи по одной до успешной записи.
+  // Цель: пользовательская история задач НЕ теряется при росте >30 шт.
+  const HEAVY_FIELDS = ['sourceHtml', 'result', 'error', 'progress'];
+  const all = jobs.value.slice(0, JOBS_LS_HARD_MAX);
+
+  function tryWrite(arr) {
+    localStorage.setItem(JOBS_LS_KEY, JSON.stringify(arr));
   }
+  function isQuotaError(e) {
+    if (!e) return false;
+    // Имена различаются между браузерами/спеками: QuotaExceededError,
+    // NS_ERROR_DOM_QUOTA_REACHED (Firefox), а также code 22 / 1014.
+    return (
+      e.name === 'QuotaExceededError'
+      || e.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+      || e.code === 22
+      || e.code === 1014
+    );
+  }
+
+  // (1) Быстрый путь: всё уместилось.
+  try {
+    tryWrite(all);
+    return;
+  } catch (e) {
+    if (!isQuotaError(e)) {
+      console.warn('[AcfJson] не удалось сохранить задачи в localStorage:', e);
+      return;
+    }
+  }
+
+  // (2) Постепенно стрипаем тяжёлые поля у завершённых задач — начиная с
+  // самых старых (хвост массива). Активные (queued/processing) не трогаем,
+  // чтобы не потерять входной HTML до начала обработки.
+  const trimmed = all.map((j) => ({ ...j }));
+  for (let i = trimmed.length - 1; i >= 0; i -= 1) {
+    const j = trimmed[i];
+    if (j.status === 'queued' || j.status === 'processing') continue;
+    let mutated = false;
+    for (const f of HEAVY_FIELDS) {
+      if (j[f] && typeof j[f] === 'string' && j[f].length > 0) {
+        j[f] = '';
+        mutated = true;
+      }
+    }
+    if (!mutated) continue;
+    try {
+      tryWrite(trimmed);
+      return;
+    } catch (e) {
+      if (!isQuotaError(e)) {
+        console.warn('[AcfJson] не удалось сохранить задачи в localStorage:', e);
+        return;
+      }
+      // Продолжаем стрипать следующую задачу.
+    }
+  }
+
+  // (3) Последняя линия обороны: дропаем самые старые задачи по одной.
+  // Сохраняем хотя бы одну запись, чтобы не сломать loadJobsFromStorage.
+  let dropTo = trimmed.length;
+  while (dropTo > 1) {
+    dropTo -= 1;
+    try {
+      tryWrite(trimmed.slice(0, dropTo));
+      if (dropTo < all.length) {
+        console.warn(
+          `[AcfJson] localStorage переполнен — сохранены только последние ${dropTo} из ${all.length} задач.`,
+        );
+      }
+      return;
+    } catch (e) {
+      if (!isQuotaError(e)) {
+        console.warn('[AcfJson] не удалось сохранить задачи в localStorage:', e);
+        return;
+      }
+    }
+  }
+  console.warn('[AcfJson] localStorage квота переполнена, не удалось сохранить ни одной задачи.');
 }
 
 // Глубокий watch — задачи мутируются по полям (status/progress/result),

@@ -245,31 +245,28 @@ const sanitizedHtml = computed(() => {
 async function copyAsHtml() {
   const html = selectedTask.value?.article_html;
   if (!html) return;
-  const plain = selectedTask.value?.article_plain || html.replace(/<[^>]+>/g, ' ');
 
-  // Path A: Async Clipboard API + ClipboardItem (secure context only).
-  try {
-    if (navigator.clipboard && window.ClipboardItem) {
-      const blobHtml  = new Blob([html],  { type: 'text/html' });
-      const blobPlain = new Blob([plain], { type: 'text/plain' });
-      await navigator.clipboard.write([
-        new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobPlain }),
-      ]);
-      flashToast('HTML скопирован в буфер обмена');
-      return;
-    }
-  } catch (_) { /* fallthrough */ }
+  // ВАЖНО: «Скопировать HTML» должна класть в буфер именно ИСХОДНЫЙ HTML
+  // как plain-text, чтобы при вставке в WYSIWYG-редактор биржи / блог-движка
+  // (sape, miralinks, gogetlinks, WordPress…) пользователь получил сам
+  // HTML-код для вставки в режиме «Текст / HTML», а НЕ отрендеренный
+  // «форматированный» вариант. Раньше регистрировался ClipboardItem с MIME
+  // 'text/html' + 'text/plain' (стрипаный) — браузер при вставке в WYSIWYG
+  // выбирал text/html и рендерил разметку, а вставка в plain-text режим
+  // давала «полотно текста без html разметки». Для копирования именно
+  // отрендеренного варианта есть отдельная кнопка
+  // «Скопировать форматированный текст» (copyAsFormattedText).
 
-  // Path B: writeText (secure context only, но без ClipboardItem).
+  // Path A: Async Clipboard API — пишем HTML только как text/plain.
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(html);
-      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      flashToast('HTML скопирован (вставьте в режим «Текст / HTML» редактора)');
       return;
     }
   } catch (_) { /* fallthrough */ }
 
-  // Path C (legacy): document.execCommand('copy') через скрытый textarea.
+  // Path B (legacy): document.execCommand('copy') через скрытый textarea.
   // Единственный способ копирования на HTTP / по IP-адресу без secure context.
   try {
     const ta = document.createElement('textarea');
@@ -283,7 +280,7 @@ async function copyAsHtml() {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     if (ok) {
-      flashToast('HTML скопирован как текст (вставьте в режиме «Текст» редактора)');
+      flashToast('HTML скопирован (вставьте в режим «Текст / HTML» редактора)');
       return;
     }
     throw new Error('execCommand copy вернул false');
