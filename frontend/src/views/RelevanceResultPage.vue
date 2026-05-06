@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, unref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import api from '../api.js';
 import AppLayout from '../components/AppLayout.vue';
@@ -44,12 +44,34 @@ const headingsSort = ref({ key: 'df', dir: 'desc' });
 
 // Универсальный обработчик клика по заголовку колонки таблицы.
 // Один и тот же ref{key,dir} переиспользуется для разных таблиц.
+//
+// ВАЖНО: эта функция вызывается и из <script>, куда передаётся сам ref
+// (`toggleSort(compTableSort, key)`), и из <template>, куда Vue передаёт
+// уже автораспакованное reactive-значение (`@click="toggleSort(gapSort, key)"`).
+// Поэтому через `unref` сводим оба варианта к одной reactive-сущности и
+// мутируем её свойства — изменения видны и через `state.value` в скрипте,
+// и через `state.key` / `state.dir` в шаблоне (плюс срабатывает watch,
+// который переключает страницу пагинации на 1).
 function toggleSort(state, key) {
-  if (state.value.key === key) {
-    state.value.dir = state.value.dir === 'desc' ? 'asc' : 'desc';
+  const s = unref(state);
+  if (!s) return;
+  if (s.key === key) {
+    s.dir = s.dir === 'desc' ? 'asc' : 'desc';
   } else {
-    state.value = { key, dir: 'desc' };
+    s.key = key;
+    s.dir = 'desc';
   }
+}
+
+// Маленький компонент-helper в template: ↕ / ↑ / ↓ для индикатора активной сортировки.
+// Те же соображения с `unref`, что и в `toggleSort` — иначе из шаблона
+// прилетает уже автораспакованное значение, и `state.value.key` падает с
+// `Cannot read properties of undefined (reading 'key')`, ломая весь рендер
+// готового отчёта (пользователь видит «пустой экран»).
+function sortArrow(state, key) {
+  const s = unref(state);
+  if (!s || s.key !== key) return '↕';
+  return s.dir === 'desc' ? '↓' : '↑';
 }
 
 // Возвращает компаратор для sort() по объектному ключу + направлению.
@@ -67,12 +89,6 @@ function makeSorter({ key, dir }, { numeric = true } = {}) {
     }
     return sign * String(av || '').localeCompare(String(bv || ''), 'ru');
   };
-}
-
-// Маленький компонент-helper в template: ↕ / ↑ / ↓ для индикатора активной сортировки.
-function sortArrow(state, key) {
-  if (state.value.key !== key) return '↕';
-  return state.value.dir === 'desc' ? '↓' : '↑';
 }
 
 // ── Cocoons (PR 2) ────────────────────────────────────────────────────────
