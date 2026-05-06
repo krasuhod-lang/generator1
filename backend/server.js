@@ -736,6 +736,22 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_user_created ON relevance_reports (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_status ON relevance_reports (status)`);
 
+    // Migration 019: семантические коконы (SVD) + метаданные raw-кэша Redis.
+    // processed_documents (леммы + POS-последовательности) живут в Redis
+    // по ключу relevance:raw:{id} с TTL (default 7 дней) — Postgres хранит
+    // только агрегаты + указатель на наличие/срок жизни кэша.
+    await db.query(`
+      ALTER TABLE relevance_reports
+        ADD COLUMN IF NOT EXISTS cocoons         JSONB,
+        ADD COLUMN IF NOT EXISTS raw_storage     TEXT DEFAULT 'none',
+        ADD COLUMN IF NOT EXISTS raw_expires_at  TIMESTAMPTZ
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_relevance_reports_raw_alive
+        ON relevance_reports (raw_expires_at)
+       WHERE raw_storage = 'redis' AND raw_expires_at IS NOT NULL
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$

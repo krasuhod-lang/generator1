@@ -21,6 +21,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from .bm25_calc import compute_vocabulary_bm25
+from .cocoons import compute_cocoons
 from .ngrams import compute_ngrams
 from .normalizer import normalize_document
 from .parser import extract_full_text
@@ -69,6 +70,10 @@ class AnalyzeOptions(BaseModel):
     min_ngram_df: int = Field(default=3, ge=1, le=20)
     max_terms: int = Field(default=500, ge=10, le=5000)
     max_ngrams_per_type: int = Field(default=200, ge=10, le=2000)
+    # PR 2: если true — в ответе вернутся processed_documents (леммы +
+    # POS-последовательности по каждому документу). Node-бэкенд кладёт
+    # их в Redis с TTL, чтобы потом считать коконы без повторного парсинга.
+    return_processed: bool = Field(default=False)
 
 
 class AnalyzeRequest(BaseModel):
@@ -93,6 +98,14 @@ class NgramRow(BaseModel):
     pos_pattern: str
 
 
+class ProcessedDocument(BaseModel):
+    """Лёгкое представление документа после парсинга и нормализации.
+    Используется как payload для последующего расчёта коконов."""
+    url: str
+    lemmas: List[str]
+    pos_seq: List[List[str]]  # список пар [lemma, pos], сериализуется компактнее, чем dict
+
+
 class AnalyzeStats(BaseModel):
     doc_count: int
     parsed_doc_count: int
@@ -107,6 +120,57 @@ class AnalyzeResponse(BaseModel):
     stats: AnalyzeStats
     vocabulary: List[VocabRow]
     ngrams: List[NgramRow]
+    processed_documents: Optional[List[ProcessedDocument]] = None
+
+
+# ── Cocoons (PR 2) ────────────────────────────────────────────────────────────
+class ProcessedDocumentIn(BaseModel):
+    url: str
+    lemmas: List[str]
+
+
+class CocoonsOptions(BaseModel):
+    n_topics: int = Field(default=8, ge=2, le=32)
+    top_terms: int = Field(default=12, ge=3, le=50)
+    top_documents: int = Field(default=5, ge=1, le=20)
+
+
+class CocoonsRequest(BaseModel):
+    documents: List[ProcessedDocumentIn]
+    options: Optional[CocoonsOptions] = None
+
+
+class CocoonTerm(BaseModel):
+    lemma: str
+    weight: float
+
+
+class CocoonDocument(BaseModel):
+    url: str
+    score: float
+
+
+class CocoonTopic(BaseModel):
+    id: int
+    label: str
+    explained_variance: float
+    terms: List[CocoonTerm]
+    top_documents: List[CocoonDocument]
+
+
+class CocoonsStats(BaseModel):
+    doc_count: int
+    n_topics_requested: int
+    n_topics_actual: int
+    vocab_size: int
+    skipped_too_short: int
+    total_explained_variance: float = 0.0
+    duration_ms: int
+
+
+class CocoonsResponse(BaseModel):
+    topics: List[CocoonTopic]
+    stats: CocoonsStats
 
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
@@ -169,6 +233,19 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         parsed_doc_count, len(payload.documents), len(vocabulary), len(ngrams), duration_ms,
     )
 
+    processed_out: Optional[List[ProcessedDocument]] = None
+    if opts.return_processed:
+        # Сериализуем seq как [[lemma, pos], ...] — компактнее, чем dict.
+        processed_out = []
+        for d, lemmas, seq in zip(payload.documents, doc_lemmas, doc_seqs):
+            if not lemmas:
+                continue
+            processed_out.append(ProcessedDocument(
+                url=d.url,
+                lemmas=lemmas,
+                pos_seq=[[lemma, pos] for (lemma, pos) in seq],
+            ))
+
     return AnalyzeResponse(
         stats=AnalyzeStats(
             doc_count=len(payload.documents),
@@ -181,4 +258,39 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         ),
         vocabulary=[VocabRow(**v) for v in vocabulary],
         ngrams=[NgramRow(**n) for n in ngrams],
+        processed_documents=processed_out,
+    )
+
+
+@app.post("/cocoons", response_model=CocoonsResponse, dependencies=[Depends(verify_internal_token)])
+def cocoons(payload: CocoonsRequest) -> CocoonsResponse:
+    """Расчёт «семантических коконов» через Truncated SVD.
+
+    Принимает уже processed-документы (сделанные предыдущим вызовом
+    /analyze с return_processed=true и закэшированные в Redis на стороне
+    Node-бэкенда) — это позволяет не парсить ТОП-20 повторно.
+    """
+    started = time.perf_counter()
+    opts = payload.options or CocoonsOptions()
+
+    logger.info("cocoons: docs=%d n_topics=%d", len(payload.documents), opts.n_topics)
+
+    result = compute_cocoons(
+        [{"url": d.url, "lemmas": d.lemmas} for d in payload.documents],
+        n_topics=opts.n_topics,
+        top_terms=opts.top_terms,
+        top_documents=opts.top_documents,
+    )
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "cocoons done: topics=%d (req=%d) vocab=%d in %dms",
+        result["stats"]["n_topics_actual"], opts.n_topics,
+        result["stats"]["vocab_size"], duration_ms,
+    )
+
+    stats = {**result["stats"], "duration_ms": duration_ms}
+    return CocoonsResponse(
+        topics=[CocoonTopic(**t) for t in result["topics"]],
+        stats=CocoonsStats(**stats),
     )

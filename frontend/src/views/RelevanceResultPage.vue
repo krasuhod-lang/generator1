@@ -18,6 +18,76 @@ let pollTimer    = null;
 const vocabFilter = ref('all'); // 'all' | 'important' | 'additional'
 const ngramFilter = ref('all'); // 'all' | 'bigram' | 'trigram'
 
+// ── Cocoons (PR 2) ────────────────────────────────────────────────────────
+const cocoonsBuilding = ref(false);
+const cocoonsError    = ref(null);
+const cocoonsOpts     = ref({ n_topics: 8, top_terms: 12, top_documents: 5 });
+
+async function buildCocoons() {
+  if (!report.value || cocoonsBuilding.value) return;
+  cocoonsBuilding.value = true;
+  cocoonsError.value = null;
+  try {
+    await store.buildCocoons(report.value.id, cocoonsOpts.value);
+    await reload();
+  } catch (err) {
+    cocoonsError.value = err.response?.data?.error || err.message || 'Не удалось построить коконы';
+  } finally {
+    cocoonsBuilding.value = false;
+  }
+}
+
+async function deleteRawCache() {
+  if (!report.value) return;
+  if (!confirm('Удалить кэш сырых документов? После этого пересчитать коконы можно будет только создав новый отчёт.')) return;
+  try {
+    await store.deleteRaw(report.value.id);
+    await reload();
+  } catch (err) {
+    alert(err.response?.data?.error || err.message || 'Не удалось удалить кэш');
+  }
+}
+
+const cocoons = computed(() => report.value?.cocoons || null);
+const cocoonsTopics = computed(() => {
+  const list = cocoons.value?.topics;
+  return Array.isArray(list) ? list : [];
+});
+
+// Размер «чипа» леммы пропорционален |weight| относительно максимума в теме.
+function chipStyle(term, topic) {
+  const maxW = Math.max(...topic.terms.map((t) => Math.abs(t.weight)), 1e-6);
+  const t = Math.abs(term.weight) / maxW;
+  const size = 11 + t * 7; // 11–18 px
+  if (term.weight < 0) {
+    // Антитема — серым outline, чтобы копирайтер видел «что НЕ употреблять».
+    return {
+      fontSize: size + 'px',
+      color:    '#9ca3af',
+      borderColor: '#374151',
+      background:  'transparent',
+    };
+  }
+  // hue: 220 → 280 (синий → фиол) пропорционально весу.
+  const hue = 220 + t * 60;
+  return {
+    fontSize: size + 'px',
+    color:    `hsl(${hue.toFixed(0)}, 80%, 75%)`,
+    borderColor: `hsl(${hue.toFixed(0)}, 60%, 35%)`,
+    background:  `hsl(${hue.toFixed(0)}, 50%, 18%)`,
+  };
+}
+
+function formatRawTtl(report) {
+  if (!report?.raw_expires_at) return null;
+  const ms = new Date(report.raw_expires_at).getTime() - Date.now();
+  if (ms <= 0) return { expired: true, label: 'кэш истёк' };
+  const days  = Math.floor(ms / (24 * 3600 * 1000));
+  const hours = Math.floor((ms % (24 * 3600 * 1000)) / (3600 * 1000));
+  const label = days > 0 ? `${days}д ${hours}ч` : `${hours}ч`;
+  return { expired: false, label };
+}
+
 async function reload() {
   try {
     report.value = await store.getReport(route.params.id);
@@ -384,6 +454,96 @@ async function exportFile(kind) {
                 </tr>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- ── Семантические коконы (PR 2) ── -->
+        <div class="card">
+          <div class="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 class="text-lg font-bold text-purple-300">🧬 Семантические коконы</h2>
+              <p class="text-xs text-gray-400 mt-1">
+                Группировка лемм по латентным темам ниши (Truncated SVD / LSI).
+                Положительные веса — «о теме», отрицательные (серым) — антитема,
+                которую копирайтеру стоит избегать в этом разделе.
+              </p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span v-if="report.has_raw" class="badge bg-emerald-900/40 text-emerald-300 border border-emerald-800">
+                📦 raw-кэш активен
+                <span v-if="formatRawTtl(report)" class="ml-1 text-emerald-400/70">
+                  · ещё {{ formatRawTtl(report).label }}
+                </span>
+              </span>
+              <span v-else class="badge bg-gray-800 text-gray-400 border border-gray-700">
+                🧊 raw-кэш истёк
+              </span>
+              <button v-if="report.has_raw" @click="deleteRawCache"
+                      class="text-xs text-rose-400 hover:text-rose-300 underline">
+                удалить кэш
+              </button>
+            </div>
+          </div>
+
+          <div v-if="report.has_raw" class="mt-3 flex items-center gap-2 flex-wrap">
+            <label class="text-xs text-gray-400">Тем:
+              <input type="number" v-model.number="cocoonsOpts.n_topics" min="2" max="32"
+                     class="ml-1 w-16 bg-gray-900 border border-gray-700 rounded px-2 py-0.5 text-xs" />
+            </label>
+            <label class="text-xs text-gray-400">Лемм/тему:
+              <input type="number" v-model.number="cocoonsOpts.top_terms" min="3" max="50"
+                     class="ml-1 w-16 bg-gray-900 border border-gray-700 rounded px-2 py-0.5 text-xs" />
+            </label>
+            <button @click="buildCocoons"
+                    :disabled="cocoonsBuilding"
+                    class="btn-primary text-xs disabled:opacity-50">
+              {{ cocoonsBuilding ? 'Строим…' : (cocoons ? 'Пересчитать коконы' : 'Построить коконы') }}
+            </button>
+          </div>
+
+          <div v-if="cocoonsError" class="mt-2 text-rose-400 text-xs">{{ cocoonsError }}</div>
+
+          <div v-if="cocoonsTopics.length > 0" class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="t in cocoonsTopics" :key="t.id"
+                 class="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+              <div class="flex items-baseline justify-between gap-2 mb-2">
+                <div class="text-purple-300 font-semibold truncate" :title="t.label">
+                  #{{ t.id + 1 }} · {{ t.label }}
+                </div>
+                <div class="text-[10px] text-gray-500 flex-shrink-0">
+                  {{ (t.explained_variance * 100).toFixed(1) }}%
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-1.5 mb-2">
+                <span v-for="term in t.terms" :key="term.lemma"
+                      class="px-1.5 py-0.5 rounded border leading-tight"
+                      :style="chipStyle(term, t)"
+                      :title="`weight: ${term.weight}`">
+                  {{ term.lemma }}
+                </span>
+              </div>
+              <details v-if="t.top_documents?.length" class="text-[11px] text-gray-400 mt-1">
+                <summary class="cursor-pointer hover:text-gray-200">
+                  топ-документы ({{ t.top_documents.length }})
+                </summary>
+                <ul class="mt-1.5 space-y-0.5">
+                  <li v-for="d in t.top_documents" :key="d.url" class="truncate">
+                    <a :href="d.url" target="_blank" rel="noopener noreferrer"
+                       class="text-sky-400 hover:underline break-all">{{ d.url }}</a>
+                    <span class="text-gray-600 ml-1">{{ d.score.toFixed(3) }}</span>
+                  </li>
+                </ul>
+              </details>
+            </div>
+          </div>
+          <div v-else-if="cocoons" class="mt-3 text-xs text-amber-400">
+            ⚠ SVD не нашёл тем (вероятно, слишком мало уникальных лемм или
+            однообразный корпус — попробуйте увеличить диапазон ТОП SERP).
+          </div>
+          <div v-else-if="!report.has_raw" class="mt-3 text-xs text-gray-500">
+            Для расчёта коконов нужны processed-документы из Redis-кэша.
+            После истечения TTL (7 дней по умолчанию) пересчёт невозможен —
+            создайте новый отчёт.
           </div>
         </div>
 

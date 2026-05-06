@@ -66,6 +66,43 @@ async function analyze(payload) {
   }
 }
 
+/**
+ * Расчёт «семантических коконов» (Truncated SVD) поверх уже processed-документов.
+ *
+ * @param {{ documents: Array<{url:string, lemmas: string[]}>, options?: {n_topics?:number, top_terms?:number, top_documents?:number} }} payload
+ * @returns {Promise<object>} — { topics, stats }
+ */
+async function cocoons(payload) {
+  if (!payload || !Array.isArray(payload.documents)) {
+    throw new Error('cocoons(): payload.documents must be an array');
+  }
+  try {
+    const res = await axios.post(
+      `${BASE_URL}/cocoons`,
+      payload,
+      {
+        // Коконы — лёгкая операция (TF-IDF + SVD), но на 20 крупных
+        // документах с 5к лемм это ~1-3 секунды. Берём 60s с запасом.
+        timeout: 60000,
+        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        maxBodyLength:    64 * 1024 * 1024,
+        maxContentLength: 64 * 1024 * 1024,
+        validateStatus: (s) => s >= 200 && s < 300,
+      },
+    );
+    return res.data;
+  } catch (err) {
+    const code = err?.response?.status || err?.code || 'ERR';
+    const detail =
+      err?.response?.data?.detail
+      || err?.response?.data?.error
+      || err?.message
+      || 'unknown';
+    const safeDetail = String(detail).replace(/\s+/g, ' ').slice(0, 300);
+    throw new Error(`relevance-service /cocoons ${code}: ${safeDetail}`);
+  }
+}
+
 async function health() {
   try {
     const res = await axios.get(`${BASE_URL}/health`, {
@@ -92,6 +129,7 @@ async function health() {
 
 module.exports = {
   analyze,
+  cocoons,
   health,
   RELEVANCE_BASE_URL: BASE_URL,
   ANALYZE_TIMEOUT_MS,

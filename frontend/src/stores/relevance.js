@@ -47,5 +47,17 @@ export const useRelevanceStore = defineStore('relevance', {
       const { data } = await api.get('/relevance/health');
       return data?.relevance || null;
     },
+
+    /** PR 2: запустить расчёт «семантических коконов» поверх raw-кэша. */
+    async buildCocoons(id, options = {}) {
+      const { data } = await api.post(`/relevance/${id}/cocoons`, options);
+      return data?.cocoons || null;
+    },
+
+    /** PR 2: досрочно удалить кэш сырых documents в Redis. */
+    async deleteRaw(id) {
+      const { data } = await api.delete(`/relevance/${id}/raw`);
+      return data;
+    },
   },
 });

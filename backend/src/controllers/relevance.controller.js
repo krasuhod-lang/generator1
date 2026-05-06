@@ -15,7 +15,8 @@
 
 const db = require('../config/db');
 const { processRelevanceReport } = require('../services/relevance/pipeline');
-const { health: relevanceHealth } = require('../services/relevance/pythonClient');
+const { health: relevanceHealth, cocoons: relevanceCocoons } = require('../services/relevance/pythonClient');
+const rawStorage = require('../services/relevance/rawStorage');
 
 const MAX_QUERY_LEN = 200;
 const MAX_LR_LEN    = 16;
@@ -34,7 +35,10 @@ async function listReports(req, res, next) {
               jsonb_array_length(COALESCE(serp,        '[]'::jsonb)) AS serp_count,
               jsonb_array_length(COALESCE(failed_urls, '[]'::jsonb)) AS failed_count,
               error_message, duration_ms,
-              created_at, started_at, completed_at
+              created_at, started_at, completed_at,
+              raw_storage, raw_expires_at,
+              (cocoons IS NOT NULL) AS has_cocoons,
+              (raw_storage = 'redis' AND raw_expires_at > NOW()) AS has_raw
          FROM relevance_reports
         WHERE user_id = $1
         ORDER BY created_at DESC
@@ -86,7 +90,11 @@ async function createReport(req, res, next) {
 async function getReport(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT * FROM relevance_reports WHERE id = $1 AND user_id = $2`,
+      `SELECT *,
+              (raw_storage = 'redis' AND raw_expires_at > NOW()) AS has_raw,
+              (cocoons IS NOT NULL) AS has_cocoons
+         FROM relevance_reports
+        WHERE id = $1 AND user_id = $2`,
       [req.params.id, req.user.id],
     );
     if (!rows.length) {
@@ -108,17 +116,118 @@ async function deleteReport(req, res, next) {
     if (rowCount === 0) {
       return res.status(404).json({ error: 'Отчёт не найден' });
     }
+    // Подчищаем raw-кэш в Redis (если был) — best-effort.
+    try { await rawStorage.deleteRaw(req.params.id); } catch (_) { /* ignore */ }
     return res.json({ ok: true });
   } catch (err) {
     return next(err);
   }
 }
 
+// ─── POST /api/relevance/:id/cocoons ──────────────────────────────
+// Запускает повторный проход поверх processed-документов из Redis-кэша
+// и кладёт результат в relevance_reports.cocoons. Идемпотентен —
+// каждый вызов перезаписывает cocoons свежим расчётом.
+async function buildCocoons(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status, raw_storage, raw_expires_at
+         FROM relevance_reports
+        WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id],
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Отчёт не найден' });
+    }
+    const r = rows[0];
+    if (r.status !== 'done') {
+      return res.status(409).json({ error: 'Отчёт ещё не готов (status != done).' });
+    }
+    if (r.raw_storage !== 'redis' || !r.raw_expires_at || r.raw_expires_at <= new Date()) {
+      return res.status(410).json({
+        error: 'Кэш сырых документов истёк или отсутствует. Создайте новый отчёт для расчёта коконов.',
+      });
+    }
+
+    const processed = await rawStorage.loadRaw(r.id);
+    if (!processed || !Array.isArray(processed) || processed.length === 0) {
+      // Метка в БД говорит что ключ есть, а в Redis ничего нет — проставляем 'none'.
+      await db.query(
+        `UPDATE relevance_reports SET raw_storage='none', raw_expires_at=NULL WHERE id=$1`,
+        [r.id],
+      );
+      return res.status(410).json({
+        error: 'Кэш сырых документов недоступен (Redis вернул пусто). Создайте новый отчёт.',
+      });
+    }
+
+    // Опции коконов из тела запроса (с дефолтами и потолками).
+    const body = req.body || {};
+    const nTopics = clampInt(body.n_topics, 8, 2, 32);
+    const topTerms = clampInt(body.top_terms, 12, 3, 50);
+    const topDocs  = clampInt(body.top_documents, 5, 1, 20);
+
+    const cocoonsPayload = {
+      documents: processed.map((d) => ({
+        url:    String(d.url || ''),
+        // POS-последовательность для коконов не нужна — экономим трафик.
+        lemmas: Array.isArray(d.lemmas) ? d.lemmas : [],
+      })),
+      options: { n_topics: nTopics, top_terms: topTerms, top_documents: topDocs },
+    };
+
+    const t0 = Date.now();
+    const result = await relevanceCocoons(cocoonsPayload);
+    const cocoonsDoc = {
+      generated_at: new Date().toISOString(),
+      duration_ms:  Date.now() - t0,
+      options:      cocoonsPayload.options,
+      topics:       Array.isArray(result?.topics) ? result.topics : [],
+      stats:        result?.stats || {},
+    };
+
+    await db.query(
+      `UPDATE relevance_reports SET cocoons = $2::jsonb WHERE id = $1`,
+      [r.id, JSON.stringify(cocoonsDoc)],
+    );
+
+    return res.json({ cocoons: cocoonsDoc });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── DELETE /api/relevance/:id/raw ────────────────────────────────
+// Досрочно удаляет processed-документы из Redis (но не сами cocoons).
+async function deleteRaw(req, res, next) {
+  try {
+    const { rowCount } = await db.query(
+      `UPDATE relevance_reports
+          SET raw_storage='none', raw_expires_at=NULL
+        WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id],
+    );
+    if (rowCount === 0) {
+      return res.status(404).json({ error: 'Отчёт не найден' });
+    }
+    const removed = await rawStorage.deleteRaw(req.params.id);
+    return res.json({ ok: true, removed });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+function clampInt(v, def, min, max) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+
 // ─── GET /api/relevance/:id/export.json ───────────────────────────
 async function exportJson(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT query, lr, status, report, serp, failed_urls, duration_ms,
+      `SELECT query, lr, status, report, cocoons, serp, failed_urls, duration_ms,
               created_at, completed_at
          FROM relevance_reports
         WHERE id = $1 AND user_id = $2`,
@@ -138,6 +247,7 @@ async function exportJson(req, res, next) {
       serp:         r.serp || [],
       failed_urls:  r.failed_urls || [],
       report:       r.report || {},
+      cocoons:      r.cocoons || null,
     };
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     const safeName = String(r.query).replace(/[^a-zа-яё0-9_-]+/gi, '_').slice(0, 60) || 'report';
@@ -231,6 +341,8 @@ module.exports = {
   createReport,
   getReport,
   deleteReport,
+  buildCocoons,
+  deleteRaw,
   exportJson,
   exportCsv,
   getHealth,

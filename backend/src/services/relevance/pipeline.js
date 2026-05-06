@@ -19,6 +19,7 @@ const db = require('../../config/db');
 const { fetchYandexSerp } = require('../metaTags/xmlstockClient');
 const { fetchPages }      = require('./pageFetcher');
 const { analyze }         = require('./pythonClient');
+const rawStorage          = require('./rawStorage');
 
 const MIN_FETCHED_FOR_ANALYZE = (() => {
   const v = parseInt(process.env.RELEVANCE_MIN_FETCHED, 10);
@@ -58,16 +59,24 @@ async function _setStage(reportId, stage, extra = {}) {
   );
 }
 
-async function _finishOk(reportId, report, durationMs) {
+async function _finishOk(reportId, report, durationMs, rawMeta) {
   await db.query(
     `UPDATE relevance_reports
        SET status='done',
            current_stage='done',
            report = $2::jsonb,
            completed_at = NOW(),
-           duration_ms = $3
+           duration_ms = $3,
+           raw_storage = $4,
+           raw_expires_at = $5
      WHERE id = $1`,
-    [reportId, JSON.stringify(report), durationMs],
+    [
+      reportId,
+      JSON.stringify(report),
+      durationMs,
+      rawMeta?.stored ? 'redis' : 'none',
+      rawMeta?.stored ? rawMeta.expiresAt : null,
+    ],
   );
 }
 
@@ -147,10 +156,29 @@ async function processRelevanceReport(reportId) {
     }
 
     // ── 3. Python-микросервис ────────────────────────────────────────────
+    // return_processed=true просим всегда — processed_documents пойдут в
+    // Redis с TTL для последующего расчёта коконов (PR 2). Если Redis
+    // недоступен — saveRaw() вернёт {stored:false}, и в БД отметим
+    // raw_storage='none'; пайплайн всё равно успешен.
     const analysisResp = await analyze({
       query,
       documents: successes.map((s) => ({ url: s.url, html: s.html })),
+      options: { return_processed: true },
     });
+
+    // ── 3.5. Складываем processed-доки в Redis (best-effort) ────────────
+    let rawMeta = { stored: false };
+    const processed = Array.isArray(analysisResp?.processed_documents)
+      ? analysisResp.processed_documents
+      : [];
+    if (processed.length > 0) {
+      try {
+        rawMeta = await rawStorage.saveRaw(reportId, processed);
+      } catch (e) {
+        // saveRaw сама ловит ошибки, но на всякий случай.
+        console.warn('[relevance] saveRaw threw:', e.message);
+      }
+    }
 
     // ── 4. Сохраняем отчёт ───────────────────────────────────────────────
     const fullReport = {
@@ -162,7 +190,7 @@ async function processRelevanceReport(reportId) {
       ngrams:     Array.isArray(analysisResp?.ngrams)     ? analysisResp.ngrams     : [],
     };
 
-    await _finishOk(reportId, fullReport, Date.now() - t0);
+    await _finishOk(reportId, fullReport, Date.now() - t0, rawMeta);
   } catch (err) {
     console.error(`[relevance] report ${reportId} failed:`, err.message);
     await _finishError(reportId, err.message);
