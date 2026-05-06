@@ -11,15 +11,38 @@
  *   • строгий лимит на размер ответа (RELEVANCE_MAX_HTML_BYTES, дефолт 16 МБ);
  *   • per-URL таймаут (RELEVANCE_FETCH_TIMEOUT_MS, дефолт 25 с);
  *   • ограниченный параллелизм (RELEVANCE_FETCH_CONCURRENCY, дефолт 6);
- *   • повтор с альтернативным User-Agent (Googlebot) при 403/429/503/таймауте —
- *     это закрывает большинство «непарсимых» сайтов с базовой WAF-защитой;
- *   • любая ошибка по конкретному URL не валит весь пайплайн — URL уходит в
- *     failed_urls с текстом ошибки.
+ *   • повтор с альтернативным User-Agent (Googlebot) при 403/429/503/таймауте;
+ *   • cookie jar (`tough-cookie`) — многие сайты на втором запросе отдают
+ *     полный HTML, если приняли cookie с первого (Cloudflare cf_clearance,
+ *     Qrator, Akamai). Создаём отдельный jar на каждый URL — изоляция;
+ *   • опциональный headless-fallback: если задан
+ *     `RELEVANCE_HEADLESS_FETCHER_URL`, для пустых/SPA-страниц делаем
+ *     POST {url} → ожидаем {html} от внешнего сервиса (Playwright/Puppeteer
+ *     поднимается отдельным контейнером — тяжёлый Chromium не тащим в
+ *     основной backend, чтобы не раздувать образ).
  *
- * Возвращает { successes: [{url, html}], failures: [{url, error}] }.
+ * Возвращает `{ successes: [{url, html}], failures: [{url, error, code, ...}] }`.
+ * `failures[].code` — категория (`http_403`, `timeout`, `dns`, `tls`,
+ * `empty_body`, `too_large`, `parse_error`, `headless_fail`, `unknown`).
+ * Это позволяет фронту показать распределение причин fail'а — сразу видно,
+ * где WAF, где SSR-only, где вообще DNS-проблемы.
  */
 
 const axios = require('axios');
+
+let _cookieJarSupport = null;
+let _CookieJarCtor    = null;
+try {
+  // Подключение опционально: если пакетов нет — работаем без cookie jar
+  // (graceful degradation; пайплайн не падает).
+  // eslint-disable-next-line global-require
+  _cookieJarSupport = require('axios-cookiejar-support').wrapper;
+  // eslint-disable-next-line global-require
+  _CookieJarCtor    = require('tough-cookie').CookieJar;
+} catch (_) {
+  _cookieJarSupport = null;
+  _CookieJarCtor    = null;
+}
 
 // Реальный современный Chrome — большинство сайтов отдают полную HTML-версию.
 const PRIMARY_USER_AGENT =
@@ -43,9 +66,22 @@ const FETCH_CONCURRENCY = (() => {
 
 const MAX_HTML_BYTES = (() => {
   const v = parseInt(process.env.RELEVANCE_MAX_HTML_BYTES, 10);
-  // 16 MB по умолчанию — редкие тяжёлые SPA с инлайн-данными тоже влезут;
-  // поднимаем с прежних 4 МБ, потому что нам важно собрать «100% контента».
   return Number.isFinite(v) && v >= 65536 ? v : 16 * 1024 * 1024;
+})();
+
+// Минимальная длина «полезного» текста в HTML, ниже которой считаем страницу
+// SPA-заглушкой и (если настроен headless) пробуем headless-fallback.
+const SPA_THRESHOLD_BYTES = (() => {
+  const v = parseInt(process.env.RELEVANCE_SPA_THRESHOLD_BYTES, 10);
+  return Number.isFinite(v) && v >= 0 && v <= 1_000_000 ? v : 1500;
+})();
+
+// Опциональный URL внешнего headless-сервиса (Playwright/Puppeteer).
+// Сервис должен принимать POST { url, timeout_ms } → { html } или 4xx/5xx.
+const HEADLESS_FETCHER_URL = (process.env.RELEVANCE_HEADLESS_FETCHER_URL || '').trim();
+const HEADLESS_TIMEOUT_MS  = (() => {
+  const v = parseInt(process.env.RELEVANCE_HEADLESS_TIMEOUT_MS, 10);
+  return Number.isFinite(v) && v >= 5000 && v <= 120000 ? v : 35000;
 })();
 
 // Статус-коды и сетевые коды ошибок, при которых имеет смысл повторить
@@ -74,14 +110,14 @@ async function pMap(items, limit, fn) {
 function _buildHeaders(userAgent) {
   return {
     'User-Agent':      userAgent,
-    // Принимаем и html, и xml, и любой mime — некоторые сайты неправильно
-    // ставят Content-Type, но по сути отдают html. */*;q=0.8 закрывает дыру.
     'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.7,en;q=0.6',
+    // Brotli/gzip/deflate — axios сам распакует (decompress:true).
+    // На некоторых серверах brotli может вернуть «битый» поток (плохой
+    // Content-Encoding) — для таких случаев есть fallback в _doFetch без `br`.
     'Accept-Encoding': 'gzip, deflate, br',
     'Cache-Control':   'no-cache',
     'Pragma':          'no-cache',
-    // Имитируем «прямой переход» — некоторые сайты блочат пустой Referer.
     'Referer':         'https://yandex.ru/',
     'Upgrade-Insecure-Requests': '1',
     'Sec-Fetch-Dest':  'document',
@@ -91,18 +127,62 @@ function _buildHeaders(userAgent) {
   };
 }
 
-async function _doFetch(url, userAgent) {
-  return axios.get(url, {
+function _newAxiosWithJar() {
+  // tough-cookie + axios-cookiejar-support: получаем axios-инстанс,
+  // который сам сохраняет/подтягивает Set-Cookie между запросами на
+  // один и тот же домен. Это критично для Cloudflare/Qrator: первый
+  // запрос → 503 + Set-Cookie cf_clearance; второй → 200 OK.
+  if (!_cookieJarSupport || !_CookieJarCtor) return axios.create();
+  const jar = new _CookieJarCtor();
+  const inst = axios.create({ jar, withCredentials: true });
+  return _cookieJarSupport(inst);
+}
+
+async function _doFetch(client, url, userAgent, { acceptBrotli = true } = {}) {
+  const headers = _buildHeaders(userAgent);
+  if (!acceptBrotli) {
+    // На редких серверах brotli приходит «битым» (бинарь без правильного
+    // Content-Encoding). Если первая попытка дала пустой/мусорный body —
+    // повторяем без `br`, чтобы axios не пытался распаковывать.
+    headers['Accept-Encoding'] = 'gzip, deflate';
+  }
+  return client.get(url, {
     timeout: FETCH_TIMEOUT_MS,
     maxContentLength: MAX_HTML_BYTES,
     maxBodyLength:    MAX_HTML_BYTES,
     maxRedirects: 5,
-    headers: _buildHeaders(userAgent),
+    headers,
     responseType: 'text',
     transformResponse: [(d) => d],
     validateStatus: (s) => s >= 200 && s < 300,
     decompress: true,
   });
+}
+
+/**
+ * Категоризирует ошибку axios → стабильный код для статистики.
+ * Эти коды попадают в `failed_urls[].code` и используются на фронте
+ * для подсчёта распределения причин fail'а (сразу видно, где WAF,
+ * где SSR-only сайты, где DNS).
+ */
+function _categorize(err) {
+  const status = err?.response?.status;
+  if (status) return `http_${status}`;
+  const code = err?.code;
+  if (code === 'EMPTY_BODY')        return 'empty_body';
+  if (code === 'ECONNABORTED')      return 'timeout';   // axios timeout
+  if (code === 'ETIMEDOUT')         return 'timeout';
+  if (code === 'ECONNRESET')        return 'conn_reset';
+  if (code === 'ECONNREFUSED')      return 'conn_refused';
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'dns';
+  if (code === 'ENETUNREACH')       return 'unreachable';
+  if (code === 'CERT_HAS_EXPIRED' || code === 'DEPTH_ZERO_SELF_SIGNED_CERT'
+   || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+   || code === 'SELF_SIGNED_CERT_IN_CHAIN'
+   || code === 'ERR_TLS_CERT_ALTNAME_INVALID') return 'tls';
+  if (code === 'ERR_FR_MAX_BODY_LENGTH_EXCEEDED'
+   || code === 'ERR_BAD_RESPONSE') return 'too_large';
+  return 'unknown';
 }
 
 function _shouldRetry(err) {
@@ -113,41 +193,105 @@ function _shouldRetry(err) {
   return false;
 }
 
-async function fetchOne(url) {
-  // Попытка №1 — реальный Chrome.
+async function _headlessFetch(url) {
+  if (!HEADLESS_FETCHER_URL) return null;
   try {
-    const res = await _doFetch(url, PRIMARY_USER_AGENT);
+    const res = await axios.post(
+      HEADLESS_FETCHER_URL,
+      { url, timeout_ms: HEADLESS_TIMEOUT_MS },
+      {
+        timeout: HEADLESS_TIMEOUT_MS + 5000,
+        maxContentLength: MAX_HTML_BYTES,
+        maxBodyLength:    MAX_HTML_BYTES,
+        validateStatus: (s) => s >= 200 && s < 300,
+      },
+    );
+    const html = String(res?.data?.html || '');
+    if (!html.trim()) return null;
+    return html;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchOne(url) {
+  const client = _newAxiosWithJar();
+  const result = { url };
+
+  // Попытка №1 — реальный Chrome + cookie jar (Cloudflare cf_clearance ловится).
+  let firstErr = null;
+  try {
+    const res = await _doFetch(client, url, PRIMARY_USER_AGENT);
     const html = String(res.data || '');
     if (!html.trim()) {
-      // Пустой body — попробуем ещё раз Googlebot, иногда помогает.
       throw Object.assign(new Error('empty body'), { code: 'EMPTY_BODY' });
     }
-    return { url, html };
-  } catch (err1) {
-    if (!_shouldRetry(err1) && err1?.code !== 'EMPTY_BODY') {
-      const code = err1?.response?.status || err1?.code || 'ERR';
-      const msg  = err1?.message || 'fetch failed';
-      return { url, error: `${code}: ${msg.slice(0, 140)}` };
+    if (html.length < SPA_THRESHOLD_BYTES) {
+      // Возможно SPA — попытаемся headless (если настроен).
+      const hh = await _headlessFetch(url);
+      if (hh) return { url, html: hh, method: 'headless' };
     }
-    // Попытка №2 — Googlebot UA. Многие WAF/anti-bot пропускают его.
+    return { url, html, method: 'axios_chrome' };
+  } catch (err) {
+    firstErr = err;
+  }
+
+  // Попытка №2 — fallback: Googlebot UA, тот же cookie jar (поможет
+  // если первый запрос получил cookie-челлендж, а второй пройдёт).
+  let secondErr = null;
+  if (_shouldRetry(firstErr) || firstErr?.code === 'EMPTY_BODY') {
     try {
-      const res2 = await _doFetch(url, FALLBACK_USER_AGENT);
+      const res2 = await _doFetch(client, url, FALLBACK_USER_AGENT);
       const html2 = String(res2.data || '');
       if (!html2.trim()) {
-        return { url, error: 'empty body (after retry)' };
+        throw Object.assign(new Error('empty body (after retry)'), { code: 'EMPTY_BODY' });
       }
-      return { url, html: html2 };
-    } catch (err2) {
-      const code = err2?.response?.status || err2?.code || 'ERR';
-      const msg  = err2?.message || 'fetch failed';
-      return { url, error: `${code}: ${msg.slice(0, 140)}` };
+      if (html2.length < SPA_THRESHOLD_BYTES) {
+        const hh = await _headlessFetch(url);
+        if (hh) return { url, html: hh, method: 'headless' };
+      }
+      return { url, html: html2, method: 'axios_googlebot' };
+    } catch (err) {
+      secondErr = err;
     }
   }
+
+  // Попытка №3 — без brotli (на случай битого br-стрима у редких серверов).
+  if (!secondErr) secondErr = firstErr;
+  if (_shouldRetry(secondErr) || secondErr?.code === 'EMPTY_BODY') {
+    try {
+      const res3 = await _doFetch(client, url, PRIMARY_USER_AGENT, { acceptBrotli: false });
+      const html3 = String(res3.data || '');
+      if (html3.trim()) {
+        if (html3.length < SPA_THRESHOLD_BYTES) {
+          const hh = await _headlessFetch(url);
+          if (hh) return { url, html: hh, method: 'headless' };
+        }
+        return { url, html: html3, method: 'axios_no_brotli' };
+      }
+    } catch (_) { /* ignored — последний fallback ниже */ }
+  }
+
+  // Финальная попытка — headless, если включён, даже без предварительного
+  // успеха. Это покрывает SPA, которые без JS вообще ничего не отдают.
+  if (HEADLESS_FETCHER_URL) {
+    const hh = await _headlessFetch(url);
+    if (hh) return { url, html: hh, method: 'headless' };
+  }
+
+  const finalErr = secondErr || firstErr;
+  result.error = (() => {
+    const status = finalErr?.response?.status || finalErr?.code || 'ERR';
+    const msg    = String(finalErr?.message || 'fetch failed').slice(0, 140);
+    return `${status}: ${msg}`;
+  })();
+  result.code = _categorize(finalErr);
+  return result;
 }
 
 /**
  * @param {string[]} urls
- * @returns {Promise<{successes: Array<{url, html}>, failures: Array<{url, error}>}>}
+ * @returns {Promise<{successes: Array<{url, html, method?}>, failures: Array<{url, error, code}>}>}
  */
 async function fetchPages(urls) {
   const list = (Array.isArray(urls) ? urls : [])
@@ -163,10 +307,21 @@ async function fetchPages(urls) {
   const successes = [];
   const failures  = [];
   for (const r of all) {
-    if (r && r.html) successes.push({ url: r.url, html: r.html });
-    else if (r)      failures.push({ url: r.url, error: r.error || 'unknown' });
+    if (r && r.html) successes.push({ url: r.url, html: r.html, method: r.method || 'axios' });
+    else if (r) failures.push({
+      url:   r.url,
+      error: r.error || 'unknown',
+      code:  r.code  || 'unknown',
+    });
   }
   return { successes, failures };
 }
 
-module.exports = { fetchPages, FETCH_CONCURRENCY, FETCH_TIMEOUT_MS };
+module.exports = {
+  fetchPages,
+  fetchOne,
+  FETCH_CONCURRENCY,
+  FETCH_TIMEOUT_MS,
+  HEADLESS_FETCHER_URL,
+  COOKIE_JAR_AVAILABLE: !!_cookieJarSupport,
+};

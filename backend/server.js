@@ -767,6 +767,22 @@ async function ensureSchema() {
         WHERE raw_processed IS NOT NULL
     `);
 
+    // Migration 021: «наш сайт vs ТОП конкурентов» — опциональное сравнение.
+    //   our_url             — URL нашей страницы (input от пользователя);
+    //   our_report          — diagnostics + leммы нашего документа;
+    //   comparison          — итог /compare (per-term gap, lsi%, bm25, cos,
+    //                         математические директивы, competitor table);
+    //   exclude_aggregators — чекбокс «исключить агрегаторы из ТОПа».
+    // Все поля nullable: на старых отчётах останутся NULL, фронт показывает
+    // секцию сравнения только если comparison IS NOT NULL.
+    await db.query(`
+      ALTER TABLE relevance_reports
+        ADD COLUMN IF NOT EXISTS our_url             TEXT,
+        ADD COLUMN IF NOT EXISTS our_report          JSONB,
+        ADD COLUMN IF NOT EXISTS comparison          JSONB,
+        ADD COLUMN IF NOT EXISTS exclude_aggregators BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$

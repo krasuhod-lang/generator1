@@ -1,0 +1,302 @@
+"""Сравнение «наш сайт vs ТОП конкурентов».
+
+Берём готовый отчёт по корпусу ТОПа (vocabulary + ngrams + processed_documents)
+и леммы нашего документа — и считаем:
+
+  * **lsi_coverage**       — % важных лемм ТОПа, встречающихся у нас ≥ 1 раз;
+  * **vocab_coverage**     — то же для всего словаря (не только important);
+  * **ngrams_coverage**    — % биграмм/триграмм/4-грамм ТОПа у нас;
+  * **bm25_score**         — BM25 нашего документа против корпуса ТОПа
+                             (через rank-bm25 с query=important_lemmas);
+  * **tf_idf_cosine**      — косинус угла между нашим TF-IDF вектором и
+                             покомпонентной медианой векторов ТОПа;
+  * **per_term_gap**       — для каждой леммы из словаря: our_count vs
+                             median_count_top, и статус
+                             missing/under/ok/over;
+  * **per_phrase_gap**     — то же для n-грамм;
+  * **directives**         — конкретные текстовые директивы для копирайтера
+                             («Слово X: у вас 8, медиана 26, +18»).
+
+Никаких сетевых вызовов — модуль чистый, считает поверх готовых лемм.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from typing import Dict, List, Sequence
+
+from .bm25_calc import score_document_against_corpus
+
+# Пороги статусов для per-term gap (доля от медианы):
+#   < UNDER_RATIO          → under
+#   между UNDER..OVER      → ok
+#   > OVER_RATIO * median  → over (риск переспама)
+UNDER_RATIO = 0.5
+OVER_RATIO  = 1.5
+# Минимальное «лишнее» абсолютное значение, чтобы счесть over: + 5 к медиане.
+# Иначе при медиане 1 любой повтор 2 раз помечался бы как переспам.
+OVER_ABSOLUTE_BUFFER = 5
+
+# Сколько максимум директив выдавать (чтобы UI не лопнул).
+MAX_DIRECTIVES = 200
+
+
+def _doc_term_counts(lemmas: Sequence[str]) -> Dict[str, int]:
+    c: Dict[str, int] = {}
+    for l in lemmas:
+        c[l] = c.get(l, 0) + 1
+    return c
+
+
+def _classify(our_count: int, median: float) -> str:
+    if our_count == 0:
+        return "missing"
+    if median <= 0:
+        # Терм есть только у нас — это «over» с т.з. ниши.
+        return "over"
+    ratio = our_count / median
+    if ratio < UNDER_RATIO:
+        return "under"
+    if ratio > OVER_RATIO and our_count >= median + OVER_ABSOLUTE_BUFFER:
+        return "over"
+    return "ok"
+
+
+def compute_comparison(
+    *,
+    our_lemmas: List[str],
+    vocabulary: List[dict],
+    ngrams: List[dict],
+    corpus_lemmas: List[List[str]],
+    our_text_chars: int = 0,
+    our_html_chars: int = 0,
+    median_text_chars: float = 0.0,
+    median_html_chars: float = 0.0,
+) -> dict:
+    """Считает сравнительный отчёт. Все аргументы keyword-only — не путаемся.
+
+    Args:
+        our_lemmas: леммы нашего документа (после normalizer).
+        vocabulary: уже посчитанный словарь ТОПа (rows из compute_vocabulary_bm25).
+        ngrams: уже посчитанные n-граммы ТОПа (rows из compute_ngrams).
+        corpus_lemmas: lemmas всех документов ТОПа (для BM25 нашего документа).
+        our_text_chars / our_html_chars: длины нашего документа (для text/HTML
+            ratio в сравнении с корпусом).
+        median_text_chars / median_html_chars: медианы по корпусу.
+    """
+    our_counts = _doc_term_counts(our_lemmas)
+
+    # ── 1) Vocabulary gap (per-term) ──────────────────────────────────────
+    important_lemmas: List[str] = []
+    per_term: List[dict] = []
+    important_hits = 0
+    important_total = 0
+    vocab_hits = 0
+    vocab_total = len(vocabulary)
+
+    for v in vocabulary:
+        lemma = v.get("lemma", "")
+        if not lemma:
+            continue
+        median = float(v.get("median_count") or 0)
+        our_count = int(our_counts.get(lemma, 0))
+        status = _classify(our_count, median)
+        is_important = (v.get("status") == "important")
+        if is_important:
+            important_lemmas.append(lemma)
+            important_total += 1
+            if our_count > 0:
+                important_hits += 1
+        if our_count > 0:
+            vocab_hits += 1
+        per_term.append({
+            "lemma":         lemma,
+            "df":            int(v.get("df") or 0),
+            "median_top":    median,
+            "our_count":     our_count,
+            "bm25_score":    float(v.get("bm25_score") or 0),
+            "tf_idf_score":  float(v.get("tf_idf_score") or 0),
+            "important":     is_important,
+            "status":        status,    # missing / under / ok / over
+        })
+
+    # ── 2) N-grams gap ────────────────────────────────────────────────────
+    # Считаем фразы у нас «грубо»: сшиваем леммы подряд и ищем подстроку.
+    our_lemma_str = " ".join(our_lemmas)
+
+    def _phrase_count(phrase: str) -> int:
+        if not phrase:
+            return 0
+        # +1 рамка, чтобы " слово " не нашло в "словосочетании"
+        needle = " " + phrase + " "
+        hay = " " + our_lemma_str + " "
+        # быстрый подсчёт неперекрывающихся вхождений
+        c = 0
+        i = 0
+        while True:
+            j = hay.find(needle, i)
+            if j == -1:
+                break
+            c += 1
+            # неперекрывающиеся — двигаемся за конец фразы
+            i = j + len(needle) - 1
+        return c
+
+    per_phrase: List[dict] = []
+    ngrams_hits = 0
+    ngrams_total = len(ngrams)
+    for n in ngrams:
+        phrase = n.get("phrase", "")
+        median = float(n.get("median_count") or 0)
+        our_count = _phrase_count(phrase)
+        status = _classify(our_count, median)
+        if our_count > 0:
+            ngrams_hits += 1
+        per_phrase.append({
+            "phrase":     phrase,
+            "df":         int(n.get("df") or 0),
+            "median_top": median,
+            "our_count":  our_count,
+            "type":       n.get("type", ""),
+            "status":     status,
+        })
+
+    # ── 3) BM25 + TF-IDF cosine нашего документа против корпуса ──────────
+    # Для BM25 query = important_lemmas (если их < 5 — берём весь словарь).
+    query = important_lemmas if len(important_lemmas) >= 5 \
+        else [v.get("lemma", "") for v in vocabulary if v.get("lemma")]
+    scoring = score_document_against_corpus(
+        our_lemmas, corpus_lemmas, important_lemmas=query,
+    )
+
+    # ── 4) Coverage % ────────────────────────────────────────────────────
+    def _pct(num, den) -> float:
+        if not den:
+            return 0.0
+        return round(100.0 * num / den, 2)
+
+    summary = {
+        "our_text_chars":     int(our_text_chars or 0),
+        "our_html_chars":     int(our_html_chars or 0),
+        "our_text_html_ratio": round(
+            (our_text_chars / max(our_html_chars, 1)) if our_text_chars else 0.0, 4,
+        ),
+        "median_text_chars_top": round(median_text_chars or 0, 1),
+        "median_html_chars_top": round(median_html_chars or 0, 1),
+        "median_text_html_ratio_top": round(
+            (median_text_chars / max(median_html_chars, 1)) if median_text_chars else 0.0, 4,
+        ),
+        "lsi_coverage_pct":      _pct(important_hits, important_total),
+        "vocab_coverage_pct":    _pct(vocab_hits, vocab_total),
+        "ngrams_coverage_pct":   _pct(ngrams_hits, ngrams_total),
+        "bm25_score":            scoring["bm25_score"],
+        "bm25_score_norm":       scoring["bm25_score_norm"],
+        "tf_idf_cosine":         scoring["tf_idf_cosine"],
+        "important_lemmas_total": important_total,
+        "important_lemmas_hit":   important_hits,
+        "ngrams_total":           ngrams_total,
+        "ngrams_hit":             ngrams_hits,
+    }
+
+    # ── 5) Math directives — самая ценная часть для копирайтера ──────────
+    # Сортируем кандидатов по «важности» (BM25 score конкурентов) и берём
+    # ТОП MAX_DIRECTIVES, у которых статус ≠ ok (т.е. что-то надо менять).
+    directives: List[dict] = []
+    sorted_terms = sorted(
+        per_term,
+        key=lambda x: (x["important"], x["bm25_score"]),
+        reverse=True,
+    )
+    for t in sorted_terms:
+        if t["status"] == "ok":
+            continue
+        if t["status"] == "missing":
+            text = (
+                f"Добавьте слово «{t['lemma']}» (рекомендуется ~{int(round(t['median_top']))} вхождений, "
+                f"медиана ТОПа). У вас 0."
+            )
+            delta = int(round(t["median_top"]))
+        elif t["status"] == "under":
+            need = max(int(round(t["median_top"])) - t["our_count"], 1)
+            text = (
+                f"Увеличьте количество «{t['lemma']}» с {t['our_count']} до "
+                f"{int(round(t['median_top']))} (медиана ТОПа). +{need}."
+            )
+            delta = need
+        else:  # over
+            cut = max(t["our_count"] - int(round(t["median_top"])), 1)
+            text = (
+                f"Сократите количество «{t['lemma']}» с {t['our_count']} до "
+                f"{int(round(t['median_top']))} (медиана ТОПа). −{cut}."
+            )
+            delta = -cut
+        directives.append({
+            "lemma":     t["lemma"],
+            "status":    t["status"],
+            "important": t["important"],
+            "delta":     delta,          # положит = добавить, отриц = убрать
+            "our_count": t["our_count"],
+            "median_top": t["median_top"],
+            "text":      text,
+        })
+        if len(directives) >= MAX_DIRECTIVES:
+            break
+
+    return {
+        "summary":     summary,
+        "per_term":    per_term,
+        "per_phrase":  per_phrase,
+        "directives":  directives,
+    }
+
+
+def per_competitor_table(
+    *,
+    competitors: List[dict],
+    vocabulary: List[dict],
+    corpus_lemmas: List[List[str]],
+    our_doc: dict | None = None,
+) -> List[dict]:
+    """Сводная табличка ТОП-N + наш сайт.
+
+    Для каждого конкурента и для нашего документа считает:
+      - lsi_coverage_pct — % важных лемм, присутствующих в документе
+      - bm25_score       — BM25 этого документа против общего корпуса
+      - tf_idf_cosine    — косинус с медианным вектором ТОПа
+
+    Args:
+        competitors: список {url, lemmas} — документы ТОПа.
+        vocabulary:  словарь ТОПа (для определения important).
+        corpus_lemmas: lemmas корпуса ТОПа (= [c.lemmas for c in competitors]).
+        our_doc:     {url, lemmas} нашего документа или None.
+    """
+    important_lemmas = [
+        v["lemma"] for v in vocabulary if v.get("status") == "important" and v.get("lemma")
+    ]
+    important_set = set(important_lemmas)
+
+    rows: List[dict] = []
+
+    def _row(url: str, lemmas: List[str], is_ours: bool) -> dict:
+        cnt = _doc_term_counts(lemmas)
+        hits = sum(1 for l in important_set if cnt.get(l, 0) > 0)
+        coverage = (100.0 * hits / len(important_set)) if important_set else 0.0
+        scoring = score_document_against_corpus(
+            lemmas, corpus_lemmas, important_lemmas=important_lemmas,
+        )
+        return {
+            "url":               url,
+            "is_ours":           is_ours,
+            "lsi_coverage_pct":  round(coverage, 2),
+            "bm25_score":        scoring["bm25_score"],
+            "bm25_score_norm":   scoring["bm25_score_norm"],
+            "tf_idf_cosine":     scoring["tf_idf_cosine"],
+            "tokens":            len(lemmas),
+        }
+
+    if our_doc and our_doc.get("lemmas"):
+        rows.append(_row(our_doc.get("url", ""), list(our_doc["lemmas"]), True))
+    for c in competitors:
+        rows.append(_row(c.get("url", ""), list(c.get("lemmas") or []), False))
+
+    return rows

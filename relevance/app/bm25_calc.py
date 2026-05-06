@@ -121,3 +121,98 @@ def compute_vocabulary_bm25(
             r["status"] = "important" if (top_bm25 or top_tfidf) and r["df"] >= important_min_df else "additional"
 
     return rows
+
+
+# ── Document scoring against an existing corpus (для сравнения нашего сайта) ──
+
+def score_document_against_corpus(
+    our_lemmas: List[str],
+    corpus_lemmas: List[List[str]],
+    *,
+    important_lemmas: List[str] | None = None,
+) -> Dict[str, float]:
+    """Считает BM25-релевантность нашего документа корпусу ТОПа.
+
+    Логика: BM25Okapi(corpus) + query = ВАЖНЫЕ леммы (LSI-ключи). Это даёт
+    «насколько хорошо наш текст ранжируется как раз по тем словам, которые
+    важны в нише». Если important_lemmas не задан — берём весь словарь
+    нашего документа (это общая релевантность всему корпусу).
+
+    Возвращает:
+      bm25_score        — суммарный BM25 нашего документа против ТОПа
+      bm25_score_norm   — нормированный (доля от макс. score в корпусе)
+      tf_idf_cosine     — косинус между нашим TF-IDF вектором и медианным
+                          вектором ТОПа (по объединённому словарю).
+    """
+    out = {"bm25_score": 0.0, "bm25_score_norm": 0.0, "tf_idf_cosine": 0.0}
+    if not our_lemmas or not corpus_lemmas:
+        return out
+
+    bm25 = BM25Okapi(corpus_lemmas + [our_lemmas])
+    # query: либо явно заданные important леммы, либо уникумы нашего документа
+    query = list(dict.fromkeys(important_lemmas)) if important_lemmas else list(set(our_lemmas))
+    if not query:
+        return out
+
+    scores = bm25.get_scores(query)
+    # Последняя позиция в массиве scores — наш документ
+    our_score = float(scores[-1])
+    corpus_scores = [float(s) for s in scores[:-1]]
+
+    out["bm25_score"] = round(our_score, 4)
+    if corpus_scores:
+        # max из корпуса берём как baseline; при отрицательных значениях
+        # нормировка теряет смысл (BM25 на крошечных корпусах часто < 0
+        # из-за idf-штрафа за общие слова), поэтому в этом случае
+        # возвращаем 0 — нет смысла «нормировать на минус».
+        max_score = max(max(corpus_scores), our_score)
+        if max_score > 1e-6:
+            out["bm25_score_norm"] = round(max(0.0, our_score) / max_score, 4)
+
+    # TF-IDF cosine: вектор по объединённому словарю (corpus + our).
+    # 1) df по всему расширенному корпусу (для idf)
+    all_docs = corpus_lemmas + [our_lemmas]
+    n_docs = len(all_docs)
+    df_map: Dict[str, int] = {}
+    for doc in all_docs:
+        for lemma in set(doc):
+            df_map[lemma] = df_map.get(lemma, 0) + 1
+    vocab = sorted(df_map.keys())
+    if not vocab:
+        return out
+
+    idx = {lemma: i for i, lemma in enumerate(vocab)}
+    idf_arr = [math.log((n_docs + 1) / (df_map[v] + 1)) + 1.0 for v in vocab]
+
+    def _vec(doc_lemmas: List[str]) -> List[float]:
+        cnt: Dict[str, int] = {}
+        for l in doc_lemmas:
+            cnt[l] = cnt.get(l, 0) + 1
+        v = [0.0] * len(vocab)
+        for lemma, c in cnt.items():
+            if c <= 0 or lemma not in idx:
+                continue
+            i = idx[lemma]
+            v[i] = (1.0 + math.log(c)) * idf_arr[i]
+        return v
+
+    # Медианный вектор ТОПа: покомпонентная медиана TF-IDF векторов.
+    corpus_vecs = [_vec(d) for d in corpus_lemmas]
+    if not corpus_vecs:
+        return out
+    median_vec = [
+        statistics.median([cv[i] for cv in corpus_vecs])
+        for i in range(len(vocab))
+    ]
+    our_vec = _vec(our_lemmas)
+
+    def _cos(a: List[float], b: List[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        na  = math.sqrt(sum(x * x for x in a))
+        nb  = math.sqrt(sum(y * y for y in b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return dot / (na * nb)
+
+    out["tf_idf_cosine"] = round(_cos(our_vec, median_vec), 4)
+    return out

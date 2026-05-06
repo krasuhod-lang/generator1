@@ -103,6 +103,57 @@ async function cocoons(payload) {
   }
 }
 
+/**
+ * Сравнение «наш сайт vs ТОП». Принимает уже нормализованные леммы — из
+ * Redis-кэша processed_documents (или возвращаются /analyze with
+ * return_processed=true). Никакого парсинга — только числовой расчёт.
+ *
+ * @param {{
+ *   our_lemmas: string[],
+ *   our_url?: string,
+ *   our_text_chars?: number,
+ *   our_html_chars?: number,
+ *   median_text_chars?: number,
+ *   median_html_chars?: number,
+ *   vocabulary: object[],
+ *   ngrams?: object[],
+ *   corpus_lemmas: string[][],
+ *   competitor_urls?: string[],
+ * }} payload
+ * @returns {Promise<{summary, per_term, per_phrase, directives, competitor_table?}>}
+ */
+async function compare(payload) {
+  if (!payload || !Array.isArray(payload.our_lemmas)) {
+    throw new Error('compare(): payload.our_lemmas must be an array');
+  }
+  if (!Array.isArray(payload.corpus_lemmas) || payload.corpus_lemmas.length === 0) {
+    throw new Error('compare(): payload.corpus_lemmas must be a non-empty array');
+  }
+  try {
+    const res = await axios.post(
+      `${BASE_URL}/compare`,
+      payload,
+      {
+        timeout: 60000,
+        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        maxBodyLength:    64 * 1024 * 1024,
+        maxContentLength: 64 * 1024 * 1024,
+        validateStatus: (s) => s >= 200 && s < 300,
+      },
+    );
+    return res.data;
+  } catch (err) {
+    const code = err?.response?.status || err?.code || 'ERR';
+    const detail =
+      err?.response?.data?.detail
+      || err?.response?.data?.error
+      || err?.message
+      || 'unknown';
+    const safeDetail = String(detail).replace(/\s+/g, ' ').slice(0, 300);
+    throw new Error(`relevance-service /compare ${code}: ${safeDetail}`);
+  }
+}
+
 async function health() {
   try {
     const res = await axios.get(`${BASE_URL}/health`, {
@@ -130,6 +181,7 @@ async function health() {
 module.exports = {
   analyze,
   cocoons,
+  compare,
   health,
   RELEVANCE_BASE_URL: BASE_URL,
   ANALYZE_TIMEOUT_MS,

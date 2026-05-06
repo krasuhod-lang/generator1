@@ -11,6 +11,8 @@ const store  = useRelevanceStore();
 const form = ref({
   query: '',
   lr:    '213',
+  our_url: '',
+  exclude_aggregators: false,
 });
 
 // ── Region picker (комбобокс с поиском) ──────────────────────────────────
@@ -90,6 +92,8 @@ async function handleCreate() {
     const id = await store.createReport({
       query: form.value.query.trim(),
       lr:    form.value.lr.trim() || '213',
+      our_url: (form.value.our_url || '').trim() || null,
+      exclude_aggregators: !!form.value.exclude_aggregators,
     });
     await store.fetchReports();
     if (id) router.push(`/relevance/${id}`);
@@ -207,6 +211,35 @@ function formatDuration(ms) {
                 </li>
               </ul>
             </div>
+          </div>
+        </div>
+
+        <!-- PR3: «наш сайт vs ТОП» — необязательное сравнение -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1">
+          <div class="md:col-span-2">
+            <label class="label flex items-center gap-2">
+              <span>URL вашей страницы для сравнения</span>
+              <span class="text-[10px] text-gray-500 font-normal normal-case">(необязательно)</span>
+            </label>
+            <input v-model="form.our_url" type="url" class="input"
+                   placeholder="https://example.ru/page-to-compare" />
+            <p class="text-[11px] text-gray-500 mt-1">
+              Если задан — мы скачаем эту страницу тем же парсером и посчитаем
+              сравнение с ТОПом: % покрытия LSI-ключей, BM25, TF-IDF cosine,
+              математические директивы для копирайтера.
+            </p>
+          </div>
+          <div class="flex items-start pt-7">
+            <label class="inline-flex items-start gap-2 cursor-pointer text-sm text-gray-300 select-none">
+              <input v-model="form.exclude_aggregators" type="checkbox"
+                     class="mt-0.5 rounded border-gray-700 bg-gray-900 text-indigo-600 focus:ring-indigo-700" />
+              <span>
+                Исключить агрегаторы и крупные площадки
+                <span class="block text-[11px] text-gray-500">
+                  Avito / hh / Ozon / WB / Dzen / vc / habr / pikabu / 2gis…
+                </span>
+              </span>
+            </label>
           </div>
         </div>
 
