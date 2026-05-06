@@ -38,7 +38,10 @@ async function listReports(req, res, next) {
               created_at, started_at, completed_at,
               raw_storage, raw_expires_at,
               (cocoons IS NOT NULL) AS has_cocoons,
-              (raw_storage = 'redis' AND raw_expires_at > NOW()) AS has_raw
+              (
+                (raw_storage = 'redis' AND raw_expires_at > NOW())
+                OR raw_processed IS NOT NULL
+              ) AS has_raw
          FROM relevance_reports
         WHERE user_id = $1
         ORDER BY created_at DESC
@@ -90,8 +93,15 @@ async function createReport(req, res, next) {
 async function getReport(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT *,
-              (raw_storage = 'redis' AND raw_expires_at > NOW()) AS has_raw,
+      `SELECT id, user_id, query, lr, top_n, status, current_stage,
+              fetched_count, serp, failed_urls, error_message, duration_ms,
+              created_at, started_at, completed_at,
+              report, cocoons,
+              raw_storage, raw_expires_at,
+              (
+                (raw_storage = 'redis' AND raw_expires_at > NOW())
+                OR raw_processed IS NOT NULL
+              ) AS has_raw,
               (cocoons IS NOT NULL) AS has_cocoons
          FROM relevance_reports
         WHERE id = $1 AND user_id = $2`,
@@ -126,12 +136,14 @@ async function deleteReport(req, res, next) {
 
 // ─── POST /api/relevance/:id/cocoons ──────────────────────────────
 // Запускает повторный проход поверх processed-документов из Redis-кэша
-// и кладёт результат в relevance_reports.cocoons. Идемпотентен —
+// (или из Postgres-fallback'а, если Redis не доступен / TTL истёк) и
+// кладёт результат в relevance_reports.cocoons. Идемпотентен —
 // каждый вызов перезаписывает cocoons свежим расчётом.
 async function buildCocoons(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, status, raw_storage, raw_expires_at
+      `SELECT id, status, raw_storage, raw_expires_at,
+              (raw_processed IS NOT NULL) AS has_db_processed
          FROM relevance_reports
         WHERE id = $1 AND user_id = $2`,
       [req.params.id, req.user.id],
@@ -143,21 +155,38 @@ async function buildCocoons(req, res, next) {
     if (r.status !== 'done') {
       return res.status(409).json({ error: 'Отчёт ещё не готов (status != done).' });
     }
-    if (r.raw_storage !== 'redis' || !r.raw_expires_at || r.raw_expires_at <= new Date()) {
-      return res.status(410).json({
-        error: 'Кэш сырых документов истёк или отсутствует. Создайте новый отчёт для расчёта коконов.',
-      });
-    }
 
-    const processed = await rawStorage.loadRaw(r.id);
+    const redisAlive = (
+      r.raw_storage === 'redis'
+      && r.raw_expires_at
+      && r.raw_expires_at > new Date()
+    );
+
+    // 1) Сначала пробуем Redis (быстро). 2) Если пусто — Postgres-fallback.
+    let processed = null;
+    if (redisAlive) {
+      try {
+        processed = await rawStorage.loadRaw(r.id);
+      } catch (e) {
+        console.warn('[relevance] loadRaw from redis failed:', e.message);
+      }
+    }
     if (!processed || !Array.isArray(processed) || processed.length === 0) {
-      // Метка в БД говорит что ключ есть, а в Redis ничего нет — проставляем 'none'.
-      await db.query(
-        `UPDATE relevance_reports SET raw_storage='none', raw_expires_at=NULL WHERE id=$1`,
+      // Грузим из БД
+      const dbRows = await db.query(
+        `SELECT raw_processed FROM relevance_reports WHERE id = $1`,
         [r.id],
       );
+      const dbProcessed = dbRows.rows[0]?.raw_processed;
+      if (Array.isArray(dbProcessed) && dbProcessed.length > 0) {
+        processed = dbProcessed;
+      }
+    }
+
+    if (!processed || !Array.isArray(processed) || processed.length === 0) {
       return res.status(410).json({
-        error: 'Кэш сырых документов недоступен (Redis вернул пусто). Создайте новый отчёт.',
+        error: 'Кэш сырых документов недоступен (ни в Redis, ни в БД). '
+             + 'Создайте новый отчёт для расчёта коконов.',
       });
     }
 
@@ -198,12 +227,13 @@ async function buildCocoons(req, res, next) {
 }
 
 // ─── DELETE /api/relevance/:id/raw ────────────────────────────────
-// Досрочно удаляет processed-документы из Redis (но не сами cocoons).
+// Досрочно удаляет processed-документы и из Redis, и из Postgres
+// (но не сами cocoons — итоговый отчёт остаётся).
 async function deleteRaw(req, res, next) {
   try {
     const { rowCount } = await db.query(
       `UPDATE relevance_reports
-          SET raw_storage='none', raw_expires_at=NULL
+          SET raw_storage='none', raw_expires_at=NULL, raw_processed=NULL
         WHERE id = $1 AND user_id = $2`,
       [req.params.id, req.user.id],
     );
@@ -288,8 +318,8 @@ async function exportCsv(req, res, next) {
     csv += `"# Relevance report"${sep}${csvCell(query)}\r\n`;
     csv += `"# Generated"${sep}${csvCell(new Date().toISOString())}\r\n\r\n`;
 
-    csv += `"# Vocabulary (BM25)"\r\n`;
-    csv += ['Lemma', 'DF (sites)', 'Median count', 'BM25 score', 'Status']
+    csv += `"# Vocabulary (BM25 + TF-IDF)"\r\n`;
+    csv += ['Lemma', 'DF (sites)', 'Median count', 'BM25 score', 'TF-IDF score', 'Status']
       .map(csvCell).join(sep) + '\r\n';
     for (const v of vocab) {
       csv += [
@@ -297,6 +327,7 @@ async function exportCsv(req, res, next) {
         csvCell(v.df),
         csvCell(v.median_count),
         csvCell(v.bm25_score),
+        csvCell(v.tf_idf_score ?? 0),
         csvCell(v.status),
       ].join(sep) + '\r\n';
     }

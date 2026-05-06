@@ -68,8 +68,12 @@ class DocumentIn(BaseModel):
 class AnalyzeOptions(BaseModel):
     min_term_df: int = Field(default=2, ge=1, le=20)
     min_ngram_df: int = Field(default=3, ge=1, le=20)
-    max_terms: int = Field(default=500, ge=10, le=5000)
-    max_ngrams_per_type: int = Field(default=200, ge=10, le=2000)
+    # Поднято с 500 до 5000 — заказчик: «не все LSI слова учитываются».
+    # Теперь словарь не обрезается на сколько-нибудь содержательных корпусах.
+    max_terms: int = Field(default=5000, ge=10, le=20000)
+    # Поднято с 200 до 2000 — заказчик: «n-грамм надо собирать от 30 штук,
+    # чем больше тем лучше».
+    max_ngrams_per_type: int = Field(default=2000, ge=10, le=10000)
     # PR 2: если true — в ответе вернутся processed_documents (леммы +
     # POS-последовательности по каждому документу). Node-бэкенд кладёт
     # их в Redis с TTL, чтобы потом считать коконы без повторного парсинга.
@@ -87,6 +91,7 @@ class VocabRow(BaseModel):
     df: int
     median_count: float
     bm25_score: float
+    tf_idf_score: float = 0.0
     status: str
 
 
