@@ -739,7 +739,7 @@ _HIDDEN_CLASS_RE = re.compile(
 # (без cssutils — спецификация явно это запрещает).
 _RE_DISPLAY_NONE     = re.compile(r"display\s*:\s*none\b",    re.IGNORECASE)
 _RE_VISIBILITY_HIDDEN = re.compile(r"visibility\s*:\s*hidden\b", re.IGNORECASE)
-_RE_OPACITY_ZERO     = re.compile(r"opacity\s*:\s*0(?:\.0+)?(?![\.\d])", re.IGNORECASE)
+_RE_OPACITY_ZERO     = re.compile(r"opacity\s*:\s*0(?:\.0+)?(?![.\d])", re.IGNORECASE)
 _RE_POSITION_ABS     = re.compile(r"position\s*:\s*absolute\b",   re.IGNORECASE)
 _RE_OFFSCREEN_OFFSET = re.compile(r"(?:left|top)\s*:\s*-\d{3,}px\b", re.IGNORECASE)
 
@@ -1011,13 +1011,12 @@ def _full_dom_extract(html: str) -> Tuple[
         if name in _FULL_DOM_SKIP_TAGS:
             return
 
-        # §C: <noscript> — спускаемся, но всё внутри помечаем hidden=true
-        # с reason="noscript" (если ещё не помечено более жёсткой причиной).
-        force_hidden = False
-        force_reason = parent_reason
-        if name == "noscript" and not parent_hidden:
-            force_hidden = True
-            force_reason = "noscript"
+        # §C: <noscript> — спускаемся, но всё внутри ЖЁСТКО помечаем
+        # is_hidden=true с причиной "noscript" (даже если родитель уже был
+        # скрыт по другой причине — спецификация требует именно эту метку
+        # для содержимого noscript, чтобы оператор отличал «реально
+        # invisible no-JS fallback» от «скрыто CSS-ом»).
+        force_noscript = (name == "noscript")
 
         # Собственные сигналы зоны
         own_zones = _classify_node_zones(node)
@@ -1028,13 +1027,18 @@ def _full_dom_extract(html: str) -> Tuple[
         eff_zone = _resolve_zone(parent_zone, own_zones)
 
         # is_hidden наследуется + проверяем сигналы текущего узла
-        cur_hidden = parent_hidden or force_hidden
-        cur_reason = force_reason if force_hidden else parent_reason
+        cur_hidden = parent_hidden
+        cur_reason = parent_reason
         if not cur_hidden:
             h, r = _check_hidden(node)
             if h:
                 cur_hidden = True
                 cur_reason = r
+        # noscript-маркер ставится ПОСЛЕ обычных проверок — он перекрывает
+        # любую другую причину для всего поддерева noscript.
+        if force_noscript:
+            cur_hidden = True
+            cur_reason = "noscript"
 
         cur_in_anchor = in_anchor or (name == "a")
 
