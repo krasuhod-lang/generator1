@@ -22,6 +22,19 @@ const { analyze, compare }     = require('./pythonClient');
 const rawStorage          = require('./rawStorage');
 const { splitBySerp }     = require('./aggregatorDomains');
 
+/**
+ * Возвращает «канонический» хост для дедупликации SERP по домену.
+ * Срезаем `www.` и приводим к нижнему регистру. Если URL невалидный —
+ * возвращаем пустую строку, такие записи в дедупе не участвуют.
+ */
+function _canonicalHost(url) {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch (_) {
+    return '';
+  }
+}
+
 const MIN_FETCHED_FOR_ANALYZE = (() => {
   const v = parseInt(process.env.RELEVANCE_MIN_FETCHED, 10);
   return Number.isFinite(v) && v >= 1 ? v : 5;
@@ -125,13 +138,28 @@ async function processRelevanceReport(reportId) {
     await _setStage(reportId, 'serp', { status: 'fetching', started: true });
 
     const serpRaw = await fetchYandexSerp(query, { lr: lr || '', pages: 2 });
-    // Нормализуем + берём top_n уникальных по URL.
+    // Нормализуем + дедуп по URL и по домену + берём top_n.
+    // Заказчик: «парсим один домен; если на один домен несколько ссылок —
+    // оставляем первую попавшуюся». Дедуп по домену работает ПОСЛЕ
+    // дедупа по URL и ДО фильтра агрегаторов, чтобы экономить лимиты
+    // парсинга на одинаковых доменах из выдачи Яндекса.
     const seen = new Set();
+    const seenHosts = new Set();
+    const skippedSameHost = [];
     const serp = [];
     for (const item of (serpRaw || [])) {
       const url = String(item.url || '').trim();
       if (!url || seen.has(url)) continue;
       seen.add(url);
+      const host = _canonicalHost(url);
+      if (host && seenHosts.has(host)) {
+        // Второй и далее URL того же домена — пропускаем, но фиксируем для
+        // прозрачности в карточке отчёта (оператор видит «дубль домена,
+        // оставлен первый из выдачи»).
+        skippedSameHost.push({ url, host });
+        continue;
+      }
+      if (host) seenHosts.add(host);
       serp.push({
         url,
         title:   String(item.title   || '').slice(0, 500),
@@ -190,10 +218,23 @@ async function processRelevanceReport(reportId) {
     // return_processed=true — processed_documents пойдут в Redis с TTL.
     // include_anchor_zone=true — отдельно посчитаем «анкорный профиль» ниши
     //   (BM25 по текстам внутри `<a>` основного контента).
+    // include_tag_zone=true — отдельный BM25 по «теговой зоне» (header/
+    //   footer/nav + .menu/.navbar/...). Заказчик: «учитывать сквозное меню».
+    // include_headings=true — соберём h2..h6 и пересечения для рекомендаций
+    //   по структуре статьи.
+    // include_parsed_preview=true — превью парсеннного текста для UI-кнопки
+    //   «что собрал парсер» (ограничение по символам).
     const analysisResp = await analyze({
       query,
       documents: successes.map((s) => ({ url: s.url, html: s.html })),
-      options: { return_processed: true, include_anchor_zone: true },
+      options: {
+        return_processed: true,
+        include_anchor_zone: true,
+        include_tag_zone: true,
+        include_headings: true,
+        include_parsed_preview: true,
+        parsed_preview_chars: 20000,
+      },
     });
 
     // ── 3.5. Складываем processed-доки в Redis (best-effort) и в Postgres ───
@@ -236,9 +277,15 @@ async function processRelevanceReport(reportId) {
         ? analysisResp.document_diagnostics : [],
       anchor_zone_vocabulary: Array.isArray(analysisResp?.anchor_zone_vocabulary)
         ? analysisResp.anchor_zone_vocabulary : [],
+      // Новое: «теговая зона» (шапка/подвал/сквозное меню) + пересечения h2..h6.
+      tag_zone_vocabulary: Array.isArray(analysisResp?.tag_zone_vocabulary)
+        ? analysisResp.tag_zone_vocabulary : [],
+      headings_intersection: Array.isArray(analysisResp?.headings_intersection)
+        ? analysisResp.headings_intersection : [],
       filter: {
         exclude_aggregators:  !!excludeAggregators,
         removed_aggregators:  removedAggregators,
+        skipped_same_host:    skippedSameHost,
         serp_after_filter:    serpForFetch.length,
       },
       // Сводка причин fail'а — оператору сразу видно, где проблема.
@@ -312,14 +359,26 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs, serp }) {
   //    единственный способ получить леммы, не дублируя нормализатор в Node.
   //    Корпус НЕ передаём → analyze посчитает пустой словарь, но вернёт
   //    processed_documents с леммами нашего документа и diagnostics.
+  //    include_tag_zone=true — нужен для сравнения «наш сайт vs ТОП»
+  //    по сквозному меню (заказчик).
   const ourAnalyze = await analyze({
     query: 'our_document_only',
     documents: [{ url: ourUrl, html: fetched.html }],
-    options: { return_processed: true, min_term_df: 1, min_ngram_df: 1 },
+    options: {
+      return_processed: true,
+      min_term_df: 1,
+      min_ngram_df: 1,
+      include_tag_zone: true,
+      include_headings: true,
+      include_parsed_preview: true,
+      parsed_preview_chars: 20000,
+    },
   });
 
   const ourProcessed = (ourAnalyze?.processed_documents || [])[0];
   const ourLemmas    = Array.isArray(ourProcessed?.lemmas) ? ourProcessed.lemmas : [];
+  const ourTagZoneLemmas = Array.isArray(ourProcessed?.tag_zone_lemmas)
+    ? ourProcessed.tag_zone_lemmas : [];
   const ourDiag      = (ourAnalyze?.document_diagnostics || [])[0] || {};
 
   if (ourLemmas.length === 0) {
@@ -386,6 +445,10 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs, serp }) {
       method:      fetched.method || 'axios',
       diagnostics: ourDiag,
       lemma_count: ourLemmas.length,
+      // Леммы нашего сайта (для сравнения с tag_zone_vocabulary конкурентов
+      // на стороне UI). Только уникальные — корпус с шапкой/подвалом обычно
+      // 100–500 уникальных лемм, не больше нескольких КБ JSON.
+      tag_zone_lemmas: Array.from(new Set(ourTagZoneLemmas)),
     },
     comparison: cmp,
   };

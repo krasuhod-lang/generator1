@@ -271,6 +271,26 @@ function clampInt(v, def, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+/**
+ * Формирует заголовок Content-Disposition с поддержкой Unicode (кириллица
+ * в названии запроса). Node.js при `res.setHeader` бросает ERR_INVALID_CHAR,
+ * если в значении есть не-Latin1 символы — поэтому raw query'и
+ * («ремонт квартир») ломали скачивание JSON/CSV.
+ *
+ * Решение по RFC 5987 / RFC 6266: даём ASCII-фолбэк через `filename=`
+ * (с заменой не-ASCII на `_`) + полноценное `filename*=UTF-8''…` с
+ * percent-encoding для современных браузеров.
+ */
+function _contentDispositionAttachment(rawName, ext) {
+  const baseRaw = String(rawName || 'report');
+  const safeUtf8  = baseRaw.replace(/[^a-zа-яё0-9_-]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'report';
+  const safeAscii = baseRaw.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'report';
+  const filenameAscii = `relevance_${safeAscii}.${ext}`;
+  // RFC 5987: percent-encode UTF-8 bytes; кавычка/процент/и т.д. — тоже.
+  const filenameUtf8  = encodeURIComponent(`relevance_${safeUtf8}.${ext}`);
+  return `attachment; filename="${filenameAscii}"; filename*=UTF-8''${filenameUtf8}`;
+}
+
 // ─── GET /api/relevance/:id/export.json ───────────────────────────
 async function exportJson(req, res, next) {
   try {
@@ -298,11 +318,7 @@ async function exportJson(req, res, next) {
       cocoons:      r.cocoons || null,
     };
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    const safeName = String(r.query).replace(/[^a-zа-яё0-9_-]+/gi, '_').slice(0, 60) || 'report';
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="relevance_${safeName}.json"`,
-    );
+    res.setHeader('Content-Disposition', _contentDispositionAttachment(r.query, 'json'));
     return res.send(JSON.stringify(payload, null, 2));
   } catch (err) {
     return next(err);
@@ -363,12 +379,8 @@ async function exportCsv(req, res, next) {
       ].join(sep) + '\r\n';
     }
 
-    const safeName = String(query).replace(/[^a-zа-яё0-9_-]+/gi, '_').slice(0, 60) || 'report';
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="relevance_${safeName}.csv"`,
-    );
+    res.setHeader('Content-Disposition', _contentDispositionAttachment(query, 'csv'));
     return res.send(csv);
   } catch (err) {
     return next(err);

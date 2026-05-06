@@ -215,6 +215,12 @@ class ParseResult:
     blocks: List[str] = field(default_factory=list)
     diagnostics: ParseDiagnostics = field(default_factory=ParseDiagnostics)
     anchor_text: str = ""           # объединённый текст всех `<a>` в контенте
+    # Текст «теговой зоны» (header/footer/nav/aside) — «сквозное меню» сайта,
+    # шапка и подвал. Идёт отдельным мини-корпусом для расчёта tag_zone_vocab.
+    tag_zone_text: str = ""
+    # Заголовки h2..h6 в порядке появления, нужны для рекомендаций по
+    # структуре статьи (пересечения с конкурентами).
+    headings: List[Dict] = field(default_factory=list)  # [{level:'h2', text:'…'}, ...]
     # Полная зональная карта DOM. None в legacy-режиме (флаг выключен) —
     # это сигнал потребителям, что сейчас работает старая логика, и
     # zoned_blocks недоступна. См. README full-DOM mode (Слой 2).
@@ -358,6 +364,115 @@ def _collect_anchor_text(soup: BeautifulSoup) -> str:
         if t:
             anchors.append(t)
     return " ".join(anchors)
+
+
+# Регекспы class/id-хинтов для определения header/footer/menu (для случаев,
+# когда сайт использует <div class="header"> вместо семантического <header>).
+_TAG_ZONE_CLASS_RE = re.compile(
+    r"(?:^|[-_\s])("
+    r"header|site[-_]?header|page[-_]?header|top[-_]?bar|topbar|masthead|"
+    r"footer|site[-_]?footer|page[-_]?footer|bottom[-_]?bar|colophon|"
+    r"menu|menus|main[-_]?menu|nav|navbar|navigation|"
+    r"sidebar|aside"
+    r")(?:[-_\s]|$)",
+    re.IGNORECASE,
+)
+
+
+def extract_tag_zone_text(html: str) -> str:
+    """Собирает текст «теговой зоны» = шапка + подвал + сквозное меню + sidebar.
+
+    Используется для отдельного мини-корпуса tag_zone_vocabulary — какие
+    LSI-слова конкуренты выводят в шапке/подвале (заказчик: «надо учитывать
+    сквозное меню»). Парсим RAW HTML, минуя _strip_noise (которая как раз
+    эти зоны выпиливает), но осторожно — не дёргаем script/style/noscript.
+
+    Возвращает один большой текст (как `anchor_text`); нормализатор сам
+    разрежет на леммы.
+    """
+    if not html or not html.strip():
+        return ""
+    try:
+        soup = _make_soup(html)
+    except Exception:
+        return ""
+
+    # Удаляем заведомо мусорные теги (но НЕ header/footer/nav — они нам нужны!).
+    for t in ("script", "style", "noscript", "template", "iframe", "svg", "canvas"):
+        for el in soup.find_all(t):
+            try:
+                el.decompose()
+            except Exception:
+                pass
+
+    chunks: List[str] = []
+    seen_chunk_ids = set()  # id(node) → не дублируем вложенные совпадения
+
+    def _harvest(node) -> None:
+        if node is None or id(node) in seen_chunk_ids:
+            return
+        seen_chunk_ids.add(id(node))
+        text = node.get_text(separator=" ", strip=True)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text and len(text) >= 2:
+            chunks.append(text)
+
+    # 1) Семантические теги.
+    for tag in ("header", "footer", "nav", "aside"):
+        for el in soup.find_all(tag):
+            _harvest(el)
+
+    # 2) ARIA role'ы.
+    for role in ("banner", "navigation", "contentinfo", "complementary"):
+        for el in soup.find_all(attrs={"role": role}):
+            _harvest(el)
+
+    # 3) Class/id-хинты (BЭМ + просто "header"/"footer"/"menu").
+    for el in soup.find_all(class_=True):
+        try:
+            classes = el.get("class") or []
+            joined = " ".join(classes) if isinstance(classes, list) else str(classes)
+            if _TAG_ZONE_CLASS_RE.search(joined):
+                _harvest(el)
+        except Exception:
+            pass
+    for el in soup.find_all(id=True):
+        try:
+            el_id = el.get("id") or ""
+            if isinstance(el_id, list):
+                el_id = " ".join(el_id)
+            if _TAG_ZONE_CLASS_RE.search(str(el_id)):
+                _harvest(el)
+        except Exception:
+            pass
+
+    return " \n ".join(chunks)
+
+
+def extract_headings(html: str) -> List[Dict]:
+    """Собирает заголовки h2..h6 в порядке появления.
+
+    Возвращает [{level:'h2', text:'…'}, ...]. h1 намеренно пропускаем —
+    это обычно title статьи, который мало помогает при рекомендациях
+    структуры (нужны именно подразделы)."""
+    if not html or not html.strip():
+        return []
+    try:
+        soup = _make_soup(html)
+    except Exception:
+        return []
+    # Шум вырезаем (footer-меню/nav часто содержит <h3>Контакты</h3>),
+    # чтобы рекомендации были релевантны контенту, а не шапке/подвалу.
+    _strip_noise(soup)
+
+    out: List[Dict] = []
+    for tag in soup.find_all(["h2", "h3", "h4", "h5", "h6"]):
+        text = tag.get_text(separator=" ", strip=True)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or len(text) < 2 or len(text) > 250:
+            continue
+        out.append({"level": tag.name.lower(), "text": text})
+    return out
 
 
 # ── Extraction passes ─────────────────────────────────────────────────────────
@@ -620,6 +735,8 @@ def extract_with_diagnostics(html: str) -> ParseResult:
         diagnostics=diag,
         anchor_text=anchor_text,
         zoned_blocks=zoned_blocks,
+        tag_zone_text=extract_tag_zone_text(html),
+        headings=extract_headings(html),
     )
 
 
