@@ -1,12 +1,12 @@
 """Bigram, trigram and 4-gram extraction with POS-pattern filtering.
 
-Согласно ТЗ ЭТАП 1, п.4 + правки заказчика «n-грамм надо собирать от 30 штук,
-чем больше тем лучше»:
-
+Согласно ТЗ ЭТАП 1, п.4 + правки заказчика:
   * биграммы, триграммы и 4-граммы;
-  * базовый min DF = 3 сайта (≥ 15%), но если в выдаче меньше TARGET_PER_TYPE
-    (по умолчанию 30) — динамически снижаем порог до 2, затем до 1, чтобы
-    добрать минимально-приемлемое количество фраз;
+  * **жёсткий порог по доле сайтов**: фразу выводим, только если она
+    встречается у ≥ MIN_DF_SHARE_PCT (40%) сайтов из корпуса. Заказчик
+    явно потребовал: «если встречается более чем у 40% сайтов то выводятся,
+    если меньше, то не выводим их». Никакого динамического снижения порога
+    больше не делаем — иначе в выдаче появляются «случайные» фразы;
   * разрешённые POS-паттерны: NOUN+NOUN, ADJ+NOUN, VERB+NOUN, NOUN+ADJ+NOUN,
     NOUN+NOUN+NOUN, NOUN+NOUN+ADJ+NOUN, ADJ+NOUN+ADJ+NOUN, ADJ+ADJ+NOUN+NOUN;
   * мусор с предлогами/союзами/частицами выкинут на этапе normalizer
@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import Counter
 from typing import Dict, List, Tuple
@@ -39,8 +40,12 @@ ALLOWED_4GRAM_PATTERNS = {
     ("NOUN", "NOUN", "NOUN", "NOUN"),
 }
 
-# Сколько n-грамм каждого типа стараемся отдать минимум, прежде чем сдадимся.
-TARGET_PER_TYPE = 30
+# Жёсткий порог: фраза должна встретиться у ≥ 40% сайтов (по умолчанию).
+# Это требование заказчика, см. docstring модуля. min_df на входе остаётся
+# как «нижний абсолютный пол» (например, при 5 документах 40% даст 2 —
+# и это OK; при 3 документах 40% даст 1.2 → ceil=2, но абсолютный пол 1
+# для очень маленьких корпусов).
+MIN_DF_SHARE_PCT = 40.0
 
 
 def _norm_pos(pos: str) -> str:
@@ -80,21 +85,27 @@ def compute_ngrams(
     *,
     min_df: int = 3,
     max_per_type: int = 2000,
+    min_df_share_pct: float = MIN_DF_SHARE_PCT,
 ) -> List[dict]:
-    """Возвращает список `{phrase, df, median_count, type, pos_pattern}`,
+    """Возвращает список `{phrase, df, df_share_pct, median_count, type, pos_pattern}`,
     отсортированный по убыванию (df, median_count) внутри каждого типа.
 
     Args:
         doc_seqs: список документов, каждый — последовательность (lemma, pos)
                   с разрывами '' для стоп-слов / шума.
-        min_df: исходное минимальное число документов. Если фраз получается
-                меньше TARGET_PER_TYPE, порог автоматически снижается до 2,
-                затем до 1.
-        max_per_type: ограничение на каждый тип для UI (по умолчанию 2000 —
-                достаточно много, чтобы ничего не отбрасывать без нужды).
+        min_df:   абсолютный нижний пол по df (защита от случая когда корпус
+                  очень маленький и 40% даёт <1).
+        max_per_type: ограничение на каждый тип для UI.
+        min_df_share_pct: порог по доле сайтов (0..100). По умолчанию 40%
+                  согласно требованию заказчика.
     """
     if not doc_seqs:
         return []
+
+    n_docs = len(doc_seqs)
+    # Эффективный порог = max(min_df, ceil(n_docs * share/100)).
+    share_threshold = max(1, math.ceil(n_docs * (min_df_share_pct / 100.0)))
+    effective_min_df = max(min_df, share_threshold)
 
     # phrase -> { 'df': N, 'counts_per_doc': [..], 'type': str, 'pos_pattern': tuple }
     aggregated: Dict[str, dict] = {}
@@ -118,39 +129,20 @@ def compute_ngrams(
                 })
                 bucket["counts_per_doc"].append(count)
 
-    def _rows_with_threshold(threshold: int) -> List[dict]:
-        rows_local: List[dict] = []
-        for phrase, info in aggregated.items():
-            counts = info["counts_per_doc"]
-            df = len(counts)
-            if df < threshold:
-                continue
-            rows_local.append({
-                "phrase": phrase,
-                "df": df,
-                "median_count": float(statistics.median(counts)) if counts else 0.0,
-                "type": info["type"],
-                "pos_pattern": info["pos_pattern"],
-            })
-        return rows_local
-
-    # Динамический подбор порога: пытаемся min_df, если для какого-то типа
-    # фраз < TARGET_PER_TYPE — снижаем до min_df-1, потом до 1. Не страшно,
-    # если уникумы попадут в «Доп»: пользователю важнее увидеть варианты.
-    candidate_thresholds = [t for t in (min_df, max(1, min_df - 1), 1) if t >= 1]
-    # Уникальный порядок без дублей.
-    seen_t = set()
-    candidate_thresholds = [t for t in candidate_thresholds if not (t in seen_t or seen_t.add(t))]
-
     chosen_rows: List[dict] = []
-    for t in candidate_thresholds:
-        chosen_rows = _rows_with_threshold(t)
-        type_counts = Counter(r["type"] for r in chosen_rows)
-        # Если хоть один тип имеет < TARGET_PER_TYPE — снижаем порог дальше.
-        # Но если уже на min_df=1 не набрали — отдаём что есть.
-        worst = min((type_counts.get(k, 0) for k in ("bigram", "trigram", "4gram")), default=0)
-        if worst >= TARGET_PER_TYPE or t == 1:
-            break
+    for phrase, info in aggregated.items():
+        counts = info["counts_per_doc"]
+        df = len(counts)
+        if df < effective_min_df:
+            continue
+        chosen_rows.append({
+            "phrase": phrase,
+            "df": df,
+            "df_share_pct": round(100.0 * df / max(n_docs, 1), 1),
+            "median_count": float(statistics.median(counts)) if counts else 0.0,
+            "type": info["type"],
+            "pos_pattern": info["pos_pattern"],
+        })
 
     # Берём топ-N для каждого типа отдельно.
     out: List[dict] = []

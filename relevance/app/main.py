@@ -84,6 +84,22 @@ class AnalyzeOptions(BaseModel):
     # по anchor-text (тексту внутри `<a>` основного контента) — получаем
     # «анкорный профиль ниши» как доп. секцию ответа.
     include_anchor_zone: bool = Field(default=False)
+    # Если true — дополнительно собираем «теговую зону» (header/footer/nav/
+    # aside + class-хинты типа .menu/.navbar/.site-header/.footer) и
+    # считаем по ней отдельный BM25-словарь tag_zone_vocabulary. Это
+    # «сквозное меню» сайта — что конкуренты выводят в шапке/подвале.
+    include_tag_zone: bool = Field(default=False)
+    # Если true — собираем заголовки h2..h6 каждого документа и в ответе
+    # вернём headings_per_doc + headings_intersection (фразы, встретившиеся
+    # у ≥ headings_intersection_min_share_pct % сайтов). Используется для
+    # рекомендаций «какие разделы стоит завести в статье».
+    include_headings: bool = Field(default=False)
+    headings_intersection_min_share_pct: float = Field(default=20.0, ge=1.0, le=100.0)
+    # Если true — в diagnostics каждого документа добавляется превью
+    # очищенного парсером текста (до preview_chars символов). Нужно для
+    # UI-кнопки «что собрал парсер».
+    include_parsed_preview: bool = Field(default=False)
+    parsed_preview_chars: int = Field(default=20000, ge=500, le=200000)
 
 
 class AnchorDocumentIn(BaseModel):
@@ -113,6 +129,7 @@ class VocabRow(BaseModel):
 class NgramRow(BaseModel):
     phrase: str
     df: int
+    df_share_pct: float = 0.0
     median_count: float
     type: str
     pos_pattern: str
@@ -124,6 +141,9 @@ class ProcessedDocument(BaseModel):
     url: str
     lemmas: List[str]
     pos_seq: List[List[str]]  # список пар [lemma, pos], сериализуется компактнее, чем dict
+    # Леммы «теговой зоны» (шапка/подвал/меню), если include_tag_zone=true.
+    # Используются для сравнения нашего сайта с конкурентами по сквозному меню.
+    tag_zone_lemmas: List[str] = Field(default_factory=list)
 
 
 class AnalyzeStats(BaseModel):
@@ -156,6 +176,14 @@ class DocumentDiagnostics(BaseModel):
     empty_reason: Optional[str] = None
     lemma_count: int = 0
     candidates: Dict[str, int] = Field(default_factory=dict)
+    # Превью того, что вытащил парсер (для UI-кнопки «что собрал парсер»).
+    # Включается опцией include_parsed_preview=true. Может быть None.
+    parsed_preview: Optional[str] = None
+    # Сколько символов теговой зоны (header/footer/nav) у этого документа
+    # — чтобы пользователь видел, насколько «жирная» шапка/подвал.
+    tag_zone_chars: int = 0
+    # Заголовки h2..h6 (если include_headings=true).
+    headings: Optional[List[Dict]] = None
 
 
 class OurDocumentMetrics(BaseModel):
@@ -176,6 +204,20 @@ class AnchorZoneRow(BaseModel):
     status: str
 
 
+# Алиас типа для строки tag_zone-словаря — структура совпадает с anchor.
+TagZoneRow = AnchorZoneRow
+
+
+class HeadingIntersectionRow(BaseModel):
+    """Заголовок, встретившийся у нескольких конкурентов. Используется
+    для рекомендаций «какие разделы стоит завести в статье»."""
+    text: str          # канонический текст (lower, схлопнутые пробелы)
+    sample: str        # один из реальных вариантов (для UI — c регистром)
+    df: int            # на скольких сайтах встретился
+    df_share_pct: float
+    levels: List[str]  # на каких уровнях встречался: ['h2','h3', ...]
+
+
 class AnalyzeResponse(BaseModel):
     stats: AnalyzeStats
     vocabulary: List[VocabRow]
@@ -183,6 +225,8 @@ class AnalyzeResponse(BaseModel):
     processed_documents: Optional[List[ProcessedDocument]] = None
     document_diagnostics: Optional[List[DocumentDiagnostics]] = None
     anchor_zone_vocabulary: Optional[List[AnchorZoneRow]] = None
+    tag_zone_vocabulary: Optional[List[TagZoneRow]] = None
+    headings_intersection: Optional[List[HeadingIntersectionRow]] = None
     our_document: Optional[OurDocumentMetrics] = None
 
 
@@ -271,6 +315,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     doc_lemmas: List[List[str]] = []
     doc_seqs = []
     anchor_lemmas: List[List[str]] = []
+    tag_zone_lemmas: List[List[str]] = []
     diagnostics: List[DocumentDiagnostics] = []
     text_chars_list: List[int] = []
     html_chars_list: List[int] = []
@@ -285,9 +330,22 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             a_lemmas, _ = normalize_document(pr.anchor_text)
             anchor_lemmas.append(a_lemmas)
 
+        # Tag-zone (header/footer/nav/menu) — отдельный мини-корпус по
+        # «сквозной» зоне сайта (см. extract_tag_zone_text в parser.py).
+        if opts.include_tag_zone:
+            tz_lemmas, _ = normalize_document(pr.tag_zone_text)
+            tag_zone_lemmas.append(tz_lemmas)
+
         diag = pr.diagnostics
         text_chars_list.append(diag.text_chars)
         html_chars_list.append(diag.html_chars)
+
+        # Превью текста (для UI-кнопки «что собрал парсер») — по запросу.
+        parsed_preview: Optional[str] = None
+        if opts.include_parsed_preview:
+            full = pr.text or ""
+            parsed_preview = full[: opts.parsed_preview_chars]
+
         diagnostics.append(DocumentDiagnostics(
             url=d.url,
             method=diag.method,
@@ -301,6 +359,9 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             empty_reason=diag.empty_reason,
             lemma_count=len(lemmas),
             candidates=diag.candidates,
+            parsed_preview=parsed_preview,
+            tag_zone_chars=len(pr.tag_zone_text or ""),
+            headings=(pr.headings if opts.include_headings else None),
         ))
 
     parsed_doc_count = sum(1 for d in doc_lemmas if d)
@@ -343,6 +404,74 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
                 max_terms=min(1000, opts.max_terms),
             )
             anchor_zone_vocab = [AnchorZoneRow(**v) for v in a_vocab]
+
+    # Шаг 4c. Tag-zone vocabulary (опционально) — отдельный BM25 по
+    # «теговой зоне» (header/footer/nav/aside + class/id-хинты). Заказчик:
+    # «надо учитывать сквозное меню».
+    tag_zone_vocab: Optional[List[TagZoneRow]] = None
+    if opts.include_tag_zone:
+        tz_corpus = [a for a in tag_zone_lemmas if a]
+        if tz_corpus:
+            tz_vocab = compute_vocabulary_bm25(
+                tz_corpus,
+                # Tag-zone обычно короткая — снижаем min_df.
+                min_df=max(1, opts.min_term_df - 1),
+                max_terms=min(1000, opts.max_terms),
+            )
+            tag_zone_vocab = [TagZoneRow(**v) for v in tz_vocab]
+
+    # Шаг 4d. Headings intersection (опционально) — какие h2..h6 фразы
+    # встречаются у нескольких сайтов. Используется для рекомендаций
+    # «какие разделы стоит завести в статье».
+    headings_intersection: Optional[List[HeadingIntersectionRow]] = None
+    if opts.include_headings:
+        # Нормализация: lower, схлопываем пробелы; считаем df по канон-форме.
+        from collections import defaultdict
+        bucket: Dict[str, dict] = defaultdict(lambda: {
+            "df_set": set(),     # уникальные хосты, чтобы 5 заголовков с
+                                  # одного сайта не давали df=5
+            "samples": [],
+            "levels": set(),
+        })
+        for d, pr in parse_results:
+            host = ""
+            try:
+                from urllib.parse import urlparse
+                host = urlparse(d.url).hostname or d.url
+            except Exception:
+                host = d.url
+            seen_in_doc = set()
+            for h in (pr.headings or []):
+                raw = (h.get("text") or "").strip()
+                canon = " ".join(raw.lower().split())
+                if not canon or canon in seen_in_doc:
+                    continue
+                seen_in_doc.add(canon)
+                b = bucket[canon]
+                b["df_set"].add(host)
+                if len(b["samples"]) < 3:
+                    b["samples"].append(raw)
+                lvl = h.get("level")
+                if lvl:
+                    b["levels"].add(str(lvl).lower())
+        n_docs_h = len(parse_results) or 1
+        threshold_share = float(opts.headings_intersection_min_share_pct)
+        rows: List[dict] = []
+        for canon, b in bucket.items():
+            df = len(b["df_set"])
+            share = 100.0 * df / n_docs_h
+            if share < threshold_share:
+                continue
+            rows.append({
+                "text":   canon,
+                "sample": (b["samples"][0] if b["samples"] else canon),
+                "df":     df,
+                "df_share_pct": round(share, 1),
+                "levels": sorted(b["levels"]),
+            })
+        # Сортируем: чем больше df, тем выше; затем по длине (длинные ≈ информативнее).
+        rows.sort(key=lambda r: (r["df"], len(r["text"])), reverse=True)
+        headings_intersection = [HeadingIntersectionRow(**r) for r in rows[:200]]
 
     # Шаг 5. Наш документ — обрабатываем тем же стеком, но не подмешиваем
     # его в IDF/медианы корпуса (иначе бы исказил статистику).
@@ -426,13 +555,18 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     if opts.return_processed:
         # Сериализуем seq как [[lemma, pos], ...] — компактнее, чем dict.
         processed_out = []
-        for d, lemmas, seq in zip(payload.documents, doc_lemmas, doc_seqs):
+        # Если include_tag_zone=true — индексом доступно tag_zone_lemmas[i].
+        for i, (d, lemmas, seq) in enumerate(zip(payload.documents, doc_lemmas, doc_seqs)):
             if not lemmas:
                 continue
+            tz = []
+            if opts.include_tag_zone and i < len(tag_zone_lemmas):
+                tz = tag_zone_lemmas[i] or []
             processed_out.append(ProcessedDocument(
                 url=d.url,
                 lemmas=lemmas,
                 pos_seq=[[lemma, pos] for (lemma, pos) in seq],
+                tag_zone_lemmas=tz,
             ))
 
     return AnalyzeResponse(
@@ -453,6 +587,8 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         processed_documents=processed_out,
         document_diagnostics=diagnostics,
         anchor_zone_vocabulary=anchor_zone_vocab,
+        tag_zone_vocabulary=tag_zone_vocab,
+        headings_intersection=headings_intersection,
         our_document=our_metrics,
     )
 
