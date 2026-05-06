@@ -113,12 +113,17 @@ async function cocoons(payload) {
  *   our_url?: string,
  *   our_text_chars?: number,
  *   our_html_chars?: number,
+ *   our_word_count?: number,
+ *   our_serp_position?: number|null,
  *   median_text_chars?: number,
  *   median_html_chars?: number,
  *   vocabulary: object[],
  *   ngrams?: object[],
  *   corpus_lemmas: string[][],
  *   competitor_urls?: string[],
+ *   competitor_text_chars?: number[],
+ *   competitor_word_counts?: number[],
+ *   competitor_serp_positions?: Array<number|null>,
  * }} payload
  * @returns {Promise<{summary, per_term, per_phrase, directives, competitor_table?}>}
  */

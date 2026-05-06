@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import api from '../api.js';
 import AppLayout from '../components/AppLayout.vue';
@@ -18,6 +18,16 @@ let pollTimer    = null;
 // ── Filters / paging для таблиц ──────────────────────────────────────────
 const vocabFilter = ref('all'); // 'all' | 'important' | 'additional'
 const ngramFilter = ref('all'); // 'all' | 'bigram' | 'trigram' | '4gram'
+
+// Пагинация для больших таблиц — заказчик: «не должно быть полотном,
+// каждый раздел сделать по страницам». Размер страницы общий, дефолт 50.
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
+const vocabPage     = ref(1);
+const vocabPageSize = ref(50);
+const ngramPage     = ref(1);
+const ngramPageSize = ref(50);
+const gapPage       = ref(1);
+const gapPageSize   = ref(50);
 
 // Сортировка таблицы LSI (важно: TF-IDF теперь тоже доступен).
 const vocabSort = ref('bm25_score'); // 'bm25_score' | 'tf_idf_score' | 'df' | 'median_count' | 'lemma'
@@ -153,6 +163,9 @@ function statusColor(s) {
 }
 
 // Сводная табличка ТОП + наш сайт. Сортировка по выбранной колонке.
+// Заказчик: «наш сайт тоже должен участвовать в рейтинге по конкурентам» —
+// поэтому не закрепляем нашу строку сверху, она сортируется наравне
+// со всеми (визуально подсвечивается ★ + цветной фон + столбец «#» с рангом).
 const compTableSort = ref({ key: 'lsi_coverage_pct', dir: 'desc' });
 function setCompSort(key) {
   if (compTableSort.value.key === key) {
@@ -165,14 +178,22 @@ const compTable = computed(() => {
   const rows = comparison.value?.competitor_table || [];
   if (!Array.isArray(rows) || rows.length === 0) return [];
   const { key, dir } = compTableSort.value;
+  // Стабильная сортировка с понятным поведением для null serp_position
+  // (страницы вне ТОПа уезжают в конец при сортировке по позиции).
   const sorted = [...rows].sort((a, b) => {
-    if (a.is_ours && !b.is_ours) return -1;   // наша строка всегда сверху
-    if (!a.is_ours && b.is_ours) return 1;
-    const av = key === 'url' ? String(a.url || '') : Number(a[key] || 0);
-    const bv = key === 'url' ? String(b.url || '') : Number(b[key] || 0);
-    if (av < bv) return dir === 'desc' ? 1 : -1;
-    if (av > bv) return dir === 'desc' ? -1 : 1;
-    return 0;
+    if (key === 'url') {
+      const av = String(a.url || '');
+      const bv = String(b.url || '');
+      return dir === 'desc' ? bv.localeCompare(av) : av.localeCompare(bv);
+    }
+    if (key === 'serp_position') {
+      const av = a.serp_position == null ? Infinity : Number(a.serp_position);
+      const bv = b.serp_position == null ? Infinity : Number(b.serp_position);
+      return dir === 'desc' ? bv - av : av - bv;
+    }
+    const av = Number(a[key] || 0);
+    const bv = Number(b[key] || 0);
+    return dir === 'desc' ? bv - av : av - bv;
   });
   return sorted;
 });
@@ -210,6 +231,45 @@ const ngramsFiltered = computed(() => {
   if (ngramFilter.value === 'all') return ngrams.value;
   return ngrams.value.filter((n) => n.type === ngramFilter.value);
 });
+
+// ── Пагинация ─────────────────────────────────────────────────────────────
+// При смене фильтра/сортировки сбрасываем страницу на 1 — иначе можно
+// попасть на «пустую» страницу.
+watch([vocabFilter, vocabSort, vocabPageSize], () => { vocabPage.value = 1; });
+watch([ngramFilter, ngramPageSize],            () => { ngramPage.value = 1; });
+watch([gapFilter,   gapPageSize],              () => { gapPage.value   = 1; });
+
+function pageCount(total, size) {
+  return Math.max(1, Math.ceil((Number(total) || 0) / Math.max(1, Number(size) || 1)));
+}
+function clampPage(page, total, size) {
+  const max = pageCount(total, size);
+  const p = Math.min(Math.max(1, Number(page) || 1), max);
+  return p;
+}
+function paginate(arr, page, size) {
+  const list = Array.isArray(arr) ? arr : [];
+  const sz   = Math.max(1, Number(size) || 1);
+  const p    = clampPage(page, list.length, sz);
+  const start = (p - 1) * sz;
+  return list.slice(start, start + sz);
+}
+
+const vocabPaged       = computed(() => paginate(vocabFiltered.value, vocabPage.value, vocabPageSize.value));
+const vocabPageCount   = computed(() => pageCount(vocabFiltered.value.length, vocabPageSize.value));
+const vocabPageStart   = computed(() => vocabFiltered.value.length === 0 ? 0 : (clampPage(vocabPage.value, vocabFiltered.value.length, vocabPageSize.value) - 1) * vocabPageSize.value);
+
+const ngramsPaged      = computed(() => paginate(ngramsFiltered.value, ngramPage.value, ngramPageSize.value));
+const ngramsPageCount  = computed(() => pageCount(ngramsFiltered.value.length, ngramPageSize.value));
+const ngramsPageStart  = computed(() => ngramsFiltered.value.length === 0 ? 0 : (clampPage(ngramPage.value, ngramsFiltered.value.length, ngramPageSize.value) - 1) * ngramPageSize.value);
+
+const gapPaged         = computed(() => paginate(gapVisible.value, gapPage.value, gapPageSize.value));
+const gapPageCount     = computed(() => pageCount(gapVisible.value.length, gapPageSize.value));
+const gapPageStart     = computed(() => gapVisible.value.length === 0 ? 0 : (clampPage(gapPage.value, gapVisible.value.length, gapPageSize.value) - 1) * gapPageSize.value);
+
+function gotoPage(target, total, size, setter) {
+  setter(clampPage(target, total, size));
+}
 
 // Bar chart: топ-20 по медиане вхождений (как «суммарная частота» по корпусу).
 const topByFrequency = computed(() => {
@@ -514,13 +574,19 @@ function copyFilteredNgrams() {
           <div v-if="compTable.length > 0" class="mb-5">
             <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">
               📊 Сравнительная таблица
+              <span class="text-[10px] text-gray-500 font-normal normal-case ml-1">
+                (наш сайт — ★, участвует в рейтинге наравне с конкурентами)
+              </span>
             </h3>
             <div class="overflow-x-auto">
               <table class="w-full text-xs">
                 <thead class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-gray-800">
                   <tr>
+                    <th class="text-right py-2 px-2 w-8">#</th>
                     <th class="text-left py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="setCompSort('url')">URL</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('serp_position')" title="Позиция в выдаче Яндекса">Поз.</th>
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="setCompSort('lsi_coverage_pct')">LSI %</th>
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
@@ -528,19 +594,29 @@ function copyFilteredNgrams() {
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="setCompSort('tf_idf_cosine')">TF-IDF cos</th>
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
-                        @click="setCompSort('tokens')">Лемм</th>
+                        @click="setCompSort('text_chars')" title="Длина основного текста (символы)">Симв.</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('word_count')" title="Сырое число словоформ (без учёта лемматизации)">Слов</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('tokens')" title="Лемм после нормализации (BM25-токены)">Лемм</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="(row, i) in compTable" :key="row.url + ':' + i"
                       :class="row.is_ours
-                        ? 'bg-indigo-900/30 border-b border-indigo-800/50 sticky top-0'
+                        ? 'bg-indigo-900/30 border-b border-indigo-800/50'
                         : 'border-b border-gray-800/60 hover:bg-gray-900/40'">
+                    <td class="text-right py-1.5 px-2 text-gray-500 tabular-nums font-bold">{{ i + 1 }}</td>
                     <td class="py-1.5 px-2">
                       <span v-if="row.is_ours" class="text-indigo-300 font-bold mr-1">★ ВЫ:</span>
                       <a :href="row.url" target="_blank" rel="noopener"
-                         class="text-gray-200 hover:text-indigo-300 truncate inline-block max-w-[420px] align-middle"
+                         class="text-gray-200 hover:text-indigo-300 truncate inline-block max-w-[360px] align-middle"
                          :title="row.url">{{ row.url }}</a>
+                    </td>
+                    <td class="text-right py-1.5 px-2 tabular-nums"
+                        :class="row.serp_position == null ? 'text-gray-600' : 'text-amber-300'">
+                      <span v-if="row.serp_position != null">#{{ row.serp_position }}</span>
+                      <span v-else title="URL не найден в ТОП-выдаче Яндекса">—</span>
                     </td>
                     <td class="text-right py-1.5 px-2 text-emerald-300 tabular-nums">
                       {{ (row.lsi_coverage_pct ?? 0).toFixed(1) }}
@@ -551,12 +627,23 @@ function copyFilteredNgrams() {
                     <td class="text-right py-1.5 px-2 text-fuchsia-300 tabular-nums">
                       {{ (row.tf_idf_cosine ?? 0).toFixed(3) }}
                     </td>
+                    <td class="text-right py-1.5 px-2 text-gray-300 tabular-nums">
+                      {{ (row.text_chars || 0).toLocaleString('ru-RU') }}
+                    </td>
+                    <td class="text-right py-1.5 px-2 text-gray-300 tabular-nums">
+                      {{ (row.word_count || 0).toLocaleString('ru-RU') }}
+                    </td>
                     <td class="text-right py-1.5 px-2 text-gray-400 tabular-nums">
                       {{ row.tokens || 0 }}
                     </td>
                   </tr>
                 </tbody>
               </table>
+            </div>
+            <div class="text-[10px] text-gray-600 mt-2 leading-relaxed">
+              «Симв.» — длина основного текста, «Слов» — сырое число словоформ
+              (с латиницей и цифрами), «Лемм» — нормализованные токены, идущие
+              в BM25 (короткие слова, стоп-слова и не-кириллица отфильтрованы).
             </div>
           </div>
 
@@ -583,7 +670,7 @@ function copyFilteredNgrams() {
           <div v-if="(comparison.per_term || []).length > 0">
             <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
               <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider">
-                🎨 Подсветка слов (per-term gap)
+                🎨 Подсветка слов (per-term gap) — {{ gapVisible.length }}
               </h3>
               <div class="flex items-center gap-1 text-[11px] flex-wrap">
                 <button v-for="opt in ['actionable','all','missing','under','ok','over']" :key="opt"
@@ -592,9 +679,9 @@ function copyFilteredNgrams() {
                         @click="gapFilter = opt">{{ opt }}</button>
               </div>
             </div>
-            <div class="overflow-x-auto max-h-[420px] overflow-y-auto">
+            <div class="overflow-x-auto max-h-[60vh] overflow-y-auto border border-gray-800 rounded">
               <table class="w-full text-xs">
-                <thead class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
+                <thead class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
                   <tr>
                     <th class="text-left py-2 px-2">Лемма</th>
                     <th class="text-center py-2 px-2">Статус</th>
@@ -605,7 +692,7 @@ function copyFilteredNgrams() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="t in gapVisible" :key="t.lemma"
+                  <tr v-for="t in gapPaged" :key="t.lemma"
                       class="border-b border-gray-800/40 hover:bg-gray-900/30">
                     <td class="py-1 px-2 text-gray-200">
                       <span v-if="t.important" class="text-indigo-300 mr-0.5" title="Important LSI">★</span>
@@ -623,6 +710,33 @@ function copyFilteredNgrams() {
               </table>
               <div v-if="gapVisible.length === 0" class="text-gray-500 text-sm py-4 text-center">
                 Нет лемм по выбранному фильтру.
+              </div>
+            </div>
+            <!-- Pager -->
+            <div v-if="gapVisible.length > 0" class="flex items-center justify-between mt-2 text-[11px] text-gray-400 flex-wrap gap-2">
+              <div>
+                {{ gapPageStart + 1 }}–{{ Math.min(gapPageStart + gapPageSize, gapVisible.length) }}
+                из <span class="text-gray-300">{{ gapVisible.length }}</span>
+              </div>
+              <div class="flex items-center gap-1">
+                <label class="text-gray-500">На странице:
+                  <select v-model.number="gapPageSize"
+                          class="ml-1 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200">
+                    <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }}</option>
+                  </select>
+                </label>
+                <button class="btn-ghost px-2" :disabled="gapPage <= 1"
+                        @click="gotoPage(gapPage - 1, gapVisible.length, gapPageSize, (v) => gapPage = v)">←</button>
+                <span class="tabular-nums">
+                  стр.
+                  <input type="number" min="1" :max="gapPageCount"
+                         :value="Math.min(gapPage, gapPageCount)"
+                         @change="(e) => gotoPage(Number(e.target.value), gapVisible.length, gapPageSize, (v) => gapPage = v)"
+                         class="w-12 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[11px] text-gray-200 text-center" />
+                  / {{ gapPageCount }}
+                </span>
+                <button class="btn-ghost px-2" :disabled="gapPage >= gapPageCount"
+                        @click="gotoPage(gapPage + 1, gapVisible.length, gapPageSize, (v) => gapPage = v)">→</button>
               </div>
             </div>
           </div>
@@ -752,40 +866,69 @@ function copyFilteredNgrams() {
           <div v-if="vocabFiltered.length === 0" class="text-gray-500 text-sm py-4 text-center">
             Нет лемм по выбранному фильтру.
           </div>
-          <div v-else class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800">
-                <tr>
-                  <th class="text-left py-2 px-2 w-8">#</th>
-                  <th class="text-left py-2 px-2">Лемма</th>
-                  <th class="text-right py-2 px-2">DF (сайтов)</th>
-                  <th class="text-right py-2 px-2">Медиана вх.</th>
-                  <th class="text-right py-2 px-2">BM25 score</th>
-                  <th class="text-right py-2 px-2">TF-IDF</th>
-                  <th class="text-center py-2 px-2">Статус</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(v, i) in vocabFiltered" :key="v.lemma"
-                    class="border-b border-gray-900 hover:bg-gray-900/50">
-                  <td class="py-1.5 px-2 text-gray-500">{{ i + 1 }}</td>
-                  <td class="py-1.5 px-2 text-gray-100 font-medium">{{ v.lemma }}</td>
-                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.df }}</td>
-                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.median_count }}</td>
-                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.bm25_score || 0).toFixed(4) }}</td>
-                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.tf_idf_score || 0).toFixed(4) }}</td>
-                  <td class="py-1.5 px-2 text-center">
-                    <span v-if="v.status === 'important'"
-                          class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800">
-                      Важное
-                    </span>
-                    <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">
-                      Доп
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-else>
+            <div class="overflow-x-auto max-h-[60vh] overflow-y-auto border border-gray-800 rounded">
+              <table class="w-full text-xs">
+                <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
+                  <tr>
+                    <th class="text-left py-2 px-2 w-10">#</th>
+                    <th class="text-left py-2 px-2">Лемма</th>
+                    <th class="text-right py-2 px-2">DF (сайтов)</th>
+                    <th class="text-right py-2 px-2">Медиана вх.</th>
+                    <th class="text-right py-2 px-2">BM25 score</th>
+                    <th class="text-right py-2 px-2">TF-IDF</th>
+                    <th class="text-center py-2 px-2">Статус</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(v, i) in vocabPaged" :key="v.lemma"
+                      class="border-b border-gray-900 hover:bg-gray-900/50">
+                    <td class="py-1.5 px-2 text-gray-500 tabular-nums">{{ vocabPageStart + i + 1 }}</td>
+                    <td class="py-1.5 px-2 text-gray-100 font-medium">{{ v.lemma }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.df }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.median_count }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.bm25_score || 0).toFixed(4) }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.tf_idf_score || 0).toFixed(4) }}</td>
+                    <td class="py-1.5 px-2 text-center">
+                      <span v-if="v.status === 'important'"
+                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800">
+                        Важное
+                      </span>
+                      <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">
+                        Доп
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <!-- Pager: LSI -->
+            <div class="flex items-center justify-between mt-2 text-[11px] text-gray-400 flex-wrap gap-2">
+              <div>
+                {{ vocabPageStart + 1 }}–{{ Math.min(vocabPageStart + vocabPageSize, vocabFiltered.length) }}
+                из <span class="text-gray-300">{{ vocabFiltered.length }}</span>
+              </div>
+              <div class="flex items-center gap-1">
+                <label class="text-gray-500">На странице:
+                  <select v-model.number="vocabPageSize"
+                          class="ml-1 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200">
+                    <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }}</option>
+                  </select>
+                </label>
+                <button class="btn-ghost px-2" :disabled="vocabPage <= 1"
+                        @click="gotoPage(vocabPage - 1, vocabFiltered.length, vocabPageSize, (v) => vocabPage = v)">←</button>
+                <span class="tabular-nums">
+                  стр.
+                  <input type="number" min="1" :max="vocabPageCount"
+                         :value="Math.min(vocabPage, vocabPageCount)"
+                         @change="(e) => gotoPage(Number(e.target.value), vocabFiltered.length, vocabPageSize, (v) => vocabPage = v)"
+                         class="w-12 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[11px] text-gray-200 text-center" />
+                  / {{ vocabPageCount }}
+                </span>
+                <button class="btn-ghost px-2" :disabled="vocabPage >= vocabPageCount"
+                        @click="gotoPage(vocabPage + 1, vocabFiltered.length, vocabPageSize, (v) => vocabPage = v)">→</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -826,39 +969,68 @@ function copyFilteredNgrams() {
           <div v-if="ngramsFiltered.length === 0" class="text-gray-500 text-sm py-4 text-center">
             Нет n-грамм по выбранному фильтру.
           </div>
-          <div v-else class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800">
-                <tr>
-                  <th class="text-left py-2 px-2 w-8">#</th>
-                  <th class="text-left py-2 px-2">Фраза</th>
-                  <th class="text-right py-2 px-2">DF (сайтов)</th>
-                  <th class="text-right py-2 px-2">Медиана вх.</th>
-                  <th class="text-center py-2 px-2">Тип</th>
-                  <th class="text-center py-2 px-2">POS</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(n, i) in ngramsFiltered" :key="n.phrase + ':' + n.type"
-                    class="border-b border-gray-900 hover:bg-gray-900/50">
-                  <td class="py-1.5 px-2 text-gray-500">{{ i + 1 }}</td>
-                  <td class="py-1.5 px-2 text-gray-100 font-medium">{{ n.phrase }}</td>
-                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.df }}</td>
-                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.median_count }}</td>
-                  <td class="py-1.5 px-2 text-center">
-                    <span :class="{
-                            'text-sky-300':    n.type === 'bigram',
-                            'text-fuchsia-300':n.type === 'trigram',
-                            'text-amber-300':  n.type === '4gram',
-                          }"
-                          class="text-[10px] uppercase">
-                      {{ n.type === 'bigram' ? 'Би' : (n.type === 'trigram' ? 'Три' : '4-гр') }}
-                    </span>
-                  </td>
-                  <td class="py-1.5 px-2 text-center text-gray-500 text-[10px]">{{ n.pos_pattern }}</td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-else>
+            <div class="overflow-x-auto max-h-[60vh] overflow-y-auto border border-gray-800 rounded">
+              <table class="w-full text-xs">
+                <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
+                  <tr>
+                    <th class="text-left py-2 px-2 w-10">#</th>
+                    <th class="text-left py-2 px-2">Фраза</th>
+                    <th class="text-right py-2 px-2">DF (сайтов)</th>
+                    <th class="text-right py-2 px-2">Медиана вх.</th>
+                    <th class="text-center py-2 px-2">Тип</th>
+                    <th class="text-center py-2 px-2">POS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(n, i) in ngramsPaged" :key="n.phrase + ':' + n.type"
+                      class="border-b border-gray-900 hover:bg-gray-900/50">
+                    <td class="py-1.5 px-2 text-gray-500 tabular-nums">{{ ngramsPageStart + i + 1 }}</td>
+                    <td class="py-1.5 px-2 text-gray-100 font-medium">{{ n.phrase }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.df }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.median_count }}</td>
+                    <td class="py-1.5 px-2 text-center">
+                      <span :class="{
+                              'text-sky-300':    n.type === 'bigram',
+                              'text-fuchsia-300':n.type === 'trigram',
+                              'text-amber-300':  n.type === '4gram',
+                            }"
+                            class="text-[10px] uppercase">
+                        {{ n.type === 'bigram' ? 'Би' : (n.type === 'trigram' ? 'Три' : '4-гр') }}
+                      </span>
+                    </td>
+                    <td class="py-1.5 px-2 text-center text-gray-500 text-[10px]">{{ n.pos_pattern }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <!-- Pager: N-grams -->
+            <div class="flex items-center justify-between mt-2 text-[11px] text-gray-400 flex-wrap gap-2">
+              <div>
+                {{ ngramsPageStart + 1 }}–{{ Math.min(ngramsPageStart + ngramPageSize, ngramsFiltered.length) }}
+                из <span class="text-gray-300">{{ ngramsFiltered.length }}</span>
+              </div>
+              <div class="flex items-center gap-1">
+                <label class="text-gray-500">На странице:
+                  <select v-model.number="ngramPageSize"
+                          class="ml-1 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200">
+                    <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }}</option>
+                  </select>
+                </label>
+                <button class="btn-ghost px-2" :disabled="ngramPage <= 1"
+                        @click="gotoPage(ngramPage - 1, ngramsFiltered.length, ngramPageSize, (v) => ngramPage = v)">←</button>
+                <span class="tabular-nums">
+                  стр.
+                  <input type="number" min="1" :max="ngramsPageCount"
+                         :value="Math.min(ngramPage, ngramsPageCount)"
+                         @change="(e) => gotoPage(Number(e.target.value), ngramsFiltered.length, ngramPageSize, (v) => ngramPage = v)"
+                         class="w-12 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[11px] text-gray-200 text-center" />
+                  / {{ ngramsPageCount }}
+                </span>
+                <button class="btn-ghost px-2" :disabled="ngramPage >= ngramsPageCount"
+                        @click="gotoPage(ngramPage + 1, ngramsFiltered.length, ngramPageSize, (v) => ngramPage = v)">→</button>
+              </div>
+            </div>
           </div>
         </div>
 

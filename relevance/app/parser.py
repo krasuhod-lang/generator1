@@ -84,6 +84,11 @@ LINK_DENSITY_NOISE_RATIO = float(
 # но мы оставляем 4 — короткие списки/теги тоже несут смысл.
 MIN_BLOCK_LEN_CHARS = 4
 
+# Регулярка для «человеческого» подсчёта слов: кириллица, латиница, цифры
+# (включая дефисные составные — «бизнес-ланч»). Используется только в
+# диагностике для прозрачности подсчёта, не влияет на BM25/n-граммы.
+_WORD_COUNT_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+(?:-[A-Za-zА-Яа-яЁё0-9]+)*")
+
 
 # ── Список «шумовых» структурных тегов (вырезаются полностью) ─────────────────
 NOISE_TAGS = (
@@ -149,6 +154,9 @@ class ParseDiagnostics:
 
     method: str = "none"            # heavy_bs4 / trafilatura / readability / wide_bs4 / none
     text_chars: int = 0
+    word_count: int = 0             # «сырой» подсчёт словоформ в основном тексте
+                                    # (не зависит от лемматизации / стоп-слов —
+                                    # для прозрачности в UI)
     html_chars: int = 0
     text_html_ratio: float = 0.0    # text / html, грубая мера «полезности»
     block_count: int = 0
@@ -161,6 +169,7 @@ class ParseDiagnostics:
         return {
             "method":           self.method,
             "text_chars":       self.text_chars,
+            "word_count":       self.word_count,
             "html_chars":       self.html_chars,
             "text_html_ratio":  round(self.text_html_ratio, 4),
             "block_count":      self.block_count,
@@ -490,6 +499,15 @@ def extract_with_diagnostics(html: str) -> ParseResult:
     diag.text_chars = sum(len(b) for b in blocks)
     diag.block_count = len(blocks)
     diag.text_html_ratio = diag.text_chars / max(diag.html_chars, 1)
+
+    # Сырой подсчёт слов в основном тексте — независимо от лемматизатора
+    # и стоп-слов. Нужен в UI для прозрачности (чтобы оператор видел,
+    # сколько вообще словоформ на странице, а не только сколько уникальных
+    # лемм попало в BM25-словарь).  `\w+` ловит и кириллицу, и латиницу,
+    # и цифры — это «человеческое» определение слова.
+    if blocks:
+        joined_text = " ".join(blocks)
+        diag.word_count = len(_WORD_COUNT_RE.findall(joined_text))
 
     # Anchor text — берём всегда из heavy_soup (после _strip_noise/link-density).
     # Это «легитимные» ссылки внутри контента, без меню/footer'а.

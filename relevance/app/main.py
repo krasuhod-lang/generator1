@@ -147,6 +147,7 @@ class DocumentDiagnostics(BaseModel):
     url: str
     method: str
     text_chars: int
+    word_count: int = 0
     html_chars: int
     text_html_ratio: float
     block_count: int
@@ -291,6 +292,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             url=d.url,
             method=diag.method,
             text_chars=diag.text_chars,
+            word_count=diag.word_count,
             html_chars=diag.html_chars,
             text_html_ratio=diag.text_html_ratio,
             block_count=diag.block_count,
@@ -356,6 +358,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             url=payload.our_document.url,
             method=our_pr.diagnostics.method,
             text_chars=our_pr.diagnostics.text_chars,
+            word_count=our_pr.diagnostics.word_count,
             html_chars=our_pr.diagnostics.html_chars,
             text_html_ratio=our_pr.diagnostics.text_html_ratio,
             block_count=our_pr.diagnostics.block_count,
@@ -389,6 +392,18 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
                     vocabulary=vocabulary,
                     corpus_lemmas=corpus,
                     our_doc={"url": payload.our_document.url, "lemmas": our_lemmas},
+                    text_chars_by_url={
+                        d.url: parse_results[i][1].diagnostics.text_chars
+                        for i, (d, _) in enumerate(parse_results)
+                        if doc_lemmas[i]
+                    },
+                    word_count_by_url={
+                        d.url: parse_results[i][1].diagnostics.word_count
+                        for i, (d, _) in enumerate(parse_results)
+                        if doc_lemmas[i]
+                    },
+                    our_text_chars=our_pr.diagnostics.text_chars,
+                    our_word_count=our_pr.diagnostics.word_count,
                 )
             except Exception as e:
                 logger.warning("comparison failed: %s", e)
@@ -453,12 +468,19 @@ class CompareRequest(BaseModel):
     our_url: str = ""
     our_text_chars: int = 0
     our_html_chars: int = 0
+    our_word_count: int = 0
+    our_serp_position: Optional[int] = None
     median_text_chars: float = 0.0
     median_html_chars: float = 0.0
     vocabulary: List[VocabRow]
     ngrams: List[NgramRow] = Field(default_factory=list)
     corpus_lemmas: List[List[str]]
     competitor_urls: Optional[List[str]] = None
+    # Параллельные competitor_urls списки метрик/позиций для прозрачности
+    # в сравнительной таблице. Если длина не совпадает — поля игнорируем.
+    competitor_text_chars: Optional[List[int]] = None
+    competitor_word_counts: Optional[List[int]] = None
+    competitor_serp_positions: Optional[List[Optional[int]]] = None
 
 
 class CompareResponse(BaseModel):
@@ -499,11 +521,31 @@ def compare(payload: CompareRequest) -> CompareResponse:
     comp_table = None
     urls = payload.competitor_urls or []
     if urls and len(urls) == len(payload.corpus_lemmas):
+        n = len(urls)
+
+        def _aligned(arr: Optional[List]) -> Dict[str, object]:
+            if not arr or len(arr) != n:
+                return {}
+            return {urls[i]: arr[i] for i in range(n)}
+
+        text_chars_by_url = {k: int(v or 0) for k, v in _aligned(payload.competitor_text_chars).items()}
+        word_count_by_url = {k: int(v or 0) for k, v in _aligned(payload.competitor_word_counts).items()}
+        serp_position_by_url = {
+            k: (int(v) if v is not None else None)
+            for k, v in _aligned(payload.competitor_serp_positions).items()
+        }
+
         comp_table = per_competitor_table(
             competitors=[{"url": u, "lemmas": l} for u, l in zip(urls, payload.corpus_lemmas)],
             vocabulary=vocab_dicts,
             corpus_lemmas=payload.corpus_lemmas,
             our_doc={"url": payload.our_url, "lemmas": payload.our_lemmas},
+            text_chars_by_url=text_chars_by_url,
+            word_count_by_url=word_count_by_url,
+            serp_position_by_url=serp_position_by_url,
+            our_text_chars=int(payload.our_text_chars or 0),
+            our_word_count=int(payload.our_word_count or 0),
+            our_serp_position=payload.our_serp_position,
         )
 
     logger.info(
