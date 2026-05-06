@@ -238,6 +238,70 @@ def main() -> int:
     failures += _assert(agg0["doc_count"] == 0, "empty agg ok")
     failures += _assert(agg0["top_aggregate"] == {}, "empty top_aggregate")
 
+    # ── Wave 2 / Wave 3 ──
+    print("\n=== Test 5: Wave 2 — per-URL extractors ===")
+    sig_a = docs[0]
+    intent = sig_a.get("intent_signals") or {}
+    failures += _assert("intent" in intent, "intent_signals.intent present")
+    failures += _assert(intent.get("commercial_score") is not None, "commercial_score computed")
+    fmt = sig_a.get("format_signals") or {}
+    failures += _assert(fmt.get("format") in (
+        "guide", "listicle", "comparison", "qa", "case_study",
+        "glossary", "product_page", "hub_page", "unknown",
+    ), f"format detected: {fmt.get('format')}")
+    failures += _assert(isinstance(fmt.get("h2_canva"), list), "h2_canva is list")
+    qb = sig_a.get("question_bank") or {}
+    failures += _assert(isinstance(qb.get("questions"), list), "question_bank.questions is list")
+    eb = sig_a.get("entity_bank") or {}
+    failures += _assert(isinstance(eb.get("entities"), list), "entity_bank.entities is list")
+    failures += _assert(eb.get("ner_engine") in ("regex", "natasha"),
+                       f"ner_engine label: {eb.get('ner_engine')}")
+    hng = sig_a.get("heading_ngrams") or {}
+    failures += _assert(isinstance(hng.get("bigrams"), list), "heading_ngrams.bigrams is list")
+
+    print("\n=== Test 6: Wave 3 — lexical diversity (TTR/MTLD) ===")
+    lex = sig_a.get("lexical_diversity") or {}
+    failures += _assert(lex.get("tokens", 0) > 0, f"lex.tokens > 0 got {lex.get('tokens')}")
+    failures += _assert(0.0 <= lex.get("ttr", -1) <= 1.0, f"TTR in [0..1]: {lex.get('ttr')}")
+    failures += _assert(lex.get("mtld", -1) >= 0.0, f"MTLD non-negative: {lex.get('mtld')}")
+
+    print("\n=== Test 7: Wave 2/3 — aggregator outputs ===")
+    ta = agg["top_aggregate"]
+    failures += _assert("serp_intent" in ta, "serp_intent in top_aggregate")
+    failures += _assert("commercial_blocks_required" in ta, "commercial_blocks_required present")
+    failures += _assert(isinstance(ta["commercial_blocks_required"], list),
+                       "commercial_blocks_required is list")
+    failures += _assert("format_winner" in ta, "format_winner in top_aggregate")
+    failures += _assert(ta["format_winner"].get("winner"),
+                       f"format_winner.winner set: {ta['format_winner'].get('winner')}")
+    failures += _assert(isinstance(ta.get("mandatory_questions"), list),
+                       "mandatory_questions is list")
+    failures += _assert("entity_coverage" in ta, "entity_coverage present")
+    failures += _assert("coverage_target_pct" in ta["entity_coverage"],
+                       "entity_coverage.coverage_target_pct present")
+    failures += _assert("heading_ngrams" in ta, "heading_ngrams in top_aggregate")
+    failures += _assert("lexical_diversity_target" in ta,
+                       "lexical_diversity_target present")
+    # Title-pattern miner (Wave 3 #15)
+    failures += _assert("detected_patterns" in ta["title_template"],
+                       "title_template.detected_patterns present")
+    failures += _assert("patterns" in ta["title_template"]["detected_patterns"],
+                       "detected_patterns.patterns list present")
+    # Algorithm signals enriched
+    failures += _assert(alg["yandex"].get("commercial_factors_score") is not None,
+                       "yandex.commercial_factors_score now active (Wave 2)")
+    failures += _assert("serp_intent" in alg["yandex"], "yandex.serp_intent label")
+    failures += _assert("format_winner" in alg["google"], "google.format_winner")
+
+    print("\n=== Test 8: Wave 3 — embeddings gracefully disabled by default ===")
+    from .signals import embeddings_enabled, compute_topical_signals
+    failures += _assert(embeddings_enabled() is False,
+                       "embeddings disabled by default (no env flag)")
+    out = compute_topical_signals([], {}, None)
+    failures += _assert(out.get("enabled") is False,
+                       "compute_topical_signals → enabled=false (no-op)")
+    failures += _assert("reason" in out, "compute_topical_signals → reason field")
+
     print("\n=== Summary ===")
     if failures:
         print(f"  ❌ {failures} assertion(s) failed")

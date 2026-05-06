@@ -183,6 +183,7 @@ def extract_competitor_signals(
     out: Dict[str, Any] = {
         "url": url,
         "empty_reason": None,
+        # ── Wave 1 ──
         "title_meta":         _signal_title_meta(raw_soup, query),
         "schema_types":       _signal_schema_types(raw_soup),
         "freshness":          _signal_freshness(raw_soup),
@@ -192,8 +193,23 @@ def extract_competitor_signals(
         "ux_profile":         _signal_ux_profile(clean_soup),
         "exact_occurrences":  _signal_exact_occurrences(clean_soup, query),
         "host_hygiene":       _signal_host_hygiene(raw_soup),
+        # ── Wave 2 ──
+        # SERP-intent индикаторы (price/cart/CTA/Product schema/form/phone/...).
+        "intent_signals":     _signal_intent(raw_soup, clean_soup),
+        # Эвристическая классификация формата страницы (guide/listicle/...).
+        "format_signals":     _signal_format(clean_soup),
+        # Banker вопросов: предложения с `?` + h2/h3 на «как/что/почему/...».
+        "question_bank":      _signal_question_bank(clean_soup),
+        # Lite-NER (regex/capitalized): brand-like proper nouns / acronyms / GPE.
+        "entity_bank":        _signal_entity_bank(clean_soup),
+        # Headings-only n-grams (в дополнение к body-n-граммам в comparison.py).
+        "heading_ngrams":     _signal_heading_ngrams(clean_soup),
+        # ── Wave 3 (CPU-only) ──
+        # TTR + MTLD — лёгкая лексическая статистика, без модели.
+        "lexical_diversity":  _signal_lexical_diversity(clean_soup),
     }
     # Композитный score «усилия» (effort proxy) — плоский число для сортировки.
+    # Учитывает Wave 1 + Wave 3 (TTR/MTLD).
     out["effort_score"] = _compute_effort_score(out)
     return out
 
@@ -227,8 +243,17 @@ def compute_top_signals_aggregate(
     exact_targets = _agg_exact_targets(docs)
     host_hygiene = _agg_host_hygiene(docs, n)
     effort = _agg_effort(docs)
+    # Wave 2
+    intent_profile      = _agg_intent_profile(docs, n)
+    format_winner       = _agg_format_winner(docs, n)
+    mandatory_questions = _agg_mandatory_questions(docs, n)
+    entity_coverage     = _agg_entity_coverage(docs, n)
+    heading_ngrams      = _agg_heading_ngrams(docs, n)
+    # Wave 3 (CPU-only)
+    lex_div_target      = _agg_lex_diversity(docs)
 
     top_aggregate = {
+        # Wave 1
         "title_template":              title_template,
         "schema_profile":              schema_profile,
         "mandatory_schemas":           schema_profile["mandatory"],
@@ -240,6 +265,16 @@ def compute_top_signals_aggregate(
         "exact_query_position_targets": exact_targets,
         "host_hygiene_checklist":      host_hygiene,
         "effort_target":               effort,
+        # Wave 2
+        "serp_intent":                 intent_profile,
+        "commercial_blocks_required":  intent_profile.get("commercial_blocks_required") or [],
+        "format_winner":               format_winner,
+        "mandatory_questions":         mandatory_questions,
+        "mandatory_entities_from_top": entity_coverage.get("mandatory_entities") or [],
+        "entity_coverage":             entity_coverage,
+        "heading_ngrams":              heading_ngrams,
+        # Wave 3 (CPU-only)
+        "lexical_diversity_target":    lex_div_target,
     }
 
     algorithm_signals = {
@@ -249,13 +284,20 @@ def compute_top_signals_aggregate(
             "freshness_pressure":  freshness_profile["freshness_pressure"],
             "schema_pressure":     schema_profile["pressure"],
             "ux_quality_target":   ux_profile["score_target"],
+            # Wave 2/3
+            "format_winner":       format_winner.get("winner"),
+            "topical_focus_target": lex_div_target.get("mtld_median"),
+            "entity_coverage_target": entity_coverage.get("coverage_target_pct"),
         },
         "yandex": {
             "exact_form_density":   exact_targets["density_target"],
             "trust_density":        trust_quota["per_1000_words_target"],
             "host_hygiene_score":   host_hygiene["score_target"],
             "slug_recommendation":  slug_pattern["recommendation"],
-            "commercial_factors_score": None,  # волна 2: SERP-intent классификатор
+            # Wave 2: SERP-intent классификатор активирован.
+            "commercial_factors_score": intent_profile.get("commercial_score") or 0.0,
+            "serp_intent":             intent_profile.get("dominant_intent") or "info",
+            "mandatory_questions_count": len(mandatory_questions or []),
         },
     }
     return {
@@ -270,9 +312,15 @@ def compute_top_signals_aggregate(
 def _empty_signals(url: str) -> Dict[str, Any]:
     return {
         "url": url, "empty_reason": "no_html",
+        # Wave 1
         "title_meta": {}, "schema_types": [], "freshness": {},
         "url_factors": {}, "trust_links": {}, "anchor_bank": {},
         "ux_profile": {}, "exact_occurrences": {}, "host_hygiene": {},
+        # Wave 2
+        "intent_signals": {}, "format_signals": {},
+        "question_bank": {}, "entity_bank": {}, "heading_ngrams": {},
+        # Wave 3 (CPU-only)
+        "lexical_diversity": {},
         "effort_score": 0.0,
     }
 
@@ -880,11 +928,14 @@ def _compute_effort_score(sig: Dict[str, Any]) -> float:
     вложено в страницу (прокси для contentEffort из утечки Google).
 
     Формула эвристическая, цель — сравнимость в рамках одного отчёта.
+    Wave 3: добавлены TTR / MTLD (лексическое разнообразие) — Google
+    contentEffort / originalContentScore коррелируют с уникальностью.
     """
     ux = sig.get("ux_profile") or {}
     schema = sig.get("schema_types") or []
     trust = sig.get("trust_links") or {}
     media = ux.get("media_count") or {}
+    lex   = sig.get("lexical_diversity") or {}
     score = 0.0
     score += min(20.0, 0.4 * (ux.get("h2_count") or 0))                    # структура
     score += min(15.0, 1.5 * (ux.get("h3_count") or 0))                    # подразделы
@@ -896,6 +947,9 @@ def _compute_effort_score(sig: Dict[str, Any]) -> float:
     score += min(5.0,  2.0 * (media.get("details") or 0))                  # FAQ-аккордеон
     score += min(5.0,  1.0 * len(schema))                                  # schema-разметка
     score += min(5.0,  1.0 * (trust.get("trust_links") or 0))              # trust-ссылки
+    # Wave 3: уникальность лексики. MTLD ~50 — типичный текст; ~80+ — богатый.
+    mtld = float(lex.get("mtld") or 0.0)
+    score += min(10.0, mtld / 10.0)                                        # лексическая глубина
     return round(min(100.0, score), 1)
 
 
@@ -927,6 +981,8 @@ def _agg_title_template(docs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             mod_counter[m] += 1
     # Шаблон H1 (медиана length)
     h1_chars = [d["title_meta"].get("h1_chars", 0) for d in docs]
+    # Wave 3: title-pattern miner — детектирует частотные шаблоны с CTR-эвристиками.
+    detected_patterns = _detect_title_patterns(titles)
     return {
         "titles_sample":              titles[:10],
         "title_chars_median":         _med(chars) or 0.0,
@@ -946,6 +1002,8 @@ def _agg_title_template(docs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             100.0 * sum(1 for d in docs if d["title_meta"].get("title_query_exact_hits", 0) > 0) / n,
             1,
         ),
+        # Wave 3
+        "detected_patterns": detected_patterns,
     }
 
 
@@ -1135,3 +1193,708 @@ def _agg_effort(docs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "effort_score_top3_min": round(min(top3), 1) if top3 else 0.0,
         "effort_score_max":      round(max(scores), 1) if scores else 0.0,
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WAVE 2 — средняя сложность: SERP-intent / format / questions / entities /
+#          headings-only n-grams. Без heavy ML, всё на регулярках + lxml.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Маркеры коммерческого/транзакционного интента в HTML конкурента.
+_COMMERCIAL_PRICE_RE = re.compile(
+    r"(?:\b\d{2,}\s*(?:руб(?:\.|лей)?|₽|р\.|usd|\$|eur|€)\b"
+    r"|\bцена[:\s]*от\b|\bстоимость[:\s]|class\s*=\s*[\"'][^\"']*price[^\"']*[\"'])",
+    re.IGNORECASE,
+)
+_COMMERCIAL_CART_RE = re.compile(
+    r"(?:в\s+корзину|купить\s+(?:в\s+)?(?:1\s+клик|сейчас)|оформить\s+заказ"
+    r"|add\s+to\s+cart|buy\s+now|checkout|корзин(?:а|у|е))",
+    re.IGNORECASE,
+)
+_COMMERCIAL_CTA_RE = re.compile(
+    r"(?:оставить\s+заявку|заказать\s+(?:звонок|консультацию|услугу)"
+    r"|записаться\s+(?:на|к)|получить\s+(?:консультацию|расчёт|смету|кп)"
+    r"|request\s+a\s+quote|book\s+now|get\s+started|sign\s+up)",
+    re.IGNORECASE,
+)
+_COMMERCIAL_PHONE_RE = re.compile(
+    r"(?:tel:[\+\d][\d\-\(\)\s]{6,}|\+7[\s\-\(]?\d{3}[\s\-\)]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
+    r"|8\s*[\s\-\(]?\d{3}[\s\-\)]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2})",
+)
+_COMMERCIAL_MESSENGER_RE = re.compile(
+    r"(?:wa\.me/|whatsapp|t\.me/|telegram|viber://|вконтакте\b|vk\.com/)",
+    re.IGNORECASE,
+)
+_COMMERCIAL_REVIEW_RE = re.compile(
+    r"(?:отзыв(?:ы|ов|а)?|оцен(?:к|ить)|рейтинг|review|testimonial|stars?\s*rating"
+    r"|class\s*=\s*[\"'][^\"']*(?:rating|stars?|reviews?)[^\"']*[\"'])",
+    re.IGNORECASE,
+)
+_COMMERCIAL_GUARANTEE_RE = re.compile(
+    r"(?:гаранти(?:я|и|ей)|возврат\s+(?:денег|товара)|качество\s+гарантирован"
+    r"|guarantee|money[\-\s]back|warranty)",
+    re.IGNORECASE,
+)
+_COMMERCIAL_DELIVERY_RE = re.compile(
+    r"(?:доставк(?:а|и|у|ой)|самовывоз|оплат(?:а|у|ы)|способы\s+оплаты"
+    r"|shipping|delivery|payment\s+methods)",
+    re.IGNORECASE,
+)
+_COMMERCIAL_USP_RE = re.compile(
+    r"(?:наши\s+преимуществ|почему\s+(?:мы|нас\s+выбирают)|преимуществ(?:а|ом)"
+    r"|why\s+choose\s+us|our\s+advantages?)",
+    re.IGNORECASE,
+)
+
+# Schema-типы, однозначно говорящие о коммерции.
+_COMMERCIAL_SCHEMAS = {"Product", "Offer", "AggregateOffer", "AggregateRating",
+                       "LocalBusiness", "Service"}
+_TRANSACTIONAL_SCHEMAS = {"Product", "Offer", "AggregateOffer", "Reservation"}
+
+
+def _signal_intent(raw_soup: BeautifulSoup, clean_soup: BeautifulSoup) -> Dict[str, Any]:
+    """Per-URL индикаторы интента + блоки коммерческого/транзакционного UX.
+
+    Считаем булевые маркеры по сырому HTML (для скриптов/класс-имён) и по
+    очищенному (для видимого текста). Возвращаем плоский dict с per-маркерами
+    + score.
+    """
+    raw_html = str(raw_soup) if raw_soup else ""
+    visible_text = clean_soup.get_text(" ", strip=True) if clean_soup else ""
+    visible_text = re.sub(r"\s+", " ", visible_text or "")
+
+    has_price       = bool(_COMMERCIAL_PRICE_RE.search(raw_html))
+    has_cart        = bool(_COMMERCIAL_CART_RE.search(visible_text))
+    has_cta         = bool(_COMMERCIAL_CTA_RE.search(visible_text))
+    has_phone       = bool(_COMMERCIAL_PHONE_RE.search(raw_html))
+    has_messenger   = bool(_COMMERCIAL_MESSENGER_RE.search(raw_html))
+    has_form        = bool(clean_soup.find("form")) or bool(raw_soup.find("form"))
+    has_review      = bool(_COMMERCIAL_REVIEW_RE.search(visible_text))
+    has_guarantee   = bool(_COMMERCIAL_GUARANTEE_RE.search(visible_text))
+    has_delivery    = bool(_COMMERCIAL_DELIVERY_RE.search(visible_text))
+    has_usp         = bool(_COMMERCIAL_USP_RE.search(visible_text))
+
+    # Из schema-типов (соберём заново, чтобы не зависеть от порядка вызовов).
+    schema_types = _signal_schema_types(raw_soup)
+    seen_types = {t.get("type") for t in schema_types if t.get("type")}
+    has_product_schema     = bool(seen_types & _COMMERCIAL_SCHEMAS)
+    has_transactional_sch  = bool(seen_types & _TRANSACTIONAL_SCHEMAS)
+
+    # Композитный счёт коммерческой/транзакционной плотности (0..100).
+    weights = {
+        "has_price":       18.0, "has_cart":        18.0,
+        "has_cta":         12.0, "has_phone":        8.0,
+        "has_messenger":    4.0, "has_form":         8.0,
+        "has_review":       6.0, "has_guarantee":    6.0,
+        "has_delivery":     6.0, "has_usp":          4.0,
+        "has_product_schema":  10.0,
+    }
+    flags = {
+        "has_price": has_price, "has_cart": has_cart, "has_cta": has_cta,
+        "has_phone": has_phone, "has_messenger": has_messenger,
+        "has_form": has_form, "has_review": has_review,
+        "has_guarantee": has_guarantee, "has_delivery": has_delivery,
+        "has_usp": has_usp, "has_product_schema": has_product_schema,
+    }
+    score = round(sum(weights[k] for k, v in flags.items() if v), 1)
+
+    # Per-URL intent label.
+    if has_transactional_sch or (has_cart and has_price):
+        intent = "transactional"
+    elif score >= 30.0:
+        intent = "commercial"
+    elif (has_phone and has_form and not (has_price or has_cart)):
+        intent = "navigational"
+    else:
+        intent = "info"
+
+    return {
+        **flags,
+        "has_transactional_schema": has_transactional_sch,
+        "commercial_score":         score,
+        "intent":                   intent,
+    }
+
+
+def _agg_intent_profile(docs: Sequence[Dict[str, Any]], n: int) -> Dict[str, Any]:
+    """Профиль интента SERP по топу + чеклист обязательных коммерческих блоков."""
+    counter: Counter = Counter()
+    flag_shares: Dict[str, float] = {}
+    flag_keys = ("has_price", "has_cart", "has_cta", "has_phone", "has_messenger",
+                 "has_form", "has_review", "has_guarantee", "has_delivery",
+                 "has_usp", "has_product_schema", "has_transactional_schema")
+    for d in docs:
+        sig = d.get("intent_signals") or {}
+        counter[sig.get("intent") or "info"] += 1
+    scores = [float((d.get("intent_signals") or {}).get("commercial_score") or 0.0) for d in docs]
+    for k in flag_keys:
+        c = sum(1 for d in docs if (d.get("intent_signals") or {}).get(k))
+        flag_shares[k] = round(100.0 * c / n, 1)
+
+    dominant = counter.most_common(1)[0][0] if counter else "info"
+    distribution_pct = {k: round(100.0 * c / n, 1) for k, c in counter.items()}
+
+    # Чеклист «обязательных» коммерческих блоков: всё, что встречается ≥ 50%
+    # топа, и при этом интент топа в {commercial, transactional}.
+    commercial_blocks_required: List[str] = []
+    if dominant in ("commercial", "transactional"):
+        labels = {
+            "has_price":             "блок цен / прайс-лист",
+            "has_cart":              "корзина / кнопка «купить»",
+            "has_cta":               "форма заявки / CTA",
+            "has_phone":             "видимый телефон + tel: ссылка",
+            "has_messenger":         "ссылки на мессенджеры (WA / Telegram / VK)",
+            "has_form":              "форма обратной связи",
+            "has_review":            "блок отзывов / рейтинг",
+            "has_guarantee":         "блок гарантий / возврата",
+            "has_delivery":          "секция «Доставка / Оплата»",
+            "has_usp":               "блок «Наши преимущества» / USP",
+            "has_product_schema":    "schema.org/Product (или Offer / Service)",
+            "has_transactional_schema": "schema.org/Offer / AggregateOffer",
+        }
+        for k, share in flag_shares.items():
+            if share >= 50.0 and k in labels:
+                commercial_blocks_required.append(labels[k])
+
+    return {
+        "dominant_intent":            dominant,
+        "distribution_pct":           distribution_pct,
+        "commercial_score":           _med(scores) or 0.0,
+        "flag_shares_pct":            flag_shares,
+        "commercial_blocks_required": commercial_blocks_required,
+    }
+
+
+# ── 10. Format классификатор ────────────────────────────────────────────────
+_FMT_LISTICLE_H1_RE = re.compile(
+    r"^\s*(?:топ[\-\s]*\d+|\d+\s+(?:лучших?|способов|причин|шагов|советов|ошибок|примеров|инструмент|вариантов|типов))",
+    re.IGNORECASE,
+)
+_FMT_GUIDE_H1_RE = re.compile(
+    r"\b(?:гайд|инструкция|руководств|как\b|пошаговое|how\s+to|step[\-\s]?by[\-\s]?step|complete\s+guide)\b",
+    re.IGNORECASE,
+)
+_FMT_COMPARISON_H1_RE = re.compile(
+    r"\b(?:сравнение|против|vs\.?|или|comparison|разница\s+между)\b",
+    re.IGNORECASE,
+)
+_FMT_QA_H1_RE = re.compile(
+    r"\b(?:часто\s+задава|вопрос(?:ы|\s+ответ)|q\s*&\s*a|faq)\b",
+    re.IGNORECASE,
+)
+_FMT_GLOSSARY_H1_RE = re.compile(
+    r"\b(?:словар(?:ь|ик)|глоссарий|терминолог|словарь\s+терминов|glossary)\b",
+    re.IGNORECASE,
+)
+_FMT_CASE_H1_RE = re.compile(
+    r"\b(?:кейс\b|case\s+study|история\s+(?:успеха|клиента)|пример\s+проекта)\b",
+    re.IGNORECASE,
+)
+_FMT_LISTICLE_NUM_PREFIX_RE = re.compile(r"^\s*\d+\s*[.):—–\-]\s*")
+
+
+def _signal_format(soup: BeautifulSoup) -> Dict[str, Any]:
+    """Эвристическая классификация формата страницы конкурента.
+
+    Score-based: каждый формат набирает очки, побеждает максимальный.
+    Параллельно сохраняем h2_canva — список текстов h2 (как готовая канва).
+    """
+    if not soup:
+        return {"format": "unknown", "scores": {}, "h2_canva": []}
+    title_tag = soup.find("title")
+    title = (title_tag.get_text(" ", strip=True) if title_tag else "") or ""
+    h1 = soup.find("h1")
+    h1_text = h1.get_text(" ", strip=True) if h1 else ""
+    head_str = f"{title} {h1_text}".strip()
+
+    h2_tags = soup.find_all("h2")
+    h2_texts = [re.sub(r"\s+", " ", t.get_text(" ", strip=True)) for t in h2_tags]
+    h2_texts = [t for t in h2_texts if t]
+    n_h2 = len(h2_texts)
+    n_h2_numbered = sum(1 for t in h2_texts if _FMT_LISTICLE_NUM_PREFIX_RE.match(t))
+    n_h2_question = sum(1 for t in h2_texts if t.endswith("?") or _FMT_QA_H1_RE.search(t))
+    n_dl   = len(soup.find_all("dl"))
+    n_dt   = len(soup.find_all("dt"))
+    n_step = sum(1 for t in h2_texts if re.search(r"^\s*шаг\s*\d|^\s*step\s*\d", t, re.I))
+    has_table = bool(soup.find("table"))
+    soup_str = str(soup)
+    has_product_schema_hint = bool(re.search(r'"@type"\s*:\s*"(?:Product|Offer)"', soup_str))
+    has_breadcrumbs = bool(soup.find(attrs={"class": re.compile(r"breadcrumb", re.I)})) \
+        or bool(re.search(r'"@type"\s*:\s*"BreadcrumbList"', soup_str))
+
+    scores: Dict[str, float] = {
+        "guide": 0.0, "listicle": 0.0, "comparison": 0.0, "qa": 0.0,
+        "case_study": 0.0, "glossary": 0.0, "product_page": 0.0, "hub_page": 0.0,
+    }
+    if _FMT_GUIDE_H1_RE.search(head_str):       scores["guide"]      += 4.0
+    if n_step >= 3:                              scores["guide"]      += 3.0
+    scores["guide"] += min(3.0, n_h2 * 0.3)
+    if _FMT_LISTICLE_H1_RE.search(head_str):    scores["listicle"]   += 5.0
+    scores["listicle"] += min(5.0, n_h2_numbered * 0.7)
+    if _FMT_COMPARISON_H1_RE.search(head_str):  scores["comparison"] += 5.0
+    if has_table:                                scores["comparison"] += 1.5
+    if _FMT_QA_H1_RE.search(head_str):           scores["qa"]         += 5.0
+    scores["qa"] += min(5.0, n_h2_question * 0.5)
+    if _FMT_CASE_H1_RE.search(head_str):         scores["case_study"] += 5.0
+    if _FMT_GLOSSARY_H1_RE.search(head_str):     scores["glossary"]   += 4.0
+    if n_dl >= 1 or n_dt >= 5:                   scores["glossary"]   += 3.0
+    if has_product_schema_hint:                  scores["product_page"] += 5.0
+    if has_breadcrumbs and n_h2 >= 6 and not _FMT_LISTICLE_H1_RE.search(head_str):
+        scores["hub_page"] += 2.0
+    if n_h2 >= 10:                               scores["hub_page"]   += 2.0
+
+    fmt, val = max(scores.items(), key=lambda kv: kv[1])
+    if val < 2.0:
+        fmt = "guide" if scores["guide"] > 0 else "unknown"
+
+    return {
+        "format":       fmt,
+        "scores":       {k: round(v, 1) for k, v in scores.items()},
+        "h2_canva":     h2_texts[:30],
+        "n_h2":         n_h2,
+        "n_h2_numbered": n_h2_numbered,
+        "n_h2_question": n_h2_question,
+    }
+
+
+def _agg_format_winner(docs: Sequence[Dict[str, Any]], n: int) -> Dict[str, Any]:
+    """Доминирующий формат + рекомендованная H2-канва (топ-N H2 по DF среди
+    документов, попавших в победивший формат)."""
+    counter: Counter = Counter()
+    by_fmt: Dict[str, List[Dict[str, Any]]] = {}
+    for d in docs:
+        f = (d.get("format_signals") or {}).get("format") or "unknown"
+        counter[f] += 1
+        by_fmt.setdefault(f, []).append(d)
+    if not counter:
+        return {"winner": "unknown", "share_pct": 0.0, "distribution_pct": {},
+                "recommended_h2_canva": []}
+    winner, count = counter.most_common(1)[0]
+    distribution = {k: round(100.0 * c / n, 1) for k, c in counter.items()}
+
+    pool = by_fmt.get(winner) or docs
+    h2_counter: Counter = Counter()
+    for d in pool:
+        for h2 in (d.get("format_signals") or {}).get("h2_canva") or []:
+            canon = re.sub(r"\s+", " ", h2.lower()).strip()
+            if 6 <= len(canon) <= 120:
+                h2_counter[canon] += 1
+    canva = [
+        {"h2": txt, "df": c} for txt, c in h2_counter.most_common(20) if c >= 2
+    ]
+    return {
+        "winner":              winner,
+        "share_pct":           round(100.0 * count / n, 1),
+        "distribution_pct":    distribution,
+        "recommended_h2_canva": canva,
+    }
+
+
+# ── 11. Question mining (без PAA) ───────────────────────────────────────────
+_QUESTION_HEAD_RE = re.compile(
+    r"^\s*(?:как\b|что\b|почему\b|зачем\b|когда\b|где\b|сколько\b|какой|какая|какие|"
+    r"нужно\s+ли|можно\s+ли|стоит\s+ли|нужен\s+ли|how\b|what\b|why\b|when\b|where\b|"
+    r"can\s+i|should\s+i|do\s+i|is\s+it|are\s+there)",
+    re.IGNORECASE,
+)
+_QUESTION_SENT_RE = re.compile(r"[^.!?\n]{8,250}\?")
+
+
+def _signal_question_bank(soup: BeautifulSoup) -> Dict[str, Any]:
+    """Извлекает банк вопросов из H2/H3-формулировок и предложений с `?`.
+
+    Дедуп по канонической форме (lower + схлопнутые пробелы + удалённый
+    финальный знак вопроса). Cap 50, чтобы не раздувать payload.
+    """
+    if not soup:
+        return {"questions": [], "count": 0}
+    seen: Dict[str, Dict[str, Any]] = {}
+
+    def _add(text: str, source: str) -> None:
+        text = re.sub(r"\s+", " ", text or "").strip()
+        if not text or len(text) < 8 or len(text) > 280:
+            return
+        canon = re.sub(r"[\?\!\.]+\s*$", "", text.lower()).strip()
+        if not canon:
+            return
+        if canon in seen:
+            seen[canon]["count"] += 1
+            return
+        seen[canon] = {"text": text, "source": source, "count": 1}
+
+    for tag in soup.find_all(["h2", "h3", "h4"]):
+        t = re.sub(r"\s+", " ", tag.get_text(" ", strip=True))
+        if not t:
+            continue
+        if t.endswith("?") or _QUESTION_HEAD_RE.match(t):
+            _add(t if t.endswith("?") else t + "?", source=tag.name)
+
+    full_text = soup.get_text(" ", strip=True)
+    full_text = re.sub(r"\s+", " ", full_text or "")
+    for m in _QUESTION_SENT_RE.finditer(full_text):
+        _add(m.group(0).strip(), source="sentence")
+        if len(seen) >= 100:
+            break
+
+    out = sorted(seen.values(), key=lambda x: -x["count"])[:50]
+    return {"questions": out, "count": len(out)}
+
+
+def _agg_mandatory_questions(docs: Sequence[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+    """Топ вопросов по DF (на скольких URL встретился). DF ≥ 2 — кандидат
+    в обязательные. Возвращаем до 25."""
+    df_bag: Dict[str, Dict[str, Any]] = {}
+    for d in docs:
+        qb = d.get("question_bank") or {}
+        seen_local = set()
+        for q in qb.get("questions") or []:
+            canon = re.sub(r"[\?\!\.]+\s*$", "", (q.get("text") or "").lower()).strip()
+            if not canon or canon in seen_local:
+                continue
+            seen_local.add(canon)
+            slot = df_bag.setdefault(canon, {"text": q["text"], "df": 0})
+            slot["df"] += 1
+    rows = [{"text": v["text"], "df": v["df"], "df_share_pct": round(100.0 * v["df"] / n, 1)}
+            for v in df_bag.values() if v["df"] >= 2]
+    rows.sort(key=lambda r: (r["df"], len(r["text"])), reverse=True)
+    return rows[:25]
+
+
+# ── 12. Lite-NER + entity-coverage ──────────────────────────────────────────
+_RU_CAPS_PHRASE_RE = re.compile(
+    r"(?<![А-Яа-яёЁA-Za-z])"
+    r"((?:[А-ЯЁ][а-яё]{1,}|[A-Z][a-z]{1,})(?:\s+(?:[А-ЯЁ][а-яё]{1,}|[A-Z][a-z]{1,}|"
+    r"в|и|на|к|по|для|от|или|the|of|and))*)"
+)
+_LATIN_ACRONYM_RE = re.compile(r"\b([A-Z]{2,8}(?:\d+)?)\b")
+_NER_STOP_LOWER = {
+    "это", "для", "при", "как", "что", "если", "так", "вот", "там",
+    "после", "вместо", "возможно", "также", "однако", "поэтому",
+    "так же", "пример",
+    "the", "and", "for", "with", "this", "that",
+}
+_NER_STOP_FIRST_TOKEN = {
+    "это", "для", "при", "как", "что", "если", "так", "вот", "там",
+    "также", "однако", "поэтому", "иначе", "после", "перед", "благодаря",
+    "согласно", "вопреки", "несмотря",
+}
+
+
+def _signal_entity_bank(soup: BeautifulSoup) -> Dict[str, Any]:
+    """Lite-NER: regex-кандидаты в именованные сущности. Источник — основной
+    текст (p/li/td/blockquote), но не headings. Cap 80 на документ.
+
+    Полный NER (Natasha) — гейт через RELEVANCE_NER_FULL=true (graceful no-op
+    если pkg нет; см. _try_full_ner).
+    """
+    if not soup:
+        return {"entities": [], "count": 0}
+    pieces: List[str] = []
+    for t in soup.find_all(["p", "li", "td", "blockquote"]):
+        s = t.get_text(" ", strip=True)
+        if s:
+            pieces.append(s)
+    text = " ".join(pieces)
+    text = re.sub(r"\s+", " ", text or "").strip()
+
+    full = _try_full_ner(text)
+    if full is not None:
+        return {"entities": full[:80], "count": min(len(full), 80), "ner_engine": "natasha"}
+
+    bag: Counter = Counter()
+    for m in _RU_CAPS_PHRASE_RE.finditer(text):
+        phrase = m.group(1).strip()
+        first = phrase.split()[0] if phrase else ""
+        if first.lower() in _NER_STOP_FIRST_TOKEN:
+            tail = " ".join(phrase.split()[1:]).strip()
+            if not tail:
+                continue
+            phrase = tail
+        canon = phrase.lower()
+        if canon in _NER_STOP_LOWER or len(canon) < 3:
+            continue
+        bag[phrase] += 1
+
+    for m in _LATIN_ACRONYM_RE.finditer(text):
+        token = m.group(1)
+        if token.upper() in {"FAQ", "TLDR", "CTA", "URL", "HTML", "CSS", "API"}:
+            continue
+        if 2 <= len(token) <= 8:
+            bag[token] += 1
+
+    entities = [{"text": k, "count": v} for k, v in bag.most_common(80) if v >= 1]
+    return {"entities": entities, "count": len(entities), "ner_engine": "regex"}
+
+
+def _try_full_ner(text: str) -> Optional[List[Dict[str, Any]]]:
+    """Опциональный полный NER через Natasha. Гейт — RELEVANCE_NER_FULL=true.
+    Если пакет не установлен — возвращаем None (caller использует regex).
+    """
+    if os.environ.get("RELEVANCE_NER_FULL", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    try:  # pragma: no cover — гейт для опциональной зависимости
+        from natasha import (Doc, Segmenter, NewsEmbedding, NewsNERTagger)
+    except Exception:
+        return None
+    try:
+        seg = Segmenter()
+        emb = NewsEmbedding()
+        ner = NewsNERTagger(emb)
+        doc = Doc(text[:200_000])
+        doc.segment(seg)
+        doc.tag_ner(ner)
+        bag: Counter = Counter()
+        for span in doc.spans:
+            t = re.sub(r"\s+", " ", span.text).strip()
+            if 3 <= len(t) <= 120:
+                bag[t] += 1
+        return [{"text": k, "count": v, "type": "ner"} for k, v in bag.most_common(120)]
+    except Exception:
+        return None
+
+
+def _agg_entity_coverage(docs: Sequence[Dict[str, Any]], n: int) -> Dict[str, Any]:
+    """Сущностное покрытие топа: какие сущности встречаются у ≥ 50% URL."""
+    df_bag: Dict[str, int] = {}
+    for d in docs:
+        eb = d.get("entity_bank") or {}
+        seen_local = set()
+        for e in eb.get("entities") or []:
+            canon = (e.get("text") or "").lower().strip()
+            if canon and canon not in seen_local:
+                seen_local.add(canon)
+                df_bag[canon] = df_bag.get(canon, 0) + 1
+
+    rows = sorted(
+        [{"text": k, "df": v, "df_share_pct": round(100.0 * v / n, 1)} for k, v in df_bag.items()],
+        key=lambda r: (-r["df"], -len(r["text"])),
+    )
+    threshold = max(2, int(round(n * 0.5)))
+    mandatory = [r["text"] for r in rows if r["df"] >= threshold][:30]
+    top = rows[:50]
+
+    if mandatory:
+        coverage_per_doc: List[float] = []
+        m_set = set(mandatory)
+        for d in docs:
+            eb = d.get("entity_bank") or {}
+            seen = {(e.get("text") or "").lower().strip() for e in eb.get("entities") or []}
+            hits = sum(1 for m in m_set if m in seen)
+            coverage_per_doc.append(100.0 * hits / max(len(m_set), 1))
+        target = round(median(coverage_per_doc), 1)
+    else:
+        target = 0.0
+
+    return {
+        "mandatory_entities":   mandatory,
+        "top_entities":         top,
+        "coverage_target_pct":  target,
+        "df_threshold":         threshold,
+    }
+
+
+# ── 3.4 Headings-only n-grams ───────────────────────────────────────────────
+def _signal_heading_ngrams(soup: BeautifulSoup) -> Dict[str, Any]:
+    """N-граммы (bi/tri) ТОЛЬКО из текстов H2/H3 — банк формулировок
+    подзаголовков. Body-n-граммы остаются в comparison.py.
+    """
+    if not soup:
+        return {"bigrams": [], "trigrams": []}
+    texts: List[str] = []
+    for tag in soup.find_all(["h2", "h3"]):
+        t = re.sub(r"\s+", " ", tag.get_text(" ", strip=True)).lower()
+        if t:
+            texts.append(t)
+    if not texts:
+        return {"bigrams": [], "trigrams": [], "headings_count": 0}
+    bi: Counter = Counter()
+    tri: Counter = Counter()
+    for t in texts:
+        toks = [m.group(0) for m in _WORD_RE.finditer(t) if len(m.group(0)) >= 2]
+        for i in range(len(toks) - 1):
+            bi[" ".join(toks[i:i + 2])] += 1
+        for i in range(len(toks) - 2):
+            tri[" ".join(toks[i:i + 3])] += 1
+    return {
+        "bigrams":  [{"phrase": k, "count": v} for k, v in bi.most_common(40)],
+        "trigrams": [{"phrase": k, "count": v} for k, v in tri.most_common(30)],
+        "headings_count": len(texts),
+    }
+
+
+def _agg_heading_ngrams(docs: Sequence[Dict[str, Any]], n: int) -> Dict[str, Any]:
+    """Агрегат n-грамм заголовков: DF (на скольких URL встретилась фраза)."""
+    bi_df: Counter = Counter()
+    tri_df: Counter = Counter()
+    for d in docs:
+        hg = d.get("heading_ngrams") or {}
+        for x in hg.get("bigrams") or []:
+            bi_df[x["phrase"]] += 1
+        for x in hg.get("trigrams") or []:
+            tri_df[x["phrase"]] += 1
+    bi_rows = [
+        {"phrase": k, "df": v, "df_share_pct": round(100.0 * v / n, 1)}
+        for k, v in bi_df.most_common(60) if v >= 2
+    ]
+    tri_rows = [
+        {"phrase": k, "df": v, "df_share_pct": round(100.0 * v / n, 1)}
+        for k, v in tri_df.most_common(40) if v >= 2
+    ]
+    return {"bigrams": bi_rows, "trigrams": tri_rows}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WAVE 3 — ML и тяжёлая статистика. Лексические сигналы — pure-CPU.
+# Эмбеддинги — гейт RELEVANCE_EMBEDDINGS=true + опциональная зависимость
+# sentence-transformers (модель ~100 МБ, разворачивается отдельно).
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _signal_lexical_diversity(soup: BeautifulSoup) -> Dict[str, Any]:
+    """Лексическое разнообразие текста — TTR + MTLD.
+
+    TTR  — type-token ratio = unique / total. Падает на длинных текстах,
+           поэтому смотрим вместе с MTLD.
+    MTLD — Measure of Textual Lexical Diversity (McCarthy 2010).
+
+    Pure-CPU, без модели. Используется в effort_score (Wave 3 #14).
+    """
+    if not soup:
+        return {"tokens": 0, "types": 0, "ttr": 0.0, "mtld": 0.0}
+    text = soup.get_text(" ", strip=True)
+    text = re.sub(r"\s+", " ", text or "").lower()
+    if not text:
+        return {"tokens": 0, "types": 0, "ttr": 0.0, "mtld": 0.0}
+    tokens = [m.group(0) for m in _WORD_RE.finditer(text) if len(m.group(0)) >= 2]
+    n = len(tokens)
+    if n == 0:
+        return {"tokens": 0, "types": 0, "ttr": 0.0, "mtld": 0.0}
+    types = len(set(tokens))
+    ttr = round(types / n, 4)
+    mtld = round(_mtld(tokens, threshold=0.72), 1)
+    return {
+        "tokens": n,
+        "types":  types,
+        "ttr":    ttr,
+        "mtld":   mtld,
+    }
+
+
+def _mtld(tokens: Sequence[str], threshold: float = 0.72) -> float:
+    """MTLD по канонической формуле McCarthy (двунаправленный проход)."""
+    if not tokens:
+        return 0.0
+
+    def _factor(seq: Sequence[str]) -> float:
+        if len(seq) < 10:
+            return 0.0
+        factors = 0
+        types: set = set()
+        running = 0
+        for w in seq:
+            types.add(w)
+            running += 1
+            ttr_local = len(types) / running
+            if ttr_local <= threshold:
+                factors += 1
+                types = set()
+                running = 0
+        if running > 0:
+            partial = (1.0 - (len(types) / max(running, 1))) / max(1.0 - threshold, 1e-6)
+            factors += partial
+        return len(seq) / factors if factors else 0.0
+
+    forward = _factor(tokens)
+    backward = _factor(list(reversed(tokens)))
+    if forward and backward:
+        return (forward + backward) / 2.0
+    return forward or backward
+
+
+def _agg_lex_diversity(docs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    ttr_vals  = [float((d.get("lexical_diversity") or {}).get("ttr") or 0.0) for d in docs]
+    mtld_vals = [float((d.get("lexical_diversity") or {}).get("mtld") or 0.0) for d in docs]
+    return {
+        "ttr_median":  _med(ttr_vals)  or 0.0,
+        "mtld_median": _med(mtld_vals) or 0.0,
+        "mtld_min":    round(min(mtld_vals), 1) if mtld_vals else 0.0,
+        "mtld_max":    round(max(mtld_vals), 1) if mtld_vals else 0.0,
+    }
+
+
+# ── 15. Title-pattern miner с CTR-эвристиками ─────────────────────────────
+_TPAT_LISTICLE_RE = re.compile(
+    r"^\s*(?:топ[\-\s]*\d+|\d+\s+(?:лучших?|способов|причин|шагов|советов|"
+    r"идей|примеров|инструмент|вариантов|типов|вещей|правил|плюсов|минусов))"
+    r"|^\s*\d+\s+best\b|^\s*top\s*\d+\b",
+    re.IGNORECASE,
+)
+_TPAT_QUESTION_RE = re.compile(
+    r"^(?:как\b|что\b|почему\b|зачем\b|когда\b|где\b|сколько\b|"
+    r"how\b|what\b|why\b|when\b|where\b)",
+    re.IGNORECASE,
+)
+_TPAT_VS_RE = re.compile(r"\b(?:vs\.?|против)\b", re.IGNORECASE)
+_TPAT_BRAND_PIPE_RE = re.compile(r"[\|—–\-]\s*[А-Яа-яA-Za-z][\w\s]{2,40}$")
+_TPAT_BRACKETS_RE = re.compile(r"[\(\[\{][^)\]\}]{3,30}[\)\]\}]")
+
+
+def _detect_title_patterns(titles: Sequence[str]) -> Dict[str, Any]:
+    """Wave 3 #15: классификатор шаблонов title в топе."""
+    n = max(len(titles), 1)
+    patterns = {
+        "listicle":      sum(1 for t in titles if _TPAT_LISTICLE_RE.search(t or "")),
+        "question":      sum(1 for t in titles if _TPAT_QUESTION_RE.match((t or "").strip())),
+        "comparison":    sum(1 for t in titles if _TPAT_VS_RE.search(t or "")),
+        "brand_pipe":    sum(1 for t in titles if _TPAT_BRAND_PIPE_RE.search(t or "")),
+        "brackets":      sum(1 for t in titles if _TPAT_BRACKETS_RE.search(t or "")),
+        "year_present":  sum(1 for t in titles if _YEAR_RE.search(t or "")),
+    }
+    rows = [
+        {"pattern": k, "count": v, "share_pct": round(100.0 * v / n, 1)}
+        for k, v in patterns.items() if v > 0
+    ]
+    rows.sort(key=lambda r: -r["count"])
+    recommended = next((r["pattern"] for r in rows if r["share_pct"] >= 30.0), None)
+    return {
+        "patterns":     rows,
+        "recommended":  recommended,
+        "total_titles": n,
+    }
+
+
+# ── 13. Embeddings (опционально, гейт RELEVANCE_EMBEDDINGS=true) ───────────
+# Этот модуль НЕ грузит модель сам — он лишь предоставляет API для pipeline.js.
+# Реальная имплементация — в relevance/app/embeddings.py (импортируется лениво,
+# не падает если sentence-transformers отсутствует).
+def embeddings_enabled() -> bool:
+    """True, если RELEVANCE_EMBEDDINGS=true И пакет sentence-transformers
+    реально установлен. Самого факта наличия `embeddings.py` недостаточно —
+    модуль написан так, чтобы импортироваться даже без heavy-deps; реальная
+    модель грузится только в `_load_model()`. Проверяем `find_spec`, чтобы
+    не оттригерить компиляцию модели.
+    """
+    if os.environ.get("RELEVANCE_EMBEDDINGS", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    try:  # pragma: no cover — гейт для опциональной зависимости
+        from importlib.util import find_spec
+        return find_spec("sentence_transformers") is not None
+    except Exception:
+        return False
+
+
+def compute_topical_signals(
+    per_url: Sequence[Dict[str, Any]],
+    docs_text_by_url: Dict[str, str],
+    our_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Wave 3 #13: topical_distance + page_radius. No-op без env-флага."""
+    if not embeddings_enabled():
+        return {
+            "enabled": False,
+            "reason": "RELEVANCE_EMBEDDINGS=false or sentence-transformers not installed",
+        }
+    try:  # pragma: no cover — гейт для опциональной зависимости
+        from . import embeddings as _emb
+        return _emb.compute_topical_signals(per_url, docs_text_by_url, our_text)
+    except Exception as e:
+        return {"enabled": False, "reason": f"embeddings_failed: {str(e)[:120]}"}
