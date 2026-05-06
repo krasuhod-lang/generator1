@@ -1,12 +1,21 @@
 """HTML → clean text extractor.
 
-1. readability-lxml извлекает основной контент (article / content area).
-2. BeautifulSoup чистит шум:
+Принцип: «мы берём 100% полезного текста со страницы».
+
+1. BeautifulSoup чистит шум:
    * стоп-теги вырезаются полностью (script, style, nav, footer, …);
    * элементы с подозрительными class/id (menu, sidebar, cookie, ads, …)
      удаляются по регулярному выражению.
-3. Текст собирается ТОЛЬКО из p, h1..h6, li, td, th. div/span намеренно
-   не используются как структурные блоки — они дают много мусора.
+2. Текст собирается из расширенного набора структурных тегов
+   (p, h1..h6, li, td, th, blockquote, dt, dd, figcaption, article,
+   section, main, div, span). div/span включены, потому что современные
+   сайты часто верстают абзацы через div — ранее мы теряли до 60-70%
+   контента. Дедупликация по тексту убирает дубли от вложенных div.
+3. Если очищенный текст оказался слишком коротким (< MIN_BODY_TEXT_CHARS),
+   делаем второй заход через readability-lxml — иногда readability
+   достаёт основной контент даже там, где BS4 видит «всё в одном div».
+4. Если оба прохода вернули мало — отдаём наиболее длинный из двух
+   результатов. Никаких отбрасываний «если меньше N» — берём всё.
 """
 
 from __future__ import annotations
@@ -34,13 +43,26 @@ NOISE_CLASS_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Из каких именно тегов собирать текст. div/span — нет, чтобы не цеплять
-# обвязку. Текст внутри <p><span>…</span></p> всё равно вытащится через
-# get_text() на уровне <p>.
-CONTENT_TAGS = ("p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "td", "th")
+# Из каких именно тегов собирать текст. Включаем div/span/article/section —
+# современные сайты часто верстают абзацы через div, и без них мы теряли
+# существенную часть контента. Дубли вложенных блоков убирает дедупликация
+# по подстроке-родителю в _collect_text_blocks().
+CONTENT_TAGS = (
+    "p", "h1", "h2", "h3", "h4", "h5", "h6",
+    "li", "td", "th",
+    "blockquote", "dt", "dd", "figcaption", "caption", "summary",
+    "article", "section", "main",
+    "div", "span",
+)
 
 # Очень короткие куски (1-2 слова) — это, как правило, навигация / breadcrumb.
-MIN_BLOCK_LEN_CHARS = 8
+# Снижено с 8 до 4 — на современных сайтах одно-двухсловные подзаголовки и
+# элементы списков тоже несут смысл (бренды, регионы, теги).
+MIN_BLOCK_LEN_CHARS = 4
+
+# Если после первого прохода BS4 текста меньше — пробуем readability как
+# второй источник и берём максимум из двух.
+MIN_BODY_TEXT_CHARS = 800
 
 
 def _strip_noise(soup: BeautifulSoup) -> None:
@@ -76,30 +98,98 @@ def _readability_main_html(html: str) -> str:
         return html
 
 
+def _make_soup(html: str) -> BeautifulSoup:
+    """lxml-парсер быстрее на больших страницах; html.parser как запасной."""
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
+def _collect_text_blocks(soup: BeautifulSoup) -> List[str]:
+    """Собирает текстовые блоки из CONTENT_TAGS с дедупликацией.
+
+    Дедупликация важна потому, что при включении div/span один и тот же
+    текст может встретиться 3-4 раза (вложенные обёртки). Алгоритм:
+    идём от глубоких узлов к поверхностным, и если текст узла полностью
+    совпадает с уже собранным блоком (или является его супер-строкой) —
+    оставляем более длинную версию.
+    """
+    seen: List[str] = []
+    seen_set = set()
+    for tag in soup.find_all(CONTENT_TAGS):
+        text = tag.get_text(separator=" ", strip=True)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) < MIN_BLOCK_LEN_CHARS:
+            continue
+        if text in seen_set:
+            continue
+        seen_set.add(text)
+        seen.append(text)
+    return seen
+
+
+def _strip_text_dups(blocks: List[str]) -> List[str]:
+    """Убирает блоки, которые целиком содержатся в более длинном соседе.
+
+    Сортируем по длине убыв. и выкидываем те, чей текст уже встречается
+    как подстрока в принятом длинном блоке. Это снимает дубли «div >
+    div > p»: оставляем самый информативный (обычно самый длинный) узел.
+    """
+    if len(blocks) <= 1:
+        return blocks
+    accepted: List[str] = []
+    for b in sorted(blocks, key=len, reverse=True):
+        is_subset = False
+        for a in accepted:
+            # быстрая отсечка: если b короче a И b in a — выбрасываем
+            if len(b) < len(a) and b in a:
+                is_subset = True
+                break
+        if not is_subset:
+            accepted.append(b)
+    # сохраняем приблизительный исходный порядок (по позиции в blocks)
+    order = {b: i for i, b in enumerate(blocks)}
+    accepted.sort(key=lambda x: order.get(x, 1 << 30))
+    return accepted
+
+
 def extract_text_blocks(html: str) -> List[str]:
-    """Возвращает список текстовых блоков (по одному на p/h*/li/td/th)."""
+    """Возвращает список текстовых блоков (по одному на p/h*/li/div/…).
+
+    Алгоритм: сначала чистим шум на полном документе, собираем все
+    содержательные блоки. Если блоков мало (страница странная) — пробуем
+    второй заход через readability и берём то, что длиннее.
+    """
     if not html or not html.strip():
         return []
 
-    main_html = _readability_main_html(html)
+    # ── Pass 1: full body, минус шум, расширенный набор тегов ────────────
+    soup_full = _make_soup(html)
+    _strip_noise(soup_full)
+    blocks_full = _collect_text_blocks(soup_full)
+    blocks_full = _strip_text_dups(blocks_full)
+    full_chars = sum(len(b) for b in blocks_full)
 
-    # lxml-парсер быстрее на больших страницах; html.parser как запасной
+    # Если из полного дерева вытащили достаточно — используем как есть.
+    # Это и есть «100% полезной информации».
+    if full_chars >= MIN_BODY_TEXT_CHARS:
+        return blocks_full
+
+    # ── Pass 2: readability как fallback ────────────────────────────────
     try:
-        soup = BeautifulSoup(main_html, "lxml")
+        main_html = _readability_main_html(html)
+        soup_main = _make_soup(main_html)
+        _strip_noise(soup_main)
+        blocks_main = _collect_text_blocks(soup_main)
+        blocks_main = _strip_text_dups(blocks_main)
+        main_chars = sum(len(b) for b in blocks_main)
     except Exception:
-        soup = BeautifulSoup(main_html, "html.parser")
+        blocks_main = []
+        main_chars = 0
 
-    _strip_noise(soup)
-
-    blocks: List[str] = []
-    for tag in soup.find_all(CONTENT_TAGS):
-        text = tag.get_text(separator=" ", strip=True)
-        # Сжимаем все whitespace последовательности в один пробел
-        text = re.sub(r"\s+", " ", text).strip()
-        if len(text) >= MIN_BLOCK_LEN_CHARS:
-            blocks.append(text)
-
-    return blocks
+    # Возвращаем максимум — даже короткий результат лучше пустого.
+    return blocks_full if full_chars >= main_chars else blocks_main
 
 
 def extract_full_text(html: str) -> str:

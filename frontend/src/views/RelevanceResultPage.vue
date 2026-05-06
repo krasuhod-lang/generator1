@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import api from '../api.js';
 import AppLayout from '../components/AppLayout.vue';
 import { useRelevanceStore } from '../stores/relevance.js';
+import { findRegionByCode } from '../data/yandexRegions.js';
 
 const route   = useRoute();
 const router  = useRouter();
@@ -16,7 +17,10 @@ let pollTimer    = null;
 
 // ── Filters / paging для таблиц ──────────────────────────────────────────
 const vocabFilter = ref('all'); // 'all' | 'important' | 'additional'
-const ngramFilter = ref('all'); // 'all' | 'bigram' | 'trigram'
+const ngramFilter = ref('all'); // 'all' | 'bigram' | 'trigram' | '4gram'
+
+// Сортировка таблицы LSI (важно: TF-IDF теперь тоже доступен).
+const vocabSort = ref('bm25_score'); // 'bm25_score' | 'tf_idf_score' | 'df' | 'median_count' | 'lemma'
 
 // ── Cocoons (PR 2) ────────────────────────────────────────────────────────
 const cocoonsBuilding = ref(false);
@@ -121,8 +125,15 @@ const ngrams = computed(() => {
 const stats = computed(() => report.value?.report?.stats || {});
 
 const vocabFiltered = computed(() => {
-  if (vocabFilter.value === 'all') return vocabulary.value;
-  return vocabulary.value.filter((v) => v.status === vocabFilter.value);
+  let arr = vocabFilter.value === 'all'
+    ? vocabulary.value
+    : vocabulary.value.filter((v) => v.status === vocabFilter.value);
+  const key = vocabSort.value;
+  arr = [...arr].sort((a, b) => {
+    if (key === 'lemma') return String(a.lemma).localeCompare(String(b.lemma), 'ru');
+    return (Number(b[key]) || 0) - (Number(a[key]) || 0);
+  });
+  return arr;
 });
 const ngramsFiltered = computed(() => {
   if (ngramFilter.value === 'all') return ngrams.value;
@@ -196,6 +207,12 @@ function formatDuration(ms) {
   return s < 60 ? `${s.toFixed(1)}с` : `${Math.round(s / 60)}м ${Math.round(s % 60)}с`;
 }
 
+// Подпись региона: вместо «lr=213» показываем «Москва (lr=213)».
+function regionLabel(lr) {
+  const r = findRegionByCode(lr);
+  return r ? `${r.name} (lr=${r.code})` : `lr=${lr}`;
+}
+
 // ── Export — берём напрямую с бэка через apiBaseURL+токен ────────────────
 async function exportFile(kind) {
   try {
@@ -219,11 +236,80 @@ async function exportFile(kind) {
     alert(err.response?.data?.error || err.message || 'Ошибка экспорта');
   }
 }
+
+// ── Copy helpers ─────────────────────────────────────────────────────────
+const copyHint = ref('');     // временный feedback, что скопировано
+let copyHintTimer = null;
+
+async function copyToClipboard(text, label) {
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // Fallback для старых браузеров / небезопасных origin'ов
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    copyHint.value = `✓ Скопировано: ${label}`;
+  } catch (err) {
+    copyHint.value = `⚠ Не удалось скопировать: ${err.message || ''}`;
+  }
+  if (copyHintTimer) clearTimeout(copyHintTimer);
+  copyHintTimer = setTimeout(() => { copyHint.value = ''; }, 2500);
+}
+
+function copyImportantLsi() {
+  const items = vocabulary.value.filter((v) => v.status === 'important').map((v) => v.lemma);
+  copyToClipboard(items.join(', '), `важные LSI (${items.length})`);
+}
+function copyAllLsi() {
+  const items = vocabulary.value.map((v) => v.lemma);
+  copyToClipboard(items.join(', '), `все LSI (${items.length})`);
+}
+function copyImportantNgrams() {
+  // «Важные» n-граммы — те, что встречаются у максимума сайтов (топ по df).
+  // Если в выдаче есть фразы с df ≥ 3, считаем их важными; иначе берём top-30.
+  const ng = ngrams.value;
+  const important = ng.filter((n) => n.df >= 3);
+  const list = important.length >= 5
+    ? important
+    : [...ng].sort((a, b) => b.df - a.df).slice(0, 30);
+  const text = list.map((n) => n.phrase).join('\n');
+  copyToClipboard(text, `важные n-граммы (${list.length})`);
+}
+function copyAllNgrams() {
+  const text = ngrams.value.map((n) => n.phrase).join('\n');
+  copyToClipboard(text, `все n-граммы (${ngrams.value.length})`);
+}
+function copyFilteredVocab() {
+  const text = vocabFiltered.value.map((v) => v.lemma).join(', ');
+  copyToClipboard(text, `видимые LSI (${vocabFiltered.value.length})`);
+}
+function copyFilteredNgrams() {
+  const text = ngramsFiltered.value.map((n) => n.phrase).join('\n');
+  copyToClipboard(text, `видимые n-граммы (${ngramsFiltered.value.length})`);
+}
 </script>
 
 <template>
   <AppLayout>
     <div class="max-w-7xl mx-auto px-6 py-8 space-y-6">
+      <!-- Toast: feedback от кнопок «Скопировать» -->
+      <Transition name="fade">
+        <div v-if="copyHint"
+             class="fixed bottom-6 right-6 z-50 px-4 py-2 rounded-lg shadow-lg
+                    bg-emerald-900/90 text-emerald-100 border border-emerald-700 text-sm">
+          {{ copyHint }}
+        </div>
+      </Transition>
+
       <!-- Шапка -->
       <div class="flex items-start justify-between gap-4 border-b border-gray-800 pb-4">
         <div class="min-w-0">
@@ -232,7 +318,7 @@ async function exportFile(kind) {
             📊 {{ report?.query || 'Загрузка отчёта...' }}
           </h1>
           <div class="text-xs text-gray-500 mt-1 flex flex-wrap gap-x-4 gap-y-1">
-            <span v-if="report">lr={{ report.lr }}</span>
+            <span v-if="report">📍 {{ regionLabel(report.lr) }}</span>
             <span v-if="report">📅 {{ formatDate(report.created_at) }}</span>
             <span v-if="report?.duration_ms">⏱ {{ formatDuration(report.duration_ms) }}</span>
             <span v-if="report">🔗 {{ report.fetched_count }}/{{ (report.serp || []).length }} страниц</span>
@@ -348,13 +434,13 @@ async function exportFile(kind) {
           </div>
         </div>
 
-        <!-- ── Таблица 1: LSI словарь (BM25) ── -->
+        <!-- ── Таблица 1: LSI словарь (BM25 + TF-IDF) ── -->
         <div class="card">
           <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">
-              📑 Словарь LSI (BM25) — {{ vocabFiltered.length }} лемм
+              📑 Словарь LSI (BM25 + TF-IDF) — {{ vocabFiltered.length }} лемм
             </h2>
-            <div class="flex items-center gap-1 text-xs">
+            <div class="flex items-center gap-1 text-xs flex-wrap">
               <button class="btn-ghost"
                       :class="vocabFilter === 'all' ? 'text-indigo-300' : 'text-gray-500'"
                       @click="vocabFilter = 'all'">Все</button>
@@ -364,6 +450,29 @@ async function exportFile(kind) {
               <button class="btn-ghost"
                       :class="vocabFilter === 'additional' ? 'text-indigo-300' : 'text-gray-500'"
                       @click="vocabFilter = 'additional'">Доп</button>
+              <span class="mx-1 text-gray-700">·</span>
+              <span class="text-gray-500">сорт:</span>
+              <select v-model="vocabSort"
+                      class="bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-xs text-gray-200">
+                <option value="bm25_score">BM25</option>
+                <option value="tf_idf_score">TF-IDF</option>
+                <option value="df">DF</option>
+                <option value="median_count">Медиана</option>
+                <option value="lemma">Алфавит</option>
+              </select>
+              <span class="mx-1 text-gray-700">·</span>
+              <button class="btn-ghost text-emerald-300"
+                      @click="copyImportantLsi" title="Скопировать только важные леммы">
+                📋 Важные
+              </button>
+              <button class="btn-ghost text-sky-300"
+                      @click="copyFilteredVocab" title="Скопировать видимые в таблице">
+                📋 Видимые
+              </button>
+              <button class="btn-ghost text-gray-400"
+                      @click="copyAllLsi" title="Скопировать все леммы">
+                📋 Все
+              </button>
             </div>
           </div>
           <div v-if="vocabFiltered.length === 0" class="text-gray-500 text-sm py-4 text-center">
@@ -378,6 +487,7 @@ async function exportFile(kind) {
                   <th class="text-right py-2 px-2">DF (сайтов)</th>
                   <th class="text-right py-2 px-2">Медиана вх.</th>
                   <th class="text-right py-2 px-2">BM25 score</th>
+                  <th class="text-right py-2 px-2">TF-IDF</th>
                   <th class="text-center py-2 px-2">Статус</th>
                 </tr>
               </thead>
@@ -388,7 +498,8 @@ async function exportFile(kind) {
                   <td class="py-1.5 px-2 text-gray-100 font-medium">{{ v.lemma }}</td>
                   <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.df }}</td>
                   <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.median_count }}</td>
-                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.bm25_score.toFixed(4) }}</td>
+                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.bm25_score || 0).toFixed(4) }}</td>
+                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.tf_idf_score || 0).toFixed(4) }}</td>
                   <td class="py-1.5 px-2 text-center">
                     <span v-if="v.status === 'important'"
                           class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800">
@@ -410,7 +521,7 @@ async function exportFile(kind) {
             <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">
               🔗 N-граммы — {{ ngramsFiltered.length }} фраз
             </h2>
-            <div class="flex items-center gap-1 text-xs">
+            <div class="flex items-center gap-1 text-xs flex-wrap">
               <button class="btn-ghost"
                       :class="ngramFilter === 'all' ? 'text-indigo-300' : 'text-gray-500'"
                       @click="ngramFilter = 'all'">Все</button>
@@ -420,10 +531,26 @@ async function exportFile(kind) {
               <button class="btn-ghost"
                       :class="ngramFilter === 'trigram' ? 'text-indigo-300' : 'text-gray-500'"
                       @click="ngramFilter = 'trigram'">Триграммы</button>
+              <button class="btn-ghost"
+                      :class="ngramFilter === '4gram' ? 'text-indigo-300' : 'text-gray-500'"
+                      @click="ngramFilter = '4gram'">4-граммы</button>
+              <span class="mx-1 text-gray-700">·</span>
+              <button class="btn-ghost text-emerald-300"
+                      @click="copyImportantNgrams" title="Скопировать наиболее частые n-граммы">
+                📋 Важные
+              </button>
+              <button class="btn-ghost text-sky-300"
+                      @click="copyFilteredNgrams" title="Скопировать видимые в таблице">
+                📋 Видимые
+              </button>
+              <button class="btn-ghost text-gray-400"
+                      @click="copyAllNgrams" title="Скопировать все n-граммы">
+                📋 Все
+              </button>
             </div>
           </div>
           <div v-if="ngramsFiltered.length === 0" class="text-gray-500 text-sm py-4 text-center">
-            Нет n-грамм по выбранному фильтру (минимум 3 сайта).
+            Нет n-грамм по выбранному фильтру.
           </div>
           <div v-else class="overflow-x-auto">
             <table class="w-full text-xs">
@@ -445,9 +572,13 @@ async function exportFile(kind) {
                   <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.df }}</td>
                   <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.median_count }}</td>
                   <td class="py-1.5 px-2 text-center">
-                    <span :class="n.type === 'bigram' ? 'text-sky-300' : 'text-fuchsia-300'"
+                    <span :class="{
+                            'text-sky-300':    n.type === 'bigram',
+                            'text-fuchsia-300':n.type === 'trigram',
+                            'text-amber-300':  n.type === '4gram',
+                          }"
                           class="text-[10px] uppercase">
-                      {{ n.type === 'bigram' ? 'Би' : 'Три' }}
+                      {{ n.type === 'bigram' ? 'Би' : (n.type === 'trigram' ? 'Три' : '4-гр') }}
                     </span>
                   </td>
                   <td class="py-1.5 px-2 text-center text-gray-500 text-[10px]">{{ n.pos_pattern }}</td>

@@ -59,7 +59,7 @@ async function _setStage(reportId, stage, extra = {}) {
   );
 }
 
-async function _finishOk(reportId, report, durationMs, rawMeta) {
+async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed) {
   await db.query(
     `UPDATE relevance_reports
        SET status='done',
@@ -68,7 +68,8 @@ async function _finishOk(reportId, report, durationMs, rawMeta) {
            completed_at = NOW(),
            duration_ms = $3,
            raw_storage = $4,
-           raw_expires_at = $5
+           raw_expires_at = $5,
+           raw_processed = $6::jsonb
      WHERE id = $1`,
     [
       reportId,
@@ -76,6 +77,7 @@ async function _finishOk(reportId, report, durationMs, rawMeta) {
       durationMs,
       rawMeta?.stored ? 'redis' : 'none',
       rawMeta?.stored ? rawMeta.expiresAt : null,
+      dbProcessed ? JSON.stringify(dbProcessed) : null,
     ],
   );
 }
@@ -166,8 +168,13 @@ async function processRelevanceReport(reportId) {
       options: { return_processed: true },
     });
 
-    // ── 3.5. Складываем processed-доки в Redis (best-effort) ────────────
+    // ── 3.5. Складываем processed-доки в Redis (best-effort) и в Postgres ───
+    // Redis — «горячий путь» для быстрых пересчётов; Postgres — гарантия,
+    // что коконы будут работать всегда, даже без Redis или после истечения
+    // TTL. В БД храним только леммы (без POS-последовательностей) — они
+    // занимают на порядок меньше места и достаточны для TruncatedSVD.
     let rawMeta = { stored: false };
+    let dbProcessed = null;
     const processed = Array.isArray(analysisResp?.processed_documents)
       ? analysisResp.processed_documents
       : [];
@@ -178,6 +185,14 @@ async function processRelevanceReport(reportId) {
         // saveRaw сама ловит ошибки, но на всякий случай.
         console.warn('[relevance] saveRaw threw:', e.message);
       }
+      // Компактный DB-fallback: оставляем только {url, lemmas}.
+      dbProcessed = processed
+        .filter((d) => Array.isArray(d?.lemmas) && d.lemmas.length > 0)
+        .map((d) => ({
+          url:    String(d.url || ''),
+          lemmas: d.lemmas,
+        }));
+      if (dbProcessed.length === 0) dbProcessed = null;
     }
 
     // ── 4. Сохраняем отчёт ───────────────────────────────────────────────
@@ -190,7 +205,7 @@ async function processRelevanceReport(reportId) {
       ngrams:     Array.isArray(analysisResp?.ngrams)     ? analysisResp.ngrams     : [],
     };
 
-    await _finishOk(reportId, fullReport, Date.now() - t0, rawMeta);
+    await _finishOk(reportId, fullReport, Date.now() - t0, rawMeta, dbProcessed);
   } catch (err) {
     console.error(`[relevance] report ${reportId} failed:`, err.message);
     await _finishError(reportId, err.message);

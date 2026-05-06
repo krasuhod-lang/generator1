@@ -1,8 +1,9 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import { useRelevanceStore } from '../stores/relevance.js';
+import { YANDEX_REGIONS, findRegionByCode } from '../data/yandexRegions.js';
 
 const router = useRouter();
 const store  = useRelevanceStore();
@@ -11,6 +12,46 @@ const form = ref({
   query: '',
   lr:    '213',
 });
+
+// ── Region picker (комбобокс с поиском) ──────────────────────────────────
+const regionQuery   = ref('');         // строка поиска в поле
+const regionDropdown = ref(false);     // открыт ли список
+const regionInputRef = ref(null);
+
+const filteredRegions = computed(() => {
+  const q = regionQuery.value.trim().toLowerCase();
+  if (!q) return YANDEX_REGIONS.slice(0, 200); // show first 200
+  const out = [];
+  for (const r of YANDEX_REGIONS) {
+    if (r.name.toLowerCase().includes(q) || String(r.code).includes(q)) {
+      out.push(r);
+      if (out.length >= 200) break;
+    }
+  }
+  return out;
+});
+
+const currentRegionLabel = computed(() => {
+  const r = findRegionByCode(form.value.lr);
+  return r ? `${r.name} (lr=${r.code})` : `lr=${form.value.lr}`;
+});
+
+function pickRegion(region) {
+  form.value.lr = String(region.code);
+  regionQuery.value = '';
+  regionDropdown.value = false;
+}
+
+function regionGroupColor(group) {
+  switch (group) {
+    case 'Округ':     return 'text-amber-300';
+    case 'Область':   return 'text-sky-300';
+    case 'Республика':return 'text-emerald-300';
+    case 'Край':      return 'text-fuchsia-300';
+    case 'Город':     return 'text-gray-300';
+    default:          return 'text-gray-400';
+  }
+}
 
 const submitting = ref(false);
 const formError  = ref(null);
@@ -25,6 +66,17 @@ onMounted(() => {
 function saveDraft() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(form.value)); } catch (_) { /* ignore */ }
 }
+
+// Закрываем дропдаун по клику снаружи
+function handleDocClick(e) {
+  if (!regionInputRef.value) return;
+  const root = regionInputRef.value.closest('[data-region-picker]');
+  if (root && !root.contains(e.target)) {
+    regionDropdown.value = false;
+  }
+}
+onMounted(() => { document.addEventListener('click', handleDocClick); });
+onUnmounted(() => { document.removeEventListener('click', handleDocClick); });
 
 async function handleCreate() {
   formError.value = null;
@@ -124,9 +176,37 @@ function formatDuration(ms) {
             <input v-model="form.query" type="text" class="input"
                    placeholder="Например: купить керамическую плитку" />
           </div>
-          <div>
+          <div data-region-picker class="relative">
             <label class="label">Регион Яндекса (lr)</label>
-            <input v-model="form.lr" type="text" class="input" placeholder="213 (Москва)" />
+            <button type="button"
+                    @click="regionDropdown = !regionDropdown"
+                    class="input text-left flex items-center justify-between gap-2 w-full">
+              <span class="truncate">{{ currentRegionLabel }}</span>
+              <span class="text-xs text-gray-500">{{ regionDropdown ? '▲' : '▼' }}</span>
+            </button>
+            <div v-if="regionDropdown"
+                 class="absolute z-20 mt-1 w-full bg-gray-900 border border-gray-700 rounded shadow-xl">
+              <input ref="regionInputRef"
+                     v-model="regionQuery"
+                     type="text"
+                     class="w-full bg-gray-950 border-b border-gray-800 px-3 py-2 text-sm text-gray-200 outline-none focus:border-indigo-700"
+                     placeholder="🔎 Поиск региона по названию или коду…"
+                     @click.stop />
+              <ul class="max-h-72 overflow-y-auto text-xs">
+                <li v-if="filteredRegions.length === 0"
+                    class="px-3 py-2 text-gray-500">Ничего не найдено</li>
+                <li v-for="r in filteredRegions" :key="r.code"
+                    @click="pickRegion(r)"
+                    :class="['px-3 py-1.5 cursor-pointer flex items-center justify-between gap-2 hover:bg-indigo-900/30',
+                             String(form.lr) === String(r.code) ? 'bg-indigo-900/40' : '']">
+                  <span class="truncate">
+                    <span :class="regionGroupColor(r.group)" class="text-[10px] uppercase tracking-wider mr-1.5">{{ r.group }}</span>
+                    <span class="text-gray-100">{{ r.name }}</span>
+                  </span>
+                  <span class="text-gray-500 tabular-nums flex-shrink-0">lr={{ r.code }}</span>
+                </li>
+              </ul>
+            </div>
           </div>
         </div>
 
