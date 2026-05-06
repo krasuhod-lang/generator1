@@ -15,6 +15,7 @@ const TABS = [
   { key: 'info-article',   label: 'Статья в блог',    icon: '📰', path: '/info-article' },
   { key: 'article-topics', label: 'Темы статей',      icon: '🔮', path: '/article-topics' },
   { key: 'acf-json',       label: 'JSON',             icon: '🧩', path: '/acf-json' },
+  { key: 'relevance',      label: 'Релевантность',    icon: '📊', path: '/relevance' },
 ];
 
 const activeTab = computed(() => {
@@ -24,6 +25,7 @@ const activeTab = computed(() => {
   if (p.startsWith('/info-article'))   return 'info-article';
   if (p.startsWith('/article-topics')) return 'article-topics';
   if (p.startsWith('/acf-json'))       return 'acf-json';
+  if (p.startsWith('/relevance'))      return 'relevance';
   if (p.startsWith('/copilot') || /\/tasks\/[^/]+\/copilot/.test(p)) return 'copilot';
   return 'seo-text';
 });

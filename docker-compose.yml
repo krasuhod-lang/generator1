@@ -68,6 +68,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
       # Redis — внутреннее имя сервиса Docker (переопределяет .env если там localhost)
       REDIS_URL: redis://redis:6379
+      # Релевантность: внутренний URL Python-микросервиса.
+      RELEVANCE_INTERNAL_URL: ${RELEVANCE_INTERNAL_URL:-http://relevance:8000}
+      RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
       # Прокси для Gemini API — загружаются из .env через env_file
       # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
     ports:
@@ -118,6 +121,29 @@ services:
       - "8080:80"
     depends_on:
       - backend
+
+  # ── Relevance Analyzer (FastAPI + readability-lxml + pymorphy3 + BM25) ───
+  # Stateless микросервис «Релевантности»: принимает список HTML, возвращает
+  # JSON с BM25-словарём и n-граммами. Наружу не торчит — только во внутренней
+  # сети Docker. Node-бэкенд ходит на http://relevance:8000 с заголовком
+  # X-Internal-Token (значение из .env, обязательно совпадает с обеих сторон).
+  relevance:
+    build:
+      context: ./relevance
+      dockerfile: Dockerfile
+    container_name: seo_relevance
+    restart: unless-stopped
+    environment:
+      RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
+      LOG_LEVEL: ${RELEVANCE_LOG_LEVEL:-INFO}
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 # ── Volumes ─────────────────────────────────────────────────────────────────
 volumes:

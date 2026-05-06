@@ -29,6 +29,7 @@ const linkArticleRoutes   = require('./src/routes/linkArticle.routes');
 const infoArticleRoutes   = require('./src/routes/infoArticle.routes');
 const articleTopicsRoutes = require('./src/routes/articleTopics.routes');
 const acfJsonRoutes       = require('./src/routes/acfJson.routes');
+const relevanceRoutes     = require('./src/routes/relevance.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -107,6 +108,7 @@ app.use('/api/link-article',   linkArticleRoutes);
 app.use('/api/info-article',   infoArticleRoutes);
 app.use('/api/article-topics', articleTopicsRoutes);
 app.use('/api/acf-json',       acfJsonRoutes);
+app.use('/api/relevance',      relevanceRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -697,6 +699,43 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_task_logs_task_ts ON task_logs (task_id, ts)`);
+
+    // ─── Migration 018: Relevance Analyzer (XMLStock SERP + BM25 + n-grams) ───
+    // Хранит отчёты анализа релевантности (вкладка «Релевантность»). Сырой
+    // текст ТОП-20 НЕ кладём — только агрегаты (BM25-словарь и n-граммы).
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'relevance_report_status') THEN
+          CREATE TYPE relevance_report_status AS ENUM (
+            'pending', 'fetching', 'analyzing', 'done', 'error'
+          );
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS relevance_reports (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        query           TEXT NOT NULL,
+        lr              TEXT NOT NULL DEFAULT '213',
+        top_n           INTEGER NOT NULL DEFAULT 20,
+        status          relevance_report_status NOT NULL DEFAULT 'pending',
+        error_message   TEXT,
+        current_stage   TEXT,
+        serp            JSONB NOT NULL DEFAULT '[]'::jsonb,
+        fetched_count   INTEGER NOT NULL DEFAULT 0,
+        failed_urls     JSONB NOT NULL DEFAULT '[]'::jsonb,
+        report          JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at      TIMESTAMPTZ,
+        completed_at    TIMESTAMPTZ,
+        duration_ms     INTEGER
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_user_created ON relevance_reports (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_status ON relevance_reports (status)`);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
