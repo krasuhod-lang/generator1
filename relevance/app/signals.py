@@ -961,9 +961,16 @@ def _agg_schema_profile(docs: Sequence[Dict[str, Any]], n: int) -> Dict[str, Any
     ]
     # Mandatory: типы, встретившиеся ≥ 50% топа.
     mandatory = [r["type"] for r in rows if r["share_pct"] >= 50.0]
-    pressure = round(100.0 * (len(mandatory) > 0) + 0.0, 1) if mandatory else round(
-        100.0 * sum(r["share_pct"] for r in rows[:5]) / max(len(rows[:5]), 1) / 100.0 * 50.0, 1
-    )
+    # Schema-pressure (0..100): если есть «обязательные» типы, давление
+    # максимальное — добавление обязательно. Иначе — взвешенная сумма долей
+    # топ-5 типов / 2 (т.е. чем чаще схемы вообще встречаются, тем выше).
+    if mandatory:
+        pressure = 100.0
+    elif rows:
+        top5 = rows[:5]
+        pressure = round(sum(r["share_pct"] for r in top5) / len(top5) / 2.0, 1)
+    else:
+        pressure = 0.0
     return {
         "types":     rows,
         "mandatory": mandatory,

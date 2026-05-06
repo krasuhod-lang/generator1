@@ -20,7 +20,10 @@ from .signals import (
 
 
 def _today_minus(days: int) -> str:
-    return (_dt.date.today() - _dt.timedelta(days=days)).strftime("%Y-%m-%dT12:00:00+0000")
+    # ISO 8601 с двоеточием в TZ-offset — это эталонный формат, который
+    # принимают и JSON-LD, и наш _parse_date (после _DATE_FORMATS он также
+    # успешно дойдёт до date.fromisoformat fallback).
+    return (_dt.date.today() - _dt.timedelta(days=days)).strftime("%Y-%m-%dT12:00:00+00:00")
 
 
 SAMPLE_HTML_A = f"""

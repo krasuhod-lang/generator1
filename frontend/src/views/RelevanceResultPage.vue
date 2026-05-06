@@ -313,6 +313,76 @@ const headingsSorted = computed(() => {
   }));
 });
 
+// ── (13) Wave 1: SEO-сигналы из утечек Google/Yandex ───────────────────
+// См. relevance/app/signals.py + competitorSignalsRequirements.js на бэке.
+// Структура: { per_url, top_aggregate, algorithm_signals, doc_count }.
+// our_report.competitor_signals — то же самое для нашего сайта (если задан).
+const competitorSignals = computed(() => {
+  const block = report.value?.report?.competitor_signals;
+  return (block && typeof block === 'object') ? block : null;
+});
+const topAggregate = computed(() => competitorSignals.value?.top_aggregate || {});
+const algorithmSignals = computed(() => competitorSignals.value?.algorithm_signals || {});
+const ourSignals = computed(() => report.value?.our_report?.competitor_signals || null);
+
+// Mini-чеклист для UI: «наш сайт vs медиана топа» по ключевым метрикам.
+// Пороги дублируются в backend/src/services/relevance/competitorSignalsRequirements.js
+// (compareOurDocumentToTop) — держать значения в синхронизации.
+const GAP_UNDER_THRESHOLD = 0.7;
+const GAP_OVER_THRESHOLD = 1.5;
+const GAP_OVER_THRESHOLD_INVERSE = 1.3;
+const ourVsTopGaps = computed(() => {
+  const our = ourSignals.value;
+  const top = topAggregate.value;
+  if (!our || our.empty_reason || !top || Object.keys(top).length === 0) return [];
+  const ux = top.ux_profile || {};
+  const exact = top.exact_query_position_targets || {};
+  const trust = top.trust_link_quota || {};
+  const our_ux = our.ux_profile || {};
+  const our_eo = our.exact_occurrences || {};
+  const our_tl = our.trust_links || {};
+  const cmp = (label, ourVal, topVal, higherIsBetter = true) => {
+    if (topVal === null || topVal === undefined) return null;
+    const o = Number(ourVal) || 0;
+    const t = Number(topVal) || 0;
+    let gap = 'ok';
+    if (higherIsBetter && o < t * GAP_UNDER_THRESHOLD) gap = 'under';
+    if (higherIsBetter && o > t * GAP_OVER_THRESHOLD) gap = 'over';
+    if (!higherIsBetter && o > t * GAP_OVER_THRESHOLD_INVERSE) gap = 'over';
+    return { label, our: o, top: t, gap };
+  };
+  return [
+    cmp('H2-разделов', our_ux.h2_count, ux.h2_count_median),
+    cmp('Заголовков на 1000 слов', our_ux.headings_per_1k_words, ux.headings_per_1k_words_median),
+    cmp('Символов до первого H2', our_ux.above_the_fold_chars, ux.above_the_fold_chars_median),
+    cmp('Средняя длина абзаца', our_ux.avg_paragraph_chars, ux.avg_paragraph_chars_median, false),
+    cmp('Точные вхождения в первых 100 словах', our_eo.first_100_words, exact.first_100_words_median),
+    cmp('Точные вхождения в H2', our_eo.in_h2, exact.in_h2_median),
+    cmp('Точные вхождения всего', our_eo.total, exact.total_median),
+    cmp('Trust-ссылок (gov/wiki/ГОСТ/СМИ)', our_tl.trust_links, trust.trust_links_median),
+  ].filter(Boolean);
+});
+
+// Per-URL таблица Wave-1 сигналов. Сортировка по effort_score.
+const competitorSignalsRows = computed(() => {
+  const rows = competitorSignals.value?.per_url || [];
+  return rows
+    .filter((r) => r && !r.empty_reason)
+    .map((r) => ({
+      url: r.url,
+      title: r.title_meta?.title || '',
+      title_chars: r.title_meta?.title_chars || 0,
+      title_h1_match: !!r.title_meta?.title_h1_exact_match,
+      schemas: (r.schema_types || []).map((t) => t.type).filter(Boolean),
+      age_modified: r.freshness?.age_modified_days,
+      effort: r.effort_score || 0,
+      h2: r.ux_profile?.h2_count || 0,
+      trust: r.trust_links?.trust_links || 0,
+      exact_total: r.exact_occurrences?.total || 0,
+    }))
+    .sort((a, b) => (b.effort || 0) - (a.effort || 0));
+});
+
 // ── (4) Превью того, что собрал парсер (per-URL) ───────────────────────
 // Бэкенд кладёт `parsed_preview` в каждый document_diagnostics при
 // `include_parsed_preview=true`. На UI: модалка по клику на «📄 Что собрал».
@@ -1617,6 +1687,274 @@ function copyTagZone() {
               </tbody>
             </table>
           </div>
+        </div>
+
+        <!-- ── (13) Wave 1: SEO-сигналы из утечек Google/Yandex ── -->
+        <div v-if="competitorSignals && (competitorSignals.doc_count || 0) > 0" class="card">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 class="text-base font-bold text-fuchsia-300 uppercase tracking-wider">
+              🎯 Сигналы топа (утечки Google / Yandex) — {{ competitorSignals.doc_count }} страниц
+            </h2>
+          </div>
+          <p class="text-[11px] text-gray-500 mb-3">
+            Wave 1: HTML-сигналы из утечек Google Content Warehouse (май 2024) и
+            Яндекс (январь 2023, 1922 фактора). Чеклист для writer/audit-стадий.
+            Эмбеддинги, NER, PAA-mining (Wave 2/3) добавятся отдельно.
+          </p>
+
+          <!-- Наш сайт vs медиана топа -->
+          <div v-if="ourVsTopGaps.length > 0" class="mb-4">
+            <h3 class="text-xs font-bold text-amber-300 uppercase tracking-wider mb-2">
+              📊 Наш сайт vs медиана топа
+            </h3>
+            <div class="overflow-x-auto border border-gray-800 rounded">
+              <table class="w-full text-xs">
+                <thead class="text-[10px] text-gray-500 uppercase border-b border-gray-800 bg-gray-900">
+                  <tr>
+                    <th class="text-left py-2 px-2">Метрика</th>
+                    <th class="text-right py-2 px-2">У нас</th>
+                    <th class="text-right py-2 px-2">Медиана топа</th>
+                    <th class="text-center py-2 px-2">Статус</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="g in ourVsTopGaps" :key="g.label" class="border-b border-gray-900">
+                    <td class="py-1.5 px-2 text-gray-100">{{ g.label }}</td>
+                    <td class="py-1.5 px-2 text-right tabular-nums"
+                        :class="g.gap === 'under' ? 'text-rose-300' : g.gap === 'over' ? 'text-amber-300' : 'text-emerald-300'">
+                      {{ Number(g.our).toFixed(1) }}
+                    </td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(g.top).toFixed(1) }}</td>
+                    <td class="py-1.5 px-2 text-center">
+                      <span v-if="g.gap === 'under'" class="text-rose-400" title="Отстаём от медианы топа">▼ ниже</span>
+                      <span v-else-if="g.gap === 'over'" class="text-amber-400">▲ выше</span>
+                      <span v-else class="text-emerald-400">✓ ок</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 4 колонки сводок -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 text-xs">
+            <!-- Title-template -->
+            <div v-if="topAggregate.title_template" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-sky-300 uppercase tracking-wider mb-2">📝 Title-шаблон топа</div>
+              <ul class="space-y-1 text-gray-300">
+                <li>Длина (медиана): <b class="text-gray-100">{{ Math.round(topAggregate.title_template.title_chars_median || 0) }} симв.</b>
+                  ({{ topAggregate.title_template.title_chars_min }}–{{ topAggregate.title_template.title_chars_max }})</li>
+                <li>Точная фраза в title: <b class="text-gray-100">{{ Number(topAggregate.title_template.exact_query_in_title_share_pct || 0).toFixed(0) }}%</b></li>
+                <li>Год в title: <b>{{ Number(topAggregate.title_template.title_has_year_share_pct || 0).toFixed(0) }}%</b></li>
+                <li>Число в title: <b>{{ Number(topAggregate.title_template.title_has_number_share_pct || 0).toFixed(0) }}%</b></li>
+                <li>title↔H1 совпадают: <b>{{ Number(topAggregate.title_template.title_h1_match_share_pct || 0).toFixed(0) }}%</b></li>
+                <li v-if="(topAggregate.title_template.modifiers_top || []).length > 0">
+                  CTR-модификаторы:
+                  <span v-for="m in (topAggregate.title_template.modifiers_top || []).slice(0, 5)" :key="m.modifier"
+                        class="inline-block bg-gray-800 text-emerald-300 px-1.5 py-0.5 rounded text-[10px] mr-1">
+                    {{ m.modifier }} <span class="text-gray-500">{{ Number(m.share_pct).toFixed(0) }}%</span>
+                  </span>
+                </li>
+              </ul>
+            </div>
+
+            <!-- Schema-профиль -->
+            <div v-if="topAggregate.schema_profile" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-emerald-300 uppercase tracking-wider mb-2">🏷 Schema.org-профиль</div>
+              <div v-if="(topAggregate.schema_profile.mandatory || []).length > 0" class="mb-2">
+                <span class="text-rose-300 text-[10px] uppercase">Обязательные:</span>
+                <span v-for="t in topAggregate.schema_profile.mandatory" :key="'m-'+t"
+                      class="inline-block bg-rose-900/40 border border-rose-800 text-rose-200 px-1.5 py-0.5 rounded text-[10px] ml-1">
+                  {{ t }}
+                </span>
+              </div>
+              <div v-if="(topAggregate.schema_profile.types || []).length > 0">
+                <span class="text-gray-500 text-[10px] uppercase">Все встреченные:</span>
+                <span v-for="r in topAggregate.schema_profile.types" :key="'t-'+r.type"
+                      class="inline-block bg-gray-800 text-emerald-300 px-1.5 py-0.5 rounded text-[10px] ml-1 mt-1">
+                  {{ r.type }} <span class="text-gray-500">{{ r.share_pct }}%</span>
+                </span>
+              </div>
+              <div v-else class="text-gray-500">Schema-разметка не обнаружена в топе.</div>
+            </div>
+
+            <!-- Freshness -->
+            <div v-if="topAggregate.freshness_profile" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-cyan-300 uppercase tracking-wider mb-2">🕒 Freshness</div>
+              <ul class="space-y-1 text-gray-300">
+                <li>Возраст по dateModified (медиана):
+                  <b class="text-gray-100">
+                    {{ topAggregate.freshness_profile.median_age_modified_days !== null
+                        ? topAggregate.freshness_profile.median_age_modified_days + ' дн.'
+                        : '—' }}
+                  </b>
+                </li>
+                <li>Свежих за 90 дн: <b>{{ Number(topAggregate.freshness_profile.share_fresh_90_pct || 0).toFixed(0) }}%</b></li>
+                <li>Свежих за 180 дн: <b>{{ Number(topAggregate.freshness_profile.share_fresh_180_pct || 0).toFixed(0) }}%</b></li>
+                <li>Свежих за 365 дн: <b>{{ Number(topAggregate.freshness_profile.share_fresh_365_pct || 0).toFixed(0) }}%</b></li>
+                <li v-if="topAggregate.freshness_profile.current_year">
+                  Актуальный год: <b class="text-emerald-300">{{ topAggregate.freshness_profile.current_year }}</b>
+                </li>
+              </ul>
+            </div>
+
+            <!-- UX-профиль -->
+            <div v-if="topAggregate.ux_profile" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-violet-300 uppercase tracking-wider mb-2">🧠 UX-профиль (NavBoost-прокси)</div>
+              <ul class="space-y-1 text-gray-300">
+                <li>H2 (медиана): <b class="text-gray-100">{{ topAggregate.ux_profile.h2_count_median }}</b>,
+                    H3: <b>{{ topAggregate.ux_profile.h3_count_median }}</b></li>
+                <li>Заголовков на 1k слов: <b>{{ topAggregate.ux_profile.headings_per_1k_words_median }}</b></li>
+                <li>Длина абзаца (медиана): <b>{{ topAggregate.ux_profile.avg_paragraph_chars_median }} симв.</b></li>
+                <li>До первого H2: <b>{{ topAggregate.ux_profile.above_the_fold_chars_median }} симв.</b></li>
+                <li>С ToC: <b>{{ Number(topAggregate.ux_profile.share_with_toc_pct || 0).toFixed(0) }}%</b></li>
+                <li>С FAQ в начале: <b>{{ Number(topAggregate.ux_profile.share_with_faq_early_pct || 0).toFixed(0) }}%</b></li>
+                <li>С TL;DR: <b>{{ Number(topAggregate.ux_profile.share_with_tldr_early_pct || 0).toFixed(0) }}%</b></li>
+                <li>С ALT первой картинки: <b>{{ Number(topAggregate.ux_profile.share_with_first_img_alt_pct || 0).toFixed(0) }}%</b></li>
+              </ul>
+            </div>
+
+            <!-- Slug -->
+            <div v-if="topAggregate.slug_pattern" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-amber-300 uppercase tracking-wider mb-2">🔗 URL/Slug</div>
+              <ul class="space-y-1 text-gray-300">
+                <li>Длина slug (медиана): <b class="text-gray-100">{{ topAggregate.slug_pattern.slug_chars_median }} симв.</b></li>
+                <li>Глубина URL: <b>{{ topAggregate.slug_pattern.depth_slashes_median }}</b></li>
+                <li>Кириллица в URL: <b>{{ Number(topAggregate.slug_pattern.share_cyrillic_url_pct || 0).toFixed(0) }}%</b></li>
+                <li>Год в URL: <b>{{ Number(topAggregate.slug_pattern.share_year_in_url_pct || 0).toFixed(0) }}%</b></li>
+                <li>Slug содержит ключ: <b>{{ Number(topAggregate.slug_pattern.share_slug_has_query_pct || 0).toFixed(0) }}%</b></li>
+                <li v-if="topAggregate.slug_pattern.recommendation" class="text-emerald-300 italic mt-1">
+                  → {{ topAggregate.slug_pattern.recommendation }}
+                </li>
+              </ul>
+            </div>
+
+            <!-- Trust-link density -->
+            <div v-if="topAggregate.trust_link_quota" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-rose-300 uppercase tracking-wider mb-2">🛡 Trust-link density (Yandex hostrank)</div>
+              <ul class="space-y-1 text-gray-300">
+                <li>Trust-ссылок (медиана): <b class="text-gray-100">{{ topAggregate.trust_link_quota.trust_links_median }}</b></li>
+                <li>Внешних ссылок (медиана): <b>{{ topAggregate.trust_link_quota.external_links_median }}</b></li>
+                <li>На 1000 слов (target): <b class="text-emerald-300">{{ Number(topAggregate.trust_link_quota.per_1000_words_target || 0).toFixed(2) }}</b></li>
+                <li>Доля топа с trust-ссылками: <b>{{ Number(topAggregate.trust_link_quota.share_with_any_trust_pct || 0).toFixed(0) }}%</b></li>
+              </ul>
+              <div class="text-[10px] text-gray-500 mt-2">
+                Trust-домены: .gov / .edu / Wikipedia / ГОСТ / Минздрав / Росстат / крупные СМИ.
+              </div>
+            </div>
+
+            <!-- Exact-position match -->
+            <div v-if="topAggregate.exact_query_position_targets" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-pink-300 uppercase tracking-wider mb-2">🎯 Exact-position match (Yandex FI_BCLM_*)</div>
+              <ul class="space-y-1 text-gray-300">
+                <li>В первых 100 словах: <b>{{ topAggregate.exact_query_position_targets.first_100_words_median }}</b></li>
+                <li>В первом абзаце: <b>{{ topAggregate.exact_query_position_targets.first_paragraph_median }}</b></li>
+                <li>В H2: <b>{{ topAggregate.exact_query_position_targets.in_h2_median }}</b></li>
+                <li>В H3: <b>{{ topAggregate.exact_query_position_targets.in_h3_median }}</b></li>
+                <li>В alt: <b>{{ topAggregate.exact_query_position_targets.in_alt_median }}</b></li>
+                <li>Всего (медиана): <b>{{ topAggregate.exact_query_position_targets.total_median }}</b></li>
+                <li>Density на 1000 слов (target): <b class="text-emerald-300">{{ Number(topAggregate.exact_query_position_targets.density_target || 0).toFixed(2) }}</b></li>
+              </ul>
+            </div>
+
+            <!-- Host hygiene -->
+            <div v-if="topAggregate.host_hygiene_checklist" class="border border-gray-800 rounded p-3">
+              <div class="text-[11px] font-bold text-teal-300 uppercase tracking-wider mb-2">🧰 Host-hygiene (SEO-инфра)</div>
+              <ul class="space-y-1 text-gray-300">
+                <li v-for="(v, k) in (topAggregate.host_hygiene_checklist.shares_pct || {})" :key="k">
+                  <span :class="v >= 50 ? 'text-emerald-300' : 'text-gray-500'">
+                    {{ v >= 50 ? '✓' : '·' }}
+                  </span>
+                  {{ k.replace(/^has_/, '').replace(/_/g, ' ') }}:
+                  <b>{{ Number(v).toFixed(0) }}%</b>
+                </li>
+              </ul>
+              <div v-if="(topAggregate.host_hygiene_checklist.must_have || []).length > 0"
+                   class="mt-2 text-[10px] text-rose-300">
+                Обязательно (≥50% топа): {{ topAggregate.host_hygiene_checklist.must_have.join(', ') }}
+              </div>
+            </div>
+          </div>
+
+          <!-- Anchor bank -->
+          <div v-if="(topAggregate.anchor_bank?.top_anchors || []).length > 0" class="mb-4">
+            <h3 class="text-xs font-bold text-orange-300 uppercase tracking-wider mb-2">
+              ⚓ Банк анкоров топа ({{ (topAggregate.anchor_bank.top_anchors || []).length }})
+            </h3>
+            <p class="text-[11px] text-gray-500 mb-2">
+              Внутренние анкоры из основной зоны конкурентов — кандидаты для перелинковки.
+            </p>
+            <div class="flex flex-wrap gap-1">
+              <span v-for="a in (topAggregate.anchor_bank.top_anchors || []).slice(0, 60)" :key="a.text"
+                    class="inline-block bg-gray-800 text-orange-200 px-2 py-1 rounded text-[10px]">
+                {{ a.text }} <span class="text-gray-500">×{{ a.df }}</span>
+              </span>
+            </div>
+            <div v-if="topAggregate.anchor_bank.class_shares_pct" class="mt-2 text-[10px] text-gray-500">
+              Доли: brand {{ Number(topAggregate.anchor_bank.class_shares_pct.brand || 0).toFixed(0) }}% ·
+              exact {{ Number(topAggregate.anchor_bank.class_shares_pct.exact || 0).toFixed(0) }}% ·
+              partial {{ Number(topAggregate.anchor_bank.class_shares_pct.partial || 0).toFixed(0) }}% ·
+              generic {{ Number(topAggregate.anchor_bank.class_shares_pct.generic || 0).toFixed(0) }}%
+            </div>
+          </div>
+
+          <!-- Per-URL signals table -->
+          <details class="border border-gray-800 rounded">
+            <summary class="cursor-pointer text-xs font-bold text-gray-400 uppercase tracking-wider p-2">
+              📋 Per-URL: сигналы по каждому конкуренту ({{ competitorSignalsRows.length }})
+            </summary>
+            <div class="overflow-x-auto max-h-[60vh] overflow-y-auto">
+              <table class="w-full text-xs">
+                <thead class="text-[10px] text-gray-500 uppercase border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
+                  <tr>
+                    <th class="text-left py-2 px-2">URL</th>
+                    <th class="text-right py-2 px-2">Title</th>
+                    <th class="text-center py-2 px-2">T↔H1</th>
+                    <th class="text-left py-2 px-2">Schemas</th>
+                    <th class="text-right py-2 px-2">Возраст</th>
+                    <th class="text-right py-2 px-2">H2</th>
+                    <th class="text-right py-2 px-2">Trust</th>
+                    <th class="text-right py-2 px-2">Точн.</th>
+                    <th class="text-right py-2 px-2">Effort</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="r in competitorSignalsRows" :key="r.url" class="border-b border-gray-900 hover:bg-gray-900/50">
+                    <td class="py-1.5 px-2">
+                      <a :href="r.url" target="_blank" rel="noopener noreferrer"
+                         class="text-sky-300 hover:underline truncate block max-w-[220px]" :title="r.url">
+                        {{ r.url }}
+                      </a>
+                    </td>
+                    <td class="py-1.5 px-2 text-right text-gray-400 tabular-nums">{{ r.title_chars }}</td>
+                    <td class="py-1.5 px-2 text-center">
+                      <span v-if="r.title_h1_match" class="text-emerald-400">✓</span>
+                      <span v-else class="text-gray-600">·</span>
+                    </td>
+                    <td class="py-1.5 px-2 text-emerald-300 text-[10px]">
+                      {{ (r.schemas || []).slice(0, 4).join(', ') || '—' }}
+                    </td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">
+                      {{ r.age_modified !== null && r.age_modified !== undefined ? r.age_modified + 'д' : '—' }}
+                    </td>
+                    <td class="py-1.5 px-2 text-right tabular-nums">{{ r.h2 }}</td>
+                    <td class="py-1.5 px-2 text-right text-rose-300 tabular-nums">{{ r.trust }}</td>
+                    <td class="py-1.5 px-2 text-right text-pink-300 tabular-nums">{{ r.exact_total }}</td>
+                    <td class="py-1.5 px-2 text-right text-fuchsia-300 tabular-nums font-bold">{{ Number(r.effort).toFixed(1) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <!-- Algorithm-signal summary -->
+          <details v-if="algorithmSignals && (algorithmSignals.google || algorithmSignals.yandex)"
+                   class="mt-3 border border-gray-800 rounded">
+            <summary class="cursor-pointer text-xs font-bold text-gray-400 uppercase tracking-wider p-2">
+              🧪 algorithm_signals (Google / Yandex)
+            </summary>
+            <pre class="text-[10px] text-gray-300 p-3 overflow-x-auto bg-gray-950">{{ JSON.stringify(algorithmSignals, null, 2) }}</pre>
+          </details>
         </div>
 
         <!-- ── (12) Пересечения заголовков h2..h6 → рекомендации структуры ── -->
