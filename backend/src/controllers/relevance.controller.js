@@ -68,11 +68,28 @@ async function createReport(req, res, next) {
     // top_n — на этапе MVP фиксируем 20 (можем расширить позже).
     const topN = 20;
 
+    // PR3: сравнение «наш сайт vs ТОП». our_url — необязательное поле формы.
+    let ourUrl = clipStr(body.our_url, 2048) || null;
+    if (ourUrl) {
+      // Базовая валидация: только http(s); кривые URL → отчёт всё равно
+      // создаём, но без сравнения.
+      try {
+        const u = new URL(ourUrl);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+          ourUrl = null;
+        }
+      } catch (_) {
+        ourUrl = null;
+      }
+    }
+    const excludeAggregators = !!body.exclude_aggregators;
+
     const { rows } = await db.query(
-      `INSERT INTO relevance_reports (user_id, query, lr, top_n, status)
-       VALUES ($1, $2, $3, $4, 'pending')
-       RETURNING id, query, lr, top_n, status, created_at`,
-      [req.user.id, query, lr, topN],
+      `INSERT INTO relevance_reports
+         (user_id, query, lr, top_n, status, our_url, exclude_aggregators)
+       VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+       RETURNING id, query, lr, top_n, status, our_url, exclude_aggregators, created_at`,
+      [req.user.id, query, lr, topN, ourUrl, excludeAggregators],
     );
     const report = rows[0];
 
@@ -97,6 +114,7 @@ async function getReport(req, res, next) {
               fetched_count, serp, failed_urls, error_message, duration_ms,
               created_at, started_at, completed_at,
               report, cocoons,
+              our_url, our_report, comparison, exclude_aggregators,
               raw_storage, raw_expires_at,
               (
                 (raw_storage = 'redis' AND raw_expires_at > NOW())

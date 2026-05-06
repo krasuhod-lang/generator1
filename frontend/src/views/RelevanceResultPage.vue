@@ -124,6 +124,77 @@ const ngrams = computed(() => {
 });
 const stats = computed(() => report.value?.report?.stats || {});
 
+// PR3: comparison «наш сайт vs ТОП». Все computed безопасны — возвращают
+// null/[] на старых отчётах (поле comparison NULL).
+const comparison      = computed(() => report.value?.comparison || null);
+const ourReport       = computed(() => report.value?.our_report || null);
+const docDiagnostics  = computed(() => {
+  const list = report.value?.report?.document_diagnostics;
+  return Array.isArray(list) ? list : [];
+});
+const failBreakdown   = computed(() => report.value?.report?.fail_breakdown || {});
+const filterInfo      = computed(() => report.value?.report?.filter || null);
+
+// Сводка причин fail'а — для бейджиков «5×http_403, 3×timeout, 2×SPA».
+const failBreakdownEntries = computed(() => {
+  const obj = failBreakdown.value || {};
+  return Object.entries(obj).sort((a, b) => b[1] - a[1]);
+});
+
+// Цветовое кодирование per-term статуса.
+function statusColor(s) {
+  switch (s) {
+    case 'missing': return 'bg-red-900/40 text-red-300 border border-red-800/60';
+    case 'under':   return 'bg-orange-900/40 text-orange-300 border border-orange-800/60';
+    case 'ok':      return 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/60';
+    case 'over':    return 'bg-sky-900/40 text-sky-300 border border-sky-800/60';
+    default:        return 'bg-gray-800 text-gray-400 border border-gray-700';
+  }
+}
+
+// Сводная табличка ТОП + наш сайт. Сортировка по выбранной колонке.
+const compTableSort = ref({ key: 'lsi_coverage_pct', dir: 'desc' });
+function setCompSort(key) {
+  if (compTableSort.value.key === key) {
+    compTableSort.value.dir = compTableSort.value.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    compTableSort.value = { key, dir: 'desc' };
+  }
+}
+const compTable = computed(() => {
+  const rows = comparison.value?.competitor_table || [];
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const { key, dir } = compTableSort.value;
+  const sorted = [...rows].sort((a, b) => {
+    if (a.is_ours && !b.is_ours) return -1;   // наша строка всегда сверху
+    if (!a.is_ours && b.is_ours) return 1;
+    const av = key === 'url' ? String(a.url || '') : Number(a[key] || 0);
+    const bv = key === 'url' ? String(b.url || '') : Number(b[key] || 0);
+    if (av < bv) return dir === 'desc' ? 1 : -1;
+    if (av > bv) return dir === 'desc' ? -1 : 1;
+    return 0;
+  });
+  return sorted;
+});
+
+// Фильтр для секции gap (по умолчанию показываем только важные missing/under/over).
+const gapFilter = ref('actionable');  // all / actionable / missing / under / over / ok
+const gapVisible = computed(() => {
+  const arr = comparison.value?.per_term || [];
+  if (!Array.isArray(arr)) return [];
+  let out = arr;
+  if (gapFilter.value === 'actionable') {
+    out = arr.filter((t) => t.status !== 'ok');
+  } else if (gapFilter.value !== 'all') {
+    out = arr.filter((t) => t.status === gapFilter.value);
+  }
+  // Сортировка: важные → сначала, потом по убыванию BM25.
+  return [...out].sort((a, b) => {
+    if (a.important !== b.important) return a.important ? -1 : 1;
+    return (Number(b.bm25_score) || 0) - (Number(a.bm25_score) || 0);
+  }).slice(0, 500);  // защита от гигантских таблиц
+});
+
 const vocabFiltered = computed(() => {
   let arr = vocabFilter.value === 'all'
     ? vocabulary.value
@@ -384,6 +455,209 @@ function copyFilteredNgrams() {
           <div class="card py-3 text-center">
             <div class="text-2xl font-bold text-fuchsia-300">{{ ngrams.length }}</div>
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">N-грамм</div>
+          </div>
+        </div>
+
+        <!-- ── PR3: Сравнение «наш сайт vs ТОП» ── -->
+        <div v-if="comparison && !comparison.error" class="card border-indigo-700/50">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-2">
+              ⚖ Сравнение: ваш сайт vs ТОП конкурентов
+            </h2>
+            <a v-if="ourReport?.url" :href="ourReport.url" target="_blank" rel="noopener"
+               class="text-xs text-indigo-300 hover:text-indigo-200 underline truncate max-w-[400px]">
+              {{ ourReport.url }}
+            </a>
+          </div>
+
+          <!-- Сводка: 4 числа + подсказки -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="rounded bg-gray-950 border border-gray-800 p-3 text-center">
+              <div class="text-2xl font-bold text-emerald-300">
+                {{ (comparison.summary?.lsi_coverage_pct ?? 0).toFixed(1) }}%
+              </div>
+              <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">LSI-покрытие</div>
+              <div class="text-[10px] text-gray-600 mt-0.5">
+                {{ comparison.summary?.important_lemmas_hit || 0 }} из
+                {{ comparison.summary?.important_lemmas_total || 0 }} важных
+              </div>
+            </div>
+            <div class="rounded bg-gray-950 border border-gray-800 p-3 text-center">
+              <div class="text-2xl font-bold text-sky-300">
+                {{ (comparison.summary?.bm25_score ?? 0).toFixed(2) }}
+              </div>
+              <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">BM25 vs ТОП</div>
+              <div class="text-[10px] text-gray-600 mt-0.5">
+                норм. {{ ((comparison.summary?.bm25_score_norm ?? 0) * 100).toFixed(0) }}%
+              </div>
+            </div>
+            <div class="rounded bg-gray-950 border border-gray-800 p-3 text-center">
+              <div class="text-2xl font-bold text-fuchsia-300">
+                {{ (comparison.summary?.tf_idf_cosine ?? 0).toFixed(3) }}
+              </div>
+              <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">TF-IDF cosine</div>
+              <div class="text-[10px] text-gray-600 mt-0.5">с медианой ТОПа</div>
+            </div>
+            <div class="rounded bg-gray-950 border border-gray-800 p-3 text-center">
+              <div class="text-2xl font-bold text-amber-300">
+                {{ ((comparison.summary?.our_text_html_ratio ?? 0) * 100).toFixed(1) }}%
+              </div>
+              <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">Text/HTML ratio</div>
+              <div class="text-[10px] text-gray-600 mt-0.5">
+                ТОП медиана:
+                {{ ((comparison.summary?.median_text_html_ratio_top ?? 0) * 100).toFixed(1) }}%
+              </div>
+            </div>
+          </div>
+
+          <!-- Сводная таблица «ТОП-N + наш сайт» с сортировкой -->
+          <div v-if="compTable.length > 0" class="mb-5">
+            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">
+              📊 Сравнительная таблица
+            </h3>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-gray-800">
+                  <tr>
+                    <th class="text-left py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('url')">URL</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('lsi_coverage_pct')">LSI %</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('bm25_score')">BM25</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('tf_idf_cosine')">TF-IDF cos</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="setCompSort('tokens')">Лемм</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, i) in compTable" :key="row.url + ':' + i"
+                      :class="row.is_ours
+                        ? 'bg-indigo-900/30 border-b border-indigo-800/50 sticky top-0'
+                        : 'border-b border-gray-800/60 hover:bg-gray-900/40'">
+                    <td class="py-1.5 px-2">
+                      <span v-if="row.is_ours" class="text-indigo-300 font-bold mr-1">★ ВЫ:</span>
+                      <a :href="row.url" target="_blank" rel="noopener"
+                         class="text-gray-200 hover:text-indigo-300 truncate inline-block max-w-[420px] align-middle"
+                         :title="row.url">{{ row.url }}</a>
+                    </td>
+                    <td class="text-right py-1.5 px-2 text-emerald-300 tabular-nums">
+                      {{ (row.lsi_coverage_pct ?? 0).toFixed(1) }}
+                    </td>
+                    <td class="text-right py-1.5 px-2 text-sky-300 tabular-nums">
+                      {{ (row.bm25_score ?? 0).toFixed(2) }}
+                    </td>
+                    <td class="text-right py-1.5 px-2 text-fuchsia-300 tabular-nums">
+                      {{ (row.tf_idf_cosine ?? 0).toFixed(3) }}
+                    </td>
+                    <td class="text-right py-1.5 px-2 text-gray-400 tabular-nums">
+                      {{ row.tokens || 0 }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Математические директивы для копирайтера -->
+          <div v-if="(comparison.directives || []).length > 0" class="mb-5">
+            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">
+              ✍ Что делать (математические директивы)
+            </h3>
+            <ol class="space-y-1 text-xs">
+              <li v-for="(d, i) in comparison.directives.slice(0, 50)" :key="d.lemma + ':' + i"
+                  class="flex items-start gap-2 py-1 px-2 rounded hover:bg-gray-900/40">
+                <span class="text-gray-500 tabular-nums w-6 flex-shrink-0 text-right">{{ i + 1 }}.</span>
+                <span :class="['badge text-[10px] px-1.5 py-0', statusColor(d.status)]">{{ d.status }}</span>
+                <span v-if="d.important" class="text-[10px] text-indigo-300" title="Important LSI-key">★</span>
+                <span class="text-gray-200">{{ d.text }}</span>
+              </li>
+            </ol>
+            <div v-if="comparison.directives.length > 50" class="text-[11px] text-gray-500 mt-2">
+              … и ещё {{ comparison.directives.length - 50 }} директив (см. подсветку слов ниже).
+            </div>
+          </div>
+
+          <!-- Подсветка слов: per-term gap-таблица -->
+          <div v-if="(comparison.per_term || []).length > 0">
+            <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+              <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider">
+                🎨 Подсветка слов (per-term gap)
+              </h3>
+              <div class="flex items-center gap-1 text-[11px] flex-wrap">
+                <button v-for="opt in ['actionable','all','missing','under','ok','over']" :key="opt"
+                        class="btn-ghost"
+                        :class="gapFilter === opt ? 'text-indigo-300' : 'text-gray-500'"
+                        @click="gapFilter = opt">{{ opt }}</button>
+              </div>
+            </div>
+            <div class="overflow-x-auto max-h-[420px] overflow-y-auto">
+              <table class="w-full text-xs">
+                <thead class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
+                  <tr>
+                    <th class="text-left py-2 px-2">Лемма</th>
+                    <th class="text-center py-2 px-2">Статус</th>
+                    <th class="text-right py-2 px-2">У вас</th>
+                    <th class="text-right py-2 px-2">Медиана ТОПа</th>
+                    <th class="text-right py-2 px-2">DF</th>
+                    <th class="text-right py-2 px-2">BM25</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in gapVisible" :key="t.lemma"
+                      class="border-b border-gray-800/40 hover:bg-gray-900/30">
+                    <td class="py-1 px-2 text-gray-200">
+                      <span v-if="t.important" class="text-indigo-300 mr-0.5" title="Important LSI">★</span>
+                      {{ t.lemma }}
+                    </td>
+                    <td class="text-center py-1 px-2">
+                      <span :class="['badge text-[10px] px-1.5 py-0', statusColor(t.status)]">{{ t.status }}</span>
+                    </td>
+                    <td class="text-right py-1 px-2 text-gray-300 tabular-nums">{{ t.our_count }}</td>
+                    <td class="text-right py-1 px-2 text-gray-400 tabular-nums">{{ t.median_top }}</td>
+                    <td class="text-right py-1 px-2 text-gray-500 tabular-nums">{{ t.df }}</td>
+                    <td class="text-right py-1 px-2 text-sky-300 tabular-nums">{{ (t.bm25_score || 0).toFixed(2) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="gapVisible.length === 0" class="text-gray-500 text-sm py-4 text-center">
+                Нет лемм по выбранному фильтру.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Если comparison был запрошен, но упал — показываем мягкую ошибку -->
+        <div v-else-if="comparison && comparison.error" class="card border-amber-800/60 bg-amber-900/10">
+          <h2 class="text-base font-bold text-amber-300 uppercase tracking-wider mb-2">
+            ⚠ Сравнение «ваш сайт vs ТОП» не выполнилось
+          </h2>
+          <div class="text-amber-200 text-sm">{{ comparison.error }}</div>
+          <div class="text-[11px] text-amber-300/70 mt-2">
+            Отчёт ТОПа сохранён полностью — это «мягкая» ошибка только нашего URL.
+            Попробуйте проверить, открывается ли страница в браузере без авторизации
+            и не блокирует ли её WAF (Cloudflare/Qrator) для серверных запросов.
+          </div>
+        </div>
+
+        <!-- Сводка причин fail'а — оператор сразу видит, где WAF/SPA/DNS -->
+        <div v-if="failBreakdownEntries.length > 0" class="card">
+          <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">
+            📉 Причины недоступности страниц ТОПа
+          </h3>
+          <div class="flex flex-wrap gap-2">
+            <span v-for="[code, count] in failBreakdownEntries" :key="code"
+                  class="text-xs px-2 py-1 rounded bg-gray-950 border border-gray-800">
+              <span class="text-gray-400 font-mono">{{ code }}</span>
+              <span class="text-amber-300 font-bold ml-1">×{{ count }}</span>
+            </span>
+          </div>
+          <div v-if="filterInfo?.removed_aggregators?.length"
+               class="text-[11px] text-gray-500 mt-3">
+            Также отфильтровано как агрегаторы:
+            <span class="text-gray-400">{{ filterInfo.removed_aggregators.length }}</span>
+            (<span class="font-mono">{{ filterInfo.removed_aggregators.slice(0,5).map(r => r.host).join(', ') }}{{ filterInfo.removed_aggregators.length > 5 ? '…' : '' }}</span>)
           </div>
         </div>
 

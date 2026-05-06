@@ -17,9 +17,10 @@
 
 const db = require('../../config/db');
 const { fetchYandexSerp } = require('../metaTags/xmlstockClient');
-const { fetchPages }      = require('./pageFetcher');
-const { analyze }         = require('./pythonClient');
+const { fetchPages, fetchOne } = require('./pageFetcher');
+const { analyze, compare }     = require('./pythonClient');
 const rawStorage          = require('./rawStorage');
+const { splitBySerp }     = require('./aggregatorDomains');
 
 const MIN_FETCHED_FOR_ANALYZE = (() => {
   const v = parseInt(process.env.RELEVANCE_MIN_FETCHED, 10);
@@ -59,7 +60,7 @@ async function _setStage(reportId, stage, extra = {}) {
   );
 }
 
-async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed) {
+async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed, extras = {}) {
   await db.query(
     `UPDATE relevance_reports
        SET status='done',
@@ -69,7 +70,9 @@ async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed) {
            duration_ms = $3,
            raw_storage = $4,
            raw_expires_at = $5,
-           raw_processed = $6::jsonb
+           raw_processed = $6::jsonb,
+           our_report = $7::jsonb,
+           comparison = $8::jsonb
      WHERE id = $1`,
     [
       reportId,
@@ -78,6 +81,8 @@ async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed) {
       rawMeta?.stored ? 'redis' : 'none',
       rawMeta?.stored ? rawMeta.expiresAt : null,
       dbProcessed ? JSON.stringify(dbProcessed) : null,
+      extras.our_report  ? JSON.stringify(extras.our_report)  : null,
+      extras.comparison  ? JSON.stringify(extras.comparison)  : null,
     ],
   );
 }
@@ -105,14 +110,15 @@ async function processRelevanceReport(reportId) {
   const t0 = Date.now();
 
   const { rows } = await db.query(
-    `SELECT id, query, lr, top_n FROM relevance_reports WHERE id = $1`,
+    `SELECT id, query, lr, top_n, our_url, exclude_aggregators
+       FROM relevance_reports WHERE id = $1`,
     [reportId],
   );
   if (!rows.length) {
     console.error(`[relevance] report ${reportId} not found`);
     return;
   }
-  const { query, lr, top_n: topN } = rows[0];
+  const { query, lr, top_n: topN, our_url: ourUrl, exclude_aggregators: excludeAggregators } = rows[0];
 
   try {
     // ── 1. SERP ──────────────────────────────────────────────────────────
@@ -140,10 +146,33 @@ async function processRelevanceReport(reportId) {
         + `(регион lr=${lr || '—'}). Проверьте лимиты ключа XMLStock и корректность запроса.`,
       );
     }
+
+    // ── 1.5. Фильтр агрегаторов (опционально, по чекбоксу формы) ───────
+    // Avito/hh/ozon/dzen/… занимают ТОП Яндекса почти всегда, но сами
+    // никогда не «информационный конкурент» — их словарь («доставка /
+    // отзыв / товар») размывает корпус. Отфильтровываем ДО парсинга, но
+    // оставляем список removed в SERP-карточке для прозрачности.
+    let removedAggregators = [];
+    let serpForFetch = serp;
+    if (excludeAggregators) {
+      const split = splitBySerp(serp);
+      removedAggregators = split.removed;
+      serpForFetch = split.kept;
+      if (serpForFetch.length === 0) {
+        // На всякий случай: если после фильтра ничего не осталось — НЕ
+        // падаем, продолжаем с исходным списком, но логируем warning.
+        console.warn(
+          `[relevance] aggregator filter оставил 0 URL для отчёта ${reportId}, `
+          + `используем оригинальный SERP.`,
+        );
+        serpForFetch = serp;
+        removedAggregators = [];
+      }
+    }
     await _setStage(reportId, 'fetching_pages', { serp });
 
     // ── 2. Скачивание HTML ───────────────────────────────────────────────
-    const { successes, failures } = await fetchPages(serp.map((s) => s.url));
+    const { successes, failures } = await fetchPages(serpForFetch.map((s) => s.url));
     await _setStage(reportId, 'analyzing', {
       status: 'analyzing',
       fetched_count: successes.length,
@@ -158,14 +187,13 @@ async function processRelevanceReport(reportId) {
     }
 
     // ── 3. Python-микросервис ────────────────────────────────────────────
-    // return_processed=true просим всегда — processed_documents пойдут в
-    // Redis с TTL для последующего расчёта коконов (PR 2). Если Redis
-    // недоступен — saveRaw() вернёт {stored:false}, и в БД отметим
-    // raw_storage='none'; пайплайн всё равно успешен.
+    // return_processed=true — processed_documents пойдут в Redis с TTL.
+    // include_anchor_zone=true — отдельно посчитаем «анкорный профиль» ниши
+    //   (BM25 по текстам внутри `<a>` основного контента).
     const analysisResp = await analyze({
       query,
       documents: successes.map((s) => ({ url: s.url, html: s.html })),
-      options: { return_processed: true },
+      options: { return_processed: true, include_anchor_zone: true },
     });
 
     // ── 3.5. Складываем processed-доки в Redis (best-effort) и в Postgres ───
@@ -203,13 +231,137 @@ async function processRelevanceReport(reportId) {
       stats:      analysisResp?.stats      || {},
       vocabulary: Array.isArray(analysisResp?.vocabulary) ? analysisResp.vocabulary : [],
       ngrams:     Array.isArray(analysisResp?.ngrams)     ? analysisResp.ngrams     : [],
+      // PR3: per-document diagnostics + anchor-zone vocabulary + filter info
+      document_diagnostics: Array.isArray(analysisResp?.document_diagnostics)
+        ? analysisResp.document_diagnostics : [],
+      anchor_zone_vocabulary: Array.isArray(analysisResp?.anchor_zone_vocabulary)
+        ? analysisResp.anchor_zone_vocabulary : [],
+      filter: {
+        exclude_aggregators:  !!excludeAggregators,
+        removed_aggregators:  removedAggregators,
+        serp_after_filter:    serpForFetch.length,
+      },
+      // Сводка причин fail'а — оператору сразу видно, где проблема.
+      fail_breakdown: _summarizeFailures(failures),
     };
 
-    await _finishOk(reportId, fullReport, Date.now() - t0, rawMeta, dbProcessed);
+    // ── 5. Сравнение «наш сайт vs ТОП» (опционально, если задан our_url) ─
+    let ourReport = null;
+    let comparisonReport = null;
+    if (ourUrl && (analysisResp?.vocabulary?.length || 0) > 0) {
+      try {
+        await _setStage(reportId, 'comparing');
+        const ourResult = await _runComparison({
+          ourUrl,
+          analysisResp,
+          processedDocs: Array.isArray(analysisResp?.processed_documents)
+            ? analysisResp.processed_documents : [],
+        });
+        ourReport       = ourResult.our_report;
+        comparisonReport = ourResult.comparison;
+      } catch (e) {
+        // Мягкая ошибка: отчёт ТОПа всё равно сохраняем.
+        console.warn('[relevance] comparison failed:', e.message);
+        comparisonReport = { error: String(e.message || e).slice(0, 500) };
+      }
+    }
+
+    await _finishOk(reportId, fullReport, Date.now() - t0, rawMeta, dbProcessed, {
+      our_report: ourReport,
+      comparison: comparisonReport,
+    });
   } catch (err) {
     console.error(`[relevance] report ${reportId} failed:`, err.message);
     await _finishError(reportId, err.message);
   }
+}
+
+/** Группирует failures по category-code, чтобы оператор сразу видел распределение
+ *  причин: `{http_403: 5, timeout: 3, empty_body: 2, dns: 1, unknown: 1}`.
+ *  Это и есть «детальный лог по каждому failure», требуемый в плане работ. */
+function _summarizeFailures(failures) {
+  const breakdown = {};
+  for (const f of (failures || [])) {
+    const code = String(f?.code || 'unknown');
+    breakdown[code] = (breakdown[code] || 0) + 1;
+  }
+  return breakdown;
+}
+
+/**
+ * Качает наш URL тем же pageFetcher'ом, шлёт single-doc analyze, потом /compare
+ * с уже посчитанным vocabulary ТОПа + леммами нашего документа.
+ *
+ * Все ошибки бросаются наружу — обёртка в processRelevanceReport ловит и
+ * пишет comparison.error, не валя основной отчёт.
+ */
+async function _runComparison({ ourUrl, analysisResp, processedDocs }) {
+  // 1) Скачиваем нашу страницу — тем же fetcher'ом (cookie-jar, retry,
+  //    headless-fallback). Если 0 страниц — бросаем понятную ошибку.
+  const fetched = await fetchOne(ourUrl);
+  if (!fetched || !fetched.html) {
+    const err = new Error(
+      `Не удалось загрузить наш URL: ${fetched?.error || 'unknown'}`,
+    );
+    err.code = fetched?.code;
+    throw err;
+  }
+
+  // 2) Прогоняем парсер + нормализатор через single-doc analyze — это
+  //    единственный способ получить леммы, не дублируя нормализатор в Node.
+  //    Корпус НЕ передаём → analyze посчитает пустой словарь, но вернёт
+  //    processed_documents с леммами нашего документа и diagnostics.
+  const ourAnalyze = await analyze({
+    query: 'our_document_only',
+    documents: [{ url: ourUrl, html: fetched.html }],
+    options: { return_processed: true, min_term_df: 1, min_ngram_df: 1 },
+  });
+
+  const ourProcessed = (ourAnalyze?.processed_documents || [])[0];
+  const ourLemmas    = Array.isArray(ourProcessed?.lemmas) ? ourProcessed.lemmas : [];
+  const ourDiag      = (ourAnalyze?.document_diagnostics || [])[0] || {};
+
+  if (ourLemmas.length === 0) {
+    throw new Error(
+      `Парсер не вытащил из ${ourUrl} ни одного слова `
+      + `(reason=${ourDiag.empty_reason || 'unknown'}, method=${ourDiag.method || 'none'})`,
+    );
+  }
+
+  // 3) Собираем corpus_lemmas из processed_documents ТОПа (что уже посчитано).
+  const corpusLemmas = (processedDocs || [])
+    .map((d) => Array.isArray(d?.lemmas) ? d.lemmas : [])
+    .filter((l) => l.length > 0);
+  const corpusUrls = (processedDocs || [])
+    .map((d) => String(d?.url || ''));
+
+  if (corpusLemmas.length === 0) {
+    throw new Error('У ТОПа нет ни одного processed-документа для сравнения');
+  }
+
+  // 4) Зовём /compare.
+  const cmp = await compare({
+    our_lemmas:        ourLemmas,
+    our_url:           ourUrl,
+    our_text_chars:    Number(ourDiag.text_chars) || 0,
+    our_html_chars:    Number(ourDiag.html_chars) || 0,
+    median_text_chars: Number(analysisResp?.stats?.median_text_chars) || 0,
+    median_html_chars: Number(analysisResp?.stats?.median_html_chars) || 0,
+    vocabulary:        analysisResp?.vocabulary || [],
+    ngrams:            analysisResp?.ngrams     || [],
+    corpus_lemmas:     corpusLemmas,
+    competitor_urls:   corpusUrls,
+  });
+
+  return {
+    our_report: {
+      url:         ourUrl,
+      method:      fetched.method || 'axios',
+      diagnostics: ourDiag,
+      lemma_count: ourLemmas.length,
+    },
+    comparison: cmp,
+  };
 }
 
 module.exports = { processRelevanceReport };
