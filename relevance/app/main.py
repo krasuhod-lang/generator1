@@ -26,7 +26,7 @@ from .cocoons import compute_cocoons
 from .comparison import compute_comparison, per_competitor_table
 from .ngrams import compute_ngrams
 from .normalizer import normalize_document
-from .parser import extract_with_diagnostics
+from .parser import ParseDiagnostics, ParseResult, extract_with_diagnostics
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -263,7 +263,6 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             pr = extract_with_diagnostics(d.html)
         except Exception as e:  # pragma: no cover — readability/lxml краевые случаи
             logger.warning("parser failed for %s: %s", d.url, e)
-            from .parser import ParseDiagnostics, ParseResult
             pr = ParseResult(blocks=[], diagnostics=ParseDiagnostics(empty_reason="parser_exception"), anchor_text="")
         parse_results.append((d, pr))
 
@@ -351,7 +350,6 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             our_pr = extract_with_diagnostics(payload.our_document.html)
         except Exception as e:
             logger.warning("our_document parser failed: %s", e)
-            from .parser import ParseDiagnostics, ParseResult
             our_pr = ParseResult(blocks=[], diagnostics=ParseDiagnostics(empty_reason="parser_exception"), anchor_text="")
         our_lemmas, _our_seq = normalize_document(our_pr.text)
         our_diag = DocumentDiagnostics(
