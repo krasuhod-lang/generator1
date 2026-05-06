@@ -41,7 +41,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4.element import Comment as _Bs4Comment
 from readability import Document
 
 try:
@@ -83,6 +84,20 @@ LINK_DENSITY_NOISE_RATIO = float(
 # Минимальная длина блока, чтобы он попал в выдачу. Снижено с 8 до 4 в PR #90,
 # но мы оставляем 4 — короткие списки/теги тоже несут смысл.
 MIN_BLOCK_LEN_CHARS = 4
+
+# ── Флаг полно-DOM-режима парсинга (Слой 2, Sandbox) ──────────────────────────
+# По умолчанию ВЫКЛЮЧЕН: legacy-конвейер (heavy/trafilatura/readability/wide)
+# работает байт-в-байт как раньше. Когда флаг = true, после legacy-прохода
+# запускается дополнительный зональный walker, который:
+#   • заполняет ParseResult.zoned_blocks (полная карта зон + hidden),
+#   • расширяет ParseDiagnostics новыми полями (zone_chars/zone_word_count/
+#     hidden_chars/hidden_reasons),
+#   • ПЕРЕЗАПИСЫВАЕТ ParseResult.blocks → только видимый текст из зон main+
+#     unknown (контракт E из спецификации).
+# pipeline.js / comparison.py / Vue фронтенд в этой задаче не трогаем.
+FULL_DOM_MODE = os.environ.get("RELEVANCE_FULL_DOM_MODE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 # Регулярка для «человеческого» подсчёта слов: кириллица, латиница, цифры
 # (включая дефисные составные — «бизнес-ланч»). Используется только в
@@ -165,6 +180,15 @@ class ParseDiagnostics:
     empty_reason: Optional[str] = None
     candidates: Dict[str, int] = field(default_factory=dict)  # method -> chars
 
+    # ── Full-DOM mode (RELEVANCE_FULL_DOM_MODE=true) ──────────────────────
+    # Заполняются ТОЛЬКО когда включён флаг полно-DOM-парсинга. В legacy-режиме
+    # остаются пустыми, чтобы не раздувать ответ и не ломать исторические
+    # снапшоты диагностики в БД.
+    zone_chars: Dict[str, int] = field(default_factory=dict)
+    zone_word_count: Dict[str, int] = field(default_factory=dict)
+    hidden_chars: int = 0
+    hidden_reasons: Dict[str, int] = field(default_factory=dict)
+
     def as_dict(self) -> dict:
         return {
             "method":           self.method,
@@ -177,6 +201,10 @@ class ParseDiagnostics:
             "link_density":     round(self.link_density, 4),
             "empty_reason":     self.empty_reason,
             "candidates":       dict(self.candidates),
+            "zone_chars":       dict(self.zone_chars),
+            "zone_word_count":  dict(self.zone_word_count),
+            "hidden_chars":     self.hidden_chars,
+            "hidden_reasons":   dict(self.hidden_reasons),
         }
 
 
@@ -187,6 +215,10 @@ class ParseResult:
     blocks: List[str] = field(default_factory=list)
     diagnostics: ParseDiagnostics = field(default_factory=ParseDiagnostics)
     anchor_text: str = ""           # объединённый текст всех `<a>` в контенте
+    # Полная зональная карта DOM. None в legacy-режиме (флаг выключен) —
+    # это сигнал потребителям, что сейчас работает старая логика, и
+    # zoned_blocks недоступна. См. README full-DOM mode (Слой 2).
+    zoned_blocks: Optional[List[Dict]] = None
 
     @property
     def text(self) -> str:
@@ -532,10 +564,62 @@ def extract_with_diagnostics(html: str) -> ParseResult:
         else:
             diag.empty_reason = "noise_only"
 
+    zoned_blocks: Optional[List[Dict]] = None
+
+    # ── Слой 2: полно-DOM-режим (опционально, за флагом) ──────────────────
+    # Запускается ПОСЛЕ legacy-прохода, поверх исходного HTML (а не очищенного
+    # heavy_soup, у которого уже выпилены header/footer/nav/aside): walker'у
+    # нужно увидеть всю структуру, чтобы корректно классифицировать зоны и
+    # подсчитать hidden-метрики. Согласно контракту E мы при этом
+    # ПЕРЕЗАПИСЫВАЕМ blocks/text_chars/word_count/block_count так, чтобы
+    # туда попадал только видимый текст из зон main+unknown — это и есть
+    # «100% совместимость» (раньше footer/nav/aside тоже выпиливались, теперь
+    # выпиливаются ровно те же зоны, но через явный zoning, а не через
+    # decompose в _strip_noise).
+    if FULL_DOM_MODE:
+        try:
+            zoned_blocks, zone_chars, zone_word_count, hidden_chars, hidden_reasons = (
+                _full_dom_extract(html)
+            )
+        except Exception as exc:  # pragma: no cover — walker не должен валить весь парсер
+            zoned_blocks = None
+            diag.empty_reason = diag.empty_reason or f"full_dom_walker_failed:{type(exc).__name__}"
+        else:
+            diag.zone_chars = zone_chars
+            diag.zone_word_count = zone_word_count
+            diag.hidden_chars = hidden_chars
+            diag.hidden_reasons = hidden_reasons
+
+            # Контракт E: blocks = только видимый текст из main+unknown.
+            visible_main_unknown = [
+                zb["text"] for zb in zoned_blocks
+                if not zb.get("is_hidden")
+                and zb.get("zone") in ("main", "unknown")
+                and len(zb.get("text", "")) >= MIN_BLOCK_LEN_CHARS
+            ]
+            blocks = visible_main_unknown
+            diag.text_chars = sum(len(b) for b in blocks)
+            diag.block_count = len(blocks)
+            diag.text_html_ratio = diag.text_chars / max(diag.html_chars, 1)
+            diag.word_count = (
+                len(_WORD_COUNT_RE.findall(" ".join(blocks))) if blocks else 0
+            )
+            # link_density пересчёт от нового text_chars (anchor_text сам считаем
+            # как раньше из heavy_soup — это «легитимные» ссылки внутри контента).
+            diag.link_density = (
+                diag.anchor_text_chars / max(diag.text_chars, 1)
+                if diag.text_chars > 0 else 0.0
+            )
+            # Если empty_reason был выставлен по legacy-проходу, но full-DOM
+            # нашёл видимый main/unknown текст — снимаем флаг.
+            if blocks and diag.empty_reason in ("noise_only", "tiny_html", "rendered_by_js"):
+                diag.empty_reason = None
+
     return ParseResult(
         blocks=blocks,
         diagnostics=diag,
         anchor_text=anchor_text,
+        zoned_blocks=zoned_blocks,
     )
 
 
@@ -548,3 +632,488 @@ def extract_full_text(html: str) -> str:
     """Backward-compat: один большой текст для документа целиком."""
     return extract_with_diagnostics(html).text
 
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#                  Слой 2: Full-DOM zoning walker
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Реализация спецификации A–G. Запускается ТОЛЬКО когда выставлен флаг
+# RELEVANCE_FULL_DOM_MODE=true. Самодостаточный модуль — не использует
+# legacy-функции _strip_noise / _strip_high_link_density (которые decompose'ят
+# узлы и тем самым делают зональную классификацию невозможной).
+# Главное публичное API: `_full_dom_extract(html)`, вызывается из
+# `extract_with_diagnostics`.
+#
+# Контракт зон (см. Спецификация §A):
+#   - attributes        (приоритет 100) — текст из alt/title/aria-label
+#   - boilerplate_links (приоритет 90)  — контейнеры с link-density >= 0.6
+#   - nav               (приоритет 80)  — <nav>/role=navigation/menu-классы
+#   - noise_other       (приоритет 70)  — NOISE_CLASS_ID_RE без семантики
+#   - header            (приоритет 70)
+#   - footer            (приоритет 70)
+#   - aside             (приоритет 70)
+#   - main              (приоритет 50)  — <main>/<article>
+#   - unknown           (приоритет 0)   — дефолт
+# is_hidden — параллельный булев флаг (см. §C).
+
+ZONE_MAIN = "main"
+ZONE_HEADER = "header"
+ZONE_NAV = "nav"
+ZONE_FOOTER = "footer"
+ZONE_ASIDE = "aside"
+ZONE_BOILERPLATE = "boilerplate_links"
+ZONE_NOISE = "noise_other"
+ZONE_ATTRIBUTES = "attributes"
+ZONE_UNKNOWN = "unknown"
+
+ZONE_LABELS = (
+    ZONE_MAIN, ZONE_HEADER, ZONE_NAV, ZONE_FOOTER, ZONE_ASIDE,
+    ZONE_BOILERPLATE, ZONE_NOISE, ZONE_ATTRIBUTES, ZONE_UNKNOWN,
+)
+
+ZONE_PRIORITY: Dict[str, int] = {
+    ZONE_ATTRIBUTES:   100,
+    ZONE_BOILERPLATE:  90,
+    ZONE_NAV:          80,
+    ZONE_NOISE:        70,
+    ZONE_HEADER:       70,
+    ZONE_FOOTER:       70,
+    ZONE_ASIDE:        70,
+    ZONE_MAIN:         50,
+    ZONE_UNKNOWN:      0,
+}
+
+# Блочные теги, которые рвут поток текста и порождают отдельные блоки.
+# inline-теги (span, a, b, strong, em, i, u, mark, small, sub, sup, code,
+# abbr, cite, q, time, br) специально НЕ в этом списке: их текст склеивается
+# в текст ближайшего блочного предка (см. спецификацию §B).
+_BLOCK_LEVEL_TAGS = frozenset({
+    "p", "div", "section", "article", "main", "header", "footer", "nav", "aside",
+    "li", "ul", "ol", "dl", "dt", "dd",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "pre", "figure", "figcaption", "caption",
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "form", "fieldset", "legend",
+    "address", "details", "summary",
+    "hr", "body", "html",
+})
+
+# Теги, которые целиком пропускаем (не спускаемся внутрь).
+_FULL_DOM_SKIP_TAGS = frozenset({"script", "style", "template"})
+
+# Класс/id-хинты для конкретных семантических зон (более узкие, чем
+# глобальный NOISE_CLASS_ID_RE). Если узел совпадает И с ними, и с
+# NOISE_CLASS_ID_RE — приоритет у семантической зоны.
+_NAV_HINT_RE = re.compile(
+    r"(?:^|[-_\s])(?:menu|menus|main[-_]?menu|nav|navbar|navigation|"
+    r"breadcrumb|breadcrumbs|crumb|crumbs|pagination|pager)(?:[-_\s]|$)",
+    re.IGNORECASE,
+)
+_HEADER_HINT_RE = re.compile(
+    r"(?:^|[-_\s])(?:header|site[-_]?header|page[-_]?header|"
+    r"top[-_]?bar|topbar|masthead)(?:[-_\s]|$)",
+    re.IGNORECASE,
+)
+_FOOTER_HINT_RE = re.compile(
+    r"(?:^|[-_\s])(?:footer|site[-_]?footer|page[-_]?footer|"
+    r"bottom[-_]?bar|colophon)(?:[-_\s]|$)",
+    re.IGNORECASE,
+)
+_ASIDE_HINT_RE = re.compile(
+    r"(?:^|[-_\s])(?:sidebar|side[-_]?bar|aside|side[-_]?nav|"
+    r"side[-_]?col|side[-_]?column|secondary|complementary)(?:[-_\s]|$)",
+    re.IGNORECASE,
+)
+
+# §C: классы, гарантированно скрывающие текст визуально (a11y-приёмы).
+_HIDDEN_CLASS_RE = re.compile(
+    r"(?:^|\s)(?:sr-only|sr_only|visually-hidden|visually_hidden|"
+    r"hidden|d-none|is-hidden)(?:\s|$)",
+    re.IGNORECASE,
+)
+
+# §C: inline-CSS regex'ы. Парсим ТОЛЬКО атрибут style текущего узла
+# (а наследование от предков обеспечивается нашим walker'ом — родитель
+# уже передал свой is_hidden вниз). Глобальные <style>-теги не парсим
+# (без cssutils — спецификация явно это запрещает).
+_RE_DISPLAY_NONE     = re.compile(r"display\s*:\s*none\b",    re.IGNORECASE)
+_RE_VISIBILITY_HIDDEN = re.compile(r"visibility\s*:\s*hidden\b", re.IGNORECASE)
+_RE_OPACITY_ZERO     = re.compile(r"opacity\s*:\s*0(?:\.0+)?(?![\.\d])", re.IGNORECASE)
+_RE_POSITION_ABS     = re.compile(r"position\s*:\s*absolute\b",   re.IGNORECASE)
+_RE_OFFSCREEN_OFFSET = re.compile(r"(?:left|top)\s*:\s*-\d{3,}px\b", re.IGNORECASE)
+
+
+def _resolve_zone(parent_zone: str, own_zones: set) -> str:
+    """Выбирает эффективную зону по приоритету (см. §A).
+
+    Унаследованная от предка зона участвует наравне с собственными
+    сигналами текущего узла — поэтому если ребёнок попадает в более
+    приоритетную зону (например, `<nav>` внутри `<main>`), он её и
+    получает; и наоборот, если ребёнок без своих сигналов — он
+    наследует зону предка."""
+    candidates = set(own_zones) if own_zones else set()
+    if parent_zone:
+        candidates.add(parent_zone)
+    if not candidates:
+        return ZONE_UNKNOWN
+    return max(candidates, key=lambda z: ZONE_PRIORITY.get(z, 0))
+
+
+def _classify_node_zones(node: Tag) -> set:
+    """Возвращает СОБСТВЕННЫЕ zone-сигналы узла (без учёта родителя).
+
+    Не возвращает ZONE_BOILERPLATE — boilerplate определяется отдельным
+    проходом по link-density (см. _collect_boilerplate_containers)."""
+    zones: set = set()
+    name = (node.name or "").lower()
+
+    # Семантические HTML5 теги
+    if name == "main" or name == "article":
+        zones.add(ZONE_MAIN)
+    elif name == "header":
+        zones.add(ZONE_HEADER)
+    elif name == "nav":
+        zones.add(ZONE_NAV)
+    elif name == "footer":
+        zones.add(ZONE_FOOTER)
+    elif name == "aside":
+        zones.add(ZONE_ASIDE)
+
+    attrs = node.attrs or {}
+
+    # ARIA role
+    role = attrs.get("role")
+    if role:
+        if isinstance(role, list):
+            role = " ".join(str(x) for x in role)
+        role = str(role).lower().strip()
+        if role == "navigation":
+            zones.add(ZONE_NAV)
+        elif role == "banner":
+            zones.add(ZONE_HEADER)
+        elif role == "contentinfo":
+            zones.add(ZONE_FOOTER)
+        elif role == "complementary":
+            zones.add(ZONE_ASIDE)
+        elif role == "main":
+            zones.add(ZONE_MAIN)
+
+    # Class + id (объединяем для regex-проверок)
+    classes = attrs.get("class") or []
+    if isinstance(classes, str):
+        classes = [classes]
+    cls_str = " ".join(str(c) for c in classes)
+    eid = attrs.get("id") or ""
+    if isinstance(eid, list):
+        eid = " ".join(str(x) for x in eid)
+    haystack = (cls_str + " " + str(eid)).strip()
+    if not haystack:
+        return zones
+
+    # Семантические хинты (более узкие — выигрывают у noise_other)
+    matched_semantic = False
+    if _NAV_HINT_RE.search(haystack):
+        zones.add(ZONE_NAV)
+        matched_semantic = True
+    if _HEADER_HINT_RE.search(haystack):
+        zones.add(ZONE_HEADER)
+        matched_semantic = True
+    if _FOOTER_HINT_RE.search(haystack):
+        zones.add(ZONE_FOOTER)
+        matched_semantic = True
+    if _ASIDE_HINT_RE.search(haystack):
+        zones.add(ZONE_ASIDE)
+        matched_semantic = True
+
+    # noise_other — только если не попали ни в одну семантическую зону
+    if not matched_semantic and NOISE_CLASS_ID_RE.search(haystack):
+        zones.add(ZONE_NOISE)
+
+    return zones
+
+
+def _check_hidden(node: Tag) -> Tuple[bool, Optional[str]]:
+    """§C: возвращает (is_hidden, hidden_reason) ТОЛЬКО по сигналам текущего
+    узла. Наследование вниз обеспечивается walker'ом."""
+    if not isinstance(node, Tag):
+        return False, None
+    attrs = node.attrs or {}
+
+    # 1) hidden attribute (html5: bool-атрибут — присутствует или нет)
+    if "hidden" in attrs:
+        return True, "attr_hidden"
+
+    # 2) aria-hidden="true"
+    aria_hidden = attrs.get("aria-hidden")
+    if aria_hidden is not None:
+        if isinstance(aria_hidden, list):
+            aria_hidden = " ".join(str(x) for x in aria_hidden)
+        if str(aria_hidden).strip().lower() == "true":
+            return True, "aria_hidden"
+
+    # 3) classes
+    classes = attrs.get("class") or []
+    if isinstance(classes, str):
+        classes = [classes]
+    if classes:
+        cls_str = " ".join(str(c) for c in classes)
+        if _HIDDEN_CLASS_RE.search(" " + cls_str + " "):
+            return True, "sr_only"
+
+    # 4) inline CSS (style="…") — только текущего узла
+    style = attrs.get("style")
+    if style:
+        if isinstance(style, list):
+            style = " ".join(str(x) for x in style)
+        style = str(style)
+        if _RE_DISPLAY_NONE.search(style):
+            return True, "css_display_none"
+        if _RE_VISIBILITY_HIDDEN.search(style):
+            return True, "css_visibility_hidden"
+        if _RE_OPACITY_ZERO.search(style):
+            return True, "css_opacity_zero"
+        if _RE_POSITION_ABS.search(style) and _RE_OFFSCREEN_OFFSET.search(style):
+            return True, "css_offscreen"
+
+    return False, None
+
+
+def _collect_boilerplate_containers(soup: BeautifulSoup) -> set:
+    """§D: возвращает набор `id(node)` контейнеров (ul/ol/div/section), у
+    которых доля символов внутри `<a>` выше RELEVANCE_LINK_DENSITY_NOISE_RATIO
+    и общий объём текста ≥ 80 символов (тот же порог, что в legacy
+    _strip_high_link_density — иначе любой осмысленный мини-список из 2 ссылок
+    был бы помечен boilerplate'ом)."""
+    boiler: set = set()
+    for tag_name in ("ul", "ol", "div", "section"):
+        for el in soup.find_all(tag_name):
+            if not isinstance(el, Tag) or el.attrs is None:
+                continue
+            text = el.get_text(" ", strip=True)
+            n = len(text)
+            if n < 80:
+                continue
+            anchor_chars = sum(
+                len(a.get_text(" ", strip=True))
+                for a in el.find_all("a")
+            )
+            if anchor_chars / max(n, 1) >= LINK_DENSITY_NOISE_RATIO:
+                boiler.add(id(el))
+    return boiler
+
+
+def _nearest_block_ancestor(node, block_stack):
+    """Возвращает текущий блочный контейнер (вершину стека), под которым
+    группируются текстовые фрагменты. Никогда не None — внизу стека лежит
+    корневой объект (soup), который тоже трактуем как 'блок'."""
+    return block_stack[-1] if block_stack else None
+
+
+def _full_dom_extract(html: str) -> Tuple[
+    List[Dict],            # zoned_blocks
+    Dict[str, int],        # zone_chars
+    Dict[str, int],        # zone_word_count
+    int,                   # hidden_chars
+    Dict[str, int],        # hidden_reasons
+]:
+    """Главная точка входа Слоя 2. См. шапку модуля для контракта."""
+    soup = _make_soup(html)
+
+    # §C: <template> вырезаем полностью. <script>/<style> просто не входим
+    # внутрь (их обработка в walker'е через _FULL_DOM_SKIP_TAGS).
+    for tpl in list(soup.find_all("template")):
+        try:
+            tpl.decompose()
+        except Exception:
+            pass
+
+    boiler_ids = _collect_boilerplate_containers(soup)
+
+    # Накопитель «блок-предок → list[fragment]».
+    # fragment = {"text", "is_anchor"}; зона/hidden/hidden_reason — общие
+    # для блока (фрагменты из разных зон/состояний попадают в РАЗНЫЕ блоки).
+    # Поэтому ключ группировки — кортеж (id(block_parent), zone, is_hidden,
+    # hidden_reason). Это сохраняет порядок появления фрагментов и склеивает
+    # инлайн-теги (span, a, b, strong) внутри одного блока (см. §B).
+    grouped: Dict[Tuple, Dict] = {}
+    group_order: List[Tuple] = []
+    attr_blocks: List[Dict] = []  # отдельные объекты для alt/title/aria-label
+
+    def _emit_attr(node: Tag, value: str, parent_zone: str,
+                   parent_hidden: bool, parent_reason: Optional[str],
+                   in_anchor: bool) -> None:
+        """§A: текст из alt/title/aria-label всегда идёт зоной 'attributes'
+        (наивысший приоритет). hidden наследуется от предков (если родитель
+        скрыт — атрибут тоже не показывается пользователю)."""
+        clean = re.sub(r"\s+", " ", str(value)).strip()
+        if not clean:
+            return
+        attr_blocks.append({
+            "text": clean,
+            "zone": ZONE_ATTRIBUTES,
+            "tag": node.name,
+            "is_hidden": bool(parent_hidden),
+            "hidden_reason": parent_reason if parent_hidden else None,
+            "is_anchor": bool(in_anchor),
+        })
+
+    def _add_fragment(block_parent, zone: str, is_hidden: bool,
+                      hidden_reason: Optional[str], is_anchor: bool,
+                      text: str) -> None:
+        clean = re.sub(r"\s+", " ", text).strip()
+        if not clean:
+            return
+        # is_anchor дробит группу: фрагменты внутри `<a>` и фрагменты вне `<a>`
+        # внутри одного блока становятся разными zoned_blocks-объектами,
+        # чтобы потребитель мог отдельно посчитать анкорный текст. Слова не
+        # рвутся внутри фрагмента (мы уже схлопнули пробелы).
+        block_id = id(block_parent) if block_parent is not None else 0
+        block_tag = block_parent.name if isinstance(block_parent, Tag) else "body"
+        key = (block_id, zone, bool(is_hidden), hidden_reason, bool(is_anchor))
+        if key not in grouped:
+            grouped[key] = {
+                "text_parts": [],
+                "zone": zone,
+                "tag": block_tag,
+                "is_hidden": bool(is_hidden),
+                "hidden_reason": hidden_reason,
+                "is_anchor": bool(is_anchor),
+            }
+            group_order.append(key)
+        grouped[key]["text_parts"].append(clean)
+
+    def _walk(node, parent_zone: str, parent_hidden: bool,
+              parent_reason: Optional[str], in_anchor: bool,
+              block_stack: List) -> None:
+        # NavigableString (текстовый узел)
+        if isinstance(node, NavigableString):
+            # bs4.Comment / CData / ProcessingInstruction — это подклассы
+            # NavigableString. Их в текст не пускаем.
+            if isinstance(node, _Bs4Comment):
+                return
+            raw = str(node)
+            if not raw or not raw.strip():
+                return
+            block_parent = _nearest_block_ancestor(node, block_stack)
+            _add_fragment(
+                block_parent, parent_zone, parent_hidden, parent_reason,
+                in_anchor, raw,
+            )
+            return
+
+        if not isinstance(node, Tag):
+            return
+
+        name = (node.name or "").lower()
+
+        # Полный пропуск служебных тегов
+        if name in _FULL_DOM_SKIP_TAGS:
+            return
+
+        # §C: <noscript> — спускаемся, но всё внутри помечаем hidden=true
+        # с reason="noscript" (если ещё не помечено более жёсткой причиной).
+        force_hidden = False
+        force_reason = parent_reason
+        if name == "noscript" and not parent_hidden:
+            force_hidden = True
+            force_reason = "noscript"
+
+        # Собственные сигналы зоны
+        own_zones = _classify_node_zones(node)
+        # boilerplate_links — отдельный сигнал по link-density
+        if id(node) in boiler_ids:
+            own_zones = set(own_zones) | {ZONE_BOILERPLATE}
+
+        eff_zone = _resolve_zone(parent_zone, own_zones)
+
+        # is_hidden наследуется + проверяем сигналы текущего узла
+        cur_hidden = parent_hidden or force_hidden
+        cur_reason = force_reason if force_hidden else parent_reason
+        if not cur_hidden:
+            h, r = _check_hidden(node)
+            if h:
+                cur_hidden = True
+                cur_reason = r
+
+        cur_in_anchor = in_anchor or (name == "a")
+
+        # §A: эмитим attributes-объекты для alt/title/aria-label
+        # (для самого узла, ДО спуска — порядок в выдаче сохранится логичный).
+        if node.attrs:
+            for attr_name in ("alt", "title", "aria-label"):
+                v = node.attrs.get(attr_name)
+                if v is None:
+                    continue
+                if isinstance(v, list):
+                    v = " ".join(str(x) for x in v)
+                if not str(v).strip():
+                    continue
+                _emit_attr(node, v, eff_zone, cur_hidden, cur_reason, cur_in_anchor)
+
+        # Открываем блочную рамку, если это блочный тег
+        new_block_opened = False
+        if name in _BLOCK_LEVEL_TAGS:
+            block_stack.append(node)
+            new_block_opened = True
+
+        try:
+            for child in list(node.children):
+                _walk(child, eff_zone, cur_hidden, cur_reason,
+                      cur_in_anchor, block_stack)
+        finally:
+            if new_block_opened:
+                block_stack.pop()
+
+    # Стартуем с soup; на верхнем уровне зона = unknown, hidden = False.
+    # soup сам по себе как «корневой блок-предок» — фрагменты не имеющие
+    # явного блочного предка (например, текст прямо внутри <body>) попадут
+    # под него. На самом верхнем уровне soup.children может содержать
+    # «осиротевшие» NavigableString'и (артефакты разбора doctype lxml'ом
+    # — например, текст 'html' рядом с тегом <html>). Их пропускаем.
+    initial_block_stack: List = [soup]
+    for top in list(soup.children):
+        if not isinstance(top, Tag):
+            continue
+        _walk(top, ZONE_UNKNOWN, False, None, False, initial_block_stack)
+
+    # Сборка zoned_blocks: сначала структурные блоки (по порядку появления
+    # их block_parent'а в DOM), потом attributes-объекты — так атрибуты
+    # не «разрывают» соседние текстовые блоки.
+    zoned_blocks: List[Dict] = []
+    for key in group_order:
+        g = grouped[key]
+        text = " ".join(g["text_parts"]).strip()
+        text = re.sub(r"\s+", " ", text)
+        if not text:
+            continue
+        zoned_blocks.append({
+            "text": text,
+            "zone": g["zone"],
+            "tag": g["tag"],
+            "is_hidden": g["is_hidden"],
+            "hidden_reason": g["hidden_reason"],
+            "is_anchor": g["is_anchor"],
+        })
+    zoned_blocks.extend(attr_blocks)
+
+    # Агрегаты для диагностики
+    zone_chars: Dict[str, int] = {z: 0 for z in ZONE_LABELS}
+    zone_word_count: Dict[str, int] = {z: 0 for z in ZONE_LABELS}
+    hidden_chars = 0
+    hidden_reasons: Dict[str, int] = {}
+    for zb in zoned_blocks:
+        n = len(zb["text"])
+        wc = len(_WORD_COUNT_RE.findall(zb["text"]))
+        z = zb["zone"]
+        zone_chars[z] = zone_chars.get(z, 0) + n
+        zone_word_count[z] = zone_word_count.get(z, 0) + wc
+        if zb["is_hidden"]:
+            hidden_chars += n
+            r = zb["hidden_reason"] or "unknown"
+            hidden_reasons[r] = hidden_reasons.get(r, 0) + n
+    # Чистим нули, чтобы JSON был компактным
+    zone_chars = {k: v for k, v in zone_chars.items() if v}
+    zone_word_count = {k: v for k, v in zone_word_count.items() if v}
+
+    return zoned_blocks, zone_chars, zone_word_count, hidden_chars, hidden_reasons
