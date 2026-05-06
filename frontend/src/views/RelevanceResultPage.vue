@@ -30,7 +30,50 @@ const gapPage       = ref(1);
 const gapPageSize   = ref(50);
 
 // Сортировка таблицы LSI (важно: TF-IDF теперь тоже доступен).
-const vocabSort = ref('bm25_score'); // 'bm25_score' | 'tf_idf_score' | 'df' | 'median_count' | 'lemma'
+const vocabSort = ref({ key: 'bm25_score', dir: 'desc' });
+
+// Сортировка таблицы N-грамм.
+const ngramSort = ref({ key: 'df', dir: 'desc' });
+
+// Сортировка таблицы per-term gap (сравнение с нашим сайтом).
+const gapSort   = ref({ key: 'bm25_score', dir: 'desc' });
+
+// Сортировка для таблиц теговой зоны и пересечений заголовков.
+const tagZoneSort  = ref({ key: 'bm25_score', dir: 'desc' });
+const headingsSort = ref({ key: 'df', dir: 'desc' });
+
+// Универсальный обработчик клика по заголовку колонки таблицы.
+// Один и тот же ref{key,dir} переиспользуется для разных таблиц.
+function toggleSort(state, key) {
+  if (state.value.key === key) {
+    state.value.dir = state.value.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    state.value = { key, dir: 'desc' };
+  }
+}
+
+// Возвращает компаратор для sort() по объектному ключу + направлению.
+// numeric=true → числа; иначе localeCompare для строк.
+function makeSorter({ key, dir }, { numeric = true } = {}) {
+  const sign = dir === 'desc' ? -1 : 1;
+  return (a, b) => {
+    const av = a == null ? null : a[key];
+    const bv = b == null ? null : b[key];
+    if (numeric) {
+      const na = av == null ? -Infinity : Number(av);
+      const nb = bv == null ? -Infinity : Number(bv);
+      if (na === nb) return 0;
+      return na > nb ? sign : -sign;
+    }
+    return sign * String(av || '').localeCompare(String(bv || ''), 'ru');
+  };
+}
+
+// Маленький компонент-helper в template: ↕ / ↑ / ↓ для индикатора активной сортировки.
+function sortArrow(state, key) {
+  if (state.value.key !== key) return '↕';
+  return state.value.dir === 'desc' ? '↓' : '↑';
+}
 
 // ── Cocoons (PR 2) ────────────────────────────────────────────────────────
 const cocoonsBuilding = ref(false);
@@ -162,40 +205,24 @@ function statusColor(s) {
   }
 }
 
-// Сводная табличка ТОП + наш сайт. Сортировка по выбранной колонке.
-// Заказчик: «наш сайт тоже должен участвовать в рейтинге по конкурентам» —
-// поэтому не закрепляем нашу строку сверху, она сортируется наравне
-// со всеми (визуально подсвечивается ★ + цветной фон + столбец «#» с рангом).
+// Сортировка comp-table уже использует свой стейт — переписываем через
+// общий helper для единообразия.
 const compTableSort = ref({ key: 'lsi_coverage_pct', dir: 'desc' });
-function setCompSort(key) {
-  if (compTableSort.value.key === key) {
-    compTableSort.value.dir = compTableSort.value.dir === 'desc' ? 'asc' : 'desc';
-  } else {
-    compTableSort.value = { key, dir: 'desc' };
-  }
-}
+function setCompSort(key) { toggleSort(compTableSort, key); }
 const compTable = computed(() => {
   const rows = comparison.value?.competitor_table || [];
   if (!Array.isArray(rows) || rows.length === 0) return [];
-  const { key, dir } = compTableSort.value;
-  // Стабильная сортировка с понятным поведением для null serp_position
-  // (страницы вне ТОПа уезжают в конец при сортировке по позиции).
-  const sorted = [...rows].sort((a, b) => {
-    if (key === 'url') {
-      const av = String(a.url || '');
-      const bv = String(b.url || '');
-      return dir === 'desc' ? bv.localeCompare(av) : av.localeCompare(bv);
-    }
-    if (key === 'serp_position') {
+  // serp_position требует null→Infinity для корректной сортировки.
+  const { key } = compTableSort.value;
+  if (key === 'serp_position') {
+    const sign = compTableSort.value.dir === 'desc' ? -1 : 1;
+    return [...rows].sort((a, b) => {
       const av = a.serp_position == null ? Infinity : Number(a.serp_position);
       const bv = b.serp_position == null ? Infinity : Number(b.serp_position);
-      return dir === 'desc' ? bv - av : av - bv;
-    }
-    const av = Number(a[key] || 0);
-    const bv = Number(b[key] || 0);
-    return dir === 'desc' ? bv - av : av - bv;
-  });
-  return sorted;
+      return (av - bv) * sign;
+    });
+  }
+  return [...rows].sort(makeSorter(compTableSort.value, { numeric: key !== 'url' }));
 });
 
 // Фильтр для секции gap (по умолчанию показываем только важные missing/under/over).
@@ -209,35 +236,122 @@ const gapVisible = computed(() => {
   } else if (gapFilter.value !== 'all') {
     out = arr.filter((t) => t.status === gapFilter.value);
   }
-  // Сортировка: важные → сначала, потом по убыванию BM25.
+  // Сортировка: важные → сначала, потом по выбранной колонке.
   return [...out].sort((a, b) => {
     if (a.important !== b.important) return a.important ? -1 : 1;
-    return (Number(b.bm25_score) || 0) - (Number(a.bm25_score) || 0);
+    return makeSorter(gapSort.value)(a, b);
   }).slice(0, 500);  // защита от гигантских таблиц
 });
+
+// ── (9) Фильтр для математических директив ────────────────────────────
+// Заказчик: «Что делать (математические директивы) надо разделить, что
+// важно, что менее важно, чтобы можно было легко фильтровать».
+// Используем уже существующий флаг `important` (выставляется в Python,
+// см. comparison.py:_build_directives — он совпадает с important_set
+// словаря).
+const directiveFilter = ref('important'); // 'all' | 'important' | 'additional'
+const directivesVisible = computed(() => {
+  const arr = comparison.value?.directives || [];
+  if (!Array.isArray(arr)) return [];
+  if (directiveFilter.value === 'important') return arr.filter((d) => d.important);
+  if (directiveFilter.value === 'additional') return arr.filter((d) => !d.important);
+  return arr;
+});
+const directivesImportantCount = computed(
+  () => (comparison.value?.directives || []).filter((d) => d.important).length
+);
+const directivesAdditionalCount = computed(
+  () => (comparison.value?.directives || []).filter((d) => !d.important).length
+);
+
+// ── (7) Tag-zone vocabulary + сравнение с нашим сайтом ─────────────────
+const tagZoneVocab = computed(() => {
+  const list = report.value?.report?.tag_zone_vocabulary;
+  return Array.isArray(list) ? list : [];
+});
+const ourTagZoneSet = computed(() => {
+  const arr = report.value?.our_report?.tag_zone_lemmas;
+  return new Set(Array.isArray(arr) ? arr : []);
+});
+const tagZoneRows = computed(() => {
+  const set = ourTagZoneSet.value;
+  return tagZoneVocab.value.map((v) => ({
+    ...v,
+    in_our_tag_zone: set.has(v.lemma),
+  }));
+});
+const tagZoneSorted = computed(() => {
+  return [...tagZoneRows.value].sort(makeSorter(tagZoneSort.value, {
+    numeric: tagZoneSort.value.key !== 'lemma' && tagZoneSort.value.key !== 'status',
+  }));
+});
+
+// ── (12) Пересечения заголовков h2..h6 ─────────────────────────────────
+const headingsIntersection = computed(() => {
+  const list = report.value?.report?.headings_intersection;
+  return Array.isArray(list) ? list : [];
+});
+const headingsSorted = computed(() => {
+  return [...headingsIntersection.value].sort(makeSorter(headingsSort.value, {
+    numeric: headingsSort.value.key !== 'text' && headingsSort.value.key !== 'sample',
+  }));
+});
+
+// ── (4) Превью того, что собрал парсер (per-URL) ───────────────────────
+// Бэкенд кладёт `parsed_preview` в каждый document_diagnostics при
+// `include_parsed_preview=true`. На UI: модалка по клику на «📄 Что собрал».
+const previewByUrl = computed(() => {
+  const map = new Map();
+  for (const d of (docDiagnostics.value || [])) {
+    if (d?.url) {
+      map.set(String(d.url), {
+        text: String(d.parsed_preview || ''),
+        text_chars: Number(d.text_chars || 0),
+        word_count: Number(d.word_count || 0),
+        method:     String(d.method || '—'),
+        empty_reason: d.empty_reason || null,
+        tag_zone_chars: Number(d.tag_zone_chars || 0),
+        headings: Array.isArray(d.headings) ? d.headings : null,
+      });
+    }
+  }
+  return map;
+});
+const previewModalUrl = ref(null);
+const previewModal = computed(() => {
+  if (!previewModalUrl.value) return null;
+  const data = previewByUrl.value.get(previewModalUrl.value);
+  if (!data) return null;
+  return { url: previewModalUrl.value, ...data };
+});
+function openPreview(url) {
+  previewModalUrl.value = String(url || '') || null;
+}
+function closePreview() {
+  previewModalUrl.value = null;
+}
 
 const vocabFiltered = computed(() => {
   let arr = vocabFilter.value === 'all'
     ? vocabulary.value
     : vocabulary.value.filter((v) => v.status === vocabFilter.value);
-  const key = vocabSort.value;
-  arr = [...arr].sort((a, b) => {
-    if (key === 'lemma') return String(a.lemma).localeCompare(String(b.lemma), 'ru');
-    return (Number(b[key]) || 0) - (Number(a[key]) || 0);
-  });
+  arr = [...arr].sort(makeSorter(vocabSort.value, { numeric: vocabSort.value.key !== 'lemma' }));
   return arr;
 });
 const ngramsFiltered = computed(() => {
-  if (ngramFilter.value === 'all') return ngrams.value;
-  return ngrams.value.filter((n) => n.type === ngramFilter.value);
+  let arr = ngramFilter.value === 'all'
+    ? ngrams.value
+    : ngrams.value.filter((n) => n.type === ngramFilter.value);
+  arr = [...arr].sort(makeSorter(ngramSort.value, { numeric: ngramSort.value.key !== 'phrase' && ngramSort.value.key !== 'pos_pattern' }));
+  return arr;
 });
 
 // ── Пагинация ─────────────────────────────────────────────────────────────
 // При смене фильтра/сортировки сбрасываем страницу на 1 — иначе можно
 // попасть на «пустую» страницу.
-watch([vocabFilter, vocabSort, vocabPageSize], () => { vocabPage.value = 1; });
-watch([ngramFilter, ngramPageSize],            () => { ngramPage.value = 1; });
-watch([gapFilter,   gapPageSize],              () => { gapPage.value   = 1; });
+watch([vocabFilter, vocabSort, vocabPageSize], () => { vocabPage.value = 1; }, { deep: true });
+watch([ngramFilter, ngramSort, ngramPageSize], () => { ngramPage.value = 1; }, { deep: true });
+watch([gapFilter, gapSort, gapPageSize],       () => { gapPage.value   = 1; }, { deep: true });
 
 function pageCount(total, size) {
   return Math.max(1, Math.ceil((Number(total) || 0) / Math.max(1, Number(size) || 1)));
@@ -286,30 +400,168 @@ const barMax = computed(() => {
   return arr.length ? Math.max(...arr.map((v) => v.median_count * v.df)) : 1;
 });
 
-// Word cloud: первые 60 «важных» лемм, размер шрифта по bm25_score.
+// ── (8) Multi-series: median(top) vs our_count vs Zipf-fit ─────────────
+// Заказчик: «надо строить формат графика, где будет графики: медиана по
+// LSI словам, график по нашему сайту, и расчёт закона ципфа и построение
+// графика третьего». Используем те же топ-20 лемм по «суммарной частоте».
+// Закон Ципфа: f(rank) ≈ C / rank^s; подбираем C, s по медиане ТОПа
+// методом наименьших квадратов в log-log пространстве.
+const ourCountByLemma = computed(() => {
+  const map = new Map();
+  for (const t of (comparison.value?.per_term || [])) {
+    if (t?.lemma != null) map.set(String(t.lemma), Number(t.our_count) || 0);
+  }
+  return map;
+});
+
+const topChartData = computed(() => {
+  const items = topByFrequency.value;
+  if (!items.length) return null;
+
+  // ── 1) Подгонка Zipf: y = C * rank^(-s) → log y = log C - s * log rank.
+  // y_i = median_count_i (используем медиану, а не df×median, чтобы
+  // получить распределение «частоты слова в одном документе ниши»).
+  const ranks = items.map((_, i) => i + 1);
+  const yObs  = items.map((v) => Math.max(1e-6, Number(v.median_count) || 0));
+  // Линейная регрессия по точкам (log rank, log y).
+  const xs = ranks.map((r) => Math.log(r));
+  const ys = yObs.map((y) => Math.log(y));
+  const n  = xs.length;
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (xs[i] - meanX) * (ys[i] - meanY);
+    den += (xs[i] - meanX) ** 2;
+  }
+  // Если все x_i равны (n=1 или дисперсия ноль) — закону Ципфа нечем
+  // обучаться. Берём s=1 (классический закон Ципфа без отклонений) и
+  // intercept = mean(y), чтобы кривая прошла через средний уровень.
+  const slope = den > 0 ? num / den : -1; // -s, по умолчанию s=1
+  const intercept = den > 0 ? meanY - slope * meanX : meanY;
+  const s = -slope;
+  const C = Math.exp(intercept);
+  const zipf = ranks.map((r) => C * Math.pow(r, -s));
+
+  // ── 2) Серии для графика. Шкала Y: max из всех серий (с округлением).
+  const our = items.map((v) => ourCountByLemma.value.get(v.lemma) ?? 0);
+  const med = items.map((v) => Number(v.median_count) || 0);
+  const yMax = Math.max(
+    1,
+    ...med, ...our, ...zipf,
+  );
+
+  return {
+    items,        // полные строки vocab (для tooltip)
+    labels: items.map((v) => v.lemma),
+    median: med,
+    our,
+    zipf,
+    zipf_C: C,
+    zipf_s: s,
+    yMax,
+    n,
+    hasOur: our.some((v) => v > 0),
+    hasComparison: !!comparison.value && !comparison.value.error,
+  };
+});
+
+// ── (6) Word cloud: spiral layout. Возвращает массив элементов с
+// абсолютными координатами {x, y, lemma, size, color, title}.
+// Главное слово (топ-1 по BM25) — в центре. Остальные размещаются по
+// архимедовой спирали с проверкой коллизий (грубая bbox-эвристика).
 const cloud = computed(() => {
   const items = [...vocabulary.value]
     .filter((v) => v.bm25_score > 0)
     .sort((a, b) => b.bm25_score - a.bm25_score)
     .slice(0, 60);
-  if (!items.length) return [];
+  if (!items.length) return { boxes: [], width: 800, height: 420 };
+
   const max = items[0].bm25_score;
   const min = items[items.length - 1].bm25_score;
   const span = Math.max(1e-6, max - min);
-  return items.map((v) => {
-    // Линейная интерполяция в диапазон 13–34 px
-    const t = (v.bm25_score - min) / span;
-    const size = 13 + t * 21;
-    // hue: 220 (синий) для «доп» → 280 (фиол) → 350 (розово-красный) для топов
-    const hue  = 220 + t * 130;
-    return {
-      lemma: v.lemma,
-      size:  size.toFixed(1),
-      color: `hsl(${hue.toFixed(0)}, 70%, 65%)`,
-      title: `BM25: ${v.bm25_score} · DF: ${v.df} · Median: ${v.median_count}`,
-    };
-  });
+
+  // Размер шрифта 14–48 px пропорционально BM25 (главное слово — самое крупное).
+  const sizes = items.map((v) => 14 + ((v.bm25_score - min) / span) * 34);
+
+  // Канвас словаря.
+  const W = 900, H = 460;
+  const cx = W / 2, cy = H / 2;
+
+  // Грубая ширина текста: ~0.55 * fontSize * length, высота ≈ fontSize * 1.05
+  const charWidth = (size, text) => Math.max(20, size * 0.58 * Math.max(1, text.length));
+
+  const placed = [];
+
+  function intersects(a, b) {
+    return !(a.right < b.left || b.right < a.left || a.bottom < b.top || b.bottom < a.top);
+  }
+
+  // Размещение по архимедовой спирали r = a + b*theta.
+  // Шаг угла маленький; шаг r растёт медленно, чтобы заполнить плотно.
+  for (let i = 0; i < items.length; i++) {
+    const v    = items[i];
+    const text = v.lemma;
+    const size = sizes[i];
+    const w    = charWidth(size, text);
+    const h    = size * 1.1;
+
+    // Центральное слово — без поиска.
+    if (i === 0) {
+      const left = cx - w / 2, top = cy - h / 2;
+      placed.push({
+        lemma: text, size, color: cloudColor(1, sizes.length),
+        title: `BM25: ${v.bm25_score} · DF: ${v.df} · Median: ${v.median_count}`,
+        cx,
+        cy,
+        left, top,
+        right: left + w, bottom: top + h,
+        is_center: true,
+      });
+      continue;
+    }
+
+    // Спираль: theta растёт, r растёт линейно.
+    const a = 4, b = 4;
+    let placedNode = null;
+    for (let theta = 0; theta < 80 * Math.PI; theta += 0.18) {
+      const r  = a + b * theta;
+      const x  = cx + r * Math.cos(theta);
+      const y  = cy + r * Math.sin(theta);
+      const left = x - w / 2, top = y - h / 2;
+      const box  = { left, top, right: left + w, bottom: top + h };
+      // Не выходим за границы канваса (с padding).
+      if (box.left < 4 || box.top < 4 || box.right > W - 4 || box.bottom > H - 4) continue;
+      // Проверка коллизии со всеми ранее размещёнными.
+      let collide = false;
+      for (const p of placed) {
+        if (intersects(box, p)) { collide = true; break; }
+      }
+      if (!collide) {
+        placedNode = {
+          lemma: text, size, color: cloudColor(i + 1, items.length),
+          title: `BM25: ${v.bm25_score} · DF: ${v.df} · Median: ${v.median_count}`,
+          cx: x, cy: y,
+          left, top,
+          right: box.right, bottom: box.bottom,
+          is_center: false,
+        };
+        break;
+      }
+    }
+    if (placedNode) placed.push(placedNode);
+  }
+
+  return { boxes: placed, width: W, height: H };
 });
+
+function cloudColor(rank, total) {
+  // Топ-1 → ярко-фиолетовый; далее переход к синему.
+  const t = Math.max(0, Math.min(1, (rank - 1) / Math.max(1, total - 1)));
+  const hue = 280 - t * 80; // 280 → 200
+  const lightness = 70 - t * 15; // 70% → 55%
+  return `hsl(${hue.toFixed(0)}, 75%, ${lightness.toFixed(0)}%)`;
+}
 
 // ── Status helpers ───────────────────────────────────────────────────────
 function statusBadgeClass(status) {
@@ -351,6 +603,20 @@ async function exportFile(kind) {
     const res = await api.get(`/relevance/${route.params.id}/export.${ext}`, {
       responseType: 'blob',
     });
+    // Если бэк отдал JSON-ошибку (400/500) с responseType:'blob', содержимое
+    // всё равно придёт как Blob. Распознаём по типу и парсим, чтобы показать
+    // нормальный alert вместо «качаем 100 байт мусора».
+    const ct = (res?.headers?.['content-type'] || '').toLowerCase();
+    if (kind === 'csv' && ct.includes('application/json') && res.data?.text) {
+      try {
+        const txt = await res.data.text();
+        const parsed = JSON.parse(txt);
+        throw new Error(parsed?.error || 'Ошибка экспорта');
+      } catch (e) {
+        alert(e.message || 'Ошибка экспорта');
+        return;
+      }
+    }
     const blob = new Blob([res.data], {
       type: kind === 'json' ? 'application/json' : 'text/csv',
     });
@@ -362,9 +628,22 @@ async function exportFile(kind) {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    // Браузеру нужно время на инициирование загрузки до того, как мы освободим URL.
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
   } catch (err) {
-    alert(err.response?.data?.error || err.message || 'Ошибка экспорта');
+    // Если ответ axios — пытаемся распарсить blob как JSON.
+    let msg = err.message || 'Ошибка экспорта';
+    const blob = err?.response?.data;
+    if (blob && typeof blob.text === 'function') {
+      try {
+        const txt = await blob.text();
+        const parsed = JSON.parse(txt);
+        msg = parsed?.error || msg;
+      } catch (_) { /* keep original */ }
+    } else if (typeof err?.response?.data?.error === 'string') {
+      msg = err.response.data.error;
+    }
+    alert(msg);
   }
 }
 
@@ -426,6 +705,29 @@ function copyFilteredVocab() {
 function copyFilteredNgrams() {
   const text = ngramsFiltered.value.map((n) => n.phrase).join('\n');
   copyToClipboard(text, `видимые n-граммы (${ngramsFiltered.value.length})`);
+}
+
+// (4) Скопировать содержимое модалки «что собрал парсер» (для выбранного URL).
+function copyPreviewText() {
+  const data = previewModal.value;
+  if (!data || !data.text) return;
+  copyToClipboard(data.text, `текст ${data.url}`);
+}
+
+// (12) Скопировать рекомендованные заголовки (для копирайтера).
+function copyHeadings() {
+  const list = headingsIntersection.value || [];
+  if (!list.length) return;
+  const text = list.map((h) => `${h.sample}  (df=${h.df}, ${h.df_share_pct}%)`).join('\n');
+  copyToClipboard(text, `рекомендованные h2..h6 (${list.length})`);
+}
+
+// (7) Скопировать LSI теговой зоны.
+function copyTagZone() {
+  const list = tagZoneVocab.value || [];
+  if (!list.length) return;
+  const text = list.map((t) => t.lemma).join(', ');
+  copyToClipboard(text, `LSI теговой зоны (${list.length})`);
 }
 </script>
 
@@ -541,6 +843,9 @@ function copyFilteredNgrams() {
                 {{ comparison.summary?.important_lemmas_hit || 0 }} из
                 {{ comparison.summary?.important_lemmas_total || 0 }} важных
               </div>
+              <div class="text-[9px] text-gray-600 mt-0.5 italic">
+                считается только по важным LSI
+              </div>
             </div>
             <div class="rounded bg-gray-950 border border-gray-800 p-3 text-center">
               <div class="text-2xl font-bold text-sky-300">
@@ -649,20 +954,45 @@ function copyFilteredNgrams() {
 
           <!-- Математические директивы для копирайтера -->
           <div v-if="(comparison.directives || []).length > 0" class="mb-5">
-            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">
-              ✍ Что делать (математические директивы)
-            </h3>
+            <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+              <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider">
+                ✍ Что делать (математические директивы)
+              </h3>
+              <div class="flex items-center gap-1 text-[11px]">
+                <button class="btn-ghost"
+                        :class="directiveFilter === 'important' ? 'text-indigo-300' : 'text-gray-500'"
+                        @click="directiveFilter = 'important'"
+                        title="Только важные LSI (★) — приоритетные правки">
+                  ★ Важные ({{ directivesImportantCount }})
+                </button>
+                <button class="btn-ghost"
+                        :class="directiveFilter === 'additional' ? 'text-indigo-300' : 'text-gray-500'"
+                        @click="directiveFilter = 'additional'"
+                        title="Менее приоритетные — после того как важные закрыты">
+                  · Менее важные ({{ directivesAdditionalCount }})
+                </button>
+                <button class="btn-ghost"
+                        :class="directiveFilter === 'all' ? 'text-indigo-300' : 'text-gray-500'"
+                        @click="directiveFilter = 'all'">
+                  Все ({{ comparison.directives.length }})
+                </button>
+              </div>
+            </div>
             <ol class="space-y-1 text-xs">
-              <li v-for="(d, i) in comparison.directives.slice(0, 50)" :key="d.lemma + ':' + i"
-                  class="flex items-start gap-2 py-1 px-2 rounded hover:bg-gray-900/40">
+              <li v-for="(d, i) in directivesVisible.slice(0, 100)" :key="d.lemma + ':' + i"
+                  :class="['flex items-start gap-2 py-1 px-2 rounded',
+                           d.important ? 'hover:bg-indigo-900/20' : 'hover:bg-gray-900/40']">
                 <span class="text-gray-500 tabular-nums w-6 flex-shrink-0 text-right">{{ i + 1 }}.</span>
                 <span :class="['badge text-[10px] px-1.5 py-0', statusColor(d.status)]">{{ d.status }}</span>
-                <span v-if="d.important" class="text-[10px] text-indigo-300" title="Important LSI-key">★</span>
+                <span v-if="d.important" class="text-[10px] text-indigo-300 font-bold" title="Important LSI-key">★</span>
                 <span class="text-gray-200">{{ d.text }}</span>
               </li>
             </ol>
-            <div v-if="comparison.directives.length > 50" class="text-[11px] text-gray-500 mt-2">
-              … и ещё {{ comparison.directives.length - 50 }} директив (см. подсветку слов ниже).
+            <div v-if="directivesVisible.length > 100" class="text-[11px] text-gray-500 mt-2">
+              … и ещё {{ directivesVisible.length - 100 }} директив (см. подсветку слов ниже).
+            </div>
+            <div v-if="directivesVisible.length === 0" class="text-[11px] text-gray-500 mt-2 italic">
+              Нет директив по выбранному фильтру.
             </div>
           </div>
 
@@ -683,12 +1013,18 @@ function copyFilteredNgrams() {
               <table class="w-full text-xs">
                 <thead class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
                   <tr>
-                    <th class="text-left py-2 px-2">Лемма</th>
-                    <th class="text-center py-2 px-2">Статус</th>
-                    <th class="text-right py-2 px-2">У вас</th>
-                    <th class="text-right py-2 px-2">Медиана ТОПа</th>
-                    <th class="text-right py-2 px-2">DF</th>
-                    <th class="text-right py-2 px-2">BM25</th>
+                    <th class="text-left py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(gapSort, 'lemma')">Лемма {{ sortArrow(gapSort, 'lemma') }}</th>
+                    <th class="text-center py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(gapSort, 'status')">Статус {{ sortArrow(gapSort, 'status') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(gapSort, 'our_count')">У вас {{ sortArrow(gapSort, 'our_count') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(gapSort, 'median_top')">Медиана ТОПа {{ sortArrow(gapSort, 'median_top') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(gapSort, 'df')">DF {{ sortArrow(gapSort, 'df') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(gapSort, 'bm25_score')">BM25 {{ sortArrow(gapSort, 'bm25_score') }}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -775,50 +1111,129 @@ function copyFilteredNgrams() {
           </div>
         </div>
 
-        <!-- ── Bar chart: ТОП-20 по частоте ── -->
+        <!-- ── Multi-series chart: ТОП-20 по частоте + наш сайт + Ципф ── -->
         <div class="card">
-          <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider mb-3">
-            📈 ТОП-20 слов по суммарной частоте (DF × медиана)
-          </h2>
-          <div v-if="topByFrequency.length === 0" class="text-gray-500 text-sm py-4 text-center">
+          <div class="flex items-baseline justify-between flex-wrap gap-2 mb-3">
+            <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">
+              📈 ТОП-20 слов: медиана ТОПа · наш сайт · закон Ципфа
+            </h2>
+            <div v-if="topChartData" class="text-[11px] text-gray-500">
+              Zipf: f(rank) ≈
+              <span class="text-gray-300 tabular-nums">{{ topChartData.zipf_C.toFixed(2) }}</span>
+              / rank<sup>{{ topChartData.zipf_s.toFixed(2) }}</sup>
+            </div>
+          </div>
+          <div v-if="!topChartData" class="text-gray-500 text-sm py-4 text-center">
             Нет данных для построения графика.
           </div>
-          <div v-else class="space-y-1.5">
-            <div v-for="(item, i) in topByFrequency" :key="item.lemma"
-                 class="flex items-center gap-2 text-xs">
-              <div class="w-6 text-right text-gray-500">{{ i + 1 }}</div>
-              <div class="w-32 truncate text-gray-200" :title="item.lemma">{{ item.lemma }}</div>
-              <div class="flex-1 bg-gray-800 rounded h-5 relative overflow-hidden">
-                <div class="h-full transition-all"
-                     :class="item.status === 'important' ? 'bg-indigo-500' : 'bg-sky-700'"
-                     :style="{ width: `${(item.median_count * item.df / barMax * 100).toFixed(1)}%` }"></div>
-              </div>
-              <div class="w-20 text-right text-gray-400 tabular-nums">
-                {{ item.df }} × {{ item.median_count }}
-              </div>
-              <div class="w-20 text-right text-gray-500 tabular-nums">
-                BM25 {{ item.bm25_score.toFixed(2) }}
-              </div>
+          <div v-else>
+            <!-- Легенда -->
+            <div class="flex items-center gap-4 text-[11px] text-gray-400 mb-2 flex-wrap">
+              <span class="flex items-center gap-1.5">
+                <span class="inline-block w-3 h-3 rounded-sm bg-sky-500/80"></span>
+                Медиана ТОПа (по корпусу)
+              </span>
+              <span v-if="topChartData.hasComparison" class="flex items-center gap-1.5">
+                <span class="inline-block w-3 h-3 rounded-sm bg-emerald-500/80"></span>
+                Ваш сайт (фактические вхождения)
+              </span>
+              <span class="flex items-center gap-1.5">
+                <span class="inline-block w-3 h-3 rounded-sm border-2 border-fuchsia-400"></span>
+                Закон Ципфа (теоретическая кривая)
+              </span>
             </div>
+            <!-- Сам график: SVG со столбиками (median + our) и линией Zipf -->
+            <div class="overflow-x-auto">
+              <svg :viewBox="`0 0 ${40 + topChartData.n * 44} 240`"
+                   :width="40 + topChartData.n * 44"
+                   height="260"
+                   class="block">
+                <!-- сетка Y -->
+                <g v-for="(yv, i) in [0, 0.25, 0.5, 0.75, 1]" :key="'g' + i">
+                  <line :x1="32" :x2="40 + topChartData.n * 44 - 8"
+                        :y1="200 - 180 * yv" :y2="200 - 180 * yv"
+                        stroke="#1f2937" stroke-width="1" stroke-dasharray="3,3" />
+                  <text :x="28" :y="200 - 180 * yv + 4" text-anchor="end"
+                        class="fill-gray-500" style="font-size:9px">
+                    {{ Math.round(yv * topChartData.yMax) }}
+                  </text>
+                </g>
+                <!-- столбики и линия -->
+                <g v-for="(label, i) in topChartData.labels" :key="label">
+                  <!-- median bar -->
+                  <rect :x="40 + i * 44 + 4" :y="200 - 180 * (topChartData.median[i] / topChartData.yMax)"
+                        :width="14" :height="180 * (topChartData.median[i] / topChartData.yMax)"
+                        class="fill-sky-500/80">
+                    <title>{{ label }} · медиана ТОПа: {{ topChartData.median[i] }}</title>
+                  </rect>
+                  <!-- our bar -->
+                  <rect v-if="topChartData.hasComparison"
+                        :x="40 + i * 44 + 22" :y="200 - 180 * (topChartData.our[i] / topChartData.yMax)"
+                        :width="14" :height="180 * (topChartData.our[i] / topChartData.yMax)"
+                        class="fill-emerald-500/80">
+                    <title>{{ label }} · ваш сайт: {{ topChartData.our[i] }}</title>
+                  </rect>
+                  <!-- xtick label -->
+                  <text :x="40 + i * 44 + 22" :y="220"
+                        text-anchor="end"
+                        :transform="`rotate(-50, ${40 + i * 44 + 22}, 220)`"
+                        class="fill-gray-400" style="font-size:10px">
+                    {{ label }}
+                  </text>
+                </g>
+                <!-- Zipf curve (через точки центра баров) -->
+                <polyline
+                  fill="none"
+                  stroke="#e879f9"
+                  stroke-width="2"
+                  stroke-dasharray="4,3"
+                  :points="topChartData.zipf.map((y, i) =>
+                    `${40 + i * 44 + 22},${200 - 180 * Math.min(1, y / topChartData.yMax)}`
+                  ).join(' ')" />
+                <!-- точки на кривой Zipf -->
+                <circle v-for="(y, i) in topChartData.zipf" :key="'z' + i"
+                        :cx="40 + i * 44 + 22"
+                        :cy="200 - 180 * Math.min(1, y / topChartData.yMax)"
+                        r="3"
+                        class="fill-fuchsia-400">
+                  <title>{{ topChartData.labels[i] }} · Zipf: {{ y.toFixed(2) }}</title>
+                </circle>
+              </svg>
+            </div>
+            <p class="text-[10px] text-gray-500 mt-2 italic">
+              Чем ближе зелёные столбики (ваш сайт) к синим (медиана ТОПа) и к
+              фиолетовой кривой Ципфа — тем естественнее распределение частот
+              у вас. Сильные провалы зелёного по топ-1…топ-5 — сигнал нарастить
+              «ядро» темы.
+            </p>
           </div>
         </div>
 
-        <!-- ── Word cloud (по BM25) ── -->
+        <!-- ── Word cloud (spiral, в центре — топ-1 BM25) ── -->
         <div class="card">
           <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider mb-3">
-            ☁ Облако слов (размер ∝ BM25-весу)
+            ☁ Облако слов (центр — главное слово; размер ∝ BM25)
           </h2>
-          <div v-if="cloud.length === 0" class="text-gray-500 text-sm py-4 text-center">
+          <div v-if="cloud.boxes.length === 0" class="text-gray-500 text-sm py-4 text-center">
             Нет слов с положительным BM25-весом.
           </div>
-          <div v-else
-               class="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 py-4 px-2 bg-gray-950 rounded">
-            <span v-for="w in cloud" :key="w.lemma"
-                  :title="w.title"
-                  :style="{ fontSize: w.size + 'px', color: w.color, lineHeight: 1.1 }"
-                  class="font-semibold cursor-default hover:opacity-100 opacity-90 transition-opacity">
-              {{ w.lemma }}
-            </span>
+          <div v-else class="bg-gray-950 rounded overflow-hidden flex justify-center">
+            <svg :viewBox="`0 0 ${cloud.width} ${cloud.height}`"
+                 :width="cloud.width" :height="cloud.height"
+                 preserveAspectRatio="xMidYMid meet"
+                 class="max-w-full h-auto">
+              <text v-for="b in cloud.boxes" :key="b.lemma"
+                    :x="b.cx" :y="b.cy"
+                    :font-size="b.size"
+                    :fill="b.color"
+                    :font-weight="b.is_center ? 800 : 600"
+                    text-anchor="middle"
+                    dominant-baseline="middle"
+                    style="cursor: default; font-family: Inter, system-ui, sans-serif">
+                <title>{{ b.title }}</title>
+                {{ b.lemma }}
+              </text>
+            </svg>
           </div>
         </div>
 
@@ -838,16 +1253,6 @@ function copyFilteredNgrams() {
               <button class="btn-ghost"
                       :class="vocabFilter === 'additional' ? 'text-indigo-300' : 'text-gray-500'"
                       @click="vocabFilter = 'additional'">Доп</button>
-              <span class="mx-1 text-gray-700">·</span>
-              <span class="text-gray-500">сорт:</span>
-              <select v-model="vocabSort"
-                      class="bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-xs text-gray-200">
-                <option value="bm25_score">BM25</option>
-                <option value="tf_idf_score">TF-IDF</option>
-                <option value="df">DF</option>
-                <option value="median_count">Медиана</option>
-                <option value="lemma">Алфавит</option>
-              </select>
               <span class="mx-1 text-gray-700">·</span>
               <button class="btn-ghost text-emerald-300"
                       @click="copyImportantLsi" title="Скопировать только важные леммы">
@@ -872,12 +1277,18 @@ function copyFilteredNgrams() {
                 <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
                   <tr>
                     <th class="text-left py-2 px-2 w-10">#</th>
-                    <th class="text-left py-2 px-2">Лемма</th>
-                    <th class="text-right py-2 px-2">DF (сайтов)</th>
-                    <th class="text-right py-2 px-2">Медиана вх.</th>
-                    <th class="text-right py-2 px-2">BM25 score</th>
-                    <th class="text-right py-2 px-2">TF-IDF</th>
-                    <th class="text-center py-2 px-2">Статус</th>
+                    <th class="text-left py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'lemma')">Лемма {{ sortArrow(vocabSort, 'lemma') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'df')">DF (сайтов) {{ sortArrow(vocabSort, 'df') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'median_count')">Медиана вх. {{ sortArrow(vocabSort, 'median_count') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'bm25_score')">BM25 score {{ sortArrow(vocabSort, 'bm25_score') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'tf_idf_score')">TF-IDF {{ sortArrow(vocabSort, 'tf_idf_score') }}</th>
+                    <th class="text-center py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'status')">Статус {{ sortArrow(vocabSort, 'status') }}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -937,6 +1348,9 @@ function copyFilteredNgrams() {
           <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">
               🔗 N-граммы — {{ ngramsFiltered.length }} фраз
+              <span class="text-[10px] text-gray-500 font-normal normal-case ml-1">
+                (показаны фразы, встретившиеся у ≥ 40% сайтов)
+              </span>
             </h2>
             <div class="flex items-center gap-1 text-xs flex-wrap">
               <button class="btn-ghost"
@@ -975,11 +1389,19 @@ function copyFilteredNgrams() {
                 <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
                   <tr>
                     <th class="text-left py-2 px-2 w-10">#</th>
-                    <th class="text-left py-2 px-2">Фраза</th>
-                    <th class="text-right py-2 px-2">DF (сайтов)</th>
-                    <th class="text-right py-2 px-2">Медиана вх.</th>
-                    <th class="text-center py-2 px-2">Тип</th>
-                    <th class="text-center py-2 px-2">POS</th>
+                    <th class="text-left py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(ngramSort, 'phrase')">Фраза {{ sortArrow(ngramSort, 'phrase') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(ngramSort, 'df')">DF (сайтов) {{ sortArrow(ngramSort, 'df') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(ngramSort, 'df_share_pct')"
+                        title="Доля сайтов из ТОПа (порог = 40%)">% сайтов {{ sortArrow(ngramSort, 'df_share_pct') }}</th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(ngramSort, 'median_count')">Медиана вх. {{ sortArrow(ngramSort, 'median_count') }}</th>
+                    <th class="text-center py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(ngramSort, 'type')">Тип {{ sortArrow(ngramSort, 'type') }}</th>
+                    <th class="text-center py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(ngramSort, 'pos_pattern')">POS {{ sortArrow(ngramSort, 'pos_pattern') }}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -988,6 +1410,7 @@ function copyFilteredNgrams() {
                     <td class="py-1.5 px-2 text-gray-500 tabular-nums">{{ ngramsPageStart + i + 1 }}</td>
                     <td class="py-1.5 px-2 text-gray-100 font-medium">{{ n.phrase }}</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.df }}</td>
+                    <td class="py-1.5 px-2 text-right text-emerald-300 tabular-nums">{{ Number(n.df_share_pct || 0).toFixed(1) }}%</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ n.median_count }}</td>
                     <td class="py-1.5 px-2 text-center">
                       <span :class="{
@@ -1124,6 +1547,106 @@ function copyFilteredNgrams() {
           </div>
         </div>
 
+        <!-- ── (7) LSI теговой зоны (header/footer/sidemenu) ── -->
+        <div v-if="tagZoneVocab.length > 0" class="card">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">
+              🧱 LSI теговой зоны (шапка / подвал / сквозное меню) — {{ tagZoneVocab.length }} лемм
+            </h2>
+            <div class="flex items-center gap-1 text-xs flex-wrap">
+              <button class="btn-ghost text-sky-300" @click="copyTagZone"
+                      title="Скопировать леммы теговой зоны">📋 Скопировать</button>
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-500 mb-2">
+            Леммы, которые конкуренты выводят в шапке/подвале/сквозном меню сайта
+            (BM25-словарь по «теговой» зоне отдельно от основного контента). Колонка
+            «У вас в тег.зоне» показывает, есть ли эта лемма в шапке/подвале вашего сайта.
+          </p>
+          <div class="overflow-x-auto max-h-[50vh] overflow-y-auto border border-gray-800 rounded">
+            <table class="w-full text-xs">
+              <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
+                <tr>
+                  <th class="text-left py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(tagZoneSort, 'lemma')">Лемма {{ sortArrow(tagZoneSort, 'lemma') }}</th>
+                  <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(tagZoneSort, 'df')">DF {{ sortArrow(tagZoneSort, 'df') }}</th>
+                  <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(tagZoneSort, 'median_count')">Медиана {{ sortArrow(tagZoneSort, 'median_count') }}</th>
+                  <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(tagZoneSort, 'bm25_score')">BM25 {{ sortArrow(tagZoneSort, 'bm25_score') }}</th>
+                  <th class="text-center py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(tagZoneSort, 'status')">Статус {{ sortArrow(tagZoneSort, 'status') }}</th>
+                  <th class="text-center py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(tagZoneSort, 'in_our_tag_zone')">У вас {{ sortArrow(tagZoneSort, 'in_our_tag_zone') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in tagZoneSorted" :key="t.lemma"
+                    class="border-b border-gray-900 hover:bg-gray-900/50">
+                  <td class="py-1.5 px-2 text-gray-100 font-medium">{{ t.lemma }}</td>
+                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ t.df }}</td>
+                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ t.median_count }}</td>
+                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(t.bm25_score || 0).toFixed(3) }}</td>
+                  <td class="py-1.5 px-2 text-center">
+                    <span v-if="t.status === 'important'"
+                          class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800">Важное</span>
+                    <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">Доп</span>
+                  </td>
+                  <td class="py-1.5 px-2 text-center">
+                    <span v-if="t.in_our_tag_zone" class="text-emerald-400" title="есть в шапке/подвале вашего сайта">✓</span>
+                    <span v-else class="text-rose-400" title="отсутствует у вашего сайта">✗</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ── (12) Пересечения заголовков h2..h6 → рекомендации структуры ── -->
+        <div v-if="headingsIntersection.length > 0" class="card">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">
+              🧩 Заголовки конкурентов (h2–h6) — {{ headingsIntersection.length }} рекомендаций
+            </h2>
+            <div class="flex items-center gap-1 text-xs flex-wrap">
+              <button class="btn-ghost text-sky-300" @click="copyHeadings"
+                      title="Скопировать список рекомендованных заголовков">📋 Скопировать</button>
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-500 mb-2">
+            Заголовки h2..h6, которые встречаются у нескольких сайтов из ТОП-20.
+            Это «пересечение» подсказывает, какие разделы стоит завести в вашей
+            статье — чтобы перекрыть структуру ниши.
+          </p>
+          <div class="overflow-x-auto max-h-[50vh] overflow-y-auto border border-gray-800 rounded">
+            <table class="w-full text-xs">
+              <thead class="text-[10px] text-gray-500 uppercase tracking-wider border-b border-gray-800 sticky top-0 bg-gray-900 z-10">
+                <tr>
+                  <th class="text-left py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(headingsSort, 'sample')">Заголовок {{ sortArrow(headingsSort, 'sample') }}</th>
+                  <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(headingsSort, 'df')">Сайтов {{ sortArrow(headingsSort, 'df') }}</th>
+                  <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                      @click="toggleSort(headingsSort, 'df_share_pct')">% сайтов {{ sortArrow(headingsSort, 'df_share_pct') }}</th>
+                  <th class="text-center py-2 px-2">Уровни</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="h in headingsSorted" :key="h.text"
+                    class="border-b border-gray-900 hover:bg-gray-900/50">
+                  <td class="py-1.5 px-2 text-gray-100">{{ h.sample }}</td>
+                  <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ h.df }}</td>
+                  <td class="py-1.5 px-2 text-right text-emerald-300 tabular-nums">{{ Number(h.df_share_pct || 0).toFixed(1) }}%</td>
+                  <td class="py-1.5 px-2 text-center text-[10px] text-gray-400 uppercase">
+                    {{ (h.levels || []).join(', ') }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <!-- ── SERP список ── -->
         <details class="card">
           <summary class="cursor-pointer text-sm font-bold text-gray-300 uppercase tracking-wider">
@@ -1132,15 +1655,30 @@ function copyFilteredNgrams() {
                   class="ml-2 text-amber-400 text-xs normal-case">
               · не открылось: {{ report.failed_urls.length }}
             </span>
+            <span v-if="(report.filter?.skipped_same_host?.length || 0) > 0"
+                  class="ml-2 text-gray-500 text-xs normal-case">
+              · дублей домена пропущено: {{ report.filter.skipped_same_host.length }}
+            </span>
           </summary>
           <ol class="mt-3 space-y-1.5 text-xs">
-            <li v-for="(s, i) in (report.serp || [])" :key="s.url" class="flex gap-2">
+            <li v-for="(s, i) in (report.serp || [])" :key="s.url" class="flex gap-2 items-start">
               <span class="w-6 text-gray-500 text-right flex-shrink-0">{{ i + 1 }}.</span>
-              <div class="min-w-0">
+              <div class="min-w-0 flex-1">
                 <a :href="s.url" target="_blank" rel="noopener noreferrer"
                    class="text-sky-300 hover:underline break-all">{{ s.url }}</a>
                 <div v-if="s.title" class="text-gray-400 truncate">{{ s.title }}</div>
               </div>
+              <button v-if="previewByUrl.get(s.url)?.text"
+                      @click.stop="openPreview(s.url)"
+                      class="btn-ghost text-emerald-300 text-[10px] flex-shrink-0"
+                      title="Показать, что собрал парсер с этой страницы">
+                📄 Что собрал
+              </button>
+              <span v-else-if="previewByUrl.has(s.url)"
+                    class="text-[10px] text-amber-400 flex-shrink-0"
+                    :title="previewByUrl.get(s.url)?.empty_reason || 'парсер ничего не вытащил'">
+                ⚠ нет текста
+              </span>
             </li>
           </ol>
           <div v-if="(report.failed_urls || []).length > 0" class="mt-4 pt-3 border-t border-gray-800">
@@ -1151,7 +1689,73 @@ function copyFilteredNgrams() {
               </li>
             </ul>
           </div>
+          <div v-if="(report.filter?.skipped_same_host?.length || 0) > 0" class="mt-4 pt-3 border-t border-gray-800">
+            <div class="text-gray-400 text-xs uppercase tracking-wider mb-2">
+              ⏭ Пропущено как дубли домена (оставлен первый URL хоста):
+            </div>
+            <ul class="text-[11px] space-y-0.5">
+              <li v-for="x in report.filter.skipped_same_host" :key="x.url" class="text-gray-500 break-all">
+                <span class="text-gray-400 font-mono">{{ x.host }}</span> — {{ x.url }}
+              </li>
+            </ul>
+          </div>
         </details>
+
+        <!-- ── (4) Модалка «Что собрал парсер» ── -->
+        <div v-if="previewModal" @click.self="closePreview"
+             class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-start justify-center p-4 overflow-y-auto">
+          <div class="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl max-w-4xl w-full mt-8 mb-8">
+            <div class="flex items-start justify-between p-4 border-b border-gray-800 sticky top-0 bg-gray-900 z-10 rounded-t-lg">
+              <div class="min-w-0 flex-1">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Что собрал парсер</div>
+                <a :href="previewModal.url" target="_blank" rel="noopener noreferrer"
+                   class="text-sky-300 hover:underline text-xs break-all">{{ previewModal.url }}</a>
+                <div class="text-[11px] text-gray-500 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+                  <span>метод: <span class="text-gray-300 font-mono">{{ previewModal.method }}</span></span>
+                  <span>символов: <span class="text-gray-300 tabular-nums">{{ previewModal.text_chars }}</span></span>
+                  <span>слов: <span class="text-gray-300 tabular-nums">{{ previewModal.word_count }}</span></span>
+                  <span>тег.зона: <span class="text-gray-300 tabular-nums">{{ previewModal.tag_zone_chars }}</span> симв.</span>
+                  <span v-if="previewModal.empty_reason" class="text-amber-400">
+                    {{ previewModal.empty_reason }}
+                  </span>
+                </div>
+              </div>
+              <div class="flex items-center gap-2 flex-shrink-0 ml-3">
+                <button @click="copyPreviewText"
+                        class="btn-ghost text-emerald-300 text-xs"
+                        title="Скопировать весь текст в буфер">
+                  📋 Скопировать
+                </button>
+                <button @click="closePreview"
+                        class="btn-ghost text-gray-400 text-xs"
+                        title="Закрыть">
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div class="p-4">
+              <div v-if="previewModal.headings && previewModal.headings.length > 0" class="mb-4">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-1">
+                  заголовки (h2–h6):
+                </div>
+                <ul class="text-[11px] text-gray-300 space-y-0.5 max-h-32 overflow-y-auto">
+                  <li v-for="(h, hi) in previewModal.headings" :key="hi"
+                      :class="{
+                        'pl-0':  h.level === 'h2',
+                        'pl-3':  h.level === 'h3',
+                        'pl-6':  h.level === 'h4',
+                        'pl-9':  h.level === 'h5',
+                        'pl-12': h.level === 'h6',
+                      }">
+                    <span class="text-gray-500 font-mono uppercase mr-1">{{ h.level }}</span>{{ h.text }}
+                  </li>
+                </ul>
+              </div>
+              <pre class="text-xs text-gray-200 whitespace-pre-wrap break-words bg-gray-950 p-3 rounded border border-gray-800 max-h-[60vh] overflow-y-auto"
+                   style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace">{{ previewModal.text || '— парсер не вернул текста —' }}</pre>
+            </div>
+          </div>
+        </div>
       </template>
     </div>
   </AppLayout>

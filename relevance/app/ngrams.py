@@ -105,7 +105,7 @@ def compute_ngrams(
     n_docs = len(doc_seqs)
     # Эффективный порог = max(min_df, ceil(n_docs * share/100)).
     share_threshold = max(1, math.ceil(n_docs * (min_df_share_pct / 100.0)))
-    effective_min_df = max(int(min_df), share_threshold)
+    effective_min_df = max(min_df, share_threshold)
 
     # phrase -> { 'df': N, 'counts_per_doc': [..], 'type': str, 'pos_pattern': tuple }
     aggregated: Dict[str, dict] = {}
