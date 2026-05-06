@@ -20,7 +20,8 @@
 ALTER TABLE relevance_reports
   ADD COLUMN IF NOT EXISTS raw_processed JSONB;
 
--- Используем для частичного индекса «у каких отчётов есть DB-fallback».
+-- Партичный индекс «у каких отчётов есть DB-fallback» — пригодится для
+-- быстрых выборок «сколько отчётов могут пересчитать коконы».
 CREATE INDEX IF NOT EXISTS idx_relevance_reports_raw_processed_present
-  ON relevance_reports ((raw_processed IS NOT NULL))
+  ON relevance_reports (id)
   WHERE raw_processed IS NOT NULL;
