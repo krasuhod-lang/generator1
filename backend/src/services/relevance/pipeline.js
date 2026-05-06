@@ -233,6 +233,12 @@ async function processRelevanceReport(reportId) {
         include_tag_zone: true,
         include_headings: true,
         include_parsed_preview: true,
+        // Wave 1: HTML-сигналы из утечек Google Content Warehouse / Yandex
+        // (1922 факторов) — title/H1/meta-шаблон, schema.org-профиль, freshness,
+        // URL/slug, trust-link density, anchor-bank, UX-профиль, exact-form
+        // occurrences, host-hygiene. Доп. env-выключатель на стороне Python:
+        // RELEVANCE_COMPETITOR_SIGNALS=false.
+        include_competitor_signals: true,
         parsed_preview_chars: 20000,
       },
     });
@@ -282,6 +288,11 @@ async function processRelevanceReport(reportId) {
         ? analysisResp.tag_zone_vocabulary : [],
       headings_intersection: Array.isArray(analysisResp?.headings_intersection)
         ? analysisResp.headings_intersection : [],
+      // Wave 1 SEO-сигналы из утечек Google/Yandex (см. signals.py).
+      // Может быть null, если опция выключена через env на стороне Python.
+      competitor_signals: (analysisResp?.competitor_signals && typeof analysisResp.competitor_signals === 'object')
+        ? analysisResp.competitor_signals
+        : null,
       filter: {
         exclude_aggregators:  !!excludeAggregators,
         removed_aggregators:  removedAggregators,
@@ -304,6 +315,7 @@ async function processRelevanceReport(reportId) {
           processedDocs: Array.isArray(analysisResp?.processed_documents)
             ? analysisResp.processed_documents : [],
           serp,
+          query,
         });
         ourReport       = ourResult.our_report;
         comparisonReport = ourResult.comparison;
@@ -343,7 +355,7 @@ function _summarizeFailures(failures) {
  * Все ошибки бросаются наружу — обёртка в processRelevanceReport ловит и
  * пишет comparison.error, не валя основной отчёт.
  */
-async function _runComparison({ ourUrl, analysisResp, processedDocs, serp }) {
+async function _runComparison({ ourUrl, analysisResp, processedDocs, serp, query }) {
   // 1) Скачиваем нашу страницу — тем же fetcher'ом (cookie-jar, retry,
   //    headless-fallback). Если 0 страниц — бросаем понятную ошибку.
   const fetched = await fetchOne(ourUrl);
@@ -362,7 +374,9 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs, serp }) {
   //    include_tag_zone=true — нужен для сравнения «наш сайт vs ТОП»
   //    по сквозному меню (заказчик).
   const ourAnalyze = await analyze({
-    query: 'our_document_only',
+    // Передаём настоящий query, чтобы Wave 1 сигналы (exact-form occurrences,
+    // title_query_*) считались относительно реальной выдачи, а не плейсхолдера.
+    query: String(query || 'our_document_only'),
     documents: [{ url: ourUrl, html: fetched.html }],
     options: {
       return_processed: true,
@@ -371,6 +385,8 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs, serp }) {
       include_tag_zone: true,
       include_headings: true,
       include_parsed_preview: true,
+      // Wave 1 сигналы и для нашего документа — UI показывает «наш сайт vs медиана топа».
+      include_competitor_signals: true,
       parsed_preview_chars: 20000,
     },
   });
@@ -449,6 +465,9 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs, serp }) {
       // на стороне UI). Только уникальные — корпус с шапкой/подвалом обычно
       // 100–500 уникальных лемм, не больше нескольких КБ JSON.
       tag_zone_lemmas: Array.from(new Set(ourTagZoneLemmas)),
+      // Wave 1 SEO-сигналы НАШЕГО документа (если Python-сервис их вернул).
+      // Сравниваем на UI с фронтового competitor_signals.top_aggregate.
+      competitor_signals: ((ourAnalyze?.competitor_signals?.per_url) || [])[0] || null,
     },
     comparison: cmp,
   };

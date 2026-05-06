@@ -27,6 +27,11 @@ from .comparison import compute_comparison, per_competitor_table
 from .ngrams import compute_ngrams
 from .normalizer import normalize_document
 from .parser import ParseDiagnostics, ParseResult, extract_with_diagnostics
+from .signals import (
+    compute_top_signals_aggregate,
+    extract_competitor_signals,
+    signals_enabled,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -99,6 +104,12 @@ class AnalyzeOptions(BaseModel):
     # очищенного парсером текста (до preview_chars символов). Нужно для
     # UI-кнопки «что собрал парсер».
     include_parsed_preview: bool = Field(default=False)
+    # Если true — в ответе появится секция `competitor_signals` с
+    # per-URL сигналами из утечек Google/Yandex (Wave 1: title/H1/meta,
+    # schema.org, freshness, URL/slug, trust-links, anchor-bank, UX-профиль,
+    # exact-form occurrences, host-hygiene) + агрегатом top_aggregate.
+    # Гейт также через RELEVANCE_COMPETITOR_SIGNALS=false (env-выключатель).
+    include_competitor_signals: bool = Field(default=False)
     parsed_preview_chars: int = Field(default=20000, ge=500, le=200000)
 
 
@@ -193,6 +204,9 @@ class OurDocumentMetrics(BaseModel):
     lemmas: List[str] = Field(default_factory=list)
     comparison: Optional[dict] = None
     competitor_table: Optional[List[dict]] = None
+    # Wave 1: сигналы из утечек, посчитанные тем же extractor'ом, что и для
+    # конкурентов — UI выводит per-row сравнение «наш сайт vs медиана топа».
+    competitor_signals: Optional[dict] = None
 
 
 class AnchorZoneRow(BaseModel):
@@ -218,6 +232,20 @@ class HeadingIntersectionRow(BaseModel):
     levels: List[str]  # на каких уровнях встречался: ['h2','h3', ...]
 
 
+class CompetitorSignalsBlock(BaseModel):
+    """Сигналы из утечек Google/Yandex, посчитанные по топу.
+
+    Per-URL — детальный набор по каждому конкуренту (title/H1/meta, schema.org,
+    freshness, URL/slug, trust-links, anchor-bank, UX-profile, exact-form
+    occurrences, host-hygiene). top_aggregate — медианы / шаблоны / квоты.
+    algorithm_signals — отдельные сводки под Google и Yandex для writer-стадий.
+    """
+    per_url:           List[dict] = Field(default_factory=list)
+    top_aggregate:     dict       = Field(default_factory=dict)
+    algorithm_signals: dict       = Field(default_factory=dict)
+    doc_count:         int        = 0
+
+
 class AnalyzeResponse(BaseModel):
     stats: AnalyzeStats
     vocabulary: List[VocabRow]
@@ -228,6 +256,9 @@ class AnalyzeResponse(BaseModel):
     tag_zone_vocabulary: Optional[List[TagZoneRow]] = None
     headings_intersection: Optional[List[HeadingIntersectionRow]] = None
     our_document: Optional[OurDocumentMetrics] = None
+    # Опционально, при include_competitor_signals=true и
+    # RELEVANCE_COMPETITOR_SIGNALS != false (env).
+    competitor_signals: Optional[CompetitorSignalsBlock] = None
 
 
 # ── Cocoons (PR 2) ────────────────────────────────────────────────────────────
@@ -473,6 +504,33 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         rows.sort(key=lambda r: (r["df"], len(r["text"])), reverse=True)
         headings_intersection = [HeadingIntersectionRow(**r) for r in rows[:200]]
 
+    # Шаг 4e. Конкурентные сигналы (Wave 1: HTML-сигналы из утечек
+    # Google Content Warehouse / Yandex 1922 факторов). Опциональный блок,
+    # гейт через include_competitor_signals + env RELEVANCE_COMPETITOR_SIGNALS.
+    competitor_signals_block: Optional[CompetitorSignalsBlock] = None
+    competitor_signals_per_url: List[dict] = []
+    if opts.include_competitor_signals and signals_enabled():
+        for d, pr in parse_results:
+            try:
+                # Используем СЫРОЙ HTML — экстрактору нужны head/script/json-ld,
+                # которые parser.py уже мог отрезать как noise.
+                sig = extract_competitor_signals(d.html, d.url, payload.query)
+            except Exception as e:
+                logger.warning("competitor_signals failed for %s: %s", d.url, e)
+                sig = {"url": d.url, "empty_reason": f"signals_exception: {str(e)[:80]}"}
+            competitor_signals_per_url.append(sig)
+        try:
+            agg = compute_top_signals_aggregate(competitor_signals_per_url, payload.query)
+        except Exception as e:
+            logger.warning("competitor_signals aggregate failed: %s", e)
+            agg = {"top_aggregate": {}, "algorithm_signals": {}, "doc_count": 0}
+        competitor_signals_block = CompetitorSignalsBlock(
+            per_url=competitor_signals_per_url,
+            top_aggregate=agg.get("top_aggregate") or {},
+            algorithm_signals=agg.get("algorithm_signals") or {},
+            doc_count=int(agg.get("doc_count") or 0),
+        )
+
     # Шаг 5. Наш документ — обрабатываем тем же стеком, но не подмешиваем
     # его в IDF/медианы корпуса (иначе бы исказил статистику).
     our_metrics: Optional[OurDocumentMetrics] = None
@@ -544,6 +602,21 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             comparison=comparison,
             competitor_table=comp_table,
         )
+        # Wave 1: считаем сигналы и для нашего документа (опционально),
+        # чтобы UI показал «наш сайт vs медиана топа» по той же шкале.
+        if opts.include_competitor_signals and signals_enabled():
+            try:
+                our_metrics.competitor_signals = extract_competitor_signals(
+                    payload.our_document.html,
+                    payload.our_document.url,
+                    payload.query,
+                )
+            except Exception as e:
+                logger.warning("our_document competitor_signals failed: %s", e)
+                our_metrics.competitor_signals = {
+                    "url": payload.our_document.url,
+                    "empty_reason": f"signals_exception: {str(e)[:80]}",
+                }
 
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.info(
@@ -590,6 +663,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         tag_zone_vocabulary=tag_zone_vocab,
         headings_intersection=headings_intersection,
         our_document=our_metrics,
+        competitor_signals=competitor_signals_block,
     )
 
 
