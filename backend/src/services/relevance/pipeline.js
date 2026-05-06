@@ -256,6 +256,7 @@ async function processRelevanceReport(reportId) {
           analysisResp,
           processedDocs: Array.isArray(analysisResp?.processed_documents)
             ? analysisResp.processed_documents : [],
+          serp,
         });
         ourReport       = ourResult.our_report;
         comparisonReport = ourResult.comparison;
@@ -295,7 +296,7 @@ function _summarizeFailures(failures) {
  * Все ошибки бросаются наружу — обёртка в processRelevanceReport ловит и
  * пишет comparison.error, не валя основной отчёт.
  */
-async function _runComparison({ ourUrl, analysisResp, processedDocs }) {
+async function _runComparison({ ourUrl, analysisResp, processedDocs, serp }) {
   // 1) Скачиваем нашу страницу — тем же fetcher'ом (cookie-jar, retry,
   //    headless-fallback). Если 0 страниц — бросаем понятную ошибку.
   const fetched = await fetchOne(ourUrl);
@@ -333,11 +334,32 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs }) {
     .map((d) => Array.isArray(d?.lemmas) ? d.lemmas : [])
     .filter((l) => l.length > 0);
   const corpusUrls = (processedDocs || [])
+    .filter((d) => Array.isArray(d?.lemmas) && d.lemmas.length > 0)
     .map((d) => String(d?.url || ''));
 
   if (corpusLemmas.length === 0) {
     throw new Error('У ТОПа нет ни одного processed-документа для сравнения');
   }
+
+  // 3.5) Выровненные параллельно corpusUrls массивы метрик из document_diagnostics
+  //      ТОПа — нужны Python-сервису, чтобы отрисовать text_chars/word_count
+  //      в сравнительной таблице без повторного парсинга. Также строим
+  //      позиции в SERP по URL → 1-based индекс в исходной выдаче.
+  const diagByUrl = new Map();
+  for (const d of (analysisResp?.document_diagnostics || [])) {
+    if (d && d.url) diagByUrl.set(String(d.url), d);
+  }
+  const serpPosByUrl = new Map();
+  for (let i = 0; i < (serp || []).length; i++) {
+    const u = String(serp[i]?.url || '');
+    if (u && !serpPosByUrl.has(u)) serpPosByUrl.set(u, i + 1);
+  }
+
+  const competitorTextChars     = corpusUrls.map((u) => Number(diagByUrl.get(u)?.text_chars) || 0);
+  const competitorWordCounts    = corpusUrls.map((u) => Number(diagByUrl.get(u)?.word_count) || 0);
+  const competitorSerpPositions = corpusUrls.map((u) => serpPosByUrl.has(u) ? serpPosByUrl.get(u) : null);
+
+  const ourSerpPosition = serpPosByUrl.has(String(ourUrl)) ? serpPosByUrl.get(String(ourUrl)) : null;
 
   // 4) Зовём /compare.
   const cmp = await compare({
@@ -345,12 +367,17 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs }) {
     our_url:           ourUrl,
     our_text_chars:    Number(ourDiag.text_chars) || 0,
     our_html_chars:    Number(ourDiag.html_chars) || 0,
+    our_word_count:    Number(ourDiag.word_count) || 0,
+    our_serp_position: ourSerpPosition,
     median_text_chars: Number(analysisResp?.stats?.median_text_chars) || 0,
     median_html_chars: Number(analysisResp?.stats?.median_html_chars) || 0,
     vocabulary:        analysisResp?.vocabulary || [],
     ngrams:            analysisResp?.ngrams     || [],
     corpus_lemmas:     corpusLemmas,
     competitor_urls:   corpusUrls,
+    competitor_text_chars:     competitorTextChars,
+    competitor_word_counts:    competitorWordCounts,
+    competitor_serp_positions: competitorSerpPositions,
   });
 
   return {

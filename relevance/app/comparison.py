@@ -256,6 +256,12 @@ def per_competitor_table(
     vocabulary: List[dict],
     corpus_lemmas: List[List[str]],
     our_doc: dict | None = None,
+    text_chars_by_url: Dict[str, int] | None = None,
+    word_count_by_url: Dict[str, int] | None = None,
+    serp_position_by_url: Dict[str, int] | None = None,
+    our_text_chars: int = 0,
+    our_word_count: int = 0,
+    our_serp_position: int | None = None,
 ) -> List[dict]:
     """Сводная табличка ТОП-N + наш сайт.
 
@@ -263,21 +269,40 @@ def per_competitor_table(
       - lsi_coverage_pct — % важных лемм, присутствующих в документе
       - bm25_score       — BM25 этого документа против общего корпуса
       - tf_idf_cosine    — косинус с медианным вектором ТОПа
+      - text_chars       — длина основного текста (для прозрачности)
+      - word_count       — сырое число словоформ (без лемматизации/стоп-слов)
+      - serp_position    — позиция URL в выдаче Яндекса по ключу (если есть)
 
     Args:
         competitors: список {url, lemmas} — документы ТОПа.
         vocabulary:  словарь ТОПа (для определения important).
         corpus_lemmas: lemmas корпуса ТОПа (= [c.lemmas for c in competitors]).
         our_doc:     {url, lemmas} нашего документа или None.
+        text_chars_by_url / word_count_by_url: маппинг URL→метрика для
+            конкурентов (берутся из document_diagnostics, не пересчитываются).
+        serp_position_by_url: URL→номер в SERP (1-based). Может отсутствовать.
+        our_text_chars / our_word_count / our_serp_position: метрики нашего
+            документа (наш URL может быть не в ТОПе → our_serp_position=None).
     """
     important_lemmas = [
         v["lemma"] for v in vocabulary if v.get("status") == "important" and v.get("lemma")
     ]
     important_set = set(important_lemmas)
 
+    text_chars_by_url = text_chars_by_url or {}
+    word_count_by_url = word_count_by_url or {}
+    serp_position_by_url = serp_position_by_url or {}
+
     rows: List[dict] = []
 
-    def _row(url: str, lemmas: List[str], is_ours: bool) -> dict:
+    def _row(
+        url: str,
+        lemmas: List[str],
+        is_ours: bool,
+        text_chars: int,
+        word_count: int,
+        serp_position: int | None,
+    ) -> dict:
         cnt = _doc_term_counts(lemmas)
         hits = sum(1 for l in important_set if cnt.get(l, 0) > 0)
         coverage = (100.0 * hits / len(important_set)) if important_set else 0.0
@@ -292,11 +317,29 @@ def per_competitor_table(
             "bm25_score_norm":   scoring["bm25_score_norm"],
             "tf_idf_cosine":     scoring["tf_idf_cosine"],
             "tokens":            len(lemmas),
+            "text_chars":        int(text_chars or 0),
+            "word_count":        int(word_count or 0),
+            "serp_position":     serp_position,
         }
 
     if our_doc and our_doc.get("lemmas"):
-        rows.append(_row(our_doc.get("url", ""), list(our_doc["lemmas"]), True))
+        rows.append(_row(
+            our_doc.get("url", ""),
+            list(our_doc["lemmas"]),
+            True,
+            our_text_chars,
+            our_word_count,
+            our_serp_position,
+        ))
     for c in competitors:
-        rows.append(_row(c.get("url", ""), list(c.get("lemmas") or []), False))
+        url = c.get("url", "")
+        rows.append(_row(
+            url,
+            list(c.get("lemmas") or []),
+            False,
+            text_chars_by_url.get(url, 0),
+            word_count_by_url.get(url, 0),
+            serp_position_by_url.get(url),
+        ))
 
     return rows
