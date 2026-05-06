@@ -63,7 +63,10 @@ async function fetchOne(url) {
       // сайтов кривой), а вот application/* (pdf/json/image) пусть падает 406.
       headers: {
         'User-Agent': DEFAULT_USER_AGENT,
-        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7',
+        // Принимаем только html-семейство. */*;q=… намеренно НЕ ставим,
+        // чтобы сайт сам отдал 406 на PDF/JSON/image, а не подсунул бинарь
+        // в наш парсер (readability на нём упадёт, но проще отфильтровать).
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9',
         'Accept-Language': 'ru,en;q=0.8',
       },
       // axios сам не распарсит — просим текст.

@@ -124,7 +124,10 @@ async function processRelevanceReport(reportId) {
     }
 
     if (serp.length === 0) {
-      throw new Error('XMLStock не вернул ни одного URL.');
+      throw new Error(
+        `XMLStock не вернул ни одного URL для запроса «${query}» `
+        + `(регион lr=${lr || '—'}). Проверьте лимиты ключа XMLStock и корректность запроса.`,
+      );
     }
     await _setStage(reportId, 'fetching_pages', { serp });
 

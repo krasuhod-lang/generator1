@@ -84,11 +84,14 @@ def compute_vocabulary_bm25(
     rows.sort(key=lambda r: r["bm25_score"], reverse=True)
     rows = rows[:max_terms]
 
-    # Размечаем «Важное / Доп»: top-30% по score → important.
+    # Размечаем «Важное / Доп»: top-30% по score → important, при условии,
+    # что терм встречается минимум в 3 документах (даже если min_df ниже —
+    # «важными» считаем только те, что подтверждены ≥3 сайтами).
     if rows:
         threshold_idx = max(1, math.ceil(len(rows) * 0.3))
         important_score = rows[min(threshold_idx, len(rows)) - 1]["bm25_score"]
+        important_min_df = max(min_df, 3)
         for r in rows:
-            r["status"] = "important" if r["bm25_score"] >= important_score and r["df"] >= max(min_df, 3) else "additional"
+            r["status"] = "important" if r["bm25_score"] >= important_score and r["df"] >= important_min_df else "additional"
 
     return rows
