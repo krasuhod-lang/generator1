@@ -1898,6 +1898,194 @@ function copyTagZone() {
             </div>
           </div>
 
+          <!-- ═══════════════ Wave 2 / Wave 3 sections ═══════════════ -->
+          <!-- 🎯 SERP-intent + commercial blocks (Wave 2 #9) -->
+          <div v-if="topAggregate.serp_intent" class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-pink-300 uppercase tracking-wider mb-2">
+              🎯 Интент SERP (Wave 2)
+            </h3>
+            <p class="text-xs text-gray-300">
+              Доминирующий интент: <b class="text-pink-200">{{ topAggregate.serp_intent.dominant_intent }}</b>
+              · коммерческий счёт: <b>{{ Number(topAggregate.serp_intent.commercial_score || 0).toFixed(0) }}</b>
+            </p>
+            <div class="mt-2 text-[11px] text-gray-400">
+              Распределение:
+              <span v-for="(v, k) in (topAggregate.serp_intent.distribution_pct || {})" :key="k"
+                    class="inline-block bg-gray-800 px-2 py-0.5 mr-1 mb-1 rounded">
+                {{ k }} <b class="text-gray-200">{{ Number(v).toFixed(0) }}%</b>
+              </span>
+            </div>
+            <div v-if="(topAggregate.commercial_blocks_required || []).length > 0"
+                 class="mt-2 text-[11px] text-pink-200 bg-pink-950/40 border border-pink-900 rounded p-2">
+              <b>Обязательные коммерческие блоки:</b>
+              <ul class="list-disc ml-4 mt-1">
+                <li v-for="b in topAggregate.commercial_blocks_required" :key="b">{{ b }}</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- 📋 Format winner + H2 canva (Wave 2 #10) -->
+          <div v-if="topAggregate.format_winner && topAggregate.format_winner.winner !== 'unknown'"
+               class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-indigo-300 uppercase tracking-wider mb-2">
+              📋 Формат-победитель (Wave 2)
+            </h3>
+            <p class="text-xs text-gray-300">
+              <b class="text-indigo-200">{{ topAggregate.format_winner.winner }}</b>
+              ({{ Number(topAggregate.format_winner.share_pct || 0).toFixed(0) }}% топа)
+            </p>
+            <div class="mt-2 text-[11px] text-gray-400">
+              Распределение:
+              <span v-for="(v, k) in (topAggregate.format_winner.distribution_pct || {})" :key="k"
+                    class="inline-block bg-gray-800 px-2 py-0.5 mr-1 mb-1 rounded">
+                {{ k }} <b class="text-gray-200">{{ Number(v).toFixed(0) }}%</b>
+              </span>
+            </div>
+            <div v-if="(topAggregate.format_winner.recommended_h2_canva || []).length > 0" class="mt-2">
+              <p class="text-[11px] text-gray-500 mb-1">Рекомендованная H2-канва (DF≥2):</p>
+              <ul class="list-disc ml-4 text-[11px] text-gray-300">
+                <li v-for="c in (topAggregate.format_winner.recommended_h2_canva || []).slice(0, 12)"
+                    :key="c.h2">
+                  {{ c.h2 }} <span class="text-gray-500">×{{ c.df }}</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- ❓ Mandatory questions (Wave 2 #11) -->
+          <div v-if="(topAggregate.mandatory_questions || []).length > 0"
+               class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-amber-300 uppercase tracking-wider mb-2">
+              ❓ Обязательные вопросы топа (Wave 2)
+            </h3>
+            <p class="text-[11px] text-gray-500 mb-2">
+              Вопросы из H2/H3 + предложений конкурентов с DF≥2 (всего {{ topAggregate.mandatory_questions.length }}).
+            </p>
+            <ul class="list-disc ml-4 text-[11px] text-gray-300 max-h-48 overflow-y-auto">
+              <li v-for="q in topAggregate.mandatory_questions" :key="q.text">
+                {{ q.text }}
+                <span class="text-gray-500">— DF {{ q.df }} ({{ Number(q.df_share_pct || 0).toFixed(0) }}%)</span>
+              </li>
+            </ul>
+          </div>
+
+          <!-- 🏷 Entity coverage (Wave 2 #12) -->
+          <div v-if="topAggregate.entity_coverage && (topAggregate.entity_coverage.mandatory_entities || []).length > 0"
+               class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-emerald-300 uppercase tracking-wider mb-2">
+              🏷 Сущности топа (Wave 2)
+            </h3>
+            <p class="text-xs text-gray-300">
+              Mandatory (DF≥{{ topAggregate.entity_coverage.df_threshold || 2 }}):
+              <span class="text-gray-500">цель покрытия — </span>
+              <b class="text-emerald-200">{{ Number(topAggregate.entity_coverage.coverage_target_pct || 0).toFixed(0) }}%</b>
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1">
+              <span v-for="e in topAggregate.entity_coverage.mandatory_entities" :key="e"
+                    class="inline-block bg-emerald-950/60 border border-emerald-900 text-emerald-200 px-2 py-1 rounded text-[10px]">
+                {{ e }}
+              </span>
+            </div>
+            <details v-if="(topAggregate.entity_coverage.top_entities || []).length > 0" class="mt-2">
+              <summary class="cursor-pointer text-[10px] text-gray-500">
+                ▸ ещё {{ topAggregate.entity_coverage.top_entities.length }} сущностей по DF
+              </summary>
+              <div class="mt-2 flex flex-wrap gap-1 max-h-40 overflow-y-auto">
+                <span v-for="e in topAggregate.entity_coverage.top_entities" :key="e.text"
+                      class="inline-block bg-gray-800 text-gray-300 px-2 py-1 rounded text-[10px]">
+                  {{ e.text }} <span class="text-gray-500">×{{ e.df }}</span>
+                </span>
+              </div>
+            </details>
+          </div>
+
+          <!-- 🧬 Headings n-grams (Wave 2 #3.4) -->
+          <div v-if="(topAggregate.heading_ngrams?.bigrams || []).length > 0"
+               class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-cyan-300 uppercase tracking-wider mb-2">
+              🧬 N-граммы заголовков (Wave 2)
+            </h3>
+            <p class="text-[11px] text-gray-500 mb-2">
+              Биграммы и триграммы только из H2/H3 конкурентов (отдельно от body).
+            </p>
+            <div class="grid grid-cols-2 gap-2 text-[11px]">
+              <div>
+                <p class="text-gray-500 mb-1">Биграммы:</p>
+                <div class="flex flex-wrap gap-1">
+                  <span v-for="b in (topAggregate.heading_ngrams.bigrams || []).slice(0, 30)" :key="b.phrase"
+                        class="inline-block bg-gray-800 text-cyan-200 px-2 py-1 rounded text-[10px]">
+                    {{ b.phrase }} <span class="text-gray-500">×{{ b.df }}</span>
+                  </span>
+                </div>
+              </div>
+              <div>
+                <p class="text-gray-500 mb-1">Триграммы:</p>
+                <div class="flex flex-wrap gap-1">
+                  <span v-for="b in (topAggregate.heading_ngrams.trigrams || []).slice(0, 20)" :key="b.phrase"
+                        class="inline-block bg-gray-800 text-cyan-200 px-2 py-1 rounded text-[10px]">
+                    {{ b.phrase }} <span class="text-gray-500">×{{ b.df }}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 🎨 Title patterns (Wave 3 #15) -->
+          <div v-if="(topAggregate.title_template?.detected_patterns?.patterns || []).length > 0"
+               class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-rose-300 uppercase tracking-wider mb-2">
+              🎨 Шаблоны title (Wave 3)
+            </h3>
+            <p class="text-xs text-gray-300">
+              Рекомендуем:
+              <b class="text-rose-200">{{ topAggregate.title_template.detected_patterns.recommended || '—' }}</b>
+              <span class="text-gray-500"> ({{ topAggregate.title_template.detected_patterns.total_titles }} title из топа)</span>
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1">
+              <span v-for="p in topAggregate.title_template.detected_patterns.patterns" :key="p.pattern"
+                    class="inline-block bg-gray-800 text-rose-200 px-2 py-1 rounded text-[10px]">
+                {{ p.pattern }} <span class="text-gray-500">{{ Number(p.share_pct).toFixed(0) }}%</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- 🧠 Lexical diversity (Wave 3 #14) -->
+          <div v-if="topAggregate.lexical_diversity_target && topAggregate.lexical_diversity_target.mtld_median"
+               class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-violet-300 uppercase tracking-wider mb-2">
+              🧠 Лексическое разнообразие (Wave 3)
+            </h3>
+            <ul class="text-xs text-gray-300 space-y-1">
+              <li>MTLD (медиана): <b class="text-violet-200">{{ Number(topAggregate.lexical_diversity_target.mtld_median || 0).toFixed(0) }}</b>
+                <span class="text-gray-500"> (диапазон {{ Number(topAggregate.lexical_diversity_target.mtld_min || 0).toFixed(0) }}–{{ Number(topAggregate.lexical_diversity_target.mtld_max || 0).toFixed(0) }})</span></li>
+              <li>TTR (медиана): <b>{{ Number(topAggregate.lexical_diversity_target.ttr_median || 0).toFixed(3) }}</b></li>
+              <li class="text-[11px] text-gray-500">
+                Прокси Google contentEffort / originalContentScore. Цель — попасть в коридор топа или выше.
+              </li>
+            </ul>
+          </div>
+
+          <!-- ⚙ Embeddings status (Wave 3 #13) — UI-индикатор активации -->
+          <div v-if="topAggregate.embeddings || competitorSignals?.embeddings"
+               class="mb-4 border border-gray-800 rounded p-3">
+            <h3 class="text-xs font-bold text-teal-300 uppercase tracking-wider mb-2">
+              🧬 Embeddings (Wave 3, опционально)
+            </h3>
+            <div v-if="(topAggregate.embeddings || competitorSignals.embeddings).enabled" class="text-xs text-gray-300">
+              <p>Модель: <code class="text-teal-200">{{ (topAggregate.embeddings || competitorSignals.embeddings).model }}</code></p>
+              <p v-if="(topAggregate.embeddings || competitorSignals.embeddings).topical_distance">
+                Topical pairwise (медиана): <b>{{ Number((topAggregate.embeddings || competitorSignals.embeddings).topical_distance.top_pairwise_median || 0).toFixed(3) }}</b>
+              </p>
+            </div>
+            <p v-else class="text-[11px] text-gray-500">
+              Embeddings не активированы. Включите <code>RELEVANCE_EMBEDDINGS=true</code> и установите
+              <code>sentence-transformers</code> (модель ~120 МБ).
+              <span v-if="(topAggregate.embeddings || competitorSignals.embeddings).reason">
+                Причина: {{ (topAggregate.embeddings || competitorSignals.embeddings).reason }}
+              </span>
+            </p>
+          </div>
+
           <!-- Per-URL signals table -->
           <details class="border border-gray-800 rounded">
             <summary class="cursor-pointer text-xs font-bold text-gray-400 uppercase tracking-wider p-2">

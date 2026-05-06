@@ -144,6 +144,44 @@ function buildCompetitorSignalsRequirements(signalsBlock) {
       shares_pct:   hygiene.shares_pct || {},
       score_target: hygiene.score_target || 0,
     },
+    // ── Wave 2 ──
+    serp_intent: {
+      dominant_intent:            (top.serp_intent || {}).dominant_intent || 'info',
+      distribution_pct:           (top.serp_intent || {}).distribution_pct || {},
+      commercial_score:           (top.serp_intent || {}).commercial_score || 0,
+      flag_shares_pct:            (top.serp_intent || {}).flag_shares_pct || {},
+      commercial_blocks_required: Array.isArray(top.commercial_blocks_required)
+        ? top.commercial_blocks_required
+        : ((top.serp_intent || {}).commercial_blocks_required || []),
+    },
+    format: {
+      winner:                (top.format_winner || {}).winner || 'unknown',
+      share_pct:             (top.format_winner || {}).share_pct || 0,
+      distribution_pct:      (top.format_winner || {}).distribution_pct || {},
+      recommended_h2_canva:  Array.isArray((top.format_winner || {}).recommended_h2_canva)
+        ? (top.format_winner || {}).recommended_h2_canva
+        : [],
+    },
+    mandatory_questions: Array.isArray(top.mandatory_questions) ? top.mandatory_questions : [],
+    entity_coverage: {
+      mandatory_entities:    Array.isArray((top.entity_coverage || {}).mandatory_entities)
+        ? (top.entity_coverage || {}).mandatory_entities
+        : (Array.isArray(top.mandatory_entities_from_top) ? top.mandatory_entities_from_top : []),
+      top_entities:          Array.isArray((top.entity_coverage || {}).top_entities)
+        ? (top.entity_coverage || {}).top_entities
+        : [],
+      coverage_target_pct:   (top.entity_coverage || {}).coverage_target_pct || 0,
+      df_threshold:          (top.entity_coverage || {}).df_threshold || 0,
+    },
+    heading_ngrams: {
+      bigrams:  Array.isArray((top.heading_ngrams || {}).bigrams)  ? (top.heading_ngrams).bigrams  : [],
+      trigrams: Array.isArray((top.heading_ngrams || {}).trigrams) ? (top.heading_ngrams).trigrams : [],
+    },
+    // ── Wave 3 (CPU-only + опционально ML) ──
+    lexical_diversity_target: top.lexical_diversity_target || {},
+    title_patterns: (titleTpl.detected_patterns && typeof titleTpl.detected_patterns === 'object')
+      ? titleTpl.detected_patterns
+      : { patterns: [], recommended: null, total_titles: 0 },
     algorithm_signals: {
       google: alg.google || {},
       yandex: alg.yandex || {},
@@ -316,10 +354,243 @@ function _buildChecklist(req) {
     push(`hygiene_${k}`, `Добавить: ${labels[k] || k}`, 'must', 'host_hygiene');
   }
 
+  // ── Wave 2: SERP-intent → коммерческие блоки ──
+  if (req.serp_intent && (req.serp_intent.dominant_intent === 'commercial'
+                          || req.serp_intent.dominant_intent === 'transactional')) {
+    push(
+      'intent_dominant',
+      `Доминирующий интент SERP: ${req.serp_intent.dominant_intent}. ` +
+        'Контент должен включать коммерческие/транзакционные блоки (см. ниже).',
+      'must',
+      'serp_intent',
+    );
+    for (const block of req.serp_intent.commercial_blocks_required || []) {
+      const id = 'commercial_' + String(block).toLowerCase().replace(/[^a-z0-9а-яё]+/gi, '_').slice(0, 40);
+      push(id, `Добавить: ${block}`, 'must', 'serp_intent');
+    }
+  } else if (req.serp_intent && req.serp_intent.dominant_intent === 'navigational') {
+    push(
+      'intent_navigational',
+      'Топ — navigational (страницы контактов/о компании). ' +
+        'Не пытайтесь конкурировать информационной статьёй; рассмотрите страницу-визитку.',
+      'should',
+      'serp_intent',
+    );
+  }
+
+  // ── Wave 2: Format winner → рекомендованная H2-канва ──
+  if (req.format && req.format.winner && req.format.winner !== 'unknown') {
+    push(
+      'format_winner',
+      `Доминирующий формат топа: ${req.format.winner} (${req.format.share_pct}%). ` +
+        'Канва H2 должна следовать этому формату.',
+      'must',
+      'format_winner',
+    );
+    const canva = (req.format.recommended_h2_canva || []).slice(0, 8);
+    if (canva.length) {
+      push(
+        'format_h2_canva',
+        'Рекомендованные H2 (DF≥2 в топе): ' + canva.map((c) => `«${c.h2}»`).join('; '),
+        'should',
+        'format_winner',
+      );
+    }
+  }
+
+  // ── Wave 2: Mandatory questions ──
+  if (Array.isArray(req.mandatory_questions) && req.mandatory_questions.length) {
+    const top5 = req.mandatory_questions.slice(0, 5).map((q) => `«${q.text}»`).join('; ');
+    push(
+      'mandatory_questions',
+      `Обязательные вопросы (DF≥2 в топе, всего ${req.mandatory_questions.length}): ${top5}`,
+      'must',
+      'mandatory_questions',
+    );
+  }
+
+  // ── Wave 2: Entity coverage ──
+  if (req.entity_coverage && Array.isArray(req.entity_coverage.mandatory_entities)
+      && req.entity_coverage.mandatory_entities.length) {
+    const mand = req.entity_coverage.mandatory_entities.slice(0, 12);
+    push(
+      'mandatory_entities',
+      `Сущности, упомянутые ≥${req.entity_coverage.df_threshold || 2} конкурентами: ${mand.join(', ')}`,
+      'must',
+      'entity_coverage',
+    );
+    if (req.entity_coverage.coverage_target_pct) {
+      push(
+        'entity_coverage_target',
+        `Покрытие mandatory-сущностей: цель — ${req.entity_coverage.coverage_target_pct}% (медиана топа)`,
+        'should',
+        'entity_coverage',
+      );
+    }
+  }
+
+  // ── Wave 2: Headings n-grams ──
+  if (req.heading_ngrams && Array.isArray(req.heading_ngrams.bigrams)
+      && req.heading_ngrams.bigrams.length) {
+    const bi = req.heading_ngrams.bigrams.slice(0, 6).map((b) => `«${b.phrase}»`).join('; ');
+    push(
+      'heading_ngrams',
+      `Частотные би-граммы заголовков топа: ${bi}`,
+      'nice',
+      'heading_ngrams',
+    );
+  }
+
+  // ── Wave 3: Lexical diversity (MTLD) ──
+  if (req.lexical_diversity_target && req.lexical_diversity_target.mtld_median) {
+    const mtld = Number(req.lexical_diversity_target.mtld_median).toFixed(0);
+    push(
+      'lexical_diversity',
+      `Лексическое разнообразие (MTLD): цель ≥ ${mtld} (медиана топа). ` +
+        'Это прокси Google contentEffort / originalContentScore.',
+      'should',
+      'lexical_diversity',
+    );
+  }
+
+  // ── Wave 3: Title patterns ──
+  if (req.title_patterns && req.title_patterns.recommended) {
+    const labels = {
+      listicle:     'листикл («10 ...», «Топ-10 ...»)',
+      question:     'вопрос («Как ...», «Что ...»)',
+      comparison:   'сравнение («X vs Y», «X против Y»)',
+      brand_pipe:   'бренд-pipe («Title — Brand»)',
+      brackets:     'скобочная часть («... (год)»)',
+      year_present: 'указание года',
+    };
+    const pat = req.title_patterns.recommended;
+    push(
+      'title_pattern',
+      `Шаблон title в топе — ${labels[pat] || pat}`,
+      'should',
+      'title_template',
+    );
+  }
+
   return out;
+}
+
+/**
+ * Возвращает готовый markdown-блок для встраивания в AKB / IAKB
+ * (articleKnowledgeBase.js §12 / infoArticleKnowledgeBase.js §9).
+ *
+ * Если данных нет (`ready=false`) — возвращает пустую строку, чтобы caller
+ * мог безопасно конкатенировать без проверок.
+ *
+ * @param {object|null} signalsBlock — `report.competitor_signals`
+ * @param {{ maxChecklistItems?: number }} [opts]
+ * @returns {string}
+ */
+function buildAKBSection(signalsBlock, opts = {}) {
+  const built = buildCompetitorSignalsRequirements(signalsBlock);
+  if (!built.ready) return '';
+  const { requirements: r, checklist, doc_count } = built;
+  const limit = Math.max(5, Math.min(60, Number(opts.maxChecklistItems) || 40));
+
+  const lines = [];
+  lines.push('Раздел построен из агрегата сигналов Wave 1/2/3 — медианы и доли');
+  lines.push(`по ТОП-${doc_count} конкурентов (signals.py + comparison.py).`);
+  lines.push('');
+
+  // Intent
+  if (r.serp_intent && r.serp_intent.dominant_intent) {
+    lines.push(`**Интент SERP:** ${r.serp_intent.dominant_intent}` +
+      (r.serp_intent.commercial_score ? ` (коммерческий счёт: ${r.serp_intent.commercial_score})` : ''));
+    if ((r.serp_intent.commercial_blocks_required || []).length) {
+      lines.push('Обязательные коммерческие блоки в контенте:');
+      for (const b of r.serp_intent.commercial_blocks_required) {
+        lines.push(`  - ${b}`);
+      }
+    }
+  }
+
+  // Format winner
+  if (r.format && r.format.winner && r.format.winner !== 'unknown') {
+    lines.push('');
+    lines.push(`**Доминирующий формат топа:** ${r.format.winner} (${r.format.share_pct}%).`);
+    const canva = (r.format.recommended_h2_canva || []).slice(0, 10);
+    if (canva.length) {
+      lines.push('Рекомендованная H2-канва (DF≥2 в топе):');
+      for (const c of canva) lines.push(`  - ${c.h2}`);
+    }
+  }
+
+  // Mandatory questions
+  if ((r.mandatory_questions || []).length) {
+    lines.push('');
+    lines.push(`**Обязательные вопросы (всего ${r.mandatory_questions.length}, DF≥2):**`);
+    for (const q of r.mandatory_questions.slice(0, 10)) {
+      lines.push(`  - ${q.text}`);
+    }
+  }
+
+  // Entity coverage
+  if (r.entity_coverage && (r.entity_coverage.mandatory_entities || []).length) {
+    lines.push('');
+    lines.push(`**Сущности, упомянутые ≥${r.entity_coverage.df_threshold || 2} конкурентами:**`);
+    lines.push('  ' + r.entity_coverage.mandatory_entities.slice(0, 20).join(', '));
+    if (r.entity_coverage.coverage_target_pct) {
+      lines.push(`Цель покрытия: ${r.entity_coverage.coverage_target_pct}% (медиана топа).`);
+    }
+  }
+
+  // Title pattern
+  if (r.title_patterns && r.title_patterns.recommended) {
+    lines.push('');
+    lines.push(`**Шаблон title:** ${r.title_patterns.recommended} ` +
+      `(длина ~${Math.round(r.title.length_chars.median || 0)} симв., ` +
+      `H1↔title совпадают на ${r.title.title_h1_should_match ? 'да' : 'нет'}).`);
+  }
+
+  // Mandatory schemas
+  if ((r.schemas.mandatory || []).length) {
+    lines.push('');
+    lines.push(`**Schema.org обязательно:** ${r.schemas.mandatory.join(', ')}.`);
+  }
+
+  // Lexical diversity (Wave 3)
+  if (r.lexical_diversity_target && r.lexical_diversity_target.mtld_median) {
+    lines.push('');
+    lines.push(`**Лексическое разнообразие (MTLD):** цель ≥ ${Math.round(r.lexical_diversity_target.mtld_median)} ` +
+      '(прокси Google contentEffort / originalContentScore).');
+  }
+
+  // Trust + Exact-query
+  if (r.trust && r.trust.target_per_1000_words) {
+    lines.push('');
+    lines.push(`**Trust-ссылки:** ~${Number(r.trust.target_per_1000_words).toFixed(1)} ` +
+      'на 1000 слов (.gov / Wikipedia / ГОСТ / крупные СМИ).');
+  }
+  if (r.exact_query && r.exact_query.first_100_words_median) {
+    lines.push(`**Точная фраза запроса:** ≥${r.exact_query.first_100_words_median} ` +
+      'вхождений в первых 100 словах (медиана топа).');
+  }
+
+  // Compact checklist
+  if (checklist && checklist.length) {
+    lines.push('');
+    lines.push('**Чеклист (truncated):**');
+    for (const item of checklist.slice(0, limit)) {
+      const tag = item.importance === 'must' ? '🔴 MUST'
+        : item.importance === 'should' ? '🟡 SHOULD'
+        : '🟢 NICE';
+      lines.push(`  - ${tag} | ${item.label}`);
+    }
+    if (checklist.length > limit) {
+      lines.push(`  - … ещё ${checklist.length - limit} пункт(ов) опущено для компактности`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 module.exports = {
   buildCompetitorSignalsRequirements,
   compareOurDocumentToTop,
+  buildAKBSection,
 };

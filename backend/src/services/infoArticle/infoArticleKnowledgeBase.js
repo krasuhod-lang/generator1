@@ -271,6 +271,9 @@ function sectionLinkPlan(linkPlan) {
 
 function buildInfoArticleKnowledgeBase({
   task, strategy, audience, intents, whitespace, outline, lsi, linkPlan,
+  // Wave 2/3: report.competitor_signals из relevance-pipeline.
+  // Опциональный input — если null, §9 просто не рендерится.
+  relevanceSignals = null,
 } = {}) {
   if (!task) return '';
   const header = [
@@ -279,11 +282,25 @@ function buildInfoArticleKnowledgeBase({
     'Свернутый аналитический контекст для ОДНОЙ информационной статьи в блог.',
     'Строится один раз после стадий DeepSeek-анализа и используется как',
     'systemInstruction для Gemini (через cachedContents API, если включён',
-    'INFO_ARTICLE_GEMINI_CACHE_ENABLED). Gemini обязан опираться на §1..§8',
+    'INFO_ARTICLE_GEMINI_CACHE_ENABLED). Gemini обязан опираться на §1..§9',
     'как на «фон» статьи и не выходить за их рамки. ЗАПРЕЩЕНО выдумывать',
     'факты, бренды, статистику, цитаты, ссылки.',
     '',
   ].join('\n');
+
+  // §9 — Конкурентные требования топа (Wave 1/2/3). Опционально, graceful.
+  let sectionRelevance = '';
+  if (relevanceSignals) {
+    try {
+      const { buildAKBSection } = require('../relevance/competitorSignalsRequirements');
+      const md = buildAKBSection(relevanceSignals, { maxChecklistItems: 25 });
+      if (md && md.trim()) {
+        sectionRelevance = '## §9. Конкурентные требования топа (Wave 1/2/3)\n\n' + md;
+      }
+    } catch (_) {
+      // graceful: helper не подключён / сломан — без §9
+    }
+  }
 
   const parts = [
     sectionTask(task),
@@ -294,6 +311,7 @@ function buildInfoArticleKnowledgeBase({
     sectionOutline(outline),
     sectionLsi(lsi),
     sectionLinkPlan(linkPlan),
+    sectionRelevance,
   ].filter(Boolean);
 
   let text = header + parts.join('\n\n');

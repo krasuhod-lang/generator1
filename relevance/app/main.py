@@ -235,10 +235,23 @@ class HeadingIntersectionRow(BaseModel):
 class CompetitorSignalsBlock(BaseModel):
     """Сигналы из утечек Google/Yandex, посчитанные по топу.
 
-    Per-URL — детальный набор по каждому конкуренту (title/H1/meta, schema.org,
-    freshness, URL/slug, trust-links, anchor-bank, UX-profile, exact-form
-    occurrences, host-hygiene). top_aggregate — медианы / шаблоны / квоты.
-    algorithm_signals — отдельные сводки под Google и Yandex для writer-стадий.
+    Per-URL — детальный набор по каждому конкуренту:
+      • Wave 1 (default ON): title/H1/meta, schema.org, freshness, URL/slug,
+        trust-links, anchor-bank, UX-profile, exact-form occurrences,
+        host-hygiene.
+      • Wave 2 (default ON, CPU-only): SERP-intent + commercial blocks,
+        format классификатор + рекомендованная H2-канва, mandatory_questions
+        (DF≥2), entity_bank (lite-NER) + entity_coverage, headings-only
+        n-grams.
+      • Wave 3 (опционально): TTR + MTLD (включено всегда, CPU); embeddings
+        topical_distance / page_radius (гейт RELEVANCE_EMBEDDINGS=true).
+
+    top_aggregate — медианы / шаблоны / квоты + расширения Wave 2/3:
+      serp_intent, commercial_blocks_required, format_winner,
+      mandatory_questions, mandatory_entities_from_top, entity_coverage,
+      heading_ngrams, lexical_diversity_target.
+    algorithm_signals — отдельные сводки под Google и Yandex для writer-стадий
+      (теперь yandex.commercial_factors_score реально активирован Wave 2).
     """
     per_url:           List[dict] = Field(default_factory=list)
     top_aggregate:     dict       = Field(default_factory=dict)
