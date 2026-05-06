@@ -752,6 +752,21 @@ async function ensureSchema() {
        WHERE raw_storage = 'redis' AND raw_expires_at IS NOT NULL
     `);
 
+    // Migration 020: DB-fallback for processed_documents (леммы), чтобы
+    // семантические коконы пересчитывались даже без Redis-кэша.
+    // Без этой колонки relevance.controller / pipeline падают с
+    // `column "raw_processed" does not exist` на существующих инсталляциях,
+    // где /docker-entrypoint-initdb.d миграции уже не применяются.
+    await db.query(`
+      ALTER TABLE relevance_reports
+        ADD COLUMN IF NOT EXISTS raw_processed JSONB
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_relevance_reports_raw_processed_present
+        ON relevance_reports (id)
+        WHERE raw_processed IS NOT NULL
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
