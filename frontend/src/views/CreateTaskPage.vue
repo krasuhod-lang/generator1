@@ -142,7 +142,7 @@ async function prefillFromRelevanceReport(reportId) {
     const incomingTfidf = (det.input_tfidf_json || '').toString().trim();
     if (incomingTfidf) {
       let currentArr = [];
-      try { const p = JSON.parse(form.input_tfidf_json); if (Array.isArray(p)) currentArr = p; } catch (_) {}
+      try { const p = JSON.parse(form.input_tfidf_json); if (Array.isArray(p)) currentArr = p; } catch (_) { /* пустой/невалидный JSON в форме = считаем пустым */ }
       if (currentArr.length === 0) { form.input_tfidf_json = incomingTfidf; filled++; }
     }
 

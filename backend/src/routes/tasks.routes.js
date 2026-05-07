@@ -145,10 +145,23 @@ router.post('/parse-tz', authMiddleware, uploadTz.single('file'), parseTZWithLLM
 // Скачать пример ТЗ (DOCX) (ДОЛЖЕН быть ДО /:id)
 router.get('/example-tz', authMiddleware, downloadExampleTZ); // GET /api/tasks/example-tz
 
+// Rate limiter для DeepSeek-обогащённого автозаполнения формы из relevance-отчёта.
+// Эндпоинт делает дорогой LLM-вызов (DeepSeek, ~$0.001/запрос, до 90с таймаута),
+// поэтому ограничиваем 20/мин/IP — этого с запасом хватает на нормальную работу
+// (пользователь обычно делает 1 запрос на отчёт), но защищает от случайного
+// burst-трафика и от утечки бюджета через зацикленный фронт.
+const relevancePrefillLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много запросов автозаполнения. Подождите минуту.' },
+});
+
 // Автозаполнение формы из готового relevance-отчёта (ДОЛЖЕН быть ДО /:id).
 // Owner-check внутри контроллера. Используется кнопкой «✍ SEO-текст» в
 // RelevanceResultPage и onMounted-логикой CreateTaskPage.
-router.get('/relevance-prefill/:reportId', authMiddleware, getRelevancePrefill);
+router.get('/relevance-prefill/:reportId', relevancePrefillLimiter, authMiddleware, getRelevancePrefill);
 
 // Конкретная задача
 router.get('/:id',         authMiddleware, getTask);    // GET    /api/tasks/:id
