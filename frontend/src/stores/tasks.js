@@ -125,6 +125,16 @@ export const useTasksStore = defineStore('tasks', () => {
     return data;
   }
 
+  // ── Автозаполнение формы создания задачи из готового relevance-отчёта ───
+  // Бэкенд (POST не нужен — чистый read+enrich) собирает детерминированные
+  // поля + DeepSeek-аналитику ЦА/ниши/фактов. Никаких записей не делает.
+  async function fetchRelevancePrefill(reportId) {
+    const { data } = await api.get(`/tasks/relevance-prefill/${encodeURIComponent(reportId)}`, {
+      timeout: 120000, // DeepSeek-вызов может занимать до ~90с
+    });
+    return data;
+  }
+
   // ── Вспомогательные ───────────────────────────────────────────────
   function _replaceInList(task) {
     const idx = tasks.value.findIndex(t => t.id === task.id);
@@ -140,5 +150,6 @@ export const useTasksStore = defineStore('tasks', () => {
     fetchTasks, fetchTask, createTask, updateTask,
     startTask, pauseTask, resumeTask, deleteTask,
     fetchResult, fetchMetrics, fetchTaskLogs, uploadTZ, parseTZWithLLM,
+    fetchRelevancePrefill,
   };
 });

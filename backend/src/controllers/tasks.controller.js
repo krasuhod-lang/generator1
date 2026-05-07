@@ -1125,6 +1125,232 @@ async function downloadExampleTZ(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/tasks/relevance-prefill/:reportId
+//
+// Возвращает данные для автозаполнения формы создания задачи на основе
+// готового отчёта релевантности (см. кнопку «✍ SEO-текст» в
+// RelevanceResultPage). Структура ответа:
+//   {
+//     deterministic: {
+//       input_target_url, input_competitor_urls,
+//       input_ngrams, input_tfidf_json,
+//     },
+//     llm: {
+//       input_target_audience, input_niche_features, input_brand_facts,
+//     },
+//     llm_used: bool,        // удалось ли получить LLM-аналитику
+//     llm_error: string|null // если упало — текст для UI (для админки)
+//   }
+//
+// Принципы:
+//   • Owner-check: отчёт должен принадлежать req.user.id и иметь status='done'
+//     (защита от IDOR). Иначе 404.
+//   • Детерминированные поля строим прямо из JSONB-колонок отчёта — без
+//     LLM (быстро, дёшево, надёжно).
+//   • LLM-блок (DeepSeek, последняя модель из env DEEPSEEK_MODEL) опционален:
+//     если упал — возвращаем deterministic + llm:{} + llm_error для UI,
+//     задача всё равно создаётся.
+//   • Никаких записей в БД здесь нет — это чистый «read+enrich», фронт сам
+//     решает, какие пустые поля заполнить ответом.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Безопасно сериализует структуру в JSON-строку с лимитом длины (для prompt'а).
+ */
+function _safeJsonForPrompt(value, maxChars = 4000) {
+  try {
+    const s = JSON.stringify(value);
+    if (!s) return '';
+    return s.length > maxChars ? s.slice(0, maxChars) + '…[truncated]' : s;
+  } catch (_) { return ''; }
+}
+
+/**
+ * Из vocabulary (с .status==='important') собирает массив для формы:
+ *   [{ term, rangeMin, rangeMax }, ...]
+ * rangeMin/rangeMax — окрестность медианы по ТОПу (±20%, минимум 1).
+ */
+function _vocabularyToTfidfJson(vocabulary, limit = 20) {
+  if (!Array.isArray(vocabulary)) return [];
+  const important = vocabulary
+    .filter((v) => v && v.lemma && (v.status === 'important' || (v.bm25_score || 0) > 0))
+    .sort((a, b) => (b.bm25_score || 0) - (a.bm25_score || 0))
+    .slice(0, limit);
+  return important.map((v) => {
+    const median = Math.max(1, Math.round(Number(v.median_count) || 1));
+    const rangeMin = Math.max(1, Math.round(median * 0.8));
+    const rangeMax = Math.max(rangeMin, Math.round(median * 1.2));
+    return { term: String(v.lemma).slice(0, 80), rangeMin, rangeMax };
+  });
+}
+
+/**
+ * Строит строку «n-граммы через запятую» из report.ngrams.
+ * Берём топ по df (документ-частоте), отбрасываем мусор (одиночные слова).
+ */
+function _ngramsToCsv(ngrams, limit = 25) {
+  if (!Array.isArray(ngrams)) return '';
+  const filtered = ngrams
+    .filter((n) => n && typeof n.phrase === 'string' && n.phrase.trim().length >= 4)
+    .sort((a, b) => (b.df_share_pct || b.df || 0) - (a.df_share_pct || a.df || 0))
+    .slice(0, limit)
+    .map((n) => n.phrase.trim());
+  // Дедуп с сохранением порядка
+  const seen = new Set();
+  const out = [];
+  for (const p of filtered) {
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out.join(', ');
+}
+
+/**
+ * DeepSeek-аналитика: на основе query/региона/ngrams/competitor-сигналов
+ * генерирует ЦА, особенности ниши, факты о конкурентах. Один JSON-вызов.
+ * Возвращает { target_audience, niche_features, brand_facts } или null
+ * при ошибке (не бросает — fail-soft).
+ */
+async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary, competitorSignals, ourUrl, competitorUrls }) {
+  const systemMsg =
+    'Ты — старший SEO-аналитик и специалист по контент-маркетингу. На вход получаешь данные ' +
+    'аналитического отчёта по поисковой выдаче (запрос, регион, n-граммы и важные термины ТОП-10, ' +
+    'сигналы топовых конкурентов). Твоя задача — кратко, но содержательно, по-русски, описать: ' +
+    '(1) портрет целевой аудитории; (2) ключевые особенности ниши; (3) типовые факты/цифры/' +
+    'доказательства, которые используют конкуренты в ТОПе. Возвращай СТРОГО JSON-объект без ' +
+    'markdown-обёрток с ключами target_audience, niche_features, brand_facts. Каждое значение — ' +
+    'строка 2–6 предложений. Если данных недостаточно — пиши осмысленные гипотезы на основе запроса, ' +
+    'но не выдумывай цифры/имена.';
+
+  const userPrompt =
+    `Запрос: ${String(query || '').slice(0, 250)}\n` +
+    `Регион (lr): ${String(lr || '')}\n` +
+    `URL целевой страницы (наша): ${String(ourUrl || '—').slice(0, 250)}\n` +
+    `URL конкурентов (ТОП): ${(competitorUrls || []).slice(0, 4).join(', ').slice(0, 800)}\n` +
+    `Топ n-грамм (df desc): ${ngramsCsv.slice(0, 1500)}\n` +
+    `Важные термины ТОПа (lemma → median_count): ` +
+    _safeJsonForPrompt(
+      (topVocabulary || []).slice(0, 30).map((v) => ({ l: v.lemma, m: v.median_count })),
+      2000,
+    ) + '\n' +
+    `Сигналы конкурентов (digest): ` +
+    _safeJsonForPrompt(competitorSignals || {}, 2500) + '\n\n' +
+    `Верни JSON: {"target_audience":"…","niche_features":"…","brand_facts":"…"}.`;
+
+  try {
+    const ds = await callDeepSeek(systemMsg, userPrompt, {
+      temperature: 0.3,
+      maxTokens:   2000,
+      timeoutMs:   90000,
+    });
+    const raw = (ds.text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
+    const start = raw.indexOf('{');
+    const end   = raw.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    const parsed = JSON.parse(raw.slice(start, end + 1));
+    const pick = (k) => {
+      const v = parsed && parsed[k];
+      return (typeof v === 'string') ? v.trim().slice(0, 4000) : '';
+    };
+    return {
+      target_audience: pick('target_audience'),
+      niche_features:  pick('niche_features'),
+      brand_facts:     pick('brand_facts'),
+    };
+  } catch (err) {
+    // fail-soft: пробрасываем как { _error } — вызывающий решит, как показать.
+    return { _error: (err && err.message) || 'DeepSeek error' };
+  }
+}
+
+/**
+ * GET /api/tasks/relevance-prefill/:reportId
+ */
+async function getRelevancePrefill(req, res, next) {
+  try {
+    const reportId = String(req.params.reportId || '').trim().toLowerCase();
+    if (!_UUID_RE.test(reportId)) {
+      return res.status(400).json({ error: 'Некорректный ID отчёта' });
+    }
+
+    const { rows } = await db.query(
+      `SELECT id, query, lr, our_url, status, serp, report, our_report, comparison
+         FROM relevance_reports
+        WHERE id = $1 AND user_id = $2`,
+      [reportId, req.user.id],
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Отчёт не найден или доступ запрещён' });
+    }
+    const r = rows[0];
+    if (r.status !== 'done') {
+      return res.status(409).json({ error: `Отчёт ещё не готов (status=${r.status})` });
+    }
+
+    const report     = r.report     || {};
+    const ourReport  = r.our_report || {};
+    const comparison = r.comparison || {};
+    const serpRows   = Array.isArray(r.serp) ? r.serp : [];
+
+    // Детерминированный блок
+    const competitorUrls = serpRows
+      .map((s) => (s && typeof s.url === 'string') ? s.url.trim() : '')
+      .filter(Boolean)
+      .slice(0, 4);
+
+    const tfidfArr = _vocabularyToTfidfJson(report.vocabulary, 20);
+    const ngramsCsv = _ngramsToCsv(report.ngrams, 25);
+
+    const deterministic = {
+      input_target_url:      (ourReport && typeof ourReport.url === 'string')
+        ? ourReport.url.trim()
+        : (typeof r.our_url === 'string' ? r.our_url.trim() : ''),
+      input_competitor_urls: competitorUrls.join('\n'),
+      input_ngrams:          ngramsCsv,
+      input_tfidf_json:      JSON.stringify(tfidfArr),
+    };
+
+    // LLM-аналитика
+    const llmRaw = await _runRelevanceLlmEnrichment({
+      query:              report.query || r.query || '',
+      lr:                 report.lr    || r.lr    || '',
+      ngramsCsv,
+      topVocabulary:      Array.isArray(report.vocabulary) ? report.vocabulary : [],
+      competitorSignals:  report.competitor_signals || null,
+      ourUrl:             deterministic.input_target_url,
+      competitorUrls,
+    });
+
+    let llm = { input_target_audience: '', input_niche_features: '', input_brand_facts: '' };
+    let llmUsed = false;
+    let llmError = null;
+    if (llmRaw && !llmRaw._error) {
+      llm = {
+        input_target_audience: llmRaw.target_audience || '',
+        input_niche_features:  llmRaw.niche_features  || '',
+        input_brand_facts:     llmRaw.brand_facts     || '',
+      };
+      llmUsed = !!(llm.input_target_audience || llm.input_niche_features || llm.input_brand_facts);
+    } else if (llmRaw && llmRaw._error) {
+      llmError = String(llmRaw._error).slice(0, 400);
+    }
+
+    return res.json({
+      report_id: r.id,
+      query:     report.query || r.query || '',
+      deterministic,
+      llm,
+      llm_used:  llmUsed,
+      llm_error: llmError,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   listTasks,
   createTask,
@@ -1143,4 +1369,5 @@ module.exports = {
   uploadTZ,
   parseTZWithLLM,
   downloadExampleTZ,
+  getRelevancePrefill,
 };

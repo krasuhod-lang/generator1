@@ -12,6 +12,7 @@
 
 const db = require('../config/db');
 const { processLinkArticleTask } = require('../services/linkArticle/linkArticlePipeline');
+const { withUserSlot } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
 
 const MAX_TOPIC_LEN   = 250;
@@ -90,7 +91,7 @@ async function createLinkArticleTask(req, res, next) {
     const task = rows[0];
 
     setImmediate(() => {
-      processLinkArticleTask(task.id).catch((err) => {
+      withUserSlot(req.user.id, () => processLinkArticleTask(task.id)).catch((err) => {
         console.error('[linkArticle] background task failed:', err.message);
       });
     });
