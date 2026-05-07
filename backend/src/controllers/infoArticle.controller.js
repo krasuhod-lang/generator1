@@ -36,10 +36,43 @@ const MAX_BRAND_LEN  = 200;
 const MAX_FACTS_LEN  = 4000;
 const MAX_FILENAME_LEN = 250;
 const ALLOWED_FORMATS = ['html', 'formatted_text'];
+// Бизнес-требование: «по изображениям, надо чтобы мы сами указали количество
+// создания изображений. Делается только для статьи в блог». Pipeline сейчас
+// поддерживает 1..6 (см. CHECK constraint миграции 022 + Stage 4 / embedImages).
+const MIN_IMAGES_COUNT = 1;
+const MAX_IMAGES_COUNT = 6;
+
+// UUID v4 / любая версия.
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function resolveOwnedRelevanceReportId(rawId, userId) {
+  if (!rawId || typeof rawId !== 'string') return null;
+  const id = rawId.trim().toLowerCase();
+  if (!_UUID_RE.test(id)) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT id FROM relevance_reports
+        WHERE id = $1 AND user_id = $2 AND status = 'done'
+        LIMIT 1`,
+      [id, userId],
+    );
+    return rows.length ? rows[0].id : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function clipStr(v, max) {
   if (v == null) return '';
   return String(v).slice(0, max).trim();
+}
+
+function clampImagesCount(v) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return 1;
+  if (n < MIN_IMAGES_COUNT) return MIN_IMAGES_COUNT;
+  if (n > MAX_IMAGES_COUNT) return MAX_IMAGES_COUNT;
+  return n;
 }
 
 // ─── GET /api/info-article ─────────────────────────────────────────
@@ -48,6 +81,7 @@ async function listInfoArticleTasks(req, res, next) {
     const { rows } = await db.query(
       `SELECT id, topic, region, brand_name, output_format,
               commercial_links_filename, commercial_links_count,
+              images_count, source_relevance_report_id,
               status, progress_pct, current_stage, error_message,
               deepseek_tokens_in, deepseek_tokens_out,
               gemini_tokens_in, gemini_tokens_out,
@@ -78,6 +112,15 @@ async function createInfoArticleTask(req, res, next) {
     const outputFormat = ALLOWED_FORMATS.includes(String(body.output_format || '').toLowerCase())
       ? String(body.output_format).toLowerCase()
       : 'html';
+    // Изображения: 1..6, default 1. Для статьи в блог пользователь сам
+    // указывает количество — см. бизнес-требование (D).
+    const imagesCount  = clampImagesCount(body.images_count);
+    // Опциональная связка с отчётом релевантности — Wave 1 competitor_signals
+    // и entity_coverage уйдут в IAKB §9 / __moduleContext (см. server pipeline).
+    // Невалидное / чужое / незавершённое id молча превращаем в null.
+    const relevanceReportId = await resolveOwnedRelevanceReportId(
+      body.source_relevance_report_id, req.user.id
+    );
 
     if (topic.length < MIN_TOPIC_LEN) {
       return res.status(400).json({ error: `Тема статьи должна быть не короче ${MIN_TOPIC_LEN} символов` });
@@ -114,15 +157,18 @@ async function createInfoArticleTask(req, res, next) {
       `INSERT INTO info_article_tasks
          (user_id, topic, region, brand_name, author_name, brand_facts, output_format,
           commercial_links, commercial_links_filename, commercial_links_count,
+          images_count, source_relevance_report_id,
           status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued', 0)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'queued', 0)
        RETURNING id, topic, region, brand_name, output_format,
                  commercial_links_filename, commercial_links_count,
+                 images_count, source_relevance_report_id,
                  status, progress_pct, created_at`,
       [
         req.user.id, topic, region, brandName || null, authorName || null,
         brandFacts || null, outputFormat,
         JSON.stringify(links), filename || null, links.length,
+        imagesCount, relevanceReportId,
       ],
     );
     const task = rows[0];

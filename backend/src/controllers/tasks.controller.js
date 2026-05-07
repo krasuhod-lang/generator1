@@ -29,6 +29,38 @@ async function loadOwnTask(taskId, userId) {
   return rows[0];
 }
 
+// UUID v4 / v3 / v5 — допускаем любую версию: relevance_reports.id = gen_random_uuid().
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * resolveOwnedRelevanceReportId — возвращает UUID отчёта релевантности,
+ * только если:
+ *   1) формат — валидный UUID,
+ *   2) запись существует в relevance_reports,
+ *   3) принадлежит тому же user_id (защита от IDOR — пользователь не может
+ *      «подсадить» свою задачу на чужой отчёт),
+ *   4) отчёт завершён (status='done') — иначе вливать просто нечего.
+ *
+ * Любой fail возвращает null (а не бросает) — пользователь увидит задачу
+ * созданной как обычно, без обогащения. Это безопаснее, чем 400 на пустяке.
+ */
+async function resolveOwnedRelevanceReportId(rawId, userId) {
+  if (!rawId || typeof rawId !== 'string') return null;
+  const id = rawId.trim().toLowerCase();
+  if (!_UUID_RE.test(id)) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT id FROM relevance_reports
+        WHERE id = $1 AND user_id = $2 AND status = 'done'
+        LIMIT 1`,
+      [id, userId],
+    );
+    return rows.length ? rows[0].id : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Валидация полей перед запуском задачи (ТЗ §16).
  * Возвращает массив ошибок (пустой = OK).
@@ -123,6 +155,10 @@ async function createTask(req, res, next) {
       input_max_chars,
       input_target_url,
       llm_provider,
+      // Опциональная привязка к отчёту релевантности (миграция 022).
+      // Если задано — orchestrator подгружает report.competitor_signals
+      // и report.entity_coverage и вливает их в __moduleContext + AKB.
+      source_relevance_report_id,
     } = req.body;
 
     // Для черновика допускаем пустое поле — ставим плейсхолдер
@@ -140,6 +176,13 @@ async function createTask(req, res, next) {
       ? 'grok'
       : 'gemini';
 
+    // source_relevance_report_id: принимаем только валидный UUID, который
+    // принадлежит текущему пользователю и завершился успешно. Невалидный/
+    // чужой/незавершённый id → null (не падаем — задача создаётся «как раньше»).
+    const relevanceReportId = await resolveOwnedRelevanceReportId(
+      source_relevance_report_id, req.user.id
+    );
+
     const { rows } = await db.query(
       `INSERT INTO tasks (
          user_id, title, status,
@@ -151,7 +194,8 @@ async function createTask(req, res, next) {
          input_brand_facts, input_competitor_urls,
          input_min_chars, input_max_chars,
          input_target_url,
-         llm_provider
+         llm_provider,
+         source_relevance_report_id
        ) VALUES (
          $1, $2, 'draft',
          $3, $4, $5,
@@ -162,7 +206,8 @@ async function createTask(req, res, next) {
          $19, $20,
          $21, $22,
          $23,
-         $24
+         $24,
+         $25
        ) RETURNING *`,
       [
         req.user.id,
@@ -189,6 +234,7 @@ async function createTask(req, res, next) {
         maxChars,
         toText(input_target_url),
         provider,
+        relevanceReportId,
       ]
     );
 
@@ -240,6 +286,7 @@ async function updateTask(req, res, next) {
       'input_min_chars', 'input_max_chars',
       'input_target_url',
       'llm_provider',
+      'source_relevance_report_id',
     ];
 
     const fields = [];
@@ -254,14 +301,18 @@ async function updateTask(req, res, next) {
 
     for (const key of ALLOWED) {
       if (key in req.body) {
-        fields.push(`${key} = $${values.length + 1}`);
         let val = req.body[key];
         if (INT_FIELDS.has(key))  val = parseInt(val) || null;
         else if (JSON_FIELDS.has(key)) val = toText(val);
         else if (ENUM_FIELDS[key]) {
           const lc = (val == null ? '' : String(val).toLowerCase().trim());
           val = ENUM_FIELDS[key].has(lc) ? lc : 'gemini';
+        } else if (key === 'source_relevance_report_id') {
+          // Та же owner-валидация, что и в createTask. Невалидное id → null
+          // (не падаем 400). Чужой/несуществующий/недоделанный отчёт также → null.
+          val = await resolveOwnedRelevanceReportId(val, req.user.id);
         }
+        fields.push(`${key} = $${values.length + 1}`);
         values.push(val);
       }
     }

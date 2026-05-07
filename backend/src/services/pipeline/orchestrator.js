@@ -357,6 +357,43 @@ async function runPipeline(task, ctx) {
   // claims_to_prove + jtbd_to_close. Сохраняется в tasks.module_context
   // (миграция 014) и уезжает в AKB как §11 hard analytical constraints.
   // См.: backend/src/utils/moduleContext.js
+  //
+  // Если у задачи привязан исходный отчёт релевантности (миграция 022,
+  // tasks.source_relevance_report_id), мы дополнительно вливаем
+  // mandatory_entities из entity_coverage и сводку competitor_signals
+  // из ТОП-10 — по верд<кту: «Вливаем mandatory_entities и competitor_signals
+  // из отчета напрямую в __moduleContext при генерации».
+  let relevanceReport = null;
+  if (task.source_relevance_report_id) {
+    try {
+      const { rows: rRows } = await db.query(
+        `SELECT report, our_report, comparison
+           FROM relevance_reports
+          WHERE id = $1 AND user_id = $2 AND status = 'done'`,
+        [task.source_relevance_report_id, task.user_id]
+      );
+      if (rRows.length) {
+        relevanceReport = rRows[0].report || {};
+        // Прокидываем comparison.entity_coverage в верхний уровень,
+        // чтобы deriveMandatoryEntities нашёл его одной точкой.
+        if (rRows[0].comparison && rRows[0].comparison.entity_coverage) {
+          relevanceReport.entity_coverage = relevanceReport.entity_coverage
+            || rRows[0].comparison.entity_coverage;
+        }
+        log(
+          `Relevance report подключён (id=${task.source_relevance_report_id.slice(0, 8)}…): ` +
+          `entities=${(relevanceReport.entity_coverage?.mandatory_entities?.length) || 0}, ` +
+          `competitor_signals=${relevanceReport.competitor_signals ? 'да' : 'нет'}`,
+          'info'
+        );
+      } else {
+        log(`Relevance report ${task.source_relevance_report_id.slice(0,8)}… не найден или не done — пропускаем`, 'warn');
+      }
+    } catch (relErr) {
+      log(`Relevance report: ошибка загрузки (${relErr.message}) — продолжаем без него`, 'warn');
+    }
+  }
+
   try {
     task.__moduleContext = deriveModuleContext({
       task,
@@ -365,6 +402,7 @@ async function runPipeline(task, ctx) {
       stage2Result: { taxonomy, stage2Raw, enrichedStage1 },
       targetPageAnalysis,
       strategyContext,
+      relevanceReport,
     });
     const s = task.__moduleContext._summary || {};
     log(

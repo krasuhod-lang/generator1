@@ -549,36 +549,60 @@ async function runLinkAudit(articleHtml, linkPlan, deterministicCheck, ctx) {
 
 // ── Stage 4: image prompts + Nano Banana Pro ────────────────────────
 
-async function runImagePromptsGen(task, outline, articleHtml, audience, ctx) {
+async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, imagesCount = 1) {
+  const N = Math.max(1, Math.min(6, parseInt(imagesCount, 10) || 1));
   const user = [
     `[INPUTS]`,
     `topic: ${task.topic}`,
     `region: ${task.region || '[не задано]'}`,
+    `images_count_required: ${N}`,
     `audience_digest: ${JSON.stringify(audience).slice(0, 2000)}`,
     `stage2_outline: ${JSON.stringify(outline).slice(0, 6000)}`,
     `article_html: ${articleHtml.slice(0, 12000)}`,
+    '',
+    // Прокидываем количество прямо в user-промт. Stage 4 system-промт
+    // знает про images_count_required (см. stage4_image_prompts.txt).
+    // Если N=1 — поведение сохраняется (1 cover-слот). Если N>1 — модель
+    // выдаёт slot=1 cover + slot=2..N inline-иллюстрации, привязанные к
+    // конкретным H2 из outline (по target_section_index / section_h2).
+    `Сгенерируй РОВНО ${N} image_prompts.`,
+    N === 1
+      ? `Это slot=1 cover (как раньше).`
+      : `slot=1 — обложка (как раньше); slot=2..${N} — inline-иллюстрации, ` +
+        `каждая привязана к УНИКАЛЬНОЙ H2 из stage2_outline (поле section_h2 ` +
+        `должно совпадать с outline.sections[i].h2). Не дублируй секции.`,
   ].join('\n');
   const result = await callLLM(
     'deepseek',
     loadInfoArticlePrompt('stage4Images'),
     user,
-    { retries: 3, temperature: 0.4, callLabel: 'InfoArticle Stage 4 (image prompts)', ...ctx },
+    { retries: 3, temperature: 0.4, callLabel: `InfoArticle Stage 4 (${N} image prompts)`, ...ctx },
   );
   const prompts = Array.isArray(result?.image_prompts) ? result.image_prompts : [];
-  // info-article выдаёт ровно 1 cover-изображение (см. stage4_image_prompts.txt).
-  // Если LLM по инерции (cache / старый промт) вернул несколько слотов — берём
-  // первый, перенумеровываем в slot=1, остальные отбрасываем.
-  return prompts.slice(0, 1).map((p) => ({
-    slot:            1,
-    section_h2:      String(p.section_h2 || '').slice(0, 200),
-    visual_prompt:   String(p.visual_prompt || '').slice(0, 2000),
-    negative_prompt: String(p.negative_prompt || '').slice(0, 400),
-    alt_ru:          String(p.alt_ru || '').slice(0, 200),
-    status:          'pending',
-    image_base64:    null,
-    mime_type:       null,
-    error:           null,
-  }));
+  // Берём первые N, перенумеровываем slot=1..N. Если LLM вернул меньше — сколько
+  // прислал. Дубль section_h2 (один и тот же H2 в нескольких inline-слотах)
+  // схлопываем, сохраняя первый.
+  const seenH2 = new Set();
+  const normalized = [];
+  for (const p of prompts) {
+    if (normalized.length >= N) break;
+    const h2 = String(p?.section_h2 || '').slice(0, 200);
+    // slot=1 — cover, ему дубль H2 не страшен; для slot>=2 требуем уникальности.
+    if (normalized.length >= 1 && h2 && seenH2.has(h2.toLowerCase())) continue;
+    if (h2) seenH2.add(h2.toLowerCase());
+    normalized.push({
+      slot:            normalized.length + 1,
+      section_h2:      h2,
+      visual_prompt:   String(p?.visual_prompt   || '').slice(0, 2000),
+      negative_prompt: String(p?.negative_prompt || '').slice(0, 400),
+      alt_ru:          String(p?.alt_ru          || '').slice(0, 200),
+      status:          'pending',
+      image_base64:    null,
+      mime_type:       null,
+      error:           null,
+    });
+  }
+  return normalized;
 }
 
 async function runImageGeneration(taskId, imagePrompts) {
@@ -617,42 +641,93 @@ function escapeHtml(s) {
 function embedImages(html, imagePrompts) {
   // info-article: cover-изображение встраивается в article_html сразу после <h1>
   // (если оно сгенерировалось успешно), чтобы при копировании HTML / форматированного
-  // текста картинка уезжала вместе со статьёй (как в link-article). Раньше
-  // изображение отдавалось только как отдельный download'ный файл из галереи
-  // — пользователи теряли его при публикации, потому что многие блог-движки
-  // вставляют HTML «как есть», без отдельной обложки.
+  // текста картинка уезжала вместе со статьёй (как в link-article).
   //
-  // Стратегия:
-  //   1) очищаем возможные leftover-плейсхолдеры <!-- IMAGE_SLOT_N --> и пустые <p></p>
-  //      (на случай, если Gemini по инерции старого промта их оставил);
-  //   2) берём первый успешный image_prompt с непустым image_base64;
-  //   3) если в HTML уже есть тег <img> или <figure> (writer всё-таки вставил) —
-  //      ничего не добавляем, чтобы не задвоить картинку;
-  //   4) иначе вставляем <figure class="info-article-cover"><img src="data:…"/></figure>
-  //      сразу после закрывающего </h1>; если <h1> отсутствует — в самое начало.
+  // С приходом многослотовой генерации (D, миграция 022) поведение расширено:
+  //   • slot=1 (cover) — после </h1>, как и раньше;
+  //   • slot=2..N (inline) — перед целевым <h2>, чей текст совпадает с
+  //     image_prompts[i].section_h2 (case-insensitive, без знаков). Если
+  //     ни один h2 не совпал — слот молча пропускается (остаётся в галерее
+  //     отдельно как download-файл, чтобы пользователь мог вставить вручную).
+  //
+  // Защита от двойной вставки сохранена для cover: если writer всё-таки
+  // вставил <img>/<figure> в начале статьи — cover повторно не добавляем.
   let out = String(html || '');
   out = out.replace(/<!--\s*IMAGE_SLOT_\d+\s*-->/gi, '');
   out = out.replace(/<p>\s*<\/p>/gi, '');
 
-  const cover = Array.isArray(imagePrompts)
-    ? imagePrompts.find((p) => p && p.status === 'done' && p.image_base64)
-    : null;
-  if (!cover) return out;
-  if (/<img\b|<figure\b/i.test(out)) return out;
+  const ready = Array.isArray(imagePrompts)
+    ? imagePrompts.filter((p) => p && p.status === 'done' && p.image_base64)
+    : [];
+  if (!ready.length) return out;
 
-  const alt  = escapeHtml(cover.alt_ru || '');
-  const mime = cover.mime_type || 'image/png';
-  const figure =
-    `<figure class="info-article-cover">` +
-    `<img src="data:${mime};base64,${cover.image_base64}" alt="${alt}" />` +
-    `</figure>`;
+  // Сортируем по slot — slot=1 (cover) идёт первым.
+  ready.sort((a, b) => (a.slot || 1) - (b.slot || 1));
 
-  // Вставляем после первого закрывающего </h1>; если <h1> нет — префикс к HTML.
-  const h1Re = /<\/h1\s*>/i;
-  if (h1Re.test(out)) {
-    out = out.replace(h1Re, (match) => `${match}\n${figure}`);
-  } else {
-    out = `${figure}\n${out}`;
+  const buildFigure = (p, klass) => {
+    const alt  = escapeHtml(p.alt_ru || '');
+    const mime = p.mime_type || 'image/png';
+    return `<figure class="${klass}">` +
+      `<img src="data:${mime};base64,${p.image_base64}" alt="${alt}" />` +
+      `</figure>`;
+  };
+
+  // ── 1) Cover (slot=1 / первый). ───────────────────────────────────
+  const cover = ready.find((p) => (p.slot || 1) === 1) || ready[0];
+  const coverIsFirst = cover === ready[0];
+  if (coverIsFirst && !/<img\b|<figure\b/i.test(out)) {
+    const figure = buildFigure(cover, 'info-article-cover');
+    const h1Re = /<\/h1\s*>/i;
+    if (h1Re.test(out)) {
+      out = out.replace(h1Re, (match) => `${match}\n${figure}`);
+    } else {
+      out = `${figure}\n${out}`;
+    }
+  }
+
+  // ── 2) Inline-иллюстрации (slot >= 2). ────────────────────────────
+  // Канонизация заголовка для match'а: lowercase, без HTML-сущностей,
+  // только буквы/цифры/пробелы. Совпадение по равенству или contains
+  // (LLM иногда даёт укороченную/переформулированную версию H2).
+  const canon = (s) => String(s || '')
+    .toLowerCase()
+    .replace(/&[a-z#0-9]+;/gi, ' ')
+    .replace(/[^а-яa-z0-9\s]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Собираем индекс всех <h2>…</h2> с их позициями (start = индекс начала тега).
+  const h2Re = /<h2\b[^>]*>([\s\S]*?)<\/h2\s*>/gi;
+  const h2List = [];
+  let m;
+  while ((m = h2Re.exec(out)) !== null) {
+    const inner = m[1].replace(/<[^>]+>/g, '');
+    h2List.push({ start: m.index, text: inner, canon: canon(inner) });
+  }
+  if (!h2List.length) return out;
+
+  // Накапливаем правки, применяем от конца к началу — чтобы позиции не «съезжали».
+  const edits = [];
+  const usedH2 = new Set();
+  for (const p of ready) {
+    if ((p.slot || 1) === 1) continue; // cover уже вставлен
+    const target = canon(p.section_h2);
+    if (!target) continue;
+    let h2 = h2List.find((h, idx) => !usedH2.has(idx) && h.canon === target);
+    if (!h2) {
+      // fallback: contains-match (target внутри h2 или наоборот).
+      const idx = h2List.findIndex((h, i) => !usedH2.has(i)
+        && (h.canon.includes(target) || target.includes(h.canon)));
+      if (idx >= 0) h2 = h2List[idx];
+    }
+    if (!h2) continue;
+    const h2Index = h2List.indexOf(h2);
+    usedH2.add(h2Index);
+    edits.push({ pos: h2.start, insertText: `${buildFigure(p, 'info-article-inline')}\n` });
+  }
+  edits.sort((a, b) => b.pos - a.pos);
+  for (const ed of edits) {
+    out = out.slice(0, ed.pos) + ed.insertText + out.slice(ed.pos);
   }
   return out;
 }
@@ -824,6 +899,40 @@ async function processInfoArticleTask(taskId) {
     publishEvent(taskId, 'status', { status: 'running' });
     await appendLog(taskId, '🚀 Старт генерации информационной статьи в блог', 'ok');
 
+    // ── Опционально загружаем привязанный отчёт релевантности ──────────
+    // Если пользователь нажал «Создать контент» из раздела «Релевантность»,
+    // у задачи будет source_relevance_report_id (миграция 022). Из отчёта
+    // берём competitor_signals (Wave 1 — title-template, schema.org,
+    // freshness, trust-links, anchor-bank, host-hygiene + effort_score)
+    // и вливаем в IAKB §9 — Gemini-writer увидит требования топа как
+    // hard-constraints. Без отчёта (старые задачи) поле = null, секция §9
+    // не рендерится и pipeline идёт «как раньше».
+    let relevanceSignals = null;
+    if (task.source_relevance_report_id) {
+      try {
+        const { rows: rRows } = await db.query(
+          `SELECT report
+             FROM relevance_reports
+            WHERE id = $1 AND user_id = $2 AND status = 'done'`,
+          [task.source_relevance_report_id, task.user_id],
+        );
+        if (rRows.length && rRows[0].report && rRows[0].report.competitor_signals) {
+          relevanceSignals = rRows[0].report.competitor_signals;
+          await appendLog(
+            taskId,
+            `🎯 Подключён competitor_signals из relevance_report (${task.source_relevance_report_id.slice(0, 8)}…) — уйдёт в IAKB §9`,
+            'info',
+          );
+        } else if (rRows.length) {
+          await appendLog(taskId, `⚠ relevance_report без competitor_signals — пропускаем`, 'warn');
+        } else {
+          await appendLog(taskId, `⚠ relevance_report не найден или не done — продолжаем без него`, 'warn');
+        }
+      } catch (relErr) {
+        await appendLog(taskId, `⚠ relevance_report: ошибка загрузки (${relErr.message}) — продолжаем без него`, 'warn');
+      }
+    }
+
     const ctx = { ...buildCallCtx(taskId, 'info_article'), taskId };
 
     // 1. Pre-Stage 0
@@ -910,6 +1019,7 @@ async function processInfoArticleTask(taskId) {
     // 8. Build IAKB + optional Gemini cachedContents
     task.__iakb = buildInfoArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
+      relevanceSignals,
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
 
@@ -1090,10 +1200,20 @@ async function processInfoArticleTask(taskId) {
     }
 
     // 12. Stage 4 image prompts
+    // task.images_count приходит из миграции 022 (CHECK 1..6, default 1).
+    // На очень старых задачах поле может отсутствовать → fallback к 1.
+    const imagesCount = Math.max(1, Math.min(6, parseInt(task.images_count, 10) || 1));
     await setStage(taskId, 'stage4_image_prompts', 84);
-    const imagePrompts = await runImagePromptsGen(task, outline, articleHtml, audience, ctx);
+    await appendLog(taskId, `🖼 Запрос на ${imagesCount} изображени${imagesCount === 1 ? 'е' : 'я'} (slot=1 cover${imagesCount > 1 ? `, slot=2..${imagesCount} inline` : ''})`, 'info');
+    const imagePrompts = await runImagePromptsGen(task, outline, articleHtml, audience, ctx, imagesCount);
     if (imagePrompts.length < 1) {
       await appendLog(taskId, `⚠ DeepSeek не вернул промт обложки (image_prompts пусто)`, 'warn');
+    } else if (imagePrompts.length < imagesCount) {
+      await appendLog(
+        taskId,
+        `⚠ DeepSeek вернул ${imagePrompts.length}/${imagesCount} image_prompts — продолжаем с тем, что есть`,
+        'warn',
+      );
     }
     await saveColumn(taskId, 'image_prompts', imagePrompts);
 

@@ -70,11 +70,16 @@ function clampArr(arr, n) {
 }
 
 // ── 1. mandatory_entities (Модуль 1) ────────────────────────────────
-function deriveMandatoryEntities({ stage0Result, stage1Result }) {
+function deriveMandatoryEntities({ stage0Result, stage1Result, relevanceReport }) {
   // Источники (по приоритету достоверности):
   //   a) stage1.knowledge_graph.nodes c salience >= 0.5
   //   b) stage1.entity_graph (топ по weight)
   //   c) stage0.core_entities (с trust_signal === true приоритетнее)
+  //   d) relevance_report.entity_coverage.mandatory_entities — сущности,
+  //      упомянутые ≥df_threshold конкурентами из ТОП-10. Приоритет высокий
+  //      (weight=0.85), т.к. это эмпирический сигнал: «без них статья
+  //      не воспринимается алгоритмом как полная по теме». См.
+  //      relevance/app/comparison.py + entity_coverage в relevance_reports.report.
   const out = [];
 
   // a) knowledge_graph nodes
@@ -110,6 +115,20 @@ function deriveMandatoryEntities({ stage0Result, stage1Result }) {
       source:   'stage0_core_entities',
       // trust_signal=true → выше приоритет
       weight:   e.trust_signal ? 0.7 : 0.4,
+    });
+  }
+
+  // d) relevance_report.entity_coverage.mandatory_entities (Wave 2)
+  // Принимаем как массив строк (текущий формат) или объектов {entity,...}.
+  const ec = relevanceReport && relevanceReport.entity_coverage;
+  for (const raw of asArray(ec && ec.mandatory_entities)) {
+    const label = (typeof raw === 'string' ? raw : raw && (raw.entity || raw.label) || '').toString().trim();
+    if (!label) continue;
+    out.push({
+      entity:   label,
+      type:     'concept',
+      source:   'relevance_top_consensus',
+      weight:   0.85,
     });
   }
 
@@ -385,6 +404,11 @@ function deriveModuleContext(input = {}) {
     stage1Result      = null,
     stage2Result      = null,
     targetPageAnalysis = null,
+    // Опциональный отчёт релевантности (Wave 1/2). Когда передан —
+    // mandatory_entities дополняются «top-consensus» сущностями, а
+    // competitor_signals попадают в ctx как самостоятельный блок и
+    // отдельно — в AKB §11 (formatModuleContextForAKB).
+    relevanceReport    = null,
   } = input;
 
   const ctx = {
@@ -392,7 +416,7 @@ function deriveModuleContext(input = {}) {
     generated_at:   new Date().toISOString(),
 
     // Module 1
-    mandatory_entities:        deriveMandatoryEntities({ stage0Result, stage1Result }),
+    mandatory_entities:        deriveMandatoryEntities({ stage0Result, stage1Result, relevanceReport }),
     avoid_ambiguous_terms:     deriveAvoidAmbiguous({ stage1Result }),
     audience_language_clusters: deriveAudienceLanguage({ stage1Result }),
 
@@ -401,6 +425,11 @@ function deriveModuleContext(input = {}) {
     trust_complexity: deriveTrustComplexity({ stage0Result, targetPageAnalysis, task }),
     claims_to_prove: deriveClaimsToProve({ stage0Result, task }),
     jtbd_to_close:   deriveJtbdToClose({ stage0Result, stage1Result }),
+
+    // Wave 1/2: компактная сводка competitor_signals из relevance_reports.
+    // Полные сигналы лежат в IAKB §9 и AKB §11 — здесь только digest для
+    // UI/админки и Stage 8 evaluator. Если отчёта нет — null (не {}).
+    competitor_signals_digest: deriveCompetitorSignalsDigest(relevanceReport),
   };
 
   // Сводка для логирования
@@ -412,9 +441,58 @@ function deriveModuleContext(input = {}) {
     jtbd_to_close_n:             ctx.jtbd_to_close.length,
     trust_level:                 ctx.trust_complexity.level,
     primary_format:              ctx.format_wedge.primary,
+    relevance_used:              !!relevanceReport,
   };
 
   return ctx;
+}
+
+/**
+ * deriveCompetitorSignalsDigest — компактная сводка по competitor_signals
+ * из отчёта релевантности (см. relevance/app/signals.py). Возвращаем
+ * только то, что осмысленно использовать как guidance для writer'а:
+ *   • effort_score (медиана/min/max по ТОПу),
+ *   • title_template (паттерн заголовков, который преобладает),
+ *   • freshness    (медианный «возраст» документов),
+ *   • trust_links  (наличие ссылок на госдомены / GOST / SNiP и т.д.),
+ *   • host_hygiene (https / валидный сертификат / hreflang).
+ *
+ * Возвращает null, если данных нет.
+ */
+function deriveCompetitorSignalsDigest(relevanceReport) {
+  if (!relevanceReport || typeof relevanceReport !== 'object') return null;
+  const cs = relevanceReport.competitor_signals;
+  if (!cs || typeof cs !== 'object') return null;
+  const top = cs.top_aggregate || cs.aggregate || cs;
+
+  const pickNum = (obj, ...keys) => {
+    for (const k of keys) {
+      const v = Number(obj?.[k]);
+      if (Number.isFinite(v)) return v;
+    }
+    return null;
+  };
+  const pickStr = (obj, ...keys) => {
+    for (const k of keys) {
+      const v = obj?.[k];
+      if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 200);
+    }
+    return null;
+  };
+
+  const digest = {
+    effort_score_median: pickNum(top, 'effort_score_median', 'effort_score'),
+    effort_score_min:    pickNum(top, 'effort_score_min'),
+    effort_score_max:    pickNum(top, 'effort_score_max'),
+    title_template:      pickStr(top, 'title_template_dominant', 'title_template'),
+    freshness_median_days: pickNum(top, 'freshness_median_days', 'freshness_days'),
+    trust_links_min_count: pickNum(top, 'trust_links_min_count', 'trust_links_count'),
+    https_required:        top?.https_required === true || top?.https === true || null,
+  };
+
+  // Если ВСЕ поля null — возвращаем null, чтобы AKB не печатал пустую секцию.
+  const hasAny = Object.values(digest).some(v => v !== null && v !== undefined);
+  return hasAny ? digest : null;
 }
 
 /**
@@ -487,6 +565,26 @@ function formatModuleContextForAKB(ctx) {
       .map((j, i) => `${i + 1}. ${j.jtbd}`)
       .join('\n');
     lines.push(`**Задачи аудитории (JTBD top-5):**\n${top}`);
+  }
+
+  // Competitor signals digest (Wave 1/2 — из relevance_report).
+  // Печатаем только когда отчёт релевантности был привязан к задаче.
+  if (ctx.competitor_signals_digest && typeof ctx.competitor_signals_digest === 'object') {
+    const d = ctx.competitor_signals_digest;
+    const items = [];
+    if (Number.isFinite(d.effort_score_median)) {
+      const range = (Number.isFinite(d.effort_score_min) && Number.isFinite(d.effort_score_max))
+        ? ` (диапазон ${d.effort_score_min}..${d.effort_score_max})`
+        : '';
+      items.push(`effort_score топа ≈ ${d.effort_score_median}${range} — ориентируйся на этот уровень глубины`);
+    }
+    if (d.title_template) items.push(`title-template, который доминирует в ТОПе: «${d.title_template}»`);
+    if (Number.isFinite(d.freshness_median_days)) items.push(`медианный возраст контента в ТОПе: ${d.freshness_median_days} дн.`);
+    if (Number.isFinite(d.trust_links_min_count)) items.push(`минимум trust-ссылок в ТОПе: ${d.trust_links_min_count}`);
+    if (d.https_required === true) items.push('https + валидный сертификат обязательны');
+    if (items.length) {
+      lines.push(`**Сигналы топа (Relevance):** ${items.join('; ')}.`);
+    }
   }
 
   return lines.join('\n');

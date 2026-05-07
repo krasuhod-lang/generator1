@@ -783,6 +783,49 @@ async function ensureSchema() {
         ADD COLUMN IF NOT EXISTS exclude_aggregators BOOLEAN NOT NULL DEFAULT FALSE
     `);
 
+    // ─── Migration 022: relevance → content bridge + images_count ─────────
+    // 1) Связь tasks/info_article_tasks с исходным relevance_report — чтобы
+    //    pipeline вливал mandatory_entities + competitor_signals в
+    //    __moduleContext (см. backend/src/utils/moduleContext.js) и в IAKB §9
+    //    (backend/src/services/infoArticle/infoArticleKnowledgeBase.js).
+    // 2) Управляемое пользователем количество изображений для info-article
+    //    (бизнес-требование «делается только для статьи в блог»).
+    await db.query(`
+      ALTER TABLE tasks
+        ADD COLUMN IF NOT EXISTS source_relevance_report_id UUID
+          REFERENCES relevance_reports(id) ON DELETE SET NULL
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_tasks_source_relevance
+        ON tasks (source_relevance_report_id)
+        WHERE source_relevance_report_id IS NOT NULL
+    `);
+    await db.query(`
+      ALTER TABLE info_article_tasks
+        ADD COLUMN IF NOT EXISTS source_relevance_report_id UUID
+          REFERENCES relevance_reports(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS images_count INTEGER NOT NULL DEFAULT 1
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_info_article_source_relevance
+        ON info_article_tasks (source_relevance_report_id)
+        WHERE source_relevance_report_id IS NOT NULL
+    `);
+    // Защитный CHECK: 1..6 изображений — выше штучного количества pipeline
+    // не пойдёт. Стадия 4 и embedImages поддерживают N≥1.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'info_article_tasks_images_count_chk'
+        ) THEN
+          ALTER TABLE info_article_tasks
+            ADD CONSTRAINT info_article_tasks_images_count_chk
+            CHECK (images_count BETWEEN 1 AND 6);
+        END IF;
+      END$$;
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
