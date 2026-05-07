@@ -43,6 +43,10 @@ const form = reactive({
   input_target_url:      '',   // URL целевой страницы
   title:                 '',
   llm_provider:          'gemini', // 'gemini' | 'grok' (см. backend/services/llm/grok.adapter.js)
+  // Связка с отчётом релевантности — заполняется при переходе из
+  // /relevance/:id, бэкенд по этому id вытащит entity_coverage и
+  // competitor_signals и вольёт их в __moduleContext / AKB §11.
+  source_relevance_report_id: '',
 });
 
 // Загружаем черновик при редактировании
@@ -73,6 +77,11 @@ onMounted(async () => {
     prefill_brand:    'input_brand_name',
     prefill_facts:    'input_brand_facts',
     prefill_title:    'title',
+    // Прифилл из «Релевантность → Создать контент»: важные LSI попадают
+    // как \n-разделённый блок в textarea, релевантный отчёт связывается с
+    // задачей через source_relevance_report_id (бэкенд проверяет владельца).
+    prefill_lsi:      'input_raw_lsi',
+    prefill_relevance_report_id: 'source_relevance_report_id',
   };
   let touched = false;
   for (const [qk, fk] of Object.entries(map)) {
@@ -80,6 +89,12 @@ onMounted(async () => {
     if (raw == null || raw === '') continue;
     const value = Array.isArray(raw) ? String(raw[0]) : String(raw);
     if (!value) continue;
+    // UUID-фильтр для relevance_report_id — иначе бэкенд просто отвергнет,
+    // но проще не давать заведомо мусорные данные в форму.
+    if (fk === 'source_relevance_report_id' &&
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim())) {
+      continue;
+    }
     // Длина: backend всё равно валидирует, но обрезаем заранее, чтобы
     // не перегружать форму.
     form[fk] = value.slice(0, 4000);
@@ -439,6 +454,18 @@ function downloadExampleTZ() {
             <span class="text-gray-400 text-lg">{{ openSections.s1 ? '▲' : '▼' }}</span>
           </button>
           <div v-show="openSections.s1" class="px-5 pb-5 space-y-4 border-t border-gray-800">
+            <div v-if="form.source_relevance_report_id" class="pt-4">
+              <div class="p-2 rounded bg-emerald-900/20 border border-emerald-800/50 text-xs text-emerald-300">
+                🎯 Подключён отчёт релевантности
+                <code class="font-mono">{{ form.source_relevance_report_id.slice(0, 8) }}…</code>
+                — competitor_signals и mandatory_entities из ТОП-10 уйдут в __moduleContext / AKB §11.
+                <button type="button"
+                        class="ml-2 underline text-emerald-200 hover:text-emerald-100"
+                        @click="form.source_relevance_report_id = ''">
+                  отвязать
+                </button>
+              </div>
+            </div>
             <div class="pt-4">
               <label class="label">H1 / Целевая услуга <span class="text-red-500">*</span></label>
               <input v-model="form.input_target_service" type="text" class="input"

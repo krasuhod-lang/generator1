@@ -19,6 +19,13 @@ const form = ref({
   author_name:   '',
   brand_facts:   '',
   output_format: 'html',
+  // Количество генерируемых изображений (1..6, default 1).
+  // По бизнес-требованию: «делается только для статьи в блог» — поле живёт
+  // только здесь. Backend проверяет диапазон ещё раз (см. clampImagesCount).
+  images_count:  1,
+  // Опциональная привязка к отчёту релевантности — приходит через query
+  // (?prefill_relevance_report_id=…), пользователю не показываем как input.
+  source_relevance_report_id: '',
 });
 const optionalOpen = ref(false);
 const submitting   = ref(false);
@@ -50,7 +57,13 @@ onMounted(() => {
     if (brand) form.value.brand_name = brand;
     const facts = pickStr(q.prefill_facts, 4000);
     if (facts) form.value.brand_facts = facts;
-    if (topic || region || brand || facts) {
+    // Связка с отчётом релевантности (Wave 1 competitor_signals → IAKB §9).
+    // Принимаем UUID любой версии; невалидный — игнорируем.
+    const rrId = pickStr(q.prefill_relevance_report_id, 64);
+    if (rrId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rrId)) {
+      form.value.source_relevance_report_id = rrId.toLowerCase();
+    }
+    if (topic || region || brand || facts || rrId) {
       // Раскроем «опциональный» блок, если что-то предзаполнили — иначе
       // brand_facts «прячется» под коллапсом и пользователь его не увидит.
       optionalOpen.value = true;
@@ -237,6 +250,10 @@ async function handleCreate() {
   submitting.value = true;
   try {
     saveDraft();
+    // Клампим images_count в [1..6] на клиенте — backend всё равно проверит,
+    // но так UI сразу показывает корректное значение в drafts.
+    const imagesCount = Math.max(1, Math.min(6, parseInt(form.value.images_count, 10) || 1));
+    form.value.images_count = imagesCount;
     const payload = {
       topic,
       region,
@@ -244,9 +261,13 @@ async function handleCreate() {
       author_name:  form.value.author_name.trim(),
       brand_facts:  form.value.brand_facts.trim(),
       output_format: form.value.output_format,
+      images_count: imagesCount,
       commercial_links: parsedLinks.value,
       commercial_links_filename: fileMeta.value?.name || '',
     };
+    if (form.value.source_relevance_report_id) {
+      payload.source_relevance_report_id = form.value.source_relevance_report_id;
+    }
     const { id, normalized } = await store.createTask(payload);
     if (normalized) {
       parseInfo.value = `Серверная нормализация: ${normalized.kept} принято, ${normalized.dropped} отбраковано`;
@@ -923,6 +944,32 @@ onUnmounted(() => { stopTicker(); });
                     <input type="radio" v-model="form.output_format" value="formatted_text" class="accent-indigo-500" /> Форматированный текст
                   </label>
                 </div>
+              </div>
+              <div>
+                <label class="label">
+                  Количество изображений <span class="text-gray-500 text-xs">(1–6)</span>
+                </label>
+                <div class="flex items-center gap-3">
+                  <input
+                    type="number"
+                    v-model.number="form.images_count"
+                    min="1" max="6" step="1"
+                    class="input w-20"
+                  />
+                  <span class="text-xs text-gray-400">
+                    slot=1 — обложка после &lt;h1&gt;{{ (form.images_count || 1) > 1 ? `; slot=2..${form.images_count} — иллюстрации перед целевыми H2` : '' }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="form.source_relevance_report_id" class="p-2 rounded bg-emerald-900/20 border border-emerald-800/50 text-xs text-emerald-300">
+                🎯 Подключён отчёт релевантности
+                <code class="font-mono">{{ form.source_relevance_report_id.slice(0, 8) }}…</code>
+                — competitor_signals и mandatory_entities из ТОП-10 уйдут в IAKB §9 / __moduleContext.
+                <button type="button"
+                        class="ml-2 underline text-emerald-200 hover:text-emerald-100"
+                        @click="form.source_relevance_report_id = ''">
+                  отвязать
+                </button>
               </div>
             </div>
           </div>

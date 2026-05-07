@@ -196,9 +196,11 @@ async function processArticleTopicTask(taskId) {
       throw new Error('Gemini вернул пустой ответ');
     }
 
-    const tokensIn  = Number(result.tokensIn  || 0);
-    const tokensOut = Number(result.tokensOut || 0);
-    const costUsd   = calcCost('gemini', tokensIn, tokensOut, false);
+    const tokensIn       = Number(result.tokensIn       || 0);
+    const tokensOut      = Number(result.tokensOut      || 0);
+    const thoughtsTokens = Number(result.thoughtsTokens || 0);
+    const cachedTokens   = Number(result.cachedTokens   || 0);
+    const costUsd   = calcCost('gemini', tokensIn, tokensOut, { thoughtsTokens, cachedTokens });
 
     // ── Post-processing: вытаскиваем TRENDS_JSON-блок (только для main),
     // ── сохраняем в trends_json + регистре article_topic_trends.

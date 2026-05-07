@@ -330,11 +330,13 @@ function isGeoBlockError(errMsg) {
  *                                                НЕ отправляется (он уже в кэше).
  *
  * @returns {Promise<{
- *   text:       string,
- *   tokensIn:   number,
- *   tokensOut:  number,
- *   model:      string,
- *   cacheMiss?: boolean,   // true если cachedContent был запрошен, но кэш истёк
+ *   text:           string,
+ *   tokensIn:       number,
+ *   tokensOut:      number,
+ *   thoughtsTokens?: number,  // thoughts (тарифицируется как output, Gemini 2.5/3.x thinking)
+ *   cachedTokens?:   number,  // cached input (часть tokensIn, дисконт ~75%)
+ *   model:          string,
+ *   cacheMiss?:     boolean,  // true если cachedContent был запрошен, но кэш истёк
  * }>}
  */
 async function callGemini(systemInstruction, userPrompt, options = {}) {
@@ -575,6 +577,14 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     const finishReason = candidate?.finishReason || '';
     const tokensIn  = data?.usageMetadata?.promptTokenCount     || 0;
     const tokensOut = data?.usageMetadata?.candidatesTokenCount || 0;
+    // Gemini 2.5/3.x thinking-models: thoughtsTokenCount тарифицируется
+    // как output (см. Google docs «Thinking models pricing»). cachedContentTokenCount —
+    // часть promptTokenCount, тарифицируется по дисконтированному cached-input rate.
+    // Передаём оба наверх, чтобы priceCalculator мог их корректно учесть;
+    // если поля отсутствуют (старая модель / non-thinking) — будет 0 и формула
+    // деградирует к старому поведению.
+    const thoughtsTokens = Number(data?.usageMetadata?.thoughtsTokenCount       || 0) || 0;
+    const cachedTokens   = Number(data?.usageMetadata?.cachedContentTokenCount  || 0) || 0;
 
     if (!text) {
       // Различаем «обрезано лимитом» / «заблокировано» / «пусто» — это
@@ -601,7 +611,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     // Если ответ был обрезан лимитом — приклеиваем понятное предупреждение
     // в meta, чтобы вызывающая сторона могла среагировать (autoCloseJSON
     // и т.п.). Сам текст возвращаем как есть.
-    return { text, tokensIn, tokensOut, model, finishReason };
+    return { text, tokensIn, tokensOut, thoughtsTokens, cachedTokens, model, finishReason };
   }
 
   // Сюда попадаем только если все прокси перебраны и ни один не сработал
@@ -780,15 +790,17 @@ async function streamGenerate(systemInstruction, userPrompt, options = {}) {
             console.warn('[gemini-stream] onChunk (fallback) threw:', e.message);
           }
           return {
-            text:          fb.text,
-            tokensIn:      fb.tokensIn  || 0,
-            tokensOut:     fb.tokensOut || 0,
-            aborted:       false,
-            finishReason:  fb.finishReason || result.finishReason || null,
-            blockReason:   null,
-            safetyBlocked: false,
+            text:           fb.text,
+            tokensIn:       fb.tokensIn       || 0,
+            tokensOut:      fb.tokensOut      || 0,
+            thoughtsTokens: fb.thoughtsTokens || 0,
+            cachedTokens:   fb.cachedTokens   || 0,
+            aborted:        false,
+            finishReason:   fb.finishReason || result.finishReason || null,
+            blockReason:    null,
+            safetyBlocked:  false,
             model,
-            fallbackUsed:  true,
+            fallbackUsed:   true,
           };
         }
       } catch (fbErr) {
@@ -823,6 +835,8 @@ function consumeSseStream(stream, { onChunk, shouldAbort }) {
     let aggregate    = '';
     let tokensIn     = 0;
     let tokensOut    = 0;
+    let thoughtsTokens = 0;
+    let cachedTokens   = 0;
     let aborted      = false;
     let finishReason = null;
     let blockReason  = null;
@@ -864,8 +878,12 @@ function consumeSseStream(stream, { onChunk, shouldAbort }) {
       }
       const usage = json?.usageMetadata;
       if (usage) {
-        if (typeof usage.promptTokenCount === 'number')      tokensIn  = usage.promptTokenCount;
-        if (typeof usage.candidatesTokenCount === 'number')  tokensOut = usage.candidatesTokenCount;
+        if (typeof usage.promptTokenCount === 'number')         tokensIn       = usage.promptTokenCount;
+        if (typeof usage.candidatesTokenCount === 'number')     tokensOut      = usage.candidatesTokenCount;
+        // thoughtsTokenCount тарифицируется как output (Gemini 2.5/3.x thinking).
+        // cachedContentTokenCount — дисконтированный input (часть promptTokenCount).
+        if (typeof usage.thoughtsTokenCount === 'number')       thoughtsTokens = usage.thoughtsTokenCount;
+        if (typeof usage.cachedContentTokenCount === 'number')  cachedTokens   = usage.cachedContentTokenCount;
       }
     };
 
@@ -906,7 +924,7 @@ function consumeSseStream(stream, { onChunk, shouldAbort }) {
           if (frame && frame !== '[DONE]') flushFrame(frame);
         }
       }
-      resolve({ text: aggregate, tokensIn, tokensOut, aborted, finishReason, blockReason, safetyBlocked });
+      resolve({ text: aggregate, tokensIn, tokensOut, thoughtsTokens, cachedTokens, aborted, finishReason, blockReason, safetyBlocked });
     });
     stream.on('error', (e) => reject(e));
   });

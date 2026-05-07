@@ -61,18 +61,28 @@ INFO-ARTICLE STAGE 4 — Промпт обложки (cover image) для Nano B
 
 [OUTPUT CONTRACT]
   - Только валидный JSON.
-  - Ровно 1 элемент в image_prompts (slot=1).
+  - Количество элементов в image_prompts определяется полем `images_count_required`
+    из user-секции [INPUTS]: ровно столько слотов, сколько запросил пользователь
+    (диапазон 1..6). По умолчанию (если поле отсутствует) — 1.
+    • slot=1 — ВСЕГДА cover (как раньше);
+    • slot=2..N — inline-иллюстрации, каждая привязана к УНИКАЛЬНОЙ H2 из
+      stage2_outline.sections[*].h2 (поле section_h2 должно совпадать с h2
+      целевой секции). Не дублируй секции между слотами.
   - Длина visual_prompt: 600–1100 символов.
   - alt_ru ≤ 140 символов, без HTML-тегов.
 
 [SELF-AUDIT — silent]
   ✓ visual_prompt начинается с одного из STYLE-ANCHOR'ов?
   ✓ Сцена живая и конкретная, а не абстракция?
-  ✓ Композиция читается как hero / cover (пригодна для публикации в блоге)?
+  ✓ Композиция slot=1 читается как hero / cover; slot≥2 — иллюстрация конкретной H2-секции?
   ✓ Нет узнаваемых лиц / знаменитостей / брендов?
   ✓ alt_ru на русском, ≤ 140 символов?
+  ✓ Количество слотов = images_count_required (или 1, если не задано)?
 
 [STRICT OUTPUT RULES]
   - Только JSON.
   - Запрещены пустые visual_prompt / scene_concept / alt_ru.
-  - Ровно 1 слот, не больше и не меньше.
+  - Количество слотов = images_count_required (по умолчанию 1).
+  - section_h2 для slot=1 — из image_plan.target_section_index (или главного h2);
+    для slot≥2 — точное совпадение с одной из stage2_outline.sections[*].h2,
+    каждая секция используется не более одного раза.

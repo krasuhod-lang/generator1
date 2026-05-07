@@ -438,6 +438,8 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
   let lastMissed = [];
   let totalTokensIn = 0;
   let totalTokensOut = 0;
+  let totalThoughtsTokens = 0;
+  let totalCachedTokens   = 0;
   let model = '';
   let attemptsMade = 0;
   let userPrompt = baseUserPrompt;
@@ -455,8 +457,10 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
       userPrompt,
       { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 },
     );
-    totalTokensIn  += callRes.tokensIn  || 0;
-    totalTokensOut += callRes.tokensOut || 0;
+    totalTokensIn       += callRes.tokensIn       || 0;
+    totalTokensOut      += callRes.tokensOut      || 0;
+    totalThoughtsTokens += callRes.thoughtsTokens || 0;
+    totalCachedTokens   += callRes.cachedTokens   || 0;
     model = callRes.model || model;
 
     const parsed = parseMetaJson(callRes.text);
@@ -539,8 +543,10 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
   result.post_validation_notes = allNotes;
   result._meta = {
     model,
-    tokensIn: totalTokensIn,
-    tokensOut: totalTokensOut,
+    tokensIn:        totalTokensIn,
+    tokensOut:       totalTokensOut,
+    thoughtsTokens:  totalThoughtsTokens,
+    cachedTokens:    totalCachedTokens,
     attempts: attemptsMade,
   };
   return result;

@@ -3,7 +3,19 @@
 /**
  * Тарифы LLM-провайдеров (апрель 2026).
  * Источник: раздел 10 ТЗ.
+ *
+ * Все Gemini-тарифы переопределяемы через ENV без правки кода — это
+ * критично, т.к. Google периодически меняет цены и/или мы переключаемся
+ * между моделями (gemini-2.5-pro / gemini-3.x-pro-preview). Дефолты соответствуют
+ * gemini-2.5-pro pricing на апрель 2026 — для других моделей задавайте
+ * GEMINI_*_PRICE_USD_PER_1M в .env.
  */
+const _envPricePer1M = (key, fallbackPerToken) => {
+  const v = parseFloat(process.env[key]);
+  if (Number.isFinite(v) && v >= 0) return v / 1_000_000;
+  return fallbackPerToken;
+};
+
 const PRICES = {
   deepseek: {
     input_cache_miss: 0.000000270,  // $0.27 / 1M tokens
@@ -12,11 +24,13 @@ const PRICES = {
   },
   gemini: {
     // Контекст до 200K токенов
-    input_short:   0.000002000,  // $2.00  / 1M tokens (≤200K context)
-    output_short:  0.000012000,  // $12.00 / 1M tokens (≤200K context)
+    input_short:        _envPricePer1M('GEMINI_INPUT_PRICE_USD_PER_1M_SHORT',         0.000002000),
+    output_short:       _envPricePer1M('GEMINI_OUTPUT_PRICE_USD_PER_1M_SHORT',        0.000012000),
+    cached_input_short: _envPricePer1M('GEMINI_CACHED_INPUT_PRICE_USD_PER_1M_SHORT',  0.000000500),
     // Контекст свыше 200K токенов
-    input_long:    0.000004000,  // $4.00  / 1M tokens (>200K context)
-    output_long:   0.000018000,  // $18.00 / 1M tokens (>200K context)
+    input_long:         _envPricePer1M('GEMINI_INPUT_PRICE_USD_PER_1M_LONG',          0.000004000),
+    output_long:        _envPricePer1M('GEMINI_OUTPUT_PRICE_USD_PER_1M_LONG',         0.000018000),
+    cached_input_long:  _envPricePer1M('GEMINI_CACHED_INPUT_PRICE_USD_PER_1M_LONG',   0.000001000),
   },
   // x.ai Grok pricing (продуктовое требование апрель 2026):
   //   $2.00 / 1M input tokens, $6.00 / 1M output tokens.
@@ -48,13 +62,26 @@ function estimateTokens(text) {
 /**
  * Рассчитывает стоимость вызова LLM в USD.
  *
- * @param {'deepseek'|'gemini'} model
+ * @param {'deepseek'|'gemini'|'grok'} model
  * @param {number} tokensIn
  * @param {number} tokensOut
- * @param {boolean} [cacheHit=false]  — для DeepSeek: был ли кэш-хит
+ * @param {boolean|object} [cacheHitOrUsage=false]
+ *   - boolean (legacy): для DeepSeek признак cache_hit.
+ *   - object  (новый формат): { cacheHit?:boolean, thoughtsTokens?:number, cachedTokens?:number }
+ *     • thoughtsTokens — Gemini 2.5/3.x thinking-output, тарифицируется как output.
+ *     • cachedTokens   — часть tokensIn, дисконтированная по cached-input rate.
  * @returns {number} — стоимость в USD
  */
-function calcCost(model, tokensIn, tokensOut, cacheHit = false) {
+function calcCost(model, tokensIn, tokensOut, cacheHitOrUsage = false) {
+  // Backward-compat: вызов calcCost(model, in, out, true|false) трактуем как cacheHit.
+  const usage = (cacheHitOrUsage && typeof cacheHitOrUsage === 'object')
+    ? cacheHitOrUsage
+    : { cacheHit: !!cacheHitOrUsage };
+
+  const cacheHit       = !!usage.cacheHit;
+  const thoughtsTokens = Math.max(0, Number(usage.thoughtsTokens) || 0);
+  const cachedTokens   = Math.max(0, Number(usage.cachedTokens)   || 0);
+
   if (model === 'deepseek') {
     const inputRate = cacheHit
       ? PRICES.deepseek.input_cache_hit
@@ -63,10 +90,20 @@ function calcCost(model, tokensIn, tokensOut, cacheHit = false) {
   }
 
   if (model === 'gemini') {
-    const isLong    = tokensIn > GEMINI_SHORT_CONTEXT_LIMIT;
-    const inputRate  = isLong ? PRICES.gemini.input_long  : PRICES.gemini.input_short;
-    const outputRate = isLong ? PRICES.gemini.output_long : PRICES.gemini.output_short;
-    return tokensIn * inputRate + tokensOut * outputRate;
+    const isLong       = tokensIn > GEMINI_SHORT_CONTEXT_LIMIT;
+    const inputRate       = isLong ? PRICES.gemini.input_long         : PRICES.gemini.input_short;
+    const outputRate      = isLong ? PRICES.gemini.output_long        : PRICES.gemini.output_short;
+    const cachedInputRate = isLong ? PRICES.gemini.cached_input_long  : PRICES.gemini.cached_input_short;
+
+    // cachedTokens — это ЧАСТЬ promptTokenCount (Google API), считаем дисконт
+    // только на cachedTokens, остальное (tokensIn − cachedTokens) — по обычному input rate.
+    const cached    = Math.min(cachedTokens, tokensIn);
+    const inputCost = (tokensIn - cached) * inputRate + cached * cachedInputRate;
+
+    // thoughtsTokens (thinking-models) — отдельное поле, НЕ входит в candidatesTokenCount.
+    // Тарифицируется как output. Если нули — формула совпадает со старой.
+    const outputCost = (tokensOut + thoughtsTokens) * outputRate;
+    return inputCost + outputCost;
   }
 
   if (model === 'grok') {
