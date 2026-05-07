@@ -15,6 +15,7 @@
 
 const db = require('../config/db');
 const { processRelevanceReport } = require('../services/relevance/pipeline');
+const { withUserSlot } = require('../utils/perUserConcurrency');
 const { health: relevanceHealth, cocoons: relevanceCocoons } = require('../services/relevance/pythonClient');
 const rawStorage = require('../services/relevance/rawStorage');
 
@@ -95,7 +96,7 @@ async function createReport(req, res, next) {
 
     // Fire-and-forget — пайплайн сам пишет статусы и ошибки в БД.
     setImmediate(() => {
-      processRelevanceReport(report.id).catch((err) => {
+      withUserSlot(req.user.id, () => processRelevanceReport(report.id)).catch((err) => {
         console.error('[relevance] background pipeline failed:', err.message);
       });
     });

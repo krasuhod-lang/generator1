@@ -13,6 +13,7 @@
 const db = require('../config/db');
 const { processArticleTopicTask } = require('../services/articleTopics/articleTopicsPipeline');
 const { findDuplicateDeepDives } = require('../services/articleTopics/articleTopicsTrends');
+const { withUserSlot } = require('../utils/perUserConcurrency');
 
 // Лимиты длины — чтобы не дать раздуть промпт неосторожным копипастом
 // и не зацепить лимит входа Gemini-адаптера.
@@ -95,7 +96,7 @@ async function createArticleTopicTask(req, res, next) {
     const task = rows[0];
 
     setImmediate(() => {
-      processArticleTopicTask(task.id).catch((err) => {
+      withUserSlot(req.user.id, () => processArticleTopicTask(task.id)).catch((err) => {
         console.error('[articleTopics] background task failed:', err.message);
       });
     });
@@ -171,7 +172,7 @@ async function createArticleTopicDeepDive(req, res, next) {
     const task = rows[0];
 
     setImmediate(() => {
-      processArticleTopicTask(task.id).catch((err) => {
+      withUserSlot(req.user.id, () => processArticleTopicTask(task.id)).catch((err) => {
         console.error('[articleTopics] deep-dive failed:', err.message);
       });
     });

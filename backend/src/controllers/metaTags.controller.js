@@ -12,6 +12,7 @@
 
 const db = require('../config/db');
 const { processMetaTagTask } = require('../services/metaTags/pipeline');
+const { withUserSlot } = require('../utils/perUserConcurrency');
 
 // ─── Валидация входных данных ─────────────────────────────────────
 const MAX_NAME_LEN     = 200;
@@ -89,7 +90,7 @@ async function createMetaTagTask(req, res, next) {
     // Запускаем фоновую обработку. Любая ошибка ловится внутри pipeline и
     // сохраняется в БД — здесь only fire-and-forget.
     setImmediate(() => {
-      processMetaTagTask(task.id).catch((err) => {
+      withUserSlot(req.user.id, () => processMetaTagTask(task.id)).catch((err) => {
         console.error('[metaTags] background task failed:', err.message);
       });
     });
