@@ -1216,14 +1216,43 @@ function _ngramsToCsv(ngrams, limit = 25) {
  */
 async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary, competitorSignals, ourUrl, competitorUrls }) {
   const systemMsg =
-    'Ты — старший SEO-аналитик и специалист по контент-маркетингу. На вход получаешь данные ' +
-    'аналитического отчёта по поисковой выдаче (запрос, регион, n-граммы и важные термины ТОП-10, ' +
-    'сигналы топовых конкурентов). Твоя задача — кратко, но содержательно, по-русски, описать: ' +
-    '(1) портрет целевой аудитории; (2) ключевые особенности ниши; (3) типовые факты/цифры/' +
-    'доказательства, которые используют конкуренты в ТОПе. Возвращай СТРОГО JSON-объект без ' +
-    'markdown-обёрток с ключами target_audience, niche_features, brand_facts. Каждое значение — ' +
-    'строка 2–6 предложений. Если данных недостаточно — пиши осмысленные гипотезы на основе запроса, ' +
-    'но не выдумывай цифры/имена.';
+    'Ты — senior SEO-стратег, voice-of-customer аналитик и специалист по conversational demand mining. ' +
+    'На вход ты получаешь данные аналитического отчёта по поисковой выдаче (запрос, регион, n-граммы ' +
+    'и важные термины ТОП-10, сигналы топовых конкурентов). По этим данным восстанови реальный голос ' +
+    'аудитории и зафиксируй конкретные факты, цифры и доказательства, которые используют конкуренты в ТОПе. ' +
+    'Возвращай СТРОГО JSON-объект без markdown-обёрток с тремя строковыми ключами: ' +
+    'target_audience, niche_features, brand_facts.\n\n' +
+    '— target_audience: 2–6 предложений. Портрет ЦА: сегменты, демография, JTBD, ключевые боли, ' +
+    'эмоциональные триггеры, как они сами называют свою проблему и желаемый результат.\n' +
+    '— niche_features: 2–6 предложений. Особенности ниши: тип бизнеса, YMYL/не-YMYL, сезонность, ' +
+    'локальная привязка, уровень конкуренции, регуляторные требования, специфика buyer journey.\n' +
+    '— brand_facts: РАЗВЁРНУТЫЙ структурированный текст-дайджест (10–25 предложений, можно с короткими ' +
+    'подзаголовками вида «Боли:», «Возражения:», «Критерии выбора:», «Цифры/доказательства из ТОПа:», ' +
+    '«Trust-сигналы:», «Часто задаваемые вопросы:», «Мифы и заблуждения:», «Сценарии использования:»). ' +
+    'Цель — дать команде voice-of-customer карту ниши, которую дальше можно использовать в SEO, ' +
+    'page messaging, money-pages, FAQ, CTA и AI-search. Опирайся на:\n' +
+    '   1) реальные формулировки болей и желаемых результатов (problem language vs outcome language);\n' +
+    '   2) повторяющиеся объекции и hesitation language (цена, доверие, сложность, риск, время, поддержка);\n' +
+    '   3) decision criteria, по которым люди выбирают (proof, цены, сроки, локальность, гарантии, отзывы);\n' +
+    '   4) trust- и skepticism-сигналы (что усиливает доверие, что подрывает);\n' +
+    '   5) recurring questions / FAQ-кластеры из языка ниши (с интентом и подходящим page type);\n' +
+    '   6) мифы, misconceptions и language traps;\n' +
+    '   7) различия по сегментам (новички / эксперты, B2B / B2C, локальные / удалённые, urgency / price-sensitive);\n' +
+    '   8) сигналы по этапам buyer journey (awareness → evaluation → decision → onboarding → retention);\n' +
+    '   9) типовые цифры, опыт, лицензии, объёмы, гарантии и USP, которые упоминают конкуренты в ТОПе.\n\n' +
+    'Правила:\n' +
+    '• Если конкретных цифр/имён/лицензий нет в данных — НЕ выдумывай; формулируй как «обычно конкуренты ' +
+    'указывают…», «характерно для ниши…», «ожидание аудитории…».\n' +
+    '• Различай язык аудитории (как люди реально говорят) и keyword-язык; полезные «человеческие» ' +
+    'формулировки приводи в кавычках.\n' +
+    '• Различай pre-purchase voice и post-purchase truth.\n' +
+    '• Если ниша B2B — добавь ROI/stakeholder/risk/implementation language.\n' +
+    '• Если ниша SaaS — добавь onboarding/pricing/switching/integration/support language.\n' +
+    '• Если ниша e-commerce — добавь fit/quality/shipping/comparison/post-purchase reality.\n' +
+    '• Если ниша local-heavy — добавь urgency/proximity/availability/local proof.\n' +
+    '• Если ниша YMYL/trust-sensitive — добавь fear/caution/proof/credibility cues.\n' +
+    '• Не используй markdown-блоки кода; подзаголовки внутри строки оформляй простым текстом ' +
+    'вида «Боли: …», «Возражения: …».';
 
   const userPrompt =
     `Запрос: ${String(query || '').slice(0, 250)}\n` +
@@ -1238,13 +1267,18 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
     ) + '\n' +
     `Сигналы конкурентов (digest): ` +
     _safeJsonForPrompt(competitorSignals || {}, 2500) + '\n\n' +
-    `Верни JSON: {"target_audience":"…","niche_features":"…","brand_facts":"…"}.`;
+    `Сначала мысленно пройди по фреймворку community voice (problem language → outcome language → ` +
+    `objections → decision criteria → trust signals → recurring questions → myths → segments → journey ` +
+    `stages → typical proof points конкурентов в ТОПе). Затем верни ТОЛЬКО JSON по схеме ` +
+    `{"target_audience":"…","niche_features":"…","brand_facts":"…"} без каких-либо обёрток. ` +
+    `Поле brand_facts — самое объёмное и структурированное (с подзаголовками внутри строки), ` +
+    `target_audience и niche_features — компактные 2–6 предложений.`;
 
   try {
     const ds = await callDeepSeek(systemMsg, userPrompt, {
       temperature: 0.3,
-      maxTokens:   2000,
-      timeoutMs:   90000,
+      maxTokens:   3500,
+      timeoutMs:   120000,
     });
     const raw = (ds.text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const start = raw.indexOf('{');
