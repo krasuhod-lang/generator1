@@ -1150,6 +1150,15 @@ function findMissingPhrases(inputHtml, outputPlain) {
   for (const h of extractInputHeadings(inputHtml)) {
     const c = canonicalForCompare(h.text);
     if (c) headingCanons.add(c);
+    // Дополнительно — канон БЕЗ ведущего «N. »/«Шаг N». В исходных статьях
+    // <h2> часто пронумерованы (например, «3. Пошаговая инструкция…»), а
+    // postCleanupAcfArray применяет stripLeadingNumber к block.title /
+    // items[].title / question — поэтому в выводе остаётся только «голый»
+    // текст. Без этого зеркала dedupe пропускает такие пары, и
+    // findMissingPhrases начинает дважды-репортить «потерю» того же
+    // заголовка, что найдёт findMissingHeadings.
+    const stripped = canonicalForCompare(stripLeadingNumber(h.text));
+    if (stripped && stripped !== c) headingCanons.add(stripped);
   }
   const missing     = [];
   for (const seg of segments) {
@@ -1331,6 +1340,14 @@ function findMissingHeadings(inputHtml, outputArray) {
   for (const h of heads) {
     const expectedTextCanon = canonicalForCompare(h.text);
     if (!expectedTextCanon) continue;
+    // Дополнительный канон БЕЗ ведущего «N. »/«Шаг N» — в исходных <h2>
+    // часто стоит нумерация (например, «3. Пошаговая инструкция…»), а
+    // postCleanupAcfArray применяет stripLeadingNumber к title/question/
+    // items[].title в выводе. Иначе title-канон-исключение (#4) и FAQ-
+    // question-исключение (#2) дают ложно-положительную «потерю», и
+    // секция уезжает в «сырой» blocks-фолбэк с предупреждением.
+    const expectedTextCanonStripped =
+      canonicalForCompare(stripLeadingNumber(h.text));
 
     // 1. Ищем точно <tag>...текст...</tag> в HTML-полях.
     let foundAsTag = false;
@@ -1349,6 +1366,8 @@ function findMissingHeadings(inputHtml, outputArray) {
 
     // 2. FAQ-исключение: вопрос мог уехать в "question" БЕЗ тега.
     if (questionsCanon.includes(expectedTextCanon)) continue;
+    if (expectedTextCanonStripped && expectedTextCanonStripped !== expectedTextCanon
+        && questionsCanon.includes(expectedTextCanonStripped)) continue;
 
     // 3. FAQ-section-исключение: исходный <hN>«Часто задаваемые вопросы»</hN>
     //    (или эквивалент) семантически уезжает в title блока faq, у которого
@@ -1364,6 +1383,8 @@ function findMissingHeadings(inputHtml, outputArray) {
     //    смыслу, дополнительный <hN> в HTML-полях создавал бы визуальный
     //    дубль (см. удалённую механику «sibling-h2» в acfDeterministicBuilder).
     if (titlesCanon.has(expectedTextCanon)) continue;
+    if (expectedTextCanonStripped && expectedTextCanonStripped !== expectedTextCanon
+        && titlesCanon.has(expectedTextCanonStripped)) continue;
 
     missing.push(h);
   }

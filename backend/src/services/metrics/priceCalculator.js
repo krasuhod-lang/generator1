@@ -4,17 +4,15 @@
  * Тарифы LLM-провайдеров (апрель 2026).
  * Источник: раздел 10 ТЗ.
  *
- * Все Gemini-тарифы переопределяемы через ENV без правки кода — это
- * критично, т.к. Google периодически меняет цены и/или мы переключаемся
- * между моделями (gemini-2.5-pro / gemini-3.x-pro-preview). Дефолты соответствуют
- * gemini-2.5-pro pricing на апрель 2026 — для других моделей задавайте
- * GEMINI_*_PRICE_USD_PER_1M в .env.
+ * Gemini-тарифы ЗАХАРДКОЖЕНЫ по продуктовому требованию: «По такому прайсу
+ * всегда считаем». Соответствующие env-переменные GEMINI_*_PRICE_USD_PER_1M*
+ * больше не читаются — даже если оператор по ошибке выставит их в .env,
+ * фактический расчёт стоимости останется детерминированным:
+ *   до 200 000 токенов:   $2 / 1M input,  $12 / 1M output
+ *   от 200 000 до 1 000 000 токенов: $4 / 1M input, $18 / 1M output
+ * (output-rate включает thoughts/reasoning-токены — Gemini 2.5+ тарифицирует
+ * их именно как output, см. поле thoughtsTokens в calcCost ниже).
  */
-const _envPricePer1M = (key, fallbackPerToken) => {
-  const v = parseFloat(process.env[key]);
-  if (Number.isFinite(v) && v >= 0) return v / 1_000_000;
-  return fallbackPerToken;
-};
 
 const PRICES = {
   deepseek: {
@@ -23,14 +21,14 @@ const PRICES = {
     output:           0.000001100,  // $1.10 / 1M tokens
   },
   gemini: {
-    // Контекст до 200K токенов
-    input_short:        _envPricePer1M('GEMINI_INPUT_PRICE_USD_PER_1M_SHORT',         0.000002000),
-    output_short:       _envPricePer1M('GEMINI_OUTPUT_PRICE_USD_PER_1M_SHORT',        0.000012000),
-    cached_input_short: _envPricePer1M('GEMINI_CACHED_INPUT_PRICE_USD_PER_1M_SHORT',  0.000000500),
-    // Контекст свыше 200K токенов
-    input_long:         _envPricePer1M('GEMINI_INPUT_PRICE_USD_PER_1M_LONG',          0.000004000),
-    output_long:        _envPricePer1M('GEMINI_OUTPUT_PRICE_USD_PER_1M_LONG',         0.000018000),
-    cached_input_long:  _envPricePer1M('GEMINI_CACHED_INPUT_PRICE_USD_PER_1M_LONG',   0.000001000),
+    // Контекст до 200 000 токенов — захардкожено, env не учитывается.
+    input_short:        0.000002000,  // $2.00 / 1M input
+    output_short:       0.000012000,  // $12.00 / 1M output (incl. thoughts)
+    cached_input_short: 0.000000500,  // $0.50 / 1M cached input
+    // Контекст от 200 000 до 1 000 000 токенов — захардкожено, env не учитывается.
+    input_long:         0.000004000,  // $4.00 / 1M input
+    output_long:        0.000018000,  // $18.00 / 1M output (incl. thoughts)
+    cached_input_long:  0.000001000,  // $1.00 / 1M cached input
   },
   // x.ai Grok pricing (продуктовое требование апрель 2026):
   //   $2.00 / 1M input tokens, $6.00 / 1M output tokens.
