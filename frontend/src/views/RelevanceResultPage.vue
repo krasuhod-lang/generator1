@@ -322,6 +322,51 @@ const competitorSignals = computed(() => {
   return (block && typeof block === 'object') ? block : null;
 });
 const topAggregate = computed(() => competitorSignals.value?.top_aggregate || {});
+
+// ── Действие «Создать контент из этого отчёта» ────────────────────────
+// По продуктовому требованию: из готового relevance-отчёта пользователь
+// должен иметь возможность одним кликом стартовать SEO-текст или
+// статью в блог. Мы прокидываем:
+//   • prefill_target / prefill_title    — основной запрос (report.query),
+//   • prefill_region                    — регион (lr → код, см. regionLabel),
+//   • prefill_relevance_report_id       — UUID отчёта (бэкенд по нему вытащит
+//     entity_coverage и competitor_signals в __moduleContext / IAKB §9),
+//   • prefill_lsi (top-50 important leм) — чтобы пользователь видел LSI-pool
+//     в форме без копипаста (он остаётся редактируемым).
+// Никаких mutations / network-вызовов здесь не делаем — только router.push.
+function buildRelevancePrefillQuery() {
+  const r = report.value;
+  if (!r) return null;
+  const out = { prefill_relevance_report_id: r.id };
+  const q = (r.query || '').toString().trim();
+  if (q) {
+    out.prefill_target = q.slice(0, 250);
+    out.prefill_title  = q.slice(0, 250);
+    out.prefill_topic  = q.slice(0, 250);
+  }
+  // lr может быть числом (Yandex region code) или строкой — UI прокидывает «как есть»,
+  // CreateTaskPage сам решает, как мапить (имя/код).
+  if (r.lr !== undefined && r.lr !== null && r.lr !== '') {
+    out.prefill_region = String(r.lr).slice(0, 200);
+  }
+  // LSI pool — top-50 ВАЖНЫХ директив. Передаём через query `prefill_lsi`
+  // как один \n-разделённый блок (то же, что текстарея в форме).
+  const dirs = (comparison.value?.directives || []).filter((d) => d?.important && d.lemma);
+  const lsi = dirs.slice(0, 50).map((d) => d.lemma).join('\n');
+  if (lsi) out.prefill_lsi = lsi;
+  return out;
+}
+function gotoCreateSeoText() {
+  const q = buildRelevancePrefillQuery();
+  if (!q) return;
+  router.push({ path: '/tasks/new', query: q });
+}
+function gotoCreateInfoArticle() {
+  const q = buildRelevancePrefillQuery();
+  if (!q) return;
+  router.push({ path: '/info-article', query: q });
+}
+
 const algorithmSignals = computed(() => competitorSignals.value?.algorithm_signals || {});
 const ourSignals = computed(() => report.value?.our_report?.competitor_signals || null);
 
@@ -853,6 +898,23 @@ function copyTagZone() {
                   class="btn-secondary text-xs">⬇ JSON</button>
           <button v-if="report?.status === 'done'" @click="exportFile('csv')"
                   class="btn-secondary text-xs">⬇ CSV</button>
+          <!-- ── Создать контент из отчёта ─────────────────────────────
+               Прокидываем prefill_relevance_report_id в /tasks/new и
+               /info-article. Сервер сам подгрузит entity_coverage +
+               competitor_signals из relevance_reports и вольёт их в
+               __moduleContext (SEO-текст) или IAKB §9 (статья в блог). -->
+          <div v-if="report?.status === 'done'" class="flex items-center gap-1">
+            <button @click="gotoCreateSeoText"
+                    class="btn-primary text-xs"
+                    title="Создать SEO-текст с предзаполненной формой">
+              ✍ SEO-текст
+            </button>
+            <button @click="gotoCreateInfoArticle"
+                    class="btn-primary text-xs"
+                    title="Создать «Статью в блог» с предзаполненной формой">
+              📝 Статья в блог
+            </button>
+          </div>
         </div>
       </div>
 
