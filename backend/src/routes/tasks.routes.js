@@ -23,6 +23,7 @@ const {
   uploadTZ,
   parseTZWithLLM,
   downloadExampleTZ,
+  getRelevancePrefill,
 } = require('../controllers/tasks.controller');
 
 const jwt = require('jsonwebtoken');
@@ -143,6 +144,11 @@ router.post('/parse-tz', authMiddleware, uploadTz.single('file'), parseTZWithLLM
 
 // Скачать пример ТЗ (DOCX) (ДОЛЖЕН быть ДО /:id)
 router.get('/example-tz', authMiddleware, downloadExampleTZ); // GET /api/tasks/example-tz
+
+// Автозаполнение формы из готового relevance-отчёта (ДОЛЖЕН быть ДО /:id).
+// Owner-check внутри контроллера. Используется кнопкой «✍ SEO-текст» в
+// RelevanceResultPage и onMounted-логикой CreateTaskPage.
+router.get('/relevance-prefill/:reportId', authMiddleware, getRelevancePrefill);
 
 // Конкретная задача
 router.get('/:id',         authMiddleware, getTask);    // GET    /api/tasks/:id

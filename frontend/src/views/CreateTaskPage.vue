@@ -105,7 +105,82 @@ onMounted(async () => {
     // подставленные значения и не тыкал в каждую.
     Object.keys(openSections).forEach((k) => { openSections[k] = true; });
   }
+
+  // ── Доп. автозаполнение из relevance-отчёта (DeepSeek-аналитика) ───
+  // Если есть валидный source_relevance_report_id — дёргаем бэкенд,
+  // который соберёт из отчёта детерминированные поля (URL цели,
+  // конкуренты, n-граммы, TF-IDF) + через DeepSeek сгенерирует ЦА,
+  // особенности ниши и факты. Никогда не перезаписываем уже заполненные
+  // юзером поля (пустота → подставляем, текст → не трогаем).
+  if (form.source_relevance_report_id) {
+    void prefillFromRelevanceReport(form.source_relevance_report_id);
+  }
 });
+
+async function prefillFromRelevanceReport(reportId) {
+  relevancePrefilling.value = true;
+  relevancePrefillMsg.value = '';
+  relevancePrefillError.value = '';
+  try {
+    const data = await store.fetchRelevancePrefill(reportId);
+    const det  = data?.deterministic || {};
+    const llm  = data?.llm || {};
+    let filled = 0;
+
+    // Детерминированные поля — заполняем только пустые (не перезаписываем юзера).
+    const detMap = [
+      'input_target_url',
+      'input_competitor_urls',
+      'input_ngrams',
+    ];
+    for (const k of detMap) {
+      const incoming = (det[k] || '').toString().trim();
+      const current  = (form[k] || '').toString().trim();
+      if (incoming && !current) { form[k] = incoming; filled++; }
+    }
+    // input_tfidf_json — пустым считаем '[]' / '' / невалидный JSON-массив.
+    const incomingTfidf = (det.input_tfidf_json || '').toString().trim();
+    if (incomingTfidf) {
+      let currentArr = [];
+      try { const p = JSON.parse(form.input_tfidf_json); if (Array.isArray(p)) currentArr = p; } catch (_) {}
+      if (currentArr.length === 0) { form.input_tfidf_json = incomingTfidf; filled++; }
+    }
+
+    // LLM-поля — тоже только в пустые.
+    const llmMap = [
+      'input_target_audience',
+      'input_niche_features',
+      'input_brand_facts',
+    ];
+    for (const k of llmMap) {
+      const incoming = (llm[k] || '').toString().trim();
+      const current  = (form[k] || '').toString().trim();
+      if (incoming && !current) { form[k] = incoming; filled++; }
+    }
+
+    // Открываем релевантные секции — чтобы юзер сразу увидел подстановки.
+    if (det.input_target_url || llm.input_target_audience || llm.input_niche_features) openSections.s1 = true;
+    if (det.input_ngrams || incomingTfidf) openSections.s2 = true;
+    if (llm.input_brand_facts) openSections.s3 = true;
+    if (det.input_competitor_urls) openSections.s4 = true;
+
+    if (filled > 0) {
+      const llmNote = data?.llm_used ? ' (включая ЦА/нишу/факты от DeepSeek)' : '';
+      relevancePrefillMsg.value = `Подставлено ${filled} полей из отчёта релевантности${llmNote}. Проверьте и при необходимости скорректируйте.`;
+    } else {
+      relevancePrefillMsg.value = 'Отчёт релевантности подключён — подходящих полей для автозаполнения не найдено.';
+    }
+    if (data?.llm_error) {
+      relevancePrefillError.value = `DeepSeek-аналитика недоступна: ${data.llm_error}. Детерминированные поля подставлены.`;
+    }
+  } catch (err) {
+    relevancePrefillError.value = err?.response?.data?.error
+      || err?.message
+      || 'Не удалось получить данные из отчёта релевантности';
+  } finally {
+    relevancePrefilling.value = false;
+  }
+}
 
 onBeforeUnmount(() => {
   if (llmTimer) { clearInterval(llmTimer); llmTimer = null; }
@@ -137,6 +212,14 @@ const llmMsg       = ref('');
 const llmError     = ref('');
 const llmElapsed   = ref(0);
 let   llmTimer     = null;
+
+// Автозаполнение из отчёта релевантности (DeepSeek-аналитика). Используется
+// при переходе из RelevanceResultPage по кнопке «✍ SEO-текст». Не блокирует
+// форму — пока DeepSeek думает, юзер уже видит детерминированно подставленные
+// поля; LLM-поля доезжают через 10–60 сек.
+const relevancePrefilling = ref(false);
+const relevancePrefillMsg   = ref('');
+const relevancePrefillError = ref('');
 
 // Маппинг полей extracted → form
 const LLM_FIELD_MAP = {
@@ -454,7 +537,7 @@ function downloadExampleTZ() {
             <span class="text-gray-400 text-lg">{{ openSections.s1 ? '▲' : '▼' }}</span>
           </button>
           <div v-show="openSections.s1" class="px-5 pb-5 space-y-4 border-t border-gray-800">
-            <div v-if="form.source_relevance_report_id" class="pt-4">
+            <div v-if="form.source_relevance_report_id" class="pt-4 space-y-2">
               <div class="p-2 rounded bg-emerald-900/20 border border-emerald-800/50 text-xs text-emerald-300">
                 🎯 Подключён отчёт релевантности
                 <code class="font-mono">{{ form.source_relevance_report_id.slice(0, 8) }}…</code>
@@ -464,6 +547,22 @@ function downloadExampleTZ() {
                         @click="form.source_relevance_report_id = ''">
                   отвязать
                 </button>
+              </div>
+              <div v-if="relevancePrefilling"
+                   class="p-2 rounded bg-indigo-900/20 border border-indigo-800/50 text-xs text-indigo-300 flex items-center gap-2">
+                <svg class="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+                </svg>
+                🤖 DeepSeek анализирует данные отчёта (ЦА, особенности ниши, факты)…
+              </div>
+              <div v-if="relevancePrefillMsg && !relevancePrefilling"
+                   class="p-2 rounded bg-indigo-900/20 border border-indigo-800/50 text-xs text-indigo-200">
+                ✓ {{ relevancePrefillMsg }}
+              </div>
+              <div v-if="relevancePrefillError && !relevancePrefilling"
+                   class="p-2 rounded bg-red-900/20 border border-red-800/50 text-xs text-red-300">
+                ⚠ {{ relevancePrefillError }}
               </div>
             </div>
             <div class="pt-4">
