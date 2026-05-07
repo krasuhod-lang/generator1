@@ -30,7 +30,7 @@
 const db = require('../../config/db');
 const { callLLM } = require('../llm/callLLM');
 const { loadInfoArticlePrompt } = require('../../prompts/infoArticle');
-const { generateImage } = require('../linkArticle/nanoBananaPro.adapter');
+const { generateImage, IMAGE_PRICE_USD } = require('../linkArticle/nanoBananaPro.adapter');
 const sse = require('../sse/sseManager');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { EEAT_PQ_TARGET, LSI_COVERAGE_TARGET } = require('../../utils/objectiveMetrics');
@@ -67,10 +67,8 @@ const MAX_PARALLEL_IMAGES = (() => {
   return Number.isFinite(v) && v >= 1 && v <= 5 ? v : 3;
 })();
 
-const IMAGE_PRICE_USD = (() => {
-  const v = parseFloat(process.env.GEMINI_IMAGE_PRICE_USD);
-  return Number.isFinite(v) && v >= 0 ? v : 0.04;
-})();
+// IMAGE_PRICE_USD пришёл из nanoBananaPro.adapter (см. там — единый
+// источник истины с поддержкой NANO_BANANA_PRO_PRICE_USD env).
 
 const INFO_ARTICLE_GEMINI_CACHE_ENABLED =
   String(process.env.INFO_ARTICLE_GEMINI_CACHE_ENABLED || '').toLowerCase() === 'true';

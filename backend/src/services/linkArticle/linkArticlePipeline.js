@@ -27,7 +27,7 @@
 const db = require('../../config/db');
 const { callLLM } = require('../llm/callLLM');
 const { loadLinkArticlePrompt } = require('../../prompts/linkArticle');
-const { generateImage } = require('./nanoBananaPro.adapter');
+const { generateImage, IMAGE_PRICE_USD } = require('./nanoBananaPro.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
 const sse = require('../sse/sseManager');
 const {
@@ -54,10 +54,8 @@ const MAX_PARALLEL_IMAGES = (() => {
   return Number.isFinite(v) && v >= 1 && v <= 5 ? v : 3;
 })();
 
-const IMAGE_PRICE_USD = (() => {
-  const v = parseFloat(process.env.GEMINI_IMAGE_PRICE_USD);
-  return Number.isFinite(v) && v >= 0 ? v : 0.04; // дефолтное прайс-ориентир
-})();
+// IMAGE_PRICE_USD пришёл из nanoBananaPro.adapter (см. там — единый
+// источник истины с поддержкой NANO_BANANA_PRO_PRICE_USD env).
 
 // Включает Gemini cachedContents для LAKB. Должен быть GEMINI_PROXY+GEMINI_API_KEY.
 // Минимальный размер кэша у Gemini ≥ 4096 input tokens, поэтому LAKB должна быть

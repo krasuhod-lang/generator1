@@ -37,6 +37,24 @@ const IMAGE_MODEL = process.env.LINK_ARTICLE_IMAGE_MODEL || 'gemini-3-pro-image-
 const GEMINI_BASE_URL =
   (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/models').replace(/\/$/, '');
 
+// ── Цена одного изображения в USD ────────────────────────────────────
+//
+// Nano Banana Pro (gemini-3-pro-image-preview) тарифицируется ~$0.12 за HD-картинку
+// (Google docs «Image generation pricing», апрель 2026). Старая константа
+// IMAGE_PRICE_USD=$0.04 в *Pipeline.js занижала расход на info-/link-article в ~3 раза.
+//
+// Приоритет: NANO_BANANA_PRO_PRICE_USD → GEMINI_IMAGE_PRICE_USD (legacy fallback) → 0.12.
+// Это позволяет:
+//   • менять тариф без редеплоя при смене модели/контракта;
+//   • сохранять обратную совместимость с инсталляциями, где задан GEMINI_IMAGE_PRICE_USD.
+const IMAGE_PRICE_USD = (() => {
+  const primary = parseFloat(process.env.NANO_BANANA_PRO_PRICE_USD);
+  if (Number.isFinite(primary) && primary >= 0) return primary;
+  const legacy  = parseFloat(process.env.GEMINI_IMAGE_PRICE_USD);
+  if (Number.isFinite(legacy) && legacy >= 0) return legacy;
+  return 0.12;
+})();
+
 // Жёстко ограничиваем предел размера base64 изображения (защита от raw-bomb
 // ответа API). ~5 МБ base64 = ~3.7 МБ бинарника — достаточно для 1024x1024 PNG.
 const MAX_IMAGE_BASE64_BYTES = 8 * 1024 * 1024;
@@ -233,4 +251,4 @@ async function generateImage(prompt, opts = {}) {
   };
 }
 
-module.exports = { generateImage, IMAGE_MODEL };
+module.exports = { generateImage, IMAGE_MODEL, IMAGE_PRICE_USD };

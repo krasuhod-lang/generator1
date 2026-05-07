@@ -327,7 +327,13 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
       const result    = await withProviderSlot(adapter, () => callFn(system, prompt, callOpts));
       const cacheHit  = adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0;
-      const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut, cacheHit);
+      // Для Gemini подмешиваем thoughts/cached токены из usageMetadata в формулу
+      // стоимости. Для DeepSeek/Grok эти поля не существуют → undefined → не влияют.
+      const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut, {
+        cacheHit,
+        thoughtsTokens: result.thoughtsTokens || 0,
+        cachedTokens:   result.cachedTokens   || 0,
+      });
       const parsed    = normalizeKeys(parseJSON(result.text));
 
       // Аккумулируем расход для guard'а
@@ -335,10 +341,13 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         _accumulateTokens(taskId, 'gemini', result.tokensIn || 0);
       }
 
-      const cacheNote = cacheHit ? ` | cache_hit: ${result.cacheHitTokens}` : '';
-      const cachedNote = (adapter === 'gemini' && activeCachedContent) ? ' | gemini_cached' : '';
+      const cacheNote   = cacheHit ? ` | cache_hit: ${result.cacheHitTokens}` : '';
+      const cachedNote  = (adapter === 'gemini' && activeCachedContent) ? ' | gemini_cached' : '';
+      // Подсветим thoughts/cached в логе только когда они ненулевые — иначе шум.
+      const thoughtsNote = (result.thoughtsTokens || 0) > 0 ? ` | thoughts: ${result.thoughtsTokens}` : '';
+      const cachedTokNote = (result.cachedTokens   || 0) > 0 ? ` | cached_in: ${result.cachedTokens}` : '';
       log(
-        `${callLabel || stageName} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${cacheNote}${cachedNote} | $${costUsd.toFixed(6)}`,
+        `${callLabel || stageName} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote} | $${costUsd.toFixed(6)}`,
         'success'
       );
 
