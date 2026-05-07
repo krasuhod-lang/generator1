@@ -700,8 +700,22 @@ function embedImages(html, imagePrompts) {
   const h2Re = /<h2\b[^>]*>([\s\S]*?)<\/h2\s*>/gi;
   const h2List = [];
   let m;
+  // Извлекаем «голый» текст H2: убираем все вложенные теги. Делаем это
+  // в цикле до стабилизации (как в buildPlainText) — на случай вложенных
+  // или склеенных конструкций вида "<<a></a>script>", чтобы поведение
+  // не зависело от того, как именно writer оформил <h2>. Текст никогда не
+  // вставляется обратно в HTML — используется только для canon-сравнения.
+  const stripTags = (s) => {
+    let cur = String(s || '');
+    for (let i = 0; i < 5; i += 1) {
+      const next = cur.replace(/<[^>]+>/g, '');
+      if (next === cur) break;
+      cur = next;
+    }
+    return cur;
+  };
   while ((m = h2Re.exec(out)) !== null) {
-    const inner = m[1].replace(/<[^>]+>/g, '');
+    const inner = stripTags(m[1]);
     h2List.push({ start: m.index, text: inner, canon: canon(inner) });
   }
   if (!h2List.length) return out;
@@ -1203,8 +1217,15 @@ async function processInfoArticleTask(taskId) {
     // task.images_count приходит из миграции 022 (CHECK 1..6, default 1).
     // На очень старых задачах поле может отсутствовать → fallback к 1.
     const imagesCount = Math.max(1, Math.min(6, parseInt(task.images_count, 10) || 1));
+    // Корректное русское склонение: 1 — «изображение», 2-4 — «изображения»,
+    // 5+ — «изображений». В нашем диапазоне 1..6 достаточно явной таблицы.
+    const RU_IMAGES_FORMS = {
+      1: '1 изображение', 2: '2 изображения', 3: '3 изображения',
+      4: '4 изображения', 5: '5 изображений', 6: '6 изображений',
+    };
+    const imagesPhrase = RU_IMAGES_FORMS[imagesCount] || `${imagesCount} изображений`;
     await setStage(taskId, 'stage4_image_prompts', 84);
-    await appendLog(taskId, `🖼 Запрос на ${imagesCount} изображени${imagesCount === 1 ? 'е' : 'я'} (slot=1 cover${imagesCount > 1 ? `, slot=2..${imagesCount} inline` : ''})`, 'info');
+    await appendLog(taskId, `🖼 Запрос на ${imagesPhrase} (slot=1 cover${imagesCount > 1 ? `, slot=2..${imagesCount} inline` : ''})`, 'info');
     const imagePrompts = await runImagePromptsGen(task, outline, articleHtml, audience, ctx, imagesCount);
     if (imagePrompts.length < 1) {
       await appendLog(taskId, `⚠ DeepSeek не вернул промт обложки (image_prompts пусто)`, 'warn');

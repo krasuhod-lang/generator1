@@ -331,7 +331,7 @@ const topAggregate = computed(() => competitorSignals.value?.top_aggregate || {}
 //   • prefill_region                    — регион (lr → код, см. regionLabel),
 //   • prefill_relevance_report_id       — UUID отчёта (бэкенд по нему вытащит
 //     entity_coverage и competitor_signals в __moduleContext / IAKB §9),
-//   • prefill_lsi (top-50 important leм) — чтобы пользователь видел LSI-pool
+//   • prefill_lsi (top-50 important лем) — чтобы пользователь видел LSI-pool
 //     в форме без копипаста (он остаётся редактируемым).
 // Никаких mutations / network-вызовов здесь не делаем — только router.push.
 function buildRelevancePrefillQuery() {

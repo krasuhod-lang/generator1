@@ -361,7 +361,7 @@ async function runPipeline(task, ctx) {
   // Если у задачи привязан исходный отчёт релевантности (миграция 022,
   // tasks.source_relevance_report_id), мы дополнительно вливаем
   // mandatory_entities из entity_coverage и сводку competitor_signals
-  // из ТОП-10 — по верд<кту: «Вливаем mandatory_entities и competitor_signals
+  // из ТОП-10 — по вердикту: «Вливаем mandatory_entities и competitor_signals
   // из отчета напрямую в __moduleContext при генерации».
   let relevanceReport = null;
   if (task.source_relevance_report_id) {
