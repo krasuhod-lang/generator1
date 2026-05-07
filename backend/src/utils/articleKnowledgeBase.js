@@ -259,6 +259,7 @@ function buildArticleKnowledgeBase(input = {}) {
     stage1Result        = null,
     knowledgeGraph      = null,
     moduleContext       = null,
+    relevanceSignals    = null, // Wave 2/3: report.competitor_signals из relevance-pipeline
   } = input;
 
   // Реальные тексты аудитории/ниши приходят как сериализованные
@@ -492,6 +493,24 @@ function buildArticleKnowledgeBase(input = {}) {
       }
     } catch (_) {
       // graceful: если файл отсутствует/сломан — просто без §11
+    }
+  }
+
+  // ── 12. Конкурентные требования топа (Wave 1/2/3 — relevance-сигналы) ─
+  // Опциональный блок: рендерится только если отчёт релевантности был
+  // прокинут через input. По умолчанию выключен — следующий PR подключит
+  // plumbing в pipeline/orchestrator. См. backend/src/services/relevance/
+  // competitorSignalsRequirements.js (buildAKBSection).
+  if (relevanceSignals) {
+    try {
+      const { buildAKBSection } = require('../services/relevance/competitorSignalsRequirements');
+      const md = buildAKBSection(relevanceSignals, { maxChecklistItems: 30 });
+      if (md && md.trim()) {
+        sections.push('\n## 12. Конкурентные требования топа (Wave 1/2/3)');
+        sections.push(md);
+      }
+    } catch (_) {
+      // graceful: если helper отсутствует/сломан — просто без §12
     }
   }
 
