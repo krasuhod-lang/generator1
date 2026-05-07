@@ -10,12 +10,23 @@ LINK-ARTICLE PRE-STAGE 0 — Стратегический анализ темы 
   Строгий JSON следующей формы (без markdown, без пояснений снаружи):
   {
     "niche_summary":         "string",
+    "intent_types": [                              // 1–3 типа поискового интента, обслуживаемых статьёй
+      "informational|commercial-investigation|problem-solving|preventative|navigational|transactional"
+    ],
     "audience_clusters": [
-      { "name": "string", "intent_bias": "informational|commercial|navigational|transactional",
+      { "name": "string",
+        "intent_bias": "informational|commercial|navigational|transactional",
+        "buyer_journey_stage": "awareness|consideration|decision|retention",
         "pains": ["string"], "goals": ["string"] }
     ],
     "topical_opportunities": [
       { "angle": "string", "why_relevant": "string", "priority": "high|medium|low" }
+    ],
+    "lsi_entities": [                              // обязательные сущности/термины ниши, без которых тема не раскрыта
+      { "entity": "string",
+        "category": "term|method|tool|metric|standard|organization|product|symptom|condition|other",
+        "must_appear": true,
+        "short_definition": "string" }
     ],
     "demand_signals": [
       { "query_class": "how-to|definition|comparison|list|review|other",
@@ -25,14 +36,24 @@ LINK-ARTICLE PRE-STAGE 0 — Стратегический анализ темы 
 
 [REASONING STEPS — silent, do not output]
   1. Разбери `topic` как семантическое ядро. Определи, о чём именно речь, и в каких границах ниши.
-  2. Сформулируй 2–4 аудиторных кластера. Каждому припиши доминирующий интент.
-  3. Подбери 3–6 сильных углов раскрытия темы — такие, которые:
+  2. Определи intent_types (1–3 наиболее точных):
+       • informational — пользователь хочет ПОНЯТЬ.
+       • commercial-investigation — пользователь СРАВНИВАЕТ варианты.
+       • problem-solving / diagnostic — пользователь ищет шаги решения и чеклист.
+       • preventative — пользователь хочет избежать проблемы.
+       • navigational / transactional — добавляй только если статья реально подталкивает к действию.
+  3. Сформулируй 2–4 аудиторных кластера. Каждому припиши доминирующий интент и buyer_journey_stage.
+  4. Подбери 3–6 сильных углов раскрытия темы — такие, которые:
        • на 100 % релевантны `topic`,
        • закрывают реальные вопросы пользователей,
        • гармонично согласуются с `focus_notes` (если они заданы).
-  4. Сгенерируй 3–6 кластеров демандов — типичных поисковых запросов по теме
+  5. Сгенерируй lsi_entities — 8–15 обязательных сущностей/терминов ниши,
+     которые ДОЛЖНЫ присутствовать в тексте статьи для раскрытия темы и
+     демонстрации экспертности (минимум 5 must_appear=true). Это
+     профессиональный язык ниши, а не маркетинговые слова.
+  6. Сгенерируй 3–6 кластеров демандов — типичных поисковых запросов по теме
      и связанной с ними пользовательской боли.
-  5. Не выдумывай данные о брендах, статистику и цифры — это стратегический анализ,
+  7. Не выдумывай данные о брендах, статистику и цифры — это стратегический анализ,
      а не энциклопедический пересказ.
 
 [OUTPUT CONTRACT]
@@ -43,6 +64,9 @@ LINK-ARTICLE PRE-STAGE 0 — Стратегический анализ темы 
 
 [SELF-AUDIT — silent, do not output]
   ✓ Все angles/кластеры на 100 % относятся к `topic`? Нет ли тем-«соседей»?
+  ✓ intent_types согласован с углами и аудиторией?
+  ✓ У каждого audience_cluster есть buyer_journey_stage?
+  ✓ В lsi_entities — реальные термины ниши, не маркетинговые слова, минимум 5 must_appear?
   ✓ Не выдуманы ли «согласно исследованию», проценты, бренды, цифры?
   ✓ Не повторяются ли кластеры аудитории?
   ✓ Сумма всех полей помогает потом построить сильную структуру статьи?
