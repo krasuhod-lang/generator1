@@ -24,6 +24,14 @@ from pydantic import BaseModel, Field
 from .bm25_calc import compute_vocabulary_bm25
 from .cocoons import compute_cocoons
 from .comparison import compute_comparison, per_competitor_table
+from .evidence import (
+    DEFAULT_MAX_CHARS_PER_URL as EVIDENCE_DEFAULT_MAX_CHARS,
+    DEFAULT_TOP_K as EVIDENCE_DEFAULT_TOP_K,
+    HARD_MAX_CHARS_LIMIT as EVIDENCE_HARD_MAX_CHARS,
+    HARD_TOP_K_LIMIT as EVIDENCE_HARD_TOP_K,
+    _normalize_query_to_lemmas as evidence_normalize_query_to_lemmas,
+    extract_evidence_for_document,
+)
 from .ngrams import compute_ngrams
 from .normalizer import normalize_document
 from .parser import ParseDiagnostics, ParseResult, extract_with_diagnostics
@@ -819,4 +827,121 @@ def cocoons(payload: CocoonsRequest) -> CocoonsResponse:
     return CocoonsResponse(
         topics=[CocoonTopic(**t) for t in result["topics"]],
         stats=CocoonsStats(**stats),
+    )
+
+
+# ── /evidence (Phase 1, P0-2 grounding) ───────────────────────────────────────
+#
+# Возвращает top-K BM25-абзацев, наиболее релевантных запросу, по каждому
+# из переданных HTML-документов. Используется генератором инфо-статей как
+# «фактологическая база» для writer'а (см.
+# backend/src/services/infoArticle/serpEvidence.service.js).
+#
+# Stateless: ничего не сохраняет, не делает сетевых запросов. Кэширование
+# результата (по ключу query+top_n) — ответственность Node-бэкенда.
+
+class EvidenceDocumentIn(BaseModel):
+    url: str
+    html: str
+    # Опциональная дата публикации (ISO-8601). Прокидывается в ответ как
+    # есть — пайплайн grounding'а позже использует её для freshness-сигналов
+    # и приоритезации свежих источников. Сам микросервис не парсит дату.
+    published_at: Optional[str] = None
+
+
+class EvidenceOptions(BaseModel):
+    # Сколько top-параграфов оставить на 1 URL (после BM25-ранжирования
+    # по query). Жёсткий потолок задаётся EVIDENCE_HARD_TOP_K.
+    top_k_paragraphs: int = Field(default=EVIDENCE_DEFAULT_TOP_K, ge=1, le=EVIDENCE_HARD_TOP_K)
+    # Суммарная квота символов сниппетов на 1 URL — защита от раздутия
+    # writer-промта. Жёсткий потолок — EVIDENCE_HARD_MAX_CHARS.
+    max_chars_per_url: int = Field(default=EVIDENCE_DEFAULT_MAX_CHARS, ge=200, le=EVIDENCE_HARD_MAX_CHARS)
+
+
+class EvidenceRequest(BaseModel):
+    query: str
+    documents: List[EvidenceDocumentIn]
+    options: Optional[EvidenceOptions] = None
+
+
+class EvidenceSnippet(BaseModel):
+    text: str
+    score: float
+    position: int
+
+
+class EvidenceItem(BaseModel):
+    url: str
+    h1: str = ""
+    published_at: Optional[str] = None
+    text_chars: int = 0
+    parsed_method: str = "none"
+    empty_reason: Optional[str] = None
+    snippets: List[EvidenceSnippet] = Field(default_factory=list)
+
+
+class EvidenceStats(BaseModel):
+    doc_count: int
+    snippet_count: int
+    duration_ms: int
+    query_lemma_count: int = 0
+
+
+class EvidenceResponse(BaseModel):
+    evidence: List[EvidenceItem]
+    stats: EvidenceStats
+
+
+@app.post("/evidence", response_model=EvidenceResponse, dependencies=[Depends(verify_internal_token)])
+def evidence(payload: EvidenceRequest) -> EvidenceResponse:
+    started = time.perf_counter()
+    opts = payload.options or EvidenceOptions()
+
+    query_lemmas = evidence_normalize_query_to_lemmas(payload.query or "")
+
+    items: List[EvidenceItem] = []
+    snippet_total = 0
+    for d in payload.documents:
+        try:
+            ev = extract_evidence_for_document(
+                html=d.html,
+                query_lemmas=query_lemmas,
+                top_k=opts.top_k_paragraphs,
+                max_chars=opts.max_chars_per_url,
+            )
+        except Exception as exc:  # pragma: no cover — extract сам ловит, но defense-in-depth
+            logger.warning("evidence: extract failed for %s: %s", d.url, exc)
+            ev = {
+                "h1": "",
+                "text_chars": 0,
+                "parsed_method": "none",
+                "empty_reason": f"evidence_exception:{type(exc).__name__}",
+                "snippets": [],
+            }
+        snippets = [EvidenceSnippet(**s) for s in ev.get("snippets", [])]
+        snippet_total += len(snippets)
+        items.append(EvidenceItem(
+            url=d.url,
+            h1=ev.get("h1") or "",
+            published_at=d.published_at,
+            text_chars=int(ev.get("text_chars") or 0),
+            parsed_method=ev.get("parsed_method") or "none",
+            empty_reason=ev.get("empty_reason"),
+            snippets=snippets,
+        ))
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "evidence done: docs=%d snippets=%d query_lemmas=%d in %dms",
+        len(items), snippet_total, len(query_lemmas), duration_ms,
+    )
+
+    return EvidenceResponse(
+        evidence=items,
+        stats=EvidenceStats(
+            doc_count=len(items),
+            snippet_count=snippet_total,
+            duration_ms=duration_ms,
+            query_lemma_count=len(query_lemmas),
+        ),
     )
