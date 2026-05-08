@@ -170,7 +170,7 @@ test('dashscope: неизвестная модель → fallback default + од
   // Перехватываем console.warn один раз, чтобы убедиться, что предупреждение действительно вылетает.
   const origWarn = console.warn;
   let warnCount = 0;
-  console.warn = (...args) => { warnCount++; /* проглатываем */ };
+  console.warn = (...args) => { warnCount++; /* swallow */ };
   try {
     const cost1 = calcCost('dashscope', 1000, 500, { model: 'qwen-future-2050' });
     const cost2 = calcCost('dashscope', 1000, 500, { model: 'qwen-future-2050' });

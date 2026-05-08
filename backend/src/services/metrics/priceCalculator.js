@@ -74,12 +74,34 @@ const _dashscopeUnknownModelLogged = new Set();
  * Нормализует имя модели DashScope в имя env-переменной:
  *   qwen3.6-plus → QWEN3_6_PLUS
  *   qwen-max     → QWEN_MAX
+ *
+ * Реализация — императивный проход по символам без regex-цепочек, чтобы
+ * исключить полиномиальный ReDoS (CodeQL js/polynomial-redos): даже
+ * патологическая строка из тысяч символов «-» / «.» обрабатывается за
+ * O(n) без backtracking. Длина результата дополнительно ограничена,
+ * чтобы env-ключ оставался разумного размера.
  */
 function _dashscopeEnvKey(model) {
-  return String(model || '').trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  const src = String(model || '').trim().toUpperCase();
+  if (!src) return '';
+  let out = '';
+  let prevUnderscore = true; // подавляем ведущие «_»
+  for (let i = 0; i < src.length && out.length < 64; i++) {
+    const ch = src.charCodeAt(i);
+    const isAlnum = (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57); // A-Z, 0-9
+    if (isAlnum) {
+      out += src[i];
+      prevUnderscore = false;
+    } else if (!prevUnderscore) {
+      out += '_';
+      prevUnderscore = true;
+    }
+  }
+  // Убрать висячий подчёркивание справа, не вызывая regex.
+  while (out.length > 0 && out.charCodeAt(out.length - 1) === 95 /* '_' */) {
+    out = out.slice(0, -1);
+  }
+  return out;
 }
 
 /**

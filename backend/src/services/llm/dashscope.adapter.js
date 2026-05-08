@@ -279,6 +279,9 @@ async function callDashscope({
     : safeModel;
   let usage = usageRaw;
   if (usageRaw && Number.isFinite(Number(usageRaw.prompt_tokens))) {
+    // completion_tokens может отсутствовать (например, max_tokens=1 + сразу stop)
+    // — это нормально, считаем его 0. Стоимость от tOut=0 = 0, так что
+    // итоговая cost корректно учитывает только input.
     const tIn  = Number(usageRaw.prompt_tokens)     || 0;
     const tOut = Number(usageRaw.completion_tokens) || 0;
     const costUsd = calcCost('dashscope', tIn, tOut, { model: respondedModel });
