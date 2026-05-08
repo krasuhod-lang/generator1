@@ -54,6 +54,7 @@ const {
 } = require('./serpEvidence.service');
 const { runFactCheck } = require('./factCheck.service');
 const { runPlagiarismCheck } = require('./plagiarism.service');
+const { runImageQa } = require('./imageQa.service');
 
 // ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
 // Гейт. По умолчанию OFF — фундамент укладываем без изменения дефолтного
@@ -78,6 +79,15 @@ const INFO_ARTICLE_FACTCHECK_ENABLED =
 // требует наличия task.__serpEvidence (иначе skip).
 const INFO_ARTICLE_PLAGIARISM_ENABLED =
   String(process.env.INFO_ARTICLE_PLAGIARISM_ENABLED || '').toLowerCase() === 'true';
+
+// ── Image QA (Phase 1 / P0-4) ────────────────────────────────────────
+// Детерминированный пост-аудит сгенерированных изображений: формат,
+// размеры, аспект, дубли (sha256). Не требует SERP-evidence — никогда
+// не делает сетевых запросов и не вызывает LLM. По умолчанию ON: чек
+// безопасный, никогда не валит pipeline (только пишет отчёт + лог).
+// Отключить: INFO_ARTICLE_IMAGE_QA_ENABLED=false.
+const INFO_ARTICLE_IMAGE_QA_ENABLED =
+  String(process.env.INFO_ARTICLE_IMAGE_QA_ENABLED || 'true').toLowerCase() === 'true';
 const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -1403,6 +1413,63 @@ async function processInfoArticleTask(taskId) {
     await setStage(taskId, 'image_generation', 92);
     const renderedImages = await runImageGeneration(taskId, imagePrompts);
     await saveColumn(taskId, 'image_prompts', renderedImages);
+
+    // 13b. Image QA — Phase 1 / P0-4. Детерминированный аудит готовых
+    //      картинок: формат-через-magic-bytes, ширина/высота, аспект,
+    //      sha256-дубли, пустые alt. Не делает сети, не вызывает LLM,
+    //      никогда не валит pipeline (try/catch + soft warn). Гейт
+    //      INFO_ARTICLE_IMAGE_QA_ENABLED (default ON).
+    if (INFO_ARTICLE_IMAGE_QA_ENABLED) {
+      try {
+        const qa = runImageQa(renderedImages);
+        await saveColumn(taskId, 'image_qa_report', qa);
+        const qs = qa.summary;
+        const verdictIcon = qs.verdict === 'pass' ? '✅'
+          : qs.verdict === 'review' ? '⚠'
+          : qs.verdict === 'na' ? 'ℹ'
+          : '❌';
+        await appendLog(
+          taskId,
+          `${verdictIcon} Image QA: slots=${qs.doneSlots}/${qs.totalSlots} ` +
+          `(failed=${qs.failedSlots}, errors=${qs.errors}, warnings=${qs.warnings}, ` +
+          `coverOk=${qs.coverOk}) verdict=${qs.verdict}`,
+          qs.verdict === 'pass' || qs.verdict === 'na' ? 'ok' : 'info',
+        );
+        if (qa.duplicate_groups.length > 0) {
+          const grp = qa.duplicate_groups
+            .map((g) => `[${g.slots.join(',')}]${g.includes_cover ? '!' : ''}`)
+            .join(' ');
+          await appendLog(
+            taskId,
+            `🖼 Image QA: обнаружены дубли по sha256: ${grp}` +
+            ` (! = группа включает cover)`,
+            'warn',
+          );
+        }
+        // Топ-3 диагностических сообщения по уровню error для краткости в логе.
+        const topIssues = [];
+        for (const s of qa.slots) {
+          for (const it of s.issues) {
+            if (it.level === 'error') topIssues.push(it.message);
+            if (topIssues.length >= 3) break;
+          }
+          if (topIssues.length >= 3) break;
+        }
+        if (topIssues.length > 0) {
+          await appendLog(
+            taskId,
+            `🖼 Image QA: top-${topIssues.length} ошибок: ${topIssues.join(' | ')}`,
+            'warn',
+          );
+        }
+      } catch (qaErr) {
+        await appendLog(
+          taskId,
+          `⚠ Image-QA не выполнился: ${qaErr.message} — продолжаем без отчёта`,
+          'warn',
+        );
+      }
+    }
 
     // 14. Финализация HTML + plain text. Cover-изображение встраивается в
     //     article_html сразу после <h1> (см. embedImages), чтобы при копировании

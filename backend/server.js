@@ -840,6 +840,14 @@ async function ensureSchema() {
         ADD COLUMN IF NOT EXISTS plagiarism_report JSONB;
     `);
 
+    // Migration 025: хранилище image-QA отчёта (Phase 1 / P0-4).
+    // Колонка nullable: если INFO_ARTICLE_IMAGE_QA_ENABLED=false или картинок
+    // не было — поле остаётся NULL. Не ломает старые задачи.
+    await db.query(`
+      ALTER TABLE info_article_tasks
+        ADD COLUMN IF NOT EXISTS image_qa_report JSONB;
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
