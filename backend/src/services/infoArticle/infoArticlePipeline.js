@@ -48,6 +48,36 @@ const {
 const { synthesizeLsiSet, measureLsiCoverageInHtml } = require('./lsiPipeline');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
 const { domainsFromLinks } = require('./excelParser');
+const {
+  buildSerpEvidence,
+  renderEvidenceForPrompt,
+} = require('./serpEvidence.service');
+const { runFactCheck } = require('./factCheck.service');
+const { runPlagiarismCheck } = require('./plagiarism.service');
+
+// ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
+// Гейт. По умолчанию OFF — фундамент укладываем без изменения дефолтного
+// поведения; включение прод-окружения — отдельным конфиг-PR после того,
+// как будут готовы P0-1 (fact-check) и P0-3 (антиплагиат), которые тоже
+// читают evidence. Включить локально: INFO_ARTICLE_GROUNDING_ENABLED=true.
+const INFO_ARTICLE_GROUNDING_ENABLED =
+  String(process.env.INFO_ARTICLE_GROUNDING_ENABLED || '').toLowerCase() === 'true';
+
+// ── Fact-check verifier (Phase 1 / P0-1) ──────────────────────────────
+// Детерминированный пост-аудит финального articleHtml против собранных
+// SERP-evidence сниппетов. По умолчанию OFF; включается независимо от
+// grounding-флага, но требует наличия task.__serpEvidence (иначе skip).
+const INFO_ARTICLE_FACTCHECK_ENABLED =
+  String(process.env.INFO_ARTICLE_FACTCHECK_ENABLED || '').toLowerCase() === 'true';
+
+// ── Anti-plagiarism (Phase 1 / P0-3) ──────────────────────────────────
+// Детерминированная сверка финального articleHtml с теми же
+// SERP-evidence сниппетами по n-gram overlap. Цель — поймать прямые
+// заимствования у конкурентов, особенно при включённом grounding'е,
+// когда LLM может «срисовать» абзац вместо рерайта. По умолчанию OFF;
+// требует наличия task.__serpEvidence (иначе skip).
+const INFO_ARTICLE_PLAGIARISM_ENABLED =
+  String(process.env.INFO_ARTICLE_PLAGIARISM_ENABLED || '').toLowerCase() === 'true';
 const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -372,6 +402,17 @@ async function runWriter(task, args, ctx, opts = {}) {
       `lsi_set: ${pointerOrJson('§7 LSI-набор', lsi, iakbReady, 2500)}`,
       `link_plan: ${pointerOrJson('§8 Перелинковка', linkPlan, iakbReady, 6000)}`,
     ];
+    // Phase 1 / P0-2: SERP-evidence grounding.
+    // Намеренно НЕ кладём evidence в IAKB (и тем более в Gemini cache) —
+    // цель в том, чтобы writer видел свежие фрагменты топа на каждом
+    // вызове (включая corrective retry), а кэш IAKB оставался стабильным
+    // для других стадий. Если evidence отсутствует или пуст —
+    // renderEvidenceForPrompt возвращает '', ничего не вставляем.
+    const evidenceBlock = renderEvidenceForPrompt(task.__serpEvidence);
+    if (evidenceBlock) {
+      base.push('');
+      base.push(evidenceBlock);
+    }
     if (noLinks) {
       // Excel-база коммерческих ссылок не загружена → пишем статью без перелинковки.
       // Без этого маркера writer мог бы попытаться придумать фейковые href.
@@ -1037,6 +1078,48 @@ async function processInfoArticleTask(taskId) {
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
 
+    // 8.5. SERP-evidence grounding (Phase 1 / P0-2). Гейтировано env'ом
+    // INFO_ARTICLE_GROUNDING_ENABLED (default OFF). Не валит pipeline ни при
+    // каких сбоях — graceful: при ошибке task.__serpEvidence = null,
+    // writer-промт получит на 1 блок меньше.
+    task.__serpEvidence = null;
+    if (INFO_ARTICLE_GROUNDING_ENABLED) {
+      try {
+        await setStage(taskId, 'stage2d_grounding', 56);
+        const evidenceResult = await buildSerpEvidence({
+          query:  task.topic,
+          region: task.region || '',
+          logger: (msg, level) => { appendLog(taskId, msg, level || 'info').catch(() => {}); },
+        });
+        if (evidenceResult && Array.isArray(evidenceResult.evidence) && evidenceResult.evidence.length) {
+          task.__serpEvidence = evidenceResult;
+          await appendLog(
+            taskId,
+            `📚 SERP-evidence: ${evidenceResult.evidence.length} URL × до ${evidenceResult.stats.top_k || '?'} сниппетов ` +
+            `(${evidenceResult.stats.snippet_count} всего, ${evidenceResult.stats.duration_ms} мс, ` +
+            `cache=${evidenceResult.stats.cache_hit ? 'hit' : 'miss'})`,
+            'ok',
+          );
+          if (Array.isArray(evidenceResult.warnings) && evidenceResult.warnings.length) {
+            await appendLog(taskId, `⚠ SERP-evidence warnings: ${evidenceResult.warnings.join('; ')}`, 'warn');
+          }
+        } else {
+          const warns = (evidenceResult && evidenceResult.warnings) || [];
+          await appendLog(
+            taskId,
+            `⚠ SERP-evidence пуст (warnings: ${warns.join('; ') || 'unknown'}) — writer без grounding`,
+            'warn',
+          );
+        }
+      } catch (groundingErr) {
+        await appendLog(
+          taskId,
+          `⚠ SERP-evidence не собран: ${groundingErr.message} — writer продолжит без grounding`,
+          'warn',
+        );
+      }
+    }
+
     if (INFO_ARTICLE_GEMINI_CACHE_ENABLED) {
       try {
         const writerInstructions = loadInfoArticlePrompt('stage3');
@@ -1208,6 +1291,84 @@ async function processInfoArticleTask(taskId) {
         await appendLog(
           taskId,
           `⚠ Не удалось дописать ${inj.skipped.length} пропущенных ссылок (нет <p> в целевой H2-секции)`,
+          'warn',
+        );
+      }
+    }
+
+    // 11c. Детерминированный fact-check (Phase 1 / P0-1).
+    //      Гейтировано env'ом INFO_ARTICLE_FACTCHECK_ENABLED (default OFF) +
+    //      требует, чтобы grounding отработал и собрал evidence (иначе нечего
+    //      сверять). Не валит pipeline ни при каких сбоях — graceful warn.
+    if (INFO_ARTICLE_FACTCHECK_ENABLED && task.__serpEvidence) {
+      try {
+        const factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+        await saveColumn(taskId, 'fact_check_report', factCheck);
+        const s = factCheck.summary;
+        const verdictIcon = s.verdict === 'pass' ? '✅'
+          : s.verdict === 'review' ? '⚠'
+          : s.verdict === 'na' ? 'ℹ'
+          : '❌';
+        await appendLog(
+          taskId,
+          `${verdictIcon} Fact-check: claims=${s.total} ` +
+          `(supported=${s.supported}/${s.supportedPct}%, partial=${s.partial}, unsupported=${s.unsupported}) ` +
+          `verdict=${s.verdict}`,
+          s.verdict === 'pass' || s.verdict === 'na' ? 'ok' : 'info',
+        );
+        if (factCheck.top_unsupported.length > 0) {
+          const sample = factCheck.top_unsupported.slice(0, 3)
+            .map((c) => `«${c.text.slice(0, 120)}…»`).join(' | ');
+          await appendLog(
+            taskId,
+            `🔎 Fact-check: ${factCheck.top_unsupported.length} утверждений без подтверждения в SERP-evidence. Примеры: ${sample}`,
+            'warn',
+          );
+        }
+      } catch (factCheckErr) {
+        await appendLog(
+          taskId,
+          `⚠ Fact-check не выполнился: ${factCheckErr.message} — продолжаем без отчёта`,
+          'warn',
+        );
+      }
+    }
+
+    // 11d. Детерминированная анти-плагиат проверка (Phase 1 / P0-3).
+    //      Гейт INFO_ARTICLE_PLAGIARISM_ENABLED (default OFF) + наличие
+    //      task.__serpEvidence (иначе skip). Greedy n-gram overlap по тем
+    //      же сниппетам, что использовал writer для grounding'а — ловим
+    //      буквальные заимствования. Никогда не валит pipeline.
+    if (INFO_ARTICLE_PLAGIARISM_ENABLED && task.__serpEvidence) {
+      try {
+        const plag = runPlagiarismCheck(articleHtml, task.__serpEvidence);
+        await saveColumn(taskId, 'plagiarism_report', plag);
+        const ps = plag.summary;
+        const verdictIcon = ps.verdict === 'pass' ? '✅'
+          : ps.verdict === 'review' ? '⚠'
+          : ps.verdict === 'na' ? 'ℹ'
+          : '❌';
+        await appendLog(
+          taskId,
+          `${verdictIcon} Plagiarism: sentences=${ps.scoredSentences}/${ps.totalSentences} ` +
+          `(clean=${ps.cleanCount}, suspicious=${ps.suspiciousCount}, plagiarism=${ps.plagiarismCount}) ` +
+          `overlap_total=${ps.overlapPctTotal}% verdict=${ps.verdict}`,
+          ps.verdict === 'pass' || ps.verdict === 'na' ? 'ok' : 'info',
+        );
+        if (plag.top_sentences.length > 0) {
+          const sample = plag.top_sentences.slice(0, 2)
+            .map((s) => `«${s.text.slice(0, 100)}…» (${Math.round(s.overlapPct * 100)}%, ${s.donors[0]?.url || '?'})`)
+            .join(' | ');
+          await appendLog(
+            taskId,
+            `🔎 Plagiarism: top-${Math.min(2, plag.top_sentences.length)} проблемных предложений: ${sample}`,
+            'warn',
+          );
+        }
+      } catch (plagErr) {
+        await appendLog(
+          taskId,
+          `⚠ Plagiarism-check не выполнился: ${plagErr.message} — продолжаем без отчёта`,
           'warn',
         );
       }
