@@ -53,6 +53,7 @@ const {
   renderEvidenceForPrompt,
 } = require('./serpEvidence.service');
 const { runFactCheck } = require('./factCheck.service');
+const { runPlagiarismCheck } = require('./plagiarism.service');
 
 // ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
 // Гейт. По умолчанию OFF — фундамент укладываем без изменения дефолтного
@@ -68,6 +69,15 @@ const INFO_ARTICLE_GROUNDING_ENABLED =
 // grounding-флага, но требует наличия task.__serpEvidence (иначе skip).
 const INFO_ARTICLE_FACTCHECK_ENABLED =
   String(process.env.INFO_ARTICLE_FACTCHECK_ENABLED || '').toLowerCase() === 'true';
+
+// ── Anti-plagiarism (Phase 1 / P0-3) ──────────────────────────────────
+// Детерминированная сверка финального articleHtml с теми же
+// SERP-evidence сниппетами по n-gram overlap. Цель — поймать прямые
+// заимствования у конкурентов, особенно при включённом grounding'е,
+// когда LLM может «срисовать» абзац вместо рерайта. По умолчанию OFF;
+// требует наличия task.__serpEvidence (иначе skip).
+const INFO_ARTICLE_PLAGIARISM_ENABLED =
+  String(process.env.INFO_ARTICLE_PLAGIARISM_ENABLED || '').toLowerCase() === 'true';
 const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -1319,6 +1329,46 @@ async function processInfoArticleTask(taskId) {
         await appendLog(
           taskId,
           `⚠ Fact-check не выполнился: ${factCheckErr.message} — продолжаем без отчёта`,
+          'warn',
+        );
+      }
+    }
+
+    // 11d. Детерминированная анти-плагиат проверка (Phase 1 / P0-3).
+    //      Гейт INFO_ARTICLE_PLAGIARISM_ENABLED (default OFF) + наличие
+    //      task.__serpEvidence (иначе skip). Greedy n-gram overlap по тем
+    //      же сниппетам, что использовал writer для grounding'а — ловим
+    //      буквальные заимствования. Никогда не валит pipeline.
+    if (INFO_ARTICLE_PLAGIARISM_ENABLED && task.__serpEvidence) {
+      try {
+        const plag = runPlagiarismCheck(articleHtml, task.__serpEvidence);
+        await saveColumn(taskId, 'plagiarism_report', plag);
+        const ps = plag.summary;
+        const verdictIcon = ps.verdict === 'pass' ? '✅'
+          : ps.verdict === 'review' ? '⚠'
+          : ps.verdict === 'na' ? 'ℹ'
+          : '❌';
+        await appendLog(
+          taskId,
+          `${verdictIcon} Plagiarism: sentences=${ps.scoredSentences}/${ps.totalSentences} ` +
+          `(clean=${ps.cleanCount}, suspicious=${ps.suspiciousCount}, plagiarism=${ps.plagiarismCount}) ` +
+          `overlap_total=${ps.overlapPctTotal}% verdict=${ps.verdict}`,
+          ps.verdict === 'pass' || ps.verdict === 'na' ? 'ok' : 'info',
+        );
+        if (plag.top_sentences.length > 0) {
+          const sample = plag.top_sentences.slice(0, 2)
+            .map((s) => `«${s.text.slice(0, 100)}…» (${Math.round(s.overlapPct * 100)}%, ${s.donors[0]?.url || '?'})`)
+            .join(' | ');
+          await appendLog(
+            taskId,
+            `🔎 Plagiarism: top-${Math.min(2, plag.top_sentences.length)} проблемных предложений: ${sample}`,
+            'warn',
+          );
+        }
+      } catch (plagErr) {
+        await appendLog(
+          taskId,
+          `⚠ Plagiarism-check не выполнился: ${plagErr.message} — продолжаем без отчёта`,
           'warn',
         );
       }
