@@ -203,7 +203,9 @@ function extractClaims(html) {
       tokens,
     });
   }
-  return claims.slice(0, MAX_CLAIMS_PER_SECTION * 6);   // финальный hard cap
+  // Цикл уже сам выходит при достижении MAX_CLAIMS — отдельный slice
+  // не нужен. Оставляем массив как есть.
+  return claims;
 }
 
 // ── Token extraction & normalization ───────────────────────────────

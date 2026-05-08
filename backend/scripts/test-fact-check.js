@@ -73,10 +73,17 @@ check('decodes basic HTML entities', () => {
   assert.ok(out.includes('…'),          `hellip not decoded: ${out}`);
 });
 check('does NOT double-decode &amp;lt; into <', () => {
-  // Если декодировать &amp; раньше &lt;, "&amp;lt;" → "&lt;" → "<".
-  // Корректно: после полного прохода должно остаться "&lt;" (один уровень).
+  // Регрессия на CodeQL js/double-escaping. Если &amp; декодируется РАНЬШЕ
+  // &lt;, то "&amp;lt;" → "&lt;" → "<" (двойное декодирование, неверно).
+  // Корректный порядок: &amp; декодируем В ПОСЛЕДНЮЮ ОЧЕРЕДЬ. Тогда:
+  //   "&amp;lt;"   — после прохода &lt;/&gt;/etc. остаётся "&amp;lt;" (этап
+  //                  &lt; уже прошёл), затем &amp; превращается в "&", итого "&lt;"
+  //   "&amp;"      — превращается в "&"
+  //   "&lt;tag&gt;" — декодируется обычным образом в "<tag>"
+  // Все три ассерта НЕ противоречат друг другу — они проверяют разные
+  // подстроки одного и того же входа.
   const out = stripHtml('A &amp;lt; B и обычный &amp; ещё &lt;tag&gt;');
-  assert.ok(out.includes('&lt;'),       `double-decoding: ${out}`);
+  assert.ok(out.includes('&lt;'),       `double-decoding (lost literal &lt;): ${out}`);
   assert.ok(out.includes('&'),          `lost ampersand: ${out}`);
   assert.ok(out.includes('<tag>'),      `single-decoded &lt;tag&gt; missing: ${out}`);
 });
