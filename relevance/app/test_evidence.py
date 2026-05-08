@@ -137,7 +137,7 @@ def main() -> int:
     failures += _assert(total_chars <= 2000, f"sum chars within max_chars=2000 ({total_chars})")
     # H1 распарсен
     failures += _assert("насос" in (ev["h1"] or "").lower(), f"h1 parsed ({ev['h1']!r})")
-    # Scores отсортированы убыванию
+    # Scores отсортированы по убыванию
     scores = [s["score"] for s in ev["snippets"]]
     failures += _assert(scores == sorted(scores, reverse=True),
                         f"snippets sorted by score desc ({scores})")
