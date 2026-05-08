@@ -45,7 +45,7 @@ const {
   iakbCallOpts,
   pointerOrJson,
 } = require('./infoArticleKnowledgeBase');
-const { synthesizeLsiSet, measureLsiCoverageInHtml } = require('./lsiPipeline');
+const { synthesizeLsiSet, measureLsiCoverageInHtml, measureLsiCoverageSemantic } = require('./lsiPipeline');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
 const { domainsFromLinks } = require('./excelParser');
 const {
@@ -55,6 +55,11 @@ const {
 const { runFactCheck } = require('./factCheck.service');
 const { runPlagiarismCheck } = require('./plagiarism.service');
 const { runImageQa } = require('./imageQa.service');
+const { analyzeReadability } = require('./readability.service');
+const { verifyIntent } = require('./intentVerify.service');
+const { createValidationTracker } = require('./validationFailures.service');
+const { runEeatAuditCore } = require('../eeatAudit/core');
+const { buildLsiDigestByWeight } = require('./eeatChunker');
 
 // ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
 // Гейт. По умолчанию OFF — фундамент укладываем без изменения дефолтного
@@ -88,6 +93,27 @@ const INFO_ARTICLE_PLAGIARISM_ENABLED =
 // Отключить: INFO_ARTICLE_IMAGE_QA_ENABLED=false.
 const INFO_ARTICLE_IMAGE_QA_ENABLED =
   String(process.env.INFO_ARTICLE_IMAGE_QA_ENABLED || 'true').toLowerCase() === 'true';
+
+// ── Phase 2 / Б4: Readability analyzer ──────────────────────────────
+// Детерминированный программный аудит читабельности готовой статьи.
+// Ничего не валит, только пишет отчёт + лог. Default ON (чек безопасный).
+const INFO_ARTICLE_READABILITY_ENABLED =
+  String(process.env.INFO_ARTICLE_READABILITY_ENABLED || 'true').toLowerCase() === 'true';
+
+// ── Phase 2 / Б5: Intent verifier ───────────────────────────────────
+// Сравнивает программно определённый интент финальной статьи с
+// dominant_intent из competitor_signals.serp_intent (если статья
+// привязана к relevance_report). Только soft-warning, никогда не валит.
+const INFO_ARTICLE_INTENT_VERIFY_ENABLED =
+  String(process.env.INFO_ARTICLE_INTENT_VERIFY_ENABLED || 'true').toLowerCase() === 'true';
+
+// ── Phase 2 / Б2: Семантическая LSI-метрика ─────────────────────────
+// Гибрид substring+stem-bigram cosine: уменьшает ложные corrective-retry
+// для случаев, когда термин «семантически» в тексте есть, но точного
+// substring-stem нет (синоним/переформулировка). По умолчанию OFF, чтобы
+// не менять поведение существующих задач — включается одной env-переменной.
+const INFO_ARTICLE_LSI_SEMANTIC_ENABLED =
+  String(process.env.INFO_ARTICLE_LSI_SEMANTIC_ENABLED || '').toLowerCase() === 'true';
 const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -516,40 +542,46 @@ async function runWriter(task, args, ctx, opts = {}) {
 // ── Stage 5 / 5b: audits ────────────────────────────────────────────
 
 async function runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx) {
-  const user = [
-    `[INPUTS]`,
-    `topic: ${task.topic}`,
-    `region: ${task.region || '[не задано]'}`,
-    `brand_name: ${task.brand_name || '[авто]'}`,
-    `audience_digest: ${JSON.stringify(audience).slice(0, 2500)}`,
-    `intents_digest: ${JSON.stringify({
-      user_questions: (intents && intents.user_questions) || [],
-      entities: (intents && Array.isArray(intents.entities) ? intents.entities.slice(0, 12) : []),
-    }).slice(0, 3500)}`,
-    `lsi_set_digest: ${JSON.stringify((lsiSet && lsiSet.important) || []).slice(0, 1500)}`,
-    `article_html: ${articleHtml.slice(0, 14000)}`,
-  ].join('\n');
+  // Phase 2 / Б1.2: подаём LSI-дайджест по весу (не по позиции),
+  // без жёсткого среза 1500 символов — функция сама уложится в бюджет.
+  const lsiDigest = buildLsiDigestByWeight(lsiSet, 4000);
 
-  const result = await callLLM(
-    'deepseek',
-    loadInfoArticlePrompt('stage5Eeat'),
-    user,
-    { retries: 3, temperature: 0.2, callLabel: 'InfoArticle Stage 5 (E-E-A-T audit)', ...ctx },
-  );
+  // Шаблон сборки user-prompt'а: используется для single-call И для
+  // chunk-call'ов (Б1.1). В chunk-режиме article_html заменяется на
+  // содержимое чанка с маркером h2_text.
+  function buildUserText(htmlSlice, chunkInfo) {
+    const articleField = chunkInfo
+      ? `article_html (chunk ${chunkInfo.index + 1}: ${chunkInfo.h2_text}): ${htmlSlice}`
+      : `article_html: ${htmlSlice}`;
+    return [
+      `[INPUTS]`,
+      `topic: ${task.topic}`,
+      `region: ${task.region || '[не задано]'}`,
+      `brand_name: ${task.brand_name || '[авто]'}`,
+      `audience_digest: ${JSON.stringify(audience).slice(0, 2500)}`,
+      `intents_digest: ${JSON.stringify({
+        user_questions: (intents && intents.user_questions) || [],
+        entities: (intents && Array.isArray(intents.entities) ? intents.entities.slice(0, 12) : []),
+      }).slice(0, 3500)}`,
+      `lsi_set_digest: ${lsiDigest}`,
+      articleField,
+    ].join('\n');
+  }
 
-  const norm = result || {};
-  const totalRaw = Number(norm.total_score);
-  norm.total_score = Number.isFinite(totalRaw)
-    ? Math.max(0, Math.min(10, Math.round(totalRaw * 10) / 10))
-    : 0;
-  if (!Array.isArray(norm.issues)) norm.issues = [];
-  if (!['pass', 'refine', 'reject'].includes(norm.verdict)) {
-    norm.verdict = norm.total_score >= INFO_ARTICLE_EEAT_TARGET ? 'pass' : 'refine';
-  }
-  if (typeof norm.lsi_coverage_pct !== 'number' || !Number.isFinite(norm.lsi_coverage_pct)) {
-    norm.lsi_coverage_pct = 0;
-  }
-  return norm;
+  // По-старому single-call (back-compat для коротких статей <=8kb).
+  // Для длинных — chunked-режим (Б1.1) автоматически срабатывает в core.
+  const callOptions = { retries: 3, temperature: 0.2, callLabel: 'InfoArticle Stage 5 (E-E-A-T audit)', ...ctx };
+  return runEeatAuditCore({
+    adapter:    'deepseek',
+    system:     loadInfoArticlePrompt('stage5Eeat'),
+    userText:   buildUserText(articleHtml.slice(0, 14000)), // single-call back-compat
+    threshold:  INFO_ARTICLE_EEAT_TARGET,
+    callOptions,
+    chunkOpts: {
+      html: articleHtml,
+      buildChunkUserText: (chunk) => buildUserText(chunk.html, chunk),
+    },
+  });
 }
 
 async function runLinkAudit(articleHtml, linkPlan, deterministicCheck, ctx) {
@@ -1153,12 +1185,17 @@ async function processInfoArticleTask(taskId) {
 
     // 9. Stage 3 writer
     await setStage(taskId, 'stage3_writer', 60);
+    // Phase 2 / С1: трекер регрессий валидатора writer'а. Записываем
+    // remainingIssues после каждого прохода, в конце сохраняем агрегат
+    // в info_article_tasks.validation_report.
+    const validationTracker = createValidationTracker();
     let { html: articleHtml, remainingIssues: writerIssues } = await runWriter(
       task,
       { audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan },
       ctx,
     );
     if (!articleHtml) throw new Error('Gemini не сгенерировал статью (пустой article_html)');
+    validationTracker.recordPass('writer_initial', writerIssues);
     if (writerIssues.length) {
       await appendLog(taskId, `⚠ Остались ${writerIssues.length} замечаний после первичного writer`, 'warn');
     }
@@ -1200,9 +1237,26 @@ async function processInfoArticleTask(taskId) {
       linkAudit.verdict === 'pass' ? 'ok' : 'info',
     );
 
-    // LSI coverage measurement (программно)
-    const lsiCov = measureLsiCoverageInHtml(articleHtml, lsiSet.important || []);
-    await appendLog(taskId, `🔤 LSI coverage: ${lsiCov.coveragePct}% (${lsiCov.coveredCount}/${lsiCov.totalCount})`, 'info');
+    // LSI coverage measurement (программно).
+    // Phase 2 / Б2: гибрид substring+семантика. Если включён флаг —
+    // используем семантический коверидж для триггера refine. Substring
+    // coverage всё равно считаем для лога (для прозрачности).
+    const lsiCovSubstring = measureLsiCoverageInHtml(articleHtml, lsiSet.important || []);
+    let lsiCov = lsiCovSubstring;
+    let lsiSemantic = null;
+    if (INFO_ARTICLE_LSI_SEMANTIC_ENABLED) {
+      lsiSemantic = measureLsiCoverageSemantic(articleHtml, lsiSet.important || []);
+      lsiCov = lsiSemantic; // используем для триггера refine
+      await appendLog(
+        taskId,
+        `🔤 LSI coverage (semantic): ${lsiSemantic.coveragePct}% ` +
+        `(substring=${lsiSemantic.substring_covered}, semantic=${lsiSemantic.semantic_covered}, ` +
+        `miss=${lsiSemantic.missing.length}; substring-only=${lsiCovSubstring.coveragePct}%)`,
+        'info',
+      );
+    } else {
+      await appendLog(taskId, `🔤 LSI coverage: ${lsiCov.coveragePct}% (${lsiCov.coveredCount}/${lsiCov.totalCount})`, 'info');
+    }
 
     // 11. Refine loop (≤ 1 retry)
     const eeatBelow      = eeatAudit && eeatAudit.total_score < INFO_ARTICLE_EEAT_TARGET;
@@ -1243,6 +1297,8 @@ async function processInfoArticleTask(taskId) {
           priorLinkIssues: linkIssues,
         },
       );
+      // Phase 2 / С1: фиксируем результат refine-прохода в трекере регрессий.
+      validationTracker.recordPass('writer_refine', refined.remainingIssues || []);
       if (refined.html) {
         articleHtml = refined.html;
         // Re-audit best-effort.
@@ -1382,6 +1438,89 @@ async function processInfoArticleTask(taskId) {
           'warn',
         );
       }
+    }
+
+    // 11e. Phase 2 / Б4: Readability analyzer (детерминированный).
+    //      Гейт INFO_ARTICLE_READABILITY_ENABLED (default ON). Безопасный
+    //      программный чек: считает индекс Флеша-Тулдавы для русского,
+    //      долю длинных предложений, канцелярит, пассив. Soft-warning,
+    //      никогда не валит pipeline.
+    if (INFO_ARTICLE_READABILITY_ENABLED) {
+      try {
+        const readability = analyzeReadability(articleHtml);
+        await saveColumn(taskId, 'readability_report', readability);
+        const m = readability.metrics || {};
+        const verdictIcon = readability.verdict === 'pass' ? '✅'
+          : readability.verdict === 'review' ? '⚠'
+          : readability.verdict === 'refine' ? '❌'
+          : 'ℹ';
+        await appendLog(
+          taskId,
+          `${verdictIcon} Readability: flesch=${m.flesch_index} avg_sent=${m.avg_sentence_words}w ` +
+          `passive=${m.passive_pct}% bureaucratese=${m.bureaucratese_pct}% verdict=${readability.verdict}`,
+          readability.verdict === 'pass' ? 'ok' : 'info',
+        );
+        if (readability.issues && readability.issues.length) {
+          for (const it of readability.issues.slice(0, 3)) {
+            await appendLog(taskId, `📖 ${it.message}`, it.severity === 'high' ? 'warn' : 'info');
+          }
+        }
+      } catch (readErr) {
+        await appendLog(taskId, `⚠ Readability-check не выполнился: ${readErr.message}`, 'warn');
+      }
+    }
+
+    // 11f. Phase 2 / Б5: Intent verifier (детерминированный).
+    //      Гейт INFO_ARTICLE_INTENT_VERIFY_ENABLED (default ON). Сравнивает
+    //      программно определённый интент статьи с dominant_intent из
+    //      competitor_signals.serp_intent (если статья привязана к
+    //      relevance_report). Никогда не валит pipeline (soft-warning).
+    if (INFO_ARTICLE_INTENT_VERIFY_ENABLED) {
+      try {
+        const intentReport = verifyIntent(articleHtml, relevanceSignals || null);
+        await saveColumn(taskId, 'intent_verdict', intentReport);
+        if (intentReport.verdict === 'na') {
+          await appendLog(
+            taskId,
+            `🎯 Intent: article=${intentReport.article_intent} (verdict=na, ${intentReport.reason || 'no_data'})`,
+            'info',
+          );
+        } else {
+          const icon = intentReport.verdict === 'pass' ? '✅'
+            : intentReport.verdict === 'mismatch' ? '❌' : '⚠';
+          await appendLog(
+            taskId,
+            `${icon} Intent: article=${intentReport.article_intent}, SERP=${intentReport.serp_intent}, verdict=${intentReport.verdict}`,
+            intentReport.verdict === 'pass' ? 'ok' : (intentReport.critical ? 'warn' : 'info'),
+          );
+          if (intentReport.recommendation) {
+            await appendLog(taskId, `💡 ${intentReport.recommendation}`, intentReport.critical ? 'warn' : 'info');
+          }
+        }
+      } catch (intentErr) {
+        await appendLog(taskId, `⚠ Intent-verify не выполнился: ${intentErr.message}`, 'warn');
+      }
+    }
+
+    // 11g. Phase 2 / С1: сохраняем регресс-отчёт валидатора writer'а.
+    //      Содержит все проходы (initial, retry, refine) с их issue-списками
+    //      и by_kind tally — для последующей аналитики корпуса задач:
+    //      какие классы issues регрессируют чаще всего.
+    try {
+      const validationReport = validationTracker.toReport();
+      await saveColumn(taskId, 'validation_report', validationReport);
+      if (validationReport.total_passes > 1 || validationReport.final_count > 0) {
+        await appendLog(
+          taskId,
+          `📋 Validation: passes=${validationReport.total_passes}, ` +
+          `${validationReport.initial_count}→${validationReport.final_count} issues, ` +
+          `fixed=[${validationReport.fixed_kinds.join(',')}], ` +
+          `persistent=[${validationReport.persistent_kinds.join(',')}]`,
+          validationReport.final_count === 0 ? 'ok' : 'info',
+        );
+      }
+    } catch (vrErr) {
+      await appendLog(taskId, `⚠ Validation-report сохранение упало: ${vrErr.message}`, 'warn');
     }
 
     // 12. Stage 4 image prompts

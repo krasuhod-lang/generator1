@@ -244,11 +244,188 @@ function measureLsiCoverageInHtml(html, importantTerms) {
   };
 }
 
+// ── Phase 2 / Б2: семантический коверидж (stem-bigram cosine) ─────────
+//
+// Подход: вместо точного string-match через стеммы (текущий
+// `measureLsiCoverageInHtml` ниже = подстрока), считаем максимальный
+// cosine-similarity LSI-термина с каждым предложением статьи. Если
+// max ≥ threshold (по умолчанию 0.55) — термин «семантически покрыт».
+//
+// Контракт без LLM/embeddings: используем разреженные «embeddings» в виде
+// мульти-сета stem-униграмм + stem-биграмм нормализованного предложения
+// (та же tokenize+stemKey, что в Phase 1). Это:
+//   • устойчиво к морфологии (стеммы);
+//   • учитывает порядок (биграммы);
+//   • не требует ML-модели и сети;
+//   • даёт более мягкий матч, чем «все стеммы термина в любом месте текста».
+//
+// Гибрид-режим: substring-stem (быстрый) считается первым; покрытые им
+// термины не требуют семантического матча. Для оставшихся «промахнутых»
+// прогоняем семантический матч (медленнее, но число кандидатов меньше).
+//
+// Используется в orchestrator для понижения частоты ложных corrective-retry
+// (Б2.2). Включается env'ом INFO_ARTICLE_LSI_SEMANTIC_ENABLED.
+
+const LSI_SEMANTIC_COVERAGE_THRESHOLD = (() => {
+  const v = parseFloat(process.env.LSI_SEMANTIC_COVERAGE_THRESHOLD);
+  return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.55;
+})();
+
+/** Делит текст на «псевдо-предложения» по терминаторам .?! и абзацам. */
+function splitSentencesPlain(text) {
+  if (!text) return [];
+  return String(text)
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.?!])\s+(?=[А-ЯA-ZЁ«"'(\d])|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 5);
+}
+
+/** Возвращает Map<stemBigramKey, count> — «embedding»-вектор из стеммов. */
+function buildStemBigramVector(text) {
+  const v = new Map();
+  const tokens = tokenize(text);
+  if (!tokens.length) return v;
+  const stems = tokens.map(stemKey);
+  // unigrams (вес 1)
+  for (const s of stems) v.set(s, (v.get(s) || 0) + 1);
+  // bigrams (вес 1)
+  for (let i = 0; i < stems.length - 1; i += 1) {
+    const k = `${stems[i]}|${stems[i + 1]}`;
+    v.set(k, (v.get(k) || 0) + 1);
+  }
+  return v;
+}
+
+/** Cosine similarity двух Map<key, count>. */
+function cosineMaps(a, b) {
+  if (!a.size || !b.size) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (const [, w] of a) na += w * w;
+  for (const [, w] of b) nb += w * w;
+  if (!na || !nb) return 0;
+  const [small, big] = a.size < b.size ? [a, b] : [b, a];
+  for (const [k, w] of small) {
+    const w2 = big.get(k);
+    if (w2) dot += w * w2;
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+/**
+ * measureLsiCoverageSemantic — гибрид substring+семантический матч.
+ *
+ * @param {string} html
+ * @param {string[]} importantTerms
+ * @param {object} [opts]
+ * @param {number} [opts.threshold=LSI_SEMANTIC_COVERAGE_THRESHOLD] — порог cosine
+ * @param {boolean} [opts.useSubstringPrecheck=true] — гибрид-режим
+ * @returns {{
+ *   coveredCount, totalCount, coveragePct, missing,
+ *   substring_covered, semantic_covered,
+ *   per_term: Array<{term, hit_kind, max_cosine, substring_hit}>,
+ *   threshold,
+ * }}
+ */
+function measureLsiCoverageSemantic(html, importantTerms, opts = {}) {
+  const threshold = (typeof opts.threshold === 'number' && Number.isFinite(opts.threshold))
+    ? opts.threshold : LSI_SEMANTIC_COVERAGE_THRESHOLD;
+  const useSubstringPrecheck = opts.useSubstringPrecheck !== false;
+
+  if (!html || !Array.isArray(importantTerms) || !importantTerms.length) {
+    return {
+      coveredCount: 0,
+      totalCount: importantTerms?.length || 0,
+      coveragePct: 0,
+      missing: [],
+      substring_covered: 0,
+      semantic_covered:  0,
+      per_term: [],
+      threshold,
+    };
+  }
+
+  const plain = stripHtmlTagsToText(html).toLowerCase().replace(/[ёЁ]/g, 'е');
+  const sentences = splitSentencesPlain(plain);
+  const tokens    = tokenize(plain);
+  const stemSet   = new Set(tokens.map(stemKey));
+
+  // pre-build sentence vectors lazily — только если нужен семантический проход.
+  let sentenceVectors = null;
+
+  let substringCovered = 0;
+  let semanticCovered  = 0;
+  const missing = [];
+  const perTerm = [];
+
+  for (const term of importantTerms) {
+    const tStems = tokenize(term).map(stemKey);
+    if (!tStems.length) {
+      perTerm.push({ term, hit_kind: 'skipped', max_cosine: 0, substring_hit: false });
+      continue;
+    }
+
+    // Phase 1: substring-stem precheck (быстро). Все стеммы термина должны
+    // присутствовать где-то в статье.
+    const substrHit = tStems.every((s) => stemSet.has(s));
+
+    if (useSubstringPrecheck && substrHit) {
+      substringCovered += 1;
+      perTerm.push({ term, hit_kind: 'substring', max_cosine: 1.0, substring_hit: true });
+      continue;
+    }
+
+    // Phase 2: семантический матч — максимальный cosine с предложениями.
+    if (!sentenceVectors) {
+      sentenceVectors = sentences.map(buildStemBigramVector);
+    }
+    const termVec = buildStemBigramVector(term);
+    let maxCos = 0;
+    for (const sv of sentenceVectors) {
+      const c = cosineMaps(termVec, sv);
+      if (c > maxCos) maxCos = c;
+      if (maxCos >= 1) break;
+    }
+    if (maxCos >= threshold) {
+      semanticCovered += 1;
+      perTerm.push({
+        term,
+        hit_kind: 'semantic',
+        max_cosine: Math.round(maxCos * 1000) / 1000,
+        substring_hit: substrHit,
+      });
+    } else {
+      missing.push(term);
+      perTerm.push({
+        term,
+        hit_kind: 'miss',
+        max_cosine: Math.round(maxCos * 1000) / 1000,
+        substring_hit: substrHit,
+      });
+    }
+  }
+
+  const total = importantTerms.length;
+  const covered = substringCovered + semanticCovered;
+  return {
+    coveredCount: covered,
+    totalCount:   total,
+    coveragePct:  total ? Math.round((covered / total) * 1000) / 10 : 0,
+    missing,
+    substring_covered: substringCovered,
+    semantic_covered:  semanticCovered,
+    per_term:          perTerm,
+    threshold,
+  };
+}
+
 module.exports = {
   extractBaseSeed,
   synthesizeLsiSet,
   sanitizeLsi,
   measureLsiCoverageInHtml,
+  measureLsiCoverageSemantic,
+  LSI_SEMANTIC_COVERAGE_THRESHOLD,
   // exports for tests
-  _internal: { tokenize, stemKey },
+  _internal: { tokenize, stemKey, splitSentencesPlain, buildStemBigramVector, cosineMaps },
 };

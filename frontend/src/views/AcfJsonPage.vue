@@ -1466,6 +1466,156 @@ function findHeadingLevelMismatches(inputHtml, outputArray) {
   return mismatches;
 }
 
+// ── Phase 2 / С3.1: дубликаты блоков верхнего уровня ──────────────────
+// LLM иногда «забывает» свои предыдущие ответы и при чанковой обработке
+// (или внутри одного длинного prompt'а) выдаёт ОДИН И ТОТ ЖЕ блок
+// дважды — например, блок «Преимущества» с идентичными items[]. Сейчас
+// это не ловится никем: postCleanupAcfArray не дедублирует на уровне
+// верхнеуровневых блоков (он только режет ведущий <hN>-дубль внутри
+// одного блока), а findMissingHeadings/findMissingPhrases — это валидаторы
+// «ничего не потеряно», а не «ничего не задвоено».
+//
+// Алгоритм:
+//   1) Строим стабильную fingerprint каждого блока:
+//      acf_fc_layout + canon(title) + canon(plain-text всего блока).
+//      Берём именно plain-text, чтобы не пенализовать косметические
+//      различия в HTML-разметке (\n, лишние пробелы, классы).
+//   2) Находим все группы с >1 одинаковым fingerprint'ом.
+//   3) Игнорируем заведомо короткие блоки (<50 символов plain-text) —
+//      слишком мало материала, чтобы говорить о «дублировании».
+//
+// Возвращает массив { fingerprint, indices, layout, title } —
+// для логирования/warning'а в job.warnings. Сами блоки НЕ удаляем —
+// решение «удалить vs оставить» оставляем за пользователем (могут быть
+// легитимные сценарии повторения, например «вопросы и ответы» х 2).
+function findDuplicatedBlocks(arr) {
+  if (!Array.isArray(arr) || arr.length < 2) return [];
+  const groups = new Map();
+  for (let i = 0; i < arr.length; i += 1) {
+    const b = arr[i];
+    if (!b || typeof b !== 'object') continue;
+    const layout = String(b.acf_fc_layout || '').toLowerCase();
+    if (!layout) continue;
+
+    // Собираем «текстовое содержимое» блока — все строковые поля
+    // глубоко (text/content/answer/title/items[].title/items[].content
+    // и т.п.) — переиспользуем существующий collectContentStrings.
+    const allTexts = [];
+    collectContentStrings([b], allTexts);
+    const plain = stripTagsAndNormalize(allTexts.join(' '));
+    if (plain.length < 50) continue; // слишком короткий — игнорим
+
+    const titleCanon = stripTagsAndNormalize(String(b.title || '')).toLowerCase();
+    const fp = `${layout}|${titleCanon}|${plain.toLowerCase()}`;
+    if (!groups.has(fp)) groups.set(fp, []);
+    groups.get(fp).push(i);
+  }
+
+  const dups = [];
+  for (const [fp, indices] of groups) {
+    if (indices.length < 2) continue;
+    const first = arr[indices[0]];
+    dups.push({
+      fingerprint: fp.slice(0, 80),
+      indices,
+      layout: first?.acf_fc_layout || '',
+      title:  String(first?.title || '').slice(0, 80),
+      count:  indices.length,
+    });
+  }
+  return dups;
+}
+
+// ── Phase 2 / С3.2: валидация порядка <h3> внутри H2-секции ────────────
+// Проблема, которую видим в проде: LLM иногда меняет порядок подзаголовков
+// внутри логической секции — особенно при многопроходной обработке
+// (chunked/hybrid). Это не «потеря» (все hN сохранены — findMissingHeadings
+// молчит) и не «уровень не тот» (findHeadingLevelMismatches молчит), но
+// читатель видит разное оглавление по сравнению с источником.
+//
+// Алгоритм:
+//   1) Из исходного HTML извлекаем «секции» вида:
+//      h2 → ordered_list[<h3>...</h3>, <h3>...</h3>, ...] до следующего h2.
+//   2) Из выходного JSON собираем все hN из HTML-полей в линейном порядке
+//      обхода блоков, группируем по h2 (как в источнике).
+//   3) Сравниваем порядок h3 внутри каждой секции, используя канонические
+//      формы; если последовательность отличается — фиксируем нарушение.
+//
+// Возвращает [{ h2_text, expected_order: [...], actual_order: [...] }].
+// Игнорируем секции с ≤1 h3 (порядок тривиален).
+function validateHeadingOrder(inputHtml, outputArray) {
+  if (!inputHtml || !Array.isArray(outputArray) || !outputArray.length) return [];
+
+  // Build expected: { h2_canon → [h3_canon, ...] }
+  const expected = new Map();
+  let curH2 = null;
+  const inputHN_RE = /<(h[2-3])\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
+  let m = inputHN_RE.exec(inputHtml);
+  while (m) {
+    const tag = m[1].toLowerCase();
+    const text = stripTagsAndNormalize(m[2]).toLowerCase();
+    if (!text) { m = inputHN_RE.exec(inputHtml); continue; }
+    if (tag === 'h2') {
+      curH2 = text;
+      if (!expected.has(curH2)) expected.set(curH2, []);
+    } else if (tag === 'h3' && curH2 != null) {
+      expected.get(curH2).push(text);
+    }
+    m = inputHN_RE.exec(inputHtml);
+  }
+
+  // Build actual: traverse output in order, emit hN occurrences from HTML fields.
+  const actual = new Map();
+  let actCurH2 = null;
+  const outputHN_RE = /<(h[2-3])\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
+  const allTexts = [];
+  collectContentStrings(outputArray, allTexts);
+  for (const html of allTexts) {
+    if (typeof html !== 'string' || !html) continue;
+    outputHN_RE.lastIndex = 0;
+    let mm = outputHN_RE.exec(html);
+    while (mm) {
+      const tag  = mm[1].toLowerCase();
+      const text = stripTagsAndNormalize(mm[2]).toLowerCase();
+      if (text) {
+        if (tag === 'h2') {
+          actCurH2 = text;
+          if (!actual.has(actCurH2)) actual.set(actCurH2, []);
+        } else if (tag === 'h3' && actCurH2 != null) {
+          if (!actual.has(actCurH2)) actual.set(actCurH2, []);
+          actual.get(actCurH2).push(text);
+        }
+      }
+      mm = outputHN_RE.exec(html);
+    }
+  }
+
+  const violations = [];
+  for (const [h2, expOrder] of expected) {
+    if (expOrder.length < 2) continue;
+    const actOrder = actual.get(h2) || [];
+    if (!actOrder.length) continue; // ни одного h3 в выводе для этой секции (это поймает findMissingHeadings)
+    // Сравниваем по подмножеству, которое есть и там, и там — иначе можно
+    // false-positive ловить из-за того, что один h3 «потерян» (это другая
+    // ошибка, см. findMissingHeadings).
+    const expSubset = expOrder.filter((t) => actOrder.includes(t));
+    const actSubset = actOrder.filter((t) => expSubset.includes(t));
+    if (expSubset.length < 2) continue;
+    let same = true;
+    for (let i = 0; i < expSubset.length; i += 1) {
+      if (expSubset[i] !== actSubset[i]) { same = false; break; }
+    }
+    if (!same) {
+      violations.push({
+        h2_text:        h2,
+        expected_order: expSubset,
+        actual_order:   actSubset,
+      });
+    }
+  }
+  return violations;
+}
+
 // ── Один HTTP-вызов к DashScope через наш backend-прокси ──────────────────
 // Возвращает первый `choice` в OpenAI-совместимом формате
 // ({ message: { content }, finish_reason }). Сам прокси-роут живёт в
@@ -2089,13 +2239,28 @@ async function runJob(job) {
     const missing         = findMissingPhrases(html, outPlain);
     const missingHeadings = findMissingHeadings(html, finalArray);
     const levelMismatches = findHeadingLevelMismatches(html, finalArray);
-    if (missing.length || missingHeadings.length || levelMismatches.length) {
+    // Phase 2 / С3.1+С3.2: дополнительные структурные валидаторы.
+    const duplicates      = findDuplicatedBlocks(finalArray);
+    const orderViolations = validateHeadingOrder(html, finalArray);
+    if (missing.length || missingHeadings.length || levelMismatches.length
+        || duplicates.length || orderViolations.length) {
       const sampleP = missing.slice(0, 3).map((m) => `«${m}»`).join('; ');
       const sampleH = missingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
       const parts = [];
       if (missing.length) parts.push(`фрагменты текста (${missing.length}): ${sampleP}`);
       if (missingHeadings.length) parts.push(`заголовки (${missingHeadings.length}): ${sampleH}`);
       if (levelMismatches.length) parts.push(`перекошенный уровень тегов (${levelMismatches.length})`);
+      if (duplicates.length) {
+        const sampleD = duplicates.slice(0, 2)
+          .map((d) => `${d.layout}/«${d.title}» × ${d.count}`).join('; ');
+        parts.push(`дублирующиеся блоки (${duplicates.length}): ${sampleD}`);
+      }
+      if (orderViolations.length) {
+        const sampleO = orderViolations.slice(0, 2)
+          .map((v) => `«${v.h2_text}»: было [${v.expected_order.slice(0, 3).join(',')}], стало [${v.actual_order.slice(0, 3).join(',')}]`)
+          .join('; ');
+        parts.push(`порядок h3 в секции (${orderViolations.length}): ${sampleO}`);
+      }
       if (!Array.isArray(job.warnings)) job.warnings = [];
       job.warnings.push(
         `Финальная пост-валидация JSON выявила потери, которые не были зафиксированы пер-секционной проверкой: ${parts.join('; ')}. `

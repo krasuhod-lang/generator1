@@ -848,6 +848,29 @@ async function ensureSchema() {
         ADD COLUMN IF NOT EXISTS image_qa_report JSONB;
     `);
 
+    // Migration 026: хранилище readability-отчёта (Phase 2 / Б4).
+    // Колонка nullable; если INFO_ARTICLE_READABILITY_ENABLED=false или
+    // статья слишком короткая — поле остаётся NULL. Не ломает старые задачи.
+    await db.query(`
+      ALTER TABLE info_article_tasks
+        ADD COLUMN IF NOT EXISTS readability_report JSONB;
+    `);
+
+    // Migration 027: хранилище intent-verify отчёта (Phase 2 / Б5).
+    // Колонка nullable; verdict=na при отсутствии competitor_signals.
+    await db.query(`
+      ALTER TABLE info_article_tasks
+        ADD COLUMN IF NOT EXISTS intent_verdict JSONB;
+    `);
+
+    // Migration 028: хранилище validation-tracker отчёта (Phase 2 / С1).
+    // Колонка nullable; содержит per-pass issue-списки и by_kind tally
+    // для последующей аналитики корпуса задач.
+    await db.query(`
+      ALTER TABLE info_article_tasks
+        ADD COLUMN IF NOT EXISTS validation_report JSONB;
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
