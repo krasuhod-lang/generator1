@@ -165,7 +165,7 @@ function computeBureaucrateseRatio(text) {
  *     readabilityIndex, passiveRatio, bureaucrateseRatio
  *   },
  *   verdict: {
- *     violations: string[],          // human-readable  
+ *     violations: string[],          // human-readable
  *     severeViolations: string[],    // нарушения с >50% превышения порога
  *     ok: boolean,
  *   }

@@ -23,7 +23,17 @@
 // ── helpers ────────────────────────────────────────────────────────
 
 function stripTags(s) {
-  return String(s || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  // Многократный strip + удаление одиночных «<»/«>» — закрываем
+  // js/incomplete-multi-character-sanitization (например, `<<script>>`).
+  let out = String(s);
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/<[^>]*>/g, '');
+  } while (out !== prev);
+  out = out.replace(/[<>]/g, '');
+  return out.replace(/\s+/g, ' ').trim();
 }
 
 function canon(text) {

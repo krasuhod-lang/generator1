@@ -38,20 +38,44 @@
  */
 function stripHtml(html) {
   if (!html) return '';
-  return String(html)
-    // блочные теги → разделитель абзацев
+  // Single-pass entity decoder — без double-escaping: сначала именованные/
+  // числовые entities, затем теги. Если бы делали `&amp;` → `&` отдельным
+  // шагом до `&lt;` → `<`, то `&amp;lt;` превратилось бы в `<` (CodeQL
+  // js/double-escaping). Здесь decode идёт за один проход по callback.
+  const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  let s = String(html)
+    // блочные теги → разделитель абзацев (до очистки сущностей, чтобы
+    // случайный `&lt;/p&gt;` не превратился в реальный </p> и не сломал split)
     .replace(/<\/(p|h[1-6]|li|ul|ol|blockquote|div|section|article|figure|figcaption|table|tr|thead|tbody|td|th)>/gi, '\n\n')
-    .replace(/<br\s*\/?>/gi, '\n')
-    // прочие теги
-    .replace(/<[^>]+>/g, ' ')
-    // entities (минимум — &nbsp; и числовые)
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#x?[0-9a-f]+;/gi, ' ')
-    .replace(/[\u00A0]/g, ' ');
+    .replace(/<br\s*\/?>/gi, '\n');
+
+  // Многократное снятие тегов — на случай вложенных артефактов вида
+  // `<<script>>` (js/incomplete-multi-character-sanitization).
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(/<[^>]*>/g, ' ');
+  } while (s !== prev);
+
+  // Любые остаточные одиночные «<»/«>» (например, из обрезанного тега) —
+  // в пробел; иначе CodeQL справедливо считает strip неполным.
+  s = s.replace(/[<>]/g, ' ');
+
+  // Decode entities за один проход — без double-escape.
+  s = s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (m, body) => {
+    if (body.startsWith('#x') || body.startsWith('#X')) {
+      const cp = parseInt(body.slice(2), 16);
+      return Number.isFinite(cp) ? ' ' : ' ';
+    }
+    if (body.startsWith('#')) {
+      const cp = parseInt(body.slice(1), 10);
+      return Number.isFinite(cp) ? ' ' : ' ';
+    }
+    const lower = body.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(ENTITIES, lower) ? ENTITIES[lower] : ' ';
+  });
+
+  return s.replace(/[\u00A0]/g, ' ');
 }
 
 /**
