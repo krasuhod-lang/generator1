@@ -826,6 +826,13 @@ async function ensureSchema() {
       END$$;
     `);
 
+    // Migration 023: хранилище fact-check отчёта (Phase 1 / P0-1).
+    // Колонка nullable, не ломает старые задачи и пайплайны без grounding'а.
+    await db.query(`
+      ALTER TABLE info_article_tasks
+        ADD COLUMN IF NOT EXISTS fact_check_report JSONB;
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$

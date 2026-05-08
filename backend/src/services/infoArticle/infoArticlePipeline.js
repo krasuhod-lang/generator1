@@ -52,6 +52,7 @@ const {
   buildSerpEvidence,
   renderEvidenceForPrompt,
 } = require('./serpEvidence.service');
+const { runFactCheck } = require('./factCheck.service');
 
 // ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
 // Гейт. По умолчанию OFF — фундамент укладываем без изменения дефолтного
@@ -60,6 +61,13 @@ const {
 // читают evidence. Включить локально: INFO_ARTICLE_GROUNDING_ENABLED=true.
 const INFO_ARTICLE_GROUNDING_ENABLED =
   String(process.env.INFO_ARTICLE_GROUNDING_ENABLED || '').toLowerCase() === 'true';
+
+// ── Fact-check verifier (Phase 1 / P0-1) ──────────────────────────────
+// Детерминированный пост-аудит финального articleHtml против собранных
+// SERP-evidence сниппетов. По умолчанию OFF; включается независимо от
+// grounding-флага, но требует наличия task.__serpEvidence (иначе skip).
+const INFO_ARTICLE_FACTCHECK_ENABLED =
+  String(process.env.INFO_ARTICLE_FACTCHECK_ENABLED || '').toLowerCase() === 'true';
 const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -1273,6 +1281,44 @@ async function processInfoArticleTask(taskId) {
         await appendLog(
           taskId,
           `⚠ Не удалось дописать ${inj.skipped.length} пропущенных ссылок (нет <p> в целевой H2-секции)`,
+          'warn',
+        );
+      }
+    }
+
+    // 11c. Детерминированный fact-check (Phase 1 / P0-1).
+    //      Гейтировано env'ом INFO_ARTICLE_FACTCHECK_ENABLED (default OFF) +
+    //      требует, чтобы grounding отработал и собрал evidence (иначе нечего
+    //      сверять). Не валит pipeline ни при каких сбоях — graceful warn.
+    if (INFO_ARTICLE_FACTCHECK_ENABLED && task.__serpEvidence) {
+      try {
+        const factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+        await saveColumn(taskId, 'fact_check_report', factCheck);
+        const s = factCheck.summary;
+        const verdictIcon = s.verdict === 'pass' ? '✅'
+          : s.verdict === 'review' ? '⚠'
+          : s.verdict === 'na' ? 'ℹ'
+          : '❌';
+        await appendLog(
+          taskId,
+          `${verdictIcon} Fact-check: claims=${s.total} ` +
+          `(supported=${s.supported}/${s.supportedPct}%, partial=${s.partial}, unsupported=${s.unsupported}) ` +
+          `verdict=${s.verdict}`,
+          s.verdict === 'pass' || s.verdict === 'na' ? 'ok' : 'info',
+        );
+        if (factCheck.top_unsupported.length > 0) {
+          const sample = factCheck.top_unsupported.slice(0, 3)
+            .map((c) => `«${c.text.slice(0, 120)}…»`).join(' | ');
+          await appendLog(
+            taskId,
+            `🔎 Fact-check: ${factCheck.top_unsupported.length} утверждений без подтверждения в SERP-evidence. Примеры: ${sample}`,
+            'warn',
+          );
+        }
+      } catch (factCheckErr) {
+        await appendLog(
+          taskId,
+          `⚠ Fact-check не выполнился: ${factCheckErr.message} — продолжаем без отчёта`,
           'warn',
         );
       }
