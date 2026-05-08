@@ -94,7 +94,10 @@ const CLAIM_SIGNAL_RE = new RegExp(
 function stripHtml(html) {
   if (!html || typeof html !== 'string') return '';
   // Удаляем code/pre/script/style целиком (числа в коде — не факты).
-  let s = html.replace(/<(?:script|style|code|pre)\b[^>]*>[\s\S]*?<\/(?:script|style|code|pre)>/gi, ' ');
+  // Допускаем пробелы внутри закрывающего тега (</script  > и т.п.) —
+  // иначе CodeQL js/bad-tag-filter справедливо ругается на пропуск
+  // edge-case'а, через который контент может «утечь» в plain text.
+  let s = html.replace(/<(script|style|code|pre)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
   // Заголовки и блоки — заменяем на разделитель, чтобы не склеивать
   // соседние предложения в одно гигантское.
   s = s.replace(/<\/(?:h[1-6]|p|li|div|section|article|header|footer|td|th|tr|table|ul|ol|blockquote|figcaption|caption)\s*>/gi, '. ');
@@ -104,9 +107,11 @@ function stripHtml(html) {
   // Раскрываем основные HTML-сущности; полное декодирование оставляем за
   // потребителем — нам важно только, чтобы &amp;/&nbsp;/&laquo;/&raquo;
   // не ломали разбиение на предложения.
+  // ВАЖНО: &amp; декодируем В ПОСЛЕДНЮЮ ОЧЕРЕДЬ — иначе входная строка
+  // вида "&amp;lt;" сначала превратится в "&lt;", а потом в "<" (двойное
+  // декодирование, см. CodeQL js/double-escaping).
   s = s
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
@@ -114,7 +119,8 @@ function stripHtml(html) {
     .replace(/&raquo;/gi, '»')
     .replace(/&mdash;/gi, '—')
     .replace(/&ndash;/gi, '–')
-    .replace(/&hellip;/gi, '…');
+    .replace(/&hellip;/gi, '…')
+    .replace(/&amp;/gi, '&');
   // Свёртка пробелов.
   s = s.replace(/\s+/g, ' ').trim();
   return s;

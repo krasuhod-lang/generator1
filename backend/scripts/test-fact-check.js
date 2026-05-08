@@ -72,6 +72,22 @@ check('decodes basic HTML entities', () => {
   assert.ok(out.includes('100 руб'),    `nbsp not decoded: ${out}`);
   assert.ok(out.includes('…'),          `hellip not decoded: ${out}`);
 });
+check('does NOT double-decode &amp;lt; into <', () => {
+  // Если декодировать &amp; раньше &lt;, "&amp;lt;" → "&lt;" → "<".
+  // Корректно: после полного прохода должно остаться "&lt;" (один уровень).
+  const out = stripHtml('A &amp;lt; B и обычный &amp; ещё &lt;tag&gt;');
+  assert.ok(out.includes('&lt;'),       `double-decoding: ${out}`);
+  assert.ok(out.includes('&'),          `lost ampersand: ${out}`);
+  assert.ok(out.includes('<tag>'),      `single-decoded &lt;tag&gt; missing: ${out}`);
+});
+check('strips </script > with whitespace before >', () => {
+  // CodeQL js/bad-tag-filter: closing tag may include whitespace.
+  const out = stripHtml('<p>Visible</p><script>var leak=42;</script  ><p>Tail</p>');
+  assert.ok(out.includes('Visible'));
+  assert.ok(out.includes('Tail'));
+  assert.ok(!out.includes('leak'),  `script with trailing space leaked: ${out}`);
+  assert.ok(!out.includes('42'),    `script content leaked: ${out}`);
+});
 
 // ── Test 2: splitSentences ───────────────────────────────────────────
 
