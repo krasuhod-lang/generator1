@@ -34,8 +34,8 @@ check('strips tags, keeps text', () => {
 check('strips script/style/code', () => {
   const out = _internal.htmlToPlain('<p>Visible</p><script>x=1</script>');
   assert.ok(out.includes('Visible'));
-  // we don't enforce script-strip here, just that no tag leaks
-  assert.ok(!/<script>/.test(out));
+  // we don't enforce script-strip here, just that no tag leaks (case-insensitive)
+  assert.ok(!/<script\b/i.test(out));
 });
 
 // ── Test 2: splitSentences ───────────────────────────────────

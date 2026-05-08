@@ -27,7 +27,7 @@ function check(name, fn) {
 
 // ── Test 1: detectArticleIntent ──────────────────────────────────────
 console.log('\n=== Test 1: detectArticleIntent ===');
-check('info-statья → intent=info', () => {
+check('info-статья → intent=info', () => {
   const html = '<h1>Как выбрать диван</h1>'
     + '<p>В этой статье разберёмся, как и почему стоит выбирать диван. </p>'.repeat(30)
     + '<h2>Часто задаваемые вопросы</h2>'

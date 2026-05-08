@@ -33,13 +33,17 @@ const EEAT_CHUNKED_ENABLED = (() => {
   return true;
 })();
 
+const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 const H2_OPEN_RE = /<h2\b[^>]*>/i;
 const H2_OPEN_RE_G = /<h2\b[^>]*>/gi;
 
 function stripTagsForLabel(s) {
-  return String(s || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  // Используем итеративный stripper из utils/stripHtmlTags — он устойчив
+  // к нестед/малформ HTML и обходит CodeQL js/incomplete-multi-character-sanitization.
+  return stripHtmlTagsToText(String(s || '')).replace(/\s+/g, ' ').trim();
 }
 
 /**

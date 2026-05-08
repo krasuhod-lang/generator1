@@ -209,10 +209,10 @@ function bureaucrateseRatio(plain, words) {
     } else {
       // одиночное слово — prefix-match: term должен быть началом слова длиной
       // ≥ term.length+0 и иметь только русские суффиксы дальше (≤ 6 букв).
-      // Берём первые 5 букв термина как стабильный «корень-стемм» — короче
-      // нельзя (даст шум), длиннее — слишком строго (отрежет морфологию).
-      const root = term.slice(0, Math.min(term.length, term.length <= 5 ? term.length : term.length - 2))
-        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Берём «корень-стемм»: для коротких терминов (≤5 букв) — целиком,
+      // для длинных — без последних 2 букв (отрезаем хвост-суффикс).
+      const rootLen = term.length <= 5 ? term.length : term.length - 2;
+      const root = term.slice(0, rootLen).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       re = new RegExp(`(?:^|\\s)${root}[а-я]{0,8}(?=\\s|[.,;:!?)»]|$)`, 'g');
     }
     const m = text.match(re);
