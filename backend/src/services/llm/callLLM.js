@@ -327,8 +327,14 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
       const result    = await withProviderSlot(adapter, () => callFn(system, prompt, callOpts));
       const cacheHit  = adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0;
-      // Для Gemini подмешиваем thoughts/cached токены из usageMetadata в формулу
-      // стоимости. Для DeepSeek/Grok эти поля не существуют → undefined → не влияют.
+      // Передаём в calcCost полный набор usage-полей:
+      //   • Gemini: thoughts/cached (из usageMetadata) — точная стоимость reasoning + cache
+      //     дисконт. Long/short tier выбирается по contextTokens (если задан) либо по tokensIn.
+      //   • DeepSeek: cachedTokens (из usage.prompt_cache_hit_tokens) — точный mixed-cache
+      //     биллинг. Boolean `cacheHit` оставлен как BC-флаг для случаев, когда адаптер
+      //     не отдал точное число (новая логика calcCost его проигнорирует, если
+      //     cachedTokens > 0).
+      //   • Grok: оба поля undefined → не влияют.
       const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut, {
         cacheHit,
         thoughtsTokens: result.thoughtsTokens || 0,

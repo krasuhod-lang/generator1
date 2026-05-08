@@ -111,6 +111,11 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
       tokensOut: usage.completion_tokens   || 0,
       model:     data.model               || DEEPSEEK_MODEL,
       cacheHitTokens: usage.prompt_cache_hit_tokens || 0,
+      // Дублируем под унифицированным именем `cachedTokens` для priceCalculator —
+      // это позволяет считать mixed-cache билл точно (cached × hit-rate +
+      // miss × miss-rate), а не «всё-или-ничего» по boolean cacheHit.
+      // Контракт расширен только добавлением поля; cacheHitTokens сохранён для BC.
+      cachedTokens: usage.prompt_cache_hit_tokens || 0,
       logprobs: logprobsData,
     };
   } catch (err) {

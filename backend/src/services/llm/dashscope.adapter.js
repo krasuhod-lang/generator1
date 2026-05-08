@@ -24,6 +24,7 @@
 
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { calcCost } = require('../metrics/priceCalculator');
 
 // ── Конфигурация ─────────────────────────────────────────────────────────
 // Базовый URL OpenAI-совместимого режима DashScope (международный регион).
@@ -263,9 +264,33 @@ async function callDashscope({
     throw e;
   }
 
+  // ── Расчёт стоимости (включаем в usage) ──────────────────────────────
+  // До этого DashScope-вызовы НИКАК не учитывались в биллинге (вкладка
+  // «Сформировать JSON» уходила в /0/ затрат на admin-dashboard). Теперь
+  // адаптер сам считает стоимость по тарифу из priceCalculator и возвращает
+  // её в `usage.cost_usd` + `usage.model` (имя реальной модели, как ответил
+  // DashScope, либо safeModel — на случай эха `data.model` без префикса).
+  // Контракт `{ choice, usage }` остаётся обратно совместимым: добавлены
+  // только новые поля, прежние (prompt_tokens / completion_tokens / total_tokens)
+  // сохранены.
+  const usageRaw = data.usage || null;
+  const respondedModel = (typeof data.model === 'string' && data.model.trim())
+    ? data.model.trim()
+    : safeModel;
+  let usage = usageRaw;
+  if (usageRaw && Number.isFinite(Number(usageRaw.prompt_tokens))) {
+    const tIn  = Number(usageRaw.prompt_tokens)     || 0;
+    const tOut = Number(usageRaw.completion_tokens) || 0;
+    const costUsd = calcCost('dashscope', tIn, tOut, { model: respondedModel });
+    usage = Object.assign({}, usageRaw, {
+      model:    respondedModel,
+      cost_usd: Number.isFinite(costUsd) ? costUsd : 0,
+    });
+  }
+
   return {
     choice: data.choices[0],
-    usage:  data.usage || null,
+    usage,
   };
 }
 
