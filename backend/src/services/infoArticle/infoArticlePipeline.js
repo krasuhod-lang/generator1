@@ -1080,7 +1080,7 @@ async function processInfoArticleTask(taskId) {
 
     // 8.5. SERP-evidence grounding (Phase 1 / P0-2). Гейтировано env'ом
     // INFO_ARTICLE_GROUNDING_ENABLED (default OFF). Не валит pipeline ни при
-    // каких сбоях — графdful: при ошибке task.__serpEvidence = null,
+    // каких сбоях — graceful: при ошибке task.__serpEvidence = null,
     // writer-промт получит на 1 блок меньше.
     task.__serpEvidence = null;
     if (INFO_ARTICLE_GROUNDING_ENABLED) {
