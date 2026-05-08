@@ -26,6 +26,7 @@
 
 const db = require('../../config/db');
 const { callLLM } = require('../llm/callLLM');
+const { runEeatAuditCore } = require('../eeatAudit/core');
 const { loadLinkArticlePrompt } = require('../../prompts/linkArticle');
 const { generateImage, IMAGE_PRICE_USD } = require('./nanoBananaPro.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
@@ -446,6 +447,11 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
 }
 
 // ── Stage 5: E-E-A-T audit (DeepSeek) ──────────────────────────────────
+//
+// Phase 2 / С2: использует унифицированный eeatAudit/core.js (общий с
+// info-article). Локальная версия вокруг — только для сборки user-prompt'а
+// (link-article-специфичные поля: anchor_text/anchor_url) и для прокидывания
+// link-article порога LINK_ARTICLE_EEAT_TARGET.
 async function runEeatAudit(task, audience, intents, articleHtml, ctx) {
   const user = [
     `[INPUTS]`,
@@ -460,26 +466,16 @@ async function runEeatAudit(task, audience, intents, articleHtml, ctx) {
     `article_html: ${articleHtml.slice(0, 14000)}`,
   ].join('\n');
 
-  const result = await callLLM(
-    'deepseek',
-    loadLinkArticlePrompt('stage5Eeat'),
-    user,
-    { retries: 3, temperature: 0.2, callLabel: 'LinkArticle Stage 5 (E-E-A-T audit)', ...ctx },
-  );
-
-  // Нормализация: total_score в [0, 10], issues — массив, verdict — enum.
-  const norm = result || {};
-  const totalRaw = Number(norm.total_score);
-  if (!Number.isFinite(totalRaw)) {
-    norm.total_score = 0;
-  } else {
-    norm.total_score = Math.max(0, Math.min(10, Math.round(totalRaw * 10) / 10));
-  }
-  if (!Array.isArray(norm.issues)) norm.issues = [];
-  if (!['pass', 'refine', 'reject'].includes(norm.verdict)) {
-    norm.verdict = norm.total_score >= LINK_ARTICLE_EEAT_TARGET ? 'pass' : 'refine';
-  }
-  return norm;
+  return runEeatAuditCore({
+    adapter:   'deepseek',
+    system:    loadLinkArticlePrompt('stage5Eeat'),
+    userText:  user,
+    threshold: LINK_ARTICLE_EEAT_TARGET,
+    callOptions: { retries: 3, temperature: 0.2, callLabel: 'LinkArticle Stage 5 (E-E-A-T audit)', ...ctx },
+    // chunkOpts намеренно не передаём: link-article короче (≤ ~6kb обычно),
+    // и историческое поведение «один LLM-вызов» сохранено для обратной
+    // совместимости с существующими E-E-A-T логами и метриками link-article.
+  });
 }
 
 async function runImagePromptsGen(task, structure, articleHtml, ctx) {

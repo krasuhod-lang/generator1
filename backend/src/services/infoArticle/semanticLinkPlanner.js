@@ -257,6 +257,69 @@ function jaccard(a, b) {
   return union ? inter / union : 0;
 }
 
+// ── Phase 2 / Б3: char-bigram cosine — морфология-tolerant similarity ─
+//
+// Дополнительный «семантический» компонент скоринга: вместо stem-униграмм
+// строим вектор character-биграмм (latin/cyrillic, lowercase, без пробелов).
+// Это лучше ловит:
+//   • опечатки/морфологические варианты, которые «съел» stemmer;
+//   • англоязычные термины внутри русского текста (бренды, типы продуктов);
+//   • короткие H1 с малым числом значащих слов (2-3 слова).
+//
+// По сути это «sparse character-embedding» — приближение того, что должны
+// были бы давать ML-эмбеддинги (см. relevance/app/embeddings.py), но без
+// зависимости от sentence-transformers и не требуя сети.
+//
+// Гейтировано env'ом:
+//   LINK_SEMANTIC_COSINE_WEIGHT  — вес в итоговом score (0..1, default 0).
+//   LINK_MIN_SEMANTIC_COSINE     — отдельный мин. порог по семантике (0 = OFF).
+// При weight=0 поведение не меняется (back-compat).
+const LINK_SEMANTIC_COSINE_WEIGHT = (() => {
+  const v = parseFloat(process.env.LINK_SEMANTIC_COSINE_WEIGHT);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0;
+})();
+
+const LINK_MIN_SEMANTIC_COSINE = (() => {
+  const v = parseFloat(process.env.LINK_MIN_SEMANTIC_COSINE);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0;
+})();
+
+function charBigramVec(text) {
+  const v = new Map();
+  if (!text) return v;
+  const norm = String(text).toLowerCase().replace(/[ёЁ]/g, 'е').replace(/[^а-яa-z0-9]/g, '');
+  if (norm.length < 2) return v;
+  for (let i = 0; i < norm.length - 1; i += 1) {
+    const k = norm.slice(i, i + 2);
+    v.set(k, (v.get(k) || 0) + 1);
+  }
+  return v;
+}
+
+function cosineCharVec(a, b) {
+  if (!a.size || !b.size) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (const [, w] of a) na += w * w;
+  for (const [, w] of b) nb += w * w;
+  if (!na || !nb) return 0;
+  const [small, big] = a.size < b.size ? [a, b] : [b, a];
+  for (const [k, w] of small) {
+    const w2 = big.get(k);
+    if (w2) dot += w * w2;
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function buildSectionTextForSemantic(section) {
+  // Используем H2 + descriptor + jtbd — самые «концептуальные» поля.
+  return [section?.h2 || '', section?.descriptor || '', section?.jtbd_cluster || '']
+    .filter(Boolean).join(' ');
+}
+
+function buildLinkTextForSemantic(link) {
+  return `${link?.h1 || ''} ${link?.url || ''}`;
+}
+
 /**
  * Computes shortlist per h2. Returns {
  *   shortlistByH2: { [section_index]: [{url, h1, score, h1_stems, matched_lsi}] },
@@ -276,6 +339,12 @@ function computeShortlists({ outline, links, k = SHORTLIST_SIZE }) {
   const h2Vectors   = h2Profiles.map((b) => tfidfVector(b, idfCorpus));
   const linkVectors = linkProfiles.map((b) => tfidfVector(b, idfCorpus));
 
+  // Phase 2 / Б3: дополнительные char-bigram векторы (только если включено).
+  const semWeight = LINK_SEMANTIC_COSINE_WEIGHT;
+  const useSemantic = semWeight > 0;
+  const h2SemVecs    = useSemantic ? sections.map((s) => charBigramVec(buildSectionTextForSemantic(s))) : null;
+  const linkSemVecs  = useSemantic ? links.map((l) => charBigramVec(buildLinkTextForSemantic(l))) : null;
+
   const shortlistByH2 = {};
   const sectionMeta = [];
 
@@ -285,13 +354,31 @@ function computeShortlists({ outline, links, k = SHORTLIST_SIZE }) {
     const scored = links.map((lnk, j) => {
       const cos = cosine(h2Vectors[i], linkVectors[j]);
       const jac = jaccard(h2Profiles[i], linkProfiles[j]);
-      const score = 0.7 * cos + 0.3 * jac;
+      const baseScore = 0.7 * cos + 0.3 * jac;
+      let semCos = 0;
+      let score = baseScore;
+      if (useSemantic) {
+        semCos = cosineCharVec(h2SemVecs[i], linkSemVecs[j]);
+        // Линейная комбинация: (1-w)·baseScore + w·semCos.
+        // Так при weight=1 score == чистый char-bigram cosine,
+        // при weight=0 score == baseScore (back-compat).
+        score = (1 - semWeight) * baseScore + semWeight * semCos;
+      }
       const matched = [];
       for (const [stem] of linkProfiles[j]) if (h2Profiles[i].has(stem)) matched.push(stem);
       return {
         url:           lnk.url,
         h1:            lnk.h1,
         score:         Math.round(score * 1000) / 1000,
+        // Оставляем компоненты для прозрачности (и для пост-валидации).
+        score_components: useSemantic
+          ? {
+              cosine_tfidf:     Math.round(cos * 1000) / 1000,
+              jaccard:          Math.round(jac * 1000) / 1000,
+              char_bigram_cos:  Math.round(semCos * 1000) / 1000,
+              semantic_weight:  semWeight,
+            }
+          : undefined,
         h1_stems:      Array.from(linkProfiles[j].keys()).slice(0, 16),
         matched_lsi:   matched.slice(0, 12),
       };
@@ -368,6 +455,22 @@ function postValidate({ link_plan, shortlistByH2, sectionMeta, totalMin, totalMa
       if (score < MIN_SEMANTIC_SCORE) {
         issues.push({ h2_index: meta.index, kind: 'low_score', url: pick.url, score });
         continue;
+      }
+      // 2b) Phase 2 / Б3: дополнительный гейт по char-bigram cosine
+      //     (если включён). Активен только при LINK_MIN_SEMANTIC_COSINE>0
+      //     и наличии score_components в shortlist'е.
+      if (LINK_MIN_SEMANTIC_COSINE > 0 && slEntry?.score_components?.char_bigram_cos != null) {
+        const semCos = slEntry.score_components.char_bigram_cos;
+        if (semCos < LINK_MIN_SEMANTIC_COSINE) {
+          issues.push({
+            h2_index: meta.index,
+            kind:     'low_semantic_cosine',
+            url:      pick.url,
+            char_bigram_cos: semCos,
+            min_required:    LINK_MIN_SEMANTIC_COSINE,
+          });
+          continue;
+        }
       }
       // 3) Anchor sanitization.
       let anchor = (pick.anchor_text || '').trim();
