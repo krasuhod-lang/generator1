@@ -159,6 +159,52 @@ async function compare(payload) {
   }
 }
 
+/**
+ * SERP-evidence (Phase 1 / P0-2 grounding) — top-K BM25-абзацев из top SERP HTML.
+ *
+ * @param {{
+ *   query: string,
+ *   documents: Array<{ url:string, html:string, published_at?:string }>,
+ *   options?: { top_k_paragraphs?: number, max_chars_per_url?: number },
+ * }} payload
+ * @returns {Promise<{ evidence: Array<object>, stats: object }>}
+ */
+async function evidence(payload) {
+  if (!payload || !Array.isArray(payload.documents)) {
+    throw new Error('evidence(): payload.documents must be an array');
+  }
+  if (typeof payload.query !== 'string') {
+    throw new Error('evidence(): payload.query must be a string');
+  }
+  try {
+    const res = await axios.post(
+      `${BASE_URL}/evidence`,
+      payload,
+      {
+        // Evidence — самый «лёгкий» из эндпоинтов (без BM25 на уровне корпуса
+        // и без NER), но мы парсим до 20 крупных HTML — ставим тот же
+        // потолок таймаута, что и /analyze, чтобы не упереться на тяжёлых
+        // страницах.
+        timeout: ANALYZE_TIMEOUT_MS,
+        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        maxBodyLength:    256 * 1024 * 1024,
+        maxContentLength: 256 * 1024 * 1024,
+        validateStatus: (s) => s >= 200 && s < 300,
+      },
+    );
+    return res.data;
+  } catch (err) {
+    const code = err?.response?.status || err?.code || 'ERR';
+    const detail =
+      err?.response?.data?.detail
+      || err?.response?.data?.error
+      || err?.message
+      || 'unknown';
+    const safeDetail = String(detail).replace(/\s+/g, ' ').slice(0, 300);
+    throw new Error(`relevance-service /evidence ${code}: ${safeDetail}`);
+  }
+}
+
 async function health() {
   try {
     const res = await axios.get(`${BASE_URL}/health`, {
@@ -187,6 +233,7 @@ module.exports = {
   analyze,
   cocoons,
   compare,
+  evidence,
   health,
   RELEVANCE_BASE_URL: BASE_URL,
   ANALYZE_TIMEOUT_MS,

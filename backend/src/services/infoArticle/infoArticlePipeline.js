@@ -48,6 +48,18 @@ const {
 const { synthesizeLsiSet, measureLsiCoverageInHtml } = require('./lsiPipeline');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
 const { domainsFromLinks } = require('./excelParser');
+const {
+  buildSerpEvidence,
+  renderEvidenceForPrompt,
+} = require('./serpEvidence.service');
+
+// ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
+// Гейт. По умолчанию OFF — фундамент укладываем без изменения дефолтного
+// поведения; включение прод-окружения — отдельным конфиг-PR после того,
+// как будут готовы P0-1 (fact-check) и P0-3 (антиплагиат), которые тоже
+// читают evidence. Включить локально: INFO_ARTICLE_GROUNDING_ENABLED=true.
+const INFO_ARTICLE_GROUNDING_ENABLED =
+  String(process.env.INFO_ARTICLE_GROUNDING_ENABLED || '').toLowerCase() === 'true';
 const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -372,6 +384,17 @@ async function runWriter(task, args, ctx, opts = {}) {
       `lsi_set: ${pointerOrJson('§7 LSI-набор', lsi, iakbReady, 2500)}`,
       `link_plan: ${pointerOrJson('§8 Перелинковка', linkPlan, iakbReady, 6000)}`,
     ];
+    // Phase 1 / P0-2: SERP-evidence grounding.
+    // Намеренно НЕ кладём evidence в IAKB (и тем более в Gemini cache) —
+    // цель в том, чтобы writer видел свежие фрагменты топа на каждом
+    // вызове (включая corrective retry), а кэш IAKB оставался стабильным
+    // для других стадий. Если evidence отсутствует или пуст —
+    // renderEvidenceForPrompt возвращает '', ничего не вставляем.
+    const evidenceBlock = renderEvidenceForPrompt(task.__serpEvidence);
+    if (evidenceBlock) {
+      base.push('');
+      base.push(evidenceBlock);
+    }
     if (noLinks) {
       // Excel-база коммерческих ссылок не загружена → пишем статью без перелинковки.
       // Без этого маркера writer мог бы попытаться придумать фейковые href.
@@ -1036,6 +1059,48 @@ async function processInfoArticleTask(taskId) {
       relevanceSignals,
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
+
+    // 8.5. SERP-evidence grounding (Phase 1 / P0-2). Гейтировано env'ом
+    // INFO_ARTICLE_GROUNDING_ENABLED (default OFF). Не валит pipeline ни при
+    // каких сбоях — графdful: при ошибке task.__serpEvidence = null,
+    // writer-промт получит на 1 блок меньше.
+    task.__serpEvidence = null;
+    if (INFO_ARTICLE_GROUNDING_ENABLED) {
+      try {
+        await setStage(taskId, 'stage2d_grounding', 56);
+        const evidenceResult = await buildSerpEvidence({
+          query:  task.topic,
+          region: task.region || '',
+          logger: (msg, level) => { appendLog(taskId, msg, level || 'info').catch(() => {}); },
+        });
+        if (evidenceResult && Array.isArray(evidenceResult.evidence) && evidenceResult.evidence.length) {
+          task.__serpEvidence = evidenceResult;
+          await appendLog(
+            taskId,
+            `📚 SERP-evidence: ${evidenceResult.evidence.length} URL × до ${evidenceResult.stats.top_k || '?'} сниппетов ` +
+            `(${evidenceResult.stats.snippet_count} всего, ${evidenceResult.stats.duration_ms} мс, ` +
+            `cache=${evidenceResult.stats.cache_hit ? 'hit' : 'miss'})`,
+            'ok',
+          );
+          if (Array.isArray(evidenceResult.warnings) && evidenceResult.warnings.length) {
+            await appendLog(taskId, `⚠ SERP-evidence warnings: ${evidenceResult.warnings.join('; ')}`, 'warn');
+          }
+        } else {
+          const warns = (evidenceResult && evidenceResult.warnings) || [];
+          await appendLog(
+            taskId,
+            `⚠ SERP-evidence пуст (warnings: ${warns.join('; ') || 'unknown'}) — writer без grounding`,
+            'warn',
+          );
+        }
+      } catch (groundingErr) {
+        await appendLog(
+          taskId,
+          `⚠ SERP-evidence не собран: ${groundingErr.message} — writer продолжит без grounding`,
+          'warn',
+        );
+      }
+    }
 
     if (INFO_ARTICLE_GEMINI_CACHE_ENABLED) {
       try {
