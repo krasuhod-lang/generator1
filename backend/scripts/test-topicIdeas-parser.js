@@ -5,7 +5,7 @@
  *
  * Покрывает:
  *   • Извлечение TOPIC_IDEAS_JSON-блока по sentinel-комментариям;
- *   • Графfeful возврат null на отсутствующий sentinel / битый JSON /
+ *   • Graceful возврат null на отсутствующий sentinel / битый JSON /
  *     пустые topics / битые типы / неизвестные enum'ы;
  *   • Корректное усечение длинных строк до LIM-лимитов;
  *   • Валидацию enum'ов primary_intent / expected_format / confidence;
