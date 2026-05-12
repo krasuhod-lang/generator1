@@ -605,6 +605,29 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_trends_task       ON article_topic_trends (task_id)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_trends_user_niche ON article_topic_trends (user_id, niche, normalized_name)`);
 
+    // ─── Migration 029: Article Topics — Idea-mode (Подбор тем статей) ──
+    // Третий режим задачи: 'topic_ideas' — анализ рынка/сущностей/интентов,
+    // ровно N предложенных тем, описание ЦА и список фактов о бренде/нише.
+    // Колонки additive-only, чтобы старые задачи main/deep_dive не пострадали.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_type t
+            JOIN pg_enum e ON t.oid = e.enumtypid
+           WHERE t.typname = 'article_topic_mode'
+             AND e.enumlabel = 'topic_ideas'
+        ) THEN
+          ALTER TYPE article_topic_mode ADD VALUE 'topic_ideas';
+        END IF;
+      END$$;
+    `);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS topic_count_requested INT`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS topic_count_returned  INT`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS topic_ideas_json      JSONB`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS audience_profile      JSONB`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS brand_facts_json      JSONB`);
+
     // ─── Migration 017: Info Article Generator (Статья в блог) ────────
     // Информационная статья на основе Excel'я коммерческих страниц с
     // семантической перелинковкой 1–2 ссылок на каждый <h2>. Все DDL

@@ -26,6 +26,7 @@ const {
   persistExtractedTrends,
   buildSiblingDeepDivesBlock,
 } = require('./articleTopicsTrends');
+const { extractTopicIdeasJsonBlock } = require('./topicIdeasParser');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 
 const PROMPTS_DIR = path.join(__dirname, '..', '..', 'prompts', 'articleTopics');
@@ -33,6 +34,7 @@ const PROMPTS_DIR = path.join(__dirname, '..', '..', 'prompts', 'articleTopics')
 // Кэшируем тексты промптов в память при первом обращении — файлы не меняются.
 let _mainPromptCache     = null;
 let _deepDivePromptCache = null;
+let _topicIdeasPromptCache = null;
 
 function _loadMainPrompt() {
   if (_mainPromptCache == null) {
@@ -46,6 +48,13 @@ function _loadDeepDivePrompt() {
     _deepDivePromptCache = fs.readFileSync(path.join(PROMPTS_DIR, 'deepDive.txt'), 'utf-8');
   }
   return _deepDivePromptCache;
+}
+
+function _loadTopicIdeasPrompt() {
+  if (_topicIdeasPromptCache == null) {
+    _topicIdeasPromptCache = fs.readFileSync(path.join(PROMPTS_DIR, 'topicIdeas.txt'), 'utf-8');
+  }
+  return _topicIdeasPromptCache;
 }
 
 /**
@@ -171,6 +180,26 @@ async function processArticleTopicTask(taskId) {
         PARENT_CONTEXT:     parentContext || '(отсутствует — опирайся только на тренд и нишу)',
         SIBLING_DEEP_DIVES: siblingBlock,
       });
+    } else if (task.mode === 'topic_ideas') {
+      // Третий режим: подбор N тем статей + анализ рынка/сущностей/интентов
+      // + описание ЦА + список фактов о бренде. Inputs (target_url,
+      // brand_hint, topic_count) сохранены controllerом в module_context_used
+      // на момент INSERT — читаем их оттуда (плюс всегда есть fallback на
+      // sane defaults).
+      const stashedInputs = (task.module_context_used && typeof task.module_context_used === 'object')
+        ? (task.module_context_used.topic_ideas_inputs || {})
+        : {};
+      const requestedCount = Number(stashedInputs.topic_count)
+                           || Number(task.topic_count_requested)
+                           || 10;
+      userPrompt = _interpolate(_loadTopicIdeasPrompt(), {
+        NICHE:       task.niche || '',
+        REGION:      task.region || '(не указан)',
+        AUDIENCE:    task.audience || '(не указано)',
+        TARGET_URL:  String(stashedInputs.target_url || '').slice(0, 300) || '(не указан)',
+        BRAND_HINT:  String(stashedInputs.brand_hint || '').slice(0, 300) || '(не указано)',
+        TOPIC_COUNT: String(requestedCount),
+      });
     } else {
       userPrompt = _interpolate(_loadMainPrompt(), {
         NICHE:            task.niche || '',
@@ -223,13 +252,55 @@ async function processArticleTopicTask(taskId) {
       }
     }
 
+    // ── Post-processing для topic_ideas: TOPIC_IDEAS_JSON-блок →
+    //    topic_ideas_json + audience_profile + brand_facts_json +
+    //    topic_count_returned. Парсер сам режет длинные строки и
+    //    валидирует enum'ы; на любой сбой возвращает null — задачу не валим.
+    let topicIdeasJson  = null;
+    let audienceProfile = null;
+    let brandFactsJson  = null;
+    let topicCountReturned = null;
+    let topicIdeasWarnings = null;
+    if (task.mode === 'topic_ideas') {
+      try {
+        topicIdeasJson = extractTopicIdeasJsonBlock(result.text);
+      } catch (parseErr) {
+        console.warn(`[articleTopics] TOPIC_IDEAS_JSON parse failed for ${taskId}: ${parseErr.message}`);
+      }
+      if (topicIdeasJson) {
+        audienceProfile    = topicIdeasJson.audience_profile || null;
+        brandFactsJson     = topicIdeasJson.brand_facts || null;
+        topicCountReturned = Number.isFinite(topicIdeasJson.topic_count_returned)
+          ? topicIdeasJson.topic_count_returned
+          : (Array.isArray(topicIdeasJson.topics) ? topicIdeasJson.topics.length : null);
+        // Warning: модель вернула меньше тем, чем запросили.
+        const requested = Number(task.topic_count_requested) || null;
+        if (requested && topicCountReturned != null && topicCountReturned < requested) {
+          topicIdeasWarnings = {
+            kind: 'fewer_topics_than_requested',
+            requested,
+            returned: topicCountReturned,
+          };
+        }
+      } else {
+        topicIdeasWarnings = { kind: 'topic_ideas_json_missing_or_invalid' };
+      }
+    }
+
     // Снимок того, какие inputs реально подмешаны — для последующего
     // DSPy/MIPROv2 анализа качества (а пока — для отладки в admin-панели).
+    // Сохраняем уже существующие topic_ideas_inputs (если они были записаны
+    // controllerом при INSERT) — они нужны для воспроизводимости запроса.
+    const prevContext = (task.module_context_used && typeof task.module_context_used === 'object')
+      ? task.module_context_used : {};
     const moduleContextUsed = {
+      ...prevContext,
       mode:              task.mode,
       siblings_injected: siblingsCount,
       trends_extracted:  trendsJson && Array.isArray(trendsJson.trends) ? trendsJson.trends.length : 0,
       ru_cis_block:      trendsJson ? trendsJson.ru_cis_block_present : null,
+      topic_ideas_returned: topicCountReturned,
+      topic_ideas_warnings: topicIdeasWarnings,
       generated_at:      new Date().toISOString(),
     };
 
@@ -243,6 +314,10 @@ async function processArticleTopicTask(taskId) {
               cost_usd          = $6,
               trends_json       = $7,
               module_context_used = $8,
+              topic_ideas_json    = $9,
+              audience_profile    = $10,
+              brand_facts_json    = $11,
+              topic_count_returned = $12,
               completed_at      = NOW(),
               updated_at        = NOW()
         WHERE id = $1`,
@@ -250,6 +325,10 @@ async function processArticleTopicTask(taskId) {
         taskId, result.text, result.model || null, tokensIn, tokensOut, costUsd,
         trendsJson ? JSON.stringify(trendsJson) : null,
         JSON.stringify(moduleContextUsed),
+        topicIdeasJson  ? JSON.stringify(topicIdeasJson)  : null,
+        audienceProfile ? JSON.stringify(audienceProfile) : null,
+        brandFactsJson  ? JSON.stringify(brandFactsJson)  : null,
+        topicCountReturned,
       ],
     );
 

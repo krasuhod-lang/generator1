@@ -26,6 +26,13 @@ const LIMITS = {
   search_ecosystem: 60,
   top_competitors:  1000,
   trend_name:       300,
+  // topic_ideas-режим: target_url / brand_hint режутся жёстко, чтобы влезть
+  // в промпт-плейсхолдеры (см. backend/src/prompts/articleTopics/topicIdeas.txt).
+  target_url:       300,
+  brand_hint:       300,
+  topic_count_min:  1,
+  topic_count_max:  parseInt(process.env.ARTICLE_TOPICS_TOPIC_IDEAS_MAX, 10) || 30,
+  topic_count_default: 10,
 };
 
 const ALLOWED_AUDIENCE     = ['B2B', 'B2C', 'смешанная'];
@@ -56,6 +63,7 @@ async function listArticleTopicTasks(req, res, next) {
               status, error_message, llm_model,
               gemini_tokens_in, gemini_tokens_out, cost_usd,
               trends_json, evaluator_report,
+              topic_count_requested, topic_count_returned,
               created_at, started_at, completed_at
          FROM article_topic_tasks
         WHERE user_id = $1
@@ -98,6 +106,93 @@ async function createArticleTopicTask(req, res, next) {
     setImmediate(() => {
       withUserSlot(req.user.id, () => processArticleTopicTask(task.id)).catch((err) => {
         console.error('[articleTopics] background task failed:', err.message);
+      });
+    });
+
+    return res.status(201).json({ task });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/article-topics/topic-ideas ──────────────────────────
+// Третий режим: анализ рынка/сущностей/интентов и подбор N тем статей
+// с описанием ЦА и фактов о бренде. Гейтится
+// ARTICLE_TOPICS_TOPIC_IDEAS_ENABLED — default 'true' (фича безопасна,
+// гейт нужен только для аварийного отключения на проде).
+function _topicIdeasEnabled() {
+  const v = process.env.ARTICLE_TOPICS_TOPIC_IDEAS_ENABLED;
+  // Default ON: undefined / '' / 'true' / любая нестрогая строка → enabled.
+  // Только явное 'false' (regardless of case) выключает фичу.
+  return String(v == null ? 'true' : v).toLowerCase() !== 'false';
+}
+
+async function createArticleTopicIdeasTask(req, res, next) {
+  try {
+    if (!_topicIdeasEnabled()) {
+      return res.status(503).json({ error: 'Режим «Подбор тем статей» временно отключён администратором' });
+    }
+    const body = req.body || {};
+    const niche = clipStr(body.niche, LIMITS.niche);
+    if (niche.length < 3) {
+      return res.status(400).json({ error: 'Поле «Ниша / тема» обязательно (от 3 символов)' });
+    }
+    const region    = clipStr(body.region,   LIMITS.region);
+    const audience  = pickEnum(body.audience, ALLOWED_AUDIENCE);
+    const targetUrl = clipStr(body.target_url, LIMITS.target_url);
+    const brandHint = clipStr(body.brand_hint, LIMITS.brand_hint);
+
+    // topic_count: integer в [LIMITS.topic_count_min .. LIMITS.topic_count_max].
+    // Default — LIMITS.topic_count_default (10). Любая некорректная форма
+    // (NaN, дробь, отрицательное, выше потолка, строка) — 400.
+    let topicCount = body.topic_count;
+    if (topicCount === undefined || topicCount === null || topicCount === '') {
+      topicCount = LIMITS.topic_count_default;
+    } else {
+      const n = Number(topicCount);
+      if (!Number.isFinite(n) || n !== Math.floor(n)) {
+        return res.status(400).json({
+          error: `topic_count должен быть целым числом от ${LIMITS.topic_count_min} до ${LIMITS.topic_count_max}`,
+        });
+      }
+      if (n < LIMITS.topic_count_min || n > LIMITS.topic_count_max) {
+        return res.status(400).json({
+          error: `topic_count вне диапазона ${LIMITS.topic_count_min}..${LIMITS.topic_count_max}`,
+        });
+      }
+      topicCount = n;
+    }
+
+    // target_url валидируем мягко: если задан — должен начинаться с http(s)://
+    // Пустая строка — ОК (это опциональное поле).
+    if (targetUrl && !/^https?:\/\//i.test(targetUrl)) {
+      return res.status(400).json({ error: 'target_url должен начинаться с http:// или https://' });
+    }
+
+    // Inputs (target_url, brand_hint, topic_count) сохраняем в module_context_used
+    // на момент INSERT — pipeline прочитает их оттуда. Это позволяет не плодить
+    // отдельные колонки в article_topic_tasks под опциональные topic_ideas-поля.
+    const initialContext = {
+      topic_ideas_inputs: {
+        target_url:  targetUrl,
+        brand_hint:  brandHint,
+        topic_count: topicCount,
+      },
+    };
+
+    const { rows } = await db.query(
+      `INSERT INTO article_topic_tasks
+         (user_id, mode, niche, region, audience,
+          status, topic_count_requested, module_context_used)
+       VALUES ($1, 'topic_ideas', $2, $3, $4, 'queued', $5, $6::jsonb)
+       RETURNING id, mode, niche, status, topic_count_requested, created_at`,
+      [req.user.id, niche, region, audience, topicCount, JSON.stringify(initialContext)],
+    );
+    const task = rows[0];
+
+    setImmediate(() => {
+      withUserSlot(req.user.id, () => processArticleTopicTask(task.id)).catch((err) => {
+        console.error('[articleTopics] topic-ideas background failed:', err.message);
       });
     });
 
@@ -218,7 +313,10 @@ async function deleteArticleTopicTask(req, res, next) {
 module.exports = {
   listArticleTopicTasks,
   createArticleTopicTask,
+  createArticleTopicIdeasTask,
   createArticleTopicDeepDive,
   getArticleTopicTask,
   deleteArticleTopicTask,
+  // экспортируем LIMITS и _topicIdeasEnabled для тестов
+  _testing: { LIMITS, _topicIdeasEnabled },
 };

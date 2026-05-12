@@ -7,6 +7,7 @@ const auth      = require('../middleware/auth');
 const {
   listArticleTopicTasks,
   createArticleTopicTask,
+  createArticleTopicIdeasTask,
   createArticleTopicDeepDive,
   getArticleTopicTask,
   deleteArticleTopicTask,
@@ -36,6 +37,7 @@ router.use(readLimiter);
 
 router.get('/',                auth, listArticleTopicTasks);
 router.post('/',               auth, createLimiter, createArticleTopicTask);
+router.post('/topic-ideas',    auth, createLimiter, createArticleTopicIdeasTask);
 router.post('/deep-dive',      auth, createLimiter, createArticleTopicDeepDive);
 router.get('/:id',             auth, getArticleTopicTask);
 router.delete('/:id',          auth, deleteArticleTopicTask);
