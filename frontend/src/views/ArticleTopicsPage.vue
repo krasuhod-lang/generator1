@@ -1155,6 +1155,18 @@ const sortedTasks = computed(() =>
 
             <!-- ── Структурированный вид: TOPIC IDEAS ── -->
             <div v-else-if="parsedTopicIdeas && parsedTopicIdeas.hasJson" class="space-y-5">
+              <!-- Информируем, если структура восстановлена из markdown
+                   (Gemini не вернул финальный TOPIC_IDEAS_JSON-блок).
+                   Карточки тем и кнопка «Создать статью» работают, но
+                   часть полей (coverage map, market_overview) может быть
+                   пустой — это норма для md-фоллбэка. -->
+              <div v-if="parsedTopicIdeas.derivedFromMarkdown"
+                   class="p-3 rounded bg-sky-900/30 border border-sky-800 text-sky-200 text-xs">
+                ℹ Структура восстановлена из markdown-отчёта (Gemini не вернул
+                финальный <code class="font-mono">TOPIC_IDEAS_JSON</code>-блок).
+                Карточки тем и кнопка «📝 Создать статью» работают штатно;
+                карта покрытия / обзор рынка могут быть пустыми.
+              </div>
               <!-- Top-bar: экспорт + копирование brand_facts -->
               <div class="flex flex-wrap gap-2 pb-1">
                 <button class="btn-secondary text-xs"
