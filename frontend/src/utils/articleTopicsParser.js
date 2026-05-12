@@ -532,3 +532,84 @@ function _tableToPlainText(table) {
   for (const r of rows) lines.push(fmt(r));
   return lines.join('\n');
 }
+
+// ── Topic-ideas mode (новый режим, см. backend/src/prompts/articleTopics/topicIdeas.txt) ──
+//
+// Если backend сохранил topic_ideas_json (JSONB) — рисуем его структурированно
+// (UI-карточки тем, бейджи confidence, coverage map). Если по какой-то причине
+// JSON отсутствует, падаем в общий markdown-разбор по splitByH2 (UI покажет
+// фолбэк через тот же шаблон, что main).
+//
+// Возвращает:
+//   { hasJson: boolean, json: object|null, fallback: { preamble, sections } }
+export function parseTopicIdeasResult(markdown, topicIdeasJson) {
+  const json = (topicIdeasJson && typeof topicIdeasJson === 'object') ? topicIdeasJson : null;
+  const fallback = splitByH2(String(markdown || ''));
+  return { hasJson: Boolean(json && Array.isArray(json.topics) && json.topics.length), json, fallback };
+}
+
+/**
+ * Форматирует brand_facts (массив { fact, confidence }) для подстановки в
+ * текстовое поле info-article writer'а. Каждый факт — отдельная строка
+ * с маркером confidence в квадратных скобках, как в исходном промпте.
+ */
+export function formatBrandFactsForInfoArticle(brandFacts) {
+  if (!Array.isArray(brandFacts) || !brandFacts.length) return '';
+  return brandFacts.map((f) => {
+    const fact = String(f && f.fact || '').trim();
+    if (!fact) return '';
+    const conf = String(f && f.confidence || '').trim().toLowerCase();
+    return conf ? `${fact} [confidence: ${conf}]` : fact;
+  }).filter(Boolean).join('\n');
+}
+
+/**
+ * Сериализует audience_profile (объект из topic_ideas_json) в компактный
+ * текст для prefill_audience_profile / поля audience info-article writer'а.
+ */
+export function formatAudienceProfileForInfoArticle(profile) {
+  if (!profile || typeof profile !== 'object') return '';
+  const out = [];
+  if (Array.isArray(profile.segments) && profile.segments.length) {
+    out.push('Сегменты:');
+    for (const s of profile.segments) {
+      const name = String(s && s.name || '').trim();
+      const desc = String(s && s.description || '').trim();
+      if (name) out.push(`• ${name}${desc ? ' — ' + desc : ''}`);
+    }
+  }
+  if (Array.isArray(profile.jtbd) && profile.jtbd.length) {
+    out.push('', 'JTBD:');
+    for (const j of profile.jtbd) out.push(`• ${j}`);
+  }
+  if (Array.isArray(profile.pains) && profile.pains.length) {
+    out.push('', 'Боли и барьеры:');
+    for (const p of profile.pains) out.push(`• ${p}`);
+  }
+  if (Array.isArray(profile.voice_of_customer) && profile.voice_of_customer.length) {
+    out.push('', 'Голос клиента:');
+    for (const v of profile.voice_of_customer) out.push(`• ${v}`);
+  }
+  return out.join('\n').trim();
+}
+
+/**
+ * Готовит CSV-строку из списка тем (для кнопки «📥 Экспорт в CSV»).
+ * Заголовок + строки в RFC 4180 с экранированием двойных кавычек.
+ */
+export function topicsToCsv(topics) {
+  const cols = [
+    'title', 'h1_variant', 'primary_intent', 'intent_facet',
+    'expected_format', 'target_audience_segment',
+    'commercial_potential', 'difficulty', 'why_now',
+  ];
+  const esc = (v) => {
+    const s = String(v == null ? '' : v);
+    return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [cols.join(',')];
+  for (const t of (topics || [])) {
+    lines.push(cols.map((c) => esc(t && t[c])).join(','));
+  }
+  return lines.join('\n');
+}

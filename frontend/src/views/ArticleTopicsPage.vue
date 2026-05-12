@@ -20,6 +20,8 @@ import AppLayout from '../components/AppLayout.vue';
 import { useArticleTopicsStore } from '../stores/articleTopics.js';
 import {
   parseMainResult, parseDeepDiveResult,
+  parseTopicIdeasResult, formatBrandFactsForInfoArticle,
+  formatAudienceProfileForInfoArticle, topicsToCsv,
   renderInlineMarkdown, sectionToPlainText,
 } from '../utils/articleTopicsParser.js';
 
@@ -27,7 +29,17 @@ const store  = useArticleTopicsStore();
 const router = useRouter();
 
 // ── Форма ────────────────────────────────────────────────────────────
-const DRAFT_KEY = 'article_topics_draft_v1';
+// formMode определяет, какую задачу создавать: 'main' (foresight, как было)
+// или 'topic_ideas' (новый режим — подбор N тем статей с описанием ЦА и
+// фактов о бренде; см. backend/src/prompts/articleTopics/topicIdeas.txt).
+// Deep-dive отдельной вкладки не имеет — он создаётся из модалки результата
+// завершённой main-задачи (см. startDeepDive ниже), как и раньше.
+const FORM_MODE_LS_KEY  = 'article_topics_form_mode_v1';
+const formMode = ref('main'); // 'main' | 'topic_ideas'
+const DRAFT_KEYS = {
+  main:        'article_topics_draft_v1',
+  topic_ideas: 'article_topics_topic_ideas_draft_v1',
+};
 const form = ref({
   niche:            '',
   region:           '',
@@ -37,21 +49,54 @@ const form = ref({
   search_ecosystem: 'оба',
   top_competitors:  '',
 });
+// topic_ideas-режим использует свой набор полей: niche/region/audience уже
+// есть в form.value, плюс отдельные target_url, brand_hint, topic_count.
+const topicIdeasForm = ref({
+  target_url:  '',
+  brand_hint:  '',
+  topic_count: 10,
+});
 
 const formError  = ref('');
 const submitting = ref(false);
 
 onMounted(() => {
+  // Восстанавливаем последний выбранный режим формы (per-user persisted).
   try {
-    const raw = localStorage.getItem(DRAFT_KEY);
-    if (raw) Object.assign(form.value, JSON.parse(raw));
+    const m = localStorage.getItem(FORM_MODE_LS_KEY);
+    if (m === 'main' || m === 'topic_ideas') formMode.value = m;
   } catch (_) { /* ignore */ }
+  loadDraftForCurrentMode();
   store.fetchTasks();
   startPolling();
 });
 
+function loadDraftForCurrentMode() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEYS[formMode.value]);
+    if (raw) {
+      const data = JSON.parse(raw);
+      Object.assign(form.value, data.form || {});
+      if (data.topicIdeas) Object.assign(topicIdeasForm.value, data.topicIdeas);
+    }
+  } catch (_) { /* ignore */ }
+}
+
 function saveDraft() {
-  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(form.value)); } catch (_) { /* ignore */ }
+  try {
+    const payload = { form: form.value };
+    if (formMode.value === 'topic_ideas') payload.topicIdeas = topicIdeasForm.value;
+    localStorage.setItem(DRAFT_KEYS[formMode.value], JSON.stringify(payload));
+  } catch (_) { /* ignore */ }
+}
+
+function switchFormMode(m) {
+  if (m !== 'main' && m !== 'topic_ideas') return;
+  if (m === formMode.value) return;
+  formMode.value = m;
+  formError.value = '';
+  try { localStorage.setItem(FORM_MODE_LS_KEY, m); } catch (_) { /* ignore */ }
+  loadDraftForCurrentMode();
 }
 
 async function handleCreate() {
@@ -61,10 +106,35 @@ async function handleCreate() {
     formError.value = 'Поле «Ниша / тема» обязательно (от 3 символов).';
     return;
   }
+  // Дополнительная валидация для topic_ideas — клиентская, чтобы
+  // пользователь не получал 400 от backend без подсказки.
+  if (formMode.value === 'topic_ideas') {
+    const n = Number(topicIdeasForm.value.topic_count);
+    if (!Number.isFinite(n) || n !== Math.floor(n) || n < 1 || n > 30) {
+      formError.value = 'Количество тем — целое от 1 до 30.';
+      return;
+    }
+    const url = (topicIdeasForm.value.target_url || '').trim();
+    if (url && !/^https?:\/\//i.test(url)) {
+      formError.value = 'URL целевой страницы должен начинаться с http:// или https://';
+      return;
+    }
+  }
   submitting.value = true;
   try {
     saveDraft();
-    await store.createTask({ ...form.value, niche });
+    if (formMode.value === 'topic_ideas') {
+      await store.createTopicIdeasTask({
+        niche,
+        region:      (form.value.region || '').trim(),
+        audience:    form.value.audience,
+        target_url:  (topicIdeasForm.value.target_url || '').trim(),
+        brand_hint:  (topicIdeasForm.value.brand_hint || '').trim(),
+        topic_count: Number(topicIdeasForm.value.topic_count) || 10,
+      });
+    } else {
+      await store.createTask({ ...form.value, niche });
+    }
     await store.fetchTasks();
   } catch (err) {
     formError.value = err.response?.data?.error || err.message || 'Не удалось создать задачу';
@@ -129,6 +199,25 @@ const parsedDeepDive = computed(() => {
   }
   try {
     return parseDeepDiveResult(activeTask.value.result_markdown);
+  } catch (_) {
+    return null;
+  }
+});
+
+// topic_ideas-режим: возвращает { hasJson, json, fallback } или null.
+// hasJson=true → рисуем структурированно (карточки тем, ЦА, brand_facts,
+// coverage map). hasJson=false → fallback на сырой markdown через
+// существующий renderBlock (плюс кнопка «📋 Скопировать markdown»).
+const parsedTopicIdeas = computed(() => {
+  if (!activeTask.value || activeTask.value.mode !== 'topic_ideas' ||
+      activeTask.value.status !== 'done' || !activeTask.value.result_markdown) {
+    return null;
+  }
+  try {
+    return parseTopicIdeasResult(
+      activeTask.value.result_markdown,
+      activeTask.value.topic_ideas_json || null,
+    );
   } catch (_) {
     return null;
   }
@@ -346,7 +435,11 @@ function statusClass(s) {
     default:        return 'bg-gray-800/70  text-gray-400  border-gray-700';
   }
 }
-function modeLabel(m) { return m === 'deep_dive' ? 'Deep-dive' : 'Анализ'; }
+function modeLabel(m) {
+  if (m === 'deep_dive')   return 'Deep-dive';
+  if (m === 'topic_ideas') return 'Подбор тем';
+  return 'Анализ';
+}
 function fmtDate(s)   { return s ? new Date(s).toLocaleString('ru-RU') : '—'; }
 
 // Презентация секций распарсенного отчёта: иконка + цветовой акцент. Ключи
@@ -451,6 +544,80 @@ function createSeoArticleFromQuickWin() {
   });
 }
 
+// ── topic_ideas: создание info-article-задачи из конкретной темы ───────
+//
+// Прокидываем максимум контекста в /info-article query-string. Если
+// аудитория / факты не влезают в query (URL-длина), info-article
+// дополнительно подтянет полные данные по prefill_topic_idea_id.
+function createSeoArticleFromTopicIdea(topic) {
+  if (!topic || !topic.title || !activeTask.value) return;
+  const t = activeTask.value;
+  const json = t.topic_ideas_json || {};
+  const audienceText = formatAudienceProfileForInfoArticle(json.audience_profile)
+                       .slice(0, 1500);
+  const factsText    = formatBrandFactsForInfoArticle(json.brand_facts)
+                       .slice(0, 1500);
+  const targetService = [t.niche, topic.title].filter(Boolean).join(' — ');
+  router.push({
+    path: '/info-article',
+    query: {
+      prefill_target:   targetService,
+      prefill_title:    topic.h1_variant || topic.title,
+      prefill_audience: t.audience || '',
+      prefill_region:   t.region   || '',
+      prefill_facts:    factsText,
+      // Новые поля для topic_ideas (см. InfoArticlePage.vue → onMounted).
+      prefill_audience_profile: audienceText,
+      prefill_intent:    [topic.primary_intent, topic.intent_facet].filter(Boolean).join(' / '),
+      prefill_lsi_seed:  Array.isArray(topic.lsi_seed) ? topic.lsi_seed.join(', ').slice(0, 1000) : '',
+      prefill_topic_idea_id: t.id,
+    },
+  });
+}
+
+// CSV-экспорт списка тем (для редакционного плана / Notion / sheets).
+function exportTopicsCsv() {
+  const json = activeTask.value && activeTask.value.topic_ideas_json;
+  if (!json || !Array.isArray(json.topics) || !json.topics.length) return;
+  const csv = topicsToCsv(json.topics);
+  // Выкладываем как Blob и скачиваем — чище, чем navigator.clipboard, потому
+  // что Excel/Google Sheets легко импортируют из файла.
+  try {
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const niche = (activeTask.value.niche || 'topics').replace(/[^\wа-яё-]+/gi, '_').slice(0, 60);
+    a.href = url;
+    a.download = `topics-${niche}-${activeTask.value.id.slice(0, 8)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    copyText(csv, 'topics-csv', 'text');
+  }
+}
+
+// «📋 Скопировать в формате brand_facts» — копирует brand_facts json как
+// готовую строку для подстановки в textarea info-article writer'а.
+function copyBrandFactsForInfoArticle() {
+  const json = activeTask.value && activeTask.value.topic_ideas_json;
+  if (!json) return;
+  const text = formatBrandFactsForInfoArticle(json.brand_facts);
+  if (text) copyText(text, 'brand-facts-info', 'text');
+}
+
+// Хелпер бейджа intent (цветовая дифференциация — informational / commercial /
+// transactional / navigational). Незнакомое значение — нейтральный серый.
+function intentBadge(intent) {
+  const i = String(intent || '').toLowerCase();
+  if (i === 'informational')  return 'bg-sky-900/40 text-sky-200 border border-sky-700';
+  if (i === 'commercial')     return 'bg-emerald-900/40 text-emerald-200 border border-emerald-700';
+  if (i === 'transactional')  return 'bg-amber-900/40 text-amber-200 border border-amber-700';
+  if (i === 'navigational')   return 'bg-violet-900/40 text-violet-200 border border-violet-700';
+  return 'bg-gray-800/70 text-gray-300 border border-gray-700';
+}
+
 /**
  * Возвращает «тело секции» для блочного рендера: вырезает таблицу (она
  * рисуется отдельным `<table>`) и под-секции `### ...` (они рисуются
@@ -506,58 +673,125 @@ const sortedTasks = computed(() =>
         <form @submit.prevent="handleCreate" class="card space-y-4 lg:col-span-5">
           <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">📝 Новая задача</h2>
 
+          <!-- Табы режимов формы. Deep-dive отдельной вкладки не имеет —
+               он создаётся из модалки результата завершённой main-задачи. -->
+          <div class="flex border border-gray-800 rounded-lg overflow-hidden text-xs">
+            <button type="button"
+                    :class="['flex-1 px-3 py-2 transition-colors',
+                             formMode === 'main'
+                               ? 'bg-indigo-600 text-white font-semibold'
+                               : 'bg-gray-900 text-gray-400 hover:bg-gray-800']"
+                    @click="switchFormMode('main')">
+              🔮 Foresight-анализ
+            </button>
+            <button type="button"
+                    :class="['flex-1 px-3 py-2 transition-colors border-l border-gray-800',
+                             formMode === 'topic_ideas'
+                               ? 'bg-indigo-600 text-white font-semibold'
+                               : 'bg-gray-900 text-gray-400 hover:bg-gray-800']"
+                    @click="switchFormMode('topic_ideas')">
+              💡 Подбор тем
+            </button>
+          </div>
+
           <div>
             <label class="label">Ниша / тема <span class="text-red-400">*</span></label>
             <input v-model="form.niche" type="text" class="input"
                    placeholder="Например: оформление ВНЖ Португалии для IT-предпринимателей" />
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="label">Фокусный регион</label>
-              <input v-model="form.region" type="text" class="input"
-                     placeholder="Россия / СНГ / Европа / DACH" />
+          <!-- ── Поля для main-режима ── -->
+          <template v-if="formMode === 'main'">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="label">Фокусный регион</label>
+                <input v-model="form.region" type="text" class="input"
+                       placeholder="Россия / СНГ / Европа / DACH" />
+              </div>
+              <div>
+                <label class="label">Горизонт планирования</label>
+                <input v-model="form.horizon" type="text" class="input"
+                       placeholder="12 месяцев / 3 года / 5 лет" />
+              </div>
             </div>
-            <div>
-              <label class="label">Горизонт планирования</label>
-              <input v-model="form.horizon" type="text" class="input"
-                     placeholder="12 месяцев / 3 года / 5 лет" />
-            </div>
-          </div>
 
-          <div class="grid grid-cols-3 gap-3">
-            <div>
-              <label class="label">Аудитория</label>
-              <select v-model="form.audience" class="input">
-                <option>B2B</option>
-                <option>B2C</option>
-                <option>смешанная</option>
-              </select>
+            <div class="grid grid-cols-3 gap-3">
+              <div>
+                <label class="label">Аудитория</label>
+                <select v-model="form.audience" class="input">
+                  <option>B2B</option>
+                  <option>B2C</option>
+                  <option>смешанная</option>
+                </select>
+              </div>
+              <div>
+                <label class="label">Стадия рынка</label>
+                <select v-model="form.market_stage" class="input">
+                  <option>зарождающийся</option>
+                  <option>растущий</option>
+                  <option>зрелый</option>
+                  <option>стагнирующий</option>
+                </select>
+              </div>
+              <div>
+                <label class="label">Поиск</label>
+                <select v-model="form.search_ecosystem" class="input">
+                  <option>Google</option>
+                  <option>Яндекс</option>
+                  <option>оба</option>
+                </select>
+              </div>
             </div>
-            <div>
-              <label class="label">Стадия рынка</label>
-              <select v-model="form.market_stage" class="input">
-                <option>зарождающийся</option>
-                <option>растущий</option>
-                <option>зрелый</option>
-                <option>стагнирующий</option>
-              </select>
-            </div>
-            <div>
-              <label class="label">Поиск</label>
-              <select v-model="form.search_ecosystem" class="input">
-                <option>Google</option>
-                <option>Яндекс</option>
-                <option>оба</option>
-              </select>
-            </div>
-          </div>
 
-          <div>
-            <label class="label">Топ-3 конкурента (по строке на каждого)</label>
-            <textarea v-model="form.top_competitors" rows="3" class="textarea"
-                      placeholder="example1.com — описание&#10;example2.com — описание&#10;example3.com — описание"></textarea>
-          </div>
+            <div>
+              <label class="label">Топ-3 конкурента (по строке на каждого)</label>
+              <textarea v-model="form.top_competitors" rows="3" class="textarea"
+                        placeholder="example1.com — описание&#10;example2.com — описание&#10;example3.com — описание"></textarea>
+            </div>
+          </template>
+
+          <!-- ── Поля для topic_ideas-режима ── -->
+          <template v-else-if="formMode === 'topic_ideas'">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="label">Фокусный регион</label>
+                <input v-model="form.region" type="text" class="input"
+                       placeholder="Россия / СНГ / Европа / DACH" />
+              </div>
+              <div>
+                <label class="label">Аудитория</label>
+                <select v-model="form.audience" class="input">
+                  <option>B2B</option>
+                  <option>B2C</option>
+                  <option>смешанная</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="label">
+                Количество тем <span class="text-gray-500 text-xs">(1–30)</span>
+              </label>
+              <input v-model.number="topicIdeasForm.topic_count"
+                     type="number" min="1" max="30" step="1" class="input w-32" />
+            </div>
+            <div>
+              <label class="label">URL целевой страницы <span class="text-gray-500 text-xs">(опц., до 300 симв.)</span></label>
+              <input v-model="topicIdeasForm.target_url" type="text" class="input" maxlength="300"
+                     placeholder="https://example.com/landing" />
+            </div>
+            <div>
+              <label class="label">Краткое описание бренда <span class="text-gray-500 text-xs">(опц., до 300 симв.)</span></label>
+              <textarea v-model="topicIdeasForm.brand_hint" rows="2" class="textarea" maxlength="300"
+                        placeholder="Например: онлайн-школа английского, 7 лет на рынке, методика Cambridge"></textarea>
+            </div>
+            <p class="text-[11px] text-gray-500">
+              Один Gemini-вызов проведёт анализ рынка / сущностей / интентов
+              и предложит ровно N тем статей с описанием ЦА и фактов о
+              бренде. Затем кнопка «📝 Создать статью» в карточке темы
+              открывает раздел «Статья для блога» с уже заполненными
+              целью / аудиторией / фактами.
+            </p>
+          </template>
 
           <div v-if="formError"
                class="p-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">
@@ -565,7 +799,9 @@ const sortedTasks = computed(() =>
           </div>
 
           <button type="submit" class="btn-primary w-full" :disabled="submitting">
-            {{ submitting ? '⏳ Создание задачи...' : '➕ Создать задачу' }}
+            <template v-if="submitting">⏳ Создание задачи...</template>
+            <template v-else-if="formMode === 'topic_ideas'">💡 Подобрать темы статей</template>
+            <template v-else>➕ Создать задачу</template>
           </button>
           <p class="text-[11px] text-gray-500">
             Задача поставится в очередь и обработается в фоне. Прогресс — в правой панели.
@@ -915,6 +1151,210 @@ const sortedTasks = computed(() =>
                   </div>
                 </div>
               </section>
+            </div>
+
+            <!-- ── Структурированный вид: TOPIC IDEAS ── -->
+            <div v-else-if="parsedTopicIdeas && parsedTopicIdeas.hasJson" class="space-y-5">
+              <!-- Top-bar: экспорт + копирование brand_facts -->
+              <div class="flex flex-wrap gap-2 pb-1">
+                <button class="btn-secondary text-xs"
+                        @click="exportTopicsCsv"
+                        :disabled="!parsedTopicIdeas.json.topics?.length"
+                        title="Скачать список тем как CSV для импорта в Notion / Sheets / Excel">
+                  📥 Экспорт тем (CSV)
+                </button>
+                <button class="btn-secondary text-xs"
+                        @click="copyBrandFactsForInfoArticle"
+                        :disabled="!parsedTopicIdeas.json.brand_facts?.length">
+                  {{ isCopied('brand-facts-info', 'text')
+                      ? '✅ Скопировано'
+                      : '📋 brand_facts для info-article' }}
+                </button>
+                <button class="btn-secondary text-xs" @click="copyFullResult('md')">
+                  {{ isCopied('all', 'md') ? '✅ Скопировано' : '📋 Весь markdown' }}
+                </button>
+              </div>
+
+              <!-- Описание ЦА -->
+              <section v-if="parsedTopicIdeas.json.audience_profile"
+                       class="rounded-xl bg-gray-900/60 p-4 space-y-3 border-l-4 border-sky-500">
+                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                  <span>👥</span><span>Описание целевой аудитории</span>
+                </h3>
+                <div v-if="parsedTopicIdeas.json.audience_profile.segments?.length" class="space-y-1.5">
+                  <div class="text-xs uppercase tracking-wider text-gray-400">Сегменты</div>
+                  <div v-for="(seg, i) in parsedTopicIdeas.json.audience_profile.segments" :key="i"
+                       class="text-sm text-gray-200">
+                    <span class="font-semibold text-white">{{ seg.name }}</span>
+                    <span v-if="seg.description" class="text-gray-400"> — {{ seg.description }}</span>
+                  </div>
+                </div>
+                <div v-if="parsedTopicIdeas.json.audience_profile.jtbd?.length" class="space-y-1.5">
+                  <div class="text-xs uppercase tracking-wider text-gray-400">Jobs-to-be-Done</div>
+                  <ul class="list-disc list-inside text-sm text-gray-200 space-y-0.5">
+                    <li v-for="(j, i) in parsedTopicIdeas.json.audience_profile.jtbd" :key="i">{{ j }}</li>
+                  </ul>
+                </div>
+                <div v-if="parsedTopicIdeas.json.audience_profile.pains?.length" class="space-y-1.5">
+                  <div class="text-xs uppercase tracking-wider text-gray-400">Боли и барьеры</div>
+                  <ul class="list-disc list-inside text-sm text-gray-200 space-y-0.5">
+                    <li v-for="(p, i) in parsedTopicIdeas.json.audience_profile.pains" :key="i">{{ p }}</li>
+                  </ul>
+                </div>
+                <div v-if="parsedTopicIdeas.json.audience_profile.voice_of_customer?.length" class="space-y-1.5">
+                  <div class="text-xs uppercase tracking-wider text-gray-400">Голос клиента (VoC)</div>
+                  <ul class="list-disc list-inside text-sm text-gray-300 italic space-y-0.5">
+                    <li v-for="(v, i) in parsedTopicIdeas.json.audience_profile.voice_of_customer" :key="i">«{{ v }}»</li>
+                  </ul>
+                </div>
+              </section>
+
+              <!-- Факты о бренде / нише -->
+              <section v-if="parsedTopicIdeas.json.brand_facts?.length"
+                       class="rounded-xl bg-gray-900/60 p-4 space-y-2 border-l-4 border-emerald-500">
+                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                  <span>🏷️</span><span>Факты о бренде / нише</span>
+                </h3>
+                <ol class="list-decimal list-inside text-sm text-gray-200 space-y-1">
+                  <li v-for="(bf, i) in parsedTopicIdeas.json.brand_facts" :key="i">
+                    {{ bf.fact }}
+                    <span v-if="confidenceBadge(bf.confidence)"
+                          :class="['ml-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px]',
+                                   confidenceBadge(bf.confidence).bgClass]">
+                      <span :class="['w-1.5 h-1.5 rounded-full', confidenceBadge(bf.confidence).dotClass]"></span>
+                      {{ confidenceBadge(bf.confidence).label }}
+                    </span>
+                  </li>
+                </ol>
+              </section>
+
+              <!-- Карта intent × audience -->
+              <section v-if="parsedTopicIdeas.json.coverage_map?.rows?.length
+                          && parsedTopicIdeas.json.coverage_map?.columns?.length"
+                       class="rounded-xl bg-gray-900/60 p-4 space-y-2 border-l-4 border-fuchsia-500">
+                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                  <span>🗺️</span><span>Карта покрытия: сегмент × intent</span>
+                </h3>
+                <div class="overflow-x-auto rounded-lg border border-gray-800">
+                  <table class="min-w-full text-xs">
+                    <thead class="bg-gray-800/80">
+                      <tr>
+                        <th class="px-3 py-2 text-left text-gray-300 font-semibold">Сегмент / Intent</th>
+                        <th v-for="(col, ci) in parsedTopicIdeas.json.coverage_map.columns" :key="ci"
+                            class="px-3 py-2 text-left text-gray-200 font-semibold whitespace-nowrap">{{ col }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(row, ri) in parsedTopicIdeas.json.coverage_map.rows" :key="ri"
+                          class="border-t border-gray-800">
+                        <td class="px-3 py-2 text-gray-200 font-medium align-top">{{ row }}</td>
+                        <td v-for="(col, ci) in parsedTopicIdeas.json.coverage_map.columns" :key="ci"
+                            :class="['px-3 py-2 align-top',
+                                     (parsedTopicIdeas.json.coverage_map.cells[ri]?.[ci]?.length)
+                                       ? 'text-emerald-300' : 'text-gray-600 bg-gray-900/40']">
+                          <template v-if="parsedTopicIdeas.json.coverage_map.cells[ri]?.[ci]?.length">
+                            №{{ parsedTopicIdeas.json.coverage_map.cells[ri][ci].join(', ') }}
+                          </template>
+                          <template v-else>—</template>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <!-- Карточки тем -->
+              <section class="space-y-3">
+                <div class="flex items-center justify-between flex-wrap gap-2">
+                  <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                    <span>💡</span>
+                    <span>Темы статей
+                      ({{ parsedTopicIdeas.json.topics.length }}<span
+                        v-if="parsedTopicIdeas.json.topic_count_requested
+                              && parsedTopicIdeas.json.topic_count_requested !== parsedTopicIdeas.json.topics.length">
+                        / {{ parsedTopicIdeas.json.topic_count_requested }} запрошено</span>)
+                    </span>
+                  </h3>
+                </div>
+
+                <div v-for="(topic, ti) in parsedTopicIdeas.json.topics" :key="ti"
+                     class="rounded-xl bg-gray-900/60 p-4 space-y-2 border-l-4 border-indigo-500">
+                  <div class="flex items-start justify-between gap-3 flex-wrap">
+                    <div class="min-w-0 flex-1 space-y-1">
+                      <div class="flex items-baseline gap-2 flex-wrap">
+                        <span class="text-xs text-gray-500">Тема {{ ti + 1 }}.</span>
+                        <span class="text-sm font-bold text-white">{{ topic.title }}</span>
+                      </div>
+                      <div v-if="topic.h1_variant" class="text-xs text-gray-300">
+                        <span class="text-gray-500">H1:</span> {{ topic.h1_variant }}
+                      </div>
+                      <div class="flex flex-wrap gap-1.5 pt-1">
+                        <span v-if="topic.primary_intent"
+                              :class="['px-2 py-0.5 rounded text-[10px]', intentBadge(topic.primary_intent)]">
+                          {{ topic.primary_intent }}<span v-if="topic.intent_facet"> · {{ topic.intent_facet }}</span>
+                        </span>
+                        <span v-if="topic.expected_format"
+                              class="px-2 py-0.5 rounded text-[10px] bg-gray-800/70 text-gray-300 border border-gray-700">
+                          {{ topic.expected_format }}
+                        </span>
+                        <span v-if="topic.target_audience_segment"
+                              class="px-2 py-0.5 rounded text-[10px] bg-sky-900/40 text-sky-200 border border-sky-700">
+                          👥 {{ topic.target_audience_segment }}
+                        </span>
+                        <span v-if="Number.isFinite(topic.commercial_potential)"
+                              class="px-2 py-0.5 rounded text-[10px] bg-emerald-900/40 text-emerald-200 border border-emerald-700"
+                              :title="`Коммерческий потенциал ${topic.commercial_potential}/5`">
+                          💰 {{ topic.commercial_potential }}/5
+                        </span>
+                        <span v-if="Number.isFinite(topic.difficulty)"
+                              class="px-2 py-0.5 rounded text-[10px] bg-amber-900/40 text-amber-200 border border-amber-700"
+                              :title="`Сложность ${topic.difficulty}/5`">
+                          ⚙ {{ topic.difficulty }}/5
+                        </span>
+                      </div>
+                    </div>
+                    <div class="flex flex-col gap-1.5 items-end">
+                      <button class="btn-ghost text-[11px] border border-emerald-700 text-emerald-200 whitespace-nowrap"
+                              @click="createSeoArticleFromTopicIdea(topic)"
+                              title="Открыть «Статью для блога» с предзаполненными темой, аудиторией и фактами">
+                        📝 Создать статью →
+                      </button>
+                      <button class="btn-ghost text-[11px] border border-gray-700 whitespace-nowrap"
+                              @click="copyText(topic.h1_variant || topic.title, `topic:${ti}`, 'text')">
+                        {{ isCopied(`topic:${ti}`, 'text') ? '✅' : '📋 Заголовок' }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div v-if="topic.pain_or_question" class="text-xs text-gray-300">
+                    <span class="text-gray-500">Боль / вопрос:</span> {{ topic.pain_or_question }}
+                  </div>
+                  <div v-if="topic.uniqueness_angle" class="text-xs text-gray-300">
+                    <span class="text-gray-500">Whitespace:</span> {{ topic.uniqueness_angle }}
+                  </div>
+                  <div v-if="topic.why_now" class="text-xs text-gray-300">
+                    <span class="text-gray-500">Why now:</span> {{ topic.why_now }}
+                  </div>
+                  <div v-if="topic.key_entities?.length" class="flex flex-wrap gap-1">
+                    <span v-for="(e, i) in topic.key_entities" :key="i"
+                          class="px-1.5 py-0.5 rounded text-[10px] bg-gray-800/70 text-gray-300 border border-gray-700">
+                      {{ e }}
+                    </span>
+                  </div>
+                  <div v-if="topic.lsi_seed?.length" class="text-[11px] text-gray-500">
+                    <span class="text-gray-600">LSI:</span> {{ topic.lsi_seed.join(', ') }}
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <!-- topic_ideas без распарсенного JSON — показываем сырой markdown -->
+            <div v-else-if="parsedTopicIdeas" class="space-y-3">
+              <div class="p-3 rounded bg-amber-900/30 border border-amber-800 text-amber-200 text-xs">
+                ⚠ Не удалось распарсить TOPIC_IDEAS_JSON-блок. Показан сырой markdown-отчёт.
+              </div>
+              <pre class="text-sm text-gray-100 whitespace-pre-wrap font-sans leading-relaxed"
+              >{{ activeTask.result_markdown }}</pre>
             </div>
 
             <!-- ── Структурированный вид: DEEP-DIVE ── -->
