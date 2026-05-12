@@ -535,17 +535,246 @@ function _tableToPlainText(table) {
 
 // ── Topic-ideas mode (новый режим, см. backend/src/prompts/articleTopics/topicIdeas.txt) ──
 //
+// ── topic_ideas: markdown-фоллбэк, когда TOPIC_IDEAS_JSON-блок отсутствует ──
+//
+// Промпт `backend/src/prompts/articleTopics/topicIdeas.txt` гарантирует
+// финальный JSON-блок между `<!-- TOPIC_IDEAS_JSON_START -->` и
+// `<!-- TOPIC_IDEAS_JSON_END -->`, и backend парсит его в колонку
+// `topic_ideas_json`. Но Gemini иногда «забывает» этот блок (или выдаёт
+// его с trailing-запятыми / комментариями) — тогда колонка остаётся NULL,
+// и UI вынужден показывать сырой markdown без структурированных карточек
+// и без кнопки «📝 Создать статью».
+//
+// Чтобы пользователь не терял главную ценность раздела (готовые темы +
+// one-click-генератор статьи), здесь восстанавливаем минимально достаточный
+// объект `{ topics, audience_profile, brand_facts }` напрямую из markdown:
+//   • ## 4. Описание целевой аудитории  → audience_profile
+//   • ## 5. Факты о бренде / нише       → brand_facts (нумерованный список
+//                                          с суффиксом `[confidence: ...]`)
+//   • ## 6. Темы статей                 → topics (### Тема N. + bullet-поля)
+//
+// Парсер толерантен к лишним пробелам / разному регистру / отсутствию точки
+// после номера секции. Любую ошибку молча проглатывает — на выходе всегда
+// либо валидный объект (с непустым topics), либо null.
+
+const PRIMARY_INTENT_OK = new Set(
+  ['informational', 'commercial', 'transactional', 'navigational'],
+);
+const FORMAT_OK = new Set(
+  ['how-to', 'listicle', 'guide', 'comparison', 'case', 'faq'],
+);
+const CONFIDENCE_OK = new Set(['low', 'medium', 'high']);
+
+// Регексп бескостыльно ловит ## заголовок (с возможным «4.» / «4) » префиксом)
+// и проверяет, содержит ли остаток одно из ключевых слов раздела.
+function _findH2(sections, keywordRe) {
+  for (const s of sections) {
+    if (keywordRe.test(s.title)) return s;
+  }
+  return null;
+}
+
+// Извлекает строки списка `- xxx` / `* xxx` / `1. xxx`. Возвращает массив
+// строк без префикса; вложенные строки (с отступом) приклеивает к
+// предыдущему элементу.
+function _extractBulletList(body) {
+  const lines = String(body || '').split('\n');
+  const items = [];
+  let cur = null;
+  for (const raw of lines) {
+    const m = /^\s*(?:[-*•]|\d+[.)])\s+(.+?)\s*$/.exec(raw);
+    if (m) {
+      if (cur != null) items.push(cur);
+      cur = m[1];
+    } else if (cur != null && /^\s+\S/.test(raw)) {
+      cur += ' ' + raw.trim();
+    } else if (cur != null && raw.trim() === '') {
+      items.push(cur);
+      cur = null;
+    }
+  }
+  if (cur != null) items.push(cur);
+  return items.map((s) => s.trim()).filter(Boolean);
+}
+
+// «**Поле**: значение» / «Поле: значение» — возвращает значение или null.
+function _bulletField(line, label) {
+  // label может содержать спецсимволы regex (« / »), экранируем через replace.
+  const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(
+    '^\\s*\\**\\s*' + esc + '\\s*\\**\\s*:\\s*(.+?)\\s*$',
+    'i',
+  );
+  const m = re.exec(line);
+  return m ? m[1].replace(/^[*_`]+|[*_`]+$/g, '').trim() : null;
+}
+
+function _findFieldInBullets(bullets, label) {
+  for (const b of bullets) {
+    const v = _bulletField(b, label);
+    if (v != null && v !== '') return v;
+  }
+  return null;
+}
+
+function _csvList(s) {
+  if (!s) return [];
+  return String(s)
+    .split(/[,;]+/)
+    .map((x) => x.replace(/^[*_`«»"']+|[*_`«»"']+$/g, '').trim())
+    .filter(Boolean)
+    .slice(0, 30);
+}
+
+function _enumOrNull(v, set) {
+  const s = String(v || '').toLowerCase().trim();
+  return set.has(s) ? s : null;
+}
+
+function _intRange(v, min, max) {
+  const m = /(-?\d+)/.exec(String(v || ''));
+  if (!m) return null;
+  const n = Math.round(Number(m[1]));
+  if (!Number.isFinite(n) || n < min || n > max) return null;
+  return n;
+}
+
+function _parseTopicCard(sub) {
+  // sub.title: «Тема 1. Как выбрать ...» или «Тема 1 — ...»
+  const titleRaw = String(sub.title || '').trim();
+  const titleMatch = /^Тема\s*\d+\s*[.\-—:)]?\s*(.+)$/i.exec(titleRaw);
+  const title = (titleMatch ? titleMatch[1] : titleRaw).trim();
+  if (!title) return null;
+  const bullets = _extractBulletList(sub.body);
+  const get = (label) => _findFieldInBullets(bullets, label);
+
+  return {
+    title,
+    h1_variant:              get('H1-вариант') || get('H1') || '',
+    slug_hint:               get('slug-подсказка') || get('slug') || '',
+    primary_intent:          _enumOrNull(get('Primary intent'), PRIMARY_INTENT_OK),
+    intent_facet:            (get('Intent facet') || '').toLowerCase() || null,
+    target_audience_segment: get('Сегмент ЦА') || '',
+    expected_format:         _enumOrNull(get('Формат'), FORMAT_OK),
+    pain_or_question:        get('Боль / вопрос пользователя') || get('Боль') || get('Боль / вопрос') || '',
+    key_entities:            _csvList(get('Ключевые сущности')),
+    lsi_seed:                _csvList(get('LSI-seed') || get('LSI')),
+    commercial_potential:    _intRange(get('Коммерческий потенциал'), 1, 5),
+    difficulty:              _intRange(get('Сложность'), 1, 5),
+    uniqueness_angle:        get('Уникальный угол (whitespace)') || get('Уникальный угол') || get('Whitespace') || '',
+    why_now:                 get('Why now') || '',
+  };
+}
+
+function _parseAudienceProfileFromBody(body) {
+  const { subs } = splitByH3(body);
+  const findSub = (re) => subs.find((s) => re.test(s.title));
+  const segSub = findSub(/сегмент/i);
+  const jtbdSub = findSub(/jtbd|jobs-to-be-done|jobs\s*to\s*be\s*done/i);
+  const painSub = findSub(/бол|барьер/i);
+  const vocSub  = findSub(/voc|voice|голос/i);
+
+  const segments = (segSub ? _extractBulletList(segSub.body) : []).map((line) => {
+    // «<имя> — <описание>» либо «<имя>: <описание>».
+    const m = /^([^—–\-:]+)[—–\-:]\s*(.+)$/.exec(line);
+    if (m) return { name: m[1].trim(), description: m[2].trim() };
+    return { name: line.trim(), description: '' };
+  }).filter((s) => s.name);
+
+  return {
+    segments:           segments.slice(0, 8),
+    jtbd:               jtbdSub ? _extractBulletList(jtbdSub.body).slice(0, 30) : [],
+    pains:              painSub ? _extractBulletList(painSub.body).slice(0, 30) : [],
+    voice_of_customer:  vocSub  ? _extractBulletList(vocSub.body).slice(0, 30)  : [],
+  };
+}
+
+function _parseBrandFactsFromBody(body) {
+  return _extractBulletList(body).map((line) => {
+    // Извлекаем хвостовой `[confidence: high|medium|low]`.
+    const confMatch = /\[\s*confidence\s*:\s*(high|medium|low)\s*\]\s*$/i.exec(line);
+    const fact = line.replace(/\[\s*confidence\s*:\s*(high|medium|low)\s*\]\s*$/i, '').trim();
+    if (!fact) return null;
+    return {
+      fact,
+      confidence: confMatch ? confMatch[1].toLowerCase() : 'low',
+    };
+  }).filter(Boolean).slice(0, 20);
+}
+
+/**
+ * Восстанавливает минимально достаточный topic_ideas-объект из markdown
+ * (без TOPIC_IDEAS_JSON-блока). Возвращает объект той же формы, что
+ * backend `topic_ideas_json`, либо null, если topics не нашлись.
+ */
+export function extractTopicIdeasFromMarkdown(markdown) {
+  const text = String(markdown || '');
+  if (!text.trim()) return null;
+  const { sections } = splitByH2(text);
+  if (!sections.length) return null;
+
+  const topicsSec   = _findH2(sections, /темы\s+статей/i);
+  const audienceSec = _findH2(sections, /(описание\s+)?целевой\s+аудитор|аудитори/i);
+  const factsSec    = _findH2(sections, /факты\s+о\s+бренд|brand\s+facts/i);
+
+  if (!topicsSec) return null;
+  const { subs } = splitByH3(topicsSec.body);
+  const topics = subs
+    .filter((s) => /^Тема\s*\d+/i.test(s.title))
+    .map(_parseTopicCard)
+    .filter(Boolean);
+
+  if (!topics.length) return null;
+
+  return {
+    market_overview:  [],
+    entities:         { products: [], companies: [], technologies: [], methodologies: [], problems: [], regulations: [] },
+    intents:          { informational: [], commercial: [], transactional: [], navigational: [] },
+    audience_profile: audienceSec ? _parseAudienceProfileFromBody(audienceSec.body)
+                                  : { segments: [], jtbd: [], pains: [], voice_of_customer: [] },
+    brand_facts:      factsSec ? _parseBrandFactsFromBody(factsSec.body) : [],
+    topics,
+    coverage_map:     { rows: [], columns: [], cells: [] },
+    topic_count_requested: null,
+    topic_count_returned:  topics.length,
+    serp_evidence_used:    false,
+  };
+}
+
 // Если backend сохранил topic_ideas_json (JSONB) — рисуем его структурированно
 // (UI-карточки тем, бейджи confidence, coverage map). Если по какой-то причине
-// JSON отсутствует, падаем в общий markdown-разбор по splitByH2 (UI покажет
-// фолбэк через тот же шаблон, что main).
+// JSON отсутствует/пуст (Gemini «забыл» финальный TOPIC_IDEAS_JSON-блок) —
+// пытаемся восстановить минимально достаточный объект из markdown через
+// `extractTopicIdeasFromMarkdown`, чтобы пользователь всё равно увидел
+// карточки тем + кнопку «📝 Создать статью». Если и так не получилось —
+// `hasJson` будет false, и UI покажет сырой markdown как раньше.
 //
 // Возвращает:
-//   { hasJson: boolean, json: object|null, fallback: { preamble, sections } }
+//   { hasJson, json, fallback, derivedFromMarkdown }
+//     • derivedFromMarkdown=true означает, что json восстановлен из markdown
+//       (UI показывает мягкое предупреждение об этом).
 export function parseTopicIdeasResult(markdown, topicIdeasJson) {
-  const json = (topicIdeasJson && typeof topicIdeasJson === 'object') ? topicIdeasJson : null;
+  let json = (topicIdeasJson && typeof topicIdeasJson === 'object' &&
+              Array.isArray(topicIdeasJson.topics) && topicIdeasJson.topics.length)
+              ? topicIdeasJson
+              : null;
+  let derivedFromMarkdown = false;
+  if (!json) {
+    try {
+      const fromMd = extractTopicIdeasFromMarkdown(markdown);
+      if (fromMd && Array.isArray(fromMd.topics) && fromMd.topics.length) {
+        json = fromMd;
+        derivedFromMarkdown = true;
+      }
+    } catch (_) { /* ignore — оставим json=null, UI покажет raw markdown */ }
+  }
   const fallback = splitByH2(String(markdown || ''));
-  return { hasJson: Boolean(json && Array.isArray(json.topics) && json.topics.length), json, fallback };
+  return {
+    hasJson: Boolean(json),
+    json,
+    fallback,
+    derivedFromMarkdown,
+  };
 }
 
 /**
