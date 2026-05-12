@@ -39,10 +39,23 @@ onMounted(() => {
   } catch (_) { /* ignore */ }
 
   // Префилл из query-параметров (например, переход из /article-topics →
-  // «Создать статью для блога» после Phase 2 / quick-win). Параметры
-  // перекрывают draft, чтобы свежий контекст из «Тем статей» не терялся.
-  // Поддерживаются: prefill_target → topic, prefill_title → topic (fallback),
-  // prefill_region → region, prefill_brand → brand_name, prefill_facts → brand_facts.
+  // «Создать статью для блога» после Phase 2 / quick-win / topic-ideas).
+  // Параметры перекрывают draft, чтобы свежий контекст из «Тем статей»
+  // не терялся.
+  // Поддерживаются:
+  //   prefill_target → topic, prefill_title → topic (fallback),
+  //   prefill_region → region, prefill_brand → brand_name, prefill_facts → brand_facts.
+  // topic_ideas-режим (см. backend/src/prompts/articleTopics/topicIdeas.txt) дополнительно прокидывает:
+  //   prefill_audience_profile → блок «Аудитория» в начале brand_facts;
+  //   prefill_intent           → строка «Primary intent: ...» в brand_facts;
+  //   prefill_lsi_seed         → строка «LSI-seed: ...» в brand_facts;
+  //   prefill_topic_idea_id    → UUID задачи article_topic_tasks; если задан и
+  //                              query-string не вмещает audience/facts полностью,
+  //                              асинхронно тянем GET /api/article-topics/:id и
+  //                              добираем полные значения из JSONB-полей.
+  // Все доп-параметры — additive: префилл brand_facts формируется в виде
+  // «<блок prefill_audience>\n\n<блок prefill_facts>», чтобы writer info-article
+  // мог сразу опереться на готовый контекст без ручного пересоставления.
   try {
     const q = route.query || {};
     const pickStr = (v, max) => {
@@ -55,18 +68,93 @@ onMounted(() => {
     if (region) form.value.region = region;
     const brand = pickStr(q.prefill_brand, 200);
     if (brand) form.value.brand_name = brand;
-    const facts = pickStr(q.prefill_facts, 4000);
-    if (facts) form.value.brand_facts = facts;
+    const facts            = pickStr(q.prefill_facts,            4000);
+    const audienceProfile  = pickStr(q.prefill_audience_profile, 4000);
+    const intent           = pickStr(q.prefill_intent,            120);
+    const lsiSeed          = pickStr(q.prefill_lsi_seed,         1000);
+    const topicIdeaId      = pickStr(q.prefill_topic_idea_id,      64);
+
+    // Собираем brand_facts из всех источников, разделяя ясными метками,
+    // чтобы пользователь мог отредактировать каждый блок отдельно.
+    const buildBrandFacts = ({ audience: aud, facts: fct, intent: itnt, lsi }) => {
+      const parts = [];
+      if (aud) parts.push(`# Аудитория\n${aud}`);
+      if (itnt) parts.push(`# Primary intent\n${itnt}`);
+      if (lsi) parts.push(`# LSI-seed\n${lsi}`);
+      if (fct) parts.push(`# Факты о бренде / нише\n${fct}`);
+      return parts.join('\n\n').slice(0, 4000);
+    };
+    const composed = buildBrandFacts({
+      audience: audienceProfile, facts, intent, lsi: lsiSeed,
+    });
+    if (composed) form.value.brand_facts = composed;
+
     // Связка с отчётом релевантности (Wave 1 competitor_signals → IAKB §9).
     // Принимаем UUID любой версии; невалидный — игнорируем.
     const rrId = pickStr(q.prefill_relevance_report_id, 64);
     if (rrId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rrId)) {
       form.value.source_relevance_report_id = rrId.toLowerCase();
     }
-    if (topic || region || brand || facts || rrId) {
+    if (topic || region || brand || composed || rrId) {
       // Раскроем «опциональный» блок, если что-то предзаполнили — иначе
       // brand_facts «прячется» под коллапсом и пользователь его не увидит.
       optionalOpen.value = true;
+    }
+
+    // Если задан topic_idea_id — query-string мог быть обрезан (300 символов
+    // в audience-профиле далеко не всегда хватает), асинхронно дозабираем
+    // полный topic_ideas_json из БД и перезаполняем brand_facts.
+    // Гoнка с saveDraft не страшна: draft пишется на каждое изменение формы,
+    // а наш писатель — последний (через nextTick после mount).
+    if (topicIdeaId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(topicIdeaId)) {
+      // Ленивый импорт api клиента — auth-store его уже подтягивает.
+      import('../api.js').then(({ default: api }) => api
+        .get(`/article-topics/${topicIdeaId}`)
+        .then(({ data }) => {
+          const t = data && data.task;
+          if (!t) return;
+          // Из JSONB достаём audience_profile и brand_facts_json. Если пользователь
+          // уже что-то правил — НЕ перезаписываем (uplift только для пустого/
+          // дефолтного варианта).
+          const isStillPrefill = form.value.brand_facts === composed;
+          if (!isStillPrefill) return;
+          let audText = audienceProfile;
+          let factsText = facts;
+          // audience_profile из БД — либо строка (если backend сам сериализовал),
+          // либо объект; render через тот же formatter.
+          if (t.audience_profile && typeof t.audience_profile === 'object'
+              && !Array.isArray(t.audience_profile)) {
+            const lines = [];
+            const ap = t.audience_profile;
+            if (Array.isArray(ap.segments)) {
+              for (const s of ap.segments) {
+                if (s && s.name) lines.push(`• ${s.name}${s.description ? ' — ' + s.description : ''}`);
+              }
+            }
+            if (Array.isArray(ap.jtbd) && ap.jtbd.length) {
+              lines.push('JTBD:');
+              for (const j of ap.jtbd) lines.push(`• ${j}`);
+            }
+            if (Array.isArray(ap.pains) && ap.pains.length) {
+              lines.push('Боли:');
+              for (const p of ap.pains) lines.push(`• ${p}`);
+            }
+            audText = lines.join('\n').slice(0, 2500);
+          }
+          if (Array.isArray(t.brand_facts_json) && t.brand_facts_json.length) {
+            factsText = t.brand_facts_json.map((bf) => {
+              const fact = String(bf && bf.fact || '').trim();
+              const conf = String(bf && bf.confidence || '').trim().toLowerCase();
+              return fact ? (conf ? `${fact} [confidence: ${conf}]` : fact) : '';
+            }).filter(Boolean).join('\n').slice(0, 2500);
+          }
+          const composedFull = buildBrandFacts({
+            audience: audText, facts: factsText, intent, lsi: lsiSeed,
+          });
+          if (composedFull) form.value.brand_facts = composedFull;
+        })
+        .catch(() => { /* graceful — оставляем то, что было в query-string */ }),
+      ).catch(() => { /* import failure — тоже не валим UI */ });
     }
   } catch (_) { /* ignore */ }
 });

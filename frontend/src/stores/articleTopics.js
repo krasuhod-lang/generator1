@@ -31,6 +31,18 @@ export const useArticleTopicsStore = defineStore('articleTopics', {
       return data?.task?.id;
     },
 
+    /**
+     * Создание задачи режима 'topic_ideas' (подбор N тем статей с
+     * описанием ЦА и фактов о бренде). См.
+     * backend/src/controllers/articleTopics.controller.js → createArticleTopicIdeasTask.
+     *
+     * payload: { niche, region?, audience?, target_url?, brand_hint?, topic_count? }
+     */
+    async createTopicIdeasTask(payload) {
+      const { data } = await api.post('/article-topics/topic-ideas', payload);
+      return data?.task?.id;
+    },
+
     async createDeepDive(parent_task_id, trend_name, opts = {}) {
       // opts.force=true → пересоздать deep-dive поверх существующего
       // (backend по умолчанию возвращает 409 со списком дубликатов).

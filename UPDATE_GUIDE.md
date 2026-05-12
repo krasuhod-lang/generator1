@@ -280,6 +280,88 @@ Excel-базу при этом загружать **не нужно** — авт
 ничего не покажет. Достаточно выполнить `git pull` + пересобрать контейнеры
 (см. §2.4).
 
+### 3.4. Новый режим «💡 Подбор тем статей» в разделе «Темы статей»
+
+В разделе **«Темы статей»** (`/article-topics`) появилась вкладка
+**«💡 Подбор тем»** (рядом с уже знакомым **«🔮 Foresight-анализ»**).
+
+**Что делает:** один Gemini-вызов проводит анализ рынка / сущностей /
+интентов в указанной нише и предлагает **ровно N тем статей** (1–30,
+по умолчанию 10) с дополнительной структурированной выдачей:
+
+* **Описание ЦА** — сегменты, JTBD, боли, voice-of-customer цитаты;
+* **Факты о бренде / нише** — нумерованный список с маркером
+  `[confidence: high/medium/low]`, готовый к подстановке в writer
+  info-article без ручного пересоставления;
+* **Карта покрытия** «сегмент × intent» — подсвечивает, какие
+  комбинации остались без статьи;
+* **Карточки тем** с полями: H1-вариант, primary intent + facet,
+  целевой сегмент ЦА, формат (how-to/listicle/guide/…), коммерческий
+  потенциал (1–5), сложность (1–5), уникальный угол, why-now.
+
+В каждой карточке темы — кнопка **«📝 Создать статью →»**. Она открывает
+`/info-article` с уже заполненными полями: тема + H1, регион, аудитория,
+а в `brand_facts` подставляется блок:
+
+```
+# Аудитория
+<сегменты + JTBD + боли>
+
+# Primary intent
+<informational / how-to>
+
+# LSI-seed
+<ключевые слова через запятую>
+
+# Факты о бренде / нише
+<факты с confidence-маркерами>
+```
+
+Если query-string обрезана (длинный профиль ЦА / много фактов), info-article
+дополнительно дозабирает полные данные по `prefill_topic_idea_id` — это
+UUID задачи `article_topic_tasks`, через `GET /api/article-topics/:id`.
+
+**Доп.UI:** кнопки `📥 Экспорт тем (CSV)` (для импорта в
+Notion/Sheets/Excel) и `📋 brand_facts для info-article` (отдельное
+копирование уже отформатированной строки фактов).
+
+#### `.env` для этого режима
+
+Менять `.env` НЕ обязательно — фича включена by-default. Доступные
+переменные (см. секцию `Article Topics — Idea-mode` в `.env.example`):
+
+* `ARTICLE_TOPICS_TOPIC_IDEAS_ENABLED` — `true` / `false`. Default `true`
+  (фича безопасна, гейт нужен только для аварийного отключения на проде).
+* `ARTICLE_TOPICS_TOPIC_IDEAS_MAX` — потолок для `topic_count`. Default
+  `30` — выше Gemini не успевает в 16k output-токенов.
+
+#### Миграция
+
+Применяется автоматически через `ensureSchema()` в `backend/server.js`
+(паттерн идентичен миграциям 015/025/026/027/028). Файл —
+`migrations/029_article_topics_idea_mode.sql`. Изменения **additive-only**:
+
+* Новое значение enum `article_topic_mode → 'topic_ideas'`;
+* В `article_topic_tasks` пять новых колонок: `topic_count_requested INT`,
+  `topic_count_returned INT`, `topic_ideas_json JSONB`,
+  `audience_profile JSONB`, `brand_facts_json JSONB`.
+
+Старые `main` / `deep_dive` задачи **не затронуты** — все новые поля
+NULL для них.
+
+#### Тесты
+
+Запускать как обычные `node backend/scripts/test-*.js`:
+
+* `node backend/scripts/test-topicIdeas-parser.js` — извлечение и
+  валидация TOPIC_IDEAS_JSON-блока (graceful degradation, усечение
+  длинных строк, enum-валидация);
+* `node backend/scripts/test-topicIdeas-controller.js` — валидация
+  POST /topic-ideas (границы `topic_count`, length `niche`, enum
+  `audience`, env-гейт `ARTICLE_TOPICS_TOPIC_IDEAS_ENABLED`);
+* `node backend/scripts/test-topicIdeas-prompt.js` — smoke-тест
+  шаблона `topicIdeas.txt` (отсутствие незаменённых `{{...}}`).
+
 ---
 
 ## Приложение A. Структура `.env` (актуальный список ключей)
