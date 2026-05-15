@@ -10,9 +10,10 @@
  * Принципы:
  *   • никогда не блокирует основной pipeline (ошибки записи → console.warn
  *     и продолжение работы; lossy by design);
- *   • ENV-gated через INFO_ARTICLE_VALIDATION_LOG_ENABLED — без флага
- *     функция no-op;
- *   • path управляется через INFO_ARTICLE_VALIDATION_LOG_PATH;
+ *   • включается через программный флаг QUALITY_FLAGS.validationLog.enabled
+ *     в backend/src/services/qualityLayers/featureFlags.js — если флаг
+ *     равен false (значение по умолчанию), функция no-op;
+ *   • путь к файлу задаётся в QUALITY_FLAGS.validationLog.filePath;
  *   • mkdirSync с recursive:true — на случай отсутствия каталога;
  *   • никаких секретов в payload — фильтруем поля, начинающиеся на
  *     api_key, token, secret, authorization, bearer.

@@ -29,7 +29,21 @@ require.cache[require.resolve(path.join('..', 'src', 'config', 'db'))] = {
 };
 
 const QL_DIR = path.join('..', 'src', 'services', 'qualityLayers');
-const { getQualityFlags } = require(path.join(QL_DIR, 'featureFlags'));
+
+// Real, frozen, hardcoded config (single source of truth).
+const realFeatureFlags = require(path.join(QL_DIR, 'featureFlags'));
+const { getQualityFlags } = realFeatureFlags;
+
+// Stub featureFlags BEFORE requiring validationFailureLog so that
+// validation-log tests can inject an overridden config (without touching
+// the real frozen QUALITY_FLAGS object). This is the only place we
+// override; all other modules see the real config via realFeatureFlags.
+const featureFlagsModulePath = require.resolve(path.join(QL_DIR, 'featureFlags'));
+let stubbedFlags = realFeatureFlags.getQualityFlags();
+require.cache[featureFlagsModulePath].exports = {
+  getQualityFlags: () => stubbedFlags,
+};
+
 const { extractClaims }   = require(path.join(QL_DIR, 'factExtractor'));
 const {
   shingleSet, jaccard, containment,
@@ -52,50 +66,66 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 // ── featureFlags ────────────────────────────────────────────────────
 
-test('featureFlags — defaults are OFF and pass plan thresholds', () => {
-  // Изолируем env от внешнего окружения CI.
-  const SAVED = {};
-  for (const k of Object.keys(process.env).filter((k) => /^(INFO_ARTICLE_|READABILITY_|LSI_SEMANTIC_|LINK_(SEMANTIC|MIN)_|IMAGE_(QA|ALT)_|EEAT_TARGET_)/i.test(k))) {
-    SAVED[k] = process.env[k];
-    delete process.env[k];
-  }
-
+test('featureFlags — defaults match the «Комбайн» plan thresholds', () => {
   const f = getQualityFlags();
   assert.strictEqual(f.factcheck.enabled, false);
   assert.strictEqual(f.factcheck.minSupportedRatio, 0.7);
   assert.strictEqual(f.factcheck.blockOnContradicted, true);
   assert.strictEqual(f.grounding.enabled, false);
+  assert.strictEqual(f.grounding.tokensPerH2, 500);
+  assert.strictEqual(f.grounding.totalBudget, 3500);
+  assert.strictEqual(f.grounding.passagesPerH2, 5);
   assert.strictEqual(f.plagiarism.externalEnabled, false);
   assert.strictEqual(f.plagiarism.maxOverlap, 0.18);
+  assert.strictEqual(f.plagiarism.shingleSize, 6);
   assert.strictEqual(f.plagiarism.selfplagMaxCosine, 0.92);
+  assert.strictEqual(f.plagiarism.selfplagMinChars, 120);
   assert.strictEqual(f.imageQa.enabled, false);
   assert.strictEqual(f.imageQa.maxRetries, 2);
+  assert.strictEqual(f.imageQa.altVisualMinCosine, 0.22);
   assert.strictEqual(f.eeatChunked.enabled, false);
   assert.strictEqual(f.eeatChunked.chunkTargetChars, 8000);
+  assert.strictEqual(f.lsiSemantic.enabled, false);
   assert.strictEqual(f.lsiSemantic.threshold, 0.55);
+  assert.strictEqual(f.linkSemantic.cosineWeight, 0.5);
   assert.strictEqual(f.linkSemantic.minCosine, 0.35);
+  assert.strictEqual(f.readability.enabled, false);
   assert.strictEqual(f.readability.minIndex, 55);
+  assert.strictEqual(f.readability.maxAvgSentenceLen, 22);
+  assert.strictEqual(f.readability.maxPassiveRatio, 0.18);
+  assert.strictEqual(f.readability.maxBureaucrateseRatio, 0.04);
+  assert.strictEqual(f.intentVerify.enabled, false);
+  assert.strictEqual(f.intentVerify.blockOnMismatch, false);
+  assert.strictEqual(f.validationLog.enabled, false);
+  assert.strictEqual(typeof f.validationLog.filePath, 'string');
+  assert.ok(f.validationLog.filePath.length > 0);
   assert.strictEqual(f.eeatTargetDefault, 7.5);
-
-  for (const [k, v] of Object.entries(SAVED)) process.env[k] = v;
 });
 
-test('featureFlags — env overrides parsed and clamped', () => {
-  process.env.INFO_ARTICLE_FACTCHECK_ENABLED = 'true';
-  process.env.INFO_ARTICLE_PLAGIARISM_MAX_OVERLAP = '0.25';
-  process.env.READABILITY_MIN_INDEX = '999'; // out of range → fallback to default
-  process.env.IMAGE_QA_MAX_RETRIES = '3';
-
+test('featureFlags — config is frozen and ignores process.env', () => {
   const f = getQualityFlags();
-  assert.strictEqual(f.factcheck.enabled, true);
-  assert.strictEqual(f.plagiarism.maxOverlap, 0.25);
-  assert.strictEqual(f.readability.minIndex, 55, 'out-of-range falls back to default');
-  assert.strictEqual(f.imageQa.maxRetries, 3);
+  assert.ok(Object.isFrozen(f), 'top-level config must be frozen');
+  assert.ok(Object.isFrozen(f.plagiarism), 'nested objects must be frozen');
+  assert.ok(Object.isFrozen(f.readability));
 
-  delete process.env.INFO_ARTICLE_FACTCHECK_ENABLED;
-  delete process.env.INFO_ARTICLE_PLAGIARISM_MAX_OVERLAP;
-  delete process.env.READABILITY_MIN_INDEX;
-  delete process.env.IMAGE_QA_MAX_RETRIES;
+  // process.env must NOT influence values (configuration is hardcoded).
+  process.env.INFO_ARTICLE_FACTCHECK_ENABLED = 'true';
+  process.env.INFO_ARTICLE_PLAGIARISM_MAX_OVERLAP = '0.99';
+  process.env.READABILITY_MIN_INDEX = '1';
+  process.env.IMAGE_QA_MAX_RETRIES = '99';
+  try {
+    const f2 = getQualityFlags();
+    assert.strictEqual(f2.factcheck.enabled, false, 'env must not flip enabled flag');
+    assert.strictEqual(f2.plagiarism.maxOverlap, 0.18, 'env must not change threshold');
+    assert.strictEqual(f2.readability.minIndex, 55, 'env must not change threshold');
+    assert.strictEqual(f2.imageQa.maxRetries, 2, 'env must not change retry count');
+    assert.strictEqual(f2, f, 'must return the same singleton object');
+  } finally {
+    delete process.env.INFO_ARTICLE_FACTCHECK_ENABLED;
+    delete process.env.INFO_ARTICLE_PLAGIARISM_MAX_OVERLAP;
+    delete process.env.READABILITY_MIN_INDEX;
+    delete process.env.IMAGE_QA_MAX_RETRIES;
+  }
 });
 
 // ── factExtractor ──────────────────────────────────────────────────
@@ -300,37 +330,44 @@ test('eeatChunker — aggregateEeatVerdicts handles missing fields', () => {
 // ── validationFailureLog ───────────────────────────────────────────
 
 test('validationFailureLog — disabled by default → no-op', () => {
-  delete process.env.INFO_ARTICLE_VALIDATION_LOG_ENABLED;
+  // Real defaults have validationLog.enabled = false; do not override.
+  stubbedFlags = realFeatureFlags.getQualityFlags();
   const wrote = recordValidationFailure({ taskId: 't1', violationType: 'missing-LSI' });
   assert.strictEqual(wrote, false);
 });
 
-test('validationFailureLog — writes JSONL when enabled', () => {
+test('validationFailureLog — writes JSONL when config enables it', () => {
   _resetForTest();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vlog-'));
   const file = path.join(tmp, 'failures.jsonl');
-  process.env.INFO_ARTICLE_VALIDATION_LOG_ENABLED = 'true';
-  process.env.INFO_ARTICLE_VALIDATION_LOG_PATH = file;
 
-  const ok = recordValidationFailure({
-    taskId: 'task-42',
-    stage: 'writer',
-    violationType: 'missing-H3',
-    model: 'gemini-3.1-pro-preview',
-    context: { h2: 'Введение', api_key: 'sk-shouldnotleak1234567890' },
-  });
-  assert.strictEqual(ok, true);
+  // Inject an enabled config via the test stub (real QUALITY_FLAGS is
+  // frozen and intentionally cannot be changed at runtime).
+  stubbedFlags = {
+    ...realFeatureFlags.getQualityFlags(),
+    validationLog: { enabled: true, filePath: file },
+  };
 
-  const content = fs.readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.strictEqual(content.length, 1);
-  const entry = content[0];
-  assert.strictEqual(entry.taskId, 'task-42');
-  assert.strictEqual(entry.violationType, 'missing-H3');
-  assert.strictEqual(entry.context.api_key, '[REDACTED]');
+  try {
+    const ok = recordValidationFailure({
+      taskId: 'task-42',
+      stage: 'writer',
+      violationType: 'missing-H3',
+      model: 'gemini-3.1-pro-preview',
+      context: { h2: 'Введение', api_key: 'sk-shouldnotleak1234567890' },
+    });
+    assert.strictEqual(ok, true);
 
-  delete process.env.INFO_ARTICLE_VALIDATION_LOG_ENABLED;
-  delete process.env.INFO_ARTICLE_VALIDATION_LOG_PATH;
-  fs.rmSync(tmp, { recursive: true, force: true });
+    const content = fs.readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.strictEqual(content.length, 1);
+    const entry = content[0];
+    assert.strictEqual(entry.taskId, 'task-42');
+    assert.strictEqual(entry.violationType, 'missing-H3');
+    assert.strictEqual(entry.context.api_key, '[REDACTED]');
+  } finally {
+    stubbedFlags = realFeatureFlags.getQualityFlags();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('validationFailureLog — sanitize masks sk-... and Bearer ...', () => {
