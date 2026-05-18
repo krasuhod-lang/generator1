@@ -30,6 +30,7 @@
 const db = require('../../config/db');
 const { callLLM, resetTaskBudget } = require('../llm/callLLM');
 const { loadInfoArticlePrompt } = require('../../prompts/infoArticle');
+const { buildPersonaSystemBlock } = require('../../prompts/infoArticle/personas');
 const { generateImage, IMAGE_PRICE_USD } = require('../linkArticle/nanoBananaPro.adapter');
 const sse = require('../sse/sseManager');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
@@ -416,12 +417,44 @@ async function runWriter(task, args, ctx, opts = {}) {
   const iakbReady = !!task.__iakb;
   const writerInstructions = loadInfoArticlePrompt('stage3');
 
+  // Authorial persona — детерминированно выбираем 1 из 7 готовых персон
+  // (см. backend/src/prompts/infoArticle/personas.js). Цель: убрать
+  // монотонный «LLM-стиль» и усилить anti-hallucination через жёсткие
+  // правила, прописанные в каждой персоне. Persona одинакова для
+  // повторных запусков одной задачи (hash от topic+region+brand) —
+  // это важно для consistency cached response в Redis.
+  let personaBlock = '';
+  let personaKey   = '';
+  try {
+    const picked = buildPersonaSystemBlock({
+      topic:  task.topic,
+      region: task.region || '',
+      brand:  task.brand_name || task.brand || '',
+      persona: task.persona || '',
+    });
+    personaKey = picked.key;
+    personaBlock = picked.block || '';
+  } catch (e) {
+    // Полный graceful — без персоны writer работает по-старому.
+    personaBlock = '';
+    if (ctx && typeof ctx.taskId !== 'undefined') {
+      appendLog(ctx.taskId, `⚠ Persona pick failed: ${e.message}`, 'warn').catch(() => {});
+    }
+  }
+
   // System prompt: при активном Gemini cache — пусто (всё в кэше);
-  // иначе — IAKB + writer-instructions.
-  const systemFull = task.__iakb
-    ? `${task.__iakb}\n\n========================================\n${writerInstructions}`
+  // иначе — IAKB + writer-instructions + персона.
+  const writerWithPersona = personaBlock
+    ? `${writerInstructions}\n\n${personaBlock}`
     : writerInstructions;
+  const systemFull = task.__iakb
+    ? `${task.__iakb}\n\n========================================\n${writerWithPersona}`
+    : writerWithPersona;
   const systemArg = task.__geminiCacheName ? '' : systemFull;
+
+  if (personaKey && ctx && typeof ctx.taskId !== 'undefined') {
+    appendLog(ctx.taskId, `🎭 Авторская персона: ${personaKey}`, 'info').catch(() => {});
+  }
 
   const buildUser = (correctiveIssues = null, priorEeatIssues = null, priorLinkIssues = null) => {
     const noLinks = !Array.isArray(linkPlan) || linkPlan.length === 0;
@@ -1167,7 +1200,25 @@ async function processInfoArticleTask(taskId) {
     if (INFO_ARTICLE_GEMINI_CACHE_ENABLED) {
       try {
         const writerInstructions = loadInfoArticlePrompt('stage3');
-        const cacheText = `${task.__iakb}\n\n========================================\n${writerInstructions}`;
+        // Включаем персону в Gemini cached prefix, чтобы тон writer'а
+        // оставался стабильным при cache-hit и совпадал с системой,
+        // которую видит non-cache путь в runWriter. Cache привязан к задаче
+        // (taskId), а персона детерминирована от task.topic+region+brand —
+        // поэтому персона в cache соответствует runWriter 1-в-1.
+        let personaForCache = '';
+        try {
+          const picked = buildPersonaSystemBlock({
+            topic:  task.topic,
+            region: task.region || '',
+            brand:  task.brand_name || task.brand || '',
+            persona: task.persona || '',
+          });
+          personaForCache = picked.block || '';
+        } catch (_) { personaForCache = ''; }
+        const writerWithPersona = personaForCache
+          ? `${writerInstructions}\n\n${personaForCache}`
+          : writerInstructions;
+        const cacheText = `${task.__iakb}\n\n========================================\n${writerWithPersona}`;
         const created = await createCachedContent({
           systemInstruction: cacheText,
           ttlSeconds: INFO_ARTICLE_GEMINI_CACHE_TTL_S,
