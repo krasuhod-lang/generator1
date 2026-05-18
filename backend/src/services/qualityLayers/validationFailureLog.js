@@ -23,16 +23,49 @@ const fs = require('fs');
 const path = require('path');
 const { getQualityFlags } = require('./featureFlags');
 
-const SECRET_KEY_RE = /^(api_?key|token|secret|authorization|bearer|password)$/i;
+const SECRET_KEY_RE = /^(api_?key|token|secret|authorization|bearer|password|passwd|pwd|access_?key|private_?key|client_?secret)$/i;
+
+/**
+ * TOKEN_PATTERNS — наборы шаблонов известных секретных строк.
+ * Применяются последовательно поверх каждой строки. Каждый шаблон
+ * заменяется на стабильный маркер «<TYPE>-[REDACTED]».
+ *
+ * Список покрывает наиболее частые форматы, которые могут случайно
+ * попасть в payload (URL'ы, JSON-ошибки апстрима, stack traces):
+ *   - Bearer ...
+ *   - sk-... (OpenAI/DeepSeek/Anthropic)
+ *   - GitHub PAT (ghp_..., github_pat_..., gho_/ghu_/ghs_/ghr_)
+ *   - JWT (header.payload.signature, base64url)
+ *   - AWS access key ID (AKIA + 16 base32)
+ *   - Generic hex 32+ символов (часто сессионные токены / hash-секреты)
+ */
+const TOKEN_PATTERNS = [
+  [/Bearer\s+[A-Za-z0-9._\-]+/gi,                              'Bearer [REDACTED]'],
+  [/\bsk-[A-Za-z0-9_\-]{8,}\b/g,                               'sk-[REDACTED]'],
+  [/\bghp_[A-Za-z0-9]{20,}\b/g,                                'ghp_[REDACTED]'],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,                        'github_pat_[REDACTED]'],
+  [/\bgh[oush]_[A-Za-z0-9]{20,}\b/g,                           'gh_[REDACTED]'],
+  // JWT: три base64url-сегмента, разделённые точками; первый начинается с eyJ.
+  [/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/g,  'jwt-[REDACTED]'],
+  [/\bAKIA[0-9A-Z]{16}\b/g,                                    'AKIA-[REDACTED]'],
+  // Длинный hex (≥32) — типично session-id / API hash / SHA-256 как токен.
+  // Ставим в конце, чтобы более специфичные паттерны выше отработали раньше.
+  [/\b[a-f0-9]{32,}\b/gi,                                      'hex-[REDACTED]'],
+];
+
+function _maskTokensInString(s) {
+  let out = s;
+  for (const [re, repl] of TOKEN_PATTERNS) {
+    out = out.replace(re, repl);
+  }
+  return out;
+}
 
 function sanitize(value, depth = 0) {
   if (depth > 6) return '[truncated:depth]';
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') {
-    // Маскируем токены вида sk-..., Bearer ...
-    return value
-      .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer [REDACTED]')
-      .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, 'sk-[REDACTED]');
+    return _maskTokensInString(value);
   }
   if (typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map((v) => sanitize(v, depth + 1));

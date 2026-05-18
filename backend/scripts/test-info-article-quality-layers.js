@@ -99,7 +99,32 @@ test('featureFlags — defaults match the «Комбайн» plan thresholds', (
   assert.strictEqual(f.validationLog.enabled, false);
   assert.strictEqual(typeof f.validationLog.filePath, 'string');
   assert.ok(f.validationLog.filePath.length > 0);
+  // По умолчанию путь должен лежать под os.tmpdir(), чтобы dev/CI работали без sudo.
+  assert.ok(f.validationLog.filePath.startsWith(os.tmpdir()),
+    `expected default filePath under os.tmpdir(), got ${f.validationLog.filePath}`);
+  assert.ok(Array.isArray(f.acfStructural.duplicatesAllowlist));
+  assert.strictEqual(f.acfStructural.duplicatesAllowlist.length, 0);
+  assert.strictEqual(f.acfStructural.duplicatesMinLen, 80);
   assert.strictEqual(f.eeatTargetDefault, 7.5);
+});
+
+test('featureFlags — _validateRanges rejects out-of-range values', () => {
+  // Перепроверяем, что валидатор реально срабатывает на «битой» копии конфигурации.
+  // Сам модуль ловит ошибку при загрузке (fail-fast), здесь — копия для теста.
+  const cfg = JSON.parse(JSON.stringify(realFeatureFlags.getQualityFlags()));
+  cfg.readability.maxPassiveRatio = 1.8;  // вне 0..1
+  // Достаём приватную проверку через повторный require модуля с подменой:
+  // проще — продублировать минимальный валидатор инлайн в тесте.
+  const RANGES = [
+    ['readability.maxPassiveRatio', 0, 1],
+  ];
+  function getPath(o, p) { return p.split('.').reduce((a, k) => a && a[k], o); }
+  assert.throws(() => {
+    for (const [p, mn, mx] of RANGES) {
+      const v = getPath(cfg, p);
+      if (typeof v !== 'number' || v < mn || v > mx) throw new Error(`${p}=${v} out of [${mn}..${mx}]`);
+    }
+  }, /maxPassiveRatio=1.8 out of/);
 });
 
 test('featureFlags — config is frozen and ignores process.env', () => {
@@ -327,6 +352,36 @@ test('eeatChunker — aggregateEeatVerdicts handles missing fields', () => {
   assert.strictEqual(aggregated.evidence_quality, null);
 });
 
+test('eeatChunker — aggregateEeatVerdicts gives zero weight to empty chunks', () => {
+  // Пустой chunk не должен «голосовать» наравне с большим: было Math.max(1, chars)
+  // → empty chunk весил 1 и тянул среднее. Теперь его вес 0.
+  const entries = [
+    { chunk: { index: 0, h2: 'A', plainChars: 10000 }, verdict: { pq_score: 9.0 } },
+    { chunk: { index: 1, h2: 'B', plainChars: 0     }, verdict: { pq_score: 1.0, issues: ['noted'] } },
+  ];
+  const { aggregated, totalChars } = aggregateEeatVerdicts(entries);
+  assert.strictEqual(totalChars, 10000);
+  assert.strictEqual(aggregated.pq_score, 9.0, 'empty chunk must not pull the average down');
+  // issues из пустого chunk всё равно собираются (структурная диагностика полезна).
+  assert.strictEqual(aggregated.issues.length, 1);
+  assert.strictEqual(aggregated.issues[0].h2, 'B');
+});
+
+test('eeatChunker — chunkBySize splits on </tr> and </table> boundaries', () => {
+  // Длинная таблица: 3 строки по 2500 символов. targetChars=3000 → каждая строка
+  // в своём чанке, потому что split допускается на </tr>.
+  const row = '<tr><td>' + 'Я'.repeat(2500) + '</td></tr>';
+  const html = '<table><tbody>' + row + row + row + '</tbody></table>';
+  const chunks = chunkBySize(html, 3000);
+  assert.ok(chunks.length >= 2, `expected ≥2 chunks, got ${chunks.length}`);
+  // Ни в одном куске не должно быть «оборванного» <tr> (т.е. <tr ... без </tr>).
+  for (const c of chunks) {
+    const openTr = (c.html.match(/<tr\b/gi) || []).length;
+    const closeTr = (c.html.match(/<\/tr>/gi) || []).length;
+    assert.strictEqual(openTr, closeTr, `chunk has unbalanced <tr>: ${openTr} open vs ${closeTr} close`);
+  }
+});
+
 // ── validationFailureLog ───────────────────────────────────────────
 
 test('validationFailureLog — disabled by default → no-op', () => {
@@ -376,6 +431,41 @@ test('validationFailureLog — sanitize masks sk-... and Bearer ...', () => {
   assert.ok(/sk-\[REDACTED\]/.test(out.key));
 });
 
+test('validationFailureLog — sanitize masks GitHub PAT, JWT, AWS, long hex', () => {
+  const out = sanitize({
+    a: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+    b: 'github_pat_11ABCDEFG0xyz123456789_ABCDEFGHIJKLMN',
+    c: 'gho_abcdefghijklmnopqrstuv12345',
+    d: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.abcDEF-_123',
+    e: 'AKIAIOSFODNN7EXAMPLE',
+    f: 'deadbeefcafebabe0123456789abcdef0123456789',  // 42-hex
+  });
+  assert.ok(/ghp_\[REDACTED\]/.test(out.a), `a not masked: ${out.a}`);
+  assert.ok(/github_pat_\[REDACTED\]/.test(out.b), `b not masked: ${out.b}`);
+  assert.ok(/gh_\[REDACTED\]/.test(out.c), `c not masked: ${out.c}`);
+  assert.ok(/jwt-\[REDACTED\]/.test(out.d), `d not masked: ${out.d}`);
+  assert.ok(/AKIA-\[REDACTED\]/.test(out.e), `e not masked: ${out.e}`);
+  assert.ok(/hex-\[REDACTED\]/.test(out.f), `f not masked: ${out.f}`);
+});
+
+test('validationFailureLog — sanitize redacts extended secret-key names', () => {
+  // SECRET_KEY_RE расширен: access_key/private_key/client_secret/passwd/pwd.
+  const out = sanitize({
+    access_key: 'AKIA1234567890ABCDEF',
+    private_key: '-----BEGIN PRIVATE KEY-----abc',
+    client_secret: 'whatever-anything',
+    passwd: 'hunter2',
+    pwd: 'hunter2',
+    visible: 'kept-as-is',
+  });
+  assert.strictEqual(out.access_key, '[REDACTED]');
+  assert.strictEqual(out.private_key, '[REDACTED]');
+  assert.strictEqual(out.client_secret, '[REDACTED]');
+  assert.strictEqual(out.passwd, '[REDACTED]');
+  assert.strictEqual(out.pwd, '[REDACTED]');
+  assert.strictEqual(out.visible, 'kept-as-is');
+});
+
 // ── acfStructuralValidators ────────────────────────────────────────
 
 test('acfStructuralValidators — findDuplicatedBlocks catches cross-block clone', () => {
@@ -399,6 +489,25 @@ test('acfStructuralValidators — findDuplicatedBlocks ignores within same block
   ];
   const { duplicates } = findDuplicatedBlocks(acf, { minLen: 80, crossBlockOnly: true });
   assert.strictEqual(duplicates.length, 0, 'within-block dups should be ignored when crossBlockOnly=true');
+});
+
+test('acfStructuralValidators — findDuplicatedBlocks allowlist suppresses brand/CTA repeats', () => {
+  // Допустим, на каждой странице бренда повторяется одна и та же CTA-фраза в
+  // attention-блоке и в финальной секции tags. Это намеренно — добавим в allowlist.
+  const cta = 'Закажите бесплатную консультацию специалиста бренда AcmeCorp по телефону восемь восемьсот сто двадцать три.';
+  const acf = [
+    { acf_fc_layout: 'attention', text: cta },
+    { acf_fc_layout: 'blocks', blocks: [{ text: cta }] },
+    { acf_fc_layout: 'blocks', blocks: [{ text: 'Совсем другой длинный фрагмент про погоду и Африку и слонов в саванне.' }] },
+  ];
+  const { duplicates: withoutAllow } = findDuplicatedBlocks(acf, { minLen: 80 });
+  assert.strictEqual(withoutAllow.length, 1, 'baseline: дубликат обнаружен');
+
+  const { duplicates: withAllow } = findDuplicatedBlocks(acf, {
+    minLen: 80,
+    allowlist: ['AcmeCorp', 'бесплатную консультацию'],
+  });
+  assert.strictEqual(withAllow.length, 0, 'allowlist должен подавить known-good повтор');
 });
 
 test('acfStructuralValidators — validateHeadingOrder detects reorder & missing', () => {

@@ -74,8 +74,10 @@ function chunkBySize(html, targetChars = 8000) {
   if (countPlainChars(html) <= targetChars) {
     return [{ html, plainChars: countPlainChars(html) }];
   }
-  // Режем по </p>, </li>, </h3>, </h4>, </blockquote>.
-  const tokens = html.split(/(?<=<\/(?:p|li|h[3-6]|blockquote|figure)>)/i);
+  // Режем по </p>, </li>, </h3>, </h4>, </blockquote>, </figure>, </tr>, </table>.
+  // Таблицы: </tr> и </table> — безопасные границы (целые строки/таблицы);
+  // </td> не используем намеренно, чтобы не разрывать ячейки.
+  const tokens = html.split(/(?<=<\/(?:p|li|h[3-6]|blockquote|figure|tr|table)>)/i);
   const out = [];
   let buf = '';
   let bufChars = 0;
@@ -151,8 +153,21 @@ function aggregateEeatVerdicts(entries) {
   let totalChars = 0;
 
   for (const e of entries) {
-    const w = Math.max(1, e.chunk.plainChars || 0);
-    totalChars += e.chunk.plainChars || 0;
+    const chars = Math.max(0, e.chunk.plainChars || 0);
+    totalChars += chars;
+    // Чанки без текста не должны тянуть среднее: им присваивается вес 0.
+    // (Старое поведение Math.max(1, chars) делало пустой chunk «полноценным
+    // голосом» наравне с тысячесимвольным куском.)
+    if (chars === 0) {
+      // Только issues аккумулируем, без вклада в среднее.
+      if (e.verdict && Array.isArray(e.verdict.issues)) {
+        for (const iss of e.verdict.issues) {
+          allIssues.push({ chunkIndex: e.chunk.index, h2: e.chunk.h2, issue: iss });
+        }
+      }
+      continue;
+    }
+    const w = chars;
     for (const f of fields) {
       const v = e.verdict ? e.verdict[f] : null;
       if (typeof v === 'number' && Number.isFinite(v)) {
