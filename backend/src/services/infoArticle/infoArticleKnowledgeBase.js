@@ -333,6 +333,14 @@ function iakbCallOpts(task, extra = {}) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
   }
+  // Brand-aware response cache: каждая задача имеет brand_name (явное поле БД)
+  // или brand (legacy). Передаём это в callLLM, чтобы Redis-кэш изолировал
+  // ответы по бренду и позволял адресную инвалидацию через
+  // responseCache.invalidateByBrand(brand). Без явного бренда — попадаем в
+  // общий неймспейс 'nobrand' (см. cachePolicy.normalizeBrand).
+  if (task && (task.brand_name || task.brand)) {
+    opts.brand = task.brand_name || task.brand;
+  }
   return opts;
 }
 

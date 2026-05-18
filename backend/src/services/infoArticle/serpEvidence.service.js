@@ -42,6 +42,9 @@ const crypto = require('crypto');
 const { fetchYandexSerp } = require('../metaTags/xmlstockClient');
 const { fetchPages }      = require('../relevance/pageFetcher');
 const { evidence: callEvidenceService } = require('../relevance/pythonClient');
+const { getCachePolicy, normalizeBrand } = require('../llm/cachePolicy');
+
+const _POLICY = getCachePolicy();
 
 // ── Config (env-overridable) ─────────────────────────────────────────
 
@@ -62,9 +65,13 @@ const MAX_CHARS_PER_URL = (() => {
 
 const CACHE_TTL_MS = (() => {
   const v = parseInt(process.env.INFO_ARTICLE_GROUNDING_CACHE_TTL_S, 10);
-  // Дефолт — 1 час. Темы статей повторяются редко; долго хранить смысла нет,
-  // а свежесть SERP — фактор качества (события месяца, новые товары).
-  return Number.isFinite(v) && v >= 60 && v <= 86400 ? v * 1000 : 60 * 60 * 1000;
+  // По единой политике: 7 дней. SERP-evidence — это публичные данные
+  // конкурентов, шаринг безопасен. Свежесть SERP важна, но 7 дней —
+  // приемлемо для статей; при острой необходимости можно вызвать с
+  // force=true (force re-fetch).
+  return Number.isFinite(v) && v >= 60 && v <= 30 * 24 * 60 * 60
+    ? v * 1000
+    : _POLICY.ttlSeconds * 1000;
 })();
 
 const CACHE_MAX_ENTRIES = (() => {
@@ -80,13 +87,18 @@ const CACHE_MAX_ENTRIES = (() => {
 
 const _cache = new Map();   // key → { value, expiresAt }
 
-function _cacheKey({ query, region, topN, topK, maxChars }) {
+function _cacheKey({ query, region, topN, topK, maxChars, brand }) {
   const norm = JSON.stringify({
     q: String(query || '').trim().toLowerCase(),
     r: String(region || '').trim().toLowerCase(),
     n: topN,
     k: topK,
     c: maxChars,
+    // Бренд участвует в ключе, чтобы две задачи разных брендов с одинаковым
+    // query/region не делили evidence. Хотя SERP — публичные данные,
+    // изоляция нужна для консистентного учёта в админ-панели «кэш по брендам»
+    // и для возможности инвалидации одного бренда без затрагивания других.
+    b: normalizeBrand(brand),
   });
   return crypto.createHash('sha1').update(norm).digest('hex');
 }
@@ -104,13 +116,18 @@ function _cacheGet(key) {
   return hit.value;
 }
 
-function _cacheSet(key, value) {
+function _cacheSet(key, value, brand) {
   if (_cache.size >= CACHE_MAX_ENTRIES) {
     // Удаляем «самый старый» (первый ключ в порядке вставки).
     const oldest = _cache.keys().next().value;
     if (oldest !== undefined) _cache.delete(oldest);
   }
-  _cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+  _cache.set(key, {
+    value,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+    brand: normalizeBrand(brand),
+  });
+  _ensureSweeper();
 }
 
 function _cacheClear() {
@@ -122,6 +139,77 @@ function _cacheStats() {
   const now = Date.now();
   for (const v of _cache.values()) if (v.expiresAt > now) alive += 1;
   return { size: _cache.size, alive, ttlMs: CACHE_TTL_MS, max: CACHE_MAX_ENTRIES };
+}
+
+/**
+ * Возвращает массив ключей кэша, принадлежащих указанному бренду
+ * (для admin-панели «кэш по брендам»).
+ */
+function _cacheListByBrand(brand) {
+  const target = normalizeBrand(brand);
+  const out = [];
+  for (const [k, v] of _cache.entries()) {
+    if (v.brand === target) out.push(k);
+  }
+  return out;
+}
+
+/**
+ * Удаляет из in-memory кэша все записи указанного бренда.
+ * Возвращает количество удалённых записей.
+ */
+function _cacheInvalidateByBrand(brand) {
+  const target = normalizeBrand(brand);
+  let deleted = 0;
+  for (const [k, v] of _cache.entries()) {
+    if (v.brand === target) {
+      _cache.delete(k);
+      deleted += 1;
+    }
+  }
+  return deleted;
+}
+
+// ── Background sweeper ────────────────────────────────────────────────
+//
+// Lazy-eviction в _cacheGet удаляет просроченные записи только при попадании
+// на тот же ключ. Если ключ больше никогда не запрашивается — он остаётся в
+// Map до выдавливания через CACHE_MAX_ENTRIES. Sweeper раз в N минут
+// проходит по Map и удаляет просроченные. Это гарантирует требование
+// заказчика «срок хранения данных до 7 дней, далее они затираются», даже
+// при отсутствии новых запросов.
+//
+// .unref() — чтобы интервал не блокировал выход Node-процесса.
+
+let _sweepTimer = null;
+
+function _sweepExpired() {
+  const now = Date.now();
+  let removed = 0;
+  for (const [k, v] of _cache.entries()) {
+    if (v.expiresAt <= now) {
+      _cache.delete(k);
+      removed += 1;
+    }
+  }
+  if (removed > 0) {
+    console.log(`[serpEvidence] sweeper removed ${removed} expired entries (alive=${_cache.size})`);
+  }
+}
+
+function _ensureSweeper() {
+  if (_sweepTimer || typeof setInterval !== 'function') return;
+  _sweepTimer = setInterval(_sweepExpired, _POLICY.sweepIntervalMs);
+  if (_sweepTimer && typeof _sweepTimer.unref === 'function') {
+    _sweepTimer.unref();
+  }
+}
+
+function _stopSweeper() {
+  if (_sweepTimer) {
+    clearInterval(_sweepTimer);
+    _sweepTimer = null;
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────
@@ -136,6 +224,7 @@ async function buildSerpEvidence(opts = {}) {
   const t0 = Date.now();
   const query  = String(opts.query || '').trim();
   const region = String(opts.region || '').trim();
+  const brand  = String(opts.brand || '').trim();
   const topN   = _clampInt(opts.topN, TOP_N, 1, 20);
   const topK   = _clampInt(opts.topK, TOP_K, 1, 20);
   const maxChars = _clampInt(opts.maxCharsPerUrl, MAX_CHARS_PER_URL, 200, 20000);
@@ -149,7 +238,7 @@ async function buildSerpEvidence(opts = {}) {
     });
   }
 
-  const key = _cacheKey({ query, region, topN, topK, maxChars });
+  const key = _cacheKey({ query, region, topN, topK, maxChars, brand });
   if (!opts.force) {
     const cached = _cacheGet(key);
     if (cached) {
@@ -263,7 +352,7 @@ async function buildSerpEvidence(opts = {}) {
     warnings,
   };
 
-  _cacheSet(key, result);
+  _cacheSet(key, result, brand);
   log(`📚 SERP-evidence: ${enriched.length} URL × до ${topK} сниппетов (${snippetCount} всего, ${result.stats.duration_ms} мс)`, 'ok');
   return result;
 }
@@ -353,6 +442,10 @@ module.exports = {
   _cacheClear,
   _cacheStats,
   _cacheKey,
+  _cacheListByBrand,
+  _cacheInvalidateByBrand,
+  _sweepExpired,
+  _stopSweeper,
   TOP_N,
   TOP_K,
   MAX_CHARS_PER_URL,

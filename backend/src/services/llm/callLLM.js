@@ -236,6 +236,12 @@ async function persistStageCall({ taskId, stageName, callLabel, model, promptSiz
  * @param {number}              [opts.tokenBudget]  — лимит input-токенов на задачу (для Gemini).
  *                                                    Infinity по умолчанию. При исчерпании —
  *                                                    BudgetExceededError (isDeterministic).
+ * @param {string}              [opts.brand]        — наименование бренда из задачи
+ *                                                    (task.brand / brand_name). Используется
+ *                                                    в Redis-кэше для изоляции по бренду
+ *                                                    (см. responseCache.buildKey) и для
+ *                                                    последующего поиска/инвалидации кэша
+ *                                                    по бренду через listKeysByBrand.
  *
  * @returns {Promise<object>}   — распарсенный JSON-ответ
  */
@@ -255,6 +261,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     cachedContent = null,
     onCacheMiss   = null,
     tokenBudget   = Infinity,
+    brand         = '',
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -303,6 +310,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         prompt,
         temperature,
         maxTokens,
+        brand,
       }).catch(() => null)
     : null;
 

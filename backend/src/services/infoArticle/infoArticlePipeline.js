@@ -28,7 +28,7 @@
  */
 
 const db = require('../../config/db');
-const { callLLM } = require('../llm/callLLM');
+const { callLLM, resetTaskBudget } = require('../llm/callLLM');
 const { loadInfoArticlePrompt } = require('../../prompts/infoArticle');
 const { generateImage, IMAGE_PRICE_USD } = require('../linkArticle/nanoBananaPro.adapter');
 const sse = require('../sse/sseManager');
@@ -1131,6 +1131,7 @@ async function processInfoArticleTask(taskId) {
         const evidenceResult = await buildSerpEvidence({
           query:  task.topic,
           region: task.region || '',
+          brand:  task.brand_name || task.brand || '',
           logger: (msg, level) => { appendLog(taskId, msg, level || 'info').catch(() => {}); },
         });
         if (evidenceResult && Array.isArray(evidenceResult.evidence) && evidenceResult.evidence.length) {
@@ -1657,6 +1658,10 @@ async function processInfoArticleTask(taskId) {
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState
+    // в callLLM аккумулирует записи для всех когда-либо запущенных задач
+    // (утечка памяти, ~120 байт на задачу × тысячи прогонов).
+    resetTaskBudget(taskId);
   }
 }
 
