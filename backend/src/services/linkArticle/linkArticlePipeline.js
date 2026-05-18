@@ -25,7 +25,7 @@
  */
 
 const db = require('../../config/db');
-const { callLLM } = require('../llm/callLLM');
+const { callLLM, resetTaskBudget } = require('../llm/callLLM');
 const { runEeatAuditCore } = require('../eeatAudit/core');
 const { loadLinkArticlePrompt } = require('../../prompts/linkArticle');
 const { generateImage, IMAGE_PRICE_USD } = require('./nanoBananaPro.adapter');
@@ -829,6 +829,10 @@ async function processLinkArticleTask(taskId) {
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState
+    // в callLLM аккумулирует записи навсегда. См. фикс утечки в
+    // infoArticlePipeline и аналогичный паттерн в classic-orchestrator.
+    resetTaskBudget(taskId);
   }
 }
 

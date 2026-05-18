@@ -28,8 +28,9 @@
  */
 
 const db = require('../../config/db');
-const { callLLM } = require('../llm/callLLM');
+const { callLLM, resetTaskBudget } = require('../llm/callLLM');
 const { loadInfoArticlePrompt } = require('../../prompts/infoArticle');
+const { buildPersonaSystemBlock } = require('../../prompts/infoArticle/personas');
 const { generateImage, IMAGE_PRICE_USD } = require('../linkArticle/nanoBananaPro.adapter');
 const sse = require('../sse/sseManager');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
@@ -46,6 +47,7 @@ const {
   pointerOrJson,
 } = require('./infoArticleKnowledgeBase');
 const { synthesizeLsiSet, measureLsiCoverageInHtml, measureLsiCoverageSemantic } = require('./lsiPipeline');
+const { checkLsiOverdose } = require('./lsiDensity.service');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
 const { domainsFromLinks } = require('./excelParser');
 const {
@@ -415,12 +417,44 @@ async function runWriter(task, args, ctx, opts = {}) {
   const iakbReady = !!task.__iakb;
   const writerInstructions = loadInfoArticlePrompt('stage3');
 
+  // Authorial persona — детерминированно выбираем 1 из 7 готовых персон
+  // (см. backend/src/prompts/infoArticle/personas.js). Цель: убрать
+  // монотонный «LLM-стиль» и усилить anti-hallucination через жёсткие
+  // правила, прописанные в каждой персоне. Persona одинакова для
+  // повторных запусков одной задачи (hash от topic+region+brand) —
+  // это важно для consistency cached response в Redis.
+  let personaBlock = '';
+  let personaKey   = '';
+  try {
+    const picked = buildPersonaSystemBlock({
+      topic:  task.topic,
+      region: task.region || '',
+      brand:  task.brand_name || task.brand || '',
+      persona: task.persona || '',
+    });
+    personaKey = picked.key;
+    personaBlock = picked.block || '';
+  } catch (e) {
+    // Полный graceful — без персоны writer работает по-старому.
+    personaBlock = '';
+    if (ctx && typeof ctx.taskId !== 'undefined') {
+      appendLog(ctx.taskId, `⚠ Persona pick failed: ${e.message}`, 'warn').catch(() => {});
+    }
+  }
+
   // System prompt: при активном Gemini cache — пусто (всё в кэше);
-  // иначе — IAKB + writer-instructions.
-  const systemFull = task.__iakb
-    ? `${task.__iakb}\n\n========================================\n${writerInstructions}`
+  // иначе — IAKB + writer-instructions + персона.
+  const writerWithPersona = personaBlock
+    ? `${writerInstructions}\n\n${personaBlock}`
     : writerInstructions;
+  const systemFull = task.__iakb
+    ? `${task.__iakb}\n\n========================================\n${writerWithPersona}`
+    : writerWithPersona;
   const systemArg = task.__geminiCacheName ? '' : systemFull;
+
+  if (personaKey && ctx && typeof ctx.taskId !== 'undefined') {
+    appendLog(ctx.taskId, `🎭 Авторская персона: ${personaKey}`, 'info').catch(() => {});
+  }
 
   const buildUser = (correctiveIssues = null, priorEeatIssues = null, priorLinkIssues = null) => {
     const noLinks = !Array.isArray(linkPlan) || linkPlan.length === 0;
@@ -1131,6 +1165,7 @@ async function processInfoArticleTask(taskId) {
         const evidenceResult = await buildSerpEvidence({
           query:  task.topic,
           region: task.region || '',
+          brand:  task.brand_name || task.brand || '',
           logger: (msg, level) => { appendLog(taskId, msg, level || 'info').catch(() => {}); },
         });
         if (evidenceResult && Array.isArray(evidenceResult.evidence) && evidenceResult.evidence.length) {
@@ -1165,7 +1200,25 @@ async function processInfoArticleTask(taskId) {
     if (INFO_ARTICLE_GEMINI_CACHE_ENABLED) {
       try {
         const writerInstructions = loadInfoArticlePrompt('stage3');
-        const cacheText = `${task.__iakb}\n\n========================================\n${writerInstructions}`;
+        // Включаем персону в Gemini cached prefix, чтобы тон writer'а
+        // оставался стабильным при cache-hit и совпадал с системой,
+        // которую видит non-cache путь в runWriter. Cache привязан к задаче
+        // (taskId), а персона детерминирована от task.topic+region+brand —
+        // поэтому персона в cache соответствует runWriter 1-в-1.
+        let personaForCache = '';
+        try {
+          const picked = buildPersonaSystemBlock({
+            topic:  task.topic,
+            region: task.region || '',
+            brand:  task.brand_name || task.brand || '',
+            persona: task.persona || '',
+          });
+          personaForCache = picked.block || '';
+        } catch (_) { personaForCache = ''; }
+        const writerWithPersona = personaForCache
+          ? `${writerInstructions}\n\n${personaForCache}`
+          : writerInstructions;
+        const cacheText = `${task.__iakb}\n\n========================================\n${writerWithPersona}`;
         const created = await createCachedContent({
           systemInstruction: cacheText,
           ttlSeconds: INFO_ARTICLE_GEMINI_CACHE_TTL_S,
@@ -1470,6 +1523,50 @@ async function processInfoArticleTask(taskId) {
       }
     }
 
+    // 11e2. LSI density / anti-overspam контроль (детерминированный).
+    //       По ТЗ заказчика: «усилить контроль переспама при генерации
+    //       контента». Считает per-H2 плотность каждой important-фразы:
+    //         - per-term > 2.5% → overdose для этого термина
+    //         - total > 8.0%   → overdose для секции
+    //       Verdict 'fail' / 'review' / 'pass' / 'na' (если LSI пустой).
+    //       Soft-warning, никогда не валит pipeline. Используется UI как
+    //       сигнал «эту секцию надо переписать естественнее».
+    //
+    //       Не вынесен в env-флаг по требованию заказчика «новые ENV не
+    //       добавлять»: модуль чисто детерминированный, ничего не сетит,
+    //       не платит — всегда безопасно запускать.
+    try {
+      const importantTerms = (lsiSet && Array.isArray(lsiSet.important))
+        ? lsiSet.important
+        : [];
+      const overdoseReport = checkLsiOverdose(articleHtml, importantTerms);
+      // Сохраняем в JSONB-колонку lsi_overdose_report; колонка создаётся
+      // лениво через server.js ensureSchema (миграция 029 / IF NOT EXISTS).
+      await saveColumn(taskId, 'lsi_overdose_report', overdoseReport).catch(() => {});
+      const icon = overdoseReport.verdict === 'pass' ? '✅'
+        : overdoseReport.verdict === 'review' ? '⚠'
+        : overdoseReport.verdict === 'fail' ? '❌'
+        : 'ℹ';
+      await appendLog(
+        taskId,
+        `${icon} LSI overdose: verdict=${overdoseReport.verdict}, `
+        + `overdose=${overdoseReport.sections_overdose}/${overdoseReport.sections_total}, `
+        + `low=${overdoseReport.sections_low}, good=${overdoseReport.sections_good}`,
+        overdoseReport.verdict === 'pass' ? 'ok' : 'info',
+      );
+      if (overdoseReport.overspam && overdoseReport.overspam.length) {
+        for (const o of overdoseReport.overspam.slice(0, 5)) {
+          await appendLog(
+            taskId,
+            `🚨 Переспам «${o.term}» в «${o.section_title}» — плотность ${o.density_pct}%`,
+            'warn',
+          );
+        }
+      }
+    } catch (overErr) {
+      await appendLog(taskId, `⚠ LSI overdose-check не выполнился: ${overErr.message}`, 'warn');
+    }
+
     // 11f. Phase 2 / Б5: Intent verifier (детерминированный).
     //      Гейт INFO_ARTICLE_INTENT_VERIFY_ENABLED (default ON). Сравнивает
     //      программно определённый интент статьи с dominant_intent из
@@ -1657,6 +1754,10 @@ async function processInfoArticleTask(taskId) {
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState
+    // в callLLM аккумулирует записи для всех когда-либо запущенных задач
+    // (утечка памяти, ~120 байт на задачу × тысячи прогонов).
+    resetTaskBudget(taskId);
   }
 }
 
