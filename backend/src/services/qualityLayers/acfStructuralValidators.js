@@ -107,6 +107,10 @@ function extractTextFragments(acfArray) {
  *                                    (короткие подписи и общие фразы не интересны)
  * @param {boolean} [opts.crossBlockOnly=true]  если true, дубликаты внутри
  *                                              одного block не репортятся (это часто намеренно)
+ * @param {string[]} [opts.allowlist=[]] список known-good фрагментов: если canon
+ *                                       дубликата СОДЕРЖИТ canon любого из них —
+ *                                       такой повтор не репортится (бренд, контакты,
+ *                                       постоянное CTA-объявление и т.п.).
  * @returns {{ duplicates: Array<{
  *   canonHash: string,
  *   occurrences: Array<{ blockIdx, layout, field, path, snippet }>,
@@ -116,6 +120,9 @@ function extractTextFragments(acfArray) {
 function findDuplicatedBlocks(acfArray, opts = {}) {
   const minLen = opts.minLen || 80;
   const crossBlockOnly = opts.crossBlockOnly !== false;
+  const allowlistCanons = Array.isArray(opts.allowlist)
+    ? opts.allowlist.map((s) => canon(s)).filter((c) => c.length > 0)
+    : [];
 
   const fragments = extractTextFragments(acfArray).filter((f) => f.canon.length >= minLen);
   const byCanon = new Map();
@@ -132,6 +139,11 @@ function findDuplicatedBlocks(acfArray, opts = {}) {
       const distinctBlocks = new Set(occList.map((o) => o.blockIdx));
       if (distinctBlocks.size < 2) continue;
     }
+    // Allowlist-фильтр: дубликат пропускаем, если внутри его canon встречается
+    // любой allowlist-canon. Это «бренд / телефон / постоянное CTA» — известный
+    // намеренный повтор.
+    if (allowlistCanons.some((a) => canonStr.includes(a))) continue;
+
     duplicates.push({
       canonHash: canonStr.slice(0, 80),
       length: canonStr.length,

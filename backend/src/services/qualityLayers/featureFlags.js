@@ -103,12 +103,81 @@ const QUALITY_FLAGS = deepFreeze({
   // ── C1. Prompt regression tracking ───────────────────────────────
   validationLog: {
     enabled: false,
-    filePath: '/var/log/seo-genius/validation-failures.jsonl',
+    // Безопасный дефолт под os.tmpdir() — на dev/CI работает без прав на /var/log.
+    // На проде задайте абсолютный путь (например `/var/log/seo-genius/...`).
+    filePath: require('path').join(require('os').tmpdir(), 'seo-genius', 'validation-failures.jsonl'),
+  },
+
+  // ── C3. Структурные ACF-валидаторы ───────────────────────────────
+  acfStructural: {
+    // canon-substrings, при попадании которых дубликат НЕ считается ошибкой
+    // (бренд, телефон, постоянная цитата CTA и т.п.). Строки нормализуются
+    // в canon-форму внутри validator-а (lower-case + только буквы/цифры).
+    // По умолчанию пусто — никаких исключений.
+    duplicatesAllowlist: [],
+    duplicatesMinLen: 80,           // 30..1000
   },
 
   // ── C2. Унифицированный E-E-A-T таргет ───────────────────────────
   eeatTargetDefault: 7.5,          // 0..10
 });
+
+/**
+ * RANGES — задекларированные в комментариях диапазоны значений.
+ * Проверяются один раз при загрузке модуля; при нарушении бросаем
+ * Error — это страховка от опечаток вроде `maxPassiveRatio: 1.8`.
+ * Не покрывает enabled-флаги (boolean) и filePath (string).
+ */
+const RANGES = [
+  ['factcheck.minSupportedRatio',         0, 1],
+  ['grounding.tokensPerH2',               50, 4000],
+  ['grounding.totalBudget',               200, 32000],
+  ['grounding.passagesPerH2',             1, 20],
+  ['plagiarism.maxOverlap',               0, 1],
+  ['plagiarism.shingleSize',              3, 12],
+  ['plagiarism.selfplagMaxCosine',        0, 1],
+  ['plagiarism.selfplagMinChars',         30, 1000],
+  ['imageQa.maxRetries',                  0, 5],
+  ['imageQa.altVisualMinCosine',          0, 1],
+  ['eeatChunked.chunkTargetChars',        1500, 30000],
+  ['lsiSemantic.threshold',               0, 1],
+  ['linkSemantic.cosineWeight',           0, 1],
+  ['linkSemantic.minCosine',              0, 1],
+  ['readability.minIndex',                0, 100],
+  ['readability.maxAvgSentenceLen',       5, 60],
+  ['readability.maxPassiveRatio',         0, 1],
+  ['readability.maxBureaucrateseRatio',   0, 1],
+  ['acfStructural.duplicatesMinLen',      30, 1000],
+  ['eeatTargetDefault',                   0, 10],
+];
+
+function _get(obj, path) {
+  return path.split('.').reduce((acc, k) => (acc == null ? acc : acc[k]), obj);
+}
+
+function _validateRanges(cfg) {
+  for (const [pathStr, min, max] of RANGES) {
+    const v = _get(cfg, pathStr);
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) {
+      throw new Error(
+        `[qualityLayers/featureFlags] ${pathStr}=${v} вне допустимого диапазона [${min}..${max}]`,
+      );
+    }
+  }
+  // Дополнительно: duplicatesAllowlist должен быть массивом строк.
+  const allow = _get(cfg, 'acfStructural.duplicatesAllowlist');
+  if (!Array.isArray(allow) || allow.some((s) => typeof s !== 'string')) {
+    throw new Error('[qualityLayers/featureFlags] acfStructural.duplicatesAllowlist должен быть массивом строк');
+  }
+  // validationLog.filePath — непустая строка.
+  const fp = _get(cfg, 'validationLog.filePath');
+  if (typeof fp !== 'string' || !fp.length) {
+    throw new Error('[qualityLayers/featureFlags] validationLog.filePath должен быть непустой строкой');
+  }
+}
+
+// Fail-fast при старте процесса, если конфигурация невалидна.
+_validateRanges(QUALITY_FLAGS);
 
 /**
  * getQualityFlags — возвращает frozen-snapshot конфигурации.
