@@ -576,24 +576,49 @@ function createSeoArticleFromTopicIdea(topic) {
 }
 
 // CSV-экспорт списка тем (для редакционного плана / Notion / sheets).
+//
+// Источник данных — `parsedTopicIdeas.json.topics`, тот же, что используется
+// для disabled-условия кнопки и для отрисовки UI. Раньше хендлер читал
+// `activeTask.topic_ideas_json` напрямую, и при отсутствии этого JSON в БД
+// (когда темы парсились из markdown как fallback) кнопка молчаливо ничего
+// не делала: визуально активна, но клик уходил в return. Из-за этого
+// пользователь видел «кнопка не работает».
 function exportTopicsCsv() {
-  const json = activeTask.value && activeTask.value.topic_ideas_json;
-  if (!json || !Array.isArray(json.topics) || !json.topics.length) return;
-  const csv = topicsToCsv(json.topics);
+  const parsed = parsedTopicIdeas.value;
+  const topics = parsed && parsed.json && Array.isArray(parsed.json.topics)
+    ? parsed.json.topics
+    : [];
+  if (!topics.length) {
+    copyError.value = 'Нет тем для экспорта в CSV (topics-список пуст).';
+    return;
+  }
+  const csv = topicsToCsv(topics);
+  const niche = (activeTask.value?.niche || 'topics')
+    .replace(/[^\wа-яё-]+/gi, '_')
+    .slice(0, 60);
+  const taskShortId = (activeTask.value?.id || 'task').slice(0, 8);
   // Выкладываем как Blob и скачиваем — чище, чем navigator.clipboard, потому
-  // что Excel/Google Sheets легко импортируют из файла.
+  // что Excel/Google Sheets легко импортируют из файла. На fail — fallback на
+  // copyText, чтобы пользователь хотя бы получил CSV в буфер обмена.
   try {
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const niche = (activeTask.value.niche || 'topics').replace(/[^\wа-яё-]+/gi, '_').slice(0, 60);
     a.href = url;
-    a.download = `topics-${niche}-${activeTask.value.id.slice(0, 8)}.csv`;
+    a.download = `topics-${niche}-${taskShortId}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // Кратковременный визуальный feedback на ту же кнопку (id 'topics-csv').
+    lastCopied.value = { id: 'topics-csv', mode: 'text' };
+    if (lastCopiedTimer) clearTimeout(lastCopiedTimer);
+    lastCopiedTimer = setTimeout(() => {
+      lastCopied.value = { id: '', mode: '' };
+    }, 2000);
   } catch (e) {
+    copyError.value = 'Не удалось скачать CSV (' + (e.message || e)
+                      + '), копирую в буфер обмена.';
     copyText(csv, 'topics-csv', 'text');
   }
 }
@@ -1173,7 +1198,9 @@ const sortedTasks = computed(() =>
                         @click="exportTopicsCsv"
                         :disabled="!parsedTopicIdeas.json.topics?.length"
                         title="Скачать список тем как CSV для импорта в Notion / Sheets / Excel">
-                  📥 Экспорт тем (CSV)
+                  {{ isCopied('topics-csv', 'text')
+                      ? '✅ Скачано'
+                      : '📥 Экспорт тем (CSV)' }}
                 </button>
                 <button class="btn-secondary text-xs"
                         @click="copyBrandFactsForInfoArticle"
