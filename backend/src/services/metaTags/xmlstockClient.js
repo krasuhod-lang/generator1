@@ -30,17 +30,21 @@ function collapseWs(s) {
 }
 
 /**
- * Запрашивает 2 страницы XMLStock (по 10 doc на странице) → итого до ~20 результатов.
+ * Запрашивает страницы XMLStock (по 10 doc на странице) → итого до ~`pages*10`.
  * При сетевой ошибке/5xx делает до 3 попыток с паузой 3s.
  *
  * @param {string} keyword       — поисковый запрос
  * @param {object} [opts]
- * @param {string} [opts.lr]     — yandex region (если не задан — без &lr)
- * @param {number} [opts.pages]  — сколько страниц забирать (по умолчанию 2)
+ * @param {string} [opts.lr]         — yandex region (если не задан — без &lr)
+ * @param {number} [opts.pages]      — сколько страниц забирать (по умолчанию 2)
+ * @param {number} [opts.startPage]  — индекс первой страницы XMLStock (по
+ *   умолчанию 0). XMLStock индексирует страницы от 0: page=0 — позиции 1-10,
+ *   page=1 — 11-20, page=2 — 21-30, и т.д. Используется для «добора» URL со
+ *   страницы 3 SERP, когда после dedup осталось мало результатов.
  * @returns {Promise<Array<{title, snippet, url}>>}
  */
 async function fetchYandexSerp(keyword, opts = {}) {
-  const { lr = '', pages = 2 } = opts;
+  const { lr = '', pages = 2, startPage = 0 } = opts;
   const baseUrl = XMLSTOCK_URL;
   // Параметры идентичны beta-версии:
   //   groupby=attr=''.mode=flat.groups-on-page=10.docs-in-group=1
@@ -54,7 +58,7 @@ async function fetchYandexSerp(keyword, opts = {}) {
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
       const extracted = [];
-      for (let page = 0; page < pages; page += 1) {
+      for (let page = startPage; page < startPage + pages; page += 1) {
         const lrPart = lr ? `&lr=${encodeURIComponent(String(lr).trim())}` : '';
         const url =
           `${baseUrl}${sep}query=${encodeURIComponent(keyword)}` +

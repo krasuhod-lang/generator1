@@ -40,6 +40,13 @@ const MIN_FETCHED_FOR_ANALYZE = (() => {
   return Number.isFinite(v) && v >= 1 ? v : 5;
 })();
 
+// Минимальное количество URL после dedup + фильтра агрегаторов, ниже которого
+// мы делаем «добор» со страницы 3 SERP (XMLStock page=2 → позиции 21-30).
+// Цель — иметь приличный корпус для сравнения, даже если две первые страницы
+// Яндекса забиты агрегаторами или дублями домена. Захардкожено по требованию
+// заказчика, env не используется (политика «не трогаем .env»).
+const MIN_SERP_AFTER_DEDUP = 18;
+
 async function _setStage(reportId, stage, extra = {}) {
   const sets = ['current_stage = $2'];
   const params = [reportId, stage];
@@ -175,6 +182,57 @@ async function processRelevanceReport(reportId) {
       );
     }
 
+    // ── 1.4. Добор со страницы 3 SERP, если после dedup осталось < 18 ──
+    // Заказчик: «если спарсено сайтов менее 18, то дополнительно мы добираем
+    // сайты с 3 страницы поисковой выдачи (позиции 21-30)». Считаем именно
+    // длину после dedup по URL/host, но ДО фильтра агрегаторов — добираем
+    // максимально широкий пул, фильтр применим единообразно к расширенному
+    // набору ниже. Если страница 3 тоже не наполнила — продолжаем с тем, что
+    // есть (не падаем).
+    let extendedFromPage3 = false;
+    if (serp.length < MIN_SERP_AFTER_DEDUP) {
+      try {
+        const extraRaw = await fetchYandexSerp(query, {
+          lr: lr || '',
+          pages: 1,
+          startPage: 2, // XMLStock page=2 → позиции 21-30
+        });
+        let addedCount = 0;
+        for (const item of (extraRaw || [])) {
+          const url = String(item.url || '').trim();
+          if (!url || seen.has(url)) continue;
+          seen.add(url);
+          const host = _canonicalHost(url);
+          if (host && seenHosts.has(host)) {
+            skippedSameHost.push({ url, host });
+            continue;
+          }
+          if (host) seenHosts.add(host);
+          serp.push({
+            url,
+            title:   String(item.title   || '').slice(0, 500),
+            snippet: String(item.snippet || '').slice(0, 1000),
+          });
+          addedCount += 1;
+          if (serp.length >= topN) break;
+        }
+        extendedFromPage3 = addedCount > 0;
+        if (extendedFromPage3) {
+          console.log(
+            `[relevance] добор со стр. 3 SERP для отчёта ${reportId}: `
+            + `+${addedCount} URL (итого ${serp.length}/${topN}, threshold=${MIN_SERP_AFTER_DEDUP})`,
+          );
+        }
+      } catch (e) {
+        // Добор — best-effort. Если 3-я страница не пришла — работаем с тем,
+        // что есть, не валим отчёт.
+        console.warn(
+          `[relevance] добор со стр. 3 SERP не удался для отчёта ${reportId}: `
+          + `${e.message || e}`,
+        );
+      }
+    }
+
     // ── 1.5. Фильтр агрегаторов (опционально, по чекбоксу формы) ───────
     // Avito/hh/ozon/dzen/… занимают ТОП Яндекса почти всегда, но сами
     // никогда не «информационный конкурент» — их словарь («доставка /
@@ -196,6 +254,18 @@ async function processRelevanceReport(reportId) {
         serpForFetch = serp;
         removedAggregators = [];
       }
+    }
+    // serp в БД — JSONB-массив. Метаданные о доборе со стр. 3 и фильтрах
+    // пишем только в лог, чтобы не ломать существующих потребителей
+    // (RelevanceResultPage.vue, relevance.controller.js, tasks.controller.js
+    // читают serp как массив URL).
+    if (extendedFromPage3 || skippedSameHost.length || removedAggregators.length) {
+      console.log(
+        `[relevance] serp-meta для ${reportId}: kept=${serpForFetch.length}, `
+        + `skippedSameHost=${skippedSameHost.length}, `
+        + `removedAggregators=${removedAggregators.length}, `
+        + `extendedFromPage3=${extendedFromPage3}`,
+      );
     }
     await _setStage(reportId, 'fetching_pages', { serp });
 
