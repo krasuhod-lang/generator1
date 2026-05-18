@@ -46,6 +46,7 @@ const {
   pointerOrJson,
 } = require('./infoArticleKnowledgeBase');
 const { synthesizeLsiSet, measureLsiCoverageInHtml, measureLsiCoverageSemantic } = require('./lsiPipeline');
+const { checkLsiOverdose } = require('./lsiDensity.service');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
 const { domainsFromLinks } = require('./excelParser');
 const {
@@ -1469,6 +1470,50 @@ async function processInfoArticleTask(taskId) {
       } catch (readErr) {
         await appendLog(taskId, `⚠ Readability-check не выполнился: ${readErr.message}`, 'warn');
       }
+    }
+
+    // 11e2. LSI density / anti-overspam контроль (детерминированный).
+    //       По ТЗ заказчика: «усилить контроль переспама при генерации
+    //       контента». Считает per-H2 плотность каждой important-фразы:
+    //         - per-term > 2.5% → overdose для этого термина
+    //         - total > 8.0%   → overdose для секции
+    //       Verdict 'fail' / 'review' / 'pass' / 'na' (если LSI пустой).
+    //       Soft-warning, никогда не валит pipeline. Используется UI как
+    //       сигнал «эту секцию надо переписать естественнее».
+    //
+    //       Не вынесен в env-флаг по требованию заказчика «новые ENV не
+    //       добавлять»: модуль чисто детерминированный, ничего не сетит,
+    //       не платит — всегда безопасно запускать.
+    try {
+      const importantTerms = (lsiSet && Array.isArray(lsiSet.important))
+        ? lsiSet.important
+        : [];
+      const overdoseReport = checkLsiOverdose(articleHtml, importantTerms);
+      // Сохраняем в JSONB-колонку lsi_overdose_report; колонка создаётся
+      // лениво через server.js ensureSchema (миграция 029 / IF NOT EXISTS).
+      await saveColumn(taskId, 'lsi_overdose_report', overdoseReport).catch(() => {});
+      const icon = overdoseReport.verdict === 'pass' ? '✅'
+        : overdoseReport.verdict === 'review' ? '⚠'
+        : overdoseReport.verdict === 'fail' ? '❌'
+        : 'ℹ';
+      await appendLog(
+        taskId,
+        `${icon} LSI overdose: verdict=${overdoseReport.verdict}, `
+        + `overdose=${overdoseReport.sections_overdose}/${overdoseReport.sections_total}, `
+        + `low=${overdoseReport.sections_low}, good=${overdoseReport.sections_good}`,
+        overdoseReport.verdict === 'pass' ? 'ok' : 'info',
+      );
+      if (overdoseReport.overspam && overdoseReport.overspam.length) {
+        for (const o of overdoseReport.overspam.slice(0, 5)) {
+          await appendLog(
+            taskId,
+            `🚨 Переспам «${o.term}» в «${o.section_title}» — плотность ${o.density_pct}%`,
+            'warn',
+          );
+        }
+      }
+    } catch (overErr) {
+      await appendLog(taskId, `⚠ LSI overdose-check не выполнился: ${overErr.message}`, 'warn');
     }
 
     // 11f. Phase 2 / Б5: Intent verifier (детерминированный).

@@ -894,6 +894,14 @@ async function ensureSchema() {
         ADD COLUMN IF NOT EXISTS validation_report JSONB;
     `);
 
+    // Migration 030: lsi_overdose_report (anti-spam LSI density per-H2).
+    // См. backend/src/services/infoArticle/lsiDensity.service.js.
+    // Колонка nullable; для исторических задач остаётся NULL.
+    await db.query(`
+      ALTER TABLE info_article_tasks
+        ADD COLUMN IF NOT EXISTS lsi_overdose_report JSONB;
+    `);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
