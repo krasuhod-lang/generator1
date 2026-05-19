@@ -8,8 +8,16 @@
      idf = log((N + 1) / (df + 1)) + 1 (smoothing как в sklearn).
   5. Сортируем — это вес слова в нише.
 
-Размечаем status="important" для топовых токенов и "additional" для остальных.
-Порог — top 30% по BM25 ИЛИ top 30% по TF-IDF, плюс DF >= 3.
+Размечаем status по доле документов топа, в которых встречается лемма
+(любая словоформа = одна лемма после морфоанализа):
+  * df_share_pct ≥ 51%  → "important"  (★ обязательные LSI ниши);
+  * 20% ≤ df_share_pct < 51% → "additional" (доп. LSI, желательны);
+  * df_share_pct < 20%  → "rare" (показываем для прозрачности, но
+    не считаем релевантными — слово встретилось лишь у одного-двух
+    документов и, скорее всего, отражает их частную специфику).
+
+Подход согласован с заказчиком: «более 51% сопоставлений слова в разных
+словоформах — важный LSI; от 20 до 50% — дополнительный».
 """
 
 from __future__ import annotations
@@ -19,6 +27,18 @@ import statistics
 from typing import Dict, List
 
 from rank_bm25 import BM25Okapi
+
+
+# ── Пороги статуса лемм (детерминированные, без env) ─────────────────────────
+# Согласовано с заказчиком: «более 51% сопоставлений слова в разных
+# словоформах является важным LSI; от 20 до 50% — дополнительный».
+# Лемматизация уже сворачивает все словоформы в одну лемму, поэтому df
+# (document frequency) по леммам и есть «сколько документов топа содержат
+# любую словоформу этого слова».
+IMPORTANT_DF_SHARE_PCT  = 51.0   # ≥ → "important"
+ADDITIONAL_DF_SHARE_PCT = 20.0   # ≥ → "additional" (если < IMPORTANT)
+# меньше ADDITIONAL_DF_SHARE_PCT → "rare" (показываем, но не считаем
+# обязательным к покрытию LSI).
 
 
 def _doc_term_counts(doc_lemmas: List[List[str]]) -> List[Dict[str, int]]:
@@ -90,6 +110,10 @@ def compute_vocabulary_bm25(
         rows.append({
             "lemma": lemma,
             "df": df_l,
+            # Доля документов корпуса, в которых встретилась лемма (любая
+            # словоформа после лемматизации). Используется и для status, и
+            # для UI («встречается у X из N сайтов топа = Y%»).
+            "df_share_pct": round(100.0 * df_l / max(n_docs, 1), 1),
             "median_count": median_count,
             # Округляем до 4 знаков, чтобы JSON не пух.
             "bm25_score":   round(bm25_sum, 4),
@@ -99,26 +123,19 @@ def compute_vocabulary_bm25(
     rows.sort(key=lambda r: r["bm25_score"], reverse=True)
     rows = rows[:max_terms]
 
-    # Размечаем «Важное / Доп»: top-30% по BM25 ИЛИ top-30% по TF-IDF →
-    # important, при условии, что терм встречается минимум в 3 документах
-    # (даже если min_df ниже — «важными» считаем только те, что подтверждены
-    # ≥3 сайтами, чтобы не помечать редкий шум).
-    if rows:
-        threshold_idx = max(1, math.ceil(len(rows) * 0.3))
-
-        # Порог по BM25 (rows уже отсортирован по bm25_score)
-        bm25_top = sorted([r["bm25_score"] for r in rows], reverse=True)
-        bm25_threshold = bm25_top[min(threshold_idx, len(bm25_top)) - 1]
-
-        # Порог по TF-IDF
-        tfidf_top = sorted([r["tf_idf_score"] for r in rows], reverse=True)
-        tfidf_threshold = tfidf_top[min(threshold_idx, len(tfidf_top)) - 1]
-
-        important_min_df = max(min_df, 3)
-        for r in rows:
-            top_bm25  = r["bm25_score"]   >= bm25_threshold
-            top_tfidf = r["tf_idf_score"] >= tfidf_threshold
-            r["status"] = "important" if (top_bm25 or top_tfidf) and r["df"] >= important_min_df else "additional"
+    # Размечаем «Важное / Доп. / Редкое» по доле документов топа, в которых
+    # встречается лемма (а не по BM25/TF-IDF). Это — детерминированный и
+    # объяснимый критерий, согласованный с заказчиком: «более 51% — важный
+    # LSI; 20–50% — дополнительный». BM25/TF-IDF остаются в строке для
+    # сортировки и для UI-таблицы, но не влияют на status.
+    for r in rows:
+        share = r.get("df_share_pct") or 0.0
+        if share >= IMPORTANT_DF_SHARE_PCT:
+            r["status"] = "important"
+        elif share >= ADDITIONAL_DF_SHARE_PCT:
+            r["status"] = "additional"
+        else:
+            r["status"] = "rare"
 
     return rows
 

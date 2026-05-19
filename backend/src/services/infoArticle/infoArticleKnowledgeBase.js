@@ -274,6 +274,12 @@ function buildInfoArticleKnowledgeBase({
   // Wave 2/3: report.competitor_signals из relevance-pipeline.
   // Опциональный input — если null, §9 просто не рендерится.
   relevanceSignals = null,
+  // 2026-05: расширенный контекст из relevance-отчёта (LSI top важных лемм,
+  // n-граммы, общие H2 топа, voice-of-customer-дайджест, summary
+  // микроразметки). Прокидываем в IAKB §9b, чтобы автор статьи (Gemini)
+  // мог опереться на максимально подробную аналитику — заказчик хочет
+  // «детализацию описания сущностей, интентов и высокий E-E-A-T».
+  relevanceContext = null,
 } = {}) {
   if (!task) return '';
   const header = [
@@ -302,6 +308,19 @@ function buildInfoArticleKnowledgeBase({
     }
   }
 
+  // §9b — Расширенный контекст из relevance-отчёта (LSI, ngrams, headings,
+  // voice-of-customer, schema-summary). Подаётся максимально кратко, чтобы
+  // не раздувать IAKB (он жёстко обрезается MAX_IAKB_CHARS).
+  let sectionRelevanceCtx = '';
+  if (relevanceContext) {
+    try {
+      const md = renderRelevanceContextSection(relevanceContext);
+      if (md && md.trim()) {
+        sectionRelevanceCtx = '## §9b. Развёрнутый контекст из отчёта релевантности\n\n' + md;
+      }
+    } catch (_) { /* graceful */ }
+  }
+
   const parts = [
     sectionTask(task),
     sectionStrategy(strategy),
@@ -312,6 +331,7 @@ function buildInfoArticleKnowledgeBase({
     sectionLsi(lsi),
     sectionLinkPlan(linkPlan),
     sectionRelevance,
+    sectionRelevanceCtx,
   ].filter(Boolean);
 
   let text = header + parts.join('\n\n');
@@ -319,6 +339,57 @@ function buildInfoArticleKnowledgeBase({
     text = `${text.slice(0, MAX_IAKB_CHARS - 80)}\n\n…[IAKB truncated to ${MAX_IAKB_CHARS} chars]`;
   }
   return text;
+}
+
+/**
+ * §9b — render развёрнутого relevance-контекста. Все блоки опциональны.
+ * Каждый список сильно ограничен по длине, чтобы не вытеснить §1..§8.
+ */
+function renderRelevanceContextSection(ctx) {
+  const out = [];
+  // Важные LSI (top-30, > 51% документов топа)
+  const imp = Array.isArray(ctx.important_lsi) ? ctx.important_lsi : [];
+  if (imp.length) {
+    out.push('### Обязательные LSI-леммы (≥51% документов топа)');
+    out.push(imp.slice(0, 30).map(v => `- **${v.lemma}** (${v.df_share_pct}% топа, медиана ${v.median_count})`).join('\n'));
+  }
+  // Дополнительные LSI (top-20, 20–50%)
+  const add = Array.isArray(ctx.additional_lsi) ? ctx.additional_lsi : [];
+  if (add.length) {
+    out.push('### Дополнительные LSI-леммы (20–50% документов топа)');
+    out.push(add.slice(0, 20).map(v => `- ${v.lemma} (${v.df_share_pct}%)`).join('\n'));
+  }
+  // Высокочастотные n-граммы
+  const ngrams = Array.isArray(ctx.top_ngrams) ? ctx.top_ngrams : [];
+  if (ngrams.length) {
+    out.push('### Высокочастотные фразы топа (готовые long-tail для H2/H3)');
+    out.push(ngrams.slice(0, 25).map(n => `- "${n.phrase}" — df=${n.df} (${n.df_share_pct}%)`).join('\n'));
+  }
+  // Заголовки топа (общие H2/H3) — основа скелета статьи
+  const heads = Array.isArray(ctx.shared_headings) ? ctx.shared_headings : [];
+  if (heads.length) {
+    out.push('### Общие заголовки конкурентов (что обязательно раскрыть)');
+    out.push(heads.slice(0, 25).map(h => `- ${h.sample || h.text} _(на ${h.df} сайтах, ${h.df_share_pct}%)_`).join('\n'));
+  }
+  // Микроразметка — готовый блок «что внедрить»
+  if (ctx.schema_recommendation_markdown && ctx.schema_recommendation_markdown.trim()) {
+    out.push(ctx.schema_recommendation_markdown.trim());
+  }
+  // Voice-of-customer — ЦА, ниша, факты (из DeepSeek-аналитики relevance)
+  const voc = ctx.voice_of_customer || null;
+  if (voc && (voc.target_audience || voc.niche_features || voc.brand_facts)) {
+    out.push('### Voice-of-customer / экспертный контекст (DeepSeek-аналитика)');
+    if (voc.target_audience) out.push(`**ЦА:** ${voc.target_audience}`);
+    if (voc.niche_features) out.push(`**Особенности ниши:** ${voc.niche_features}`);
+    if (voc.brand_facts) out.push(`**Факты о бренде / нише:** ${voc.brand_facts}`);
+  }
+  // Сущности (entity_coverage) — обязательные именованные сущности из NER
+  const ent = Array.isArray(ctx.mandatory_entities) ? ctx.mandatory_entities : [];
+  if (ent.length) {
+    out.push('### Обязательные именованные сущности (NER, в ≥50% топа)');
+    out.push(ent.slice(0, 20).map(e => `- ${e.text || e}${e.df_share_pct ? ' (' + e.df_share_pct + '%)' : ''}`).join('\n'));
+  }
+  return out.join('\n\n');
 }
 
 function iakbSystem(task) {

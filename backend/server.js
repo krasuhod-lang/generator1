@@ -806,6 +806,17 @@ async function ensureSchema() {
         ADD COLUMN IF NOT EXISTS exclude_aggregators BOOLEAN NOT NULL DEFAULT FALSE
     `);
 
+    // ─── Migration 031: relevance.cocoon_plan (Bourrelly cocoon) ─────────
+    // План «семантического кокона» нашего будущего сайта (Page Cible →
+    // Mères → Filles + золотые правила перелинковки). Хранится отдельно
+    // от cocoons (TruncatedSVD/LSA по чужим документам) — это
+    // принципиально другой контракт. Структура:
+    //   { generated_at, duration_ms, options, plan, markdown }
+    await db.query(`
+      ALTER TABLE relevance_reports
+        ADD COLUMN IF NOT EXISTS cocoon_plan JSONB
+    `);
+
     // ─── Migration 022: relevance → content bridge + images_count ─────────
     // 1) Связь tasks/info_article_tasks с исходным relevance_report — чтобы
     //    pipeline вливал mandatory_entities + competitor_signals в

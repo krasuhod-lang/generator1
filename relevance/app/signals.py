@@ -1029,11 +1029,148 @@ def _agg_schema_profile(docs: Sequence[Dict[str, Any]], n: int) -> Dict[str, Any
         pressure = round(sum(r["share_pct"] for r in top5) / len(top5) / 2.0, 1)
     else:
         pressure = 0.0
+
+    # ── 2026-05: расширенная сводка по микроразметке ────────────────────
+    # Заказчик: «дополнительно собирать микроразметку с конкурентов и давать
+    # краткую выжимку, какая микроразметка используется и какую нужно нам
+    # внедрить + описание микроразметки куда применять».
+    #
+    # Tier-классификация (по аналогии с LSI:
+    #   • must_have   — ≥51% топа использует тип;
+    #   • nice_to_have — 20–50%;
+    #   • rare         — <20% (для информации, не обязательно).
+    # К каждому типу клеим короткое описание из справочника
+    # SCHEMA_TYPE_HINTS (где применять, что даёт). Если тип незнакомый —
+    # дефолтное описание + ссылка на schema.org/<Type>.
+    summary_rows = []
+    for r in rows:
+        share = r["share_pct"]
+        if share >= 51.0:
+            tier = "must_have"
+        elif share >= 20.0:
+            tier = "nice_to_have"
+        else:
+            tier = "rare"
+        hint = SCHEMA_TYPE_HINTS.get(r["type"], {
+            "description": f"Schema.org/{r['type']} — см. https://schema.org/{r['type']}",
+            "apply_where": "Уточните применимость на вашем типе страницы.",
+        })
+        summary_rows.append({
+            "type":         r["type"],
+            "df":           r["df"],
+            "share_pct":    share,
+            "tier":         tier,
+            "description":  hint["description"],
+            "apply_where":  hint["apply_where"],
+        })
+
+    summary = {
+        "must_have":     [s for s in summary_rows if s["tier"] == "must_have"],
+        "nice_to_have":  [s for s in summary_rows if s["tier"] == "nice_to_have"],
+        "rare":          [s for s in summary_rows if s["tier"] == "rare"],
+        # Готовый markdown-блок для копирования юзеру/в LLM-промпт. Никакой
+        # верстки — только текст, кратко по пунктам. Полезно как «итог
+        # одной кнопкой» при создании задачи.
+        "recommendation_markdown": _render_schema_recommendation_md(summary_rows, n),
+    }
     return {
         "types":     rows,
         "mandatory": mandatory,
         "pressure":  pressure,  # «насколько сильно schema-разметка нужна» 0..100
+        "summary":   summary,
     }
+
+
+# Справочник коротких описаний по типам schema.org — куда применять и
+# зачем нужно. Намеренно держим тут (а не в .env / отдельном json), чтобы
+# можно было править вместе с кодом и легко расширять.
+SCHEMA_TYPE_HINTS: Dict[str, Dict[str, str]] = {
+    "Article":          {"description": "Базовый тип для статей/новостей; формирует rich-snippet в выдаче.",
+                         "apply_where": "Корневой блок любой контентной (info / news / blog) страницы."},
+    "NewsArticle":      {"description": "Подтип Article для новостей; даёт право на Top Stories carousel.",
+                         "apply_where": "Новостные материалы с датой публикации и автором."},
+    "BlogPosting":      {"description": "Подтип Article для блог-записей.",
+                         "apply_where": "Все статьи в разделе «Блог»."},
+    "WebPage":          {"description": "Базовый тип страницы, родитель ItemPage/AboutPage и др.",
+                         "apply_where": "Любая страница, если нет более конкретного типа."},
+    "WebSite":          {"description": "Описание сайта целиком + sitelinks searchbox.",
+                         "apply_where": "Главная страница (один раз)."},
+    "Organization":     {"description": "E-E-A-T-сигнал: реквизиты компании, лого, sameAs соцсетей.",
+                         "apply_where": "Главная и «О компании» (одна Organization на сайт)."},
+    "LocalBusiness":    {"description": "Адрес, часы работы, телефон, гео — для локального ранжирования.",
+                         "apply_where": "Страницы филиалов / контактов / посадочные local-SEO."},
+    "Person":           {"description": "Автор материала: имя, должность, sameAs — критично для E-E-A-T.",
+                         "apply_where": "Authorbox под/над статьёй; рядом с экспертом."},
+    "BreadcrumbList":   {"description": "Хлебные крошки в сниппете SERP вместо длинного URL.",
+                         "apply_where": "Все страницы кроме главной — обязательно."},
+    "FAQPage":          {"description": "Аккордеон FAQ; даёт расширенный сниппет (Google периодически режет, Yandex показывает).",
+                         "apply_where": "Статьи и посадочные с блоком «Частые вопросы» (≥3 пары Q/A)."},
+    "HowTo":            {"description": "Пошаговая инструкция; rich-result со ступенями.",
+                         "apply_where": "Гайды «как сделать X» с явными шагами."},
+    "Product":          {"description": "Карточка товара: цена, наличие, отзывы, бренд.",
+                         "apply_where": "Каталог / карточка товара / посадочная под товар."},
+    "Offer":            {"description": "Коммерческое предложение (цена + валюта + availability).",
+                         "apply_where": "Вложенный в Product / Service; критично для shopping-сниппетов."},
+    "AggregateOffer":   {"description": "Диапазон цен от нескольких продавцов.",
+                         "apply_where": "Карточка товара с несколькими офферами."},
+    "AggregateRating":  {"description": "Средняя оценка + кол-во отзывов; даёт звёздочки в SERP.",
+                         "apply_where": "Карточки товаров/услуг/курсов/локальных бизнесов."},
+    "Review":           {"description": "Один отзыв; родитель Rating.",
+                         "apply_where": "Блоки отзывов на странице товара/услуги/места."},
+    "Service":          {"description": "Услуга (B2B/B2C); может содержать Offer.",
+                         "apply_where": "Посадочные «Услуги/Solutions»."},
+    "Course":           {"description": "Курс; для education-вертикали.",
+                         "apply_where": "Страницы курсов в EdTech."},
+    "Event":            {"description": "Мероприятие: дата, место, цена.",
+                         "apply_where": "Анонсы конференций, вебинаров."},
+    "VideoObject":      {"description": "Видео-разметка для индексации в Видео-поиске.",
+                         "apply_where": "Страницы со встроенным видео — указать thumbnailUrl, duration."},
+    "ImageObject":      {"description": "Метаданные изображения (часто внутри Article/Product).",
+                         "apply_where": "Hero-изображение, лого, фото товара."},
+    "Recipe":           {"description": "Рецепт: ингредиенты, время, калории; rich-card.",
+                         "apply_where": "Кулинарные сайты."},
+    "JobPosting":       {"description": "Вакансия; индексируется Google for Jobs.",
+                         "apply_where": "Страницы открытых вакансий."},
+    "QAPage":           {"description": "Страница «один вопрос — один лучший ответ» (Q&A).",
+                         "apply_where": "Community-страницы вопросов/ответов (отличается от FAQPage)."},
+    "ItemList":         {"description": "Список (рейтинг / подборка); helps carousel-разметка.",
+                         "apply_where": "Листинги «Топ-10», подборки."},
+    "SoftwareApplication": {"description": "ПО/приложение: рейтинг, цена, OS.",
+                            "apply_where": "Страницы продуктов SaaS / мобильных приложений."},
+    "MedicalWebPage":   {"description": "YMYL-медицина: подтверждение экспертизы.",
+                         "apply_where": "Любые мед-статьи (учитывается reviewedBy=Physician)."},
+    "Question":         {"description": "Отдельный вопрос (внутри FAQPage / QAPage).",
+                         "apply_where": "Внутри Q/A-блоков."},
+    "Answer":           {"description": "Ответ внутри Question.",
+                         "apply_where": "Внутри Question."},
+}
+
+
+def _render_schema_recommendation_md(summary_rows: List[Dict[str, Any]], n: int) -> str:
+    """Готовый markdown-блок «что внедрять у нас» — для копирования юзеру
+    и для LLM-контекста при создании задачи. Содержит must-have / nice /
+    rare с долями топа и hint'ом «куда применять»."""
+    if not summary_rows:
+        return f"_В топе ({n} URL) не обнаружено schema.org микроразметки._"
+
+    def _fmt_row(r: Dict[str, Any]) -> str:
+        return (f"- **{r['type']}** ({r['share_pct']}% топа) — "
+                f"{r['description']} _Применять:_ {r['apply_where']}")
+
+    must = [r for r in summary_rows if r["tier"] == "must_have"]
+    nice = [r for r in summary_rows if r["tier"] == "nice_to_have"]
+    rare = [r for r in summary_rows if r["tier"] == "rare"]
+    parts: List[str] = [f"### Микроразметка топа ({n} URL)"]
+    if must:
+        parts.append("\n**🔴 Обязательно внедрить (≥51% топа):**")
+        parts.extend(_fmt_row(r) for r in must)
+    if nice:
+        parts.append("\n**🟡 Желательно (20–50% топа):**")
+        parts.extend(_fmt_row(r) for r in nice)
+    if rare:
+        parts.append("\n**⚪ Опционально (<20% топа, для справки):**")
+        parts.extend(_fmt_row(r) for r in rare[:10])  # rare часто длинный — обрезаем
+    return "\n".join(parts)
 
 
 def _agg_freshness(docs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:

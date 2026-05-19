@@ -7,7 +7,7 @@ const auth      = require('../middleware/auth');
 const {
   listReports, createReport,
   getReport, deleteReport,
-  buildCocoons, deleteRaw,
+  buildCocoons, buildCocoonPlan, deleteRaw,
   exportJson, exportCsv, getHealth,
 } = require('../controllers/relevance.controller');
 
@@ -47,6 +47,7 @@ router.post('/',                     auth, createLimiter, createReport);
 router.get('/:id',                   auth, getReport);
 router.delete('/:id',                auth, deleteReport);
 router.post('/:id/cocoons',          auth, cocoonsLimiter, buildCocoons);
+router.post('/:id/cocoon-plan',      auth, cocoonsLimiter, buildCocoonPlan);
 router.delete('/:id/raw',            auth, deleteRaw);
 router.get('/:id/export.json',       auth, exportJson);
 router.get('/:id/export.csv',        auth, exportCsv);

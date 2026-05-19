@@ -95,8 +95,15 @@ MIN_BLOCK_LEN_CHARS = 4
 #   • ПЕРЕЗАПИСЫВАЕТ ParseResult.blocks → только видимый текст из зон main+
 #     unknown (контракт E из спецификации).
 # pipeline.js / comparison.py / Vue фронтенд в этой задаче не трогаем.
-FULL_DOM_MODE = os.environ.get("RELEVANCE_FULL_DOM_MODE", "").strip().lower() in (
-    "1", "true", "yes", "on",
+#
+# 2026-05 update: по требованию заказчика «парсер должен идеально собирать
+# весь контент, который сканируется поисковыми роботами (шапка, подвал,
+# тело)» — дефолт переключаем на ON. .env.example менять запрещено
+# (см. memories: env configuration), поэтому управление полностью в коде.
+# Env-override остаётся как явный kill-switch для отладки: чтобы выключить
+# walker — `RELEVANCE_FULL_DOM_MODE=false|0|off|no`.
+FULL_DOM_MODE = os.environ.get("RELEVANCE_FULL_DOM_MODE", "").strip().lower() not in (
+    "0", "false", "no", "off",
 )
 
 # Регулярка для «человеческого» подсчёта слов: кириллица, латиница, цифры
@@ -705,11 +712,21 @@ def extract_with_diagnostics(html: str) -> ParseResult:
             diag.hidden_chars = hidden_chars
             diag.hidden_reasons = hidden_reasons
 
-            # Контракт E: blocks = только видимый текст из main+unknown.
+            # Контракт «полный охват» (по требованию заказчика «парсер должен
+            # собирать весь контент, который сканируется поисковыми роботами:
+            # шапку, подвал и тело страницы»): blocks = весь видимый текст из
+            # main + unknown + header + footer + nav + aside + boilerplate_links.
+            # Hidden и attributes (alt/title/aria-label) НЕ кладём — Google их
+            # тоже учитывает с понижающим весом, но в нашем основном корпусе
+            # лемм они исказили бы статистику.
+            VISIBLE_CONTENT_ZONES = (
+                "main", "unknown", "header", "footer", "nav", "aside",
+                "boilerplate_links",
+            )
             visible_main_unknown = [
                 zb["text"] for zb in zoned_blocks
                 if not zb.get("is_hidden")
-                and zb.get("zone") in ("main", "unknown")
+                and zb.get("zone") in VISIBLE_CONTENT_ZONES
                 and len(zb.get("text", "")) >= MIN_BLOCK_LEN_CHARS
             ]
             blocks = visible_main_unknown

@@ -127,6 +127,35 @@ const cocoonsTopics = computed(() => {
   return Array.isArray(list) ? list : [];
 });
 
+// ── Cocoon-plan (Bourrelly) ──────────────────────────────────────────────
+// Самостоятельный план Page Cible → Mères → Filles. Не имеет общих
+// state-полей с LSA-коконами выше — это разные сущности.
+const cocoonPlanBuilding = ref(false);
+const cocoonPlanError    = ref(null);
+const cocoonPlanOpts     = ref({ max_mothers: 8, max_children_per_mother: 12, min_cosine: 0.18 });
+
+async function buildCocoonPlan() {
+  if (!report.value || cocoonPlanBuilding.value) return;
+  cocoonPlanBuilding.value = true;
+  cocoonPlanError.value = null;
+  try {
+    await store.buildCocoonPlan(report.value.id, cocoonPlanOpts.value);
+    await reload();
+  } catch (err) {
+    cocoonPlanError.value = err.response?.data?.error || err.message || 'Не удалось построить кокон';
+  } finally {
+    cocoonPlanBuilding.value = false;
+  }
+}
+
+const cocoonPlanDoc  = computed(() => report.value?.cocoon_plan || null);
+const cocoonPlanData = computed(() => cocoonPlanDoc.value?.plan || null);
+function copyCocoonMarkdown() {
+  const md = cocoonPlanDoc.value?.markdown || '';
+  if (!md) return;
+  copyToClipboard(md, 'структуру кокона (markdown)');
+}
+
 // Размер «чипа» леммы пропорционален |weight| относительно максимума в теме.
 function chipStyle(term, topic) {
   const maxW = Math.max(...topic.terms.map((t) => Math.abs(t.weight)), 1e-6);
@@ -1397,10 +1426,16 @@ function copyTagZone() {
                       @click="vocabFilter = 'all'">Все</button>
               <button class="btn-ghost"
                       :class="vocabFilter === 'important' ? 'text-indigo-300' : 'text-gray-500'"
-                      @click="vocabFilter = 'important'">Важное</button>
+                      @click="vocabFilter = 'important'"
+                      title="≥51% документов топа содержат слово в любой словоформе">Важное (≥51%)</button>
               <button class="btn-ghost"
                       :class="vocabFilter === 'additional' ? 'text-indigo-300' : 'text-gray-500'"
-                      @click="vocabFilter = 'additional'">Доп</button>
+                      @click="vocabFilter = 'additional'"
+                      title="20–50% документов топа содержат слово">Доп (20–50%)</button>
+              <button class="btn-ghost"
+                      :class="vocabFilter === 'rare' ? 'text-indigo-300' : 'text-gray-500'"
+                      @click="vocabFilter = 'rare'"
+                      title="Менее 20% — редкое, не блокирующее">Редкое (&lt;20%)</button>
               <span class="mx-1 text-gray-700">·</span>
               <button class="btn-ghost text-emerald-300"
                       @click="copyImportantLsi" title="Скопировать только важные леммы">
@@ -1430,6 +1465,11 @@ function copyTagZone() {
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="toggleSort(vocabSort, 'df')">DF (сайтов) {{ sortArrow(vocabSort, 'df') }}</th>
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'df_share_pct')"
+                        title="Доля документов топа, в которых встречается слово в любой словоформе">
+                      % топа {{ sortArrow(vocabSort, 'df_share_pct') }}
+                    </th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="toggleSort(vocabSort, 'median_count')">Медиана вх. {{ sortArrow(vocabSort, 'median_count') }}</th>
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="toggleSort(vocabSort, 'bm25_score')">BM25 score {{ sortArrow(vocabSort, 'bm25_score') }}</th>
@@ -1445,16 +1485,27 @@ function copyTagZone() {
                     <td class="py-1.5 px-2 text-gray-500 tabular-nums">{{ vocabPageStart + i + 1 }}</td>
                     <td class="py-1.5 px-2 text-gray-100 font-medium">{{ v.lemma }}</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.df }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">
+                      {{ Number(v.df_share_pct || 0).toFixed(1) }}%
+                    </td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.median_count }}</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.bm25_score || 0).toFixed(4) }}</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.tf_idf_score || 0).toFixed(4) }}</td>
                     <td class="py-1.5 px-2 text-center">
                       <span v-if="v.status === 'important'"
-                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800">
+                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800"
+                            title="≥51% документов топа содержат слово в любой словоформе">
                         Важное
                       </span>
-                      <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">
+                      <span v-else-if="v.status === 'additional'"
+                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300 border border-gray-700"
+                            title="20–50% документов топа">
                         Доп
+                      </span>
+                      <span v-else
+                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-900 text-gray-500 border border-gray-800"
+                            title="Менее 20% — редкое">
+                        Редко
                       </span>
                     </td>
                   </tr>
@@ -1695,6 +1746,135 @@ function copyTagZone() {
           </div>
         </div>
 
+        <!-- ── (7b) Семантический кокон (Bourrelly: Cible → Mères → Filles) ── -->
+        <div class="card">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 class="text-base font-bold text-teal-300 uppercase tracking-wider">
+              🪺 Семантический кокон (Page Cible → Mères → Filles)
+            </h2>
+            <div class="flex items-center gap-2 text-xs flex-wrap">
+              <label class="text-gray-500">Матерей max:</label>
+              <input type="number" v-model.number="cocoonPlanOpts.max_mothers" min="3" max="16"
+                     class="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 w-14 text-right" />
+              <label class="text-gray-500">Дочерних max:</label>
+              <input type="number" v-model.number="cocoonPlanOpts.max_children_per_mother" min="4" max="24"
+                     class="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 w-14 text-right" />
+              <button @click="buildCocoonPlan"
+                      :disabled="cocoonPlanBuilding"
+                      class="btn-primary text-xs">
+                {{ cocoonPlanBuilding ? 'Строим…' : (cocoonPlanData ? 'Пересчитать кокон' : 'Построить кокон') }}
+              </button>
+              <button v-if="cocoonPlanDoc?.markdown"
+                      class="btn-ghost text-sky-300"
+                      @click="copyCocoonMarkdown"
+                      title="Скопировать структуру в markdown — для копирайтера или ТЗ">
+                📋 Структура (.md)
+              </button>
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-500 mb-3">
+            План архитектуры под ваш ВЧ-запрос по методике Laurent Bourrelly.
+            Вершина (Cible) — ВЧ; Mères — 3–8 материнских СЧ-подтем; под каждой
+            Mère — 4–12 дочерних long-tail-страниц (Filles). Граф перелинковки
+            строится по «золотым правилам»: Mère ↔ все свои Filles, Fille → Mère
+            (обязательно в начале), сестринские ссылки только последовательные
+            (Шаг 1 → Шаг 2), кросс-cocoon-ссылки запрещены.
+          </p>
+
+          <div v-if="cocoonPlanError" class="mb-3 text-rose-400 text-xs">{{ cocoonPlanError }}</div>
+
+          <div v-if="cocoonPlanData">
+            <!-- Page Cible -->
+            <div class="border border-teal-800 bg-teal-900/20 rounded p-3 mb-3">
+              <div class="text-[10px] uppercase tracking-wider text-teal-300 mb-1">🎯 Page Cible (ВЧ)</div>
+              <div class="text-base font-bold text-gray-100">«{{ cocoonPlanData.page_cible?.query }}»</div>
+              <div class="text-[11px] text-gray-500 mt-1">
+                slug: <code class="text-emerald-300">/{{ cocoonPlanData.page_cible?.suggested_url_slug }}/</code>
+                · intent: {{ cocoonPlanData.page_cible?.intent }}
+                · исходит ссылок: {{ (cocoonPlanData.page_cible?.links_out || []).length }}
+              </div>
+            </div>
+
+            <!-- Mères -->
+            <div class="space-y-3">
+              <div v-for="m in cocoonPlanData.mothers" :key="m.id"
+                   class="border border-gray-800 rounded p-3">
+                <div class="flex items-start justify-between gap-2 mb-2 flex-wrap">
+                  <div>
+                    <span class="text-[10px] uppercase tracking-wider text-sky-300 mr-2">🟦 Mère [{{ m.id }}]</span>
+                    <span class="text-gray-100 font-bold">{{ m.label }}</span>
+                  </div>
+                  <div class="text-[10px] text-gray-500">
+                    intent={{ m.intent }} · df_share={{ m.df_share_pct }}% · weight={{ m.weight }}
+                  </div>
+                </div>
+                <div class="text-[11px] text-gray-500 mb-2">
+                  slug: <code class="text-emerald-300">/{{ m.suggested_url_slug }}/</code>
+                </div>
+
+                <details class="text-xs" open>
+                  <summary class="cursor-pointer text-teal-300 hover:text-teal-200">
+                    {{ (m.children || []).length }} Filles + правила перелинковки
+                  </summary>
+                  <ul class="mt-2 space-y-1 pl-4">
+                    <li v-for="c in (m.children || [])" :key="c.id"
+                        class="border-l-2 border-emerald-800 pl-2">
+                      <div>
+                        <span class="text-[10px] uppercase text-emerald-300 mr-1">🟢 [{{ c.id }}]</span>
+                        <span class="text-gray-200">{{ c.title }}</span>
+                      </div>
+                      <div class="text-[10px] text-gray-500">
+                        slug: <code>/{{ c.suggested_url_slug }}/</code>
+                        · intent: {{ c.intent }}
+                        · cosine→Mère: {{ c.match_cosine }}
+                      </div>
+                      <!-- Sister-sequential ссылки -->
+                      <div v-if="(c.links_out || []).some((l) => (l.reason || '').startsWith('sister_'))"
+                           class="text-[10px] text-amber-300 mt-0.5">
+                        Sister-seq:
+                        <span v-for="l in (c.links_out || []).filter((x) => (x.reason || '').startsWith('sister_'))"
+                              :key="l.target + l.reason"
+                              class="ml-1">
+                          {{ l.reason.replace('sister_sequential_', '') }} → [{{ l.target }}]
+                        </span>
+                      </div>
+                    </li>
+                  </ul>
+                </details>
+              </div>
+            </div>
+
+            <!-- Orphans -->
+            <div v-if="(cocoonPlanData.orphans || []).length > 0"
+                 class="mt-3 border border-amber-900 bg-amber-950/30 rounded p-3">
+              <div class="text-[10px] uppercase tracking-wider text-amber-300 mb-1">
+                ⚪ Orphans — фразы без подходящей Mère ({{ cocoonPlanData.orphans.length }})
+              </div>
+              <p class="text-[11px] text-amber-200/80 mb-2">
+                Эти long-tail-фразы либо не легли в косинус ≥ {{ cocoonPlanOpts.min_cosine }} ни к одной матери,
+                либо их матери уже заполнены. Решение: создать ещё одну Mère, либо
+                расширить лимит «Дочерних max», либо включить их как H3 внутри ближайшей по смыслу Mère.
+              </p>
+              <ul class="text-xs text-amber-200 list-disc pl-5">
+                <li v-for="o in cocoonPlanData.orphans.slice(0, 12)" :key="o.canon">
+                  {{ o.phrase }} <span class="text-amber-500 text-[10px]">(cos={{ o.match_cosine }})</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="mt-3 text-[11px] text-gray-500">
+              Матерей: <b class="text-gray-300">{{ cocoonPlanData.stats?.mothers_count }}</b>
+              · Дочерних: <b class="text-gray-300">{{ cocoonPlanData.stats?.children_total }}</b>
+              · Orphans: <b class="text-gray-300">{{ cocoonPlanData.stats?.orphans_count }}</b>
+              · Построено: {{ cocoonPlanDoc?.generated_at?.slice(0, 19).replace('T', ' ') }} ({{ cocoonPlanDoc?.duration_ms }} мс)
+            </div>
+          </div>
+          <div v-else class="text-xs text-gray-500">
+            Нажмите «Построить кокон», чтобы получить план Page Cible → Mères → Filles
+            с готовым графом перелинковки и markdown-ТЗ для копирайтера.
+          </div>
+        </div>
+
         <!-- ── (7) LSI теговой зоны (header/footer/sidemenu) ── -->
         <div v-if="tagZoneVocab.length > 0" class="card">
           <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
@@ -1820,24 +2000,69 @@ function copyTagZone() {
               </ul>
             </div>
 
-            <!-- Schema-профиль -->
+            <!-- Schema-профиль (расширенный: must / nice / rare + рекомендации) -->
             <div v-if="topAggregate.schema_profile" class="border border-gray-800 rounded p-3">
-              <div class="text-[11px] font-bold text-emerald-300 uppercase tracking-wider mb-2">🏷 Schema.org-профиль</div>
-              <div v-if="(topAggregate.schema_profile.mandatory || []).length > 0" class="mb-2">
-                <span class="text-rose-300 text-[10px] uppercase">Обязательные:</span>
-                <span v-for="t in topAggregate.schema_profile.mandatory" :key="'m-'+t"
-                      class="inline-block bg-rose-900/40 border border-rose-800 text-rose-200 px-1.5 py-0.5 rounded text-[10px] ml-1">
-                  {{ t }}
+              <div class="flex items-center justify-between mb-2 gap-2">
+                <div class="text-[11px] font-bold text-emerald-300 uppercase tracking-wider">
+                  🧩 Микроразметка топа
+                </div>
+                <button v-if="topAggregate.schema_profile?.summary?.recommendation_markdown"
+                        class="btn-ghost text-[10px] text-sky-300"
+                        title="Скопировать готовый markdown «что внедрить нам»"
+                        @click="copyToClipboard(
+                          topAggregate.schema_profile.summary.recommendation_markdown,
+                          'рекомендации по микроразметке'
+                        )">
+                  📋 Рекомендации
+                </button>
+              </div>
+
+              <!-- Must-have ≥51% -->
+              <div v-if="(topAggregate.schema_profile?.summary?.must_have || []).length > 0" class="mb-2">
+                <div class="text-rose-300 text-[10px] uppercase mb-1">🔴 Обязательно (≥51% топа):</div>
+                <ul class="space-y-1">
+                  <li v-for="s in topAggregate.schema_profile.summary.must_have" :key="'mh-'+s.type"
+                      class="border-l-2 border-rose-700 pl-2">
+                    <div>
+                      <span class="text-rose-200 font-bold">{{ s.type }}</span>
+                      <span class="text-gray-500 text-[10px]"> ({{ s.share_pct }}% топа)</span>
+                    </div>
+                    <div class="text-[11px] text-gray-300">{{ s.description }}</div>
+                    <div class="text-[10px] text-gray-500 italic">→ {{ s.apply_where }}</div>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- Nice-to-have 20-50% -->
+              <div v-if="(topAggregate.schema_profile?.summary?.nice_to_have || []).length > 0" class="mb-2">
+                <div class="text-amber-300 text-[10px] uppercase mb-1">🟡 Желательно (20–50% топа):</div>
+                <ul class="space-y-1">
+                  <li v-for="s in topAggregate.schema_profile.summary.nice_to_have" :key="'nh-'+s.type"
+                      class="border-l-2 border-amber-700 pl-2">
+                    <div>
+                      <span class="text-amber-200 font-bold">{{ s.type }}</span>
+                      <span class="text-gray-500 text-[10px]"> ({{ s.share_pct }}% топа)</span>
+                    </div>
+                    <div class="text-[11px] text-gray-300">{{ s.description }}</div>
+                    <div class="text-[10px] text-gray-500 italic">→ {{ s.apply_where }}</div>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- Rare <20% — компактный список -->
+              <div v-if="(topAggregate.schema_profile?.summary?.rare || []).length > 0">
+                <div class="text-gray-500 text-[10px] uppercase mb-1">⚪ Опционально (&lt;20% топа):</div>
+                <span v-for="s in topAggregate.schema_profile.summary.rare.slice(0, 12)" :key="'r-'+s.type"
+                      class="inline-block bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-[10px] ml-1 mt-1"
+                      :title="s.description + ' → ' + s.apply_where">
+                  {{ s.type }} <span class="text-gray-600">{{ s.share_pct }}%</span>
                 </span>
               </div>
-              <div v-if="(topAggregate.schema_profile.types || []).length > 0">
-                <span class="text-gray-500 text-[10px] uppercase">Все встреченные:</span>
-                <span v-for="r in topAggregate.schema_profile.types" :key="'t-'+r.type"
-                      class="inline-block bg-gray-800 text-emerald-300 px-1.5 py-0.5 rounded text-[10px] ml-1 mt-1">
-                  {{ r.type }} <span class="text-gray-500">{{ r.share_pct }}%</span>
-                </span>
+
+              <div v-if="(topAggregate.schema_profile?.types || []).length === 0"
+                   class="text-gray-500">
+                Schema-разметка не обнаружена в топе.
               </div>
-              <div v-else class="text-gray-500">Schema-разметка не обнаружена в топе.</div>
             </div>
 
             <!-- Freshness -->

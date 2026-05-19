@@ -1167,6 +1167,55 @@ function _safeJsonForPrompt(value, maxChars = 4000) {
 }
 
 /**
+ * Из vocabulary собирает текст «лемма-в-строке через \n» для поля input_raw_lsi
+ * формы создания SEO-задачи. Берём:
+ *   1. Все важные (status==='important', ≥51% документов топа), отсортированы
+ *      по df_share_pct desc, затем по bm25.
+ *   2. Дополнительные (status==='additional', 20–50%) — добиваем до `limit`,
+ *      чтобы юзер сразу получил полную LSI-палитру для редактуры.
+ * Дубликаты исключаем, длину обрезаем до 80 символов на лемму.
+ */
+function _vocabularyToRawLsi(vocabulary, limit = 60) {
+  if (!Array.isArray(vocabulary)) return '';
+  const important = vocabulary
+    .filter((v) => v && v.lemma && v.status === 'important')
+    .sort((a, b) => (b.df_share_pct || 0) - (a.df_share_pct || 0) || (b.bm25_score || 0) - (a.bm25_score || 0));
+  const additional = vocabulary
+    .filter((v) => v && v.lemma && v.status === 'additional')
+    .sort((a, b) => (b.df_share_pct || 0) - (a.df_share_pct || 0) || (b.bm25_score || 0) - (a.bm25_score || 0));
+  const merged = [...important, ...additional].slice(0, limit);
+  const seen = new Set();
+  const out = [];
+  for (const v of merged) {
+    const lemma = String(v.lemma).trim().slice(0, 80).toLowerCase();
+    if (!lemma || seen.has(lemma)) continue;
+    seen.add(lemma);
+    out.push(lemma);
+  }
+  return out.join('\n');
+}
+
+/**
+ * Пытается собрать «дефолтный бренд» из URL целевой страницы — берём
+ * домен второго уровня (example.com → Example). Это нужно, чтобы кнопка
+ * «▶ Запустить генерацию» сразу стала активной при переходе из релевантности
+ * (там бренд явно не задаётся, а форма требует его как обязательное).
+ * Пользователь всегда может перезаписать поле вручную.
+ */
+function _brandFromUrl(url) {
+  if (!url || typeof url !== 'string') return '';
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    const parts = host.split('.');
+    // Для example.com → 'example'; для blog.example.co.uk → 'example'.
+    let core = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+    if (core && core.length <= 2 && parts.length >= 3) core = parts[parts.length - 3];
+    if (!core) return '';
+    return core.charAt(0).toUpperCase() + core.slice(1);
+  } catch (_) { return ''; }
+}
+
+/**
  * Из vocabulary (с .status==='important') собирает массив для формы:
  *   [{ term, rangeMin, rangeMax }, ...]
  * rangeMin/rangeMax — окрестность медианы по ТОПу (±20%, минимум 1).
@@ -1337,14 +1386,28 @@ async function getRelevancePrefill(req, res, next) {
 
     const tfidfArr = _vocabularyToTfidfJson(report.vocabulary, 20);
     const ngramsCsv = _ngramsToCsv(report.ngrams, 25);
+    const rawLsi    = _vocabularyToRawLsi(report.vocabulary, 60);
+
+    const targetUrl = (ourReport && typeof ourReport.url === 'string')
+      ? ourReport.url.trim()
+      : (typeof r.our_url === 'string' ? r.our_url.trim() : '');
 
     const deterministic = {
-      input_target_url:      (ourReport && typeof ourReport.url === 'string')
-        ? ourReport.url.trim()
-        : (typeof r.our_url === 'string' ? r.our_url.trim() : ''),
+      input_target_url:      targetUrl,
       input_competitor_urls: competitorUrls.join('\n'),
       input_ngrams:          ngramsCsv,
       input_tfidf_json:      JSON.stringify(tfidfArr),
+      // input_raw_lsi — главное LSI-поле для формы SEO-задачи (textarea
+      // «2. LSI / N-граммы / TF-IDF»). Передаётся \n-разделённым списком
+      // из 60 верхних важных+дополнительных лемм; canStart на форме
+      // требует ≥5 LSI — этим автоматически закрываем условие.
+      input_raw_lsi:         rawLsi,
+      // Sensible defaults — чтобы кнопка «▶ Запустить генерацию» сразу
+      // стала активной (форма требует brand/author/region не пустыми).
+      // Пользователь всегда может перезаписать.
+      input_brand_name:      _brandFromUrl(targetUrl) || 'Бренд',
+      input_author_name:     'Редакция',
+      input_region:          (r.lr || report.lr || '').toString().trim() || 'Россия',
     };
 
     // LLM-аналитика
