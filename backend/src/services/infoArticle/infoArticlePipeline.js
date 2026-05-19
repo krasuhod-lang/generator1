@@ -1039,10 +1039,11 @@ async function processInfoArticleTask(taskId) {
     // hard-constraints. Без отчёта (старые задачи) поле = null, секция §9
     // не рендерится и pipeline идёт «как раньше».
     let relevanceSignals = null;
+    let relevanceContext = null;  // 2026-05: расширенный контекст (LSI/ngrams/headings/schema/VoC) для §9b IAKB
     if (task.source_relevance_report_id) {
       try {
         const { rows: rRows } = await db.query(
-          `SELECT report
+          `SELECT report, our_report
              FROM relevance_reports
             WHERE id = $1 AND user_id = $2 AND status = 'done'`,
           [task.source_relevance_report_id, task.user_id],
@@ -1058,6 +1059,46 @@ async function processInfoArticleTask(taskId) {
           await appendLog(taskId, `⚠ relevance_report без competitor_signals — пропускаем`, 'warn');
         } else {
           await appendLog(taskId, `⚠ relevance_report не найден или не done — продолжаем без него`, 'warn');
+        }
+        // Расширенный контекст из всего отчёта (для §9b IAKB). Извлекаем
+        // максимум полезных полей. Все блоки graceful: если поле отсутствует
+        // или пустое — оно просто не рендерится в §9b.
+        if (rRows.length && rRows[0].report) {
+          const rep   = rRows[0].report || {};
+          const our   = rRows[0].our_report || {};
+          const voc   = rRows[0].report?.llm_enrichment || rRows[0].llm_enrichment || null;
+          const vocab = Array.isArray(rep.vocabulary) ? rep.vocabulary : [];
+          const important = vocab.filter((v) => v && v.status === 'important')
+            .sort((a, b) => (b.df_share_pct || 0) - (a.df_share_pct || 0));
+          const additional = vocab.filter((v) => v && v.status === 'additional')
+            .sort((a, b) => (b.df_share_pct || 0) - (a.df_share_pct || 0));
+          const ngramsArr = Array.isArray(rep.ngrams) ? rep.ngrams : [];
+          const headsArr  = Array.isArray(rep.headings_intersection) ? rep.headings_intersection : [];
+          const csig      = rep.competitor_signals || {};
+          const topAgg    = csig.top_aggregate || {};
+          relevanceContext = {
+            important_lsi:  important.slice(0, 50),
+            additional_lsi: additional.slice(0, 30),
+            top_ngrams:     ngramsArr.slice(0, 40),
+            shared_headings: headsArr.slice(0, 40),
+            mandatory_entities: (topAgg.entity_coverage && topAgg.entity_coverage.mandatory_entities) || [],
+            // Готовый markdown «что внедрить» — собран на python-стороне
+            schema_recommendation_markdown:
+              (topAgg.schema_profile && topAgg.schema_profile.summary
+                && topAgg.schema_profile.summary.recommendation_markdown) || '',
+            voice_of_customer: voc ? {
+              target_audience: voc.input_target_audience || voc.target_audience || '',
+              niche_features:  voc.input_niche_features  || voc.niche_features  || '',
+              brand_facts:     voc.input_brand_facts     || voc.brand_facts     || '',
+            } : null,
+            our_url: (our && our.url) || rRows[0].our_url || '',
+          };
+          await appendLog(
+            taskId,
+            `📚 §9b: важных LSI=${important.length}, доп=${additional.length}, ngrams=${ngramsArr.length}, headings=${headsArr.length}` +
+            (relevanceContext.schema_recommendation_markdown ? ', schema-summary=да' : ''),
+            'info',
+          );
         }
       } catch (relErr) {
         await appendLog(taskId, `⚠ relevance_report: ошибка загрузки (${relErr.message}) — продолжаем без него`, 'warn');
@@ -1151,6 +1192,7 @@ async function processInfoArticleTask(taskId) {
     task.__iakb = buildInfoArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
       relevanceSignals,
+      relevanceContext,
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
 

@@ -1842,24 +1842,69 @@ function copyTagZone() {
               </ul>
             </div>
 
-            <!-- Schema-профиль -->
+            <!-- Schema-профиль (расширенный: must / nice / rare + рекомендации) -->
             <div v-if="topAggregate.schema_profile" class="border border-gray-800 rounded p-3">
-              <div class="text-[11px] font-bold text-emerald-300 uppercase tracking-wider mb-2">🏷 Schema.org-профиль</div>
-              <div v-if="(topAggregate.schema_profile.mandatory || []).length > 0" class="mb-2">
-                <span class="text-rose-300 text-[10px] uppercase">Обязательные:</span>
-                <span v-for="t in topAggregate.schema_profile.mandatory" :key="'m-'+t"
-                      class="inline-block bg-rose-900/40 border border-rose-800 text-rose-200 px-1.5 py-0.5 rounded text-[10px] ml-1">
-                  {{ t }}
+              <div class="flex items-center justify-between mb-2 gap-2">
+                <div class="text-[11px] font-bold text-emerald-300 uppercase tracking-wider">
+                  🧩 Микроразметка топа
+                </div>
+                <button v-if="topAggregate.schema_profile?.summary?.recommendation_markdown"
+                        class="btn-ghost text-[10px] text-sky-300"
+                        title="Скопировать готовый markdown «что внедрить нам»"
+                        @click="copyToClipboard(
+                          topAggregate.schema_profile.summary.recommendation_markdown,
+                          'рекомендации по микроразметке'
+                        )">
+                  📋 Рекомендации
+                </button>
+              </div>
+
+              <!-- Must-have ≥51% -->
+              <div v-if="(topAggregate.schema_profile?.summary?.must_have || []).length > 0" class="mb-2">
+                <div class="text-rose-300 text-[10px] uppercase mb-1">🔴 Обязательно (≥51% топа):</div>
+                <ul class="space-y-1">
+                  <li v-for="s in topAggregate.schema_profile.summary.must_have" :key="'mh-'+s.type"
+                      class="border-l-2 border-rose-700 pl-2">
+                    <div>
+                      <span class="text-rose-200 font-bold">{{ s.type }}</span>
+                      <span class="text-gray-500 text-[10px]"> ({{ s.share_pct }}% топа)</span>
+                    </div>
+                    <div class="text-[11px] text-gray-300">{{ s.description }}</div>
+                    <div class="text-[10px] text-gray-500 italic">→ {{ s.apply_where }}</div>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- Nice-to-have 20-50% -->
+              <div v-if="(topAggregate.schema_profile?.summary?.nice_to_have || []).length > 0" class="mb-2">
+                <div class="text-amber-300 text-[10px] uppercase mb-1">🟡 Желательно (20–50% топа):</div>
+                <ul class="space-y-1">
+                  <li v-for="s in topAggregate.schema_profile.summary.nice_to_have" :key="'nh-'+s.type"
+                      class="border-l-2 border-amber-700 pl-2">
+                    <div>
+                      <span class="text-amber-200 font-bold">{{ s.type }}</span>
+                      <span class="text-gray-500 text-[10px]"> ({{ s.share_pct }}% топа)</span>
+                    </div>
+                    <div class="text-[11px] text-gray-300">{{ s.description }}</div>
+                    <div class="text-[10px] text-gray-500 italic">→ {{ s.apply_where }}</div>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- Rare <20% — компактный список -->
+              <div v-if="(topAggregate.schema_profile?.summary?.rare || []).length > 0">
+                <div class="text-gray-500 text-[10px] uppercase mb-1">⚪ Опционально (&lt;20% топа):</div>
+                <span v-for="s in topAggregate.schema_profile.summary.rare.slice(0, 12)" :key="'r-'+s.type"
+                      class="inline-block bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-[10px] ml-1 mt-1"
+                      :title="s.description + ' → ' + s.apply_where">
+                  {{ s.type }} <span class="text-gray-600">{{ s.share_pct }}%</span>
                 </span>
               </div>
-              <div v-if="(topAggregate.schema_profile.types || []).length > 0">
-                <span class="text-gray-500 text-[10px] uppercase">Все встреченные:</span>
-                <span v-for="r in topAggregate.schema_profile.types" :key="'t-'+r.type"
-                      class="inline-block bg-gray-800 text-emerald-300 px-1.5 py-0.5 rounded text-[10px] ml-1 mt-1">
-                  {{ r.type }} <span class="text-gray-500">{{ r.share_pct }}%</span>
-                </span>
+
+              <div v-if="(topAggregate.schema_profile?.types || []).length === 0"
+                   class="text-gray-500">
+                Schema-разметка не обнаружена в топе.
               </div>
-              <div v-else class="text-gray-500">Schema-разметка не обнаружена в топе.</div>
             </div>
 
             <!-- Freshness -->
