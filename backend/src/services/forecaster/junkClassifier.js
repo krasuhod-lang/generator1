@@ -151,11 +151,18 @@ function classifyJunkPhrases({ parsedRows, monthCols, targetUrl } = {}) {
     if (reasons.includes('too_broad') || reasons.includes('foreign_brand') || reasons.includes('dead')) severity = 'high';
     else if (reasons.includes('info_intent')) severity = 'mid';
 
+    // exclude_from_forecast: фразу вычитаем из агрегации спроса в pipeline.
+    // Перечень причин — из config.junk.excludeFromForecastReasons.
+    const excludeReasons = Array.isArray(cfg.excludeFromForecastReasons)
+      ? cfg.excludeFromForecastReasons : [];
+    const excludeFromForecast = reasons.some((r) => excludeReasons.includes(r));
+
     flagged.push({
       phrase,
       total: Number(row.total || 0),
       reasons,
       severity,
+      exclude_from_forecast: excludeFromForecast,
       sample_periods_demand: samplePeriods.map((p) => ({
         period: p,
         v: Number(row.byPeriod?.[p] || 0),
@@ -176,12 +183,17 @@ function classifyJunkPhrases({ parsedRows, monthCols, targetUrl } = {}) {
   const topExamples = flagged.slice(0, 10).map((f) => ({
     phrase: f.phrase, reasons: f.reasons, total: f.total,
   }));
+  const excludedCount = flagged.reduce((a, f) => a + (f.exclude_from_forecast ? 1 : 0), 0);
+  const excludedTotal = flagged.reduce(
+    (a, f) => a + (f.exclude_from_forecast ? Number(f.total || 0) : 0), 0,
+  );
 
   return {
     flagged,
     counts: {
       total_rows: rows.length,
       junk_count: junkCount,
+      excluded_count: excludedCount,
       by_reason:  byReason,
     },
     summary: {
@@ -189,6 +201,8 @@ function classifyJunkPhrases({ parsedRows, monthCols, targetUrl } = {}) {
       warn:      junkPct >= cfg.warnPctThreshold,
       target_url: targetUrl || null,
       target_host: targetHost || null,
+      excluded_count: excludedCount,
+      excluded_total_demand: excludedTotal,
       top_examples: topExamples,
     },
   };

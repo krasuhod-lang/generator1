@@ -109,6 +109,33 @@ const FORECASTER_CONFIG = deepFreeze({
     // Когда current_traffic пользователь не указал, всё равно ограничиваем
     // прогноз через estimate текущего захвата (по defaultCurrentCtr).
     // Дополнительной защиты не нужно: при отсутствии baseline-уплифт = null.
+
+    // ── Калибровка по сигналам keys.so ─────────────────────────────
+    // Если pipeline получил keysso_signals, домножаем realisticShareTopN
+    // на competitionFactor по медианной конкуренции топ-10. Конкуренция —
+    // нормированная 0..1 (доля «сильных» доменов в топ-10 / индекс
+    // конкурентности keys.so, нормированный). Множитель ВСЕГДА ≤ 1.0:
+    // никаких "×100" из-за keys.so быть не должно.
+    competitionAdjustment: {
+      // competition >= high → share ×= 0.5  (очень тяжёлая ниша, агрегаторы)
+      // competition >= mid  → share ×= 0.75
+      // иначе               → share ×= 1.0
+      thresholdHigh: 0.75,
+      thresholdMid:  0.45,
+      factorHigh:    0.50,
+      factorMid:     0.75,
+      factorLow:     1.00,
+    },
+    // Если momentum по портфелю «negative» (позиции в среднем падают за
+    // последние 3 месяца) — сжимаем верхнюю границу CI прогноза на этот
+    // коэффициент. На сам прогноз point estimate не влияем, чтобы не
+    // занижать ожидания «искусственно». На положительный momentum коэф
+    // = 1.0 (никакого "boost" — не множим >1).
+    momentumCiAdjust: {
+      negative: 0.7,
+      neutral:  1.0,
+      positive: 1.0,
+    },
   },
 
   // ── Классификатор «шлак-запросов» ────────────────────────────────
@@ -137,6 +164,41 @@ const FORECASTER_CONFIG = deepFreeze({
     // Минимальная длина фразы в словах для коммерческой релевантности
     // (после нижеперечисленных эвристик). Иначе помечаем "too_broad".
     broadMaxWords:       1,
+
+    // ── Исключение из расчёта прогноза ─────────────────────────────
+    // Какие причины (см. junkClassifier) ВЫЧИТАЮТ фразу из агрегации
+    // monthly demand. Без этого однословник «купить» с total=500k
+    // съедал прогноз и тянул цифры вверх, хотя реального трафика
+    // на нём всё равно не получить. Перечень причин держим в коде,
+    // чтобы безопасно править без ENV (см. memory «env configuration»).
+    excludeFromForecastReasons: ['too_broad', 'dead', 'too_short', 'foreign_brand'],
+  },
+
+  // ── Интеграция keys.so (позиции / конкуренция / momentum) ───────
+  //
+  // Ключ — только из process.env.KEYSSO_API_KEY (не хардкодим). Если
+  // ключа нет, шаг graceful-skip: пайплайн отрабатывает как раньше.
+  // Подробнее: backend/src/services/forecaster/keyssoClient.js.
+  keysso: {
+    enabled:           true,
+    apiBase:           'https://api.keys.so/v2',
+    // Сколько фраз максимум отдаём в keys.so за одну задачу.
+    // Экономит квоту: модуль обязан работать на любом тарифе,
+    // даже на скромном.
+    maxPhrasesPerTask: 300,
+    // Размер батча в одном HTTP-запросе.
+    batchSize:         50,
+    // Пауза между батчами, мс — щадим rate-limit.
+    batchDelayMs:      350,
+    // Таймаут одного HTTP-запроса.
+    timeoutMs:         15000,
+    // TTL и размер in-memory LRU-кэша.
+    cacheTtlMs:        24 * 60 * 60 * 1000, // 24 ч
+    cacheMaxEntries:   2000,
+    // Регион Яндекса по умолчанию (lr=213 — Москва).
+    defaultRegion:     'msk',
+    // Yandex по умолчанию (можно поменять на 'google').
+    searchEngine:      'yandex',
   },
 
   // ── DeepSeek-аналитик ────────────────────────────────────────────
