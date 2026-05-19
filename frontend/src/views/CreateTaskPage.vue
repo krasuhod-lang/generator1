@@ -132,6 +132,14 @@ async function prefillFromRelevanceReport(reportId) {
       'input_target_url',
       'input_competitor_urls',
       'input_ngrams',
+      // ↓ Новые поля из getRelevancePrefill (см. tasks.controller.js):
+      // LSI-pool из top-60 важных+доп. лемм релевантности, плюс
+      // sensible-defaults, чтобы кнопка «▶ Запустить генерацию» сразу
+      // была активной (canStart требует brand/author/region/≥5 LSI).
+      'input_raw_lsi',
+      'input_brand_name',
+      'input_author_name',
+      'input_region',
     ];
     for (const k of detMap) {
       const incoming = (det[k] || '').toString().trim();

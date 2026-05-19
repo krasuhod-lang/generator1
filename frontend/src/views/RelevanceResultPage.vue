@@ -1397,10 +1397,16 @@ function copyTagZone() {
                       @click="vocabFilter = 'all'">Все</button>
               <button class="btn-ghost"
                       :class="vocabFilter === 'important' ? 'text-indigo-300' : 'text-gray-500'"
-                      @click="vocabFilter = 'important'">Важное</button>
+                      @click="vocabFilter = 'important'"
+                      title="≥51% документов топа содержат слово в любой словоформе">Важное (≥51%)</button>
               <button class="btn-ghost"
                       :class="vocabFilter === 'additional' ? 'text-indigo-300' : 'text-gray-500'"
-                      @click="vocabFilter = 'additional'">Доп</button>
+                      @click="vocabFilter = 'additional'"
+                      title="20–50% документов топа содержат слово">Доп (20–50%)</button>
+              <button class="btn-ghost"
+                      :class="vocabFilter === 'rare' ? 'text-indigo-300' : 'text-gray-500'"
+                      @click="vocabFilter = 'rare'"
+                      title="Менее 20% — редкое, не блокирующее">Редкое (&lt;20%)</button>
               <span class="mx-1 text-gray-700">·</span>
               <button class="btn-ghost text-emerald-300"
                       @click="copyImportantLsi" title="Скопировать только важные леммы">
@@ -1430,6 +1436,11 @@ function copyTagZone() {
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="toggleSort(vocabSort, 'df')">DF (сайтов) {{ sortArrow(vocabSort, 'df') }}</th>
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
+                        @click="toggleSort(vocabSort, 'df_share_pct')"
+                        title="Доля документов топа, в которых встречается слово в любой словоформе">
+                      % топа {{ sortArrow(vocabSort, 'df_share_pct') }}
+                    </th>
+                    <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="toggleSort(vocabSort, 'median_count')">Медиана вх. {{ sortArrow(vocabSort, 'median_count') }}</th>
                     <th class="text-right py-2 px-2 cursor-pointer hover:text-indigo-300"
                         @click="toggleSort(vocabSort, 'bm25_score')">BM25 score {{ sortArrow(vocabSort, 'bm25_score') }}</th>
@@ -1445,16 +1456,27 @@ function copyTagZone() {
                     <td class="py-1.5 px-2 text-gray-500 tabular-nums">{{ vocabPageStart + i + 1 }}</td>
                     <td class="py-1.5 px-2 text-gray-100 font-medium">{{ v.lemma }}</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.df }}</td>
+                    <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">
+                      {{ Number(v.df_share_pct || 0).toFixed(1) }}%
+                    </td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ v.median_count }}</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.bm25_score || 0).toFixed(4) }}</td>
                     <td class="py-1.5 px-2 text-right text-gray-300 tabular-nums">{{ Number(v.tf_idf_score || 0).toFixed(4) }}</td>
                     <td class="py-1.5 px-2 text-center">
                       <span v-if="v.status === 'important'"
-                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800">
+                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-900/50 text-indigo-300 border border-indigo-800"
+                            title="≥51% документов топа содержат слово в любой словоформе">
                         Важное
                       </span>
-                      <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">
+                      <span v-else-if="v.status === 'additional'"
+                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300 border border-gray-700"
+                            title="20–50% документов топа">
                         Доп
+                      </span>
+                      <span v-else
+                            class="inline-block px-2 py-0.5 rounded text-[10px] bg-gray-900 text-gray-500 border border-gray-800"
+                            title="Менее 20% — редкое">
+                        Редко
                       </span>
                     </td>
                   </tr>

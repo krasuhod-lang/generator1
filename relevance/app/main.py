@@ -139,6 +139,7 @@ class AnalyzeRequest(BaseModel):
 class VocabRow(BaseModel):
     lemma: str
     df: int
+    df_share_pct: float = 0.0
     median_count: float
     bm25_score: float
     tf_idf_score: float = 0.0
@@ -220,6 +221,7 @@ class OurDocumentMetrics(BaseModel):
 class AnchorZoneRow(BaseModel):
     lemma: str
     df: int
+    df_share_pct: float = 0.0
     median_count: float
     bm25_score: float
     tf_idf_score: float = 0.0
