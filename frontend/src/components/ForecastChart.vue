@@ -14,8 +14,14 @@
  *   • полупрозрачную «ленту» 95% CI вокруг прогноза,
  *   • красные подсвеченные прямоугольники для аномальных зон,
  *   • зелёную сглаженную линию тренда (EMA).
+ *
+ * Интерактив:
+ *   • hover → вертикальная направляющая, подсветка точки и тултип со всеми
+ *     значениями за этот месяц (история / прогноз / CI / тренд),
+ *   • плавная анимация появления линий (CSS-keyframe + stroke-dasharray),
+ *   • плавный transition CI-области и направляющей.
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
 const props = defineProps({
   historical:      { type: Array, required: true },
@@ -179,13 +185,73 @@ const fcStartX = computed(() => {
   if (histN === 0 || !(props.forecastPoints || []).length) return null;
   return xFor(histN - 1);
 });
+
+// ── HOVER ──────────────────────────────────────────────────────────
+// hoverIndex — индекс ближайшей точки в allPoints; null = курсор вне графика.
+const hoverIndex = ref(null);
+const svgRef = ref(null);
+
+function onMove(ev) {
+  const n = allPoints.value.length;
+  if (!n || !svgRef.value) return;
+  const rect = svgRef.value.getBoundingClientRect();
+  // переводим CSS-координаты в координаты viewBox с учётом масштабирования
+  const scaleX = props.width / rect.width;
+  const xCss = ev.clientX - rect.left;
+  const xVb  = xCss * scaleX;
+  if (xVb < PAD.l - 4 || xVb > props.width - PAD.r + 4) { hoverIndex.value = null; return; }
+  // ближайший индекс
+  const i = Math.round(((xVb - PAD.l) / Math.max(1, innerW.value)) * (n - 1));
+  hoverIndex.value = Math.max(0, Math.min(n - 1, i));
+}
+function onLeave() { hoverIndex.value = null; }
+
+const hoverInfo = computed(() => {
+  if (hoverIndex.value == null) return null;
+  const i = hoverIndex.value;
+  const p = allPoints.value[i];
+  if (!p) return null;
+  const histN = (props.historical || []).length;
+  const isHist = i < histN;
+  const tx = xFor(i);
+  // позиция тултипа: справа от точки, либо слева, если близко к правому краю
+  const tooltipW = 200;
+  const flip = tx + 12 + tooltipW > props.width - PAD.r;
+  return {
+    i,
+    x: tx,
+    period: p.period,
+    isHist,
+    value:   p.value,
+    lo:      p.lo,
+    hi:      p.hi,
+    ema:     isHist && (props.trendEma || [])[i] != null ? props.trendEma[i] : null,
+    tooltipX: flip ? tx - 12 - tooltipW : tx + 12,
+    tooltipY: Math.max(PAD.t + 4, Math.min(props.height - 110, yFor(p.value) - 30)),
+    tooltipW,
+    point_y: yFor(p.value),
+    point_hi_y: typeof p.hi === 'number' ? yFor(p.hi) : null,
+    point_lo_y: typeof p.lo === 'number' ? yFor(p.lo) : null,
+    point_ema_y: isHist && (props.trendEma || [])[i] != null ? yFor(props.trendEma[i]) : null,
+  };
+});
+
+function fmtNum(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return Math.round(v).toLocaleString('ru-RU');
+}
+
+// Длина пути для draw-on-mount анимации: SVG getTotalLength недоступна без
+// шаблонного ref'а на конкретный path; используем фиксированный «большой»
+// dasharray и анимируем dashoffset (визуально неотличимо).
 </script>
 
 <template>
   <div class="w-full overflow-x-auto">
-    <svg :viewBox="`0 0 ${width} ${height}`" :width="width" :height="height"
-         class="bg-gray-900 rounded-lg" preserveAspectRatio="xMidYMid meet" role="img"
-         :aria-label="'Прогноз сезонного спроса'">
+    <svg ref="svgRef" :viewBox="`0 0 ${width} ${height}`" :width="width" :height="height"
+         class="fc-svg bg-gray-900 rounded-lg" preserveAspectRatio="xMidYMid meet" role="img"
+         :aria-label="'Прогноз сезонного спроса'"
+         @mousemove="onMove" @mouseleave="onLeave">
       <!-- Y-grid -->
       <g>
         <line v-for="t in yTicks" :key="'g'+t.v"
@@ -200,25 +266,31 @@ const fcStartX = computed(() => {
       <g>
         <rect v-for="(r, i) in anomalyRects" :key="'a'+i"
               :x="r.x" :y="PAD.t" :width="r.w" :height="innerH"
-              :fill="r.fill" :stroke="r.stroke" stroke-dasharray="3 3" />
+              :fill="r.fill" :stroke="r.stroke" stroke-dasharray="3 3"
+              class="fc-anomaly" />
         <text v-for="(r, i) in anomalyRects" :key="'al'+i"
               :x="r.labelX" :y="PAD.t + 14" text-anchor="middle"
-              fill="#fecaca" font-size="10" font-weight="600">⚠ {{ r.label }}</text>
+              fill="#fecaca" font-size="10" font-weight="600"
+              class="fc-anomaly-label">⚠ {{ r.label }}</text>
       </g>
 
       <!-- CI band -->
-      <path v-if="ciArea" :d="ciArea" fill="rgba(251, 146, 60, 0.18)" stroke="none" />
+      <path v-if="ciArea" :d="ciArea" fill="rgba(251, 146, 60, 0.18)" stroke="none"
+            class="fc-ci" />
 
       <!-- Trend EMA (зелёная) -->
       <path v-if="emaPath" :d="emaPath" stroke="#22c55e" stroke-width="1.5"
-            fill="none" stroke-dasharray="2 2" opacity="0.7" />
+            fill="none" stroke-dasharray="2 2" opacity="0.7"
+            class="fc-line fc-line-ema" />
 
       <!-- Historical (синяя) -->
-      <path v-if="histPath" :d="histPath" stroke="#60a5fa" stroke-width="2" fill="none" />
+      <path v-if="histPath" :d="histPath" stroke="#60a5fa" stroke-width="2" fill="none"
+            class="fc-line fc-line-hist" />
 
       <!-- Forecast (оранжевая, пунктир) -->
       <path v-if="fcPath" :d="fcPath" stroke="#fb923c" stroke-width="2"
-            fill="none" stroke-dasharray="6 4" />
+            fill="none" stroke-dasharray="6 4"
+            class="fc-line fc-line-fc" />
 
       <!-- разделитель -->
       <line v-if="fcStartX != null" :x1="fcStartX" :x2="fcStartX"
@@ -233,6 +305,68 @@ const fcStartX = computed(() => {
               :transform="`rotate(-35, ${lab.x}, ${height - PAD.b + 16})`">
           {{ lab.label }}
         </text>
+      </g>
+
+      <!-- HOVER guideline + точки -->
+      <g v-if="hoverInfo" class="fc-hover-layer">
+        <line :x1="hoverInfo.x" :x2="hoverInfo.x"
+              :y1="PAD.t" :y2="PAD.t + innerH"
+              stroke="#cbd5e1" stroke-width="1" stroke-dasharray="3 3" opacity="0.6" />
+        <!-- highlight для верхней/нижней границы CI -->
+        <g v-if="hoverInfo.point_hi_y != null">
+          <circle :cx="hoverInfo.x" :cy="hoverInfo.point_hi_y" r="3"
+                  fill="#fb923c" opacity="0.55" />
+          <circle :cx="hoverInfo.x" :cy="hoverInfo.point_lo_y" r="3"
+                  fill="#fb923c" opacity="0.55" />
+        </g>
+        <!-- ema -->
+        <circle v-if="hoverInfo.point_ema_y != null"
+                :cx="hoverInfo.x" :cy="hoverInfo.point_ema_y" r="3"
+                fill="#22c55e" opacity="0.85" />
+        <!-- основной маркер -->
+        <circle :cx="hoverInfo.x" :cy="hoverInfo.point_y" r="5"
+                :fill="hoverInfo.isHist ? '#60a5fa' : '#fb923c'"
+                stroke="#0f172a" stroke-width="2" class="fc-marker" />
+      </g>
+
+      <!-- HOVER tooltip -->
+      <g v-if="hoverInfo" :transform="`translate(${hoverInfo.tooltipX}, ${hoverInfo.tooltipY})`"
+         class="fc-tooltip" pointer-events="none">
+        <rect x="0" y="0" :width="hoverInfo.tooltipW" :height="hoverInfo.isHist ? 64 : 92"
+              rx="6" ry="6"
+              fill="rgba(15, 23, 42, 0.96)" stroke="#334155" stroke-width="1" />
+        <text x="10" y="18" fill="#e2e8f0" font-size="12" font-weight="600">
+          {{ hoverInfo.period }}
+          <tspan :fill="hoverInfo.isHist ? '#93c5fd' : '#fdba74'" font-size="10" font-weight="400">
+            · {{ hoverInfo.isHist ? 'история' : 'прогноз' }}
+          </tspan>
+        </text>
+        <!-- история / прогноз value -->
+        <text x="10" y="38" font-size="11" fill="#cbd5e1">
+          <tspan :fill="hoverInfo.isHist ? '#60a5fa' : '#fb923c'">●</tspan>
+          <tspan dx="6">{{ hoverInfo.isHist ? 'Спрос' : 'Прогноз' }}:</tspan>
+          <tspan dx="4" fill="#f1f5f9" font-weight="600">{{ fmtNum(hoverInfo.value) }}</tspan>
+        </text>
+        <!-- EMA для истории -->
+        <text v-if="hoverInfo.isHist && hoverInfo.ema != null"
+              x="10" y="56" font-size="11" fill="#cbd5e1">
+          <tspan fill="#22c55e">●</tspan>
+          <tspan dx="6">Тренд (EMA):</tspan>
+          <tspan dx="4" fill="#f1f5f9">{{ fmtNum(hoverInfo.ema) }}</tspan>
+        </text>
+        <!-- CI для прогноза -->
+        <template v-if="!hoverInfo.isHist">
+          <text x="10" y="56" font-size="11" fill="#cbd5e1">
+            <tspan fill="#fdba74">▲</tspan>
+            <tspan dx="6">95% верх:</tspan>
+            <tspan dx="4" fill="#f1f5f9">{{ fmtNum(hoverInfo.hi) }}</tspan>
+          </text>
+          <text x="10" y="74" font-size="11" fill="#cbd5e1">
+            <tspan fill="#fdba74">▼</tspan>
+            <tspan dx="6">95% низ:</tspan>
+            <tspan dx="4" fill="#f1f5f9">{{ fmtNum(hoverInfo.lo) }}</tspan>
+          </text>
+        </template>
       </g>
 
       <!-- Легенда -->
@@ -251,3 +385,48 @@ const fcStartX = computed(() => {
     </svg>
   </div>
 </template>
+
+<style scoped>
+.fc-svg { cursor: crosshair; }
+
+/* Плавная анимация «прорисовки» линий на mount.
+   Используем большой dasharray-offset, анимируем offset → 0. */
+@keyframes fc-draw {
+  from { stroke-dashoffset: 2200; opacity: 0.0; }
+  to   { stroke-dashoffset: 0;    opacity: 1.0; }
+}
+@keyframes fc-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.fc-line {
+  /* для draw-эффекта */
+  stroke-dasharray: 2200;
+  stroke-dashoffset: 2200;
+  animation: fc-draw 900ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+.fc-line-hist { animation-delay: 50ms; }
+.fc-line-fc   { animation-delay: 350ms;
+                /* сохраняем визуальный пунктир после анимации */
+                stroke-dasharray: 6 4;
+                stroke-dashoffset: 0;
+                animation: fc-fade-in 700ms ease-out both; }
+.fc-line-ema  { animation-delay: 200ms;
+                stroke-dasharray: 2 2;
+                stroke-dashoffset: 0;
+                animation: fc-fade-in 700ms ease-out both; }
+
+.fc-ci             { animation: fc-fade-in 800ms 200ms ease-out both; }
+.fc-anomaly        { animation: fc-fade-in 600ms 100ms ease-out both; }
+.fc-anomaly-label  { animation: fc-fade-in 600ms 250ms ease-out both; }
+
+.fc-hover-layer line,
+.fc-hover-layer circle,
+.fc-tooltip rect,
+.fc-tooltip text { transition: opacity 120ms ease-out; }
+
+.fc-tooltip { animation: fc-fade-in 140ms ease-out; }
+.fc-marker  { transition: r 120ms ease-out; }
+.fc-marker:hover { r: 6; }
+</style>

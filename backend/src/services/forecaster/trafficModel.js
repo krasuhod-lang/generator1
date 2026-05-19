@@ -3,25 +3,39 @@
 /**
  * forecaster/trafficModel.js — оценка трафика при росте в ТОП-3 / 5 / 10.
  *
- * Идея:
- *   • есть прогноз будущего спроса (показов) demand[h]
- *   • CTR по позициям задан в config (агрегированные данные RU)
- *   • если пользователь указал «текущий трафик в месяц» — мы калибруем
- *     модель: считаем неявный CTR_now = current_traffic / current_demand,
- *     и для каждой target-группы (top3/5/10) масштабируем будущий трафик
- *     как demand[h] * target_ctr, ВОЗВРАЩАЯ ТАКЖЕ uplift_x = target/current.
- *   • если current_traffic не указан — используем дефолтный CTR_now из
- *     config (≈ позиция 20-30).
+ * РЕАЛИСТИЧНАЯ МОДЕЛЬ (по требованию владельца):
+ *   Нельзя считать так, будто сайт встанет в ТОП-N сразу ПО ВСЕМ запросам
+ *   из выгрузки. Реальный сайт по крупному ядру выходит в ТОП-3 примерно
+ *   по 10-20 % фраз, в ТОП-5 — по ~28 %, в ТОП-10 — по ~55 % (cfg.realisticShareTopN).
+ *
+ *   Поэтому для каждого сценария считаем:
+ *     1) optimistic = demand × avgCtrTopN    (потолок «идеальной выдачи»)
+ *     2) realistic  = demand × avgCtrTopN × realisticShareTopN
+ *     3) clamp(realistic) — если задан current_traffic, проекция не может
+ *        превышать current × maxUpliftTopN (защита от фантастики).
+ *
+ * Возвращаем оба числа: UI показывает realistic как основной, optimistic —
+ * как «теоретический потолок при идеальной выдаче».
+ *
+ * Если current_traffic указан — implied_ctr_now = current/current_demand,
+ * uplift_x = realistic_ctr / implied_ctr_now, и применяется maxUplift cap.
  */
 
 const { getForecasterConfig } = require('./config');
 
+function _clampUplift(annualRealistic, currentAnnual, maxX) {
+  if (currentAnnual <= 0 || !(maxX > 0)) return { annual: annualRealistic, capped: false };
+  const cap = currentAnnual * maxX;
+  if (annualRealistic > cap) return { annual: Math.round(cap), capped: true };
+  return { annual: annualRealistic, capped: false };
+}
+
 /**
  * @param {Object} args
- * @param {Array<{period:string,demand:number}>} args.historicalMonthly  -- последние месяцы (для оценки current_demand)
- * @param {Array<{period:string,value:number}>} args.forecastPoints     -- прогноз 12 мес
- * @param {number} [args.currentTrafficPerMonth]                         -- введённый пользователем трафик/мес
- * @param {number} [args.currentDemandWindow]                           -- сколько последних месяцев брать в качестве "текущего спроса"
+ * @param {Array<{period:string,demand:number}>} args.historicalMonthly
+ * @param {Array<{period:string,value:number}>} args.forecastPoints
+ * @param {number} [args.currentTrafficPerMonth]
+ * @param {number} [args.currentDemandWindow]
  */
 function estimateTraffic({
   historicalMonthly,
@@ -43,36 +57,83 @@ function estimateTraffic({
     : null;
   const implied_ctr_now = explicitCtr != null ? explicitCtr : cfg.defaultCurrentCtr;
 
-  // Сценарии: top3 / top5 / top10
   const scenarios = {
-    top3:  cfg.avgCtrTop3,
-    top5:  cfg.avgCtrTop5,
-    top10: cfg.avgCtrTop10,
+    top3:  { ctr: cfg.avgCtrTop3,  share: cfg.realisticShareTop3,  maxX: cfg.maxUpliftTop3  },
+    top5:  { ctr: cfg.avgCtrTop5,  share: cfg.realisticShareTop5,  maxX: cfg.maxUpliftTop5  },
+    top10: { ctr: cfg.avgCtrTop10, share: cfg.realisticShareTop10, maxX: cfg.maxUpliftTop10 },
   };
+
+  const currentAnnual = currentTrafficPerMonth > 0 ? currentTrafficPerMonth * 12 : 0;
 
   const result = {
-    current_traffic_input: currentTrafficPerMonth || 0,
-    current_demand_avg:    Math.round(currentDemand),
-    implied_ctr_now:       Math.round(implied_ctr_now * 10000) / 10000,
+    current_traffic_input:  currentTrafficPerMonth || 0,
+    current_demand_avg:     Math.round(currentDemand),
+    implied_ctr_now:        Math.round(implied_ctr_now * 10000) / 10000,
     implied_ctr_now_source: explicitCtr != null ? 'user_input' : 'default_position_20+',
+    // Подсказка для UI/DeepSeek: реализм-факторы (что мы взяли).
+    realism: {
+      share_top3:  cfg.realisticShareTop3,
+      share_top5:  cfg.realisticShareTop5,
+      share_top10: cfg.realisticShareTop10,
+      max_uplift_top3:  cfg.maxUpliftTop3,
+      max_uplift_top5:  cfg.maxUpliftTop5,
+      max_uplift_top10: cfg.maxUpliftTop10,
+      explanation:
+        'realistic = demand × avgCtrTopN × realisticShareTopN. ' +
+        'Доля учитывает, что в ТОП-N реально выходит лишь часть фраз ядра. ' +
+        'Если указан current_traffic, проекция дополнительно ограничена current × maxUpliftTopN.',
+    },
   };
 
-  for (const [name, targetCtr] of Object.entries(scenarios)) {
-    const monthly = forecastPoints.map((p) => ({
+  for (const [name, { ctr: targetCtr, share, maxX }] of Object.entries(scenarios)) {
+    // realistic CTR = targetCtr × realisticShare (доля фраз, реально доходящих)
+    const realisticCtr = targetCtr * share;
+
+    const monthlyOptimistic = forecastPoints.map((p) => ({
       period: p.period,
       traffic: Math.round(p.value * targetCtr),
     }));
-    const annual = monthly.reduce((a, m) => a + m.traffic, 0);
-    const currentAnnual = currentTrafficPerMonth > 0 ? currentTrafficPerMonth * 12 : 0;
-    const uplift_x = explicitCtr != null && explicitCtr > 0 ? (targetCtr / explicitCtr) : null;
-    const delta = currentAnnual > 0 ? annual - currentAnnual : null;
+    const monthlyRealistic = forecastPoints.map((p) => ({
+      period: p.period,
+      traffic: Math.round(p.value * realisticCtr),
+    }));
+    const annualOptimistic = monthlyOptimistic.reduce((a, m) => a + m.traffic, 0);
+    let annualRealistic    = monthlyRealistic.reduce((a, m) => a + m.traffic, 0);
+
+    // Cap по «максимальному реалистичному росту» от текущего трафика.
+    const capped = _clampUplift(annualRealistic, currentAnnual, maxX);
+    annualRealistic = capped.annual;
+    // Если cap сработал — пропорционально сжать помесячный ряд.
+    if (capped.capped && annualRealistic > 0) {
+      const k = capped.annual / monthlyRealistic.reduce((a, m) => a + m.traffic, 0);
+      for (const m of monthlyRealistic) m.traffic = Math.round(m.traffic * k);
+    }
+
+    const uplift_x_realistic = explicitCtr != null && explicitCtr > 0 && currentAnnual > 0
+      ? Math.round((annualRealistic / currentAnnual) * 100) / 100
+      : (explicitCtr != null && explicitCtr > 0 ? Math.round((realisticCtr / explicitCtr) * 100) / 100 : null);
+    const uplift_x_optimistic = explicitCtr != null && explicitCtr > 0
+      ? Math.round((targetCtr / explicitCtr) * 100) / 100
+      : null;
+    const delta = currentAnnual > 0 ? annualRealistic - currentAnnual : null;
 
     result[name] = {
-      target_ctr: targetCtr,
-      monthly,
-      annual,
+      // основной (реалистичный) сценарий
+      target_ctr:        targetCtr,           // сохранено для обратной совместимости
+      realistic_ctr:     Math.round(realisticCtr * 10000) / 10000,
+      realistic_share:   share,
+      monthly:           monthlyRealistic,    // helbreaker: monthly — это РЕАЛИСТИЧНЫЙ ряд
+      annual:            annualRealistic,
       annual_vs_current: delta,
-      uplift_x: uplift_x != null ? Math.round(uplift_x * 100) / 100 : null,
+      uplift_x:          uplift_x_realistic,
+      uplift_capped:     capped.capped,
+      max_uplift_x:      maxX,
+      // «потолок» при идеальной выдаче (legacy/optimistic)
+      optimistic: {
+        monthly:    monthlyOptimistic,
+        annual:     annualOptimistic,
+        uplift_x:   uplift_x_optimistic,
+      },
     };
   }
 

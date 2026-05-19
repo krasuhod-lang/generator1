@@ -965,6 +965,10 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_forecaster_status       ON forecaster_tasks (status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_forecaster_share_token  ON forecaster_tasks (share_token) WHERE share_token IS NOT NULL`);
 
+    // Migration 033: target_url + junk_phrases (см. файл миграции).
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS target_url   TEXT`);
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS junk_phrases JSONB`);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
