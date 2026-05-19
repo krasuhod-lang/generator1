@@ -21,7 +21,6 @@ const {
   generateShareToken,
   isValidShareToken,
 } = require('../services/forecaster/shareToken');
-const { getForecasterConfig } = require('../services/forecaster/config');
 
 const NAME_LIMIT = 200;
 
@@ -67,14 +66,10 @@ async function createForecasterTask(req, res, next) {
     if (!rows && !csv) {
       return res.status(400).json({ error: 'Не передан файл: ожидается source.rows (array) или source.csv (string)' });
     }
-    // защитные потолки
-    const cfg = getForecasterConfig().parser;
-    if (rows && rows.length > cfg.maxRows + 1) {
-      return res.status(400).json({ error: `Слишком много строк: ${rows.length} (лимит ${cfg.maxRows})` });
-    }
-    if (csv && Buffer.byteLength(csv, 'utf8') > cfg.maxFileBytes) {
-      return res.status(400).json({ error: `Файл превышает ${Math.round(cfg.maxFileBytes / 1024 / 1024)} МБ` });
-    }
+    // Защитные потолки на размер файла/число строк намеренно сняты:
+    // по требованию владельца продукта прогнозатор обязан учитывать все
+    // фразы из выгрузки Wordstat без отсечения. Парсер сам справляется
+    // с большими объёмами (O(N) по строкам, без сетевых вызовов).
 
     // Опции (текущий трафик и т.п.)
     const opts = body.options || {};

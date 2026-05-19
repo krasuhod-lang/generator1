@@ -15,6 +15,13 @@ const {
 
 const router = express.Router();
 
+// Глобальный express.json в server.js ограничен 10 МБ — это разумно для
+// большинства API, но прогнозатор обязан принимать большие выгрузки
+// Wordstat (сотни тысяч фраз × 16+ месяцев). Поэтому для POST-роутов
+// форкастера используем отдельный JSON-парсер с поднятым лимитом —
+// глобальный middleware при этом не трогаем.
+const bigJson = express.json({ limit: '1024mb' });
+
 // Создание задачи — отдельный, более жёсткий лимит, как в article-topics.
 const createLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -35,7 +42,7 @@ const readLimiter = rateLimit({
 router.use(readLimiter);
 
 router.get('/',                  auth, listForecasterTasks);
-router.post('/',                 auth, createLimiter, createForecasterTask);
+router.post('/',                 auth, bigJson, createLimiter, createForecasterTask);
 router.get('/:id',               auth, getForecasterTask);
 router.delete('/:id',            auth, deleteForecasterTask);
 router.post('/:id/share',        auth, createShareLink);

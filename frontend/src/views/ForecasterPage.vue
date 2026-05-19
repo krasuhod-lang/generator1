@@ -39,11 +39,8 @@ function onFileChange(ev) {
     form.value.fileName = '';
     return;
   }
-  if (f.size > 10 * 1024 * 1024) {
-    formError.value = `Файл слишком большой: ${(f.size / 1024 / 1024).toFixed(1)} МБ (лимит 10 МБ)`;
-    ev.target.value = '';
-    return;
-  }
+  // Лимит размера файла намеренно снят (по требованию: учитывать ВСЕ фразы
+  // из любой выгрузки Wordstat, какой бы объёмной она ни была).
   form.value.file = f;
   form.value.fileName = f.name;
   if (!form.value.name) {
