@@ -54,6 +54,16 @@ export const useRelevanceStore = defineStore('relevance', {
       return data?.cocoons || null;
     },
 
+    /**
+     * Cocoon-plan (Bourrelly): Page Cible → Mères → Filles + правила
+     * перелинковки. Не требует raw-кэша — читает vocabulary/ngrams/headings
+     * прямо из готового report. Возвращает { plan, markdown, generated_at }.
+     */
+    async buildCocoonPlan(id, options = {}) {
+      const { data } = await api.post(`/relevance/${id}/cocoon-plan`, options);
+      return data?.cocoon_plan || null;
+    },
+
     /** PR 2: досрочно удалить кэш сырых documents в Redis. */
     async deleteRaw(id) {
       const { data } = await api.delete(`/relevance/${id}/raw`);

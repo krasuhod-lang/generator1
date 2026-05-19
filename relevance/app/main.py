@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from .bm25_calc import compute_vocabulary_bm25
 from .cocoons import compute_cocoons
+from .cocoon_planner import build_cocoon_plan, render_cocoon_markdown
 from .comparison import compute_comparison, per_competitor_table
 from .evidence import (
     DEFAULT_MAX_CHARS_PER_URL as EVIDENCE_DEFAULT_MAX_CHARS,
@@ -332,6 +333,32 @@ class CocoonsStats(BaseModel):
 class CocoonsResponse(BaseModel):
     topics: List[CocoonTopic]
     stats: CocoonsStats
+
+
+# ── Cocoon-Plan (Page Cible → Mères → Filles, Bourrelly-методика) ───────
+# Это **другой** контракт, чем /cocoons (тот — LSA-кластеризация чужих
+# документов). Здесь строим скелет НАШЕГО будущего сайта под ВЧ-запрос,
+# с графом перелинковки по золотым правилам.
+class CocoonPlanOptions(BaseModel):
+    max_mothers: int = 8
+    max_children_per_mother: int = 12
+    min_cosine: float = 0.18
+
+
+class CocoonPlanRequest(BaseModel):
+    query: str
+    vocabulary: List[dict] = Field(default_factory=list)
+    ngrams: List[dict] = Field(default_factory=list)
+    headings_intersection: List[dict] = Field(default_factory=list)
+    our_url: str = ""
+    region: str = ""
+    options: Optional[CocoonPlanOptions] = None
+
+
+class CocoonPlanResponse(BaseModel):
+    plan: dict
+    markdown: str
+    duration_ms: int
 
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
@@ -830,6 +857,41 @@ def cocoons(payload: CocoonsRequest) -> CocoonsResponse:
         topics=[CocoonTopic(**t) for t in result["topics"]],
         stats=CocoonsStats(**stats),
     )
+
+
+@app.post("/cocoon-plan", response_model=CocoonPlanResponse, dependencies=[Depends(verify_internal_token)])
+def cocoon_plan(payload: CocoonPlanRequest) -> CocoonPlanResponse:
+    """Расчёт «семантического кокона» по Bourrelly-методике (Page Cible
+    → Mères → Filles + золотые правила перелинковки). На вход — словарь
+    лемм, n-граммы и общие H2/H3 топа из существующего relevance-отчёта.
+    Полностью offline, без LLM и эмбеддингов: char-bigram cosine.
+
+    Endpoint автономен и не требует processed-документов (в отличие от
+    /cocoons), поэтому можно вызывать сразу после /analyze."""
+    started = time.perf_counter()
+    opts = payload.options or CocoonPlanOptions()
+
+    plan = build_cocoon_plan(
+        query=payload.query,
+        vocabulary=payload.vocabulary,
+        ngrams=payload.ngrams,
+        headings_intersection=payload.headings_intersection,
+        our_url=payload.our_url,
+        region=payload.region,
+        max_mothers=opts.max_mothers,
+        max_children_per_mother=opts.max_children_per_mother,
+        min_cosine=opts.min_cosine,
+    )
+    md = render_cocoon_markdown(plan)
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "cocoon-plan: mothers=%d children=%d orphans=%d in %dms",
+        plan["stats"]["mothers_count"],
+        plan["stats"]["children_total"],
+        plan["stats"]["orphans_count"],
+        duration_ms,
+    )
+    return CocoonPlanResponse(plan=plan, markdown=md, duration_ms=duration_ms)
 
 
 # ── /evidence (Phase 1, P0-2 grounding) ───────────────────────────────────────

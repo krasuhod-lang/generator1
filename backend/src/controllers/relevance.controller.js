@@ -16,7 +16,7 @@
 const db = require('../config/db');
 const { processRelevanceReport } = require('../services/relevance/pipeline');
 const { withUserSlot } = require('../utils/perUserConcurrency');
-const { health: relevanceHealth, cocoons: relevanceCocoons } = require('../services/relevance/pythonClient');
+const { health: relevanceHealth, cocoons: relevanceCocoons, cocoonPlan: relevanceCocoonPlan } = require('../services/relevance/pythonClient');
 const rawStorage = require('../services/relevance/rawStorage');
 
 const MAX_QUERY_LEN = 200;
@@ -114,14 +114,15 @@ async function getReport(req, res, next) {
       `SELECT id, user_id, query, lr, top_n, status, current_stage,
               fetched_count, serp, failed_urls, error_message, duration_ms,
               created_at, started_at, completed_at,
-              report, cocoons,
+              report, cocoons, cocoon_plan,
               our_url, our_report, comparison, exclude_aggregators,
               raw_storage, raw_expires_at,
               (
                 (raw_storage = 'redis' AND raw_expires_at > NOW())
                 OR raw_processed IS NOT NULL
               ) AS has_raw,
-              (cocoons IS NOT NULL) AS has_cocoons
+              (cocoons IS NOT NULL) AS has_cocoons,
+              (cocoon_plan IS NOT NULL) AS has_cocoon_plan
          FROM relevance_reports
         WHERE id = $1 AND user_id = $2`,
       [req.params.id, req.user.id],
@@ -245,6 +246,73 @@ async function buildCocoons(req, res, next) {
   }
 }
 
+// ─── POST /api/relevance/:id/cocoon-plan ──────────────────────────────
+// Строит «семантический кокон» по методике Bourrelly (Page Cible →
+// Mères → Filles + золотые правила перелинковки) поверх уже готового
+// relevance-отчёта. Не требует raw_processed (в отличие от /cocoons) —
+// читает vocabulary/ngrams/headings_intersection прямо из report jsonb.
+// Идемпотентен; перезаписывает relevance_reports.cocoon_plan свежим
+// расчётом. Не блокирует другие действия с отчётом.
+async function buildCocoonPlan(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status, query, lr, our_url, report
+         FROM relevance_reports
+        WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Отчёт не найден' });
+    const r = rows[0];
+    if (r.status !== 'done') {
+      return res.status(409).json({ error: 'Отчёт ещё не готов (status != done).' });
+    }
+
+    const rep = r.report || {};
+    const body = req.body || {};
+    const payload = {
+      query:                  r.query || '',
+      vocabulary:             Array.isArray(rep.vocabulary) ? rep.vocabulary : [],
+      ngrams:                 Array.isArray(rep.ngrams) ? rep.ngrams : [],
+      headings_intersection:  Array.isArray(rep.headings_intersection) ? rep.headings_intersection : [],
+      our_url:                r.our_url || '',
+      region:                 r.lr || '',
+      options: {
+        max_mothers:             clampInt(body.max_mothers, 8, 3, 16),
+        max_children_per_mother: clampInt(body.max_children_per_mother, 12, 4, 24),
+        min_cosine:              Math.max(0.05, Math.min(0.5, Number(body.min_cosine) || 0.18)),
+      },
+    };
+
+    if (!payload.query.trim()) {
+      return res.status(400).json({ error: 'У отчёта нет query — не из чего строить кокон.' });
+    }
+    if (payload.vocabulary.length === 0 && payload.ngrams.length === 0 && payload.headings_intersection.length === 0) {
+      return res.status(400).json({
+        error: 'В отчёте нет vocabulary/ngrams/headings — кокон строить не из чего.',
+      });
+    }
+
+    const t0 = Date.now();
+    const result = await relevanceCocoonPlan(payload);
+    const cocoonPlanDoc = {
+      generated_at: new Date().toISOString(),
+      duration_ms:  Date.now() - t0,
+      options:      payload.options,
+      plan:         result?.plan || null,
+      markdown:     result?.markdown || '',
+    };
+
+    await db.query(
+      `UPDATE relevance_reports SET cocoon_plan = $2::jsonb WHERE id = $1`,
+      [r.id, JSON.stringify(cocoonPlanDoc)],
+    );
+
+    return res.json({ cocoon_plan: cocoonPlanDoc });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // ─── DELETE /api/relevance/:id/raw ────────────────────────────────
 // Досрочно удаляет processed-документы и из Redis, и из Postgres
 // (но не сами cocoons — итоговый отчёт остаётся).
@@ -296,7 +364,7 @@ function _contentDispositionAttachment(rawName, ext) {
 async function exportJson(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT query, lr, status, report, cocoons, serp, failed_urls, duration_ms,
+      `SELECT query, lr, status, report, cocoons, cocoon_plan, serp, failed_urls, duration_ms,
               created_at, completed_at
          FROM relevance_reports
         WHERE id = $1 AND user_id = $2`,
@@ -317,6 +385,7 @@ async function exportJson(req, res, next) {
       failed_urls:  r.failed_urls || [],
       report:       r.report || {},
       cocoons:      r.cocoons || null,
+      cocoon_plan:  r.cocoon_plan || null,
     };
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Content-Disposition', _contentDispositionAttachment(r.query, 'json'));
@@ -404,6 +473,7 @@ module.exports = {
   getReport,
   deleteReport,
   buildCocoons,
+  buildCocoonPlan,
   deleteRaw,
   exportJson,
   exportCsv,

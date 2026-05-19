@@ -127,6 +127,35 @@ const cocoonsTopics = computed(() => {
   return Array.isArray(list) ? list : [];
 });
 
+// ── Cocoon-plan (Bourrelly) ──────────────────────────────────────────────
+// Самостоятельный план Page Cible → Mères → Filles. Не имеет общих
+// state-полей с LSA-коконами выше — это разные сущности.
+const cocoonPlanBuilding = ref(false);
+const cocoonPlanError    = ref(null);
+const cocoonPlanOpts     = ref({ max_mothers: 8, max_children_per_mother: 12, min_cosine: 0.18 });
+
+async function buildCocoonPlan() {
+  if (!report.value || cocoonPlanBuilding.value) return;
+  cocoonPlanBuilding.value = true;
+  cocoonPlanError.value = null;
+  try {
+    await store.buildCocoonPlan(report.value.id, cocoonPlanOpts.value);
+    await reload();
+  } catch (err) {
+    cocoonPlanError.value = err.response?.data?.error || err.message || 'Не удалось построить кокон';
+  } finally {
+    cocoonPlanBuilding.value = false;
+  }
+}
+
+const cocoonPlanDoc  = computed(() => report.value?.cocoon_plan || null);
+const cocoonPlanData = computed(() => cocoonPlanDoc.value?.plan || null);
+function copyCocoonMarkdown() {
+  const md = cocoonPlanDoc.value?.markdown || '';
+  if (!md) return;
+  copyToClipboard(md, 'структуру кокона (markdown)');
+}
+
 // Размер «чипа» леммы пропорционален |weight| относительно максимума в теме.
 function chipStyle(term, topic) {
   const maxW = Math.max(...topic.terms.map((t) => Math.abs(t.weight)), 1e-6);
@@ -1714,6 +1743,135 @@ function copyTagZone() {
             Для расчёта коконов нужны processed-документы из Redis-кэша.
             После истечения TTL (7 дней по умолчанию) пересчёт невозможен —
             создайте новый отчёт.
+          </div>
+        </div>
+
+        <!-- ── (7b) Семантический кокон (Bourrelly: Cible → Mères → Filles) ── -->
+        <div class="card">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 class="text-base font-bold text-teal-300 uppercase tracking-wider">
+              🪺 Семантический кокон (Page Cible → Mères → Filles)
+            </h2>
+            <div class="flex items-center gap-2 text-xs flex-wrap">
+              <label class="text-gray-500">Матерей max:</label>
+              <input type="number" v-model.number="cocoonPlanOpts.max_mothers" min="3" max="16"
+                     class="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 w-14 text-right" />
+              <label class="text-gray-500">Дочерних max:</label>
+              <input type="number" v-model.number="cocoonPlanOpts.max_children_per_mother" min="4" max="24"
+                     class="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 w-14 text-right" />
+              <button @click="buildCocoonPlan"
+                      :disabled="cocoonPlanBuilding"
+                      class="btn-primary text-xs">
+                {{ cocoonPlanBuilding ? 'Строим…' : (cocoonPlanData ? 'Пересчитать кокон' : 'Построить кокон') }}
+              </button>
+              <button v-if="cocoonPlanDoc?.markdown"
+                      class="btn-ghost text-sky-300"
+                      @click="copyCocoonMarkdown"
+                      title="Скопировать структуру в markdown — для копирайтера или ТЗ">
+                📋 Структура (.md)
+              </button>
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-500 mb-3">
+            План архитектуры под ваш ВЧ-запрос по методике Laurent Bourrelly.
+            Вершина (Cible) — ВЧ; Mères — 3–8 материнских СЧ-подтем; под каждой
+            Mère — 4–12 дочерних long-tail-страниц (Filles). Граф перелинковки
+            строится по «золотым правилам»: Mère ↔ все свои Filles, Fille → Mère
+            (обязательно в начале), сестринские ссылки только последовательные
+            (Шаг 1 → Шаг 2), кросс-cocoon-ссылки запрещены.
+          </p>
+
+          <div v-if="cocoonPlanError" class="mb-3 text-rose-400 text-xs">{{ cocoonPlanError }}</div>
+
+          <div v-if="cocoonPlanData">
+            <!-- Page Cible -->
+            <div class="border border-teal-800 bg-teal-900/20 rounded p-3 mb-3">
+              <div class="text-[10px] uppercase tracking-wider text-teal-300 mb-1">🎯 Page Cible (ВЧ)</div>
+              <div class="text-base font-bold text-gray-100">«{{ cocoonPlanData.page_cible?.query }}»</div>
+              <div class="text-[11px] text-gray-500 mt-1">
+                slug: <code class="text-emerald-300">/{{ cocoonPlanData.page_cible?.suggested_url_slug }}/</code>
+                · intent: {{ cocoonPlanData.page_cible?.intent }}
+                · исходит ссылок: {{ (cocoonPlanData.page_cible?.links_out || []).length }}
+              </div>
+            </div>
+
+            <!-- Mères -->
+            <div class="space-y-3">
+              <div v-for="m in cocoonPlanData.mothers" :key="m.id"
+                   class="border border-gray-800 rounded p-3">
+                <div class="flex items-start justify-between gap-2 mb-2 flex-wrap">
+                  <div>
+                    <span class="text-[10px] uppercase tracking-wider text-sky-300 mr-2">🟦 Mère [{{ m.id }}]</span>
+                    <span class="text-gray-100 font-bold">{{ m.label }}</span>
+                  </div>
+                  <div class="text-[10px] text-gray-500">
+                    intent={{ m.intent }} · df_share={{ m.df_share_pct }}% · weight={{ m.weight }}
+                  </div>
+                </div>
+                <div class="text-[11px] text-gray-500 mb-2">
+                  slug: <code class="text-emerald-300">/{{ m.suggested_url_slug }}/</code>
+                </div>
+
+                <details class="text-xs" open>
+                  <summary class="cursor-pointer text-teal-300 hover:text-teal-200">
+                    {{ (m.children || []).length }} Filles + правила перелинковки
+                  </summary>
+                  <ul class="mt-2 space-y-1 pl-4">
+                    <li v-for="c in (m.children || [])" :key="c.id"
+                        class="border-l-2 border-emerald-800 pl-2">
+                      <div>
+                        <span class="text-[10px] uppercase text-emerald-300 mr-1">🟢 [{{ c.id }}]</span>
+                        <span class="text-gray-200">{{ c.title }}</span>
+                      </div>
+                      <div class="text-[10px] text-gray-500">
+                        slug: <code>/{{ c.suggested_url_slug }}/</code>
+                        · intent: {{ c.intent }}
+                        · cosine→Mère: {{ c.match_cosine }}
+                      </div>
+                      <!-- Sister-sequential ссылки -->
+                      <div v-if="(c.links_out || []).some((l) => (l.reason || '').startsWith('sister_'))"
+                           class="text-[10px] text-amber-300 mt-0.5">
+                        Sister-seq:
+                        <span v-for="l in (c.links_out || []).filter((x) => (x.reason || '').startsWith('sister_'))"
+                              :key="l.target + l.reason"
+                              class="ml-1">
+                          {{ l.reason.replace('sister_sequential_', '') }} → [{{ l.target }}]
+                        </span>
+                      </div>
+                    </li>
+                  </ul>
+                </details>
+              </div>
+            </div>
+
+            <!-- Orphans -->
+            <div v-if="(cocoonPlanData.orphans || []).length > 0"
+                 class="mt-3 border border-amber-900 bg-amber-950/30 rounded p-3">
+              <div class="text-[10px] uppercase tracking-wider text-amber-300 mb-1">
+                ⚪ Orphans — фразы без подходящей Mère ({{ cocoonPlanData.orphans.length }})
+              </div>
+              <p class="text-[11px] text-amber-200/80 mb-2">
+                Эти long-tail-фразы либо не легли в косинус ≥ {{ cocoonPlanOpts.min_cosine }} ни к одной матери,
+                либо их матери уже заполнены. Решение: создать ещё одну Mère, либо
+                расширить лимит «Дочерних max», либо включить их как H3 внутри ближайшей по смыслу Mère.
+              </p>
+              <ul class="text-xs text-amber-200 list-disc pl-5">
+                <li v-for="o in cocoonPlanData.orphans.slice(0, 12)" :key="o.canon">
+                  {{ o.phrase }} <span class="text-amber-500 text-[10px]">(cos={{ o.match_cosine }})</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="mt-3 text-[11px] text-gray-500">
+              Матерей: <b class="text-gray-300">{{ cocoonPlanData.stats?.mothers_count }}</b>
+              · Дочерних: <b class="text-gray-300">{{ cocoonPlanData.stats?.children_total }}</b>
+              · Orphans: <b class="text-gray-300">{{ cocoonPlanData.stats?.orphans_count }}</b>
+              · Построено: {{ cocoonPlanDoc?.generated_at?.slice(0, 19).replace('T', ' ') }} ({{ cocoonPlanDoc?.duration_ms }} мс)
+            </div>
+          </div>
+          <div v-else class="text-xs text-gray-500">
+            Нажмите «Построить кокон», чтобы получить план Page Cible → Mères → Filles
+            с готовым графом перелинковки и markdown-ТЗ для копирайтера.
           </div>
         </div>
 

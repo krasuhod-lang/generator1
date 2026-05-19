@@ -229,9 +229,49 @@ async function health() {
   }
 }
 
+/**
+ * Расчёт «семантического кокона» по Bourrelly-методике (Page Cible →
+ * Mères → Filles + золотые правила перелинковки). Endpoint автономен:
+ * принимает уже vocabulary/ngrams/headings_intersection из готового
+ * relevance-отчёта, поэтому может вызываться без processed-документов.
+ *
+ * @param {{ query:string, vocabulary:Array, ngrams:Array, headings_intersection?:Array, our_url?:string, region?:string, options?:object }} payload
+ * @returns {Promise<{plan:object, markdown:string, duration_ms:number}>}
+ */
+async function cocoonPlan(payload) {
+  if (!payload || !payload.query) {
+    throw new Error('cocoonPlan(): payload.query is required');
+  }
+  try {
+    const res = await axios.post(
+      `${BASE_URL}/cocoon-plan`,
+      payload,
+      {
+        // Полностью CPU-bound, без сети — обычно <500ms.
+        timeout: 30000,
+        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        maxBodyLength:    32 * 1024 * 1024,
+        maxContentLength: 32 * 1024 * 1024,
+        validateStatus: (s) => s >= 200 && s < 300,
+      },
+    );
+    return res.data;
+  } catch (err) {
+    const code = err?.response?.status || err?.code || 'ERR';
+    const detail =
+      err?.response?.data?.detail
+      || err?.response?.data?.error
+      || err?.message
+      || 'unknown';
+    const safeDetail = String(detail).replace(/\s+/g, ' ').slice(0, 300);
+    throw new Error(`relevance-service /cocoon-plan ${code}: ${safeDetail}`);
+  }
+}
+
 module.exports = {
   analyze,
   cocoons,
+  cocoonPlan,
   compare,
   evidence,
   health,
