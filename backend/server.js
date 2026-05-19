@@ -30,6 +30,8 @@ const infoArticleRoutes   = require('./src/routes/infoArticle.routes');
 const articleTopicsRoutes = require('./src/routes/articleTopics.routes');
 const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 const relevanceRoutes     = require('./src/routes/relevance.routes');
+const forecasterRoutes    = require('./src/routes/forecaster.routes');
+const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -109,6 +111,8 @@ app.use('/api/info-article',   infoArticleRoutes);
 app.use('/api/article-topics', articleTopicsRoutes);
 app.use('/api/acf-json',       acfJsonRoutes);
 app.use('/api/relevance',      relevanceRoutes);
+app.use('/api/forecaster',     forecasterRoutes);
+app.use('/api/public',         forecasterPublicRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -912,6 +916,54 @@ async function ensureSchema() {
       ALTER TABLE info_article_tasks
         ADD COLUMN IF NOT EXISTS lsi_overdose_report JSONB;
     `);
+
+    // Migration 032: forecaster_tasks (модуль «Прогнозатор»).
+    // Хранит загруженные CSV/XLSX-выгрузки Wordstat, агрегированный
+    // помесячный спрос, найденные аномалии, прогноз на 12 мес,
+    // оценку трафика для ТОП-3/5/10, выводы DeepSeek и share-токен.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'forecaster_status') THEN
+          CREATE TYPE forecaster_status AS ENUM (
+            'queued', 'running', 'done', 'error'
+          );
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS forecaster_tasks (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name                TEXT NOT NULL DEFAULT '',
+        status              forecaster_status NOT NULL DEFAULT 'queued',
+        error_message       TEXT,
+        source_filename     TEXT NOT NULL DEFAULT '',
+        source_rows_count   INTEGER NOT NULL DEFAULT 0,
+        source_columns      JSONB,
+        options             JSONB,
+        monthly_series      JSONB,
+        anomalies           JSONB,
+        forecast            JSONB,
+        trend               JSONB,
+        traffic_estimate    JSONB,
+        deepseek_summary    JSONB,
+        llm_provider        VARCHAR(16) NOT NULL DEFAULT 'deepseek',
+        llm_model           TEXT,
+        tokens_in           BIGINT NOT NULL DEFAULT 0,
+        tokens_out          BIGINT NOT NULL DEFAULT 0,
+        cost_usd            NUMERIC(12, 6) NOT NULL DEFAULT 0,
+        share_token         TEXT UNIQUE,
+        share_created_at    TIMESTAMPTZ,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at          TIMESTAMPTZ,
+        completed_at        TIMESTAMPTZ,
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_forecaster_user_created ON forecaster_tasks (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_forecaster_status       ON forecaster_tasks (status)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_forecaster_share_token  ON forecaster_tasks (share_token) WHERE share_token IS NOT NULL`);
 
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
