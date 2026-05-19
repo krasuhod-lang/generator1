@@ -21,6 +21,9 @@ const routes = [
   { path: '/acf-json',     component: () => import('../views/AcfJsonPage.vue'),     meta: { auth: true } },
   { path: '/relevance',    component: () => import('../views/RelevancePage.vue'),    meta: { auth: true } },
   { path: '/relevance/:id',component: () => import('../views/RelevanceResultPage.vue'), meta: { auth: true } },
+  { path: '/forecaster',           component: () => import('../views/ForecasterPage.vue'),       meta: { auth: true } },
+  { path: '/forecaster/:id',       component: () => import('../views/ForecasterResultPage.vue'), meta: { auth: true } },
+  { path: '/forecast/share/:token',component: () => import('../views/ForecasterSharedPage.vue'), meta: { guest: false, public: true } },
 
   // Admin routes
   { path: '/admin/login',     component: () => import('../views/admin/AdminLoginPage.vue'),      meta: { adminGuest: true } },
