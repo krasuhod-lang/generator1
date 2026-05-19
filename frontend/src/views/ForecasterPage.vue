@@ -24,6 +24,7 @@ const form = ref({
   current_traffic_per_month: '',
   region: '',
   notes: '',
+  target_url: '',
 });
 
 const submitting = ref(false);
@@ -75,6 +76,7 @@ async function handleSubmit() {
         current_traffic_per_month: Math.max(0, parseInt(form.value.current_traffic_per_month, 10) || 0),
         region: form.value.region?.trim() || '',
         notes:  form.value.notes?.trim()  || '',
+        target_url: form.value.target_url?.trim() || '',
       },
       source: {
         filename: form.value.fileName,
@@ -144,7 +146,9 @@ function statusBadge(s) {
             <li>построит график спроса по месяцам,</li>
             <li>подсветит зоны падения красным,</li>
             <li>спрогнозирует спрос на 12 месяцев вперёд,</li>
-            <li>оценит трафик при выходе в ТОП-3 / 5 / 10,</li>
+            <li>оценит <span class="text-gray-300">реалистичный</span> трафик при выходе в ТОП-3 / 5 / 10
+                (с учётом текущего значения, а не «все запросы в ТОП»),</li>
+            <li>отсеет шлак-запросы (детерминированно + AI-разметка причин),</li>
             <li>сделает выводы и даст рекомендации (DeepSeek).</li>
           </ul>
         </header>
@@ -181,6 +185,17 @@ function statusBadge(s) {
                 class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
                 placeholder="Москва" />
             </div>
+          </div>
+
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">URL продвигаемого сайта</label>
+            <input v-model="form.target_url" type="url" maxlength="500"
+              class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+              placeholder="https://example.com/" />
+            <p class="text-[11px] text-gray-500 mt-1">
+              Используется DeepSeek-аналитикой для контекста и AI-фильтром, чтобы исключить
+              чужие бренды/нерелевантные запросы.
+            </p>
           </div>
 
           <div>

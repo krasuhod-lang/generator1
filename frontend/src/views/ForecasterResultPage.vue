@@ -61,6 +61,22 @@ const anomalies = computed(() => (task.value?.anomalies?.drops) || []);
 const trend = computed(() => task.value?.trend || null);
 const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
+const junkReport = computed(() => task.value?.junk_phrases || null);
+const targetUrl  = computed(() => task.value?.target_url || task.value?.options?.target_url || null);
+
+// Фильтр шлак-таблицы
+const junkFilter = ref('all');
+const junkSeverityFilter = ref('all');
+const junkVisible = computed(() => {
+  const list = junkReport.value?.flagged || [];
+  return list.filter((f) => {
+    if (junkSeverityFilter.value !== 'all' && f.severity !== junkSeverityFilter.value) return false;
+    if (junkFilter.value !== 'all' && !(f.reasons || []).includes(junkFilter.value)) return false;
+    return true;
+  });
+});
+const junkReasonsList = computed(() => Object.keys(junkReport.value?.counts?.by_reason || {}));
+const junkReasonLabels = computed(() => junkReport.value?.reason_labels || {});
 
 const annualForecast = computed(() => task.value?.forecast?.annual_total || 0);
 const annualHistorical = computed(() => {
@@ -148,6 +164,10 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
             Статус: <span class="font-semibold">{{ task.status }}</span>
             <span v-if="task.source_filename"> · 📎 {{ task.source_filename }}</span>
             <span v-if="task.source_rows_count"> · {{ task.source_rows_count }} строк</span>
+          </p>
+          <p v-if="targetUrl" class="text-xs text-indigo-300 mt-0.5">
+            🔗 Сайт: <a :href="targetUrl" target="_blank" rel="noopener noreferrer"
+                       class="underline hover:text-indigo-200 break-all">{{ targetUrl }}</a>
           </p>
         </div>
         <div v-if="task && task.status === 'done'" class="flex items-center gap-2">
@@ -263,27 +283,135 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
 
           <!-- Трафик top3/5/10 -->
           <section v-if="trafficEst" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <h2 class="text-sm font-semibold text-gray-200 mb-3">🎯 Оценка трафика при росте позиций</h2>
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">🎯 Реалистичная оценка трафика при росте позиций</h2>
             <p class="text-xs text-gray-500 mb-3">
               Текущий трафик/мес: <span class="text-gray-200">{{ fmtNum(trafficEst.current_traffic_input) || 'не указан' }}</span>
               · Неявный CTR сейчас: <span class="text-gray-200">{{ fmtCtr(trafficEst.implied_ctr_now) }}</span>
               <span class="text-gray-600 ml-1">({{ trafficEst.implied_ctr_now_source }})</span>
             </p>
+            <details v-if="trafficEst.realism" class="mb-3 text-[11px] text-gray-400">
+              <summary class="cursor-pointer hover:text-gray-300">
+                ℹ Как считается «реалистичный» прогноз (никто не выходит в ТОП по ВСЕМ запросам)
+              </summary>
+              <p class="mt-1 leading-relaxed">{{ trafficEst.realism.explanation }}</p>
+              <p class="mt-1">
+                Доли фраз, реально доходящих до ТОП: ТОП-3 {{ Math.round(trafficEst.realism.share_top3 * 100) }}%,
+                ТОП-5 {{ Math.round(trafficEst.realism.share_top5 * 100) }}%,
+                ТОП-10 {{ Math.round(trafficEst.realism.share_top10 * 100) }}%.
+                Кап от текущего трафика: ×{{ trafficEst.realism.max_uplift_top3 }} / ×{{ trafficEst.realism.max_uplift_top5 }} / ×{{ trafficEst.realism.max_uplift_top10 }}.
+              </p>
+            </details>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div v-for="key in ['top3','top5','top10']" :key="key"
                    class="border border-gray-800 rounded-lg p-3">
                 <div class="text-[11px] text-gray-500 uppercase">
-                  ТОП-{{ key.replace('top','') }} · CTR {{ fmtCtr(trafficEst[key].target_ctr) }}
+                  ТОП-{{ key.replace('top','') }}
+                  · реал. CTR <span class="text-gray-300">{{ fmtCtr(trafficEst[key].realistic_ctr ?? (trafficEst[key].target_ctr * (trafficEst.realism?.['share_' + key] ?? 1))) }}</span>
                 </div>
                 <div class="text-2xl font-semibold text-emerald-300 mt-1">{{ fmtNum(trafficEst[key].annual) }}</div>
-                <div class="text-[11px] text-gray-500">визитов в год</div>
+                <div class="text-[11px] text-gray-500">визитов в год (реалистично)</div>
                 <div v-if="trafficEst[key].uplift_x" class="text-xs text-emerald-400 mt-1">
                   ×{{ trafficEst[key].uplift_x }} vs текущий
+                  <span v-if="trafficEst[key].uplift_capped" class="text-amber-400 ml-1" :title="`Ограничено максимумом ×${trafficEst[key].max_uplift_x} (защита от нереалистичного скачка)`">
+                    🛡 cap
+                  </span>
                 </div>
                 <div v-if="trafficEst[key].annual_vs_current != null" class="text-[11px] text-gray-500 mt-0.5">
                   Δ = {{ trafficEst[key].annual_vs_current > 0 ? '+' : '' }}{{ fmtNum(trafficEst[key].annual_vs_current) }}
                 </div>
+                <div v-if="trafficEst[key].optimistic" class="mt-2 pt-2 border-t border-gray-800 text-[11px] text-gray-500">
+                  Потолок (идеальная выдача): <span class="text-gray-300">{{ fmtNum(trafficEst[key].optimistic.annual) }}</span>
+                  <span v-if="trafficEst[key].optimistic.uplift_x" class="text-gray-500"> · ×{{ trafficEst[key].optimistic.uplift_x }}</span>
+                </div>
               </div>
+            </div>
+          </section>
+
+          <!-- Шлак-запросы -->
+          <section v-if="junkReport && junkReport.flagged && junkReport.flagged.length"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <header class="flex items-start justify-between gap-3 flex-wrap mb-3">
+              <div>
+                <h2 class="text-sm font-semibold text-gray-200">🧹 Шлак-запросы (AI-фильтр)</h2>
+                <p class="text-xs text-gray-500 mt-1">
+                  Помечено
+                  <span class="text-gray-200 font-semibold">{{ junkReport.counts?.junk_count || 0 }}</span>
+                  из {{ junkReport.counts?.total_rows || 0 }} фраз
+                  · <span :class="junkReport.summary?.warn ? 'text-amber-300' : 'text-gray-400'">
+                    {{ junkReport.summary?.junk_pct }} %
+                  </span>
+                  <span v-if="junkReport.summary?.warn" class="text-amber-400">⚠ много мусора в ядре</span>
+                  <span v-if="junkReport.deepseek?.verdict === 'ok'" class="text-emerald-300 ml-1">
+                    · 🤖 DeepSeek-разметка ({{ junkReport.deepseek.items_count }})
+                  </span>
+                  <span v-else-if="junkReport.deepseek?.verdict === 'skipped'" class="text-gray-500 ml-1 italic">
+                    · DeepSeek-разметка пропущена: {{ junkReport.deepseek.reason }}
+                  </span>
+                  <span v-else-if="junkReport.deepseek?.verdict === 'error'" class="text-amber-400 ml-1 italic">
+                    · DeepSeek-разметка недоступна: {{ junkReport.deepseek.reason }}
+                  </span>
+                </p>
+                <p v-if="junkReport.overflow" class="text-[11px] text-gray-500 mt-0.5 italic">
+                  Показано {{ junkReport.overflow.stored }} из {{ junkReport.overflow.total }} помеченных.
+                </p>
+              </div>
+              <div class="flex gap-2 items-center flex-wrap">
+                <select v-model="junkSeverityFilter"
+                        class="bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200">
+                  <option value="all">все важности</option>
+                  <option value="high">🔴 high</option>
+                  <option value="mid">🟠 mid</option>
+                  <option value="low">🟡 low</option>
+                </select>
+                <select v-model="junkFilter"
+                        class="bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200">
+                  <option value="all">все причины</option>
+                  <option v-for="r in junkReasonsList" :key="r" :value="r">
+                    {{ r }} ({{ junkReport.counts.by_reason[r] }})
+                  </option>
+                </select>
+              </div>
+            </header>
+            <div class="max-h-[420px] overflow-y-auto border border-gray-800 rounded">
+              <table class="w-full text-xs">
+                <thead class="bg-gray-950 sticky top-0">
+                  <tr class="text-gray-400">
+                    <th class="text-left px-2 py-1.5 font-normal">Фраза</th>
+                    <th class="text-right px-2 py-1.5 font-normal w-20">Частотка</th>
+                    <th class="text-left px-2 py-1.5 font-normal w-32">Причины</th>
+                    <th class="text-left px-2 py-1.5 font-normal w-20">AI</th>
+                    <th class="text-left px-2 py-1.5 font-normal">Комментарий</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(f, idx) in junkVisible" :key="'jp'+idx"
+                      class="border-t border-gray-800 hover:bg-gray-950/50 transition">
+                    <td class="px-2 py-1.5 text-gray-200">
+                      <span class="mr-1">{{ severityIcon(f.severity) }}</span>{{ f.phrase }}
+                    </td>
+                    <td class="px-2 py-1.5 text-right text-gray-400">{{ fmtNum(f.total) }}</td>
+                    <td class="px-2 py-1.5">
+                      <span v-for="r in f.reasons" :key="r"
+                            class="inline-block text-[10px] bg-rose-500/10 border border-rose-500/20 text-rose-300 rounded px-1.5 py-0.5 mr-1 mb-0.5"
+                            :title="junkReasonLabels[r] || r">
+                        {{ r }}
+                      </span>
+                    </td>
+                    <td class="px-2 py-1.5">
+                      <span v-if="f.ai_verdict === 'drop'" class="text-rose-300 font-semibold">drop</span>
+                      <span v-else-if="f.ai_verdict === 'keep'" class="text-emerald-300 font-semibold">keep</span>
+                      <span v-else-if="f.ai_verdict === 'unsure'" class="text-amber-300">unsure</span>
+                      <span v-else class="text-gray-600">—</span>
+                    </td>
+                    <td class="px-2 py-1.5 text-gray-400">{{ f.ai_reason || '—' }}</td>
+                  </tr>
+                  <tr v-if="junkVisible.length === 0">
+                    <td colspan="5" class="px-2 py-3 text-center text-gray-500 italic">
+                      Нет фраз под выбранные фильтры.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </section>
 

@@ -18,6 +18,7 @@ const { aggregateMonthlySeries } = require('../src/services/forecaster/series');
 const { detectAnomalies } = require('../src/services/forecaster/anomalyDetector');
 const { buildForecast, olsTrend } = require('../src/services/forecaster/forecast');
 const { estimateTraffic } = require('../src/services/forecaster/trafficModel');
+const { classifyJunkPhrases } = require('../src/services/forecaster/junkClassifier');
 
 let passed = 0;
 let failed = 0;
@@ -120,13 +121,32 @@ const traffic = estimateTraffic({
   forecastPoints:    fc.points,
   currentTrafficPerMonth: 500,
 });
-ok('traffic top3 annual > top10 annual',
-   traffic.top3.annual > traffic.top10.annual,
+// Реалистичная модель: реалистично в ТОП-10 попадает больше фраз (~55 %),
+// чем в ТОП-3 (~15 %), поэтому суммарный РЕАЛИСТИЧНЫЙ трафик из ТОП-10 БОЛЬШЕ.
+// А «потолок» (optimistic) — наоборот: CTR ТОП-3 выше CTR ТОП-10.
+ok('traffic top10 realistic > top3 realistic (more phrases qualify)',
+   traffic.top10.annual > traffic.top3.annual,
    `top3=${traffic.top3.annual} top10=${traffic.top10.annual}`);
+ok('traffic top3 optimistic > top10 optimistic (CTR top3 > CTR top10)',
+   traffic.top3.optimistic.annual > traffic.top10.optimistic.annual,
+   `top3.opt=${traffic.top3.optimistic.annual} top10.opt=${traffic.top10.optimistic.annual}`);
+ok('traffic realism block present', !!traffic.realism && traffic.realism.share_top3 > 0);
 ok('traffic implied_ctr_now from user',
    traffic.implied_ctr_now_source === 'user_input');
 ok('traffic top3.uplift_x positive',
    traffic.top3.uplift_x > 0);
+// Cap: при огромном forecast и крошечном current_traffic — должен сработать cap по top3
+const trafficCap = estimateTraffic({
+  historicalMonthly: [{period:'2025-01',demand:100},{period:'2025-02',demand:100},{period:'2025-03',demand:100}],
+  forecastPoints: Array.from({length:12},(_,i)=>({period:`2026-${String(i+1).padStart(2,'0')}`, value:1000000, lo:900000, hi:1100000})),
+  currentTrafficPerMonth: 10, // current annual = 120 → cap top3 = 120 × 8 = 960
+});
+ok('traffic top3.uplift_capped triggered on absurd forecast vs tiny current',
+   trafficCap.top3.uplift_capped === true,
+   `capped=${trafficCap.top3.uplift_capped} annual=${trafficCap.top3.annual}`);
+ok('traffic top3.uplift_x ≤ max_uplift_x after cap',
+   trafficCap.top3.uplift_x <= trafficCap.top3.max_uplift_x + 0.01,
+   `uplift_x=${trafficCap.top3.uplift_x} max=${trafficCap.top3.max_uplift_x}`);
 
 // без current traffic → дефолтный CTR
 const trafficNoInput = estimateTraffic({
@@ -137,6 +157,56 @@ ok('traffic default CTR source',
    trafficNoInput.implied_ctr_now_source === 'default_position_20+');
 ok('traffic no uplift_x when no input',
    trafficNoInput.top3.uplift_x === null);
+
+console.log('\n=== junk classifier ===');
+const monthColsJ = [
+  { index: 1, header: '2024-10', period: '2024-10' },
+  { index: 2, header: '2024-11', period: '2024-11' },
+  { index: 3, header: '2024-12', period: '2024-12' },
+  { index: 4, header: '2025-01', period: '2025-01' },
+  { index: 5, header: '2025-02', period: '2025-02' },
+  { index: 6, header: '2025-03', period: '2025-03' },
+];
+const junkRows = [
+  // too_broad + info_intent (1 слово, частотка > 100k)
+  { phrase: 'купить', total: 500000, byPeriod: { '2024-10': 80000, '2024-11': 90000, '2024-12': 100000, '2025-01': 90000, '2025-02': 80000, '2025-03': 60000 } },
+  // info_intent
+  { phrase: 'окна пвх отзывы', total: 5000, byPeriod: { '2024-10': 800, '2024-11': 900, '2024-12': 1000, '2025-01': 900, '2025-02': 800, '2025-03': 600 } },
+  // dead
+  { phrase: 'устаревшая фраза 2020', total: 100, byPeriod: { '2024-10': 0, '2024-11': 0, '2024-12': 0, '2025-01': 0, '2025-02': 0, '2025-03': 0 } },
+  // foreign_brand
+  { phrase: 'купить на ozon.ru', total: 2000, byPeriod: { '2024-10': 300, '2024-11': 300, '2024-12': 300, '2025-01': 300, '2025-02': 300, '2025-03': 200 } },
+  // duplicate
+  { phrase: 'окна пвх отзывы', total: 5000, byPeriod: { '2024-10': 800, '2024-11': 900, '2024-12': 1000, '2025-01': 900, '2025-02': 800, '2025-03': 600 } },
+  // нормальная — НЕ должна попасть в junk
+  { phrase: 'окна пвх купить с установкой', total: 1500, byPeriod: { '2024-10': 200, '2024-11': 250, '2024-12': 300, '2025-01': 250, '2025-02': 250, '2025-03': 250 } },
+];
+const junk = classifyJunkPhrases({ parsedRows: junkRows, monthCols: monthColsJ, targetUrl: 'https://kompy.com' });
+ok('junk flagged count == 5', junk.flagged.length === 5,
+   `flagged=${junk.flagged.length}`);
+ok('junk too_broad detected',
+   junk.flagged.some((f) => f.reasons.includes('too_broad')));
+ok('junk info_intent detected',
+   junk.flagged.some((f) => f.reasons.includes('info_intent')));
+ok('junk dead detected',
+   junk.flagged.some((f) => f.reasons.includes('dead')));
+ok('junk foreign_brand detected for ozon.ru when target=kompy.com',
+   junk.flagged.some((f) => f.reasons.includes('foreign_brand')));
+ok('junk duplicate detected',
+   junk.flagged.some((f) => f.reasons.includes('duplicate')));
+ok('junk severity high for too_broad',
+   junk.flagged.find((f) => f.reasons.includes('too_broad'))?.severity === 'high');
+ok('junk counts.total_rows == 6', junk.counts.total_rows === 6);
+ok('junk reason_labels exposed via summary structure (top_examples present)',
+   Array.isArray(junk.summary.top_examples) && junk.summary.top_examples.length >= 1);
+// targetUrl host detection
+ok('junk summary target_host = kompy.com',
+   junk.summary.target_host === 'kompy.com');
+
+// без targetUrl → foreign_brand всё равно ловит явный домен в фразе
+const junkNoTarget = classifyJunkPhrases({ parsedRows: junkRows, monthCols: monthColsJ });
+ok('junk foreign_brand caught even without targetUrl (ozon.ru → flagged)',
+   junkNoTarget.flagged.some((f) => f.reasons.includes('foreign_brand')));
 
 console.log(`\n=== Result: ${passed} passed / ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);

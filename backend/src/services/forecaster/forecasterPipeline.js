@@ -23,7 +23,9 @@ const { aggregateMonthlySeries } = require('./series');
 const { detectAnomalies } = require('./anomalyDetector');
 const { buildForecast } = require('./forecast');
 const { estimateTraffic } = require('./trafficModel');
-const { runDeepSeekAnalysis } = require('./deepseekAnalyzer');
+const { runDeepSeekAnalysis, runDeepSeekJunkRefine } = require('./deepseekAnalyzer');
+const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
+const { getForecasterConfig } = require('./config');
 
 async function processForecasterTask(taskId) {
   if (!taskId) throw new Error('processForecasterTask: taskId required');
@@ -82,11 +84,32 @@ async function processForecasterTask(taskId) {
 
     // 6. Трафик
     const currentTraffic = Number(options.current_traffic_per_month) || 0;
+    const targetUrl = String(options.target_url || '').trim() || null;
     const trafficEstimate = estimateTraffic({
       historicalMonthly: seriesData.monthly,
       forecastPoints:    forecast.points,
       currentTrafficPerMonth: currentTraffic,
     });
+
+    // 6b. Junk-классификатор фраз (детерминированный)
+    const junkRaw = classifyJunkPhrases({
+      parsedRows: parsed.rows,
+      monthCols:  parsed.monthCols,
+      targetUrl,
+    });
+    // Ограничиваем payload в БД: храним top-N помеченных фраз, остальное —
+    // сводно. По умолчанию хватит 500 для UI; флаг overflow подсветит факт обрезки.
+    const JUNK_STORE_LIMIT = 500;
+    const flaggedTrimmed = junkRaw.flagged.slice(0, JUNK_STORE_LIMIT);
+    const junkReport = {
+      flagged: flaggedTrimmed,
+      counts:  junkRaw.counts,
+      summary: junkRaw.summary,
+      reason_labels: REASON_LABELS,
+      overflow: junkRaw.flagged.length > JUNK_STORE_LIMIT
+        ? { stored: JUNK_STORE_LIMIT, total: junkRaw.flagged.length }
+        : null,
+    };
 
     // 7. Сохраняем «полу-готовое» состояние, чтобы UI мог показать
     // данные даже если DeepSeek потом упадёт.
@@ -95,6 +118,7 @@ async function processForecasterTask(taskId) {
       total_col:  parsed.totalCol,
       month_cols: parsed.monthCols,
       warnings:   parsed.warnings,
+      target_url: targetUrl,
     };
     await db.query(
       `UPDATE forecaster_tasks SET
@@ -105,6 +129,8 @@ async function processForecasterTask(taskId) {
          forecast=$6::jsonb,
          trend=$7::jsonb,
          traffic_estimate=$8::jsonb,
+         target_url=$9,
+         junk_phrases=$10::jsonb,
          updated_at=NOW()
        WHERE id=$1`,
       [
@@ -116,10 +142,12 @@ async function processForecasterTask(taskId) {
         JSON.stringify({ ...forecast, trend: undefined }),
         JSON.stringify(forecast.trend),
         JSON.stringify(trafficEstimate),
+        targetUrl,
+        JSON.stringify(junkReport),
       ],
     );
 
-    // 8. DeepSeek — graceful
+    // 8. DeepSeek — graceful (анализ + junk refinement)
     const ds = await runDeepSeekAnalysis({
       sourceInfo: { filename, rowsCount: parsed.rowsCount },
       monthlySeries: seriesData.monthly,
@@ -127,9 +155,51 @@ async function processForecasterTask(taskId) {
       forecast,
       trend: forecast.trend,
       trafficEstimate,
+      targetUrl,
+      junkSummary: junkReport,
     });
 
+    // 8b. Junk refinement — берём top-K кандидатов и просим DS дать verdict + reason
+    const cfgJunk = getForecasterConfig().junk;
+    const candidates = flaggedTrimmed.slice(0, cfgJunk.deepseekTopK);
+    const junkRefine = await runDeepSeekJunkRefine({ candidates, targetUrl });
+    // Прокидываем annotations обратно в flagged (если ok)
+    if (junkRefine && junkRefine.verdict === 'ok' && junkRefine.annotations) {
+      for (const f of junkReport.flagged) {
+        const ann = junkRefine.annotations[String(f.phrase || '').toLowerCase()];
+        if (ann) {
+          f.ai_verdict = ann.verdict;
+          f.ai_reason  = ann.reason;
+        }
+      }
+      junkReport.deepseek = {
+        verdict: 'ok',
+        items_count: junkRefine.items_count,
+        tokens_in: junkRefine.tokens_in,
+        tokens_out: junkRefine.tokens_out,
+        cost_usd: junkRefine.cost_usd,
+        model: junkRefine.model,
+      };
+      // пере-сохраним junk_phrases с обогащением
+      await db.query(
+        `UPDATE forecaster_tasks SET junk_phrases=$2::jsonb, updated_at=NOW() WHERE id=$1`,
+        [taskId, JSON.stringify(junkReport)],
+      );
+    } else if (junkRefine) {
+      junkReport.deepseek = { verdict: junkRefine.verdict, reason: junkRefine.reason || null };
+      await db.query(
+        `UPDATE forecaster_tasks SET junk_phrases=$2::jsonb, updated_at=NOW() WHERE id=$1`,
+        [taskId, JSON.stringify(junkReport)],
+      );
+    }
+
     // 9. Финал
+    const dsCost     = ds.verdict === 'ok' ? (ds.cost_usd || 0) : 0;
+    const refineCost = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.cost_usd || 0) : 0;
+    const dsIn       = ds.verdict === 'ok' ? (ds.tokens_in || 0) : 0;
+    const refineIn   = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.tokens_in || 0) : 0;
+    const dsOut      = ds.verdict === 'ok' ? (ds.tokens_out || 0) : 0;
+    const refineOut  = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.tokens_out || 0) : 0;
     await db.query(
       `UPDATE forecaster_tasks SET
          status='done',
@@ -145,12 +215,12 @@ async function processForecasterTask(taskId) {
         taskId,
         JSON.stringify(ds),
         ds.verdict === 'ok' ? (ds.model || 'deepseek') : null,
-        ds.verdict === 'ok' ? (ds.tokens_in || 0) : 0,
-        ds.verdict === 'ok' ? (ds.tokens_out || 0) : 0,
-        ds.verdict === 'ok' ? (ds.cost_usd || 0) : 0,
+        dsIn + refineIn,
+        dsOut + refineOut,
+        dsCost + refineCost,
       ],
     );
-    console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict})`);
+    console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'})`);
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     console.error(`[Forecaster] task ${taskId} failed: ${msg}`);

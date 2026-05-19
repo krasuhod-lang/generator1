@@ -28,6 +28,22 @@ function _clipName(v) {
   return String(v || '').slice(0, NAME_LIMIT).trim();
 }
 
+// Безопасная нормализация URL: принимаем только http/https, обрезаем мусор.
+// Возвращаем строку URL (с протоколом) либо пустую — если что-то не так.
+function _sanitizeUrl(v) {
+  const raw = String(v || '').trim();
+  if (!raw) return '';
+  let s = raw;
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  try {
+    const u = new URL(s);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    return u.toString();
+  } catch (_) {
+    return '';
+  }
+}
+
 // ─── GET /api/forecaster ───────────────────────────────────────────
 async function listForecasterTasks(req, res, next) {
   try {
@@ -73,10 +89,13 @@ async function createForecasterTask(req, res, next) {
 
     // Опции (текущий трафик и т.п.)
     const opts = body.options || {};
+    const rawTargetUrl = String(opts.target_url || '').slice(0, 500).trim();
+    const targetUrl = _sanitizeUrl(rawTargetUrl);
     const options = {
       current_traffic_per_month: Math.max(0, Math.floor(Number(opts.current_traffic_per_month) || 0)),
       region:                    String(opts.region || '').slice(0, 100),
       notes:                     String(opts.notes  || '').slice(0, 1000),
+      target_url:                targetUrl,
     };
 
     const sourceColumns = rows ? { raw_rows: rows } : { raw_csv: csv };
@@ -112,9 +131,9 @@ async function getForecasterTask(req, res, next) {
     const { rows } = await db.query(
       `SELECT id, user_id, name, status, error_message,
               source_filename, source_rows_count, source_columns,
-              options,
+              options, target_url,
               monthly_series, anomalies, forecast, trend,
-              traffic_estimate, deepseek_summary,
+              traffic_estimate, junk_phrases, deepseek_summary,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
               created_at, started_at, completed_at, updated_at
@@ -216,9 +235,9 @@ async function getSharedForecast(req, res, next) {
       return res.status(400).json({ error: 'Некорректный токен' });
     }
     const { rows } = await db.query(
-      `SELECT id, name, status, source_filename, source_rows_count,
+      `SELECT id, name, status, source_filename, source_rows_count, target_url,
               monthly_series, anomalies, forecast, trend,
-              traffic_estimate, deepseek_summary,
+              traffic_estimate, junk_phrases, deepseek_summary,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks
         WHERE share_token = $1 AND status='done'
