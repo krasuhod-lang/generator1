@@ -25,6 +25,8 @@ const form = ref({
   region: '',
   notes: '',
   target_url: '',
+  conversion_rate_pct: '',  // в %, переводим в дробь при отправке (0.02)
+  intent: '',
 });
 
 const submitting = ref(false);
@@ -70,6 +72,9 @@ async function handleSubmit() {
   submitting.value = true;
   try {
     const fileData = await readFileAsRows(form.value.file);
+    // CR: user вводит в %, бэкенд хранит как дробь.
+    const crPct = parseFloat(form.value.conversion_rate_pct);
+    const cr = Number.isFinite(crPct) && crPct > 0 ? crPct / 100 : null;
     const payload = {
       name: form.value.name?.trim() || '',
       options: {
@@ -77,6 +82,10 @@ async function handleSubmit() {
         region: form.value.region?.trim() || '',
         notes:  form.value.notes?.trim()  || '',
         target_url: form.value.target_url?.trim() || '',
+        // По требованию владельца: считаем только объём заявок (= traffic × CR),
+        // никакой выручки/маржи.
+        conversion_rate: cr,
+        intent: form.value.intent?.trim() || null,
       },
       source: {
         filename: form.value.fileName,
@@ -196,6 +205,34 @@ function statusBadge(s) {
               Используется DeepSeek-аналитикой для контекста и AI-фильтром, чтобы исключить
               чужие бренды/нерелевантные запросы.
             </p>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Конверсия сайта, %</label>
+              <input v-model="form.conversion_rate_pct" type="number" min="0.01" max="50" step="0.1"
+                class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                placeholder="например, 2.0" />
+              <p class="text-[11px] text-gray-500 mt-1">
+                Считаем <span class="text-gray-300">объём заявок</span> = трафик × конверсия.
+                Маржу/выручку модуль не считает. Если оставить пустым — берётся preset по типу проекта.
+              </p>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Тип проекта (intent)</label>
+              <select v-model="form.intent"
+                class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100">
+                <option value="">— не указан —</option>
+                <option value="commercial">commercial (услуги, 2.0 %)</option>
+                <option value="ecommerce">ecommerce (магазин, 1.2 %)</option>
+                <option value="lead_gen">lead_gen (лендинг/квиз, 3.0 %)</option>
+                <option value="info">info (контент, 0.3 %)</option>
+                <option value="b2b">b2b (длинный цикл, 0.8 %)</option>
+              </select>
+              <p class="text-[11px] text-gray-500 mt-1">
+                Используется как стартовый CR, если поле «конверсия» пустое.
+              </p>
+            </div>
           </div>
 
           <div>

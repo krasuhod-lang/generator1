@@ -66,6 +66,42 @@ const targetUrl  = computed(() => task.value?.target_url || task.value?.options?
 const excludedSummary = computed(() => task.value?.monthly_series?.excludedSummary || null);
 const keyssoSignals   = computed(() => task.value?.keysso_signals || null);
 const keyssoAgg       = computed(() => keyssoSignals.value?.aggregate || null);
+const opportunities   = computed(() => task.value?.opportunities || null);
+const oppList         = computed(() => opportunities.value?.opportunities || []);
+const oppClusters     = computed(() => opportunities.value?.clusters || []);
+const oppSummary      = computed(() => opportunities.value?.summary || null);
+const leadsSummary    = computed(() => task.value?.leads_summary || null);
+const expertReports   = computed(() => task.value?.expert_reports || null);
+const nicheStrategist = computed(() => expertReports.value?.niche_strategist || null);
+const opportunityHunter = computed(() => expertReports.value?.opportunity_hunter || null);
+const clusterPlanner  = computed(() => expertReports.value?.cluster_planner || null);
+
+// Эксперт OpportunityHunter возвращает массив; индексируем по фразе для
+// inline-отрисовки в таблице opportunities.
+const hunterByPhrase = computed(() => {
+  const out = new Map();
+  const arr = opportunityHunter.value?.payload;
+  if (!Array.isArray(arr)) return out;
+  for (const it of arr) {
+    if (it && it.phrase) out.set(String(it.phrase).toLowerCase().trim(), it);
+  }
+  return out;
+});
+
+function fmtPct(v, digits = 1) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  return (Number(v) * 100).toFixed(digits) + '%';
+}
+function fmtNumSafe(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  return Number(v).toLocaleString('ru-RU');
+}
+function confidenceColor(c) {
+  if (c === 'high') return 'text-emerald-300';
+  if (c === 'mid')  return 'text-amber-300';
+  if (c === 'low')  return 'text-rose-300';
+  return 'text-gray-400';
+}
 
 function momentumIcon(m) {
   if (m === 'positive') return '↑';
@@ -504,6 +540,258 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <!-- ─── 👥 Заявки (объём, без выручки) ─── -->
+          <section v-if="leadsSummary" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">
+              👥 Заявки (объём, без выручки)
+              <span class="text-xs text-gray-500 font-normal">
+                · CR {{ leadsSummary.conversion_rate_pct }}%
+                <span class="text-gray-600">({{ leadsSummary.conversion_rate_source }})</span>
+                <span v-if="leadsSummary.intent" class="text-gray-600">· intent: {{ leadsSummary.intent }}</span>
+              </span>
+            </h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div class="bg-gray-950 border border-gray-800 rounded p-2">
+                <div class="text-xs text-gray-500">сейчас / год</div>
+                <div class="text-base font-semibold text-gray-200 mt-0.5">
+                  {{ fmtNumSafe(leadsSummary.current_leads_annual) }}
+                </div>
+                <div class="text-[10px] text-gray-500">
+                  ≈ {{ fmtNumSafe(leadsSummary.current_leads_per_month) }} / мес
+                </div>
+              </div>
+              <div class="bg-emerald-500/5 border border-emerald-500/20 rounded p-2">
+                <div class="text-xs text-emerald-400">ТОП-3 / год</div>
+                <div class="text-base font-semibold text-emerald-300 mt-0.5">
+                  {{ fmtNumSafe(leadsSummary.top3_annual) }}
+                </div>
+              </div>
+              <div class="bg-sky-500/5 border border-sky-500/20 rounded p-2">
+                <div class="text-xs text-sky-400">ТОП-5 / год</div>
+                <div class="text-base font-semibold text-sky-300 mt-0.5">
+                  {{ fmtNumSafe(leadsSummary.top5_annual) }}
+                </div>
+              </div>
+              <div class="bg-indigo-500/5 border border-indigo-500/20 rounded p-2">
+                <div class="text-xs text-indigo-400">ТОП-10 / год</div>
+                <div class="text-base font-semibold text-indigo-300 mt-0.5">
+                  {{ fmtNumSafe(leadsSummary.top10_annual) }}
+                </div>
+              </div>
+            </div>
+            <p class="text-[11px] text-gray-500 mt-2 italic">
+              leads = traffic × conversion_rate. Маржу/выручку модуль не считает — только объём.
+            </p>
+          </section>
+
+          <!-- ─── 🎯 Точки усиления (opportunityAnalyzer) ─── -->
+          <section v-if="opportunities && opportunities.verdict === 'ok' && oppList.length > 0"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <header class="mb-3">
+              <h2 class="text-sm font-semibold text-gray-200">
+                🎯 Точки усиления
+                <span class="text-xs text-gray-500 font-normal">
+                  · {{ oppSummary.opportunities_returned }} из {{ oppSummary.opportunities_total }}
+                  · просадок {{ oppSummary.drop_count }}
+                  · вне топ-10 {{ oppSummary.off_top10_count }}
+                </span>
+              </h2>
+              <p class="text-[11px] text-gray-500 mt-1 leading-relaxed">
+                Ранжировано по composite_score (просадка + объём + лёгкость конкуренции − негативный momentum).
+                Сценарии: позиция (Verhulst-логистика) × CTR (power-law) × ramp-up (exp-decay).
+              </p>
+            </header>
+            <div v-if="oppSummary.portfolio_ci" class="grid grid-cols-3 gap-2 mb-3 text-xs">
+              <div class="bg-gray-950 border border-gray-800 rounded p-2">
+                <div class="text-gray-500">портфель p10 / год (трафик)</div>
+                <div class="text-gray-300 font-semibold">{{ fmtNumSafe(oppSummary.portfolio_ci.p10) }}</div>
+              </div>
+              <div class="bg-gray-950 border border-emerald-500/20 rounded p-2">
+                <div class="text-emerald-400">портфель p50 / год (трафик)</div>
+                <div class="text-emerald-300 font-semibold">{{ fmtNumSafe(oppSummary.portfolio_ci.p50) }}</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded p-2">
+                <div class="text-gray-500">портфель p90 / год (трафик)</div>
+                <div class="text-gray-300 font-semibold">{{ fmtNumSafe(oppSummary.portfolio_ci.p90) }}</div>
+              </div>
+              <div class="bg-gray-950 border border-sky-500/20 rounded p-2 col-span-3">
+                <div class="text-sky-400">портфель заявок / год — best {{ fmtNumSafe(oppSummary.portfolio_best_annual_leads) }} · safe {{ fmtNumSafe(oppSummary.portfolio_safe_annual_leads) }}</div>
+              </div>
+            </div>
+            <div class="max-h-[440px] overflow-y-auto border border-gray-800 rounded">
+              <table class="w-full text-xs">
+                <thead class="bg-gray-950 sticky top-0">
+                  <tr class="text-gray-400">
+                    <th class="text-left px-2 py-1.5 font-normal">Фраза</th>
+                    <th class="text-right px-2 py-1.5 font-normal w-16">Спрос/мес</th>
+                    <th class="text-right px-2 py-1.5 font-normal w-16">Поз.</th>
+                    <th class="text-right px-2 py-1.5 font-normal w-16">Просад.</th>
+                    <th class="text-right px-2 py-1.5 font-normal w-20">Трафик ТОП-3</th>
+                    <th class="text-right px-2 py-1.5 font-normal w-20">Заявок ТОП-3</th>
+                    <th class="text-right px-2 py-1.5 font-normal w-16">Score</th>
+                    <th class="text-left px-2 py-1.5 font-normal">Действие (AI)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(o, idx) in oppList" :key="'op'+idx"
+                      class="border-t border-gray-800 hover:bg-gray-950/50 transition">
+                    <td class="px-2 py-1.5 text-gray-200">{{ o.phrase }}</td>
+                    <td class="px-2 py-1.5 text-right text-gray-400">{{ fmtNumSafe(o.demand_monthly) }}</td>
+                    <td class="px-2 py-1.5 text-right">
+                      <span v-if="o.current_position != null" class="text-gray-300">{{ o.current_position }}</span>
+                      <span v-else class="text-gray-600">—</span>
+                    </td>
+                    <td class="px-2 py-1.5 text-right">
+                      <span :class="o.drop_pct >= 0.5 ? 'text-rose-300' : o.drop_pct >= 0.2 ? 'text-amber-300' : 'text-gray-500'">
+                        {{ fmtPct(o.drop_pct, 0) }}
+                      </span>
+                    </td>
+                    <td class="px-2 py-1.5 text-right text-emerald-300">
+                      {{ fmtNumSafe(o.scenarios?.high?.top3?.expected_traffic_monthly) }}
+                    </td>
+                    <td class="px-2 py-1.5 text-right text-indigo-300">
+                      {{ fmtNumSafe(o.scenarios?.high?.top3?.expected_leads_monthly) }}
+                    </td>
+                    <td class="px-2 py-1.5 text-right text-gray-300 font-mono">{{ o.composite_score }}</td>
+                    <td class="px-2 py-1.5">
+                      <template v-if="hunterByPhrase.get(o.phrase.toLowerCase().trim())">
+                        <div class="text-[11px]">
+                          <span class="inline-block bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 rounded px-1.5 py-0.5 mr-1">
+                            {{ hunterByPhrase.get(o.phrase.toLowerCase().trim()).action_type }}
+                          </span>
+                          <span :class="confidenceColor(hunterByPhrase.get(o.phrase.toLowerCase().trim()).confidence)" class="text-[10px]">
+                            ·{{ hunterByPhrase.get(o.phrase.toLowerCase().trim()).confidence }}
+                          </span>
+                          <span class="text-gray-500 text-[10px]">
+                            · {{ hunterByPhrase.get(o.phrase.toLowerCase().trim()).effort_estimate_h }}ч
+                          </span>
+                          <div class="text-gray-400 text-[11px] mt-0.5">
+                            {{ hunterByPhrase.get(o.phrase.toLowerCase().trim()).why }}
+                          </div>
+                        </div>
+                      </template>
+                      <span v-else class="text-gray-600">—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section v-else-if="opportunities && opportunities.verdict === 'skipped'"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-3 text-xs text-gray-500">
+            🎯 Точки усиления: пропущено ({{ opportunities.reason }}).
+          </section>
+
+          <!-- ─── 🧭 NicheStrategist ─── -->
+          <section v-if="nicheStrategist && nicheStrategist.verdict === 'ok' && nicheStrategist.payload"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-2">
+              🧭 Стратегия ниши <span class="text-xs text-gray-500 font-normal">(NicheStrategist)</span>
+            </h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-xs">
+              <div class="bg-gray-950 border border-gray-800 rounded p-2">
+                <div class="text-gray-500">ниша</div>
+                <div class="text-gray-200 font-semibold">{{ nicheStrategist.payload.niche_label }}</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded p-2">
+                <div class="text-gray-500">сложность</div>
+                <div class="text-gray-200 font-semibold">{{ '★'.repeat(nicheStrategist.payload.niche_difficulty) }}{{ '☆'.repeat(5 - nicheStrategist.payload.niche_difficulty) }}</div>
+              </div>
+              <div class="bg-indigo-500/5 border border-indigo-500/20 rounded p-2">
+                <div class="text-indigo-400">strategy lane</div>
+                <div class="text-indigo-300 font-semibold">{{ nicheStrategist.payload.strategy_lane }}</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded p-2">
+                <div class="text-gray-500">горизонт</div>
+                <div class="text-gray-200 font-semibold">{{ nicheStrategist.payload.expected_horizon_months }} мес</div>
+              </div>
+            </div>
+            <p v-if="nicheStrategist.payload.rationale" class="text-sm text-gray-300 mb-3 leading-relaxed italic">
+              {{ nicheStrategist.payload.rationale }}
+            </p>
+            <div v-if="nicheStrategist.payload.primary_levers && nicheStrategist.payload.primary_levers.length">
+              <div class="text-xs text-gray-500 uppercase mb-1">Основные рычаги</div>
+              <ul class="list-disc pl-5 text-sm text-gray-300 space-y-0.5">
+                <li v-for="(l, i) in nicheStrategist.payload.primary_levers" :key="'lv'+i">{{ l }}</li>
+              </ul>
+            </div>
+            <div v-if="nicheStrategist.payload.decision_matrix && nicheStrategist.payload.decision_matrix.length" class="mt-3">
+              <div class="text-xs text-gray-500 uppercase mb-1">Матрица решений</div>
+              <table class="w-full text-xs border border-gray-800 rounded">
+                <thead class="bg-gray-950">
+                  <tr class="text-gray-400">
+                    <th class="text-left px-2 py-1 font-normal">Если</th>
+                    <th class="text-left px-2 py-1 font-normal">То</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(d, i) in nicheStrategist.payload.decision_matrix" :key="'dm'+i"
+                      class="border-t border-gray-800">
+                    <td class="px-2 py-1 text-amber-300">{{ d.if_condition }}</td>
+                    <td class="px-2 py-1 text-emerald-300">{{ d.then_action }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="text-[10px] text-gray-600 mt-3">
+              {{ nicheStrategist.model || '—' }} · in {{ nicheStrategist.tokens_in }} · out {{ nicheStrategist.tokens_out }}
+              · ${{ (nicheStrategist.cost_usd || 0).toFixed(4) }}
+            </p>
+          </section>
+          <section v-else-if="nicheStrategist && nicheStrategist.verdict !== 'ok'"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-3 text-xs text-gray-500">
+            🧭 NicheStrategist: {{ nicheStrategist.verdict }}{{ nicheStrategist.reason ? ' — ' + nicheStrategist.reason : '' }}
+          </section>
+
+          <!-- ─── 📋 ClusterPlanner ─── -->
+          <section v-if="clusterPlanner && clusterPlanner.verdict === 'ok' && clusterPlanner.payload && clusterPlanner.payload.length"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">
+              📋 План работ по кластерам <span class="text-xs text-gray-500 font-normal">(ClusterPlanner)</span>
+            </h2>
+            <div class="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+              <div v-for="(c, idx) in clusterPlanner.payload" :key="'cp'+idx"
+                   class="bg-gray-950 border border-gray-800 rounded p-3">
+                <div class="flex items-start justify-between gap-3 mb-2">
+                  <div>
+                    <div class="text-sm text-gray-200 font-semibold">🪺 {{ c.cluster_centroid }}</div>
+                    <div class="text-[11px] text-gray-500 mt-0.5">
+                      целевой объём: <b class="text-gray-300">{{ c.content_units_target }}</b> юнитов ·
+                      покрытие +{{ fmtPct(c.expected_coverage_gain, 0) }} ·
+                      input-links ≥ {{ c.internal_links_min }}
+                    </div>
+                  </div>
+                  <div class="flex gap-1 flex-wrap justify-end">
+                    <span v-for="pt in (c.page_types || [])" :key="pt"
+                          class="text-[10px] bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 rounded px-1.5 py-0.5">
+                      {{ pt }}
+                    </span>
+                  </div>
+                </div>
+                <div v-if="c.phases && c.phases.length" class="space-y-1">
+                  <div v-for="(ph, j) in c.phases" :key="'ph'+idx+'_'+j"
+                       class="flex items-start gap-2 text-[11px] border-l-2 border-indigo-500/30 pl-2">
+                    <span class="text-indigo-400 font-mono shrink-0">M{{ ph.month }}</span>
+                    <div>
+                      <div class="text-gray-200">{{ ph.milestone }}</div>
+                      <ul v-if="ph.deliverables && ph.deliverables.length" class="list-disc pl-5 text-gray-500 mt-0.5">
+                        <li v-for="(d, k) in ph.deliverables" :key="'dl'+idx+'_'+j+'_'+k">{{ d }}</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="text-[10px] text-gray-600 mt-3">
+              {{ clusterPlanner.model || '—' }} · in {{ clusterPlanner.tokens_in }} · out {{ clusterPlanner.tokens_out }}
+              · ${{ (clusterPlanner.cost_usd || 0).toFixed(4) }}
+            </p>
+          </section>
+          <section v-else-if="clusterPlanner && clusterPlanner.verdict !== 'ok'"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-3 text-xs text-gray-500">
+            📋 ClusterPlanner: {{ clusterPlanner.verdict }}{{ clusterPlanner.reason ? ' — ' + clusterPlanner.reason : '' }}
           </section>
 
           <!-- DeepSeek выводы -->
