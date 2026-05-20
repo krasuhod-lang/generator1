@@ -63,6 +63,15 @@ const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
 const junkReport = computed(() => task.value?.junk_phrases || null);
 const targetUrl  = computed(() => task.value?.target_url || task.value?.options?.target_url || null);
+const excludedSummary = computed(() => task.value?.monthly_series?.excludedSummary || null);
+const keyssoSignals   = computed(() => task.value?.keysso_signals || null);
+const keyssoAgg       = computed(() => keyssoSignals.value?.aggregate || null);
+
+function momentumIcon(m) {
+  if (m === 'positive') return '↑';
+  if (m === 'negative') return '↓';
+  return '→';
+}
 
 // Фильтр шлак-таблицы
 const junkFilter = ref('all');
@@ -281,6 +290,20 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
             </ul>
           </section>
 
+          <!-- Banner: Исключено N фраз из расчёта прогноза -->
+          <div v-if="excludedSummary && excludedSummary.phrases > 0"
+               class="bg-amber-500/5 border border-amber-500/30 rounded-lg p-3 text-sm text-amber-200">
+            🚫 Из расчёта прогноза исключено
+            <b class="text-amber-100">{{ excludedSummary.phrases }}</b> фраз
+            с суммарным спросом
+            <b class="text-amber-100">{{ fmtNum(excludedSummary.total_demand) }}</b>
+            (однословные ВЧ / мёртвые / чужие бренды).
+            <span v-if="excludedSummary.sample_phrases?.length" class="text-amber-300/80">
+              Например: {{ excludedSummary.sample_phrases.slice(0, 3).join(', ') }}.
+            </span>
+            <span class="text-gray-400">Цифры прогноза «честные» — без раздутого спроса.</span>
+          </div>
+
           <!-- Трафик top3/5/10 -->
           <section v-if="trafficEst" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
             <h2 class="text-sm font-semibold text-gray-200 mb-3">🎯 Реалистичная оценка трафика при росте позиций</h2>
@@ -325,6 +348,69 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
                 </div>
               </div>
             </div>
+          </section>
+
+          <!-- Текущая видимость keys.so -->
+          <section v-if="keyssoSignals && keyssoSignals.verdict === 'ok' && keyssoAgg"
+                   class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">
+              📊 Текущая видимость (keys.so)
+              <span class="text-[11px] font-normal text-gray-500 ml-1">
+                · домен <code class="text-gray-400">{{ keyssoSignals.domain }}</code>
+                · {{ keyssoSignals.region || '—' }} · {{ keyssoSignals.engine || 'yandex' }}
+              </span>
+            </h2>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">Средняя позиция</div>
+                <div class="text-lg font-semibold text-gray-100 mt-0.5">
+                  {{ keyssoAgg.avg_current_position ?? '—' }}
+                </div>
+              </div>
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">В топ-10</div>
+                <div class="text-lg font-semibold text-emerald-300 mt-0.5">{{ keyssoAgg.phrases_in_top10_pct }}%</div>
+              </div>
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">В топ-30</div>
+                <div class="text-lg font-semibold text-sky-300 mt-0.5">{{ keyssoAgg.phrases_in_top30_pct }}%</div>
+              </div>
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">Медиана конкуренции</div>
+                <div class="text-lg font-semibold text-gray-100 mt-0.5">
+                  {{ keyssoAgg.median_competition ?? '—' }}
+                </div>
+              </div>
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">Momentum 3м</div>
+                <div class="text-lg font-semibold mt-0.5"
+                     :class="keyssoAgg.momentum === 'positive' ? 'text-emerald-300' :
+                             keyssoAgg.momentum === 'negative' ? 'text-rose-300' : 'text-gray-300'">
+                  {{ momentumIcon(keyssoAgg.momentum) }} {{ keyssoAgg.momentum }}
+                </div>
+              </div>
+            </div>
+            <p v-if="trafficEst?.keysso_calibration" class="text-[11px] text-gray-400 mt-3 leading-relaxed">
+              Прогноз скорректирован: realisticShare умножен на competition_factor =
+              <b class="text-gray-200">{{ trafficEst.keysso_calibration.competition_factor }}</b>
+              ({{ trafficEst.keysso_calibration.competition_label }} конкуренция).
+              CTR-baseline = <b class="text-gray-200">{{ fmtCtr(trafficEst.implied_ctr_now) }}</b>
+              ({{ trafficEst.implied_ctr_now_source }}).
+              <span v-if="keyssoAgg.phrases_off_top50_pct > 0">
+                {{ keyssoAgg.phrases_off_top50_pct }}% фраз сейчас за топ-50 — это снижает «потолок».
+              </span>
+            </p>
+            <p class="text-[10px] text-gray-600 mt-2">
+              Запрошено {{ keyssoSignals.requested }} фраз ·
+              сопоставлено {{ keyssoSignals.matched }} ·
+              из кеша {{ keyssoSignals.cache_hits }} ·
+              {{ keyssoSignals.duration_ms }} мс
+            </p>
+          </section>
+
+          <section v-else-if="keyssoSignals && keyssoSignals.verdict === 'skipped'"
+                   class="text-[11px] text-gray-500 italic">
+            📊 keys.so: пропущен ({{ keyssoSignals.reason }}). Прогноз использует дефолтный CTR.
           </section>
 
           <!-- Шлак-запросы -->
@@ -388,6 +474,11 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
                       class="border-t border-gray-800 hover:bg-gray-950/50 transition">
                     <td class="px-2 py-1.5 text-gray-200">
                       <span class="mr-1">{{ severityIcon(f.severity) }}</span>{{ f.phrase }}
+                      <span v-if="f.exclude_from_forecast"
+                            class="ml-1 text-[10px] bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded px-1.5 py-0.5"
+                            title="Эта фраза исключена из агрегации прогноза (однословник / мёртвая / чужой бренд)">
+                        🚫 исключено из прогноза
+                      </span>
                     </td>
                     <td class="px-2 py-1.5 text-right text-gray-400">{{ fmtNum(f.total) }}</td>
                     <td class="px-2 py-1.5">

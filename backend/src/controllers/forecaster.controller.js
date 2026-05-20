@@ -133,7 +133,7 @@ async function getForecasterTask(req, res, next) {
               source_filename, source_rows_count, source_columns,
               options, target_url,
               monthly_series, anomalies, forecast, trend,
-              traffic_estimate, junk_phrases, deepseek_summary,
+              traffic_estimate, junk_phrases, keysso_signals, deepseek_summary,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
               created_at, started_at, completed_at, updated_at
@@ -237,7 +237,7 @@ async function getSharedForecast(req, res, next) {
     const { rows } = await db.query(
       `SELECT id, name, status, source_filename, source_rows_count, target_url,
               monthly_series, anomalies, forecast, trend,
-              traffic_estimate, junk_phrases, deepseek_summary,
+              traffic_estimate, junk_phrases, keysso_signals, deepseek_summary,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks
         WHERE share_token = $1 AND status='done'

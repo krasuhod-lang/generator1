@@ -969,6 +969,9 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS target_url   TEXT`);
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS junk_phrases JSONB`);
 
+    // Migration 034: keysso_signals (интеграция keys.so).
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS keysso_signals JSONB`);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$

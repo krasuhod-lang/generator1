@@ -25,6 +25,7 @@ const { buildForecast } = require('./forecast');
 const { estimateTraffic } = require('./trafficModel');
 const { runDeepSeekAnalysis, runDeepSeekJunkRefine } = require('./deepseekAnalyzer');
 const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
+const { fetchPhraseSignals, aggregateSignals } = require('./keyssoClient');
 const { getForecasterConfig } = require('./config');
 
 async function processForecasterTask(taskId) {
@@ -70,33 +71,88 @@ async function processForecasterTask(taskId) {
       throw new Error(`Найдено только ${parsed.monthCols.length} помесячных колонок (нужно минимум 3). Проверьте заголовки.`);
     }
 
-    // 3. Агрегация
-    const seriesData = aggregateMonthlySeries(parsed);
-    if (seriesData.monthly.length < 3) {
-      throw new Error('После агрегации меньше 3 месяцев данных — недостаточно для анализа');
-    }
-
-    // 4. Аномалии
-    const anomalies = detectAnomalies(seriesData.monthly);
-
-    // 5. Прогноз
-    const forecast = buildForecast(seriesData.monthly);
-
-    // 6. Трафик
+    // Текущий трафик и URL продвигаемого сайта — нужны и junk-классификатору
+    // (для foreign_brand), и trafficEstimate, и keys.so.
     const currentTraffic = Number(options.current_traffic_per_month) || 0;
     const targetUrl = String(options.target_url || '').trim() || null;
-    const trafficEstimate = estimateTraffic({
-      historicalMonthly: seriesData.monthly,
-      forecastPoints:    forecast.points,
-      currentTrafficPerMonth: currentTraffic,
-    });
 
-    // 6b. Junk-классификатор фраз (детерминированный)
+    // 3. Junk-классификатор фраз (детерминированный) — выполняется ДО
+    //    агрегации, чтобы из суммы спроса вычесть однословные ВЧ /
+    //    мёртвые / чужие бренды (см. cfg.junk.excludeFromForecastReasons).
     const junkRaw = classifyJunkPhrases({
       parsedRows: parsed.rows,
       monthCols:  parsed.monthCols,
       targetUrl,
     });
+    const excludeSet = new Set();
+    for (const f of junkRaw.flagged) {
+      if (f.exclude_from_forecast) {
+        excludeSet.add(String(f.phrase || '').trim().toLowerCase().replace(/\s+/g, ' '));
+      }
+    }
+
+    // 4. Агрегация (с учётом исключённых фраз)
+    const seriesData = aggregateMonthlySeries(parsed, { excludePhrases: excludeSet });
+    if (seriesData.monthly.length < 3) {
+      throw new Error('После агрегации меньше 3 месяцев данных — недостаточно для анализа');
+    }
+
+    // 5. Аномалии
+    const anomalies = detectAnomalies(seriesData.monthly);
+
+    // 6. Прогноз
+    const forecast = buildForecast(seriesData.monthly);
+
+    // 6b. Keys.so signals (graceful skip без ключа). Шлём top-N фраз по total
+    // (после фильтрации исключённых) — чтобы экономить квоту.
+    let keyssoSignalsReport = null;
+    try {
+      const remainingRows = parsed.rows.filter((r) => {
+        const norm = String(r.phrase || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        return norm && !excludeSet.has(norm);
+      });
+      const topPhrases = [...remainingRows]
+        .sort((a, b) => Number(b.total || 0) - Number(a.total || 0))
+        .map((r) => String(r.phrase || '').trim())
+        .filter(Boolean);
+
+      const ksResp = await fetchPhraseSignals({
+        phrases: topPhrases,
+        domain:  targetUrl,
+        region:  options.region,
+      });
+      if (ksResp.verdict === 'ok') {
+        const agg = aggregateSignals(ksResp.signals, ksResp.requested);
+        keyssoSignalsReport = {
+          verdict:      'ok',
+          requested:    ksResp.requested,
+          matched:      ksResp.matched,
+          cache_hits:   ksResp.cache_hits,
+          duration_ms:  ksResp.duration_ms,
+          domain:       ksResp.domain,
+          region:       ksResp.region,
+          engine:       ksResp.engine,
+          aggregate:    agg,
+        };
+      } else {
+        keyssoSignalsReport = {
+          verdict: ksResp.verdict,
+          reason:  ksResp.reason || null,
+        };
+      }
+    } catch (err) {
+      keyssoSignalsReport = { verdict: 'error', reason: (err && err.message) || String(err) };
+    }
+
+    // 7. Трафик (с калибровкой по keys.so, если есть)
+    const trafficEstimate = estimateTraffic({
+      historicalMonthly: seriesData.monthly,
+      forecastPoints:    forecast.points,
+      currentTrafficPerMonth: currentTraffic,
+      keyssoAggregate:   keyssoSignalsReport?.verdict === 'ok' ? keyssoSignalsReport.aggregate : null,
+    });
+
+    // 7b. Финализируем junkReport (он построен ранее, но сохраним вместе со всем)
     // Ограничиваем payload в БД: храним top-N помеченных фраз, остальное —
     // сводно. По умолчанию хватит 500 для UI; флаг overflow подсветит факт обрезки.
     const JUNK_STORE_LIMIT = 500;
@@ -131,6 +187,7 @@ async function processForecasterTask(taskId) {
          traffic_estimate=$8::jsonb,
          target_url=$9,
          junk_phrases=$10::jsonb,
+         keysso_signals=$11::jsonb,
          updated_at=NOW()
        WHERE id=$1`,
       [
@@ -144,6 +201,7 @@ async function processForecasterTask(taskId) {
         JSON.stringify(trafficEstimate),
         targetUrl,
         JSON.stringify(junkReport),
+        keyssoSignalsReport ? JSON.stringify(keyssoSignalsReport) : null,
       ],
     );
 
@@ -157,6 +215,7 @@ async function processForecasterTask(taskId) {
       trafficEstimate,
       targetUrl,
       junkSummary: junkReport,
+      keyssoSignals: keyssoSignalsReport,
     });
 
     // 8b. Junk refinement — берём top-K кандидатов и просим DS дать verdict + reason
