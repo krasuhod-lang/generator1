@@ -311,4 +311,259 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
   }
 }
 
-module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine };
+module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner };
+
+// ─────────────────────────────────────────────────────────────────────
+// DSPy-style эксперты («Signature → strict JSON I/O»).
+//
+// Каждый эксперт — отдельный вызов с фокусированной задачей и строго
+// типизированной JSON-схемой ответа. Это эквивалент dspy.Signature на
+// чистом prompt-engineering: модель видит только relevant context,
+// возвращает только ожидаемые поля; pipeline валидирует.
+//
+// Параметры — getForecasterConfig().advanced.experts.<name>.
+// Все три эксперта graceful: при отсутствии ключа или ошибке возвращают
+// { verdict: 'skipped'|'error', reason } и пайплайн продолжает работу.
+//
+// 1) NicheStrategist  — портрет ниши и стратегическая рамка
+//    Вход: keysso_aggregate, junk_summary, traffic_estimate.realism,
+//          monthly_summary, target_url
+//    Выход: { niche_label, niche_difficulty (1..5), strategy_lane,
+//             primary_levers[], expected_horizon_months, decision_matrix[] }
+//
+// 2) OpportunityHunter — ранжированные действия по top-N opportunities
+//    Вход: top-N opportunities из opportunityAnalyzer (с сценариями)
+//    Выход: { ranked_actions[]:{ phrase, action_type, why,
+//             expected_traffic_lift_monthly, expected_leads_lift_monthly,
+//             effort_estimate_h, confidence: low|mid|high, risks[] } }
+//
+// 3) ClusterPlanner — план работ по top-N кластерам (с log-returns)
+//    Вход: clusters + calibration; контент-юниты = logReturnsUnitsFor
+//    Выход: { plans[]:{ cluster_centroid, content_units_target,
+//             page_types[], internal_links_min, expected_coverage_gain,
+//             phases:[{month, milestone, deliverables[] }] } }
+
+const NICHE_STRATEGIST_SYSTEM = [
+  'Ты — стратег-аналитик уровня senior, специализация: продвижение в Яндексе/Google в коммерческом RU-сегменте.',
+  'На вход получишь сжатый портрет ниши (объём ядра, доля исключённого шлака, реализм-факторы',
+  'трафик-модели, агрегаты keys.so). Твоя задача — определить рамки стратегии:',
+  '1) niche_label (1-3 слова, например: "пластиковые окна Москва"),',
+  '2) niche_difficulty (1=лёгкая, 5=очень тяжёлая) — обоснованно по конкуренции, ',
+  '   доле фраз в топ-10, momentum,',
+  '3) strategy_lane: один из ["volume_play","precision_play","authority_play","reanimation_play"]',
+  '   где volume_play — массовое покрытие, precision_play — точечные просадки,',
+  '   authority_play — рост домена через E-E-A-T контент, reanimation_play — восстановление просевших страниц,',
+  '4) primary_levers (2-4 главных рычага), каждый — строка <= 80 символов,',
+  '5) expected_horizon_months — за сколько мес strategy_lane даст видимый эффект (3..18),',
+  '6) decision_matrix — массив из 3-5 пар { if_condition, then_action } с конкретными триггерами',
+  '   (например, if "phrases_in_top10_pct < 15%" then "сосредоточиться на 5-7 hub-страницах").',
+  '',
+  'СТРОГО не считай и не упоминай выручку, маржу, ROI, "доход". Только объёмы трафика, заявок,',
+  'позиции, доли фраз. Это требование продукта.',
+  '',
+  'Формат ответа — JSON:',
+  '{',
+  '  "niche_label": "…",',
+  '  "niche_difficulty": 1|2|3|4|5,',
+  '  "strategy_lane": "volume_play|precision_play|authority_play|reanimation_play",',
+  '  "primary_levers": ["…","…"],',
+  '  "expected_horizon_months": 3..18,',
+  '  "decision_matrix": [{"if_condition":"…","then_action":"…"}],',
+  '  "rationale": "1-2 предложения, почему именно эта strategy_lane"',
+  '}',
+  'Никакого markdown вне JSON.',
+].join('\n');
+
+const OPPORTUNITY_HUNTER_SYSTEM = [
+  'Ты — старший SEO-практик. На вход получишь top-N "точек усиления" (opportunities) с',
+  'detailed-метриками: текущая позиция, конкуренция, drop_pct, и сценарии (effort low/mid/high ×',
+  'target позиция top3/5/10 — каждый с expected_traffic_monthly и expected_leads_monthly).',
+  'Числа уже посчитаны нашей моделью (Verhulst-логистика + power-law CTR), твоя задача —',
+  'выбрать для каждой фразы РЕАЛИСТИЧНЫЙ план:',
+  '1) action_type: один из ["fix_existing_page","build_new_landing","expand_cluster","internal_links_boost","tech_seo_fix","content_refresh"],',
+  '2) why — одно предложение, ≤ 160 символов, простыми словами для клиента,',
+  '3) expected_traffic_lift_monthly — возьми из подходящего сценария (не выдумывай),',
+  '4) expected_leads_lift_monthly — то же,',
+  '5) effort_estimate_h — оценка часов работы (1..120). На "build_new_landing" обычно 16-40 ч,',
+  '   на "fix_existing_page" — 4-12 ч, на "tech_seo_fix" — 2-8 ч.',
+  '6) confidence: low|mid|high — насколько уверен в реалистичности этого числа.',
+  '   high только если: drop_pct < 0.5 ИЛИ current_position ≤ 20 ИЛИ low competition.',
+  '7) risks — 1-2 риска короткими фразами (если есть).',
+  '',
+  'Сохраняй порядок фраз как во входе. НИКАКОЙ выручки/маржи/ROI — только трафик и заявки.',
+  '',
+  'Формат — JSON-массив той же длины:',
+  '[{ "phrase":"…", "action_type":"…", "why":"…",',
+  '   "expected_traffic_lift_monthly":<int>, "expected_leads_lift_monthly":<int>,',
+  '   "effort_estimate_h":<int>, "confidence":"low|mid|high",',
+  '   "risks":["…"] }, …]',
+  'Никакого markdown вне JSON.',
+].join('\n');
+
+const CLUSTER_PLANNER_SYSTEM = [
+  'Ты — старший контент-стратег. На вход получишь top-N кластеров (групп семантически близких',
+  'фраз) с агрегированными метриками: total_demand_monthly, total_drop_volume, best_traffic_monthly,',
+  'best_leads_monthly, member_phrases (примеры).',
+  'Дополнительно — calibration с alpha/scale (log-returns закон отдачи: gain = α·ln(1 + units/scale)).',
+  '',
+  'Для каждого кластера верни план:',
+  '1) content_units_target — сколько новых/обновлённых страниц-юнитов нужно за 12 мес (1..30).',
+  '   Рекомендации: тяжёлый кластер с total_demand_monthly > 5000 → 10-20 юнитов;',
+  '   средний (1000..5000) → 5-10; маленький (< 1000) → 2-4.',
+  '2) page_types — массив типов из ["hub_pillar","category","commercial_landing","how_to_guide","comparison","case_study"],',
+  '   обычно 1-3 разных типа на кластер,',
+  '3) internal_links_min — минимум входящих ссылок на hub_pillar (5..30),',
+  '4) expected_coverage_gain — оценка прироста доли покрываемых фраз кластера 0..1,',
+  '5) phases — массив из 3-4 фаз: { month: 1..12, milestone: "…", deliverables: ["…"] }.',
+  '   month — НОМЕР месяца проекта (1=старт). Первая фаза обычно month=1-2 (структура+pillar),',
+  '   средняя — month=3-6 (контент), последняя — month=9-12 (оптимизация по данным).',
+  '',
+  'Сохраняй порядок кластеров. НИКАКОЙ выручки/маржи. Только трафик/заявки/позиции/контент.',
+  '',
+  'Формат — JSON-массив той же длины:',
+  '[{ "cluster_centroid":"…", "content_units_target":<int>,',
+  '   "page_types":["…"], "internal_links_min":<int>,',
+  '   "expected_coverage_gain":<float 0..1>,',
+  '   "phases":[{ "month":<int>, "milestone":"…", "deliverables":["…"] }] }, …]',
+  'Никакого markdown вне JSON.',
+].join('\n');
+
+/** Общая обёртка для DSPy-style экспертов: единая обработка skip/error. */
+async function _runExpert({ expertKey, system, userPrompt, parser }) {
+  const cfg = getForecasterConfig().advanced;
+  if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'advanced_disabled' };
+  const ex = cfg.experts[expertKey];
+  if (!ex || !ex.enabled) return { verdict: 'skipped', reason: 'expert_disabled' };
+  if (!process.env.DEEPSEEK_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+
+  try {
+    const t0 = Date.now();
+    const resp = await callDeepSeek(system, userPrompt, {
+      temperature: ex.temperature,
+      maxTokens:   ex.maxTokens,
+      timeoutMs:   ex.timeoutMs,
+    });
+    const ms = Date.now() - t0;
+    const tIn  = resp.tokensIn  || 0;
+    const tOut = resp.tokensOut || 0;
+    const cached = resp.cacheHitTokens || 0;
+    const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+    const parsed = parser(resp.text || '');
+    if (parsed == null) {
+      return {
+        verdict: 'error',
+        reason:  'invalid_json',
+        raw_text: (resp.text || '').slice(0, 400),
+        tokens_in: tIn, tokens_out: tOut, cost_usd: Math.round(cost * 1e6) / 1e6,
+        duration_ms: ms,
+      };
+    }
+    return {
+      verdict: 'ok',
+      payload: parsed,
+      tokens_in: tIn, tokens_out: tOut, cached_tokens: cached,
+      cost_usd: Math.round(cost * 1e6) / 1e6,
+      duration_ms: ms,
+      model: resp.model || 'deepseek',
+    };
+  } catch (err) {
+    return { verdict: 'error', reason: (err && err.message) ? err.message : String(err) };
+  }
+}
+
+/** NicheStrategist. */
+async function runNicheStrategist({ keyssoAggregate, junkSummary, trafficRealism, monthlySummary, targetUrl } = {}) {
+  const ctx = {
+    target_url: targetUrl || null,
+    monthly_summary: monthlySummary || null,
+    keysso_aggregate: keyssoAggregate || null,
+    traffic_realism:  trafficRealism  || null,
+    junk_summary: junkSummary ? {
+      junk_pct: junkSummary.summary?.junk_pct,
+      excluded_count: junkSummary.summary?.excluded_count,
+      by_reason: junkSummary.counts?.by_reason,
+    } : null,
+  };
+  const userPrompt = [
+    'Сводный портрет ниши — верни JSON по описанной схеме.',
+    '```json',
+    JSON.stringify(ctx, null, 2),
+    '```',
+  ].join('\n');
+  return _runExpert({
+    expertKey: 'nicheStrategist',
+    system: NICHE_STRATEGIST_SYSTEM,
+    userPrompt,
+    parser: _safeParseJson,
+  });
+}
+
+/** OpportunityHunter. */
+async function runOpportunityHunter({ opportunities, calibration, targetUrl } = {}) {
+  const cfg = getForecasterConfig().advanced.experts;
+  const list = Array.isArray(opportunities) ? opportunities.slice(0, cfg.hunterTopN) : [];
+  if (list.length === 0) return { verdict: 'skipped', reason: 'no_opportunities' };
+  // Сжимаем структуру для промпта (убираем тяжёлые поля).
+  const compact = list.map((o) => ({
+    phrase: o.phrase,
+    demand_monthly: o.demand_monthly,
+    baseline_monthly: o.baseline_monthly,
+    current_monthly: o.current_monthly,
+    drop_pct: o.drop_pct,
+    current_position: o.current_position,
+    competition: o.competition,
+    momentum_delta: o.momentum_delta,
+    composite_score: o.composite_score,
+    scenarios: {
+      low_top10:  o.scenarios?.low?.top10,
+      mid_top5:   o.scenarios?.mid?.top5,
+      high_top3:  o.scenarios?.high?.top3,
+    },
+  }));
+  const userPrompt = [
+    'Top-N opportunities — выбери для каждой РЕАЛИСТИЧНЫЙ план.',
+    `target_url: ${targetUrl ? JSON.stringify(targetUrl) : 'null'}`,
+    `calibration: ${JSON.stringify(calibration || {})}`,
+    '```json',
+    JSON.stringify(compact, null, 2),
+    '```',
+  ].join('\n');
+  return _runExpert({
+    expertKey: 'opportunityHunter',
+    system: OPPORTUNITY_HUNTER_SYSTEM,
+    userPrompt,
+    parser: _safeParseJsonArray,
+  });
+}
+
+/** ClusterPlanner. */
+async function runClusterPlanner({ clusters, calibration, targetUrl } = {}) {
+  const cfg = getForecasterConfig().advanced.experts;
+  const cfgLogR = getForecasterConfig().advanced.logReturns;
+  const list = Array.isArray(clusters) ? clusters.slice(0, cfg.plannerTopN) : [];
+  if (list.length === 0) return { verdict: 'skipped', reason: 'no_clusters' };
+  const compact = list.map((c) => ({
+    cluster_centroid: c.centroid,
+    members_count:    c.members_count,
+    total_demand_monthly: c.total_demand_monthly,
+    total_drop_volume:    c.total_drop_volume,
+    best_traffic_monthly: c.best_traffic_monthly,
+    best_leads_monthly:   c.best_leads_monthly,
+    member_phrases:       c.member_phrases,
+  }));
+  const userPrompt = [
+    'Top-N кластеров — построй план работ.',
+    `target_url: ${targetUrl ? JSON.stringify(targetUrl) : 'null'}`,
+    `log_returns_calibration: { alpha: ${cfgLogR.alphaDefault}, scale: ${cfgLogR.scaleDefault} }`,
+    `calibration: ${JSON.stringify(calibration || {})}`,
+    '```json',
+    JSON.stringify(compact, null, 2),
+    '```',
+  ].join('\n');
+  return _runExpert({
+    expertKey: 'clusterPlanner',
+    system: CLUSTER_PLANNER_SYSTEM,
+    userPrompt,
+    parser: _safeParseJsonArray,
+  });
+}
