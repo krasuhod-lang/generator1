@@ -386,15 +386,11 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
             </div>
           </section>
 
-          <!-- Текущая видимость keys.so -->
+          <!-- Текущая видимость -->
           <section v-if="keyssoSignals && keyssoSignals.verdict === 'ok' && keyssoAgg"
                    class="bg-gray-900 border border-gray-800 rounded-xl p-4">
             <h2 class="text-sm font-semibold text-gray-200 mb-3">
-              📊 Текущая видимость (keys.so)
-              <span class="text-[11px] font-normal text-gray-500 ml-1">
-                · домен <code class="text-gray-400">{{ keyssoSignals.domain }}</code>
-                · {{ keyssoSignals.region || '—' }} · {{ keyssoSignals.engine || 'yandex' }}
-              </span>
+              📊 Текущая видимость
             </h2>
             <div class="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
               <div class="border border-gray-800 rounded p-2.5">
@@ -426,27 +422,15 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
                 </div>
               </div>
             </div>
-            <p v-if="trafficEst?.keysso_calibration" class="text-[11px] text-gray-400 mt-3 leading-relaxed">
-              Прогноз скорректирован: realisticShare умножен на competition_factor =
-              <b class="text-gray-200">{{ trafficEst.keysso_calibration.competition_factor }}</b>
-              ({{ trafficEst.keysso_calibration.competition_label }} конкуренция).
-              CTR-baseline = <b class="text-gray-200">{{ fmtCtr(trafficEst.implied_ctr_now) }}</b>
-              ({{ trafficEst.implied_ctr_now_source }}).
-              <span v-if="keyssoAgg.phrases_off_top50_pct > 0">
-                {{ keyssoAgg.phrases_off_top50_pct }}% фраз сейчас за топ-50 — это снижает «потолок».
-              </span>
-            </p>
-            <p class="text-[10px] text-gray-600 mt-2">
-              Запрошено {{ keyssoSignals.requested }} фраз ·
-              сопоставлено {{ keyssoSignals.matched }} ·
-              из кеша {{ keyssoSignals.cache_hits }} ·
-              {{ keyssoSignals.duration_ms }} мс
+            <p v-if="keyssoAgg.phrases_off_top50_pct > 0"
+               class="text-[11px] text-gray-400 mt-3 leading-relaxed">
+              {{ keyssoAgg.phrases_off_top50_pct }}% фраз сейчас за топ-50 — это снижает «потолок».
             </p>
           </section>
 
-          <section v-else-if="keyssoSignals && keyssoSignals.verdict === 'skipped'"
+          <section v-else-if="keyssoSignals && keyssoSignals.verdict !== 'ok'"
                    class="text-[11px] text-gray-500 italic">
-            📊 keys.so: пропущен ({{ keyssoSignals.reason }}). Прогноз использует дефолтный CTR.
+            📊 Текущая видимость: данные временно недоступны.
           </section>
 
           <!-- Шлак-запросы -->

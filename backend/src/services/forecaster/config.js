@@ -181,24 +181,30 @@ const FORECASTER_CONFIG = deepFreeze({
   // Подробнее: backend/src/services/forecaster/keyssoClient.js.
   keysso: {
     enabled:           true,
-    apiBase:           'https://api.keys.so/v2',
-    // Сколько фраз максимум отдаём в keys.so за одну задачу.
-    // Экономит квоту: модуль обязан работать на любом тарифе,
-    // даже на скромном.
+    // Реальный публичный API keys.so. Эндпоинт — GET
+    // /report/simple/organic/keywords, заголовок авторизации
+    // X-Keyso-TOKEN (см. openapi.json в корне репо).
+    apiBase:           'https://api.keys.so',
+    // Сколько фраз максимум сопоставляем с выдачей keys.so за одну
+    // задачу. Экономит квоту: модуль обязан работать на любом тарифе.
     maxPhrasesPerTask: 300,
-    // Размер батча в одном HTTP-запросе.
-    batchSize:         50,
-    // Пауза между батчами, мс — щадим rate-limit.
-    batchDelayMs:      350,
+    // Лимит на количество ключевых слов домена, которые мы вытягиваем
+    // из keys.so (сортировка по позиции asc — лучшие сверху). Чем
+    // больше — тем выше шанс попасть в наш список запрошенных фраз,
+    // но и больше HTTP-страниц. 2000 ≈ 4 запроса при per_page=500.
+    maxFetchKeywords:  2000,
+    // Записей на одной странице ответа.
+    perPage:           500,
+    // Пауза между страницами, мс — щадим rate-limit.
+    pageDelayMs:       300,
     // Таймаут одного HTTP-запроса.
     timeoutMs:         15000,
-    // TTL и размер in-memory LRU-кэша.
+    // TTL и размер in-memory LRU-кэша (ключ — base+domain).
     cacheTtlMs:        24 * 60 * 60 * 1000, // 24 ч
-    cacheMaxEntries:   2000,
-    // Регион Яндекса по умолчанию (lr=213 — Москва).
+    cacheMaxEntries:   200,
+    // Регион/база keys.so по умолчанию (msk = Яндекс: Москва).
+    // Полный список кодов — см. schemas.base в openapi.json.
     defaultRegion:     'msk',
-    // Yandex по умолчанию (можно поменять на 'google').
-    searchEngine:      'yandex',
   },
 
   // ── DeepSeek-аналитик ────────────────────────────────────────────
