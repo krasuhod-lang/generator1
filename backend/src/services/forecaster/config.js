@@ -214,6 +214,147 @@ const FORECASTER_CONFIG = deepFreeze({
   share: {
     tokenBytes:    12,   // 12 bytes base64url ≈ 16 символов
   },
+
+  // ── Лиды (заявки) ────────────────────────────────────────────────
+  // По требованию владельца: маржу/рентабельность НЕ считаем, только
+  // объём трафика и объём заявок (= traffic × CR). CR задаётся
+  // пользователем на старте; если не задан — берём дефолт по intent.
+  // Никаких «выручки», «cost per lead» и «ROI» — это намеренно.
+  leads: {
+    // Дефолтный CR (если пользователь не указал). 1.5 % — медианное
+    // значение для коммерческих сайтов услуг в RU. Источник: открытые
+    // обзоры (Tilda/Roistat/Mango 2023-2024).
+    defaultConversionRate: 0.015,
+    // Подсказки по intent (если пользователь указал тип проекта —
+    // используется как стартовое значение в UI; backend всё равно
+    // берёт options.conversion_rate, если оно > 0).
+    intentPresets: {
+      commercial:    0.020, // услуги, b2c — 2.0 %
+      ecommerce:     0.012, // интернет-магазины — 1.2 %
+      lead_gen:      0.030, // лендинги/квизы — 3.0 %
+      info:          0.003, // инфо-сайт с заявкой/подпиской — 0.3 %
+      b2b:           0.008, // b2b — длинный цикл, 0.8 %
+    },
+    // Жёсткие границы CR (защита от опечаток на UI).
+    minCr: 0.0001,  // 0.01 %
+    maxCr: 0.50,    // 50 %
+  },
+
+  // ── Расширенная аналитика («экспертный» режим) ───────────────────
+  // Гейт ВСЕЙ группы — advanced.enabled (default true). Если выключить,
+  // pipeline работает в legacy-режиме (Holt-Winters + estimateTraffic
+  // как раньше), без opportunityAnalyzer и DSPy-style экспертов.
+  // ВНУТРИ группы каждый под-блок имеет смысл и используется незав-мо:
+  //   • logistic       — траектория позиции для opportunityAnalyzer,
+  //   • momentum       — ramp-up прогноза,
+  //   • logReturns     — отдача от объёма работ (ClusterPlanner),
+  //   • ctrPowerLaw    — гладкая CTR-кривая для дробной позиции,
+  //   • lognormal      — честные p10/p50/p90 прогноза,
+  //   • recovery       — восстановление трафика после просадки,
+  //   • opportunity    — пороги ранжирования (drop_severity → priority),
+  //   • experts        — параметры DSPy-style DeepSeek-промптов.
+  advanced: {
+    enabled: true,
+
+    // Параметры Verhulst-логистики (см. advancedMath.logisticPosition).
+    // k = крутизна, t0 = месяц «перегиба» (когда позиция «уходит» к
+    // потолку). Калибруются от competition + effort_level.
+    logistic: {
+      kDefault:  0.35,
+      t0Default: 6.0,
+      kMin:      0.20,
+      kMax:      0.55,
+      t0Min:     3.0,    // лёгкая ниша + сильный effort
+      t0Max:     12.0,   // тяжёлая ниша + слабый effort
+    },
+
+    // Экспоненциальное ramp-up. λ = 0.25 → полу-время ≈ 2.8 мес,
+    // т.е. за ~3 мес выходим на 50 % uplift; за 9 мес — на ~90 %.
+    // Это согласуется с типовой динамикой SEO в RU-выдаче.
+    momentum: {
+      lambdaDefault: 0.25,
+      lambdaMin:     0.10, // вялый effort
+      lambdaMax:     0.45, // агрессивный effort
+    },
+
+    // Закон убывающей отдачи на контент. Калибровано на оценке
+    // «10 статей → ~+30 % покрытия фраз кластера»: ln(1+10/15) ≈ 0.62,
+    // alpha ≈ 0.5 → gain ≈ 0.31. Не претендуем на физический закон —
+    // это инженерная аппроксимация; пересмотри scaleDefault, если
+    // есть собственная статистика по типу проекта.
+    logReturns: {
+      alphaDefault: 0.50,
+      scaleDefault: 15,   // «удвоить» эффект — нужно ×e=2.72 единиц
+    },
+
+    // Параметры степенной CTR (CTR(p) = a · p^(−b)). Если оставить
+    // null/undefined — на старте калибруется автоматически по
+    // traffic.ctrByPosition (см. advancedMath._bootstrapCtrParams).
+    // Жёстко зашить пока не имеет смысла: меняется ctrByPosition →
+    // меняются a/b.
+    ctrPowerLaw: {
+      a: 0.30,    // intercept ≈ CTR на позиции 1 (будет уточнено бутстрапом)
+      b: 1.00,    // экспонента; типично 0.9-1.2 для Яндекса
+      // На случай отсутствия бутстрапа — fallback-значения по дискретной
+      // таблице (top-10 yandex): power-fit даёт a≈0.30, b≈1.01.
+    },
+
+    // σ в лог-пространстве для лог-нормального CI. 0.30 ⇒
+    // p90/p50 ≈ e^(1.28·0.30) ≈ 1.47, т.е. верхняя оценка на ~50 %
+    // выше медианы. Это «умеренная неопределённость», характерная для
+    // 12-мес прогноза по приличному ряду (12+ точек, sezonalty fit).
+    // Если ряд короткий/шумный — pipeline может локально поднять σ
+    // (см. opportunityAnalyzer).
+    lognormal: {
+      sigmaDefault: 0.30,
+      sigmaShort:   0.45,  // для рядов < 12 точек
+      sigmaLong:    0.25,  // для рядов >= 24 точек
+    },
+
+    // Recovery potential — пороги сигмоиды (см. advancedMath.recoveryPotential).
+    // threshold=0.4 → effort ≥ 40 % даёт >50 % восстановления,
+    // softness=0.15 → переход «не начали → почти всё восстановили»
+    // занимает интервал effort ≈ [0.1, 0.7].
+    recovery: {
+      thresholdDefault: 0.40,
+      softnessDefault:  0.15,
+    },
+
+    // ── Opportunity analyzer ─────────────────────────────────────
+    opportunity: {
+      // Минимальный относительный gap, чтобы фраза/период попали в
+      // «возможности». 10 % — отсекаем шум.
+      minGapPct: 0.10,
+      // Сколько top-N возможностей возвращаем для UI.
+      topNGlobal: 30,
+      // Сколько top-N кластеров (если будем группировать).
+      topNClusters: 10,
+      // Месяцев горизонта для оценки expected_uplift.
+      horizonMonths: 12,
+      // Effort-уровни, которые перебираем для оценки реалистичного uplift.
+      effortLevels: { low: 0.25, mid: 0.55, high: 0.80 },
+      // Веса для приоритизации (composite_score).
+      weights: {
+        gapShare:        0.40, // размер просадки
+        currentVolume:   0.25, // фразы с большой текущей частоткой
+        competitionEase: 0.20, // лёгкая конкуренция → проще «вернуть»
+        momentumPenalty: 0.15, // negative momentum → штраф
+      },
+    },
+
+    // DSPy-style эксперты (DeepSeek с типизированными JSON-схемами).
+    // Каждый эксперт — отдельный вызов с фокусированным system-промптом
+    // и строгим JSON-output. Гейт каждого: feature flag + ключ DeepSeek.
+    experts: {
+      nicheStrategist:    { enabled: true, temperature: 0.25, maxTokens: 1200, timeoutMs: 60000 },
+      opportunityHunter:  { enabled: true, temperature: 0.30, maxTokens: 1500, timeoutMs: 60000 },
+      clusterPlanner:     { enabled: true, temperature: 0.30, maxTokens: 1500, timeoutMs: 60000 },
+      // Сколько top-возможностей передаём в OpportunityHunter (защита промпта).
+      hunterTopN:         15,
+      // Сколько top-кластеров передаём в ClusterPlanner.
+      plannerTopN:        8,
+    },
+  },
 });
 
 function getForecasterConfig() {

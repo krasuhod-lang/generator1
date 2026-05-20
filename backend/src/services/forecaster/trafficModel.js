@@ -42,6 +42,13 @@ function _clampUplift(annualRealistic, currentAnnual, maxX) {
  *     • домножения realisticShareTopN на competition_factor (≤ 1.0),
  *     • сжатия верхней границы CI прогноза при negative momentum
  *       (только для UI-полей optimistic/уплифт-капов).
+ * @param {number} [args.conversionRate] — пользовательская конверсия сайта
+ *   (0..0.5). Если задана и валидна, считаем `leads_*` поля = traffic × CR.
+ *   Если не задана — берётся cfg.leads.defaultConversionRate. Маржу/выручку
+ *   НЕ считаем (по требованию владельца — см. memory).
+ * @param {string} [args.intent] — 'commercial'|'ecommerce'|'lead_gen'|'info'|'b2b'
+ *   используется ТОЛЬКО когда conversionRate не задан, чтобы вместо
+ *   defaultConversionRate взять более релевантный intentPreset.
  */
 function estimateTraffic({
   historicalMonthly,
@@ -49,8 +56,11 @@ function estimateTraffic({
   currentTrafficPerMonth = 0,
   currentDemandWindow = 3,
   keyssoAggregate = null,
+  conversionRate = null,
+  intent = null,
 }) {
   const cfg = getForecasterConfig().traffic;
+  const cfgLeads = getForecasterConfig().leads;
 
   // Оценка текущего спроса (среднее по последним N мес)
   const tail = (historicalMonthly || []).slice(-Math.max(1, currentDemandWindow));
@@ -110,6 +120,28 @@ function estimateTraffic({
 
   const currentAnnual = currentTrafficPerMonth > 0 ? currentTrafficPerMonth * 12 : 0;
 
+  // ── Conversion rate resolution ──────────────────────────────────
+  // Приоритет: явное user input → intent preset → default.
+  // НИКАКОЙ маржи/выручки/ROI не считаем — только объём заявок.
+  let cr = null;
+  let crSource = 'default';
+  const userCr = Number(conversionRate);
+  if (Number.isFinite(userCr) && userCr >= cfgLeads.minCr && userCr <= cfgLeads.maxCr) {
+    cr = userCr;
+    crSource = 'user_input';
+  } else if (intent && cfgLeads.intentPresets[intent] != null) {
+    cr = cfgLeads.intentPresets[intent];
+    crSource = `intent_preset_${intent}`;
+  } else {
+    cr = cfgLeads.defaultConversionRate;
+    crSource = 'default';
+  }
+  // Текущее число заявок/мес (по текущему трафику × CR), для baseline-leads.
+  const currentLeadsPerMonth = currentTrafficPerMonth > 0
+    ? Math.round(currentTrafficPerMonth * cr)
+    : 0;
+  const currentLeadsAnnual = currentLeadsPerMonth * 12;
+
   const result = {
     current_traffic_input:  currentTrafficPerMonth || 0,
     current_demand_avg:     Math.round(currentDemand),
@@ -143,6 +175,20 @@ function estimateTraffic({
         'Доля учитывает, что в ТОП-N реально выходит лишь часть фраз ядра. ' +
         'competition_factor (≤ 1.0) учитывает конкуренцию по данным keys.so. ' +
         'Если указан current_traffic, проекция дополнительно ограничена current × maxUpliftTopN.',
+    },
+    // ── Заявки (по конверсии сайта) ─────────────────────────────────
+    // По требованию владельца: считаем ТОЛЬКО объём заявок (= traffic × CR),
+    // никаких выручки/маржи/ROI. CR задаётся пользователем; intent — подсказка.
+    leads_model: {
+      conversion_rate:   Math.round(cr * 100000) / 100000, // 5 знаков (для CR=0.00012 и т.п.)
+      conversion_rate_pct: Math.round(cr * 10000) / 100,    // в %, 2 знака
+      conversion_rate_source: crSource,
+      intent: intent || null,
+      current_leads_per_month: currentLeadsPerMonth,
+      current_leads_annual:    currentLeadsAnnual,
+      explanation:
+        'leads_per_month = traffic_per_month × conversion_rate. ' +
+        'Маржу/выручку модуль не считает по требованию владельца — только объём заявок.',
     },
   };
 
@@ -196,6 +242,21 @@ function estimateTraffic({
         monthly:    monthlyOptimistic,
         annual:     annualOptimistic,
         uplift_x:   uplift_x_optimistic,
+      },
+      // ── Заявки (traffic × CR) — реалистичный сценарий ──────────
+      // Считаем по уже clamped monthlyRealistic, чтобы лиды никогда не
+      // превышали оценку трафика после cap-а. annual_vs_current_leads —
+      // delta заявок год к году (если есть current_traffic).
+      leads: {
+        monthly: monthlyRealistic.map((m) => ({
+          period: m.period,
+          leads:  Math.round(m.traffic * cr),
+        })),
+        annual:        Math.round(annualRealistic * cr),
+        annual_optimistic: Math.round(annualOptimistic * cr),
+        annual_vs_current: currentLeadsAnnual > 0
+          ? Math.round(annualRealistic * cr) - currentLeadsAnnual
+          : null,
       },
     };
   }

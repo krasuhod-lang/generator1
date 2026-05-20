@@ -23,9 +23,10 @@ const { aggregateMonthlySeries } = require('./series');
 const { detectAnomalies } = require('./anomalyDetector');
 const { buildForecast } = require('./forecast');
 const { estimateTraffic } = require('./trafficModel');
-const { runDeepSeekAnalysis, runDeepSeekJunkRefine } = require('./deepseekAnalyzer');
+const { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner } = require('./deepseekAnalyzer');
 const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
 const { fetchPhraseSignals, aggregateSignals } = require('./keyssoClient');
+const { analyzeOpportunities } = require('./opportunityAnalyzer');
 const { getForecasterConfig } = require('./config');
 
 async function processForecasterTask(taskId) {
@@ -106,6 +107,7 @@ async function processForecasterTask(taskId) {
     // 6b. Keys.so signals (graceful skip без ключа). Шлём top-N фраз по total
     // (после фильтрации исключённых) — чтобы экономить квоту.
     let keyssoSignalsReport = null;
+    let keyssoSignalsMap    = null; // Map<normPhrase, signals> для opportunityAnalyzer
     try {
       const remainingRows = parsed.rows.filter((r) => {
         const norm = String(r.phrase || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -123,6 +125,7 @@ async function processForecasterTask(taskId) {
       });
       if (ksResp.verdict === 'ok') {
         const agg = aggregateSignals(ksResp.signals, ksResp.requested);
+        keyssoSignalsMap = ksResp.signals;
         keyssoSignalsReport = {
           verdict:      'ok',
           requested:    ksResp.requested,
@@ -144,13 +147,45 @@ async function processForecasterTask(taskId) {
       keyssoSignalsReport = { verdict: 'error', reason: (err && err.message) || String(err) };
     }
 
-    // 7. Трафик (с калибровкой по keys.so, если есть)
+    // Conversion rate + intent — задаются пользователем при создании задачи.
+    // Считаем ТОЛЬКО объём заявок (= traffic × CR); никакой выручки/маржи
+    // (см. memory «env configuration» + требование владельца продукта).
+    const conversionRate = Number(options.conversion_rate) || null;
+    const intent = options.intent ? String(options.intent).trim() : null;
+
+    // 7. Трафик (с калибровкой по keys.so + лиды по CR)
     const trafficEstimate = estimateTraffic({
       historicalMonthly: seriesData.monthly,
       forecastPoints:    forecast.points,
       currentTrafficPerMonth: currentTraffic,
       keyssoAggregate:   keyssoSignalsReport?.verdict === 'ok' ? keyssoSignalsReport.aggregate : null,
+      conversionRate,
+      intent,
     });
+
+    // 7c. Advanced analytics: opportunityAnalyzer (точечные просадки + ранжированные «точки усиления»).
+    // Работает только на фразах, оставшихся после junk-фильтра. Гейт — advanced.enabled.
+    let opportunitiesReport = null;
+    const advCfg = getForecasterConfig().advanced;
+    if (advCfg && advCfg.enabled) {
+      try {
+        const remainingRowsForOpp = parsed.rows.filter((r) => {
+          const norm = String(r.phrase || '').trim().toLowerCase().replace(/\s+/g, ' ');
+          return norm && !excludeSet.has(norm);
+        });
+        opportunitiesReport = analyzeOpportunities({
+          parsedRows: remainingRowsForOpp,
+          monthCols:  parsed.monthCols,
+          keyssoSignalsMap,
+          conversionRate,
+          intent,
+        });
+      } catch (err) {
+        opportunitiesReport = { verdict: 'error', reason: (err && err.message) || String(err) };
+      }
+    } else {
+      opportunitiesReport = { verdict: 'skipped', reason: 'advanced_disabled' };
+    }
 
     // 7b. Финализируем junkReport (он построен ранее, но сохраним вместе со всем)
     // Ограничиваем payload в БД: храним top-N помеченных фраз, остальное —
@@ -176,6 +211,20 @@ async function processForecasterTask(taskId) {
       warnings:   parsed.warnings,
       target_url: targetUrl,
     };
+    // Компактная leads_summary — то, что фронт сможет показать без копания
+    // в traffic_estimate.* (для шапки страницы результата).
+    const leadsSummary = trafficEstimate && trafficEstimate.leads_model ? {
+      conversion_rate:          trafficEstimate.leads_model.conversion_rate,
+      conversion_rate_pct:      trafficEstimate.leads_model.conversion_rate_pct,
+      conversion_rate_source:   trafficEstimate.leads_model.conversion_rate_source,
+      intent:                   trafficEstimate.leads_model.intent,
+      current_leads_per_month:  trafficEstimate.leads_model.current_leads_per_month,
+      current_leads_annual:     trafficEstimate.leads_model.current_leads_annual,
+      top3_annual:              trafficEstimate.top3?.leads?.annual,
+      top5_annual:              trafficEstimate.top5?.leads?.annual,
+      top10_annual:             trafficEstimate.top10?.leads?.annual,
+    } : null;
+
     await db.query(
       `UPDATE forecaster_tasks SET
          source_rows_count=$2,
@@ -188,6 +237,8 @@ async function processForecasterTask(taskId) {
          target_url=$9,
          junk_phrases=$10::jsonb,
          keysso_signals=$11::jsonb,
+         opportunities=$12::jsonb,
+         leads_summary=$13::jsonb,
          updated_at=NOW()
        WHERE id=$1`,
       [
@@ -202,6 +253,8 @@ async function processForecasterTask(taskId) {
         targetUrl,
         JSON.stringify(junkReport),
         keyssoSignalsReport ? JSON.stringify(keyssoSignalsReport) : null,
+        opportunitiesReport ? JSON.stringify(opportunitiesReport) : null,
+        leadsSummary ? JSON.stringify(leadsSummary) : null,
       ],
     );
 
@@ -252,6 +305,66 @@ async function processForecasterTask(taskId) {
       );
     }
 
+    // 8c. DSPy-style эксперты (NicheStrategist / OpportunityHunter / ClusterPlanner).
+    // Все три graceful: skipped без ключа или если advanced.enabled=false.
+    // Запускаем последовательно — на типовом ядре все три уложатся в ~2-3 мин
+    // и расходуют умеренный бюджет токенов (max ~5k tokens out суммарно).
+    let expertReports = null;
+    if (advCfg && advCfg.enabled) {
+      // monthly_summary — короткий контекст для NicheStrategist.
+      const monthlySummary = {
+        months_count: seriesData.monthly.length,
+        annual_total_forecast: forecast.annual_total,
+        trend_direction: forecast.trend?.direction,
+        trend_slope_per_month: forecast.trend?.slope_per_month,
+        anomalies_count: anomalies?.summary?.count || 0,
+        max_severity:    anomalies?.summary?.max_severity || null,
+      };
+      const niche = await runNicheStrategist({
+        keyssoAggregate: keyssoSignalsReport?.verdict === 'ok' ? keyssoSignalsReport.aggregate : null,
+        junkSummary:     junkReport,
+        trafficRealism:  trafficEstimate?.realism || null,
+        monthlySummary,
+        targetUrl,
+      });
+      const hunter = (opportunitiesReport && opportunitiesReport.verdict === 'ok')
+        ? await runOpportunityHunter({
+            opportunities: opportunitiesReport.opportunities,
+            calibration:   opportunitiesReport.calibration,
+            targetUrl,
+          })
+        : { verdict: 'skipped', reason: 'no_opportunities' };
+      const planner = (opportunitiesReport && opportunitiesReport.verdict === 'ok'
+                       && opportunitiesReport.clusters && opportunitiesReport.clusters.length > 0)
+        ? await runClusterPlanner({
+            clusters:    opportunitiesReport.clusters,
+            calibration: opportunitiesReport.calibration,
+            targetUrl,
+          })
+        : { verdict: 'skipped', reason: 'no_clusters' };
+      expertReports = { niche_strategist: niche, opportunity_hunter: hunter, cluster_planner: planner };
+
+      const expCost = (niche.cost_usd || 0) + (hunter.cost_usd || 0) + (planner.cost_usd || 0);
+      const expIn   = (niche.tokens_in  || 0) + (hunter.tokens_in  || 0) + (planner.tokens_in  || 0);
+      const expOut  = (niche.tokens_out || 0) + (hunter.tokens_out || 0) + (planner.tokens_out || 0);
+      await db.query(
+        `UPDATE forecaster_tasks SET
+           expert_reports=$2::jsonb,
+           tokens_in=tokens_in+$3,
+           tokens_out=tokens_out+$4,
+           cost_usd=cost_usd+$5,
+           updated_at=NOW()
+         WHERE id=$1`,
+        [taskId, JSON.stringify(expertReports), expIn, expOut, expCost],
+      );
+    } else {
+      expertReports = {
+        niche_strategist:   { verdict: 'skipped', reason: 'advanced_disabled' },
+        opportunity_hunter: { verdict: 'skipped', reason: 'advanced_disabled' },
+        cluster_planner:    { verdict: 'skipped', reason: 'advanced_disabled' },
+      };
+    }
+
     // 9. Финал
     const dsCost     = ds.verdict === 'ok' ? (ds.cost_usd || 0) : 0;
     const refineCost = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.cost_usd || 0) : 0;
@@ -279,7 +392,7 @@ async function processForecasterTask(taskId) {
         dsCost + refineCost,
       ],
     );
-    console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'})`);
+    console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'}, opp=${opportunitiesReport?.verdict || 'n/a'}, niche=${expertReports?.niche_strategist?.verdict || 'n/a'}, hunter=${expertReports?.opportunity_hunter?.verdict || 'n/a'}, planner=${expertReports?.cluster_planner?.verdict || 'n/a'})`);
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     console.error(`[Forecaster] task ${taskId} failed: ${msg}`);

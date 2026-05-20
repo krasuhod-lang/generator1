@@ -44,6 +44,24 @@ function _sanitizeUrl(v) {
   }
 }
 
+// Конверсия сайта: 0..0.5 (50 % — жёсткий потолок против опечаток).
+// Принимаем число (0.02), процент (2 = 2 %, если > 1 и ≤ 100), и пустоту → null.
+function _sanitizeCr(v) {
+  if (v == null || v === '') return null;
+  let n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // Эвристика: если пользователь ввёл "2" — считаем как 2 %.
+  if (n > 1 && n <= 100) n = n / 100;
+  if (n > 0.5) return null; // отсекаем явные опечатки
+  return Math.round(n * 100000) / 100000;
+}
+
+function _sanitizeIntent(v) {
+  const allowed = ['commercial', 'ecommerce', 'lead_gen', 'info', 'b2b'];
+  const s = String(v || '').trim().toLowerCase();
+  return allowed.includes(s) ? s : null;
+}
+
 // ─── GET /api/forecaster ───────────────────────────────────────────
 async function listForecasterTasks(req, res, next) {
   try {
@@ -96,6 +114,13 @@ async function createForecasterTask(req, res, next) {
       region:                    String(opts.region || '').slice(0, 100),
       notes:                     String(opts.notes  || '').slice(0, 1000),
       target_url:                targetUrl,
+      // Конверсия сайта (0..0.5). Хранится как дробь (0.02 = 2 %).
+      // По требованию владельца: маржу/выручку модуль не считает,
+      // только объём заявок = traffic × CR.
+      conversion_rate:           _sanitizeCr(opts.conversion_rate),
+      // Подсказка intent (commercial/ecommerce/lead_gen/info/b2b).
+      // Используется только если conversion_rate не задан (выбирается preset).
+      intent:                    _sanitizeIntent(opts.intent),
     };
 
     const sourceColumns = rows ? { raw_rows: rows } : { raw_csv: csv };
@@ -133,7 +158,9 @@ async function getForecasterTask(req, res, next) {
               source_filename, source_rows_count, source_columns,
               options, target_url,
               monthly_series, anomalies, forecast, trend,
-              traffic_estimate, junk_phrases, keysso_signals, deepseek_summary,
+              traffic_estimate, junk_phrases, keysso_signals,
+              opportunities, expert_reports, leads_summary,
+              deepseek_summary,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
               created_at, started_at, completed_at, updated_at
@@ -237,7 +264,9 @@ async function getSharedForecast(req, res, next) {
     const { rows } = await db.query(
       `SELECT id, name, status, source_filename, source_rows_count, target_url,
               monthly_series, anomalies, forecast, trend,
-              traffic_estimate, junk_phrases, keysso_signals, deepseek_summary,
+              traffic_estimate, junk_phrases, keysso_signals,
+              opportunities, expert_reports, leads_summary,
+              deepseek_summary,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks
         WHERE share_token = $1 AND status='done'
