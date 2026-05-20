@@ -3,11 +3,14 @@
 /**
  * forecaster/keyssoClient.js — тонкий HTTP-клиент keys.so для прогнозатора.
  *
- * Назначение: по списку фраз и домену вернуть фактические сигналы из выдачи
- *   • current_position (1..100+, 0 = не в топ-100)
- *   • top10_competition  (0..1, индекс силы конкурентов в топ-10)
- *   • demand_index       (нормированная частотность; для калибровки)
- *   • position_3m_delta  (тренд позиции за 3 мес; <0 — падаем, >0 — растём)
+ * Назначение: по списку фраз и домену вернуть фактические сигналы из выдачи:
+ *   • current_position (1..200, 0 = не найдено)
+ *   • top10_competition (per-фраза keys.so по этому endpoint-у не отдаёт,
+ *     оставляем null — медиана конкуренции тогда тоже null → пайплайн
+ *     трактует это как «unknown» и не штрафует прогноз)
+ *   • demand_index    — частотность (wsk «!очень !точная», fallback ws)
+ *   • position_3m_delta — `delta` поля API (положительное число обычно
+ *     означает улучшение позиции)
  *
  * Эти данные нужны прогнозатору, чтобы вместо плоского defaultCurrentCtr
  * (≈ позиция 20+) использовать реальные позиции; домножать realisticShareTopN
@@ -15,45 +18,120 @@
  * negative momentum (см. traffic.competitionAdjustment / momentumCiAdjust в
  * config.js).
  *
- * Гейт:
+ * Реальный API keys.so (см. /openapi.json в корне репо):
+ *   GET https://api.keys.so/report/simple/organic/keywords
+ *       ?base=<base>&domain=<domain>&page=<n>&per_page=<n>&sort=pos|asc
+ *   Заголовок авторизации: X-Keyso-TOKEN: <key>
+ *   Ответ:
+ *     {
+ *       current_page, per_page, last_page, total,
+ *       data: [ { word, url, pos, ws, wsk, delta, ... }, ... ]
+ *     }
+ *
+ * Поскольку endpoint не принимает список фраз на вход, мы вытягиваем
+ * органическую выдачу домена постранично (сорт по позиции asc — «лучшие
+ * сверху»), затем пересекаем с requested-набором.
+ *
+ * Гейты:
  *   • feature flag — getForecasterConfig().keysso.enabled
- *   • ключ — process.env.KEYSSO_API_KEY (хранится только в env, не в коде).
- *     Если ключа нет — fetchPhraseSignals возвращает { verdict: 'skipped',
- *     reason: 'no_api_key' }, пайплайн продолжает работу без сигналов.
+ *   • ключ — process.env.KEYSSO_API_KEY. Если ключа нет —
+ *     fetchPhraseSignals возвращает { verdict: 'skipped', reason: 'no_api_key' },
+ *     пайплайн продолжает работу без сигналов.
  *
  * Все сетевые ошибки graceful: timeouts/4xx/5xx → { verdict: 'error', reason }.
  * Никаких exception наружу.
  *
- * Кеш — in-memory LRU+TTL по hash(method|phrase|domain|region|engine), TTL
- * по умолчанию 24 ч (cacheTtlMs). Паттерн идентичен serpEvidence.service.js.
- *
- * Замечание по API: точная схема endpoint-ов keys.so может отличаться по
- * тарифу/версии. Клиент использует POST <apiBase>/serp/positions/ с JSON
- * { domain, phrases, region, engine }, авторизация — Bearer token. Парсер
- * ответа устойчив к нескольким вариантам field-неймов (data.<domain>.<phrase>,
- * results[], items[]) — при необходимости адаптируйте _parseResponse под
- * актуальную спецификацию (см. keys.so dashboard → API).
+ * Кэш — in-memory LRU+TTL по hash(base|domain). Один ключ кэша = полный
+ * Map ключей домена; TTL по умолчанию 24 ч.
  */
 
 const crypto = require('crypto');
 const { getForecasterConfig } = require('./config');
 
-// ── In-memory LRU + TTL cache (паттерн как у serpEvidence.service.js) ─
+// ── Region label → keys.so base code ──────────────────────────────────
+//
+// keys.so принимает короткие коды баз (msk, spb, gru, …). Пользователь
+// в форме «Регион / комментарий» вводит произвольный текст. Здесь —
+// минимальный mapping ходовых обозначений. Если ничего не подошло —
+// fallback на defaultRegion из config.
+//
+// Полный список (schemas.base в openapi.json):
+//   msk gru zen gkv rnd ekb ufa sar krr prm sam kry oms kzn che nsk
+//   nnv vlg vrn spb mns tmn gmns tom gny
+const _BASE_CODES = new Set([
+  'msk', 'gru', 'zen', 'gkv', 'rnd', 'ekb', 'ufa', 'sar', 'krr', 'prm',
+  'sam', 'kry', 'oms', 'kzn', 'che', 'nsk', 'nnv', 'vlg', 'vrn', 'spb',
+  'mns', 'tmn', 'gmns', 'tom', 'gny',
+]);
 
-const _cache = new Map(); // key → { value, expiresAt }
+const _REGION_ALIASES = {
+  // Россия (агрегата нет) → берём Яндекс: Москва как столичный регион
+  'россия':                      'msk',
+  'russia':                      'msk',
+  'ru':                          'msk',
+  'рф':                          'msk',
+  // Москва
+  'москва':                      'msk',
+  'moscow':                      'msk',
+  'мск':                         'msk',
+  // Google Москва
+  'google':                      'gru',
+  'google москва':               'gru',
+  'google moscow':               'gru',
+  // Санкт-Петербург
+  'санкт-петербург':             'spb',
+  'санкт петербург':             'spb',
+  'спб':                         'spb',
+  'питер':                       'spb',
+  'saint-petersburg':            'spb',
+  'st petersburg':               'spb',
+  // Остальные крупные города
+  'екатеринбург':                'ekb',
+  'новосибирск':                 'nsk',
+  'нижний новгород':             'nnv',
+  'казань':                      'kzn',
+  'самара':                      'sam',
+  'ростов-на-дону':              'rnd',
+  'ростов на дону':              'rnd',
+  'краснодар':                   'krr',
+  'воронеж':                     'vrn',
+  'волгоград':                   'vlg',
+  'пермь':                       'prm',
+  'уфа':                         'ufa',
+  'саратов':                     'sar',
+  'красноярск':                  'kry',
+  'омск':                        'oms',
+  'челябинск':                   'che',
+  'томск':                       'tom',
+  'тюмень':                      'tmn',
+  'минск':                       'mns',
+  'киев':                        'gkv',
+  'kiev':                        'gkv',
+  'kyiv':                        'gkv',
+};
 
-function _cacheKey({ method, phrase, domain, region, engine }) {
+function _resolveBase(region, fallback) {
+  const raw = String(region || '').trim().toLowerCase();
+  if (!raw) return fallback;
+  if (_BASE_CODES.has(raw)) return raw;
+  const alias = _REGION_ALIASES[raw];
+  if (alias) return alias;
+  return fallback;
+}
+
+// ── In-memory LRU + TTL cache (ключ = base+domain) ────────────────────
+
+const _cache = new Map(); // key → { value: Map<phrase, signals>, expiresAt }
+
+function _cacheKey({ base, domain }) {
   const norm = JSON.stringify({
-    m: String(method || '').toLowerCase(),
-    p: String(phrase || '').trim().toLowerCase(),
+    b: String(base   || '').trim().toLowerCase(),
     d: String(domain || '').trim().toLowerCase(),
-    r: String(region || '').trim().toLowerCase(),
-    e: String(engine || '').trim().toLowerCase(),
   });
   return crypto.createHash('sha1').update(norm).digest('hex');
 }
 
-function _cacheGet(key, ttlMs) {
+function _cacheGet(key) {
   const hit = _cache.get(key);
   if (!hit) return null;
   if (hit.expiresAt <= Date.now()) {
@@ -90,33 +168,21 @@ function _hostFromUrl(u) {
 
 function _sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-function _chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
 function _normalizePhrase(s) {
   return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────
 
-/**
- * Делает один HTTP-запрос к keys.so. Возвращает либо распарсенный JSON,
- * либо null + warning в console (без throw). fetchImpl можно подменить
- * в тестах.
- */
-async function _httpJson({ url, headers, body, timeoutMs, fetchImpl }) {
+async function _httpGetJson({ url, headers, timeoutMs, fetchImpl }) {
   const f = fetchImpl || (typeof fetch === 'function' ? fetch : null);
   if (!f) throw new Error('global fetch not available (Node ≥ 18 required)');
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const resp = await f(url, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json', ...headers },
-      body:    typeof body === 'string' ? body : JSON.stringify(body),
+      method:  'GET',
+      headers: { Accept: 'application/json', ...headers },
       signal:  ctrl.signal,
     });
     const text = await resp.text();
@@ -134,65 +200,96 @@ async function _httpJson({ url, headers, body, timeoutMs, fetchImpl }) {
 }
 
 /**
- * Парсит ответ keys.so в унифицированную Map<normPhrase, signals>.
- * Устойчив к нескольким известным форматам:
- *   • { data: { "<domain>": { "<phrase>": { position, ... } } } }
- *   • { results: [ { phrase, position, ... } ] }
- *   • { items:   [ { keyword, pos, ... } ] }
- *   • { keywords:[ { kw, pos, comp, trend, freq } ] }
+ * Парсит одну страницу /report/simple/organic/keywords в Map<phrase, signals>.
+ * Поля API (см. openapi.json):
+ *   word    — ключевая фраза
+ *   pos     — позиция (0 = не в выдаче)
+ *   ws      — базовая частотность
+ *   wsk     — «!очень !точная» частотность (предпочтительнее)
+ *   delta   — изменение позиции
  */
-function _parseResponse(json, domain) {
+function _parsePage(json) {
   const out = new Map();
   if (!json || typeof json !== 'object') return out;
-
-  const _push = (phraseRaw, src) => {
-    if (!src || typeof src !== 'object') return;
-    const phrase = _normalizePhrase(phraseRaw);
-    if (!phrase) return;
-    const pos = Number(
-      src.position ?? src.pos ?? src.current_position ?? src.cur_pos ?? 0,
-    );
-    const comp = Number(
-      src.competition ?? src.comp ?? src.competition_index ?? src.kei ?? 0,
-    );
-    const freq = Number(
-      src.frequency ?? src.freq ?? src.search_volume ?? src.demand ?? 0,
-    );
-    const delta3m = Number(
-      src.position_3m_delta ?? src.pos_change ?? src.trend ?? src.delta ?? 0,
-    );
+  const arr = Array.isArray(json.data) ? json.data : [];
+  for (const it of arr) {
+    if (!it || typeof it !== 'object') continue;
+    const phrase = _normalizePhrase(it.word ?? it.keyword ?? it.kw ?? it.phrase);
+    if (!phrase) continue;
+    const posRaw = Number(it.pos ?? it.position ?? 0);
+    const pos    = Number.isFinite(posRaw) && posRaw > 0
+      ? Math.min(200, Math.round(posRaw))
+      : 0;
+    const freqRaw = Number(it.wsk ?? it.ws ?? it.frequency ?? it.freq ?? 0);
+    const freq    = Number.isFinite(freqRaw) && freqRaw > 0 ? freqRaw : 0;
+    const deltaRaw = Number(it.delta ?? it.position_3m_delta ?? it.trend ?? 0);
+    const delta    = Number.isFinite(deltaRaw) ? deltaRaw : 0;
     out.set(phrase, {
-      current_position:    pos > 0 ? Math.min(200, Math.round(pos)) : 0,
-      top10_competition:   Math.max(0, Math.min(1, comp)),
-      demand_index:        freq > 0 ? freq : 0,
-      position_3m_delta:   Number.isFinite(delta3m) ? delta3m : 0,
+      current_position:   pos,
+      // keys.so в этом эндпоинте не отдаёт per-keyword competition —
+      // оставляем null, чтобы aggregateSignals пометил medianas как unknown
+      // и не штрафовал прогноз (см. trafficModel.competitionAdjustment).
+      top10_competition:  null,
+      demand_index:       freq,
+      position_3m_delta:  delta,
     });
-  };
-
-  // вариант 1: data[domain][phrase]
-  if (json.data && typeof json.data === 'object') {
-    const dn = String(domain || '').toLowerCase();
-    const sub = json.data[dn] || json.data[domain] || json.data;
-    if (sub && typeof sub === 'object' && !Array.isArray(sub)) {
-      for (const [k, v] of Object.entries(sub)) {
-        if (v && typeof v === 'object' && !Array.isArray(v) &&
-            (v.position != null || v.pos != null || v.current_position != null)) {
-          _push(k, v);
-        }
-      }
-    }
-  }
-  // вариант 2/3/4: массивы
-  for (const key of ['results', 'items', 'keywords', 'data']) {
-    const arr = json[key];
-    if (Array.isArray(arr)) {
-      for (const it of arr) {
-        const ph = it?.phrase || it?.keyword || it?.kw || it?.query || it?.text;
-        _push(ph, it);
-      }
-    }
   }
   return out;
+}
+
+/**
+ * Тянет все страницы органической выдачи домена до cfg.maxFetchKeywords
+ * либо последней страницы. Возвращает Map<normPhrase, signals>.
+ * Сетевые ошибки на отдельных страницах — graceful: warn + продолжаем.
+ */
+async function _fetchDomainKeywords({
+  apiBase, apiKey, base, domain, perPage, maxFetchKeywords,
+  pageDelayMs, timeoutMs, fetchImpl,
+}) {
+  const allSignals = new Map();
+  const baseUrl = `${apiBase.replace(/\/+$/, '')}/report/simple/organic/keywords`;
+  const headers = { 'X-Keyso-TOKEN': apiKey };
+
+  let page = 1;
+  // sort=pos|asc → начинаем с лучших позиций; для отчёта так информативнее.
+  const sort = 'pos|asc';
+  // Hard-cap страниц на случай нестандартных ответов (защита от runaway).
+  const hardMaxPages = Math.max(1, Math.ceil(maxFetchKeywords / Math.max(1, perPage)) + 2);
+
+  while (page <= hardMaxPages && allSignals.size < maxFetchKeywords) {
+    const qs = new URLSearchParams({
+      base,
+      domain,
+      page:     String(page),
+      per_page: String(perPage),
+      sort,
+    }).toString();
+    const url = `${baseUrl}?${qs}`;
+    let json;
+    try {
+      json = await _httpGetJson({ url, headers, timeoutMs, fetchImpl });
+    } catch (err) {
+      console.warn(`[keysso] page ${page} failed: ${err.message}`);
+      // На первой странице ошибка → бросаем выше, чтобы пайплайн
+      // отметил verdict='error'. На последующих — обрываем пагинацию,
+      // оставляем то, что уже собрали.
+      if (page === 1) throw err;
+      break;
+    }
+    const pageMap = _parsePage(json);
+    for (const [ph, sig] of pageMap) {
+      if (!allSignals.has(ph)) allSignals.set(ph, sig);
+      if (allSignals.size >= maxFetchKeywords) break;
+    }
+    const lastPage    = Number(json && json.last_page) || 0;
+    const currentPage = Number(json && json.current_page) || page;
+    const gotRows     = pageMap.size;
+    if (gotRows === 0)              break; // ничего нового
+    if (lastPage > 0 && currentPage >= lastPage) break;
+    page = currentPage + 1;
+    if (pageDelayMs > 0) await _sleep(pageDelayMs);
+  }
+  return allSignals;
 }
 
 // ── Public: fetchPhraseSignals ────────────────────────────────────────
@@ -203,8 +300,7 @@ function _parseResponse(json, domain) {
  * @param {Object} args
  * @param {Array<string>} args.phrases   список фраз (top-N от пайплайна)
  * @param {string} args.domain           домен (например, "example.com")
- * @param {string} [args.region]
- * @param {string} [args.engine]         'yandex'|'google'
+ * @param {string} [args.region]         произвольный текст, маппится в base
  * @param {Function} [args.fetchImpl]    переопределение fetch (для тестов)
  * @returns {Promise<{
  *   verdict: 'ok'|'skipped'|'error',
@@ -217,7 +313,7 @@ function _parseResponse(json, domain) {
  * }>}
  */
 async function fetchPhraseSignals({
-  phrases, domain, region, engine, fetchImpl,
+  phrases, domain, region, fetchImpl,
 } = {}) {
   const cfg = getForecasterConfig().keysso;
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
@@ -231,79 +327,63 @@ async function fetchPhraseSignals({
   const list = Array.isArray(phrases) ? phrases.filter(Boolean) : [];
   if (list.length === 0) return { verdict: 'skipped', reason: 'no_phrases' };
 
-  // Trim до квоты
+  const base = _resolveBase(region, cfg.defaultRegion || 'msk');
   const trimmed = list.slice(0, cfg.maxPhrasesPerTask);
 
-  const rg = String(region || cfg.defaultRegion || '').trim();
-  const eng = String(engine || cfg.searchEngine || 'yandex').trim();
-
   const t0 = Date.now();
-  const signals = new Map();
   let cacheHits = 0;
 
-  // Сначала пройдёмся по кешу — все фразы, которые есть, не отправим в сеть.
-  const toFetch = [];
+  // Один кэш-ключ = весь набор ключей домена для данной базы.
+  const ckey = _cacheKey({ base, domain: dom });
+  let domainMap = _cacheGet(ckey);
+  if (domainMap) {
+    cacheHits = domainMap.size;
+  } else {
+    try {
+      domainMap = await _fetchDomainKeywords({
+        apiBase:          cfg.apiBase,
+        apiKey,
+        base,
+        domain:           dom,
+        perPage:          cfg.perPage,
+        maxFetchKeywords: cfg.maxFetchKeywords,
+        pageDelayMs:      cfg.pageDelayMs,
+        timeoutMs:        cfg.timeoutMs,
+        fetchImpl,
+      });
+    } catch (err) {
+      return {
+        verdict:     'error',
+        reason:      (err && err.message) || String(err),
+        requested:   trimmed.length,
+        matched:     0,
+        cache_hits:  0,
+        duration_ms: Date.now() - t0,
+        domain:      dom,
+        region:      base,
+      };
+    }
+    _cacheSet(ckey, domainMap, cfg.cacheTtlMs, cfg.cacheMaxEntries);
+  }
+
+  // Пересечение с запрошенным списком.
+  const signals = new Map();
   for (const p of trimmed) {
     const norm = _normalizePhrase(p);
     if (!norm) continue;
-    const key = _cacheKey({ method: 'positions', phrase: norm, domain: dom, region: rg, engine: eng });
-    const cached = _cacheGet(key, cfg.cacheTtlMs);
-    if (cached) {
-      signals.set(norm, cached);
-      cacheHits += 1;
-    } else {
-      toFetch.push(norm);
-    }
-  }
-
-  if (toFetch.length > 0) {
-    const batches = _chunk(toFetch, cfg.batchSize);
-    const url = `${cfg.apiBase.replace(/\/+$/, '')}/serp/positions/`;
-    const headers = { Authorization: `Bearer ${apiKey}` };
-
-    for (let bi = 0; bi < batches.length; bi++) {
-      const batch = batches[bi];
-      try {
-        const json = await _httpJson({
-          url,
-          headers,
-          body: { domain: dom, phrases: batch, region: rg, engine: eng },
-          timeoutMs: cfg.timeoutMs,
-          fetchImpl,
-        });
-        const parsed = _parseResponse(json, dom);
-        for (const ph of batch) {
-          const sig = parsed.get(ph);
-          if (sig) {
-            signals.set(ph, sig);
-            const key = _cacheKey({
-              method: 'positions', phrase: ph, domain: dom, region: rg, engine: eng,
-            });
-            _cacheSet(key, sig, cfg.cacheTtlMs, cfg.cacheMaxEntries);
-          }
-        }
-      } catch (err) {
-        // graceful: не валим всю задачу из-за одного упавшего батча,
-        // продолжаем — на оставшиеся батчи может быть ОК.
-        console.warn(`[keysso] batch ${bi + 1}/${batches.length} failed: ${err.message}`);
-      }
-      // щадящая задержка между батчами (кроме последнего)
-      if (bi < batches.length - 1 && cfg.batchDelayMs > 0) {
-        await _sleep(cfg.batchDelayMs);
-      }
-    }
+    const sig = domainMap.get(norm);
+    if (sig) signals.set(norm, sig);
   }
 
   return {
-    verdict: 'ok',
+    verdict:     'ok',
     signals,
     requested:   trimmed.length,
     matched:     signals.size,
     cache_hits:  cacheHits,
     duration_ms: Date.now() - t0,
     domain:      dom,
-    region:      rg,
-    engine:      eng,
+    region:      base,
   };
 }
 
@@ -312,8 +392,8 @@ async function fetchPhraseSignals({
 /**
  * Сводит Map<phrase, signals> в портфельные агрегаты для прогноза и UI:
  *   • avg_current_position (среднее по фразам, где position>0)
- *   • phrases_in_top10_pct / phrases_in_top30_pct
- *   • median_competition   (медиана top10_competition)
+ *   • phrases_in_top10_pct / phrases_in_top30_pct / phrases_off_top50_pct
+ *   • median_competition   (медиана top10_competition; null если данных нет)
  *   • momentum             ('positive'|'neutral'|'negative')
  *
  * @param {Map<string, Object>} signals
@@ -346,7 +426,10 @@ function aggregateSignals(signals, totalRequested) {
     if (p > 0 && p <= 10) inTop10 += 1;
     if (p > 0 && p <= 30) inTop30 += 1;
     if (p === 0 || p > 50) offTop50 += 1;
-    if (s.top10_competition >= 0) comps.push(s.top10_competition);
+    if (s.top10_competition !== null && s.top10_competition !== undefined &&
+        Number(s.top10_competition) >= 0) {
+      comps.push(Number(s.top10_competition));
+    }
     deltas.push(Number(s.position_3m_delta || 0));
   }
   if (positions.length > 0) {
@@ -368,10 +451,8 @@ function aggregateSignals(signals, totalRequested) {
   }
   if (deltas.length > 0) {
     const avg = deltas.reduce((a, b) => a + b, 0) / deltas.length;
-    // delta — положительное число = позиция РОСЛА (позиция уменьшилась):
-    // зависит от соглашения API. Принимаем «delta > 0 — рост», т.е.
-    // позиция улучшилась (стала ближе к 1). Если API даёт обратное —
-    // адаптируйте в _parseResponse.
+    // delta > 0 — позиция РОСЛА (улучшилась). Если API даст обратное —
+    // адаптируйте в _parsePage.
     out.momentum_delta_avg = Math.round(avg * 100) / 100;
     if (avg > 0.5)       out.momentum = 'positive';
     else if (avg < -0.5) out.momentum = 'negative';
@@ -389,7 +470,8 @@ module.exports = {
   _cacheSet,
   _cacheClear,
   _cacheSize,
-  _parseResponse,
+  _parsePage,
   _normalizePhrase,
   _hostFromUrl,
+  _resolveBase,
 };
