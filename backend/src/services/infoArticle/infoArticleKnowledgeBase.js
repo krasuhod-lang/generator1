@@ -406,6 +406,13 @@ function iakbCallOpts(task, extra = {}) {
   if (task?.__geminiCacheName) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
+    // Счётчик переиспользований Gemini cachedContent в рамках задачи.
+    // Используется для итогового лога «[cache] reused N times» — позволяет
+    // отличить «cache создался но никто его не использовал» от «cache
+    // переиспользован Stage 3/5/6 и сэкономил X токенов». См. также
+    // header `responseCache.js` (карта 3 слоёв кэша).
+    if (!task.__geminiCacheReuseCount) task.__geminiCacheReuseCount = 0;
+    task.__geminiCacheReuseCount += 1;
   }
   // Brand-aware response cache: каждая задача имеет brand_name (явное поле БД)
   // или brand (legacy). Передаём это в callLLM, чтобы Redis-кэш изолировал

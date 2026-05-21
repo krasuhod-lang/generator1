@@ -1755,6 +1755,17 @@ async function processInfoArticleTask(taskId) {
     //      посчитанным отчётам качества. Используется в /api/admin/model-comparison
     //      для сравнения gemini-моделей. Не делает сети, никогда не валит
     //      pipeline (try/catch).
+    // Перед quality_score — финальный лог по статистике Gemini Context Cache.
+    // Помогает диагностировать «cache создался, но переиспользований не было».
+    if (geminiCacheName) {
+      const reused = Number(task.__geminiCacheReuseCount || 0);
+      await appendLog(
+        taskId,
+        `[cache] gemini cachedContent ${geminiCacheName.split('/').pop()}: ` +
+        `${reused > 0 ? `reused ${reused} time(s)` : '⚠ created but NEVER reused (check pipeline flow)'}`,
+        reused > 0 ? 'info' : 'warn',
+      );
+    }
     try {
       const { computeQualityScore } = require('../qualityLayers/qualityScore');
       // Перечитываем актуальные отчёты + метаданные задачи.

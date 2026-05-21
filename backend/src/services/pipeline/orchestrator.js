@@ -1,5 +1,49 @@
 'use strict';
 
+/**
+ * orchestrator — главный конечный автомат пайплайна Tasks (8 стадий +
+ * meta/relevance/article-topics submodules).
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * КАРТА КЭШИРОВАНИЯ (R = читает, W = пишет, RW = и то и другое):
+ * Используется для resume после рестарта воркера и для передачи данных
+ * между стадиями без повторных LLM-вызовов.
+ *
+ *   Стадия              | Колонка в `tasks`                | R/W
+ *   --------------------+----------------------------------+------
+ *   stage0  (scraper)   | stage0_result                    | W
+ *   stage1  (entities)  | stage0_result → stage1_result    | R/W
+ *   stage2  (queries)   | stage1_result → stage2_result    | R/W
+ *   stage3  (writer)    | stage2_result → stage3_result    | R/W
+ *   stage4  (post-edit) | stage3_result → stage4_result    | R/W
+ *   stage5  (e-e-a-t)   | stage4_result → stage5_result    | R/W
+ *   stage6  (lsi/refine)| stage5_result → stage6_result    | R/W
+ *   stage7  (meta)      | stage6_result → stage7_result    | R/W
+ *   stage8  (final)     | stage7_result → article_html     | R/W
+ *
+ *   Submodules:
+ *     info_article_tasks / link_article_tasks — собственный пайплайн со
+ *       своими колонками (см. headers infoArticlePipeline.js и
+ *       linkArticlePipeline.js). Также квалити-отчёты: eeat_audit,
+ *       lsi_report, readability_report, intent_verdict, fact_check_report,
+ *       plagiarism_report, lsi_overdose_report, image_qa_report,
+ *       validation_report, quality_score (миграция 037).
+ *
+ *   Между задачами:
+ *     • `responseCache` (Redis) — кэш HTTP-ответов LLM. См. header
+ *       `backend/src/services/llm/responseCache.js`.
+ *     • Gemini Context Caching — серверный кэш Google, name хранится
+ *       в `*_tasks.gemini_cache_name`. Действует только в пределах
+ *       одной задачи (создаётся в IAKB/LinkAKB, переиспользуется
+ *       Stage 3/5/6, удаляется в finally).
+ *
+ * При ре-старте воркера каждая стадия должна:
+ *   1) попробовать прочитать свой `*_result` из БД;
+ *   2) если уже заполнен — пропустить LLM-вызов;
+ *   3) иначе выполнить LLM-вызов и записать `*_result`.
+ * ─────────────────────────────────────────────────────────────────────
+ */
+
 const db              = require('../../config/db');
 const { publish }     = require('../sse/sseManager');
 

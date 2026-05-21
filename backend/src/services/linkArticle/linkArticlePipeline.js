@@ -785,6 +785,16 @@ async function processLinkArticleTask(taskId) {
 
     // 7b. Quality Score — детерминированный агрегат по eeat_audit и др.
     //     отчётам. Не делает сети. Используется в /api/admin/model-comparison.
+    // Перед quality_score — финальный лог по статистике Gemini Context Cache.
+    if (geminiCacheName) {
+      const reused = Number(task.__geminiCacheReuseCount || 0);
+      await appendLog(
+        taskId,
+        `[cache] gemini cachedContent ${geminiCacheName.split('/').pop()}: ` +
+        `${reused > 0 ? `reused ${reused} time(s)` : '⚠ created but NEVER reused (check pipeline flow)'}`,
+        reused > 0 ? 'info' : 'warn',
+      );
+    }
     try {
       const { computeQualityScore } = require('../qualityLayers/qualityScore');
       const { rows: [t] } = await db.query(
