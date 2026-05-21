@@ -50,6 +50,62 @@ const sslAgent = new https.Agent({ rejectUnauthorized: false });
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// -----------------------------------------------------------------
+// Очистка HTML/DOM от шума ДО передачи в Readability / Cheerio.
+// Удаляет скрипты, стили, iframes, cookie/popup/banner-баннеры, формы
+// комментариев и прочий шум, который раздувает токен-счёт промптов
+// конкурентного анализа без полезного сигнала.
+// -----------------------------------------------------------------
+const NOISE_SELECTORS = [
+  'script', 'style', 'noscript', 'link[rel="stylesheet"]',
+  'iframe', 'svg', 'picture > source', 'template',
+  'ins.adsbygoogle', 'ins[class*="ad" i]',
+  '[class*="cookie" i]', '[id*="cookie" i]',
+  '[class*="banner" i]', '[class*="popup" i]', '[class*="modal" i]',
+  '[id*="comments" i]', '[class*="comments" i]',
+  '[class*="subscribe" i]', '[class*="newsletter" i]',
+  '.related', '.share', '.social', '.author-bio',
+];
+
+function _stripDomNoise(document) {
+  try {
+    const sel = NOISE_SELECTORS.join(',');
+    const nodes = document.querySelectorAll(sel);
+    for (const n of nodes) {
+      try { n.remove(); } catch (_) { /* ignore */ }
+    }
+  } catch (_) { /* ignore */ }
+}
+
+// Хвостовая чистка markdown: удаляем повторяющиеся футер-следы.
+// Применяется ПОСЛЕ Turndown — иначе шаблоны типа «© 2024 Company»,
+// «Политика конфиденциальности», «Все права защищены» прорастают
+// сквозь Readability на длинных страницах. JS \b не работает с кириллицей,
+// поэтому матчим без word-boundary.
+const FOOTER_PATTERNS = [
+  /^.*©\s*\d{4}[^\n]*$/gim,
+  /^.*(all rights reserved|все права защищены)[^\n]*$/gim,
+  /^.*(политика конфиденциальности|privacy policy|terms of (use|service)|пользовательское соглашение)[^\n]*$/gim,
+  /^.*(cookie policy|использование cookie|использование куки|мы используем (cookie|куки))[^\n]*$/gim,
+  /^.*(subscribe to our newsletter|подпишитесь на (нашу )?рассылку|подпишись на (нашу )?рассылку)[^\n]*$/gim,
+];
+
+function _stripFooterArtifacts(markdown) {
+  if (!markdown) return markdown;
+  let out = markdown;
+  for (const re of FOOTER_PATTERNS) {
+    out = out.replace(re, '');
+  }
+  // Свернуть подряд идущие пустые строки.
+  out = out.replace(/\n{3,}/g, '\n\n');
+  return out.trim();
+}
+
+// Лимит markdown, который возвращает scrapeUrl. Раньше был 12000.
+// Поднят до 15000 после оптимизации очистки: после удаления script/style/
+// iframe/cookie-баннеров в окно влезает больше полезного контента.
+const SCRAPE_MARKDOWN_MAX_CHARS = 15000;
+
 /**
  * Нормализует строку в валидный URL или возвращает null.
  * Поддерживает:
@@ -203,8 +259,13 @@ async function scrapeUrl(url, timeout = 30000) {
   // -----------------------------------------------------------------
   // Попытка 1: Mozilla Readability (чистит рекламу, боковые панели)
   // -----------------------------------------------------------------
+  const rawHtmlLen = (responseData || '').length;
   try {
     const dom    = new JSDOM(responseData, { url: finalUrl });
+    // Удаляем шум ДО Readability, чтобы он не уехал в article.content
+    // как параграфы (часть cookie-баннеров оформлена как <p>, не как <aside>).
+    _stripDomNoise(dom.window.document);
+
     const reader = new Readability(dom.window.document);
     const article = reader.parse();
 
@@ -214,18 +275,22 @@ async function scrapeUrl(url, timeout = 30000) {
         bulletListMarker: '-',
         codeBlockStyle:   'fenced',
       });
-      // Убираем навигацию и таблицы, они дают мусор
+      // Усиленный фильтр: nav/footer/aside + остаточные iframe/form/button/noscript,
+      // которые Readability иногда оставляет на сложных шаблонах.
       turndown.addRule('removeNav', {
-        filter: ['nav', 'footer', 'aside'],
+        filter: ['nav', 'footer', 'aside', 'iframe', 'form', 'button', 'noscript'],
         replacement: () => '',
       });
 
-      const markdown = turndown.turndown(article.content);
+      let markdown = turndown.turndown(article.content);
+      markdown = _stripFooterArtifacts(markdown);
 
       return {
         url:      finalUrl,
         title:    article.title || '',
-        markdown: markdown.substring(0, 12000),
+        markdown: markdown.substring(0, SCRAPE_MARKDOWN_MAX_CHARS),
+        rawHtmlBytes: rawHtmlLen,
+        cleanedBytes: markdown.length,
       };
     }
   } catch (_) {
@@ -237,21 +302,31 @@ async function scrapeUrl(url, timeout = 30000) {
   // -----------------------------------------------------------------
   const $ = cheerio.load(responseData);
 
-  // Удаляем мусорные элементы
+  // Удаляем мусорные элементы (расширенный список — синхронизирован
+  // с NOISE_SELECTORS Readability-ветки, плюс семантические зоны).
   $(
-    'script, style, noscript, nav, footer, header, ' +
+    'script, style, noscript, link[rel="stylesheet"], iframe, svg, template, ' +
+    'nav, footer, header, form, button, ' +
     '.menu, .sidebar, .ads, .advertisement, .cookie, ' +
-    '.popup, .modal, .banner, [role="navigation"], ' +
-    '[role="banner"], [role="complementary"]'
+    '.popup, .modal, .banner, .related, .share, .social, .author-bio, ' +
+    '[role="navigation"], [role="banner"], [role="complementary"], ' +
+    '[class*="cookie" i], [id*="cookie" i], ' +
+    '[class*="popup" i], [class*="banner" i], ' +
+    '[id*="comments" i], [class*="comments" i], ' +
+    '[class*="subscribe" i], [class*="newsletter" i], ' +
+    'ins.adsbygoogle, ins[class*="ad" i]'
   ).remove();
 
   const title    = $('title').text().trim() || $('h1').first().text().trim();
-  const bodyText = $('body').text().replace(/\s{2,}/g, ' ').trim();
+  let   bodyText = $('body').text().replace(/\s{2,}/g, ' ').trim();
+  bodyText = _stripFooterArtifacts(bodyText);
 
   return {
     url:      finalUrl,
     title,
-    markdown: bodyText.substring(0, 12000),
+    markdown: bodyText.substring(0, SCRAPE_MARKDOWN_MAX_CHARS),
+    rawHtmlBytes: rawHtmlLen,
+    cleanedBytes: bodyText.length,
   };
 }
 
@@ -289,6 +364,8 @@ async function scrapeCompetitors(rawUrls, timeoutMs = 30000) {
         timedOut:   false,
         invalidUrl: false,
         sslIssue:   false,
+        rawHtmlBytes: result.value.rawHtmlBytes || 0,
+        cleanedBytes: result.value.cleanedBytes || (result.value.markdown || '').length,
       };
     }
 
@@ -322,4 +399,12 @@ async function scrapeCompetitors(rawUrls, timeoutMs = 30000) {
   });
 }
 
-module.exports = { scrapeUrl, scrapeCompetitors, sanitizeUrl };
+module.exports = {
+  scrapeUrl,
+  scrapeCompetitors,
+  sanitizeUrl,
+  // exported for unit-testing only
+  _stripFooterArtifacts,
+  _stripDomNoise,
+  NOISE_SELECTORS,
+};
