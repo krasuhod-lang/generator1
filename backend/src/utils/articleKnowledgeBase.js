@@ -20,6 +20,7 @@
  */
 
 const { buildStrategyDigest } = require('../services/pipeline/preStage0');
+const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 
 // ────────────────────────────────────────────────────────────────────
 // Константы лимитов секций (в словах) — подобраны так, чтобы AKB
@@ -536,6 +537,10 @@ function buildArticleKnowledgeBase(input = {}) {
  */
 function geminiCallOpts(task, extra = {}) {
   const opts = { ...extra };
+  const provider = (task?.llm_provider || 'gemini').toString().toLowerCase().trim();
+  if (provider !== 'grok') {
+    opts.model = normalizeGeminiCopywritingModel(task?.gemini_model);
+  }
   // cachedContent — только для Gemini. Для Grok игнорируем (cachedContents
   // у x.ai отсутствует) — callLLM сам пропустит при adapter='grok'.
   if (task?.__geminiCacheName) opts.cachedContent = task.__geminiCacheName;

@@ -102,7 +102,7 @@ function _brandHash(brand) {
  * Префикс ключа содержит хэш бренда — это позволяет делать SCAN/DEL по
  * бренду одной командой Redis MATCH `llmcache:v2:b=<hash>:*`.
  */
-function buildKey({ adapter, system = '', prompt = '', temperature, maxTokens, brand = '' }) {
+function buildKey({ adapter, system = '', prompt = '', temperature, maxTokens, model = '', brand = '' }) {
   const h = crypto.createHash('sha256');
   // Включаем поля раздельно, чтобы случайная коллизия конкатенации
   // не объединяла разные ключи (например, system без разделителя).
@@ -111,13 +111,13 @@ function buildKey({ adapter, system = '', prompt = '', temperature, maxTokens, b
   h.update('|U=' + prompt);
   h.update('|T=' + (temperature == null ? '_' : String(temperature)));
   h.update('|M=' + (maxTokens   == null ? '_' : String(maxTokens)));
-  // model — берём из env (если задан явно), иначе входит в adapter-namespace
-  // через сам adapter (gemini.adapter уже содержит GEMINI_MODEL).
+  // model — явный per-task override важнее env; иначе берём env (если задан),
+  // иначе входит в adapter-namespace через сам adapter.
   const modelEnv = adapter === 'gemini'   ? process.env.GEMINI_MODEL
                  : adapter === 'grok'     ? process.env.XAI_MODEL
                  : adapter === 'deepseek' ? process.env.DEEPSEEK_MODEL
                  : '';
-  h.update('|MD=' + (modelEnv || ''));
+  h.update('|MD=' + (model || modelEnv || ''));
   // Бренд в hash тоже включаем, на случай если префикс изменится в будущем
   // и понадобится миграция: значение ключа всё равно уникально per-brand.
   h.update('|B=' + normalizeBrand(brand));

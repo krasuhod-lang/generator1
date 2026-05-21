@@ -994,7 +994,7 @@ module.exports = {
  * @returns {Promise<{ name: string, model: string, ttlSeconds: number }>}
  *          name — `cachedContents/abc123…`, передаётся в callGemini({cachedContent}).
  */
-async function createCachedContent({ systemInstruction, ttlSeconds = 900, timeoutMs = 60000 }) {
+async function createCachedContent({ systemInstruction, ttlSeconds = 900, timeoutMs = 60000, model = GEMINI_MODEL }) {
   if (!systemInstruction || typeof systemInstruction !== 'string') {
     throw new Error('createCachedContent: systemInstruction must be a non-empty string');
   }
@@ -1017,7 +1017,7 @@ async function createCachedContent({ systemInstruction, ttlSeconds = 900, timeou
     '3) NEVER use unescaped newlines inside string values.';
 
   const payload = {
-    model: `models/${GEMINI_MODEL}`,
+    model: `models/${model}`,
     systemInstruction: {
       parts: [
         { text: JSON_STRICT_GUARD },
@@ -1050,7 +1050,7 @@ async function createCachedContent({ systemInstruction, ttlSeconds = 900, timeou
 
   return {
     name,
-    model:      GEMINI_MODEL,
+    model,
     ttlSeconds: Math.max(60, Math.floor(ttlSeconds)),
   };
 }

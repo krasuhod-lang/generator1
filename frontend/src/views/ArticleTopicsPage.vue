@@ -17,6 +17,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import { useArticleTopicsStore } from '../stores/articleTopics.js';
 import {
   parseMainResult, parseDeepDiveResult,
@@ -48,6 +49,7 @@ const form = ref({
   market_stage:     'растущий',
   search_ecosystem: 'оба',
   top_competitors:  '',
+  gemini_model:     'gemini-3.1-pro-preview',
 });
 // topic_ideas-режим использует свой набор полей: niche/region/audience уже
 // есть в form.value, плюс отдельные target_url, brand_hint, topic_count.
@@ -131,6 +133,7 @@ async function handleCreate() {
         target_url:  (topicIdeasForm.value.target_url || '').trim(),
         brand_hint:  (topicIdeasForm.value.brand_hint || '').trim(),
         topic_count: Number(topicIdeasForm.value.topic_count) || 10,
+        gemini_model: form.value.gemini_model,
       });
     } else {
       await store.createTask({ ...form.value, niche });
@@ -817,6 +820,12 @@ const sortedTasks = computed(() =>
               целью / аудиторией / фактами.
             </p>
           </template>
+
+          <GeminiModelSelector
+            v-model="form.gemini_model"
+            :disabled="submitting"
+            hint="Модель применяется к Gemini-вызову этой задачи; deep-dive наследует модель родительского отчёта."
+          />
 
           <div v-if="formError"
                class="p-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">

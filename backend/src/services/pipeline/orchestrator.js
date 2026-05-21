@@ -77,6 +77,7 @@ const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { resetTaskBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -473,6 +474,7 @@ async function runPipeline(task, ctx) {
       const cache = await createCachedContent({
         systemInstruction: task.__articleKnowledgeBase,
         ttlSeconds:        ttl,
+        model:             normalizeGeminiCopywritingModel(task.gemini_model),
       });
       task.__geminiCacheName = cache.name;
       log(`Gemini cachedContent создан: ${cache.name} (TTL ${cache.ttlSeconds}s).`, 'success');

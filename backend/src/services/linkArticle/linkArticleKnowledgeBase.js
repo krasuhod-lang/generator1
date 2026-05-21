@@ -26,6 +26,8 @@
  * меняет его поведение.
  */
 
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+
 const MAX_LAKB_CHARS = 24 * 1024;   // 24 КБ — fits под Gemini cachedContents min-token порог + наш типовой системный промпт.
 const MAX_FIELD_LEN  = 1500;        // обрезка длинных JSON-блоков
 
@@ -312,6 +314,7 @@ function lakbSystem(task) {
  */
 function lakbCallOpts(task, extra = {}) {
   const opts = { ...extra };
+  opts.model = normalizeGeminiCopywritingModel(task?.gemini_model);
   if (task?.__geminiCacheName) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };

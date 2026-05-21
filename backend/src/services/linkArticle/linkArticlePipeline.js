@@ -42,6 +42,7 @@ const {
   pointerOrJson,
 } = require('./linkArticleKnowledgeBase');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -677,6 +678,7 @@ async function processLinkArticleTask(taskId) {
         const created = await createCachedContent({
           systemInstruction: cacheText,
           ttlSeconds: LINK_ARTICLE_GEMINI_CACHE_TTL_S,
+          model: normalizeGeminiCopywritingModel(task.gemini_model),
         });
         task.__geminiCacheName = created.name;
         geminiCacheName = created.name;

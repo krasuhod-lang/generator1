@@ -21,6 +21,7 @@ const path = require('path');
 const db   = require('../../config/db');
 const { callGemini } = require('../llm/gemini.adapter');
 const { calcCost }   = require('../metrics/priceCalculator');
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const {
   extractTrendsJsonBlock,
   persistExtractedTrends,
@@ -219,6 +220,7 @@ async function processArticleTopicTask(taskId) {
       maxTokens:   16384,
       timeoutMs:   300000,
       plainText:   true,
+      model:       normalizeGeminiCopywritingModel(task.gemini_model),
     });
 
     if (!result || !result.text || !result.text.trim()) {

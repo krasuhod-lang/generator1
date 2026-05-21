@@ -7,6 +7,7 @@ const { parseTZ } = require('../utils/parseTZ');
 const { generationQueue } = require('../queue/queue');
 const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
+const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -98,6 +99,7 @@ async function listTasks(req, res, next) {
     const { rows } = await db.query(
       `SELECT
          t.id, t.title, t.status, t.input_target_service,
+         t.llm_provider, t.gemini_model,
          t.created_at, t.completed_at, t.started_at,
          t.bull_job_id, t.error_message,
          m.lsi_coverage, m.eeat_score, m.total_cost_usd, m.bm25_score
@@ -155,6 +157,7 @@ async function createTask(req, res, next) {
       input_max_chars,
       input_target_url,
       llm_provider,
+      gemini_model,
       // Опциональная привязка к отчёту релевантности (миграция 022).
       // Если задано — orchestrator подгружает report.competitor_signals
       // и report.entity_coverage и вливает их в __moduleContext + AKB.
@@ -175,6 +178,7 @@ async function createTask(req, res, next) {
     const provider = (typeof llm_provider === 'string' && llm_provider.toLowerCase().trim() === 'grok')
       ? 'grok'
       : 'gemini';
+    const geminiModel = normalizeGeminiCopywritingModel(gemini_model);
 
     // source_relevance_report_id: принимаем только валидный UUID, который
     // принадлежит текущему пользователю и завершился успешно. Невалидный/
@@ -195,6 +199,7 @@ async function createTask(req, res, next) {
          input_min_chars, input_max_chars,
          input_target_url,
          llm_provider,
+         gemini_model,
          source_relevance_report_id
        ) VALUES (
          $1, $2, 'draft',
@@ -205,10 +210,11 @@ async function createTask(req, res, next) {
          $16, $17, $18,
          $19, $20,
          $21, $22,
-         $23,
-         $24,
-         $25
-       ) RETURNING *`,
+          $23,
+          $24,
+          $25,
+          $26
+        ) RETURNING *`,
       [
         req.user.id,
         toText(title) || targetService,
@@ -234,6 +240,7 @@ async function createTask(req, res, next) {
         maxChars,
         toText(input_target_url),
         provider,
+        geminiModel,
         relevanceReportId,
       ]
     );
@@ -286,6 +293,7 @@ async function updateTask(req, res, next) {
       'input_min_chars', 'input_max_chars',
       'input_target_url',
       'llm_provider',
+      'gemini_model',
       'source_relevance_report_id',
     ];
 
@@ -311,6 +319,8 @@ async function updateTask(req, res, next) {
           // Та же owner-валидация, что и в createTask. Невалидное id → null
           // (не падаем 400). Чужой/несуществующий/недоделанный отчёт также → null.
           val = await resolveOwnedRelevanceReportId(val, req.user.id);
+        } else if (key === 'gemini_model') {
+          val = normalizeGeminiCopywritingModel(val);
         }
         fields.push(`${key} = $${values.length + 1}`);
         values.push(val);

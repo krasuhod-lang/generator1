@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import LlmProviderSelector from '../components/LlmProviderSelector.vue';
+import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import { useMetaTagsStore } from '../stores/metaTags.js';
 
 const router = useRouter();
@@ -19,6 +20,7 @@ const form = ref({
   summary:  '',
   keywords: '',
   llm_provider: 'gemini',
+  gemini_model: 'gemini-3.1-pro-preview',
 });
 
 const submitting = ref(false);
@@ -58,6 +60,7 @@ async function handleCreate() {
       summary:  form.value.summary.trim(),
       keywords: keywordsList.value,
       llm_provider: form.value.llm_provider === 'grok' ? 'grok' : 'gemini',
+      gemini_model: form.value.gemini_model,
     };
     saveDraft();
     const id = await store.createTask(payload);
@@ -201,6 +204,13 @@ function formatDate(d) {
             :disabled="submitting"
             hint="Выберите движок генерации мета-тегов. Применяется ко всем ключевым запросам этой задачи."
           />
+          <div v-if="form.llm_provider === 'gemini'" class="mt-3">
+            <GeminiModelSelector
+              v-model="form.gemini_model"
+              :disabled="submitting"
+              hint="Модель применяется ко всем Gemini-вызовам этой задачи."
+            />
+          </div>
         </div>
 
         <div v-if="formError"

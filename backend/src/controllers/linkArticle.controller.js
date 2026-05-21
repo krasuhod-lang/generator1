@@ -14,6 +14,7 @@ const db = require('../config/db');
 const { processLinkArticleTask } = require('../services/linkArticle/linkArticlePipeline');
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
+const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 
 const MAX_TOPIC_LEN   = 250;
 const MIN_TOPIC_LEN   = 5;
@@ -41,8 +42,8 @@ function isValidUrl(url) {
 async function listLinkArticleTasks(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, topic, anchor_text, anchor_url, output_format,
-              status, progress_pct, current_stage, error_message,
+      `SELECT id, topic, anchor_text, anchor_url, output_format, gemini_model,
+               status, progress_pct, current_stage, error_message,
               deepseek_tokens_in, deepseek_tokens_out,
               gemini_tokens_in, gemini_tokens_out,
               gemini_image_calls, cost_usd,
@@ -70,6 +71,7 @@ async function createLinkArticleTask(req, res, next) {
     const output_format = ALLOWED_FORMATS.includes(String(body.output_format || '').toLowerCase())
       ? String(body.output_format).toLowerCase()
       : 'html';
+    const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
 
     if (topic.length < MIN_TOPIC_LEN) {
       return res.status(400).json({ error: `Тема статьи должна быть не короче ${MIN_TOPIC_LEN} символов` });
@@ -83,10 +85,10 @@ async function createLinkArticleTask(req, res, next) {
 
     const { rows } = await db.query(
       `INSERT INTO link_article_tasks
-         (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, 'queued', 0)
-       RETURNING id, topic, anchor_text, anchor_url, output_format, status, progress_pct, created_at`,
-      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format],
+          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model, status, progress_pct)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 0)
+       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, status, progress_pct, created_at`,
+      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel],
     );
     const task = rows[0];
 

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
 import AppLayout from '../components/AppLayout.vue';
 import LlmProviderSelector from '../components/LlmProviderSelector.vue';
+import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -43,6 +44,7 @@ const form = reactive({
   input_target_url:      '',   // URL целевой страницы
   title:                 '',
   llm_provider:          'gemini', // 'gemini' | 'grok' (см. backend/services/llm/grok.adapter.js)
+  gemini_model:          'gemini-3.1-pro-preview',
   // Связка с отчётом релевантности — заполняется при переходе из
   // /relevance/:id, бэкенд по этому id вытащит entity_coverage и
   // competitor_signals и вольёт их в __moduleContext / AKB §11.
@@ -893,6 +895,13 @@ function downloadExampleTZ() {
             :disabled="saving"
             hint="Выберите движок генерации. Применяется ко всем стадиям пайплайна (Stage 3/5/6) и AI-Copilot редактору после создания задачи."
           />
+          <div v-if="form.llm_provider === 'gemini'" class="mt-4">
+            <GeminiModelSelector
+              v-model="form.gemini_model"
+              :disabled="saving"
+              hint="Выбор сохраняется в задаче и применяется ко всем Gemini-вызовам копирайтинга."
+            />
+          </div>
         </div>
 
         <!-- ── Ошибка ──────────────────────────────────────────────── -->
