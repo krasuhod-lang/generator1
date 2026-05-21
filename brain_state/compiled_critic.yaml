@@ -1,0 +1,13 @@
+version: 1
+compiled_at: 2026-05-21T00:00:00Z
+model: deepseek-v4-pro
+mean_spq_before: 0
+mean_spq_after: 0
+trials_done: 0
+notes: |
+  Initial empty state. Critic system prompt пока заглушка — будет
+  заменён DSPy retrain'ом после накопления ≥ 50 примеров в
+  aegis_dspy_dataset.
+critic:
+  system_prompt: ""
+  few_shot: []

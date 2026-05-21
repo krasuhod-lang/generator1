@@ -1,0 +1,94 @@
+# =============================================================================
+# A.E.G.I.S. additive compose (использовать ВМЕСТЕ с основным docker-compose.yml):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.aegis.yml up -d
+#
+# Стартует только дополнительные сервисы: neo4j, qdrant, aegis_py, ray-head.
+# Никаких изменений в основной стек — это override.
+#
+# Все сервисы — ОПЦИОНАЛЬНЫЕ. Можно поднять только то, что нужно для
+# текущей фазы:
+#   • Phase 1 (GraphRAG): neo4j + aegis_py
+#   • Phase 2 (VectorDB): qdrant + aegis_py
+#   • Phase 4 (Ray):     ray-head + aegis_py
+#   • Phase 6 (DSPy):     aegis_py (на CPU достаточно)
+# =============================================================================
+version: "3.9"
+
+services:
+  neo4j:
+    image: neo4j:5.25-community
+    profiles: ["graphrag"]
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${AEGIS_NEO4J_USER:-neo4j}/${AEGIS_NEO4J_PASSWORD:-aegis_neo4j_dev}
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*,gds.*"
+    ports:
+      - "${AEGIS_NEO4J_HTTP_PORT:-7474}:7474"
+      - "${AEGIS_NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    profiles: ["vectordb"]
+    restart: unless-stopped
+    ports:
+      - "${AEGIS_QDRANT_PORT:-6333}:6333"
+      - "${AEGIS_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:6333/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  ray-head:
+    image: rayproject/ray:2.39.0
+    profiles: ["ray"]
+    restart: unless-stopped
+    command: >
+      bash -c "ray start --head --port=6379
+                         --dashboard-host=0.0.0.0
+                         --dashboard-port=8265
+                         --block"
+    ports:
+      - "${AEGIS_RAY_DASHBOARD_PORT:-8265}:8265"
+      - "${AEGIS_RAY_PORT:-6379}:6379"
+    shm_size: 2gb
+
+  aegis_py:
+    build:
+      context: ./aegis_py
+      args:
+        INSTALL_HEAVY: ${AEGIS_PY_INSTALL_HEAVY:-false}
+    profiles: ["aegis"]
+    restart: unless-stopped
+    ports:
+      - "${AEGIS_PY_PORT:-8800}:8800"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AEGIS_NEO4J_URI:      ${AEGIS_NEO4J_URI:-}
+      AEGIS_NEO4J_USER:     ${AEGIS_NEO4J_USER:-neo4j}
+      AEGIS_NEO4J_PASSWORD: ${AEGIS_NEO4J_PASSWORD:-}
+      AEGIS_QDRANT_URL:     ${AEGIS_QDRANT_URL:-}
+      AEGIS_QDRANT_API_KEY: ${AEGIS_QDRANT_API_KEY:-}
+      RAY_ADDRESS:          ${RAY_ADDRESS:-}
+      AEGIS_GA4_PROPERTY_ID: ${AEGIS_GA4_PROPERTY_ID:-}
+      AEGIS_GA4_SA_JSON:    ${AEGIS_GA4_SA_JSON:-}
+      GOOGLE_API_KEY:       ${GOOGLE_API_KEY:-}
+      GEMINI_API_KEY:       ${GEMINI_API_KEY:-}
+      DEEPSEEK_API_KEY:     ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL:       ${DEEPSEEK_MODEL:-deepseek-chat}
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  qdrant_data:

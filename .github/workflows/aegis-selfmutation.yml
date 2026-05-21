@@ -1,0 +1,111 @@
+name: aegis-selfmutation
+
+# Когда в репозитории ≥ AEGIS_SELFMUTATE_FAIL_TRIGGER (default 5) подряд
+# фейлов парсера на одном домене, backend пишет issue с label
+# `aegis:selfmutate-trigger`. Этот workflow ловит такие issue и:
+#   1. Скачивает старый код упавшего модуля.
+#   2. Вызывает /api/aegis/mutate/propose (DeepSeek-V4-Pro).
+#   3. Открывает draft-PR с предложенным diff'ом.
+#
+# По жёсткому правилу `requireHumanReview=true` — PR ВСЕГДА draft и
+# требует ручного approve. Это безопасный режим первой недели.
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      file_path:
+        description: 'Путь до файла для мутации (например, backend/src/services/parser/scraper.js)'
+        required: true
+      error_context:
+        description: 'Текст ошибки / стек'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: aegis-selfmutation-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  propose-patch:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' &&
+       contains(github.event.issue.labels.*.name, 'aegis:selfmutate-trigger'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Call backend mutator endpoint
+        id: mutate
+        env:
+          AEGIS_API_URL: ${{ secrets.AEGIS_API_URL }}      # https://your-app/api
+          AEGIS_API_TOKEN: ${{ secrets.AEGIS_API_TOKEN }}  # JWT admin user
+          FILE_PATH: ${{ github.event.inputs.file_path || '' }}
+          ERROR_CONTEXT: ${{ github.event.inputs.error_context || github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AEGIS_API_URL:-}" || -z "${AEGIS_API_TOKEN:-}" ]]; then
+            echo "::warning::AEGIS_API_URL / AEGIS_API_TOKEN not configured — skipping."
+            exit 0
+          fi
+          # Извлекаем file_path из issue body (паттерн: `file_path: <...>`)
+          if [[ -z "$FILE_PATH" && -n "${ERROR_CONTEXT:-}" ]]; then
+            FILE_PATH=$(echo "$ERROR_CONTEXT" | grep -m1 -oP '(?<=file_path:\s)[^\s]+' || true)
+          fi
+          if [[ -z "$FILE_PATH" ]]; then
+            echo "::error::file_path not provided"
+            exit 1
+          fi
+          OLD_CODE=$(cat "$FILE_PATH" || true)
+          PAYLOAD=$(jq -nc \
+            --arg fp "$FILE_PATH" \
+            --arg oc "$OLD_CODE" \
+            --arg ec "$ERROR_CONTEXT" \
+            '{filePath:$fp, oldCode:$oc, errorContext:$ec}')
+          RESP=$(curl -fsS -X POST "$AEGIS_API_URL/aegis/mutate/propose" \
+            -H "Authorization: Bearer $AEGIS_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          echo "$RESP" | jq .
+          DIFF=$(echo "$RESP" | jq -r '.diff // empty')
+          ABORT=$(echo "$RESP" | jq -r '.abort // false')
+          if [[ "$ABORT" == "true" || -z "$DIFF" ]]; then
+            echo "::notice::Mutator aborted or no diff produced; nothing to PR."
+            exit 0
+          fi
+          echo "$DIFF" > /tmp/aegis.patch
+          echo "diff_path=/tmp/aegis.patch" >> "$GITHUB_OUTPUT"
+          echo "file_path=$FILE_PATH"       >> "$GITHUB_OUTPUT"
+
+      - name: Apply patch and open draft PR
+        if: steps.mutate.outputs.diff_path != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIFF_PATH: ${{ steps.mutate.outputs.diff_path }}
+          FILE_PATH: ${{ steps.mutate.outputs.file_path }}
+        run: |
+          set -euo pipefail
+          BRANCH="aegis/mutate-$(date +%s)"
+          git config user.name  "aegis-bot"
+          git config user.email "aegis-bot@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          if ! git apply --check "$DIFF_PATH"; then
+            echo "::error::Diff не применяется чисто. Требуется ручная проверка."
+            exit 1
+          fi
+          git apply "$DIFF_PATH"
+          git add -A
+          git commit -m "aegis: auto-patch ${FILE_PATH}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --draft \
+            --title "🤖 AEGIS auto-patch: ${FILE_PATH}" \
+            --body  "Сгенерировано DeepSeek-V4-Pro по триггеру self-mutation. **Требуется ревью человеком.**" \
+            --label "aegis,aegis:auto-patch"

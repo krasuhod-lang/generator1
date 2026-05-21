@@ -32,6 +32,7 @@ const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 const relevanceRoutes     = require('./src/routes/relevance.routes');
 const forecasterRoutes    = require('./src/routes/forecaster.routes');
 const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
+const aegisRoutes         = require('./src/routes/aegis.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -113,6 +114,7 @@ app.use('/api/acf-json',       acfJsonRoutes);
 app.use('/api/relevance',      relevanceRoutes);
 app.use('/api/forecaster',     forecasterRoutes);
 app.use('/api/public',         forecasterPublicRoutes);
+app.use('/api/aegis',          aegisRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -1041,6 +1043,107 @@ async function ensureSchema() {
       END;
       $$;
     `);
+
+    // ─── Migration 038–042: A.E.G.I.S. («Эгида») — мозг системы ────────
+    // Идемпотентный DDL для пяти таблиц: aegis_runs, aegis_backlog,
+    // aegis_dspy_dataset, aegis_mutations, aegis_brain_versions.
+    // Подробности см. migrations/038–042 и AEGIS_SETUP.md.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_runs (
+        id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        kind            VARCHAR(32)  NOT NULL DEFAULT 'super_core_seo',
+        task_ref        TEXT,
+        niche           TEXT,
+        status          VARCHAR(16)  NOT NULL DEFAULT 'pending',
+        overall_score   NUMERIC(5,2),
+        iterations      INTEGER      NOT NULL DEFAULT 0,
+        cost_usd        NUMERIC(10,4) NOT NULL DEFAULT 0,
+        tokens_in       BIGINT       NOT NULL DEFAULT 0,
+        tokens_out      BIGINT       NOT NULL DEFAULT 0,
+        audit           JSONB,
+        trace           JSONB,
+        error_message   TEXT,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        finished_at     TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_runs_created ON aegis_runs (created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_runs_status  ON aegis_runs (status)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_backlog (
+        id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        issue_number    INTEGER      NOT NULL UNIQUE,
+        title           TEXT         NOT NULL,
+        labels          JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        niche           TEXT,
+        lsi_cluster_id  TEXT,
+        status          VARCHAR(16)  NOT NULL DEFAULT 'pending',
+        picked_by       TEXT,
+        picked_at       TIMESTAMPTZ,
+        aegis_run_id    UUID,
+        notes           TEXT,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_backlog_status ON aegis_backlog (status)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_dspy_dataset (
+        id              BIGSERIAL    PRIMARY KEY,
+        article_ref     TEXT         NOT NULL,
+        niche           TEXT,
+        user_prompt     TEXT         NOT NULL,
+        html_output     TEXT         NOT NULL,
+        quality_score   JSONB        NOT NULL,
+        spq_overall     NUMERIC(5,2) NOT NULL,
+        ppo_weight      NUMERIC(6,3) NOT NULL DEFAULT 1.0,
+        ga4_metrics     JSONB,
+        model_used      TEXT,
+        cost_usd        NUMERIC(10,4),
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        used_in_retrain UUID
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_niche_spq ON aegis_dspy_dataset (niche, spq_overall DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_unused    ON aegis_dspy_dataset (used_in_retrain) WHERE used_in_retrain IS NULL`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_mutations (
+        id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        file_path       TEXT         NOT NULL,
+        trigger_reason  TEXT,
+        abort           BOOLEAN      NOT NULL DEFAULT false,
+        abort_reason    TEXT,
+        diff_text       TEXT,
+        pr_number       INTEGER,
+        pr_url          TEXT,
+        pr_status       VARCHAR(16),
+        tokens_cost_usd NUMERIC(10,4),
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        merged_at       TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_mut_created ON aegis_mutations (created_at DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_brain_versions (
+        id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        yaml_path         TEXT         NOT NULL,
+        sha               VARCHAR(40),
+        mean_spq_before   NUMERIC(5,2),
+        mean_spq_after    NUMERIC(5,2),
+        improvement_pct   NUMERIC(6,3),
+        trials_done       INTEGER,
+        dataset_size      INTEGER,
+        cost_usd          NUMERIC(10,4),
+        deployed_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        rolled_back_at    TIMESTAMPTZ,
+        notes             TEXT
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_brain_deployed ON aegis_brain_versions (deployed_at DESC)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

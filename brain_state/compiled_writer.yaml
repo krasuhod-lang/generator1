@@ -1,0 +1,16 @@
+version: 1
+compiled_at: 2026-05-21T00:00:00Z
+model: gemini-3.1-pro-preview
+mean_spq_before: 0
+mean_spq_after: 0
+trials_done: 0
+notes: |
+  Initial empty state. Будет перезаписан первым успешным DSPy retrain'ом
+  (см. .github/workflows/aegis-dspy-retrain.yml).
+
+  Пока этот файл не содержит system_prompt — brainStateRegistry вернёт null
+  на getWriterSystemPromptOverride() и writer'ы будут использовать свои
+  встроенные дефолтные системные промпты.
+writer:
+  system_prompt: ""
+  few_shot: []
