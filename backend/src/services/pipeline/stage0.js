@@ -49,6 +49,26 @@ async function runStage0(task, ctx) {
   log(`Stage 0: Парсинг ${rawUrls.length} страниц...`, 'info');
   const scrapedPages = await scrapeCompetitors(rawUrls);
 
+  // Метрика очистки HTML: суммируем raw → cleaned по успешным страницам.
+  const cleanedStats = scrapedPages.reduce((acc, p) => {
+    if (p.content && p.rawHtmlBytes) {
+      acc.raw     += p.rawHtmlBytes;
+      acc.cleaned += p.cleanedBytes || p.content.length;
+      acc.n       += 1;
+    }
+    return acc;
+  }, { raw: 0, cleaned: 0, n: 0 });
+  if (cleanedStats.n > 0 && cleanedStats.raw > 0) {
+    const rawKb     = (cleanedStats.raw     / 1024).toFixed(1);
+    const cleanedKb = (cleanedStats.cleaned / 1024).toFixed(1);
+    const savedPct  = Math.round((1 - cleanedStats.cleaned / cleanedStats.raw) * 100);
+    log(
+      `Stage 0: HTML-очистка — было ${rawKb} КБ → стало ${cleanedKb} КБ (` +
+      `−${savedPct}% мусора, ${cleanedStats.n} стр.)`,
+      'info'
+    );
+  }
+
   // Логируем в SSE все URL с ошибками или таймаутами — не роняем процесс
   scrapedPages.filter(p => p.timedOut || p.error).forEach(p => {
     let reason;
@@ -113,11 +133,11 @@ BUSINESS GOAL: ${task.input_business_goal || '[не указано]'}
 MONETIZATION: ${task.input_monetization || '[не указано]'}
 PROJECT LIMITS: ${task.input_project_limits || '[не указано]'}
 PAGE PRIORITIES: ${task.input_page_priorities || '[не указано]'}
-NICHE FEATURES: ${task.input_niche_features || '[не указано]'}${onlyCompetitors.map(c => `URL: ${c.url}\n${c.content.substring(0, 8000)}`).join('\n\n---\n\n')}
+NICHE FEATURES: ${task.input_niche_features || '[не указано]'}${onlyCompetitors.map(c => `URL: ${c.url}\n${c.content.substring(0, 12000)}`).join('\n\n---\n\n')}
 ${ownSiteContent ? `
 ===== OUR SITE (ANALYZE WEAKNESSES vs COMPETITORS) =====
 URL: ${ownSiteContent.url}
-${ownSiteContent.content.substring(0, 4000)}
+${ownSiteContent.content.substring(0, 6000)}
 TASK: Find gaps between our content and competitors. What do competitors cover that we miss? What can we do BETTER?
 ` : ''}
 OUTPUT: Return ONLY valid JSON with ALL of these keys:

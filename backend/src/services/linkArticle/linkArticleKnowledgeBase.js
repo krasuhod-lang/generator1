@@ -318,6 +318,11 @@ function lakbCallOpts(task, extra = {}) {
   if (task?.__geminiCacheName) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
+    // Счётчик переиспользований Gemini cachedContent — для итогового
+    // лога «[cache] reused N times». См. iakbCallOpts(infoArticle) и
+    // header `responseCache.js` (карта 3 слоёв кэша).
+    if (!task.__geminiCacheReuseCount) task.__geminiCacheReuseCount = 0;
+    task.__geminiCacheReuseCount += 1;
   }
   return opts;
 }

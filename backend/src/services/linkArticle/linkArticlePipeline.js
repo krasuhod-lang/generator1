@@ -42,14 +42,14 @@ const {
   pointerOrJson,
 } = require('./linkArticleKnowledgeBase');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
-const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { normalizeGeminiCopywritingModel, DEFAULT_GEMINI_COPYWRITING_MODEL } = require('../llm/geminiModels');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
   process.env.LINK_ARTICLE_GEMINI_MODEL ||
   process.env.GEMINI_MODEL ||
-  'gemini-3.1-pro-preview';
+  DEFAULT_GEMINI_COPYWRITING_MODEL;
 
 const MAX_PARALLEL_IMAGES = (() => {
   const v = parseInt(process.env.LINK_ARTICLE_MAX_PARALLEL_IMAGES, 10);
@@ -782,6 +782,55 @@ async function processLinkArticleTask(taskId) {
     await setStage(taskId, 'image_generation', 87);
     const renderedImages = await runImageGeneration(taskId, imagePrompts);
     await saveStageResult(taskId, 'image_prompts', renderedImages);
+
+    // 7b. Quality Score — детерминированный агрегат по eeat_audit и др.
+    //     отчётам. Не делает сети. Используется в /api/admin/model-comparison.
+    // Перед quality_score — финальный лог по статистике Gemini Context Cache.
+    if (geminiCacheName) {
+      const reused = Number(task.__geminiCacheReuseCount || 0);
+      await appendLog(
+        taskId,
+        `[cache] gemini cachedContent ${geminiCacheName.split('/').pop()}: ` +
+        `${reused > 0 ? `reused ${reused} time(s)` : '⚠ created but NEVER reused (check pipeline flow)'}`,
+        reused > 0 ? 'info' : 'warn',
+      );
+    }
+    try {
+      const { computeQualityScore } = require('../qualityLayers/qualityScore');
+      const { rows: [t] } = await db.query(
+        `SELECT eeat_audit, gemini_model,
+                total_cost_usd, total_tokens_in, total_tokens_out,
+                started_at
+           FROM link_article_tasks
+          WHERE id = $1`,
+        [taskId],
+      );
+      if (t) {
+        const elapsedMs = t.started_at
+          ? Date.now() - new Date(t.started_at).getTime()
+          : null;
+        const quality = computeQualityScore(
+          { eeat_audit: t.eeat_audit },
+          {
+            model_used:         t.gemini_model,
+            cost_usd:           Number(t.total_cost_usd)   || 0,
+            tokens_in:          Number(t.total_tokens_in)  || 0,
+            tokens_out:         Number(t.total_tokens_out) || 0,
+            generation_time_ms: elapsedMs,
+          },
+        );
+        await saveStageResult(taskId, 'quality_score', quality);
+        if (quality.overall !== null) {
+          await appendLog(
+            taskId,
+            `📊 Quality score: ${quality.overall.toFixed(1)}/100 (model=${quality.model_used || '?'})`,
+            'info',
+          );
+        }
+      }
+    } catch (qsErr) {
+      console.warn(`[linkArticle] computeQualityScore failed: ${qsErr.message}`);
+    }
 
     // 8. Embed images + strip any unused placeholders
     const finalHtml  = embedImages(articleHtml, renderedImages);

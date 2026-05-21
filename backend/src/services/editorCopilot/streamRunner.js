@@ -3,6 +3,7 @@
 const db = require('../../config/db');
 const { streamGenerate, callGemini } = require('../llm/gemini.adapter');
 const { streamGenerateGrok, callGrok, XAI_MODEL } = require('../llm/grok.adapter');
+const { DEFAULT_GEMINI_COPYWRITING_MODEL } = require('../llm/geminiModels');
 const { calcCost } = require('../metrics/priceCalculator');
 const { buildContext } = require('./contextBuilder');
 const { buildPrompt, postProcess, validateOutput, buildCorrectiveUserPrompt } = require('./promptBuilder');
@@ -22,7 +23,7 @@ const { getPreset } = require('./actionPresets');
 const COPILOT_MODEL =
   process.env.EDITOR_COPILOT_MODEL ||
   process.env.GEMINI_MODEL ||
-  'gemini-3.1-pro-preview';
+  DEFAULT_GEMINI_COPYWRITING_MODEL;
 
 // После завершения операции держим её в in-memory регистре ещё 30 секунд,
 // чтобы поздние подписчики (например, автоматический реконнект EventSource

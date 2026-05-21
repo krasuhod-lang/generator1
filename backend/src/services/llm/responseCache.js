@@ -3,6 +3,30 @@
 /**
  * responseCache — детерминированный кэш «промпт → JSON ответ» в Redis.
  *
+ * ─────────────────────────────────────────────────────────────────────
+ * Этот модуль — ОДИН ИЗ ТРЁХ СЛОЁВ кэширования между задачами в системе.
+ * Для общей карты кэшей см. также `cachePolicy.js` (заголовочный
+ * комментарий) и `pipeline/orchestrator.js`. Краткая карта:
+ *
+ *   1) responseCache (этот файл) — Redis-кэш HTTP-ответов LLM, ключ
+ *      `sha256(adapter|model|system|user|temperature|maxTokens)` с
+ *      префиксом по бренду. TTL — из cachePolicy.shouldCache(...).
+ *      Действует МЕЖДУ задачами (любая повторная задача с теми же
+ *      параметрами берёт ответ без оплаты).
+ *   2) Gemini Context Caching (`createCachedContent`) — серверный
+ *      кэш Google, TTL 900с (15 мин). Используется IAKB/LinkAKB,
+ *      разделяемый внутри одной задачи между Stage 3/5/6 (см.
+ *      `infoArticleKnowledgeBase.js` / `linkArticleKnowledgeBase.js`).
+ *      НЕ переиспользуется между задачами (cache name хранится в
+ *      tasks.gemini_cache_name, удаляется в finally).
+ *   3) Межстадийный «БД-кэш» — колонки `*_stage*_result` /
+ *      `eeat_audit` / `lsi_report` / и т.п. в `tasks` /
+ *      `info_article_tasks` / `link_article_tasks`. Обеспечивает
+ *      идемпотентность стадий: при ре-старте воркера каждая стадия
+ *      читает свой `*_result` и пропускает повтор LLM-вызова.
+ *      Карта «стадия → колонка → R/W» — в шапке `orchestrator.js`.
+ * ─────────────────────────────────────────────────────────────────────
+ *
  * Цель: экономить деньги при повторных запусках задачи с одним и тем же
  * входом (URL + ключи + параметры). Альтернатива serverside context-cache:
  * работает для всех провайдеров (Gemini / Grok / DeepSeek / Qwen), и
