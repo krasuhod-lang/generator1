@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import DOMPurify from 'dompurify';
 import AppLayout from '../components/AppLayout.vue';
+import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import api from '../api.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useLinkArticleStore } from '../stores/linkArticle.js';
@@ -16,6 +17,7 @@ const form = ref({
   anchor_url:    '',
   focus_notes:   '',
   output_format: 'html',
+  gemini_model:  'gemini-3.1-pro-preview',
 });
 const submitting = ref(false);
 const formError  = ref(null);
@@ -65,6 +67,7 @@ async function handleCreate() {
       anchor_url:    form.value.anchor_url.trim(),
       focus_notes:   form.value.focus_notes.trim(),
       output_format: form.value.output_format,
+      gemini_model:  form.value.gemini_model,
     });
     await store.fetchTasks();
     if (id) {
@@ -459,6 +462,12 @@ const hasResult = computed(() => !!selectedTask.value?.article_html);
               из них предлагается по умолчанию для копирования.
             </p>
           </div>
+
+          <GeminiModelSelector
+            v-model="form.gemini_model"
+            :disabled="submitting"
+            hint="Модель применяется к Gemini-writer этапу этой задачи."
+          />
 
           <div v-if="formError"
                class="p-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">

@@ -29,6 +29,7 @@ const { withUserSlot } = require('../utils/perUserConcurrency');
 const { normalizeCommercialLinks, MAX_COMMERCIAL_LINKS } =
   require('../services/infoArticle/excelParser');
 const sse = require('../services/sse/sseManager');
+const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 
 const MAX_TOPIC_LEN  = 250;
 const MIN_TOPIC_LEN  = 5;
@@ -82,8 +83,9 @@ async function listInfoArticleTasks(req, res, next) {
     const { rows } = await db.query(
       `SELECT id, topic, region, brand_name, output_format,
               commercial_links_filename, commercial_links_count,
-              images_count, source_relevance_report_id,
-              status, progress_pct, current_stage, error_message,
+               images_count, source_relevance_report_id,
+               gemini_model,
+               status, progress_pct, current_stage, error_message,
               deepseek_tokens_in, deepseek_tokens_out,
               gemini_tokens_in, gemini_tokens_out,
               gemini_image_calls, cost_usd, eeat_score,
@@ -113,6 +115,7 @@ async function createInfoArticleTask(req, res, next) {
     const outputFormat = ALLOWED_FORMATS.includes(String(body.output_format || '').toLowerCase())
       ? String(body.output_format).toLowerCase()
       : 'html';
+    const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
     // Изображения: 1..6, default 1. Для статьи в блог пользователь сам
     // указывает количество — см. бизнес-требование (D).
     const imagesCount  = clampImagesCount(body.images_count);
@@ -157,19 +160,19 @@ async function createInfoArticleTask(req, res, next) {
     const { rows } = await db.query(
       `INSERT INTO info_article_tasks
          (user_id, topic, region, brand_name, author_name, brand_facts, output_format,
-          commercial_links, commercial_links_filename, commercial_links_count,
-          images_count, source_relevance_report_id,
-          status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'queued', 0)
+           commercial_links, commercial_links_filename, commercial_links_count,
+           images_count, source_relevance_report_id,
+           gemini_model, status, progress_pct)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'queued', 0)
        RETURNING id, topic, region, brand_name, output_format,
                  commercial_links_filename, commercial_links_count,
-                 images_count, source_relevance_report_id,
+                 images_count, source_relevance_report_id, gemini_model,
                  status, progress_pct, created_at`,
       [
         req.user.id, topic, region, brandName || null, authorName || null,
         brandFacts || null, outputFormat,
         JSON.stringify(links), filename || null, links.length,
-        imagesCount, relevanceReportId,
+        imagesCount, relevanceReportId, geminiModel,
       ],
     );
     const task = rows[0];

@@ -13,6 +13,7 @@
 const db = require('../config/db');
 const { processMetaTagTask } = require('../services/metaTags/pipeline');
 const { withUserSlot } = require('../utils/perUserConcurrency');
+const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 
 // ─── Валидация входных данных ─────────────────────────────────────
 const MAX_NAME_LEN     = 200;
@@ -43,6 +44,7 @@ async function listMetaTagTasks(req, res, next) {
               progress_current, progress_total, active_keyword,
               jsonb_array_length(COALESCE(keywords, '[]'::jsonb)) AS keywords_count,
               total_tokens_in, total_tokens_out, total_cost_usd, llm_model,
+              llm_provider, gemini_model,
               error_message, created_at, started_at, completed_at
          FROM meta_tag_tasks
         WHERE user_id = $1
@@ -75,15 +77,16 @@ async function createMetaTagTask(req, res, next) {
     const llmProvider = (typeof body.llm_provider === 'string'
         && body.llm_provider.toLowerCase().trim() === 'grok')
       ? 'grok' : 'gemini';
+    const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
 
     const { rows } = await db.query(
       `INSERT INTO meta_tag_tasks
          (user_id, name, niche, lr, toponym, brand, phone, summary, keywords,
-          status, progress_total, llm_provider)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending', $10, $11)
-       RETURNING id, name, status, progress_total, llm_provider, created_at`,
+           status, progress_total, llm_provider, gemini_model)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending', $10, $11, $12)
+       RETURNING id, name, status, progress_total, llm_provider, gemini_model, created_at`,
       [req.user.id, name, niche, lr, toponym, brand, phone, summary,
-        JSON.stringify(keywords), keywords.length, llmProvider],
+        JSON.stringify(keywords), keywords.length, llmProvider, geminiModel],
     );
     const task = rows[0];
 

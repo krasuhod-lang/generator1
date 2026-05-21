@@ -227,6 +227,7 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user' NOT NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
 
     // Migration 005: pause/resume support — add 'pausing' / 'paused' to task_status enum,
     // add pipeline_checkpoint column, and partial index. Idempotent via DO blocks /
@@ -399,6 +400,7 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS total_tokens_out BIGINT NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS total_cost_usd   NUMERIC(12, 6) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS llm_model        TEXT`);
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS gemini_model     TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_user_created ON meta_tag_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_status ON meta_tag_tasks (status)`);
 
@@ -449,7 +451,6 @@ async function ensureSchema() {
         END IF;
       END$$;
     `);
-
     // ─── Migration 012: Link Article Generator ───────────────────────
     // Генератор ссылочной статьи. Отдельный пайплайн и таблица.
     // Создаём ENUM и таблицу идемпотентно, чтобы после простого
@@ -499,6 +500,7 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_user_created ON link_article_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_status       ON link_article_tasks (status)`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
 
     // Отдельный журнал событий пайплайна ссылочной статьи.
     // Inline logs JSONB в link_article_tasks остаётся для UI-ленты,
@@ -587,6 +589,7 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS trends_json         JSONB`);
     await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS evaluator_report    JSONB`);
     await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS module_context_used JSONB`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS gemini_model        TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
     await db.query(`
       CREATE TABLE IF NOT EXISTS article_topic_trends (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -691,6 +694,7 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_user_created ON info_article_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_status       ON info_article_tasks (status)`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_info_article_eeat_score
         ON info_article_tasks (eeat_score)
@@ -915,6 +919,32 @@ async function ensureSchema() {
     await db.query(`
       ALTER TABLE info_article_tasks
         ADD COLUMN IF NOT EXISTS lsi_overdose_report JSONB;
+    `);
+
+    // Gemini text model selector for copywriting tasks: only internal
+    // production-approved models are accepted per task.
+    await db.query(`
+      DO $$
+      DECLARE
+        tbl TEXT;
+        constraint_name TEXT;
+      BEGIN
+        FOREACH tbl IN ARRAY ARRAY['tasks','meta_tag_tasks','link_article_tasks','info_article_tasks','article_topic_tasks']
+        LOOP
+          constraint_name := tbl || '_gemini_model_check';
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = constraint_name
+          ) THEN
+            EXECUTE format(
+              'ALTER TABLE %I ADD CONSTRAINT %I CHECK (gemini_model IN (%L, %L))',
+              tbl,
+              constraint_name,
+              'gemini-3.1-pro-preview',
+              'gemini-3.5-flash'
+            );
+          END IF;
+        END LOOP;
+      END$$;
     `);
 
     // Migration 032: forecaster_tasks (модуль «Прогнозатор»).

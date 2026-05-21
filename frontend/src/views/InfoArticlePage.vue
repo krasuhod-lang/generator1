@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 import DOMPurify from 'dompurify';
 import readXlsxFile from 'read-excel-file';
 import AppLayout from '../components/AppLayout.vue';
+import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import { useAuthStore } from '../stores/auth.js';
 import { useInfoArticleStore } from '../stores/infoArticle.js';
 
@@ -19,6 +20,7 @@ const form = ref({
   author_name:   '',
   brand_facts:   '',
   output_format: 'html',
+  gemini_model:  'gemini-3.1-pro-preview',
   // Количество генерируемых изображений (1..6, default 1).
   // По бизнес-требованию: «делается только для статьи в блог» — поле живёт
   // только здесь. Backend проверяет диапазон ещё раз (см. clampImagesCount).
@@ -350,6 +352,7 @@ async function handleCreate() {
       brand_facts:  form.value.brand_facts.trim(),
       output_format: form.value.output_format,
       images_count: imagesCount,
+      gemini_model:  form.value.gemini_model,
       commercial_links: parsedLinks.value,
       commercial_links_filename: fileMeta.value?.name || '',
     };
@@ -1049,6 +1052,11 @@ onUnmounted(() => { stopTicker(); });
                   </span>
                 </div>
               </div>
+              <GeminiModelSelector
+                v-model="form.gemini_model"
+                :disabled="submitting"
+                hint="Модель применяется к Gemini-writer этапу этой задачи."
+              />
               <div v-if="form.source_relevance_report_id" class="p-2 rounded bg-emerald-900/20 border border-emerald-800/50 text-xs text-emerald-300">
                 🎯 Подключён отчёт релевантности
                 <code class="font-mono">{{ form.source_relevance_report_id.slice(0, 8) }}…</code>

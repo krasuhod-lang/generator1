@@ -16,6 +16,7 @@
 
 const { callGemini } = require('../llm/gemini.adapter');
 const { callGrok }   = require('../llm/grok.adapter');
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
 const { checkLsiUsage } = require('./semantics');
@@ -452,10 +453,14 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
     // бюджет тоже хватает с запасом для Title+Description+H1.
     const provider = (inputs && inputs.llm_provider === 'grok') ? 'grok' : 'gemini';
     const callFn   = provider === 'grok' ? callGrok : callGemini;
+    const callOptions = { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 };
+    if (provider === 'gemini') {
+      callOptions.model = normalizeGeminiCopywritingModel(inputs && inputs.gemini_model);
+    }
     const callRes = await callFn(
       SYSTEM_PROMPT,
       userPrompt,
-      { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 },
+      callOptions,
     );
     totalTokensIn       += callRes.tokensIn       || 0;
     totalTokensOut      += callRes.tokensOut      || 0;

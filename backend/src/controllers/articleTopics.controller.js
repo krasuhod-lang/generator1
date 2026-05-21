@@ -14,6 +14,7 @@ const db = require('../config/db');
 const { processArticleTopicTask } = require('../services/articleTopics/articleTopicsPipeline');
 const { findDuplicateDeepDives } = require('../services/articleTopics/articleTopicsTrends');
 const { withUserSlot } = require('../utils/perUserConcurrency');
+const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 
 // Лимиты длины — чтобы не дать раздуть промпт неосторожным копипастом
 // и не зацепить лимит входа Gemini-адаптера.
@@ -60,7 +61,7 @@ async function listArticleTopicTasks(req, res, next) {
     const { rows } = await db.query(
       `SELECT id, mode, parent_task_id, niche, region, horizon, audience,
               market_stage, search_ecosystem, top_competitors, trend_name,
-              status, error_message, llm_model,
+              status, error_message, gemini_model, llm_model,
               gemini_tokens_in, gemini_tokens_out, cost_usd,
               trends_json, evaluator_report,
               topic_count_requested, topic_count_returned,
@@ -91,15 +92,16 @@ async function createArticleTopicTask(req, res, next) {
     const market_stage     = pickEnum(body.market_stage,     ALLOWED_MARKET_STAGE);
     const search_ecosystem = pickEnum(body.search_ecosystem, ALLOWED_ECOSYSTEM);
     const top_competitors  = clipStr(body.top_competitors,  LIMITS.top_competitors);
+    const geminiModel      = normalizeGeminiCopywritingModel(body.gemini_model);
 
     const { rows } = await db.query(
       `INSERT INTO article_topic_tasks
-         (user_id, mode, niche, region, horizon, audience, market_stage,
-          search_ecosystem, top_competitors, status)
-       VALUES ($1, 'main', $2, $3, $4, $5, $6, $7, $8, 'queued')
-       RETURNING id, mode, niche, status, created_at`,
+          (user_id, mode, niche, region, horizon, audience, market_stage,
+           search_ecosystem, top_competitors, gemini_model, status)
+       VALUES ($1, 'main', $2, $3, $4, $5, $6, $7, $8, $9, 'queued')
+       RETURNING id, mode, niche, gemini_model, status, created_at`,
       [req.user.id, niche, region, horizon, audience, market_stage,
-       search_ecosystem, top_competitors],
+       search_ecosystem, top_competitors, geminiModel],
     );
     const task = rows[0];
 
@@ -141,6 +143,7 @@ async function createArticleTopicIdeasTask(req, res, next) {
     const audience  = pickEnum(body.audience, ALLOWED_AUDIENCE);
     const targetUrl = clipStr(body.target_url, LIMITS.target_url);
     const brandHint = clipStr(body.brand_hint, LIMITS.brand_hint);
+    const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
 
     // topic_count: integer в [LIMITS.topic_count_min .. LIMITS.topic_count_max].
     // Default — LIMITS.topic_count_default (10). Любая некорректная форма
@@ -182,11 +185,11 @@ async function createArticleTopicIdeasTask(req, res, next) {
 
     const { rows } = await db.query(
       `INSERT INTO article_topic_tasks
-         (user_id, mode, niche, region, audience,
-          status, topic_count_requested, module_context_used)
-       VALUES ($1, 'topic_ideas', $2, $3, $4, 'queued', $5, $6::jsonb)
-       RETURNING id, mode, niche, status, topic_count_requested, created_at`,
-      [req.user.id, niche, region, audience, topicCount, JSON.stringify(initialContext)],
+          (user_id, mode, niche, region, audience,
+           status, topic_count_requested, module_context_used, gemini_model)
+       VALUES ($1, 'topic_ideas', $2, $3, $4, 'queued', $5, $6::jsonb, $7)
+       RETURNING id, mode, niche, status, topic_count_requested, gemini_model, created_at`,
+      [req.user.id, niche, region, audience, topicCount, JSON.stringify(initialContext), geminiModel],
     );
     const task = rows[0];
 
@@ -220,7 +223,7 @@ async function createArticleTopicDeepDive(req, res, next) {
     // чтобы новый deep-dive унаследовал нишу/регион/горизонт.
     const { rows: parentRows } = await db.query(
       `SELECT id, niche, region, horizon, audience, market_stage,
-              search_ecosystem, top_competitors, status
+              search_ecosystem, top_competitors, status, gemini_model
          FROM article_topic_tasks
         WHERE id = $1 AND user_id = $2 AND mode = 'main'`,
       [parent_task_id, req.user.id],
@@ -256,13 +259,13 @@ async function createArticleTopicDeepDive(req, res, next) {
 
     const { rows } = await db.query(
       `INSERT INTO article_topic_tasks
-         (user_id, mode, parent_task_id, niche, region, horizon, audience,
-          market_stage, search_ecosystem, top_competitors, trend_name, status)
-       VALUES ($1, 'deep_dive', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')
-       RETURNING id, mode, parent_task_id, niche, trend_name, status, created_at`,
+          (user_id, mode, parent_task_id, niche, region, horizon, audience,
+           market_stage, search_ecosystem, top_competitors, trend_name, gemini_model, status)
+       VALUES ($1, 'deep_dive', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued')
+       RETURNING id, mode, parent_task_id, niche, trend_name, gemini_model, status, created_at`,
       [req.user.id, parent.id, parent.niche, parent.region, parent.horizon,
        parent.audience, parent.market_stage, parent.search_ecosystem,
-       parent.top_competitors, trend_name],
+       parent.top_competitors, trend_name, normalizeGeminiCopywritingModel(parent.gemini_model)],
     );
     const task = rows[0];
 

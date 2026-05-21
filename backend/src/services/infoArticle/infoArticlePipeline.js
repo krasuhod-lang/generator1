@@ -34,6 +34,7 @@ const { buildPersonaSystemBlock } = require('../../prompts/infoArticle/personas'
 const { generateImage, IMAGE_PRICE_USD } = require('../linkArticle/nanoBananaPro.adapter');
 const sse = require('../sse/sseManager');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { EEAT_PQ_TARGET, LSI_COVERAGE_TARGET } = require('../../utils/objectiveMetrics');
 
 const {
@@ -1264,6 +1265,7 @@ async function processInfoArticleTask(taskId) {
         const created = await createCachedContent({
           systemInstruction: cacheText,
           ttlSeconds: INFO_ARTICLE_GEMINI_CACHE_TTL_S,
+          model: normalizeGeminiCopywritingModel(task.gemini_model),
         });
         task.__geminiCacheName = created.name;
         geminiCacheName = created.name;

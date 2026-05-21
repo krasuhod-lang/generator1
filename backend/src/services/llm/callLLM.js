@@ -262,6 +262,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     onCacheMiss   = null,
     tokenBudget   = Infinity,
     brand         = '',
+    model         = null,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -310,6 +311,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         prompt,
         temperature,
         maxTokens,
+        model,
         brand,
       }).catch(() => null)
     : null;
@@ -328,6 +330,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       const callOpts = { temperature, maxTokens, logprobs };
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         callOpts.timeoutMs = timeoutMs;
+      }
+      if (adapter === 'gemini' && model) {
+        callOpts.model = model;
       }
       if (adapter === 'gemini' && activeCachedContent) {
         callOpts.cachedContent = activeCachedContent;

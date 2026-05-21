@@ -260,6 +260,7 @@ async function runMetaTagTaskInner(taskId) {
     // LLM-провайдер: 'gemini' (default) | 'grok'. Прокидывается в
     // generateDrMaxMeta → callGemini/callGrok через args.inputs.
     llm_provider: (task.llm_provider || 'gemini').toString().toLowerCase() === 'grok' ? 'grok' : 'gemini',
+    gemini_model: task.gemini_model || '',
   };
 
   // Локальные агрегаты — чтобы не дёргать SUM из JSONB на каждом ключе.

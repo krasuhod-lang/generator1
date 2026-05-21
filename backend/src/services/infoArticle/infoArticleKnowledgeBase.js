@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+
 /**
  * infoArticleKnowledgeBase — IAKB (аналог LAKB для генератора инфо-статьи).
  *
@@ -400,6 +402,7 @@ function iakbSystem(task) {
 
 function iakbCallOpts(task, extra = {}) {
   const opts = { ...extra };
+  opts.model = normalizeGeminiCopywritingModel(task?.gemini_model);
   if (task?.__geminiCacheName) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
