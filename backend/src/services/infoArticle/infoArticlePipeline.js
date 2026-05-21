@@ -1751,6 +1751,62 @@ async function processInfoArticleTask(taskId) {
       }
     }
 
+    // 13c. Quality Score — детерминированная сводная метрика по всем
+    //      посчитанным отчётам качества. Используется в /api/admin/model-comparison
+    //      для сравнения gemini-моделей. Не делает сети, никогда не валит
+    //      pipeline (try/catch).
+    try {
+      const { computeQualityScore } = require('../qualityLayers/qualityScore');
+      // Перечитываем актуальные отчёты + метаданные задачи.
+      const { rows: [t] } = await db.query(
+        `SELECT eeat_audit, readability_report, intent_verdict,
+                fact_check_report, plagiarism_report, lsi_report,
+                lsi_overdose_report, validation_report, image_qa_report,
+                gemini_model,
+                total_cost_usd, total_tokens_in, total_tokens_out,
+                started_at
+           FROM info_article_tasks
+          WHERE id = $1`,
+        [taskId],
+      );
+      if (t) {
+        const elapsedMs = t.started_at
+          ? Date.now() - new Date(t.started_at).getTime()
+          : null;
+        const quality = computeQualityScore(
+          {
+            eeat_audit:          t.eeat_audit,
+            readability_report:  t.readability_report,
+            intent_verdict:      t.intent_verdict,
+            fact_check_report:   t.fact_check_report,
+            plagiarism_report:   t.plagiarism_report,
+            lsi_report:          t.lsi_report,
+            lsi_overdose_report: t.lsi_overdose_report,
+            validation_report:   t.validation_report,
+            image_qa_report:     t.image_qa_report,
+          },
+          {
+            model_used:         t.gemini_model,
+            cost_usd:           Number(t.total_cost_usd)   || 0,
+            tokens_in:          Number(t.total_tokens_in)  || 0,
+            tokens_out:         Number(t.total_tokens_out) || 0,
+            generation_time_ms: elapsedMs,
+          },
+        );
+        await saveColumn(taskId, 'quality_score', quality);
+        if (quality.overall !== null) {
+          await appendLog(
+            taskId,
+            `📊 Quality score: ${quality.overall.toFixed(1)}/100 ` +
+            `(model=${quality.model_used || '?'})`,
+            'info',
+          );
+        }
+      }
+    } catch (qsErr) {
+      console.warn(`[infoArticle] computeQualityScore failed: ${qsErr.message}`);
+    }
+
     // 14. Финализация HTML + plain text. Cover-изображение встраивается в
     //     article_html сразу после <h1> (см. embedImages), чтобы при копировании
     //     HTML / форматированного текста картинка уезжала вместе со статьёй.

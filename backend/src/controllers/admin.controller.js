@@ -382,4 +382,119 @@ async function getAdminTaskLogs(req, res, next) {
   }
 }
 
-module.exports = { adminLogin, listUsers, getUserDetail, getUserTasks, getStats, listAllTasks, getAdminTaskDetail, getAdminTaskLogs };
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin: model comparison — агрегат quality_score по моделям.
+// Используется для сравнения качества Gemini-моделей (Pro vs Flash и т.п.)
+// на корпусе уже завершённых задач. Источник — info_article_tasks.quality_score
+// и link_article_tasks.quality_score (миграция 037).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/model-comparison?from=&to=
+ *
+ * Параметры:
+ *   from, to — ISO-даты для фильтра по completed_at (опционально).
+ *
+ * Ответ:
+ *   { rows: [{
+ *       model_used, source ('info_article'|'link_article'),
+ *       tasks_count,
+ *       avg_overall, avg_cost_usd, avg_generation_time_ms,
+ *       avg_tokens_in, avg_tokens_out,
+ *       avg_eeat, avg_readability, avg_fact_check, avg_plagiarism,
+ *       avg_intent, avg_lsi, avg_image_qa, avg_validation
+ *     }, ...] }
+ */
+async function getModelComparison(req, res, next) {
+  try {
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to   = req.query.to   ? new Date(req.query.to)   : null;
+    if (from && Number.isNaN(+from)) return res.status(400).json({ error: 'invalid `from`' });
+    if (to   && Number.isNaN(+to))   return res.status(400).json({ error: 'invalid `to`' });
+
+    // Один SQL для обеих таблиц через UNION ALL. Аккуратно через параметры
+    // ($1..$4) — никакой SQL-конкатенации (см. point 9.1).
+    const sql = `
+      WITH unioned AS (
+        SELECT
+          'info_article' AS source,
+          COALESCE(quality_score->>'model_used', gemini_model) AS model_used,
+          (quality_score->>'overall')::float            AS overall,
+          (quality_score->>'cost_usd')::float           AS cost_usd,
+          (quality_score->>'generation_time_ms')::float AS generation_time_ms,
+          (quality_score->>'tokens_in')::float          AS tokens_in,
+          (quality_score->>'tokens_out')::float         AS tokens_out,
+          (quality_score->'sub'->>'eeat')::float        AS sub_eeat,
+          (quality_score->'sub'->>'readability')::float AS sub_readability,
+          (quality_score->'sub'->>'fact_check')::float  AS sub_fact_check,
+          (quality_score->'sub'->>'plagiarism')::float  AS sub_plagiarism,
+          (quality_score->'sub'->>'intent')::float      AS sub_intent,
+          (quality_score->'sub'->>'lsi')::float         AS sub_lsi,
+          (quality_score->'sub'->>'image_qa')::float    AS sub_image_qa,
+          (quality_score->'sub'->>'validation')::float  AS sub_validation,
+          completed_at
+        FROM info_article_tasks
+        WHERE quality_score IS NOT NULL
+          AND ($1::timestamptz IS NULL OR completed_at >= $1)
+          AND ($2::timestamptz IS NULL OR completed_at <= $2)
+
+        UNION ALL
+
+        SELECT
+          'link_article' AS source,
+          COALESCE(quality_score->>'model_used', gemini_model) AS model_used,
+          (quality_score->>'overall')::float            AS overall,
+          (quality_score->>'cost_usd')::float           AS cost_usd,
+          (quality_score->>'generation_time_ms')::float AS generation_time_ms,
+          (quality_score->>'tokens_in')::float          AS tokens_in,
+          (quality_score->>'tokens_out')::float         AS tokens_out,
+          (quality_score->'sub'->>'eeat')::float        AS sub_eeat,
+          NULL::float AS sub_readability,
+          NULL::float AS sub_fact_check,
+          NULL::float AS sub_plagiarism,
+          NULL::float AS sub_intent,
+          NULL::float AS sub_lsi,
+          NULL::float AS sub_image_qa,
+          NULL::float AS sub_validation,
+          completed_at
+        FROM link_article_tasks
+        WHERE quality_score IS NOT NULL
+          AND ($3::timestamptz IS NULL OR completed_at >= $3)
+          AND ($4::timestamptz IS NULL OR completed_at <= $4)
+      )
+      SELECT
+        source,
+        model_used,
+        COUNT(*)::int                          AS tasks_count,
+        ROUND(AVG(overall)::numeric, 1)        AS avg_overall,
+        ROUND(AVG(cost_usd)::numeric, 6)       AS avg_cost_usd,
+        ROUND(AVG(generation_time_ms)::numeric, 0) AS avg_generation_time_ms,
+        ROUND(AVG(tokens_in)::numeric, 0)      AS avg_tokens_in,
+        ROUND(AVG(tokens_out)::numeric, 0)     AS avg_tokens_out,
+        ROUND(AVG(sub_eeat)::numeric, 1)        AS avg_eeat,
+        ROUND(AVG(sub_readability)::numeric, 1) AS avg_readability,
+        ROUND(AVG(sub_fact_check)::numeric, 1)  AS avg_fact_check,
+        ROUND(AVG(sub_plagiarism)::numeric, 1)  AS avg_plagiarism,
+        ROUND(AVG(sub_intent)::numeric, 1)      AS avg_intent,
+        ROUND(AVG(sub_lsi)::numeric, 1)         AS avg_lsi,
+        ROUND(AVG(sub_image_qa)::numeric, 1)    AS avg_image_qa,
+        ROUND(AVG(sub_validation)::numeric, 1)  AS avg_validation
+      FROM unioned
+      WHERE model_used IS NOT NULL
+      GROUP BY source, model_used
+      ORDER BY source, model_used
+    `;
+    const { rows } = await db.query(sql, [from, to, from, to]);
+    return res.json({
+      rows,
+      filters: {
+        from: from ? from.toISOString() : null,
+        to:   to   ? to.toISOString()   : null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { adminLogin, listUsers, getUserDetail, getUserTasks, getStats, listAllTasks, getAdminTaskDetail, getAdminTaskLogs, getModelComparison };

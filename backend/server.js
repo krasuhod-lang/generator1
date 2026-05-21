@@ -921,6 +921,27 @@ async function ensureSchema() {
         ADD COLUMN IF NOT EXISTS lsi_overdose_report JSONB;
     `);
 
+    // Migration 037: quality_score JSONB — детерминированный агрегат качества
+    // генерации, считаемый qualityLayers/qualityScore.js по уже существующим
+    // отчётам (eeat, readability, intent, fact_check, plagiarism, lsi*, image_qa,
+    // validation). Используется в /api/admin/model-comparison и в qualityFeedback.
+    await db.query(`
+      ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS quality_score JSONB;
+    `);
+    await db.query(`
+      ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS quality_score JSONB;
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS info_article_quality_score_model_idx
+        ON info_article_tasks ((quality_score->>'model_used'))
+        WHERE quality_score IS NOT NULL;
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS link_article_quality_score_model_idx
+        ON link_article_tasks ((quality_score->>'model_used'))
+        WHERE quality_score IS NOT NULL;
+    `);
+
     // Gemini text model selector for copywriting tasks: only internal
     // production-approved models are accepted per task.
     await db.query(`
