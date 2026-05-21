@@ -359,8 +359,11 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // Подсветим thoughts/cached в логе только когда они ненулевые — иначе шум.
       const thoughtsNote = (result.thoughtsTokens || 0) > 0 ? ` | thoughts: ${result.thoughtsTokens}` : '';
       const cachedTokNote = (result.cachedTokens   || 0) > 0 ? ` | cached_in: ${result.cachedTokens}` : '';
+      // Показываем фактически использованную модель — для удобства сравнения
+      // качества разных Gemini-моделей в одной задаче.
+      const modelTag = result.model ? ` (${result.model})` : '';
       log(
-        `${callLabel || stageName} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote} | $${costUsd.toFixed(6)}`,
+        `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote} | $${costUsd.toFixed(6)}`,
         'success'
       );
 

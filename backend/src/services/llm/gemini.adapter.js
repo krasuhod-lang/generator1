@@ -2,6 +2,7 @@
 
 const axios       = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { getGeminiProfile, buildJsonStrictGuard } = require('./geminiProfiles');
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview';
 
@@ -349,17 +350,22 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
     throw new Error('Input text too long');
   }
 
+  // ── Модель и DSPy-профиль ────────────────────────────────────────
+  // Профиль автоматически подставляет temperature/maxTokens, если они
+  // не заданы пользователем явно. Усиленный JSON-guard для 'strict'-
+  // профиля (Flash) помогает быстрой модели не сбиваться на markdown.
+  const model = options.model || GEMINI_MODEL;
+  const profile = getGeminiProfile(model);
+
   const {
-    temperature = 0.4,
-    maxTokens   = 16384,
+    temperature = profile.temperature,
+    maxTokens   = profile.maxTokens,
     timeoutMs   = DEFAULT_GEMINI_TIMEOUT_MS,
     cachedContent = null,
     // plainText=true → НЕ навешиваем JSON_STRICT_GUARD и НЕ форсим
     // responseMimeType=application/json. Используется фолбэком streamGenerate(),
     // когда AI-Copilot редактору нужен HTML/Markdown вместо JSON.
     plainText  = false,
-    // model — позволяет переопределить GEMINI_MODEL (например, EDITOR_COPILOT_MODEL).
-    model      = GEMINI_MODEL,
   } = options;
 
   // Проверка параметров
@@ -373,12 +379,8 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   const endpoint = `${GEMINI_BASE_URL}/${model}:generateContent?key=${apiKey}`;
 
   // ── JSON-strict guard (всегда в systemInstruction) ────────────────
-  const JSON_STRICT_GUARD =
-    'You are a strict REST API. Output ONLY valid JSON. Do not wrap in Markdown. ' +
-    'Never use trailing commas. CRITICAL RULES: ' +
-    '1) NEVER use double quotes inside string values (use single quotes \'\' instead). ' +
-    '2) Always enclose JSON keys in double quotes. ' +
-    '3) NEVER use unescaped newlines inside string values.';
+  // Уровень определяется profile.jsonStrictGuardLevel.
+  const JSON_STRICT_GUARD = buildJsonStrictGuard(model);
 
   // userPrompt всегда уходит в `contents`. systemInstruction идёт в нативное поле.
   const generationConfig = {

@@ -42,14 +42,14 @@ const {
   pointerOrJson,
 } = require('./linkArticleKnowledgeBase');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
-const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { normalizeGeminiCopywritingModel, DEFAULT_GEMINI_COPYWRITING_MODEL } = require('../llm/geminiModels');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
   process.env.LINK_ARTICLE_GEMINI_MODEL ||
   process.env.GEMINI_MODEL ||
-  'gemini-3.1-pro-preview';
+  DEFAULT_GEMINI_COPYWRITING_MODEL;
 
 const MAX_PARALLEL_IMAGES = (() => {
   const v = parseInt(process.env.LINK_ARTICLE_MAX_PARALLEL_IMAGES, 10);

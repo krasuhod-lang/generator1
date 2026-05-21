@@ -34,7 +34,7 @@ const { buildPersonaSystemBlock } = require('../../prompts/infoArticle/personas'
 const { generateImage, IMAGE_PRICE_USD } = require('../linkArticle/nanoBananaPro.adapter');
 const sse = require('../sse/sseManager');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
-const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { normalizeGeminiCopywritingModel, DEFAULT_GEMINI_COPYWRITING_MODEL } = require('../llm/geminiModels');
 const { EEAT_PQ_TARGET, LSI_COVERAGE_TARGET } = require('../../utils/objectiveMetrics');
 
 const {
@@ -124,7 +124,7 @@ const { stripHtmlTagsToText } = require('../../utils/stripHtmlTags');
 const INFO_ARTICLE_GEMINI_MODEL =
   process.env.INFO_ARTICLE_GEMINI_MODEL ||
   process.env.GEMINI_MODEL ||
-  'gemini-3.1-pro-preview';
+  DEFAULT_GEMINI_COPYWRITING_MODEL;
 
 const INFO_ARTICLE_DEEPSEEK_MODEL =
   process.env.INFO_ARTICLE_DEEPSEEK_MODEL ||

@@ -433,7 +433,19 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
   const baseUserPrompt = buildUserPrompt({ keyword, semantics, serpData, inputs, year });
 
-  const MAX_ATTEMPTS = 2; // первый вызов + один retry «с уточнением»
+  const MAX_ATTEMPTS = (() => {
+    // DSPy-style: число попыток зависит от модели Gemini (Flash менее
+    // дисциплинирован, нужно больше ретраев). Для Grok оставляем legacy=2.
+    if (inputs && inputs.llm_provider === 'grok') return 2;
+    try {
+      const { getGeminiProfile } = require('../llm/geminiProfiles');
+      const m = normalizeGeminiCopywritingModel(inputs && inputs.gemini_model);
+      const p = getGeminiProfile(m);
+      return Math.max(2, p.selfCorrectionMaxRetries || 2);
+    } catch (_) {
+      return 2;
+    }
+  })();
   const allNotes = [];
   let result = null;
   let lastMissed = [];
