@@ -1196,6 +1196,51 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_backups_created ON aegis_backups (created_at DESC)`);
 
+    // ─── Migration 044: A.E.G.I.S. Phase 14 (DSPy cold-start / ε-greedy / vector GC) ──
+    await db.query(`
+      ALTER TABLE aegis_dspy_dataset
+        ADD COLUMN IF NOT EXISTS is_seed BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_seed ON aegis_dspy_dataset (is_seed) WHERE is_seed = TRUE`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_dspy_runs (
+        id                 UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        niche              TEXT,
+        dry_run            BOOLEAN      NOT NULL DEFAULT FALSE,
+        rows_real          INTEGER      NOT NULL DEFAULT 0,
+        rows_seed          INTEGER      NOT NULL DEFAULT 0,
+        max_trials         INTEGER      NOT NULL DEFAULT 0,
+        improvement_pct    NUMERIC(6,3),
+        mutation_applied   BOOLEAN      NOT NULL DEFAULT FALSE,
+        epsilon_rate       NUMERIC(5,4),
+        status             VARCHAR(32)  NOT NULL DEFAULT 'planned',
+        cost_usd           NUMERIC(10,4) NOT NULL DEFAULT 0,
+        notes              JSONB,
+        started_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        finished_at        TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_runs_started ON aegis_dspy_runs (started_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_runs_status  ON aegis_dspy_runs (status)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_vector_gc_log (
+        id              BIGSERIAL    PRIMARY KEY,
+        kind            VARCHAR(16)  NOT NULL,
+        collection      TEXT,
+        run_id          UUID,
+        older_than_days INTEGER,
+        points_deleted  INTEGER      NOT NULL DEFAULT 0,
+        collections_seen INTEGER     NOT NULL DEFAULT 0,
+        status          VARCHAR(16)  NOT NULL DEFAULT 'ok',
+        reason          TEXT,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_vector_gc_log_created ON aegis_vector_gc_log (created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_vector_gc_log_run ON aegis_vector_gc_log (run_id) WHERE run_id IS NOT NULL`);
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

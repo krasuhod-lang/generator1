@@ -75,13 +75,14 @@ def _embed_gemini(texts: List[str]) -> List[List[float]]:
     return vectors
 
 
-def index(niche: str, paragraphs: List[str], source_url: Optional[str], embedder: str) -> Dict[str, Any]:
+def index(niche: str, paragraphs: List[str], source_url: Optional[str], embedder: str,
+          run_id: Optional[str] = None, collection_override: Optional[str] = None) -> Dict[str, Any]:
     if embedder != "gemini":
         raise RuntimeError(f"embedder '{embedder}' not implemented; use 'gemini'")
     if not paragraphs:
         return {"indexed": 0}
     cli = _client()
-    coll = _collection(niche)
+    coll = collection_override or _collection(niche)
     vecs = _embed_gemini(paragraphs)
     dim = len(vecs[0])
     # Создаём коллекцию если её ещё нет.
@@ -92,16 +93,27 @@ def index(niche: str, paragraphs: List[str], source_url: Optional[str], embedder
             collection_name=coll,
             vectors_config=VectorParams(size=dim, distance=Distance.COSINE),  # type: ignore[arg-type]
         )
+    # Phase 14: payload содержит created_at + run_id, чтобы vector_gc
+    # мог делать TTL-sweep и per-run cleanup.
+    import datetime as _dt
+    _created_at = _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     points = [
         PointStruct(  # type: ignore[call-arg]
             id=i,
             vector=v,
-            payload={"text": p, "source_url": source_url, "niche": niche},
+            payload={
+                "text": p,
+                "source_url": source_url,
+                "niche": niche,
+                "created_at": _created_at,
+                "run_id": run_id,
+            },
         )
         for i, (p, v) in enumerate(zip(paragraphs, vecs))
     ]
     cli.upsert(collection_name=coll, points=points)
-    return {"indexed": len(points), "collection": coll, "dim": dim}
+    return {"indexed": len(points), "collection": coll, "dim": dim,
+            "created_at": _created_at, "run_id": run_id}
 
 
 def search(niche: str, query: str, top_k: int, embedder: str, hybrid_alpha: float) -> List[Dict[str, Any]]:

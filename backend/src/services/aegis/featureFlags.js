@@ -132,6 +132,19 @@ const AEGIS_FLAGS = deepFreeze({
     maxTrials:        _envInt('AEGIS_DSPY_MAX_TRIALS', 20),
     maxCostUsd:       _envFloat('AEGIS_DSPY_MAX_COST_USD', 50),
     minImprovementPct: _envFloat('AEGIS_DSPY_MIN_IMPROVEMENT_PCT', 5),
+    // Phase 14.1 — Cold-Start seed dataset. Если aegis_dspy_dataset пустой
+    // (или у нас < coldStartMinRows реальных строк), используем
+    // hardcoded reference TOP-1 SEO статьи из aegis_py/app/dspy_seed.py,
+    // чтобы первый MIPROv2 retrain имел ground-truth.
+    coldStartUseSeeds: true,
+    coldStartMinRows:  _envInt('AEGIS_DSPY_COLDSTART_MIN_ROWS', 10),
+    // Phase 14.2 — ε-greedy против mode collapse. В 5–10% случаев
+    // генератор отступает от текущего оптимального промпта и пробует
+    // мутацию (новый порядок секций / альт. шаблон заголовка / иная
+    // плотность списков). Если случайно «выстрелит» в GA4, мозг
+    // переучится под новый формат.
+    epsilonGreedyRate:  _envFloat('AEGIS_DSPY_EPSILON', 0.07),
+    epsilonGreedyMaxRate: 0.20,  // hard-cap, чтобы случайно не сорваться в 100% random
   },
 
   // ── RL / GA4 feedback loop ───────────────────────────────────────
@@ -287,6 +300,48 @@ const AEGIS_FLAGS = deepFreeze({
     // mark (записать с meta.poisoned=true для последующего исключения).
     onFail:                  _envStr('AEGIS_POISON_ON_FAIL', 'drop'),
   },
+
+  // ── Phase 14 — Vector DB Tombstones / GC ─────────────────────────
+  // Qdrant раздувается, если /evidence-абзацы скрапятся 24/7. GC
+  // удаляет точки с payload.created_at старше ttlDays и/или точки
+  // конкретного aegis-прогона после aegis_runs.status='success'.
+  // Ночной cron — .github/workflows/aegis-nightly-vector-gc.yml.
+  vectorGc: {
+    enabled:           _envBool('AEGIS_VECTOR_GC_ENABLED', true),
+    // TTL для эфемерных коллекций (evidence/serp/relevance).
+    ttlDays:           _envInt('AEGIS_VECTOR_GC_TTL_DAYS', 30),
+    // После успешного aegis_runs.status='success' зачищать точки
+    // с payload.run_id = <run_id> (мгновенный per-run cleanup).
+    perRunCleanup:     _envBool('AEGIS_VECTOR_GC_PER_RUN', true),
+    // Префиксы коллекций, к которым применяется sweep по TTL
+    // (постоянные «brain»-коллекции, например aegis_okna, не трогаем).
+    ephemeralCollectionPrefixes: ['evidence_', 'serp_', 'relevance_'],
+    // Жёсткий минимум: не сносить точки моложе этого числа часов,
+    // даже если кто-то поставит ttlDays=0 по ошибке.
+    minAgeSafetyHours: 24,
+    // Информативно: расписание (фактический cron в workflow).
+    nightlyCron:       '15 3 * * *',
+  },
+
+  // ── Phase 14 — Aegis hooks в модуле релевантности ────────────────
+  // Точечная интеграция мозга в /api/relevance: telemetry-спаны,
+  // poison-фильтр для скачанных страниц (анти-отравленные данные
+  // от конкурентов), компрессия больших SERP-evidence перед DeepSeek.
+  // Все шаги — graceful: если AEGIS_ENABLED=false или конкретный
+  // под-флаг выключен, поведение не меняется.
+  relevanceAegis: {
+    enabled:               _envBool('AEGIS_RELEVANCE_ENABLED', true),
+    telemetrySpans:        _envBool('AEGIS_RELEVANCE_TELEMETRY', true),
+    poisonFilterFetched:   _envBool('AEGIS_RELEVANCE_POISON_FILTER', true),
+    // Если итоговый промпт для deepseekAnalyzer (контекст SERP+ours)
+    // превышает targetTokens (см. compress.targetTokens), применяем
+    // promptCompressor. По умолчанию OFF, чтобы не менять текущие
+    // выходы аналитика — включается осознанно.
+    compressDeepseekPrompt: _envBool('AEGIS_RELEVANCE_COMPRESS_PROMPT', false),
+    // После завершения отчёта (status='done') зачищать векторные
+    // точки текущего relevance-прогона (если vectorGc.enabled).
+    vectorGcOnDone:        _envBool('AEGIS_RELEVANCE_VECTOR_GC', true),
+  },
 });
 
 // ── Валидация диапазонов (fail-fast при старте) ───────────────────
@@ -328,6 +383,12 @@ const RANGES = [
   ['poison.keywordStuffMaxRepeat',    1, 10000],
   ['poison.invisibleCharMaxRatio',    0, 1],
   ['poison.numericOutlierMultiplier', 1, 1000],
+  // Phase 14 ranges
+  ['dspy.coldStartMinRows',           0, 1000],
+  ['dspy.epsilonGreedyRate',          0, 1],
+  ['dspy.epsilonGreedyMaxRate',       0, 1],
+  ['vectorGc.ttlDays',                0, 3650],
+  ['vectorGc.minAgeSafetyHours',      0, 24 * 365],
 ];
 
 function _get(obj, p) {

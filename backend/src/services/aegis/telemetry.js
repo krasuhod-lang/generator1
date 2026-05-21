@@ -124,6 +124,12 @@ const M = {
   killswitch:    gauge('aegis_killswitch',            'Kill switch engaged (1=on,0=off)'),
   qualityScore:  gauge('aegis_quality_score',         'Last observed quality.overall',      ['kind']),
   budgetUsd:     counter('aegis_budget_usd_total',    'Cumulative budget spent USD',        ['kind']),
+  // Phase 14 — Vector GC & relevance integration
+  vectorGcRuns:           counter('aegis_vector_gc_runs_total',           'Vector GC invocations',              ['kind', 'ok']),
+  vectorGcPointsDeleted:  counter('aegis_vector_gc_points_deleted_total', 'Vector points deleted by GC',        ['kind']),
+  relevancePages:         counter('aegis_relevance_pages_total',          'Relevance pages processed',          ['outcome']),
+  relevancePoisonDropped: counter('aegis_relevance_poison_dropped_total', 'Relevance pages dropped by poison',  ['reason']),
+  dspyMutations:          counter('aegis_dspy_mutations_total',           'ε-greedy DSPy mutations applied',    ['kind']),
 };
 
 /**

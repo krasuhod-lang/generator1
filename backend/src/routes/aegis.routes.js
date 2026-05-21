@@ -19,6 +19,8 @@ const {
   getRouterBreakers,
   runBackupNow,
   listBackups,
+  runVectorGcSweep,
+  runVectorGcCleanup,
 } = require('../controllers/aegis.controller');
 
 const router = express.Router();
@@ -59,5 +61,9 @@ router.get('/finops/spend',     auth, getSpendRate);
 router.get('/router/breakers',  auth, getRouterBreakers);
 router.post('/backup/run',      auth, writeLimiter, runBackupNow);
 router.get('/backup/list',      auth, listBackups);
+
+// Phase 14: Vector-DB GC (TTL sweep + per-run cleanup).
+router.post('/vector-gc/sweep',   auth, writeLimiter, runVectorGcSweep);
+router.post('/vector-gc/cleanup', auth, writeLimiter, runVectorGcCleanup);
 
 module.exports = router;

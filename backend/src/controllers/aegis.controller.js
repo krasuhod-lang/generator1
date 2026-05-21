@@ -28,6 +28,7 @@ const alerting   = require('../services/aegis/alerting');
 const killSwitch = require('../services/aegis/killSwitch');
 const llmRouter  = require('../services/aegis/llmRouter');
 const backup     = require('../services/aegis/backupClient');
+const vectorGc   = require('../services/aegis/vectorGc');
 
 /** GET /api/aegis/status */
 async function getStatus(req, res) {
@@ -176,6 +177,9 @@ module.exports = {
   getRouterBreakers,
   runBackupNow,
   listBackups,
+  // Phase 14:
+  runVectorGcSweep,
+  runVectorGcCleanup,
 };
 
 // ─────────────────────────── Phase 9–13 ────────────────────────────
@@ -261,4 +265,59 @@ async function listBackups(req, res) {
   const r = await backup.listBackups();
   if (!r.ok) return res.status(503).json({ error: 'backup_list_failed', reason: r.reason });
   res.json(r.body || { items: [] });
+}
+
+// ─────────────────────────── Phase 14 ───────────────────────────────
+
+/**
+ * POST /api/aegis/vector-gc/sweep (admin)
+ *
+ * Запускает TTL-чистку Qdrant: удаляет точки старше N дней в эфемерных
+ * коллекциях (evidence_*, serp_*, relevance_*) с предохранителем
+ * min_age_safety_hours. Параметры опциональны — берутся из featureFlags.
+ */
+async function runVectorGcSweep(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const { ttl_days, ephemeral_prefixes, min_age_safety_hours, dry_run } = req.body || {};
+  const r = await vectorGc.sweep({
+    ttlDays: ttl_days,
+    ephemeralPrefixes: ephemeral_prefixes,
+    minAgeSafetyHours: min_age_safety_hours,
+    dryRun: dry_run,
+  });
+  if (!r.ok && r.reason === 'disabled') return res.status(409).json({ error: 'vector_gc_disabled' });
+  if (!r.ok) return res.status(503).json({ error: 'vector_gc_failed', reason: r.reason });
+  // Persist в aegis_vector_gc_log (best-effort).
+  try {
+    await db.query(
+      `INSERT INTO aegis_vector_gc_log (mode, status, params, result)
+       VALUES ($1, $2, $3, $4)`,
+      ['sweep', 'ok', JSON.stringify(req.body || {}), JSON.stringify(r.body || {})],
+    );
+  } catch (_e) { /* table may not exist on legacy DB */ }
+  res.json({ ok: true, body: r.body });
+}
+
+/**
+ * POST /api/aegis/vector-gc/cleanup (admin)
+ *
+ * Зачистка точек конкретного run_id (после success). { run_id: string }.
+ */
+async function runVectorGcCleanup(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const { run_id } = req.body || {};
+  if (!run_id || typeof run_id !== 'string') {
+    return res.status(400).json({ error: 'run_id_required' });
+  }
+  const r = await vectorGc.cleanupRun({ runId: run_id });
+  if (!r.ok && r.reason === 'disabled') return res.status(409).json({ error: 'vector_gc_disabled' });
+  if (!r.ok) return res.status(503).json({ error: 'vector_gc_cleanup_failed', reason: r.reason });
+  try {
+    await db.query(
+      `INSERT INTO aegis_vector_gc_log (mode, status, params, result)
+       VALUES ($1, $2, $3, $4)`,
+      ['cleanup', 'ok', JSON.stringify({ run_id }), JSON.stringify(r.body || {})],
+    );
+  } catch (_e) { /* legacy DB */ }
+  res.json({ ok: true, body: r.body });
 }

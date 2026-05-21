@@ -35,6 +35,7 @@ from . import dspy_optimizer as dspy_mod
 from . import ga4 as ga4_mod
 from . import mutator as mut_mod
 from . import backup as backup_mod
+from . import vector_gc as vector_gc_mod
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -74,6 +75,7 @@ def health() -> Dict[str, Any]:
             "ga4":      ga4_mod.is_available(),
             "mutator":  mut_mod.is_available(),
             "backup":   backup_mod.is_available(),
+            "vector_gc": vector_gc_mod.is_available(),
         },
     }
 
@@ -177,6 +179,8 @@ class VectordbIndexRequest(BaseModel):
     paragraphs: List[str] = []
     source_url: Optional[str] = None
     embedder: str = "gemini"
+    run_id: Optional[str] = None
+    collection_override: Optional[str] = None
 
 
 class VectordbSearchRequest(BaseModel):
@@ -185,6 +189,20 @@ class VectordbSearchRequest(BaseModel):
     top_k: int = 5
     embedder: str = "gemini"
     hybrid_alpha: float = 0.5
+
+
+# ── /vectordb/gc — Phase 14.3: Tombstones & TTL ──────────────────────
+class VectorGcSweepRequest(BaseModel):
+    ttl_days: int = 30
+    ephemeral_prefixes: List[str] = ["evidence_", "serp_", "relevance_"]
+    min_age_safety_hours: int = 24
+    drop_empty: bool = True
+
+
+class VectorGcRunRequest(BaseModel):
+    run_id: str
+    collections: Optional[List[str]] = None
+    ephemeral_prefixes: Optional[List[str]] = None
 
 
 @app.get("/vectordb/health")
@@ -196,7 +214,10 @@ def vectordb_health() -> Dict[str, Any]:
 def vectordb_index(req: VectordbIndexRequest) -> Dict[str, Any]:
     if not vectordb_mod.is_available():
         raise _unavailable("vectordb_disabled", vectordb_mod.unavailable_reason())
-    return vectordb_mod.index(req.niche, req.paragraphs, req.source_url, req.embedder)
+    return vectordb_mod.index(
+        req.niche, req.paragraphs, req.source_url, req.embedder,
+        run_id=req.run_id, collection_override=req.collection_override,
+    )
 
 
 @app.post("/vectordb/search")
@@ -204,6 +225,41 @@ def vectordb_search(req: VectordbSearchRequest) -> Dict[str, Any]:
     if not vectordb_mod.is_available():
         return {"hits": [], "reason": "vectordb_disabled"}
     return {"hits": vectordb_mod.search(req.niche, req.query, req.top_k, req.embedder, req.hybrid_alpha)}
+
+
+@app.get("/vectordb/gc/health")
+def vector_gc_health() -> Dict[str, Any]:
+    from . import vector_gc as _gc
+    return {"ok": _gc.is_available(), "reason": _gc.unavailable_reason()}
+
+
+@app.post("/vectordb/gc/sweep")
+def vector_gc_sweep(req: VectorGcSweepRequest) -> Dict[str, Any]:
+    from . import vector_gc as _gc
+    if not _gc.is_available():
+        return {"status": "disabled", "reason": _gc.unavailable_reason(),
+                "collections": [], "points_deleted_total": 0,
+                "collections_seen": 0}
+    return _gc.sweep_ttl(
+        ttl_days=req.ttl_days,
+        ephemeral_prefixes=req.ephemeral_prefixes,
+        min_age_safety_hours=req.min_age_safety_hours,
+        drop_empty=req.drop_empty,
+    )
+
+
+@app.post("/vectordb/gc/run")
+def vector_gc_run(req: VectorGcRunRequest) -> Dict[str, Any]:
+    from . import vector_gc as _gc
+    if not _gc.is_available():
+        return {"status": "disabled", "reason": _gc.unavailable_reason(),
+                "run_id": req.run_id, "collections": [],
+                "points_deleted_total": 0}
+    return _gc.cleanup_run(
+        run_id=req.run_id,
+        collections=req.collections,
+        ephemeral_prefixes=req.ephemeral_prefixes,
+    )
 
 
 # ── /ray ──────────────────────────────────────────────────────────────
@@ -252,6 +308,12 @@ class DspyRetrainRequest(BaseModel):
     max_trials: int = 20
     max_cost_usd: float = 50.0
     min_improvement_pct: float = 5.0
+    # Phase 14: cold-start + ε-greedy ───────────────────────────────
+    real_rows: Optional[List[Dict[str, Any]]] = None  # caller передаёт выборку из БД
+    cold_start_use_seeds: bool = True
+    cold_start_min_rows: int = 10
+    epsilon_greedy_rate: float = 0.07
+    epsilon_greedy_max_rate: float = 0.20
 
 
 @app.get("/dspy/status")
@@ -259,16 +321,60 @@ def dspy_status() -> Dict[str, Any]:
     return dspy_mod.status()
 
 
+@app.get("/dspy/seeds")
+def dspy_seeds_overview(niche: Optional[str] = None) -> Dict[str, Any]:
+    """Phase 14.1: что лежит в seed-датасете для cold-start MIPROv2."""
+    from . import dspy_seed
+    rows = dspy_seed.load_seed_dataset(niche=niche)
+    return {
+        "total":   len(rows),
+        "niches":  dspy_seed.seed_niches(),
+        "filter_niche": niche,
+        "items": [
+            {
+                "id":          r["id"],
+                "niche":       r.get("niche"),
+                "tags":        r.get("tags", []),
+                "spq_overall": r.get("spq_overall"),
+                "ppo_weight":  r.get("ppo_weight"),
+                "html_chars":  len(r.get("html_output") or ""),
+            }
+            for r in rows
+        ],
+    }
+
+
 @app.post("/dspy/retrain")
 def dspy_retrain(req: DspyRetrainRequest) -> Dict[str, Any]:
     if not dspy_mod.is_available():
-        raise _unavailable("dspy_disabled", dspy_mod.unavailable_reason())
+        # Phase 14: даже без dspy-ai мы можем вернуть план seed/ε-greedy
+        # (dry-run эквивалент), чтобы аналитика и аудит работали.
+        plan = dspy_mod.retrain(
+            niche=req.niche,
+            dry_run=True,
+            max_trials=req.max_trials,
+            max_cost_usd=req.max_cost_usd,
+            min_improvement_pct=req.min_improvement_pct,
+            real_rows=req.real_rows,
+            cold_start_min_rows=req.cold_start_min_rows,
+            cold_start_use_seeds=req.cold_start_use_seeds,
+            epsilon_greedy_rate=req.epsilon_greedy_rate,
+            epsilon_greedy_max_rate=req.epsilon_greedy_max_rate,
+        )
+        plan["available"] = False
+        plan["reason"] = dspy_mod.unavailable_reason()
+        return plan
     return dspy_mod.retrain(
         niche=req.niche,
         dry_run=req.dry_run,
         max_trials=req.max_trials,
         max_cost_usd=req.max_cost_usd,
         min_improvement_pct=req.min_improvement_pct,
+        real_rows=req.real_rows,
+        cold_start_min_rows=req.cold_start_min_rows,
+        cold_start_use_seeds=req.cold_start_use_seeds,
+        epsilon_greedy_rate=req.epsilon_greedy_rate,
+        epsilon_greedy_max_rate=req.epsilon_greedy_max_rate,
     )
 
 
