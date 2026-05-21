@@ -23,6 +23,11 @@ const ray      = require('../services/aegis/rayClient');
 const dspy     = require('../services/aegis/dspyClient');
 const githubBot = require('../services/aegis/githubBot');
 const mutator  = require('../services/aegis/deepseekMutator');
+const telemetry  = require('../services/aegis/telemetry');
+const alerting   = require('../services/aegis/alerting');
+const killSwitch = require('../services/aegis/killSwitch');
+const llmRouter  = require('../services/aegis/llmRouter');
+const backup     = require('../services/aegis/backupClient');
 
 /** GET /api/aegis/status */
 async function getStatus(req, res) {
@@ -163,4 +168,97 @@ module.exports = {
   proposeMutation,
   listRuns,
   listBrainVersions,
+  // Phase 9–13:
+  getMetrics,
+  getKillSwitch,
+  postKillSwitch,
+  getSpendRate,
+  getRouterBreakers,
+  runBackupNow,
+  listBackups,
 };
+
+// ─────────────────────────── Phase 9–13 ────────────────────────────
+
+/** GET /api/aegis/metrics — Prometheus exposition (text/plain). */
+function getMetrics(req, res) {
+  res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  // Подмешиваем kill switch и spend rate в gauges перед экспортом.
+  try {
+    telemetry.M.killswitch.set(killSwitch.isEngaged() ? 1 : 0);
+    const stats = alerting.getCurrentRate();
+    telemetry.M.budgetUsd.inc(0, { kind: 'noop' }); // ensure counter is registered
+    // Дополнительный гейдж — на лету.
+    telemetry.gauge('aegis_spend_rate_usd_per_hour', 'Rolling spend rate USD/h').set(stats.rate_usd_h);
+  } catch (_e) { /* keep response */ }
+  res.send(telemetry.toPrometheus());
+}
+
+/** GET /api/aegis/kill */
+function getKillSwitch(req, res) {
+  res.json({
+    ...killSwitch.snapshot(),
+    spend_rate: alerting.getCurrentRate(),
+    breakers:   llmRouter.getBreakerStates(),
+  });
+}
+
+/** POST /api/aegis/kill (admin) — body: { action:'engage'|'disengage', reason } */
+async function postKillSwitch(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const { action, reason } = req.body || {};
+  if (action !== 'engage' && action !== 'disengage') {
+    return res.status(400).json({ error: 'invalid_action', allowed: ['engage', 'disengage'] });
+  }
+  const setBy = req.user.email || req.user.id || 'admin';
+  let snap;
+  if (action === 'engage') {
+    snap = await killSwitch.engage({ reason: reason || 'manual', setBy, db });
+    await alerting.sendAlert({
+      severity: 'critical',
+      message:  `🛑 [A.E.G.I.S.] Kill switch ENGAGED manually by ${setBy}: ${reason || ''}`,
+    });
+  } else {
+    snap = await killSwitch.disengage({ setBy, db });
+    await alerting.sendAlert({
+      severity: 'info',
+      message:  `✅ [A.E.G.I.S.] Kill switch DISENGAGED by ${setBy}`,
+    });
+  }
+  res.json(snap);
+}
+
+/** GET /api/aegis/finops/spend */
+function getSpendRate(req, res) {
+  res.json(alerting.getCurrentRate());
+}
+
+/** GET /api/aegis/router/breakers */
+function getRouterBreakers(req, res) {
+  res.json({ breakers: llmRouter.getBreakerStates() });
+}
+
+/** POST /api/aegis/backup/run (admin) */
+async function runBackupNow(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const { targets } = req.body || {};
+  const r = await backup.runBackup({ targets });
+  if (!r.ok && r.reason === 'disabled') return res.status(409).json({ error: 'backup_disabled' });
+  if (!r.ok) return res.status(503).json({ error: 'backup_failed', reason: r.reason });
+  // Persist в aegis_backups.
+  try {
+    await db.query(
+      `INSERT INTO aegis_backups (status, targets, result, s3_bucket)
+       VALUES ($1, $2, $3, $4)`,
+      ['ok', JSON.stringify(targets || []), JSON.stringify(r.body || {}), getAegisFlags().backup.s3Bucket || null],
+    );
+  } catch (_e) { /* may not exist */ }
+  res.json({ ok: true, body: r.body });
+}
+
+/** GET /api/aegis/backup/list */
+async function listBackups(req, res) {
+  const r = await backup.listBackups();
+  if (!r.ok) return res.status(503).json({ error: 'backup_list_failed', reason: r.reason });
+  res.json(r.body || { items: [] });
+}

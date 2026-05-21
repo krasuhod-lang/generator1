@@ -12,6 +12,13 @@ const {
   proposeMutation,
   listRuns,
   listBrainVersions,
+  getMetrics,
+  getKillSwitch,
+  postKillSwitch,
+  getSpendRate,
+  getRouterBreakers,
+  runBackupNow,
+  listBackups,
 } = require('../controllers/aegis.controller');
 
 const router = express.Router();
@@ -41,5 +48,16 @@ router.post('/dspy/retrain',   auth, writeLimiter, triggerDspyRetrain);
 router.post('/mutate/propose', auth, writeLimiter, proposeMutation);
 router.get('/runs',            auth, listRuns);
 router.get('/brain/versions',  auth, listBrainVersions);
+
+// Phase 9–13: observability / FinOps / kill switch / routing / backup.
+// /metrics НЕ требует auth — это стандарт для Prometheus-скрейперов.
+// Доступ ограничивается на уровне сети/reverse-proxy (см. AEGIS_SETUP.md).
+router.get('/metrics',          getMetrics);
+router.get('/kill',             auth, getKillSwitch);
+router.post('/kill',            auth, writeLimiter, postKillSwitch);
+router.get('/finops/spend',     auth, getSpendRate);
+router.get('/router/breakers',  auth, getRouterBreakers);
+router.post('/backup/run',      auth, writeLimiter, runBackupNow);
+router.get('/backup/list',      auth, listBackups);
 
 module.exports = router;

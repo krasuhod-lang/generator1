@@ -207,6 +207,19 @@ const start = async () => {
       console.warn('[Server] Info-article recovery skipped:', err.message);
     }
 
+    // A.E.G.I.S. Phase 9–13: bootstrap kill switch state + wire alerting → db.
+    try {
+      const db          = require('./src/config/db');
+      const killSwitch  = require('./src/services/aegis/killSwitch');
+      const alerting    = require('./src/services/aegis/alerting');
+      const telemetry   = require('./src/services/aegis/telemetry');
+      alerting.setDbConnection(db);
+      await killSwitch.loadInitialState(db);
+      telemetry.startOtlpPusher(); // no-op если AEGIS_OTLP_HTTP_URL пуст.
+    } catch (err) {
+      console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
+    }
+
     app.listen(PORT, () => {
       console.log(`[Server] SEO Genius v4.0 running on port ${PORT} [${process.env.NODE_ENV}]`);
     });
@@ -1144,6 +1157,44 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_brain_deployed ON aegis_brain_versions (deployed_at DESC)`);
+
+    // ─── Migration 043: A.E.G.I.S. Phase 9–13 (Observability / FinOps) ──
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_killswitch (
+        id          BIGSERIAL    PRIMARY KEY,
+        engaged     BOOLEAN      NOT NULL,
+        reason      TEXT,
+        set_by      TEXT,
+        set_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_kill_set_at ON aegis_killswitch (set_at DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_alerts (
+        id          BIGSERIAL    PRIMARY KEY,
+        severity    VARCHAR(16)  NOT NULL,
+        message     TEXT         NOT NULL,
+        payload     JSONB,
+        deliveries  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_alerts_created ON aegis_alerts (created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_alerts_severity ON aegis_alerts (severity)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_backups (
+        id          BIGSERIAL    PRIMARY KEY,
+        status      VARCHAR(16)  NOT NULL,
+        targets     JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        result      JSONB,
+        s3_bucket   TEXT,
+        bytes_total BIGINT,
+        created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_backups_created ON aegis_backups (created_at DESC)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

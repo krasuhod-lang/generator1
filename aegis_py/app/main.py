@@ -34,6 +34,7 @@ from . import langgraph_runner as lg_mod
 from . import dspy_optimizer as dspy_mod
 from . import ga4 as ga4_mod
 from . import mutator as mut_mod
+from . import backup as backup_mod
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -72,8 +73,57 @@ def health() -> Dict[str, Any]:
             "dspy":     dspy_mod.is_available(),
             "ga4":      ga4_mod.is_available(),
             "mutator":  mut_mod.is_available(),
+            "backup":   backup_mod.is_available(),
         },
     }
+
+
+# ── /backup ───────────────────────────────────────────────────────────
+class BackupRunRequest(BaseModel):
+    targets: List[str] = ["qdrant", "neo4j"]
+    s3_bucket: str = ""
+    s3_region: str = "eu-central-1"
+    s3_prefix: str = "aegis/backups"
+    local_dir: str = "/var/lib/aegis/backups"
+    retain_days: int = 30
+
+
+@app.get("/backup/health")
+def backup_health() -> Dict[str, Any]:
+    return {"ok": True, "deps": backup_mod.is_available()}
+
+
+@app.post("/backup/run")
+def backup_run(req: BackupRunRequest):
+    # _safe_dir внутри run_backup может бросить ValueError. Перехватываем
+    # на одну строку (без обращения к атрибутам исключения), и возвращаем
+    # обычный 400 с константной строкой — никакой утечки stack trace.
+    if not _is_safe_local_dir(req.local_dir):
+        raise HTTPException(status_code=400, detail="invalid_local_dir")
+    return backup_mod.run_backup(
+        targets=req.targets,
+        s3_bucket=req.s3_bucket,
+        s3_region=req.s3_region,
+        s3_prefix=req.s3_prefix,
+        local_dir=req.local_dir,
+        retain_days=req.retain_days,
+    )
+
+
+@app.get("/backup/list")
+def backup_list(local_dir: str = "/var/lib/aegis/backups"):
+    if not _is_safe_local_dir(local_dir):
+        raise HTTPException(status_code=400, detail="invalid_local_dir")
+    return backup_mod.list_backups(local_dir=local_dir)
+
+
+def _is_safe_local_dir(p: str) -> bool:
+    """Тонкая обёртка-предикат вокруг ``backup_mod._safe_dir`` — без stack trace."""
+    try:
+        backup_mod._safe_dir(p)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ── /shannon ──────────────────────────────────────────────────────────

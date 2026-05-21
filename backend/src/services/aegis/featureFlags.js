@@ -182,6 +182,111 @@ const AEGIS_FLAGS = deepFreeze({
     writerYaml: 'compiled_writer.yaml',
     criticYaml: 'compiled_critic.yaml',
   },
+
+  // ── Phase 9.1 — Observability (OpenTelemetry / Prometheus) ───────
+  // Метрики экспонируются на GET /api/aegis/metrics в формате
+  // Prometheus exposition (text/plain). Внешний Prometheus/Grafana —
+  // ОПЦИОНАЛЬНЫ: данные доступны и без них через тот же endpoint.
+  telemetry: {
+    enabled:     _envBool('AEGIS_TELEMETRY_ENABLED', true),
+    serviceName: _envStr('AEGIS_TELEMETRY_SERVICE', 'aegis'),
+    // Доп. push-режим (OTLP exporter): если установлен URL — клиент
+    // периодически POST'ит снапшот метрик в JSON-формате.
+    otlpHttpUrl: _envStr('AEGIS_OTLP_HTTP_URL', ''),
+    pushIntervalSec: _envInt('AEGIS_TELEMETRY_PUSH_INTERVAL_SEC', 60),
+  },
+
+  // ── Phase 9.2 — Alerting & Kill Switch ───────────────────────────
+  // Глобальный мониторинг расхода. Если за rollingWindowSec расход
+  // превысил rateUsdPerHour — отправляется alert и (опц.) включается
+  // kill switch. Telegram/Slack — опциональны (graceful если URL пуст).
+  alerting: {
+    enabled:           _envBool('AEGIS_ALERTING_ENABLED', false),
+    // Жёсткий лимит расхода в USD/час (rolling).
+    rateUsdPerHour:    _envFloat('AEGIS_ALERT_RATE_USD_PER_HOUR', 50),
+    rollingWindowSec:  _envInt('AEGIS_ALERT_WINDOW_SEC', 600),
+    // Автоматически включать kill switch при превышении.
+    autoKillOnBreach:  _envBool('AEGIS_ALERT_AUTO_KILL', false),
+    // Каналы доставки (любой пустой = пропустить).
+    telegramBotToken:  _envStr('AEGIS_ALERT_TG_TOKEN', ''),
+    telegramChatId:    _envStr('AEGIS_ALERT_TG_CHAT', ''),
+    slackWebhookUrl:   _envStr('AEGIS_ALERT_SLACK_URL', ''),
+    // Не флудить: минимальный интервал между однотипными алертами.
+    cooldownSec:       _envInt('AEGIS_ALERT_COOLDOWN_SEC', 300),
+  },
+
+  // ── Phase 9.3 — Kill Switch (глобальный stop) ────────────────────
+  killSwitch: {
+    // initially OFF; устанавливается через POST /api/aegis/kill
+    // или alerting.autoKillOnBreach. Состояние persist'ится в БД
+    // (таблица aegis_killswitch, миграция 043).
+    persistTable: 'aegis_killswitch',
+  },
+
+  // ── Phase 10 — Context Compression (LLMLingua-style) ─────────────
+  // Детерминированное extractive сжатие промптов перед вызовом LLM.
+  // Сохраняет числа, имена собственные, термины с высоким IDF;
+  // удаляет стоп-слова и предложения с низким score, когда промпт
+  // превышает targetTokens.
+  compress: {
+    enabled:        _envBool('AEGIS_COMPRESS_ENABLED', false),
+    // Если promptTokens > targetTokens — сжимаем до targetTokens.
+    targetTokens:   _envInt('AEGIS_COMPRESS_TARGET_TOKENS', 24000),
+    // Жёсткий минимум: не сжимать промпты короче N токенов.
+    minTokensToCompress: _envInt('AEGIS_COMPRESS_MIN_TOKENS', 4000),
+    // Доля «важных» предложений, которая сохраняется ВСЕГДА (по топ-IDF).
+    keepTopRatio:   _envFloat('AEGIS_COMPRESS_KEEP_TOP_RATIO', 0.4),
+  },
+
+  // ── Phase 11 — Backups (Qdrant snapshot + Neo4j dump → S3) ───────
+  // Cron-скрипт (GitHub Actions, см. aegis-nightly-backup.yml) вызывает
+  // POST /backup/run в aegis_py. S3 — опционален; без S3 снапшоты
+  // лежат локально на диске (volume для дальнейшей выгрузки).
+  backup: {
+    enabled:        _envBool('AEGIS_BACKUP_ENABLED', false),
+    s3Bucket:       _envStr('AEGIS_BACKUP_S3_BUCKET', ''),
+    s3Region:       _envStr('AEGIS_BACKUP_S3_REGION', 'eu-central-1'),
+    s3Prefix:       _envStr('AEGIS_BACKUP_S3_PREFIX', 'aegis/backups'),
+    retainDays:     _envInt('AEGIS_BACKUP_RETAIN_DAYS', 30),
+    localDir:       _envStr('AEGIS_BACKUP_LOCAL_DIR', '/var/lib/aegis/backups'),
+  },
+
+  // ── Phase 12 — LLM Routing & Circuit Breaker (Fallback) ──────────
+  // При 429/502/timeout от primary провайдера маршрутизатор
+  // переключается на fallback. vLLM/Llama3 — опциональны; по
+  // умолчанию fallback = вторая включённая модель (deepseek↔gemini).
+  routing: {
+    enabled:           _envBool('AEGIS_ROUTING_ENABLED', false),
+    // Comma-separated порядок попыток для critic-задач.
+    criticChain:       _envStr('AEGIS_ROUTING_CRITIC_CHAIN', 'deepseek,gemini'),
+    writerChain:       _envStr('AEGIS_ROUTING_WRITER_CHAIN', 'gemini,deepseek'),
+    // Эндпоинт локальной vLLM/Ollama для опц. полностью офлайн-фолбэка.
+    vllmUrl:           _envStr('AEGIS_VLLM_URL', ''),
+    vllmModel:         _envStr('AEGIS_VLLM_MODEL', 'meta-llama/Llama-3-70B-Instruct'),
+    // Circuit breaker.
+    cbFailThreshold:   _envInt('AEGIS_CB_FAIL_THRESHOLD', 5),
+    cbOpenSec:         _envInt('AEGIS_CB_OPEN_SEC', 60),
+    cbHalfOpenProbes:  _envInt('AEGIS_CB_HALF_OPEN_PROBES', 2),
+    retryOnStatus:     [408, 429, 500, 502, 503, 504],
+  },
+
+  // ── Phase 13 — Data Poisoning Filter (anti-injection) ────────────
+  // Доп. фильтр перед записью в векторную базу. Защита от:
+  //   - скрытого текста (display:none / visibility:hidden / font-size:0
+  //     / цвет = фону)
+  //   - keyword stuffing (n-gram повтор > порога)
+  //   - управляющих/невидимых юникод-символов (ZWSP, RTL-override…)
+  //   - числовых выбросов (значения вне 5x от медианы по нише)
+  poison: {
+    enabled:                 _envBool('AEGIS_POISON_ENABLED', true),
+    hiddenTextMaxRatio:      _envFloat('AEGIS_POISON_HIDDEN_MAX_RATIO', 0.05),
+    keywordStuffMaxRepeat:   _envInt('AEGIS_POISON_NGRAM_MAX_REPEAT', 8),
+    invisibleCharMaxRatio:   _envFloat('AEGIS_POISON_INVISIBLE_MAX_RATIO', 0.01),
+    numericOutlierMultiplier: _envFloat('AEGIS_POISON_NUMERIC_OUTLIER_X', 5.0),
+    // Что делать с провалившим фильтр блоком: drop (выкинуть),
+    // mark (записать с meta.poisoned=true для последующего исключения).
+    onFail:                  _envStr('AEGIS_POISON_ON_FAIL', 'drop'),
+  },
 });
 
 // ── Валидация диапазонов (fail-fast при старте) ───────────────────
@@ -207,6 +312,22 @@ const RANGES = [
   ['rlGa4.topCtrQuantile',            0, 1],
   ['rlGa4.ppoWeight',                 1, 100],
   ['selfmutate.consecutiveFailuresTrigger', 1, 1000],
+  // Phase 9–13 ranges
+  ['telemetry.pushIntervalSec',       1, 86400],
+  ['alerting.rateUsdPerHour',         0, 100000],
+  ['alerting.rollingWindowSec',       60, 86400],
+  ['alerting.cooldownSec',            1, 86400],
+  ['compress.targetTokens',           100, 1_000_000],
+  ['compress.minTokensToCompress',    0, 1_000_000],
+  ['compress.keepTopRatio',           0, 1],
+  ['backup.retainDays',               1, 3650],
+  ['routing.cbFailThreshold',         1, 1000],
+  ['routing.cbOpenSec',               1, 86400],
+  ['routing.cbHalfOpenProbes',        1, 100],
+  ['poison.hiddenTextMaxRatio',       0, 1],
+  ['poison.keywordStuffMaxRepeat',    1, 10000],
+  ['poison.invisibleCharMaxRatio',    0, 1],
+  ['poison.numericOutlierMultiplier', 1, 1000],
 ];
 
 function _get(obj, p) {
@@ -222,6 +343,9 @@ function _get(obj, p) {
   }
   if (!['fail', 'review'].includes(AEGIS_FLAGS.qualityGate.onFail)) {
     throw new Error(`[aegis/featureFlags] qualityGate.onFail должен быть 'fail' или 'review'`);
+  }
+  if (!['drop', 'mark'].includes(AEGIS_FLAGS.poison.onFail)) {
+    throw new Error(`[aegis/featureFlags] poison.onFail должен быть 'drop' или 'mark'`);
   }
 })();
 
