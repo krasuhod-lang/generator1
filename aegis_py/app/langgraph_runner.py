@@ -118,8 +118,7 @@ def _writer(user_prompt: str, niche: Optional[str] = None) -> str:
 
 
 def _critic(article_html: str, user_prompt: str) -> Dict[str, Any]:
-    text = re.sub(r"<[^>]+>", " ", article_html or "")
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _collapse_ws(_strip_html_tags(article_html or ""))
     words = [w for w in text.split(" ") if w]
     word_count = len(words)
     h2_count = _count_tag(article_html, "h2")
@@ -177,7 +176,22 @@ def _refiner(article_html: str, critic: Dict[str, Any], user_prompt: str) -> str
 def _count_tag(html: str, tag: str) -> int:
     if not html:
         return 0
-    return len(re.findall(rf"<{tag}\b", html, flags=re.IGNORECASE))
+    text = html.lower()
+    needle = f"<{(tag or '').lower()}"
+    if not needle or needle == "<":
+        return 0
+    count = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        pos = text.find(needle, i)
+        if pos == -1:
+            break
+        next_idx = pos + len(needle)
+        if next_idx >= n or not text[next_idx].isalnum():
+            count += 1
+        i = pos + len(needle)
+    return count
 
 
 def _prompt_overlap(prompt: str, text: str) -> float:
@@ -194,3 +208,23 @@ def _prompt_overlap(prompt: str, text: str) -> float:
 def _keywords(s: str) -> set:
     tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]{4,}", (s or "").lower())
     return set(tokens[:80])
+
+
+def _strip_html_tags(s: str) -> str:
+    out = []
+    in_tag = False
+    for ch in s:
+        if ch == "<":
+            in_tag = True
+            out.append(" ")
+            continue
+        if ch == ">":
+            in_tag = False
+            continue
+        if not in_tag:
+            out.append(ch)
+    return "".join(out)
+
+
+def _collapse_ws(s: str) -> str:
+    return " ".join((s or "").split())
