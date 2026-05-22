@@ -286,6 +286,81 @@ module.exports = {
   runVectorGcCleanup,
 };
 
+/** GET /api/aegis/quality-log — последние N записей теневого датасета. */
+async function listQualityLog(req, res) {
+  const flags = getAegisFlags().qualityLog || {};
+  const dflt = Number(flags.listDefaultLimit) || 30;
+  const max  = Number(flags.listMaxLimit)     || 200;
+  const limit = Math.min(max, Math.max(1, parseInt(req.query.limit, 10) || dflt));
+  const kind  = (req.query.kind && String(req.query.kind).slice(0, 32)) || null;
+  try {
+    const args = [limit];
+    let where = '';
+    if (kind) { args.push(kind); where = `WHERE kind = $2`; }
+    const r = await db.query(
+      `SELECT id, article_ref, kind, niche, spq_overall, sub, verdict_summary,
+              failure_reasons, top_failure_layer, status, passes_gate,
+              model_used, cost_usd, iterations, created_at
+         FROM aegis_quality_log
+         ${where}
+        ORDER BY created_at DESC
+        LIMIT $1`,
+      args,
+    );
+    res.json({ items: r.rows });
+  } catch (e) {
+    res.json({ items: [], warning: e.message });
+  }
+}
+
+/** GET /api/aegis/failures/top?days=7 — агрегация симптомов за окно. */
+async function listTopFailures(req, res) {
+  const flags = getAegisFlags().qualityLog || {};
+  const dflt = Number(flags.topFailuresDefaultDays) || 7;
+  const max  = Number(flags.topFailuresMaxDays)     || 90;
+  const days = Math.min(max, Math.max(1, parseInt(req.query.days, 10) || dflt));
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10)
+    || Number(flags.topFailuresLimit) || 15));
+
+  try {
+    // jsonb_array_elements_text разворачивает failure_reasons в строки;
+    // окно `days` фиксировано параметром $1, чтобы не было SQL-injection.
+    const r = await db.query(
+      `WITH expanded AS (
+         SELECT
+           jsonb_array_elements_text(failure_reasons) AS symptom,
+           created_at,
+           article_ref,
+           kind,
+           niche,
+           spq_overall
+         FROM aegis_quality_log
+         WHERE created_at > NOW() - ($1::int || ' days')::interval
+       )
+       SELECT
+         symptom,
+         COUNT(*)::int                       AS frequency,
+         COUNT(DISTINCT niche) FILTER (WHERE niche IS NOT NULL)::int AS niches,
+         MAX(created_at)                     AS last_seen_at,
+         (ARRAY_AGG(article_ref ORDER BY created_at DESC))[1] AS last_article_ref,
+         (ARRAY_AGG(kind        ORDER BY created_at DESC))[1] AS last_kind,
+         (ARRAY_AGG(niche       ORDER BY created_at DESC))[1] AS last_niche,
+         (ARRAY_AGG(spq_overall ORDER BY created_at DESC))[1] AS last_spq
+       FROM expanded
+       GROUP BY symptom
+       ORDER BY frequency DESC, last_seen_at DESC
+       LIMIT $2`,
+      [days, limit],
+    );
+    res.json({ days, items: r.rows });
+  } catch (e) {
+    res.json({ days, items: [], warning: e.message });
+  }
+}
+
+module.exports.listQualityLog   = listQualityLog;
+module.exports.listTopFailures  = listTopFailures;
+
 // ─────────────────────────── Phase 9–13 ────────────────────────────
 
 /** GET /api/aegis/metrics — Prometheus exposition (text/plain). */

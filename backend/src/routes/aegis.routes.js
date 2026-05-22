@@ -22,6 +22,8 @@ const {
   listBackups,
   runVectorGcSweep,
   runVectorGcCleanup,
+  listQualityLog,
+  listTopFailures,
 } = require('../controllers/aegis.controller');
 
 const router = express.Router();
@@ -67,5 +69,9 @@ router.get('/backup/list',      auth, listBackups);
 // Phase 14: Vector-DB GC (TTL sweep + per-run cleanup).
 router.post('/vector-gc/sweep',   auth, writeLimiter, runVectorGcSweep);
 router.post('/vector-gc/cleanup', auth, writeLimiter, runVectorGcCleanup);
+
+// Discovery (Слои 1/3/8 плана) — read-only телеметрия для дашборда.
+router.get('/quality-log',  auth, listQualityLog);
+router.get('/failures/top', auth, listTopFailures);
 
 module.exports = router;

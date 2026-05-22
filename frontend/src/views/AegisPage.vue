@@ -22,6 +22,8 @@ const status   = ref(null);
 const runs     = ref([]);
 const backlog  = ref([]);
 const versions = ref([]);
+const topFailures = ref([]);
+const failuresDays = ref(7);
 
 const minOverall = computed(() => status.value?.quality_gate?.min_overall ?? 80);
 
@@ -42,16 +44,18 @@ async function refresh() {
   loading.value = true;
   error.value   = '';
   try {
-    const [s, r, b, v] = await Promise.all([
+    const [s, r, b, v, f] = await Promise.all([
       api.get('/aegis/status').then((x) => x.data),
       api.get('/aegis/runs?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/backlog').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/brain/versions').then((x) => x.data).catch(() => ({ items: [] })),
+      api.get(`/aegis/failures/top?days=${failuresDays.value}`).then((x) => x.data).catch(() => ({ items: [] })),
     ]);
     status.value   = s;
     runs.value     = r.items || [];
     backlog.value  = b.items || [];
     versions.value = v.items || [];
+    topFailures.value = f.items || [];
   } catch (e) {
     error.value = e?.response?.data?.error || e.message || 'Ошибка загрузки';
   } finally {
@@ -164,6 +168,46 @@ onMounted(refresh);
         <p>Мозг ещё не обучен. Первый DSPy retrain создаст
           <code>brain_state/compiled_writer.yaml</code>. Запустить вручную:
           <code>POST /api/aegis/dspy/retrain</code>.</p>
+      </section>
+
+      <section class="card">
+        <h2>🔍 Топ причин провалов за {{ failuresDays }} дней ({{ topFailures.length }})</h2>
+        <p class="subtle">
+          Детерминированный root-cause: <code>failureAnalyzer</code> разбирает отчёты
+          (E-E-A-T, fact-check, plagiarism, readability, intent, LSI, image QA, validation)
+          в стабильные симптомы. Источник — таблица <code>aegis_quality_log</code>,
+          куда пишется КАЖДАЯ генерация (даже не прошедшая гейт SPQ ≥ {{ minOverall }}).
+        </p>
+        <table v-if="topFailures.length" class="grid">
+          <thead>
+            <tr>
+              <th>Симптом</th>
+              <th>Частота</th>
+              <th>Ниш</th>
+              <th>Последний раз</th>
+              <th>Пример (last article)</th>
+              <th>SPQ</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="f in topFailures" :key="f.symptom">
+              <td><code>{{ f.symptom }}</code></td>
+              <td><strong>{{ f.frequency }}</strong></td>
+              <td>{{ f.niches ?? 0 }}</td>
+              <td>{{ f.last_seen_at ? new Date(f.last_seen_at).toLocaleString() : '—' }}</td>
+              <td>
+                <span v-if="f.last_kind" class="subtle">{{ f.last_kind }}</span>
+                {{ f.last_article_ref || '—' }}
+                <span v-if="f.last_niche" class="subtle"> · {{ f.last_niche }}</span>
+              </td>
+              <td>{{ fmtMaybe(f.last_spq) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="subtle">
+          Пока пусто. После первой завершённой генерации запись появится в
+          <code>aegis_quality_log</code>, и симптомы будут сгруппированы здесь.
+        </p>
       </section>
 
       <section class="card">

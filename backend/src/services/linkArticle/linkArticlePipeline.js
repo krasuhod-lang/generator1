@@ -45,6 +45,7 @@ const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adap
 const { normalizeGeminiCopywritingModel, DEFAULT_GEMINI_COPYWRITING_MODEL } = require('../llm/geminiModels');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
+const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const biobrainClient = require('../aegis/biobrainClient');
 
@@ -834,6 +835,18 @@ async function processLinkArticleTask(taskId) {
             gaMetrics: null,
             modelUsed: quality.model_used || t.gemini_model || null,
             costUsd: Number(t.total_cost_usd) || 0,
+            userId: task.user_id || null,
+          });
+          await recordQualityLog({
+            articleRef: `link_article:${taskId}`,
+            kind: 'link_article',
+            niche: null,
+            qualityScore: quality,
+            reports: { eeat_audit: t.eeat_audit },
+            modelUsed: quality.model_used || t.gemini_model || null,
+            costUsd: Number(t.total_cost_usd) || 0,
+            iterations: 1,
+            taskRef: taskId,
             userId: task.user_id || null,
           });
           const eeat = quality && quality.subscores ? Number(quality.subscores.eeat) : null;
