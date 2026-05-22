@@ -127,6 +127,6 @@ def test_safe_dir_rejects_traversal():
     from aegis_py.app.backup import _safe_dir
     import pytest as _pt
     for bad in ("", "/etc/passwd", "/root", "/home/user/secret",
-                "/tmp/../etc/passwd"):
+                "/tmp/../etc/passwd", "../etc", "tmp/aegis"):
         with _pt.raises(ValueError):
             _safe_dir(bad)
