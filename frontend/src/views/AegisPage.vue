@@ -228,20 +228,62 @@ onMounted(refresh);
 </template>
 
 <style scoped>
-.aegis { max-width: 1200px; margin: 0 auto; padding: 16px; }
+/*
+ * Тёмная тема под общий стиль приложения (frontend/src/style.css:
+ * bg-gray-900 карточки, gray-100 текст). До этого карточки были #fff
+ * без явного цвета текста → на тёмном фоне сливались в «белым по белому».
+ */
+.aegis { max-width: 1200px; margin: 0 auto; padding: 16px; color: #e5e7eb; }
+.aegis a { color: #93c5fd; }
+.aegis a:hover { color: #bfdbfe; }
 .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-.head h1 { margin: 0; font-size: 1.5rem; }
-.btn { padding: 6px 14px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; }
+.head h1 { margin: 0; font-size: 1.5rem; color: #f9fafb; }
+.btn {
+  padding: 6px 14px;
+  border: 1px solid #4b5563;
+  border-radius: 6px;
+  background: #374151;
+  color: #f9fafb;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { background: #4b5563; }
 .btn:disabled { opacity: 0.5; cursor: wait; }
-.card { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
-.card.subtle { background: #fafafa; }
-.card h2 { margin-top: 0; font-size: 1.1rem; }
-.grid { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
-.grid th, .grid td { padding: 6px 10px; border-bottom: 1px solid #eee; text-align: left; }
-.grid th { background: #f5f5f5; }
-.ok  { color: #1a7f1a; font-weight: 600; }
-.bad { color: #c62828; font-weight: 600; }
-.err { color: #c62828; }
-.subtle { color: #666; }
-code { background: #f3f3f3; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+.card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  color: #e5e7eb;
+}
+.card.subtle { background: #0b1220; }
+.card h2 { margin-top: 0; font-size: 1.1rem; color: #f9fafb; }
+.card p { color: #e5e7eb; }
+.card strong { color: #f3f4f6; }
+.card em { color: #9ca3af; }
+.grid { width: 100%; border-collapse: collapse; font-size: 0.92rem; color: #e5e7eb; }
+.grid th, .grid td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #1f2937;
+  text-align: left;
+}
+.grid th { background: #1f2937; color: #f9fafb; }
+.grid tbody tr:hover { background: #1f2937; }
+.ok  { color: #4ade80; font-weight: 600; }
+.bad { color: #f87171; font-weight: 600; }
+.err {
+  color: #fecaca;
+  background: rgba(244, 63, 94, 0.1);
+  border: 1px solid rgba(244, 63, 94, 0.3);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.subtle { color: #9ca3af; }
+code {
+  background: #1f2937;
+  color: #e5e7eb;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
 </style>
