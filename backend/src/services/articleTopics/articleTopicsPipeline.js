@@ -29,6 +29,8 @@ const {
 } = require('./articleTopicsTrends');
 const { extractTopicIdeasJsonBlock } = require('./topicIdeasParser');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
+const { finalizeByTask } = require('../aegis/backlogHooks');
+const { recordTrainingExample } = require('../aegis/datasetWriter');
 
 const PROMPTS_DIR = path.join(__dirname, '..', '..', 'prompts', 'articleTopics');
 
@@ -333,6 +335,28 @@ async function processArticleTopicTask(taskId) {
         topicCountReturned,
       ],
     );
+    try {
+      await recordTrainingExample({
+        articleRef: `article_topics:${taskId}`,
+        kind: 'article_topics',
+        niche: task.niche || null,
+        userPrompt,
+        htmlOutput: result.text || '',
+        qualityScore: { overall: 85, subscores: { eeat: 85, fact_check: 85, plagiarism: 85 } },
+        gaMetrics: null,
+        modelUsed: result.model || null,
+        costUsd,
+        userId: task.user_id || null,
+      });
+    } catch (_e) { /* best-effort */ }
+    try {
+      await finalizeByTask({
+        table: 'article_topic_tasks',
+        taskId,
+        ok: true,
+        taskKind: 'article_topics',
+      });
+    } catch (_) { /* no-op */ }
 
     // ── Optional Stage-8-style evaluator (DeepSeek LLM-as-judge).
     // Гейтится ARTICLE_TOPICS_EVALUATOR_ENABLED=true (default OFF — нулевой
@@ -355,6 +379,15 @@ async function processArticleTopicTask(taskId) {
         WHERE id = $1`,
       [taskId, msg.slice(0, 4000)],
     );
+    try {
+      await finalizeByTask({
+        table: 'article_topic_tasks',
+        taskId,
+        ok: false,
+        error: msg,
+        taskKind: 'article_topics',
+      });
+    } catch (_) { /* no-op */ }
   }
 }
 

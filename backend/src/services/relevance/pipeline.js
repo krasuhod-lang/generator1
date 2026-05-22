@@ -22,6 +22,7 @@ const { analyze, compare }     = require('./pythonClient');
 const rawStorage          = require('./rawStorage');
 const { splitBySerp }     = require('./aggregatorDomains');
 const aegisHooks          = require('./aegisHooks');
+const { finalizeByTask }   = require('../aegis/backlogHooks');
 
 /**
  * Возвращает «канонический» хост для дедупликации SERP по домену.
@@ -422,6 +423,14 @@ async function processRelevanceReport(reportId) {
       our_report: ourReport,
       comparison: comparisonReport,
     });
+    try {
+      await finalizeByTask({
+        table: 'relevance_reports',
+        taskId: reportId,
+        ok: true,
+        taskKind: 'relevance',
+      });
+    } catch (_) { /* no-op */ }
 
     // Aegis Phase 14: после успеха зачистим эфемерные точки этого
     // прогона в Qdrant (если evidence/SERP-документы туда индексировались
@@ -432,6 +441,15 @@ async function processRelevanceReport(reportId) {
   } catch (err) {
     console.error(`[relevance] report ${reportId} failed:`, err.message);
     await _finishError(reportId, err.message);
+    try {
+      await finalizeByTask({
+        table: 'relevance_reports',
+        taskId: reportId,
+        ok: false,
+        error: err.message,
+        taskKind: 'relevance',
+      });
+    } catch (_) { /* no-op */ }
   }
 }
 

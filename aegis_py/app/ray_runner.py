@@ -40,6 +40,18 @@ def unavailable_reason() -> Optional[str]:
 _JOBS: Dict[str, Dict[str, Any]] = {}
 
 
+class BioBrainActor:
+    """Lightweight placeholder actor for async evolve ticks."""
+
+    def __init__(self, evolve_fn=None):
+        self._evolve_fn = evolve_fn
+
+    def evolve_once(self) -> Dict[str, Any]:
+        if not callable(self._evolve_fn):
+            return {"ok": False, "reason": "no_evolver"}
+        return self._evolve_fn()
+
+
 def submit(kind: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Регистрирует job. Реальный запуск actor'ов вынесен в конкретные
     модули (fact_checker_actor.py / plagiarism_actor.py — добавляются по

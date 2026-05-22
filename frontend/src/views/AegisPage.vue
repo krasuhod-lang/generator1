@@ -34,6 +34,9 @@ function fmtPct(v) {
 function fmtUsd(v) {
   return v == null ? '—' : `$${Number(v).toFixed(4)}`;
 }
+function fmtMaybe(v, digits = 1) {
+  return v == null ? '—' : Number(v).toFixed(digits);
+}
 
 async function refresh() {
   loading.value = true;
@@ -192,13 +195,34 @@ onMounted(refresh);
         <h2>📥 GitHub Backlog ({{ backlog.length }})</h2>
         <ul v-if="backlog.length">
           <li v-for="i in backlog" :key="i.id || i.number">
-            <a :href="i.html_url" target="_blank" rel="noopener">#{{ i.number }} — {{ i.title }}</a>
+            <a v-if="i.html_url" :href="i.html_url" target="_blank" rel="noopener">#{{ i.number }} — {{ i.title }}</a>
+            <span v-else>#{{ i.number }} — {{ i.title }}</span>
+            <span> · {{ i.local_status || 'pending' }}</span>
+            <span v-if="i.task_kind"> · {{ i.task_kind }}</span>
+            <span v-if="i.spq_overall != null"> · Spq {{ fmtMaybe(i.spq_overall) }}</span>
           </li>
         </ul>
         <p v-else class="subtle">
           Бэклог пуст или не подключён. Настройте <code>AEGIS_GITHUB_PAT</code> и
           <code>AEGIS_GITHUB_REPO</code> (см. AEGIS_SETUP.md).
         </p>
+      </section>
+
+      <section v-if="status" class="card">
+        <h2>🎓 Обучающая база</h2>
+        <p>Всего строк: <strong>{{ status.training_dataset?.total_rows ?? 0 }}</strong></p>
+        <p>За 24ч: <strong>{{ status.training_dataset?.rows_24h ?? 0 }}</strong></p>
+        <p>Средний Spq: <strong>{{ fmtMaybe(status.training_dataset?.avg_spq) }}</strong></p>
+        <p>Покрытие ниш: <strong>{{ fmtMaybe(status.training_dataset?.niches_coverage_pct) }}%</strong></p>
+      </section>
+
+      <section v-if="status" class="card">
+        <h2>🧬 Bio-Brain</h2>
+        <p>Включён: <strong>{{ status.biobrain?.enabled ? '✅' : '⛔' }}</strong></p>
+        <p>Поколение: <strong>{{ status.biobrain?.status?.generation ?? '—' }}</strong></p>
+        <p>Нейроны/связи: <strong>{{ status.biobrain?.status?.nodes ?? '—' }}</strong> / <strong>{{ status.biobrain?.status?.connections ?? '—' }}</strong></p>
+        <p>Mean fitness: <strong>{{ fmtMaybe(status.biobrain?.status?.mean_fitness, 4) }}</strong></p>
+        <p>Fast-Reject 24ч: <strong>{{ fmtMaybe(status.biobrain?.status?.fast_reject_rate_24h) }}%</strong></p>
       </section>
 
       <section class="card">

@@ -26,6 +26,8 @@ const {
   analyzeAudienceAndNiche,
   serializeAnalysisForPrompt,
 } = require('../parser/audienceNicheAnalyzer');
+const { finalizeByTask } = require('../aegis/backlogHooks');
+const { recordTrainingExample } = require('../aegis/datasetWriter');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -206,10 +208,28 @@ async function runMetaTagTaskInner(taskId) {
     task = rows[0];
     if (!task) {
       console.error(`[metaTags] processMetaTagTask: task ${taskId} not found`);
+      try {
+        await finalizeByTask({
+          table: 'meta_tag_tasks',
+          taskId,
+          ok: false,
+          error: 'task not found',
+          taskKind: 'meta_tags',
+        });
+      } catch (_) { /* no-op */ }
       return;
     }
   } catch (err) {
     console.error('[metaTags] processMetaTagTask: load failed:', err.message);
+    try {
+      await finalizeByTask({
+        table: 'meta_tag_tasks',
+        taskId,
+        ok: false,
+        error: err.message,
+        taskKind: 'meta_tags',
+      });
+    } catch (_) { /* no-op */ }
     return;
   }
 
@@ -221,6 +241,15 @@ async function runMetaTagTaskInner(taskId) {
         WHERE id = $1`,
       [taskId, 'Список ключевых запросов пуст'],
     );
+    try {
+      await finalizeByTask({
+        table: 'meta_tag_tasks',
+        taskId,
+        ok: false,
+        error: 'Список ключевых запросов пуст',
+        taskKind: 'meta_tags',
+      });
+    } catch (_) { /* no-op */ }
     return;
   }
 
@@ -393,6 +422,32 @@ async function runMetaTagTaskInner(taskId) {
   await appendLog(taskId,
     `🎉 Bulk-генерация завершена · итого ${totalTokensIn + totalTokensOut} ток., $${totalCostUsd.toFixed(4)}`,
     'ok');
+  try {
+    const { rows } = await db.query(`SELECT * FROM meta_tag_tasks WHERE id = $1`, [taskId]);
+    const t = rows[0];
+    if (t) {
+      await recordTrainingExample({
+        articleRef: `meta_tags:${taskId}`,
+        kind: 'meta_tags',
+        niche: t.niche || null,
+        userPrompt: `${t.name || ''}\\n${Array.isArray(t.keywords) ? t.keywords.join('\\n') : ''}`,
+        htmlOutput: JSON.stringify(t.results || []),
+        qualityScore: { overall: 85, subscores: { eeat: 85, fact_check: 85, plagiarism: 85 } },
+        gaMetrics: null,
+        modelUsed: t.gemini_model || null,
+        costUsd: Number(t.total_cost_usd) || 0,
+        userId: t.user_id || null,
+      });
+    }
+  } catch (_e) { /* best-effort */ }
+  try {
+    await finalizeByTask({
+      table: 'meta_tag_tasks',
+      taskId,
+      ok: true,
+      taskKind: 'meta_tags',
+    });
+  } catch (_) { /* no-op */ }
 }
 
 /**

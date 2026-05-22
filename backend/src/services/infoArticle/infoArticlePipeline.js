@@ -63,6 +63,9 @@ const { verifyIntent } = require('./intentVerify.service');
 const { createValidationTracker } = require('./validationFailures.service');
 const { runEeatAuditCore } = require('../eeatAudit/core');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
+const { recordTrainingExample } = require('../aegis/datasetWriter');
+const { finalizeByTask } = require('../aegis/backlogHooks');
+const biobrainClient = require('../aegis/biobrainClient');
 
 // ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
 // Гейт. По умолчанию OFF — фундамент укладываем без изменения дефолтного
@@ -1296,6 +1299,20 @@ async function processInfoArticleTask(taskId) {
     if (writerIssues.length) {
       await appendLog(taskId, `⚠ Остались ${writerIssues.length} замечаний после первичного writer`, 'warn');
     }
+    let bioFastReject = false;
+    try {
+      const br = await biobrainClient.predict({ text: articleHtml, features: null });
+      if (br.ok && br.body) {
+        const score = Number(br.body.score);
+        const gate = br.body.gate || 'pass';
+        bioFastReject = gate === 'fast_reject';
+        await appendLog(
+          taskId,
+          `🧬 BioBrain: score=${Number.isFinite(score) ? score.toFixed(3) : '—'} gate=${gate}`,
+          bioFastReject ? 'warn' : 'info',
+        );
+      }
+    } catch (_) { /* best-effort */ }
 
     // 10. Stage 5 (E-E-A-T) + Stage 5b (link audit) — параллельно.
     // Stage 5b пропускается, если link_plan пуст (режим «без перелинковки») —
@@ -1359,7 +1376,7 @@ async function processInfoArticleTask(taskId) {
     const eeatBelow      = eeatAudit && eeatAudit.total_score < INFO_ARTICLE_EEAT_TARGET;
     const linkBelow      = linkAudit && linkAudit.coverage_pct < 100;
     const lsiBelow       = lsiCov.coveragePct < INFO_ARTICLE_LSI_TARGET;
-    const refineNeeded   = eeatBelow || linkBelow || lsiBelow;
+    const refineNeeded   = eeatBelow || linkBelow || lsiBelow || bioFastReject;
 
     if (refineNeeded) {
       await setStage(taskId, 'stage3_writer_refine', 76);
@@ -1391,7 +1408,9 @@ async function processInfoArticleTask(taskId) {
         {
           callLabel: 'InfoArticle Stage 3 (refine)',
           priorEeatIssues: eeatAudit ? eeatAudit.issues : null,
-          priorLinkIssues: linkIssues,
+          priorLinkIssues: bioFastReject
+            ? [...linkIssues, 'BIO_FAST_REJECT: переработай текст с более чёткой структурой, фактами и сигналами доверия']
+            : linkIssues,
         },
       );
       // Phase 2 / С1: фиксируем результат refine-прохода в трекере регрессий.
@@ -1805,6 +1824,27 @@ async function processInfoArticleTask(taskId) {
           },
         );
         await saveColumn(taskId, 'quality_score', quality);
+        try {
+          await recordTrainingExample({
+            articleRef: `info_article:${taskId}`,
+            kind: 'info_article',
+            niche: task.region || null,
+            userPrompt: task.topic || '',
+            htmlOutput: articleHtml || '',
+            qualityScore: quality,
+            gaMetrics: null,
+            modelUsed: quality.model_used || t.gemini_model || null,
+            costUsd: Number(t.total_cost_usd) || 0,
+            userId: task.user_id || null,
+          });
+          const eeat = quality && quality.subscores ? Number(quality.subscores.eeat) : null;
+          await biobrainClient.feedback({
+            features: null,
+            predicted: null,
+            real_spq_overall: quality.overall,
+            real_eeat: Number.isFinite(eeat) ? eeat : null,
+          });
+        } catch (_e) { /* best-effort */ }
         if (quality.overall !== null) {
           await appendLog(
             taskId,
@@ -1840,6 +1880,20 @@ async function processInfoArticleTask(taskId) {
     );
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
+    try {
+      const { rows } = await db.query(
+        `SELECT quality_score FROM info_article_tasks WHERE id = $1`,
+        [taskId],
+      );
+      const score = rows[0] && rows[0].quality_score && rows[0].quality_score.overall;
+      await finalizeByTask({
+        table: 'info_article_tasks',
+        taskId,
+        ok: true,
+        spqOverall: score == null ? null : Number(score),
+        taskKind: 'info_article',
+      });
+    } catch (_) { /* no-op */ }
 
     if (geminiCacheName) {
       cleanupGeminiCache(taskId, geminiCacheName);
@@ -1857,6 +1911,13 @@ async function processInfoArticleTask(taskId) {
       );
       await appendLog(taskId, `❌ Ошибка: ${err.message}`, 'err');
       publishEvent(taskId, 'status', { status: 'error', error: err.message });
+      await finalizeByTask({
+        table: 'info_article_tasks',
+        taskId,
+        ok: false,
+        error: err.message,
+        taskKind: 'info_article',
+      });
     } catch (_) { /* no-op */ }
   } finally {
     if (geminiCacheName) {

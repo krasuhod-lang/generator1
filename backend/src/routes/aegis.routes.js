@@ -8,6 +8,7 @@ const {
   getStatus,
   listBacklog,
   createBacklogItem,
+  retryBacklogItem,
   triggerDspyRetrain,
   proposeMutation,
   listRuns,
@@ -46,6 +47,7 @@ router.use(readLimiter);
 router.get('/status',          auth, getStatus);
 router.get('/backlog',         auth, listBacklog);
 router.post('/backlog',        auth, writeLimiter, createBacklogItem);
+router.post('/backlog/:number/retry', auth, writeLimiter, retryBacklogItem);
 router.post('/dspy/retrain',   auth, writeLimiter, triggerDspyRetrain);
 router.post('/mutate/propose', auth, writeLimiter, proposeMutation);
 router.get('/runs',            auth, listRuns);

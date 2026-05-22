@@ -7,7 +7,7 @@ DSPy retrain'а).
 degradation, иначе — рендерим простой 3-step граф.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 _REASON = None
 try:  # pragma: no cover
@@ -28,7 +28,12 @@ def unavailable_reason() -> Optional[str]:
     return _REASON
 
 
-def run(user_prompt: str, niche: Optional[str], max_iters: int) -> Dict[str, Any]:
+def run(
+    user_prompt: str,
+    niche: Optional[str],
+    max_iters: int,
+    bio_predictor: Optional[Callable[..., Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Заглушка: возвращает trace без реального вызова LLM.
 
     В Node-пайплайне реальный writer/critic/refiner уже реализованы —
@@ -36,6 +41,18 @@ def run(user_prompt: str, niche: Optional[str], max_iters: int) -> Dict[str, Any
     запустить symbolic-граф изолированно (без HTTP).
     """
     trace = []
+    bio_score = None
+    bio_gate = "pass"
+    if bio_predictor is not None:
+        try:
+            bio = bio_predictor(text=user_prompt, threshold_fast_reject=0.35)
+            bio_score = bio.get("score")
+            bio_gate = bio.get("gate") or "pass"
+            trace.append({"iter": 0, "node": "bio_filter", "score": bio_score, "gate": bio_gate})
+            if bio_gate == "fast_reject":
+                trace.append({"iter": 0, "node": "refiner", "reason": "bio_fast_reject"})
+        except Exception:
+            trace.append({"iter": 0, "node": "bio_filter", "error": "predict_failed"})
     for i in range(max_iters):
         trace.append({"iter": i, "node": "writer", "ok": True})
         trace.append({"iter": i, "node": "critic", "score_stub": 75 + i * 3})
@@ -43,6 +60,8 @@ def run(user_prompt: str, niche: Optional[str], max_iters: int) -> Dict[str, Any
         "user_prompt": user_prompt,
         "niche": niche,
         "iterations": max_iters,
+        "bio_score": bio_score,
+        "bio_gate": bio_gate,
         "trace": trace,
         "stub": True,
         "note": "Real writer/critic live in Node orchestrator.js",

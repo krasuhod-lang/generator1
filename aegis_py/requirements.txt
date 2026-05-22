@@ -21,6 +21,7 @@ pydantic==2.9.2
 requests==2.32.3
 pytest==8.3.3
 numpy>=1.26,<2.2
+neat-python==0.92
 
 # ── Опциональные deps (раскомментируйте по мере подключения подсистем) ─
 # neo4j==5.25.0                      # GraphRAG (Phase 1)
@@ -33,3 +34,4 @@ numpy>=1.26,<2.2
 # dspy-ai==2.5.41                    # DSPy MIPROv2 (Phase 6)
 # google-analytics-data==0.18.16     # GA4 Reporting API v1 (Phase 7)
 # google-auth==2.35.0                # OAuth2 для GA4
+# brian2==2.7.1                      # BioBrain SNN (optional heavy)

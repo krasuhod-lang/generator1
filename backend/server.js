@@ -213,9 +213,13 @@ const start = async () => {
       const killSwitch  = require('./src/services/aegis/killSwitch');
       const alerting    = require('./src/services/aegis/alerting');
       const telemetry   = require('./src/services/aegis/telemetry');
+      const { getAegisFlags } = require('./src/services/aegis/featureFlags');
+      const { startBacklogWorker } = require('./src/services/aegis/backlogWorker');
       alerting.setDbConnection(db);
       await killSwitch.loadInitialState(db);
       telemetry.startOtlpPusher(); // no-op если AEGIS_OTLP_HTTP_URL пуст.
+      const b = getAegisFlags().backlog;
+      if (b.enabled && b.repo && b.pat) startBacklogWorker();
     } catch (err) {
       console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
     }
@@ -416,6 +420,8 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS total_cost_usd   NUMERIC(12, 6) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS llm_model        TEXT`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS gemini_model     TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS source           TEXT`);
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_user_created ON meta_tag_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_status ON meta_tag_tasks (status)`);
 
@@ -516,6 +522,8 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_user_created ON link_article_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_status       ON link_article_tasks (status)`);
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS source TEXT`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
 
     // Отдельный журнал событий пайплайна ссылочной статьи.
     // Inline logs JSONB в link_article_tasks остаётся для UI-ленты,
@@ -605,6 +613,8 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS evaluator_report    JSONB`);
     await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS module_context_used JSONB`);
     await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS gemini_model        TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS source TEXT`);
+    await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
     await db.query(`
       CREATE TABLE IF NOT EXISTS article_topic_trends (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -710,6 +720,8 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_user_created ON info_article_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_status       ON info_article_tasks (status)`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS source TEXT`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_info_article_eeat_score
         ON info_article_tasks (eeat_score)
@@ -781,6 +793,8 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_user_created ON relevance_reports (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_status ON relevance_reports (status)`);
+    await db.query(`ALTER TABLE relevance_reports ADD COLUMN IF NOT EXISTS source TEXT`);
+    await db.query(`ALTER TABLE relevance_reports ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
 
     // Migration 019: семантические коконы (SVD) + метаданные raw-кэша Redis.
     // processed_documents (леммы + POS-последовательности) живут в Redis
@@ -1101,6 +1115,11 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_backlog_status ON aegis_backlog (status)`);
+    await db.query(`ALTER TABLE aegis_backlog ADD COLUMN IF NOT EXISTS task_ref TEXT`);
+    await db.query(`ALTER TABLE aegis_backlog ADD COLUMN IF NOT EXISTS task_kind TEXT`);
+    await db.query(`ALTER TABLE aegis_backlog ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ`);
+    await db.query(`ALTER TABLE aegis_backlog ADD COLUMN IF NOT EXISTS spq_overall NUMERIC(5,2)`);
+    await db.query(`ALTER TABLE aegis_backlog ADD COLUMN IF NOT EXISTS error TEXT`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_dspy_dataset (
@@ -1121,6 +1140,15 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_niche_spq ON aegis_dspy_dataset (niche, spq_overall DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_unused    ON aegis_dspy_dataset (used_in_retrain) WHERE used_in_retrain IS NULL`);
+    await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS user_hash TEXT`);
+    await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS source_kind TEXT`);
+    await db.query(`
+      DELETE FROM aegis_dspy_dataset d
+      USING aegis_dspy_dataset d2
+      WHERE d.article_ref = d2.article_ref
+        AND d.id < d2.id
+    `);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_dspy_article_ref ON aegis_dspy_dataset (article_ref)`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_mutations (
@@ -1240,6 +1268,19 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_vector_gc_log_created ON aegis_vector_gc_log (created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_vector_gc_log_run ON aegis_vector_gc_log (run_id) WHERE run_id IS NOT NULL`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_biobrain_versions (
+        id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        generation        INTEGER      NOT NULL DEFAULT 0,
+        nodes             INTEGER      NOT NULL DEFAULT 0,
+        connections       INTEGER      NOT NULL DEFAULT 0,
+        mean_fitness      NUMERIC(10,6),
+        state_path        TEXT,
+        created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_biobrain_versions_created ON aegis_biobrain_versions (created_at DESC)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
