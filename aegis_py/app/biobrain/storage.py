@@ -8,7 +8,7 @@ import pickle
 from pathlib import Path
 from typing import Any, Optional
 
-ROOT = Path(os.environ.get("AEGIS_BIOBRAIN_DIR", "brain_state"))
+ROOT = Path(os.environ.get("AEGIS_BIOBRAIN_DIR", str(Path(__file__).resolve().parents[3] / "brain_state")))
 BEST_FILE = ROOT / "biobrain_best.pkl"
 STATE_FILE = ROOT / "biobrain_state.json"
 

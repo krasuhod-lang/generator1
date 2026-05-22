@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from typing import List
 
 _STOPWORDS = {
@@ -16,9 +17,24 @@ def _clamp01(x: float) -> float:
     return 0.0 if x < 0 else (1.0 if x > 1 else x)
 
 
+class _PlainTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._parts: List[str] = []
+
+    def handle_data(self, data: str) -> None:  # noqa: D401
+        if data:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return " ".join(self._parts)
+
+
 def extract_features(text: str, *, has_cover_image: bool = False) -> List[float]:
     s = str(text or "")
-    plain = re.sub(r"<[^>]+>", " ", s)
+    parser = _PlainTextExtractor()
+    parser.feed(s)
+    plain = parser.text()
     plain = re.sub(r"\s+", " ", plain).strip()
 
     chars = len(plain)
