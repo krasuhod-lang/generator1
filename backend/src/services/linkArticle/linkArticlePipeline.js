@@ -44,6 +44,9 @@ const {
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { normalizeGeminiCopywritingModel, DEFAULT_GEMINI_COPYWRITING_MODEL } = require('../llm/geminiModels');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
+const { recordTrainingExample } = require('../aegis/datasetWriter');
+const { finalizeByTask } = require('../aegis/backlogHooks');
+const biobrainClient = require('../aegis/biobrainClient');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
@@ -820,6 +823,27 @@ async function processLinkArticleTask(taskId) {
           },
         );
         await saveStageResult(taskId, 'quality_score', quality);
+        try {
+          await recordTrainingExample({
+            articleRef: `link_article:${taskId}`,
+            kind: 'link_article',
+            niche: null,
+            userPrompt: task.topic || '',
+            htmlOutput: articleHtml || '',
+            qualityScore: quality,
+            gaMetrics: null,
+            modelUsed: quality.model_used || t.gemini_model || null,
+            costUsd: Number(t.total_cost_usd) || 0,
+            userId: task.user_id || null,
+          });
+          const eeat = quality && quality.subscores ? Number(quality.subscores.eeat) : null;
+          await biobrainClient.feedback({
+            features: null,
+            predicted: null,
+            real_spq_overall: quality.overall,
+            real_eeat: Number.isFinite(eeat) ? eeat : null,
+          });
+        } catch (_e) { /* best-effort */ }
         if (quality.overall !== null) {
           await appendLog(
             taskId,
@@ -850,6 +874,20 @@ async function processLinkArticleTask(taskId) {
     );
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
+    try {
+      const { rows } = await db.query(
+        `SELECT quality_score FROM link_article_tasks WHERE id = $1`,
+        [taskId],
+      );
+      const score = rows[0] && rows[0].quality_score && rows[0].quality_score.overall;
+      await finalizeByTask({
+        table: 'link_article_tasks',
+        taskId,
+        ok: true,
+        spqOverall: score == null ? null : Number(score),
+        taskKind: 'link_article',
+      });
+    } catch (_) { /* no-op */ }
 
     // 9. Best-effort cleanup Gemini cachedContents (TTL — fallback).
     if (geminiCacheName) {
@@ -870,6 +908,13 @@ async function processLinkArticleTask(taskId) {
       );
       await appendLog(taskId, `❌ Ошибка: ${err.message}`, 'err');
       publishEvent(taskId, 'status', { status: 'error', error: err.message });
+      await finalizeByTask({
+        table: 'link_article_tasks',
+        taskId,
+        ok: false,
+        error: err.message,
+        taskKind: 'link_article',
+      });
     } catch (_) { /* no-op */ }
   } finally {
     // На любой ветке (success/error) при наличии «висящего» имени кэша —

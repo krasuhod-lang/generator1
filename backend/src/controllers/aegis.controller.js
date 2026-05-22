@@ -29,16 +29,48 @@ const killSwitch = require('../services/aegis/killSwitch');
 const llmRouter  = require('../services/aegis/llmRouter');
 const backup     = require('../services/aegis/backupClient');
 const vectorGc   = require('../services/aegis/vectorGc');
+const biobrain   = require('../services/aegis/biobrainClient');
+const { LABEL_READY, LABEL_IN_PROGRESS, LABEL_DONE, LABEL_FAILED } = require('../services/aegis/backlogHooks');
 
 /** GET /api/aegis/status */
 async function getStatus(req, res) {
   const flags = getAegisFlags();
   const brain = getBrainSummary();
-  const [grHealth, vdHealth, rayHealth, dspyStatus] = await Promise.all([
+  let datasetStats = { total_rows: 0, rows_24h: 0, avg_spq: null, niches_coverage_pct: null };
+  try {
+    const [{ rows: totalRows }, { rows: withNicheRows }] = await Promise.all([
+      db.query(
+        `SELECT COUNT(*)::int AS total_rows,
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::int AS rows_24h,
+                AVG(spq_overall)::numeric(10,2) AS avg_spq
+           FROM aegis_dspy_dataset
+          WHERE is_seed = FALSE`,
+      ),
+      db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE COALESCE(niche, '') <> '')::int AS with_niche,
+           COUNT(*)::int AS total
+         FROM aegis_dspy_dataset
+         WHERE is_seed = FALSE`,
+      ),
+    ]);
+    const t = totalRows[0] || {};
+    const n = withNicheRows[0] || {};
+    datasetStats = {
+      total_rows: Number(t.total_rows) || 0,
+      rows_24h: Number(t.rows_24h) || 0,
+      avg_spq: t.avg_spq == null ? null : Number(t.avg_spq),
+      niches_coverage_pct: (Number(n.total) || 0) > 0
+        ? Math.round(((Number(n.with_niche) || 0) * 1000) / Number(n.total)) / 10
+        : null,
+    };
+  } catch (_) { /* optional */ }
+  const [grHealth, vdHealth, rayHealth, dspyStatus, biobrainStatus] = await Promise.all([
     graphrag.health(),
     vectordb.health(),
     ray.health(),
     dspy.status(),
+    biobrain.status().catch(() => ({ ok: false, reason: 'unavailable' })),
   ]);
   res.json({
     enabled: flags.enabled,
@@ -62,6 +94,11 @@ async function getStatus(req, res) {
       enabled: flags.backlog.enabled,
       repo_set: Boolean(flags.backlog.repo),
     },
+    biobrain: {
+      enabled: Boolean(flags.biobrain && flags.biobrain.enabled),
+      status: biobrainStatus && biobrainStatus.body ? biobrainStatus.body : null,
+    },
+    training_dataset: datasetStats,
     brain_state: brain,
   });
 }
@@ -71,8 +108,50 @@ async function listBacklog(req, res) {
   const flags = getAegisFlags().backlog;
   const label = req.query.label || flags.issueLabel;
   const r = await githubBot.listIssues({ label, state: req.query.state || 'open' });
-  if (!r.ok) return res.status(503).json({ error: 'github_unavailable', reason: r.reason });
-  res.json({ items: r.items });
+  if (!r.ok && r.reason !== 'not_configured') {
+    return res.status(503).json({ error: 'github_unavailable', reason: r.reason });
+  }
+  if (!r.ok && r.reason === 'not_configured') {
+    try {
+      const local = await db.query(
+        `SELECT issue_number AS number, title,
+                status AS local_status, task_ref, task_kind,
+                spq_overall, error AS local_error, finished_at
+           FROM aegis_backlog
+          ORDER BY updated_at DESC
+          LIMIT 100`,
+      );
+      return res.json({ items: local.rows });
+    } catch (_) {
+      return res.json({ items: [] });
+    }
+  }
+  const numbers = (r.items || []).map((i) => Number(i.number)).filter((n) => Number.isFinite(n));
+  let byNum = new Map();
+  if (numbers.length) {
+    try {
+      const local = await db.query(
+        `SELECT issue_number, status, task_ref, task_kind, spq_overall, error, finished_at
+           FROM aegis_backlog
+          WHERE issue_number = ANY($1::int[])`,
+        [numbers],
+      );
+      byNum = new Map(local.rows.map((x) => [Number(x.issue_number), x]));
+    } catch (_) { /* ignore */ }
+  }
+  const items = (r.items || []).map((i) => {
+    const local = byNum.get(Number(i.number)) || {};
+    return {
+      ...i,
+      local_status: local.status || 'pending',
+      task_ref: local.task_ref || null,
+      task_kind: local.task_kind || null,
+      spq_overall: local.spq_overall == null ? null : Number(local.spq_overall),
+      local_error: local.error || null,
+      finished_at: local.finished_at || null,
+    };
+  });
+  res.json({ items });
 }
 
 /** POST /api/aegis/backlog (admin) */
@@ -98,6 +177,30 @@ async function createBacklogItem(req, res) {
     // не критично — backlog таблица может быть ещё не накатана.
   }
   res.json({ number: r.number, url: r.url });
+}
+
+/** POST /api/aegis/backlog/:number/retry (admin) */
+async function retryBacklogItem(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const issueNumber = parseInt(req.params.number, 10);
+  if (!Number.isFinite(issueNumber) || issueNumber <= 0) return res.status(400).json({ error: 'invalid_issue_number' });
+
+  await githubBot.removeLabel({ issueNumber, label: LABEL_DONE });
+  await githubBot.removeLabel({ issueNumber, label: LABEL_FAILED });
+  await githubBot.removeLabel({ issueNumber, label: LABEL_IN_PROGRESS });
+  await githubBot.addLabel({ issueNumber, label: LABEL_READY });
+
+  try {
+    await db.query(
+      `INSERT INTO aegis_backlog (issue_number, title, labels, status, error, finished_at, updated_at)
+       VALUES ($1, '', '[]'::jsonb, 'pending', NULL, NULL, NOW())
+       ON CONFLICT (issue_number)
+       DO UPDATE SET status='pending', error=NULL, finished_at=NULL, updated_at=NOW()`,
+      [issueNumber],
+    );
+  } catch (_) { /* ignore */ }
+
+  res.json({ ok: true, issue_number: issueNumber });
 }
 
 /** POST /api/aegis/dspy/retrain (admin) */
@@ -165,6 +268,7 @@ module.exports = {
   getStatus,
   listBacklog,
   createBacklogItem,
+  retryBacklogItem,
   triggerDspyRetrain,
   proposeMutation,
   listRuns,

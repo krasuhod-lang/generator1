@@ -189,6 +189,15 @@ const AEGIS_FLAGS = deepFreeze({
     issueLabel: _envStr('AEGIS_BACKLOG_LABEL', 'aegis:ready'),
   },
 
+  // ── BioBrain (NEAT pre-filter) ─────────────────────────────────────
+  biobrain: {
+    enabled: false,
+    fastRejectThreshold: 0.35,
+    reviewThreshold: 0.55,
+    snnEnabled: false,
+    evolveIntervalSec: 300,
+  },
+
   // ── Состояние мозга (compiled DSPy weights) ──────────────────────
   brainState: {
     rootDir:   path.join(REPO_ROOT, 'brain_state'),
@@ -387,6 +396,9 @@ const RANGES = [
   ['dspy.coldStartMinRows',           0, 1000],
   ['dspy.epsilonGreedyRate',          0, 1],
   ['dspy.epsilonGreedyMaxRate',       0, 1],
+  ['biobrain.fastRejectThreshold',    0, 1],
+  ['biobrain.reviewThreshold',        0, 1],
+  ['biobrain.evolveIntervalSec',      1, 86400],
   ['vectorGc.ttlDays',                0, 3650],
   ['vectorGc.minAgeSafetyHours',      0, 24 * 365],
 ];
@@ -407,6 +419,9 @@ function _get(obj, p) {
   }
   if (!['drop', 'mark'].includes(AEGIS_FLAGS.poison.onFail)) {
     throw new Error(`[aegis/featureFlags] poison.onFail должен быть 'drop' или 'mark'`);
+  }
+  if (AEGIS_FLAGS.biobrain.reviewThreshold < AEGIS_FLAGS.biobrain.fastRejectThreshold) {
+    throw new Error('[aegis/featureFlags] biobrain.reviewThreshold должен быть >= fastRejectThreshold');
   }
 })();
 

@@ -36,6 +36,7 @@ from . import ga4 as ga4_mod
 from . import mutator as mut_mod
 from . import backup as backup_mod
 from . import vector_gc as vector_gc_mod
+from .biobrain.evolver import BioBrainEvolver
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -50,6 +51,8 @@ app = FastAPI(
     version=APP_VERSION,
     description="Адаптивный движок для генеративных интеллектуальных систем.",
 )
+
+BIOBRAIN = BioBrainEvolver()
 
 
 # ── Утилита: ответ 503 если подсистема не готова ─────────────────────
@@ -76,6 +79,7 @@ def health() -> Dict[str, Any]:
             "mutator":  mut_mod.is_available(),
             "backup":   backup_mod.is_available(),
             "vector_gc": vector_gc_mod.is_available(),
+            "biobrain": BIOBRAIN.available,
         },
     }
 
@@ -292,13 +296,58 @@ class LangGraphRunRequest(BaseModel):
     user_prompt: str
     niche: Optional[str] = None
     max_iters: int = 3
+    use_bio_filter: bool = True
 
 
 @app.post("/langgraph/run")
 def langgraph_run(req: LangGraphRunRequest) -> Dict[str, Any]:
     if not lg_mod.is_available():
         raise _unavailable("langgraph_disabled", lg_mod.unavailable_reason())
-    return lg_mod.run(req.user_prompt, req.niche, req.max_iters)
+    return lg_mod.run(
+        req.user_prompt, req.niche, req.max_iters,
+        bio_predictor=(BIOBRAIN.predict if req.use_bio_filter else None),
+    )
+
+
+class BioBrainPredictRequest(BaseModel):
+    features: Optional[List[float]] = None
+    text: Optional[str] = None
+    threshold_fast_reject: float = 0.35
+
+
+class BioBrainFeedbackRequest(BaseModel):
+    features: List[float]
+    predicted: Optional[float] = None
+    real_spq_overall: float
+    real_eeat: Optional[float] = None
+
+
+@app.get("/biobrain/status")
+def biobrain_status() -> Dict[str, Any]:
+    return BIOBRAIN.stats()
+
+
+@app.post("/biobrain/predict")
+def biobrain_predict(req: BioBrainPredictRequest) -> Dict[str, Any]:
+    return BIOBRAIN.predict(
+        features=req.features,
+        text=req.text,
+        threshold_fast_reject=req.threshold_fast_reject,
+    )
+
+
+@app.post("/biobrain/feedback")
+def biobrain_feedback(req: BioBrainFeedbackRequest) -> Dict[str, Any]:
+    stored = BIOBRAIN.record_outcome(
+        features=req.features,
+        real_spq_overall=req.real_spq_overall,
+    )
+    evolved = BIOBRAIN.evolve_step()
+    return {
+        **stored,
+        "evolved": bool(evolved.get("evolved")),
+        "stats": BIOBRAIN.stats(),
+    }
 
 
 # ── /dspy ─────────────────────────────────────────────────────────────

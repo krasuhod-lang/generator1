@@ -94,6 +94,29 @@ async function addLabel({ issueNumber, label }) {
   }
 }
 
+async function removeLabel({ issueNumber, label }) {
+  const a = _auth();
+  if (!a) return { ok: false, reason: 'not_configured' };
+  try {
+    await axios.delete(
+      `https://api.github.com/repos/${a.owner}/${a.repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+      {
+        headers: {
+          Authorization: `token ${a.pat}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'aegis-bot',
+        },
+        timeout: 15000,
+      },
+    );
+    return { ok: true };
+  } catch (err) {
+    // GitHub отдаёт 404 если метки нет — для нас это идемпотентный success.
+    if (err && err.response && err.response.status === 404) return { ok: true };
+    return { ok: false, reason: 'http_error', error: err.message };
+  }
+}
+
 async function commentIssue({ issueNumber, body }) {
   const a = _auth();
   if (!a) return { ok: false, reason: 'not_configured' };
@@ -116,4 +139,10 @@ async function commentIssue({ issueNumber, body }) {
   }
 }
 
-module.exports = { createIssue, listIssues, addLabel, commentIssue };
+module.exports = {
+  createIssue,
+  listIssues,
+  addLabel,
+  removeLabel,
+  commentIssue,
+};

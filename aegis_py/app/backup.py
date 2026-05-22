@@ -83,6 +83,8 @@ def _safe_dir(local_dir: str) -> pathlib.Path:
     """
     if not local_dir or not isinstance(local_dir, str):
         raise ValueError("local_dir must be non-empty string")
+    if not pathlib.Path(local_dir).is_absolute():
+        raise ValueError("local_dir must be absolute path")
     # Базовый sanity — никаких NUL / новых строк.
     if "\x00" in local_dir or "\n" in local_dir or "\r" in local_dir:
         raise ValueError("local_dir contains forbidden characters")
