@@ -8,6 +8,7 @@ Env:
 """
 
 import os
+import hashlib
 from typing import Any, Dict, List, Optional
 
 _REASON = None
@@ -75,15 +76,88 @@ def _embed_gemini(texts: List[str]) -> List[List[float]]:
     return vectors
 
 
+def _embed_openai(texts: List[str]) -> List[List[float]]:
+    import requests
+
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    model = (os.environ.get("AEGIS_OPENAI_EMBED_MODEL") or "text-embedding-3-small").strip()
+    vectors: List[List[float]] = []
+    for t in texts:
+        r = requests.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "input": t},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        vectors.append(data["data"][0]["embedding"])
+    return vectors
+
+
+def _embed_local_bge(texts: List[str]) -> List[List[float]]:
+    model_name = (os.environ.get("AEGIS_LOCAL_BGE_MODEL") or "BAAI/bge-small-en-v1.5").strip()
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        model = SentenceTransformer(model_name)
+        vectors = model.encode(texts, normalize_embeddings=True)
+        return [v.tolist() for v in vectors]
+    except Exception:
+        # Lightweight deterministic fallback without heavy deps.
+        dim = 384
+        out: List[List[float]] = []
+        for t in texts:
+            vec = [0.0] * dim
+            tokens = (t or "").lower().split()
+            if not tokens:
+                out.append(vec)
+                continue
+            for tok in tokens:
+                h = hashlib.sha256(tok.encode("utf-8")).digest()
+                idx = int.from_bytes(h[:4], "big") % dim
+                sign = -1.0 if (h[4] & 1) else 1.0
+                vec[idx] += sign
+            norm = sum(v * v for v in vec) ** 0.5
+            if norm > 0:
+                vec = [v / norm for v in vec]
+            out.append(vec)
+        return out
+
+
+def _normalize_embedder(embedder: str) -> str:
+    e = (embedder or "").strip().lower()
+    aliases = {
+        "open-ai": "openai",
+        "text-embedding-3-small": "openai",
+        "text-embedding-3-large": "openai",
+        "bge": "local-bge",
+        "local_bge": "local-bge",
+    }
+    return aliases.get(e, e)
+
+
+def _embed(texts: List[str], embedder: str) -> List[List[float]]:
+    provider = _normalize_embedder(embedder)
+    if provider == "gemini":
+        return _embed_gemini(texts)
+    if provider == "openai":
+        return _embed_openai(texts)
+    if provider == "local-bge":
+        return _embed_local_bge(texts)
+    raise RuntimeError(f"embedder '{embedder}' not supported; use gemini/openai/local-bge")
+
+
 def index(niche: str, paragraphs: List[str], source_url: Optional[str], embedder: str,
           run_id: Optional[str] = None, collection_override: Optional[str] = None) -> Dict[str, Any]:
-    if embedder != "gemini":
-        raise RuntimeError(f"embedder '{embedder}' not implemented; use 'gemini'")
+    embedder = _normalize_embedder(embedder)
     if not paragraphs:
         return {"indexed": 0}
     cli = _client()
     coll = collection_override or _collection(niche)
-    vecs = _embed_gemini(paragraphs)
+    vecs = _embed(paragraphs, embedder=embedder)
     dim = len(vecs[0])
     # Создаём коллекцию если её ещё нет.
     try:
@@ -117,15 +191,14 @@ def index(niche: str, paragraphs: List[str], source_url: Optional[str], embedder
 
 
 def search(niche: str, query: str, top_k: int, embedder: str, hybrid_alpha: float) -> List[Dict[str, Any]]:
-    if embedder != "gemini":
-        return []
+    embedder = _normalize_embedder(embedder)
     cli = _client()
     coll = _collection(niche)
     try:
         cli.get_collection(coll)
     except Exception:
         return []
-    qv = _embed_gemini([query])[0]
+    qv = _embed([query], embedder=embedder)[0]
     res = cli.search(collection_name=coll, query_vector=qv, limit=top_k)
     return [
         {
