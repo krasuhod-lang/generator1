@@ -1,0 +1,53 @@
+name: aegis-nightly-backup
+
+# Ночной снапшот Qdrant + Neo4j в S3.
+# Запускается cron'ом 03:00 UTC и через workflow_dispatch (ручной).
+# Требует secrets:
+#   AEGIS_BACKEND_URL    — публичный URL backend'а (https://...)
+#   AEGIS_ADMIN_TOKEN    — JWT админа (или otp) для POST /api/aegis/backup/run
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Comma list: qdrant,neo4j'
+        required: false
+        default: 'qdrant,neo4j'
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Trigger backup via API
+        env:
+          BACKEND_URL: ${{ secrets.AEGIS_BACKEND_URL }}
+          ADMIN_TOKEN: ${{ secrets.AEGIS_ADMIN_TOKEN }}
+          TARGETS:     ${{ github.event.inputs.targets || 'qdrant,neo4j' }}
+        run: |
+          set -e
+          if [ -z "$BACKEND_URL" ] || [ -z "$ADMIN_TOKEN" ]; then
+            echo "::warning::AEGIS_BACKEND_URL or AEGIS_ADMIN_TOKEN not set — backup skipped."
+            exit 0
+          fi
+          # Преобразуем comma-list в JSON-массив targets.
+          TARGETS_JSON=$(echo "$TARGETS" | python3 -c "import json,sys; print(json.dumps([t.strip() for t in sys.stdin.read().split(',') if t.strip()]))")
+          PAYLOAD=$(printf '{"targets": %s}' "$TARGETS_JSON")
+          echo "Triggering backup with targets: $TARGETS_JSON"
+          HTTP_CODE=$(curl -sS -o /tmp/backup_resp.json -w "%{http_code}" \
+            -X POST "$BACKEND_URL/api/aegis/backup/run" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 1800 \
+            -d "$PAYLOAD")
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/backup_resp.json || true
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Backup endpoint returned HTTP $HTTP_CODE"
+            exit 1
+          fi

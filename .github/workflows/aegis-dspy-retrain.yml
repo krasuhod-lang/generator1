@@ -1,0 +1,100 @@
+name: aegis-dspy-retrain
+
+# Weekly retrain мозга A.E.G.I.S. (Sunday 02:00 UTC).
+# Триггерит /api/aegis/dspy/retrain, который собирает aegis_dspy_dataset
+# и запускает DSPy MIPROv2. Если improvement_pct ≥ AEGIS_DSPY_MIN_IMPROVEMENT_PCT,
+# aegis_py перезаписывает brain_state/compiled_writer.yaml.
+#
+# Этот workflow забирает обновлённый yaml и коммитит его в репо
+# (на отдельный PR с label aegis:brain-update).
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'   # Sunday 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      niche:
+        description: 'Опционально: ниша (например, "okna"). Пусто = глобальный retrain.'
+        required: false
+      dry_run:
+        description: 'true = только посчитать, не перезаписывать yaml'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: aegis-dspy-retrain
+  cancel-in-progress: true
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trigger retrain
+        id: retrain
+        env:
+          AEGIS_API_URL:   ${{ secrets.AEGIS_API_URL }}
+          AEGIS_API_TOKEN: ${{ secrets.AEGIS_API_TOKEN }}
+          NICHE:   ${{ github.event.inputs.niche }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AEGIS_API_URL:-}" || -z "${AEGIS_API_TOKEN:-}" ]]; then
+            echo "::warning::AEGIS_API_URL / AEGIS_API_TOKEN not configured — skipping."
+            exit 0
+          fi
+          PAYLOAD=$(jq -nc \
+            --arg n "${NICHE:-}" \
+            --arg d "${DRY_RUN:-false}" \
+            '{niche: (if $n=="" then null else $n end), dry_run: ($d=="true")}')
+          RESP=$(curl -fsS -X POST "$AEGIS_API_URL/aegis/dspy/retrain" \
+            -H "Authorization: Bearer $AEGIS_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          echo "$RESP" | jq .
+          STATUS=$(echo "$RESP" | jq -r '.body.last_status // empty')
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch updated brain_state from aegis_py
+        if: steps.retrain.outputs.status == 'deployed'
+        env:
+          AEGIS_PY_URL: ${{ secrets.AEGIS_PY_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AEGIS_PY_URL:-}" ]]; then
+            echo "::warning::AEGIS_PY_URL not configured — skipping yaml sync."
+            exit 0
+          fi
+          mkdir -p brain_state
+          curl -fsS "$AEGIS_PY_URL/dspy/export?file=compiled_writer.yaml" \
+              -o brain_state/compiled_writer.yaml || true
+          curl -fsS "$AEGIS_PY_URL/dspy/export?file=compiled_critic.yaml" \
+              -o brain_state/compiled_critic.yaml || true
+
+      - name: Open PR with new brain weights
+        if: steps.retrain.outputs.status == 'deployed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet brain_state/; then
+            echo "::notice::No changes in brain_state/ — skipping PR."
+            exit 0
+          fi
+          BRANCH="aegis/brain-update-$(date +%Y%m%d-%H%M)"
+          git config user.name  "aegis-bot"
+          git config user.email "aegis-bot@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add brain_state/
+          git commit -m "aegis: weekly DSPy retrain → updated brain_state"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "🧠 AEGIS brain update ($(date +%Y-%m-%d))" \
+            --body  "Автоматический weekly DSPy MIPROv2 retrain." \
+            --label "aegis,aegis:brain-update"

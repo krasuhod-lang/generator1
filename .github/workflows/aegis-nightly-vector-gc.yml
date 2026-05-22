@@ -1,0 +1,75 @@
+name: aegis-nightly-vector-gc
+
+# Ночная TTL-чистка эфемерных коллекций Qdrant (evidence_*, serp_*,
+# relevance_*). Удаляются точки старше N дней, с предохранителем
+# min_age_safety_hours, чтобы не задеть свежие активные прогоны.
+#
+# Запускается cron'ом 03:15 UTC (через 15 минут после nightly-backup,
+# чтобы успеть снять снапшот ДО чистки).
+#
+# Требует secrets:
+#   AEGIS_BACKEND_URL   — публичный URL backend'а (https://...)
+#   AEGIS_ADMIN_TOKEN   — JWT админа для POST /api/aegis/vector-gc/sweep
+
+on:
+  schedule:
+    - cron: '15 3 * * *'   # 03:15 UTC, после aegis-nightly-backup
+  workflow_dispatch:
+    inputs:
+      ttl_days:
+        description: 'TTL in days (default — flags.vectorGc.ttlDays=30)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Dry-run (count only, do not delete)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-vector-gc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trigger vector GC sweep via API
+        env:
+          BACKEND_URL: ${{ secrets.AEGIS_BACKEND_URL }}
+          ADMIN_TOKEN: ${{ secrets.AEGIS_ADMIN_TOKEN }}
+          TTL_DAYS:    ${{ github.event.inputs.ttl_days }}
+          DRY_RUN:     ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -e
+          if [ -z "$BACKEND_URL" ] || [ -z "$ADMIN_TOKEN" ]; then
+            echo "::warning::AEGIS_BACKEND_URL or AEGIS_ADMIN_TOKEN not set — vector GC skipped."
+            exit 0
+          fi
+          PAYLOAD=$(python3 -c "
+          import json, os
+          p = {}
+          if os.environ.get('TTL_DAYS'):
+              try: p['ttl_days'] = int(os.environ['TTL_DAYS'])
+              except: pass
+          if os.environ.get('DRY_RUN','').lower() in ('1','true','yes'):
+              p['dry_run'] = True
+          print(json.dumps(p))
+          ")
+          echo "Vector GC payload: $PAYLOAD"
+          HTTP_CODE=$(curl -sS -o /tmp/vgc_resp.json -w "%{http_code}" \
+            -X POST "$BACKEND_URL/api/aegis/vector-gc/sweep" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 900 \
+            -d "$PAYLOAD")
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/vgc_resp.json || true
+          # 409 = vector GC disabled in flags — это не ошибка для cron'а.
+          if [ "$HTTP_CODE" = "409" ]; then
+            echo "::notice::vector_gc disabled in flags — skipping."
+            exit 0
+          fi
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Vector GC endpoint returned HTTP $HTTP_CODE"
+            exit 1
+          fi

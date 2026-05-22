@@ -1,0 +1,35 @@
+# =============================================================================
+# A.E.G.I.S. Python microservice
+# Подсистема aegis_py — FastAPI-сервис, который объединяет:
+#   • GraphRAG (Neo4j + NetworkX)
+#   • VectorDB (Qdrant — dense + sparse BM25)
+#   • Ray Cluster submit/jobs
+#   • LangGraph runner (writer/critic/refiner)
+#   • DSPy MIPROv2 optimizer
+#   • GA4 reporter (RL/PPO feedback)
+#   • DeepSeek-V4-Pro mutator (НЕ Claude, по решению владельца продукта)
+#
+# Все тяжёлые зависимости (neo4j, qdrant-client, ray, langgraph, dspy-ai,
+# google-analytics-data) — ОПЦИОНАЛЬНЫЕ. Сервис стартует и без них
+# (try/except), просто соответствующие endpoint'ы вернут 503.
+#
+# Обязательные deps — лёгкие (fastapi, uvicorn, pydantic, requests).
+# =============================================================================
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+requests==2.32.3
+pytest==8.3.3
+numpy>=1.26,<2.2
+
+# ── Опциональные deps (раскомментируйте по мере подключения подсистем) ─
+# neo4j==5.25.0                      # GraphRAG (Phase 1)
+# networkx==3.4.2                    # Betweenness Centrality (Phase 1)
+# qdrant-client==1.12.1              # VectorDB (Phase 2)
+# rank-bm25==0.2.2                   # Sparse BM25 для гибридного поиска
+# sentence-transformers==3.3.0       # Локальные эмбеддинги (если без Gemini)
+# ray==2.39.0                        # Ray Cluster (Phase 4)
+# langgraph==0.2.50                  # LangGraph runner (Phase 5)
+# dspy-ai==2.5.41                    # DSPy MIPROv2 (Phase 6)
+# google-analytics-data==0.18.16     # GA4 Reporting API v1 (Phase 7)
+# google-auth==2.35.0                # OAuth2 для GA4

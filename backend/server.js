@@ -32,6 +32,7 @@ const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 const relevanceRoutes     = require('./src/routes/relevance.routes');
 const forecasterRoutes    = require('./src/routes/forecaster.routes');
 const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
+const aegisRoutes         = require('./src/routes/aegis.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -113,6 +114,7 @@ app.use('/api/acf-json',       acfJsonRoutes);
 app.use('/api/relevance',      relevanceRoutes);
 app.use('/api/forecaster',     forecasterRoutes);
 app.use('/api/public',         forecasterPublicRoutes);
+app.use('/api/aegis',          aegisRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler
@@ -203,6 +205,19 @@ const start = async () => {
       await recoverStuckInfoArticleTasks();
     } catch (err) {
       console.warn('[Server] Info-article recovery skipped:', err.message);
+    }
+
+    // A.E.G.I.S. Phase 9–13: bootstrap kill switch state + wire alerting → db.
+    try {
+      const db          = require('./src/config/db');
+      const killSwitch  = require('./src/services/aegis/killSwitch');
+      const alerting    = require('./src/services/aegis/alerting');
+      const telemetry   = require('./src/services/aegis/telemetry');
+      alerting.setDbConnection(db);
+      await killSwitch.loadInitialState(db);
+      telemetry.startOtlpPusher(); // no-op если AEGIS_OTLP_HTTP_URL пуст.
+    } catch (err) {
+      console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
     }
 
     app.listen(PORT, () => {
@@ -1041,6 +1056,190 @@ async function ensureSchema() {
       END;
       $$;
     `);
+
+    // ─── Migration 038–042: A.E.G.I.S. («Эгида») — мозг системы ────────
+    // Идемпотентный DDL для пяти таблиц: aegis_runs, aegis_backlog,
+    // aegis_dspy_dataset, aegis_mutations, aegis_brain_versions.
+    // Подробности см. migrations/038–042 и AEGIS_SETUP.md.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_runs (
+        id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        kind            VARCHAR(32)  NOT NULL DEFAULT 'super_core_seo',
+        task_ref        TEXT,
+        niche           TEXT,
+        status          VARCHAR(16)  NOT NULL DEFAULT 'pending',
+        overall_score   NUMERIC(5,2),
+        iterations      INTEGER      NOT NULL DEFAULT 0,
+        cost_usd        NUMERIC(10,4) NOT NULL DEFAULT 0,
+        tokens_in       BIGINT       NOT NULL DEFAULT 0,
+        tokens_out      BIGINT       NOT NULL DEFAULT 0,
+        audit           JSONB,
+        trace           JSONB,
+        error_message   TEXT,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        finished_at     TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_runs_created ON aegis_runs (created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_runs_status  ON aegis_runs (status)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_backlog (
+        id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        issue_number    INTEGER      NOT NULL UNIQUE,
+        title           TEXT         NOT NULL,
+        labels          JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        niche           TEXT,
+        lsi_cluster_id  TEXT,
+        status          VARCHAR(16)  NOT NULL DEFAULT 'pending',
+        picked_by       TEXT,
+        picked_at       TIMESTAMPTZ,
+        aegis_run_id    UUID,
+        notes           TEXT,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_backlog_status ON aegis_backlog (status)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_dspy_dataset (
+        id              BIGSERIAL    PRIMARY KEY,
+        article_ref     TEXT         NOT NULL,
+        niche           TEXT,
+        user_prompt     TEXT         NOT NULL,
+        html_output     TEXT         NOT NULL,
+        quality_score   JSONB        NOT NULL,
+        spq_overall     NUMERIC(5,2) NOT NULL,
+        ppo_weight      NUMERIC(6,3) NOT NULL DEFAULT 1.0,
+        ga4_metrics     JSONB,
+        model_used      TEXT,
+        cost_usd        NUMERIC(10,4),
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        used_in_retrain UUID
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_niche_spq ON aegis_dspy_dataset (niche, spq_overall DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_unused    ON aegis_dspy_dataset (used_in_retrain) WHERE used_in_retrain IS NULL`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_mutations (
+        id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        file_path       TEXT         NOT NULL,
+        trigger_reason  TEXT,
+        abort           BOOLEAN      NOT NULL DEFAULT false,
+        abort_reason    TEXT,
+        diff_text       TEXT,
+        pr_number       INTEGER,
+        pr_url          TEXT,
+        pr_status       VARCHAR(16),
+        tokens_cost_usd NUMERIC(10,4),
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        merged_at       TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_mut_created ON aegis_mutations (created_at DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_brain_versions (
+        id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        yaml_path         TEXT         NOT NULL,
+        sha               VARCHAR(40),
+        mean_spq_before   NUMERIC(5,2),
+        mean_spq_after    NUMERIC(5,2),
+        improvement_pct   NUMERIC(6,3),
+        trials_done       INTEGER,
+        dataset_size      INTEGER,
+        cost_usd          NUMERIC(10,4),
+        deployed_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        rolled_back_at    TIMESTAMPTZ,
+        notes             TEXT
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_brain_deployed ON aegis_brain_versions (deployed_at DESC)`);
+
+    // ─── Migration 043: A.E.G.I.S. Phase 9–13 (Observability / FinOps) ──
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_killswitch (
+        id          BIGSERIAL    PRIMARY KEY,
+        engaged     BOOLEAN      NOT NULL,
+        reason      TEXT,
+        set_by      TEXT,
+        set_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_kill_set_at ON aegis_killswitch (set_at DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_alerts (
+        id          BIGSERIAL    PRIMARY KEY,
+        severity    VARCHAR(16)  NOT NULL,
+        message     TEXT         NOT NULL,
+        payload     JSONB,
+        deliveries  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_alerts_created ON aegis_alerts (created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_alerts_severity ON aegis_alerts (severity)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_backups (
+        id          BIGSERIAL    PRIMARY KEY,
+        status      VARCHAR(16)  NOT NULL,
+        targets     JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        result      JSONB,
+        s3_bucket   TEXT,
+        bytes_total BIGINT,
+        created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_backups_created ON aegis_backups (created_at DESC)`);
+
+    // ─── Migration 044: A.E.G.I.S. Phase 14 (DSPy cold-start / ε-greedy / vector GC) ──
+    await db.query(`
+      ALTER TABLE aegis_dspy_dataset
+        ADD COLUMN IF NOT EXISTS is_seed BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_seed ON aegis_dspy_dataset (is_seed) WHERE is_seed = TRUE`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_dspy_runs (
+        id                 UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        niche              TEXT,
+        dry_run            BOOLEAN      NOT NULL DEFAULT FALSE,
+        rows_real          INTEGER      NOT NULL DEFAULT 0,
+        rows_seed          INTEGER      NOT NULL DEFAULT 0,
+        max_trials         INTEGER      NOT NULL DEFAULT 0,
+        improvement_pct    NUMERIC(6,3),
+        mutation_applied   BOOLEAN      NOT NULL DEFAULT FALSE,
+        epsilon_rate       NUMERIC(5,4),
+        status             VARCHAR(32)  NOT NULL DEFAULT 'planned',
+        cost_usd           NUMERIC(10,4) NOT NULL DEFAULT 0,
+        notes              JSONB,
+        started_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        finished_at        TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_runs_started ON aegis_dspy_runs (started_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_runs_status  ON aegis_dspy_runs (status)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_vector_gc_log (
+        id              BIGSERIAL    PRIMARY KEY,
+        kind            VARCHAR(16)  NOT NULL,
+        collection      TEXT,
+        run_id          UUID,
+        older_than_days INTEGER,
+        points_deleted  INTEGER      NOT NULL DEFAULT 0,
+        collections_seen INTEGER     NOT NULL DEFAULT 0,
+        status          VARCHAR(16)  NOT NULL DEFAULT 'ok',
+        reason          TEXT,
+        created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_vector_gc_log_created ON aegis_vector_gc_log (created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_vector_gc_log_run ON aegis_vector_gc_log (run_id) WHERE run_id IS NOT NULL`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

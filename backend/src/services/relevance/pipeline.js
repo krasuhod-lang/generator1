@@ -21,6 +21,7 @@ const { fetchPages, fetchOne } = require('./pageFetcher');
 const { analyze, compare }     = require('./pythonClient');
 const rawStorage          = require('./rawStorage');
 const { splitBySerp }     = require('./aggregatorDomains');
+const aegisHooks          = require('./aegisHooks');
 
 /**
  * Возвращает «канонический» хост для дедупликации SERP по домену.
@@ -270,7 +271,28 @@ async function processRelevanceReport(reportId) {
     await _setStage(reportId, 'fetching_pages', { serp });
 
     // ── 2. Скачивание HTML ───────────────────────────────────────────────
-    const { successes, failures } = await fetchPages(serpForFetch.map((s) => s.url));
+    const fetchRes = await fetchPages(serpForFetch.map((s) => s.url));
+    let successes = fetchRes.successes;
+    const failures = fetchRes.failures;
+
+    // Aegis Phase 14: фильтр «отравленных» страниц (hidden text / keyword
+    // stuffing / invisible chars) — данные конкурентов могут содержать
+    // SEO-яд, и мы не хотим строить BM25/анкорный профиль ниши на нём.
+    // Graceful: если AEGIS_ENABLED=false или модуль отсутствует — no-op.
+    try {
+      const { kept, dropped } = aegisHooks.filterPoisonedPages(successes);
+      if (dropped.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[aegis][relevance ${reportId}] poison filter dropped `
+          + `${dropped.length}/${successes.length}: `
+          + dropped.slice(0, 3).map((d) => `${d.url} (${d.reason})`).join('; '),
+        );
+      }
+      successes = kept;
+      aegisHooks.emitPagesTelemetry({ ok: kept.length, dropped });
+    } catch (_) { /* graceful */ }
+
     await _setStage(reportId, 'analyzing', {
       status: 'analyzing',
       fetched_count: successes.length,
@@ -400,6 +422,13 @@ async function processRelevanceReport(reportId) {
       our_report: ourReport,
       comparison: comparisonReport,
     });
+
+    // Aegis Phase 14: после успеха зачистим эфемерные точки этого
+    // прогона в Qdrant (если evidence/SERP-документы туда индексировались
+    // с payload.run_id='relevance_<id>'). Graceful: при выключенном
+    // флаге / отсутствии Qdrant — no-op.
+    try { await aegisHooks.finalizeReportCleanup(reportId); }
+    catch (_) { /* graceful */ }
   } catch (err) {
     console.error(`[relevance] report ${reportId} failed:`, err.message);
     await _finishError(reportId, err.message);

@@ -25,6 +25,8 @@ const routes = [
   { path: '/forecaster/:id',       component: () => import('../views/ForecasterResultPage.vue'), meta: { auth: true } },
   { path: '/forecast/share/:token',component: () => import('../views/ForecasterSharedPage.vue'), meta: { guest: false, public: true } },
 
+  { path: '/aegis',                component: () => import('../views/AegisPage.vue'),            meta: { auth: true } },
+
   // Admin routes
   { path: '/admin/login',     component: () => import('../views/admin/AdminLoginPage.vue'),      meta: { adminGuest: true } },
   { path: '/admin',           component: () => import('../views/admin/AdminDashboardPage.vue'),  meta: { admin: true } },

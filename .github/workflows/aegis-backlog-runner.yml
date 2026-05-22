@@ -1,0 +1,42 @@
+name: aegis-backlog-runner
+
+# Каждые 30 минут проверяем GitHub-бэклог (issues с label `aegis:ready`)
+# и для каждого нерезервированного запускаем pipeline статьи через
+# /api/aegis/backlog/pick. Совместно с aegis_runs обеспечивает «12+
+# статей/неделю на эксперта» (Модуль 5 ТЗ).
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: aegis-backlog-runner
+  cancel-in-progress: false
+
+jobs:
+  pick-and-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger backlog runner
+        env:
+          AEGIS_API_URL:   ${{ secrets.AEGIS_API_URL }}
+          AEGIS_API_TOKEN: ${{ secrets.AEGIS_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AEGIS_API_URL:-}" || -z "${AEGIS_API_TOKEN:-}" ]]; then
+            echo "::warning::AEGIS_API_URL / AEGIS_API_TOKEN not configured — skipping."
+            exit 0
+          fi
+          # Тянем 5 топ-кандидатов.
+          ITEMS=$(curl -fsS "$AEGIS_API_URL/aegis/backlog?state=open" \
+            -H "Authorization: Bearer $AEGIS_API_TOKEN" | jq '.items[:5]')
+          COUNT=$(echo "$ITEMS" | jq 'length')
+          echo "::notice::Backlog candidates: $COUNT"
+          # Реальный pick endpoint добавляется по мере подключения Phase 4 (Ray-workers).
+          # На данный момент только публикуем сводку, не запуская runs.
+          echo "$ITEMS" | jq '.[] | {number, title}'
