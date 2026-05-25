@@ -96,6 +96,15 @@ console.log('\n=== test-cache-flow ===\n');
      typeof cachePolicy.getCachePolicy === 'function');
   ok('cachePolicy exports normalizeBrand',
      typeof cachePolicy.normalizeBrand === 'function');
+  ok('cachePolicy exports shouldCacheResponse',
+     typeof cachePolicy.shouldCacheResponse === 'function');
+  const p = cachePolicy.getCachePolicy();
+  ok('cachePolicy: large prompts skipped',
+     cachePolicy.shouldCacheResponse({
+       adapter: 'deepseek',
+       system: '',
+       prompt: 'x'.repeat(p.maxKeyMaterialBytes + 1),
+     }).reason === 'prompt_too_large');
 }
 
 // ── 4. orchestrator.js has stage→column map comment ──────────────────

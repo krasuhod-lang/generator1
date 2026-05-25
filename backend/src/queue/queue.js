@@ -30,13 +30,18 @@ function parseRedisConnection() {
 
 const connection = parseRedisConnection();
 
+const JOB_RETENTION = Object.freeze({
+  completed: { age: 3 * 24 * 3600, count: 1000 },
+  failed:    { age: 7 * 24 * 3600, count: 500 },
+});
+
 const generationQueue = new Queue('content-generation', {
   connection,
   defaultJobOptions: {
     attempts: 2,
     backoff: { type: 'fixed', delay: 5000 },
-    removeOnComplete: { age: 7  * 24 * 3600 },  // 7 дней
-    removeOnFail:     { age: 14 * 24 * 3600 },  // 14 дней
+    removeOnComplete: JOB_RETENTION.completed,
+    removeOnFail:     JOB_RETENTION.failed,
   },
 });
 
@@ -44,4 +49,4 @@ generationQueue.on('error', (err) => {
   console.error('[Queue] BullMQ error:', err.message);
 });
 
-module.exports = { generationQueue, connection };
+module.exports = { generationQueue, connection, JOB_RETENTION };
