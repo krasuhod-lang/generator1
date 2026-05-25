@@ -56,7 +56,7 @@
 
 const crypto = require('crypto');
 const Redis  = require('ioredis');
-const { getCachePolicy, normalizeBrand } = require('./cachePolicy');
+const { getCachePolicy, normalizeBrand, shouldCacheResponse } = require('./cachePolicy');
 
 const POLICY = getCachePolicy();
 
@@ -158,6 +158,10 @@ function buildKey({ adapter, system = '', prompt = '', temperature, maxTokens, m
 async function getCachedResponse(args) {
   const cli = _client();
   if (!cli) return null;
+  const admission = shouldCacheResponse(args);
+  if (!admission.ok) {
+    return { cached: false, key: null, skipped: true, reason: admission.reason };
+  }
   const key = buildKey(args);
   try {
     const raw = await cli.get(key);
@@ -177,7 +181,7 @@ async function setCachedResponse(key, value) {
   if (!cli || !key) return false;
   try {
     const json = JSON.stringify(value);
-    if (json.length > MAX_VALUE_BYTES) return false;
+    if (Buffer.byteLength(json, 'utf8') > MAX_VALUE_BYTES) return false;
     await cli.set(key, json, 'EX', TTL_S);
     return true;
   } catch (_) {
@@ -278,6 +282,7 @@ module.exports = {
   getCachedResponse,
   setCachedResponse,
   buildKey,
+  shouldCacheResponse,
   ENABLED,
   TTL_S,
   KEY_PREFIX,

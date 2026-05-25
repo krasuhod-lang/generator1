@@ -26,9 +26,21 @@ const callLLMModule = require('../src/services/llm/callLLM');
 const p = getCachePolicy();
 assert.strictEqual(p.ttlSeconds, 7 * 24 * 3600, 'ttl = 7 days');
 assert.strictEqual(p.brandInKey, true);
+assert.strictEqual(p.maxKeyMaterialBytes, 96 * 1024, 'large one-off prompts are not cached');
 assert.ok(Object.isFrozen(p));
 assert.throws(() => { p.ttlSeconds = 1; }, 'policy is frozen');
 console.log('✓ cachePolicy: 7d TTL + frozen');
+
+const admitSmall = cache.shouldCacheResponse({ adapter: 'deepseek', system: 's', prompt: 'p' });
+assert.strictEqual(admitSmall.ok, true);
+const admitLarge = cache.shouldCacheResponse({
+  adapter: 'deepseek',
+  system: 's',
+  prompt: 'x'.repeat(p.maxKeyMaterialBytes + 1),
+});
+assert.strictEqual(admitLarge.ok, false);
+assert.strictEqual(admitLarge.reason, 'prompt_too_large');
+console.log('✓ responseCache admission: skips large prompts');
 
 // 2. brand-aware keys
 const argsBase = { adapter: 'gemini', system: 's', prompt: 'p', temperature: 0.5, maxTokens: 100 };

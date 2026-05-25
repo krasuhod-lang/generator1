@@ -1,7 +1,7 @@
 'use strict';
 
 const { Worker } = require('bullmq');
-const { connection } = require('./queue');
+const { connection, JOB_RETENTION } = require('./queue');
 const db             = require('../config/db');
 const { publish }    = require('../services/sse/sseManager');
 
@@ -157,9 +157,10 @@ const worker = new Worker(
   {
     connection,
     concurrency: parseInt(process.env.WORKER_CONCURRENCY) || 3,
-    // Не удаляем job сразу — храним для диагностики
-    removeOnComplete: false,
-    removeOnFail:     false,
+    // Храним job для диагностики, но с жёстким age/count cap, чтобы Redis
+    // не раздувался от SEO-задач.
+    removeOnComplete: JOB_RETENTION.completed,
+    removeOnFail:     JOB_RETENTION.failed,
   }
 );
 
