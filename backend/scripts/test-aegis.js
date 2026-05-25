@@ -15,6 +15,7 @@
  *   • orchestrator.runRefineLoop: 1-iter pass и max-iter exhaustion.
  *   • ga4Client.computePpoWeights: квантили.
  *   • promptAudit: сканирование промтов и стабильные hash/meta для DSPy.
+ *   • seoBrain: SEO-память, reward, диагностика и безопасный action-plan.
  */
 
 const assert = require('assert');
@@ -197,6 +198,72 @@ async function main() {
     assert.strictEqual(m.prompt_hash.length, 64);
     assert.strictEqual(m.prompt_meta.kind, 'info_article');
     assert(!JSON.stringify(m).includes('secret topic text'));
+  });
+
+  console.log('\n[aegis/seoBrain]');
+  const seoBrain = require('../src/services/aegis/seoBrain');
+  const pages = [
+    {
+      url: 'https://site.test/a',
+      cluster: 'okna',
+      intent: 'commercial',
+      detected_intent: 'informational',
+      position: 12,
+      previous_position: 5,
+      ctr: 0.01,
+      previous_ctr: 0.04,
+      clicks: 20,
+      previous_clicks: 50,
+      impressions: 2000,
+      engagementRate: 0.35,
+      spqOverall: 72,
+      wordCount: 500,
+      updatedAt: '2025-01-01T00:00:00Z',
+      internalLinksIn: 0,
+    },
+    {
+      url: 'https://site.test/b',
+      cluster: 'okna',
+      intent: 'commercial',
+      position: 14,
+      ctr: 0.03,
+      impressions: 1000,
+      spqOverall: 84,
+      wordCount: 1200,
+      internalLinksIn: 2,
+    },
+  ];
+  test('buildSiteMemory groups pages into clusters', () => {
+    const memory = seoBrain.buildSiteMemory({ pages, site: { site_key: 'demo' }, now: new Date('2026-05-25T00:00:00Z') });
+    assert.strictEqual(memory.site_key, 'demo');
+    assert.strictEqual(memory.totals.pages, 2);
+    assert.strictEqual(memory.clusters.okna.page_count, 2);
+  });
+  test('computeSeoReward returns 0..100 score', () => {
+    const page = seoBrain.normalizePage(pages[0]);
+    const reward = seoBrain.computeSeoReward({ page });
+    assert(reward.overall >= 0 && reward.overall <= 100);
+    assert.strictEqual(typeof reward.components.ctr, 'number');
+  });
+  test('diagnoseSiteMemory detects drops, thin content and cannibalization', () => {
+    const memory = seoBrain.buildSiteMemory({ pages, now: new Date('2026-05-25T00:00:00Z') });
+    const d = seoBrain.diagnoseSiteMemory(memory);
+    const types = d.issues.map((i) => i.type);
+    assert(types.includes('position_drop'));
+    assert(types.includes('ctr_drop'));
+    assert(types.includes('thin_content'));
+    assert(types.includes('cannibalization'));
+  });
+  test('autopilot downgrades high-risk actions to human_review', () => {
+    const snapshot = seoBrain.buildSeoBrainSnapshot({
+      site: { site_key: 'demo' },
+      pages,
+      autonomyStage: 'autopilot',
+      now: new Date('2026-05-25T00:00:00Z'),
+    });
+    const risky = snapshot.action_plan.actions.find((a) => a.action_type === 'rewrite_for_intent');
+    assert(risky);
+    assert.strictEqual(risky.autonomy_stage, 'human_review');
   });
 
   console.log(`\n──── ${passed} passed, ${failed} failed ────`);

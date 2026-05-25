@@ -25,6 +25,8 @@ const {
   listQualityLog,
   listTopFailures,
   listPromptAuditLog,
+  getSeoBrainSnapshot,
+  analyzeSeoBrain,
 } = require('../controllers/aegis.controller');
 
 const router = express.Router();
@@ -75,5 +77,9 @@ router.post('/vector-gc/cleanup', auth, writeLimiter, runVectorGcCleanup);
 router.get('/quality-log',  auth, listQualityLog);
 router.get('/failures/top', auth, listTopFailures);
 router.get('/prompts/log',  auth, listPromptAuditLog);
+
+// Phase 15: SEO Brain — site memory / reward / diagnostics / safe action-plan.
+router.get('/seo-brain',         auth, getSeoBrainSnapshot);
+router.post('/seo-brain/analyze', auth, writeLimiter, analyzeSeoBrain);
 
 module.exports = router;

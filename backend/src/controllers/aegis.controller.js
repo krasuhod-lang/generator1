@@ -31,6 +31,7 @@ const backup     = require('../services/aegis/backupClient');
 const vectorGc   = require('../services/aegis/vectorGc');
 const biobrain   = require('../services/aegis/biobrainClient');
 const promptAudit = require('../services/aegis/promptAudit');
+const seoBrain = require('../services/aegis/seoBrain');
 const { LABEL_READY, LABEL_IN_PROGRESS, LABEL_DONE, LABEL_FAILED } = require('../services/aegis/backlogHooks');
 
 /** GET /api/aegis/status */
@@ -116,6 +117,11 @@ async function getStatus(req, res) {
     prompt_audit: promptStats,
     prompt_dspy_linkage: promptLinkage,
     autonomy: promptAudit.buildAutonomySnapshot(flags),
+    seo_brain: {
+      enabled: Boolean(flags.seoBrain && flags.seoBrain.enabled),
+      default_autonomy_stage: flags.seoBrain && flags.seoBrain.defaultAutonomyStage,
+      capabilities: seoBrain.buildCapabilities(),
+    },
     site_opportunities: promptAudit.buildSiteOpportunities(),
     training_dataset: datasetStats,
     brain_state: brain,
@@ -308,6 +314,79 @@ async function listPromptAuditLog(req, res) {
   } catch (e) {
     res.json({ items: [], warning: e.message });
   }
+
+  /** GET /api/aegis/seo-brain — последний SEO Brain snapshot по site_key. */
+  async function getSeoBrainSnapshot(req, res) {
+    const siteKey = (req.query.site_key && String(req.query.site_key).slice(0, 200)) || 'default';
+    try {
+      const [memory, actions] = await Promise.all([
+        db.query(
+          `SELECT site_key, site_url, pages, clusters, signals, reward,
+                  diagnostics, action_plan, autonomy_stage, updated_at
+             FROM aegis_seo_memory
+            WHERE site_key = $1
+            LIMIT 1`,
+          [siteKey],
+        ),
+        db.query(
+          `SELECT id, action_key, action_type, target_url, cluster, intent,
+                  priority, status, payload, created_at, updated_at
+             FROM aegis_seo_actions
+            WHERE site_key = $1
+            ORDER BY priority DESC, updated_at DESC
+            LIMIT 100`,
+          [siteKey],
+        ),
+      ]);
+      const row = memory.rows[0] || null;
+      if (!row) {
+        return res.json({
+          site_key: siteKey,
+          empty: true,
+          capabilities: seoBrain.buildCapabilities(),
+          actions: [],
+        });
+      }
+      res.json({
+        ...row,
+        capabilities: seoBrain.buildCapabilities(),
+        actions: actions.rows,
+      });
+    } catch (e) {
+      res.json({
+        site_key: siteKey,
+        empty: true,
+        warning: e.message,
+        capabilities: seoBrain.buildCapabilities(),
+        actions: [],
+      });
+    }
+  }
+
+  /** POST /api/aegis/seo-brain/analyze (admin) — собрать и сохранить snapshot. */
+  async function analyzeSeoBrain(req, res) {
+    if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+    const body = req.body || {};
+    const pages = Array.isArray(body.pages) ? body.pages : [];
+    if (!pages.length) return res.status(400).json({ error: 'pages_required' });
+    const flags = getAegisFlags().seoBrain || {};
+    const stage = body.autonomy_stage || body.autonomyStage || flags.defaultAutonomyStage || 'recommend';
+    const snapshot = seoBrain.buildSeoBrainSnapshot({
+      site: {
+        site_key: body.site_key || body.siteKey || 'default',
+        site_url: body.site_url || body.siteUrl || '',
+      },
+      pages,
+      signals: body.signals || {},
+      autonomyStage: stage,
+    });
+    try {
+      await seoBrain.persistSnapshot(db, snapshot);
+    } catch (e) {
+      return res.status(503).json({ error: 'seo_brain_persist_failed', reason: e.message, snapshot });
+    }
+    res.json({ ok: true, snapshot });
+  }
 }
 
 module.exports = {
@@ -320,6 +399,8 @@ module.exports = {
   listRuns,
   listBrainVersions,
   listPromptAuditLog,
+  getSeoBrainSnapshot,
+  analyzeSeoBrain,
   // Phase 9–13:
   getMetrics,
   getKillSwitch,
