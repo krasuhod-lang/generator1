@@ -189,6 +189,26 @@ const AEGIS_FLAGS = deepFreeze({
     issueLabel: _envStr('AEGIS_BACKLOG_LABEL', 'aegis:ready'),
   },
 
+  // ── Quality Log (Discovery — Слои 1/2/3 плана) ───────────────────
+  // «Теневой» датасет aegis_quality_log: пишется КАЖДАЯ генерация
+  // (независимо от прохождения гейта SPQ ≥ 80) + одновременная запись
+  // в aegis_runs для дашборда. failureAnalyzer мапит отчёты в симптомы.
+  // Поведение writer'а НЕ меняется — это только сбор данных для RCA.
+  qualityLog: {
+    enabled: true,
+    // Сколько записей возвращаем в GET /api/aegis/quality-log по умолчанию.
+    listDefaultLimit: 30,
+    listMaxLimit:     200,
+    // Окно агрегации «топ причин провалов» в днях (default 7).
+    topFailuresDefaultDays: 7,
+    topFailuresMaxDays:     90,
+    // Сколько причин выводить в карточке Discovery.
+    topFailuresLimit:       15,
+    // Override порогов failureAnalyzer (см. DEFAULT_THRESHOLDS).
+    // Пустой объект = взять дефолты failureAnalyzer.js.
+    thresholds: {},
+  },
+
   // ── BioBrain (NEAT pre-filter) ─────────────────────────────────────
   biobrain: {
     enabled: false,

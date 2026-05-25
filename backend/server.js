@@ -1097,6 +1097,38 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_runs_created ON aegis_runs (created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_runs_status  ON aegis_runs (status)`);
 
+    // aegis_quality_log — «теневой» датасет (миграция 047). Пишется КАЖДАЯ
+    // генерация, независимо от прохождения гейта SPQ ≥ 80. Источник данных
+    // для дашборда «Топ причин провалов» и будущего Lessons-репозитория.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_quality_log (
+        id                  BIGSERIAL    PRIMARY KEY,
+        article_ref         TEXT         NOT NULL,
+        kind                VARCHAR(32)  NOT NULL,
+        niche               TEXT,
+        spq_overall         NUMERIC(5,2),
+        sub                 JSONB        NOT NULL DEFAULT '{}'::jsonb,
+        verdict_summary     JSONB        NOT NULL DEFAULT '{}'::jsonb,
+        failure_reasons     JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        top_failure_layer   TEXT,
+        diagnoses           JSONB        NOT NULL DEFAULT '{}'::jsonb,
+        status              VARCHAR(24)  NOT NULL DEFAULT 'success',
+        passes_gate         BOOLEAN      NOT NULL DEFAULT false,
+        model_used          TEXT,
+        cost_usd            NUMERIC(10,4),
+        iterations          INTEGER      NOT NULL DEFAULT 0,
+        user_hash           TEXT,
+        created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_quality_log_article_ref ON aegis_quality_log (article_ref)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_created   ON aegis_quality_log (created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_kind      ON aegis_quality_log (kind)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_niche     ON aegis_quality_log (niche)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_top_layer ON aegis_quality_log (top_failure_layer) WHERE top_failure_layer IS NOT NULL`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_spq       ON aegis_quality_log (spq_overall) WHERE spq_overall IS NOT NULL`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_reasons   ON aegis_quality_log USING GIN (failure_reasons)`);
+
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_backlog (
         id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),

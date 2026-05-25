@@ -64,6 +64,7 @@ const { createValidationTracker } = require('./validationFailures.service');
 const { runEeatAuditCore } = require('../eeatAudit/core');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
+const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const biobrainClient = require('../aegis/biobrainClient');
 
@@ -1835,6 +1836,27 @@ async function processInfoArticleTask(taskId) {
             gaMetrics: null,
             modelUsed: quality.model_used || t.gemini_model || null,
             costUsd: Number(t.total_cost_usd) || 0,
+            userId: task.user_id || null,
+          });
+          await recordQualityLog({
+            articleRef: `info_article:${taskId}`,
+            kind: 'info_article',
+            niche: task.region || null,
+            qualityScore: quality,
+            reports: {
+              eeat_audit:          t.eeat_audit,
+              readability_report:  t.readability_report,
+              intent_verdict:      t.intent_verdict,
+              fact_check_report:   t.fact_check_report,
+              plagiarism_report:   t.plagiarism_report,
+              lsi_report:          t.lsi_report,
+              validation_report:   t.validation_report,
+              image_qa_report:     t.image_qa_report,
+            },
+            modelUsed: quality.model_used || t.gemini_model || null,
+            costUsd: Number(t.total_cost_usd) || 0,
+            iterations: 1,
+            taskRef: taskId,
             userId: task.user_id || null,
           });
           const eeat = quality && quality.subscores ? Number(quality.subscores.eeat) : null;
