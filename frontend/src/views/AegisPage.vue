@@ -23,6 +23,7 @@ const runs     = ref([]);
 const backlog  = ref([]);
 const versions = ref([]);
 const topFailures = ref([]);
+const promptLog = ref([]);
 const failuresDays = ref(7);
 
 const minOverall = computed(() => status.value?.quality_gate?.min_overall ?? 80);
@@ -44,18 +45,20 @@ async function refresh() {
   loading.value = true;
   error.value   = '';
   try {
-    const [s, r, b, v, f] = await Promise.all([
+    const [s, r, b, v, f, p] = await Promise.all([
       api.get('/aegis/status').then((x) => x.data),
       api.get('/aegis/runs?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/backlog').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/brain/versions').then((x) => x.data).catch(() => ({ items: [] })),
       api.get(`/aegis/failures/top?days=${failuresDays.value}`).then((x) => x.data).catch(() => ({ items: [] })),
+      api.get('/aegis/prompts/log?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
     ]);
     status.value   = s;
     runs.value     = r.items || [];
     backlog.value  = b.items || [];
     versions.value = v.items || [];
     topFailures.value = f.items || [];
+    promptLog.value = p.items || [];
   } catch (e) {
     error.value = e?.response?.data?.error || e.message || 'Ошибка загрузки';
   } finally {
@@ -258,6 +261,66 @@ onMounted(refresh);
         <p>За 24ч: <strong>{{ status.training_dataset?.rows_24h ?? 0 }}</strong></p>
         <p>Средний Spq: <strong>{{ fmtMaybe(status.training_dataset?.avg_spq) }}</strong></p>
         <p>Покрытие ниш: <strong>{{ fmtMaybe(status.training_dataset?.niches_coverage_pct) }}%</strong></p>
+        <p>Связано с prompt_hash: <strong>{{ status.prompt_dspy_linkage?.dspy_rows_with_prompt_hash ?? 0 }}</strong> / {{ status.prompt_dspy_linkage?.dspy_rows ?? 0 }}
+          <span class="subtle">({{ fmtMaybe(status.prompt_dspy_linkage?.coverage_pct) }}%)</span></p>
+        <p>Уникальных версий промтов в обучении: <strong>{{ status.prompt_dspy_linkage?.unique_prompt_hashes_in_training ?? 0 }}</strong></p>
+      </section>
+
+      <section v-if="status" class="card">
+        <h2>🧭 Автономный контур Эгиды 24/7</h2>
+        <p class="subtle">{{ status.autonomy?.goal }}</p>
+        <ul class="compact">
+          <li v-for="step in status.autonomy?.loop || []" :key="step">✅ {{ step }}</li>
+        </ul>
+        <p>
+          DSPy: <strong>{{ status.autonomy?.enabled?.dspy ? '✅' : '⛔' }}</strong> ·
+          quality-log: <strong>{{ status.autonomy?.enabled?.quality_log ? '✅' : '⛔' }}</strong> ·
+          backlog: <strong>{{ status.autonomy?.enabled?.backlog ? '✅' : '⛔' }}</strong> ·
+          self-mutation: <strong>{{ status.autonomy?.enabled?.self_mutation ? '✅' : '⛔' }}</strong>
+          <span v-if="status.autonomy?.enabled?.human_review" class="subtle"> · human-review ON</span>
+        </p>
+      </section>
+
+      <section v-if="status" class="card">
+        <h2>🧩 Что можно реализовать на сайте из функций AEGIS</h2>
+        <table class="grid">
+          <thead><tr><th>Функция</th><th>Статус</th><th>Польза</th></tr></thead>
+          <tbody>
+            <tr v-for="o in status.site_opportunities || []" :key="o.key">
+              <td>{{ o.title }}</td>
+              <td><span class="badge">{{ o.status }}</span></td>
+              <td>{{ o.value }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section v-if="status" class="card">
+        <h2>🧾 Prompts-as-Code: лог изменений ({{ promptLog.length }})</h2>
+        <p class="subtle">
+          Всего промтов: <strong>{{ status.prompt_audit?.total_prompts ?? 0 }}</strong> ·
+          связаны с DSPy/анализом: <strong>{{ status.prompt_audit?.dspy_linked ?? 0 }}</strong> ·
+          writer: {{ status.prompt_audit?.writer_prompts ?? 0 }},
+          critic: {{ status.prompt_audit?.critic_prompts ?? 0 }},
+          analysis: {{ status.prompt_audit?.analysis_prompts ?? 0 }} ·
+          изменений за 7 дней: <strong>{{ status.prompt_audit?.changes_7d ?? 0 }}</strong>
+        </p>
+        <table v-if="promptLog.length" class="grid">
+          <thead>
+            <tr><th>Когда</th><th>Промт</th><th>Роль</th><th>DSPy</th><th>Hash</th><th>Изменение</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in promptLog" :key="p.id">
+              <td>{{ new Date(p.changed_at).toLocaleString() }}</td>
+              <td><code>{{ p.prompt_key }}</code><br><span class="subtle">{{ p.source_path }}</span></td>
+              <td>{{ p.role }}</td>
+              <td>{{ p.dspy_linked ? '✅' : '—' }}</td>
+              <td><code>{{ p.hash_short }}</code></td>
+              <td>{{ p.change_kind }}<span v-if="p.previous_hash_short" class="subtle"> · prev {{ p.previous_hash_short }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="subtle">История появится после первого сканирования /api/aegis/status.</p>
       </section>
 
       <section v-if="status" class="card">
@@ -347,6 +410,16 @@ onMounted(refresh);
   padding: 8px 12px;
 }
 .subtle { color: #9ca3af; }
+.compact { margin: 8px 0 0; padding-left: 20px; color: #e5e7eb; }
+.badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #1f2937;
+  color: #bfdbfe;
+  border: 1px solid #374151;
+  font-size: 0.82rem;
+}
 code {
   background: #1f2937;
   color: #e5e7eb;

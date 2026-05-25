@@ -1128,6 +1128,9 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_top_layer ON aegis_quality_log (top_failure_layer) WHERE top_failure_layer IS NOT NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_spq       ON aegis_quality_log (spq_overall) WHERE spq_overall IS NOT NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_reasons   ON aegis_quality_log USING GIN (failure_reasons)`);
+    await db.query(`ALTER TABLE aegis_quality_log ADD COLUMN IF NOT EXISTS prompt_hash TEXT`);
+    await db.query(`ALTER TABLE aegis_quality_log ADD COLUMN IF NOT EXISTS prompt_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_quality_log_prompt_hash ON aegis_quality_log (prompt_hash) WHERE prompt_hash IS NOT NULL`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_backlog (
@@ -1174,6 +1177,8 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_unused    ON aegis_dspy_dataset (used_in_retrain) WHERE used_in_retrain IS NULL`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS user_hash TEXT`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS source_kind TEXT`);
+    await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS prompt_hash TEXT`);
+    await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS prompt_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await db.query(`
       DELETE FROM aegis_dspy_dataset d
       USING aegis_dspy_dataset d2
@@ -1181,6 +1186,7 @@ async function ensureSchema() {
         AND d.id < d2.id
     `);
     await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_dspy_article_ref ON aegis_dspy_dataset (article_ref)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_prompt_hash ON aegis_dspy_dataset (prompt_hash) WHERE prompt_hash IS NOT NULL`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_mutations (
@@ -1313,6 +1319,29 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_biobrain_versions_created ON aegis_biobrain_versions (created_at DESC)`);
+
+    // ─── Migration 048: prompt tracking + DSPy linkage ────────────────
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_prompt_audit (
+        id              BIGSERIAL    PRIMARY KEY,
+        prompt_key      TEXT         NOT NULL,
+        source_path     TEXT         NOT NULL,
+        prompt_hash     VARCHAR(64)  NOT NULL,
+        previous_hash   VARCHAR(64),
+        change_kind     VARCHAR(16)  NOT NULL DEFAULT 'created',
+        role            VARCHAR(32)  NOT NULL DEFAULT 'prompt',
+        dspy_linked     BOOLEAN      NOT NULL DEFAULT FALSE,
+        content_chars   INTEGER      NOT NULL DEFAULT 0,
+        vars            JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        active          BOOLEAN      NOT NULL DEFAULT TRUE,
+        first_seen_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        last_seen_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        changed_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_prompt_audit_changed ON aegis_prompt_audit (changed_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_prompt_audit_key ON aegis_prompt_audit (prompt_key, changed_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_prompt_audit_hash ON aegis_prompt_audit (prompt_hash)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

@@ -30,6 +30,7 @@ const llmRouter  = require('../services/aegis/llmRouter');
 const backup     = require('../services/aegis/backupClient');
 const vectorGc   = require('../services/aegis/vectorGc');
 const biobrain   = require('../services/aegis/biobrainClient');
+const promptAudit = require('../services/aegis/promptAudit');
 const { LABEL_READY, LABEL_IN_PROGRESS, LABEL_DONE, LABEL_FAILED } = require('../services/aegis/backlogHooks');
 
 /** GET /api/aegis/status */
@@ -72,6 +73,20 @@ async function getStatus(req, res) {
     dspy.status(),
     biobrain.status().catch(() => ({ ok: false, reason: 'unavailable' })),
   ]);
+  let promptStats;
+  let promptLinkage;
+  try {
+    await promptAudit.persistCurrentPrompts(db);
+  } catch (_) { /* optional audit table */ }
+  try {
+    [promptStats, promptLinkage] = await Promise.all([
+      promptAudit.getPromptDashboardStats(db),
+      promptAudit.getPromptDspyLinkageStats(db),
+    ]);
+  } catch (_) {
+    promptStats = { total_prompts: 0, dspy_linked: 0, recent_changes: [] };
+    promptLinkage = {};
+  }
   res.json({
     enabled: flags.enabled,
     quality_gate: {
@@ -98,6 +113,10 @@ async function getStatus(req, res) {
       enabled: Boolean(flags.biobrain && flags.biobrain.enabled),
       status: biobrainStatus && biobrainStatus.body ? biobrainStatus.body : null,
     },
+    prompt_audit: promptStats,
+    prompt_dspy_linkage: promptLinkage,
+    autonomy: promptAudit.buildAutonomySnapshot(flags),
+    site_opportunities: promptAudit.buildSiteOpportunities(),
     training_dataset: datasetStats,
     brain_state: brain,
   });
@@ -253,7 +272,8 @@ async function listRuns(req, res) {
 async function listBrainVersions(req, res) {
   try {
     const r = await db.query(
-      `SELECT id, yaml_path, sha, mean_spq_before, mean_spq_after, deployed_at
+      `SELECT id, yaml_path, sha, mean_spq_before, mean_spq_after,
+              improvement_pct, trials_done, dataset_size, cost_usd, deployed_at
          FROM aegis_brain_versions
         ORDER BY deployed_at DESC
         LIMIT 50`,
@@ -261,6 +281,32 @@ async function listBrainVersions(req, res) {
     res.json({ items: r.rows, current: getBrainSummary() });
   } catch (e) {
     res.json({ items: [], current: getBrainSummary(), warning: e.message });
+  }
+}
+
+/** GET /api/aegis/prompts/log — история изменения Prompts-as-Code. */
+async function listPromptAuditLog(req, res) {
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
+  try {
+    await promptAudit.persistCurrentPrompts(db).catch(() => {});
+    const r = await db.query(
+      `SELECT id, prompt_key, source_path, prompt_hash, previous_hash,
+              change_kind, role, dspy_linked, content_chars, vars,
+              active, first_seen_at, last_seen_at, changed_at
+         FROM aegis_prompt_audit
+        ORDER BY changed_at DESC, id DESC
+        LIMIT $1`,
+      [limit],
+    );
+    res.json({
+      items: r.rows.map((x) => ({
+        ...x,
+        hash_short: String(x.prompt_hash || '').slice(0, 12),
+        previous_hash_short: String(x.previous_hash || '').slice(0, 12) || null,
+      })),
+    });
+  } catch (e) {
+    res.json({ items: [], warning: e.message });
   }
 }
 
@@ -273,6 +319,7 @@ module.exports = {
   proposeMutation,
   listRuns,
   listBrainVersions,
+  listPromptAuditLog,
   // Phase 9–13:
   getMetrics,
   getKillSwitch,
@@ -300,7 +347,7 @@ async function listQualityLog(req, res) {
     const r = await db.query(
       `SELECT id, article_ref, kind, niche, spq_overall, sub, verdict_summary,
               failure_reasons, top_failure_layer, status, passes_gate,
-              model_used, cost_usd, iterations, created_at
+              model_used, cost_usd, iterations, prompt_hash, prompt_meta, created_at
          FROM aegis_quality_log
          ${where}
         ORDER BY created_at DESC

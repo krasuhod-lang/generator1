@@ -24,6 +24,7 @@ const {
   runVectorGcCleanup,
   listQualityLog,
   listTopFailures,
+  listPromptAuditLog,
 } = require('../controllers/aegis.controller');
 
 const router = express.Router();
@@ -73,5 +74,6 @@ router.post('/vector-gc/cleanup', auth, writeLimiter, runVectorGcCleanup);
 // Discovery (Слои 1/3/8 плана) — read-only телеметрия для дашборда.
 router.get('/quality-log',  auth, listQualityLog);
 router.get('/failures/top', auth, listTopFailures);
+router.get('/prompts/log',  auth, listPromptAuditLog);
 
 module.exports = router;

@@ -14,6 +14,7 @@
  *   • deepseekMutator.isPathAllowed: allowlist / blocklist.
  *   • orchestrator.runRefineLoop: 1-iter pass и max-iter exhaustion.
  *   • ga4Client.computePpoWeights: квантили.
+ *   • promptAudit: сканирование промтов и стабильные hash/meta для DSPy.
  */
 
 const assert = require('assert');
@@ -175,6 +176,27 @@ async function main() {
     assert.strictEqual(winner.ppo_weight, 3);
     const loser = w.find((x) => x.pagePath === '/a');
     assert.strictEqual(loser.ppo_weight, 1);
+  });
+
+  console.log('\n[aegis/promptAudit]');
+  const promptAudit = require('../src/services/aegis/promptAudit');
+  test('scanPromptFiles finds writer prompts', () => {
+    const prompts = promptAudit.scanPromptFiles();
+    assert(prompts.length > 0);
+    assert(prompts.some((p) => p.prompt_key === 'infoArticle/stage3_writer'));
+    assert(prompts.some((p) => p.role === 'writer' && p.dspy_linked === true));
+  });
+  test('promptHashFromText is stable sha256', () => {
+    const a = promptAudit.promptHashFromText('abc');
+    const b = promptAudit.promptHashFromText('abc');
+    assert.strictEqual(a, b);
+    assert.strictEqual(a.length, 64);
+  });
+  test('buildPromptMeta links user prompt without storing text', () => {
+    const m = promptAudit.buildPromptMeta({ kind: 'info_article', userPrompt: 'secret topic text' });
+    assert.strictEqual(m.prompt_hash.length, 64);
+    assert.strictEqual(m.prompt_meta.kind, 'info_article');
+    assert(!JSON.stringify(m).includes('secret topic text'));
   });
 
   console.log(`\n──── ${passed} passed, ${failed} failed ────`);

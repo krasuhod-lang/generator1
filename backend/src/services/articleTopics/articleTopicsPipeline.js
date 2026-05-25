@@ -360,6 +360,7 @@ async function processArticleTopicTask(taskId) {
         iterations: 1,
         taskRef: taskId,
         userId: task.user_id || null,
+        userPrompt,
       });
     } catch (_e) { /* best-effort */ }
     try {

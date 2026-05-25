@@ -450,6 +450,7 @@ async function runMetaTagTaskInner(taskId) {
         iterations: 1,
         taskRef: taskId,
         userId: t.user_id || null,
+        userPrompt: `${t.name || ''}\\n${Array.isArray(t.keywords) ? t.keywords.join('\\n') : ''}`,
       });
     }
   } catch (_e) { /* best-effort */ }

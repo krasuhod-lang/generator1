@@ -1858,6 +1858,7 @@ async function processInfoArticleTask(taskId) {
             iterations: 1,
             taskRef: taskId,
             userId: task.user_id || null,
+            userPrompt: task.topic || '',
           });
           const eeat = quality && quality.subscores ? Number(quality.subscores.eeat) : null;
           await biobrainClient.feedback({

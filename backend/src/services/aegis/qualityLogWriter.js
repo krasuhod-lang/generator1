@@ -23,6 +23,7 @@ const db = require('../../config/db');
 const { getAegisFlags } = require('./featureFlags');
 const { analyzeFailures } = require('./failureAnalyzer');
 const { _passesGate } = require('./datasetWriter');
+const { buildPromptMeta } = require('./promptAudit');
 
 function _num(v) {
   const n = Number(v);
@@ -70,6 +71,9 @@ async function recordQualityLog({
   iterations,
   taskRef,
   userId,
+  userPrompt = '',
+  promptHash = null,
+  promptMeta = null,
 } = {}) {
   if (!articleRef || !kind) return { ok: false, reason: 'invalid_payload' };
 
@@ -98,6 +102,9 @@ async function recordQualityLog({
   const status = _resolveStatus({ passes, qualityScore });
   const userHash = _hashUser(userId);
   const cost = _num(costUsd);
+  const linkage = promptHash
+    ? { prompt_hash: promptHash, prompt_meta: promptMeta || {} }
+    : buildPromptMeta({ kind, userPrompt });
 
   // ── 1. aegis_quality_log (теневой датасет) ────────────────────────
   try {
@@ -105,10 +112,10 @@ async function recordQualityLog({
       `INSERT INTO aegis_quality_log
          (article_ref, kind, niche, spq_overall, sub, verdict_summary,
           failure_reasons, top_failure_layer, diagnoses, status, passes_gate,
-          model_used, cost_usd, iterations, user_hash)
+          model_used, cost_usd, iterations, user_hash, prompt_hash, prompt_meta)
        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb,
                $7::jsonb, $8, $9::jsonb, $10, $11,
-               $12, $13, $14, $15)
+               $12, $13, $14, $15, $16, $17::jsonb)
        ON CONFLICT (article_ref)
        DO UPDATE SET
          kind              = EXCLUDED.kind,
@@ -124,7 +131,9 @@ async function recordQualityLog({
          model_used        = EXCLUDED.model_used,
          cost_usd          = EXCLUDED.cost_usd,
          iterations        = EXCLUDED.iterations,
-         user_hash         = EXCLUDED.user_hash`,
+         user_hash         = EXCLUDED.user_hash,
+         prompt_hash       = EXCLUDED.prompt_hash,
+         prompt_meta       = EXCLUDED.prompt_meta`,
       [
         String(articleRef),
         String(kind),
@@ -141,6 +150,8 @@ async function recordQualityLog({
         cost,
         itersSafe,
         userHash,
+        linkage.prompt_hash || null,
+        JSON.stringify(linkage.prompt_meta || {}),
       ],
     );
   } catch (e) {
@@ -171,6 +182,7 @@ async function recordQualityLog({
           top_failure_layer: diagnoses.top_failure_layer,
           passes_gate:       Boolean(passes),
           model_used:        modelUsed || null,
+          prompt_hash:       linkage.prompt_hash || null,
         }),
       ],
     );
