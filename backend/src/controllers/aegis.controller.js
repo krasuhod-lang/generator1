@@ -30,6 +30,8 @@ const llmRouter  = require('../services/aegis/llmRouter');
 const backup     = require('../services/aegis/backupClient');
 const vectorGc   = require('../services/aegis/vectorGc');
 const biobrain   = require('../services/aegis/biobrainClient');
+const promptAudit = require('../services/aegis/promptAudit');
+const seoBrain = require('../services/aegis/seoBrain');
 const { LABEL_READY, LABEL_IN_PROGRESS, LABEL_DONE, LABEL_FAILED } = require('../services/aegis/backlogHooks');
 
 /** GET /api/aegis/status */
@@ -72,6 +74,20 @@ async function getStatus(req, res) {
     dspy.status(),
     biobrain.status().catch(() => ({ ok: false, reason: 'unavailable' })),
   ]);
+  let promptStats;
+  let promptLinkage;
+  try {
+    await promptAudit.persistCurrentPrompts(db);
+  } catch (_) { /* optional audit table */ }
+  try {
+    [promptStats, promptLinkage] = await Promise.all([
+      promptAudit.getPromptDashboardStats(db),
+      promptAudit.getPromptDspyLinkageStats(db),
+    ]);
+  } catch (_) {
+    promptStats = { total_prompts: 0, dspy_linked: 0, recent_changes: [] };
+    promptLinkage = {};
+  }
   res.json({
     enabled: flags.enabled,
     quality_gate: {
@@ -98,6 +114,15 @@ async function getStatus(req, res) {
       enabled: Boolean(flags.biobrain && flags.biobrain.enabled),
       status: biobrainStatus && biobrainStatus.body ? biobrainStatus.body : null,
     },
+    prompt_audit: promptStats,
+    prompt_dspy_linkage: promptLinkage,
+    autonomy: promptAudit.buildAutonomySnapshot(flags),
+    seo_brain: {
+      enabled: Boolean(flags.seoBrain && flags.seoBrain.enabled),
+      default_autonomy_stage: flags.seoBrain && flags.seoBrain.defaultAutonomyStage,
+      capabilities: seoBrain.buildCapabilities(),
+    },
+    site_opportunities: promptAudit.buildSiteOpportunities(),
     training_dataset: datasetStats,
     brain_state: brain,
   });
@@ -253,7 +278,8 @@ async function listRuns(req, res) {
 async function listBrainVersions(req, res) {
   try {
     const r = await db.query(
-      `SELECT id, yaml_path, sha, mean_spq_before, mean_spq_after, deployed_at
+      `SELECT id, yaml_path, sha, mean_spq_before, mean_spq_after,
+              improvement_pct, trials_done, dataset_size, cost_usd, deployed_at
          FROM aegis_brain_versions
         ORDER BY deployed_at DESC
         LIMIT 50`,
@@ -262,6 +288,113 @@ async function listBrainVersions(req, res) {
   } catch (e) {
     res.json({ items: [], current: getBrainSummary(), warning: e.message });
   }
+}
+
+/** GET /api/aegis/prompts/log — история изменения Prompts-as-Code. */
+async function listPromptAuditLog(req, res) {
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
+  try {
+    await promptAudit.persistCurrentPrompts(db).catch(() => {});
+    const r = await db.query(
+      `SELECT id, prompt_key, source_path, prompt_hash, previous_hash,
+              change_kind, role, dspy_linked, content_chars, vars,
+              active, first_seen_at, last_seen_at, changed_at
+         FROM aegis_prompt_audit
+        ORDER BY changed_at DESC, id DESC
+        LIMIT $1`,
+      [limit],
+    );
+    res.json({
+      items: r.rows.map((x) => ({
+        ...x,
+        hash_short: String(x.prompt_hash || '').slice(0, 12),
+        previous_hash_short: String(x.previous_hash || '').slice(0, 12) || null,
+      })),
+    });
+  } catch (e) {
+    res.json({ items: [], warning: e.message });
+  }
+}
+
+/** GET /api/aegis/seo-brain — последний SEO Brain snapshot по site_key. */
+async function getSeoBrainSnapshot(req, res) {
+  const siteKey = (req.query.site_key && String(req.query.site_key).slice(0, 200)) || 'default';
+  try {
+    const [memory, actions] = await Promise.all([
+      db.query(
+        `SELECT site_key, site_url, pages, clusters, signals, reward,
+                diagnostics, action_plan, autonomy_stage, updated_at
+           FROM aegis_seo_memory
+          WHERE site_key = $1
+          LIMIT 1`,
+        [siteKey],
+      ),
+      db.query(
+        `SELECT id, action_key, action_type, target_url, cluster, intent,
+                priority, status, payload, created_at, updated_at
+           FROM aegis_seo_actions
+          WHERE site_key = $1
+          ORDER BY priority DESC, updated_at DESC
+          LIMIT 100`,
+        [siteKey],
+      ),
+    ]);
+    const row = memory.rows[0] || null;
+    if (!row) {
+      return res.json({
+        site_key: siteKey,
+        empty: true,
+        capabilities: seoBrain.buildCapabilities(),
+        actions: [],
+      });
+    }
+    res.json({
+      ...row,
+      capabilities: seoBrain.buildCapabilities(),
+      actions: actions.rows,
+    });
+  } catch (e) {
+    res.json({
+      site_key: siteKey,
+      empty: true,
+      warning: e.message,
+      capabilities: seoBrain.buildCapabilities(),
+      actions: [],
+    });
+  }
+}
+
+/** POST /api/aegis/seo-brain/analyze (admin) — собрать и сохранить snapshot. */
+async function analyzeSeoBrain(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const body = req.body || {};
+  const pages = Array.isArray(body.pages) ? body.pages : [];
+  if (!pages.length) return res.status(400).json({ error: 'pages_required' });
+  // B5: бюджет на размер payload — защита от 200 MB JSON-апа.
+  if (pages.length > seoBrain.DEFAULTS.maxPagesPerAnalyze) {
+    return res.status(413).json({
+      error: 'too_many_pages',
+      limit: seoBrain.DEFAULTS.maxPagesPerAnalyze,
+      got: pages.length,
+    });
+  }
+  const flags = getAegisFlags().seoBrain || {};
+  const stage = body.autonomy_stage || body.autonomyStage || flags.defaultAutonomyStage || 'recommend';
+  const snapshot = seoBrain.buildSeoBrainSnapshot({
+    site: {
+      site_key: body.site_key || body.siteKey || 'default',
+      site_url: body.site_url || body.siteUrl || '',
+    },
+    pages,
+    signals: body.signals || {},
+    autonomyStage: stage,
+  });
+  try {
+    await seoBrain.persistSnapshot(db, snapshot);
+  } catch (e) {
+    return res.status(503).json({ error: 'seo_brain_persist_failed', reason: e.message, snapshot });
+  }
+  res.json({ ok: true, snapshot });
 }
 
 module.exports = {
@@ -273,6 +406,9 @@ module.exports = {
   proposeMutation,
   listRuns,
   listBrainVersions,
+  listPromptAuditLog,
+  getSeoBrainSnapshot,
+  analyzeSeoBrain,
   // Phase 9–13:
   getMetrics,
   getKillSwitch,
@@ -300,7 +436,7 @@ async function listQualityLog(req, res) {
     const r = await db.query(
       `SELECT id, article_ref, kind, niche, spq_overall, sub, verdict_summary,
               failure_reasons, top_failure_layer, status, passes_gate,
-              model_used, cost_usd, iterations, created_at
+              model_used, cost_usd, iterations, prompt_hash, prompt_meta, created_at
          FROM aegis_quality_log
          ${where}
         ORDER BY created_at DESC
@@ -360,6 +496,126 @@ async function listTopFailures(req, res) {
 
 module.exports.listQualityLog   = listQualityLog;
 module.exports.listTopFailures  = listTopFailures;
+
+// ─────────────────────── Phase 15.C — SEO observations / retention ─────────────────────
+
+/**
+ * POST /api/aegis/seo-brain/pages/observe (admin)
+ * Принимает GA4/GSC дельты по URL → считает reward и пишет в aegis_seo_observations.
+ * Используется фоновым job/cron для backfill aegis_dspy_dataset.ga4_metrics.
+ */
+async function observeSeoPages(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const body = req.body || {};
+  const siteKey = (body.site_key || body.siteKey || 'default').toString().slice(0, 200);
+  const observations = Array.isArray(body.observations) ? body.observations : [];
+  if (!observations.length) return res.status(400).json({ error: 'observations_required' });
+  // B5-style cap для observe-эндпоинта.
+  if (observations.length > seoBrain.DEFAULTS.maxPagesPerAnalyze) {
+    return res.status(413).json({
+      error: 'too_many_observations',
+      limit: seoBrain.DEFAULTS.maxPagesPerAnalyze,
+      got: observations.length,
+    });
+  }
+  const source = (body.source || 'manual').toString().slice(0, 32);
+  const results = [];
+  for (const obs of observations) {
+    const url = (obs.url || obs.path || '').toString().slice(0, 1024);
+    if (!url) { results.push({ url: null, ok: false, reason: 'url_required' }); continue; }
+    const weekStart = obs.week_start || obs.weekStart || new Date().toISOString().slice(0, 10);
+    const page = obs.current || obs.page || obs;
+    const previous = obs.previous || obs.prev || {};
+    const reward = seoBrain.computeSeoReward({ page, previous });
+    const delta = {
+      clicks: _safeNum(page.clicks) != null && _safeNum(previous.clicks) != null
+        ? _safeNum(page.clicks) - _safeNum(previous.clicks) : null,
+      impressions: _safeNum(page.impressions) != null && _safeNum(previous.impressions) != null
+        ? _safeNum(page.impressions) - _safeNum(previous.impressions) : null,
+      position: _safeNum(page.position) != null && _safeNum(previous.position) != null
+        ? _safeNum(page.position) - _safeNum(previous.position) : null,
+    };
+    try {
+      await db.query(
+        `INSERT INTO aegis_seo_observations
+           (site_key, url, week_start, clicks, impressions, ctr, position,
+            sessions, engagement_rate, reward_overall, reward_components, delta, source)
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13)
+         ON CONFLICT (site_key, url, week_start)
+         DO UPDATE SET
+           clicks = EXCLUDED.clicks,
+           impressions = EXCLUDED.impressions,
+           ctr = EXCLUDED.ctr,
+           position = EXCLUDED.position,
+           sessions = EXCLUDED.sessions,
+           engagement_rate = EXCLUDED.engagement_rate,
+           reward_overall = EXCLUDED.reward_overall,
+           reward_components = EXCLUDED.reward_components,
+           delta = EXCLUDED.delta,
+           source = EXCLUDED.source,
+           observed_at = NOW()`,
+        [
+          siteKey, url, weekStart,
+          _safeNum(page.clicks), _safeNum(page.impressions), _safeNum(page.ctr), _safeNum(page.position),
+          _safeNum(page.sessions), _safeNum(page.engagement_rate ?? page.engagementRate),
+          reward.overall, JSON.stringify(reward.components || {}), JSON.stringify(delta), source,
+        ],
+      );
+      results.push({ url, ok: true, reward_overall: reward.overall });
+    } catch (e) {
+      results.push({ url, ok: false, reason: e.message });
+    }
+  }
+  res.json({ site_key: siteKey, processed: results.length, results });
+}
+
+function _safeNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * POST /api/aegis/prompts/prune (admin) — A4 retention для aegis_prompt_audit.
+ * Может вызываться руками или cron'ом.
+ */
+async function prunePromptAuditHandler(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const keepPerKey = Math.min(200, Math.max(1, Number(req.body?.keep_per_key) || 20));
+  const inactiveDays = Math.min(3650, Math.max(1, Number(req.body?.inactive_days) || 90));
+  try {
+    const stats = await promptAudit.pruneAuditHistory(db, { keepPerKey, inactiveDays });
+    res.json({ ok: true, ...stats });
+  } catch (e) {
+    res.status(503).json({ error: 'prune_failed', reason: e.message });
+  }
+}
+
+module.exports.observeSeoPages = observeSeoPages;
+module.exports.prunePromptAuditHandler = prunePromptAuditHandler;
+
+/**
+ * POST /api/aegis/seo-brain/actions/dispatch (admin) — C2 bridge.
+ * Берёт top-priority low_risk действия из aegis_seo_actions и создаёт GitHub
+ * issue с label `aegis:ready` для каждого. Может вызываться руками или cron'ом.
+ */
+async function dispatchSeoActions(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const limit = Math.min(50, Math.max(1, Number(req.body?.limit) || 5));
+  const minPriority = Math.min(100, Math.max(0, Number(req.body?.min_priority) || 80));
+  const dryRun = !!req.body?.dry_run;
+  try {
+    const bridge = require('../services/aegis/seoActionsBridge');
+    const out = await bridge.runOnce({ limit, minPriority, dryRun });
+    if (out && out.skipped === 'locked') {
+      return res.status(409).json({ error: 'locked', reason: 'another_dispatch_in_progress' });
+    }
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    res.status(503).json({ error: 'dispatch_failed', reason: e.message });
+  }
+}
+
+module.exports.dispatchSeoActions = dispatchSeoActions;
 
 // ─────────────────────────── Phase 9–13 ────────────────────────────
 

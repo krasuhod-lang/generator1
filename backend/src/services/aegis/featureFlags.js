@@ -371,6 +371,30 @@ const AEGIS_FLAGS = deepFreeze({
     // точки текущего relevance-прогона (если vectorGc.enabled).
     vectorGcOnDone:        _envBool('AEGIS_RELEVANCE_VECTOR_GC', true),
   },
+
+  // ── Phase 15 — SEO Brain (самостоятельный SEO-агент) ──────────────
+  // Центральный слой: SEO-память сайта → диагностика → reward model →
+  // безопасный action-plan. В отличие от интеграционных URL/секретов,
+  // параметры автономности хранятся в коде, чтобы не раздувать .env.
+  seoBrain: {
+    enabled: true,
+    defaultAutonomyStage: 'recommend',
+    staleDays: 180,
+    thinWordCount: 800,
+    weakSpq: 78,
+    maxActions: 30,
+    lowRiskActionTypes: ['add_internal_links', 'refresh_title_meta', 'add_faq_block'],
+  },
+
+  // ── Phase B2 — экономия токенов writer-промпта ────────────────────
+  // По симметрии с relevanceAegis.compressDeepseekPrompt. Включается осознанно,
+  // т.к. промпт writer'а длинный (IAKB + outline + LSI + linkPlan + evidence)
+  // и compressor может слегка сместить акценты. Default OFF.
+  infoArticle: {
+    compressWriterPrompt: _envBool('AEGIS_INFO_WRITER_COMPRESS_PROMPT', false),
+    // Минимальная длина текста, начиная с которой имеет смысл звать compressor.
+    writerCompressMinChars: _envInt('AEGIS_INFO_WRITER_COMPRESS_MIN_CHARS', 12000),
+  },
 });
 
 // ── Валидация диапазонов (fail-fast при старте) ───────────────────

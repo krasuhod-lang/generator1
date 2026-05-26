@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const db = require('../../config/db');
 const { getAegisFlags } = require('./featureFlags');
 const dspyClient = require('./dspyClient');
+const { buildPromptMeta } = require('./promptAudit');
 
 const MAX_PROMPT_CHARS = 4000;
 const AUTO_RETRAIN_EVERY = 50;
@@ -73,11 +74,16 @@ async function recordTrainingExample({
   modelUsed,
   costUsd,
   userId,
+  promptHash = null,
+  promptMeta = null,
 }) {
   if (!articleRef || !kind || !qualityScore || !htmlOutput) return { ok: false, reason: 'invalid_payload' };
   if (!_passesGate(qualityScore)) return { ok: false, reason: 'quality_gate_reject' };
 
   const promptSafe = String(userPrompt || '').slice(0, MAX_PROMPT_CHARS);
+  const linkage = promptHash
+    ? { prompt_hash: promptHash, prompt_meta: promptMeta || {} }
+    : buildPromptMeta({ kind, userPrompt });
   const spqOverall = _num(qualityScore.overall);
   if (spqOverall == null) return { ok: false, reason: 'invalid_overall' };
 
@@ -86,10 +92,10 @@ async function recordTrainingExample({
       `INSERT INTO aegis_dspy_dataset
          (article_ref, niche, user_prompt, html_output, quality_score,
           spq_overall, ppo_weight, ga4_metrics, model_used, cost_usd,
-          user_hash, source_kind)
+          user_hash, source_kind, prompt_hash, prompt_meta)
        VALUES ($1, $2, $3, $4, $5::jsonb,
                $6, 1.0, $7::jsonb, $8, $9,
-               $10, $11)
+               $10, $11, $12, $13::jsonb)
        ON CONFLICT (article_ref)
        DO UPDATE SET
          niche = EXCLUDED.niche,
@@ -101,7 +107,9 @@ async function recordTrainingExample({
          model_used = EXCLUDED.model_used,
          cost_usd = EXCLUDED.cost_usd,
          user_hash = EXCLUDED.user_hash,
-         source_kind = EXCLUDED.source_kind`,
+         source_kind = EXCLUDED.source_kind,
+         prompt_hash = EXCLUDED.prompt_hash,
+         prompt_meta = EXCLUDED.prompt_meta`,
       [
         String(articleRef),
         niche || null,
@@ -114,6 +122,8 @@ async function recordTrainingExample({
         _num(costUsd),
         _hashUser(userId),
         String(kind),
+        linkage.prompt_hash || null,
+        JSON.stringify(linkage.prompt_meta || {}),
       ],
     );
   } catch (e) {

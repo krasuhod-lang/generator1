@@ -29,6 +29,7 @@ const {
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
+const { resolvePromptHash } = require('../aegis/promptAudit');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -438,6 +439,7 @@ async function runMetaTagTaskInner(taskId) {
         modelUsed: t.gemini_model || null,
         costUsd: Number(t.total_cost_usd) || 0,
         userId: t.user_id || null,
+        promptHash: resolvePromptHash('systemPrompts'),
       });
       await recordQualityLog({
         articleRef: `meta_tags:${taskId}`,
@@ -450,6 +452,8 @@ async function runMetaTagTaskInner(taskId) {
         iterations: 1,
         taskRef: taskId,
         userId: t.user_id || null,
+        userPrompt: `${t.name || ''}\\n${Array.isArray(t.keywords) ? t.keywords.join('\\n') : ''}`,
+        promptHash: resolvePromptHash('systemPrompts'),
       });
     }
   } catch (_e) { /* best-effort */ }

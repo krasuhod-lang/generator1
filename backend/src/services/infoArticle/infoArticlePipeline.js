@@ -65,6 +65,36 @@ const { runEeatAuditCore } = require('../eeatAudit/core');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
+const { resolvePromptHash } = require('../aegis/promptAudit');
+const { getAegisFlags: _getAegisFlagsForWriter } = require('../aegis/featureFlags');
+
+/**
+ * B2: опциональная компрессия writer-промпта через aegis/promptCompressor.
+ * Default OFF (см. AEGIS_INFO_WRITER_COMPRESS_PROMPT). Возвращает тот же текст
+ * если флаг выключен, промпт короткий или compressor недоступен/упал.
+ */
+function _maybeCompressWriterPrompt(text) {
+  try {
+    const cfg = _getAegisFlagsForWriter().infoArticle;
+    if (!cfg || !cfg.compressWriterPrompt) return text;
+    if (!text || text.length < (cfg.writerCompressMinChars || 12000)) return text;
+    const pc = require('../aegis/promptCompressor');
+    if (!pc || typeof pc.compressPrompt !== 'function') return text;
+    const res = pc.compressPrompt(text);
+    if (res && !res.skipped && typeof res.text === 'string' && res.text.length < text.length) {
+      try {
+        const tel = require('../aegis/telemetry');
+        if (tel && tel.M && tel.M.promptCompressSaved) {
+          // приближённо: saved chars / 4 ≈ tokens (для русского/латиницы упрощение)
+          const savedTokensApprox = Math.max(0, Math.floor((text.length - res.text.length) / 4));
+          tel.M.promptCompressSaved.inc(savedTokensApprox, { stage: 'info_writer' });
+        }
+      } catch (_) { /* graceful */ }
+      return res.text;
+    }
+  } catch (_) { /* graceful */ }
+  return text;
+}
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const biobrainClient = require('../aegis/biobrainClient');
 
@@ -520,7 +550,7 @@ async function runWriter(task, args, ctx, opts = {}) {
       base.push('');
       base.push('Пересобери статью так, чтобы все эти проблемы были устранены, сохранив корректные части.');
     }
-    return base.join('\n');
+    return _maybeCompressWriterPrompt(base.join('\n'));
   };
 
   // First attempt
@@ -1837,6 +1867,7 @@ async function processInfoArticleTask(taskId) {
             modelUsed: quality.model_used || t.gemini_model || null,
             costUsd: Number(t.total_cost_usd) || 0,
             userId: task.user_id || null,
+            promptHash: resolvePromptHash('infoArticle/stage3_writer'),
           });
           await recordQualityLog({
             articleRef: `info_article:${taskId}`,
@@ -1858,6 +1889,8 @@ async function processInfoArticleTask(taskId) {
             iterations: 1,
             taskRef: taskId,
             userId: task.user_id || null,
+            userPrompt: task.topic || '',
+            promptHash: resolvePromptHash('infoArticle/stage3_writer'),
           });
           const eeat = quality && quality.subscores ? Number(quality.subscores.eeat) : null;
           await biobrainClient.feedback({

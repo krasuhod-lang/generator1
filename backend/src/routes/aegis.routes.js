@@ -24,6 +24,12 @@ const {
   runVectorGcCleanup,
   listQualityLog,
   listTopFailures,
+  listPromptAuditLog,
+  getSeoBrainSnapshot,
+  analyzeSeoBrain,
+  observeSeoPages,
+  prunePromptAuditHandler,
+  dispatchSeoActions,
 } = require('../controllers/aegis.controller');
 
 const router = express.Router();
@@ -73,5 +79,21 @@ router.post('/vector-gc/cleanup', auth, writeLimiter, runVectorGcCleanup);
 // Discovery (Слои 1/3/8 плана) — read-only телеметрия для дашборда.
 router.get('/quality-log',  auth, listQualityLog);
 router.get('/failures/top', auth, listTopFailures);
+router.get('/prompts/log',  auth, listPromptAuditLog);
+
+// Phase 15: SEO Brain — site memory / reward / diagnostics / safe action-plan.
+// B5: явный body cap 5 MB на /analyze и /observe — защита от 200 MB JSON apocalypse.
+const seoBrainBody = express.json({ limit: '5mb' });
+router.get('/seo-brain',         auth, getSeoBrainSnapshot);
+router.post('/seo-brain/analyze', auth, writeLimiter, seoBrainBody, analyzeSeoBrain);
+
+// Phase 15.C: SEO observations (GA4/GSC delta → reward → dataset backfill).
+router.post('/seo-brain/pages/observe', auth, writeLimiter, seoBrainBody, observeSeoPages);
+
+// Phase A4: retention для prompt audit (admin-only ручной/cron triggered cleanup).
+router.post('/prompts/prune', auth, writeLimiter, prunePromptAuditHandler);
+
+// Phase C2: bridge SEO actions → GitHub backlog issues.
+router.post('/seo-brain/actions/dispatch', auth, writeLimiter, dispatchSeoActions);
 
 module.exports = router;
