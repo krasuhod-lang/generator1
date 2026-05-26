@@ -506,6 +506,13 @@ async function persistSnapshot(db, snapshot, opts = {}) {
       );
     }
     if (client) await exec('COMMIT', []);
+    // C5: наблюдаемая «экономия» — размер pages JSONB после компакции.
+    try {
+      const tel = require('./telemetry');
+      if (tel && tel.M && tel.M.seoMemoryBytes) {
+        tel.M.seoMemoryBytes.set(Buffer.byteLength(pagesJson, 'utf8'), { site: snapshot.site_key });
+      }
+    } catch (_) { /* graceful */ }
     return { ok: true, actions: (snapshot.action_plan.actions || []).length };
   } catch (e) {
     if (client) {

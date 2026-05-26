@@ -17,6 +17,20 @@ const { extractVars } = require('../../prompts/promptRegistry');
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const PROMPTS_ROOT = path.join(REPO_ROOT, 'backend/src/prompts');
 
+// A2/B1: in-memory кэш сканирования промтов.
+//   - mtimeSig: подпись по (rel_path|mtimeMs) всех файлов — инвалидируется только при реальном изменении
+//   - persistedAt: последний успешный persistCurrentPrompts (с TTL ниже)
+//   - prompts: последний результат scanPromptFiles() для resolvePromptHash
+const _SCAN_CACHE = {
+  mtimeSig: null,
+  prompts: null,
+  scannedAt: 0,
+  persistedMtimeSig: null,
+  persistedAt: 0,
+};
+const SCAN_TTL_MS = 60 * 1000;          // повторное чтение FS не чаще раза в минуту
+const PERSIST_TTL_MS = 10 * 60 * 1000;  // запись в БД не чаще раза в 10 минут (если файлы не менялись)
+
 function promptHashFromText(text) {
   return crypto.createHash('sha256').update(String(text || '')).digest('hex');
 }
@@ -68,34 +82,92 @@ function _classify(rel) {
   return { role: 'prompt', dspy_linked: false };
 }
 
-function scanPromptFiles() {
-  return _walk(PROMPTS_ROOT)
-    .filter(_isPromptSource)
-    .sort()
-    .map((file) => {
-      const text = fs.readFileSync(file, 'utf8');
-      const rel = path.relative(REPO_ROOT, file).replace(/\\/g, '/');
-      const sourceKey = rel
-        .replace(/^backend\/src\/prompts\//, '')
-        .replace(/\.(txt|js)$/i, '');
-      const vars = extractVars(text);
-      const stat = fs.statSync(file);
-      return {
-        prompt_key: sourceKey,
-        source_path: rel,
-        prompt_hash: promptHashFromText(text),
-        hash_short: promptHashFromText(text).slice(0, 12),
-        content_chars: text.length,
-        vars,
-        vars_count: vars.length,
-        mtime: stat.mtime.toISOString(),
-        ..._classify(sourceKey),
-      };
-    });
+function _computeMtimeSig(files) {
+  const parts = [];
+  for (const file of files) {
+    try {
+      const st = fs.statSync(file);
+      parts.push(`${file}|${st.mtimeMs}|${st.size}`);
+    } catch (_) { /* skip */ }
+  }
+  return crypto.createHash('sha1').update(parts.join('\n')).digest('hex');
 }
 
-async function persistCurrentPrompts(db) {
+function scanPromptFiles() {
+  const files = _walk(PROMPTS_ROOT).filter(_isPromptSource).sort();
+  const mtimeSig = _computeMtimeSig(files);
+  // A2: вернуть кэш если файлы не менялись и TTL не вышел.
+  if (_SCAN_CACHE.prompts
+    && _SCAN_CACHE.mtimeSig === mtimeSig
+    && (Date.now() - _SCAN_CACHE.scannedAt) < SCAN_TTL_MS) {
+    try {
+      const tel = require('./telemetry');
+      if (tel && tel.M && tel.M.statusCacheHits) tel.M.statusCacheHits.inc(1, { kind: 'scan' });
+    } catch (_) { /* graceful */ }
+    return _SCAN_CACHE.prompts;
+  }
+  const prompts = files.map((file) => {
+    const text = fs.readFileSync(file, 'utf8');
+    const rel = path.relative(REPO_ROOT, file).replace(/\\/g, '/');
+    const sourceKey = rel
+      .replace(/^backend\/src\/prompts\//, '')
+      .replace(/\.(txt|js)$/i, '');
+    const vars = extractVars(text);
+    const stat = fs.statSync(file);
+    return {
+      prompt_key: sourceKey,
+      source_path: rel,
+      prompt_hash: promptHashFromText(text),
+      hash_short: promptHashFromText(text).slice(0, 12),
+      content_chars: text.length,
+      vars,
+      vars_count: vars.length,
+      mtime: stat.mtime.toISOString(),
+      ..._classify(sourceKey),
+    };
+  });
+  _SCAN_CACHE.mtimeSig = mtimeSig;
+  _SCAN_CACHE.prompts = prompts;
+  _SCAN_CACHE.scannedAt = Date.now();
+  return prompts;
+}
+
+/**
+ * B1: вернуть текущий sha256-хеш конкретного промта по prompt_key (например
+ * 'infoArticle/stage3_writer'). Использует кэш scanPromptFiles, поэтому
+ * пайплайны могут звать на каждой генерации без хождения по FS.
+ */
+function resolvePromptHash(promptKey) {
+  if (!promptKey) return null;
   const prompts = scanPromptFiles();
+  // совпадение по точному prompt_key или префиксу (например 'infoArticle/stage3_writer'
+  // может матчить 'infoArticle/stage3_writer/system'). Берём самый длинный matched key.
+  const matches = prompts.filter((p) => p.prompt_key === promptKey || p.prompt_key.startsWith(`${promptKey}/`));
+  if (!matches.length) return null;
+  if (matches.length === 1) return matches[0].prompt_hash;
+  // несколько файлов (например system+user) — комбинированный hash в детерминированном порядке
+  const combined = matches
+    .sort((a, b) => a.prompt_key.localeCompare(b.prompt_key))
+    .map((m) => `${m.prompt_key}:${m.prompt_hash}`)
+    .join('|');
+  return promptHashFromText(combined);
+}
+
+async function persistCurrentPrompts(db, opts = {}) {
+  const prompts = scanPromptFiles();
+  const currentSig = _SCAN_CACHE.mtimeSig;
+  // A2: skip полную запись, если файлы не менялись с прошлого persist и TTL свеж.
+  // force=true позволяет ручным вызовам (тесты, миграция) обойти кэш.
+  if (!opts.force
+    && currentSig
+    && _SCAN_CACHE.persistedMtimeSig === currentSig
+    && (Date.now() - _SCAN_CACHE.persistedAt) < PERSIST_TTL_MS) {
+    try {
+      const tel = require('./telemetry');
+      if (tel && tel.M && tel.M.statusCacheHits) tel.M.statusCacheHits.inc(1, { kind: 'persist' });
+    } catch (_) { /* graceful */ }
+    return { ok: true, total: prompts.length, cached: true };
+  }
   for (const p of prompts) {
     const latest = await db.query(
       `SELECT prompt_hash
@@ -139,7 +211,51 @@ async function persistCurrentPrompts(db) {
   if (keys.length) {
     await db.query(`UPDATE aegis_prompt_audit SET active = FALSE WHERE NOT (prompt_key = ANY($1::text[]))`, [keys]);
   }
-  return { ok: true, total: prompts.length };
+  _SCAN_CACHE.persistedMtimeSig = currentSig;
+  _SCAN_CACHE.persistedAt = Date.now();
+  return { ok: true, total: prompts.length, cached: false };
+}
+
+/**
+ * A4: retention для aegis_prompt_audit — оставляем последние N версий на prompt_key
+ * и удаляем неактивные старше M дней. Безопасно вызывать раз в сутки.
+ */
+async function pruneAuditHistory(db, opts = {}) {
+  const keepPerKey = Math.max(1, Number(opts.keepPerKey) || 20);
+  const inactiveDays = Math.max(1, Number(opts.inactiveDays) || 90);
+  const stats = { kept_per_key: keepPerKey, inactive_days: inactiveDays, deleted_versions: 0, deleted_inactive: 0 };
+  try {
+    const r1 = await db.query(
+      `WITH ranked AS (
+         SELECT id,
+                ROW_NUMBER() OVER (PARTITION BY prompt_key ORDER BY changed_at DESC, id DESC) AS rn
+           FROM aegis_prompt_audit
+       )
+       DELETE FROM aegis_prompt_audit
+        WHERE id IN (SELECT id FROM ranked WHERE rn > $1)`,
+      [keepPerKey],
+    );
+    stats.deleted_versions = r1.rowCount || 0;
+  } catch (e) { stats.versions_error = e.message; }
+  try {
+    const r2 = await db.query(
+      `DELETE FROM aegis_prompt_audit
+        WHERE active = FALSE
+          AND last_seen_at < NOW() - ($1 || ' days')::interval`,
+      [String(inactiveDays)],
+    );
+    stats.deleted_inactive = r2.rowCount || 0;
+  } catch (e) { stats.inactive_error = e.message; }
+  return stats;
+}
+
+/** Тестовый хук: сброс кэша. */
+function _resetCache() {
+  _SCAN_CACHE.mtimeSig = null;
+  _SCAN_CACHE.prompts = null;
+  _SCAN_CACHE.scannedAt = 0;
+  _SCAN_CACHE.persistedMtimeSig = null;
+  _SCAN_CACHE.persistedAt = 0;
 }
 
 async function getPromptDashboardStats(db) {
@@ -248,10 +364,13 @@ function buildSiteOpportunities() {
 module.exports = {
   scanPromptFiles,
   persistCurrentPrompts,
+  pruneAuditHistory,
+  resolvePromptHash,
   getPromptDashboardStats,
   getPromptDspyLinkageStats,
   buildAutonomySnapshot,
   buildSiteOpportunities,
   promptHashFromText,
   buildPromptMeta,
+  _resetCache,
 };

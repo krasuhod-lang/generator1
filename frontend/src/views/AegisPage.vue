@@ -25,6 +25,9 @@ const versions = ref([]);
 const topFailures = ref([]);
 const promptLog = ref([]);
 const failuresDays = ref(7);
+const seoBrain = ref(null);
+const seoDispatchBusy = ref(false);
+const seoDispatchMsg = ref('');
 
 const minOverall = computed(() => status.value?.quality_gate?.min_overall ?? 80);
 
@@ -45,13 +48,14 @@ async function refresh() {
   loading.value = true;
   error.value   = '';
   try {
-    const [s, r, b, v, f, p] = await Promise.all([
+    const [s, r, b, v, f, p, sb] = await Promise.all([
       api.get('/aegis/status').then((x) => x.data),
       api.get('/aegis/runs?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/backlog').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/brain/versions').then((x) => x.data).catch(() => ({ items: [] })),
       api.get(`/aegis/failures/top?days=${failuresDays.value}`).then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/prompts/log?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
+      api.get('/aegis/seo-brain').then((x) => x.data).catch(() => null),
     ]);
     status.value   = s;
     runs.value     = r.items || [];
@@ -59,6 +63,7 @@ async function refresh() {
     versions.value = v.items || [];
     topFailures.value = f.items || [];
     promptLog.value = p.items || [];
+    seoBrain.value = sb;
   } catch (e) {
     error.value = e?.response?.data?.error || e.message || 'Ошибка загрузки';
   } finally {
@@ -67,6 +72,22 @@ async function refresh() {
 }
 
 onMounted(refresh);
+
+async function dispatchSeoActions() {
+  if (seoDispatchBusy.value) return;
+  seoDispatchBusy.value = true;
+  seoDispatchMsg.value = '';
+  try {
+    const r = await api.post('/aegis/seo-brain/actions/dispatch', { limit: 5, min_priority: 80 });
+    const d = r.data || {};
+    seoDispatchMsg.value = `Отправлено: ${d.dispatched ?? 0}, ошибок: ${d.errors ?? 0}`;
+    await refresh();
+  } catch (e) {
+    seoDispatchMsg.value = e?.response?.data?.error || e.message || 'Ошибка';
+  } finally {
+    seoDispatchBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -330,6 +351,51 @@ onMounted(refresh);
         <p>Нейроны/связи: <strong>{{ status.biobrain?.status?.nodes ?? '—' }}</strong> / <strong>{{ status.biobrain?.status?.connections ?? '—' }}</strong></p>
         <p>Mean fitness: <strong>{{ fmtMaybe(status.biobrain?.status?.mean_fitness, 4) }}</strong></p>
         <p>Fast-Reject 24ч: <strong>{{ fmtMaybe(status.biobrain?.status?.fast_reject_rate_24h) }}%</strong></p>
+      </section>
+
+      <section v-if="seoBrain" class="card">
+        <h2>🧠 SEO Brain</h2>
+        <p v-if="!seoBrain.snapshot">
+          <span class="subtle">Snapshot ещё не построен. POST /api/aegis/seo-brain/analyze создаст первый.</span>
+        </p>
+        <template v-else>
+          <p>
+            Сайт: <strong>{{ seoBrain.snapshot.site_key }}</strong>
+            · Reward: <strong>{{ fmtMaybe(seoBrain.snapshot.reward?.overall, 1) }}</strong>
+            · Autonomy: <span class="badge">{{ seoBrain.snapshot.autonomy_stage || 'recommend' }}</span>
+          </p>
+          <div v-if="seoBrain.snapshot.diagnostics?.summary?.by_type" class="kv">
+            <h3>Issues by type</h3>
+            <ul>
+              <li v-for="(cnt, type) in seoBrain.snapshot.diagnostics.summary.by_type" :key="type">
+                <code>{{ type }}</code>: <strong>{{ cnt }}</strong>
+              </li>
+            </ul>
+          </div>
+          <div v-if="seoBrain.snapshot.action_plan?.actions?.length">
+            <h3>Top-10 actions</h3>
+            <table class="grid">
+              <thead>
+                <tr><th>Priority</th><th>Type</th><th>Target</th><th>Risk</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="a in seoBrain.snapshot.action_plan.actions.slice(0, 10)" :key="a.action_key">
+                  <td><strong>{{ a.priority }}</strong></td>
+                  <td><code>{{ a.action_type }}</code></td>
+                  <td><span class="subtle">{{ a.target_url || a.cluster || '—' }}</span></td>
+                  <td>{{ a.low_risk ? '🟢 low' : '🟡 review' }}</td>
+                  <td>{{ a.status || 'recommended' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="row" style="margin-top: 0.75rem;">
+            <button class="btn" @click="dispatchSeoActions" :disabled="seoDispatchBusy">
+              {{ seoDispatchBusy ? '…' : '🚀 Создать issue из top low-risk actions' }}
+            </button>
+            <span v-if="seoDispatchMsg" class="subtle" style="margin-left: 0.5rem;">{{ seoDispatchMsg }}</span>
+          </div>
+        </template>
       </section>
 
       <section class="card">

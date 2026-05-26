@@ -385,6 +385,16 @@ const AEGIS_FLAGS = deepFreeze({
     maxActions: 30,
     lowRiskActionTypes: ['add_internal_links', 'refresh_title_meta', 'add_faq_block'],
   },
+
+  // ── Phase B2 — экономия токенов writer-промпта ────────────────────
+  // По симметрии с relevanceAegis.compressDeepseekPrompt. Включается осознанно,
+  // т.к. промпт writer'а длинный (IAKB + outline + LSI + linkPlan + evidence)
+  // и compressor может слегка сместить акценты. Default OFF.
+  infoArticle: {
+    compressWriterPrompt: _envBool('AEGIS_INFO_WRITER_COMPRESS_PROMPT', false),
+    // Минимальная длина текста, начиная с которой имеет смысл звать compressor.
+    writerCompressMinChars: _envInt('AEGIS_INFO_WRITER_COMPRESS_MIN_CHARS', 12000),
+  },
 });
 
 // ── Валидация диапазонов (fail-fast при старте) ───────────────────

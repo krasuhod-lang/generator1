@@ -497,6 +497,126 @@ async function listTopFailures(req, res) {
 module.exports.listQualityLog   = listQualityLog;
 module.exports.listTopFailures  = listTopFailures;
 
+// ─────────────────────── Phase 15.C — SEO observations / retention ─────────────────────
+
+/**
+ * POST /api/aegis/seo-brain/pages/observe (admin)
+ * Принимает GA4/GSC дельты по URL → считает reward и пишет в aegis_seo_observations.
+ * Используется фоновым job/cron для backfill aegis_dspy_dataset.ga4_metrics.
+ */
+async function observeSeoPages(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const body = req.body || {};
+  const siteKey = (body.site_key || body.siteKey || 'default').toString().slice(0, 200);
+  const observations = Array.isArray(body.observations) ? body.observations : [];
+  if (!observations.length) return res.status(400).json({ error: 'observations_required' });
+  // B5-style cap для observe-эндпоинта.
+  if (observations.length > seoBrain.DEFAULTS.maxPagesPerAnalyze) {
+    return res.status(413).json({
+      error: 'too_many_observations',
+      limit: seoBrain.DEFAULTS.maxPagesPerAnalyze,
+      got: observations.length,
+    });
+  }
+  const source = (body.source || 'manual').toString().slice(0, 32);
+  const results = [];
+  for (const obs of observations) {
+    const url = (obs.url || obs.path || '').toString().slice(0, 1024);
+    if (!url) { results.push({ url: null, ok: false, reason: 'url_required' }); continue; }
+    const weekStart = obs.week_start || obs.weekStart || new Date().toISOString().slice(0, 10);
+    const page = obs.current || obs.page || obs;
+    const previous = obs.previous || obs.prev || {};
+    const reward = seoBrain.computeSeoReward({ page, previous });
+    const delta = {
+      clicks: _safeNum(page.clicks) != null && _safeNum(previous.clicks) != null
+        ? _safeNum(page.clicks) - _safeNum(previous.clicks) : null,
+      impressions: _safeNum(page.impressions) != null && _safeNum(previous.impressions) != null
+        ? _safeNum(page.impressions) - _safeNum(previous.impressions) : null,
+      position: _safeNum(page.position) != null && _safeNum(previous.position) != null
+        ? _safeNum(page.position) - _safeNum(previous.position) : null,
+    };
+    try {
+      await db.query(
+        `INSERT INTO aegis_seo_observations
+           (site_key, url, week_start, clicks, impressions, ctr, position,
+            sessions, engagement_rate, reward_overall, reward_components, delta, source)
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13)
+         ON CONFLICT (site_key, url, week_start)
+         DO UPDATE SET
+           clicks = EXCLUDED.clicks,
+           impressions = EXCLUDED.impressions,
+           ctr = EXCLUDED.ctr,
+           position = EXCLUDED.position,
+           sessions = EXCLUDED.sessions,
+           engagement_rate = EXCLUDED.engagement_rate,
+           reward_overall = EXCLUDED.reward_overall,
+           reward_components = EXCLUDED.reward_components,
+           delta = EXCLUDED.delta,
+           source = EXCLUDED.source,
+           observed_at = NOW()`,
+        [
+          siteKey, url, weekStart,
+          _safeNum(page.clicks), _safeNum(page.impressions), _safeNum(page.ctr), _safeNum(page.position),
+          _safeNum(page.sessions), _safeNum(page.engagement_rate ?? page.engagementRate),
+          reward.overall, JSON.stringify(reward.components || {}), JSON.stringify(delta), source,
+        ],
+      );
+      results.push({ url, ok: true, reward_overall: reward.overall });
+    } catch (e) {
+      results.push({ url, ok: false, reason: e.message });
+    }
+  }
+  res.json({ site_key: siteKey, processed: results.length, results });
+}
+
+function _safeNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * POST /api/aegis/prompts/prune (admin) — A4 retention для aegis_prompt_audit.
+ * Может вызываться руками или cron'ом.
+ */
+async function prunePromptAuditHandler(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const keepPerKey = Math.min(200, Math.max(1, Number(req.body?.keep_per_key) || 20));
+  const inactiveDays = Math.min(3650, Math.max(1, Number(req.body?.inactive_days) || 90));
+  try {
+    const stats = await promptAudit.pruneAuditHistory(db, { keepPerKey, inactiveDays });
+    res.json({ ok: true, ...stats });
+  } catch (e) {
+    res.status(503).json({ error: 'prune_failed', reason: e.message });
+  }
+}
+
+module.exports.observeSeoPages = observeSeoPages;
+module.exports.prunePromptAuditHandler = prunePromptAuditHandler;
+
+/**
+ * POST /api/aegis/seo-brain/actions/dispatch (admin) — C2 bridge.
+ * Берёт top-priority low_risk действия из aegis_seo_actions и создаёт GitHub
+ * issue с label `aegis:ready` для каждого. Может вызываться руками или cron'ом.
+ */
+async function dispatchSeoActions(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  const limit = Math.min(50, Math.max(1, Number(req.body?.limit) || 5));
+  const minPriority = Math.min(100, Math.max(0, Number(req.body?.min_priority) || 80));
+  const dryRun = !!req.body?.dry_run;
+  try {
+    const bridge = require('../services/aegis/seoActionsBridge');
+    const out = await bridge.runOnce({ limit, minPriority, dryRun });
+    if (out && out.skipped === 'locked') {
+      return res.status(409).json({ error: 'locked', reason: 'another_dispatch_in_progress' });
+    }
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    res.status(503).json({ error: 'dispatch_failed', reason: e.message });
+  }
+}
+
+module.exports.dispatchSeoActions = dispatchSeoActions;
+
 // ─────────────────────────── Phase 9–13 ────────────────────────────
 
 /** GET /api/aegis/metrics — Prometheus exposition (text/plain). */

@@ -1360,8 +1360,10 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_memory_updated ON aegis_seo_memory (updated_at DESC)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_memory_pages ON aegis_seo_memory USING GIN (pages)`);
-    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_memory_diagnostics ON aegis_seo_memory USING GIN (diagnostics)`);
+    // A3: тяжёлые GIN-индексы по полному pages/diagnostics не запрашиваются нигде в
+    // коде — только раздували диск/replication lag. Дропаем при старте.
+    await db.query(`DROP INDEX IF EXISTS idx_aegis_seo_memory_pages`);
+    await db.query(`DROP INDEX IF EXISTS idx_aegis_seo_memory_diagnostics`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_seo_actions (
@@ -1383,6 +1385,31 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_actions_site_priority ON aegis_seo_actions (site_key, priority DESC, updated_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_actions_status ON aegis_seo_actions (status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_actions_type ON aegis_seo_actions (action_type)`);
+
+    // C1: observations — фактические GA4/GSC дельты + reward на URL/неделя.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_seo_observations (
+        id                BIGSERIAL    PRIMARY KEY,
+        site_key          TEXT         NOT NULL,
+        url               TEXT         NOT NULL,
+        observed_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        week_start        DATE         NOT NULL,
+        clicks            INTEGER,
+        impressions       INTEGER,
+        ctr               DOUBLE PRECISION,
+        position          DOUBLE PRECISION,
+        sessions          INTEGER,
+        engagement_rate   DOUBLE PRECISION,
+        reward_overall    DOUBLE PRECISION,
+        reward_components JSONB        NOT NULL DEFAULT '{}'::jsonb,
+        delta             JSONB        NOT NULL DEFAULT '{}'::jsonb,
+        source            VARCHAR(32)  NOT NULL DEFAULT 'manual',
+        created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        UNIQUE (site_key, url, week_start)
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_observations_site_week ON aegis_seo_observations (site_key, week_start DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_observations_url ON aegis_seo_observations (url, observed_at DESC)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

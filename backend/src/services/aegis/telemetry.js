@@ -130,6 +130,11 @@ const M = {
   relevancePages:         counter('aegis_relevance_pages_total',          'Relevance pages processed',          ['outcome']),
   relevancePoisonDropped: counter('aegis_relevance_poison_dropped_total', 'Relevance pages dropped by poison',  ['reason']),
   dspyMutations:          counter('aegis_dspy_mutations_total',           'ε-greedy DSPy mutations applied',    ['kind']),
+  // Phase B/C — экономия токенов и кэширование статуса (наблюдаемая «экономия»).
+  promptCompressSaved: counter('aegis_prompt_compress_saved_tokens_total', 'Tokens saved by promptCompressor',  ['stage']),
+  seoMemoryBytes:      gauge('aegis_seo_memory_pages_bytes',              'Size of aegis_seo_memory.pages JSON', ['site']),
+  statusCacheHits:     counter('aegis_status_cache_hits_total',            'Promptaudit scan cache hits',        ['kind']),
+  seoActionsDispatched: counter('aegis_seo_actions_dispatched_total',      'SEO actions auto-dispatched to GitHub backlog', ['outcome']),
 };
 
 /**

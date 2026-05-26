@@ -32,6 +32,7 @@ const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
+const { resolvePromptHash } = require('../aegis/promptAudit');
 
 const PROMPTS_DIR = path.join(__dirname, '..', '..', 'prompts', 'articleTopics');
 
@@ -348,6 +349,7 @@ async function processArticleTopicTask(taskId) {
         modelUsed: result.model || null,
         costUsd,
         userId: task.user_id || null,
+        promptHash: resolvePromptHash('articleTopics/main'),
       });
       await recordQualityLog({
         articleRef: `article_topics:${taskId}`,
@@ -361,6 +363,7 @@ async function processArticleTopicTask(taskId) {
         taskRef: taskId,
         userId: task.user_id || null,
         userPrompt,
+        promptHash: resolvePromptHash('articleTopics/main'),
       });
     } catch (_e) { /* best-effort */ }
     try {
