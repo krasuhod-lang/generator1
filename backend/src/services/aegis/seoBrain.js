@@ -22,6 +22,11 @@ const DEFAULTS = Object.freeze({
   weakSpq: 78,
   cannibalizationPosition: 20,
   maxActions: 30,
+  // A3: ограничения для persist — не хранить весь массив страниц в JSONB.
+  maxPagesInMemory: 50,        // top-N проблемных URL вместо полного списка
+  maxSnapshotBytes: 256 * 1024, // 256 KB на запись aegis_seo_memory
+  // B5: верхний кап на /seo-brain/analyze, чтобы 200 MB JSON не прилетел.
+  maxPagesPerAnalyze: 5000,
   lowRiskActionTypes: Object.freeze(['add_internal_links', 'refresh_title_meta', 'add_faq_block']),
   autonomyStages: Object.freeze(['recommend', 'task', 'draft', 'human_review', 'autopilot']),
 });
@@ -101,8 +106,8 @@ function normalizePage(input = {}, opts = {}) {
     word_count: wordCount,
     updated_at: updatedAt,
     age_days: _dateAgeDays(updatedAt, now),
-    internal_links_in: _num(input.internal_links_in ?? input.internalLinksIn, 0),
-    internal_links_out: _num(input.internal_links_out ?? input.internalLinksOut, 0),
+    internal_links_in: _num(input.internal_links_in ?? input.internalLinksIn, null),
+    internal_links_out: _num(input.internal_links_out ?? input.internalLinksOut, null),
     keysso_signals: keysso,
     history,
   };
@@ -248,10 +253,24 @@ function diagnoseSiteMemory(siteMemory, opts = {}) {
         detected: p.detected_intent,
       }));
     }
-    if (p.internal_links_in <= 0 && pages.length > 1) {
-      issues.push(_issue('weak_internal_links', p, 'На страницу не ведут внутренние ссылки', 55, {
-        internal_links_in: p.internal_links_in,
-      }));
+  }
+  // B3: weak_internal_links — только когда сигнал реально доставлен.
+  // Триггерим если: (a) явно задано in == 0, ИЛИ (b) хоть у одной страницы того же
+  // кластера есть out > 0 (значит есть откуда линковать). Иначе шум.
+  const someoneLinksOut = pages.some((p) => _num(p.internal_links_out, 0) > 0);
+  for (const p of pages) {
+    const linksInExplicit = p.internal_links_in != null;
+    const noIncoming = linksInExplicit
+      ? p.internal_links_in <= 0
+      : someoneLinksOut && pages.length > 1; // если кто-то линкует, а сюда не приходят — подозрительно
+    if (noIncoming && pages.length > 1) {
+      const sameCluster = pages.filter((q) => q.cluster === p.cluster && q.path !== p.path);
+      const candidatesExist = sameCluster.some((q) => _num(q.internal_links_out, 0) > 0);
+      if (linksInExplicit || candidatesExist) {
+        issues.push(_issue('weak_internal_links', p, 'На страницу не ведут внутренние ссылки', 55, {
+          internal_links_in: p.internal_links_in,
+        }));
+      }
     }
   }
 
@@ -351,63 +370,151 @@ function buildCapabilities() {
   };
 }
 
-async function persistSnapshot(db, snapshot) {
-  if (!db || !snapshot || !snapshot.site_key) return { ok: false, reason: 'invalid_payload' };
-  await db.query(
-    `INSERT INTO aegis_seo_memory
-       (site_key, site_url, pages, clusters, signals, reward, diagnostics, action_plan, autonomy_stage, updated_at)
-     VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, NOW())
-     ON CONFLICT (site_key)
-     DO UPDATE SET
-       site_url = EXCLUDED.site_url,
-       pages = EXCLUDED.pages,
-       clusters = EXCLUDED.clusters,
-       signals = EXCLUDED.signals,
-       reward = EXCLUDED.reward,
-       diagnostics = EXCLUDED.diagnostics,
-       action_plan = EXCLUDED.action_plan,
-       autonomy_stage = EXCLUDED.autonomy_stage,
-       updated_at = NOW()`,
-    [
-      snapshot.site_key,
-      snapshot.site_url || null,
-      JSON.stringify(snapshot.memory.pages || []),
-      JSON.stringify(snapshot.memory.clusters || {}),
-      JSON.stringify(snapshot.signals || {}),
-      JSON.stringify(snapshot.reward || {}),
-      JSON.stringify(snapshot.diagnostics || {}),
-      JSON.stringify(snapshot.action_plan || {}),
-      snapshot.action_plan.autonomy_stage || 'recommend',
-    ],
-  );
+/**
+ * A3: компактная репрезентация pages — top-N проблемных URL + агрегаты,
+ * вместо полного массива. Полный массив больше нигде не запрашивается
+ * (см. SELECT в getSeoBrainSnapshot), а в JSONB он раздувает диск и replication lag.
+ */
+function _compactPagesForPersist(pages, diagnostics, cfg) {
+  const limit = cfg.maxPagesInMemory || DEFAULTS.maxPagesInMemory;
+  const issuesByUrl = new Map();
+  for (const issue of (diagnostics && diagnostics.issues) || []) {
+    const url = issue.target_url;
+    if (!url) continue;
+    if (!issuesByUrl.has(url)) issuesByUrl.set(url, []);
+    issuesByUrl.get(url).push({ type: issue.type, severity: issue.severity });
+  }
+  const ranked = (pages || []).map((p) => {
+    const issues = issuesByUrl.get(p.path) || [];
+    const maxSeverity = issues.reduce((m, i) => Math.max(m, i.severity || 0), 0);
+    return { page: p, issues, maxSeverity };
+  });
+  ranked.sort((a, b) => {
+    if (b.maxSeverity !== a.maxSeverity) return b.maxSeverity - a.maxSeverity;
+    return (_num(b.page.impressions, 0) || 0) - (_num(a.page.impressions, 0) || 0);
+  });
+  const top = ranked.slice(0, limit).map(({ page, issues, maxSeverity }) => ({
+    path: page.path,
+    url: page.url,
+    title: page.title,
+    cluster: page.cluster,
+    intent: page.intent,
+    position: page.position,
+    ctr: page.ctr,
+    clicks: page.clicks,
+    impressions: page.impressions,
+    spq_overall: page.spq_overall,
+    word_count: page.word_count,
+    age_days: page.age_days,
+    max_issue_severity: maxSeverity || null,
+    issues,
+  }));
+  return {
+    total: pages.length,
+    truncated: pages.length > top.length,
+    top_problem_urls: top,
+  };
+}
 
-  for (const action of snapshot.action_plan.actions || []) {
-    await db.query(
-      `INSERT INTO aegis_seo_actions
-         (site_key, action_key, action_type, target_url, cluster, intent, priority, status, payload)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'recommended', $8::jsonb)
-       ON CONFLICT (site_key, action_key)
+function _truncateToBudget(jsonString, byteBudget) {
+  if (Buffer.byteLength(jsonString, 'utf8') <= byteBudget) return jsonString;
+  // мягко режем массивы пока не уложимся
+  try {
+    const obj = JSON.parse(jsonString);
+    if (obj && Array.isArray(obj.top_problem_urls)) {
+      while (obj.top_problem_urls.length > 5
+        && Buffer.byteLength(JSON.stringify(obj), 'utf8') > byteBudget) {
+        obj.top_problem_urls.pop();
+      }
+      obj.truncated = true;
+      return JSON.stringify(obj);
+    }
+  } catch (_) { /* noop */ }
+  return jsonString;
+}
+
+async function persistSnapshot(db, snapshot, opts = {}) {
+  if (!db || !snapshot || !snapshot.site_key) return { ok: false, reason: 'invalid_payload' };
+  const cfg = { ...DEFAULTS, ...opts };
+
+  // A3: компактные pages вместо полного массива.
+  const compactPages = _compactPagesForPersist(
+    snapshot.memory && snapshot.memory.pages,
+    snapshot.diagnostics,
+    cfg,
+  );
+  let pagesJson = JSON.stringify(compactPages);
+  pagesJson = _truncateToBudget(pagesJson, cfg.maxSnapshotBytes);
+
+  // B4: транзакция — memory UPSERT + N×action UPSERT атомарно.
+  const client = typeof db.connect === 'function' ? await db.connect() : null;
+  const exec = client ? (q, p) => client.query(q, p) : (q, p) => db.query(q, p);
+  try {
+    if (client) await exec('BEGIN', []);
+    await exec(
+      `INSERT INTO aegis_seo_memory
+         (site_key, site_url, pages, clusters, signals, reward, diagnostics, action_plan, autonomy_stage, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, NOW())
+       ON CONFLICT (site_key)
        DO UPDATE SET
-         action_type = EXCLUDED.action_type,
-         target_url = EXCLUDED.target_url,
-         cluster = EXCLUDED.cluster,
-         intent = EXCLUDED.intent,
-         priority = EXCLUDED.priority,
-         payload = EXCLUDED.payload,
+         site_url = EXCLUDED.site_url,
+         pages = EXCLUDED.pages,
+         clusters = EXCLUDED.clusters,
+         signals = EXCLUDED.signals,
+         reward = EXCLUDED.reward,
+         diagnostics = EXCLUDED.diagnostics,
+         action_plan = EXCLUDED.action_plan,
+         autonomy_stage = EXCLUDED.autonomy_stage,
          updated_at = NOW()`,
       [
         snapshot.site_key,
-        action.action_key,
-        action.action_type,
-        action.target_url || null,
-        action.cluster || null,
-        action.intent || null,
-        action.priority,
-        JSON.stringify(action),
+        snapshot.site_url || null,
+        pagesJson,
+        JSON.stringify(snapshot.memory.clusters || {}),
+        JSON.stringify(snapshot.signals || {}),
+        JSON.stringify(snapshot.reward || {}),
+        JSON.stringify(snapshot.diagnostics || {}),
+        JSON.stringify(snapshot.action_plan || {}),
+        snapshot.action_plan.autonomy_stage || 'recommend',
       ],
     );
+
+    for (const action of snapshot.action_plan.actions || []) {
+      await exec(
+        `INSERT INTO aegis_seo_actions
+           (site_key, action_key, action_type, target_url, cluster, intent, priority, status, payload)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'recommended', $8::jsonb)
+         ON CONFLICT (site_key, action_key)
+         DO UPDATE SET
+           action_type = EXCLUDED.action_type,
+           target_url = EXCLUDED.target_url,
+           cluster = EXCLUDED.cluster,
+           intent = EXCLUDED.intent,
+           priority = EXCLUDED.priority,
+           payload = EXCLUDED.payload,
+           updated_at = NOW()`,
+        [
+          snapshot.site_key,
+          action.action_key,
+          action.action_type,
+          action.target_url || null,
+          action.cluster || null,
+          action.intent || null,
+          action.priority,
+          JSON.stringify(action),
+        ],
+      );
+    }
+    if (client) await exec('COMMIT', []);
+    return { ok: true, actions: (snapshot.action_plan.actions || []).length };
+  } catch (e) {
+    if (client) {
+      try { await exec('ROLLBACK', []); } catch (_) { /* noop */ }
+    }
+    throw e;
+  } finally {
+    if (client && typeof client.release === 'function') client.release();
   }
-  return { ok: true, actions: (snapshot.action_plan.actions || []).length };
 }
 
 function _avg(values) {
