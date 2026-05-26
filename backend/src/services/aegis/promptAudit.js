@@ -153,9 +153,42 @@ function resolvePromptHash(promptKey) {
   return promptHashFromText(combined);
 }
 
+// Последняя диагностика persistCurrentPrompts — поднимаем в /api/aegis/status,
+// чтобы UI понимал, почему «Всего промтов: 0» (раньше ошибка глоталась).
+const _PERSIST_DIAG = {
+  last_run_at: null,
+  last_ok: null,
+  last_error: null,      // { reason: 'table_missing'|'scan_empty'|'db_error', message }
+  last_total: null,
+};
+
+function _classifyDbError(err) {
+  const msg = String((err && err.message) || err || '');
+  const code = (err && err.code) || null;
+  if (code === '42P01' || /relation .* does not exist/i.test(msg)) {
+    return { reason: 'table_missing', message: msg };
+  }
+  if (code === '42703' || /column .* does not exist/i.test(msg)) {
+    return { reason: 'schema_mismatch', message: msg };
+  }
+  return { reason: 'db_error', message: msg };
+}
+
+function getPersistDiagnostics() {
+  return { ..._PERSIST_DIAG };
+}
+
 async function persistCurrentPrompts(db, opts = {}) {
   const prompts = scanPromptFiles();
   const currentSig = _SCAN_CACHE.mtimeSig;
+  if (!prompts.length) {
+    _PERSIST_DIAG.last_run_at = new Date().toISOString();
+    _PERSIST_DIAG.last_ok = false;
+    _PERSIST_DIAG.last_total = 0;
+    _PERSIST_DIAG.last_error = { reason: 'scan_empty', message: 'no prompt sources found under backend/src/prompts' };
+    console.warn('[aegis/promptAudit] scan_empty: no prompt sources discovered');
+    return { ok: false, total: 0, reason: 'scan_empty' };
+  }
   // A2: skip полную запись, если файлы не менялись с прошлого persist и TTL свеж.
   // force=true позволяет ручным вызовам (тесты, миграция) обойти кэш.
   if (!opts.force
@@ -168,6 +201,7 @@ async function persistCurrentPrompts(db, opts = {}) {
     } catch (_) { /* graceful */ }
     return { ok: true, total: prompts.length, cached: true };
   }
+  try {
   for (const p of prompts) {
     const latest = await db.query(
       `SELECT prompt_hash
@@ -213,7 +247,20 @@ async function persistCurrentPrompts(db, opts = {}) {
   }
   _SCAN_CACHE.persistedMtimeSig = currentSig;
   _SCAN_CACHE.persistedAt = Date.now();
+  _PERSIST_DIAG.last_run_at = new Date().toISOString();
+  _PERSIST_DIAG.last_ok = true;
+  _PERSIST_DIAG.last_total = prompts.length;
+  _PERSIST_DIAG.last_error = null;
   return { ok: true, total: prompts.length, cached: false };
+  } catch (err) {
+    const diag = _classifyDbError(err);
+    _PERSIST_DIAG.last_run_at = new Date().toISOString();
+    _PERSIST_DIAG.last_ok = false;
+    _PERSIST_DIAG.last_total = prompts.length;
+    _PERSIST_DIAG.last_error = diag;
+    console.warn(`[aegis/promptAudit] persist failed (${diag.reason}): ${diag.message}`);
+    return { ok: false, total: prompts.length, reason: diag.reason };
+  }
 }
 
 /**
@@ -370,6 +417,7 @@ module.exports = {
   getPromptDspyLinkageStats,
   buildAutonomySnapshot,
   buildSiteOpportunities,
+  getPersistDiagnostics,
   promptHashFromText,
   buildPromptMeta,
   _resetCache,

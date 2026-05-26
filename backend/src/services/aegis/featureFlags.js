@@ -145,6 +145,16 @@ const AEGIS_FLAGS = deepFreeze({
     // переучится под новый формат.
     epsilonGreedyRate:  _envFloat('AEGIS_DSPY_EPSILON', 0.07),
     epsilonGreedyMaxRate: 0.20,  // hard-cap, чтобы случайно не сорваться в 100% random
+    // Autopilot: автоматический retrain. Хранится в коде (без ENV),
+    // чтобы первый «компилированный мозг» собрался сам без ручного POST.
+    // Поведение: каждые `autoRetrainCheckIntervalSec` мы смотрим на
+    // aegis_dspy_dataset (rows ≥ autoRetrainMinRows) и `aegis_brain_versions`
+    // (с последнего deployed_at прошло ≥ autoRetrainMinSpacingSec) — и зовём
+    // retrain. dspy.enabled остаётся гейтом верхнего уровня.
+    autoRetrainEnabled:           true,
+    autoRetrainMinRows:           10,
+    autoRetrainCheckIntervalSec:  3600,    // раз в час
+    autoRetrainMinSpacingSec:     21600,   // не чаще 1 раза в 6 часов
   },
 
   // ── RL / GA4 feedback loop ───────────────────────────────────────
@@ -212,10 +222,28 @@ const AEGIS_FLAGS = deepFreeze({
   // ── BioBrain (NEAT pre-filter) ─────────────────────────────────────
   biobrain: {
     enabled: false,
+    // Документируется в /api/aegis/status как «почему прочерки» —
+    // включение требует правки кода (экспериментальный NEAT-слой,
+    // ENV-флаг намеренно не вводим, см. README AEGIS).
+    disabledReason: 'experimental_disabled_in_code',
     fastRejectThreshold: 0.35,
     reviewThreshold: 0.55,
     snnEnabled: false,
     evolveIntervalSec: 300,
+  },
+
+  // ── Prompts-as-Code audit ─────────────────────────────────────────
+  // Контролирует, какие источники сканируются promptAudit.scanPromptFiles
+  // и где UI показывает «Всего промтов / изменения за 7 дней». Сам флаг
+  // enabled оставляем true — audit безопасный (только sha256 хеши).
+  promptAudit: {
+    enabled: true,
+    // Источники промтов на диске. Хранятся в коде, чтобы дашборд мог
+    // показать «что именно сканируется», когда total_prompts=0.
+    sources: ['backend/src/prompts'],
+    // retention для pruneAuditHistory (вызывается из cron / админ-эндпоинта).
+    keepVersionsPerKey: 20,
+    inactiveDays: 90,
   },
 
   // ── Состояние мозга (compiled DSPy weights) ──────────────────────
@@ -384,6 +412,15 @@ const AEGIS_FLAGS = deepFreeze({
     weakSpq: 78,
     maxActions: 30,
     lowRiskActionTypes: ['add_internal_links', 'refresh_title_meta', 'add_faq_block'],
+    // Autopilot — раз в сутки агрегировать наблюдения из aegis_seo_observations
+    // и пересобирать snapshot. Гейтится наличием хотя бы одной строки
+    // наблюдений за окно. Без записи в БД (новый snapshot только если есть
+    // что обновить), чтобы не порождать лишние строки в aegis_seo_memory.
+    autoAnalyzeEnabled:           true,
+    autoAnalyzeIntervalSec:       86400,  // раз в 24 часа
+    autoAnalyzeMinSpacingSec:     79200,  // не чаще 1 раза в 22 часа
+    autoAnalyzeLookbackDays:      30,
+    autoAnalyzeMaxPagesPerSite:   200,
   },
 
   // ── Phase B2 — экономия токенов writer-промпта ────────────────────

@@ -220,6 +220,24 @@ const start = async () => {
       telemetry.startOtlpPusher(); // no-op если AEGIS_OTLP_HTTP_URL пуст.
       const b = getAegisFlags().backlog;
       if (b.enabled && b.repo && b.pat) startBacklogWorker();
+
+      // Phase 16 — autopilot для «компилированного мозга».
+      // dspyAutoRetrain.startDspyAutoRetrain сам гейтится по dspy.enabled и
+      // dspy.autoRetrainEnabled (см. featureFlags.dspy). Без ENV — это
+      // безопасно: если dspy.enabled=false, воркер ничего не делает,
+      // только заполняет telemetry для /api/aegis/status.
+      try {
+        const { startDspyAutoRetrain } = require('./src/services/aegis/dspyAutoRetrain');
+        startDspyAutoRetrain();
+      } catch (e) {
+        console.warn('[Server] AEGIS dspyAutoRetrain skipped:', e.message);
+      }
+      try {
+        const { startSeoBrainScheduler } = require('./src/services/aegis/seoBrainScheduler');
+        startSeoBrainScheduler();
+      } catch (e) {
+        console.warn('[Server] AEGIS seoBrainScheduler skipped:', e.message);
+      }
     } catch (err) {
       console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
     }
