@@ -623,6 +623,36 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_status       ON article_topic_tasks (status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topic_parent       ON article_topic_tasks (parent_task_id) WHERE parent_task_id IS NOT NULL`);
 
+    // Migration 051: brand history для дедупа тем по бренду.
+    // pg_trgm может не подняться на managed Postgres без superuser — гасим
+    // ошибку, тогда detector использует только exact + Jaccard prefilter.
+    try {
+      await db.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
+    } catch (e) {
+      console.warn('[ensureSchema] pg_trgm extension not available (brand dedup degrades to exact/Jaccard only):', e.message);
+    }
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS article_topics_brand_history (
+        id                  BIGSERIAL    PRIMARY KEY,
+        user_id             UUID         NOT NULL,
+        brand_key           TEXT         NOT NULL,
+        topic_title_canon   TEXT         NOT NULL,
+        topic_h1_canon      TEXT,
+        primary_intent      TEXT,
+        intent_facet        TEXT,
+        topic_idea_task_id  UUID         REFERENCES article_topic_tasks(id) ON DELETE SET NULL,
+        created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        UNIQUE (user_id, brand_key, topic_title_canon)
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topics_brand_history_userbrand ON article_topics_brand_history (user_id, brand_key)`);
+    try {
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topics_brand_history_title_trgm ON article_topics_brand_history USING GIN (topic_title_canon gin_trgm_ops)`);
+    } catch (e) {
+      console.warn('[ensureSchema] trigram GIN index skipped:', e.message);
+    }
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topics_brand_history_created ON article_topics_brand_history (created_at DESC)`);
+
     // ─── Migration 016: Article Topics — enhancements (plan B/C) ──────
     // Добавляем JSONB-колонки для structured trends, evaluator-отчёта и
     // снимка module-context. Создаём реестр трендов для дедупа и

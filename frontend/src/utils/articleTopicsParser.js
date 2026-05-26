@@ -825,20 +825,54 @@ export function formatAudienceProfileForInfoArticle(profile) {
 /**
  * Готовит CSV-строку из списка тем (для кнопки «📥 Экспорт в CSV»).
  * Заголовок + строки в RFC 4180 с экранированием двойных кавычек.
+ *
+ * Расширено до полного набора колонок: исходные 9 + расширенные интенты
+ * (intent_user_questions, intent_pains, intent_jobs_to_be_done,
+ * intent_decision_stage, intent_serp_features, expected_search_volume,
+ * lsi_seed, target_audience_segment_detail, content_angle, cta_suggestion)
+ * + флаги дедупа (duplicate_of_task, duplicate_of_title). Поля, которых
+ * нет в старых задачах, экспортируются пустой строкой.
  */
 export function topicsToCsv(topics) {
   const cols = [
     'title', 'h1_variant', 'primary_intent', 'intent_facet',
     'expected_format', 'target_audience_segment',
     'commercial_potential', 'difficulty', 'why_now',
+    // PR-3 — расширенные интенты
+    'intent_user_questions', 'intent_pains', 'intent_jobs_to_be_done',
+    'intent_decision_stage', 'intent_serp_features',
+    'expected_search_volume', 'lsi_seed',
+    'target_audience_segment_detail', 'content_angle', 'cta_suggestion',
+    // PR-2 — дедуп
+    'duplicate_of_task', 'duplicate_of_title',
   ];
   const esc = (v) => {
-    const s = String(v == null ? '' : v);
+    if (v == null) return '';
+    let s;
+    if (Array.isArray(v)) {
+      s = v
+        .map((x) => (x == null ? '' : (typeof x === 'string' ? x : (x.text || x.value || x.label || String(x)))))
+        .filter(Boolean)
+        .join(' | ');
+    } else if (typeof v === 'object') {
+      s = String(v.text || v.value || v.label || JSON.stringify(v));
+    } else {
+      s = String(v);
+    }
     return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [cols.join(',')];
   for (const t of (topics || [])) {
-    lines.push(cols.map((c) => esc(t && t[c])).join(','));
+    const row = cols.map((c) => {
+      if (c === 'duplicate_of_task') {
+        return esc(t && t.duplicate_of && (t.duplicate_of.task_short_id || t.duplicate_of.task_id));
+      }
+      if (c === 'duplicate_of_title') {
+        return esc(t && t.duplicate_of && t.duplicate_of.title);
+      }
+      return esc(t && t[c]);
+    });
+    lines.push(row.join(','));
   }
   return lines.join('\n');
 }

@@ -28,6 +28,10 @@ const {
   buildSiblingDeepDivesBlock,
 } = require('./articleTopicsTrends');
 const { extractTopicIdeasJsonBlock } = require('./topicIdeasParser');
+const { normalizeBrandKey } = require('./brandKey');
+const { detectDuplicates } = require('./topicDuplicateDetector');
+const { recordTopics, loadHistory } = require('./brandTopicHistory');
+const { getQualityFlags } = require('../qualityLayers/featureFlags');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
@@ -293,6 +297,41 @@ async function processArticleTopicTask(taskId) {
       }
     }
 
+    // Brand-aware дедуп: если у задачи есть brand_hint и парсенные topics,
+    // запускаем детектор перед UPDATE — duplicate_of улетает в БД вместе с
+    // topic_ideas_json, чтобы UI мог показать бейдж сразу после генерации.
+    let brandDedupStats = null;
+    const brandHintRaw = (task.module_context_used
+      && typeof task.module_context_used === 'object'
+      && task.module_context_used.brand_hint) || null;
+    const brandKey = normalizeBrandKey(brandHintRaw);
+    if (
+      task.mode === 'topic_ideas'
+      && topicIdeasJson
+      && Array.isArray(topicIdeasJson.topics)
+      && topicIdeasJson.topics.length
+      && brandKey
+    ) {
+      try {
+        const flags = (getQualityFlags() || {}).brandDedup || {};
+        const history = await loadHistory(db, {
+          userId: task.user_id,
+          brandKey,
+          lookbackDays: Number(flags.historyLookbackDays) || 365,
+          limit: Number(flags.historyLimit) || 500,
+        });
+        const { enriched, stats } = await detectDuplicates({
+          candidates: topicIdeasJson.topics,
+          history,
+          flags,
+        });
+        topicIdeasJson = { ...topicIdeasJson, topics: enriched };
+        brandDedupStats = stats;
+      } catch (e) {
+        console.warn(`[articleTopics] brand dedup failed for ${taskId}: ${e.message}`);
+      }
+    }
+
     // Снимок того, какие inputs реально подмешаны — для последующего
     // DSPy/MIPROv2 анализа качества (а пока — для отладки в admin-панели).
     // Сохраняем уже существующие topic_ideas_inputs (если они были записаны
@@ -307,6 +346,8 @@ async function processArticleTopicTask(taskId) {
       ru_cis_block:      trendsJson ? trendsJson.ru_cis_block_present : null,
       topic_ideas_returned: topicCountReturned,
       topic_ideas_warnings: topicIdeasWarnings,
+      brand_key:            brandKey || null,
+      brand_dedup:          brandDedupStats,
       generated_at:      new Date().toISOString(),
     };
 
@@ -337,6 +378,28 @@ async function processArticleTopicTask(taskId) {
         topicCountReturned,
       ],
     );
+
+    // После успешной записи topic_ideas_json — сохраняем canon-заголовки в
+    // brand history, чтобы следующий запуск под тот же brand_key мог
+    // увидеть их через detectDuplicates. Дубли по UNIQUE-индексу игнорируются.
+    if (
+      task.mode === 'topic_ideas'
+      && topicIdeasJson
+      && Array.isArray(topicIdeasJson.topics)
+      && topicIdeasJson.topics.length
+      && brandKey
+    ) {
+      try {
+        await recordTopics(db, {
+          userId: task.user_id,
+          brandKey,
+          taskId,
+          topics: topicIdeasJson.topics,
+        });
+      } catch (e) {
+        console.warn(`[articleTopics] brand history insert failed for ${taskId}: ${e.message}`);
+      }
+    }
     try {
       await recordTrainingExample({
         articleRef: `article_topics:${taskId}`,

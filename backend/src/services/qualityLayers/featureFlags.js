@@ -120,6 +120,18 @@ const QUALITY_FLAGS = deepFreeze({
 
   // ── C2. Унифицированный E-E-A-T таргет ───────────────────────────
   eeatTargetDefault: 7.5,          // 0..10
+
+  // ── D1. Brand-aware дедуп тем (article_topics_brand_history) ─────
+  // detector: exact → Jaccard → опционально DeepSeek. Новые темы
+  // никогда не отбрасываются, только помечаются duplicate_of. См.
+  // backend/src/services/articleTopics/topicDuplicateDetector.js
+  brandDedup: {
+    enabled: true,
+    useLlm: true,
+    historyLookbackDays: 365,
+    historyLimit: 500,
+    maxLlmCandidates: 20,
+  },
 });
 
 /**
@@ -149,6 +161,9 @@ const RANGES = [
   ['readability.maxBureaucrateseRatio',   0, 1],
   ['acfStructural.duplicatesMinLen',      30, 1000],
   ['eeatTargetDefault',                   0, 10],
+  ['brandDedup.historyLookbackDays',      1, 3650],
+  ['brandDedup.historyLimit',             10, 5000],
+  ['brandDedup.maxLlmCandidates',         0, 200],
 ];
 
 function _get(obj, path) {
