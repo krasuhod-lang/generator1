@@ -13,6 +13,8 @@ const {
   getAdminTaskDetail,
   getAdminTaskLogs,
   getModelComparison,
+  getUserAllTasks,
+  getCrossTaskDetail,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -42,12 +44,16 @@ router.post('/login', loginLimiter, adminLogin);
 router.get('/users',              apiLimiter, adminAuth, listUsers);
 router.get('/users/:userId',      apiLimiter, adminAuth, getUserDetail);
 router.get('/users/:userId/tasks', apiLimiter, adminAuth, getUserTasks);
+router.get('/users/:userId/all-tasks', apiLimiter, adminAuth, getUserAllTasks);
 router.get('/stats',              apiLimiter, adminAuth, getStats);
 
 // Per-task admin views (Point 8) — task_logs reused from /api/tasks/:id/logs.
 router.get('/tasks',              apiLimiter, adminAuth, listAllTasks);
 router.get('/tasks/:id',          apiLimiter, adminAuth, getAdminTaskDetail);
 router.get('/tasks/:id/logs',     apiLimiter, adminAuth, getAdminTaskLogs);
+
+// Cross-module task detail (UNION across 7 task tables).
+router.get('/cross-tasks/:source/:id', apiLimiter, adminAuth, getCrossTaskDetail);
 
 // Model quality comparison — агрегат quality_score по моделям (миграция 037).
 router.get('/model-comparison',   apiLimiter, adminAuth, getModelComparison);

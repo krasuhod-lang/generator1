@@ -82,13 +82,23 @@ export const useAdminStore = defineStore('admin', () => {
     return data.user;
   }
 
-  // ── Задачи пользователя ──────────────────────────────────────────────
+  // ── Задачи пользователя (legacy SEO only — оставляем для обратной совместимости) ─
   async function fetchUserTasks(userId, params = {}) {
     const query = new URLSearchParams();
     if (params.page)  query.set('page', params.page);
     if (params.limit) query.set('limit', params.limit);
 
     const { data } = await adminApi.get(`/admin/users/${userId}/tasks?${query.toString()}`);
+    return data;
+  }
+
+  // ── Задачи пользователя из ВСЕХ модулей (UNION по 7 task-таблицам) ────
+  async function fetchUserAllTasks(userId, params = {}) {
+    const query = new URLSearchParams();
+    if (params.page)  query.set('page', params.page);
+    if (params.limit) query.set('limit', params.limit);
+
+    const { data } = await adminApi.get(`/admin/users/${userId}/all-tasks?${query.toString()}`);
     return data;
   }
 
@@ -120,6 +130,13 @@ export const useAdminStore = defineStore('admin', () => {
     return data; // { tasks, page, perPage, total }
   }
 
+  // Cross-module detail (любой из 7 источников: seo|meta_tag|link_article|
+  // article_topic|info_article|relevance|forecaster)
+  async function fetchAdminCrossTask(source, taskId) {
+    const { data } = await adminApi.get(`/admin/cross-tasks/${source}/${taskId}`);
+    return data; // { task, source, sourceLabel }
+  }
+
   return {
     adminToken,
     adminUser,
@@ -135,9 +152,11 @@ export const useAdminStore = defineStore('admin', () => {
     fetchUsers,
     fetchUserDetail,
     fetchUserTasks,
+    fetchUserAllTasks,
     fetchStats,
     fetchAdminTask,
     fetchAdminTaskLogs,
     fetchAdminAllTasks,
+    fetchAdminCrossTask,
   };
 });
