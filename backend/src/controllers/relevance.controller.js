@@ -467,6 +467,25 @@ async function getHealth(_req, res, next) {
   }
 }
 
+// ─── GET /api/relevance/:id/artifact ──────────────────────────────
+// Sprint B: возвращает нормализованный relevance-артефакт (LSI / n-граммы /
+// H2-H3 наброски / mandatory entities / competitor_signals_digest) для
+// привязки к задачам infoArticle / linkArticle / metaTags. Используется
+// фронтом для предпросмотра «что уйдёт в генератор» и сторонними скриптами.
+async function getArtifact(req, res, next) {
+  try {
+    const { loadArtifact } = require('../services/relevance/relevanceArtifacts');
+    const art = await loadArtifact(db, {
+      reportId: req.params.id,
+      userId: req.user.id,
+    });
+    if (!art) return res.status(404).json({ error: 'relevance report not found or not done' });
+    return res.json({ artifact: art });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listReports,
   createReport,
@@ -478,4 +497,5 @@ module.exports = {
   exportJson,
   exportCsv,
   getHealth,
+  getArtifact,
 };

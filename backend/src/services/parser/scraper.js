@@ -6,6 +6,7 @@ const cheerio         = require('cheerio');
 const { Readability } = require('@mozilla/readability');
 const { JSDOM }       = require('jsdom');
 const TurndownService = require('turndown');
+const { extractHiddenLayers, summarizeHiddenLayers } = require('./hiddenLayers');
 
 // -----------------------------------------------------------------
 // User-Agent rotation
@@ -260,6 +261,35 @@ async function scrapeUrl(url, timeout = 30000) {
   // Попытка 1: Mozilla Readability (чистит рекламу, боковые панели)
   // -----------------------------------------------------------------
   const rawHtmlLen = (responseData || '').length;
+  // Sprint C: extract hidden layers ONCE на «сырой» HTML — до того, как
+  // Readability/Cheerio удалят <noscript>/<template>/<script type=ld+json>.
+  // Эти слои могут влиять на ранжирование (JSON-LD, hreflang, canonical,
+  // SSR-state Next/Nuxt). Используется и в Relevance, и в Aegis.
+  let hiddenLayers = null;
+  try {
+    const $hidden = cheerio.load(responseData);
+    hiddenLayers = extractHiddenLayers($hidden, { baseUrl: finalUrl });
+  } catch (e) {
+    console.warn(`[scraper] hidden-layers extraction failed for ${finalUrl}: ${e.message}`);
+  }
+  // Aegis cross-module hook: фиксируем стадию extract_hidden_layers.
+  try {
+    require('../aegis/moduleHooks').observeStage({
+      module: 'parser',
+      stage:  'extract_hidden_layers',
+      outcome: hiddenLayers ? 'ok' : 'warn',
+      payload: hiddenLayers ? {
+        json_ld:        Array.isArray(hiddenLayers.jsonLd) ? hiddenLayers.jsonLd.length : 0,
+        microdata:      Array.isArray(hiddenLayers.microdata) ? hiddenLayers.microdata.length : 0,
+        hreflang:       Array.isArray(hiddenLayers.hreflang) ? hiddenLayers.hreflang.length : 0,
+        noscript:       Array.isArray(hiddenLayers.noscript) ? hiddenLayers.noscript.length : 0,
+        template:       Array.isArray(hiddenLayers.template) ? hiddenLayers.template.length : 0,
+        hidden_blocks:  Array.isArray(hiddenLayers.hiddenBlocks) ? hiddenLayers.hiddenBlocks.length : 0,
+        next_data:      hiddenLayers.nextData ? 1 : 0,
+      } : null,
+    });
+  } catch (_) { /* graceful */ }
+
   try {
     const dom    = new JSDOM(responseData, { url: finalUrl });
     // Удаляем шум ДО Readability, чтобы он не уехал в article.content
@@ -291,6 +321,8 @@ async function scrapeUrl(url, timeout = 30000) {
         markdown: markdown.substring(0, SCRAPE_MARKDOWN_MAX_CHARS),
         rawHtmlBytes: rawHtmlLen,
         cleanedBytes: markdown.length,
+        hiddenLayers,
+        hiddenLayersSummary: hiddenLayers ? summarizeHiddenLayers(hiddenLayers) : '',
       };
     }
   } catch (_) {
@@ -327,6 +359,8 @@ async function scrapeUrl(url, timeout = 30000) {
     markdown: bodyText.substring(0, SCRAPE_MARKDOWN_MAX_CHARS),
     rawHtmlBytes: rawHtmlLen,
     cleanedBytes: bodyText.length,
+    hiddenLayers,
+    hiddenLayersSummary: hiddenLayers ? summarizeHiddenLayers(hiddenLayers) : '',
   };
 }
 
@@ -366,6 +400,8 @@ async function scrapeCompetitors(rawUrls, timeoutMs = 30000) {
         sslIssue:   false,
         rawHtmlBytes: result.value.rawHtmlBytes || 0,
         cleanedBytes: result.value.cleanedBytes || (result.value.markdown || '').length,
+        hiddenLayers: result.value.hiddenLayers || null,
+        hiddenLayersSummary: result.value.hiddenLayersSummary || '',
       };
     }
 
@@ -403,6 +439,10 @@ module.exports = {
   scrapeUrl,
   scrapeCompetitors,
   sanitizeUrl,
+  // Sprint C: переэкспорт extractors из hiddenLayers — чтобы другие
+  // модули могли применять их к уже скачанному HTML без re-fetch.
+  extractHiddenLayers,
+  summarizeHiddenLayers,
   // exported for unit-testing only
   _stripFooterArtifacts,
   _stripDomNoise,

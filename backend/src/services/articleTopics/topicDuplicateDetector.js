@@ -18,12 +18,18 @@
  * Без сетевых вызовов всё детерминировано (LLM-этап отключаем для тестов).
  */
 
-const { canonTitle } = require('./brandKey');
+const { canonTitle, canonTitleStem, stemWord } = require('./brandKey');
 
 function _tokens(s) {
   const c = canonTitle(s);
   if (!c) return [];
   return c.split(/\s+/).filter(Boolean);
+}
+
+function _stemTokens(s) {
+  const c = canonTitle(s);
+  if (!c) return [];
+  return c.split(/\s+/).map(stemWord).filter(Boolean);
 }
 
 function _jaccard(aTokens, bTokens) {
@@ -36,14 +42,26 @@ function _jaccard(aTokens, bTokens) {
   return union > 0 ? inter / union : 0;
 }
 
+/**
+ * Гибридный score = max(jaccard(tokens), jaccard(stemTokens)).
+ * Stem-форма ловит словоформы («прокладка/прокладки/прокладок» → одна основа).
+ */
+function _hybridSim(candTokens, candStems, histTokens, histStems) {
+  const j1 = _jaccard(candTokens, histTokens);
+  const j2 = _jaccard(candStems, histStems);
+  return Math.max(j1, j2);
+}
+
 function _bestMatch(candidateTitle, history) {
   const candTokens = _tokens(candidateTitle);
+  const candStems = _stemTokens(candidateTitle);
   if (!candTokens.length) return { best: null, score: 0 };
   let best = null;
   let bestScore = 0;
   for (const h of history) {
     const hTokens = _tokens(h.topic_title_canon);
-    const sim = _jaccard(candTokens, hTokens);
+    const hStems = h.__stemTokens || _stemTokens(h.topic_title_canon);
+    const sim = _hybridSim(candTokens, candStems, hTokens, hStems);
     if (sim > bestScore) {
       bestScore = sim;
       best = h;
@@ -125,10 +143,19 @@ async function detectDuplicates({
     return { enriched, stats };
   }
 
-  // EXACT
+  // Pre-compute stem-tokens for each history entry once (perf).
+  for (const h of hist) {
+    if (!h.__stemTokens) h.__stemTokens = _stemTokens(h.topic_title_canon);
+    if (!h.__stemCanon) h.__stemCanon = h.__stemTokens.join(' ');
+  }
+
+  // EXACT (by canon title)
   const histByTitle = new Map();
+  // EXACT-by-stem (по стем-канону) — ловит «прокладка / прокладки»
+  const histByStem = new Map();
   for (const h of hist) {
     if (!histByTitle.has(h.topic_title_canon)) histByTitle.set(h.topic_title_canon, h);
+    if (h.__stemCanon && !histByStem.has(h.__stemCanon)) histByStem.set(h.__stemCanon, h);
   }
 
   const llmCandidates = [];
@@ -137,8 +164,9 @@ async function detectDuplicates({
     const title = c.topic_title || c.title || '';
     const canonT = canonTitle(title);
     if (!canonT) continue;
+    const stemT = canonTitleStem(title);
 
-    // 1. EXACT
+    // 1. EXACT (canon)
     if (histByTitle.has(canonT)) {
       const h = histByTitle.get(canonT);
       c.duplicate_of = {
@@ -153,7 +181,22 @@ async function detectDuplicates({
       continue;
     }
 
-    // 2. FUZZY (Jaccard)
+    // 1b. EXACT (stem) — словоформы
+    if (stemT && histByStem.has(stemT)) {
+      const h = histByStem.get(stemT);
+      c.duplicate_of = {
+        task_id: h.topic_idea_task_id || null,
+        title: h.topic_title_canon,
+        h1: h.topic_h1_canon,
+        created_at: h.created_at,
+        similarity: 0.99,
+        source: 'exact_stem',
+      };
+      stats.exact += 1;
+      continue;
+    }
+
+    // 2. FUZZY (hybrid Jaccard: max of token+stem)
     const { best, score } = _bestMatch(canonT, hist);
     if (best && score >= 0.65) {
       c.duplicate_of = {
@@ -212,4 +255,26 @@ async function detectDuplicates({
   return { enriched, stats };
 }
 
-module.exports = { detectDuplicates, _jaccard, _tokens };
+/**
+ * filterDuplicates(enriched, { dropDuplicates }):
+ *   Если dropDuplicates=true, возвращает массив без duplicate_of !== null.
+ *   Возвращает { kept, dropped, droppedCount }. По умолчанию dropDuplicates
+ *   = false (BC: pipeline продолжает возвращать всё, только помечая).
+ */
+function filterDuplicates(enriched, { dropDuplicates = false } = {}) {
+  if (!Array.isArray(enriched) || !enriched.length) {
+    return { kept: [], dropped: [], droppedCount: 0 };
+  }
+  if (!dropDuplicates) {
+    return { kept: enriched, dropped: [], droppedCount: 0 };
+  }
+  const kept = [];
+  const dropped = [];
+  for (const c of enriched) {
+    if (c && c.duplicate_of) dropped.push(c);
+    else kept.push(c);
+  }
+  return { kept, dropped, droppedCount: dropped.length };
+}
+
+module.exports = { detectDuplicates, filterDuplicates, _jaccard, _tokens, _stemTokens };

@@ -29,8 +29,9 @@ const {
 } = require('./articleTopicsTrends');
 const { extractTopicIdeasJsonBlock } = require('./topicIdeasParser');
 const { normalizeBrandKey } = require('./brandKey');
-const { detectDuplicates } = require('./topicDuplicateDetector');
+const { detectDuplicates, filterDuplicates } = require('./topicDuplicateDetector');
 const { recordTopics, loadHistory } = require('./brandTopicHistory');
+const { resolveBrandKey, autoLinkSimilar } = require('./brandAliases');
 const { getQualityFlags } = require('../qualityLayers/featureFlags');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 const { finalizeByTask } = require('../aegis/backlogHooks');
@@ -304,7 +305,36 @@ async function processArticleTopicTask(taskId) {
     const brandHintRaw = (task.module_context_used
       && typeof task.module_context_used === 'object'
       && task.module_context_used.brand_hint) || null;
-    const brandKey = normalizeBrandKey(brandHintRaw);
+    const baseBrandKey = normalizeBrandKey(brandHintRaw);
+    // Резолвим алиас → canonical brand_key; если автоконсолидация
+    // (autoAlias) включена, эвристически склеиваем похожие brand_key.
+    const dedupFlagsTop = (getQualityFlags() || {}).brandDedup || {};
+    let brandKey = baseBrandKey;
+    let brandAliasInfo = null;
+    if (baseBrandKey && task.user_id) {
+      try {
+        const resolved = await resolveBrandKey(db, { userId: task.user_id, rawBrand: brandHintRaw });
+        if (resolved && resolved !== baseBrandKey) {
+          brandKey = resolved;
+          brandAliasInfo = { source: 'alias', base: baseBrandKey, canonical: resolved };
+        } else if (dedupFlagsTop.autoAlias !== false) {
+          const link = await autoLinkSimilar(db, {
+            userId: task.user_id,
+            candidateKey: baseBrandKey,
+            threshold: Number(dedupFlagsTop.autoAliasThreshold) || 0.85,
+          });
+          if (link.linked) {
+            brandKey = link.canonical;
+            brandAliasInfo = {
+              source: 'auto', base: baseBrandKey, canonical: link.canonical, similarity: link.similarity,
+            };
+          }
+        }
+      } catch (e) {
+        console.warn(`[articleTopics] brand alias resolve failed for ${taskId}: ${e.message}`);
+      }
+    }
+    let topicsDroppedAsDuplicates = 0;
     if (
       task.mode === 'topic_ideas'
       && topicIdeasJson
@@ -325,12 +355,36 @@ async function processArticleTopicTask(taskId) {
           history,
           flags,
         });
-        topicIdeasJson = { ...topicIdeasJson, topics: enriched };
-        brandDedupStats = stats;
+        // Опциональный жёсткий дроп дублей из выдачи (по умолчанию OFF).
+        const filtered = filterDuplicates(enriched, { dropDuplicates: !!flags.dropDuplicates });
+        topicIdeasJson = {
+          ...topicIdeasJson,
+          topics: filtered.kept,
+          ...(filtered.droppedCount ? { topics_dropped_as_duplicates: filtered.dropped } : {}),
+        };
+        topicsDroppedAsDuplicates = filtered.droppedCount;
+        brandDedupStats = { ...stats, dropped: filtered.droppedCount };
       } catch (e) {
         console.warn(`[articleTopics] brand dedup failed for ${taskId}: ${e.message}`);
       }
     }
+
+    // Aegis cross-module hook: фиксируем стадию dedup в общую телеметрию.
+    try {
+      require('../aegis/moduleHooks').observeStage({
+        module: 'articleTopics',
+        stage:  'brand_dedup',
+        taskId,
+        outcome: brandDedupStats && brandDedupStats.dropped > 0 ? 'warn' : 'ok',
+        payload: {
+          brand_key:   brandKey || null,
+          kept:        Array.isArray(topicIdeasJson && topicIdeasJson.topics) ? topicIdeasJson.topics.length : 0,
+          dropped:     topicsDroppedAsDuplicates,
+          siblings:    siblingsCount,
+        },
+        warnings: topicsDroppedAsDuplicates ? { duplicates_dropped: topicsDroppedAsDuplicates } : null,
+      });
+    } catch (_) { /* graceful */ }
 
     // Снимок того, какие inputs реально подмешаны — для последующего
     // DSPy/MIPROv2 анализа качества (а пока — для отладки в admin-панели).
@@ -347,7 +401,9 @@ async function processArticleTopicTask(taskId) {
       topic_ideas_returned: topicCountReturned,
       topic_ideas_warnings: topicIdeasWarnings,
       brand_key:            brandKey || null,
+      brand_alias_resolved: brandAliasInfo,
       brand_dedup:          brandDedupStats,
+      topics_dropped_as_duplicates: topicsDroppedAsDuplicates,
       generated_at:      new Date().toISOString(),
     };
 
