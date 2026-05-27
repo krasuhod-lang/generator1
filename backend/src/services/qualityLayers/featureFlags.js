@@ -131,6 +131,13 @@ const QUALITY_FLAGS = deepFreeze({
     historyLookbackDays: 365,
     historyLimit: 500,
     maxLlmCandidates: 20,
+    // 2026-05 (Sprint A): пометить дубликат → выкинуть его из выдачи.
+    // По умолчанию OFF для BC: pipeline просто помечает duplicate_of.
+    dropDuplicates: false,
+    // Авто-консолидация bram_key через char-bigram cosine ≥ threshold:
+    // если новый brand_hint похож на существующий → регистрируем alias.
+    autoAlias: true,
+    autoAliasThreshold: 0.85,
   },
 });
 
@@ -164,6 +171,7 @@ const RANGES = [
   ['brandDedup.historyLookbackDays',      1, 3650],
   ['brandDedup.historyLimit',             10, 5000],
   ['brandDedup.maxLlmCandidates',         0, 200],
+  ['brandDedup.autoAliasThreshold',       0, 1],
 ];
 
 function _get(obj, path) {

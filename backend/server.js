@@ -653,6 +653,24 @@ async function ensureSchema() {
     }
     await db.query(`CREATE INDEX IF NOT EXISTS idx_article_topics_brand_history_created ON article_topics_brand_history (created_at DESC)`);
 
+    // Migration 052: brand aliases + semantic fingerprint.
+    // Алиасы позволяют склеивать разные написания одного бренда
+    // («Бренд Х», «brand-x», «BrandX Pro») в один canonical brand_key.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS article_topics_brand_aliases (
+        id                    BIGSERIAL    PRIMARY KEY,
+        user_id               UUID         NOT NULL,
+        brand_key_canonical   TEXT         NOT NULL,
+        brand_alias_key       TEXT         NOT NULL,
+        source                TEXT         NOT NULL DEFAULT 'manual',
+        confidence            REAL,
+        created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        UNIQUE (user_id, brand_alias_key)
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_brand_aliases_user_canonical ON article_topics_brand_aliases (user_id, brand_key_canonical)`);
+    await db.query(`ALTER TABLE article_topics_brand_history ADD COLUMN IF NOT EXISTS semantic_fingerprint JSONB`);
+
     // ─── Migration 016: Article Topics — enhancements (plan B/C) ──────
     // Добавляем JSONB-колонки для structured trends, evaluator-отчёта и
     // снимка module-context. Создаём реестр трендов для дедупа и
