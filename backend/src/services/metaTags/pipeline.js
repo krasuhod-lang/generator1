@@ -288,11 +288,37 @@ async function runMetaTagTaskInner(taskId) {
     // analyzeAudienceAndNiche на уровне всей задачи (не на каждый ключ —
     // экономия токенов, цена $0.02-0.05 на одну meta-tag-задачу).
     audienceNicheDigest: '',
+    // Sprint B: relevance-артефакт (если у задачи указан
+    // source_relevance_report_id). Заполняется ниже, до основного цикла —
+    // один раз на задачу, тот же артефакт используется для всех ключей.
+    relevanceBrief: '',
     // LLM-провайдер: 'gemini' (default) | 'grok'. Прокидывается в
     // generateDrMaxMeta → callGemini/callGrok через args.inputs.
     llm_provider: (task.llm_provider || 'gemini').toString().toLowerCase() === 'grok' ? 'grok' : 'gemini',
     gemini_model: task.gemini_model || '',
   };
+
+  // Sprint B: подключаем relevance-артефакт (если есть).
+  if (task.source_relevance_report_id) {
+    try {
+      const { loadArtifact, renderForPromptBrief } = require('../relevance/relevanceArtifacts');
+      const art = await loadArtifact(db, {
+        reportId: task.source_relevance_report_id,
+        userId: task.user_id,
+      });
+      if (art) {
+        inputs.relevanceBrief = renderForPromptBrief(art, {
+          // Для меты делаем короче, чтобы не утопить per-keyword промпт.
+          lsiLimit: 12, ngramsLimit: 8, h2Limit: 6, h3Limit: 6,
+        });
+        await appendLog(taskId,
+          `📚 Relevance-артефакт подключён: LSI=${art.important_lsi.length}, ngrams=${art.top_ngrams.length}`,
+          'info');
+      }
+    } catch (e) {
+      await appendLog(taskId, `⚠ Relevance-артефакт не загружен (${e.message})`, 'warn');
+    }
+  }
 
   // Локальные агрегаты — чтобы не дёргать SUM из JSONB на каждом ключе.
   let totalTokensIn  = 0;

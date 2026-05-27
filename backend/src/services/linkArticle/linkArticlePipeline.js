@@ -381,6 +381,20 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
         (whitespace && whitespace.article_hierarchy_hints) || {}, lakbReady, 2500)}`,
       `stage2_structure: ${pointerOrJson('§6 Структура статьи', structure, lakbReady, 8000)}`,
     ];
+    // Sprint B: relevance-артефакт (LSI/ngrams/H2-H3 наброски) — добавляем
+    // как отдельный блок, чтобы Gemini обязательно использовал LSI-леммы
+    // и не пропустил темы из общих заголовков топа.
+    if (task.__relevanceArtifact) {
+      try {
+        const { renderForPromptBrief } = require('../relevance/relevanceArtifacts');
+        const brief = renderForPromptBrief(task.__relevanceArtifact);
+        if (brief) {
+          base.push('');
+          base.push(brief);
+          base.push('Обязательно: использовать перечисленные LSI-леммы и n-граммы естественным образом; раскрыть темы из H2/H3-набросков (можно адаптировать формулировку).');
+        }
+      } catch (_) { /* graceful */ }
+    }
     if (eeatIssues && eeatIssues.length) {
       base.push('');
       base.push('[PRIOR_EEAT_ISSUES — корректировочный проход. Закрой каждую issue в новой версии:]');
@@ -627,6 +641,30 @@ async function processLinkArticleTask(taskId) {
     if (!task) {
       console.error(`[linkArticle] task ${taskId} not found`);
       return;
+    }
+
+    // Sprint B: подключаем relevance-артефакт (LSI/ngrams/H2/H3-черновики),
+    // если у задачи указан source_relevance_report_id. Загружается через
+    // общий extractor, прокидывается в task.__relevanceArtifact и далее
+    // в user-prompt runWriter через renderForPromptBrief.
+    if (task.source_relevance_report_id) {
+      try {
+        const { loadArtifact } = require('../relevance/relevanceArtifacts');
+        const art = await loadArtifact(db, {
+          reportId: task.source_relevance_report_id,
+          userId: task.user_id,
+        });
+        if (art) {
+          task.__relevanceArtifact = art;
+          await appendLog(
+            taskId,
+            `📚 Relevance-артефакт: LSI=${art.important_lsi.length}, ngrams=${art.top_ngrams.length}, h2=${art.h2_drafts.length}, h3=${art.h3_drafts.length}`,
+            'info',
+          );
+        }
+      } catch (e) {
+        await appendLog(taskId, `⚠ relevance-артефакт не загружен (${e.message})`, 'warn');
+      }
     }
 
     await db.query(

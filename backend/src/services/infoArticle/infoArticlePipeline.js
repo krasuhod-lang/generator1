@@ -1075,65 +1075,46 @@ async function processInfoArticleTask(taskId) {
     // не рендерится и pipeline идёт «как раньше».
     let relevanceSignals = null;
     let relevanceContext = null;  // 2026-05: расширенный контекст (LSI/ngrams/headings/schema/VoC) для §9b IAKB
+    let relevanceArtifact = null; // 2026-05/Sprint B: единый нормализованный артефакт relevance
     if (task.source_relevance_report_id) {
       try {
-        const { rows: rRows } = await db.query(
-          `SELECT report, our_report
-             FROM relevance_reports
-            WHERE id = $1 AND user_id = $2 AND status = 'done'`,
-          [task.source_relevance_report_id, task.user_id],
-        );
-        if (rRows.length && rRows[0].report && rRows[0].report.competitor_signals) {
-          relevanceSignals = rRows[0].report.competitor_signals;
+        const { loadArtifact } = require('../relevance/relevanceArtifacts');
+        relevanceArtifact = await loadArtifact(db, {
+          reportId: task.source_relevance_report_id,
+          userId: task.user_id,
+        });
+        if (relevanceArtifact) {
+          relevanceSignals = relevanceArtifact.competitor_signals || null;
+          relevanceContext = {
+            important_lsi:  relevanceArtifact.important_lsi,
+            additional_lsi: relevanceArtifact.additional_lsi,
+            top_ngrams:     relevanceArtifact.top_ngrams,
+            shared_headings: relevanceArtifact.shared_headings,
+            mandatory_entities: relevanceArtifact.mandatory_entities,
+            schema_recommendation_markdown: relevanceArtifact.schema_recommendation_markdown,
+            voice_of_customer: relevanceArtifact.voice_of_customer,
+            our_url: relevanceArtifact.our_url,
+          };
+          if (relevanceSignals) {
+            await appendLog(
+              taskId,
+              `🎯 Подключён competitor_signals из relevance_report (${task.source_relevance_report_id.slice(0, 8)}…) — уйдёт в IAKB §9`,
+              'info',
+            );
+          } else {
+            await appendLog(taskId, `⚠ relevance_report без competitor_signals — пропускаем`, 'warn');
+          }
           await appendLog(
             taskId,
-            `🎯 Подключён competitor_signals из relevance_report (${task.source_relevance_report_id.slice(0, 8)}…) — уйдёт в IAKB §9`,
+            `📚 §9b: важных LSI=${relevanceArtifact.important_lsi.length}, доп=${relevanceArtifact.additional_lsi.length}, ngrams=${relevanceArtifact.top_ngrams.length}, headings=${relevanceArtifact.shared_headings.length}, h2=${relevanceArtifact.h2_drafts.length}, h3=${relevanceArtifact.h3_drafts.length}` +
+            (relevanceArtifact.schema_recommendation_markdown ? ', schema-summary=да' : ''),
             'info',
           );
-        } else if (rRows.length) {
-          await appendLog(taskId, `⚠ relevance_report без competitor_signals — пропускаем`, 'warn');
+          // Прокидываем артефакт в task, чтобы стадии (structure/LSI/links)
+          // могли использовать h2_drafts/h3_drafts и top_ngrams напрямую.
+          task.__relevanceArtifact = relevanceArtifact;
         } else {
           await appendLog(taskId, `⚠ relevance_report не найден или не done — продолжаем без него`, 'warn');
-        }
-        // Расширенный контекст из всего отчёта (для §9b IAKB). Извлекаем
-        // максимум полезных полей. Все блоки graceful: если поле отсутствует
-        // или пустое — оно просто не рендерится в §9b.
-        if (rRows.length && rRows[0].report) {
-          const rep   = rRows[0].report || {};
-          const our   = rRows[0].our_report || {};
-          const voc   = rRows[0].report?.llm_enrichment || rRows[0].llm_enrichment || null;
-          const vocab = Array.isArray(rep.vocabulary) ? rep.vocabulary : [];
-          const important = vocab.filter((v) => v && v.status === 'important')
-            .sort((a, b) => (b.df_share_pct || 0) - (a.df_share_pct || 0));
-          const additional = vocab.filter((v) => v && v.status === 'additional')
-            .sort((a, b) => (b.df_share_pct || 0) - (a.df_share_pct || 0));
-          const ngramsArr = Array.isArray(rep.ngrams) ? rep.ngrams : [];
-          const headsArr  = Array.isArray(rep.headings_intersection) ? rep.headings_intersection : [];
-          const csig      = rep.competitor_signals || {};
-          const topAgg    = csig.top_aggregate || {};
-          relevanceContext = {
-            important_lsi:  important.slice(0, 50),
-            additional_lsi: additional.slice(0, 30),
-            top_ngrams:     ngramsArr.slice(0, 40),
-            shared_headings: headsArr.slice(0, 40),
-            mandatory_entities: (topAgg.entity_coverage && topAgg.entity_coverage.mandatory_entities) || [],
-            // Готовый markdown «что внедрить» — собран на python-стороне
-            schema_recommendation_markdown:
-              (topAgg.schema_profile && topAgg.schema_profile.summary
-                && topAgg.schema_profile.summary.recommendation_markdown) || '',
-            voice_of_customer: voc ? {
-              target_audience: voc.input_target_audience || voc.target_audience || '',
-              niche_features:  voc.input_niche_features  || voc.niche_features  || '',
-              brand_facts:     voc.input_brand_facts     || voc.brand_facts     || '',
-            } : null,
-            our_url: (our && our.url) || rRows[0].our_url || '',
-          };
-          await appendLog(
-            taskId,
-            `📚 §9b: важных LSI=${important.length}, доп=${additional.length}, ngrams=${ngramsArr.length}, headings=${headsArr.length}` +
-            (relevanceContext.schema_recommendation_markdown ? ', schema-summary=да' : ''),
-            'info',
-          );
         }
       } catch (relErr) {
         await appendLog(taskId, `⚠ relevance_report: ошибка загрузки (${relErr.message}) — продолжаем без него`, 'warn');

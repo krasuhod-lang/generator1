@@ -185,6 +185,19 @@ function buildUserPrompt({ keyword, semantics, serpData, inputs, year }) {
 ${inputs.audienceNicheDigest.trim()}`
     : '';
 
+  // Sprint B: relevance-артефакт (LSI/ngrams/H2-H3 наброски из общего отчёта
+  // релевантности). Если задаче привязан source_relevance_report_id,
+  // pipeline уже загрузил brief в inputs.relevanceBrief. Прокидываем сюда
+  // дополнительным блоком — Gemini получает усиленный контекст по нише,
+  // помимо TF-IDF по конкретному ключу.
+  const relevanceBlock = (inputs.relevanceBrief || '').trim()
+    ? `
+
+[RELEVANCE-АРТЕФАКТ — общий контекст ниши из отчёта релевантности]
+${inputs.relevanceBrief.trim()}`
+    : '';
+
+
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Бренд (brand_name): ${inputs.brand || ''}
 - Телефон (phone_number): ${inputs.phone || ''}
@@ -195,7 +208,7 @@ ${inputs.audienceNicheDigest.trim()}`
 - Краткий контекст / УТП страницы (page_context): ${pageContext}
 
 Примеры Title конкурентов из ТОП-выдачи (для анализа интента и формул):
-${competitorsTitles}${audienceBlock}
+${competitorsTitles}${audienceBlock}${relevanceBlock}
 
 Создай мета-теги строго по правилам DrMax из system-prompt (формулы Title, длины,
 бренд / телефон / CTA в Description, H1 ≤70 символов и не копия Title).`;

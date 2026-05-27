@@ -440,6 +440,15 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS gemini_model     TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS source           TEXT`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
+    // Migration 053: source_relevance_report_id для meta_tag_tasks
+    // (Sprint B). При наличии — pipeline загрузит relevance-артефакт и
+    // вольёт LSI/n-граммы в per-keyword промпт generateDrMaxMeta.
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS source_relevance_report_id UUID`);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_relevance_src
+        ON meta_tag_tasks (source_relevance_report_id)
+        WHERE source_relevance_report_id IS NOT NULL
+    `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_user_created ON meta_tag_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_meta_tag_tasks_status ON meta_tag_tasks (status)`);
 
@@ -567,6 +576,16 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS eeat_audit          JSONB`);
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS eeat_score          NUMERIC(4, 2)`);
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS gemini_cache_name   TEXT`);
+    // Migration 053: source_relevance_report_id (Sprint B — Relevance →
+    // generators). Привязывает задачу ссылочной статьи к отчёту
+    // релевантности; pipeline подгружает relevance-артефакт и инжектит
+    // LSI/n-граммы/H2-H3 наброски в writer.
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS source_relevance_report_id UUID`);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_article_tasks_relevance_src
+        ON link_article_tasks (source_relevance_report_id)
+        WHERE source_relevance_report_id IS NOT NULL
+    `);
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_link_article_eeat_score
         ON link_article_tasks (eeat_score)

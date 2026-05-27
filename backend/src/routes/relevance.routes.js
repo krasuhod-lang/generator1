@@ -8,7 +8,7 @@ const {
   listReports, createReport,
   getReport, deleteReport,
   buildCocoons, buildCocoonPlan, deleteRaw,
-  exportJson, exportCsv, getHealth,
+  exportJson, exportCsv, getHealth, getArtifact,
 } = require('../controllers/relevance.controller');
 
 const router = express.Router();
@@ -51,5 +51,6 @@ router.post('/:id/cocoon-plan',      auth, cocoonsLimiter, buildCocoonPlan);
 router.delete('/:id/raw',            auth, deleteRaw);
 router.get('/:id/export.json',       auth, exportJson);
 router.get('/:id/export.csv',        auth, exportCsv);
+router.get('/:id/artifact',          auth, getArtifact);
 
 module.exports = router;
