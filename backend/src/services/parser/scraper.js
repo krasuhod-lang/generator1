@@ -6,6 +6,7 @@ const cheerio         = require('cheerio');
 const { Readability } = require('@mozilla/readability');
 const { JSDOM }       = require('jsdom');
 const TurndownService = require('turndown');
+const { extractHiddenLayers, summarizeHiddenLayers } = require('./hiddenLayers');
 
 // -----------------------------------------------------------------
 // User-Agent rotation
@@ -260,6 +261,18 @@ async function scrapeUrl(url, timeout = 30000) {
   // Попытка 1: Mozilla Readability (чистит рекламу, боковые панели)
   // -----------------------------------------------------------------
   const rawHtmlLen = (responseData || '').length;
+  // Sprint C: extract hidden layers ONCE на «сырой» HTML — до того, как
+  // Readability/Cheerio удалят <noscript>/<template>/<script type=ld+json>.
+  // Эти слои могут влиять на ранжирование (JSON-LD, hreflang, canonical,
+  // SSR-state Next/Nuxt). Используется и в Relevance, и в Aegis.
+  let hiddenLayers = null;
+  try {
+    const $hidden = cheerio.load(responseData);
+    hiddenLayers = extractHiddenLayers($hidden, { baseUrl: finalUrl });
+  } catch (e) {
+    console.warn(`[scraper] hidden-layers extraction failed for ${finalUrl}: ${e.message}`);
+  }
+
   try {
     const dom    = new JSDOM(responseData, { url: finalUrl });
     // Удаляем шум ДО Readability, чтобы он не уехал в article.content
@@ -291,6 +304,8 @@ async function scrapeUrl(url, timeout = 30000) {
         markdown: markdown.substring(0, SCRAPE_MARKDOWN_MAX_CHARS),
         rawHtmlBytes: rawHtmlLen,
         cleanedBytes: markdown.length,
+        hiddenLayers,
+        hiddenLayersSummary: hiddenLayers ? summarizeHiddenLayers(hiddenLayers) : '',
       };
     }
   } catch (_) {
@@ -327,6 +342,8 @@ async function scrapeUrl(url, timeout = 30000) {
     markdown: bodyText.substring(0, SCRAPE_MARKDOWN_MAX_CHARS),
     rawHtmlBytes: rawHtmlLen,
     cleanedBytes: bodyText.length,
+    hiddenLayers,
+    hiddenLayersSummary: hiddenLayers ? summarizeHiddenLayers(hiddenLayers) : '',
   };
 }
 
@@ -366,6 +383,8 @@ async function scrapeCompetitors(rawUrls, timeoutMs = 30000) {
         sslIssue:   false,
         rawHtmlBytes: result.value.rawHtmlBytes || 0,
         cleanedBytes: result.value.cleanedBytes || (result.value.markdown || '').length,
+        hiddenLayers: result.value.hiddenLayers || null,
+        hiddenLayersSummary: result.value.hiddenLayersSummary || '',
       };
     }
 
@@ -403,6 +422,10 @@ module.exports = {
   scrapeUrl,
   scrapeCompetitors,
   sanitizeUrl,
+  // Sprint C: переэкспорт extractors из hiddenLayers — чтобы другие
+  // модули могли применять их к уже скачанному HTML без re-fetch.
+  extractHiddenLayers,
+  summarizeHiddenLayers,
   // exported for unit-testing only
   _stripFooterArtifacts,
   _stripDomNoise,
