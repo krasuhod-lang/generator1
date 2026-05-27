@@ -17,7 +17,13 @@
  */
 
 const path = require('path');
-const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..');
+const { findRepoRoot, findBrainStateDir } = require('./_paths');
+// REPO_ROOT теперь резолвится динамически (см. _paths.js): в dev — корень
+// репозитория, в Docker — `/app` (backend), чтобы пути brain_state/prompts
+// были корректны в обеих раскладках. Раньше `path.resolve(__dirname, ...)`
+// в контейнере давал `/` и AEGIS видел пустые каталоги.
+const REPO_ROOT = findRepoRoot();
+const BRAIN_STATE_DIR = findBrainStateDir();
 
 function deepFreeze(obj) {
   if (obj === null || typeof obj !== 'object' || Object.isFrozen(obj)) return obj;
@@ -248,7 +254,7 @@ const AEGIS_FLAGS = deepFreeze({
 
   // ── Состояние мозга (compiled DSPy weights) ──────────────────────
   brainState: {
-    rootDir:   path.join(REPO_ROOT, 'brain_state'),
+    rootDir:   BRAIN_STATE_DIR,
     writerYaml: 'compiled_writer.yaml',
     criticYaml: 'compiled_critic.yaml',
   },

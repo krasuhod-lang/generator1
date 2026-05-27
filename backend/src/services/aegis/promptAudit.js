@@ -13,9 +13,16 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { extractVars } = require('../../prompts/promptRegistry');
+const { findPromptsDir, findRepoRoot } = require('./_paths');
 
-const REPO_ROOT = path.resolve(__dirname, '../../../..');
-const PROMPTS_ROOT = path.join(REPO_ROOT, 'backend/src/prompts');
+// REPO_ROOT/PROMPTS_ROOT резолвятся динамически, чтобы корректно работать и в
+// dev-раскладке (когда `backend/` — подкаталог репо), и в Docker-контейнере
+// (где Dockerfile копирует backend в `/app`, без префикса `backend/`).
+// Раньше использовался `path.resolve(__dirname, '../../../..')`, что в
+// контейнере давало `/`, и `PROMPTS_ROOT` указывал на несуществующий
+// `/backend/src/prompts` → scan возвращал [] → 0 промтов в дашборде.
+const REPO_ROOT = findRepoRoot();
+const PROMPTS_ROOT = findPromptsDir() || path.join(REPO_ROOT, 'backend/src/prompts');
 
 // A2/B1: in-memory кэш сканирования промтов.
 //   - mtimeSig: подпись по (rel_path|mtimeMs) всех файлов — инвалидируется только при реальном изменении
@@ -185,9 +192,14 @@ async function persistCurrentPrompts(db, opts = {}) {
     _PERSIST_DIAG.last_run_at = new Date().toISOString();
     _PERSIST_DIAG.last_ok = false;
     _PERSIST_DIAG.last_total = 0;
-    _PERSIST_DIAG.last_error = { reason: 'scan_empty', message: 'no prompt sources found under backend/src/prompts' };
-    console.warn('[aegis/promptAudit] scan_empty: no prompt sources discovered');
-    return { ok: false, total: 0, reason: 'scan_empty' };
+    const dirExists = (() => {
+      try { return fs.statSync(PROMPTS_ROOT).isDirectory(); } catch (_) { return false; }
+    })();
+    _PERSIST_DIAG.last_error = dirExists
+      ? { reason: 'scan_empty', message: `no prompt sources found under ${PROMPTS_ROOT}` }
+      : { reason: 'prompts_dir_missing', message: `prompts directory not found: ${PROMPTS_ROOT}` };
+    console.warn(`[aegis/promptAudit] ${_PERSIST_DIAG.last_error.reason}: ${_PERSIST_DIAG.last_error.message}`);
+    return { ok: false, total: 0, reason: _PERSIST_DIAG.last_error.reason };
   }
   // A2: skip полную запись, если файлы не менялись с прошлого persist и TTL свеж.
   // force=true позволяет ручным вызовам (тесты, миграция) обойти кэш.
