@@ -327,7 +327,7 @@ async function getAdminTaskDetail(req, res, next) {
               tm.deepseek_tokens_in, tm.deepseek_tokens_out, tm.deepseek_cost_usd,
               tm.gemini_tokens_in,   tm.gemini_tokens_out,   tm.gemini_cost_usd,
               tm.grok_tokens_in,     tm.grok_tokens_out,     tm.grok_cost_usd,
-              tm.lsi_coverage, tm.eeat_score, tm.naturalness_score
+              tm.lsi_coverage, tm.eeat_score
          FROM tasks t
          JOIN users u ON u.id = t.user_id
          LEFT JOIN task_metrics tm ON tm.task_id = t.id
@@ -497,4 +497,189 @@ async function getModelComparison(req, res, next) {
   }
 }
 
-module.exports = { adminLogin, listUsers, getUserDetail, getUserTasks, getStats, listAllTasks, getAdminTaskDetail, getAdminTaskLogs, getModelComparison };
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-module admin views: per-user UNION list across all 7 task tables
+// + detail loader by (source, id). Список источников и их особенности —
+// единая «карта» TASK_SOURCES (используется и для UNION, и для detail).
+// Никаких новых ENV-переменных: всё деклараций в коде (см. fact «env configuration»).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TASK_SOURCES = Object.freeze({
+  seo: Object.freeze({
+    table: 'tasks',
+    label: 'SEO-текст',
+    titleSql: `COALESCE(NULLIF(t.title, ''), t.input_target_service, '')`,
+    costSql: `(SELECT total_cost_usd FROM task_metrics WHERE task_id = t.id)`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  meta_tag: Object.freeze({
+    table: 'meta_tag_tasks',
+    label: 'Мета-теги',
+    titleSql: `COALESCE(NULLIF(t.name, ''), '')`,
+    costSql: `t.total_cost_usd`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  link_article: Object.freeze({
+    table: 'link_article_tasks',
+    label: 'Ссылочная статья',
+    titleSql: `COALESCE(NULLIF(t.topic, ''), '')`,
+    costSql: `t.cost_usd`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  article_topic: Object.freeze({
+    table: 'article_topic_tasks',
+    label: 'Темы статей',
+    titleSql: `COALESCE(NULLIF(t.trend_name, ''), NULLIF(t.niche, ''), '')`,
+    costSql: `t.cost_usd`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  info_article: Object.freeze({
+    table: 'info_article_tasks',
+    label: 'Инфо-статья',
+    titleSql: `COALESCE(NULLIF(t.topic, ''), '')`,
+    costSql: `t.cost_usd`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  relevance: Object.freeze({
+    table: 'relevance_reports',
+    label: 'Релевантность',
+    titleSql: `COALESCE(NULLIF(t.query, ''), '')`,
+    costSql: `0::numeric`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  forecaster: Object.freeze({
+    table: 'forecaster_tasks',
+    label: 'Прогнозатор',
+    titleSql: `COALESCE(NULLIF(t.name, ''), NULLIF(t.source_filename, ''), '')`,
+    costSql: `t.cost_usd`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+});
+
+/**
+ * Собирает один SELECT для UNION ALL по конкретному источнику.
+ * Возвращает нормализованные колонки: source, id, title, status, created_at,
+ * completed_at, started_at, error_message, cost_usd.
+ */
+function _sourceSelect(sourceKey, src) {
+  const completed = src.hasCompletedAt ? 't.completed_at' : 'NULL::timestamptz';
+  const started   = src.hasStartedAt   ? 't.started_at'   : 'NULL::timestamptz';
+  return `
+    SELECT
+      '${sourceKey}'::text                AS source,
+      t.id::uuid                          AS id,
+      ${src.titleSql}                     AS title,
+      t.status::text                      AS status,
+      t.created_at                        AS created_at,
+      ${completed}                        AS completed_at,
+      ${started}                          AS started_at,
+      t.error_message                     AS error_message,
+      COALESCE(${src.costSql}, 0)::numeric(12,6) AS cost_usd
+    FROM ${src.table} t
+    WHERE t.user_id = $1
+  `;
+}
+
+/**
+ * GET /api/admin/users/:userId/all-tasks?page=&limit=
+ * Список задач пользователя со ВСЕХ модулей — UNION ALL по 7 таблицам.
+ * Сортировка по created_at DESC. Пагинация серверная.
+ */
+async function getUserAllTasks(req, res, next) {
+  try {
+    const { userId } = req.params;
+    const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
+    const offset = (page - 1) * limit;
+
+    const userCheck = await db.query(`SELECT id FROM users WHERE id = $1`, [userId]);
+    if (!userCheck.rows.length) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    const unionSql = Object.entries(TASK_SOURCES)
+      .map(([key, src]) => _sourceSelect(key, src))
+      .join(' UNION ALL ');
+
+    const { rows } = await db.query(
+      `WITH all_tasks AS ( ${unionSql} )
+       SELECT * FROM all_tasks
+       ORDER BY created_at DESC NULLS LAST
+       LIMIT $2 OFFSET $3`,
+      [userId, limit, offset],
+    );
+
+    const { rows: cRows } = await db.query(
+      `WITH all_tasks AS ( ${unionSql} )
+       SELECT COUNT(*)::int AS total FROM all_tasks`,
+      [userId],
+    );
+
+    return res.json({
+      tasks: rows,
+      total: cRows[0]?.total || 0,
+      page,
+      limit,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/admin/cross-tasks/:source/:id
+ * Возвращает полную строку таблицы выбранного источника (без проверки user_id —
+ * admin видит всё). Источник валидируется по белому списку TASK_SOURCES,
+ * id — обязательный UUID (валидация через regex).
+ */
+async function getCrossTaskDetail(req, res, next) {
+  try {
+    const { source, id } = req.params;
+    const src = TASK_SOURCES[source];
+    if (!src) {
+      return res.status(400).json({ error: 'Неизвестный модуль задачи' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      return res.status(400).json({ error: 'Некорректный id' });
+    }
+
+    // Имя таблицы — из whitelist (TASK_SOURCES), безопасно для интерполяции.
+    const { rows } = await db.query(
+      `SELECT t.*, u.email AS user_email, u.name AS user_name
+         FROM ${src.table} t
+         JOIN users u ON u.id = t.user_id
+        WHERE t.id = $1`,
+      [id],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Задача не найдена' });
+
+    return res.json({
+      task: rows[0],
+      source,
+      sourceLabel: src.label,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  adminLogin,
+  listUsers,
+  getUserDetail,
+  getUserTasks,
+  getStats,
+  listAllTasks,
+  getAdminTaskDetail,
+  getAdminTaskLogs,
+  getModelComparison,
+  getUserAllTasks,
+  getCrossTaskDetail,
+};

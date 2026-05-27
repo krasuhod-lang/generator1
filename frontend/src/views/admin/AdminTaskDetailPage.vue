@@ -19,8 +19,12 @@ const route   = useRoute();
 const router  = useRouter();
 const admin   = useAdminStore();
 const taskId  = route.params.id;
+// ?source=seo|meta_tag|link_article|article_topic|info_article|relevance|forecaster
+// Если параметр отсутствует — задача считается legacy SEO и грузится через /tasks/:id.
+const source  = (route.query.source || 'seo').toString();
 
 const task    = ref(null);
+const sourceLabel = ref('');
 const loading = ref(true);
 const error   = ref(null);
 
@@ -61,19 +65,33 @@ function levelClass(level) {
   }
 }
 
-// Безопасный рендер HTML — final_html уже прошёл санитизацию на стороне
-// бэкенда в Stage 7. Дополнительный sanitize здесь не делаем, чтобы не
-// сломать визуальное совпадение с тем, что отдаётся пользователю.
+// Финальный HTML — собираем из подходящих полей в зависимости от модуля.
+// SEO → final_html / full_html; link_article/info_article → article_html;
+// article_topic → result_markdown (рендерим как `<pre>` в шаблоне);
+// остальные модули HTML не имеют.
 const finalHtml = computed(() => {
-  return task.value?.final_html_edited || task.value?.final_html || '';
+  const t = task.value;
+  if (!t) return '';
+  return (
+    t.final_html_edited ||
+    t.final_html ||
+    t.full_html ||
+    t.article_html ||
+    ''
+  );
 });
+
+const resultMarkdown = computed(() => {
+  return task.value?.result_markdown || '';
+});
+
+const isSeoSource = computed(() => source === 'seo');
 
 const metricsJson = computed(() => {
   if (!task.value) return '';
   const m = {
     lsi_coverage:        task.value.lsi_coverage,
     eeat_score:          task.value.eeat_score,
-    naturalness_score:   task.value.naturalness_score,
     total_tokens:        task.value.total_tokens,
     total_cost_usd:      task.value.total_cost_usd,
     deepseek_tokens_in:  task.value.deepseek_tokens_in,
@@ -103,10 +121,35 @@ const strategyJson = computed(() => {
   catch (_) { return String(s); }
 });
 
+// Дамп полной строки таблицы (полезно для не-SEO модулей, где результат
+// сложно унифицировать одним viewer-ом). Скрывает заведомо тяжёлые поля.
+const HEAVY_FIELDS = new Set([
+  'full_html', 'final_html', 'final_html_edited', 'article_html', 'article_plain',
+  'result_markdown', 'image_prompts', 'input_tz_parsed_json', 'input_brand_facts',
+  'input_raw_lsi', 'input_ngrams', 'input_tfidf_json',
+]);
+const fullRowJson = computed(() => {
+  if (!task.value) return '';
+  const out = {};
+  for (const [k, v] of Object.entries(task.value)) {
+    if (HEAVY_FIELDS.has(k)) continue;
+    out[k] = v;
+  }
+  try { return JSON.stringify(out, null, 2); }
+  catch (_) { return ''; }
+});
+
 async function loadTask() {
   loading.value = true;
   try {
-    task.value = await admin.fetchAdminTask(taskId);
+    if (isSeoSource.value) {
+      task.value = await admin.fetchAdminTask(taskId);
+      sourceLabel.value = 'SEO-текст';
+    } else {
+      const data = await admin.fetchAdminCrossTask(source, taskId);
+      task.value = data.task;
+      sourceLabel.value = data.sourceLabel || source;
+    }
   } catch (e) {
     error.value = e.response?.data?.error || e.message || 'Ошибка загрузки задачи';
   } finally {
@@ -116,6 +159,8 @@ async function loadTask() {
 
 async function loadLogsIncremental() {
   if (logsLoading.value) return;
+  // task_logs существуют только для SEO-задач; для остальных модулей пропускаем.
+  if (!isSeoSource.value) return;
   logsLoading.value = true;
   try {
     const data = await admin.fetchAdminTaskLogs(taskId, { after: lastLogId || null, limit: 1000 });
@@ -134,6 +179,9 @@ async function loadLogsIncremental() {
 
 function startLogsPolling() {
   if (logsPollTimer) return;
+  // Logs polling — только для SEO (task_logs table). Не-SEO модули логов
+  // в БД не имеют (есть только error_message + status).
+  if (!isSeoSource.value) return;
   // Poll every 3s while task is processing — stop when terminal.
   logsPollTimer = setInterval(() => {
     if (task.value && (task.value.status === 'completed' || task.value.status === 'failed')) {
@@ -158,11 +206,47 @@ onUnmounted(() => {
 const STATUS_CLS = {
   draft:      'bg-gray-800 text-gray-300',
   pending:    'bg-blue-900 text-blue-300',
+  queued:     'bg-yellow-900 text-yellow-300',
   processing: 'bg-indigo-900 text-indigo-300',
+  running:    'bg-indigo-900 text-indigo-300',
   completed:  'bg-green-900 text-green-300',
+  done:       'bg-green-900 text-green-300',
   failed:     'bg-red-900 text-red-300',
+  error:      'bg-red-900 text-red-300',
+  cancelled:  'bg-gray-700 text-gray-400',
 };
 function statusCls(s) { return STATUS_CLS[s] || STATUS_CLS.draft; }
+
+// Универсальный заголовок задачи — учитывает специфические поля каждого модуля.
+const universalTitle = computed(() => {
+  const t = task.value;
+  if (!t) return '';
+  return (
+    t.title ||
+    t.input_target_service ||
+    t.topic ||
+    t.name ||
+    t.query ||
+    t.trend_name ||
+    t.niche ||
+    t.source_filename ||
+    'Без названия'
+  );
+});
+
+// Подпись под заголовком — короткое описание входа.
+const universalSubtitle = computed(() => {
+  const t = task.value;
+  if (!t) return '';
+  if (source === 'seo')           return t.input_target_service || '';
+  if (source === 'meta_tag')      return [t.niche, t.toponym].filter(Boolean).join(' · ');
+  if (source === 'link_article')  return [t.anchor_text, t.anchor_url].filter(Boolean).join(' → ');
+  if (source === 'article_topic') return [t.mode, t.niche, t.region].filter(Boolean).join(' · ');
+  if (source === 'info_article')  return [t.topic, t.region].filter(Boolean).join(' · ');
+  if (source === 'relevance')     return `LR=${t.lr || ''} · top_n=${t.top_n || ''}`;
+  if (source === 'forecaster')    return t.source_filename || '';
+  return '';
+});
 </script>
 
 <template>
@@ -181,9 +265,9 @@ function statusCls(s) { return STATUS_CLS[s] || STATUS_CLS.draft; }
           <div class="flex items-start gap-4 flex-wrap">
             <div class="flex-1 min-w-0">
               <h1 class="text-xl font-semibold text-white truncate">
-                {{ task.title || task.input_target_service || 'Без названия' }}
+                {{ universalTitle }}
               </h1>
-              <p class="text-sm text-gray-400 mt-1 truncate">{{ task.input_target_service }}</p>
+              <p v-if="universalSubtitle" class="text-sm text-gray-400 mt-1 truncate">{{ universalSubtitle }}</p>
               <p class="text-xs text-gray-500 mt-2">
                 Юзер: <span class="text-gray-300">{{ task.user_email }}</span>
                 <span class="mx-2">·</span>
@@ -191,17 +275,18 @@ function statusCls(s) { return STATUS_CLS[s] || STATUS_CLS.draft; }
               </p>
             </div>
             <div class="flex flex-col items-end gap-1">
+              <span class="badge bg-slate-800 text-slate-200">{{ sourceLabel }}</span>
               <span class="badge" :class="statusCls(task.status)">{{ task.status }}</span>
               <span
                 v-if="task.llm_provider"
                 class="badge"
                 :class="task.llm_provider === 'grok' ? 'bg-purple-900 text-purple-300' : 'bg-blue-900 text-blue-300'"
-              >{{ task.llm_provider === 'grok' ? 'Grok' : 'Gemini' }}</span>
+              >{{ task.llm_provider === 'grok' ? 'Grok' : (task.llm_provider === 'deepseek' ? 'DeepSeek' : 'Gemini') }}</span>
               <span class="text-xs text-gray-500">{{ fmtDate(task.created_at) }}</span>
             </div>
           </div>
 
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+          <div v-if="isSeoSource" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
             <div class="bg-gray-800/40 rounded p-2 text-center">
               <div class="text-xs text-gray-500">Стоимость</div>
               <div class="text-sm text-white font-semibold">{{ fmtCost(task.total_cost_usd) }}</div>
@@ -223,16 +308,35 @@ function statusCls(s) { return STATUS_CLS[s] || STATUS_CLS.draft; }
               </div>
             </div>
           </div>
+          <div v-else class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+            <div class="bg-gray-800/40 rounded p-2 text-center">
+              <div class="text-xs text-gray-500">Стоимость</div>
+              <div class="text-sm text-white font-semibold">{{ fmtCost(task.cost_usd ?? task.total_cost_usd) }}</div>
+            </div>
+            <div class="bg-gray-800/40 rounded p-2 text-center">
+              <div class="text-xs text-gray-500">Начало</div>
+              <div class="text-sm text-white font-semibold">{{ fmtDate(task.started_at) }}</div>
+            </div>
+            <div class="bg-gray-800/40 rounded p-2 text-center">
+              <div class="text-xs text-gray-500">Завершение</div>
+              <div class="text-sm text-white font-semibold">{{ fmtDate(task.completed_at) }}</div>
+            </div>
+            <div class="bg-gray-800/40 rounded p-2 text-center">
+              <div class="text-xs text-gray-500">Статус</div>
+              <div class="text-sm text-white font-semibold">{{ task.status }}</div>
+            </div>
+          </div>
         </div>
 
         <!-- Табы -->
-        <div class="flex gap-2 border-b border-gray-800 mb-4">
+        <div class="flex gap-2 border-b border-gray-800 mb-4 flex-wrap">
           <button
             v-for="tab in [
-              { id: 'result',  label: 'Результат' },
-              { id: 'logs',    label: `Логи (${logs.length})` },
-              { id: 'context', label: 'Промпты / контекст' },
-            ]"
+              { id: 'result',  label: 'Результат', show: true },
+              { id: 'logs',    label: `Логи (${logs.length})`, show: isSeoSource },
+              { id: 'context', label: 'Промпты / контекст', show: isSeoSource },
+              { id: 'raw',     label: 'Полные данные', show: true },
+            ].filter(x => x.show)"
             :key="tab.id"
             @click="activeTab = tab.id"
             class="px-4 py-2 text-sm transition-colors"
@@ -244,23 +348,37 @@ function statusCls(s) { return STATUS_CLS[s] || STATUS_CLS.draft; }
 
         <!-- Tab: Результат -->
         <div v-if="activeTab === 'result'" class="space-y-4">
-          <div v-if="!finalHtml" class="card text-gray-500 text-center py-10">
-            Финальный HTML ещё не сгенерирован.
-          </div>
-          <template v-else>
+          <!-- HTML-результат (SEO / info_article / link_article) -->
+          <template v-if="finalHtml">
             <div class="card">
               <div class="text-xs text-gray-500 mb-2">Отрендеренный HTML</div>
               <div class="bg-white text-gray-900 rounded p-5 prose prose-sm max-w-none" v-html="finalHtml" />
             </div>
+          </template>
+          <!-- Markdown-результат (article_topic) -->
+          <template v-else-if="resultMarkdown">
             <div class="card">
-              <div class="text-xs text-gray-500 mb-2">Метрики</div>
-              <pre class="text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre">{{ metricsJson }}</pre>
-            </div>
-            <div v-if="unusedInputsJson" class="card">
-              <div class="text-xs text-gray-500 mb-2">Не использовано (unused_inputs)</div>
-              <pre class="text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre max-h-96">{{ unusedInputsJson }}</pre>
+              <div class="text-xs text-gray-500 mb-2">Результат (markdown)</div>
+              <pre class="text-sm text-gray-200 whitespace-pre-wrap break-words max-h-[700px] overflow-y-auto">{{ resultMarkdown }}</pre>
             </div>
           </template>
+          <!-- Иначе — короткое сообщение + ссылка на «Полные данные» -->
+          <div v-else class="card text-gray-500 text-center py-10">
+            <div class="mb-3">Этот модуль не имеет HTML-результата. Откройте вкладку «Полные данные» для просмотра содержимого задачи.</div>
+            <div v-if="task.error_message" class="text-red-400 text-sm mt-3 text-left whitespace-pre-wrap">
+              {{ task.error_message }}
+            </div>
+          </div>
+
+          <!-- Метрики (только для SEO) -->
+          <div v-if="isSeoSource && finalHtml" class="card">
+            <div class="text-xs text-gray-500 mb-2">Метрики</div>
+            <pre class="text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre">{{ metricsJson }}</pre>
+          </div>
+          <div v-if="isSeoSource && unusedInputsJson" class="card">
+            <div class="text-xs text-gray-500 mb-2">Не использовано (unused_inputs)</div>
+            <pre class="text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre max-h-96">{{ unusedInputsJson }}</pre>
+          </div>
         </div>
 
         <!-- Tab: Логи -->
@@ -312,8 +430,8 @@ function statusCls(s) { return STATUS_CLS[s] || STATUS_CLS.draft; }
           </div>
         </div>
 
-        <!-- Tab: Промпты / контекст -->
-        <div v-if="activeTab === 'context'" class="space-y-4">
+        <!-- Tab: Промпты / контекст (только для SEO) -->
+        <div v-if="activeTab === 'context' && isSeoSource" class="space-y-4">
           <div v-if="strategyJson" class="card">
             <div class="text-xs text-gray-500 mb-2">Strategy context (Pre-Stage 0)</div>
             <pre class="text-xs text-gray-300 font-mono overflow-x-auto max-h-96 whitespace-pre">{{ strategyJson }}</pre>
@@ -330,6 +448,14 @@ function statusCls(s) { return STATUS_CLS[s] || STATUS_CLS.draft; }
                class="card text-gray-500 text-center py-10">
             Контекстные данные недоступны.
           </div>
+        </div>
+
+        <!-- Tab: Полные данные — нормализованный JSON всей строки таблицы
+             (без тяжёлых полей вроде final_html / result_markdown). Доступен
+             для всех модулей — это базовый fallback просмотрщик. -->
+        <div v-if="activeTab === 'raw'" class="card">
+          <div class="text-xs text-gray-500 mb-2">Все поля задачи (тяжёлые поля скрыты)</div>
+          <pre class="text-xs text-gray-300 font-mono overflow-x-auto max-h-[700px] whitespace-pre">{{ fullRowJson }}</pre>
         </div>
       </template>
     </div>

@@ -2201,24 +2201,54 @@ async function runJob(job) {
         // и пользователь не получал ничего. Теперь — graceful fallback:
         // вставляем «сырой» blocks-блок с полным sectionHtml. Это гарантирует
         // byte-for-byte сохранность контента секции (исходный HTML кладётся
-        // в text как есть), а пользователь получает рабочий JSON и
-        // подробный warning по проблемной секции — он сможет вручную
-        // переразложить её, не теряя текста.
-        console.warn(`[AcfJson] section ${i + 1} fallback failed, emitting raw blocks:`, sectionErr);
+        // в text как есть). Раньше тут эмитился громкий warning «потери:
+        // фрагменты текста / заголовки …», но фактически после raw-фолбэка
+        // ничего не теряется (sectionHtml присутствует дословно в HTML-поле
+        // text, которое валидаторы видят целиком). Получалось, что система
+        // пугала пользователя «ошибкой» там, где контент на самом деле в
+        // полном порядке. Поэтому теперь: переподтверждаем сохранность
+        // повторной пер-секционной валидацией; если она чиста — оставляем
+        // лишь спокойную информационную записку. Громкий warning остаётся
+        // только как защитный путь на случай, если raw-фолбэк сам что-то
+        // не сохранил (по конструкции — невозможно, но проверяем явно).
+        console.warn(`[AcfJson] section ${i + 1} fallback to raw blocks-блок:`, sectionErr);
         sec.blocks = buildRawSectionFallback(sec.sectionHtml);
-        const sampleP = secMissing.slice(0, 3).map((m) => `«${m}»`).join('; ');
-        const sampleH = secMissingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
-        const parts = [];
-        if (secMissing.length) parts.push(`фрагменты текста (${secMissing.length}): ${sampleP}`);
-        if (secMissingHeadings.length) parts.push(`заголовки (${secMissingHeadings.length}): ${sampleH}`);
-        if (secLevelMismatches.length) parts.push(`перекошенный уровень тегов (${secLevelMismatches.length})`);
         if (!Array.isArray(job.warnings)) job.warnings = [];
-        job.warnings.push(
-          `Секция ${i + 1} из ${sections.length}: ни программный билдер, ни LLM-фолбэк не смогли упаковать её в типизированный блок без потерь`
-          + (parts.length ? ` (потери: ${parts.join('; ')})` : '')
-          + `. Содержимое секции вставлено как «сырой» blocks-блок (HTML сохранён дословно). `
-          + `Детали LLM-фолбэка: ${sectionErr.message || sectionErr}.`
-        );
+
+        const rawOutPlain        = outputPlainText(sec.blocks);
+        const rawMissing         = findMissingPhrases(sec.sectionHtml, rawOutPlain);
+        const rawMissingHeadings = findMissingHeadings(sec.sectionHtml, sec.blocks);
+        const rawLevelMismatches = findHeadingLevelMismatches(sec.sectionHtml, sec.blocks);
+        const rawStillBroken =
+          rawMissing.length > 0
+          || rawMissingHeadings.length > 0
+          || rawLevelMismatches.length > 0;
+
+        if (!rawStillBroken) {
+          // Контент сохранён полностью — это НЕ ошибка, а штатный
+          // graceful-путь. Информируем пользователя нейтрально, без слов
+          // «потеря» / «не смогли», чтобы JSON не выглядел сломанным.
+          job.warnings.push(
+            `Секция ${i + 1} из ${sections.length}: упакована как универсальный `
+            + `blocks-блок (типизированный шаблон не подошёл). Контент секции `
+            + `сохранён дословно, потерь нет.`
+          );
+        } else {
+          // Защитная ветка: теоретически недостижима, потому что
+          // buildRawSectionFallback кладёт sectionHtml в text 1:1.
+          // На случай будущих регрессий — оставляем подробный warning.
+          const sampleP = rawMissing.slice(0, 3).map((m) => `«${m}»`).join('; ');
+          const sampleH = rawMissingHeadings.slice(0, 3).map((h) => `<${h.tag}>${h.text}</${h.tag}>`).join('; ');
+          const parts = [];
+          if (rawMissing.length) parts.push(`фрагменты текста (${rawMissing.length}): ${sampleP}`);
+          if (rawMissingHeadings.length) parts.push(`заголовки (${rawMissingHeadings.length}): ${sampleH}`);
+          if (rawLevelMismatches.length) parts.push(`перекошенный уровень тегов (${rawLevelMismatches.length})`);
+          job.warnings.push(
+            `Секция ${i + 1} из ${sections.length}: даже «сырой» blocks-фолбэк не прошёл пост-валидацию`
+            + (parts.length ? ` (потери: ${parts.join('; ')})` : '')
+            + `. Это внутренняя ошибка, проверьте исходный HTML. Детали LLM-фолбэка: ${sectionErr.message || sectionErr}.`
+          );
+        }
       }
     }
 

@@ -22,7 +22,7 @@ onMounted(async () => {
   try {
     const [user, tasksData] = await Promise.all([
       admin.fetchUserDetail(userId),
-      admin.fetchUserTasks(userId, { page: 1, limit: pageLimit }),
+      admin.fetchUserAllTasks(userId, { page: 1, limit: pageLimit }),
     ]);
     userDetail.value = user;
     tasks.value      = tasksData.tasks;
@@ -35,7 +35,7 @@ onMounted(async () => {
 });
 
 async function loadTasks() {
-  const data = await admin.fetchUserTasks(userId, { page: currentPage.value, limit: pageLimit });
+  const data = await admin.fetchUserAllTasks(userId, { page: currentPage.value, limit: pageLimit });
   tasks.value      = data.tasks;
   tasksTotal.value = data.total;
 }
@@ -75,14 +75,42 @@ const daysSinceRegistration = computed(() => {
 // ── Форматирование ─────────────────────────────────────────────────
 const STATUS_META = {
   draft:      { label: 'Черновик',     cls: 'bg-gray-700 text-gray-300' },
+  pending:    { label: 'Ожидает',      cls: 'bg-yellow-900 text-yellow-300' },
   queued:     { label: 'В очереди',    cls: 'bg-yellow-900 text-yellow-300' },
   processing: { label: 'Выполняется',  cls: 'bg-indigo-900 text-indigo-300' },
+  running:    { label: 'Выполняется',  cls: 'bg-indigo-900 text-indigo-300' },
   completed:  { label: 'Завершена',    cls: 'bg-green-900 text-green-300' },
+  done:       { label: 'Завершена',    cls: 'bg-green-900 text-green-300' },
   failed:     { label: 'Ошибка',       cls: 'bg-red-900 text-red-300' },
+  error:      { label: 'Ошибка',       cls: 'bg-red-900 text-red-300' },
+  cancelled:  { label: 'Отменена',     cls: 'bg-gray-700 text-gray-400' },
+};
+
+const MODULE_META = {
+  seo:           { label: 'SEO-текст',         cls: 'bg-emerald-900 text-emerald-300' },
+  meta_tag:      { label: 'Мета-теги',         cls: 'bg-sky-900 text-sky-300' },
+  link_article:  { label: 'Ссылочная статья',  cls: 'bg-violet-900 text-violet-300' },
+  article_topic: { label: 'Темы статей',       cls: 'bg-pink-900 text-pink-300' },
+  info_article:  { label: 'Инфо-статья',       cls: 'bg-amber-900 text-amber-300' },
+  relevance:     { label: 'Релевантность',     cls: 'bg-teal-900 text-teal-300' },
+  forecaster:    { label: 'Прогнозатор',       cls: 'bg-orange-900 text-orange-300' },
 };
 
 function statusMeta(status) {
-  return STATUS_META[status] || { label: status, cls: 'bg-gray-700 text-gray-400' };
+  return STATUS_META[status] || { label: status || '—', cls: 'bg-gray-700 text-gray-400' };
+}
+
+function moduleMeta(source) {
+  return MODULE_META[source] || { label: source || '—', cls: 'bg-gray-700 text-gray-400' };
+}
+
+function openTask(t) {
+  // SEO-задачи открываются в старом detail (по id), не-SEO — через source-aware route.
+  if (!t.source || t.source === 'seo') {
+    router.push(`/admin/tasks/${t.id}`);
+  } else {
+    router.push(`/admin/tasks/${t.id}?source=${encodeURIComponent(t.source)}`);
+  }
 }
 
 function fmtDate(dt) {
@@ -178,13 +206,11 @@ function fmtCost(usd) {
           <table class="w-full text-sm">
             <thead>
               <tr class="border-b border-gray-800 text-left">
-                <th class="py-3 px-3 text-gray-400 font-medium">Название</th>
-                <th class="py-3 px-3 text-gray-400 font-medium">H1 / Услуга</th>
+                <th class="py-3 px-3 text-gray-400 font-medium">Модуль</th>
+                <th class="py-3 px-3 text-gray-400 font-medium">Название / тема</th>
                 <th class="py-3 px-3 text-gray-400 font-medium">Статус</th>
                 <th class="py-3 px-3 text-gray-400 font-medium">Создана</th>
                 <th class="py-3 px-3 text-gray-400 font-medium">Завершена</th>
-                <th class="py-3 px-3 text-gray-400 font-medium">LSI%</th>
-                <th class="py-3 px-3 text-gray-400 font-medium">E-E-A-T</th>
                 <th class="py-3 px-3 text-gray-400 font-medium">Стоимость</th>
                 <th class="py-3 px-3 text-gray-400 font-medium">Ошибка</th>
                 <th class="py-3 px-3 text-gray-400 font-medium"></th>
@@ -193,11 +219,15 @@ function fmtCost(usd) {
             <tbody>
               <tr
                 v-for="t in tasks"
-                :key="t.id"
+                :key="`${t.source}:${t.id}`"
                 class="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
               >
-                <td class="py-3 px-3 text-gray-200 max-w-[200px] truncate">{{ t.title || '—' }}</td>
-                <td class="py-3 px-3 text-gray-300 max-w-[200px] truncate">{{ t.input_target_service || '—' }}</td>
+                <td class="py-3 px-3">
+                  <span class="badge" :class="moduleMeta(t.source).cls">
+                    {{ moduleMeta(t.source).label }}
+                  </span>
+                </td>
+                <td class="py-3 px-3 text-gray-200 max-w-[320px] truncate" :title="t.title">{{ t.title || '—' }}</td>
                 <td class="py-3 px-3">
                   <span class="badge" :class="statusMeta(t.status).cls">
                     {{ statusMeta(t.status).label }}
@@ -205,30 +235,20 @@ function fmtCost(usd) {
                 </td>
                 <td class="py-3 px-3 text-gray-400">{{ fmtDate(t.created_at) }}</td>
                 <td class="py-3 px-3 text-gray-400">{{ fmtDate(t.completed_at) }}</td>
-                <td class="py-3 px-3">
-                  <span :class="parseFloat(t.lsi_coverage) >= 80 ? 'text-green-400' : 'text-yellow-400'">
-                    {{ t.lsi_coverage ? parseFloat(t.lsi_coverage).toFixed(1) + '%' : '—' }}
-                  </span>
-                </td>
-                <td class="py-3 px-3">
-                  <span :class="parseFloat(t.eeat_score) >= 8 ? 'text-green-400' : 'text-yellow-400'">
-                    {{ t.eeat_score ? parseFloat(t.eeat_score).toFixed(1) : '—' }}
-                  </span>
-                </td>
-                <td class="py-3 px-3 text-gray-300">{{ fmtCost(t.total_cost_usd) }}</td>
+                <td class="py-3 px-3 text-gray-300">{{ fmtCost(t.cost_usd) }}</td>
                 <td class="py-3 px-3 text-red-400 max-w-[200px] truncate" :title="t.error_message">
                   {{ t.error_message || '—' }}
                 </td>
                 <td class="py-3 px-3">
                   <button
                     class="btn-ghost text-xs"
-                    @click="router.push(`/admin/tasks/${t.id}`)"
+                    @click="openTask(t)"
                     title="Открыть подробности задачи (результат + логи)"
                   >Открыть</button>
                 </td>
               </tr>
               <tr v-if="!tasks.length">
-                <td colspan="10" class="py-8 text-center text-gray-500">У пользователя нет задач</td>
+                <td colspan="8" class="py-8 text-center text-gray-500">У пользователя нет задач</td>
               </tr>
             </tbody>
           </table>
