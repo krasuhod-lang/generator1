@@ -661,6 +661,15 @@ async function processLinkArticleTask(taskId) {
             `📚 Relevance-артефакт: LSI=${art.important_lsi.length}, ngrams=${art.top_ngrams.length}, h2=${art.h2_drafts.length}, h3=${art.h3_drafts.length}`,
             'info',
           );
+          try {
+            require('../aegis/moduleHooks').observeStage({
+              module: 'linkArticle', stage: 'relevance_artifact_loaded', taskId,
+              payload: {
+                lsi: art.important_lsi.length, ngrams: art.top_ngrams.length,
+                h2: art.h2_drafts.length, h3: art.h3_drafts.length,
+              },
+            });
+          } catch (_) { /* graceful */ }
         }
       } catch (e) {
         await appendLog(taskId, `⚠ relevance-артефакт не загружен (${e.message})`, 'warn');

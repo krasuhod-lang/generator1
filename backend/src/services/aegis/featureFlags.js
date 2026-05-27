@@ -432,6 +432,18 @@ const AEGIS_FLAGS = deepFreeze({
     // Минимальная длина текста, начиная с которой имеет смысл звать compressor.
     writerCompressMinChars: _envInt('AEGIS_INFO_WRITER_COMPRESS_MIN_CHARS', 12000),
   },
+
+  // ── Sprint D — Aegis cross-module hooks ───────────────────────────
+  // Единый observer-слой для модулей: aegis/moduleHooks.observeStage()
+  // зовётся из articleTopics / linkArticle / metaTags / parser и пушит
+  // счётчики aegis_module_stages_total{module,stage,outcome} +
+  // гистограмму aegis_module_stage_latency_ms. Опц. — qualityGate.
+  // По умолчанию ON (метрики безвредны), но qualityGate-эскалация — OFF.
+  moduleHooks: {
+    enabled:     true,
+    qualityGate: false,
+    verbose:     false,
+  },
 });
 
 // ── Валидация диапазонов (fail-fast при старте) ───────────────────

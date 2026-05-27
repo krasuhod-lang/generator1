@@ -369,6 +369,23 @@ async function processArticleTopicTask(taskId) {
       }
     }
 
+    // Aegis cross-module hook: фиксируем стадию dedup в общую телеметрию.
+    try {
+      require('../aegis/moduleHooks').observeStage({
+        module: 'articleTopics',
+        stage:  'brand_dedup',
+        taskId,
+        outcome: brandDedupStats && brandDedupStats.dropped > 0 ? 'warn' : 'ok',
+        payload: {
+          brand_key:   brandKey || null,
+          kept:        Array.isArray(topicIdeasJson && topicIdeasJson.topics) ? topicIdeasJson.topics.length : 0,
+          dropped:     topicsDroppedAsDuplicates,
+          siblings:    siblingsCount,
+        },
+        warnings: topicsDroppedAsDuplicates ? { duplicates_dropped: topicsDroppedAsDuplicates } : null,
+      });
+    } catch (_) { /* graceful */ }
+
     // Снимок того, какие inputs реально подмешаны — для последующего
     // DSPy/MIPROv2 анализа качества (а пока — для отладки в admin-панели).
     // Сохраняем уже существующие topic_ideas_inputs (если они были записаны

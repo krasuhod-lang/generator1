@@ -314,6 +314,12 @@ async function runMetaTagTaskInner(taskId) {
         await appendLog(taskId,
           `📚 Relevance-артефакт подключён: LSI=${art.important_lsi.length}, ngrams=${art.top_ngrams.length}`,
           'info');
+        try {
+          require('../aegis/moduleHooks').observeStage({
+            module: 'metaTags', stage: 'relevance_artifact_loaded', taskId,
+            payload: { lsi: art.important_lsi.length, ngrams: art.top_ngrams.length },
+          });
+        } catch (_) { /* graceful */ }
       }
     } catch (e) {
       await appendLog(taskId, `⚠ Relevance-артефакт не загружен (${e.message})`, 'warn');

@@ -272,6 +272,23 @@ async function scrapeUrl(url, timeout = 30000) {
   } catch (e) {
     console.warn(`[scraper] hidden-layers extraction failed for ${finalUrl}: ${e.message}`);
   }
+  // Aegis cross-module hook: фиксируем стадию extract_hidden_layers.
+  try {
+    require('../aegis/moduleHooks').observeStage({
+      module: 'parser',
+      stage:  'extract_hidden_layers',
+      outcome: hiddenLayers ? 'ok' : 'warn',
+      payload: hiddenLayers ? {
+        json_ld:        Array.isArray(hiddenLayers.jsonLd) ? hiddenLayers.jsonLd.length : 0,
+        microdata:      Array.isArray(hiddenLayers.microdata) ? hiddenLayers.microdata.length : 0,
+        hreflang:       Array.isArray(hiddenLayers.hreflang) ? hiddenLayers.hreflang.length : 0,
+        noscript:       Array.isArray(hiddenLayers.noscript) ? hiddenLayers.noscript.length : 0,
+        template:       Array.isArray(hiddenLayers.template) ? hiddenLayers.template.length : 0,
+        hidden_blocks:  Array.isArray(hiddenLayers.hiddenBlocks) ? hiddenLayers.hiddenBlocks.length : 0,
+        next_data:      hiddenLayers.nextData ? 1 : 0,
+      } : null,
+    });
+  } catch (_) { /* graceful */ }
 
   try {
     const dom    = new JSDOM(responseData, { url: finalUrl });
