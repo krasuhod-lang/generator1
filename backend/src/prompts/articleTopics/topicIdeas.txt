@@ -234,7 +234,16 @@ SELF-AUDIT (молча перед отдачей ответа)
       "commercial_potential": 3,
       "difficulty": 2,
       "uniqueness_angle": "...",
-      "why_now": "..."
+      "why_now": "...",
+      "intent_user_questions": ["вопрос 1", "вопрос 2"],
+      "intent_pains": ["боль 1", "боль 2"],
+      "intent_jobs_to_be_done": ["JTBD 1", "JTBD 2"],
+      "intent_decision_stage": "TOFU|MOFU|BOFU",
+      "intent_serp_features": ["people_also_ask", "featured_snippet", "video_carousel"],
+      "expected_search_volume": "low|mid|high|unknown",
+      "target_audience_segment_detail": "уточнение сегмента (роль/контекст/триггер)",
+      "content_angle": "под каким углом раскрывать тему (1 короткое предложение)",
+      "cta_suggestion": "что предложить читателю в финале (демо / чек-лист / расчёт)"
     }
   ],
   "coverage_map": {

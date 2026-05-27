@@ -656,3 +656,34 @@ AEGIS_POISON_ON_FAIL=drop               # drop | mark
 | `GET http://ray-head:8265/` | Ray dashboard |
 
 Дашборд фронта: **`/aegis`**.
+
+---
+
+## Чек-лист включения GA4 RL и Self-Mutation (Phase 16)
+
+Эти подсистемы по умолчанию выключены (см. лента `/aegis` → ⛔). Чтобы их включить, добавьте переменные окружения в продакшен-окружение (НЕ в `.env.example` — он намеренно зафиксирован; вся новая конфигурация хранится в коде, см. `backend/src/services/aegis/featureFlags.js`).
+
+### GA4 RL/PPO feedback (`📊 GA4 RL/PPO`)
+
+| ENV | Значение | Комментарий |
+| --- | --- | --- |
+| `AEGIS_RL_GA4_ENABLED` | `true` | Главный гейт `rlGa4.enabled` |
+| `AEGIS_GA4_PROPERTY_ID` | `properties/000000000` | GA4 Data API property |
+| `AEGIS_GA4_SA_JSON` | JSON service account (одной строкой) | Доступ read-only к GA4 |
+
+После выставления — перезапустить процесс. В `/api/aegis/status.rl_ga4.property_id_set` появится `true`.
+
+### Self-Mutation (`🤖 Self-Mutation DeepSeek-V4-Pro`)
+
+| ENV | Значение | Комментарий |
+| --- | --- | --- |
+| `AEGIS_SELFMUTATE_ENABLED` | `true` | Гейт `selfmutate.enabled` |
+| `AEGIS_SELFMUTATE_REQUIRE_HUMAN_REVIEW` | `true` (по умолчанию) | Жёсткий human-review первой недели; снимать **только** после ревью первых 20 мутаций |
+
+Если включить self-mutation без `requireHumanReview=true`, в логи попадёт предупреждение, но изменения промтов всё равно встанут в очередь ревью — это намеренная страховка.
+
+### Автозапуски, для которых ENV не нужен (Phase 16)
+
+- **DSPy auto-retrain** (`backend/src/services/aegis/dspyAutoRetrain.js`) — гейтится `featureFlags.dspy.autoRetrainEnabled` (по умолчанию `true`). Реальный запуск произойдёт, только если `dspy.enabled=true` И в `aegis_dspy_dataset` ≥ `autoRetrainMinRows` (10) И с последнего deploy прошло ≥ `autoRetrainMinSpacingSec` (6ч).
+- **SEO Brain scheduler** (`backend/src/services/aegis/seoBrainScheduler.js`) — гейтится `featureFlags.seoBrain.autoAnalyzeEnabled` (по умолчанию `true`). Раз в сутки агрегирует `aegis_seo_observations` по site_key и пересобирает snapshot. Если нет наблюдений — тихо ничего не делает.
+- **Prompts-as-Code audit** — теперь логирует причину провала. Смотреть `GET /api/aegis/status.prompt_audit.last_error` (поля `reason`: `table_missing`/`scan_empty`/`db_error`/`schema_mismatch`).

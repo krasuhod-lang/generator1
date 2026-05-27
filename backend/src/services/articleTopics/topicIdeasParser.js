@@ -48,6 +48,8 @@ const FORMAT_OK = new Set([
   'how-to', 'listicle', 'guide', 'comparison', 'case', 'faq',
 ]);
 const CONFIDENCE_OK = new Set(['low', 'medium', 'high']);
+const DECISION_STAGE_OK = new Set(['TOFU', 'MOFU', 'BOFU']);
+const DUPLICATE_SOURCE_OK = new Set(['exact', 'fuzzy', 'llm']);
 
 function _str(v, max) {
   if (v == null) return '';
@@ -63,6 +65,40 @@ function _strArr(v, maxItems, maxLen) {
     .map((x) => _str(x, maxLen))
     .filter(Boolean)
     .slice(0, maxItems);
+}
+
+/**
+ * _strOrArr — для intent-полей, которые LLM может вернуть либо строкой,
+ * либо массивом строк, либо массивом объектов с .text/.value/.label.
+ * Возвращаем массив непустых строк; null если ничего полезного.
+ */
+function _strOrArr(v, maxItems, maxLen) {
+  if (v == null) return null;
+  if (Array.isArray(v)) {
+    const out = v
+      .map((x) => {
+        if (x == null) return '';
+        if (typeof x === 'string') return _str(x, maxLen);
+        if (typeof x === 'object') {
+          const cand = x.text || x.value || x.label || x.title || '';
+          return _str(cand, maxLen);
+        }
+        return _str(String(x), maxLen);
+      })
+      .filter(Boolean)
+      .slice(0, maxItems);
+    return out.length ? out : null;
+  }
+  if (typeof v === 'string') {
+    const s = _str(v, maxLen);
+    return s ? [s] : null;
+  }
+  if (typeof v === 'object') {
+    const cand = v.text || v.value || v.label || '';
+    const s = _str(cand, maxLen);
+    return s ? [s] : null;
+  }
+  return null;
 }
 
 function _intRange(v, min, max) {
@@ -145,6 +181,26 @@ function _normBrandFact(obj) {
   };
 }
 
+function _normDuplicateOf(o) {
+  if (!o || typeof o !== 'object') return null;
+  const taskId = _str(o.task_id || o.taskId, LIM.shortStr);
+  const title  = _str(o.title || o.topic_title, LIM.mediumStr);
+  if (!taskId && !title) return null;
+  const sim = Number(o.similarity);
+  return {
+    task_id:       taskId || null,
+    task_short_id: _str(o.task_short_id || o.taskShortId, LIM.shortStr) || null,
+    title:         title || null,
+    h1:            _str(o.h1 || o.topic_h1, LIM.mediumStr) || null,
+    created_at:    o.created_at || o.createdAt || null,
+    similarity:    Number.isFinite(sim) ? Math.max(0, Math.min(1, sim)) : null,
+    source:        DUPLICATE_SOURCE_OK.has(String(o.source)) ? o.source : null,
+    llm_confidence: Number.isFinite(Number(o.llm_confidence))
+      ? Math.max(0, Math.min(1, Number(o.llm_confidence))) : null,
+    llm_reason:    _str(o.llm_reason, LIM.mediumStr) || null,
+  };
+}
+
 function _normTopic(t) {
   const o = t && typeof t === 'object' ? t : {};
   const title = _str(o.title, LIM.shortStr);
@@ -164,6 +220,22 @@ function _normTopic(t) {
     difficulty:              _intRange(o.difficulty,           1, 5),
     uniqueness_angle:        _str(o.uniqueness_angle, LIM.longStr),
     why_now:                 _str(o.why_now,          LIM.longStr),
+
+    // Расширенные intent-поля (PR-3) — модель может пропустить любое из них.
+    // Все нормализуются в массив строк или null, чтобы CSV не падал.
+    intent_user_questions:   _strOrArr(o.intent_user_questions, 15, LIM.mediumStr),
+    intent_pains:            _strOrArr(o.intent_pains || o.pain_points, 15, LIM.mediumStr),
+    intent_jobs_to_be_done:  _strOrArr(o.intent_jobs_to_be_done || o.jtbd, 12, LIM.mediumStr),
+    intent_decision_stage:   _enum(o.intent_decision_stage || o.decision_stage, DECISION_STAGE_OK, false),
+    intent_serp_features:    _strOrArr(o.intent_serp_features, 10, LIM.shortStr),
+    expected_search_volume:  _intRange(o.expected_search_volume, 0, 100000000),
+    target_audience_segment_detail: _str(o.target_audience_segment_detail, LIM.longStr),
+    content_angle:           _str(o.content_angle, LIM.longStr),
+    cta_suggestion:          _str(o.cta_suggestion, LIM.mediumStr),
+
+    // Passthrough для duplicate_of (заполняется topicDuplicateDetector
+    // ПОСЛЕ парсинга; здесь оставляем как опциональное поле).
+    duplicate_of:            _normDuplicateOf(o.duplicate_of),
   };
 }
 

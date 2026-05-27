@@ -75,19 +75,41 @@ onMounted(() => {
     const intent           = pickStr(q.prefill_intent,            120);
     const lsiSeed          = pickStr(q.prefill_lsi_seed,         1000);
     const topicIdeaId      = pickStr(q.prefill_topic_idea_id,      64);
+    // PR-3: расширенные интенты из article-topics. Прокидываем в brand_facts
+    // отдельным блоком «# Intent (detailed)», который infoArticleKnowledgeBase
+    // распознаёт и выносит в §Intent (detailed) для writer-промта.
+    const intentQuestions  = pickStr(q.prefill_intent_questions, 1500);
+    const intentPains      = pickStr(q.prefill_intent_pains,     1500);
+    const intentJobs       = pickStr(q.prefill_intent_jobs,      1500);
+    const decisionStage    = pickStr(q.prefill_decision_stage,     20);
+    const contentAngle     = pickStr(q.prefill_content_angle,     500);
+    const ctaSuggestion    = pickStr(q.prefill_cta_suggestion,    500);
 
     // Собираем brand_facts из всех источников, разделяя ясными метками,
     // чтобы пользователь мог отредактировать каждый блок отдельно.
-    const buildBrandFacts = ({ audience: aud, facts: fct, intent: itnt, lsi }) => {
+    const buildBrandFacts = ({ audience: aud, facts: fct, intent: itnt, lsi, intentDetailed }) => {
       const parts = [];
       if (aud) parts.push(`# Аудитория\n${aud}`);
       if (itnt) parts.push(`# Primary intent\n${itnt}`);
       if (lsi) parts.push(`# LSI-seed\n${lsi}`);
+      if (intentDetailed) parts.push(intentDetailed);
       if (fct) parts.push(`# Факты о бренде / нише\n${fct}`);
       return parts.join('\n\n').slice(0, 4000);
     };
+    // Сборка §Intent (detailed) — пропускается, если все поля пусты.
+    const intentDetailedBlock = (() => {
+      const lines = [];
+      if (decisionStage) lines.push(`Decision stage: ${decisionStage}`);
+      if (intentQuestions) lines.push(`Questions: ${intentQuestions}`);
+      if (intentPains) lines.push(`Pains: ${intentPains}`);
+      if (intentJobs) lines.push(`Jobs-to-be-done: ${intentJobs}`);
+      if (contentAngle) lines.push(`Content angle: ${contentAngle}`);
+      if (ctaSuggestion) lines.push(`CTA: ${ctaSuggestion}`);
+      return lines.length ? `# Intent (detailed)\n${lines.join('\n')}` : '';
+    })();
     const composed = buildBrandFacts({
       audience: audienceProfile, facts, intent, lsi: lsiSeed,
+      intentDetailed: intentDetailedBlock,
     });
     if (composed) form.value.brand_facts = composed;
 

@@ -561,6 +561,10 @@ function createSeoArticleFromTopicIdea(topic) {
   const factsText    = formatBrandFactsForInfoArticle(json.brand_facts)
                        .slice(0, 1500);
   const targetService = [t.niche, topic.title].filter(Boolean).join(' — ');
+  // Расширенный prefill для info-article: вытаскиваем все детализированные
+  // intent-поля, чтобы Knowledge Base показал §Intent (detailed). Все поля
+  // обрезаются до безопасных лимитов, чтобы query string не превратился в килобайты.
+  const joinArr = (a) => (Array.isArray(a) ? a.filter(Boolean).join(' | ') : '');
   router.push({
     path: '/info-article',
     query: {
@@ -574,6 +578,14 @@ function createSeoArticleFromTopicIdea(topic) {
       prefill_intent:    [topic.primary_intent, topic.intent_facet].filter(Boolean).join(' / '),
       prefill_lsi_seed:  Array.isArray(topic.lsi_seed) ? topic.lsi_seed.join(', ').slice(0, 1000) : '',
       prefill_topic_idea_id: t.id,
+      // PR-3: расширенные интенты — InfoArticlePage / infoArticleKnowledgeBase
+      // конкатенирует их в §Intent (detailed).
+      prefill_intent_questions: joinArr(topic.intent_user_questions).slice(0, 1500),
+      prefill_intent_pains:     joinArr(topic.intent_pains).slice(0, 1500),
+      prefill_intent_jobs:      joinArr(topic.intent_jobs_to_be_done).slice(0, 1500),
+      prefill_decision_stage:   topic.intent_decision_stage || '',
+      prefill_content_angle:    (topic.content_angle || '').slice(0, 500),
+      prefill_cta_suggestion:   (topic.cta_suggestion || '').slice(0, 500),
     },
   });
 }
@@ -1335,6 +1347,30 @@ const sortedTasks = computed(() =>
                       </div>
                       <div v-if="topic.h1_variant" class="text-xs text-gray-300">
                         <span class="text-gray-500">H1:</span> {{ topic.h1_variant }}
+                      </div>
+                      <!-- PR-2.4: бейдж дедупа. Темы не отбрасываем, но помечаем — -->
+                      <!-- ссылка ведёт на исходную задачу, которая породила похожую тему. -->
+                      <div v-if="topic.duplicate_of"
+                           class="text-[11px] text-amber-200 bg-amber-900/30 border border-amber-700 rounded px-2 py-1">
+                        🔁
+                        <span class="text-amber-300">повторяет тему</span>
+                        <template v-if="topic.duplicate_of.task_id">
+                          из задачи
+                          <router-link :to="`/article-topics/${topic.duplicate_of.task_id}`"
+                                       class="underline hover:text-amber-100">
+                            #{{ topic.duplicate_of.task_short_id || String(topic.duplicate_of.task_id).slice(0, 8) }}
+                          </router-link>
+                        </template>
+                        <span v-if="topic.duplicate_of.title" class="text-amber-100">
+                          «{{ topic.duplicate_of.title }}»
+                        </span>
+                        <span v-if="topic.duplicate_of.similarity != null"
+                              class="text-amber-400">
+                          · sim {{ Number(topic.duplicate_of.similarity).toFixed(2) }}
+                        </span>
+                        <span v-if="topic.duplicate_of.source" class="text-amber-500">
+                          · {{ topic.duplicate_of.source }}
+                        </span>
                       </div>
                       <div class="flex flex-wrap gap-1.5 pt-1">
                         <span v-if="topic.primary_intent"

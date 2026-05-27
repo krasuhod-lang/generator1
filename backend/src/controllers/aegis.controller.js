@@ -76,9 +76,18 @@ async function getStatus(req, res) {
   ]);
   let promptStats;
   let promptLinkage;
+  let promptPersistDiag = null;
   try {
     await promptAudit.persistCurrentPrompts(db);
-  } catch (_) { /* optional audit table */ }
+  } catch (e) {
+    // Должен не сюда падать (persistCurrentPrompts ловит сам), но на всякий случай.
+    console.warn('[aegis/getStatus] persistCurrentPrompts threw:', e.message);
+  }
+  try {
+    promptPersistDiag = promptAudit.getPersistDiagnostics
+      ? promptAudit.getPersistDiagnostics()
+      : null;
+  } catch (_) { /* graceful */ }
   try {
     [promptStats, promptLinkage] = await Promise.all([
       promptAudit.getPromptDashboardStats(db),
@@ -88,6 +97,34 @@ async function getStatus(req, res) {
     promptStats = { total_prompts: 0, dspy_linked: 0, recent_changes: [] };
     promptLinkage = {};
   }
+  if (promptStats && promptPersistDiag) {
+    // Не разглашаем стек/полную SQL-ошибку — только классифицированный reason.
+    promptStats.last_error = promptPersistDiag.last_error || null;
+    promptStats.last_run_at = promptPersistDiag.last_run_at || null;
+    promptStats.sources = (flags.promptAudit && flags.promptAudit.sources) || null;
+  }
+
+  // Backlog telemetry + dspy/seoBrain планировщики (только чтение).
+  let backlogTel = null;
+  let dspyTel = null;
+  let seoBrainTel = null;
+  try { backlogTel = require('../services/aegis/backlogWorker').getBacklogTelemetry(); } catch (_) {}
+  try { dspyTel = require('../services/aegis/dspyAutoRetrain').getDspyAutoTelemetry(); } catch (_) {}
+  try { seoBrainTel = require('../services/aegis/seoBrainScheduler').getSeoBrainSchedulerTelemetry(); } catch (_) {}
+
+  // Последние 5 версий мозга (для UI «История обновлений мозга»).
+  let brainVersions = [];
+  try {
+    const r = await db.query(
+      `SELECT id, yaml_path, sha, mean_spq_before, mean_spq_after,
+              improvement_pct, trials_done, dataset_size, cost_usd,
+              deployed_at, rolled_back_at, notes
+         FROM aegis_brain_versions
+        ORDER BY deployed_at DESC LIMIT 5`
+    );
+    brainVersions = r.rows;
+  } catch (_) { /* table may not exist yet */ }
+
   res.json({
     enabled: flags.enabled,
     quality_gate: {
@@ -100,7 +137,17 @@ async function getStatus(req, res) {
     vectordb:   { enabled: flags.vectordb.enabled, health: vdHealth },
     ray:        { enabled: flags.ray.enabled,      health: rayHealth },
     langgraph:  { enabled: flags.langgraph.enabled, max_refine: flags.langgraph.maxRefineIters },
-    dspy:       { enabled: flags.dspy.enabled,      status: dspyStatus },
+    dspy:       {
+      enabled: flags.dspy.enabled,
+      status: dspyStatus,
+      auto_retrain_enabled: Boolean(flags.dspy.autoRetrainEnabled),
+      auto_retrain_min_rows: flags.dspy.autoRetrainMinRows || null,
+      auto_retrain_check_interval_sec: flags.dspy.autoRetrainCheckIntervalSec || null,
+      last_retrain_at: dspyTel && dspyTel.last_retrain_at,
+      last_retrain_reason: dspyTel && dspyTel.last_retrain_reason,
+      next_retrain_eta_sec: dspyTel && dspyTel.next_retrain_eta_sec,
+      dataset_rows: dspyTel && dspyTel.dataset_rows,
+    },
     rl_ga4:     { enabled: flags.rlGa4.enabled,     property_id_set: Boolean(flags.rlGa4.propertyId) },
     selfmutate: {
       enabled: flags.selfmutate.enabled,
@@ -109,9 +156,17 @@ async function getStatus(req, res) {
     backlog: {
       enabled: flags.backlog.enabled,
       repo_set: Boolean(flags.backlog.repo),
+      last_poll_at: backlogTel && backlogTel.last_poll_at,
+      last_poll_found: backlogTel && backlogTel.last_poll_found,
+      last_poll_dispatched: backlogTel && backlogTel.last_poll_dispatched,
+      repo_reachable: backlogTel && backlogTel.repo_reachable,
+      last_error: backlogTel && backlogTel.last_error,
     },
     biobrain: {
       enabled: Boolean(flags.biobrain && flags.biobrain.enabled),
+      reason: (flags.biobrain && !flags.biobrain.enabled)
+        ? (flags.biobrain.disabledReason || 'disabled')
+        : null,
       status: biobrainStatus && biobrainStatus.body ? biobrainStatus.body : null,
     },
     prompt_audit: promptStats,
@@ -121,10 +176,16 @@ async function getStatus(req, res) {
       enabled: Boolean(flags.seoBrain && flags.seoBrain.enabled),
       default_autonomy_stage: flags.seoBrain && flags.seoBrain.defaultAutonomyStage,
       capabilities: seoBrain.buildCapabilities(),
+      auto_analyze_enabled: Boolean(flags.seoBrain && flags.seoBrain.autoAnalyzeEnabled),
+      last_run_at: seoBrainTel && seoBrainTel.last_run_at,
+      last_sites_processed: seoBrainTel && seoBrainTel.last_sites_processed,
+      next_run_eta_sec: seoBrainTel && seoBrainTel.next_run_eta_sec,
+      last_error: seoBrainTel && seoBrainTel.last_error,
     },
     site_opportunities: promptAudit.buildSiteOpportunities(),
     training_dataset: datasetStats,
     brain_state: brain,
+    brain_versions: brainVersions,
   });
 }
 
@@ -488,7 +549,11 @@ async function listTopFailures(req, res) {
        LIMIT $2`,
       [days, limit],
     );
-    res.json({ days, items: r.rows });
+    res.json({
+      days,
+      items: r.rows,
+      note: r.rows.length ? null : 'no_failures_in_window',
+    });
   } catch (e) {
     res.json({ days, items: [], warning: e.message });
   }
