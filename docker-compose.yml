@@ -82,6 +82,10 @@ services:
         condition: service_healthy
     volumes:
       - uploads:/app/uploads
+      # brain_state/: compiled_writer.yaml + история DSPy retrain'ов.
+      # Bind-mount, чтобы (1) уже существующие yaml-файлы видны контейнеру,
+      # (2) DSPy retrain мог писать новые версии и они переживали restart.
+      - ./brain_state:/app/brain_state
 
   # ── Worker (BullMQ) ──────────────────────────────────────────────────────
   # Отдельный контейнер для воркера — не блокирует HTTP-сервер
@@ -106,6 +110,7 @@ services:
         condition: service_healthy
     volumes:
       - uploads:/app/uploads
+      - ./brain_state:/app/brain_state
 
   # ── Frontend (Vue 3 SPA → Nginx) ─────────────────────────────────────────
   frontend:
