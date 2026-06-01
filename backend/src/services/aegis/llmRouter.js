@@ -22,6 +22,7 @@ const { createCircuitBreaker } = require('./circuitBreaker');
 const { M: metrics, recordLlmCall } = require('./telemetry');
 const alerting   = require('./alerting');
 const killSwitch = require('./killSwitch');
+const llmUsageLog = require('./llmUsageLog');
 
 const _breakers = new Map(); // provider → breaker
 
@@ -115,7 +116,7 @@ async function route({ kind = 'critic', system, user, options = {}, chainOverrid
   const cfg = getAegisFlags().routing;
   if (!cfg.enabled && !chainOverride) {
     // Прозрачный путь: просто DeepSeek.
-    return _callOnce('deepseek', system, user, options);
+    return _callOnce('deepseek', system, user, options, kind);
   }
 
   const chain = chainOverride
@@ -131,7 +132,7 @@ async function route({ kind = 'critic', system, user, options = {}, chainOverrid
       attempts.push({ provider, ok: false, reason: 'circuit_open' });
       continue;
     }
-    const r = await _callOnce(provider, system, user, options);
+    const r = await _callOnce(provider, system, user, options, kind);
     attempts.push({ provider, ok: r.ok, reason: r.reason, status: r.status });
     if (r.ok) {
       cb.recordSuccess();
@@ -151,22 +152,38 @@ async function route({ kind = 'critic', system, user, options = {}, chainOverrid
   return { ok: false, provider: null, attempts, reason: 'all_failed' };
 }
 
-async function _callOnce(provider, system, user, options) {
+async function _callOnce(provider, system, user, options, kind = null) {
   const t0 = Date.now();
   try {
     const adapter = _adapter(provider);
     const resp = await adapter(system, user, options);
     const latencyMs = Date.now() - t0;
     const usage = (resp && resp.usage) || {};
+    const tokensIn      = usage.tokensIn  || usage.tokens_in  || 0;
+    const tokensOut     = usage.tokensOut || usage.tokens_out || 0;
+    const costUsd       = usage.cost_usd  || usage.costUsd    || 0;
+    const cacheHitTokens = usage.cachedTokens || usage.cacheHitTokens || 0;
     recordLlmCall({
       provider,
-      tokensIn:       usage.tokensIn  || usage.tokens_in  || 0,
-      tokensOut:      usage.tokensOut || usage.tokens_out || 0,
-      costUsd:        usage.cost_usd  || usage.costUsd    || 0,
-      cacheHitTokens: usage.cachedTokens || usage.cacheHitTokens || 0,
+      tokensIn,
+      tokensOut,
+      costUsd,
+      cacheHitTokens,
       latencyMs,
       outcome:        'ok',
     });
+    // Персист посуточного расхода Эгиды (best-effort, не блокирует ответ).
+    llmUsageLog.recordUsage({
+      provider,
+      kind,
+      tokensIn,
+      tokensOut,
+      cachedTokens: cacheHitTokens,
+      costUsd,
+      cacheHit:     cacheHitTokens > 0,
+      latencyMs,
+      outcome:      'ok',
+    }).catch(() => {});
     alerting.recordSpend({ provider, costUsd: usage.cost_usd || usage.costUsd || 0 });
     return {
       ok:       true,
@@ -179,6 +196,7 @@ async function _callOnce(provider, system, user, options) {
     const latencyMs = Date.now() - t0;
     const status = _extractStatus(err);
     metrics.requests.inc(1, { provider, outcome: 'error' });
+    llmUsageLog.recordUsage({ provider, kind, outcome: 'error', latencyMs }).catch(() => {});
     return {
       ok:       false,
       provider,

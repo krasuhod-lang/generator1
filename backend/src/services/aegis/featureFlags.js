@@ -283,6 +283,18 @@ const AEGIS_FLAGS = deepFreeze({
     persist: _envBool('AEGIS_FUNNEL_PERSIST', true),
   },
 
+  // ── Учёт расходов Эгиды по дням (cost log) ───────────────────────
+  // Персист каждого AEGIS LLM-вызова (через aegis/llmRouter) в таблицу
+  // aegis_llm_usage: provider/kind/tokens/cached/cost/cache_hit/outcome.
+  // Источник для admin-раздела «Расходы Эгиды по дням». Без новых ENV —
+  // конфигурация в коде. Безопасно: запись best-effort, не валит пайплайн.
+  costLog: {
+    enabled: true,
+    // Сколько суток хранить детальные строки (для опциональной очистки
+    // через админ-эндпоинт/cron; сама очистка вне scope этого блока).
+    retentionDays: 180,
+  },
+
   // ── Phase 9.2 — Alerting & Kill Switch ───────────────────────────
   // Глобальный мониторинг расхода. Если за rollingWindowSec расход
   // превысил rateUsdPerHour — отправляется alert и (опц.) включается

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { useAdminStore } from '../../stores/admin.js';
 import AdminLayout from '../../components/AdminLayout.vue';
 import AdminFunnelsCard from '../../components/AdminFunnelsCard.vue';
+import AdminAegisCostsCard from '../../components/AdminAegisCostsCard.vue';
 
 const router = useRouter();
 const admin  = useAdminStore();
@@ -138,6 +139,9 @@ function fmtCost(usd) {
 
       <!-- Воронки генерации (успех/провал по стадиям) -->
       <AdminFunnelsCard />
+
+      <!-- Расходы Эгиды по дням (токены/стоимость/кэш, фильтр периода) -->
+      <AdminAegisCostsCard />
 
       <!-- Поиск -->
       <div class="flex items-center gap-4 mb-4">

@@ -815,6 +815,108 @@ async function getFunnelBreakdown(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin: Расходы Эгиды по дням (aegis_llm_usage, мигр. 055) — посуточный учёт
+// расхода лимитов мозга: токены in/out, стоимость USD, доля prompt-кэша.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/aegis-costs?from=&to=
+ * Возвращает: суточный ряд расхода Эгиды (cost/tokens/cached/calls/cache_hits/
+ * errors по дням), разбивку по провайдерам и итоги периода с долей кэш-хитов.
+ * Период фильтруется from/to (по умолчанию 30 дней). Все запросы параметризованы.
+ */
+async function getAegisCostBreakdown(req, res, next) {
+  try {
+    const { from, to } = _parseFunnelRange(req.query || {});
+    const params = [from, to];
+
+    // 1. Суточный ряд.
+    const daily = await db.query(
+      `SELECT date_trunc('day', created_at)::date          AS day,
+              COUNT(*)::int                                AS calls,
+              COALESCE(SUM(cost_usd), 0)::numeric(14,6)    AS cost_usd,
+              COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
+              COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
+              COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
+              COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits,
+              COUNT(*) FILTER (WHERE outcome <> 'ok')::int AS errors
+         FROM aegis_llm_usage
+        WHERE created_at >= $1 AND created_at < $2
+        GROUP BY 1
+        ORDER BY 1`,
+      params,
+    );
+
+    // 2. Разбивка по провайдерам за период.
+    const byProvider = await db.query(
+      `SELECT provider,
+              COUNT(*)::int                                AS calls,
+              COALESCE(SUM(cost_usd), 0)::numeric(14,6)    AS cost_usd,
+              COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
+              COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
+              COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
+              COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits
+         FROM aegis_llm_usage
+        WHERE created_at >= $1 AND created_at < $2
+        GROUP BY provider
+        ORDER BY cost_usd DESC`,
+      params,
+    );
+
+    // 3. Итоги периода.
+    const totalsQ = await db.query(
+      `SELECT COUNT(*)::int                                AS calls,
+              COALESCE(SUM(cost_usd), 0)::numeric(14,6)    AS cost_usd,
+              COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
+              COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
+              COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
+              COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits,
+              COUNT(*) FILTER (WHERE outcome <> 'ok')::int AS errors
+         FROM aegis_llm_usage
+        WHERE created_at >= $1 AND created_at < $2`,
+      params,
+    );
+
+    const t = totalsQ.rows[0] || {};
+    const calls = Number(t.calls) || 0;
+    const tokensIn = Number(t.tokens_in) || 0;
+    const cachedTokens = Number(t.cached_tokens) || 0;
+    const totals = {
+      calls,
+      cost_usd: Number(t.cost_usd) || 0,
+      tokens_in: tokensIn,
+      tokens_out: Number(t.tokens_out) || 0,
+      cached_tokens: cachedTokens,
+      cache_hits: Number(t.cache_hits) || 0,
+      errors: Number(t.errors) || 0,
+      // Доля вызовов с попаданием в кэш и доля закэшированных input-токенов.
+      cache_hit_rate_pct: calls ? Number(((Number(t.cache_hits) / calls) * 100).toFixed(1)) : 0,
+      cached_token_pct: tokensIn ? Number(((cachedTokens / tokensIn) * 100).toFixed(1)) : 0,
+    };
+
+    return res.json({
+      range: { from, to },
+      totals,
+      daily: daily.rows,
+      by_provider: byProvider.rows,
+    });
+  } catch (err) {
+    // Таблицы ещё нет (миграция не применена) — пустой каркас, чтобы админка
+    // не падала.
+    if (err && /aegis_llm_usage/.test(String(err.message))) {
+      return res.json({
+        range: null,
+        totals: { calls: 0, cost_usd: 0, tokens_in: 0, tokens_out: 0, cached_tokens: 0, cache_hits: 0, errors: 0, cache_hit_rate_pct: 0, cached_token_pct: 0 },
+        daily: [],
+        by_provider: [],
+        note: 'aegis_llm_usage table not initialized',
+      });
+    }
+    next(err);
+  }
+}
+
 module.exports = {
   adminLogin,
   listUsers,
@@ -828,4 +930,5 @@ module.exports = {
   getUserAllTasks,
   getCrossTaskDetail,
   getFunnelBreakdown,
+  getAegisCostBreakdown,
 };
