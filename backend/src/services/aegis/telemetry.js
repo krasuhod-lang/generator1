@@ -139,7 +139,18 @@ const M = {
   funnelStage:        counter('gen_funnel_stage_total',                    'Generation funnel stage outcomes', ['kind', 'stage', 'outcome']),
   funnelStageReason:  counter('gen_funnel_stage_reason_total',             'Generation funnel stage failure reasons', ['kind', 'stage', 'reason']),
   funnelStageLatency: histogram('gen_funnel_stage_latency_ms',             'Generation funnel stage latency (ms)', DEFAULT_BUCKETS_MS, ['kind', 'stage']),
+  // 🧬 Bio-Brain — самообучаемый NEAT-слой.
+  biobrainPredict:    counter('aegis_biobrain_predict_total',              'Bio-Brain predictions by gate', ['gate']),
+  biobrainFastReject: counter('aegis_biobrain_fast_reject_total',          'Bio-Brain fast-reject decisions'),
+  biobrainEvolve:     counter('aegis_biobrain_evolve_total',               'Bio-Brain evolution steps observed'),
+  biobrainGeneration: gauge('aegis_biobrain_generation',                   'Bio-Brain current NEAT generation'),
+  biobrainFitness:    gauge('aegis_biobrain_mean_fitness',                 'Bio-Brain best-genome mean fitness'),
+  biobrainBuffer:     gauge('aegis_biobrain_buffer_size',                  'Bio-Brain experience buffer size'),
 };
+
+// Последнее наблюдённое число эволюций — чтобы инкрементировать счётчик
+// только на дельту между пингами планировщика.
+let _lastBiobrainEvolveCount = null;
 
 /**
  * recordLlmCall({ provider, tokensIn, tokensOut, costUsd, cacheHitTokens,
@@ -173,6 +184,41 @@ function recordFunnelStage(meta = {}) {
   }
   if (meta.durationMs != null) {
     M.funnelStageLatency.observe(meta.durationMs, { kind, stage });
+  }
+}
+
+/**
+ * recordBiobrainPrediction({ gate }) — одна Bio-Brain-оценка черновика.
+ * Безопасен при выключенной телеметрии (no-op).
+ */
+function recordBiobrainPrediction(meta = {}) {
+  const gate = String(meta.gate || 'pass');
+  M.biobrainPredict.inc(1, { gate });
+  if (gate === 'fast_reject') M.biobrainFastReject.inc(1);
+}
+
+/**
+ * recordBiobrainState(stats) — снимок /biobrain/status из планировщика.
+ * Обновляет gauge'и (поколение/фитнес/буфер) и инкрементирует счётчик
+ * эволюций только на дельту между пингами.
+ */
+function recordBiobrainState(stats = {}) {
+  if (stats == null || typeof stats !== 'object') return;
+  if (Number.isFinite(Number(stats.generation))) {
+    M.biobrainGeneration.set(Number(stats.generation));
+  }
+  if (Number.isFinite(Number(stats.mean_fitness))) {
+    M.biobrainFitness.set(Number(stats.mean_fitness));
+  }
+  if (Number.isFinite(Number(stats.buffer_size))) {
+    M.biobrainBuffer.set(Number(stats.buffer_size));
+  }
+  const evolveCount = Number(stats.evolve_count);
+  if (Number.isFinite(evolveCount)) {
+    if (_lastBiobrainEvolveCount != null && evolveCount > _lastBiobrainEvolveCount) {
+      M.biobrainEvolve.inc(evolveCount - _lastBiobrainEvolveCount);
+    }
+    _lastBiobrainEvolveCount = evolveCount;
   }
 }
 
@@ -245,6 +291,7 @@ function _resetForTests() {
   _state.counters.clear();
   _state.gauges.clear();
   _state.histograms.clear();
+  _lastBiobrainEvolveCount = null;
   // meta оставляем (зарегистрирована один раз при require).
 }
 
@@ -271,6 +318,7 @@ function stopOtlpPusher() {
 module.exports = {
   counter, gauge, histogram,
   M, recordLlmCall, recordFunnelStage,
+  recordBiobrainPrediction, recordBiobrainState,
   snapshot, toPrometheus,
   startOtlpPusher, stopOtlpPusher,
   _resetForTests,

@@ -111,6 +111,8 @@ async function getStatus(req, res) {
   try { backlogTel = require('../services/aegis/backlogWorker').getBacklogTelemetry(); } catch (_) {}
   try { dspyTel = require('../services/aegis/dspyAutoRetrain').getDspyAutoTelemetry(); } catch (_) {}
   try { seoBrainTel = require('../services/aegis/seoBrainScheduler').getSeoBrainSchedulerTelemetry(); } catch (_) {}
+  let biobrainTel = null;
+  try { biobrainTel = require('../services/aegis/biobrainScheduler').getBiobrainSchedulerTelemetry(); } catch (_) {}
 
   // Последние 5 версий мозга (для UI «История обновлений мозга»).
   let brainVersions = [];
@@ -162,13 +164,34 @@ async function getStatus(req, res) {
       repo_reachable: backlogTel && backlogTel.repo_reachable,
       last_error: backlogTel && backlogTel.last_error,
     },
-    biobrain: {
-      enabled: Boolean(flags.biobrain && flags.biobrain.enabled),
-      reason: (flags.biobrain && !flags.biobrain.enabled)
-        ? (flags.biobrain.disabledReason || 'disabled')
-        : null,
-      status: biobrainStatus && biobrainStatus.body ? biobrainStatus.body : null,
-    },
+    biobrain: (() => {
+      const enabled = Boolean(flags.biobrain && flags.biobrain.enabled);
+      const body = biobrainStatus && biobrainStatus.body ? biobrainStatus.body : null;
+      // «Почему прочерки»: если выключен в коде — disabledReason; если
+      // включён, но py недоступен — reason из пинга (network/disabled); если
+      // включён и доступен, но neat не установлен — reason из самого статуса
+      // (neat_missing). Когда всё работает — reason = null.
+      let reason = null;
+      if (!enabled) {
+        reason = (flags.biobrain && flags.biobrain.disabledReason) || 'disabled';
+      } else if (!biobrainStatus || !biobrainStatus.ok || !body) {
+        reason = (biobrainStatus && biobrainStatus.reason) || 'py_service_unreachable';
+      } else if (body && body.available === false) {
+        reason = body.reason || 'unavailable';
+      }
+      return {
+        enabled,
+        reason,
+        status: body,
+        // Телеметрия автономного цикла (для карточки «🧬 Bio-Brain»).
+        auto_evolve_enabled: Boolean(flags.biobrain && flags.biobrain.autoEvolveEnabled),
+        last_check_at:   biobrainTel && biobrainTel.last_check_at,
+        last_evolve_at:  biobrainTel && biobrainTel.last_evolve_at,
+        evolve_count:    biobrainTel && biobrainTel.evolve_count,
+        buffer_size:     biobrainTel && biobrainTel.buffer_size,
+        last_advice:     biobrainTel && biobrainTel.last_advice,
+      };
+    })(),
     prompt_audit: promptStats,
     prompt_dspy_linkage: promptLinkage,
     autonomy: promptAudit.buildAutonomySnapshot(flags),

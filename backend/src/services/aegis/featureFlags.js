@@ -226,16 +226,28 @@ const AEGIS_FLAGS = deepFreeze({
   },
 
   // ── BioBrain (NEAT pre-filter) ─────────────────────────────────────
+  // Самообучаемый нейроэволюционный слой (NEAT). Включён на уровне кода;
+  // фактическая доступность определяется в рантайме сервисом aegis_py
+  // (/biobrain/status → available). Если Python-сервис недоступен или
+  // библиотека `neat` не установлена — слой self-disable, а причина
+  // (например neat_missing / network) поднимается в /api/aegis/status как
+  // «почему прочерки». ENV-флаг намеренно не вводим (конфиг живёт в коде).
   biobrain: {
-    enabled: false,
-    // Документируется в /api/aegis/status как «почему прочерки» —
-    // включение требует правки кода (экспериментальный NEAT-слой,
-    // ENV-флаг намеренно не вводим, см. README AEGIS).
-    disabledReason: 'experimental_disabled_in_code',
+    enabled: true,
+    // Резервная причина, если рантайм-статус недоступен (py не отвечает).
+    disabledReason: 'py_service_unreachable',
     fastRejectThreshold: 0.35,
     reviewThreshold: 0.55,
     snnEnabled: false,
+    // Период автономной эволюции (фоновый цикл в aegis_py и пинг из Node).
     evolveIntervalSec: 300,
+    // Автономный самообучаемый цикл: фоновый воркер эволюционирует мозг,
+    // даже когда статьи не генерируются. Гейтится только кодом.
+    autoEvolveEnabled: true,
+    // Минимальный размер буфера опыта для запуска одного поколения NEAT.
+    minBufferToEvolve: 32,
+    // Как часто Node-планировщик пингует /biobrain/status (телеметрия UI).
+    statusPollIntervalSec: 300,
   },
 
   // ── Prompts-as-Code audit ─────────────────────────────────────────
@@ -521,6 +533,8 @@ const RANGES = [
   ['biobrain.fastRejectThreshold',    0, 1],
   ['biobrain.reviewThreshold',        0, 1],
   ['biobrain.evolveIntervalSec',      1, 86400],
+  ['biobrain.minBufferToEvolve',      1, 100000],
+  ['biobrain.statusPollIntervalSec',  1, 86400],
   ['vectorGc.ttlDays',                0, 3650],
   ['vectorGc.minAgeSafetyHours',      0, 24 * 365],
 ];

@@ -41,3 +41,44 @@ def load_state() -> dict:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+BUFFER_FILE = ROOT / "biobrain_buffer.json"
+
+
+def save_buffer(samples: Any, *, max_items: int = 256) -> None:
+    """Persist the experience buffer so learning survives restarts.
+
+    ``samples`` is an iterable of ``(features, target)`` pairs. Only the most
+    recent ``max_items`` are kept. Best-effort: never raises.
+    """
+    try:
+        ROOT.mkdir(parents=True, exist_ok=True)
+        items = list(samples)[-max_items:]
+        payload = [
+            {"f": [float(x) for x in feat], "t": float(target)}
+            for feat, target in items
+        ]
+        BUFFER_FILE.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_buffer() -> list:
+    """Load the persisted experience buffer as a list of ``(features, target)``."""
+    if not BUFFER_FILE.exists():
+        return []
+    try:
+        raw = json.loads(BUFFER_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    out = []
+    for row in raw if isinstance(raw, list) else []:
+        try:
+            feat = [float(x) for x in row.get("f", [])]
+            target = float(row.get("t"))
+            if feat:
+                out.append((feat, target))
+        except Exception:
+            continue
+    return out
