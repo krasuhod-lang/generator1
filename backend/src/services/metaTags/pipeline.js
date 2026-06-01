@@ -30,6 +30,7 @@ const { finalizeByTask } = require('../aegis/backlogHooks');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
+const { createFunnelTracker } = require('../aegis/funnelTracker');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -236,6 +237,7 @@ async function runMetaTagTaskInner(taskId) {
   }
 
   const keywords = Array.isArray(task.keywords) ? task.keywords : [];
+  const funnel = createFunnelTracker({ kind: 'meta_tags', taskRef: taskId, userId: task.user_id, niche: task.niche || null });
   if (keywords.length === 0) {
     await db.query(
       `UPDATE meta_tag_tasks
@@ -243,6 +245,8 @@ async function runMetaTagTaskInner(taskId) {
         WHERE id = $1`,
       [taskId, 'Список ключевых запросов пуст'],
     );
+    funnel.recordStage('load', { outcome: 'fail', reason: 'empty_keywords list' });
+    try { await funnel.persist({ status: 'failed', error: 'Список ключевых запросов пуст' }); } catch (_e) { /* no-op */ }
     try {
       await finalizeByTask({
         table: 'meta_tag_tasks',
@@ -331,6 +335,10 @@ async function runMetaTagTaskInner(taskId) {
   let totalTokensOut = 0;
   let totalCostUsd   = 0;
   let modelUsed      = null;
+  let kwOk           = 0;
+  let kwFail         = 0;
+
+  funnel.step('audience_niche');
 
   // ── Однократный анализ ЦА и ниши до генерации тегов ───────────────
   // Использует ту же логику, что и основной SEO-пайплайн (см. memory о
@@ -356,6 +364,7 @@ async function runMetaTagTaskInner(taskId) {
       `🧭 Анализ ЦА и ниши упал (${err.message}) — продолжаем без digest`, 'warn');
   }
 
+  funnel.step('generate_meta');
   for (let i = 0; i < keywords.length; i += 1) {
     const kw = String(keywords[i] || '').trim();
     await updateProgress(taskId, i, kw);
@@ -364,6 +373,7 @@ async function runMetaTagTaskInner(taskId) {
     if (!kw) {
       await pushResult(taskId, { keyword: '', status: 'error', error: 'Пустая строка' });
       await updateProgress(taskId, i + 1, '');
+      kwFail += 1;
       continue;
     }
 
@@ -430,6 +440,7 @@ async function runMetaTagTaskInner(taskId) {
       );
 
       await pushResult(taskId, { keyword: kw, status: 'success', serp, semantics, metas });
+      kwOk += 1;
       await appendLog(taskId,
         `✅ «${kw}» готово (Title ${metas.title_length}, Desc ${metas.description_length}` +
         `, ${tIn + tOut} ток., $${cost.toFixed(4)})`,
@@ -437,6 +448,7 @@ async function runMetaTagTaskInner(taskId) {
     } catch (err) {
       console.error(`[metaTags] generation failed for "${kw}":`, err.message);
       await pushResult(taskId, { keyword: kw, status: 'error', error: err.message });
+      kwFail += 1;
       await appendLog(taskId, `❌ «${kw}»: ${err.message}`, 'err');
     }
 
@@ -445,6 +457,14 @@ async function runMetaTagTaskInner(taskId) {
     if (i < keywords.length - 1) {
       await sleep(COOLDOWN_BETWEEN_KEYWORDS_MS);
     }
+  }
+
+  // Записываем исход стадии генерации: все ключи упали → fail, иначе ok
+  // (с числом неуспешных «связок» как retry-метрикой для аналитики).
+  if (kwOk === 0 && kwFail > 0) {
+    funnel.fail(`all ${kwFail} keywords failed (empty_output)`);
+  } else {
+    funnel.step('finalize');
   }
 
   await db.query(
@@ -497,6 +517,9 @@ async function runMetaTagTaskInner(taskId) {
       taskKind: 'meta_tags',
     });
   } catch (_) { /* no-op */ }
+  try {
+    await funnel.finish({ status: kwOk > 0 ? 'completed' : 'failed' });
+  } catch (_e) { /* analytics must not break generation */ }
 }
 
 /**

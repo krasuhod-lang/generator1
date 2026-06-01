@@ -28,6 +28,7 @@ const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
 const { fetchPhraseSignals, aggregateSignals } = require('./keyssoClient');
 const { analyzeOpportunities } = require('./opportunityAnalyzer');
 const { getForecasterConfig } = require('./config');
+const { createFunnelTracker } = require('../aegis/funnelTracker');
 
 async function processForecasterTask(taskId) {
   if (!taskId) throw new Error('processForecasterTask: taskId required');
@@ -55,7 +56,10 @@ async function processForecasterTask(taskId) {
     [taskId],
   );
 
+  const funnel = createFunnelTracker({ kind: 'forecaster', taskRef: taskId, userId: task.user_id });
+
   try {
+    funnel.step('parse');
     // 2. Парсер
     let parsed;
     if (Array.isArray(rawTable)) {
@@ -80,6 +84,7 @@ async function processForecasterTask(taskId) {
     // 3. Junk-классификатор фраз (детерминированный) — выполняется ДО
     //    агрегации, чтобы из суммы спроса вычесть однословные ВЧ /
     //    мёртвые / чужие бренды (см. cfg.junk.excludeFromForecastReasons).
+    funnel.step('junk_classify');
     const junkRaw = classifyJunkPhrases({
       parsedRows: parsed.rows,
       monthCols:  parsed.monthCols,
@@ -93,19 +98,23 @@ async function processForecasterTask(taskId) {
     }
 
     // 4. Агрегация (с учётом исключённых фраз)
+    funnel.step('aggregate');
     const seriesData = aggregateMonthlySeries(parsed, { excludePhrases: excludeSet });
     if (seriesData.monthly.length < 3) {
       throw new Error('После агрегации меньше 3 месяцев данных — недостаточно для анализа');
     }
 
     // 5. Аномалии
+    funnel.step('anomalies');
     const anomalies = detectAnomalies(seriesData.monthly);
 
     // 6. Прогноз
+    funnel.step('forecast');
     const forecast = buildForecast(seriesData.monthly);
 
     // 6b. Keys.so signals (graceful skip без ключа). Шлём top-N фраз по total
     // (после фильтрации исключённых) — чтобы экономить квоту.
+    funnel.step('keysso_signals');
     let keyssoSignalsReport = null;
     let keyssoSignalsMap    = null; // Map<normPhrase, signals> для opportunityAnalyzer
     try {
@@ -154,6 +163,7 @@ async function processForecasterTask(taskId) {
     const intent = options.intent ? String(options.intent).trim() : null;
 
     // 7. Трафик (с калибровкой по keys.so + лиды по CR)
+    funnel.step('traffic_estimate');
     const trafficEstimate = estimateTraffic({
       historicalMonthly: seriesData.monthly,
       forecastPoints:    forecast.points,
@@ -204,6 +214,7 @@ async function processForecasterTask(taskId) {
 
     // 7. Сохраняем «полу-готовое» состояние, чтобы UI мог показать
     // данные даже если DeepSeek потом упадёт.
+    funnel.step('persist_partial');
     const sourceMeta = {
       phrase_col: parsed.phraseCol,
       total_col:  parsed.totalCol,
@@ -259,6 +270,7 @@ async function processForecasterTask(taskId) {
     );
 
     // 8. DeepSeek — graceful (анализ + junk refinement)
+    funnel.step('deepseek_analysis');
     const ds = await runDeepSeekAnalysis({
       sourceInfo: { filename, rowsCount: parsed.rowsCount },
       monthlySeries: seriesData.monthly,
@@ -366,6 +378,7 @@ async function processForecasterTask(taskId) {
     }
 
     // 9. Финал
+    funnel.step('finalize');
     const dsCost     = ds.verdict === 'ok' ? (ds.cost_usd || 0) : 0;
     const refineCost = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.cost_usd || 0) : 0;
     const dsIn       = ds.verdict === 'ok' ? (ds.tokens_in || 0) : 0;
@@ -393,6 +406,7 @@ async function processForecasterTask(taskId) {
       ],
     );
     console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'}, opp=${opportunitiesReport?.verdict || 'n/a'}, niche=${expertReports?.niche_strategist?.verdict || 'n/a'}, hunter=${expertReports?.opportunity_hunter?.verdict || 'n/a'}, planner=${expertReports?.cluster_planner?.verdict || 'n/a'})`);
+    try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     console.error(`[Forecaster] task ${taskId} failed: ${msg}`);
@@ -400,6 +414,7 @@ async function processForecasterTask(taskId) {
       `UPDATE forecaster_tasks SET status='error', error_message=$2, completed_at=NOW(), updated_at=NOW() WHERE id=$1`,
       [taskId, msg.slice(0, 2000)],
     );
+    try { await funnel.finish({ status: 'failed', error: err }); } catch (_e) { /* no-op */ }
   }
 }
 

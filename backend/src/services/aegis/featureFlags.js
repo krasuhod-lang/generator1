@@ -272,6 +272,17 @@ const AEGIS_FLAGS = deepFreeze({
     pushIntervalSec: _envInt('AEGIS_TELEMETRY_PUSH_INTERVAL_SEC', 60),
   },
 
+  // ── Воронки генерации (funnel analytics) ─────────────────────────
+  // Учёт успешных/неуспешных «связок» (стадий) каждой генерации с
+  // детализацией каждой воронки и агрегированным анализом. Сбор в памяти
+  // (createFunnelTracker) + Prometheus-метрики gen_funnel_stage_*; persist
+  // в таблицу generation_funnels включается отдельным флагом.
+  funnel: {
+    enabled: _envBool('AEGIS_FUNNEL_ENABLED', true),
+    // Сохранять детальный per-stage отчёт в таблицу generation_funnels.
+    persist: _envBool('AEGIS_FUNNEL_PERSIST', true),
+  },
+
   // ── Phase 9.2 — Alerting & Kill Switch ───────────────────────────
   // Глобальный мониторинг расхода. Если за rollingWindowSec расход
   // превысил rateUsdPerHour — отправляется alert и (опц.) включается

@@ -1056,6 +1056,50 @@ async function ensureSchema() {
         WHERE quality_score IS NOT NULL;
     `);
 
+    // Migration 054: generation_funnels — учёт успешных/неуспешных «связок»
+    // (стадий) каждой генерации. Детализация каждой воронки + агрегаты для
+    // анализа (conversion-rate, причины отказов, стоимость/латентность).
+    // Пишется aegis/funnelTracker.persist() при включённом флаге funnel.persist.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS generation_funnels (
+        id                UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+        kind              VARCHAR(32)   NOT NULL,
+        task_ref          TEXT,
+        user_id           UUID,
+        niche             TEXT,
+        status            VARCHAR(16)   NOT NULL DEFAULT 'completed',
+        final_stage       TEXT,
+        fail_reason       VARCHAR(48),
+        stage_count       INTEGER       NOT NULL DEFAULT 0,
+        total_cost_usd    NUMERIC(12,6) NOT NULL DEFAULT 0,
+        total_tokens_in   BIGINT        NOT NULL DEFAULT 0,
+        total_tokens_out  BIGINT        NOT NULL DEFAULT 0,
+        total_retries     INTEGER       NOT NULL DEFAULT 0,
+        duration_ms       BIGINT        NOT NULL DEFAULT 0,
+        report            JSONB,
+        created_at        TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+        finished_at       TIMESTAMPTZ
+      );
+    `);
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS generation_funnels_kind_ref_uidx
+        ON generation_funnels (kind, task_ref)
+        WHERE task_ref IS NOT NULL;
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS generation_funnels_kind_created_idx
+        ON generation_funnels (kind, created_at DESC);
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS generation_funnels_status_idx
+        ON generation_funnels (status);
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS generation_funnels_fail_reason_idx
+        ON generation_funnels (fail_reason)
+        WHERE fail_reason IS NOT NULL;
+    `);
+
     // Gemini text model selector for copywriting tasks: only internal
     // production-approved models are accepted per task.
     await db.query(`

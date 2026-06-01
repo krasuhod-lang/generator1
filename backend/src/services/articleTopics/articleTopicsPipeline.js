@@ -35,6 +35,7 @@ const { resolveBrandKey, autoLinkSimilar } = require('./brandAliases');
 const { getQualityFlags } = require('../qualityLayers/featureFlags');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 const { finalizeByTask } = require('../aegis/backlogHooks');
+const { createFunnelTracker } = require('../aegis/funnelTracker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
@@ -154,7 +155,10 @@ async function processArticleTopicTask(taskId) {
     [taskId],
   );
 
+  const funnel = createFunnelTracker({ kind: 'article_topics', taskRef: taskId, userId: task.user_id, niche: task.niche || null });
+
   try {
+    funnel.step('build_prompt');
     let userPrompt;
     let siblingsCount = 0;
     if (task.mode === 'deep_dive') {
@@ -224,6 +228,7 @@ async function processArticleTopicTask(taskId) {
 
     // 300 секунд — потолок для одного non-streaming Gemini-вызова в адаптере.
     // 16384 output-токенов хватает на длинный markdown-отчёт (~50 KB текста).
+    funnel.step('llm_generation');
     const result = await callGemini(SYSTEM_INSTRUCTION, userPrompt, {
       temperature: 0.7,
       maxTokens:   16384,
@@ -242,6 +247,7 @@ async function processArticleTopicTask(taskId) {
     const cachedTokens   = Number(result.cachedTokens   || 0);
     const costUsd   = calcCost('gemini', tokensIn, tokensOut, { thoughtsTokens, cachedTokens });
 
+    funnel.step('post_processing', { model: result.model || 'gemini', tokensIn, tokensOut, costUsd });
     // ── Post-processing: вытаскиваем TRENDS_JSON-блок (только для main),
     // ── сохраняем в trends_json + регистре article_topic_trends.
     // Все ошибки парсинга/persist — гасим warn'ом, статус задачи не страдает.
@@ -434,6 +440,7 @@ async function processArticleTopicTask(taskId) {
         topicCountReturned,
       ],
     );
+    funnel.step('finalize');
 
     // После успешной записи topic_ideas_json — сохраняем canon-заголовки в
     // brand history, чтобы следующий запуск под тот же brand_key мог
@@ -503,6 +510,7 @@ async function processArticleTopicTask(taskId) {
       .catch((evalErr) => {
         console.warn(`[articleTopics] evaluator failed for ${taskId}: ${evalErr && evalErr.message}`);
       });
+    try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     console.error(`[articleTopics] Task ${taskId} failed:`, msg);
@@ -524,6 +532,7 @@ async function processArticleTopicTask(taskId) {
         taskKind: 'article_topics',
       });
     } catch (_) { /* no-op */ }
+    try { await funnel.finish({ status: 'failed', error: err }); } catch (_e) { /* no-op */ }
   }
 }
 
