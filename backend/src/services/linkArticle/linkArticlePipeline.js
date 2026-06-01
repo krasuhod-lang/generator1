@@ -48,6 +48,7 @@ const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
 const { finalizeByTask } = require('../aegis/backlogHooks');
+const { createFunnelTracker } = require('../aegis/funnelTracker');
 const biobrainClient = require('../aegis/biobrainClient');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -89,6 +90,9 @@ const IN_PROGRESS = new Set(); // taskId — защита от двойного 
 // Текущая стадия per-task (in-memory) — используется, чтобы recordEvent
 // автоматически прикреплял stage к событию без передачи его во все вызовы.
 const CURRENT_STAGE = new Map();
+// Реестр воронок генерации по taskId — setStage() автоматически отмечает
+// переход стадии в funnel.step(). Регистрируется в processLinkArticleTask.
+const FUNNELS = new Map();
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -105,6 +109,8 @@ async function appendLog(taskId, msg, level = 'info') {
 
 async function setStage(taskId, stageName, progressPct) {
   CURRENT_STAGE.set(taskId, stageName);
+  const funnel = FUNNELS.get(taskId);
+  if (funnel) { try { funnel.step(stageName); } catch (_e) { /* analytics must not break generation */ } }
   try {
     await db.query(
       `UPDATE link_article_tasks
@@ -631,6 +637,7 @@ async function processLinkArticleTask(taskId) {
 
   // Tracked across try/catch/finally for cleanup paths.
   let geminiCacheName = null;
+  let funnel = null;
 
   try {
     const { rows } = await db.query(
@@ -642,6 +649,9 @@ async function processLinkArticleTask(taskId) {
       console.error(`[linkArticle] task ${taskId} not found`);
       return;
     }
+
+    funnel = createFunnelTracker({ kind: 'link_article', taskRef: taskId, userId: task.user_id, niche: task.topic || null });
+    FUNNELS.set(taskId, funnel);
 
     // Sprint B: подключаем relevance-артефакт (LSI/ngrams/H2/H3-черновики),
     // если у задачи указан source_relevance_report_id. Загружается через
@@ -938,6 +948,7 @@ async function processLinkArticleTask(taskId) {
     );
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
+    try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
     try {
       const { rows } = await db.query(
         `SELECT quality_score FROM link_article_tasks WHERE id = $1`,
@@ -960,6 +971,7 @@ async function processLinkArticleTask(taskId) {
     }
   } catch (err) {
     console.error(`[linkArticle] task ${taskId} failed:`, err);
+    if (funnel) { try { await funnel.finish({ status: 'failed', error: err }); } catch (_e) { /* no-op */ } }
     try {
       await db.query(
         `UPDATE link_article_tasks
@@ -989,6 +1001,7 @@ async function processLinkArticleTask(taskId) {
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    FUNNELS.delete(taskId);
     // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState
     // в callLLM аккумулирует записи навсегда. См. фикс утечки в
     // infoArticlePipeline и аналогичный паттерн в classic-orchestrator.

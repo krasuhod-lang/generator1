@@ -3,6 +3,7 @@ import { ref, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAdminStore } from '../../stores/admin.js';
 import AdminLayout from '../../components/AdminLayout.vue';
+import AdminFunnelsCard from '../../components/AdminFunnelsCard.vue';
 
 const router = useRouter();
 const admin  = useAdminStore();
@@ -134,6 +135,9 @@ function fmtCost(usd) {
           <div class="text-xs text-gray-400 mt-1">Средние метрики</div>
         </div>
       </div>
+
+      <!-- Воронки генерации (успех/провал по стадиям) -->
+      <AdminFunnelsCard />
 
       <!-- Поиск -->
       <div class="flex items-center gap-4 mb-4">

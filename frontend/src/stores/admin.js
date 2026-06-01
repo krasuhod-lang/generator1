@@ -137,6 +137,17 @@ export const useAdminStore = defineStore('admin', () => {
     return data; // { task, source, sourceLabel }
   }
 
+  // ── Воронки генерации (generation_funnels, мигр. 054) ────────────────
+  async function fetchFunnels({ kind = null, from = null, to = null } = {}) {
+    const q = new URLSearchParams();
+    if (kind) q.set('kind', kind);
+    if (from) q.set('from', from);
+    if (to) q.set('to', to);
+    const qs = q.toString();
+    const { data } = await adminApi.get(`/admin/funnels${qs ? `?${qs}` : ''}`);
+    return data; // { range, kind, summary, stages, stage_reasons, fail_reasons }
+  }
+
   return {
     adminToken,
     adminUser,
@@ -158,5 +169,6 @@ export const useAdminStore = defineStore('admin', () => {
     fetchAdminTaskLogs,
     fetchAdminAllTasks,
     fetchAdminCrossTask,
+    fetchFunnels,
   };
 });

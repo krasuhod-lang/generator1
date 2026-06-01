@@ -660,12 +660,157 @@ async function getCrossTaskDetail(req, res, next) {
     );
     if (!rows.length) return res.status(404).json({ error: 'Задача не найдена' });
 
+    return res.json({ task: rows[0], source, sourceLabel: src.label });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin: Воронки генерации (generation_funnels) — учёт успешных/неуспешных
+// «связок» (стадий) каждой генерации с детализацией каждой воронки.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FUNNEL_KINDS = new Set([
+  'info_article', 'link_article', 'meta_tags', 'relevance',
+  'article_topics', 'forecaster', 'super_core_seo',
+]);
+
+function _parseFunnelRange(query) {
+  const now = Date.now();
+  let to = Date.parse(query.to);
+  if (!Number.isFinite(to)) to = now;
+  let from = Date.parse(query.from);
+  if (!Number.isFinite(from)) from = to - 30 * 24 * 60 * 60 * 1000; // 30 дней по умолчанию
+  // Гарантируем from < to.
+  if (from >= to) from = to - 24 * 60 * 60 * 1000;
+  return { from: new Date(from).toISOString(), to: new Date(to).toISOString() };
+}
+
+/**
+ * GET /api/admin/funnels?kind=&from=&to=
+ * Возвращает пошаговую воронку по каждому kind (или одному, если задан),
+ * conversion-rate по стадиям, топ причин отказов и стоимость/латентность
+ * успешной vs неуспешной генерации. Все запросы параметризованы.
+ */
+async function getFunnelBreakdown(req, res, next) {
+  try {
+    const { from, to } = _parseFunnelRange(req.query || {});
+    const kind = (req.query && typeof req.query.kind === 'string' && FUNNEL_KINDS.has(req.query.kind))
+      ? req.query.kind : null;
+
+    const params = [from, to];
+    let kindClause = '';
+    if (kind) { params.push(kind); kindClause = ` AND kind = $3`; }
+
+    // 1. Сводка по kind: всего / completed / failed / partial + стоимость и
+    //    латентность отдельно для успешных и неуспешных генераций.
+    const summary = await db.query(
+      `SELECT
+         kind,
+         COUNT(*)::int                                            AS total,
+         COUNT(*) FILTER (WHERE status = 'completed')::int        AS completed,
+         COUNT(*) FILTER (WHERE status = 'failed')::int           AS failed,
+         COUNT(*) FILTER (WHERE status = 'partial')::int          AS partial,
+         COALESCE(AVG(total_cost_usd) FILTER (WHERE status = 'completed'), 0)::numeric(12,6) AS avg_cost_completed,
+         COALESCE(AVG(total_cost_usd) FILTER (WHERE status = 'failed'),    0)::numeric(12,6) AS avg_cost_failed,
+         COALESCE(AVG(duration_ms)    FILTER (WHERE status = 'completed'), 0)::bigint        AS avg_duration_completed,
+         COALESCE(AVG(duration_ms)    FILTER (WHERE status = 'failed'),    0)::bigint        AS avg_duration_failed
+       FROM generation_funnels
+       WHERE created_at >= $1 AND created_at < $2${kindClause}
+       GROUP BY kind
+       ORDER BY total DESC`,
+      params,
+    );
+
+    // 2. Пошаговая разбивка (unnest report.stages): сколько связок по каждой
+    //    стадии и исходу — основа для conversion-rate по стадиям.
+    const stages = await db.query(
+      `SELECT
+         gf.kind                       AS kind,
+         st->>'stage'                  AS stage,
+         st->>'outcome'                AS outcome,
+         COUNT(*)::int                 AS n
+       FROM generation_funnels gf,
+            jsonb_array_elements(COALESCE(gf.report->'stages', '[]'::jsonb)) AS st
+       WHERE gf.created_at >= $1 AND gf.created_at < $2${kindClause}
+       GROUP BY gf.kind, st->>'stage', st->>'outcome'`,
+      params,
+    );
+
+    // 3. Топ причин отказов на стадию (fail/retry со заполненным reason).
+    const reasons = await db.query(
+      `SELECT
+         gf.kind        AS kind,
+         st->>'stage'   AS stage,
+         st->>'reason'  AS reason,
+         COUNT(*)::int  AS n
+       FROM generation_funnels gf,
+            jsonb_array_elements(COALESCE(gf.report->'stages', '[]'::jsonb)) AS st
+       WHERE gf.created_at >= $1 AND gf.created_at < $2${kindClause}
+         AND st->>'outcome' IN ('fail', 'retry')
+         AND st->>'reason' IS NOT NULL
+       GROUP BY gf.kind, st->>'stage', st->>'reason'
+       ORDER BY n DESC`,
+      params,
+    );
+
+    // 4. Топ причин обрыва воронки (funnel-level fail_reason).
+    const failReasons = await db.query(
+      `SELECT kind, fail_reason AS reason, COUNT(*)::int AS n
+         FROM generation_funnels
+        WHERE created_at >= $1 AND created_at < $2${kindClause}
+          AND status <> 'completed' AND fail_reason IS NOT NULL
+        GROUP BY kind, fail_reason
+        ORDER BY n DESC`,
+      params,
+    );
+
+    // Сборка пошаговой воронки по kind: сохраняем порядок появления стадий и
+    // считаем conversion (ok / всего связок этой стадии).
+    const funnelsByKind = {};
+    for (const row of stages.rows) {
+      const k = row.kind;
+      if (!funnelsByKind[k]) funnelsByKind[k] = {};
+      const s = funnelsByKind[k][row.stage] || { stage: row.stage, ok: 0, fail: 0, skipped: 0, retry: 0, total: 0 };
+      const n = Number(row.n) || 0;
+      if (row.outcome === 'ok' || row.outcome === 'fail' || row.outcome === 'skipped' || row.outcome === 'retry') {
+        s[row.outcome] += n;
+      }
+      s.total += n;
+      funnelsByKind[k][row.stage] = s;
+    }
+    const stagesList = {};
+    for (const k of Object.keys(funnelsByKind)) {
+      stagesList[k] = Object.values(funnelsByKind[k]).map((s) => ({
+        ...s,
+        conversion_pct: s.total ? Number(((s.ok / s.total) * 100).toFixed(1)) : 0,
+      }));
+    }
+
+    // Причины по стадии → компактная карта { kind: { stage: [{reason,n}] } }.
+    const reasonsByKindStage = {};
+    for (const row of reasons.rows) {
+      const k = row.kind;
+      reasonsByKindStage[k] = reasonsByKindStage[k] || {};
+      reasonsByKindStage[k][row.stage] = reasonsByKindStage[k][row.stage] || [];
+      reasonsByKindStage[k][row.stage].push({ reason: row.reason, n: Number(row.n) || 0 });
+    }
+
     return res.json({
-      task: rows[0],
-      source,
-      sourceLabel: src.label,
+      range: { from, to },
+      kind: kind || 'all',
+      summary: summary.rows,
+      stages: stagesList,
+      stage_reasons: reasonsByKindStage,
+      fail_reasons: failReasons.rows,
     });
   } catch (err) {
+    // Если таблицы ещё нет (миграция не применена) — отдаём пустой каркас,
+    // чтобы админка не падала.
+    if (err && /generation_funnels/.test(String(err.message))) {
+      return res.json({ range: null, kind: 'all', summary: [], stages: {}, stage_reasons: {}, fail_reasons: [], note: 'generation_funnels table not initialized' });
+    }
     next(err);
   }
 }
@@ -682,4 +827,5 @@ module.exports = {
   getModelComparison,
   getUserAllTasks,
   getCrossTaskDetail,
+  getFunnelBreakdown,
 };

@@ -15,6 +15,7 @@ const {
   getModelComparison,
   getUserAllTasks,
   getCrossTaskDetail,
+  getFunnelBreakdown,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -57,5 +58,9 @@ router.get('/cross-tasks/:source/:id', apiLimiter, adminAuth, getCrossTaskDetail
 
 // Model quality comparison — агрегат quality_score по моделям (миграция 037).
 router.get('/model-comparison',   apiLimiter, adminAuth, getModelComparison);
+
+// Воронки генерации — пошаговая воронка по kind, conversion-rate, причины
+// отказов, стоимость/латентность success vs fail (generation_funnels, мигр. 054).
+router.get('/funnels',            apiLimiter, adminAuth, getFunnelBreakdown);
 
 module.exports = router;
