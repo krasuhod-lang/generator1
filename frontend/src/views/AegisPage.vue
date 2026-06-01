@@ -120,6 +120,7 @@ async function dispatchSeoActions() {
 
       <section v-if="status" class="card">
         <h2>Подсистемы</h2>
+        <div class="table-wrap">
         <table class="grid">
           <thead>
             <tr><th>Подсистема</th><th>Включена</th><th>Health</th><th>Параметры</th></tr>
@@ -175,6 +176,7 @@ async function dispatchSeoActions() {
             </tr>
           </tbody>
         </table>
+        </div>
       </section>
 
       <section v-if="status" class="card">
@@ -240,6 +242,7 @@ async function dispatchSeoActions() {
           <span class="badge badge-info" v-if="status.brain_state.health.always_on">♾️ всегда онлайн</span>
           <span class="subtle">{{ status.brain_state.health.reason }}</span>
         </div>
+        <div class="table-wrap">
         <table class="grid fixed">
           <thead>
             <tr><th>Файл</th><th>Назначение</th><th class="num">Вес</th><th class="num">Статус</th></tr>
@@ -264,6 +267,7 @@ async function dispatchSeoActions() {
             </tr>
           </tfoot>
         </table>
+        </div>
         <p v-if="status.brain_state.health.missing?.length" class="subtle">
           ⚠ Отсутствуют файлы: <code>{{ status.brain_state.health.missing.join(', ') }}</code>
           (норма для свежей установки — создаются первым retrain'ом).
@@ -282,7 +286,8 @@ async function dispatchSeoActions() {
           в стабильные симптомы. Источник — таблица <code>aegis_quality_log</code>,
           куда пишется КАЖДАЯ генерация (даже не прошедшая гейт SPQ ≥ {{ minOverall }}).
         </p>
-        <table v-if="topFailures.length" class="grid">
+        <div v-if="topFailures.length" class="table-wrap">
+        <table class="grid">
           <thead>
             <tr>
               <th>Симптом</th>
@@ -308,6 +313,7 @@ async function dispatchSeoActions() {
             </tr>
           </tbody>
         </table>
+        </div>
         <p v-else class="subtle">
           Пока пусто. После первой завершённой генерации запись появится в
           <code>aegis_quality_log</code>, и симптомы будут сгруппированы здесь.
@@ -316,7 +322,8 @@ async function dispatchSeoActions() {
 
       <section class="card">
         <h2>Последние запуски ({{ runs.length }})</h2>
-        <table v-if="runs.length" class="grid">
+        <div v-if="runs.length" class="table-wrap">
+        <table class="grid">
           <thead>
             <tr>
               <th>Когда</th><th>Тип</th><th>Spq</th>
@@ -336,6 +343,7 @@ async function dispatchSeoActions() {
             </tr>
           </tbody>
         </table>
+        </div>
         <p v-else class="subtle">Пока пусто. Запусков ещё не было.</p>
       </section>
 
@@ -384,6 +392,7 @@ async function dispatchSeoActions() {
 
       <section v-if="status" class="card">
         <h2>🧩 Что можно реализовать на сайте из функций AEGIS</h2>
+        <div class="table-wrap">
         <table class="grid">
           <thead><tr><th>Функция</th><th>Статус</th><th>Польза</th></tr></thead>
           <tbody>
@@ -394,6 +403,7 @@ async function dispatchSeoActions() {
             </tr>
           </tbody>
         </table>
+        </div>
       </section>
 
       <section v-if="status" class="card">
@@ -406,7 +416,8 @@ async function dispatchSeoActions() {
           analysis: {{ status.prompt_audit?.analysis_prompts ?? 0 }} ·
           изменений за 7 дней: <strong>{{ status.prompt_audit?.changes_7d ?? 0 }}</strong>
         </p>
-        <table v-if="promptLog.length" class="grid fixed prompts-log">
+        <div v-if="promptLog.length" class="table-wrap">
+        <table class="grid fixed prompts-log">
           <thead>
             <tr><th>Когда</th><th>Промт</th><th>Роль</th><th>DSPy</th><th>Hash</th><th>Что изменилось · зачем · что стало лучше</th></tr>
           </thead>
@@ -433,6 +444,7 @@ async function dispatchSeoActions() {
             </tr>
           </tbody>
         </table>
+        </div>
         <p v-else class="subtle">История появится после первого сканирования /api/aegis/status.</p>
       </section>
 
@@ -466,6 +478,7 @@ async function dispatchSeoActions() {
           </div>
           <div v-if="seoBrain.snapshot.action_plan?.actions?.length">
             <h3>Top-10 actions</h3>
+            <div class="table-wrap">
             <table class="grid">
               <thead>
                 <tr><th>Priority</th><th>Type</th><th>Target</th><th>Risk</th><th>Status</th></tr>
@@ -480,6 +493,7 @@ async function dispatchSeoActions() {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
           <div class="row" style="margin-top: 0.75rem;">
             <button class="btn" @click="dispatchSeoActions" :disabled="seoDispatchBusy">
@@ -492,7 +506,8 @@ async function dispatchSeoActions() {
 
       <section class="card">
         <h2>📜 История обновлений мозга</h2>
-        <table v-if="versions.length" class="grid fixed">
+        <div v-if="versions.length" class="table-wrap">
+        <table class="grid fixed">
           <thead>
             <tr>
               <th>Когда</th><th>SHA</th>
@@ -513,6 +528,7 @@ async function dispatchSeoActions() {
             </tr>
           </tbody>
         </table>
+        </div>
         <p v-else class="subtle">Ещё нет ни одного компиляционного цикла.</p>
       </section>
     </div>
@@ -562,9 +578,23 @@ async function dispatchSeoActions() {
 .card strong { color: #f3f4f6; }
 .card em { color: #9ca3af; }
 .grid { width: 100%; border-collapse: collapse; font-size: 0.92rem; color: #e5e7eb; }
+/* Горизонтальный скролл-контейнер: широкие таблицы больше не распирают карточку
+ * и не «вылезают» за её границы — вместо этого внутри появляется аккуратный
+ * скролл, а вёрстка карточки остаётся ровной на любой ширине экрана. */
+.table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 6px;
+}
+/* Таблица внутри скролл-контейнера держит читаемую минимальную ширину,
+ * а на широком экране растягивается на всю карточку. */
+.table-wrap > .grid { min-width: 640px; }
+.table-wrap > .grid.fixed { min-width: 720px; }
 /* fixed layout → ровные колонки, текст переносится вместо распирания таблицы */
 .grid.fixed { table-layout: fixed; }
-.grid.fixed td, .grid.fixed th { overflow-wrap: anywhere; }
+.grid td, .grid th { overflow-wrap: anywhere; word-break: break-word; }
 .grid th, .grid td {
   padding: 8px 12px;
   border-bottom: 1px solid #1f2937;
