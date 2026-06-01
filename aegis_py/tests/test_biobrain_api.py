@@ -27,3 +27,22 @@ def test_biobrain_predict_and_feedback():
     })
     assert f.status_code == 200
     assert "stats" in f.json()
+
+
+def test_biobrain_advice_endpoint():
+    r = client.post("/biobrain/advice", json={"text": "<p>short</p>"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "advice" in data
+    assert isinstance(data["advice"], list)
+
+
+def test_biobrain_feedback_without_features_derives_them():
+    # features omitted → server derives them from text+signals (loop closes).
+    r = client.post("/biobrain/feedback", json={
+        "text": "<h2>Title</h2><p>body 2024</p>",
+        "signals": {"readability": 75, "lsi_coverage": 0.6},
+        "real_spq_overall": 88,
+    })
+    assert r.status_code == 200
+    assert r.json().get("stored") is True

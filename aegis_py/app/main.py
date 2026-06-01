@@ -37,6 +37,7 @@ from . import mutator as mut_mod
 from . import backup as backup_mod
 from . import vector_gc as vector_gc_mod
 from .biobrain.evolver import BioBrainEvolver
+from .biobrain.feature_vector import extract_features
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -52,7 +53,50 @@ app = FastAPI(
     description="Адаптивный движок для генеративных интеллектуальных систем.",
 )
 
-BIOBRAIN = BioBrainEvolver()
+BIOBRAIN = BioBrainEvolver(min_buffer_to_evolve=32)
+
+# ── Autonomous self-evolution loop ───────────────────────────────────
+# Bio-Brain "lives its own life": a daemon thread periodically evolves the
+# best genome from accumulated experience, even when no article is being
+# generated. Interval mirrors Node featureFlags.biobrain.evolveIntervalSec
+# (config lives in code, no new ENV var). The thread only starts on FastAPI
+# startup, so unit tests that build TestClient(app) without the lifespan
+# context never spawn it.
+import threading  # noqa: E402
+
+BIOBRAIN_EVOLVE_INTERVAL_SEC = 300
+_biobrain_stop = threading.Event()
+_biobrain_thread: Optional[threading.Thread] = None
+
+
+def _biobrain_evolve_loop() -> None:
+    # Небольшая задержка перед первой эволюцией, чтобы дать сервису стартовать.
+    while not _biobrain_stop.wait(BIOBRAIN_EVOLVE_INTERVAL_SEC):
+        try:
+            BIOBRAIN.maybe_evolve()
+        except Exception as e:  # pragma: no cover - защитный best-effort
+            log.warning("biobrain autonomous evolve failed: %s", e)
+
+
+@app.on_event("startup")
+def _start_biobrain_loop() -> None:  # pragma: no cover - требует живого сервиса
+    global _biobrain_thread
+    if not BIOBRAIN.available:
+        log.info("biobrain autonomous loop skipped: %s", BIOBRAIN.reason)
+        return
+    if _biobrain_thread is not None:
+        return
+    _biobrain_stop.clear()
+    _biobrain_thread = threading.Thread(
+        target=_biobrain_evolve_loop, name="biobrain-evolve", daemon=True
+    )
+    _biobrain_thread.start()
+    log.info("biobrain autonomous loop started (every %ss)", BIOBRAIN_EVOLVE_INTERVAL_SEC)
+
+
+@app.on_event("shutdown")
+def _stop_biobrain_loop() -> None:  # pragma: no cover
+    _biobrain_stop.set()
 
 
 # ── Утилита: ответ 503 если подсистема не готова ─────────────────────
@@ -312,11 +356,14 @@ def langgraph_run(req: LangGraphRunRequest) -> Dict[str, Any]:
 class BioBrainPredictRequest(BaseModel):
     features: Optional[List[float]] = None
     text: Optional[str] = None
+    signals: Optional[Dict[str, Any]] = None
     threshold_fast_reject: float = 0.35
 
 
 class BioBrainFeedbackRequest(BaseModel):
-    features: List[float]
+    features: Optional[List[float]] = None
+    text: Optional[str] = None
+    signals: Optional[Dict[str, Any]] = None
     predicted: Optional[float] = None
     real_spq_overall: float
     real_eeat: Optional[float] = None
@@ -332,21 +379,45 @@ def biobrain_predict(req: BioBrainPredictRequest) -> Dict[str, Any]:
     return BIOBRAIN.predict(
         features=req.features,
         text=req.text,
+        signals=req.signals,
         threshold_fast_reject=req.threshold_fast_reject,
     )
 
 
 @app.post("/biobrain/feedback")
 def biobrain_feedback(req: BioBrainFeedbackRequest) -> Dict[str, Any]:
+    # Закрываем цикл обучения: если features не переданы, выводим их из
+    # текста/сигналов (тот же детерминированный вектор, что и в predict).
+    feats = req.features
+    if feats is None:
+        feats = extract_features(req.text or "", signals=req.signals)
     stored = BIOBRAIN.record_outcome(
-        features=req.features,
+        features=feats,
         real_spq_overall=req.real_spq_overall,
     )
-    evolved = BIOBRAIN.evolve_step()
+    evolved = BIOBRAIN.maybe_evolve()
     return {
         **stored,
         "evolved": bool(evolved.get("evolved")),
+        "evolve_reason": evolved.get("reason"),
         "stats": BIOBRAIN.stats(),
+    }
+
+
+@app.post("/biobrain/advice")
+def biobrain_advice(req: BioBrainPredictRequest) -> Dict[str, Any]:
+    """JARVIS-style: вернуть ранжированные подсказки для черновика."""
+    pred = BIOBRAIN.predict(
+        features=req.features,
+        text=req.text,
+        signals=req.signals,
+        threshold_fast_reject=req.threshold_fast_reject,
+    )
+    return {
+        "score": pred.get("score"),
+        "gate": pred.get("gate"),
+        "confidence": pred.get("confidence"),
+        "advice": pred.get("advice"),
     }
 
 

@@ -1322,19 +1322,29 @@ async function processInfoArticleTask(taskId) {
       await appendLog(taskId, `⚠ Остались ${writerIssues.length} замечаний после первичного writer`, 'warn');
     }
     let bioFastReject = false;
+    let bioFeatures = null;
     try {
       const br = await biobrainClient.predict({ text: articleHtml, features: null });
       if (br.ok && br.body) {
         const score = Number(br.body.score);
         const gate = br.body.gate || 'pass';
         bioFastReject = gate === 'fast_reject';
+        // Запоминаем точный вектор признаков, на котором мозг сделал
+        // прогноз, чтобы обучить его на ТОМ ЖЕ векторе по реальному SPQ
+        // (закрываем цикл predict → реальный исход → feedback).
+        if (Array.isArray(br.body.features)) bioFeatures = br.body.features;
+        try { require('../aegis/telemetry').recordBiobrainPrediction({ gate }); } catch (_) {}
+        const advice = Array.isArray(br.body.advice) ? br.body.advice : [];
         await appendLog(
           taskId,
-          `🧬 BioBrain: score=${Number.isFinite(score) ? score.toFixed(3) : '—'} gate=${gate}`,
+          `🧬 BioBrain: score=${Number.isFinite(score) ? score.toFixed(3) : '—'} gate=${gate}` +
+            (advice.length ? ` · совет: ${advice[0]}` : ''),
           bioFastReject ? 'warn' : 'info',
         );
       }
     } catch (_) { /* best-effort */ }
+    // Делаем захваченный вектор доступным на этапе feedback (ниже по пайплайну).
+    task.__bioFeatures = bioFeatures;
 
     // 10. Stage 5 (E-E-A-T) + Stage 5b (link audit) — параллельно.
     // Stage 5b пропускается, если link_plan пуст (режим «без перелинковки») —
@@ -1885,7 +1895,8 @@ async function processInfoArticleTask(taskId) {
           });
           const eeat = quality && quality.subscores ? Number(quality.subscores.eeat) : null;
           await biobrainClient.feedback({
-            features: null,
+            features: Array.isArray(task.__bioFeatures) ? task.__bioFeatures : null,
+            text: Array.isArray(task.__bioFeatures) ? null : (articleHtml || null),
             predicted: null,
             real_spq_overall: quality.overall,
             real_eeat: Number.isFinite(eeat) ? eeat : null,

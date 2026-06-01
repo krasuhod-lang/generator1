@@ -31,6 +31,21 @@ const seoDispatchMsg = ref('');
 
 const minOverall = computed(() => status.value?.quality_gate?.min_overall ?? 80);
 
+// Последний совет Bio-Brain (JARVIS-стиль): из status.last_advice или из
+// телеметрии планировщика. Всегда массив строк (возможно пустой).
+const biobrainAdvice = computed(() => {
+  const b = status.value?.biobrain;
+  const fromStatus = b?.status?.last_advice;
+  const fromTel = b?.last_advice;
+  const arr = Array.isArray(fromStatus) && fromStatus.length ? fromStatus
+    : (Array.isArray(fromTel) ? fromTel : []);
+  return arr.filter((x) => typeof x === 'string' && x.trim());
+});
+
+function fmtTime(v) {
+  return v ? new Date(v).toLocaleString() : '—';
+}
+
 function dot(ok) {
   return ok ? '🟢' : '🔴';
 }
@@ -451,10 +466,23 @@ async function dispatchSeoActions() {
       <section v-if="status" class="card">
         <h2>🧬 Bio-Brain</h2>
         <p>Включён: <strong>{{ status.biobrain?.enabled ? '✅' : '⛔' }}</strong></p>
+        <p v-if="status.biobrain?.reason" class="subtle">
+          Почему прочерки: <code>{{ status.biobrain.reason }}</code>
+        </p>
+        <p>Автономная эволюция: <strong>{{ status.biobrain?.auto_evolve_enabled ? '✅ живёт своей жизнью' : '⛔' }}</strong></p>
         <p>Поколение: <strong>{{ status.biobrain?.status?.generation ?? '—' }}</strong></p>
+        <p>Эволюций всего: <strong>{{ status.biobrain?.status?.evolve_count ?? status.biobrain?.evolve_count ?? '—' }}</strong></p>
+        <p>Последняя эволюция: <strong>{{ fmtTime(status.biobrain?.status?.last_evolve_at || status.biobrain?.last_evolve_at) }}</strong></p>
         <p>Нейроны/связи: <strong>{{ status.biobrain?.status?.nodes ?? '—' }}</strong> / <strong>{{ status.biobrain?.status?.connections ?? '—' }}</strong></p>
         <p>Mean fitness: <strong>{{ fmtMaybe(status.biobrain?.status?.mean_fitness, 4) }}</strong></p>
+        <p>Буфер опыта: <strong>{{ status.biobrain?.status?.buffer_size ?? status.biobrain?.buffer_size ?? '—' }}</strong></p>
         <p>Fast-Reject 24ч: <strong>{{ fmtMaybe(status.biobrain?.status?.fast_reject_rate_24h) }}%</strong></p>
+        <div v-if="biobrainAdvice.length" class="biobrain-advice">
+          <p class="subtle">💡 Последний совет ИИ:</p>
+          <ul>
+            <li v-for="(tip, i) in biobrainAdvice" :key="i">{{ tip }}</li>
+          </ul>
+        </div>
       </section>
 
       <section v-if="seoBrain" class="card">

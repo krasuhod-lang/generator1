@@ -238,6 +238,15 @@ const start = async () => {
       } catch (e) {
         console.warn('[Server] AEGIS seoBrainScheduler skipped:', e.message);
       }
+      // 🧬 Bio-Brain — наблюдатель за автономным самообучаемым мозгом.
+      // Сам мозг эволюционирует внутри aegis_py; здесь лишь снимаем
+      // телеметрию для /api/aegis/status. Гейтится biobrain.enabled.
+      try {
+        const { startBiobrainScheduler } = require('./src/services/aegis/biobrainScheduler');
+        startBiobrainScheduler();
+      } catch (e) {
+        console.warn('[Server] AEGIS biobrainScheduler skipped:', e.message);
+      }
     } catch (err) {
       console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
     }

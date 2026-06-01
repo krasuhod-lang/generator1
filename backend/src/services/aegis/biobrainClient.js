@@ -12,25 +12,39 @@ function _cfg() {
   };
 }
 
-async function predict({ features = null, text = null } = {}) {
+async function predict({ features = null, text = null, signals = null } = {}) {
   const c = _cfg();
   if (!c.enabled) return { ok: false, reason: 'disabled' };
   return http.post(c.base, '/biobrain/predict', {
     features,
     text,
+    signals,
     threshold_fast_reject: c.fastRejectThreshold,
   }, { timeoutMs: 5000 });
 }
 
-async function feedback({ features, predicted, real_spq_overall, real_eeat = null } = {}) {
+async function feedback({ features = null, text = null, signals = null, predicted = null, real_spq_overall, real_eeat = null } = {}) {
   const c = _cfg();
   if (!c.enabled) return { ok: false, reason: 'disabled' };
   return http.post(c.base, '/biobrain/feedback', {
     features,
+    text,
+    signals,
     predicted,
     real_spq_overall,
     real_eeat,
   }, { timeoutMs: 10000 });
+}
+
+async function advice({ features = null, text = null, signals = null } = {}) {
+  const c = _cfg();
+  if (!c.enabled) return { ok: false, reason: 'disabled' };
+  return http.post(c.base, '/biobrain/advice', {
+    features,
+    text,
+    signals,
+    threshold_fast_reject: c.fastRejectThreshold,
+  }, { timeoutMs: 5000 });
 }
 
 async function status() {
@@ -39,4 +53,4 @@ async function status() {
   return http.get(c.base, '/biobrain/status', { timeoutMs: 5000 });
 }
 
-module.exports = { predict, feedback, status };
+module.exports = { predict, feedback, advice, status };
