@@ -592,8 +592,11 @@ async function dispatchSeoActions() {
  * а на широком экране растягивается на всю карточку. */
 .table-wrap > .grid { min-width: 640px; }
 .table-wrap > .grid.fixed { min-width: 720px; }
-/* fixed layout → ровные колонки, текст переносится вместо распирания таблицы */
-.grid.fixed { table-layout: fixed; }
+/* Раньше здесь стоял `table-layout: fixed`, но внутри скролл-контейнера
+ * (overflow-x: auto) такие таблицы у части браузеров не перерисовывались
+ * после асинхронной вставки данных Vue — становились видимы только при
+ * наведении на карточку (hover → принудительный repaint). Колонки и так
+ * остаются ровными за счёт word-break ниже, поэтому fixed-раскладка убрана. */
 .grid td, .grid th { overflow-wrap: anywhere; word-break: break-word; }
 .grid th, .grid td {
   padding: 8px 12px;
