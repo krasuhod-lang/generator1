@@ -44,6 +44,22 @@ function fmtMaybe(v, digits = 1) {
   return v == null ? '—' : Number(v).toFixed(digits);
 }
 
+function deltaBadge(direction) {
+  return {
+    grow: 'badge-ok',
+    shrink: 'badge-warn',
+    new: 'badge-info',
+    same: 'badge-wait',
+  }[direction] || 'badge-wait';
+}
+function deltaLabel(detail) {
+  if (!detail) return '—';
+  if (detail.direction === 'new') return 'новый';
+  if (detail.delta_chars == null) return '—';
+  if (detail.delta_chars === 0) return '±0';
+  return (detail.delta_chars > 0 ? '+' : '−') + Math.abs(detail.delta_chars);
+}
+
 async function refresh() {
   loading.value = true;
   error.value   = '';
@@ -182,16 +198,80 @@ async function dispatchSeoActions() {
 
       <section v-if="status?.brain_state?.available" class="card">
         <h2>🧠 Состояние компилированного мозга</h2>
-        <p>Версия: <strong>{{ status.brain_state.version }}</strong></p>
-        <p>Скомпилировано: {{ status.brain_state.compiled_at || '—' }}</p>
-        <p>Mean Spq до/после: {{ fmtPct(status.brain_state.mean_spq_before) }} → {{ fmtPct(status.brain_state.mean_spq_after) }}</p>
-        <p>Модель writer'а: <code>{{ status.brain_state.model_writer || '—' }}</code></p>
+        <div class="kv-grid">
+          <span class="k">Версия</span>
+          <span class="v">
+            <strong>{{ status.brain_state.version }}</strong>
+            <span class="badge" :class="status.brain_state.trained ? 'badge-ok' : 'badge-wait'">
+              {{ status.brain_state.trained ? 'обучен' : 'baseline (ещё не обучен)' }}
+            </span>
+          </span>
+          <span class="k">Скомпилировано</span>
+          <span class="v">{{ status.brain_state.compiled_at || '—' }}</span>
+          <span class="k">Mean Spq до/после</span>
+          <span class="v">{{ fmtPct(status.brain_state.mean_spq_before) }} → {{ fmtPct(status.brain_state.mean_spq_after) }}</span>
+          <span class="k">Trials DSPy</span>
+          <span class="v">{{ status.brain_state.trials_done ?? 0 }}</span>
+          <span class="k">Модель writer'а</span>
+          <span class="v"><code>{{ status.brain_state.model_writer || '—' }}</code></span>
+          <span class="k">Модель критика</span>
+          <span class="v"><code>{{ status.brain_state.model_critic || '—' }}</code></span>
+        </div>
+        <p v-if="status.brain_state.notes" class="notes">{{ status.brain_state.notes }}</p>
       </section>
       <section v-else class="card subtle">
         <h2>🧠 Состояние компилированного мозга</h2>
         <p>Мозг ещё не обучен. Первый DSPy retrain создаст
           <code>brain_state/compiled_writer.yaml</code>. Запустить вручную:
           <code>POST /api/aegis/dspy/retrain</code>.</p>
+      </section>
+
+      <section v-if="status?.brain_state?.structure" class="card">
+        <h2>🔬 Устройство мозга</h2>
+        <p class="subtle">
+          Мозг — это набор локальных файлов в <code>{{ status.brain_state.structure.root }}</code>,
+          которые backend читает <strong>синхронно на каждый запрос</strong> (без сети и внешних
+          зависимостей). Поэтому он доступен 24/7, пока writer-файл на месте и парсится.
+        </p>
+        <div class="health-row">
+          <span class="badge" :class="status.brain_state.health.ok ? 'badge-ok' : 'badge-bad'">
+            {{ status.brain_state.health.ok ? '🟢 работает' : '🔴 сбой' }}
+          </span>
+          <span class="badge badge-info" v-if="status.brain_state.health.always_on">♾️ всегда онлайн</span>
+          <span class="subtle">{{ status.brain_state.health.reason }}</span>
+        </div>
+        <table class="grid fixed">
+          <thead>
+            <tr><th>Файл</th><th>Назначение</th><th class="num">Вес</th><th class="num">Статус</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="f in status.brain_state.structure.files" :key="f.file">
+              <td><code>{{ f.file }}</code></td>
+              <td>{{ f.role }}</td>
+              <td class="num">{{ f.exists ? f.size_human : '—' }}</td>
+              <td class="num">{{ f.exists ? (f.readable ? '🟢' : '🟡') : '⛔' }}</td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="2">
+                <strong>Итого</strong>
+                · снапшотов истории: {{ status.brain_state.structure.history_snapshots }}
+                · файлов: {{ status.brain_state.structure.files_present }}/{{ status.brain_state.structure.files_total }}
+              </td>
+              <td class="num"><strong>{{ status.brain_state.structure.total_human }}</strong></td>
+              <td class="num">—</td>
+            </tr>
+          </tfoot>
+        </table>
+        <p v-if="status.brain_state.health.missing?.length" class="subtle">
+          ⚠ Отсутствуют файлы: <code>{{ status.brain_state.health.missing.join(', ') }}</code>
+          (норма для свежей установки — создаются первым retrain'ом).
+        </p>
+        <p class="subtle">
+          Последнее изменение файлов: {{ status.brain_state.structure.last_modified
+            ? new Date(status.brain_state.structure.last_modified).toLocaleString() : '—' }}
+        </p>
       </section>
 
       <section class="card">
@@ -326,18 +406,30 @@ async function dispatchSeoActions() {
           analysis: {{ status.prompt_audit?.analysis_prompts ?? 0 }} ·
           изменений за 7 дней: <strong>{{ status.prompt_audit?.changes_7d ?? 0 }}</strong>
         </p>
-        <table v-if="promptLog.length" class="grid">
+        <table v-if="promptLog.length" class="grid fixed prompts-log">
           <thead>
-            <tr><th>Когда</th><th>Промт</th><th>Роль</th><th>DSPy</th><th>Hash</th><th>Изменение</th></tr>
+            <tr><th>Когда</th><th>Промт</th><th>Роль</th><th>DSPy</th><th>Hash</th><th>Что изменилось · зачем · что стало лучше</th></tr>
           </thead>
           <tbody>
             <tr v-for="p in promptLog" :key="p.id">
-              <td>{{ new Date(p.changed_at).toLocaleString() }}</td>
+              <td class="nowrap">{{ new Date(p.changed_at).toLocaleString() }}</td>
               <td><code>{{ p.prompt_key }}</code><br><span class="subtle">{{ p.source_path }}</span></td>
               <td>{{ p.role }}</td>
-              <td>{{ p.dspy_linked ? '✅' : '—' }}</td>
+              <td class="num">{{ p.dspy_linked ? '✅' : '—' }}</td>
               <td><code>{{ p.hash_short }}</code></td>
-              <td>{{ p.change_kind }}<span v-if="p.previous_hash_short" class="subtle"> · prev {{ p.previous_hash_short }}</span></td>
+              <td class="detail">
+                <template v-if="p.change_detail">
+                  <div class="d-what">
+                    <span class="badge" :class="deltaBadge(p.change_detail.direction)">{{ deltaLabel(p.change_detail) }}</span>
+                    {{ p.change_detail.what }}
+                  </div>
+                  <div class="d-why subtle">🎯 {{ p.change_detail.why }}</div>
+                  <div class="d-improved subtle">📈 {{ p.change_detail.improved }}</div>
+                </template>
+                <template v-else>
+                  {{ p.change_kind }}<span v-if="p.previous_hash_short" class="subtle"> · prev {{ p.previous_hash_short }}</span>
+                </template>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -400,21 +492,24 @@ async function dispatchSeoActions() {
 
       <section class="card">
         <h2>📜 История обновлений мозга</h2>
-        <table v-if="versions.length" class="grid">
+        <table v-if="versions.length" class="grid fixed">
           <thead>
             <tr>
               <th>Когда</th><th>SHA</th>
-              <th>Spq до/после</th><th>Δ %</th><th>Trials</th><th>$</th>
+              <th class="num">Spq до/после</th><th class="num">Δ %</th><th class="num">Trials</th><th class="num">$</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="v in versions" :key="v.id">
-              <td>{{ new Date(v.deployed_at).toLocaleString() }}</td>
-              <td><code>{{ (v.sha || '').slice(0, 7) }}</code></td>
-              <td>{{ fmtPct(v.mean_spq_before) }} → {{ fmtPct(v.mean_spq_after) }}</td>
-              <td>{{ fmtPct(v.improvement_pct) }}</td>
-              <td>{{ v.trials_done || '—' }}</td>
-              <td>{{ fmtUsd(v.cost_usd) }}</td>
+              <td class="nowrap">
+                {{ v.deployed_at ? new Date(v.deployed_at).toLocaleString() : '—' }}
+                <span v-if="v.is_baseline" class="badge badge-info">baseline</span>
+              </td>
+              <td><code>{{ v.is_baseline ? 'v' + (status?.brain_state?.version ?? 1) : (v.sha || '').slice(0, 7) }}</code></td>
+              <td class="num">{{ fmtPct(v.mean_spq_before) }} → {{ fmtPct(v.mean_spq_after) }}</td>
+              <td class="num">{{ fmtPct(v.improvement_pct) }}</td>
+              <td class="num">{{ v.trials_done || '—' }}</td>
+              <td class="num">{{ fmtUsd(v.cost_usd) }}</td>
             </tr>
           </tbody>
         </table>
@@ -442,8 +537,10 @@ async function dispatchSeoActions() {
   background: #374151;
   color: #f9fafb;
   cursor: pointer;
+  transition: background 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
 }
-.btn:hover:not(:disabled) { background: #4b5563; }
+.btn:hover:not(:disabled) { background: #4b5563; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.5; cursor: wait; }
 .card {
   background: #111827;
@@ -452,6 +549,12 @@ async function dispatchSeoActions() {
   padding: 16px 20px;
   margin-bottom: 16px;
   color: #e5e7eb;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+.card:hover {
+  border-color: #374151;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  transform: translateY(-2px);
 }
 .card.subtle { background: #0b1220; }
 .card h2 { margin-top: 0; font-size: 1.1rem; color: #f9fafb; }
@@ -459,13 +562,43 @@ async function dispatchSeoActions() {
 .card strong { color: #f3f4f6; }
 .card em { color: #9ca3af; }
 .grid { width: 100%; border-collapse: collapse; font-size: 0.92rem; color: #e5e7eb; }
+/* fixed layout → ровные колонки, текст переносится вместо распирания таблицы */
+.grid.fixed { table-layout: fixed; }
+.grid.fixed td, .grid.fixed th { overflow-wrap: anywhere; }
 .grid th, .grid td {
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid #1f2937;
   text-align: left;
+  vertical-align: top;
 }
-.grid th { background: #1f2937; color: #f9fafb; }
+.grid th { background: #1f2937; color: #f9fafb; font-weight: 600; }
+.grid th.num, .grid td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.grid td.nowrap { white-space: nowrap; }
+.grid tfoot td { border-top: 2px solid #374151; background: #0b1220; }
+.grid tbody tr { transition: background 0.15s ease; }
 .grid tbody tr:hover { background: #1f2937; }
+/* key→value сетка для аккуратного выравнивания состояния мозга */
+.kv-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  align-items: baseline;
+  margin: 4px 0;
+}
+.kv-grid .k { color: #9ca3af; }
+.kv-grid .v { color: #e5e7eb; }
+.notes {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-left: 3px solid #374151;
+  background: #0b1220;
+  color: #cbd5e1;
+  white-space: pre-line;
+  border-radius: 0 6px 6px 0;
+}
+.health-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 12px; }
+.prompts-log .detail { line-height: 1.45; }
+.prompts-log .d-why, .prompts-log .d-improved { margin-top: 2px; font-size: 0.86rem; }
 .ok  { color: #4ade80; font-weight: 600; }
 .bad { color: #f87171; font-weight: 600; }
 .err {
@@ -485,7 +618,14 @@ async function dispatchSeoActions() {
   color: #bfdbfe;
   border: 1px solid #374151;
   font-size: 0.82rem;
+  transition: transform 0.15s ease, filter 0.15s ease;
 }
+.badge:hover { transform: translateY(-1px); filter: brightness(1.15); }
+.badge-ok   { background: rgba(34, 197, 94, 0.15); color: #86efac; border-color: rgba(34, 197, 94, 0.4); }
+.badge-bad  { background: rgba(244, 63, 94, 0.15); color: #fca5a5; border-color: rgba(244, 63, 94, 0.4); }
+.badge-warn { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border-color: rgba(245, 158, 11, 0.4); }
+.badge-wait { background: rgba(148, 163, 184, 0.12); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.3); }
+.badge-info { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border-color: rgba(59, 130, 246, 0.4); }
 code {
   background: #1f2937;
   color: #e5e7eb;

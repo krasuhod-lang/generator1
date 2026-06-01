@@ -96,6 +96,7 @@ function _maybeCompressWriterPrompt(text) {
   return text;
 }
 const { finalizeByTask } = require('../aegis/backlogHooks');
+const { createFunnelTracker } = require('../aegis/funnelTracker');
 const biobrainClient = require('../aegis/biobrainClient');
 
 // ── SERP-evidence grounding (Phase 1 / P0-2) ──────────────────────────
@@ -195,6 +196,9 @@ const INFO_ARTICLE_LSI_TARGET = (() => {
 
 const IN_PROGRESS = new Set();
 const CURRENT_STAGE = new Map();
+// Реестр воронок генерации по taskId — setStage() автоматически отмечает
+// переход стадии в funnel.step(). Регистрируется в processInfoArticleTask.
+const FUNNELS = new Map();
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -211,6 +215,8 @@ async function appendLog(taskId, msg, level = 'info') {
 
 async function setStage(taskId, stageName, progressPct) {
   CURRENT_STAGE.set(taskId, stageName);
+  const funnel = FUNNELS.get(taskId);
+  if (funnel) { try { funnel.step(stageName); } catch (_e) { /* analytics must not break generation */ } }
   try {
     await db.query(
       `UPDATE info_article_tasks
@@ -1049,11 +1055,15 @@ async function processInfoArticleTask(taskId) {
   if (IN_PROGRESS.has(taskId)) return;
   IN_PROGRESS.add(taskId);
   let geminiCacheName = null;
+  let funnel = null;
 
   try {
     const { rows } = await db.query(`SELECT * FROM info_article_tasks WHERE id = $1`, [taskId]);
     const task = rows[0];
     if (!task) { console.error(`[infoArticle] task ${taskId} not found`); return; }
+
+    funnel = createFunnelTracker({ kind: 'info_article', taskRef: taskId, userId: task.user_id, niche: task.topic || null });
+    FUNNELS.set(taskId, funnel);
 
     await db.query(
       `UPDATE info_article_tasks
@@ -1916,6 +1926,7 @@ async function processInfoArticleTask(taskId) {
     );
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
+    try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
     try {
       const { rows } = await db.query(
         `SELECT quality_score FROM info_article_tasks WHERE id = $1`,
@@ -1937,6 +1948,7 @@ async function processInfoArticleTask(taskId) {
     }
   } catch (err) {
     console.error(`[infoArticle] task ${taskId} failed:`, err);
+    if (funnel) { try { await funnel.finish({ status: 'failed', error: err }); } catch (_e) { /* no-op */ } }
     try {
       await db.query(
         `UPDATE info_article_tasks
@@ -1962,6 +1974,7 @@ async function processInfoArticleTask(taskId) {
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    FUNNELS.delete(taskId);
     // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState
     // в callLLM аккумулирует записи для всех когда-либо запущенных задач
     // (утечка памяти, ~120 байт на задачу × тысячи прогонов).

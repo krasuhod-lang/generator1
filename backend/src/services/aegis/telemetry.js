@@ -135,6 +135,10 @@ const M = {
   seoMemoryBytes:      gauge('aegis_seo_memory_pages_bytes',              'Size of aegis_seo_memory.pages JSON', ['site']),
   statusCacheHits:     counter('aegis_status_cache_hits_total',            'Promptaudit scan cache hits',        ['kind']),
   seoActionsDispatched: counter('aegis_seo_actions_dispatched_total',      'SEO actions auto-dispatched to GitHub backlog', ['outcome']),
+  // Воронки генерации — успешные/неуспешные связки по стадиям.
+  funnelStage:        counter('gen_funnel_stage_total',                    'Generation funnel stage outcomes', ['kind', 'stage', 'outcome']),
+  funnelStageReason:  counter('gen_funnel_stage_reason_total',             'Generation funnel stage failure reasons', ['kind', 'stage', 'reason']),
+  funnelStageLatency: histogram('gen_funnel_stage_latency_ms',             'Generation funnel stage latency (ms)', DEFAULT_BUCKETS_MS, ['kind', 'stage']),
 };
 
 /**
@@ -153,6 +157,23 @@ function recordLlmCall(meta = {}) {
   }
   if (meta.latencyMs != null) M.latency.observe(meta.latencyMs, { provider });
   M.requests.inc(1, { provider, outcome: meta.outcome || 'ok' });
+}
+
+/**
+ * recordFunnelStage({ kind, stage, outcome, reason, durationMs }) — одна
+ * «связка» воронки генерации. Безопасен при выключенной телеметрии (no-op).
+ */
+function recordFunnelStage(meta = {}) {
+  const kind    = String(meta.kind  || 'unknown');
+  const stage   = String(meta.stage || 'unknown');
+  const outcome = String(meta.outcome || 'ok');
+  M.funnelStage.inc(1, { kind, stage, outcome });
+  if ((outcome === 'fail' || outcome === 'retry') && meta.reason) {
+    M.funnelStageReason.inc(1, { kind, stage, reason: String(meta.reason) });
+  }
+  if (meta.durationMs != null) {
+    M.funnelStageLatency.observe(meta.durationMs, { kind, stage });
+  }
 }
 
 /** snapshot() — машинно-читаемый JSON всех метрик. */
@@ -249,7 +270,7 @@ function stopOtlpPusher() {
 
 module.exports = {
   counter, gauge, histogram,
-  M, recordLlmCall,
+  M, recordLlmCall, recordFunnelStage,
   snapshot, toPrometheus,
   startOtlpPusher, stopOtlpPusher,
   _resetForTests,

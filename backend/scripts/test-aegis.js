@@ -118,7 +118,7 @@ async function main() {
   });
 
   console.log('\n[aegis/brainStateRegistry]');
-  const { _parseSimpleYaml } = require('../src/services/aegis/brainStateRegistry');
+  const { _parseSimpleYaml, _humanBytes, getBrainSummary, getBrainStructure } = require('../src/services/aegis/brainStateRegistry');
   test('parses nested keys', () => {
     const y = _parseSimpleYaml('version: 2\nwriter:\n  model: gemini-3.5\n  trials: 17\n');
     assert.strictEqual(y.version, 2);
@@ -128,6 +128,46 @@ async function main() {
   test('parses multi-line block', () => {
     const y = _parseSimpleYaml('notes: |\n  line one\n  line two\n');
     assert.strictEqual(y.notes, 'line one\nline two');
+  });
+  test('_humanBytes formats B/KB/MB', () => {
+    assert.strictEqual(_humanBytes(512), '512 B');
+    assert.strictEqual(_humanBytes(2048), '2.0 KB');
+    assert.strictEqual(_humanBytes(5 * 1024 * 1024), '5.00 MB');
+    assert.strictEqual(_humanBytes(null), '—');
+  });
+  test('getBrainStructure reports files with sizes and totals', () => {
+    const st = getBrainStructure();
+    assert.ok(Array.isArray(st.files) && st.files.length >= 1);
+    assert.ok(st.files.every((f) => typeof f.size_human === 'string'));
+    assert.strictEqual(typeof st.total_human, 'string');
+    assert.ok(st.files_total >= st.files_present);
+  });
+  test('getBrainSummary exposes health, trials and critic model', () => {
+    const s = getBrainSummary();
+    assert.ok(s.health && typeof s.health.always_on === 'boolean');
+    assert.strictEqual(typeof s.trials_done, 'number');
+    assert.ok('model_critic' in s);
+    assert.ok(s.structure && typeof s.structure.total_bytes === 'number');
+  });
+
+  console.log('\n[aegis/promptAudit describePromptChange]');
+  const { describePromptChange } = require('../src/services/aegis/promptAudit');
+  test('growth of dspy-linked writer prompt is reported as improvement', () => {
+    const d = describePromptChange({ change_kind: 'changed', role: 'writer', dspy_linked: true, content_chars: 460, previous_content_chars: 340 });
+    assert.strictEqual(d.delta_chars, 120);
+    assert.strictEqual(d.direction, 'grow');
+    assert.match(d.what, /\+120/);
+    assert.match(d.why, /DSPy/);
+  });
+  test('created prompt has new direction and null delta', () => {
+    const d = describePromptChange({ change_kind: 'created', role: 'analysis', dspy_linked: true, content_chars: 200, previous_content_chars: null });
+    assert.strictEqual(d.direction, 'new');
+    assert.strictEqual(d.delta_chars, null);
+  });
+  test('non-dspy prompt is not tracked for Spq', () => {
+    const d = describePromptChange({ change_kind: 'changed', role: 'site_assistant', dspy_linked: false, content_chars: 100, previous_content_chars: 150 });
+    assert.strictEqual(d.direction, 'shrink');
+    assert.match(d.improved, /не отслеживается/);
   });
 
   console.log('\n[aegis/deepseekMutator]');

@@ -23,6 +23,7 @@ const rawStorage          = require('./rawStorage');
 const { splitBySerp }     = require('./aggregatorDomains');
 const aegisHooks          = require('./aegisHooks');
 const { finalizeByTask }   = require('../aegis/backlogHooks');
+const { createFunnelTracker } = require('../aegis/funnelTracker');
 
 /**
  * Возвращает «канонический» хост для дедупликации SERP по домену.
@@ -142,8 +143,11 @@ async function processRelevanceReport(reportId) {
   }
   const { query, lr, top_n: topN, our_url: ourUrl, exclude_aggregators: excludeAggregators } = rows[0];
 
+  const funnel = createFunnelTracker({ kind: 'relevance', taskRef: reportId, niche: query || null });
+
   try {
     // ── 1. SERP ──────────────────────────────────────────────────────────
+    funnel.step('serp');
     await _setStage(reportId, 'serp', { status: 'fetching', started: true });
 
     const serpRaw = await fetchYandexSerp(query, { lr: lr || '', pages: 2 });
@@ -269,6 +273,7 @@ async function processRelevanceReport(reportId) {
         + `extendedFromPage3=${extendedFromPage3}`,
       );
     }
+    funnel.step('fetching_pages');
     await _setStage(reportId, 'fetching_pages', { serp });
 
     // ── 2. Скачивание HTML ───────────────────────────────────────────────
@@ -294,6 +299,7 @@ async function processRelevanceReport(reportId) {
       aegisHooks.emitPagesTelemetry({ ok: kept.length, dropped });
     } catch (_) { /* graceful */ }
 
+    funnel.step('analyzing');
     await _setStage(reportId, 'analyzing', {
       status: 'analyzing',
       fetched_count: successes.length,
@@ -401,6 +407,7 @@ async function processRelevanceReport(reportId) {
     let comparisonReport = null;
     if (ourUrl && (analysisResp?.vocabulary?.length || 0) > 0) {
       try {
+        funnel.step('comparing');
         await _setStage(reportId, 'comparing');
         const ourResult = await _runComparison({
           ourUrl,
@@ -423,6 +430,7 @@ async function processRelevanceReport(reportId) {
       our_report: ourReport,
       comparison: comparisonReport,
     });
+    funnel.step('finalize');
     try {
       await finalizeByTask({
         table: 'relevance_reports',
@@ -431,6 +439,7 @@ async function processRelevanceReport(reportId) {
         taskKind: 'relevance',
       });
     } catch (_) { /* no-op */ }
+    try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
 
     // Aegis Phase 14: после успеха зачистим эфемерные точки этого
     // прогона в Qdrant (если evidence/SERP-документы туда индексировались
@@ -450,6 +459,7 @@ async function processRelevanceReport(reportId) {
         taskKind: 'relevance',
       });
     } catch (_) { /* no-op */ }
+    try { await funnel.finish({ status: 'failed', error: err }); } catch (_e) { /* no-op */ }
   }
 }
 
