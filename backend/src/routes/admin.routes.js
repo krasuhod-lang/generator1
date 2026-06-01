@@ -16,6 +16,7 @@ const {
   getUserAllTasks,
   getCrossTaskDetail,
   getFunnelBreakdown,
+  getAegisCostBreakdown,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -62,5 +63,10 @@ router.get('/model-comparison',   apiLimiter, adminAuth, getModelComparison);
 // Воронки генерации — пошаговая воронка по kind, conversion-rate, причины
 // отказов, стоимость/латентность success vs fail (generation_funnels, мигр. 054).
 router.get('/funnels',            apiLimiter, adminAuth, getFunnelBreakdown);
+
+// Расходы Эгиды по дням — посуточный учёт расхода лимитов мозга (токены,
+// стоимость USD, доля prompt-кэша). Фильтр периода from/to (aegis_llm_usage,
+// мигр. 055).
+router.get('/aegis-costs',        apiLimiter, adminAuth, getAegisCostBreakdown);
 
 module.exports = router;

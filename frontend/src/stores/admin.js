@@ -148,6 +148,16 @@ export const useAdminStore = defineStore('admin', () => {
     return data; // { range, kind, summary, stages, stage_reasons, fail_reasons }
   }
 
+  // ── Расходы Эгиды по дням (aegis_llm_usage, мигр. 055) ───────────────
+  async function fetchAegisCosts({ from = null, to = null } = {}) {
+    const q = new URLSearchParams();
+    if (from) q.set('from', from);
+    if (to) q.set('to', to);
+    const qs = q.toString();
+    const { data } = await adminApi.get(`/admin/aegis-costs${qs ? `?${qs}` : ''}`);
+    return data; // { range, totals, daily, by_provider }
+  }
+
   return {
     adminToken,
     adminUser,
@@ -170,5 +180,6 @@ export const useAdminStore = defineStore('admin', () => {
     fetchAdminAllTasks,
     fetchAdminCrossTask,
     fetchFunnels,
+    fetchAegisCosts,
   };
 });
