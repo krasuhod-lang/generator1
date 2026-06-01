@@ -40,3 +40,21 @@ git commit -m "aegis: rollback writer to <sha>"
 См. `compiled_writer.yaml` — мини-подмножество YAML, читается собственным
 парсером `backend/src/services/aegis/brainStateRegistry.js::_parseSimpleYaml`
 без `js-yaml` зависимости.
+
+## 🧬 Bio-Brain (NEAT) — самообучаемый слой
+
+Помимо скомпилированных yaml-промтов, каталог хранит состояние автономного
+нейроэволюционного слоя Bio-Brain (см. `aegis_py/app/biobrain/`):
+
+- `biobrain_state.json` — поколение, число нейронов/связей, mean fitness,
+  счётчик эволюций и время последней эволюции.
+- `biobrain_best.pkl` — лучший геном NEAT (бинарь, pickle).
+- `biobrain_buffer.json` — буфер опыта (features → реальный SPQ). Создаётся
+  в рантайме и **не коммитится** (см. `.gitignore`), но переживает рестарт.
+
+Bio-Brain «живёт своей жизнью»: фоновый поток в `aegis_py` раз в
+`biobrain.evolveIntervalSec` (по умолчанию 300 c) вызывает `maybe_evolve()` и
+эволюционирует мозг по накопленному опыту, даже когда статьи не генерируются.
+Node-планировщик `aegis/biobrainScheduler.js` лишь снимает телеметрию для
+карточки «🧬 Bio-Brain» в `/aegis`. Конфигурация живёт в коде
+(`backend/src/services/aegis/featureFlags.js` → `biobrain`), без ENV-переменных.
