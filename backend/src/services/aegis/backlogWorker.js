@@ -37,6 +37,24 @@ async function _acquireLock() {
   return Boolean(rows[0] && rows[0].ok);
 }
 
+// DB-level идемпотентность: задача уже отправлена в работу (dispatchBacklogItem
+// проставил status='processing'). Это страховка на случай, когда метки GitHub
+// не применились (githubBot.addLabel/removeLabel при отсутствии прав или сетевой
+// ошибке возвращают {ok:false} БЕЗ исключения, а markIssueInProgress их не
+// проверяет) — иначе тот же issue переотправлялся бы КАЖДЫЙ POLL_MS (60с),
+// порождая новую генерацию (и новые cache-miss LLM-вызовы) каждую минуту.
+async function _alreadyProcessing(issueNumber) {
+  try {
+    const { rows } = await db.query(
+      `SELECT status FROM aegis_backlog WHERE issue_number = $1 LIMIT 1`,
+      [issueNumber],
+    );
+    return rows.length > 0 && rows[0].status === 'processing';
+  } catch (_) {
+    return false;
+  }
+}
+
 async function _releaseLock() {
   try { await db.query(`SELECT pg_advisory_unlock($1)`, [LOCK_KEY]); } catch (_) { /* no-op */ }
 }
@@ -77,6 +95,11 @@ async function runTick() {
 
       const issueNumber = Number(issue.number) || null;
       if (!issueNumber) continue;
+
+      // Если задача уже в работе (status='processing') — не дублируем диспатч,
+      // даже если метки GitHub по какой-то причине остались на 'aegis:ready'.
+      // Это закрывает «протечку» с переотправкой того же issue каждую минуту.
+      if (await _alreadyProcessing(issueNumber)) continue;
 
       await markIssueInProgress(issueNumber);
 
@@ -125,4 +148,4 @@ function stopBacklogWorker() {
   _timer = null;
 }
 
-module.exports = { startBacklogWorker, stopBacklogWorker, runTick, getBacklogTelemetry };
+module.exports = { startBacklogWorker, stopBacklogWorker, runTick, getBacklogTelemetry, _alreadyProcessing };
