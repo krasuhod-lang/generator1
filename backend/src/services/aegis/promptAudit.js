@@ -410,6 +410,65 @@ function buildAutonomySnapshot(flags = {}) {
   };
 }
 
+/**
+ * describePromptChange(row) — детерминированный человекочитаемый отчёт
+ * «что поменялось / зачем / что стало лучше» для одной записи аудита.
+ *
+ * Текст промтов НЕ хранится (только hash + content_chars), поэтому отчёт
+ * строится из метаданных: роль, дельта размера, связь с DSPy-обучением.
+ *
+ * @param {object} row — строка aegis_prompt_audit + previous_content_chars
+ * @returns {{ what:string, why:string, improved:string, delta_chars:(number|null), direction:string }}
+ */
+function describePromptChange(row = {}) {
+  const ROLE_RU = {
+    writer: 'писатель статей',
+    critic: 'критик-аудитор',
+    analysis: 'аналитика/планирование',
+    site_assistant: 'ассистент сайта',
+    prompt: 'служебный промт',
+  };
+  const roleLabel = ROLE_RU[row.role] || row.role || 'промт';
+  const cur = Number(row.content_chars) || 0;
+  const prev = row.previous_content_chars == null ? null : Number(row.previous_content_chars);
+  const delta = prev == null ? null : cur - prev;
+  const direction = delta == null ? 'new' : (delta > 0 ? 'grow' : (delta < 0 ? 'shrink' : 'same'));
+
+  let what;
+  if (row.change_kind === 'created' || prev == null) {
+    what = `Добавлен новый промт (${roleLabel}), ${cur} симв.`;
+  } else if (delta === 0) {
+    what = `Промт переоформлен без изменения объёма (${cur} симв.), роль: ${roleLabel}.`;
+  } else {
+    const sign = delta > 0 ? '+' : '−';
+    what = `Промт ${roleLabel} изменён: ${sign}${Math.abs(delta)} симв. (${prev} → ${cur}).`;
+  }
+
+  let why;
+  if (row.dspy_linked) {
+    why = 'Промт участвует в DSPy-обучении: правка влияет на компиляцию brain_state и метрику Spq.';
+  } else if (row.role === 'site_assistant') {
+    why = 'Промт ассистента сайта: правка меняет ответы пользователям, вне контура DSPy.';
+  } else {
+    why = 'Служебный промт вне контура DSPy: правка не перекомпилирует мозг.';
+  }
+
+  let improved;
+  if (!row.dspy_linked) {
+    improved = 'Эффект на Spq не отслеживается (промт не связан с обучением).';
+  } else if (direction === 'grow') {
+    improved = 'Промт стал подробнее — ожидаем рост полноты/E-E-A-T; итог сверяем по mean Spq следующего retrain.';
+  } else if (direction === 'shrink') {
+    improved = 'Промт упрощён — ожидаем меньше шума/токенов; итог сверяем по mean Spq следующего retrain.';
+  } else if (direction === 'new') {
+    improved = 'Базовая версия — станет точкой отсчёта Spq для последующих правок.';
+  } else {
+    improved = 'Объём не изменился — влияние на Spq сверяем по следующему retrain.';
+  }
+
+  return { what, why, improved, delta_chars: delta, direction };
+}
+
 function buildSiteOpportunities() {
   return [
     { key: 'prompt_change_log', title: 'Лог изменений промтов', status: 'ready', value: 'показывать hash, дату, роль и связь с DSPy' },
@@ -429,6 +488,7 @@ module.exports = {
   getPromptDspyLinkageStats,
   buildAutonomySnapshot,
   buildSiteOpportunities,
+  describePromptChange,
   getPersistDiagnostics,
   promptHashFromText,
   buildPromptMeta,

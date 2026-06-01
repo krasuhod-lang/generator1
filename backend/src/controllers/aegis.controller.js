@@ -337,6 +337,7 @@ async function listRuns(req, res) {
 
 /** GET /api/aegis/brain/versions */
 async function listBrainVersions(req, res) {
+  const current = getBrainSummary();
   try {
     const r = await db.query(
       `SELECT id, yaml_path, sha, mean_spq_before, mean_spq_after,
@@ -345,10 +346,40 @@ async function listBrainVersions(req, res) {
         ORDER BY deployed_at DESC
         LIMIT 50`,
     );
-    res.json({ items: r.rows, current: getBrainSummary() });
+    const items = r.rows;
+    // Точка 2: пока DSPy не записал ни одной версии, таблица пуста и UI
+    // показывает «ещё нет ни одного цикла». Это сбивает с толку — мозг УЖЕ
+    // имеет baseline-состояние (compiled_writer.yaml v1). Синтезируем его как
+    // нулевую запись, чтобы история всегда отражала текущее состояние.
+    if (!items.length && current && current.available) {
+      items.push(_baselineBrainVersion(current));
+    }
+    res.json({ items, current });
   } catch (e) {
-    res.json({ items: [], current: getBrainSummary(), warning: e.message });
+    const items = (current && current.available) ? [_baselineBrainVersion(current)] : [];
+    res.json({ items, current, warning: e.message });
   }
+}
+
+/**
+ * _baselineBrainVersion — синтетическая «версия 0» истории мозга на основе
+ * текущего compiled_writer.yaml. Помечена is_baseline=true, чтобы UI мог
+ * отрисовать её отдельным бейджем и не путать с реальным retrain'ом.
+ */
+function _baselineBrainVersion(current) {
+  return {
+    id: 'baseline',
+    is_baseline: true,
+    yaml_path: current.paths && current.paths.writer,
+    sha: null,
+    mean_spq_before: current.mean_spq_before,
+    mean_spq_after: current.mean_spq_after,
+    improvement_pct: null,
+    trials_done: current.trials_done || 0,
+    dataset_size: null,
+    cost_usd: null,
+    deployed_at: current.compiled_at || (current.health && current.health.last_modified) || null,
+  };
 }
 
 /** GET /api/aegis/prompts/log — история изменения Prompts-as-Code. */
@@ -356,12 +387,23 @@ async function listPromptAuditLog(req, res) {
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
   try {
     await promptAudit.persistCurrentPrompts(db).catch(() => {});
+    // Подтягиваем content_chars предыдущей версии (по previous_hash того же
+    // prompt_key), чтобы посчитать дельту «что поменялось» детерминированно.
     const r = await db.query(
-      `SELECT id, prompt_key, source_path, prompt_hash, previous_hash,
-              change_kind, role, dspy_linked, content_chars, vars,
-              active, first_seen_at, last_seen_at, changed_at
-         FROM aegis_prompt_audit
-        ORDER BY changed_at DESC, id DESC
+      `SELECT a.id, a.prompt_key, a.source_path, a.prompt_hash, a.previous_hash,
+              a.change_kind, a.role, a.dspy_linked, a.content_chars, a.vars,
+              a.active, a.first_seen_at, a.last_seen_at, a.changed_at,
+              prev.content_chars AS previous_content_chars
+         FROM aegis_prompt_audit a
+         LEFT JOIN LATERAL (
+           SELECT p.content_chars
+             FROM aegis_prompt_audit p
+            WHERE p.prompt_key = a.prompt_key
+              AND p.prompt_hash = a.previous_hash
+            ORDER BY p.changed_at DESC, p.id DESC
+            LIMIT 1
+         ) prev ON TRUE
+        ORDER BY a.changed_at DESC, a.id DESC
         LIMIT $1`,
       [limit],
     );
@@ -370,6 +412,7 @@ async function listPromptAuditLog(req, res) {
         ...x,
         hash_short: String(x.prompt_hash || '').slice(0, 12),
         previous_hash_short: String(x.previous_hash || '').slice(0, 12) || null,
+        change_detail: promptAudit.describePromptChange(x),
       })),
     });
   } catch (e) {
