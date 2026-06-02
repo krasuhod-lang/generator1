@@ -120,8 +120,17 @@ app.use('/api/projects',       projectsRoutes);
 app.use('/api/public',         projectsPublicRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
-// Канонический путь — /api/public/projects/gsc/callback.
+// Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
+// как публичный роутер (60 req/min), чтобы не открывать нелимитированную точку.
+const oauthAliasLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000,
+  max:      60,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Слишком много запросов. Попробуйте позже.' },
+});
 app.get('/api/oauth/google/callback',
+  oauthAliasLimiter,
   require('./src/controllers/projects.controller').handleGscCallback);
 app.use('/api/aegis',          aegisRoutes);
 
