@@ -32,6 +32,8 @@ const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 const relevanceRoutes     = require('./src/routes/relevance.routes');
 const forecasterRoutes    = require('./src/routes/forecaster.routes');
 const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
+const projectsRoutes      = require('./src/routes/projects.routes');
+const projectsPublicRoutes = require('./src/routes/projectsPublic.routes');
 const aegisRoutes         = require('./src/routes/aegis.routes');
 
 const app  = express();
@@ -114,6 +116,8 @@ app.use('/api/acf-json',       acfJsonRoutes);
 app.use('/api/relevance',      relevanceRoutes);
 app.use('/api/forecaster',     forecasterRoutes);
 app.use('/api/public',         forecasterPublicRoutes);
+app.use('/api/projects',       projectsRoutes);
+app.use('/api/public',         projectsPublicRoutes);
 app.use('/api/aegis',          aegisRoutes);
 
 // -----------------------------------------------------------------
@@ -1230,6 +1234,61 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS opportunities  JSONB`);
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS expert_reports JSONB`);
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS leads_summary  JSONB`);
+
+    // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google
+    // Search Console (OAuth-токены хранятся строго в зашифрованном виде) +
+    // AI-аналитика DeepSeek + публичный read-only шаринг дашборда.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'project_analysis_status') THEN
+          CREATE TYPE project_analysis_status AS ENUM ('queued','running','done','error');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS projects (
+        id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id                UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name                   TEXT NOT NULL,
+        url                    TEXT NOT NULL,
+        audience_description   TEXT,
+        gsc_connected          BOOLEAN NOT NULL DEFAULT FALSE,
+        gsc_site_url           TEXT,
+        gsc_available_sites    JSONB,
+        gsc_access_token_enc   TEXT,
+        gsc_refresh_token_enc  TEXT,
+        gsc_token_expiry       TIMESTAMPTZ,
+        share_token            TEXT UNIQUE,
+        share_created_at       TIMESTAMPTZ,
+        created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_user_created ON projects (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_share_token  ON projects (share_token) WHERE share_token IS NOT NULL`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_analyses (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status          project_analysis_status NOT NULL DEFAULT 'queued',
+        range_key       TEXT,
+        period_from     DATE,
+        period_to       DATE,
+        report_markdown TEXT,
+        gsc_snapshot    JSONB,
+        llm_model       TEXT,
+        tokens_in       BIGINT NOT NULL DEFAULT 0,
+        tokens_out      BIGINT NOT NULL DEFAULT 0,
+        cost_usd        NUMERIC(12, 6) NOT NULL DEFAULT 0,
+        error_message   TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at      TIMESTAMPTZ,
+        completed_at    TIMESTAMPTZ
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_analyses_project ON project_analyses (project_id, created_at DESC)`);
 
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
