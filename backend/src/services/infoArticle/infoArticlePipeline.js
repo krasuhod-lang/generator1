@@ -737,6 +737,21 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, ima
     { retries: 3, temperature: 0.4, callLabel: `InfoArticle Stage 4 (${N} image prompts)`, ...ctx },
   );
   const prompts = Array.isArray(result?.image_prompts) ? result.image_prompts : [];
+  // style_profile — общий для всей статьи выбор визуального стиля/формата
+  // (stage4_image_prompts.txt оценивает тон статьи и подбирает стиль индивидуально).
+  // Метку дублируем в каждый слот, чтобы все изображения статьи были в едином стиле.
+  const styleProfile = result?.style_profile && typeof result.style_profile === 'object'
+    ? result.style_profile
+    : null;
+  const styleLabel = String(styleProfile?.style_label || '').slice(0, 120);
+  if (task?.id && styleLabel) {
+    await appendLog(
+      task.id,
+      `🎨 Стиль изображений подобран под статью: «${styleLabel}»` +
+        (styleProfile?.rationale ? ` — ${String(styleProfile.rationale).slice(0, 200)}` : ''),
+      'info',
+    );
+  }
   // Берём первые N, перенумеровываем slot=1..N. Если LLM вернул меньше — сколько
   // прислал. Дубль section_h2 (один и тот же H2 в нескольких inline-слотах)
   // схлопываем, сохраняя первый.
@@ -751,6 +766,7 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, ima
     normalized.push({
       slot:            normalized.length + 1,
       section_h2:      h2,
+      style_label:     String(p?.style_label || styleLabel || '').slice(0, 120),
       visual_prompt:   String(p?.visual_prompt   || '').slice(0, 2000),
       negative_prompt: String(p?.negative_prompt || '').slice(0, 400),
       alt_ru:          String(p?.alt_ru          || '').slice(0, 200),

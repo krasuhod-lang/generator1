@@ -610,51 +610,24 @@ async function copyAsHtml() {
   const rawHtml = selectedTask.value?.article_html;
   if (!rawHtml) return;
 
-  // ТЗ: «Скопировать как HTML» должна копировать ТОЛЬКО тело статьи —
-  // без заголовка <h1> и без обложки. Пользователь вставляет полученный
-  // HTML в редактор блога, где заголовок и featured-image задаются
-  // отдельными полями, поэтому дублировать их в теле не нужно (а base64
-  // обложки ещё и раздувает буфер до сотен КБ).
-  // Стрипаем:
-  //   • <h1>…</h1>           — единственный H1 статьи (см. embedImages в
-  //                             backend/src/services/infoArticle/infoArticlePipeline.js,
-  //                             validateWriterOutput гарантирует ровно 1 шт.);
-  //   • <figure …><img …></figure> и одиночные <img>/<picture> — обложку
-  //     info-article-cover с data:image/...;base64,… (embedImages вшивает её
-  //     сразу после </h1>).
-  let html = String(rawHtml);
-  html = html.replace(/<h1\b[^>]*>[\s\S]*?<\/h1\s*>/gi, '');
-  html = html.replace(/<\/?h1\b[^>]*>/gi, '');
-  for (let i = 0; i < 10; i += 1) {
-    const next = html.replace(/<figure\b[^>]*>[\s\S]*?<\/figure\s*>/gi, '');
-    if (next === html) break;
-    html = next;
-  }
-  for (let i = 0; i < 10; i += 1) {
-    const next = html.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
-    if (next === html) break;
-    html = next;
-  }
-  html = html.replace(/<img\b[^>]*\/?>/gi, '');
-  // Подчищаем потенциальные пустые ведущие переводы строк после удалений,
-  // чтобы вставка в редакторе начиналась сразу с первого осмысленного блока.
-  html = html.replace(/^(?:\s|&nbsp;|<br\s*\/?>)+/i, '');
+  // ТЗ (новое): «Скопировать как HTML» должна копировать статью ЦЕЛИКОМ —
+  // вместе с обложкой и иллюстрациями (data:image/...;base64,…), чтобы при
+  // вставке в Word / Google Docs / любой редактор пользователь сразу получил
+  // статью С ИЗОБРАЖЕНИЯМИ, а не только текст. Поэтому изображения и <h1>
+  // больше НЕ вырезаются — кладём исходный HTML статьи как есть.
+  const html = String(rawHtml);
 
-  // ВАЖНО: «Скопировать как HTML» должна класть в буфер именно ИСХОДНЫЙ HTML
-  // как plain-text, чтобы при вставке в WYSIWYG-редактор блог-движка / Word /
-  // Google Docs пользователь получил сам HTML-код (для последующей вставки
-  // через режим «HTML / Текст»), а НЕ отрендеренный «форматированный» вариант.
-  // Раньше мы регистрировали ClipboardItem с MIME 'text/html' — браузер при
-  // вставке выбирал именно эту часть, и большинство блог-редакторов
-  // подставляли уже отформатированный текст вместо разметки. Для копирования
-  // отрендеренного варианта есть отдельная кнопка «Скопировать форматированный
-  // текст» (copyAsFormattedText).
+  // ВАЖНО: «Скопировать как HTML» кладёт в буфер именно ИСХОДНЫЙ HTML как
+  // plain-text, чтобы при вставке в режим «HTML / Текст» редактора пользователь
+  // получил сам HTML-код (с тегами <img>), а не отрендеренный вариант. Для
+  // отрендеренной вставки (картинки + форматирование) есть отдельная кнопка
+  // «Скопировать форматированный текст» (copyAsFormattedText).
 
   // Path A: Async Clipboard API — пишем HTML только как text/plain.
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(html);
-      flashToast('HTML скопирован (вставьте в режим «Текст / HTML» редактора)');
+      flashToast('HTML с изображениями скопирован (вставьте в режим «Текст / HTML» редактора)');
       return;
     }
   } catch (_) { /* fallthrough */ }
@@ -674,7 +647,7 @@ async function copyAsHtml() {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     if (ok) {
-      flashToast('HTML скопирован (вставьте в режим «Текст / HTML» редактора)');
+      flashToast('HTML с изображениями скопирован (вставьте в режим «Текст / HTML» редактора)');
       return;
     }
     throw new Error('execCommand copy вернул false');
@@ -1216,8 +1189,8 @@ onUnmounted(() => { stopTicker(); });
           <!-- TAB: Статья -->
           <div v-if="activeResultTab === 'article'" class="space-y-3">
             <div class="flex flex-wrap gap-2">
-              <button class="btn-primary" @click="copyAsHtml">📋 Скопировать как HTML</button>
-              <button class="btn-ghost border border-gray-700" @click="copyAsFormattedText">📝 Скопировать форматированный текст</button>
+              <button class="btn-primary" @click="copyAsHtml">📋 Скопировать HTML с изображениями</button>
+              <button class="btn-ghost border border-gray-700" @click="copyAsFormattedText">📝 Скопировать форматированный текст (с изображениями)</button>
               <button class="btn-ghost border border-gray-700" @click="downloadHtml">⬇ Скачать .html</button>
             </div>
 
@@ -1236,6 +1209,7 @@ onUnmounted(() => { stopTicker(); });
                        :alt="img.alt_ru || ''"
                        class="w-full h-48 object-cover rounded" />
                   <div class="text-[11px] text-gray-400 truncate" :title="img.alt_ru">{{ img.alt_ru || '—' }}</div>
+                  <div v-if="img.style_label" class="text-[10px] text-indigo-300/80 truncate" :title="img.style_label">🎨 {{ img.style_label }}</div>
                   <div class="flex gap-2">
                     <button type="button"
                             class="flex-1 text-xs px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
