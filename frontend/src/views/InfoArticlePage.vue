@@ -718,6 +718,33 @@ function flashToast(msg) {
   toastTimer = setTimeout(() => { toastMsg.value = ''; }, 2500);
 }
 
+// Копирование короткого текста (SEO title/description) в буфер обмена с
+// тостом «Скопировано!». Async Clipboard API + execCommand fallback.
+async function copyText(text, label = 'Скопировано!') {
+  const value = (text == null ? '' : String(text));
+  if (!value) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      flashToast(label);
+      return;
+    }
+  } catch (_) { /* fallback ниже */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    flashToast(ok ? label : 'Не удалось скопировать');
+  } catch (_) {
+    flashToast('Не удалось скопировать');
+  }
+}
+
 const renderedImages = computed(() => {
   const arr = Array.isArray(selectedTask.value?.image_prompts) ? selectedTask.value.image_prompts : [];
   return arr.filter((p) => p.status === 'done' && p.image_base64);
@@ -1204,6 +1231,43 @@ onUnmounted(() => { stopTicker(); });
 
           <!-- TAB: Статья -->
           <div v-if="activeResultTab === 'article'" class="space-y-3">
+            <!-- 🏷 SEO-метатеги: title (≤60) и description (≤160), сгенерированные
+                 ИИ строго по тематике статьи. Каждое поле — с кнопкой «Скопировать»
+                 для быстрого переноса в CMS. -->
+            <div v-if="selectedTask.seo_title || selectedTask.seo_description"
+                 class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div class="bg-gray-950 border border-indigo-900/60 rounded-lg p-3 space-y-1.5">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs uppercase tracking-wider text-indigo-300 font-semibold">SEO Title</span>
+                  <span class="text-[11px]" :class="(selectedTask.seo_title || '').length > 60 ? 'text-red-400' : 'text-gray-500'">
+                    {{ (selectedTask.seo_title || '').length }}/60
+                  </span>
+                </div>
+                <input type="text" readonly :value="selectedTask.seo_title || ''"
+                       class="w-full bg-gray-900 border border-gray-800 rounded px-2 py-1.5 text-sm text-gray-100 focus:outline-none" />
+                <button type="button"
+                        class="w-full text-xs px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                        @click="copyText(selectedTask.seo_title, 'Title скопирован!')">
+                  📋 Скопировать
+                </button>
+              </div>
+              <div class="bg-gray-950 border border-indigo-900/60 rounded-lg p-3 space-y-1.5">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs uppercase tracking-wider text-indigo-300 font-semibold">SEO Description</span>
+                  <span class="text-[11px]" :class="(selectedTask.seo_description || '').length > 160 ? 'text-red-400' : 'text-gray-500'">
+                    {{ (selectedTask.seo_description || '').length }}/160
+                  </span>
+                </div>
+                <textarea readonly rows="2" :value="selectedTask.seo_description || ''"
+                          class="w-full bg-gray-900 border border-gray-800 rounded px-2 py-1.5 text-sm text-gray-100 focus:outline-none resize-none"></textarea>
+                <button type="button"
+                        class="w-full text-xs px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                        @click="copyText(selectedTask.seo_description, 'Description скопирован!')">
+                  📋 Скопировать
+                </button>
+              </div>
+            </div>
+
             <div class="flex flex-wrap gap-2">
               <button class="btn-primary" @click="copyAsHtml">📋 Скопировать HTML с изображениями</button>
               <button class="btn-ghost border border-gray-700" @click="copyAsFormattedText">📝 Скопировать форматированный текст (с изображениями)</button>

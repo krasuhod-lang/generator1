@@ -61,6 +61,7 @@ const { runImageQa } = require('./imageQa.service');
 const { analyzeReadability } = require('./readability.service');
 const { verifyIntent } = require('./intentVerify.service');
 const { createValidationTracker } = require('./validationFailures.service');
+const { generateSeoMeta } = require('./seoMeta.service');
 const { runEeatAuditCore } = require('../eeatAudit/core');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
@@ -1957,17 +1958,41 @@ async function processInfoArticleTask(taskId) {
     const finalHtml  = embedImages(articleHtml, renderedImages);
     const finalPlain = buildPlainText(finalHtml);
 
+    // 14b. SEO-метатеги (Часть 1 эпика): ИИ формирует title (≤60) и
+    //      description (≤160) строго по тематике статьи. Полностью graceful —
+    //      при сбое используется детерминированный fallback из <h1>/абзаца.
+    let seoTitle = null;
+    let seoDescription = null;
+    try {
+      await setStage(taskId, 'seo_meta', 99);
+      const seo = await generateSeoMeta({
+        topic: task.topic,
+        region: task.region || '',
+        brand: task.brand_name || task.brand || '',
+        articleHtml: finalHtml,
+        articlePlain: finalPlain,
+        ctx: { taskId, onLog: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); } },
+      });
+      seoTitle = seo.title || null;
+      seoDescription = seo.description || null;
+      await appendLog(taskId, `🏷 SEO-метатеги готовы (${seo.source})`, 'info');
+    } catch (seoErr) {
+      console.warn(`[infoArticle] generateSeoMeta failed: ${seoErr.message}`);
+    }
+
     await db.query(
       `UPDATE info_article_tasks
-          SET article_html  = $2,
-              article_plain = $3,
-              status        = 'done',
-              progress_pct  = 100,
-              current_stage = 'done',
-              completed_at  = NOW(),
-              updated_at    = NOW()
+          SET article_html    = $2,
+              article_plain   = $3,
+              seo_title       = $4,
+              seo_description = $5,
+              status          = 'done',
+              progress_pct    = 100,
+              current_stage   = 'done',
+              completed_at    = NOW(),
+              updated_at      = NOW()
         WHERE id = $1`,
-      [taskId, finalHtml, finalPlain],
+      [taskId, finalHtml, finalPlain, seoTitle, seoDescription],
     );
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
