@@ -21,7 +21,8 @@ const form = ref({
   brand_facts:   '',
   output_format: 'html',
   gemini_model:  'gemini-3.1-pro-preview',
-  // Количество генерируемых изображений (1..6, default 1).
+  // Количество генерируемых изображений (0..6, default 1).
+  // 0 — «Не нужны изображения»: backend пропускает генерацию картинок целиком.
   // По бизнес-требованию: «делается только для статьи в блог» — поле живёт
   // только здесь. Backend проверяет диапазон ещё раз (см. clampImagesCount).
   images_count:  1,
@@ -362,9 +363,13 @@ async function handleCreate() {
   submitting.value = true;
   try {
     saveDraft();
-    // Клампим images_count в [1..6] на клиенте — backend всё равно проверит,
-    // но так UI сразу показывает корректное значение в drafts.
-    const imagesCount = Math.max(1, Math.min(6, parseInt(form.value.images_count, 10) || 1));
+    // Клампим images_count в [0..6] на клиенте — backend всё равно проверит,
+    // но так UI сразу показывает корректное значение в drafts. 0 — «Не нужны
+    // изображения». Невалидный ввод (NaN) трактуем как default 1.
+    const parsedImages = parseInt(form.value.images_count, 10);
+    const imagesCount = Number.isFinite(parsedImages)
+      ? Math.max(0, Math.min(6, parsedImages))
+      : 1;
     form.value.images_count = imagesCount;
     const payload = {
       topic,
@@ -1033,17 +1038,28 @@ onUnmounted(() => { stopTicker(); });
               </div>
               <div>
                 <label class="label">
-                  Количество изображений <span class="text-gray-500 text-xs">(1–6)</span>
+                  Количество изображений <span class="text-gray-500 text-xs">(0–6, 0 = без изображений)</span>
                 </label>
                 <div class="flex items-center gap-3">
+                  <label class="inline-flex items-center gap-2 cursor-pointer text-sm text-gray-300 select-none">
+                    <input
+                      type="checkbox"
+                      :checked="(form.images_count || 0) === 0"
+                      @change="form.images_count = $event.target.checked ? 0 : 1"
+                      class="accent-indigo-500"
+                    />
+                    Не нужны изображения
+                  </label>
                   <input
                     type="number"
                     v-model.number="form.images_count"
-                    min="1" max="6" step="1"
-                    class="input w-20"
+                    min="0" max="6" step="1"
+                    :disabled="(form.images_count || 0) === 0"
+                    class="input w-20 disabled:opacity-50"
                   />
                   <span class="text-xs text-gray-400">
-                    slot=1 — обложка после &lt;h1&gt;{{ (form.images_count || 1) > 1 ? `; slot=2..${form.images_count} — иллюстрации перед целевыми H2` : '' }}
+                    <template v-if="(form.images_count || 0) === 0">изображения не будут сгенерированы</template>
+                    <template v-else>slot=1 — обложка после &lt;h1&gt;{{ (form.images_count || 1) > 1 ? `; slot=2..${form.images_count} — иллюстрации перед целевыми H2` : '' }}</template>
                   </span>
                 </div>
               </div>

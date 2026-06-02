@@ -40,8 +40,11 @@ const MAX_FILENAME_LEN = 250;
 const ALLOWED_FORMATS = ['html', 'formatted_text'];
 // Бизнес-требование: «по изображениям, надо чтобы мы сами указали количество
 // создания изображений. Делается только для статьи в блог». Pipeline сейчас
-// поддерживает 1..6 (см. CHECK constraint миграции 022 + Stage 4 / embedImages).
-const MIN_IMAGES_COUNT = 1;
+// поддерживает 0..6 (см. CHECK constraint миграции 056 + Stage 4 / embedImages).
+//   • 0 — «Не нужны изображения»: pipeline целиком пропускает Stage 4 и
+//     генерацию картинок (см. infoArticlePipeline.js).
+//   • 1..6 — обычная генерация (slot=1 cover + slot=2..N inline).
+const MIN_IMAGES_COUNT = 0;
 const MAX_IMAGES_COUNT = 6;
 
 // UUID v4 / любая версия.

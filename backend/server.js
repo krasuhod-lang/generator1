@@ -976,18 +976,22 @@ async function ensureSchema() {
         ON info_article_tasks (source_relevance_report_id)
         WHERE source_relevance_report_id IS NOT NULL
     `);
-    // Защитный CHECK: 1..6 изображений — выше штучного количества pipeline
-    // не пойдёт. Стадия 4 и embedImages поддерживают N≥1.
+    // Защитный CHECK: 0..6 изображений. 0 — «Не нужны изображения»
+    // (pipeline целиком пропускает Stage 4 и генерацию картинок). Выше 6
+    // штучного количества pipeline не пойдёт. См. миграцию 056.
+    // Drop+recreate, чтобы обновить старый constraint 1..6 (миграция 022).
     await db.query(`
       DO $$
       BEGIN
-        IF NOT EXISTS (
+        IF EXISTS (
           SELECT 1 FROM pg_constraint WHERE conname = 'info_article_tasks_images_count_chk'
         ) THEN
           ALTER TABLE info_article_tasks
-            ADD CONSTRAINT info_article_tasks_images_count_chk
-            CHECK (images_count BETWEEN 1 AND 6);
+            DROP CONSTRAINT info_article_tasks_images_count_chk;
         END IF;
+        ALTER TABLE info_article_tasks
+          ADD CONSTRAINT info_article_tasks_images_count_chk
+          CHECK (images_count BETWEEN 0 AND 6);
       END$$;
     `);
 
