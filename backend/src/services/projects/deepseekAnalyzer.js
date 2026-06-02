@@ -49,6 +49,21 @@ const SYSTEM_PROMPT = [
   'Чёткий пронумерованный пошаговый план развития (что, зачем, ожидаемый',
   'эффект). Приоритизируй шаги.',
   '',
+  '## 6. Коммерческий рост',
+  'ОБЯЗАТЕЛЬНЫЙ раздел с упором на рост КОММЕРЧЕСКОГО трафика и выручки.',
+  'Тебе передан детерминированный [КОММЕРЧЕСКИЙ СРЕЗ]: распределение запросов',
+  'по интенту, доля коммерческого/брендового трафика, коммерческие запросы',
+  'в зоне быстрого роста (striking distance), CTR-аномалии, каннибализация и',
+  'несоответствие интента. На его основе дай приоритизированный план именно',
+  'для коммерции: какие коммерческие страницы (каталог/услуги/карточки)',
+  'усилить; под какие коммерческие запросы создать или доработать посадочные',
+  'страницы; конкретные гипотезы по CTR (title/description/schema/rich',
+  'snippets) для аномалий; как устранить каннибализацию (склейка/перелинковка/',
+  'канонизация); куда направить пользователей при несоответствии интента;',
+  'как развивать небрендовый коммерческий спрос, если доминирует бренд.',
+  'Если коммерческого среза нет — кратко объясни, что усилить для коммерции',
+  'на основе топ-запросов и страниц.',
+  '',
   'Опирайся только на переданные данные и здравый SEO-смысл, не выдумывай',
   'цифр. Учитывай целевую аудиторию проекта во всех рекомендациях.',
   'Не добавляй преамбулы и заключения вне этой структуры.',
@@ -62,7 +77,7 @@ function _stripFence(text) {
     .trim();
 }
 
-function _buildUserPrompt({ project, range, performance, top }) {
+function _buildUserPrompt({ project, range, performance, top, commercial }) {
   const lines = [
     '[ПРОЕКТ]',
     `Название: ${project.name || '—'}`,
@@ -86,6 +101,30 @@ function _buildUserPrompt({ project, range, performance, top }) {
     `[ТОП-${top.topPages.length} СТРАНИЦ] (page, clicks, impressions, ctr%, position)`,
     JSON.stringify(top.topPages),
   ];
+  if (commercial && commercial.available) {
+    lines.push(
+      '',
+      '[КОММЕРЧЕСКИЙ СРЕЗ] (детерминированный анализ для раздела 6)',
+      `Доля коммерческого трафика: ${commercial.commercial_clicks_pct}% кликов, ${commercial.commercial_impressions_pct}% показов`,
+      `Доля брендового трафика: ${commercial.branded_clicks_pct}% кликов`,
+      `Брендовые маркеры: ${(commercial.brand_tokens || []).join(', ') || '—'}`,
+      '',
+      'Распределение по интенту (intent, queries, clicks, clicksPct):',
+      JSON.stringify(commercial.intent_distribution),
+      '',
+      'Коммерческие запросы в зоне быстрого роста / striking distance (query, intent, impressions, ctr%, position):',
+      JSON.stringify(commercial.striking_distance),
+      '',
+      'CTR-аномалии на коммерческих запросах — CTR ниже ожидаемого для позиции (query, ctr%, expectedCtr%, position, impressions):',
+      JSON.stringify(commercial.ctr_anomalies),
+      '',
+      'Каннибализация коммерческих запросов — один запрос делят несколько URL, ни один не в топ-3 (query, best_position, pages):',
+      JSON.stringify(commercial.cannibalization),
+      '',
+      'Несоответствие интента — коммерческий запрос приземляется на инфо-страницу (query, landing_page, impressions, position):',
+      JSON.stringify(commercial.intent_mismatch),
+    );
+  }
   return lines.join('\n');
 }
 

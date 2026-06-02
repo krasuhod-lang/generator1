@@ -121,9 +121,34 @@ async function fetchTopDimensions(project, range) {
   };
 }
 
+/**
+ * Срез «запрос × страница» за период — для детектора каннибализации и
+ * несоответствия интента в коммерческом анализе. Возвращает плоский список
+ * строк {query, page, clicks, impressions, ctr%, position}.
+ */
+async function fetchQueryPageMatrix(project, range) {
+  const cfg = getProjectsConfig().commercial;
+  const { startDate, endDate } = resolveRange(range);
+  const accessToken = await getValidAccessToken(project);
+  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+    startDate, endDate,
+    dimensions: ['query', 'page'],
+    rowLimit: cfg.queryPageRowLimit,
+  });
+  return (rows || []).map((r) => ({
+    query: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
+    page: Array.isArray(r.keys) ? (r.keys[1] || '') : '',
+    clicks: r.clicks || 0,
+    impressions: r.impressions || 0,
+    ctr: _round((r.ctr || 0) * 100, 2),
+    position: _round(r.position || 0, 2),
+  }));
+}
+
 module.exports = {
   getValidAccessToken,
   resolveRange,
   fetchPerformanceSeries,
   fetchTopDimensions,
+  fetchQueryPageMatrix,
 };

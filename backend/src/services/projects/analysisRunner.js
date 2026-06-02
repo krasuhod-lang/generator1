@@ -9,8 +9,10 @@
  */
 
 const db = require('../../config/db');
-const { fetchPerformanceSeries, fetchTopDimensions, resolveRange } = require('./gscService');
+const { fetchPerformanceSeries, fetchTopDimensions, fetchQueryPageMatrix, resolveRange } = require('./gscService');
 const { runProjectAnalysis } = require('./deepseekAnalyzer');
+const { analyzeCommercial, deriveBrandTokens } = require('./commercialIntent');
+const { getProjectsConfig } = require('./config');
 
 async function _setError(analysisId, message) {
   await db.query(
@@ -64,8 +66,28 @@ async function processAnalysis(analysisId) {
     const top = await fetchTopDimensions(project, range);
     const resolved = resolveRange(range);
 
+    // Коммерческий срез (детерминированный, без LLM). Доп. запрос query×page
+    // — graceful: при ошибке/выключенном флаге каннибализация просто пустая.
+    const commercialCfg = getProjectsConfig().commercial;
+    let commercial = null;
+    if (commercialCfg.enabled) {
+      let queryPage = [];
+      try {
+        queryPage = await fetchQueryPageMatrix(project, range);
+      } catch (_) { queryPage = []; }
+      const brandTokens = deriveBrandTokens({
+        name: project.name, siteUrl: project.gsc_site_url, url: project.url,
+      });
+      commercial = analyzeCommercial({
+        topQueries: top.topQueries,
+        topPages: top.topPages,
+        queryPage,
+        brandTokens,
+      });
+    }
+
     const result = await runProjectAnalysis({
-      project, range: resolved, performance, top,
+      project, range: resolved, performance, top, commercial,
     });
 
     if (result.verdict !== 'ok') {
@@ -79,6 +101,7 @@ async function processAnalysis(analysisId) {
       series: performance.series,
       top_queries: top.topQueries,
       top_pages: top.topPages,
+      commercial,
     };
 
     await db.query(
