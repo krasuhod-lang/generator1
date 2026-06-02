@@ -18,6 +18,7 @@
 
 const { callDeepSeek } = require('../llm/deepseek.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
+const llmUsageLog = require('../aegis/llmUsageLog');
 const { getProjectsConfig } = require('./config');
 
 const SYSTEM_PROMPT = [
@@ -108,6 +109,20 @@ async function runProjectAnalysis(payload) {
     const tOut = resp.tokensOut || 0;
     const cached = resp.cacheHitTokens || 0;
     const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+    const durationMs = Date.now() - t0;
+    // Эгида: учитываем расход LLM в сквозной cost-аналитике (graceful, не бросает).
+    try {
+      llmUsageLog.recordUsage({
+        provider: 'deepseek',
+        kind: 'project_seo_analysis',
+        outcome: 'ok',
+        tokensIn: tIn,
+        tokensOut: tOut,
+        cachedTokens: cached,
+        costUsd: cost,
+        latencyMs: durationMs,
+      });
+    } catch (_) { /* no-op */ }
     return {
       verdict: 'ok',
       markdown: _stripFence(resp.text || ''),
@@ -115,9 +130,12 @@ async function runProjectAnalysis(payload) {
       tokens_out: tOut,
       cost_usd: Math.round(cost * 1e6) / 1e6,
       model: resp.model || 'deepseek',
-      duration_ms: Date.now() - t0,
+      duration_ms: durationMs,
     };
   } catch (err) {
+    try {
+      llmUsageLog.recordUsage({ provider: 'deepseek', kind: 'project_seo_analysis', outcome: 'error' });
+    } catch (_) { /* no-op */ }
     return { verdict: 'error', reason: (err && err.message) ? err.message : String(err) };
   }
 }

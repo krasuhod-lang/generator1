@@ -228,6 +228,7 @@ function _msg(err) {
 module.exports = {
   GscError,
   buildAuthUrl,
+  buildState,
   verifyState,
   exchangeCodeForTokens,
   refreshAccessToken,
