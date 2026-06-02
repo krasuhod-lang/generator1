@@ -737,6 +737,21 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, ima
     { retries: 3, temperature: 0.4, callLabel: `InfoArticle Stage 4 (${N} image prompts)`, ...ctx },
   );
   const prompts = Array.isArray(result?.image_prompts) ? result.image_prompts : [];
+  // style_profile — общий для всей статьи выбор визуального стиля/формата
+  // (stage4_image_prompts.txt оценивает тон статьи и подбирает стиль индивидуально).
+  // Метку дублируем в каждый слот, чтобы все изображения статьи были в едином стиле.
+  const styleProfile = result?.style_profile && typeof result.style_profile === 'object'
+    ? result.style_profile
+    : null;
+  const styleLabel = String(styleProfile?.style_label || '').slice(0, 120);
+  if (task?.id && styleLabel) {
+    await appendLog(
+      task.id,
+      `🎨 Стиль изображений подобран под статью: «${styleLabel}»` +
+        (styleProfile?.rationale ? ` — ${String(styleProfile.rationale).slice(0, 200)}` : ''),
+      'info',
+    );
+  }
   // Берём первые N, перенумеровываем slot=1..N. Если LLM вернул меньше — сколько
   // прислал. Дубль section_h2 (один и тот же H2 в нескольких inline-слотах)
   // схлопываем, сохраняя первый.
@@ -751,6 +766,7 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, ima
     normalized.push({
       slot:            normalized.length + 1,
       section_h2:      h2,
+      style_label:     String(p?.style_label || styleLabel || '').slice(0, 120),
       visual_prompt:   String(p?.visual_prompt   || '').slice(0, 2000),
       negative_prompt: String(p?.negative_prompt || '').slice(0, 400),
       alt_ru:          String(p?.alt_ru          || '').slice(0, 200),
@@ -1716,9 +1732,26 @@ async function processInfoArticleTask(taskId) {
     }
 
     // 12. Stage 4 image prompts
-    // task.images_count приходит из миграции 022 (CHECK 1..6, default 1).
-    // На очень старых задачах поле может отсутствовать → fallback к 1.
-    const imagesCount = Math.max(1, Math.min(6, parseInt(task.images_count, 10) || 1));
+    // task.images_count приходит из миграции 022 (CHECK 0..6, default 1).
+    //   • 0 — пользователь выбрал «Не нужны изображения» → весь блок
+    //     генерации картинок (Stage 4 + Nano Banana + Image QA) пропускаем.
+    //   • На очень старых задачах поле может отсутствовать → fallback к 1.
+    const parsedImagesCount = parseInt(task.images_count, 10);
+    const imagesCount = Number.isFinite(parsedImagesCount)
+      ? Math.max(0, Math.min(6, parsedImagesCount))
+      : 1;
+    // renderedImages нужен ниже в embedImages — при отключённых картинках
+    // остаётся пустым массивом (embedImages вернёт HTML без изменений).
+    let renderedImages = [];
+    if (imagesCount === 0) {
+      await setStage(taskId, 'stage4_image_prompts', 84);
+      await appendLog(
+        taskId,
+        'ℹ Изображения отключены пользователем («Не нужны изображения») — пропускаем Stage 4 и генерацию картинок',
+        'info',
+      );
+      await saveColumn(taskId, 'image_prompts', []);
+    } else {
     // Корректное русское склонение: 1 — «изображение», 2-4 — «изображения»,
     // 5+ — «изображений». В нашем диапазоне 1..6 достаточно явной таблицы.
     const RU_IMAGES_FORMS = {
@@ -1742,7 +1775,7 @@ async function processInfoArticleTask(taskId) {
 
     // 13. Image generation
     await setStage(taskId, 'image_generation', 92);
-    const renderedImages = await runImageGeneration(taskId, imagePrompts);
+    renderedImages = await runImageGeneration(taskId, imagePrompts);
     await saveColumn(taskId, 'image_prompts', renderedImages);
 
     // 13b. Image QA — Phase 1 / P0-4. Детерминированный аудит готовых
@@ -1801,6 +1834,7 @@ async function processInfoArticleTask(taskId) {
         );
       }
     }
+    } // end else (imagesCount > 0)
 
     // 13c. Quality Score — детерминированная сводная метрика по всем
     //      посчитанным отчётам качества. Используется в /api/admin/model-comparison
