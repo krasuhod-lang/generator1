@@ -15,6 +15,7 @@ const TABS = [
   { key: 'info-article',   label: 'Статья в блог',    icon: '📰', path: '/info-article' },
   { key: 'article-topics', label: 'Темы статей',      icon: '🔮', path: '/article-topics' },
   { key: 'forecaster',     label: 'Прогнозатор',      icon: '📈', path: '/forecaster' },
+  { key: 'projects',       label: 'Проекты',          icon: '🗂️', path: '/projects' },
   { key: 'acf-json',       label: 'JSON',             icon: '🧩', path: '/acf-json' },
   { key: 'relevance',      label: 'Релевантность',    icon: '📊', path: '/relevance' },
 ];
@@ -26,6 +27,7 @@ const activeTab = computed(() => {
   if (p.startsWith('/info-article'))   return 'info-article';
   if (p.startsWith('/article-topics')) return 'article-topics';
   if (p.startsWith('/forecaster'))     return 'forecaster';
+  if (p.startsWith('/projects'))       return 'projects';
   if (p.startsWith('/acf-json'))       return 'acf-json';
   if (p.startsWith('/relevance'))      return 'relevance';
   if (p.startsWith('/copilot') || /\/tasks\/[^/]+\/copilot/.test(p)) return 'copilot';
