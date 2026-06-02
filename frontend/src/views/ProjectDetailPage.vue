@@ -11,6 +11,7 @@ import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import GscPerformanceChart from '../components/GscPerformanceChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
+import CommercialInsights from '../components/CommercialInsights.vue';
 import { useProjectsStore } from '../stores/projects.js';
 
 const route = useRoute();
@@ -49,6 +50,9 @@ function flash(msg) {
 }
 
 const gscReady = computed(() => project.value?.gsc_connected && project.value?.gsc_site_url);
+
+// Коммерческий срез из снапшота последнего/открытого анализа.
+const commercialData = computed(() => currentAnalysis.value?.gsc_snapshot?.commercial || null);
 
 async function load() {
   loading.value = true;
@@ -347,6 +351,9 @@ onUnmounted(() => {
           </div>
           <MarkdownView v-else-if="currentAnalysis?.status === 'done'" :source="currentAnalysis.report_markdown" />
         </section>
+
+        <!-- Коммерческий срез -->
+        <CommercialInsights v-if="commercialData" :commercial="commercialData" />
 
         <!-- История анализов -->
         <section v-if="analyses.length" class="card space-y-2">

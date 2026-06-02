@@ -10,6 +10,7 @@ import { useRoute } from 'vue-router';
 import axios from 'axios';
 import GscPerformanceChart from '../components/GscPerformanceChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
+import CommercialInsights from '../components/CommercialInsights.vue';
 
 const route = useRoute();
 const loading = ref(true);
@@ -82,6 +83,10 @@ onMounted(async () => {
             <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">AI-отчёт</h2>
             <MarkdownView :source="analysis.report_markdown" />
           </section>
+
+          <!-- Коммерческий срез -->
+          <CommercialInsights v-if="analysis.gsc_snapshot?.commercial"
+                              :commercial="analysis.gsc_snapshot.commercial" />
         </template>
       </template>
     </div>
