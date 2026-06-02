@@ -118,6 +118,11 @@ app.use('/api/forecaster',     forecasterRoutes);
 app.use('/api/public',         forecasterPublicRoutes);
 app.use('/api/projects',       projectsRoutes);
 app.use('/api/public',         projectsPublicRoutes);
+// Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
+// Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
+// Канонический путь — /api/public/projects/gsc/callback.
+app.get('/api/oauth/google/callback',
+  require('./src/controllers/projects.controller').handleGscCallback);
 app.use('/api/aegis',          aegisRoutes);
 
 // -----------------------------------------------------------------

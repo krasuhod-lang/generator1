@@ -5,7 +5,9 @@
  *   • GET /projects/gsc/callback — OAuth-колбэк Google (браузерный редирект)
  *   • GET /project/:token        — read-only публичный дашборд по share-ссылке
  *
- * Монтируется в server.js под '/api/public'.
+ * Монтируется в server.js под '/api/public'. Дополнительно в server.js
+ * зарегистрирован алиас GET /api/oauth/google/callback → handleGscCallback
+ * для совместимости с ранее настроенным в Google Cloud redirect_uri.
  */
 
 const express   = require('express');

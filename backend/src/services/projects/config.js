@@ -153,9 +153,11 @@ function getProjectsConfig() {
  * функционал проектов (CRUD, шаринг) работает.
  */
 function getGoogleOAuthConfig() {
-  const clientId = process.env.GOOGLE_CLIENT_ID || '';
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
-  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || '';
+  // .trim() — на случай лишних пробелов вокруг значения в .env
+  // (например GOOGLE_OAUTH_REDIRECT_URI=" https://site/...callback ").
+  const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+  const clientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+  const redirectUri = (process.env.GOOGLE_OAUTH_REDIRECT_URI || '').trim();
   return {
     clientId,
     clientSecret,
