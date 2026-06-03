@@ -96,4 +96,16 @@ router.post('/prompts/prune', auth, writeLimiter, prunePromptAuditHandler);
 // Phase C2: bridge SEO actions → GitHub backlog issues.
 router.post('/seo-brain/actions/dispatch', auth, writeLimiter, dispatchSeoActions);
 
+// ── Bio-Brain B5/B1: read-only timeline + admin tools ────────────
+const {
+  listBiobrainGenerations,
+  listAlgoUpdates,
+  refreshAlgoUpdates,
+  listSerpOutcomes,
+} = require('../controllers/aegis.controller');
+router.get('/biobrain/generations', auth, listBiobrainGenerations);
+router.get('/algo-updates',         auth, listAlgoUpdates);
+router.post('/algo-updates/refresh', auth, writeLimiter, refreshAlgoUpdates);
+router.get('/serp-outcomes',        auth, listSerpOutcomes);
+
 module.exports = router;

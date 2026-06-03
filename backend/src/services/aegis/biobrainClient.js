@@ -53,4 +53,11 @@ async function status() {
   return http.get(c.base, '/biobrain/status', { timeoutMs: 5000 });
 }
 
-module.exports = { predict, feedback, advice, status };
+async function generations(limit = 50) {
+  const c = _cfg();
+  if (!c.enabled) return { ok: false, reason: 'disabled' };
+  const lim = Math.max(1, Math.min(500, Number(limit) || 50));
+  return http.get(c.base, `/biobrain/generations?limit=${lim}`, { timeoutMs: 5000 });
+}
+
+module.exports = { predict, feedback, advice, status, generations };

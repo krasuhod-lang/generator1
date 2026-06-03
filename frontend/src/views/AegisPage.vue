@@ -22,6 +22,8 @@ const status   = ref(null);
 const runs     = ref([]);
 const backlog  = ref([]);
 const versions = ref([]);
+const generations = ref([]);
+const algoUpdates = ref([]);
 const topFailures = ref([]);
 const promptLog = ref([]);
 const failuresDays = ref(7);
@@ -79,7 +81,7 @@ async function refresh() {
   loading.value = true;
   error.value   = '';
   try {
-    const [s, r, b, v, f, p, sb] = await Promise.all([
+    const [s, r, b, v, f, p, sb, gen, algo] = await Promise.all([
       api.get('/aegis/status').then((x) => x.data),
       api.get('/aegis/runs?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/backlog').then((x) => x.data).catch(() => ({ items: [] })),
@@ -87,6 +89,8 @@ async function refresh() {
       api.get(`/aegis/failures/top?days=${failuresDays.value}`).then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/prompts/log?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/seo-brain').then((x) => x.data).catch(() => null),
+      api.get('/aegis/biobrain/generations?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
+      api.get('/aegis/algo-updates?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
     ]);
     status.value   = s;
     runs.value     = r.items || [];
@@ -95,6 +99,8 @@ async function refresh() {
     topFailures.value = f.items || [];
     promptLog.value = p.items || [];
     seoBrain.value = sb;
+    generations.value = gen.items || [];
+    algoUpdates.value = algo.items || [];
   } catch (e) {
     error.value = e?.response?.data?.error || e.message || 'Ошибка загрузки';
   } finally {
@@ -530,6 +536,72 @@ async function dispatchSeoActions() {
             <span v-if="seoDispatchMsg" class="subtle" style="margin-left: 0.5rem;">{{ seoDispatchMsg }}</span>
           </div>
         </template>
+      </section>
+
+      <section class="card">
+        <h2>🧬 Поколения NEAT</h2>
+        <p class="subtle">
+          Снимок каждого поколения автономного Bio-Brain: рост сети, fitness,
+          hold-out MAE, признаки откатов под пенальти за сложность (B6).
+        </p>
+        <div v-if="generations.length" class="table-wrap">
+          <table class="grid fixed">
+            <thead>
+              <tr>
+                <th>Когда</th><th class="num">Gen</th>
+                <th class="num">Узлы/связи</th>
+                <th class="num">Mean fitness</th>
+                <th class="num">Hold-out MAE</th>
+                <th class="num">Откат?</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="g in generations" :key="`${g.generation}-${g.evolved_at}`">
+                <td class="nowrap">{{ fmtTime(g.evolved_at) }}</td>
+                <td class="num">{{ g.generation }}</td>
+                <td class="num">{{ g.nodes ?? '—' }} / {{ g.conns ?? '—' }}</td>
+                <td class="num">{{ fmtMaybe(g.mean_fitness, 4) }}</td>
+                <td class="num">{{ fmtMaybe(g.holdout_mae, 4) }}</td>
+                <td class="num">{{ g.rolled_back ? '↩️' : '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="subtle">Поколений пока нет — мозг ещё не запустил эволюцию.</p>
+      </section>
+
+      <section class="card">
+        <h2>🌐 Обновления алгоритмов</h2>
+        <p class="subtle">
+          Лента из Google Search Central, статуса поиска и SEJ Roundtable;
+          теги расставляет regex-классификатор (B5).
+        </p>
+        <div v-if="algoUpdates.length" class="table-wrap">
+          <table class="grid fixed">
+            <thead>
+              <tr>
+                <th>Когда</th><th>Источник</th><th>Заголовок</th>
+                <th>Теги</th><th class="num">Severity</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="u in algoUpdates" :key="u.id">
+                <td class="nowrap">{{ fmtTime(u.published_at || u.fetched_at) }}</td>
+                <td><code>{{ u.source }}</code></td>
+                <td>
+                  <a :href="u.url" target="_blank" rel="noopener noreferrer">
+                    {{ u.title }}
+                  </a>
+                </td>
+                <td>
+                  <span v-for="t in (u.tags || [])" :key="t" class="badge badge-info" style="margin-right:4px;">{{ t }}</span>
+                </td>
+                <td class="num">{{ fmtMaybe(u.severity, 2) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="subtle">Лента пока пуста — AlgoWatcher запускается через 30 сек после старта сервера.</p>
       </section>
 
       <section class="card">
