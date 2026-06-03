@@ -973,3 +973,71 @@ module.exports.listBiobrainGenerations = listBiobrainGenerations;
 module.exports.listAlgoUpdates         = listAlgoUpdates;
 module.exports.refreshAlgoUpdates      = refreshAlgoUpdates;
 module.exports.listSerpOutcomes        = listSerpOutcomes;
+
+// ── B4: experiments — активный цикл обучения мозга ──────────────────
+
+/** GET /api/aegis/experiments?status=planned&limit=50 */
+async function listExperiments(req, res) {
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    const r = await exp.listExperiments(db, {
+      status: req.query.status || null,
+      limit:  req.query.limit,
+      offset: req.query.offset,
+    });
+    if (!r.ok) return res.status(503).json({ error: 'experiments_failed', reason: r.reason });
+    res.json({ items: r.items });
+  } catch (e) {
+    res.status(503).json({ error: 'experiments_failed', reason: e.message });
+  }
+}
+
+/** POST /api/aegis/experiments/run — ручной триггер одного тика. */
+async function runExperimentsNow(req, res) {
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    exp.setDbConnection(db);
+    const r = await exp.runOnce(db);
+    if (!r.ok) return res.status(503).json({ error: 'experiments_run_failed', reason: r.reason });
+    res.json(r);
+  } catch (e) {
+    res.status(503).json({ error: 'experiments_run_failed', reason: e.message });
+  }
+}
+
+/** POST /api/aegis/experiments/:id/dispatch — пометить как dispatched. */
+async function dispatchExperimentHandler(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'bad_id' });
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    const r = await exp.dispatchExperiment(db, id);
+    if (!r.ok) return res.status(409).json({ error: 'dispatch_failed', reason: r.reason });
+    res.json(r);
+  } catch (e) {
+    res.status(503).json({ error: 'dispatch_failed', reason: e.message });
+  }
+}
+
+/**
+ * POST /api/aegis/experiments/:id/measure
+ * body: { avgPosition, clicks, impressions, features?: number[] }
+ * Закрывает эксперимент по переданным post-метрикам и считает reward.
+ */
+async function measureExperimentHandler(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'bad_id' });
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    const r = await exp.closeExperiment(db, id, req.body || {});
+    if (!r.ok) return res.status(409).json({ error: 'measure_failed', reason: r.reason });
+    res.json(r);
+  } catch (e) {
+    res.status(503).json({ error: 'measure_failed', reason: e.message });
+  }
+}
+
+module.exports.listExperiments         = listExperiments;
+module.exports.runExperimentsNow       = runExperimentsNow;
+module.exports.dispatchExperimentHandler = dispatchExperimentHandler;
+module.exports.measureExperimentHandler  = measureExperimentHandler;

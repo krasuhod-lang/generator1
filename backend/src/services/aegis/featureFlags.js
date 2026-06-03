@@ -310,6 +310,35 @@ const AEGIS_FLAGS = deepFreeze({
     },
   },
 
+  // ── Experiments (B4) — активный цикл обучения мозга ────────────────
+  // Раз в сутки experimentLoop.runOnce() выбирает страницы с самым
+  // высоким composite-uncertainty (entropy биомозга + striking-distance
+  // позиции 11–30 + priority действий из aegis_seo_actions), записывает
+  // baseline-метрики и top-N гипотез из action_plan в aegis_experiments.
+  // Через measureAfterDays дней closeExperiment() считает Δposition/Δclicks,
+  // пушит reward в biobrain.feedback и помечает outcome (won/lost/inconclusive).
+  // Это и есть «мозг ставит себе эксперименты». Без новых ENV.
+  experiments: {
+    enabled: true,
+    intervalSec: 86400,           // раз в сутки
+    measureAfterDays: 14,
+    candidateLookbackDays: 30,    // окно aegis_seo_observations для baseline
+    maxNewPerTick: 3,             // не плодить эксперименты лавинообразно
+    hypothesisTopN: 3,            // top-N действий из action_plan на гипотезу
+    // Композитный uncertainty для ранжирования кандидатов (нормализуется).
+    uncertaintyWeights: {
+      biobrain: 0.5,              // 1 - confidence (если py доступен)
+      striking: 0.3,              // peak в позициях 11..20
+      priority: 0.2,              // максимальный priority action_plan
+    },
+    // По умолчанию dispatch не создаёт GitHub-issue: запись просто
+    // отображается в карточке «🧪 Эксперименты мозга», и пользователь
+    // решает, что с ней делать. Если включить и backlog (см. backlog
+    // блок) — появятся issue с label aegis:experiment.
+    dispatchToBacklog: false,
+    autoDispatch: false,
+  },
+
   // ── Prompts-as-Code audit ─────────────────────────────────────────
   // Контролирует, какие источники сканируются promptAudit.scanPromptFiles
   // и где UI показывает «Всего промтов / изменения за 7 дней». Сам флаг

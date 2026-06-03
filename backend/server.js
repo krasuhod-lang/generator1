@@ -293,6 +293,16 @@ const start = async () => {
       } catch (e) {
         console.warn('[Server] AEGIS serpOutcomeTracker skipped:', e.message);
       }
+      // 🧪 Experiments loop (B4) — мозг сам ставит себе эксперименты:
+      // entropy-sampling страниц + гипотеза → планирует эксперимент,
+      // через measureAfterDays закрывает с reward в biobrain.feedback.
+      try {
+        const exp = require('./src/services/aegis/experimentLoop');
+        exp.setDbConnection(db);
+        exp.startExperimentLoop();
+      } catch (e) {
+        console.warn('[Server] AEGIS experimentLoop skipped:', e.message);
+      }
     } catch (err) {
       console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
     }
@@ -1729,6 +1739,45 @@ async function ensureSchema() {
     await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_serp_outcomes_url_pub ON aegis_serp_outcomes (url, published_at)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_serp_outcomes_status ON aegis_serp_outcomes (status, published_at)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_serp_outcomes_published ON aegis_serp_outcomes (published_at DESC)`);
+
+    // ─── Migration 065: Experiments (B4) — активный цикл обучения мозга ──
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_experiments (
+        id                      BIGSERIAL    PRIMARY KEY,
+        site_key                TEXT         NOT NULL,
+        target_url              TEXT         NOT NULL,
+        queries                 TEXT[]       NOT NULL DEFAULT '{}',
+        uncertainty             NUMERIC(6,4) NOT NULL DEFAULT 0,
+        hypothesis              JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        baseline_features       REAL[]       NOT NULL DEFAULT '{}',
+        baseline_feature_labels TEXT[]       NOT NULL DEFAULT '{}',
+        baseline_position       NUMERIC(7,3),
+        baseline_clicks         NUMERIC(12,2),
+        baseline_impressions    NUMERIC(12,2),
+        post_features           REAL[],
+        post_position           NUMERIC(7,3),
+        post_clicks             NUMERIC(12,2),
+        post_impressions        NUMERIC(12,2),
+        delta_position          NUMERIC(7,3),
+        delta_clicks            NUMERIC(12,2),
+        reward                  NUMERIC(6,4),
+        status                  VARCHAR(20)  NOT NULL DEFAULT 'planned',
+        outcome                 VARCHAR(20),
+        planned_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        dispatched_at           TIMESTAMPTZ,
+        measured_at             TIMESTAMPTZ,
+        backlog_issue_number    INTEGER,
+        serp_outcome_id         BIGINT,
+        notes                   TEXT
+      )
+    `);
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_experiments_open
+        ON aegis_experiments (site_key, target_url)
+        WHERE status IN ('planned', 'dispatched')
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_experiments_status ON aegis_experiments (status, planned_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_experiments_site   ON aegis_experiments (site_key, planned_at DESC)`);
 
     // ─── Migration 048: prompt tracking + DSPy linkage ────────────────
     await db.query(`
