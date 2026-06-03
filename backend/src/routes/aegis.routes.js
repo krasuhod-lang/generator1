@@ -96,4 +96,26 @@ router.post('/prompts/prune', auth, writeLimiter, prunePromptAuditHandler);
 // Phase C2: bridge SEO actions → GitHub backlog issues.
 router.post('/seo-brain/actions/dispatch', auth, writeLimiter, dispatchSeoActions);
 
+// ── Bio-Brain B5/B1: read-only timeline + admin tools ────────────
+const {
+  listBiobrainGenerations,
+  listAlgoUpdates,
+  refreshAlgoUpdates,
+  listSerpOutcomes,
+  listExperiments,
+  runExperimentsNow,
+  dispatchExperimentHandler,
+  measureExperimentHandler,
+} = require('../controllers/aegis.controller');
+router.get('/biobrain/generations', auth, listBiobrainGenerations);
+router.get('/algo-updates',         auth, listAlgoUpdates);
+router.post('/algo-updates/refresh', auth, writeLimiter, refreshAlgoUpdates);
+router.get('/serp-outcomes',        auth, listSerpOutcomes);
+
+// B4: experiments — мозг сам ставит себе эксперименты.
+router.get('/experiments',                  auth, listExperiments);
+router.post('/experiments/run',             auth, writeLimiter, runExperimentsNow);
+router.post('/experiments/:id/dispatch',    auth, writeLimiter, dispatchExperimentHandler);
+router.post('/experiments/:id/measure',     auth, writeLimiter, express.json({ limit: '64kb' }), measureExperimentHandler);
+
 module.exports = router;

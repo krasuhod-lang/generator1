@@ -248,6 +248,95 @@ const AEGIS_FLAGS = deepFreeze({
     minBufferToEvolve: 32,
     // Как часто Node-планировщик пингует /biobrain/status (телеметрия UI).
     statusPollIntervalSec: 300,
+    // Сколько последних поколений (snapshots) подтягивать с Python-сервиса
+    // на каждом тике для сохранения в aegis_biobrain_versions (B6).
+    generationsFetchLimit: 50,
+  },
+
+  // ── AlgoWatcher (B5) — лента обновлений алгоритмов поиска ───────
+  // Раз в час сервис тянет RSS из источников ниже и складывает уникальные
+  // элементы в aegis_algo_updates. UI «📜 История обновлений мозга»
+  // отображает их рядом с внутренними поколениями NEAT, чтобы видна была
+  // корреляция «апдейт N → провал/рост позиций».
+  algoWatcher: {
+    enabled: true,
+    intervalSec: 3600,
+    // Список RSS-источников. Без новых ENV — конфиг живёт в коде.
+    sources: [
+      { id: 'google_search_central',
+        url: 'https://developers.google.com/search/blog/feed.xml',
+        weight: 1.0 },
+      { id: 'google_search_status',
+        url: 'https://status.search.google.com/incidents.rss',
+        weight: 0.8 },
+      { id: 'serp_roundtable',
+        url: 'https://www.seroundtable.com/rss.xml',
+        weight: 0.6 },
+    ],
+    // Простой regex-классификатор расставляет теги; LLM-уровень
+    // (опциональный) гейтится отдельно и по умолчанию выключен — не
+    // тратит токены, пока админ явно не включит.
+    classifier: {
+      llmEnabled: false,
+      // Сопоставление regex → tag: применяется к title+summary.
+      tagRules: [
+        { tag: 'core_update',     re: '\\bcore\\s+update|core ranking' },
+        { tag: 'spam_update',     re: '\\bspam\\s+update' },
+        { tag: 'helpful_content', re: 'helpful\\s+content' },
+        { tag: 'eeat',            re: 'e[\\-\\s]?e[\\-\\s]?a[\\-\\s]?t|experience\\s+expertise' },
+        { tag: 'linking',         re: '\\bbacklinks?|link\\s+spam|nofollow|rel=' },
+        { tag: 'technical',       re: 'crawl|index|robots|sitemap|core\\s+web\\s+vitals|cwv' },
+        { tag: 'ranking_factor',  re: 'ranking\\s+factor|ranking\\s+system' },
+      ],
+    },
+  },
+
+  // ── SERP outcomes (B1) — реальный reward в biobrain.feedback ──────
+  // serpOutcomeTracker записывает (url, queries, features) при публикации,
+  // через measureAfterDays дней закрывает запись реальной позицией из
+  // GSC/SERP и отправляет reward в Bio-Brain — мозг учится связке
+  // «свойства черновика → позиция в Google», а не «себя на себя».
+  serpOutcomes: {
+    enabled: true,
+    measureAfterDays: 14,
+    // Веса reward'a при закрытии outcome'a:
+    //   reward = w_pos * f(avg_position) + w_top10 * (in_top10>0)
+    //          + w_top3 * (in_top3>0)    + w_clicks * normClicks
+    rewardWeights: {
+      position: 0.4,
+      top10:    0.2,
+      top3:     0.2,
+      clicks:   0.2,
+    },
+  },
+
+  // ── Experiments (B4) — активный цикл обучения мозга ────────────────
+  // Раз в сутки experimentLoop.runOnce() выбирает страницы с самым
+  // высоким composite-uncertainty (entropy биомозга + striking-distance
+  // позиции 11–30 + priority действий из aegis_seo_actions), записывает
+  // baseline-метрики и top-N гипотез из action_plan в aegis_experiments.
+  // Через measureAfterDays дней closeExperiment() считает Δposition/Δclicks,
+  // пушит reward в biobrain.feedback и помечает outcome (won/lost/inconclusive).
+  // Это и есть «мозг ставит себе эксперименты». Без новых ENV.
+  experiments: {
+    enabled: true,
+    intervalSec: 86400,           // раз в сутки
+    measureAfterDays: 14,
+    candidateLookbackDays: 30,    // окно aegis_seo_observations для baseline
+    maxNewPerTick: 3,             // не плодить эксперименты лавинообразно
+    hypothesisTopN: 3,            // top-N действий из action_plan на гипотезу
+    // Композитный uncertainty для ранжирования кандидатов (нормализуется).
+    uncertaintyWeights: {
+      biobrain: 0.5,              // 1 - confidence (если py доступен)
+      striking: 0.3,              // peak в позициях 11..20
+      priority: 0.2,              // максимальный priority action_plan
+    },
+    // По умолчанию dispatch не создаёт GitHub-issue: запись просто
+    // отображается в карточке «🧪 Эксперименты мозга», и пользователь
+    // решает, что с ней делать. Если включить и backlog (см. backlog
+    // блок) — появятся issue с label aegis:experiment.
+    dispatchToBacklog: false,
+    autoDispatch: false,
   },
 
   // ── Prompts-as-Code audit ─────────────────────────────────────────

@@ -19,6 +19,9 @@ const biobrain = require('./biobrainClient');
 const telemetry = require('./telemetry');
 const { getAegisFlags } = require('./featureFlags');
 
+let _db = null;
+function setDbConnection(db) { _db = db; }
+
 let _timer = null;
 let _running = false;
 
@@ -76,6 +79,41 @@ async function tick() {
 
     // Prometheus-метрики (no-op при выключенной телеметрии).
     try { telemetry.recordBiobrainState(s); } catch (_) { /* best-effort */ }
+
+    // B6: подтянуть лог поколений и записать новые в aegis_biobrain_versions.
+    // UPSERT по (generation, evolved_at) — повторные тики безопасны.
+    if (_db) {
+      try {
+        const limit = Number(flags.generationsFetchLimit) || 50;
+        const g = await biobrain.generations(limit);
+        const items = (g && g.ok && g.body && Array.isArray(g.body.items)) ? g.body.items : [];
+        for (const item of items) {
+          if (!item || item.generation == null) continue;
+          await _db.query(
+            `INSERT INTO aegis_biobrain_versions
+                (generation, evolved_at, nodes, conns, mean_fitness,
+                 best_fitness, holdout_mae, rolled_back, complexity_penalty)
+              VALUES ($1, COALESCE($2::timestamptz, NOW()), $3, $4, $5, $6, $7, $8, $9)
+              ON CONFLICT (generation, evolved_at) DO UPDATE
+                SET nodes = EXCLUDED.nodes,
+                    conns = EXCLUDED.conns,
+                    mean_fitness = EXCLUDED.mean_fitness,
+                    best_fitness = EXCLUDED.best_fitness,
+                    holdout_mae = EXCLUDED.holdout_mae,
+                    rolled_back = EXCLUDED.rolled_back,
+                    complexity_penalty = EXCLUDED.complexity_penalty`,
+            [item.generation, item.evolved_at || null,
+             item.nodes ?? null, item.conns ?? null,
+             item.mean_fitness ?? null, item.best_fitness ?? null,
+             item.holdout_mae ?? null,
+             item.rolled_back === true,
+             item.complexity_penalty ?? null]
+          );
+        }
+      } catch (e) {
+        console.warn('[aegis/biobrainScheduler] generations sync:', e.message);
+      }
+    }
   } catch (e) {
     _telemetry.last_error = e.message;
     console.warn('[aegis/biobrainScheduler] tick failed:', e.message);
@@ -104,6 +142,7 @@ function stopBiobrainScheduler() {
 module.exports = {
   startBiobrainScheduler,
   stopBiobrainScheduler,
+  setDbConnection,
   tick,
   getBiobrainSchedulerTelemetry,
 };

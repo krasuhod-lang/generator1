@@ -887,3 +887,157 @@ async function runVectorGcCleanup(req, res) {
   } catch (_e) { /* legacy DB */ }
   res.json({ ok: true, body: r.body });
 }
+
+// ────────────── Bio-Brain B5/B1 read-only admin endpoints ──────────────
+
+/** GET /api/aegis/biobrain/generations?limit=50 — лог поколений NEAT. */
+async function listBiobrainGenerations(req, res) {
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
+  try {
+    const r = await db.query(
+      `SELECT generation, evolved_at, nodes, conns, mean_fitness, best_fitness,
+              holdout_mae, prev_holdout_mae, complexity_lambda, complexity_penalty,
+              rolled_back, evolve_count, buffer_size
+         FROM aegis_biobrain_versions
+        ORDER BY COALESCE(evolved_at, created_at) DESC
+        LIMIT $1`,
+      [limit]
+    );
+    res.json({ items: r.rows });
+  } catch (e) {
+    res.status(503).json({ error: 'biobrain_generations_failed', reason: e.message });
+  }
+}
+
+/** GET /api/aegis/algo-updates?limit=50&since=ISO&tag=core_update */
+async function listAlgoUpdates(req, res) {
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50));
+  const params = [limit];
+  const where = [];
+  if (req.query.since) {
+    params.push(String(req.query.since));
+    where.push(`COALESCE(published_at, fetched_at) >= $${params.length}::timestamptz`);
+  }
+  if (req.query.tag) {
+    params.push(String(req.query.tag));
+    where.push(`$${params.length} = ANY(tags)`);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  try {
+    const r = await db.query(
+      `SELECT id, source, title, url, summary, published_at, fetched_at,
+              tags, severity
+         FROM aegis_algo_updates
+         ${whereSql}
+        ORDER BY COALESCE(published_at, fetched_at) DESC
+        LIMIT $1`,
+      params
+    );
+    res.json({ items: r.rows });
+  } catch (e) {
+    res.status(503).json({ error: 'algo_updates_failed', reason: e.message });
+  }
+}
+
+/** POST /api/aegis/algo-updates/refresh — ручной триггер RSS-обхода. */
+async function refreshAlgoUpdates(req, res) {
+  try {
+    const aw = require('../services/aegis/algoWatcher');
+    aw.setDbConnection(db);
+    const r = await aw.runOnce();
+    if (!r.ok) return res.status(503).json({ error: 'algo_refresh_failed', reason: r.reason });
+    res.json(r);
+  } catch (e) {
+    res.status(503).json({ error: 'algo_refresh_failed', reason: e.message });
+  }
+}
+
+/** GET /api/aegis/serp-outcomes?status=pending&limit=50 */
+async function listSerpOutcomes(req, res) {
+  try {
+    const t = require('../services/aegis/serpOutcomeTracker');
+    t.setDbConnection(db);
+    const r = await t.listOutcomes({
+      status: req.query.status || null,
+      limit:  req.query.limit,
+      offset: req.query.offset,
+    });
+    if (!r.ok) return res.status(503).json({ error: 'serp_outcomes_failed', reason: r.reason });
+    res.json({ items: r.items });
+  } catch (e) {
+    res.status(503).json({ error: 'serp_outcomes_failed', reason: e.message });
+  }
+}
+
+module.exports.listBiobrainGenerations = listBiobrainGenerations;
+module.exports.listAlgoUpdates         = listAlgoUpdates;
+module.exports.refreshAlgoUpdates      = refreshAlgoUpdates;
+module.exports.listSerpOutcomes        = listSerpOutcomes;
+
+// ── B4: experiments — активный цикл обучения мозга ──────────────────
+
+/** GET /api/aegis/experiments?status=planned&limit=50 */
+async function listExperiments(req, res) {
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    const r = await exp.listExperiments(db, {
+      status: req.query.status || null,
+      limit:  req.query.limit,
+      offset: req.query.offset,
+    });
+    if (!r.ok) return res.status(503).json({ error: 'experiments_failed', reason: r.reason });
+    res.json({ items: r.items });
+  } catch (e) {
+    res.status(503).json({ error: 'experiments_failed', reason: e.message });
+  }
+}
+
+/** POST /api/aegis/experiments/run — ручной триггер одного тика. */
+async function runExperimentsNow(req, res) {
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    exp.setDbConnection(db);
+    const r = await exp.runOnce(db);
+    if (!r.ok) return res.status(503).json({ error: 'experiments_run_failed', reason: r.reason });
+    res.json(r);
+  } catch (e) {
+    res.status(503).json({ error: 'experiments_run_failed', reason: e.message });
+  }
+}
+
+/** POST /api/aegis/experiments/:id/dispatch — пометить как dispatched. */
+async function dispatchExperimentHandler(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'bad_id' });
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    const r = await exp.dispatchExperiment(db, id);
+    if (!r.ok) return res.status(409).json({ error: 'dispatch_failed', reason: r.reason });
+    res.json(r);
+  } catch (e) {
+    res.status(503).json({ error: 'dispatch_failed', reason: e.message });
+  }
+}
+
+/**
+ * POST /api/aegis/experiments/:id/measure
+ * body: { avgPosition, clicks, impressions, features?: number[] }
+ * Закрывает эксперимент по переданным post-метрикам и считает reward.
+ */
+async function measureExperimentHandler(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'bad_id' });
+  try {
+    const exp = require('../services/aegis/experimentLoop');
+    const r = await exp.closeExperiment(db, id, req.body || {});
+    if (!r.ok) return res.status(409).json({ error: 'measure_failed', reason: r.reason });
+    res.json(r);
+  } catch (e) {
+    res.status(503).json({ error: 'measure_failed', reason: e.message });
+  }
+}
+
+module.exports.listExperiments         = listExperiments;
+module.exports.runExperimentsNow       = runExperimentsNow;
+module.exports.dispatchExperimentHandler = dispatchExperimentHandler;
+module.exports.measureExperimentHandler  = measureExperimentHandler;

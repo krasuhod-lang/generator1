@@ -270,10 +270,38 @@ const start = async () => {
       // Сам мозг эволюционирует внутри aegis_py; здесь лишь снимаем
       // телеметрию для /api/aegis/status. Гейтится biobrain.enabled.
       try {
-        const { startBiobrainScheduler } = require('./src/services/aegis/biobrainScheduler');
-        startBiobrainScheduler();
+        const sched = require('./src/services/aegis/biobrainScheduler');
+        // Прокидываем pg-pool, чтобы tick синхронизировал /biobrain/generations
+        // с таблицей aegis_biobrain_versions (B6).
+        try { sched.setDbConnection(db); } catch (_) {}
+        sched.startBiobrainScheduler();
       } catch (e) {
         console.warn('[Server] AEGIS biobrainScheduler skipped:', e.message);
+      }
+      // 🌐 AlgoWatcher — RSS-наблюдатель за апдейтами поисковых алгоритмов.
+      try {
+        const aw = require('./src/services/aegis/algoWatcher');
+        aw.setDbConnection(db);
+        aw.startAlgoWatcher();
+      } catch (e) {
+        console.warn('[Server] AEGIS algoWatcher skipped:', e.message);
+      }
+      // 🎯 SERP outcome tracker — хранилище публикаций для замыкания петли B1.
+      try {
+        const t = require('./src/services/aegis/serpOutcomeTracker');
+        t.setDbConnection(db);
+      } catch (e) {
+        console.warn('[Server] AEGIS serpOutcomeTracker skipped:', e.message);
+      }
+      // 🧪 Experiments loop (B4) — мозг сам ставит себе эксперименты:
+      // entropy-sampling страниц + гипотеза → планирует эксперимент,
+      // через measureAfterDays закрывает с reward в biobrain.feedback.
+      try {
+        const exp = require('./src/services/aegis/experimentLoop');
+        exp.setDbConnection(db);
+        exp.startExperimentLoop();
+      } catch (e) {
+        console.warn('[Server] AEGIS experimentLoop skipped:', e.message);
       }
     } catch (err) {
       console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
@@ -1647,6 +1675,109 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_biobrain_versions_created ON aegis_biobrain_versions (created_at DESC)`);
+    // ─── Migration 062: extended fields (B6 — hold-out, rollback, complexity) ──
+    await db.query(`ALTER TABLE aegis_biobrain_versions
+                       ADD COLUMN IF NOT EXISTS evolve_count       INTEGER,
+                       ADD COLUMN IF NOT EXISTS buffer_size        INTEGER,
+                       ADD COLUMN IF NOT EXISTS holdout_mae        NUMERIC(10,6),
+                       ADD COLUMN IF NOT EXISTS prev_holdout_mae   NUMERIC(10,6),
+                       ADD COLUMN IF NOT EXISTS complexity_lambda  NUMERIC(10,6),
+                       ADD COLUMN IF NOT EXISTS complexity_penalty NUMERIC(10,6),
+                       ADD COLUMN IF NOT EXISTS best_fitness       NUMERIC(10,6),
+                       ADD COLUMN IF NOT EXISTS conns              INTEGER,
+                       ADD COLUMN IF NOT EXISTS rolled_back        BOOLEAN NOT NULL DEFAULT FALSE,
+                       ADD COLUMN IF NOT EXISTS evolved_at         TIMESTAMPTZ`);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_biobrain_versions_gen_at
+                      ON aegis_biobrain_versions (generation, evolved_at)`);
+
+    // ─── Migration 063: AlgoWatcher — лента обновлений алгоритмов поиска ──
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_algo_updates (
+        id            BIGSERIAL    PRIMARY KEY,
+        source        TEXT         NOT NULL,
+        title         TEXT         NOT NULL,
+        url           TEXT         NOT NULL,
+        summary       TEXT,
+        published_at  TIMESTAMPTZ,
+        fetched_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        tags          TEXT[]       NOT NULL DEFAULT '{}',
+        severity      NUMERIC(4,3),
+        classified_at TIMESTAMPTZ,
+        raw           JSONB        NOT NULL DEFAULT '{}'::jsonb
+      )
+    `);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_algo_updates_src_url ON aegis_algo_updates (source, url)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_algo_updates_published ON aegis_algo_updates (published_at DESC NULLS LAST)`);
+    try {
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_algo_updates_tags ON aegis_algo_updates USING GIN (tags)`);
+    } catch (e) {
+      console.warn('[ensureSchema] aegis_algo_updates GIN index skipped:', e.message);
+    }
+
+    // ─── Migration 064: SERP outcomes — замыкаем biobrain feedback на позиции ──
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_serp_outcomes (
+        id              BIGSERIAL    PRIMARY KEY,
+        url             TEXT         NOT NULL,
+        queries         TEXT[]       NOT NULL DEFAULT '{}',
+        features        REAL[]       NOT NULL DEFAULT '{}',
+        feature_labels  TEXT[]       NOT NULL DEFAULT '{}',
+        published_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        measured_at     TIMESTAMPTZ,
+        avg_position    NUMERIC(7,3),
+        best_position   NUMERIC(7,3),
+        in_top3         INTEGER      NOT NULL DEFAULT 0,
+        in_top10        INTEGER      NOT NULL DEFAULT 0,
+        delta_clicks    NUMERIC(12,2),
+        delta_ctr       NUMERIC(6,4),
+        reward          NUMERIC(6,4),
+        status          VARCHAR(20)  NOT NULL DEFAULT 'pending',
+        project_id      UUID,
+        notes           TEXT
+      )
+    `);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_serp_outcomes_url_pub ON aegis_serp_outcomes (url, published_at)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_serp_outcomes_status ON aegis_serp_outcomes (status, published_at)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_serp_outcomes_published ON aegis_serp_outcomes (published_at DESC)`);
+
+    // ─── Migration 065: Experiments (B4) — активный цикл обучения мозга ──
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS aegis_experiments (
+        id                      BIGSERIAL    PRIMARY KEY,
+        site_key                TEXT         NOT NULL,
+        target_url              TEXT         NOT NULL,
+        queries                 TEXT[]       NOT NULL DEFAULT '{}',
+        uncertainty             NUMERIC(6,4) NOT NULL DEFAULT 0,
+        hypothesis              JSONB        NOT NULL DEFAULT '[]'::jsonb,
+        baseline_features       REAL[]       NOT NULL DEFAULT '{}',
+        baseline_feature_labels TEXT[]       NOT NULL DEFAULT '{}',
+        baseline_position       NUMERIC(7,3),
+        baseline_clicks         NUMERIC(12,2),
+        baseline_impressions    NUMERIC(12,2),
+        post_features           REAL[],
+        post_position           NUMERIC(7,3),
+        post_clicks             NUMERIC(12,2),
+        post_impressions        NUMERIC(12,2),
+        delta_position          NUMERIC(7,3),
+        delta_clicks            NUMERIC(12,2),
+        reward                  NUMERIC(6,4),
+        status                  VARCHAR(20)  NOT NULL DEFAULT 'planned',
+        outcome                 VARCHAR(20),
+        planned_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        dispatched_at           TIMESTAMPTZ,
+        measured_at             TIMESTAMPTZ,
+        backlog_issue_number    INTEGER,
+        serp_outcome_id         BIGINT,
+        notes                   TEXT
+      )
+    `);
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_aegis_experiments_open
+        ON aegis_experiments (site_key, target_url)
+        WHERE status IN ('planned', 'dispatched')
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_experiments_status ON aegis_experiments (status, planned_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_experiments_site   ON aegis_experiments (site_key, planned_at DESC)`);
 
     // ─── Migration 048: prompt tracking + DSPy linkage ────────────────
     await db.query(`

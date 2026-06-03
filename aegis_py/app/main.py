@@ -418,7 +418,23 @@ def biobrain_advice(req: BioBrainPredictRequest) -> Dict[str, Any]:
         "gate": pred.get("gate"),
         "confidence": pred.get("confidence"),
         "advice": pred.get("advice"),
+        "attribution": pred.get("attribution"),
+        "feature_labels": pred.get("feature_labels"),
     }
+
+
+@app.get("/biobrain/generations")
+def biobrain_generations(limit: int = 50) -> Dict[str, Any]:
+    """B6: вернуть последние N снапшотов поколений NEAT.
+
+    Эта лента питает Node-планировщик biobrainScheduler — он переносит
+    записи в `aegis_biobrain_generations`, чтобы UI «🧬 Версии мозга»
+    мог нарисовать timeline и предложить откат, если новое поколение
+    деградировало на hold-out.
+    """
+    from .biobrain.storage import load_generations
+    items = load_generations(limit=int(limit))
+    return {"items": items, "count": len(items)}
 
 
 # ── /dspy ─────────────────────────────────────────────────────────────

@@ -22,6 +22,11 @@ const status   = ref(null);
 const runs     = ref([]);
 const backlog  = ref([]);
 const versions = ref([]);
+const generations = ref([]);
+const algoUpdates = ref([]);
+const experiments = ref([]);
+const experimentsBusy = ref(false);
+const experimentsMsg = ref('');
 const topFailures = ref([]);
 const promptLog = ref([]);
 const failuresDays = ref(7);
@@ -79,7 +84,7 @@ async function refresh() {
   loading.value = true;
   error.value   = '';
   try {
-    const [s, r, b, v, f, p, sb] = await Promise.all([
+    const [s, r, b, v, f, p, sb, gen, algo, exps] = await Promise.all([
       api.get('/aegis/status').then((x) => x.data),
       api.get('/aegis/runs?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/backlog').then((x) => x.data).catch(() => ({ items: [] })),
@@ -87,6 +92,9 @@ async function refresh() {
       api.get(`/aegis/failures/top?days=${failuresDays.value}`).then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/prompts/log?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/seo-brain').then((x) => x.data).catch(() => null),
+      api.get('/aegis/biobrain/generations?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
+      api.get('/aegis/algo-updates?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
+      api.get('/aegis/experiments?limit=30').then((x) => x.data).catch(() => ({ items: [] })),
     ]);
     status.value   = s;
     runs.value     = r.items || [];
@@ -95,6 +103,9 @@ async function refresh() {
     topFailures.value = f.items || [];
     promptLog.value = p.items || [];
     seoBrain.value = sb;
+    generations.value = gen.items || [];
+    algoUpdates.value = algo.items || [];
+    experiments.value = exps.items || [];
   } catch (e) {
     error.value = e?.response?.data?.error || e.message || 'Ошибка загрузки';
   } finally {
@@ -118,6 +129,42 @@ async function dispatchSeoActions() {
   } finally {
     seoDispatchBusy.value = false;
   }
+}
+
+async function runExperimentsNow() {
+  if (experimentsBusy.value) return;
+  experimentsBusy.value = true;
+  experimentsMsg.value = '';
+  try {
+    const r = await api.post('/aegis/experiments/run', {});
+    const d = r.data || {};
+    experimentsMsg.value = `Кандидатов: ${d.picked ?? 0}, запланировано: ${d.planned ?? 0}, отправлено: ${d.dispatched ?? 0}`;
+    await refresh();
+  } catch (e) {
+    experimentsMsg.value = e?.response?.data?.error || e.message || 'Ошибка';
+  } finally {
+    experimentsBusy.value = false;
+  }
+}
+
+async function dispatchExperiment(id) {
+  experimentsMsg.value = '';
+  try {
+    await api.post(`/aegis/experiments/${id}/dispatch`, {});
+    await refresh();
+  } catch (e) {
+    experimentsMsg.value = e?.response?.data?.error || e.message || 'Ошибка';
+  }
+}
+
+function expBadge(status, outcome) {
+  if (status === 'measured') {
+    if (outcome === 'won') return 'badge-ok';
+    if (outcome === 'lost') return 'badge-warn';
+    return 'badge-wait';
+  }
+  if (status === 'dispatched') return 'badge-info';
+  return 'badge-wait';
 }
 </script>
 
@@ -530,6 +577,130 @@ async function dispatchSeoActions() {
             <span v-if="seoDispatchMsg" class="subtle" style="margin-left: 0.5rem;">{{ seoDispatchMsg }}</span>
           </div>
         </template>
+      </section>
+
+      <section class="card">
+        <h2>🧬 Поколения NEAT</h2>
+        <p class="subtle">
+          Снимок каждого поколения автономного Bio-Brain: рост сети, fitness,
+          hold-out MAE, признаки откатов под пенальти за сложность (B6).
+        </p>
+        <div v-if="generations.length" class="table-wrap">
+          <table class="grid fixed">
+            <thead>
+              <tr>
+                <th>Когда</th><th class="num">Gen</th>
+                <th class="num">Узлы/связи</th>
+                <th class="num">Mean fitness</th>
+                <th class="num">Hold-out MAE</th>
+                <th class="num">Откат?</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="g in generations" :key="`${g.generation}-${g.evolved_at}`">
+                <td class="nowrap">{{ fmtTime(g.evolved_at) }}</td>
+                <td class="num">{{ g.generation }}</td>
+                <td class="num">{{ g.nodes ?? '—' }} / {{ g.conns ?? '—' }}</td>
+                <td class="num">{{ fmtMaybe(g.mean_fitness, 4) }}</td>
+                <td class="num">{{ fmtMaybe(g.holdout_mae, 4) }}</td>
+                <td class="num">{{ g.rolled_back ? '↩️' : '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="subtle">Поколений пока нет — мозг ещё не запустил эволюцию.</p>
+      </section>
+
+      <section class="card">
+        <h2>🌐 Обновления алгоритмов</h2>
+        <p class="subtle">
+          Лента из Google Search Central, статуса поиска и SEJ Roundtable;
+          теги расставляет regex-классификатор (B5).
+        </p>
+        <div v-if="algoUpdates.length" class="table-wrap">
+          <table class="grid fixed">
+            <thead>
+              <tr>
+                <th>Когда</th><th>Источник</th><th>Заголовок</th>
+                <th>Теги</th><th class="num">Severity</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="u in algoUpdates" :key="u.id">
+                <td class="nowrap">{{ fmtTime(u.published_at || u.fetched_at) }}</td>
+                <td><code>{{ u.source }}</code></td>
+                <td>
+                  <a :href="u.url" target="_blank" rel="noopener noreferrer">
+                    {{ u.title }}
+                  </a>
+                </td>
+                <td>
+                  <span v-for="t in (u.tags || [])" :key="t" class="badge badge-info" style="margin-right:4px;">{{ t }}</span>
+                </td>
+                <td class="num">{{ fmtMaybe(u.severity, 2) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="subtle">Лента пока пуста — AlgoWatcher запускается через 30 сек после старта сервера.</p>
+      </section>
+
+      <section class="card">
+        <h2>🧪 Эксперименты мозга</h2>
+        <p class="subtle">
+          Активный цикл обучения (B4): мозг каждые сутки выбирает страницы
+          с самым высоким composite-uncertainty (entropy биомозга +
+          striking-distance + priority действий) и записывает гипотезу.
+          Через 14 дней замеряет Δposition / Δclicks и пушит reward
+          в biobrain.feedback. Победы → усиливают связи мозга, провалы → ослабляют.
+        </p>
+        <div class="row" style="gap:8px; margin-bottom:8px;">
+          <button class="btn" :disabled="experimentsBusy" @click="runExperimentsNow">
+            {{ experimentsBusy ? '…' : 'Запустить тик сейчас' }}
+          </button>
+          <span v-if="experimentsMsg" class="subtle">{{ experimentsMsg }}</span>
+        </div>
+        <div v-if="experiments.length" class="table-wrap">
+          <table class="grid fixed">
+            <thead>
+              <tr>
+                <th>План</th><th>URL</th>
+                <th class="num">Uncertainty</th>
+                <th class="num">Pos baseline → post</th>
+                <th class="num">Δ кликов</th>
+                <th class="num">Reward</th>
+                <th>Статус</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="e in experiments" :key="e.id">
+                <td class="nowrap">{{ fmtTime(e.planned_at) }}</td>
+                <td><code style="font-size:11px;">{{ e.target_url }}</code></td>
+                <td class="num">{{ fmtMaybe(e.uncertainty, 3) }}</td>
+                <td class="num">
+                  {{ fmtMaybe(e.baseline_position, 1) }} → {{ fmtMaybe(e.post_position, 1) }}
+                </td>
+                <td class="num">{{ e.delta_clicks == null ? '—' : (e.delta_clicks > 0 ? '+' : '') + Number(e.delta_clicks) }}</td>
+                <td class="num">{{ fmtMaybe(e.reward, 2) }}</td>
+                <td>
+                  <span :class="['badge', expBadge(e.status, e.outcome)]">
+                    {{ e.status }}{{ e.outcome ? ' · ' + e.outcome : '' }}
+                  </span>
+                </td>
+                <td>
+                  <button v-if="e.status === 'planned'" class="btn-mini" @click="dispatchExperiment(e.id)">
+                    dispatch
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="subtle">
+          Экспериментов ещё нет. Они появятся после первого SEO-Brain snapshot'a
+          и накопления action_plan'a.
+        </p>
       </section>
 
       <section class="card">
