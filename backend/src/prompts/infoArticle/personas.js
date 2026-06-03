@@ -48,6 +48,67 @@ const PERSONA_KEYS = [
   'engineer',
 ];
 
+/**
+ * Метаданные персоны для байлайна (видимая «подпись автора» в HTML)
+ * и JSON-LD Author. По SEO/GEO 2026 авторство — обязательный сигнал
+ * E-E-A-T. profile_url оставлен пустым: реальные публичные страницы
+ * вымышленных персон не существуют, а ссылка на «битый» URL — плохой
+ * сигнал доверия. При появлении реального профиля — заполнять здесь.
+ */
+const PERSONA_META = Object.freeze({
+  practitioner: Object.freeze({
+    display_name: 'Анна Воронова',
+    role:         'практикующий специалист с 12-летним опытом',
+    bio_short:    'Эксперт-практик ниши, описывает реальные кейсы «с земли».',
+    profile_url:  '',
+  }),
+  science_journalist: Object.freeze({
+    display_name: 'Сергей Климов',
+    role:         'научный обозреватель, популяризатор',
+    bio_short:    'Корректно популяризует исследования и стандарты ниши.',
+    profile_url:  '',
+  }),
+  mentor: Object.freeze({
+    display_name: 'Мария Литвин',
+    role:         'наставник для новичков',
+    bio_short:    'Объясняет сложное простым языком, с акцентом на разбор частых ошибок.',
+    profile_url:  '',
+  }),
+  reviewer: Object.freeze({
+    display_name: 'Дмитрий Орлов',
+    role:         'независимый обзорщик',
+    bio_short:    'Сравнивает варианты по измеримым критериям, без рекламных штампов.',
+    profile_url:  '',
+  }),
+  lifehack: Object.freeze({
+    display_name: 'Елена Тихая',
+    role:         'лайфхак-публицист',
+    bio_short:    'Динамичный полезный стиль, ставка на быстрые применимые советы.',
+    profile_url:  '',
+  }),
+  historian: Object.freeze({
+    display_name: 'Игорь Безуглов',
+    role:         'историк-аналитик',
+    bio_short:    'Разбирает темы через исторический контекст и эволюцию подходов.',
+    profile_url:  '',
+  }),
+  engineer: Object.freeze({
+    display_name: 'Павел Ильин',
+    role:         'инженер-технолог',
+    bio_short:    'Чёткие методики, пошаговые алгоритмы, инженерный взгляд.',
+    profile_url:  '',
+  }),
+});
+
+/**
+ * Возвращает метаданные персоны по ключу. Для неизвестного ключа —
+ * первая (нейтральная) персона.
+ */
+function getPersonaMeta(key) {
+  if (PERSONA_META[key]) return PERSONA_META[key];
+  return PERSONA_META[PERSONA_KEYS[0]];
+}
+
 const _cache = new Map();
 
 function getPersonaPrompt(key) {
@@ -127,8 +188,10 @@ function buildPersonaSystemBlock(opts = {}) {
 
 module.exports = {
   PERSONA_KEYS,
+  PERSONA_META,
   listPersonas,
   getPersonaPrompt,
+  getPersonaMeta,
   pickPersonaFor,
   buildPersonaSystemBlock,
 };
