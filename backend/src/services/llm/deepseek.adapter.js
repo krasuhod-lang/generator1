@@ -6,8 +6,8 @@ const DEEPSEEK_ENDPOINT = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek
 const DEEPSEEK_MODEL    = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
 
 /**
- * Определяет, является ли модель DeepSeek-R1 (reasoning model).
- * Для R1 моделей рекомендуется избегать системных промптов —
+ * Определяет, является ли модель DeepSeek reasoning-моделью (R1/reasoner).
+ * Для reasoning-моделей рекомендуется избегать системных промптов —
  * все инструкции передаются в user prompt.
  */
 function isReasoningModel(model) {
@@ -29,6 +29,7 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     maxTokens   = 8000,
     timeoutMs   = 120000,
     logprobs    = false,
+    model       = DEEPSEEK_MODEL,
   } = options;
 
   // Проверка параметров
@@ -42,10 +43,10 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     throw new Error('DEEPSEEK_API_KEY is not set in environment variables');
   }
 
-  // ── R1 (reasoning) модель: system prompt → user prompt ────────────
-  // DeepSeek-R1 рекомендует не использовать system prompt.
-  // Все жёсткие SEO-инструкции передаём в user prompt с XML-тегами.
-  const r1Mode = isReasoningModel(DEEPSEEK_MODEL);
+  // ── R1 / reasoner: system prompt → user prompt ─────────────────────
+  // DeepSeek-reasoner и R1 рекомендуют не использовать system prompt.
+  // Все жёсткие инструкции передаём в user prompt с XML-тегами.
+  const r1Mode = isReasoningModel(model);
 
   let messages;
   if (r1Mode && systemInstruction.trim()) {
@@ -69,7 +70,7 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   }
 
   const body = {
-    model: DEEPSEEK_MODEL,
+    model,
     messages,
     temperature: temperature,
     max_tokens: maxTokens,
@@ -109,8 +110,9 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
       text,
       tokensIn:  usage.prompt_tokens      || 0,
       tokensOut: usage.completion_tokens   || 0,
-      model:     data.model               || DEEPSEEK_MODEL,
+      model:     data.model               || model,
       cacheHitTokens: usage.prompt_cache_hit_tokens || 0,
+      reasoningTokens: usage.completion_tokens_details?.reasoning_tokens || 0,
       logprobs: logprobsData,
     };
   } catch (err) {

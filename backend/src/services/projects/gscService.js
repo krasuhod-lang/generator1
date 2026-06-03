@@ -54,6 +54,24 @@ function resolveRange({ days, from, to } = {}) {
   return { startDate: _isoDate(start), endDate: _isoDate(end) };
 }
 
+/**
+ * Предыдущий равный по длине период (для PoP-сравнения). Заканчивается за
+ * день до startDate переданного периода.
+ * @returns {{from:string, to:string, days:number}} — формат, совместимый с
+ *   resolveRange/fetchPerformanceSeries (они принимают {from,to}).
+ */
+function previousRange(range) {
+  const { startDate, endDate } = resolveRange(range);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end   = new Date(`${endDate}T00:00:00Z`);
+  const days  = Math.max(1, Math.round((end - start) / 86400000) + 1);
+  const prevEnd   = new Date(start);
+  prevEnd.setUTCDate(prevEnd.getUTCDate() - 1);
+  const prevStart = new Date(prevEnd);
+  prevStart.setUTCDate(prevStart.getUTCDate() - (days - 1));
+  return { from: _isoDate(prevStart), to: _isoDate(prevEnd), days };
+}
+
 function _round(n, p = 2) {
   const f = Math.pow(10, p);
   return Math.round((Number(n) || 0) * f) / f;
@@ -145,10 +163,88 @@ async function fetchQueryPageMatrix(project, range) {
   }));
 }
 
+/**
+ * Универсальный одно-измеренческий разрез по device / country / searchAppearance.
+ * Возвращает массив {key, clicks, impressions, ctr%, position}.
+ */
+async function fetchBreakdown(project, range, dimension, { rowLimit = 25 } = {}) {
+  const cfg = getProjectsConfig().gsc;
+  const { startDate, endDate } = resolveRange(range);
+  const accessToken = await getValidAccessToken(project);
+  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+    startDate, endDate,
+    dimensions: [dimension],
+    rowLimit: Math.min(rowLimit, cfg.rowLimit),
+  });
+  return (rows || []).map((r) => ({
+    key: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
+    clicks: r.clicks || 0,
+    impressions: r.impressions || 0,
+    ctr: _round((r.ctr || 0) * 100, 2),
+    position: _round(r.position || 0, 2),
+  }));
+}
+
+/**
+ * Срез page × date — нужен для page-decay detector (регрессия по неделям
+ * на каждой странице из топа). Тянем строки только для top-N страниц,
+ * чтобы не раздувать запрос: фильтр по page через dimensionFilterGroups.
+ */
+async function fetchPageDailySeries(project, range, pages, { rowLimit = 25000 } = {}) {
+  if (!Array.isArray(pages) || pages.length === 0) return [];
+  const cfg = getProjectsConfig().gsc;
+  const { startDate, endDate } = resolveRange(range);
+  const accessToken = await getValidAccessToken(project);
+  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+    startDate, endDate,
+    dimensions: ['page', 'date'],
+    rowLimit: Math.min(rowLimit, cfg.rowLimit),
+    dimensionFilterGroups: [{
+      filters: pages.map((p) => ({ dimension: 'page', operator: 'equals', expression: p })),
+      groupType: 'or',
+    }],
+  });
+  return (rows || []).map((r) => ({
+    page: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
+    date: Array.isArray(r.keys) ? (r.keys[1] || '') : '',
+    clicks: r.clicks || 0,
+    impressions: r.impressions || 0,
+    ctr: _round((r.ctr || 0) * 100, 2),
+    position: _round(r.position || 0, 2),
+  }));
+}
+
+/**
+ * Срез по запросам с произвольным rowLimit. Используется для:
+ *   • PoP-сравнения (запросы за предыдущий период);
+ *   • расчёта бренд/небренд пропорции (нужен большой набор, не только топ-50).
+ */
+async function fetchTopQueries(project, range, { rowLimit = 50 } = {}) {
+  const cfg = getProjectsConfig().gsc;
+  const { startDate, endDate } = resolveRange(range);
+  const accessToken = await getValidAccessToken(project);
+  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+    startDate, endDate,
+    dimensions: ['query'],
+    rowLimit: Math.min(rowLimit, cfg.rowLimit),
+  });
+  return (rows || []).map((r) => ({
+    key: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
+    clicks: r.clicks || 0,
+    impressions: r.impressions || 0,
+    ctr: _round((r.ctr || 0) * 100, 2),
+    position: _round(r.position || 0, 2),
+  }));
+}
+
 module.exports = {
   getValidAccessToken,
   resolveRange,
+  previousRange,
   fetchPerformanceSeries,
   fetchTopDimensions,
   fetchQueryPageMatrix,
+  fetchBreakdown,
+  fetchPageDailySeries,
+  fetchTopQueries,
 };

@@ -33,6 +33,10 @@ const SYSTEM_PROMPT = [
   '',
   '## 1. Общая оценка текущей ситуации',
   'Почему метрики растут или падают, что говорит динамика позиций и CTR.',
+  'Если в данных есть [ЧТО ИЗМЕНИЛОСЬ vs ПРЕДЫДУЩИЙ РАВНЫЙ ПЕРИОД] —',
+  'опирайся на ДЕКОМПОЗИЦИЮ Δclicks (вклад спроса vs CTR) и называй',
+  'конкретные движущие запросы/страницы. Не ограничивайся фразой «упало',
+  'на N%» — раскрой ПРИЧИНУ (спрос упал / позиции просели / CTR провалился).',
   '',
   '## 2. Точки роста',
   'Что стоит усилить в первую очередь (конкретные запросы/страницы).',
@@ -43,7 +47,9 @@ const SYSTEM_PROMPT = [
   '',
   '## 4. Постраничная оптимизация',
   'Рекомендации по конкретным URL из топа: title/description, контент,',
-  'интент, внутренние ссылки.',
+  'интент, внутренние ссылки. Если есть [PAGE DECAY DETECTOR] — отдельно',
+  'выдели страницы с decaying=true и предложи план их content refresh',
+  '(что обновить, какие новые секции добавить, как перелинковать).',
   '',
   '## 5. Action Plan на ближайший период',
   'Чёткий пронумерованный пошаговый план развития (что, зачем, ожидаемый',
@@ -64,6 +70,13 @@ const SYSTEM_PROMPT = [
   'Если коммерческого среза нет — кратко объясни, что усилить для коммерции',
   'на основе топ-запросов и страниц.',
   '',
+  '## 7. Сегменты: устройства, гео, rich snippets, бренд',
+  'Если в данных есть [СРЕЗ ПО УСТРОЙСТВАМ] / [СРЕЗ ПО СТРАНАМ] /',
+  '[СРЕЗ ПО SEARCH APPEARANCE] / [БРЕНД vs НЕБРЕНД] — выдай по 1–3 ёмких',
+  'наблюдения по каждому сегменту и конкретные действия (mobile-fix,',
+  'hreflang/локализация, внедрение/расширение rich-snippets, развитие',
+  'небрендового спроса). Если каких-то срезов нет — пропусти подразделы.',
+  '',
   'Опирайся только на переданные данные и здравый SEO-смысл, не выдумывай',
   'цифр. Учитывай целевую аудиторию проекта во всех рекомендациях.',
   'Не добавляй преамбулы и заключения вне этой структуры.',
@@ -77,7 +90,8 @@ function _stripFence(text) {
     .trim();
 }
 
-function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification }) {
+function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification,
+  breakdowns, periodCompare, pageDecay, brandSplit }) {
   const lines = [
     '[ПРОЕКТ]',
     `Название: ${project.name || '—'}`,
@@ -101,6 +115,10 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
     `[ТОП-${top.topPages.length} СТРАНИЦ] (page, clicks, impressions, ctr%, position)`,
     JSON.stringify(top.topPages),
   ];
+  lines.push(..._renderPeriodCompareLines(periodCompare));
+  lines.push(..._renderBreakdownLines(breakdowns));
+  lines.push(..._renderPageDecayLines(pageDecay));
+  lines.push(..._renderBrandSplitLines(brandSplit));
   if (commercial && commercial.available) {
     lines.push(
       '',
@@ -127,6 +145,110 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
   }
   lines.push(..._renderSerpVerificationLines(serpVerification));
   return lines.join('\n');
+}
+
+/**
+ * Срез изменений vs предыдущий равный период: тоталы, декомпозиция Δclicks
+ * (вклад спроса vs CTR), топ движущих запросов и страниц.
+ */
+function _renderPeriodCompareLines(pc) {
+  if (!pc || !pc.available) return [];
+  const lines = [
+    '',
+    '[ЧТО ИЗМЕНИЛОСЬ vs ПРЕДЫДУЩИЙ РАВНЫЙ ПЕРИОД]',
+    'Используй этот срез как ОСНОВУ раздела 1: вместо общих оценок «выросло/',
+    'упало» — назови КОНКРЕТНУЮ причину (спрос, позиции или CTR).',
+    `Дельты тоталов (clicks, impressions, ctr%, position): ${JSON.stringify(pc.totals.delta)}`,
+    `Дельты в %: ${JSON.stringify(pc.totals.pct)}`,
+    'Декомпозиция Δclicks ≈ ΔImpr×CTRprev + ImprCurr×ΔCTR:',
+    JSON.stringify(pc.totals.decomposition),
+    '',
+    'Топ растущих запросов (key, delta.clicks, delta.position, clicks_curr, impressions_curr):',
+    JSON.stringify((pc.queries.risers || []).map((r) => ({
+      key: r.key, delta_clicks: r.delta.clicks, delta_position: r.delta.position,
+      clicks_curr: r.clicks_curr, impressions_curr: r.impressions_curr,
+    }))),
+    'Топ падающих запросов:',
+    JSON.stringify((pc.queries.fallers || []).map((r) => ({
+      key: r.key, delta_clicks: r.delta.clicks, delta_position: r.delta.position,
+      clicks_curr: r.clicks_curr, clicks_prev: r.clicks_prev,
+    }))),
+    'Новые запросы в выборке (key, clicks_curr, position_curr):',
+    JSON.stringify((pc.queries.newcomers || []).map((r) => ({
+      key: r.key, clicks_curr: r.clicks_curr, position_curr: r.position_curr,
+    }))),
+    'Потерянные запросы (key, clicks_prev, position_prev):',
+    JSON.stringify((pc.queries.lost || []).map((r) => ({
+      key: r.key, clicks_prev: r.clicks_prev, position_prev: r.position_prev,
+    }))),
+    '',
+    'Топ растущих страниц:',
+    JSON.stringify((pc.pages.risers || []).map((r) => ({
+      key: r.key, delta_clicks: r.delta.clicks, delta_position: r.delta.position,
+    }))),
+    'Топ падающих страниц:',
+    JSON.stringify((pc.pages.fallers || []).map((r) => ({
+      key: r.key, delta_clicks: r.delta.clicks, delta_position: r.delta.position,
+    }))),
+  ];
+  return lines;
+}
+
+/** Срез по устройствам / странам / searchAppearance. */
+function _renderBreakdownLines(breakdowns) {
+  if (!breakdowns) return [];
+  const out = [];
+  if (Array.isArray(breakdowns.device) && breakdowns.device.length) {
+    out.push('', '[СРЕЗ ПО УСТРОЙСТВАМ] (key, clicks, impressions, ctr%, position)',
+      JSON.stringify(breakdowns.device));
+  }
+  if (Array.isArray(breakdowns.country) && breakdowns.country.length) {
+    out.push('', '[СРЕЗ ПО СТРАНАМ] (key=ISO-3, clicks, impressions, ctr%, position)',
+      JSON.stringify(breakdowns.country));
+  }
+  if (Array.isArray(breakdowns.searchAppearance) && breakdowns.searchAppearance.length) {
+    out.push('', '[СРЕЗ ПО SEARCH APPEARANCE] (key=тип rich-result, clicks, impressions, ctr%, position)',
+      JSON.stringify(breakdowns.searchAppearance));
+  }
+  if (out.length) {
+    out.push('Используй эти срезы для отдельных гипотез: mobile vs desktop',
+      '(скорость/viewport), географическое покрытие (hreflang/локализация),',
+      'rich snippets (FAQ/How-to/sitelinks — где недобираем).');
+  }
+  return out;
+}
+
+/** Page-decay detector: страницы-кандидаты на refresh контента. */
+function _renderPageDecayLines(pd) {
+  if (!pd || !pd.available || !pd.items || pd.items.length === 0) return [];
+  return [
+    '',
+    `[PAGE DECAY DETECTOR] страниц проанализировано: ${pd.pages_analyzed}, в decay: ${pd.decaying_count}`,
+    'Страницы с системным падением кликов по неделям — кандидаты на content refresh.',
+    'slope_norm — наклон в долях средних кликов в неделю (-0.1 = -10%/нед).',
+    'Поле decaying=true — рекомендуй именно их для приоритетного рефреша.',
+    JSON.stringify(pd.items.map((it) => ({
+      page: it.page, weeks: it.weeks,
+      mean_weekly_clicks: it.mean_weekly_clicks,
+      slope_norm: it.slope_norm,
+      decaying: it.decaying,
+    }))),
+  ];
+}
+
+/** Бренд vs небренд динамика. */
+function _renderBrandSplitLines(bs) {
+  if (!bs || !bs.available) return [];
+  return [
+    '',
+    '[БРЕНД vs НЕБРЕНД]',
+    `Брендовые токены: ${(bs.brand_tokens || []).join(', ') || '—'}`,
+    `Branded:    ${JSON.stringify(bs.branded)}`,
+    `Non-branded: ${JSON.stringify(bs.nonbranded)}`,
+    'Если рост сосредоточен в branded — отдельной задачей предложи как развивать',
+    'небрендовый спрос; если небренд проседает на фоне роста бренда — это сигнал',
+    'тревоги (теряем «холодную» аудиторию).',
+  ];
 }
 
 /**
@@ -158,6 +280,15 @@ function _renderSerpVerificationLines(serpVerification) {
 }
 
 /**
+ * Возвращает имя «провайдера» для priceCalculator/llmUsageLog в зависимости
+ * от выбранной модели DeepSeek. Reasoner тарифицируется отдельным тарифом
+ * (см. priceCalculator.PRICES.deepseek_reasoner).
+ */
+function _providerName(model) {
+  return /reasoner|r1/i.test(String(model || '')) ? 'deepseek-reasoner' : 'deepseek';
+}
+
+/**
  * Запускает анализ. Возвращает объект-результат (никогда не бросает).
  */
 async function runProjectAnalysis(payload) {
@@ -172,16 +303,18 @@ async function runProjectAnalysis(payload) {
       temperature: cfg.temperature,
       maxTokens: cfg.maxTokens,
       timeoutMs: cfg.timeoutMs,
+      model: cfg.model,
     });
     const tIn = resp.tokensIn || 0;
     const tOut = resp.tokensOut || 0;
     const cached = resp.cacheHitTokens || 0;
-    const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+    const provider = _providerName(cfg.model);
+    const cost = calcCost(provider, tIn, tOut, { cachedTokens: cached });
     const durationMs = Date.now() - t0;
     // Эгида: учитываем расход LLM в сквозной cost-аналитике (graceful, не бросает).
     try {
       llmUsageLog.recordUsage({
-        provider: 'deepseek',
+        provider,
         kind: 'project_seo_analysis',
         outcome: 'ok',
         tokensIn: tIn,
@@ -197,12 +330,12 @@ async function runProjectAnalysis(payload) {
       tokens_in: tIn,
       tokens_out: tOut,
       cost_usd: Math.round(cost * 1e6) / 1e6,
-      model: resp.model || 'deepseek',
+      model: resp.model || cfg.model || 'deepseek',
       duration_ms: durationMs,
     };
   } catch (err) {
     try {
-      llmUsageLog.recordUsage({ provider: 'deepseek', kind: 'project_seo_analysis', outcome: 'error' });
+      llmUsageLog.recordUsage({ provider: _providerName(cfg.model), kind: 'project_seo_analysis', outcome: 'error' });
     } catch (_) { /* no-op */ }
     return { verdict: 'error', reason: (err && err.message) ? err.message : String(err) };
   }
@@ -244,20 +377,22 @@ async function _callDeepSeekTracked(system, user, cfg, kind) {
     temperature: cfg.temperature,
     maxTokens: cfg.maxTokens,
     timeoutMs: cfg.timeoutMs,
+    model: cfg.model,
   });
   const tIn = resp.tokensIn || 0;
   const tOut = resp.tokensOut || 0;
   const cached = resp.cacheHitTokens || 0;
-  const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+  const provider = _providerName(cfg.model);
+  const cost = calcCost(provider, tIn, tOut, { cachedTokens: cached });
   const durationMs = Date.now() - t0;
   try {
     llmUsageLog.recordUsage({
-      provider: 'deepseek', kind, outcome: 'ok',
+      provider, kind, outcome: 'ok',
       tokensIn: tIn, tokensOut: tOut, cachedTokens: cached,
       costUsd: cost, latencyMs: durationMs,
     });
   } catch (_) { /* no-op */ }
-  return { text: resp.text || '', tIn, tOut, cached, cost, model: resp.model || 'deepseek', durationMs };
+  return { text: resp.text || '', tIn, tOut, cached, cost, model: resp.model || cfg.model || 'deepseek', durationMs };
 }
 
 /**
@@ -334,7 +469,7 @@ async function runProjectAnalysisBatched(payload) {
   } catch (err) {
     // Любой сбой порционного режима — мягкий откат на одиночный анализ.
     try {
-      llmUsageLog.recordUsage({ provider: 'deepseek', kind: 'project_seo_analysis_batched', outcome: 'error' });
+      llmUsageLog.recordUsage({ provider: _providerName(dcfg.model), kind: 'project_seo_analysis_batched', outcome: 'error' });
     } catch (_) { /* no-op */ }
     return runProjectAnalysis(payload);
   }
