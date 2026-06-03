@@ -56,6 +56,13 @@ router.post('/:id/analyze',        auth, analyzeLimiter, c.startAnalysis);
 router.get('/:id/analyses',        auth, c.listAnalyses);
 router.get('/:id/analyses/:aid',   auth, c.getAnalysis);
 
+// Snapshots GSC (PR 1: персистентность). Сбор без LLM делит лимит с
+// тяжёлыми GSC-запросами analyze.
+router.get('/:id/snapshots',              auth, c.listProjectSnapshots);
+router.post('/:id/snapshots',             auth, analyzeLimiter, c.createProjectSnapshot);
+router.get('/:id/snapshots/:sid',         auth, c.getProjectSnapshot);
+router.get('/:id/snapshots/:sid/diff',    auth, c.diffProjectSnapshot);
+
 // Lead-text auto-context (компактная проекция последнего анализа)
 router.get('/:id/lead-context',    auth, c.getLeadContext);
 

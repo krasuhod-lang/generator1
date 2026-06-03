@@ -165,8 +165,55 @@ function buildPeriodReport({ currTotals, prevTotals, currQueries, prevQueries, c
   };
 }
 
+/**
+ * Сравнение двух сохранённых снимков (project_snapshots.gsc_data). В отличие
+ * от buildPeriodReport, который требует «свежих» массивов из gscService, здесь
+ * на вход поступают уже агрегированные снимки, и можно сравнить любые два
+ * (например, текущий с тем, что был 3 месяца назад).
+ *
+ * @param {object} curr  gsc_data текущего снимка
+ * @param {object} prev  gsc_data предыдущего снимка
+ * @returns {{available:boolean, totals?:object, queries?:object, pages?:object,
+ *           periods?:{curr:object,prev:object}}}
+ */
+function compareSnapshots(curr, prev, opts = {}) {
+  if (!curr || !prev || typeof curr !== 'object' || typeof prev !== 'object') {
+    return { available: false, reason: 'missing_snapshot' };
+  }
+  const o = {
+    minImpressions: opts.minImpressions || 0,
+    minClicksAbsDelta: opts.minClicksAbsDelta || 0,
+    topQueriesDelta: Math.max(1, Number(opts.topQueriesDelta) || 10),
+    topPagesDelta: Math.max(1, Number(opts.topPagesDelta) || 10),
+  };
+  const currTotals = curr.totals || null;
+  const prevTotals = prev.totals || null;
+  if (!currTotals || !prevTotals) {
+    return { available: false, reason: 'no_totals' };
+  }
+  return {
+    available: true,
+    periods: {
+      curr: curr.range || null,
+      prev: prev.range || null,
+    },
+    totals: compareTotals(currTotals, prevTotals),
+    queries: compareKeyed(curr.top_queries || [], prev.top_queries || [], {
+      minImpressions: o.minImpressions,
+      minClicksAbsDelta: o.minClicksAbsDelta,
+      topN: o.topQueriesDelta,
+    }),
+    pages: compareKeyed(curr.top_pages || [], prev.top_pages || [], {
+      minImpressions: o.minImpressions,
+      minClicksAbsDelta: o.minClicksAbsDelta,
+      topN: o.topPagesDelta,
+    }),
+  };
+}
+
 module.exports = {
   compareTotals,
   compareKeyed,
   buildPeriodReport,
+  compareSnapshots,
 };

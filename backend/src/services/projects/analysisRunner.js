@@ -21,6 +21,88 @@ const { detectPageDecay } = require('./pageDecayDetector');
 const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
 const { onAnalysisDone } = require('./aegisBridge');
+const { insertSnapshot } = require('./snapshotsRepo');
+
+/**
+ * Собирает «голую» выгрузку GSC за переданный диапазон + детерминированные
+ * срезы (commercial, breakdowns, period_compare, page_decay, brand_split).
+ * Используется и фоновым анализом (processAnalysis), и эндпоинтом
+ * POST /:id/snapshots (сбор без LLM).
+ *
+ * @returns {Promise<{snapshot:object, payload:object}>} snapshot — то, что
+ *   ляжет в project_snapshots.gsc_data; payload — расширенный объект для
+ *   передачи в deepseekAnalyzer (содержит `project` и сырой queryPage).
+ */
+async function collectSnapshot(project, range) {
+  const performance = await fetchPerformanceSeries(project, range);
+  const top = await fetchTopDimensions(project, range);
+  const resolved = resolveRange(range);
+
+  const projectsCfg = getProjectsConfig();
+  const commercialCfg = projectsCfg.commercial;
+  let commercial = null;
+  let queryPage = [];
+  if (commercialCfg.enabled) {
+    try {
+      queryPage = await fetchQueryPageMatrix(project, range);
+    } catch (_) { queryPage = []; }
+    const brandTokens = deriveBrandTokens({
+      name: project.name, siteUrl: project.gsc_site_url, url: project.url,
+    });
+    commercial = analyzeCommercial({
+      topQueries: top.topQueries,
+      topPages: top.topPages,
+      queryPage,
+      brandTokens,
+    });
+  }
+
+  let serpVerification = null;
+  const serpCfg = projectsCfg.serpVerification;
+  if (serpCfg.enabled && commercial && Array.isArray(commercial.cannibalization)
+    && commercial.cannibalization.length > 0) {
+    try {
+      serpVerification = await verifyCannibalization({
+        candidates: commercial.cannibalization,
+      });
+    } catch (_) { serpVerification = null; }
+  }
+
+  const breakdowns = await _fetchBreakdowns(project, range, projectsCfg.gscBreakdowns);
+  const periodCompare = await _buildPeriodCompare(project, range, top, projectsCfg.periodCompare, performance);
+  const pageDecay = await _buildPageDecay(project, range, top.topPages, projectsCfg.pageDecay);
+  const brandSplit = await _buildBrandSplit(project, range, projectsCfg.brandSplit, project.gsc_site_url);
+
+  const snapshot = {
+    range: resolved,
+    totals: performance.totals,
+    series: performance.series,
+    top_queries: top.topQueries,
+    top_pages: top.topPages,
+    commercial,
+    serp_verification: serpVerification,
+    breakdowns,
+    period_compare: periodCompare,
+    page_decay: pageDecay,
+    brand_split: brandSplit,
+  };
+
+  const payload = {
+    project,
+    range: resolved,
+    performance,
+    top,
+    commercial,
+    serpVerification,
+    queryPage,
+    breakdowns,
+    periodCompare,
+    pageDecay,
+    brandSplit,
+  };
+
+  return { snapshot, payload };
+}
 
 async function _setError(analysisId, message) {
   await db.query(
@@ -70,85 +152,57 @@ async function processAnalysis(analysisId) {
       [analysisId],
     );
 
-    const performance = await fetchPerformanceSeries(project, range);
-    const top = await fetchTopDimensions(project, range);
-    const resolved = resolveRange(range);
+    // Загружаем user_id один раз — потребуется и для project_snapshots,
+    // и для aegis-петли в конце.
+    const { rows: uRows } = await db.query(
+      `SELECT user_id FROM projects WHERE id = $1`, [project.id],
+    ).catch(() => ({ rows: [] }));
+    const userId = uRows[0] && uRows[0].user_id || null;
 
-    // Коммерческий срез (детерминированный, без LLM). Доп. запрос query×page
-    // — graceful: при ошибке/выключенном флаге каннибализация просто пустая.
-    const commercialCfg = getProjectsConfig().commercial;
-    let commercial = null;
-    let queryPage = [];
-    if (commercialCfg.enabled) {
-      try {
-        queryPage = await fetchQueryPageMatrix(project, range);
-      } catch (_) { queryPage = []; }
-      const brandTokens = deriveBrandTokens({
-        name: project.name, siteUrl: project.gsc_site_url, url: project.url,
-      });
-      commercial = analyzeCommercial({
-        topQueries: top.topQueries,
-        topPages: top.topPages,
-        queryPage,
-        brandTokens,
-      });
-    }
+    // Сбор «голой» выгрузки GSC + все детерминированные срезы.
+    const { snapshot, payload } = await collectSnapshot(project, range);
 
-    // Верификация каннибализации по реальной топ-выдаче Google (graceful):
-    // прежде чем LLM порекомендует слияние разделов, сверяем кейсы с выдачей.
-    let serpVerification = null;
-    const serpCfg = getProjectsConfig().serpVerification;
-    if (serpCfg.enabled && commercial && Array.isArray(commercial.cannibalization)
-      && commercial.cannibalization.length > 0) {
+    // Сразу сохраняем снимок как отдельную строку — он остаётся даже если
+    // LLM-вызов ниже упадёт. PR 1 «снимки как first-class сущность».
+    let snapshotId = null;
+    if (userId) {
       try {
-        serpVerification = await verifyCannibalization({
-          candidates: commercial.cannibalization,
+        const ins = await insertSnapshot({
+          projectId: project.id,
+          userId,
+          rangeKey: row.range_key || null,
+          periodFrom: snapshot.range.startDate,
+          periodTo: snapshot.range.endDate,
+          source: 'analysis',
+          gscData: snapshot,
         });
-      } catch (_) { serpVerification = null; }
+        snapshotId = ins.id;
+        await db.query(
+          `UPDATE project_analyses SET snapshot_id = $2 WHERE id = $1`,
+          [analysisId, snapshotId],
+        );
+      } catch (e) {
+        // best-effort: при сбое продолжаем без snapshot_id (старое поведение).
+        console.warn('[projects/analysisRunner] snapshot persist failed:', e.message);
+      }
     }
 
-    // Большие наборы данных обрабатываем порционно (map-reduce), затем сводим
-    // общий пул выводов и гипотез в единый отчёт.
     const batchCfg = getProjectsConfig().batch;
     const workload = estimateWorkload({
-      topQueries: top.topQueries, topPages: top.topPages, queryPage,
+      topQueries: payload.top.topQueries,
+      topPages: payload.top.topPages,
+      queryPage: payload.queryPage,
     });
     const useBatch = shouldBatch(workload, batchCfg);
 
-    // ── Расширенные срезы и аналитические слои (graceful) ─────────────
-    const projectsCfg = getProjectsConfig();
-    const breakdowns = await _fetchBreakdowns(project, range, projectsCfg.gscBreakdowns);
-    const periodCompare = await _buildPeriodCompare(project, range, top, projectsCfg.periodCompare, performance);
-    const pageDecay = await _buildPageDecay(project, range, top.topPages, projectsCfg.pageDecay);
-    const brandSplit = await _buildBrandSplit(project, range, projectsCfg.brandSplit, project.gsc_site_url);
-
-    const analysisPayload = {
-      project, range: resolved, performance, top, commercial,
-      serpVerification, queryPage,
-      breakdowns, periodCompare, pageDecay, brandSplit,
-    };
     const result = useBatch
-      ? await runProjectAnalysisBatched(analysisPayload)
-      : await runProjectAnalysis(analysisPayload);
+      ? await runProjectAnalysisBatched(payload)
+      : await runProjectAnalysis(payload);
 
     if (result.verdict !== 'ok') {
       await _setError(analysisId, `DeepSeek ${result.verdict}: ${result.reason || ''}`);
       return;
     }
-
-    const snapshot = {
-      range: resolved,
-      totals: performance.totals,
-      series: performance.series,
-      top_queries: top.topQueries,
-      top_pages: top.topPages,
-      commercial,
-      serp_verification: serpVerification,
-      breakdowns,
-      period_compare: periodCompare,
-      page_decay: pageDecay,
-      brand_split: brandSplit,
-    };
 
     await db.query(
       `UPDATE project_analyses
@@ -175,11 +229,6 @@ async function processAnalysis(analysisId) {
     // Aegis-петля (best-effort): seoBrain snapshot + training example +
     // biobrain feedback. Любая ошибка — warn и продолжаем.
     try {
-      // user_id нужен датасету; analysisRunner ранее не хранил его в `project`.
-      const { rows: uRows } = await db.query(
-        `SELECT user_id FROM projects WHERE id = $1`, [project.id],
-      ).catch(() => ({ rows: [] }));
-      const userId = uRows[0] && uRows[0].user_id || null;
       await onAnalysisDone(db, {
         analysisId,
         project: { ...project, user_id: userId },
@@ -299,4 +348,4 @@ async function _buildBrandSplit(project, range, cfg, siteUrl) {
   }
 }
 
-module.exports = { processAnalysis };
+module.exports = { processAnalysis, collectSnapshot };

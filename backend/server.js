@@ -1322,6 +1322,69 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_project_analyses_project ON project_analyses (project_id, created_at DESC)`);
 
+    // Migration 061: snapshots GSC как first-class сущность (PR 1 итерации
+    // «Проекты»). Хранит «голую» выгрузку GSC отдельно от LLM-отчётов, чтобы
+    // (1) собирать срезы без LLM, (2) сравнивать снимки между собой,
+    // (3) переиспользовать снимок при rerun отдельных модулей анализа.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_snapshots (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id      UUID NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+        range_key    TEXT,
+        period_from  DATE NOT NULL,
+        period_to    DATE NOT NULL,
+        source       TEXT NOT NULL DEFAULT 'analysis',
+        gsc_data     JSONB NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_snapshots_project ON project_snapshots (project_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_snapshots_period ON project_snapshots (project_id, period_to DESC, period_from)`);
+    await db.query(`ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS snapshot_id UUID REFERENCES project_snapshots(id) ON DELETE SET NULL`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_analyses_snapshot ON project_analyses (snapshot_id) WHERE snapshot_id IS NOT NULL`);
+
+    // Backfill: для исторических analyses со снимком в gsc_snapshot, но без
+    // snapshot_id — создаём строку project_snapshots и подвязываем. Безопасно
+    // выполнять при каждом старте: курсор пройдёт только по строкам с
+    // snapshot_id IS NULL и gsc_snapshot не пуст. На втором запуске — no-op.
+    await db.query(`
+      DO $$
+      DECLARE
+        r           RECORD;
+        new_snap_id UUID;
+        pf          DATE;
+        pt          DATE;
+      BEGIN
+        FOR r IN
+          SELECT a.id, a.project_id, a.user_id, a.range_key,
+                 a.period_from, a.period_to, a.gsc_snapshot, a.created_at
+            FROM project_analyses a
+           WHERE a.snapshot_id IS NULL
+             AND a.gsc_snapshot IS NOT NULL
+             AND a.status = 'done'
+        LOOP
+          pf := COALESCE(r.period_from,
+                         NULLIF(r.gsc_snapshot->'range'->>'startDate','')::date);
+          pt := COALESCE(r.period_to,
+                         NULLIF(r.gsc_snapshot->'range'->>'endDate','')::date);
+          IF pf IS NULL OR pt IS NULL THEN
+            CONTINUE;
+          END IF;
+          INSERT INTO project_snapshots
+            (project_id, user_id, range_key, period_from, period_to, source, gsc_data, created_at)
+          VALUES
+            (r.project_id, r.user_id, r.range_key, pf, pt, 'backfill', r.gsc_snapshot, r.created_at)
+          RETURNING id INTO new_snap_id;
+          UPDATE project_analyses SET snapshot_id = new_snap_id WHERE id = r.id;
+        END LOOP;
+      END$$;
+    `).catch((e) => {
+      // best-effort: если backfill упал, миграция всё равно завершена,
+      // снимки появятся естественным образом при новых анализах.
+      console.warn('[migrate] project_snapshots backfill skipped:', e.message);
+    });
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$
