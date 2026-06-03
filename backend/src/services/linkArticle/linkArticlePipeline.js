@@ -370,6 +370,15 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
   const eeatIssues = Array.isArray(opts.priorEeatIssues) ? opts.priorEeatIssues : null;
 
   const buildUser = (correctiveIssues = null) => {
+    // SEO/GEO 2026: byline + Author JSON-LD. linkArticle не использует
+    // систему персон info-article; берём author из task, если задан,
+    // иначе пропускаем byline (writer оставит блок пустым).
+    const authorName = String(task.author_name || task.__authorName || '').trim();
+    const authorRole = String(task.author_role || task.__authorRole || '').trim();
+    const dateModified = task.__dateModified || new Date().toISOString().slice(0, 10);
+    task.__dateModified = dateModified;
+    task.__authorName = authorName;
+    task.__authorRole = authorRole;
     const base = [
       `[INPUTS]`,
       `topic: ${task.topic}`,
@@ -377,6 +386,9 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
       `anchor_url: ${task.anchor_url}`,
       `focus_notes: ${task.focus_notes || '[не задано]'}`,
       `output_format: ${task.output_format || 'html'}`,
+      `author_name: ${authorName || '[не задано — пропусти byline-блок]'}`,
+      `author_role: ${authorRole || '[не задано]'}`,
+      `date_modified: ${dateModified}`,
       // При активном LAKB вместо толстых JSON-дампов отправляем короткие
       // указатели на разделы LAKB (он уже уехал systemInstruction'ом /
       // в Gemini cachedContents). Это и есть «кэширование DeepSeek-аналитики
@@ -934,17 +946,99 @@ async function processLinkArticleTask(taskId) {
     const finalHtml  = embedImages(articleHtml, renderedImages);
     const finalPlain = buildPlainText(finalHtml);
 
+    // 8b. SEO/GEO 2026: JSON-LD (Article + Author + FAQPage [+ HowTo]).
+    let articleHtmlWithSchema = finalHtml;
+    let jsonLdBlocks = null;
+    let authorByline = null;
+    try {
+      const {
+        buildArticleJsonLd,
+        buildFaqPageJsonLd,
+        buildHowToJsonLd,
+        assembleJsonLdScripts,
+      } = require('../seo/geoSchema');
+      const {
+        extractH1,
+        extractFaqItems,
+        extractHowToSteps,
+        extractCoverImage,
+        buildArticleDescription,
+      } = require('../seo/geoExtractor');
+
+      const headline = extractH1(finalHtml) || task.topic || '';
+      const description = buildArticleDescription(finalHtml);
+      const datePublished = task.created_at
+        ? new Date(task.created_at).toISOString()
+        : new Date().toISOString();
+      const dateModified = task.__dateModified
+        ? `${task.__dateModified}T00:00:00.000Z`
+        : new Date().toISOString();
+
+      const article = buildArticleJsonLd({
+        articleType: 'BlogPosting',
+        headline,
+        description,
+        datePublished,
+        dateModified,
+        inLanguage: 'ru-RU',
+        author: task.__authorName ? {
+          name: task.__authorName,
+          jobTitle: task.__authorRole || '',
+        } : null,
+        image: extractCoverImage(finalHtml),
+      });
+
+      const faqItems = extractFaqItems(finalHtml);
+      const faq = faqItems.length >= 1 ? buildFaqPageJsonLd(faqItems) : null;
+
+      let howto = null;
+      const isHowto = !!(structure && structure.is_howto);
+      if (isHowto) {
+        const stepsFromOutline = Array.isArray(structure.howto_steps) ? structure.howto_steps : [];
+        const stepsFromHtml = extractHowToSteps(finalHtml);
+        const steps = stepsFromHtml.length >= 2 ? stepsFromHtml : stepsFromOutline;
+        if (steps && steps.length >= 2) {
+          howto = buildHowToJsonLd({ name: headline, description, steps });
+        }
+      }
+
+      const blocks = [article, faq, howto].filter(Boolean);
+      if (blocks.length > 0) {
+        const scripts = assembleJsonLdScripts(blocks);
+        articleHtmlWithSchema = `${finalHtml}\n${scripts.join('\n')}`;
+        jsonLdBlocks = blocks;
+      }
+      if (task.__authorName) {
+        authorByline = task.__authorRole
+          ? `Автор: ${task.__authorName}, ${task.__authorRole}. Обновлено: ${task.__dateModified || ''}`.trim()
+          : `Автор: ${task.__authorName}. Обновлено: ${task.__dateModified || ''}`.trim();
+      }
+      await appendLog(
+        taskId,
+        `🧬 JSON-LD: ${blocks.length} блок(а) (${blocks.map((b) => b['@type']).join(', ')})`,
+        'info',
+      );
+    } catch (schemaErr) {
+      console.warn(`[linkArticle] JSON-LD build failed: ${schemaErr.message}`);
+    }
+
     await db.query(
       `UPDATE link_article_tasks
-          SET article_html   = $2,
-              article_plain  = $3,
+          SET article_html             = $2,
+              article_plain            = $3,
+              article_html_with_schema = $4,
+              json_ld_blocks           = $5,
+              author_byline            = $6,
               status         = 'done',
               progress_pct   = 100,
               current_stage  = 'done',
               completed_at   = NOW(),
               updated_at     = NOW()
         WHERE id = $1`,
-      [taskId, finalHtml, finalPlain],
+      [
+        taskId, finalHtml, finalPlain,
+        articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
+      ],
     );
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });

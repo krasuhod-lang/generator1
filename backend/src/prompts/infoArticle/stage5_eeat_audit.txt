@@ -39,15 +39,30 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
       "expert_opinion_quality":     0.0,   // 13. Качество блока «Мнение эксперта»: содержательный insight,
                                            //     обезличенная атрибуция, без выдуманных ФИО/регалий.
                                            //     0 → блок отсутствует.
-      "faq_block_quality":          0.0    // 14. Качество FAQ-блока перед «Заключением»: 4–6 Q&A,
+      "faq_block_quality":          0.0,   // 14. Качество FAQ-блока перед «Заключением»: 4–6 Q&A,
                                            //     вопросы соответствуют user_questions, ответы по делу.
                                            //     0 → блок отсутствует или < 4 Q&A.
+      "direct_answer_first_100w":   0.0,   // 15. Прямой ответ в первых 100 словах под H1 (атомарный
+                                           //     блок-ответ для AI Overviews). 0 → отсутствует.
+      "atomic_blocks_per_h2":       0.0,   // 16. Каждая основная H2 начинается с <p class="answer-lead">
+                                           //     1–3 предложения прямого ответа. 0 → большая часть H2
+                                           //     не имеет ведущего ответа-абзаца.
+      "structural_geo_signals":     0.0    // 17. Совокупность GEO-сигналов: byline, TOC, summary, ≥1 список,
+                                           //     консистентные id="sec-N" якорей. 0 → большинство отсутствует.
     },
     "structural_requirements": {
       "expert_opinion_present": true,      // <blockquote class="expert-opinion"> ровно 1
       "faq_block_present":      true,      // <h2>Часто задаваемые вопросы</h2> ровно 1
       "faq_questions_count":    4,         // фактическое число <h3> в FAQ-блоке (целевое 4–6)
-      "skeleton_traceable":     true       // каждый H2 выводится из entities + subintents + user_questions Stage 1
+      "skeleton_traceable":     true,      // каждый H2 выводится из entities + subintents + user_questions Stage 1
+      "byline_present":         true,      // <p class="byline"> с автором + датой обновления
+      "lead_answer_present":    true,      // <p class="lead-answer"> в первых 100 словах
+      "toc_present":            true,      // <nav class="toc"> с кликабельными ссылками на H2
+      "atomic_blocks_present":  true,      // каждая основная H2 начинается с <p class="answer-lead">
+      "summary_block_present":  true,      // <section class="summary"><h2>Итоги</h2><ul>…</ul></section>
+      "lists_present":          true,      // ≥1 <ul>/<ol> в основном теле (помимо TOC/FAQ)
+      "h2_anchors_consistent":  true,      // у каждого основного <h2> есть id="sec-N", совпадающий с ссылкой из TOC
+      "howto_steps_consistent": true       // если в статье есть <ol class="howto">, в нём ≥2 <li> со «Шаг N.»
     },
     "total_score":          0.0,
     "lsi_coverage_pct":     0.0,    // % important-LSI терминов, фактически встретившихся в тексте
@@ -57,7 +72,7 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
     },
     "issues": [
       {
-        "category":        "experience|expertise|authoritativeness|trustworthiness|hallucination|structure|intent_match|tone|lsi_coverage|tfidf_spam|expert_opinion|faq_block|skeleton_trace",
+        "category":        "experience|expertise|authoritativeness|trustworthiness|hallucination|structure|intent_match|tone|lsi_coverage|tfidf_spam|expert_opinion|faq_block|skeleton_trace|byline|lead_answer|toc|atomic_blocks|summary_block|lists|howto|h2_anchors",
         "severity":        "blocker|major|minor",
         "where":           "string",
         "problem":         "string",
@@ -81,10 +96,17 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
          - blocker: галлюцинации, отсутствующие ответы на ключевые user_questions,
                     потеря всех LSI ниже 50%, ОТСУТСТВИЕ <blockquote class="expert-opinion"> (category="expert_opinion"),
                     ОТСУТСТВИЕ <h2>Часто задаваемые вопросы</h2> или < 4 Q&A в нём (category="faq_block"),
+                    ОТСУТСТВИЕ <p class="byline"> с автором и датой (category="byline"),
+                    ОТСУТСТВИЕ <p class="lead-answer"> в первых 100 словах (category="lead_answer"),
+                    ОТСУТСТВИЕ <nav class="toc"> или ≥1 H2 без id="sec-N" (category="toc"/"h2_anchors"),
+                    более половины основных H2 без <p class="answer-lead"> (category="atomic_blocks"),
+                    ОТСУТСТВИЕ <section class="summary"> с 3–6 буллетами перед «Заключением» (category="summary_block"),
                     скелет статьи не выводится из entities/subintents/user_questions Stage 1 (category="skeleton_trace");
          - major:   слабая глубина, плохой intent match, тон выпадает,
                     spam-плотность по terminам, в expert_opinion придумано ФИО/регалии,
-                    FAQ-вопросы не из stage1.user_questions;
+                    FAQ-вопросы не из stage1.user_questions,
+                    нет ни одного <ul>/<ol> в основном теле (category="lists"),
+                    <ol class="howto"> без «Шаг N.» в каждом <li> (category="howto");
          - minor:   стилистика, повторы, ритм.
   7. total_score = взвешенная сумма scores_4d:
         0.20·experience + 0.25·expertise + 0.20·authoritativeness +
@@ -94,9 +116,16 @@ Authoritativeness, Trustworthiness) и Page Quality (PQ) гайдлайнам Go
        - "pass"   если total_score ≥ 8.0, нет blocker, lsi_coverage_pct ≥ 80, tfidf_spam_check.passed,
                   structural_requirements.expert_opinion_present == true,
                   structural_requirements.faq_block_present == true И faq_questions_count ≥ 4,
-                  structural_requirements.skeleton_traceable == true;
+                  structural_requirements.skeleton_traceable == true,
+                  structural_requirements.byline_present == true,
+                  structural_requirements.lead_answer_present == true,
+                  structural_requirements.toc_present == true,
+                  structural_requirements.atomic_blocks_present == true,
+                  structural_requirements.summary_block_present == true,
+                  structural_requirements.h2_anchors_consistent == true;
        - "reject" если есть blocker категории hallucination или ключевой intent_match
-                  ИЛИ отсутствует expert_opinion / faq_block / skeleton_trace;
+                  ИЛИ отсутствует expert_opinion / faq_block / skeleton_trace
+                  ИЛИ отсутствует byline / lead_answer / toc / summary_block;
        - "refine" в остальных случаях.
 
 [OUTPUT CONTRACT]

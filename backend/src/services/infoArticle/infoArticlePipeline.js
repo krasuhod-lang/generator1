@@ -467,6 +467,7 @@ async function runWriter(task, args, ctx, opts = {}) {
   // это важно для consistency cached response в Redis.
   let personaBlock = '';
   let personaKey   = '';
+  let personaMeta  = null;
   try {
     const picked = buildPersonaSystemBlock({
       topic:  task.topic,
@@ -476,6 +477,12 @@ async function runWriter(task, args, ctx, opts = {}) {
     });
     personaKey = picked.key;
     personaBlock = picked.block || '';
+    try {
+      const personasModule = require('../../prompts/infoArticle/personas');
+      if (personasModule && typeof personasModule.getPersonaMeta === 'function') {
+        personaMeta = personasModule.getPersonaMeta(personaKey);
+      }
+    } catch (_) { /* graceful */ }
   } catch (e) {
     // Полный graceful — без персоны writer работает по-старому.
     personaBlock = '';
@@ -483,6 +490,19 @@ async function runWriter(task, args, ctx, opts = {}) {
       appendLog(ctx.taskId, `⚠ Persona pick failed: ${e.message}`, 'warn').catch(() => {});
     }
   }
+
+  // SEO/GEO 2026: видимый byline (автор + дата обновления) и Author JSON-LD.
+  // author_name / author_role строго из persona-метаданных, чтобы writer
+  // НЕ выдумывал ФИО. date_modified — текущая дата в формате YYYY-MM-DD.
+  const authorName = personaMeta && personaMeta.display_name ? personaMeta.display_name : '';
+  const authorRole = personaMeta && personaMeta.role ? personaMeta.role : '';
+  const dateModified = new Date().toISOString().slice(0, 10);
+  // Прокидываем меты в task, чтобы pipeline на этапе post-processing
+  // мог собрать byline + JSON-LD без повторного выбора персоны.
+  task.__authorName = authorName;
+  task.__authorRole = authorRole;
+  task.__authorPersonaKey = personaKey;
+  task.__dateModified = dateModified;
 
   // System prompt: при активном Gemini cache — пусто (всё в кэше);
   // иначе — IAKB + writer-instructions + персона.
@@ -507,6 +527,9 @@ async function runWriter(task, args, ctx, opts = {}) {
       `brand_name: ${task.brand_name || '[авто]'}`,
       `brand_facts: ${task.brand_facts || '[не задано]'}`,
       `output_format: ${task.output_format || 'html'}`,
+      `author_name: ${authorName || '[не задано — пропусти byline-блок]'}`,
+      `author_role: ${authorRole || '[не задано]'}`,
+      `date_modified: ${dateModified}`,
       `stage0_audience: ${pointerOrJson('§3 Аудитория и тон', audience, iakbReady, 3500)}`,
       `stage1_intents: ${pointerOrJson('§4 Сущности/интенты/jtbd', intents, iakbReady, 5000)}`,
       `whitespace_hints: ${pointerOrJson('§5 White-space', (whitespace && whitespace.article_hierarchy_hints) || {}, iakbReady, 2500)}`,
@@ -1980,19 +2003,104 @@ async function processInfoArticleTask(taskId) {
       console.warn(`[infoArticle] generateSeoMeta failed: ${seoErr.message}`);
     }
 
+    // 14c. SEO/GEO 2026: JSON-LD (Article + Author + FAQPage [+ HowTo]).
+    //      Полностью graceful — при сбое сохраняем article_html без расширения.
+    let articleHtmlWithSchema = finalHtml;
+    let jsonLdBlocks = null;
+    let authorByline = null;
+    try {
+      const {
+        buildArticleJsonLd,
+        buildFaqPageJsonLd,
+        buildHowToJsonLd,
+        assembleJsonLdScripts,
+      } = require('../seo/geoSchema');
+      const {
+        extractH1,
+        extractFaqItems,
+        extractHowToSteps,
+        extractCoverImage,
+        buildArticleDescription,
+      } = require('../seo/geoExtractor');
+
+      const headline = seoTitle || extractH1(finalHtml) || task.topic || '';
+      const description = seoDescription || buildArticleDescription(finalHtml);
+      const datePublished = task.created_at
+        ? new Date(task.created_at).toISOString()
+        : new Date().toISOString();
+      const dateModified = task.__dateModified
+        ? `${task.__dateModified}T00:00:00.000Z`
+        : new Date().toISOString();
+
+      const article = buildArticleJsonLd({
+        articleType: 'BlogPosting',
+        headline,
+        description,
+        datePublished,
+        dateModified,
+        inLanguage: 'ru-RU',
+        author: task.__authorName ? {
+          name: task.__authorName,
+          jobTitle: task.__authorRole || '',
+        } : null,
+        image: extractCoverImage(finalHtml),
+      });
+
+      const faqItems = extractFaqItems(finalHtml);
+      const faq = faqItems.length >= 1 ? buildFaqPageJsonLd(faqItems) : null;
+
+      let howto = null;
+      const isHowto = !!(outline && outline.is_howto);
+      if (isHowto) {
+        const stepsFromOutline = Array.isArray(outline.howto_steps) ? outline.howto_steps : [];
+        const stepsFromHtml = extractHowToSteps(finalHtml);
+        const steps = stepsFromHtml.length >= 2 ? stepsFromHtml : stepsFromOutline;
+        if (steps && steps.length >= 2) {
+          howto = buildHowToJsonLd({ name: headline, description, steps });
+        }
+      }
+
+      const blocks = [article, faq, howto].filter(Boolean);
+      if (blocks.length > 0) {
+        const scripts = assembleJsonLdScripts(blocks);
+        articleHtmlWithSchema = `${finalHtml}\n${scripts.join('\n')}`;
+        jsonLdBlocks = blocks;
+      }
+
+      if (task.__authorName) {
+        authorByline = task.__authorRole
+          ? `Автор: ${task.__authorName}, ${task.__authorRole}. Обновлено: ${task.__dateModified || ''}`.trim()
+          : `Автор: ${task.__authorName}. Обновлено: ${task.__dateModified || ''}`.trim();
+      }
+
+      await appendLog(
+        taskId,
+        `🧬 JSON-LD: ${blocks.length} блок(а) (${blocks.map((b) => b['@type']).join(', ')})`,
+        'info',
+      );
+    } catch (schemaErr) {
+      console.warn(`[infoArticle] JSON-LD build failed: ${schemaErr.message}`);
+    }
+
     await db.query(
       `UPDATE info_article_tasks
-          SET article_html    = $2,
-              article_plain   = $3,
-              seo_title       = $4,
-              seo_description = $5,
+          SET article_html             = $2,
+              article_plain            = $3,
+              seo_title                = $4,
+              seo_description          = $5,
+              article_html_with_schema = $6,
+              json_ld_blocks           = $7,
+              author_byline            = $8,
               status          = 'done',
               progress_pct    = 100,
               current_stage   = 'done',
               completed_at    = NOW(),
               updated_at      = NOW()
         WHERE id = $1`,
-      [taskId, finalHtml, finalPlain, seoTitle, seoDescription],
+      [
+        taskId, finalHtml, finalPlain, seoTitle, seoDescription,
+        articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
+      ],
     );
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });

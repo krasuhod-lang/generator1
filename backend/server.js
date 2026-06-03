@@ -618,6 +618,10 @@ async function ensureSchema() {
     // релевантности; pipeline подгружает relevance-артефакт и инжектит
     // LSI/n-граммы/H2-H3 наброски в writer.
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS source_relevance_report_id UUID`);
+    // Migration 060: SEO/GEO 2026 — JSON-LD blocks + author byline для ссылочных статей.
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS article_html_with_schema TEXT`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS json_ld_blocks           JSONB`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS author_byline            TEXT`);
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_link_article_tasks_relevance_src
         ON link_article_tasks (source_relevance_report_id)
@@ -847,6 +851,10 @@ async function ensureSchema() {
     // Migration 057: SEO-метатеги, генерируемые ИИ для статьи в блог.
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS seo_title       TEXT`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS seo_description TEXT`);
+    // Migration 060: SEO/GEO 2026 — JSON-LD blocks + author byline.
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS article_html_with_schema TEXT`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS json_ld_blocks           JSONB`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS author_byline            TEXT`);
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_info_article_eeat_score
         ON info_article_tasks (eeat_score)
@@ -1704,6 +1712,8 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_category_lead_user_created ON category_lead_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_category_lead_status ON category_lead_tasks (status)`);
+    // Migration 060: SEO/GEO 2026 — JSON-LD blocks для категорий.
+    await db.query(`ALTER TABLE category_lead_tasks ADD COLUMN IF NOT EXISTS json_ld_blocks JSONB`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

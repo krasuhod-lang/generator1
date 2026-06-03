@@ -32,6 +32,7 @@ const { encryptToken } = require('../services/projects/tokenCrypto');
 const { fetchPerformanceSeries } = require('../services/projects/gscService');
 const { processAnalysis } = require('../services/projects/analysisRunner');
 const { generateShareToken, isValidShareToken } = require('../services/projects/shareToken');
+const { buildLeadContext } = require('../services/projects/leadContext');
 
 const CFG = getProjectsConfig();
 
@@ -335,6 +336,18 @@ async function getAnalysis(req, res, next) {
   } catch (err) { return next(err); }
 }
 
+// ── GET /api/projects/:id/lead-context ─────────────────────────────
+// Подтягиваем «контекст» проекта (имя/url/описание + последний анализ) для
+// префилла формы инструмента «Lead-text + Фасетный SEO-оптимизатор».
+async function getLeadContext(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const payload = await buildLeadContext(db, project);
+    return res.json(payload);
+  } catch (err) { return next(err); }
+}
+
 // ── Шаринг ──────────────────────────────────────────────────────────
 async function createShareLink(req, res, next) {
   try {
@@ -435,6 +448,7 @@ module.exports = {
   startAnalysis,
   listAnalyses,
   getAnalysis,
+  getLeadContext,
   createShareLink,
   revokeShareLink,
   getSharedProject,

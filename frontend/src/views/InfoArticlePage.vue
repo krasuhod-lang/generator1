@@ -693,7 +693,10 @@ async function copyAsFormattedText() {
 }
 
 function downloadHtml() {
-  const html = selectedTask.value?.article_html;
+  // SEO/GEO 2026: при скачивании предпочитаем версию со встроенными JSON-LD
+  // блоками (article_html_with_schema). На рендер в карточке это не влияет —
+  // он по-прежнему берёт article_html.
+  const html = selectedTask.value?.article_html_with_schema || selectedTask.value?.article_html;
   if (!html) return;
   const blob = new Blob([
     `<!doctype html>\n<html lang="ru"><head><meta charset="utf-8"><title>${escapeAttr(selectedTask.value.topic)}</title></head><body>${html}</body></html>`,
