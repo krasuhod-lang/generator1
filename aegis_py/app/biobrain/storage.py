@@ -82,3 +82,57 @@ def load_buffer() -> list:
         except Exception:
             continue
     return out
+
+
+# ── Generation log (B6) ──────────────────────────────────────────────────
+# Каждая успешная эволюция NEAT добавляет запись в JSONL, чтобы Node-сервис
+# мог опросить /biobrain/generations и сохранить версии мозга в БД для
+# отката, а UI — нарисовать timeline «нейросвязи росли так-то».
+GENERATIONS_FILE = ROOT / "biobrain_generations.jsonl"
+_MAX_GENERATIONS = 500
+
+
+def append_generation(entry: dict) -> None:
+    """Append a single generation snapshot. Best-effort, never raises."""
+    try:
+        ROOT.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(entry, ensure_ascii=False)
+        with GENERATIONS_FILE.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        # Periodically truncate to avoid unbounded growth.
+        if GENERATIONS_FILE.stat().st_size > 1_000_000:  # ~1 MB
+            _truncate_generations()
+    except Exception:
+        pass
+
+
+def _truncate_generations(max_items: int = _MAX_GENERATIONS) -> None:
+    try:
+        items = load_generations(limit=max_items)
+        with GENERATIONS_FILE.open("w", encoding="utf-8") as f:
+            for it in items:
+                f.write(json.dumps(it, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def load_generations(limit: int = 50) -> list:
+    """Load the last ``limit`` generation entries (newest last)."""
+    if not GENERATIONS_FILE.exists():
+        return []
+    out: list = []
+    try:
+        with GENERATIONS_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    if limit > 0:
+        out = out[-int(limit):]
+    return out
