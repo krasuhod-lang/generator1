@@ -77,7 +77,7 @@ function _stripFence(text) {
     .trim();
 }
 
-function _buildUserPrompt({ project, range, performance, top, commercial }) {
+function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification }) {
   const lines = [
     '[ПРОЕКТ]',
     `Название: ${project.name || '—'}`,
@@ -125,7 +125,7 @@ function _buildUserPrompt({ project, range, performance, top, commercial }) {
       JSON.stringify(commercial.intent_mismatch),
     );
   }
-  lines.push(..._renderSerpVerificationLines(payload.serpVerification));
+  lines.push(..._renderSerpVerificationLines(serpVerification));
   return lines.join('\n');
 }
 
