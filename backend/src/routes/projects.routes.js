@@ -56,6 +56,9 @@ router.post('/:id/analyze',        auth, analyzeLimiter, c.startAnalysis);
 router.get('/:id/analyses',        auth, c.listAnalyses);
 router.get('/:id/analyses/:aid',   auth, c.getAnalysis);
 
+// Lead-text auto-context (компактная проекция последнего анализа)
+router.get('/:id/lead-context',    auth, c.getLeadContext);
+
 // Шаринг
 router.post('/:id/share',          auth, c.createShareLink);
 router.delete('/:id/share',        auth, c.revokeShareLink);

@@ -30,6 +30,59 @@ const submitting = ref(false);
 const formError  = ref(null);
 const projects   = ref([]);
 
+// ── Auto-pull контекста выбранного проекта ─────────────────────────
+// При смене селектора подтягиваем последний анализ и аккуратно
+// префиллим только пустые поля формы (не затираем введённое вручную).
+const projectContext = ref(null);
+const contextLoading = ref(false);
+const contextError   = ref('');
+
+function _isEmpty(v) {
+  return v == null || String(v).trim() === '';
+}
+
+function fmtAnalysisDate(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleDateString('ru-RU'); } catch (_) { return ''; }
+}
+
+async function onProjectChanged() {
+  projectContext.value = null;
+  contextError.value   = '';
+  const id = form.value.gsc_project_id;
+  if (!id) return;
+  contextLoading.value = true;
+  try {
+    const { data } = await api.get(`/projects/${encodeURIComponent(id)}/lead-context`);
+    projectContext.value = data || null;
+    const proj = data?.project || {};
+    const ctx  = data?.context || {};
+
+    // Префилл: только если поле пустое — не перетираем пользователя.
+    if (_isEmpty(form.value.name) && proj.name) {
+      form.value.name = String(proj.name).slice(0, 200);
+    }
+    if (_isEmpty(form.value.category_url) && proj.url) {
+      form.value.category_url = String(proj.url).slice(0, 2000);
+    }
+    if (_isEmpty(form.value.questions) && Array.isArray(ctx.suggested_questions) && ctx.suggested_questions.length) {
+      form.value.questions = ctx.suggested_questions.join('\n');
+    }
+    if (_isEmpty(form.value.semantic_core) && Array.isArray(ctx.suggested_core) && ctx.suggested_core.length) {
+      form.value.semantic_core = ctx.suggested_core.join('\n');
+    }
+  } catch (err) {
+    contextError.value = err.response?.data?.error || err.message || 'Не удалось подтянуть контекст проекта';
+  } finally {
+    contextLoading.value = false;
+  }
+}
+
+function clearProjectContext() {
+  // Не трогаем уже введённые данные — только убираем бейдж и информацию.
+  projectContext.value = null;
+}
+
 async function loadProjects() {
   try {
     const { data } = await api.get('/projects');
@@ -160,7 +213,7 @@ function statusBadge(s) {
 
           <div>
             <label class="block text-xs text-gray-400 mb-1">GSC-проект (источник интентов, опц.)</label>
-            <select v-model="form.gsc_project_id"
+            <select v-model="form.gsc_project_id" @change="onProjectChanged"
               class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100">
               <option value="">— не использовать GSC —</option>
               <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
@@ -169,6 +222,35 @@ function statusBadge(s) {
               Если выбран — запросы страницы (по URL выше) отсортируются по показам и
               сгруппируются в кластеры интентов.
             </p>
+
+            <!-- Бейдж: данные подтянуты из проекта. -->
+            <div v-if="contextLoading" class="mt-2 text-[11px] text-gray-500 italic">
+              ↻ Подтягиваем данные проекта…
+            </div>
+            <div v-else-if="contextError" class="mt-2 text-[11px] text-amber-400">
+              ⚠ {{ contextError }}
+            </div>
+            <div v-else-if="projectContext && projectContext.has_analysis"
+                 class="mt-2 flex items-start justify-between gap-2 text-[11px]
+                        bg-emerald-500/5 border border-emerald-500/30 rounded px-2 py-1.5">
+              <div class="text-emerald-300 leading-snug">
+                ✓ Подтянуто из проекта <b>{{ projectContext.project?.name }}</b>
+                <span v-if="projectContext.context?.source_analysis_completed_at" class="text-emerald-400/80">
+                  (анализ от {{ fmtAnalysisDate(projectContext.context.source_analysis_completed_at) }})
+                </span>:
+                {{ (projectContext.context?.suggested_questions?.length || 0) }} вопросов,
+                {{ (projectContext.context?.suggested_core?.length || 0) }} запросов,
+                {{ (projectContext.context?.brand_tokens?.length || 0) }} brand-токенов.
+              </div>
+              <button type="button" @click="clearProjectContext"
+                      class="text-[11px] text-gray-400 hover:text-rose-400 shrink-0">очистить</button>
+            </div>
+            <div v-else-if="projectContext && !projectContext.has_analysis"
+                 class="mt-2 text-[11px] text-gray-500 italic">
+              ℹ Подтянуты данные проекта <b>{{ projectContext.project?.name }}</b>
+              (история анализов пуста — запустите анализ в карточке проекта,
+              чтобы получить интенты и семантическое ядро).
+            </div>
           </div>
 
           <details class="text-sm">

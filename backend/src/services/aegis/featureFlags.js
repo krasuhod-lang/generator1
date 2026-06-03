@@ -295,6 +295,35 @@ const AEGIS_FLAGS = deepFreeze({
     persist: _envBool('AEGIS_FUNNEL_PERSIST', true),
   },
 
+  // ── Aegis-крючки инструмента «Lead-text + Фасет-оптимизатор» ────
+  // Включают/выключают прокидывание категории-Lead в обучающую петлю
+  // Эгиды. Конфиг хранится в коде (без новых ENV) — см. конвенцию
+  // владельца продукта (deepFreeze).
+  categoryLead: {
+    aegisHooks: {
+      // Запись обучающих примеров (kind='category_lead') в aegis_dspy_dataset.
+      trainingDataset: true,
+      // Funnel/persist уже управляется блоком `funnel` выше — отдельный
+      // тумблер не нужен.
+    },
+  },
+
+  // ── Aegis-крючки модуля «Проекты»/GSC-аналитика ─────────────────
+  // После каждого успешного project_analyses собирать pages[] из gsc_snapshot,
+  // обновлять aegis_seo_memory + aegis_seo_actions, писать обучающий пример
+  // и отправлять reward в Bio-Brain.
+  projects: {
+    aegisHooks: {
+      // seoBrain.persistSnapshot после успешного analysis.
+      seoBrain: true,
+      // recordTrainingExample(kind='projects_analysis') — для dspyAutoRetrain.
+      trainingDataset: true,
+      // biobrainClient.feedback с reward от periodCompare (только если NEAT
+      // включён в blockе biobrain выше).
+      biobrain: true,
+    },
+  },
+
   // ── Учёт расходов Эгиды по дням (cost log) ───────────────────────
   // Персист каждого AEGIS LLM-вызова (через aegis/llmRouter) в таблицу
   // aegis_llm_usage: provider/kind/tokens/cached/cost/cache_hit/outcome.

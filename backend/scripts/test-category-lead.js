@@ -152,5 +152,98 @@ console.log('\n=== metaBridge ===');
   ok('bridge noindex', bridge.noindex_recommendations.length === 1);
 }
 
+// ─── leadContext: префилл формы из последнего успешного project_analyses ──
+console.log('\n=== leadContext: build from analysis ===');
+{
+  const { buildLeadContextFromAnalysis } = require('../src/services/projects/leadContext');
+  const project = { id: 7, name: 'Acme Shop', url: 'https://acme.example/', gsc_site_url: 'sc-domain:acme.example' };
+  const analysis = {
+    id: 'a-1',
+    completed_at: new Date('2026-05-10T10:00:00Z'),
+    gsc_snapshot: {
+      top_queries: [
+        { key: 'купить кроссовки', impressions: 5000, clicks: 100 },
+        { key: 'кроссовки adidas', impressions: 3000, clicks: 60 },
+        { key: 'кроссовки nike', impressions: 2000, clicks: 40 },
+      ],
+      commercial: {
+        striking_distance: [
+          { query: 'купить кроссовки nike', position: 12, impressions: 800 },
+          { query: 'кроссовки распродажа',  position: 14, impressions: 600 },
+        ],
+        intent_distribution: [
+          { intent: 'commercial', clicksPct: 60 },
+          { intent: 'informational', clicksPct: 25 },
+        ],
+        brand_tokens: ['acme', 'acme.example'],
+      },
+      brand_split: { brand_tokens: ['Acme', 'acme.example'] },
+    },
+  };
+
+  const ctx = buildLeadContextFromAnalysis({ project, analysis });
+  ok('source_analysis_id propagated', ctx.source_analysis_id === 'a-1');
+  ok('source_completed_at present', !!ctx.source_analysis_completed_at);
+  ok('suggested_core has top queries', Array.isArray(ctx.suggested_core) && ctx.suggested_core.length >= 3);
+  ok('suggested_questions includes striking', Array.isArray(ctx.suggested_questions)
+     && ctx.suggested_questions.some((q) => /кроссовки/.test(q)));
+  ok('brand_tokens deduped+lowercased', Array.isArray(ctx.brand_tokens)
+     && new Set(ctx.brand_tokens.map((b) => b.toLowerCase())).size === ctx.brand_tokens.length);
+  ok('intent_distribution forwarded', Array.isArray(ctx.intent_distribution)
+     && ctx.intent_distribution.length === 2);
+
+  // Edge: пустой snapshot — не падаем, suggestions пусты, но brand_tokens из проекта.
+  const empty = buildLeadContextFromAnalysis({ project, analysis: { id: 'a-2', completed_at: null, gsc_snapshot: {} } });
+  ok('empty snapshot → empty core', Array.isArray(empty.suggested_core) && empty.suggested_core.length === 0);
+  ok('empty snapshot → analysis id kept', empty.source_analysis_id === 'a-2');
+
+  // Edge: analysis отсутствует — все suggestions пусты.
+  const none = buildLeadContextFromAnalysis({ project, analysis: null });
+  ok('no analysis → null id', none.source_analysis_id === null);
+  ok('no analysis → empty questions', Array.isArray(none.suggested_questions) && none.suggested_questions.length === 0);
+}
+
+// ─── projects/aegisBridge: pages mapping + reward ──
+console.log('\n=== projects/aegisBridge: snapshot → pages ===');
+{
+  const { mapSnapshotToPages, computeProjectReward, _siteKeyForProject } = require('../src/services/projects/aegisBridge');
+  const project = { id: 9, name: 'Shop', url: 'https://shop.example/', gsc_site_url: 'sc-domain:shop.example' };
+  const snapshot = {
+    top_pages: [
+      { key: 'https://shop.example/cat/a', clicks: 50, impressions: 1000, position: 4.2, ctr: 0.05 },
+      { key: 'https://shop.example/cat/b', clicks: 20, impressions: 500,  position: 8.1, ctr: 0.04 },
+    ],
+    commercial: {
+      cannibalization: [
+        { query: 'купить штуку', pages: ['https://shop.example/cat/a', 'https://shop.example/cat/c'], impressions: 200 },
+      ],
+    },
+    page_decay: {
+      declining_pages: [
+        { page: 'https://shop.example/cat/d', last_position: 15, last_clicks: 1, last_impressions: 100 },
+      ],
+    },
+    period_compare: { available: true, totals: { clicks_pct: 30 } },
+  };
+  const pages = mapSnapshotToPages(snapshot, project);
+  ok('pages collected', pages.length === 4); // a, b, c (cannib new), d (decay)
+  ok('pages dedup by url', new Set(pages.map((p) => p.url)).size === pages.length);
+  const a = pages.find((p) => p.url.endsWith('/cat/a'));
+  ok('top page keeps clicks', a && a.clicks === 50);
+  const c = pages.find((p) => p.url.endsWith('/cat/c'));
+  ok('cannib-only page → ambiguous', c && c.intent === 'ambiguous');
+  const d = pages.find((p) => p.url.endsWith('/cat/d'));
+  ok('decay page → declining cluster', d && d.cluster === 'declining');
+
+  ok('reward in [-1,1]', computeProjectReward(snapshot) === 0.3);
+  ok('reward null when no period_compare', computeProjectReward({}) === null);
+  ok('reward clamped on huge growth',
+     computeProjectReward({ period_compare: { totals: { clicks_pct: 999 } } }) === 1);
+
+  ok('site_key uses gsc sc-domain', _siteKeyForProject(project) === 'gsc:shop.example');
+  ok('site_key falls back to url host',
+     _siteKeyForProject({ url: 'https://other.example/x' }) === 'gsc:other.example');
+}
+
 console.log(`\n=== RESULT: ${passed} passed, ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);

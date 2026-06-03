@@ -20,6 +20,7 @@ const { buildPeriodReport } = require('./periodComparison');
 const { detectPageDecay } = require('./pageDecayDetector');
 const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
+const { onAnalysisDone } = require('./aegisBridge');
 
 async function _setError(analysisId, message) {
   await db.query(
@@ -170,6 +171,24 @@ async function processAnalysis(analysisId) {
         result.cost_usd,
       ],
     );
+
+    // Aegis-петля (best-effort): seoBrain snapshot + training example +
+    // biobrain feedback. Любая ошибка — warn и продолжаем.
+    try {
+      // user_id нужен датасету; analysisRunner ранее не хранил его в `project`.
+      const { rows: uRows } = await db.query(
+        `SELECT user_id FROM projects WHERE id = $1`, [project.id],
+      ).catch(() => ({ rows: [] }));
+      const userId = uRows[0] && uRows[0].user_id || null;
+      await onAnalysisDone(db, {
+        analysisId,
+        project: { ...project, user_id: userId },
+        snapshot,
+        result,
+      });
+    } catch (e) {
+      console.warn('[projects/analysisRunner] aegis hook failed:', e.message);
+    }
   } catch (err) {
     await _setError(analysisId, err.message).catch(() => {});
   }
