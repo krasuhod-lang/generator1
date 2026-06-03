@@ -10,8 +10,9 @@
 
 const db = require('../../config/db');
 const { fetchPerformanceSeries, fetchTopDimensions, fetchQueryPageMatrix, resolveRange } = require('./gscService');
-const { runProjectAnalysis } = require('./deepseekAnalyzer');
+const { runProjectAnalysis, runProjectAnalysisBatched, estimateWorkload, shouldBatch } = require('./deepseekAnalyzer');
 const { analyzeCommercial, deriveBrandTokens } = require('./commercialIntent');
+const { verifyCannibalization } = require('./serpVerifier');
 const { getProjectsConfig } = require('./config');
 
 async function _setError(analysisId, message) {
@@ -70,8 +71,8 @@ async function processAnalysis(analysisId) {
     // — graceful: при ошибке/выключенном флаге каннибализация просто пустая.
     const commercialCfg = getProjectsConfig().commercial;
     let commercial = null;
+    let queryPage = [];
     if (commercialCfg.enabled) {
-      let queryPage = [];
       try {
         queryPage = await fetchQueryPageMatrix(project, range);
       } catch (_) { queryPage = []; }
@@ -86,9 +87,33 @@ async function processAnalysis(analysisId) {
       });
     }
 
-    const result = await runProjectAnalysis({
-      project, range: resolved, performance, top, commercial,
+    // Верификация каннибализации по реальной топ-выдаче Google (graceful):
+    // прежде чем LLM порекомендует слияние разделов, сверяем кейсы с выдачей.
+    let serpVerification = null;
+    const serpCfg = getProjectsConfig().serpVerification;
+    if (serpCfg.enabled && commercial && Array.isArray(commercial.cannibalization)
+      && commercial.cannibalization.length > 0) {
+      try {
+        serpVerification = await verifyCannibalization({
+          candidates: commercial.cannibalization,
+        });
+      } catch (_) { serpVerification = null; }
+    }
+
+    // Большие наборы данных обрабатываем порционно (map-reduce), затем сводим
+    // общий пул выводов и гипотез в единый отчёт.
+    const batchCfg = getProjectsConfig().batch;
+    const workload = estimateWorkload({
+      topQueries: top.topQueries, topPages: top.topPages, queryPage,
     });
+    const useBatch = shouldBatch(workload, batchCfg);
+    const analysisPayload = {
+      project, range: resolved, performance, top, commercial,
+      serpVerification, queryPage,
+    };
+    const result = useBatch
+      ? await runProjectAnalysisBatched(analysisPayload)
+      : await runProjectAnalysis(analysisPayload);
 
     if (result.verdict !== 'ok') {
       await _setError(analysisId, `DeepSeek ${result.verdict}: ${result.reason || ''}`);
@@ -102,6 +127,7 @@ async function processAnalysis(analysisId) {
       top_queries: top.topQueries,
       top_pages: top.topPages,
       commercial,
+      serp_verification: serpVerification,
     };
 
     await db.query(

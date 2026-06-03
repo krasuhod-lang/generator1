@@ -53,6 +53,8 @@ const gscReady = computed(() => project.value?.gsc_connected && project.value?.g
 
 // Коммерческий срез из снапшота последнего/открытого анализа.
 const commercialData = computed(() => currentAnalysis.value?.gsc_snapshot?.commercial || null);
+// Верификация каннибализации по топ-выдаче Google.
+const serpVerificationData = computed(() => currentAnalysis.value?.gsc_snapshot?.serp_verification || null);
 
 async function load() {
   loading.value = true;
@@ -353,7 +355,7 @@ onUnmounted(() => {
         </section>
 
         <!-- Коммерческий срез -->
-        <CommercialInsights v-if="commercialData" :commercial="commercialData" />
+        <CommercialInsights v-if="commercialData" :commercial="commercialData" :serp-verification="serpVerificationData" />
 
         <!-- История анализов -->
         <section v-if="analyses.length" class="card space-y-2">
