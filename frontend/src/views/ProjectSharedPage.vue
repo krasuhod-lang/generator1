@@ -11,6 +11,7 @@ import axios from 'axios';
 import GscPerformanceChart from '../components/GscPerformanceChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
 import CommercialInsights from '../components/CommercialInsights.vue';
+import AnalyticsExtras from '../components/AnalyticsExtras.vue';
 
 const route = useRoute();
 const loading = ref(true);
@@ -88,6 +89,12 @@ onMounted(async () => {
           <CommercialInsights v-if="analysis.gsc_snapshot?.commercial"
                               :commercial="analysis.gsc_snapshot.commercial"
                               :serp-verification="analysis.gsc_snapshot?.serp_verification || null" />
+
+          <AnalyticsExtras v-if="analysis.gsc_snapshot && (analysis.gsc_snapshot.period_compare || analysis.gsc_snapshot.breakdowns || analysis.gsc_snapshot.page_decay || analysis.gsc_snapshot.brand_split)"
+                           :period-compare="analysis.gsc_snapshot.period_compare || null"
+                           :breakdowns="analysis.gsc_snapshot.breakdowns || null"
+                           :page-decay="analysis.gsc_snapshot.page_decay || null"
+                           :brand-split="analysis.gsc_snapshot.brand_split || null" />
         </template>
       </template>
     </div>
