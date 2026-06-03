@@ -64,29 +64,9 @@ services:
       - "${AEGIS_RAY_PORT:-6379}:6379"
     shm_size: 2gb
 
-  aegis_py:
-    build:
-      context: ./aegis_py
-      args:
-        INSTALL_HEAVY: ${AEGIS_PY_INSTALL_HEAVY:-false}
-    profiles: ["aegis"]
-    restart: unless-stopped
-    ports:
-      - "${AEGIS_PY_PORT:-8800}:8800"
-    environment:
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      AEGIS_NEO4J_URI:      ${AEGIS_NEO4J_URI:-}
-      AEGIS_NEO4J_USER:     ${AEGIS_NEO4J_USER:-neo4j}
-      AEGIS_NEO4J_PASSWORD: ${AEGIS_NEO4J_PASSWORD:-}
-      AEGIS_QDRANT_URL:     ${AEGIS_QDRANT_URL:-}
-      AEGIS_QDRANT_API_KEY: ${AEGIS_QDRANT_API_KEY:-}
-      RAY_ADDRESS:          ${RAY_ADDRESS:-}
-      AEGIS_GA4_PROPERTY_ID: ${AEGIS_GA4_PROPERTY_ID:-}
-      AEGIS_GA4_SA_JSON:    ${AEGIS_GA4_SA_JSON:-}
-      GOOGLE_API_KEY:       ${GOOGLE_API_KEY:-}
-      GEMINI_API_KEY:       ${GEMINI_API_KEY:-}
-      DEEPSEEK_API_KEY:     ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_MODEL:       ${DEEPSEEK_MODEL:-deepseek-chat}
+  # 🧬 aegis_py перенесён в основной docker-compose.yml (без profile),
+  # чтобы Bio-Brain поднимался по умолчанию. Здесь оставляем только
+  # тяжёлые опциональные сервисы (neo4j/qdrant/ray-head) под профилями.
 
 volumes:
   neo4j_data:

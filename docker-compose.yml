@@ -73,6 +73,8 @@ services:
       RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
       # Прокси для Gemini API — загружаются из .env через env_file
       # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
+      # 🧬 Bio-Brain: внутренний URL aegis_py в docker-сети.
+      AEGIS_PY_URL: ${AEGIS_PY_URL:-http://aegis_py:8800}
     ports:
       - "3000:3000"
     depends_on:
@@ -100,6 +102,7 @@ services:
       NODE_ENV: development
       DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
       REDIS_URL: redis://redis:6379
+      AEGIS_PY_URL: ${AEGIS_PY_URL:-http://aegis_py:8800}
       # Прокси для Gemini API — загружаются из .env через env_file
       # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
     command: node src/queue/worker.js
@@ -150,6 +153,47 @@ services:
       retries: 3
       start_period: 20s
 
+  # ── A.E.G.I.S. Python (Bio-Brain NEAT + DSPy + GraphRAG-фасад) ──────────
+  # 🧬 Поднимаем по умолчанию в основном стеке, чтобы Bio-Brain «жил
+  # своей жизнью»: фоновый поток `_biobrain_evolve_loop` в aegis_py/app/main.py
+  # эволюционирует мозг, накопленный буфер опыта переживает рестарт через
+  # volume aegis_brain_state. Без этого сервиса карточка «🧬 Bio-Brain» в UI
+  # рисует прочерки. Тяжёлые зависимости (neo4j/qdrant/ray) остаются опциональными
+  # и подключаются через docker-compose.aegis.yml override.
+  aegis_py:
+    build:
+      context: ./aegis_py
+      args:
+        INSTALL_HEAVY: ${AEGIS_PY_INSTALL_HEAVY:-false}
+    container_name: seo_aegis_py
+    restart: unless-stopped
+    ports:
+      - "${AEGIS_PY_PORT:-8800}:8800"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AEGIS_NEO4J_URI:      ${AEGIS_NEO4J_URI:-}
+      AEGIS_NEO4J_USER:     ${AEGIS_NEO4J_USER:-neo4j}
+      AEGIS_NEO4J_PASSWORD: ${AEGIS_NEO4J_PASSWORD:-}
+      AEGIS_QDRANT_URL:     ${AEGIS_QDRANT_URL:-}
+      AEGIS_QDRANT_API_KEY: ${AEGIS_QDRANT_API_KEY:-}
+      RAY_ADDRESS:          ${RAY_ADDRESS:-}
+      AEGIS_GA4_PROPERTY_ID: ${AEGIS_GA4_PROPERTY_ID:-}
+      AEGIS_GA4_SA_JSON:    ${AEGIS_GA4_SA_JSON:-}
+      GOOGLE_API_KEY:       ${GOOGLE_API_KEY:-}
+      GEMINI_API_KEY:       ${GEMINI_API_KEY:-}
+      DEEPSEEK_API_KEY:     ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL:       ${DEEPSEEK_MODEL:-deepseek-chat}
+      # Папка с лучшим геномом + persistent buffer (см. biobrain/storage.py).
+      AEGIS_BIOBRAIN_DIR: /app/brain_state
+    volumes:
+      - aegis_brain_state:/app/brain_state
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8800/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
 # ── Volumes ─────────────────────────────────────────────────────────────────
 volumes:
   pg_data:
@@ -157,4 +201,6 @@ volumes:
   redis_data:
     driver: local
   uploads:
+    driver: local
+  aegis_brain_state:
     driver: local
