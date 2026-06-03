@@ -35,6 +35,7 @@ const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
 const projectsRoutes      = require('./src/routes/projects.routes');
 const projectsPublicRoutes = require('./src/routes/projectsPublic.routes');
 const aegisRoutes         = require('./src/routes/aegis.routes');
+const categoryLeadRoutes  = require('./src/routes/categoryLead.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -118,6 +119,21 @@ app.use('/api/forecaster',     forecasterRoutes);
 app.use('/api/public',         forecasterPublicRoutes);
 app.use('/api/projects',       projectsRoutes);
 app.use('/api/public',         projectsPublicRoutes);
+app.use('/api/category-lead',  categoryLeadRoutes);
+// Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
+// Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
+// Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
+// как публичный роутер (60 req/min), чтобы не открывать нелимитированную точку.
+const oauthAliasLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000,
+  max:      60,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Слишком много запросов. Попробуйте позже.' },
+});
+app.get('/api/oauth/google/callback',
+  oauthAliasLimiter,
+  require('./src/controllers/projects.controller').handleGscCallback);
 app.use('/api/aegis',          aegisRoutes);
 
 // -----------------------------------------------------------------
@@ -185,6 +201,14 @@ const start = async () => {
       await recoverStuckMetaTagTasks();
     } catch (err) {
       console.warn('[Server] Meta-tag recovery skipped:', err.message);
+    }
+
+    // После рестарта переводим зависшие category-lead-задачи в error
+    try {
+      const { recoverStuckCategoryLeadTasks } = require('./src/services/categoryLead/pipeline');
+      await recoverStuckCategoryLeadTasks();
+    } catch (err) {
+      console.warn('[Server] Category-lead recovery skipped:', err.message);
     }
 
     // После рестарта переводим зависшие link-article-задачи в error
@@ -1643,6 +1667,43 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_observations_site_week ON aegis_seo_observations (site_key, week_start DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_observations_url ON aegis_seo_observations (url, observed_at DESC)`);
+
+    // Migration 059: category_lead_tasks — инструмент «Lead-text + Фасетный
+    // SEO-оптимизатор». Хранит входные данные, lead-text (Проход 1), таблицу
+    // фасет-оптимизатора (Проход 2), мост к мета-тегам и метрики стоимости.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'category_lead_status') THEN
+          CREATE TYPE category_lead_status AS ENUM ('queued', 'running', 'done', 'error');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS category_lead_tasks (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name          TEXT NOT NULL DEFAULT '',
+        category      TEXT NOT NULL DEFAULT '',
+        status        category_lead_status NOT NULL DEFAULT 'queued',
+        error_message TEXT,
+        inputs        JSONB,
+        lead_text     JSONB,
+        facet_table   JSONB,
+        meta          JSONB,
+        diagnostics   JSONB,
+        llm_model     TEXT,
+        tokens_in     BIGINT NOT NULL DEFAULT 0,
+        tokens_out    BIGINT NOT NULL DEFAULT 0,
+        cost_usd      NUMERIC(12, 6) NOT NULL DEFAULT 0,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at    TIMESTAMPTZ,
+        completed_at  TIMESTAMPTZ,
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_category_lead_user_created ON category_lead_tasks (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_category_lead_status ON category_lead_tasks (status)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

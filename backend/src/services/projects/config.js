@@ -130,6 +130,49 @@ const PROJECTS_CONFIG = deepFreeze({
     ],
   },
 
+  // Верификация каннибализации/слияния разделов по РЕАЛЬНОЙ топ-выдаче Google
+  // (через xmlstock). Детектор каннибализации в commercialIntent.js работает по
+  // данным GSC и лишь сигнализирует о подозрении; прежде чем рекомендовать
+  // склейку разделов, мы снимаем топ Google по запросу и проверяем, реально ли
+  // несколько страниц сайта конкурируют в выдаче. Graceful: при недоступности
+  // xmlstock вердикт = 'inconclusive', анализ продолжается.
+  serpVerification: {
+    enabled: true,
+    engine: 'google',
+    // Сколько верхних результатов Google анализируем (pages×10).
+    pages: 2,            // → топ-20
+    topResults: 20,
+    // Сколько кейсов каннибализации проверяем по SERP (бережём лимиты ключа).
+    maxCandidates: 10,
+    // Регион/домен/устройство Google (по умолчанию без привязки).
+    region: '',
+    domain: '',
+    device: '',
+    // Кэш SERP-ответов (одна выдача переиспользуется между кейсами/обновлениями).
+    cacheTtlMs: 24 * 60 * 60 * 1000, // 24 часа
+    cacheMaxEntries: 500,
+    // Порог: на скольких позициях Google должны стоять ≥2 страницы сайта, чтобы
+    // считать каннибализацию подтверждённой (склейку оправданной).
+    minPagesInTop: 2,
+  },
+
+  // Порционная (map-reduce) обработка больших объёмов данных. Если запросов и
+  // строк «запрос × страница» становится несколько сотен/тысяч, единый промт
+  // раздувается и теряет фокус. Тогда данные режутся на порции, по каждой
+  // извлекаются ёмкие выводы и гипотезы, затем сводятся в общий пул.
+  batch: {
+    enabled: true,
+    // Суммарный объём (topQueries + строки query×page), свыше которого
+    // включается порционный режим.
+    workloadThreshold: 300,
+    // Размер одной порции (запросов/строк).
+    chunkSize: 150,
+    // Потолок числа порций — защита от тысяч LLM-вызовов на гигантских наборах.
+    maxChunks: 12,
+    // Параллелизм map-фазы.
+    concurrency: 3,
+  },
+
   // Готовые пресеты периода для DatePicker.
   datePresets: [
     { key: '7d',  label: 'За 7 дней',   days: 7 },
@@ -153,9 +196,11 @@ function getProjectsConfig() {
  * функционал проектов (CRUD, шаринг) работает.
  */
 function getGoogleOAuthConfig() {
-  const clientId = process.env.GOOGLE_CLIENT_ID || '';
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
-  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || '';
+  // .trim() — на случай лишних пробелов вокруг значения в .env
+  // (например GOOGLE_OAUTH_REDIRECT_URI=" https://site/...callback ").
+  const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+  const clientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+  const redirectUri = (process.env.GOOGLE_OAUTH_REDIRECT_URI || '').trim();
   return {
     clientId,
     clientSecret,

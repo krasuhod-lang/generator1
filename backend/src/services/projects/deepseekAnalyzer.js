@@ -125,7 +125,36 @@ function _buildUserPrompt({ project, range, performance, top, commercial }) {
       JSON.stringify(commercial.intent_mismatch),
     );
   }
+  lines.push(..._renderSerpVerificationLines(payload.serpVerification));
   return lines.join('\n');
+}
+
+/**
+ * Блок проверки каннибализации по реальной топ-выдаче Google. Включается в
+ * промт, чтобы LLM рекомендовала склейку разделов ТОЛЬКО там, где выдача это
+ * подтверждает (verdict=merge_recommended), а не по одному сигналу из GSC.
+ */
+function _renderSerpVerificationLines(serpVerification) {
+  if (!serpVerification || !serpVerification.available
+    || !Array.isArray(serpVerification.items) || serpVerification.items.length === 0) {
+    return [];
+  }
+  return [
+    '',
+    `[ВЕРИФИКАЦИЯ КАННИБАЛИЗАЦИИ ПО ТОП-ВЫДАЧЕ ${String(serpVerification.engine || 'google').toUpperCase()}]`,
+    'Каждый кейс каннибализации сверен с реальной выдачей. Рекомендуй слияние/',
+    'склейку разделов ТОЛЬКО для verdict=merge_recommended. Для keep_separate —',
+    'НЕ предлагай объединять страницы. Для inconclusive — отметь, что выдачу не',
+    'удалось снять, и опирайся на данные GSC.',
+    'Кейсы (query, verdict, best_position, site_pages_in_top_count, recommendation):',
+    JSON.stringify(serpVerification.items.map((it) => ({
+      query: it.query,
+      verdict: it.verdict,
+      best_position: it.best_position,
+      site_pages_in_top_count: it.site_pages_in_top_count,
+      recommendation: it.recommendation,
+    }))),
+  ];
 }
 
 /**
@@ -179,4 +208,138 @@ async function runProjectAnalysis(payload) {
   }
 }
 
-module.exports = { runProjectAnalysis, SYSTEM_PROMPT, _buildUserPrompt };
+module.exports = { runProjectAnalysis, runProjectAnalysisBatched, SYSTEM_PROMPT, _buildUserPrompt };
+
+// ── Порционный (map-reduce) режим для больших наборов данных ───────────
+
+const { buildChunks, runMapReduce, estimateWorkload, shouldBatch } = require('./batchAnalyzer');
+
+// MAP: ёмкое извлечение выводов и гипотез по одной порции данных.
+const MAP_SYSTEM_PROMPT = [
+  'Ты — SEO-аналитик. Тебе дают ПОРЦИЮ строк Google Search Console',
+  '(query × page: клики, показы, CTR%, позиция). Это часть большого набора.',
+  'Выдели только САМОЕ ВАЖНОЕ по этой порции в виде коротких буллетов на',
+  'русском, без воды и преамбул, максимально ёмко:',
+  '• точки роста (запросы/страницы у входа в топ);',
+  '• подозрения на каннибализацию (один запрос — несколько URL);',
+  '• несоответствие интента (коммерческий запрос на инфо-странице);',
+  '• заметные CTR-аномалии и гипотезы по их причинам.',
+  'Не выдумывай данных. Не более 12 буллетов. Только буллеты.',
+].join('\n');
+
+function _buildMapUserPrompt(chunk) {
+  return [
+    `[ПОРЦИЯ ${chunk.index}/${chunk.total}] строк query×page: ${chunk.items.length}`,
+    '(query, page, clicks, impressions, ctr%, position)',
+    JSON.stringify(chunk.items.map((r) => ({
+      query: r.query, page: r.page, clicks: r.clicks,
+      impressions: r.impressions, ctr: r.ctr, position: r.position,
+    }))),
+  ].join('\n');
+}
+
+async function _callDeepSeekTracked(system, user, cfg, kind) {
+  const t0 = Date.now();
+  const resp = await callDeepSeek(system, user, {
+    temperature: cfg.temperature,
+    maxTokens: cfg.maxTokens,
+    timeoutMs: cfg.timeoutMs,
+  });
+  const tIn = resp.tokensIn || 0;
+  const tOut = resp.tokensOut || 0;
+  const cached = resp.cacheHitTokens || 0;
+  const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+  const durationMs = Date.now() - t0;
+  try {
+    llmUsageLog.recordUsage({
+      provider: 'deepseek', kind, outcome: 'ok',
+      tokensIn: tIn, tokensOut: tOut, cachedTokens: cached,
+      costUsd: cost, latencyMs: durationMs,
+    });
+  } catch (_) { /* no-op */ }
+  return { text: resp.text || '', tIn, tOut, cached, cost, model: resp.model || 'deepseek', durationMs };
+}
+
+/**
+ * Порционный анализ: режет тяжёлый срез (query×page) на порции, по каждой
+ * извлекает выводы/гипотезы (map), затем сводит общий пул в единый отчёт
+ * (reduce). Включается в analysisRunner при большом объёме данных.
+ * Graceful: при провале map-reduce откатывается на обычный runProjectAnalysis.
+ */
+async function runProjectAnalysisBatched(payload) {
+  const cfg = getProjectsConfig();
+  const dcfg = cfg.deepseek;
+  const bcfg = cfg.batch;
+  if (!dcfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
+  if (!process.env.DEEPSEEK_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+
+  const slice = {
+    topQueries: (payload.top && payload.top.topQueries) || [],
+    queryPage: Array.isArray(payload.queryPage) ? payload.queryPage : [],
+  };
+  const chunks = buildChunks(slice, bcfg);
+  // Слишком мало порций — нет смысла в map-reduce, обычный путь.
+  if (chunks.length < 2) return runProjectAnalysis(payload);
+
+  try {
+    let mapTokIn = 0; let mapTokOut = 0; let mapCost = 0;
+    const mapFn = async (chunk) => {
+      const r = await _callDeepSeekTracked(
+        MAP_SYSTEM_PROMPT, _buildMapUserPrompt(chunk), dcfg, 'project_seo_analysis_map',
+      );
+      mapTokIn += r.tIn; mapTokOut += r.tOut; mapCost += r.cost;
+      const text = _stripFence(r.text).trim();
+      return text ? { index: chunk.index, total: chunk.total, text } : null;
+    };
+
+    const reduceFn = async (partials) => {
+      const base = _buildUserPrompt(payload);
+      const poolLines = partials.map(
+        (p) => `— Порция ${p.index}/${p.total}:\n${p.text}`,
+      );
+      const reduceUser = [
+        base,
+        '',
+        '[СВЕДЁННЫЙ ПУЛ ВЫВОДОВ И ГИПОТЕЗ ПО ПОРЦИЯМ]',
+        'Данные были обработаны порционно. Ниже — ёмкие выводы по каждой порции.',
+        'Сведи их в единый непротиворечивый отчёт по структуре выше, убери',
+        'дубли, расставь приоритеты. Держи изложение ёмким, чётким и понятным.',
+        '',
+        poolLines.join('\n\n'),
+      ].join('\n');
+      const r = await _callDeepSeekTracked(
+        SYSTEM_PROMPT, reduceUser, dcfg, 'project_seo_analysis_reduce',
+      );
+      return r;
+    };
+
+    const { result: reduced, stats } = await runMapReduce({
+      chunks, mapFn, reduceFn, concurrency: bcfg.concurrency,
+    });
+
+    const tokIn = mapTokIn + reduced.tIn;
+    const tokOut = mapTokOut + reduced.tOut;
+    const cost = mapCost + reduced.cost;
+    return {
+      verdict: 'ok',
+      markdown: _stripFence(reduced.text),
+      tokens_in: tokIn,
+      tokens_out: tokOut,
+      cost_usd: Math.round(cost * 1e6) / 1e6,
+      model: reduced.model,
+      duration_ms: reduced.durationMs,
+      batched: true,
+      batch_stats: stats,
+    };
+  } catch (err) {
+    // Любой сбой порционного режима — мягкий откат на одиночный анализ.
+    try {
+      llmUsageLog.recordUsage({ provider: 'deepseek', kind: 'project_seo_analysis_batched', outcome: 'error' });
+    } catch (_) { /* no-op */ }
+    return runProjectAnalysis(payload);
+  }
+}
+
+// Реэкспорт утилит для analysisRunner (решение о порционном режиме).
+module.exports.estimateWorkload = estimateWorkload;
+module.exports.shouldBatch = shouldBatch;

@@ -86,7 +86,8 @@ onMounted(async () => {
 
           <!-- Коммерческий срез -->
           <CommercialInsights v-if="analysis.gsc_snapshot?.commercial"
-                              :commercial="analysis.gsc_snapshot.commercial" />
+                              :commercial="analysis.gsc_snapshot.commercial"
+                              :serp-verification="analysis.gsc_snapshot?.serp_verification || null" />
         </template>
       </template>
     </div>

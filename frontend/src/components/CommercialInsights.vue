@@ -14,6 +14,7 @@ import { computed } from 'vue';
 
 const props = defineProps({
   commercial: { type: Object, default: null },
+  serpVerification: { type: Object, default: null },
 });
 
 const data = computed(() => props.commercial || null);
@@ -44,6 +45,16 @@ const striking = computed(() => data.value?.striking_distance || []);
 const anomalies = computed(() => data.value?.ctr_anomalies || []);
 const cannibal = computed(() => data.value?.cannibalization || []);
 const mismatch = computed(() => data.value?.intent_mismatch || []);
+
+// SERP-вердикты по каннибализации (проверка по реальному топу Google).
+const serpItems = computed(() => props.serpVerification?.items || []);
+const serpEngine = computed(() => (props.serpVerification?.engine || 'google').toUpperCase());
+const SERP_VERDICT = {
+  merge_recommended: { label: 'Сливать', cls: 'bg-orange-500/20 text-orange-300 border-orange-500/40' },
+  keep_separate: { label: 'Не сливать', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' },
+  inconclusive: { label: 'Нет данных', cls: 'bg-gray-600/20 text-gray-400 border-gray-600/40' },
+};
+function serpVerdict(v) { return SERP_VERDICT[v] || SERP_VERDICT.inconclusive; }
 
 function shortUrl(u) {
   try { const x = new URL(u); return x.pathname + (x.search || ''); } catch (_) { return u; }
@@ -139,6 +150,23 @@ function shortUrl(u) {
           <ul class="ml-4 mt-0.5 text-gray-500">
             <li v-for="(p, j) in r.pages" :key="j" class="truncate">• {{ shortUrl(p.page) }} (поз. {{ p.position }})</li>
           </ul>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Верификация каннибализации по топ-выдаче Google -->
+    <div v-if="serpItems.length" class="space-y-1.5">
+      <div class="text-xs font-semibold text-sky-400 uppercase">🔎 Проверка по топу {{ serpEngine }} (нужно ли сливать разделы)</div>
+      <ul class="space-y-1.5">
+        <li v-for="(r, i) in serpItems" :key="i" class="text-xs text-gray-300">
+          <span class="inline-flex items-center gap-2">
+            <span class="px-1.5 py-0.5 rounded border text-[10px] uppercase font-semibold" :class="serpVerdict(r.verdict).cls">
+              {{ serpVerdict(r.verdict).label }}
+            </span>
+            <span class="text-gray-100 font-medium">{{ r.query }}</span>
+            <span v-if="r.best_position" class="text-gray-500">— лучшая позиция {{ r.best_position }}, страниц в топе: {{ r.site_pages_in_top_count }}</span>
+          </span>
+          <div class="ml-1 mt-0.5 text-gray-500">{{ r.recommendation }}</div>
         </li>
       </ul>
     </div>
