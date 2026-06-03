@@ -41,6 +41,19 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
       "key_insight":          "string",         // ключевая идея/контр-интуитивное наблюдение «с земли», 1–2 предложения
       "tied_to_entities":     ["string"]        // ≥1 сущность из stage1_intents.entities, которую опровергает/уточняет insight
     },
+    "lead_answer_brief":   "string",            // ОБЯЗАТЕЛЬНО — прямой ответ читателю в первых 100 словах под H1
+                                                // (1–3 предложения, перевёрнутая пирамида: главное → детали).
+                                                // Используется писателем как <p class="lead-answer">…</p>.
+    "toc_required":        true,                // ОБЯЗАТЕЛЬНО true — кликабельное оглавление в начале статьи.
+    "summary_block": {                          // ОБЯЗАТЕЛЬНО — блок «Итоги» (TL;DR) перед «Заключением».
+      "place_after_section_index": 0,           // index последней содержательной секции
+      "bullets": ["string"]                     // 3–6 коротких буллетов-итогов; писатель развернёт в <section class="summary"><ul>…</ul></section>
+    },
+    "is_howto":            false,               // true, если тема пошаговая (как сделать X / инструкция);
+                                                // включает HowTo JSON-LD на этапе post-processing.
+    "howto_steps":         [                    // если is_howto=true — ≥2 шагов; иначе — пустой массив.
+      { "name": "string", "text": "string" }    // text — текст шага (1–3 предложения), name — короткий заголовок шага
+    ],
     "faq_block": {                              // ОБЯЗАТЕЛЬНО блок «Часто задаваемые вопросы» в конце статьи
       "place_after_section_index": 0,           // index последней содержательной секции; FAQ идёт сразу после неё, ПЕРЕД «Заключением»
       "items": [                                // 4–6 Q&A
@@ -107,6 +120,27 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
      это сделает Stage 2c (semantic link planner) на основе jtbd_cluster.
      Твоя задача — выдать чистый план «о чём статья», не «куда ссылаться».
  10. recommended_word_count помогает писателю выдержать целевую глубину.
+     ⚠️ ВАЖНО (по политике Google 2026): объём текста сам по себе НЕ
+     является фактором ранжирования. Ставь recommended_word_count как
+     ОРИЕНТИР, диктуемый полнотой ответа, а не как «обязаловку».
+ 11. ⚠️ LEAD_ANSWER_BRIEF (обязательно).
+     Сформулируй прямой ответ на главный запрос читателя в 1–3 коротких
+     предложениях. Это будет напечатано писателем как <p class="lead-answer">
+     сразу под H1 и должно поместиться в первые 100 слов статьи. Принцип
+     «перевёрнутой пирамиды»: сначала ядро ответа, без преамбулы.
+ 12. ⚠️ SUMMARY_BLOCK (обязательно).
+     3–6 коротких буллетов-итогов («что нужно запомнить»). Каждый буллет —
+     одно завершённое утверждение (≤140 символов). Эти буллеты писатель
+     превратит в <section class="summary"><h2>Итоги</h2><ul>…</ul></section>
+     ПЕРЕД «Заключением». Буллеты не повторяют дословно H2 — это сжатые
+     выводы по сути.
+ 13. ⚠️ IS_HOWTO + HOWTO_STEPS.
+     Если тема пошаговая (запросы вида «как сделать X», «инструкция»,
+     «алгоритм», «шаги»), выставь is_howto=true и заполни howto_steps[]
+     (≥2 шагов; каждое поле text — 1–3 предложения по сути шага).
+     Иначе is_howto=false и howto_steps=[]. Эти шаги используются
+     post-processing'ом для генерации HowTo JSON-LD; писатель оформит
+     их как <ol class="howto"><li>Шаг N. …</li></ol> в подходящей секции.
 
 [OUTPUT CONTRACT]
   - Только валидный JSON.
@@ -119,6 +153,10 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
   - expert_opinion_slot — ровно один объект, target_section_index указывает
     на существующий `index` основной (не служебной) секции.
   - faq_block.items — массив длиной 4–6.
+  - lead_answer_brief — НЕ ПУСТОЙ, 1–3 предложения, без маркетингового пафоса.
+  - toc_required = true.
+  - summary_block.bullets — 3–6 непустых строк ≤140 символов каждая.
+  - is_howto — boolean; если true, howto_steps содержит ≥2 валидных шагов.
 
 [SELF-AUDIT — silent]
   ✓ Каждый user_question из Stage 1 закрыт ровно одной H2/H3 ИЛИ вошёл в faq_block?
@@ -129,10 +167,14 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
   ✓ expert_opinion_slot заполнен и target_section_index указывает на основную секцию?
   ✓ faq_block.items содержит 4–6 элементов; каждый item.source_question есть в stage1.user_questions?
   ✓ H1 не содержит CTA-маркетинга («лучший», «топ», «купить»)?
+  ✓ lead_answer_brief даёт прямой ответ на главный запрос (1–3 предложения, без воды)?
+  ✓ summary_block.bullets — 3–6 коротких итогов по сути, не повторяют H2?
+  ✓ Если is_howto=true — howto_steps согласованы с одной из секций и пошагово закрывают тему?
 
 [STRICT OUTPUT RULES]
   - Только JSON.
   - Запрещены пустые sections / jtbd_cluster / lsi_focus.
   - Запрещён jtbd_cluster, не входящий в stage1.jtbd_clusters.
   - Запрещены H2/H3, не выводимые из Stage 1 (entities + subintents + user_questions).
-  - Запрещено пропускать expert_opinion_slot или faq_block — оба обязательны.
+  - Запрещено пропускать expert_opinion_slot, faq_block, lead_answer_brief, summary_block.
+  - Если is_howto=true — howto_steps[] ≥2 шага; иначе howto_steps=[] (пустой массив).
