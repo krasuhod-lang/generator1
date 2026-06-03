@@ -20,6 +20,15 @@ const PRICES = {
     input_cache_hit:  0.000000070,  // $0.07 / 1M tokens
     output:           0.000001100,  // $1.10 / 1M tokens
   },
+  // DeepSeek-reasoner (R1-серия / «pro» reasoning-эндпоинт): отдельный тариф,
+  // output дороже за счёт reasoning-токенов (DeepSeek тарифицирует
+  // completion_tokens целиком, включая внутренний chain-of-thought).
+  // Источник: https://api-docs.deepseek.com/quick_start/pricing — апрель 2026.
+  deepseek_reasoner: {
+    input_cache_miss: 0.000000550,  // $0.55 / 1M tokens
+    input_cache_hit:  0.000000140,  // $0.14 / 1M tokens
+    output:           0.000002190,  // $2.19 / 1M tokens (incl. reasoning)
+  },
   gemini: {
     // Контекст до 200 000 токенов — захардкожено, env не учитывается.
     input_short:        0.000002000,  // $2.00 / 1M input
@@ -80,11 +89,11 @@ function calcCost(model, tokensIn, tokensOut, cacheHitOrUsage = false) {
   const thoughtsTokens = Math.max(0, Number(usage.thoughtsTokens) || 0);
   const cachedTokens   = Math.max(0, Number(usage.cachedTokens)   || 0);
 
-  if (model === 'deepseek') {
-    const inputRate = cacheHit
-      ? PRICES.deepseek.input_cache_hit
-      : PRICES.deepseek.input_cache_miss;
-    return tokensIn * inputRate + tokensOut * PRICES.deepseek.output;
+  if (model === 'deepseek' || model === 'deepseek_reasoner' || model === 'deepseek-reasoner') {
+    // Имя 'deepseek-reasoner' (с дефисом) — алиас для удобства вызывающего кода.
+    const tier = (model === 'deepseek') ? PRICES.deepseek : PRICES.deepseek_reasoner;
+    const inputRate = cacheHit ? tier.input_cache_hit : tier.input_cache_miss;
+    return tokensIn * inputRate + tokensOut * tier.output;
   }
 
   if (model === 'gemini') {

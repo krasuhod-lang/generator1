@@ -9,10 +9,16 @@
  */
 
 const db = require('../../config/db');
-const { fetchPerformanceSeries, fetchTopDimensions, fetchQueryPageMatrix, resolveRange } = require('./gscService');
+const {
+  fetchPerformanceSeries, fetchTopDimensions, fetchQueryPageMatrix, resolveRange,
+  fetchBreakdown, fetchPageDailySeries, fetchTopQueries, previousRange,
+} = require('./gscService');
 const { runProjectAnalysis, runProjectAnalysisBatched, estimateWorkload, shouldBatch } = require('./deepseekAnalyzer');
 const { analyzeCommercial, deriveBrandTokens } = require('./commercialIntent');
 const { verifyCannibalization } = require('./serpVerifier');
+const { buildPeriodReport } = require('./periodComparison');
+const { detectPageDecay } = require('./pageDecayDetector');
+const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
 
 async function _setError(analysisId, message) {
@@ -107,9 +113,18 @@ async function processAnalysis(analysisId) {
       topQueries: top.topQueries, topPages: top.topPages, queryPage,
     });
     const useBatch = shouldBatch(workload, batchCfg);
+
+    // ── Расширенные срезы и аналитические слои (graceful) ─────────────
+    const projectsCfg = getProjectsConfig();
+    const breakdowns = await _fetchBreakdowns(project, range, projectsCfg.gscBreakdowns);
+    const periodCompare = await _buildPeriodCompare(project, range, top, projectsCfg.periodCompare, performance);
+    const pageDecay = await _buildPageDecay(project, range, top.topPages, projectsCfg.pageDecay);
+    const brandSplit = await _buildBrandSplit(project, range, projectsCfg.brandSplit, project.gsc_site_url);
+
     const analysisPayload = {
       project, range: resolved, performance, top, commercial,
       serpVerification, queryPage,
+      breakdowns, periodCompare, pageDecay, brandSplit,
     };
     const result = useBatch
       ? await runProjectAnalysisBatched(analysisPayload)
@@ -128,6 +143,10 @@ async function processAnalysis(analysisId) {
       top_pages: top.topPages,
       commercial,
       serp_verification: serpVerification,
+      breakdowns,
+      period_compare: periodCompare,
+      page_decay: pageDecay,
+      brand_split: brandSplit,
     };
 
     await db.query(
@@ -168,6 +187,96 @@ function _daysForKey(key) {
     case '6m': return 180;
     case '28d':
     default: return 28;
+  }
+}
+
+/**
+ * Доп. срезы GSC (device / country / searchAppearance). Каждый — graceful:
+ * при ошибке/выключенном флаге отдаёт null, остальной анализ продолжается.
+ */
+async function _fetchBreakdowns(project, range, cfg) {
+  if (!cfg || !cfg.enabled) return null;
+  const out = {};
+  const tasks = [];
+  if (cfg.device && cfg.device.enabled) {
+    tasks.push(fetchBreakdown(project, range, 'device', { rowLimit: cfg.device.rowLimit })
+      .then((r) => { out.device = r; }).catch(() => { out.device = []; }));
+  }
+  if (cfg.country && cfg.country.enabled) {
+    tasks.push(fetchBreakdown(project, range, 'country', { rowLimit: cfg.country.rowLimit })
+      .then((r) => { out.country = r; }).catch(() => { out.country = []; }));
+  }
+  if (cfg.searchAppearance && cfg.searchAppearance.enabled) {
+    tasks.push(fetchBreakdown(project, range, 'searchAppearance', { rowLimit: cfg.searchAppearance.rowLimit })
+      .then((r) => { out.searchAppearance = r; }).catch(() => { out.searchAppearance = []; }));
+  }
+  await Promise.all(tasks);
+  return out;
+}
+
+/**
+ * Сравнение период-к-периоду: тащим тоталы и топ-запросы/страницы за
+ * предыдущий равный период и считаем дельты + декомпозицию Δclicks.
+ * Graceful: при сбое или слишком коротком периоде возвращает null.
+ */
+async function _buildPeriodCompare(project, range, currTop, cfg, currPerformance) {
+  if (!cfg || !cfg.enabled) return null;
+  const prev = previousRange(range);
+  if (prev.days < (cfg.minDays || 5)) return { available: false, reason: 'period_too_short' };
+  try {
+    const [prevPerf, prevQueries, prevPages] = await Promise.all([
+      fetchPerformanceSeries(project, prev),
+      fetchTopQueries(project, prev, { rowLimit: Math.max(cfg.topQueriesDelta * 2, 50) }),
+      fetchBreakdown(project, prev, 'page', { rowLimit: Math.max(cfg.topPagesDelta * 2, 30) })
+        .catch(() => []), // page как dimension в общем разрезе.
+    ]);
+    return buildPeriodReport({
+      currTotals: currPerformance.totals,
+      prevTotals: prevPerf.totals,
+      currQueries: currTop.topQueries,
+      prevQueries,
+      currPages: currTop.topPages,
+      prevPages,
+      opts: {
+        minImpressions: cfg.minImpressions,
+        minClicksAbsDelta: cfg.minClicksAbsDelta,
+        topQueriesDelta: cfg.topQueriesDelta,
+        topPagesDelta: cfg.topPagesDelta,
+      },
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Page-decay detector: тащим page×date по топ-N страницам и прогоняем
+ * через линейную регрессию. Graceful: при сбое возвращает null.
+ */
+async function _buildPageDecay(project, range, topPages, cfg) {
+  if (!cfg || !cfg.enabled) return null;
+  const pages = (topPages || []).slice(0, cfg.topPages).map((p) => p.key).filter(Boolean);
+  if (pages.length === 0) return null;
+  try {
+    const rows = await fetchPageDailySeries(project, range, pages);
+    return detectPageDecay(rows, cfg);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Brand-split: тащим большой срез по запросам и считаем долю бренда.
+ * Graceful: при сбое — null.
+ */
+async function _buildBrandSplit(project, range, cfg, siteUrl) {
+  if (!cfg || !cfg.enabled) return null;
+  try {
+    const queries = await fetchTopQueries(project, range, { rowLimit: cfg.queryRowLimit });
+    const brandTokens = deriveBrandTokens({ name: project.name, siteUrl, url: project.url });
+    return splitBrand(queries, brandTokens);
+  } catch (_) {
+    return null;
   }
 }
 

@@ -12,6 +12,7 @@ import AppLayout from '../components/AppLayout.vue';
 import GscPerformanceChart from '../components/GscPerformanceChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
 import CommercialInsights from '../components/CommercialInsights.vue';
+import AnalyticsExtras from '../components/AnalyticsExtras.vue';
 import { useProjectsStore } from '../stores/projects.js';
 
 const route = useRoute();
@@ -55,6 +56,12 @@ const gscReady = computed(() => project.value?.gsc_connected && project.value?.g
 const commercialData = computed(() => currentAnalysis.value?.gsc_snapshot?.commercial || null);
 // Верификация каннибализации по топ-выдаче Google.
 const serpVerificationData = computed(() => currentAnalysis.value?.gsc_snapshot?.serp_verification || null);
+// Расширенные срезы и аналитические слои (period-over-period, page decay,
+// устройства/страны/searchAppearance, бренд vs небренд).
+const periodCompareData = computed(() => currentAnalysis.value?.gsc_snapshot?.period_compare || null);
+const breakdownsData = computed(() => currentAnalysis.value?.gsc_snapshot?.breakdowns || null);
+const pageDecayData = computed(() => currentAnalysis.value?.gsc_snapshot?.page_decay || null);
+const brandSplitData = computed(() => currentAnalysis.value?.gsc_snapshot?.brand_split || null);
 
 async function load() {
   loading.value = true;
@@ -353,6 +360,15 @@ onUnmounted(() => {
           </div>
           <MarkdownView v-else-if="currentAnalysis?.status === 'done'" :source="currentAnalysis.report_markdown" />
         </section>
+
+        <!-- Расширенные срезы: что изменилось, устройства/страны, page decay, бренд -->
+        <AnalyticsExtras
+          v-if="periodCompareData || breakdownsData || pageDecayData || brandSplitData"
+          :period-compare="periodCompareData"
+          :breakdowns="breakdownsData"
+          :page-decay="pageDecayData"
+          :brand-split="brandSplitData"
+        />
 
         <!-- Коммерческий срез -->
         <CommercialInsights v-if="commercialData" :commercial="commercialData" :serp-verification="serpVerificationData" />
