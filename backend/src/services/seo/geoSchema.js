@@ -52,11 +52,11 @@ function sanitizeText(value, maxLen = MAX_TEXT) {
   // Декодируем самые частые HTML entities.
   s = s
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'");
+    .replace(/&#39;/gi, "'")
+    .replace(/&amp;/gi, '&');
   // Удаляем управляющие символы (кроме \t \n).
   s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
   // Если в строке остались литералы < или >, удалим — они опасны внутри <script>.
@@ -318,7 +318,7 @@ function serializeJsonLdScript(block) {
   json = json
     .replace(/<\/script/gi, '<\\/script')
     .replace(/<!--/g, '<\\!--')
-    .replace(/-->/g, '--\\>')
+    .replace(/--!?>/g, '--\\>')
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
   return `<script type="application/ld+json">${json}</script>`;

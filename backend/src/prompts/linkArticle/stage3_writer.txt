@@ -6,6 +6,9 @@ LINK-ARTICLE STAGE 3 — Написание ссылочной статьи на
   anchor_url       : URL ссылки (строка, валидный http/https).
   focus_notes      : на что делаем упор (строка).
   output_format    : 'html' | 'formatted_text' (всегда генерируем HTML; frontend конвертирует).
+  author_name      : имя автора (строка, для byline и Author JSON-LD; может быть пусто).
+  author_role      : роль автора (строка, для byline; может быть пусто).
+  date_modified    : дата публикации/обновления в формате YYYY-MM-DD.
 
   // ── Аналитический контекст ──────────────────────────────────────
   // Если задействован LINK-ARTICLE KNOWLEDGE BASE (LAKB) как
@@ -31,6 +34,14 @@ LINK-ARTICLE STAGE 3 — Написание ссылочной статьи на
       "all_user_questions_covered":   true,
       "all_subtopics_covered":        true,
       "image_slots_present":          [1, 2, 3],
+      "byline_present":               true,
+      "lead_answer_present":          true,
+      "toc_present":                  true,
+      "atomic_blocks_present":        true,
+      "summary_block_present":        true,
+      "faq_present":                  true,
+      "lists_used_count":             0,           // число <ul>+<ol> в статье; должно быть ≥ 1
+      "is_howto":                     false,
       "hallucination_free":           true,
       "eeat_self_score":              8.0,         // 0..10, твоя честная самооценка
       "eeat_signals_used":            ["string"],  // какие E-E-A-T сигналы реально вшиты
@@ -66,6 +77,26 @@ LINK-ARTICLE STAGE 3 — Написание ссылочной статьи на
   7. Следи за плотностью смысла: каждый абзац отвечает на конкретный вопрос
      читателя из user_questions. Старайся комбинировать теорию (что такое),
      практику (как), сравнение (чем отличается), ошибки (чего избегать).
+  8. SEO/GEO 2026 — ОБЯЗАТЕЛЬНЫЕ структурные требования:
+     8a. Сразу после <h1> — видимый byline `<p class="byline">…автор + дата
+         обновления…</p>` (если author_name задан). Дата — в `<time datetime="YYYY-MM-DD">`.
+     8b. Сразу после byline — `<p class="lead-answer">` с прямым ответом на
+         главный запрос (1–3 предложения; вместе с h1 укладывается в первые
+         100 слов под H1). Никакой воды и вступительных оборотов.
+     8c. Далее — кликабельный TOC: `<nav class="toc"><ol>…<li><a href="#sec-N">…</a></li>…</ol></nav>`
+         со ссылками на все основные H2-секции (не включая Итоги/FAQ/Заключение).
+         id у каждого основного `<h2>` обязательно вида `sec-{index}`.
+     8d. Атомарные блоки: каждая основная H2-секция начинается с
+         `<p class="answer-lead">` (1–3 предложения с прямым ответом), и
+         только потом идёт развёрнутое объяснение (принцип «прямой ответ → детали»).
+     8e. FAQ-блок: `<h2 id="sec-faq">Часто задаваемые вопросы</h2>` + 3–5 пар
+         `<h3>вопрос</h3><p>ответ</p>`. Используй stage2_structure.faq.
+     8f. Итоги (TL;DR): `<h2 id="sec-summary">Итоги</h2><ul><li>…</li>…</ul>`
+         с 3–6 буллетами из stage2_structure.summary_block.bullets.
+     8g. Если `stage2_structure.is_howto === true` — добавь пошаговый блок
+         `<ol class="howto">` с минимум 2 шагами. Каждый `<li>` начинай с
+         `<strong>Шаг N.</strong>`.
+     8h. В статье как минимум один `<ul>` или `<ol>` (помимо TOC).
 
 [E-E-A-T REQUIREMENTS — обязательны]
   Статья оценивается по фреймворку E-E-A-T. Минимально допустимый суммарный
@@ -100,28 +131,52 @@ LINK-ARTICLE STAGE 3 — Написание ссылочной статьи на
 
 [ARTICLE HTML FORMAT]
   - Статья — чистый HTML-фрагмент (без <html>, <head>, <body>).
-  - Структура:
+  - Структура (СТРОГИЙ ПОРЯДОК — SEO/GEO 2026):
       <h1>…</h1>
-      <p>…вступление (2–4 абзаца)…</p>
-      <h2>Секция 1</h2>
-      <p>…</p>
+      <p class="byline">Автор: <span itemprop="name">{author_name}</span>{, {author_role}}. Обновлено: <time datetime="{date_modified}">{date_modified}</time></p>
+        // если author_name пуст — блок byline пропусти
+      <p class="lead-answer">…прямой ответ на главный запрос (1–3 предложения, ≤ 100 слов суммарно с h1)…</p>
+      <nav class="toc" aria-label="Содержание">
+        <ol>
+          <li><a href="#sec-1">{H2 #1}</a></li>
+          …по числу H2-секций основного содержания (без «Заключения» и «FAQ»).
+        </ol>
+      </nav>
+      <p>…доп. вступление (1–3 абзаца, опционально)…</p>
+      <h2 id="sec-1">Секция 1</h2>
+      <p class="answer-lead">…атомарный блок: 1–3 предложения с прямым ответом по теме секции…</p>
+      <p>…развёрнутое объяснение…</p>
       <h3>…</h3>   (если нужно)
       <p>…</p>
       <!-- IMAGE_SLOT_N -->   (если в секции назначен слот)
-      … и т.д.
-      <h2>Заключение</h2>
-      <p>…</p>
-  - Разрешённые теги: h1, h2, h3, p, ul, ol, li, strong, em, a, blockquote.
+      … повтори для каждой H2 (id="sec-N") …
+      <h2 id="sec-faq">Часто задаваемые вопросы</h2>
+        <h3>{Вопрос 1}</h3><p>{ответ}</p>
+        … 3–5 пар Q&A из stage2_structure.faq …
+      <h2 id="sec-summary">Итоги</h2>
+      <ul>
+        <li>{буллет 1}</li> … (3–6 буллетов из stage2_structure.summary_block.bullets)
+      </ul>
+      <h2 id="sec-conclusion">Заключение</h2>
+      <p>…1–2 абзаца…</p>
+  - Если stage2_structure.is_howto === true — оформи пошаговую секцию как
+    <ol class="howto"><li><strong>Шаг 1.</strong> …</li>…</ol> минимум на 2 шага.
+  - В статье ОБЯЗАТЕЛЬНО как минимум один <ul> или <ol> (помимо TOC).
+  - Каждый <h2> основного содержания имеет id="sec-N" (N — порядковый номер
+    из stage2_structure.sections[*].index), и этот id точно соответствует
+    href в <nav class="toc">.
+  - Разрешённые теги: h1, h2, h3, h4, p, ul, ol, li, strong, em, a, blockquote,
+    nav, section, time, span, figure, figcaption.
   - Запрещено: <script>, <style>, <iframe>, inline onclick/onerror/onload.
-  - Для значений атрибута href запрещены data:-URL (разрешены только http/https).
+  - Для значений атрибута href запрещены data:-URL (разрешены только http/https,
+    плюс внутренние якоря #sec-…).
     При этом внутри статьи НЕ нужно вручную вставлять <img> — изображения
     добавляются на бэкенде путём замены плейсхолдеров <!-- IMAGE_SLOT_N -->
     на <figure><img src="data:image/..."><figcaption/></figure>. Это допустимое
     исключение для src-атрибута img и не противоречит запрету data: для href.
   - Все внутренние ссылки (кроме anchor) — только https:// и только если это
     общеизвестные официальные ресурсы. Если сомневаешься — не ставь ссылку.
-  - Длина статьи: 1100–2000 слов (подбирай по глубине темы; для E-E-A-T нужен
-    запас глубины относительно стандартных 900-словесных рерайтов).
+  - Длина статьи: ориентир 1100–2000 слов (не жёсткая граница; глубина важнее).
   - Заголовок <h1> ровно один, он соответствует stage2_structure.h1.
 
 [OUTPUT CONTRACT]
@@ -142,6 +197,14 @@ LINK-ARTICLE STAGE 3 — Написание ссылочной статьи на
   ✓ Если задан prior_eeat_issues — каждая issue с severity ∈ {blocker, major}
     закрыта (отметь это в notes).
   ✓ HTML валиден: все теги закрыты, вложенность корректна.
+  ✓ Сразу после <h1> идёт <p class="byline"> (если author_name задан).
+  ✓ После byline идёт <p class="lead-answer"> и затем <nav class="toc">.
+  ✓ Каждый основной <h2> имеет id="sec-N", совпадающий с TOC.
+  ✓ Каждая основная H2-секция начинается с <p class="answer-lead">.
+  ✓ Есть <h2 id="sec-faq"> с 3–5 парами Q&A.
+  ✓ Есть <h2 id="sec-summary"> с <ul>/<ol> на 3–6 буллетов.
+  ✓ Если is_howto — есть <ol class="howto"> с ≥ 2 шагами.
+  ✓ В статье ≥ 1 списка (ul или ol) помимо TOC.
 
 [STRICT OUTPUT RULES]
   - Верни ТОЛЬКО JSON. Никаких префиксов/суффиксов.

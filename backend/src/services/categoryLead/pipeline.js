@@ -157,6 +157,33 @@ async function processCategoryLeadTask(taskId) {
       category, leadResult: lead.result, facetResult: facet.result,
     });
 
+    // ── [E] SEO/GEO 2026: Breadcrumb + ItemList + FAQPage JSON-LD ──
+    let jsonLdBlocks = null;
+    try {
+      const {
+        buildBreadcrumbListJsonLd,
+        buildFaqPageJsonLd,
+        buildItemListJsonLd,
+      } = require('../seo/geoSchema');
+      const blocksInput = lead.result.json_ld_blocks || {};
+      const breadcrumb = buildBreadcrumbListJsonLd(
+        Array.isArray(blocksInput.breadcrumb_items) ? blocksInput.breadcrumb_items : []
+      );
+      const faq = (Array.isArray(blocksInput.faq_items) && blocksInput.faq_items.length >= 1)
+        ? buildFaqPageJsonLd(blocksInput.faq_items)
+        : null;
+      const itemList = (Array.isArray(blocksInput.item_list_about) && blocksInput.item_list_about.length >= 1)
+        ? buildItemListJsonLd({
+          name: category,
+          items: blocksInput.item_list_about.map((s, i) => ({ name: s, position: i + 1 })),
+        })
+        : null;
+      const blocks = [breadcrumb, itemList, faq].filter(Boolean);
+      if (blocks.length > 0) jsonLdBlocks = blocks;
+    } catch (schemaErr) {
+      console.warn('[categoryLead] JSON-LD build failed:', schemaErr.message);
+    }
+
     // ── Стоимость ──────────────────────────────────────────────────
     // priceCalculator.calcCost ждёт семейство модели ('gemini'), а не полное
     // имя — оба прохода идут через callGemini.
@@ -195,6 +222,7 @@ async function processCategoryLeadTask(taskId) {
               tokens_in = $7,
               tokens_out = $8,
               cost_usd = $9,
+              json_ld_blocks = $10::jsonb,
               completed_at = NOW(),
               updated_at = NOW()
         WHERE id = $1`,
@@ -208,6 +236,7 @@ async function processCategoryLeadTask(taskId) {
         tokensIn,
         tokensOut,
         Number(costUsd) || 0,
+        jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null,
       ],
     );
   } catch (err) {

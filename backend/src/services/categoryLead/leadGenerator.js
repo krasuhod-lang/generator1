@@ -48,6 +48,21 @@ function normalizeLeadResult(parsed) {
         : { anchor: _str(a), target_hint: '', based_on_filter: '' }))
       .filter((a) => a.anchor),
     json_ld: (r.json_ld && typeof r.json_ld === 'object') ? r.json_ld : null,
+    json_ld_blocks: (() => {
+      const blocks = (r.json_ld_blocks && typeof r.json_ld_blocks === 'object') ? r.json_ld_blocks : {};
+      const breadcrumbs = _asArray(blocks.breadcrumb_items)
+        .map((b) => (b && typeof b === 'object'
+          ? { name: _str(b.name), url: _str(b.url) }
+          : null))
+        .filter((b) => b && b.name);
+      const aboutEntities = _asArray(blocks.item_list_about).map(_str).filter(Boolean);
+      const faqItems = _asArray(blocks.faq_items)
+        .map((f) => (f && typeof f === 'object'
+          ? { q: _str(f.q), a: _str(f.a) }
+          : null))
+        .filter((f) => f && f.q && f.a);
+      return { breadcrumb_items: breadcrumbs, item_list_about: aboutEntities, faq_items: faqItems };
+    })(),
     category_meta_draft: {
       title: _str(meta.title),
       description: _str(meta.description),
