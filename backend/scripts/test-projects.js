@@ -14,17 +14,21 @@ const assert = require('assert');
 
 let passed = 0;
 let failed = 0;
+const pending = [];
 function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    // eslint-disable-next-line no-console
-    console.log(`  ✓ ${name}`);
-  } catch (err) {
-    failed += 1;
-    // eslint-disable-next-line no-console
-    console.error(`  ✗ ${name}\n    ${err.message}`);
-  }
+  const run = (async () => {
+    try {
+      await fn();
+      passed += 1;
+      // eslint-disable-next-line no-console
+      console.log(`  ✓ ${name}`);
+    } catch (err) {
+      failed += 1;
+      // eslint-disable-next-line no-console
+      console.error(`  ✗ ${name}\n    ${err.message}`);
+    }
+  })();
+  pending.push(run);
 }
 
 // ── tokenCrypto ──────────────────────────────────────────────────────
@@ -149,7 +153,103 @@ test('deterministicMeta respects limits', () => {
   assert.ok(m.title.length > 0 && m.description.length > 0);
 });
 
+// ── compareSnapshots (PR 1: персистентность) ────────────────────────
+const { compareSnapshots } = require('../src/services/projects/periodComparison');
+
+test('compareSnapshots returns unavailable on missing input', () => {
+  assert.strictEqual(compareSnapshots(null, {}).available, false);
+  assert.strictEqual(compareSnapshots({}, null).available, false);
+});
+
+test('compareSnapshots returns unavailable when totals missing', () => {
+  const out = compareSnapshots({ top_queries: [] }, { top_queries: [] });
+  assert.strictEqual(out.available, false);
+  assert.strictEqual(out.reason, 'no_totals');
+});
+
+test('compareSnapshots computes totals + queries diff', () => {
+  const curr = {
+    range: { startDate: '2026-05-01', endDate: '2026-05-28' },
+    totals: { clicks: 200, impressions: 4000, ctr: 5, position: 12 },
+    top_queries: [
+      { key: 'seo audit', clicks: 50, impressions: 1000, ctr: 5, position: 8 },
+      { key: 'new query', clicks: 20, impressions: 500,  ctr: 4, position: 9 },
+    ],
+    top_pages: [],
+  };
+  const prev = {
+    range: { startDate: '2026-04-01', endDate: '2026-04-28' },
+    totals: { clicks: 150, impressions: 3000, ctr: 5, position: 13 },
+    top_queries: [
+      { key: 'seo audit', clicks: 30, impressions: 800, ctr: 3.75, position: 9 },
+      { key: 'lost query', clicks: 25, impressions: 600, ctr: 4.16, position: 11 },
+    ],
+    top_pages: [],
+  };
+  const out = compareSnapshots(curr, prev, {
+    minImpressions: 0, minClicksAbsDelta: 0, topQueriesDelta: 5, topPagesDelta: 5,
+  });
+  assert.strictEqual(out.available, true);
+  assert.strictEqual(out.totals.delta.clicks, 50);
+  assert.strictEqual(out.totals.delta.impressions, 1000);
+  // Δposition отрицательная = улучшение (с 13 на 12).
+  assert.strictEqual(out.totals.delta.position, -1);
+  // Запросы: 1 общий, 1 новый, 1 потерянный.
+  const newcomerKeys = out.queries.newcomers.map((r) => r.key);
+  const lostKeys = out.queries.lost.map((r) => r.key);
+  assert.ok(newcomerKeys.includes('new query'));
+  assert.ok(lostKeys.includes('lost query'));
+  // Risers — самый растущий «seo audit» (+20 кликов).
+  assert.strictEqual(out.queries.risers[0].key, 'seo audit');
+  assert.strictEqual(out.queries.risers[0].delta.clicks, 20);
+  assert.deepStrictEqual(out.periods.curr, curr.range);
+  assert.deepStrictEqual(out.periods.prev, prev.range);
+});
+
+// ── snapshotsRepo (без БД, лёгкий smoke) ────────────────────────────
+const snapshotsRepo = require('../src/services/projects/snapshotsRepo');
+
+test('snapshotsRepo.insertSnapshot rejects empty period', async () => {
+  let threw = false;
+  try {
+    await snapshotsRepo.insertSnapshot({ projectId: 'p', userId: 'u', gscData: {} },
+      { query: async () => ({ rows: [] }) });
+  } catch (_) { threw = true; }
+  assert.ok(threw, 'must throw without periodFrom/periodTo');
+});
+
+test('snapshotsRepo.insertSnapshot rejects missing gscData', async () => {
+  let threw = false;
+  try {
+    await snapshotsRepo.insertSnapshot(
+      { projectId: 'p', userId: 'u', periodFrom: '2026-01-01', periodTo: '2026-01-28' },
+      { query: async () => ({ rows: [] }) },
+    );
+  } catch (_) { threw = true; }
+  assert.ok(threw, 'must throw without gscData');
+});
+
+test('snapshotsRepo.insertSnapshot normalizes unknown source to manual', async () => {
+  let captured = null;
+  const fakeDb = {
+    async query(sql, params) {
+      captured = { sql, params };
+      return { rows: [{ id: 'snap-1', created_at: '2026-06-01T00:00:00Z' }] };
+    },
+  };
+  const out = await snapshotsRepo.insertSnapshot({
+    projectId: 'p', userId: 'u',
+    rangeKey: '28d', periodFrom: '2026-01-01', periodTo: '2026-01-28',
+    source: 'evil-source-tag', gscData: { totals: {} },
+  }, fakeDb);
+  assert.strictEqual(out.id, 'snap-1');
+  // 6-й параметр — source.
+  assert.strictEqual(captured.params[5], 'manual');
+});
+
 // ── summary ──────────────────────────────────────────────────────────
-// eslint-disable-next-line no-console
-console.log(`\nProjects smoke test: ${passed} passed, ${failed} failed`);
-process.exit(failed === 0 ? 0 : 1);
+Promise.all(pending).then(() => {
+  // eslint-disable-next-line no-console
+  console.log(`\nProjects smoke test: ${passed} passed, ${failed} failed`);
+  process.exit(failed === 0 ? 0 : 1);
+});

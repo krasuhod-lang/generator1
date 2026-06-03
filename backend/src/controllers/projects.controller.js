@@ -30,9 +30,11 @@ const { getProjectsConfig, getGoogleOAuthConfig } = require('../services/project
 const gsc = require('../services/projects/gscClient');
 const { encryptToken } = require('../services/projects/tokenCrypto');
 const { fetchPerformanceSeries } = require('../services/projects/gscService');
-const { processAnalysis } = require('../services/projects/analysisRunner');
+const { processAnalysis, collectSnapshot } = require('../services/projects/analysisRunner');
 const { generateShareToken, isValidShareToken } = require('../services/projects/shareToken');
 const { buildLeadContext } = require('../services/projects/leadContext');
+const snapshotsRepo = require('../services/projects/snapshotsRepo');
+const { compareSnapshots } = require('../services/projects/periodComparison');
 
 const CFG = getProjectsConfig();
 
@@ -312,7 +314,7 @@ async function listAnalyses(req, res, next) {
     if (!project) return res.status(404).json({ error: 'Проект не найден' });
     const { rows } = await db.query(
       `SELECT id, status, range_key, period_from, period_to, created_at, completed_at,
-              error_message, cost_usd
+              error_message, cost_usd, snapshot_id
          FROM project_analyses WHERE project_id=$1 ORDER BY created_at DESC LIMIT 50`,
       [project.id],
     );
@@ -325,7 +327,7 @@ async function getAnalysis(req, res, next) {
     const { rows } = await db.query(
       `SELECT a.id, a.status, a.range_key, a.period_from, a.period_to,
               a.report_markdown, a.gsc_snapshot, a.llm_model, a.cost_usd,
-              a.error_message, a.created_at, a.completed_at
+              a.error_message, a.created_at, a.completed_at, a.snapshot_id
          FROM project_analyses a
          JOIN projects p ON p.id = a.project_id
         WHERE a.id = $1 AND a.project_id = $2 AND p.user_id = $3`,
@@ -346,6 +348,102 @@ async function getLeadContext(req, res, next) {
     const payload = await buildLeadContext(db, project);
     return res.json(payload);
   } catch (err) { return next(err); }
+}
+
+// ── Snapshots GSC (PR 1: персистентность) ──────────────────────────
+// Снимок — голая выгрузка GSC за период, отдельная сущность, не привязанная
+// к LLM-анализу. Используется для дашборда, истории, сравнения дельты.
+
+async function listProjectSnapshots(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const snapshots = await snapshotsRepo.listSnapshots(project.id, { limit });
+    return res.json({ snapshots });
+  } catch (err) { return next(err); }
+}
+
+async function createProjectSnapshot(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    if (!project.gsc_connected || !project.gsc_site_url) {
+      return res.status(409).json({ error: 'Подключите GSC и выберите домен перед сбором снимка' });
+    }
+    const { rangeKey, from, to } = _normalizeRangeInput(req.body || {});
+    const range = (from && to) ? { from, to } : { days: _daysForKey(rangeKey) };
+    const { snapshot } = await collectSnapshot(project, range);
+    const ins = await snapshotsRepo.insertSnapshot({
+      projectId: project.id,
+      userId: req.user.id,
+      rangeKey,
+      periodFrom: snapshot.range.startDate,
+      periodTo: snapshot.range.endDate,
+      source: 'manual',
+      gscData: snapshot,
+    });
+    return res.status(201).json({
+      snapshot: {
+        id: ins.id,
+        range_key: rangeKey,
+        period_from: snapshot.range.startDate,
+        period_to: snapshot.range.endDate,
+        source: 'manual',
+        created_at: ins.created_at,
+        totals: snapshot.totals,
+      },
+    });
+  } catch (err) {
+    return _gscError(res, next, err);
+  }
+}
+
+async function getProjectSnapshot(req, res, next) {
+  try {
+    const snap = await snapshotsRepo.getSnapshot(req.params.sid, req.params.id, req.user.id);
+    if (!snap) return res.status(404).json({ error: 'Снимок не найден' });
+    return res.json({ snapshot: snap });
+  } catch (err) { return next(err); }
+}
+
+async function diffProjectSnapshot(req, res, next) {
+  try {
+    const curr = await snapshotsRepo.getSnapshot(req.params.sid, req.params.id, req.user.id);
+    if (!curr) return res.status(404).json({ error: 'Снимок не найден' });
+    let prev = null;
+    if (req.query.prev) {
+      prev = await snapshotsRepo.getSnapshot(String(req.query.prev), req.params.id, req.user.id);
+      if (!prev) return res.status(404).json({ error: 'Предыдущий снимок не найден' });
+    } else {
+      prev = await snapshotsRepo.findPreviousSnapshot(req.params.id, curr.id);
+    }
+    if (!prev) {
+      return res.json({ diff: { available: false, reason: 'no_previous_snapshot' } });
+    }
+    const cfg = CFG.periodCompare || {};
+    const diff = compareSnapshots(curr.gsc_data, prev.gsc_data, {
+      minImpressions: cfg.minImpressions,
+      minClicksAbsDelta: cfg.minClicksAbsDelta,
+      topQueriesDelta: cfg.topQueriesDelta,
+      topPagesDelta: cfg.topPagesDelta,
+    });
+    return res.json({
+      diff,
+      curr: { id: curr.id, period_from: curr.period_from, period_to: curr.period_to },
+      prev: { id: prev.id, period_from: prev.period_from, period_to: prev.period_to },
+    });
+  } catch (err) { return next(err); }
+}
+
+function _daysForKey(key) {
+  switch (key) {
+    case '7d': return 7;
+    case '3m': return 90;
+    case '6m': return 180;
+    case '28d':
+    default: return 28;
+  }
 }
 
 // ── Шаринг ──────────────────────────────────────────────────────────
@@ -452,4 +550,8 @@ module.exports = {
   createShareLink,
   revokeShareLink,
   getSharedProject,
+  listProjectSnapshots,
+  createProjectSnapshot,
+  getProjectSnapshot,
+  diffProjectSnapshot,
 };
