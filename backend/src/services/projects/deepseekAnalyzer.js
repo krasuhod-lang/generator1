@@ -114,6 +114,15 @@ const SYSTEM_PROMPT = [
   'каких не хватает, что битое (нет price/availability/author/datePublished и',
   'т.п.). Дай готовые JSON-LD сниппеты из переданных рекомендаций.',
   '',
+  '## 14. Почему страницы в топе и рекомендации для будущих статей',
+  'Если есть [РЕВЕРС-ИНЖИНИРИНГ ТОП-СТРАНИЦ] — отдельным этапом проанализируй',
+  'страницы-лидеры (высокие показы + высокая позиция): объясни, ПОЧЕМУ они в',
+  'топе и ЧТО влияет на позицию (объём, структура H2/H3, списки/таблицы/медиа,',
+  'покрытие семантики запросов в тексте, интент). Выяви ЗАКОНОМЕРНОСТИ по',
+  'лидерам (типичный объём, структура, форматы) и сведи их в перечень',
+  'конкретных РЕКОМЕНДАЦИЙ для написания будущих статей. Раскрой и приоритизируй',
+  'переданные детерминированные рекомендации.',
+  '',
   'Опирайся только на переданные данные и здравый SEO-смысл, не выдумывай',
   'цифр. Учитывай целевую аудиторию проекта во всех рекомендациях.',
   'Не добавляй преамбулы и заключения вне этой структуры.',
@@ -129,7 +138,7 @@ function _stripFence(text) {
 
 function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification,
   breakdowns, periodCompare, pageDecay, brandSplit,
-  pageMetaAudit, eat, schemaAudit, linkAudit, blogPlan, geoAeo }) {
+  pageMetaAudit, eat, schemaAudit, linkAudit, blogPlan, geoAeo, topPageInsights }) {
   const lines = [
     '[ПРОЕКТ]',
     `Название: ${project.name || '—'}`,
@@ -188,6 +197,7 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
   lines.push(..._renderEatLines(eat));
   lines.push(..._renderGeoAeoLines(geoAeo));
   lines.push(..._renderSchemaAuditLines(schemaAudit));
+  lines.push(..._renderTopPageInsightsLines(topPageInsights));
   return lines.join('\n');
 }
 
@@ -399,6 +409,31 @@ function _renderSchemaAuditLines(schema) {
     `Сводка: ${JSON.stringify(schema.summary)}`,
     'По шаблонам (template, present_types, missing_types, broken_fields, actions, snippets):',
     JSON.stringify(schema.items)];
+}
+
+/**
+ * [РЕВЕРС-ИНЖИНИРИНГ ТОП-СТРАНИЦ] (п.3 — почему страницы в топе + рекомендации
+ * для будущих статей). Отдаём профили лидеров, выявленные закономерности и
+ * детерминированные рекомендации, чтобы нарратив объяснил факторы позиции.
+ */
+function _renderTopPageInsightsLines(tpi) {
+  if (!tpi || !tpi.available || !Array.isArray(tpi.pages) || tpi.pages.length === 0) return [];
+  const rows = tpi.pages
+    .filter((p) => p && !p.error)
+    .map((p) => ({
+      url: p.url,
+      position: p.position,
+      impressions: p.impressions,
+      profile: p.profile,
+      coverage_pct: p.coverage && p.coverage.coverage_pct,
+      ranking_factors: p.ranking_factors,
+    }));
+  return ['', '[РЕВЕРС-ИНЖИНИРИНГ ТОП-СТРАНИЦ] (используй: объясни, ПОЧЕМУ эти страницы в топе и что влияет на позицию)',
+    `Закономерности по лидерам выдачи: ${JSON.stringify(tpi.patterns || {})}`,
+    'Профили страниц-лидеров (url, position, impressions, profile, coverage_pct, ranking_factors):',
+    JSON.stringify(rows),
+    'Рекомендации для будущих статей (детерминированные — раскрой и приоритизируй):',
+    JSON.stringify(tpi.recommendations || [])];
 }
 
 /**

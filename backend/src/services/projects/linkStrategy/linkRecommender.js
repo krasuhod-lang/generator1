@@ -35,15 +35,54 @@ function _anchorVariants(query) {
 }
 
 /**
- * @param {object} args { project, commercial, linkAudit, topPages }
+ * Строит карту URL → лучший (по показам) поисковый запрос из матрицы GSC
+ * query×page. Используется, чтобы анкор был реальным поисковым запросом,
+ * который вбивают в поиск, а не окончанием URL (п.1 ТЗ).
+ *
+ * @param {Array} queryPage [{query, page, impressions}]
+ * @returns {Map<string,string>} page → top query
+ */
+function _buildTopQueryByPage(queryPage) {
+  const map = new Map();
+  if (!Array.isArray(queryPage)) return map;
+  const best = new Map(); // page → impressions лучшего запроса
+  queryPage.forEach((r) => {
+    const page = r && r.page;
+    const query = r && String(r.query || '').trim();
+    if (!page || !query) return;
+    const impr = Number(r.impressions) || 0;
+    if (!best.has(page) || impr > best.get(page)) {
+      best.set(page, impr);
+      map.set(page, query);
+    }
+  });
+  return map;
+}
+
+/**
+ * Анкор для целевого URL: приоритет — реальный поисковый запрос страницы из
+ * GSC (то, что вбивают в поиск). Только если запросов нет — деградируем до
+ * человекочитаемого слага URL.
+ */
+function _anchorForUrl(url, topQueryByPage, fallbackQuery) {
+  const fromGsc = topQueryByPage && topQueryByPage.get(url);
+  if (fromGsc) return fromGsc;
+  if (fallbackQuery && String(fallbackQuery).trim()) return String(fallbackQuery).trim();
+  const slug = _hostPath(url).split('/').pop().replace(/[-_]+/g, ' ').trim();
+  return _anchorVariants(slug)[0];
+}
+
+/**
+ * @param {object} args { project, commercial, linkAudit, topPages, queryPage }
  * @returns {{available:true, data_source, recommendations:Array, count}}
  */
-function recommendLinks({ project, commercial, linkAudit, topPages } = {}) {
+function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } = {}) {
   const cfg = getProjectsConfig().linkStrategy;
   const min = cfg.minRecommendations || 5;
   const site = (project && (project.gsc_site_url || project.url)) || '';
   const recs = [];
   const seen = new Set();
+  const topQueryByPage = _buildTopQueryByPage(queryPage);
 
   const push = (rec) => {
     const key = `${rec.target_url}::${rec.anchor}`;
@@ -55,10 +94,11 @@ function recommendLinks({ project, commercial, linkAudit, topPages } = {}) {
   // 1) Орфаны с высокими показами — приоритетные цели линкбилдинга.
   const orphans = (linkAudit && linkAudit.orphans) || [];
   orphans.forEach((o) => {
+    const anchor = _anchorForUrl(o.url, topQueryByPage);
     push({
-      anchor: _anchorVariants(_hostPath(o.url).split('/').pop())[0],
+      anchor,
       anchor_type: 'commercial',
-      donor_topic: _donorTopic(null, o.url),
+      donor_topic: _donorTopic(topQueryByPage.get(o.url) || null, o.url),
       target_url: o.url,
       why: `Топ-страница (${o.impressions} показов) без входящих ссылок — наращиваем вес.`,
       priority: 'high',
@@ -98,9 +138,9 @@ function recommendLinks({ project, commercial, linkAudit, topPages } = {}) {
     for (const p of pages) {
       if (recs.length >= min) break;
       push({
-        anchor: _anchorVariants(_hostPath(p.key).split('/').pop().replace(/[-_]/g, ' '))[0],
+        anchor: _anchorForUrl(p.key, topQueryByPage),
         anchor_type: 'generic',
-        donor_topic: _donorTopic(null, p.key),
+        donor_topic: _donorTopic(topQueryByPage.get(p.key) || null, p.key),
         target_url: p.key,
         why: `Расширение ссылочной массы на значимую страницу (${p.impressions || 0} показов).`,
         priority: 'medium',

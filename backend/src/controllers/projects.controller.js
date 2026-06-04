@@ -581,11 +581,26 @@ async function regenerateMeta(req, res, next) {
     if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'Некорректный url' });
 
     const { auditPages } = require('../services/projects/pageMetaAudit');
+
+    // Тянем реальные поисковые запросы этой страницы из GSC (query×page), чтобы
+    // семантика регенерации строилась на фактическом спросе, а не была пустой
+    // (без этого генератор пропускал страницу — п.2 ТЗ). При отсутствии GSC или
+    // ошибке — graceful: auditPages сам дотянет анализ выдачи по запросам.
+    let queryPage = [];
+    if (project.gsc_connected && project.gsc_site_url) {
+      try {
+        const { fetchQueryPageMatrix } = require('../services/projects/gscService');
+        const range = _rangeFromQuery(req.query);
+        const matrix = await fetchQueryPageMatrix(project, range);
+        queryPage = (matrix || []).filter((r) => r.page === url);
+      } catch (_) { queryPage = []; }
+    }
+
     // Точечный аудит одной страницы: подаём её как единственную top_page.
     const result = await auditPages({
       project,
       snapshot: { top_pages: [{ key: url }] },
-      queryPage: [],
+      queryPage,
     });
     return res.json(result || { available: false });
   } catch (err) { return next(err); }

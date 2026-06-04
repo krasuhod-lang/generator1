@@ -12,16 +12,16 @@ const { auditLinks } = require('./linkAuditor');
 const { recommendLinks } = require('./linkRecommender');
 
 /**
- * @param {object} args { project, commercial, topPages, db }
+ * @param {object} args { project, commercial, topPages, queryPage, db }
  * @returns {Promise<object|null>} snapshot.link_audit
  */
-async function buildLinkStrategy({ project, commercial, topPages, db } = {}) {
+async function buildLinkStrategy({ project, commercial, topPages, queryPage, db } = {}) {
   const cfg = getProjectsConfig().linkStrategy;
   if (!cfg || !cfg.enabled) return null;
   try {
     const links = project && project.id ? await loadLinks(project.id, db) : { anchors: [], pages: [], sites: [] };
     const audit = auditLinks({ project, links, topPages }) || { available: false };
-    const recommend = recommendLinks({ project, commercial, linkAudit: audit, topPages });
+    const recommend = recommendLinks({ project, commercial, linkAudit: audit, topPages, queryPage });
     return {
       available: true,
       data_source: audit.data_source,

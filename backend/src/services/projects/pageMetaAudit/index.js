@@ -185,6 +185,8 @@ async function auditPages({ project, snapshot, queryPage } = {}) {
     ({ generateDrMaxMeta } = require('../../metaTags/metaGenerator'));
   }
 
+  const serpCfg = (cfg && cfg.serpAnalysis) || {};
+
   const pages = [];
   for (const cand of candidates) {
     try {
@@ -198,6 +200,23 @@ async function auditPages({ project, snapshot, queryPage } = {}) {
       };
       const lengths = analyzeMetaLengths(before);
       const semantics = buildSemanticsFromQueries(cand.queries);
+      // Главный запрос: реальный GSC-запрос страницы; если их нет — деградируем
+      // до заголовка/слага URL, чтобы регенерация всё равно сработала (п.2 ТЗ:
+      // запрос обязан уйти в функцию и собрать качественный мета-тег).
+      const keyword = (cand.queries[0] && cand.queries[0].query)
+        || _fallbackKeyword(before, cand.url);
+
+      // Анализ поисковой выдачи: тянем ТОП Яндекса по главному запросу страницы
+      // и обогащаем семантику TF-IDF конкурентов. serpData уходит в промпт
+      // генератора — мета-тег строится на основе анализа выдачи (п.2 ТЗ).
+      let serpData = null;
+      if (generateDrMaxMeta && serpCfg.enabled && keyword) {
+        serpData = await _fetchSerpSafe(keyword, serpCfg);
+        if (serpData && serpData.length) {
+          const serpSemantics = _extractSerpSemantics(keyword, serpData);
+          _mergeSemantics(semantics, serpSemantics);
+        }
+      }
 
       const entry = {
         url: cand.url,
@@ -206,20 +225,22 @@ async function auditPages({ project, snapshot, queryPage } = {}) {
         lengths,
         mandatory_words: semantics.title_mandatory_words,
         queries: cand.queries,
+        serp_analyzed: Boolean(serpData && serpData.length),
         suggested: null,
         diff: null,
       };
 
       if (generateDrMaxMeta && semantics.title_mandatory_words.length > 0) {
         try {
-          const keyword = (cand.queries[0] && cand.queries[0].query) || '';
           const gen = await generateDrMaxMeta({
             keyword,
             semantics,
-            serpData: null,
+            serpData,
             inputs: {
               brand_name: project && project.name,
+              brand: (project && project.name) || '',
               page_context: before.description || before.title || '',
+              summary: before.description || before.title || '',
             },
           });
           const after = { title: gen.title || '', description: gen.description || '', h1: gen.h1 || '' };
@@ -236,11 +257,70 @@ async function auditPages({ project, snapshot, queryPage } = {}) {
   return { available: true, pages, generated: Boolean(generateDrMaxMeta) };
 }
 
+/**
+ * Безопасно тянет ТОП Яндекса по ключу (xmlstock). Любая ошибка/таймаут →
+ * null, регенерация продолжается на одних GSC-запросах.
+ */
+async function _fetchSerpSafe(keyword, serpCfg) {
+  try {
+    const { fetchYandexSerp } = require('../../metaTags/xmlstockClient');
+    const serp = await fetchYandexSerp(keyword, {
+      lr: serpCfg.lr || '',
+      pages: serpCfg.serpPages || 1,
+    });
+    return Array.isArray(serp) ? serp : null;
+  } catch (_) { return null; }
+}
+
+/** Ленивая обёртка над metaTags/semantics.extractSemantics (TF-IDF по SERP). */
+function _extractSerpSemantics(keyword, serpData) {
+  try {
+    const { extractSemantics } = require('../../metaTags/semantics');
+    return extractSemantics(keyword, serpData) || {};
+  } catch (_) { return {}; }
+}
+
+/**
+ * Дополняет GSC-семантику словами из анализа выдачи, не теряя порядок и не
+ * дублируя. SERP-слова (реальные конкуренты в ТОПе) идут после GSC-слов
+ * (реальный спрос страницы), но обогащают итоговые списки.
+ */
+function _mergeSemantics(target, extra) {
+  if (!extra) return target;
+  const merge = (key, max) => {
+    const seen = new Set(target[key] || []);
+    (extra[key] || []).forEach((w) => {
+      if (w && !seen.has(w)) { seen.add(w); target[key].push(w); }
+    });
+    target[key] = target[key].slice(0, max);
+  };
+  if (!Array.isArray(target.title_mandatory_words)) target.title_mandatory_words = [];
+  if (!Array.isArray(target.description_mandatory_words)) target.description_mandatory_words = [];
+  merge('title_mandatory_words', 6);
+  merge('description_mandatory_words', 10);
+  return target;
+}
+
 function _extractH1(scraped) {
   // scrapeUrl не отдаёт H1 напрямую — пробуем из markdown (первый "# ").
   const md = String(scraped && scraped.markdown || '');
   const m = md.match(/^#\s+(.+)$/m);
   return m ? m[1].trim().slice(0, 200) : '';
+}
+
+/**
+ * Фоллбэк-ключ, когда у страницы нет GSC-запросов: берём H1/Title, иначе —
+ * человекочитаемый слаг URL. Нужен, чтобы регенерация мета-тега работала даже
+ * без подключённого GSC (п.2 ТЗ).
+ */
+function _fallbackKeyword(before, url) {
+  const fromMeta = String((before && (before.h1 || before.title)) || '').trim();
+  if (fromMeta) return fromMeta.slice(0, 120);
+  try {
+    const u = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
+    const slug = u.pathname.replace(/^\/|\/$/g, '').split('/').pop() || u.hostname;
+    return slug.replace(/[-_]+/g, ' ').replace(/\.\w+$/, '').trim();
+  } catch (_) { return ''; }
 }
 
 module.exports = {
