@@ -106,6 +106,37 @@ console.log('\n=== normalizeLeadResult ===');
   ok('null-safe', Array.isArray(empty.paragraphs) && empty.paragraphs.length === 0);
 }
 
+console.log('\n=== jsonParse: устойчивость к мусору после JSON ===');
+{
+  const { parseLlmJson } = require('../src/services/categoryLead/jsonParse');
+
+  // Регрессия: модель дописала текст после закрывающей «}»
+  // (ошибка "Unexpected non-whitespace character after JSON").
+  const trailing = parseLlmJson(
+    '{ "lead_text_html": "<p>текст</p>", "paragraphs": ["a","b"] }\n\nлишний текст</p>',
+  );
+  ok('trailing junk after JSON parsed', trailing && trailing.paragraphs.length === 2,
+    JSON.stringify(trailing));
+
+  // Повторный объект после первого — берём первый.
+  const dup = parseLlmJson('{"x":1}{"x":2}');
+  ok('duplicate object → first used', dup && dup.x === 1, JSON.stringify(dup));
+
+  // Markdown-обёртка + фигурные скобки внутри строки.
+  const fenced = parseLlmJson('```json\n{"html":"<a>{не скобка}</a>","n":3}\n``` хвост');
+  ok('braces inside string survive', fenced && fenced.n === 3 && fenced.html.includes('{не скобка}'),
+    JSON.stringify(fenced));
+
+  // Обрыв на полпути (MAX_TOKENS) — autoCloseJSON чинит.
+  const truncated = parseLlmJson('{"lead_text_html":"<p>abc","paragraphs":["a"');
+  ok('truncated JSON recovered', truncated && typeof truncated === 'object',
+    JSON.stringify(truncated));
+
+  // Нормальный валидный JSON не ломается.
+  const plain = parseLlmJson('{"a":1}');
+  ok('plain JSON intact', plain && plain.a === 1);
+}
+
 console.log('\n=== normalizeFacetResult ===');
 {
   const r = normalizeFacetResult({
