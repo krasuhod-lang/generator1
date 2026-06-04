@@ -28,6 +28,7 @@ const { auditSchema } = require('./schemaAuditor');
 const { buildLinkStrategy } = require('./linkStrategy');
 const { buildBlogPlan } = require('./contentGapPlanner');
 const { buildGeoAeo } = require('./geoAeo');
+const { analyzeTopPages } = require('./topPageInsights');
 const dspyClient = require('./dspyClient');
 
 /**
@@ -90,6 +91,7 @@ async function collectSnapshot(project, range) {
   const schemaAudit = await _buildSchemaAudit(eat, project, projectsCfg.schemaAudit);
   const blogPlan = await _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification);
   const geoAeo = await _buildGeoAeo(project, top, schemaAudit, breakdowns, brandTokens);
+  const topPageInsights = await _buildTopPageInsights(project, top, queryPage);
 
   // _scans — транзиентные данные парсинга (hiddenLayers) для schema/geo, в
   // снапшот НЕ кладём (тяжёлый HTML), очищаем перед сохранением.
@@ -114,6 +116,7 @@ async function collectSnapshot(project, range) {
     link_audit: linkAuditPersist,
     blog_plan: blogPlan,
     geo_aeo: geoAeo,
+    top_page_insights: topPageInsights,
   };
 
   const payload = {
@@ -134,6 +137,7 @@ async function collectSnapshot(project, range) {
     linkAudit: linkAuditPersist,
     blogPlan,
     geoAeo,
+    topPageInsights,
   };
 
   return { snapshot, payload };
@@ -212,6 +216,17 @@ async function _buildGeoAeo(project, top, schemaAudit, breakdowns, brandTokens) 
       breakdowns,
       brandTokens,
       runProbe: false,
+    });
+  } catch (_) { return null; }
+}
+
+/** Реверс-инжиниринг топовых страниц (п.3) — почему в топе + рекомендации. */
+async function _buildTopPageInsights(project, top, queryPage) {
+  try {
+    return await analyzeTopPages({
+      project,
+      snapshot: { top_pages: top.topPages },
+      queryPage,
     });
   } catch (_) { return null; }
 }
