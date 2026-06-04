@@ -51,13 +51,15 @@ function buyText(r) {
 
 // Строка для копирования одной рекомендации.
 function rowText(r) {
-  return [
+  const lines = [
     `Купить: ${buyText(r)}`,
     `Анкор: ${r.anchor}`,
     `Тема статьи донора: ${r.donor_topic}`,
-    `Целевой URL: ${r.target_url}`,
-    `Приоритет: ${prioLabel(r.priority)}`,
-  ].join('\n');
+  ];
+  if (r.donor_topic_angle) lines.push(`Угол раскрытия: ${r.donor_topic_angle}`);
+  lines.push(`Целевой URL: ${r.target_url}`);
+  lines.push(`Приоритет: ${prioLabel(r.priority)}`);
+  return lines.join('\n');
 }
 
 // Вся таблица в TSV для вставки в Google Sheets / Excel.
@@ -115,7 +117,12 @@ function copyAll() {
                 <div class="text-[11px] text-gray-500">{{ buyInfo(r).kind }}</div>
               </td>
               <td class="py-1.5 px-2 text-gray-200">{{ r.anchor }}</td>
-              <td class="py-1.5 px-2 text-gray-300">{{ r.donor_topic }}</td>
+              <td class="py-1.5 px-2 text-gray-300">
+                <div>{{ r.donor_topic }}</div>
+                <div v-if="r.donor_topic_angle" class="text-[11px] text-gray-500 mt-0.5">
+                  Угол: {{ r.donor_topic_angle }}
+                </div>
+              </td>
               <td class="py-1.5 px-2 text-indigo-300 break-all">{{ trimUrl(r.target_url) }}</td>
               <td class="py-1.5 px-2 uppercase" :class="prioClass(r.priority)">{{ prioLabel(r.priority) }}</td>
               <td class="py-1.5 pl-2"><CopyButton :text="rowText(r)" /></td>

@@ -21,11 +21,21 @@ function _hostPath(u) {
 }
 
 /**
+ * Обязательная формат-обёртка темы статьи-донора (внешний контракт — то, что
+ * менеджер отдаёт донору). Выносим в одну функцию, чтобы и детерминированный
+ * фолбэк, и обогащённый LLM-путь («Темы статей») использовали единый формат.
+ */
+function wrapDonorTopic(topicText) {
+  const base = String(topicText == null ? '' : topicText).trim();
+  return `Экспертная статья по теме «${base}» с естественной ссылкой на ваш раздел`;
+}
+
+/**
  * Тема статьи донора под целевой URL/запрос: «Как выбрать …», «Гид по …».
  */
 function _donorTopic(query, targetUrl) {
   const base = query || _hostPath(targetUrl).replace(/[-_/]+/g, ' ');
-  return `Экспертная статья по теме «${base}» с естественной ссылкой на ваш раздел`;
+  return wrapDonorTopic(base);
 }
 
 function _anchorVariants(query) {
@@ -95,10 +105,12 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
   const orphans = (linkAudit && linkAudit.orphans) || [];
   orphans.forEach((o) => {
     const anchor = _anchorForUrl(o.url, topQueryByPage);
+    const seed = topQueryByPage.get(o.url) || null;
     push({
       anchor,
       anchor_type: 'commercial',
-      donor_topic: _donorTopic(topQueryByPage.get(o.url) || null, o.url),
+      donor_topic_seed: seed || anchor,
+      donor_topic: _donorTopic(seed, o.url),
       target_url: o.url,
       why: `Топ-страница (${o.impressions} показов) без входящих ссылок — наращиваем вес.`,
       priority: 'high',
@@ -112,6 +124,7 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
     push({
       anchor: _anchorVariants(s.query)[0],
       anchor_type: 'commercial',
+      donor_topic_seed: s.query,
       donor_topic: _donorTopic(s.query, target || site),
       target_url: target || site,
       why: `Коммерческий запрос «${s.query}» на позиции ${s.position} — ссылки добьют в топ.`,
@@ -137,10 +150,12 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
     const pages = (topPages || []).slice().sort((a, b) => (b.impressions || 0) - (a.impressions || 0));
     for (const p of pages) {
       if (recs.length >= min) break;
+      const seed = topQueryByPage.get(p.key) || null;
       push({
         anchor: _anchorForUrl(p.key, topQueryByPage),
         anchor_type: 'generic',
-        donor_topic: _donorTopic(topQueryByPage.get(p.key) || null, p.key),
+        donor_topic_seed: seed || _anchorForUrl(p.key, topQueryByPage),
+        donor_topic: _donorTopic(seed, p.key),
         target_url: p.key,
         why: `Расширение ссылочной массы на значимую страницу (${p.impressions || 0} показов).`,
         priority: 'medium',
@@ -169,4 +184,4 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
   };
 }
 
-module.exports = { recommendLinks };
+module.exports = { recommendLinks, wrapDonorTopic };

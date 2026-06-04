@@ -14,10 +14,8 @@ const { recommendLinks } = require('../src/services/projects/linkStrategy/linkRe
 const { importLinksCsv, detectTableType } = require('../src/services/projects/linkStrategy/linksImporter');
 
 let passed = 0; let failed = 0;
-function test(name, fn) {
-  try { fn(); passed += 1; console.log(`  ✓ ${name}`); }
-  catch (err) { failed += 1; console.error(`  ✗ ${name}\n    ${err.message}`); }
-}
+const _queue = [];
+function test(name, fn) { _queue.push({ name, fn }); }
 
 const project = { id: '00000000-0000-0000-0000-000000000001', name: 'AquaShop', url: 'https://aquashop.ru', gsc_site_url: 'https://aquashop.ru' };
 
@@ -168,6 +166,81 @@ test('detectTableType returns unknown for unrelated header', () => {
   assert.strictEqual(detectTableType(['Foo', 'Bar']), 'unknown');
 });
 
+// ── donorTopicGenerator: готовые темы статей под анкор ───────────────
+const { wrapDonorTopic } = require('../src/services/projects/linkStrategy/linkRecommender');
+const { enrichDonorTopics } = require('../src/services/projects/linkStrategy/donorTopicGenerator');
+
+test('wrapDonorTopic keeps the required external format', () => {
+  assert.strictEqual(
+    wrapDonorTopic('греется тормозной диск с одной стороны'),
+    'Экспертная статья по теме «греется тормозной диск с одной стороны» с естественной ссылкой на ваш раздел',
+  );
+});
+
+function _orphanRecs() {
+  const url = 'https://aquashop.ru/catalog/nasos-dlya-skvazhiny';
+  const audit = auditLinks({ project, links: { anchors: [], pages: [], sites: [] }, topPages: [{ key: url, impressions: 900 }] });
+  return recommendLinks({
+    project, commercial: null, linkAudit: audit,
+    topPages: [{ key: url, impressions: 900 }],
+    queryPage: [{ query: 'насос для скважины купить', page: url, impressions: 500 }],
+  }).recommendations;
+}
+
+test('enrichDonorTopics without llmFn keeps deterministic wrapper + format', async () => {
+  const recs = _orphanRecs();
+  const before = recs.map((r) => r.donor_topic);
+  const res = await enrichDonorTopics({ recommendations: recs, project, llmFn: null });
+  assert.strictEqual(res.enriched, 0);
+  assert.strictEqual(res.used_llm, false);
+  recs.forEach((r, i) => {
+    assert.strictEqual(r.donor_topic, before[i]); // не тронуто
+    assert.ok(r.donor_topic_ready === undefined);
+  });
+  // Тематическая (seed) рекомендация сохраняет обязательный формат-обёртку.
+  const seedRec = recs.find((r) => r.donor_topic_seed);
+  assert.ok(seedRec, 'has a thematic seed recommendation');
+  assert.ok(/^Экспертная статья по теме «.*» с естественной ссылкой на ваш раздел$/.test(seedRec.donor_topic));
+  assert.ok(recs.length >= 5);
+});
+
+test('enrichDonorTopics with llmFn fills ready topic, still wrapped in format', async () => {
+  const recs = _orphanRecs();
+  const seedRec = recs.find((r) => r.donor_topic_seed);
+  assert.ok(seedRec, 'has a thematic seed recommendation');
+  const fakeLlm = async () => JSON.stringify(
+    recs.filter((r) => r.donor_topic_seed).map((r) => ({
+      ready_topic: `Как устранить «${r.donor_topic_seed}»: гид эксперта`,
+      h1: `Гид: ${r.donor_topic_seed}`,
+      angle: 'Пошаговая диагностика и выбор решения',
+    })),
+  );
+  const res = await enrichDonorTopics({ recommendations: recs, project, llmFn: fakeLlm });
+  assert.ok(res.used_llm);
+  assert.ok(res.enriched >= 1, `enriched ${res.enriched}`);
+  const enriched = recs.find((r) => r.donor_topic_ready);
+  assert.ok(enriched.donor_topic_ready.startsWith('Как устранить'));
+  assert.ok(enriched.donor_topic_angle);
+  // Итоговая строка обёрнута в обязательный формат и содержит готовую тему.
+  assert.strictEqual(enriched.donor_topic, wrapDonorTopic(enriched.donor_topic_ready));
+  assert.ok(enriched.donor_topic.includes('Как устранить'));
+});
+
+test('enrichDonorTopics graceful on broken llm output → keeps fallback', async () => {
+  const recs = _orphanRecs();
+  const before = recs.map((r) => r.donor_topic);
+  const badLlm = async () => 'не json вовсе';
+  const res = await enrichDonorTopics({ recommendations: recs, project, llmFn: badLlm });
+  assert.strictEqual(res.enriched, 0);
+  recs.forEach((r, i) => assert.strictEqual(r.donor_topic, before[i]));
+});
+
 // ── summary ──────────────────────────────────────────────────────────
-console.log(`\nLink-strategy smoke test: ${passed} passed, ${failed} failed`);
-process.exit(failed === 0 ? 0 : 1);
+(async () => {
+  for (const { name, fn } of _queue) {
+    try { await fn(); passed += 1; console.log(`  ✓ ${name}`); }
+    catch (err) { failed += 1; console.error(`  ✗ ${name}\n    ${err.message}`); }
+  }
+  console.log(`\nLink-strategy smoke test: ${passed} passed, ${failed} failed`);
+  process.exit(failed === 0 ? 0 : 1);
+})();

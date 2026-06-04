@@ -30,6 +30,24 @@ const { buildBlogPlan } = require('./contentGapPlanner');
 const { buildGeoAeo } = require('./geoAeo');
 const { analyzeTopPages } = require('./topPageInsights');
 const dspyClient = require('./dspyClient');
+const { callDeepSeek } = require('../llm/deepseek.adapter');
+
+/**
+ * llmFn для donorTopicGenerator («Темы статей под анкоры»). Один батч-вызов
+ * DeepSeek. Graceful: без ключа возвращает '' → генератор откатывается на
+ * детерминированную обёртку.
+ */
+async function _donorTopicLlmFn(prompt, opts = {}) {
+  if (!process.env.DEEPSEEK_API_KEY) return '';
+  const cfg = getProjectsConfig().deepseek;
+  const resp = await callDeepSeek('', String(prompt || ''), {
+    temperature: opts.temperature != null ? opts.temperature : 0.6,
+    maxTokens: opts.maxTokens || 4000,
+    timeoutMs: opts.timeoutMs || 120000,
+    model: cfg.model,
+  });
+  return (resp && resp.text) || '';
+}
 
 /**
  * Собирает «голую» выгрузку GSC за переданный диапазон + детерминированные
@@ -186,7 +204,7 @@ async function _buildSchemaAudit(eat, project, cfg) {
 async function _buildLinkStrategy(project, commercial, top, queryPage) {
   try {
     return await buildLinkStrategy({
-      project, commercial, topPages: top.topPages, queryPage, db,
+      project, commercial, topPages: top.topPages, queryPage, db, llmFn: _donorTopicLlmFn,
     });
   } catch (_) { return null; }
 }

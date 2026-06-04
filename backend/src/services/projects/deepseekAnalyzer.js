@@ -338,8 +338,17 @@ function _renderLinkStrategyLines(link) {
   if (!link || !link.available) return [];
   const out = ['', '[ССЫЛОЧНАЯ СТРАТЕГИЯ] (раздел 8 — выдай ≥5 рекомендаций)',
     `data_source: ${link.data_source} (gsc_csv = есть выгрузка GSC; inferred = построено от контента/SERP)`,
-    `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic, target_url, priority, why):`,
-    JSON.stringify((link.recommendations || []).slice(0, 20))];
+    `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic — готовая тема статьи-донора в формате «Экспертная статья по теме «…» с естественной ссылкой на ваш раздел», donor_topic_ready/donor_topic_angle — проработанная тема и угол, target_url, priority, why):`,
+    JSON.stringify((link.recommendations || []).slice(0, 20).map((r) => ({
+      anchor: r.anchor,
+      anchor_type: r.anchor_type,
+      donor_topic: r.donor_topic,
+      donor_topic_ready: r.donor_topic_ready || null,
+      donor_topic_angle: r.donor_topic_angle || null,
+      target_url: r.target_url,
+      priority: r.priority,
+      why: r.why,
+    })))];
   if (link.audit && link.audit.available) {
     const a = link.audit;
     out.push('', '[АУДИТ ССЫЛОК] (раздел 9)',
