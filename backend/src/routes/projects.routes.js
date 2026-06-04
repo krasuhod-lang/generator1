@@ -2,11 +2,18 @@
 
 const express   = require('express');
 const rateLimit = require('express-rate-limit');
+const multer    = require('multer');
 const auth      = require('../middleware/auth');
 
 const c = require('../controllers/projects.controller');
 
 const router = express.Router();
+
+// CSV-импорт ссылок GSC: храним файл в памяти (мелкий CSV), без диска.
+const uploadCsv = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+});
 
 const createLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -65,6 +72,11 @@ router.get('/:id/snapshots/:sid/diff',    auth, c.diffProjectSnapshot);
 
 // Lead-text auto-context (компактная проекция последнего анализа)
 router.get('/:id/lead-context',    auth, c.getLeadContext);
+
+// Расширение «Анализ GSC» (п.1-8): импорт ссылок, регенерация мета, AI-probe.
+router.post('/:id/gsc-links/import', auth, createLimiter, uploadCsv.single('file'), c.importGscLinks);
+router.post('/:id/meta-suggestions/regenerate', auth, analyzeLimiter, c.regenerateMeta);
+router.post('/:id/ai-visibility/probe', auth, analyzeLimiter, c.probeAiVisibility);
 
 // Шаринг
 router.post('/:id/share',          auth, c.createShareLink);

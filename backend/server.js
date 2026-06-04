@@ -1413,6 +1413,98 @@ async function ensureSchema() {
       console.warn('[migrate] project_snapshots backfill skipped:', e.message);
     });
 
+    // ─── Migrations 066–071: расширение модуля «Анализ GSC» (8 слоёв) ──
+    // Идемпотентный DDL: ссылочный импорт, кэш парсинга страниц, кэш срезов,
+    // история AI-visibility, E-E-A-T и schema-аудитов. См. migrations/066–071.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_gsc_links (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
+        table_type   TEXT NOT NULL,
+        donor        TEXT,
+        target_page  TEXT,
+        anchor       TEXT,
+        links        INTEGER NOT NULL DEFAULT 0,
+        imported_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_gsc_links_project ON project_gsc_links (project_id, table_type)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_page_snapshots (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        url          TEXT NOT NULL,
+        parsed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        html_hash    TEXT,
+        title        TEXT,
+        description  TEXT,
+        h1           TEXT,
+        jsonld       JSONB,
+        microdata    JSONB,
+        blocks       JSONB
+      );
+    `);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_project_page_snapshots_project_url ON project_page_snapshots (project_id, url)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_signal_cache (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        signal_key   TEXT NOT NULL,
+        hash         TEXT NOT NULL,
+        payload      JSONB,
+        ttl_sec      INTEGER NOT NULL DEFAULT 3600,
+        computed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_project_signal_cache UNIQUE (project_id, signal_key)
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_signal_cache_project ON project_signal_cache (project_id, signal_key)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_ai_visibility (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        query             TEXT NOT NULL,
+        sge_present       BOOLEAN,
+        sge_includes_us   BOOLEAN,
+        paa               BOOLEAN,
+        featured_snippet  BOOLEAN,
+        top_domains       JSONB,
+        checked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_ai_visibility_project ON project_ai_visibility (project_id, checked_at DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_eat_audits (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        template     TEXT NOT NULL,
+        sample_url   TEXT,
+        score        INTEGER,
+        dimensions   JSONB,
+        gaps         JSONB,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_eat_audits_project ON project_eat_audits (project_id, created_at DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_schema_audits (
+        id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id     UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        template       TEXT NOT NULL,
+        sample_url     TEXT,
+        present_types  JSONB,
+        missing_types  JSONB,
+        broken_fields  JSONB,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_schema_audits_project ON project_schema_audits (project_id, created_at DESC)`);
+
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_old_task_logs(retain_days INTEGER DEFAULT 30)
       RETURNS INTEGER LANGUAGE plpgsql AS $$

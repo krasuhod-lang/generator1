@@ -531,6 +531,83 @@ function _gscError(res, next, err) {
   return next(err);
 }
 
+// ── Расширение «Анализ GSC» (п.1-8 ТЗ) ──────────────────────────────────
+
+/**
+ * POST /:id/gsc-links/import — импорт CSV-выгрузки «Ссылки» из GSC UI.
+ * Принимает multipart-файл (поле "file") ИЛИ сырой CSV в body.csv.
+ * Тип таблицы (sites/pages/anchors) определяется автоматически по заголовку.
+ */
+async function importGscLinks(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+
+    const linkCfg = CFG.linkStrategy || {};
+    let csvText = '';
+    if (req.file && req.file.buffer) {
+      if (req.file.size > (linkCfg.importMaxBytes || 5_000_000)) {
+        return res.status(413).json({ error: 'Файл слишком большой' });
+      }
+      csvText = req.file.buffer.toString('utf8');
+    } else if (req.body && typeof req.body.csv === 'string') {
+      csvText = req.body.csv;
+    }
+    if (!csvText.trim()) return res.status(400).json({ error: 'Пустой CSV' });
+
+    const { importLinksCsv } = require('../services/projects/linkStrategy/linksImporter');
+    const { saveImport } = require('../services/projects/linkStrategy/linksRepo');
+    const parsed = importLinksCsv(csvText);
+    if (parsed.type === 'unknown') {
+      return res.status(422).json({ error: 'Не удалось определить тип таблицы GSC (sites/pages/anchors)' });
+    }
+    const saved = await saveImport({
+      projectId: project.id, userId: req.user.id, type: parsed.type, rows: parsed.rows,
+    });
+    return res.json({ type: parsed.type, imported: saved.inserted, parsed: parsed.count });
+  } catch (err) { return next(err); }
+}
+
+/**
+ * POST /:id/meta-suggestions/regenerate — перегенерация мета-тегов через
+ * инструмент Meta Tags (п.4 ТЗ). Принимает body.url целевой страницы, парсит
+ * текущие title/description и прогоняет через metaGenerator.
+ */
+async function regenerateMeta(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const url = req.body && typeof req.body.url === 'string' ? req.body.url.trim() : '';
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'Некорректный url' });
+
+    const { auditPages } = require('../services/projects/pageMetaAudit');
+    // Точечный аудит одной страницы: подаём её как единственную top_page.
+    const result = await auditPages({
+      project,
+      snapshot: { top_pages: [{ key: url }] },
+      queryPage: [],
+    });
+    return res.json(result || { available: false });
+  } catch (err) { return next(err); }
+}
+
+/**
+ * POST /:id/ai-visibility/probe — ручной запуск пробника нейровыдачи (п.7 ТЗ).
+ * Тяжёлый (SERP-запросы), поэтому отдельный эндпоинт под analyzeLimiter.
+ */
+async function probeAiVisibility(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+
+    const range = _rangeFromQuery(req.query);
+    const { top } = await collectSnapshot(project, range);
+    const { probeAiVisibility: probe } = require('../services/projects/geoAeo');
+    const result = await probe({ project, topQueries: top.topQueries });
+    return res.json(result || { available: false });
+  } catch (err) { return _gscError(res, next, err); }
+}
+
 module.exports = {
   listProjects,
   createProject,
@@ -554,4 +631,7 @@ module.exports = {
   createProjectSnapshot,
   getProjectSnapshot,
   diffProjectSnapshot,
+  importGscLinks,
+  regenerateMeta,
+  probeAiVisibility,
 };
