@@ -26,69 +26,119 @@ async function submit() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-950 flex items-center justify-center px-4">
-    <div class="w-full max-w-sm">
-      <!-- Logo -->
-      <div class="text-center mb-8">
-        <div class="inline-flex items-center gap-2 mb-2">
-          <svg viewBox="0 0 32 32" class="w-8 h-8" fill="none" aria-label="SEO Genius">
-            <rect width="32" height="32" rx="8" fill="#6366f1"/>
-            <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="white" stroke-width="2" stroke-linecap="round"/>
-            <circle cx="16" cy="16" r="3" fill="white"/>
-            <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
-          </svg>
-          <span class="text-xl font-bold text-white">SEO Genius</span>
-        </div>
-        <p class="text-gray-500 text-sm">v4.0 — AI Content Platform</p>
+  <div class="min-h-screen bg-gray-950 flex">
+    <!-- Левая «обложка» сервиса -->
+    <aside
+      class="hidden lg:flex flex-col justify-between w-1/2 relative overflow-hidden
+             bg-gradient-to-br from-indigo-700 via-indigo-800 to-gray-950 p-12 text-white"
+    >
+      <!-- декоративные пятна -->
+      <div class="pointer-events-none absolute -top-24 -right-24 w-96 h-96 rounded-full bg-indigo-400/20 blur-3xl"></div>
+      <div class="pointer-events-none absolute bottom-0 -left-24 w-96 h-96 rounded-full bg-fuchsia-500/10 blur-3xl"></div>
+
+      <div class="relative flex items-center gap-3">
+        <svg viewBox="0 0 32 32" class="w-9 h-9" fill="none" aria-label="SEO Genius">
+          <rect width="32" height="32" rx="8" fill="white"/>
+          <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="#4f46e5" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="16" cy="16" r="3" fill="#4f46e5"/>
+          <path d="M22 22l4 4" stroke="#4f46e5" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span class="text-2xl font-bold tracking-tight">SEO Genius</span>
       </div>
 
-      <div class="card">
-        <h1 class="text-lg font-semibold text-white mb-6">Войти в систему</h1>
-
-        <form @submit.prevent="submit" class="space-y-4">
-          <div>
-            <label class="label">Email</label>
-            <input
-              v-model="email"
-              type="email"
-              class="input"
-              placeholder="you@example.com"
-              required
-              autocomplete="email"
-            />
-          </div>
-          <div>
-            <label class="label">Пароль</label>
-            <input
-              v-model="password"
-              type="password"
-              class="input"
-              placeholder="••••••••"
-              required
-              autocomplete="current-password"
-            />
-          </div>
-
-          <div
-            v-if="error"
-            class="bg-red-950 border border-red-800 text-red-400 text-sm px-3 py-2 rounded-lg"
-          >
-            {{ error }}
-          </div>
-
-          <button type="submit" class="btn-primary w-full justify-center" :disabled="loading">
-            <svg v-if="loading" class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
-            </svg>
-            {{ loading ? 'Входим...' : 'Войти' }}
-          </button>
-        </form>
-
-        <p class="text-center text-sm text-gray-500 mt-5">
-          Нет аккаунта?
-          <RouterLink to="/register" class="text-indigo-400 hover:text-indigo-300">Зарегистрироваться</RouterLink>
+      <div class="relative max-w-md">
+        <h2 class="text-4xl font-extrabold leading-tight">
+          AI-платформа для контента,<br>который ранжируется
+        </h2>
+        <p class="mt-4 text-indigo-100/80 text-lg">
+          Тексты, мета-теги, статьи в блог, прогнозы трафика и анализ проектов —
+          всё в одном рабочем пространстве.
         </p>
+        <ul class="mt-8 space-y-3 text-indigo-50/90">
+          <li class="flex items-center gap-3">
+            <span class="flex-shrink-0 w-7 h-7 rounded-lg bg-white/15 flex items-center justify-center">📝</span>
+            SEO-тексты и AI-редактор статей
+          </li>
+          <li class="flex items-center gap-3">
+            <span class="flex-shrink-0 w-7 h-7 rounded-lg bg-white/15 flex items-center justify-center">📈</span>
+            Прогнозатор трафика и анализ проектов
+          </li>
+          <li class="flex items-center gap-3">
+            <span class="flex-shrink-0 w-7 h-7 rounded-lg bg-white/15 flex items-center justify-center">🔮</span>
+            Темы статей и работа с релевантностью
+          </li>
+        </ul>
+      </div>
+
+      <p class="relative text-sm text-indigo-200/70">© SEO Genius · v4.0</p>
+    </aside>
+
+    <!-- Правая часть — форма входа -->
+    <div class="flex-1 flex items-center justify-center px-4 py-10">
+      <div class="w-full max-w-sm">
+        <!-- Logo (для мобильных, где обложка скрыта) -->
+        <div class="text-center mb-8 lg:hidden">
+          <div class="inline-flex items-center gap-2 mb-2">
+            <svg viewBox="0 0 32 32" class="w-8 h-8" fill="none" aria-label="SEO Genius">
+              <rect width="32" height="32" rx="8" fill="#6366f1"/>
+              <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="white" stroke-width="2" stroke-linecap="round"/>
+              <circle cx="16" cy="16" r="3" fill="white"/>
+              <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+            </svg>
+            <span class="text-xl font-bold text-white">SEO Genius</span>
+          </div>
+          <p class="text-gray-500 text-sm">v4.0 — AI Content Platform</p>
+        </div>
+
+        <div class="card">
+          <h1 class="text-xl font-semibold text-white mb-1">С возвращением 👋</h1>
+          <p class="text-sm text-gray-400 mb-6">Войдите, чтобы продолжить работу</p>
+
+          <form @submit.prevent="submit" class="space-y-4">
+            <div>
+              <label class="label">Email</label>
+              <input
+                v-model="email"
+                type="email"
+                class="input"
+                placeholder="you@example.com"
+                required
+                autocomplete="email"
+              />
+            </div>
+            <div>
+              <label class="label">Пароль</label>
+              <input
+                v-model="password"
+                type="password"
+                class="input"
+                placeholder="••••••••"
+                required
+                autocomplete="current-password"
+              />
+            </div>
+
+            <div
+              v-if="error"
+              class="bg-red-950 border border-red-800 text-red-400 text-sm px-3 py-2 rounded-lg"
+            >
+              {{ error }}
+            </div>
+
+            <button type="submit" class="btn-primary w-full justify-center" :disabled="loading">
+              <svg v-if="loading" class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+              </svg>
+              {{ loading ? 'Входим...' : 'Войти' }}
+            </button>
+          </form>
+
+          <p class="text-center text-sm text-gray-500 mt-5">
+            Нет аккаунта?
+            <RouterLink to="/register" class="text-indigo-400 hover:text-indigo-300">Зарегистрироваться</RouterLink>
+          </p>
+        </div>
       </div>
     </div>
   </div>

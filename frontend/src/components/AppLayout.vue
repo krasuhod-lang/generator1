@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth.js';
 
@@ -21,7 +21,7 @@ const TABS = [
   { key: 'relevance',      label: 'Релевантность',    icon: '📊', path: '/relevance' },
 ];
 
-const activeTab = computed(() => {
+const activeTabKey = computed(() => {
   const p = route.path;
   if (p.startsWith('/meta-tags'))      return 'meta-tags';
   if (p.startsWith('/link-article'))   return 'link-article';
@@ -36,9 +36,41 @@ const activeTab = computed(() => {
   return 'seo-text';
 });
 
+const activeTab = computed(() =>
+  TABS.find((t) => t.key === activeTabKey.value) || TABS[0]
+);
+
+const menuOpen = ref(false);
+const menuRef  = ref(null);
+
+function toggleMenu() {
+  menuOpen.value = !menuOpen.value;
+}
+
 function goTab(tab) {
+  menuOpen.value = false;
   router.push(tab.path);
 }
+
+function handleClickOutside(e) {
+  if (menuRef.value && !menuRef.value.contains(e.target)) {
+    menuOpen.value = false;
+  }
+}
+
+function handleEsc(e) {
+  if (e.key === 'Escape') menuOpen.value = false;
+}
+
+onMounted(() => {
+  document.addEventListener('click', handleClickOutside);
+  document.addEventListener('keydown', handleEsc);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleClickOutside);
+  document.removeEventListener('keydown', handleEsc);
+});
 
 function handleLogout() {
   auth.logout();
@@ -49,41 +81,74 @@ function handleLogout() {
 <template>
   <div class="min-h-screen bg-gray-950 flex flex-col">
     <!-- Шапка -->
-    <header class="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center justify-between flex-shrink-0">
-      <div class="flex items-center gap-3">
-        <svg viewBox="0 0 32 32" class="w-7 h-7" fill="none">
+    <header class="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center justify-between gap-4 flex-shrink-0">
+      <div class="flex items-center gap-3 min-w-0">
+        <svg viewBox="0 0 32 32" class="w-7 h-7 flex-shrink-0" fill="none">
           <rect width="32" height="32" rx="8" fill="#6366f1"/>
           <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="white" stroke-width="2" stroke-linecap="round"/>
           <circle cx="16" cy="16" r="3" fill="white"/>
           <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
         </svg>
-        <span class="font-bold text-white">SEO Genius <span class="text-indigo-400">v4.0</span></span>
+        <span class="font-bold text-white truncate">SEO Genius <span class="text-indigo-400">v4.0</span></span>
+
+        <!-- Навигация: выпадающее меню (всегда в видимой области) -->
+        <div ref="menuRef" class="relative ml-2 sm:ml-4">
+          <button
+            type="button"
+            @click="toggleMenu"
+            :aria-expanded="menuOpen"
+            class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium
+                   bg-gray-800 hover:bg-gray-700 text-gray-100 border border-gray-700
+                   transition-colors"
+          >
+            <span class="text-base">{{ activeTab.icon }}</span>
+            <span class="hidden sm:inline">{{ activeTab.label }}</span>
+            <svg
+              class="w-4 h-4 text-gray-400 transition-transform duration-200"
+              :class="{ 'rotate-180': menuOpen }"
+              viewBox="0 0 20 20" fill="currentColor"
+            >
+              <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd"/>
+            </svg>
+          </button>
+
+          <transition
+            enter-active-class="transition ease-out duration-150"
+            enter-from-class="opacity-0 -translate-y-1"
+            enter-to-class="opacity-100 translate-y-0"
+            leave-active-class="transition ease-in duration-100"
+            leave-from-class="opacity-100 translate-y-0"
+            leave-to-class="opacity-0 -translate-y-1"
+          >
+            <div
+              v-if="menuOpen"
+              class="absolute left-0 mt-2 w-72 max-w-[90vw] z-50 rounded-xl border border-gray-700
+                     bg-gray-900 shadow-2xl shadow-black/40 p-1.5 grid grid-cols-1 gap-0.5"
+            >
+              <button
+                v-for="tab in TABS"
+                :key="tab.key"
+                @click="goTab(tab)"
+                :class="[
+                  'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-left transition-colors',
+                  activeTabKey === tab.key
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-gray-300 hover:bg-gray-800 hover:text-white'
+                ]"
+              >
+                <span class="text-base w-5 text-center">{{ tab.icon }}</span>
+                <span class="truncate">{{ tab.label }}</span>
+              </button>
+            </div>
+          </transition>
+        </div>
       </div>
-      <div class="flex items-center gap-4">
-        <span class="text-sm text-gray-400">{{ auth.user?.name || auth.user?.email }}</span>
+
+      <div class="flex items-center gap-4 flex-shrink-0">
+        <span class="hidden sm:inline text-sm text-gray-400 truncate max-w-[12rem]">{{ auth.user?.name || auth.user?.email }}</span>
         <button @click="handleLogout" class="btn-ghost text-xs">Выйти</button>
       </div>
     </header>
-
-    <!-- Навигация по вкладкам -->
-    <nav class="bg-gray-900/50 border-b border-gray-800 px-6 flex-shrink-0">
-      <div class="max-w-7xl mx-auto flex gap-1 overflow-x-auto">
-        <button
-          v-for="tab in TABS"
-          :key="tab.key"
-          @click="goTab(tab)"
-          :class="[
-            'flex items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-all duration-200 border-b-2 -mb-px',
-            activeTab === tab.key
-              ? 'text-indigo-400 border-indigo-500 bg-indigo-950/30'
-              : 'text-gray-400 border-transparent hover:text-gray-200 hover:border-gray-600 hover:bg-gray-800/30'
-          ]"
-        >
-          <span class="text-base">{{ tab.icon }}</span>
-          <span>{{ tab.label }}</span>
-        </button>
-      </div>
-    </nav>
 
     <!-- Контент вкладки -->
     <main class="flex-1">
