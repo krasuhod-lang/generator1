@@ -514,6 +514,31 @@ def dspy_retrain(req: DspyRetrainRequest) -> Dict[str, Any]:
     )
 
 
+# ── /dspy/prompt — усиление промптов модуля «Анализ GSC» (projects) ────
+class DspyPromptRequest(BaseModel):
+    context: Optional[Dict[str, Any]] = None
+
+
+@app.get("/dspy/prompt/signatures")
+def dspy_prompt_signatures() -> Dict[str, Any]:
+    from . import projects_dspy
+    return {
+        "signatures": projects_dspy.available_signatures(),
+        "dspy_available": projects_dspy.is_dspy_available(),
+    }
+
+
+@app.post("/dspy/prompt/{signature}")
+def dspy_prompt(signature: str, req: DspyPromptRequest) -> Dict[str, Any]:
+    """Few-shot-усиленные инструкции для именованной DSPy-сигнатуры.
+
+    Используется node-стороной (projects/dspyClient.js) для усиления промптов
+    LLM-слоёв анализа GSC. Graceful: работает и без установленного dspy-ai.
+    """
+    from . import projects_dspy
+    return projects_dspy.build_prompt(signature, req.context or {})
+
+
 # ── /ga4 ──────────────────────────────────────────────────────────────
 class Ga4FetchRequest(BaseModel):
     property_id: str
