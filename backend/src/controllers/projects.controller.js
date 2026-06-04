@@ -580,12 +580,12 @@ async function regenerateMeta(req, res, next) {
     const url = req.body && typeof req.body.url === 'string' ? req.body.url.trim() : '';
     if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'Некорректный url' });
 
-    const { auditPages } = require('../services/projects/pageMetaAudit');
+    const { auditPages, regenerateMetaForPages } = require('../services/projects/pageMetaAudit');
 
     // Тянем реальные поисковые запросы этой страницы из GSC (query×page), чтобы
     // семантика регенерации строилась на фактическом спросе, а не была пустой
     // (без этого генератор пропускал страницу — п.2 ТЗ). При отсутствии GSC или
-    // ошибке — graceful: auditPages сам дотянет анализ выдачи по запросам.
+    // ошибке — graceful: staged-хелпер дотянет анализ выдачи по запросам.
     let queryPage = [];
     if (project.gsc_connected && project.gsc_site_url) {
       try {
@@ -596,12 +596,36 @@ async function regenerateMeta(req, res, next) {
       } catch (_) { queryPage = []; }
     }
 
-    // Точечный аудит одной страницы: подаём её как единственную top_page.
-    const result = await auditPages({
+    // Шаг 1 — детерминированный аудит «было» (парсинг + диагностика длины), без
+    // LLM. Подаём страницу как единственную top_page.
+    const audited = await auditPages({
       project,
       snapshot: { top_pages: [{ key: url }] },
       queryPage,
+      regenerate: false,
     });
+    if (!audited || !Array.isArray(audited.pages) || audited.pages.length === 0) {
+      return res.json(audited || { available: false });
+    }
+
+    // Шаг 2 — staged-генерация мета-тегов через общий хелпер metaTags/metaStages
+    // (разовый анализ ЦА/ниши → SERP → семантика → Gemini → LSI-проверка), с
+    // трекингом этапов через funnelTracker (как в инструменте мета-тегов).
+    const { createFunnelTracker } = require('../services/aegis/funnelTracker');
+    const funnel = createFunnelTracker({
+      kind: 'projects_meta_audit',
+      taskRef: `project:${project.id}`,
+      userId: req.user.id,
+      niche: project.name || null,
+    });
+    let result;
+    try {
+      result = await regenerateMetaForPages({ project, pages: audited.pages, funnel });
+      try { await funnel.persist({ status: 'completed' }); } catch (_) { /* no-op */ }
+    } catch (err) {
+      try { funnel.fail(err.message); await funnel.persist({ status: 'failed', error: err.message }); } catch (_) { /* no-op */ }
+      throw err;
+    }
     return res.json(result || { available: false });
   } catch (err) { return next(err); }
 }

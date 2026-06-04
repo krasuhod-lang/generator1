@@ -93,6 +93,8 @@ async function listUsers(req, res, next) {
     const limitIdx = dataParams.length - 1;
     const offsetIdx = dataParams.length;
 
+    const srcEntries = await _existingTaskSourceEntries();
+
     const { rows } = await db.query(
       `WITH ut AS (
          SELECT
@@ -103,7 +105,7 @@ async function listUsers(req, res, next) {
            COUNT(*) FILTER (WHERE z.norm_status = 'processing')::int AS tasks_processing,
            MAX(z.created_at)                                      AS last_task_at,
            COALESCE(SUM(z.cost_usd), 0)::numeric(14,6)            AS total_cost_usd
-         FROM ( ${_userTaskUnionSql()} ) z
+         FROM ( ${_userTaskUnionSql({ entries: srcEntries })} ) z
          GROUP BY z.user_id
        )
        SELECT
@@ -137,6 +139,8 @@ async function getUserDetail(req, res, next) {
   try {
     const { userId } = req.params;
 
+    const srcEntries = await _existingTaskSourceEntries();
+
     const { rows } = await db.query(
       `WITH ut AS (
          SELECT
@@ -149,7 +153,7 @@ async function getUserDetail(req, res, next) {
            COUNT(*) FILTER (WHERE z.norm_status = 'queued')::int     AS tasks_queued,
            MAX(z.created_at)                                        AS last_task_at,
            COALESCE(SUM(z.cost_usd), 0)::numeric(14,6)              AS total_cost_usd
-         FROM ( ${_userTaskUnionSql({ filterUser: true })} ) z
+         FROM ( ${_userTaskUnionSql({ filterUser: true, entries: srcEntries })} ) z
          GROUP BY z.user_id
        )
        SELECT
@@ -230,8 +234,9 @@ async function getUserTasks(req, res, next) {
 
 async function getStats(req, res, next) {
   try {
+    const srcEntries = await _existingTaskSourceEntries();
     const { rows } = await db.query(`
-      WITH ut AS ( ${_statusUnionSql()} )
+      WITH ut AS ( ${_statusUnionSql(srcEntries)} )
       SELECT
         (SELECT COUNT(*)::int FROM users) AS total_users,
         (SELECT COUNT(*)::int FROM users WHERE created_at >= NOW() - INTERVAL '1 day') AS users_today,
@@ -586,6 +591,44 @@ const TASK_SOURCES = Object.freeze({
   }),
 });
 
+// Кэш списка реально существующих таблиц-источников. Нужен, чтобы один
+// неприменённый миграцией модуль (отсутствующая таблица) не ломал ВЕСЬ
+// UNION-запрос и, как следствие, не «прятал» весь список пользователей.
+let _taskSourceCache = { entries: null, ts: 0 };
+const _TASK_SOURCE_TTL_MS = 60_000;
+
+/**
+ * Возвращает Object.entries(TASK_SOURCES), оставляя только те источники,
+ * чьи таблицы реально присутствуют в БД (проверка через to_regclass).
+ * Результат кэшируется на _TASK_SOURCE_TTL_MS. При ошибке проверки —
+ * безопасный фолбэк на полный список (поведение как раньше).
+ */
+async function _existingTaskSourceEntries() {
+  const now = Date.now();
+  if (_taskSourceCache.entries && (now - _taskSourceCache.ts) < _TASK_SOURCE_TTL_MS) {
+    return _taskSourceCache.entries;
+  }
+
+  const all = Object.entries(TASK_SOURCES);
+  try {
+    const { rows } = await db.query(
+      `SELECT tbl, to_regclass('public.' || tbl) IS NOT NULL AS exists
+         FROM unnest($1::text[]) AS tbl`,
+      [all.map(([, src]) => src.table)],
+    );
+    const existing = new Set(
+      rows.filter((r) => r.exists).map((r) => r.tbl),
+    );
+    const entries = all.filter(([, src]) => existing.has(src.table));
+    // Если по какой-то причине не нашли ни одной таблицы — не обнуляем список,
+    // отдаём полный набор (пусть запрос сам решает), чтобы не терять данные.
+    _taskSourceCache = { entries: entries.length ? entries : all, ts: now };
+  } catch (_) {
+    _taskSourceCache = { entries: all, ts: now };
+  }
+  return _taskSourceCache.entries;
+}
+
 /**
  * Собирает один SELECT для UNION ALL по конкретному источнику.
  * Возвращает нормализованные колонки: source, id, title, status, created_at,
@@ -632,10 +675,11 @@ const NORM_STATUS_SQL = `
  * UNION ALL по всем источникам с нормализованными колонками для агрегации
  * per-user счётчиков: user_id, norm_status, created_at, cost_usd.
  * Если filterUser=true — каждый SELECT ограничивается `WHERE t.user_id = $1`.
+ * `entries` — список реально существующих источников (по умолчанию все).
  */
-function _userTaskUnionSql({ filterUser = false } = {}) {
+function _userTaskUnionSql({ filterUser = false, entries = Object.entries(TASK_SOURCES) } = {}) {
   const where = filterUser ? 'WHERE t.user_id = $1' : '';
-  return Object.entries(TASK_SOURCES)
+  return entries
     .map(([, src]) => `
       SELECT
         t.user_id::uuid                            AS user_id,
@@ -650,10 +694,11 @@ function _userTaskUnionSql({ filterUser = false } = {}) {
 
 /**
  * UNION ALL по всем источникам только со статусом — для глобальной статистики.
+ * `entries` — список реально существующих источников (по умолчанию все).
  */
-function _statusUnionSql() {
-  return Object.values(TASK_SOURCES)
-    .map((src) => `SELECT ${NORM_STATUS_SQL} AS norm_status FROM ${src.table} t`)
+function _statusUnionSql(entries = Object.entries(TASK_SOURCES)) {
+  return entries
+    .map(([, src]) => `SELECT ${NORM_STATUS_SQL} AS norm_status FROM ${src.table} t`)
     .join(' UNION ALL ');
 }
 
@@ -674,7 +719,8 @@ async function getUserAllTasks(req, res, next) {
       return res.status(404).json({ error: 'Пользователь не найден' });
     }
 
-    const unionSql = Object.entries(TASK_SOURCES)
+    const srcEntries = await _existingTaskSourceEntries();
+    const unionSql = srcEntries
       .map(([key, src]) => _sourceSelect(key, src))
       .join(' UNION ALL ');
 

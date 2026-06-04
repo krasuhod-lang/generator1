@@ -37,37 +37,72 @@ test('detectGaps finds striking-info and mismatch gaps', () => {
 });
 
 test('buildTopicFromGap respects title/description length limits', () => {
-  const t = buildTopicFromGap({ query: 'как выбрать насос' }, { name: 'AquaShop' });
+  const t = buildTopicFromGap({ query: 'как выбрать насос', impressions: 500, position: 12 }, { name: 'AquaShop' });
   assert.ok(t.title.length >= TITLE_MIN && t.title.length <= TITLE_MAX, `title len ${t.title.length}`);
   assert.ok(t.description.length >= DESC_MIN && t.description.length <= DESC_MAX, `desc len ${t.description.length}`);
   assert.ok(t.supporting_queries.length >= 1);
+  // Факт-обоснование: интент размечен, evidence несёт реальные цифры.
+  assert.ok(typeof t.intent === 'string' && t.intent.length > 0);
+  assert.ok(Array.isArray(t.evidence) && t.evidence[0].impressions === 500);
+  assert.ok(typeof t.intent_gap === 'string' && t.intent_gap.length > 0);
 });
 
 async function asyncBlock() {
-  // generateTopics always >= minTopics (5)
+  // generateTopics builds only fact-based topics (every topic has supporting query)
   {
     const { gaps } = detectGaps({ topQueries, queryPage, breakdowns, brandTokens: [] });
     const res = await generateTopics({ gaps, project: { name: 'AquaShop' } });
-    assert.ok(res.topics.length >= 5, `got ${res.topics.length}`);
+    assert.ok(res.topics.length >= 1, `got ${res.topics.length}`);
+    assert.strictEqual(res.topics.length, gaps.length, 'topic per gap, no synthetic backfill');
     res.topics.forEach((t) => {
       assert.ok(t.title.length <= TITLE_MAX);
       assert.ok(t.description.length <= DESC_MAX);
+      // Каждая тема привязана к реальному запросу со статистикой (без галлюцинаций).
+      assert.ok(t.supporting_queries.length >= 1 && t.supporting_queries[0]);
+      assert.ok(Array.isArray(t.evidence) && t.evidence.length >= 1);
     });
-    passed += 1; console.log('  ✓ generateTopics returns >= 5 valid topics');
+    passed += 1; console.log('  ✓ generateTopics returns one fact-based topic per gap');
+  }
+  // insufficient flag set when gaps < minTopics
+  {
+    const res = await generateTopics({ gaps: [{ query: 'как выбрать насос', reason: 'striking_info', impressions: 500, position: 12 }], project: { name: 'AquaShop' } });
+    assert.ok(res.insufficient && res.insufficient.got === 1 && res.insufficient.needed === 5);
+    passed += 1; console.log('  ✓ generateTopics flags insufficient data instead of fake topics');
+  }
+  // empty gaps → no topics, no crash
+  {
+    const res = await generateTopics({ gaps: [], project: { name: 'AquaShop' } });
+    assert.strictEqual(res.topics.length, 0);
+    assert.ok(res.insufficient);
+    passed += 1; console.log('  ✓ generateTopics returns no topics when there are no gaps');
   }
   // buildBlogPlan end-to-end deterministic
   {
     const plan = await buildBlogPlan({ project: { name: 'AquaShop' }, topQueries, queryPage, breakdowns, brandTokens: [] });
     assert.strictEqual(plan.available, true);
-    assert.ok(plan.topics_count >= 5);
-    passed += 1; console.log('  ✓ buildBlogPlan produces >= 5 topics');
+    assert.ok(plan.topics_count >= 1);
+    passed += 1; console.log('  ✓ buildBlogPlan produces fact-based topics');
   }
   // LLM path graceful fallback on bad JSON
   {
     const { gaps } = detectGaps({ topQueries, queryPage, breakdowns, brandTokens: [] });
     const res = await generateTopics({ gaps, project: { name: 'AquaShop' }, llmFn: async () => 'not a json' });
-    assert.ok(res.topics.length >= 5);
+    assert.ok(res.topics.length >= 1);
     passed += 1; console.log('  ✓ generateTopics falls back when LLM returns invalid JSON');
+  }
+  // LLM hallucination guard: topic referencing a query NOT in the input set is dropped
+  {
+    const { gaps } = detectGaps({ topQueries, queryPage, breakdowns, brandTokens: [] });
+    const fakeJson = JSON.stringify([
+      { topic: 'Выдуманная тема', title: 'x'.repeat(55), description: 'y'.repeat(150), supporting_queries: ['несуществующий запрос про космос'] },
+    ]);
+    const res = await generateTopics({ gaps, project: { name: 'AquaShop' }, llmFn: async () => fakeJson });
+    // Привязка по индексу спасает (baseTopic = base[0]), но supporting_queries остаются из базы.
+    res.topics.forEach((t) => {
+      assert.ok(t.supporting_queries[0] !== 'несуществующий запрос про космос',
+        'hallucinated query must not leak into supporting_queries');
+    });
+    passed += 1; console.log('  ✓ generateTopics keeps supporting_queries factual under LLM hallucination');
   }
 }
 
