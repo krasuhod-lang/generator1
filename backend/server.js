@@ -883,6 +883,10 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS article_html_with_schema TEXT`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS json_ld_blocks           JSONB`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS author_byline            TEXT`);
+    // Migration 072: audience_research JSONB — A/B-телеметрия слоя §10
+    // (Reddit Mapper V2 «голос аудитории»): бакет test/control, has_signal,
+    // signal_count, stages_run, skipped_reason. Для офлайн-сравнения качества.
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS audience_research        JSONB`);
     await db.query(`
       CREATE INDEX IF NOT EXISTS idx_info_article_eeat_score
         ON info_article_tasks (eeat_score)
