@@ -20,9 +20,10 @@ const { classifyQuery } = require('../commercialIntent');
  */
 function _presentSchemaTypes(schemaAudit) {
   const present = new Set();
-  if (schemaAudit && Array.isArray(schemaAudit.templates)) {
-    schemaAudit.templates.forEach((t) => {
-      (t.found_types || t.types || []).forEach((ty) => present.add(String(ty)));
+  const items = schemaAudit && (schemaAudit.items || schemaAudit.templates);
+  if (Array.isArray(items)) {
+    items.forEach((t) => {
+      (t.present_types || t.found_types || t.types || []).forEach((ty) => present.add(String(ty)));
     });
   }
   return present;

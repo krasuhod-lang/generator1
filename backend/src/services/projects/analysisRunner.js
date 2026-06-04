@@ -22,6 +22,13 @@ const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
 const { onAnalysisDone } = require('./aegisBridge');
 const { insertSnapshot } = require('./snapshotsRepo');
+const { auditPages } = require('./pageMetaAudit');
+const { analyzeEat } = require('./eatAnalyzer');
+const { auditSchema } = require('./schemaAuditor');
+const { buildLinkStrategy } = require('./linkStrategy');
+const { buildBlogPlan } = require('./contentGapPlanner');
+const { buildGeoAeo } = require('./geoAeo');
+const dspyClient = require('./dspyClient');
 
 /**
  * Собирает «голую» выгрузку GSC за переданный диапазон + детерминированные
@@ -40,15 +47,15 @@ async function collectSnapshot(project, range) {
 
   const projectsCfg = getProjectsConfig();
   const commercialCfg = projectsCfg.commercial;
+  const brandTokens = deriveBrandTokens({
+    name: project.name, siteUrl: project.gsc_site_url, url: project.url,
+  });
   let commercial = null;
   let queryPage = [];
   if (commercialCfg.enabled) {
     try {
       queryPage = await fetchQueryPageMatrix(project, range);
     } catch (_) { queryPage = []; }
-    const brandTokens = deriveBrandTokens({
-      name: project.name, siteUrl: project.gsc_site_url, url: project.url,
-    });
     commercial = analyzeCommercial({
       topQueries: top.topQueries,
       topPages: top.topPages,
@@ -73,6 +80,22 @@ async function collectSnapshot(project, range) {
   const pageDecay = await _buildPageDecay(project, range, top.topPages, projectsCfg.pageDecay);
   const brandSplit = await _buildBrandSplit(project, range, projectsCfg.brandSplit, project.gsc_site_url);
 
+  // --- Новые слои (п.1-8 ТЗ). Все graceful: ошибка → null, пайплайн не падает.
+  // Порядок учитывает зависимости: linkAudit → eat(linkedUrls) → schema(eat) → geo(schema).
+  const pageMetaAudit = await _buildPageMetaAudit(project, top, commercial, pageDecay, queryPage, projectsCfg.pageMetaAudit);
+  const linkAudit = await _buildLinkStrategy(project, commercial, top);
+  const linkedUrls = linkAudit && linkAudit.audit && Array.isArray(linkAudit.audit._linked_urls)
+    ? new Set(linkAudit.audit._linked_urls) : null;
+  const eat = await _buildEat(project, top, linkedUrls, projectsCfg.eat);
+  const schemaAudit = await _buildSchemaAudit(eat, project, projectsCfg.schemaAudit);
+  const blogPlan = await _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification);
+  const geoAeo = await _buildGeoAeo(project, top, schemaAudit, breakdowns, brandTokens);
+
+  // _scans — транзиентные данные парсинга (hiddenLayers) для schema/geo, в
+  // снапшот НЕ кладём (тяжёлый HTML), очищаем перед сохранением.
+  const eatPersist = _stripScans(eat);
+  const linkAuditPersist = _stripLinkedUrls(linkAudit);
+
   const snapshot = {
     range: resolved,
     totals: performance.totals,
@@ -85,6 +108,12 @@ async function collectSnapshot(project, range) {
     period_compare: periodCompare,
     page_decay: pageDecay,
     brand_split: brandSplit,
+    page_meta_audit: pageMetaAudit,
+    eat: eatPersist,
+    schema_audit: schemaAudit,
+    link_audit: linkAuditPersist,
+    blog_plan: blogPlan,
+    geo_aeo: geoAeo,
   };
 
   const payload = {
@@ -99,9 +128,90 @@ async function collectSnapshot(project, range) {
     periodCompare,
     pageDecay,
     brandSplit,
+    pageMetaAudit,
+    eat: eatPersist,
+    schemaAudit,
+    linkAudit: linkAuditPersist,
+    blogPlan,
+    geoAeo,
   };
 
   return { snapshot, payload };
+}
+
+/** Удаляет транзиентные _scans из eat-результата перед персистом. */
+function _stripScans(eat) {
+  if (!eat || typeof eat !== 'object') return eat;
+  const { _scans, ...rest } = eat;
+  return rest;
+}
+
+/** Удаляет тяжёлый список _linked_urls из link-аудита перед персистом. */
+function _stripLinkedUrls(linkAudit) {
+  if (!linkAudit || typeof linkAudit !== 'object' || !linkAudit.audit) return linkAudit;
+  const { _linked_urls, ...auditRest } = linkAudit.audit;
+  return { ...linkAudit, audit: auditRest };
+}
+
+/** Постраничный аудит метатегов (п.4). */
+async function _buildPageMetaAudit(project, top, commercial, pageDecay, queryPage, cfg) {
+  if (!cfg || !cfg.enabled) return null;
+  try {
+    const snapshotLike = { commercial, page_decay: pageDecay, top_pages: top.topPages };
+    return await auditPages({ project, snapshot: snapshotLike, queryPage });
+  } catch (_) { return null; }
+}
+
+/** E-E-A-T по шаблонам страниц (п.5). */
+async function _buildEat(project, top, linkedUrls, cfg) {
+  if (!cfg || !cfg.enabled) return null;
+  try {
+    return await analyzeEat({ project, snapshot: { top_pages: top.topPages }, linkedUrls });
+  } catch (_) { return null; }
+}
+
+/** Аудит микроразметки (п.8) — поверх результата парсинга из _buildEat. */
+async function _buildSchemaAudit(eat, project, cfg) {
+  if (!cfg || !cfg.enabled) return null;
+  try {
+    return auditSchema({ eatResult: eat, project });
+  } catch (_) { return null; }
+}
+
+/** Ссылочная стратегия + аудит ссылок (п.1, п.2). */
+async function _buildLinkStrategy(project, commercial, top) {
+  try {
+    return await buildLinkStrategy({ project, commercial, topPages: top.topPages, db });
+  } catch (_) { return null; }
+}
+
+/** План публикаций в блог (п.3). */
+async function _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification) {
+  try {
+    return await buildBlogPlan({
+      project,
+      topQueries: top.topQueries,
+      queryPage,
+      breakdowns,
+      brandTokens,
+      serpVerification,
+      dspyClient,
+    });
+  } catch (_) { return null; }
+}
+
+/** GEO/AEO — нейровыдача (п.7). Probe внутри пайплайна выключен (лимиты ключа). */
+async function _buildGeoAeo(project, top, schemaAudit, breakdowns, brandTokens) {
+  try {
+    return await buildGeoAeo({
+      project,
+      topQueries: top.topQueries,
+      schemaAudit,
+      breakdowns,
+      brandTokens,
+      runProbe: false,
+    });
+  } catch (_) { return null; }
 }
 
 async function _setError(analysisId, message) {
