@@ -11,6 +11,8 @@
  * и в приватном дашборде, и в публичном (read-only) отчёте.
  */
 import { computed } from 'vue';
+import CopyButton from './CopyButton.vue';
+import { toTsv } from '../utils/clipboard.js';
 
 const props = defineProps({
   commercial: { type: Object, default: null },
@@ -58,6 +60,48 @@ function serpVerdict(v) { return SERP_VERDICT[v] || SERP_VERDICT.inconclusive; }
 
 function shortUrl(u) {
   try { const x = new URL(u); return x.pathname + (x.search || ''); } catch (_) { return u; }
+}
+
+// ── Каннибализация: что с чем сливать ────────────────────────────────
+// Страницы в r.pages уже отсортированы по показам (impressions) убыванием,
+// поэтому первая — «донор-акцептор» (оставляем и усиливаем), остальные
+// сливаем (301-редирект / объединение контента) в неё.
+function mergeKeep(item) {
+  const pages = (item && item.pages) || [];
+  return pages[0] || null;
+}
+function mergeFrom(item) {
+  const pages = (item && item.pages) || [];
+  return pages.slice(1);
+}
+function totalImpr(item) {
+  return ((item && item.pages) || []).reduce((s, p) => s + (Number(p.impressions) || 0), 0);
+}
+function fmt(n) { return Number(n || 0).toLocaleString('ru'); }
+
+// Текст рекомендации для одной строки каннибализации.
+function cannibalRowText(item) {
+  const keep = mergeKeep(item);
+  const from = mergeFrom(item);
+  const lines = [
+    `Запрос: ${item.query} (показов всего: ${totalImpr(item)}, лучшая позиция: ${item.best_position})`,
+    `Оставить (усилить): ${keep ? shortUrl(keep.page) : '—'} — ${keep ? fmt(keep.impressions) : 0} показов, поз. ${keep ? keep.position : '—'}`,
+  ];
+  from.forEach((p) => {
+    lines.push(`Слить в неё: ${shortUrl(p.page)} — ${fmt(p.impressions)} показов, поз. ${p.position}`);
+  });
+  return lines.join('\n');
+}
+
+// Вся таблица каннибализации в TSV.
+function copyCannibal() {
+  const header = ['Запрос', 'Показов всего', 'Лучшая позиция', 'Оставить (усилить)', 'Слить в неё'];
+  const body = cannibal.value.map((item) => {
+    const keep = mergeKeep(item);
+    const from = mergeFrom(item).map((p) => shortUrl(p.page)).join(' + ');
+    return [item.query, totalImpr(item), item.best_position, keep ? shortUrl(keep.page) : '—', from];
+  });
+  return toTsv([header, ...body]);
 }
 </script>
 
@@ -142,16 +186,49 @@ function shortUrl(u) {
 
     <!-- Каннибализация -->
     <div v-if="cannibal.length" class="space-y-1.5">
-      <div class="text-xs font-semibold text-orange-400 uppercase">🔁 Каннибализация (несколько URL на один запрос)</div>
-      <ul class="space-y-1.5">
-        <li v-for="(r, i) in cannibal" :key="i" class="text-xs text-gray-300">
-          <span class="text-gray-100 font-medium">{{ r.query }}</span>
-          <span class="text-gray-500"> — лучшая позиция {{ r.best_position }}</span>
-          <ul class="ml-4 mt-0.5 text-gray-500">
-            <li v-for="(p, j) in r.pages" :key="j" class="truncate">• {{ shortUrl(p.page) }} (поз. {{ p.position }})</li>
-          </ul>
-        </li>
-      </ul>
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-xs font-semibold text-orange-400 uppercase">🔁 Каннибализация — что с чем сливать (оценка по показам GSC)</div>
+        <CopyButton text="" :copy-fn="copyCannibal" label="Копировать таблицу" />
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-gray-500 text-left">
+            <tr>
+              <th class="py-1 pr-2">Запрос</th>
+              <th class="py-1 px-2">Показов</th>
+              <th class="py-1 px-2">Оставить (усилить)</th>
+              <th class="py-1 px-2">Слить в неё</th>
+              <th class="py-1 pl-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(r, i) in cannibal" :key="i" class="border-t border-gray-800/60 align-top">
+              <td class="py-1.5 pr-2">
+                <div class="text-gray-100 font-medium">{{ r.query }}</div>
+                <div class="text-[11px] text-gray-500">лучшая позиция {{ r.best_position }}</div>
+              </td>
+              <td class="py-1.5 px-2 text-gray-400 whitespace-nowrap">{{ fmt(totalImpr(r)) }}</td>
+              <td class="py-1.5 px-2">
+                <template v-if="mergeKeep(r)">
+                  <div class="text-emerald-300 break-all">{{ shortUrl(mergeKeep(r).page) }}</div>
+                  <div class="text-[11px] text-gray-500">{{ fmt(mergeKeep(r).impressions) }} показов · поз. {{ mergeKeep(r).position }}</div>
+                </template>
+              </td>
+              <td class="py-1.5 px-2">
+                <div v-for="(p, j) in mergeFrom(r)" :key="j" class="text-gray-300 break-all">
+                  {{ shortUrl(p.page) }}
+                  <span class="text-[11px] text-gray-500">({{ fmt(p.impressions) }} показов · поз. {{ p.position }})</span>
+                </div>
+              </td>
+              <td class="py-1.5 pl-2"><CopyButton :text="cannibalRowText(r)" /></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="text-[11px] text-gray-600">
+        Рекомендация: оставляем страницу с наибольшими показами, остальные сливаем в неё (объединение контента + 301-редирект),
+        чтобы не конкурировать самим с собой за один запрос.
+      </p>
     </div>
 
     <!-- Верификация каннибализации по топ-выдаче Google -->

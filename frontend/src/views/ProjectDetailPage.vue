@@ -20,6 +20,7 @@ import EatTemplatesCard from '../components/EatTemplatesCard.vue';
 import SchemaAuditCard from '../components/SchemaAuditCard.vue';
 import AiVisibilityCard from '../components/AiVisibilityCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
+import { copyToClipboard } from '../utils/clipboard.js';
 
 const route = useRoute();
 const router = useRouter();
@@ -62,7 +63,9 @@ async function uploadLinksCsv() {
   csvUploading.value = true;
   try {
     const res = await store.importGscLinks(projectId, csvFile.value);
-    flash(`Импортировано: ${res?.imported ?? 0} строк`);
+    const TYPE_RU = { sites: 'доноры', pages: 'целевые страницы', anchors: 'анкоры' };
+    const typeRu = TYPE_RU[res?.type] || res?.type || '';
+    flash(`Импортировано (${typeRu}): ${res?.imported ?? 0} из ${res?.parsed ?? 0} строк`);
     csvFile.value = null;
     if (csvInput.value) csvInput.value.value = '';
   } catch (err) {
@@ -259,8 +262,14 @@ async function revokeShare() {
 }
 async function copyShare() {
   if (!shareUrl.value) return;
-  try { await navigator.clipboard.writeText(shareUrl.value); flash('Ссылка скопирована!'); }
-  catch (_) { flash('Не удалось скопировать'); }
+  const ok = await copyToClipboard(shareUrl.value);
+  flash(ok ? 'Ссылка скопирована!' : 'Не удалось скопировать');
+}
+async function copyReport() {
+  const md = currentAnalysis.value?.report_markdown;
+  if (!md) return;
+  const ok = await copyToClipboard(md);
+  flash(ok ? 'Отчёт скопирован (Markdown)' : 'Не удалось скопировать');
 }
 
 onMounted(() => {
@@ -399,7 +408,13 @@ onUnmounted(() => {
 
         <!-- AI report -->
         <section v-if="analyzing || currentAnalysis" class="card space-y-3">
-          <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Отчёт AI-аналитика</h2>
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Отчёт AI-аналитика</h2>
+            <button v-if="currentAnalysis?.status === 'done'"
+                    class="btn-ghost border border-gray-700 text-xs" @click="copyReport">
+              📋 Скопировать отчёт
+            </button>
+          </div>
           <div v-if="analyzing && (!currentAnalysis || currentAnalysis.status !== 'done')" class="space-y-2">
             <div class="h-4 w-2/3 animate-pulse bg-gray-800 rounded"></div>
             <div class="h-4 w-full animate-pulse bg-gray-800 rounded"></div>
