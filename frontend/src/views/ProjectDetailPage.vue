@@ -13,6 +13,12 @@ import GscPerformanceChart from '../components/GscPerformanceChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
 import CommercialInsights from '../components/CommercialInsights.vue';
 import AnalyticsExtras from '../components/AnalyticsExtras.vue';
+import LinkProfileCard from '../components/LinkProfileCard.vue';
+import BlogTopicsCard from '../components/BlogTopicsCard.vue';
+import MetaSuggestionsCard from '../components/MetaSuggestionsCard.vue';
+import EatTemplatesCard from '../components/EatTemplatesCard.vue';
+import SchemaAuditCard from '../components/SchemaAuditCard.vue';
+import AiVisibilityCard from '../components/AiVisibilityCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
 
 const route = useRoute();
@@ -44,6 +50,28 @@ const currentAnalysis = ref(null);
 const analyzing = ref(false);
 let analysisTimer = null;
 
+// CSV-импорт ссылок из GSC
+const csvInput = ref(null);
+const csvFile = ref(null);
+const csvUploading = ref(false);
+function onCsvSelected(e) {
+  csvFile.value = (e.target.files && e.target.files[0]) || null;
+}
+async function uploadLinksCsv() {
+  if (!csvFile.value) return;
+  csvUploading.value = true;
+  try {
+    const res = await store.importGscLinks(projectId, csvFile.value);
+    flash(`Импортировано: ${res?.imported ?? 0} строк`);
+    csvFile.value = null;
+    if (csvInput.value) csvInput.value.value = '';
+  } catch (err) {
+    flash(err.response?.data?.error || 'Не удалось импортировать CSV');
+  } finally {
+    csvUploading.value = false;
+  }
+}
+
 function flash(msg) {
   toast.value = msg;
   if (toastTimer) clearTimeout(toastTimer);
@@ -62,6 +90,13 @@ const periodCompareData = computed(() => currentAnalysis.value?.gsc_snapshot?.pe
 const breakdownsData = computed(() => currentAnalysis.value?.gsc_snapshot?.breakdowns || null);
 const pageDecayData = computed(() => currentAnalysis.value?.gsc_snapshot?.page_decay || null);
 const brandSplitData = computed(() => currentAnalysis.value?.gsc_snapshot?.brand_split || null);
+// Новые слои анализа GSC (ссылочный профиль, блог-план, мета, E-E-A-T, GEO/AEO, схема).
+const linkAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.link_audit || null);
+const blogPlanData = computed(() => currentAnalysis.value?.gsc_snapshot?.blog_plan || null);
+const pageMetaAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.page_meta_audit || null);
+const eatData = computed(() => currentAnalysis.value?.gsc_snapshot?.eat || null);
+const schemaAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.schema_audit || null);
+const geoAeoData = computed(() => currentAnalysis.value?.gsc_snapshot?.geo_aeo || null);
 
 async function load() {
   loading.value = true;
@@ -292,6 +327,22 @@ onUnmounted(() => {
           </div>
         </section>
 
+        <!-- Импорт CSV «Ссылки» из GSC (внешние ссылки/доноры/анкоры) -->
+        <section v-if="gscReady" class="card space-y-2">
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Ссылки из GSC (CSV)</h2>
+          <p class="text-xs text-gray-500">
+            Search Console не отдаёт отчёт «Ссылки» через API. Выгрузите CSV вручную
+            (Ссылки → Экспорт) и загрузите сюда — это включит анализ доноров и анкоров.
+          </p>
+          <div class="flex items-center gap-2">
+            <input ref="csvInput" type="file" accept=".csv,text/csv" class="text-xs text-gray-300"
+                   @change="onCsvSelected" />
+            <button class="btn-secondary text-xs" :disabled="!csvFile || csvUploading" @click="uploadLinksCsv">
+              {{ csvUploading ? 'Загрузка…' : 'Импортировать' }}
+            </button>
+          </div>
+        </section>
+
         <!-- Дашборд -->
         <section v-if="gscReady" class="card space-y-4">
           <div class="flex flex-wrap items-center justify-between gap-3">
@@ -372,6 +423,24 @@ onUnmounted(() => {
 
         <!-- Коммерческий срез -->
         <CommercialInsights v-if="commercialData" :commercial="commercialData" :serp-verification="serpVerificationData" />
+
+        <!-- Ссылочная стратегия (анкоры/доноры) -->
+        <LinkProfileCard v-if="linkAuditData" :link-audit="linkAuditData" />
+
+        <!-- Постраничная оптимизация метатегов через Meta Tags -->
+        <MetaSuggestionsCard v-if="pageMetaAuditData" :page-meta-audit="pageMetaAuditData" :project-id="projectId" />
+
+        <!-- План публикаций в блог -->
+        <BlogTopicsCard v-if="blogPlanData" :blog-plan="blogPlanData" />
+
+        <!-- E-E-A-T по шаблонам страниц -->
+        <EatTemplatesCard v-if="eatData" :eat="eatData" />
+
+        <!-- Микроразметка -->
+        <SchemaAuditCard v-if="schemaAuditData" :schema-audit="schemaAuditData" />
+
+        <!-- GEO/AEO — нейровыдача -->
+        <AiVisibilityCard v-if="geoAeoData" :geo-aeo="geoAeoData" :project-id="projectId" />
 
         <!-- История анализов -->
         <section v-if="analyses.length" class="card space-y-2">
