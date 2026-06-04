@@ -115,6 +115,41 @@ test('recommendLinks uses striking distance commercial queries', () => {
   assert.ok(rec.recommendations.some((r) => r.target_url.includes('/catalog/nasos')));
 });
 
+// ── п.1 ТЗ: анкор = поисковый запрос из GSC, а не окончание URL ───────
+test('recommendLinks uses real GSC query as anchor for orphans (not URL slug)', () => {
+  const orphanUrl = 'https://aquashop.ru/catalog/nasos-dlya-skvazhiny';
+  const audit = auditLinks({
+    project,
+    links: { anchors: [], pages: [], sites: [] },
+    topPages: [{ key: orphanUrl, impressions: 900 }],
+  });
+  const rec = recommendLinks({
+    project,
+    commercial: null,
+    linkAudit: audit,
+    topPages: [{ key: orphanUrl, impressions: 900 }],
+    queryPage: [
+      { query: 'насос для скважины купить', page: orphanUrl, impressions: 500 },
+      { query: 'погружной насос', page: orphanUrl, impressions: 120 },
+    ],
+  });
+  const orphanRec = rec.recommendations.find((r) => r.target_url === orphanUrl);
+  assert.ok(orphanRec, 'orphan recommendation present');
+  assert.strictEqual(orphanRec.anchor, 'насос для скважины купить');
+  // анкор НЕ должен быть окончанием URL
+  assert.ok(!orphanRec.anchor.includes('nasos-dlya'), 'anchor is not the URL slug');
+});
+
+test('recommendLinks falls back to slug anchor when no GSC query for page', () => {
+  const url = 'https://aquashop.ru/x';
+  const audit = auditLinks({ project, links: { anchors: [], pages: [], sites: [] }, topPages: [{ key: url, impressions: 50 }] });
+  const rec = recommendLinks({
+    project, commercial: null, linkAudit: audit,
+    topPages: [{ key: url, impressions: 50 }], queryPage: [],
+  });
+  assert.ok(rec.recommendations.length >= 5);
+});
+
 // ── importLinksCsv ──────────────────────────────────────────────────
 test('importLinksCsv detects anchors table', () => {
   const r = importLinksCsv('Top linking text,Links\nкупить насос,120\nAquaShop,30\n');

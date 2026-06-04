@@ -83,7 +83,7 @@ async function collectSnapshot(project, range) {
   // --- Новые слои (п.1-8 ТЗ). Все graceful: ошибка → null, пайплайн не падает.
   // Порядок учитывает зависимости: linkAudit → eat(linkedUrls) → schema(eat) → geo(schema).
   const pageMetaAudit = await _buildPageMetaAudit(project, top, commercial, pageDecay, queryPage, projectsCfg.pageMetaAudit);
-  const linkAudit = await _buildLinkStrategy(project, commercial, top);
+  const linkAudit = await _buildLinkStrategy(project, commercial, top, queryPage);
   const linkedUrls = linkAudit && linkAudit.audit && Array.isArray(linkAudit.audit._linked_urls)
     ? new Set(linkAudit.audit._linked_urls) : null;
   const eat = await _buildEat(project, top, linkedUrls, projectsCfg.eat);
@@ -179,9 +179,11 @@ async function _buildSchemaAudit(eat, project, cfg) {
 }
 
 /** Ссылочная стратегия + аудит ссылок (п.1, п.2). */
-async function _buildLinkStrategy(project, commercial, top) {
+async function _buildLinkStrategy(project, commercial, top, queryPage) {
   try {
-    return await buildLinkStrategy({ project, commercial, topPages: top.topPages, db });
+    return await buildLinkStrategy({
+      project, commercial, topPages: top.topPages, queryPage, db,
+    });
   } catch (_) { return null; }
 }
 
