@@ -282,6 +282,10 @@ function buildInfoArticleKnowledgeBase({
   // мог опереться на максимально подробную аналитику — заказчик хочет
   // «детализацию описания сущностей, интентов и высокий E-E-A-T».
   relevanceContext = null,
+  // 2026-06: исследовательский слой Reddit Mapper V2 (голос аудитории — боли,
+  // язык, вопросы, приоритетные темы). Опциональный input: если null, §10 не
+  // рендерится. Источник — services/redditMapper/masterJson.buildResearchDigest.
+  audienceResearch = null,
 } = {}) {
   if (!task) return '';
   const header = [
@@ -323,6 +327,28 @@ function buildInfoArticleKnowledgeBase({
     } catch (_) { /* graceful */ }
   }
 
+  // §10 — Голос аудитории из Reddit Mapper V2 (Information Gain топливо:
+  // реальные боли, язык, вопросы, приоритетные темы). Опционально, graceful.
+  let sectionAudienceResearch = '';
+  if (audienceResearch) {
+    try {
+      const { renderResearchDigestMarkdown, buildResearchDigest } = require('../redditMapper/masterJson');
+      // Принимаем как готовый digest (has_signal), так и сырой master JSON.
+      const digest = audienceResearch.has_signal !== undefined
+        ? audienceResearch
+        : buildResearchDigest(audienceResearch);
+      const md = renderResearchDigestMarkdown(digest);
+      if (md && md.trim()) {
+        sectionAudienceResearch =
+          '## §10. Голос аудитории (Reddit Mapper V2)\n\n' +
+          'Опирайся на реальные боли, язык и вопросы аудитории ниже, чтобы дать ' +
+          'оригинальную пользу (Information Gain) и закрыть соседние интенты. ' +
+          'Используй формулировки аудитории в FAQ и подзаголовках, не выдумывай факты.\n\n' +
+          md;
+      }
+    } catch (_) { /* graceful: модуль не подключён — без §10 */ }
+  }
+
   const parts = [
     sectionTask(task),
     sectionStrategy(strategy),
@@ -334,6 +360,7 @@ function buildInfoArticleKnowledgeBase({
     sectionLinkPlan(linkPlan),
     sectionRelevance,
     sectionRelevanceCtx,
+    sectionAudienceResearch,
   ].filter(Boolean);
 
   let text = header + parts.join('\n\n');
