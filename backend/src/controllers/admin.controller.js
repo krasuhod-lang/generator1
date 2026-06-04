@@ -94,19 +94,29 @@ async function listUsers(req, res, next) {
     const offsetIdx = dataParams.length;
 
     const { rows } = await db.query(
-      `SELECT
+      `WITH ut AS (
+         SELECT
+           z.user_id,
+           COUNT(*)::int                                          AS tasks_total,
+           COUNT(*) FILTER (WHERE z.norm_status = 'completed')::int  AS tasks_completed,
+           COUNT(*) FILTER (WHERE z.norm_status = 'failed')::int     AS tasks_failed,
+           COUNT(*) FILTER (WHERE z.norm_status = 'processing')::int AS tasks_processing,
+           MAX(z.created_at)                                      AS last_task_at,
+           COALESCE(SUM(z.cost_usd), 0)::numeric(14,6)            AS total_cost_usd
+         FROM ( ${_userTaskUnionSql()} ) z
+         GROUP BY z.user_id
+       )
+       SELECT
          u.id, u.email, u.name, u.role, u.created_at,
-         COUNT(t.id)::int AS tasks_total,
-         COUNT(t.id) FILTER (WHERE t.status = 'completed')::int AS tasks_completed,
-         COUNT(t.id) FILTER (WHERE t.status = 'failed')::int AS tasks_failed,
-         COUNT(t.id) FILTER (WHERE t.status = 'processing')::int AS tasks_processing,
-         MAX(t.created_at) AS last_task_at,
-         COALESCE(SUM(m.total_cost_usd), 0)::numeric(10,6) AS total_cost_usd
+         COALESCE(ut.tasks_total, 0)::int      AS tasks_total,
+         COALESCE(ut.tasks_completed, 0)::int  AS tasks_completed,
+         COALESCE(ut.tasks_failed, 0)::int     AS tasks_failed,
+         COALESCE(ut.tasks_processing, 0)::int AS tasks_processing,
+         ut.last_task_at                       AS last_task_at,
+         COALESCE(ut.total_cost_usd, 0)::numeric(14,6) AS total_cost_usd
        FROM users u
-       LEFT JOIN tasks t ON t.user_id = u.id
-       LEFT JOIN task_metrics m ON m.task_id = t.id
+       LEFT JOIN ut ON ut.user_id = u.id
        ${whereSQL}
-       GROUP BY u.id
        ORDER BY ${sort === 'tasks_total' ? 'tasks_total' : sort === 'total_cost_usd' ? 'total_cost_usd' : `u.${sort}`} ${order}
        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       dataParams
@@ -128,21 +138,33 @@ async function getUserDetail(req, res, next) {
     const { userId } = req.params;
 
     const { rows } = await db.query(
-      `SELECT
+      `WITH ut AS (
+         SELECT
+           z.user_id,
+           COUNT(*)::int                                            AS tasks_total,
+           COUNT(*) FILTER (WHERE z.norm_status = 'completed')::int  AS tasks_completed,
+           COUNT(*) FILTER (WHERE z.norm_status = 'failed')::int     AS tasks_failed,
+           COUNT(*) FILTER (WHERE z.norm_status = 'processing')::int AS tasks_processing,
+           COUNT(*) FILTER (WHERE z.norm_status = 'draft')::int      AS tasks_draft,
+           COUNT(*) FILTER (WHERE z.norm_status = 'queued')::int     AS tasks_queued,
+           MAX(z.created_at)                                        AS last_task_at,
+           COALESCE(SUM(z.cost_usd), 0)::numeric(14,6)              AS total_cost_usd
+         FROM ( ${_userTaskUnionSql({ filterUser: true })} ) z
+         GROUP BY z.user_id
+       )
+       SELECT
          u.id, u.email, u.name, u.role, u.created_at,
-         COUNT(t.id)::int AS tasks_total,
-         COUNT(t.id) FILTER (WHERE t.status = 'completed')::int AS tasks_completed,
-         COUNT(t.id) FILTER (WHERE t.status = 'failed')::int AS tasks_failed,
-         COUNT(t.id) FILTER (WHERE t.status = 'processing')::int AS tasks_processing,
-         COUNT(t.id) FILTER (WHERE t.status = 'draft')::int AS tasks_draft,
-         COUNT(t.id) FILTER (WHERE t.status = 'queued')::int AS tasks_queued,
-         MAX(t.created_at) AS last_task_at,
-         COALESCE(SUM(m.total_cost_usd), 0)::numeric(10,6) AS total_cost_usd
+         COALESCE(ut.tasks_total, 0)::int      AS tasks_total,
+         COALESCE(ut.tasks_completed, 0)::int  AS tasks_completed,
+         COALESCE(ut.tasks_failed, 0)::int     AS tasks_failed,
+         COALESCE(ut.tasks_processing, 0)::int AS tasks_processing,
+         COALESCE(ut.tasks_draft, 0)::int      AS tasks_draft,
+         COALESCE(ut.tasks_queued, 0)::int     AS tasks_queued,
+         ut.last_task_at                       AS last_task_at,
+         COALESCE(ut.total_cost_usd, 0)::numeric(14,6) AS total_cost_usd
        FROM users u
-       LEFT JOIN tasks t ON t.user_id = u.id
-       LEFT JOIN task_metrics m ON m.task_id = t.id
-       WHERE u.id = $1
-       GROUP BY u.id`,
+       LEFT JOIN ut ON ut.user_id = u.id
+       WHERE u.id = $1`,
       [userId]
     );
 
@@ -209,15 +231,16 @@ async function getUserTasks(req, res, next) {
 async function getStats(req, res, next) {
   try {
     const { rows } = await db.query(`
+      WITH ut AS ( ${_statusUnionSql()} )
       SELECT
         (SELECT COUNT(*)::int FROM users) AS total_users,
         (SELECT COUNT(*)::int FROM users WHERE created_at >= NOW() - INTERVAL '1 day') AS users_today,
         (SELECT COUNT(*)::int FROM users WHERE created_at >= NOW() - INTERVAL '7 days') AS users_this_week,
         (SELECT COUNT(*)::int FROM users WHERE created_at >= NOW() - INTERVAL '30 days') AS users_this_month,
-        (SELECT COUNT(*)::int FROM tasks) AS total_tasks,
-        (SELECT COUNT(*)::int FROM tasks WHERE status = 'completed') AS tasks_completed,
-        (SELECT COUNT(*)::int FROM tasks WHERE status = 'failed') AS tasks_failed,
-        (SELECT COUNT(*)::int FROM tasks WHERE status = 'processing') AS tasks_processing,
+        (SELECT COUNT(*)::int FROM ut) AS total_tasks,
+        (SELECT COUNT(*)::int FROM ut WHERE norm_status = 'completed') AS tasks_completed,
+        (SELECT COUNT(*)::int FROM ut WHERE norm_status = 'failed') AS tasks_failed,
+        (SELECT COUNT(*)::int FROM ut WHERE norm_status = 'processing') AS tasks_processing,
         (SELECT COALESCE(SUM(total_cost_usd), 0)::numeric(10,4) FROM task_metrics) AS total_cost_usd,
         (SELECT COALESCE(AVG(lsi_coverage), 0)::numeric(5,1) FROM task_metrics WHERE lsi_coverage > 0) AS avg_lsi_coverage,
         (SELECT COALESCE(AVG(eeat_score), 0)::numeric(4,1) FROM task_metrics WHERE eeat_score > 0) AS avg_eeat_score
@@ -585,6 +608,53 @@ function _sourceSelect(sourceKey, src) {
     FROM ${src.table} t
     WHERE t.user_id = $1
   `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Сводные счётчики задач по ВСЕМ модулям (а не только legacy-таблица `tasks`).
+// Разные модули используют разный словарь статусов: legacy `tasks` —
+// 'completed'/'failed'/'processing'/'draft'/'queued', а новые модули —
+// 'done'/'error'/'running'. Нормализуем к единому набору, чтобы счётчики
+// в админ-панели учитывали все задачи. Источники берём из TASK_SOURCES.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Нормализация статуса задачи к единому словарю (псевдоним таблицы — `t`). */
+const NORM_STATUS_SQL = `
+  CASE
+    WHEN t.status IN ('completed', 'done')                  THEN 'completed'
+    WHEN t.status IN ('failed', 'error')                    THEN 'failed'
+    WHEN t.status IN ('processing', 'running', 'in_progress') THEN 'processing'
+    WHEN t.status IN ('queued', 'pending')                  THEN 'queued'
+    ELSE t.status::text
+  END`;
+
+/**
+ * UNION ALL по всем источникам с нормализованными колонками для агрегации
+ * per-user счётчиков: user_id, norm_status, created_at, cost_usd.
+ * Если filterUser=true — каждый SELECT ограничивается `WHERE t.user_id = $1`.
+ */
+function _userTaskUnionSql({ filterUser = false } = {}) {
+  const where = filterUser ? 'WHERE t.user_id = $1' : '';
+  return Object.entries(TASK_SOURCES)
+    .map(([, src]) => `
+      SELECT
+        t.user_id::uuid                            AS user_id,
+        ${NORM_STATUS_SQL}                         AS norm_status,
+        t.created_at                               AS created_at,
+        COALESCE(${src.costSql}, 0)::numeric(14,6) AS cost_usd
+      FROM ${src.table} t
+      ${where}
+    `)
+    .join(' UNION ALL ');
+}
+
+/**
+ * UNION ALL по всем источникам только со статусом — для глобальной статистики.
+ */
+function _statusUnionSql() {
+  return Object.values(TASK_SOURCES)
+    .map((src) => `SELECT ${NORM_STATUS_SQL} AS norm_status FROM ${src.table} t`)
+    .join(' UNION ALL ');
 }
 
 /**
