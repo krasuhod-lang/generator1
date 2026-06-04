@@ -7,6 +7,7 @@
  */
 import { ref, computed, watch } from 'vue';
 import { useProjectsStore } from '../stores/projects.js';
+import CopyButton from './CopyButton.vue';
 
 const props = defineProps({
   pageMetaAudit: { type: Object, default: null },
@@ -27,6 +28,13 @@ const busy = ref({});
 function trimUrl(u) {
   if (!u) return '';
   try { const p = new URL(u); return (p.pathname + p.search) || u; } catch (_) { return u; }
+}
+
+// Title + Description одной строкой для копирования сразу обоих метатегов.
+function bothMeta(p) {
+  const s = p && p.suggested;
+  if (!s) return '';
+  return `Title: ${s.title || ''}\nDescription: ${s.description || ''}`;
 }
 
 async function regenerate(page, idx) {
@@ -65,16 +73,25 @@ async function regenerate(page, idx) {
             <div class="rounded bg-gray-900/50 p-2">
               <div class="text-[11px] text-gray-500 uppercase">Стало</div>
               <template v-if="p.suggested">
-                <div class="text-xs"><b>Title:</b> {{ p.suggested.title }}</div>
-                <div class="text-xs"><b>Desc:</b> {{ p.suggested.description }}</div>
+                <div class="flex items-start justify-between gap-2">
+                  <div class="text-xs min-w-0"><b>Title:</b> {{ p.suggested.title }}</div>
+                  <CopyButton :text="p.suggested.title" label="Title" />
+                </div>
+                <div class="flex items-start justify-between gap-2 mt-1">
+                  <div class="text-xs min-w-0"><b>Desc:</b> {{ p.suggested.description }}</div>
+                  <CopyButton :text="p.suggested.description" label="Desc" />
+                </div>
               </template>
               <div v-else class="text-xs text-gray-500">Рекомендация не сгенерирована.</div>
             </div>
           </div>
 
-          <button class="btn-secondary text-xs" :disabled="busy[i]" @click="regenerate(p, i)">
-            {{ busy[i] ? 'Генерация…' : 'Перегенерировать через Meta Tags' }}
-          </button>
+          <div class="flex flex-wrap items-center gap-2">
+            <button class="btn-secondary text-xs" :disabled="busy[i]" @click="regenerate(p, i)">
+              {{ busy[i] ? 'Генерация…' : 'Перегенерировать через Meta Tags' }}
+            </button>
+            <CopyButton v-if="p.suggested" :text="bothMeta(p)" label="Title + Description" />
+          </div>
         </template>
       </div>
     </div>

@@ -6,6 +6,8 @@
  * Если ссылочных данных нет — рекомендации помечены data_source: inferred.
  */
 import { computed } from 'vue';
+import CopyButton from './CopyButton.vue';
+import { toTsv } from '../utils/clipboard.js';
 
 const props = defineProps({
   linkAudit: { type: Object, default: null },
@@ -25,13 +27,58 @@ function prioClass(p) {
   if (p === 'medium') return 'text-amber-300';
   return 'text-gray-300';
 }
+function prioLabel(p) {
+  if (p === 'high') return 'высокий';
+  if (p === 'medium') return 'средний';
+  return 'низкий';
+}
+
+// Что именно покупать: анкорная ссылка с нужным типом анкора или безанкорная.
+const BUY = {
+  commercial: { what: 'Анкорная', kind: 'коммерческий анкор' },
+  branded:    { what: 'Анкорная', kind: 'брендовый анкор' },
+  generic:    { what: 'Анкорная', kind: 'общий (разбавляющий) анкор' },
+  naked:      { what: 'Безанкорная', kind: 'голый URL / «тут», «здесь»' },
+};
+function buyInfo(r) {
+  const naked = /безанкор/i.test(r.anchor || '');
+  return naked ? BUY.naked : (BUY[r.anchor_type] || BUY.generic);
+}
+function buyText(r) {
+  const b = buyInfo(r);
+  return `${b.what} ссылка — ${b.kind}`;
+}
+
+// Строка для копирования одной рекомендации.
+function rowText(r) {
+  return [
+    `Купить: ${buyText(r)}`,
+    `Анкор: ${r.anchor}`,
+    `Тема статьи донора: ${r.donor_topic}`,
+    `Целевой URL: ${r.target_url}`,
+    `Приоритет: ${prioLabel(r.priority)}`,
+  ].join('\n');
+}
+
+// Вся таблица в TSV для вставки в Google Sheets / Excel.
+function copyAll() {
+  const header = ['Что купить', 'Тип анкора', 'Анкор', 'Тема статьи донора', 'Целевой URL', 'Приоритет'];
+  const body = recs.value.map((r) => {
+    const b = buyInfo(r);
+    return [b.what, b.kind, r.anchor, r.donor_topic, r.target_url, prioLabel(r.priority)];
+  });
+  return toTsv([header, ...body]);
+}
 </script>
 
 <template>
   <section v-if="available" class="card space-y-3">
-    <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">
-      🔗 Ссылочная стратегия (анкоры / доноры)
-    </h2>
+    <div class="flex items-center justify-between gap-2">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">
+        🔗 Ссылочная стратегия (анкоры / доноры)
+      </h2>
+      <CopyButton v-if="recs.length" :copy-fn="copyAll" label="Копировать таблицу" />
+    </div>
     <p v-if="inferred" class="text-xs text-amber-300/80">
       Нет выгрузки «Ссылки» из GSC — рекомендации построены по контентному срезу (data_source: inferred).
       Загрузите CSV «Внешние ссылки», чтобы уточнить анализ доноров.
@@ -49,17 +96,32 @@ function prioClass(p) {
 
     <div>
       <div class="text-xs text-gray-400 mb-1">Рекомендации к закупке ({{ recs.length }})</div>
-      <div class="space-y-2">
-        <div v-for="(r, i) in recs" :key="i" class="rounded-lg bg-gray-800/40 p-3 text-sm">
-          <div class="flex items-center justify-between">
-            <span class="font-semibold">{{ r.anchor }}</span>
-            <span class="text-xs uppercase" :class="prioClass(r.priority)">{{ r.priority }}</span>
-          </div>
-          <div class="text-xs text-gray-400">Тип анкора: {{ r.anchor_type }}</div>
-          <div class="text-xs">Тема статьи донора: <span class="text-gray-200">{{ r.donor_topic }}</span></div>
-          <div class="text-xs">Целевой URL: <span class="text-indigo-300">{{ trimUrl(r.target_url) }}</span></div>
-          <div v-if="r.why" class="text-xs text-gray-500 mt-1">{{ r.why }}</div>
-        </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-gray-500 text-left">
+            <tr>
+              <th class="py-1 pr-2">Что купить</th>
+              <th class="py-1 px-2">Анкор</th>
+              <th class="py-1 px-2">Тема статьи донора</th>
+              <th class="py-1 px-2">Целевой URL</th>
+              <th class="py-1 px-2">Приоритет</th>
+              <th class="py-1 pl-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(r, i) in recs" :key="i" class="border-t border-gray-800/60 align-top">
+              <td class="py-1.5 pr-2">
+                <div class="text-gray-100 font-medium">{{ buyInfo(r).what }} ссылка</div>
+                <div class="text-[11px] text-gray-500">{{ buyInfo(r).kind }}</div>
+              </td>
+              <td class="py-1.5 px-2 text-gray-200">{{ r.anchor }}</td>
+              <td class="py-1.5 px-2 text-gray-300">{{ r.donor_topic }}</td>
+              <td class="py-1.5 px-2 text-indigo-300 break-all">{{ trimUrl(r.target_url) }}</td>
+              <td class="py-1.5 px-2 uppercase" :class="prioClass(r.priority)">{{ prioLabel(r.priority) }}</td>
+              <td class="py-1.5 pl-2"><CopyButton :text="rowText(r)" /></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>
