@@ -296,6 +296,8 @@ const PROJECTS_CONFIG = deepFreeze({
     maxGapCandidates: 40,
     // Striking distance для информационных запросов.
     strikingDistance: { minPosition: 5, maxPosition: 30, minImpressions: 20 },
+    // Минимум показов по стране, чтобы считать её гео-спросом без локализации.
+    geoMinImpressions: 100,
   },
 
   // п.4 — Аудит и усиление мета-тегов топ-страниц. Парсим текущие title/desc
