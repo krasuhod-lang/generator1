@@ -91,5 +91,23 @@ export const useProjectsStore = defineStore('projects', {
     async revokeShare(id) {
       await api.delete(`/projects/${id}/share`);
     },
+
+    // ── Ссылочный профиль / мета / AI-visibility ─────────────────────
+    async importGscLinks(id, file) {
+      const form = new FormData();
+      form.append('file', file);
+      const { data } = await api.post(`/projects/${id}/gsc-links/import`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      return data;
+    },
+    async regenerateMeta(id, url) {
+      const { data } = await api.post(`/projects/${id}/meta-suggestions/regenerate`, { url });
+      return data;
+    },
+    async probeAiVisibility(id, payload) {
+      const { data } = await api.post(`/projects/${id}/ai-visibility/probe`, payload || {});
+      return data;
+    },
   },
 });

@@ -238,6 +238,150 @@ const PROJECTS_CONFIG = deepFreeze({
     concurrency: 3,
   },
 
+  // ─────────────────────────────────────────────────────────────────
+  // Расширение «Анализ GSC v2»: 8 новых детерминированных слоёв.
+  // Каждый блок gated собственным `enabled` (как commercial/serpVerification)
+  // и graceful в analysisRunner: при сбое/выключении раздел просто пропускается.
+  // ─────────────────────────────────────────────────────────────────
+
+  // п.6 — Универсальный кэш детерминированных срезов (commercial, breakdowns,
+  // page_decay, link_audit, eat, schema...). Ключ = hash(project, range, sources):
+  // если данные не изменились — переиспользуем срез, не дёргая GSC/парсер/LLM.
+  signalCache: {
+    enabled: true,
+    defaultTtlSec: 6 * 60 * 60,   // 6 часов на детерминированные срезы
+    maxPayloadBytes: 2_000_000,   // защита от раздувания JSONB
+  },
+
+  // п.6 — DSPy-усиление промптов. Node вызывает aegis_py /dspy/prompt/:signature
+  // для получения few-shot-усиленных инструкций; при недоступности aegis_py —
+  // graceful fallback на статический промпт (всё работает без DSPy).
+  dspy: {
+    enabled: true,
+    timeoutMs: 8000,
+    // Имена сигнатур (должны совпадать с aegis_py/app/projects_dspy.py).
+    signatures: ['LinkRecommend', 'BlogTopicSuggest', 'EatRecommend',
+      'GeoAeoBoost', 'MetaUplift', 'SchemaSuggest'],
+  },
+
+  // п.1, п.2 — Ссылочная стратегия. GSC Search Analytics API НЕ отдаёт отчёт
+  // «Ссылки», поэтому данные импортируются вручную CSV-выгрузкой из GSC UI
+  // (Top linking sites / Top linked pages / Top linking text). Если ссылочных
+  // данных нет — рекомендации генерим из контентного среза (data_source:'inferred').
+  linkStrategy: {
+    enabled: true,
+    // Минимальное число рекомендаций на покупку ссылок (ТЗ: «От 5 всегда»).
+    minRecommendations: 5,
+    // Сколько топ-страниц-целей рассматриваем для линкбилдинга.
+    topTargetPages: 20,
+    // Сколько доноров оцениваем/выводим.
+    topDonors: 30,
+    // Импорт CSV: лимиты на размер файла и число строк (анти-DoS).
+    importMaxBytes: 5_000_000,
+    importMaxRows: 20000,
+    // Брендовые/коммерческие маркеры анкоров наследуем из commercial.dictionaries.
+    // Порог «перекоса» по донору: доля одного анкора > этого = спам-сигнал.
+    anchorSkewThreshold: 0.6,
+    // Доля «голых»/URL-анкоров, выше которой профиль считается рискованным.
+    nakedAnchorWarnPct: 0.5,
+  },
+
+  // п.3 — План публикаций в блог. Детерминированный gapDetector находит «дыры»
+  // (striking-distance инфо-запросы, инфо-запросы без покрытия), затем LLM-слой
+  // выдаёт ≥ minTopics тем с готовыми title/description (через metaGenerator).
+  blogTopics: {
+    enabled: true,
+    minTopics: 5,
+    // Сколько кандидатов-«дыр» подаём в LLM (берём топ по показам).
+    maxGapCandidates: 40,
+    // Striking distance для информационных запросов.
+    strikingDistance: { minPosition: 5, maxPosition: 30, minImpressions: 20 },
+    // Минимум показов по стране, чтобы считать её гео-спросом без локализации.
+    geoMinImpressions: 100,
+  },
+
+  // п.4 — Аудит и усиление мета-тегов топ-страниц. Парсим текущие title/desc
+  // через parser/scraper, прогоняем через metaTags/metaGenerator (Gemini),
+  // отдаём таблицу «было → стало».
+  pageMetaAudit: {
+    enabled: true,
+    // Сколько страниц аудитим (приоритет: ctrAnomaly + pageDecay + топ показов).
+    maxPages: 8,
+    // Таймаут парсинга одной страницы.
+    scrapeTimeoutMs: 25000,
+    // TTL кэша распарсенных страниц (project_page_snapshots).
+    pageCacheTtlSec: 24 * 60 * 60,
+    // Запускать ли LLM-регенерацию (Gemini) сразу в фоне анализа. Если false —
+    // только парсинг + дифф, регенерация по кнопке во фронте.
+    autoRegenerate: true,
+  },
+
+  // п.5 — Сканирование шаблонов страниц и оценка E-E-A-T. Кластеризуем топ-
+  // страницы по URL-паттерну, парсим представителей, детектируем блоки и
+  // считаем детерминированный E-E-A-T score 0..100.
+  eat: {
+    enabled: true,
+    // Сколько верхних страниц рассматриваем для кластеризации по шаблонам.
+    topPages: 30,
+    // Сколько представителей парсим на каждый кластер шаблона.
+    samplesPerTemplate: 1,
+    // Максимум кластеров шаблонов (защита от парсинга десятков URL).
+    maxTemplates: 6,
+    scrapeTimeoutMs: 25000,
+    pageCacheTtlSec: 24 * 60 * 60,
+    // URL-паттерны → имя шаблона (по подстроке пути).
+    templatePatterns: {
+      catalog: ['/catalog', '/category', '/categories', '/shop', '/store'],
+      product: ['/product', '/products', '/tovar', '/tovary', '/item', '/p/'],
+      service: ['/uslugi', '/services', '/service', '/usluga'],
+      blog: ['/blog', '/article', '/articles', '/news', '/stati', '/statya', '/post'],
+      about: ['/o-kompanii', '/about', '/o-nas', '/company', '/o_nas'],
+      contacts: ['/contacts', '/kontakty', '/contact'],
+    },
+  },
+
+  // п.7 — GEO/AEO (попадание в нейровыдачу ИИ-моделей). Косвенные сигналы из
+  // топ-выдачи (featured snippet / PAA), проверка наличия нужных JSON-LD типов,
+  // рекомендации по AEO-формату ответов.
+  geoAeo: {
+    enabled: true,
+    // Сколько приоритетных запросов проверяем на SERP-фичи (бережём лимиты ключа).
+    maxProbeQueries: 10,
+    // Минимум показов запроса, чтобы попасть в probe.
+    minImpressions: 30,
+    // JSON-LD типы, критичные для AI Overviews / нейровыдачи.
+    aiCriticalSchemaTypes: ['Article', 'BlogPosting', 'FAQPage', 'HowTo',
+      'Speakable', 'AboutPage', 'Organization', 'Person', 'BreadcrumbList'],
+    // Длина TL;DR-ответа (слов) для AEO-формата.
+    tldrWords: { min: 40, max: 80 },
+  },
+
+  // п.8 — Аудит микроразметки. Использует structured_data (jsonld+microdata) из
+  // parser/hiddenLayers, собранный в eat-слое. Проверяет наличие/валидность
+  // ключевых типов и полей, предлагает готовые JSON-LD сниппеты (geoSchema).
+  schemaAudit: {
+    enabled: true,
+    // Обязательные поля по типам (для валидации «битости» разметки).
+    requiredFields: {
+      Product: ['name', 'image', 'offers'],
+      Offer: ['price', 'priceCurrency', 'availability'],
+      Article: ['headline', 'author', 'datePublished'],
+      BlogPosting: ['headline', 'author', 'datePublished'],
+      FAQPage: ['mainEntity'],
+      Organization: ['name', 'url'],
+      BreadcrumbList: ['itemListElement'],
+    },
+    // Какие типы микроразметки ждём на каком шаблоне (gap-детектор).
+    expectedByTemplate: {
+      catalog: ['BreadcrumbList', 'ItemList', 'Organization'],
+      product: ['Product', 'Offer', 'BreadcrumbList', 'AggregateRating'],
+      service: ['Service', 'BreadcrumbList', 'Organization', 'FAQPage'],
+      blog: ['Article', 'BlogPosting', 'BreadcrumbList', 'FAQPage'],
+      about: ['Organization', 'AboutPage'],
+      contacts: ['Organization', 'LocalBusiness'],
+    },
+  },
+
   // Готовые пресеты периода для DatePicker.
   datePresets: [
     { key: '7d',  label: 'За 7 дней',   days: 7 },

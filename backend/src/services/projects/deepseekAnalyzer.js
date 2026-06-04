@@ -77,6 +77,43 @@ const SYSTEM_PROMPT = [
   'hreflang/локализация, внедрение/расширение rich-snippets, развитие',
   'небрендового спроса). Если каких-то срезов нет — пропусти подразделы.',
   '',
+  '## 8. Ссылочная стратегия (анкоры/доноры)',
+  'Если есть [ССЫЛОЧНАЯ СТРАТЕГИЯ] — на её основе дай НЕ МЕНЕЕ 5 конкретных',
+  'рекомендаций на закупку ссылок в формате таблицы: «анкор | тип анкора |',
+  'тема статьи донора | целевой URL на нашем сайте | приоритет | зачем».',
+  'Отдельно оцени доноров (каких стоит покупать, каких избегать) и анкор-профиль',
+  '(перекосы, переоптимизация). Если data_source=inferred — честно отметь, что',
+  'данных GSC по ссылкам нет и рекомендации построены от контента/SERP.',
+  '',
+  '## 9. Аудит ссылочного профиля',
+  'Если есть [АУДИТ ССЫЛОК] — диагностируй текущий профиль: рискованные доноры,',
+  'перекошенные анкоры, целевые страницы без ссылок (орфаны), что поправить',
+  '(Disavow, разбавление анкоров, приоритетные цели линкбилдинга).',
+  '',
+  '## 10. План публикаций в блог (≥5 тем)',
+  'Если есть [ПЛАН БЛОГА] — выдай НЕ МЕНЕЕ 5 тем статей таблицей:',
+  '«тема | H1 | title (50-60) | description (140-155) | целевой интент URL |',
+  'опорные запросы». Опирайся на контентные дыры (striking-distance инфо-запросы,',
+  'mismatch, гео-спрос). Темы должны раскрывать спрос и вести трафик на сайт.',
+  '',
+  '## 11. E-E-A-T по шаблонам страниц',
+  'Если есть [E-E-A-T ПО ШАБЛОНАМ] — по каждому шаблону (каталог/услуги/товар/',
+  'блог/о компании) назови score, чего не хватает по Experience/Expertise/',
+  'Authoritativeness/Trust и дай конкретный план усиления (автор+регалии, кейсы/',
+  'фото, отзывы, контакты/юр.инфо, сертификаты, политика).',
+  '',
+  '## 12. GEO/AEO — нейровыдача (AI Overviews / SGE)',
+  'Если есть [GEO/AEO] — дай рекомендации, чтобы сайт попадал в нейровыдачу ИИ',
+  '(ChatGPT/Perplexity/Google SGE): AEO-формат ответов (TL;DR в первых 40-80',
+  'словах, списки, явные сущности, prompt-friendly заголовки), каких JSON-LD',
+  'типов не хватает для AI Overviews, hreflang/локализация, связывание сущностей',
+  '(sameAs/mentions), Speakable. Если есть AI-visibility probe — учитывай его.',
+  '',
+  '## 13. Микроразметка: что добавить и поправить',
+  'Если есть [МИКРОРАЗМЕТКА] — по каждому шаблону: какие типы Schema.org есть,',
+  'каких не хватает, что битое (нет price/availability/author/datePublished и',
+  'т.п.). Дай готовые JSON-LD сниппеты из переданных рекомендаций.',
+  '',
   'Опирайся только на переданные данные и здравый SEO-смысл, не выдумывай',
   'цифр. Учитывай целевую аудиторию проекта во всех рекомендациях.',
   'Не добавляй преамбулы и заключения вне этой структуры.',
@@ -91,7 +128,8 @@ function _stripFence(text) {
 }
 
 function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification,
-  breakdowns, periodCompare, pageDecay, brandSplit }) {
+  breakdowns, periodCompare, pageDecay, brandSplit,
+  pageMetaAudit, eat, schemaAudit, linkAudit, blogPlan, geoAeo }) {
   const lines = [
     '[ПРОЕКТ]',
     `Название: ${project.name || '—'}`,
@@ -144,6 +182,12 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
     );
   }
   lines.push(..._renderSerpVerificationLines(serpVerification));
+  lines.push(..._renderLinkStrategyLines(linkAudit));
+  lines.push(..._renderBlogPlanLines(blogPlan));
+  lines.push(..._renderPageMetaAuditLines(pageMetaAudit));
+  lines.push(..._renderEatLines(eat));
+  lines.push(..._renderGeoAeoLines(geoAeo));
+  lines.push(..._renderSchemaAuditLines(schemaAudit));
   return lines.join('\n');
 }
 
@@ -277,6 +321,84 @@ function _renderSerpVerificationLines(serpVerification) {
       recommendation: it.recommendation,
     }))),
   ];
+}
+
+/** [ССЫЛОЧНАЯ СТРАТЕГИЯ] + [АУДИТ ССЫЛОК] (разделы 8-9, ≥5 рекомендаций). */
+function _renderLinkStrategyLines(link) {
+  if (!link || !link.available) return [];
+  const out = ['', '[ССЫЛОЧНАЯ СТРАТЕГИЯ] (раздел 8 — выдай ≥5 рекомендаций)',
+    `data_source: ${link.data_source} (gsc_csv = есть выгрузка GSC; inferred = построено от контента/SERP)`,
+    `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic, target_url, priority, why):`,
+    JSON.stringify((link.recommendations || []).slice(0, 20))];
+  if (link.audit && link.audit.available) {
+    const a = link.audit;
+    out.push('', '[АУДИТ ССЫЛОК] (раздел 9)',
+      `Анкор-профиль (distribution): ${JSON.stringify(a.anchors && a.anchors.distribution)}`,
+      `Предупреждения по анкорам: ${JSON.stringify((a.anchors && a.anchors.warnings) || [])}`,
+      `Топ-доноры (host, trust_score, flags): ${JSON.stringify((a.donors || []).slice(0, 15))}`,
+      `Орфаны — топ-страницы без ссылок (url, impressions): ${JSON.stringify((a.orphans || []).map((o) => ({ url: o.url, impressions: o.impressions })))}`,
+      `Проблемы: ${JSON.stringify(a.issues || [])}`);
+  }
+  return out;
+}
+
+/** [ПЛАН БЛОГА] (раздел 10, ≥5 тем). */
+function _renderBlogPlanLines(blog) {
+  if (!blog || !blog.available || !Array.isArray(blog.topics) || blog.topics.length === 0) return [];
+  return ['', '[ПЛАН БЛОГА] (раздел 10 — выдай ≥5 тем статей)',
+    'Темы (topic, h1, title, description, target_url_intent, supporting_queries):',
+    JSON.stringify(blog.topics),
+    `Гео-сигналы: ${JSON.stringify((blog.gap_signals && blog.gap_signals.geo) || [])}`];
+}
+
+/** [ПОСТРАНИЧНЫЙ МЕТА-АУДИТ] (усиливает раздел 4). */
+function _renderPageMetaAuditLines(meta) {
+  if (!meta || !meta.available || !Array.isArray(meta.pages) || meta.pages.length === 0) return [];
+  const rows = meta.pages.map((p) => ({
+    url: p.url, reason: p.reason,
+    before: p.before, lengths: p.lengths,
+    suggested: p.suggested || null,
+  }));
+  return ['', '[ПОСТРАНИЧНЫЙ МЕТА-АУДИТ] (используй в разделе 4: таблица «было → стало»)',
+    'Для страниц с suggested!=null покажи готовые рекомендованные title/description/H1.',
+    'Для остальных — предложи усиление по выявленным issues длины/дублей.',
+    JSON.stringify(rows)];
+}
+
+/** [E-E-A-T ПО ШАБЛОНАМ] (раздел 11). */
+function _renderEatLines(eat) {
+  if (!eat || !eat.available || !Array.isArray(eat.templates) || eat.templates.length === 0) return [];
+  const rows = eat.templates.map((t) => ({
+    template: t.template, sample_url: t.sample_url, score: t.score, level: t.level,
+    dimensions: t.dimensions, gaps: t.gaps, strengths: t.strengths,
+  }));
+  return ['', '[E-E-A-T ПО ШАБЛОНАМ] (раздел 11)',
+    `Средний score: ${eat.avg_score}`,
+    JSON.stringify(rows)];
+}
+
+/** [GEO/AEO] (раздел 12). */
+function _renderGeoAeoLines(geo) {
+  if (!geo || !geo.available || !geo.aeo || !geo.aeo.available) return [];
+  const a = geo.aeo;
+  const out = ['', '[GEO/AEO] (раздел 12 — нейровыдача AI Overviews / SGE)',
+    `AEO-форматы ответов по запросам: ${JSON.stringify((a.aeo_answers || []).slice(0, 10))}`,
+    `Не хватает JSON-LD типов для AI Overviews: ${JSON.stringify(a.missing_schema || [])}`,
+    `Гео-спрос вне основного региона: ${JSON.stringify(a.geo || [])}`,
+    `Рекомендации: ${JSON.stringify(a.recommendations || [])}`];
+  if (geo.ai_visibility && Array.isArray(geo.ai_visibility.probes) && geo.ai_visibility.probes.length) {
+    out.push(`AI-visibility probe (query, sge_includes_us, ai_opportunity): ${JSON.stringify(geo.ai_visibility.probes)}`);
+  }
+  return out;
+}
+
+/** [МИКРОРАЗМЕТКА] (раздел 13). */
+function _renderSchemaAuditLines(schema) {
+  if (!schema || !schema.available || !Array.isArray(schema.items) || schema.items.length === 0) return [];
+  return ['', '[МИКРОРАЗМЕТКА] (раздел 13)',
+    `Сводка: ${JSON.stringify(schema.summary)}`,
+    'По шаблонам (template, present_types, missing_types, broken_fields, actions, snippets):',
+    JSON.stringify(schema.items)];
 }
 
 /**
