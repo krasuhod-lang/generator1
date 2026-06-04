@@ -18,14 +18,8 @@
  */
 
 const db = require('../../config/db');
-const { fetchYandexSerp }    = require('./xmlstockClient');
-const { extractSemantics, checkLsiUsage } = require('./semantics');
-const { generateDrMaxMeta }  = require('./metaGenerator');
+const { runMetaStagesForKeyword, buildAudienceNicheDigest } = require('./metaStages');
 const { calcCost }           = require('../metrics/priceCalculator');
-const {
-  analyzeAudienceAndNiche,
-  serializeAnalysisForPrompt,
-} = require('../parser/audienceNicheAnalyzer');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
@@ -133,43 +127,22 @@ async function pushResult(taskId, item) {
  * @param {Function} onTokens — (adapter, tIn, tOut, costUsd) для агрегации
  */
 async function runAudienceNicheForMetaTask(taskId, task, inputs, onTokens) {
-  // analyzeAudienceAndNiche ожидает task.input_*-поля основного пайплайна.
-  // Собираем синтетический объект, не трогая оригинальный task.
-  const syntheticTask = {
-    input_target_service: inputs.niche || (Array.isArray(task.keywords) ? task.keywords[0] : '') || 'Нет данных',
-    input_brand_name:     inputs.brand || '',
-    input_business_type:  '',
-    input_region:         inputs.toponym || 'Россия',
-    input_brand_facts:    inputs.summary || '',
-    input_target_audience: '',
-    input_niche_features:  '',
-  };
-
-  const ctx = {
-    taskId,
-    onTokens,
-    log: (msg, type = 'info') => {
-      // Заворачиваем в наш appendLog, не валим задачу при ошибке записи.
-      appendLog(taskId, msg, type === 'success' ? 'ok' : type).catch(() => {});
+  // Делегируем общему хелперу metaStages.buildAudienceNicheDigest (та же логика,
+  // что и в основном SEO-пайплайне Stage 1→3). niche по умолчанию — первый ключ
+  // задачи; логирование заворачиваем в appendLog meta_tag_tasks.
+  return buildAudienceNicheDigest({
+    niche: inputs.niche || (Array.isArray(task.keywords) ? task.keywords[0] : '') || '',
+    brand: inputs.brand,
+    toponym: inputs.toponym,
+    summary: inputs.summary,
+    ctx: {
+      taskId,
+      onTokens,
+      log: (msg, type = 'info') => {
+        appendLog(taskId, msg, type === 'success' ? 'ok' : type).catch(() => {});
+      },
     },
-  };
-
-  const analysis = await analyzeAudienceAndNiche(syntheticTask, ctx);
-  if (!analysis) return '';
-
-  const { personasText, nicheDeepDiveText, contentVoiceText, nicheTerminologyText } =
-    serializeAnalysisForPrompt(analysis);
-
-  // Собираем компактный digest: тон + 1-2 инсайта ниши + 1 короткая персона
-  // + термины. Лимит ~1500 символов, чтобы не раздуть Gemini-промпт.
-  const parts = [];
-  if (contentVoiceText)     parts.push(`▸ Тон/голос:\n${contentVoiceText}`);
-  if (nicheDeepDiveText)    parts.push(`▸ Инсайты ниши:\n${nicheDeepDiveText.slice(0, 600)}`);
-  if (personasText)         parts.push(`▸ Ключевая персона ЦА:\n${personasText.slice(0, 500)}`);
-  if (nicheTerminologyText) parts.push(`▸ Терминология ниши: ${nicheTerminologyText.slice(0, 200)}`);
-
-  const digest = parts.join('\n\n').slice(0, 1500);
-  return digest;
+  });
 }
 
 /**
@@ -378,37 +351,19 @@ async function runMetaTagTaskInner(taskId) {
     }
 
     try {
-      // 1) XMLStock SERP
-      const serp = await fetchYandexSerp(kw, { lr: task.lr });
+      // Этапы 1-4 (SERP → семантика → Gemini → LSI-проверка) вынесены в общий
+      // staged-хелпер metaStages.runMetaStagesForKeyword, который переиспользуется
+      // и в анализе проектов (projects/pageMetaAudit), чтобы логика этапов и
+      // LSI-верификации не дублировалась.
+      const { serp, semantics, metas } = await runMetaStagesForKeyword({
+        keyword: kw,
+        inputs,
+        lr: task.lr,
+      });
       await appendLog(taskId, `📡 SERP получен: ${serp.length} результатов`, 'info');
-
-      // 2) Semantics (TF-IDF)
-      const semantics = extractSemantics(kw, serp);
       await appendLog(taskId,
         `🔢 LSI: важных ${semantics.title_mandatory_words.length}, рекомендованных ${semantics.description_mandatory_words.length}`,
         'info');
-
-      // 3) Gemini → Title + Description (та же модель, что и Stage 3/5/6)
-      const metas = await generateDrMaxMeta({ keyword: kw, semantics, serpData: serp, inputs });
-
-      // 4) Проверка фактического использования LSI в готовых метатегах.
-      // ВАЖНО: считаем «использовано» по объединённому тексту Title + Description + H1.
-      // Иначе слово, которое модель уместно вписала в Description (например «google»
-      // или «сайт»), отображается на фронте как пропущенное в Title — что вводит
-      // в заблуждение: для важных LSI достаточно появиться в любом из трёх полей.
-      const combinedMetaText = [
-        metas.title       || '',
-        metas.description || '',
-        metas.h1          || '',
-      ].join(' ');
-      const lsiTitleCheck = checkLsiUsage(combinedMetaText, semantics.title_mandatory_words);
-      const lsiDescCheck  = checkLsiUsage(combinedMetaText, semantics.description_mandatory_words);
-      metas.lsi_check = {
-        title:       lsiTitleCheck,
-        description: lsiDescCheck,
-        // Объединённый список «не использовано» — для удобства фронта.
-        missed_lsi: [...lsiTitleCheck.missed_lsi, ...lsiDescCheck.missed_lsi],
-      };
 
       // 5) Учёт токенов и стоимости (Gemini / Grok).
       // Провайдер для cost-calc подбирается из inputs.llm_provider, чтобы

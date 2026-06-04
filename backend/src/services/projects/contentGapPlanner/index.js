@@ -22,13 +22,14 @@ async function buildBlogPlan({ project, topQueries, queryPage, breakdowns, brand
     const { gaps, signals } = detectGaps({
       topQueries, queryPage, breakdowns, brandTokens, serpVerification,
     });
-    const res = await generateTopics({ gaps, signals, project, llmFn, dspyClient });
+    const res = await generateTopics({ gaps, signals, project, brandTokens, llmFn, dspyClient });
     if (!res) return null;
     return {
       available: true,
       topics: res.topics,
       topics_count: res.count,
       gap_signals: signals,
+      insufficient: res.insufficient || null,
     };
   } catch (err) {
     return { available: false, error: String((err && err.message) || err) };

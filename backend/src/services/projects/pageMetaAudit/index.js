@@ -168,24 +168,28 @@ function diffMeta(before, after) {
 /**
  * Полный аудит мета-тегов (с парсингом и опциональной LLM-регенерацией).
  * Graceful: ошибки парсинга/LLM на отдельной странице не валят весь срез.
- * Тяжёлые зависимости (scraper/metaGenerator) подгружаются лениво, чтобы
+ * Тяжёлые зависимости (scraper/metaStages) подгружаются лениво, чтобы
  * детерминированные хелперы оставались тестируемыми без сети.
  *
+ * Этапы генерации (SERP → семантика → Gemini → LSI-проверка) вынесены в общий
+ * staged-хелпер metaTags/metaStages.runMetaStagesForKeyword — тот же, что у
+ * инструмента мета-тегов. По умолчанию (regenerate=false) LLM НЕ запускается:
+ * быстрый детерминированный аудит «было» внутри анализа GSC. Регенерация —
+ * отдельным шагом через regenerateMetaForPages (кнопка / эндпоинт).
+ *
+ * @param {object} args
+ * @param {boolean} [args.regenerate] — запускать ли staged LLM-генерацию
  * @returns {Promise<{available:boolean, pages:Array}|null>}
  */
-async function auditPages({ project, snapshot, queryPage } = {}) {
+async function auditPages({ project, snapshot, queryPage, regenerate } = {}) {
   const cfg = getProjectsConfig().pageMetaAudit;
   if (!cfg || !cfg.enabled) return null;
   const candidates = selectPagesToAudit(snapshot, queryPage, cfg);
   if (candidates.length === 0) return { available: false, reason: 'no_pages' };
 
   const { scrapeUrl } = require('../../parser/scraper');
-  let generateDrMaxMeta = null;
-  if (cfg.autoRegenerate) {
-    ({ generateDrMaxMeta } = require('../../metaTags/metaGenerator'));
-  }
-
-  const serpCfg = (cfg && cfg.serpAnalysis) || {};
+  // LLM-регенерация запускается только при явном regenerate (отдельный шаг).
+  const doRegenerate = regenerate === true;
 
   const pages = [];
   for (const cand of candidates) {
@@ -200,23 +204,6 @@ async function auditPages({ project, snapshot, queryPage } = {}) {
       };
       const lengths = analyzeMetaLengths(before);
       const semantics = buildSemanticsFromQueries(cand.queries);
-      // Главный запрос: реальный GSC-запрос страницы; если их нет — деградируем
-      // до заголовка/слага URL, чтобы регенерация всё равно сработала (п.2 ТЗ:
-      // запрос обязан уйти в функцию и собрать качественный мета-тег).
-      const keyword = (cand.queries[0] && cand.queries[0].query)
-        || _fallbackKeyword(before, cand.url);
-
-      // Анализ поисковой выдачи: тянем ТОП Яндекса по главному запросу страницы
-      // и обогащаем семантику TF-IDF конкурентов. serpData уходит в промпт
-      // генератора — мета-тег строится на основе анализа выдачи (п.2 ТЗ).
-      let serpData = null;
-      if (generateDrMaxMeta && serpCfg.enabled && keyword) {
-        serpData = await _fetchSerpSafe(keyword, serpCfg);
-        if (serpData && serpData.length) {
-          const serpSemantics = _extractSerpSemantics(keyword, serpData);
-          _mergeSemantics(semantics, serpSemantics);
-        }
-      }
 
       const entry = {
         url: cand.url,
@@ -225,27 +212,20 @@ async function auditPages({ project, snapshot, queryPage } = {}) {
         lengths,
         mandatory_words: semantics.title_mandatory_words,
         queries: cand.queries,
-        serp_analyzed: Boolean(serpData && serpData.length),
+        serp_analyzed: false,
         suggested: null,
         diff: null,
       };
 
-      if (generateDrMaxMeta && semantics.title_mandatory_words.length > 0) {
+      if (doRegenerate && semantics.title_mandatory_words.length > 0) {
         try {
-          const gen = await generateDrMaxMeta({
-            keyword,
-            semantics,
-            serpData,
-            inputs: {
-              brand_name: project && project.name,
-              brand: (project && project.name) || '',
-              page_context: before.description || before.title || '',
-              summary: before.description || before.title || '',
-            },
-          });
-          const after = { title: gen.title || '', description: gen.description || '', h1: gen.h1 || '' };
-          entry.suggested = after;
-          entry.diff = diffMeta(before, after);
+          const generated = await _regenerateOne({ project, cand, before, semantics, cfg });
+          if (generated) {
+            entry.suggested = generated.suggested;
+            entry.diff = generated.diff;
+            entry.lsi_check = generated.lsi_check;
+            entry.serp_analyzed = generated.serp_analyzed;
+          }
         } catch (_) { /* keep audit without suggestion */ }
       }
       pages.push(entry);
@@ -254,51 +234,111 @@ async function auditPages({ project, snapshot, queryPage } = {}) {
     }
   }
 
-  return { available: true, pages, generated: Boolean(generateDrMaxMeta) };
+  return { available: true, pages, generated: doRegenerate };
 }
 
 /**
- * Безопасно тянет ТОП Яндекса по ключу (xmlstock). Любая ошибка/таймаут →
- * null, регенерация продолжается на одних GSC-запросах.
+ * Staged-регенерация мета-тега одной страницы через общий хелпер
+ * metaTags/metaStages.runMetaStagesForKeyword (SERP → семантика → Gemini →
+ * LSI-проверка). Главный запрос — реальный GSC-запрос страницы, иначе фоллбэк
+ * на заголовок/слаг URL. Возвращает {suggested, diff, lsi_check, serp_analyzed}.
+ *
+ * @param {object} [audienceNicheDigest] — разовый digest ЦА/ниши (опционально)
  */
-async function _fetchSerpSafe(keyword, serpCfg) {
-  try {
-    const { fetchYandexSerp } = require('../../metaTags/xmlstockClient');
-    const serp = await fetchYandexSerp(keyword, {
-      lr: serpCfg.lr || '',
-      pages: serpCfg.serpPages || 1,
-    });
-    return Array.isArray(serp) ? serp : null;
-  } catch (_) { return null; }
-}
+async function _regenerateOne({ project, cand, before, semantics, cfg, audienceNicheDigest = '' }) {
+  const { runMetaStagesForKeyword } = require('../../metaTags/metaStages');
+  const serpCfg = (cfg && cfg.serpAnalysis) || {};
 
-/** Ленивая обёртка над metaTags/semantics.extractSemantics (TF-IDF по SERP). */
-function _extractSerpSemantics(keyword, serpData) {
-  try {
-    const { extractSemantics } = require('../../metaTags/semantics');
-    return extractSemantics(keyword, serpData) || {};
-  } catch (_) { return {}; }
-}
+  const keyword = (cand.queries[0] && cand.queries[0].query)
+    || _fallbackKeyword(before, cand.url);
+  if (!keyword) return null;
 
-/**
- * Дополняет GSC-семантику словами из анализа выдачи, не теряя порядок и не
- * дублируя. SERP-слова (реальные конкуренты в ТОПе) идут после GSC-слов
- * (реальный спрос страницы), но обогащают итоговые списки.
- */
-function _mergeSemantics(target, extra) {
-  if (!extra) return target;
-  const merge = (key, max) => {
-    const seen = new Set(target[key] || []);
-    (extra[key] || []).forEach((w) => {
-      if (w && !seen.has(w)) { seen.add(w); target[key].push(w); }
-    });
-    target[key] = target[key].slice(0, max);
+  const { metas, serp } = await runMetaStagesForKeyword({
+    keyword,
+    semantics,
+    lr: serpCfg.lr || '',
+    inputs: {
+      brand_name: project && project.name,
+      brand: (project && project.name) || '',
+      niche: (cand.queries[0] && cand.queries[0].query) || '',
+      page_context: before.description || before.title || '',
+      summary: before.description || before.title || '',
+      audienceNicheDigest: audienceNicheDigest || '',
+    },
+  });
+
+  const after = { title: metas.title || '', description: metas.description || '', h1: metas.h1 || '' };
+  return {
+    suggested: after,
+    diff: diffMeta(before, after),
+    lsi_check: metas.lsi_check || null,
+    serp_analyzed: Boolean(serp && serp.length),
   };
-  if (!Array.isArray(target.title_mandatory_words)) target.title_mandatory_words = [];
-  if (!Array.isArray(target.description_mandatory_words)) target.description_mandatory_words = [];
-  merge('title_mandatory_words', 6);
-  merge('description_mandatory_words', 10);
-  return target;
+}
+
+/**
+ * Staged-регенерация мета-тегов для набора уже выбранных страниц (отдельный шаг
+ * «генерация» вне тяжёлого анализа GSC). Разово строит digest ЦА/ниши и гоняет
+ * каждую страницу через runMetaStagesForKeyword. Этапы трекаются через
+ * переданный funnel (audience_niche / generate_meta / finalize).
+ *
+ * @param {object} args { project, pages:[{url, reason, before, lengths, queries, mandatory_words}], funnel }
+ * @returns {Promise<{available:boolean, pages:Array, generated:boolean}>}
+ */
+async function regenerateMetaForPages({ project, pages = [], funnel = null } = {}) {
+  const cfg = getProjectsConfig().pageMetaAudit;
+  if (!cfg || !cfg.enabled) return { available: false, reason: 'disabled' };
+  if (!Array.isArray(pages) || pages.length === 0) return { available: false, reason: 'no_pages' };
+
+  // Разовый анализ ЦА/ниши на всю пачку URL (как в инструменте мета-тегов).
+  let audienceNicheDigest = '';
+  if (cfg.audienceNiche && cfg.audienceNiche.enabled) {
+    if (funnel) funnel.step('audience_niche');
+    try {
+      const { buildAudienceNicheDigest } = require('../../metaTags/metaStages');
+      const sample = pages[0] || {};
+      audienceNicheDigest = await buildAudienceNicheDigest({
+        niche: (sample.queries && sample.queries[0] && sample.queries[0].query)
+          || (sample.before && (sample.before.h1 || sample.before.title)) || '',
+        brand: (project && project.name) || '',
+        toponym: '',
+        summary: (sample.before && (sample.before.description || sample.before.title)) || '',
+      });
+    } catch (_) { audienceNicheDigest = ''; }
+  }
+
+  if (funnel) funnel.step('generate_meta');
+  const out = [];
+  let okCount = 0;
+  for (const page of pages) {
+    const before = page.before || { title: '', description: '', h1: '' };
+    const semantics = buildSemanticsFromQueries(page.queries);
+    const entry = { ...page, suggested: null, diff: null };
+    try {
+      const generated = await _regenerateOne({
+        project,
+        cand: { url: page.url, queries: page.queries || [] },
+        before,
+        semantics,
+        cfg,
+        audienceNicheDigest,
+      });
+      if (generated) {
+        entry.suggested = generated.suggested;
+        entry.diff = generated.diff;
+        entry.lsi_check = generated.lsi_check;
+        entry.serp_analyzed = generated.serp_analyzed;
+        okCount += 1;
+      }
+    } catch (_) { /* graceful per-page */ }
+    out.push(entry);
+  }
+
+  if (funnel) {
+    if (okCount === 0) funnel.fail(`all ${pages.length} pages failed`);
+    else funnel.step('finalize');
+  }
+  return { available: true, pages: out, generated: true };
 }
 
 function _extractH1(scraped) {
@@ -329,4 +369,5 @@ module.exports = {
   buildSemanticsFromQueries,
   diffMeta,
   auditPages,
+  regenerateMetaForPages,
 };

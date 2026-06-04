@@ -8,6 +8,7 @@
 import { ref, computed, watch } from 'vue';
 import { useProjectsStore } from '../stores/projects.js';
 import CopyButton from './CopyButton.vue';
+import { copyToClipboard, toTsv } from '../utils/clipboard.js';
 
 const props = defineProps({
   pageMetaAudit: { type: Object, default: null },
@@ -17,6 +18,7 @@ const props = defineProps({
 const store = useProjectsStore();
 const available = computed(() => props.pageMetaAudit && props.pageMetaAudit.available);
 const pages = ref([]);
+const copied = ref(false);
 
 // Локальная копия, чтобы кнопка регенерации могла обновлять строку.
 watch(() => props.pageMetaAudit, (val) => {
@@ -37,6 +39,12 @@ function bothMeta(p) {
   return `Title: ${s.title || ''}\nDescription: ${s.description || ''}`;
 }
 
+// Непокрытые LSI-слова в готовых тегах (диагностика покрытия ключей).
+function missedLsi(p) {
+  const m = p && p.lsi_check && p.lsi_check.missed_lsi;
+  return Array.isArray(m) ? m : [];
+}
+
 async function regenerate(page, idx) {
   if (!props.projectId) return;
   busy.value = { ...busy.value, [idx]: true };
@@ -47,13 +55,45 @@ async function regenerate(page, idx) {
   } catch (_) { /* graceful: keep current row */ }
   finally { busy.value = { ...busy.value, [idx]: false }; }
 }
+
+// Копирование всей таблицы в Excel: TSV с разбивкой по колонкам (2 клика).
+async function copyAllForExcel() {
+  const headers = ['URL', 'Причина', 'Title (было)', 'Title (стало)', 'Description (было)',
+    'Description (стало)', 'H1 (было)', 'H1 (стало)', 'Title длина', 'Desc длина', 'Непокрытые LSI'];
+  const rows = [headers];
+  pages.value.forEach((p) => {
+    const b = p.before || {};
+    const s = p.suggested || {};
+    rows.push([
+      p.url || '',
+      p.reason || '',
+      b.title || '',
+      s.title || '',
+      b.description || '',
+      s.description || '',
+      b.h1 || '',
+      s.h1 || '',
+      s.title ? s.title.length : (b.title ? b.title.length : ''),
+      s.description ? s.description.length : (b.description ? b.description.length : ''),
+      missedLsi(p).join(', '),
+    ]);
+  });
+  const ok = await copyToClipboard(toTsv(rows));
+  if (ok) { copied.value = true; setTimeout(() => { copied.value = false; }, 2000); }
+}
 </script>
 
 <template>
   <section v-if="available && pages.length" class="card space-y-3">
-    <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">
-      🏷️ Постраничная оптимизация метатегов
-    </h2>
+    <div class="flex items-center justify-between gap-2">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">
+        🏷️ Постраничная оптимизация метатегов
+      </h2>
+      <button class="btn-secondary text-xs" @click="copyAllForExcel"
+              title="Скопировать таблицу в формате TSV — вставляется в Excel как таблица (Ctrl+V)">
+        {{ copied ? '✓ Скопировано' : '📋 Копировать всё (для Excel)' }}
+      </button>
+    </div>
     <div class="space-y-3">
       <div v-for="(p, i) in pages" :key="p.url || i" class="rounded-lg bg-gray-800/40 p-3 text-sm space-y-2">
         <div class="flex items-center justify-between">
@@ -86,9 +126,17 @@ async function regenerate(page, idx) {
             </div>
           </div>
 
+          <!-- Диагностика покрытия ключей (LSI) в готовых тегах -->
+          <div v-if="p.suggested" class="text-[11px]">
+            <span v-if="missedLsi(p).length === 0" class="text-emerald-300">✓ Все ключи покрыты</span>
+            <span v-else class="text-amber-300">
+              ⚠ Непокрытые LSI: {{ missedLsi(p).slice(0, 8).join(', ') }}
+            </span>
+          </div>
+
           <div class="flex flex-wrap items-center gap-2">
             <button class="btn-secondary text-xs" :disabled="busy[i]" @click="regenerate(p, i)">
-              {{ busy[i] ? 'Генерация…' : 'Перегенерировать через Meta Tags' }}
+              {{ busy[i] ? 'Этапы: ЦА → SERP → генерация → LSI…' : 'Перегенерировать через Meta Tags' }}
             </button>
             <CopyButton v-if="p.suggested" :text="bothMeta(p)" label="Title + Description" />
           </div>
