@@ -48,6 +48,7 @@ const {
   pointerOrJson,
 } = require('./infoArticleKnowledgeBase');
 const { synthesizeLsiSet, measureLsiCoverageInHtml, measureLsiCoverageSemantic } = require('./lsiPipeline');
+const { resolveAudienceResearch } = require('./audienceResearch.service');
 const { checkLsiOverdose } = require('./lsiDensity.service');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
 const { domainsFromLinks } = require('./excelParser');
@@ -1254,11 +1255,38 @@ async function processInfoArticleTask(taskId) {
       'ok',
     );
 
+    // 7.5 Голос аудитории (Reddit Mapper V2 → IAKB §10). Фиче-флаг + A/B +
+    // graceful: при выключенном флаге / контрольной A/B-группе / отсутствии
+    // сигнала digest=null и §10 просто не рендерится (статья как раньше).
+    const audienceResearchResult = await resolveAudienceResearch({
+      task, strategy, audience, intents,
+      ctx: buildCallCtx(taskId, 'audience_research'),
+    });
+    await saveColumn(taskId, 'audience_research', audienceResearchResult.meta);
+    {
+      const arm = audienceResearchResult.meta || {};
+      if (arm.included) {
+        await appendLog(
+          taskId,
+          `🧑‍🤝‍🧑 Reddit Mapper §10 включён (A/B=${arm.ab_bucket}, сигналов=${arm.signal_count}, ` +
+          `этапов=${(arm.stages_run || []).length}${arm.cache_hit ? ', cache=hit' : ''})`,
+          'ok',
+        );
+      } else if (arm.enabled) {
+        await appendLog(
+          taskId,
+          `🧑‍🤝‍🧑 Reddit Mapper §10 пропущен (${arm.skipped_reason || 'unknown'}${arm.ab_bucket ? `, A/B=${arm.ab_bucket}` : ''})`,
+          'info',
+        );
+      }
+    }
+
     // 8. Build IAKB + optional Gemini cachedContents
     task.__iakb = buildInfoArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
       relevanceSignals,
       relevanceContext,
+      audienceResearch: audienceResearchResult.digest,
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
 

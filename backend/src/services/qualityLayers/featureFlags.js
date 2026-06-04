@@ -121,6 +121,26 @@ const QUALITY_FLAGS = deepFreeze({
   // ── C2. Унифицированный E-E-A-T таргет ───────────────────────────
   eeatTargetDefault: 7.5,          // 0..10
 
+  // ── D2. Голос аудитории (Reddit Mapper V2 → IAKB §10) ────────────
+  // Прогон redditMapperPipeline (7 этапов) для исследования реальных
+  // болей/языка/вопросов аудитории и подача дайджеста в knowledge base
+  // §10 как Information-Gain топливо. По умолчанию ВЫКЛ — поведение
+  // pipeline без явного включения не меняется (graceful: при has_signal=
+  // false или любой ошибке статья генерируется как раньше).
+  // См. backend/src/services/infoArticle/audienceResearch.service.js
+  audienceResearch: {
+    enabled: false,
+    provider: 'deepseek',          // LLM-провайдер для всех этапов
+    // A/B: доля задач (из попавших под enabled) в тест-группе с §10.
+    // Контрольная группа генерируется БЕЗ §10 — для сравнения качества
+    // (Information Gain / уникальность / покрытие болей). Бакет
+    // детерминирован по taskId. 1.0 = все в тест-группе; 0.5 = 50/50.
+    abSampleRatio: 1.0,            // 0..1
+    // Кэш дайджеста по ключу niche|geo (одна тема/регион → один прогон).
+    cacheTtlMinutes: 1440,         // 5..43200
+    cacheMaxEntries: 200,          // 10..5000
+  },
+
   // ── D1. Brand-aware дедуп тем (article_topics_brand_history) ─────
   // detector: exact → Jaccard → опционально DeepSeek. Новые темы
   // никогда не отбрасываются, только помечаются duplicate_of. См.
@@ -168,6 +188,9 @@ const RANGES = [
   ['readability.maxBureaucrateseRatio',   0, 1],
   ['acfStructural.duplicatesMinLen',      30, 1000],
   ['eeatTargetDefault',                   0, 10],
+  ['audienceResearch.abSampleRatio',      0, 1],
+  ['audienceResearch.cacheTtlMinutes',    5, 43200],
+  ['audienceResearch.cacheMaxEntries',    10, 5000],
   ['brandDedup.historyLookbackDays',      1, 3650],
   ['brandDedup.historyLimit',             10, 5000],
   ['brandDedup.maxLlmCandidates',         0, 200],
