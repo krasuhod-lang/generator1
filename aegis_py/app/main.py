@@ -522,8 +522,9 @@ class DspyPromptRequest(BaseModel):
 @app.get("/dspy/prompt/signatures")
 def dspy_prompt_signatures() -> Dict[str, Any]:
     from . import projects_dspy
+    from . import reddit_mapper_dspy
     return {
-        "signatures": projects_dspy.available_signatures(),
+        "signatures": projects_dspy.available_signatures() + reddit_mapper_dspy.available_signatures(),
         "dspy_available": projects_dspy.is_dspy_available(),
     }
 
@@ -532,11 +533,22 @@ def dspy_prompt_signatures() -> Dict[str, Any]:
 def dspy_prompt(signature: str, req: DspyPromptRequest) -> Dict[str, Any]:
     """Few-shot-усиленные инструкции для именованной DSPy-сигнатуры.
 
-    Используется node-стороной (projects/dspyClient.js) для усиления промптов
-    LLM-слоёв анализа GSC. Graceful: работает и без установленного dspy-ai.
+    Используется node-стороной (projects/dspyClient.js, redditMapper) для усиления
+    промптов LLM-слоёв. Graceful: работает и без установленного dspy-ai.
+    Ищет сигнатуру сначала среди projects-сигнатур, затем среди Reddit Mapper V2.
     """
     from . import projects_dspy
-    return projects_dspy.build_prompt(signature, req.context or {})
+    from . import reddit_mapper_dspy
+    if signature in projects_dspy.available_signatures():
+        return projects_dspy.build_prompt(signature, req.context or {})
+    if signature in reddit_mapper_dspy.available_signatures():
+        return reddit_mapper_dspy.build_prompt(signature, req.context or {})
+    # Неизвестная сигнатура — единый список доступных из обоих модулей.
+    return {
+        "ok": False,
+        "reason": "unknown_signature",
+        "available": projects_dspy.available_signatures() + reddit_mapper_dspy.available_signatures(),
+    }
 
 
 # ── /ga4 ──────────────────────────────────────────────────────────────
