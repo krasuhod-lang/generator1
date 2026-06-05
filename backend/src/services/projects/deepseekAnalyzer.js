@@ -133,6 +133,12 @@ const SYSTEM_PROMPT = [
   '',
   'Опирайся только на переданные данные и здравый SEO-смысл, не выдумывай',
   'цифр. Учитывай целевую аудиторию проекта во всех рекомендациях.',
+  'Если есть [ПЛАН ДЕЙСТВИЙ] — это детерминированно посчитанные КОНКРЕТНЫЕ',
+  'рекомендации (мета-теги было→стало, точки быстрого роста с ожидаемыми',
+  'кликами, content refresh, каннибализация, темы статей). В разделах 4, 5 и 6',
+  'опирайся на эти КОНКРЕТНЫЕ значения и цифры: называй точные URL, готовые',
+  'title/description, ожидаемый прирост кликов и «что на что менять и зачем».',
+  'Не подменяй конкретику общими советами, когда в плане уже есть точные значения.',
   'Не добавляй преамбулы и заключения вне этой структуры.',
 ].join('\n');
 
@@ -146,7 +152,13 @@ function _stripFence(text) {
 
 function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification,
   breakdowns, periodCompare, pageDecay, brandSplit,
-  pageMetaAudit, eat, schemaAudit, linkAudit, blogPlan, geoAeo, topPageInsights }) {
+  pageMetaAudit, eat, schemaAudit, linkAudit, blogPlan, geoAeo, topPageInsights, actionPlan }) {
+  const dscfg = getProjectsConfig().deepseek;
+  // Данные собираются БЕЗ лимитов (ТЗ п.2), но в промпт LLM кладём только топ-N
+  // запросов/страниц — бюджет токенов. Детерминированные срезы (commercial,
+  // brand_split, page_decay) уже посчитаны на ПОЛНЫХ данных.
+  const promptTopQueries = (top.topQueries || []).slice(0, dscfg.topQueries);
+  const promptTopPages = (top.topPages || []).slice(0, dscfg.topPages);
   const lines = [
     '[ПРОЕКТ]',
     `Название: ${project.name || '—'}`,
@@ -164,11 +176,11 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
     '[ДИНАМИКА ПО ДНЯМ] (date, clicks, impressions, ctr%, position)',
     JSON.stringify(performance.series.slice(-90)),
     '',
-    `[ТОП-${top.topQueries.length} ЗАПРОСОВ] (query, clicks, impressions, ctr%, position)`,
-    JSON.stringify(top.topQueries),
+    `[ТОП-${promptTopQueries.length} ЗАПРОСОВ из ${(top.topQueries || []).length} (полная выгрузка)] (query, clicks, impressions, ctr%, position)`,
+    JSON.stringify(promptTopQueries),
     '',
-    `[ТОП-${top.topPages.length} СТРАНИЦ] (page, clicks, impressions, ctr%, position)`,
-    JSON.stringify(top.topPages),
+    `[ТОП-${promptTopPages.length} СТРАНИЦ из ${(top.topPages || []).length} (полная выгрузка)] (page, clicks, impressions, ctr%, position)`,
+    JSON.stringify(promptTopPages),
   ];
   lines.push(..._renderPeriodCompareLines(periodCompare));
   lines.push(..._renderBreakdownLines(breakdowns));
@@ -206,7 +218,47 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
   lines.push(..._renderGeoAeoLines(geoAeo));
   lines.push(..._renderSchemaAuditLines(schemaAudit));
   lines.push(..._renderTopPageInsightsLines(topPageInsights));
+  lines.push(..._renderActionPlanLines(actionPlan));
   return lines.join('\n');
+}
+
+/**
+ * [ПЛАН ДЕЙСТВИЙ] — детерминированно связанные, ПОСЧИТАННЫЕ рекомендации
+ * (ТЗ п.3): конкретные мета-теги было→стало, striking distance с ожидаемыми
+ * кликами, content refresh затухающих, каннибализация, темы статей. LLM обязан
+ * опираться на эти конкретные значения и цифры, а не выдумывать.
+ */
+function _renderActionPlanLines(ap) {
+  if (!ap || !ap.available) return [];
+  const lines = ['', '[ПЛАН ДЕЙСТВИЙ] (детерминированно посчитанные конкретные рекомендации — ОПИРАЙСЯ на них)'];
+  if (ap.summary) {
+    lines.push(`Сводный потенциал: +${ap.summary.est_extra_clicks} кликов/период (быстрый рост + сниппеты), восстановимо ~${ap.summary.est_recoverable_weekly_clicks} кликов/нед (refresh затухающих).`);
+  }
+  if (Array.isArray(ap.meta_changes) && ap.meta_changes.length) {
+    lines.push('', 'Конкретные правки мета-тегов (url, reason, keyword, before, suggested, why, expected_effect):',
+      JSON.stringify(ap.meta_changes.map((m) => ({
+        url: m.url, reason: m.reason, keyword: m.keyword,
+        before: m.before, suggested: m.suggested, why: m.why,
+        expected_effect: m.expected_effect,
+      }))));
+  }
+  if (Array.isArray(ap.striking_distance) && ap.striking_distance.length) {
+    lines.push('', 'Точки быстрого роста (query, page, position→target, impressions, expected_extra_clicks, action):',
+      JSON.stringify(ap.striking_distance));
+  }
+  if (Array.isArray(ap.content_refresh) && ap.content_refresh.length) {
+    lines.push('', 'Затухающие страницы под content refresh (url, тренд %/нед, mean_weekly_clicks, action):',
+      JSON.stringify(ap.content_refresh));
+  }
+  if (Array.isArray(ap.cannibalization) && ap.cannibalization.length) {
+    lines.push('', 'Каннибализация (query, pages, verdict, action):',
+      JSON.stringify(ap.cannibalization));
+  }
+  if (Array.isArray(ap.article_topics) && ap.article_topics.length) {
+    lines.push('', 'Готовые темы статей (title, description, intent, target_keywords, why):',
+      JSON.stringify(ap.article_topics));
+  }
+  return lines;
 }
 
 /**

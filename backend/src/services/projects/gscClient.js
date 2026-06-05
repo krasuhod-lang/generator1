@@ -191,6 +191,50 @@ async function querySearchAnalytics(accessToken, siteUrl, body) {
   }
 }
 
+/**
+ * Полная выгрузка searchAnalytics.query постранично (startRow + rowLimit), пока
+ * GSC отдаёт полные страницы. Снимает ограничение в 25000 строк на проект
+ * (ТЗ п.2). Каждая страница кэшируется внутри querySearchAnalytics.
+ *
+ * @param {string} accessToken
+ * @param {string} siteUrl
+ * @param {Object} body  тело запроса GSC БЕЗ rowLimit/startRow (они проставляются)
+ * @param {Object} [opts]
+ * @param {number} [opts.maxRows]  общий потолок строк (0/undefined = без лимита)
+ * @returns {Promise<{rows:Array, fromCache:boolean, pages:number}>}
+ */
+async function querySearchAnalyticsAll(accessToken, siteUrl, body = {}, opts = {}) {
+  const cfg = getProjectsConfig().gsc;
+  const pageSize = Math.min(
+    Math.max(1, Number(body.rowLimit) || cfg.pageSize || cfg.rowLimit),
+    cfg.rowLimit,
+  );
+  const maxRows = opts.maxRows != null ? Math.max(0, Number(opts.maxRows) || 0) : (cfg.maxRows || 0);
+  const maxPages = Math.max(1, Number(cfg.maxPages) || 40);
+
+  const { rowLimit: _ignored, startRow: _ignored2, ...baseBody } = body;
+  const all = [];
+  let fromCacheAll = true;
+  let pages = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const remaining = maxRows ? maxRows - all.length : pageSize;
+    if (maxRows && remaining <= 0) break;
+    const limit = maxRows ? Math.min(pageSize, remaining) : pageSize;
+    const startRow = page * pageSize;
+    // eslint-disable-next-line no-await-in-loop
+    const res = await querySearchAnalytics(accessToken, siteUrl, {
+      ...baseBody, rowLimit: limit, startRow,
+    });
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    pages += 1;
+    if (!res.fromCache) fromCacheAll = false;
+    all.push(...rows);
+    // Последняя страница: GSC вернул меньше, чем просили — данные закончились.
+    if (rows.length < limit) break;
+  }
+  return { rows: all, fromCache: fromCacheAll, pages };
+}
+
 // ── in-memory TTL+LRU кэш ───────────────────────────────────────────
 const _cache = new Map();
 
@@ -234,6 +278,7 @@ module.exports = {
   refreshAccessToken,
   listSites,
   querySearchAnalytics,
+  querySearchAnalyticsAll,
   _clearCache,
   _cacheKey,
 };

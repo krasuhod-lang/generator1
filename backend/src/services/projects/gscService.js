@@ -10,7 +10,6 @@
 const db = require('../../config/db');
 const gsc = require('./gscClient');
 const { encryptToken, decryptToken } = require('./tokenCrypto');
-const { getProjectsConfig } = require('./config');
 
 /**
  * Возвращает валидный access-токен для проекта, при необходимости обновляя
@@ -82,13 +81,11 @@ function _round(n, p = 2) {
  * (clicks, impressions, ctr, position) + суммарные тоталы за период.
  */
 async function fetchPerformanceSeries(project, range) {
-  const cfg = getProjectsConfig().gsc;
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
-  const { rows, fromCache } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+  const { rows, fromCache } = await gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
     startDate, endDate,
     dimensions: ['date'],
-    rowLimit: cfg.rowLimit,
   });
   const series = rows.map((r) => ({
     date: Array.isArray(r.keys) ? r.keys[0] : null,
@@ -113,7 +110,6 @@ async function fetchPerformanceSeries(project, range) {
 
 /** Топ-запросы и топ-страницы за период (для среза AI-аналитики). */
 async function fetchTopDimensions(project, range) {
-  const cfg = getProjectsConfig();
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
 
@@ -126,11 +122,11 @@ async function fetchTopDimensions(project, range) {
   });
 
   const [q, p] = await Promise.all([
-    gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
-      startDate, endDate, dimensions: ['query'], rowLimit: cfg.deepseek.topQueries,
+    gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
+      startDate, endDate, dimensions: ['query'],
     }),
-    gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
-      startDate, endDate, dimensions: ['page'], rowLimit: cfg.deepseek.topPages,
+    gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
+      startDate, endDate, dimensions: ['page'],
     }),
   ]);
   return {
@@ -145,13 +141,11 @@ async function fetchTopDimensions(project, range) {
  * строк {query, page, clicks, impressions, ctr%, position}.
  */
 async function fetchQueryPageMatrix(project, range) {
-  const cfg = getProjectsConfig().commercial;
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
-  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+  const { rows } = await gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
     startDate, endDate,
     dimensions: ['query', 'page'],
-    rowLimit: cfg.queryPageRowLimit,
   });
   return (rows || []).map((r) => ({
     query: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
@@ -167,15 +161,13 @@ async function fetchQueryPageMatrix(project, range) {
  * Универсальный одно-измеренческий разрез по device / country / searchAppearance.
  * Возвращает массив {key, clicks, impressions, ctr%, position}.
  */
-async function fetchBreakdown(project, range, dimension, { rowLimit = 25 } = {}) {
-  const cfg = getProjectsConfig().gsc;
+async function fetchBreakdown(project, range, dimension, { rowLimit = 0 } = {}) {
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
-  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+  const { rows } = await gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
     startDate, endDate,
     dimensions: [dimension],
-    rowLimit: Math.min(rowLimit, cfg.rowLimit),
-  });
+  }, { maxRows: rowLimit });
   return (rows || []).map((r) => ({
     key: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
     clicks: r.clicks || 0,
@@ -190,20 +182,18 @@ async function fetchBreakdown(project, range, dimension, { rowLimit = 25 } = {})
  * на каждой странице из топа). Тянем строки только для top-N страниц,
  * чтобы не раздувать запрос: фильтр по page через dimensionFilterGroups.
  */
-async function fetchPageDailySeries(project, range, pages, { rowLimit = 25000 } = {}) {
+async function fetchPageDailySeries(project, range, pages, { rowLimit = 0 } = {}) {
   if (!Array.isArray(pages) || pages.length === 0) return [];
-  const cfg = getProjectsConfig().gsc;
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
-  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+  const { rows } = await gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
     startDate, endDate,
     dimensions: ['page', 'date'],
-    rowLimit: Math.min(rowLimit, cfg.rowLimit),
     dimensionFilterGroups: [{
       filters: pages.map((p) => ({ dimension: 'page', operator: 'equals', expression: p })),
       groupType: 'or',
     }],
-  });
+  }, { maxRows: rowLimit });
   return (rows || []).map((r) => ({
     page: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
     date: Array.isArray(r.keys) ? (r.keys[1] || '') : '',
@@ -215,19 +205,18 @@ async function fetchPageDailySeries(project, range, pages, { rowLimit = 25000 } 
 }
 
 /**
- * Срез по запросам с произвольным rowLimit. Используется для:
+ * Срез по запросам с произвольным потолком. Используется для:
  *   • PoP-сравнения (запросы за предыдущий период);
- *   • расчёта бренд/небренд пропорции (нужен большой набор, не только топ-50).
+ *   • расчёта бренд/небренд пропорции (нужен весь набор, не только топ).
+ * rowLimit=0 (по умолчанию) — без лимита: тянем все запросы постранично.
  */
-async function fetchTopQueries(project, range, { rowLimit = 50 } = {}) {
-  const cfg = getProjectsConfig().gsc;
+async function fetchTopQueries(project, range, { rowLimit = 0 } = {}) {
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
-  const { rows } = await gsc.querySearchAnalytics(accessToken, project.gsc_site_url, {
+  const { rows } = await gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
     startDate, endDate,
     dimensions: ['query'],
-    rowLimit: Math.min(rowLimit, cfg.rowLimit),
-  });
+  }, { maxRows: rowLimit });
   return (rows || []).map((r) => ({
     key: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
     clicks: r.clicks || 0,
