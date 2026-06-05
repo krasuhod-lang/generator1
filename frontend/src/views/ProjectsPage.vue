@@ -50,7 +50,7 @@ async function remove(p) {
       <header>
         <h1 class="text-2xl font-bold text-gray-100">🗂 Проекты</h1>
         <p class="text-sm text-gray-400 mt-1">
-          Управление SEO-проектами, интеграция с Google Search Console и AI-аналитика DeepSeek.
+          Управление SEO-проектами, интеграция с Google Search Console и Яндекс.Вебмастером, AI-аналитика DeepSeek.
         </p>
       </header>
 
@@ -73,6 +73,11 @@ async function remove(p) {
                     placeholder="Кто целевой клиент, его боли, гео, сегменты…"></textarea>
         </div>
         <div v-if="formError" class="text-sm text-red-400">{{ formError }}</div>
+        <p class="text-xs text-gray-500">
+          После создания на странице проекта вы сможете подключить обе системы веб-аналитики —
+          <span class="text-indigo-300">Google Search Console</span> и
+          <span class="text-red-300">Яндекс.Вебмастер</span> — и сопоставить данные между ними.
+        </p>
         <div class="flex justify-end">
           <button class="btn-primary" :disabled="submitting" @click="submit">
             {{ submitting ? 'Создание…' : '➕ Создать проект' }}
@@ -98,11 +103,19 @@ async function remove(p) {
                 <a :href="p.url" target="_blank" rel="noopener" class="text-xs text-indigo-400 hover:underline truncate block"
                    @click.stop>{{ p.url }}</a>
               </div>
-              <span class="shrink-0 text-[11px] px-2 py-0.5 rounded-full border"
-                    :class="p.gsc_connected
-                      ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
-                      : 'border-gray-700 text-gray-400'">
-                {{ p.gsc_connected ? '🔗 GSC подключён' : 'GSC не подключён' }}
+              <span class="shrink-0 flex flex-wrap gap-1 justify-end">
+                <span class="text-[11px] px-2 py-0.5 rounded-full border"
+                      :class="p.gsc_connected
+                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                        : 'border-gray-700 text-gray-400'">
+                  {{ p.gsc_connected ? '🔗 GSC' : 'GSC —' }}
+                </span>
+                <span class="text-[11px] px-2 py-0.5 rounded-full border"
+                      :class="p.ydx_connected
+                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                        : 'border-gray-700 text-gray-400'">
+                  {{ p.ydx_connected ? '🔗 Яндекс' : 'Яндекс —' }}
+                </span>
               </span>
             </div>
             <p v-if="p.audience_description" class="text-xs text-gray-500 mt-2 line-clamp-2">

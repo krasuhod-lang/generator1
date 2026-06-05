@@ -196,7 +196,7 @@ async function queryHistory(accessToken, userId, hostId, { dateFrom, dateTo, ind
 const _cache = new Map();
 
 function _cacheKey(url) {
-  return crypto.createHash('sha1').update(String(url)).digest('hex');
+  return crypto.createHash('sha256').update(String(url)).digest('hex');
 }
 function _cacheGet(key) {
   const e = _cache.get(key);
