@@ -20,6 +20,7 @@ import EatTemplatesCard from '../components/EatTemplatesCard.vue';
 import SchemaAuditCard from '../components/SchemaAuditCard.vue';
 import AiVisibilityCard from '../components/AiVisibilityCard.vue';
 import RankingFactorsCard from '../components/RankingFactorsCard.vue';
+import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 
@@ -120,6 +121,31 @@ const pageMetaAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.pa
 const eatData = computed(() => currentAnalysis.value?.gsc_snapshot?.eat || null);
 const schemaAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.schema_audit || null);
 const geoAeoData = computed(() => currentAnalysis.value?.gsc_snapshot?.geo_aeo || null);
+// Реверс-инжиниринг топ-страниц: закономерности, КФ6/переспам, топ-10 дифференциал.
+const topPageInsightsData = computed(() => currentAnalysis.value?.gsc_snapshot?.top_page_insights || null);
+
+// Под-вкладки аналитики GSC: вместо длинной простыни секций показываем их как
+// табы под графиком — кликнул, появилась нужная информация.
+const gscSubTab = ref('report');
+const gscSubTabs = computed(() => [
+  { key: 'report', label: 'Отчёт ИИ', show: !!(analyzing.value || currentAnalysis.value) },
+  { key: 'dynamics', label: 'Динамика', show: !!(periodCompareData.value || breakdownsData.value || pageDecayData.value || brandSplitData.value) },
+  { key: 'commercial', label: 'Коммерция', show: !!commercialData.value },
+  { key: 'toppages', label: 'Топ-страницы', show: !!topPageInsightsData.value },
+  { key: 'links', label: 'Ссылки', show: !!linkAuditData.value },
+  { key: 'meta', label: 'Мета', show: !!pageMetaAuditData.value },
+  { key: 'blog', label: 'Блог', show: !!blogPlanData.value },
+  { key: 'eat', label: 'E-E-A-T', show: !!eatData.value },
+  { key: 'schema', label: 'Микроразметка', show: !!schemaAuditData.value },
+  { key: 'geo', label: 'GEO/AEO', show: !!geoAeoData.value },
+  { key: 'history', label: 'История', show: !!analyses.value.length },
+].filter((t) => t.show));
+// Активная под-вкладка: выбранная пользователем, либо первая доступная.
+const activeGscSubTab = computed(() => {
+  const tabs = gscSubTabs.value;
+  if (!tabs.length) return '';
+  return tabs.some((t) => t.key === gscSubTab.value) ? gscSubTab.value : tabs[0].key;
+});
 
 // Мультиисточниковая аналитика: отдельный отчёт Яндекса, сводка закономерностей
 // и аудит факторов ранжирования (что мешает росту).
@@ -550,7 +576,16 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <!-- AI report -->
+        <!-- Под-вкладки аналитики: под графиком, вместо длинной простыни -->
+        <nav v-if="gscSubTabs.length" class="flex flex-wrap gap-1 border-b border-gray-800">
+          <button v-for="t in gscSubTabs" :key="t.key" type="button"
+                  class="px-3 py-1.5 text-xs font-medium -mb-px border-b-2 transition-colors"
+                  :class="activeGscSubTab === t.key ? 'border-indigo-500 text-indigo-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                  @click="gscSubTab = t.key">{{ t.label }}</button>
+        </nav>
+
+        <!-- Панель: Отчёт ИИ -->
+        <div v-show="activeGscSubTab === 'report'">
         <section v-if="analyzing || currentAnalysis" class="card space-y-3">
           <div class="flex items-center justify-between gap-2">
             <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Отчёт AI-аналитика</h2>
@@ -570,8 +605,10 @@ onUnmounted(() => {
           </div>
           <MarkdownView v-else-if="currentAnalysis?.status === 'done'" :source="currentAnalysis.report_markdown" />
         </section>
+        </div>
 
-        <!-- Расширенные срезы: что изменилось, устройства/страны, page decay, бренд -->
+        <!-- Панель: Динамика (что изменилось, устройства/страны, page decay, бренд) -->
+        <div v-show="activeGscSubTab === 'dynamics'">
         <AnalyticsExtras
           v-if="periodCompareData || breakdownsData || pageDecayData || brandSplitData"
           :period-compare="periodCompareData"
@@ -579,29 +616,50 @@ onUnmounted(() => {
           :page-decay="pageDecayData"
           :brand-split="brandSplitData"
         />
+        </div>
 
-        <!-- Коммерческий срез -->
+        <!-- Панель: Коммерческий срез -->
+        <div v-show="activeGscSubTab === 'commercial'">
         <CommercialInsights v-if="commercialData" :commercial="commercialData" :serp-verification="serpVerificationData" />
+        </div>
 
-        <!-- Ссылочная стратегия (анкоры/доноры) -->
+        <!-- Панель: Реверс-инжиниринг топ-страниц (КФ6/переспам, топ-10 дифференциал) -->
+        <div v-show="activeGscSubTab === 'toppages'">
+        <TopPageInsightsCard v-if="topPageInsightsData" :insights="topPageInsightsData" />
+        </div>
+
+        <!-- Панель: Ссылочная стратегия (анкоры/доноры) -->
+        <div v-show="activeGscSubTab === 'links'">
         <LinkProfileCard v-if="linkAuditData" :link-audit="linkAuditData" />
+        </div>
 
-        <!-- Постраничная оптимизация метатегов через Meta Tags -->
+        <!-- Панель: Постраничная оптимизация метатегов через Meta Tags -->
+        <div v-show="activeGscSubTab === 'meta'">
         <MetaSuggestionsCard v-if="pageMetaAuditData" :page-meta-audit="pageMetaAuditData" :project-id="projectId" />
+        </div>
 
-        <!-- План публикаций в блог -->
+        <!-- Панель: План публикаций в блог -->
+        <div v-show="activeGscSubTab === 'blog'">
         <BlogTopicsCard v-if="blogPlanData" :blog-plan="blogPlanData" />
+        </div>
 
-        <!-- E-E-A-T по шаблонам страниц -->
+        <!-- Панель: E-E-A-T по шаблонам страниц -->
+        <div v-show="activeGscSubTab === 'eat'">
         <EatTemplatesCard v-if="eatData" :eat="eatData" />
+        </div>
 
-        <!-- Микроразметка -->
+        <!-- Панель: Микроразметка -->
+        <div v-show="activeGscSubTab === 'schema'">
         <SchemaAuditCard v-if="schemaAuditData" :schema-audit="schemaAuditData" />
+        </div>
 
-        <!-- GEO/AEO — нейровыдача -->
+        <!-- Панель: GEO/AEO — нейровыдача -->
+        <div v-show="activeGscSubTab === 'geo'">
         <AiVisibilityCard v-if="geoAeoData" :geo-aeo="geoAeoData" :project-id="projectId" />
+        </div>
 
-        <!-- История анализов -->
+        <!-- Панель: История анализов -->
+        <div v-show="activeGscSubTab === 'history'">
         <section v-if="analyses.length" class="card space-y-2">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">История анализов</h2>
           <div v-for="a in analyses" :key="a.id"
@@ -616,6 +674,7 @@ onUnmounted(() => {
                   }">{{ a.status }}</span>
           </div>
         </section>
+        </div>
         </div>
         <!-- ============ /Вкладка GSC ============ -->
 
