@@ -26,10 +26,13 @@
  */
 
 const db = require('../config/db');
-const { getProjectsConfig, getGoogleOAuthConfig } = require('../services/projects/config');
+const { getProjectsConfig, getGoogleOAuthConfig, getYandexOAuthConfig } = require('../services/projects/config');
 const gsc = require('../services/projects/gscClient');
+const ydx = require('../services/projects/ydxClient');
 const { encryptToken } = require('../services/projects/tokenCrypto');
-const { fetchPerformanceSeries } = require('../services/projects/gscService');
+const { fetchPerformanceSeries, fetchTopDimensions } = require('../services/projects/gscService');
+const ydxService = require('../services/projects/ydxService');
+const { compareSources } = require('../services/projects/sourceComparison');
 const { processAnalysis, collectSnapshot } = require('../services/projects/analysisRunner');
 const { generateShareToken, isValidShareToken } = require('../services/projects/shareToken');
 const { buildLeadContext } = require('../services/projects/leadContext');
@@ -66,6 +69,8 @@ const PUBLIC_COLUMNS = `
   id, name, url, audience_description,
   gsc_connected, gsc_site_url, gsc_available_sites,
   (gsc_refresh_token_enc IS NOT NULL) AS gsc_has_refresh,
+  ydx_connected, ydx_site_url, ydx_available_sites,
+  (ydx_refresh_token_enc IS NOT NULL) AS ydx_has_refresh,
   share_token, share_created_at, created_at, updated_at`;
 
 function _frontendBase() {
@@ -133,6 +138,7 @@ async function getProject(req, res, next) {
       project,
       analyses,
       gsc_configured: getGoogleOAuthConfig().configured,
+      ydx_configured: getYandexOAuthConfig().configured,
       date_presets: CFG.datePresets,
     });
   } catch (err) { return next(err); }
@@ -269,6 +275,170 @@ async function disconnectGsc(req, res, next) {
     return res.json({ ok: true });
   } catch (err) { return next(err); }
 }
+
+// ── Яндекс.Вебмастер OAuth (полный аналог GSC) ──────────────────────
+async function getYdxAuthUrl(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const url = ydx.buildAuthUrl(project.id, req.user.id);
+    return res.json({ auth_url: url });
+  } catch (err) {
+    return _integrationError(res, next, err);
+  }
+}
+
+// OAuth-колбэк Яндекса. Публичный (браузерный редирект). Проверяем state,
+// меняем code на токены, получаем список хостов, сохраняем зашифрованные токены.
+async function handleYdxCallback(req, res) {
+  const base = _frontendBase();
+  const fail = (projectId, reason) => {
+    const target = `${base}/projects/${projectId || ''}?ydx=error&reason=${encodeURIComponent(reason)}`;
+    return res.redirect(target);
+  };
+  try {
+    const { code, state, error } = req.query;
+    const decoded = ydx.verifyState(state);
+    if (!decoded) return fail('', 'invalid_state');
+    if (error) return fail(decoded.projectId, String(error));
+    if (!code) return fail(decoded.projectId, 'no_code');
+
+    const { rows } = await db.query(
+      `SELECT id FROM projects WHERE id=$1 AND user_id=$2`,
+      [decoded.projectId, decoded.userId],
+    );
+    if (rows.length === 0) return fail(decoded.projectId, 'project_not_found');
+
+    const tokens = await ydx.exchangeCodeForTokens(String(code));
+    const userId = await ydx.getUserId(tokens.accessToken);
+    const sites = await ydx.listHosts(tokens.accessToken, userId);
+    const expiry = new Date(Date.now() + tokens.expiresIn * 1000);
+
+    const refreshEnc = tokens.refreshToken ? encryptToken(tokens.refreshToken) : null;
+    await db.query(
+      `UPDATE projects
+          SET ydx_connected = TRUE,
+              ydx_access_token_enc = $2,
+              ydx_refresh_token_enc = COALESCE($3, ydx_refresh_token_enc),
+              ydx_token_expiry = $4,
+              ydx_available_sites = $5,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [decoded.projectId, encryptToken(tokens.accessToken), refreshEnc, expiry, JSON.stringify(sites)],
+    );
+    return res.redirect(`${base}/projects/${decoded.projectId}?ydx=connected`);
+  } catch (err) {
+    return res.redirect(`${base}/projects?ydx=error&reason=${encodeURIComponent(err.code || 'oauth_failed')}`);
+  }
+}
+
+async function listYdxSites(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const sites = Array.isArray(project.ydx_available_sites) ? project.ydx_available_sites : [];
+    return res.json({ connected: !!project.ydx_connected, sites, selected: project.ydx_site_url || null });
+  } catch (err) { return next(err); }
+}
+
+async function selectYdxSite(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    if (!project.ydx_connected) return res.status(409).json({ error: 'Сначала подключите Яндекс.Вебмастер' });
+    const siteUrl = String((req.body && req.body.site_url) || '').trim();
+    const available = Array.isArray(project.ydx_available_sites) ? project.ydx_available_sites : [];
+    if (!siteUrl || !available.some((s) => s.siteUrl === siteUrl)) {
+      return res.status(400).json({ error: 'Выбранный сайт недоступен в этом аккаунте Яндекс.Вебмастера' });
+    }
+    const { rows } = await db.query(
+      `UPDATE projects SET ydx_site_url=$2, updated_at=NOW()
+        WHERE id=$1 RETURNING ${PUBLIC_COLUMNS}`,
+      [project.id, siteUrl],
+    );
+    return res.json({ project: rows[0] });
+  } catch (err) { return next(err); }
+}
+
+async function disconnectYdx(req, res, next) {
+  try {
+    const { rowCount } = await db.query(
+      `UPDATE projects
+          SET ydx_connected = FALSE, ydx_access_token_enc = NULL,
+              ydx_refresh_token_enc = NULL, ydx_token_expiry = NULL,
+              ydx_available_sites = NULL, ydx_site_url = NULL, updated_at = NOW()
+        WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id],
+    );
+    if (rowCount === 0) return res.status(404).json({ error: 'Проект не найден' });
+    return res.json({ ok: true });
+  } catch (err) { return next(err); }
+}
+
+// GET /:id/ydx/performance — данные дашборда Яндекс.Вебмастера.
+async function getYdxPerformance(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    if (!project.ydx_connected || !project.ydx_site_url) {
+      return res.status(409).json({ error: 'Подключите Яндекс.Вебмастер и выберите сайт' });
+    }
+    const range = _rangeFromQuery(req.query);
+    const data = await ydxService.fetchPerformanceSeries(project, range);
+    return res.json(data);
+  } catch (err) {
+    return _integrationError(res, next, err);
+  }
+}
+
+// ── Сопоставление источников (GSC ↔ Яндекс.Вебмастер) ───────────────
+// GET /:id/compare — тянет показатели и топ-запросы из обеих систем,
+// считает дельты и формирует рекомендации по улучшению. Источник, который
+// не подключён или вернул ошибку, тихо пропускается (сравниваем доступное).
+async function compareProjectSources(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const range = _rangeFromQuery(req.query);
+
+    let gscData = null;
+    let ydxData = null;
+    const errors = {};
+
+    if (project.gsc_connected && project.gsc_site_url) {
+      try {
+        const [perf, top] = await Promise.all([
+          fetchPerformanceSeries(project, range),
+          fetchTopDimensions(project, range),
+        ]);
+        gscData = { totals: perf.totals, topQueries: top.topQueries };
+      } catch (err) { errors.google = err.code || err.message; }
+    }
+
+    if (project.ydx_connected && project.ydx_site_url) {
+      try {
+        const [perf, top] = await Promise.all([
+          ydxService.fetchPerformanceSeries(project, range),
+          ydxService.fetchTopDimensions(project, range),
+        ]);
+        ydxData = { totals: perf.totals, topQueries: top.topQueries };
+      } catch (err) { errors.yandex = err.code || err.message; }
+    }
+
+    const comparison = compareSources(gscData, ydxData);
+    return res.json({
+      comparison,
+      connected: {
+        google: Boolean(project.gsc_connected && project.gsc_site_url),
+        yandex: Boolean(project.ydx_connected && project.ydx_site_url),
+      },
+      errors,
+    });
+  } catch (err) {
+    return _integrationError(res, next, err);
+  }
+}
+
 
 // ── Дашборд ─────────────────────────────────────────────────────────
 async function getPerformance(req, res, next) {
@@ -531,6 +701,15 @@ function _gscError(res, next, err) {
   return next(err);
 }
 
+// Обобщённый обработчик ошибок интеграций (GSC + Яндекс.Вебмастер): обе
+// ошибки несут httpStatus/code, поэтому отдаём их клиенту единообразно.
+function _integrationError(res, next, err) {
+  if (err && (err.name === 'GscError' || err.name === 'YdxError')) {
+    return res.status(err.httpStatus || 502).json({ error: err.message, code: err.code });
+  }
+  return next(err);
+}
+
 // ── Расширение «Анализ GSC» (п.1-8 ТЗ) ──────────────────────────────────
 
 /**
@@ -658,6 +837,13 @@ module.exports = {
   listGscSites,
   selectGscSite,
   disconnectGsc,
+  getYdxAuthUrl,
+  handleYdxCallback,
+  listYdxSites,
+  selectYdxSite,
+  disconnectYdx,
+  getYdxPerformance,
+  compareProjectSources,
   getPerformance,
   startAnalysis,
   listAnalyses,

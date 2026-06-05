@@ -40,6 +40,24 @@ const sites = ref([]);
 const selectedSite = ref('');
 const sitesLoading = ref(false);
 
+// Активная вкладка источника данных: 'gsc' | 'ydx' | 'compare'
+const activeTab = ref('gsc');
+
+// Яндекс.Вебмастер (симметрично GSC)
+const ydxConfigured = ref(false);
+const ydxSites = ref([]);
+const selectedYdxSite = ref('');
+const ydxSitesLoading = ref(false);
+const ydxPerf = ref(null);
+const ydxPerfLoading = ref(false);
+const ydxPerfError = ref('');
+
+// Сопоставление источников (GSC ↔ Яндекс) + рекомендации
+const comparison = ref(null);
+const compareConnected = ref({ google: false, yandex: false });
+const compareLoading = ref(false);
+const compareError = ref('');
+
 // Performance
 const range = ref({ key: '28d', from: '', to: '' });
 const perf = ref(null);
@@ -82,6 +100,7 @@ function flash(msg) {
 }
 
 const gscReady = computed(() => project.value?.gsc_connected && project.value?.gsc_site_url);
+const ydxReady = computed(() => project.value?.ydx_connected && project.value?.ydx_site_url);
 
 // Коммерческий срез из снапшота последнего/открытого анализа.
 const commercialData = computed(() => currentAnalysis.value?.gsc_snapshot?.commercial || null);
@@ -108,9 +127,13 @@ async function load() {
     project.value = data.project;
     analyses.value = data.analyses || [];
     gscConfigured.value = !!data.gsc_configured;
+    ydxConfigured.value = !!data.ydx_configured;
     datePresets.value = data.date_presets || [];
     if (project.value.gsc_connected && !project.value.gsc_site_url) {
       await loadSites();
+    }
+    if (project.value.ydx_connected && !project.value.ydx_site_url) {
+      await loadYdxSites();
     }
     if (gscReady.value) {
       await loadPerformance();
@@ -162,6 +185,86 @@ async function disconnect() {
   } catch (_) { /* no-op */ }
 }
 
+// ── Яндекс.Вебмастер ──────────────────────────────────────────────
+async function loadYdxSites() {
+  ydxSitesLoading.value = true;
+  try {
+    const data = await store.getYdxSites(projectId);
+    ydxSites.value = data.sites || [];
+    selectedYdxSite.value = data.selected || (ydxSites.value[0]?.siteUrl || '');
+  } catch (_) { /* no-op */ } finally {
+    ydxSitesLoading.value = false;
+  }
+}
+
+async function connectYdx() {
+  try {
+    const url = await store.getYdxAuthUrl(projectId);
+    if (url) window.location.href = url;
+  } catch (err) {
+    flash(err.response?.data?.error || 'Не удалось начать авторизацию Яндекса');
+  }
+}
+
+async function chooseYdxSite() {
+  if (!selectedYdxSite.value) return;
+  try {
+    project.value = await store.selectYdxSite(projectId, selectedYdxSite.value);
+    flash('Сайт Яндекс.Вебмастера привязан к проекту');
+    await loadYdxPerformance();
+  } catch (err) {
+    flash(err.response?.data?.error || 'Не удалось выбрать сайт');
+  }
+}
+
+async function disconnectYdx() {
+  if (!confirm('Отключить Яндекс.Вебмастер от проекта?')) return;
+  try {
+    await store.disconnectYdx(projectId);
+    ydxPerf.value = null;
+    await load();
+  } catch (_) { /* no-op */ }
+}
+
+async function loadYdxPerformance() {
+  if (!ydxReady.value) return;
+  ydxPerfLoading.value = true;
+  ydxPerfError.value = '';
+  try {
+    ydxPerf.value = await store.getYdxPerformance(projectId, rangeParams());
+  } catch (err) {
+    ydxPerfError.value = err.response?.data?.error || 'Не удалось получить данные Яндекс.Вебмастера';
+  } finally {
+    ydxPerfLoading.value = false;
+  }
+}
+
+// ── Сопоставление источников ──────────────────────────────────────
+async function loadComparison() {
+  compareLoading.value = true;
+  compareError.value = '';
+  try {
+    const data = await store.compareSources(projectId, rangeParams());
+    comparison.value = data?.comparison || null;
+    compareConnected.value = data?.connected || { google: false, yandex: false };
+  } catch (err) {
+    compareError.value = err.response?.data?.error || 'Не удалось сопоставить данные';
+  } finally {
+    compareLoading.value = false;
+  }
+}
+
+// Переключение вкладок: лениво подгружаем данные при первом открытии.
+function switchTab(tab) {
+  activeTab.value = tab;
+  if (tab === 'ydx' && ydxReady.value && !ydxPerf.value && !ydxPerfLoading.value) {
+    loadYdxPerformance();
+  }
+  if (tab === 'compare' && !comparison.value && !compareLoading.value) {
+    loadComparison();
+  }
+}
+
 function rangeParams() {
   if (range.value.key === 'custom' && range.value.from && range.value.to) {
     return { from: range.value.from, to: range.value.to };
@@ -181,15 +284,21 @@ async function loadPerformance() {
   }
 }
 
+function _reloadActive() {
+  if (activeTab.value === 'ydx') return loadYdxPerformance();
+  if (activeTab.value === 'compare') return loadComparison();
+  return loadPerformance();
+}
+
 function setPreset(key) {
   range.value.key = key;
-  if (key !== 'custom') loadPerformance();
+  if (key !== 'custom') _reloadActive();
 }
 
 function applyCustom() {
   if (range.value.from && range.value.to) {
     range.value.key = 'custom';
-    loadPerformance();
+    _reloadActive();
   }
 }
 
@@ -276,7 +385,9 @@ onMounted(() => {
   // Обработка возврата с OAuth.
   if (route.query.gsc === 'connected') flash('Google Search Console подключён ✓');
   else if (route.query.gsc === 'error') flash('Ошибка подключения GSC: ' + (route.query.reason || ''));
-  if (route.query.gsc) router.replace({ path: route.path });
+  if (route.query.ydx === 'connected') { flash('Яндекс.Вебмастер подключён ✓'); activeTab.value = 'ydx'; }
+  else if (route.query.ydx === 'error') { flash('Ошибка подключения Яндекс.Вебмастера: ' + (route.query.reason || '')); activeTab.value = 'ydx'; }
+  if (route.query.gsc || route.query.ydx) router.replace({ path: route.path });
   load();
 });
 onUnmounted(() => {
@@ -304,6 +415,32 @@ onUnmounted(() => {
           </div>
         </header>
 
+        <!-- Вкладки источников данных: GSC / Яндекс.Вебмастер / Сравнение -->
+        <nav class="flex flex-wrap gap-1 border-b border-gray-800">
+          <button type="button"
+                  class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
+                  :class="activeTab === 'gsc' ? 'border-indigo-500 text-indigo-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                  @click="switchTab('gsc')">
+            Google Search Console
+            <span v-if="gscReady" class="ml-1 text-emerald-400">●</span>
+          </button>
+          <button type="button"
+                  class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
+                  :class="activeTab === 'ydx' ? 'border-red-500 text-red-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                  @click="switchTab('ydx')">
+            Яндекс.Вебмастер
+            <span v-if="ydxReady" class="ml-1 text-emerald-400">●</span>
+          </button>
+          <button type="button"
+                  class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
+                  :class="activeTab === 'compare' ? 'border-fuchsia-500 text-fuchsia-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                  @click="switchTab('compare')">
+            Сравнение и рекомендации
+          </button>
+        </nav>
+
+        <!-- ============ Вкладка: Google Search Console ============ -->
+        <div v-show="activeTab === 'gsc'" class="space-y-5">
         <!-- GSC connect block -->
         <section class="card space-y-3">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Google Search Console</h2>
@@ -472,6 +609,185 @@ onUnmounted(() => {
                   }">{{ a.status }}</span>
           </div>
         </section>
+        </div>
+        <!-- ============ /Вкладка GSC ============ -->
+
+        <!-- ============ Вкладка: Яндекс.Вебмастер ============ -->
+        <div v-show="activeTab === 'ydx'" class="space-y-5">
+          <!-- Yandex connect block -->
+          <section class="card space-y-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-red-300">Яндекс.Вебмастер</h2>
+
+            <div v-if="!ydxConfigured" class="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded p-2">
+              Интеграция Яндекса не настроена на сервере (YANDEX_CLIENT_ID / SECRET / REDIRECT_URI).
+              Подключение будет доступно после настройки.
+            </div>
+
+            <div v-if="!project.ydx_connected">
+              <button class="btn-primary !bg-red-600 hover:!bg-red-500" :disabled="!ydxConfigured" @click="connectYdx">
+                🔗 Подключить Яндекс.Вебмастер
+              </button>
+            </div>
+
+            <div v-else-if="!project.ydx_site_url" class="space-y-2">
+              <p class="text-sm text-gray-300">Аккаунт подключён. Выберите подтверждённый сайт:</p>
+              <div class="flex gap-2 items-center">
+                <select v-model="selectedYdxSite" class="input max-w-md" :disabled="ydxSitesLoading">
+                  <option v-for="s in ydxSites" :key="s.siteUrl" :value="s.siteUrl">{{ s.siteUrl }}</option>
+                </select>
+                <button class="btn-primary !bg-red-600 hover:!bg-red-500" :disabled="!selectedYdxSite" @click="chooseYdxSite">Привязать</button>
+              </div>
+              <p v-if="!ydxSites.length && !ydxSitesLoading" class="text-xs text-gray-500">Нет подтверждённых сайтов в этом аккаунте Яндекс.Вебмастера.</p>
+            </div>
+
+            <div v-else class="flex items-center justify-between">
+              <span class="text-sm text-emerald-300">✓ Привязан сайт: <b>{{ project.ydx_site_url }}</b></span>
+              <button class="text-xs text-red-400 hover:text-red-300" @click="disconnectYdx">Отключить</button>
+            </div>
+          </section>
+
+          <!-- Yandex dashboard -->
+          <section v-if="ydxReady" class="card space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-red-300">Эффективность в Яндексе</h2>
+              <div class="flex flex-wrap gap-1.5">
+                <button v-for="p in datePresets" :key="p.key" type="button"
+                        class="text-xs px-2.5 py-1 rounded border transition-colors"
+                        :class="range.key === p.key ? 'border-red-500 text-red-200 bg-red-500/10' : 'border-gray-700 text-gray-400 hover:text-gray-200'"
+                        @click="setPreset(p.key)">{{ p.label }}</button>
+                <div class="flex items-center gap-1">
+                  <input type="date" v-model="range.from" class="input !py-1 text-xs" />
+                  <span class="text-gray-600 text-xs">—</span>
+                  <input type="date" v-model="range.to" class="input !py-1 text-xs" />
+                  <button class="text-xs px-2.5 py-1 rounded border border-gray-700 text-gray-300 hover:text-white" @click="applyCustom">OK</button>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="ydxPerf && !ydxPerfLoading" class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">Клики</div>
+                <div class="text-xl font-bold text-red-300">{{ ydxPerf.totals.clicks.toLocaleString('ru') }}</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">Показы</div>
+                <div class="text-xl font-bold text-orange-300">{{ ydxPerf.totals.impressions.toLocaleString('ru') }}</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">CTR</div>
+                <div class="text-xl font-bold text-emerald-300">{{ ydxPerf.totals.ctr }}%</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">Ср. позиция</div>
+                <div class="text-xl font-bold text-amber-300">{{ ydxPerf.totals.position }}</div>
+              </div>
+            </div>
+
+            <div v-if="ydxPerfLoading" class="h-80 animate-pulse bg-gray-900/60 rounded-lg"></div>
+            <div v-else-if="ydxPerfError" class="text-sm text-red-400">{{ ydxPerfError }}</div>
+            <GscPerformanceChart v-else-if="ydxPerf && ydxPerf.series.length" :series="ydxPerf.series" />
+            <div v-else class="text-sm text-gray-500 text-center py-6">Нет данных за выбранный период.</div>
+          </section>
+        </div>
+        <!-- ============ /Вкладка Яндекс.Вебмастер ============ -->
+
+        <!-- ============ Вкладка: Сравнение и рекомендации ============ -->
+        <div v-show="activeTab === 'compare'" class="space-y-5">
+          <section class="card space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-fuchsia-300">Сопоставление Google ↔ Яндекс</h2>
+              <div class="flex flex-wrap gap-1.5">
+                <button v-for="p in datePresets" :key="p.key" type="button"
+                        class="text-xs px-2.5 py-1 rounded border transition-colors"
+                        :class="range.key === p.key ? 'border-fuchsia-500 text-fuchsia-200 bg-fuchsia-500/10' : 'border-gray-700 text-gray-400 hover:text-gray-200'"
+                        @click="setPreset(p.key)">{{ p.label }}</button>
+                <button class="text-xs px-2.5 py-1 rounded border border-gray-700 text-gray-300 hover:text-white" @click="loadComparison">↻ Обновить</button>
+              </div>
+            </div>
+
+            <div v-if="!compareConnected.google || !compareConnected.yandex" class="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded p-2">
+              Для полноценного сравнения подключите обе системы.
+              <template v-if="!compareConnected.google"> Google Search Console — не подключён.</template>
+              <template v-if="!compareConnected.yandex"> Яндекс.Вебмастер — не подключён.</template>
+            </div>
+
+            <div v-if="compareLoading" class="h-40 animate-pulse bg-gray-900/60 rounded-lg"></div>
+            <div v-else-if="compareError" class="text-sm text-red-400">{{ compareError }}</div>
+
+            <template v-else-if="comparison">
+              <p class="text-sm text-gray-300">{{ comparison.summary }}</p>
+
+              <!-- Таблица суммарных показателей -->
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left text-[11px] uppercase text-gray-500 border-b border-gray-800">
+                      <th class="py-2 pr-3">Показатель</th>
+                      <th class="py-2 px-3 text-indigo-300">Google</th>
+                      <th class="py-2 px-3 text-red-300">Яндекс</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in comparison.totals" :key="row.metric" class="border-b border-gray-800/60 last:border-0">
+                      <td class="py-2 pr-3 text-gray-300">{{ row.metric }}</td>
+                      <td class="py-2 px-3 font-semibold text-indigo-200">
+                        {{ row.is_percent ? row.google + '%' : Number(row.google).toLocaleString('ru') }}
+                        <span v-if="row.google_share != null" class="text-[11px] text-gray-500">({{ row.google_share }}%)</span>
+                      </td>
+                      <td class="py-2 px-3 font-semibold text-red-200">
+                        {{ row.is_percent ? row.yandex + '%' : Number(row.yandex).toLocaleString('ru') }}
+                        <span v-if="row.yandex_share != null" class="text-[11px] text-gray-500">({{ row.yandex_share }}%)</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="grid grid-cols-3 gap-3 text-center text-xs">
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-2">
+                  <div class="text-gray-500">Общих запросов</div>
+                  <div class="text-lg font-bold text-fuchsia-300">{{ comparison.queries.overlap_count }}</div>
+                </div>
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-2">
+                  <div class="text-gray-500">Только Google</div>
+                  <div class="text-lg font-bold text-indigo-300">{{ comparison.queries.only_google_count }}</div>
+                </div>
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-2">
+                  <div class="text-gray-500">Только Яндекс</div>
+                  <div class="text-lg font-bold text-red-300">{{ comparison.queries.only_yandex_count }}</div>
+                </div>
+              </div>
+            </template>
+          </section>
+
+          <!-- Рекомендации -->
+          <section v-if="comparison && comparison.recommendations && comparison.recommendations.length" class="card space-y-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-fuchsia-300">Рекомендации по улучшению</h2>
+            <div v-for="(rec, i) in comparison.recommendations" :key="i"
+                 class="border border-gray-800 rounded-lg p-3 bg-gray-950/60">
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] uppercase px-2 py-0.5 rounded-full border"
+                      :class="{
+                        'border-red-500/40 text-red-300': rec.priority==='high',
+                        'border-amber-500/40 text-amber-300': rec.priority==='medium',
+                        'border-sky-500/40 text-sky-300': rec.priority==='info',
+                      }">{{ rec.priority }}</span>
+                <span class="text-sm font-semibold text-gray-100">{{ rec.title }}</span>
+              </div>
+              <p class="text-sm text-gray-400 mt-1">{{ rec.detail }}</p>
+              <ul v-if="rec.items && rec.items.length" class="mt-2 space-y-0.5 text-xs text-gray-400">
+                <li v-for="(it, j) in rec.items" :key="j" class="flex flex-wrap gap-x-2">
+                  <span class="text-gray-200">{{ it.query }}</span>
+                  <span v-if="it.google_position != null" class="text-indigo-300">Google: {{ it.google_position }}</span>
+                  <span v-if="it.yandex_position != null" class="text-red-300">Яндекс: {{ it.yandex_position }}</span>
+                  <span v-if="it.google_impressions != null" class="text-indigo-300">Google показы: {{ it.google_impressions }}</span>
+                  <span v-if="it.yandex_impressions != null" class="text-red-300">Яндекс показы: {{ it.yandex_impressions }}</span>
+                </li>
+              </ul>
+            </div>
+          </section>
+        </div>
+        <!-- ============ /Вкладка Сравнение ============ -->
 
         <!-- Share -->
         <section class="card space-y-2">

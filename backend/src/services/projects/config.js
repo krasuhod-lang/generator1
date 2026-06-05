@@ -40,6 +40,40 @@ const PROJECTS_CONFIG = deepFreeze({
     rowLimit: 25000,            // верхний предел строк на запрос к GSC
   },
 
+  // Яндекс.Вебмастер / Yandex OAuth 2.0 — вторая аналитическая интеграция
+  // проекта (по аналогии с GSC). Поведение симметрично gsc-блоку, чтобы
+  // переиспользовать паттерн (см. projects/ydxClient.js, projects/ydxService.js).
+  ydx: {
+    // OAuth-эндпоинты Яндекс ID.
+    authUrl: 'https://oauth.yandex.ru/authorize',
+    tokenUrl: 'https://oauth.yandex.ru/token',
+    // Webmaster API v4.
+    apiBase: 'https://api.webmaster.yandex.net/v4',
+    // Право доступа к данным Яндекс.Вебмастера (read-only достаточно для
+    // дашборда и аналитики поисковых запросов).
+    scope: 'webmaster:hostinfo webmaster:verify',
+    httpTimeoutMs: 20000,
+    // Кэш ответов Webmaster API (соблюдаем лимиты — не бьёмся в API при
+    // каждом обновлении страницы).
+    cacheTtlMs: 10 * 60 * 1000, // 10 минут
+    cacheMaxEntries: 500,
+    // Webmaster отдаёт статистику с задержкой ~1-2 дня — не запрашиваем «сегодня».
+    lagDays: 2,
+    // Тянем ВСЕ популярные запросы периода постранично (без лимита).
+    //   pageSize  — строк за один запрос (ограничение Webmaster API ≤ 500);
+    //   maxRows   — общий потолок (0 = без лимита, тянем все страницы);
+    //   maxPages  — страховка от бесконечного цикла при сбоях пагинации.
+    pageSize: 500,
+    maxRows: 0,
+    maxPages: 500,
+    // Индикаторы статистики запросов Webmaster API.
+    indicators: {
+      shows: 'TOTAL_SHOWS',
+      clicks: 'TOTAL_CLICKS',
+      position: 'AVG_SHOW_POSITION',
+    },
+  },
+
   // DeepSeek — «Senior SEO-аналитик». Долгий ответ (30–60 c) — задача
   // выполняется в фоне, фронт поллит статус.
   //
@@ -471,4 +505,23 @@ function getGoogleOAuthConfig() {
   };
 }
 
-module.exports = { getProjectsConfig, getGoogleOAuthConfig, deepFreeze };
+/**
+ * Сконфигурирован ли Yandex OAuth (Яндекс.Вебмастер). Симметрично
+ * getGoogleOAuthConfig: если не задан — Webmaster-эндпоинты деградируют с
+ * понятной ошибкой, остальной функционал проектов работает.
+ * Секреты читаются из process.env (без правки .env.example):
+ *   YANDEX_CLIENT_ID, YANDEX_CLIENT_SECRET, YANDEX_OAUTH_REDIRECT_URI.
+ */
+function getYandexOAuthConfig() {
+  const clientId = (process.env.YANDEX_CLIENT_ID || '').trim();
+  const clientSecret = (process.env.YANDEX_CLIENT_SECRET || '').trim();
+  const redirectUri = (process.env.YANDEX_OAUTH_REDIRECT_URI || '').trim();
+  return {
+    clientId,
+    clientSecret,
+    redirectUri,
+    configured: Boolean(clientId && clientSecret && redirectUri),
+  };
+}
+
+module.exports = { getProjectsConfig, getGoogleOAuthConfig, getYandexOAuthConfig, deepFreeze };

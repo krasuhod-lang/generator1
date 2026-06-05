@@ -55,6 +55,16 @@ router.get('/:id/gsc/sites',       auth, c.listGscSites);
 router.post('/:id/gsc/select-site', auth, c.selectGscSite);
 router.delete('/:id/gsc',          auth, c.disconnectGsc);
 
+// Яндекс.Вебмастер (симметрично GSC)
+router.get('/:id/ydx/auth-url',     auth, c.getYdxAuthUrl);
+router.get('/:id/ydx/sites',        auth, c.listYdxSites);
+router.post('/:id/ydx/select-site', auth, c.selectYdxSite);
+router.delete('/:id/ydx',           auth, c.disconnectYdx);
+router.get('/:id/ydx/performance',  auth, c.getYdxPerformance);
+
+// Сопоставление источников (GSC ↔ Яндекс.Вебмастер) + рекомендации
+router.get('/:id/compare',          auth, c.compareProjectSources);
+
 // Дашборд
 router.get('/:id/performance',     auth, c.getPerformance);
 

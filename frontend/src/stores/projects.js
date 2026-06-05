@@ -63,6 +63,33 @@ export const useProjectsStore = defineStore('projects', {
       await api.delete(`/projects/${id}/gsc`);
     },
 
+    // ── Яндекс.Вебмастер (симметрично GSC) ───────────────────────────
+    async getYdxAuthUrl(id) {
+      const { data } = await api.get(`/projects/${id}/ydx/auth-url`);
+      return data?.auth_url || null;
+    },
+    async getYdxSites(id) {
+      const { data } = await api.get(`/projects/${id}/ydx/sites`);
+      return data || { sites: [] };
+    },
+    async selectYdxSite(id, siteUrl) {
+      const { data } = await api.post(`/projects/${id}/ydx/select-site`, { site_url: siteUrl });
+      return data?.project || null;
+    },
+    async disconnectYdx(id) {
+      await api.delete(`/projects/${id}/ydx`);
+    },
+    async getYdxPerformance(id, params) {
+      const { data } = await api.get(`/projects/${id}/ydx/performance`, { params });
+      return data || null;
+    },
+
+    // ── Сопоставление источников (GSC ↔ Яндекс) + рекомендации ───────
+    async compareSources(id, params) {
+      const { data } = await api.get(`/projects/${id}/compare`, { params });
+      return data || null;
+    },
+
     // ── Дашборд ──────────────────────────────────────────────────────
     async getPerformance(id, params) {
       const { data } = await api.get(`/projects/${id}/performance`, { params });
