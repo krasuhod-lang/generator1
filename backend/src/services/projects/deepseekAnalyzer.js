@@ -16,10 +16,9 @@
  * никогда не бросает, возвращает { verdict: 'ok'|'skipped'|'error' }.
  */
 
-const { callDeepSeek } = require('../llm/deepseek.adapter');
-const { calcCost } = require('../metrics/priceCalculator');
 const llmUsageLog = require('../aegis/llmUsageLog');
 const { getProjectsConfig } = require('./config');
+const { runAnalyst, runAnalystTracked, analystAvailable } = require('./llmAnalyst');
 
 const SYSTEM_PROMPT = [
   'Ты — Senior SEO-аналитик с 10+ годами опыта в поисковом продвижении.',
@@ -456,55 +455,17 @@ function _providerName(model) {
 
 /**
  * Запускает анализ. Возвращает объект-результат (никогда не бросает).
+ * LLM-провайдер выбирается в llmAnalyst (по умолчанию Gemini 3.1 Pro,
+ * фолбэк — DeepSeek-reasoner).
  */
 async function runProjectAnalysis(payload) {
   const cfg = getProjectsConfig().deepseek;
   if (!cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!process.env.DEEPSEEK_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!analystAvailable()) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const userPrompt = _buildUserPrompt(payload);
-  try {
-    const t0 = Date.now();
-    const resp = await callDeepSeek(SYSTEM_PROMPT, userPrompt, {
-      temperature: cfg.temperature,
-      maxTokens: cfg.maxTokens,
-      timeoutMs: cfg.timeoutMs,
-      model: cfg.model,
-    });
-    const tIn = resp.tokensIn || 0;
-    const tOut = resp.tokensOut || 0;
-    const cached = resp.cacheHitTokens || 0;
-    const provider = _providerName(cfg.model);
-    const cost = calcCost(provider, tIn, tOut, { cachedTokens: cached });
-    const durationMs = Date.now() - t0;
-    // Эгида: учитываем расход LLM в сквозной cost-аналитике (graceful, не бросает).
-    try {
-      llmUsageLog.recordUsage({
-        provider,
-        kind: 'project_seo_analysis',
-        outcome: 'ok',
-        tokensIn: tIn,
-        tokensOut: tOut,
-        cachedTokens: cached,
-        costUsd: cost,
-        latencyMs: durationMs,
-      });
-    } catch (_) { /* no-op */ }
-    return {
-      verdict: 'ok',
-      markdown: _stripFence(resp.text || ''),
-      tokens_in: tIn,
-      tokens_out: tOut,
-      cost_usd: Math.round(cost * 1e6) / 1e6,
-      model: resp.model || cfg.model || 'deepseek',
-      duration_ms: durationMs,
-    };
-  } catch (err) {
-    try {
-      llmUsageLog.recordUsage({ provider: _providerName(cfg.model), kind: 'project_seo_analysis', outcome: 'error' });
-    } catch (_) { /* no-op */ }
-    return { verdict: 'error', reason: (err && err.message) ? err.message : String(err) };
-  }
+  const res = await runAnalyst(SYSTEM_PROMPT, userPrompt, { kind: 'project_seo_analysis' });
+  return res;
 }
 
 module.exports = { runProjectAnalysis, runProjectAnalysisBatched, SYSTEM_PROMPT, _buildUserPrompt };
@@ -538,27 +499,9 @@ function _buildMapUserPrompt(chunk) {
 }
 
 async function _callDeepSeekTracked(system, user, cfg, kind) {
-  const t0 = Date.now();
-  const resp = await callDeepSeek(system, user, {
-    temperature: cfg.temperature,
-    maxTokens: cfg.maxTokens,
-    timeoutMs: cfg.timeoutMs,
-    model: cfg.model,
-  });
-  const tIn = resp.tokensIn || 0;
-  const tOut = resp.tokensOut || 0;
-  const cached = resp.cacheHitTokens || 0;
-  const provider = _providerName(cfg.model);
-  const cost = calcCost(provider, tIn, tOut, { cachedTokens: cached });
-  const durationMs = Date.now() - t0;
-  try {
-    llmUsageLog.recordUsage({
-      provider, kind, outcome: 'ok',
-      tokensIn: tIn, tokensOut: tOut, cachedTokens: cached,
-      costUsd: cost, latencyMs: durationMs,
-    });
-  } catch (_) { /* no-op */ }
-  return { text: resp.text || '', tIn, tOut, cached, cost, model: resp.model || cfg.model || 'deepseek', durationMs };
+  // cfg сохранён в сигнатуре для совместимости; параметры берёт llmAnalyst из
+  // config.analyzer (Gemini) или config.deepseek (фолбэк).
+  return runAnalystTracked(system, user, { kind });
 }
 
 /**
@@ -572,7 +515,7 @@ async function runProjectAnalysisBatched(payload) {
   const dcfg = cfg.deepseek;
   const bcfg = cfg.batch;
   if (!dcfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!process.env.DEEPSEEK_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!analystAvailable()) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const slice = {
     topQueries: (payload.top && payload.top.topQueries) || [],

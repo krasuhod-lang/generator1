@@ -31,6 +31,10 @@ const { buildGeoAeo } = require('./geoAeo');
 const { analyzeTopPages } = require('./topPageInsights');
 const dspyClient = require('./dspyClient');
 const { callDeepSeek } = require('../llm/deepseek.adapter');
+const ydxService = require('./ydxService');
+const { runYandexAnalysis } = require('./ydxAnalyzer');
+const { buildRankingFactors } = require('./rankingFactors');
+const { runSynthesis } = require('./synthesisAnalyzer');
 
 /**
  * llmFn для donorTopicGenerator («Темы статей под анкоры»). Один батч-вызов
@@ -161,6 +165,55 @@ async function collectSnapshot(project, range) {
   return { snapshot, payload };
 }
 
+/**
+ * Собирает снапшот Яндекс.Вебмастера за тот же период (раздельный анализ).
+ * Данные Webmaster API беднее GSC: тоталы, посуточная динамика, топ-запросы и
+ * бренд-сплит. Полностью graceful: при любой ошибке/отсутствии подключения
+ * возвращает null — пайплайн продолжает работать только по Google.
+ *
+ * @returns {Promise<{snapshot:object, payload:object}|null>}
+ */
+async function collectYdxSnapshot(project, range) {
+  const acfg = getProjectsConfig().analyzer;
+  if (!acfg || !acfg.yandex || !acfg.yandex.enabled) return null;
+  if (!project.ydx_connected || !project.ydx_site_url) return null;
+  try {
+    const performance = await ydxService.fetchPerformanceSeries(project, range);
+    let topQueries = [];
+    try {
+      topQueries = await ydxService.fetchTopQueries(project, range);
+    } catch (_) { topQueries = []; }
+
+    let brandSplit = null;
+    try {
+      const brandTokens = deriveBrandTokens({
+        name: project.name, siteUrl: project.ydx_site_url, url: project.url,
+      });
+      brandSplit = splitBrand(topQueries, brandTokens);
+    } catch (_) { brandSplit = null; }
+
+    const snapshot = {
+      source: 'yandex',
+      range: performance.range,
+      totals: performance.totals,
+      series: performance.series,
+      top_queries: topQueries,
+      brand_split: brandSplit,
+    };
+    const payload = {
+      project,
+      range: performance.range,
+      performance,
+      topQueries,
+      brandSplit,
+    };
+    return { snapshot, payload };
+  } catch (e) {
+    console.warn('[projects/analysisRunner] ydx snapshot failed:', e.message);
+    return null;
+  }
+}
+
 /** Удаляет транзиентные _scans из eat-результата перед персистом. */
 function _stripScans(eat) {
   if (!eat || typeof eat !== 'object') return eat;
@@ -269,7 +322,9 @@ async function processAnalysis(analysisId) {
       `SELECT a.id, a.project_id, a.period_from, a.period_to, a.range_key,
               p.name, p.url, p.audience_description,
               p.gsc_connected, p.gsc_site_url, p.gsc_access_token_enc,
-              p.gsc_refresh_token_enc, p.gsc_token_expiry
+              p.gsc_refresh_token_enc, p.gsc_token_expiry,
+              p.ydx_connected, p.ydx_site_url, p.ydx_access_token_enc,
+              p.ydx_refresh_token_enc, p.ydx_token_expiry, p.ydx_available_sites
          FROM project_analyses a
          JOIN projects p ON p.id = a.project_id
         WHERE a.id = $1`,
@@ -287,6 +342,12 @@ async function processAnalysis(analysisId) {
       gsc_access_token_enc: row.gsc_access_token_enc,
       gsc_refresh_token_enc: row.gsc_refresh_token_enc,
       gsc_token_expiry: row.gsc_token_expiry,
+      ydx_connected: row.ydx_connected,
+      ydx_site_url: row.ydx_site_url,
+      ydx_access_token_enc: row.ydx_access_token_enc,
+      ydx_refresh_token_enc: row.ydx_refresh_token_enc,
+      ydx_token_expiry: row.ydx_token_expiry,
+      ydx_available_sites: row.ydx_available_sites,
     };
     range = (row.period_from && row.period_to)
       ? { from: _isoDate(row.period_from), to: _isoDate(row.period_to) }
@@ -345,8 +406,51 @@ async function processAnalysis(analysisId) {
       : await runProjectAnalysis(payload);
 
     if (result.verdict !== 'ok') {
-      await _setError(analysisId, `DeepSeek ${result.verdict}: ${result.reason || ''}`);
+      await _setError(analysisId, `Анализатор ${result.verdict}: ${result.reason || ''}`);
       return;
+    }
+
+    // ── Раздельный анализ Яндекса + сводка закономерностей + ranking-gaps ──
+    // Всё graceful: сбой любого из проходов не валит основной (Google) отчёт.
+    let ydxSnapshot = null;
+    let ydxPayload = null;
+    let ydxReport = null;
+    try {
+      const ydx = await collectYdxSnapshot(project, range);
+      if (ydx) { ydxSnapshot = ydx.snapshot; ydxPayload = ydx.payload; }
+    } catch (e) {
+      console.warn('[projects/analysisRunner] ydx collect failed:', e.message);
+    }
+    if (ydxPayload) {
+      try {
+        const yr = await runYandexAnalysis(ydxPayload);
+        if (yr && yr.verdict === 'ok') ydxReport = yr.markdown;
+      } catch (e) {
+        console.warn('[projects/analysisRunner] ydx analysis failed:', e.message);
+      }
+    }
+
+    // Детерминированный аудит факторов ранжирования (что мешает росту).
+    let rankingFactors = null;
+    try { rankingFactors = buildRankingFactors(snapshot, ydxSnapshot); } catch (_) { rankingFactors = null; }
+
+    // Финальная сводка закономерностей Google ↔ Яндекс + подсветка пробелов.
+    let synthesisMarkdown = null;
+    const synthCfg = getProjectsConfig().analyzer;
+    if (synthCfg && synthCfg.synthesis && synthCfg.synthesis.enabled) {
+      try {
+        const syn = await runSynthesis({
+          project,
+          gscReport: result.markdown,
+          ydxReport,
+          gscPerformance: payload.performance,
+          ydxPerformance: ydxPayload ? ydxPayload.performance : null,
+          rankingFactors,
+        });
+        if (syn && (syn.markdown || syn.verdict === 'ok')) synthesisMarkdown = syn.markdown || null;
+      } catch (e) {
+        console.warn('[projects/analysisRunner] synthesis failed:', e.message);
+      }
     }
 
     await db.query(
@@ -358,6 +462,10 @@ async function processAnalysis(analysisId) {
               tokens_in = $5,
               tokens_out = $6,
               cost_usd = $7,
+              ydx_snapshot = $8,
+              ydx_report_markdown = $9,
+              synthesis_markdown = $10,
+              ranking_factors = $11,
               completed_at = NOW()
         WHERE id = $1`,
       [
@@ -368,6 +476,10 @@ async function processAnalysis(analysisId) {
         result.tokens_in,
         result.tokens_out,
         result.cost_usd,
+        ydxSnapshot ? JSON.stringify(ydxSnapshot) : null,
+        ydxReport,
+        synthesisMarkdown,
+        rankingFactors ? JSON.stringify(rankingFactors) : null,
       ],
     );
 
@@ -493,4 +605,4 @@ async function _buildBrandSplit(project, range, cfg, siteUrl) {
   }
 }
 
-module.exports = { processAnalysis, collectSnapshot };
+module.exports = { processAnalysis, collectSnapshot, collectYdxSnapshot };
