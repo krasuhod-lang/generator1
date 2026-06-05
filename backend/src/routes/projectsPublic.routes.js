@@ -28,6 +28,7 @@ const publicLimiter = rateLimit({
 router.use(publicLimiter);
 
 router.get('/projects/gsc/callback', c.handleGscCallback);
+router.get('/projects/ydx/callback', c.handleYdxCallback);
 router.get('/project/:token',        c.getSharedProject);
 
 module.exports = router;

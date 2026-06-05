@@ -134,6 +134,11 @@ const oauthAliasLimiter = require('express-rate-limit')({
 app.get('/api/oauth/google/callback',
   oauthAliasLimiter,
   require('./src/controllers/projects.controller').handleGscCallback);
+// Алиас OAuth-колбэка Яндекса (симметрично Google) для совместимости с
+// настроенным в Яндекс ID redirect_uri вида https://<домен>/api/oauth/yandex/callback.
+app.get('/api/oauth/yandex/callback',
+  oauthAliasLimiter,
+  require('./src/controllers/projects.controller').handleYdxCallback);
 app.use('/api/aegis',          aegisRoutes);
 
 // -----------------------------------------------------------------
@@ -1331,6 +1336,16 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_user_created ON projects (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_share_token  ON projects (share_token) WHERE share_token IS NOT NULL`);
+
+    // Migration 062: интеграция с Яндекс.Вебмастером (вторая аналитическая
+    // система проекта, симметрично GSC). Токены Yandex OAuth храним строго
+    // зашифрованными (AES-256-GCM, projects/tokenCrypto.js) — в колонках *_enc.
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS ydx_connected         BOOLEAN NOT NULL DEFAULT FALSE`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS ydx_site_url          TEXT`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS ydx_available_sites   JSONB`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS ydx_access_token_enc  TEXT`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS ydx_refresh_token_enc TEXT`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS ydx_token_expiry      TIMESTAMPTZ`);
     await db.query(`
       CREATE TABLE IF NOT EXISTS project_analyses (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
