@@ -103,8 +103,8 @@ function _historySeries(indicators, name) {
 
 /**
  * Данные для графика эффективности Яндекс.Вебмастера: посуточная динамика
- * показов/кликов + суммарные тоталы (CTR — производная, позиция — средняя по
- * топ-запросам периода).
+ * показов, кликов и средней позиции + суммарные тоталы (CTR — производная).
+ * Метрики раздельные (как в GSC): показы, клики, CTR, средняя позиция.
  */
 async function fetchPerformanceSeries(project, range) {
   const cfg = getProjectsConfig().ydx;
@@ -113,11 +113,13 @@ async function fetchPerformanceSeries(project, range) {
 
   const indicators = await ydx.queryHistory(accessToken, userId, hostId, {
     dateFrom: startDate, dateTo: endDate,
-    indicators: [cfg.indicators.shows, cfg.indicators.clicks],
+    indicators: [cfg.indicators.shows, cfg.indicators.clicks, cfg.indicators.position],
   });
   const shows = _historySeries(indicators, cfg.indicators.shows);
   const clicks = _historySeries(indicators, cfg.indicators.clicks);
+  const positions = _historySeries(indicators, cfg.indicators.position);
   const clicksByDate = new Map(clicks.map((p) => [p.date, p.value]));
+  const posByDate = new Map(positions.map((p) => [p.date, p.value]));
   const series = shows.map((p) => {
     const c = clicksByDate.get(p.date) || 0;
     return {
@@ -125,22 +127,30 @@ async function fetchPerformanceSeries(project, range) {
       clicks: c,
       impressions: p.value,
       ctr: p.value ? _round((c / p.value) * 100, 2) : 0,
-      position: 0,
+      position: _round(posByDate.get(p.date) || 0, 2),
     };
   });
   const totalClicks = series.reduce((s, p) => s + p.clicks, 0);
   const totalImpr = series.reduce((s, p) => s + p.impressions, 0);
   const avgCtr = totalImpr ? _round((totalClicks / totalImpr) * 100, 2) : 0;
 
-  // Средняя позиция — из топ-запросов (история её не отдаёт), взвешенно по показам.
-  let avgPos = 0;
-  try {
-    const top = await fetchTopQueries(project, range, { ctx: { accessToken, userId, hostId } });
-    const wSum = top.reduce((s, q) => s + q.impressions, 0);
-    if (wSum) {
-      avgPos = _round(top.reduce((s, q) => s + q.position * q.impressions, 0) / wSum, 2);
-    }
-  } catch (_) { /* позиция опциональна */ }
+  // Средняя позиция за период — взвешенно по показам из посуточного ряда.
+  let posW = 0;
+  let posN = 0;
+  for (const p of series) {
+    if (p.position > 0) { const w = p.impressions || 1; posW += p.position * w; posN += w; }
+  }
+  let avgPos = posN ? _round(posW / posN, 2) : 0;
+  // Фолбэк: если история не отдала позицию — берём её из топ-запросов.
+  if (!avgPos) {
+    try {
+      const top = await fetchTopQueries(project, range, { ctx: { accessToken, userId, hostId } });
+      const wSum = top.reduce((s, q) => s + q.impressions, 0);
+      if (wSum) {
+        avgPos = _round(top.reduce((s, q) => s + q.position * q.impressions, 0) / wSum, 2);
+      }
+    } catch (_) { /* позиция опциональна */ }
+  }
 
   return {
     source: 'yandex',
@@ -154,16 +164,21 @@ async function fetchPerformanceSeries(project, range) {
 /**
  * Топ поисковых запросов за период — нормализуем к тому же формату, что и
  * gscService.fetchTopDimensions().topQueries: {key, clicks, impressions, ctr, position}.
+ * По умолчанию тянем ВСЕ запросы периода постранично (без лимита). Передача
+ * rowLimit ограничивает выборку одной страницей нужного размера.
  */
 async function fetchTopQueries(project, range, { rowLimit, ctx } = {}) {
   const cfg = getProjectsConfig().ydx;
   const { startDate, endDate } = resolveRange(range);
   const c = ctx || await _resolveContext(project);
-  const rows = await ydx.queryPopular(c.accessToken, c.userId, c.hostId, {
-    dateFrom: startDate, dateTo: endDate,
-    indicators: [cfg.indicators.shows, cfg.indicators.clicks, cfg.indicators.position],
-    limit: rowLimit || cfg.topQueries,
-  });
+  const indicators = [cfg.indicators.shows, cfg.indicators.clicks, cfg.indicators.position];
+  const rows = rowLimit
+    ? await ydx.queryPopular(c.accessToken, c.userId, c.hostId, {
+      dateFrom: startDate, dateTo: endDate, indicators, limit: rowLimit,
+    })
+    : await ydx.queryPopularAll(c.accessToken, c.userId, c.hostId, {
+      dateFrom: startDate, dateTo: endDate, indicators,
+    });
   return (rows || []).map((r) => {
     const impressions = _indicator(r, cfg.indicators.shows);
     const clicks = _indicator(r, cfg.indicators.clicks);

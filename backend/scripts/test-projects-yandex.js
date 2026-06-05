@@ -15,6 +15,7 @@ const assert = require('assert');
 
 let passed = 0;
 let failed = 0;
+const asyncQueue = [];
 function test(name, fn) {
   try {
     fn();
@@ -26,6 +27,22 @@ function test(name, fn) {
     // eslint-disable-next-line no-console
     console.error(`  ✗ ${name}\n    ${err.message}`);
   }
+}
+// Асинхронные тесты выполняются строго последовательно (часть из них
+// подменяет глобальный axios.get и общий кэш — параллельный запуск гонялся бы).
+function atest(name, fn) {
+  asyncQueue.push(async () => {
+    try {
+      await fn();
+      passed += 1;
+      // eslint-disable-next-line no-console
+      console.log(`  ✓ ${name}`);
+    } catch (err) {
+      failed += 1;
+      // eslint-disable-next-line no-console
+      console.error(`  ✗ ${name}\n    ${err.message}`);
+    }
+  });
 }
 
 // ── ydxClient: OAuth state + auth-url ───────────────────────────────
@@ -85,6 +102,38 @@ test('ydxService _resolveHostId falls back to site url when no match', () => {
     ydxService._resolveHostId({ ydx_site_url: 'x.com', ydx_available_sites: [] }),
     'x.com',
   );
+});
+
+// ── ydxClient.queryPopularAll: безлимитная постраничная выборка ──────
+const axios = require('axios');
+
+async function withStubbedAxios(pages, fn) {
+  const orig = axios.get;
+  ydx._clearCache();
+  axios.get = async (url) => {
+    const m = String(url).match(/[?&]offset=(\d+)/);
+    const offset = m ? Number(m[1]) : 0;
+    return { data: { queries: pages[offset] || [] } };
+  };
+  try { return await fn(); } finally { axios.get = orig; }
+}
+
+function _q(n) {
+  return Array.from({ length: n }, (_, i) => ({ query_text: `q${i}`, indicators: {} }));
+}
+
+atest('queryPopularAll paginates until a short page (no limit)', async () => {
+  // pageSize=500 (config). Две полные страницы + короткая последняя.
+  const pages = { 0: _q(500), 500: _q(500), 1000: _q(10) };
+  const rows = await withStubbedAxios(pages, () =>
+    ydx.queryPopularAll('tok', 'uid', 'host', { dateFrom: '2024-01-01', dateTo: '2024-01-28' }));
+  assert.strictEqual(rows.length, 1010, 'pulls all rows across pages');
+});
+
+atest('queryPopularAll stops on first empty page', async () => {
+  const rows = await withStubbedAxios({ 0: [] }, () =>
+    ydx.queryPopularAll('tok', 'uid', 'host', { dateFrom: '2024-01-01', dateTo: '2024-01-28' }));
+  assert.strictEqual(rows.length, 0);
 });
 
 // ── sourceComparison ────────────────────────────────────────────────
@@ -168,5 +217,9 @@ test('compareSources is pure (does not mutate inputs)', () => {
 });
 
 // eslint-disable-next-line no-console
-console.log(`\nYandex/Projects smoke: ${passed} passed, ${failed} failed`);
-process.exit(failed === 0 ? 0 : 1);
+(async () => {
+  for (const run of asyncQueue) { await run(); } // eslint-disable-line no-await-in-loop
+  // eslint-disable-next-line no-console
+  console.log(`\nYandex/Projects smoke: ${passed} passed, ${failed} failed`);
+  process.exit(failed === 0 ? 0 : 1);
+})();

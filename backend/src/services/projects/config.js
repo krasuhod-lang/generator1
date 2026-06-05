@@ -59,7 +59,13 @@ const PROJECTS_CONFIG = deepFreeze({
     cacheMaxEntries: 500,
     // Webmaster отдаёт статистику с задержкой ~1-2 дня — не запрашиваем «сегодня».
     lagDays: 2,
-    topQueries: 50,            // топ-50 популярных запросов в срез
+    // Тянем ВСЕ популярные запросы периода постранично (без лимита).
+    //   pageSize  — строк за один запрос (ограничение Webmaster API ≤ 500);
+    //   maxRows   — общий потолок (0 = без лимита, тянем все страницы);
+    //   maxPages  — страховка от бесконечного цикла при сбоях пагинации.
+    pageSize: 500,
+    maxRows: 0,
+    maxPages: 500,
     // Индикаторы статистики запросов Webmaster API.
     indicators: {
       shows: 'TOTAL_SHOWS',

@@ -161,8 +161,9 @@ async function listHosts(accessToken, userId) {
 /**
  * Популярные поисковые запросы за период. Возвращает «сырой» массив строк
  * Webmaster API ({query_text|text, indicators:{...}}). Кэшируется.
+ * Поддерживает постраничную выборку через offset (см. queryPopularAll).
  */
-async function queryPopular(accessToken, userId, hostId, { dateFrom, dateTo, indicators, limit } = {}) {
+async function queryPopular(accessToken, userId, hostId, { dateFrom, dateTo, indicators, limit, offset } = {}) {
   const cfg = getProjectsConfig().ydx;
   const params = new URLSearchParams();
   params.set('order_by', cfg.indicators.shows);
@@ -171,9 +172,36 @@ async function queryPopular(accessToken, userId, hostId, { dateFrom, dateTo, ind
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
   if (limit) params.set('limit', String(limit));
+  if (offset) params.set('offset', String(offset));
   const url = `${cfg.apiBase}/user/${encodeURIComponent(userId)}/hosts/${encodeURIComponent(hostId)}/search-queries/popular/?${params.toString()}`;
   return _getCached(url, accessToken, 'ydx_popular_failed', (data) =>
     (Array.isArray(data && data.queries) ? data.queries : []));
+}
+
+/**
+ * Все популярные запросы периода — постранично, без лимита. Перебираем offset
+ * страницами по cfg.pageSize, пока страница «полная», уважая cfg.maxRows
+ * (0 = без лимита) и cfg.maxPages (страховка от бесконечного цикла).
+ */
+async function queryPopularAll(accessToken, userId, hostId, { dateFrom, dateTo, indicators } = {}) {
+  const cfg = getProjectsConfig().ydx;
+  const pageSize = Math.max(1, Number(cfg.pageSize) || 500);
+  const maxRows = Math.max(0, Number(cfg.maxRows) || 0); // 0 = без лимита
+  const maxPages = Math.max(1, Number(cfg.maxPages) || 500);
+  const all = [];
+  for (let page = 0; page < maxPages; page += 1) {
+    const remaining = maxRows ? maxRows - all.length : pageSize;
+    if (maxRows && remaining <= 0) break;
+    const limit = maxRows ? Math.min(pageSize, remaining) : pageSize;
+    // eslint-disable-next-line no-await-in-loop
+    const rows = await queryPopular(accessToken, userId, hostId, {
+      dateFrom, dateTo, indicators, limit, offset: page * pageSize,
+    });
+    if (!rows.length) break;
+    all.push(...rows);
+    if (rows.length < limit) break; // последняя (неполная) страница
+  }
+  return all;
 }
 
 /**
@@ -253,6 +281,7 @@ module.exports = {
   getUserId,
   listHosts,
   queryPopular,
+  queryPopularAll,
   queryHistory,
   _clearCache,
   _cacheKey,
