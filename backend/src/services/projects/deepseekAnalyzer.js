@@ -121,6 +121,15 @@ const SYSTEM_PROMPT = [
   'лидерам (типичный объём, структура, форматы) и сведи их в перечень',
   'конкретных РЕКОМЕНДАЦИЙ для написания будущих статей. Раскрой и приоритизируй',
   'переданные детерминированные рекомендации.',
+  'Если есть [ТОП-10 ДИФФЕРЕНЦИАЛ] — отдельно ответь на вопрос: что есть у',
+  'страниц, попавших в топ-10 (статьи/коммерческие), ЧЕГО НЕТ у остальных',
+  'страниц (набор сравнения с худшей позицией). Опирайся на advantages/summary',
+  'и преврати их в конкретные действия по доработке отстающих страниц.',
+  'Если есть [КФ6 / ПЕРЕСПАМ] — ВАЖНО: выводы о переспаме/переоптимизации делай',
+  'ТОЛЬКО на основе этого распарсенного среза (плотность ключей, повтор точных',
+  'фраз, переспам title), а не из метрик выдачи. Для страниц с level=risk/watch',
+  'предложи, что снизить (плотность вхождений, разбавить LSI, естественный текст),',
+  'чтобы не попасть под фильтры переоптимизации.',
   '',
   'Опирайся только на переданные данные и здравый SEO-смысл, не выдумывай',
   'цифр. Учитывай целевую аудиторию проекта во всех рекомендациях.',
@@ -434,14 +443,35 @@ function _renderTopPageInsightsLines(tpi) {
       impressions: p.impressions,
       profile: p.profile,
       coverage_pct: p.coverage && p.coverage.coverage_pct,
+      overspam: p.overspam ? { level: p.overspam.level, score: p.overspam.overspam_score, signals: p.overspam.signals } : null,
       ranking_factors: p.ranking_factors,
     }));
-  return ['', '[РЕВЕРС-ИНЖИНИРИНГ ТОП-СТРАНИЦ] (используй: объясни, ПОЧЕМУ эти страницы в топе и что влияет на позицию)',
+  const out = ['', '[РЕВЕРС-ИНЖИНИРИНГ ТОП-СТРАНИЦ] (используй: объясни, ПОЧЕМУ эти страницы в топе и что влияет на позицию)',
     `Закономерности по лидерам выдачи: ${JSON.stringify(tpi.patterns || {})}`,
-    'Профили страниц-лидеров (url, position, impressions, profile, coverage_pct, ranking_factors):',
+    'Профили страниц-лидеров (url, position, impressions, profile, coverage_pct, overspam, ranking_factors):',
     JSON.stringify(rows),
     'Рекомендации для будущих статей (детерминированные — раскрой и приоритизируй):',
     JSON.stringify(tpi.recommendations || [])];
+  if (tpi.overspam) {
+    out.push(
+      '',
+      '[КФ6 / ПЕРЕСПАМ] (детерминированная оценка переоптимизации ПО РАСПАРСЕННОМУ контенту — выводы делай только на её основе):',
+      JSON.stringify(tpi.overspam),
+    );
+  }
+  if (tpi.differential && tpi.differential.available) {
+    out.push(
+      '',
+      '[ТОП-10 ДИФФЕРЕНЦИАЛ] (что есть у страниц из топа, чего НЕ хватает остальным — сравнение распарсенных профилей):',
+      JSON.stringify({
+        top_count: tpi.differential.top_count,
+        rest_count: tpi.differential.rest_count,
+        advantages: tpi.differential.advantages,
+        summary: tpi.differential.summary,
+      }),
+    );
+  }
+  return out;
 }
 
 /**

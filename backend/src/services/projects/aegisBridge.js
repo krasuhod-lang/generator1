@@ -150,6 +150,40 @@ function mapSnapshotToPages(snapshot, project, opts = {}) {
     }
   }
 
+  // 4) top_page_insights — обогащаем уже известные страницы-лидеры распарсенными
+  //    сигналами (объём, переспам/КФ6), чтобы seoBrain учился на реальном
+  //    контенте топа, а не только на метриках выдачи.
+  const tpi = snapshot.top_page_insights && typeof snapshot.top_page_insights === 'object'
+    ? snapshot.top_page_insights : null;
+  if (tpi && Array.isArray(tpi.pages)) {
+    const byUrl = new Map(out.map((p) => [p.url, p]));
+    for (const p of tpi.pages.slice(0, MAX_PAGES)) {
+      if (!p || p.error) continue;
+      const url = _str(p.url, 2000);
+      if (!url) continue;
+      const overLevel = p.overspam && p.overspam.level ? p.overspam.level : null;
+      const enrich = {
+        cluster: 'top_leader',
+        intent: overLevel === 'risk' ? 'overoptimized' : 'unknown',
+        position: _num(p.position, null),
+        impressions: _num(p.impressions, 0),
+        word_count: p.profile ? _num(p.profile.word_count, null) : null,
+        overspam_level: overLevel,
+        overspam_score: p.overspam ? _num(p.overspam.overspam_score, null) : null,
+      };
+      const existing = byUrl.get(url);
+      if (existing) {
+        Object.assign(existing, { word_count: enrich.word_count, overspam_level: enrich.overspam_level, overspam_score: enrich.overspam_score });
+        if (existing.position == null) existing.position = enrich.position;
+      } else {
+        const entry = { url, path: url, ...enrich };
+        out.push(entry);
+        byUrl.set(url, entry);
+        seenUrls.add(url);
+      }
+    }
+  }
+
   return out.slice(0, limit);
 }
 
@@ -233,6 +267,13 @@ async function onAnalysisDone(db, { analysisId, project, snapshot, result } = {}
         },
         period_compare: snapshot && snapshot.period_compare ? {
           available: snapshot.period_compare.available !== false,
+        } : null,
+        top_page_insights: snapshot && snapshot.top_page_insights && snapshot.top_page_insights.available ? {
+          overspam: snapshot.top_page_insights.overspam
+            ? snapshot.top_page_insights.overspam.by_level : null,
+          differential_advantages: snapshot.top_page_insights.differential
+            && Array.isArray(snapshot.top_page_insights.differential.advantages)
+            ? snapshot.top_page_insights.differential.advantages.length : 0,
         } : null,
       });
       const userPrompt = [
