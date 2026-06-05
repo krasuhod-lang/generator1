@@ -14,7 +14,11 @@ const {
   aggregatePatterns,
   buildRecommendations,
   explainRanking,
+  profileOverspam,
+  aggregateOverspam,
+  buildTopDifferential,
 } = require('../src/services/projects/topPageInsights/contentProfiler');
+const { selectComparisonPages } = require('../src/services/projects/topPageInsights');
 
 let passed = 0; let failed = 0;
 function test(name, fn) {
@@ -157,6 +161,105 @@ test('explainRanking produces deterministic factors', () => {
 
 test('explainRanking no profile → []', () => {
   assert.deepStrictEqual(explainRanking({ position: 2 }), []);
+});
+
+test('explainRanking flags overspam risk', () => {
+  const factors = explainRanking({
+    position: 2, impressions: 900,
+    profile: profileContent(sampleMd, 't'),
+    overspam: { level: 'risk', overspam_score: 72 },
+  });
+  assert.ok(factors.some((f) => f.includes('переспам') || f.includes('КФ6')));
+});
+
+// ── profileOverspam (КФ6) ───────────────────────────────────────────
+const overspamMd = (`# Купить пластиковые окна\n\n${Array.from({ length: 60 }, () => 'купить пластиковые окна недорого купить пластиковые окна в москве').join(' ')}`);
+
+test('profileOverspam flags keyword stuffing as risk/watch', () => {
+  const r = profileOverspam(overspamMd, 'Купить пластиковые окна купить окна', [
+    { query: 'купить пластиковые окна' },
+  ]);
+  assert.ok(r.overspam_score > 0, `score ${r.overspam_score}`);
+  assert.ok(['watch', 'risk'].includes(r.level), `level ${r.level}`);
+  assert.ok(r.signals.length >= 1);
+  assert.ok(Array.isArray(r.top_terms) && r.top_terms.length >= 1);
+});
+
+test('profileOverspam clean text → ok / unknown', () => {
+  const r = profileOverspam(sampleMd, 'Как выбрать насос для скважины', [
+    { query: 'насос для скважины' },
+  ]);
+  assert.ok(['ok', 'unknown', 'watch'].includes(r.level));
+  assert.ok(r.overspam_score < 60);
+});
+
+test('profileOverspam too-short text → unknown', () => {
+  const r = profileOverspam('короткий текст', 't', [{ query: 'текст' }]);
+  assert.strictEqual(r.level, 'unknown');
+  assert.strictEqual(r.overspam_score, 0);
+});
+
+// ── aggregateOverspam ───────────────────────────────────────────────
+test('aggregateOverspam summarizes levels and risky pages', () => {
+  const agg = aggregateOverspam([
+    { url: 'a', overspam: { level: 'risk', overspam_score: 80, signals: ['x'] } },
+    { url: 'b', overspam: { level: 'ok', overspam_score: 5, signals: [] } },
+    { url: 'c', overspam: { level: 'watch', overspam_score: 40, signals: ['y'] } },
+    { url: 'd', error: 'scrape_failed' },
+    { url: 'e', overspam: { level: 'unknown', overspam_score: 0, signals: [] } },
+  ]);
+  assert.strictEqual(agg.pages_scored, 3);
+  assert.strictEqual(agg.by_level.risk, 1);
+  assert.strictEqual(agg.by_level.watch, 1);
+  assert.strictEqual(agg.risky_pages.length, 2);
+  // отсортировано по убыванию score
+  assert.strictEqual(agg.risky_pages[0].url, 'a');
+});
+
+test('aggregateOverspam none scored → null', () => {
+  assert.strictEqual(aggregateOverspam([{ url: 'x', error: 'e' }]), null);
+  assert.strictEqual(aggregateOverspam([]), null);
+});
+
+// ── selectComparisonPages ───────────────────────────────────────────
+test('selectComparisonPages picks laggards excluding top', () => {
+  const cmpCfg = { minPosition: 11, maxPosition: 50, minImpressions: 50, maxPages: 3 };
+  const sel = selectComparisonPages([
+    { key: 'https://x.ru/top', impressions: 900, position: 2 },     // excluded by set
+    { key: 'https://x.ru/lag1', impressions: 400, position: 15 },   // keep
+    { key: 'https://x.ru/lag2', impressions: 200, position: 30 },   // keep
+    { key: 'https://x.ru/lag3', impressions: 20, position: 20 },    // drop: low impr
+    { key: 'https://x.ru/lag4', impressions: 800, position: 80 },   // drop: too far
+  ], cmpCfg, new Set(['https://x.ru/top']));
+  const urls = sel.map((p) => p.url);
+  assert.deepStrictEqual(urls, ['https://x.ru/lag1', 'https://x.ru/lag2']);
+});
+
+// ── buildTopDifferential ────────────────────────────────────────────
+test('buildTopDifferential surfaces what top has that rest lacks', () => {
+  const richMd = (`${sampleMd}\n\n## Ещё\n${Array.from({ length: 300 }, () => 'слово').join(' ')}`);
+  const top = [
+    { profile: profileContent(richMd, 't'), coverage: { coverage_pct: 80 } },
+    { profile: profileContent(richMd, 't'), coverage: { coverage_pct: 75 } },
+  ];
+  const rest = [
+    { profile: profileContent('# Тонкая\n\nмало текста тут', 't'), coverage: { coverage_pct: 20 } },
+    { profile: profileContent('# Тонкая 2\n\nещё мало', 't'), coverage: { coverage_pct: 25 } },
+  ];
+  const diff = buildTopDifferential(top, rest);
+  assert.strictEqual(diff.available, true);
+  assert.strictEqual(diff.top_count, 2);
+  assert.strictEqual(diff.rest_count, 2);
+  assert.ok(diff.advantages.length >= 1);
+  assert.ok(diff.summary.length >= 1);
+  // объём текста у топа должен быть преимуществом
+  assert.ok(diff.advantages.some((a) => a.factor.includes('Объём')));
+});
+
+test('buildTopDifferential no comparison → available false', () => {
+  const diff = buildTopDifferential([{ profile: profileContent(sampleMd, 't') }], []);
+  assert.strictEqual(diff.available, false);
+  assert.strictEqual(diff.reason, 'no_comparison');
 });
 
 // ── summary ──────────────────────────────────────────────────────────
