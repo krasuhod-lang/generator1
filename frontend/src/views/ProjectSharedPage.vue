@@ -12,6 +12,7 @@ import GscPerformanceChart from '../components/GscPerformanceChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
 import CommercialInsights from '../components/CommercialInsights.vue';
 import AnalyticsExtras from '../components/AnalyticsExtras.vue';
+import RankingFactorsCard from '../components/RankingFactorsCard.vue';
 
 const route = useRoute();
 const loading = ref(true);
@@ -81,8 +82,23 @@ onMounted(async () => {
 
           <!-- AI report -->
           <section class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 space-y-3">
-            <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">AI-отчёт</h2>
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">AI-отчёт · Google</h2>
             <MarkdownView :source="analysis.report_markdown" />
+          </section>
+
+          <!-- AI report · Яндекс -->
+          <section v-if="analysis.ydx_report_markdown" class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 space-y-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-red-300">AI-отчёт · Яндекс</h2>
+            <MarkdownView :source="analysis.ydx_report_markdown" />
+          </section>
+
+          <!-- Аудит факторов ранжирования: чего не хватает для роста -->
+          <RankingFactorsCard v-if="analysis.ranking_factors" :ranking-factors="analysis.ranking_factors" />
+
+          <!-- AI-сводка закономерностей Google ↔ Яндекс -->
+          <section v-if="analysis.synthesis_markdown" class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 space-y-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-fuchsia-300">Сводка закономерностей Google ↔ Яндекс</h2>
+            <MarkdownView :source="analysis.synthesis_markdown" />
           </section>
 
           <!-- Коммерческий срез -->

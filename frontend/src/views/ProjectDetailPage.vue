@@ -19,6 +19,7 @@ import MetaSuggestionsCard from '../components/MetaSuggestionsCard.vue';
 import EatTemplatesCard from '../components/EatTemplatesCard.vue';
 import SchemaAuditCard from '../components/SchemaAuditCard.vue';
 import AiVisibilityCard from '../components/AiVisibilityCard.vue';
+import RankingFactorsCard from '../components/RankingFactorsCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 
@@ -119,6 +120,12 @@ const pageMetaAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.pa
 const eatData = computed(() => currentAnalysis.value?.gsc_snapshot?.eat || null);
 const schemaAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.schema_audit || null);
 const geoAeoData = computed(() => currentAnalysis.value?.gsc_snapshot?.geo_aeo || null);
+
+// Мультиисточниковая аналитика: отдельный отчёт Яндекса, сводка закономерностей
+// и аудит факторов ранжирования (что мешает росту).
+const ydxReportMarkdown = computed(() => currentAnalysis.value?.ydx_report_markdown || null);
+const synthesisMarkdown = computed(() => currentAnalysis.value?.synthesis_markdown || null);
+const rankingFactorsData = computed(() => currentAnalysis.value?.ranking_factors || null);
 
 async function load() {
   loading.value = true;
@@ -688,11 +695,34 @@ onUnmounted(() => {
             <GscPerformanceChart v-else-if="ydxPerf && ydxPerf.series.length" :series="ydxPerf.series" />
             <div v-else class="text-sm text-gray-500 text-center py-6">Нет данных за выбранный период.</div>
           </section>
+
+          <!-- Отдельный AI-отчёт по Яндексу (поведенческие/коммерч./регион.) -->
+          <section v-if="ydxReportMarkdown" class="card space-y-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-red-300">Отчёт AI-аналитика · Яндекс</h2>
+            <MarkdownView :source="ydxReportMarkdown" />
+          </section>
+          <section v-else-if="ydxReady && currentAnalysis?.status === 'done'" class="card">
+            <p class="text-xs text-gray-500">
+              Отдельный AI-отчёт по Яндексу появится после запуска анализа на вкладке Google
+              (кнопка «Анализировать показатели проекта») — Яндекс анализируется автоматически вместе с Google.
+            </p>
+          </section>
         </div>
         <!-- ============ /Вкладка Яндекс.Вебмастер ============ -->
 
         <!-- ============ Вкладка: Сравнение и рекомендации ============ -->
         <div v-show="activeTab === 'compare'" class="space-y-5">
+          <!-- Аудит факторов ранжирования: чего не хватает для роста -->
+          <RankingFactorsCard v-if="rankingFactorsData" :ranking-factors="rankingFactorsData" />
+
+          <!-- AI-сводка закономерностей Google ↔ Яндекс -->
+          <section v-if="synthesisMarkdown" class="card space-y-3">
+            <div class="flex items-center justify-between gap-2">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-fuchsia-300">AI-сводка закономерностей Google ↔ Яндекс</h2>
+            </div>
+            <MarkdownView :source="synthesisMarkdown" />
+          </section>
+
           <section class="card space-y-4">
             <div class="flex flex-wrap items-center justify-between gap-3">
               <h2 class="text-sm font-semibold uppercase tracking-wider text-fuchsia-300">Сопоставление Google ↔ Яндекс</h2>
