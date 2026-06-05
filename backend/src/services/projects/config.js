@@ -93,6 +93,27 @@ const PROJECTS_CONFIG = deepFreeze({
     topPages: 20,           // топ-20 страниц в срез
   },
 
+  // Провайдер LLM для проектной аналитики. По умолчанию — Gemini 3.1 Pro:
+  // даёт более точечный анализ срезов, прогнозы и определение слабых зон.
+  // DeepSeek-reasoner остаётся фолбэком, если Gemini не сконфигурирован
+  // (нет GEMINI_API_KEY) — пайплайн не падает. Раздельный анализ Google и
+  // Яндекса + сводка закономерностей по обоим источникам.
+  analyzer: {
+    // 'gemini' | 'deepseek'. llmAnalyst мягко откатывается на доступный
+    // провайдер, если выбранный не сконфигурирован.
+    provider: 'gemini',
+    gemini: {
+      model: 'gemini-3.1-pro-preview',
+      temperature: 0.4,
+      maxTokens: 16384,   // reasoning-модель: большой развёрнутый markdown
+      timeoutMs: 300000,  // до 5 минут на тяжёлый срез
+    },
+    // Отдельный AI-анализ Яндекс.Вебмастера (помимо Google Search Console).
+    yandex: { enabled: true },
+    // Финальный проход: сводка закономерностей Google+Яндекс + ranking-gaps.
+    synthesis: { enabled: true },
+  },
+
   // Расширенные срезы GSC (помимо date / query / page): разрезы, которые
   // GSC уже отдаёт через searchAnalytics.query, но мы их не использовали.
   // Подаются и в snapshot, и в промпт LLM-аналитика.
@@ -295,7 +316,31 @@ const PROJECTS_CONFIG = deepFreeze({
     timeoutMs: 8000,
     // Имена сигнатур (должны совпадать с aegis_py/app/projects_dspy.py).
     signatures: ['LinkRecommend', 'BlogTopicSuggest', 'EatRecommend',
-      'GeoAeoBoost', 'MetaUplift', 'SchemaSuggest'],
+      'GeoAeoBoost', 'MetaUplift', 'SchemaSuggest',
+      // Раздельный анализ источников + сводка закономерностей + ranking-gaps.
+      'YandexQueryAnalysis', 'ProjectGrowthSynthesis', 'RankingFactorGaps'],
+  },
+
+  // Каталог важных факторов ранжирования — детерминированный аудит «чего не
+  // хватает для роста». Каждый фактор оценивается по данным снапшота (GSC +
+  // Яндекс) в статус ok | gap | critical | unknown и подаётся в LLM-сводку,
+  // а также отображается отдельной карточкой. weight — относительная важность.
+  rankingFactors: {
+    enabled: true,
+    factors: [
+      { key: 'relevance',    label: 'Релевантность и покрытие интента',   weight: 5, group: 'content' },
+      { key: 'content_depth', label: 'Глубина и полнота контента',        weight: 5, group: 'content' },
+      { key: 'ctr',          label: 'Кликабельность сниппета (CTR)',       weight: 4, group: 'serp' },
+      { key: 'striking',     label: 'Запросы у входа в топ (3–20)',        weight: 5, group: 'serp' },
+      { key: 'cannibalization', label: 'Каннибализация запросов',          weight: 4, group: 'structure' },
+      { key: 'page_decay',   label: 'Деградация страниц (трафик падает)',  weight: 4, group: 'content' },
+      { key: 'eat',          label: 'E-E-A-T (экспертность и доверие)',    weight: 5, group: 'trust' },
+      { key: 'schema',       label: 'Микроразметка Schema.org',            weight: 3, group: 'tech' },
+      { key: 'links',        label: 'Ссылочный профиль и анкоры',          weight: 4, group: 'authority' },
+      { key: 'mobile',       label: 'Мобильный трафик и UX',               weight: 3, group: 'tech' },
+      { key: 'geo_aeo',      label: 'Видимость в нейровыдаче (AI/SGE)',    weight: 3, group: 'aeo' },
+      { key: 'content_gaps', label: 'Контентные дыры (непокрытый спрос)',  weight: 4, group: 'content' },
+    ],
   },
 
   // п.1, п.2 — Ссылочная стратегия. GSC Search Analytics API НЕ отдаёт отчёт

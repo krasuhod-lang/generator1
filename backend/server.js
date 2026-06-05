@@ -1391,6 +1391,13 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS snapshot_id UUID REFERENCES project_snapshots(id) ON DELETE SET NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_project_analyses_snapshot ON project_analyses (snapshot_id) WHERE snapshot_id IS NOT NULL`);
 
+    // Migration 073: мультиисточниковая AI-аналитика (раздельные Google/Яндекс
+    // отчёты + сводка закономерностей + аудит факторов ранжирования).
+    await db.query(`ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS ydx_snapshot        JSONB`);
+    await db.query(`ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS ydx_report_markdown TEXT`);
+    await db.query(`ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS synthesis_markdown  TEXT`);
+    await db.query(`ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS ranking_factors     JSONB`);
+
     // Backfill: для исторических analyses со снимком в gsc_snapshot, но без
     // snapshot_id — создаём строку project_snapshots и подвязываем. Безопасно
     // выполнять при каждом старте: курсор пройдёт только по строкам с

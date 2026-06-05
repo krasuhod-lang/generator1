@@ -497,6 +497,7 @@ async function getAnalysis(req, res, next) {
     const { rows } = await db.query(
       `SELECT a.id, a.status, a.range_key, a.period_from, a.period_to,
               a.report_markdown, a.gsc_snapshot, a.llm_model, a.cost_usd,
+              a.ydx_snapshot, a.ydx_report_markdown, a.synthesis_markdown, a.ranking_factors,
               a.error_message, a.created_at, a.completed_at, a.snapshot_id
          FROM project_analyses a
          JOIN projects p ON p.id = a.project_id
@@ -666,7 +667,9 @@ async function getSharedProject(req, res, next) {
     // Последний завершённый анализ — содержит и snapshot (графики), и markdown-отчёт.
     const { rows: aRows } = await db.query(
       `SELECT id, status, range_key, period_from, period_to,
-              report_markdown, gsc_snapshot, created_at, completed_at
+              report_markdown, gsc_snapshot,
+              ydx_snapshot, ydx_report_markdown, synthesis_markdown, ranking_factors,
+              created_at, completed_at
          FROM project_analyses
         WHERE project_id = $1 AND status = 'done'
         ORDER BY completed_at DESC NULLS LAST LIMIT 1`,
