@@ -13,6 +13,14 @@ import MarkdownView from '../components/MarkdownView.vue';
 import CommercialInsights from '../components/CommercialInsights.vue';
 import AnalyticsExtras from '../components/AnalyticsExtras.vue';
 import RankingFactorsCard from '../components/RankingFactorsCard.vue';
+import ActionPlanCard from '../components/ActionPlanCard.vue';
+import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
+import LinkProfileCard from '../components/LinkProfileCard.vue';
+import MetaSuggestionsCard from '../components/MetaSuggestionsCard.vue';
+import BlogTopicsCard from '../components/BlogTopicsCard.vue';
+import EatTemplatesCard from '../components/EatTemplatesCard.vue';
+import SchemaAuditCard from '../components/SchemaAuditCard.vue';
+import AiVisibilityCard from '../components/AiVisibilityCard.vue';
 
 const route = useRoute();
 const loading = ref(true);
@@ -92,6 +100,31 @@ onMounted(async () => {
             <MarkdownView :source="analysis.ydx_report_markdown" />
           </section>
 
+          <!-- Эффективность в Яндексе (из снапшота) -->
+          <section v-if="analysis.ydx_snapshot" class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 space-y-4">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-red-300">Эффективность в Яндексе</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">Клики</div>
+                <div class="text-xl font-bold text-red-300">{{ (analysis.ydx_snapshot.totals?.clicks || 0).toLocaleString('ru') }}</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">Показы</div>
+                <div class="text-xl font-bold text-orange-300">{{ (analysis.ydx_snapshot.totals?.impressions || 0).toLocaleString('ru') }}</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">CTR</div>
+                <div class="text-xl font-bold text-emerald-300">{{ analysis.ydx_snapshot.totals?.ctr || 0 }}%</div>
+              </div>
+              <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] uppercase text-gray-500">Ср. позиция</div>
+                <div class="text-xl font-bold text-amber-300">{{ analysis.ydx_snapshot.totals?.position || 0 }}</div>
+              </div>
+            </div>
+            <GscPerformanceChart v-if="analysis.ydx_snapshot.series?.length"
+                                 :series="analysis.ydx_snapshot.series" />
+          </section>
+
           <!-- Аудит факторов ранжирования: чего не хватает для роста -->
           <RankingFactorsCard v-if="analysis.ranking_factors" :ranking-factors="analysis.ranking_factors" />
 
@@ -100,6 +133,10 @@ onMounted(async () => {
             <h2 class="text-sm font-semibold uppercase tracking-wider text-fuchsia-300">Сводка закономерностей Google ↔ Яндекс</h2>
             <MarkdownView :source="analysis.synthesis_markdown" />
           </section>
+
+          <!-- План действий: конкретные рекомендации с расчётами -->
+          <ActionPlanCard v-if="analysis.gsc_snapshot?.action_plan"
+                          :plan="analysis.gsc_snapshot.action_plan" />
 
           <!-- Коммерческий срез -->
           <CommercialInsights v-if="analysis.gsc_snapshot?.commercial"
@@ -111,6 +148,34 @@ onMounted(async () => {
                            :breakdowns="analysis.gsc_snapshot.breakdowns || null"
                            :page-decay="analysis.gsc_snapshot.page_decay || null"
                            :brand-split="analysis.gsc_snapshot.brand_split || null" />
+
+          <!-- Реверс-инжиниринг топ-страниц -->
+          <TopPageInsightsCard v-if="analysis.gsc_snapshot?.top_page_insights"
+                               :insights="analysis.gsc_snapshot.top_page_insights" />
+
+          <!-- Ссылочная стратегия -->
+          <LinkProfileCard v-if="analysis.gsc_snapshot?.link_audit"
+                           :link-audit="analysis.gsc_snapshot.link_audit" />
+
+          <!-- Постраничная оптимизация метатегов (read-only) -->
+          <MetaSuggestionsCard v-if="analysis.gsc_snapshot?.page_meta_audit"
+                               :page-meta-audit="analysis.gsc_snapshot.page_meta_audit" />
+
+          <!-- План публикаций в блог -->
+          <BlogTopicsCard v-if="analysis.gsc_snapshot?.blog_plan"
+                          :blog-plan="analysis.gsc_snapshot.blog_plan" />
+
+          <!-- E-E-A-T по шаблонам страниц -->
+          <EatTemplatesCard v-if="analysis.gsc_snapshot?.eat"
+                            :eat="analysis.gsc_snapshot.eat" />
+
+          <!-- Микроразметка -->
+          <SchemaAuditCard v-if="analysis.gsc_snapshot?.schema_audit"
+                           :schema-audit="analysis.gsc_snapshot.schema_audit" />
+
+          <!-- GEO/AEO — видимость в нейровыдаче (read-only) -->
+          <AiVisibilityCard v-if="analysis.gsc_snapshot?.geo_aeo"
+                            :geo-aeo="analysis.gsc_snapshot.geo_aeo" />
         </template>
       </template>
     </div>

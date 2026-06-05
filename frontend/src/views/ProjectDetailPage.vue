@@ -21,6 +21,7 @@ import SchemaAuditCard from '../components/SchemaAuditCard.vue';
 import AiVisibilityCard from '../components/AiVisibilityCard.vue';
 import RankingFactorsCard from '../components/RankingFactorsCard.vue';
 import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
+import ActionPlanCard from '../components/ActionPlanCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 
@@ -123,12 +124,14 @@ const schemaAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.sche
 const geoAeoData = computed(() => currentAnalysis.value?.gsc_snapshot?.geo_aeo || null);
 // Реверс-инжиниринг топ-страниц: закономерности, КФ6/переспам, топ-10 дифференциал.
 const topPageInsightsData = computed(() => currentAnalysis.value?.gsc_snapshot?.top_page_insights || null);
+const actionPlanData = computed(() => currentAnalysis.value?.gsc_snapshot?.action_plan || null);
 
 // Под-вкладки аналитики GSC: вместо длинной простыни секций показываем их как
 // табы под графиком — кликнул, появилась нужная информация.
 const gscSubTab = ref('report');
 const gscSubTabs = computed(() => [
   { key: 'report', label: 'Отчёт ИИ', show: !!(analyzing.value || currentAnalysis.value) },
+  { key: 'actionplan', label: 'План действий', show: !!(actionPlanData.value && actionPlanData.value.available) },
   { key: 'dynamics', label: 'Динамика', show: !!(periodCompareData.value || breakdownsData.value || pageDecayData.value || brandSplitData.value) },
   { key: 'commercial', label: 'Коммерция', show: !!commercialData.value },
   { key: 'toppages', label: 'Топ-страницы', show: !!topPageInsightsData.value },
@@ -605,6 +608,11 @@ onUnmounted(() => {
           </div>
           <MarkdownView v-else-if="currentAnalysis?.status === 'done'" :source="currentAnalysis.report_markdown" />
         </section>
+        </div>
+
+        <!-- Панель: План действий (конкретные рекомендации с расчётами) -->
+        <div v-show="activeGscSubTab === 'actionplan'">
+        <ActionPlanCard v-if="actionPlanData" :plan="actionPlanData" />
         </div>
 
         <!-- Панель: Динамика (что изменилось, устройства/страны, page decay, бренд) -->

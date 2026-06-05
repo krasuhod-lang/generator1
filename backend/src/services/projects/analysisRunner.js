@@ -22,13 +22,14 @@ const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
 const { onAnalysisDone } = require('./aegisBridge');
 const { insertSnapshot } = require('./snapshotsRepo');
-const { auditPages } = require('./pageMetaAudit');
+const { auditPages, regenerateMetaForPages } = require('./pageMetaAudit');
 const { analyzeEat } = require('./eatAnalyzer');
 const { auditSchema } = require('./schemaAuditor');
 const { buildLinkStrategy } = require('./linkStrategy');
 const { buildBlogPlan } = require('./contentGapPlanner');
 const { buildGeoAeo } = require('./geoAeo');
 const { analyzeTopPages } = require('./topPageInsights');
+const { buildActionPlan } = require('./actionPlan');
 const dspyClient = require('./dspyClient');
 const { callDeepSeek } = require('../llm/deepseek.adapter');
 const ydxService = require('./ydxService');
@@ -141,6 +142,12 @@ async function collectSnapshot(project, range) {
     top_page_insights: topPageInsights,
   };
 
+  // ТЗ п.3 — «План действий»: связываем все срезы в конкретные, посчитанные
+  // рекомендации (что→на что→зачем→эффект). Граничный шаг: добирает конкретные
+  // мета-теги через мета-генератор + xmlstock + парсинг (graceful без ключей).
+  const actionPlan = await _buildActionPlan(project, snapshot, queryPage);
+  snapshot.action_plan = actionPlan;
+
   const payload = {
     project,
     range: resolved,
@@ -160,6 +167,7 @@ async function collectSnapshot(project, range) {
     blogPlan,
     geoAeo,
     topPageInsights,
+    actionPlan,
   };
 
   return { snapshot, payload };
@@ -298,6 +306,19 @@ async function _buildTopPageInsights(project, top, queryPage) {
       project,
       snapshot: { top_pages: top.topPages },
       queryPage,
+    });
+  } catch (_) { return null; }
+}
+
+/**
+ * «План действий» (ТЗ п.3): связывает собранные срезы в конкретные посчитанные
+ * рекомендации. metaFn = regenerateMetaForPages — конкретные мета-теги через
+ * мета-генератор + xmlstock + парсинг. Graceful: ошибка → null.
+ */
+async function _buildActionPlan(project, snapshot, queryPage) {
+  try {
+    return await buildActionPlan({
+      project, snapshot, queryPage, metaFn: regenerateMetaForPages,
     });
   } catch (_) { return null; }
 }
