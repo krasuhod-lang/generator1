@@ -69,7 +69,7 @@ async function runProbe() {
     </div>
 
     <div class="pt-1">
-      <button class="btn-secondary text-xs" :disabled="probing" @click="runProbe">
+      <button v-if="projectId" class="btn-secondary text-xs" :disabled="probing" @click="runProbe">
         {{ probing ? 'Проверка…' : 'Проверить видимость в AI-выдаче' }}
       </button>
       <div v-if="probe && probe.probes" class="mt-2 space-y-1">

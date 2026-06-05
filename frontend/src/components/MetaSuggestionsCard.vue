@@ -135,7 +135,7 @@ async function copyAllForExcel() {
           </div>
 
           <div class="flex flex-wrap items-center gap-2">
-            <button class="btn-secondary text-xs" :disabled="busy[i]" @click="regenerate(p, i)">
+            <button v-if="projectId" class="btn-secondary text-xs" :disabled="busy[i]" @click="regenerate(p, i)">
               {{ busy[i] ? 'Этапы: ЦА → SERP → генерация → LSI…' : 'Перегенерировать через Meta Tags' }}
             </button>
             <CopyButton v-if="p.suggested" :text="bothMeta(p)" label="Title + Description" />
