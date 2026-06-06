@@ -20,6 +20,7 @@ const {
   detectPageDecay,
 } = require('../src/services/projects/pageDecayDetector');
 const { splitQueries } = require('../src/services/projects/brandSplit');
+const { detectSeasonality } = require('../src/services/projects/seasonalityDetector');
 
 let passed = 0; let failed = 0;
 function ok(name, cond) {
@@ -136,6 +137,53 @@ function _isoDateAddWeeks(base, w) {
   const d = new Date(`${base}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + w * 7);
   return d.toISOString().slice(0, 10);
+}
+
+console.log('');
+console.log('## seasonalityDetector.detectSeasonality');
+{
+  // Короткий ряд → недоступно.
+  const shortR = detectSeasonality(
+    Array.from({ length: 10 }, (_, i) => ({ date: `2026-01-${String(i + 1).padStart(2, '0')}`, clicks: 100, impressions: 1000 })),
+    { enabled: true, minDays: 28 },
+  );
+  ok('short series → not available', shortR.available === false && shortR.reason === 'not_enough_days');
+
+  // ~4 месяца дневного ряда с системным спадом + слабыми выходными.
+  const series = [];
+  const start = new Date('2026-01-01T00:00:00Z');
+  for (let i = 0; i < 120; i++) {
+    const d = new Date(start); d.setUTCDate(d.getUTCDate() + i);
+    const iso = d.toISOString().slice(0, 10);
+    const wd = d.getUTCDay();
+    const weekendDrop = (wd === 0 || wd === 6) ? 0.4 : 1; // выходные слабее
+    const base = Math.max(5, 200 - i); // нисходящий тренд
+    series.push({ date: iso, clicks: Math.round(base * weekendDrop), impressions: 2000 });
+  }
+  const r = detectSeasonality(series, {
+    enabled: true, minDays: 28, weekdayWeakThreshold: -0.25, trendDownThreshold: -0.003,
+  });
+  ok('long series → available', r.available === true);
+  ok('days counted = 120', r.days === 120);
+  ok('trend direction down', r.trend.direction === 'down');
+  ok('slope is negative', r.trend.slope_clicks_per_day < 0);
+  ok('monthly buckets present', Array.isArray(r.monthly.by_month) && r.monthly.by_month.length >= 4);
+  ok('mom_pct of first month is null', r.monthly.by_month[0].mom_pct === null);
+  ok('decline streak >= 2 months', r.monthly.decline_streak_months >= 2);
+  ok('weekend flagged as weak day', r.weekday.weak_days.some((d) => d.weekday === 0 || d.weekday === 6));
+  ok('weak day below_pct is negative', r.weekday.weak_days.every((d) => d.below_pct < 0));
+  ok('produces findings', Array.isArray(r.findings) && r.findings.length > 0);
+
+  // Disabled config path is handled by analysisRunner; detector itself respects minDays only.
+  const flat = detectSeasonality(
+    Array.from({ length: 60 }, (_, i) => {
+      const d = new Date('2026-01-01T00:00:00Z'); d.setUTCDate(d.getUTCDate() + i);
+      return { date: d.toISOString().slice(0, 10), clicks: 100, impressions: 1000 };
+    }),
+    { enabled: true, minDays: 28, trendDownThreshold: -0.01 },
+  );
+  ok('flat series → direction flat', flat.available && flat.trend.direction === 'flat');
+  ok('flat series → no weak days', flat.weekday.weak_days.length === 0);
 }
 
 console.log('');

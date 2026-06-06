@@ -140,11 +140,12 @@ onMounted(async () => {
                                 :commercial="snap.commercial"
                                 :serp-verification="snap?.serp_verification || null" />
 
-            <AnalyticsExtras v-if="snap && (snap.period_compare || snap.breakdowns || snap.page_decay || snap.brand_split)"
+            <AnalyticsExtras v-if="snap && (snap.period_compare || snap.breakdowns || snap.page_decay || snap.brand_split || snap.seasonality)"
                              :period-compare="snap.period_compare || null"
                              :breakdowns="snap.breakdowns || null"
                              :page-decay="snap.page_decay || null"
-                             :brand-split="snap.brand_split || null" />
+                             :brand-split="snap.brand_split || null"
+                             :seasonality="snap.seasonality || null" />
 
             <TopPageInsightsCard v-if="snap?.top_page_insights" :insights="snap.top_page_insights" />
             <LinkProfileCard v-if="snap?.link_audit" :link-audit="snap.link_audit" />

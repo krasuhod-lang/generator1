@@ -151,7 +151,7 @@ function _stripFence(text) {
 }
 
 function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification,
-  breakdowns, periodCompare, pageDecay, brandSplit,
+  breakdowns, periodCompare, pageDecay, brandSplit, seasonality,
   pageMetaAudit, eat, schemaAudit, linkAudit, blogPlan, geoAeo, topPageInsights, actionPlan }) {
   const dscfg = getProjectsConfig().deepseek;
   // Данные собираются БЕЗ лимитов (ТЗ п.2), но в промпт LLM кладём только топ-N
@@ -185,6 +185,7 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
   lines.push(..._renderPeriodCompareLines(periodCompare));
   lines.push(..._renderBreakdownLines(breakdowns));
   lines.push(..._renderPageDecayLines(pageDecay));
+  lines.push(..._renderSeasonalityLines(seasonality));
   lines.push(..._renderBrandSplitLines(brandSplit));
   if (commercial && commercial.available) {
     lines.push(
@@ -348,6 +349,32 @@ function _renderPageDecayLines(pd) {
       decaying: it.decaying,
     }))),
   ];
+}
+
+/** Закономерности спада: тренд, дни недели, помесячная динамика (ТЗ п.4). */
+function _renderSeasonalityLines(s) {
+  if (!s || !s.available) return [];
+  const out = [
+    '',
+    `[ЗАКОНОМЕРНОСТИ СПАДА] окно ${s.range.from}…${s.range.to} (${s.days} дн.)`,
+    `Тренд: ${s.trend.direction} (наклон ${s.trend.slope_clicks_per_day} кликов/день, ${_pct(s.trend.slope_norm)} к среднему/день).`,
+  ];
+  if (s.monthly && Array.isArray(s.monthly.by_month) && s.monthly.by_month.length) {
+    out.push(`Помесячно (month, clicks, mom_pct): ${JSON.stringify(s.monthly.by_month.map((m) => ({ month: m.month, clicks: m.clicks, mom_pct: m.mom_pct })))}`);
+    if (s.monthly.decline_streak_months >= 2) {
+      out.push(`Серия помесячного спада подряд: ${s.monthly.decline_streak_months} мес. — это закономерность, разбери причины.`);
+    }
+  }
+  if (s.weekday && Array.isArray(s.weekday.weak_days) && s.weekday.weak_days.length) {
+    out.push(`Системно слабые дни недели: ${s.weekday.weak_days.map((d) => `${d.name} (${d.below_pct}%)`).join(', ')}.`);
+  }
+  out.push('Используй это в разделе про динамику: назови КОГДА именно падает трафик (дни/месяцы) и предложи гипотезы и действия под выявленные закономерности.');
+  return out;
+}
+
+function _pct(n) {
+  const v = Number(n) || 0;
+  return `${(v * 100).toFixed(1)}%`;
 }
 
 /** Бренд vs небренд динамика. */

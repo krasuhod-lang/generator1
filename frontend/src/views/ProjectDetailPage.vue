@@ -115,6 +115,7 @@ const periodCompareData = computed(() => currentAnalysis.value?.gsc_snapshot?.pe
 const breakdownsData = computed(() => currentAnalysis.value?.gsc_snapshot?.breakdowns || null);
 const pageDecayData = computed(() => currentAnalysis.value?.gsc_snapshot?.page_decay || null);
 const brandSplitData = computed(() => currentAnalysis.value?.gsc_snapshot?.brand_split || null);
+const seasonalityData = computed(() => currentAnalysis.value?.gsc_snapshot?.seasonality || null);
 // Новые слои анализа GSC (ссылочный профиль, блог-план, мета, E-E-A-T, GEO/AEO, схема).
 const linkAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.link_audit || null);
 const blogPlanData = computed(() => currentAnalysis.value?.gsc_snapshot?.blog_plan || null);
@@ -132,7 +133,7 @@ const gscSubTab = ref('report');
 const gscSubTabs = computed(() => [
   { key: 'report', label: 'Отчёт ИИ', show: !!(analyzing.value || currentAnalysis.value) },
   { key: 'actionplan', label: 'План действий', show: !!(actionPlanData.value && actionPlanData.value.available) },
-  { key: 'dynamics', label: 'Динамика', show: !!(periodCompareData.value || breakdownsData.value || pageDecayData.value || brandSplitData.value) },
+  { key: 'dynamics', label: 'Динамика', show: !!(periodCompareData.value || breakdownsData.value || pageDecayData.value || brandSplitData.value || seasonalityData.value) },
   { key: 'commercial', label: 'Коммерция', show: !!commercialData.value },
   { key: 'toppages', label: 'Топ-страницы', show: !!topPageInsightsData.value },
   { key: 'links', label: 'Ссылки', show: !!linkAuditData.value },
@@ -618,11 +619,12 @@ onUnmounted(() => {
         <!-- Панель: Динамика (что изменилось, устройства/страны, page decay, бренд) -->
         <div v-show="activeGscSubTab === 'dynamics'">
         <AnalyticsExtras
-          v-if="periodCompareData || breakdownsData || pageDecayData || brandSplitData"
+          v-if="periodCompareData || breakdownsData || pageDecayData || brandSplitData || seasonalityData"
           :period-compare="periodCompareData"
           :breakdowns="breakdownsData"
           :page-decay="pageDecayData"
           :brand-split="brandSplitData"
+          :seasonality="seasonalityData"
         />
         </div>
 
