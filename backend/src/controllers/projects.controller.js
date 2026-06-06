@@ -829,6 +829,38 @@ async function probeAiVisibility(req, res, next) {
   } catch (err) { return _gscError(res, next, err); }
 }
 
+/**
+ * POST /:id/blog-article — сгенерировать статью для блога через наш внутренний
+ * инструмент (info-article pipeline) из темы плана публикаций проекта (ТЗ п.7).
+ * Факты о компании собираются автоматически со страницы проекта.
+ */
+async function generateBlogArticle(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+
+    const body = req.body || {};
+    const topic = typeof body.topic === 'string' ? body.topic.trim() : '';
+    if (topic.length < 5) {
+      return res.status(400).json({ error: 'Тема статьи обязательна (не короче 5 символов)' });
+    }
+
+    const { generateBlogArticleFromProject } = require('../services/projects/blogArticleBridge');
+    const result = await generateBlogArticleFromProject({
+      project,
+      userId: req.user.id,
+      topic,
+      region: body.region,
+      geminiModel: body.gemini_model,
+      imagesCount: body.images_count,
+    });
+    return res.status(201).json(result);
+  } catch (err) {
+    if (err && err.statusCode === 400) return res.status(400).json({ error: err.message });
+    return next(err);
+  }
+}
+
 module.exports = {
   listProjects,
   createProject,
@@ -862,4 +894,5 @@ module.exports = {
   importGscLinks,
   regenerateMeta,
   probeAiVisibility,
+  generateBlogArticle,
 };

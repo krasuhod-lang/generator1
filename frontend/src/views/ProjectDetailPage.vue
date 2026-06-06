@@ -39,6 +39,25 @@ const loading = ref(true);
 const toast = ref('');
 let toastTimer = null;
 
+// План публикаций → генерация статьи в блог через info-article (ТЗ п.7).
+const generatedArticles = ref({});
+const generatingArticleIndex = ref(-1);
+const blogArticleError = ref('');
+async function onGenerateBlogArticle({ topic, index }) {
+  blogArticleError.value = '';
+  generatingArticleIndex.value = index;
+  try {
+    const res = await store.generateBlogArticle(projectId, { topic });
+    if (res && res.task && res.task.id) {
+      generatedArticles.value = { ...generatedArticles.value, [index]: { id: res.task.id } };
+    }
+  } catch (err) {
+    blogArticleError.value = err.response?.data?.error || err.message || 'Не удалось запустить генерацию статьи';
+  } finally {
+    generatingArticleIndex.value = -1;
+  }
+}
+
 // GSC site select
 const sites = ref([]);
 const selectedSite = ref('');
@@ -658,7 +677,11 @@ onUnmounted(() => {
 
         <!-- Панель: План публикаций в блог -->
         <div v-show="activeGscSubTab === 'blog'">
-        <BlogTopicsCard v-if="blogPlanData" :blog-plan="blogPlanData" />
+        <BlogTopicsCard v-if="blogPlanData" :blog-plan="blogPlanData"
+                        :generated-articles="generatedArticles"
+                        :generating-index="generatingArticleIndex"
+                        @generate="onGenerateBlogArticle" />
+        <p v-if="blogArticleError" class="text-xs text-red-400 mt-2">{{ blogArticleError }}</p>
         </div>
 
         <!-- Панель: E-E-A-T по шаблонам страниц -->

@@ -403,6 +403,12 @@ async function handleCreate() {
 let pollTimer = null;
 onMounted(async () => {
   await store.fetchTasks();
+  // Глубокая ссылка из проекта (?open=<taskId>) — сразу открыть задачу.
+  try {
+    const openId = route.query && route.query.open;
+    const id = Array.isArray(openId) ? openId[0] : openId;
+    if (id && typeof id === 'string') await selectTask(id);
+  } catch (_) { /* no-op */ }
   pollTimer = setInterval(() => {
     if (store.tasks.some((t) => t.status === 'queued' || t.status === 'running')) {
       store.fetchTasks();
