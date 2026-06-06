@@ -398,13 +398,15 @@ function _renderLinkStrategyLines(link) {
   if (!link || !link.available) return [];
   const out = ['', '[ССЫЛОЧНАЯ СТРАТЕГИЯ] (раздел 8 — выдай ≥5 рекомендаций)',
     `data_source: ${link.data_source} (gsc_csv = есть выгрузка GSC; inferred = построено от контента/SERP)`,
-    `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic — готовая тема статьи-донора в формате «Экспертная статья по теме «…» с естественной ссылкой на ваш раздел», donor_topic_ready/donor_topic_angle — проработанная тема и угол, target_url, priority, why):`,
+    `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic — готовая тема статьи-донора в формате «Экспертная статья по теме «…» с естественной ссылкой на ваш раздел», donor_topic_ready/donor_topic_angle — проработанная тема и угол, donor_topic_title — интригующий SEO-title (раскрывает интент, не дублирует тему), donor_topic_description — meta-description, target_url, priority, why):`,
     JSON.stringify((link.recommendations || []).slice(0, 20).map((r) => ({
       anchor: r.anchor,
       anchor_type: r.anchor_type,
       donor_topic: r.donor_topic,
       donor_topic_ready: r.donor_topic_ready || null,
       donor_topic_angle: r.donor_topic_angle || null,
+      donor_topic_title: r.donor_topic_title || null,
+      donor_topic_description: r.donor_topic_description || null,
       target_url: r.target_url,
       priority: r.priority,
       why: r.why,

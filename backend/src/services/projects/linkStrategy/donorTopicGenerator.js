@@ -29,6 +29,30 @@ function _clip(s, max) {
   return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
 }
 
+// Нормализация для сравнения «title vs тема»: без регистра, пунктуации и кавычек.
+function _norm(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[«»"'`.,:;!?()\-—–]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * title обязан отличаться от темы статьи (ТЗ п.3): интриговать и раскрывать
+ * интент, а не дублировать тему. Если LLM вернул title, совпадающий/входящий в
+ * тему (или наоборот), считаем его непригодным и возвращаем '' (фолбэк-логика
+ * выше сохранит поведение без дубля).
+ */
+function _distinctTitle(title, topic) {
+  const t = _norm(title);
+  const top = _norm(topic);
+  if (!t) return '';
+  if (!top) return title;
+  if (t === top || t.includes(top) || top.includes(t)) return '';
+  return title;
+}
+
 /**
  * Кандидаты на обогащение: только рекомендации с тематическим seed
  * (реальный запрос/анкор), ограниченные cfg.maxAnchors.
@@ -61,8 +85,15 @@ function _buildPrompt({ project, targets }) {
     '  дословно и не «статья про <анкор>». Сделай её конкретной и полезной.',
     '— Пиши на языке анкора (как правило русский).',
     '',
+    'ОТДЕЛЬНО к каждой теме обязателен SEO-title и meta-description:',
+    '— title — кликабельный, интригующий заголовок (45–60 символов), который РАСКРЫВАЕТ',
+    '  интент анкора и вызывает желание прочитать. title НЕ должен дословно повторять',
+    '  тему статьи (ready_topic) и не должен быть на неё похож — это другой ракурс/крючок.',
+    '— description — meta-description 140–160 символов: суть статьи + выгода для читателя,',
+    '  естественно отражает интент анкора, без кликбейта-обмана и выдуманных фактов.',
+    '',
     `Верни ТОЛЬКО JSON-массив РОВНО из ${targets.length} объектов в том же порядке:`,
-    '{"ready_topic": "готовая тема статьи (рабочий заголовок)", "h1": "H1 статьи", "angle": "угол раскрытия одним предложением"}',
+    '{"ready_topic": "готовая тема статьи (рабочий заголовок)", "h1": "H1 статьи", "title": "интригующий SEO-title, раскрывает интент, не похож на тему", "description": "meta-description 140–160 символов", "angle": "угол раскрытия одним предложением"}',
     '',
     'Анкоры/запросы:',
     list,
@@ -121,6 +152,10 @@ async function enrichDonorTopics({ recommendations, project, llmFn } = {}) {
     rec.donor_topic_ready = ready;
     rec.donor_topic_h1 = _clip((item && item.h1) || ready, 200);
     if (item && item.angle) rec.donor_topic_angle = _clip(item.angle, 240);
+    // SEO-title (интригует, раскрывает интент, НЕ похож на тему) + meta-description.
+    const title = _distinctTitle(item && item.title, ready);
+    if (title) rec.donor_topic_title = _clip(title, 70);
+    if (item && item.description) rec.donor_topic_description = _clip(item.description, 170);
     // Итоговая строка — всегда в обязательном формате-обёртке.
     rec.donor_topic = wrapDonorTopic(ready);
     result.enriched += 1;
