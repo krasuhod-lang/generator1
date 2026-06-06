@@ -20,6 +20,7 @@ import EatTemplatesCard from '../components/EatTemplatesCard.vue';
 import SchemaAuditCard from '../components/SchemaAuditCard.vue';
 import AiVisibilityCard from '../components/AiVisibilityCard.vue';
 import RankingFactorsCard from '../components/RankingFactorsCard.vue';
+import StrategyDiagram from '../components/StrategyDiagram.vue';
 import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
 import ActionPlanCard from '../components/ActionPlanCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
@@ -116,6 +117,7 @@ const breakdownsData = computed(() => currentAnalysis.value?.gsc_snapshot?.break
 const pageDecayData = computed(() => currentAnalysis.value?.gsc_snapshot?.page_decay || null);
 const brandSplitData = computed(() => currentAnalysis.value?.gsc_snapshot?.brand_split || null);
 const seasonalityData = computed(() => currentAnalysis.value?.gsc_snapshot?.seasonality || null);
+const strategyMapData = computed(() => currentAnalysis.value?.gsc_snapshot?.strategy_map || null);
 // Новые слои анализа GSC (ссылочный профиль, блог-план, мета, E-E-A-T, GEO/AEO, схема).
 const linkAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.link_audit || null);
 const blogPlanData = computed(() => currentAnalysis.value?.gsc_snapshot?.blog_plan || null);
@@ -132,6 +134,7 @@ const actionPlanData = computed(() => currentAnalysis.value?.gsc_snapshot?.actio
 const gscSubTab = ref('report');
 const gscSubTabs = computed(() => [
   { key: 'report', label: 'Отчёт ИИ', show: !!(analyzing.value || currentAnalysis.value) },
+  { key: 'strategy', label: 'Стратегия', show: !!(strategyMapData.value && strategyMapData.value.available) },
   { key: 'actionplan', label: 'План действий', show: !!(actionPlanData.value && actionPlanData.value.available) },
   { key: 'dynamics', label: 'Динамика', show: !!(periodCompareData.value || breakdownsData.value || pageDecayData.value || brandSplitData.value || seasonalityData.value) },
   { key: 'commercial', label: 'Коммерция', show: !!commercialData.value },
@@ -609,6 +612,11 @@ onUnmounted(() => {
           </div>
           <MarkdownView v-else-if="currentAnalysis?.status === 'done'" :source="currentAnalysis.report_markdown" />
         </section>
+        </div>
+
+        <!-- Панель: План действий (конкретные рекомендации с расчётами) -->
+        <div v-show="activeGscSubTab === 'strategy'">
+        <StrategyDiagram v-if="strategyMapData" :strategy-map="strategyMapData" />
         </div>
 
         <!-- Панель: План действий (конкретные рекомендации с расчётами) -->

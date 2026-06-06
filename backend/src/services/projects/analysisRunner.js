@@ -36,6 +36,7 @@ const { callDeepSeek } = require('../llm/deepseek.adapter');
 const ydxService = require('./ydxService');
 const { runYandexAnalysis } = require('./ydxAnalyzer');
 const { buildRankingFactors } = require('./rankingFactors');
+const { buildStrategyMap } = require('./strategyMap');
 const { runSynthesis } = require('./synthesisAnalyzer');
 
 /**
@@ -460,6 +461,10 @@ async function processAnalysis(analysisId) {
     // Детерминированный аудит факторов ранжирования (что мешает росту).
     let rankingFactors = null;
     try { rankingFactors = buildRankingFactors(snapshot, ydxSnapshot); } catch (_) { rankingFactors = null; }
+
+    // Визуальная схема стратегии (ТЗ п.5) — строим из факторов ранжирования и
+    // кладём в снапшот, чтобы и кабинет, и публичный отчёт рисовали её одинаково.
+    try { snapshot.strategy_map = buildStrategyMap(rankingFactors); } catch (_) { snapshot.strategy_map = null; }
 
     // Финальная сводка закономерностей Google ↔ Яндекс + подсветка пробелов.
     let synthesisMarkdown = null;

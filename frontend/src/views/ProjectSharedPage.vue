@@ -18,6 +18,7 @@ import MarkdownView from '../components/MarkdownView.vue';
 import CommercialInsights from '../components/CommercialInsights.vue';
 import AnalyticsExtras from '../components/AnalyticsExtras.vue';
 import RankingFactorsCard from '../components/RankingFactorsCard.vue';
+import StrategyDiagram from '../components/StrategyDiagram.vue';
 import ActionPlanCard from '../components/ActionPlanCard.vue';
 import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
 import LinkProfileCard from '../components/LinkProfileCard.vue';
@@ -133,6 +134,8 @@ onMounted(async () => {
               <h2 class="panel-title text-indigo-300">AI-отчёт · Google</h2>
               <MarkdownView :source="analysis.report_markdown" />
             </section>
+
+            <StrategyDiagram v-if="snap?.strategy_map && snap.strategy_map.available" :strategy-map="snap.strategy_map" />
 
             <ActionPlanCard v-if="snap?.action_plan" :plan="snap.action_plan" />
 

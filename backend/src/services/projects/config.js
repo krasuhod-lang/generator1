@@ -365,6 +365,12 @@ const PROJECTS_CONFIG = deepFreeze({
     ],
   },
 
+  // п.5 — Визуальная схема стратегии. Строится детерминированно из факторов
+  // ранжирования (rankingFactors) и раскладывает работы по 5 этапам воронки.
+  strategyMap: {
+    enabled: true,
+  },
+
   // п.1, п.2 — Ссылочная стратегия. GSC Search Analytics API НЕ отдаёт отчёт
   // «Ссылки», поэтому данные импортируются вручную CSV-выгрузкой из GSC UI
   // (Top linking sites / Top linked pages / Top linking text). Если ссылочных
