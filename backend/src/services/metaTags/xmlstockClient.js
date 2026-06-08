@@ -30,6 +30,53 @@ const GOOGLE_XMLSTOCK_URL =
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ── Бесперебойность парсинга ───────────────────────────────────────────────
+// XMLStock обрабатывает запрос асинхронно: сразу после постановки в очередь он
+// может вернуть «мягкую» ошибку <error>Запрос еще не обработан, попробуйте
+// позже</error>. Это НЕ фатальная ошибка — нужно подождать и повторить тот же
+// запрос (поллинг). Раньше клиент делал только 3 быстрые попытки с паузой 3s и
+// при не успевшей обработке отдавал ошибку наружу («Запрос еще не обработан»),
+// из-за чего падали ВСЕ функции на базе SERP (релевантность, мета-теги,
+// serp-evidence, проверка каннибализации). Теперь такие транзиентные ошибки
+// поллим отдельно — с увеличенным числом попыток и нарастающей паузой.
+const _envInt = (name, def) => {
+  const v = parseInt(process.env[name], 10);
+  return Number.isFinite(v) && v > 0 ? v : def;
+};
+
+// Сетевые/5xx сбои — короткий ретрай (как и раньше).
+const NETWORK_RETRIES = _envInt('XMLSTOCK_NETWORK_RETRIES', 3);
+const NETWORK_DELAY_MS = _envInt('XMLSTOCK_NETWORK_DELAY_MS', 3000);
+// Транзиентные API-ошибки («ещё не обработан») — поллинг с бэкоффом.
+const TRANSIENT_RETRIES = _envInt('XMLSTOCK_TRANSIENT_RETRIES', 8);
+const TRANSIENT_BASE_DELAY_MS = _envInt('XMLSTOCK_TRANSIENT_DELAY_MS', 3000);
+const TRANSIENT_MAX_DELAY_MS = _envInt('XMLSTOCK_TRANSIENT_MAX_DELAY_MS', 15000);
+
+// Сигнатуры «мягких» (транзиентных) ошибок XMLStock — запрос принят, но ещё не
+// готов / временный лимит. Их нужно ПОЛЛИТЬ, а не падать. Исчерпание квоты
+// («Превышен лимит», «Not enough money») сюда НЕ входит — это фатально.
+const TRANSIENT_ERROR_PATTERNS = [
+  /не\s+обработан/i,
+  /попробуйте\s+(?:позже|поздней|чуть\s+позже|через)/i,
+  /повторите\s+(?:запрос|попытку|позже)/i,
+  /в\s+очеред/i, // «запрос в очереди»
+  /not\s+(?:yet\s+)?(?:ready|processed|complete)/i,
+  /try\s+again\s+later/i,
+  /temporar/i, // temporarily unavailable
+  /still\s+processing/i,
+];
+
+function _isTransientErrorMessage(msg) {
+  const text = String(msg || '');
+  return TRANSIENT_ERROR_PATTERNS.some((re) => re.test(text));
+}
+
+/** Пауза с экспоненциальным бэкоффом (с потолком) для поллинга XMLStock. */
+function _transientDelay(attempt) {
+  const ms = TRANSIENT_BASE_DELAY_MS * 2 ** (attempt - 1);
+  return Math.min(ms, TRANSIENT_MAX_DELAY_MS);
+}
+
 /**
  * Сжимает пробелы в одну строку. cheerio `.text()` уже корректно убирает
  * любую XML-разметку (включая вложенные `<hlword>...</hlword>`-маркеры
@@ -52,7 +99,11 @@ function _extractDocsFromXml(xmlText) {
   // xmlstock при ошибке возвращает <error>текст</error>
   const errNode = $('error').first();
   if (errNode.length) {
-    throw new Error(`XMLStock API error: ${errNode.text().trim()}`);
+    const msg = errNode.text().trim();
+    const err = new Error(`XMLStock API error: ${msg}`);
+    // Помечаем «мягкие» ошибки (запрос ещё не обработан) — их поллим, а не падаем.
+    err.transient = _isTransientErrorMessage(msg);
+    throw err;
   }
 
   const docs = [];
@@ -71,6 +122,58 @@ function _extractDocsFromXml(xmlText) {
     if (title) docs.push({ title, snippet, url: link });
   });
   return docs;
+}
+
+/**
+ * Бесперебойно тянет ОДНУ страницу XMLStock по готовому URL и парсит её в
+ * массив doc'ов. Транзиентные ошибки («Запрос ещё не обработан») поллит с
+ * нарастающей паузой; сетевые/5xx — короткий ретрай. Бросает только когда все
+ * попытки исчерпаны или ошибка фатальна (например, исчерпан лимит ключа).
+ *
+ * @param {string} url       — полный URL запроса к XMLStock
+ * @param {string} [label]   — префикс для логов (yandex|google)
+ * @returns {Promise<Array<{title, snippet, url}>>}
+ */
+async function _fetchSerpPage(url, label = 'xmlstock') {
+  let lastErr = null;
+  // Транзиентные попытки считаем отдельно от сетевых, чтобы «не обработан»
+  // поллился долго, а сетевой сбой не висел бесконечно.
+  let transientAttempt = 0;
+  let networkAttempt = 0;
+
+  // Общий потолок итераций — защита от бесконечного цикла.
+  const maxIters = TRANSIENT_RETRIES + NETWORK_RETRIES + 2;
+  for (let iter = 0; iter < maxIters; iter += 1) {
+    try {
+      const res = await axios.get(url, {
+        timeout: 30000,
+        // XMLStock возвращает XML — отдаём строкой, не пытаемся auto-parse.
+        responseType: 'text',
+        transformResponse: [(d) => d],
+        validateStatus: (s) => s >= 200 && s < 300,
+      });
+      return _extractDocsFromXml(String(res.data || ''));
+    } catch (err) {
+      lastErr = err;
+      if (err && err.transient) {
+        transientAttempt += 1;
+        if (transientAttempt > TRANSIENT_RETRIES) break;
+        const delay = _transientDelay(transientAttempt);
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[${label}] запрос ещё не обработан (попытка ${transientAttempt}/${TRANSIENT_RETRIES}), `
+          + `ждём ${delay}ms и повторяем…`,
+        );
+        await sleep(delay);
+        continue;
+      }
+      // Сетевая/прочая ошибка — короткий ретрай.
+      networkAttempt += 1;
+      if (networkAttempt > NETWORK_RETRIES) break;
+      await sleep(NETWORK_DELAY_MS);
+    }
+  }
+  throw lastErr || new Error('XMLStock: unknown error');
 }
 
 /**
@@ -96,44 +199,31 @@ async function fetchYandexSerp(keyword, opts = {}) {
     'attr%3D%22%22.mode%3Dflat.groups-on-page%3D10.docs-in-group%3D1';
   const sep = baseUrl.includes('?') ? '&' : '?';
 
-  const maxRetries = 3;
+  // Каждую страницу тянем бесперебойно (с поллингом транзиентных ошибок).
+  // Накапливаем результат постранично — успешно полученные страницы не
+  // теряются, даже если последняя не наберётся.
+  const extracted = [];
   let lastErr = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+  for (let page = startPage; page < startPage + pages; page += 1) {
+    const lrPart = lr ? `&lr=${encodeURIComponent(String(lr).trim())}` : '';
+    const url =
+      `${baseUrl}${sep}query=${encodeURIComponent(keyword)}` +
+      `&groupby=${groupBy}${lrPart}&page=${page}`;
     try {
-      const extracted = [];
-      for (let page = startPage; page < startPage + pages; page += 1) {
-        const lrPart = lr ? `&lr=${encodeURIComponent(String(lr).trim())}` : '';
-        const url =
-          `${baseUrl}${sep}query=${encodeURIComponent(keyword)}` +
-          `&groupby=${groupBy}${lrPart}&page=${page}`;
-
-        const res = await axios.get(url, {
-          timeout: 30000,
-          // XMLStock возвращает XML — отдаём строкой, не пытаемся auto-parse.
-          responseType: 'text',
-          transformResponse: [(d) => d],
-          // При 4xx/5xx бросаем — поймаем в catch и сделаем retry или выйдем.
-          validateStatus: (s) => s >= 200 && s < 300,
-        });
-
-        const xmlText = String(res.data || '');
-        const docs = _extractDocsFromXml(xmlText);
-        for (const d of docs) extracted.push(d);
-      }
-
-      if (extracted.length === 0) {
-        throw new Error('Пустой SERP (нет результатов от XMLStock)');
-      }
-      return extracted;
+      const docs = await _fetchSerpPage(url, 'yandex');
+      for (const d of docs) extracted.push(d);
     } catch (err) {
       lastErr = err;
-      if (attempt < maxRetries) {
-        await sleep(3000);
-      }
+      // Если хоть что-то уже набрали — не валим весь запрос из-за одной
+      // недобравшейся страницы (best-effort добор).
+      if (extracted.length) break;
     }
   }
-  throw new Error(`XMLStock: ${lastErr?.message || 'unknown error'}`);
+
+  if (extracted.length === 0) {
+    throw new Error(`XMLStock: ${lastErr?.message || 'Пустой SERP (нет результатов от XMLStock)'}`);
+  }
+  return extracted;
 }
 
 /**
@@ -159,45 +249,30 @@ async function fetchGoogleSerp(keyword, opts = {}) {
     'attr%3D%22%22.mode%3Dflat.groups-on-page%3D10.docs-in-group%3D1';
   const sep = baseUrl.includes('?') ? '&' : '?';
 
-  const maxRetries = 3;
+  const extracted = [];
   let lastErr = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+  for (let page = startPage; page < startPage + pages; page += 1) {
+    const lrPart = lr ? `&lr=${encodeURIComponent(String(lr).trim())}` : '';
+    const domainPart = domain
+      ? `&domain=${encodeURIComponent(String(domain).trim())}` : '';
+    const devicePart = device
+      ? `&device=${encodeURIComponent(String(device).trim())}` : '';
+    const url =
+      `${baseUrl}${sep}query=${encodeURIComponent(keyword)}` +
+      `&groupby=${groupBy}${lrPart}${domainPart}${devicePart}&page=${page}`;
     try {
-      const extracted = [];
-      for (let page = startPage; page < startPage + pages; page += 1) {
-        const lrPart = lr ? `&lr=${encodeURIComponent(String(lr).trim())}` : '';
-        const domainPart = domain
-          ? `&domain=${encodeURIComponent(String(domain).trim())}` : '';
-        const devicePart = device
-          ? `&device=${encodeURIComponent(String(device).trim())}` : '';
-        const url =
-          `${baseUrl}${sep}query=${encodeURIComponent(keyword)}` +
-          `&groupby=${groupBy}${lrPart}${domainPart}${devicePart}&page=${page}`;
-
-        const res = await axios.get(url, {
-          timeout: 30000,
-          responseType: 'text',
-          transformResponse: [(d) => d],
-          validateStatus: (s) => s >= 200 && s < 300,
-        });
-
-        const docs = _extractDocsFromXml(String(res.data || ''));
-        for (const d of docs) extracted.push(d);
-      }
-
-      if (extracted.length === 0) {
-        throw new Error('Пустой SERP (нет результатов от XMLStock/Google)');
-      }
-      return extracted;
+      const docs = await _fetchSerpPage(url, 'google');
+      for (const d of docs) extracted.push(d);
     } catch (err) {
       lastErr = err;
-      if (attempt < maxRetries) {
-        await sleep(3000);
-      }
+      if (extracted.length) break;
     }
   }
-  throw new Error(`XMLStock(Google): ${lastErr?.message || 'unknown error'}`);
+
+  if (extracted.length === 0) {
+    throw new Error(`XMLStock(Google): ${lastErr?.message || 'Пустой SERP (нет результатов от XMLStock/Google)'}`);
+  }
+  return extracted;
 }
 
 module.exports = {
