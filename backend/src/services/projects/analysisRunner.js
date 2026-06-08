@@ -34,6 +34,7 @@ const { buildActionPlan } = require('./actionPlan');
 const dspyClient = require('./dspyClient');
 const { callDeepSeek } = require('../llm/deepseek.adapter');
 const ydxService = require('./ydxService');
+const { buildYandexInsights } = require('./ydxInsights');
 const { runYandexAnalysis } = require('./ydxAnalyzer');
 const { buildRankingFactors } = require('./rankingFactors');
 const { buildStrategyMap } = require('./strategyMap');
@@ -207,6 +208,14 @@ async function collectYdxSnapshot(project, range) {
       brandSplit = splitBrand(topQueries, brandTokens);
     } catch (_) { brandSplit = null; }
 
+    // Расширяем базу анализируемых данных Яндекса детерминированными срезами
+    // поверх уже собранных топ-запросов (позиционные корзины, точки роста,
+    // низкий CTR, интент-сплит) — без доп. вызовов Webmaster API.
+    let insights = null;
+    try {
+      insights = buildYandexInsights(topQueries, { project });
+    } catch (_) { insights = null; }
+
     const snapshot = {
       source: 'yandex',
       range: performance.range,
@@ -214,6 +223,7 @@ async function collectYdxSnapshot(project, range) {
       series: performance.series,
       top_queries: topQueries,
       brand_split: brandSplit,
+      insights,
     };
     const payload = {
       project,
@@ -221,6 +231,7 @@ async function collectYdxSnapshot(project, range) {
       performance,
       topQueries,
       brandSplit,
+      insights,
     };
     return { snapshot, payload };
   } catch (e) {
