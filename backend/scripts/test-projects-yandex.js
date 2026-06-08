@@ -216,6 +216,53 @@ test('compareSources is pure (does not mutate inputs)', () => {
   assert.deepStrictEqual(y, JSON.parse(JSON.stringify(YDX)));
 });
 
+// ── ydxInsights: расширенные срезы поверх топ-запросов ───────────────
+const { buildYandexInsights } = require('../src/services/projects/ydxInsights');
+
+const YDX_QUERIES = [
+  { key: 'купить тормозные диски', clicks: 40, impressions: 1000, ctr: 4, position: 2.4 },
+  { key: 'тормозные колодки цена', clicks: 5, impressions: 800, ctr: 0.6, position: 6.1 },
+  { key: 'как поменять колодки', clicks: 12, impressions: 300, ctr: 4, position: 8.0 },
+  { key: 'seniko официальный сайт', clicks: 30, impressions: 200, ctr: 15, position: 1.2 },
+  { key: 'амортизаторы каталог', clicks: 2, impressions: 500, ctr: 0.4, position: 12 },
+  { key: 'грм комплект', clicks: 1, impressions: 50, ctr: 2, position: 45 },
+];
+
+test('buildYandexInsights returns full slices', () => {
+  const ins = buildYandexInsights(YDX_QUERIES, { project: { name: 'Seniko', url: 'https://seniko.ru' } });
+  assert.strictEqual(ins.available, true);
+  // Корзины покрывают все позиции, суммарные показы сходятся.
+  const bucketImpr = ins.position_buckets.reduce((s, b) => s + b.impressions, 0);
+  assert.strictEqual(bucketImpr, ins.total.impressions);
+  assert.ok(ins.position_buckets.find((b) => b.key === 'top3').queries >= 2);
+  // Striking distance — запросы позиций 4-15 с показами.
+  assert.ok(ins.striking_distance.some((q) => /колодки цена/.test(q.query)));
+  assert.ok(ins.striking_distance.every((q) => q.position >= 4 && q.position <= 15));
+  // Низкий CTR — высокие показы + ctr ниже порога.
+  assert.ok(ins.low_ctr.some((q) => /колодки цена/.test(q.query)));
+  // Интент-сплит: коммерческие запросы попадают в commercial.
+  assert.ok(ins.intent_split.commercial.impressions > 0);
+});
+
+test('buildYandexInsights graceful on empty input', () => {
+  const ins = buildYandexInsights([], {});
+  assert.strictEqual(ins.available, false);
+});
+
+test('ydxAnalyzer prompt includes extended slices when insights present', () => {
+  const { _buildUserPrompt } = require('../src/services/projects/ydxAnalyzer');
+  const prompt = _buildUserPrompt({
+    project: { name: 'Seniko' },
+    range: { startDate: '2026-01-01', endDate: '2026-01-28' },
+    performance: { totals: { clicks: 90, impressions: 2850, ctr: 3.2, position: 5 }, series: [] },
+    topQueries: YDX_QUERIES,
+    brandSplit: null,
+    insights: buildYandexInsights(YDX_QUERIES, { project: { name: 'Seniko' } }),
+  });
+  assert.ok(/РАСШИРЕННЫЕ СРЕЗЫ ЯНДЕКСА/.test(prompt));
+  assert.ok(/Точки роста у входа в топ/.test(prompt));
+});
+
 // eslint-disable-next-line no-console
 (async () => {
   for (const run of asyncQueue) { await run(); } // eslint-disable-line no-await-in-loop

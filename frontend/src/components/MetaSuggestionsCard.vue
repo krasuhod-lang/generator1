@@ -28,6 +28,7 @@ watch(() => props.pageMetaAudit, (val) => {
 }, { immediate: true });
 
 const busy = ref({});
+const errors = ref({});
 
 function trimUrl(u) {
   if (!u) return '';
@@ -50,13 +51,23 @@ function missedLsi(p) {
 async function regenerate(page, idx) {
   if (!props.projectId) return;
   busy.value = { ...busy.value, [idx]: true };
+  errors.value = { ...errors.value, [idx]: '' };
   try {
     const res = await store.regenerateMeta(props.projectId, page.url, props.analysisId);
     const updated = res && res.pages && res.pages[0];
     if (updated) pages.value.splice(idx, 1, updated);
     if (res && res.persisted && res.persisted.page_meta_audit) emit('updated', res.persisted.page_meta_audit);
-  } catch (_) { /* graceful: keep current row */ }
-  finally { busy.value = { ...busy.value, [idx]: false }; }
+    // Показываем причину, если рекомендация так и не сгенерировалась — иначе
+    // кнопка выглядит «нерабочей» (ничего не произошло).
+    const reason = (updated && updated.error) || (res && res.error) || '';
+    if (updated && !updated.suggested) {
+      errors.value = { ...errors.value, [idx]: reason || 'Не удалось сгенерировать — попробуйте ещё раз' };
+    }
+  } catch (e) {
+    const msg = (e && e.response && e.response.data && e.response.data.error)
+      || (e && e.message) || 'Ошибка перегенерации';
+    errors.value = { ...errors.value, [idx]: msg };
+  } finally { busy.value = { ...busy.value, [idx]: false }; }
 }
 
 // Копирование всей таблицы в Excel: TSV с разбивкой по колонкам (2 клика).
@@ -125,7 +136,10 @@ async function copyAllForExcel() {
                   <CopyButton :text="p.suggested.description" label="Desc" />
                 </div>
               </template>
-              <div v-else class="text-xs text-gray-500">Рекомендация не сгенерирована.</div>
+              <div v-else class="text-xs text-gray-500">
+                Рекомендация не сгенерирована.
+                <span v-if="p.error" class="block text-amber-300 mt-0.5">⚠ {{ p.error }}</span>
+              </div>
             </div>
           </div>
 
@@ -142,6 +156,7 @@ async function copyAllForExcel() {
               {{ busy[i] ? 'Этапы: ЦА → SERP → генерация → LSI…' : 'Перегенерировать через Meta Tags' }}
             </button>
             <CopyButton v-if="p.suggested" :text="bothMeta(p)" label="Title + Description" />
+            <span v-if="errors[i]" class="text-[11px] text-rose-300">⚠ {{ errors[i] }}</span>
           </div>
         </template>
       </div>

@@ -65,7 +65,28 @@ function _renderBrandSplit(bs) {
   ];
 }
 
-function _buildUserPrompt({ project, range, performance, topQueries, brandSplit, dspySuffix }) {
+/**
+ * Расширенные срезы Яндекса (ydxInsights): позиционные корзины, точки роста у
+ * входа в топ, запросы с низким CTR (поведенческий сигнал), интент-сплит.
+ * Дают аналитику полную картину спроса, а не только сырой топ-запросов.
+ */
+function _renderInsights(ins) {
+  if (!ins || ins.available === false) return [];
+  return [
+    '',
+    '[РАСШИРЕННЫЕ СРЕЗЫ ЯНДЕКСА]',
+    '— Распределение по позициям (клики/показы/CTR/ср.позиция по корзинам топ-3/4-10/11-30/30+):',
+    JSON.stringify(ins.position_buckets || []),
+    '— Точки роста у входа в топ (позиции 4-15, по убыванию показов):',
+    JSON.stringify(ins.striking_distance || []),
+    '— Запросы с высокими показами и низким CTR (поведенческий/сниппетный сигнал):',
+    JSON.stringify(ins.low_ctr || []),
+    '— Сплит спроса по интенту (commercial/informational/navigational/other):',
+    JSON.stringify(ins.intent_split || {}),
+  ];
+}
+
+function _buildUserPrompt({ project, range, performance, topQueries, brandSplit, insights, dspySuffix }) {
   const totals = (performance && performance.totals) || {};
   const series = (performance && performance.series) || [];
   const lines = [
@@ -91,6 +112,7 @@ function _buildUserPrompt({ project, range, performance, topQueries, brandSplit,
     }))),
   ];
   lines.push(..._renderBrandSplit(brandSplit));
+  lines.push(..._renderInsights(insights));
   if (dspySuffix) lines.push('', dspySuffix);
   return lines.join('\n');
 }
