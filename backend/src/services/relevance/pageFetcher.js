@@ -5,13 +5,18 @@
  *
  * Главные правила:
  *   • реальный браузерный User-Agent (некоторые сайты режут axios/default
- *     или дефолтные строки SEO-ботов);
+ *     или дефолтные строки SEO-ботов); UA берётся из пула свежих браузерных
+ *     строк со случайной ротацией на каждый URL (anti-bot);
  *   • расширенный Accept (+image/webp,*\/*; q=0.8) — современные сайты часто
  *     отдают 406, если видеть только text/html;
  *   • строгий лимит на размер ответа (RELEVANCE_MAX_HTML_BYTES, дефолт 16 МБ);
  *   • per-URL таймаут (RELEVANCE_FETCH_TIMEOUT_MS, дефолт 25 с);
  *   • ограниченный параллелизм (RELEVANCE_FETCH_CONCURRENCY, дефолт 6);
- *   • повтор с альтернативным User-Agent (Googlebot) при 403/429/503/таймауте;
+ *   • повтор с альтернативным User-Agent (Googlebot) при 403/429/503/таймауте,
+ *     с экспоненциальной задержкой между попытками (Exponential Backoff,
+ *     RELEVANCE_RETRY_BASE_DELAY_MS / RELEVANCE_RETRY_MAX_DELAY_MS);
+ *   • опциональный прокси-ротатор (RELEVANCE_PROXY_URL / RELEVANCE_PROXY_LIST)
+ *     через https-proxy-agent — обход IP-блокировок и гео-ограничений;
  *   • cookie jar (`tough-cookie`) — многие сайты на втором запросе отдают
  *     полный HTML, если приняли cookie с первого (Cloudflare cf_clearance,
  *     Qrator, Akamai). Создаём отдельный jar на каждый URL — изоляция;
@@ -29,6 +34,17 @@
  */
 
 const axios = require('axios');
+
+let _HttpsProxyAgent = null;
+try {
+  // https-proxy-agent уже в зависимостях бэкенда. Туннелируем axios-запросы
+  // через корпоративный/ротируемый прокси (CONNECT) — обход IP-блокировок и
+  // гео-ограничений сайтов-доноров. Если пакет недоступен — работаем напрямую.
+  // eslint-disable-next-line global-require
+  _HttpsProxyAgent = require('https-proxy-agent').HttpsProxyAgent;
+} catch (_) {
+  _HttpsProxyAgent = null;
+}
 
 let _cookieJarSupport = null;
 let _CookieJarCtor    = null;
@@ -53,6 +69,32 @@ const PRIMARY_USER_AGENT =
 // антибот-фильтров, чтобы не вылетать из выдачи Яндекса/Google.
 const FALLBACK_USER_AGENT =
   'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
+// Пул свежих UA реальных десктоп-браузеров (Chrome/Edge/Firefox на Win/Mac).
+// Ротация снижает шанс попасть под rate-limit/фингерпринт-блокировку по
+// «однообразному» User-Agent (TZ: «ротация актуальных User-Agent»). Берём
+// хардкод-пул вместо внешней fake_useragent — он не тянет зависимость и не
+// ходит в сеть за свежей базой UA на каждый запрос.
+const USER_AGENT_POOL = [
+  PRIMARY_USER_AGENT,
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    + '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    + '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    + '(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    + '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+    + '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+];
+
+/** Случайный «человеческий» UA из пула (TZ: случайный, но валидный UA). */
+function _randomUserAgent() {
+  return USER_AGENT_POOL[Math.floor(Math.random() * USER_AGENT_POOL.length)];
+}
 
 const FETCH_TIMEOUT_MS = (() => {
   const v = parseInt(process.env.RELEVANCE_FETCH_TIMEOUT_MS, 10);
@@ -87,6 +129,76 @@ const HEADLESS_TIMEOUT_MS  = (() => {
 // X-Internal-Token для вызова `relevance_fetcher` (шарим единый токен с
 // сервисом `relevance`). Если переменная пустая — сервис тоже её не требует.
 const RELEVANCE_INTERNAL_TOKEN = (process.env.RELEVANCE_INTERNAL_TOKEN || '').trim();
+
+// ── Прокси (anti-bot / гео-обход) ──────────────────────────────────────────
+// TZ: «Архитектура функции должна поддерживать передачу прокси-серверов.
+// Предусмотреть возможность подключения proxy-ротатора».
+//   • RELEVANCE_PROXY_URL  — один прокси (******host:port).
+//   • RELEVANCE_PROXY_LIST — список через запятую/перенос строки → ротатор:
+//     на каждый URL берём случайный прокси из пула.
+// Прокси применяется только если в вызов передан proxiesEnabled !== false
+// (по умолчанию включён, когда пул непустой). Туннелирование — через
+// https-proxy-agent (CONNECT), работает для https-целей.
+function _parseProxyList(raw) {
+  return String(raw || '')
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const PROXY_POOL = (() => {
+  const single = (process.env.RELEVANCE_PROXY_URL || '').trim();
+  const list = _parseProxyList(process.env.RELEVANCE_PROXY_LIST);
+  const all = [];
+  if (single) all.push(single);
+  for (const p of list) if (!all.includes(p)) all.push(p);
+  return all;
+})();
+
+const PROXY_AVAILABLE = PROXY_POOL.length > 0 && !!_HttpsProxyAgent;
+
+/** Случайный прокси из пула (ротатор) либо null, если пул пуст/выключен. */
+function _pickProxy(proxiesEnabled) {
+  if (proxiesEnabled === false) return null;
+  if (!PROXY_AVAILABLE) return null;
+  return PROXY_POOL[Math.floor(Math.random() * PROXY_POOL.length)];
+}
+
+/** Строит agent для axios из URL прокси (или null, если прокси не задан). */
+function _proxyAgent(proxyUrl) {
+  if (!proxyUrl || !_HttpsProxyAgent) return null;
+  try {
+    return new _HttpsProxyAgent(proxyUrl);
+  } catch (_) {
+    return null;
+  }
+}
+
+// ── Экспоненциальный backoff между ретраями ────────────────────────────────
+// TZ: «Реализовать экспоненциальную задержку (Exponential Backoff) для
+// повторных запросов при статусах 429, 500, 502, 503, 504». Базовая задержка
+// и потолок настраиваются через env; добавляем небольшой джиттер, чтобы не
+// бить по серверу синхронно по всем URL батча.
+const RETRY_BASE_DELAY_MS = (() => {
+  const v = parseInt(process.env.RELEVANCE_RETRY_BASE_DELAY_MS, 10);
+  return Number.isFinite(v) && v >= 0 && v <= 30000 ? v : 600;
+})();
+
+const RETRY_MAX_DELAY_MS = (() => {
+  const v = parseInt(process.env.RELEVANCE_RETRY_MAX_DELAY_MS, 10);
+  return Number.isFinite(v) && v >= 0 && v <= 120000 ? v : 8000;
+})();
+
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Задержка attempt-й попытки: base * 2^(attempt-1) + джиттер, с потолком. */
+function _backoffDelay(attempt) {
+  if (RETRY_BASE_DELAY_MS <= 0) return 0;
+  const exp = RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1);
+  const capped = Math.min(exp, RETRY_MAX_DELAY_MS);
+  const jitter = Math.floor(Math.random() * Math.min(250, capped + 1));
+  return capped + jitter;
+}
 
 // Сигнатуры антибот-челленджей (Cloudflare / Qrator / DDoS-Guard / Sucuri).
 // При их обнаружении в HTML или статус-кодах форсим headless БЕЗ ожидания
@@ -171,7 +283,7 @@ function _newAxiosWithJar() {
   return _cookieJarSupport(inst);
 }
 
-async function _doFetch(client, url, userAgent, { acceptBrotli = true } = {}) {
+async function _doFetch(client, url, userAgent, { acceptBrotli = true, proxyAgent = null } = {}) {
   const headers = _buildHeaders(userAgent);
   if (!acceptBrotli) {
     // На редких серверах brotli приходит «битым» (бинарь без правильного
@@ -179,7 +291,7 @@ async function _doFetch(client, url, userAgent, { acceptBrotli = true } = {}) {
     // повторяем без `br`, чтобы axios не пытался распаковывать.
     headers['Accept-Encoding'] = 'gzip, deflate';
   }
-  return client.get(url, {
+  const cfg = {
     timeout: FETCH_TIMEOUT_MS,
     maxContentLength: MAX_HTML_BYTES,
     maxBodyLength:    MAX_HTML_BYTES,
@@ -189,7 +301,15 @@ async function _doFetch(client, url, userAgent, { acceptBrotli = true } = {}) {
     transformResponse: [(d) => d],
     validateStatus: (s) => s >= 200 && s < 300,
     decompress: true,
-  });
+  };
+  if (proxyAgent) {
+    // Туннелируем через прокси (CONNECT). proxy:false отключает встроенную
+    // axios-обработку env-переменных HTTP(S)_PROXY, чтобы не конфликтовала.
+    cfg.httpsAgent = proxyAgent;
+    cfg.httpAgent = proxyAgent;
+    cfg.proxy = false;
+  }
+  return client.get(url, cfg);
 }
 
 /**
@@ -226,12 +346,15 @@ function _shouldRetry(err) {
   return false;
 }
 
-async function _headlessFetch(url) {
+async function _headlessFetch(url, proxyUrl = null) {
   if (!HEADLESS_FETCHER_URL) return null;
   try {
+    const body = { url, timeout_ms: HEADLESS_TIMEOUT_MS };
+    // Пробрасываем прокси в headless-сервис (Playwright умеет launch с proxy).
+    if (proxyUrl) body.proxy = proxyUrl;
     const res = await axios.post(
       HEADLESS_FETCHER_URL,
-      { url, timeout_ms: HEADLESS_TIMEOUT_MS },
+      body,
       {
         timeout: HEADLESS_TIMEOUT_MS + 5000,
         maxContentLength: MAX_HTML_BYTES,
@@ -250,23 +373,34 @@ async function _headlessFetch(url) {
   }
 }
 
-async function fetchOne(url) {
+async function fetchOne(url, opts = {}) {
+  const { proxiesEnabled } = opts;
   const client = _newAxiosWithJar();
+  // Прокси выбираем один раз на URL (ротатор на уровне URL, не на уровне
+  // попытки), чтобы cookie jar/челлендж не «прыгали» между IP внутри ретраев.
+  const proxyUrl = _pickProxy(proxiesEnabled);
+  const proxyAgent = _proxyAgent(proxyUrl);
+  // Случайные «человеческие» UA для основной и третьей попытки (ротация).
+  const primaryUa = _randomUserAgent();
+  const thirdUa = _randomUserAgent();
   const result = { url };
+  // Счётчик ретраев (TZ output: retries_used) — число повторов сверх первой
+  // попытки, доведших до успеха или до финальной ошибки.
+  let retries = 0;
 
   // helper: вернуть успех (если headless вернул HTML), иначе null.
   // Используем при WAF/антибот-сигналах ДО исчерпания axios-попыток.
   const _tryHeadless = async (reasonMethod) => {
     if (!HEADLESS_FETCHER_URL) return null;
-    const hh = await _headlessFetch(url);
-    if (hh) return { url, html: hh, method: `headless_${reasonMethod}` };
+    const hh = await _headlessFetch(url, proxyUrl);
+    if (hh) return { url, html: hh, method: `headless_${reasonMethod}`, retries_used: retries };
     return null;
   };
 
   // Попытка №1 — реальный Chrome + cookie jar (Cloudflare cf_clearance ловится).
   let firstErr = null;
   try {
-    const res = await _doFetch(client, url, PRIMARY_USER_AGENT);
+    const res = await _doFetch(client, url, primaryUa, { proxyAgent });
     const html = String(res.data || '');
     if (!html.trim()) {
       throw Object.assign(new Error('empty body'), { code: 'EMPTY_BODY' });
@@ -282,7 +416,7 @@ async function fetchOne(url) {
       const hh = await _tryHeadless('spa');
       if (hh) return hh;
     }
-    return { url, html, method: 'axios_chrome' };
+    return { url, html, method: 'axios_chrome', retries_used: retries };
   } catch (err) {
     firstErr = err;
   }
@@ -298,10 +432,13 @@ async function fetchOne(url) {
 
   // Попытка №2 — fallback: Googlebot UA, тот же cookie jar (поможет
   // если первый запрос получил cookie-челлендж, а второй пройдёт).
+  // Перед повтором — экспоненциальная пауза (TZ: Exponential Backoff).
   let secondErr = null;
   if (_shouldRetry(firstErr) || firstErr?.code === 'EMPTY_BODY') {
+    retries += 1;
+    await _sleep(_backoffDelay(retries));
     try {
-      const res2 = await _doFetch(client, url, FALLBACK_USER_AGENT);
+      const res2 = await _doFetch(client, url, FALLBACK_USER_AGENT, { proxyAgent });
       const html2 = String(res2.data || '');
       if (!html2.trim()) {
         throw Object.assign(new Error('empty body (after retry)'), { code: 'EMPTY_BODY' });
@@ -314,7 +451,7 @@ async function fetchOne(url) {
         const hh = await _tryHeadless('spa');
         if (hh) return hh;
       }
-      return { url, html: html2, method: 'axios_googlebot' };
+      return { url, html: html2, method: 'axios_googlebot', retries_used: retries };
     } catch (err) {
       secondErr = err;
     }
@@ -323,8 +460,10 @@ async function fetchOne(url) {
   // Попытка №3 — без brotli (на случай битого br-стрима у редких серверов).
   if (!secondErr) secondErr = firstErr;
   if (_shouldRetry(secondErr) || secondErr?.code === 'EMPTY_BODY') {
+    retries += 1;
+    await _sleep(_backoffDelay(retries));
     try {
-      const res3 = await _doFetch(client, url, PRIMARY_USER_AGENT, { acceptBrotli: false });
+      const res3 = await _doFetch(client, url, thirdUa, { acceptBrotli: false, proxyAgent });
       const html3 = String(res3.data || '');
       if (html3.trim()) {
         if (_looksLikeWafChallenge(html3)) {
@@ -335,7 +474,7 @@ async function fetchOne(url) {
           const hh = await _tryHeadless('spa');
           if (hh) return hh;
         }
-        return { url, html: html3, method: 'axios_no_brotli' };
+        return { url, html: html3, method: 'axios_no_brotli', retries_used: retries };
       }
     } catch (_) { /* ignored — последний fallback ниже */ }
   }
@@ -344,8 +483,8 @@ async function fetchOne(url) {
   // успеха. Это покрывает SPA, которые без JS вообще ничего не отдают,
   // и WAF-страницы, где axios подряд получает 403/503.
   if (HEADLESS_FETCHER_URL) {
-    const hh = await _headlessFetch(url);
-    if (hh) return { url, html: hh, method: 'headless_last_resort' };
+    const hh = await _headlessFetch(url, proxyUrl);
+    if (hh) return { url, html: hh, method: 'headless_last_resort', retries_used: retries };
   }
 
   const finalErr = secondErr || firstErr;
@@ -355,14 +494,18 @@ async function fetchOne(url) {
     return `${status}: ${msg}`;
   })();
   result.code = _categorize(finalErr);
+  result.retries_used = retries;
   return result;
 }
 
 /**
  * @param {string[]} urls
- * @returns {Promise<{successes: Array<{url, html, method?}>, failures: Array<{url, error, code}>}>}
+ * @param {object}   [opts]
+ * @param {boolean}  [opts.proxiesEnabled] — включить прокси-ротатор для этого
+ *   батча (по умолчанию используется, если задан пул RELEVANCE_PROXY_*).
+ * @returns {Promise<{successes: Array<{url, html, method?, retries_used?}>, failures: Array<{url, error, code, retries_used?}>}>}
  */
-async function fetchPages(urls) {
+async function fetchPages(urls, opts = {}) {
   const list = (Array.isArray(urls) ? urls : [])
     .map((u) => String(u || '').trim())
     .filter(Boolean);
@@ -371,17 +514,23 @@ async function fetchPages(urls) {
     return { successes: [], failures: [] };
   }
 
-  const all = await pMap(list, FETCH_CONCURRENCY, fetchOne);
+  const all = await pMap(list, FETCH_CONCURRENCY, (u) => fetchOne(u, opts));
 
   const successes = [];
   const failures  = [];
   for (const r of all) {
-    if (r && r.html) successes.push({ url: r.url, html: r.html, method: r.method || 'axios' });
-    else if (r) failures.push({
-      url:   r.url,
-      error: r.error || 'unknown',
-      code:  r.code  || 'unknown',
-    });
+    if (r && r.html) {
+      successes.push({
+        url: r.url, html: r.html, method: r.method || 'axios', retries_used: r.retries_used || 0,
+      });
+    } else if (r) {
+      failures.push({
+        url:   r.url,
+        error: r.error || 'unknown',
+        code:  r.code  || 'unknown',
+        retries_used: r.retries_used || 0,
+      });
+    }
   }
   return { successes, failures };
 }
@@ -393,4 +542,6 @@ module.exports = {
   FETCH_TIMEOUT_MS,
   HEADLESS_FETCHER_URL,
   COOKIE_JAR_AVAILABLE: !!_cookieJarSupport,
+  PROXY_AVAILABLE,
+  USER_AGENT_POOL,
 };

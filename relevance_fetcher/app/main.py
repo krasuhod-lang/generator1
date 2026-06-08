@@ -27,6 +27,7 @@ Behaviour mirrors what firecrawl/crawl4ai do in production:
 import asyncio
 import logging
 import os
+import random
 import re
 import time
 from contextlib import asynccontextmanager
@@ -69,6 +70,58 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Пул свежих UA реальных браузеров — ротация на каждый запрос (anti-bot).
+# Совпадает по духу с пулом в backend/pageFetcher.js; держим только desktop
+# Chromium-совместимые строки, чтобы sec-ch-ua/fingerprint оставались
+# консистентными с заголовками контекста ниже.
+USER_AGENT_POOL = [
+    USER_AGENT,
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
+# Дефолтный прокси из окружения (опционально). Per-request `proxy` имеет
+# приоритет. Формат: scheme://[user:pass@]host:port.
+DEFAULT_PROXY = (os.environ.get("RELEVANCE_FETCHER_PROXY") or "").strip()
+
+
+def _random_user_agent() -> str:
+    return random.choice(USER_AGENT_POOL)
+
+
+def _build_proxy(proxy_url: Optional[str]) -> Optional[dict]:
+    """Преобразует ``scheme://[user:pass@]host:port`` в playwright proxy-dict.
+
+    Возвращает ``None``, если прокси не задан. Логин/пароль (если есть в URL)
+    выносятся в отдельные поля, как того требует Playwright.
+    """
+    url = (proxy_url or "").strip() or DEFAULT_PROXY
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+        host = parsed.hostname or ""
+        if not host:
+            return None
+        port = f":{parsed.port}" if parsed.port else ""
+        server = f"{parsed.scheme or 'http'}://{host}{port}"
+        cfg: dict = {"server": server}
+        if parsed.username:
+            cfg["username"] = parsed.username
+        if parsed.password:
+            cfg["password"] = parsed.password
+        return cfg
+    except Exception:  # pragma: no cover - defensive
+        return None
+
 # Тяжёлые ресурс-классы Playwright, которые блокируем для скорости.
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "websocket", "manifest", "other"}
 
@@ -103,6 +156,12 @@ CONTENT_SELECTORS = (
 class FetchRequest(BaseModel):
     url: str = Field(..., min_length=4, max_length=4096)
     timeout_ms: Optional[int] = Field(None, ge=2000, le=MAX_TIMEOUT_MS)
+    # Прокси для этого запроса (scheme://[user:pass@]host:port). Если не задан —
+    # используется RELEVANCE_FETCHER_PROXY из окружения (если есть).
+    proxy: Optional[str] = Field(None, max_length=2048)
+    # Явное отключение прокси для конкретного URL (proxies_enabled=false с
+    # backend-стороны): тогда дефолтный env-прокси НЕ применяется.
+    proxies_enabled: Optional[bool] = None
 
 
 class FetchResponse(BaseModel):
@@ -200,7 +259,7 @@ async def _wait_for_content(page: Page, deadline_ms: int) -> None:
         return
 
 
-async def _fetch_one(url: str, timeout_ms: int) -> FetchResponse:
+async def _fetch_one(url: str, timeout_ms: int, proxy: Optional[dict] = None) -> FetchResponse:
     """Открыть страницу, дождаться контента, забрать outerHTML."""
     browser: Browser = _state["browser"]
     if browser is None:
@@ -208,8 +267,9 @@ async def _fetch_one(url: str, timeout_ms: int) -> FetchResponse:
 
     t0 = time.monotonic()
     method = "playwright"
-    context = await browser.new_context(
-        user_agent=USER_AGENT,
+    user_agent = _random_user_agent()
+    context_kwargs = dict(
+        user_agent=user_agent,
         locale="ru-RU",
         timezone_id="Europe/Moscow",
         viewport={"width": 1366, "height": 900},
@@ -223,6 +283,12 @@ async def _fetch_one(url: str, timeout_ms: int) -> FetchResponse:
             "Upgrade-Insecure-Requests": "1",
         },
     )
+    if proxy:
+        # Per-context proxy (anti-bot / гео-обход). Playwright туннелирует все
+        # запросы контекста через указанный сервер.
+        context_kwargs["proxy"] = proxy
+        method = "playwright_proxy"
+    context = await browser.new_context(**context_kwargs)
     try:
         await context.route("**/*", _route_handler)
 
@@ -232,7 +298,7 @@ async def _fetch_one(url: str, timeout_ms: int) -> FetchResponse:
         if stealth_async is not None:
             try:
                 await stealth_async(page)
-                method = "playwright_stealth"
+                method = "playwright_proxy_stealth" if proxy else "playwright_stealth"
             except Exception as exc:  # pragma: no cover
                 LOG.debug("stealth_async failed: %s", exc)
 
@@ -289,6 +355,7 @@ async def health() -> dict:
         "stealth": bool(stealth_async),
         "max_html_bytes": MAX_HTML_BYTES,
         "default_timeout_ms": DEFAULT_TIMEOUT_MS,
+        "proxy_default": bool(DEFAULT_PROXY),
     }
 
 
@@ -301,4 +368,9 @@ async def fetch(
     url = _validate_url(payload.url)
     timeout_ms = int(payload.timeout_ms or DEFAULT_TIMEOUT_MS)
     timeout_ms = max(2000, min(MAX_TIMEOUT_MS, timeout_ms))
-    return await _fetch_one(url, timeout_ms)
+    # proxies_enabled=false → принудительно без прокси (даже если задан env).
+    if payload.proxies_enabled is False:
+        proxy = None
+    else:
+        proxy = _build_proxy(payload.proxy)
+    return await _fetch_one(url, timeout_ms, proxy=proxy)
