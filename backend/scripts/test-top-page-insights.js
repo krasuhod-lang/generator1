@@ -49,6 +49,16 @@ test('selectTopPages respects maxPages', () => {
   assert.strictEqual(sel.length, 3);
 });
 
+test('selectTopPages falls back to high-impression pages when no top-10 pages', () => {
+  const sel = selectTopPages([
+    { key: 'https://x.ru/a', impressions: 500, position: 18 },
+    { key: 'https://x.ru/b', impressions: 900, position: 22 },
+  ], { ...cfg, maxPosition: 10, minImpressions: 100, maxPages: 3 });
+  assert.strictEqual(sel.length, 2);
+  assert.strictEqual(sel[0].url, 'https://x.ru/b');
+  assert.strictEqual(sel[0].fallback, true);
+});
+
 test('selectTopPages empty input → []', () => {
   assert.deepStrictEqual(selectTopPages([], cfg), []);
   assert.deepStrictEqual(selectTopPages(null, cfg), []);

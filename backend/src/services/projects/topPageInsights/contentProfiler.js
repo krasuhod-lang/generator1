@@ -25,12 +25,16 @@ function selectTopPages(topPages, cfg = {}) {
   const maxPosition = Number(cfg.maxPosition) || 10;
   const maxPages = Number(cfg.maxPages) || 6;
   if (!Array.isArray(topPages)) return [];
-  return topPages
+  const base = topPages
     .filter((p) => p && p.key
       && (Number(p.impressions) || 0) >= minImpressions
       && Number(p.position) > 0
       && Number(p.position) <= maxPosition)
-    .slice()
+    .slice();
+  const selected = base.length ? base : topPages
+    .filter((p) => p && p.key && (Number(p.impressions) || 0) >= minImpressions)
+    .slice();
+  return selected
     .sort((a, b) => (b.impressions || 0) - (a.impressions || 0))
     .slice(0, maxPages)
     .map((p) => ({
@@ -39,6 +43,7 @@ function selectTopPages(topPages, cfg = {}) {
       position: p.position || 0,
       ctr: p.ctr || 0,
       clicks: p.clicks || 0,
+      fallback: base.length === 0,
     }));
 }
 

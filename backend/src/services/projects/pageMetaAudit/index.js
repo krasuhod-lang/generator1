@@ -165,6 +165,35 @@ function diffMeta(before, after) {
   };
 }
 
+function mergeGeneratedMetaIntoAudit(pageMetaAudit, generatedPages) {
+  const audit = pageMetaAudit && typeof pageMetaAudit === 'object'
+    ? { ...pageMetaAudit }
+    : { available: true, pages: [] };
+  const current = Array.isArray(audit.pages) ? audit.pages : [];
+  const incoming = Array.isArray(generatedPages) ? generatedPages.filter((p) => p && p.url) : [];
+  if (incoming.length === 0) return audit;
+
+  const byUrl = new Map(current.map((p) => [p && p.url, p]).filter(([url]) => url));
+  incoming.forEach((page) => {
+    const prev = byUrl.get(page.url) || {};
+    byUrl.set(page.url, { ...prev, ...page });
+  });
+
+  const incomingUrls = new Set(incoming.map((p) => p.url));
+  const merged = current.map((p) => (p && incomingUrls.has(p.url) ? byUrl.get(p.url) : p));
+  incoming.forEach((p) => {
+    if (!current.some((old) => old && old.url === p.url)) merged.push(byUrl.get(p.url));
+  });
+
+  return {
+    ...audit,
+    available: true,
+    pages: merged,
+    generated: true,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 /**
  * Полный аудит мета-тегов (с парсингом и опциональной LLM-регенерацией).
  * Graceful: ошибки парсинга/LLM на отдельной странице не валят весь срез.
@@ -368,6 +397,7 @@ module.exports = {
   selectPagesToAudit,
   buildSemanticsFromQueries,
   diffMeta,
+  mergeGeneratedMetaIntoAudit,
   auditPages,
   regenerateMetaForPages,
 };

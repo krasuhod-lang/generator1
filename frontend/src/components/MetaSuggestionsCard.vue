@@ -13,7 +13,9 @@ import { copyToClipboard, toTsv } from '../utils/clipboard.js';
 const props = defineProps({
   pageMetaAudit: { type: Object, default: null },
   projectId:     { type: [String, Number], default: null },
+  analysisId:    { type: [String, Number], default: null },
 });
+const emit = defineEmits(['updated']);
 
 const store = useProjectsStore();
 const available = computed(() => props.pageMetaAudit && props.pageMetaAudit.available);
@@ -49,9 +51,10 @@ async function regenerate(page, idx) {
   if (!props.projectId) return;
   busy.value = { ...busy.value, [idx]: true };
   try {
-    const res = await store.regenerateMeta(props.projectId, page.url);
+    const res = await store.regenerateMeta(props.projectId, page.url, props.analysisId);
     const updated = res && res.pages && res.pages[0];
     if (updated) pages.value.splice(idx, 1, updated);
+    if (res && res.persisted && res.persisted.page_meta_audit) emit('updated', res.persisted.page_meta_audit);
   } catch (_) { /* graceful: keep current row */ }
   finally { busy.value = { ...busy.value, [idx]: false }; }
 }

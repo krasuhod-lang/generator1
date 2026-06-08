@@ -414,6 +414,18 @@ async function openAnalysis(a) {
   } catch (_) { /* no-op */ }
 }
 
+function applyPageMetaAuditUpdate(pageMetaAudit) {
+  if (!currentAnalysis.value || !pageMetaAudit) return;
+  const snapshot = currentAnalysis.value.gsc_snapshot || {};
+  currentAnalysis.value = {
+    ...currentAnalysis.value,
+    gsc_snapshot: {
+      ...snapshot,
+      page_meta_audit: pageMetaAudit,
+    },
+  };
+}
+
 // ── Шаринг ────────────────────────────────────────────────────────
 const shareUrl = computed(() => project.value?.share_token
   ? `${window.location.origin}/share/project/${project.value.share_token}` : '');
@@ -672,7 +684,13 @@ onUnmounted(() => {
 
         <!-- Панель: Постраничная оптимизация метатегов через Meta Tags -->
         <div v-show="activeGscSubTab === 'meta'">
-        <MetaSuggestionsCard v-if="pageMetaAuditData" :page-meta-audit="pageMetaAuditData" :project-id="projectId" />
+        <MetaSuggestionsCard
+          v-if="pageMetaAuditData"
+          :page-meta-audit="pageMetaAuditData"
+          :project-id="projectId"
+          :analysis-id="currentAnalysis && currentAnalysis.id"
+          @updated="applyPageMetaAuditUpdate"
+        />
         </div>
 
         <!-- Панель: План публикаций в блог -->
