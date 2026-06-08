@@ -58,6 +58,33 @@ test('detectBlocks detects text blocks and schema', () => {
   assert.strictEqual(detected.has_breadcrumb_schema, true);
 });
 
+// ── detectBlocks with header/footer chrome (ТЗ п.6) ──────────────────
+test('detectBlocks picks up commercial factors from header/footer chrome', () => {
+  // Контент НЕ содержит контактов/соцсетей — они только в шапке/подвале.
+  const detected = detectBlocks({
+    title: 'Купить насос',
+    markdown: '# Насос\nХарактеристики и описание товара.',
+    hiddenLayers: {},
+    chrome: {
+      text: 'Доставка по РФ. Оплата картой и наличными. Режим работы: 9-21.',
+      tel: ['+74950000000'],
+      email: ['info@shop.ru'],
+      social: ['https://t.me/shop'],
+    },
+  });
+  assert.strictEqual(detected.chrome_parsed, true);
+  assert.strictEqual(detected.contacts_in_chrome, true);
+  assert.strictEqual(detected.blocks.contacts, true, 'contacts via tel/email in chrome');
+  assert.strictEqual(detected.blocks.social, true, 'social via chrome link');
+  assert.strictEqual(detected.blocks.delivery, true, 'delivery/payment from chrome text');
+});
+
+test('detectBlocks without chrome leaves chrome_parsed false', () => {
+  const d = detectBlocks({ markdown: 'просто текст', hiddenLayers: {} });
+  assert.strictEqual(d.chrome_parsed, false);
+  assert.strictEqual(d.contacts_in_chrome, false);
+});
+
 // ── scoreEat ────────────────────────────────────────────────────────
 test('scoreEat returns 0..100 across 4 dimensions', () => {
   const detected = detectBlocks({ markdown: 'пусто', hiddenLayers: {} });

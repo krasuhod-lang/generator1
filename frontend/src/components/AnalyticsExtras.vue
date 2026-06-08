@@ -15,6 +15,7 @@ const props = defineProps({
   breakdowns:    { type: Object, default: null },
   pageDecay:     { type: Object, default: null },
   brandSplit:    { type: Object, default: null },
+  seasonality:   { type: Object, default: null },
 });
 
 function fmtPct(v) {
@@ -42,6 +43,15 @@ function positionClass(v) {
 const pcAvailable = computed(() => props.periodCompare && props.periodCompare.available);
 const pdAvailable = computed(() => props.pageDecay && props.pageDecay.available && Array.isArray(props.pageDecay.items) && props.pageDecay.items.length);
 const bsAvailable = computed(() => props.brandSplit && props.brandSplit.available);
+const seaAvailable = computed(() => props.seasonality && props.seasonality.available);
+const seaTrendClass = computed(() => {
+  const d = props.seasonality && props.seasonality.trend && props.seasonality.trend.direction;
+  return d === 'down' ? 'text-red-300' : (d === 'up' ? 'text-emerald-300' : 'text-gray-300');
+});
+const seaTrendLabel = computed(() => {
+  const d = props.seasonality && props.seasonality.trend && props.seasonality.trend.direction;
+  return d === 'down' ? 'Спад' : (d === 'up' ? 'Рост' : 'Стабильно');
+});
 const bdAvailable = computed(() => {
   const b = props.breakdowns;
   if (!b) return false;
@@ -238,6 +248,54 @@ function trimUrl(u) {
             {{ brandSplit.nonbranded.clicks_pct }}% кликов · CTR {{ brandSplit.nonbranded.ctr }}% · поз. {{ brandSplit.nonbranded.position }}
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- ── Закономерности спада (ТЗ п.4) ────────────────────────── -->
+    <section v-if="seaAvailable" class="card space-y-3">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">
+        📉 Закономерности спада
+      </h2>
+      <p class="text-xs text-gray-500">
+        Окно {{ seasonality.range.from }} — {{ seasonality.range.to }} · {{ seasonality.days }} дн.
+      </p>
+
+      <!-- Общий тренд -->
+      <div class="rounded-lg bg-gray-800/40 p-3 flex items-center justify-between text-sm">
+        <span class="text-gray-400">Общий тренд</span>
+        <span class="font-semibold" :class="seaTrendClass">
+          {{ seaTrendLabel }} · {{ fmtNum(seasonality.trend.slope_clicks_per_day) }} кликов/день
+        </span>
+      </div>
+
+      <!-- Найденные закономерности -->
+      <ul v-if="(seasonality.findings || []).length" class="text-xs text-gray-300 space-y-1 list-disc pl-4">
+        <li v-for="(f, i) in seasonality.findings" :key="'sf'+i">{{ f }}</li>
+      </ul>
+
+      <!-- Помесячная динамика -->
+      <div v-if="(seasonality.monthly?.by_month || []).length" class="overflow-x-auto">
+        <div class="text-xs text-gray-400 mb-1">Помесячно</div>
+        <table class="w-full text-xs">
+          <thead><tr class="text-gray-500 text-left">
+            <th class="py-1 pr-2">Месяц</th><th class="py-1 pr-2">Клики</th><th class="py-1">MoM</th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="m in seasonality.monthly.by_month" :key="m.month" class="border-b border-gray-800/40">
+              <td class="py-1 pr-2 text-gray-300">{{ m.month }}</td>
+              <td class="py-1 pr-2 text-gray-200">{{ Number(m.clicks).toLocaleString('ru-RU') }}</td>
+              <td class="py-1" :class="deltaClass(m.mom_pct)">{{ m.mom_pct == null ? '—' : fmtPct(m.mom_pct) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Слабые дни недели -->
+      <div v-if="(seasonality.weekday?.weak_days || []).length" class="text-xs text-gray-300">
+        <span class="text-gray-400">Системно слабые дни: </span>
+        <span v-for="(d, i) in seasonality.weekday.weak_days" :key="'wd'+i" class="text-red-300">
+          {{ d.name }} ({{ d.below_pct }}%)<span v-if="i < seasonality.weekday.weak_days.length - 1">, </span>
+        </span>
       </div>
     </section>
   </div>

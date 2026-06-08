@@ -18,6 +18,7 @@ const { analyzeCommercial, deriveBrandTokens } = require('./commercialIntent');
 const { verifyCannibalization } = require('./serpVerifier');
 const { buildPeriodReport } = require('./periodComparison');
 const { detectPageDecay } = require('./pageDecayDetector');
+const { detectSeasonality } = require('./seasonalityDetector');
 const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
 const { onAnalysisDone } = require('./aegisBridge');
@@ -35,6 +36,7 @@ const { callDeepSeek } = require('../llm/deepseek.adapter');
 const ydxService = require('./ydxService');
 const { runYandexAnalysis } = require('./ydxAnalyzer');
 const { buildRankingFactors } = require('./rankingFactors');
+const { buildStrategyMap } = require('./strategyMap');
 const { runSynthesis } = require('./synthesisAnalyzer');
 
 /**
@@ -103,6 +105,9 @@ async function collectSnapshot(project, range) {
   const periodCompare = await _buildPeriodCompare(project, range, top, projectsCfg.periodCompare, performance);
   const pageDecay = await _buildPageDecay(project, range, top.topPages, projectsCfg.pageDecay);
   const brandSplit = await _buildBrandSplit(project, range, projectsCfg.brandSplit, project.gsc_site_url);
+  // Закономерности спада на дистанции в несколько месяцев (ТЗ п.4) — строим
+  // из уже собранного дневного ряда totals, без дополнительных запросов.
+  const seasonality = _buildSeasonality(performance.series, projectsCfg.seasonality);
 
   // --- Новые слои (п.1-8 ТЗ). Все graceful: ошибка → null, пайплайн не падает.
   // Порядок учитывает зависимости: linkAudit → eat(linkedUrls) → schema(eat) → geo(schema).
@@ -133,6 +138,7 @@ async function collectSnapshot(project, range) {
     period_compare: periodCompare,
     page_decay: pageDecay,
     brand_split: brandSplit,
+    seasonality,
     page_meta_audit: pageMetaAudit,
     eat: eatPersist,
     schema_audit: schemaAudit,
@@ -160,6 +166,7 @@ async function collectSnapshot(project, range) {
     periodCompare,
     pageDecay,
     brandSplit,
+    seasonality,
     pageMetaAudit,
     eat: eatPersist,
     schemaAudit,
@@ -455,6 +462,10 @@ async function processAnalysis(analysisId) {
     let rankingFactors = null;
     try { rankingFactors = buildRankingFactors(snapshot, ydxSnapshot); } catch (_) { rankingFactors = null; }
 
+    // Визуальная схема стратегии (ТЗ п.5) — строим из факторов ранжирования и
+    // кладём в снапшот, чтобы и кабинет, и публичный отчёт рисовали её одинаково.
+    try { snapshot.strategy_map = buildStrategyMap(rankingFactors); } catch (_) { snapshot.strategy_map = null; }
+
     // Финальная сводка закономерностей Google ↔ Яндекс + подсветка пробелов.
     let synthesisMarkdown = null;
     const synthCfg = getProjectsConfig().analyzer;
@@ -606,6 +617,19 @@ async function _buildPageDecay(project, range, topPages, cfg) {
   try {
     const rows = await fetchPageDailySeries(project, range, pages);
     return detectPageDecay(rows, cfg);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Сезонность/закономерности спада (ТЗ п.4) — детерминированно из дневного ряда.
+ * Graceful: при сбое или коротком ряде возвращает null/неактивный объект.
+ */
+function _buildSeasonality(series, cfg) {
+  if (!cfg || !cfg.enabled) return null;
+  try {
+    return detectSeasonality(series, cfg);
   } catch (_) {
     return null;
   }

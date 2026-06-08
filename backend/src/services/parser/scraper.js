@@ -107,6 +107,68 @@ function _stripFooterArtifacts(markdown) {
 // iframe/cookie-баннеров в окно влезает больше полезного контента.
 const SCRAPE_MARKDOWN_MAX_CHARS = 15000;
 
+// Лимит текста «обвязки» (шапка/подвал) — нужен компактный, но достаточный для
+// детекции коммерческих факторов фрагмент (контакты, оплата, доставка, соцсети).
+const SCRAPE_CHROME_MAX_CHARS = 6000;
+
+/**
+ * Извлекает «обвязку» страницы — шапку (header/.header) и подвал (footer/
+ * .footer) вместе с навигацией (ТЗ п.6: «парси шаблон вместе с шапкой и подвалом
+ * сайта»). Именно там живут коммерческие факторы: телефоны, адреса, режим
+ * работы, способы оплаты/доставки, мессенджеры/соцсети, реквизиты, гарантии.
+ *
+ * Readability/основная очистка ЭТО ВЫРЕЗАЮТ, поэтому собираем отдельно из сырого
+ * HTML. Возвращаем компактный текст + явные tel:/mailto/соц-ссылки.
+ *
+ * @param {string} html — сырой HTML страницы
+ * @returns {{text:string, tel:string[], email:string[], social:string[]}|null}
+ */
+function _extractChrome(html) {
+  if (!html || typeof html !== 'string') return null;
+  let $;
+  try { $ = cheerio.load(html); } catch (_) { return null; }
+  // Убираем заведомый шум, который мог попасть в header/footer.
+  $('script, style, noscript, template, svg, iframe').remove();
+
+  const selector = [
+    'header', 'footer', 'nav',
+    '[role="banner"]', '[role="contentinfo"]', '[role="navigation"]',
+    '[class*="header" i]', '[id*="header" i]',
+    '[class*="footer" i]', '[id*="footer" i]',
+    '[class*="contacts" i]', '[id*="contacts" i]',
+    '[class*="topbar" i]', '[class*="top-bar" i]',
+  ].join(', ');
+
+  const parts = [];
+  const tel = new Set();
+  const email = new Set();
+  const social = new Set();
+  const SOCIAL_RE = /(vk\.com|t\.me|telegram|wa\.me|whatsapp|instagram|youtube\.com|ok\.ru|facebook\.com|dzen\.ru)/i;
+
+  $(selector).each((_, el) => {
+    const $el = $(el);
+    const txt = $el.text().replace(/\s{2,}/g, ' ').trim();
+    if (txt) parts.push(txt);
+    $el.find('a[href]').each((__, a) => {
+      const href = String($(a).attr('href') || '');
+      if (/^tel:/i.test(href)) tel.add(href.replace(/^tel:/i, '').trim());
+      else if (/^mailto:/i.test(href)) email.add(href.replace(/^mailto:/i, '').trim());
+      else if (SOCIAL_RE.test(href)) social.add(href.trim());
+    });
+  });
+
+  // Дедуп и склейка; обрезаем по лимиту.
+  let text = Array.from(new Set(parts)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (text.length > SCRAPE_CHROME_MAX_CHARS) text = text.slice(0, SCRAPE_CHROME_MAX_CHARS);
+  if (!text && tel.size === 0 && email.size === 0 && social.size === 0) return null;
+  return {
+    text,
+    tel: Array.from(tel).slice(0, 20),
+    email: Array.from(email).slice(0, 20),
+    social: Array.from(social).slice(0, 20),
+  };
+}
+
 /**
  * Нормализует строку в валидный URL или возвращает null.
  * Поддерживает:
@@ -290,6 +352,11 @@ async function scrapeUrl(url, timeout = 30000) {
     });
   } catch (_) { /* graceful */ }
 
+  // ТЗ п.6: отдельно собираем шапку/подвал/навигацию для детекции коммерческих
+  // факторов (контакты, оплата, доставка, соцсети) — основная очистка их режет.
+  let chrome = null;
+  try { chrome = _extractChrome(responseData); } catch (_) { chrome = null; }
+
   try {
     const dom    = new JSDOM(responseData, { url: finalUrl });
     // Удаляем шум ДО Readability, чтобы он не уехал в article.content
@@ -323,6 +390,7 @@ async function scrapeUrl(url, timeout = 30000) {
         cleanedBytes: markdown.length,
         hiddenLayers,
         hiddenLayersSummary: hiddenLayers ? summarizeHiddenLayers(hiddenLayers) : '',
+        chrome,
       };
     }
   } catch (_) {
@@ -361,6 +429,7 @@ async function scrapeUrl(url, timeout = 30000) {
     cleanedBytes: bodyText.length,
     hiddenLayers,
     hiddenLayersSummary: hiddenLayers ? summarizeHiddenLayers(hiddenLayers) : '',
+    chrome,
   };
 }
 
@@ -446,5 +515,6 @@ module.exports = {
   // exported for unit-testing only
   _stripFooterArtifacts,
   _stripDomNoise,
+  _extractChrome,
   NOISE_SELECTORS,
 };

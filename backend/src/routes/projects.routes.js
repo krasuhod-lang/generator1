@@ -87,6 +87,7 @@ router.get('/:id/lead-context',    auth, c.getLeadContext);
 router.post('/:id/gsc-links/import', auth, createLimiter, uploadCsv.single('file'), c.importGscLinks);
 router.post('/:id/meta-suggestions/regenerate', auth, analyzeLimiter, c.regenerateMeta);
 router.post('/:id/ai-visibility/probe', auth, analyzeLimiter, c.probeAiVisibility);
+router.post('/:id/blog-article', auth, analyzeLimiter, c.generateBlogArticle);
 
 // Шаринг
 router.post('/:id/share',          auth, c.createShareLink);

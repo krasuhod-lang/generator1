@@ -65,7 +65,14 @@ function collectJsonLdTypes(jsonld) {
  *            has_breadcrumb_schema:boolean, text_len:number}}
  */
 function detectBlocks(page = {}) {
-  const text = _norm(`${page.title || ''}\n${page.markdown || ''}`);
+  // ТЗ п.6: учитываем «обвязку» (шапку/подвал) — там живут коммерческие факторы
+  // (контакты, телефоны, оплата, доставка, соцсети, реквизиты), которые основная
+  // очистка контента вырезает. page.chrome — {text, tel[], email[], social[]}.
+  const chrome = page.chrome || null;
+  const chromeText = chrome
+    ? `${chrome.text || ''}\n${(chrome.tel || []).join(' ')}\n${(chrome.email || []).join(' ')}\n${(chrome.social || []).join(' ')}`
+    : '';
+  const text = _norm(`${page.title || ''}\n${page.markdown || ''}\n${chromeText}`);
   const hl = page.hiddenLayers || {};
   const sd = hl.structured_data || {};
   const schemaTypes = [];
@@ -91,6 +98,13 @@ function detectBlocks(page = {}) {
   if (hasReviewSchema) blocks.reviews = true;
   blocks.breadcrumbs = hasBreadcrumb;
 
+  // Усиливаем коммерческие факторы явными ссылками из шапки/подвала (ТЗ п.6):
+  // tel:/mailto: → контакты, соц-ссылки → social. Это надёжнее текстовых сигналов.
+  if (chrome) {
+    if ((chrome.tel || []).length || (chrome.email || []).length) blocks.contacts = true;
+    if ((chrome.social || []).length) blocks.social = true;
+  }
+
   // Медиа (фото/видео) — Experience-сигнал.
   const og = hl.meta_signals && hl.meta_signals.og;
   const hasMedia = Boolean(og && og.image)
@@ -104,6 +118,8 @@ function detectBlocks(page = {}) {
     has_author_schema: hasAuthorSchema,
     has_review_schema: hasReviewSchema,
     has_breadcrumb_schema: hasBreadcrumb,
+    chrome_parsed: Boolean(chrome),
+    contacts_in_chrome: Boolean(chrome && ((chrome.tel || []).length || (chrome.email || []).length)),
     text_len: text.length,
   };
 }

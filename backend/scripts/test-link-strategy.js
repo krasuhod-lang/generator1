@@ -212,6 +212,8 @@ test('enrichDonorTopics with llmFn fills ready topic, still wrapped in format', 
     recs.filter((r) => r.donor_topic_seed).map((r) => ({
       ready_topic: `Как устранить «${r.donor_topic_seed}»: гид эксперта`,
       h1: `Гид: ${r.donor_topic_seed}`,
+      title: `Почему «${r.donor_topic_seed}» — и что с этим делать сегодня`,
+      description: `Разбираем причины и быстрые решения «${r.donor_topic_seed}» простыми словами, с чек-листом для самостоятельной диагностики и выбора.`,
       angle: 'Пошаговая диагностика и выбор решения',
     })),
   );
@@ -221,9 +223,31 @@ test('enrichDonorTopics with llmFn fills ready topic, still wrapped in format', 
   const enriched = recs.find((r) => r.donor_topic_ready);
   assert.ok(enriched.donor_topic_ready.startsWith('Как устранить'));
   assert.ok(enriched.donor_topic_angle);
+  // ТЗ п.3: title и description заполнены, title не дублирует тему.
+  assert.ok(enriched.donor_topic_title, 'title filled');
+  assert.ok(enriched.donor_topic_description, 'description filled');
+  assert.notStrictEqual(enriched.donor_topic_title, enriched.donor_topic_ready);
   // Итоговая строка обёрнута в обязательный формат и содержит готовую тему.
   assert.strictEqual(enriched.donor_topic, wrapDonorTopic(enriched.donor_topic_ready));
   assert.ok(enriched.donor_topic.includes('Как устранить'));
+});
+
+test('enrichDonorTopics drops title that duplicates the topic (must intrigue, not repeat)', async () => {
+  const recs = _orphanRecs();
+  const fakeLlm = async () => JSON.stringify(
+    recs.filter((r) => r.donor_topic_seed).map((r) => ({
+      ready_topic: `Тема про ${r.donor_topic_seed}`,
+      // title дословно равен теме → должен быть отброшен safeguard'ом.
+      title: `Тема про ${r.donor_topic_seed}`,
+      description: 'Короткое описание статьи для проверки.',
+    })),
+  );
+  await enrichDonorTopics({ recommendations: recs, project, llmFn: fakeLlm });
+  const enriched = recs.find((r) => r.donor_topic_ready);
+  assert.ok(enriched, 'has enriched rec');
+  assert.strictEqual(enriched.donor_topic_title, undefined, 'duplicate title dropped');
+  // description при этом сохраняется.
+  assert.ok(enriched.donor_topic_description);
 });
 
 test('enrichDonorTopics graceful on broken llm output → keeps fallback', async () => {

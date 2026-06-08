@@ -151,7 +151,7 @@ function _stripFence(text) {
 }
 
 function _buildUserPrompt({ project, range, performance, top, commercial, serpVerification,
-  breakdowns, periodCompare, pageDecay, brandSplit,
+  breakdowns, periodCompare, pageDecay, brandSplit, seasonality,
   pageMetaAudit, eat, schemaAudit, linkAudit, blogPlan, geoAeo, topPageInsights, actionPlan }) {
   const dscfg = getProjectsConfig().deepseek;
   // Данные собираются БЕЗ лимитов (ТЗ п.2), но в промпт LLM кладём только топ-N
@@ -185,6 +185,7 @@ function _buildUserPrompt({ project, range, performance, top, commercial, serpVe
   lines.push(..._renderPeriodCompareLines(periodCompare));
   lines.push(..._renderBreakdownLines(breakdowns));
   lines.push(..._renderPageDecayLines(pageDecay));
+  lines.push(..._renderSeasonalityLines(seasonality));
   lines.push(..._renderBrandSplitLines(brandSplit));
   if (commercial && commercial.available) {
     lines.push(
@@ -350,6 +351,32 @@ function _renderPageDecayLines(pd) {
   ];
 }
 
+/** Закономерности спада: тренд, дни недели, помесячная динамика (ТЗ п.4). */
+function _renderSeasonalityLines(s) {
+  if (!s || !s.available) return [];
+  const out = [
+    '',
+    `[ЗАКОНОМЕРНОСТИ СПАДА] окно ${s.range.from}…${s.range.to} (${s.days} дн.)`,
+    `Тренд: ${s.trend.direction} (наклон ${s.trend.slope_clicks_per_day} кликов/день, ${_pct(s.trend.slope_norm)} к среднему/день).`,
+  ];
+  if (s.monthly && Array.isArray(s.monthly.by_month) && s.monthly.by_month.length) {
+    out.push(`Помесячно (month, clicks, mom_pct): ${JSON.stringify(s.monthly.by_month.map((m) => ({ month: m.month, clicks: m.clicks, mom_pct: m.mom_pct })))}`);
+    if (s.monthly.decline_streak_months >= 2) {
+      out.push(`Серия помесячного спада подряд: ${s.monthly.decline_streak_months} мес. — это закономерность, разбери причины.`);
+    }
+  }
+  if (s.weekday && Array.isArray(s.weekday.weak_days) && s.weekday.weak_days.length) {
+    out.push(`Системно слабые дни недели: ${s.weekday.weak_days.map((d) => `${d.name} (${d.below_pct}%)`).join(', ')}.`);
+  }
+  out.push('Используй это в разделе про динамику: назови КОГДА именно падает трафик (дни/месяцы) и предложи гипотезы и действия под выявленные закономерности.');
+  return out;
+}
+
+function _pct(n) {
+  const v = Number(n) || 0;
+  return `${(v * 100).toFixed(1)}%`;
+}
+
 /** Бренд vs небренд динамика. */
 function _renderBrandSplitLines(bs) {
   if (!bs || !bs.available) return [];
@@ -398,13 +425,15 @@ function _renderLinkStrategyLines(link) {
   if (!link || !link.available) return [];
   const out = ['', '[ССЫЛОЧНАЯ СТРАТЕГИЯ] (раздел 8 — выдай ≥5 рекомендаций)',
     `data_source: ${link.data_source} (gsc_csv = есть выгрузка GSC; inferred = построено от контента/SERP)`,
-    `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic — готовая тема статьи-донора в формате «Экспертная статья по теме «…» с естественной ссылкой на ваш раздел», donor_topic_ready/donor_topic_angle — проработанная тема и угол, target_url, priority, why):`,
+    `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic — готовая тема статьи-донора в формате «Экспертная статья по теме «…» с естественной ссылкой на ваш раздел», donor_topic_ready/donor_topic_angle — проработанная тема и угол, donor_topic_title — интригующий SEO-title (раскрывает интент, не дублирует тему), donor_topic_description — meta-description, target_url, priority, why):`,
     JSON.stringify((link.recommendations || []).slice(0, 20).map((r) => ({
       anchor: r.anchor,
       anchor_type: r.anchor_type,
       donor_topic: r.donor_topic,
       donor_topic_ready: r.donor_topic_ready || null,
       donor_topic_angle: r.donor_topic_angle || null,
+      donor_topic_title: r.donor_topic_title || null,
+      donor_topic_description: r.donor_topic_description || null,
       target_url: r.target_url,
       priority: r.priority,
       why: r.why,

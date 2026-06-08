@@ -45,6 +45,7 @@ async function analyzeEat({ snapshot, linkedUrls } = {}) {
         markdown: scraped.markdown,
         title: scraped.title,
         hiddenLayers: scraped.hiddenLayers,
+        chrome: scraped.chrome,
       });
       const hasBacklinks = linked.has(rep.url);
       const eat = scoreEat(detected, { hasBacklinks, template: cluster.template });

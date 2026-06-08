@@ -56,6 +56,8 @@ function rowText(r) {
     `Анкор: ${r.anchor}`,
     `Тема статьи донора: ${r.donor_topic}`,
   ];
+  if (r.donor_topic_title) lines.push(`Title: ${r.donor_topic_title}`);
+  if (r.donor_topic_description) lines.push(`Description: ${r.donor_topic_description}`);
   if (r.donor_topic_angle) lines.push(`Угол раскрытия: ${r.donor_topic_angle}`);
   lines.push(`Целевой URL: ${r.target_url}`);
   lines.push(`Приоритет: ${prioLabel(r.priority)}`);
@@ -119,6 +121,12 @@ function copyAll() {
               <td class="py-1.5 px-2 text-gray-200">{{ r.anchor }}</td>
               <td class="py-1.5 px-2 text-gray-300">
                 <div>{{ r.donor_topic }}</div>
+                <div v-if="r.donor_topic_title" class="text-[11px] text-indigo-300 mt-0.5">
+                  Title: {{ r.donor_topic_title }}
+                </div>
+                <div v-if="r.donor_topic_description" class="text-[11px] text-gray-400 mt-0.5">
+                  Description: {{ r.donor_topic_description }}
+                </div>
                 <div v-if="r.donor_topic_angle" class="text-[11px] text-gray-500 mt-0.5">
                   Угол: {{ r.donor_topic_angle }}
                 </div>

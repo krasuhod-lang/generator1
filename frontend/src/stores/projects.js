@@ -136,5 +136,9 @@ export const useProjectsStore = defineStore('projects', {
       const { data } = await api.post(`/projects/${id}/ai-visibility/probe`, payload || {});
       return data;
     },
+    async generateBlogArticle(id, payload) {
+      const { data } = await api.post(`/projects/${id}/blog-article`, payload || {});
+      return data;
+    },
   },
 });

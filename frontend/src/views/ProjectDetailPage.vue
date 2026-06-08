@@ -20,6 +20,7 @@ import EatTemplatesCard from '../components/EatTemplatesCard.vue';
 import SchemaAuditCard from '../components/SchemaAuditCard.vue';
 import AiVisibilityCard from '../components/AiVisibilityCard.vue';
 import RankingFactorsCard from '../components/RankingFactorsCard.vue';
+import StrategyDiagram from '../components/StrategyDiagram.vue';
 import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
 import ActionPlanCard from '../components/ActionPlanCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
@@ -37,6 +38,25 @@ const datePresets = ref([]);
 const loading = ref(true);
 const toast = ref('');
 let toastTimer = null;
+
+// План публикаций → генерация статьи в блог через info-article (ТЗ п.7).
+const generatedArticles = ref({});
+const generatingArticleIndex = ref(-1);
+const blogArticleError = ref('');
+async function onGenerateBlogArticle({ topic, index }) {
+  blogArticleError.value = '';
+  generatingArticleIndex.value = index;
+  try {
+    const res = await store.generateBlogArticle(projectId, { topic });
+    if (res && res.task && res.task.id) {
+      generatedArticles.value = { ...generatedArticles.value, [index]: { id: res.task.id } };
+    }
+  } catch (err) {
+    blogArticleError.value = err.response?.data?.error || err.message || 'Не удалось запустить генерацию статьи';
+  } finally {
+    generatingArticleIndex.value = -1;
+  }
+}
 
 // GSC site select
 const sites = ref([]);
@@ -115,6 +135,8 @@ const periodCompareData = computed(() => currentAnalysis.value?.gsc_snapshot?.pe
 const breakdownsData = computed(() => currentAnalysis.value?.gsc_snapshot?.breakdowns || null);
 const pageDecayData = computed(() => currentAnalysis.value?.gsc_snapshot?.page_decay || null);
 const brandSplitData = computed(() => currentAnalysis.value?.gsc_snapshot?.brand_split || null);
+const seasonalityData = computed(() => currentAnalysis.value?.gsc_snapshot?.seasonality || null);
+const strategyMapData = computed(() => currentAnalysis.value?.gsc_snapshot?.strategy_map || null);
 // Новые слои анализа GSC (ссылочный профиль, блог-план, мета, E-E-A-T, GEO/AEO, схема).
 const linkAuditData = computed(() => currentAnalysis.value?.gsc_snapshot?.link_audit || null);
 const blogPlanData = computed(() => currentAnalysis.value?.gsc_snapshot?.blog_plan || null);
@@ -131,8 +153,9 @@ const actionPlanData = computed(() => currentAnalysis.value?.gsc_snapshot?.actio
 const gscSubTab = ref('report');
 const gscSubTabs = computed(() => [
   { key: 'report', label: 'Отчёт ИИ', show: !!(analyzing.value || currentAnalysis.value) },
+  { key: 'strategy', label: 'Стратегия', show: !!(strategyMapData.value && strategyMapData.value.available) },
   { key: 'actionplan', label: 'План действий', show: !!(actionPlanData.value && actionPlanData.value.available) },
-  { key: 'dynamics', label: 'Динамика', show: !!(periodCompareData.value || breakdownsData.value || pageDecayData.value || brandSplitData.value) },
+  { key: 'dynamics', label: 'Динамика', show: !!(periodCompareData.value || breakdownsData.value || pageDecayData.value || brandSplitData.value || seasonalityData.value) },
   { key: 'commercial', label: 'Коммерция', show: !!commercialData.value },
   { key: 'toppages', label: 'Топ-страницы', show: !!topPageInsightsData.value },
   { key: 'links', label: 'Ссылки', show: !!linkAuditData.value },
@@ -611,6 +634,11 @@ onUnmounted(() => {
         </div>
 
         <!-- Панель: План действий (конкретные рекомендации с расчётами) -->
+        <div v-show="activeGscSubTab === 'strategy'">
+        <StrategyDiagram v-if="strategyMapData" :strategy-map="strategyMapData" />
+        </div>
+
+        <!-- Панель: План действий (конкретные рекомендации с расчётами) -->
         <div v-show="activeGscSubTab === 'actionplan'">
         <ActionPlanCard v-if="actionPlanData" :plan="actionPlanData" />
         </div>
@@ -618,11 +646,12 @@ onUnmounted(() => {
         <!-- Панель: Динамика (что изменилось, устройства/страны, page decay, бренд) -->
         <div v-show="activeGscSubTab === 'dynamics'">
         <AnalyticsExtras
-          v-if="periodCompareData || breakdownsData || pageDecayData || brandSplitData"
+          v-if="periodCompareData || breakdownsData || pageDecayData || brandSplitData || seasonalityData"
           :period-compare="periodCompareData"
           :breakdowns="breakdownsData"
           :page-decay="pageDecayData"
           :brand-split="brandSplitData"
+          :seasonality="seasonalityData"
         />
         </div>
 
@@ -648,7 +677,11 @@ onUnmounted(() => {
 
         <!-- Панель: План публикаций в блог -->
         <div v-show="activeGscSubTab === 'blog'">
-        <BlogTopicsCard v-if="blogPlanData" :blog-plan="blogPlanData" />
+        <BlogTopicsCard v-if="blogPlanData" :blog-plan="blogPlanData"
+                        :generated-articles="generatedArticles"
+                        :generating-index="generatingArticleIndex"
+                        @generate="onGenerateBlogArticle" />
+        <p v-if="blogArticleError" class="text-xs text-red-400 mt-2">{{ blogArticleError }}</p>
         </div>
 
         <!-- Панель: E-E-A-T по шаблонам страниц -->

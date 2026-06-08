@@ -14,7 +14,7 @@
 const http = require('http');
 const assert = require('assert');
 
-const { scrapeUrl, _stripFooterArtifacts, _stripDomNoise } = require('../src/services/parser/scraper');
+const { scrapeUrl, _stripFooterArtifacts, _stripDomNoise, _extractChrome } = require('../src/services/parser/scraper');
 
 let failed = 0;
 let passed = 0;
@@ -83,6 +83,24 @@ function makeServer(handler) {
 
 (async () => {
   console.log('\n=== test-scraper-clean ===\n');
+
+  // ── 0. _extractChrome unit (ТЗ п.6: шапка/подвал для коммерч. факторов) ──
+  {
+    const html = `<!doctype html><html><body>
+      <header class="site-header"><a href="tel:+74950001122">+7 495 000-11-22</a>
+        <a href="mailto:sale@shop.ru">sale@shop.ru</a></header>
+      <article><h1>Товар</h1><p>Описание товара без контактов.</p></article>
+      <footer class="site-footer">Доставка и оплата по всей России. ИНН 7700000000.
+        <a href="https://t.me/shop">Telegram</a></footer>
+    </body></html>`;
+    const chrome = _extractChrome(html);
+    ok('_extractChrome returns object', chrome && typeof chrome === 'object');
+    ok('_extractChrome captures tel:', (chrome.tel || []).some((t) => /4950001122/.test(t.replace(/\D/g, ''))));
+    ok('_extractChrome captures mailto:', (chrome.email || []).includes('sale@shop.ru'));
+    ok('_extractChrome captures social link', (chrome.social || []).some((s) => /t\.me/.test(s)));
+    ok('_extractChrome footer text has доставка/оплата', /доставк/i.test(chrome.text) && /оплат/i.test(chrome.text));
+    ok('_extractChrome on empty html → null', _extractChrome('') === null);
+  }
 
   // ── 1. _stripFooterArtifacts unit ─────────────────────────────────
   {

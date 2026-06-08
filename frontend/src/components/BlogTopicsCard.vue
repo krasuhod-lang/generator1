@@ -10,7 +10,11 @@ import { copyToClipboard, toTsv } from '../utils/clipboard.js';
 
 const props = defineProps({
   blogPlan: { type: Object, default: null },
+  // Карта index → { id } созданных статей; индекс генерящейся темы.
+  generatedArticles: { type: Object, default: () => ({}) },
+  generatingIndex: { type: Number, default: -1 },
 });
+const emit = defineEmits(['generate']);
 
 const available = computed(() => props.blogPlan && props.blogPlan.available);
 const topics = computed(() => (props.blogPlan && props.blogPlan.topics) || []);
@@ -86,6 +90,20 @@ async function copyAllForExcel() {
           <span v-for="q in t.supporting_queries.slice(0, 6)" :key="q"
                 class="rounded-full bg-gray-900/60 px-2 py-0.5 text-[11px] text-gray-300">{{ q }}</span>
           <span class="text-[11px] text-gray-500">· показы: {{ supportImpressions(t) }}</span>
+        </div>
+        <div class="flex items-center gap-2 pt-2">
+          <button v-if="!generatedArticles[i]"
+                  class="btn-secondary text-xs"
+                  :disabled="generatingIndex === i"
+                  @click="emit('generate', { topic: t.topic, index: i })"
+                  title="Сгенерировать полноценную статью для блога через наш инструмент (с автосбором фактов о компании)">
+            {{ generatingIndex === i ? '⏳ Запускаем…' : '✍️ Сгенерировать статью' }}
+          </button>
+          <a v-else
+             :href="`/info-article?open=${generatedArticles[i].id}`"
+             class="text-xs text-emerald-300 hover:text-emerald-200 underline">
+            ✓ Статья создана — открыть генерацию →
+          </a>
         </div>
       </div>
     </div>
