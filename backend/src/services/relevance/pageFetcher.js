@@ -84,6 +84,39 @@ const HEADLESS_TIMEOUT_MS  = (() => {
   return Number.isFinite(v) && v >= 5000 && v <= 120000 ? v : 35000;
 })();
 
+// X-Internal-Token для вызова `relevance_fetcher` (шарим единый токен с
+// сервисом `relevance`). Если переменная пустая — сервис тоже её не требует.
+const RELEVANCE_INTERNAL_TOKEN = (process.env.RELEVANCE_INTERNAL_TOKEN || '').trim();
+
+// Сигнатуры антибот-челленджей (Cloudflare / Qrator / DDoS-Guard / Sucuri).
+// При их обнаружении в HTML или статус-кодах форсим headless БЕЗ ожидания
+// SPA-порога — иначе мы будем считать «пустым телом» страницу, которая на
+// самом деле прячет реальный контент за JS-челленджем.
+const WAF_HTML_MARKERS = [
+  '__cf_chl_',
+  'cf-browser-verification',
+  'Just a moment...',
+  'cdn-cgi/challenge-platform',
+  'Checking your browser',
+  'qrator.net',
+  '_qrtj',
+  'ddos-guard',
+  'sucuri_cloudproxy',
+];
+
+const FORCE_HEADLESS_STATUSES = new Set([401, 403, 429, 503]);
+
+function _looksLikeWafChallenge(html) {
+  if (!html) return false;
+  // Дешёвый поиск без regex по ограниченному префиксу — не пробегаем по
+  // мегабайтам HTML, достаточно проверить начало (~16 КБ).
+  const head = html.slice(0, 16384);
+  for (const m of WAF_HTML_MARKERS) {
+    if (head.indexOf(m) !== -1) return true;
+  }
+  return false;
+}
+
 // Статус-коды и сетевые коды ошибок, при которых имеет смысл повторить
 // запрос с альтернативным User-Agent.
 const RETRY_STATUS_CODES = new Set([403, 408, 425, 429, 500, 502, 503, 504, 522, 524]);
@@ -204,6 +237,9 @@ async function _headlessFetch(url) {
         maxContentLength: MAX_HTML_BYTES,
         maxBodyLength:    MAX_HTML_BYTES,
         validateStatus: (s) => s >= 200 && s < 300,
+        headers: RELEVANCE_INTERNAL_TOKEN
+          ? { 'X-Internal-Token': RELEVANCE_INTERNAL_TOKEN }
+          : undefined,
       },
     );
     const html = String(res?.data?.html || '');
@@ -218,6 +254,15 @@ async function fetchOne(url) {
   const client = _newAxiosWithJar();
   const result = { url };
 
+  // helper: вернуть успех (если headless вернул HTML), иначе null.
+  // Используем при WAF/антибот-сигналах ДО исчерпания axios-попыток.
+  const _tryHeadless = async (reasonMethod) => {
+    if (!HEADLESS_FETCHER_URL) return null;
+    const hh = await _headlessFetch(url);
+    if (hh) return { url, html: hh, method: `headless_${reasonMethod}` };
+    return null;
+  };
+
   // Попытка №1 — реальный Chrome + cookie jar (Cloudflare cf_clearance ловится).
   let firstErr = null;
   try {
@@ -226,14 +271,29 @@ async function fetchOne(url) {
     if (!html.trim()) {
       throw Object.assign(new Error('empty body'), { code: 'EMPTY_BODY' });
     }
+    // Антибот-челлендж — сразу в headless (axios даже на retry его не
+    // пробьёт, нужно реальное JS-исполнение).
+    if (_looksLikeWafChallenge(html)) {
+      const hh = await _tryHeadless('cf_challenge');
+      if (hh) return hh;
+    }
     if (html.length < SPA_THRESHOLD_BYTES) {
       // Возможно SPA — попытаемся headless (если настроен).
-      const hh = await _headlessFetch(url);
-      if (hh) return { url, html: hh, method: 'headless' };
+      const hh = await _tryHeadless('spa');
+      if (hh) return hh;
     }
     return { url, html, method: 'axios_chrome' };
   } catch (err) {
     firstErr = err;
+  }
+
+  // Если первый запрос упал на статусе из FORCE_HEADLESS_STATUSES (403/503/…) —
+  // axios-retry даже с другим UA не пробьёт WAF (он привязывает челлендж к
+  // IP+TLS). Сразу пробуем headless.
+  const firstStatus = firstErr?.response?.status;
+  if (firstStatus && FORCE_HEADLESS_STATUSES.has(firstStatus)) {
+    const hh = await _tryHeadless(`http_${firstStatus}`);
+    if (hh) return hh;
   }
 
   // Попытка №2 — fallback: Googlebot UA, тот же cookie jar (поможет
@@ -246,9 +306,13 @@ async function fetchOne(url) {
       if (!html2.trim()) {
         throw Object.assign(new Error('empty body (after retry)'), { code: 'EMPTY_BODY' });
       }
+      if (_looksLikeWafChallenge(html2)) {
+        const hh = await _tryHeadless('cf_challenge_after_googlebot');
+        if (hh) return hh;
+      }
       if (html2.length < SPA_THRESHOLD_BYTES) {
-        const hh = await _headlessFetch(url);
-        if (hh) return { url, html: hh, method: 'headless' };
+        const hh = await _tryHeadless('spa');
+        if (hh) return hh;
       }
       return { url, html: html2, method: 'axios_googlebot' };
     } catch (err) {
@@ -263,9 +327,13 @@ async function fetchOne(url) {
       const res3 = await _doFetch(client, url, PRIMARY_USER_AGENT, { acceptBrotli: false });
       const html3 = String(res3.data || '');
       if (html3.trim()) {
+        if (_looksLikeWafChallenge(html3)) {
+          const hh = await _tryHeadless('cf_challenge_no_brotli');
+          if (hh) return hh;
+        }
         if (html3.length < SPA_THRESHOLD_BYTES) {
-          const hh = await _headlessFetch(url);
-          if (hh) return { url, html: hh, method: 'headless' };
+          const hh = await _tryHeadless('spa');
+          if (hh) return hh;
         }
         return { url, html: html3, method: 'axios_no_brotli' };
       }
@@ -273,10 +341,11 @@ async function fetchOne(url) {
   }
 
   // Финальная попытка — headless, если включён, даже без предварительного
-  // успеха. Это покрывает SPA, которые без JS вообще ничего не отдают.
+  // успеха. Это покрывает SPA, которые без JS вообще ничего не отдают,
+  // и WAF-страницы, где axios подряд получает 403/503.
   if (HEADLESS_FETCHER_URL) {
     const hh = await _headlessFetch(url);
-    if (hh) return { url, html: hh, method: 'headless' };
+    if (hh) return { url, html: hh, method: 'headless_last_resort' };
   }
 
   const finalErr = secondErr || firstErr;

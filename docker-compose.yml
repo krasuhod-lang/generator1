@@ -71,6 +71,9 @@ services:
       # Релевантность: внутренний URL Python-микросервиса.
       RELEVANCE_INTERNAL_URL: ${RELEVANCE_INTERNAL_URL:-http://relevance:8000}
       RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
+      # Headless-fallback (Playwright + stealth) для WAF/Cloudflare/SPA URL.
+      # Контейнер `relevance_fetcher` поднимается ниже; наружу не торчит.
+      RELEVANCE_HEADLESS_FETCHER_URL: ${RELEVANCE_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch}
       # Прокси для Gemini API — загружаются из .env через env_file
       # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
       # 🧬 Bio-Brain: внутренний URL aegis_py в docker-сети.
@@ -103,8 +106,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-seogenius}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-seogenius_db}
       REDIS_URL: redis://redis:6379
       AEGIS_PY_URL: ${AEGIS_PY_URL:-http://aegis_py:8800}
-      # Прокси для Gemini API — загружаются из .env через env_file
-      # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
+      RELEVANCE_INTERNAL_URL: ${RELEVANCE_INTERNAL_URL:-http://relevance:8000}
+      RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
+      RELEVANCE_HEADLESS_FETCHER_URL: ${RELEVANCE_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch}
     command: node src/queue/worker.js
     depends_on:
       postgres:
@@ -152,6 +156,32 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ── Relevance Headless Fetcher (Playwright + stealth) ───────────────────
+  # «firecrawl-class» fallback для WAF/Cloudflare/SPA: pageFetcher.js шлёт
+  # POST /fetch при 403/503/cf_clearance/«пустом теле», получает обратно
+  # outerHTML после гидратации. Тяжёлый Chromium НЕ тащим в основной backend.
+  # Использует общий RELEVANCE_INTERNAL_TOKEN. Внутренняя сеть, наружу не
+  # торчит.
+  relevance_fetcher:
+    build:
+      context: ./relevance_fetcher
+      dockerfile: Dockerfile
+    container_name: seo_relevance_fetcher
+    restart: unless-stopped
+    environment:
+      RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
+      LOG_LEVEL: ${RELEVANCE_FETCHER_LOG_LEVEL:-INFO}
+      FETCHER_DEFAULT_TIMEOUT_MS: ${RELEVANCE_FETCHER_DEFAULT_TIMEOUT_MS:-35000}
+      FETCHER_MAX_TIMEOUT_MS: ${RELEVANCE_FETCHER_MAX_TIMEOUT_MS:-60000}
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # ── A.E.G.I.S. Python (Bio-Brain NEAT + DSPy + GraphRAG-фасад) ──────────
   # 🧬 Поднимаем по умолчанию в основном стеке, чтобы Bio-Brain «жил

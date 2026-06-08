@@ -40,15 +40,21 @@ function _canonicalHost(url) {
 
 const MIN_FETCHED_FOR_ANALYZE = (() => {
   const v = parseInt(process.env.RELEVANCE_MIN_FETCHED, 10);
-  return Number.isFinite(v) && v >= 1 ? v : 5;
+  // По умолчанию 3 (раньше было 5). Анализ по 3 точкам шумный, но
+  // информативный — мы предпочитаем частичные данные с warning'ом, чем
+  // фатальную ошибку «3/20» из-за WAF/SPA.
+  return Number.isFinite(v) && v >= 1 ? v : 3;
 })();
 
-// Минимальное количество URL после dedup + фильтра агрегаторов, ниже которого
-// мы делаем «добор» со страницы 3 SERP (XMLStock page=2 → позиции 21-30).
-// Цель — иметь приличный корпус для сравнения, даже если две первые страницы
-// Яндекса забиты агрегаторами или дублями домена. Захардкожено по требованию
-// заказчика, env не используется (политика «не трогаем .env»).
+// Минимальное количество URL ПОСЛЕ dedup и фильтра агрегаторов, ниже
+// которого мы делаем «добор» с доп. страниц SERP (XMLStock page=2/3/4 →
+// позиции 21-30, 31-40, 41-50). Цель — получить 18+ полезных URL даже
+// если две первые страницы Яндекса забиты агрегаторами или дублями
+// домена. Захардкожено по требованию заказчика, env не используется.
 const MIN_SERP_AFTER_DEDUP = 18;
+// До скольких доп. страниц SERP добираем (XMLStock page index'ы — это
+// 2 (стр.3), 3 (стр.4), 4 (стр.5)). Один проход = +10 doc.
+const SERP_TOPUP_PAGES = [2, 3, 4];
 
 async function _setStage(reportId, stage, extra = {}) {
   const sets = ['current_stage = $2'];
@@ -188,56 +194,77 @@ async function processRelevanceReport(reportId) {
       );
     }
 
-    // ── 1.4. Добор со страницы 3 SERP, если после dedup осталось < 18 ──
-    // Заказчик: «если спарсено сайтов менее 18, то дополнительно мы добираем
-    // сайты с 3 страницы поисковой выдачи (позиции 21-30)». Считаем именно
-    // длину после dedup по URL/host, но ДО фильтра агрегаторов — добираем
-    // максимально широкий пул, фильтр применим единообразно к расширенному
-    // набору ниже. Если страница 3 тоже не наполнила — продолжаем с тем, что
-    // есть (не падаем).
-    let extendedFromPage3 = false;
-    if (serp.length < MIN_SERP_AFTER_DEDUP) {
-      try {
-        const extraRaw = await fetchYandexSerp(query, {
-          lr: lr || '',
-          pages: 1,
-          startPage: 2, // XMLStock page=2 → позиции 21-30
-        });
-        let addedCount = 0;
-        for (const item of (extraRaw || [])) {
-          const url = String(item.url || '').trim();
-          if (!url || seen.has(url)) continue;
-          seen.add(url);
-          const host = _canonicalHost(url);
-          if (host && seenHosts.has(host)) {
-            skippedSameHost.push({ url, host });
-            continue;
-          }
-          if (host) seenHosts.add(host);
-          serp.push({
-            url,
-            title:   String(item.title   || '').slice(0, 500),
-            snippet: String(item.snippet || '').slice(0, 1000),
-          });
-          addedCount += 1;
-          if (serp.length >= topN) break;
+    // Вспомогательная функция: добавить в `serp` URL'ы из dump'а XMLStock с
+    // соблюдением dedup'ов (по URL и по host). Возвращает число добавленных.
+    const _ingestSerp = (raw) => {
+      let added = 0;
+      for (const item of (raw || [])) {
+        const url = String(item.url || '').trim();
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        const host = _canonicalHost(url);
+        if (host && seenHosts.has(host)) {
+          skippedSameHost.push({ url, host });
+          continue;
         }
-        extendedFromPage3 = addedCount > 0;
-        if (extendedFromPage3) {
+        if (host) seenHosts.add(host);
+        serp.push({
+          url,
+          title:   String(item.title   || '').slice(0, 500),
+          snippet: String(item.snippet || '').slice(0, 1000),
+        });
+        added += 1;
+        if (serp.length >= topN) break;
+      }
+      return added;
+    };
+
+    // Считаем «полезное» количество URL — после исключения тех, кого выкинет
+    // фильтр агрегаторов (если опция включена). Этот счётчик используем как
+    // условие добора со следующей SERP-страницы.
+    const _usefulCount = () => {
+      if (!excludeAggregators) return serp.length;
+      const split = splitBySerp(serp);
+      return split.kept.length;
+    };
+
+    // ── 1.4. Добор с доп. страниц SERP (стр.3/4/5), пока не наберём 18 ────
+    // Заказчик: «если кол-во меньше 20 сайтов, парсим ещё страницу». Делаем
+    // это ИТЕРАТИВНО до 3-х доп. страниц XMLStock (позиции 21-30, 31-40,
+    // 41-50), останавливаемся при достижении MIN_SERP_AFTER_DEDUP полезных
+    // URL ИЛИ topN. Считаем именно «полезные» URL — после фильтра
+    // агрегаторов, чтобы при включённой галке не выскочить из условия с
+    // 18 URL, из которых 12 — Avito/hh/ozon.
+    const topupPages = [];
+    let needTopup = _usefulCount() < MIN_SERP_AFTER_DEDUP && serp.length < topN;
+    if (needTopup) {
+      for (const page of SERP_TOPUP_PAGES) {
+        if (serp.length >= topN) break;
+        if (_usefulCount() >= MIN_SERP_AFTER_DEDUP) break;
+        try {
+          const extraRaw = await fetchYandexSerp(query, {
+            lr: lr || '',
+            pages: 1,
+            startPage: page,
+          });
+          const added = _ingestSerp(extraRaw);
+          topupPages.push({ page, added, useful: _usefulCount() });
           console.log(
-            `[relevance] добор со стр. 3 SERP для отчёта ${reportId}: `
-            + `+${addedCount} URL (итого ${serp.length}/${topN}, threshold=${MIN_SERP_AFTER_DEDUP})`,
+            `[relevance] добор SERP page=${page} (поз. ${page * 10 + 1}-${page * 10 + 10}) `
+            + `для отчёта ${reportId}: +${added} URL `
+            + `(итого ${serp.length}/${topN}, полезных ${_usefulCount()}, threshold=${MIN_SERP_AFTER_DEDUP})`,
+          );
+        } catch (e) {
+          // Best-effort: если страница не пришла — пробуем следующую.
+          console.warn(
+            `[relevance] добор SERP page=${page} не удался для отчёта ${reportId}: `
+            + `${e.message || e}`,
           );
         }
-      } catch (e) {
-        // Добор — best-effort. Если 3-я страница не пришла — работаем с тем,
-        // что есть, не валим отчёт.
-        console.warn(
-          `[relevance] добор со стр. 3 SERP не удался для отчёта ${reportId}: `
-          + `${e.message || e}`,
-        );
       }
+      needTopup = _usefulCount() < MIN_SERP_AFTER_DEDUP;
     }
+    const extendedFromExtraPages = topupPages.some((p) => (p.added || 0) > 0);
 
     // ── 1.5. Фильтр агрегаторов (опционально, по чекбоксу формы) ───────
     // Avito/hh/ozon/dzen/… занимают ТОП Яндекса почти всегда, но сами
@@ -261,16 +288,16 @@ async function processRelevanceReport(reportId) {
         removedAggregators = [];
       }
     }
-    // serp в БД — JSONB-массив. Метаданные о доборе со стр. 3 и фильтрах
-    // пишем только в лог, чтобы не ломать существующих потребителей
-    // (RelevanceResultPage.vue, relevance.controller.js, tasks.controller.js
+    // serp в БД — JSONB-массив. Метаданные о доборе со стр. 3+ и фильтрах
+    // пишем только в лог + позже в report.serp_meta, чтобы не ломать
+    // существующих потребителей (RelevanceResultPage.vue, контроллеры
     // читают serp как массив URL).
-    if (extendedFromPage3 || skippedSameHost.length || removedAggregators.length) {
+    if (extendedFromExtraPages || skippedSameHost.length || removedAggregators.length) {
       console.log(
         `[relevance] serp-meta для ${reportId}: kept=${serpForFetch.length}, `
         + `skippedSameHost=${skippedSameHost.length}, `
         + `removedAggregators=${removedAggregators.length}, `
-        + `extendedFromPage3=${extendedFromPage3}`,
+        + `topup=${topupPages.map((p) => `p${p.page}+${p.added}`).join(',') || '—'}`,
       );
     }
     funnel.step('fetching_pages');
@@ -398,6 +425,35 @@ async function processRelevanceReport(reportId) {
         skipped_same_host:    skippedSameHost,
         serp_after_filter:    serpForFetch.length,
       },
+      // Метаданные SERP-добора: какие доп. страницы XMLStock запрашивали и
+      // сколько уникальных URL они добавили. Полезно для отладки на стороне
+      // оператора («а почему добор не сработал?»).
+      serp_meta: {
+        top_n:                  topN,
+        serp_total:             serp.length,
+        useful_after_filter:    serpForFetch.length,
+        skipped_same_host:      skippedSameHost.length,
+        removed_aggregators:    removedAggregators.length,
+        topup_pages:            topupPages,
+        min_threshold:          MIN_SERP_AFTER_DEDUP,
+      },
+      // Человекочитаемые предупреждения (показываются баннером в UI).
+      warnings: (() => {
+        const warns = [];
+        if (successes.length < 5) {
+          warns.push(
+            `Скачано ${successes.length} страниц — это мало для устойчивых медиан, `
+            + `выводы по корпусу индикативны.`,
+          );
+        }
+        if (serpForFetch.length < MIN_SERP_AFTER_DEDUP) {
+          warns.push(
+            `После dedup и фильтра агрегаторов осталось ${serpForFetch.length} URL `
+            + `(порог ${MIN_SERP_AFTER_DEDUP}). Добор с доп. страниц SERP исчерпан.`,
+          );
+        }
+        return warns;
+      })(),
       // Сводка причин fail'а — оператору сразу видно, где проблема.
       fail_breakdown: _summarizeFailures(failures),
     };

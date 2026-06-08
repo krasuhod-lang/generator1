@@ -67,14 +67,18 @@ const path   = require('path');
       'MIN_SERP_AFTER_DEDUP=18 expected',
     );
     assert.ok(
-      /startPage:\s*2/.test(pipelineSource),
-      'добор со стр. 3 (startPage: 2) expected in pipeline',
+      /SERP_TOPUP_PAGES\s*=\s*\[\s*2\s*,\s*3\s*,\s*4\s*\]/.test(pipelineSource),
+      'SERP_TOPUP_PAGES=[2,3,4] expected (добор со стр. 3/4/5)',
     );
     assert.ok(
-      /serp\.length\s*<\s*MIN_SERP_AFTER_DEDUP/.test(pipelineSource),
-      'gate `serp.length < MIN_SERP_AFTER_DEDUP` expected',
+      /startPage:\s*page/.test(pipelineSource),
+      'iterative startPage (по SERP_TOPUP_PAGES) expected in pipeline',
     );
-    console.log('✓ relevance/pipeline.js wires page-3 fallback');
+    assert.ok(
+      /_usefulCount\(\)\s*<\s*MIN_SERP_AFTER_DEDUP/.test(pipelineSource),
+      'gate `_usefulCount() < MIN_SERP_AFTER_DEDUP` expected (post-фильтр-агрегаторов учёт)',
+    );
+    console.log('✓ relevance/pipeline.js wires multi-page topup (стр. 3/4/5)');
 
     console.log('\n✅ test-relevance-pagination: all checks passed');
   })().catch((e) => {
