@@ -187,21 +187,33 @@ function _orphanRecs() {
   }).recommendations;
 }
 
-test('enrichDonorTopics without llmFn keeps deterministic wrapper + format', async () => {
+test('enrichDonorTopics without llmFn builds deterministic ready topic + format', async () => {
   const recs = _orphanRecs();
   const before = recs.map((r) => r.donor_topic);
   const res = await enrichDonorTopics({ recommendations: recs, project, llmFn: null });
-  assert.strictEqual(res.enriched, 0);
+  assert.ok(res.enriched >= 1);
   assert.strictEqual(res.used_llm, false);
-  recs.forEach((r, i) => {
-    assert.strictEqual(r.donor_topic, before[i]); // не тронуто
-    assert.ok(r.donor_topic_ready === undefined);
-  });
   // Тематическая (seed) рекомендация сохраняет обязательный формат-обёртку.
   const seedRec = recs.find((r) => r.donor_topic_seed);
   assert.ok(seedRec, 'has a thematic seed recommendation');
+  assert.ok(seedRec.donor_topic_ready, 'ready topic filled deterministically');
+  assert.notStrictEqual(seedRec.donor_topic, before[recs.indexOf(seedRec)], 'raw-anchor wrapper replaced');
   assert.ok(/^Экспертная статья по теме «.*» с естественной ссылкой на ваш раздел$/.test(seedRec.donor_topic));
   assert.ok(recs.length >= 5);
+});
+
+test('enrichDonorTopics fallback makes intent topic instead of raw anchor', async () => {
+  const recs = [{
+    anchor: 'анализ сайта',
+    anchor_type: 'commercial',
+    donor_topic_seed: 'анализ сайта',
+    donor_topic: wrapDonorTopic('анализ сайта'),
+    target_url: '/service/seo-analiz-sajta/',
+    priority: 'high',
+  }];
+  await enrichDonorTopics({ recommendations: recs, project, llmFn: null });
+  assert.strictEqual(recs[0].donor_topic_ready, 'Как провести анализ сайта и найти точки роста в SEO');
+  assert.strictEqual(recs[0].donor_topic, wrapDonorTopic(recs[0].donor_topic_ready));
 });
 
 test('enrichDonorTopics with llmFn fills ready topic, still wrapped in format', async () => {
@@ -250,13 +262,15 @@ test('enrichDonorTopics drops title that duplicates the topic (must intrigue, no
   assert.ok(enriched.donor_topic_description);
 });
 
-test('enrichDonorTopics graceful on broken llm output → keeps fallback', async () => {
+test('enrichDonorTopics graceful on broken llm output → keeps deterministic ready topic', async () => {
   const recs = _orphanRecs();
   const before = recs.map((r) => r.donor_topic);
   const badLlm = async () => 'не json вовсе';
   const res = await enrichDonorTopics({ recommendations: recs, project, llmFn: badLlm });
-  assert.strictEqual(res.enriched, 0);
-  recs.forEach((r, i) => assert.strictEqual(r.donor_topic, before[i]));
+  assert.ok(res.enriched >= 1);
+  const seedRec = recs.find((r) => r.donor_topic_seed);
+  assert.ok(seedRec.donor_topic_ready);
+  assert.notStrictEqual(seedRec.donor_topic, before[recs.indexOf(seedRec)]);
 });
 
 // ── summary ──────────────────────────────────────────────────────────

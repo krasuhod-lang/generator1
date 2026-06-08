@@ -12,6 +12,7 @@ const {
   selectPagesToAudit,
   buildSemanticsFromQueries,
   diffMeta,
+  mergeGeneratedMetaIntoAudit,
 } = require('../src/services/projects/pageMetaAudit');
 const { _mergeSemantics } = require('../src/services/metaTags/metaStages');
 
@@ -68,6 +69,23 @@ test('diffMeta reports before/after lengths', () => {
   assert.strictEqual(d.title.before_len, 1);
   assert.strictEqual(d.title.after_len, 3);
   assert.strictEqual(d.description.after_len, 4);
+});
+
+test('mergeGeneratedMetaIntoAudit replaces generated page and keeps other rows', () => {
+  const audit = {
+    available: true,
+    pages: [
+      { url: 'https://x.ru/a', before: { title: 'Old A' }, suggested: null },
+      { url: 'https://x.ru/b', before: { title: 'Old B' }, suggested: null },
+    ],
+  };
+  const merged = mergeGeneratedMetaIntoAudit(audit, [
+    { url: 'https://x.ru/a', suggested: { title: 'New A', description: 'Desc A' } },
+  ]);
+  assert.strictEqual(merged.pages.length, 2);
+  assert.strictEqual(merged.pages[0].suggested.title, 'New A');
+  assert.strictEqual(merged.pages[1].url, 'https://x.ru/b');
+  assert.strictEqual(merged.generated, true);
 });
 
 test('metaStages._mergeSemantics keeps GSC words first, no dup, respects caps', () => {

@@ -762,7 +762,7 @@ async function regenerateMeta(req, res, next) {
     const url = req.body && typeof req.body.url === 'string' ? req.body.url.trim() : '';
     if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'Некорректный url' });
 
-    const { auditPages, regenerateMetaForPages } = require('../services/projects/pageMetaAudit');
+    const { auditPages, regenerateMetaForPages, mergeGeneratedMetaIntoAudit } = require('../services/projects/pageMetaAudit');
 
     // Тянем реальные поисковые запросы этой страницы из GSC (query×page), чтобы
     // семантика регенерации строилась на фактическом спросе, а не была пустой
@@ -808,8 +808,51 @@ async function regenerateMeta(req, res, next) {
       try { funnel.fail(err.message); await funnel.persist({ status: 'failed', error: err.message }); } catch (_) { /* no-op */ }
       throw err;
     }
-    return res.json(result || { available: false });
+    const persisted = await _persistGeneratedMetaAudit({
+      projectId: project.id,
+      userId: req.user.id,
+      analysisId: req.body && req.body.analysis_id,
+      result,
+      mergeGeneratedMetaIntoAudit,
+    });
+    return res.json({ ...(result || { available: false }), persisted });
   } catch (err) { return next(err); }
+}
+
+async function _persistGeneratedMetaAudit({ projectId, userId, analysisId, result, mergeGeneratedMetaIntoAudit }) {
+  const pages = result && Array.isArray(result.pages) ? result.pages : [];
+  if (!pages.length || typeof mergeGeneratedMetaIntoAudit !== 'function') return null;
+
+  const params = [projectId, userId];
+  let where = 'a.project_id = $1 AND p.user_id = $2 AND a.status = \'done\'';
+  if (analysisId) {
+    params.push(analysisId);
+    where += ` AND a.id = $${params.length}`;
+  }
+
+  const { rows } = await db.query(
+    `SELECT a.id, a.gsc_snapshot
+       FROM project_analyses a
+       JOIN projects p ON p.id = a.project_id
+      WHERE ${where}
+      ORDER BY a.completed_at DESC NULLS LAST, a.created_at DESC
+      LIMIT 1`,
+    params,
+  );
+  if (!rows.length) return null;
+
+  const snapshot = rows[0].gsc_snapshot && typeof rows[0].gsc_snapshot === 'object'
+    ? { ...rows[0].gsc_snapshot }
+    : {};
+  snapshot.page_meta_audit = mergeGeneratedMetaIntoAudit(snapshot.page_meta_audit, pages);
+
+  await db.query(
+    `UPDATE project_analyses
+        SET gsc_snapshot = $2
+      WHERE id = $1`,
+    [rows[0].id, snapshot],
+  );
+  return { analysis_id: rows[0].id, page_meta_audit: snapshot.page_meta_audit };
 }
 
 /**

@@ -128,8 +128,9 @@ export const useProjectsStore = defineStore('projects', {
       });
       return data;
     },
-    async regenerateMeta(id, url) {
-      const { data } = await api.post(`/projects/${id}/meta-suggestions/regenerate`, { url });
+    async regenerateMeta(id, url, analysisId = null) {
+      const payload = analysisId ? { url, analysis_id: analysisId } : { url };
+      const { data } = await api.post(`/projects/${id}/meta-suggestions/regenerate`, payload);
       return data;
     },
     async probeAiVisibility(id, payload) {
