@@ -57,6 +57,32 @@ const currentTab = computed(() => {
   return list.some((t) => t.key === activeTab.value) ? activeTab.value : list[0].key;
 });
 
+// Под-вкладки внутри «Google» — зеркалят личный кабинет (ProjectDetailPage),
+// чтобы клиент видел те же разделы по табам, а не одной длинной простынёй.
+const gscSubTab = ref('report');
+const gscSubTabs = computed(() => {
+  const s = snap.value || {};
+  return [
+    { key: 'report', label: 'Отчёт ИИ', show: !!analysis.value?.report_markdown },
+    { key: 'strategy', label: 'Стратегия', show: !!(s.strategy_map && s.strategy_map.available) },
+    { key: 'actionplan', label: 'План действий', show: !!s.action_plan },
+    { key: 'dynamics', label: 'Динамика', show: !!(s.period_compare || s.breakdowns || s.page_decay || s.brand_split || s.seasonality) },
+    { key: 'commercial', label: 'Коммерция', show: !!s.commercial },
+    { key: 'toppages', label: 'Топ-страницы', show: !!s.top_page_insights },
+    { key: 'links', label: 'Ссылки', show: !!s.link_audit },
+    { key: 'meta', label: 'Мета', show: !!s.page_meta_audit },
+    { key: 'blog', label: 'Блог', show: !!s.blog_plan },
+    { key: 'eat', label: 'E-E-A-T', show: !!s.eat },
+    { key: 'schema', label: 'Микроразметка', show: !!s.schema_audit },
+    { key: 'geo', label: 'GEO/AEO', show: !!s.geo_aeo },
+  ].filter((t) => t.show);
+});
+const activeGscSubTab = computed(() => {
+  const list = gscSubTabs.value;
+  if (!list.length) return '';
+  return list.some((t) => t.key === gscSubTab.value) ? gscSubTab.value : list[0].key;
+});
+
 function fmt(n) {
   return (n || 0).toLocaleString('ru');
 }
@@ -130,33 +156,71 @@ onMounted(async () => {
               <GscPerformanceChart v-if="snap.series?.length" :series="snap.series" />
             </section>
 
-            <section v-if="analysis.report_markdown" class="panel space-y-3">
-              <h2 class="panel-title text-indigo-300">AI-отчёт · Google</h2>
-              <MarkdownView :source="analysis.report_markdown" />
-            </section>
+            <!-- Под-вкладки аналитики (как в личном кабинете) -->
+            <nav v-if="gscSubTabs.length" class="flex flex-wrap gap-1 border-b border-gray-800">
+              <button v-for="t in gscSubTabs" :key="t.key" type="button"
+                      class="px-3 py-1.5 text-xs font-medium -mb-px border-b-2 transition-colors"
+                      :class="activeGscSubTab === t.key ? 'border-indigo-500 text-indigo-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                      @click="gscSubTab = t.key">{{ t.label }}</button>
+            </nav>
 
-            <StrategyDiagram v-if="snap?.strategy_map && snap.strategy_map.available" :strategy-map="snap.strategy_map" />
+            <div v-show="activeGscSubTab === 'report'">
+              <section v-if="analysis.report_markdown" class="panel space-y-3">
+                <h2 class="panel-title text-indigo-300">AI-отчёт · Google</h2>
+                <MarkdownView :source="analysis.report_markdown" />
+              </section>
+            </div>
 
-            <ActionPlanCard v-if="snap?.action_plan" :plan="snap.action_plan" />
+            <div v-show="activeGscSubTab === 'strategy'">
+              <StrategyDiagram v-if="snap?.strategy_map && snap.strategy_map.available" :strategy-map="snap.strategy_map" />
+            </div>
 
-            <CommercialInsights v-if="snap?.commercial"
-                                :commercial="snap.commercial"
-                                :serp-verification="snap?.serp_verification || null" />
+            <div v-show="activeGscSubTab === 'actionplan'">
+              <ActionPlanCard v-if="snap?.action_plan" :plan="snap.action_plan" />
+            </div>
 
-            <AnalyticsExtras v-if="snap && (snap.period_compare || snap.breakdowns || snap.page_decay || snap.brand_split || snap.seasonality)"
-                             :period-compare="snap.period_compare || null"
-                             :breakdowns="snap.breakdowns || null"
-                             :page-decay="snap.page_decay || null"
-                             :brand-split="snap.brand_split || null"
-                             :seasonality="snap.seasonality || null" />
+            <div v-show="activeGscSubTab === 'dynamics'">
+              <AnalyticsExtras v-if="snap && (snap.period_compare || snap.breakdowns || snap.page_decay || snap.brand_split || snap.seasonality)"
+                               :period-compare="snap.period_compare || null"
+                               :breakdowns="snap.breakdowns || null"
+                               :page-decay="snap.page_decay || null"
+                               :brand-split="snap.brand_split || null"
+                               :seasonality="snap.seasonality || null" />
+            </div>
 
-            <TopPageInsightsCard v-if="snap?.top_page_insights" :insights="snap.top_page_insights" />
-            <LinkProfileCard v-if="snap?.link_audit" :link-audit="snap.link_audit" />
-            <MetaSuggestionsCard v-if="snap?.page_meta_audit" :page-meta-audit="snap.page_meta_audit" />
-            <BlogTopicsCard v-if="snap?.blog_plan" :blog-plan="snap.blog_plan" />
-            <EatTemplatesCard v-if="snap?.eat" :eat="snap.eat" />
-            <SchemaAuditCard v-if="snap?.schema_audit" :schema-audit="snap.schema_audit" />
-            <AiVisibilityCard v-if="snap?.geo_aeo" :geo-aeo="snap.geo_aeo" />
+            <div v-show="activeGscSubTab === 'commercial'">
+              <CommercialInsights v-if="snap?.commercial"
+                                  :commercial="snap.commercial"
+                                  :serp-verification="snap?.serp_verification || null" />
+            </div>
+
+            <div v-show="activeGscSubTab === 'toppages'">
+              <TopPageInsightsCard v-if="snap?.top_page_insights" :insights="snap.top_page_insights" />
+            </div>
+
+            <div v-show="activeGscSubTab === 'links'">
+              <LinkProfileCard v-if="snap?.link_audit" :link-audit="snap.link_audit" />
+            </div>
+
+            <div v-show="activeGscSubTab === 'meta'">
+              <MetaSuggestionsCard v-if="snap?.page_meta_audit" :page-meta-audit="snap.page_meta_audit" />
+            </div>
+
+            <div v-show="activeGscSubTab === 'blog'">
+              <BlogTopicsCard v-if="snap?.blog_plan" :blog-plan="snap.blog_plan" />
+            </div>
+
+            <div v-show="activeGscSubTab === 'eat'">
+              <EatTemplatesCard v-if="snap?.eat" :eat="snap.eat" />
+            </div>
+
+            <div v-show="activeGscSubTab === 'schema'">
+              <SchemaAuditCard v-if="snap?.schema_audit" :schema-audit="snap.schema_audit" />
+            </div>
+
+            <div v-show="activeGscSubTab === 'geo'">
+              <AiVisibilityCard v-if="snap?.geo_aeo" :geo-aeo="snap.geo_aeo" />
+            </div>
           </div>
 
           <!-- ===================== ЯНДЕКС ===================== -->
