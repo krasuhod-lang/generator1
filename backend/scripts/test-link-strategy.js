@@ -170,10 +170,11 @@ test('detectTableType returns unknown for unrelated header', () => {
 const { wrapDonorTopic } = require('../src/services/projects/linkStrategy/linkRecommender');
 const { enrichDonorTopics } = require('../src/services/projects/linkStrategy/donorTopicGenerator');
 
-test('wrapDonorTopic keeps the required external format', () => {
+test('wrapDonorTopic outputs the article topic directly (no wrapper)', () => {
+  // Заказчик: выводим тему статьи напрямую, без обёртки «Экспертная статья по теме…».
   assert.strictEqual(
     wrapDonorTopic('греется тормозной диск с одной стороны'),
-    'Экспертная статья по теме «греется тормозной диск с одной стороны» с естественной ссылкой на ваш раздел',
+    'греется тормозной диск с одной стороны',
   );
 });
 
@@ -193,12 +194,13 @@ test('enrichDonorTopics without llmFn builds deterministic ready topic + format'
   const res = await enrichDonorTopics({ recommendations: recs, project, llmFn: null });
   assert.ok(res.enriched >= 1);
   assert.strictEqual(res.used_llm, false);
-  // Тематическая (seed) рекомендация сохраняет обязательный формат-обёртку.
+  // Тематическая (seed) рекомендация теперь содержит саму тему статьи напрямую.
   const seedRec = recs.find((r) => r.donor_topic_seed);
   assert.ok(seedRec, 'has a thematic seed recommendation');
   assert.ok(seedRec.donor_topic_ready, 'ready topic filled deterministically');
-  assert.notStrictEqual(seedRec.donor_topic, before[recs.indexOf(seedRec)], 'raw-anchor wrapper replaced');
-  assert.ok(/^Экспертная статья по теме «.*» с естественной ссылкой на ваш раздел$/.test(seedRec.donor_topic));
+  assert.notStrictEqual(seedRec.donor_topic, before[recs.indexOf(seedRec)], 'raw-anchor replaced by ready topic');
+  assert.strictEqual(seedRec.donor_topic, seedRec.donor_topic_ready, 'donor_topic = тема статьи напрямую');
+  assert.ok(!/Экспертная статья по теме/.test(seedRec.donor_topic), 'без служебной обёртки');
   assert.ok(recs.length >= 5);
 });
 

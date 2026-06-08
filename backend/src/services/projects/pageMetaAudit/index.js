@@ -359,7 +359,12 @@ async function regenerateMetaForPages({ project, pages = [], funnel = null } = {
         entry.serp_analyzed = generated.serp_analyzed;
         okCount += 1;
       }
-    } catch (_) { /* graceful per-page */ }
+    } catch (err) {
+      // Не глотаем причину молча — прокидываем в строку, чтобы UI показал,
+      // почему «Стало» не сгенерировалось (например, сбой SERP/ключей), а не
+      // оставлял оператора в неведении («ничего не произошло»).
+      entry.error = String((err && err.message) || err) || 'generation_failed';
+    }
     out.push(entry);
   }
 
@@ -367,7 +372,15 @@ async function regenerateMetaForPages({ project, pages = [], funnel = null } = {
     if (okCount === 0) funnel.fail(`all ${pages.length} pages failed`);
     else funnel.step('finalize');
   }
-  return { available: true, pages: out, generated: true };
+  return {
+    available: true,
+    pages: out,
+    generated: true,
+    ok_count: okCount,
+    // Когда не сгенерировалась НИ ОДНА страница — отдаём флаг и первую причину,
+    // чтобы фронт показал понятную ошибку вместо «тишины».
+    error: okCount === 0 ? ((out.find((p) => p.error) || {}).error || 'generation_failed') : null,
+  };
 }
 
 function _extractH1(scraped) {
