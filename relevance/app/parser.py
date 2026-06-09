@@ -625,12 +625,17 @@ def extract_with_diagnostics(html: str) -> ParseResult:
     # Если набрали достаточно «жирных» — этого достаточно как baseline.
     # Но всё равно гоняем trafilatura для возможного апгрейда (он чище).
     traf_blocks = _trafilatura_pass(html)
-    diag.candidates["trafilatura"] = sum(len(b) for b in traf_blocks)
+    traf_chars = sum(len(b) for b in traf_blocks)
+    diag.candidates["trafilatura"] = traf_chars
     if traf_blocks:
         candidates["trafilatura"] = traf_blocks
 
-    # readability — только если оба основных слабоваты
-    if heavy_chars < MIN_BODY_TEXT_CHARS and not traf_blocks:
+    # readability — запускаем, если ни один из основных проходов не дал
+    # достаточно текста. Раньше условие было `heavy < MIN AND not traf`,
+    # из-за чего на сайтах-карточках товара (короткий trafilatura-результат
+    # ~50 симв.) readability вообще не пробовали. Новое условие срабатывает
+    # и в этом кейсе.
+    if max(heavy_chars, traf_chars) < MIN_BODY_TEXT_CHARS:
         rd_blocks = _readability_pass(html)
         diag.candidates["readability"] = sum(len(b) for b in rd_blocks)
         if rd_blocks:
@@ -685,6 +690,11 @@ def extract_with_diagnostics(html: str) -> ParseResult:
             diag.empty_reason = "tiny_html"
         else:
             diag.empty_reason = "noise_only"
+    else:
+        # Защита от регресса: если text_chars > 0, ни в коем случае не
+        # выставляем empty_reason — иначе оператор увидит false-positive
+        # «пустая страница», хотя текст распарсился.
+        diag.empty_reason = None
 
     zoned_blocks: Optional[List[Dict]] = None
 
@@ -705,7 +715,11 @@ def extract_with_diagnostics(html: str) -> ParseResult:
             )
         except Exception as exc:  # pragma: no cover — walker не должен валить весь парсер
             zoned_blocks = None
-            diag.empty_reason = diag.empty_reason or f"full_dom_walker_failed:{type(exc).__name__}"
+            # Не затираем empty_reason, если legacy-проход уже вернул блоки —
+            # иначе оператор видит false-positive «парсер не справился», хотя
+            # текст распарсился через heavy_bs4/trafilatura.
+            if not blocks:
+                diag.empty_reason = diag.empty_reason or f"full_dom_walker_failed:{type(exc).__name__}"
         else:
             diag.zone_chars = zone_chars
             diag.zone_word_count = zone_word_count

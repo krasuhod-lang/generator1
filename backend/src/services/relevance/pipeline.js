@@ -17,7 +17,8 @@
 
 const db = require('../../config/db');
 const { fetchYandexSerp } = require('../metaTags/xmlstockClient');
-const { fetchPages, fetchOne } = require('./pageFetcher');
+const pageFetcher = require('./pageFetcher');
+const { fetchPages, fetchOne } = pageFetcher;
 const { analyze, compare }     = require('./pythonClient');
 const rawStorage          = require('./rawStorage');
 const { splitBySerp }     = require('./aggregatorDomains');
@@ -306,24 +307,87 @@ async function processRelevanceReport(reportId) {
     // ── 2. Скачивание HTML ───────────────────────────────────────────────
     const fetchRes = await fetchPages(serpForFetch.map((s) => s.url));
     let successes = fetchRes.successes;
-    const failures = fetchRes.failures;
+    let failures = fetchRes.failures;
+
+    // ── 2b. Второй проход для не-успешных URL: форсим headless. Цель —
+    // довести `successes.length` максимально близко к `serp.length`, иначе
+    // мы считаем релевантность по 3 точкам, а оператор видит «3 из 20»
+    // (основная боль из ТЗ). Запускаем только если есть failures и есть
+    // headless-сервис.
+    const failedForRetry = failures.filter((f) => {
+      // Бессмысленно ретраить настоящие 404/410/451 — там HTML просто нет.
+      const c = String(f?.code || '');
+      if (c === 'http_404' || c === 'http_410' || c === 'http_451') return false;
+      if (c === 'dns' || c === 'tls') return false;
+      return true;
+    });
+    let headlessSecondPass = { attempted: 0, recovered: 0, available: false };
+    if (failedForRetry.length > 0 && pageFetcher.HEADLESS_FETCHER_URL) {
+      headlessSecondPass.available = true;
+      headlessSecondPass.attempted = failedForRetry.length;
+      try {
+        const second = await pageFetcher.fetchHeadlessOnly(failedForRetry.map((f) => f.url));
+        if (second.successes.length > 0) {
+          const recoveredUrls = new Set(second.successes.map((s) => s.url));
+          successes = successes.concat(second.successes);
+          // Убираем восстановленные из failures и заменяем оставшиеся причины на
+          // headless_fail/headless_unavailable из второго прохода.
+          const stillFailed = failures.filter((f) => !recoveredUrls.has(f.url));
+          // Обновим описание у тех, что остались failed после headless: пусть
+          // финальная категория отражает headless_fail (если он действительно
+          // пробовался и упал).
+          const headlessFailMap = new Map();
+          for (const f of second.failures) headlessFailMap.set(f.url, f);
+          failures = stillFailed.map((f) => {
+            const hh = headlessFailMap.get(f.url);
+            if (hh && hh.code) {
+              return { ...f, code: hh.code, error: hh.error || f.error };
+            }
+            return f;
+          });
+          headlessSecondPass.recovered = second.successes.length;
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`[relevance ${reportId}] headless second pass failed:`, e.message);
+      }
+    } else if (failedForRetry.length > 0 && !pageFetcher.HEADLESS_FETCHER_URL) {
+      // Helmet «headless недоступен» — помечаем все retryable-failures стабильным
+      // кодом, чтобы оператор сразу видел причину «20 - N» в fail_breakdown.
+      const retryableSet = new Set(failedForRetry.map((f) => f.url));
+      failures = failures.map((f) => (
+        retryableSet.has(f.url)
+          ? { ...f, code: f.code === 'unknown' ? 'headless_unavailable' : f.code }
+          : f
+      ));
+    }
 
     // Aegis Phase 14: фильтр «отравленных» страниц (hidden text / keyword
     // stuffing / invisible chars) — данные конкурентов могут содержать
     // SEO-яд, и мы не хотим строить BM25/анкорный профиль ниши на нём.
     // Graceful: если AEGIS_ENABLED=false или модуль отсутствует — no-op.
+    // ВАЖНО: по ТЗ «надо чтобы у каждого URL был спарсен контент»
+    // poison-фильтр НЕ выкидывает страницы из корпуса, а только помечает —
+    // оператор видит причину в `dropped_by_aegis`, корпус остаётся полным.
+    let aegisDropped = [];
     try {
       const { kept, dropped } = aegisHooks.filterPoisonedPages(successes);
-      if (dropped.length > 0) {
+      aegisDropped = dropped || [];
+      if (aegisDropped.length > 0) {
         // eslint-disable-next-line no-console
         console.warn(
-          `[aegis][relevance ${reportId}] poison filter dropped `
-          + `${dropped.length}/${successes.length}: `
-          + dropped.slice(0, 3).map((d) => `${d.url} (${d.reason})`).join('; '),
+          `[aegis][relevance ${reportId}] poison filter flagged `
+          + `${aegisDropped.length}/${successes.length} (kept in corpus, marked only): `
+          + aegisDropped.slice(0, 3).map((d) => `${d.url} (${d.reason})`).join('; '),
         );
       }
-      successes = kept;
-      aegisHooks.emitPagesTelemetry({ ok: kept.length, dropped });
+      // Поведение по умолчанию изменено: НЕ дропаем, чтобы релевантность
+      // считалась по всем URL. Если потребуется жёсткий drop — включить через
+      // env RELEVANCE_AEGIS_HARD_DROP=1.
+      if ((process.env.RELEVANCE_AEGIS_HARD_DROP || '').trim() === '1') {
+        successes = kept;
+      }
+      aegisHooks.emitPagesTelemetry({ ok: successes.length, dropped: aegisDropped });
     } catch (_) { /* graceful */ }
 
     funnel.step('analyzing');
@@ -445,6 +509,16 @@ async function processRelevanceReport(reportId) {
             `Скачано ${successes.length} страниц — это мало для устойчивых медиан, `
             + `выводы по корпусу индикативны.`,
           );
+        } else if (successes.length < 10) {
+          warns.push(
+            `Скачано ${successes.length}/${serp.length} — частичные данные. `
+            + `Релевантность считается по этим документам, медианы шумные.`,
+          );
+        } else if (successes.length < serp.length) {
+          warns.push(
+            `Скачано ${successes.length}/${serp.length} — выводы устойчивы, но `
+            + `${serp.length - successes.length} URL в корпусе не учтены.`,
+          );
         }
         if (serpForFetch.length < MIN_SERP_AFTER_DEDUP) {
           warns.push(
@@ -452,10 +526,42 @@ async function processRelevanceReport(reportId) {
             + `(порог ${MIN_SERP_AFTER_DEDUP}). Добор с доп. страниц SERP исчерпан.`,
           );
         }
+        if (!pageFetcher.HEADLESS_FETCHER_URL) {
+          warns.push(
+            'Headless-фетчер (RELEVANCE_HEADLESS_FETCHER_URL) не настроен — '
+            + 'SPA / WAF-страницы могут не скачиваться. Это поднимает долю «не открылось».',
+          );
+        } else if (headlessSecondPass.attempted > 0) {
+          warns.push(
+            `Второй проход через headless: ${headlessSecondPass.recovered}/`
+            + `${headlessSecondPass.attempted} URL восстановлено.`,
+          );
+        }
+        if ((aegisDropped || []).length > 0) {
+          warns.push(
+            `Aegis poison-фильтр пометил ${aegisDropped.length} страниц как `
+            + `подозрительные (оставлены в корпусе для прозрачности).`,
+          );
+        }
         return warns;
       })(),
       // Сводка причин fail'а — оператору сразу видно, где проблема.
       fail_breakdown: _summarizeFailures(failures),
+      // Сводка по парсингу: какой метод сработал на сколько URL и сколько
+      // документов попали в empty_reason. Это разделяет «WAF не пустил» (виден
+      // в fail_breakdown) и «парсер не справился» (виден в parse_breakdown) —
+      // ключевое требование ТЗ для диагностики «3 из 20».
+      parse_breakdown: _summarizeParse(analysisResp?.document_diagnostics),
+      // Какой fetch-метод (axios_chrome / headless_* / axios_googlebot) дал
+      // успех по каждому URL — оператор сразу видит, кому помог headless.
+      fetch_methods: successes.map((s) => ({
+        url: s.url, method: s.method || 'axios', retries_used: s.retries_used || 0,
+      })),
+      // Метаданные второго прохода через headless для UI/логов.
+      headless_second_pass: headlessSecondPass,
+      // Aegis: какие страницы помечены как «отравленные» (оставлены в корпусе,
+      // если RELEVANCE_AEGIS_HARD_DROP не выставлен).
+      dropped_by_aegis: aegisDropped,
     };
 
     // ── 5. Сравнение «наш сайт vs ТОП» (опционально, если задан our_url) ─
@@ -481,6 +587,8 @@ async function processRelevanceReport(reportId) {
         comparisonReport = { error: String(e.message || e).slice(0, 500) };
       }
     }
+
+    _logRunSummary(reportId, fullReport, successes, failures);
 
     await _finishOk(reportId, fullReport, Date.now() - t0, rawMeta, dbProcessed, {
       our_report: ourReport,
@@ -529,6 +637,59 @@ function _summarizeFailures(failures) {
     breakdown[code] = (breakdown[code] || 0) + 1;
   }
   return breakdown;
+}
+
+/**
+ * Сводка по парсингу контента: сколько URL дали empty_reason vs какой метод
+ * экстрактора (heavy_bs4 / trafilatura / readability / wide_bs4 / parser_exception)
+ * сработал. Это позволяет в одном взгляде понять «WAF не пустил» (видно в
+ * fail_breakdown) vs «парсер не справился» (видно здесь).
+ */
+function _summarizeParse(diagnostics) {
+  const out = { methods: {}, empty_reasons: {}, total: 0, parsed: 0, empty: 0 };
+  const list = Array.isArray(diagnostics) ? diagnostics : [];
+  for (const d of list) {
+    out.total += 1;
+    const method = String(d?.method || 'none');
+    out.methods[method] = (out.methods[method] || 0) + 1;
+    if (d?.empty_reason) {
+      const r = String(d.empty_reason);
+      out.empty_reasons[r] = (out.empty_reasons[r] || 0) + 1;
+      out.empty += 1;
+    } else if ((d?.text_chars || 0) > 0) {
+      out.parsed += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Печатает в лог одну сводную строку по отчёту: сколько URL скачано / не
+ * скачано / распарсено + топ-3 причины по каждому breakdown'у.
+ * Ничего не возвращает, не бросает — это диагностика, не часть контракта.
+ */
+function _logRunSummary(reportId, fullReport, successes, failures) {
+  try {
+    const top = (obj, n = 3) => Object.entries(obj || {})
+      .sort((a, b) => b[1] - a[1]).slice(0, n)
+      .map(([k, v]) => `${k}×${v}`).join(',') || '—';
+    const fb = fullReport?.fail_breakdown || {};
+    const pb = fullReport?.parse_breakdown || {};
+    const fm = (successes || []).reduce((acc, s) => {
+      const k = String(s.method || 'axios');
+      acc[k] = (acc[k] || 0) + 1; return acc;
+    }, {});
+    // eslint-disable-next-line no-console
+    console.info(
+      `[relevance ${reportId}] summary: `
+      + `serp=${(fullReport.serp_meta || {}).useful_after_filter ?? '?'} `
+      + `fetched=${successes.length} failed=${failures.length} `
+      + `methods=[${top(fm)}] `
+      + `parse_methods=[${top(pb.methods)}] `
+      + `empty=${pb.empty || 0}/${pb.total || 0} (${top(pb.empty_reasons)}) `
+      + `fail=[${top(fb)}]`,
+    );
+  } catch (_) { /* diagnostics must not throw */ }
 }
 
 /**

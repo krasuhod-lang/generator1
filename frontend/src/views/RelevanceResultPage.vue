@@ -232,6 +232,133 @@ const docDiagnostics  = computed(() => {
 });
 const failBreakdown   = computed(() => report.value?.report?.fail_breakdown || {});
 const filterInfo      = computed(() => report.value?.report?.filter || null);
+const parseBreakdown  = computed(() => report.value?.report?.parse_breakdown || null);
+const reportWarnings  = computed(() => {
+  const w = report.value?.report?.warnings;
+  return Array.isArray(w) ? w : [];
+});
+const headlessSecondPass = computed(() => report.value?.report?.headless_second_pass || null);
+const droppedByAegis  = computed(() => report.value?.report?.dropped_by_aegis || []);
+
+// Карта url → fetch-метод (axios_chrome / headless_* / axios_googlebot).
+// Используется для цветовой подсветки клеток heatmap'а ТОП-20.
+const fetchMethodByUrl = computed(() => {
+  const map = new Map();
+  for (const r of (report.value?.report?.fetch_methods || [])) {
+    if (r && r.url) map.set(r.url, r.method || 'axios');
+  }
+  return map;
+});
+
+// Для каждого URL в SERP — итоговый «статус-токен» для heatmap-клетки.
+//   ok / headless / failed / parse_empty / no_data
+function statusOfUrl(url) {
+  if (!url) return 'no_data';
+  const method = fetchMethodByUrl.value.get(url);
+  const failed = (report.value?.failed_urls || []).find((f) => f && f.url === url);
+  if (failed) return 'failed';
+  // Парсер мог не вытащить контент (empty_reason) — это не failure фетча.
+  const diag = (docDiagnostics.value || []).find((d) => d && d.url === url);
+  if (diag && diag.empty_reason) return 'parse_empty';
+  if (typeof method === 'string' && method.startsWith('headless_')) return 'headless';
+  if (method) return 'ok';
+  return 'no_data';
+}
+
+const HEATMAP_LEGEND = [
+  { token: 'ok',          label: 'HTTP-фетч OK',  cls: 'bg-emerald-500/80 border-emerald-400' },
+  { token: 'headless',    label: 'через headless',cls: 'bg-sky-500/80 border-sky-400' },
+  { token: 'parse_empty', label: 'парсер пуст',   cls: 'bg-amber-500/80 border-amber-400' },
+  { token: 'failed',      label: 'не открылось',  cls: 'bg-red-600/80 border-red-400' },
+  { token: 'no_data',     label: 'нет данных',    cls: 'bg-gray-700/70 border-gray-500' },
+];
+function heatmapCellClass(token) {
+  return HEATMAP_LEGEND.find((x) => x.token === token)?.cls || HEATMAP_LEGEND[4].cls;
+}
+
+// Donut по fail_breakdown: вычисляем conic-gradient stops + цвет по коду.
+const FAIL_COLORS = {
+  http_403: '#f59e0b', http_404: '#9ca3af', http_410: '#9ca3af', http_429: '#f59e0b',
+  http_500: '#ef4444', http_502: '#ef4444', http_503: '#ef4444', http_504: '#ef4444',
+  timeout: '#fb923c', dns: '#a78bfa', tls: '#facc15', conn_reset: '#fb923c',
+  conn_refused: '#fb923c', too_large: '#22d3ee', empty_body: '#94a3b8',
+  http2_protocol: '#fb7185', headless_fail: '#f97316', headless_unavailable: '#fb923c',
+  unknown: '#6b7280',
+};
+function _failColor(code) {
+  return FAIL_COLORS[code] || '#9ca3af';
+}
+const failDonut = computed(() => {
+  const entries = failBreakdownEntries.value;
+  if (!entries.length) return null;
+  const total = entries.reduce((s, [, n]) => s + n, 0) || 1;
+  let acc = 0;
+  const stops = entries.map(([code, count]) => {
+    const pct = (count / total) * 100;
+    const start = acc;
+    acc += pct;
+    return { code, count, color: _failColor(code), start, end: acc };
+  });
+  const gradient = stops
+    .map((s) => `${s.color} ${s.start.toFixed(2)}% ${s.end.toFixed(2)}%`)
+    .join(', ');
+  return { total, stops, gradient: `conic-gradient(${gradient})` };
+});
+
+// Tween-аниматор счётчика: запускает rAF от 0 до значения за `ms` (~500мс),
+// возвращает реактивный ref с текущим значением. Без зависимостей.
+function useTweenedNumber(targetRef, ms = 600) {
+  const out = ref(0);
+  let raf = 0;
+  let from = 0;
+  let to = 0;
+  let t0 = 0;
+  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+  const tick = (now) => {
+    const t = Math.min(1, (now - t0) / ms);
+    out.value = Math.round(from + (to - from) * easeOut(t));
+    if (t < 1) raf = requestAnimationFrame(tick);
+  };
+  watch(
+    () => Number(targetRef.value || 0),
+    (val) => {
+      if (raf) cancelAnimationFrame(raf);
+      from = out.value;
+      to = Number.isFinite(val) ? val : 0;
+      t0 = performance.now();
+      raf = requestAnimationFrame(tick);
+    },
+    { immediate: true },
+  );
+  return out;
+}
+
+const tweenedFetched   = useTweenedNumber(computed(() => report.value?.fetched_count || 0));
+const tweenedSerpTotal = useTweenedNumber(computed(() => (report.value?.serp || []).length || 0));
+const tweenedTokens    = useTweenedNumber(computed(() => stats.value?.total_tokens || 0));
+const tweenedVocab     = useTweenedNumber(computed(() => vocabulary.value.length));
+const tweenedNgrams    = useTweenedNumber(computed(() => ngrams.value.length));
+
+// Цвет «N/20» badge: ≥18 — зелёный, 10–17 — жёлтый, <10 — красный + пульсация.
+const fetchedRatioClass = computed(() => {
+  const n = report.value?.fetched_count || 0;
+  const total = (report.value?.serp || []).length || 0;
+  if (total === 0) return 'text-gray-400 border-gray-600';
+  if (n >= 18) return 'text-emerald-300 border-emerald-700/70 bg-emerald-900/20';
+  if (n >= 10) return 'text-amber-300 border-amber-700/70 bg-amber-900/20';
+  return 'text-red-300 border-red-700/70 bg-red-900/20 animate-pulse';
+});
+
+// Скрываемые предупреждения — состояние «закрыли крестик».
+const dismissedWarnings = ref(new Set());
+function dismissWarning(idx) {
+  dismissedWarnings.value = new Set([...dismissedWarnings.value, idx]);
+}
+const visibleWarnings = computed(() => (
+  reportWarnings.value
+    .map((w, i) => ({ text: w, idx: i }))
+    .filter((w) => !dismissedWarnings.value.has(w.idx))
+));
 
 // Сводка причин fail'а — для бейджиков «5×http_403, 3×timeout, 2×SPA».
 const failBreakdownEntries = computed(() => {
@@ -914,7 +1041,10 @@ function copyTagZone() {
             <span v-if="report">📍 {{ regionLabel(report.lr) }}</span>
             <span v-if="report">📅 {{ formatDate(report.created_at) }}</span>
             <span v-if="report?.duration_ms">⏱ {{ formatDuration(report.duration_ms) }}</span>
-            <span v-if="report">🔗 {{ report.fetched_count }}/{{ (report.serp || []).length }} страниц</span>
+            <span v-if="report"
+                  :class="['inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-semibold transition-colors duration-300', fetchedRatioClass]">
+              🔗 {{ tweenedFetched }}/{{ tweenedSerpTotal }} страниц
+            </span>
           </div>
         </div>
         <div class="flex items-center gap-2 flex-shrink-0">
@@ -980,7 +1110,7 @@ function copyTagZone() {
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">Документов</div>
           </div>
           <div class="card py-3 text-center">
-            <div class="text-2xl font-bold text-indigo-300">{{ (stats.total_tokens || 0).toLocaleString('ru-RU') }}</div>
+            <div class="text-2xl font-bold text-indigo-300">{{ tweenedTokens.toLocaleString('ru-RU') }}</div>
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">Токенов</div>
           </div>
           <div class="card py-3 text-center">
@@ -988,12 +1118,56 @@ function copyTagZone() {
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">Сред. длина</div>
           </div>
           <div class="card py-3 text-center">
-            <div class="text-2xl font-bold text-emerald-300">{{ vocabulary.length }}</div>
+            <div class="text-2xl font-bold text-emerald-300">{{ tweenedVocab }}</div>
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">Лемм в словаре</div>
           </div>
           <div class="card py-3 text-center">
-            <div class="text-2xl font-bold text-fuchsia-300">{{ ngrams.length }}</div>
+            <div class="text-2xl font-bold text-fuchsia-300">{{ tweenedNgrams }}</div>
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">N-грамм</div>
+          </div>
+        </div>
+
+        <!-- Предупреждения: dismissible, slide-in -->
+        <TransitionGroup name="warn-slide" tag="div"
+                         v-if="visibleWarnings.length"
+                         class="space-y-2">
+          <div v-for="w in visibleWarnings" :key="w.idx"
+               class="card border-amber-700/60 bg-amber-900/20 flex items-start gap-3 py-2">
+            <div class="text-amber-300 text-lg leading-none mt-0.5">⚠</div>
+            <div class="text-amber-100 text-xs flex-1 break-words">{{ w.text }}</div>
+            <button @click="dismissWarning(w.idx)"
+                    class="text-amber-300/70 hover:text-amber-100 text-sm leading-none">✕</button>
+          </div>
+        </TransitionGroup>
+
+        <!-- ── Heatmap по 20 URL: статус каждого результата SERP ── -->
+        <div v-if="(report.serp || []).length" class="card">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 class="text-base font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
+              🌡 Статус по {{ (report.serp || []).length }} URL ТОПа
+            </h2>
+            <div class="flex items-center gap-3 text-[10px] text-gray-400 flex-wrap">
+              <span v-for="L in HEATMAP_LEGEND" :key="L.token" class="flex items-center gap-1">
+                <span :class="['inline-block w-2.5 h-2.5 rounded-sm border', L.cls]"></span>
+                {{ L.label }}
+              </span>
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <a v-for="(s, i) in report.serp" :key="(s.url || '') + '_' + i"
+               :href="s.url" target="_blank" rel="noopener nofollow"
+               :title="`${i+1}. ${s.url || '—'} · ${statusOfUrl(s.url)}`"
+               :class="['heatmap-cell relative rounded border transition-transform hover:scale-110',
+                        heatmapCellClass(statusOfUrl(s.url))]"
+               :style="{ animationDelay: (i * 30) + 'ms' }">
+              <span class="text-[9px] text-white/90 font-bold absolute inset-0 flex items-center justify-center pointer-events-none">{{ i + 1 }}</span>
+            </a>
+          </div>
+          <div v-if="headlessSecondPass && headlessSecondPass.attempted"
+               class="text-[11px] text-gray-400 mt-3">
+            🤖 Второй проход через headless: восстановлено
+            <span class="text-emerald-300 font-semibold">{{ headlessSecondPass.recovered || 0 }}</span>
+            из {{ headlessSecondPass.attempted }} URL
           </div>
         </div>
 
@@ -1270,21 +1444,48 @@ function copyTagZone() {
 
         <!-- Сводка причин fail'а — оператор сразу видит, где WAF/SPA/DNS -->
         <div v-if="failBreakdownEntries.length > 0" class="card">
-          <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">
+          <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-3">
             📉 Причины недоступности страниц ТОПа
           </h3>
-          <div class="flex flex-wrap gap-2">
-            <span v-for="[code, count] in failBreakdownEntries" :key="code"
-                  class="text-xs px-2 py-1 rounded bg-gray-950 border border-gray-800">
-              <span class="text-gray-400 font-mono">{{ code }}</span>
-              <span class="text-amber-300 font-bold ml-1">×{{ count }}</span>
-            </span>
+          <div class="flex items-center gap-5 flex-wrap">
+            <!-- Donut: CSS conic-gradient, без зависимостей -->
+            <div v-if="failDonut" class="relative flex-shrink-0"
+                 :style="{ width: '120px', height: '120px' }">
+              <div class="rounded-full transition-all duration-500"
+                   :style="{ width: '120px', height: '120px', background: failDonut.gradient }"></div>
+              <div class="absolute inset-3 rounded-full bg-gray-950 flex flex-col items-center justify-center">
+                <div class="text-xl font-bold text-amber-300 tabular-nums">{{ failDonut.total }}</div>
+                <div class="text-[10px] text-gray-500 uppercase">фейлов</div>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2 flex-1 min-w-0">
+              <span v-for="s in (failDonut?.stops || [])" :key="s.code"
+                    class="text-xs px-2 py-1 rounded bg-gray-950 border border-gray-800 flex items-center gap-1.5">
+                <span class="inline-block w-2.5 h-2.5 rounded-sm"
+                      :style="{ background: s.color }"></span>
+                <span class="text-gray-400 font-mono">{{ s.code }}</span>
+                <span class="text-amber-300 font-bold">×{{ s.count }}</span>
+              </span>
+            </div>
+          </div>
+          <!-- parse_breakdown: причины, по которым парсер вернул пустой текст -->
+          <div v-if="parseBreakdown && parseBreakdown.empty"
+               class="mt-3 pt-3 border-t border-gray-800">
+            <div class="text-[11px] text-gray-400 mb-1">
+              Парсер вернул пустой текст: <span class="text-amber-300 font-bold">{{ parseBreakdown.empty }}</span>
+              из {{ parseBreakdown.total }}
+              ({{ Object.entries(parseBreakdown.empty_reasons || {}).slice(0,3).map(([k,v]) => `${k}×${v}`).join(', ') || '—' }})
+            </div>
           </div>
           <div v-if="filterInfo?.removed_aggregators?.length"
                class="text-[11px] text-gray-500 mt-3">
             Также отфильтровано как агрегаторы:
             <span class="text-gray-400">{{ filterInfo.removed_aggregators.length }}</span>
             (<span class="font-mono">{{ filterInfo.removed_aggregators.slice(0,5).map(r => r.host).join(', ') }}{{ filterInfo.removed_aggregators.length > 5 ? '…' : '' }}</span>)
+          </div>
+          <div v-if="droppedByAegis && droppedByAegis.length"
+               class="text-[11px] text-purple-300/80 mt-2">
+            🛡 Aegis пометил подозрительными (не выкинуты): {{ droppedByAegis.length }}
           </div>
         </div>
 
@@ -2589,3 +2790,31 @@ function copyTagZone() {
     </div>
   </AppLayout>
 </template>
+
+<style scoped>
+/* Heatmap-клетка статуса URL: размер фиксирован, плавный fade-in. */
+.heatmap-cell {
+  width: 28px;
+  height: 28px;
+  display: inline-block;
+  animation: hm-fade-in 0.4s ease both;
+}
+@keyframes hm-fade-in {
+  from { opacity: 0; transform: scale(0.6); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Slide-in для предупреждений */
+.warn-slide-enter-active,
+.warn-slide-leave-active {
+  transition: all 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.warn-slide-enter-from {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+.warn-slide-leave-to {
+  opacity: 0;
+  transform: translateX(20px);
+}
+</style>
