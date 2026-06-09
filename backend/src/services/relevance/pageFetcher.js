@@ -205,15 +205,35 @@ function _backoffDelay(attempt) {
 // SPA-порога — иначе мы будем считать «пустым телом» страницу, которая на
 // самом деле прячет реальный контент за JS-челленджем.
 const WAF_HTML_MARKERS = [
+  // Cloudflare
   '__cf_chl_',
   'cf-browser-verification',
   'Just a moment...',
   'cdn-cgi/challenge-platform',
   'Checking your browser',
+  // Qrator / DDoS-Guard / Sucuri
   'qrator.net',
   '_qrtj',
   'ddos-guard',
   'sucuri_cloudproxy',
+  // Akamai
+  'ak_bmsc',
+  'Reference&#32;ID',
+  'Reference #18.',
+  // Imperva / Incapsula
+  '_Incapsula_Resource',
+  'Powered by Imperva',
+  'Request unsuccessful',
+  // PerimeterX / HUMAN
+  'pxhd',
+  '__pxvid',
+  'Please verify you are a human',
+  // F5 BIG-IP
+  'f5avraaaaa',
+  'TS01',
+  // Generic
+  'Доступ ограничен',
+  'Подтвердите, что вы не робот',
 ];
 
 const FORCE_HEADLESS_STATUSES = new Set([401, 403, 429, 503]);
@@ -235,7 +255,26 @@ const RETRY_STATUS_CODES = new Set([403, 408, 425, 429, 500, 502, 503, 504, 522,
 const RETRY_ERROR_CODES  = new Set([
   'ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED',
   'ECONNREFUSED', 'EAI_AGAIN', 'ENETUNREACH',
+  // HTTP/2 / parser-level errors that occasionally happen on Node 20 with
+  // aggressive HTTP/2 servers. Без ретрая такие URL уходили в `unknown` и
+  // оператор видел «3/20» там, где на самом деле помог бы повтор / headless.
+  'EPROTO',
+  'HPE_INVALID_HEADER_TOKEN',
+  'HPE_INVALID_CONSTANT',
+  'HPE_INVALID_CHUNK_SIZE',
+  'HPE_INVALID_METHOD',
+  'HPE_HEADER_OVERFLOW',
+  'ERR_HTTP2_STREAM_ERROR',
+  'ERR_HTTP2_PROTOCOL_ERROR',
+  'ERR_HTTP2_GOAWAY_SESSION',
+  'ERR_HTTP2_INVALID_STREAM',
+  'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
+  'ERR_SSL_PROTOCOL_ERROR',
 ]);
+// Регулярка-маска для всех ERR_HTTP2_* / HPE_* кодов на случай новых имён в
+// будущих версиях Node — _shouldRetry() проверяет совпадение либо по Set,
+// либо по этому prefix-фильтру.
+const RETRY_ERROR_CODE_PREFIXES = ['ERR_HTTP2_', 'HPE_'];
 
 /** Ограниченно-параллельный map: запускает не более `limit` задач одновременно. */
 async function pMap(items, limit, fn) {
@@ -297,7 +336,11 @@ async function _doFetch(client, url, userAgent, { acceptBrotli = true, proxyAgen
     maxBodyLength:    MAX_HTML_BYTES,
     maxRedirects: 5,
     headers,
-    responseType: 'text',
+    // Берём сырой ArrayBuffer, чтобы корректно перекодировать страницы в
+    // windows-1251 / koi8-r / etc — axios по умолчанию декодирует как UTF-8
+    // и для cp1251-русских сайтов кириллица превращается в мусор, что ломает
+    // лемматизацию (`_WORD_COUNT_RE` находит мало слов → text_chars≈0).
+    responseType: 'arraybuffer',
     transformResponse: [(d) => d],
     validateStatus: (s) => s >= 200 && s < 300,
     decompress: true,
@@ -309,7 +352,54 @@ async function _doFetch(client, url, userAgent, { acceptBrotli = true, proxyAgen
     cfg.httpAgent = proxyAgent;
     cfg.proxy = false;
   }
-  return client.get(url, cfg);
+  const res = await client.get(url, cfg);
+  // Декодируем тело в строку с учётом charset из Content-Type / <meta charset>.
+  res.data = _decodeBodyToString(res.data, res.headers || {});
+  return res;
+}
+
+/**
+ * Определяет charset из HTTP-заголовка `Content-Type` (приоритет 1) и из
+ * `<meta charset>` / `<meta http-equiv="Content-Type">` (приоритет 2).
+ * Для неподдерживаемых TextDecoder'ом кодировок пытаемся iconv-lite
+ * (зависимость опциональная — graceful degradation).
+ */
+let _iconv = null;
+try {
+  // eslint-disable-next-line global-require
+  _iconv = require('iconv-lite');
+} catch (_) { _iconv = null; }
+
+function _detectCharset(buf, headers) {
+  const ct = String((headers && (headers['content-type'] || headers['Content-Type'])) || '');
+  const m1 = /charset\s*=\s*['"]?([\w-]+)/i.exec(ct);
+  if (m1 && m1[1]) return m1[1].toLowerCase();
+  // Сниффим первые 4 KB на наличие <meta charset=...> / http-equiv.
+  try {
+    const head = Buffer.isBuffer(buf) ? buf.slice(0, 4096).toString('latin1')
+                                      : String(buf || '').slice(0, 4096);
+    const m2 = /<meta[^>]+charset\s*=\s*['"]?([\w-]+)/i.exec(head);
+    if (m2 && m2[1]) return m2[1].toLowerCase();
+  } catch (_) { /* best-effort */ }
+  return 'utf-8';
+}
+
+function _decodeBodyToString(body, headers) {
+  // Если уже строка (например при responseType:'text' где-то выше) — возвращаем.
+  if (typeof body === 'string') return body;
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(body || []);
+  const enc = _detectCharset(buf, headers);
+  // node:TextDecoder поддерживает большой список кодировок (utf-8, windows-1251,
+  // koi8-r, и т.д.). Если конкретная не поддерживается — пробуем iconv-lite.
+  try {
+    return new TextDecoder(enc, { fatal: false }).decode(buf);
+  } catch (_) {
+    if (_iconv && _iconv.encodingExists(enc)) {
+      try { return _iconv.decode(buf, enc); } catch (_e) { /* fallthrough */ }
+    }
+    // Последний фоллбэк — UTF-8.
+    return buf.toString('utf-8');
+  }
 }
 
 /**
@@ -335,6 +425,10 @@ function _categorize(err) {
    || code === 'ERR_TLS_CERT_ALTNAME_INVALID') return 'tls';
   if (code === 'ERR_FR_MAX_BODY_LENGTH_EXCEEDED'
    || code === 'ERR_BAD_RESPONSE') return 'too_large';
+  if (typeof code === 'string' && (code.startsWith('ERR_HTTP2_') || code.startsWith('HPE_')
+    || code === 'EPROTO')) return 'http2_protocol';
+  if (code === 'HEADLESS_UNAVAILABLE') return 'headless_unavailable';
+  if (code === 'HEADLESS_FAIL')        return 'headless_fail';
   return 'unknown';
 }
 
@@ -342,12 +436,24 @@ function _shouldRetry(err) {
   const status = err?.response?.status;
   if (status && RETRY_STATUS_CODES.has(status)) return true;
   const code = err?.code;
-  if (code && RETRY_ERROR_CODES.has(code)) return true;
+  if (!code) return false;
+  if (RETRY_ERROR_CODES.has(code)) return true;
+  for (const p of RETRY_ERROR_CODE_PREFIXES) {
+    if (typeof code === 'string' && code.startsWith(p)) return true;
+  }
   return false;
 }
 
+/**
+ * Зовёт внешний headless-сервис (relevance_fetcher / Playwright).
+ * Возвращает структуру { ok, html?, reason?, status? } всегда — никогда null,
+ * чтобы вызывающая сторона могла категоризировать причину failed-headless'а
+ * как `headless_fail` / `headless_unavailable`, а не молча терять её в `unknown`.
+ */
 async function _headlessFetch(url, proxyUrl = null) {
-  if (!HEADLESS_FETCHER_URL) return null;
+  if (!HEADLESS_FETCHER_URL) {
+    return { ok: false, reason: 'headless_unavailable: RELEVANCE_HEADLESS_FETCHER_URL not set' };
+  }
   try {
     const body = { url, timeout_ms: HEADLESS_TIMEOUT_MS };
     // Пробрасываем прокси в headless-сервис (Playwright умеет launch с proxy).
@@ -366,10 +472,17 @@ async function _headlessFetch(url, proxyUrl = null) {
       },
     );
     const html = String(res?.data?.html || '');
-    if (!html.trim()) return null;
-    return html;
-  } catch (_) {
-    return null;
+    const status = Number(res?.data?.status || 0);
+    if (!html.trim()) {
+      return { ok: false, reason: `headless_fail: empty body (status=${status || 'n/a'})`, status };
+    }
+    if (_looksLikeWafChallenge(html)) {
+      return { ok: false, reason: 'headless_fail: WAF challenge in headless body', status, html };
+    }
+    return { ok: true, html, status };
+  } catch (e) {
+    const status = e?.response?.status || 0;
+    return { ok: false, reason: `headless_fail: ${e?.code || e?.message || 'unknown'}`, status };
   }
 }
 
@@ -388,12 +501,20 @@ async function fetchOne(url, opts = {}) {
   // попытки, доведших до успеха или до финальной ошибки.
   let retries = 0;
 
-  // helper: вернуть успех (если headless вернул HTML), иначе null.
-  // Используем при WAF/антибот-сигналах ДО исчерпания axios-попыток.
+  // helper: вернуть успех (если headless вернул HTML), иначе null. Также
+  // мутирует `lastHeadlessReason` — чтобы при финальном фейле передать его
+  // как finalErr.code и категоризовать как `headless_fail`/`headless_unavailable`.
+  let lastHeadlessReason = null;
   const _tryHeadless = async (reasonMethod) => {
-    if (!HEADLESS_FETCHER_URL) return null;
+    if (!HEADLESS_FETCHER_URL) {
+      lastHeadlessReason = 'headless_unavailable: RELEVANCE_HEADLESS_FETCHER_URL not set';
+      return null;
+    }
     const hh = await _headlessFetch(url, proxyUrl);
-    if (hh) return { url, html: hh, method: `headless_${reasonMethod}`, retries_used: retries };
+    if (hh && hh.ok && hh.html) {
+      return { url, html: hh.html, method: `headless_${reasonMethod}`, retries_used: retries };
+    }
+    if (hh && hh.reason) lastHeadlessReason = hh.reason;
     return null;
   };
 
@@ -484,16 +605,36 @@ async function fetchOne(url, opts = {}) {
   // и WAF-страницы, где axios подряд получает 403/503.
   if (HEADLESS_FETCHER_URL) {
     const hh = await _headlessFetch(url, proxyUrl);
-    if (hh) return { url, html: hh, method: 'headless_last_resort', retries_used: retries };
+    if (hh && hh.ok && hh.html) {
+      return { url, html: hh.html, method: 'headless_last_resort', retries_used: retries };
+    }
+    if (hh && hh.reason) lastHeadlessReason = hh.reason;
   }
 
   const finalErr = secondErr || firstErr;
+  // Стратегия итоговой причины:
+  //   • Если axios имеет реальный HTTP-статус (404/410/etc) — это и есть
+  //     понятная причина, отдаём её.
+  //   • Если axios упал с сетевой/timeout/WAF-ошибкой и headless тоже не
+  //     помог — отдаём headless-reason: оператору важно видеть, что мы
+  //     пробовали и почему всё-таки не получилось.
+  const axiosStatus = finalErr?.response?.status;
+  const preferHeadlessReason = !!lastHeadlessReason && !axiosStatus;
   result.error = (() => {
-    const status = finalErr?.response?.status || finalErr?.code || 'ERR';
+    if (preferHeadlessReason) {
+      return String(lastHeadlessReason).slice(0, 200);
+    }
+    const status = axiosStatus || finalErr?.code || 'ERR';
     const msg    = String(finalErr?.message || 'fetch failed').slice(0, 140);
     return `${status}: ${msg}`;
   })();
-  result.code = _categorize(finalErr);
+  if (preferHeadlessReason) {
+    result.code = lastHeadlessReason.startsWith('headless_unavailable')
+      ? 'headless_unavailable'
+      : 'headless_fail';
+  } else {
+    result.code = _categorize(finalErr);
+  }
   result.retries_used = retries;
   return result;
 }
@@ -535,9 +676,91 @@ async function fetchPages(urls, opts = {}) {
   return { successes, failures };
 }
 
+/**
+ * fetchHeadlessOnly(urls) — второй проход: дёргаем только headless-сервис
+ * для URL, на которых первая стадия (`fetchPages`) не получила HTML.
+ * Используется пайплайном, чтобы добрать `successes.length` ближе к
+ * `serp.length` — без этого мы остаёмся с «3 из 20» и считаем релевантность
+ * по 3 точкам, что и было основной болью оператора.
+ *
+ * Возвращает контракт идентичный `fetchPages`.
+ */
+async function fetchHeadlessOnly(urls, opts = {}) {
+  const list = (Array.isArray(urls) ? urls : [])
+    .map((u) => String(u || '').trim())
+    .filter(Boolean);
+  if (list.length === 0 || !HEADLESS_FETCHER_URL) {
+    return {
+      successes: [],
+      failures: list.map((u) => ({
+        url: u,
+        error: 'headless_unavailable: RELEVANCE_HEADLESS_FETCHER_URL not set',
+        code: 'headless_unavailable',
+        retries_used: 0,
+      })),
+    };
+  }
+  const concurrency = Math.max(1, Math.min(FETCH_CONCURRENCY, 4));
+  const proxiesEnabled = opts && opts.proxiesEnabled;
+  const all = await pMap(list, concurrency, async (u) => {
+    const proxyUrl = _pickProxy(proxiesEnabled);
+    const hh = await _headlessFetch(u, proxyUrl);
+    if (hh && hh.ok && hh.html) {
+      return { url: u, html: hh.html, method: 'headless_second_pass', retries_used: 0 };
+    }
+    return {
+      url: u,
+      error: (hh && hh.reason) || 'headless_fail: unknown',
+      code: hh && hh.reason && hh.reason.startsWith('headless_unavailable')
+        ? 'headless_unavailable' : 'headless_fail',
+      retries_used: 0,
+    };
+  });
+  const successes = [];
+  const failures = [];
+  for (const r of all) {
+    if (r && r.html) successes.push(r);
+    else failures.push(r);
+  }
+  return { successes, failures };
+}
+
+/**
+ * checkHeadlessHealth() — best-effort GET /health внешнего headless-сервиса.
+ * Возвращает { available, ok, error?, info? }. Никогда не бросает.
+ */
+async function checkHeadlessHealth() {
+  if (!HEADLESS_FETCHER_URL) {
+    return { available: false, ok: false, error: 'RELEVANCE_HEADLESS_FETCHER_URL is empty' };
+  }
+  try {
+    // /fetch вызываем через POST, но /health у `relevance_fetcher` — GET.
+    // HEADLESS_FETCHER_URL в конфигах обычно указывают на `/fetch` —
+    // подменим хвост на `/health`, чтобы не требовать ещё одной env-переменной.
+    const u = new URL(HEADLESS_FETCHER_URL);
+    u.pathname = u.pathname.replace(/\/(fetch|fetch_html)\/?$/, '/health');
+    const res = await axios.get(u.toString(), {
+      timeout: 5000,
+      validateStatus: (s) => s >= 200 && s < 300,
+      headers: RELEVANCE_INTERNAL_TOKEN
+        ? { 'X-Internal-Token': RELEVANCE_INTERNAL_TOKEN } : undefined,
+    });
+    const info = res?.data || {};
+    return { available: true, ok: !!info.ok, info };
+  } catch (e) {
+    return {
+      available: true,
+      ok: false,
+      error: String(e?.code || e?.message || 'unknown').slice(0, 200),
+    };
+  }
+}
+
 module.exports = {
   fetchPages,
   fetchOne,
+  fetchHeadlessOnly,
+  checkHeadlessHealth,
   FETCH_CONCURRENCY,
   FETCH_TIMEOUT_MS,
   HEADLESS_FETCHER_URL,
