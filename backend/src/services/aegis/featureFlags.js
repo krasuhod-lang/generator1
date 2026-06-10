@@ -336,7 +336,17 @@ const AEGIS_FLAGS = deepFreeze({
     // решает, что с ней делать. Если включить и backlog (см. backlog
     // блок) — появятся issue с label aegis:experiment.
     dispatchToBacklog: false,
-    autoDispatch: false,
+    // autoDispatch=true — runOnce сразу переводит planned→dispatched,
+    // чтобы measureAfterDays-таймер пошёл, а closeStaleExperiments
+    // через grace-окно мог замкнуть петлю на 'measured/inconclusive'.
+    // Без этого записи зависают в 'planned' и unique-индекс
+    // uq_aegis_experiments_open блокирует выбор новых кандидатов
+    // по тем же URL.
+    autoDispatch: true,
+    // Сколько дней ждать сверх measureAfterDays, прежде чем считать
+    // эксперимент 'просроченным' и помечать как inconclusive (чтобы
+    // освободить URL для повторного выбора).
+    staleGraceDays: 7,
   },
 
   // ── Prompts-as-Code audit ─────────────────────────────────────────

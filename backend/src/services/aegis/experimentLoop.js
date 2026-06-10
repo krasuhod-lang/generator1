@@ -383,12 +383,81 @@ async function closeExperiment(db, id, postMetrics = {}) {
 
 // ── one tick of the scheduler ─────────────────────────────────────────
 
+/**
+ * Помечает зависшие planned/dispatched-эксперименты как 'measured' с
+ * outcome='inconclusive', чтобы partial-уникальный индекс
+ * uq_aegis_experiments_open освободил (site_key, target_url) и мозг
+ * мог выбрать тот же URL снова. Триггер — возраст > measureAfterDays
+ * + staleGraceDays.
+ *
+ * Возвращает { ok, closed }. Никогда не throw.
+ */
+async function closeStaleExperiments(db = _db) {
+  const flags = getAegisFlags().experiments || {};
+  if (!flags.enabled) return { ok: false, reason: 'disabled', closed: 0 };
+  if (!db) return { ok: false, reason: 'db_not_wired', closed: 0 };
+  const measureAfter = Math.max(1, Number(flags.measureAfterDays) || 14);
+  const grace        = Math.max(0, Number(flags.staleGraceDays)   || 7);
+  const ttlDays      = measureAfter + grace;
+  try {
+    // Используем COALESCE(dispatched_at, planned_at): для planned-записей
+    // отсчитываем от planned_at; для dispatched — от dispatched_at.
+    const r = await db.query(
+      `UPDATE aegis_experiments
+          SET status      = 'measured',
+              outcome     = 'inconclusive',
+              measured_at = NOW(),
+              notes       = COALESCE(notes, '') ||
+                            CASE WHEN COALESCE(notes,'')='' THEN '' ELSE E'\n' END ||
+                            'auto-closed by closeStaleExperiments after '
+                            || $1::int || ' days without measurement'
+        WHERE status IN ('planned', 'dispatched')
+          AND COALESCE(dispatched_at, planned_at) < NOW() - ($1::int || ' days')::interval
+        RETURNING id`,
+      [ttlDays]);
+    const closed = (r.rows || []).length;
+    if (closed > 0) {
+      console.log(`[aegis/experimentLoop] closeStaleExperiments: closed ${closed} stale rows (>${ttlDays}d)`);
+    }
+    return { ok: true, closed };
+  } catch (e) {
+    console.warn('[aegis/experimentLoop] closeStaleExperiments:', e.message);
+    return { ok: false, reason: 'db_error', error: e.message, closed: 0 };
+  }
+}
+
+/** Сколько незавершённых экспериментов сейчас (для UX-сообщения). */
+async function _countInProgress(db) {
+  try {
+    const r = await db.query(
+      `SELECT
+         SUM(CASE WHEN status='planned'    THEN 1 ELSE 0 END)::int AS planned,
+         SUM(CASE WHEN status='dispatched' THEN 1 ELSE 0 END)::int AS dispatched
+       FROM aegis_experiments
+       WHERE status IN ('planned','dispatched')`);
+    const row = r.rows && r.rows[0] || {};
+    return {
+      planned:    Number(row.planned)    || 0,
+      dispatched: Number(row.dispatched) || 0,
+    };
+  } catch (_) {
+    return { planned: 0, dispatched: 0 };
+  }
+}
+
 async function runOnce(db = _db) {
   const flags = getAegisFlags().experiments || {};
   if (!flags.enabled) return { ok: false, reason: 'disabled' };
   if (!db) return { ok: false, reason: 'db_not_wired' };
 
-  const stats = { picked: 0, planned: 0, dispatched: 0 };
+  const stats = { picked: 0, planned: 0, dispatched: 0, stale_closed: 0,
+                  in_progress: { planned: 0, dispatched: 0 } };
+
+  // 0) Прежде чем брать новых кандидатов, освобождаем URL'ы с зависшими
+  //    экспериментами (старше measureAfterDays + staleGraceDays).
+  const sweep = await closeStaleExperiments(db);
+  stats.stale_closed = (sweep && sweep.closed) || 0;
+
   const lookback = Number(flags.candidateLookbackDays) || 30;
   const limit = Math.max(1, Math.min(50, Number(flags.maxNewPerTick) || 3));
   const candidates = await _loadCandidates(db, limit, lookback);
@@ -418,12 +487,19 @@ async function runOnce(db = _db) {
       }
     }
   }
+
+  // Сообщение для UI: даже если picked=0, пользователь должен видеть,
+  // сколько экспериментов сейчас в работе — иначе выглядит как «кнопка
+  // не работает», хотя дедупликация по uq_aegis_experiments_open
+  // отрабатывает корректно.
+  stats.in_progress = await _countInProgress(db);
   return { ok: true, ...stats };
 }
 
 // ── scheduler wrapper ────────────────────────────────────────────────
 
 let _timer = null;
+let _sweepTimer = null;
 
 function startExperimentLoop() {
   if (_timer) return;
@@ -436,11 +512,21 @@ function startExperimentLoop() {
     runOnce().catch((e) => console.warn('[aegis/experimentLoop] tick:', e.message));
   }, intervalSec * 1000);
   _timer.unref?.();
+  // Дополнительный частый sweep stale-экспериментов раз в час: даже если
+  // основной runOnce-тик раз в сутки, освобождение URL по TTL должно
+  // идти быстрее, чтобы автопилот не простаивал.
+  const sweepSec = 3600;
+  _sweepTimer = setInterval(() => {
+    closeStaleExperiments().catch((e) => console.warn('[aegis/experimentLoop] sweep:', e.message));
+  }, sweepSec * 1000);
+  _sweepTimer.unref?.();
 }
 
 function stopExperimentLoop() {
   if (_timer) clearInterval(_timer);
+  if (_sweepTimer) clearInterval(_sweepTimer);
   _timer = null;
+  _sweepTimer = null;
 }
 
 // ── list/get для UI/admin ─────────────────────────────────────────────
@@ -489,6 +575,7 @@ module.exports = {
   planExperiment,
   dispatchExperiment,
   closeExperiment,
+  closeStaleExperiments,
   runOnce,
   // scheduler + admin:
   startExperimentLoop,

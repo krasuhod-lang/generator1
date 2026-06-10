@@ -138,7 +138,24 @@ async function runExperimentsNow() {
   try {
     const r = await api.post('/aegis/experiments/run', {});
     const d = r.data || {};
-    experimentsMsg.value = `Кандидатов: ${d.picked ?? 0}, запланировано: ${d.planned ?? 0}, отправлено: ${d.dispatched ?? 0}`;
+    const picked     = Number(d.picked     ?? 0);
+    const planned    = Number(d.planned    ?? 0);
+    const dispatched = Number(d.dispatched ?? 0);
+    const staleClosed = Number(d.stale_closed ?? 0);
+    const inProg = d.in_progress || {};
+    const inProgPlanned    = Number(inProg.planned    ?? 0);
+    const inProgDispatched = Number(inProg.dispatched ?? 0);
+    const parts = [
+      `Кандидатов: ${picked}`,
+      `запланировано: ${planned}`,
+      `отправлено: ${dispatched}`,
+    ];
+    if (staleClosed > 0) parts.push(`закрыто просроченных: ${staleClosed}`);
+    if (picked === 0 && (inProgPlanned + inProgDispatched) > 0) {
+      // Дедупликация по uq_aegis_experiments_open: те же URL уже в работе.
+      parts.push(`в работе: planned=${inProgPlanned}, dispatched=${inProgDispatched} — все URL заняты, ждём измерения`);
+    }
+    experimentsMsg.value = parts.join(', ');
     await refresh();
   } catch (e) {
     experimentsMsg.value = e?.response?.data?.error || e.message || 'Ошибка';

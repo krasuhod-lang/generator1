@@ -12,8 +12,19 @@ const assert = require('assert');
 const exp = require('../src/services/aegis/experimentLoop');
 
 let passed = 0, failed = 0;
+const _pending = [];
 function test(name, fn) {
-  try { fn(); console.log(`✅ ${name}`); passed++; }
+  try {
+    const r = fn();
+    if (r && typeof r.then === 'function') {
+      _pending.push(r.then(
+        () => { console.log(`✅ ${name}`); passed++; },
+        (e) => { console.error(`❌ ${name}\n   ${e.message}`); failed++; }
+      ));
+      return;
+    }
+    console.log(`✅ ${name}`); passed++;
+  }
   catch (e) { console.error(`❌ ${name}\n   ${e.message}`); failed++; }
 }
 
@@ -106,5 +117,67 @@ test('outcome: nulls → inconclusive', () => {
   assert.strictEqual(exp.classifyOutcome({}), 'inconclusive');
 });
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+// ── closeStaleExperiments + runOnce wiring ────────────────────────────
+// Используем in-memory mock db.query для проверки SQL-вызова и stats.
+function mockDb(handlers) {
+  return {
+    calls: [],
+    async query(sql, params) {
+      this.calls.push({ sql, params });
+      for (const [pattern, handler] of handlers) {
+        if (pattern.test(sql)) return handler(sql, params);
+      }
+      return { rows: [] };
+    },
+  };
+}
+
+test('closeStaleExperiments: db_not_wired without db', async () => {
+  const r = await exp.closeStaleExperiments(null);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.reason, 'db_not_wired');
+  assert.strictEqual(r.closed, 0);
+});
+
+test('closeStaleExperiments: passes measureAfterDays+staleGraceDays as TTL', async () => {
+  const db = mockDb([
+    [/UPDATE aegis_experiments[\s\S]+SET status\s*=\s*'measured'/i,
+      () => ({ rows: [{ id: 1 }, { id: 2 }] })],
+  ]);
+  const r = await exp.closeStaleExperiments(db);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.closed, 2);
+  // ttl param = measureAfterDays(14) + staleGraceDays(7) = 21
+  assert.deepStrictEqual(db.calls[0].params, [21]);
+  // Должен фильтровать только planned/dispatched
+  assert.match(db.calls[0].sql, /status\s+IN\s*\(\s*'planned'\s*,\s*'dispatched'\s*\)/i);
+  // И сравнивать по COALESCE(dispatched_at, planned_at)
+  assert.match(db.calls[0].sql, /COALESCE\(\s*dispatched_at\s*,\s*planned_at\s*\)/i);
+});
+
+test('runOnce: returns picked/planned/dispatched/stale_closed/in_progress', async () => {
+  const db = mockDb([
+    // closeStaleExperiments
+    [/UPDATE aegis_experiments[\s\S]+SET status\s*=\s*'measured'/i,
+      () => ({ rows: [] })],
+    // _loadCandidates
+    [/FROM aegis_seo_actions/i,
+      () => ({ rows: [] })],
+    // _countInProgress
+    [/SUM\(CASE WHEN status='planned'/i,
+      () => ({ rows: [{ planned: 5, dispatched: 2 }] })],
+  ]);
+  const r = await exp.runOnce(db);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.picked, 0);
+  assert.strictEqual(r.planned, 0);
+  assert.strictEqual(r.dispatched, 0);
+  assert.strictEqual(r.stale_closed, 0);
+  assert.deepStrictEqual(r.in_progress, { planned: 5, dispatched: 2 });
+});
+
+(async () => {
+  await Promise.all(_pending);
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+})();
