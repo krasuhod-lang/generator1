@@ -207,9 +207,9 @@ pip install dspy-ai==2.5.41
    `AEGIS_DSPY_ENABLED=true`. По умолчанию `false` — autopilot
    (`dspyAutoRetrain.tick`) и weekly workflow тихо выходят с
    `last_retrain_reason='dspy_disabled'`.
-2. **Заданы все три DSPy env'а:** `AEGIS_DSPY_PY_URL` (URL `aegis_py`),
-   `AEGIS_DSPY_MAX_TRIALS`, `AEGIS_DSPY_MAX_COST_USD`,
-   `AEGIS_DSPY_MIN_IMPROVEMENT_PCT`.
+2. **Заданы env'ы DSPy:** `AEGIS_PY_URL` (URL `aegis_py`, обязательный — 
+   один общий с GraphRAG/GA4), плюс опционально `AEGIS_DSPY_MAX_TRIALS`,
+   `AEGIS_DSPY_MAX_COST_USD`, `AEGIS_DSPY_MIN_IMPROVEMENT_PCT`.
 3. **GitHub-секреты для weekly workflow:** `AEGIS_API_URL`,
    `AEGIS_API_TOKEN`, `AEGIS_PY_URL`. Без них шаг `Trigger retrain`
    делает `exit 0` без логов.
@@ -225,6 +225,14 @@ pip install dspy-ai==2.5.41
 5. После первого успешного retrain автопилот сам подхватит расписание
    (`autoRetrainCheckIntervalSec=3600`, не чаще раза в 6 часов при
    ≥10 строк в `aegis_dspy_dataset`).
+
+> **Подсказка:** всю эту проверку (ENV / aegis_py ping / dataset rows /
+> baseline yaml / последнюю запись `aegis_brain_versions` / список
+> конкретных недостающих шагов) можно получить одним запросом:
+> `GET /api/aegis/training/health`. То же выводится на дашборде
+> `🛡️ A.E.G.I.S.` в карточке **«🩺 Готовность контура обучения»**.
+> При старте сервера с `AEGIS_ENABLED=true` и неподнятым контуром
+> backend печатает один WARN со списком конкретных шагов.
 
 ### Если карточка «🧪 Эксперименты мозга» висит в `planned`
 Эксперименты застревают в статусе `planned`/`dispatched` и
@@ -354,6 +362,7 @@ git commit -m "aegis: rollback brain to <sha>"
 | `GET /api/aegis/runs?limit=20` | Последние циклы рефайна |
 | `GET /api/aegis/backlog` | Очередь работ |
 | `GET /api/aegis/brain/versions` | История DSPy retrain'ов |
+| `GET /api/aegis/training/health` | Готовность контура обучения (DSPy + GA4): ENV-чек-лист, ping aegis_py, dataset rows, baseline yaml, конкретные шаги для оператора. `ready_for_first_retrain: true/false`. |
 | `GET http://aegis_py:8800/health` | Здоровье Python-микросервиса |
 | `GET /api/aegis/metrics` | Prometheus-метрики (Phase 9, no auth) |
 | `GET /api/aegis/kill` | Состояние Kill Switch + spend rate + breakers (Phase 9) |

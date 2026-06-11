@@ -27,6 +27,7 @@ const algoUpdates = ref([]);
 const experiments = ref([]);
 const experimentsBusy = ref(false);
 const experimentsMsg = ref('');
+const trainingHealth = ref(null);
 const topFailures = ref([]);
 const promptLog = ref([]);
 const failuresDays = ref(7);
@@ -84,7 +85,7 @@ async function refresh() {
   loading.value = true;
   error.value   = '';
   try {
-    const [s, r, b, v, f, p, sb, gen, algo, exps] = await Promise.all([
+    const [s, r, b, v, f, p, sb, gen, algo, exps, th] = await Promise.all([
       api.get('/aegis/status').then((x) => x.data),
       api.get('/aegis/runs?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/backlog').then((x) => x.data).catch(() => ({ items: [] })),
@@ -95,6 +96,7 @@ async function refresh() {
       api.get('/aegis/biobrain/generations?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/algo-updates?limit=20').then((x) => x.data).catch(() => ({ items: [] })),
       api.get('/aegis/experiments?limit=30').then((x) => x.data).catch(() => ({ items: [] })),
+      api.get('/aegis/training/health').then((x) => x.data).catch(() => null),
     ]);
     status.value   = s;
     runs.value     = r.items || [];
@@ -106,6 +108,7 @@ async function refresh() {
     generations.value = gen.items || [];
     algoUpdates.value = algo.items || [];
     experiments.value = exps.items || [];
+    trainingHealth.value = th;
   } catch (e) {
     error.value = e?.response?.data?.error || e.message || 'Ошибка загрузки';
   } finally {
@@ -305,6 +308,86 @@ function expBadge(status, outcome) {
         <p>Мозг ещё не обучен. Первый DSPy retrain создаст
           <code>brain_state/compiled_writer.yaml</code>. Запустить вручную:
           <code>POST /api/aegis/dspy/retrain</code>.</p>
+      </section>
+
+      <section v-if="trainingHealth" class="card">
+        <h2>
+          🩺 Готовность контура обучения
+          <span class="badge" :class="trainingHealth.ready_for_first_retrain ? 'badge-ok' : 'badge-wait'">
+            {{ trainingHealth.ready_for_first_retrain ? 'готов к первому retrain' : 'не готов' }}
+          </span>
+        </h2>
+        <p class="subtle">
+          Единая диагностика Phase 6 (DSPy MIPROv2) и Phase 7 (GA4 RL/PPO):
+          какие ENV выставлены, доступен ли <code>aegis_py</code>, сколько строк в
+          <code>aegis_dspy_dataset</code>, что осталось сделать оператору.
+          Подробности — <code>GET /api/aegis/training/health</code>.
+        </p>
+
+        <div class="th-grid">
+          <!-- DSPy -->
+          <div class="th-col">
+            <h3>🎓 DSPy retrain {{ dot(trainingHealth.dspy?.ready_for_first_retrain) }}</h3>
+            <div class="kv-grid">
+              <span class="k">aegis_py</span>
+              <span class="v">
+                <span v-if="trainingHealth.dspy?.py_reachable === true" class="badge badge-ok">доступен</span>
+                <span v-else-if="trainingHealth.dspy?.py_reachable === false" class="badge badge-bad">недоступен</span>
+                <span v-else class="badge badge-wait">не задан AEGIS_PY_URL</span>
+              </span>
+              <span class="k">aegis_dspy_dataset</span>
+              <span class="v">
+                {{ trainingHealth.dspy?.dataset?.total_rows ?? '—' }}
+                <span class="subtle">/ нужно ≥ {{ trainingHealth.dspy?.dataset?.min_rows ?? '—' }}</span>
+              </span>
+              <span class="k">baseline_yaml</span>
+              <span class="v">
+                {{ trainingHealth.dspy?.baseline_yaml?.size_bytes ?? '—' }} B
+                <span v-if="trainingHealth.dspy?.baseline_yaml?.looks_like_baseline_stub" class="badge badge-wait">стаб</span>
+              </span>
+              <span class="k">aegis_brain_versions</span>
+              <span class="v">
+                <template v-if="trainingHealth.dspy?.last_brain_version?.exists">
+                  v{{ trainingHealth.dspy.last_brain_version.id }} ·
+                  {{ fmtTime(trainingHealth.dspy.last_brain_version.deployed_at) }}
+                </template>
+                <span v-else class="subtle">ни одной записи</span>
+              </span>
+            </div>
+            <ul v-if="trainingHealth.dspy?.issues?.length" class="th-issues">
+              <li v-for="(it, idx) in trainingHealth.dspy.issues" :key="`d${idx}`" :class="`lvl-${it.level}`">
+                <strong>{{ it.message }}</strong>
+                <div class="subtle">→ {{ it.fix }}</div>
+              </li>
+            </ul>
+          </div>
+
+          <!-- GA4 RL/PPO -->
+          <div class="th-col">
+            <h3>📊 GA4 RL/PPO {{ dot(trainingHealth.rl_ga4?.ready) }}</h3>
+            <div class="kv-grid">
+              <span class="k">AEGIS_RL_GA4_ENABLED</span>
+              <span class="v">{{ trainingHealth.rl_ga4?.enabled ? '✅' : '⛔' }}</span>
+              <span class="k">property_id</span>
+              <span class="v"><code>{{ trainingHealth.rl_ga4?.property_id || '—' }}</code></span>
+              <span class="k">service account</span>
+              <span class="v">
+                <span v-if="trainingHealth.rl_ga4?.sa_json_valid === true" class="badge badge-ok">валиден</span>
+                <span v-else-if="trainingHealth.rl_ga4?.sa_json_valid === false" class="badge badge-bad">не парсится</span>
+                <span v-else class="badge badge-wait">не задан</span>
+                <span v-if="trainingHealth.rl_ga4?.sa_client_email" class="subtle"> {{ trainingHealth.rl_ga4.sa_client_email }}</span>
+              </span>
+              <span class="k">PPO weight × quantile</span>
+              <span class="v">×{{ trainingHealth.rl_ga4?.ppo_weight ?? '—' }} @ q{{ trainingHealth.rl_ga4?.top_ctr_quantile ?? '—' }}</span>
+            </div>
+            <ul v-if="trainingHealth.rl_ga4?.issues?.length" class="th-issues">
+              <li v-for="(it, idx) in trainingHealth.rl_ga4.issues" :key="`g${idx}`" :class="`lvl-${it.level}`">
+                <strong>{{ it.message }}</strong>
+                <div class="subtle">→ {{ it.fix }}</div>
+              </li>
+            </ul>
+          </div>
+        </div>
       </section>
 
       <section v-if="status?.brain_state?.structure" class="card">
@@ -884,6 +967,21 @@ function expBadge(status, outcome) {
 .badge-warn { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border-color: rgba(245, 158, 11, 0.4); }
 .badge-wait { background: rgba(148, 163, 184, 0.12); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.3); }
 .badge-info { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border-color: rgba(59, 130, 246, 0.4); }
+/* Готовность контура обучения: две колонки (DSPy / GA4) и список issues */
+.th-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+@media (max-width: 720px) { .th-grid { grid-template-columns: 1fr; } }
+.th-col h3 { margin: 0 0 6px; font-size: 0.98rem; color: #f3f4f6; }
+.th-issues { list-style: none; padding: 0; margin: 10px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.th-issues li {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border-left: 3px solid #374151;
+  background: #0b1220;
+  font-size: 0.88rem;
+}
+.th-issues li.lvl-error { border-left-color: #f87171; }
+.th-issues li.lvl-warn  { border-left-color: #fbbf24; }
+.th-issues li.lvl-info  { border-left-color: #60a5fa; }
 code {
   background: #1f2937;
   color: #e5e7eb;

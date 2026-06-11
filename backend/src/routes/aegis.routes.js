@@ -118,4 +118,11 @@ router.post('/experiments/run',             auth, writeLimiter, runExperimentsNo
 router.post('/experiments/:id/dispatch',    auth, writeLimiter, dispatchExperimentHandler);
 router.post('/experiments/:id/measure',     auth, writeLimiter, express.json({ limit: '64kb' }), measureExperimentHandler);
 
+// Phase B: единая диагностика готовности контура обучения (DSPy + GA4 RL/PPO).
+// Возвращает env-чек-лист, ping aegis_py, статистику aegis_dspy_dataset,
+// последнюю запись aegis_brain_versions, размер baseline-yaml и список
+// конкретных шагов, которые остались оператору.
+const { getTrainingHealth } = require('../controllers/aegis.controller');
+router.get('/training/health', auth, getTrainingHealth);
+
 module.exports = router;
