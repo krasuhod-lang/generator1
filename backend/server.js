@@ -265,6 +265,19 @@ const start = async () => {
       } catch (e) {
         console.warn('[Server] AEGIS dspyAutoRetrain skipped:', e.message);
       }
+      // Единая диагностика готовности контура обучения (DSPy + GA4 RL/PPO).
+      // Печатает один WARN со списком конкретных недостающих шагов, если
+      // AEGIS_ENABLED=true, но env не сконфигурирован / py недоступен /
+      // dataset пустой. Не блокирует старт.
+      try {
+        const trainingHealth = require('./src/services/aegis/trainingHealth');
+        // Async, в фоне — чтобы не задерживать app.listen на ping aegis_py.
+        trainingHealth.buildTrainingHealth({ db })
+          .then((report) => trainingHealth.logStartupAdvice(report))
+          .catch((e) => console.warn('[Server] AEGIS trainingHealth advice failed:', e.message));
+      } catch (e) {
+        console.warn('[Server] AEGIS trainingHealth skipped:', e.message);
+      }
       try {
         const { startSeoBrainScheduler } = require('./src/services/aegis/seoBrainScheduler');
         startSeoBrainScheduler();

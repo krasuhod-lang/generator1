@@ -32,6 +32,7 @@ const vectorGc   = require('../services/aegis/vectorGc');
 const biobrain   = require('../services/aegis/biobrainClient');
 const promptAudit = require('../services/aegis/promptAudit');
 const seoBrain = require('../services/aegis/seoBrain');
+const trainingHealth = require('../services/aegis/trainingHealth');
 const { LABEL_READY, LABEL_IN_PROGRESS, LABEL_DONE, LABEL_FAILED } = require('../services/aegis/backlogHooks');
 
 /** GET /api/aegis/status */
@@ -319,6 +320,16 @@ async function triggerDspyRetrain(req, res) {
   const r = await dspy.retrain({ niche, dryRun: Boolean(dry_run) });
   if (!r.ok) return res.status(503).json({ error: 'dspy_unavailable', reason: r.reason });
   res.json({ ok: true, body: r.body });
+}
+
+/** GET /api/aegis/training/health (auth) — единая диагностика DSPy + GA4. */
+async function getTrainingHealth(req, res) {
+  try {
+    const report = await trainingHealth.buildTrainingHealth({ db });
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: 'training_health_failed', reason: e.message });
+  }
 }
 
 /** POST /api/aegis/mutate/propose (admin) */
@@ -1041,3 +1052,4 @@ module.exports.listExperiments         = listExperiments;
 module.exports.runExperimentsNow       = runExperimentsNow;
 module.exports.dispatchExperimentHandler = dispatchExperimentHandler;
 module.exports.measureExperimentHandler  = measureExperimentHandler;
+module.exports.getTrainingHealth         = getTrainingHealth;
