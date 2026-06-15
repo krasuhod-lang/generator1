@@ -12,6 +12,8 @@ const ExcelJS = require('exceljs');
 const COLUMNS = [
   { header: 'Сайт',          key: 'url',          width: 32 },
   { header: 'Юр. лицо',      key: 'company_name', width: 36 },
+  { header: 'Статус юр. лица', key: 'company_status', width: 18 },
+  { header: 'Источник имени', key: 'company_name_source', width: 16 },
   { header: 'ИНН',           key: 'inn',          width: 16 },
   { header: 'ОГРН',          key: 'ogrn',         width: 18 },
   { header: 'КПП',           key: 'kpp',          width: 12 },
@@ -45,6 +47,8 @@ function _flat(item) {
   return {
     url:            item.url || '',
     company_name:   item.company_name || '',
+    company_status: _statusLabel(item.company_status),
+    company_name_source: _sourceLabel(item.company_name_source),
     inn:            item.inn || '',
     ogrn:           item.ogrn || '',
     kpp:            item.kpp || '',
@@ -56,6 +60,29 @@ function _flat(item) {
     status:         item.status || '',
     error:          item.error || '',
   };
+}
+
+// Человеко-читаемые лейблы для XLSX.
+const _STATUS_LABELS = {
+  ACTIVE:       'действует',
+  LIQUIDATING:  'ликвидируется',
+  LIQUIDATED:   'ликвидирована',
+  BANKRUPT:     'банкрот',
+  REORGANIZING: 'реорганизация',
+};
+function _statusLabel(s) {
+  if (!s) return '';
+  return _STATUS_LABELS[String(s).toUpperCase()] || String(s);
+}
+const _SOURCE_LABELS = {
+  jsonld: 'JSON-LD',
+  html:   'HTML',
+  dadata: 'Dadata',
+  llm:    'LLM',
+};
+function _sourceLabel(s) {
+  if (!s) return '';
+  return _SOURCE_LABELS[String(s).toLowerCase()] || String(s);
 }
 
 function _autoFitWidths(ws, rows) {

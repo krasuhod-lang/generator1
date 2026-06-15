@@ -244,6 +244,25 @@ ok('extractContactsFromPage: ИНН из JSON-LD при пустом DOM',
 ok('extractContactsFromPage: company_name из JSON-LD при пустом DOM',
   hiddenContacts.company_name && hiddenContacts.company_name.includes('СкрытыйИНН'),
   `got: ${hiddenContacts.company_name}`);
+ok('extractContactsFromPage: company_name_source = "jsonld" для JSON-LD',
+  hiddenContacts.company_name_source === 'jsonld',
+  `got: ${hiddenContacts.company_name_source}`);
+
+// Если структурированной разметки нет, источник = 'html'.
+const plainHtml = `
+  <html><body><footer>
+    Мы — ООО «АльфаТех», свяжитесь с нами.
+  </footer></body></html>`;
+const plainContacts = extractContactsFromPage(plainHtml);
+ok('extractContactsFromPage: company_name_source = "html" без JSON-LD',
+  plainContacts.company_name && plainContacts.company_name_source === 'html',
+  `got: name=${plainContacts.company_name} source=${plainContacts.company_name_source}`);
+
+// Если ничего не найдено — source = null.
+const emptyContacts = extractContactsFromPage('<html><body><p>Just text.</p></body></html>');
+ok('extractContactsFromPage: company_name_source = null когда имя не найдено',
+  emptyContacts.company_name === null && emptyContacts.company_name_source === null,
+  `got: name=${emptyContacts.company_name} source=${emptyContacts.company_name_source}`);
 
 // Невалидная контрольная сумма ИНН в JSON-LD не должна попадать в результат.
 const badInnHtml = `
@@ -316,6 +335,9 @@ fetcher.fetchPage = async (url) => {
   ok('_processSite собирает данные с альтернативных страниц',
     row.inn === '7707083893' && row.company_name,
     `inn=${row && row.inn} name=${row && row.company_name}`);
+  ok('_processSite заполняет company_name_source ("html" из текста футера)',
+    row.company_name_source === 'html',
+    `got: ${row && row.company_name_source}`);
   fetcher.fetchPage = realFetch;
 
   console.log(`\n${failed === 0 ? '✅ ALL OK' : `❌ ${failed} TEST(S) FAILED`}\n`);

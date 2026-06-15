@@ -71,7 +71,11 @@ function _initResultRow(siteRoot) {
 function _mergeContacts(target, contacts, contactUrl) {
   if (contacts.company_name && !target.company_name) {
     target.company_name = contacts.company_name;
-    if (!target.company_name_source) target.company_name_source = 'html';
+    if (!target.company_name_source) {
+      // Источник теперь приходит из extractContactsFromPage —
+      // 'jsonld' (структурированная разметка) или 'html' (видимый DOM).
+      target.company_name_source = contacts.company_name_source || 'html';
+    }
   }
   if (contacts.inn && !target.inn) target.inn = contacts.inn;
   if (contacts.ogrn && !target.ogrn) target.ogrn = contacts.ogrn;

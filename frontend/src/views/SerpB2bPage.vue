@@ -241,6 +241,26 @@ function rowStatusLabel(s) {
   return s || '';
 }
 
+// Источник имени юр. лица (`company_name_source`) — короткий бейдж.
+function companyNameSourceLabel(s) {
+  if (!s) return '';
+  const map = { jsonld: 'JSON-LD', html: 'HTML', dadata: 'Dadata', llm: 'LLM' };
+  return map[String(s).toLowerCase()] || String(s);
+}
+
+// Статус юр. лица в реестре (`company_status`, как у Dadata).
+// Возвращает {label, kind} — kind влияет на цвет бейджа.
+function companyStatusInfo(s) {
+  if (!s) return null;
+  const norm = String(s).toUpperCase();
+  if (norm === 'ACTIVE')       return { label: 'действует',     kind: 'ok' };
+  if (norm === 'LIQUIDATING')  return { label: 'ликвидируется', kind: 'warn' };
+  if (norm === 'LIQUIDATED')   return { label: 'ликвидирована', kind: 'bad' };
+  if (norm === 'BANKRUPT')     return { label: 'банкрот',       kind: 'bad' };
+  if (norm === 'REORGANIZING') return { label: 'реорганизация', kind: 'warn' };
+  return { label: String(s), kind: 'neutral' };
+}
+
 function fmtDate(iso) {
   if (!iso) return '';
   try { return new Date(iso).toLocaleString('ru-RU'); } catch (_) { return iso; }
@@ -367,7 +387,25 @@ onUnmounted(() => stopPolling());
                     {{ row.url }}
                   </a>
                 </td>
-                <td>{{ row.company_name || '—' }}</td>
+                <td class="company-cell">
+                  <template v-if="row.company_name">
+                    <div class="company-name">{{ row.company_name }}</div>
+                    <div class="company-meta">
+                      <span
+                        v-if="companyStatusInfo(row.company_status)"
+                        class="entity-badge"
+                        :class="`entity-${companyStatusInfo(row.company_status).kind}`"
+                        :title="`Статус юр. лица в реестре: ${companyStatusInfo(row.company_status).label}`"
+                      >{{ companyStatusInfo(row.company_status).label }}</span>
+                      <span
+                        v-if="row.company_name_source"
+                        class="source-badge"
+                        :title="`Источник имени: ${companyNameSourceLabel(row.company_name_source)}`"
+                      >{{ companyNameSourceLabel(row.company_name_source) }}</span>
+                    </div>
+                  </template>
+                  <template v-else>—</template>
+                </td>
                 <td class="mono">{{ row.inn || '—' }}</td>
                 <td class="mono">{{ row.ogrn || '—' }}</td>
                 <td>{{ fmtList(splitPhones(row)[0]) || '—' }}</td>
@@ -686,6 +724,50 @@ onUnmounted(() => stopPolling());
   max-width: 280px;
   font-size: 13px;
   color: var(--apple-text);
+}
+
+/* Колонка «Юр. лицо»: имя + бейджи статуса/источника. */
+.company-cell .company-name {
+  font-weight: 500;
+  line-height: 1.3;
+}
+.company-cell .company-meta {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.entity-badge,
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.entity-ok {
+  background: rgba(52, 199, 89, 0.12);
+  color: #1F8A3F;
+}
+.entity-warn {
+  background: rgba(255, 159, 10, 0.15);
+  color: #B25C00;
+}
+.entity-bad {
+  background: rgba(255, 59, 48, 0.13);
+  color: #B81E14;
+}
+.entity-neutral {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--apple-muted);
+}
+.source-badge {
+  background: rgba(0, 113, 227, 0.10);
+  color: #0050A0;
 }
 .data-grid a {
   color: var(--apple-blue);

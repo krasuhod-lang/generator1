@@ -660,10 +660,26 @@ function extractContactsFromPage(html, text) {
   // Юрлицо: 1) из структурированной разметки, 2) точечный поиск рядом
   // с ИНН/ОГРН (на политике конфиденциальности), 3) общий fallback по
   // тексту. Окончательное Enrichment имени делает pipeline через Dadata
-  // (см. serpB2b/dadataClient).
-  const company_name = structured.company_name
-    || extractCompanyNameNearRequisites(cleanText)
-    || extractCompanyName(cleanText);
+  // (см. serpB2b/dadataClient). Возвращаем источник имени, чтобы
+  // pipeline корректно заполнял `company_name_source` ('jsonld'|'html').
+  let company_name = null;
+  let company_name_source = null;
+  if (structured.company_name) {
+    company_name = structured.company_name;
+    company_name_source = 'jsonld';
+  } else {
+    const near = extractCompanyNameNearRequisites(cleanText);
+    if (near) {
+      company_name = near;
+      company_name_source = 'html';
+    } else {
+      const general = extractCompanyName(cleanText);
+      if (general) {
+        company_name = general;
+        company_name_source = 'html';
+      }
+    }
+  }
 
   return {
     emails,
@@ -674,6 +690,7 @@ function extractContactsFromPage(html, text) {
     ogrn,
     kpp,
     company_name,
+    company_name_source,
     services: extractServicesFromHeader(html),
   };
 }
