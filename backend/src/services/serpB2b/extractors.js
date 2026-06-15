@@ -718,7 +718,7 @@ function extractContactsFromPage(html, text) {
     const near = extractCompanyNameNearRequisites(cleanText);
     if (near) {
       company_name = near;
-      company_name_source = 'html';
+      company_name_source = 'html_requisites';
     } else {
       const general = extractCompanyName(cleanText, { rejectClientContext: true });
       if (general) {
