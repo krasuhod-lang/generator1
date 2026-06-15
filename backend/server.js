@@ -36,6 +36,7 @@ const projectsRoutes      = require('./src/routes/projects.routes');
 const projectsPublicRoutes = require('./src/routes/projectsPublic.routes');
 const aegisRoutes         = require('./src/routes/aegis.routes');
 const categoryLeadRoutes  = require('./src/routes/categoryLead.routes');
+const serpB2bRoutes       = require('./src/routes/serpB2b.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -120,6 +121,7 @@ app.use('/api/public',         forecasterPublicRoutes);
 app.use('/api/projects',       projectsRoutes);
 app.use('/api/public',         projectsPublicRoutes);
 app.use('/api/category-lead',  categoryLeadRoutes);
+app.use('/api/serp-b2b',       serpB2bRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
@@ -214,6 +216,14 @@ const start = async () => {
       await recoverStuckCategoryLeadTasks();
     } catch (err) {
       console.warn('[Server] Category-lead recovery skipped:', err.message);
+    }
+
+    // После рестарта переводим зависшие serp-b2b-задачи в error
+    try {
+      const { recoverStuckSerpB2bTasks } = require('./src/services/serpB2b/pipeline');
+      await recoverStuckSerpB2bTasks();
+    } catch (err) {
+      console.warn('[Server] Serp-b2b recovery skipped:', err.message);
     }
 
     // После рестарта переводим зависшие link-article-задачи в error
@@ -2039,6 +2049,41 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_category_lead_status ON category_lead_tasks (status)`);
     // Migration 060: SEO/GEO 2026 — JSON-LD blocks для категорий.
     await db.query(`ALTER TABLE category_lead_tasks ADD COLUMN IF NOT EXISTS json_ld_blocks JSONB`);
+
+    // Migration 074: serp_b2b_tasks — SERP Crawler & B2B Contact Extractor
+    // Pipeline. Хранит входные параметры (поисковый запрос, движок, кол-во
+    // страниц), инкрементально стримит результаты в JSONB и diagnostics.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'serp_b2b_status') THEN
+          CREATE TYPE serp_b2b_status AS ENUM ('queued', 'running', 'done', 'error');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS serp_b2b_tasks (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name            TEXT NOT NULL DEFAULT '',
+        query           TEXT NOT NULL DEFAULT '',
+        search_engine   TEXT NOT NULL DEFAULT 'yandex',
+        depth_pages     INTEGER NOT NULL DEFAULT 1,
+        status          serp_b2b_status NOT NULL DEFAULT 'queued',
+        error_message   TEXT,
+        inputs          JSONB,
+        results         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        total_sites     INTEGER NOT NULL DEFAULT 0,
+        processed_sites INTEGER NOT NULL DEFAULT 0,
+        diagnostics     JSONB,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at      TIMESTAMPTZ,
+        completed_at    TIMESTAMPTZ,
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_serp_b2b_user_created ON serp_b2b_tasks (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_serp_b2b_status ON serp_b2b_tasks (status)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

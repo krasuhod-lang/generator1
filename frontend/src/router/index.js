@@ -28,6 +28,8 @@ const routes = [
   { path: '/category-lead',        component: () => import('../views/CategoryLeadPage.vue'),       meta: { auth: true } },
   { path: '/category-lead/:id',    component: () => import('../views/CategoryLeadResultPage.vue'), meta: { auth: true } },
 
+  { path: '/serp-b2b',             component: () => import('../views/SerpB2bPage.vue'),            meta: { auth: true } },
+
   { path: '/projects',             component: () => import('../views/ProjectsPage.vue'),        meta: { auth: true } },
   { path: '/projects/:id',         component: () => import('../views/ProjectDetailPage.vue'),   meta: { auth: true } },
   { path: '/share/project/:token', component: () => import('../views/ProjectSharedPage.vue'),   meta: { guest: false, public: true } },
