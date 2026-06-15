@@ -347,8 +347,8 @@ onUnmounted(() => stopPolling());
           <table class="data-grid">
             <thead>
               <tr>
-                <th class="col-num">#</th>
-                <th>Сайт</th>
+                <th class="col-num col-sticky col-sticky-1">#</th>
+                <th class="col-sticky col-sticky-2">Сайт</th>
                 <th>Юр. лицо</th>
                 <th>ИНН</th>
                 <th>ОГРН</th>
@@ -361,8 +361,8 @@ onUnmounted(() => stopPolling());
             </thead>
             <tbody>
               <tr v-for="(row, i) in rows" :key="`${row.url}-${i}`">
-                <td class="col-num">{{ i + 1 }}</td>
-                <td>
+                <td class="col-num col-sticky col-sticky-1">{{ i + 1 }}</td>
+                <td class="col-sticky col-sticky-2">
                   <a :href="row.url" target="_blank" rel="noopener noreferrer">
                     {{ row.url }}
                   </a>
@@ -382,7 +382,7 @@ onUnmounted(() => stopPolling());
               </tr>
               <!-- Skeleton-строки для ещё необработанных сайтов -->
               <tr v-for="n in skeletonCount" :key="`sk-${n}`" class="skeleton-row">
-                <td class="col-num">{{ rows.length + n }}</td>
+                <td class="col-num col-sticky col-sticky-1">{{ rows.length + n }}</td>
                 <td colspan="9"><div class="skeleton-bar"></div></td>
               </tr>
               <tr v-if="!rows.length && !isRunning && isDone">
@@ -608,17 +608,28 @@ onUnmounted(() => stopPolling());
 .table-wrap {
   border: 1px solid var(--apple-border);
   border-radius: 12px;
-  overflow: hidden;
+  /* Горизонтальный скролл нужен для широкой таблицы (10 колонок:
+     #, Сайт, Юр.лицо, ИНН, ОГРН, Сотовый, Городской, Email, Услуги, Статус).
+     На узких экранах пользователь скроллит вправо к реквизитам, а
+     первые два столбца («#» и «Сайт») остаются прилипшими слева — без
+     этого непонятно, какому сайту принадлежит строка. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
   background: #fff;
 }
 .data-grid {
+  /* min-width вместо 100% — даёт строкам растянуться шире контейнера и
+     включает горизонтальный скролл. */
+  min-width: 1100px;
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate; /* для sticky-колонок нужен separate */
+  border-spacing: 0;
   font-size: 14px;
 }
 .data-grid thead th {
-  position: sticky; top: 0; z-index: 1;
-  background: rgba(245, 245, 247, 0.85);
+  position: sticky; top: 0; z-index: 2;
+  background: rgba(245, 245, 247, 0.95);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   font-weight: 600;
@@ -634,13 +645,31 @@ onUnmounted(() => stopPolling());
   padding: 12px 16px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.04);
   vertical-align: top;
+  background: #fff;
 }
 .data-grid tbody tr:last-child td {
   border-bottom: none;
 }
-.data-grid tbody tr:hover {
-  background: rgba(0, 113, 227, 0.03);
+.data-grid tbody tr:hover td {
+  background: #F4F8FF;
 }
+
+/* Прилипшие первые два столбца (# + Сайт) — пользователь видит, к
+   какому сайту относятся реквизиты при скролле вправо. */
+.col-sticky {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+.col-sticky-1 { left: 0; min-width: 40px; }
+.col-sticky-2 {
+  left: 40px;
+  min-width: 220px;
+  max-width: 320px;
+  /* Тень-разделитель между прилипшими колонками и скроллящимися. */
+  box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.08);
+}
+.data-grid thead th.col-sticky { z-index: 3; }
 .col-num {
   width: 40px;
   color: var(--apple-muted);

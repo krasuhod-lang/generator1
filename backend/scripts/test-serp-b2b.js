@@ -28,12 +28,17 @@ const {
   classifyPhone, extractPhones, extractPhonesFromHrefs,
   extractCompanyName, extractCompanyNameNearRequisites,
   extractServicesFromHeader, extractContactsFromPage,
+  extractStructuredRequisites,
   isValidInn, isValidOgrn, extractInn, extractOgrn,
 } = require('../src/services/serpB2b/extractors');
 const { findContactLinks, CONTACT_KEYWORDS } = require(
   '../src/services/serpB2b/contactPageFinder');
 const { isBlacklistedHost, isBlacklistedUrl } = require(
   '../src/services/serpB2b/domainBlacklist');
+const { lookupByInn, isDadataEnabled, _resetCache: _resetDadataCache } = require(
+  '../src/services/serpB2b/dadataClient');
+const { _looksLikeLegalEntity } = require(
+  '../src/services/serpB2b/companyLLMExtractor');
 
 let failed = 0;
 function ok(name, cond, extra = '') {
@@ -197,8 +202,96 @@ ok('full: services',
   Array.isArray(full.services) && full.services.length === 2
   && full.services.includes('Поставка щебня'));
 
+console.log('\n[serpB2b] Structured requisites — JSON-LD / <meta> / itemprop');
+const jsonLdHtml = `
+  <html><head>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "ООО \\"Ромашка-Технологии\\"",
+        "taxID": "7707083893",
+        "ogrn": "1027700132195"
+      }
+    </script>
+    <meta itemprop="taxID" content="7707083893">
+  </head><body>
+    <footer>Просто текст без ИНН в видимом DOM.</footer>
+  </body></html>`;
+const struct = extractStructuredRequisites(jsonLdHtml);
+ok('JSON-LD: ИНН подхвачен по taxID и валиден',
+  struct.inn === '7707083893' && isValidInn(struct.inn),
+  `got: ${JSON.stringify(struct)}`);
+ok('JSON-LD: ОГРН подхвачен и валиден',
+  struct.ogrn === '1027700132195' && isValidOgrn(struct.ogrn),
+  `got: ${JSON.stringify(struct)}`);
+ok('JSON-LD: name → нормализован к ООО «...»',
+  struct.company_name && struct.company_name.includes('Ромашка-Технологии'),
+  `got: ${struct.company_name}`);
+
+// extractContactsFromPage должен ловить реквизиты из JSON-LD, даже когда
+// видимый DOM пуст (важный кейс: ИНН спрятан под спойлером/в скриптах).
+const hiddenInnHtml = `
+  <html><head>
+    <script type="application/ld+json">
+      {"@type":"Organization","name":"ООО \\"СкрытыйИНН\\"","taxID":"7707083893"}
+    </script>
+  </head><body><div>Контакты у нас в футере, ИНН не виден глазом.</div></body></html>`;
+const hiddenContacts = extractContactsFromPage(hiddenInnHtml);
+ok('extractContactsFromPage: ИНН из JSON-LD при пустом DOM',
+  hiddenContacts.inn === '7707083893',
+  `got: ${JSON.stringify(hiddenContacts)}`);
+ok('extractContactsFromPage: company_name из JSON-LD при пустом DOM',
+  hiddenContacts.company_name && hiddenContacts.company_name.includes('СкрытыйИНН'),
+  `got: ${hiddenContacts.company_name}`);
+
+// Невалидная контрольная сумма ИНН в JSON-LD не должна попадать в результат.
+const badInnHtml = `
+  <html><head>
+    <script type="application/ld+json">{"@type":"Organization","taxID":"1234567890"}</script>
+  </head><body>foo</body></html>`;
+const badStruct = extractStructuredRequisites(badInnHtml);
+ok('JSON-LD: невалидный ИНН (битая контр. сумма) отбрасывается',
+  badStruct.inn === null,
+  `got: ${badStruct.inn}`);
+
+// <meta itemprop="..."> в head — fallback, когда JSON-LD нет.
+const metaOnlyHtml = '<html><head><meta itemprop="ogrn" content="1027700132195"></head><body></body></html>';
+ok('meta itemprop=ogrn: ОГРН подхвачен',
+  extractStructuredRequisites(metaOnlyHtml).ogrn === '1027700132195');
+
+console.log('\n[serpB2b] Dadata client — gating + cache');
+const prevKey = process.env.DADATA_API_KEY;
+delete process.env.DADATA_API_KEY;
+_resetDadataCache();
+ok('isDadataEnabled() === false без ключа', !isDadataEnabled());
+(async () => {
+  const r = await lookupByInn('7707083893');
+  ok('lookupByInn без ключа → null', r === null, `got: ${JSON.stringify(r)}`);
+  if (prevKey) process.env.DADATA_API_KEY = prevKey;
+})();
+// Невалидный ИНН — даже при наличии ключа не делаем сетевой запрос.
+process.env.DADATA_API_KEY = 'fake-key-for-test';
+_resetDadataCache();
+(async () => {
+  const r = await lookupByInn('1234567890'); // битая контр. сумма
+  ok('lookupByInn(битый ИНН) → null без сетевого запроса', r === null);
+  delete process.env.DADATA_API_KEY;
+  if (prevKey) process.env.DADATA_API_KEY = prevKey;
+})();
+
+console.log('\n[serpB2b] LLM extractor — legal-entity validation');
+ok('valid: ООО «Ромашка»', _looksLikeLegalEntity('ООО «Ромашка»'));
+ok('valid: ИП Иванов И.И.', _looksLikeLegalEntity('ИП Иванов И.И.'));
+ok('valid: Общество с ограниченной ответственностью «Бетон-Строй»',
+  _looksLikeLegalEntity('Общество с ограниченной ответственностью «Бетон-Строй»'));
+ok('reject: пустая строка', !_looksLikeLegalEntity(''));
+ok('reject: просто слово', !_looksLikeLegalEntity('Ромашка'));
+ok('reject: слишком длинный текст',
+  !_looksLikeLegalEntity('ООО «' + 'Х'.repeat(300) + '»'));
+ok('reject: null', !_looksLikeLegalEntity(null));
+
 console.log('\n[serpB2b] Pipeline robustness — _processSite swallows page errors');
-// Заглушаем сетевые вызовы, чтобы проверить отказоустойчивость.
 const fetcher = require('../src/services/serpB2b/siteFetcher');
 const realFetch = fetcher.fetchPage;
 let calls = 0;

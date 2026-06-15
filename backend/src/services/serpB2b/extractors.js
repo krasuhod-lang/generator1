@@ -376,6 +376,119 @@ function extractCompanyName(text) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// JSON-LD / Microdata / <meta> — структурированные реквизиты
+// ─────────────────────────────────────────────────────────────────────
+
+// Ключи в JSON-LD/Schema.org/Microdata, под которыми сайты хранят ИНН/ОГРН.
+// Schema.org: Organization.taxID / vatID. На рунет-сайтах часто прямо «inn»,
+// «ogrn», «kpp» в произвольных JSON-структурах (микроразметка через
+// data-attributes, viewModel и т.п.).
+const STRUCT_INN_KEYS  = ['taxid', 'taxnumber', 'tax_id', 'vatid', 'vat_id', 'inn', 'инн'];
+const STRUCT_OGRN_KEYS = ['ogrn', 'огрн', 'ogrnip', 'огрнип', 'psrn', 'registrationnumber', 'registration_number'];
+const STRUCT_NAME_KEYS = ['legalname', 'legal_name', 'alternatename', 'alternate_name', 'name'];
+
+function _normKey(k) { return String(k || '').toLowerCase().replace(/[\s_\-]+/g, ''); }
+
+function _walkJson(value, visit) {
+  if (value === null || value === undefined) return;
+  if (Array.isArray(value)) {
+    for (const v of value) _walkJson(v, visit);
+    return;
+  }
+  if (typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      visit(k, v);
+      _walkJson(v, visit);
+    }
+  }
+}
+
+/**
+ * Возвращает структурированные реквизиты, найденные в JSON-LD-блоках
+ * (`<script type="application/ld+json">`) и в `<meta name|property|itemprop="..." content="...">`.
+ *
+ * Найденные ИНН/ОГРН проходят ту же проверку контрольной суммой, что и
+ * текстовые: случайные числа из data-атрибутов отсеиваются.
+ *
+ * @param {string} html — сырой HTML
+ * @returns {{inn: string|null, ogrn: string|null, company_name: string|null}}
+ */
+function extractStructuredRequisites(html) {
+  const out = { inn: null, ogrn: null, company_name: null };
+  if (!html) return out;
+  let $;
+  try { $ = cheerio.load(String(html)); } catch (_) { return out; }
+
+  const tryInn = (raw) => {
+    if (out.inn) return;
+    const s = String(raw || '').replace(/\D+/g, '');
+    if ((s.length === 10 || s.length === 12) && isValidInn(s)) out.inn = s;
+  };
+  const tryOgrn = (raw) => {
+    if (out.ogrn) return;
+    const s = String(raw || '').replace(/\D+/g, '');
+    if ((s.length === 13 || s.length === 15) && isValidOgrn(s)) out.ogrn = s;
+  };
+  const tryName = (raw) => {
+    if (out.company_name) return;
+    const s = String(raw || '').trim();
+    if (!s || s.length < 3 || s.length > 200) return;
+    // Берём только то, что выглядит как юр. лицо (ООО/АО/ПАО/ИП/полная форма).
+    const found = extractCompanyName(s);
+    if (found) out.company_name = found;
+  };
+
+  // 1) JSON-LD блоки.
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const raw = $(el).contents().text() || $(el).html() || '';
+    if (!raw) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (_) {
+      // Иногда сайты кладут несколько JSON-объектов конкатенацией —
+      // пробуем выдрать первый объект/массив.
+      const m = raw.match(/[\[{][\s\S]*[\]}]/);
+      if (!m) return;
+      try { parsed = JSON.parse(m[0]); } catch (__) { return; }
+    }
+    _walkJson(parsed, (k, v) => {
+      if (typeof v !== 'string' && typeof v !== 'number') return;
+      const nk = _normKey(k);
+      if (STRUCT_INN_KEYS.includes(nk))  tryInn(v);
+      if (STRUCT_OGRN_KEYS.includes(nk)) tryOgrn(v);
+      if (STRUCT_NAME_KEYS.includes(nk)) tryName(v);
+    });
+  });
+
+  // 2) <meta name|property|itemprop="..." content="...">.
+  $('meta[content]').each((_, el) => {
+    const $el = $(el);
+    const key = _normKey($el.attr('name') || $el.attr('property') || $el.attr('itemprop') || '');
+    if (!key) return;
+    const content = $el.attr('content') || '';
+    if (!content) return;
+    if (STRUCT_INN_KEYS.includes(key))  tryInn(content);
+    if (STRUCT_OGRN_KEYS.includes(key)) tryOgrn(content);
+    if (STRUCT_NAME_KEYS.includes(key)) tryName(content);
+  });
+
+  // 3) Microdata: itemprop на любом элементе со значением в text/value.
+  $('[itemprop]').each((_, el) => {
+    const $el = $(el);
+    const key = _normKey($el.attr('itemprop') || '');
+    if (!key) return;
+    const val = $el.attr('content') || $el.text() || '';
+    if (!val) return;
+    if (STRUCT_INN_KEYS.includes(key))  tryInn(val);
+    if (STRUCT_OGRN_KEYS.includes(key)) tryOgrn(val);
+    if (STRUCT_NAME_KEYS.includes(key)) tryName(val);
+  });
+
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Точечный поиск юрлица рядом с ИНН/ОГРН (помогает на политике
 // конфиденциальности / страницах «О компании», где юрлицо
 // располагается в одном абзаце с ИНН).
@@ -533,10 +646,23 @@ function extractContactsFromPage(html, text) {
     else phones_landline.push(p);
   }
 
-  // Юрлицо: сначала точечный поиск рядом с ИНН/ОГРН (особенно важно
-  // на политике конфиденциальности / о компании / соглашении), потом
-  // общий fallback по тексту.
-  const company_name = extractCompanyNameNearRequisites(cleanText)
+  // Реквизиты: сначала структурированные (JSON-LD / <meta> / itemprop) —
+  // самый надёжный источник, потому что не зависит от верстки и не
+  // ломается, когда ИНН визуально спрятан в футере под спойлером.
+  const structured = extractStructuredRequisites(html);
+
+  // ИНН/ОГРН/КПП: если в структуре нашли — используем; иначе fallback к
+  // тексту видимого DOM (footer/address/contacts блоки попадают в cleanText).
+  const inn  = structured.inn  || extractInn(cleanText);
+  const ogrn = structured.ogrn || extractOgrn(cleanText);
+  const kpp  = extractKpp(cleanText);
+
+  // Юрлицо: 1) из структурированной разметки, 2) точечный поиск рядом
+  // с ИНН/ОГРН (на политике конфиденциальности), 3) общий fallback по
+  // тексту. Окончательное Enrichment имени делает pipeline через Dadata
+  // (см. serpB2b/dadataClient).
+  const company_name = structured.company_name
+    || extractCompanyNameNearRequisites(cleanText)
     || extractCompanyName(cleanText);
 
   return {
@@ -544,9 +670,9 @@ function extractContactsFromPage(html, text) {
     phones,
     phones_mobile,
     phones_landline,
-    inn: extractInn(cleanText),
-    ogrn: extractOgrn(cleanText),
-    kpp: extractKpp(cleanText),
+    inn,
+    ogrn,
+    kpp,
     company_name,
     services: extractServicesFromHeader(html),
   };
@@ -565,6 +691,7 @@ module.exports = {
   isValidOgrn,
   extractCompanyName,
   extractCompanyNameNearRequisites,
+  extractStructuredRequisites,
   extractServicesFromHeader,
   classifyPhone,
   extractContactsFromPage,
