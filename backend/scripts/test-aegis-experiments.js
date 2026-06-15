@@ -160,6 +160,9 @@ test('runOnce: returns picked/planned/dispatched/stale_closed/in_progress', asyn
     // closeStaleExperiments
     [/UPDATE aegis_experiments[\s\S]+SET status\s*=\s*'measured'/i,
       () => ({ rows: [] })],
+    // orphan-dispatch sweep (autoDispatch=true) — none pending
+    [/SELECT id FROM aegis_experiments[\s\S]+status\s*=\s*'planned'/i,
+      () => ({ rows: [] })],
     // _loadCandidates
     [/FROM aegis_seo_actions/i,
       () => ({ rows: [] })],
@@ -173,7 +176,45 @@ test('runOnce: returns picked/planned/dispatched/stale_closed/in_progress', asyn
   assert.strictEqual(r.planned, 0);
   assert.strictEqual(r.dispatched, 0);
   assert.strictEqual(r.stale_closed, 0);
+  assert.strictEqual(r.orphan_dispatched, 0);
   assert.deepStrictEqual(r.in_progress, { planned: 5, dispatched: 2 });
+});
+
+test('runOnce: orphan-dispatch sweeps pre-existing planned rows when autoDispatch=true', async () => {
+  // Имитируем 3 «осиротевшие» planned-записи (как в реальной админ-панели:
+  // planned=38 до того, как заработал autoDispatch). runOnce должен
+  // перевести их в 'dispatched', чтобы measure-таймер стартовал и
+  // WHERE NOT EXISTS разблокировал новые URL.
+  const orphans = [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }];
+  const db = mockDb([
+    [/UPDATE aegis_experiments[\s\S]+SET status\s*=\s*'measured'/i,
+      () => ({ rows: [] })],
+    // orphan list
+    [/SELECT id FROM aegis_experiments[\s\S]+status\s*=\s*'planned'/i,
+      () => ({ rows: orphans })],
+    // dispatchExperiment SELECT — статус 'planned', чтобы дойти до UPDATE
+    [/SELECT id, site_key, target_url, queries, hypothesis, status[\s\S]+aegis_experiments WHERE id/i,
+      (_sql, params) => ({ rows: [{
+        id: params[0], site_key: 'site', target_url: '/u',
+        queries: [], hypothesis: [], status: 'planned',
+      }] })],
+    // dispatchExperiment UPDATE
+    [/UPDATE aegis_experiments[\s\S]+SET status\s*=\s*'dispatched'/i,
+      () => ({ rows: [] })],
+    [/FROM aegis_seo_actions/i, () => ({ rows: [] })],
+    [/SUM\(CASE WHEN status='planned'/i,
+      () => ({ rows: [{ planned: 0, dispatched: 3 }] })],
+  ]);
+  const r = await exp.runOnce(db);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.orphan_dispatched, 3);
+  // SELECT по 'planned' должен идти ДО _loadCandidates — иначе
+  // WHERE NOT EXISTS отфильтрует кандидатов.
+  const orphanIdx = db.calls.findIndex((c) =>
+    /SELECT id FROM aegis_experiments[\s\S]+status\s*=\s*'planned'/i.test(c.sql));
+  const loadIdx = db.calls.findIndex((c) => /FROM aegis_seo_actions/i.test(c.sql));
+  assert.ok(orphanIdx >= 0 && loadIdx >= 0 && orphanIdx < loadIdx,
+    `orphan sweep (#${orphanIdx}) must precede _loadCandidates (#${loadIdx})`);
 });
 
 (async () => {

@@ -661,13 +661,22 @@ function _sourceSelect(sourceKey, src) {
 // в админ-панели учитывали все задачи. Источники берём из TASK_SOURCES.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Нормализация статуса задачи к единому словарю (псевдоним таблицы — `t`). */
+/** Нормализация статуса задачи к единому словарю (псевдоним таблицы — `t`).
+ *  ВАЖНО: t.status в каждом модуле — это собственный ENUM-тип (task_status,
+ *  relevance_report_status, forecaster_status, info_article_status и т.д.),
+ *  и наборы значений у них РАЗНЫЕ. Сравнивать ENUM напрямую со строкой,
+ *  отсутствующей в его словаре (например, 'completed' для
+ *  relevance_report_status, где есть только 'done'/'error'), Postgres не
+ *  даёт — кидает «invalid input value for enum». Из-за этого UNION ALL
+ *  по всем источникам падал, и админ-панель показывала 0 задач, 0 успехов,
+ *  0 ошибок и пустой список пользователей. Поэтому приводим status к text
+ *  ДО сравнения, чтобы IN работал на текстовом наборе. */
 const NORM_STATUS_SQL = `
   CASE
-    WHEN t.status IN ('completed', 'done')                  THEN 'completed'
-    WHEN t.status IN ('failed', 'error')                    THEN 'failed'
-    WHEN t.status IN ('processing', 'running', 'in_progress') THEN 'processing'
-    WHEN t.status IN ('queued', 'pending')                  THEN 'queued'
+    WHEN t.status::text IN ('completed', 'done')                    THEN 'completed'
+    WHEN t.status::text IN ('failed', 'error')                      THEN 'failed'
+    WHEN t.status::text IN ('processing', 'running', 'in_progress') THEN 'processing'
+    WHEN t.status::text IN ('queued', 'pending')                    THEN 'queued'
     ELSE t.status::text
   END`;
 
