@@ -1,0 +1,230 @@
+'use strict';
+
+/**
+ * Smoke-tests for SERP B2B extractors / contact-finder / blacklist.
+ *
+ * Покрывает:
+ *   • разбиение телефонов на сотовые (9XX) и городские (3XX/4XX/8XX);
+ *   • поиск ссылок на политику конфиденциальности / о компании /
+ *     соглашение, а не только «Контакты»;
+ *   • точечный поиск юрлица в окне ±400 символов вокруг ИНН на странице
+ *     политики конфиденциальности (типичный кейс реквизитов);
+ *   • извлечение услуг из top-nav в шапке;
+ *   • расширенный blacklist агрегаторов (ЦИАН, Авито, Яндекс, hh.ru и пр.);
+ *   • пайплайн _processSite не валится на одной упавшей contact-странице.
+ *
+ * Запуск:  node backend/scripts/test-serp-b2b.js
+ */
+
+const assert = require('assert');
+const path = require('path');
+
+// Подменяем pg/db, чтобы тесты экстракторов не зависели от БД.
+require.cache[require.resolve('../src/config/db')] = {
+  exports: { query: async () => ({ rows: [], rowCount: 0 }) },
+};
+
+const {
+  classifyPhone, extractPhones, extractPhonesFromHrefs,
+  extractCompanyName, extractCompanyNameNearRequisites,
+  extractServicesFromHeader, extractContactsFromPage,
+  isValidInn, isValidOgrn, extractInn, extractOgrn,
+} = require('../src/services/serpB2b/extractors');
+const { findContactLinks, CONTACT_KEYWORDS } = require(
+  '../src/services/serpB2b/contactPageFinder');
+const { isBlacklistedHost, isBlacklistedUrl } = require(
+  '../src/services/serpB2b/domainBlacklist');
+
+let failed = 0;
+function ok(name, cond, extra = '') {
+  if (cond) {
+    console.log(`  ✓ ${name}`);
+  } else {
+    failed += 1;
+    console.error(`  ✗ ${name}${extra ? ' — ' + extra : ''}`);
+  }
+}
+
+console.log('\n[serpB2b] Phone classification (mobile/landline)');
+ok('+7 (901) 123-45-67 → mobile', classifyPhone('+7 (901) 123-45-67') === 'mobile');
+ok('+7 (915) 555-44-33 → mobile', classifyPhone('+7 (915) 555-44-33') === 'mobile');
+ok('+7 (988) 100-20-30 → mobile', classifyPhone('+7 (988) 100-20-30') === 'mobile');
+ok('+7 (495) 123-45-67 → landline (Москва)', classifyPhone('+7 (495) 123-45-67') === 'landline');
+ok('+7 (812) 100-20-30 → landline (СПб)', classifyPhone('+7 (812) 100-20-30') === 'landline');
+ok('+7 (343) 222-11-00 → landline (Екб)', classifyPhone('+7 (343) 222-11-00') === 'landline');
+ok('+7 (800) 555-35-35 → landline (toll-free 8800)', classifyPhone('+7 (800) 555-35-35') === 'landline');
+
+console.log('\n[serpB2b] Phone extraction + tel: hrefs');
+const phoneText = 'Звоните: +7 (495) 123-45-67 или 8 (901) 234-56-78. ИНН 7707083893.';
+const phones = extractPhones(phoneText);
+ok('два телефона из текста', phones.length === 2);
+ok('сохранён 495 (городской)', phones.some((p) => p.includes('(495)')));
+ok('сохранён 901 (сотовый)', phones.some((p) => p.includes('(901)')));
+const telHtml = '<a href="tel:+74951234567">офис</a><a href="tel:89012345678">моб.</a>';
+const telPhones = extractPhonesFromHrefs(telHtml);
+ok('tel: 11-цифр и 10-цифр нормализованы',
+  telPhones.length === 2 && telPhones[0].includes('(495)') && telPhones[1].includes('(901)'));
+
+console.log('\n[serpB2b] Contact links across categories');
+const html = `
+  <html><body>
+    <header><nav>
+      <a href="/about">О компании</a>
+      <a href="/services">Услуги</a>
+      <a href="/contacts">Контакты</a>
+    </nav></header>
+    <footer>
+      <a href="/privacy-policy">Политика конфиденциальности</a>
+      <a href="/oferta">Публичная оферта</a>
+      <a href="https://other.com/contacts">External</a>
+      <a href="javascript:void(0)">Skip</a>
+    </footer>
+  </body></html>`;
+const links = findContactLinks(html, 'https://example.ru/');
+const cats = new Set(links.map((l) => l.category));
+ok('contacts найден', cats.has('contacts'));
+ok('about найден', cats.has('about'));
+ok('policy найден', cats.has('policy'));
+ok('terms (оферта) найден', cats.has('terms'));
+ok('внешние хосты не попали', !links.find((l) => {
+  try { return new URL(l.url).hostname === 'other.com'; } catch (_) { return false; }
+}));
+// Производственный код в contactPageFinder допускает только http(s) —
+// проверяем именно это инвариантное свойство (а не отрицательный список).
+ok('все ссылки используют http(s) (javascript:/data:/vbscript: отсеяны)',
+  links.every((l) => {
+    try { return /^https?:$/.test(new URL(l.url).protocol); } catch (_) { return false; }
+  }));
+ok('CONTACT_KEYWORDS совместим (массив)', Array.isArray(CONTACT_KEYWORDS) && CONTACT_KEYWORDS.length > 0);
+
+console.log('\n[serpB2b] Company name near requisites (privacy policy)');
+const policyText = `
+  Настоящая Политика обработки персональных данных составлена в
+  соответствии с требованиями Федерального закона. Оператор —
+  Общество с ограниченной ответственностью «Бетон-Строй»
+  (ИНН 7701234567, ОГРН 1027700132195), адрес: г. Москва.
+  Цель обработки — выполнение договорных обязательств.
+`;
+const nameNear = extractCompanyNameNearRequisites(policyText);
+ok('юрлицо рядом с ИНН на политике', nameNear && nameNear.includes('Бетон-Строй'),
+  `got: ${nameNear}`);
+// На странице, где ИНН нет — fallback к общему extractCompanyName:
+const aboutText = 'Мы — ООО «АльфаТех», работаем с 2010 года.';
+ok('юрлицо без ИНН → общий fallback',
+  extractCompanyName(aboutText) === 'ООО «АльфаТех»');
+
+console.log('\n[serpB2b] Services from header / top nav');
+const navHtml = `
+  <html><body>
+    <header class="site-header">
+      <nav class="main-menu">
+        <ul>
+          <li><a href="/">Главная</a></li>
+          <li class="has-submenu">
+            <a href="/services">Услуги</a>
+            <ul class="submenu">
+              <li><a href="/services/seo">SEO-продвижение</a></li>
+              <li><a href="/services/contextual">Контекстная реклама</a></li>
+              <li><a href="/services/dev">Разработка сайтов</a></li>
+            </ul>
+          </li>
+          <li><a href="/about">О компании</a></li>
+          <li><a href="/contacts">Контакты</a></li>
+        </ul>
+      </nav>
+    </header>
+  </body></html>`;
+const services = extractServicesFromHeader(navHtml);
+ok('взяли подменю «Услуги» (3 пункта)',
+  services.length === 3 && services.includes('SEO-продвижение'),
+  `got: ${JSON.stringify(services)}`);
+ok('Главная/Контакты не попали в услуги',
+  !services.includes('Главная') && !services.includes('Контакты'));
+
+// Без подменю — fallback к плоскому top-nav (стоп-слова отфильтрованы).
+const flatNavHtml = `
+  <html><body><header><nav>
+    <a href="/">Главная</a>
+    <a href="/printing">Полиграфия</a>
+    <a href="/branding">Брендинг</a>
+    <a href="/contacts">Контакты</a>
+  </nav></header></body></html>`;
+const flatServices = extractServicesFromHeader(flatNavHtml);
+ok('flat-меню: «Полиграфия»/«Брендинг» взяты, стоп-слова — нет',
+  flatServices.includes('Полиграфия') && flatServices.includes('Брендинг')
+  && !flatServices.includes('Главная') && !flatServices.includes('Контакты'),
+  `got: ${JSON.stringify(flatServices)}`);
+
+console.log('\n[serpB2b] Aggregator blacklist');
+ok('avito.ru → blacklisted', isBlacklistedHost('www.avito.ru'));
+ok('cian.ru → blacklisted', isBlacklistedHost('cian.ru'));
+ok('yandex.ru → blacklisted', isBlacklistedHost('yandex.ru'));
+ok('hh.ru → blacklisted', isBlacklistedHost('hh.ru'));
+ok('superjob.ru → blacklisted', isBlacklistedHost('www.superjob.ru'));
+ok('youdo.com → blacklisted', isBlacklistedHost('youdo.com'));
+ok('subdomain market.yandex → blacklisted', isBlacklistedHost('market.yandex.ru'));
+ok('https://avito.ru/foo → blacklisted', isBlacklistedUrl('https://avito.ru/foo'));
+ok('обычный сайт → НЕ blacklisted', !isBlacklistedHost('beton-stroy.ru'));
+ok('javascript: → blacklisted (не http)', isBlacklistedUrl('javascript:alert(1)'));
+
+console.log('\n[serpB2b] Full extractContactsFromPage integration');
+const fullHtml = `
+  <html><body>
+    <header><nav class="main-menu">
+      <li class="has-submenu">
+        <a href="/services">Услуги</a>
+        <ul><li><a href="/x">Поставка щебня</a></li><li><a href="/y">Аренда техники</a></li></ul>
+      </li>
+    </nav></header>
+    <footer>
+      ООО «Бетон-Строй» ИНН 7707083893 ОГРН 1027700132195 КПП 770701001
+      Тел.: <a href="tel:+74951234567">+7 (495) 123-45-67</a>,
+      <a href="tel:89052345678">+7 (905) 234-56-78</a>
+      <a href="mailto:info@example.ru">info@example.ru</a>
+    </footer>
+  </body></html>`;
+const full = extractContactsFromPage(fullHtml);
+ok('full: ИНН валиден', full.inn === '7707083893' && isValidInn(full.inn));
+ok('full: ОГРН валиден', full.ogrn === '1027700132195' && isValidOgrn(full.ogrn));
+ok('full: КПП', full.kpp === '770701001');
+ok('full: company_name', full.company_name && full.company_name.includes('Бетон-Строй'));
+ok('full: phones split mobile/landline',
+  full.phones_mobile.some((p) => p.includes('(905)'))
+  && full.phones_landline.some((p) => p.includes('(495)')),
+  `mobile=${JSON.stringify(full.phones_mobile)} landline=${JSON.stringify(full.phones_landline)}`);
+ok('full: email', full.emails.includes('info@example.ru'));
+ok('full: services',
+  Array.isArray(full.services) && full.services.length === 2
+  && full.services.includes('Поставка щебня'));
+
+console.log('\n[serpB2b] Pipeline robustness — _processSite swallows page errors');
+// Заглушаем сетевые вызовы, чтобы проверить отказоустойчивость.
+const fetcher = require('../src/services/serpB2b/siteFetcher');
+const realFetch = fetcher.fetchPage;
+let calls = 0;
+fetcher.fetchPage = async (url) => {
+  calls += 1;
+  if (calls === 1) {
+    return { url, status: 200, html: '<html><body><a href="/contacts">Контакты</a><a href="/privacy">Политика</a></body></html>' };
+  }
+  if (calls === 2) {
+    // Первая contact-страница падает — пайплайн не должен валиться.
+    const e = new Error('ECONNRESET'); e.code = 'network'; throw e;
+  }
+  // Вторая — валидная политика с ИНН.
+  return { url, status: 200, html: 'ООО «ПолитикаКонтрагент» ИНН 7707083893' };
+};
+(async () => {
+  const { _processSite } = require('../src/services/serpB2b/pipeline');
+  const row = await _processSite('https://test.example/');
+  ok('_processSite не падает на ошибочной странице',
+    row && row.status !== 'error',
+    `status=${row && row.status}`);
+  ok('_processSite собирает данные с альтернативных страниц',
+    row.inn === '7707083893' && row.company_name,
+    `inn=${row && row.inn} name=${row && row.company_name}`);
+  fetcher.fetchPage = realFetch;
+
+  console.log(`\n${failed === 0 ? '✅ ALL OK' : `❌ ${failed} TEST(S) FAILED`}\n`);
+  process.exit(failed === 0 ? 0 : 1);
+})();

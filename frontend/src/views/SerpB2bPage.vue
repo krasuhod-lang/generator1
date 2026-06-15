@@ -26,7 +26,39 @@ const form = ref({
   keyword: '',
   search_engine: 'yandex',
   depth_pages: 3,
+  region: '', // код Яндекс-региона (lr); пусто = без географии
 });
+
+// Список регионов (Яндекс-коды lr). Покрывает Россию по федеральным
+// округам + крупнейшие города; «Без региона» = пусто.
+const REGION_OPTIONS = [
+  { value: '',    label: 'Без региона (вся выдача)' },
+  { value: '225', label: 'Россия' },
+  { value: '213', label: 'Москва' },
+  { value: '1',   label: 'Москва и область' },
+  { value: '2',   label: 'Санкт-Петербург' },
+  { value: '10174', label: 'Санкт-Петербург и область' },
+  { value: '54',  label: 'Екатеринбург' },
+  { value: '47',  label: 'Нижний Новгород' },
+  { value: '43',  label: 'Казань' },
+  { value: '65',  label: 'Новосибирск' },
+  { value: '66',  label: 'Омск' },
+  { value: '50',  label: 'Самара' },
+  { value: '51',  label: 'Уфа' },
+  { value: '63',  label: 'Челябинск' },
+  { value: '35',  label: 'Краснодар' },
+  { value: '39',  label: 'Ростов-на-Дону' },
+  { value: '20',  label: 'Воронеж' },
+  { value: '53',  label: 'Красноярск' },
+  { value: '67',  label: 'Иркутск' },
+  { value: '75',  label: 'Владивосток' },
+  { value: '11316', label: 'Калининград' },
+  { value: '23',  label: 'Волгоград' },
+  { value: '38',  label: 'Тюмень' },
+  { value: '187', label: 'Украина' },
+  { value: '149', label: 'Беларусь' },
+  { value: '159', label: 'Казахстан' },
+];
 
 const submitting = ref(false);
 const formError = ref(null);
@@ -94,6 +126,7 @@ async function startTask() {
       keyword: form.value.keyword.trim(),
       search_engine: form.value.search_engine,
       depth_pages: Number(form.value.depth_pages) || 1,
+      region: form.value.region || '',
     });
     if (!task?.id) throw new Error('Сервер не вернул задачу');
     activeTask.value = { ...task, results: [] };
@@ -180,6 +213,26 @@ function fmtList(arr) {
   return Array.isArray(arr) ? arr.filter(Boolean).join(', ') : (arr || '');
 }
 
+// Возвращает массивы [сотовые, городские]. Если бэкенд уже посчитал
+// разбиение — используем его; иначе классифицируем по первой цифре кода
+// зоны (9XX → сотовый).
+function splitPhones(row) {
+  if (Array.isArray(row.phones_mobile) || Array.isArray(row.phones_landline)) {
+    return [
+      Array.isArray(row.phones_mobile) ? row.phones_mobile : [],
+      Array.isArray(row.phones_landline) ? row.phones_landline : [],
+    ];
+  }
+  const mobile = [];
+  const landline = [];
+  for (const p of (row.phones || [])) {
+    const digits = String(p || '').replace(/\D+/g, '');
+    if (digits.length >= 11 && digits[1] === '9') mobile.push(p);
+    else landline.push(p);
+  }
+  return [mobile, landline];
+}
+
 function rowStatusLabel(s) {
   if (s === 'ok')      return 'Найдено';
   if (s === 'empty')   return 'Пусто';
@@ -230,6 +283,14 @@ onUnmounted(() => stopPolling());
             <select id="engine" v-model="form.search_engine" :disabled="submitting || isRunning">
               <option value="yandex">Яндекс</option>
               <option value="google">Google</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="region">Регион</label>
+            <select id="region" v-model="form.region" :disabled="submitting || isRunning">
+              <option v-for="r in REGION_OPTIONS" :key="r.value" :value="r.value">
+                {{ r.label }}
+              </option>
             </select>
           </div>
           <div class="field">
@@ -291,8 +352,10 @@ onUnmounted(() => stopPolling());
                 <th>Юр. лицо</th>
                 <th>ИНН</th>
                 <th>ОГРН</th>
-                <th>Телефон</th>
+                <th>Сотовый</th>
+                <th>Городской</th>
                 <th>Email</th>
+                <th>Услуги</th>
                 <th>Статус</th>
               </tr>
             </thead>
@@ -307,8 +370,10 @@ onUnmounted(() => stopPolling());
                 <td>{{ row.company_name || '—' }}</td>
                 <td class="mono">{{ row.inn || '—' }}</td>
                 <td class="mono">{{ row.ogrn || '—' }}</td>
-                <td>{{ fmtList(row.phones) || '—' }}</td>
+                <td>{{ fmtList(splitPhones(row)[0]) || '—' }}</td>
+                <td>{{ fmtList(splitPhones(row)[1]) || '—' }}</td>
                 <td class="email-cell">{{ fmtList(row.emails) || '—' }}</td>
+                <td class="services-cell">{{ fmtList(row.services) || '—' }}</td>
                 <td>
                   <span class="row-badge" :class="`row-${row.status}`">
                     {{ rowStatusLabel(row.status) }}
@@ -318,10 +383,10 @@ onUnmounted(() => stopPolling());
               <!-- Skeleton-строки для ещё необработанных сайтов -->
               <tr v-for="n in skeletonCount" :key="`sk-${n}`" class="skeleton-row">
                 <td class="col-num">{{ rows.length + n }}</td>
-                <td colspan="7"><div class="skeleton-bar"></div></td>
+                <td colspan="9"><div class="skeleton-bar"></div></td>
               </tr>
               <tr v-if="!rows.length && !isRunning && isDone">
-                <td colspan="8" class="empty-row">
+                <td colspan="10" class="empty-row">
                   Не удалось извлечь контакты ни с одного сайта.
                 </td>
               </tr>
@@ -411,7 +476,7 @@ onUnmounted(() => stopPolling());
 /* ── Форма ─────────────────────────────────────────────────────────── */
 .form-grid {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr auto;
+  grid-template-columns: 2fr 1fr 1fr 1fr auto;
   gap: 14px 16px;
   align-items: end;
 }
@@ -587,6 +652,11 @@ onUnmounted(() => stopPolling());
 }
 .email-cell {
   word-break: break-all;
+}
+.services-cell {
+  max-width: 280px;
+  font-size: 13px;
+  color: var(--apple-text);
 }
 .data-grid a {
   color: var(--apple-blue);

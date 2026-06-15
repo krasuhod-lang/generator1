@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS serp_b2b_tasks (
   query           TEXT NOT NULL DEFAULT '',
   search_engine   TEXT NOT NULL DEFAULT 'yandex',
   depth_pages     INTEGER NOT NULL DEFAULT 1,
+  region          TEXT NOT NULL DEFAULT '',
   status          serp_b2b_status NOT NULL DEFAULT 'queued',
   error_message   TEXT,
   inputs          JSONB,
@@ -30,6 +31,12 @@ CREATE TABLE IF NOT EXISTS serp_b2b_tasks (
   completed_at    TIMESTAMPTZ,
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Колонка `region` хранит код Яндекс-региона (lr) для фильтра SERP:
+-- 213 — Москва, 2 — Санкт-Петербург, 65 — Новосибирск, и т.д.
+-- Пустая строка = без географической привязки (выдача по умолчанию).
+ALTER TABLE serp_b2b_tasks
+  ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_serp_b2b_user_created
   ON serp_b2b_tasks (user_id, created_at DESC);

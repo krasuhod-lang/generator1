@@ -10,29 +10,56 @@
  */
 
 const BLACKLIST_DOMAINS = new Set([
-  // Маркетплейсы / агрегаторы
+  // Маркетплейсы / агрегаторы товаров
   'avito.ru', 'youla.ru', 'drom.ru', 'auto.ru', 'farpost.ru',
   'ozon.ru', 'wildberries.ru', 'aliexpress.ru', 'aliexpress.com',
   'market.yandex.ru', 'megamarket.ru', 'goods.ru', 'sbermarket.ru',
+  'kazanexpress.ru', 'lamoda.ru', 'detmir.ru', 'dns-shop.ru',
+  'mvideo.ru', 'eldorado.ru', 'citilink.ru', 'leroymerlin.ru',
+  'petrovich.ru', 'vseinstrumenti.ru', '220-volt.ru',
+  // B2B/оптовые агрегаторы / тендерные площадки
   'flagma.ru', 'pulscen.ru', 'tiu.ru', 'all.biz', 'rosfirm.ru',
-  'tutu.ru', 'b2b-center.ru', 'rutender.ru', 'zakupki.gov.ru',
-  // Справочники / карты
-  'yandex.ru', 'maps.yandex.ru', 'yandex.com', '2gis.ru', '2gis.com',
+  'satom.ru', 'supl.biz', 'blizko.ru', 'tender.pro', 'b2b-center.ru',
+  'rutender.ru', 'zakupki.gov.ru', 'roseltorg.ru', 'sberbank-ast.ru',
+  'fabrikant.ru', 'tendery.ru', 'rts-tender.ru', 'opt-union.ru',
+  'optlist.ru', 'optomarket.su', 'wholesale.ru',
+  // Недвижимость (ЦИАН и пр.)
+  'cian.ru', 'realty.yandex.ru', 'domclick.ru', 'n1.ru', 'mirkvartir.ru',
+  'irr.ru', 'gdeetotdom.ru', 'restate.ru', 'novostroy.ru',
+  // Услуги / фриланс / job
+  'youdo.com', 'profi.ru', 'remontnik.ru', 'tiu.ru', 'fl.ru',
+  'kwork.ru', 'freelance.ru', 'workzilla.com',
+  'hh.ru', 'superjob.ru', 'rabota.ru', 'zarplata.ru', 'avitojobs.ru',
+  // Туризм / билеты / отели
+  'tutu.ru', 'aviasales.ru', 'aviasales.com', 'skyscanner.ru',
+  'booking.com', 'ostrovok.ru', 'tripadvisor.ru', 'tripadvisor.com',
+  'level.travel', 'travelata.ru', 'sletat.ru',
+  // Справочники / карты / поисковики
+  'yandex.ru', 'maps.yandex.ru', 'yandex.com', 'yandex.kz', 'yandex.by',
+  '2gis.ru', '2gis.com', 'spravka.city', 'orgs.ru',
   'google.com', 'google.ru', 'maps.google.com', 'youtube.com',
-  'wikipedia.org', 'ru.wikipedia.org',
+  'wikipedia.org', 'ru.wikipedia.org', 'bing.com', 'mail.ru',
+  'rambler.ru', 'duckduckgo.com', 'sputnik.ru',
   // Соцсети / мессенджеры / видеохостинги
   'vk.com', 'vk.ru', 'ok.ru', 'facebook.com', 'instagram.com',
   't.me', 'telegram.me', 'telegram.org', 'twitter.com', 'x.com',
   'rutube.ru', 'dzen.ru', 'zen.yandex.ru', 'pikabu.ru',
   'tiktok.com', 'pinterest.com', 'pinterest.ru', 'linkedin.com',
+  'whatsapp.com', 'wa.me', 'viber.com',
   // Отзовики и обзоры
   'otzovik.com', 'irecommend.ru', 'flamp.ru', 'zoon.ru', 'orgpage.ru',
   'spravker.ru', 'yell.ru', 'rusprofile.ru', 'list-org.com',
   'sbis.ru', 'kontur.ru', 'focus.kontur.ru', 'spark-interfax.ru',
-  // Доски объявлений / каталоги услуг
-  'youdo.com', 'profi.ru',
-  // Почтовые сервисы / прочее
-  'mail.ru', 'rambler.ru', 'gmail.com', 'yandex.kz',
+  'tinkoff.ru', 'bank.tinkoff.ru', 'checko.ru', 'ofd.nalog.ru',
+  'nalog.gov.ru', 'nalog.ru', 'audit-it.ru', 'rusbase.com',
+  // Информационные/новостные/каталоги статей
+  'habr.com', 'vc.ru', 'lenta.ru', 'rbc.ru', 'kommersant.ru',
+  'forbes.ru', 'tass.ru', 'ria.ru', 'gazeta.ru', 'kp.ru',
+  'livejournal.com', 'medium.com', 'reddit.com',
+  // Q&A / форумы
+  'otvet.mail.ru', 'thequestion.ru', 'quora.com', 'forum.ixbt.com',
+  // Почтовые сервисы
+  'gmail.com', 'outlook.com', 'icloud.com',
 ]);
 
 const BLACKLIST_HOST_PREFIXES = [

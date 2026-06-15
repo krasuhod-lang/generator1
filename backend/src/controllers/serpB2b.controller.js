@@ -21,6 +21,11 @@ const MAX_DEPTH = 10;
 
 const ALLOWED_ENGINES = new Set(['yandex', 'google']);
 
+// Регион принимаем как код Яндекс-региона (lr): пустая строка или
+// строка из 1..6 цифр. Этого формата достаточно и для Google (xmlstock
+// также пропускает `lr` параметр).
+const REGION_RE = /^\d{1,6}$/;
+
 function _clip(s, n) {
   if (s == null) return '';
   return String(s).slice(0, n).trim();
@@ -36,7 +41,7 @@ function _safeFileName(name, fallback) {
 async function listSerpB2bTasks(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, query, search_engine, depth_pages, status,
+      `SELECT id, name, query, search_engine, depth_pages, region, status,
               error_message, total_sites, processed_sites,
               created_at, started_at, completed_at
          FROM serp_b2b_tasks
@@ -62,6 +67,7 @@ async function createSerpB2bTask(req, res, next) {
       Math.max(MIN_DEPTH, parseInt(body.depth_pages, 10) || 1),
     );
     const name = _clip(body.name, 200) || query;
+    const region = _clip(body.region, 16);
 
     if (!query) {
       return res.status(400).json({ error: 'Укажите поисковый запрос (keyword)' });
@@ -71,16 +77,21 @@ async function createSerpB2bTask(req, res, next) {
         error: `search_engine должен быть одним из: ${[...ALLOWED_ENGINES].join(', ')}`,
       });
     }
+    if (region && !REGION_RE.test(region)) {
+      return res.status(400).json({
+        error: 'region должен быть числовым кодом Яндекс-региона (lr), например 213 (Москва)',
+      });
+    }
 
-    const inputs = { query, search_engine: searchEngine, depth_pages: depthPages };
+    const inputs = { query, search_engine: searchEngine, depth_pages: depthPages, region };
 
     const { rows } = await db.query(
       `INSERT INTO serp_b2b_tasks
-          (user_id, name, query, search_engine, depth_pages, status, inputs)
-       VALUES ($1, $2, $3, $4, $5, 'queued', $6::jsonb)
-       RETURNING id, name, query, search_engine, depth_pages, status,
+          (user_id, name, query, search_engine, depth_pages, region, status, inputs)
+       VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7::jsonb)
+       RETURNING id, name, query, search_engine, depth_pages, region, status,
                  total_sites, processed_sites, created_at`,
-      [req.user.id, name, query, searchEngine, depthPages, JSON.stringify(inputs)],
+      [req.user.id, name, query, searchEngine, depthPages, region, JSON.stringify(inputs)],
     );
     const task = rows[0];
 
@@ -101,7 +112,7 @@ async function createSerpB2bTask(req, res, next) {
 async function getSerpB2bTask(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, query, search_engine, depth_pages, status,
+      `SELECT id, name, query, search_engine, depth_pages, region, status,
               error_message, results, total_sites, processed_sites,
               diagnostics, created_at, started_at, completed_at, updated_at
          FROM serp_b2b_tasks

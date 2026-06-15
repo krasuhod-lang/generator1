@@ -2069,6 +2069,7 @@ async function ensureSchema() {
         query           TEXT NOT NULL DEFAULT '',
         search_engine   TEXT NOT NULL DEFAULT 'yandex',
         depth_pages     INTEGER NOT NULL DEFAULT 1,
+        region          TEXT NOT NULL DEFAULT '',
         status          serp_b2b_status NOT NULL DEFAULT 'queued',
         error_message   TEXT,
         inputs          JSONB,
@@ -2082,6 +2083,8 @@ async function ensureSchema() {
         updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // backfill для уже созданных без региона.
+    await db.query(`ALTER TABLE serp_b2b_tasks ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT ''`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_serp_b2b_user_created ON serp_b2b_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_serp_b2b_status ON serp_b2b_tasks (status)`);
 
