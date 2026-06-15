@@ -451,12 +451,38 @@ async function runOnce(db = _db) {
   if (!db) return { ok: false, reason: 'db_not_wired' };
 
   const stats = { picked: 0, planned: 0, dispatched: 0, stale_closed: 0,
+                  orphan_dispatched: 0,
                   in_progress: { planned: 0, dispatched: 0 } };
 
   // 0) Прежде чем брать новых кандидатов, освобождаем URL'ы с зависшими
   //    экспериментами (старше measureAfterDays + staleGraceDays).
   const sweep = await closeStaleExperiments(db);
   stats.stale_closed = (sweep && sweep.closed) || 0;
+
+  // 0b) Сметаем «осиротевшие» planned-записи, которые остались с тиков
+  //     ДО того, как заработал autoDispatch (или с тика, упавшего на
+  //     dispatchExperiment). Без этого пара десятков planned-строк
+  //     блокирует выбор новых кандидатов через WHERE NOT EXISTS, а
+  //     stale-sweep сработает только через measureAfterDays+staleGraceDays
+  //     (21 день по умолчанию). Лимит — maxNewPerTick * 5 за тик, чтобы
+  //     не штормить БД, но в норме одного-двух тиков хватает на разморозку.
+  if (flags.autoDispatch) {
+    try {
+      const orphanLimit = Math.max(5, Math.min(200,
+        (Number(flags.maxNewPerTick) || 3) * 5));
+      const orphans = await db.query(
+        `SELECT id FROM aegis_experiments
+          WHERE status = 'planned'
+          ORDER BY planned_at ASC
+          LIMIT $1`, [orphanLimit]);
+      for (const row of (orphans.rows || [])) {
+        const d = await dispatchExperiment(db, row.id);
+        if (d.ok) stats.orphan_dispatched += 1;
+      }
+    } catch (e) {
+      console.warn('[aegis/experimentLoop] orphan dispatch:', e.message);
+    }
+  }
 
   const lookback = Number(flags.candidateLookbackDays) || 30;
   const limit = Math.max(1, Math.min(50, Number(flags.maxNewPerTick) || 3));
