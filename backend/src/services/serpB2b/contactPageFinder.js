@@ -55,12 +55,13 @@ const STRONG_PATH_BY_CATEGORY = {
 };
 
 // Бонус группы — определяет приоритет между группами при равном score.
+// Политика конфиденциальности и согласия - самый важный приоритет для реквизитов.
 const CATEGORY_BONUS = {
-  contacts: 0,
-  requisites: -1,
-  about: -2,
-  policy: -3,
-  terms: -4,
+  policy: 0,
+  terms: -1,
+  requisites: -2,
+  contacts: -3,
+  about: -4,
 };
 
 const MAX_RESULTS = 8;

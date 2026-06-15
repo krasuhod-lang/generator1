@@ -37,6 +37,14 @@ const MAX_CONTACT_PAGES = 4;         // сколько страниц пробу
 const MAX_PAGES_DEPTH = 10;          // защита от слишком глубокого SERP
 const MIN_PAGES_DEPTH = 1;
 
+const SOURCE_PRIORITY = {
+  'dadata': 40,
+  'jsonld': 30,
+  'html_requisites': 20,
+  'html': 10,
+  'llm': 5
+};
+
 // ── Утилиты ──────────────────────────────────────────────────────────
 
 function _siteRootFromUrl(url) {
@@ -53,7 +61,7 @@ function _initResultRow(siteRoot) {
     url: siteRoot,
     company_name: null,
     company_status: null,
-    company_name_source: null, // 'html' | 'jsonld' | 'dadata' | 'llm'
+    company_name_source: null, // 'html' | 'html_requisites' | 'jsonld' | 'dadata' | 'llm'
     inn: null,
     ogrn: null,
     kpp: null,
@@ -69,12 +77,15 @@ function _initResultRow(siteRoot) {
 }
 
 function _mergeContacts(target, contacts, contactUrl) {
-  if (contacts.company_name && !target.company_name) {
-    target.company_name = contacts.company_name;
-    if (!target.company_name_source) {
-      // Источник теперь приходит из extractContactsFromPage —
-      // 'jsonld' (структурированная разметка) или 'html' (видимый DOM).
-      target.company_name_source = contacts.company_name_source || 'html';
+  if (contacts.company_name) {
+    const targetSource = target.company_name_source || 'none';
+    const newSource = contacts.company_name_source || 'html';
+    const targetPrio = SOURCE_PRIORITY[targetSource] || 0;
+    const newPrio = SOURCE_PRIORITY[newSource] || 10;
+    
+    if (!target.company_name || newPrio > targetPrio) {
+      target.company_name = contacts.company_name;
+      target.company_name_source = newSource;
     }
   }
   if (contacts.inn && !target.inn) target.inn = contacts.inn;

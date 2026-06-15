@@ -379,8 +379,8 @@ fetcher.fetchPage = async (url) => {
   ok('_processSite собирает данные с альтернативных страниц',
     row.inn === '7707083893' && row.company_name,
     `inn=${row && row.inn} name=${row && row.company_name}`);
-  ok('_processSite заполняет company_name_source ("html" из текста футера)',
-    row.company_name_source === 'html',
+  ok('_processSite заполняет company_name_source ("html_requisites" из текста политики)',
+    row.company_name_source === 'html_requisites',
     `got: ${row && row.company_name_source}`);
   fetcher.fetchPage = realFetch;
 

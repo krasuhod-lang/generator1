@@ -183,6 +183,28 @@ async function deleteHistoryTask(t) {
   }
 }
 
+function copyTable() {
+  if (!rows.value.length) return;
+  const headers = ['#', 'Сайт', 'Юр. лицо', 'ИНН', 'Контакты'];
+  const lines = [headers.join('\t')];
+  rows.value.forEach((r, i) => {
+    const site = r.url || '';
+    const company = r.company_name || '';
+    const inn = r.inn || '';
+    const contacts = [
+      ...(r.phones || []),
+      ...(r.emails || []),
+    ].join(', ');
+    lines.push([i + 1, site, company, inn, contacts].join('\t'));
+  });
+  const tsv = lines.join('\n');
+  navigator.clipboard.writeText(tsv).then(() => {
+    alert('Таблица скопирована в буфер обмена');
+  }).catch(err => {
+    console.error('Failed to copy: ', err);
+  });
+}
+
 async function downloadXlsx() {
   if (!activeTask.value?.id) return;
   // Скачиваем через api с Bearer-токеном (axios с responseType:'blob').
@@ -345,6 +367,14 @@ onUnmounted(() => stopPolling());
             </span>
           </div>
           <div class="results-actions">
+            <button
+              class="btn btn-secondary"
+              :disabled="!isDone || !rows.length"
+              @click="copyTable"
+              style="margin-right: 8px;"
+            >
+              ⎘ Скопировать таблицу
+            </button>
             <button
               class="btn btn-secondary"
               :disabled="!isDone || !rows.length"
