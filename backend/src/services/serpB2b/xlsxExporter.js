@@ -15,25 +15,46 @@ const COLUMNS = [
   { header: 'ИНН',           key: 'inn',          width: 16 },
   { header: 'ОГРН',          key: 'ogrn',         width: 18 },
   { header: 'КПП',           key: 'kpp',          width: 12 },
-  { header: 'Телефон',       key: 'phone',        width: 22 },
+  { header: 'Сотовый',       key: 'phone_mobile',   width: 22 },
+  { header: 'Городской',     key: 'phone_landline', width: 22 },
   { header: 'Email',         key: 'email',        width: 32 },
+  { header: 'Услуги',        key: 'services',     width: 40 },
   { header: 'Контактная стр.', key: 'contact_url', width: 36 },
   { header: 'Статус',        key: 'status',       width: 14 },
   { header: 'Ошибка',        key: 'error',        width: 28 },
 ];
 
 function _flat(item) {
+  // Backward-compat: если split-полей нет (старые задачи), классифицируем
+  // на лету по первому символу кода зоны.
+  let mobile = Array.isArray(item.phones_mobile) ? item.phones_mobile : null;
+  let landline = Array.isArray(item.phones_landline) ? item.phones_landline : null;
+  if ((!mobile || !landline) && Array.isArray(item.phones)) {
+    mobile = mobile || [];
+    landline = landline || [];
+    for (const p of item.phones) {
+      const digits = String(p || '').replace(/\D+/g, '');
+      const isMobile = digits.length >= 11 && digits[1] === '9';
+      if (isMobile) {
+        if (!mobile.includes(p)) mobile.push(p);
+      } else if (!landline.includes(p)) {
+        landline.push(p);
+      }
+    }
+  }
   return {
-    url:          item.url || '',
-    company_name: item.company_name || '',
-    inn:          item.inn || '',
-    ogrn:         item.ogrn || '',
-    kpp:          item.kpp || '',
-    phone:        Array.isArray(item.phones) ? item.phones.join(', ') : (item.phone || ''),
-    email:        Array.isArray(item.emails) ? item.emails.join(', ') : (item.email || ''),
-    contact_url:  item.contact_url || '',
-    status:       item.status || '',
-    error:        item.error || '',
+    url:            item.url || '',
+    company_name:   item.company_name || '',
+    inn:            item.inn || '',
+    ogrn:           item.ogrn || '',
+    kpp:            item.kpp || '',
+    phone_mobile:   Array.isArray(mobile) ? mobile.join(', ') : '',
+    phone_landline: Array.isArray(landline) ? landline.join(', ') : '',
+    email:          Array.isArray(item.emails) ? item.emails.join(', ') : (item.email || ''),
+    services:       Array.isArray(item.services) ? item.services.join(', ') : '',
+    contact_url:    item.contact_url || '',
+    status:         item.status || '',
+    error:          item.error || '',
   };
 }
 
@@ -86,7 +107,7 @@ async function buildXlsx(task) {
   };
 
   // Перенос текста в широких колонках.
-  for (const colKey of ['email', 'phone', 'company_name']) {
+  for (const colKey of ['email', 'phone_mobile', 'phone_landline', 'company_name', 'services']) {
     const col = ws.getColumn(colKey);
     col.alignment = { wrapText: true, vertical: 'top' };
   }

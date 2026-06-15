@@ -30,7 +30,8 @@ const { isBlacklistedUrl, isBlacklistedHost, getRegistrableDomain } = require('.
 // ── Параметры ────────────────────────────────────────────────────────
 const SITE_CONCURRENCY = 4;          // параллельных сайтов
 const SITE_TIMEOUT_MS  = 20000;      // timeout одного fetchPage
-const MAX_CONTACT_PAGES = 2;         // сколько contact-страниц пробуем после главной
+const MAX_CONTACT_PAGES = 4;         // сколько страниц пробуем после главной
+                                     // (contacts/about/policy/terms — для реквизитов)
 const MAX_PAGES_DEPTH = 10;          // защита от слишком глубокого SERP
 const MIN_PAGES_DEPTH = 1;
 
@@ -53,7 +54,10 @@ function _initResultRow(siteRoot) {
     ogrn: null,
     kpp: null,
     phones: [],
+    phones_mobile: [],
+    phones_landline: [],
     emails: [],
+    services: [],
     contact_url: null,
     status: 'pending',
     error: null,
@@ -69,9 +73,22 @@ function _mergeContacts(target, contacts, contactUrl) {
     const set = new Set(target.phones);
     for (const p of contacts.phones) if (!set.has(p)) { set.add(p); target.phones.push(p); }
   }
+  if (Array.isArray(contacts.phones_mobile)) {
+    const set = new Set(target.phones_mobile);
+    for (const p of contacts.phones_mobile) if (!set.has(p)) { set.add(p); target.phones_mobile.push(p); }
+  }
+  if (Array.isArray(contacts.phones_landline)) {
+    const set = new Set(target.phones_landline);
+    for (const p of contacts.phones_landline) if (!set.has(p)) { set.add(p); target.phones_landline.push(p); }
+  }
   if (Array.isArray(contacts.emails)) {
     const set = new Set(target.emails);
     for (const e of contacts.emails) if (!set.has(e)) { set.add(e); target.emails.push(e); }
+  }
+  if (Array.isArray(contacts.services) && contacts.services.length && !target.services.length) {
+    // Услуги берём только с одной страницы (главная → top nav), чтобы не
+    // мешать с подменю на «политике»; первая непустая выборка фиксируется.
+    target.services = contacts.services.slice(0, 12);
   }
   if (contactUrl && !target.contact_url) target.contact_url = contactUrl;
 }
@@ -89,9 +106,14 @@ function _hasAnyContact(row) {
  * Достаёт органические URL через xmlstock и фильтрует blacklist.
  * Возвращает уникальные «корневые» URL сайтов (по eTLD+1).
  */
-async function _gatherSerpUrls({ query, searchEngine, depthPages }) {
+async function _gatherSerpUrls({ query, searchEngine, depthPages, region }) {
   const fn = searchEngine === 'google' ? fetchGoogleSerp : fetchYandexSerp;
-  const docs = await fn(query, { pages: depthPages, startPage: 0 });
+  const fetchOpts = { pages: depthPages, startPage: 0 };
+  // Регион — для Яндекса передаём как `lr` (числовой код Яндекс-региона:
+  // 213 — Москва, 2 — Санкт-Петербург, 65 — Новосибирск и т.д.).
+  // Для Google xmlstock также принимает `lr`, остаётся как есть.
+  if (region) fetchOpts.lr = String(region).trim();
+  const docs = await fn(query, fetchOpts);
 
   const seenDomains = new Set();
   const out = [];
@@ -126,31 +148,50 @@ async function _processSite(siteRoot) {
   }
 
   // Сразу пытаемся вытащить контакты с главной (там тоже могут быть
-  // — обычно в футере).
+  // — обычно в футере) и услуги из шапки.
   try {
     const homeText = htmlToCleanText(homepage.html);
     const homeContacts = extractContactsFromPage(homepage.html, homeText);
     _mergeContacts(row, homeContacts, null);
   } catch (_) { /* мягко */ }
 
-  // Step 2b: ищем ссылку на страницу контактов.
+  // Step 2b: ищем ссылки на страницы контактов / реквизитов / о компании /
+  // политики / соглашения. Возвращается массив объектов {url, category}.
   let contactLinks = [];
   try {
     contactLinks = findContactLinks(homepage.html, homepage.url || siteRoot);
   } catch (_) { contactLinks = []; }
 
-  // Step 2c/3: парсим до MAX_CONTACT_PAGES contact-страниц.
-  for (const link of contactLinks.slice(0, MAX_CONTACT_PAGES)) {
+  // Берём top-N с разнесением по категориям: хотя бы по 1 ссылке из
+  // contacts / about / policy, чтобы реквизиты, которые часто живут только
+  // в политике конфиденциальности, не пропустить.
+  const picked = [];
+  const usedCategories = new Set();
+  for (const link of contactLinks) {
+    if (picked.length >= MAX_CONTACT_PAGES) break;
+    if (usedCategories.has(link.category) && picked.length >= 2) continue;
+    picked.push(link);
+    usedCategories.add(link.category);
+  }
+  // Добиваем оставшиеся слоты лучшими по score.
+  for (const link of contactLinks) {
+    if (picked.length >= MAX_CONTACT_PAGES) break;
+    if (!picked.find((p) => p.url === link.url)) picked.push(link);
+  }
+
+  // Step 2c/3: парсим до MAX_CONTACT_PAGES страниц.
+  for (const link of picked) {
     try {
-      const page = await fetchPage(link, { timeout: SITE_TIMEOUT_MS });
+      const page = await fetchPage(link.url, { timeout: SITE_TIMEOUT_MS });
       const contacts = extractContactsFromPage(page.html);
-      _mergeContacts(row, contacts, page.url || link);
-      // Если уже есть ИНН + телефон — дальше не идём.
+      _mergeContacts(row, contacts, page.url || link.url);
+      // Если уже есть ИНН + телефон/email — дальше не идём, ради
+      // скорости и устойчивости пайплайна на больших задачах.
       if (row.inn && (row.phones.length || row.emails.length)) break;
     } catch (err) {
       // Продолжаем — одна несработавшая страница не валит сайт.
       // eslint-disable-next-line no-console
-      console.warn(`[serpB2b] contact-page failed (${link}): ${err.message}`);
+      console.warn(`[serpB2b] contact-page failed (${link.url}): ${err.message}`);
     }
   }
 
@@ -224,7 +265,7 @@ async function _appendResult(taskId, row, processedCount) {
 
 async function processSerpB2bTask(taskId) {
   const { rows: taskRows } = await db.query(
-    `SELECT id, query, search_engine, depth_pages, inputs
+    `SELECT id, query, search_engine, depth_pages, region, inputs
        FROM serp_b2b_tasks WHERE id = $1`,
     [taskId],
   );
@@ -243,6 +284,7 @@ async function processSerpB2bTask(taskId) {
       query: task.query,
       searchEngine: task.search_engine,
       depthPages: Math.min(MAX_PAGES_DEPTH, Math.max(MIN_PAGES_DEPTH, Number(task.depth_pages) || 1)),
+      region: task.region || (task.inputs && task.inputs.region) || '',
     });
     diagnostics.steps.push({ step: 'serp', got_urls: serpUrls.length });
   } catch (err) {

@@ -121,6 +121,25 @@ function _normalizePhone(d1, d2, d3, d4) {
   return `+7 (${d1}) ${d2}-${d3}-${d4}`;
 }
 
+/**
+ * Классификация номера РФ по коду зоны DEF/ABC:
+ *   • 9XX → сотовый (всё мобильное в РФ начинается на 9: 900..999);
+ *   • 8XX (включая 800/804/805 — бесплатные и сервисные) → городской/сервисный;
+ *   • остальные коды (3XX, 4XX, 5XX, 6XX, 7XX) → городские.
+ *
+ * @param {string} phone — номер в любом формате (берём digits)
+ * @returns {'mobile'|'landline'}
+ */
+function classifyPhone(phone) {
+  const digits = String(phone || '').replace(/\D+/g, '');
+  // Ожидаем 11 цифр после нормализации (7XXXXXXXXXX). Если меньше —
+  // консервативно считаем городским (ИНН/опечатка в нормализации).
+  if (digits.length < 11) return 'landline';
+  // Первая цифра кода зоны — индекс 1 (после ведущей 7).
+  const areaFirst = digits[1];
+  return areaFirst === '9' ? 'mobile' : 'landline';
+}
+
 function extractPhones(text, { maxItems = 6 } = {}) {
   if (!text) return [];
   const src = String(text);
@@ -298,6 +317,24 @@ const COMPANY_RE = new RegExp(
   `${_NB}(ООО|ОАО|ЗАО|ПАО|АО|НКО|ТОО)\\s+["«“”„‟'\`‹›]([^"«»“”„‟'\`‹›\\n]{2,120})["«»“”„‟'\`‹›]`,
   'g',
 );
+// Полная форма: «Общество с ограниченной ответственностью «Бетон-Строй»» —
+// часто встречается на политике конфиденциальности и в соглашениях.
+const COMPANY_FULL_FORM_RE = new RegExp(
+  '(Общество\\s+с\\s+ограниченной\\s+ответственностью|'
+  + 'Открытое\\s+акционерное\\s+общество|'
+  + 'Закрытое\\s+акционерное\\s+общество|'
+  + 'Публичное\\s+акционерное\\s+общество|'
+  + 'Акционерное\\s+общество)'
+  + '\\s+["«“”„‟\'`‹›]([^"«»“”„‟\'`‹›\\n]{2,120})["«»“”„‟\'`‹›]',
+  'gi',
+);
+const COMPANY_FULL_TO_SHORT = {
+  'общество с ограниченной ответственностью': 'ООО',
+  'открытое акционерное общество': 'ОАО',
+  'закрытое акционерное общество': 'ЗАО',
+  'публичное акционерное общество': 'ПАО',
+  'акционерное общество': 'АО',
+};
 const COMPANY_PLAIN_RE = new RegExp(
   `${_NB}(ООО|ОАО|ЗАО|ПАО|АО)\\s+([А-ЯЁA-Z][\\wА-ЯЁа-яё\\-«»"]{2,80})(?![\\wА-Яа-я])`,
   'g',
@@ -316,17 +353,150 @@ function extractCompanyName(text) {
   if ((m = COMPANY_RE.exec(src)) !== null) {
     return `${m[1]} «${m[2].trim()}»`;
   }
-  // 2) ИП ФИО.
+  // 2) Полная форма «Общество с ограниченной ответственностью «...»» —
+  // нормализуем к короткому виду (ООО / АО / ПАО), чтобы записи в базе
+  // были однотипными.
+  COMPANY_FULL_FORM_RE.lastIndex = 0;
+  if ((m = COMPANY_FULL_FORM_RE.exec(src)) !== null) {
+    const fullForm = m[1].toLowerCase().replace(/\s+/g, ' ').trim();
+    const shortForm = COMPANY_FULL_TO_SHORT[fullForm] || m[1];
+    return `${shortForm} «${m[2].trim()}»`;
+  }
+  // 3) ИП ФИО.
   IP_RE.lastIndex = 0;
   if ((m = IP_RE.exec(src)) !== null) {
     return `ИП ${m[1].trim()}`;
   }
-  // 3) Без кавычек — только если за маркером идёт явное Название.
+  // 4) Без кавычек — только если за маркером идёт явное Название.
   COMPANY_PLAIN_RE.lastIndex = 0;
   if ((m = COMPANY_PLAIN_RE.exec(src)) !== null) {
     return `${m[1]} ${m[2].trim()}`;
   }
   return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Точечный поиск юрлица рядом с ИНН/ОГРН (помогает на политике
+// конфиденциальности / страницах «О компании», где юрлицо
+// располагается в одном абзаце с ИНН).
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Возвращает компанию в окне ±400 символов вокруг найденного ИНН/ОГРН.
+ * Важно для текстов вида:
+ *   «Оператор персональных данных — Общество с ограниченной
+ *    ответственностью «Бетон-Строй» (ИНН 7701234567, ОГРН ...)»
+ * — здесь юрлицо стоит до маркера, а не после.
+ */
+function extractCompanyNameNearRequisites(text) {
+  if (!text) return null;
+  const src = String(text);
+  // Якоря: ИНН/ОГРН с числовым значением.
+  const re = /(?:ИНН|ОГРН(?:ИП)?)[^А-Яа-яёЁ\d]{0,5}\d{10,15}/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const start = Math.max(0, m.index - 400);
+    const end = Math.min(src.length, m.index + 400);
+    const window = src.slice(start, end);
+    const name = extractCompanyName(window);
+    if (name) return name;
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Услуги компании из шапки сайта (header / top nav)
+// ─────────────────────────────────────────────────────────────────────
+
+const SERVICES_NAV_KEYWORDS = [
+  'услуги', 'сервисы', 'services', 'наши услуги',
+  'каталог услуг', 'что мы делаем', 'направления',
+];
+
+const SERVICE_TEXT_BLACKLIST = new Set([
+  'главная', 'home', 'контакты', 'contacts', 'contact',
+  'о нас', 'о компании', 'about', 'about us',
+  'блог', 'blog', 'новости', 'news', 'отзывы', 'reviews',
+  'портфолио', 'portfolio', 'кейсы', 'cases', 'galery',
+  'войти', 'регистрация', 'login', 'sign in', 'sign up',
+  'каталог', 'catalog', 'оплата', 'доставка', 'faq', 'вопросы',
+  'политика', 'оферта', 'соглашение', 'privacy', 'terms',
+  'корзина', 'cart', 'заказать', 'купить',
+]);
+
+function _isLikelyServiceText(t) {
+  const norm = String(t || '').trim().toLowerCase();
+  if (norm.length < 3 || norm.length > 80) return false;
+  if (SERVICE_TEXT_BLACKLIST.has(norm)) return false;
+  // Стоп: телефон/email/URL.
+  if (/[@\d]/.test(norm) && /\d{3,}/.test(norm)) return false;
+  // Должны быть буквы.
+  if (!/[a-zA-Zа-яёА-ЯЁ]/.test(norm)) return false;
+  return true;
+}
+
+/**
+ * Извлекает список «услуг» компании из шапки сайта. Стратегия:
+ *   1) ищем в header/top-nav пункт меню со словом «Услуги/Services» и
+ *      собираем дочерние ссылки (sub-menu) — это самый чистый сигнал;
+ *   2) если sub-menu не нашли — берём прямые соседние пункты меню,
+ *      отфильтровав очевидно нерелевантные («Главная», «Контакты»).
+ *
+ * @param {string} html
+ * @param {string} [baseUrl]
+ * @returns {string[]} список названий услуг (до 12 штук)
+ */
+function extractServicesFromHeader(html, baseUrl) {
+  if (!html) return [];
+  let $;
+  try { $ = cheerio.load(String(html)); } catch (_) { return []; }
+  $('script, style, noscript, template').remove();
+
+  const seen = new Set();
+  const out = [];
+  function _push(name) {
+    const v = String(name || '').trim().replace(/\s+/g, ' ');
+    if (!_isLikelyServiceText(v)) return;
+    const key = v.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(v);
+  }
+
+  // Шаг 1: ищем «корневой» пункт меню со словом «Услуги/Services» и
+  // собираем sub-menu (вложенные <a> в том же родителе/«сабменю»).
+  const navSel = 'header, [role="banner"], [class*="header" i], [class*="menu" i], '
+    + '[class*="navbar" i], [class*="nav-" i], [class*="main-nav" i], nav';
+  let foundSubmenu = false;
+  $(navSel).find('a').each((_, a) => {
+    if (foundSubmenu) return;
+    const text = ($(a).text() || '').trim().toLowerCase();
+    if (!text) return;
+    if (!SERVICES_NAV_KEYWORDS.some((k) => text === k || text.startsWith(k))) return;
+    // Поднимаемся к ближайшему «контейнеру меню» и собираем все ссылки внутри.
+    const $a = $(a);
+    const $container = $a.closest('li, .has-submenu, [class*="dropdown" i], [class*="submenu" i]');
+    const $scope = $container.length ? $container : $a.parent();
+    $scope.find('a').each((__, sub) => {
+      const t = ($(sub).text() || '').trim();
+      if (t && t.toLowerCase() !== text) {
+        _push(t);
+        foundSubmenu = true;
+      }
+    });
+  });
+
+  // Шаг 2: fallback — top-level пункты меню без сабменю.
+  if (!out.length) {
+    $('header nav a, nav a, [class*="main-menu" i] a, [class*="top-menu" i] a').each((_, a) => {
+      if (out.length >= 12) return;
+      const t = ($(a).text() || '').trim();
+      _push(t);
+    });
+  }
+
+  // Лимит на разумное число услуг.
+  return out.slice(0, 12);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -338,8 +508,10 @@ function extractCompanyName(text) {
  * @param {string} [text] — опциональный заранее очищенный текст
  * @returns {{
  *   emails: string[], phones: string[],
+ *   phones_mobile: string[], phones_landline: string[],
  *   inn: string|null, ogrn: string|null, kpp: string|null,
- *   company_name: string|null
+ *   company_name: string|null,
+ *   services: string[]
  * }}
  */
 function extractContactsFromPage(html, text) {
@@ -353,13 +525,30 @@ function extractContactsFromPage(html, text) {
   const emails = Array.from(new Set([...hrefEmails, ...textEmails])).slice(0, 10);
   const phones = Array.from(new Set([...hrefPhones, ...textPhones])).slice(0, 6);
 
+  // Раздел сотовые / городские (РФ: 9XX → сотовый).
+  const phones_mobile = [];
+  const phones_landline = [];
+  for (const p of phones) {
+    if (classifyPhone(p) === 'mobile') phones_mobile.push(p);
+    else phones_landline.push(p);
+  }
+
+  // Юрлицо: сначала точечный поиск рядом с ИНН/ОГРН (особенно важно
+  // на политике конфиденциальности / о компании / соглашении), потом
+  // общий fallback по тексту.
+  const company_name = extractCompanyNameNearRequisites(cleanText)
+    || extractCompanyName(cleanText);
+
   return {
     emails,
     phones,
+    phones_mobile,
+    phones_landline,
     inn: extractInn(cleanText),
     ogrn: extractOgrn(cleanText),
     kpp: extractKpp(cleanText),
-    company_name: extractCompanyName(cleanText),
+    company_name,
+    services: extractServicesFromHeader(html),
   };
 }
 
@@ -375,5 +564,8 @@ module.exports = {
   isValidInn,
   isValidOgrn,
   extractCompanyName,
+  extractCompanyNameNearRequisites,
+  extractServicesFromHeader,
+  classifyPhone,
   extractContactsFromPage,
 };
