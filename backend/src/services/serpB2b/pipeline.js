@@ -26,6 +26,8 @@ const { fetchPage } = require('./siteFetcher');
 const { findContactLinks } = require('./contactPageFinder');
 const { extractContactsFromPage, htmlToCleanText } = require('./extractors');
 const { isBlacklistedUrl, isBlacklistedHost, getRegistrableDomain } = require('./domainBlacklist');
+const { lookupByInn, isDadataEnabled } = require('./dadataClient');
+const { extractCompanyNameWithLLM } = require('./companyLLMExtractor');
 
 // ── Параметры ────────────────────────────────────────────────────────
 const SITE_CONCURRENCY = 4;          // параллельных сайтов
@@ -50,6 +52,8 @@ function _initResultRow(siteRoot) {
   return {
     url: siteRoot,
     company_name: null,
+    company_status: null,
+    company_name_source: null, // 'html' | 'jsonld' | 'dadata' | 'llm'
     inn: null,
     ogrn: null,
     kpp: null,
@@ -65,7 +69,14 @@ function _initResultRow(siteRoot) {
 }
 
 function _mergeContacts(target, contacts, contactUrl) {
-  if (contacts.company_name && !target.company_name) target.company_name = contacts.company_name;
+  if (contacts.company_name && !target.company_name) {
+    target.company_name = contacts.company_name;
+    if (!target.company_name_source) {
+      // Источник теперь приходит из extractContactsFromPage —
+      // 'jsonld' (структурированная разметка) или 'html' (видимый DOM).
+      target.company_name_source = contacts.company_name_source || 'html';
+    }
+  }
   if (contacts.inn && !target.inn) target.inn = contacts.inn;
   if (contacts.ogrn && !target.ogrn) target.ogrn = contacts.ogrn;
   if (contacts.kpp && !target.kpp) target.kpp = contacts.kpp;
@@ -137,6 +148,9 @@ async function _gatherSerpUrls({ query, searchEngine, depthPages, region }) {
 
 async function _processSite(siteRoot) {
   const row = _initResultRow(siteRoot);
+  // Накопитель чистого текста с главной + всех просканированных
+  // contact/about/policy страниц — нужен для LLM-фолбэка по юр. лицу.
+  const textSnippets = [];
   let homepage = null;
   // Step 2a: главная.
   try {
@@ -153,6 +167,7 @@ async function _processSite(siteRoot) {
     const homeText = htmlToCleanText(homepage.html);
     const homeContacts = extractContactsFromPage(homepage.html, homeText);
     _mergeContacts(row, homeContacts, null);
+    if (homeText) textSnippets.push(homeText);
   } catch (_) { /* мягко */ }
 
   // Step 2b: ищем ссылки на страницы контактов / реквизитов / о компании /
@@ -183,8 +198,10 @@ async function _processSite(siteRoot) {
   for (const link of picked) {
     try {
       const page = await fetchPage(link.url, { timeout: SITE_TIMEOUT_MS });
-      const contacts = extractContactsFromPage(page.html);
+      const pageText = htmlToCleanText(page.html);
+      const contacts = extractContactsFromPage(page.html, pageText);
       _mergeContacts(row, contacts, page.url || link.url);
+      if (pageText) textSnippets.push(pageText);
       // Если уже есть ИНН + телефон/email — дальше не идём, ради
       // скорости и устойчивости пайплайна на больших задачах.
       if (row.inn && (row.phones.length || row.emails.length)) break;
@@ -192,6 +209,44 @@ async function _processSite(siteRoot) {
       // Продолжаем — одна несработавшая страница не валит сайт.
       // eslint-disable-next-line no-console
       console.warn(`[serpB2b] contact-page failed (${link.url}): ${err.message}`);
+    }
+  }
+
+  // Step 3b: Dadata enrichment по ИНН — самый точный источник имени
+  // компании. Перезаписывает HTML-извлечённое имя на каноническую форму
+  // (full_with_opf), дособирает ОГРН/КПП и статус юрлица.
+  if (row.inn && isDadataEnabled()) {
+    try {
+      const dd = await lookupByInn(row.inn);
+      if (dd && dd.name_full_with_opf) {
+        row.company_name = dd.name_full_with_opf;
+        row.company_name_source = 'dadata';
+        row.company_status = dd.status || null;
+        if (!row.ogrn && dd.ogrn) row.ogrn = dd.ogrn;
+        if (!row.kpp && dd.kpp) row.kpp = dd.kpp;
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[serpB2b] dadata enrichment failed for inn=${row.inn}: ${err.message}`);
+    }
+  }
+
+  // Step 3c: LLM fallback — только если ни валидный ИНН, ни регулярки
+  // не дали имени юрлица. Прогоняем накопленный текст footer/contacts
+  // через LLM (deepseek). Гейтинг по ключу провайдера — в адаптере.
+  if (!row.company_name && textSnippets.length) {
+    try {
+      const merged = textSnippets.join('\n\n').slice(0, 12000);
+      const llmName = await extractCompanyNameWithLLM(merged, {
+        stageName: 'serpB2b.companyLLM',
+      });
+      if (llmName) {
+        row.company_name = llmName;
+        row.company_name_source = 'llm';
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[serpB2b] LLM fallback failed: ${err.message}`);
     }
   }
 
