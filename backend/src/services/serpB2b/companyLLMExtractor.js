@@ -22,16 +22,23 @@ const { callLLM } = require('../llm/callLLM');
 
 const SYSTEM_PROMPT =
   'You are an entity extractor for Russian B2B websites. Your task is to '
-  + 'extract the official legal entity name (containing ООО, АО, ПАО, ЗАО, '
-  + 'ИП, НКО, ТОО, or the full form «Общество с ограниченной ответственностью») '
-  + 'from the provided page text. '
+  + 'extract the official legal entity name of the company that OWNS or '
+  + 'operates this website (containing ООО, АО, ПАО, ЗАО, ИП, НКО, ТОО, or '
+  + 'the full form «Общество с ограниченной ответственностью» / '
+  + '«Индивидуальный предприниматель») from the provided page text. '
+  + 'The owner is normally found in the footer requisites, privacy policy, '
+  + 'personal-data consent, contacts page, or «О компании» section, usually '
+  + 'next to ИНН/ОГРН. '
+  + 'IMPORTANT: do NOT return names of clients, partners, contractors, '
+  + 'case studies, testimonials, or organizations merely mentioned on the '
+  + 'page — only the entity that the site itself belongs to. '
   + 'Return ONLY a strict JSON object: {"name": "<official name as it appears, '
-  + 'preserving quotes and form>" } or {"name": null} if no legal entity is '
-  + 'present. Do not invent names, do not translate, do not include any '
+  + 'preserving quotes and form>" } or {"name": null} if no owner legal entity '
+  + 'is present. Do not invent names, do not translate, do not include any '
   + 'commentary, do not include extra fields.';
 
 const LEGAL_FORM_RE = /(?:^|[^А-Яа-яёЁA-Za-z])(ООО|ОАО|ЗАО|ПАО|АО|НКО|ТОО|ИП)\s/;
-const FULL_FORM_RE = /(Общество\s+с\s+ограниченной\s+ответственностью|Акционерное\s+общество|Публичное\s+акционерное\s+общество|Открытое\s+акционерное\s+общество|Закрытое\s+акционерное\s+общество)/i;
+const FULL_FORM_RE = /(Общество\s+с\s+ограниченной\s+ответственностью|Акционерное\s+общество|Публичное\s+акционерное\s+общество|Открытое\s+акционерное\s+общество|Закрытое\s+акционерное\s+общество|Индивидуальный\s+предприниматель)/i;
 
 function _looksLikeLegalEntity(name) {
   if (!name || typeof name !== 'string') return false;

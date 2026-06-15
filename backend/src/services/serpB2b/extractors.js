@@ -339,38 +339,85 @@ const COMPANY_PLAIN_RE = new RegExp(
   `${_NB}(ООО|ОАО|ЗАО|ПАО|АО)\\s+([А-ЯЁA-Z][\\wА-ЯЁа-яё\\-«»"]{2,80})(?![\\wА-Яа-я])`,
   'g',
 );
-const IP_RE = new RegExp(
-  `${_NB}ИП\\s+([А-ЯЁ][а-яё]{2,30}\\s+[А-ЯЁ]\\.\\s*[А-ЯЁ]\\.)`,
-  'g',
+// ИП ФИО. Маркер — «ИП» или полная форма «Индивидуальный предприниматель».
+// ФИО поддерживаем в двух видах:
+//   • Фамилия + два инициала: «Иванов И.И.», «Иванов И. И.»;
+//   • Фамилия Имя Отчество полностью: «Иванов Иван Иванович».
+const _IP_MARK = '(?:Индивидуальный\\s+предприниматель|ИП)';
+const _IP_FIO = '([А-ЯЁ][а-яё]{2,30}\\s+'
+  + '(?:[А-ЯЁ]\\.\\s*[А-ЯЁ]\\.|[А-ЯЁ][а-яё]{2,30}\\s+[А-ЯЁ][а-яё]{2,30}))';
+const IP_RE = new RegExp(`${_NB}${_IP_MARK}\\s+${_IP_FIO}`, 'g');
+
+// Контекст, выдающий «чужое» юрлицо: клиент / партнёр / упоминание без
+// повода. Если название организации окружено такими маркерами, оно почти
+// наверняка НЕ принадлежит владельцу сайта (это клиент, контрагент,
+// отзыв, кейс, портфолио и т.п.) — такое имя выписывать нельзя.
+const CLIENT_CONTEXT_RE = new RegExp(
+  '(?:'
+  + 'клиент|заказчик|партн[её]р|контрагент|поставщик|подрядчик'
+  + '|для\\s+компании|среди\\s+наших|нам\\s+доверяют|доверяют\\s+нам'
+  + '|реализова\\w*\\s+для|выполн\\w*\\s+для|постав\\w*\\s+для'
+  + '|кейс|портфолио|отзыв|благодарственн|нашими\\s+клиентами'
+  + ')',
+  'i',
 );
 
-function extractCompanyName(text) {
+// Проверяет, что найденное юрлицо стоит в «клиентском» предложении.
+// Берём клаузу (предложение/строку) вокруг совпадения, исключая сам
+// текст названия — чтобы не среагировать на «клиент» внутри имени
+// компании, — и ищем в ней клиентские маркеры.
+function _hasClientContext(src, index, matchLen) {
+  const BREAK = '.!?;\n';
+  let start = index;
+  while (start > 0 && !BREAK.includes(src[start - 1])) start -= 1;
+  let end = index + matchLen;
+  while (end < src.length && !BREAK.includes(src[end])) end += 1;
+  const clause = `${src.slice(start, index)} ${src.slice(index + matchLen, end)}`;
+  return CLIENT_CONTEXT_RE.test(clause);
+}
+
+/**
+ * Извлекает название юрлица из текста.
+ *
+ * @param {string} text
+ * @param {object} [opts]
+ * @param {boolean} [opts.rejectClientContext=false] — когда true, пропускает
+ *   совпадения, окружённые «клиентскими» маркерами (клиент / партнёр /
+ *   отзыв / кейс), чтобы не выписать организацию, которой сайт не
+ *   принадлежит. Используется на общем fallback по всему тексту страницы.
+ * @returns {string|null}
+ */
+function extractCompanyName(text, opts = {}) {
   if (!text) return null;
   const src = String(text);
-  // 1) Кавычки — самый чёткий сигнал.
-  let m;
-  COMPANY_RE.lastIndex = 0;
-  if ((m = COMPANY_RE.exec(src)) !== null) {
-    return `${m[1]} «${m[2].trim()}»`;
-  }
-  // 2) Полная форма «Общество с ограниченной ответственностью «...»» —
-  // нормализуем к короткому виду (ООО / АО / ПАО), чтобы записи в базе
-  // были однотипными.
-  COMPANY_FULL_FORM_RE.lastIndex = 0;
-  if ((m = COMPANY_FULL_FORM_RE.exec(src)) !== null) {
-    const fullForm = m[1].toLowerCase().replace(/\s+/g, ' ').trim();
-    const shortForm = COMPANY_FULL_TO_SHORT[fullForm] || m[1];
-    return `${shortForm} «${m[2].trim()}»`;
-  }
-  // 3) ИП ФИО.
-  IP_RE.lastIndex = 0;
-  if ((m = IP_RE.exec(src)) !== null) {
-    return `ИП ${m[1].trim()}`;
-  }
-  // 4) Без кавычек — только если за маркером идёт явное Название.
-  COMPANY_PLAIN_RE.lastIndex = 0;
-  if ((m = COMPANY_PLAIN_RE.exec(src)) !== null) {
-    return `${m[1]} ${m[2].trim()}`;
+  const reject = !!opts.rejectClientContext;
+
+  // Паттерны в порядке убывания надёжности сигнала:
+  //   1) кавычки (ООО «…») — самый чёткий;
+  //   2) полная форма «Общество с ограниченной ответственностью «…»» —
+  //      нормализуем к короткому виду (ООО / АО / ПАО);
+  //   3) ИП ФИО;
+  //   4) без кавычек — только если за маркером идёт явное Название.
+  const patterns = [
+    [COMPANY_RE, (m) => `${m[1]} «${m[2].trim()}»`],
+    [COMPANY_FULL_FORM_RE, (m) => {
+      const fullForm = m[1].toLowerCase().replace(/\s+/g, ' ').trim();
+      const shortForm = COMPANY_FULL_TO_SHORT[fullForm] || m[1];
+      return `${shortForm} «${m[2].trim()}»`;
+    }],
+    [IP_RE, (m) => `ИП ${m[1].trim()}`],
+    [COMPANY_PLAIN_RE, (m) => `${m[1]} ${m[2].trim()}`],
+  ];
+
+  for (const [re, format] of patterns) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      // В «клиентском» контексте пропускаем совпадение и ищем следующее
+      // (на странице может быть и владелец, и клиенты одновременно).
+      if (reject && _hasClientContext(src, m.index, m[0].length)) continue;
+      return format(m);
+    }
   }
   return null;
 }
@@ -673,7 +720,7 @@ function extractContactsFromPage(html, text) {
       company_name = near;
       company_name_source = 'html';
     } else {
-      const general = extractCompanyName(cleanText);
+      const general = extractCompanyName(cleanText, { rejectClientContext: true });
       if (general) {
         company_name = general;
         company_name_source = 'html';
