@@ -118,6 +118,50 @@ const aboutText = 'Мы — ООО «АльфаТех», работаем с 201
 ok('юрлицо без ИНН → общий fallback',
   extractCompanyName(aboutText) === 'ООО «АльфаТех»');
 
+console.log('\n[serpB2b] ИП extraction (different name forms)');
+ok('ИП Фамилия + 2 инициала',
+  extractCompanyName('Продавец: ИП Иванов И.И., ИНН 500100732259.') === 'ИП Иванов И.И.',
+  `got: ${extractCompanyName('Продавец: ИП Иванов И.И.')}`);
+ok('ИП Фамилия + инициалы с пробелом',
+  extractCompanyName('Реквизиты: ИП Петров П. С.') === 'ИП Петров П. С.',
+  `got: ${extractCompanyName('Реквизиты: ИП Петров П. С.')}`);
+ok('ИП Фамилия Имя Отчество (полное ФИО)',
+  extractCompanyName('Оператор — ИП Сидоров Сидор Сидорович.') === 'ИП Сидоров Сидор Сидорович',
+  `got: ${extractCompanyName('Оператор — ИП Сидоров Сидор Сидорович.')}`);
+ok('Полная форма «Индивидуальный предприниматель» → ИП',
+  extractCompanyName('Индивидуальный предприниматель Кузнецов А.В.') === 'ИП Кузнецов А.В.',
+  `got: ${extractCompanyName('Индивидуальный предприниматель Кузнецов А.В.')}`);
+ok('Полная форма ИП с полным ФИО',
+  extractCompanyName('Индивидуальный предприниматель Орлов Олег Олегович работает.')
+    === 'ИП Орлов Олег Олегович',
+  `got: ${extractCompanyName('Индивидуальный предприниматель Орлов Олег Олегович.')}`);
+
+console.log('\n[serpB2b] Ownership verification (skip clients / mentions)');
+// Без rejectClientContext поведение прежнее — берём первое совпадение.
+const clientsText = 'Среди наших клиентов — ООО «Клиент-Один». А мы — ООО «Хозяин Сайта».';
+ok('default: берёт первое совпадение (обратная совместимость)',
+  extractCompanyName(clientsText) === 'ООО «Клиент-Один»',
+  `got: ${extractCompanyName(clientsText)}`);
+ok('rejectClientContext: пропускает клиента, берёт владельца',
+  extractCompanyName(clientsText, { rejectClientContext: true }) === 'ООО «Хозяин Сайта»',
+  `got: ${extractCompanyName(clientsText, { rejectClientContext: true })}`);
+ok('rejectClientContext: только клиент → null',
+  extractCompanyName('Наш клиент — ООО «Только Клиент».', { rejectClientContext: true }) === null,
+  `got: ${extractCompanyName('Наш клиент — ООО «Только Клиент».', { rejectClientContext: true })}`);
+ok('rejectClientContext: партнёр/кейс отсеивается',
+  extractCompanyName('Кейс: реализовали проект для ООО «Заказчик».', { rejectClientContext: true })
+    === null,
+  `got: ${extractCompanyName('Кейс: реализовали проект для ООО «Заказчик».', { rejectClientContext: true })}`);
+// extractContactsFromPage должен применять ownership-фильтр на общем fallback.
+const ownerPageHtml = `<html><body>
+  <section>Наши клиенты: ООО «Чужая Компания» доверяют нам.</section>
+  <footer>ООО «Наш Сайт», все права защищены.</footer>
+</body></html>`;
+const ownerContacts = extractContactsFromPage(ownerPageHtml);
+ok('extractContactsFromPage: не выписывает клиента, берёт владельца',
+  ownerContacts.company_name === 'ООО «Наш Сайт»',
+  `got: ${ownerContacts.company_name}`);
+
 console.log('\n[serpB2b] Services from header / top nav');
 const navHtml = `
   <html><body>
