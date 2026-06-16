@@ -85,10 +85,15 @@ function _sanitizeAccent(v) {
 }
 function _sanitizeKeysSoDomain(v) {
   if (v == null) return null;
-  const raw = String(v).trim().toLowerCase();
+  let raw = String(v).trim().toLowerCase().slice(0, 400);
   if (!raw) return null;
-  // Принимаем как голый домен, так и URL — нормализуем.
-  const stripped = raw.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
+  // Принимаем как голый домен, так и URL — нормализуем без backtracking-уязвимых regex.
+  if (raw.startsWith('https://')) raw = raw.slice(8);
+  else if (raw.startsWith('http://')) raw = raw.slice(7);
+  const slashIdx = raw.indexOf('/');
+  if (slashIdx >= 0) raw = raw.slice(0, slashIdx);
+  if (raw.startsWith('www.')) raw = raw.slice(4);
+  const stripped = raw;
   // Простая защита от мусора: должен содержать минимум одну точку и валидные символы.
   if (!/^[a-z0-9.\-]+\.[a-z]{2,}$/i.test(stripped)) return null;
   return stripped.slice(0, 200);
