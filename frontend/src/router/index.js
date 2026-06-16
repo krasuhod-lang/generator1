@@ -36,6 +36,13 @@ const routes = [
 
   { path: '/aegis',                component: () => import('../views/AegisPage.vue'),            meta: { auth: true } },
 
+  // Smart Report Builder
+  { path: '/reports',              component: () => import('../views/ReportsPage.vue'),       meta: { auth: true } },
+  { path: '/reports/new',          component: () => import('../views/ReportNewPage.vue'),     meta: { auth: true } },
+  { path: '/reports/shared',       component: () => import('../views/SharedReportsPage.vue'), meta: { auth: true } },
+  { path: '/reports/:id/edit',     component: () => import('../views/ReportEditorPage.vue'),  meta: { auth: true } },
+  { path: '/r/:uuid',              component: () => import('../views/PublicReportPage.vue'),  meta: { public: true } },
+
   // Admin routes
   { path: '/admin/login',     component: () => import('../views/admin/AdminLoginPage.vue'),      meta: { adminGuest: true } },
   { path: '/admin',           component: () => import('../views/admin/AdminDashboardPage.vue'),  meta: { admin: true } },
