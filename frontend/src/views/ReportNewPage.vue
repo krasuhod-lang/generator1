@@ -125,19 +125,38 @@ async function submit() {
 </template>
 
 <style scoped>
-.rnp { max-width: 640px; margin: 0 auto; padding: 24px; }
+.rnp {
+  max-width: 640px; margin: -8px auto 0; padding: 28px;
+  background: #f5f5f7; color: #1d1d1f; color-scheme: light;
+  border-radius: 22px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased; letter-spacing: -0.01em;
+}
 .rnp-head { margin-bottom: 24px; }
-.rnp-head h1 { margin: 8px 0 0; font-size: 24px; }
-.back-btn { background: none; border: none; color: #0071e3; cursor: pointer; font-size: 14px; padding: 0; }
-.rnp-form { display: flex; flex-direction: column; gap: 16px; background: #fff; padding: 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-.rnp-form label { display: flex; flex-direction: column; gap: 6px; }
-.lbl { font-size: 13px; color: rgba(0,0,0,0.65); font-weight: 500; }
-.rnp-form input, .rnp-form select { padding: 10px 12px; border: 1px solid rgba(0,0,0,0.15); border-radius: 8px; font-size: 14px; }
+.rnp-head h1 { margin: 10px 0 0; font-size: 28px; font-weight: 700; letter-spacing: -0.03em; color: #1d1d1f; }
+.back-btn { background: none; border: none; color: #0a84ff; cursor: pointer; font-size: 14px; padding: 0; font-weight: 500; }
+.back-btn:hover { color: #0071e3; }
+.rnp-form {
+  display: flex; flex-direction: column; gap: 18px;
+  background: #fff; padding: 28px; border-radius: 18px;
+  border: 1px solid rgba(60,60,67,0.10);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04);
+}
+.rnp-form label { display: flex; flex-direction: column; gap: 6px; color: #424245; }
+.lbl { font-size: 12px; color: #6e6e73; font-weight: 500; }
+.rnp-form input, .rnp-form select {
+  padding: 11px 13px; border: 1px solid rgba(60,60,67,0.18); border-radius: 10px;
+  font-size: 14px; background: #fff; color: #1d1d1f;
+}
+.rnp-form input:focus, .rnp-form select:focus { outline: none; border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.15); }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.rnp-error { color: #b00020; font-size: 13px; padding: 8px 12px; background: rgba(220,40,40,0.08); border-radius: 6px; }
+.rnp-error { color: #d70015; font-size: 13px; padding: 10px 14px; background: rgba(255,59,48,0.08); border-radius: 10px; }
 .rnp-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
-.btn { padding: 9px 16px; border-radius: 8px; font-size: 14px; cursor: pointer; border: 1px solid transparent; }
-.btn-primary { background: #0071e3; color: #fff; }
+.btn { padding: 10px 18px; border-radius: 10px; font-size: 14px; cursor: pointer; border: 1px solid transparent; font-weight: 500; transition: background 0.15s, transform 0.05s; }
+.btn:active { transform: scale(0.98); }
+.btn-primary { background: #0a84ff; color: #fff; }
+.btn-primary:hover { background: #0071e3; }
 .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
-.btn-secondary { background: #fff; border-color: rgba(0,0,0,0.15); }
+.btn-secondary { background: rgba(60,60,67,0.06); color: #1d1d1f; border-color: transparent; }
+.btn-secondary:hover { background: rgba(60,60,67,0.10); }
 </style>

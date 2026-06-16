@@ -139,10 +139,11 @@ async function loadAutolog() {
 
 const sources = computed(() => {
   if (!data.value) return [];
+  const projId = draft.value?.project_id || route.params.projectId || '';
   return [
-    { key: 'gsc', label: 'Google Search Console', state: _stateOf(data.value.gsc) },
-    { key: 'ywm', label: 'Яндекс.Вебмастер', state: _stateOf(data.value.ywm) },
-    { key: 'keys_so', label: 'Keys.so', state: _stateOf(data.value.keys_so) },
+    { key: 'gsc', label: 'Google Search Console', state: _stateOf(data.value.gsc), connect: projId ? `/projects/${projId}` : null },
+    { key: 'ywm', label: 'Яндекс.Вебмастер', state: _stateOf(data.value.ywm), connect: projId ? `/projects/${projId}` : null },
+    { key: 'keys_so', label: 'Keys.so', state: _stateOf(data.value.keys_so), connect: projId ? `/projects/${projId}` : null },
   ];
 });
 
@@ -156,6 +157,7 @@ function _stateOf(section) {
 
 <template>
   <AppLayout>
+    <div class="rep-stage">
     <div v-if="store.loading && !draft" class="rep-loading">Загрузка…</div>
     <div v-else-if="!draft" class="rep-loading">Отчёт не найден.</div>
     <div v-else class="rep-editor">
@@ -185,7 +187,10 @@ function _stateOf(section) {
             <ul class="src-list">
               <li v-for="s in sources" :key="s.key">
                 <span class="src-label">{{ s.label }}</span>
-                <span class="src-state" :data-tag="s.state.tag">{{ s.state.label }}</span>
+                <span class="src-row-right">
+                  <a v-if="s.state.tag === 'off' && s.connect" :href="s.connect" class="src-connect">Подключить →</a>
+                  <span class="src-state" :data-tag="s.state.tag">{{ s.state.label }}</span>
+                </span>
               </li>
             </ul>
             <button class="btn btn-secondary" :disabled="dataLoading" @click="refreshData">
@@ -274,48 +279,94 @@ function _stateOf(section) {
         </div>
       </div>
     </div>
+    </div>
   </AppLayout>
 </template>
 
 <style scoped>
-.rep-loading { padding: 60px; text-align: center; color: rgba(0,0,0,0.5); }
-.rep-editor { padding: 16px; max-width: 1400px; margin: 0 auto; }
-.rep-head { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
-.back-btn { background: none; border: none; color: #0071e3; cursor: pointer; font-size: 14px; padding: 0; }
-.rep-status-pill { padding: 2px 10px; border-radius: 12px; background: rgba(0,0,0,0.06); font-size: 12px; text-transform: uppercase; }
-.rep-status-pill[data-status="published"] { background: rgba(0,150,80,0.12); color: #047b3a; }
-.rep-project-info { color: rgba(0,0,0,0.55); font-size: 13px; }
-.rep-grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
-.rep-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 16px; align-self: flex-start; max-height: calc(100vh - 32px); overflow-y: auto; }
-.rep-card { background: #fff; padding: 14px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; flex-direction: column; gap: 8px; }
-.rep-card h3 { margin: 0 0 4px; font-size: 14px; color: rgba(0,0,0,0.65); text-transform: uppercase; letter-spacing: 0.04em; }
-.rep-card label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.rep-card input, .rep-card select { padding: 7px 10px; border: 1px solid rgba(0,0,0,0.12); border-radius: 6px; font-size: 13px; }
-.btn { padding: 8px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; border: 1px solid transparent; text-align: center; }
-.btn-primary { background: #0071e3; color: #fff; }
+/* Apple-style stage: фиксированный светлый фон поверх AppLayout, чтобы
+ * не было «тёмные буквы на тёмном фоне» в любой системной теме. */
+.rep-stage {
+  background: #f5f5f7;
+  color-scheme: light;
+  color: #1d1d1f;
+  border-radius: 22px;
+  padding: 20px;
+  margin: -8px -8px 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.01em;
+}
+.rep-loading { padding: 60px; text-align: center; color: #6e6e73; }
+.rep-editor { max-width: 1400px; margin: 0 auto; }
+.rep-head { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+.back-btn { background: none; border: none; color: #0071e3; cursor: pointer; font-size: 14px; padding: 0; font-weight: 500; }
+.back-btn:hover { color: #0a84ff; }
+.rep-status-line { display: flex; align-items: center; gap: 10px; }
+.rep-status-pill {
+  padding: 4px 12px; border-radius: 999px; background: rgba(60,60,67,0.08);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+  color: #424245;
+}
+.rep-status-pill[data-status="published"] { background: rgba(48,209,88,0.15); color: #03762d; }
+.rep-project-info { color: #6e6e73; font-size: 13px; }
+.rep-grid { display: grid; grid-template-columns: 320px 1fr; gap: 18px; }
+.rep-side { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 16px; align-self: flex-start; max-height: calc(100vh - 32px); overflow-y: auto; }
+.rep-card {
+  background: #fff; padding: 18px; border-radius: 16px;
+  border: 1px solid rgba(60,60,67,0.12);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.04);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.rep-card h3 { margin: 0 0 6px; font-size: 12px; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+.rep-card label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #424245; }
+.rep-card input, .rep-card select {
+  padding: 9px 12px; border: 1px solid rgba(60,60,67,0.18); border-radius: 10px;
+  font-size: 13px; background: #fff; color: #1d1d1f;
+}
+.rep-card input:focus, .rep-card select:focus { outline: none; border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.15); }
+.btn { padding: 9px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; border: 1px solid transparent; text-align: center; font-weight: 500; transition: background 0.15s, transform 0.05s; }
+.btn:active { transform: scale(0.98); }
+.btn-primary { background: #0a84ff; color: #fff; }
+.btn-primary:hover { background: #0071e3; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-secondary { background: #f5f5f7; color: #1d1d1f; }
-.src-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
-.src-list li { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
-.src-label { color: rgba(0,0,0,0.7); }
-.src-state { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(0,0,0,0.06); }
-.src-state[data-tag="ok"] { background: rgba(0,150,80,0.12); color: #047b3a; }
-.src-state[data-tag="err"] { background: rgba(220,40,40,0.12); color: #b00020; }
-.src-state[data-tag="off"] { background: rgba(0,0,0,0.06); color: rgba(0,0,0,0.5); }
-.src-state[data-tag="empty"] { background: rgba(255,180,0,0.15); color: #876200; }
-.src-hint { margin: 0; font-size: 12px; color: rgba(0,0,0,0.55); }
-.src-hint.err { color: #b00020; }
-.src-err { color: #b00020; font-size: 12px; }
-.modal-back { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.modal { background: #fff; padding: 24px; border-radius: 12px; min-width: 380px; max-width: 480px; display: flex; flex-direction: column; gap: 12px; }
-.modal h2 { margin: 0; font-size: 18px; }
-.modal label { display: flex; flex-direction: column; gap: 4px; }
-.lbl { font-size: 12px; color: rgba(0,0,0,0.55); }
-.modal input, .modal select { padding: 8px 10px; border: 1px solid rgba(0,0,0,0.15); border-radius: 6px; }
+.btn-secondary { background: rgba(60,60,67,0.06); color: #1d1d1f; }
+.btn-secondary:hover { background: rgba(60,60,67,0.10); }
+.src-row-right { display: inline-flex; align-items: center; gap: 8px; }
+.src-connect { color: #0a84ff; font-size: 12px; font-weight: 500; text-decoration: none; }
+.src-connect:hover { color: #0071e3; text-decoration: underline; }
+.src-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.src-list li { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; align-items: center; }
+.src-label { color: #424245; font-weight: 500; }
+.src-state { font-size: 11px; padding: 3px 9px; border-radius: 999px; background: rgba(60,60,67,0.08); color: #424245; font-weight: 500; }
+.src-state[data-tag="ok"] { background: rgba(48,209,88,0.15); color: #03762d; }
+.src-state[data-tag="err"] { background: rgba(255,59,48,0.12); color: #d70015; }
+.src-state[data-tag="off"] { background: rgba(60,60,67,0.08); color: #6e6e73; }
+.src-state[data-tag="empty"] { background: rgba(255,159,10,0.18); color: #8e5500; }
+.src-hint { margin: 0; font-size: 12px; color: #6e6e73; }
+.src-hint.err { color: #d70015; }
+.src-hint a { color: #0a84ff; }
+.src-err { color: #d70015; font-size: 12px; }
+.modal-back { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(8px); }
+.modal {
+  background: #fff; padding: 28px; border-radius: 18px;
+  min-width: 380px; max-width: 480px; display: flex; flex-direction: column; gap: 14px;
+  color: #1d1d1f;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.18);
+}
+.modal h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+.modal label { display: flex; flex-direction: column; gap: 6px; }
+.lbl { font-size: 12px; color: #6e6e73; font-weight: 500; }
+.modal input, .modal select {
+  padding: 10px 12px; border: 1px solid rgba(60,60,67,0.18); border-radius: 10px;
+  background: #fff; color: #1d1d1f; font-size: 14px;
+}
+.modal input:focus, .modal select:focus { outline: none; border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.15); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 
 @media (max-width: 900px) {
   .rep-grid { grid-template-columns: 1fr; }
   .rep-side { position: static; max-height: none; }
+  .rep-stage { border-radius: 14px; padding: 14px; margin: 0; }
 }
 </style>

@@ -91,15 +91,30 @@ defineExpose({ reset });
 </template>
 
 <style scoped>
-.pin-gate { max-width: 420px; margin: 80px auto; text-align: center; padding: 32px; background: #fff; border-radius: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
-.pin-gate h2 { margin: 0; font-size: 22px; }
-.pg-sub { color: rgba(0,0,0,0.55); font-size: 14px; margin: 8px 0 24px; }
+.pin-gate {
+  max-width: 420px; margin: 80px auto; text-align: center; padding: 36px 32px;
+  background: #fff; border-radius: 22px;
+  border: 1px solid rgba(60,60,67,0.12);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 12px 40px rgba(0,0,0,0.08);
+  color: #1d1d1f;
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
+  letter-spacing: -0.01em;
+}
+.pin-gate h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.03em; }
+.pg-sub { color: #6e6e73; font-size: 14px; margin: 10px 0 28px; }
 .pg-row { display: flex; gap: 10px; justify-content: center; }
-.pg-row input { width: 48px; height: 56px; border: 2px solid rgba(0,0,0,0.12); border-radius: 10px; font-size: 26px; text-align: center; font-weight: 600; transition: border-color 0.15s; }
-.pg-row input:focus { border-color: #0071e3; outline: none; }
-.pg-info { margin-top: 18px; color: rgba(0,0,0,0.5); font-size: 13px; }
-.pg-err { margin-top: 18px; color: #b00020; font-size: 13px; }
+.pg-row input {
+  width: 52px; height: 60px; border: 1.5px solid rgba(60,60,67,0.18); border-radius: 14px;
+  font-size: 28px; text-align: center; font-weight: 600;
+  transition: border-color 0.15s, box-shadow 0.15s; background: #fff; color: #1d1d1f;
+  font-variant-numeric: tabular-nums;
+}
+.pg-row input:focus { border-color: #0a84ff; outline: none; box-shadow: 0 0 0 4px rgba(10,132,255,0.18); }
+.pg-info { margin-top: 18px; color: #86868b; font-size: 13px; }
+.pg-err { margin-top: 18px; color: #d70015; font-size: 13px; font-weight: 500; }
 @media (max-width: 480px) {
-  .pg-row input { width: 40px; height: 48px; font-size: 22px; }
+  .pin-gate { margin: 40px 16px; padding: 28px 22px; }
+  .pg-row input { width: 44px; height: 52px; font-size: 24px; }
 }
 </style>
