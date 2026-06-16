@@ -69,7 +69,7 @@ function _serializeDraft(row) {
     tasks_blocks: row.tasks_blocks || [],
     llm_summary: row.llm_summary || null,
     llm_highlights: row.llm_highlights || null,
-    llm_growth: row.llm_growth || null,
+    llm_growth: _parseGrowth(row.llm_growth),
     llm_status: row.llm_status,
     llm_generated_at: row.llm_generated_at,
     llm_error: row.llm_error || null,
@@ -88,6 +88,28 @@ function _periodLabel(from, to) {
   };
   if (!from || !to) return '';
   return `${fmt(from)} — ${fmt(to)}`;
+}
+
+/**
+ * llm_growth хранится в TEXT-колонке. Новый формат — JSON-строка массива
+ * объектов {metric, attribution, conclusion, forecast, weak_zones}; старые
+ * черновики могут содержать обычный текст. Возвращаем стабильную форму:
+ *   - массив объектов, если удалось распарсить;
+ *   - либо строку как есть, если это легаси-формат (UI умеет показать оба).
+ */
+function _parseGrowth(raw) {
+  if (raw == null) return null;
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'object') return raw;
+  const s = String(raw).trim();
+  if (!s) return null;
+  if (s.startsWith('[') || s.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(s);
+      return parsed;
+    } catch (_) { /* fallthrough: legacy plain-text */ }
+  }
+  return s;
 }
 
 // ─── CRUD черновиков ──────────────────────────────────────────────────────
@@ -271,7 +293,7 @@ async function _runSummaryJob(draftId, userId, jobId) {
         userId,
         summary.executive_summary || '',
         JSON.stringify(summary.highlights || []),
-        summary.growth_attribution || '',
+        JSON.stringify(summary.growth_attribution || []),
         jobId,
       ],
     );
@@ -296,7 +318,7 @@ async function getSummaryStatus(req, res) {
     error: draft.llm_error || null,
     summary: draft.llm_summary || null,
     highlights: draft.llm_highlights || null,
-    growth_attribution: draft.llm_growth || null,
+    growth_attribution: _parseGrowth(draft.llm_growth),
     generated_at: draft.llm_generated_at,
   });
 }
@@ -331,7 +353,7 @@ async function publishDraft(req, res) {
         summary: {
           executive_summary: draft.llm_summary,
           highlights: draft.llm_highlights,
-          growth_attribution: draft.llm_growth,
+          growth_attribution: _parseGrowth(draft.llm_growth),
         },
         tasks_blocks: draft.tasks_blocks,
         config: draft.config,
@@ -529,7 +551,7 @@ async function publicGet(req, res) {
       summary: {
         executive_summary: sr.llm_summary,
         highlights: sr.llm_highlights,
-        growth_attribution: sr.llm_growth,
+        growth_attribution: _parseGrowth(sr.llm_growth),
       },
       tasks_blocks: sr.tasks_blocks || [],
       config: sr.config || {},

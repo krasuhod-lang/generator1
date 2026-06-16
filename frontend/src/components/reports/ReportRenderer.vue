@@ -125,6 +125,38 @@ const totals = computed(() => {
   return out;
 });
 
+// ─── Growth attribution: нормализуем в массив объектов ──────────────────
+//   API/контроллер уже отдаёт массив, но публичные снапшоты + старые черновики
+//   могут содержать строку. Рендерим стабильно: выводы / прогноз / слабые зоны
+//   как отдельные строки.
+const growthItems = computed(() => {
+  const raw = props.summary?.growth_attribution;
+  if (!raw) return [];
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    if (!text) return [];
+    return [{ metric: 'Общая динамика', attribution: text, conclusion: '', forecast: '', weak_zones: '' }];
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((g) => {
+      if (!g) return null;
+      if (typeof g === 'string') {
+        const t = g.trim();
+        return t ? { metric: '', attribution: t, conclusion: '', forecast: '', weak_zones: '' } : null;
+      }
+      if (typeof g !== 'object') return null;
+      return {
+        metric: String(g.metric || g.name || '').trim(),
+        attribution: String(g.attribution || g.cause || '').trim(),
+        conclusion: String(g.conclusion || '').trim(),
+        forecast: String(g.forecast || g.prediction || '').trim(),
+        weak_zones: String(g.weak_zones || g.weakZones || g.weakness || '').trim(),
+      };
+    })
+    .filter((g) => g && (g.metric || g.attribution || g.conclusion || g.forecast || g.weak_zones));
+});
+
 // ─── Tasks blocks editing ───────────────────────────────────────────────
 function addSection() {
   const next = [...(props.tasksBlocks || []), { section: 'Новый раздел', items: [] }];
@@ -248,15 +280,29 @@ function _minutesAgo(iso) {
     </section>
 
     <!-- GROWTH ATTRIBUTION -->
-    <section v-if="summary?.growth_attribution?.length" class="rblk">
+    <section v-if="growthItems.length" class="rblk">
       <h2>Что повлияло на рост</h2>
-      <ul class="highlights-list">
-        <li v-for="(g, i) in summary.growth_attribution" :key="i">
-          <strong v-if="g.metric">{{ g.metric }}:</strong>
-          <span v-if="g.attribution"> {{ g.attribution }}</span>
-          <span v-else-if="typeof g === 'string'">{{ g }}</span>
-        </li>
-      </ul>
+      <div class="growth-list">
+        <div v-for="(g, i) in growthItems" :key="i" class="growth-item">
+          <div v-if="g.metric" class="growth-metric">{{ g.metric }}</div>
+          <div v-if="g.attribution" class="growth-row">
+            <span class="growth-label">Что повлияло:</span>
+            <span class="growth-text">{{ g.attribution }}</span>
+          </div>
+          <div v-if="g.conclusion" class="growth-row">
+            <span class="growth-label">Вывод:</span>
+            <span class="growth-text">{{ g.conclusion }}</span>
+          </div>
+          <div v-if="g.forecast" class="growth-row">
+            <span class="growth-label">Прогноз:</span>
+            <span class="growth-text">{{ g.forecast }}</span>
+          </div>
+          <div v-if="g.weak_zones" class="growth-row">
+            <span class="growth-label">Слабые зоны / точки роста:</span>
+            <span class="growth-text">{{ g.weak_zones }}</span>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- TASKS BLOCKS -->
@@ -395,6 +441,21 @@ function _minutesAgo(iso) {
 }
 .highlights-list, .autolog-list { padding-left: 20px; margin: 0; line-height: 1.7; color: var(--ink-2); }
 .highlights-list strong { color: var(--accent-strong); font-weight: 600; }
+.growth-list { display: flex; flex-direction: column; gap: 14px; }
+.growth-item {
+  padding: 14px 16px; border-radius: 12px;
+  background: var(--accent-bg); border: 1px solid var(--line);
+}
+.growth-metric {
+  font-size: 15px; font-weight: 600; color: var(--accent-strong);
+  margin-bottom: 8px;
+}
+.growth-row { display: flex; gap: 6px; margin-top: 4px; line-height: 1.6; color: var(--ink-2); }
+.growth-row .growth-label { font-weight: 600; color: var(--ink-1); flex: 0 0 auto; }
+.growth-row .growth-text { flex: 1; }
+@media (max-width: 600px) {
+  .growth-row { flex-direction: column; gap: 2px; }
+}
 .tasks-block { padding: 14px 0; border-top: 1px solid var(--line); }
 .tasks-block:first-of-type { border-top: 0; padding-top: 0; }
 .tb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
