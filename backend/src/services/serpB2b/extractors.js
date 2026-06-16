@@ -116,9 +116,9 @@ const PHONE_RE = /(?:\+7|(?<!\d)8)[\s\-()\u00A0]*\(?(\d{3,4})\)?[\s\-()\u00A0]*(
 const PHONE_NEGATIVE_CONTEXT = /(?:ИНН|ОГРН|ОКПО|ОКВЭД|ОКАТО|ОКТМО|КПП|БИК|р[\/\\\s]?с|расч[её]тный\s+сч[её]т|счет|account|account\s*no|tax\s*id)/i;
 
 function _normalizePhone(d1, d2, d3, d4) {
-  // Сводим к +7 (XXX) XXX-XX-XX. d1 длиной 3 или 4 (Беларусь/Казахстан
+  // Сводим к 7 (XXX) XXX-XX-XX. d1 длиной 3 или 4 (Беларусь/Казахстан
   // могут давать 3-значные коды у нас не нормализуем — оставляем как есть).
-  return `+7 (${d1}) ${d2}-${d3}-${d4}`;
+  return `7 (${d1}) ${d2}-${d3}-${d4}`;
 }
 
 /**
@@ -181,7 +181,7 @@ function extractPhonesFromHrefs(html, { maxItems = 6 } = {}) {
     if (d.length === 11 && (d.startsWith('7') || d.startsWith('8'))) d = '7' + d.slice(1);
     if (d.length === 10) d = '7' + d;
     if (d.length !== 11 || !d.startsWith('7')) continue;
-    const norm = `+7 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9, 11)}`;
+    const norm = `7 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9, 11)}`;
     if (seen.has(norm)) continue;
     seen.add(norm);
     out.push(norm);

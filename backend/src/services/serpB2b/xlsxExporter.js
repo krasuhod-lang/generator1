@@ -9,7 +9,7 @@
 
 const ExcelJS = require('exceljs');
 
-const COLUMNS = [
+const BASE_COLUMNS = [
   { header: 'Сайт',          key: 'url',          width: 32 },
   { header: 'Юр. лицо',      key: 'company_name', width: 36 },
   { header: 'Статус юр. лица', key: 'company_status', width: 18 },
@@ -17,10 +17,9 @@ const COLUMNS = [
   { header: 'ИНН',           key: 'inn',          width: 16 },
   { header: 'ОГРН',          key: 'ogrn',         width: 18 },
   { header: 'КПП',           key: 'kpp',          width: 12 },
-  { header: 'Сотовый',       key: 'phone_mobile',   width: 22 },
-  { header: 'Городской',     key: 'phone_landline', width: 22 },
-  { header: 'Email',         key: 'email',        width: 32 },
-  { header: 'Услуги',        key: 'services',     width: 40 },
+];
+
+const TAIL_COLUMNS = [
   { header: 'Контактная стр.', key: 'contact_url', width: 36 },
   { header: 'Статус',        key: 'status',       width: 14 },
   { header: 'Ошибка',        key: 'error',        width: 28 },
@@ -44,6 +43,10 @@ function _flat(item) {
       }
     }
   }
+  
+  let emails = Array.isArray(item.emails) ? item.emails : (item.email ? item.email.split(',').map(e => e.trim()) : []);
+  let services = Array.isArray(item.services) ? item.services : [];
+
   return {
     url:            item.url || '',
     company_name:   item.company_name || '',
@@ -52,10 +55,10 @@ function _flat(item) {
     inn:            item.inn || '',
     ogrn:           item.ogrn || '',
     kpp:            item.kpp || '',
-    phone_mobile:   Array.isArray(mobile) ? mobile.join(', ') : '',
-    phone_landline: Array.isArray(landline) ? landline.join(', ') : '',
-    email:          Array.isArray(item.emails) ? item.emails.join(', ') : (item.email || ''),
-    services:       Array.isArray(item.services) ? item.services.join(', ') : '',
+    mobile,
+    landline,
+    emails,
+    services,
     contact_url:    item.contact_url || '',
     status:         item.status || '',
     error:          item.error || '',
@@ -112,10 +115,39 @@ async function buildXlsx(task) {
   wb.creator = 'SEO Genius — SERP B2B Crawler';
   wb.created = new Date();
 
+  const rows = (Array.isArray(task.results) ? task.results : []).map(_flat);
+
+  let maxMobile = 1;
+  let maxLandline = 1;
+  let maxEmails = 1;
+  let maxServices = 1;
+
+  for (const r of rows) {
+    if (r.mobile && r.mobile.length > maxMobile) maxMobile = r.mobile.length;
+    if (r.landline && r.landline.length > maxLandline) maxLandline = r.landline.length;
+    if (r.emails && r.emails.length > maxEmails) maxEmails = r.emails.length;
+    if (r.services && r.services.length > maxServices) maxServices = r.services.length;
+  }
+
+  const columns = [...BASE_COLUMNS];
+  for (let i = 0; i < maxMobile; i++) {
+    columns.push({ header: `Сотовый ${i + 1}`, key: `phone_mobile_${i}`, width: 22 });
+  }
+  for (let i = 0; i < maxLandline; i++) {
+    columns.push({ header: `Городской ${i + 1}`, key: `phone_landline_${i}`, width: 22 });
+  }
+  for (let i = 0; i < maxEmails; i++) {
+    columns.push({ header: `Email ${i + 1}`, key: `email_${i}`, width: 32 });
+  }
+  for (let i = 0; i < maxServices; i++) {
+    columns.push({ header: `Услуга ${i + 1}`, key: `service_${i}`, width: 40 });
+  }
+  columns.push(...TAIL_COLUMNS);
+
   const ws = wb.addWorksheet('Контакты', {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
-  ws.columns = COLUMNS;
+  ws.columns = columns;
 
   // Заголовок — жирный + светло-серый фон.
   const header = ws.getRow(1);
@@ -125,8 +157,16 @@ async function buildXlsx(task) {
     type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F7' },
   };
 
-  const rows = (Array.isArray(task.results) ? task.results : []).map(_flat);
-  for (const r of rows) ws.addRow(r);
+  const finalRows = rows.map(r => {
+    const flatR = { ...r };
+    for (let i = 0; i < maxMobile; i++) flatR[`phone_mobile_${i}`] = r.mobile?.[i] || '';
+    for (let i = 0; i < maxLandline; i++) flatR[`phone_landline_${i}`] = r.landline?.[i] || '';
+    for (let i = 0; i < maxEmails; i++) flatR[`email_${i}`] = r.emails?.[i] || '';
+    for (let i = 0; i < maxServices; i++) flatR[`service_${i}`] = r.services?.[i] || '';
+    return flatR;
+  });
+
+  for (const r of finalRows) ws.addRow(r);
 
   // Жирная граница под заголовком.
   ws.getRow(1).border = {
@@ -134,12 +174,18 @@ async function buildXlsx(task) {
   };
 
   // Перенос текста в широких колонках.
-  for (const colKey of ['email', 'phone_mobile', 'phone_landline', 'company_name', 'services']) {
+  const wrapKeys = ['company_name'];
+  for (let i = 0; i < maxMobile; i++) wrapKeys.push(`phone_mobile_${i}`);
+  for (let i = 0; i < maxLandline; i++) wrapKeys.push(`phone_landline_${i}`);
+  for (let i = 0; i < maxEmails; i++) wrapKeys.push(`email_${i}`);
+  for (let i = 0; i < maxServices; i++) wrapKeys.push(`service_${i}`);
+  
+  for (const colKey of wrapKeys) {
     const col = ws.getColumn(colKey);
-    col.alignment = { wrapText: true, vertical: 'top' };
+    if (col) col.alignment = { wrapText: true, vertical: 'top' };
   }
 
-  _autoFitWidths(ws, rows);
+  _autoFitWidths(ws, finalRows);
 
   const buf = await wb.xlsx.writeBuffer();
   return Buffer.from(buf);
@@ -147,5 +193,4 @@ async function buildXlsx(task) {
 
 module.exports = {
   buildXlsx,
-  COLUMNS,
 };
