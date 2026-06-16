@@ -63,11 +63,12 @@ function fmtDate(d) {
 
 <template>
   <AppLayout>
+    <div class="tracker-stage">
     <div class="max-w-6xl mx-auto px-4 py-6">
       <div class="flex items-center justify-between mb-6">
         <div>
-          <h1 class="text-2xl font-semibold text-gray-900">Съём позиций</h1>
-          <p class="text-sm text-gray-500 mt-1">
+          <h1 class="page-title">Съём позиций</h1>
+          <p class="page-sub mt-1">
             Регулярное снятие позиций сайта в Яндексе и Google через XMLStock — с гео, графиками динамики и анализом «выросло/упало».
           </p>
         </div>
@@ -165,18 +166,43 @@ function fmtDate(d) {
         </div>
       </div>
     </div>
+    </div>
   </AppLayout>
 </template>
 
 <style scoped>
-.card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; }
-.input { width: 100%; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
-.input:focus { outline: 2px solid #6366f1; outline-offset: -1px; border-color: #6366f1; }
-.btn-primary { background: #0071e3; color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; }
-.btn-primary:hover { background: #0058b8; }
+/* Apple-style «сцена» — единый стиль со страницей отчётов (см. ReportEditorPage),
+ * чтобы «съём позиций» и «отчёты» отображались одинаково и читались на светлом фоне. */
+.tracker-stage {
+  background: #f5f5f7;
+  color-scheme: light;
+  color: #1d1d1f;
+  border-radius: 22px;
+  padding: 12px;
+  margin: -8px -8px 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
+}
+.tracker-stage :deep(h2), .tracker-stage :deep(h3) { color: #1d1d1f; }
+.page-title { font-size: 24px; font-weight: 700; color: #1d1d1f; letter-spacing: -0.02em; }
+.page-sub { font-size: 13px; color: #6e6e73; }
+.card {
+  background: #fff; border: 1px solid rgba(60,60,67,0.12); border-radius: 16px; padding: 18px;
+  color: #1d1d1f;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.04);
+}
+.input {
+  width: 100%; padding: 9px 12px; border: 1px solid rgba(60,60,67,0.18); border-radius: 10px;
+  font-size: 14px; background: #fff; color: #1d1d1f;
+}
+.input:focus { outline: none; border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.15); }
+.btn-primary { background: #0a84ff; color: #fff; padding: 9px 16px; border-radius: 10px; font-size: 14px; font-weight: 500; border: none; cursor: pointer; }
+.btn-primary:hover { background: #0071e3; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-secondary { background: #f3f4f6; color: #374151; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; }
-.btn-secondary:hover { background: #e5e7eb; }
-.badge { background: #f3f4f6; color: #374151; border-radius: 999px; padding: 2px 8px; font-size: 11px; }
-.empty { background: #f9fafb; border: 1px dashed #e5e7eb; border-radius: 12px; padding: 48px; text-align: center; color: #6b7280; }
+.btn-secondary { background: rgba(60,60,67,0.06); color: #1d1d1f; padding: 9px 16px; border-radius: 10px; font-size: 14px; font-weight: 500; border: none; cursor: pointer; }
+.btn-secondary:hover { background: rgba(60,60,67,0.10); }
+.badge { background: rgba(60,60,67,0.06); color: #424245; border-radius: 999px; padding: 3px 9px; font-size: 11px; font-weight: 500; }
+.empty { background: #fff; border: 1px dashed rgba(60,60,67,0.18); border-radius: 16px; padding: 48px; text-align: center; color: #6e6e73; }
 </style>

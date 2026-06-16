@@ -21,6 +21,25 @@ const { loadCachedSeries, loadCurrent } = require('./keysSoSync');
 const tasksLog = require('./tasksAutoLog');
 const { forecastMetric } = require('./forecastEngine');
 
+/**
+ * Нормализует значение даты (строка или JS Date из node-postgres) в строку
+ * формата YYYY-MM-DD. Колонки DATE драйвер pg отдаёт как объект Date, и
+ * наивный `String(date).slice(0, 10)` давал «Wed Apr 01» вместо «2026-04-01»,
+ * из-за чего GSC / Яндекс.Вебмастер / Keys.so отклоняли запрос (неверный формат
+ * даты → ошибка GSC и HTTP 400 у Вебмастера).
+ */
+function _isoDate(value) {
+  if (value == null) return '';
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10);
+  }
+  const s = String(value).trim();
+  // Уже ISO-подобная строка («2026-04-01» или «2026-04-01T...»).
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+}
+
 /** Группировка дневной серии по месяцам. */
 function _aggregateByMonth(series, valueKeys = ['clicks', 'impressions']) {
   const buckets = new Map();
@@ -169,8 +188,8 @@ async function aggregateForDraft(draft, opts = {}) {
   const project = rows[0];
   if (!project) throw new Error('project_not_found');
 
-  const from = String(draft.date_from).slice(0, 10);
-  const to = String(draft.date_to).slice(0, 10);
+  const from = _isoDate(draft.date_from);
+  const to = _isoDate(draft.date_to);
 
   const [gsc, ywm, keysSo, tasks] = await Promise.all([
     _gscSection(project, from, to),
@@ -198,4 +217,4 @@ async function aggregateForDraft(draft, opts = {}) {
   };
 }
 
-module.exports = { aggregateForDraft, _aggregateByMonth };
+module.exports = { aggregateForDraft, _aggregateByMonth, _isoDate };
