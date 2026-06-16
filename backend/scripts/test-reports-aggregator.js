@@ -3,7 +3,7 @@
 /* Tests for reports/dataAggregator._aggregateByMonth + integration shape. */
 
 const assert = require('assert');
-const { _aggregateByMonth } = require('../src/services/reports/dataAggregator');
+const { _aggregateByMonth, _isoDate } = require('../src/services/reports/dataAggregator');
 
 let passed = 0; let failed = 0;
 function test(name, fn) {
@@ -49,6 +49,25 @@ test('skips rows without date', () => {
 test('handles empty input', () => {
   assert.deepStrictEqual(_aggregateByMonth([], ['clicks']), []);
   assert.deepStrictEqual(_aggregateByMonth(null, ['clicks']), []);
+});
+
+// ── _isoDate: даты периода для GSC/Яндекс.Вебмастер/Keys.so ────────────────
+test('_isoDate: JS Date → YYYY-MM-DD (а не «Wed Apr 01»)', () => {
+  // node-postgres отдаёт DATE как объект Date (UTC-полночь).
+  const d = new Date('2026-04-01T00:00:00.000Z');
+  assert.strictEqual(_isoDate(d), '2026-04-01');
+});
+
+test('_isoDate: ISO-строка обрезается до даты', () => {
+  assert.strictEqual(_isoDate('2026-04-01'), '2026-04-01');
+  assert.strictEqual(_isoDate('2026-04-01T12:34:56.000Z'), '2026-04-01');
+});
+
+test('_isoDate: null/undefined/невалидное → пустая строка', () => {
+  assert.strictEqual(_isoDate(null), '');
+  assert.strictEqual(_isoDate(undefined), '');
+  assert.strictEqual(_isoDate('не дата'), '');
+  assert.strictEqual(_isoDate(new Date('invalid')), '');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

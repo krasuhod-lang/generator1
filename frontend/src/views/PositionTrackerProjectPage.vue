@@ -158,15 +158,16 @@ onBeforeUnmount(stopPolling);
 
 <template>
   <AppLayout>
+    <div class="tracker-stage">
     <div class="max-w-7xl mx-auto px-4 py-6">
       <div class="flex items-start justify-between gap-4 mb-6">
         <div class="min-w-0">
-          <button class="text-sm text-gray-500 hover:text-gray-700 mb-2"
+          <button class="back-btn mb-2"
                   @click="router.push('/position-tracker')">← Все проекты</button>
-          <h1 class="text-2xl font-semibold text-gray-900 truncate">
+          <h1 class="page-title truncate">
             {{ project?.name || project?.domain || '…' }}
           </h1>
-          <div class="text-sm text-gray-500 mt-1">
+          <div class="page-sub mt-1">
             {{ project?.domain }} ·
             {{ project?.engine === 'both' ? 'Яндекс + Google' : project?.engine === 'google' ? 'Google' : 'Яндекс' }}
             <span v-if="project?.geo_lr"> · lr={{ project.geo_lr }}</span>
@@ -343,27 +344,61 @@ onBeforeUnmount(stopPolling);
         </div>
       </div>
     </div>
+    </div>
   </AppLayout>
 </template>
 
 <style scoped>
-.card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; }
-.kpi { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 14px; }
-.kpi-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
-.kpi-value { font-size: 22px; font-weight: 600; color: #111827; margin-top: 4px; }
-.kpi-suffix { font-size: 13px; color: #9ca3af; font-weight: 400; }
-.kpi-delta { font-size: 11px; color: #6b7280; margin-top: 4px; }
-.input { width: 100%; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
-.btn-primary { background: #0071e3; color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; }
-.btn-primary:hover { background: #0058b8; }
+/* Apple-style «сцена»: тот же светлый фон и палитра, что и в отчётах
+ * (ReportRenderer / ReportEditorPage), чтобы «съём позиций» и «отчёты»
+ * выглядели в едином стиле и текст/запросы везде читались на светлом фоне. */
+.tracker-stage {
+  background: #f5f5f7;
+  color-scheme: light;
+  color: #1d1d1f;
+  border-radius: 22px;
+  padding: 12px;
+  margin: -8px -8px 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
+}
+.tracker-stage :deep(h2) { color: #1d1d1f; }
+.tracker-stage :deep(h3) { color: #1d1d1f; }
+.page-title { font-size: 24px; font-weight: 700; color: #1d1d1f; letter-spacing: -0.02em; }
+.page-sub { font-size: 13px; color: #6e6e73; }
+.back-btn { background: none; border: none; color: #0a84ff; cursor: pointer; font-size: 14px; padding: 0; font-weight: 500; }
+.back-btn:hover { color: #0071e3; }
+.card {
+  background: #fff; border: 1px solid rgba(60,60,67,0.12); border-radius: 16px; padding: 18px;
+  color: #1d1d1f;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.04);
+}
+.kpi {
+  background: #fff; border: 1px solid rgba(60,60,67,0.12); border-radius: 16px; padding: 14px 16px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 6px 18px rgba(0,0,0,0.04);
+}
+.kpi-label { font-size: 11px; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.04em; }
+.kpi-value { font-size: 22px; font-weight: 700; color: #1d1d1f; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.kpi-suffix { font-size: 13px; color: #86868b; font-weight: 400; }
+.kpi-delta { font-size: 11px; color: #6e6e73; margin-top: 4px; }
+.input {
+  width: 100%; padding: 9px 12px; border: 1px solid rgba(60,60,67,0.18); border-radius: 10px;
+  font-size: 14px; background: #fff; color: #1d1d1f;
+}
+.input:focus { outline: none; border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.15); }
+.btn-primary { background: #0a84ff; color: #fff; padding: 9px 16px; border-radius: 10px; font-size: 14px; font-weight: 500; border: none; cursor: pointer; }
+.btn-primary:hover { background: #0071e3; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.tab { padding: 4px 10px; border-radius: 6px; background: #f3f4f6; color: #374151; font-size: 13px; }
-.tab-active { background: #111827; color: #fff; }
-.progress { width: 200px; height: 4px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
-.progress-bar { height: 100%; background: #0071e3; transition: width .3s; }
+.tab { padding: 4px 10px; border-radius: 8px; background: rgba(60,60,67,0.06); color: #424245; font-size: 13px; border: none; cursor: pointer; }
+.tab:hover { background: rgba(60,60,67,0.10); }
+.tab-active, .tab-active:hover { background: #1d1d1f; color: #fff; }
+.progress { width: 200px; height: 4px; background: rgba(60,60,67,0.12); border-radius: 4px; overflow: hidden; }
+.progress-bar { height: 100%; background: #0a84ff; transition: width .3s; }
 .table-wrap { overflow-x: auto; }
-.kw-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-.kw-table th { text-align: left; font-weight: 500; color: #6b7280; padding: 8px 10px; border-bottom: 1px solid #e5e7eb; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
-.kw-table td { padding: 8px 10px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
-.kw-table tr:hover { background: #fafafa; }
+.kw-table { width: 100%; border-collapse: collapse; font-size: 14px; color: #1d1d1f; }
+.kw-table th { text-align: left; font-weight: 600; color: #6e6e73; padding: 10px; border-bottom: 1px solid rgba(60,60,67,0.12); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.kw-table td { padding: 10px; border-bottom: 1px solid rgba(60,60,67,0.08); vertical-align: middle; }
+.kw-table tr:hover { background: rgba(60,60,67,0.03); }
 </style>
