@@ -25,6 +25,37 @@ const TAIL_COLUMNS = [
   { header: 'Ошибка',        key: 'error',        width: 28 },
 ];
 
+// Excel поддерживает максимум 16 384 колонки на лист. Извлечение контактов
+// иногда захватывает аномально много телефонов/email с одного сайта (например,
+// каталог номеров или ложные срабатывания регэкспа). Без ограничения такая
+// строка раздувала число колонок за лимит Excel, и `writeBuffer()` падал с
+// ошибкой «… is out of bounds» → HTTP 500 при скачивании. Ограничиваем число
+// колонок в каждой группе; «лишние» значения склеиваются в последнюю колонку
+// группы, поэтому данные не теряются.
+const MAX_GROUP_COLUMNS = 25;
+
+function _capCount(n) {
+  const v = Number.isFinite(n) ? n : 1;
+  return Math.min(Math.max(v, 1), MAX_GROUP_COLUMNS);
+}
+
+// Раскладывает массив значений по `count` ячейкам. Если значений больше, чем
+// колонок, остаток склеивается через запятую в последнюю ячейку.
+function _spread(values, count) {
+  const arr = Array.isArray(values)
+    ? values.filter((v) => v != null && v !== '')
+    : [];
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    if (i === count - 1 && arr.length > count) {
+      out.push(arr.slice(i).join(', '));
+    } else {
+      out.push(arr[i] != null ? arr[i] : '');
+    }
+  }
+  return out;
+}
+
 function _flat(item) {
   // Backward-compat: если split-полей нет (старые задачи), классифицируем
   // на лету по первому символу кода зоны.
@@ -129,6 +160,13 @@ async function buildXlsx(task) {
     if (r.services && r.services.length > maxServices) maxServices = r.services.length;
   }
 
+  // Ограничиваем число колонок в каждой группе, чтобы суммарно не выйти за
+  // лимит Excel (16 384 колонки) и не уронить генерацию файла.
+  maxMobile = _capCount(maxMobile);
+  maxLandline = _capCount(maxLandline);
+  maxEmails = _capCount(maxEmails);
+  maxServices = _capCount(maxServices);
+
   const columns = [...BASE_COLUMNS];
   for (let i = 0; i < maxMobile; i++) {
     columns.push({ header: `Сотовый ${i + 1}`, key: `phone_mobile_${i}`, width: 22 });
@@ -159,10 +197,14 @@ async function buildXlsx(task) {
 
   const finalRows = rows.map(r => {
     const flatR = { ...r };
-    for (let i = 0; i < maxMobile; i++) flatR[`phone_mobile_${i}`] = r.mobile?.[i] || '';
-    for (let i = 0; i < maxLandline; i++) flatR[`phone_landline_${i}`] = r.landline?.[i] || '';
-    for (let i = 0; i < maxEmails; i++) flatR[`email_${i}`] = r.emails?.[i] || '';
-    for (let i = 0; i < maxServices; i++) flatR[`service_${i}`] = r.services?.[i] || '';
+    const mobileCells = _spread(r.mobile, maxMobile);
+    const landlineCells = _spread(r.landline, maxLandline);
+    const emailCells = _spread(r.emails, maxEmails);
+    const serviceCells = _spread(r.services, maxServices);
+    for (let i = 0; i < maxMobile; i++) flatR[`phone_mobile_${i}`] = mobileCells[i];
+    for (let i = 0; i < maxLandline; i++) flatR[`phone_landline_${i}`] = landlineCells[i];
+    for (let i = 0; i < maxEmails; i++) flatR[`email_${i}`] = emailCells[i];
+    for (let i = 0; i < maxServices; i++) flatR[`service_${i}`] = serviceCells[i];
     return flatR;
   });
 

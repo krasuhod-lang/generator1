@@ -384,6 +384,34 @@ fetcher.fetchPage = async (url) => {
     `got: ${row && row.company_name_source}`);
   fetcher.fetchPage = realFetch;
 
+  // ── XLSX export — устойчивость к аномальному числу контактов ──────
+  console.log('\n[serpB2b] XLSX export — column cap & overflow');
+  const { buildXlsx } = require('../src/services/serpB2b/xlsxExporter');
+  const ExcelJS = require('exceljs');
+  try {
+    // Строка с 20 000 email раньше выбрасывала «… out of bounds»
+    // (Excel поддерживает максимум 16 384 колонки) → HTTP 500.
+    const manyEmails = Array.from({ length: 20000 }, (_, i) => `e${i}@x.ru`);
+    const buf = await buildXlsx({
+      results: [{ url: 'https://x.ru', company_name: 'ООО Т', phones: [], emails: manyEmails, services: [] }],
+    });
+    ok('buildXlsx не падает при аномальном числе контактов', Buffer.isBuffer(buf) && buf.length > 0);
+
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.worksheets[0];
+    const headers = ws.getRow(1).values.filter(Boolean).map(String);
+    const emailCols = headers.filter((h) => h.startsWith('Email'));
+    ok('число Email-колонок ограничено (≤ 25)', emailCols.length > 0 && emailCols.length <= 25,
+      `got ${emailCols.length}`);
+    const lastEmailIdx = headers.lastIndexOf(emailCols[emailCols.length - 1]) + 1;
+    const lastEmailVal = String(ws.getRow(2).values[lastEmailIdx] || '');
+    ok('«лишние» значения склеены в последнюю колонку (данные не теряются)',
+      lastEmailVal.includes('e19999@x.ru'));
+  } catch (err) {
+    ok('buildXlsx не падает при аномальном числе контактов', false, err.message);
+  }
+
   console.log(`\n${failed === 0 ? '✅ ALL OK' : `❌ ${failed} TEST(S) FAILED`}\n`);
   process.exit(failed === 0 ? 0 : 1);
 })();

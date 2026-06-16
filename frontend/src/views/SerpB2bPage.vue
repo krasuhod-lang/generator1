@@ -190,17 +190,29 @@ async function deleteHistoryTask(t) {
 
 function copyTable() {
   if (!rows.value.length) return;
-  const headers = ['#', 'Сайт', 'Юр. лицо', 'ИНН', 'Контакты'];
+  // Колонки повторяют схему таблицы в личном кабинете: сотовые, городские
+  // и email попадают в отдельные столбцы (внутри столбца несколько значений
+  // разделяются запятой). Так данные корректно вставляются в Excel/Google Sheets.
+  const headers = [
+    '#', 'Сайт', 'Юр. лицо', 'ИНН', 'ОГРН',
+    'Сотовый', 'Городской', 'Email', 'Услуги', 'Статус',
+  ];
   const lines = [headers.join('\t')];
   rows.value.forEach((r, i) => {
-    const site = r.url || '';
-    const company = r.company_name || '';
-    const inn = r.inn || '';
-    const contacts = [
-      ...(r.phones || []),
-      ...(r.emails || []),
-    ].join(', ');
-    lines.push([i + 1, site, company, inn, contacts].join('\t'));
+    const [mobile, landline] = splitPhones(r);
+    const cells = [
+      i + 1,
+      r.url || '',
+      r.company_name || '',
+      r.inn || '',
+      r.ogrn || '',
+      fmtList(mobile),
+      fmtList(landline),
+      fmtList(r.emails),
+      fmtList(r.services),
+      rowStatusLabel(r.status),
+    ].map(v => String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' '));
+    lines.push(cells.join('\t'));
   });
   const tsv = lines.join('\n');
   navigator.clipboard.writeText(tsv).then(() => {
