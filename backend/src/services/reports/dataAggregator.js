@@ -17,7 +17,7 @@
 const db = require('../../config/db');
 const gscService = require('../projects/gscService');
 const ydxService = require('../projects/ydxService');
-const { loadCachedSeries, loadCurrent } = require('./keysSoSync');
+const { loadCachedSeries, loadCurrent, syncDomain } = require('./keysSoSync');
 const tasksLog = require('./tasksAutoLog');
 const { forecastMetric } = require('./forecastEngine');
 
@@ -117,8 +117,34 @@ async function _keysSoSection(project, from, to) {
     return { connected: false, series: [], current: null };
   }
   try {
-    const series = await loadCachedSeries(project.keys_so_domain, from, to);
-    const current = await loadCurrent(project.keys_so_domain);
+    let series = await loadCachedSeries(project.keys_so_domain, from, to);
+    let current = await loadCurrent(project.keys_so_domain);
+
+    // Если кэш пустой, а API-ключ задан — пробуем подтянуть данные на лету,
+    // чтобы первый отчёт по только что добавленному домену не оставался
+    // пустым до следующего CRON-тика. Учитываем лимит Keys.so 10 запросов /
+    // 10 секунд: один вызов на отчёт нам по карману.
+    const cacheEmpty = !current && (!series || !series.length);
+    const hasApiKey = !!(process.env.KEYS_SO_API_KEY || process.env.KEYSSO_API_KEY);
+    if (cacheEmpty && hasApiKey) {
+      try {
+        await syncDomain(project.keys_so_domain, {
+          base: project.keys_so_region || 'msk',
+          months: 12,
+        });
+        series = await loadCachedSeries(project.keys_so_domain, from, to);
+        current = await loadCurrent(project.keys_so_domain);
+      } catch (syncErr) {
+        // не падаем — просто отдадим пустую секцию + сообщение об ошибке
+        return {
+          connected: true,
+          error: syncErr.message || 'keys_so_sync_failed',
+          series: [],
+          current: null,
+        };
+      }
+    }
+
     return {
       connected: true,
       series: series.map((r) => ({
