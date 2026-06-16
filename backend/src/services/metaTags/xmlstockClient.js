@@ -242,7 +242,7 @@ async function fetchYandexSerp(keyword, opts = {}) {
  */
 async function fetchGoogleSerp(keyword, opts = {}) {
   const {
-    pages = 2, startPage = 0, lr = '', domain = '', device = '',
+    pages = 2, startPage = 0, lr = '', domain = '', device = '', loc = '',
   } = opts;
   const baseUrl = GOOGLE_XMLSTOCK_URL;
   const groupBy =
@@ -257,9 +257,12 @@ async function fetchGoogleSerp(keyword, opts = {}) {
       ? `&domain=${encodeURIComponent(String(domain).trim())}` : '';
     const devicePart = device
       ? `&device=${encodeURIComponent(String(device).trim())}` : '';
+    // Google-вариант гео — параметр `loc` (строка вида "Moscow,Moscow,Russia").
+    const locPart = loc
+      ? `&loc=${encodeURIComponent(String(loc).trim())}` : '';
     const url =
       `${baseUrl}${sep}query=${encodeURIComponent(keyword)}` +
-      `&groupby=${groupBy}${lrPart}${domainPart}${devicePart}&page=${page}`;
+      `&groupby=${groupBy}${lrPart}${domainPart}${devicePart}${locPart}&page=${page}`;
     try {
       const docs = await _fetchSerpPage(url, 'google');
       for (const d of docs) extracted.push(d);

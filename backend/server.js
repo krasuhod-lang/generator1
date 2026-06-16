@@ -37,6 +37,9 @@ const projectsPublicRoutes = require('./src/routes/projectsPublic.routes');
 const aegisRoutes         = require('./src/routes/aegis.routes');
 const categoryLeadRoutes  = require('./src/routes/categoryLead.routes');
 const serpB2bRoutes       = require('./src/routes/serpB2b.routes');
+const reportsRoutes       = require('./src/routes/reports.routes');
+const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
+const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -122,6 +125,9 @@ app.use('/api/projects',       projectsRoutes);
 app.use('/api/public',         projectsPublicRoutes);
 app.use('/api/category-lead',  categoryLeadRoutes);
 app.use('/api/serp-b2b',       serpB2bRoutes);
+app.use('/api/reports',        reportsRoutes);
+app.use('/api/public',         reportsPublicRoutes);
+app.use('/api/position-tracker', positionTrackerRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
@@ -250,6 +256,21 @@ const start = async () => {
       console.warn('[Server] Info-article recovery skipped:', err.message);
     }
 
+    // После рестарта — переводим зависшие position-tracker runs в error
+    // и стартуем планировщик авто-съёма (gating через ENV).
+    try {
+      const { recoverStuckPositionRuns } = require('./src/services/positionTracker/runner');
+      await recoverStuckPositionRuns();
+    } catch (err) {
+      console.warn('[Server] Position-tracker recovery skipped:', err.message);
+    }
+    try {
+      const { startPositionTrackerScheduler } = require('./src/services/positionTracker/scheduler');
+      startPositionTrackerScheduler();
+    } catch (err) {
+      console.warn('[Server] Position-tracker scheduler skipped:', err.message);
+    }
+
     // A.E.G.I.S. Phase 9–13: bootstrap kill switch state + wire alerting → db.
     try {
       const db          = require('./src/config/db');
@@ -333,6 +354,14 @@ const start = async () => {
       }
     } catch (err) {
       console.warn('[Server] A.E.G.I.S. observability bootstrap skipped:', err.message);
+    }
+
+    // 📊 Smart Report Builder — суточная синхронизация Keys.so.
+    try {
+      const { startKeysSoScheduler } = require('./src/services/reports/keysSoScheduler');
+      startKeysSoScheduler();
+    } catch (e) {
+      console.warn('[Server] Reports keysSoScheduler skipped:', e.message);
     }
 
     app.listen(PORT, () => {
@@ -2087,6 +2116,196 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE serp_b2b_tasks ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT ''`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_serp_b2b_user_created ON serp_b2b_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_serp_b2b_status ON serp_b2b_tasks (status)`);
+
+    // ── Migration 075: Smart Report Builder V2 ───────────────────────────
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS logo_url       TEXT`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS color_accent   VARCHAR(7)`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS keys_so_domain TEXT`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS report_drafts (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title             TEXT NOT NULL,
+        date_from         DATE NOT NULL,
+        date_to           DATE NOT NULL,
+        status            VARCHAR(16) NOT NULL DEFAULT 'draft'
+                          CHECK (status IN ('draft','published','archived')),
+        config            JSONB NOT NULL DEFAULT '{}'::jsonb,
+        tasks_blocks      JSONB NOT NULL DEFAULT '[]'::jsonb,
+        llm_summary       TEXT,
+        llm_highlights    JSONB,
+        llm_growth        TEXT,
+        llm_status        VARCHAR(16) NOT NULL DEFAULT 'idle'
+                          CHECK (llm_status IN ('idle','queued','running','done','error')),
+        llm_job_id        UUID,
+        llm_error         TEXT,
+        llm_generated_at  TIMESTAMPTZ,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_report_drafts_user_created ON report_drafts (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_report_drafts_project ON report_drafts (project_id, created_at DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS shared_reports (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        draft_id        UUID NOT NULL REFERENCES report_drafts(id) ON DELETE CASCADE,
+        user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        uuid            VARCHAR(64) NOT NULL UNIQUE,
+        mode            VARCHAR(16) NOT NULL DEFAULT 'live'
+                        CHECK (mode IN ('snapshot','live')),
+        snapshot_data   JSONB,
+        expires_at      TIMESTAMPTZ,
+        password_hash   TEXT,
+        is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+        view_count      INTEGER NOT NULL DEFAULT 0,
+        last_viewed_at  TIMESTAMPTZ,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_shared_reports_user ON shared_reports (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_shared_reports_draft ON shared_reports (draft_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_shared_reports_active ON shared_reports (is_active) WHERE is_active = TRUE`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS keys_so_cache (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        domain          TEXT NOT NULL,
+        date            DATE NOT NULL,
+        yandex_traffic  INTEGER,
+        google_traffic  INTEGER,
+        visibility      NUMERIC(10,4),
+        keywords_top1   INTEGER,
+        keywords_top3   INTEGER,
+        keywords_top10  INTEGER,
+        keywords_total  INTEGER,
+        fetched_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(domain, date)
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_keys_so_cache_domain_date ON keys_so_cache (domain, date DESC)`);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS tasks_auto_log (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
+        task_type       VARCHAR(32) NOT NULL
+                        CHECK (task_type IN ('content_generation','meta_update','link_article','technical_seo','other')),
+        title           TEXT NOT NULL,
+        description     TEXT,
+        performed_at    DATE NOT NULL DEFAULT CURRENT_DATE,
+        source          VARCHAR(16) NOT NULL DEFAULT 'platform_auto'
+                        CHECK (source IN ('platform_auto','manual')),
+        is_hidden       BOOLEAN NOT NULL DEFAULT FALSE,
+        ref_table       TEXT,
+        ref_id          UUID,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tasks_auto_log_project_perf ON tasks_auto_log (project_id, performed_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tasks_auto_log_type ON tasks_auto_log (project_id, task_type, performed_at DESC)`);
+
+    // ─── Migration 076: Position Tracker (XMLStock) ─────────────────────
+    // Снятие позиций в Яндексе/Google по списку запросов с гео и историей
+    // позиций для построения графиков (день/неделя/месяц) и анализа динамики.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'position_engine') THEN
+          CREATE TYPE position_engine AS ENUM ('yandex', 'google', 'both');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'position_device') THEN
+          CREATE TYPE position_device AS ENUM ('desktop', 'mobile');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'position_schedule') THEN
+          CREATE TYPE position_schedule AS ENUM ('daily', 'weekly', 'manual');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'position_run_status') THEN
+          CREATE TYPE position_run_status AS ENUM ('queued', 'processing', 'done', 'error');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS position_projects (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL DEFAULT '',
+        domain      TEXT NOT NULL,
+        engine      position_engine   NOT NULL DEFAULT 'yandex',
+        geo_lr      TEXT NOT NULL DEFAULT '',
+        geo_loc     TEXT NOT NULL DEFAULT '',
+        device      position_device   NOT NULL DEFAULT 'desktop',
+        schedule    position_schedule NOT NULL DEFAULT 'manual',
+        last_run_at TIMESTAMPTZ,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_position_projects_user ON position_projects (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_position_projects_schedule ON position_projects (schedule, last_run_at)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS position_keywords (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id UUID NOT NULL REFERENCES position_projects(id) ON DELETE CASCADE,
+        query      TEXT NOT NULL,
+        target_url TEXT,
+        tags       JSONB NOT NULL DEFAULT '[]'::jsonb,
+        is_active  BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(project_id, query)
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_position_keywords_project ON position_keywords (project_id, is_active)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS position_runs (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id      UUID NOT NULL REFERENCES position_projects(id) ON DELETE CASCADE,
+        engine          TEXT NOT NULL,
+        status          position_run_status NOT NULL DEFAULT 'queued',
+        error           TEXT,
+        keywords_total  INTEGER NOT NULL DEFAULT 0,
+        keywords_done   INTEGER NOT NULL DEFAULT 0,
+        started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        finished_at     TIMESTAMPTZ
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_position_runs_project ON position_runs (project_id, started_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_position_runs_status ON position_runs (status)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS position_results (
+        id           BIGSERIAL PRIMARY KEY,
+        run_id       UUID NOT NULL REFERENCES position_runs(id) ON DELETE CASCADE,
+        project_id   UUID NOT NULL REFERENCES position_projects(id) ON DELETE CASCADE,
+        keyword_id   UUID NOT NULL REFERENCES position_keywords(id) ON DELETE CASCADE,
+        engine       TEXT NOT NULL,
+        position     INTEGER,
+        found_url    TEXT,
+        serp_snippet TEXT,
+        checked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(run_id, keyword_id, engine)
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_position_results_keyword_date ON position_results (keyword_id, engine, checked_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_position_results_project_date ON position_results (project_id, engine, checked_at DESC)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

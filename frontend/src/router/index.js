@@ -30,11 +30,21 @@ const routes = [
 
   { path: '/serp-b2b',             component: () => import('../views/SerpB2bPage.vue'),            meta: { auth: true } },
 
+  { path: '/position-tracker',     component: () => import('../views/PositionTrackerPage.vue'),    meta: { auth: true } },
+  { path: '/position-tracker/:id', component: () => import('../views/PositionTrackerProjectPage.vue'), meta: { auth: true } },
+
   { path: '/projects',             component: () => import('../views/ProjectsPage.vue'),        meta: { auth: true } },
   { path: '/projects/:id',         component: () => import('../views/ProjectDetailPage.vue'),   meta: { auth: true } },
   { path: '/share/project/:token', component: () => import('../views/ProjectSharedPage.vue'),   meta: { guest: false, public: true } },
 
   { path: '/aegis',                component: () => import('../views/AegisPage.vue'),            meta: { auth: true } },
+
+  // Smart Report Builder
+  { path: '/reports',              component: () => import('../views/ReportsPage.vue'),       meta: { auth: true } },
+  { path: '/reports/new',          component: () => import('../views/ReportNewPage.vue'),     meta: { auth: true } },
+  { path: '/reports/shared',       component: () => import('../views/SharedReportsPage.vue'), meta: { auth: true } },
+  { path: '/reports/:id/edit',     component: () => import('../views/ReportEditorPage.vue'),  meta: { auth: true } },
+  { path: '/r/:uuid',              component: () => import('../views/PublicReportPage.vue'),  meta: { public: true } },
 
   // Admin routes
   { path: '/admin/login',     component: () => import('../views/admin/AdminLoginPage.vue'),      meta: { adminGuest: true } },
