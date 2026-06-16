@@ -8,6 +8,7 @@
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS logo_url        TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS color_accent    VARCHAR(7);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS keys_so_domain  TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS keys_so_region  VARCHAR(8);
 
 -- 2. Черновики отчётов.
 CREATE TABLE IF NOT EXISTS report_drafts (

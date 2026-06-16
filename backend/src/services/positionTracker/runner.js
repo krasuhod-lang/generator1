@@ -16,7 +16,7 @@
 const db = require('../../config/db');
 const xmlstock = require('./xmlstockSerp');
 
-const DEFAULT_CONCURRENCY = parseInt(process.env.POSITION_TRACKER_CONCURRENCY, 10) || 3;
+const DEFAULT_CONCURRENCY = parseInt(process.env.POSITION_TRACKER_CONCURRENCY, 10) || 15;
 
 function _engineList(engineCol) {
   if (engineCol === 'both') return ['yandex', 'google'];
@@ -156,14 +156,16 @@ async function runPositionRun(projectId, opts = {}) {
 
   const summary = [];
 
-  for (const engine of engines) {
+  // Движки запускаем параллельно, чтобы при engine='both' Яндекс и Google
+  // не складывались последовательно (важно для целевого SLA «100 запросов
+  // за 30 секунд»).
+  const enginePromises = engines.map(async (engine) => {
     const run = await _createRun(projectId, engine, keywords.length);
     const runSummary = { engine, run_id: run.id, ok: 0, error: 0, results: [] };
-    summary.push(runSummary);
 
     if (keywords.length === 0) {
       await _finishRun(run.id, 'done', null);
-      continue;
+      return runSummary;
     }
 
     await _markRunProcessing(run.id);
@@ -207,7 +209,11 @@ async function runPositionRun(projectId, opts = {}) {
       runSummary.error = keywords.length;
       await _finishRun(run.id, 'error', err.message || String(err));
     }
-  }
+    return runSummary;
+  });
+
+  const settled = await Promise.all(enginePromises);
+  summary.push(...settled);
 
   await db.query(
     `UPDATE position_projects SET last_run_at = NOW(), updated_at = NOW() WHERE id = $1`,

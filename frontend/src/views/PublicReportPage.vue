@@ -94,13 +94,22 @@ function trySetPinLength(n) {
 </template>
 
 <style scoped>
-.public-page { min-height: 100vh; background: #f5f5f7; padding: 16px; }
-.status { padding: 80px 24px; text-align: center; color: rgba(0,0,0,0.55); font-size: 16px; }
-.status.err { color: #b00020; }
+.public-page {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f5f5f7 0%, #ececef 100%);
+  color: #1d1d1f;
+  color-scheme: light;
+  padding: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.01em;
+}
+.status { padding: 80px 24px; text-align: center; color: #6e6e73; font-size: 16px; }
+.status.err { color: #d70015; }
 .public-shell { max-width: 1080px; margin: 0 auto; }
 .public-inner { display: flex; flex-direction: column; gap: 16px; }
-.public-footer { text-align: center; padding: 12px 0 32px; color: rgba(0,0,0,0.4); font-size: 12px; }
+.public-footer { text-align: center; padding: 16px 0 36px; color: #86868b; font-size: 12px; letter-spacing: 0.02em; }
 
-@media (min-width: 375px) { .public-page { padding: 16px 12px; } }
-@media (min-width: 768px) { .public-page { padding: 32px 16px; } }
+@media (min-width: 375px) { .public-page { padding: 20px 14px; } }
+@media (min-width: 768px) { .public-page { padding: 40px 20px; } }
 </style>

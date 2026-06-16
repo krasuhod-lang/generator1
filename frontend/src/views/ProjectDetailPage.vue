@@ -122,6 +122,69 @@ function flash(msg) {
   toastTimer = setTimeout(() => { toast.value = ''; }, 3000);
 }
 
+// ── Бренд и источники отчётов ────────────────────────────────────────
+// Карточка над дашбордом источников: позволяет пользователю задать
+// логотип / акцентный цвет / домен и регион для модуля Smart Reports
+// (без этого Keys.so в отчёте всегда показывает «Не подключён»).
+const KEYS_SO_REGIONS = [
+  { v: 'msk', l: 'Москва (msk)' }, { v: 'spb', l: 'СПб (spb)' },
+  { v: 'ekb', l: 'Екатеринбург (ekb)' }, { v: 'nsk', l: 'Новосибирск (nsk)' },
+  { v: 'kzn', l: 'Казань (kzn)' }, { v: 'nnv', l: 'Нижний Новгород (nnv)' },
+  { v: 'rnd', l: 'Ростов-на-Дону (rnd)' }, { v: 'sam', l: 'Самара (sam)' },
+  { v: 'krr', l: 'Краснодар (krr)' }, { v: 'vrn', l: 'Воронеж (vrn)' },
+  { v: 'ufa', l: 'Уфа (ufa)' }, { v: 'prm', l: 'Пермь (prm)' },
+  { v: 'che', l: 'Челябинск (che)' }, { v: 'tmn', l: 'Тюмень (tmn)' },
+  { v: 'oms', l: 'Омск (oms)' }, { v: 'vlg', l: 'Волгоград (vlg)' },
+  { v: 'kry', l: 'Красноярск (kry)' }, { v: 'sar', l: 'Саратов (sar)' },
+  { v: 'tom', l: 'Томск (tom)' }, { v: 'gru', l: 'Грозный (gru)' },
+  { v: 'mns', l: 'Минск (mns)' }, { v: 'gmns', l: 'Минск Google (gmns)' },
+  { v: 'gkv', l: 'Киев Google (gkv)' }, { v: 'zen', l: 'Дзен (zen)' },
+  { v: 'gny', l: 'New York Google (gny)' },
+];
+const brandingForm = ref({
+  logo_url: '',
+  color_accent: '#0a84ff',
+  keys_so_domain: '',
+  keys_so_region: 'msk',
+});
+const brandingSaving = ref(false);
+function _projectDomainHint(p) {
+  if (!p) return '';
+  try {
+    return new URL(p.url).hostname.replace(/^www\./, '');
+  } catch (_) { return ''; }
+}
+function _syncBrandingFromProject() {
+  if (!project.value) return;
+  brandingForm.value = {
+    logo_url: project.value.logo_url || '',
+    color_accent: project.value.color_accent || '#0a84ff',
+    keys_so_domain: project.value.keys_so_domain || _projectDomainHint(project.value),
+    keys_so_region: project.value.keys_so_region || 'msk',
+  };
+}
+async function saveBranding() {
+  if (!project.value) return;
+  brandingSaving.value = true;
+  try {
+    const updated = await store.updateProject(projectId, {
+      logo_url: brandingForm.value.logo_url || null,
+      color_accent: brandingForm.value.color_accent || null,
+      keys_so_domain: brandingForm.value.keys_so_domain || null,
+      keys_so_region: brandingForm.value.keys_so_region || 'msk',
+    });
+    if (updated) {
+      project.value = { ...project.value, ...updated };
+      _syncBrandingFromProject();
+      flash('Сохранено');
+    }
+  } catch (err) {
+    flash(err.response?.data?.error || 'Не удалось сохранить');
+  } finally {
+    brandingSaving.value = false;
+  }
+}
+
 const gscReady = computed(() => project.value?.gsc_connected && project.value?.gsc_site_url);
 const ydxReady = computed(() => project.value?.ydx_connected && project.value?.ydx_site_url);
 
@@ -184,6 +247,7 @@ async function load() {
   try {
     const data = await store.getProject(projectId);
     project.value = data.project;
+    _syncBrandingFromProject();
     analyses.value = data.analyses || [];
     gscConfigured.value = !!data.gsc_configured;
     ydxConfigured.value = !!data.ydx_configured;
@@ -480,11 +544,62 @@ onUnmounted(() => {
 
       <template v-else-if="project">
         <header class="flex items-start justify-between gap-3">
-          <div class="min-w-0">
-            <h1 class="text-2xl font-bold text-gray-100 truncate">{{ project.name }}</h1>
-            <a :href="project.url" target="_blank" rel="noopener" class="text-sm text-indigo-400 hover:underline">{{ project.url }}</a>
+          <div class="min-w-0 flex items-center gap-3">
+            <img v-if="project.logo_url" :src="project.logo_url" alt=""
+                 class="h-10 w-10 rounded-xl object-contain bg-white/5 border border-white/10 p-1" />
+            <div class="min-w-0">
+              <h1 class="text-2xl font-bold text-gray-100 truncate"
+                  :style="project.color_accent ? `color:${project.color_accent}` : ''">{{ project.name }}</h1>
+              <a :href="project.url" target="_blank" rel="noopener" class="text-sm text-indigo-400 hover:underline">{{ project.url }}</a>
+            </div>
           </div>
         </header>
+
+        <!-- Бренд и источники отчётов (Smart Reports / Keys.so) -->
+        <section class="card space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Бренд и источники отчётов</h2>
+            <span class="text-[11px] text-gray-500">используется в модулях «Отчёты» и «Съём позиций»</span>
+          </div>
+          <div class="grid md:grid-cols-2 gap-3">
+            <label class="block">
+              <span class="text-xs text-gray-400">Логотип (URL .png/.svg)</span>
+              <input v-model="brandingForm.logo_url" class="input mt-1" type="url"
+                     placeholder="https://example.com/logo.svg" maxlength="500" />
+            </label>
+            <label class="block">
+              <span class="text-xs text-gray-400">Акцентный цвет</span>
+              <div class="mt-1 flex items-center gap-2">
+                <input v-model="brandingForm.color_accent" type="color" class="h-10 w-14 rounded-md border border-white/10 bg-transparent cursor-pointer" />
+                <input v-model="brandingForm.color_accent" class="input flex-1" placeholder="#0a84ff" maxlength="7" />
+              </div>
+            </label>
+            <label class="block">
+              <span class="text-xs text-gray-400">Домен Keys.so</span>
+              <input v-model="brandingForm.keys_so_domain" class="input mt-1"
+                     placeholder="example.ru" maxlength="200" />
+              <span class="text-[11px] text-gray-500">Без http:// и www. По умолчанию — домен из URL проекта.</span>
+            </label>
+            <label class="block">
+              <span class="text-xs text-gray-400">Регион Keys.so</span>
+              <select v-model="brandingForm.keys_so_region" class="input mt-1">
+                <option v-for="r in KEYS_SO_REGIONS" :key="r.v" :value="r.v">{{ r.l }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <span v-if="project.keys_so_domain" class="text-xs text-emerald-300">
+              ✓ Подключён домен <b>{{ project.keys_so_domain }}</b>
+              ({{ project.keys_so_region || 'msk' }})
+            </span>
+            <span v-else class="text-xs text-amber-300">
+              Не подключено — отчёт не получит данные Keys.so
+            </span>
+            <button class="btn-primary" :disabled="brandingSaving" @click="saveBranding">
+              {{ brandingSaving ? 'Сохранение…' : 'Сохранить' }}
+            </button>
+          </div>
+        </section>
 
         <!-- Вкладки источников данных: GSC / Яндекс.Вебмастер / Сравнение -->
         <nav class="flex flex-wrap gap-1 border-b border-gray-800">

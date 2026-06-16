@@ -2121,6 +2121,8 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS logo_url       TEXT`);
     await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS color_accent   VARCHAR(7)`);
     await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS keys_so_domain TEXT`);
+    // Регион базы Keys.so (msk|spb|...) — для запросов /report/simple/domain_dashboard.
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS keys_so_region VARCHAR(8)`);
     await db.query(`
       CREATE TABLE IF NOT EXISTS report_drafts (
         id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
