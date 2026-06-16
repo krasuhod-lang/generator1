@@ -64,9 +64,51 @@ function _sanitizeUrl(v) {
   }
 }
 
+// ── branding sanitizers (logo url / accent color / Keys.so domain & region) ─
+function _sanitizeLogoUrl(v) {
+  if (v == null) return null;
+  const s = String(v).trim().slice(0, 500);
+  if (!s) return null;
+  // Разрешаем только http(s):// и data:image/* (для логотипов SVG/PNG inline).
+  if (/^data:image\//i.test(s)) return s;
+  try {
+    const u = new URL(s);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch (_) { return null; }
+}
+function _sanitizeAccent(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  return /^#[0-9a-fA-F]{6}$/.test(s) ? s.toLowerCase() : null;
+}
+function _sanitizeKeysSoDomain(v) {
+  if (v == null) return null;
+  const raw = String(v).trim().toLowerCase();
+  if (!raw) return null;
+  // Принимаем как голый домен, так и URL — нормализуем.
+  const stripped = raw.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
+  // Простая защита от мусора: должен содержать минимум одну точку и валидные символы.
+  if (!/^[a-z0-9.\-]+\.[a-z]{2,}$/i.test(stripped)) return null;
+  return stripped.slice(0, 200);
+}
+const KEYS_SO_REGIONS = new Set([
+  'msk', 'gru', 'zen', 'gkv', 'rnd', 'ekb', 'ufa', 'sar', 'krr', 'prm',
+  'sam', 'kry', 'oms', 'kzn', 'che', 'nsk', 'nnv', 'vlg', 'vrn', 'spb',
+  'mns', 'tmn', 'gmns', 'tom', 'gny',
+]);
+function _sanitizeKeysSoRegion(v) {
+  if (v == null) return null;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return null;
+  return KEYS_SO_REGIONS.has(s) ? s : null;
+}
+
 // Публичная (безопасная) проекция строки проекта — без *_enc токенов.
 const PUBLIC_COLUMNS = `
   id, name, url, audience_description,
+  logo_url, color_accent, keys_so_domain, keys_so_region,
   gsc_connected, gsc_site_url, gsc_available_sites,
   (gsc_refresh_token_enc IS NOT NULL) AS gsc_has_refresh,
   ydx_connected, ydx_site_url, ydx_available_sites,
@@ -148,17 +190,30 @@ async function updateProject(req, res, next) {
   try {
     const existing = await _loadOwned(req.params.id, req.user.id);
     if (!existing) return res.status(404).json({ error: 'Проект не найден' });
-    const name = req.body && req.body.name != null ? _clipName(req.body.name) : existing.name;
-    const url = req.body && req.body.url != null ? _sanitizeUrl(req.body.url) : existing.url;
-    const audience = req.body && 'audience_description' in req.body
-      ? _clipAudience(req.body.audience_description)
+    const body = req.body || {};
+    const name = body.name != null ? _clipName(body.name) : existing.name;
+    const url = body.url != null ? _sanitizeUrl(body.url) : existing.url;
+    const audience = 'audience_description' in body
+      ? _clipAudience(body.audience_description)
       : existing.audience_description;
+    // Поля брендинга и интеграции с источниками — обновляем только если ключ
+    // явно присутствует в payload (пустая строка трактуется как «очистить»).
+    const logoUrl = 'logo_url' in body ? _sanitizeLogoUrl(body.logo_url) : existing.logo_url;
+    const accent = 'color_accent' in body ? _sanitizeAccent(body.color_accent) : existing.color_accent;
+    const keysSoDomain = 'keys_so_domain' in body
+      ? _sanitizeKeysSoDomain(body.keys_so_domain)
+      : existing.keys_so_domain;
+    const keysSoRegion = 'keys_so_region' in body
+      ? (_sanitizeKeysSoRegion(body.keys_so_region) || (body.keys_so_region == null ? null : existing.keys_so_region))
+      : existing.keys_so_region;
     if (!name) return res.status(400).json({ error: 'Название проекта обязательно' });
     if (!url) return res.status(400).json({ error: 'Укажите корректную ссылку на проект' });
     const { rows } = await db.query(
-      `UPDATE projects SET name=$2, url=$3, audience_description=$4, updated_at=NOW()
+      `UPDATE projects SET name=$2, url=$3, audience_description=$4,
+              logo_url=$5, color_accent=$6, keys_so_domain=$7, keys_so_region=$8,
+              updated_at=NOW()
         WHERE id=$1 RETURNING ${PUBLIC_COLUMNS}`,
-      [existing.id, name, url, audience],
+      [existing.id, name, url, audience, logoUrl, accent, keysSoDomain, keysSoRegion],
     );
     return res.json({ project: rows[0] });
   } catch (err) { return next(err); }

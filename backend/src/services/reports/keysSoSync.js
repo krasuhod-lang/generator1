@@ -13,7 +13,11 @@
  */
 
 const db = require('../../config/db');
-const { getDomainHistory, getDomainOverview, KeysSoError, _normalizeDomain } = require('./keysSoClient');
+const { getDomainDashboard, KeysSoError, _normalizeDomain, _normalizeBase } = require('./keysSoClient');
+
+function _hasApiKey() {
+  return !!(process.env.KEYS_SO_API_KEY || process.env.KEYSSO_API_KEY);
+}
 
 async function _upsertSnapshot(snap) {
   await db.query(
@@ -39,52 +43,72 @@ async function _upsertSnapshot(snap) {
 }
 
 async function syncDomain(domain, opts = {}) {
-  if (!process.env.KEYS_SO_API_KEY) {
+  if (!_hasApiKey()) {
     return { domain, skipped: true, reason: 'no_api_key' };
   }
   const months = Number(opts.months) || 12;
   const norm = _normalizeDomain(domain);
+  const base = _normalizeBase(opts.base);
   const client = opts.client || null;
+  const httpOpts = { base, ...(client ? { httpClient: client } : {}) };
 
-  const history = await getDomainHistory(norm, months, client ? { httpClient: client } : {});
-  for (const row of history) {
+  // Один запрос /report/simple/domain_dashboard возвращает и overview, и
+  // помесячную историю. Делаем один вызов, чтобы не упираться в лимит
+  // Keys.so 10 запросов / 10 секунд при синхронизации десятков доменов.
+  let dashboard;
+  try {
+    dashboard = await getDomainDashboard(norm, httpOpts);
+  } catch (err) {
+    if (err instanceof KeysSoError && err.code === 'no_api_key') {
+      return { domain: norm, skipped: true, reason: 'no_api_key' };
+    }
+    throw err;
+  }
+
+  const { overview, history } = dashboard;
+  const monthsToSave = history.slice(-months);
+  for (const row of monthsToSave) {
     await _upsertSnapshot({ domain: norm, ...row });
   }
 
-  let overview = null;
-  try {
-    overview = await getDomainOverview(norm, client ? { httpClient: client } : {});
-    // overview сохраняем датой = первое число текущего месяца.
-    const today = new Date();
-    const monthFirst = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-01`;
-    await _upsertSnapshot({ domain: norm, date: monthFirst, ...overview });
-  } catch (err) {
-    if (!(err instanceof KeysSoError)) throw err;
-    // overview-эндпоинт может быть недоступен — не валим всю задачу.
-  }
+  // overview сохраняем датой = первое число текущего месяца (перезапишет
+  // последнюю строку history, если она за этот же месяц — это ожидаемо,
+  // overview даёт более актуальные значения).
+  const today = new Date();
+  const monthFirst = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-01`;
+  await _upsertSnapshot({ domain: norm, date: monthFirst, ...overview });
 
-  return { domain: norm, syncedMonths: history.length, hasOverview: !!overview };
+  return {
+    domain: norm,
+    base,
+    syncedMonths: monthsToSave.length,
+    hasOverview: true,
+  };
 }
 
 /**
- * CRON-задача: пробежать по всем уникальным domains из projects.keys_so_domain.
+ * CRON-задача: пробежать по всем уникальным (domain, region) из projects.
  * Возвращает агрегат {processed, errors[]}. Никогда не бросает наружу.
  */
 async function syncAllDomains(opts = {}) {
   const { rows } = await db.query(
-    `SELECT DISTINCT keys_so_domain
+    `SELECT DISTINCT keys_so_domain,
+            COALESCE(NULLIF(keys_so_region, ''), 'msk') AS keys_so_region
        FROM projects
       WHERE keys_so_domain IS NOT NULL AND keys_so_domain <> ''`,
   );
   const results = { processed: 0, skipped: 0, errors: [] };
   for (const row of rows) {
     try {
-      const r = await syncDomain(row.keys_so_domain, opts);
+      const r = await syncDomain(row.keys_so_domain, { ...opts, base: row.keys_so_region });
       if (r.skipped) results.skipped++;
       else results.processed++;
     } catch (err) {
       results.errors.push({ domain: row.keys_so_domain, error: err.message });
     }
+    // Грубое соблюдение лимита 10 запросов / 10 секунд: ~1 запрос/сек,
+    // когда доменов много. Один проход = один запрос на домен.
+    if (rows.length > 5) await new Promise((r) => setTimeout(r, 1100));
   }
   return results;
 }

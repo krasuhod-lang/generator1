@@ -23,8 +23,8 @@ function startKeysSoScheduler() {
     console.log('[KeysSoScheduler] disabled via REPORTS_KEYS_SO_SYNC=disabled');
     return;
   }
-  if (!process.env.KEYS_SO_API_KEY) {
-    console.log('[KeysSoScheduler] skipped: no KEYS_SO_API_KEY');
+  if (!process.env.KEYS_SO_API_KEY && !process.env.KEYSSO_API_KEY) {
+    console.log('[KeysSoScheduler] skipped: no KEYS_SO_API_KEY (or KEYSSO_API_KEY)');
     return;
   }
   const interval = Number(process.env.REPORTS_KEYS_SO_SYNC_INTERVAL_MS) || DEFAULT_INTERVAL_MS;
