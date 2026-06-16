@@ -122,7 +122,12 @@ async function startTask() {
   }
   submitting.value = true;
   try {
+    const selectedRegion = REGION_OPTIONS.find(r => r.value === form.value.region);
+    const regionName = selectedRegion && selectedRegion.value !== '' ? selectedRegion.label : '';
+    const taskName = regionName ? `${form.value.keyword.trim()} (${regionName})` : form.value.keyword.trim();
+
     const task = await store.createTask({
+      name: taskName,
       keyword: form.value.keyword.trim(),
       search_engine: form.value.search_engine,
       depth_pages: Number(form.value.depth_pages) || 1,
