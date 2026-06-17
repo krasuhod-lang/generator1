@@ -122,11 +122,42 @@ async function buildReportDocx(payload = {}) {
   if (payload.project?.name) children.push(_paragraph(`Проект: ${payload.project.name}`));
   if (payload.project?.url) children.push(_paragraph(`Сайт: ${payload.project.url}`));
 
+  // KPI Totals
+  const kpiLines = [];
+  const gscTotals = payload.data?.gsc?.totals;
+  if (gscTotals) {
+    kpiLines.push(`Google клики: ${Number(gscTotals.clicks || 0).toLocaleString('ru-RU')}`);
+    kpiLines.push(`Google показы: ${Number(gscTotals.impressions || 0).toLocaleString('ru-RU')}`);
+    if (gscTotals.ctr != null) kpiLines.push(`Google CTR: ${Number(gscTotals.ctr).toFixed(2)}%`);
+    if (gscTotals.position != null) kpiLines.push(`Google ср. позиция: ${Number(gscTotals.position).toFixed(1)}`);
+  }
+  const ywmTotals = payload.data?.ywm?.totals;
+  if (ywmTotals) {
+    kpiLines.push(`Яндекс клики: ${Number(ywmTotals.clicks || 0).toLocaleString('ru-RU')}`);
+    kpiLines.push(`Яндекс показы: ${Number(ywmTotals.impressions || 0).toLocaleString('ru-RU')}`);
+    if (ywmTotals.ctr != null) kpiLines.push(`Яндекс CTR: ${Number(ywmTotals.ctr).toFixed(2)}%`);
+  }
+  const keysCurrent = payload.data?.keys_so?.current;
+  if (keysCurrent) {
+    if (keysCurrent.visibility != null) kpiLines.push(`Видимость Keys.so: ${Number(keysCurrent.visibility).toFixed(2)}`);
+    kpiLines.push(`ТОП-10: ${Number(keysCurrent.top10 || 0).toLocaleString('ru-RU')}`);
+    kpiLines.push(`ТОП-50: ${Number(keysCurrent.top50 || 0).toLocaleString('ru-RU')}`);
+  }
+  if (kpiLines.length) {
+    children.push(_heading('Ключевые показатели'));
+    kpiLines.forEach((line) => {
+      children.push(new Paragraph({ bullet: { level: 0 }, spacing: { after: 60 }, children: [new TextRun(line)] }));
+    });
+  }
+
   if (payload.summary?.executive_summary) {
     children.push(_heading('Executive Summary'));
     for (const part of String(payload.summary.executive_summary).split(/\n{2,}/)) {
       if (part.trim()) children.push(_paragraph(part.trim()));
     }
+  } else {
+    children.push(_heading('Executive Summary'));
+    children.push(_paragraph('Резюме не сформировано. Сгенерируйте AI-резюме в редакторе отчёта.'));
   }
 
   if (payload.summary?.highlights?.length) {

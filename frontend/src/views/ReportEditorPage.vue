@@ -93,7 +93,7 @@ async function saveMeta() {
 
 async function generateSummary() {
   summaryStatus.value = { status: 'queued', error: null };
-  await store.generateSummary(route.params.id);
+  await store.generateSummary(route.params.id, viewRange.value);
   startPolling();
 }
 
