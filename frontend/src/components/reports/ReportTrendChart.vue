@@ -198,28 +198,58 @@ function onHover(idx) { hoverIndex.value = idx; }
 function onLeave() { hoverIndex.value = -1; }
 
 // --- Trend delta labels at line endpoints ---
+// Определяем, является ли последний бакет неполным (текущий месяц).
+// labels содержат даты вида "2024-01-01" или "2024-01". Если последний бакет
+// относится к текущему месяцу — это неполные данные, сравнение с предыдущими
+// полными месяцами некорректно. Поэтому ищем 3 последних ПОЛНЫХ месяца и
+// вычисляем процент как (последний полный − предпоследний полный) / предпоследний полный.
+function _isCurrentMonth(label) {
+  if (!label) return false;
+  const m = String(label).match(/^(\d{4})-(\d{2})/);
+  if (!m) return false;
+  const now = new Date();
+  return +m[1] === now.getFullYear() && +m[2] === (now.getMonth() + 1);
+}
+
 const trendDeltas = computed(() => {
+  const labels = props.labels || [];
   return props.datasets.map((ds, di) => {
     if (hiddenSeries.value.has(di)) return null;
     const pts = ds.data || [];
-    // Find first and last non-null values
-    let firstVal = null, lastVal = null, lastIdx = -1;
+    // Собираем индексы полных месяцев (не текущий неполный месяц)
+    // с non-null значениями.
+    const fullIndices = [];
     for (let i = 0; i < pts.length; i++) {
-      if (pts[i] != null && Number.isFinite(pts[i])) {
-        if (firstVal === null) firstVal = pts[i];
-        lastVal = pts[i];
-        lastIdx = i;
+      if (pts[i] != null && Number.isFinite(pts[i]) && !_isCurrentMonth(labels[i])) {
+        fullIndices.push(i);
       }
     }
-    if (firstVal === null || lastVal === null || lastIdx < 1) return null;
-    const diff = lastVal - firstVal;
-    if (firstVal === 0 && diff === 0) return null;
-    const pct = firstVal > 0 ? Math.round(((lastVal - firstVal) / firstVal) * 1000) / 10 : null;
+    // Нужно минимум 2 полных месяца для корректного сравнения.
+    if (fullIndices.length < 2) return null;
+    // Берём последний полный и предпоследний полный для дельты.
+    const currIdx = fullIndices[fullIndices.length - 1];
+    const prevIdx = fullIndices[fullIndices.length - 2];
+    const currVal = pts[currIdx];
+    const prevVal = pts[prevIdx];
+    // Для отображения метки — ставим на последнюю точку серии (полную или нет).
+    let displayIdx = -1;
+    let displayVal = null;
+    for (let i = pts.length - 1; i >= 0; i--) {
+      if (pts[i] != null && Number.isFinite(pts[i])) {
+        displayIdx = i;
+        displayVal = pts[i];
+        break;
+      }
+    }
+    if (displayIdx < 0) return null;
+    const diff = currVal - prevVal;
+    if (prevVal === 0 && diff === 0) return null;
+    const pct = prevVal > 0 ? Math.round(((currVal - prevVal) / prevVal) * 1000) / 10 : null;
     const sign = diff >= 0 ? '+' : '';
     const axis = ds.yAxisID || 'y';
     return {
-      x: xFor(lastIdx) + 4,
-      y: yFor(lastVal, axis),
+      x: xFor(displayIdx) + 4,
+      y: yFor(displayVal, axis),
       label: pct != null ? `${sign}${pct}%` : '',
       color: ds.color,
       up: diff >= 0,

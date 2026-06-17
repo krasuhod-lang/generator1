@@ -67,8 +67,20 @@ function _pctChange(curr, prev) {
 
 function _seriesDelta(series, key = 'clicks') {
   if (!Array.isArray(series) || series.length < 2) return null;
-  const last = Number(series[series.length - 1]?.[key]) || 0;
-  const prev = Number(series[series.length - 2]?.[key]) || 0;
+  // Определяем, является ли последний бакет текущим (неполным) месяцем.
+  // Если да — пропускаем его и берём два последних полных месяца.
+  const now = new Date();
+  const curY = now.getFullYear();
+  const curM = now.getMonth() + 1;
+  const fullMonths = series.filter((row) => {
+    const m = String(row?.date || '').match(/^(\d{4})-(\d{2})/);
+    if (!m) return true; // если формат не месяц — оставляем
+    return !(+m[1] === curY && +m[2] === curM);
+  });
+  // Нужно минимум 2 полных месяца.
+  const src = fullMonths.length >= 2 ? fullMonths : series;
+  const last = Number(src[src.length - 1]?.[key]) || 0;
+  const prev = Number(src[src.length - 2]?.[key]) || 0;
   return { last, prev, deltaPct: _pctChange(last, prev) };
 }
 
