@@ -93,7 +93,7 @@ async function saveMeta() {
 
 async function generateSummary() {
   summaryStatus.value = { status: 'queued', error: null };
-  await store.generateSummary(route.params.id);
+  await store.generateSummary(route.params.id, viewRange.value);
   startPolling();
 }
 
@@ -133,20 +133,20 @@ async function publish() {
   } catch (err) {
     publishError.value = err.response?.data?.error || err.message || 'Ошибка публикации';
   }
+}
 
-  async function exportDocx() {
-    if (!route.params.id || !previewRef.value) return;
-    exporting.value = true;
-    try {
-      const chartImages = await collectReportChartImages(previewRef.value);
-      const blob = await store.exportDocx(route.params.id, {
-        ...viewRange.value,
-        chart_images: chartImages,
-      });
-      downloadBlob(blob, `${(draft.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.docx`);
-    } finally {
-      exporting.value = false;
-    }
+async function exportDocx() {
+  if (!route.params.id || !previewRef.value) return;
+  exporting.value = true;
+  try {
+    const chartImages = await collectReportChartImages(previewRef.value);
+    const blob = await store.exportDocx(route.params.id, {
+      ...viewRange.value,
+      chart_images: chartImages,
+    });
+    downloadBlob(blob, `${(draft.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.docx`);
+  } finally {
+    exporting.value = false;
   }
 }
 
