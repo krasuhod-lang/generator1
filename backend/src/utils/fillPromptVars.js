@@ -1,5 +1,7 @@
 'use strict';
 
+const { richTextToPlain } = require('./stripHtmlTags');
+
 /**
  * fillPromptVars — заменяет плейсхолдеры «Входные данные» в system-промптах
  * реальными значениями из объекта task.
@@ -49,7 +51,7 @@ function fillPromptVars(prompt, task) {
     {
       // - Целевая аудитория: [описание]
       re: /^(- Целевая аудитория:\s*)\[.*?\]/gm,
-      val: () => task.input_target_audience || '[не указано]',
+      val: () => richTextToPlain(task.input_target_audience) || '[не указано]',
     },
     {
       // - Приоритетная бизнес-цель / Приоритетная цель: [...]
@@ -80,17 +82,17 @@ function fillPromptVars(prompt, task) {
       // - Если есть, ограничения проекта: [...]
       // - Ограничения, если есть: [...]
       re: /^(- (?:Если есть, ограничения проекта|Ограничения(?:,\s*если\s+есть)?):\s*)\[.*?\]/gm,
-      val: () => task.input_project_limits || '[не указано]',
+      val: () => richTextToPlain(task.input_project_limits) || '[не указано]',
     },
     {
       // - Если есть, приоритетные типы страниц: [...]
       re: /^(- Если есть, приоритетные типы страниц:\s*)\[.*?\]/gm,
-      val: () => task.input_page_priorities || '[не указано]',
+      val: () => richTextToPlain(task.input_page_priorities) || '[не указано]',
     },
     {
       // - Если есть, особенности ниши: [...]
       re: /^(- Если есть, особенности ниши:\s*)\[.*?\]/gm,
-      val: () => task.input_niche_features || '[не указано]',
+      val: () => richTextToPlain(task.input_niche_features) || '[не указано]',
     },
     {
       // - Основной продукт / услуга / категории: [список]

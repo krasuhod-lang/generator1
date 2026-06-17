@@ -5,6 +5,7 @@ import { useTasksStore } from '../stores/tasks.js';
 import AppLayout from '../components/AppLayout.vue';
 import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
+import RichTextInput from '../components/RichTextInput.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -641,8 +642,8 @@ function downloadExampleTZ() {
             </div>
             <div>
               <label class="label">Целевая аудитория</label>
-              <textarea v-model="form.input_target_audience" class="textarea h-24"
-                placeholder="Например: Физические лица 25-45 лет со средним доходом, ищущие быстрое кредитование без визита в банк. Основные боли: сложная процедура одобрения, высокие ставки, необходимость собирать документы." />
+              <RichTextInput v-model="form.input_target_audience" min-height="96px"
+                placeholder="Например: Физические лица 25-45 лет со средним доходом, ищущие быстрое кредитование без визита в банк." />
             </div>
             <div>
               <label class="label">Приоритетная бизнес-цель</label>
@@ -676,18 +677,18 @@ function downloadExampleTZ() {
             </div>
             <div>
               <label class="label">Ограничения проекта</label>
-              <textarea v-model="form.input_project_limits" class="textarea h-24"
-                placeholder="Например: Нет штатных экспертов для E-E-A-T контента. Слабый ссылочный профиль — менее 50 referring domains. Бюджет на контент ограничен." />
+              <RichTextInput v-model="form.input_project_limits" min-height="96px"
+                placeholder="Например: Нет штатных экспертов для E-E-A-T контента. Слабый ссылочный профиль — менее 50 referring domains." />
             </div>
             <div>
               <label class="label">Приоритетные типы страниц</label>
-              <textarea v-model="form.input_page_priorities" class="textarea h-20"
+              <RichTextInput v-model="form.input_page_priorities" min-height="80px"
                 placeholder="Например: Блог с экспертными статьями для привлечения информационного трафика. Страницы услуг с коммерческим интентом." />
             </div>
             <div>
               <label class="label">Особенности ниши</label>
-              <textarea v-model="form.input_niche_features" class="textarea h-24"
-                placeholder="Например: YMYL-ниша — Google требует повышенного уровня экспертизы. Сильная локальная привязка — пользователи ищут услуги в конкретном городе." />
+              <RichTextInput v-model="form.input_niche_features" min-height="96px"
+                placeholder="Например: YMYL-ниша — Google требует повышенного уровня экспертизы. Сильная локальная привязка." />
             </div>
           </div>
         </div>
@@ -755,7 +756,7 @@ function downloadExampleTZ() {
           <div v-show="openSections.s3" class="px-5 pb-5 border-t border-gray-800">
             <div class="pt-4">
               <label class="label">Факты, цифры, доказательства</label>
-              <textarea v-model="form.input_brand_facts" class="textarea h-36"
+              <RichTextInput v-model="form.input_brand_facts" min-height="144px"
                 placeholder="Компания основана в 2010 году. Обслужили 50,000+ клиентов. Ставка от 1.5%/мес. Лицензия №12345..." />
             </div>
           </div>

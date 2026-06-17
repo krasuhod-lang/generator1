@@ -117,6 +117,7 @@ const { runPreStage0, buildStrategyDigest } = require('./preStage0');
 const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
 const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
 const { deriveModuleContext } = require('../../utils/moduleContext');
+const { richTextToPlain }    = require('../../utils/stripHtmlTags');
 const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { resetTaskBudget } = require('../llm/callLLM');
@@ -214,6 +215,15 @@ async function runPipeline(task, ctx) {
   const stageCtx = { log, progress, taskId, onTokens };
 
   log(`Пайплайн запущен для задачи "${task.input_target_service}"`, 'info');
+
+  // ── Конвертируем rich-text HTML описаний в plain text для LLM-промптов ──
+  const RICH_TEXT_FIELDS = [
+    'input_target_audience', 'input_project_limits',
+    'input_page_priorities', 'input_niche_features', 'input_brand_facts',
+  ];
+  for (const f of RICH_TEXT_FIELDS) {
+    if (task[f]) task[f] = richTextToPlain(task[f]);
+  }
 
   const pipelineStartedAt = Date.now();
 
