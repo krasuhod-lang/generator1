@@ -2,6 +2,7 @@
 
 const db = require('../../config/db');
 const { computeLsiUnused } = require('./lsiUnusedCalc');
+const { richTextToPlain }  = require('../../utils/stripHtmlTags');
 
 /**
  * buildContext — формирует «Пакет контекста» для AI-Copilot редактора.
@@ -52,11 +53,11 @@ async function buildContext(taskId) {
       region:        task.input_region     || '',
       business_type: task.input_business_type || '',
       site_type:     task.input_site_type  || '',
-      target_audience: task.input_target_audience || '',
+      target_audience: richTextToPlain(task.input_target_audience) || '',
       target_service:  task.input_target_service  || '',
       language:        task.input_language || 'ru',
-      brand_facts:     task.input_brand_facts || '',
-      project_limits:  task.input_project_limits || '',
+      brand_facts:     richTextToPlain(task.input_brand_facts) || '',
+      project_limits:  richTextToPlain(task.input_project_limits) || '',
     },
     strategy_context: strategy || {},
     eeat_brief:       extractEeatBrief(stage0, stage1),

@@ -164,47 +164,73 @@ async function _ydxSection(project, from, to, granularity) {
   }
 }
 
+function _mapSeriesRow(r) {
+  return {
+    date: r.date,
+    visibility: r.visibility != null ? Number(r.visibility) : null,
+    yandex_traffic: r.yandex_traffic,
+    google_traffic: r.google_traffic,
+    keywords_top1: r.keywords_top1,
+    keywords_top3: r.keywords_top3,
+    keywords_top10: r.keywords_top10,
+    keywords_top50: r.keywords_top50 != null ? Number(r.keywords_top50) : Number(r.keywords_total || 0),
+    keywords_total: r.keywords_total,
+    adcost: r.adcost != null ? Number(r.adcost) : null,
+  };
+}
+
+function _mapCurrent(current) {
+  if (!current) return null;
+  return {
+    date: current.date,
+    visibility: current.visibility != null ? Number(current.visibility) : null,
+    top1: current.keywords_top1,
+    top3: current.keywords_top3,
+    top10: current.keywords_top10,
+    top50: current.keywords_top50 != null ? Number(current.keywords_top50) : Number(current.keywords_total || 0),
+    total: current.keywords_total,
+    yandex_traffic: current.yandex_traffic,
+    google_traffic: current.google_traffic,
+    adcost: current.adcost != null ? Number(current.adcost) : null,
+  };
+}
+
+async function _loadEngineData(domain, from, to, searchEngine) {
+  const series = await loadCachedSeries(domain, from, to, searchEngine);
+  const current = await loadCurrent(domain, searchEngine);
+  return {
+    series: (series || []).map(_mapSeriesRow),
+    current: _mapCurrent(current),
+  };
+}
+
 async function _keysSoSection(project, from, to) {
-  if (!project.keys_so_domain) return { connected: false, series: [], current: null };
+  if (!project.keys_so_domain) return { connected: false, yandex: { series: [], current: null }, google: { series: [], current: null } };
   try {
-    let series = await loadCachedSeries(project.keys_so_domain, from, to);
-    let current = await loadCurrent(project.keys_so_domain);
-    const cacheEmpty = !current && (!series || !series.length);
+    // Check if cache is empty; if so, sync (which fetches both Yandex and Google).
+    const ydxCurrent = await loadCurrent(project.keys_so_domain, 'yandex');
+    const ydxSeries = await loadCachedSeries(project.keys_so_domain, from, to, 'yandex');
+    const cacheEmpty = !ydxCurrent && (!ydxSeries || !ydxSeries.length);
     const hasApiKey = !!(process.env.KEYS_SO_API_KEY || process.env.KEYSSO_API_KEY);
     if (cacheEmpty && hasApiKey) {
       await syncDomain(project.keys_so_domain, { base: project.keys_so_region || 'msk', months: 18 });
-      series = await loadCachedSeries(project.keys_so_domain, from, to);
-      current = await loadCurrent(project.keys_so_domain);
     }
+
+    const [yandex, google] = await Promise.all([
+      _loadEngineData(project.keys_so_domain, from, to, 'yandex'),
+      _loadEngineData(project.keys_so_domain, from, to, 'google'),
+    ]);
+
+    // Backwards-compatible: top-level series/current point to Yandex (default)
     return {
       connected: true,
-      series: (series || []).map((r) => ({
-        date: r.date,
-        visibility: r.visibility != null ? Number(r.visibility) : null,
-        yandex_traffic: r.yandex_traffic,
-        google_traffic: r.google_traffic,
-        keywords_top1: r.keywords_top1,
-        keywords_top3: r.keywords_top3,
-        keywords_top10: r.keywords_top10,
-        keywords_top50: r.keywords_top50 != null ? Number(r.keywords_top50) : Number(r.keywords_total || 0),
-        keywords_total: r.keywords_total,
-        adcost: r.adcost != null ? Number(r.adcost) : null,
-      })),
-      current: current ? {
-        date: current.date,
-        visibility: current.visibility != null ? Number(current.visibility) : null,
-        top1: current.keywords_top1,
-        top3: current.keywords_top3,
-        top10: current.keywords_top10,
-        top50: current.keywords_top50 != null ? Number(current.keywords_top50) : Number(current.keywords_total || 0),
-        total: current.keywords_total,
-        yandex_traffic: current.yandex_traffic,
-        google_traffic: current.google_traffic,
-        adcost: current.adcost != null ? Number(current.adcost) : null,
-      } : null,
+      series: yandex.series,
+      current: yandex.current,
+      yandex,
+      google,
     };
   } catch (err) {
-    return { connected: true, error: err.message || 'keys_so_failed', series: [], current: null };
+    return { connected: true, error: err.message || 'keys_so_failed', series: [], current: null, yandex: { series: [], current: null }, google: { series: [], current: null } };
   }
 }
 

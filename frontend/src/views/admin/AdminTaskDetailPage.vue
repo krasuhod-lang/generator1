@@ -14,6 +14,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAdminStore } from '../../stores/admin.js';
 import AdminLayout from '../../components/AdminLayout.vue';
+import DOMPurify from 'dompurify';
 
 const route   = useRoute();
 const router  = useRouter();
@@ -438,7 +439,8 @@ const universalSubtitle = computed(() => {
           </div>
           <div v-if="task.input_brand_facts" class="card">
             <div class="text-xs text-gray-500 mb-2">Brand facts (input)</div>
-            <pre class="text-xs text-gray-300 font-mono overflow-x-auto max-h-96 whitespace-pre-wrap">{{ task.input_brand_facts }}</pre>
+            <div class="text-xs text-gray-300 overflow-x-auto max-h-96 prose prose-invert prose-sm max-w-none"
+              v-html="DOMPurify.sanitize(task.input_brand_facts)" />
           </div>
           <div v-if="task.input_raw_lsi" class="card">
             <div class="text-xs text-gray-500 mb-2">LSI (input)</div>

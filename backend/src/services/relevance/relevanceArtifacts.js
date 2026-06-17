@@ -1,5 +1,7 @@
 'use strict';
 
+const { richTextToPlain } = require('../../utils/stripHtmlTags');
+
 /**
  * relevanceArtifacts — единый extractor «всего полезного» из relevance_report.
  *
@@ -121,9 +123,9 @@ function fromReportRow(row) {
         && topAgg.schema_profile.summary
         && topAgg.schema_profile.summary.recommendation_markdown) || '',
     voice_of_customer: voc ? {
-      target_audience: voc.input_target_audience || voc.target_audience || '',
-      niche_features:  voc.input_niche_features  || voc.niche_features  || '',
-      brand_facts:     voc.input_brand_facts     || voc.brand_facts     || '',
+      target_audience: richTextToPlain(voc.input_target_audience || voc.target_audience || ''),
+      niche_features:  richTextToPlain(voc.input_niche_features  || voc.niche_features  || ''),
+      brand_facts:     richTextToPlain(voc.input_brand_facts     || voc.brand_facts     || ''),
     } : null,
     cocoon_plan: row.cocoon_plan || null,
   };
