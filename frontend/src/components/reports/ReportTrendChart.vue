@@ -5,6 +5,8 @@
  *   • до 4 серий с заданными цветами,
  *   • прогноз пунктиром (поле dashed=true) с заливкой зоны 15% opacity,
  *   • двух-осный режим (yAxisID='y2'): отдельная правая ось для visibility.
+ *   • hover-tooltip с данными всех серий в выбранной точке,
+ *   • легенда с цветными маркерами и кликом для скрытия/показа серий.
  *
  * Props:
  *   labels: string[]      // подписи оси X (помесячно)
@@ -19,7 +21,7 @@
  *   showSecondAxis?: boolean
  *   annotations?: Array<{ bucket?: string, date?: string, label?: string }>
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
 const props = defineProps({
   labels: { type: Array, default: () => [] },
@@ -35,9 +37,25 @@ const PAD = { l: 50, r: 50, t: 16, b: 36 };
 const innerW = computed(() => props.width - PAD.l - PAD.r);
 const innerH = computed(() => props.height - PAD.t - PAD.b);
 
+const hiddenSeries = ref(new Set());
+const hoverIndex = ref(-1);
+
+function toggleSeries(idx) {
+  const next = new Set(hiddenSeries.value);
+  if (next.has(idx)) next.delete(idx);
+  else next.add(idx);
+  hiddenSeries.value = next;
+}
+
+const visibleDatasets = computed(() =>
+  props.datasets.map((ds, i) => hiddenSeries.value.has(i) ? { ...ds, _hidden: true } : ds),
+);
+
 function _yMaxFor(axis) {
   let m = 0;
-  for (const ds of props.datasets) {
+  for (let di = 0; di < props.datasets.length; di++) {
+    if (hiddenSeries.value.has(di)) continue;
+    const ds = props.datasets[di];
     const onAxis = axis === 'y' ? (ds.yAxisID || 'y') === 'y' : (ds.yAxisID === 'y2');
     if (!onAxis) continue;
     for (const v of ds.data) if (typeof v === 'number' && v > m) m = v;
@@ -73,7 +91,6 @@ function pathOf(ds) {
 }
 
 function fillPathOf(ds) {
-  // Простейшая зона: линия + спуск к низу первого/последнего ненулевого x.
   const pts = ds.data || [];
   let firstIdx = -1; let lastIdx = -1;
   for (let i = 0; i < pts.length; i++) {
@@ -112,23 +129,30 @@ function _formatNum(v) {
   if (v >= 1000) return `${Math.round(v / 100) / 10}k`;
   return Math.round(v).toString();
 }
+
+function _formatTooltipNum(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+}
+
 const xLabels = computed(() => {
-  // Показываем не более 8 подписей.
   const labels = props.labels;
   const n = labels.length;
-  if (n <= 8) return labels.map((l, i) => ({ x: xFor(i), label: _shortMonth(l) }));
+  if (n <= 8) return labels.map((l, i) => ({ x: xFor(i), label: _shortLabel(l) }));
   const step = Math.ceil(n / 8);
-  return labels.map((l, i) => ({ x: xFor(i), label: i % step === 0 ? _shortMonth(l) : '' }));
+  return labels.map((l, i) => ({ x: xFor(i), label: i % step === 0 ? _shortLabel(l) : '' }));
 });
 
-function _shortMonth(label) {
+function _shortLabel(label) {
   if (!label) return '';
-  // YYYY-MM-DD → "Янв 2026"
-  const m = String(label).match(/^(\d{4})-(\d{2})/);
+  const m = String(label).match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/);
   if (!m) return label;
   const months = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
-  return `${months[parseInt(m[2], 10) - 1] || ''} ${m[1].slice(2)}`;
+  const mo = months[parseInt(m[2], 10) - 1] || '';
+  if (m[3] && m[3] !== '01') return `${parseInt(m[3], 10)} ${mo}`;
+  return `${mo} ${m[1].slice(2)}`;
 }
+
 const chartAnnotations = computed(() => {
   const labels = props.labels || [];
   return (props.annotations || [])
@@ -144,10 +168,38 @@ const chartAnnotations = computed(() => {
     })
     .filter(Boolean);
 });
+
+// Hover tooltip data
+const tooltipData = computed(() => {
+  if (hoverIndex.value < 0 || hoverIndex.value >= props.labels.length) return null;
+  const idx = hoverIndex.value;
+  const items = props.datasets.map((ds, di) => ({
+    label: ds.label,
+    color: ds.color,
+    value: ds.data?.[idx],
+    hidden: hiddenSeries.value.has(di),
+  })).filter((it) => !it.hidden);
+  return { label: props.labels[idx], x: xFor(idx), items };
+});
+
+// Invisible hover rects for each data point column
+const hoverZones = computed(() => {
+  const n = props.labels.length;
+  if (n < 1) return [];
+  const colW = n > 1 ? innerW.value / (n - 1) : innerW.value;
+  return props.labels.map((_, i) => ({
+    x: xFor(i) - colW / 2,
+    w: colW,
+    idx: i,
+  }));
+});
+
+function onHover(idx) { hoverIndex.value = idx; }
+function onLeave() { hoverIndex.value = -1; }
 </script>
 
 <template>
-  <div class="report-trend-chart">
+  <div class="report-trend-chart" @mouseleave="onLeave">
     <svg :viewBox="`0 0 ${width} ${height}`" class="w-full h-auto" preserveAspectRatio="none">
       <!-- Y grid -->
       <g class="grid" stroke="rgba(0,0,0,0.06)" stroke-width="1">
@@ -173,48 +225,121 @@ const chartAnnotations = computed(() => {
         </g>
       </g>
       <!-- Datasets -->
-      <g v-for="(ds, di) in datasets" :key="`ds${di}`">
-        <path v-if="ds.fill"
-              :d="fillPathOf(ds)"
-              :fill="ds.color"
-              fill-opacity="0.12"
-              stroke="none" />
-        <path :d="pathOf(ds)"
-              fill="none"
-              :stroke="ds.color"
-              stroke-width="2"
-              :stroke-dasharray="ds.dashed ? '6,4' : '0'"
-              stroke-linecap="round"
-              stroke-linejoin="round" />
+      <g v-for="(ds, di) in visibleDatasets" :key="`ds${di}`">
+        <template v-if="!ds._hidden">
+          <path v-if="ds.fill"
+                :d="fillPathOf(ds)"
+                :fill="ds.color"
+                fill-opacity="0.12"
+                stroke="none" />
+          <path :d="pathOf(ds)"
+                fill="none"
+                :stroke="ds.color"
+                stroke-width="2"
+                :stroke-dasharray="ds.dashed ? '6,4' : '0'"
+                stroke-linecap="round"
+                stroke-linejoin="round" />
+        </template>
+      </g>
+      <!-- Hover crosshair + dots -->
+      <template v-if="hoverIndex >= 0 && hoverIndex < labels.length">
+        <line :x1="xFor(hoverIndex)" :x2="xFor(hoverIndex)"
+              :y1="PAD.t" :y2="PAD.t + innerH"
+              stroke="rgba(0,0,0,0.15)" stroke-width="1" stroke-dasharray="3,3" />
+        <template v-for="(ds, di) in datasets" :key="`dot${di}`">
+          <circle v-if="!hiddenSeries.has(di) && ds.data?.[hoverIndex] != null && Number.isFinite(ds.data[hoverIndex])"
+                  :cx="xFor(hoverIndex)"
+                  :cy="yFor(ds.data[hoverIndex], ds.yAxisID || 'y')"
+                  r="4" :fill="ds.color" stroke="#fff" stroke-width="2" />
+        </template>
+      </template>
+      <!-- Invisible hover zones -->
+      <g>
+        <rect v-for="hz in hoverZones" :key="`hz${hz.idx}`"
+              :x="Math.max(PAD.l, hz.x)" :y="PAD.t"
+              :width="Math.min(hz.w, width - PAD.r - Math.max(PAD.l, hz.x))"
+              :height="innerH"
+              fill="transparent"
+              @mouseenter="onHover(hz.idx)"
+              style="cursor: crosshair" />
       </g>
     </svg>
+    <!-- Tooltip -->
+    <div v-if="tooltipData" class="chart-tooltip"
+         :style="{ left: `${Math.min(Math.max(tooltipData.x / width * 100, 10), 90)}%` }">
+      <div class="tooltip-date">{{ tooltipData.label }}</div>
+      <div v-for="(item, idx) in tooltipData.items" :key="idx" class="tooltip-row">
+        <span class="tooltip-dot" :style="{ background: item.color }" />
+        <span class="tooltip-label">{{ item.label }}</span>
+        <span class="tooltip-value">{{ _formatTooltipNum(item.value) }}</span>
+      </div>
+    </div>
+    <!-- Legend -->
     <div class="chart-legend">
-      <span v-for="(ds, i) in datasets" :key="`lg${i}`" class="legend-item">
-        <span class="legend-swatch" :style="{ backgroundColor: ds.color, borderStyle: ds.dashed ? 'dashed' : 'solid' }" />
-        {{ ds.label }}
-      </span>
+      <button v-for="(ds, i) in datasets" :key="`lg${i}`"
+              class="legend-item" :class="{ dimmed: hiddenSeries.has(i) }"
+              @click="toggleSeries(i)">
+        <span class="legend-swatch" :style="{
+          borderColor: ds.color,
+          borderStyle: ds.dashed ? 'dashed' : 'solid',
+          opacity: hiddenSeries.has(i) ? 0.35 : 1,
+        }" />
+        <span class="legend-text" :style="{ color: hiddenSeries.has(i) ? 'rgba(0,0,0,0.3)' : ds.color }">{{ ds.label }}</span>
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
-.report-trend-chart { width: 100%; }
+.report-trend-chart { width: 100%; position: relative; }
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 18px;
-  margin-top: 6px;
+  gap: 8px 16px;
+  margin-top: 8px;
   font-size: 12px;
-  color: rgba(0,0,0,0.65);
 }
-.legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.legend-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: none; padding: 4px 6px; border-radius: 8px;
+  cursor: pointer; transition: opacity 0.15s;
+  font: inherit;
+}
+.legend-item:hover { background: rgba(0,0,0,0.04); }
+.legend-item.dimmed { opacity: 0.55; }
 .legend-swatch {
   display: inline-block;
-  width: 14px; height: 0; border-top-width: 3px; border-color: currentColor;
-  background: transparent !important;
+  width: 18px; height: 0; border-top: 3px solid;
 }
-.legend-item .legend-swatch { background: transparent !important; }
-.legend-item span.legend-swatch {
-  width: 18px; height: 0; border-top: 3px solid; display: inline-block;
+.legend-text {
+  font-weight: 500;
+  transition: color 0.15s;
 }
+.chart-tooltip {
+  position: absolute;
+  top: 8px;
+  transform: translateX(-50%);
+  background: rgba(255,255,255,0.96);
+  border: 1px solid rgba(60,60,67,0.12);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 12px;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.10);
+  z-index: 10;
+  min-width: 140px;
+  backdrop-filter: blur(8px);
+}
+.tooltip-date {
+  font-weight: 600; margin-bottom: 6px; color: #1d1d1f;
+}
+.tooltip-row {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 3px;
+}
+.tooltip-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.tooltip-label { color: #6e6e73; flex: 1; }
+.tooltip-value { font-weight: 600; color: #1d1d1f; }
 </style>
