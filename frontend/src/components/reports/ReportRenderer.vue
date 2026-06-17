@@ -22,6 +22,13 @@ const emit = defineEmits(['update:tasksBlocks']);
 const accent = computed(() => props.project?.color_accent || '#0a84ff');
 const accentBg = computed(() => `${accent.value}15`);
 
+// Keys.so search engine toggle (Яндекс / Google)
+const keysEngine = ref('yandex');
+const hasGoogleKeys = computed(() => {
+  const g = props.data?.keys_so?.google;
+  return g && g.series && g.series.length > 0;
+});
+
 // --- Section state helpers ---
 function sectionState(section) {
   if (!section) return 'empty';
@@ -84,12 +91,16 @@ const ywmChart = computed(() => {
 });
 
 const keysChart = computed(() => {
-  const series = props.data?.keys_so?.series || [];
+  const engine = keysEngine.value;
+  const engineData = engine === 'google' ? props.data?.keys_so?.google : props.data?.keys_so?.yandex;
+  const series = engineData?.series || (engine === 'yandex' ? (props.data?.keys_so?.series || []) : []);
   if (!series.length) return null;
+  const colorVis = engine === 'google' ? '#ea4335' : '#6e5dc6';
+  const label = engine === 'google' ? 'Google' : 'Яндекс';
   return {
     labels: series.map((r) => r.date),
     datasets: [
-      { label: 'Видимость', color: '#6e5dc6', data: series.map((r) => Number(r.visibility) || 0), yAxisID: 'y2' },
+      { label: `Видимость (${label})`, color: colorVis, data: series.map((r) => Number(r.visibility) || 0), yAxisID: 'y2' },
       { label: 'ТОП-10', color: '#2563eb', data: series.map((r) => Number(r.keywords_top10) || 0) },
       { label: 'ТОП-50', color: '#f59e0b', data: series.map((r) => Number(r.keywords_top50) || 0) },
     ],
@@ -113,11 +124,17 @@ const totals = computed(() => {
     out.push({ label: 'Яндекс показы', value: Number(y.impressions || 0).toLocaleString('ru-RU') });
     out.push({ label: 'Яндекс CTR', value: y.ctr != null ? `${Number(y.ctr).toFixed(2)}%` : '—' });
   }
-  const k = props.data?.keys_so?.current;
+  const k = props.data?.keys_so?.yandex?.current || props.data?.keys_so?.current;
   if (k) {
-    out.push({ label: 'Видимость Keys.so', value: k.visibility != null ? Number(k.visibility).toFixed(2) : '—' });
-    out.push({ label: 'ТОП-10', value: Number(k.top10 || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'ТОП-50', value: Number(k.top50 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Видимость Яндекс (Keys.so)', value: k.visibility != null ? Number(k.visibility).toFixed(2) : '—' });
+    out.push({ label: 'ТОП-10 Яндекс', value: Number(k.top10 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'ТОП-50 Яндекс', value: Number(k.top50 || 0).toLocaleString('ru-RU') });
+  }
+  const kg = props.data?.keys_so?.google?.current;
+  if (kg) {
+    out.push({ label: 'Видимость Google (Keys.so)', value: kg.visibility != null ? Number(kg.visibility).toFixed(2) : '—' });
+    out.push({ label: 'ТОП-10 Google', value: Number(kg.top10 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'ТОП-50 Google', value: Number(kg.top50 || 0).toLocaleString('ru-RU') });
   }
   const p = props.data?.position?.summary;
   if (p) {
@@ -324,7 +341,9 @@ const ywmDeltas = computed(() => {
 });
 
 const keysDeltas = computed(() => {
-  const series = props.data?.keys_so?.series || [];
+  const engine = keysEngine.value;
+  const engineData = engine === 'google' ? props.data?.keys_so?.google : props.data?.keys_so?.yandex;
+  const series = engineData?.series || (engine === 'yandex' ? (props.data?.keys_so?.series || []) : []);
   return {
     top10: _computeDeltas(series, 'keywords_top10'),
     top50: _computeDeltas(series, 'keywords_top50'),
@@ -451,6 +470,19 @@ function formatAbsDelta(d) {
     <section id="report-keys-so" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
       <h2>Видимость в поиске (Keys.so)</h2>
       <p class="chart-desc">Индекс видимости, количество запросов в ТОП-10 и ТОП-50 по данным Keys.so.</p>
+      <div v-if="hasGoogleKeys || true" class="keys-engine-toggle">
+        <button
+          class="engine-btn"
+          :class="{ active: keysEngine === 'yandex' }"
+          @click="keysEngine = 'yandex'"
+        >Яндекс</button>
+        <button
+          class="engine-btn"
+          :class="{ active: keysEngine === 'google', disabled: !hasGoogleKeys }"
+          :disabled="!hasGoogleKeys"
+          @click="keysEngine = 'google'"
+        >Google</button>
+      </div>
       <div v-if="keysDeltas.top10 || keysDeltas.top50" class="chart-deltas">
         <span v-if="keysDeltas.top10" class="delta-badge" :class="{ up: keysDeltas.top10.diff >= 0, down: keysDeltas.top10.diff < 0 }">
           ТОП-10: {{ formatAbsDelta(keysDeltas.top10) }} ({{ formatDelta(keysDeltas.top10) }})
@@ -612,6 +644,18 @@ function formatAbsDelta(d) {
   font-size: 12px; font-weight: 600;
 }
 .summary-text { white-space: pre-wrap; line-height: 1.7; }
+.keys-engine-toggle {
+  display: inline-flex; gap: 0; border-radius: 10px; overflow: hidden;
+  border: 1px solid rgba(60,60,67,0.15); margin-bottom: 12px;
+}
+.engine-btn {
+  padding: 6px 18px; font-size: 13px; font-weight: 600; border: none;
+  background: #f5f5f7; color: #6e6e73; cursor: pointer; transition: all 0.2s;
+}
+.engine-btn:first-child { border-right: 1px solid rgba(60,60,67,0.1); }
+.engine-btn.active { background: var(--accent); color: #fff; }
+.engine-btn.disabled { opacity: 0.4; cursor: not-allowed; }
+.engine-btn:not(.active):not(.disabled):hover { background: rgba(10,132,255,0.08); color: #0a84ff; }
 .totals-grid, .growth-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

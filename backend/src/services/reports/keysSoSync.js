@@ -13,19 +13,20 @@
  */
 
 const db = require('../../config/db');
-const { getDomainDashboard, KeysSoError, _normalizeDomain, _normalizeBase } = require('./keysSoClient');
+const { getDomainDashboard, KeysSoError, _normalizeDomain, _normalizeBase, getGoogleBase } = require('./keysSoClient');
 
 function _hasApiKey() {
   return !!(process.env.KEYS_SO_API_KEY || process.env.KEYSSO_API_KEY);
 }
 
 async function _upsertSnapshot(snap) {
+  const engine = snap.search_engine || 'yandex';
   await db.query(
     `INSERT INTO keys_so_cache
        (domain, date, yandex_traffic, google_traffic, visibility,
-       keywords_top1, keywords_top3, keywords_top10, keywords_top50, keywords_total, adcost, fetched_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW())
-     ON CONFLICT (domain, date) DO UPDATE SET
+       keywords_top1, keywords_top3, keywords_top10, keywords_top50, keywords_total, adcost, search_engine, fetched_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW())
+     ON CONFLICT (domain, date, search_engine) DO UPDATE SET
        yandex_traffic = EXCLUDED.yandex_traffic,
        google_traffic = EXCLUDED.google_traffic,
        visibility     = EXCLUDED.visibility,
@@ -40,6 +41,7 @@ async function _upsertSnapshot(snap) {
      snap.domain, snap.date,
      snap.yandex_traffic, snap.google_traffic, snap.visibility,
      snap.keywords_top1, snap.keywords_top3, snap.keywords_top10, snap.keywords_top50, snap.keywords_total, snap.adcost,
+     engine,
     ],
   );
 }
@@ -68,9 +70,10 @@ async function syncDomain(domain, opts = {}) {
   }
 
   const { overview, history } = dashboard;
+  const searchEngine = opts.searchEngine || 'yandex';
   const monthsToSave = history.slice(-months);
   for (const row of monthsToSave) {
-    await _upsertSnapshot({ domain: norm, ...row });
+    await _upsertSnapshot({ domain: norm, search_engine: searchEngine, ...row });
   }
 
   // overview сохраняем датой = первое число текущего месяца (перезапишет
@@ -78,13 +81,29 @@ async function syncDomain(domain, opts = {}) {
   // overview даёт более актуальные значения).
   const today = new Date();
   const monthFirst = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, '0')}-01`;
-  await _upsertSnapshot({ domain: norm, date: monthFirst, ...overview });
+  await _upsertSnapshot({ domain: norm, date: monthFirst, search_engine: searchEngine, ...overview });
+
+  // ── Google: если для региона есть Google-база, синхронизируем и её ──
+  let googleSynced = false;
+  if (searchEngine === 'yandex') {
+    const googleBase = getGoogleBase(base);
+    if (googleBase) {
+      try {
+        await syncDomain(norm, { ...opts, base: googleBase, searchEngine: 'google', client });
+        googleSynced = true;
+      } catch (err) {
+        // Google-sync не критичен — логируем и продолжаем.
+        console.warn(`[keysSoSync] Google sync failed for ${norm} (base=${googleBase}): ${err.message}`);
+      }
+    }
+  }
 
   return {
     domain: norm,
     base,
     syncedMonths: monthsToSave.length,
     hasOverview: true,
+    googleSynced,
   };
 }
 
@@ -116,9 +135,10 @@ async function syncAllDomains(opts = {}) {
 }
 
 /** Чтение из кэша: помесячный ряд за период. */
-async function loadCachedSeries(domain, dateFrom, dateTo) {
+async function loadCachedSeries(domain, dateFrom, dateTo, searchEngine) {
   if (!domain) return [];
   const norm = _normalizeDomain(domain);
+  const engine = searchEngine || 'yandex';
   const { rows } = await db.query(
     `SELECT to_char(date, 'YYYY-MM-DD') AS date,
             yandex_traffic, google_traffic, visibility,
@@ -127,16 +147,18 @@ async function loadCachedSeries(domain, dateFrom, dateTo) {
       WHERE domain = $1
         AND date >= date_trunc('month', $2::date)
         AND date <= date_trunc('month', $3::date)
+        AND search_engine = $4
       ORDER BY date ASC`,
-    [norm, dateFrom, dateTo],
+    [norm, dateFrom, dateTo, engine],
   );
   return rows;
 }
 
 /** Самый свежий snapshot для домена (для блока «Текущие показатели»). */
-async function loadCurrent(domain) {
+async function loadCurrent(domain, searchEngine) {
   if (!domain) return null;
   const norm = _normalizeDomain(domain);
+  const engine = searchEngine || 'yandex';
   const { rows } = await db.query(
     `SELECT to_char(date, 'YYYY-MM-DD') AS date,
             yandex_traffic, google_traffic, visibility,
@@ -144,9 +166,10 @@ async function loadCurrent(domain) {
             fetched_at
        FROM keys_so_cache
       WHERE domain = $1
+        AND search_engine = $2
       ORDER BY date DESC
       LIMIT 1`,
-    [norm],
+    [norm, engine],
   );
   return rows[0] || null;
 }

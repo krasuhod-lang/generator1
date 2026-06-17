@@ -42,6 +42,40 @@ const VALID_BASES = new Set([
   'mns', 'tmn', 'gmns', 'tom', 'gny',
 ]);
 
+/**
+ * Маппинг Яндекс-база → Google-база.
+ * Keys.so хранит отдельные базы для Яндекса и Google.
+ * Если Google-базы для региона нет — вернём null.
+ */
+const YANDEX_TO_GOOGLE_BASE = {
+  msk: 'gru',    // Москва
+  spb: 'gru',    // СПб → ближайшая Google-база Москва
+  rnd: 'gru',
+  ekb: 'gru',
+  ufa: 'gru',
+  sar: 'gru',
+  krr: 'gru',
+  prm: 'gru',
+  sam: 'gru',
+  kry: 'gru',
+  oms: 'gru',
+  kzn: 'gru',
+  che: 'gru',
+  nsk: 'gru',
+  nnv: 'gru',
+  vlg: 'gru',
+  vrn: 'gru',
+  tmn: 'gru',
+  tom: 'gru',
+  mns: 'gmns',   // Минск
+};
+
+/** Возвращает Google-базу Keys.so для заданной Яндекс-базы (или null). */
+function getGoogleBase(yandexBase) {
+  const b = _normalizeBase(yandexBase);
+  return YANDEX_TO_GOOGLE_BASE[b] || null;
+}
+
 class KeysSoError extends Error {
   constructor(message, code = 'keys_so_error', status = 502) {
     super(message);
@@ -244,9 +278,11 @@ module.exports = {
   getDomainDashboard,
   getDomainOverview,
   getDomainHistory,
+  getGoogleBase,
   KeysSoError,
   _normalizeDomain,
   _normalizeBase,
   _monthKeyToDate,
   VALID_BASES,
+  YANDEX_TO_GOOGLE_BASE,
 };

@@ -2190,8 +2190,9 @@ async function ensureSchema() {
         keywords_top50  INTEGER,
         keywords_total  INTEGER,
         adcost          NUMERIC(14,2),
+        search_engine   VARCHAR(8) NOT NULL DEFAULT 'yandex',
         fetched_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(domain, date)
+        UNIQUE(domain, date, search_engine)
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_keys_so_cache_domain_date ON keys_so_cache (domain, date DESC)`);
@@ -2328,6 +2329,10 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_traffic_value TEXT`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS keywords_top50 INTEGER`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS adcost NUMERIC(14,2)`);
+    await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS search_engine VARCHAR(8) NOT NULL DEFAULT 'yandex'`);
+    // Replace old UNIQUE(domain,date) with UNIQUE(domain,date,search_engine) for Google support
+    await db.query(`DROP INDEX IF EXISTS keys_so_cache_domain_date_key`);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS keys_so_cache_domain_date_engine_key ON keys_so_cache (domain, date, search_engine)`);
     await db.query(`ALTER TABLE position_results ADD COLUMN IF NOT EXISTS is_found BOOLEAN NOT NULL DEFAULT FALSE`);
     await db.query(`ALTER TABLE position_results ADD COLUMN IF NOT EXISTS result_page INTEGER`);
 
