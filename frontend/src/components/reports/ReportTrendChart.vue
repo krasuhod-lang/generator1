@@ -196,6 +196,36 @@ const hoverZones = computed(() => {
 
 function onHover(idx) { hoverIndex.value = idx; }
 function onLeave() { hoverIndex.value = -1; }
+
+// --- Trend delta labels at line endpoints ---
+const trendDeltas = computed(() => {
+  return props.datasets.map((ds, di) => {
+    if (hiddenSeries.value.has(di)) return null;
+    const pts = ds.data || [];
+    // Find first and last non-null values
+    let firstVal = null, lastVal = null, lastIdx = -1;
+    for (let i = 0; i < pts.length; i++) {
+      if (pts[i] != null && Number.isFinite(pts[i])) {
+        if (firstVal === null) firstVal = pts[i];
+        lastVal = pts[i];
+        lastIdx = i;
+      }
+    }
+    if (firstVal === null || lastVal === null || lastIdx < 1) return null;
+    const diff = lastVal - firstVal;
+    if (firstVal === 0 && diff === 0) return null;
+    const pct = firstVal > 0 ? Math.round(((lastVal - firstVal) / firstVal) * 1000) / 10 : null;
+    const sign = diff >= 0 ? '+' : '';
+    const axis = ds.yAxisID || 'y';
+    return {
+      x: xFor(lastIdx) + 4,
+      y: yFor(lastVal, axis),
+      label: pct != null ? `${sign}${pct}%` : '',
+      color: ds.color,
+      up: diff >= 0,
+    };
+  }).filter(Boolean);
+});
 </script>
 
 <template>
@@ -240,6 +270,16 @@ function onLeave() { hoverIndex.value = -1; }
                 stroke-linecap="round"
                 stroke-linejoin="round" />
         </template>
+      </g>
+      <!-- Trend delta labels at line endpoints -->
+      <g v-for="(td, ti) in trendDeltas" :key="`td${ti}`">
+        <rect v-if="td.label"
+              :x="td.x - 2" :y="td.y - 8" :width="td.label.length * 7 + 8" height="16"
+              rx="4" :fill="td.up ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)'" />
+        <text v-if="td.label"
+              :x="td.x + 2" :y="td.y + 3.5"
+              font-size="10" font-weight="700" font-family="-apple-system, sans-serif"
+              :fill="td.up ? '#059669' : '#dc2626'">{{ td.label }}</text>
       </g>
       <!-- Hover crosshair + dots -->
       <template v-if="hoverIndex >= 0 && hoverIndex < labels.length">

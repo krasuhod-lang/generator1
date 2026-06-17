@@ -130,10 +130,13 @@ const totals = computed(() => {
 const growthItems = computed(() => {
   const raw = props.summary?.growth_attribution;
   if (!raw) return [];
-  if (typeof raw === 'string') return [{ metric: 'Общая динамика', attribution: raw, conclusion: '', forecast: '', weak_zones: '' }];
+  if (typeof raw === 'string') return [{ metric: 'Общая динамика', trend_direction: '', delta_value: '', delta_pct: '', attribution: raw, conclusion: '', forecast: '', weak_zones: '' }];
   if (!Array.isArray(raw)) return [];
   return raw.map((g) => ({
     metric: String(g?.metric || '').trim(),
+    trend_direction: String(g?.trend_direction || '').trim(),
+    delta_value: String(g?.delta_value || '').trim(),
+    delta_pct: String(g?.delta_pct || '').trim(),
     attribution: String(g?.attribution || '').trim(),
     conclusion: String(g?.conclusion || '').trim(),
     forecast: String(g?.forecast || '').trim(),
@@ -292,6 +295,53 @@ function formatDateTime(iso) {
   if (!iso) return '';
   return new Date(iso).toLocaleString('ru-RU');
 }
+
+// --- Chart growth dynamics helpers ---
+function _computeDeltas(series, key) {
+  if (!Array.isArray(series) || series.length < 2) return null;
+  const last = Number(series[series.length - 1]?.[key]) || 0;
+  const prev = Number(series[series.length - 2]?.[key]) || 0;
+  if (!prev && !last) return null;
+  const diff = last - prev;
+  const pct = prev > 0 ? Math.round(((last - prev) / prev) * 1000) / 10 : null;
+  return { last, prev, diff, pct };
+}
+
+const gscDeltas = computed(() => {
+  const series = props.data?.gsc?.series || [];
+  return {
+    clicks: _computeDeltas(series, 'clicks'),
+    impressions: _computeDeltas(series, 'impressions'),
+  };
+});
+
+const ywmDeltas = computed(() => {
+  const series = props.data?.ywm?.series || [];
+  return {
+    clicks: _computeDeltas(series, 'clicks'),
+    impressions: _computeDeltas(series, 'impressions'),
+  };
+});
+
+const keysDeltas = computed(() => {
+  const series = props.data?.keys_so?.series || [];
+  return {
+    top10: _computeDeltas(series, 'keywords_top10'),
+    top50: _computeDeltas(series, 'keywords_top50'),
+  };
+});
+
+function formatDelta(d) {
+  if (!d) return '';
+  const sign = d.pct >= 0 ? '+' : '';
+  return d.pct != null ? `${sign}${d.pct}%` : '';
+}
+
+function formatAbsDelta(d) {
+  if (!d) return '';
+  const sign = d.diff >= 0 ? '+' : '';
+  return `${sign}${Math.round(d.diff).toLocaleString('ru-RU')}`;
+}
 </script>
 
 <template>
@@ -351,6 +401,14 @@ function formatDateTime(iso) {
     <section id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
       <h2>Google Search Console</h2>
       <p class="chart-desc">Клики, показы и CTR из органической выдачи Google за выбранный период.</p>
+      <div v-if="gscDeltas.clicks || gscDeltas.impressions" class="chart-deltas">
+        <span v-if="gscDeltas.clicks" class="delta-badge" :class="{ up: gscDeltas.clicks.diff >= 0, down: gscDeltas.clicks.diff < 0 }">
+          Клики: {{ formatAbsDelta(gscDeltas.clicks) }} ({{ formatDelta(gscDeltas.clicks) }})
+        </span>
+        <span v-if="gscDeltas.impressions" class="delta-badge" :class="{ up: gscDeltas.impressions.diff >= 0, down: gscDeltas.impressions.diff < 0 }">
+          Показы: {{ formatAbsDelta(gscDeltas.impressions) }} ({{ formatDelta(gscDeltas.impressions) }})
+        </span>
+      </div>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.gsc) === 'error'" class="section-error">
         <span class="error-icon">⚠️</span> Ошибка загрузки данных GSC: {{ sectionError(data?.gsc) }}
@@ -368,6 +426,14 @@ function formatDateTime(iso) {
     <section id="report-ywm" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
       <h2>Яндекс.Вебмастер</h2>
       <p class="chart-desc">Клики, показы и CTR из Яндекс.Вебмастер за выбранный период.</p>
+      <div v-if="ywmDeltas.clicks || ywmDeltas.impressions" class="chart-deltas">
+        <span v-if="ywmDeltas.clicks" class="delta-badge" :class="{ up: ywmDeltas.clicks.diff >= 0, down: ywmDeltas.clicks.diff < 0 }">
+          Клики: {{ formatAbsDelta(ywmDeltas.clicks) }} ({{ formatDelta(ywmDeltas.clicks) }})
+        </span>
+        <span v-if="ywmDeltas.impressions" class="delta-badge" :class="{ up: ywmDeltas.impressions.diff >= 0, down: ywmDeltas.impressions.diff < 0 }">
+          Показы: {{ formatAbsDelta(ywmDeltas.impressions) }} ({{ formatDelta(ywmDeltas.impressions) }})
+        </span>
+      </div>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.ywm) === 'error'" class="section-error">
         <span class="error-icon">⚠️</span> Ошибка загрузки данных Яндекс: {{ sectionError(data?.ywm) }}
@@ -385,6 +451,14 @@ function formatDateTime(iso) {
     <section id="report-keys-so" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
       <h2>Видимость в поиске (Keys.so)</h2>
       <p class="chart-desc">Индекс видимости, количество запросов в ТОП-10 и ТОП-50 по данным Keys.so.</p>
+      <div v-if="keysDeltas.top10 || keysDeltas.top50" class="chart-deltas">
+        <span v-if="keysDeltas.top10" class="delta-badge" :class="{ up: keysDeltas.top10.diff >= 0, down: keysDeltas.top10.diff < 0 }">
+          ТОП-10: {{ formatAbsDelta(keysDeltas.top10) }} ({{ formatDelta(keysDeltas.top10) }})
+        </span>
+        <span v-if="keysDeltas.top50" class="delta-badge" :class="{ up: keysDeltas.top50.diff >= 0, down: keysDeltas.top50.diff < 0 }">
+          ТОП-50: {{ formatAbsDelta(keysDeltas.top50) }} ({{ formatDelta(keysDeltas.top50) }})
+        </span>
+      </div>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.keys_so) === 'error'" class="section-error">
         <span class="error-icon">⚠️</span> Ошибка загрузки данных Keys.so: {{ sectionError(data?.keys_so) }}
@@ -408,7 +482,16 @@ function formatDateTime(iso) {
       <h2>Анализ показателей</h2>
       <div class="growth-grid">
         <article v-for="(item, idx) in growthItems" :key="idx" class="growth-card">
-          <h3>{{ item.metric || 'Метрика' }}</h3>
+          <div class="growth-header">
+            <h3>{{ item.metric || 'Метрика' }}</h3>
+            <div v-if="item.delta_pct || item.delta_value" class="growth-trend">
+              <span v-if="item.delta_pct" class="trend-badge" :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }">
+                <span class="trend-arrow">{{ item.trend_direction === 'up' ? '↑' : (item.trend_direction === 'down' ? '↓' : '→') }}</span>
+                {{ item.delta_pct }}
+              </span>
+              <span v-if="item.delta_value" class="trend-abs">{{ item.delta_value }}</span>
+            </div>
+          </div>
           <p v-if="item.attribution">{{ item.attribution }}</p>
           <p v-if="item.conclusion"><strong>Вывод:</strong> {{ item.conclusion }}</p>
           <p v-if="item.forecast"><strong>Прогноз:</strong> {{ item.forecast }}</p>
@@ -586,6 +669,36 @@ function formatDateTime(iso) {
 .actions-inline { display: flex; gap: 8px; flex-wrap: wrap; }
 .empty { color: #6e6e73; }
 .chart-desc { color: #6e6e73; font-size: 13px; margin: -2px 0 10px; line-height: 1.4; }
+.chart-deltas {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
+}
+.delta-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 12px; border-radius: 10px;
+  font-size: 13px; font-weight: 600;
+}
+.delta-badge.up {
+  background: rgba(16, 185, 129, 0.1); color: #059669;
+}
+.delta-badge.down {
+  background: rgba(239, 68, 68, 0.08); color: #b91c1c;
+}
+.growth-header {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 4px;
+}
+.growth-trend {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
+.trend-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 3px 10px; border-radius: 8px;
+  font-size: 13px; font-weight: 700;
+}
+.trend-badge.up { background: rgba(16, 185, 129, 0.12); color: #059669; }
+.trend-badge.down { background: rgba(239, 68, 68, 0.08); color: #b91c1c; }
+.trend-badge.stable { background: rgba(107, 114, 128, 0.1); color: #6b7280; }
+.trend-arrow { font-size: 14px; }
+.trend-abs { font-size: 12px; color: #6e6e73; font-weight: 500; }
 .section-empty {
   padding: 32px 16px; text-align: center; color: #86868b; font-size: 14px;
   background: rgba(60,60,67,0.03); border-radius: 12px;
