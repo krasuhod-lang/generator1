@@ -277,15 +277,22 @@ async function generateSummaryEndpoint(req, res) {
     [draft.id, req.user.id, jobId],
   );
 
+  // Capture filter state from request before going async.
+  const summaryOpts = {
+    from: req.query?.from || undefined,
+    to: req.query?.to || undefined,
+    granularity: req.query?.granularity || undefined,
+  };
+
   // Запуск без ожидания: возвращаем 202 с jobId, фронт опрашивает status.
-  setImmediate(() => _runSummaryJob(draft.id, req.user.id, jobId).catch((err) => {
+  setImmediate(() => _runSummaryJob(draft.id, req.user.id, jobId, summaryOpts).catch((err) => {
     console.error('[reports] summary job crashed:', err.message);
   }));
 
   res.status(202).json({ job_id: jobId, status: 'queued' });
 }
 
-async function _runSummaryJob(draftId, userId, jobId) {
+async function _runSummaryJob(draftId, userId, jobId, opts = {}) {
   await db.query(
     `UPDATE report_drafts SET llm_status = 'running', updated_at = NOW()
       WHERE id = $1 AND user_id = $2 AND llm_job_id = $3`,
@@ -295,9 +302,9 @@ async function _runSummaryJob(draftId, userId, jobId) {
     const draft = await _ownedDraft(draftId, userId);
     if (!draft) return;
     const data = await aggregateForDraft(draft, {
-      from: req.query?.from,
-      to: req.query?.to,
-      granularity: req.query?.granularity,
+      from: opts.from,
+      to: opts.to,
+      granularity: opts.granularity,
     });
     const summary = await generateSummary(data, {
       brandName: draft.project_name,

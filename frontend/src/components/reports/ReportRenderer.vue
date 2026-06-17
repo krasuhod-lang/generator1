@@ -71,8 +71,14 @@ const totals = computed(() => {
   if (g) {
     out.push({ label: 'Google клики', value: Number(g.clicks || 0).toLocaleString('ru-RU') });
     out.push({ label: 'Google показы', value: Number(g.impressions || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Google CTR', value: g.ctr != null ? `${(Number(g.ctr) * 100).toFixed(2)}%` : '—' });
-    out.push({ label: 'Ср. позиция', value: g.position != null ? Number(g.position).toFixed(1) : '—' });
+    out.push({ label: 'Google CTR', value: g.ctr != null ? `${Number(g.ctr).toFixed(2)}%` : '—' });
+    out.push({ label: 'Google ср. позиция', value: g.position != null ? Number(g.position).toFixed(1) : '—' });
+  }
+  const y = props.data?.ywm?.totals;
+  if (y) {
+    out.push({ label: 'Яндекс клики', value: Number(y.clicks || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Яндекс показы', value: Number(y.impressions || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Яндекс CTR', value: y.ctr != null ? `${Number(y.ctr).toFixed(2)}%` : '—' });
   }
   const k = props.data?.keys_so?.current;
   if (k) {
