@@ -93,8 +93,15 @@ async function saveMeta() {
 
 async function generateSummary() {
   summaryStatus.value = { status: 'queued', error: null };
-  await store.generateSummary(route.params.id, viewRange.value);
-  startPolling();
+  try {
+    await store.generateSummary(route.params.id, viewRange.value);
+    startPolling();
+  } catch (err) {
+    summaryStatus.value = {
+      status: 'error',
+      error: err.response?.data?.error || err.message || 'Ошибка генерации',
+    };
+  }
 }
 
 function startPolling() {

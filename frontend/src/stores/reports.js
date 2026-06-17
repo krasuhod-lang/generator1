@@ -83,7 +83,7 @@ export const useReportsStore = defineStore('reports', {
     },
 
     async generateSummary(id, params = {}) {
-      const { data } = await api.post(`/reports/drafts/${id}/generate-summary`, null, { params });
+      const { data } = await api.post(`/reports/drafts/${id}/generate-summary`, {}, { params });
       return data;
     },
 
