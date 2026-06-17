@@ -489,6 +489,8 @@ async function processAnalysis(analysisId) {
           gscPerformance: payload.performance,
           ydxPerformance: ydxPayload ? ydxPayload.performance : null,
           rankingFactors,
+          gscSnapshot: snapshot,
+          ydxSnapshot: ydxSnapshot,
         });
         if (syn && (syn.markdown || syn.verdict === 'ok')) synthesisMarkdown = syn.markdown || null;
       } catch (e) {
