@@ -45,7 +45,7 @@ async function _ownProject(req, res) {
   const { rows } = await db.query(
     `SELECT id, user_id, name, domain, engine::text AS engine,
             geo_lr, geo_loc, device::text AS device,
-            schedule::text AS schedule, last_run_at, created_at, updated_at
+            schedule::text AS schedule, parent_project_id, last_run_at, created_at, updated_at
        FROM position_projects
       WHERE id = $1`,
     [id],
@@ -63,7 +63,7 @@ async function listProjects(req, res, next) {
     const { rows } = await db.query(
       `SELECT p.id, p.name, p.domain, p.engine::text AS engine,
               p.geo_lr, p.geo_loc, p.device::text AS device,
-              p.schedule::text AS schedule, p.last_run_at, p.created_at,
+              p.schedule::text AS schedule, p.parent_project_id, p.last_run_at, p.created_at,
               (SELECT COUNT(*)::int FROM position_keywords k
                  WHERE k.project_id = p.id AND k.is_active = TRUE) AS keywords_active
          FROM position_projects p
@@ -97,7 +97,7 @@ async function createProject(req, res, next) {
       `INSERT INTO position_projects (user_id, name, domain, engine, geo_lr, geo_loc, device, schedule)
        VALUES ($1,$2,$3,$4::position_engine,$5,$6,$7::position_device,$8::position_schedule)
        RETURNING id, name, domain, engine::text AS engine, geo_lr, geo_loc,
-                 device::text AS device, schedule::text AS schedule, created_at`,
+                device::text AS device, schedule::text AS schedule, parent_project_id, created_at`,
       [req.user.id, name || domain, domain, engine, geo_lr, geo_loc, device, schedule],
     );
     res.status(201).json({ project: rows[0] });
@@ -158,7 +158,7 @@ async function updateProject(req, res, next) {
     const sql = `UPDATE position_projects SET ${fields.join(', ')}
                   WHERE id = $${params.length}
                   RETURNING id, name, domain, engine::text AS engine, geo_lr, geo_loc,
-                            device::text AS device, schedule::text AS schedule, last_run_at`;
+                            device::text AS device, schedule::text AS schedule, parent_project_id, last_run_at`;
     const { rows } = await db.query(sql, params);
     res.json({ project: rows[0] });
   } catch (err) { next(err); }

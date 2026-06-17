@@ -32,6 +32,7 @@ const store = useProjectsStore();
 
 const projectId = route.params.id;
 const project = ref(null);
+const positionProject = ref(null);
 const analyses = ref([]);
 const gscConfigured = ref(false);
 const datePresets = ref([]);
@@ -247,6 +248,7 @@ async function load() {
   try {
     const data = await store.getProject(projectId);
     project.value = data.project;
+    positionProject.value = data.position_project || data.project?.position_project || null;
     _syncBrandingFromProject();
     analyses.value = data.analyses || [];
     gscConfigured.value = !!data.gsc_configured;
@@ -552,6 +554,10 @@ onUnmounted(() => {
                   :style="project.color_accent ? `color:${project.color_accent}` : ''">{{ project.name }}</h1>
               <a :href="project.url" target="_blank" rel="noopener" class="text-sm text-indigo-400 hover:underline">{{ project.url }}</a>
             </div>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button v-if="positionProject?.id" class="btn-secondary" @click="router.push(`/position-tracker/${positionProject.id}`)">📈 Позиции</button>
+            <button class="btn-secondary" @click="router.push(`/reports/new?projectId=${project.id}`)">🧾 Новый отчёт</button>
           </div>
         </header>
 

@@ -74,7 +74,7 @@ async function remove(p) {
         </div>
         <div v-if="formError" class="text-sm text-red-400">{{ formError }}</div>
         <p class="text-xs text-gray-500">
-          После создания на странице проекта вы сможете подключить обе системы веб-аналитики —
+          После создания проект сразу получит связанное пространство для отчётов и съёма позиций. На странице проекта вы сможете подключить обе системы веб-аналитики —
           <span class="text-indigo-300">Google Search Console</span> и
           <span class="text-red-300">Яндекс.Вебмастер</span> — и сопоставить данные между ними.
         </p>
@@ -115,6 +115,12 @@ async function remove(p) {
                         ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
                         : 'border-gray-700 text-gray-400'">
                   {{ p.ydx_connected ? '🔗 Яндекс' : 'Яндекс —' }}
+                </span>
+                <span class="text-[11px] px-2 py-0.5 rounded-full border"
+                      :class="p.linked_position_project_id
+                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                        : 'border-gray-700 text-gray-400'">
+                  {{ p.linked_position_project_id ? '📈 Позиции' : 'Позиции —' }}
                 </span>
               </span>
             </div>

@@ -189,7 +189,9 @@ async function getDomainDashboard(domain, opts = {}) {
     keywords_top3: _int(node.it3),
     keywords_top5: _int(node.it5),
     keywords_top10: _int(node.it10),
+    keywords_top50: _int(node.it50),
     keywords_total: _int(node.it50),
+    adcost: _num(node.adcost ?? node.adCost),
     pages_in_index: _int(node.pagesinindex ?? node.pagesInIndex),
     domain_rating: _int(node.dr),
     ad_traffic: _int(node.adtraf),
@@ -210,7 +212,9 @@ async function getDomainDashboard(domain, opts = {}) {
         keywords_top1: _int(v.it1),
         keywords_top3: _int(v.it3),
         keywords_top10: _int(v.it10),
+        keywords_top50: _int(v.it50),
         keywords_total: _int(v.it50),
+        adcost: _num(v.adcost ?? v.adCost),
       };
     })
     .filter(Boolean)

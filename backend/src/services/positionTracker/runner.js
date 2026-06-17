@@ -84,12 +84,12 @@ async function _finishRun(runId, status, errorMsg) {
 async function _saveResult(row) {
   await db.query(
     `INSERT INTO position_results
-       (run_id, project_id, keyword_id, engine, position, found_url, serp_snippet)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
+      (run_id, project_id, keyword_id, engine, position, found_url, serp_snippet, is_found, result_page)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      ON CONFLICT (run_id, keyword_id, engine) DO NOTHING`,
     [
       row.run_id, row.project_id, row.keyword_id, row.engine,
-      row.position, row.found_url, row.serp_snippet,
+     row.position, row.found_url, row.serp_snippet, !!row.is_found, row.result_page || null,
     ],
   );
 }
@@ -182,6 +182,8 @@ async function runPositionRun(projectId, opts = {}) {
             position: r.position,
             found_url: r.foundUrl,
             serp_snippet: r.snippet,
+            is_found: r.position != null,
+            result_page: r.position != null ? Math.ceil(r.position / 10) : null,
           });
           await _bumpDone(run.id);
           return { keyword_id: kw.id, query: kw.query, position: r.position, foundUrl: r.foundUrl };
@@ -195,6 +197,8 @@ async function runPositionRun(projectId, opts = {}) {
             position: null,
             found_url: null,
             serp_snippet: `error: ${err.message || err}`.slice(0, 800),
+            is_found: false,
+            result_page: null,
           });
           await _bumpDone(run.id);
           return { keyword_id: kw.id, query: kw.query, position: null, error: err.message || String(err) };
