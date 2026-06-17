@@ -2271,6 +2271,9 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_position_projects_user ON position_projects (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_position_projects_schedule ON position_projects (schedule, last_run_at)`);
+    // Ensure parent_project_id exists before indexing it: pre-existing position_projects
+    // tables (created before this column was introduced) are not altered by CREATE TABLE IF NOT EXISTS.
+    await db.query(`ALTER TABLE position_projects ADD COLUMN IF NOT EXISTS parent_project_id UUID REFERENCES projects(id) ON DELETE CASCADE`);
     await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_position_projects_parent_project_unique ON position_projects (parent_project_id) WHERE parent_project_id IS NOT NULL`);
     await db.query(`
       CREATE TABLE IF NOT EXISTS position_keywords (
@@ -2325,7 +2328,6 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_traffic_value TEXT`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS keywords_top50 INTEGER`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS adcost NUMERIC(14,2)`);
-    await db.query(`ALTER TABLE position_projects ADD COLUMN IF NOT EXISTS parent_project_id UUID REFERENCES projects(id) ON DELETE CASCADE`);
     await db.query(`ALTER TABLE position_results ADD COLUMN IF NOT EXISTS is_found BOOLEAN NOT NULL DEFAULT FALSE`);
     await db.query(`ALTER TABLE position_results ADD COLUMN IF NOT EXISTS result_page INTEGER`);
 
