@@ -384,7 +384,11 @@ async function publishDraft(req, res) {
   let snapshotData = null;
   if (mode === 'snapshot') {
     try {
-      const data = await aggregateForDraft(draft);
+      const data = await aggregateForDraft(draft, {
+        from: req.query?.from,
+        to: req.query?.to,
+        granularity: req.query?.granularity,
+      });
       snapshotData = JSON.stringify({
         data,
         summary: _summaryPayloadFromDraft(draft),
@@ -592,35 +596,6 @@ async function publicGet(req, res) {
     };
   }
 
-  async function exportDraftDocx(req, res) {
-    const draft = await _ownedDraft(req.params.id, req.user.id);
-    if (!draft) return _bad(res, 404, 'Черновик не найден');
-    try {
-      const data = await aggregateForDraft(draft, {
-        from: req.body?.from,
-        to: req.body?.to,
-        granularity: req.body?.granularity,
-      });
-      const buffer = await buildReportDocx({
-        title: draft.title,
-        period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
-        project: {
-          name: draft.project_name,
-          url: draft.project_url,
-        },
-        data,
-        summary: _summaryPayloadFromDraft(draft),
-        tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
-        chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
-      });
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.docx"`);
-      res.send(buffer);
-    } catch (err) {
-      return _bad(res, 500, err.message || 'docx_export_failed');
-    }
-  }
-
   // Инкремент счётчика просмотров (best-effort, не блокирует ответ).
   db.query(
     `UPDATE shared_reports SET view_count = view_count + 1, last_viewed_at = NOW()
@@ -641,6 +616,35 @@ async function publicGet(req, res) {
     },
     payload,
   });
+}
+
+async function exportDraftDocx(req, res) {
+  const draft = await _ownedDraft(req.params.id, req.user.id);
+  if (!draft) return _bad(res, 404, 'Черновик не найден');
+  try {
+    const data = await aggregateForDraft(draft, {
+      from: req.body?.from,
+      to: req.body?.to,
+      granularity: req.body?.granularity,
+    });
+    const buffer = await buildReportDocx({
+      title: draft.title,
+      period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
+      project: {
+        name: draft.project_name,
+        url: draft.project_url,
+      },
+      data,
+      summary: _summaryPayloadFromDraft(draft),
+      tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
+      chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+    });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.docx"`);
+    res.send(buffer);
+  } catch (err) {
+    return _bad(res, 500, err.message || 'docx_export_failed');
+  }
 }
 
 async function publicUnlock(req, res) {
