@@ -678,6 +678,7 @@ function formatAbsDelta(d) {
 .section-card { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .task-card { padding: 12px; background: #fff; }
 .task-title { font-weight: 600; margin-bottom: 6px; }
+.task-html, .task-preview { white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
 .task-html :deep(a), .task-preview :deep(a) { color: var(--accent); text-decoration: underline; word-break: break-all; }
 .task-html :deep(img), .task-preview :deep(img) { max-width: 100%; height: auto; border-radius: 8px; margin: 8px 0; display: block; }
 .task-attach-row { display: flex; align-items: center; gap: 10px; }
