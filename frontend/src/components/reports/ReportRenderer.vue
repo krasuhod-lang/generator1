@@ -14,11 +14,43 @@ const props = defineProps({
   mode:        { type: String, default: 'live' },
   capturedAt:  { type: String, default: null },
   readonly:    { type: Boolean, default: true },
+  loading:     { type: Boolean, default: false },
 });
 const emit = defineEmits(['update:tasksBlocks']);
 
 const accent = computed(() => props.project?.color_accent || '#0a84ff');
 const accentBg = computed(() => `${accent.value}15`);
+
+// --- Section state helpers ---
+function sectionState(section) {
+  if (!section) return 'empty';
+  if (section.error) return 'error';
+  if (section.connected === false) return 'disconnected';
+  if (!section.series?.length) return 'empty';
+  return 'ok';
+}
+
+function sectionError(section) {
+  return section?.error || '';
+}
+
+// --- Navigation items ---
+const navItems = computed(() => {
+  const items = [{ id: 'summary', label: 'Сводка' }];
+  if (props.data?.gsc) items.push({ id: 'gsc', label: 'GSC' });
+  if (props.data?.ywm) items.push({ id: 'ywm', label: 'Яндекс' });
+  if (props.data?.keys_so) items.push({ id: 'keys-so', label: 'Keys.so' });
+  items.push({ id: 'tasks', label: 'Работы' });
+  if (props.summary?.executive_summary || props.summary?.highlights?.length) {
+    items.push({ id: 'ai-analysis', label: 'AI-выводы' });
+  }
+  return items;
+});
+
+function scrollTo(id) {
+  const el = document.getElementById(`report-${id}`);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 const gscChart = computed(() => {
   const series = props.data?.gsc?.series || [];
@@ -210,7 +242,13 @@ function formatDateTime(iso) {
       </div>
     </section>
 
-    <section v-if="summary?.executive_summary" class="rblk">
+    <!-- Anchor navigation -->
+    <nav class="report-nav" v-if="navItems.length > 1">
+      <button v-for="item in navItems" :key="item.id"
+              class="nav-link" @click="scrollTo(item.id)">{{ item.label }}</button>
+    </nav>
+
+    <section v-if="summary?.executive_summary" id="report-ai-analysis" class="rblk">
       <h2>Executive Summary</h2>
       <p class="summary-text">{{ summary.executive_summary }}</p>
     </section>
@@ -220,9 +258,12 @@ function formatDateTime(iso) {
       <p>{{ summary?.traffic_value || data?.traffic_value?.label }}</p>
     </section>
 
-    <section v-if="totals.length" class="rblk">
+    <section v-if="totals.length" id="report-summary" class="rblk">
       <h2>Ключевые показатели</h2>
-      <div class="totals-grid">
+      <div v-if="loading" class="skeleton-grid">
+        <div v-for="n in 6" :key="n" class="skeleton-card" />
+      </div>
+      <div v-else class="totals-grid">
         <div v-for="(t, i) in totals" :key="i" class="total-card">
           <div class="t-label">{{ t.label }}</div>
           <div class="t-value">{{ t.value }}</div>
@@ -237,23 +278,60 @@ function formatDateTime(iso) {
       </ul>
     </section>
 
-    <section v-if="gscChart" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
+    <!-- Google Search Console -->
+    <section id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
       <h2>Google Search Console</h2>
-      <ReportTrendChart :labels="gscChart.labels" :datasets="gscChart.datasets" :annotations="gscChart.annotations" :show-second-axis="gscChart.showSecondAxis" />
+      <p class="chart-desc">Клики, показы и CTR из органической выдачи Google за выбранный период.</p>
+      <div v-if="loading" class="skeleton-chart" />
+      <div v-else-if="sectionState(data?.gsc) === 'error'" class="section-error">
+        <span class="error-icon">⚠️</span> Ошибка загрузки данных GSC: {{ sectionError(data?.gsc) }}
+      </div>
+      <div v-else-if="sectionState(data?.gsc) === 'disconnected'" class="section-empty">
+        Google Search Console не подключён к проекту.
+      </div>
+      <div v-else-if="!gscChart" class="section-empty">
+        За выбранный период данных нет.
+      </div>
+      <ReportTrendChart v-else :labels="gscChart.labels" :datasets="gscChart.datasets" :annotations="gscChart.annotations" :show-second-axis="gscChart.showSecondAxis" />
     </section>
 
-    <section v-if="ywmChart" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
+    <!-- Яндекс.Вебмастер -->
+    <section id="report-ywm" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
       <h2>Яндекс.Вебмастер</h2>
-      <ReportTrendChart :labels="ywmChart.labels" :datasets="ywmChart.datasets" :annotations="ywmChart.annotations" :show-second-axis="ywmChart.showSecondAxis" />
+      <p class="chart-desc">Клики, показы и CTR из Яндекс.Вебмастер за выбранный период.</p>
+      <div v-if="loading" class="skeleton-chart" />
+      <div v-else-if="sectionState(data?.ywm) === 'error'" class="section-error">
+        <span class="error-icon">⚠️</span> Ошибка загрузки данных Яндекс: {{ sectionError(data?.ywm) }}
+      </div>
+      <div v-else-if="sectionState(data?.ywm) === 'disconnected'" class="section-empty">
+        Яндекс.Вебмастер не подключён к проекту.
+      </div>
+      <div v-else-if="!ywmChart" class="section-empty">
+        За выбранный период данных нет.
+      </div>
+      <ReportTrendChart v-else :labels="ywmChart.labels" :datasets="ywmChart.datasets" :annotations="ywmChart.annotations" :show-second-axis="ywmChart.showSecondAxis" />
     </section>
 
-    <section v-if="keysChart" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
+    <!-- Keys.so -->
+    <section id="report-keys-so" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
       <h2>Видимость в поиске (Keys.so)</h2>
-      <ReportTrendChart :labels="keysChart.labels" :datasets="keysChart.datasets" :annotations="keysChart.annotations" :show-second-axis="keysChart.showSecondAxis" />
+      <p class="chart-desc">Индекс видимости, количество запросов в ТОП-10 и ТОП-50 по данным Keys.so.</p>
+      <div v-if="loading" class="skeleton-chart" />
+      <div v-else-if="sectionState(data?.keys_so) === 'error'" class="section-error">
+        <span class="error-icon">⚠️</span> Ошибка загрузки данных Keys.so: {{ sectionError(data?.keys_so) }}
+      </div>
+      <div v-else-if="sectionState(data?.keys_so) === 'disconnected'" class="section-empty">
+        Keys.so не подключён к проекту.
+      </div>
+      <div v-else-if="!keysChart" class="section-empty">
+        За выбранный период данных нет.
+      </div>
+      <ReportTrendChart v-else :labels="keysChart.labels" :datasets="keysChart.datasets" :annotations="keysChart.annotations" :show-second-axis="keysChart.showSecondAxis" />
     </section>
 
     <section v-if="data?.position?.connected && data?.position?.series?.length" class="rblk" data-report-chart="position" data-report-chart-title="Динамика позиций">
       <h2>Динамика позиций</h2>
+      <p class="chart-desc">Средняя позиция и распределение по ТОП-10/ТОП-30 из трекера позиций.</p>
       <PositionChart :series="data.position.series" mode="position" />
     </section>
 
@@ -295,7 +373,7 @@ function formatDateTime(iso) {
       </ol>
     </section>
 
-    <section class="rblk">
+    <section id="report-tasks" class="rblk">
       <div class="tasks-head">
         <h2>Выполненные работы</h2>
         <button v-if="!readonly" class="small-btn" @click="addMonth">+ Месяц</button>
@@ -417,6 +495,40 @@ function formatDateTime(iso) {
 .small-btn.danger { background: rgba(255,59,48,0.08); color: #d70015; }
 .actions-inline { display: flex; gap: 8px; flex-wrap: wrap; }
 .empty { color: #6e6e73; }
+.chart-desc { color: #6e6e73; font-size: 13px; margin: -2px 0 10px; line-height: 1.4; }
+.section-empty {
+  padding: 32px 16px; text-align: center; color: #86868b; font-size: 14px;
+  background: rgba(60,60,67,0.03); border-radius: 12px;
+}
+.section-error {
+  padding: 24px 16px; text-align: center; color: #d70015; font-size: 13px;
+  background: rgba(255,59,48,0.06); border-radius: 12px;
+}
+.error-icon { font-size: 16px; }
+.skeleton-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;
+}
+.skeleton-card {
+  height: 70px; border-radius: 16px; background: linear-gradient(90deg, #f0f0f2 25%, #e8e8ea 50%, #f0f0f2 75%);
+  background-size: 200% 100%; animation: shimmer 1.5s infinite;
+}
+.skeleton-chart {
+  height: 200px; border-radius: 12px; background: linear-gradient(90deg, #f0f0f2 25%, #e8e8ea 50%, #f0f0f2 75%);
+  background-size: 200% 100%; animation: shimmer 1.5s infinite;
+}
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.report-nav {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  background: #fff; border: 1px solid rgba(60,60,67,0.12); border-radius: 14px;
+  padding: 8px 12px; position: sticky; top: 0; z-index: 5;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.04);
+}
+.nav-link {
+  background: rgba(60,60,67,0.06); border: none; border-radius: 10px;
+  padding: 7px 14px; font-size: 12px; font-weight: 500; color: #424245;
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.nav-link:hover { background: rgba(10,132,255,0.08); color: #0a84ff; }
 @media (max-width: 720px) {
   .header, .header-main, .month-head, .tasks-head { flex-direction: column; align-items: flex-start; }
   .rep-title { font-size: 24px; }
