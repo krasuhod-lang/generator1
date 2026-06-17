@@ -2331,6 +2331,9 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS adcost NUMERIC(14,2)`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS search_engine VARCHAR(8) NOT NULL DEFAULT 'yandex'`);
     // Replace old UNIQUE(domain,date) with UNIQUE(domain,date,search_engine) for Google support
+    // Must drop the constraint first — the index is owned by the UNIQUE constraint
+    // and cannot be dropped independently (PG error: "cannot drop index … because constraint … requires it").
+    await db.query(`ALTER TABLE keys_so_cache DROP CONSTRAINT IF EXISTS keys_so_cache_domain_date_key`);
     await db.query(`DROP INDEX IF EXISTS keys_so_cache_domain_date_key`);
     await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS keys_so_cache_domain_date_engine_key ON keys_so_cache (domain, date, search_engine)`);
     await db.query(`ALTER TABLE position_results ADD COLUMN IF NOT EXISTS is_found BOOLEAN NOT NULL DEFAULT FALSE`);
