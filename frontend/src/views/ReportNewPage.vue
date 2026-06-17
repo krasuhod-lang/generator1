@@ -3,12 +3,13 @@
  * ReportNewPage — мастер «Создать отчёт»: выбираем проект, период, заголовок.
  */
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import { useReportsStore } from '../stores/reports.js';
 import { useProjectsStore } from '../stores/projects.js';
 
 const router = useRouter();
+const route = useRoute();
 const reports = useReportsStore();
 const projects = useProjectsStore();
 
@@ -33,6 +34,7 @@ function _ymd(d) {
 
 onMounted(async () => {
   if (!projects.projects.length) await projects.fetchProjects();
+  if (route.query.projectId) projectId.value = String(route.query.projectId);
   // По умолчанию — прошлый полный месяц.
   const now = new Date();
   const prevMonthLast = new Date(now.getFullYear(), now.getMonth(), 0);
@@ -90,7 +92,7 @@ async function submit() {
           <select v-model="projectId" required>
             <option value="" disabled>— выберите проект —</option>
             <option v-for="p in projects.projects" :key="p.id" :value="p.id">
-              {{ p.name }} ({{ p.domain }})
+              {{ p.name }} ({{ p.url }})
             </option>
           </select>
         </label>

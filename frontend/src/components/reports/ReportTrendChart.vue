@@ -17,6 +17,7 @@
  *     yAxisID?: 'y'|'y2',
  *   }>
  *   showSecondAxis?: boolean
+ *   annotations?: Array<{ bucket?: string, date?: string, label?: string }>
  */
 import { computed } from 'vue';
 
@@ -26,6 +27,7 @@ const props = defineProps({
   width: { type: Number, default: 880 },
   height: { type: Number, default: 320 },
   showSecondAxis: { type: Boolean, default: false },
+  annotations: { type: Array, default: () => [] },
 });
 
 const PAD = { l: 50, r: 50, t: 16, b: 36 };
@@ -101,7 +103,7 @@ const ticksY2 = computed(() => {
   const out = []; const max = y2Max.value;
   for (let i = 0; i <= 4; i++) {
     const v = (max * i) / 4;
-    out.push({ y: yFor(v, 'y2'), label: _formatPct(v) });
+    out.push({ y: yFor(v, 'y2'), label: _formatNum(v) });
   }
   return out;
 });
@@ -110,10 +112,6 @@ function _formatNum(v) {
   if (v >= 1000) return `${Math.round(v / 100) / 10}k`;
   return Math.round(v).toString();
 }
-function _formatPct(v) {
-  return `${Math.round(v * 1000) / 10}%`;
-}
-
 const xLabels = computed(() => {
   // Показываем не более 8 подписей.
   const labels = props.labels;
@@ -131,6 +129,21 @@ function _shortMonth(label) {
   const months = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
   return `${months[parseInt(m[2], 10) - 1] || ''} ${m[1].slice(2)}`;
 }
+const chartAnnotations = computed(() => {
+  const labels = props.labels || [];
+  return (props.annotations || [])
+    .map((item, idx) => {
+      const key = String(item.bucket || item.date || '').slice(0, 10);
+      const labelIdx = labels.findIndex((label) => String(label).slice(0, 10) === key);
+      if (labelIdx < 0) return null;
+      return {
+        id: `${idx}:${key}`,
+        x: xFor(labelIdx),
+        label: String(item.label || '').slice(0, 36),
+      };
+    })
+    .filter(Boolean);
+});
 </script>
 
 <template>
@@ -151,6 +164,13 @@ function _shortMonth(label) {
       <!-- X labels -->
       <g class="xlabels" font-size="10" fill="rgba(0,0,0,0.55)" font-family="-apple-system, sans-serif">
         <text v-for="(t,i) in xLabels" :key="`x${i}`" :x="t.x" :y="height - PAD.b + 16" text-anchor="middle">{{ t.label }}</text>
+      </g>
+      <g v-if="chartAnnotations.length">
+        <g v-for="item in chartAnnotations" :key="item.id">
+          <line :x1="item.x" :x2="item.x" :y1="PAD.t" :y2="PAD.t + innerH" stroke="rgba(245,158,11,0.5)" stroke-dasharray="5,4" />
+          <rect :x="Math.max(PAD.l, item.x - 54)" :y="PAD.t + 6" width="108" height="20" rx="10" fill="rgba(245,158,11,0.14)" />
+          <text :x="item.x" :y="PAD.t + 20" text-anchor="middle" font-size="10" fill="#b45309">{{ item.label }}</text>
+        </g>
       </g>
       <!-- Datasets -->
       <g v-for="(ds, di) in datasets" :key="`ds${di}`">

@@ -69,8 +69,8 @@ export const useReportsStore = defineStore('reports', {
       this.drafts = this.drafts.filter((d) => d.id !== id);
     },
 
-    async fetchData(id) {
-      const { data } = await api.get(`/reports/drafts/${id}/data`);
+    async fetchData(id, params = {}) {
+      const { data } = await api.get(`/reports/drafts/${id}/data`, { params });
       this.currentData = data?.data || null;
       return this.currentData;
     },
@@ -113,6 +113,13 @@ export const useReportsStore = defineStore('reports', {
 
     async revokeShared(uuid) {
       await api.post(`/reports/shared/${uuid}/revoke`);
+    },
+
+    async exportDocx(id, payload) {
+      const { data } = await api.post(`/reports/drafts/${id}/export.docx`, payload || {}, {
+        responseType: 'blob',
+      });
+      return data;
     },
   },
 });

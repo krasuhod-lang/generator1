@@ -2138,6 +2138,10 @@ async function ensureSchema() {
         llm_summary       TEXT,
         llm_highlights    JSONB,
         llm_growth        TEXT,
+        llm_quick_wins    JSONB,
+        llm_vulnerabilities JSONB,
+        llm_roadmap       JSONB,
+        llm_traffic_value TEXT,
         llm_status        VARCHAR(16) NOT NULL DEFAULT 'idle'
                           CHECK (llm_status IN ('idle','queued','running','done','error')),
         llm_job_id        UUID,
@@ -2183,7 +2187,9 @@ async function ensureSchema() {
         keywords_top1   INTEGER,
         keywords_top3   INTEGER,
         keywords_top10  INTEGER,
+        keywords_top50  INTEGER,
         keywords_total  INTEGER,
+        adcost          NUMERIC(14,2),
         fetched_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(domain, date)
       )
@@ -2257,6 +2263,7 @@ async function ensureSchema() {
         geo_loc     TEXT NOT NULL DEFAULT '',
         device      position_device   NOT NULL DEFAULT 'desktop',
         schedule    position_schedule NOT NULL DEFAULT 'manual',
+        parent_project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
         last_run_at TIMESTAMPTZ,
         created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -2264,6 +2271,7 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_position_projects_user ON position_projects (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_position_projects_schedule ON position_projects (schedule, last_run_at)`);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_position_projects_parent_project_unique ON position_projects (parent_project_id) WHERE parent_project_id IS NOT NULL`);
     await db.query(`
       CREATE TABLE IF NOT EXISTS position_keywords (
         id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2302,12 +2310,24 @@ async function ensureSchema() {
         position     INTEGER,
         found_url    TEXT,
         serp_snippet TEXT,
+        is_found     BOOLEAN NOT NULL DEFAULT FALSE,
+        result_page  INTEGER,
         checked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(run_id, keyword_id, engine)
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_position_results_keyword_date ON position_results (keyword_id, engine, checked_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_position_results_project_date ON position_results (project_id, engine, checked_at DESC)`);
+
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_quick_wins JSONB`);
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_vulnerabilities JSONB`);
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_roadmap JSONB`);
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_traffic_value TEXT`);
+    await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS keywords_top50 INTEGER`);
+    await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS adcost NUMERIC(14,2)`);
+    await db.query(`ALTER TABLE position_projects ADD COLUMN IF NOT EXISTS parent_project_id UUID REFERENCES projects(id) ON DELETE CASCADE`);
+    await db.query(`ALTER TABLE position_results ADD COLUMN IF NOT EXISTS is_found BOOLEAN NOT NULL DEFAULT FALSE`);
+    await db.query(`ALTER TABLE position_results ADD COLUMN IF NOT EXISTS result_page INTEGER`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

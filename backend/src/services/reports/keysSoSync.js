@@ -23,8 +23,8 @@ async function _upsertSnapshot(snap) {
   await db.query(
     `INSERT INTO keys_so_cache
        (domain, date, yandex_traffic, google_traffic, visibility,
-        keywords_top1, keywords_top3, keywords_top10, keywords_total, fetched_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NOW())
+       keywords_top1, keywords_top3, keywords_top10, keywords_top50, keywords_total, adcost, fetched_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW())
      ON CONFLICT (domain, date) DO UPDATE SET
        yandex_traffic = EXCLUDED.yandex_traffic,
        google_traffic = EXCLUDED.google_traffic,
@@ -32,12 +32,14 @@ async function _upsertSnapshot(snap) {
        keywords_top1  = EXCLUDED.keywords_top1,
        keywords_top3  = EXCLUDED.keywords_top3,
        keywords_top10 = EXCLUDED.keywords_top10,
+       keywords_top50 = EXCLUDED.keywords_top50,
        keywords_total = EXCLUDED.keywords_total,
+       adcost         = EXCLUDED.adcost,
        fetched_at     = NOW()`,
     [
-      snap.domain, snap.date,
-      snap.yandex_traffic, snap.google_traffic, snap.visibility,
-      snap.keywords_top1, snap.keywords_top3, snap.keywords_top10, snap.keywords_total,
+     snap.domain, snap.date,
+     snap.yandex_traffic, snap.google_traffic, snap.visibility,
+     snap.keywords_top1, snap.keywords_top3, snap.keywords_top10, snap.keywords_top50, snap.keywords_total, snap.adcost,
     ],
   );
 }
@@ -120,7 +122,7 @@ async function loadCachedSeries(domain, dateFrom, dateTo) {
   const { rows } = await db.query(
     `SELECT to_char(date, 'YYYY-MM-DD') AS date,
             yandex_traffic, google_traffic, visibility,
-            keywords_top1, keywords_top3, keywords_top10, keywords_total
+            keywords_top1, keywords_top3, keywords_top10, keywords_top50, keywords_total, adcost
        FROM keys_so_cache
       WHERE domain = $1
         AND date >= date_trunc('month', $2::date)
@@ -138,7 +140,7 @@ async function loadCurrent(domain) {
   const { rows } = await db.query(
     `SELECT to_char(date, 'YYYY-MM-DD') AS date,
             yandex_traffic, google_traffic, visibility,
-            keywords_top1, keywords_top3, keywords_top10, keywords_total,
+            keywords_top1, keywords_top3, keywords_top10, keywords_top50, keywords_total, adcost,
             fetched_at
        FROM keys_so_cache
       WHERE domain = $1

@@ -164,6 +164,8 @@ onBeforeUnmount(stopPolling);
         <div class="min-w-0">
           <button class="back-btn mb-2"
                   @click="router.push('/position-tracker')">← Все проекты</button>
+        <button v-if="project?.parent_project_id" class="back-btn mb-2 ml-3"
+                @click="router.push(`/projects/${project.parent_project_id}`)">↗ К проекту</button>
           <h1 class="page-title truncate">
             {{ project?.name || project?.domain || '…' }}
           </h1>

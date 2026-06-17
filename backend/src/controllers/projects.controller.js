@@ -38,6 +38,7 @@ const { generateShareToken, isValidShareToken } = require('../services/projects/
 const { buildLeadContext } = require('../services/projects/leadContext');
 const snapshotsRepo = require('../services/projects/snapshotsRepo');
 const { compareSnapshots } = require('../services/projects/periodComparison');
+const { ensureLinkedPositionProject, syncLinkedPositionProject } = require('../services/projects/positionBridge');
 
 const CFG = getProjectsConfig();
 
@@ -118,6 +119,7 @@ const PUBLIC_COLUMNS = `
   (gsc_refresh_token_enc IS NOT NULL) AS gsc_has_refresh,
   ydx_connected, ydx_site_url, ydx_available_sites,
   (ydx_refresh_token_enc IS NOT NULL) AS ydx_has_refresh,
+  (SELECT pp.id FROM position_projects pp WHERE pp.parent_project_id = projects.id LIMIT 1) AS linked_position_project_id,
   share_token, share_created_at, created_at, updated_at`;
 
 function _frontendBase() {
@@ -152,7 +154,12 @@ async function createProject(req, res, next) {
        RETURNING ${PUBLIC_COLUMNS}`,
       [req.user.id, name, url, audience],
     );
-    return res.status(201).json({ project: rows[0] });
+    await ensureLinkedPositionProject({ ...rows[0], user_id: req.user.id });
+    const { rows: finalRows } = await db.query(
+      `SELECT ${PUBLIC_COLUMNS} FROM projects WHERE id = $1 AND user_id = $2`,
+      [rows[0].id, req.user.id],
+    );
+    return res.status(201).json({ project: finalRows[0] || rows[0] });
   } catch (err) { return next(err); }
 }
 
@@ -181,8 +188,17 @@ async function getProject(req, res, next) {
         LIMIT 20`,
       [project.id],
     );
+    const { rows: linkedRows } = await db.query(
+      `SELECT id, name, domain, engine::text AS engine, geo_lr, geo_loc,
+              device::text AS device, schedule::text AS schedule, last_run_at
+         FROM position_projects
+        WHERE parent_project_id = $1
+        LIMIT 1`,
+      [project.id],
+    );
     return res.json({
       project,
+      position_project: linkedRows[0] || null,
       analyses,
       gsc_configured: getGoogleOAuthConfig().configured,
       ydx_configured: getYandexOAuthConfig().configured,
@@ -220,7 +236,21 @@ async function updateProject(req, res, next) {
         WHERE id=$1 RETURNING ${PUBLIC_COLUMNS}`,
       [existing.id, name, url, audience, logoUrl, accent, keysSoDomain, keysSoRegion],
     );
-    return res.json({ project: rows[0] });
+    await syncLinkedPositionProject({
+      id: existing.id,
+      name,
+      url,
+      keys_so_domain: keysSoDomain,
+    });
+    const { rows: linkedRows } = await db.query(
+      `SELECT id, name, domain, engine::text AS engine, geo_lr, geo_loc,
+              device::text AS device, schedule::text AS schedule, last_run_at
+         FROM position_projects
+        WHERE parent_project_id = $1
+        LIMIT 1`,
+      [existing.id],
+    );
+    return res.json({ project: { ...(rows[0] || {}), position_project: linkedRows[0] || null } });
   } catch (err) { return next(err); }
 }
 

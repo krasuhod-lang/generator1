@@ -11,6 +11,7 @@ import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ReportRenderer from '../components/reports/ReportRenderer.vue';
 import { useReportsStore } from '../stores/reports.js';
+import { collectReportChartImages, downloadBlob } from '../utils/reportExport.js';
 
 const route = useRoute();
 const router = useRouter();
@@ -26,6 +27,9 @@ const publishOpen = ref(false);
 const published = ref(null); // {public_url, mode, expires_at, ...}
 const publishForm = ref({ mode: 'snapshot', password: '', expires_in_days: '' });
 const publishError = ref(null);
+const previewRef = ref(null);
+const viewRange = ref({ from: '', to: '', granularity: 'month' });
+const exporting = ref(false);
 
 let pollTimer = null;
 
@@ -49,7 +53,7 @@ async function load() {
 async function refreshData() {
   if (!route.params.id) return;
   dataLoading.value = true; dataError.value = null;
-  try { await store.fetchData(route.params.id); }
+  try { await store.fetchData(route.params.id, viewRange.value); }
   catch (err) {
     dataError.value = err.response?.data?.error || err.message || 'Ошибка загрузки данных';
   } finally { dataLoading.value = false; }
@@ -66,6 +70,7 @@ watch(draft, (d) => {
   titleEdit.value = d.title;
   dateFromEdit.value = d.date_from;
   dateToEdit.value = d.date_to;
+  viewRange.value = { from: d.date_from, to: d.date_to, granularity: d.config?.granularity || 'month' };
   initial = true;
   // mark not dirty
   setTimeout(() => { dirty.value = false; }, 0);
@@ -80,6 +85,7 @@ async function saveMeta() {
     title: titleEdit.value,
     date_from: dateFromEdit.value,
     date_to: dateToEdit.value,
+    config: { ...(draft.value?.config || {}), granularity: viewRange.value.granularity },
   });
   dirty.value = false;
   await refreshData();
@@ -126,6 +132,21 @@ async function publish() {
     await store.fetchDraft(route.params.id);
   } catch (err) {
     publishError.value = err.response?.data?.error || err.message || 'Ошибка публикации';
+  }
+
+  async function exportDocx() {
+    if (!route.params.id || !previewRef.value) return;
+    exporting.value = true;
+    try {
+      const chartImages = await collectReportChartImages(previewRef.value);
+      const blob = await store.exportDocx(route.params.id, {
+        ...viewRange.value,
+        chart_images: chartImages,
+      });
+      downloadBlob(blob, `${(draft.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.docx`);
+    } finally {
+      exporting.value = false;
+    }
   }
 }
 
@@ -182,6 +203,23 @@ function _stateOf(section) {
             </button>
           </div>
 
+          <div class="rep-card sticky-card">
+            <h3>Интерактивный диапазон</h3>
+            <label>С<input type="date" v-model="viewRange.from" /></label>
+            <label>По<input type="date" v-model="viewRange.to" /></label>
+            <div class="seg">
+              <button class="seg-btn" :class="{ active: viewRange.granularity === 'day' }" @click="viewRange.granularity = 'day'">Дни</button>
+              <button class="seg-btn" :class="{ active: viewRange.granularity === 'week' }" @click="viewRange.granularity = 'week'">Недели</button>
+              <button class="seg-btn" :class="{ active: viewRange.granularity === 'month' }" @click="viewRange.granularity = 'month'">Месяцы</button>
+            </div>
+            <button class="btn btn-secondary" :disabled="dataLoading" @click="refreshData">
+              {{ dataLoading ? 'Обновление…' : 'Применить диапазон' }}
+            </button>
+            <button class="btn btn-secondary" :disabled="exporting" @click="exportDocx">
+              {{ exporting ? 'Экспорт…' : 'Скачать .docx' }}
+            </button>
+          </div>
+
           <div class="rep-card">
             <h3>Источники данных</h3>
             <ul class="src-list">
@@ -228,7 +266,7 @@ function _stateOf(section) {
         </aside>
 
         <!-- RIGHT: PREVIEW -->
-        <main class="rep-main">
+        <main ref="previewRef" class="rep-main">
           <div v-if="dataLoading" class="rep-loading">Загрузка данных…</div>
           <ReportRenderer v-else-if="data"
             :data="data"
@@ -236,10 +274,14 @@ function _stateOf(section) {
               executive_summary: draft.llm_summary,
               highlights: draft.llm_highlights,
               growth_attribution: draft.llm_growth,
+              quick_wins: draft.llm_quick_wins,
+              vulnerabilities: draft.llm_vulnerabilities,
+              roadmap: draft.llm_roadmap,
+              traffic_value: draft.llm_traffic_value,
             }"
             :tasks-blocks="draft.tasks_blocks || []"
             :title="draft.title"
-            :period="`${draft.date_from} — ${draft.date_to}`"
+            :period="`${viewRange.from} — ${viewRange.to}`"
             :project="{
               name: draft.project_name,
               url: draft.project_url,
@@ -325,6 +367,18 @@ function _stateOf(section) {
   font-size: 13px; background: #fff; color: #1d1d1f;
 }
 .rep-card input:focus, .rep-card select:focus { outline: none; border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.15); }
+.sticky-card { position: sticky; top: 0; z-index: 1; }
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.seg-btn {
+  border: 1px solid rgba(60,60,67,0.14);
+  background: #fff;
+  color: #424245;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.seg-btn.active { background: rgba(10,132,255,0.08); color: #0a84ff; border-color: rgba(10,132,255,0.24); }
 .btn { padding: 9px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; border: 1px solid transparent; text-align: center; font-weight: 500; transition: background 0.15s, transform 0.05s; }
 .btn:active { transform: scale(0.98); }
 .btn-primary { background: #0a84ff; color: #fff; }

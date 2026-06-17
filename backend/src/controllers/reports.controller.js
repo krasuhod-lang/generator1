@@ -35,6 +35,7 @@ const db = require('../config/db');
 const { aggregateForDraft } = require('../services/reports/dataAggregator');
 const { generateSummary } = require('../services/reports/aiAnalyst');
 const tasksLog = require('../services/reports/tasksAutoLog');
+const { buildReportDocx } = require('../services/reports/docxExporter');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -70,6 +71,10 @@ function _serializeDraft(row) {
     llm_summary: row.llm_summary || null,
     llm_highlights: row.llm_highlights || null,
     llm_growth: _parseGrowth(row.llm_growth),
+    llm_quick_wins: row.llm_quick_wins || [],
+    llm_vulnerabilities: row.llm_vulnerabilities || [],
+    llm_roadmap: row.llm_roadmap || [],
+    llm_traffic_value: row.llm_traffic_value || '',
     llm_status: row.llm_status,
     llm_generated_at: row.llm_generated_at,
     llm_error: row.llm_error || null,
@@ -88,6 +93,18 @@ function _periodLabel(from, to) {
   };
   if (!from || !to) return '';
   return `${fmt(from)} — ${fmt(to)}`;
+}
+
+function _summaryPayloadFromDraft(row) {
+  return {
+    executive_summary: row.llm_summary || '',
+    highlights: row.llm_highlights || [],
+    growth_attribution: _parseGrowth(row.llm_growth),
+    quick_wins: row.llm_quick_wins || [],
+    vulnerabilities: row.llm_vulnerabilities || [],
+    roadmap: row.llm_roadmap || [],
+    traffic_value: row.llm_traffic_value || '',
+  };
 }
 
 /**
@@ -226,7 +243,11 @@ async function getDraftData(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
-    const data = await aggregateForDraft(draft);
+    const data = await aggregateForDraft(draft, {
+      from: req.query.from,
+      to: req.query.to,
+      granularity: req.query.granularity,
+    });
     res.json({ data });
   } catch (err) {
     console.error('[reports] aggregate failed:', err.message);
@@ -273,7 +294,11 @@ async function _runSummaryJob(draftId, userId, jobId) {
   try {
     const draft = await _ownedDraft(draftId, userId);
     if (!draft) return;
-    const data = await aggregateForDraft(draft);
+    const data = await aggregateForDraft(draft, {
+      from: req.query?.from,
+      to: req.query?.to,
+      granularity: req.query?.granularity,
+    });
     const summary = await generateSummary(data, {
       brandName: draft.project_name,
       period: _periodLabel(draft.date_from, draft.date_to),
@@ -284,16 +309,24 @@ async function _runSummaryJob(draftId, userId, jobId) {
               llm_summary = $3,
               llm_highlights = $4,
               llm_growth = $5,
+              llm_quick_wins = $6,
+              llm_vulnerabilities = $7,
+              llm_roadmap = $8,
+              llm_traffic_value = $9,
               llm_generated_at = NOW(),
               llm_error = NULL,
               updated_at = NOW()
-        WHERE id = $1 AND user_id = $2 AND llm_job_id = $6`,
+        WHERE id = $1 AND user_id = $2 AND llm_job_id = $10`,
       [
         draftId,
         userId,
         summary.executive_summary || '',
         JSON.stringify(summary.highlights || []),
         JSON.stringify(summary.growth_attribution || []),
+        JSON.stringify(summary.quick_wins || []),
+        JSON.stringify(summary.vulnerabilities || []),
+        JSON.stringify(summary.roadmap || []),
+        summary.traffic_value || '',
         jobId,
       ],
     );
@@ -319,6 +352,10 @@ async function getSummaryStatus(req, res) {
     summary: draft.llm_summary || null,
     highlights: draft.llm_highlights || null,
     growth_attribution: _parseGrowth(draft.llm_growth),
+    quick_wins: draft.llm_quick_wins || [],
+    vulnerabilities: draft.llm_vulnerabilities || [],
+    roadmap: draft.llm_roadmap || [],
+    traffic_value: draft.llm_traffic_value || '',
     generated_at: draft.llm_generated_at,
   });
 }
@@ -347,14 +384,14 @@ async function publishDraft(req, res) {
   let snapshotData = null;
   if (mode === 'snapshot') {
     try {
-      const data = await aggregateForDraft(draft);
+      const data = await aggregateForDraft(draft, {
+        from: req.query?.from,
+        to: req.query?.to,
+        granularity: req.query?.granularity,
+      });
       snapshotData = JSON.stringify({
         data,
-        summary: {
-          executive_summary: draft.llm_summary,
-          highlights: draft.llm_highlights,
-          growth_attribution: _parseGrowth(draft.llm_growth),
-        },
+        summary: _summaryPayloadFromDraft(draft),
         tasks_blocks: draft.tasks_blocks,
         config: draft.config,
         title: draft.title,
@@ -507,7 +544,9 @@ function _issuePinCookie(res, sharedId) {
 async function _loadShared(uuid) {
   const { rows } = await db.query(
     `SELECT s.*, d.title AS draft_title, d.tasks_blocks, d.config,
-            d.llm_summary, d.llm_highlights, d.llm_growth, d.date_from, d.date_to,
+            d.llm_summary, d.llm_highlights, d.llm_growth, d.llm_quick_wins,
+            d.llm_vulnerabilities, d.llm_roadmap, d.llm_traffic_value,
+            d.date_from, d.date_to,
             d.user_id AS owner_id,
             p.id AS project_id, p.name AS project_name, p.url AS project_url,
             p.logo_url, p.color_accent, p.keys_so_domain
@@ -548,11 +587,7 @@ async function publicGet(req, res) {
     const data = await aggregateForDraft(draft);
     payload = {
       data,
-      summary: {
-        executive_summary: sr.llm_summary,
-        highlights: sr.llm_highlights,
-        growth_attribution: _parseGrowth(sr.llm_growth),
-      },
+      summary: _summaryPayloadFromDraft(sr),
       tasks_blocks: sr.tasks_blocks || [],
       config: sr.config || {},
       title: sr.draft_title,
@@ -572,7 +607,7 @@ async function publicGet(req, res) {
     uuid: sr.uuid,
     mode: sr.mode,
     title: sr.draft_title,
-    period: _periodLabel(sr.date_from, sr.date_to),
+    period: _periodLabel(req.query?.from || sr.date_from, req.query?.to || sr.date_to),
     project: {
       name: sr.project_name,
       url: sr.project_url,
@@ -581,6 +616,35 @@ async function publicGet(req, res) {
     },
     payload,
   });
+}
+
+async function exportDraftDocx(req, res) {
+  const draft = await _ownedDraft(req.params.id, req.user.id);
+  if (!draft) return _bad(res, 404, 'Черновик не найден');
+  try {
+    const data = await aggregateForDraft(draft, {
+      from: req.body?.from,
+      to: req.body?.to,
+      granularity: req.body?.granularity,
+    });
+    const buffer = await buildReportDocx({
+      title: draft.title,
+      period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
+      project: {
+        name: draft.project_name,
+        url: draft.project_url,
+      },
+      data,
+      summary: _summaryPayloadFromDraft(draft),
+      tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
+      chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+    });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.docx"`);
+    res.send(buffer);
+  } catch (err) {
+    return _bad(res, 500, err.message || 'docx_export_failed');
+  }
 }
 
 async function publicUnlock(req, res) {
@@ -598,10 +662,52 @@ async function publicUnlock(req, res) {
   res.json({ ok: true });
 }
 
+async function publicExportDocx(req, res) {
+  const sr = await _loadShared(req.params.uuid);
+  if (!sr) return res.status(404).json({ error: 'not_found' });
+  if (!sr.is_active) return res.status(410).json({ error: 'revoked' });
+  if (_isExpired(sr)) return res.status(410).json({ error: 'expired' });
+  if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
+    return res.status(403).json({ error: 'password_required' });
+  }
+  try {
+    const data = sr.mode === 'snapshot' && sr.snapshot_data
+      ? sr.snapshot_data.data
+      : await aggregateForDraft({
+        id: sr.draft_id,
+        project_id: sr.project_id,
+        date_from: req.body?.from || sr.date_from,
+        date_to: req.body?.to || sr.date_to,
+        tasks_blocks: sr.tasks_blocks || [],
+      }, {
+        from: req.body?.from,
+        to: req.body?.to,
+        granularity: req.body?.granularity,
+      });
+    const summary = sr.mode === 'snapshot' && sr.snapshot_data
+      ? (sr.snapshot_data.summary || {})
+      : _summaryPayloadFromDraft(sr);
+    const buffer = await buildReportDocx({
+      title: sr.draft_title,
+      period: _periodLabel(req.body?.from || sr.date_from, req.body?.to || sr.date_to),
+      project: { name: sr.project_name, url: sr.project_url },
+      data,
+      summary,
+      tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
+      chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+    });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((sr.draft_title || 'report').slice(0, 80))}.docx"`);
+    res.send(buffer);
+  } catch (err) {
+    return _bad(res, 500, err.message || 'docx_export_failed');
+  }
+}
+
 module.exports = {
   listDrafts, createDraft, getDraft, updateDraft, deleteDraft,
   updateTasksBlocks, getDraftData, listProjectTasks,
-  generateSummaryEndpoint, getSummaryStatus,
+  generateSummaryEndpoint, getSummaryStatus, exportDraftDocx,
   publishDraft, listShared, updateSharedSettings, revokeShared,
-  publicGet, publicUnlock,
+  publicGet, publicUnlock, publicExportDocx,
 };
