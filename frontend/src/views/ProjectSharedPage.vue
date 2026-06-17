@@ -33,9 +33,83 @@ const loading = ref(true);
 const error = ref('');
 const project = ref(null);
 const analysis = ref(null);
+const copyToast = ref('');
 
 const snap = computed(() => analysis.value?.gsc_snapshot || null);
 const ydx = computed(() => analysis.value?.ydx_snapshot || null);
+
+// ── Фильтрация серии по выбранному диапазону дат ──────────────────────────
+const dateFrom = ref('');
+const dateTo = ref('');
+
+function _filterSeries(series) {
+  if (!Array.isArray(series) || !series.length) return series;
+  const from = dateFrom.value;
+  const to = dateTo.value;
+  if (!from && !to) return series;
+  return series.filter((p) => {
+    const d = String(p.date || '').slice(0, 10);
+    if (from && d < from) return false;
+    if (to && d > to) return false;
+    return true;
+  });
+}
+
+const filteredGscSeries = computed(() => _filterSeries(snap.value?.series));
+const filteredYdxSeries = computed(() => _filterSeries(ydx.value?.series));
+
+// Пресеты периодов (клиентская фильтрация на основе уже загруженных данных)
+const datePresetKey = ref('all');
+const DATE_PRESETS = [
+  { key: 'all', label: 'Всё время' },
+  { key: '7d', label: '7 дней', days: 7 },
+  { key: '28d', label: '28 дней', days: 28 },
+  { key: '3m', label: '3 месяца', days: 90 },
+  { key: '6m', label: '6 месяцев', days: 180 },
+];
+
+function setDatePreset(key) {
+  datePresetKey.value = key;
+  if (key === 'all') {
+    dateFrom.value = '';
+    dateTo.value = '';
+    return;
+  }
+  const preset = DATE_PRESETS.find((p) => p.key === key);
+  if (!preset || !preset.days) return;
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - preset.days);
+  dateTo.value = to.toISOString().slice(0, 10);
+  dateFrom.value = from.toISOString().slice(0, 10);
+}
+
+function applyCustomDate() {
+  if (dateFrom.value && dateTo.value) {
+    datePresetKey.value = 'custom';
+  }
+}
+
+// ── Копирование ссылки ────────────────────────────────────────────────────
+async function copyCurrentUrl() {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(window.location.href);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = window.location.href;
+      ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    copyToast.value = 'Ссылка скопирована!';
+  } catch (_) {
+    copyToast.value = 'Не удалось скопировать';
+  }
+  setTimeout(() => { copyToast.value = ''; }, 2500);
+}
 
 // Доступность каждой верхнеуровневой вкладки определяется наличием данных,
 // чтобы клиент не видел пустых разделов.
@@ -112,9 +186,16 @@ onMounted(async () => {
 
       <template v-else>
         <header class="pb-2">
-          <div class="text-[11px] uppercase tracking-[0.2em] text-indigo-400/90">Публичный отчёт</div>
-          <h1 class="text-3xl font-semibold tracking-tight text-gray-50 mt-2">{{ project.name }}</h1>
-          <div class="text-sm text-gray-500 mt-1">{{ project.gsc_site_url || project.url }}</div>
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <div class="text-[11px] uppercase tracking-[0.2em] text-indigo-400/90">Публичный отчёт</div>
+              <h1 class="text-3xl font-semibold tracking-tight text-gray-50 mt-2">{{ project.name }}</h1>
+              <div class="text-sm text-gray-500 mt-1">{{ project.gsc_site_url || project.url }}</div>
+            </div>
+            <button class="copy-btn" @click="copyCurrentUrl" title="Скопировать ссылку">
+              📋 Скопировать ссылку
+            </button>
+          </div>
         </header>
 
         <div v-if="!analysis" class="text-sm text-gray-500 text-center py-12">
@@ -133,6 +214,24 @@ onMounted(async () => {
 
           <!-- ===================== GOOGLE ===================== -->
           <div v-show="currentTab === 'google'" class="space-y-5">
+            <!-- Панель выбора периода -->
+            <div class="date-controls">
+              <div class="flex flex-wrap gap-1.5 items-center">
+                <span class="text-[11px] uppercase text-gray-500 mr-1">Период:</span>
+                <button v-for="p in DATE_PRESETS" :key="p.key" type="button"
+                        class="date-btn"
+                        :class="datePresetKey === p.key ? 'date-btn--active' : ''"
+                        @click="setDatePreset(p.key)">{{ p.label }}</button>
+                <div class="flex items-center gap-1 ml-2">
+                  <input type="date" v-model="dateFrom" class="date-input" />
+                  <span class="text-gray-600 text-xs">—</span>
+                  <input type="date" v-model="dateTo" class="date-input" />
+                  <button class="date-btn" :class="datePresetKey === 'custom' ? 'date-btn--active' : ''"
+                          @click="applyCustomDate">OK</button>
+                </div>
+              </div>
+            </div>
+
             <section v-if="snap" class="panel space-y-4">
               <h2 class="panel-title text-indigo-300">График эффективности · Google</h2>
               <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -153,7 +252,7 @@ onMounted(async () => {
                   <div class="stat-value text-amber-300">{{ snap.totals?.position || 0 }}</div>
                 </div>
               </div>
-              <GscPerformanceChart v-if="snap.series?.length" :series="snap.series" />
+              <GscPerformanceChart v-if="filteredGscSeries?.length" :series="filteredGscSeries" />
             </section>
 
             <!-- Под-вкладки аналитики (как в личном кабинете) -->
@@ -245,7 +344,7 @@ onMounted(async () => {
                   <div class="stat-value text-amber-300">{{ ydx.totals?.position || 0 }}</div>
                 </div>
               </div>
-              <GscPerformanceChart v-if="ydx.series?.length" :series="ydx.series" />
+              <GscPerformanceChart v-if="filteredYdxSeries?.length" :series="filteredYdxSeries" />
             </section>
 
             <section v-if="analysis.ydx_report_markdown" class="panel space-y-3">
@@ -265,6 +364,14 @@ onMounted(async () => {
           </div>
         </template>
       </template>
+
+      <!-- Toast для копирования -->
+      <transition name="fade">
+        <div v-if="copyToast"
+             class="fixed bottom-6 right-6 bg-gray-900 border border-indigo-700 text-indigo-200 px-4 py-2 rounded-lg shadow-lg text-sm z-50">
+          {{ copyToast }}
+        </div>
+      </transition>
     </div>
   </div>
 </template>
@@ -340,4 +447,65 @@ onMounted(async () => {
   line-height: 1.2;
   margin-top: 2px;
 }
+
+/* Кнопка копирования ссылки */
+.copy-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  color: #d1d5db;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: 11px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.copy-btn:hover {
+  background: rgba(255, 255, 255, 0.10);
+  color: #f9fafb;
+  border-color: rgba(129, 140, 248, 0.4);
+}
+
+/* Панель фильтрации по дате */
+.date-controls {
+  background: rgba(17, 18, 23, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+.date-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: #9ca3af;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+.date-btn:hover { color: #e5e7eb; background: rgba(255, 255, 255, 0.05); }
+.date-btn--active {
+  color: #f9fafb;
+  background: rgba(99, 102, 241, 0.22);
+  border-color: rgba(129, 140, 248, 0.45);
+}
+.date-input {
+  background: rgba(2, 3, 8, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #d1d5db;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.date-input:focus {
+  outline: none;
+  border-color: rgba(129, 140, 248, 0.5);
+}
+
+/* Toast анимация */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

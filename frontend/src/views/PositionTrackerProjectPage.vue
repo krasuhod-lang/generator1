@@ -32,6 +32,9 @@ const runs      = ref([]);
 const granularity = ref('day');     // 'day' | 'week' | 'month'
 const period      = ref('week');    // 'week' | 'month' (для KPI/movers)
 const chartMode   = ref('position');// 'position' | 'top'
+const engine      = ref(null);     // null = все, 'yandex' | 'google'
+
+const isBoth = computed(() => project.value?.engine === 'both');
 
 const newQuery = ref('');
 const adding = ref(false);
@@ -48,12 +51,13 @@ async function loadProject() {
 
 async function loadAnalytics() {
   if (!project.value) return;
+  const eng = engine.value;
   const [sum, ser, tbl, mu, md, rns] = await Promise.all([
-    store.getSummary(projectId, period.value),
-    store.getProjectSeries(projectId, granularity.value),
-    store.getKeywordsTable(projectId, period.value),
-    store.getMovers(projectId, 'up', period.value, null),
-    store.getMovers(projectId, 'down', period.value, null),
+    store.getSummary(projectId, period.value, eng),
+    store.getProjectSeries(projectId, granularity.value, eng),
+    store.getKeywordsTable(projectId, period.value, eng),
+    store.getMovers(projectId, 'up', period.value, eng),
+    store.getMovers(projectId, 'down', period.value, eng),
     store.getRuns(projectId),
   ]);
   summary.value = sum;
@@ -124,6 +128,7 @@ async function removeKeyword(kwId) {
 
 function changeGran(g) { granularity.value = g; loadAnalytics(); }
 function changePeriod(p) { period.value = p; loadAnalytics(); }
+function changeEngine(e) { engine.value = e; loadAnalytics(); }
 
 function fmtPosition(p) {
   if (p == null) return '—';
@@ -235,10 +240,18 @@ onBeforeUnmount(stopPolling);
       </div>
 
       <!-- Период (для KPI и movers) -->
-      <div class="mb-3 flex items-center gap-2 text-sm">
+      <div class="mb-3 flex items-center gap-2 text-sm flex-wrap">
         <span class="text-gray-500">Период:</span>
         <button :class="['tab', period === 'week' ? 'tab-active' : '']" @click="changePeriod('week')">Неделя</button>
         <button :class="['tab', period === 'month' ? 'tab-active' : '']" @click="changePeriod('month')">Месяц</button>
+
+        <template v-if="isBoth">
+          <span class="text-gray-400 ml-3">|</span>
+          <span class="text-gray-500 ml-1">Поисковик:</span>
+          <button :class="['tab', engine === null ? 'tab-active' : '']" @click="changeEngine(null)">Все</button>
+          <button :class="['tab', engine === 'yandex' ? 'tab-active' : '']" @click="changeEngine('yandex')">Яндекс</button>
+          <button :class="['tab', engine === 'google' ? 'tab-active' : '']" @click="changeEngine('google')">Google</button>
+        </template>
       </div>
 
       <!-- График динамики -->
