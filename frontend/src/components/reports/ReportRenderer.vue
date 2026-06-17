@@ -1,6 +1,7 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import DOMPurify from 'dompurify';
+import api from '../../api.js';
 import ReportTrendChart from './ReportTrendChart.vue';
 import PositionChart from '../PositionChart.vue';
 
@@ -212,11 +213,79 @@ function removeTask(i, j, k) {
   updateBlocks(next);
 }
 
+function autoLinkify(html) {
+  // Skip text that's already inside <a ...>...</a> tags.
+  // Split by existing anchor tags, only linkify the non-anchor parts.
+  const parts = (html || '').split(/(<a\s[^>]*>.*?<\/a>)/gi);
+  return parts.map((part) => {
+    // If it's an existing anchor tag, keep as-is
+    if (/^<a\s/i.test(part)) return part;
+    // Convert plain URLs not already inside an attribute value
+    return part.replace(
+      /(?<![="'])(\bhttps?:\/\/[^\s<>"')\]]+)/g,
+      '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>',
+    );
+  }).join('');
+}
+
 function safeHtml(value) {
-  return DOMPurify.sanitize(value || '', {
-    ALLOWED_TAGS: ['a', 'p', 'br', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i'],
-    ALLOWED_ATTR: ['href', 'target', 'rel'],
+  const linked = autoLinkify(value || '');
+  return DOMPurify.sanitize(linked, {
+    ALLOWED_TAGS: ['a', 'p', 'br', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'img'],
+    ALLOWED_ATTR: ['href', 'target', 'rel', 'src', 'alt', 'width', 'style'],
+    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
   });
+}
+
+// ── Image upload helpers ───────────────────────────────────────────────────
+const uploadingImage = ref(false);
+
+async function uploadImageFile(file) {
+  if (!file || !file.type.startsWith('image/')) return null;
+  const form = new FormData();
+  form.append('image', file);
+  uploadingImage.value = true;
+  try {
+    const { data } = await api.post('/reports/upload-image', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return data?.url || null;
+  } catch {
+    return null;
+  } finally {
+    uploadingImage.value = false;
+  }
+}
+
+async function onDescriptionPaste(ev, i, j, k) {
+  const items = ev.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      ev.preventDefault();
+      const file = item.getAsFile();
+      if (!file) return;
+      const url = await uploadImageFile(file);
+      if (!url) return;
+      const next = cloneBlocks();
+      const task = next[i].sections[j].tasks[k];
+      task.description_html = (task.description_html || '') + `\n<img src="${url}" alt="screenshot" style="max-width:100%" />`;
+      updateBlocks(next);
+      return;
+    }
+  }
+}
+
+async function onFileSelect(ev, i, j, k) {
+  const file = ev.target?.files?.[0];
+  if (!file) return;
+  const url = await uploadImageFile(file);
+  if (!url) return;
+  const next = cloneBlocks();
+  const task = next[i].sections[j].tasks[k];
+  task.description_html = (task.description_html || '') + `\n<img src="${url}" alt="${file.name}" style="max-width:100%" />`;
+  updateBlocks(next);
+  ev.target.value = '';
 }
 
 function formatDateTime(iso) {
@@ -406,7 +475,17 @@ function formatDateTime(iso) {
             </div>
             <div v-else class="editor-grid">
               <input :value="task.title" class="text-input" placeholder="Название задачи" @input="updateTask(i, j, k, 'title', $event.target.value)" />
-              <textarea :value="task.description_html" class="text-area" rows="4" placeholder="HTML / текст описания. Ссылки вида <a href=&quot;...&quot; target=&quot;_blank&quot;>..." @input="updateTask(i, j, k, 'description_html', $event.target.value)"></textarea>
+              <textarea :value="task.description_html" class="text-area" rows="4"
+                placeholder="Описание задачи. Вставляйте ссылки и скриншоты из буфера обмена (Ctrl+V)."
+                @input="updateTask(i, j, k, 'description_html', $event.target.value)"
+                @paste="onDescriptionPaste($event, i, j, k)"></textarea>
+              <div class="task-attach-row">
+                <label class="attach-btn">
+                  <input type="file" accept="image/*" hidden @change="onFileSelect($event, i, j, k)" />
+                  📎 Добавить изображение
+                </label>
+                <span v-if="uploadingImage" class="attach-status">Загрузка…</span>
+              </div>
               <div class="task-preview" v-if="task.description_html" v-html="safeHtml(task.description_html)"></div>
               <div class="actions-inline">
                 <button class="small-btn danger" @click="removeTask(i, j, k)">Удалить задачу</button>
@@ -472,7 +551,18 @@ function formatDateTime(iso) {
 .section-card { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .task-card { padding: 12px; background: #fff; }
 .task-title { font-weight: 600; margin-bottom: 6px; }
-.task-html :deep(a), .task-preview :deep(a) { color: var(--accent); text-decoration: underline; }
+.task-html :deep(a), .task-preview :deep(a) { color: var(--accent); text-decoration: underline; word-break: break-all; }
+.task-html :deep(img), .task-preview :deep(img) { max-width: 100%; height: auto; border-radius: 8px; margin: 8px 0; display: block; }
+.task-attach-row { display: flex; align-items: center; gap: 10px; }
+.attach-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 12px; border-radius: 10px;
+  background: rgba(10,132,255,0.08); color: var(--accent);
+  font-size: 12px; font-weight: 500; cursor: pointer;
+  transition: background 0.15s;
+}
+.attach-btn:hover { background: rgba(10,132,255,0.14); }
+.attach-status { font-size: 12px; color: #6e6e73; }
 .editor-grid { display: flex; flex-direction: column; gap: 10px; }
 .text-input, .text-area {
   width: 100%;
@@ -532,5 +622,19 @@ function formatDateTime(iso) {
 @media (max-width: 720px) {
   .header, .header-main, .month-head, .tasks-head { flex-direction: column; align-items: flex-start; }
   .rep-title { font-size: 24px; }
+  .totals-grid, .growth-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .total-card { padding: 10px; }
+  .t-value { font-size: 16px; }
+  .rblk { padding: 14px; border-radius: 14px; }
+  .month-card, .section-card { padding: 10px; }
+  .task-card { padding: 10px; }
+  .text-area { min-height: 80px; }
+  .actions-inline { flex-wrap: wrap; }
+  .task-attach-row { flex-wrap: wrap; }
+}
+@media (max-width: 480px) {
+  .totals-grid, .growth-grid { grid-template-columns: 1fr; }
+  .report-nav { padding: 6px 8px; gap: 4px; }
+  .nav-link { padding: 6px 10px; font-size: 11px; }
 }
 </style>

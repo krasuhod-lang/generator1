@@ -179,5 +179,15 @@ async function exportDocx() {
 
 @media (min-width: 375px) { .public-page { padding: 20px 14px; } }
 @media (min-width: 768px) { .public-page { padding: 40px 20px; } }
-@media (max-width: 720px) { .range-grid { grid-template-columns: 1fr; } }
+@media (max-width: 720px) {
+  .range-grid { grid-template-columns: 1fr; }
+  .public-toolbar { flex-direction: column; gap: 8px; }
+  .toolbar-actions { justify-content: stretch; }
+  .tool-btn { flex: 1; text-align: center; }
+}
+@media (max-width: 480px) {
+  .public-page { padding: 10px 8px; }
+  .public-toolbar { padding: 8px; border-radius: 12px; }
+  .tool-btn { padding: 10px 10px; font-size: 13px; }
+}
 </style>

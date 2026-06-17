@@ -430,4 +430,10 @@ function _stateOf(section) {
   .rep-side { position: static; max-height: none; }
   .rep-stage { border-radius: 14px; padding: 14px; margin: 0; }
 }
+@media (max-width: 480px) {
+  .rep-stage { padding: 10px; border-radius: 10px; }
+  .rep-card { padding: 14px; border-radius: 12px; }
+  .modal { min-width: auto; max-width: calc(100vw - 32px); padding: 20px; border-radius: 14px; }
+  .rep-head { gap: 10px; }
+}
 </style>
