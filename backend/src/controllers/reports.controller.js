@@ -711,10 +711,23 @@ async function publicExportDocx(req, res) {
   }
 }
 
+// ─── Upload image for task description ─────────────────────────────────────
+async function uploadTaskImage(req, res) {
+  try {
+    if (!req.file) return _bad(res, 400, 'Файл не загружен');
+    // Return the public URL to the uploaded file
+    const url = `/uploads/report-images/${req.file.filename}`;
+    res.json({ url });
+  } catch (err) {
+    return _bad(res, 500, err.message || 'upload_failed');
+  }
+}
+
 module.exports = {
   listDrafts, createDraft, getDraft, updateDraft, deleteDraft,
   updateTasksBlocks, getDraftData, listProjectTasks,
   generateSummaryEndpoint, getSummaryStatus, exportDraftDocx,
   publishDraft, listShared, updateSharedSettings, revokeShared,
   publicGet, publicUnlock, publicExportDocx,
+  uploadTaskImage,
 };

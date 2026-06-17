@@ -29,9 +29,26 @@ api.interceptors.request.use((config) => {
 
 // ── Response interceptor ───────────────────────────────────────────────────
 // При 401: чистим хранилище и идём на /login через router (без перезагрузки).
+// При 429: retry с экспоненциальным backoff.
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
+    const config = error.config;
+
+    // ── 429 Too Many Requests — автоматический retry ──
+    if (error.response?.status === 429 && config && !config.__retryCount) {
+      config.__retryCount = 0;
+    }
+    if (error.response?.status === 429 && config && config.__retryCount < 3) {
+      config.__retryCount += 1;
+      const retryAfter = Number(error.response.headers['retry-after']) || 0;
+      const delay = retryAfter > 0
+        ? Math.min(retryAfter * 1000, 60000)
+        : Math.min(1000 * Math.pow(2, config.__retryCount), 10000);
+      await new Promise((r) => setTimeout(r, delay));
+      return api(config);
+    }
+
     if (error.response?.status === 401) {
       // Удаляем протухший токен
       localStorage.removeItem('seo_token');
