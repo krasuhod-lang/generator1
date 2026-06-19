@@ -50,15 +50,37 @@ const getClient = () => pool.connect();
 
 /**
  * Проверить подключение к БД (используется при старте сервера).
+ * Повторяет попытки с экспоненциальной задержкой, если БД ещё не готова.
+ * @param {object}  [opts]
+ * @param {number}  [opts.maxRetries=10]      — макс. число попыток
+ * @param {number}  [opts.baseDelayMs=2000]   — начальная задержка (мс)
+ * @param {number}  [opts.maxDelayMs=15000]   — потолок задержки (мс)
  * @returns {Promise<void>}
  */
-const testConnection = async () => {
-  const client = await pool.connect();
-  try {
-    const result = await client.query('SELECT NOW() AS now');
-    console.log(`[DB] Connected. Server time: ${result.rows[0].now}`);
-  } finally {
-    client.release();
+const testConnection = async (opts = {}) => {
+  const maxRetries  = opts.maxRetries  ?? 10;
+  const baseDelayMs = opts.baseDelayMs ?? 2000;
+  const maxDelayMs  = opts.maxDelayMs  ?? 15000;
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const client = await pool.connect();
+      try {
+        const result = await client.query('SELECT NOW() AS now');
+        console.log(`[DB] Connected. Server time: ${result.rows[0].now}`);
+      } finally {
+        client.release();
+      }
+      return; // success
+    } catch (err) {
+      if (attempt >= maxRetries) {
+        console.error(`[DB] Failed to connect after ${maxRetries} attempts: ${err.message}`);
+        throw err;
+      }
+      const delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+      console.warn(`[DB] Connection attempt ${attempt}/${maxRetries} failed: ${err.message}. Retrying in ${delay}ms…`);
+      await new Promise(r => setTimeout(r, delay));
+    }
   }
 };
 
