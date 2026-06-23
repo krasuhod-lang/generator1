@@ -27,8 +27,10 @@ import KPICardGrid from '../components/KPICardGrid.vue';
 import TrafficChart from '../components/TrafficChart.vue';
 import FreshnessBadge from '../components/FreshnessBadge.vue';
 import WorksTimeline from '../components/WorksTimeline.vue';
+import PrintableReport from '../components/PrintableReport.vue';
 import { useProjectsStore } from '../stores/projects.js';
 import { useViewModeStore } from '../stores/viewMode.js';
+import { exportNodeToPdf, prepareLogoForExport, nextFrame } from '../utils/pdfExporter.js';
 
 const route = useRoute();
 const router = useRouter();
@@ -43,6 +45,12 @@ const freshness = ref([]);
 const works = ref([]);
 const worksLoading = ref(false);
 const startingAnalysis = ref(false);
+
+// PR-6: ссылка на off-screen printable layout (PrintableReport) и
+// флаг загрузки во время рендера PDF.
+const printableRef = ref(null);
+const exporting = ref(false);
+const logoDataUrl = ref('');
 
 const projectId = computed(() => route.params.id);
 
@@ -214,6 +222,56 @@ async function startAnalysis() {
 }
 
 onMounted(load);
+
+/**
+ * PR-6: экспорт текущего дашборда в PDF через html2canvas + jsPDF.
+ * Снимок снимаем не с самого дашборда (тёмный фон, ECharts canvas-внутри
+ * canvas — html2canvas плохо это сшивает), а с печатного off-screen
+ * layout `PrintableReport` (белый фон, table-формат динамики). Логотип
+ * проекта конвертируем в base64 заранее — обходит CORS и не даёт обрезки
+ * (`object-fit:contain` в .pr-logo-frame).
+ */
+async function exportPdf() {
+  if (exporting.value) return;
+  exporting.value = true;
+  try {
+    // Берём URL логотипа из проекта (поле logo_url); если такого нет —
+    // оставляем заглушку (заглавная буква).
+    const rawLogo = project.value?.logo_url || project.value?.logo || '';
+    logoDataUrl.value = (await prepareLogoForExport(rawLogo)) || '';
+
+    // Ждём, пока Vue перерисует PrintableReport со свежим логотипом.
+    await nextFrame();
+    await nextFrame();
+
+    const node = printableRef.value;
+    if (!node) throw new Error('PrintableReport не смонтирован');
+    const projName = project.value?.name || project.value?.site_url || 'project';
+    const safeName = String(projName).replace(/[^a-zA-Zа-яА-Я0-9-_]+/g, '_').slice(0, 60);
+    await exportNodeToPdf(node, {
+      filename: `executive-summary_${safeName}.pdf`,
+      scale: 2,
+      backgroundColor: '#ffffff',
+    });
+  } catch (e) {
+    error.value = e?.message || 'Не удалось сформировать PDF';
+  } finally {
+    exporting.value = false;
+  }
+}
+
+// Карточки для печатной версии (повторяем shape из `cards`, но с готовыми
+// delta — берём из computedDelta KPICard было бы громоздко, пересчитываем
+// здесь же).
+const printableCards = computed(() => cards.value.map((c) => {
+  const cur = Number(c.value);
+  const prv = Number(c.previous);
+  let delta = c.delta != null ? Number(c.delta) : null;
+  if (delta === null && Number.isFinite(cur) && Number.isFinite(prv) && prv !== 0) {
+    delta = (cur - prv) / Math.abs(prv);
+  }
+  return { ...c, delta };
+}));
 </script>
 
 <template>
@@ -234,6 +292,18 @@ onMounted(load);
         :freshness="src"
         :compact="true"
       />
+      <!-- PR-6: «Скачать PDF» — экспортирует off-screen PrintableReport
+           через html2canvas + jsPDF (utils/pdfExporter.js). -->
+      <button
+        type="button"
+        class="ml-1 px-3 py-1.5 rounded-md text-xs font-semibold bg-brand-indigo text-white hover:bg-brand-dark disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+        :disabled="exporting || loading"
+        @click="exportPdf"
+        data-testid="export-pdf"
+      >
+        <span v-if="exporting">Формируем PDF…</span>
+        <span v-else>Скачать PDF</span>
+      </button>
     </template>
 
     <div class="p-6 space-y-6">
@@ -304,6 +374,30 @@ onMounted(load);
         </div>
         <WorksTimeline :works="works" :mode="viewMode.mode" :loading="worksLoading" />
       </section>
+    </div>
+
+    <!--
+      PR-6: off-screen printable layout. Расположен за пределами viewport
+      (left: -10000px), но в DOM, так что html2canvas может его снять.
+      Не aria-hidden — потому что внутри есть смысловое содержимое,
+      но для AT он отдалён, и пользователь его не видит.
+    -->
+    <div
+      aria-hidden="true"
+      style="position: fixed; left: -10000px; top: 0; pointer-events: none;"
+    >
+      <PrintableReport
+        ref="printableRef"
+        :project-name="project?.name || project?.site_url || 'Проект'"
+        :period-label="lastMonthLabel !== '—' ? `Полный месяц: ${lastMonthLabel}` : ''"
+        :generated-at="new Date().toISOString()"
+        :logo-data-url="logoDataUrl"
+        :client-name="project?.client_name || ''"
+        :kpi-cards="printableCards"
+        :monthly="snapshot?.monthly_periods || []"
+        :works="works"
+        :mode="viewMode.mode"
+      />
     </div>
   </PremiumLayout>
 </template>

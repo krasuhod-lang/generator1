@@ -16,6 +16,8 @@
     "axios": "^1.7.2",
     "dompurify": "^3.1.6",
     "echarts": "^5.5.1",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
     "pinia": "^2.1.7",
     "read-excel-file": "^5.8.6",
     "vue": "^3.4.27",
