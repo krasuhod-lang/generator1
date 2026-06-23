@@ -143,6 +143,48 @@ function _buildMetricsDigest(data) {
       query: item.query,
       position: item.position,
     })),
+    modules: _buildModulesDigest(data.modules),
+  };
+}
+
+/**
+ * Свод сигналов модулей отчёта (ТЗ §5) для AI Executive Summary: сколько точек
+ * роста Striking Distance, разрывов CTR, проблемных по Content Health страниц,
+ * состояние Off-Page и tech-audit. Возвращает null, если модули недоступны.
+ */
+function _buildModulesDigest(modules) {
+  if (!modules || modules.disabled || modules.error) return null;
+  const ex = modules.executive || {};
+  const sd = ex.striking_distance || modules.striking_distance?.summary || {};
+  const cg = ex.ctr_gap || modules.ctr_gap?.summary || {};
+  const ch = ex.content_health || modules.content_health?.summary || {};
+  const op = ex.off_page || modules.off_page?.summary || {};
+  const ta = ex.tech_audit || modules.tech_audit?.summary || {};
+  const topStriking = (modules.striking_distance?.items || []).slice(0, 5)
+    .map((it) => ({ query: it.query, position: it.avg_position, priority: it.priority, score: it.opportunity_score }));
+  const topCtrGaps = (modules.ctr_gap?.items || []).slice(0, 5)
+    .map((it) => ({ query: it.query, position: it.position, ctr: it.ctr, benchmark: it.benchmark_ctr, level: it.level }));
+  return {
+    striking_distance: {
+      total: sd.total || 0, high: sd.high || 0, medium: sd.medium || 0, low: sd.low || 0,
+      opportunity_clicks: sd.total_opportunity_clicks || 0, top: topStriking,
+    },
+    ctr_gap: {
+      total: cg.total || 0, critical: cg.critical || 0, warning: cg.warning || 0,
+      lost_clicks: cg.lost_clicks || 0, top: topCtrGaps,
+    },
+    content_health: {
+      avg_score: ch.avg_score ?? null, healthy: ch.healthy || 0,
+      needs_work: ch.needs_work || 0, critical: ch.critical || 0,
+    },
+    off_page: {
+      total: op.total || 0, indexed_yandex: op.indexed_yandex || 0,
+      indexed_google: op.indexed_google || 0, broken: op.broken || 0, unique_donors: op.unique_donors || 0,
+    },
+    tech_audit: {
+      pages: ta.pages || 0, images_no_alt: ta.images_no_alt || 0,
+      images_non_webp: ta.images_non_webp || 0, broken: ta.broken || 0,
+    },
   };
 }
 
@@ -455,6 +497,11 @@ async function generateSummary(data, opts = {}) {
     `Все метрики (JSON): ${JSON.stringify(digest)}`,
     `Quick Wins: ${JSON.stringify(digest.quick_wins)}`,
   ];
+  if (digest.modules) {
+    pass3PromptBase.push(
+      `Сигналы модулей отчёта (Striking Distance, CTR Gap, Content Health, Off-Page, Tech Audit) (JSON): ${JSON.stringify(digest.modules)}`,
+    );
+  }
 
   // Run passes 1 & 2 in parallel
   const [result1, result2] = await Promise.all([
@@ -487,6 +534,7 @@ async function generateSummary(data, opts = {}) {
     '  "traffic_value": "1-2 предложения"',
     '}',
     'Используй РЕАЛЬНЫЕ числа. executive_summary должен учитывать и Яндекс, и Google.',
+    'Если есть «Сигналы модулей отчёта» — используй их: точки роста Striking Distance (с opportunity_score), разрывы CTR Gap (critical/warning), проблемные страницы Content Health, состояние Off-Page и tech-audit — отрази их в highlights, vulnerabilities и roadmap.',
     'Ответь СТРОГО JSON-объектом, без markdown-обёртки.',
   ].join('\n');
 

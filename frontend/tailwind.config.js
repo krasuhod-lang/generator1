@@ -10,6 +10,14 @@ export default {
           dark:    '#4f46e5', // indigo-600
           light:   '#a5b4fc', // indigo-300
         },
+        // Status / trend tokens из ТЗ §6.1 — модули отчёта (Striking Distance,
+        // CTR Gap, Content Health) подсвечивают точки роста этими цветами.
+        'status-critical': '#EF4444', // red-500
+        'status-warning':  '#F59E0B', // amber-500
+        'status-healthy':  '#10B981', // emerald-500
+        'trend-up':        '#10B981',
+        'trend-down':      '#EF4444',
+        'brand-primary':   '#6366F1', // indigo-500
         // Чуть более светлая и приятная сине-серая палитра.
         // Переопределяет стандартный `gray`, который используется по всему
         // приложению, поэтому весь интерфейс становится мягче и светлее,

@@ -7,6 +7,7 @@ const { loadCachedSeries, loadCurrent, syncDomain } = require('./keysSoSync');
 const tasksLog = require('./tasksAutoLog');
 const { forecastMetric } = require('./forecastEngine');
 const positionAnalytics = require('../positionTracker/analytics');
+const { buildModulesForProject } = require('./reportModulesService');
 
 function _isoDate(value) {
   if (value == null) return '';
@@ -313,6 +314,17 @@ function _buildForecast(gsc, keysSo) {
   return out;
 }
 
+async function _modulesSection(project, from, to, config) {
+  const moduleConfig = (config && config.modules) || {};
+  // Полностью отключить блок модулей можно через config.modules.enabled = false.
+  if (moduleConfig.enabled === false) return { enabled: [], disabled: true };
+  try {
+    return await buildModulesForProject(project, { from, to, config: moduleConfig });
+  } catch (err) {
+    return { enabled: [], error: err.message || 'modules_failed' };
+  }
+}
+
 async function aggregateForDraft(draft, opts = {}) {
   const { rows } = await db.query(`SELECT * FROM projects WHERE id = $1`, [draft.project_id]);
   const project = rows[0];
@@ -330,6 +342,8 @@ async function aggregateForDraft(draft, opts = {}) {
     _tasksSection(project.id, from, to, granularity, draft.tasks_blocks, { includeHidden: opts.includeHidden }),
   ]);
 
+  const modules = await _modulesSection(project, from, to, draft.config);
+
   return {
     project: {
       id: project.id,
@@ -345,6 +359,7 @@ async function aggregateForDraft(draft, opts = {}) {
     keys_so: keysSo,
     position,
     tasks,
+    modules,
     traffic_value: _buildTrafficValue(keysSo, gsc, ywm),
     forecast: _buildForecast(gsc, keysSo),
     generated_at: new Date().toISOString(),

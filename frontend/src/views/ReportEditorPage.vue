@@ -157,6 +157,17 @@ async function exportDocx() {
   }
 }
 
+async function exportPdf() {
+  if (!route.params.id) return;
+  exporting.value = true;
+  try {
+    const blob = await store.exportPdf(route.params.id, { ...viewRange.value });
+    downloadBlob(blob, `${(draft.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.pdf`);
+  } finally {
+    exporting.value = false;
+  }
+}
+
 async function loadAutolog() {
   if (!route.params.id) return;
   try {
@@ -224,6 +235,9 @@ function _stateOf(section) {
             </button>
             <button class="btn btn-secondary" :disabled="exporting" @click="exportDocx">
               {{ exporting ? 'Экспорт…' : 'Скачать .docx' }}
+            </button>
+            <button class="btn btn-secondary" :disabled="exporting" @click="exportPdf">
+              {{ exporting ? 'Экспорт…' : 'Скачать .pdf' }}
             </button>
           </div>
 

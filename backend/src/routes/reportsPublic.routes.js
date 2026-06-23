@@ -32,5 +32,6 @@ const unlockLimiter = rateLimit({
 router.get('/report/:uuid',           publicLimiter, c.publicGet);
 router.post('/report/:uuid/unlock',   unlockLimiter, c.publicUnlock);
 router.post('/report/:uuid/export.docx', publicLimiter, c.publicExportDocx);
+router.post('/report/:uuid/export.pdf', publicLimiter, c.publicExportPdf);
 
 module.exports = router;

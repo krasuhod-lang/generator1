@@ -14,6 +14,15 @@
 
 const db = require('../../config/db');
 const { getDomainDashboard, KeysSoError, _normalizeDomain, _normalizeBase, getGoogleBase } = require('./keysSoClient');
+const { nextHealth } = require('./modules/integrationHealth');
+
+/**
+ * In-memory health-трекер по домену для CRON-цикла: считает подряд идущие
+ * ошибки синка и авто-деактивирует домен после 3 неудач подряд (ТЗ §
+ * resilience), чтобы не долбить недоступный/невалидный источник на каждом
+ * тике. Успешный синк сбрасывает счётчик и реактивирует домен.
+ */
+const _domainHealth = new Map();
 
 function _hasApiKey() {
   return !!(process.env.KEYS_SO_API_KEY || process.env.KEYSSO_API_KEY);
@@ -118,14 +127,27 @@ async function syncAllDomains(opts = {}) {
        FROM projects
       WHERE keys_so_domain IS NOT NULL AND keys_so_domain <> ''`,
   );
-  const results = { processed: 0, skipped: 0, errors: [] };
+  const results = { processed: 0, skipped: 0, errors: [], deactivated: [] };
   for (const row of rows) {
+    const domain = row.keys_so_domain;
+    const health = _domainHealth.get(domain) || { fail_count: 0, is_active: true };
+    if (!health.is_active) {
+      results.skipped++;
+      continue; // авто-деактивирован после 3 ошибок подряд — пропускаем
+    }
     try {
-      const r = await syncDomain(row.keys_so_domain, { ...opts, base: row.keys_so_region });
+      const r = await syncDomain(domain, { ...opts, base: row.keys_so_region });
       if (r.skipped) results.skipped++;
       else results.processed++;
+      _domainHealth.set(domain, nextHealth(health, 'success'));
     } catch (err) {
-      results.errors.push({ domain: row.keys_so_domain, error: err.message });
+      results.errors.push({ domain, error: err.message });
+      const next = nextHealth(health, 'failure', { reason: err.message });
+      _domainHealth.set(domain, next);
+      if (next.deactivated) {
+        results.deactivated.push(domain);
+        console.warn(`[keysSoSync] domain ${domain} auto-deactivated after ${next.fail_count} consecutive failures`);
+      }
     }
     // Грубое соблюдение лимита 10 запросов / 10 секунд: ~1 запрос/сек,
     // когда доменов много. Один проход = один запрос на домен.

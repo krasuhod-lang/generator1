@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import api from '../../api.js';
 import ReportTrendChart from './ReportTrendChart.vue';
 import PositionChart from '../PositionChart.vue';
+import ReportModulesCard from './ReportModulesCard.vue';
 
 const props = defineProps({
   data:        { type: Object, default: () => ({}) },
@@ -29,6 +30,13 @@ const hasGoogleKeys = computed(() => {
   return g && g.series && g.series.length > 0;
 });
 
+const hasModules = computed(() => {
+  const m = props.data?.modules;
+  return !!(m && !m.disabled && !m.error && (
+    m.striking_distance || m.ctr_gap || m.content_health || m.off_page || m.tech_audit
+  ));
+});
+
 // --- Section state helpers ---
 function sectionState(section) {
   if (!section) return 'empty';
@@ -48,6 +56,7 @@ const navItems = computed(() => {
   if (props.data?.gsc) items.push({ id: 'gsc', label: 'GSC' });
   if (props.data?.ywm) items.push({ id: 'ywm', label: 'Яндекс' });
   if (props.data?.keys_so) items.push({ id: 'keys-so', label: 'Keys.so' });
+  if (hasModules.value) items.push({ id: 'modules', label: 'Точки роста' });
   items.push({ id: 'tasks', label: 'Работы' });
   if (props.summary?.executive_summary || props.summary?.highlights?.length) {
     items.push({ id: 'ai-analysis', label: 'AI-выводы' });
@@ -556,6 +565,8 @@ function formatAbsDelta(d) {
         <li v-for="(item, idx) in summary.roadmap" :key="idx">{{ item }}</li>
       </ol>
     </section>
+
+    <ReportModulesCard :modules="data?.modules || {}" />
 
     <section id="report-tasks" class="rblk">
       <div class="tasks-head">
