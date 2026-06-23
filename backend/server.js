@@ -1389,6 +1389,24 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_user_created ON projects (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_share_token  ON projects (share_token) WHERE share_token IS NOT NULL`);
 
+    // Migration 081: режим публичной ссылки (analyst|client) и срок действия.
+    // Старые ссылки получают режим 'client' и бессрочный доступ — самый
+    // безопасный default (без раскрытия тех. деталей).
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS share_mode       TEXT NOT NULL DEFAULT 'client'`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS share_expires_at TIMESTAMPTZ`);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'projects_share_mode_chk'
+        ) THEN
+          ALTER TABLE projects
+            ADD CONSTRAINT projects_share_mode_chk
+            CHECK (share_mode IN ('analyst', 'client'));
+        END IF;
+      END$$;
+    `);
+
     // Migration 062: интеграция с Яндекс.Вебмастером (вторая аналитическая
     // система проекта, симметрично GSC). Токены Yandex OAuth храним строго
     // зашифрованными (AES-256-GCM, projects/tokenCrypto.js) — в колонках *_enc.
@@ -1508,6 +1526,54 @@ async function ensureSchema() {
       );
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_project_gsc_links_project ON project_gsc_links (project_id, table_type)`);
+
+    // data_source_health — мониторинг свежести данных по внешним источникам
+    // (GSC, Yandex.Webmaster, Keys.so, Backlinks). См. migrations/080_data_source_health.sql.
+    // ТЗ §5.2: для каждого источника храним last_successful_sync_at,
+    // source_max_date, expected_max_date, rows_last_sync, is_partial_period, status.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS data_source_health (
+        id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id                UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        source                    VARCHAR(32) NOT NULL,
+        last_successful_sync_at   TIMESTAMPTZ,
+        source_max_date           DATE,
+        expected_max_date         DATE,
+        rows_last_sync            INTEGER NOT NULL DEFAULT 0,
+        is_partial_period         BOOLEAN NOT NULL DEFAULT FALSE,
+        status                    VARCHAR(16) NOT NULL DEFAULT 'ok',
+        last_error                TEXT,
+        meta                      JSONB,
+        updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_data_source_health UNIQUE (project_id, source)
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_data_source_health_project ON data_source_health (project_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_data_source_health_status ON data_source_health (status) WHERE status <> 'ok'`);
+
+    // project_works — журнал работ SEO-специалиста (Works Log, PR-5 эпика
+    // premium-ui-and-client-mode-implementation). См. migrations/082_project_works.sql.
+    // В Client Mode (viewMode.js) выводится только `client_summary`, без `description`/`impact`.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_works (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        performed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        type            VARCHAR(32) NOT NULL DEFAULT 'other',
+        status          VARCHAR(16) NOT NULL DEFAULT 'done',
+        title           TEXT NOT NULL,
+        description     TEXT,
+        client_summary  TEXT,
+        impact          JSONB,
+        links           JSONB,
+        created_by      UUID,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT chk_project_works_status CHECK (status IN ('planned','in_progress','done'))
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_works_project_performed ON project_works (project_id, performed_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_works_project_status ON project_works (project_id, status)`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS project_page_snapshots (

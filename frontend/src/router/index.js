@@ -35,6 +35,8 @@ const routes = [
 
   { path: '/projects',             component: () => import('../views/ProjectsPage.vue'),        meta: { auth: true } },
   { path: '/projects/:id',         component: () => import('../views/ProjectDetailPage.vue'),   meta: { auth: true } },
+  // PR-4: Executive Summary — премиум-дашборд проекта (KPI + main chart).
+  { path: '/projects/:id/summary', component: () => import('../views/ExecutiveSummaryPage.vue'), meta: { auth: true } },
   { path: '/share/project/:token', component: () => import('../views/ProjectSharedPage.vue'),   meta: { guest: false, public: true } },
 
   { path: '/aegis',                component: () => import('../views/AegisPage.vue'),            meta: { auth: true } },

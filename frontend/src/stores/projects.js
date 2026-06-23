@@ -96,6 +96,32 @@ export const useProjectsStore = defineStore('projects', {
       return data || null;
     },
 
+    // PR-1: статус свежести данных по всем источникам (GSC/Ydx/Keys.so/...).
+    // Используется FreshnessBadge в Topbar PremiumLayout (PR-3) и Executive
+    // Summary дашборда (PR-4). Возвращает { project_id, sources: [...] }.
+    async getFreshness(id) {
+      const { data } = await api.get(`/projects/${id}/freshness`);
+      return data || { sources: [] };
+    },
+
+    // ── Works Log Module (PR-5) ──────────────────────────────────────
+    // listWorks учитывает текущий X-Client-Mode (api.js interceptor).
+    async listWorks(id, params = {}) {
+      const { data } = await api.get(`/projects/${id}/works`, { params });
+      return data || { works: [] };
+    },
+    async createWork(id, payload) {
+      const { data } = await api.post(`/projects/${id}/works`, payload || {});
+      return data?.work || null;
+    },
+    async updateWork(id, workId, patch) {
+      const { data } = await api.put(`/projects/${id}/works/${workId}`, patch || {});
+      return data?.work || null;
+    },
+    async deleteWork(id, workId) {
+      await api.delete(`/projects/${id}/works/${workId}`);
+    },
+
     // ── AI-аналитика ─────────────────────────────────────────────────
     async startAnalysis(id, payload) {
       const { data } = await api.post(`/projects/${id}/analyze`, payload || {});
@@ -111,9 +137,16 @@ export const useProjectsStore = defineStore('projects', {
     },
 
     // ── Шаринг ───────────────────────────────────────────────────────
-    async createShare(id) {
-      const { data } = await api.post(`/projects/${id}/share`);
-      return data?.token || null;
+    // opts: { mode?: 'analyst'|'client', ttlDays?: number }
+    // Возвращает полный объект { token, mode, expires_at, created_at } —
+    // для совместимости со старыми вызовами api.post возвращает строку,
+    // только если передан опциональный returnString=true.
+    async createShare(id, opts = {}) {
+      const body = {};
+      if (opts.mode)    body.mode    = opts.mode;
+      if (opts.ttlDays !== undefined) body.ttlDays = opts.ttlDays;
+      const { data } = await api.post(`/projects/${id}/share`, body);
+      return data || null;
     },
     async revokeShare(id) {
       await api.delete(`/projects/${id}/share`);

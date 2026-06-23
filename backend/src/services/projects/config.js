@@ -611,6 +611,30 @@ const PROJECTS_CONFIG = deepFreeze({
   share: {
     tokenBytes: 12, // 96 бит энтропии → base64url ≈ 16 символов
   },
+
+  // Полные периоды и оценка свежести данных (ТЗ §5.1, §5.2 — KPI и AI-выводы
+  // должны строиться только по завершённым месяцам; текущий месяц помечаем
+  // как partial и в headline не используем).
+  //
+  //   timezone — таймзона, в которой определяется граница месяца. Используем
+  //              UTC по умолчанию, чтобы матчиться с ISO-датами snapshot'ов.
+  //   completeMonthLagDays — количество дней после конца месяца, которое
+  //              нужно подождать, прежде чем считать его «полным» (источники
+  //              отдают данные с задержкой — GSC ~2-3д, Yandex ~1-2д).
+  //   freshness.staleAfterHours — sync старее этого считается stale.
+  //   freshness.errorAfterHours — sync старее этого считается error.
+  //   freshness.gapDays — допустимый зазор между expected_max_date и
+  //              source_max_date, при превышении которого статус становится
+  //              'gap' (данные в источнике застряли).
+  periods: {
+    timezone: 'UTC',
+    completeMonthLagDays: 3,
+    freshness: {
+      staleAfterHours: 36,
+      errorAfterHours: 96,
+      gapDays: 2,
+    },
+  },
 });
 
 function getProjectsConfig() {

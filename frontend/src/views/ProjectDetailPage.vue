@@ -498,8 +498,16 @@ const shareUrl = computed(() => project.value?.share_token
 
 async function createShare() {
   try {
-    const token = await store.createShare(projectId);
-    if (token) { project.value.share_token = token; flash('Публичная ссылка создана'); }
+    const result = await store.createShare(projectId);
+    const token = result && typeof result === 'object' ? result.token : result;
+    if (token) {
+      project.value.share_token = token;
+      if (result && typeof result === 'object') {
+        project.value.share_mode       = result.mode || project.value.share_mode;
+        project.value.share_expires_at = result.expires_at || null;
+      }
+      flash('Публичная ссылка создана');
+    }
   } catch (_) { flash('Не удалось создать ссылку'); }
 }
 async function revokeShare() {

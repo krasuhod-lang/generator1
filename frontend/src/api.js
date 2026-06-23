@@ -24,6 +24,14 @@ api.interceptors.request.use((config) => {
   if (token) {
     config.headers['Authorization'] = `Bearer ${token}`;
   }
+  // Premium UI: режим просмотра (analyst|client) — useViewModeStore зеркалит
+  // значение в localStorage; читаем напрямую, чтобы не зависеть от инициализации
+  // Pinia на ранних запросах. Бэкенд (services/projects/viewMode.js) урезает
+  // payload при X-Client-Mode: 1.
+  try {
+    const viewMode = localStorage.getItem('seo_view_mode');
+    if (viewMode === 'client') config.headers['X-Client-Mode'] = '1';
+  } catch (_) { /* SSR / privacy-mode — игнорируем */ }
   return config;
 });
 
