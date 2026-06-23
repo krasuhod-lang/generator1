@@ -39,6 +39,7 @@ const { buildLeadContext } = require('../services/projects/leadContext');
 const snapshotsRepo = require('../services/projects/snapshotsRepo');
 const { compareSnapshots } = require('../services/projects/periodComparison');
 const { ensureLinkedPositionProject, syncLinkedPositionProject } = require('../services/projects/positionBridge');
+const freshnessService = require('../services/projects/freshnessService');
 
 const CFG = getProjectsConfig();
 
@@ -994,6 +995,26 @@ async function generateBlogArticle(req, res, next) {
   }
 }
 
+/**
+ * GET /api/projects/:id/freshness — статус свежести по всем источникам данных
+ * проекта (ТЗ §5.2). Возвращает массив `{source, status, last_successful_sync_at,
+ * source_max_date, expected_max_date, rows_last_sync, is_partial_period, last_error}`.
+ *
+ * Список источников — все, по которым когда-либо был sync (запись в
+ * data_source_health). UI решает, как рендерить статусы 'ok'/'partial'/'stale'/
+ * 'gap'/'error' (бейджи в topbar и summary-карточках).
+ */
+async function getFreshness(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const items = await freshnessService.getProjectFreshness(project.id);
+    return res.json({ project_id: project.id, sources: items });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listProjects,
   createProject,
@@ -1028,4 +1049,5 @@ module.exports = {
   regenerateMeta,
   probeAiVisibility,
   generateBlogArticle,
+  getFreshness,
 };

@@ -67,6 +67,7 @@ router.get('/:id/compare',          auth, c.compareProjectSources);
 
 // Дашборд
 router.get('/:id/performance',     auth, c.getPerformance);
+router.get('/:id/freshness',       auth, c.getFreshness);
 
 // AI-аналитика
 router.post('/:id/analyze',        auth, analyzeLimiter, c.startAnalysis);

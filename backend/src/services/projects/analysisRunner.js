@@ -23,6 +23,8 @@ const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
 const { onAnalysisDone } = require('./aegisBridge');
 const { insertSnapshot } = require('./snapshotsRepo');
+const periodResolver = require('./periodResolver');
+const freshnessService = require('./freshnessService');
 const { auditPages, regenerateMetaForPages } = require('./pageMetaAudit');
 const { analyzeEat } = require('./eatAnalyzer');
 const { auditSchema } = require('./schemaAuditor');
@@ -127,10 +129,67 @@ async function collectSnapshot(project, range) {
   const eatPersist = _stripScans(eat);
   const linkAuditPersist = _stripLinkedUrls(linkAudit);
 
+  // ТЗ §5.1 — полные периоды. Размечаем серию по месяцам с флагами
+  // is_complete/is_partial и резолвим last/prev complete для headline KPI.
+  // Это additive поле — старые консьюмеры не ломаются.
+  const _seriesLastDate = (performance.series && performance.series.length)
+    ? performance.series[performance.series.length - 1].date
+    : (resolved && resolved.endDate) || null;
+  const monthlyPeriods = periodResolver.splitSeriesIntoMonths(performance.series || [], {
+    sourceMaxDate: _seriesLastDate,
+  });
+  const periodStatus = periodResolver.resolveCompletedMonths({
+    sourceMaxDate: _seriesLastDate,
+  });
+  // Headline KPI — только totals последнего полного месяца (если есть),
+  // detail metrics — totals за весь запрошенный диапазон (как было).
+  const _lastCompleteMonth = periodStatus.lastComplete
+    ? monthlyPeriods.find((m) => m.key === periodStatus.lastComplete.key) : null;
+  const _prevCompleteMonth = periodStatus.prevComplete
+    ? monthlyPeriods.find((m) => m.key === periodStatus.prevComplete.key) : null;
+  const headlineKpi = {
+    last_complete_month: periodStatus.lastComplete ? {
+      key: periodStatus.lastComplete.key,
+      from: periodStatus.lastComplete.from,
+      to: periodStatus.lastComplete.to,
+      totals: _lastCompleteMonth ? {
+        clicks: _lastCompleteMonth.clicks,
+        impressions: _lastCompleteMonth.impressions,
+        ctr: _lastCompleteMonth.ctr,
+        position: _lastCompleteMonth.position,
+      } : null,
+    } : null,
+    prev_complete_month: periodStatus.prevComplete ? {
+      key: periodStatus.prevComplete.key,
+      from: periodStatus.prevComplete.from,
+      to: periodStatus.prevComplete.to,
+      totals: _prevCompleteMonth ? {
+        clicks: _prevCompleteMonth.clicks,
+        impressions: _prevCompleteMonth.impressions,
+        ctr: _prevCompleteMonth.ctr,
+        position: _prevCompleteMonth.position,
+      } : null,
+    } : null,
+    partial_month: periodStatus.partialMonth ? {
+      key: periodStatus.partialMonth.key,
+      from: periodStatus.partialMonth.from,
+      to: periodStatus.partialMonth.to,
+    } : null,
+    status: periodStatus.lastComplete ? 'ok' : 'partial',
+  };
+
   const snapshot = {
     range: resolved,
     totals: performance.totals,
     series: performance.series,
+    monthly_periods: monthlyPeriods,
+    period_status: {
+      last_complete: periodStatus.lastComplete,
+      prev_complete: periodStatus.prevComplete,
+      yoy_complete: periodStatus.yoyComplete,
+      partial_month: periodStatus.partialMonth,
+    },
+    headline_kpi: headlineKpi,
     top_queries: top.topQueries,
     top_pages: top.topPages,
     commercial,
@@ -177,6 +236,19 @@ async function collectSnapshot(project, range) {
     topPageInsights,
     actionPlan,
   };
+
+  // ТЗ §5.2 — фиксируем свежесть GSC по итогам успешного сбора.
+  try {
+    await freshnessService.recordSyncSuccess({
+      projectId: project.id,
+      source: 'gsc',
+      sourceMaxDate: _seriesLastDate,
+      expectedMaxDate: resolved && resolved.endDate,
+      rowsLastSync: Array.isArray(performance.series) ? performance.series.length : 0,
+      isPartialPeriod: Boolean(periodStatus.partialMonth),
+      meta: { range: resolved, fromCache: Boolean(performance.fromCache) },
+    });
+  } catch (_) { /* graceful */ }
 
   return { snapshot, payload };
 }
@@ -225,6 +297,32 @@ async function collectYdxSnapshot(project, range) {
       brand_split: brandSplit,
       insights,
     };
+    // ТЗ §5.1: размечаем месяцы по серии Яндекса с флагом is_partial — для
+    // headline KPI используем только последний полный месяц.
+    try {
+      const ydxLastDate = (performance.series && performance.series.length)
+        ? performance.series[performance.series.length - 1].date
+        : (performance.range && performance.range.endDate) || null;
+      snapshot.monthly_periods = periodResolver.splitSeriesIntoMonths(
+        performance.series || [], { sourceMaxDate: ydxLastDate }
+      );
+      const status = periodResolver.resolveCompletedMonths({ sourceMaxDate: ydxLastDate });
+      snapshot.period_status = {
+        last_complete: status.lastComplete,
+        prev_complete: status.prevComplete,
+        partial_month: status.partialMonth,
+      };
+      // ТЗ §5.2 — фиксируем свежесть Yandex Webmaster.
+      await freshnessService.recordSyncSuccess({
+        projectId: project.id,
+        source: 'yandex_webmaster',
+        sourceMaxDate: ydxLastDate,
+        expectedMaxDate: performance.range && performance.range.endDate,
+        rowsLastSync: Array.isArray(performance.series) ? performance.series.length : 0,
+        isPartialPeriod: Boolean(status.partialMonth),
+        meta: { range: performance.range },
+      });
+    } catch (_) { /* graceful */ }
     const payload = {
       project,
       range: performance.range,
@@ -236,6 +334,11 @@ async function collectYdxSnapshot(project, range) {
     return { snapshot, payload };
   } catch (e) {
     console.warn('[projects/analysisRunner] ydx snapshot failed:', e.message);
+    try {
+      await freshnessService.recordSyncError({
+        projectId: project.id, source: 'yandex_webmaster', error: e,
+      });
+    } catch (_) { /* graceful */ }
     return null;
   }
 }
@@ -405,7 +508,19 @@ async function processAnalysis(analysisId) {
     const userId = uRows[0] && uRows[0].user_id || null;
 
     // Сбор «голой» выгрузки GSC + все детерминированные срезы.
-    const { snapshot, payload } = await collectSnapshot(project, range);
+    let snapshot;
+    let payload;
+    try {
+      ({ snapshot, payload } = await collectSnapshot(project, range));
+    } catch (e) {
+      // ТЗ §5.2 — фиксируем ошибку sync GSC.
+      try {
+        await freshnessService.recordSyncError({
+          projectId: project.id, source: 'gsc', error: e,
+        });
+      } catch (_) { /* graceful */ }
+      throw e;
+    }
 
     // Сразу сохраняем снимок как отдельную строку — он остаётся даже если
     // LLM-вызов ниже упадёт. PR 1 «снимки как first-class сущность».
