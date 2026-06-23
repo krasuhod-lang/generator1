@@ -121,5 +121,11 @@ export const useReportsStore = defineStore('reports', {
       });
       return data;
     },
+    async exportPdf(id, payload) {
+      const { data } = await api.post(`/reports/drafts/${id}/export.pdf`, payload || {}, {
+        responseType: 'blob',
+      });
+      return data;
+    },
   },
 });

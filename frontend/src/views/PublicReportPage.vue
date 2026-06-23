@@ -102,6 +102,17 @@ async function exportDocx() {
     exporting.value = false;
   }
 }
+async function exportPdf() {
+  exporting.value = true;
+  try {
+    const { data } = await api.post(`/api/public/report/${route.params.uuid}/export.pdf`, {
+      ...viewRange.value,
+    }, { responseType: 'blob' });
+    downloadBlob(data, `${(result.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.pdf`);
+  } finally {
+    exporting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -125,6 +136,7 @@ async function exportDocx() {
           <div class="toolbar-actions">
             <button class="tool-btn" :disabled="result.mode === 'snapshot'" @click="applyRange">Применить</button>
             <button class="tool-btn" :disabled="exporting" @click="exportDocx">{{ exporting ? 'Экспорт…' : 'Скачать .docx' }}</button>
+            <button class="tool-btn" :disabled="exporting" @click="exportPdf">{{ exporting ? 'Экспорт…' : 'Скачать .pdf' }}</button>
           </div>
         </div>
         <div ref="previewRef">
