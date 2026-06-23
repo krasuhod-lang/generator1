@@ -13,6 +13,7 @@ const { auditHtml, summarizeTechAudit } = require('../src/services/reports/modul
 const { summarizeBacklinks } = require('../src/services/reports/modules/offPage');
 const { assembleModules } = require('../src/services/reports/modules');
 const { normalizeSettings } = require('../src/services/reports/modules/settings');
+const { nextHealth, reactivate } = require('../src/services/reports/modules/integrationHealth');
 
 let passed = 0; let failed = 0;
 function test(name, fn) {
@@ -210,6 +211,47 @@ test('assembleModules respects disabled modules via config', () => {
   assert.ok(!out.off_page);
   assert.ok(out.striking_distance);
   assert.ok(!out.enabled.includes('tech_audit'));
+});
+
+// ── Integration health fail-counter (§ resilience) ──────────────────────────
+test('nextHealth: success resets fail counter, keeps active', () => {
+  const s = nextHealth({ fail_count: 2, is_active: true }, 'success');
+  assert.strictEqual(s.fail_count, 0);
+  assert.strictEqual(s.is_active, true);
+  assert.strictEqual(s.deactivated, false);
+  assert.ok(s.last_synced_at instanceof Date);
+});
+test('nextHealth: failures increment but stay active below threshold', () => {
+  let s = nextHealth({ fail_count: 0, is_active: true }, 'failure', { reason: 'boom' });
+  assert.strictEqual(s.fail_count, 1);
+  assert.strictEqual(s.is_active, true);
+  s = nextHealth(s, 'failure');
+  assert.strictEqual(s.fail_count, 2);
+  assert.strictEqual(s.is_active, true);
+  assert.strictEqual(s.deactivated, false);
+});
+test('nextHealth: third consecutive failure auto-deactivates', () => {
+  const s = nextHealth({ fail_count: 2, is_active: true }, 'failure', { reason: '401' });
+  assert.strictEqual(s.fail_count, 3);
+  assert.strictEqual(s.is_active, false);
+  assert.strictEqual(s.deactivated, true);
+  assert.strictEqual(s.last_error, '401');
+});
+test('nextHealth: custom threshold honoured', () => {
+  const s = nextHealth({ fail_count: 1, is_active: true }, 'failure', { threshold: 2 });
+  assert.strictEqual(s.is_active, false);
+  assert.strictEqual(s.deactivated, true);
+});
+test('nextHealth: already inactive does not re-flag deactivated', () => {
+  const s = nextHealth({ fail_count: 5, is_active: false }, 'failure');
+  assert.strictEqual(s.is_active, false);
+  assert.strictEqual(s.deactivated, false);
+});
+test('reactivate resets counter and marks reactivated when was inactive', () => {
+  const s = reactivate({ fail_count: 4, is_active: false });
+  assert.strictEqual(s.fail_count, 0);
+  assert.strictEqual(s.is_active, true);
+  assert.strictEqual(s.reactivated, true);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
