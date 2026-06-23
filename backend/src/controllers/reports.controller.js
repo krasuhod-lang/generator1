@@ -36,6 +36,7 @@ const { aggregateForDraft } = require('../services/reports/dataAggregator');
 const { generateSummary } = require('../services/reports/aiAnalyst');
 const tasksLog = require('../services/reports/tasksAutoLog');
 const { buildReportDocx } = require('../services/reports/docxExporter');
+const { buildReportPdf } = require('../services/reports/pdfExporter');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -654,6 +655,31 @@ async function exportDraftDocx(req, res) {
   }
 }
 
+async function exportDraftPdf(req, res) {
+  const draft = await _ownedDraft(req.params.id, req.user.id);
+  if (!draft) return _bad(res, 404, 'Черновик не найден');
+  try {
+    const data = await aggregateForDraft(draft, {
+      from: req.body?.from,
+      to: req.body?.to,
+      granularity: req.body?.granularity,
+    });
+    const buffer = await buildReportPdf({
+      title: draft.title,
+      period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
+      project: { name: draft.project_name, url: draft.project_url },
+      data,
+      summary: _summaryPayloadFromDraft(draft),
+      tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.pdf"`);
+    res.send(buffer);
+  } catch (err) {
+    return _bad(res, 500, err.message || 'pdf_export_failed');
+  }
+}
+
 async function publicUnlock(req, res) {
   const sr = await _loadShared(req.params.uuid);
   if (!sr) return res.status(404).json({ error: 'not_found' });
@@ -711,6 +737,47 @@ async function publicExportDocx(req, res) {
   }
 }
 
+async function publicExportPdf(req, res) {
+  const sr = await _loadShared(req.params.uuid);
+  if (!sr) return res.status(404).json({ error: 'not_found' });
+  if (!sr.is_active) return res.status(410).json({ error: 'revoked' });
+  if (_isExpired(sr)) return res.status(410).json({ error: 'expired' });
+  if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
+    return res.status(403).json({ error: 'password_required' });
+  }
+  try {
+    const data = sr.mode === 'snapshot' && sr.snapshot_data
+      ? sr.snapshot_data.data
+      : await aggregateForDraft({
+        id: sr.draft_id,
+        project_id: sr.project_id,
+        date_from: req.body?.from || sr.date_from,
+        date_to: req.body?.to || sr.date_to,
+        tasks_blocks: sr.tasks_blocks || [],
+      }, {
+        from: req.body?.from,
+        to: req.body?.to,
+        granularity: req.body?.granularity,
+      });
+    const summary = sr.mode === 'snapshot' && sr.snapshot_data
+      ? (sr.snapshot_data.summary || {})
+      : _summaryPayloadFromDraft(sr);
+    const buffer = await buildReportPdf({
+      title: sr.draft_title,
+      period: _periodLabel(req.body?.from || sr.date_from, req.body?.to || sr.date_to),
+      project: { name: sr.project_name, url: sr.project_url },
+      data,
+      summary,
+      tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((sr.draft_title || 'report').slice(0, 80))}.pdf"`);
+    res.send(buffer);
+  } catch (err) {
+    return _bad(res, 500, err.message || 'pdf_export_failed');
+  }
+}
+
 // ─── Upload image for task description ─────────────────────────────────────
 async function uploadTaskImage(req, res) {
   try {
@@ -726,8 +793,8 @@ async function uploadTaskImage(req, res) {
 module.exports = {
   listDrafts, createDraft, getDraft, updateDraft, deleteDraft,
   updateTasksBlocks, getDraftData, listProjectTasks,
-  generateSummaryEndpoint, getSummaryStatus, exportDraftDocx,
+  generateSummaryEndpoint, getSummaryStatus, exportDraftDocx, exportDraftPdf,
   publishDraft, listShared, updateSharedSettings, revokeShared,
-  publicGet, publicUnlock, publicExportDocx,
+  publicGet, publicUnlock, publicExportDocx, publicExportPdf,
   uploadTaskImage,
 };

@@ -82,6 +82,7 @@ router.get('/drafts/:id/data',                         auth, c.getDraftData);
 router.post('/drafts/:id/generate-summary',            auth, llmLimiter, c.generateSummaryEndpoint);
 router.get('/drafts/:id/generate-summary/status',      auth, c.getSummaryStatus);
 router.post('/drafts/:id/export.docx',                 auth, exportLimiter, c.exportDraftDocx);
+router.post('/drafts/:id/export.pdf',                  auth, exportLimiter, c.exportDraftPdf);
 
 // Публикация
 router.post('/drafts/:id/publish',          auth, writeLimiter, c.publishDraft);
