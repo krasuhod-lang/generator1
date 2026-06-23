@@ -94,4 +94,11 @@ router.post('/:id/blog-article', auth, analyzeLimiter, c.generateBlogArticle);
 router.post('/:id/share',          auth, c.createShareLink);
 router.delete('/:id/share',        auth, c.revokeShareLink);
 
+// Works Log Module (PR-5). Чтение учитывает X-Client-Mode (см. контроллер),
+// запись — Analyst-only по факту (UI прячет кнопки в Client Mode).
+router.get('/:id/works',                  auth, c.listWorks);
+router.post('/:id/works',                 auth, createLimiter, c.createWork);
+router.put('/:id/works/:workId',          auth, c.updateWork);
+router.delete('/:id/works/:workId',       auth, c.deleteWork);
+
 module.exports = router;

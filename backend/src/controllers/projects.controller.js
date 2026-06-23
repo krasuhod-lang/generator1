@@ -47,6 +47,7 @@ const snapshotsRepo = require('../services/projects/snapshotsRepo');
 const { compareSnapshots } = require('../services/projects/periodComparison');
 const { ensureLinkedPositionProject, syncLinkedPositionProject } = require('../services/projects/positionBridge');
 const freshnessService = require('../services/projects/freshnessService');
+const worksService = require('../services/projects/worksService');
 
 const CFG = getProjectsConfig();
 
@@ -1086,6 +1087,73 @@ async function getFreshness(req, res, next) {
   }
 }
 
+/**
+ * Works Log Module (PR-5 эпика premium-ui-and-client-mode-implementation).
+ *
+ * GET    /api/projects/:id/works           — список работ;
+ *                                            Client Mode прячет 'planned'
+ *                                            и технические поля description/impact.
+ * POST   /api/projects/:id/works           — создание (Analyst Mode только).
+ * PUT    /api/projects/:id/works/:workId   — обновление (Analyst Mode только).
+ * DELETE /api/projects/:id/works/:workId   — удаление (Analyst Mode только).
+ *
+ * Write-эндпоинты намеренно не реагируют на X-Client-Mode: даже если
+ * UI «прикинулся» клиентом, бэкенд позволит создавать работы — это
+ * редакторская операция SEO-специалиста, она вообще не должна быть
+ * доступна в Client UI (тумблер скрывает кнопку «Добавить»).
+ */
+async function listWorks(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const mode = resolveViewMode(req);
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const limit  = req.query.limit ? Number(req.query.limit) : undefined;
+    const works = await worksService.listWorks(project.id, { mode, status, limit });
+    return res.json({ project_id: project.id, mode, works });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function createWork(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const row = await worksService.createWork(project.id, req.body || {}, { userId: req.user.id });
+    return res.status(201).json({ work: row });
+  } catch (err) {
+    if (err && err.code === 'INVALID_INPUT') {
+      return res.status(400).json({ error: err.message || 'Некорректные данные' });
+    }
+    return next(err);
+  }
+}
+
+async function updateWork(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const row = await worksService.updateWork(project.id, req.params.workId, req.body || {});
+    if (!row) return res.status(404).json({ error: 'Работа не найдена' });
+    return res.json({ work: row });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function deleteWork(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const ok = await worksService.deleteWork(project.id, req.params.workId);
+    if (!ok) return res.status(404).json({ error: 'Работа не найдена' });
+    return res.status(204).end();
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listProjects,
   createProject,
@@ -1121,4 +1189,8 @@ module.exports = {
   probeAiVisibility,
   generateBlogArticle,
   getFreshness,
+  listWorks,
+  createWork,
+  updateWork,
+  deleteWork,
 };

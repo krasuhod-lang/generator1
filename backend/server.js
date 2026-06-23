@@ -1551,6 +1551,30 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_data_source_health_project ON data_source_health (project_id)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_data_source_health_status ON data_source_health (status) WHERE status <> 'ok'`);
 
+    // project_works — журнал работ SEO-специалиста (Works Log, PR-5 эпика
+    // premium-ui-and-client-mode-implementation). См. migrations/082_project_works.sql.
+    // В Client Mode (viewMode.js) выводится только `client_summary`, без `description`/`impact`.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS project_works (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        performed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        type            VARCHAR(32) NOT NULL DEFAULT 'other',
+        status          VARCHAR(16) NOT NULL DEFAULT 'done',
+        title           TEXT NOT NULL,
+        description     TEXT,
+        client_summary  TEXT,
+        impact          JSONB,
+        links           JSONB,
+        created_by      UUID,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT chk_project_works_status CHECK (status IN ('planned','in_progress','done'))
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_works_project_performed ON project_works (project_id, performed_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_works_project_status ON project_works (project_id, status)`);
+
     await db.query(`
       CREATE TABLE IF NOT EXISTS project_page_snapshots (
         id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),

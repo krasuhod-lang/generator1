@@ -104,6 +104,24 @@ export const useProjectsStore = defineStore('projects', {
       return data || { sources: [] };
     },
 
+    // ── Works Log Module (PR-5) ──────────────────────────────────────
+    // listWorks учитывает текущий X-Client-Mode (api.js interceptor).
+    async listWorks(id, params = {}) {
+      const { data } = await api.get(`/projects/${id}/works`, { params });
+      return data || { works: [] };
+    },
+    async createWork(id, payload) {
+      const { data } = await api.post(`/projects/${id}/works`, payload || {});
+      return data?.work || null;
+    },
+    async updateWork(id, workId, patch) {
+      const { data } = await api.put(`/projects/${id}/works/${workId}`, patch || {});
+      return data?.work || null;
+    },
+    async deleteWork(id, workId) {
+      await api.delete(`/projects/${id}/works/${workId}`);
+    },
+
     // ── AI-аналитика ─────────────────────────────────────────────────
     async startAnalysis(id, payload) {
       const { data } = await api.post(`/projects/${id}/analyze`, payload || {});

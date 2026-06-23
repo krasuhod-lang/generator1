@@ -26,6 +26,7 @@ import PremiumLayout from '../components/PremiumLayout.vue';
 import KPICardGrid from '../components/KPICardGrid.vue';
 import TrafficChart from '../components/TrafficChart.vue';
 import FreshnessBadge from '../components/FreshnessBadge.vue';
+import WorksTimeline from '../components/WorksTimeline.vue';
 import { useProjectsStore } from '../stores/projects.js';
 import { useViewModeStore } from '../stores/viewMode.js';
 
@@ -39,6 +40,8 @@ const error = ref(null);
 const project = ref(null);
 const analysis = ref(null);
 const freshness = ref([]);
+const works = ref([]);
+const worksLoading = ref(false);
 const startingAnalysis = ref(false);
 
 const projectId = computed(() => route.params.id);
@@ -176,6 +179,19 @@ async function load() {
     } else {
       analysis.value = null;
     }
+
+    // Works Log (PR-5) — параллельно после остального, чтобы не блокировать
+    // отрисовку KPI. Backend возвращает уже отсанитизированный список
+    // в соответствии с режимом X-Client-Mode (axios-перехватчик в api.js).
+    worksLoading.value = true;
+    try {
+      const resp = await projectsStore.listWorks(id);
+      works.value = Array.isArray(resp?.works) ? resp.works : [];
+    } catch (_) {
+      works.value = [];
+    } finally {
+      worksLoading.value = false;
+    }
   } catch (e) {
     error.value = e?.response?.data?.error || e?.message || 'Не удалось загрузить дашборд';
   } finally {
@@ -273,6 +289,20 @@ onMounted(load);
           <span class="text-xs text-gray-500">только полные месяцы</span>
         </div>
         <TrafficChart :monthly="snapshot?.monthly_periods || []" height="340px" />
+      </section>
+
+      <!-- Works Log (PR-5) — таймлайн работ SEO-специалиста.
+           Backend (worksService) уже отрезал technical-поля в Client Mode. -->
+      <section aria-labelledby="works-heading" class="space-y-3">
+        <div class="flex items-baseline justify-between">
+          <h2 id="works-heading" class="text-sm font-semibold text-gray-300 uppercase tracking-wider">
+            Список работ
+          </h2>
+          <span class="text-xs text-gray-500">
+            {{ viewMode.isClient ? 'Что мы делали для роста проекта' : 'Журнал SEO-специалиста' }}
+          </span>
+        </div>
+        <WorksTimeline :works="works" :mode="viewMode.mode" :loading="worksLoading" />
       </section>
     </div>
   </PremiumLayout>
