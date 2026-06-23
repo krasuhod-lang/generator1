@@ -96,6 +96,14 @@ export const useProjectsStore = defineStore('projects', {
       return data || null;
     },
 
+    // PR-1: статус свежести данных по всем источникам (GSC/Ydx/Keys.so/...).
+    // Используется FreshnessBadge в Topbar PremiumLayout (PR-3) и Executive
+    // Summary дашборда (PR-4). Возвращает { project_id, sources: [...] }.
+    async getFreshness(id) {
+      const { data } = await api.get(`/projects/${id}/freshness`);
+      return data || { sources: [] };
+    },
+
     // ── AI-аналитика ─────────────────────────────────────────────────
     async startAnalysis(id, payload) {
       const { data } = await api.post(`/projects/${id}/analyze`, payload || {});
