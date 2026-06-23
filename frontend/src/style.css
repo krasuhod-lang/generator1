@@ -54,4 +54,16 @@
   .badge {
     @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold;
   }
+
+  /*
+   * PR-3: цифры KPI (.kpi-figure) — фиксированная ширина разрядов через
+   * tabular-nums + lining-nums, чтобы во время roll-up анимации
+   * (AnimatedNumber.vue) число не «прыгало». Применяется к крупным KPI на
+   * Executive Summary (PR-4) и в FreshnessBadge.
+   */
+  .kpi-figure {
+    @apply font-sans tabular-nums;
+    font-variant-numeric: tabular-nums lining-nums;
+    font-feature-settings: 'tnum' 1, 'lnum' 1;
+  }
 }

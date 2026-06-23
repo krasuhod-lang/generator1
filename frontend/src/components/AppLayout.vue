@@ -2,10 +2,16 @@
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth.js';
+import { useViewModeStore, VIEW_MODES } from '../stores/viewMode.js';
 
 const route  = useRoute();
 const router = useRouter();
 const auth   = useAuthStore();
+const viewMode = useViewModeStore();
+
+function setMode(mode) {
+  viewMode.setMode(mode);
+}
 
 const TABS = [
   { key: 'seo-text',       label: 'SEO текст',        icon: '📝', path: '/dashboard' },
@@ -150,7 +156,44 @@ function handleLogout() {
         </div>
       </div>
 
-      <div class="flex items-center gap-4 flex-shrink-0">
+      <div class="flex items-center gap-3 flex-shrink-0">
+        <!--
+          PR-3: тумблер режима «Аналитик/Клиент» (state в PR-2,
+          stores/viewMode.js). При клиентском режиме axios-перехватчик
+          в api.js добавляет заголовок X-Client-Mode: 1, и backend
+          (viewMode.js#resolveViewMode) срезает технические поля из ответа.
+        -->
+        <div
+          role="group"
+          aria-label="Режим отображения"
+          class="inline-flex items-center rounded-lg border border-gray-700 bg-gray-950 p-0.5 text-xs"
+        >
+          <button
+            type="button"
+            :class="[
+              'px-2.5 py-1 rounded-md font-medium transition-colors',
+              viewMode.isAnalyst
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-gray-400 hover:text-gray-200',
+            ]"
+            :aria-pressed="viewMode.isAnalyst"
+            @click="setMode(VIEW_MODES.ANALYST)"
+            data-testid="view-mode-analyst"
+          >Аналитик</button>
+          <button
+            type="button"
+            :class="[
+              'px-2.5 py-1 rounded-md font-medium transition-colors',
+              viewMode.isClient
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-gray-400 hover:text-gray-200',
+            ]"
+            :aria-pressed="viewMode.isClient"
+            @click="setMode(VIEW_MODES.CLIENT)"
+            data-testid="view-mode-client"
+          >Клиент</button>
+        </div>
+
         <span class="hidden sm:inline text-sm text-gray-400 truncate max-w-[12rem]">{{ auth.user?.name || auth.user?.email }}</span>
         <button @click="handleLogout" class="btn-ghost text-xs">Выйти</button>
       </div>
