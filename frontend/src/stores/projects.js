@@ -111,9 +111,16 @@ export const useProjectsStore = defineStore('projects', {
     },
 
     // ── Шаринг ───────────────────────────────────────────────────────
-    async createShare(id) {
-      const { data } = await api.post(`/projects/${id}/share`);
-      return data?.token || null;
+    // opts: { mode?: 'analyst'|'client', ttlDays?: number }
+    // Возвращает полный объект { token, mode, expires_at, created_at } —
+    // для совместимости со старыми вызовами api.post возвращает строку,
+    // только если передан опциональный returnString=true.
+    async createShare(id, opts = {}) {
+      const body = {};
+      if (opts.mode)    body.mode    = opts.mode;
+      if (opts.ttlDays !== undefined) body.ttlDays = opts.ttlDays;
+      const { data } = await api.post(`/projects/${id}/share`, body);
+      return data || null;
     },
     async revokeShare(id) {
       await api.delete(`/projects/${id}/share`);

@@ -35,6 +35,13 @@ const ydxService = require('../services/projects/ydxService');
 const { compareSources } = require('../services/projects/sourceComparison');
 const { processAnalysis, collectSnapshot } = require('../services/projects/analysisRunner');
 const { generateShareToken, isValidShareToken } = require('../services/projects/shareToken');
+const {
+  VIEW_MODES,
+  resolveViewMode,
+  normalizeMode,
+  sanitizeProject,
+  sanitizeAnalysis,
+} = require('../services/projects/viewMode');
 const { buildLeadContext } = require('../services/projects/leadContext');
 const snapshotsRepo = require('../services/projects/snapshotsRepo');
 const { compareSnapshots } = require('../services/projects/periodComparison');
@@ -121,7 +128,7 @@ const PUBLIC_COLUMNS = `
   ydx_connected, ydx_site_url, ydx_available_sites,
   (ydx_refresh_token_enc IS NOT NULL) AS ydx_has_refresh,
   (SELECT pp.id FROM position_projects pp WHERE pp.parent_project_id = projects.id LIMIT 1) AS linked_position_project_id,
-  share_token, share_created_at, created_at, updated_at`;
+  share_token, share_created_at, share_mode, share_expires_at, created_at, updated_at`;
 
 function _frontendBase() {
   // Базовый URL фронта для редиректа после OAuth. По умолчанию — относительный
@@ -179,7 +186,8 @@ async function getProject(req, res, next) {
       [req.params.id, req.user.id],
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Проект не найден' });
-    const project = rows[0];
+    const mode = resolveViewMode(req);
+    const project = sanitizeProject(rows[0], mode);
     const { rows: analyses } = await db.query(
       `SELECT id, status, range_key, period_from, period_to, created_at, completed_at,
               error_message
@@ -199,6 +207,7 @@ async function getProject(req, res, next) {
     );
     return res.json({
       project,
+      view_mode: mode,
       position_project: linkedRows[0] || null,
       analyses,
       gsc_configured: getGoogleOAuthConfig().configured,
@@ -596,7 +605,8 @@ async function getAnalysis(req, res, next) {
       [req.params.aid, req.params.id, req.user.id],
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Анализ не найден' });
-    return res.json({ analysis: rows[0] });
+    const mode = resolveViewMode(req);
+    return res.json({ analysis: sanitizeAnalysis(rows[0], mode), view_mode: mode });
   } catch (err) { return next(err); }
 }
 
@@ -709,17 +719,56 @@ function _daysForKey(key) {
 }
 
 // ── Шаринг ──────────────────────────────────────────────────────────
+// POST /api/projects/:id/share — body: { mode?: 'analyst'|'client', ttlDays?: number }
+//   • mode    — режим payload для получателя (default: 'client').
+//   • ttlDays — срок действия в днях (1..365). Default: 90. 0/null → бессрочно.
+// Если ссылка уже выпущена, ре-выпускает её с новыми параметрами (mode/expires_at);
+// сам токен сохраняется, чтобы не ломать уже отправленные клиенту URL.
 async function createShareLink(req, res, next) {
   try {
     const project = await _loadOwned(req.params.id, req.user.id);
     if (!project) return res.status(404).json({ error: 'Проект не найден' });
-    if (project.share_token) return res.json({ token: project.share_token });
+
+    const body = req.body || {};
+    const mode = normalizeMode(body.mode, VIEW_MODES.CLIENT);
+    let ttlDays = Number(body.ttlDays);
+    if (!Number.isFinite(ttlDays) || ttlDays < 0) ttlDays = 90;
+    if (ttlDays > 365) ttlDays = 365;
+    const expiresClause = ttlDays > 0 ? `NOW() + ($3 || ' days')::INTERVAL` : `NULL`;
+    const expiresParam = ttlDays > 0 ? [String(ttlDays)] : [];
+
+    // Если токен уже есть — только обновим параметры доступа.
+    if (project.share_token) {
+      await db.query(
+        `UPDATE projects
+            SET share_mode=$2, share_expires_at=${expiresClause}, updated_at=NOW()
+          WHERE id=$1`,
+        [project.id, mode, ...expiresParam],
+      );
+      const { rows } = await db.query(
+        `SELECT share_token, share_mode, share_expires_at, share_created_at
+           FROM projects WHERE id=$1`,
+        [project.id],
+      );
+      return res.json({
+        token: rows[0].share_token,
+        mode:  rows[0].share_mode,
+        expires_at:  rows[0].share_expires_at,
+        created_at:  rows[0].share_created_at,
+      });
+    }
+
+    // Выпускаем новый токен, ретраи на коллизию unique-индекса.
     let token = generateShareToken();
     for (let i = 0; i < 5; i++) {
       try {
         await db.query(
-          `UPDATE projects SET share_token=$2, share_created_at=NOW(), updated_at=NOW() WHERE id=$1`,
-          [project.id, token],
+          `UPDATE projects
+              SET share_token=$2, share_created_at=NOW(),
+                  share_mode=$3, share_expires_at=${expiresClause},
+                  updated_at=NOW()
+            WHERE id=$1`,
+          [project.id, token, mode, ...expiresParam],
         );
         break;
       } catch (err) {
@@ -727,14 +776,26 @@ async function createShareLink(req, res, next) {
         throw err;
       }
     }
-    return res.json({ token });
+    const { rows } = await db.query(
+      `SELECT share_token, share_mode, share_expires_at, share_created_at
+         FROM projects WHERE id=$1`,
+      [project.id],
+    );
+    return res.json({
+      token: rows[0].share_token,
+      mode:  rows[0].share_mode,
+      expires_at:  rows[0].share_expires_at,
+      created_at:  rows[0].share_created_at,
+    });
   } catch (err) { return next(err); }
 }
 
 async function revokeShareLink(req, res, next) {
   try {
     const { rowCount } = await db.query(
-      `UPDATE projects SET share_token=NULL, share_created_at=NULL, updated_at=NOW()
+      `UPDATE projects
+          SET share_token=NULL, share_created_at=NULL, share_expires_at=NULL,
+              share_mode='client', updated_at=NOW()
         WHERE id=$1 AND user_id=$2`,
       [req.params.id, req.user.id],
     );
@@ -749,12 +810,18 @@ async function getSharedProject(req, res, next) {
     const token = String(req.params.token || '');
     if (!isValidShareToken(token)) return res.status(400).json({ error: 'Некорректный токен' });
     const { rows } = await db.query(
-      `SELECT id, name, url, audience_description, gsc_site_url, share_created_at, created_at
+      `SELECT id, name, url, audience_description, gsc_site_url, share_mode,
+              share_created_at, share_expires_at, created_at
          FROM projects WHERE share_token = $1 LIMIT 1`,
       [token],
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Ссылка недействительна или отозвана' });
     const project = rows[0];
+    // Проверка срока действия: NULL = бессрочно.
+    if (project.share_expires_at && new Date(project.share_expires_at).getTime() < Date.now()) {
+      return res.status(410).json({ error: 'Срок действия ссылки истёк', code: 'SHARE_EXPIRED' });
+    }
+    const mode = normalizeMode(project.share_mode, VIEW_MODES.CLIENT);
     // Последний завершённый анализ — содержит и snapshot (графики), и markdown-отчёт.
     const { rows: aRows } = await db.query(
       `SELECT id, status, range_key, period_from, period_to,
@@ -766,7 +833,11 @@ async function getSharedProject(req, res, next) {
         ORDER BY completed_at DESC NULLS LAST LIMIT 1`,
       [project.id],
     );
-    return res.json({ project, analysis: aRows[0] || null });
+    return res.json({
+      project: sanitizeProject(project, mode),
+      analysis: aRows[0] ? sanitizeAnalysis(aRows[0], mode) : null,
+      view_mode: mode,
+    });
   } catch (err) { return next(err); }
 }
 

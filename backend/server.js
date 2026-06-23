@@ -1389,6 +1389,24 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_user_created ON projects (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_projects_share_token  ON projects (share_token) WHERE share_token IS NOT NULL`);
 
+    // Migration 081: режим публичной ссылки (analyst|client) и срок действия.
+    // Старые ссылки получают режим 'client' и бессрочный доступ — самый
+    // безопасный default (без раскрытия тех. деталей).
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS share_mode       TEXT NOT NULL DEFAULT 'client'`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS share_expires_at TIMESTAMPTZ`);
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'projects_share_mode_chk'
+        ) THEN
+          ALTER TABLE projects
+            ADD CONSTRAINT projects_share_mode_chk
+            CHECK (share_mode IN ('analyst', 'client'));
+        END IF;
+      END$$;
+    `);
+
     // Migration 062: интеграция с Яндекс.Вебмастером (вторая аналитическая
     // система проекта, симметрично GSC). Токены Yandex OAuth храним строго
     // зашифрованными (AES-256-GCM, projects/tokenCrypto.js) — в колонках *_enc.
