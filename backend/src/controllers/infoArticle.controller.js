@@ -30,6 +30,7 @@ const { normalizeCommercialLinks, MAX_COMMERCIAL_LINKS } =
   require('../services/infoArticle/excelParser');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 
 const MAX_TOPIC_LEN  = 250;
 const MIN_TOPIC_LEN  = 5;
@@ -128,11 +129,33 @@ async function createInfoArticleTask(req, res, next) {
     const relevanceReportId = await resolveOwnedRelevanceReportId(
       body.source_relevance_report_id, req.user.id
     );
+    // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
+    const projectId = await resolveOwnedProjectId(body.project_id, req.user.id);
+    // ТЗ §8: серверный fallback из контекста проекта. Если пользователь
+    // не передал region/brand_name/brand_facts, но выбрал project_id —
+    // подтягиваем из contextResolver (источник истины — БД, не доверяем
+    // только фронту).
+    let effRegion = region;
+    let effBrandName = brandName;
+    let effBrandFacts = brandFacts;
+    if (projectId && (!effRegion || !effBrandName || !effBrandFacts)) {
+      try {
+        const { buildProjectContext } = require('../services/projects/contextResolver');
+        const ctx = await buildProjectContext(projectId, req.user.id);
+        if (ctx) {
+          if (!effRegion && ctx.project?.region) effRegion = clipStr(ctx.project.region, MAX_REGION_LEN);
+          if (!effBrandName && ctx.brand?.name) effBrandName = clipStr(ctx.brand.name, MAX_BRAND_LEN);
+          if (!effBrandFacts && Array.isArray(ctx.brand?.facts) && ctx.brand.facts.length) {
+            effBrandFacts = clipStr(ctx.brand.facts.join('. '), MAX_FACTS_LEN);
+          }
+        }
+      } catch (e) { console.warn('[infoArticle] context fallback failed:', e.message); }
+    }
 
     if (topic.length < MIN_TOPIC_LEN) {
       return res.status(400).json({ error: `Тема статьи должна быть не короче ${MIN_TOPIC_LEN} символов` });
     }
-    if (!region) {
+    if (!effRegion) {
       return res.status(400).json({ error: 'Регион обязателен' });
     }
 
@@ -165,17 +188,17 @@ async function createInfoArticleTask(req, res, next) {
          (user_id, topic, region, brand_name, author_name, brand_facts, output_format,
            commercial_links, commercial_links_filename, commercial_links_count,
            images_count, source_relevance_report_id,
-           gemini_model, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'queued', 0)
+           gemini_model, project_id, status, progress_pct)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'queued', 0)
        RETURNING id, topic, region, brand_name, output_format,
                  commercial_links_filename, commercial_links_count,
                  images_count, source_relevance_report_id, gemini_model,
-                 status, progress_pct, created_at`,
+                 project_id, status, progress_pct, created_at`,
       [
-        req.user.id, topic, region, brandName || null, authorName || null,
-        brandFacts || null, outputFormat,
+        req.user.id, topic, effRegion, effBrandName || null, authorName || null,
+        effBrandFacts || null, outputFormat,
         JSON.stringify(links), filename || null, links.length,
-        imagesCount, relevanceReportId, geminiModel,
+        imagesCount, relevanceReportId, geminiModel, projectId,
       ],
     );
     const task = rows[0];

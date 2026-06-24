@@ -44,10 +44,14 @@ router.use(readLimiter);
 
 // CRUD
 router.get('/',        auth, c.listProjects);
+// ТЗ §5: облегчённый список проектов и список всех задач, связанных с проектом
+router.get('/options', auth, c.listProjectOptions);
 router.post('/',       auth, createLimiter, c.createProject);
 router.get('/:id',     auth, c.getProject);
 router.put('/:id',     auth, c.updateProject);
 router.delete('/:id',  auth, c.deleteProject);
+router.get('/:id/tasks', auth, c.listProjectTasks);
+router.get('/:id/context', auth, c.getProjectContext);
 
 // GSC
 router.get('/:id/gsc/auth-url',    auth, c.getGscAuthUrl);

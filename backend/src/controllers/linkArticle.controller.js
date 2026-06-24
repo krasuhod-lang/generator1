@@ -15,6 +15,7 @@ const { processLinkArticleTask } = require('../services/linkArticle/linkArticleP
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 
 const MAX_TOPIC_LEN   = 250;
 const MIN_TOPIC_LEN   = 5;
@@ -82,13 +83,15 @@ async function createLinkArticleTask(req, res, next) {
     if (!isValidUrl(anchor_url)) {
       return res.status(400).json({ error: 'Некорректный URL анкора (ожидается http(s)://…)' });
     }
+    // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
+    const projectId = await resolveOwnedProjectId(req.body.project_id, req.user.id);
 
     const { rows } = await db.query(
       `INSERT INTO link_article_tasks
-          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 0)
-       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, status, progress_pct, created_at`,
-      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel],
+          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model, project_id, status, progress_pct)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', 0)
+       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id, status, progress_pct, created_at`,
+      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel, projectId],
     );
     const task = rows[0];
 

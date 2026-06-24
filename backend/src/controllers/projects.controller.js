@@ -1154,8 +1154,99 @@ async function deleteWork(req, res, next) {
   }
 }
 
+/**
+ * GET /api/projects/:id/tasks — единый список задач всех модулей, у которых
+ * проставлен project_id = :id (ТЗ §5). Возвращает плоский UNION ALL по 7
+ * таблицам с нормализованными колонками {id, type, title, status, created_at}.
+ *
+ * Поддерживает фильтр ?type=<info_article|link_article|...> — отдаёт только
+ * один сегмент. Без фильтра — всё подряд, отсортировано по created_at DESC.
+ *
+ * Безопасно: проверяем, что проект принадлежит пользователю, и каждая
+ * под-выборка фильтрует ещё и по user_id (защита от чужих NULL-project_id
+ * записей с теми же IDs у других пользователей).
+ */
+async function listProjectTasks(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const filterType = req.query.type ? String(req.query.type) : null;
+
+    // Каждая таблица → SELECT с приведением к общему виду. Использовать
+    // COALESCE для title — у разных таблиц основное поле называется
+    // по-разному (topic, name, query, anchor_text).
+    const segments = [
+      { type: 'info_article',  sql: `SELECT id::text, 'info_article'::text AS type,
+              COALESCE(topic, 'Статья')::text AS title, status::text AS status, created_at
+              FROM info_article_tasks WHERE project_id = $1 AND user_id = $2` },
+      { type: 'link_article',  sql: `SELECT id::text, 'link_article'::text AS type,
+              COALESCE(topic, anchor_text, 'Ссылочная статья')::text AS title, status::text, created_at
+              FROM link_article_tasks WHERE project_id = $1 AND user_id = $2` },
+      { type: 'meta_tags',     sql: `SELECT id::text, 'meta_tags'::text AS type,
+              COALESCE(name, 'Мета-теги')::text AS title, status::text, created_at
+              FROM meta_tag_tasks WHERE project_id = $1 AND user_id = $2` },
+      { type: 'article_topic', sql: `SELECT id::text, 'article_topic'::text AS type,
+              COALESCE(niche, 'Темы статей')::text AS title, status::text, created_at
+              FROM article_topic_tasks WHERE project_id = $1 AND user_id = $2` },
+      { type: 'relevance',     sql: `SELECT id::text, 'relevance'::text AS type,
+              COALESCE(query, 'Релевантность')::text AS title, status::text, created_at
+              FROM relevance_reports WHERE project_id = $1 AND user_id = $2` },
+      { type: 'forecaster',    sql: `SELECT id::text, 'forecaster'::text AS type,
+              COALESCE(name, 'Прогноз')::text AS title, status::text, created_at
+              FROM forecaster_tasks WHERE project_id = $1 AND user_id = $2` },
+      { type: 'serp_b2b',      sql: `SELECT id::text, 'serp_b2b'::text AS type,
+              COALESCE(name, query, 'SERP B2B')::text AS title, status::text, created_at
+              FROM serp_b2b_tasks WHERE project_id = $1 AND user_id = $2` },
+    ];
+    const used = filterType ? segments.filter((s) => s.type === filterType) : segments;
+    if (!used.length) return res.json({ items: [] });
+    const sql = used.map((s) => s.sql).join(' UNION ALL ') + ' ORDER BY created_at DESC LIMIT 500';
+    const { rows } = await db.query(sql, [project.id, req.user.id]);
+    return res.json({ items: rows });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * GET /api/projects (по сути уже есть в listProjects) — но фронту удобно
+ * иметь облегчённый ответ для ProjectPicker. Возвращаем минимум полей.
+ * Реализован поверх существующего listProjects: фильтрация → frontend.
+ * Здесь же — простой эндпоинт `/api/projects/options` для пикера.
+ */
+async function listProjectOptions(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, url FROM projects WHERE user_id = $1 ORDER BY name ASC`,
+      [req.user.id],
+    );
+    return res.json({ items: rows });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * GET /api/projects/:id/context — единый контекст проекта для
+ * предзаполнения форм создания задач (ТЗ §8). Делегирует в
+ * services/projects/contextResolver.buildProjectContext.
+ */
+async function getProjectContext(req, res, next) {
+  try {
+    const { buildProjectContext } = require('../services/projects/contextResolver');
+    const ctx = await buildProjectContext(req.params.id, req.user.id);
+    if (!ctx) return res.status(404).json({ error: 'Проект не найден' });
+    return res.json({ context: ctx });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listProjects,
+  listProjectOptions,
+  listProjectTasks,
+  getProjectContext,
   createProject,
   getProject,
   updateProject,

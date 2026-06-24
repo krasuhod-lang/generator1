@@ -15,6 +15,7 @@ const { processArticleTopicTask } = require('../services/articleTopics/articleTo
 const { findDuplicateDeepDives } = require('../services/articleTopics/articleTopicsTrends');
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 
 // Лимиты длины — чтобы не дать раздуть промпт неосторожным копипастом
 // и не зацепить лимит входа Gemini-адаптера.
@@ -93,15 +94,17 @@ async function createArticleTopicTask(req, res, next) {
     const search_ecosystem = pickEnum(body.search_ecosystem, ALLOWED_ECOSYSTEM);
     const top_competitors  = clipStr(body.top_competitors,  LIMITS.top_competitors);
     const geminiModel      = normalizeGeminiCopywritingModel(body.gemini_model);
+    // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
+    const projectId        = await resolveOwnedProjectId(body.project_id, req.user.id);
 
     const { rows } = await db.query(
       `INSERT INTO article_topic_tasks
           (user_id, mode, niche, region, horizon, audience, market_stage,
-           search_ecosystem, top_competitors, gemini_model, status)
-       VALUES ($1, 'main', $2, $3, $4, $5, $6, $7, $8, $9, 'queued')
-       RETURNING id, mode, niche, gemini_model, status, created_at`,
+           search_ecosystem, top_competitors, gemini_model, project_id, status)
+       VALUES ($1, 'main', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')
+       RETURNING id, mode, niche, gemini_model, project_id, status, created_at`,
       [req.user.id, niche, region, horizon, audience, market_stage,
-       search_ecosystem, top_competitors, geminiModel],
+       search_ecosystem, top_competitors, geminiModel, projectId],
     );
     const task = rows[0];
 
