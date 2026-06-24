@@ -37,6 +37,8 @@ const { generateSummary } = require('../services/reports/aiAnalyst');
 const tasksLog = require('../services/reports/tasksAutoLog');
 const { buildReportDocx } = require('../services/reports/docxExporter');
 const { buildReportPdf } = require('../services/reports/pdfExporter');
+const { resolveViewMode } = require('../services/projects/viewMode');
+const { sanitizeDraft, sanitizeData, sanitizeSummary } = require('../services/reports/viewModeSanitizer');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -183,7 +185,8 @@ async function createDraft(req, res) {
 async function getDraft(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
-  res.json({ draft: _serializeDraft(draft) });
+  const mode = resolveViewMode(req);
+  res.json({ draft: sanitizeDraft(_serializeDraft(draft), mode), view_mode: mode });
 }
 
 async function updateDraft(req, res) {
@@ -244,12 +247,14 @@ async function getDraftData(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
+    const viewMode = resolveViewMode(req);
     const data = await aggregateForDraft(draft, {
       from: req.query.from,
       to: req.query.to,
       granularity: req.query.granularity,
+      viewMode,
     });
-    res.json({ data });
+    res.json({ data, view_mode: viewMode });
   } catch (err) {
     console.error('[reports] aggregate failed:', err.message);
     return _bad(res, 500, err.message || 'aggregate_failed');
@@ -581,9 +586,20 @@ async function publicGet(req, res) {
     return res.status(403).json({ error: 'password_required' });
   }
 
+  // Публичная ссылка — всегда client mode (без auth нельзя эскалировать
+  // до analyst). См. ТЗ §4.1, §1.3 PR-1.
+  const viewMode = 'client';
+
   let payload;
   if (sr.mode === 'snapshot' && sr.snapshot_data) {
-    payload = sr.snapshot_data;
+    // Snapshot был сохранён в analyst-форме на момент публикации; при отдаче
+    // публичному клиенту прогоняем через sanitizer ещё раз.
+    const snap = sr.snapshot_data || {};
+    payload = {
+      ...snap,
+      data: sanitizeData(snap.data, viewMode),
+      summary: sanitizeSummary(snap.summary || {}, viewMode),
+    };
   } else {
     // live: пересобрать данные.
     const draft = {
@@ -592,10 +608,10 @@ async function publicGet(req, res) {
       date_from: sr.date_from,
       date_to: sr.date_to,
     };
-    const data = await aggregateForDraft(draft);
+    const data = await aggregateForDraft(draft, { viewMode });
     payload = {
       data,
-      summary: _summaryPayloadFromDraft(sr),
+      summary: sanitizeSummary(_summaryPayloadFromDraft(sr), viewMode),
       tasks_blocks: sr.tasks_blocks || [],
       config: sr.config || {},
       title: sr.draft_title,
@@ -614,6 +630,7 @@ async function publicGet(req, res) {
   res.json({
     uuid: sr.uuid,
     mode: sr.mode,
+    view_mode: viewMode,
     title: sr.draft_title,
     period: _periodLabel(req.query?.from || sr.date_from, req.query?.to || sr.date_to),
     project: {
@@ -630,10 +647,12 @@ async function exportDraftDocx(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
+    const viewMode = resolveViewMode(req);
     const data = await aggregateForDraft(draft, {
       from: req.body?.from,
       to: req.body?.to,
       granularity: req.body?.granularity,
+      viewMode,
     });
     const buffer = await buildReportDocx({
       title: draft.title,
@@ -643,9 +662,10 @@ async function exportDraftDocx(req, res) {
         url: draft.project_url,
       },
       data,
-      summary: _summaryPayloadFromDraft(draft),
+      summary: sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode),
       tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
       chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.docx"`);
@@ -659,18 +679,21 @@ async function exportDraftPdf(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
+    const viewMode = resolveViewMode(req);
     const data = await aggregateForDraft(draft, {
       from: req.body?.from,
       to: req.body?.to,
       granularity: req.body?.granularity,
+      viewMode,
     });
     const buffer = await buildReportPdf({
       title: draft.title,
       period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
       project: { name: draft.project_name, url: draft.project_url },
       data,
-      summary: _summaryPayloadFromDraft(draft),
+      summary: sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode),
       tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.pdf"`);
@@ -703,8 +726,9 @@ async function publicExportDocx(req, res) {
   if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
     return res.status(403).json({ error: 'password_required' });
   }
+  const viewMode = 'client';
   try {
-    const data = sr.mode === 'snapshot' && sr.snapshot_data
+    const rawData = sr.mode === 'snapshot' && sr.snapshot_data
       ? sr.snapshot_data.data
       : await aggregateForDraft({
         id: sr.draft_id,
@@ -716,10 +740,13 @@ async function publicExportDocx(req, res) {
         from: req.body?.from,
         to: req.body?.to,
         granularity: req.body?.granularity,
+        viewMode,
       });
-    const summary = sr.mode === 'snapshot' && sr.snapshot_data
+    const data = sr.mode === 'snapshot' ? sanitizeData(rawData, viewMode) : rawData;
+    const rawSummary = sr.mode === 'snapshot' && sr.snapshot_data
       ? (sr.snapshot_data.summary || {})
       : _summaryPayloadFromDraft(sr);
+    const summary = sanitizeSummary(rawSummary, viewMode);
     const buffer = await buildReportDocx({
       title: sr.draft_title,
       period: _periodLabel(req.body?.from || sr.date_from, req.body?.to || sr.date_to),
@@ -728,6 +755,7 @@ async function publicExportDocx(req, res) {
       summary,
       tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
       chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((sr.draft_title || 'report').slice(0, 80))}.docx"`);
@@ -745,8 +773,9 @@ async function publicExportPdf(req, res) {
   if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
     return res.status(403).json({ error: 'password_required' });
   }
+  const viewMode = 'client';
   try {
-    const data = sr.mode === 'snapshot' && sr.snapshot_data
+    const rawData = sr.mode === 'snapshot' && sr.snapshot_data
       ? sr.snapshot_data.data
       : await aggregateForDraft({
         id: sr.draft_id,
@@ -758,10 +787,13 @@ async function publicExportPdf(req, res) {
         from: req.body?.from,
         to: req.body?.to,
         granularity: req.body?.granularity,
+        viewMode,
       });
-    const summary = sr.mode === 'snapshot' && sr.snapshot_data
+    const data = sr.mode === 'snapshot' ? sanitizeData(rawData, viewMode) : rawData;
+    const rawSummary = sr.mode === 'snapshot' && sr.snapshot_data
       ? (sr.snapshot_data.summary || {})
       : _summaryPayloadFromDraft(sr);
+    const summary = sanitizeSummary(rawSummary, viewMode);
     const buffer = await buildReportPdf({
       title: sr.draft_title,
       period: _periodLabel(req.body?.from || sr.date_from, req.body?.to || sr.date_to),
@@ -769,6 +801,7 @@ async function publicExportPdf(req, res) {
       data,
       summary,
       tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((sr.draft_title || 'report').slice(0, 80))}.pdf"`);
