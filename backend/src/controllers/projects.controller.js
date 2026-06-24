@@ -505,12 +505,18 @@ async function compareProjectSources(req, res, next) {
     let gscData = null;
     let ydxData = null;
     const errors = {};
+    // Живой (синхронный) эндпоинт под 60-секундным таймаутом фронта: ограничиваем
+    // top-срезы liveRowLimit, чтобы не тянуть весь индекс постранично и не упереться
+    // в «timeout of 60000ms exceeded». Фоновая AI-аналитика тянет всё без лимита.
+    const cfg = getProjectsConfig();
+    const gscLimit = cfg.gsc.liveRowLimit || 0;
+    const ydxLimit = cfg.ydx.liveRowLimit || 0;
 
     if (project.gsc_connected && project.gsc_site_url) {
       try {
         const [perf, top] = await Promise.all([
           fetchPerformanceSeries(project, range),
-          fetchTopDimensions(project, range),
+          fetchTopDimensions(project, range, { rowLimit: gscLimit }),
         ]);
         gscData = { totals: perf.totals, topQueries: top.topQueries };
       } catch (err) { errors.google = err.code || err.message; }
@@ -520,7 +526,7 @@ async function compareProjectSources(req, res, next) {
       try {
         const [perf, top] = await Promise.all([
           ydxService.fetchPerformanceSeries(project, range),
-          ydxService.fetchTopDimensions(project, range),
+          ydxService.fetchTopDimensions(project, range, { rowLimit: ydxLimit }),
         ]);
         ydxData = { totals: perf.totals, topQueries: top.topQueries };
       } catch (err) { errors.yandex = err.code || err.message; }
@@ -950,7 +956,9 @@ async function regenerateMeta(req, res, next) {
       try {
         const { fetchQueryPageMatrix } = require('../services/projects/gscService');
         const range = _rangeFromQuery(req.query);
-        const matrix = await fetchQueryPageMatrix(project, range);
+        // Фильтруем по конкретной странице на стороне GSC: тянуть весь query×page
+        // индекс ради одного URL = риск «timeout of 60000ms exceeded».
+        const matrix = await fetchQueryPageMatrix(project, range, { page: url });
         queryPage = (matrix || []).filter((r) => r.page === url);
       } catch (_) { queryPage = []; }
     }

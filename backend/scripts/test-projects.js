@@ -124,8 +124,44 @@ test('resolveRange handles 7d', () => {
   assert.strictEqual(span, 6);
 });
 
+// ── gscService.fetchTopDimensions: bounded vs unlimited fetch ────────
+// Живой эндпоинт /compare должен ограничивать top-срезы (rowLimit→maxRows),
+// иначе постраничная выгрузка всего индекса упирается в 60-секундный таймаут
+// фронта («timeout of 60000ms exceeded»). Фон (analysisRunner) тянет всё.
+const gscService = require('../src/services/projects/gscService');
+
+function _gscProject() {
+  return {
+    gsc_connected: true,
+    gsc_site_url: 'https://example.com/',
+    gsc_access_token_enc: encryptToken('live-token'),
+    gsc_token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+  };
+}
+
+async function withStubbedGscAll(fn) {
+  const orig = gsc.querySearchAnalyticsAll;
+  const calls = [];
+  gsc.querySearchAnalyticsAll = async (_t, _u, _body, opts = {}) => {
+    calls.push(opts.maxRows);
+    return { rows: [], fromCache: false, pages: 1 };
+  };
+  try { await fn(calls); } finally { gsc.querySearchAnalyticsAll = orig; }
+}
+
+test('gscService.fetchTopDimensions caps live fetch but stays unlimited by default', async () => {
+  await withStubbedGscAll(async (calls) => {
+    await gscService.fetchTopDimensions(_gscProject(), { days: 28 }, { rowLimit: 5000 });
+    assert.deepStrictEqual(calls, [5000, 5000], 'query+page both capped at 5000 (live /compare)');
+    calls.length = 0;
+    await gscService.fetchTopDimensions(_gscProject(), { days: 28 });
+    assert.deepStrictEqual(calls, [0, 0], 'no cap → unlimited pagination (background analysis)');
+  });
+});
+
 // ── SEO meta helpers (Part 1) ────────────────────────────────────────
 const seo = require('../src/services/infoArticle/seoMeta.service');
+
 
 test('clampText enforces limit on word boundary', () => {
   const out = seo.clampText('a'.repeat(100), 60);

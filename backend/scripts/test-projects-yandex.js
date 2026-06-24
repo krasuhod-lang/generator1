@@ -263,6 +263,65 @@ test('ydxAnalyzer prompt includes extended slices when insights present', () => 
   assert.ok(/Точки роста у входа в топ/.test(prompt));
 });
 
+// ── Живые (синхронные) эндпоинты ограничивают выборку liveRowLimit ───
+// fetchTopDimensions/fetchPerformanceSeries-фолбэк не должны тянуть весь
+// индекс постранично (источник «timeout of 60000ms exceeded»).
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+const { encryptToken } = require('../src/services/projects/tokenCrypto');
+
+function _ydxProject() {
+  return {
+    ydx_connected: true,
+    ydx_site_url: 'example.com',
+    ydx_available_sites: [{ siteUrl: 'example.com', hostId: 'https:example.com:443' }],
+    ydx_access_token_enc: encryptToken('live-token'),
+    ydx_token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+  };
+}
+
+async function withStubbedYdxClient(fn) {
+  const origUser = ydx.getUserId;
+  const origPopular = ydx.queryPopular;
+  const origPopularAll = ydx.queryPopularAll;
+  const calls = { popular: [], popularAll: 0 };
+  ydx.getUserId = async () => 'uid';
+  ydx.queryPopular = async (_t, _u, _h, opts) => { calls.popular.push(opts.limit); return []; };
+  ydx.queryPopularAll = async () => { calls.popularAll += 1; return []; };
+  try { await fn(calls); } finally {
+    ydx.getUserId = origUser;
+    ydx.queryPopular = origPopular;
+    ydx.queryPopularAll = origPopularAll;
+  }
+}
+
+atest('fetchTopDimensions with rowLimit uses single bounded page (queryPopular)', async () => {
+  await withStubbedYdxClient(async (calls) => {
+    await ydxService.fetchTopDimensions(_ydxProject(), { days: 28 }, { rowLimit: 500 });
+    assert.deepStrictEqual(calls.popular, [500], 'bounded page of 500');
+    assert.strictEqual(calls.popularAll, 0, 'must not paginate the whole index');
+  });
+});
+
+atest('fetchTopDimensions without rowLimit pulls all pages (queryPopularAll)', async () => {
+  await withStubbedYdxClient(async (calls) => {
+    await ydxService.fetchTopDimensions(_ydxProject(), { days: 28 });
+    assert.strictEqual(calls.popularAll, 1, 'background path stays unlimited');
+    assert.strictEqual(calls.popular.length, 0);
+  });
+});
+
+atest('fetchPerformanceSeries position fallback is bounded (no unlimited pull)', async () => {
+  const origHistory = ydx.queryHistory;
+  ydx.queryHistory = async () => ({}); // нет позиции → срабатывает фолбэк
+  try {
+    await withStubbedYdxClient(async (calls) => {
+      await ydxService.fetchPerformanceSeries(_ydxProject(), { days: 28 });
+      assert.strictEqual(calls.popularAll, 0, 'fallback must not pull the whole index');
+      assert.ok(calls.popular.length === 1 && calls.popular[0] > 0, 'fallback uses a bounded page');
+    });
+  } finally { ydx.queryHistory = origHistory; }
+});
+
 // eslint-disable-next-line no-console
 (async () => {
   for (const run of asyncQueue) { await run(); } // eslint-disable-line no-await-in-loop

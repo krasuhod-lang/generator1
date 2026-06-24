@@ -142,9 +142,14 @@ async function fetchPerformanceSeries(project, range) {
   }
   let avgPos = posN ? _round(posW / posN, 2) : 0;
   // Фолбэк: если история не отдала позицию — берём её из топ-запросов.
+  // Ограничиваем выборку liveRowLimit: это синхронный эндпоинт дашборда, и
+  // без лимита queryPopularAll мог тянуть сотни страниц, упираясь в таймаут.
   if (!avgPos) {
     try {
-      const top = await fetchTopQueries(project, range, { ctx: { accessToken, userId, hostId } });
+      const top = await fetchTopQueries(project, range, {
+        rowLimit: cfg.liveRowLimit || 500,
+        ctx: { accessToken, userId, hostId },
+      });
       const wSum = top.reduce((s, q) => s + q.impressions, 0);
       if (wSum) {
         avgPos = _round(top.reduce((s, q) => s + q.position * q.impressions, 0) / wSum, 2);
@@ -193,10 +198,10 @@ async function fetchTopQueries(project, range, { rowLimit, ctx } = {}) {
 }
 
 /** Топ-запросы + (плейсхолдер) топ-страницы — симметрично gscService.fetchTopDimensions. */
-async function fetchTopDimensions(project, range) {
+async function fetchTopDimensions(project, range, { rowLimit = 0 } = {}) {
   // Webmaster API не отдаёт срез по страницам через тот же эндпоинт, что и GSC,
   // поэтому topPages остаётся пустым — дашборд/сравнение опираются на запросы.
-  const topQueries = await fetchTopQueries(project, range);
+  const topQueries = await fetchTopQueries(project, range, { rowLimit: rowLimit || undefined });
   return { topQueries, topPages: [] };
 }
 
