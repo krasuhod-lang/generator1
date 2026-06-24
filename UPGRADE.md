@@ -1,5 +1,8 @@
 # Инструкция по обновлению — Link Article Generator
 
+> 🆕 **2026-06: Проект как живой контейнер задач + защита от каннибализации тем.**
+> См. раздел [«Привязка задач к проекту»](#обновление-2026-06--привязка-задач-к-проекту) ниже.
+
 Это руководство описывает, как накатить обновление **«Генератор ссылочной
 статьи»** на уже работающий инстанс SEO Genius. Основной пайплайн Stage 0–7,
 AI-Copilot, генератор мета-тегов и существующая база **не затрагиваются** —
@@ -212,3 +215,84 @@ npm run dev
 Каждая задача хранит свои `deepseek_tokens_*`, `gemini_tokens_*`,
 `gemini_image_calls`, `cost_usd` прямо в строке `link_article_tasks`.
 Полный журнал этапов — в таблице `link_article_events`.
+
+---
+
+## Обновление 2026-06 — привязка задач к проекту
+
+С этого релиза любая задача (info-article, link-article, meta-tags,
+article-topics, relevance, forecaster, serp-b2b и др.) может быть привязана
+к SEO-проекту. Проект становится «живым контейнером»: один и тот же
+актуальный контекст (бренд, год, валюта, ценовая политика, конкуренты,
+опубликованные темы, сигналы каннибализации) автоматически подмешивается
+во все промты задач этого проекта.
+
+### Что добавлено
+
+| Категория | Файл / сущность |
+|---|---|
+| БД | колонки `projects.{default_year, default_currency, pricing_notes, content_criteria}` |
+| БД | колонка `project_context_snapshot JSONB` во всех таблицах задач (`CHECK ≤ 64 КБ`) |
+| БД | колонки `article_topic_tasks.{exclude_topics, exclusion_sources}` |
+| Миграции | `migrations/089_project_context_snapshot.sql`, `migrations/090_article_topics_exclusions.sql` (идемпотентные эквиваленты — в `ensureSchema()` при старте сервера) |
+| Backend | `backend/src/services/projects/contextResolver.js` (расширен) — `buildProjectContext` + `computeContextVersion` |
+| Backend | `backend/src/services/projects/snapshotCompactor.js` — рекурсивная деградация до 32 КБ + hard fallback 60 КБ |
+| Backend | `backend/src/services/projects/projectContextBlock.js` + `backend/src/prompts/_projectContext.partial.txt` — единый промт-блок |
+| Backend | `backend/src/services/articleTopics/semanticExclusionFilter.js` — каскад exact → Jaccard → embeddings → LLM-judge |
+| Backend | `backend/src/services/articleTopics/articleTopicsPipeline.js` — сборка exclusion-set + пост-фильтр |
+| Backend | `backend/src/controllers/articleTopics.controller.js` — приём `project_id` + `exclude_topics` |
+| Frontend | `frontend/src/views/ArticleTopicsPage.vue` — `ProjectPicker` + textarea «Не охватывать темы» |
+| Frontend | `frontend/src/utils/projectsCache.js` (вынесён из `ProjectPicker.vue`) |
+| Тесты | `backend/scripts/test-project-context-block.js` (18 кейсов) |
+
+### Деплой
+
+```bash
+git pull
+docker compose exec backend node -e "require('./server.js')"  # ensureSchema накатит 089/090
+```
+
+Миграции идемпотентны: повторный запуск безопасен.
+Обратная совместимость полная — старые задачи без `project_id` продолжают
+работать как раньше (просто без контекстного блока).
+
+### Правила приоритета в промте
+
+Партиал `_projectContext.partial.txt` содержит блок «ПРАВИЛА РАЗРЕШЕНИЯ
+КОНФЛИКТОВ», который инструктирует LLM:
+
+1. **Ручной ввод формы (year/region/audience/topic/exclude_topics)** всегда
+   побеждает контекст проекта. Это нужно, чтобы можно было разово сделать
+   «исключение из правил» без редактирования проекта.
+2. **Контекст проекта** (бренд, факты, ценовая политика, опубликованные темы,
+   каннибализация) — используется как дополнение, а не как замена.
+3. **Год по умолчанию** подставляется только если в задаче он не задан
+   (поведение управляется `year_policy: explicit|implicit|omit`).
+
+### Защита от каннибализации тем (article-topics)
+
+В режиме «💡 Подбор тем» появилось поле **«Не охватывать темы»** — список
+строк (1 тема на строку, до 30 строк / 2000 символов). Префикс `*` или
+`cluster:` (рус. «кластер:») в начале строки помечает строку как
+макро-кластер: backend исключит все темы, попадающие в него.
+
+Каскад фильтрации (`semanticExclusionFilter`):
+
+1. **exact** — нормализованное полное совпадение по `canonTitle`.
+2. **fuzzy (Jaccard 3-gram)** — кандидат отбрасывается при сходстве ≥ 0.6.
+3. **embeddings** (опц.) — кандидаты в «жёлтой зоне» (Jaccard 0.25–0.6)
+   могут уйти в embedding-сравнение, drop порог `0.82`, judge порог `0.72`.
+4. **LLM-judge** (опц.) — финальный арбитр на пограничных кейсах
+   и проверка cluster-исключений.
+
+При недоступности embeddings/judge система gracefully деградирует
+(в `task.exclusion_sources.degraded` пишется флаг), но базовая фильтрация
+exact + Jaccard работает всегда.
+
+Кроме ручных исключений, бэкенд автоматически добавляет в exclusion-set:
+
+* `history` — уже опубликованные темы из `article_topics_brand_history`;
+* `cannibalization` — запросы со схлёстом из `project_analyses.action_plan`.
+
+Ручной ввод имеет безусловный приоритет — если пользователь явно вписал
+тему в форму, она пройдёт даже если совпадает с историей.

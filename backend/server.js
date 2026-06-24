@@ -2507,6 +2507,42 @@ async function ensureSchema() {
         if (rows[0]?.r) await _ensureProjectIdColumn(t);
       } catch (e) { console.warn(`[ensureSchema] project_id on ${t} failed:`, e.message); }
     }
+
+    // Миграция 089: «Проект как живой контейнер задач» — контент-параметры
+    // проекта + слепок project_context_snapshot во всех task-таблицах.
+    // См. migrations/089_project_context_snapshot.sql.
+    try {
+      await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS default_year     INTEGER`);
+      await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS default_currency VARCHAR(16)`);
+      await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS pricing_notes    TEXT`);
+      await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS content_criteria JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] projects content-params columns skipped:', e.message);
+    }
+    async function _ensureProjectCtxSnapshot(table) {
+      try {
+        await db.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS project_context_snapshot JSONB`);
+      } catch (e) {
+        console.warn(`[ensureSchema] project_context_snapshot on ${table} failed:`, e.message);
+      }
+    }
+    for (const t of ['info_article_tasks', 'link_article_tasks', 'meta_tag_tasks', 'article_topic_tasks', 'relevance_reports', 'forecaster_tasks', 'serp_b2b_tasks']) {
+      await _ensureProjectCtxSnapshot(t);
+    }
+    for (const t of ['tasks', 'category_lead_tasks']) {
+      try {
+        const { rows } = await db.query(`SELECT to_regclass($1) AS r`, [t]);
+        if (rows[0]?.r) await _ensureProjectCtxSnapshot(t);
+      } catch (e) { console.warn(`[ensureSchema] project_context_snapshot on ${t} failed:`, e.message); }
+    }
+
+    // Миграция 090: исключения для тем статей (защита от каннибализации).
+    try {
+      await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS exclude_topics    JSONB`);
+      await db.query(`ALTER TABLE article_topic_tasks ADD COLUMN IF NOT EXISTS exclusion_sources JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] article_topic_tasks exclude_topics/exclusion_sources skipped:', e.message);
+    }
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS keywords_top50 INTEGER`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS adcost NUMERIC(14,2)`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS search_engine VARCHAR(8) NOT NULL DEFAULT 'yandex'`);

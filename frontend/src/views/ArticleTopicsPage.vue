@@ -18,6 +18,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
+import ProjectPicker from '../components/ProjectPicker.vue';
 import { useArticleTopicsStore } from '../stores/articleTopics.js';
 import {
   parseMainResult, parseDeepDiveResult,
@@ -57,7 +58,14 @@ const topicIdeasForm = ref({
   target_url:  '',
   brand_hint:  '',
   topic_count: 10,
+  exclude_topics: '',
 });
+
+// Привязка к SEO-проекту (ТЗ §5/§8). Хранится отдельно от draft-формы,
+// т.к. это слабая ссылка: при удалении проекта задача остаётся со снапшотом.
+const PROJECT_ID_LS_KEY = 'article_topics_project_id_v1';
+const selectedProjectId = ref(null);
+const selectedProject   = ref(null); // { id, name, url, ... } — для UI-плашки
 
 const formError  = ref('');
 const submitting = ref(false);
@@ -68,10 +76,53 @@ onMounted(() => {
     const m = localStorage.getItem(FORM_MODE_LS_KEY);
     if (m === 'main' || m === 'topic_ideas') formMode.value = m;
   } catch (_) { /* ignore */ }
+  try {
+    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
+    const n = pid ? Number(pid) : NaN;
+    if (Number.isInteger(n) && n > 0) selectedProjectId.value = n;
+  } catch (_) { /* ignore */ }
   loadDraftForCurrentMode();
   store.fetchTasks();
   startPolling();
 });
+
+/**
+ * Обработка выбора проекта в ProjectPicker. Передаём `project_id` в payload
+ * задачи (бэкенд снимет project_context_snapshot), а из быстрого объекта
+ * `project` берём имя и URL для отображения. Полный контекст (бренд / факты /
+ * регион) подтягивается отдельным эмитом `fullContext` (см. handleProjectFull).
+ */
+function handleProjectSelected(project) {
+  selectedProject.value = project || null;
+  try {
+    if (selectedProjectId.value) {
+      localStorage.setItem(PROJECT_ID_LS_KEY, String(selectedProjectId.value));
+    } else {
+      localStorage.removeItem(PROJECT_ID_LS_KEY);
+    }
+  } catch (_) { /* ignore */ }
+  // Без агрессивного предзаполнения: правило приоритета — ручной ввод выигрывает,
+  // поэтому подставляем только пустые поля (см. backend partial «ПРАВИЛА КОНФЛИКТОВ»).
+  if (project && !((topicIdeasForm.value.target_url || '').trim())) {
+    if (project.url) topicIdeasForm.value.target_url = project.url;
+  }
+}
+
+function handleProjectFull(ctx) {
+  if (!ctx) return;
+  // Предзаполняем только пустые поля — приоритет у того, что пользователь
+  // успел ввести (synchronized с backend partial «ПРАВИЛА РАЗРЕШЕНИЯ КОНФЛИКТОВ»).
+  if (!(form.value.region || '').trim() && ctx.market?.region) {
+    form.value.region = ctx.market.region;
+  }
+  if (!((topicIdeasForm.value.brand_hint || '').trim()) && ctx.brand?.name) {
+    const parts = [ctx.brand.name];
+    if (Array.isArray(ctx.brand.facts) && ctx.brand.facts.length) {
+      parts.push(ctx.brand.facts.slice(0, 2).join('; '));
+    }
+    topicIdeasForm.value.brand_hint = parts.join(' — ').slice(0, 300);
+  }
+}
 
 function loadDraftForCurrentMode() {
   try {
@@ -134,9 +185,15 @@ async function handleCreate() {
         brand_hint:  (topicIdeasForm.value.brand_hint || '').trim(),
         topic_count: Number(topicIdeasForm.value.topic_count) || 10,
         gemini_model: form.value.gemini_model,
+        project_id:  selectedProjectId.value || null,
+        exclude_topics: (topicIdeasForm.value.exclude_topics || '').trim() || undefined,
       });
     } else {
-      await store.createTask({ ...form.value, niche });
+      await store.createTask({
+        ...form.value,
+        niche,
+        project_id: selectedProjectId.value || null,
+      });
     }
     await store.fetchTasks();
   } catch (err) {
@@ -734,6 +791,22 @@ const sortedTasks = computed(() =>
             </button>
           </div>
 
+          <!-- ── Привязка к SEO-проекту (ТЗ §5/§8) ──
+               Если проект выбран, бэкенд снимет context-снапшот и впишет
+               его в промт (бренд / факты / опубликованные темы / каннибализация).
+               Локальные поля формы при конфликте имеют приоритет. -->
+          <ProjectPicker
+            v-model="selectedProjectId"
+            label="Проект"
+            placeholder="— Без проекта (одноразовая задача) —"
+            @context="handleProjectSelected"
+            @fullContext="handleProjectFull"
+          />
+          <p v-if="selectedProject" class="text-[11px] text-gray-500 -mt-2">
+            Контекст проекта будет сохранён в снапшоте задачи; если позже
+            проект удалят, задача останется работоспособной.
+          </p>
+
           <div>
             <label class="label">Ниша / тема <span class="text-red-400">*</span></label>
             <input v-model="form.niche" type="text" class="input"
@@ -823,6 +896,25 @@ const sortedTasks = computed(() =>
               <label class="label">Краткое описание бренда <span class="text-gray-500 text-xs">(опц., до 300 симв.)</span></label>
               <textarea v-model="topicIdeasForm.brand_hint" rows="2" class="textarea" maxlength="300"
                         placeholder="Например: онлайн-школа английского, 7 лет на рынке, методика Cambridge"></textarea>
+            </div>
+            <!-- ── Исключения тем (защита от каннибализации) ──
+                 Каждая строка — тема, которую не охватывать. Префикс `*` или
+                 `cluster:` (рус. «кластер:») в начале строки помечает строку
+                 как макро-кластер: backend исключит все темы, попадающие в него.
+                 Бэкенд дополнительно собирает «технические» исключения
+                 (history, action_plan.cannibalization), но ручной ввод имеет
+                 безусловный приоритет (см. partial «ПРАВИЛА КОНФЛИКТОВ»). -->
+            <div>
+              <label class="label">
+                Не охватывать темы <span class="text-gray-500 text-xs">(опц., 1 строка = 1 тема, до 30 строк / 2000 симв.)</span>
+              </label>
+              <textarea v-model="topicIdeasForm.exclude_topics" rows="3" class="textarea" maxlength="2000"
+                        placeholder="как выбрать диван&#10;*детская мебель&#10;cluster: гарантия и возврат"></textarea>
+              <p class="text-[11px] text-gray-500 mt-1">
+                Префикс <code>*</code> или <code>cluster:</code> в начале строки помечает
+                макро-кластер — будут отброшены все темы, попадающие в него
+                (exact + fuzzy + при наличии — embeddings/LLM-judge).
+              </p>
             </div>
             <p class="text-[11px] text-gray-500">
               Один Gemini-вызов проведёт анализ рынка / сущностей / интентов

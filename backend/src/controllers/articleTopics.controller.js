@@ -16,6 +16,9 @@ const { findDuplicateDeepDives } = require('../services/articleTopics/articleTop
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { buildProjectContext } = require('../services/projects/contextResolver');
+const { compactProjectSnapshot } = require('../services/projects/snapshotCompactor');
+const { canonTitle } = require('../services/articleTopics/brandKey');
 
 // Лимиты длины — чтобы не дать раздуть промпт неосторожным копипастом
 // и не зацепить лимит входа Gemini-адаптера.
@@ -35,6 +38,9 @@ const LIMITS = {
   topic_count_min:  1,
   topic_count_max:  parseInt(process.env.ARTICLE_TOPICS_TOPIC_IDEAS_MAX, 10) || 30,
   topic_count_default: 10,
+  // ТЗ §2: «темы, которые не нужно охватывать» — ≤ 30 строк, ≤ 2000 симв.
+  exclude_topics_max_lines:  30,
+  exclude_topics_max_chars:  2000,
 };
 
 const ALLOWED_AUDIENCE     = ['B2B', 'B2C', 'смешанная'];
@@ -54,6 +60,59 @@ function pickEnum(value, allowed) {
   // вместо записи произвольного 120-символьного мусора, который мог бы
   // дезориентировать LLM или попасть в логи.
   return allowed.includes(s) ? s : '';
+}
+
+/**
+ * parseExcludeTopics(raw) — нормализует пользовательский ввод поля
+ * «Темы / направления, которые НЕ нужно охватывать» (ТЗ §2.1) в массив
+ * объектов { raw, kind: 'topic'|'cluster', canon }.
+ *
+ * Источник: фронт может прислать
+ *   • массив строк (по одной теме в строке)
+ *   • строку с переносами строк
+ *   • массив объектов { raw, kind }
+ *
+ * Префиксы `cluster:` / `*` / `*` в начале строки помечают запись как
+ * макро-кластер (исключается целиком через LLM-judge). Иначе — обычная
+ * тема (точное / семантическое сопоставление).
+ *
+ * Возвращает null, если ввод пустой; иначе массив длиной ≤ MAX_LINES.
+ * Превышение лимитов (строк или общей длины) обрезается молча — это
+ * pre-input защита от случайной пасты длинных списков.
+ */
+function parseExcludeTopics(raw) {
+  if (raw == null) return null;
+  let lines;
+  if (Array.isArray(raw)) {
+    lines = raw.map((x) => (typeof x === 'string' ? x : (x && (x.raw || x.title || '')))).filter(Boolean);
+  } else if (typeof raw === 'string') {
+    if (raw.length > LIMITS.exclude_topics_max_chars * 2) {
+      raw = raw.slice(0, LIMITS.exclude_topics_max_chars * 2);
+    }
+    lines = raw.split(/\r?\n/);
+  } else {
+    return null;
+  }
+  const out = [];
+  let totalChars = 0;
+  for (const lineRaw of lines) {
+    let line = String(lineRaw || '').trim();
+    if (!line) continue;
+    let kind = 'topic';
+    if (/^(\*|cluster:|кластер:)\s*/i.test(line)) {
+      kind = 'cluster';
+      line = line.replace(/^(\*|cluster:|кластер:)\s*/i, '').trim();
+    }
+    if (!line) continue;
+    line = line.slice(0, 200);
+    totalChars += line.length;
+    if (totalChars > LIMITS.exclude_topics_max_chars) break;
+    const canon = canonTitle(line);
+    if (!canon) continue;
+    out.push({ raw: line, kind, canon });
+    if (out.length >= LIMITS.exclude_topics_max_lines) break;
+  }
+  return out.length ? out : null;
 }
 
 // ─── GET /api/article-topics ───────────────────────────────────────
@@ -96,15 +155,29 @@ async function createArticleTopicTask(req, res, next) {
     const geminiModel      = normalizeGeminiCopywritingModel(body.gemini_model);
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId        = await resolveOwnedProjectId(body.project_id, req.user.id);
+    let projectContextSnapshot = null;
+    if (projectId) {
+      try {
+        const fullCtx = await buildProjectContext(projectId, req.user.id);
+        if (fullCtx) {
+          const { snapshot } = compactProjectSnapshot(fullCtx);
+          projectContextSnapshot = snapshot;
+        }
+      } catch (e) {
+        console.warn(`[articleTopics] buildProjectContext failed for ${projectId}: ${e.message}`);
+      }
+    }
 
     const { rows } = await db.query(
       `INSERT INTO article_topic_tasks
           (user_id, mode, niche, region, horizon, audience, market_stage,
-           search_ecosystem, top_competitors, gemini_model, project_id, status)
-       VALUES ($1, 'main', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')
+           search_ecosystem, top_competitors, gemini_model, project_id,
+           project_context_snapshot, status)
+       VALUES ($1, 'main', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, 'queued')
        RETURNING id, mode, niche, gemini_model, project_id, status, created_at`,
       [req.user.id, niche, region, horizon, audience, market_stage,
-       search_ecosystem, top_competitors, geminiModel, projectId],
+       search_ecosystem, top_competitors, geminiModel, projectId,
+       projectContextSnapshot ? JSON.stringify(projectContextSnapshot) : null],
     );
     const task = rows[0];
 
@@ -175,6 +248,24 @@ async function createArticleTopicIdeasTask(req, res, next) {
       return res.status(400).json({ error: 'target_url должен начинаться с http:// или https://' });
     }
 
+    // ТЗ §2: «темы, которые не нужно охватывать» + поддержка макро-кластеров.
+    const excludeTopics = parseExcludeTopics(body.exclude_topics);
+
+    // ТЗ §5: явная привязка к проекту + загрузка контекста для слепка.
+    const projectId = await resolveOwnedProjectId(body.project_id, req.user.id);
+    let projectContextSnapshot = null;
+    if (projectId) {
+      try {
+        const fullCtx = await buildProjectContext(projectId, req.user.id);
+        if (fullCtx) {
+          const { snapshot } = compactProjectSnapshot(fullCtx);
+          projectContextSnapshot = snapshot;
+        }
+      } catch (e) {
+        console.warn(`[articleTopics] buildProjectContext failed for ${projectId}: ${e.message}`);
+      }
+    }
+
     // Inputs (target_url, brand_hint, topic_count) сохраняем в module_context_used
     // на момент INSERT — pipeline прочитает их оттуда. Это позволяет не плодить
     // отдельные колонки в article_topic_tasks под опциональные topic_ideas-поля.
@@ -189,10 +280,19 @@ async function createArticleTopicIdeasTask(req, res, next) {
     const { rows } = await db.query(
       `INSERT INTO article_topic_tasks
           (user_id, mode, niche, region, audience,
-           status, topic_count_requested, module_context_used, gemini_model)
-       VALUES ($1, 'topic_ideas', $2, $3, $4, 'queued', $5, $6::jsonb, $7)
-       RETURNING id, mode, niche, status, topic_count_requested, gemini_model, created_at`,
-      [req.user.id, niche, region, audience, topicCount, JSON.stringify(initialContext), geminiModel],
+           status, topic_count_requested, module_context_used, gemini_model,
+           project_id, project_context_snapshot, exclude_topics)
+       VALUES ($1, 'topic_ideas', $2, $3, $4, 'queued', $5, $6::jsonb, $7,
+               $8, $9::jsonb, $10::jsonb)
+       RETURNING id, mode, niche, status, topic_count_requested, gemini_model,
+                 project_id, created_at`,
+      [
+        req.user.id, niche, region, audience, topicCount,
+        JSON.stringify(initialContext), geminiModel,
+        projectId,
+        projectContextSnapshot ? JSON.stringify(projectContextSnapshot) : null,
+        excludeTopics ? JSON.stringify(excludeTopics) : null,
+      ],
     );
     const task = rows[0];
 
