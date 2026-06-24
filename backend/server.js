@@ -2451,10 +2451,18 @@ async function ensureSchema() {
     // ТЗ §6: ручные правки чисел/AI-блоков (миграция 088)
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
-    // ТЗ §5: связь любой задачи с SEO-проектом (миграция 087)
+    // ТЗ §5: связь любой задачи с SEO-проектом (миграция 087).
+    // projects.id — UUID (см. определение таблицы projects выше), поэтому FK
+    // обязан быть UUID. Раньше здесь стоял BIGINT, что давало
+    // "foreign key constraint cannot be implemented: Key columns are of
+    // incompatible types: bigint and uuid" — ALTER падал, try/catch съедал
+    // ошибку, project_id так и не добавлялся, а последующий INSERT
+    // в createArticleTopicTask/createInfoArticleTask/... падал с
+    // "column \"project_id\" of relation \"…\" does not exist" → 5xx,
+    // который nginx показывал как 502 на вкладке «Темы статей» и др.
     for (const t of ['info_article_tasks', 'link_article_tasks', 'meta_tag_tasks', 'article_topic_tasks', 'relevance_reports', 'forecaster_tasks', 'serp_b2b_tasks']) {
       try {
-        await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL`);
+        await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id) ON DELETE SET NULL`);
         await db.query(`CREATE INDEX IF NOT EXISTS ix_${t}_project_id ON ${t}(project_id)`);
       } catch (e) { console.warn(`[ensureSchema] project_id on ${t} failed:`, e.message); }
     }
@@ -2463,7 +2471,7 @@ async function ensureSchema() {
       try {
         const { rows } = await db.query(`SELECT to_regclass($1) AS r`, [t]);
         if (rows[0]?.r) {
-          await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL`);
+          await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id) ON DELETE SET NULL`);
           await db.query(`CREATE INDEX IF NOT EXISTS ix_${t}_project_id ON ${t}(project_id)`);
         }
       } catch (e) { console.warn(`[ensureSchema] project_id on ${t} failed:`, e.message); }
