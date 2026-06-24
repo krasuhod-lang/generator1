@@ -109,7 +109,7 @@ async function fetchPerformanceSeries(project, range) {
 }
 
 /** Топ-запросы и топ-страницы за период (для среза AI-аналитики). */
-async function fetchTopDimensions(project, range) {
+async function fetchTopDimensions(project, range, { rowLimit = 0 } = {}) {
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
 
@@ -124,10 +124,10 @@ async function fetchTopDimensions(project, range) {
   const [q, p] = await Promise.all([
     gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
       startDate, endDate, dimensions: ['query'],
-    }),
+    }, { maxRows: rowLimit }),
     gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
       startDate, endDate, dimensions: ['page'],
-    }),
+    }, { maxRows: rowLimit }),
   ]);
   return {
     topQueries: (q.rows || []).map(mapRow),
@@ -139,14 +139,28 @@ async function fetchTopDimensions(project, range) {
  * Срез «запрос × страница» за период — для детектора каннибализации и
  * несоответствия интента в коммерческом анализе. Возвращает плоский список
  * строк {query, page, clicks, impressions, ctr%, position}.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.page]     если задан — фильтруем выборку этой страницей
+ *   на стороне GSC (dimensionFilterGroups), чтобы не тянуть весь индекс ради
+ *   одного URL (живой эндпоинт под 60-секундным таймаутом фронта).
+ * @param {number} [opts.rowLimit] потолок строк (0 = без лимита, фон-аналитика).
  */
-async function fetchQueryPageMatrix(project, range) {
+async function fetchQueryPageMatrix(project, range, { page, rowLimit = 0 } = {}) {
   const { startDate, endDate } = resolveRange(range);
   const accessToken = await getValidAccessToken(project);
-  const { rows } = await gsc.querySearchAnalyticsAll(accessToken, project.gsc_site_url, {
+  const body = {
     startDate, endDate,
     dimensions: ['query', 'page'],
-  });
+  };
+  if (page) {
+    body.dimensionFilterGroups = [{
+      filters: [{ dimension: 'page', operator: 'equals', expression: page }],
+    }];
+  }
+  const { rows } = await gsc.querySearchAnalyticsAll(
+    accessToken, project.gsc_site_url, body, { maxRows: rowLimit },
+  );
   return (rows || []).map((r) => ({
     query: Array.isArray(r.keys) ? (r.keys[0] || '') : '',
     page: Array.isArray(r.keys) ? (r.keys[1] || '') : '',
