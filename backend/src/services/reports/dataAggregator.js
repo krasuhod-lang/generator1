@@ -11,6 +11,96 @@ const { buildModulesForProject } = require('./reportModulesService');
 const { sanitizeData } = require('./viewModeSanitizer');
 const freshnessService = require('../projects/freshnessService');
 const { buildHeadline } = require('./headlineBuilder');
+const { splitSeriesIntoMonths } = require('../projects/periodResolver');
+
+/**
+ * Метаданные временных рядов для UI/KPI.
+ *
+ * Графики в отчётах **должны** рисовать всю серию, включая текущий неполный
+ * месяц (чтобы клиент видел актуальную динамику), но любые KPI/% роста
+ * считаются ТОЛЬКО по полным месяцам — иначе сравнение «23 дня апреля vs
+ * полный март» даёт ложные минусы (ТЗ §2-3).
+ *
+ * `series_meta` отдаётся в payload вместе с series:
+ *   {
+ *     monthly_periods:     [{ key, from, to, is_complete, is_partial, days,
+ *                             clicks, impressions, ctr, position }],
+ *     last_period_partial: boolean,   // последний месяц в окне неполный
+ *     last_complete_month: 'YYYY-MM', // для подписи «за полные месяцы: …»
+ *     complete_months:     number,    // сколько полных месяцев в окне
+ *   }
+ *
+ * `totals_complete` / `prev_totals_complete` — агрегаты строго по полным
+ * месяцам. KPI/дельты на фронте читают именно их (а series_meta используется
+ * для визуального маркера неполной точки графика).
+ */
+function _seriesMeta(rawSeries) {
+  const monthly = splitSeriesIntoMonths(rawSeries || []);
+  const completes = monthly.filter((m) => m.is_complete);
+  const last = monthly.length ? monthly[monthly.length - 1] : null;
+  return {
+    monthly_periods: monthly,
+    last_period_partial: last ? !!last.is_partial : false,
+    last_complete_month: completes.length ? completes[completes.length - 1].key : null,
+    complete_months: completes.length,
+  };
+}
+
+function _totalsFromMonths(months) {
+  if (!Array.isArray(months) || !months.length) return null;
+  let clicks = 0, impressions = 0, posSum = 0, posDays = 0;
+  for (const m of months) {
+    clicks += Number(m.clicks) || 0;
+    impressions += Number(m.impressions) || 0;
+    if (m.position && m.days) { posSum += m.position * m.days; posDays += m.days; }
+  }
+  return {
+    clicks,
+    impressions,
+    ctr: impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0,
+    position: posDays > 0 ? Math.round((posSum / posDays) * 100) / 100 : null,
+    months_count: months.length,
+  };
+}
+
+/**
+ * Считает totals_complete (полные месяцы из окна) и prev_totals_complete
+ * (предыдущие N полных месяцев перед окном, той же длины) на основе
+ * helper-сервиса (ydx/gsc/projects). Если данных меньше двух полных месяцев
+ * (или предыдущие месяцы недоступны) — возвращает только totals_complete.
+ */
+async function _completePeriodTotals(rawSeries, fetcher) {
+  const meta = _seriesMeta(rawSeries);
+  const completes = meta.monthly_periods.filter((m) => m.is_complete);
+  if (!completes.length) {
+    return { totals_complete: null, prev_totals_complete: null, meta };
+  }
+  const totals_complete = _totalsFromMonths(completes);
+  let prev_totals_complete = null;
+  if (typeof fetcher === 'function') {
+    try {
+      const firstMonth = completes[0];
+      // Окно для prev: ровно N месяцев, заканчивающихся за день до начала
+      // первого полного месяца текущего окна.
+      const n = completes.length;
+      const prevTo = new Date(`${firstMonth.from}T00:00:00Z`);
+      prevTo.setUTCDate(prevTo.getUTCDate() - 1);
+      const prevFrom = new Date(prevTo);
+      prevFrom.setUTCMonth(prevFrom.getUTCMonth() - (n - 1));
+      prevFrom.setUTCDate(1);
+      const fmt = (d) => d.toISOString().slice(0, 10);
+      const prevRaw = await fetcher(fmt(prevFrom), fmt(prevTo));
+      if (Array.isArray(prevRaw) && prevRaw.length) {
+        const prevMonths = splitSeriesIntoMonths(prevRaw).filter((m) => m.is_complete);
+        prev_totals_complete = _totalsFromMonths(prevMonths) || null;
+      }
+    } catch (err) {
+      // Не критично — без prev_totals_complete KPI всё равно покажет totals.
+      console.warn('[reports][periods] prev totals failed:', err.message);
+    }
+  }
+  return { totals_complete, prev_totals_complete, meta };
+}
 
 function _isoDate(value) {
   if (value == null) return '';
@@ -180,19 +270,26 @@ function _buildTrafficValue(keysSo, gsc, ywm) {
 async function _gscSection(project, from, to, granularity, freshnessMap) {
   const last_sync_at = freshnessMap?.gsc?.last_successful_sync_at || null;
   if (!project.gsc_connected || !project.gsc_site_url) {
-    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, last_sync_at };
+    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, totals_complete: null, prev_totals_complete: null, series_meta: null, last_sync_at };
   }
   try {
     const data = await gscService.fetchPerformanceSeries(project, { from, to });
     const series = _aggregateSeries(data.series, granularity);
     const isPartial = freshnessMap?.gsc?.status === 'partial' || freshnessMap?.gsc?.status === 'gap';
+    const completePeriods = await _completePeriodTotals(data.series, async (pFrom, pTo) => {
+      const prev = await gscService.fetchPerformanceSeries(project, { from: pFrom, to: pTo });
+      return prev?.series || [];
+    });
     return {
       connected: true,
       status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
       reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
       series,
+      series_meta: completePeriods.meta,
       totals: data.totals || null,
+      totals_complete: completePeriods.totals_complete,
+      prev_totals_complete: completePeriods.prev_totals_complete,
       range: data.range,
     };
   } catch (err) {
@@ -204,7 +301,10 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
       error: err.message || 'gsc_failed',
       last_sync_at,
       series: [],
+      series_meta: null,
       totals: null,
+      totals_complete: null,
+      prev_totals_complete: null,
     };
   }
 }
@@ -212,19 +312,26 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
 async function _ydxSection(project, from, to, granularity, freshnessMap) {
   const last_sync_at = freshnessMap?.yandex_webmaster?.last_successful_sync_at || null;
   if (!project.ydx_connected || !project.ydx_site_url) {
-    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, last_sync_at };
+    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, totals_complete: null, prev_totals_complete: null, series_meta: null, last_sync_at };
   }
   try {
     const data = await ydxService.fetchPerformanceSeries(project, { from, to });
     const series = _aggregateSeries(data.series, granularity);
     const isPartial = freshnessMap?.yandex_webmaster?.status === 'partial' || freshnessMap?.yandex_webmaster?.status === 'gap';
+    const completePeriods = await _completePeriodTotals(data.series, async (pFrom, pTo) => {
+      const prev = await ydxService.fetchPerformanceSeries(project, { from: pFrom, to: pTo });
+      return prev?.series || [];
+    });
     return {
       connected: true,
       status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
       reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
       series,
+      series_meta: completePeriods.meta,
       totals: data.totals || null,
+      totals_complete: completePeriods.totals_complete,
+      prev_totals_complete: completePeriods.prev_totals_complete,
       range: data.range,
     };
   } catch (err) {
@@ -236,7 +343,10 @@ async function _ydxSection(project, from, to, granularity, freshnessMap) {
       error: err.message || 'ydx_failed',
       last_sync_at,
       series: [],
+      series_meta: null,
       totals: null,
+      totals_complete: null,
+      prev_totals_complete: null,
     };
   }
 }
@@ -541,4 +651,7 @@ module.exports = {
   _aggregateSeries,
   _aggregateByMonth,
   _isoDate,
+  _seriesMeta,
+  _totalsFromMonths,
+  _completePeriodTotals,
 };

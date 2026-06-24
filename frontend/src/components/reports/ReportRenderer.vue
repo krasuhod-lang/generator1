@@ -86,9 +86,29 @@ const completenessBanner = computed(() => {
   return { partial, failed, level: failed.length ? 'error' : 'partial' };
 });
 
+// Метка-аннотация «неполный месяц» для последней точки графика, если
+// `series_meta.last_period_partial=true`. Бакет = дата самой последней
+// точки в series (она же первая дата неполного месяца для granularity=month
+// или сама дата для day). Источник истины — backend (см. _seriesMeta).
+function _partialAnnotation(section) {
+  if (!section?.series_meta?.last_period_partial) return null;
+  const series = section.series || [];
+  if (!series.length) return null;
+  const lastDate = series[series.length - 1]?.date;
+  if (!lastDate) return null;
+  return {
+    date: lastDate,
+    bucket: lastDate,
+    label: '⏳ неполный месяц',
+    type: 'partial-period',
+  };
+}
+
 const gscChart = computed(() => {
   const series = props.data?.gsc?.series || [];
   if (!series.length) return null;
+  const taskAnnotations = props.data?.tasks?.annotations || [];
+  const partial = _partialAnnotation(props.data?.gsc);
   return {
     labels: series.map((r) => r.date),
     datasets: [
@@ -96,7 +116,7 @@ const gscChart = computed(() => {
       { label: 'Показы', color: '#8b95a7', data: series.map((r) => Number(r.impressions) || 0) },
       { label: 'CTR', color: '#10b981', data: series.map((r) => Number(r.ctr) || 0), yAxisID: 'y2' },
     ],
-    annotations: props.data?.tasks?.annotations || [],
+    annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
   };
 });
@@ -104,6 +124,8 @@ const gscChart = computed(() => {
 const ywmChart = computed(() => {
   const series = props.data?.ywm?.series || [];
   if (!series.length) return null;
+  const taskAnnotations = props.data?.tasks?.annotations || [];
+  const partial = _partialAnnotation(props.data?.ywm);
   return {
     labels: series.map((r) => r.date),
     datasets: [
@@ -111,7 +133,7 @@ const ywmChart = computed(() => {
       { label: 'Показы (Яндекс)', color: '#ffb38a', data: series.map((r) => Number(r.impressions) || 0) },
       { label: 'CTR', color: '#ef4444', data: series.map((r) => Number(r.ctr) || 0), yAxisID: 'y2' },
     ],
-    annotations: props.data?.tasks?.annotations || [],
+    annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
   };
 });
@@ -340,29 +362,57 @@ function formatDateTime(iso) {
 }
 
 // --- Chart growth dynamics helpers ---
-function _computeDeltas(series, key) {
+// Дельты считаются ТОЛЬКО по полным месяцам (ТЗ §3). Если backend отдал
+// `totals_complete` и `prev_totals_complete` — используем их напрямую. Иначе
+// (старые черновики без series_meta) fallback к попарному сравнению последних
+// двух точек series, но и тут защищаемся от ситуации «последняя точка ещё
+// неполная» (series_meta.last_period_partial) и берём предпоследнюю.
+function _deltaFromTotals(section, key) {
+  if (!section) return null;
+  const cur = section.totals_complete;
+  const prev = section.prev_totals_complete;
+  if (cur && Number.isFinite(Number(cur[key]))) {
+    const last = Number(cur[key]) || 0;
+    const prevVal = prev && Number.isFinite(Number(prev[key])) ? (Number(prev[key]) || 0) : null;
+    if (prevVal == null) return { last, prev: 0, diff: 0, pct: null, source: 'complete-no-prev' };
+    const diff = last - prevVal;
+    const pct = prevVal > 0 ? Math.round((diff / prevVal) * 1000) / 10 : null;
+    return { last, prev: prevVal, diff, pct, source: 'complete' };
+  }
+  return null;
+}
+function _computeDeltas(series, key, opts = {}) {
   if (!Array.isArray(series) || series.length < 2) return null;
-  const last = Number(series[series.length - 1]?.[key]) || 0;
-  const prev = Number(series[series.length - 2]?.[key]) || 0;
+  // Если последняя точка — частичный месяц, не сравниваем с ней (ТЗ §3),
+  // сдвигаемся на одну позицию назад.
+  const partial = opts && opts.lastPartial;
+  const end = partial ? series.length - 2 : series.length - 1;
+  if (end < 1) return null;
+  const last = Number(series[end]?.[key]) || 0;
+  const prev = Number(series[end - 1]?.[key]) || 0;
   if (!prev && !last) return null;
   const diff = last - prev;
-  const pct = prev > 0 ? Math.round(((last - prev) / prev) * 1000) / 10 : null;
-  return { last, prev, diff, pct };
+  const pct = prev > 0 ? Math.round((diff / prev) * 1000) / 10 : null;
+  return { last, prev, diff, pct, source: partial ? 'series-skip-partial' : 'series' };
 }
 
 const gscDeltas = computed(() => {
-  const series = props.data?.gsc?.series || [];
+  const sec = props.data?.gsc || {};
+  const series = sec.series || [];
+  const partial = !!sec.series_meta?.last_period_partial;
   return {
-    clicks: _computeDeltas(series, 'clicks'),
-    impressions: _computeDeltas(series, 'impressions'),
+    clicks:      _deltaFromTotals(sec, 'clicks')      || _computeDeltas(series, 'clicks',      { lastPartial: partial }),
+    impressions: _deltaFromTotals(sec, 'impressions') || _computeDeltas(series, 'impressions', { lastPartial: partial }),
   };
 });
 
 const ywmDeltas = computed(() => {
-  const series = props.data?.ywm?.series || [];
+  const sec = props.data?.ywm || {};
+  const series = sec.series || [];
+  const partial = !!sec.series_meta?.last_period_partial;
   return {
-    clicks: _computeDeltas(series, 'clicks'),
-    impressions: _computeDeltas(series, 'impressions'),
+    clicks:      _deltaFromTotals(sec, 'clicks')      || _computeDeltas(series, 'clicks',      { lastPartial: partial }),
+    impressions: _deltaFromTotals(sec, 'impressions') || _computeDeltas(series, 'impressions', { lastPartial: partial }),
   };
 });
 
@@ -370,10 +420,39 @@ const keysDeltas = computed(() => {
   const engine = keysEngine.value;
   const engineData = engine === 'google' ? props.data?.keys_so?.google : props.data?.keys_so?.yandex;
   const series = engineData?.series || (engine === 'yandex' ? (props.data?.keys_so?.series || []) : []);
+  // Keys.so пока не даёт series_meta — сравнение «последняя vs предыдущая»
+  // точка остаётся как fallback. Для месячного среза это не критично.
   return {
     top10: _computeDeltas(series, 'keywords_top10'),
     top50: _computeDeltas(series, 'keywords_top50'),
   };
+});
+
+// Период «за полные месяцы N — M» для подписи под KPI / дельтами.
+const completePeriodLabel = computed(() => {
+  const meta = props.data?.gsc?.series_meta || props.data?.ywm?.series_meta;
+  if (!meta || !Array.isArray(meta.monthly_periods)) return '';
+  const completes = meta.monthly_periods.filter((m) => m.is_complete);
+  if (!completes.length) return '';
+  const first = completes[0].key;
+  const last  = completes[completes.length - 1].key;
+  return first === last ? first : `${first} — ${last}`;
+});
+
+// Глобальный флаг «в окне нет ни одного полного месяца» → KPI/дельты
+// показываем абсолютные, проценты роста скрываем, баннер предупреждаем.
+const noCompleteMonths = computed(() => {
+  const gscMeta = props.data?.gsc?.series_meta;
+  const ywmMeta = props.data?.ywm?.series_meta;
+  const g = gscMeta?.complete_months || 0;
+  const y = ywmMeta?.complete_months || 0;
+  return g === 0 && y === 0 && ((props.data?.gsc?.series?.length || 0) + (props.data?.ywm?.series?.length || 0)) > 0;
+});
+
+// Есть ли в окне неполный последний месяц — для маркера на графике.
+const hasPartialTail = computed(() => {
+  return !!(props.data?.gsc?.series_meta?.last_period_partial
+         || props.data?.ywm?.series_meta?.last_period_partial);
 });
 
 function formatDelta(d) {
@@ -448,6 +527,13 @@ function formatAbsDelta(d) {
 
     <section v-if="totals.length" id="report-summary" class="rblk">
       <h2>Ключевые показатели</h2>
+      <div v-if="noCompleteMonths" class="period-warning">
+        ⚠️ Недостаточно полных месяцев в выбранном периоде — KPI и % роста рассчитываются по неполным данным.
+        Расширьте период так, чтобы он включал хотя бы один завершённый месяц.
+      </div>
+      <p v-else-if="completePeriodLabel" class="period-hint">
+        Дельты и % роста — за полные месяцы: <b>{{ completePeriodLabel }}</b><span v-if="hasPartialTail">. Текущий неполный месяц участвует только в графиках.</span>
+      </p>
       <div v-if="loading" class="skeleton-grid">
         <div v-for="n in 6" :key="n" class="skeleton-card" />
       </div>
@@ -787,6 +873,15 @@ function formatAbsDelta(d) {
 .chart-desc { color: #6e6e73; font-size: 13px; margin: -2px 0 10px; line-height: 1.4; }
 .chart-deltas {
   display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
+}
+.period-warning {
+  background: rgba(245, 158, 11, 0.10); color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
+  font-size: 13px; line-height: 1.45;
+}
+.period-hint {
+  color: #6b7280; font-size: 12px; margin: -4px 0 12px;
 }
 .delta-badge {
   display: inline-flex; align-items: center; gap: 4px;
