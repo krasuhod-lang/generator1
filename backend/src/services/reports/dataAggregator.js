@@ -80,6 +80,45 @@ function _aggregateSeries(series, granularity, valueKeys = ['clicks', 'impressio
     });
 }
 
+/**
+ * Lightweight month-bucket aggregator kept for tests/integrations that need a
+ * simple monthly roll-up without specifying a granularity. Sums the requested
+ * value keys, derives a weighted CTR from clicks/impressions when present and
+ * uses an arithmetic-mean position so callers don't have to provide weights.
+ */
+function _aggregateByMonth(series, valueKeys = ['clicks', 'impressions']) {
+  const buckets = new Map();
+  for (const row of Array.isArray(series) ? series : []) {
+    const date = String(row && row.date ? row.date : '').slice(0, 10);
+    if (!date) continue;
+    const bucket = _bucketOf(date, 'month');
+    if (!buckets.has(bucket)) {
+      const init = { date: bucket, _posSum: 0, _posCount: 0 };
+      for (const key of valueKeys) init[key] = 0;
+      buckets.set(bucket, init);
+    }
+    const item = buckets.get(bucket);
+    for (const key of valueKeys) {
+      if (typeof row[key] === 'number') item[key] += row[key];
+    }
+    if (typeof row.position === 'number' && row.position > 0) {
+      item._posSum += row.position;
+      item._posCount += 1;
+    }
+  }
+  return Array.from(buckets.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((item) => {
+      const out = { date: item.date };
+      for (const key of valueKeys) out[key] = item[key];
+      const clicks = Number(item.clicks) || 0;
+      const impressions = Number(item.impressions) || 0;
+      out.ctr = impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0;
+      out.position = item._posCount > 0 ? Math.round((item._posSum / item._posCount) * 100) / 100 : null;
+      return out;
+    });
+}
+
 function _annotationFromTask(item, granularity) {
   const date = _isoDate(item.performed_at);
   return {
@@ -488,5 +527,6 @@ async function aggregateForDraft(draft, opts = {}) {
 module.exports = {
   aggregateForDraft,
   _aggregateSeries,
+  _aggregateByMonth,
   _isoDate,
 };
