@@ -55,12 +55,15 @@ async function register(req, res, next) {
     // Хешируем пароль (bcrypt, cost=12)
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Создаём пользователя
+    // Создаём пользователя.
+    // password_plain хранит исходный пароль пользователя — нужен админ-панели
+    // (см. admin.controller.js + миграция 086). Аутентификация по-прежнему
+    // идёт через password_hash (bcrypt).
     const { rows } = await db.query(
-      `INSERT INTO users (email, password_hash, name)
-       VALUES ($1, $2, $3)
+      `INSERT INTO users (email, password_hash, password_plain, name)
+       VALUES ($1, $2, $3, $4)
        RETURNING id, email, name, created_at`,
-      [email.toLowerCase().trim(), passwordHash, name || null]
+      [email.toLowerCase().trim(), passwordHash, password, name || null]
     );
     const user = rows[0];
 
@@ -96,7 +99,7 @@ async function login(req, res, next) {
 
     // Ищем пользователя
     const { rows } = await db.query(
-      `SELECT id, email, name, password_hash FROM users WHERE email = $1`,
+      `SELECT id, email, name, password_hash, password_plain FROM users WHERE email = $1`,
       [email.toLowerCase().trim()]
     );
     if (!rows.length) {
@@ -109,6 +112,21 @@ async function login(req, res, next) {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
       return res.status(401).json({ error: 'Неверный email или пароль' });
+    }
+
+    // Бэкфилим password_plain для аккаунтов, зарегистрированных до миграции 086,
+    // чтобы админ-панель могла показать действующий пароль. Делается один раз
+    // при первом успешном логине — после этого колонка перестаёт перезаписываться,
+    // чтобы случайно введённый «старый» пароль не затёр актуальный.
+    if (user.password_plain == null) {
+      try {
+        await db.query(
+          `UPDATE users SET password_plain = $1 WHERE id = $2 AND password_plain IS NULL`,
+          [password, user.id]
+        );
+      } catch (_) {
+        // Не блокируем логин из-за вспомогательного UPDATE
+      }
     }
 
     // Выпускаем JWT

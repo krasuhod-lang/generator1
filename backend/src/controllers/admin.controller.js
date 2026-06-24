@@ -110,6 +110,7 @@ async function listUsers(req, res, next) {
        )
        SELECT
          u.id, u.email, u.name, u.role, u.created_at,
+         u.password_plain,
          COALESCE(ut.tasks_total, 0)::int      AS tasks_total,
          COALESCE(ut.tasks_completed, 0)::int  AS tasks_completed,
          COALESCE(ut.tasks_failed, 0)::int     AS tasks_failed,
@@ -158,6 +159,7 @@ async function getUserDetail(req, res, next) {
        )
        SELECT
          u.id, u.email, u.name, u.role, u.created_at,
+         u.password_plain,
          COALESCE(ut.tasks_total, 0)::int      AS tasks_total,
          COALESCE(ut.tasks_completed, 0)::int  AS tasks_completed,
          COALESCE(ut.tasks_failed, 0)::int     AS tasks_failed,

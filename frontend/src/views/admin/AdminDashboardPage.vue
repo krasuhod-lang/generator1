@@ -82,6 +82,15 @@ function fmtCost(usd) {
   if (!usd || parseFloat(usd) === 0) return '—';
   return '$' + parseFloat(usd).toFixed(4);
 }
+
+async function copyPassword(pwd) {
+  if (!pwd) return;
+  try {
+    await navigator.clipboard.writeText(pwd);
+  } catch (_) {
+    // Старые браузеры / небезопасный контекст — игнорируем тихо.
+  }
+}
 </script>
 
 <template>
@@ -164,6 +173,7 @@ function fmtCost(usd) {
               <th class="py-3 px-3 text-gray-400 font-medium cursor-pointer select-none hover:text-gray-200" @click="handleSort('email')">
                 Email {{ sortIcon('email') }}
               </th>
+              <th class="py-3 px-3 text-gray-400 font-medium">Пароль</th>
               <th class="py-3 px-3 text-gray-400 font-medium cursor-pointer select-none hover:text-gray-200" @click="handleSort('name')">
                 Имя {{ sortIcon('name') }}
               </th>
@@ -189,6 +199,16 @@ function fmtCost(usd) {
               class="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
             >
               <td class="py-3 px-3 text-gray-200">{{ u.email }}</td>
+              <td class="py-3 px-3 text-gray-300 font-mono text-xs">
+                <button
+                  v-if="u.password_plain"
+                  type="button"
+                  class="hover:text-emerald-300 transition-colors"
+                  :title="'Скопировать пароль'"
+                  @click="copyPassword(u.password_plain)"
+                >{{ u.password_plain }}</button>
+                <span v-else class="text-gray-600">—</span>
+              </td>
               <td class="py-3 px-3 text-gray-300">{{ u.name || '—' }}</td>
               <td class="py-3 px-3 text-gray-400">{{ fmtDate(u.created_at) }}</td>
               <td class="py-3 px-3 text-gray-200 font-medium">{{ u.tasks_total }}</td>
@@ -206,7 +226,7 @@ function fmtCost(usd) {
               </td>
             </tr>
             <tr v-if="!admin.users.length && !admin.loading">
-              <td colspan="9" class="py-8 text-center text-gray-500">
+              <td colspan="10" class="py-8 text-center text-gray-500">
                 Пользователи не найдены
               </td>
             </tr>

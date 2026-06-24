@@ -159,7 +159,7 @@ function fmtCost(usd) {
               <h2 class="text-xl font-bold text-white">{{ userDetail.name || 'Без имени' }}</h2>
               <p class="text-gray-400 text-sm">{{ userDetail.email }}</p>
             </div>
-            <div class="flex gap-6 text-sm">
+            <div class="flex gap-6 text-sm flex-wrap">
               <div>
                 <span class="text-gray-500">Регистрация:</span>
                 <span class="text-gray-300 ml-1">{{ fmtDate(userDetail.created_at) }}</span>
@@ -171,6 +171,14 @@ function fmtCost(usd) {
               <div>
                 <span class="text-gray-500">Роль:</span>
                 <span class="text-gray-300 ml-1">{{ userDetail.role }}</span>
+              </div>
+              <div>
+                <span class="text-gray-500">Пароль:</span>
+                <span
+                  v-if="userDetail.password_plain"
+                  class="text-gray-200 ml-1 font-mono select-all"
+                >{{ userDetail.password_plain }}</span>
+                <span v-else class="text-gray-600 ml-1">— (не сохранён до миграции 086 — будет записан после следующего логина)</span>
               </div>
             </div>
           </div>
