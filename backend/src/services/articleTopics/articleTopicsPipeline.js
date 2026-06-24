@@ -28,10 +28,12 @@ const {
   buildSiblingDeepDivesBlock,
 } = require('./articleTopicsTrends');
 const { extractTopicIdeasJsonBlock } = require('./topicIdeasParser');
-const { normalizeBrandKey } = require('./brandKey');
+const { normalizeBrandKey, canonTitle } = require('./brandKey');
 const { detectDuplicates, filterDuplicates } = require('./topicDuplicateDetector');
 const { recordTopics, loadHistory } = require('./brandTopicHistory');
 const { resolveBrandKey, autoLinkSimilar } = require('./brandAliases');
+const { filterCannibalizingCandidates } = require('./semanticExclusionFilter');
+const { buildProjectContextBlock } = require('../projects/projectContextBlock');
 const { getQualityFlags } = require('../qualityLayers/featureFlags');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 const { finalizeByTask } = require('../aegis/backlogHooks');
@@ -81,6 +83,27 @@ function _interpolate(template, values) {
     out = out.split(`{{${k}}}`).join(safe);
   }
   return out;
+}
+
+/**
+ * _renderExclusionList — рендерит массив исключений как список «- raw»
+ * для подстановки в плейсхолдер промта. Возвращает либо «(нет — генерируй
+ * свободно)»-подобное сообщение, либо markdown-список.
+ *
+ * Используется в topic_ideas-режиме для двух плейсхолдеров:
+ *   {{EXCLUDED_TOPICS_LIST}}  — тематические исключения
+ *   {{EXCLUDED_CLUSTERS_LIST}} — макро-кластеры (целые направления)
+ */
+function _renderExclusionList(items, fallback) {
+  if (!Array.isArray(items) || !items.length) return fallback;
+  const lines = items
+    .map((x) => {
+      const t = String((x && (x.raw || x.title || x.query || x)) || '').trim();
+      return t ? `- ${t.slice(0, 200)}` : null;
+    })
+    .filter(Boolean)
+    .slice(0, 50);
+  return lines.length ? `\n${lines.join('\n')}` : fallback;
 }
 
 /**
@@ -206,16 +229,82 @@ async function processArticleTopicTask(taskId) {
       const requestedCount = Number(stashedInputs.topic_count)
                            || Number(task.topic_count_requested)
                            || 10;
-      userPrompt = _interpolate(_loadTopicIdeasPrompt(), {
+
+      // ТЗ §2.3: формируем exclusion-set из 4 источников ДО рендера промта,
+      // чтобы LLM сразу видела «не предлагать». Источники:
+      //   • user_topics / user_clusters — из article_topic_tasks.exclude_topics
+      //   • history — brandTopicHistory по brand_key (если есть)
+      //   • cannibalization — из project_context_snapshot.signals
+      //   • target_url_h1 — на этом этапе мы H1 не парсим (это сделает
+      //     отдельный фоновый шаг targetPageAnalyzer); если есть pageSnapshot
+      //     в slep'ке — используем его title.
+      const excludeRaw = Array.isArray(task.exclude_topics) ? task.exclude_topics : [];
+      const userTopics   = excludeRaw.filter((x) => x && x.kind !== 'cluster');
+      const userClusters = excludeRaw.filter((x) => x && x.kind === 'cluster');
+      const snap = task.project_context_snapshot || null;
+      const cannFromSnap = (snap && snap.signals && Array.isArray(snap.signals.cannibalization))
+        ? snap.signals.cannibalization : [];
+
+      const exclusionSet = {
+        user_topics:    userTopics,
+        user_clusters:  userClusters,
+        history:        [], // подложим ниже из brand history
+        cannibalization: cannFromSnap,
+        target_url_h1:  null,
+      };
+
+      // PROJECT_CONTEXT_BLOCK: используем слепок (если есть), иначе пытаемся
+      // подтянуть свежий контекст. Слепок предпочтительнее — он зафиксирован
+      // на момент INSERT (детерминированный prompt).
+      let projectContextBlock = '';
+      if (snap && snap.project) {
+        projectContextBlock = buildProjectContextBlock(snap, { maxBlockChars: 6000 });
+      } else if (task.project_id && task.user_id) {
+        try {
+          const { buildProjectContext } = require('../projects/contextResolver');
+          const ctx = await buildProjectContext(task.project_id, task.user_id);
+          if (ctx) projectContextBlock = buildProjectContextBlock(ctx, { maxBlockChars: 6000 });
+        } catch (e) {
+          console.warn(`[articleTopics] late buildProjectContext failed: ${e.message}`);
+        }
+      }
+
+      const excludedTopicsList = _renderExclusionList(
+        [...userTopics, ...cannFromSnap.map((c) => ({ raw: c.query }))],
+        '(нет — генерируй свободно)'
+      );
+      const excludedClustersList = _renderExclusionList(userClusters, '(нет)');
+
+      const topicIdeasBody = _interpolate(_loadTopicIdeasPrompt(), {
         NICHE:       task.niche || '',
         REGION:      task.region || '(не указан)',
         AUDIENCE:    task.audience || '(не указано)',
         TARGET_URL:  String(stashedInputs.target_url || '').slice(0, 300) || '(не указан)',
         BRAND_HINT:  String(stashedInputs.brand_hint || '').slice(0, 300) || '(не указано)',
         TOPIC_COUNT: String(requestedCount),
+        EXCLUDED_TOPICS_LIST:   excludedTopicsList,
+        EXCLUDED_CLUSTERS_LIST: excludedClustersList,
       });
+      userPrompt = projectContextBlock
+        ? `${projectContextBlock}\n\n${topicIdeasBody}`
+        : topicIdeasBody;
+
+      // Сохраним для пост-фильтра.
+      funnel.step('exclusion_inputs_collected', {
+        user_topics: userTopics.length,
+        user_clusters: userClusters.length,
+        cannibalization: cannFromSnap.length,
+        project_context_block_chars: projectContextBlock.length,
+      });
+      task._exclusionSet = exclusionSet; // временно — для пост-обработки
     } else {
-      userPrompt = _interpolate(_loadMainPrompt(), {
+      // Main-режим: тоже подмешиваем контекст проекта, если есть слепок.
+      let projectContextBlockMain = '';
+      const snapMain = task.project_context_snapshot || null;
+      if (snapMain && snapMain.project) {
+        projectContextBlockMain = buildProjectContextBlock(snapMain, { maxBlockChars: 5000 });
+      }
+      const mainBody = _interpolate(_loadMainPrompt(), {
         NICHE:            task.niche || '',
         REGION:           task.region || '(не указан)',
         HORIZON:          task.horizon || '(не указан)',
@@ -224,6 +313,9 @@ async function processArticleTopicTask(taskId) {
         SEARCH_ECOSYSTEM: task.search_ecosystem || '(не указано)',
         TOP_COMPETITORS:  task.top_competitors || '(не указаны)',
       });
+      userPrompt = projectContextBlockMain
+        ? `${projectContextBlockMain}\n\n${mainBody}`
+        : mainBody;
     }
 
     // 300 секунд — потолок для одного non-streaming Gemini-вызова в адаптере.
@@ -375,6 +467,53 @@ async function processArticleTopicTask(taskId) {
       }
     }
 
+    // ─── ТЗ §2.3.A: семантический пост-фильтр от каннибализации ───────
+    // Применяется только в topic_ideas-режиме поверх уже отдедупленных тем.
+    // Источники исключений (см. articleTopicsPipeline._exclusionSet, собран
+    // на стадии build_prompt): user_topics, user_clusters, история бренда,
+    // cannibalization из снапшота проекта.
+    // Без embeddings/LLM-judge фильтр работает как exact + Jaccard (cheap),
+    // что уже даёт ощутимый эффект — расширенные слои подключаются позже
+    // через инжектируемые `embeddingFn` / `llmJudgeFn`.
+    let exclusionResult = null;
+    if (
+      task.mode === 'topic_ideas'
+      && topicIdeasJson
+      && Array.isArray(topicIdeasJson.topics)
+      && topicIdeasJson.topics.length
+      && task._exclusionSet
+    ) {
+      try {
+        // Обогатим history исключения через brandTopicHistory (если ещё не).
+        const ex = task._exclusionSet;
+        if (brandKey && (!ex.history || !ex.history.length)) {
+          try {
+            const hist = await loadHistory(db, { userId: task.user_id, brandKey, lookbackDays: 365, limit: 500 });
+            ex.history = hist || [];
+          } catch (_) { /* graceful */ }
+        }
+        exclusionResult = await filterCannibalizingCandidates(
+          topicIdeasJson.topics,
+          ex,
+          { /* embeddingFn / llmJudgeFn — пока не инжектим, fallback */ },
+        );
+        if (exclusionResult.summary.total_dropped > 0) {
+          topicIdeasJson = {
+            ...topicIdeasJson,
+            topics: exclusionResult.kept,
+            topics_dropped_as_cannibalization: exclusionResult.dropped.map((d) => ({
+              title: d.candidate.topic_title || d.candidate.title || d.candidate.h1 || null,
+              reason: d.reason,
+              matched_raw: d.matched ? (d.matched.raw || d.matched.query || d.matched.canon) : null,
+              score: d.score || null,
+            })),
+          };
+        }
+      } catch (e) {
+        console.warn(`[articleTopics] semantic exclusion failed for ${taskId}: ${e.message}`);
+      }
+    }
+
     // Aegis cross-module hook: фиксируем стадию dedup в общую телеметрию.
     try {
       require('../aegis/moduleHooks').observeStage({
@@ -410,8 +549,28 @@ async function processArticleTopicTask(taskId) {
       brand_alias_resolved: brandAliasInfo,
       brand_dedup:          brandDedupStats,
       topics_dropped_as_duplicates: topicsDroppedAsDuplicates,
+      excluded_candidates_summary:  exclusionResult ? exclusionResult.summary : null,
+      semantic_filter_degraded:     exclusionResult ? exclusionResult.degraded : null,
       generated_at:      new Date().toISOString(),
     };
+
+    // ТЗ §2.2: exclusion_sources — что реально подмешано в промт + статистика
+    // отбраковки. Полезно для UI плашки «N тем отброшено как каннибализация».
+    const exclusionSourcesPayload = task._exclusionSet ? {
+      user_topics:     task._exclusionSet.user_topics || [],
+      user_clusters:   task._exclusionSet.user_clusters || [],
+      history:         (task._exclusionSet.history || []).slice(0, 50).map((h) => ({
+        topic_title_canon: h.topic_title_canon || null,
+        intent_facet:      h.intent_facet || null,
+      })),
+      cannibalization: (task._exclusionSet.cannibalization || []).slice(0, 30),
+      target_url_h1:   task._exclusionSet.target_url_h1 || null,
+      dropped_by_semantic: exclusionResult ? exclusionResult.dropped.map((d) => ({
+        title: d.candidate.topic_title || d.candidate.title || null,
+        reason: d.reason,
+        matched: d.matched ? (d.matched.raw || d.matched.query || d.matched.canon) : null,
+      })) : [],
+    } : null;
 
     await db.query(
       `UPDATE article_topic_tasks
@@ -427,6 +586,7 @@ async function processArticleTopicTask(taskId) {
               audience_profile    = $10,
               brand_facts_json    = $11,
               topic_count_returned = $12,
+              exclusion_sources    = $13::jsonb,
               completed_at      = NOW(),
               updated_at        = NOW()
         WHERE id = $1`,
@@ -438,6 +598,7 @@ async function processArticleTopicTask(taskId) {
         audienceProfile ? JSON.stringify(audienceProfile) : null,
         brandFactsJson  ? JSON.stringify(brandFactsJson)  : null,
         topicCountReturned,
+        exclusionSourcesPayload ? JSON.stringify(exclusionSourcesPayload) : null,
       ],
     );
     funnel.step('finalize');
