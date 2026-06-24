@@ -5,6 +5,7 @@ import DOMPurify from 'dompurify';
 import readXlsxFile from 'read-excel-file';
 import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
+import ProjectPicker from '../components/ProjectPicker.vue';
 import { useAuthStore } from '../stores/auth.js';
 import { useInfoArticleStore } from '../stores/infoArticle.js';
 
@@ -34,11 +35,40 @@ const optionalOpen = ref(false);
 const submitting   = ref(false);
 const formError    = ref(null);
 
+// ── ProjectPicker (ТЗ §5/§8) ─────────────────────────────────────────
+const PROJECT_ID_LS_KEY = 'info_article_project_id_v1';
+const selectedProjectId = ref(null);
+const selectedProject   = ref(null);
+
+function handleProjectSelected(project) {
+  selectedProject.value = project || null;
+  try {
+    if (selectedProjectId.value) localStorage.setItem(PROJECT_ID_LS_KEY, String(selectedProjectId.value));
+    else localStorage.removeItem(PROJECT_ID_LS_KEY);
+  } catch (_) { /* ignore */ }
+}
+
+function handleProjectFull(ctx) {
+  if (!ctx) return;
+  if (!form.value.region?.trim() && ctx.market?.region) form.value.region = ctx.market.region;
+  if (!form.value.brand_name?.trim() && ctx.brand?.name) form.value.brand_name = ctx.brand.name;
+  if (!form.value.brand_facts?.trim() && Array.isArray(ctx.brand?.facts) && ctx.brand.facts.length) {
+    form.value.brand_facts = ctx.brand.facts.slice(0, 8).map((f) => `• ${f}`).join('\n');
+  }
+}
+
 const DRAFT_KEY = 'info_article_draft_v1';
 onMounted(() => {
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
     if (raw) Object.assign(form.value, JSON.parse(raw));
+  } catch (_) { /* ignore */ }
+  try {
+    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
+    if (pid) {
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
   } catch (_) { /* ignore */ }
 
   // Префилл из query-параметров (например, переход из /article-topics →
@@ -386,6 +416,7 @@ async function handleCreate() {
     if (form.value.source_relevance_report_id) {
       payload.source_relevance_report_id = form.value.source_relevance_report_id;
     }
+    if (selectedProjectId.value) payload.project_id = selectedProjectId.value;
     const { id, normalized } = await store.createTask(payload);
     if (normalized) {
       parseInfo.value = `Серверная нормализация: ${normalized.kept} принято, ${normalized.dropped} отбраковано`;
@@ -971,6 +1002,20 @@ onUnmounted(() => { stopTicker(); });
         <!-- ── Форма ── -->
         <form @submit.prevent="handleCreate" class="card space-y-4 lg:col-span-5">
           <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">📝 Новая статья</h2>
+
+          <!-- ── ProjectPicker (ТЗ §5/§8) ── -->
+          <div>
+            <ProjectPicker
+              v-model="selectedProjectId"
+              @context="handleProjectSelected"
+              @fullContext="handleProjectFull"
+              label="Проект (необязательно)"
+              placeholder="— Без проекта —"
+            />
+            <p v-if="selectedProject" class="mt-1 text-[11px] text-emerald-300">
+              📂 Контекст проекта «{{ selectedProject.name }}» подтянется в генерацию.
+            </p>
+          </div>
 
           <div>
             <label class="label">Тема статьи <span class="text-red-400">*</span></label>

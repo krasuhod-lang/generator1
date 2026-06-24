@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import ProjectPicker from '../components/ProjectPicker.vue';
 import { useRelevanceStore } from '../stores/relevance.js';
 import { YANDEX_REGIONS, findRegionByCode } from '../data/yandexRegions.js';
 
@@ -58,11 +59,36 @@ function regionGroupColor(group) {
 const submitting = ref(false);
 const formError  = ref(null);
 
+// ── ProjectPicker (ТЗ §5/§8) ─────────────────────────────────────────
+const PROJECT_ID_LS_KEY = 'relevance_project_id_v1';
+const selectedProjectId = ref(null);
+const selectedProject   = ref(null);
+function handleProjectSelected(project) {
+  selectedProject.value = project || null;
+  try {
+    if (selectedProjectId.value) localStorage.setItem(PROJECT_ID_LS_KEY, String(selectedProjectId.value));
+    else localStorage.removeItem(PROJECT_ID_LS_KEY);
+  } catch (_) { /* ignore */ }
+}
+function handleProjectFull(ctx) {
+  if (!ctx) return;
+  if (!(form.value.our_url || '').trim() && ctx.project?.site_url) {
+    form.value.our_url = ctx.project.site_url;
+  }
+}
+
 const STORAGE_KEY = 'relevance_draft_v1';
 onMounted(() => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) Object.assign(form.value, JSON.parse(raw));
+  } catch (_) { /* ignore */ }
+  try {
+    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
+    if (pid) {
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
   } catch (_) { /* ignore */ }
 });
 function saveDraft() {
@@ -94,6 +120,7 @@ async function handleCreate() {
       lr:    form.value.lr.trim() || '213',
       our_url: (form.value.our_url || '').trim() || null,
       exclude_aggregators: !!form.value.exclude_aggregators,
+      project_id: selectedProjectId.value || null,
     });
     await store.fetchReports();
     if (id) router.push(`/relevance/${id}`);
@@ -172,6 +199,20 @@ function formatDuration(ms) {
       <form @submit.prevent="handleCreate" class="card space-y-5">
         <div class="flex items-center gap-2 mb-1">
           <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">📝 Новый отчёт</h2>
+        </div>
+
+        <!-- ── ProjectPicker (ТЗ §5/§8) ── -->
+        <div>
+          <ProjectPicker
+            v-model="selectedProjectId"
+            @context="handleProjectSelected"
+            @fullContext="handleProjectFull"
+            label="Проект (необязательно)"
+            placeholder="— Без проекта —"
+          />
+          <p v-if="selectedProject" class="mt-1 text-[11px] text-emerald-300">
+            📂 Контекст проекта «{{ selectedProject.name }}» подтянется в отчёт.
+          </p>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">

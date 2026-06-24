@@ -78,8 +78,11 @@ onMounted(() => {
   } catch (_) { /* ignore */ }
   try {
     const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
-    const n = pid ? Number(pid) : NaN;
-    if (Number.isInteger(n) && n > 0) selectedProjectId.value = n;
+    if (pid) {
+      // project_id может быть UUID-строкой ИЛИ числом (legacy) — не приводим к Number.
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
   } catch (_) { /* ignore */ }
   loadDraftForCurrentMode();
   store.fetchTasks();
