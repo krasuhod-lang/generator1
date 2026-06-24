@@ -466,6 +466,32 @@ function formatAbsDelta(d) {
   const sign = d.diff >= 0 ? '+' : '';
   return `${sign}${Math.round(d.diff).toLocaleString('ru-RU')}`;
 }
+
+// ТЗ §4: разбиение топ-запросов и страниц по интенту.
+// По умолчанию активна вкладка «Коммерческие» — именно эти запросы приносят
+// выручку и должны быть в фокусе клиента/менеджера. Информационные доступны
+// рядом отдельной вкладкой, чтобы видеть инфо-спрос, но не путать его с
+// коммерческими точками роста.
+const queriesTab = ref('commercial');
+const pagesTab = ref('commercial');
+const queriesSection = computed(() => props.data?.queries || null);
+const commercialSummary = computed(() => queriesSection.value?.summary || null);
+function intentLabel(intent) {
+  switch (intent) {
+    case 'transactional': return 'Транзакционный';
+    case 'commercial':    return 'Коммерческий';
+    case 'investigation': return 'Сравнение';
+    case 'informational': return 'Информационный';
+    case 'navigational':  return 'Навигационный';
+    default:              return '—';
+  }
+}
+function formatPct(v) {
+  return v == null ? '—' : `${v}%`;
+}
+function formatNum(v) {
+  return v == null ? '—' : Number(v).toLocaleString('ru-RU');
+}
 </script>
 
 <template>
@@ -644,6 +670,137 @@ function formatAbsDelta(d) {
       <h2>Динамика позиций</h2>
       <p class="chart-desc">Средняя позиция и распределение по ТОП-10/ТОП-30 из трекера позиций.</p>
       <PositionChart :series="data.position.series" mode="position" />
+    </section>
+
+    <!-- ТЗ §4: Топ-запросы и страницы с разбиением по интенту -->
+    <section
+      v-if="queriesSection && (queriesSection.top_queries_commercial?.length || queriesSection.top_queries_informational?.length)"
+      id="report-queries"
+      class="rblk"
+    >
+      <h2>Топ-запросы</h2>
+      <p class="chart-desc">
+        По умолчанию показаны коммерческие запросы (transactional / commercial / investigation) —
+        те, что приносят выручку. Информационный спрос вынесен на отдельную вкладку.
+      </p>
+      <div v-if="commercialSummary" class="commercial-summary">
+        <span class="cs-pill">
+          Коммерческий трафик: <b>{{ formatNum(commercialSummary.commercial_clicks) }}</b>
+          кликов из <b>{{ formatNum(commercialSummary.total_clicks) }}</b>
+          <span v-if="commercialSummary.commercial_share_pct != null">
+            ({{ commercialSummary.commercial_share_pct }}%)
+          </span>
+        </span>
+      </div>
+      <div class="intent-tabs">
+        <button
+          class="intent-tab"
+          :class="{ active: queriesTab === 'commercial' }"
+          @click="queriesTab = 'commercial'"
+        >🛒 Коммерческие ({{ queriesSection.top_queries_commercial?.length || 0 }})</button>
+        <button
+          class="intent-tab"
+          :class="{ active: queriesTab === 'informational' }"
+          @click="queriesTab = 'informational'"
+        >📚 Информационные ({{ queriesSection.top_queries_informational?.length || 0 }})</button>
+        <button
+          v-if="queriesSection.top_queries_other?.length"
+          class="intent-tab"
+          :class="{ active: queriesTab === 'other' }"
+          @click="queriesTab = 'other'"
+        >🔸 Прочие ({{ queriesSection.top_queries_other.length }})</button>
+      </div>
+      <table class="rep-table">
+        <thead>
+          <tr>
+            <th>Запрос</th>
+            <th>Интент</th>
+            <th class="num">Клики</th>
+            <th class="num">Показы</th>
+            <th class="num">CTR</th>
+            <th class="num">Позиция</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="(row, i) in (queriesTab === 'commercial'
+              ? queriesSection.top_queries_commercial
+              : queriesTab === 'informational'
+                ? queriesSection.top_queries_informational
+                : queriesSection.top_queries_other) || []"
+            :key="`q-${queriesTab}-${i}`"
+          >
+            <td>{{ row.key }}<span v-if="row.branded" class="brand-tag" title="Брендовый">★</span></td>
+            <td class="intent-cell">{{ intentLabel(row.intent) }}</td>
+            <td class="num">{{ formatNum(row.clicks) }}</td>
+            <td class="num">{{ formatNum(row.impressions) }}</td>
+            <td class="num">{{ formatPct(row.ctr) }}</td>
+            <td class="num">{{ row.position != null ? row.position : '—' }}</td>
+          </tr>
+          <tr v-if="!((queriesTab === 'commercial'
+              ? queriesSection.top_queries_commercial
+              : queriesTab === 'informational'
+                ? queriesSection.top_queries_informational
+                : queriesSection.top_queries_other) || []).length">
+            <td colspan="6" class="empty-cell">За период по этому сегменту запросов нет.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section
+      v-if="queriesSection && (queriesSection.top_pages_commercial?.length || queriesSection.top_pages_informational?.length)"
+      id="report-pages"
+      class="rblk"
+    >
+      <h2>Топ-страницы</h2>
+      <p class="chart-desc">
+        Страница относится к коммерческим, если ≥50% её кликов приходится на коммерческие запросы.
+      </p>
+      <div class="intent-tabs">
+        <button
+          class="intent-tab"
+          :class="{ active: pagesTab === 'commercial' }"
+          @click="pagesTab = 'commercial'"
+        >🛒 Коммерческие ({{ queriesSection.top_pages_commercial?.length || 0 }})</button>
+        <button
+          class="intent-tab"
+          :class="{ active: pagesTab === 'informational' }"
+          @click="pagesTab = 'informational'"
+        >📚 Информационные ({{ queriesSection.top_pages_informational?.length || 0 }})</button>
+      </div>
+      <table class="rep-table">
+        <thead>
+          <tr>
+            <th>Страница</th>
+            <th class="num">Commercial-доля</th>
+            <th class="num">Клики</th>
+            <th class="num">Показы</th>
+            <th class="num">CTR</th>
+            <th class="num">Позиция</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="(row, i) in (pagesTab === 'commercial'
+              ? queriesSection.top_pages_commercial
+              : queriesSection.top_pages_informational) || []"
+            :key="`p-${pagesTab}-${i}`"
+          >
+            <td class="page-cell"><a :href="row.key" target="_blank" rel="noopener">{{ row.key }}</a></td>
+            <td class="num">{{ row.commercial_share != null ? `${Math.round(row.commercial_share * 100)}%` : '—' }}</td>
+            <td class="num">{{ formatNum(row.clicks) }}</td>
+            <td class="num">{{ formatNum(row.impressions) }}</td>
+            <td class="num">{{ formatPct(row.ctr) }}</td>
+            <td class="num">{{ row.position != null ? row.position : '—' }}</td>
+          </tr>
+          <tr v-if="!((pagesTab === 'commercial'
+              ? queriesSection.top_pages_commercial
+              : queriesSection.top_pages_informational) || []).length">
+            <td colspan="6" class="empty-cell">За период по этому сегменту страниц нет.</td>
+          </tr>
+        </tbody>
+      </table>
     </section>
 
     <section v-if="growthItems.length" class="rblk">
@@ -961,4 +1118,30 @@ function formatAbsDelta(d) {
   .report-nav { padding: 6px 8px; gap: 4px; }
   .nav-link { padding: 6px 10px; font-size: 11px; }
 }
+
+/* ТЗ §4: вкладки и таблицы коммерческих/информационных запросов */
+.commercial-summary { margin: 8px 0 12px; }
+.cs-pill {
+  display: inline-block; padding: 6px 12px; border-radius: 999px;
+  background: var(--accent-bg, #f0f4ff); color: #234; font-size: 13px;
+}
+.intent-tabs { display: flex; gap: 6px; margin: 10px 0 12px; flex-wrap: wrap; }
+.intent-tab {
+  padding: 6px 14px; border-radius: 999px; border: 1px solid #d6dbe3;
+  background: #fff; color: #455; font-size: 13px; cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.intent-tab:hover { background: #f4f6fa; }
+.intent-tab.active { background: var(--accent, #4a6cf7); color: #fff; border-color: var(--accent, #4a6cf7); }
+.rep-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rep-table th, .rep-table td { padding: 8px 10px; border-bottom: 1px solid #eef0f4; text-align: left; }
+.rep-table th { background: #fafbfd; font-weight: 600; color: #455; }
+.rep-table td.num, .rep-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.rep-table tr:hover td { background: #fafbfd; }
+.intent-cell { color: #678; font-size: 12px; white-space: nowrap; }
+.page-cell { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-cell a { color: var(--accent, #4a6cf7); text-decoration: none; }
+.page-cell a:hover { text-decoration: underline; }
+.brand-tag { margin-left: 6px; color: #d4a017; font-size: 11px; }
+.empty-cell { text-align: center; color: #889; padding: 16px; font-style: italic; }
 </style>
