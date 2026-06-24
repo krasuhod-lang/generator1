@@ -148,6 +148,7 @@ async function exportPdf() {
             :period="result.period"
             :project="result.project"
             :mode="result.mode"
+            view-mode="client"
             :captured-at="result.payload?.captured_at"
             :readonly="true" />
         </div>

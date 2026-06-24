@@ -121,5 +121,20 @@ test('VALID_STATUSES is frozen array', () => {
   assert.deepStrictEqual([...ws.VALID_STATUSES].sort(), ['done', 'in_progress', 'planned']);
 });
 
+// ── 083_works_client_visible (Sprint 3) ────────────────────────────────────
+console.log('── client_visible flag ────────────────────────');
+
+test('client mode strips client_visible flag (technical-only field)', () => {
+  const row = { ...SAMPLE, client_visible: true };
+  const out = ws.sanitizeWorkForMode(row, 'client');
+  assert.strictEqual(out.client_visible, undefined);
+});
+
+test('analyst mode keeps client_visible flag (used in management UI)', () => {
+  const row = { ...SAMPLE, client_visible: false };
+  const out = ws.sanitizeWorkForMode(row, 'analyst');
+  assert.strictEqual(out.client_visible, false);
+});
+
 console.log('\nFinished: ' + (total - failed) + '/' + total + ' OK' + (failed ? `, ${failed} FAILED` : ''));
 process.exit(failed ? 1 : 0);

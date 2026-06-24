@@ -8,6 +8,9 @@ const tasksLog = require('./tasksAutoLog');
 const { forecastMetric } = require('./forecastEngine');
 const positionAnalytics = require('../positionTracker/analytics');
 const { buildModulesForProject } = require('./reportModulesService');
+const { sanitizeData } = require('./viewModeSanitizer');
+const freshnessService = require('../projects/freshnessService');
+const { buildHeadline } = require('./headlineBuilder');
 
 function _isoDate(value) {
   if (value == null) return '';
@@ -78,6 +81,45 @@ function _aggregateSeries(series, granularity, valueKeys = ['clicks', 'impressio
     });
 }
 
+/**
+ * Lightweight month-bucket aggregator kept for tests/integrations that need a
+ * simple monthly roll-up without specifying a granularity. Sums the requested
+ * value keys, derives a weighted CTR from clicks/impressions when present and
+ * uses an arithmetic-mean position so callers don't have to provide weights.
+ */
+function _aggregateByMonth(series, valueKeys = ['clicks', 'impressions']) {
+  const buckets = new Map();
+  for (const row of Array.isArray(series) ? series : []) {
+    const date = String(row && row.date ? row.date : '').slice(0, 10);
+    if (!date) continue;
+    const bucket = _bucketOf(date, 'month');
+    if (!buckets.has(bucket)) {
+      const init = { date: bucket, _posSum: 0, _posCount: 0 };
+      for (const key of valueKeys) init[key] = 0;
+      buckets.set(bucket, init);
+    }
+    const item = buckets.get(bucket);
+    for (const key of valueKeys) {
+      if (typeof row[key] === 'number') item[key] += row[key];
+    }
+    if (typeof row.position === 'number' && row.position > 0) {
+      item._posSum += row.position;
+      item._posCount += 1;
+    }
+  }
+  return Array.from(buckets.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((item) => {
+      const out = { date: item.date };
+      for (const key of valueKeys) out[key] = item[key];
+      const clicks = Number(item.clicks) || 0;
+      const impressions = Number(item.impressions) || 0;
+      out.ctr = impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0;
+      out.position = item._posCount > 0 ? Math.round((item._posSum / item._posCount) * 100) / 100 : null;
+      return out;
+    });
+}
+
 function _annotationFromTask(item, granularity) {
   const date = _isoDate(item.performed_at);
   return {
@@ -135,33 +177,67 @@ function _buildTrafficValue(keysSo, gsc, ywm) {
   };
 }
 
-async function _gscSection(project, from, to, granularity) {
-  if (!project.gsc_connected || !project.gsc_site_url) return { connected: false, series: [], totals: null };
+async function _gscSection(project, from, to, granularity, freshnessMap) {
+  const last_sync_at = freshnessMap?.gsc?.last_successful_sync_at || null;
+  if (!project.gsc_connected || !project.gsc_site_url) {
+    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, last_sync_at };
+  }
   try {
     const data = await gscService.fetchPerformanceSeries(project, { from, to });
+    const series = _aggregateSeries(data.series, granularity);
+    const isPartial = freshnessMap?.gsc?.status === 'partial' || freshnessMap?.gsc?.status === 'gap';
     return {
       connected: true,
-      series: _aggregateSeries(data.series, granularity),
+      status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
+      reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
+      last_sync_at,
+      series,
       totals: data.totals || null,
       range: data.range,
     };
   } catch (err) {
-    return { connected: true, error: err.message || 'gsc_failed', series: [], totals: null };
+    console.error('[reports][gsc] section failed:', err.message);
+    return {
+      connected: true,
+      status: 'error',
+      reason: 'source_failed',
+      error: err.message || 'gsc_failed',
+      last_sync_at,
+      series: [],
+      totals: null,
+    };
   }
 }
 
-async function _ydxSection(project, from, to, granularity) {
-  if (!project.ydx_connected || !project.ydx_site_url) return { connected: false, series: [], totals: null };
+async function _ydxSection(project, from, to, granularity, freshnessMap) {
+  const last_sync_at = freshnessMap?.yandex_webmaster?.last_successful_sync_at || null;
+  if (!project.ydx_connected || !project.ydx_site_url) {
+    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, last_sync_at };
+  }
   try {
     const data = await ydxService.fetchPerformanceSeries(project, { from, to });
+    const series = _aggregateSeries(data.series, granularity);
+    const isPartial = freshnessMap?.yandex_webmaster?.status === 'partial' || freshnessMap?.yandex_webmaster?.status === 'gap';
     return {
       connected: true,
-      series: _aggregateSeries(data.series, granularity),
+      status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
+      reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
+      last_sync_at,
+      series,
       totals: data.totals || null,
       range: data.range,
     };
   } catch (err) {
-    return { connected: true, error: err.message || 'ydx_failed', series: [], totals: null };
+    console.error('[reports][ydx] section failed:', err.message);
+    return {
+      connected: true,
+      status: 'error',
+      reason: 'source_failed',
+      error: err.message || 'ydx_failed',
+      last_sync_at,
+      series: [],
+      totals: null,
+    };
   }
 }
 
@@ -205,8 +281,11 @@ async function _loadEngineData(domain, from, to, searchEngine) {
   };
 }
 
-async function _keysSoSection(project, from, to) {
-  if (!project.keys_so_domain) return { connected: false, yandex: { series: [], current: null }, google: { series: [], current: null } };
+async function _keysSoSection(project, from, to, freshnessMap) {
+  const last_sync_at = freshnessMap?.keys_so?.last_successful_sync_at || null;
+  if (!project.keys_so_domain) {
+    return { connected: false, status: 'empty', reason: 'not_connected', yandex: { series: [], current: null }, google: { series: [], current: null }, series: [], current: null, last_sync_at };
+  }
   try {
     // Check if cache is empty; if so, sync (which fetches both Yandex and Google).
     const ydxCurrent = await loadCurrent(project.keys_so_domain, 'yandex');
@@ -222,16 +301,31 @@ async function _keysSoSection(project, from, to) {
       _loadEngineData(project.keys_so_domain, from, to, 'google'),
     ]);
 
+    const hasRows = (yandex.series?.length || 0) + (google.series?.length || 0) > 0;
     // Backwards-compatible: top-level series/current point to Yandex (default)
     return {
       connected: true,
+      status: hasRows ? 'ready' : 'empty',
+      reason: hasRows ? null : 'no_rows',
+      last_sync_at,
       series: yandex.series,
       current: yandex.current,
       yandex,
       google,
     };
   } catch (err) {
-    return { connected: true, error: err.message || 'keys_so_failed', series: [], current: null, yandex: { series: [], current: null }, google: { series: [], current: null } };
+    console.error('[reports][keys_so] section failed:', err.message);
+    return {
+      connected: true,
+      status: 'error',
+      reason: 'source_failed',
+      error: err.message || 'keys_so_failed',
+      last_sync_at,
+      series: [],
+      current: null,
+      yandex: { series: [], current: null },
+      google: { series: [], current: null },
+    };
   }
 }
 
@@ -244,7 +338,7 @@ async function _positionSection(projectId, from, to, granularity) {
     [projectId],
   );
   const linked = rows[0];
-  if (!linked) return { connected: false, series: [], summary: null, quick_wins: [], movers_up: [], movers_down: [], keywords: [] };
+  if (!linked) return { connected: false, status: 'empty', reason: 'not_connected', series: [], summary: null, quick_wins: [], movers_up: [], movers_down: [], keywords: [] };
   const { period } = _periodWindow(from, to);
   const fromTs = `${from}T00:00:00Z`;
   const toTs = `${to}T23:59:59Z`;
@@ -265,8 +359,11 @@ async function _positionSection(projectId, from, to, granularity) {
         delta: item.delta,
         found_url: item.found_url || null,
       }));
+    const hasRows = (series && series.length) || (keywords && keywords.length);
     return {
       connected: true,
+      status: hasRows ? 'ready' : 'empty',
+      reason: hasRows ? null : 'no_rows',
       project: linked,
       series,
       summary,
@@ -276,7 +373,8 @@ async function _positionSection(projectId, from, to, granularity) {
       movers_down: moversDown,
     };
   } catch (err) {
-    return { connected: true, error: err.message || 'position_failed', series: [], summary: null, quick_wins: [], movers_up: [], movers_down: [], keywords: [] };
+    console.error('[reports][position] section failed:', err.message);
+    return { connected: true, status: 'error', reason: 'source_failed', error: err.message || 'position_failed', series: [], summary: null, quick_wins: [], movers_up: [], movers_down: [], keywords: [] };
   }
 }
 
@@ -287,14 +385,20 @@ async function _tasksSection(projectId, from, to, granularity, manualBlocks, opt
       tasksLog.listForPeriod(projectId, from, to, { includeHidden }),
       tasksLog.summarizeByType(projectId, from, to),
     ]);
+    const hasRows = items && items.length;
     return {
       ...summary,
+      status: hasRows ? 'ready' : 'empty',
+      reason: hasRows ? null : 'no_rows',
       items,
       blocks: _groupTasks(items, manualBlocks),
       annotations: items.slice(0, 12).map((item) => _annotationFromTask(item, granularity)),
     };
   } catch (err) {
+    console.error('[reports][tasks] section failed:', err.message);
     return {
+      status: 'error',
+      reason: 'source_failed',
       error: err.message || 'tasks_failed',
       total_generated: 0,
       by_type: {},
@@ -317,11 +421,40 @@ function _buildForecast(gsc, keysSo) {
 async function _modulesSection(project, from, to, config) {
   const moduleConfig = (config && config.modules) || {};
   // Полностью отключить блок модулей можно через config.modules.enabled = false.
-  if (moduleConfig.enabled === false) return { enabled: [], disabled: true };
+  if (moduleConfig.enabled === false) {
+    return { enabled: [], disabled: true, status: 'empty', reason: 'disabled' };
+  }
+  if (!project.gsc_connected || !project.gsc_site_url) {
+    // Без GSC ключевые модули (Striking Distance / CTR Gap / Content Health)
+    // не имеют данных — явно сигналим, а не прячем тихо.
+    return { enabled: [], status: 'empty', reason: 'not_connected' };
+  }
   try {
-    return await buildModulesForProject(project, { from, to, config: moduleConfig });
+    const modules = await buildModulesForProject(project, { from, to, config: moduleConfig });
+    const hasAny = !!(modules.striking_distance?.items?.length
+      || modules.ctr_gap?.items?.length
+      || modules.content_health?.items?.length
+      || modules.off_page?.items?.length
+      || modules.tech_audit?.items?.length);
+    return {
+      ...modules,
+      status: hasAny ? 'ready' : 'empty',
+      reason: hasAny ? null : 'no_rows',
+    };
   } catch (err) {
-    return { enabled: [], error: err.message || 'modules_failed' };
+    console.error('[reports][modules] section failed:', err.message);
+    return { enabled: [], status: 'error', reason: 'source_failed', error: err.message || 'modules_failed' };
+  }
+}
+
+async function _loadFreshnessMap(projectId) {
+  try {
+    const arr = await freshnessService.getProjectFreshness(projectId);
+    const map = {};
+    for (const item of arr || []) map[item.source] = item;
+    return map;
+  } catch (_) {
+    return {};
   }
 }
 
@@ -333,18 +466,39 @@ async function aggregateForDraft(draft, opts = {}) {
   const from = _isoDate(opts.from || draft.date_from);
   const to = _isoDate(opts.to || draft.date_to);
   const granularity = _granularity(opts.granularity || draft.config?.granularity || 'month');
+  const viewMode = opts.viewMode || 'analyst';
+
+  const freshnessMap = await _loadFreshnessMap(project.id);
 
   const [gsc, ywm, keysSo, position, tasks] = await Promise.all([
-    _gscSection(project, from, to, granularity),
-    _ydxSection(project, from, to, granularity),
-    _keysSoSection(project, from, to),
+    _gscSection(project, from, to, granularity, freshnessMap),
+    _ydxSection(project, from, to, granularity, freshnessMap),
+    _keysSoSection(project, from, to, freshnessMap),
     _positionSection(project.id, from, to, granularity),
     _tasksSection(project.id, from, to, granularity, draft.tasks_blocks, { includeHidden: opts.includeHidden }),
   ]);
 
   const modules = await _modulesSection(project, from, to, draft.config);
 
-  return {
+  // Сводный статус интеграций — нужен для UI-баннеров и для PDF footnote
+  // (если какие-то секции в partial/error, в экспорт добавляется сноска).
+  const integrations = [
+    { id: 'gsc', label: 'Google Search Console', status: gsc.status, reason: gsc.reason, last_sync_at: gsc.last_sync_at || null },
+    { id: 'yandex_webmaster', label: 'Яндекс.Вебмастер', status: ywm.status, reason: ywm.reason, last_sync_at: ywm.last_sync_at || null },
+    { id: 'keys_so', label: 'Keys.so', status: keysSo.status, reason: keysSo.reason, last_sync_at: keysSo.last_sync_at || null },
+    { id: 'position', label: 'Съём позиций', status: position.status, reason: position.reason, last_sync_at: null },
+    { id: 'tasks', label: 'Работы', status: tasks.status, reason: tasks.reason, last_sync_at: null },
+    { id: 'modules', label: 'Модули', status: modules.status, reason: modules.reason, last_sync_at: null },
+  ];
+  const completeness = {
+    has_partial: integrations.some((i) => i.status === 'partial'),
+    has_error: integrations.some((i) => i.status === 'error'),
+    has_empty: integrations.some((i) => i.status === 'empty'),
+    partial_sources: integrations.filter((i) => i.status === 'partial').map((i) => i.label),
+    failed_sources: integrations.filter((i) => i.status === 'error').map((i) => i.label),
+  };
+
+  const payload = {
     project: {
       id: project.id,
       name: project.name,
@@ -360,14 +514,31 @@ async function aggregateForDraft(draft, opts = {}) {
     position,
     tasks,
     modules,
+    integrations,
+    completeness,
+    view_mode: viewMode,
     traffic_value: _buildTrafficValue(keysSo, gsc, ywm),
     forecast: _buildForecast(gsc, keysSo),
     generated_at: new Date().toISOString(),
   };
+
+  // Sprint 2: client-first headline (главный KPI, что изменилось, top-3
+  // достижения/риска). Чисто детерминированный блок над уже собранным
+  // payload — не зависит от LLM. Безопасно для client mode по построению
+  // (не содержит технических полей).
+  try {
+    payload.headline = buildHeadline(payload, draft?.summary || draft?.llm_summary || null);
+  } catch (err) {
+    console.error('[reports][headline] build failed:', err.message);
+    payload.headline = null;
+  }
+
+  return sanitizeData(payload, viewMode);
 }
 
 module.exports = {
   aggregateForDraft,
   _aggregateSeries,
+  _aggregateByMonth,
   _isoDate,
 };

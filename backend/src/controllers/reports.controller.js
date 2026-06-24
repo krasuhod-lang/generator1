@@ -37,6 +37,8 @@ const { generateSummary } = require('../services/reports/aiAnalyst');
 const tasksLog = require('../services/reports/tasksAutoLog');
 const { buildReportDocx } = require('../services/reports/docxExporter');
 const { buildReportPdf } = require('../services/reports/pdfExporter');
+const { resolveViewMode } = require('../services/projects/viewMode');
+const { sanitizeDraft, sanitizeData, sanitizeSummary } = require('../services/reports/viewModeSanitizer');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -183,7 +185,8 @@ async function createDraft(req, res) {
 async function getDraft(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
-  res.json({ draft: _serializeDraft(draft) });
+  const mode = resolveViewMode(req);
+  res.json({ draft: sanitizeDraft(_serializeDraft(draft), mode), view_mode: mode });
 }
 
 async function updateDraft(req, res) {
@@ -244,12 +247,14 @@ async function getDraftData(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
+    const viewMode = resolveViewMode(req);
     const data = await aggregateForDraft(draft, {
       from: req.query.from,
       to: req.query.to,
       granularity: req.query.granularity,
+      viewMode,
     });
-    res.json({ data });
+    res.json({ data, view_mode: viewMode });
   } catch (err) {
     console.error('[reports] aggregate failed:', err.message);
     return _bad(res, 500, err.message || 'aggregate_failed');
@@ -375,6 +380,11 @@ async function publishDraft(req, res) {
   if (!draft) return _bad(res, 404, 'Черновик не найден');
 
   const mode = ['snapshot', 'live'].includes(req.body?.mode) ? req.body.mode : 'live';
+  // 085_shared_reports_view_mode: настоящий analyst|client режим публичной
+  // ссылки. Дефолт 'client' — обратная совместимость; чтобы дать ссылку
+  // в полном analyst-режиме (для команды/руководства), publishShared
+  // принимает view_mode в теле запроса.
+  const viewMode = req.body?.view_mode === 'analyst' ? 'analyst' : 'client';
   const password = req.body?.password ? String(req.body.password) : null;
   if (password && (password.length < 4 || password.length > 8 || !/^\d+$/.test(password))) {
     return _bad(res, 400, 'PIN должен быть из 4–8 цифр');
@@ -396,6 +406,7 @@ async function publishDraft(req, res) {
         from: req.query?.from,
         to: req.query?.to,
         granularity: req.query?.granularity,
+        viewMode,
       });
       snapshotData = JSON.stringify({
         data,
@@ -413,10 +424,10 @@ async function publishDraft(req, res) {
 
   const { rows } = await db.query(
     `INSERT INTO shared_reports
-       (draft_id, user_id, uuid, mode, snapshot_data, expires_at, password_hash)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
-     RETURNING id, uuid, mode, expires_at, is_active, created_at`,
-    [draft.id, req.user.id, uuid, mode, snapshotData, expiresAt, passwordHash],
+       (draft_id, user_id, uuid, mode, view_mode, snapshot_data, expires_at, password_hash)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+     RETURNING id, uuid, mode, view_mode, expires_at, is_active, created_at`,
+    [draft.id, req.user.id, uuid, mode, viewMode, snapshotData, expiresAt, passwordHash],
   );
 
   await db.query(
@@ -433,7 +444,7 @@ async function publishDraft(req, res) {
 
 async function listShared(req, res) {
   const { rows } = await db.query(
-    `SELECT s.id, s.uuid, s.mode, s.expires_at, s.is_active,
+    `SELECT s.id, s.uuid, s.mode, s.view_mode, s.expires_at, s.is_active,
             s.view_count, s.last_viewed_at, s.created_at,
             (s.password_hash IS NOT NULL) AS has_password,
             d.id AS draft_id, d.title AS draft_title,
@@ -488,6 +499,13 @@ async function updateSharedSettings(req, res) {
     if (!['snapshot', 'live'].includes(req.body.mode)) return _bad(res, 400, 'invalid mode');
     sets.push(`mode = $${i++}`);
     vals.push(req.body.mode);
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'view_mode')) {
+    // 085_shared_reports_view_mode: владелец может переключать analyst|client
+    // у существующей ссылки без её пересоздания.
+    if (!['analyst', 'client'].includes(req.body.view_mode)) return _bad(res, 400, 'invalid view_mode');
+    sets.push(`view_mode = $${i++}`);
+    vals.push(req.body.view_mode);
   }
   if (Object.prototype.hasOwnProperty.call(req.body, 'is_active')) {
     sets.push(`is_active = $${i++}`);
@@ -581,9 +599,23 @@ async function publicGet(req, res) {
     return res.status(403).json({ error: 'password_required' });
   }
 
+  // 085_shared_reports_view_mode: режим определяется владельцем при
+  // публикации, сохраняется в shared_reports.view_mode и применяется здесь.
+  // Заголовок X-Client-Mode из запроса игнорируется — без auth публичный
+  // роут не может эскалировать до analyst, если ссылка не client/analyst
+  // по решению владельца.
+  const viewMode = sr.view_mode === 'analyst' ? 'analyst' : 'client';
+
   let payload;
   if (sr.mode === 'snapshot' && sr.snapshot_data) {
-    payload = sr.snapshot_data;
+    // Snapshot был сохранён в analyst-форме на момент публикации; при отдаче
+    // публичному клиенту прогоняем через sanitizer ещё раз.
+    const snap = sr.snapshot_data || {};
+    payload = {
+      ...snap,
+      data: sanitizeData(snap.data, viewMode),
+      summary: sanitizeSummary(snap.summary || {}, viewMode),
+    };
   } else {
     // live: пересобрать данные.
     const draft = {
@@ -592,10 +624,10 @@ async function publicGet(req, res) {
       date_from: sr.date_from,
       date_to: sr.date_to,
     };
-    const data = await aggregateForDraft(draft);
+    const data = await aggregateForDraft(draft, { viewMode });
     payload = {
       data,
-      summary: _summaryPayloadFromDraft(sr),
+      summary: sanitizeSummary(_summaryPayloadFromDraft(sr), viewMode),
       tasks_blocks: sr.tasks_blocks || [],
       config: sr.config || {},
       title: sr.draft_title,
@@ -614,6 +646,7 @@ async function publicGet(req, res) {
   res.json({
     uuid: sr.uuid,
     mode: sr.mode,
+    view_mode: viewMode,
     title: sr.draft_title,
     period: _periodLabel(req.query?.from || sr.date_from, req.query?.to || sr.date_to),
     project: {
@@ -630,10 +663,12 @@ async function exportDraftDocx(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
+    const viewMode = resolveViewMode(req);
     const data = await aggregateForDraft(draft, {
       from: req.body?.from,
       to: req.body?.to,
       granularity: req.body?.granularity,
+      viewMode,
     });
     const buffer = await buildReportDocx({
       title: draft.title,
@@ -643,9 +678,10 @@ async function exportDraftDocx(req, res) {
         url: draft.project_url,
       },
       data,
-      summary: _summaryPayloadFromDraft(draft),
+      summary: sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode),
       tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
       chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.docx"`);
@@ -659,18 +695,21 @@ async function exportDraftPdf(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
+    const viewMode = resolveViewMode(req);
     const data = await aggregateForDraft(draft, {
       from: req.body?.from,
       to: req.body?.to,
       granularity: req.body?.granularity,
+      viewMode,
     });
     const buffer = await buildReportPdf({
       title: draft.title,
       period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
       project: { name: draft.project_name, url: draft.project_url },
       data,
-      summary: _summaryPayloadFromDraft(draft),
+      summary: sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode),
       tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((draft.title || 'report').slice(0, 80))}.pdf"`);
@@ -703,8 +742,11 @@ async function publicExportDocx(req, res) {
   if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
     return res.status(403).json({ error: 'password_required' });
   }
+  // 085_shared_reports_view_mode: уважаем режим, выбранный владельцем при
+  // публикации. Без auth публичный роут не может эскалировать.
+  const viewMode = sr.view_mode === 'analyst' ? 'analyst' : 'client';
   try {
-    const data = sr.mode === 'snapshot' && sr.snapshot_data
+    const rawData = sr.mode === 'snapshot' && sr.snapshot_data
       ? sr.snapshot_data.data
       : await aggregateForDraft({
         id: sr.draft_id,
@@ -716,10 +758,13 @@ async function publicExportDocx(req, res) {
         from: req.body?.from,
         to: req.body?.to,
         granularity: req.body?.granularity,
+        viewMode,
       });
-    const summary = sr.mode === 'snapshot' && sr.snapshot_data
+    const data = sr.mode === 'snapshot' ? sanitizeData(rawData, viewMode) : rawData;
+    const rawSummary = sr.mode === 'snapshot' && sr.snapshot_data
       ? (sr.snapshot_data.summary || {})
       : _summaryPayloadFromDraft(sr);
+    const summary = sanitizeSummary(rawSummary, viewMode);
     const buffer = await buildReportDocx({
       title: sr.draft_title,
       period: _periodLabel(req.body?.from || sr.date_from, req.body?.to || sr.date_to),
@@ -728,6 +773,7 @@ async function publicExportDocx(req, res) {
       summary,
       tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
       chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((sr.draft_title || 'report').slice(0, 80))}.docx"`);
@@ -745,8 +791,10 @@ async function publicExportPdf(req, res) {
   if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
     return res.status(403).json({ error: 'password_required' });
   }
+  // 085_shared_reports_view_mode: режим хранится в shared_reports.view_mode.
+  const viewMode = sr.view_mode === 'analyst' ? 'analyst' : 'client';
   try {
-    const data = sr.mode === 'snapshot' && sr.snapshot_data
+    const rawData = sr.mode === 'snapshot' && sr.snapshot_data
       ? sr.snapshot_data.data
       : await aggregateForDraft({
         id: sr.draft_id,
@@ -758,10 +806,13 @@ async function publicExportPdf(req, res) {
         from: req.body?.from,
         to: req.body?.to,
         granularity: req.body?.granularity,
+        viewMode,
       });
-    const summary = sr.mode === 'snapshot' && sr.snapshot_data
+    const data = sr.mode === 'snapshot' ? sanitizeData(rawData, viewMode) : rawData;
+    const rawSummary = sr.mode === 'snapshot' && sr.snapshot_data
       ? (sr.snapshot_data.summary || {})
       : _summaryPayloadFromDraft(sr);
+    const summary = sanitizeSummary(rawSummary, viewMode);
     const buffer = await buildReportPdf({
       title: sr.draft_title,
       period: _periodLabel(req.body?.from || sr.date_from, req.body?.to || sr.date_to),
@@ -769,6 +820,7 @@ async function publicExportPdf(req, res) {
       data,
       summary,
       tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
+      view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent((sr.draft_title || 'report').slice(0, 80))}.pdf"`);

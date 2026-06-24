@@ -11,11 +11,13 @@ import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ReportRenderer from '../components/reports/ReportRenderer.vue';
 import { useReportsStore } from '../stores/reports.js';
+import { useViewModeStore } from '../stores/viewMode.js';
 import { collectReportChartImages, downloadBlob } from '../utils/reportExport.js';
 
 const route = useRoute();
 const router = useRouter();
 const store = useReportsStore();
+const viewMode = useViewModeStore();
 
 const draft = computed(() => store.current);
 const data = computed(() => store.currentData);
@@ -310,6 +312,7 @@ function _stateOf(section) {
               color_accent: draft.color_accent,
             }"
             mode="live"
+            :view-mode="viewMode.mode"
             :readonly="false"
             @update:tasksBlocks="onTasksBlocksUpdate" />
         </main>

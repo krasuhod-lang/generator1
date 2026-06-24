@@ -102,7 +102,7 @@ async function buildModulesForProject(project, opts = {}) {
     loadBacklinks(project.id),
   ]);
 
-  return assembleModules(
+  const modules = assembleModules(
     {
       queryPageRows,
       volumeByQuery: opts.volumeByQuery || {},
@@ -113,6 +113,101 @@ async function buildModulesForProject(project, opts = {}) {
     },
     { settings, config },
   );
+
+  // Дополнительные поля доступности и client-safe summary (ТЗ §14.1).
+  // data_source: GSC для striking/ctr/content (через query×page),
+  // backlinks/tech_audit — собственные таблицы.
+  const gscAvailable = !!queryPageRows.length;
+  _annotateModule(modules.striking_distance, {
+    dataSource: 'gsc',
+    available: gscAvailable,
+    summarize: _summarizeStrikingDistance,
+  });
+  _annotateModule(modules.ctr_gap, {
+    dataSource: 'gsc',
+    available: gscAvailable,
+    summarize: _summarizeCtrGap,
+  });
+  _annotateModule(modules.content_health, {
+    dataSource: 'gsc+tech_audit',
+    available: gscAvailable || techAudit.length > 0,
+    summarize: _summarizeContentHealth,
+  });
+  _annotateModule(modules.off_page, {
+    dataSource: 'backlinks',
+    available: backlinks.length > 0,
+    summarize: _summarizeOffPage,
+  });
+  _annotateModule(modules.tech_audit, {
+    dataSource: 'tech_audit',
+    available: techAudit.length > 0,
+    summarize: _summarizeTechAudit,
+  });
+
+  return modules;
+}
+
+function _annotateModule(mod, { dataSource, available, summarize }) {
+  if (!mod || typeof mod !== 'object') return;
+  const hasItems = Array.isArray(mod.items) && mod.items.length > 0;
+  let status = 'ready';
+  let reason = null;
+  if (!available) { status = 'empty'; reason = 'not_connected'; }
+  else if (!hasItems) { status = 'empty'; reason = 'no_rows'; }
+  mod.availability_status = status;
+  mod.availability_reason = reason;
+  mod.is_partial = false;
+  mod.data_source = dataSource;
+  mod.last_sync_at = null;
+  mod.client_safe_summary = summarize ? summarize(mod) : '';
+}
+
+// ── client_safe_summary builders ─────────────────────────────────────────
+// Каждый возвращает одно короткое предложение для клиента (без терминов
+// «opportunity_score», «CTR ratio» и т.п.).
+
+function _ru(n) { return Number(n || 0).toLocaleString('ru-RU'); }
+
+function _summarizeStrikingDistance(mod) {
+  const s = mod.summary || {};
+  if (!s.total) return 'На границе ТОП-10 пока нет запросов с потенциалом роста.';
+  const opp = s.total_opportunity_clicks || 0;
+  return `Найдено ${_ru(s.total)} запросов на подходе к ТОП-10` +
+    (opp > 0 ? `, потенциальный прирост — около ${_ru(opp)} кликов в месяц.` : '.');
+}
+
+function _summarizeCtrGap(mod) {
+  const s = mod.summary || {};
+  if (!s.total) return 'Страницы с заниженным CTR не обнаружены.';
+  const lost = s.lost_clicks || 0;
+  return `Найдено ${_ru(s.total)} страниц с просевшим CTR` +
+    (lost > 0 ? ` — мы недополучаем около ${_ru(lost)} кликов.` : '.');
+}
+
+function _summarizeContentHealth(mod) {
+  const s = mod.summary || {};
+  if (!s.total) return 'Сигналов по здоровью контента пока недостаточно.';
+  const need = (s.needs_work || 0) + (s.critical || 0);
+  if (!need) return `Все ${_ru(s.total)} страниц в хорошем состоянии.`;
+  return `${_ru(need)} из ${_ru(s.total)} страниц требуют доработки контента.`;
+}
+
+function _summarizeOffPage(mod) {
+  const s = mod.summary || {};
+  if (!s.total) return 'Ссылочный профиль пока не отслеживается.';
+  const broken = s.broken || 0;
+  if (broken) return `Из ${_ru(s.total)} ссылок ${_ru(broken)} битых — нужно починить.`;
+  return `Ссылочный профиль: ${_ru(s.total)} ссылок с ${_ru(s.unique_donors || 0)} доноров.`;
+}
+
+function _summarizeTechAudit(mod) {
+  const s = mod.summary || {};
+  if (!s.pages) return 'Технический аудит ещё не проведён.';
+  const broken = s.broken || 0;
+  if (broken) return `Из ${_ru(s.pages)} проверенных страниц ${_ru(broken)} отвечают ошибкой — нужно срочно починить.`;
+  const noAltRatio = Number(s.images_no_alt_ratio || 0);
+  if (noAltRatio > 0.3) return `Технические проблемы: у ${Math.round(noAltRatio * 100)}% изображений нет alt-атрибута.`;
+  return `Технических проблем по ${_ru(s.pages)} страницам не выявлено.`;
 }
 
 module.exports = {
@@ -120,4 +215,13 @@ module.exports = {
   loadSettings,
   loadTechAudit,
   loadBacklinks,
+  // exposed for tests
+  _internal: {
+    _annotateModule,
+    _summarizeStrikingDistance,
+    _summarizeCtrGap,
+    _summarizeContentHealth,
+    _summarizeOffPage,
+    _summarizeTechAudit,
+  },
 };

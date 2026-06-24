@@ -5,6 +5,8 @@ import api from '../../api.js';
 import ReportTrendChart from './ReportTrendChart.vue';
 import PositionChart from '../PositionChart.vue';
 import ReportModulesCard from './ReportModulesCard.vue';
+import DataStateWrapper from '../DataStateWrapper.vue';
+import ExecutiveHeadline from './ExecutiveHeadline.vue';
 
 const props = defineProps({
   data:        { type: Object, default: () => ({}) },
@@ -14,11 +16,16 @@ const props = defineProps({
   period:      { type: String, default: '' },
   project:     { type: Object, default: () => ({}) },
   mode:        { type: String, default: 'live' },
+  // analyst|client — режим отображения (берётся из useViewModeStore родителем).
+  // Не путать с `mode` (snapshot|live).
+  viewMode:    { type: String, default: 'analyst' },
   capturedAt:  { type: String, default: null },
   readonly:    { type: Boolean, default: true },
   loading:     { type: Boolean, default: false },
 });
 const emit = defineEmits(['update:tasksBlocks']);
+
+const isClient = computed(() => props.viewMode === 'client');
 
 const accent = computed(() => props.project?.color_accent || '#0a84ff');
 const accentBg = computed(() => `${accent.value}15`);
@@ -68,6 +75,16 @@ function scrollTo(id) {
   const el = document.getElementById(`report-${id}`);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+
+// Глобальная completeness-предупреждалка (бэкенд складывает data.completeness/integrations).
+const completenessBanner = computed(() => {
+  const c = props.data?.completeness;
+  if (!c) return null;
+  const partial = Array.isArray(c.partial_sources) ? c.partial_sources : [];
+  const failed  = Array.isArray(c.failed_sources)  ? c.failed_sources  : [];
+  if (!partial.length && !failed.length) return null;
+  return { partial, failed, level: failed.length ? 'error' : 'partial' };
+});
 
 const gscChart = computed(() => {
   const series = props.data?.gsc?.series || [];
@@ -395,6 +412,30 @@ function formatAbsDelta(d) {
               class="nav-link" @click="scrollTo(item.id)">{{ item.label }}</button>
     </nav>
 
+    <!-- Глобальная completeness-плашка: видно сразу, что отчёт неполный -->
+    <div v-if="completenessBanner"
+         class="completeness-banner"
+         :class="`completeness-banner--${completenessBanner.level}`"
+         role="status">
+      <span aria-hidden="true">{{ completenessBanner.level === 'error' ? '⚠' : 'ⓘ' }}</span>
+      <span>
+        <strong v-if="completenessBanner.level === 'error'">Часть источников недоступна.</strong>
+        <strong v-else>Отчёт собран по неполным данным.</strong>
+        <template v-if="completenessBanner.failed.length">
+          Не удалось получить: {{ completenessBanner.failed.join(', ') }}.
+        </template>
+        <template v-if="completenessBanner.partial.length">
+          Неполные данные: {{ completenessBanner.partial.join(', ') }}.
+        </template>
+      </span>
+    </div>
+
+    <!-- Sprint 2: Executive Headline (client-first). Источник — data.headline,
+         собирается в backend/src/services/reports/headlineBuilder.js. -->
+    <ExecutiveHeadline :headline="data?.headline"
+                       :view-mode="viewMode"
+                       :accent="accent" />
+
     <section v-if="summary?.executive_summary" id="report-ai-analysis" class="rblk">
       <h2>Executive Summary</h2>
       <p class="summary-text">{{ summary.executive_summary }}</p>
@@ -566,7 +607,7 @@ function formatAbsDelta(d) {
       </ol>
     </section>
 
-    <ReportModulesCard :modules="data?.modules || {}" />
+    <ReportModulesCard :modules="data?.modules || {}" :view-mode="viewMode" />
 
     <section id="report-tasks" class="rblk">
       <div class="tasks-head">
@@ -625,6 +666,25 @@ function formatAbsDelta(d) {
 </template>
 
 <style scoped>
+.completeness-banner {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding: 0.65rem 0.9rem;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.completeness-banner--partial {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fbbf24;
+}
+.completeness-banner--error {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
 .report-renderer {
   display: flex;
   flex-direction: column;
