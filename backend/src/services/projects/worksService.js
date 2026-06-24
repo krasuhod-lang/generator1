@@ -22,11 +22,12 @@ const DEFAULT_STATUS = 'done';
 const ALL_FIELDS = Object.freeze([
   'id', 'project_id', 'performed_at', 'type', 'status',
   'title', 'description', 'client_summary', 'impact', 'links',
+  'client_visible',
   'created_at', 'updated_at',
 ]);
 
 // Технические поля, которые НЕ показываются клиенту (PR-2 view-mode принцип).
-const CLIENT_HIDDEN_FIELDS = Object.freeze(['description', 'impact']);
+const CLIENT_HIDDEN_FIELDS = Object.freeze(['description', 'impact', 'client_visible']);
 
 function _isValidStatus(s) {
   return VALID_STATUSES.includes(s);
@@ -88,6 +89,10 @@ async function listWorks(projectId, opts = {}) {
   }
   if (mode === 'client') {
     wheres.push(`status <> 'planned'`);
+    // 083_works_client_visible: клиент видит только записи, явно
+    // помеченные как видимые. Дефолт колонки TRUE, поэтому существующие
+    // работы продолжают показываться без миграции данных.
+    wheres.push(`client_visible IS TRUE`);
   }
   const { rows } = await db.query(
     `SELECT ${ALL_FIELDS.join(', ')}
@@ -120,12 +125,15 @@ async function createWork(projectId, input = {}, opts = {}) {
   const clientSummary = input.client_summary ? String(input.client_summary) : null;
   const impact = input.impact && typeof input.impact === 'object' ? input.impact : null;
   const links = Array.isArray(input.links) ? input.links : null;
+  // 083_works_client_visible: дефолт TRUE — обратная совместимость; явный
+  // false возможен только когда специалист сознательно скрывает работу.
+  const clientVisible = input.client_visible === false ? false : true;
   const createdBy = opts.userId || null;
 
   const { rows } = await db.query(
     `INSERT INTO project_works
-       (project_id, performed_at, type, status, title, description, client_summary, impact, links, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10)
+       (project_id, performed_at, type, status, title, description, client_summary, impact, links, client_visible, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11)
      RETURNING ${ALL_FIELDS.join(', ')}`,
     [
       projectId,
@@ -137,6 +145,7 @@ async function createWork(projectId, input = {}, opts = {}) {
       clientSummary,
       impact ? JSON.stringify(impact) : null,
       links ? JSON.stringify(links) : null,
+      clientVisible,
       createdBy,
     ],
   );
@@ -167,6 +176,7 @@ async function updateWork(projectId, workId, patch = {}) {
     patch.impact && typeof patch.impact === 'object' ? JSON.stringify(patch.impact) : null);
   if (patch.links !== undefined)          push('links::jsonb',
     Array.isArray(patch.links) ? JSON.stringify(patch.links) : null);
+  if (patch.client_visible !== undefined) push('client_visible', patch.client_visible === false ? false : true);
 
   if (!sets.length) {
     // Ничего не меняли — вернём текущую запись для идемпотентности.

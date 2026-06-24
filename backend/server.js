@@ -1575,6 +1575,56 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_project_works_project_performed ON project_works (project_id, performed_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_project_works_project_status ON project_works (project_id, status)`);
 
+    // 083_works_client_visible.sql — флаг видимости работы для клиента
+    // (PR-3 Sprint 3 эпика reports-analytics-client). Дефолт TRUE.
+    await db.query(`ALTER TABLE project_works ADD COLUMN IF NOT EXISTS client_visible BOOLEAN NOT NULL DEFAULT TRUE`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_project_works_client_visible
+                      ON project_works (project_id, performed_at DESC)
+                      WHERE client_visible = TRUE`);
+
+    // 084_report_exports.sql — журнал экспортов отчётов (PDF/DOCX/print)
+    // с разбивкой по viewer_mode для аудита client/analyst режима.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS report_exports (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        draft_id      UUID NOT NULL REFERENCES report_drafts(id) ON DELETE CASCADE,
+        user_id       UUID REFERENCES users(id) ON DELETE SET NULL,
+        shared_id     UUID REFERENCES shared_reports(id) ON DELETE SET NULL,
+        viewer_mode   VARCHAR(16) NOT NULL DEFAULT 'analyst',
+        format        VARCHAR(16) NOT NULL,
+        status        VARCHAR(16) NOT NULL DEFAULT 'ready',
+        file_url      TEXT,
+        size_bytes    BIGINT,
+        duration_ms   INTEGER,
+        error         TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT chk_report_exports_viewer_mode CHECK (viewer_mode IN ('analyst','client')),
+        CONSTRAINT chk_report_exports_format      CHECK (format IN ('pdf','docx','print')),
+        CONSTRAINT chk_report_exports_status      CHECK (status IN ('pending','ready','failed'))
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_report_exports_draft ON report_exports (draft_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_report_exports_user ON report_exports (user_id, created_at DESC) WHERE user_id IS NOT NULL`);
+
+    // 085_shared_reports_view_mode.sql — настоящий analyst|client режим
+    // публичных ссылок (рядом с уже существующей shared_reports.mode,
+    // которая означает snapshot|live). Дефолт 'client'.
+    await db.query(`ALTER TABLE shared_reports ADD COLUMN IF NOT EXISTS view_mode VARCHAR(16) NOT NULL DEFAULT 'client'`);
+    try {
+      await db.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_shared_reports_view_mode') THEN
+            ALTER TABLE shared_reports
+              ADD CONSTRAINT chk_shared_reports_view_mode
+              CHECK (view_mode IN ('analyst','client'));
+          END IF;
+        END$$;
+      `);
+    } catch (e) {
+      console.warn('[ensureSchema] shared_reports view_mode constraint skipped:', e.message);
+    }
+
     await db.query(`
       CREATE TABLE IF NOT EXISTS project_page_snapshots (
         id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),

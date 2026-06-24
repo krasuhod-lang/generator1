@@ -380,6 +380,11 @@ async function publishDraft(req, res) {
   if (!draft) return _bad(res, 404, 'Черновик не найден');
 
   const mode = ['snapshot', 'live'].includes(req.body?.mode) ? req.body.mode : 'live';
+  // 085_shared_reports_view_mode: настоящий analyst|client режим публичной
+  // ссылки. Дефолт 'client' — обратная совместимость; чтобы дать ссылку
+  // в полном analyst-режиме (для команды/руководства), publishShared
+  // принимает view_mode в теле запроса.
+  const viewMode = req.body?.view_mode === 'analyst' ? 'analyst' : 'client';
   const password = req.body?.password ? String(req.body.password) : null;
   if (password && (password.length < 4 || password.length > 8 || !/^\d+$/.test(password))) {
     return _bad(res, 400, 'PIN должен быть из 4–8 цифр');
@@ -401,6 +406,7 @@ async function publishDraft(req, res) {
         from: req.query?.from,
         to: req.query?.to,
         granularity: req.query?.granularity,
+        viewMode,
       });
       snapshotData = JSON.stringify({
         data,
@@ -418,10 +424,10 @@ async function publishDraft(req, res) {
 
   const { rows } = await db.query(
     `INSERT INTO shared_reports
-       (draft_id, user_id, uuid, mode, snapshot_data, expires_at, password_hash)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
-     RETURNING id, uuid, mode, expires_at, is_active, created_at`,
-    [draft.id, req.user.id, uuid, mode, snapshotData, expiresAt, passwordHash],
+       (draft_id, user_id, uuid, mode, view_mode, snapshot_data, expires_at, password_hash)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+     RETURNING id, uuid, mode, view_mode, expires_at, is_active, created_at`,
+    [draft.id, req.user.id, uuid, mode, viewMode, snapshotData, expiresAt, passwordHash],
   );
 
   await db.query(
@@ -438,7 +444,7 @@ async function publishDraft(req, res) {
 
 async function listShared(req, res) {
   const { rows } = await db.query(
-    `SELECT s.id, s.uuid, s.mode, s.expires_at, s.is_active,
+    `SELECT s.id, s.uuid, s.mode, s.view_mode, s.expires_at, s.is_active,
             s.view_count, s.last_viewed_at, s.created_at,
             (s.password_hash IS NOT NULL) AS has_password,
             d.id AS draft_id, d.title AS draft_title,
@@ -493,6 +499,13 @@ async function updateSharedSettings(req, res) {
     if (!['snapshot', 'live'].includes(req.body.mode)) return _bad(res, 400, 'invalid mode');
     sets.push(`mode = $${i++}`);
     vals.push(req.body.mode);
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'view_mode')) {
+    // 085_shared_reports_view_mode: владелец может переключать analyst|client
+    // у существующей ссылки без её пересоздания.
+    if (!['analyst', 'client'].includes(req.body.view_mode)) return _bad(res, 400, 'invalid view_mode');
+    sets.push(`view_mode = $${i++}`);
+    vals.push(req.body.view_mode);
   }
   if (Object.prototype.hasOwnProperty.call(req.body, 'is_active')) {
     sets.push(`is_active = $${i++}`);
@@ -586,9 +599,12 @@ async function publicGet(req, res) {
     return res.status(403).json({ error: 'password_required' });
   }
 
-  // Публичная ссылка — всегда client mode (без auth нельзя эскалировать
-  // до analyst). См. ТЗ §4.1, §1.3 PR-1.
-  const viewMode = 'client';
+  // 085_shared_reports_view_mode: режим определяется владельцем при
+  // публикации, сохраняется в shared_reports.view_mode и применяется здесь.
+  // Заголовок X-Client-Mode из запроса игнорируется — без auth публичный
+  // роут не может эскалировать до analyst, если ссылка не client/analyst
+  // по решению владельца.
+  const viewMode = sr.view_mode === 'analyst' ? 'analyst' : 'client';
 
   let payload;
   if (sr.mode === 'snapshot' && sr.snapshot_data) {
@@ -726,7 +742,9 @@ async function publicExportDocx(req, res) {
   if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
     return res.status(403).json({ error: 'password_required' });
   }
-  const viewMode = 'client';
+  // 085_shared_reports_view_mode: уважаем режим, выбранный владельцем при
+  // публикации. Без auth публичный роут не может эскалировать.
+  const viewMode = sr.view_mode === 'analyst' ? 'analyst' : 'client';
   try {
     const rawData = sr.mode === 'snapshot' && sr.snapshot_data
       ? sr.snapshot_data.data
@@ -773,7 +791,8 @@ async function publicExportPdf(req, res) {
   if (sr.password_hash && !_checkPinCookie(req, sr.id)) {
     return res.status(403).json({ error: 'password_required' });
   }
-  const viewMode = 'client';
+  // 085_shared_reports_view_mode: режим хранится в shared_reports.view_mode.
+  const viewMode = sr.view_mode === 'analyst' ? 'analyst' : 'client';
   try {
     const rawData = sr.mode === 'snapshot' && sr.snapshot_data
       ? sr.snapshot_data.data
