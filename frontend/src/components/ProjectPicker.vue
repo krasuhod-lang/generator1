@@ -24,11 +24,7 @@
  */
 import { ref, watch, onMounted, computed } from 'vue';
 import api from '../api.js';
-
-let _cache = null;
-let _cachePromise = null;
-
-export function clearProjectsCache() { _cache = null; _cachePromise = null; }
+import { loadProjectsOptions } from '../utils/projectsCache.js';
 
 const props = defineProps({
   modelValue: { type: [Number, null], default: null },
@@ -43,17 +39,15 @@ const loading = ref(false);
 const error = ref(null);
 
 async function load() {
-  if (_cache) { projects.value = _cache; return; }
-  if (_cachePromise) { projects.value = await _cachePromise; return; }
   loading.value = true;
-  _cachePromise = api.get('/projects/options')
-    .then((r) => {
-      _cache = r.data?.items || [];
-      return _cache;
-    })
-    .catch((e) => { error.value = e?.response?.data?.error || e.message; _cachePromise = null; return []; })
-    .finally(() => { loading.value = false; });
-  projects.value = await _cachePromise;
+  try {
+    projects.value = await loadProjectsOptions();
+  } catch (e) {
+    error.value = e?.response?.data?.error || e.message;
+    projects.value = [];
+  } finally {
+    loading.value = false;
+  }
 }
 
 onMounted(load);
