@@ -486,6 +486,32 @@ async function runPipeline(task, ctx) {
   // Уйдёт в Gemini как нативный systemInstruction (опционально через
   // cachedContents API) для Stage 3 / 5 / 6.
   // См.: backend/src/utils/articleKnowledgeBase.js
+  // ── Подгружаем projectContextBlock из task.project_context_snapshot ─
+  // Если задача привязана к проекту (ТЗ §5/§8) — сериализованный contextResolver
+  // лежит в JSONB-колонке project_context_snapshot (создан в createTask /
+  // resume пайплайна). Рендерим его в текстовый блок и пробрасываем в AKB
+  // отдельной секцией «КОНТЕКСТ ПРОЕКТА», чтобы LLM на всех стадиях знала
+  // бренд/нишу/регион/факты/конкурентов/коммерческий интент проекта.
+  let projectContextBlock = '';
+  try {
+    const snap = task.project_context_snapshot || null;
+    if (snap && typeof snap === 'object') {
+      const { buildProjectContextBlock } = require('../projects/projectContextBlock');
+      projectContextBlock = buildProjectContextBlock(snap, { maxBlockChars: 6000 });
+    } else if (task.project_id && task.user_id) {
+      // Снапшота нет (старая задача / повторный запуск) — фолбэк к
+      // contextResolver на лету. Не падаем, если проект уже удалён.
+      const { buildProjectContext } = require('../projects/contextResolver');
+      const ctx = await buildProjectContext(task.project_id, task.user_id);
+      if (ctx) {
+        const { buildProjectContextBlock } = require('../projects/projectContextBlock');
+        projectContextBlock = buildProjectContextBlock(ctx, { maxBlockChars: 6000 });
+      }
+    }
+  } catch (ctxErr) {
+    log(`ARTICLE_KNOWLEDGE_BASE: контекст проекта пропущен — ${ctxErr.message}`, 'warn');
+  }
+
   try {
     task.__articleKnowledgeBase = buildArticleKnowledgeBase({
       task,
@@ -495,6 +521,7 @@ async function runPipeline(task, ctx) {
       stage1Result,
       knowledgeGraph: stage1Result?.knowledge_graph || null,
       moduleContext:  task.__moduleContext || null,
+      projectContextBlock,
     });
     const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
     const akbTokens = estimateTokens(task.__articleKnowledgeBase);
