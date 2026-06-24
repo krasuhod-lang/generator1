@@ -11,13 +11,11 @@ import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ReportRenderer from '../components/reports/ReportRenderer.vue';
 import { useReportsStore } from '../stores/reports.js';
-import { useViewModeStore } from '../stores/viewMode.js';
 import { collectReportChartImages, downloadBlob } from '../utils/reportExport.js';
 
 const route = useRoute();
 const router = useRouter();
 const store = useReportsStore();
-const viewMode = useViewModeStore();
 
 const draft = computed(() => store.current);
 const data = computed(() => store.currentData);
@@ -32,6 +30,11 @@ const publishError = ref(null);
 const previewRef = ref(null);
 const viewRange = ref({ from: '', to: '', granularity: 'month' });
 const exporting = ref(false);
+// Локальный preview-режим (analyst|client). Глобальный тумблер из шапки
+// убран для /reports/* (см. AppLayout/PremiumLayout). Здесь это per-page
+// переключатель: при смене заново запрашиваем data с X-Client-Mode, чтобы
+// видеть, что увидит клиент по публичной ссылке (с урезанным payload).
+const previewMode = ref('analyst');
 
 let pollTimer = null;
 
@@ -55,11 +58,15 @@ async function load() {
 async function refreshData() {
   if (!route.params.id) return;
   dataLoading.value = true; dataError.value = null;
-  try { await store.fetchData(route.params.id, viewRange.value); }
+  try { await store.fetchData(route.params.id, { ...viewRange.value, viewMode: previewMode.value }); }
   catch (err) {
     dataError.value = err.response?.data?.error || err.message || 'Ошибка загрузки данных';
   } finally { dataLoading.value = false; }
 }
+
+// При переключении preview «глазами клиента» — реально перезапросить data,
+// чтобы backend-санитайзер срезал технические поля.
+watch(previewMode, () => { refreshData(); });
 
 const titleEdit = ref('');
 const dateFromEdit = ref('');
@@ -125,6 +132,30 @@ async function onTasksBlocksUpdate(next) {
   // Локальный апдейт + persist в БД.
   if (store.current) store.current.tasks_blocks = next;
   await store.updateTasksBlocks(route.params.id, next);
+}
+
+// ТЗ §6: ручные правки чисел/строк в отчёте. Сохраняем точечно через
+// PATCH /overrides, после чего перезагружаем data, чтобы applyOverrides на
+// бэке отрисовал значение с учётом всех зависимых полей (например,
+// дельты). Optimistic-обновление data делать не пытаемся — overrides могут
+// влиять на агрегаты.
+async function onOverrideUpdate(path, value) {
+  try {
+    await store.patchOverrides(route.params.id, { [path]: value });
+    await store.fetchDraft(route.params.id);
+    await store.fetchData(route.params.id, { ...viewRange.value, viewMode: previewMode.value });
+  } catch (e) {
+    console.error('[reports] override update failed:', e);
+  }
+}
+async function onOverrideReset(path) {
+  try {
+    await store.patchOverrides(route.params.id, { [path]: null });
+    await store.fetchDraft(route.params.id);
+    await store.fetchData(route.params.id, { ...viewRange.value, viewMode: previewMode.value });
+  } catch (e) {
+    console.error('[reports] override reset failed:', e);
+  }
 }
 
 async function publish() {
@@ -281,6 +312,20 @@ function _stateOf(section) {
 
           <div class="rep-card">
             <h3>Публикация</h3>
+            <div class="preview-toggle" role="group" aria-label="Превью отчёта">
+              <button type="button" class="seg-btn"
+                      :class="{ active: previewMode === 'analyst' }"
+                      @click="previewMode = 'analyst'">👨‍💻 Аналитик</button>
+              <button type="button" class="seg-btn"
+                      :class="{ active: previewMode === 'client' }"
+                      @click="previewMode = 'client'">🔍 Глазами клиента</button>
+            </div>
+            <p class="src-hint">
+              Превью «глазами клиента» — то, что увидит получатель публичной
+              ссылки в режиме <b>client</b>: без технических полей и подробных
+              таблиц. На что реально опубликуется ссылка — задаётся в модалке
+              «Опубликовать».
+            </p>
             <button class="btn btn-primary" @click="publishOpen = true">Опубликовать</button>
             <p v-if="published?.public_url" class="src-hint">
               <a :href="published.public_url" target="_blank">{{ published.public_url }}</a>
@@ -312,9 +357,12 @@ function _stateOf(section) {
               color_accent: draft.color_accent,
             }"
             mode="live"
-            :view-mode="viewMode.mode"
+            :view-mode="previewMode"
             :readonly="false"
-            @update:tasksBlocks="onTasksBlocksUpdate" />
+            :overrides-meta="draft.overrides_meta || {}"
+            @update:tasksBlocks="onTasksBlocksUpdate"
+            @override:update="onOverrideUpdate"
+            @override:reset="onOverrideReset" />
         </main>
       </div>
 
@@ -393,6 +441,7 @@ function _stateOf(section) {
 .rep-card input:focus, .rep-card select:focus { outline: none; border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.15); }
 .sticky-card { position: sticky; top: 0; z-index: 1; }
 .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.preview-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
 .seg-btn {
   border: 1px solid rgba(60,60,67,0.14);
   background: #fff;

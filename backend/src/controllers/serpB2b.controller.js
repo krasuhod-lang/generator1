@@ -14,6 +14,7 @@ const db = require('../config/db');
 const { processSerpB2bTask } = require('../services/serpB2b/pipeline');
 const { buildXlsx } = require('../services/serpB2b/xlsxExporter');
 const { withUserSlot } = require('../utils/perUserConcurrency');
+const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 
 const MAX_QUERY_LEN = 200;
 const MIN_DEPTH = 1;
@@ -84,14 +85,16 @@ async function createSerpB2bTask(req, res, next) {
     }
 
     const inputs = { query, search_engine: searchEngine, depth_pages: depthPages, region };
+    // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
+    const projectId = await resolveOwnedProjectId(req.body.project_id, req.user.id);
 
     const { rows } = await db.query(
       `INSERT INTO serp_b2b_tasks
-          (user_id, name, query, search_engine, depth_pages, region, status, inputs)
-       VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7::jsonb)
+          (user_id, name, query, search_engine, depth_pages, region, status, inputs, project_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7::jsonb, $8)
        RETURNING id, name, query, search_engine, depth_pages, region, status,
-                 total_sites, processed_sites, created_at`,
-      [req.user.id, name, query, searchEngine, depthPages, region, JSON.stringify(inputs)],
+                 total_sites, processed_sites, project_id, created_at`,
+      [req.user.id, name, query, searchEngine, depthPages, region, JSON.stringify(inputs), projectId],
     );
     const task = rows[0];
 

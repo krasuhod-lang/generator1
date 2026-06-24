@@ -17,6 +17,7 @@
 const db = require('../config/db');
 const { processForecasterTask } = require('../services/forecaster/forecasterPipeline');
 const { withUserSlot } = require('../utils/perUserConcurrency');
+const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const {
   generateShareToken,
   isValidShareToken,
@@ -124,16 +125,19 @@ async function createForecasterTask(req, res, next) {
     };
 
     const sourceColumns = rows ? { raw_rows: rows } : { raw_csv: csv };
+    // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
+    const projectId = await resolveOwnedProjectId(req.body.project_id, req.user.id);
 
     const { rows: ins } = await db.query(
       `INSERT INTO forecaster_tasks
-         (user_id, name, status, source_filename, options, source_columns)
-       VALUES ($1, $2, 'queued', $3, $4::jsonb, $5::jsonb)
-       RETURNING id, name, status, source_filename, created_at`,
+         (user_id, name, status, source_filename, options, source_columns, project_id)
+       VALUES ($1, $2, 'queued', $3, $4::jsonb, $5::jsonb, $6)
+       RETURNING id, name, status, source_filename, project_id, created_at`,
       [
         req.user.id, name, filename,
         JSON.stringify(options),
         JSON.stringify(sourceColumns),
+        projectId,
       ],
     );
     const task = ins[0];

@@ -11,6 +11,98 @@ const { buildModulesForProject } = require('./reportModulesService');
 const { sanitizeData } = require('./viewModeSanitizer');
 const freshnessService = require('../projects/freshnessService');
 const { buildHeadline } = require('./headlineBuilder');
+const { splitSeriesIntoMonths } = require('../projects/periodResolver');
+const { applyOverrides } = require('./overridesApplier');
+const { classifyQuery, deriveBrandTokens } = require('../projects/commercialIntent');
+
+/**
+ * Метаданные временных рядов для UI/KPI.
+ *
+ * Графики в отчётах **должны** рисовать всю серию, включая текущий неполный
+ * месяц (чтобы клиент видел актуальную динамику), но любые KPI/% роста
+ * считаются ТОЛЬКО по полным месяцам — иначе сравнение «23 дня апреля vs
+ * полный март» даёт ложные минусы (ТЗ §2-3).
+ *
+ * `series_meta` отдаётся в payload вместе с series:
+ *   {
+ *     monthly_periods:     [{ key, from, to, is_complete, is_partial, days,
+ *                             clicks, impressions, ctr, position }],
+ *     last_period_partial: boolean,   // последний месяц в окне неполный
+ *     last_complete_month: 'YYYY-MM', // для подписи «за полные месяцы: …»
+ *     complete_months:     number,    // сколько полных месяцев в окне
+ *   }
+ *
+ * `totals_complete` / `prev_totals_complete` — агрегаты строго по полным
+ * месяцам. KPI/дельты на фронте читают именно их (а series_meta используется
+ * для визуального маркера неполной точки графика).
+ */
+function _seriesMeta(rawSeries) {
+  const monthly = splitSeriesIntoMonths(rawSeries || []);
+  const completes = monthly.filter((m) => m.is_complete);
+  const last = monthly.length ? monthly[monthly.length - 1] : null;
+  return {
+    monthly_periods: monthly,
+    last_period_partial: last ? !!last.is_partial : false,
+    last_complete_month: completes.length ? completes[completes.length - 1].key : null,
+    complete_months: completes.length,
+  };
+}
+
+function _totalsFromMonths(months) {
+  if (!Array.isArray(months) || !months.length) return null;
+  let clicks = 0, impressions = 0, posSum = 0, posDays = 0;
+  for (const m of months) {
+    clicks += Number(m.clicks) || 0;
+    impressions += Number(m.impressions) || 0;
+    if (m.position && m.days) { posSum += m.position * m.days; posDays += m.days; }
+  }
+  return {
+    clicks,
+    impressions,
+    ctr: impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0,
+    position: posDays > 0 ? Math.round((posSum / posDays) * 100) / 100 : null,
+    months_count: months.length,
+  };
+}
+
+/**
+ * Считает totals_complete (полные месяцы из окна) и prev_totals_complete
+ * (предыдущие N полных месяцев перед окном, той же длины) на основе
+ * helper-сервиса (ydx/gsc/projects). Если данных меньше двух полных месяцев
+ * (или предыдущие месяцы недоступны) — возвращает только totals_complete.
+ */
+async function _completePeriodTotals(rawSeries, fetcher) {
+  const meta = _seriesMeta(rawSeries);
+  const completes = meta.monthly_periods.filter((m) => m.is_complete);
+  if (!completes.length) {
+    return { totals_complete: null, prev_totals_complete: null, meta };
+  }
+  const totals_complete = _totalsFromMonths(completes);
+  let prev_totals_complete = null;
+  if (typeof fetcher === 'function') {
+    try {
+      const firstMonth = completes[0];
+      // Окно для prev: ровно N месяцев, заканчивающихся за день до начала
+      // первого полного месяца текущего окна.
+      const n = completes.length;
+      const prevTo = new Date(`${firstMonth.from}T00:00:00Z`);
+      prevTo.setUTCDate(prevTo.getUTCDate() - 1);
+      const prevFrom = new Date(prevTo);
+      prevFrom.setUTCMonth(prevFrom.getUTCMonth() - (n - 1));
+      prevFrom.setUTCDate(1);
+      const fmt = (d) => d.toISOString().slice(0, 10);
+      const prevRaw = await fetcher(fmt(prevFrom), fmt(prevTo));
+      if (Array.isArray(prevRaw) && prevRaw.length) {
+        const prevMonths = splitSeriesIntoMonths(prevRaw).filter((m) => m.is_complete);
+        prev_totals_complete = _totalsFromMonths(prevMonths) || null;
+      }
+    } catch (err) {
+      // Не критично — без prev_totals_complete KPI всё равно покажет totals.
+      console.warn('[reports][periods] prev totals failed:', err.message);
+    }
+  }
+  return { totals_complete, prev_totals_complete, meta };
+}
 
 function _isoDate(value) {
   if (value == null) return '';
@@ -180,19 +272,26 @@ function _buildTrafficValue(keysSo, gsc, ywm) {
 async function _gscSection(project, from, to, granularity, freshnessMap) {
   const last_sync_at = freshnessMap?.gsc?.last_successful_sync_at || null;
   if (!project.gsc_connected || !project.gsc_site_url) {
-    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, last_sync_at };
+    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, totals_complete: null, prev_totals_complete: null, series_meta: null, last_sync_at };
   }
   try {
     const data = await gscService.fetchPerformanceSeries(project, { from, to });
     const series = _aggregateSeries(data.series, granularity);
     const isPartial = freshnessMap?.gsc?.status === 'partial' || freshnessMap?.gsc?.status === 'gap';
+    const completePeriods = await _completePeriodTotals(data.series, async (pFrom, pTo) => {
+      const prev = await gscService.fetchPerformanceSeries(project, { from: pFrom, to: pTo });
+      return prev?.series || [];
+    });
     return {
       connected: true,
       status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
       reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
       series,
+      series_meta: completePeriods.meta,
       totals: data.totals || null,
+      totals_complete: completePeriods.totals_complete,
+      prev_totals_complete: completePeriods.prev_totals_complete,
       range: data.range,
     };
   } catch (err) {
@@ -204,7 +303,10 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
       error: err.message || 'gsc_failed',
       last_sync_at,
       series: [],
+      series_meta: null,
       totals: null,
+      totals_complete: null,
+      prev_totals_complete: null,
     };
   }
 }
@@ -212,19 +314,26 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
 async function _ydxSection(project, from, to, granularity, freshnessMap) {
   const last_sync_at = freshnessMap?.yandex_webmaster?.last_successful_sync_at || null;
   if (!project.ydx_connected || !project.ydx_site_url) {
-    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, last_sync_at };
+    return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, totals_complete: null, prev_totals_complete: null, series_meta: null, last_sync_at };
   }
   try {
     const data = await ydxService.fetchPerformanceSeries(project, { from, to });
     const series = _aggregateSeries(data.series, granularity);
     const isPartial = freshnessMap?.yandex_webmaster?.status === 'partial' || freshnessMap?.yandex_webmaster?.status === 'gap';
+    const completePeriods = await _completePeriodTotals(data.series, async (pFrom, pTo) => {
+      const prev = await ydxService.fetchPerformanceSeries(project, { from: pFrom, to: pTo });
+      return prev?.series || [];
+    });
     return {
       connected: true,
       status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
       reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
       series,
+      series_meta: completePeriods.meta,
       totals: data.totals || null,
+      totals_complete: completePeriods.totals_complete,
+      prev_totals_complete: completePeriods.prev_totals_complete,
       range: data.range,
     };
   } catch (err) {
@@ -236,7 +345,10 @@ async function _ydxSection(project, from, to, granularity, freshnessMap) {
       error: err.message || 'ydx_failed',
       last_sync_at,
       series: [],
+      series_meta: null,
       totals: null,
+      totals_complete: null,
+      prev_totals_complete: null,
     };
   }
 }
@@ -254,6 +366,144 @@ function _mapSeriesRow(r) {
     keywords_total: r.keywords_total,
     adcost: r.adcost != null ? Number(r.adcost) : null,
   };
+}
+
+/**
+ * Срез топ-запросов и топ-страниц проекта за период, разбитый по интенту.
+ *
+ * ТЗ §4: в отчёте по умолчанию показываем коммерческие запросы (transactional,
+ * commercial, investigation) и связанные с ними страницы каталога/услуг.
+ * Информационные запросы выводятся отдельной вкладкой, чтобы клиент видел
+ * именно те данные, которые приносят выручку, а LLM-промпт не «дрейфовал»
+ * в информационный контент.
+ *
+ * Источник данных: gscService.fetchTopDimensions(project, range) — тот же,
+ * что используется в AI-аналитике проектов. Классификация — без сети,
+ * детерминированно через commercialIntent.classifyQuery c brand-токенами,
+ * выведенными из проекта (deriveBrandTokens).
+ *
+ * Страница помечается коммерческой, если ≥50% её кликов приходится на
+ * коммерческие запросы (что соответствует обычной коммерческой посадочной).
+ */
+const TOP_LIMIT = 25;
+const COMMERCIAL_PAGE_THRESHOLD = 0.5;
+
+function _classifyQueries(rows, brandTokens) {
+  return (rows || []).map((row) => {
+    const { intent, branded, commercial } = classifyQuery(row.key || '', { brandTokens });
+    return { ...row, intent, branded, commercial };
+  });
+}
+
+function _splitQueries(rows) {
+  const commercial    = rows.filter((r) => r.commercial);
+  const informational = rows.filter((r) => r.intent === 'informational');
+  const other         = rows.filter((r) => !r.commercial && r.intent !== 'informational');
+  // Сортируем каждое сегмент по убыванию кликов, затем по показам.
+  const sortRows = (a, b) => (b.clicks - a.clicks) || (b.impressions - a.impressions);
+  return {
+    commercial: commercial.sort(sortRows).slice(0, TOP_LIMIT),
+    informational: informational.sort(sortRows).slice(0, TOP_LIMIT),
+    other: other.sort(sortRows).slice(0, TOP_LIMIT),
+  };
+}
+
+function _splitPages(pages, queryPageMap) {
+  // queryPageMap: page -> { commercialClicks, totalClicks }. Для каждого
+  // page-row помечаем intent на основе доли коммерческих кликов.
+  return (pages || []).map((p) => {
+    const stats = queryPageMap.get(p.key) || { commercialClicks: 0, totalClicks: 0 };
+    const commercialShare = stats.totalClicks > 0 ? stats.commercialClicks / stats.totalClicks : null;
+    const isCommercial = commercialShare != null && commercialShare >= COMMERCIAL_PAGE_THRESHOLD;
+    return { ...p, commercial: isCommercial, commercial_share: commercialShare != null ? Math.round(commercialShare * 100) / 100 : null };
+  });
+}
+
+function _summarizeCommercial(queries) {
+  let totalClicks = 0, commercialClicks = 0, totalImpr = 0, commercialImpr = 0;
+  for (const q of queries) {
+    totalClicks    += Number(q.clicks) || 0;
+    totalImpr      += Number(q.impressions) || 0;
+    if (q.commercial) {
+      commercialClicks += Number(q.clicks) || 0;
+      commercialImpr   += Number(q.impressions) || 0;
+    }
+  }
+  const sharePct = totalClicks > 0 ? Math.round((commercialClicks / totalClicks) * 1000) / 10 : null;
+  return {
+    total_clicks: totalClicks,
+    total_impressions: totalImpr,
+    commercial_clicks: commercialClicks,
+    commercial_impressions: commercialImpr,
+    commercial_share_pct: sharePct,
+  };
+}
+
+async function _queriesSection(project, from, to) {
+  if (!project.gsc_connected || !project.gsc_site_url) {
+    return { connected: false, status: 'empty', reason: 'not_connected',
+      top_queries_commercial: [], top_queries_informational: [], top_queries_other: [],
+      top_pages_commercial: [], top_pages_informational: [], summary: null };
+  }
+  try {
+    const [{ topQueries, topPages }, queryPage] = await Promise.all([
+      gscService.fetchTopDimensions(project, { from, to }),
+      // queryPage срез нужен для классификации страниц по доле commercial-кликов.
+      // Если упадёт — fallback: страницы без разбиения по intent.
+      _safeFetchQueryPage(project, from, to),
+    ]);
+    const brandTokens = deriveBrandTokens({ name: project.name, siteUrl: project.gsc_site_url, url: project.url });
+    const classified = _classifyQueries(topQueries, brandTokens);
+    const split = _splitQueries(classified);
+    const summary = _summarizeCommercial(classified);
+
+    // Page → суммарные клики по коммерческим/всем запросам этой страницы.
+    const queryPageMap = new Map();
+    for (const r of queryPage || []) {
+      const { commercial } = classifyQuery(r.query || '', { brandTokens });
+      const stats = queryPageMap.get(r.page) || { commercialClicks: 0, totalClicks: 0 };
+      stats.totalClicks += Number(r.clicks) || 0;
+      if (commercial) stats.commercialClicks += Number(r.clicks) || 0;
+      queryPageMap.set(r.page, stats);
+    }
+    const taggedPages = _splitPages(topPages, queryPageMap);
+    const sortRows = (a, b) => (b.clicks - a.clicks) || (b.impressions - a.impressions);
+    const pagesCommercial    = taggedPages.filter((p) => p.commercial).sort(sortRows).slice(0, TOP_LIMIT);
+    const pagesInformational = taggedPages.filter((p) => p.commercial === false && p.commercial_share != null).sort(sortRows).slice(0, TOP_LIMIT);
+
+    return {
+      connected: true,
+      status: topQueries.length ? 'ready' : 'empty',
+      reason: topQueries.length ? null : 'no_rows',
+      top_queries_commercial: split.commercial,
+      top_queries_informational: split.informational,
+      top_queries_other: split.other,
+      top_pages_commercial: pagesCommercial,
+      top_pages_informational: pagesInformational,
+      summary,
+    };
+  } catch (err) {
+    console.error('[reports][queries] section failed:', err.message);
+    return {
+      connected: true,
+      status: 'error',
+      reason: 'source_failed',
+      error: err.message || 'queries_failed',
+      top_queries_commercial: [], top_queries_informational: [], top_queries_other: [],
+      top_pages_commercial: [], top_pages_informational: [], summary: null,
+    };
+  }
+}
+
+async function _safeFetchQueryPage(project, from, to) {
+  try {
+    if (typeof gscService.fetchQueryPageMatrix === 'function') {
+      return (await gscService.fetchQueryPageMatrix(project, { from, to })) || [];
+    }
+  } catch (err) {
+    console.warn('[reports][queries] queryPage fetch failed:', err.message);
+  }
+  return [];
 }
 
 function _mapCurrent(current) {
@@ -470,12 +720,13 @@ async function aggregateForDraft(draft, opts = {}) {
 
   const freshnessMap = await _loadFreshnessMap(project.id);
 
-  const [gsc, ywm, keysSo, position, tasks] = await Promise.all([
+  const [gsc, ywm, keysSo, position, tasks, queries] = await Promise.all([
     _gscSection(project, from, to, granularity, freshnessMap),
     _ydxSection(project, from, to, granularity, freshnessMap),
     _keysSoSection(project, from, to, freshnessMap),
     _positionSection(project.id, from, to, granularity),
     _tasksSection(project.id, from, to, granularity, draft.tasks_blocks, { includeHidden: opts.includeHidden }),
+    _queriesSection(project, from, to),
   ]);
 
   const modules = await _modulesSection(project, from, to, draft.config);
@@ -489,6 +740,7 @@ async function aggregateForDraft(draft, opts = {}) {
     { id: 'position', label: 'Съём позиций', status: position.status, reason: position.reason, last_sync_at: null },
     { id: 'tasks', label: 'Работы', status: tasks.status, reason: tasks.reason, last_sync_at: null },
     { id: 'modules', label: 'Модули', status: modules.status, reason: modules.reason, last_sync_at: null },
+    { id: 'queries', label: 'Топ-запросы', status: queries.status, reason: queries.reason, last_sync_at: null },
   ];
   const completeness = {
     has_partial: integrations.some((i) => i.status === 'partial'),
@@ -514,6 +766,7 @@ async function aggregateForDraft(draft, opts = {}) {
     position,
     tasks,
     modules,
+    queries,
     integrations,
     completeness,
     view_mode: viewMode,
@@ -533,6 +786,18 @@ async function aggregateForDraft(draft, opts = {}) {
     payload.headline = null;
   }
 
+  // ТЗ §6: ручные правки чисел и AI-блоков. Применяем ПОСЛЕ headline, но
+  // ДО sanitize — sanitize не должен трогать пользовательские значения,
+  // а наоборот, может уронить тех. поля, прокинутые правкой случайно.
+  // overrides сохраняются в draft.overrides (миграция 088).
+  if (draft && draft.overrides && typeof draft.overrides === 'object') {
+    try {
+      applyOverrides(payload, draft.overrides);
+    } catch (err) {
+      console.error('[reports][overrides] apply failed:', err.message);
+    }
+  }
+
   return sanitizeData(payload, viewMode);
 }
 
@@ -541,4 +806,11 @@ module.exports = {
   _aggregateSeries,
   _aggregateByMonth,
   _isoDate,
+  _seriesMeta,
+  _totalsFromMonths,
+  _completePeriodTotals,
+  _classifyQueries,
+  _splitQueries,
+  _splitPages,
+  _summarizeCommercial,
 };

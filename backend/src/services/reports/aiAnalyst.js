@@ -143,7 +143,7 @@ function _buildMetricsDigest(data) {
       query: item.query,
       position: item.position,
     })),
-    modules: _buildModulesDigest(data.modules),
+    modules: _buildModulesDigest(data.modules, data.queries),
   };
 }
 
@@ -151,8 +151,14 @@ function _buildMetricsDigest(data) {
  * Свод сигналов модулей отчёта (ТЗ §5) для AI Executive Summary: сколько точек
  * роста Striking Distance, разрывов CTR, проблемных по Content Health страниц,
  * состояние Off-Page и tech-audit. Возвращает null, если модули недоступны.
+ *
+ * ТЗ §4: striking_distance / ctr_gap топы фильтруем — отдаём LLM только
+ * коммерческие запросы (intent ∈ commercial/transactional/investigation),
+ * чтобы рекомендации не «дрейфовали» в инфо-контент. Если в data.queries
+ * есть классифицированный список — используем его как whitelist по
+ * key/clicks. Если нет — fallback: пропускаем фильтр (старое поведение).
  */
-function _buildModulesDigest(modules) {
+function _buildModulesDigest(modules, queries) {
   if (!modules || modules.disabled || modules.error) return null;
   const ex = modules.executive || {};
   const sd = ex.striking_distance || modules.striking_distance?.summary || {};
@@ -160,9 +166,27 @@ function _buildModulesDigest(modules) {
   const ch = ex.content_health || modules.content_health?.summary || {};
   const op = ex.off_page || modules.off_page?.summary || {};
   const ta = ex.tech_audit || modules.tech_audit?.summary || {};
-  const topStriking = (modules.striking_distance?.items || []).slice(0, 5)
+
+  // Whitelist коммерческих запросов: исходя из payload queries-секции
+  // (см. dataAggregator._queriesSection). Сравнение по нормализованному key.
+  const commercialSet = new Set();
+  if (queries) {
+    for (const q of (queries.top_queries_commercial || [])) {
+      if (q?.key) commercialSet.add(String(q.key).toLowerCase().trim());
+    }
+  }
+  const isCommercialQuery = (query) => {
+    if (commercialSet.size === 0) return true; // нет данных для фильтра — пропускаем всё
+    return commercialSet.has(String(query || '').toLowerCase().trim());
+  };
+
+  const topStriking = (modules.striking_distance?.items || [])
+    .filter((it) => isCommercialQuery(it.query))
+    .slice(0, 5)
     .map((it) => ({ query: it.query, position: it.avg_position, priority: it.priority, score: it.opportunity_score }));
-  const topCtrGaps = (modules.ctr_gap?.items || []).slice(0, 5)
+  const topCtrGaps = (modules.ctr_gap?.items || [])
+    .filter((it) => isCommercialQuery(it.query))
+    .slice(0, 5)
     .map((it) => ({ query: it.query, position: it.position, ctr: it.ctr, benchmark: it.benchmark_ctr, level: it.level }));
   return {
     striking_distance: {

@@ -76,6 +76,9 @@ router.delete('/drafts/:id',  auth, writeLimiter, c.deleteDraft);
 
 router.put('/drafts/:id/tasks-blocks', auth, writeLimiter, c.updateTasksBlocks);
 router.get('/drafts/:id/tasks',        auth, c.listProjectTasks);
+// ТЗ §6: ручные правки чисел и AI-блоков в черновике
+router.patch('/drafts/:id/overrides',  auth, writeLimiter, c.patchOverrides);
+router.patch('/drafts/:id/summary',    auth, writeLimiter, c.patchSummary);
 
 // Данные + AI
 router.get('/drafts/:id/data',                         auth, c.getDraftData);

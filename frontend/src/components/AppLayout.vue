@@ -13,6 +13,13 @@ function setMode(mode) {
   viewMode.setMode(mode);
 }
 
+// Тумблер «Аналитик/Клиент» имеет смысл только там, где backend-санитайзер
+// что-то реально режет (модуль «Проекты»). В отчётах режим клиента задаётся
+// в модалке публикации (shared_reports.view_mode), а превью открывается
+// отдельной кнопкой «🔍 Превью для клиента». Чтобы не сбивать пользователя
+// «мёртвой» кнопкой, скрываем тумблер на маршрутах /reports/*.
+const showViewModeToggle = computed(() => !String(route.path || '').startsWith('/reports'));
+
 const TABS = [
   { key: 'seo-text',       label: 'SEO текст',        icon: '📝', path: '/dashboard' },
   { key: 'copilot',        label: 'AI-редактор',      icon: '🤖', path: '/copilot' },
@@ -164,6 +171,7 @@ function handleLogout() {
           (viewMode.js#resolveViewMode) срезает технические поля из ответа.
         -->
         <div
+          v-if="showViewModeToggle"
           role="group"
           aria-label="Режим отображения"
           class="inline-flex items-center rounded-lg border border-gray-700 bg-gray-950 p-0.5 text-xs"

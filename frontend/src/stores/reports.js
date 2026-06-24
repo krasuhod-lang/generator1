@@ -70,7 +70,15 @@ export const useReportsStore = defineStore('reports', {
     },
 
     async fetchData(id, params = {}) {
-      const { data } = await api.get(`/reports/drafts/${id}/data`, { params });
+      // viewMode (analyst|client) — необязательный override для editor preview.
+      // Передаётся как заголовок X-Client-Mode (тот же интерфейс, что глобальный
+      // axios-перехватчик), чтобы локальный preview редактора реально
+      // дёргал backend-санитайзер.
+      const { viewMode, ...query } = params || {};
+      const headers = {};
+      if (viewMode === 'client') headers['X-Client-Mode'] = '1';
+      else if (viewMode === 'analyst') headers['X-Client-Mode'] = '0';
+      const { data } = await api.get(`/reports/drafts/${id}/data`, { params: query, headers });
       this.currentData = data?.data || null;
       return this.currentData;
     },
@@ -94,6 +102,17 @@ export const useReportsStore = defineStore('reports', {
 
     async updateTasksBlocks(id, blocks) {
       const { data } = await api.put(`/reports/drafts/${id}/tasks-blocks`, { blocks });
+      return data;
+    },
+
+    // ТЗ §6: точечные правки чисел/строк в отчёте и AI-блоков.
+    // overrides = { "<dot.path>": value | null }; null удаляет правку.
+    async patchOverrides(id, overrides) {
+      const { data } = await api.patch(`/reports/drafts/${id}/overrides`, { overrides });
+      return data;
+    },
+    async patchSummary(id, payload) {
+      const { data } = await api.patch(`/reports/drafts/${id}/summary`, payload);
       return data;
     },
 

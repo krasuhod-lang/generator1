@@ -39,6 +39,7 @@ const { buildReportDocx } = require('../services/reports/docxExporter');
 const { buildReportPdf } = require('../services/reports/pdfExporter');
 const { resolveViewMode } = require('../services/projects/viewMode');
 const { sanitizeDraft, sanitizeData, sanitizeSummary } = require('../services/reports/viewModeSanitizer');
+const { deepMerge } = require('../services/reports/overridesApplier');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -81,6 +82,8 @@ function _serializeDraft(row) {
     llm_status: row.llm_status,
     llm_generated_at: row.llm_generated_at,
     llm_error: row.llm_error || null,
+    overrides: row.overrides || {},
+    overrides_meta: row.overrides_meta || {},
     logo_url: row.logo_url || null,
     color_accent: row.color_accent || null,
     keys_so_domain: row.keys_so_domain || null,
@@ -239,6 +242,72 @@ async function updateTasksBlocks(req, res) {
     [draft.id, req.user.id, JSON.stringify(blocks)],
   );
   res.json({ ok: true, blocks });
+}
+
+/**
+ * PATCH /api/reports/drafts/:id/overrides — мерж dot-path правок чисел/строк
+ * в `report_drafts.overrides` (ТЗ §6). Параллельно пишем `overrides_meta`
+ * для аудита: для каждого изменённого ключа сохраняем {author_id,
+ * author_email, updated_at}. Sentinel null/undefined в body удаляет ключ.
+ *
+ * Тело: { overrides: { "gsc.totals.clicks": 12345, ... } }
+ * Ответ: { ok: true, overrides, overrides_meta }
+ */
+async function patchOverrides(req, res) {
+  const draft = await _ownedDraft(req.params.id, req.user.id);
+  if (!draft) return _bad(res, 404, 'Черновик не найден');
+  const patch = req.body?.overrides;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    return _bad(res, 400, 'overrides должен быть объектом dot-path → значение');
+  }
+  const merged = deepMerge(draft.overrides || {}, patch);
+  const metaPatch = {};
+  const now = new Date().toISOString();
+  for (const k of Object.keys(patch)) {
+    if (patch[k] === null || patch[k] === undefined) continue;
+    metaPatch[k] = { author_id: req.user.id, author_email: req.user.email || null, updated_at: now };
+  }
+  // Удалённые ключи также удаляем из meta.
+  const metaMerged = { ...(draft.overrides_meta || {}) };
+  for (const k of Object.keys(patch)) {
+    if (patch[k] === null || patch[k] === undefined) delete metaMerged[k];
+    else metaMerged[k] = metaPatch[k];
+  }
+  await db.query(
+    `UPDATE report_drafts SET overrides = $3, overrides_meta = $4, updated_at = NOW()
+      WHERE id = $1 AND user_id = $2`,
+    [draft.id, req.user.id, JSON.stringify(merged), JSON.stringify(metaMerged)],
+  );
+  res.json({ ok: true, overrides: merged, overrides_meta: metaMerged });
+}
+
+/**
+ * PATCH /api/reports/drafts/:id/summary — точечное обновление AI-блоков
+ * (ТЗ §6, чтобы редактор не дёргал большой PUT при автосейве каждого
+ * абзаца). Принимает любой подмножество полей llm_summary, llm_highlights,
+ * llm_growth, llm_quick_wins, llm_vulnerabilities, llm_roadmap,
+ * llm_traffic_value. Неизвестные поля игнорируются.
+ */
+const SUMMARY_FIELDS = ['llm_summary', 'llm_highlights', 'llm_growth', 'llm_quick_wins', 'llm_vulnerabilities', 'llm_roadmap', 'llm_traffic_value'];
+async function patchSummary(req, res) {
+  const draft = await _ownedDraft(req.params.id, req.user.id);
+  if (!draft) return _bad(res, 404, 'Черновик не найден');
+  const body = req.body || {};
+  const sets = [];
+  const params = [draft.id, req.user.id];
+  for (const f of SUMMARY_FIELDS) {
+    if (!(f in body)) continue;
+    const v = body[f];
+    params.push(f === 'llm_summary' || f === 'llm_traffic_value' ? (v == null ? null : String(v)) : JSON.stringify(v));
+    sets.push(`${f} = $${params.length}${f === 'llm_summary' || f === 'llm_traffic_value' ? '' : '::jsonb'}`);
+  }
+  if (!sets.length) return _bad(res, 400, 'нет полей для обновления');
+  sets.push(`updated_at = NOW()`);
+  await db.query(
+    `UPDATE report_drafts SET ${sets.join(', ')} WHERE id = $1 AND user_id = $2`,
+    params,
+  );
+  res.json({ ok: true });
 }
 
 // ─── Данные ───────────────────────────────────────────────────────────────
@@ -845,6 +914,7 @@ async function uploadTaskImage(req, res) {
 module.exports = {
   listDrafts, createDraft, getDraft, updateDraft, deleteDraft,
   updateTasksBlocks, getDraftData, listProjectTasks,
+  patchOverrides, patchSummary,
   generateSummaryEndpoint, getSummaryStatus, exportDraftDocx, exportDraftPdf,
   publishDraft, listShared, updateSharedSettings, revokeShared,
   publicGet, publicUnlock, publicExportDocx, publicExportPdf,

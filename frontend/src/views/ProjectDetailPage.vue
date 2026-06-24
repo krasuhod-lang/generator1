@@ -8,6 +8,7 @@
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import api from '../api.js';
 import AppLayout from '../components/AppLayout.vue';
 import GscPerformanceChart from '../components/GscPerformanceChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
@@ -388,6 +389,9 @@ function switchTab(tab) {
   if (tab === 'compare' && !comparison.value && !compareLoading.value) {
     loadComparison();
   }
+  if (tab === 'tasks' && !projectTasks.value.length && !tasksLoading.value) {
+    loadProjectTasks();
+  }
 }
 
 function rangeParams() {
@@ -412,7 +416,57 @@ async function loadPerformance() {
 function _reloadActive() {
   if (activeTab.value === 'ydx') return loadYdxPerformance();
   if (activeTab.value === 'compare') return loadComparison();
+  if (activeTab.value === 'tasks') return loadProjectTasks();
   return loadPerformance();
+}
+
+// ТЗ §5: список всех задач, привязанных к этому проекту через project_id.
+const projectTasks = ref([]);
+const tasksLoading = ref(false);
+const tasksError = ref(null);
+const TASK_TYPE_LABELS = {
+  info_article:  'Статья',
+  link_article:  'Ссылка',
+  meta_tags:     'Мета-теги',
+  article_topic: 'Темы',
+  relevance:     'Релевантность',
+  forecaster:    'Прогноз',
+  serp_b2b:      'SERP B2B',
+};
+const TASK_TYPE_ROUTES = {
+  info_article:  '/info-article/',
+  link_article:  '/link-article/',
+  meta_tags:     '/meta-tags/',
+  article_topic: '/article-topics/',
+  relevance:     '/relevance/',
+  forecaster:    '/forecaster/',
+  serp_b2b:      '/serp-b2b/',
+};
+function taskTypeLabel(t) { return TASK_TYPE_LABELS[t] || t; }
+function taskHref(t) { return (TASK_TYPE_ROUTES[t.type] || '/') + t.id; }
+function taskStatusClass(s) {
+  const st = String(s || '').toLowerCase();
+  if (st === 'completed' || st === 'done' || st === 'finished') return 'bg-emerald-500/20 text-emerald-300';
+  if (st === 'failed' || st === 'error') return 'bg-red-500/20 text-red-300';
+  if (st === 'queued' || st === 'pending') return 'bg-gray-500/20 text-gray-300';
+  return 'bg-amber-500/20 text-amber-300';
+}
+function formatDate(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }); }
+  catch (_) { return iso; }
+}
+async function loadProjectTasks() {
+  if (!projectId) return;
+  tasksLoading.value = true; tasksError.value = null;
+  try {
+    const { data } = await api.get(`/projects/${projectId}/tasks`);
+    projectTasks.value = data?.items || [];
+  } catch (err) {
+    tasksError.value = err.response?.data?.error || 'Не удалось загрузить задачи проекта';
+  } finally {
+    tasksLoading.value = false;
+  }
 }
 
 function setPreset(key) {
@@ -495,10 +549,25 @@ function applyPageMetaAuditUpdate(pageMetaAudit) {
 // ── Шаринг ────────────────────────────────────────────────────────
 const shareUrl = computed(() => project.value?.share_token
   ? `${window.location.origin}/share/project/${project.value.share_token}` : '');
+const shareForm = ref({ mode: 'client', ttlDays: 90 });
+const shareTtlOptions = [
+  { value: 7,   label: '7 дней' },
+  { value: 30,  label: '30 дней' },
+  { value: 90,  label: '90 дней' },
+  { value: 365, label: '1 год' },
+  { value: 0,   label: 'Бессрочно' },
+];
+const shareExpiresLabel = computed(() => {
+  const t = project.value?.share_expires_at;
+  if (!t) return 'бессрочная';
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return '';
+  return `истекает ${d.toLocaleDateString('ru-RU')}`;
+});
 
-async function createShare() {
+async function createShare(opts = {}) {
   try {
-    const result = await store.createShare(projectId);
+    const result = await store.createShare(projectId, opts);
     const token = result && typeof result === 'object' ? result.token : result;
     if (token) {
       project.value.share_token = token;
@@ -507,8 +576,17 @@ async function createShare() {
         project.value.share_expires_at = result.expires_at || null;
       }
       flash('Публичная ссылка создана');
+    } else {
+      flash('Не удалось создать ссылку (пустой ответ)');
     }
-  } catch (_) { flash('Не удалось создать ссылку'); }
+  } catch (err) {
+    const msg = err?.response?.data?.error || err?.message || 'неизвестная ошибка';
+    flash(`Не удалось создать ссылку: ${msg}`);
+  }
+}
+async function updateShare(opts) {
+  // Если ссылка уже выпущена — backend обновляет mode/expires_at, токен сохраняется.
+  return createShare(opts);
 }
 async function revokeShare() {
   try { await store.revokeShare(projectId); project.value.share_token = null; flash('Ссылка отозвана'); }
@@ -636,6 +714,13 @@ onUnmounted(() => {
                   :class="activeTab === 'compare' ? 'border-fuchsia-500 text-fuchsia-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
                   @click="switchTab('compare')">
             Сравнение и рекомендации
+          </button>
+          <button type="button"
+                  class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
+                  :class="activeTab === 'tasks' ? 'border-amber-500 text-amber-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                  @click="switchTab('tasks')">
+            Задачи
+            <span v-if="projectTasks.length" class="ml-1 text-xs text-gray-400">({{ projectTasks.length }})</span>
           </button>
         </nav>
 
@@ -1066,16 +1151,84 @@ onUnmounted(() => {
         </div>
         <!-- ============ /Вкладка Сравнение ============ -->
 
+        <!-- ============ Вкладка Задачи (ТЗ §5) ============ -->
+        <div v-show="activeTab === 'tasks'" class="space-y-5">
+          <section class="card space-y-4">
+            <div class="flex items-center justify-between gap-2">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-amber-300">Задачи проекта</h2>
+              <button class="text-xs text-gray-300 hover:text-white" @click="loadProjectTasks">↻ Обновить</button>
+            </div>
+            <p class="text-xs text-gray-500">
+              Все задачи, у которых в форме создания был выбран этот проект — статьи, мета-теги, темы,
+              анализ релевантности, прогнозы и SERP-B2B. Старые задачи без явной привязки сюда не попадают.
+            </p>
+            <div v-if="tasksLoading" class="text-xs text-gray-400">Загрузка…</div>
+            <div v-else-if="tasksError" class="text-xs text-red-400">{{ tasksError }}</div>
+            <div v-else-if="!projectTasks.length" class="text-xs text-gray-400">
+              Пока нет задач, привязанных к проекту. Создайте новую задачу в разделе модуля
+              (Статьи / Мета-теги / Релевантность / Прогноз / SERP-B2B) и выберите этот проект.
+            </div>
+            <table v-else class="w-full text-xs">
+              <thead class="text-gray-400 uppercase tracking-wider text-[10px]">
+                <tr>
+                  <th class="text-left py-2">Тип</th>
+                  <th class="text-left py-2">Название</th>
+                  <th class="text-left py-2">Статус</th>
+                  <th class="text-left py-2">Создано</th>
+                  <th class="text-right py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in projectTasks" :key="`${t.type}-${t.id}`" class="border-t border-gray-800">
+                  <td class="py-2 text-gray-400">{{ taskTypeLabel(t.type) }}</td>
+                  <td class="py-2 text-gray-200">{{ t.title }}</td>
+                  <td class="py-2"><span class="px-2 py-0.5 rounded text-[10px]" :class="taskStatusClass(t.status)">{{ t.status }}</span></td>
+                  <td class="py-2 text-gray-400">{{ formatDate(t.created_at) }}</td>
+                  <td class="py-2 text-right">
+                    <router-link :to="taskHref(t)" class="text-indigo-300 hover:text-indigo-100">открыть →</router-link>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+        </div>
+        <!-- ============ /Вкладка Задачи ============ -->
+
         <!-- Share -->
-        <section class="card space-y-2">
+        <section class="card space-y-3">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Поделиться статистикой</h2>
-          <p class="text-xs text-gray-500">Публичная read-only ссылка: клиент видит графики и AI-отчёт, без настроек и кнопок управления.</p>
-          <div v-if="project.share_token" class="flex flex-wrap gap-2 items-center">
-            <input :value="shareUrl" readonly class="input flex-1 min-w-0 text-xs" />
-            <button class="btn-ghost border border-gray-700" @click="copyShare">📋 Скопировать</button>
-            <button class="text-xs text-red-400 hover:text-red-300" @click="revokeShare">Сбросить ссылку</button>
+          <p class="text-xs text-gray-500">Публичная read-only ссылка: получатель видит графики и AI-отчёт, без настроек и кнопок управления.</p>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+            <label class="flex flex-col gap-1">
+              <span class="text-gray-400 uppercase tracking-wider text-[10px]">Режим payload</span>
+              <select v-model="shareForm.mode" class="input">
+                <option value="client">Клиент — урезанный (без debug/raw_prompt)</option>
+                <option value="analyst">Аналитик — полный payload</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-gray-400 uppercase tracking-wider text-[10px]">Срок действия</span>
+              <select v-model.number="shareForm.ttlDays" class="input">
+                <option v-for="o in shareTtlOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </label>
           </div>
-          <button v-else class="btn-primary" @click="createShare">🌐 Поделиться доступом</button>
+
+          <div v-if="project.share_token" class="space-y-2">
+            <div class="flex flex-wrap gap-2 items-center">
+              <input :value="shareUrl" readonly class="input flex-1 min-w-0 text-xs" />
+              <button class="btn-ghost border border-gray-700" @click="copyShare">📋 Скопировать</button>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
+              <span>Режим: <b class="text-gray-300">{{ project.share_mode || 'client' }}</b></span>
+              <span>· {{ shareExpiresLabel }}</span>
+              <button class="text-indigo-400 hover:text-indigo-300"
+                      @click="updateShare(shareForm)">↻ Обновить параметры</button>
+              <button class="text-red-400 hover:text-red-300" @click="revokeShare">Сбросить ссылку</button>
+            </div>
+          </div>
+          <button v-else class="btn-primary" @click="createShare(shareForm)">🌐 Создать публичную ссылку</button>
         </section>
       </template>
 

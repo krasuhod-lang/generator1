@@ -7,6 +7,7 @@ import PositionChart from '../PositionChart.vue';
 import ReportModulesCard from './ReportModulesCard.vue';
 import DataStateWrapper from '../DataStateWrapper.vue';
 import ExecutiveHeadline from './ExecutiveHeadline.vue';
+import EditableValue from './EditableValue.vue';
 
 const props = defineProps({
   data:        { type: Object, default: () => ({}) },
@@ -22,8 +23,23 @@ const props = defineProps({
   capturedAt:  { type: String, default: null },
   readonly:    { type: Boolean, default: true },
   loading:     { type: Boolean, default: false },
+  // ТЗ §6: карта overrides_meta из черновика — { path: { author_id, updated_at } }.
+  // Если передана, на отредактированных вручную полях рисуется бейдж ✏️.
+  overridesMeta: { type: Object, default: () => ({}) },
 });
-const emit = defineEmits(['update:tasksBlocks']);
+const emit = defineEmits(['update:tasksBlocks', 'override:update', 'override:reset']);
+
+// ТЗ §6: бейджи «изменено вручную» по карте overrides_meta из черновика.
+// Родитель (ReportEditorPage) передаёт `overridesMeta` пропсом (вычисляет
+// из draft.overrides_meta); если пропа нет — бейджи просто не показываются.
+function isOverridden(path) {
+  if (!path) return false;
+  const map = props.overridesMeta || props.data?._overrides_meta || null;
+  if (!map || typeof map !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(map, path);
+}
+function onOverrideUpdate(path, value) { emit('override:update', path, value); }
+function onOverrideReset(path) { emit('override:reset', path); }
 
 const isClient = computed(() => props.viewMode === 'client');
 
@@ -86,9 +102,29 @@ const completenessBanner = computed(() => {
   return { partial, failed, level: failed.length ? 'error' : 'partial' };
 });
 
+// Метка-аннотация «неполный месяц» для последней точки графика, если
+// `series_meta.last_period_partial=true`. Бакет = дата самой последней
+// точки в series (она же первая дата неполного месяца для granularity=month
+// или сама дата для day). Источник истины — backend (см. _seriesMeta).
+function _partialAnnotation(section) {
+  if (!section?.series_meta?.last_period_partial) return null;
+  const series = section.series || [];
+  if (!series.length) return null;
+  const lastDate = series[series.length - 1]?.date;
+  if (!lastDate) return null;
+  return {
+    date: lastDate,
+    bucket: lastDate,
+    label: '⏳ неполный месяц',
+    type: 'partial-period',
+  };
+}
+
 const gscChart = computed(() => {
   const series = props.data?.gsc?.series || [];
   if (!series.length) return null;
+  const taskAnnotations = props.data?.tasks?.annotations || [];
+  const partial = _partialAnnotation(props.data?.gsc);
   return {
     labels: series.map((r) => r.date),
     datasets: [
@@ -96,7 +132,7 @@ const gscChart = computed(() => {
       { label: 'Показы', color: '#8b95a7', data: series.map((r) => Number(r.impressions) || 0) },
       { label: 'CTR', color: '#10b981', data: series.map((r) => Number(r.ctr) || 0), yAxisID: 'y2' },
     ],
-    annotations: props.data?.tasks?.annotations || [],
+    annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
   };
 });
@@ -104,6 +140,8 @@ const gscChart = computed(() => {
 const ywmChart = computed(() => {
   const series = props.data?.ywm?.series || [];
   if (!series.length) return null;
+  const taskAnnotations = props.data?.tasks?.annotations || [];
+  const partial = _partialAnnotation(props.data?.ywm);
   return {
     labels: series.map((r) => r.date),
     datasets: [
@@ -111,7 +149,7 @@ const ywmChart = computed(() => {
       { label: 'Показы (Яндекс)', color: '#ffb38a', data: series.map((r) => Number(r.impressions) || 0) },
       { label: 'CTR', color: '#ef4444', data: series.map((r) => Number(r.ctr) || 0), yAxisID: 'y2' },
     ],
-    annotations: props.data?.tasks?.annotations || [],
+    annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
   };
 });
@@ -139,33 +177,33 @@ const totals = computed(() => {
   const out = [];
   const g = props.data?.gsc?.totals;
   if (g) {
-    out.push({ label: 'Google клики', value: Number(g.clicks || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Google показы', value: Number(g.impressions || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Google CTR', value: g.ctr != null ? `${Number(g.ctr).toFixed(2)}%` : '—' });
-    out.push({ label: 'Google ср. позиция', value: g.position != null ? Number(g.position).toFixed(1) : '—' });
+    out.push({ label: 'Google клики', value: Number(g.clicks || 0).toLocaleString('ru-RU'), raw: g.clicks, path: 'gsc.totals.clicks', type: 'int' });
+    out.push({ label: 'Google показы', value: Number(g.impressions || 0).toLocaleString('ru-RU'), raw: g.impressions, path: 'gsc.totals.impressions', type: 'int' });
+    out.push({ label: 'Google CTR', value: g.ctr != null ? `${Number(g.ctr).toFixed(2)}%` : '—', raw: g.ctr, path: 'gsc.totals.ctr', type: 'float' });
+    out.push({ label: 'Google ср. позиция', value: g.position != null ? Number(g.position).toFixed(1) : '—', raw: g.position, path: 'gsc.totals.position', type: 'float' });
   }
   const y = props.data?.ywm?.totals;
   if (y) {
-    out.push({ label: 'Яндекс клики', value: Number(y.clicks || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Яндекс показы', value: Number(y.impressions || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Яндекс CTR', value: y.ctr != null ? `${Number(y.ctr).toFixed(2)}%` : '—' });
+    out.push({ label: 'Яндекс клики', value: Number(y.clicks || 0).toLocaleString('ru-RU'), raw: y.clicks, path: 'ywm.totals.clicks', type: 'int' });
+    out.push({ label: 'Яндекс показы', value: Number(y.impressions || 0).toLocaleString('ru-RU'), raw: y.impressions, path: 'ywm.totals.impressions', type: 'int' });
+    out.push({ label: 'Яндекс CTR', value: y.ctr != null ? `${Number(y.ctr).toFixed(2)}%` : '—', raw: y.ctr, path: 'ywm.totals.ctr', type: 'float' });
   }
   const k = props.data?.keys_so?.yandex?.current || props.data?.keys_so?.current;
   if (k) {
-    out.push({ label: 'Видимость Яндекс (Keys.so)', value: k.visibility != null ? Number(k.visibility).toFixed(2) : '—' });
-    out.push({ label: 'ТОП-10 Яндекс', value: Number(k.top10 || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'ТОП-50 Яндекс', value: Number(k.top50 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Видимость Яндекс (Keys.so)', value: k.visibility != null ? Number(k.visibility).toFixed(2) : '—', raw: k.visibility, path: 'keys_so.yandex.current.visibility', type: 'float' });
+    out.push({ label: 'ТОП-10 Яндекс', value: Number(k.top10 || 0).toLocaleString('ru-RU'), raw: k.top10, path: 'keys_so.yandex.current.top10', type: 'int' });
+    out.push({ label: 'ТОП-50 Яндекс', value: Number(k.top50 || 0).toLocaleString('ru-RU'), raw: k.top50, path: 'keys_so.yandex.current.top50', type: 'int' });
   }
   const kg = props.data?.keys_so?.google?.current;
   if (kg) {
-    out.push({ label: 'Видимость Google (Keys.so)', value: kg.visibility != null ? Number(kg.visibility).toFixed(2) : '—' });
-    out.push({ label: 'ТОП-10 Google', value: Number(kg.top10 || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'ТОП-50 Google', value: Number(kg.top50 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Видимость Google (Keys.so)', value: kg.visibility != null ? Number(kg.visibility).toFixed(2) : '—', raw: kg.visibility, path: 'keys_so.google.current.visibility', type: 'float' });
+    out.push({ label: 'ТОП-10 Google', value: Number(kg.top10 || 0).toLocaleString('ru-RU'), raw: kg.top10, path: 'keys_so.google.current.top10', type: 'int' });
+    out.push({ label: 'ТОП-50 Google', value: Number(kg.top50 || 0).toLocaleString('ru-RU'), raw: kg.top50, path: 'keys_so.google.current.top50', type: 'int' });
   }
   const p = props.data?.position?.summary;
   if (p) {
-    out.push({ label: 'Средняя позиция', value: p.avg_position != null ? Number(p.avg_position).toFixed(1) : '—' });
-    out.push({ label: 'Запросов в ТОП-10', value: Number(p.top10 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Средняя позиция', value: p.avg_position != null ? Number(p.avg_position).toFixed(1) : '—', raw: p.avg_position, path: 'position.summary.avg_position', type: 'float' });
+    out.push({ label: 'Запросов в ТОП-10', value: Number(p.top10 || 0).toLocaleString('ru-RU'), raw: p.top10, path: 'position.summary.top10', type: 'int' });
   }
   return out;
 });
@@ -340,29 +378,57 @@ function formatDateTime(iso) {
 }
 
 // --- Chart growth dynamics helpers ---
-function _computeDeltas(series, key) {
+// Дельты считаются ТОЛЬКО по полным месяцам (ТЗ §3). Если backend отдал
+// `totals_complete` и `prev_totals_complete` — используем их напрямую. Иначе
+// (старые черновики без series_meta) fallback к попарному сравнению последних
+// двух точек series, но и тут защищаемся от ситуации «последняя точка ещё
+// неполная» (series_meta.last_period_partial) и берём предпоследнюю.
+function _deltaFromTotals(section, key) {
+  if (!section) return null;
+  const cur = section.totals_complete;
+  const prev = section.prev_totals_complete;
+  if (cur && Number.isFinite(Number(cur[key]))) {
+    const last = Number(cur[key]) || 0;
+    const prevVal = prev && Number.isFinite(Number(prev[key])) ? (Number(prev[key]) || 0) : null;
+    if (prevVal == null) return { last, prev: 0, diff: 0, pct: null, source: 'complete-no-prev' };
+    const diff = last - prevVal;
+    const pct = prevVal > 0 ? Math.round((diff / prevVal) * 1000) / 10 : null;
+    return { last, prev: prevVal, diff, pct, source: 'complete' };
+  }
+  return null;
+}
+function _computeDeltas(series, key, opts = {}) {
   if (!Array.isArray(series) || series.length < 2) return null;
-  const last = Number(series[series.length - 1]?.[key]) || 0;
-  const prev = Number(series[series.length - 2]?.[key]) || 0;
+  // Если последняя точка — частичный месяц, не сравниваем с ней (ТЗ §3),
+  // сдвигаемся на одну позицию назад.
+  const partial = opts && opts.lastPartial;
+  const end = partial ? series.length - 2 : series.length - 1;
+  if (end < 1) return null;
+  const last = Number(series[end]?.[key]) || 0;
+  const prev = Number(series[end - 1]?.[key]) || 0;
   if (!prev && !last) return null;
   const diff = last - prev;
-  const pct = prev > 0 ? Math.round(((last - prev) / prev) * 1000) / 10 : null;
-  return { last, prev, diff, pct };
+  const pct = prev > 0 ? Math.round((diff / prev) * 1000) / 10 : null;
+  return { last, prev, diff, pct, source: partial ? 'series-skip-partial' : 'series' };
 }
 
 const gscDeltas = computed(() => {
-  const series = props.data?.gsc?.series || [];
+  const sec = props.data?.gsc || {};
+  const series = sec.series || [];
+  const partial = !!sec.series_meta?.last_period_partial;
   return {
-    clicks: _computeDeltas(series, 'clicks'),
-    impressions: _computeDeltas(series, 'impressions'),
+    clicks:      _deltaFromTotals(sec, 'clicks')      || _computeDeltas(series, 'clicks',      { lastPartial: partial }),
+    impressions: _deltaFromTotals(sec, 'impressions') || _computeDeltas(series, 'impressions', { lastPartial: partial }),
   };
 });
 
 const ywmDeltas = computed(() => {
-  const series = props.data?.ywm?.series || [];
+  const sec = props.data?.ywm || {};
+  const series = sec.series || [];
+  const partial = !!sec.series_meta?.last_period_partial;
   return {
-    clicks: _computeDeltas(series, 'clicks'),
-    impressions: _computeDeltas(series, 'impressions'),
+    clicks:      _deltaFromTotals(sec, 'clicks')      || _computeDeltas(series, 'clicks',      { lastPartial: partial }),
+    impressions: _deltaFromTotals(sec, 'impressions') || _computeDeltas(series, 'impressions', { lastPartial: partial }),
   };
 });
 
@@ -370,10 +436,39 @@ const keysDeltas = computed(() => {
   const engine = keysEngine.value;
   const engineData = engine === 'google' ? props.data?.keys_so?.google : props.data?.keys_so?.yandex;
   const series = engineData?.series || (engine === 'yandex' ? (props.data?.keys_so?.series || []) : []);
+  // Keys.so пока не даёт series_meta — сравнение «последняя vs предыдущая»
+  // точка остаётся как fallback. Для месячного среза это не критично.
   return {
     top10: _computeDeltas(series, 'keywords_top10'),
     top50: _computeDeltas(series, 'keywords_top50'),
   };
+});
+
+// Период «за полные месяцы N — M» для подписи под KPI / дельтами.
+const completePeriodLabel = computed(() => {
+  const meta = props.data?.gsc?.series_meta || props.data?.ywm?.series_meta;
+  if (!meta || !Array.isArray(meta.monthly_periods)) return '';
+  const completes = meta.monthly_periods.filter((m) => m.is_complete);
+  if (!completes.length) return '';
+  const first = completes[0].key;
+  const last  = completes[completes.length - 1].key;
+  return first === last ? first : `${first} — ${last}`;
+});
+
+// Глобальный флаг «в окне нет ни одного полного месяца» → KPI/дельты
+// показываем абсолютные, проценты роста скрываем, баннер предупреждаем.
+const noCompleteMonths = computed(() => {
+  const gscMeta = props.data?.gsc?.series_meta;
+  const ywmMeta = props.data?.ywm?.series_meta;
+  const g = gscMeta?.complete_months || 0;
+  const y = ywmMeta?.complete_months || 0;
+  return g === 0 && y === 0 && ((props.data?.gsc?.series?.length || 0) + (props.data?.ywm?.series?.length || 0)) > 0;
+});
+
+// Есть ли в окне неполный последний месяц — для маркера на графике.
+const hasPartialTail = computed(() => {
+  return !!(props.data?.gsc?.series_meta?.last_period_partial
+         || props.data?.ywm?.series_meta?.last_period_partial);
 });
 
 function formatDelta(d) {
@@ -386,6 +481,32 @@ function formatAbsDelta(d) {
   if (!d) return '';
   const sign = d.diff >= 0 ? '+' : '';
   return `${sign}${Math.round(d.diff).toLocaleString('ru-RU')}`;
+}
+
+// ТЗ §4: разбиение топ-запросов и страниц по интенту.
+// По умолчанию активна вкладка «Коммерческие» — именно эти запросы приносят
+// выручку и должны быть в фокусе клиента/менеджера. Информационные доступны
+// рядом отдельной вкладкой, чтобы видеть инфо-спрос, но не путать его с
+// коммерческими точками роста.
+const queriesTab = ref('commercial');
+const pagesTab = ref('commercial');
+const queriesSection = computed(() => props.data?.queries || null);
+const commercialSummary = computed(() => queriesSection.value?.summary || null);
+function intentLabel(intent) {
+  switch (intent) {
+    case 'transactional': return 'Транзакционный';
+    case 'commercial':    return 'Коммерческий';
+    case 'investigation': return 'Сравнение';
+    case 'informational': return 'Информационный';
+    case 'navigational':  return 'Навигационный';
+    default:              return '—';
+  }
+}
+function formatPct(v) {
+  return v == null ? '—' : `${v}%`;
+}
+function formatNum(v) {
+  return v == null ? '—' : Number(v).toLocaleString('ru-RU');
 }
 </script>
 
@@ -448,13 +569,31 @@ function formatAbsDelta(d) {
 
     <section v-if="totals.length" id="report-summary" class="rblk">
       <h2>Ключевые показатели</h2>
+      <div v-if="noCompleteMonths" class="period-warning">
+        ⚠️ Недостаточно полных месяцев в выбранном периоде — KPI и % роста рассчитываются по неполным данным.
+        Расширьте период так, чтобы он включал хотя бы один завершённый месяц.
+      </div>
+      <p v-else-if="completePeriodLabel" class="period-hint">
+        Дельты и % роста — за полные месяцы: <b>{{ completePeriodLabel }}</b><span v-if="hasPartialTail">. Текущий неполный месяц участвует только в графиках.</span>
+      </p>
       <div v-if="loading" class="skeleton-grid">
         <div v-for="n in 6" :key="n" class="skeleton-card" />
       </div>
       <div v-else class="totals-grid">
         <div v-for="(t, i) in totals" :key="i" class="total-card">
           <div class="t-label">{{ t.label }}</div>
-          <div class="t-value">{{ t.value }}</div>
+          <div class="t-value">
+            <EditableValue
+              :display-value="t.value"
+              :raw-value="t.raw"
+              :path="t.path"
+              :type="t.type"
+              :editable="!readonly"
+              :overridden="isOverridden(t.path)"
+              @update="onOverrideUpdate"
+              @reset="onOverrideReset"
+            />
+          </div>
         </div>
       </div>
     </section>
@@ -558,6 +697,137 @@ function formatAbsDelta(d) {
       <h2>Динамика позиций</h2>
       <p class="chart-desc">Средняя позиция и распределение по ТОП-10/ТОП-30 из трекера позиций.</p>
       <PositionChart :series="data.position.series" mode="position" />
+    </section>
+
+    <!-- ТЗ §4: Топ-запросы и страницы с разбиением по интенту -->
+    <section
+      v-if="queriesSection && (queriesSection.top_queries_commercial?.length || queriesSection.top_queries_informational?.length)"
+      id="report-queries"
+      class="rblk"
+    >
+      <h2>Топ-запросы</h2>
+      <p class="chart-desc">
+        По умолчанию показаны коммерческие запросы (transactional / commercial / investigation) —
+        те, что приносят выручку. Информационный спрос вынесен на отдельную вкладку.
+      </p>
+      <div v-if="commercialSummary" class="commercial-summary">
+        <span class="cs-pill">
+          Коммерческий трафик: <b>{{ formatNum(commercialSummary.commercial_clicks) }}</b>
+          кликов из <b>{{ formatNum(commercialSummary.total_clicks) }}</b>
+          <span v-if="commercialSummary.commercial_share_pct != null">
+            ({{ commercialSummary.commercial_share_pct }}%)
+          </span>
+        </span>
+      </div>
+      <div class="intent-tabs">
+        <button
+          class="intent-tab"
+          :class="{ active: queriesTab === 'commercial' }"
+          @click="queriesTab = 'commercial'"
+        >🛒 Коммерческие ({{ queriesSection.top_queries_commercial?.length || 0 }})</button>
+        <button
+          class="intent-tab"
+          :class="{ active: queriesTab === 'informational' }"
+          @click="queriesTab = 'informational'"
+        >📚 Информационные ({{ queriesSection.top_queries_informational?.length || 0 }})</button>
+        <button
+          v-if="queriesSection.top_queries_other?.length"
+          class="intent-tab"
+          :class="{ active: queriesTab === 'other' }"
+          @click="queriesTab = 'other'"
+        >🔸 Прочие ({{ queriesSection.top_queries_other.length }})</button>
+      </div>
+      <table class="rep-table">
+        <thead>
+          <tr>
+            <th>Запрос</th>
+            <th>Интент</th>
+            <th class="num">Клики</th>
+            <th class="num">Показы</th>
+            <th class="num">CTR</th>
+            <th class="num">Позиция</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="(row, i) in (queriesTab === 'commercial'
+              ? queriesSection.top_queries_commercial
+              : queriesTab === 'informational'
+                ? queriesSection.top_queries_informational
+                : queriesSection.top_queries_other) || []"
+            :key="`q-${queriesTab}-${i}`"
+          >
+            <td>{{ row.key }}<span v-if="row.branded" class="brand-tag" title="Брендовый">★</span></td>
+            <td class="intent-cell">{{ intentLabel(row.intent) }}</td>
+            <td class="num">{{ formatNum(row.clicks) }}</td>
+            <td class="num">{{ formatNum(row.impressions) }}</td>
+            <td class="num">{{ formatPct(row.ctr) }}</td>
+            <td class="num">{{ row.position != null ? row.position : '—' }}</td>
+          </tr>
+          <tr v-if="!((queriesTab === 'commercial'
+              ? queriesSection.top_queries_commercial
+              : queriesTab === 'informational'
+                ? queriesSection.top_queries_informational
+                : queriesSection.top_queries_other) || []).length">
+            <td colspan="6" class="empty-cell">За период по этому сегменту запросов нет.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section
+      v-if="queriesSection && (queriesSection.top_pages_commercial?.length || queriesSection.top_pages_informational?.length)"
+      id="report-pages"
+      class="rblk"
+    >
+      <h2>Топ-страницы</h2>
+      <p class="chart-desc">
+        Страница относится к коммерческим, если ≥50% её кликов приходится на коммерческие запросы.
+      </p>
+      <div class="intent-tabs">
+        <button
+          class="intent-tab"
+          :class="{ active: pagesTab === 'commercial' }"
+          @click="pagesTab = 'commercial'"
+        >🛒 Коммерческие ({{ queriesSection.top_pages_commercial?.length || 0 }})</button>
+        <button
+          class="intent-tab"
+          :class="{ active: pagesTab === 'informational' }"
+          @click="pagesTab = 'informational'"
+        >📚 Информационные ({{ queriesSection.top_pages_informational?.length || 0 }})</button>
+      </div>
+      <table class="rep-table">
+        <thead>
+          <tr>
+            <th>Страница</th>
+            <th class="num">Commercial-доля</th>
+            <th class="num">Клики</th>
+            <th class="num">Показы</th>
+            <th class="num">CTR</th>
+            <th class="num">Позиция</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="(row, i) in (pagesTab === 'commercial'
+              ? queriesSection.top_pages_commercial
+              : queriesSection.top_pages_informational) || []"
+            :key="`p-${pagesTab}-${i}`"
+          >
+            <td class="page-cell"><a :href="row.key" target="_blank" rel="noopener">{{ row.key }}</a></td>
+            <td class="num">{{ row.commercial_share != null ? `${Math.round(row.commercial_share * 100)}%` : '—' }}</td>
+            <td class="num">{{ formatNum(row.clicks) }}</td>
+            <td class="num">{{ formatNum(row.impressions) }}</td>
+            <td class="num">{{ formatPct(row.ctr) }}</td>
+            <td class="num">{{ row.position != null ? row.position : '—' }}</td>
+          </tr>
+          <tr v-if="!((pagesTab === 'commercial'
+              ? queriesSection.top_pages_commercial
+              : queriesSection.top_pages_informational) || []).length">
+            <td colspan="6" class="empty-cell">За период по этому сегменту страниц нет.</td>
+          </tr>
+        </tbody>
+      </table>
     </section>
 
     <section v-if="growthItems.length" class="rblk">
@@ -788,6 +1058,15 @@ function formatAbsDelta(d) {
 .chart-deltas {
   display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
 }
+.period-warning {
+  background: rgba(245, 158, 11, 0.10); color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
+  font-size: 13px; line-height: 1.45;
+}
+.period-hint {
+  color: #6b7280; font-size: 12px; margin: -4px 0 12px;
+}
 .delta-badge {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 5px 12px; border-radius: 10px;
@@ -866,4 +1145,30 @@ function formatAbsDelta(d) {
   .report-nav { padding: 6px 8px; gap: 4px; }
   .nav-link { padding: 6px 10px; font-size: 11px; }
 }
+
+/* ТЗ §4: вкладки и таблицы коммерческих/информационных запросов */
+.commercial-summary { margin: 8px 0 12px; }
+.cs-pill {
+  display: inline-block; padding: 6px 12px; border-radius: 999px;
+  background: var(--accent-bg, #f0f4ff); color: #234; font-size: 13px;
+}
+.intent-tabs { display: flex; gap: 6px; margin: 10px 0 12px; flex-wrap: wrap; }
+.intent-tab {
+  padding: 6px 14px; border-radius: 999px; border: 1px solid #d6dbe3;
+  background: #fff; color: #455; font-size: 13px; cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.intent-tab:hover { background: #f4f6fa; }
+.intent-tab.active { background: var(--accent, #4a6cf7); color: #fff; border-color: var(--accent, #4a6cf7); }
+.rep-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rep-table th, .rep-table td { padding: 8px 10px; border-bottom: 1px solid #eef0f4; text-align: left; }
+.rep-table th { background: #fafbfd; font-weight: 600; color: #455; }
+.rep-table td.num, .rep-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.rep-table tr:hover td { background: #fafbfd; }
+.intent-cell { color: #678; font-size: 12px; white-space: nowrap; }
+.page-cell { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-cell a { color: var(--accent, #4a6cf7); text-decoration: none; }
+.page-cell a:hover { text-decoration: underline; }
+.brand-tag { margin-left: 6px; color: #d4a017; font-size: 11px; }
+.empty-cell { text-align: center; color: #889; padding: 16px; font-style: italic; }
 </style>

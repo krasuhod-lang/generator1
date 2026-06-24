@@ -2448,6 +2448,26 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_vulnerabilities JSONB`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_roadmap JSONB`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_traffic_value TEXT`);
+    // ТЗ §6: ручные правки чисел/AI-блоков (миграция 088)
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    // ТЗ §5: связь любой задачи с SEO-проектом (миграция 087)
+    for (const t of ['info_article_tasks', 'link_article_tasks', 'meta_tag_tasks', 'article_topic_tasks', 'relevance_reports', 'forecaster_tasks', 'serp_b2b_tasks']) {
+      try {
+        await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL`);
+        await db.query(`CREATE INDEX IF NOT EXISTS ix_${t}_project_id ON ${t}(project_id)`);
+      } catch (e) { console.warn(`[ensureSchema] project_id on ${t} failed:`, e.message); }
+    }
+    // tasks и category_lead_tasks — необязательные (могут отсутствовать)
+    for (const t of ['tasks', 'category_lead_tasks']) {
+      try {
+        const { rows } = await db.query(`SELECT to_regclass($1) AS r`, [t]);
+        if (rows[0]?.r) {
+          await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL`);
+          await db.query(`CREATE INDEX IF NOT EXISTS ix_${t}_project_id ON ${t}(project_id)`);
+        }
+      } catch (e) { console.warn(`[ensureSchema] project_id on ${t} failed:`, e.message); }
+    }
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS keywords_top50 INTEGER`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS adcost NUMERIC(14,2)`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS search_engine VARCHAR(8) NOT NULL DEFAULT 'yandex'`);
