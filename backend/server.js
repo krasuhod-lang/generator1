@@ -385,6 +385,11 @@ async function ensureSchema() {
     // применить runtime. Все команды идемпотентны (IF NOT EXISTS).
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user' NOT NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
+    // Миграция 086: колонка password_plain (см. migrations/086_users_password_plain.sql).
+    // Хранит пароль, который ввёл пользователь при регистрации, чтобы админ-панель
+    // могла показывать учётные данные зарегистрированных аккаунтов. Аутентификация
+    // продолжает работать через password_hash (bcrypt) — это поле только для просмотра.
+    await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_plain TEXT`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
 
@@ -2546,17 +2551,24 @@ async function seedAdmin() {
 
       // Обновляем роль и/или пароль
       if (passwordMatch) {
-        // Только роль нужно обновить
+        // Только роль нужно обновить (+ бэкфилим plain-копию, если её ещё нет)
         await db.query(
-          `UPDATE users SET role = 'admin' WHERE id = $1`,
-          [user.id]
+          `UPDATE users
+              SET role = 'admin',
+                  password_plain = COALESCE(password_plain, $2)
+            WHERE id = $1`,
+          [user.id, adminPassword]
         );
       } else {
-        // Обновляем и роль, и пароль
+        // Обновляем роль, хеш и plain-копию (пароль реально сменился)
         const passwordHash = await bcrypt.hash(adminPassword, 12);
         await db.query(
-          `UPDATE users SET role = 'admin', password_hash = $1 WHERE id = $2`,
-          [passwordHash, user.id]
+          `UPDATE users
+              SET role = 'admin',
+                  password_hash = $1,
+                  password_plain = $3
+            WHERE id = $2`,
+          [passwordHash, user.id, adminPassword]
         );
       }
       console.log(`[Admin] Updated admin account: ${email}`);
@@ -2564,8 +2576,9 @@ async function seedAdmin() {
       // Создаём нового admin-пользователя
       const passwordHash = await bcrypt.hash(adminPassword, 12);
       await db.query(
-        `INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, 'admin')`,
-        [email, passwordHash, 'Administrator']
+        `INSERT INTO users (email, password_hash, password_plain, name, role)
+         VALUES ($1, $2, $3, $4, 'admin')`,
+        [email, passwordHash, adminPassword, 'Administrator']
       );
       console.log(`[Admin] Auto-created admin account: ${email}`);
     }

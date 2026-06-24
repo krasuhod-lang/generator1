@@ -12,10 +12,37 @@ const adminApi = axios.create({
 adminApi.interceptors.request.use((config) => {
   const token = localStorage.getItem('seo_admin_token');
   if (token) {
-    config.headers['Authorization'] = `Bearer ${token}`;
+    config.headers['Authorization'] = 'Bearer ' + token;
   }
   return config;
 });
+
+// Response interceptor — на 401/403 чистим протухший admin-токен и редиректим
+// на /admin/login. Без этого старый токен (например, выпущенный до того, как
+// в JWT-payload появилось поле role) превращает каждый запрос к /api/admin/*
+// в «Request failed with status code 403» внутри панели управления.
+adminApi.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const status = error.response?.status;
+    const url = error.config?.url || '';
+    if ((status === 401 || status === 403) && !url.includes('/admin/login')) {
+      localStorage.removeItem('seo_admin_token');
+      try {
+        const { default: router } = await import('../router/index.js');
+        if (!window.location.pathname.endsWith('/admin/login')) {
+          router.replace('/admin/login');
+        }
+      } catch (_) {
+        if (!window.location.pathname.endsWith('/admin/login')) {
+          window.location.href = '/admin/login';
+        }
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 
 export const useAdminStore = defineStore('admin', () => {
   const adminToken = ref(null);
