@@ -454,6 +454,8 @@ async function aggregateForDraft(draft, opts = {}) {
     has_partial: integrations.some((i) => i.status === 'partial'),
     has_error: integrations.some((i) => i.status === 'error'),
     has_empty: integrations.some((i) => i.status === 'empty'),
+    partial_sources: integrations.filter((i) => i.status === 'partial').map((i) => i.label),
+    failed_sources: integrations.filter((i) => i.status === 'error').map((i) => i.label),
   };
 
   const payload = {
