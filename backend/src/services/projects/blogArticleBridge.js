@@ -112,11 +112,11 @@ async function generateBlogArticleFromProject(params) {
     `INSERT INTO info_article_tasks
        (user_id, topic, region, brand_name, brand_facts, output_format,
          commercial_links, commercial_links_count,
-         images_count, gemini_model, status, progress_pct)
-     VALUES ($1, $2, $3, $4, $5, 'html', '[]'::jsonb, 0, $6, $7, 'queued', 0)
+         images_count, gemini_model, project_id, status, progress_pct)
+     VALUES ($1, $2, $3, $4, $5, 'html', '[]'::jsonb, 0, $6, $7, $8, 'queued', 0)
      RETURNING id, topic, region, brand_name, output_format,
-               images_count, gemini_model, status, progress_pct, created_at`,
-    [userId, topic, region, brandName, brandFacts, imagesCount, geminiModel],
+               images_count, gemini_model, project_id, status, progress_pct, created_at`,
+    [userId, topic, region, brandName, brandFacts, imagesCount, geminiModel, project?.id || null],
   );
   const task = rows[0];
 

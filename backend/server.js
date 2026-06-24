@@ -2451,21 +2451,60 @@ async function ensureSchema() {
     // ТЗ §6: ручные правки чисел/AI-блоков (миграция 088)
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
-    // ТЗ §5: связь любой задачи с SEO-проектом (миграция 087)
-    for (const t of ['info_article_tasks', 'link_article_tasks', 'meta_tag_tasks', 'article_topic_tasks', 'relevance_reports', 'forecaster_tasks', 'serp_b2b_tasks']) {
+    // ТЗ §5: связь любой задачи с SEO-проектом (миграция 087).
+    // projects.id — UUID (см. определение таблицы projects выше), поэтому FK
+    // обязан быть UUID. Раньше здесь стоял BIGINT, что давало
+    // "foreign key constraint cannot be implemented: Key columns are of
+    // incompatible types: bigint and uuid" — ALTER падал, try/catch съедал
+    // ошибку, project_id так и не добавлялся, а последующий INSERT
+    // в createArticleTopicTask/createInfoArticleTask/... падал с
+    // "column \"project_id\" of relation \"…\" does not exist" → 5xx,
+    // который nginx показывал как 502 на вкладке «Темы статей» и др.
+    // Колонку и FK добавляем РАЗДЕЛЬНО. Если когда-нибудь добавление FK
+    // снова упадёт (как было с BIGINT vs UUID до 3d10c6c, или из-за
+    // блокировки/прав/несовместимости в нестандартной БД) — сама колонка
+    // всё равно появится, и INSERT … (project_id) … не упадёт с
+    // "column \"project_id\" of relation \"…\" does not exist" → 502 на
+    // /api/link-article и других вкладках. FK здесь — strictly nice-to-have:
+    // целостность подстраховывается ON DELETE из projects и валидацией
+    // resolveOwnedProjectId в контроллерах.
+    async function _ensureProjectIdColumn(table) {
       try {
-        await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL`);
-        await db.query(`CREATE INDEX IF NOT EXISTS ix_${t}_project_id ON ${t}(project_id)`);
-      } catch (e) { console.warn(`[ensureSchema] project_id on ${t} failed:`, e.message); }
+        await db.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS project_id UUID`);
+      } catch (e) {
+        console.warn(`[ensureSchema] add project_id column on ${table} failed:`, e.message);
+        return false;
+      }
+      try {
+        await db.query(`CREATE INDEX IF NOT EXISTS ix_${table}_project_id ON ${table}(project_id)`);
+      } catch (e) {
+        console.warn(`[ensureSchema] project_id index on ${table} failed:`, e.message);
+      }
+      try {
+        const { rows } = await db.query(
+          `SELECT 1 FROM pg_constraint WHERE conname = $1`,
+          [`fk_${table}_project_id`],
+        );
+        if (!rows.length) {
+          await db.query(
+            `ALTER TABLE ${table}
+               ADD CONSTRAINT fk_${table}_project_id
+               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL`,
+          );
+        }
+      } catch (e) {
+        console.warn(`[ensureSchema] project_id FK on ${table} skipped:`, e.message);
+      }
+      return true;
+    }
+    for (const t of ['info_article_tasks', 'link_article_tasks', 'meta_tag_tasks', 'article_topic_tasks', 'relevance_reports', 'forecaster_tasks', 'serp_b2b_tasks']) {
+      await _ensureProjectIdColumn(t);
     }
     // tasks и category_lead_tasks — необязательные (могут отсутствовать)
     for (const t of ['tasks', 'category_lead_tasks']) {
       try {
         const { rows } = await db.query(`SELECT to_regclass($1) AS r`, [t]);
-        if (rows[0]?.r) {
-          await db.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL`);
-          await db.query(`CREATE INDEX IF NOT EXISTS ix_${t}_project_id ON ${t}(project_id)`);
-        }
+        if (rows[0]?.r) await _ensureProjectIdColumn(t);
       } catch (e) { console.warn(`[ensureSchema] project_id on ${t} failed:`, e.message); }
     }
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS keywords_top50 INTEGER`);
