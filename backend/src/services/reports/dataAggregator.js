@@ -12,6 +12,7 @@ const { sanitizeData } = require('./viewModeSanitizer');
 const freshnessService = require('../projects/freshnessService');
 const { buildHeadline } = require('./headlineBuilder');
 const { splitSeriesIntoMonths } = require('../projects/periodResolver');
+const { applyOverrides } = require('./overridesApplier');
 const { classifyQuery, deriveBrandTokens } = require('../projects/commercialIntent');
 
 /**
@@ -783,6 +784,18 @@ async function aggregateForDraft(draft, opts = {}) {
   } catch (err) {
     console.error('[reports][headline] build failed:', err.message);
     payload.headline = null;
+  }
+
+  // ТЗ §6: ручные правки чисел и AI-блоков. Применяем ПОСЛЕ headline, но
+  // ДО sanitize — sanitize не должен трогать пользовательские значения,
+  // а наоборот, может уронить тех. поля, прокинутые правкой случайно.
+  // overrides сохраняются в draft.overrides (миграция 088).
+  if (draft && draft.overrides && typeof draft.overrides === 'object') {
+    try {
+      applyOverrides(payload, draft.overrides);
+    } catch (err) {
+      console.error('[reports][overrides] apply failed:', err.message);
+    }
   }
 
   return sanitizeData(payload, viewMode);

@@ -105,6 +105,17 @@ export const useReportsStore = defineStore('reports', {
       return data;
     },
 
+    // ТЗ §6: точечные правки чисел/строк в отчёте и AI-блоков.
+    // overrides = { "<dot.path>": value | null }; null удаляет правку.
+    async patchOverrides(id, overrides) {
+      const { data } = await api.patch(`/reports/drafts/${id}/overrides`, { overrides });
+      return data;
+    },
+    async patchSummary(id, payload) {
+      const { data } = await api.patch(`/reports/drafts/${id}/summary`, payload);
+      return data;
+    },
+
     async publishDraft(id, payload) {
       const { data } = await api.post(`/reports/drafts/${id}/publish`, payload);
       return data;

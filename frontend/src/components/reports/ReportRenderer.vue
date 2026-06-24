@@ -7,6 +7,7 @@ import PositionChart from '../PositionChart.vue';
 import ReportModulesCard from './ReportModulesCard.vue';
 import DataStateWrapper from '../DataStateWrapper.vue';
 import ExecutiveHeadline from './ExecutiveHeadline.vue';
+import EditableValue from './EditableValue.vue';
 
 const props = defineProps({
   data:        { type: Object, default: () => ({}) },
@@ -22,8 +23,23 @@ const props = defineProps({
   capturedAt:  { type: String, default: null },
   readonly:    { type: Boolean, default: true },
   loading:     { type: Boolean, default: false },
+  // ТЗ §6: карта overrides_meta из черновика — { path: { author_id, updated_at } }.
+  // Если передана, на отредактированных вручную полях рисуется бейдж ✏️.
+  overridesMeta: { type: Object, default: () => ({}) },
 });
-const emit = defineEmits(['update:tasksBlocks']);
+const emit = defineEmits(['update:tasksBlocks', 'override:update', 'override:reset']);
+
+// ТЗ §6: бейджи «изменено вручную» по карте overrides_meta из черновика.
+// Родитель (ReportEditorPage) передаёт `overridesMeta` пропсом (вычисляет
+// из draft.overrides_meta); если пропа нет — бейджи просто не показываются.
+function isOverridden(path) {
+  if (!path) return false;
+  const map = props.overridesMeta || props.data?._overrides_meta || null;
+  if (!map || typeof map !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(map, path);
+}
+function onOverrideUpdate(path, value) { emit('override:update', path, value); }
+function onOverrideReset(path) { emit('override:reset', path); }
 
 const isClient = computed(() => props.viewMode === 'client');
 
@@ -161,33 +177,33 @@ const totals = computed(() => {
   const out = [];
   const g = props.data?.gsc?.totals;
   if (g) {
-    out.push({ label: 'Google клики', value: Number(g.clicks || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Google показы', value: Number(g.impressions || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Google CTR', value: g.ctr != null ? `${Number(g.ctr).toFixed(2)}%` : '—' });
-    out.push({ label: 'Google ср. позиция', value: g.position != null ? Number(g.position).toFixed(1) : '—' });
+    out.push({ label: 'Google клики', value: Number(g.clicks || 0).toLocaleString('ru-RU'), raw: g.clicks, path: 'gsc.totals.clicks', type: 'int' });
+    out.push({ label: 'Google показы', value: Number(g.impressions || 0).toLocaleString('ru-RU'), raw: g.impressions, path: 'gsc.totals.impressions', type: 'int' });
+    out.push({ label: 'Google CTR', value: g.ctr != null ? `${Number(g.ctr).toFixed(2)}%` : '—', raw: g.ctr, path: 'gsc.totals.ctr', type: 'float' });
+    out.push({ label: 'Google ср. позиция', value: g.position != null ? Number(g.position).toFixed(1) : '—', raw: g.position, path: 'gsc.totals.position', type: 'float' });
   }
   const y = props.data?.ywm?.totals;
   if (y) {
-    out.push({ label: 'Яндекс клики', value: Number(y.clicks || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Яндекс показы', value: Number(y.impressions || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'Яндекс CTR', value: y.ctr != null ? `${Number(y.ctr).toFixed(2)}%` : '—' });
+    out.push({ label: 'Яндекс клики', value: Number(y.clicks || 0).toLocaleString('ru-RU'), raw: y.clicks, path: 'ywm.totals.clicks', type: 'int' });
+    out.push({ label: 'Яндекс показы', value: Number(y.impressions || 0).toLocaleString('ru-RU'), raw: y.impressions, path: 'ywm.totals.impressions', type: 'int' });
+    out.push({ label: 'Яндекс CTR', value: y.ctr != null ? `${Number(y.ctr).toFixed(2)}%` : '—', raw: y.ctr, path: 'ywm.totals.ctr', type: 'float' });
   }
   const k = props.data?.keys_so?.yandex?.current || props.data?.keys_so?.current;
   if (k) {
-    out.push({ label: 'Видимость Яндекс (Keys.so)', value: k.visibility != null ? Number(k.visibility).toFixed(2) : '—' });
-    out.push({ label: 'ТОП-10 Яндекс', value: Number(k.top10 || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'ТОП-50 Яндекс', value: Number(k.top50 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Видимость Яндекс (Keys.so)', value: k.visibility != null ? Number(k.visibility).toFixed(2) : '—', raw: k.visibility, path: 'keys_so.yandex.current.visibility', type: 'float' });
+    out.push({ label: 'ТОП-10 Яндекс', value: Number(k.top10 || 0).toLocaleString('ru-RU'), raw: k.top10, path: 'keys_so.yandex.current.top10', type: 'int' });
+    out.push({ label: 'ТОП-50 Яндекс', value: Number(k.top50 || 0).toLocaleString('ru-RU'), raw: k.top50, path: 'keys_so.yandex.current.top50', type: 'int' });
   }
   const kg = props.data?.keys_so?.google?.current;
   if (kg) {
-    out.push({ label: 'Видимость Google (Keys.so)', value: kg.visibility != null ? Number(kg.visibility).toFixed(2) : '—' });
-    out.push({ label: 'ТОП-10 Google', value: Number(kg.top10 || 0).toLocaleString('ru-RU') });
-    out.push({ label: 'ТОП-50 Google', value: Number(kg.top50 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Видимость Google (Keys.so)', value: kg.visibility != null ? Number(kg.visibility).toFixed(2) : '—', raw: kg.visibility, path: 'keys_so.google.current.visibility', type: 'float' });
+    out.push({ label: 'ТОП-10 Google', value: Number(kg.top10 || 0).toLocaleString('ru-RU'), raw: kg.top10, path: 'keys_so.google.current.top10', type: 'int' });
+    out.push({ label: 'ТОП-50 Google', value: Number(kg.top50 || 0).toLocaleString('ru-RU'), raw: kg.top50, path: 'keys_so.google.current.top50', type: 'int' });
   }
   const p = props.data?.position?.summary;
   if (p) {
-    out.push({ label: 'Средняя позиция', value: p.avg_position != null ? Number(p.avg_position).toFixed(1) : '—' });
-    out.push({ label: 'Запросов в ТОП-10', value: Number(p.top10 || 0).toLocaleString('ru-RU') });
+    out.push({ label: 'Средняя позиция', value: p.avg_position != null ? Number(p.avg_position).toFixed(1) : '—', raw: p.avg_position, path: 'position.summary.avg_position', type: 'float' });
+    out.push({ label: 'Запросов в ТОП-10', value: Number(p.top10 || 0).toLocaleString('ru-RU'), raw: p.top10, path: 'position.summary.top10', type: 'int' });
   }
   return out;
 });
@@ -566,7 +582,18 @@ function formatNum(v) {
       <div v-else class="totals-grid">
         <div v-for="(t, i) in totals" :key="i" class="total-card">
           <div class="t-label">{{ t.label }}</div>
-          <div class="t-value">{{ t.value }}</div>
+          <div class="t-value">
+            <EditableValue
+              :display-value="t.value"
+              :raw-value="t.raw"
+              :path="t.path"
+              :type="t.type"
+              :editable="!readonly"
+              :overridden="isOverridden(t.path)"
+              @update="onOverrideUpdate"
+              @reset="onOverrideReset"
+            />
+          </div>
         </div>
       </div>
     </section>

@@ -2448,6 +2448,9 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_vulnerabilities JSONB`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_roadmap JSONB`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_traffic_value TEXT`);
+    // ТЗ §6: ручные правки чисел/AI-блоков (миграция 088)
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS keywords_top50 INTEGER`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS adcost NUMERIC(14,2)`);
     await db.query(`ALTER TABLE keys_so_cache ADD COLUMN IF NOT EXISTS search_engine VARCHAR(8) NOT NULL DEFAULT 'yandex'`);

@@ -134,6 +134,30 @@ async function onTasksBlocksUpdate(next) {
   await store.updateTasksBlocks(route.params.id, next);
 }
 
+// ТЗ §6: ручные правки чисел/строк в отчёте. Сохраняем точечно через
+// PATCH /overrides, после чего перезагружаем data, чтобы applyOverrides на
+// бэке отрисовал значение с учётом всех зависимых полей (например,
+// дельты). Optimistic-обновление data делать не пытаемся — overrides могут
+// влиять на агрегаты.
+async function onOverrideUpdate(path, value) {
+  try {
+    await store.patchOverrides(route.params.id, { [path]: value });
+    await store.fetchDraft(route.params.id);
+    await store.fetchData(route.params.id, { ...viewRange.value, viewMode: previewMode.value });
+  } catch (e) {
+    console.error('[reports] override update failed:', e);
+  }
+}
+async function onOverrideReset(path) {
+  try {
+    await store.patchOverrides(route.params.id, { [path]: null });
+    await store.fetchDraft(route.params.id);
+    await store.fetchData(route.params.id, { ...viewRange.value, viewMode: previewMode.value });
+  } catch (e) {
+    console.error('[reports] override reset failed:', e);
+  }
+}
+
 async function publish() {
   publishError.value = null;
   try {
@@ -335,7 +359,10 @@ function _stateOf(section) {
             mode="live"
             :view-mode="previewMode"
             :readonly="false"
-            @update:tasksBlocks="onTasksBlocksUpdate" />
+            :overrides-meta="draft.overrides_meta || {}"
+            @update:tasksBlocks="onTasksBlocksUpdate"
+            @override:update="onOverrideUpdate"
+            @override:reset="onOverrideReset" />
         </main>
       </div>
 
