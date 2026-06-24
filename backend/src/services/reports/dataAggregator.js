@@ -10,6 +10,7 @@ const positionAnalytics = require('../positionTracker/analytics');
 const { buildModulesForProject } = require('./reportModulesService');
 const { sanitizeData } = require('./viewModeSanitizer');
 const freshnessService = require('../projects/freshnessService');
+const { buildHeadline } = require('./headlineBuilder');
 
 function _isoDate(value) {
   if (value == null) return '';
@@ -520,6 +521,17 @@ async function aggregateForDraft(draft, opts = {}) {
     forecast: _buildForecast(gsc, keysSo),
     generated_at: new Date().toISOString(),
   };
+
+  // Sprint 2: client-first headline (главный KPI, что изменилось, top-3
+  // достижения/риска). Чисто детерминированный блок над уже собранным
+  // payload — не зависит от LLM. Безопасно для client mode по построению
+  // (не содержит технических полей).
+  try {
+    payload.headline = buildHeadline(payload, draft?.summary || draft?.llm_summary || null);
+  } catch (err) {
+    console.error('[reports][headline] build failed:', err.message);
+    payload.headline = null;
+  }
 
   return sanitizeData(payload, viewMode);
 }

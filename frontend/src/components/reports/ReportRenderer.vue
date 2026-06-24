@@ -6,6 +6,7 @@ import ReportTrendChart from './ReportTrendChart.vue';
 import PositionChart from '../PositionChart.vue';
 import ReportModulesCard from './ReportModulesCard.vue';
 import DataStateWrapper from '../DataStateWrapper.vue';
+import ExecutiveHeadline from './ExecutiveHeadline.vue';
 
 const props = defineProps({
   data:        { type: Object, default: () => ({}) },
@@ -428,6 +429,12 @@ function formatAbsDelta(d) {
         </template>
       </span>
     </div>
+
+    <!-- Sprint 2: Executive Headline (client-first). Источник — data.headline,
+         собирается в backend/src/services/reports/headlineBuilder.js. -->
+    <ExecutiveHeadline :headline="data?.headline"
+                       :view-mode="viewMode"
+                       :accent="accent" />
 
     <section v-if="summary?.executive_summary" id="report-ai-analysis" class="rblk">
       <h2>Executive Summary</h2>
