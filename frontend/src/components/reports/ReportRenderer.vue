@@ -378,71 +378,11 @@ function formatDateTime(iso) {
 }
 
 // --- Chart growth dynamics helpers ---
-// Дельты считаются ТОЛЬКО по полным месяцам (ТЗ §3). Если backend отдал
-// `totals_complete` и `prev_totals_complete` — используем их напрямую. Иначе
-// (старые черновики без series_meta) fallback к попарному сравнению последних
-// двух точек series, но и тут защищаемся от ситуации «последняя точка ещё
-// неполная» (series_meta.last_period_partial) и берём предпоследнюю.
-function _deltaFromTotals(section, key) {
-  if (!section) return null;
-  const cur = section.totals_complete;
-  const prev = section.prev_totals_complete;
-  if (cur && Number.isFinite(Number(cur[key]))) {
-    const last = Number(cur[key]) || 0;
-    const prevVal = prev && Number.isFinite(Number(prev[key])) ? (Number(prev[key]) || 0) : null;
-    if (prevVal == null) return { last, prev: 0, diff: 0, pct: null, source: 'complete-no-prev' };
-    const diff = last - prevVal;
-    const pct = prevVal > 0 ? Math.round((diff / prevVal) * 1000) / 10 : null;
-    return { last, prev: prevVal, diff, pct, source: 'complete' };
-  }
-  return null;
-}
-function _computeDeltas(series, key, opts = {}) {
-  if (!Array.isArray(series) || series.length < 2) return null;
-  // Если последняя точка — частичный месяц, не сравниваем с ней (ТЗ §3),
-  // сдвигаемся на одну позицию назад.
-  const partial = opts && opts.lastPartial;
-  const end = partial ? series.length - 2 : series.length - 1;
-  if (end < 1) return null;
-  const last = Number(series[end]?.[key]) || 0;
-  const prev = Number(series[end - 1]?.[key]) || 0;
-  if (!prev && !last) return null;
-  const diff = last - prev;
-  const pct = prev > 0 ? Math.round((diff / prev) * 1000) / 10 : null;
-  return { last, prev, diff, pct, source: partial ? 'series-skip-partial' : 'series' };
-}
-
-const gscDeltas = computed(() => {
-  const sec = props.data?.gsc || {};
-  const series = sec.series || [];
-  const partial = !!sec.series_meta?.last_period_partial;
-  return {
-    clicks:      _deltaFromTotals(sec, 'clicks')      || _computeDeltas(series, 'clicks',      { lastPartial: partial }),
-    impressions: _deltaFromTotals(sec, 'impressions') || _computeDeltas(series, 'impressions', { lastPartial: partial }),
-  };
-});
-
-const ywmDeltas = computed(() => {
-  const sec = props.data?.ywm || {};
-  const series = sec.series || [];
-  const partial = !!sec.series_meta?.last_period_partial;
-  return {
-    clicks:      _deltaFromTotals(sec, 'clicks')      || _computeDeltas(series, 'clicks',      { lastPartial: partial }),
-    impressions: _deltaFromTotals(sec, 'impressions') || _computeDeltas(series, 'impressions', { lastPartial: partial }),
-  };
-});
-
-const keysDeltas = computed(() => {
-  const engine = keysEngine.value;
-  const engineData = engine === 'google' ? props.data?.keys_so?.google : props.data?.keys_so?.yandex;
-  const series = engineData?.series || (engine === 'yandex' ? (props.data?.keys_so?.series || []) : []);
-  // Keys.so пока не даёт series_meta — сравнение «последняя vs предыдущая»
-  // точка остаётся как fallback. Для месячного среза это не критично.
-  return {
-    top10: _computeDeltas(series, 'keywords_top10'),
-    top50: _computeDeltas(series, 'keywords_top50'),
-  };
-});
+// Раньше здесь жили _deltaFromTotals/_computeDeltas/gscDeltas/ywmDeltas/keysDeltas
+// и плашки «+/–» над графиками GSC / Я.Вебмастер / Keys.so. По запросу клиента
+// эти подписи убраны: способ расчёта дельт оказался непрозрачным для конечного
+// читателя отчёта. Динамика остаётся видимой на самих графиках; KPI-карточки и
+// ExecutiveHeadline продолжают показывать дельты по полным месяцам отдельно.
 
 // Период «за полные месяцы N — M» для подписи под KPI / дельтами.
 const completePeriodLabel = computed(() => {
@@ -471,17 +411,10 @@ const hasPartialTail = computed(() => {
          || props.data?.ywm?.series_meta?.last_period_partial);
 });
 
-function formatDelta(d) {
-  if (!d) return '';
-  const sign = d.pct >= 0 ? '+' : '';
-  return d.pct != null ? `${sign}${d.pct}%` : '';
-}
-
-function formatAbsDelta(d) {
-  if (!d) return '';
-  const sign = d.diff >= 0 ? '+' : '';
-  return `${sign}${Math.round(d.diff).toLocaleString('ru-RU')}`;
-}
+// formatDelta/formatAbsDelta удалены вместе с плашками «+/–» над графиками
+// GSC/Я.Вебмастер/Keys.so — способ расчёта дельт оказался непрозрачен для
+// клиента. KPI-карточки и ExecutiveHeadline считают и показывают дельты
+// отдельно (см. KPICard.vue / ExecutiveHeadline.vue).
 
 // ТЗ §4: разбиение топ-запросов и страниц по интенту.
 // По умолчанию активна вкладка «Коммерческие» — именно эти запросы приносят
@@ -609,14 +542,6 @@ function formatNum(v) {
     <section id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
       <h2>Google Search Console</h2>
       <p class="chart-desc">Клики, показы и CTR из органической выдачи Google за выбранный период.</p>
-      <div v-if="gscDeltas.clicks || gscDeltas.impressions" class="chart-deltas">
-        <span v-if="gscDeltas.clicks" class="delta-badge" :class="{ up: gscDeltas.clicks.diff >= 0, down: gscDeltas.clicks.diff < 0 }">
-          Клики: {{ formatAbsDelta(gscDeltas.clicks) }} ({{ formatDelta(gscDeltas.clicks) }})
-        </span>
-        <span v-if="gscDeltas.impressions" class="delta-badge" :class="{ up: gscDeltas.impressions.diff >= 0, down: gscDeltas.impressions.diff < 0 }">
-          Показы: {{ formatAbsDelta(gscDeltas.impressions) }} ({{ formatDelta(gscDeltas.impressions) }})
-        </span>
-      </div>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.gsc) === 'error'" class="section-error">
         <span class="error-icon">⚠️</span> Ошибка загрузки данных GSC: {{ sectionError(data?.gsc) }}
@@ -634,14 +559,6 @@ function formatNum(v) {
     <section id="report-ywm" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
       <h2>Яндекс.Вебмастер</h2>
       <p class="chart-desc">Клики, показы и CTR из Яндекс.Вебмастер за выбранный период.</p>
-      <div v-if="ywmDeltas.clicks || ywmDeltas.impressions" class="chart-deltas">
-        <span v-if="ywmDeltas.clicks" class="delta-badge" :class="{ up: ywmDeltas.clicks.diff >= 0, down: ywmDeltas.clicks.diff < 0 }">
-          Клики: {{ formatAbsDelta(ywmDeltas.clicks) }} ({{ formatDelta(ywmDeltas.clicks) }})
-        </span>
-        <span v-if="ywmDeltas.impressions" class="delta-badge" :class="{ up: ywmDeltas.impressions.diff >= 0, down: ywmDeltas.impressions.diff < 0 }">
-          Показы: {{ formatAbsDelta(ywmDeltas.impressions) }} ({{ formatDelta(ywmDeltas.impressions) }})
-        </span>
-      </div>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.ywm) === 'error'" class="section-error">
         <span class="error-icon">⚠️</span> Ошибка загрузки данных Яндекс: {{ sectionError(data?.ywm) }}
@@ -671,14 +588,6 @@ function formatNum(v) {
           :disabled="!hasGoogleKeys"
           @click="keysEngine = 'google'"
         >Google</button>
-      </div>
-      <div v-if="keysDeltas.top10 || keysDeltas.top50" class="chart-deltas">
-        <span v-if="keysDeltas.top10" class="delta-badge" :class="{ up: keysDeltas.top10.diff >= 0, down: keysDeltas.top10.diff < 0 }">
-          ТОП-10: {{ formatAbsDelta(keysDeltas.top10) }} ({{ formatDelta(keysDeltas.top10) }})
-        </span>
-        <span v-if="keysDeltas.top50" class="delta-badge" :class="{ up: keysDeltas.top50.diff >= 0, down: keysDeltas.top50.diff < 0 }">
-          ТОП-50: {{ formatAbsDelta(keysDeltas.top50) }} ({{ formatDelta(keysDeltas.top50) }})
-        </span>
       </div>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.keys_so) === 'error'" class="section-error">
@@ -1055,9 +964,6 @@ function formatNum(v) {
 .actions-inline { display: flex; gap: 8px; flex-wrap: wrap; }
 .empty { color: #6e6e73; }
 .chart-desc { color: #6e6e73; font-size: 13px; margin: -2px 0 10px; line-height: 1.4; }
-.chart-deltas {
-  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
-}
 .period-warning {
   background: rgba(245, 158, 11, 0.10); color: #b45309;
   border: 1px solid rgba(245, 158, 11, 0.25);
@@ -1066,17 +972,6 @@ function formatNum(v) {
 }
 .period-hint {
   color: #6b7280; font-size: 12px; margin: -4px 0 12px;
-}
-.delta-badge {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 5px 12px; border-radius: 10px;
-  font-size: 13px; font-weight: 600;
-}
-.delta-badge.up {
-  background: rgba(16, 185, 129, 0.1); color: #059669;
-}
-.delta-badge.down {
-  background: rgba(239, 68, 68, 0.08); color: #b91c1c;
 }
 .growth-header {
   display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 4px;

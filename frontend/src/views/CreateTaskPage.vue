@@ -6,6 +6,7 @@ import AppLayout from '../components/AppLayout.vue';
 import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import RichTextInput from '../components/RichTextInput.vue';
+import ProjectPicker from '../components/ProjectPicker.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -52,8 +53,54 @@ const form = reactive({
   source_relevance_report_id: '',
 });
 
+// Привязка к SEO-проекту (ТЗ §5/§8). Хранится отдельно от формы:
+// project_id уходит в payload createTask, бэкенд снимает project_context_snapshot.
+const PROJECT_ID_LS_KEY = 'create_task_project_id_v1';
+const selectedProjectId = ref(null);
+const selectedProject   = ref(null);
+
+function handleProjectSelected(project) {
+  selectedProject.value = project || null;
+  try {
+    if (selectedProjectId.value) {
+      localStorage.setItem(PROJECT_ID_LS_KEY, String(selectedProjectId.value));
+    } else {
+      localStorage.removeItem(PROJECT_ID_LS_KEY);
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function handleProjectFull(ctx) {
+  if (!ctx) return;
+  // Предзаполняем ТОЛЬКО пустые поля — ручной ввод имеет приоритет.
+  if (!form.input_region?.trim() && ctx.market?.region) {
+    form.input_region = ctx.market.region;
+  }
+  if (!form.input_brand_name?.trim() && ctx.brand?.name) {
+    form.input_brand_name = ctx.brand.name;
+  }
+  if (!form.input_target_audience?.trim() && ctx.brand?.audience) {
+    form.input_target_audience = ctx.brand.audience;
+  }
+  if (!form.input_brand_facts?.trim() && Array.isArray(ctx.brand?.facts) && ctx.brand.facts.length) {
+    form.input_brand_facts = ctx.brand.facts.slice(0, 8).map((f) => `• ${f}`).join('\n');
+  }
+  if (!form.input_business_type?.trim() && ctx.brand?.business_type) {
+    form.input_business_type = ctx.brand.business_type;
+  }
+}
+
 // Загружаем черновик при редактировании
 onMounted(async () => {
+  // Восстанавливаем выбранный проект (ТЗ §5/§8) — независимо от режима edit.
+  try {
+    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
+    if (pid) {
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
+  } catch (_) { /* ignore */ }
+
   if (isEdit.value) {
     loading.value = true;
     try {
@@ -474,6 +521,9 @@ async function saveDraft({ silent = false } = {}) {
   try {
     const payload = { ...form };
     if (!payload.title) payload.title = payload.input_target_service || 'Черновик';
+    // ТЗ §5/§8: пробрасываем выбранный проект (бэкенд снимет project_context_snapshot
+    // и подтянет недостающие поля из buildProjectContext).
+    if (selectedProjectId.value) payload.project_id = selectedProjectId.value;
 
     if (isEdit.value) {
       await store.updateTask(route.params.id, payload);
@@ -537,6 +587,21 @@ function downloadExampleTZ() {
       <div v-if="loading" class="text-center py-20 text-gray-500">Загрузка...</div>
 
       <div v-else class="space-y-3">
+
+        <!-- ── ProjectPicker (ТЗ §5/§8) ──────────────────────────── -->
+        <div class="card p-4">
+          <ProjectPicker
+            v-model="selectedProjectId"
+            @context="handleProjectSelected"
+            @fullContext="handleProjectFull"
+            label="Проект (необязательно)"
+            placeholder="— Без проекта —"
+          />
+          <p v-if="selectedProject" class="mt-2 text-xs text-emerald-300">
+            📂 Контекст проекта «{{ selectedProject.name }}» подтянется в генерацию
+            (бренд, ниша, регион, факты, конкуренты).
+          </p>
+        </div>
 
         <!-- ── Секция 1: Основные данные ──────────────────────────── -->
         <div class="card p-0 overflow-hidden">

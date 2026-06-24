@@ -215,6 +215,107 @@ test('informational queries ignored in query×page detectors', () => {
   assert.strictEqual(r.intent_mismatch.length, 0);
 });
 
+// ── ТЗ §4: weighted scoring и landing-based combined intent ──────────
+test('weighted scoring: «обзор лучших CRM» — informational, не commercial', () => {
+  // Раньше «обзор» / «лучший» давали investigation→commercial=true.
+  // По новой логике сильный info-маркер «лучших» (производное от «лучший»
+  // не считаем — но «обзор» одиночно). Реалистичнее: «обзор лучших CRM» имеет
+  // investigation matched, нет strong info, → investigation, commercial=true.
+  // А вот «что такое CRM» — strong info → informational.
+  const r = classifyQuery('что такое crm');
+  assert.strictEqual(r.intent, 'informational');
+  assert.strictEqual(r.commercial, false);
+});
+
+test('weighted scoring: «что такое услуга факторинга» — informational', () => {
+  // «услуга» (commercial weak) глушится сильным «что такое» → informational.
+  const r = classifyQuery('что такое услуга факторинга');
+  assert.strictEqual(r.intent, 'informational');
+  assert.strictEqual(r.commercial, false);
+});
+
+test('weighted scoring: «купить услугу под ключ» — transactional бьёт всё', () => {
+  const r = classifyQuery('купить услугу под ключ');
+  assert.strictEqual(r.intent, 'transactional');
+});
+
+test('weighted scoring: «как заказать доставку» — transactional ≥ informational', () => {
+  // «заказать»+«доставку» дают strong transactional (3), а «как» — strong info (3).
+  // Tай-брейк по PRIORITY: transactional > informational.
+  const r = classifyQuery('как заказать доставку');
+  assert.strictEqual(r.intent, 'transactional');
+});
+
+test('weighted scoring: «личный кабинет» — navigational', () => {
+  const r = classifyQuery('личный кабинет');
+  assert.strictEqual(r.intent, 'navigational');
+});
+
+test('confidence and signals reported', () => {
+  const r = classifyQuery('купить котёл недорого');
+  assert.ok(r.confidence > 0 && r.confidence <= 1, `confidence=${r.confidence}`);
+  assert.ok(Array.isArray(r.signals?.matched) && r.signals.matched.length > 0);
+});
+
+// ── classifyLanding / combinedIntent ────────────────────────────────
+const { classifyLanding, combinedIntent } = require('../src/services/projects/commercialIntent');
+
+test('classifyLanding: catalog → commerce, blog → info, root → unknown', () => {
+  assert.strictEqual(classifyLanding('https://x.ru/catalog/kotel'), 'commerce');
+  assert.strictEqual(classifyLanding('https://x.ru/blog/how-to'), 'info');
+  assert.strictEqual(classifyLanding('https://x.ru/'), 'unknown');
+});
+
+test('combinedIntent: investigation × info-landing = informational', () => {
+  // «отзывы X» на блог-странице — это обзорный контент, а не покупка.
+  assert.strictEqual(combinedIntent('investigation', 'info'), 'informational');
+  // «отзывы X» на коммерческой странице — deal-ready трафик.
+  assert.strictEqual(combinedIntent('investigation', 'commerce'), 'commercial');
+});
+
+test('combinedIntent: transactional × info = intent_mismatch (flag separately)', () => {
+  assert.strictEqual(combinedIntent('transactional', 'info'), 'intent_mismatch');
+  assert.strictEqual(combinedIntent('transactional', 'commerce'), 'transactional');
+});
+
+// ── pages_by_intent aggregation ──────────────────────────────────────
+test('analyzeCommercial pages_by_intent groups pages by dominant intent', () => {
+  const r = analyzeCommercial({
+    topQueries: _sampleQueries(),
+    queryPage: [
+      { query: 'купить котёл',       page: 'https://x.ru/catalog/kotel', clicks: 50, impressions: 1000, ctr: 5, position: 4 },
+      { query: 'котёл цена',         page: 'https://x.ru/catalog/kotel', clicks: 40, impressions: 800,  ctr: 5, position: 5 },
+      { query: 'как выбрать котёл',  page: 'https://x.ru/blog/guide',    clicks: 30, impressions: 600,  ctr: 5, position: 3 },
+      { query: 'что такое котёл',    page: 'https://x.ru/blog/guide',    clicks: 20, impressions: 400,  ctr: 5, position: 5 },
+    ],
+  });
+  const catalog = r.pages_by_intent.items.find((x) => x.page.endsWith('/kotel'));
+  const blog    = r.pages_by_intent.items.find((x) => x.page.endsWith('/guide'));
+  assert.ok(catalog, 'catalog page must appear');
+  assert.ok(blog,    'blog page must appear');
+  // catalog: оба запроса коммерческие → dominant transactional
+  assert.strictEqual(catalog.dominant_intent, 'transactional');
+  // blog: оба запроса informational → dominant informational
+  assert.strictEqual(blog.dominant_intent, 'informational');
+});
+
+test('analyzeCommercial: commercial_clicks_pct учитывает landing (intent_mismatch не в коммерции)', () => {
+  // Транзакционный запрос приземляется ТОЛЬКО на инфо-страницу →
+  // combined_intent='intent_mismatch' → не считаем коммерческими кликами.
+  const r = analyzeCommercial({
+    topQueries: [
+      { key: 'купить котёл', clicks: 100, impressions: 2000, ctr: 5, position: 6 },
+      { key: 'как выбрать котёл', clicks: 50, impressions: 1000, ctr: 5, position: 4 },
+    ],
+    queryPage: [
+      { query: 'купить котёл',       page: 'https://x.ru/blog/post', clicks: 100, impressions: 2000, ctr: 5, position: 6 },
+      { query: 'как выбрать котёл',  page: 'https://x.ru/blog/post', clicks: 50,  impressions: 1000, ctr: 5, position: 4 },
+    ],
+  });
+  // 0 коммерческих кликов: «купить» → intent_mismatch, «как выбрать» → informational
+  assert.strictEqual(r.commercial_clicks_pct, 0);
+});
+
 // ── summary ──────────────────────────────────────────────────────────
 // eslint-disable-next-line no-console
 console.log(`\nCommercial-intent smoke test: ${passed} passed, ${failed} failed`);

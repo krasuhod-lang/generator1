@@ -27,7 +27,7 @@ import api from '../api.js';
 import { loadProjectsOptions } from '../utils/projectsCache.js';
 
 const props = defineProps({
-  modelValue: { type: [Number, null], default: null },
+  modelValue: { type: [String, Number, null], default: null },
   required: { type: Boolean, default: false },
   placeholder: { type: String, default: '— Без проекта —' },
   label: { type: String, default: 'Проект' },
@@ -55,15 +55,15 @@ onMounted(load);
 const selected = computed({
   get: () => props.modelValue,
   set: (v) => {
-    const id = v === '' || v == null ? null : Number(v);
+    // project_id может быть UUID-строкой ИЛИ целым числом (legacy).
+    // Не приводим к Number — это ломает UUID.
+    const id = v === '' || v == null ? null : v;
     emit('update:modelValue', id);
     if (id == null) { emit('context', null); return; }
     // Лёгкий объект из cache, чтобы UI обновился немедленно.
-    const proj = projects.value.find((p) => p.id === id) || null;
+    const proj = projects.value.find((p) => String(p.id) === String(id)) || null;
     emit('context', proj);
     // Параллельно тянем полный контекст (бренд, факты, регион — ТЗ §8).
-    // Эмитим отдельным событием, чтобы консьюмер мог либо использовать
-    // быстрый ответ, либо дождаться полного.
     api.get(`/projects/${id}/context`).then((r) => {
       const ctx = r?.data?.context;
       if (ctx) emit('fullContext', ctx);
@@ -73,7 +73,7 @@ const selected = computed({
 
 watch(() => props.modelValue, (v) => {
   if (v == null) return;
-  const proj = projects.value.find((p) => p.id === Number(v));
+  const proj = projects.value.find((p) => String(p.id) === String(v));
   if (proj) emit('context', proj);
 });
 </script>

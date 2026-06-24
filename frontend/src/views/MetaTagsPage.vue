@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
+import ProjectPicker from '../components/ProjectPicker.vue';
 import { useMetaTagsStore } from '../stores/metaTags.js';
 
 const router = useRouter();
@@ -26,6 +27,24 @@ const form = ref({
 const submitting = ref(false);
 const formError  = ref(null);
 
+// ── ProjectPicker (ТЗ §5/§8) ─────────────────────────────────────────
+const PROJECT_ID_LS_KEY = 'meta_tags_project_id_v1';
+const selectedProjectId = ref(null);
+const selectedProject   = ref(null);
+function handleProjectSelected(project) {
+  selectedProject.value = project || null;
+  try {
+    if (selectedProjectId.value) localStorage.setItem(PROJECT_ID_LS_KEY, String(selectedProjectId.value));
+    else localStorage.removeItem(PROJECT_ID_LS_KEY);
+  } catch (_) { /* ignore */ }
+}
+function handleProjectFull(ctx) {
+  if (!ctx) return;
+  if (!form.value.brand?.trim() && ctx.brand?.name) form.value.brand = ctx.brand.name;
+  if (!form.value.niche?.trim() && ctx.brand?.niche) form.value.niche = ctx.brand.niche;
+  if (!form.value.toponym?.trim() && ctx.market?.region) form.value.toponym = ctx.market.region;
+}
+
 const keywordsList = computed(() =>
   form.value.keywords.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
 );
@@ -36,6 +55,13 @@ onMounted(() => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) Object.assign(form.value, JSON.parse(raw));
+  } catch (_) { /* ignore */ }
+  try {
+    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
+    if (pid) {
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
   } catch (_) { /* ignore */ }
 });
 function saveDraft() {
@@ -61,6 +87,7 @@ async function handleCreate() {
       keywords: keywordsList.value,
       llm_provider: form.value.llm_provider === 'grok' ? 'grok' : 'gemini',
       gemini_model: form.value.gemini_model,
+      project_id: selectedProjectId.value || null,
     };
     saveDraft();
     const id = await store.createTask(payload);
@@ -145,6 +172,20 @@ function formatDate(d) {
       <form @submit.prevent="handleCreate" class="card space-y-5">
         <div class="flex items-center gap-2 mb-1">
           <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">📝 Новая задача</h2>
+        </div>
+
+        <!-- ── ProjectPicker (ТЗ §5/§8) ── -->
+        <div>
+          <ProjectPicker
+            v-model="selectedProjectId"
+            @context="handleProjectSelected"
+            @fullContext="handleProjectFull"
+            label="Проект (необязательно)"
+            placeholder="— Без проекта —"
+          />
+          <p v-if="selectedProject" class="mt-1 text-[11px] text-emerald-300">
+            📂 Контекст проекта «{{ selectedProject.name }}» подтянется в генерацию.
+          </p>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">

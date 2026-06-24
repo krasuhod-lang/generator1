@@ -78,8 +78,11 @@ onMounted(() => {
   } catch (_) { /* ignore */ }
   try {
     const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
-    const n = pid ? Number(pid) : NaN;
-    if (Number.isInteger(n) && n > 0) selectedProjectId.value = n;
+    if (pid) {
+      // project_id может быть UUID-строкой ИЛИ числом (legacy) — не приводим к Number.
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
   } catch (_) { /* ignore */ }
   loadDraftForCurrentMode();
   store.fetchTasks();
@@ -906,9 +909,9 @@ const sortedTasks = computed(() =>
                  безусловный приоритет (см. partial «ПРАВИЛА КОНФЛИКТОВ»). -->
             <div>
               <label class="label">
-                Не охватывать темы <span class="text-gray-500 text-xs">(опц., 1 строка = 1 тема, до 30 строк / 2000 симв.)</span>
+                Не охватывать темы <span class="text-gray-500 text-xs">(опц., 1 строка = 1 тема, до 100 строк / 6000 симв.)</span>
               </label>
-              <textarea v-model="topicIdeasForm.exclude_topics" rows="3" class="textarea" maxlength="2000"
+              <textarea v-model="topicIdeasForm.exclude_topics" rows="6" class="textarea" maxlength="6000"
                         placeholder="как выбрать диван&#10;*детская мебель&#10;cluster: гарантия и возврат"></textarea>
               <p class="text-[11px] text-gray-500 mt-1">
                 Префикс <code>*</code> или <code>cluster:</code> в начале строки помечает

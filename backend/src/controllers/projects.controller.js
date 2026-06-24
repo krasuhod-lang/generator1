@@ -735,16 +735,28 @@ async function createShareLink(req, res, next) {
     let ttlDays = Number(body.ttlDays);
     if (!Number.isFinite(ttlDays) || ttlDays < 0) ttlDays = 90;
     if (ttlDays > 365) ttlDays = 365;
-    const expiresClause = ttlDays > 0 ? `NOW() + ($3 || ' days')::INTERVAL` : `NULL`;
-    const expiresParam = ttlDays > 0 ? [String(ttlDays)] : [];
+    const ttlString = ttlDays > 0 ? String(ttlDays) : null;
+
+    // Хелпер: возвращает SQL-выражение для share_expires_at и параметр,
+    // встраивая ttl в позицию `$${nextIndex}` и расширяя список параметров.
+    // Это устраняет баг с зашитым `$3` в общей переменной, из-за которого
+    // во второй ветке (выпуск нового токена) Postgres получал 4 binding'а,
+    // а в SQL находил только 3 плейсхолдера.
+    const appendExpires = (params) => {
+      if (ttlString == null) return 'NULL';
+      params.push(ttlString);
+      return `NOW() + ($${params.length} || ' days')::INTERVAL`;
+    };
 
     // Если токен уже есть — только обновим параметры доступа.
     if (project.share_token) {
+      const params = [project.id, mode];
+      const expiresClause = appendExpires(params);
       await db.query(
         `UPDATE projects
             SET share_mode=$2, share_expires_at=${expiresClause}, updated_at=NOW()
           WHERE id=$1`,
-        [project.id, mode, ...expiresParam],
+        params,
       );
       const { rows } = await db.query(
         `SELECT share_token, share_mode, share_expires_at, share_created_at
@@ -763,13 +775,15 @@ async function createShareLink(req, res, next) {
     let token = generateShareToken();
     for (let i = 0; i < 5; i++) {
       try {
+        const params = [project.id, token, mode];
+        const expiresClause = appendExpires(params);
         await db.query(
           `UPDATE projects
               SET share_token=$2, share_created_at=NOW(),
                   share_mode=$3, share_expires_at=${expiresClause},
                   updated_at=NOW()
             WHERE id=$1`,
-          [project.id, token, mode, ...expiresParam],
+          params,
         );
         break;
       } catch (err) {

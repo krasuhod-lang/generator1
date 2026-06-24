@@ -261,6 +261,7 @@ function buildArticleKnowledgeBase(input = {}) {
     knowledgeGraph      = null,
     moduleContext       = null,
     relevanceSignals    = null, // Wave 2/3: report.competitor_signals из relevance-pipeline
+    projectContextBlock = '',   // ТЗ §5/§8: рендер из projects/projectContextBlock
   } = input;
 
   // Реальные тексты аудитории/ниши приходят как сериализованные
@@ -294,6 +295,18 @@ function buildArticleKnowledgeBase(input = {}) {
     'аудитория/ниша. Используй эту базу как ИСТОЧНИК ИСТИНЫ при генерации, рефайне и аудите. ' +
     'НЕ выдумывай факты, отсутствующие здесь. НЕ повторяй буквально — синтезируй.'
   );
+
+  // ── 0. КОНТЕКСТ ПРОЕКТА (ТЗ §5/§8) ──────────────────────────────
+  // Если задача привязана к SEO-проекту — здесь идёт его «портрет»: бренд,
+  // регион, ниша, аудитория, год/валюта, факты, конкуренты, доля
+  // коммерческого трафика, опубликованные темы, каннибализационные сигналы.
+  // Локальные поля задачи (input_*) ВСЕГДА имеют приоритет над контекстом
+  // проекта — правило прописано внутри блока (см. partial
+  // _projectContext.partial.txt).
+  if (projectContextBlock && projectContextBlock.trim()) {
+    sections.push('\n## 0. КОНТЕКСТ ПРОЕКТА');
+    sections.push(projectContextBlock.trim());
+  }
 
   // ── 1. Brand & Offer ─────────────────────────────────────────────
   sections.push('\n## 1. Brand & Offer');

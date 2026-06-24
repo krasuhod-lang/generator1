@@ -8,6 +8,7 @@ const { generationQueue } = require('../queue/queue');
 const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -162,6 +163,10 @@ async function createTask(req, res, next) {
       // Если задано — orchestrator подгружает report.competitor_signals
       // и report.entity_coverage и вливает их в __moduleContext + AKB.
       source_relevance_report_id,
+      // ТЗ §5/§8: явная привязка задачи к SEO-проекту. Опциональна.
+      // Сервер валидирует владение и подтягивает контекст из БД, если
+      // часть полей формы пустая.
+      project_id,
     } = req.body;
 
     // Для черновика допускаем пустое поле — ставим плейсхолдер
@@ -187,6 +192,37 @@ async function createTask(req, res, next) {
       source_relevance_report_id, req.user.id
     );
 
+    // ТЗ §5: владение проектом валидируется на сервере (не доверяем фронту).
+    const projectId = await resolveOwnedProjectId(project_id, req.user.id);
+
+    // ТЗ §8: серверный fallback из контекста проекта. Если пользователь
+    // не передал region/brand_name/brand_facts/audience/business_type,
+    // но выбрал project_id — подтягиваем из contextResolver. Поля, которые
+    // пользователь ввёл явно, имеют приоритет (правило согласовано с
+    // partial _projectContext.partial.txt).
+    let effRegion       = input_region;
+    let effBrandName    = input_brand_name;
+    let effBrandFacts   = input_brand_facts;
+    let effAudience     = input_target_audience;
+    let effBusinessType = input_business_type;
+    let projectCtxSnapshot = null;
+    if (projectId) {
+      try {
+        const { buildProjectContext } = require('../services/projects/contextResolver');
+        const ctx = await buildProjectContext(projectId, req.user.id);
+        if (ctx) {
+          projectCtxSnapshot = ctx;
+          if (!effRegion       && ctx.project?.region)      effRegion       = ctx.project.region;
+          if (!effBrandName    && ctx.brand?.name)          effBrandName    = ctx.brand.name;
+          if (!effBrandFacts   && Array.isArray(ctx.brand?.facts) && ctx.brand.facts.length) {
+            effBrandFacts = ctx.brand.facts.join('. ');
+          }
+          if (!effAudience     && ctx.project?.audience)    effAudience     = ctx.project.audience;
+          if (!effBusinessType && ctx.project?.niche)       effBusinessType = ctx.project.niche;
+        }
+      } catch (e) { console.warn('[tasks] project context fallback failed:', e.message); }
+    }
+
     const { rows } = await db.query(
       `INSERT INTO tasks (
          user_id, title, status,
@@ -200,7 +236,9 @@ async function createTask(req, res, next) {
          input_target_url,
          llm_provider,
          gemini_model,
-         source_relevance_report_id
+         source_relevance_report_id,
+         project_id,
+         project_context_snapshot
        ) VALUES (
          $1, $2, 'draft',
          $3, $4, $5,
@@ -213,7 +251,9 @@ async function createTask(req, res, next) {
           $23,
           $24,
           $25,
-          $26
+          $26,
+          $27,
+          $28::jsonb
         ) RETURNING *`,
       [
         req.user.id,
@@ -221,11 +261,11 @@ async function createTask(req, res, next) {
         targetService,
         toText(input_brand_name),
         toText(input_author_name),
-        toText(input_region),
+        toText(effRegion),
         toText(input_language),
-        toText(input_business_type),
+        toText(effBusinessType),
         toText(input_site_type),
-        toText(input_target_audience),
+        toText(effAudience),
         toText(input_business_goal),
         toText(input_monetization),
         toText(input_project_limits),
@@ -234,7 +274,7 @@ async function createTask(req, res, next) {
         toText(input_raw_lsi),
         toText(input_ngrams),
         toText(input_tfidf_json),
-        toText(input_brand_facts),
+        toText(effBrandFacts),
         toText(input_competitor_urls),
         minChars,
         maxChars,
@@ -242,6 +282,8 @@ async function createTask(req, res, next) {
         provider,
         geminiModel,
         relevanceReportId,
+        projectId,
+        projectCtxSnapshot ? JSON.stringify(projectCtxSnapshot) : null,
       ]
     );
 

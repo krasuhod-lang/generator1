@@ -198,64 +198,10 @@ function onHover(idx) { hoverIndex.value = idx; }
 function onLeave() { hoverIndex.value = -1; }
 
 // --- Trend delta labels at line endpoints ---
-// Определяем, является ли последний бакет неполным (текущий месяц).
-// labels содержат даты вида "2024-01-01" или "2024-01". Если последний бакет
-// относится к текущему месяцу — это неполные данные, сравнение с предыдущими
-// полными месяцами некорректно. Поэтому ищем 3 последних ПОЛНЫХ месяца и
-// вычисляем процент как (последний полный − предпоследний полный) / предпоследний полный.
-function _isCurrentMonth(label) {
-  if (!label) return false;
-  const m = String(label).match(/^(\d{4})-(\d{2})/);
-  if (!m) return false;
-  const now = new Date();
-  return +m[1] === now.getFullYear() && +m[2] === (now.getMonth() + 1);
-}
-
-const trendDeltas = computed(() => {
-  const labels = props.labels || [];
-  return props.datasets.map((ds, di) => {
-    if (hiddenSeries.value.has(di)) return null;
-    const pts = ds.data || [];
-    // Собираем индексы полных месяцев (не текущий неполный месяц)
-    // с non-null значениями.
-    const fullIndices = [];
-    for (let i = 0; i < pts.length; i++) {
-      if (pts[i] != null && Number.isFinite(pts[i]) && !_isCurrentMonth(labels[i])) {
-        fullIndices.push(i);
-      }
-    }
-    // Нужно минимум 2 полных месяца для корректного сравнения.
-    if (fullIndices.length < 2) return null;
-    // Берём последний полный и предпоследний полный для дельты.
-    const currIdx = fullIndices[fullIndices.length - 1];
-    const prevIdx = fullIndices[fullIndices.length - 2];
-    const currVal = pts[currIdx];
-    const prevVal = pts[prevIdx];
-    // Для отображения метки — ставим на последнюю точку серии (полную или нет).
-    let displayIdx = -1;
-    let displayVal = null;
-    for (let i = pts.length - 1; i >= 0; i--) {
-      if (pts[i] != null && Number.isFinite(pts[i])) {
-        displayIdx = i;
-        displayVal = pts[i];
-        break;
-      }
-    }
-    if (displayIdx < 0) return null;
-    const diff = currVal - prevVal;
-    if (prevVal === 0 && diff === 0) return null;
-    const pct = prevVal > 0 ? Math.round(((currVal - prevVal) / prevVal) * 1000) / 10 : null;
-    const sign = diff >= 0 ? '+' : '';
-    const axis = ds.yAxisID || 'y';
-    return {
-      x: xFor(displayIdx) + 4,
-      y: yFor(displayVal, axis),
-      label: pct != null ? `${sign}${pct}%` : '',
-      color: ds.color,
-      up: diff >= 0,
-    };
-  }).filter(Boolean);
-});
+// Удалены по запросу клиента: цифры «+/–%» у концов линий считались по
+// (последний полный месяц − предпоследний полный), но способ расчёта был
+// непрозрачен для читателя отчёта. Сами линии графика, легенда и hover-
+// тултип с абсолютными значениями остаются.
 </script>
 
 <template>
@@ -301,16 +247,8 @@ const trendDeltas = computed(() => {
                 stroke-linejoin="round" />
         </template>
       </g>
-      <!-- Trend delta labels at line endpoints -->
-      <g v-for="(td, ti) in trendDeltas" :key="`td${ti}`">
-        <rect v-if="td.label"
-              :x="td.x - 2" :y="td.y - 8" :width="td.label.length * 7 + 8" height="16"
-              rx="4" :fill="td.up ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.12)'" />
-        <text v-if="td.label"
-              :x="td.x + 2" :y="td.y + 3.5"
-              font-size="10" font-weight="700" font-family="-apple-system, sans-serif"
-              :fill="td.up ? '#059669' : '#dc2626'">{{ td.label }}</text>
-      </g>
+      <!-- Trend delta labels at line endpoints removed (см. trendDeltas computed) -->
+
       <!-- Hover crosshair + dots -->
       <template v-if="hoverIndex >= 0 && hoverIndex < labels.length">
         <line :x1="xFor(hoverIndex)" :x2="xFor(hoverIndex)"

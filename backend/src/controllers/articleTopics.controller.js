@@ -38,9 +38,9 @@ const LIMITS = {
   topic_count_min:  1,
   topic_count_max:  parseInt(process.env.ARTICLE_TOPICS_TOPIC_IDEAS_MAX, 10) || 30,
   topic_count_default: 10,
-  // ТЗ §2: «темы, которые не нужно охватывать» — ≤ 30 строк, ≤ 2000 симв.
-  exclude_topics_max_lines:  30,
-  exclude_topics_max_chars:  2000,
+  // ТЗ §2: «темы, которые не нужно охватывать» — ≤ 100 строк, ≤ 6000 симв.
+  exclude_topics_max_lines:  100,
+  exclude_topics_max_chars:  6000,
 };
 
 const ALLOWED_AUDIENCE     = ['B2B', 'B2C', 'смешанная'];
