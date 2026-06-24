@@ -495,10 +495,25 @@ function applyPageMetaAuditUpdate(pageMetaAudit) {
 // ── Шаринг ────────────────────────────────────────────────────────
 const shareUrl = computed(() => project.value?.share_token
   ? `${window.location.origin}/share/project/${project.value.share_token}` : '');
+const shareForm = ref({ mode: 'client', ttlDays: 90 });
+const shareTtlOptions = [
+  { value: 7,   label: '7 дней' },
+  { value: 30,  label: '30 дней' },
+  { value: 90,  label: '90 дней' },
+  { value: 365, label: '1 год' },
+  { value: 0,   label: 'Бессрочно' },
+];
+const shareExpiresLabel = computed(() => {
+  const t = project.value?.share_expires_at;
+  if (!t) return 'бессрочная';
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return '';
+  return `истекает ${d.toLocaleDateString('ru-RU')}`;
+});
 
-async function createShare() {
+async function createShare(opts = {}) {
   try {
-    const result = await store.createShare(projectId);
+    const result = await store.createShare(projectId, opts);
     const token = result && typeof result === 'object' ? result.token : result;
     if (token) {
       project.value.share_token = token;
@@ -507,8 +522,17 @@ async function createShare() {
         project.value.share_expires_at = result.expires_at || null;
       }
       flash('Публичная ссылка создана');
+    } else {
+      flash('Не удалось создать ссылку (пустой ответ)');
     }
-  } catch (_) { flash('Не удалось создать ссылку'); }
+  } catch (err) {
+    const msg = err?.response?.data?.error || err?.message || 'неизвестная ошибка';
+    flash(`Не удалось создать ссылку: ${msg}`);
+  }
+}
+async function updateShare(opts) {
+  // Если ссылка уже выпущена — backend обновляет mode/expires_at, токен сохраняется.
+  return createShare(opts);
 }
 async function revokeShare() {
   try { await store.revokeShare(projectId); project.value.share_token = null; flash('Ссылка отозвана'); }
@@ -1067,15 +1091,40 @@ onUnmounted(() => {
         <!-- ============ /Вкладка Сравнение ============ -->
 
         <!-- Share -->
-        <section class="card space-y-2">
+        <section class="card space-y-3">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Поделиться статистикой</h2>
-          <p class="text-xs text-gray-500">Публичная read-only ссылка: клиент видит графики и AI-отчёт, без настроек и кнопок управления.</p>
-          <div v-if="project.share_token" class="flex flex-wrap gap-2 items-center">
-            <input :value="shareUrl" readonly class="input flex-1 min-w-0 text-xs" />
-            <button class="btn-ghost border border-gray-700" @click="copyShare">📋 Скопировать</button>
-            <button class="text-xs text-red-400 hover:text-red-300" @click="revokeShare">Сбросить ссылку</button>
+          <p class="text-xs text-gray-500">Публичная read-only ссылка: получатель видит графики и AI-отчёт, без настроек и кнопок управления.</p>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+            <label class="flex flex-col gap-1">
+              <span class="text-gray-400 uppercase tracking-wider text-[10px]">Режим payload</span>
+              <select v-model="shareForm.mode" class="input">
+                <option value="client">Клиент — урезанный (без debug/raw_prompt)</option>
+                <option value="analyst">Аналитик — полный payload</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-gray-400 uppercase tracking-wider text-[10px]">Срок действия</span>
+              <select v-model.number="shareForm.ttlDays" class="input">
+                <option v-for="o in shareTtlOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </label>
           </div>
-          <button v-else class="btn-primary" @click="createShare">🌐 Поделиться доступом</button>
+
+          <div v-if="project.share_token" class="space-y-2">
+            <div class="flex flex-wrap gap-2 items-center">
+              <input :value="shareUrl" readonly class="input flex-1 min-w-0 text-xs" />
+              <button class="btn-ghost border border-gray-700" @click="copyShare">📋 Скопировать</button>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
+              <span>Режим: <b class="text-gray-300">{{ project.share_mode || 'client' }}</b></span>
+              <span>· {{ shareExpiresLabel }}</span>
+              <button class="text-indigo-400 hover:text-indigo-300"
+                      @click="updateShare(shareForm)">↻ Обновить параметры</button>
+              <button class="text-red-400 hover:text-red-300" @click="revokeShare">Сбросить ссылку</button>
+            </div>
+          </div>
+          <button v-else class="btn-primary" @click="createShare(shareForm)">🌐 Создать публичную ссылку</button>
         </section>
       </template>
 

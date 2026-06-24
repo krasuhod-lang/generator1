@@ -64,6 +64,11 @@ function setMode(mode) {
   viewMode.setMode(mode);
 }
 
+// Тумблер «Аналитик/Клиент» скрываем на маршрутах /reports/* — там режим
+// клиента задаётся в модалке публикации (shared_reports.view_mode), а превью
+// открывается через отдельную кнопку, а не глобальным переключателем.
+const showViewModeToggle = computed(() => !String(route.path || '').startsWith('/reports'));
+
 function handleLogout() {
   auth.logout();
   router.push('/login');
@@ -139,8 +144,10 @@ function handleLogout() {
             <slot name="freshness" />
           </div>
 
-          <!-- Client / Analyst toggle (см. PR-2, stores/viewMode.js) -->
+          <!-- Client / Analyst toggle (см. PR-2, stores/viewMode.js).
+               Скрыт на /reports/* — см. showViewModeToggle. -->
           <div
+            v-if="showViewModeToggle"
             role="group"
             aria-label="Режим отображения"
             class="inline-flex items-center rounded-lg border border-surface-muted bg-surface-base p-0.5 text-xs"

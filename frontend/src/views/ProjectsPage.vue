@@ -7,6 +7,7 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import { useProjectsStore } from '../stores/projects.js';
+import { copyToClipboard } from '../utils/clipboard.js';
 
 const router = useRouter();
 const store = useProjectsStore();
@@ -14,6 +15,8 @@ const store = useProjectsStore();
 const form = ref({ name: '', url: '', audience_description: '' });
 const submitting = ref(false);
 const formError = ref(null);
+const toast = ref(null);
+function flash(msg) { toast.value = msg; setTimeout(() => { toast.value = null; }, 2500); }
 
 onMounted(() => { store.fetchProjects(); });
 
@@ -41,6 +44,40 @@ async function submit() {
 async function remove(p) {
   if (!confirm(`Удалить проект «${p.name}»?`)) return;
   try { await store.deleteProject(p.id); } catch (_) { /* no-op */ }
+}
+
+// ── Шаринг прямо из карточки проекта (без перехода на детальную страницу) ──
+function shareUrlFor(p) {
+  return p?.share_token ? `${window.location.origin}/share/project/${p.share_token}` : '';
+}
+async function quickShare(p) {
+  try {
+    const result = await store.createShare(p.id, { mode: 'client', ttlDays: 90 });
+    const token = result && typeof result === 'object' ? result.token : result;
+    if (!token) { flash('Не удалось создать ссылку (пустой ответ сервера)'); return; }
+    p.share_token       = token;
+    p.share_mode        = (result && typeof result === 'object' && result.mode) || 'client';
+    p.share_expires_at  = (result && typeof result === 'object' && result.expires_at) || null;
+    const ok = await copyToClipboard(shareUrlFor(p));
+    flash(ok ? 'Ссылка создана и скопирована' : 'Ссылка создана');
+  } catch (err) {
+    const msg = err?.response?.data?.error || err?.message || 'неизвестная ошибка';
+    flash(`Не удалось создать ссылку: ${msg}`);
+  }
+}
+async function quickCopy(p) {
+  const ok = await copyToClipboard(shareUrlFor(p));
+  flash(ok ? 'Ссылка скопирована' : 'Не удалось скопировать');
+}
+async function quickRevoke(p) {
+  if (!confirm('Отозвать публичную ссылку?')) return;
+  try {
+    await store.revokeShare(p.id);
+    p.share_token = null;
+    flash('Ссылка отозвана');
+  } catch (err) {
+    flash(`Ошибка: ${err?.response?.data?.error || err?.message || ''}`);
+  }
 }
 </script>
 
@@ -127,14 +164,33 @@ async function remove(p) {
             <p v-if="p.audience_description" class="text-xs text-gray-500 mt-2 line-clamp-2">
               {{ p.audience_description }}
             </p>
-            <div class="flex items-center justify-between mt-3">
-              <span v-if="p.share_token" class="text-[11px] text-gray-500">🌐 Публичная ссылка активна</span>
-              <span v-else></span>
+            <div class="flex items-center justify-between mt-3 gap-2 flex-wrap">
+              <div class="flex items-center gap-2 flex-wrap">
+                <template v-if="p.share_token">
+                  <span class="text-[11px] text-emerald-300">🌐 Ссылка активна</span>
+                  <button class="text-[11px] text-indigo-300 hover:text-indigo-200" @click.stop="quickCopy(p)">📋 Скопировать</button>
+                  <button class="text-[11px] text-gray-400 hover:text-gray-200" @click.stop="quickRevoke(p)">Отозвать</button>
+                </template>
+                <button v-else class="text-[11px] text-indigo-300 hover:text-indigo-200" @click.stop="quickShare(p)">
+                  🌐 Поделиться доступом
+                </button>
+              </div>
               <button class="text-xs text-red-400 hover:text-red-300" @click.stop="remove(p)">Удалить</button>
             </div>
           </div>
         </div>
       </section>
+
+      <transition name="fade">
+        <div v-if="toast" class="fixed bottom-6 right-6 bg-gray-900 border border-indigo-700 text-indigo-200 px-4 py-2 rounded-lg shadow-lg text-sm z-50">
+          {{ toast }}
+        </div>
+      </transition>
     </div>
   </AppLayout>
 </template>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.25s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>

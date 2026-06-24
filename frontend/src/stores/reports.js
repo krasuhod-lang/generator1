@@ -70,7 +70,15 @@ export const useReportsStore = defineStore('reports', {
     },
 
     async fetchData(id, params = {}) {
-      const { data } = await api.get(`/reports/drafts/${id}/data`, { params });
+      // viewMode (analyst|client) — необязательный override для editor preview.
+      // Передаётся как заголовок X-Client-Mode (тот же интерфейс, что глобальный
+      // axios-перехватчик), чтобы локальный preview редактора реально
+      // дёргал backend-санитайзер.
+      const { viewMode, ...query } = params || {};
+      const headers = {};
+      if (viewMode === 'client') headers['X-Client-Mode'] = '1';
+      else if (viewMode === 'analyst') headers['X-Client-Mode'] = '0';
+      const { data } = await api.get(`/reports/drafts/${id}/data`, { params: query, headers });
       this.currentData = data?.data || null;
       return this.currentData;
     },
