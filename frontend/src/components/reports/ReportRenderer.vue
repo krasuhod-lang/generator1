@@ -26,8 +26,20 @@ const props = defineProps({
   // ТЗ §6: карта overrides_meta из черновика — { path: { author_id, updated_at } }.
   // Если передана, на отредактированных вручную полях рисуется бейдж ✏️.
   overridesMeta: { type: Object, default: () => ({}) },
+  // ТЗ-правка: видимость графиков в клиентском борде. { gsc, ywm, keys, position }.
+  // По умолчанию график виден. В режиме редактирования показываем переключатель.
+  chartConfig: { type: Object, default: () => ({}) },
 });
-const emit = defineEmits(['update:tasksBlocks', 'override:update', 'override:reset']);
+const emit = defineEmits(['update:tasksBlocks', 'override:update', 'override:reset', 'update:chart']);
+
+// Видимость графика по id. Отсутствие ключа = виден (обратная совместимость).
+function chartVisible(id) {
+  const c = props.chartConfig || {};
+  return c[id] !== false;
+}
+function toggleChart(id) {
+  emit('update:chart', id, !chartVisible(id));
+}
 
 // ТЗ §6: бейджи «изменено вручную» по карте overrides_meta из черновика.
 // Родитель (ReportEditorPage) передаёт `overridesMeta` пропсом (вычисляет
@@ -80,6 +92,7 @@ const navItems = computed(() => {
   if (props.data?.ywm) items.push({ id: 'ywm', label: 'Яндекс' });
   if (props.data?.keys_so) items.push({ id: 'keys-so', label: 'Keys.so' });
   if (hasModules.value) items.push({ id: 'modules', label: 'Точки роста' });
+  if (enginePages.value.length) items.push({ id: 'pages', label: 'Страницы' });
   items.push({ id: 'tasks', label: 'Работы' });
   if (props.summary?.executive_summary || props.summary?.highlights?.length) {
     items.push({ id: 'ai-analysis', label: 'AI-выводы' });
@@ -416,25 +429,69 @@ const hasPartialTail = computed(() => {
 // клиента. KPI-карточки и ExecutiveHeadline считают и показывают дельты
 // отдельно (см. KPICard.vue / ExecutiveHeadline.vue).
 
-// ТЗ §4: разбиение топ-запросов и страниц по интенту.
-// По умолчанию активна вкладка «Коммерческие» — именно эти запросы приносят
-// выручку и должны быть в фокусе клиента/менеджера. Информационные доступны
-// рядом отдельной вкладкой, чтобы видеть инфо-спрос, но не путать его с
-// коммерческими точками роста.
-const queriesTab = ref('commercial');
-const pagesTab = ref('commercial');
+// ТЗ-правка: блок «топ-запросы по интенту» убран — классификация запроса по
+// интенту (коммерческий/информационный) работает плохо. Вместо этого интент
+// определяется по URL страницы (см. backend urlClassifier), а основной разрез
+// — топ-страницы с разворачиваемым списком запросов по каждой странице.
 const queriesSection = computed(() => props.data?.queries || null);
 const commercialSummary = computed(() => queriesSection.value?.summary || null);
-function intentLabel(intent) {
-  switch (intent) {
-    case 'transactional': return 'Транзакционный';
-    case 'commercial':    return 'Коммерческий';
-    case 'investigation': return 'Сравнение';
-    case 'informational': return 'Информационный';
-    case 'navigational':  return 'Навигационный';
-    default:              return '—';
-  }
+
+// Движок для топ-страниц. Срез по страницам отдаёт только Google (GSC);
+// Яндекс.Вебмастер не предоставляет page-разрез — вкладка информирует об этом.
+const pagesEngine = ref('google');
+// Фильтр по интенту страницы: все / коммерческие / информационные.
+const pageFilter = ref('all');
+// Раскрытые страницы (показываем список запросов под URL).
+const expandedPages = ref(new Set());
+function togglePage(url) {
+  const next = new Set(expandedPages.value);
+  if (next.has(url)) next.delete(url);
+  else next.add(url);
+  expandedPages.value = next;
 }
+
+// Список страниц для активного движка. Бэкенд кладёт queries.pages.{google,yandex}.
+// Фолбэк на старый формат top_pages_* для обратной совместимости со снапшотами.
+const enginePages = computed(() => {
+  const q = queriesSection.value;
+  if (!q) return [];
+  const fromNew = q.pages && Array.isArray(q.pages[pagesEngine.value]) ? q.pages[pagesEngine.value] : null;
+  if (fromNew) return fromNew;
+  // legacy fallback: объединяем commercial + informational, помечая intent.
+  const legacy = [
+    ...(q.top_pages_commercial || []).map((p) => ({ url: p.key, page_intent: 'commercial', clicks: p.clicks, impressions: p.impressions, ctr: p.ctr, position: p.position, queries: [], queries_count: 0 })),
+    ...(q.top_pages_informational || []).map((p) => ({ url: p.key, page_intent: 'informational', clicks: p.clicks, impressions: p.impressions, ctr: p.ctr, position: p.position, queries: [], queries_count: 0 })),
+  ];
+  return legacy;
+});
+const pagesCommercialCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'commercial').length);
+const pagesInfoCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'informational').length);
+const filteredPages = computed(() => {
+  if (pageFilter.value === 'all') return enginePages.value;
+  return enginePages.value.filter((p) => p.page_intent === pageFilter.value);
+});
+function pageIntentLabel(intent) {
+  return intent === 'informational' ? '📚 Информационная' : '🛒 Коммерческая';
+}
+
+// ТЗ-правка: сворачивание блоков работ по месяцам и по разделам/задачам,
+// чтобы длинный список не превращался в «полотно».
+const collapsedMonths = ref(new Set());
+const collapsedSections = ref(new Set());
+function toggleMonth(i) {
+  const next = new Set(collapsedMonths.value);
+  if (next.has(i)) next.delete(i); else next.add(i);
+  collapsedMonths.value = next;
+}
+function isMonthCollapsed(i) { return collapsedMonths.value.has(i); }
+function toggleSection(i, j) {
+  const key = `${i}:${j}`;
+  const next = new Set(collapsedSections.value);
+  if (next.has(key)) next.delete(key); else next.add(key);
+  collapsedSections.value = next;
+}
+function isSectionCollapsed(i, j) { return collapsedSections.value.has(`${i}:${j}`); }
+
 function formatPct(v) {
   return v == null ? '—' : `${v}%`;
 }
@@ -539,8 +596,14 @@ function formatNum(v) {
     </section>
 
     <!-- Google Search Console -->
-    <section id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
-      <h2>Google Search Console</h2>
+    <section v-if="!readonly || chartVisible('gsc')" id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
+      <div class="chart-head">
+        <h2>Google Search Console</h2>
+        <label v-if="!readonly" class="chart-toggle">
+          <input type="checkbox" :checked="chartVisible('gsc')" @change="toggleChart('gsc')" />
+          <span>Показывать клиенту</span>
+        </label>
+      </div>
       <p class="chart-desc">Клики, показы и CTR из органической выдачи Google за выбранный период.</p>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.gsc) === 'error'" class="section-error">
@@ -556,8 +619,14 @@ function formatNum(v) {
     </section>
 
     <!-- Яндекс.Вебмастер -->
-    <section id="report-ywm" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
-      <h2>Яндекс.Вебмастер</h2>
+    <section v-if="!readonly || chartVisible('ywm')" id="report-ywm" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
+      <div class="chart-head">
+        <h2>Яндекс.Вебмастер</h2>
+        <label v-if="!readonly" class="chart-toggle">
+          <input type="checkbox" :checked="chartVisible('ywm')" @change="toggleChart('ywm')" />
+          <span>Показывать клиенту</span>
+        </label>
+      </div>
       <p class="chart-desc">Клики, показы и CTR из Яндекс.Вебмастер за выбранный период.</p>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.ywm) === 'error'" class="section-error">
@@ -573,8 +642,14 @@ function formatNum(v) {
     </section>
 
     <!-- Keys.so -->
-    <section id="report-keys-so" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
-      <h2>Видимость в поиске (Keys.so)</h2>
+    <section v-if="!readonly || chartVisible('keys')" id="report-keys-so" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
+      <div class="chart-head">
+        <h2>Видимость в поиске (Keys.so)</h2>
+        <label v-if="!readonly" class="chart-toggle">
+          <input type="checkbox" :checked="chartVisible('keys')" @change="toggleChart('keys')" />
+          <span>Показывать клиенту</span>
+        </label>
+      </div>
       <p class="chart-desc">Индекс видимости, количество запросов в ТОП-10 и ТОП-50 по данным Keys.so.</p>
       <div v-if="hasGoogleKeys || true" class="keys-engine-toggle">
         <button
@@ -602,22 +677,30 @@ function formatNum(v) {
       <ReportTrendChart v-else :labels="keysChart.labels" :datasets="keysChart.datasets" :annotations="keysChart.annotations" :show-second-axis="keysChart.showSecondAxis" />
     </section>
 
-    <section v-if="data?.position?.connected && data?.position?.series?.length" class="rblk" data-report-chart="position" data-report-chart-title="Динамика позиций">
-      <h2>Динамика позиций</h2>
+    <section v-if="(!readonly || chartVisible('position')) && data?.position?.connected && data?.position?.series?.length" class="rblk" data-report-chart="position" data-report-chart-title="Динамика позиций">
+      <div class="chart-head">
+        <h2>Динамика позиций</h2>
+        <label v-if="!readonly" class="chart-toggle">
+          <input type="checkbox" :checked="chartVisible('position')" @change="toggleChart('position')" />
+          <span>Показывать клиенту</span>
+        </label>
+      </div>
       <p class="chart-desc">Средняя позиция и распределение по ТОП-10/ТОП-30 из трекера позиций.</p>
       <PositionChart :series="data.position.series" mode="position" />
     </section>
 
-    <!-- ТЗ §4: Топ-запросы и страницы с разбиением по интенту -->
+    <!-- ТЗ-правка: вместо ненадёжной классификации запросов — топ-страницы с
+         интентом по URL и разворачиваемым списком запросов под каждой страницей. -->
     <section
-      v-if="queriesSection && (queriesSection.top_queries_commercial?.length || queriesSection.top_queries_informational?.length)"
-      id="report-queries"
+      v-if="enginePages.length"
+      id="report-pages"
       class="rblk"
     >
-      <h2>Топ-запросы</h2>
+      <h2>Топ-страницы и запросы</h2>
       <p class="chart-desc">
-        По умолчанию показаны коммерческие запросы (transactional / commercial / investigation) —
-        те, что приносят выручку. Информационный спрос вынесен на отдельную вкладку.
+        До {{ queriesSection?.pages_limit || 50 }} страниц по кликам. Тип страницы
+        (коммерческая / информационная) определяется по структуре URL.
+        Нажмите на строку, чтобы раскрыть запросы, по которым продвигается страница.
       </p>
       <div v-if="commercialSummary" class="commercial-summary">
         <span class="cs-pill">
@@ -628,88 +711,23 @@ function formatNum(v) {
           </span>
         </span>
       </div>
-      <div class="intent-tabs">
-        <button
-          class="intent-tab"
-          :class="{ active: queriesTab === 'commercial' }"
-          @click="queriesTab = 'commercial'"
-        >🛒 Коммерческие ({{ queriesSection.top_queries_commercial?.length || 0 }})</button>
-        <button
-          class="intent-tab"
-          :class="{ active: queriesTab === 'informational' }"
-          @click="queriesTab = 'informational'"
-        >📚 Информационные ({{ queriesSection.top_queries_informational?.length || 0 }})</button>
-        <button
-          v-if="queriesSection.top_queries_other?.length"
-          class="intent-tab"
-          :class="{ active: queriesTab === 'other' }"
-          @click="queriesTab = 'other'"
-        >🔸 Прочие ({{ queriesSection.top_queries_other.length }})</button>
+      <!-- Движок: Google (есть page-разрез) / Яндекс (нет page-разреза) -->
+      <div class="keys-engine-toggle">
+        <button class="engine-btn" :class="{ active: pagesEngine === 'google' }" @click="pagesEngine = 'google'">Google</button>
+        <button class="engine-btn" :class="{ active: pagesEngine === 'yandex' }" @click="pagesEngine = 'yandex'">Яндекс</button>
       </div>
-      <table class="rep-table">
+      <!-- Фильтр по интенту страницы -->
+      <div class="intent-tabs">
+        <button class="intent-tab" :class="{ active: pageFilter === 'all' }" @click="pageFilter = 'all'">Все ({{ enginePages.length }})</button>
+        <button class="intent-tab" :class="{ active: pageFilter === 'commercial' }" @click="pageFilter = 'commercial'">🛒 Коммерческие ({{ pagesCommercialCount }})</button>
+        <button class="intent-tab" :class="{ active: pageFilter === 'informational' }" @click="pageFilter = 'informational'">📚 Информационные ({{ pagesInfoCount }})</button>
+      </div>
+      <table class="rep-table pages-table">
         <thead>
           <tr>
-            <th>Запрос</th>
-            <th>Интент</th>
-            <th class="num">Клики</th>
-            <th class="num">Показы</th>
-            <th class="num">CTR</th>
-            <th class="num">Позиция</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="(row, i) in (queriesTab === 'commercial'
-              ? queriesSection.top_queries_commercial
-              : queriesTab === 'informational'
-                ? queriesSection.top_queries_informational
-                : queriesSection.top_queries_other) || []"
-            :key="`q-${queriesTab}-${i}`"
-          >
-            <td>{{ row.key }}<span v-if="row.branded" class="brand-tag" title="Брендовый">★</span></td>
-            <td class="intent-cell">{{ intentLabel(row.intent) }}</td>
-            <td class="num">{{ formatNum(row.clicks) }}</td>
-            <td class="num">{{ formatNum(row.impressions) }}</td>
-            <td class="num">{{ formatPct(row.ctr) }}</td>
-            <td class="num">{{ row.position != null ? row.position : '—' }}</td>
-          </tr>
-          <tr v-if="!((queriesTab === 'commercial'
-              ? queriesSection.top_queries_commercial
-              : queriesTab === 'informational'
-                ? queriesSection.top_queries_informational
-                : queriesSection.top_queries_other) || []).length">
-            <td colspan="6" class="empty-cell">За период по этому сегменту запросов нет.</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section
-      v-if="queriesSection && (queriesSection.top_pages_commercial?.length || queriesSection.top_pages_informational?.length)"
-      id="report-pages"
-      class="rblk"
-    >
-      <h2>Топ-страницы</h2>
-      <p class="chart-desc">
-        Страница относится к коммерческим, если ≥50% её кликов приходится на коммерческие запросы.
-      </p>
-      <div class="intent-tabs">
-        <button
-          class="intent-tab"
-          :class="{ active: pagesTab === 'commercial' }"
-          @click="pagesTab = 'commercial'"
-        >🛒 Коммерческие ({{ queriesSection.top_pages_commercial?.length || 0 }})</button>
-        <button
-          class="intent-tab"
-          :class="{ active: pagesTab === 'informational' }"
-          @click="pagesTab = 'informational'"
-        >📚 Информационные ({{ queriesSection.top_pages_informational?.length || 0 }})</button>
-      </div>
-      <table class="rep-table">
-        <thead>
-          <tr>
+            <th></th>
             <th>Страница</th>
-            <th class="num">Commercial-доля</th>
+            <th>Тип</th>
             <th class="num">Клики</th>
             <th class="num">Показы</th>
             <th class="num">CTR</th>
@@ -717,23 +735,50 @@ function formatNum(v) {
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="(row, i) in (pagesTab === 'commercial'
-              ? queriesSection.top_pages_commercial
-              : queriesSection.top_pages_informational) || []"
-            :key="`p-${pagesTab}-${i}`"
-          >
-            <td class="page-cell"><a :href="row.key" target="_blank" rel="noopener">{{ row.key }}</a></td>
-            <td class="num">{{ row.commercial_share != null ? `${Math.round(row.commercial_share * 100)}%` : '—' }}</td>
-            <td class="num">{{ formatNum(row.clicks) }}</td>
-            <td class="num">{{ formatNum(row.impressions) }}</td>
-            <td class="num">{{ formatPct(row.ctr) }}</td>
-            <td class="num">{{ row.position != null ? row.position : '—' }}</td>
-          </tr>
-          <tr v-if="!((pagesTab === 'commercial'
-              ? queriesSection.top_pages_commercial
-              : queriesSection.top_pages_informational) || []).length">
-            <td colspan="6" class="empty-cell">За период по этому сегменту страниц нет.</td>
+          <template v-for="(row, i) in filteredPages" :key="`pg-${pagesEngine}-${i}`">
+            <tr class="page-row" :class="{ expanded: expandedPages.has(row.url) }" @click="togglePage(row.url)">
+              <td class="expand-cell">
+                <button class="expand-btn" v-if="row.queries_count" :aria-expanded="expandedPages.has(row.url)">
+                  {{ expandedPages.has(row.url) ? '−' : '+' }}
+                </button>
+              </td>
+              <td class="page-cell">
+                <a :href="row.url" target="_blank" rel="noopener" @click.stop>{{ row.url }}</a>
+                <span v-if="row.queries_count" class="q-count">{{ row.queries_count }} запр.</span>
+              </td>
+              <td class="intent-cell">{{ pageIntentLabel(row.page_intent) }}</td>
+              <td class="num">{{ formatNum(row.clicks) }}</td>
+              <td class="num">{{ formatNum(row.impressions) }}</td>
+              <td class="num">{{ formatPct(row.ctr) }}</td>
+              <td class="num">{{ row.position != null ? row.position : '—' }}</td>
+            </tr>
+            <tr v-if="expandedPages.has(row.url) && row.queries?.length" class="queries-row">
+              <td></td>
+              <td colspan="6">
+                <table class="rep-subtable">
+                  <thead>
+                    <tr><th>Запрос</th><th class="num">Клики</th><th class="num">Показы</th><th class="num">CTR</th><th class="num">Позиция</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(q, qi) in row.queries" :key="`q-${qi}`">
+                      <td>{{ q.query }}</td>
+                      <td class="num">{{ formatNum(q.clicks) }}</td>
+                      <td class="num">{{ formatNum(q.impressions) }}</td>
+                      <td class="num">{{ formatPct(q.ctr) }}</td>
+                      <td class="num">{{ q.position != null ? q.position : '—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+          </template>
+          <tr v-if="!filteredPages.length">
+            <td colspan="7" class="empty-cell">
+              <template v-if="pagesEngine === 'yandex'">
+                Яндекс.Вебмастер не отдаёт разрез по страницам — данные доступны только по запросам.
+              </template>
+              <template v-else>За период по этому фильтру страниц нет.</template>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -796,25 +841,33 @@ function formatNum(v) {
       <div v-if="!normalizedTasks.length" class="empty">Пока нет блоков работ.</div>
       <div v-for="(monthBlock, i) in normalizedTasks" :key="i" class="month-card">
         <div class="month-head">
+          <button type="button" class="collapse-btn" :aria-expanded="!isMonthCollapsed(i)" @click="toggleMonth(i)">
+            {{ isMonthCollapsed(i) ? '▸' : '▾' }}
+          </button>
           <input v-if="!readonly" :value="monthBlock.month" class="text-input month-input" @input="updateMonth(i, $event.target.value)" />
-          <h3 v-else>{{ monthBlock.month }}</h3>
+          <h3 v-else @click="toggleMonth(i)" style="cursor:pointer">{{ monthBlock.month }}</h3>
+          <span class="collapse-count">{{ (monthBlock.sections || []).length }} разд.</span>
           <div v-if="!readonly" class="actions-inline">
             <button class="small-btn" @click="addSection(i)">+ Раздел</button>
             <button class="small-btn danger" @click="removeMonth(i)">Удалить</button>
           </div>
         </div>
 
-        <div v-for="(section, j) in monthBlock.sections" :key="j" class="section-card">
+        <div v-show="!isMonthCollapsed(i)" v-for="(section, j) in monthBlock.sections" :key="j" class="section-card">
           <div class="month-head">
+            <button type="button" class="collapse-btn" :aria-expanded="!isSectionCollapsed(i, j)" @click="toggleSection(i, j)">
+              {{ isSectionCollapsed(i, j) ? '▸' : '▾' }}
+            </button>
             <input v-if="!readonly" :value="section.title" class="text-input" @input="updateSection(i, j, $event.target.value)" />
-            <h4 v-else>{{ section.title }}</h4>
+            <h4 v-else @click="toggleSection(i, j)" style="cursor:pointer">{{ section.title }}</h4>
+            <span class="collapse-count">{{ (section.tasks || []).length }} задач</span>
             <div v-if="!readonly" class="actions-inline">
               <button class="small-btn" @click="addTask(i, j)">+ Задача</button>
               <button class="small-btn danger" @click="removeSection(i, j)">Удалить раздел</button>
             </div>
           </div>
 
-          <div v-for="(task, k) in section.tasks" :key="k" class="task-card">
+          <div v-show="!isSectionCollapsed(i, j)" v-for="(task, k) in section.tasks" :key="k" class="task-card">
             <div v-if="readonly">
               <div class="task-title">{{ task.title }}</div>
               <div v-if="task.description_html" class="task-html" v-html="safeHtml(task.description_html)"></div>
@@ -1066,4 +1119,25 @@ function formatNum(v) {
 .page-cell a:hover { text-decoration: underline; }
 .brand-tag { margin-left: 6px; color: #d4a017; font-size: 11px; }
 .empty-cell { text-align: center; color: #889; padding: 16px; font-style: italic; }
+
+/* Заголовок графика с переключателем видимости для клиента */
+.chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.chart-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #678; cursor: pointer; user-select: none; }
+.chart-toggle input { accent-color: var(--accent, #4a6cf7); }
+
+/* Топ-страницы с разворачиваемыми запросами */
+.pages-table .expand-cell { width: 28px; text-align: center; }
+.page-row { cursor: pointer; }
+.page-row.expanded > td { background: #f5f8ff; }
+.expand-btn { width: 20px; height: 20px; border-radius: 6px; border: 1px solid #dce0ea; background: #fff; color: #4a6cf7; font-weight: 700; line-height: 1; cursor: pointer; }
+.q-count { margin-left: 8px; font-size: 11px; color: #99a; }
+.queries-row > td { background: #f9fbff; padding: 0 10px 10px 10px; }
+.rep-subtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.rep-subtable th, .rep-subtable td { padding: 5px 8px; border-bottom: 1px solid #eef0f4; text-align: left; }
+.rep-subtable th { color: #889; font-weight: 600; }
+.rep-subtable td.num, .rep-subtable th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Сворачивание блоков работ */
+.collapse-btn { width: 22px; height: 22px; border: none; background: none; color: #6e6e73; font-size: 13px; cursor: pointer; padding: 0; flex-shrink: 0; }
+.collapse-count { font-size: 11px; color: #99a; margin-left: auto; white-space: nowrap; }
 </style>

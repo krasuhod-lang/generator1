@@ -11,10 +11,12 @@ const props = defineProps({
 const isClient = computed(() => props.viewMode === 'client');
 
 // Хотя бы один модуль есть в принципе (с любым статусом).
+// ТЗ-правка: CTR Gap и Content Health убраны, Off-Page Monitor и Tech Audit
+// скрыты — учитываем только Striking Distance (точки роста).
 const hasAnyModule = computed(() => {
   const m = props.modules || {};
   if (m.disabled || m.error) return false;
-  return !!(m.striking_distance || m.ctr_gap || m.content_health || m.off_page || m.tech_audit);
+  return !!m.striking_distance;
 });
 
 function modState(mod) {
@@ -32,10 +34,12 @@ function isReady(mod) {
 }
 
 const sd = computed(() => props.modules?.striking_distance || null);
-const cg = computed(() => props.modules?.ctr_gap || null);
-const ch = computed(() => props.modules?.content_health || null);
-const op = computed(() => props.modules?.off_page || null);
-const ta = computed(() => props.modules?.tech_audit || null);
+// ТЗ-правка: эти модули скрыты на фронте безусловно (в т.ч. для старых
+// опубликованных снапшотов, где они ещё присутствуют в payload).
+const cg = computed(() => null);
+const ch = computed(() => null);
+const op = computed(() => null);
+const ta = computed(() => null);
 
 const PRIORITY_LABEL = { high: 'Высокий', medium: 'Средний', low: 'Низкий' };
 const PRIORITY_CLASS = { high: 'badge-critical', medium: 'badge-warning', low: 'badge-healthy' };

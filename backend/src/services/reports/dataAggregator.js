@@ -14,6 +14,7 @@ const { buildHeadline } = require('./headlineBuilder');
 const { splitSeriesIntoMonths } = require('../projects/periodResolver');
 const { applyOverrides } = require('./overridesApplier');
 const { classifyQuery, deriveBrandTokens } = require('../projects/commercialIntent');
+const { classifyUrl } = require('./urlClassifier');
 
 /**
  * Метаданные временных рядов для UI/KPI.
@@ -386,7 +387,8 @@ function _mapSeriesRow(r) {
  * коммерческие запросы (что соответствует обычной коммерческой посадочной).
  */
 const TOP_LIMIT = 25;
-const COMMERCIAL_PAGE_THRESHOLD = 0.5;
+const PAGES_LIMIT = 50;             // ТЗ-правка: до 50 топ-страниц с разворачиваемыми запросами
+const PER_PAGE_QUERY_LIMIT = 30;    // сколько запросов показываем под каждой страницей
 
 function _classifyQueries(rows, brandTokens) {
   return (rows || []).map((row) => {
@@ -409,14 +411,71 @@ function _splitQueries(rows) {
 }
 
 function _splitPages(pages, queryPageMap) {
-  // queryPageMap: page -> { commercialClicks, totalClicks }. Для каждого
-  // page-row помечаем intent на основе доли коммерческих кликов.
+  // ТЗ-правка: интент страницы определяем по URL (urlClassifier), а не по
+  // ненадёжной классификации запросов. Доля commercial-кликов остаётся как
+  // вспомогательный сигнал (commercial_share), но решающим является URL.
   return (pages || []).map((p) => {
     const stats = queryPageMap.get(p.key) || { commercialClicks: 0, totalClicks: 0 };
     const commercialShare = stats.totalClicks > 0 ? stats.commercialClicks / stats.totalClicks : null;
-    const isCommercial = commercialShare != null && commercialShare >= COMMERCIAL_PAGE_THRESHOLD;
-    return { ...p, commercial: isCommercial, commercial_share: commercialShare != null ? Math.round(commercialShare * 100) / 100 : null };
+    const { intent, confident, marker } = classifyUrl(p.key);
+    const isCommercial = intent === 'commercial';
+    return {
+      ...p,
+      commercial: isCommercial,
+      page_intent: intent,
+      intent_confident: confident,
+      intent_marker: marker,
+      commercial_share: commercialShare != null ? Math.round(commercialShare * 100) / 100 : null,
+    };
   });
+}
+
+/**
+ * Список топ-страниц (до PAGES_LIMIT) с разворачиваемым перечнем запросов,
+ * по которым продвигается каждая страница. Источник запросов — срез
+ * query×page (GSC). Интент страницы — по URL.
+ *
+ * @param {Array}  pages       topPages [{key, clicks, impressions, ctr, position}]
+ * @param {Array}  queryPage   срез query×page [{query, page, clicks, impressions, ctr, position}]
+ * @param {string} engine      'google' | 'yandex' — пометка источника
+ */
+function _buildPagesWithQueries(pages, queryPage, engine) {
+  // page -> массив запросов этой страницы
+  const queriesByPage = new Map();
+  for (const r of queryPage || []) {
+    if (!r.page) continue;
+    const arr = queriesByPage.get(r.page) || [];
+    arr.push({
+      query: r.query || '',
+      clicks: Number(r.clicks) || 0,
+      impressions: Number(r.impressions) || 0,
+      ctr: r.ctr != null ? Number(r.ctr) : null,
+      position: r.position != null ? Number(r.position) : null,
+    });
+    queriesByPage.set(r.page, arr);
+  }
+  const sortRows = (a, b) => (b.clicks - a.clicks) || (b.impressions - a.impressions);
+  return (pages || [])
+    .slice()
+    .sort(sortRows)
+    .slice(0, PAGES_LIMIT)
+    .map((p) => {
+      const { intent, confident, marker } = classifyUrl(p.key);
+      const queries = (queriesByPage.get(p.key) || []).sort(sortRows);
+      return {
+        url: p.key,
+        engine,
+        clicks: Number(p.clicks) || 0,
+        impressions: Number(p.impressions) || 0,
+        ctr: p.ctr != null ? Number(p.ctr) : null,
+        position: p.position != null ? Number(p.position) : null,
+        page_intent: intent,
+        intent_confident: confident,
+        intent_marker: marker,
+        queries_count: queries.length,
+        queries: queries.slice(0, PER_PAGE_QUERY_LIMIT),
+      };
+    });
 }
 
 function _summarizeCommercial(queries) {
@@ -469,7 +528,12 @@ async function _queriesSection(project, from, to) {
     const taggedPages = _splitPages(topPages, queryPageMap);
     const sortRows = (a, b) => (b.clicks - a.clicks) || (b.impressions - a.impressions);
     const pagesCommercial    = taggedPages.filter((p) => p.commercial).sort(sortRows).slice(0, TOP_LIMIT);
-    const pagesInformational = taggedPages.filter((p) => p.commercial === false && p.commercial_share != null).sort(sortRows).slice(0, TOP_LIMIT);
+    const pagesInformational = taggedPages.filter((p) => p.commercial === false).sort(sortRows).slice(0, TOP_LIMIT);
+
+    // ТЗ-правка: до 50 топ-страниц с разворачиваемым списком запросов (Google).
+    // Yandex.Вебмастер не отдаёт срез по страницам, поэтому pages по Яндексу
+    // недоступны — это честное ограничение API, помечаем engine.
+    const pagesGoogle = _buildPagesWithQueries(topPages, queryPage, 'google');
 
     return {
       connected: true,
@@ -480,6 +544,8 @@ async function _queriesSection(project, from, to) {
       top_queries_other: split.other,
       top_pages_commercial: pagesCommercial,
       top_pages_informational: pagesInformational,
+      pages: { google: pagesGoogle, yandex: [] },
+      pages_limit: PAGES_LIMIT,
       summary,
     };
   } catch (err) {
@@ -490,7 +556,9 @@ async function _queriesSection(project, from, to) {
       reason: 'source_failed',
       error: err.message || 'queries_failed',
       top_queries_commercial: [], top_queries_informational: [], top_queries_other: [],
-      top_pages_commercial: [], top_pages_informational: [], summary: null,
+      top_pages_commercial: [], top_pages_informational: [],
+      pages: { google: [], yandex: [] }, pages_limit: PAGES_LIMIT,
+      summary: null,
     };
   }
 }
@@ -733,21 +801,29 @@ async function aggregateForDraft(draft, opts = {}) {
 
   // Сводный статус интеграций — нужен для UI-баннеров и для PDF footnote
   // (если какие-то секции в partial/error, в экспорт добавляется сноска).
+  //
+  // core: true — это настоящие внешние интеграции данных (GSC, Яндекс,
+  // Keys.so, съём позиций). Только по ним строится глобальная плашка
+  // «часть источников недоступна». Производные/внутренние секции (Работы,
+  // Модули, Топ-запросы) имеют собственные пустые состояния в своих блоках
+  // и НЕ должны пугать клиента в общем баннере — иначе пустой лог работ даёт
+  // ложное «Не удалось получить: Работы».
   const integrations = [
-    { id: 'gsc', label: 'Google Search Console', status: gsc.status, reason: gsc.reason, last_sync_at: gsc.last_sync_at || null },
-    { id: 'yandex_webmaster', label: 'Яндекс.Вебмастер', status: ywm.status, reason: ywm.reason, last_sync_at: ywm.last_sync_at || null },
-    { id: 'keys_so', label: 'Keys.so', status: keysSo.status, reason: keysSo.reason, last_sync_at: keysSo.last_sync_at || null },
-    { id: 'position', label: 'Съём позиций', status: position.status, reason: position.reason, last_sync_at: null },
-    { id: 'tasks', label: 'Работы', status: tasks.status, reason: tasks.reason, last_sync_at: null },
-    { id: 'modules', label: 'Модули', status: modules.status, reason: modules.reason, last_sync_at: null },
-    { id: 'queries', label: 'Топ-запросы', status: queries.status, reason: queries.reason, last_sync_at: null },
+    { id: 'gsc', label: 'Google Search Console', status: gsc.status, reason: gsc.reason, last_sync_at: gsc.last_sync_at || null, core: true },
+    { id: 'yandex_webmaster', label: 'Яндекс.Вебмастер', status: ywm.status, reason: ywm.reason, last_sync_at: ywm.last_sync_at || null, core: true },
+    { id: 'keys_so', label: 'Keys.so', status: keysSo.status, reason: keysSo.reason, last_sync_at: keysSo.last_sync_at || null, core: true },
+    { id: 'position', label: 'Съём позиций', status: position.status, reason: position.reason, last_sync_at: null, core: true },
+    { id: 'tasks', label: 'Работы', status: tasks.status, reason: tasks.reason, last_sync_at: null, core: false },
+    { id: 'modules', label: 'Модули', status: modules.status, reason: modules.reason, last_sync_at: null, core: false },
+    { id: 'queries', label: 'Топ-запросы', status: queries.status, reason: queries.reason, last_sync_at: null, core: false },
   ];
+  const coreIntegrations = integrations.filter((i) => i.core);
   const completeness = {
-    has_partial: integrations.some((i) => i.status === 'partial'),
-    has_error: integrations.some((i) => i.status === 'error'),
-    has_empty: integrations.some((i) => i.status === 'empty'),
-    partial_sources: integrations.filter((i) => i.status === 'partial').map((i) => i.label),
-    failed_sources: integrations.filter((i) => i.status === 'error').map((i) => i.label),
+    has_partial: coreIntegrations.some((i) => i.status === 'partial'),
+    has_error: coreIntegrations.some((i) => i.status === 'error'),
+    has_empty: coreIntegrations.some((i) => i.status === 'empty'),
+    partial_sources: coreIntegrations.filter((i) => i.status === 'partial').map((i) => i.label),
+    failed_sources: coreIntegrations.filter((i) => i.status === 'error').map((i) => i.label),
   };
 
   const payload = {
@@ -812,5 +888,6 @@ module.exports = {
   _classifyQueries,
   _splitQueries,
   _splitPages,
+  _buildPagesWithQueries,
   _summarizeCommercial,
 };

@@ -197,13 +197,24 @@ test('assembleModules builds all modules and executive summary', () => {
     volumeByQuery: { q1: 3000 },
     techAudit: [{ url: 'https://x/p2', total_images: 4, images_no_alt: 3, images_non_webp: 4, images_no_alt_ratio: 0.75, webp_ratio: 0, http_status: 200, page_size_kb: 50 }],
     backlinks: [{ url: 'https://d.ru/x', donor_domain: 'd.ru', yandex_indexed: true, http_status: 200 }],
-  });
+    // ctr_gap/content_health/off_page/tech_audit отключены по умолчанию —
+    // включаем явно, чтобы проверить, что билдеры по-прежнему работают.
+  }, { config: { ctr_gap: true, content_health: true, off_page: true, tech_audit: true } });
   assert.ok(out.striking_distance.items.length >= 1);
   assert.ok(out.ctr_gap.items.length >= 1);
   assert.ok(out.content_health.summary.total >= 1);
   assert.ok(out.tech_audit.summary.pages === 1);
   assert.ok(out.off_page.summary.total === 1);
   assert.ok(out.executive.striking_distance);
+});
+test('по умолчанию ctr_gap/content_health/off_page/tech_audit отключены', () => {
+  const out = assembleModules({ queryPageRows: [] });
+  assert.ok(!out.ctr_gap, 'ctr_gap должен быть скрыт по умолчанию');
+  assert.ok(!out.content_health, 'content_health должен быть скрыт по умолчанию');
+  assert.ok(!out.off_page, 'off_page должен быть скрыт по умолчанию');
+  assert.ok(!out.tech_audit, 'tech_audit должен быть скрыт по умолчанию');
+  assert.ok(out.striking_distance, 'striking_distance остаётся включён');
+  assert.ok(!out.enabled.includes('ctr_gap'));
 });
 test('assembleModules respects disabled modules via config', () => {
   const out = assembleModules({ queryPageRows: [] }, { config: { tech_audit: false, off_page: false } });

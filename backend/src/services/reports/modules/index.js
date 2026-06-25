@@ -19,9 +19,16 @@ const { normalizeSettings, DEFAULT_SETTINGS } = require('./settings');
 
 const ALL_MODULES = ['executive', 'striking_distance', 'ctr_gap', 'content_health', 'off_page', 'tech_audit'];
 
+// ТЗ-правка: CTR Gap и Content Health убираем, Off-Page Monitor и Tech Audit
+// скрываем (непонятно/не работает). Эти модули отключены по умолчанию и
+// включаются только явным config.<module> = true.
+const DEFAULT_DISABLED = new Set(['ctr_gap', 'content_health', 'off_page', 'tech_audit']);
+
 function _enabled(config, name) {
-  if (!config || config[name] == null) return true; // по умолчанию модуль включён
-  return config[name] !== false;
+  // Явное значение в config имеет приоритет (true/false).
+  if (config && config[name] != null) return config[name] !== false;
+  // Иначе — дефолт: большинство модулей включено, отключённые по умолчанию скрыты.
+  return !DEFAULT_DISABLED.has(name);
 }
 
 function _ctrGapUrlSet(ctrGap) {
