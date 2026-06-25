@@ -150,6 +150,7 @@ async function exportPdf() {
             :mode="result.mode"
             view-mode="client"
             :captured-at="result.payload?.captured_at"
+            :chart-config="result.payload?.config?.charts || {}"
             :readonly="true" />
         </div>
         <div class="public-footer">

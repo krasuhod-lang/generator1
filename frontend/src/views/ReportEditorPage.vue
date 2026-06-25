@@ -134,6 +134,19 @@ async function onTasksBlocksUpdate(next) {
   await store.updateTasksBlocks(route.params.id, next);
 }
 
+// ТЗ-правка: включение/выключение графика в клиентском борде. Храним в
+// draft.config.charts.{gsc,ywm,keys,position}; persist через updateDraft.
+async function onChartToggle(id, visible) {
+  try {
+    const cfg = { ...(draft.value?.config || {}) };
+    cfg.charts = { ...(cfg.charts || {}), [id]: visible };
+    if (store.current) store.current.config = cfg;
+    await store.updateDraft(route.params.id, { config: cfg });
+  } catch (e) {
+    console.error('[reports] chart toggle failed:', e);
+  }
+}
+
 // ТЗ §6: ручные правки чисел/строк в отчёте. Сохраняем точечно через
 // PATCH /overrides, после чего перезагружаем data, чтобы applyOverrides на
 // бэке отрисовал значение с учётом всех зависимых полей (например,
@@ -360,9 +373,11 @@ function _stateOf(section) {
             :view-mode="previewMode"
             :readonly="false"
             :overrides-meta="draft.overrides_meta || {}"
+            :chart-config="draft.config?.charts || {}"
             @update:tasksBlocks="onTasksBlocksUpdate"
             @override:update="onOverrideUpdate"
-            @override:reset="onOverrideReset" />
+            @override:reset="onOverrideReset"
+            @update:chart="onChartToggle" />
         </main>
       </div>
 

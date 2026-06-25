@@ -30,6 +30,7 @@ const props = defineProps({
   height: { type: Number, default: 320 },
   showSecondAxis: { type: Boolean, default: false },
   annotations: { type: Array, default: () => [] },
+  showTrend: { type: Boolean, default: true },
 });
 
 const PAD = { l: 50, r: 50, t: 16, b: 36 };
@@ -197,16 +198,90 @@ const hoverZones = computed(() => {
 function onHover(idx) { hoverIndex.value = idx; }
 function onLeave() { hoverIndex.value = -1; }
 
-// --- Trend delta labels at line endpoints ---
-// Удалены по запросу клиента: цифры «+/–%» у концов линий считались по
-// (последний полный месяц − предпоследний полный), но способ расчёта был
-// непрозрачен для читателя отчёта. Сами линии графика, легенда и hover-
-// тултип с абсолютными значениями остаются.
+// --- Сводка тренда справа от графика (по запросу клиента) ---
+// Для каждой видимой серии строим линию тренда методом наименьших квадратов
+// (линейная регрессия) и считаем долю роста в % по концам этой линии. Это
+// устойчивее «первое/последнее значение» и честно отражает направление тренда.
+function _linregress(data) {
+  const pts = [];
+  (data || []).forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) return;
+    pts.push([i, v]);
+  });
+  if (pts.length < 2) {
+    const only = pts.length === 1 ? pts[0][1] : null;
+    return { slope: 0, intercept: only, fitFirst: only, fitLast: only, n: pts.length };
+  }
+  const n = pts.length;
+  let sx = 0; let sy = 0; let sxx = 0; let sxy = 0;
+  for (const [x, y] of pts) { sx += x; sy += y; sxx += x * x; sxy += x * y; }
+  const denom = n * sxx - sx * sx;
+  const slope = denom !== 0 ? (n * sxy - sx * sy) / denom : 0;
+  const intercept = (sy - slope * sx) / n;
+  return {
+    slope,
+    intercept,
+    fitFirst: slope * pts[0][0] + intercept,
+    fitLast: slope * pts[pts.length - 1][0] + intercept,
+    n,
+  };
+}
+
+const trendSummary = computed(() => {
+  return props.datasets.map((ds, di) => {
+    const { slope, fitFirst, fitLast, n } = _linregress(ds.data);
+    if (fitFirst === null || fitLast === null || n < 1) {
+      return { label: ds.label, color: ds.color, hidden: hiddenSeries.value.has(di), empty: true };
+    }
+    const delta = fitLast - fitFirst;
+    const pct = fitFirst !== 0 ? (delta / Math.abs(fitFirst)) * 100 : null;
+    const dir = slope > 0 ? 'up' : (slope < 0 ? 'down' : 'flat');
+    return {
+      label: ds.label,
+      color: ds.color,
+      hidden: hiddenSeries.value.has(di),
+      empty: false,
+      first: fitFirst, last: fitLast, delta, pct, dir, slope,
+    };
+  });
+});
+
+// Геометрия линии тренда для отрисовки прямо на графике (только видимые серии).
+const trendLines = computed(() => {
+  const n = props.labels.length;
+  if (n < 2) return [];
+  return props.datasets.map((ds, di) => {
+    if (hiddenSeries.value.has(di)) return null;
+    const { slope, intercept, n: cnt } = _linregress(ds.data);
+    if (cnt < 2) return null;
+    const axis = ds.yAxisID || 'y';
+    return {
+      color: ds.color,
+      x1: xFor(0),
+      x2: xFor(n - 1),
+      y1: yFor(intercept, axis),
+      y2: yFor(slope * (n - 1) + intercept, axis),
+    };
+  }).filter(Boolean);
+});
+
+function _fmtDelta(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const sign = v > 0 ? '+' : '';
+  return sign + Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 1 });
+}
+function _fmtPct(v) {
+  if (v == null || !Number.isFinite(v)) return '';
+  const sign = v > 0 ? '+' : '';
+  return `${sign}${Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`;
+}
 </script>
 
 <template>
   <div class="report-trend-chart" @mouseleave="onLeave">
-    <svg :viewBox="`0 0 ${width} ${height}`" class="w-full h-auto" preserveAspectRatio="none">
+    <div class="chart-row">
+      <div class="chart-canvas">
+      <svg :viewBox="`0 0 ${width} ${height}`" class="w-full h-auto" preserveAspectRatio="none">
       <!-- Y grid -->
       <g class="grid" stroke="rgba(0,0,0,0.06)" stroke-width="1">
         <line v-for="(t,i) in ticksY" :key="`gy${i}`" :x1="PAD.l" :x2="width - PAD.r" :y1="t.y" :y2="t.y" />
@@ -249,6 +324,13 @@ function onLeave() { hoverIndex.value = -1; }
       </g>
       <!-- Trend delta labels at line endpoints removed (см. trendDeltas computed) -->
 
+      <!-- Линии тренда (линейная регрессия) для каждой видимой серии -->
+      <line v-for="(tl, ti) in trendLines" :key="`trend${ti}`"
+            :x1="tl.x1" :y1="tl.y1" :x2="tl.x2" :y2="tl.y2"
+            :stroke="tl.color" stroke-width="1.5"
+            stroke-dasharray="7,5" stroke-opacity="0.65"
+            stroke-linecap="round" />
+
       <!-- Hover crosshair + dots -->
       <template v-if="hoverIndex >= 0 && hoverIndex < labels.length">
         <line :x1="xFor(hoverIndex)" :x2="xFor(hoverIndex)"
@@ -282,6 +364,27 @@ function onLeave() { hoverIndex.value = -1; }
         <span class="tooltip-value">{{ _formatTooltipNum(item.value) }}</span>
       </div>
     </div>
+      </div>
+      <!-- Сводка тренда справа: дельта и доля роста по каждой серии -->
+      <aside v-if="showTrend" class="trend-side">
+        <div class="trend-side-title">Динамика за период</div>
+        <div v-for="(t, i) in trendSummary" :key="`tr${i}`"
+             class="trend-row" :class="{ dimmed: t.hidden }">
+          <span class="trend-swatch" :style="{ background: t.color }" />
+          <span class="trend-label">{{ t.label }}</span>
+          <template v-if="!t.empty">
+            <span class="trend-delta" :class="`trend-${t.dir}`">
+              <template v-if="t.dir === 'up'">▲</template>
+              <template v-else-if="t.dir === 'down'">▼</template>
+              <template v-else>—</template>
+              {{ _fmtPct(t.pct) }}
+            </span>
+            <span class="trend-abs">{{ _fmtDelta(t.delta) }}</span>
+          </template>
+          <span v-else class="trend-abs">—</span>
+        </div>
+      </aside>
+    </div>
     <!-- Legend -->
     <div class="chart-legend">
       <button v-for="(ds, i) in datasets" :key="`lg${i}`"
@@ -300,6 +403,40 @@ function onLeave() { hoverIndex.value = -1; }
 
 <style scoped>
 .report-trend-chart { width: 100%; position: relative; }
+.chart-row { display: flex; align-items: stretch; gap: 16px; }
+.chart-canvas { flex: 1 1 auto; position: relative; min-width: 0; }
+.trend-side {
+  flex: 0 0 200px;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px;
+  border-left: 1px solid rgba(0,0,0,0.06);
+  font-size: 12px;
+}
+.trend-side-title {
+  font-weight: 600; color: #6e6e73; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 4px;
+}
+.trend-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  grid-template-areas: "sw lbl delta" "sw lbl abs";
+  align-items: center;
+  column-gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
+}
+.trend-row.dimmed { opacity: 0.4; }
+.trend-swatch { grid-area: sw; width: 8px; height: 8px; border-radius: 2px; }
+.trend-label { grid-area: lbl; color: #1d1d1f; font-weight: 500; }
+.trend-delta { grid-area: delta; font-weight: 600; text-align: right; white-space: nowrap; }
+.trend-abs { grid-area: abs; color: #8a8a8e; text-align: right; font-size: 11px; white-space: nowrap; }
+.trend-up { color: #2e7d32; }
+.trend-down { color: #c62828; }
+.trend-flat { color: #8a8a8e; }
+@media (max-width: 720px) {
+  .chart-row { flex-direction: column; }
+  .trend-side { flex-basis: auto; border-left: none; border-top: 1px solid rgba(0,0,0,0.06); }
+}
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
