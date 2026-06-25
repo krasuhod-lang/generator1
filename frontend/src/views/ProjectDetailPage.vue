@@ -25,11 +25,15 @@ import StrategyDiagram from '../components/StrategyDiagram.vue';
 import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
 import ActionPlanCard from '../components/ActionPlanCard.vue';
 import { useProjectsStore } from '../stores/projects.js';
+import { useReportsStore } from '../stores/reports.js';
+import { useViewModeStore } from '../stores/viewMode.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 
 const route = useRoute();
 const router = useRouter();
 const store = useProjectsStore();
+const reportsStore = useReportsStore();
+const viewMode = useViewModeStore();
 
 const projectId = route.params.id;
 const project = ref(null);
@@ -358,6 +362,7 @@ async function loadYdxPerformance() {
   ydxPerfError.value = '';
   try {
     ydxPerf.value = await store.getYdxPerformance(projectId, rangeParams());
+    _syncRangeFromResponse(ydxPerf.value);
   } catch (err) {
     ydxPerfError.value = err.response?.data?.error || 'Не удалось получить данные Яндекс.Вебмастера';
   } finally {
@@ -373,6 +378,7 @@ async function loadComparison() {
     const data = await store.compareSources(projectId, rangeParams());
     comparison.value = data?.comparison || null;
     compareConnected.value = data?.connected || { google: false, yandex: false };
+    if (data?.range) _syncRangeFromResponse(data);
   } catch (err) {
     compareError.value = err.response?.data?.error || 'Не удалось сопоставить данные';
   } finally {
@@ -401,11 +407,27 @@ function rangeParams() {
   return { range: range.value.key };
 }
 
+/**
+ * П.5: подхватить реально применённый бэкендом период
+ * (`range.startDate` / `range.endDate` из ответа fetchPerformanceSeries)
+ * и залить в инпуты UI. GSC сдвигает endDate на -2..-3 дня от «сегодня»,
+ * поэтому без этого пользователь не понимает, какой именно диапазон
+ * показывают графики.
+ */
+function _syncRangeFromResponse(resp) {
+  const r = resp && resp.range;
+  if (!r || !r.startDate || !r.endDate) return;
+  range.value.from = r.startDate;
+  range.value.to = r.endDate;
+  range.value.key = 'custom';
+}
+
 async function loadPerformance() {
   perfLoading.value = true;
   perfError.value = '';
   try {
     perf.value = await store.getPerformance(projectId, rangeParams());
+    _syncRangeFromResponse(perf.value);
   } catch (err) {
     perfError.value = err.response?.data?.error || 'Не удалось получить данные GSC';
   } finally {
@@ -604,6 +626,44 @@ async function copyReport() {
   flash(ok ? 'Отчёт скопирован (Markdown)' : 'Не удалось скопировать');
 }
 
+/**
+ * П.7: «📊 Отчёт проекта» — открыть последний draft этого проекта в
+ * редакторе отчётов, либо автоматически создать новый с дефолтным окном
+ * «последние 28 дней» и редиректнуть туда. Один проект — один активный
+ * draft (последний по дате создания); ReportsPage остаётся глобальным
+ * реестром для аналитика.
+ */
+const openingReport = ref(false);
+async function openProjectReport() {
+  if (!project.value?.id) return;
+  openingReport.value = true;
+  try {
+    const drafts = await reportsStore.fetchDrafts();
+    const list = drafts || reportsStore.drafts || [];
+    const own = list.filter((d) => d.project_id === project.value.id);
+    if (own.length) {
+      // Самый свежий — наверху (бэкенд сортирует by created_at DESC).
+      router.push(`/reports/${own[0].id}`);
+      return;
+    }
+    const to = new Date();
+    const from = new Date(to.getTime() - 27 * 86400_000);
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    const draft = await reportsStore.createDraft({
+      project_id: project.value.id,
+      title: `Отчёт: ${project.value.name}`,
+      date_from: fmt(from),
+      date_to: fmt(to),
+    });
+    if (draft?.id) router.push(`/reports/${draft.id}`);
+    else flash('Не удалось создать отчёт');
+  } catch (err) {
+    flash(err?.response?.data?.error || 'Не удалось открыть отчёт проекта');
+  } finally {
+    openingReport.value = false;
+  }
+}
+
 onMounted(() => {
   // Обработка возврата с OAuth.
   if (route.query.gsc === 'connected') flash('Google Search Console подключён ✓');
@@ -643,7 +703,13 @@ onUnmounted(() => {
           </div>
           <div class="flex flex-wrap gap-2">
             <button v-if="positionProject?.id" class="btn-secondary" @click="router.push(`/position-tracker/${positionProject.id}`)">📈 Позиции</button>
-            <button class="btn-secondary" @click="router.push(`/reports/new?projectId=${project.id}`)">🧾 Новый отчёт</button>
+            <!-- П.7: единая точка входа в отчёты проекта. Открывает последний
+                 черновик или создаёт новый (28 дней) и редиректит туда.
+                 «🧾 Новый отчёт» / ReportsPage остаются как глобальный реестр
+                 для аналитика (см. меню «Отчёты»). -->
+            <button class="btn-secondary" :disabled="openingReport" @click="openProjectReport">
+              {{ openingReport ? 'Открываем…' : '📊 Отчёт проекта' }}
+            </button>
           </div>
         </header>
 
@@ -1194,10 +1260,17 @@ onUnmounted(() => {
         </div>
         <!-- ============ /Вкладка Задачи ============ -->
 
-        <!-- Share -->
-        <section class="card space-y-3">
-          <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Поделиться статистикой</h2>
-          <p class="text-xs text-gray-500">Публичная read-only ссылка: получатель видит графики и AI-отчёт, без настроек и кнопок управления.</p>
+        <!-- Share (deprecated → П.6). Клиентская публичная поверхность
+             переехала в «Отчёты» (PublicReportPage, /r/:uuid). Здесь блок
+             оставлен только аналитику, чтобы можно было отозвать руками уже
+             выпущенные ссылки. Бэкенд /share/project/:token и token до сих
+             пор работают, чтобы не ломать ранее отправленные клиентам URL. -->
+        <section v-if="viewMode.isAnalyst" class="card space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Поделиться статистикой <span class="text-[10px] text-gray-500 normal-case">(deprecated)</span></h2>
+            <span class="text-[10px] text-amber-300/80">Новые ссылки — через «📊 Отчёт проекта» → «Опубликовать»</span>
+          </div>
+          <p class="text-xs text-gray-500">Старая публичная ссылка на дашборд проекта. Сохранена для управления ранее выпущенными ссылками; для новых клиентских отчётов используйте модуль «Отчёты».</p>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
             <label class="flex flex-col gap-1">

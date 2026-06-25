@@ -10,6 +10,7 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ReportRenderer from '../components/reports/ReportRenderer.vue';
+import GranularityToggle from '../components/reports/GranularityToggle.vue';
 import { useReportsStore } from '../stores/reports.js';
 import { collectReportChartImages, downloadBlob } from '../utils/reportExport.js';
 
@@ -215,11 +216,22 @@ async function exportPdf() {
 }
 
 async function loadAutolog() {
+  // Доп. правка из плана: «Подтянуть работы» теперь не пишет items
+  // только в локальный data.tasks.items (исчезали при следующем
+  // refreshData), а вызывает refreshData — бэкенд пересобирает blocks из
+  // актуального tasksAutoLog и сохраняет их в составе payload секции.
+  // Параллельно, чтобы группированные blocks тоже отражали свежие
+  // элементы и переживали закрытие/открытие редактора, мы дополнительно
+  // персистим их в report_drafts.tasks_blocks через updateTasksBlocks.
   if (!route.params.id) return;
   try {
-    const items = await store.listProjectTasks(route.params.id, false);
-    if (data.value) data.value.tasks = { ...(data.value.tasks || {}), items };
-  } catch { /* */ }
+    await refreshData();
+    const blocks = data.value?.tasks?.blocks;
+    if (Array.isArray(blocks)) {
+      try { await store.updateTasksBlocks(route.params.id, blocks); }
+      catch (_) { /* persist — best-effort, секция всё равно подтянется при следующем refreshData */ }
+    }
+  } catch (_) { /* */ }
 }
 
 const sources = computed(() => {
@@ -271,11 +283,7 @@ function _stateOf(section) {
             <h3>Интерактивный диапазон</h3>
             <label>С<input type="date" v-model="viewRange.from" /></label>
             <label>По<input type="date" v-model="viewRange.to" /></label>
-            <div class="seg">
-              <button class="seg-btn" :class="{ active: viewRange.granularity === 'day' }" @click="viewRange.granularity = 'day'">Дни</button>
-              <button class="seg-btn" :class="{ active: viewRange.granularity === 'week' }" @click="viewRange.granularity = 'week'">Недели</button>
-              <button class="seg-btn" :class="{ active: viewRange.granularity === 'month' }" @click="viewRange.granularity = 'month'">Месяцы</button>
-            </div>
+            <GranularityToggle v-model="viewRange.granularity" />
             <button class="btn btn-secondary" :disabled="dataLoading" @click="refreshData">
               {{ dataLoading ? 'Обновление…' : 'Применить диапазон' }}
             </button>
@@ -348,36 +356,45 @@ function _stateOf(section) {
 
         <!-- RIGHT: PREVIEW -->
         <main ref="previewRef" class="rep-main">
-          <div v-if="dataLoading" class="rep-loading">Загрузка данных…</div>
-          <ReportRenderer v-else-if="data"
-            :data="data"
-            :summary="{
-              executive_summary: draft.llm_summary,
-              highlights: draft.llm_highlights,
-              growth_attribution: draft.llm_growth,
-              quick_wins: draft.llm_quick_wins,
-              vulnerabilities: draft.llm_vulnerabilities,
-              roadmap: draft.llm_roadmap,
-              traffic_value: draft.llm_traffic_value,
-            }"
-            :tasks-blocks="draft.tasks_blocks || []"
-            :title="draft.title"
-            :period="`${viewRange.from} — ${viewRange.to}`"
-            :project="{
-              name: draft.project_name,
-              url: draft.project_url,
-              logo_url: draft.logo_url,
-              color_accent: draft.color_accent,
-            }"
-            mode="live"
-            :view-mode="previewMode"
-            :readonly="false"
-            :overrides-meta="draft.overrides_meta || {}"
-            :chart-config="draft.config?.charts || {}"
-            @update:tasksBlocks="onTasksBlocksUpdate"
-            @override:update="onOverrideUpdate"
-            @override:reset="onOverrideReset"
-            @update:chart="onChartToggle" />
+          <!-- Доп. правка: при dataLoading=true раньше превью прятался
+               полностью (пустое полотно с «Загрузка данных…»). Теперь
+               показываем «призрак» предыдущих данных с лёгким оверлеем —
+               UI не моргает при смене диапазона и не пугает клиента
+               пустотой. Если данных ещё нет (первый запрос) — показываем
+               старый лоадер. -->
+          <div v-if="dataLoading && !data" class="rep-loading">Загрузка данных…</div>
+          <div v-else-if="data" class="rep-preview-wrap" :class="{ 'is-loading': dataLoading }">
+            <div v-if="dataLoading" class="rep-preview-overlay" aria-live="polite">Обновляется…</div>
+            <ReportRenderer
+              :data="data"
+              :summary="{
+                executive_summary: draft.llm_summary,
+                highlights: draft.llm_highlights,
+                growth_attribution: draft.llm_growth,
+                quick_wins: draft.llm_quick_wins,
+                vulnerabilities: draft.llm_vulnerabilities,
+                roadmap: draft.llm_roadmap,
+                traffic_value: draft.llm_traffic_value,
+              }"
+              :tasks-blocks="draft.tasks_blocks || []"
+              :title="draft.title"
+              :period="`${viewRange.from} — ${viewRange.to}`"
+              :project="{
+                name: draft.project_name,
+                url: draft.project_url,
+                logo_url: draft.logo_url,
+                color_accent: draft.color_accent,
+              }"
+              mode="live"
+              :view-mode="previewMode"
+              :readonly="false"
+              :overrides-meta="draft.overrides_meta || {}"
+              :chart-config="draft.config?.charts || {}"
+              @update:tasksBlocks="onTasksBlocksUpdate"
+              @override:update="onOverrideUpdate"
+              @override:reset="onOverrideReset"
+              @update:chart="onChartToggle" />
+          </div>
         </main>
       </div>
 
@@ -427,6 +444,15 @@ function _stateOf(section) {
   letter-spacing: -0.01em;
 }
 .rep-loading { padding: 60px; text-align: center; color: #6e6e73; }
+.rep-preview-wrap { position: relative; }
+.rep-preview-wrap.is-loading > :not(.rep-preview-overlay) { opacity: 0.55; filter: saturate(0.9); pointer-events: none; transition: opacity 0.15s; }
+.rep-preview-overlay {
+  position: sticky; top: 12px; z-index: 5;
+  width: max-content; margin: 0 auto 8px;
+  background: rgba(10,132,255,0.95); color: #fff;
+  padding: 6px 14px; border-radius: 999px; font-size: 12px;
+  box-shadow: 0 4px 12px rgba(10,132,255,0.25);
+}
 .rep-editor { max-width: 1400px; margin: 0 auto; }
 .rep-head { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
 .back-btn { background: none; border: none; color: #0071e3; cursor: pointer; font-size: 14px; padding: 0; font-weight: 500; }

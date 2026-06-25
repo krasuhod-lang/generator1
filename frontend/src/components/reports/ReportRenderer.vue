@@ -177,9 +177,12 @@ const keysChart = computed(() => {
   return {
     labels: series.map((r) => r.date),
     datasets: [
-      { label: `Видимость (${label})`, color: colorVis, data: series.map((r) => Number(r.visibility) || 0), yAxisID: 'y2' },
-      { label: 'ТОП-10', color: '#2563eb', data: series.map((r) => Number(r.keywords_top10) || 0) },
-      { label: 'ТОП-50', color: '#f59e0b', data: series.map((r) => Number(r.keywords_top50) || 0) },
+      // ТЗ-правка: сохраняем null вместо `Number(null)||0 = 0`, иначе
+      // отсутствующие значения видимости рисуются плоской линией на y=0,
+      // и клиент видит «график есть, но видимость не отображается».
+      { label: `Видимость (${label})`, color: colorVis, data: series.map((r) => r.visibility != null ? Number(r.visibility) : null), yAxisID: 'y2' },
+      { label: 'ТОП-10', color: '#2563eb', data: series.map((r) => r.keywords_top10 != null ? Number(r.keywords_top10) : null) },
+      { label: 'ТОП-50', color: '#f59e0b', data: series.map((r) => r.keywords_top50 != null ? Number(r.keywords_top50) : null) },
     ],
     annotations: props.data?.tasks?.annotations || [],
     showSecondAxis: true,
@@ -464,14 +467,23 @@ const enginePages = computed(() => {
   ];
   return legacy;
 });
-const pagesCommercialCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'commercial').length);
-const pagesInfoCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'informational').length);
+const pagesCommercialCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'commercial' || p.page_intent === 'unknown').length);
+const pagesInfoCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'informational' || p.page_intent === 'unknown').length);
 const filteredPages = computed(() => {
   if (pageFilter.value === 'all') return enginePages.value;
+  // ТЗ-правка: страницы с нераспознанным интентом показываем в обеих вкладках.
+  if (pageFilter.value === 'commercial') {
+    return enginePages.value.filter((p) => p.page_intent === 'commercial' || p.page_intent === 'unknown');
+  }
+  if (pageFilter.value === 'informational') {
+    return enginePages.value.filter((p) => p.page_intent === 'informational' || p.page_intent === 'unknown');
+  }
   return enginePages.value.filter((p) => p.page_intent === pageFilter.value);
 });
 function pageIntentLabel(intent) {
-  return intent === 'informational' ? '📚 Информационная' : '🛒 Коммерческая';
+  if (intent === 'informational') return '📚 Информационная';
+  if (intent === 'unknown') return '🤷 Не удалось распознать';
+  return '🛒 Коммерческая';
 }
 
 // ТЗ-правка: сворачивание блоков работ по месяцам и по разделам/задачам,

@@ -8,11 +8,13 @@ import { useRoute } from 'vue-router';
 import axios from 'axios';
 import ReportRenderer from '../components/reports/ReportRenderer.vue';
 import PinGate from '../components/reports/PinGate.vue';
+import GranularityToggle from '../components/reports/GranularityToggle.vue';
 import { collectReportChartImages, downloadBlob } from '../utils/reportExport.js';
 
 const route = useRoute();
 const loading = ref(true);
 const error = ref(null);
+const expired = ref(false); // 410 → показать «запросить новую ссылку»
 const needPin = ref(false);
 const pinError = ref(null);
 const pinLoading = ref(false);
@@ -26,7 +28,7 @@ const previewRef = ref(null);
 const api = axios.create({ withCredentials: true, timeout: 30000 });
 
 async function load() {
-  loading.value = true; error.value = null; needPin.value = false;
+  loading.value = true; error.value = null; needPin.value = false; expired.value = false;
   try {
     const { data } = await api.get(`/api/public/report/${route.params.uuid}`);
     result.value = data;
@@ -41,6 +43,7 @@ async function load() {
     if (err.response?.status === 403 && err.response?.data?.error === 'password_required') {
       needPin.value = true;
     } else if (err.response?.status === 410) {
+      expired.value = true;
       error.value = err.response.data?.error === 'expired'
         ? 'Срок действия ссылки истёк.'
         : 'Ссылка отозвана.';
@@ -118,7 +121,15 @@ async function exportPdf() {
 <template>
   <div class="public-page">
     <div v-if="loading" class="status">Загрузка отчёта…</div>
-    <div v-else-if="error" class="status err">{{ error }}</div>
+    <div v-else-if="error" class="status err">
+      <div>{{ error }}</div>
+      <!-- Доп. правка: при 410 показать действенную подсказку
+           «запросить новую ссылку» — без этого клиенты теряются. -->
+      <div v-if="expired" class="status-hint">
+        Обратитесь к вашему SEO-аналитику с просьбой выпустить новую ссылку
+        на отчёт.
+      </div>
+    </div>
     <PinGate v-else-if="needPin" ref="pinRef" :length="pinLength" :loading="pinLoading" :error="pinError" @submit="submitPin" />
     <div v-else-if="result" class="public-shell"
          :style="{ '--accent': result.project?.color_accent || '#0071e3' }">
@@ -127,11 +138,7 @@ async function exportPdf() {
           <div class="range-grid">
             <input v-model="viewRange.from" type="date" :disabled="result.mode === 'snapshot'" />
             <input v-model="viewRange.to" type="date" :disabled="result.mode === 'snapshot'" />
-            <select v-model="viewRange.granularity" :disabled="result.mode === 'snapshot'">
-              <option value="day">Дни</option>
-              <option value="week">Недели</option>
-              <option value="month">Месяцы</option>
-            </select>
+            <GranularityToggle v-model="viewRange.granularity" :disabled="result.mode === 'snapshot'" size="sm" />
           </div>
           <div class="toolbar-actions">
             <button class="tool-btn" :disabled="result.mode === 'snapshot'" @click="applyRange">Применить</button>
@@ -174,6 +181,7 @@ async function exportPdf() {
 }
 .status { padding: 80px 24px; text-align: center; color: #6e6e73; font-size: 16px; }
 .status.err { color: #d70015; }
+.status-hint { color: #6e6e73; font-size: 13px; margin-top: 12px; max-width: 420px; margin-left: auto; margin-right: auto; }
 .public-shell { max-width: 1080px; margin: 0 auto; }
 .public-inner { display: flex; flex-direction: column; gap: 16px; }
 .public-footer { text-align: center; padding: 16px 0 36px; color: #86868b; font-size: 12px; letter-spacing: 0.02em; }

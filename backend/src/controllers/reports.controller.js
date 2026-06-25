@@ -686,21 +686,39 @@ async function publicGet(req, res) {
       summary: sanitizeSummary(snap.summary || {}, viewMode),
     };
   } else {
-    // live: пересобрать данные.
+    // live: пересобрать данные. П.3 — позволить клиенту сужать период в
+    // пределах окна date_from..date_to, выданного при публикации. Любой
+    // выход за окно публикации (или невалидный формат) игнорируется и
+    // используется исходный период. snapshot-режим — наоборот, заморожен.
+    const clamp = (v, lo, hi) => {
+      if (!v || typeof v !== 'string') return null;
+      const m = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+      if (!m) return null;
+      if (lo && m < lo) return null;
+      if (hi && m > hi) return null;
+      return m;
+    };
+    const winFrom = typeof sr.date_from === 'string' ? sr.date_from : new Date(sr.date_from).toISOString().slice(0, 10);
+    const winTo   = typeof sr.date_to   === 'string' ? sr.date_to   : new Date(sr.date_to).toISOString().slice(0, 10);
+    const reqFrom = clamp(req.query?.from, winFrom, winTo);
+    const reqTo   = clamp(req.query?.to,   winFrom, winTo);
+    const granularity = ['day', 'week', 'month'].includes(req.query?.granularity)
+      ? req.query.granularity : undefined;
+
     const draft = {
       id: sr.draft_id,
       project_id: sr.project_id,
-      date_from: sr.date_from,
-      date_to: sr.date_to,
+      date_from: reqFrom || winFrom,
+      date_to:   reqTo   || winTo,
     };
-    const data = await aggregateForDraft(draft, { viewMode });
+    const data = await aggregateForDraft(draft, { viewMode, granularity });
     payload = {
       data,
       summary: sanitizeSummary(_summaryPayloadFromDraft(sr), viewMode),
       tasks_blocks: sr.tasks_blocks || [],
       config: sr.config || {},
       title: sr.draft_title,
-      period: _periodLabel(sr.date_from, sr.date_to),
+      period: _periodLabel(draft.date_from, draft.date_to),
       captured_at: new Date().toISOString(),
     };
   }
