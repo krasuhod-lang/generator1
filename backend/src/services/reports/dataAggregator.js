@@ -188,6 +188,99 @@ function _periodWindow(from, to) {
   return { days, period: days > 14 ? 'month' : 'week' };
 }
 
+/**
+ * Список бакетов [from..to] для заданной гранулярности — детерминированный
+ * каркас оси X. Используется для:
+ *   • заполнения пропусков в серии (бакет без данных → null-точки, а не
+ *     схлопнутая ось),
+ *   • выдачи `expected_buckets` фронту (см. ТЗ #1),
+ *   • подписи диапазона под графиком (`bucket_keys[0] … bucket_keys[N-1]`).
+ *
+ * Возвращает {keys: ['YYYY-MM-DD', ...], count}.  Для granularity='month'
+ * первое число = 1-е число месяца from; для 'week' — понедельник недели from
+ * (ISO‐неделя); для 'day' — посуточно.
+ */
+function _bucketRange(from, to, granularity) {
+  const g = _granularity(granularity);
+  const fromKey = _bucketOf(from, g);
+  const toKey = _bucketOf(to, g);
+  if (!fromKey || !toKey) return { keys: [], count: 0 };
+  const start = new Date(`${fromKey}T00:00:00Z`);
+  const end = new Date(`${toKey}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return { keys: [], count: 0 };
+  }
+  const keys = [];
+  const cursor = new Date(start);
+  // Защитный потолок 1024 бакета — даже для дневной гранулярности это ~3 года.
+  for (let i = 0; i < 1024 && cursor.getTime() <= end.getTime(); i++) {
+    keys.push(cursor.toISOString().slice(0, 10));
+    if (g === 'day') cursor.setUTCDate(cursor.getUTCDate() + 1);
+    else if (g === 'week') cursor.setUTCDate(cursor.getUTCDate() + 7);
+    else cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+  return { keys, count: keys.length };
+}
+
+/**
+ * Превращает агрегированную серию в выровненную по `bucketKeys`. Если в
+ * исходной серии нет точки на нужный бакет — добавляем `{date, clicks:null,
+ * impressions:null, ctr:null, position:null}`. Это нужно, чтобы фронт честно
+ * рисовал «дырки» по запрошенному диапазону и не схлопывал ось X.
+ *
+ * Возвращает {series, range:{from,to,actual_from,actual_to,expected_buckets,
+ *                          actual_buckets,has_gaps}}.
+ *
+ * actual_from / actual_to — первая/последняя дата с непустыми данными
+ * (нужно для пояснения «Источник вернул данные с DD.MM.YYYY»).
+ */
+function _alignSeriesToRange(series, from, to, granularity, valueKeys = ['clicks', 'impressions']) {
+  const { keys: bucketKeys } = _bucketRange(from, to, granularity);
+  if (!bucketKeys.length) {
+    return {
+      series: series || [],
+      range: { from, to, granularity, expected_buckets: 0, actual_buckets: (series || []).length, actual_from: null, actual_to: null, has_gaps: false },
+    };
+  }
+  const byBucket = new Map();
+  for (const row of series || []) {
+    const key = String(row.date || '').slice(0, 10);
+    if (key) byBucket.set(key, row);
+  }
+  const aligned = [];
+  let actualFrom = null;
+  let actualTo = null;
+  let actualBuckets = 0;
+  for (const key of bucketKeys) {
+    const row = byBucket.get(key);
+    if (row) {
+      aligned.push(row);
+      actualFrom = actualFrom || key;
+      actualTo = key;
+      actualBuckets += 1;
+    } else {
+      const filler = { date: key };
+      for (const k of valueKeys) filler[k] = null;
+      filler.ctr = null;
+      filler.position = null;
+      aligned.push(filler);
+    }
+  }
+  return {
+    series: aligned,
+    range: {
+      from,
+      to,
+      granularity,
+      expected_buckets: bucketKeys.length,
+      actual_buckets: actualBuckets,
+      actual_from: actualFrom,
+      actual_to: actualTo,
+      has_gaps: actualBuckets < bucketKeys.length,
+    },
+  };
+}
+
 function _aggregateSeries(series, granularity, valueKeys = ['clicks', 'impressions']) {
   const buckets = new Map();
   for (const row of series || []) {
@@ -334,20 +427,24 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
       : Promise.resolve([]);
 
     const data = await gscService.fetchPerformanceSeries(project, { from, to });
-    const series = _aggregateSeries(data.series, granularity);
+    const aggregated = _aggregateSeries(data.series, granularity);
+    const { series, range } = _alignSeriesToRange(aggregated, from, to, granularity);
     const isPartial = freshnessMap?.gsc?.status === 'partial' || freshnessMap?.gsc?.status === 'gap';
     const completePeriods = await _completePeriodTotals(data.series, prevPromise);
     return {
       connected: true,
-      status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
-      reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
+      status: aggregated.length ? (isPartial ? 'partial' : 'ready') : 'empty',
+      reason: aggregated.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
       series,
       series_meta: completePeriods.meta,
       totals: data.totals || null,
       totals_complete: completePeriods.totals_complete,
       prev_totals_complete: completePeriods.prev_totals_complete,
-      range: data.range,
+      // Доп. range (см. _alignSeriesToRange): expected_buckets/actual_from/has_gaps
+      // нужны фронту, чтобы честно отрисовать «дырки» и подписать «источник
+      // вернул данные с DD.MM.YYYY». data.range остаётся для PDF/совместимости.
+      range: { ...(data.range || {}), ...range },
     };
   } catch (err) {
     console.error('[reports][gsc] section failed:', err.message);
@@ -381,20 +478,21 @@ async function _ydxSection(project, from, to, granularity, freshnessMap) {
       : Promise.resolve([]);
 
     const data = await ydxService.fetchPerformanceSeries(project, { from, to });
-    const series = _aggregateSeries(data.series, granularity);
+    const aggregated = _aggregateSeries(data.series, granularity);
+    const { series, range } = _alignSeriesToRange(aggregated, from, to, granularity);
     const isPartial = freshnessMap?.yandex_webmaster?.status === 'partial' || freshnessMap?.yandex_webmaster?.status === 'gap';
     const completePeriods = await _completePeriodTotals(data.series, prevPromise);
     return {
       connected: true,
-      status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
-      reason: series.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
+      status: aggregated.length ? (isPartial ? 'partial' : 'ready') : 'empty',
+      reason: aggregated.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
       series,
       series_meta: completePeriods.meta,
       totals: data.totals || null,
       totals_complete: completePeriods.totals_complete,
       prev_totals_complete: completePeriods.prev_totals_complete,
-      range: data.range,
+      range: { ...(data.range || {}), ...range },
     };
   } catch (err) {
     console.error('[reports][ydx] section failed:', err.message);
@@ -446,7 +544,14 @@ function _mapSeriesRow(r) {
  * коммерческие запросы (что соответствует обычной коммерческой посадочной).
  */
 const TOP_LIMIT = 25;
-const PAGES_LIMIT = 50;             // ТЗ-правка: до 50 топ-страниц с разворачиваемыми запросами
+// ТЗ #3: ранее жёсткий PAGES_LIMIT=50 обрезал список топ-страниц на бэке и
+// делал постраничный просмотр невозможным. Теперь бэк отдаёт до
+// PAGES_HARD_CAP=5000 строк (защита от мегасайтов), а UI режет по PAGE_SIZE=50
+// с кнопкой «Показать ещё». Поле pages_limit оставлено как алиас page_size
+// для обратной совместимости со снапшотами и фронт-кодом, который ещё его
+// читает.
+const PAGE_SIZE = 50;
+const PAGES_HARD_CAP = 5000;
 const PER_PAGE_QUERY_LIMIT = 30;    // сколько запросов показываем под каждой страницей
 
 function _classifyQueries(rows, brandTokens) {
@@ -522,7 +627,7 @@ function _buildPagesWithQueries(pages, queryPage, engine, brandTokens) {
   return (pages || [])
     .slice()
     .sort(sortRows)
-    .slice(0, PAGES_LIMIT)
+    .slice(0, PAGES_HARD_CAP)
     .map((p) => {
       const urlIntent = classifyUrl(p.key);
       const queries = (queriesByPage.get(p.key) || []).sort(sortRows);
@@ -579,7 +684,7 @@ function _buildYandexQueriesAsPages(topQueries, brandTokens) {
   return (topQueries || [])
     .slice()
     .sort(sortRows)
-    .slice(0, PAGES_LIMIT)
+    .slice(0, PAGES_HARD_CAP)
     .map((q) => {
       const { intent, commercial } = classifyQuery(q.key || '', { brandTokens });
       // У запроса нет «фактического» URL — но фильтр и счётчики UI работают
@@ -634,7 +739,11 @@ async function _queriesSection(project, from, to) {
   }
   try {
     const [{ topQueries, topPages }, queryPage] = await Promise.all([
-      gscService.fetchTopDimensions(project, { from, to }),
+      // ТЗ #3: live-эндпоинт отчёта обязан ограничить fetch у источника
+      // через gsc.liveRowLimit (см. memory «projects source fetch limits»).
+      // По умолчанию fetchTopDimensions берёт rowLimit=0 (unlimited), что
+      // на мегасайтах создаёт огромный отклик GSC до отчёта.
+      gscService.fetchTopDimensions(project, { from, to }, { rowLimit: getProjectsConfig().gsc.liveRowLimit }),
       // queryPage срез нужен для классификации страниц по доле commercial-кликов.
       // Если упадёт — fallback: страницы без разбиения по intent.
       _safeFetchQueryPage(project, from, to),
@@ -655,13 +764,15 @@ async function _queriesSection(project, from, to) {
     }
     const taggedPages = _splitPages(topPages, queryPageMap);
     const sortRows = (a, b) => (b.clicks - a.clicks) || (b.impressions - a.impressions);
-    // ТЗ-правка: страницы с нераспознанным интентом (commercial===null)
-    // попадают в оба списка, чтобы клиент увидел их и в коммерческом, и в
-    // информационном разрезе — в UI они подписаны «не удалось распознать».
-    const pagesCommercial    = taggedPages.filter((p) => p.commercial === true  || p.commercial === null).sort(sortRows).slice(0, TOP_LIMIT);
-    const pagesInformational = taggedPages.filter((p) => p.commercial === false || p.commercial === null).sort(sortRows).slice(0, TOP_LIMIT);
+    // ТЗ #2: страницы с нераспознанным интентом (commercial===null) НЕ
+    // дублируются в коммерческий/информационный срезы. В UI они видны
+    // только во вкладке «Все» (через enginePages), и их иконка «🤷 Не
+    // удалось распознать» отображается там же. Это устраняет двойной
+    // подсчёт и расхождение счётчиков табов с реальным числом строк.
+    const pagesCommercial    = taggedPages.filter((p) => p.commercial === true ).sort(sortRows).slice(0, TOP_LIMIT);
+    const pagesInformational = taggedPages.filter((p) => p.commercial === false).sort(sortRows).slice(0, TOP_LIMIT);
 
-    // ТЗ-правка: до 50 топ-страниц с разворачиваемым списком запросов (Google).
+    // ТЗ #3: до PAGES_HARD_CAP=5000 топ-страниц с разворачиваемым списком запросов (Google).
     // Для Яндекс.Вебмастера срез по URL недоступен, поэтому в pages.yandex
     // кладём не страницы, а топ-запросы (как «псевдо-строки») — клиент в
     // отчёте видит, по каким запросам сайт показывается в Яндексе. Если
@@ -680,7 +791,11 @@ async function _queriesSection(project, from, to) {
       top_pages_commercial: pagesCommercial,
       top_pages_informational: pagesInformational,
       pages: { google: pagesGoogle, yandex: pagesYandex },
-      pages_limit: PAGES_LIMIT,
+      // ТЗ #3: бэк отдаёт страницы целиком (до hard-cap), UI режет на page_size.
+      page_size: PAGE_SIZE,
+      page_hard_cap: PAGES_HARD_CAP,
+      total: { google: pagesGoogle.length, yandex: pagesYandex.length },
+      pages_limit: PAGE_SIZE, // alias для обратной совместимости со старыми снапшотами
       summary,
     };
   } catch (err) {
@@ -692,7 +807,11 @@ async function _queriesSection(project, from, to) {
       error: err.message || 'queries_failed',
       top_queries_commercial: [], top_queries_informational: [], top_queries_other: [],
       top_pages_commercial: [], top_pages_informational: [],
-      pages: { google: [], yandex: [] }, pages_limit: PAGES_LIMIT,
+      pages: { google: [], yandex: [] },
+      page_size: PAGE_SIZE,
+      page_hard_cap: PAGES_HARD_CAP,
+      total: { google: 0, yandex: 0 },
+      pages_limit: PAGE_SIZE,
       summary: null,
     };
   }
@@ -719,7 +838,7 @@ async function _safeFetchYandexQueries(project, from, to) {
   if (!project.ydx_connected || !project.ydx_site_url) return [];
   try {
     const cfg = getProjectsConfig().ydx;
-    const rowLimit = Math.max(PAGES_LIMIT, Number(cfg.liveRowLimit) || 500);
+    const rowLimit = Math.min(PAGES_HARD_CAP, Number(cfg.liveRowLimit) || 500);
     const rows = await ydxService.fetchTopQueries(project, { from, to }, { rowLimit });
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
@@ -744,12 +863,20 @@ function _mapCurrent(current) {
   };
 }
 
+const _KEYS_SO_VALUE_KEYS = ['visibility', 'keywords_top1', 'keywords_top3', 'keywords_top10', 'keywords_top50', 'keywords_total', 'yandex_traffic', 'google_traffic', 'adcost'];
+
 async function _loadEngineData(domain, from, to, searchEngine) {
   const series = await loadCachedSeries(domain, from, to, searchEngine);
   const current = await loadCurrent(domain, searchEngine);
+  const mapped = (series || []).map(_mapSeriesRow);
+  // ТЗ #1: Keys.so серии тоже выравниваем по запрошенному [from..to] (по
+  // месяцам — Keys.so агрегируется месячно), чтобы фронт мог отрисовать всю
+  // ось X с null-точками в местах, где источник не вернул данных.
+  const { series: aligned, range } = _alignSeriesToRange(mapped, from, to, 'month', _KEYS_SO_VALUE_KEYS);
   return {
-    series: (series || []).map(_mapSeriesRow),
+    series: aligned,
     current: _mapCurrent(current),
+    range,
   };
 }
 
@@ -773,7 +900,9 @@ async function _keysSoSection(project, from, to, freshnessMap) {
       _loadEngineData(project.keys_so_domain, from, to, 'google'),
     ]);
 
-    const hasRows = (yandex.series?.length || 0) + (google.series?.length || 0) > 0;
+    // hasRows смотрим по фактически заполненным бакетам (actual_buckets), а
+    // не по длине серии — она теперь всегда выровнена под expected_buckets.
+    const hasRows = (yandex.range?.actual_buckets || 0) + (google.range?.actual_buckets || 0) > 0;
     // Backwards-compatible: top-level series/current point to Yandex (default)
     return {
       connected: true,
@@ -782,6 +911,7 @@ async function _keysSoSection(project, from, to, freshnessMap) {
       last_sync_at,
       series: yandex.series,
       current: yandex.current,
+      range: yandex.range,
       yandex,
       google,
     };
@@ -883,7 +1013,13 @@ async function _tasksSection(projectId, from, to, granularity, manualBlocks, opt
 
 function _buildForecast(gsc, keysSo) {
   const out = {};
-  const gscClicks = (gsc.series || []).map((r) => Number(r.clicks) || 0);
+  // ТЗ #1: series теперь выровнена под expected_buckets и содержит null-точки
+  // для бакетов, по которым источник не вернул данных. Для forecast эти
+  // дырки нужно отфильтровать, иначе модель учит «нули вместо null» и даёт
+  // искажённый прогноз.
+  const gscClicks = (gsc.series || [])
+    .map((r) => (r.clicks == null ? null : Number(r.clicks)))
+    .filter((v) => v != null && Number.isFinite(v));
   const visibility = (keysSo.series || []).map((r) => r.visibility != null ? Number(r.visibility) : null).filter((v) => v != null);
   if (gscClicks.length >= 2) out.gsc_clicks = forecastMetric(gscClicks, 3);
   if (visibility.length >= 2) out.keys_visibility = forecastMetric(visibility, 3);
@@ -992,7 +1128,7 @@ async function aggregateForDraft(draft, opts = {}) {
       color_accent: project.color_accent || null,
       keys_so_domain: project.keys_so_domain || null,
     },
-    period: { from, to, granularity },
+    period: { from, to, granularity, expected_buckets: _bucketRange(from, to, granularity).count },
     gsc,
     ywm,
     keys_so: keysSo,
@@ -1048,4 +1184,6 @@ module.exports = {
   _buildPagesWithQueries,
   _buildYandexQueriesAsPages,
   _summarizeCommercial,
+  _bucketRange,
+  _alignSeriesToRange,
 };

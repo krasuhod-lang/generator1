@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import DOMPurify from 'dompurify';
 import api from '../../api.js';
 import ReportTrendChart from './ReportTrendChart.vue';
@@ -152,35 +152,45 @@ function _partialAnnotation(section) {
 
 const gscChart = computed(() => {
   const series = props.data?.gsc?.series || [];
-  if (!series.length) return null;
+  const range = props.data?.gsc?.range || null;
+  // ТЗ #1: aligned-серия теперь всегда заполнена до expected_buckets, поэтому
+  // «есть ли что показывать» определяем по фактическим данным (actual_buckets
+  // или хотя бы одна не-null точка), а не по длине массива.
+  const hasData = (range?.actual_buckets || 0) > 0 || series.some((r) => r.clicks != null || r.impressions != null);
+  if (!hasData) return null;
   const taskAnnotations = props.data?.tasks?.annotations || [];
   const partial = _partialAnnotation(props.data?.gsc);
   return {
     labels: series.map((r) => r.date),
     datasets: [
-      { label: 'Клики', color: accent.value, data: series.map((r) => Number(r.clicks) || 0) },
-      { label: 'Показы', color: '#8b95a7', data: series.map((r) => Number(r.impressions) || 0) },
-      { label: 'CTR', color: '#10b981', data: series.map((r) => Number(r.ctr) || 0), yAxisID: 'y2' },
+      // null-значения сохраняем как null, чтобы график рисовал «дырки» вместо плоского нуля.
+      { label: 'Клики', color: accent.value, data: series.map((r) => r.clicks != null ? Number(r.clicks) : null) },
+      { label: 'Показы', color: '#8b95a7', data: series.map((r) => r.impressions != null ? Number(r.impressions) : null) },
+      { label: 'CTR', color: '#10b981', data: series.map((r) => r.ctr != null ? Number(r.ctr) : null), yAxisID: 'y2' },
     ],
     annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
+    range,
   };
 });
 
 const ywmChart = computed(() => {
   const series = props.data?.ywm?.series || [];
-  if (!series.length) return null;
+  const range = props.data?.ywm?.range || null;
+  const hasData = (range?.actual_buckets || 0) > 0 || series.some((r) => r.clicks != null || r.impressions != null);
+  if (!hasData) return null;
   const taskAnnotations = props.data?.tasks?.annotations || [];
   const partial = _partialAnnotation(props.data?.ywm);
   return {
     labels: series.map((r) => r.date),
     datasets: [
-      { label: 'Клики (Яндекс)', color: '#ff5a3c', data: series.map((r) => Number(r.clicks) || 0) },
-      { label: 'Показы (Яндекс)', color: '#ffb38a', data: series.map((r) => Number(r.impressions) || 0) },
-      { label: 'CTR', color: '#ef4444', data: series.map((r) => Number(r.ctr) || 0), yAxisID: 'y2' },
+      { label: 'Клики (Яндекс)', color: '#ff5a3c', data: series.map((r) => r.clicks != null ? Number(r.clicks) : null) },
+      { label: 'Показы (Яндекс)', color: '#ffb38a', data: series.map((r) => r.impressions != null ? Number(r.impressions) : null) },
+      { label: 'CTR', color: '#ef4444', data: series.map((r) => r.ctr != null ? Number(r.ctr) : null), yAxisID: 'y2' },
     ],
     annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
+    range,
   };
 });
 
@@ -193,14 +203,18 @@ const keysChart = computed(() => {
   // движка. Сначала используем engineData.series как есть (если поле существует),
   // и только если объект engineData полностью отсутствует — пробуем legacy.
   let series;
+  let range = null;
   if (engineData && Array.isArray(engineData.series)) {
     series = engineData.series;
+    range = engineData.range || null;
   } else if (engine === 'yandex') {
     series = props.data?.keys_so?.series || [];
+    range = props.data?.keys_so?.range || null;
   } else {
     series = [];
   }
-  if (!series.length) return null;
+  const hasData = (range?.actual_buckets || 0) > 0 || series.some((r) => r.visibility != null || r.keywords_top10 != null);
+  if (!hasData) return null;
   const colorVis = engine === 'google' ? '#ea4335' : '#6e5dc6';
   const label = engine === 'google' ? 'Google' : 'Яндекс';
   return {
@@ -215,6 +229,7 @@ const keysChart = computed(() => {
     ],
     annotations: props.data?.tasks?.annotations || [],
     showSecondAxis: true,
+    range,
   };
 });
 
@@ -506,8 +521,8 @@ const enginePages = computed(() => {
   ];
   return legacy;
 });
-const pagesCommercialCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'commercial' || p.page_intent === 'unknown').length);
-const pagesInfoCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'informational' || p.page_intent === 'unknown').length);
+const pagesCommercialCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'commercial').length);
+const pagesInfoCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'informational').length);
 // ТЗ-фикс #2/#4: секция «Топ-страницы и запросы» должна оставаться видимой,
 // даже когда у активного движка нет данных (иначе пропадает тоггл движка и
 // фильтры по интенту). hasAnyPages смотрит сразу на оба движка + на legacy-
@@ -522,12 +537,14 @@ const hasAnyPages = computed(() => {
 });
 const filteredPages = computed(() => {
   if (pageFilter.value === 'all') return enginePages.value;
-  // ТЗ-правка: страницы с нераспознанным интентом показываем в обеих вкладках.
+  // ТЗ #2: страницы с интентом 'unknown' попадают ТОЛЬКО во вкладку «Все»,
+  // а не дублируются в коммерческий/информационный срез. Иконка «🤷 Не
+  // удалось распознать» в строках сохраняется — но только в общем списке.
   if (pageFilter.value === 'commercial') {
-    return enginePages.value.filter((p) => p.page_intent === 'commercial' || p.page_intent === 'unknown');
+    return enginePages.value.filter((p) => p.page_intent === 'commercial');
   }
   if (pageFilter.value === 'informational') {
-    return enginePages.value.filter((p) => p.page_intent === 'informational' || p.page_intent === 'unknown');
+    return enginePages.value.filter((p) => p.page_intent === 'informational');
   }
   return enginePages.value.filter((p) => p.page_intent === pageFilter.value);
 });
@@ -536,6 +553,21 @@ function pageIntentLabel(intent) {
   if (intent === 'unknown') return '🤷 Не удалось распознать';
   return '🛒 Коммерческая';
 }
+
+// ТЗ #3: бэк отдаёт страницы целиком (до PAGES_HARD_CAP=5000). UI режет
+// по page_size (по умолчанию 50) и предлагает «Показать ещё», чтобы DOM
+// не «взрывался» на мегасайтах. При смене вкладки/движка счётчик
+// сбрасывается на одну страницу.
+const pageSize = computed(() => Number(queriesSection.value?.page_size || queriesSection.value?.pages_limit) || 50);
+const visiblePages = ref(50);
+const visibleFilteredPages = computed(() => filteredPages.value.slice(0, visiblePages.value));
+const hasMorePages = computed(() => visiblePages.value < filteredPages.value.length);
+const remainingPages = computed(() => Math.max(0, filteredPages.value.length - visiblePages.value));
+function showMorePages() {
+  visiblePages.value = Math.min(visiblePages.value + pageSize.value, filteredPages.value.length);
+}
+watch([pageFilter, pagesEngine], () => { visiblePages.value = pageSize.value; });
+watch(pageSize, (n) => { if (visiblePages.value < n) visiblePages.value = n; });
 
 // ТЗ-правка: сворачивание блоков работ по месяцам и по разделам/задачам,
 // чтобы длинный список не превращался в «полотно».
@@ -678,7 +710,7 @@ function formatNum(v) {
       <div v-else-if="!gscChart" class="section-empty">
         За выбранный период данных нет.
       </div>
-      <ReportTrendChart v-else :labels="gscChart.labels" :datasets="gscChart.datasets" :annotations="gscChart.annotations" :show-second-axis="gscChart.showSecondAxis" />
+      <ReportTrendChart v-else :labels="gscChart.labels" :datasets="gscChart.datasets" :annotations="gscChart.annotations" :show-second-axis="gscChart.showSecondAxis" :range="gscChart.range" />
     </section>
 
     <!-- Яндекс.Вебмастер -->
@@ -701,7 +733,7 @@ function formatNum(v) {
       <div v-else-if="!ywmChart" class="section-empty">
         За выбранный период данных нет.
       </div>
-      <ReportTrendChart v-else :labels="ywmChart.labels" :datasets="ywmChart.datasets" :annotations="ywmChart.annotations" :show-second-axis="ywmChart.showSecondAxis" />
+      <ReportTrendChart v-else :labels="ywmChart.labels" :datasets="ywmChart.datasets" :annotations="ywmChart.annotations" :show-second-axis="ywmChart.showSecondAxis" :range="ywmChart.range" />
     </section>
 
     <!-- Keys.so -->
@@ -738,7 +770,7 @@ function formatNum(v) {
       <div v-else-if="!keysChart" class="section-empty">
         За выбранный период данных нет.
       </div>
-      <ReportTrendChart v-else :labels="keysChart.labels" :datasets="keysChart.datasets" :annotations="keysChart.annotations" :show-second-axis="keysChart.showSecondAxis" />
+      <ReportTrendChart v-else :labels="keysChart.labels" :datasets="keysChart.datasets" :annotations="keysChart.annotations" :show-second-axis="keysChart.showSecondAxis" :range="keysChart.range" />
     </section>
 
     <section v-if="(!readonly || chartVisible('position')) && data?.position?.connected && data?.position?.series?.length" class="rblk" data-report-chart="position" data-report-chart-title="Динамика позиций">
@@ -806,7 +838,7 @@ function formatNum(v) {
           </tr>
         </thead>
         <tbody>
-          <template v-for="(row, i) in filteredPages" :key="`pg-${pagesEngine}-${i}`">
+          <template v-for="(row, i) in visibleFilteredPages" :key="`pg-${pagesEngine}-${i}`">
             <tr class="page-row" :class="{ expanded: expandedPages.has(row.url || row.query) }" @click="row.queries_count ? togglePage(row.url || row.query) : null">
               <td class="expand-cell">
                 <button class="expand-btn" v-if="row.queries_count" :aria-expanded="expandedPages.has(row.url || row.query)">
@@ -855,6 +887,16 @@ function formatNum(v) {
           </tr>
         </tbody>
       </table>
+      <!-- ТЗ #3: пагинация — показываем по 50 строк, кнопка раскрывает следующие 50.
+           Скрыта, когда отображены все строки фильтра. -->
+      <div v-if="hasMorePages" class="pages-load-more">
+        <button class="pages-load-btn" type="button" @click="showMorePages">
+          Показать ещё {{ Math.min(pageSize, remainingPages) }} из {{ remainingPages }} остающихся
+        </button>
+        <span class="pages-load-counter">
+          Показано {{ visibleFilteredPages.length }} из {{ filteredPages.length }}
+        </span>
+      </div>
     </section>
 
     <section v-if="growthItems.length" class="rblk">
@@ -1342,6 +1384,12 @@ function formatNum(v) {
 .rep-subtable th, .rep-subtable td { padding: 5px 8px; border-bottom: 1px solid #eef0f4; text-align: left; }
 .rep-subtable th { color: #889; font-weight: 600; }
 .rep-subtable td.num, .rep-subtable th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ТЗ #3: пагинация для топ-страниц (по 50 строк со «Показать ещё»). */
+.pages-load-more { display: flex; align-items: center; gap: 12px; justify-content: center; padding: 12px 0 4px; flex-wrap: wrap; }
+.pages-load-btn { padding: 6px 14px; border-radius: 8px; border: 1px solid #dce0ea; background: #fff; color: #4a6cf7; font-weight: 600; font-size: 12px; cursor: pointer; transition: background 0.15s; }
+.pages-load-btn:hover { background: #f5f8ff; }
+.pages-load-counter { font-size: 11px; color: #99a; }
 
 /* Сворачивание блоков работ */
 .collapse-btn { width: 22px; height: 22px; border: none; background: none; color: #6e6e73; font-size: 13px; cursor: pointer; padding: 0; flex-shrink: 0; }

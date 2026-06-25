@@ -13,6 +13,11 @@ import { collectReportChartImages, downloadBlob } from '../utils/reportExport.js
 
 const route = useRoute();
 const loading = ref(true);
+// ТЗ #1: при applyRange меняем только данные, не «мигаем» всем отчётом.
+// refreshing — отдельный флаг, который рисует локальный оверлей над уже
+// отображённым ReportRenderer, чтобы клиент видел старые графики до
+// прихода свежих и не смотрел на пустой экран.
+const refreshing = ref(false);
 const error = ref(null);
 const expired = ref(false); // 410 → показать «запросить новую ссылку»
 const needPin = ref(false);
@@ -64,12 +69,15 @@ async function applyRange() {
   // гранулярность. Бэкенд для snapshot переагрегирует данные с клампом по
   // окну публикации (см. publicGet ниже). Раньше тут был ранний `return`,
   // из-за чего тулбар на опубликованной ссылке не работал.
-  loading.value = true;
+  // ТЗ #1: используем refreshing вместо loading, чтобы старая версия
+  // отчёта оставалась на экране, а сверху появлялся лёгкий оверлей с
+  // прогрессом — без «миганий» всего полотна.
+  refreshing.value = true;
   try {
     const { data } = await api.get(`/api/public/report/${route.params.uuid}`, { params: viewRange.value });
     result.value = data;
   } finally {
-    loading.value = false;
+    refreshing.value = false;
   }
 }
 
@@ -144,12 +152,12 @@ async function exportPdf() {
             <GranularityToggle v-model="viewRange.granularity" size="sm" />
           </div>
           <div class="toolbar-actions">
-            <button class="tool-btn" @click="applyRange">Применить</button>
+            <button class="tool-btn" :disabled="refreshing" @click="applyRange">{{ refreshing ? 'Обновление…' : 'Применить' }}</button>
             <button class="tool-btn" :disabled="exporting" @click="exportDocx">{{ exporting ? 'Экспорт…' : 'Скачать .docx' }}</button>
             <button class="tool-btn" :disabled="exporting" @click="exportPdf">{{ exporting ? 'Экспорт…' : 'Скачать .pdf' }}</button>
           </div>
         </div>
-        <div ref="previewRef">
+        <div ref="previewRef" class="public-preview">
           <ReportRenderer
             :data="result.payload?.data"
             :summary="result.payload?.summary || {}"
@@ -162,6 +170,12 @@ async function exportPdf() {
             :captured-at="result.payload?.captured_at"
             :chart-config="result.payload?.config?.charts || {}"
             :readonly="true" />
+          <!-- ТЗ #1: локальный оверлей при applyRange — отчёт остаётся
+               видимым (старые графики «затухают»), сверху индикатор. -->
+          <div v-if="refreshing" class="public-refresh-overlay" aria-live="polite">
+            <span class="public-refresh-spinner" />
+            <span>Обновление данных за выбранный период…</span>
+          </div>
         </div>
         <div class="public-footer">
           <span>Отчёт сформирован автоматически · Smart Report Builder</span>
@@ -201,6 +215,34 @@ async function exportPdf() {
   border: 0; background: #0a84ff; color: #fff; border-radius: 10px; padding: 10px 14px; cursor: pointer;
 }
 .tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ТЗ #1: локальный лоадер только в зоне отчёта (без миганий всей страницы). */
+.public-preview { position: relative; }
+.public-refresh-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  padding-top: 80px;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  color: #1d1d1f;
+  font-size: 13px;
+  z-index: 5;
+  border-radius: 12px;
+  pointer-events: none;
+}
+.public-refresh-spinner {
+  width: 16px; height: 16px;
+  border: 2px solid rgba(10, 132, 255, 0.25);
+  border-top-color: #0a84ff;
+  border-radius: 50%;
+  animation: pubrep-spin 0.8s linear infinite;
+}
+@keyframes pubrep-spin { to { transform: rotate(360deg); } }
 
 @media (min-width: 375px) { .public-page { padding: 20px 14px; } }
 @media (min-width: 768px) { .public-page { padding: 40px 20px; } }
