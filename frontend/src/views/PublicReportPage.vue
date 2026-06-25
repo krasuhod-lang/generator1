@@ -60,7 +60,10 @@ async function load() {
 onMounted(load);
 
 async function applyRange() {
-  if (result.value?.mode === 'snapshot') return;
+  // ТЗ-фикс #6: даже в snapshot-режиме разрешаем клиенту менять период и
+  // гранулярность. Бэкенд для snapshot переагрегирует данные с клампом по
+  // окну публикации (см. publicGet ниже). Раньше тут был ранний `return`,
+  // из-за чего тулбар на опубликованной ссылке не работал.
   loading.value = true;
   try {
     const { data } = await api.get(`/api/public/report/${route.params.uuid}`, { params: viewRange.value });
@@ -136,12 +139,12 @@ async function exportPdf() {
       <div class="public-inner">
         <div class="public-toolbar">
           <div class="range-grid">
-            <input v-model="viewRange.from" type="date" :disabled="result.mode === 'snapshot'" />
-            <input v-model="viewRange.to" type="date" :disabled="result.mode === 'snapshot'" />
-            <GranularityToggle v-model="viewRange.granularity" :disabled="result.mode === 'snapshot'" size="sm" />
+            <input v-model="viewRange.from" type="date" />
+            <input v-model="viewRange.to" type="date" />
+            <GranularityToggle v-model="viewRange.granularity" size="sm" />
           </div>
           <div class="toolbar-actions">
-            <button class="tool-btn" :disabled="result.mode === 'snapshot'" @click="applyRange">Применить</button>
+            <button class="tool-btn" @click="applyRange">Применить</button>
             <button class="tool-btn" :disabled="exporting" @click="exportDocx">{{ exporting ? 'Экспорт…' : 'Скачать .docx' }}</button>
             <button class="tool-btn" :disabled="exporting" @click="exportPdf">{{ exporting ? 'Экспорт…' : 'Скачать .pdf' }}</button>
           </div>

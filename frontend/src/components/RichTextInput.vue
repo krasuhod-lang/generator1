@@ -8,6 +8,7 @@ import { watch, onBeforeUnmount } from 'vue';
 import { useEditor, EditorContent } from '@tiptap/vue-3';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
+import Image from '@tiptap/extension-image';
 import DOMPurify from 'dompurify';
 
 const props = defineProps({
@@ -44,7 +45,15 @@ function plainToHtml(text) {
 
 function sanitize(html) {
   if (!html) return '';
-  return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+  // Разрешаем изображения (используются в описаниях задач отчётов: скриншоты
+  // загружаются через /reports/upload-image и вставляются как <img>). data:
+  // схема нужна, чтобы поддержать вставку из буфера до загрузки на сервер.
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    ADD_TAGS: ['img'],
+    ADD_ATTR: ['src', 'alt', 'width', 'height', 'style'],
+    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
+  });
 }
 
 const editor = useEditor({
@@ -56,6 +65,14 @@ const editor = useEditor({
       autolink: true,
       linkOnPaste: true,
       HTMLAttributes: { target: '_blank', rel: 'noopener noreferrer' },
+    }),
+    // Изображения: используются в описаниях задач отчётов (скриншоты).
+    // Для других форм (CreateTaskPage и т.п.) расширение безвредно — просто
+    // даёт возможность вставить <img>, если кто-то её введёт.
+    Image.configure({
+      inline: false,
+      allowBase64: true,
+      HTMLAttributes: { style: 'max-width:100%; height:auto;' },
     }),
   ],
   editorProps: {

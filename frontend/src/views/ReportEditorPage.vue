@@ -26,7 +26,11 @@ const dataError = ref(null);
 const summaryStatus = ref(null); // {status, error}
 const publishOpen = ref(false);
 const published = ref(null); // {public_url, mode, expires_at, ...}
-const publishForm = ref({ mode: 'snapshot', password: '', expires_in_days: '' });
+// ТЗ-фикс #6: по умолчанию публикуем как `live`, чтобы клиент в публичной
+// ссылке мог менять период и гранулярность, а данные обновлялись свежими.
+// `snapshot` остаётся доступным выбором — но это уже осознанное решение
+// «заморозить отчёт», а не дефолт «случайно».
+const publishForm = ref({ mode: 'live', password: '', expires_in_days: '' });
 const publishError = ref(null);
 const previewRef = ref(null);
 const viewRange = ref({ from: '', to: '', granularity: 'month' });
@@ -405,8 +409,8 @@ function _stateOf(section) {
           <label>
             <span class="lbl">Режим</span>
             <select v-model="publishForm.mode">
-              <option value="snapshot">Snapshot — данные заморожены</option>
-              <option value="live">Live — обновляются при открытии</option>
+              <option value="live">Live — данные обновляются при открытии (рекомендуется)</option>
+              <option value="snapshot">Snapshot — данные заморожены на момент публикации</option>
             </select>
           </label>
           <label>

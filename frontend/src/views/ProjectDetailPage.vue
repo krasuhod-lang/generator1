@@ -643,7 +643,11 @@ async function openProjectReport() {
     const own = list.filter((d) => d.project_id === project.value.id);
     if (own.length) {
       // Самый свежий — наверху (бэкенд сортирует by created_at DESC).
-      router.push(`/reports/${own[0].id}`);
+      // ВАЖНО: маршрут редактора — `/reports/:id/edit`. Без `/edit`
+      // путь не матчится ни одним route и срабатывает фолбэк
+      // `/:pathMatch(.*)*` → `/dashboard` (страница SEO-задач), из-за
+      // чего «📊 Отчёт проекта» открывал не отчёт, а форму SEO-текста.
+      router.push(`/reports/${own[0].id}/edit`);
       return;
     }
     const to = new Date();
@@ -655,7 +659,7 @@ async function openProjectReport() {
       date_from: fmt(from),
       date_to: fmt(to),
     });
-    if (draft?.id) router.push(`/reports/${draft.id}`);
+    if (draft?.id) router.push(`/reports/${draft.id}/edit`);
     else flash('Не удалось создать отчёт');
   } catch (err) {
     flash(err?.response?.data?.error || 'Не удалось открыть отчёт проекта');
