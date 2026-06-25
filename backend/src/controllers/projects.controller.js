@@ -502,6 +502,15 @@ async function compareProjectSources(req, res, next) {
     if (!project) return res.status(404).json({ error: 'Проект не найден' });
     const range = _rangeFromQuery(req.query);
 
+    // resolveRange(range) внутри сервисов сдвигает endDate под лаг GSC; чтобы
+    // фронт мог показать пользователю реально применённый период (П.5), сразу
+    // вычисляем его и возвращаем в ответе.
+    let appliedRange = null;
+    try {
+      const { resolveRange } = require('../services/projects/gscService');
+      appliedRange = resolveRange ? resolveRange(range) : null;
+    } catch (_) { /* no-op */ }
+
     let gscData = null;
     let ydxData = null;
     const errors = {};
@@ -539,6 +548,7 @@ async function compareProjectSources(req, res, next) {
         google: Boolean(project.gsc_connected && project.gsc_site_url),
         yandex: Boolean(project.ydx_connected && project.ydx_site_url),
       },
+      range: appliedRange,
       errors,
     });
   } catch (err) {

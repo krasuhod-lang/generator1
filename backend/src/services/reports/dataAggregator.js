@@ -71,8 +71,14 @@ function _totalsFromMonths(months) {
  * (предыдущие N полных месяцев перед окном, той же длины) на основе
  * helper-сервиса (ydx/gsc/projects). Если данных меньше двух полных месяцев
  * (или предыдущие месяцы недоступны) — возвращает только totals_complete.
+ *
+ * П.1: prev-окно зависит только от запрошенного [from..to], поэтому prev-fetch
+ * можно стартовать параллельно с основным; вызывающий код передаёт уже
+ * готовый Promise через `prevSeriesPromise`. Для обратной совместимости
+ * поддерживается старый сигнатуру `_completePeriodTotals(rawSeries, fetcher)`
+ * (fetcher вызывается лениво, последовательно — это деградация).
  */
-async function _completePeriodTotals(rawSeries, fetcher) {
+async function _completePeriodTotals(rawSeries, fetcherOrPromise) {
   const meta = _seriesMeta(rawSeries);
   const completes = meta.monthly_periods.filter((m) => m.is_complete);
   if (!completes.length) {
@@ -80,7 +86,24 @@ async function _completePeriodTotals(rawSeries, fetcher) {
   }
   const totals_complete = _totalsFromMonths(completes);
   let prev_totals_complete = null;
-  if (typeof fetcher === 'function') {
+
+  // Сценарий 1: prev-серия уже запущена параллельно — просто ждём её и
+  // используем как есть (без второго fetcher).
+  if (fetcherOrPromise && typeof fetcherOrPromise.then === 'function') {
+    try {
+      const prevRaw = await fetcherOrPromise;
+      if (Array.isArray(prevRaw) && prevRaw.length) {
+        const prevMonths = splitSeriesIntoMonths(prevRaw).filter((m) => m.is_complete);
+        prev_totals_complete = _totalsFromMonths(prevMonths) || null;
+      }
+    } catch (err) {
+      console.warn('[reports][periods] prev totals failed:', err.message);
+    }
+    return { totals_complete, prev_totals_complete, meta };
+  }
+
+  // Сценарий 2: legacy — ленивый fetcher (для тестов и точечных вызовов).
+  if (typeof fetcherOrPromise === 'function') {
     try {
       const firstMonth = completes[0];
       // Окно для prev: ровно N месяцев, заканчивающихся за день до начала
@@ -92,7 +115,7 @@ async function _completePeriodTotals(rawSeries, fetcher) {
       prevFrom.setUTCMonth(prevFrom.getUTCMonth() - (n - 1));
       prevFrom.setUTCDate(1);
       const fmt = (d) => d.toISOString().slice(0, 10);
-      const prevRaw = await fetcher(fmt(prevFrom), fmt(prevTo));
+      const prevRaw = await fetcherOrPromise(fmt(prevFrom), fmt(prevTo));
       if (Array.isArray(prevRaw) && prevRaw.length) {
         const prevMonths = splitSeriesIntoMonths(prevRaw).filter((m) => m.is_complete);
         prev_totals_complete = _totalsFromMonths(prevMonths) || null;
@@ -103,6 +126,28 @@ async function _completePeriodTotals(rawSeries, fetcher) {
     }
   }
   return { totals_complete, prev_totals_complete, meta };
+}
+
+/**
+ * Окно [from..to] → окно той же длины (в месяцах), оканчивающееся за день
+ * до from. Используется для параллельного prev-fetch без ожидания основной
+ * серии (см. П.1).
+ */
+function _prevWindowOf(from, to) {
+  try {
+    const f = new Date(`${from}T00:00:00Z`);
+    const t = new Date(`${to}T00:00:00Z`);
+    if (Number.isNaN(f.getTime()) || Number.isNaN(t.getTime())) return null;
+    const months = Math.max(1,
+      (t.getUTCFullYear() - f.getUTCFullYear()) * 12 + (t.getUTCMonth() - f.getUTCMonth()) + 1);
+    const prevTo = new Date(f);
+    prevTo.setUTCDate(prevTo.getUTCDate() - 1);
+    const prevFrom = new Date(prevTo);
+    prevFrom.setUTCMonth(prevFrom.getUTCMonth() - (months - 1));
+    prevFrom.setUTCDate(1);
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    return { from: fmt(prevFrom), to: fmt(prevTo) };
+  } catch (_) { return null; }
 }
 
 function _isoDate(value) {
@@ -276,13 +321,21 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
     return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, totals_complete: null, prev_totals_complete: null, series_meta: null, last_sync_at };
   }
   try {
+    // П.1: prev-окно зависит только от запрошенного [from..to], поэтому
+    // стартуем prev-fetch параллельно с основной серией. Раньше эти запросы
+    // шли последовательно (главный fetch → completePeriodTotals → второй
+    // fetch), что удваивало латентность GSC под фронт-таймаут.
+    const prevWindow = _prevWindowOf(from, to);
+    const prevPromise = prevWindow
+      ? gscService.fetchPerformanceSeries(project, { from: prevWindow.from, to: prevWindow.to })
+          .then((p) => p?.series || [])
+          .catch((err) => { console.warn('[reports][gsc] prev failed:', err.message); return []; })
+      : Promise.resolve([]);
+
     const data = await gscService.fetchPerformanceSeries(project, { from, to });
     const series = _aggregateSeries(data.series, granularity);
     const isPartial = freshnessMap?.gsc?.status === 'partial' || freshnessMap?.gsc?.status === 'gap';
-    const completePeriods = await _completePeriodTotals(data.series, async (pFrom, pTo) => {
-      const prev = await gscService.fetchPerformanceSeries(project, { from: pFrom, to: pTo });
-      return prev?.series || [];
-    });
+    const completePeriods = await _completePeriodTotals(data.series, prevPromise);
     return {
       connected: true,
       status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
@@ -318,13 +371,18 @@ async function _ydxSection(project, from, to, granularity, freshnessMap) {
     return { connected: false, status: 'empty', reason: 'not_connected', series: [], totals: null, totals_complete: null, prev_totals_complete: null, series_meta: null, last_sync_at };
   }
   try {
+    // П.1: parallel prev-fetch (см. _gscSection).
+    const prevWindow = _prevWindowOf(from, to);
+    const prevPromise = prevWindow
+      ? ydxService.fetchPerformanceSeries(project, { from: prevWindow.from, to: prevWindow.to })
+          .then((p) => p?.series || [])
+          .catch((err) => { console.warn('[reports][ydx] prev failed:', err.message); return []; })
+      : Promise.resolve([]);
+
     const data = await ydxService.fetchPerformanceSeries(project, { from, to });
     const series = _aggregateSeries(data.series, granularity);
     const isPartial = freshnessMap?.yandex_webmaster?.status === 'partial' || freshnessMap?.yandex_webmaster?.status === 'gap';
-    const completePeriods = await _completePeriodTotals(data.series, async (pFrom, pTo) => {
-      const prev = await ydxService.fetchPerformanceSeries(project, { from: pFrom, to: pTo });
-      return prev?.series || [];
-    });
+    const completePeriods = await _completePeriodTotals(data.series, prevPromise);
     return {
       connected: true,
       status: series.length ? (isPartial ? 'partial' : 'ready') : 'empty',
@@ -797,16 +855,19 @@ async function aggregateForDraft(draft, opts = {}) {
 
   const freshnessMap = await _loadFreshnessMap(project.id);
 
-  const [gsc, ywm, keysSo, position, tasks, queries] = await Promise.all([
+  // П.1: распараллелить все секции в один Promise.all (включая modules).
+  // _*Section внутри ловят ошибки источников и возвращают status='error',
+  // так что .all не падает целиком. Раньше modules ждали отдельно ПОСЛЕ
+  // основного Promise.all и удваивали общее время ответа.
+  const [gsc, ywm, keysSo, position, tasks, queries, modules] = await Promise.all([
     _gscSection(project, from, to, granularity, freshnessMap),
     _ydxSection(project, from, to, granularity, freshnessMap),
     _keysSoSection(project, from, to, freshnessMap),
     _positionSection(project.id, from, to, granularity),
     _tasksSection(project.id, from, to, granularity, draft.tasks_blocks, { includeHidden: opts.includeHidden }),
     _queriesSection(project, from, to),
+    _modulesSection(project, from, to, draft.config),
   ]);
-
-  const modules = await _modulesSection(project, from, to, draft.config);
 
   // Сводный статус интеграций — нужен для UI-баннеров и для PDF footnote
   // (если какие-то секции в partial/error, в экспорт добавляется сноска).

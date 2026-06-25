@@ -101,7 +101,13 @@ watch(() => props.modelValue, (v) => {
 .pp-select {
   padding: 8px 10px; border: 1px solid #d6dbe3; border-radius: 8px;
   font-size: 14px; background: #fff;
+  /* Тёмная тема страниц задач: без явного color текст селекта наследует
+     светло-серый цвет от .page и сливается с белым фоном. Явно фиксируем
+     тёмный текст и стиль для <option>. */
+  color: #1d1d1f;
+  color-scheme: light;
 }
+.pp-select option { color: #1d1d1f; background: #fff; }
 .pp-select:focus { outline: none; border-color: var(--accent, #4a6cf7); }
 .pp-error { color: #d33; font-size: 12px; }
 </style>
