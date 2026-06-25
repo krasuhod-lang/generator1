@@ -15,6 +15,7 @@ const {
   _classifyQueries,
   _splitQueries,
   _splitPages,
+  _buildPagesWithQueries,
   _summarizeCommercial,
 } = require('../src/services/reports/dataAggregator');
 const { deriveBrandTokens } = require('../src/services/projects/commercialIntent');
@@ -63,14 +64,14 @@ test('_splitQueries разбивает по сегментам и сортиру
   }
 });
 
-test('_splitPages помечает страницу commercial если ≥50% commercial-кликов', () => {
+test('_splitPages помечает интент страницы по URL (urlClassifier)', () => {
   const pages = [
     { key: '/catalog/okna-pvh',  clicks: 200, impressions: 3000, ctr: 6.6, position: 4 },
     { key: '/blog/kak-pomyt-okna', clicks: 100, impressions: 2500, ctr: 4, position: 8 },
     { key: '/about', clicks: 5, impressions: 50, ctr: 10, position: 15 },
   ];
-  // 80% кликов /catalog/okna-pvh — commercial; 100% /blog — informational;
-  // /about без покрытия в queryPageMap → commercial_share=null, не попадает ни в один сегмент.
+  // Интент теперь по URL: /catalog/ → commercial (маркер), /blog/ → informational
+  // (маркер), /about без маркеров → commercial по умолчанию (confident=false).
   const queryPageMap = new Map([
     ['/catalog/okna-pvh',    { commercialClicks: 160, totalClicks: 200 }],
     ['/blog/kak-pomyt-okna', { commercialClicks: 0,   totalClicks: 100 }],
@@ -80,11 +81,39 @@ test('_splitPages помечает страницу commercial если ≥50% c
   const blog    = tagged.find((p) => p.key === '/blog/kak-pomyt-okna');
   const about   = tagged.find((p) => p.key === '/about');
   assert.strictEqual(catalog.commercial, true);
+  assert.strictEqual(catalog.page_intent, 'commercial');
+  assert.strictEqual(catalog.intent_confident, true);
   assert.strictEqual(catalog.commercial_share, 0.8);
   assert.strictEqual(blog.commercial, false);
+  assert.strictEqual(blog.page_intent, 'informational');
+  assert.strictEqual(blog.intent_confident, true);
   assert.strictEqual(blog.commercial_share, 0);
-  assert.strictEqual(about.commercial, false);
+  assert.strictEqual(about.commercial, true);
+  assert.strictEqual(about.page_intent, 'commercial');
+  assert.strictEqual(about.intent_confident, false);
   assert.strictEqual(about.commercial_share, null);
+});
+
+test('_buildPagesWithQueries собирает до 50 страниц с запросами и интентом по URL', () => {
+  const pages = [
+    { key: '/catalog/okna-pvh', clicks: 200, impressions: 3000, ctr: 6.6, position: 4 },
+    { key: '/blog/kak-pomyt-okna', clicks: 100, impressions: 2500, ctr: 4, position: 8 },
+  ];
+  const queryPage = [
+    { query: 'купить окна пвх', page: '/catalog/okna-pvh', clicks: 120, impressions: 1500, ctr: 8, position: 4 },
+    { query: 'окна пвх цена', page: '/catalog/okna-pvh', clicks: 80, impressions: 1500, ctr: 5.3, position: 4 },
+    { query: 'как помыть окна', page: '/blog/kak-pomyt-okna', clicks: 100, impressions: 2500, ctr: 4, position: 8 },
+  ];
+  const out = _buildPagesWithQueries(pages, queryPage, 'google');
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[0].url, '/catalog/okna-pvh');
+  assert.strictEqual(out[0].engine, 'google');
+  assert.strictEqual(out[0].page_intent, 'commercial');
+  assert.strictEqual(out[0].queries_count, 2);
+  // запросы отсортированы по кликам
+  assert.strictEqual(out[0].queries[0].query, 'купить окна пвх');
+  assert.strictEqual(out[1].page_intent, 'informational');
+  assert.strictEqual(out[1].queries_count, 1);
 });
 
 test('_summarizeCommercial возвращает абсолюты и share_pct с одним знаком', () => {
