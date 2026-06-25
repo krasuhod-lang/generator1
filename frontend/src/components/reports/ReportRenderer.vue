@@ -859,22 +859,45 @@ function formatNum(v) {
 
     <section v-if="growthItems.length" class="rblk">
       <h2>Анализ показателей</h2>
-      <div class="growth-grid">
-        <article v-for="(item, idx) in growthItems" :key="idx" class="growth-card">
-          <div class="growth-header">
-            <h3>{{ item.metric || 'Метрика' }}</h3>
+      <div class="growth-rows">
+        <article
+          v-for="(item, idx) in growthItems"
+          :key="idx"
+          class="growth-row"
+          :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }"
+        >
+          <div class="growth-metric">
+            <div class="growth-metric-label">Показатель</div>
+            <h3 class="growth-metric-name">{{ item.metric || 'Метрика' }}</h3>
             <div v-if="item.delta_pct || item.delta_value" class="growth-trend">
-              <span v-if="item.delta_pct" class="trend-badge" :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }">
+              <span
+                v-if="item.delta_pct"
+                class="trend-badge"
+                :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }"
+              >
                 <span class="trend-arrow">{{ item.trend_direction === 'up' ? '↑' : (item.trend_direction === 'down' ? '↓' : '→') }}</span>
                 {{ item.delta_pct }}
               </span>
               <span v-if="item.delta_value" class="trend-abs">{{ item.delta_value }}</span>
             </div>
           </div>
-          <p v-if="item.attribution">{{ item.attribution }}</p>
-          <p v-if="item.conclusion"><strong>Вывод:</strong> {{ item.conclusion }}</p>
-          <p v-if="item.forecast"><strong>Прогноз:</strong> {{ item.forecast }}</p>
-          <p v-if="item.weak_zones"><strong>Точки роста:</strong> {{ item.weak_zones }}</p>
+          <div class="growth-details">
+            <p v-if="item.attribution" class="growth-attribution">{{ item.attribution }}</p>
+            <dl v-if="item.conclusion || item.forecast || item.weak_zones" class="growth-facts">
+              <div v-if="item.conclusion" class="growth-fact">
+                <dt class="growth-fact-label conclusion">Вывод</dt>
+                <dd class="growth-fact-value">{{ item.conclusion }}</dd>
+              </div>
+              <div v-if="item.forecast" class="growth-fact">
+                <dt class="growth-fact-label forecast">Прогноз</dt>
+                <dd class="growth-fact-value">{{ item.forecast }}</dd>
+              </div>
+              <div v-if="item.weak_zones" class="growth-fact">
+                <dt class="growth-fact-label weak">Точки роста</dt>
+                <dd class="growth-fact-value">{{ item.weak_zones }}</dd>
+              </div>
+            </dl>
+          </div>
         </article>
       </div>
     </section>
@@ -1039,12 +1062,12 @@ function formatNum(v) {
 .engine-btn.active { background: var(--accent); color: #fff; }
 .engine-btn.disabled { opacity: 0.4; cursor: not-allowed; }
 .engine-btn:not(.active):not(.disabled):hover { background: rgba(10,132,255,0.08); color: #0a84ff; }
-.totals-grid, .growth-grid {
+.totals-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
-.total-card, .growth-card, .month-card, .section-card, .task-card {
+.total-card, .month-card, .section-card, .task-card {
   border: 1px solid rgba(60,60,67,0.1);
   border-radius: 16px;
   background: #fbfbfd;
@@ -1052,7 +1075,6 @@ function formatNum(v) {
 .total-card { padding: 14px; }
 .t-label { color: #6e6e73; font-size: 12px; margin-bottom: 6px; }
 .t-value { font-size: 20px; font-weight: 700; }
-.growth-card { padding: 16px; }
 .list { margin: 0; padding-left: 18px; line-height: 1.7; }
 .ordered { padding-left: 22px; }
 .savings-card { background: linear-gradient(135deg, #fff8e8 0%, #ffffff 100%); }
@@ -1106,11 +1128,103 @@ function formatNum(v) {
 .period-hint {
   color: #6b7280; font-size: 12px; margin: -4px 0 12px;
 }
-.growth-header {
-  display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 4px;
+.growth-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.growth-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 260px) 1fr;
+  gap: 24px;
+  align-items: stretch;
+  position: relative;
+  padding: 18px 20px 18px 24px;
+  border: 1px solid rgba(60,60,67,0.1);
+  border-radius: 16px;
+  background: #fbfbfd;
+  overflow: hidden;
+}
+.growth-row::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+  background: rgba(107, 114, 128, 0.35);
+}
+.growth-row.up::before { background: #10b981; }
+.growth-row.down::before { background: #ef4444; }
+.growth-row.stable::before { background: #9ca3af; }
+.growth-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 20px;
+  border-right: 1px solid rgba(60,60,67,0.08);
+}
+.growth-metric-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #86868b;
+}
+.growth-metric-name {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #1d1d1f;
+  letter-spacing: -0.01em;
 }
 .growth-trend {
-  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px;
+}
+.growth-details {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.growth-attribution {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #3a3a3c;
+}
+.growth-facts {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.growth-fact {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 12px;
+  align-items: baseline;
+}
+.growth-fact-label {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 999px;
+  text-align: center;
+  white-space: nowrap;
+  justify-self: start;
+}
+.growth-fact-label.conclusion { background: rgba(10,132,255,0.10); color: #0a84ff; }
+.growth-fact-label.forecast   { background: rgba(16,185,129,0.12); color: #059669; }
+.growth-fact-label.weak       { background: rgba(245,158,11,0.14); color: #b45309; }
+.growth-fact-value {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #1d1d1f;
 }
 .trend-badge {
   display: inline-flex; align-items: center; gap: 3px;
@@ -1158,7 +1272,7 @@ function formatNum(v) {
 @media (max-width: 720px) {
   .header, .header-main, .month-head, .tasks-head { flex-direction: column; align-items: flex-start; }
   .rep-title { font-size: 24px; }
-  .totals-grid, .growth-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .totals-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
   .total-card { padding: 10px; }
   .t-value { font-size: 16px; }
   .rblk { padding: 14px; border-radius: 14px; }
@@ -1167,9 +1281,21 @@ function formatNum(v) {
   .text-area { min-height: 80px; }
   .actions-inline { flex-wrap: wrap; }
   .task-attach-row { flex-wrap: wrap; }
+  .growth-row {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 14px 14px 14px 18px;
+  }
+  .growth-metric {
+    padding-right: 0;
+    border-right: 0;
+    border-bottom: 1px solid rgba(60,60,67,0.08);
+    padding-bottom: 10px;
+  }
+  .growth-fact { grid-template-columns: 1fr; gap: 4px; }
 }
 @media (max-width: 480px) {
-  .totals-grid, .growth-grid { grid-template-columns: 1fr; }
+  .totals-grid { grid-template-columns: 1fr; }
   .report-nav { padding: 6px 8px; gap: 4px; }
   .nav-link { padding: 6px 10px; font-size: 11px; }
 }
