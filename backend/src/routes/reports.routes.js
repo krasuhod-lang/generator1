@@ -17,7 +17,13 @@ const c = require('../controllers/reports.controller');
 const router = express.Router();
 
 // ── Image upload for task descriptions ─────────────────────────────────────
-const imgDir = path.join(__dirname, '../../../uploads/report-images');
+// ВАЖНО: статика отдаётся из `backend/uploads` (см. backend/server.js:93,
+// `express.static(path.join(__dirname, 'uploads'))`). __dirname здесь —
+// `backend/src/routes`, поэтому подниматься нужно на ДВА уровня, а не на три.
+// Раньше путь был `../../../uploads/report-images`, multer писал файлы в
+// корень репозитория (`<repo>/uploads/...`), а Express отдавал их из
+// `backend/uploads/...` → 404 для всех загруженных скриншотов в задачах.
+const imgDir = path.join(__dirname, '../../uploads/report-images');
 if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
 
 const imgStorage = multer.diskStorage({

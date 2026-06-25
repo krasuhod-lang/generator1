@@ -8,6 +8,7 @@ import ReportModulesCard from './ReportModulesCard.vue';
 import DataStateWrapper from '../DataStateWrapper.vue';
 import ExecutiveHeadline from './ExecutiveHeadline.vue';
 import EditableValue from './EditableValue.vue';
+import RichTextInput from '../RichTextInput.vue';
 
 const props = defineProps({
   data:        { type: Object, default: () => ({}) },
@@ -58,11 +59,27 @@ const isClient = computed(() => props.viewMode === 'client');
 const accent = computed(() => props.project?.color_accent || '#0a84ff');
 const accentBg = computed(() => `${accent.value}15`);
 
-// Keys.so search engine toggle (Яндекс / Google)
-const keysEngine = ref('yandex');
+// Keys.so search engine toggle (Яндекс / Google).
+// ТЗ-фикс #3: по умолчанию выбираем тот движок, по которому реально есть
+// данные. Раньше всегда стартовали с 'yandex' — если Yandex.series пустой,
+// а Google.series — нет, клиент видел «За выбранный период данных нет»,
+// несмотря на то что данные в отчёте есть.
+const _engineHasSeries = (s) => Array.isArray(s) && s.length > 0;
+const _initialKeysEngine = (() => {
+  const k = props.data?.keys_so;
+  if (_engineHasSeries(k?.yandex?.series)) return 'yandex';
+  if (_engineHasSeries(k?.google?.series)) return 'google';
+  if (_engineHasSeries(k?.series)) return 'yandex'; // legacy top-level = Yandex
+  return 'yandex';
+})();
+const keysEngine = ref(_initialKeysEngine);
 const hasGoogleKeys = computed(() => {
   const g = props.data?.keys_so?.google;
-  return g && g.series && g.series.length > 0;
+  return _engineHasSeries(g?.series);
+});
+const hasYandexKeys = computed(() => {
+  const k = props.data?.keys_so;
+  return _engineHasSeries(k?.yandex?.series) || _engineHasSeries(k?.series);
 });
 
 const hasModules = computed(() => {
@@ -92,7 +109,7 @@ const navItems = computed(() => {
   if (props.data?.ywm) items.push({ id: 'ywm', label: 'Яндекс' });
   if (props.data?.keys_so) items.push({ id: 'keys-so', label: 'Keys.so' });
   if (hasModules.value) items.push({ id: 'modules', label: 'Точки роста' });
-  if (enginePages.value.length) items.push({ id: 'pages', label: 'Страницы' });
+  if (hasAnyPages.value) items.push({ id: 'pages', label: 'Страницы' });
   items.push({ id: 'tasks', label: 'Работы' });
   if (props.summary?.executive_summary || props.summary?.highlights?.length) {
     items.push({ id: 'ai-analysis', label: 'AI-выводы' });
@@ -170,7 +187,19 @@ const ywmChart = computed(() => {
 const keysChart = computed(() => {
   const engine = keysEngine.value;
   const engineData = engine === 'google' ? props.data?.keys_so?.google : props.data?.keys_so?.yandex;
-  const series = engineData?.series || (engine === 'yandex' ? (props.data?.keys_so?.series || []) : []);
+  // ТЗ-фикс #3: пустой массив `[]` — это валидное «нет данных», а не
+  // отсутствие поля. Раньше `engineData?.series || legacy` фолбэчился даже
+  // когда engineData.series === [], и подмешивал legacy-данные не от того
+  // движка. Сначала используем engineData.series как есть (если поле существует),
+  // и только если объект engineData полностью отсутствует — пробуем legacy.
+  let series;
+  if (engineData && Array.isArray(engineData.series)) {
+    series = engineData.series;
+  } else if (engine === 'yandex') {
+    series = props.data?.keys_so?.series || [];
+  } else {
+    series = [];
+  }
   if (!series.length) return null;
   const colorVis = engine === 'google' ? '#ea4335' : '#6e5dc6';
   const label = engine === 'google' ? 'Google' : 'Яндекс';
@@ -469,6 +498,18 @@ const enginePages = computed(() => {
 });
 const pagesCommercialCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'commercial' || p.page_intent === 'unknown').length);
 const pagesInfoCount = computed(() => enginePages.value.filter((p) => p.page_intent === 'informational' || p.page_intent === 'unknown').length);
+// ТЗ-фикс #2/#4: секция «Топ-страницы и запросы» должна оставаться видимой,
+// даже когда у активного движка нет данных (иначе пропадает тоггл движка и
+// фильтры по интенту). hasAnyPages смотрит сразу на оба движка + на legacy-
+// поля, чтобы исключить «исчезновение» секции в живом и snapshot-режиме.
+const hasAnyPages = computed(() => {
+  const q = queriesSection.value;
+  if (!q) return false;
+  const pagesObj = q.pages || {};
+  const anyNew = Object.values(pagesObj).some((arr) => Array.isArray(arr) && arr.length);
+  const anyLegacy = (q.top_pages_commercial?.length || 0) + (q.top_pages_informational?.length || 0) > 0;
+  return anyNew || anyLegacy;
+});
 const filteredPages = computed(() => {
   if (pageFilter.value === 'all') return enginePages.value;
   // ТЗ-правка: страницы с нераспознанным интентом показываем в обеих вкладках.
@@ -663,10 +704,11 @@ function formatNum(v) {
         </label>
       </div>
       <p class="chart-desc">Индекс видимости, количество запросов в ТОП-10 и ТОП-50 по данным Keys.so.</p>
-      <div v-if="hasGoogleKeys || true" class="keys-engine-toggle">
+      <div v-if="hasYandexKeys || hasGoogleKeys" class="keys-engine-toggle">
         <button
           class="engine-btn"
-          :class="{ active: keysEngine === 'yandex' }"
+          :class="{ active: keysEngine === 'yandex', disabled: !hasYandexKeys }"
+          :disabled="!hasYandexKeys"
           @click="keysEngine = 'yandex'"
         >Яндекс</button>
         <button
@@ -702,9 +744,14 @@ function formatNum(v) {
     </section>
 
     <!-- ТЗ-правка: вместо ненадёжной классификации запросов — топ-страницы с
-         интентом по URL и разворачиваемым списком запросов под каждой страницей. -->
+         интентом по URL и разворачиваемым списком запросов под каждой страницей.
+         ТЗ-фикс: секция показывается, если у проекта в принципе есть pages-данные
+         хотя бы по одному движку (Google/Яндекс). Раньше `v-if="enginePages.length"`
+         схлопывал всю секцию вместе с тоглом движка и фильтрами «Все/Коммерческие
+         /Информационные» при переключении на движок без данных, и вернуться обратно
+         было невозможно. -->
     <section
-      v-if="enginePages.length"
+      v-if="hasAnyPages"
       id="report-pages"
       class="rblk"
     >
@@ -886,10 +933,18 @@ function formatNum(v) {
             </div>
             <div v-else class="editor-grid">
               <input :value="task.title" class="text-input" placeholder="Название задачи" @input="updateTask(i, j, k, 'title', $event.target.value)" />
-              <textarea :value="task.description_html" class="text-area" rows="4"
-                placeholder="Описание задачи. Вставляйте ссылки и скриншоты из буфера обмена (Ctrl+V)."
-                @input="updateTask(i, j, k, 'description_html', $event.target.value)"
-                @paste="onDescriptionPaste($event, i, j, k)"></textarea>
+              <!-- ТЗ-фикс #5: вместо «голой» textarea используем WYSIWYG-редактор
+                   (TipTap, тот же что в CreateTaskPage). Поддерживает жирный/
+                   курсив/списки/ссылки. Вставка изображений из буфера и через
+                   кнопку 📎 ниже работают по-прежнему — апдейтим description_html. -->
+              <div @paste="onDescriptionPaste($event, i, j, k)">
+                <RichTextInput
+                  :model-value="task.description_html || ''"
+                  min-height="120px"
+                  placeholder="Описание задачи. Вставляйте ссылки и скриншоты из буфера обмена (Ctrl+V)."
+                  @update:model-value="(v) => updateTask(i, j, k, 'description_html', v)"
+                />
+              </div>
               <div class="task-attach-row">
                 <label class="attach-btn">
                   <input type="file" accept="image/*" hidden @change="onFileSelect($event, i, j, k)" />
@@ -897,7 +952,6 @@ function formatNum(v) {
                 </label>
                 <span v-if="uploadingImage" class="attach-status">Загрузка…</span>
               </div>
-              <div class="task-preview" v-if="task.description_html" v-html="safeHtml(task.description_html)"></div>
               <div class="actions-inline">
                 <button class="small-btn danger" @click="removeTask(i, j, k)">Удалить задачу</button>
               </div>

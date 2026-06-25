@@ -675,8 +675,28 @@ async function publicGet(req, res) {
   // по решению владельца.
   const viewMode = sr.view_mode === 'analyst' ? 'analyst' : 'client';
 
+  // Хелпер: безопасно парсим запрошенные клиентом from/to/granularity и
+  // клампим их в окно публикации (винфрейм snapshot/live). Используется для
+  // обоих режимов: ТЗ-фикс #6 — даже для snapshot отдаём «живой» пересбор,
+  // если клиент крутит даты/гранулярность через тулбар публичной страницы.
+  const clamp = (v, lo, hi) => {
+    if (!v || typeof v !== 'string') return null;
+    const m = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+    if (!m) return null;
+    if (lo && m < lo) return null;
+    if (hi && m > hi) return null;
+    return m;
+  };
+  const winFrom = typeof sr.date_from === 'string' ? sr.date_from : new Date(sr.date_from).toISOString().slice(0, 10);
+  const winTo   = typeof sr.date_to   === 'string' ? sr.date_to   : new Date(sr.date_to).toISOString().slice(0, 10);
+  const reqFrom = clamp(req.query?.from, winFrom, winTo);
+  const reqTo   = clamp(req.query?.to,   winFrom, winTo);
+  const reqGranularity = ['day', 'week', 'month'].includes(req.query?.granularity)
+    ? req.query.granularity : undefined;
+  const hasClientRangeOverride = !!(reqFrom || reqTo || reqGranularity);
+
   let payload;
-  if (sr.mode === 'snapshot' && sr.snapshot_data) {
+  if (sr.mode === 'snapshot' && sr.snapshot_data && !hasClientRangeOverride) {
     // Snapshot был сохранён в analyst-форме на момент публикации; при отдаче
     // публичному клиенту прогоняем через sanitizer ещё раз.
     const snap = sr.snapshot_data || {};
@@ -686,32 +706,19 @@ async function publicGet(req, res) {
       summary: sanitizeSummary(snap.summary || {}, viewMode),
     };
   } else {
-    // live: пересобрать данные. П.3 — позволить клиенту сужать период в
-    // пределах окна date_from..date_to, выданного при публикации. Любой
-    // выход за окно публикации (или невалидный формат) игнорируется и
-    // используется исходный период. snapshot-режим — наоборот, заморожен.
-    const clamp = (v, lo, hi) => {
-      if (!v || typeof v !== 'string') return null;
-      const m = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
-      if (!m) return null;
-      if (lo && m < lo) return null;
-      if (hi && m > hi) return null;
-      return m;
-    };
-    const winFrom = typeof sr.date_from === 'string' ? sr.date_from : new Date(sr.date_from).toISOString().slice(0, 10);
-    const winTo   = typeof sr.date_to   === 'string' ? sr.date_to   : new Date(sr.date_to).toISOString().slice(0, 10);
-    const reqFrom = clamp(req.query?.from, winFrom, winTo);
-    const reqTo   = clamp(req.query?.to,   winFrom, winTo);
-    const granularity = ['day', 'week', 'month'].includes(req.query?.granularity)
-      ? req.query.granularity : undefined;
-
+    // live ИЛИ snapshot с переопределением периода клиентом — пересобираем
+    // данные. П.3 — позволить клиенту сужать период в пределах окна
+    // date_from..date_to, выданного при публикации. Любой выход за окно
+    // публикации (или невалидный формат) игнорируется и используется
+    // исходный период. Для snapshot пересбор честный (с базы), просто
+    // окно нельзя расширить — это сохраняет смысл «снимка».
     const draft = {
       id: sr.draft_id,
       project_id: sr.project_id,
       date_from: reqFrom || winFrom,
       date_to:   reqTo   || winTo,
     };
-    const data = await aggregateForDraft(draft, { viewMode, granularity });
+    const data = await aggregateForDraft(draft, { viewMode, granularity: reqGranularity });
     payload = {
       data,
       summary: sanitizeSummary(_summaryPayloadFromDraft(sr), viewMode),
