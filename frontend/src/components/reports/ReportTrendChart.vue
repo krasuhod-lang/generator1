@@ -31,6 +31,35 @@ const props = defineProps({
   showSecondAxis: { type: Boolean, default: false },
   annotations: { type: Array, default: () => [] },
   showTrend: { type: Boolean, default: true },
+  // ТЗ #1: расширенный объект range от бэка.
+  //   { from, to, granularity, expected_buckets, actual_buckets,
+  //     actual_from, actual_to, has_gaps }
+  // Используется для:
+  //   • подписи диапазона под графиком («диапазон: DD.MM.YYYY — DD.MM.YYYY»),
+  //   • баннера «Источник вернул данные с DD.MM.YYYY — раньше истории нет»,
+  //     когда actual_from > range.from.
+  range: { type: Object, default: () => null },
+});
+
+function _fmtRu(iso) {
+  if (!iso || typeof iso !== 'string') return '';
+  const m = iso.slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return iso;
+  return `${m[3]}.${m[2]}.${m[1]}`;
+}
+
+const rangeCaption = computed(() => {
+  const r = props.range;
+  if (!r || !r.from || !r.to) return '';
+  return `Диапазон: ${_fmtRu(r.from)} — ${_fmtRu(r.to)}`;
+});
+
+const sourceStartNotice = computed(() => {
+  const r = props.range;
+  if (!r || !r.actual_from || !r.from) return '';
+  // показываем только если фактическое начало явно позже запрошенного
+  if (r.actual_from <= r.from) return '';
+  return `Источник вернул данные с ${_fmtRu(r.actual_from)} — раньше истории нет`;
 });
 
 const PAD = { l: 50, r: 50, t: 16, b: 36 };
@@ -279,6 +308,11 @@ function _fmtPct(v) {
 
 <template>
   <div class="report-trend-chart" @mouseleave="onLeave">
+    <!-- ТЗ #1: баннер «нет истории раньше DD.MM.YYYY», когда источник
+         (например, новый GSC-проект) вернул данные позже запрошенного from. -->
+    <div v-if="sourceStartNotice" class="chart-source-notice">
+      ℹ {{ sourceStartNotice }}
+    </div>
     <div class="chart-row">
       <div class="chart-canvas">
       <svg :viewBox="`0 0 ${width} ${height}`" class="w-full h-auto" preserveAspectRatio="none">
@@ -398,11 +432,30 @@ function _fmtPct(v) {
         <span class="legend-text" :style="{ color: hiddenSeries.has(i) ? 'rgba(0,0,0,0.3)' : ds.color }">{{ ds.label }}</span>
       </button>
     </div>
+    <!-- ТЗ #1: подпись диапазона под графиком, чтобы клиент видел, какой
+         именно период визуализирован, и понимал размер оси X. -->
+    <div v-if="rangeCaption" class="chart-range-caption">{{ rangeCaption }}</div>
   </div>
 </template>
 
 <style scoped>
 .report-trend-chart { width: 100%; position: relative; }
+.chart-source-notice {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #92400e;
+}
+.chart-range-caption {
+  margin-top: 6px;
+  color: #6e6e73;
+  font-size: 11px;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
 .chart-row { display: flex; align-items: stretch; gap: 16px; }
 .chart-canvas { flex: 1 1 auto; position: relative; min-width: 0; }
 .trend-side {
