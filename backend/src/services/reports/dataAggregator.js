@@ -414,16 +414,21 @@ function _splitPages(pages, queryPageMap) {
   // ТЗ-правка: интент страницы определяем по URL (urlClassifier), а не по
   // ненадёжной классификации запросов. Доля commercial-кликов остаётся как
   // вспомогательный сигнал (commercial_share), но решающим является URL.
+  // Если маркеров в URL нет (intent='unknown'), страница попадает в оба
+  // списка (commercial + informational) — см. _queriesSection.
   return (pages || []).map((p) => {
     const stats = queryPageMap.get(p.key) || { commercialClicks: 0, totalClicks: 0 };
     const commercialShare = stats.totalClicks > 0 ? stats.commercialClicks / stats.totalClicks : null;
     const { intent, confident, marker } = classifyUrl(p.key);
     const isCommercial = intent === 'commercial';
+    const isUnknown = intent === 'unknown';
     return {
       ...p,
-      commercial: isCommercial,
+      // commercial: true | false | null (null = unknown, попадает в оба списка)
+      commercial: isUnknown ? null : isCommercial,
       page_intent: intent,
       intent_confident: confident,
+      intent_unknown: isUnknown,
       intent_marker: marker,
       commercial_share: commercialShare != null ? Math.round(commercialShare * 100) / 100 : null,
     };
@@ -471,6 +476,7 @@ function _buildPagesWithQueries(pages, queryPage, engine) {
         position: p.position != null ? Number(p.position) : null,
         page_intent: intent,
         intent_confident: confident,
+        intent_unknown: intent === 'unknown',
         intent_marker: marker,
         queries_count: queries.length,
         queries: queries.slice(0, PER_PAGE_QUERY_LIMIT),
@@ -527,8 +533,11 @@ async function _queriesSection(project, from, to) {
     }
     const taggedPages = _splitPages(topPages, queryPageMap);
     const sortRows = (a, b) => (b.clicks - a.clicks) || (b.impressions - a.impressions);
-    const pagesCommercial    = taggedPages.filter((p) => p.commercial).sort(sortRows).slice(0, TOP_LIMIT);
-    const pagesInformational = taggedPages.filter((p) => p.commercial === false).sort(sortRows).slice(0, TOP_LIMIT);
+    // ТЗ-правка: страницы с нераспознанным интентом (commercial===null)
+    // попадают в оба списка, чтобы клиент увидел их и в коммерческом, и в
+    // информационном разрезе — в UI они подписаны «не удалось распознать».
+    const pagesCommercial    = taggedPages.filter((p) => p.commercial === true  || p.commercial === null).sort(sortRows).slice(0, TOP_LIMIT);
+    const pagesInformational = taggedPages.filter((p) => p.commercial === false || p.commercial === null).sort(sortRows).slice(0, TOP_LIMIT);
 
     // ТЗ-правка: до 50 топ-страниц с разворачиваемым списком запросов (Google).
     // Yandex.Вебмастер не отдаёт срез по страницам, поэтому pages по Яндексу

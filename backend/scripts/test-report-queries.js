@@ -71,7 +71,8 @@ test('_splitPages помечает интент страницы по URL (urlCl
     { key: '/about', clicks: 5, impressions: 50, ctr: 10, position: 15 },
   ];
   // Интент теперь по URL: /catalog/ → commercial (маркер), /blog/ → informational
-  // (маркер), /about без маркеров → commercial по умолчанию (confident=false).
+  // (маркер), /about без маркеров → unknown (не удалось распознать,
+  // commercial=null → попадает в оба списка отчёта).
   const queryPageMap = new Map([
     ['/catalog/okna-pvh',    { commercialClicks: 160, totalClicks: 200 }],
     ['/blog/kak-pomyt-okna', { commercialClicks: 0,   totalClicks: 100 }],
@@ -83,14 +84,17 @@ test('_splitPages помечает интент страницы по URL (urlCl
   assert.strictEqual(catalog.commercial, true);
   assert.strictEqual(catalog.page_intent, 'commercial');
   assert.strictEqual(catalog.intent_confident, true);
+  assert.strictEqual(catalog.intent_unknown, false);
   assert.strictEqual(catalog.commercial_share, 0.8);
   assert.strictEqual(blog.commercial, false);
   assert.strictEqual(blog.page_intent, 'informational');
   assert.strictEqual(blog.intent_confident, true);
+  assert.strictEqual(blog.intent_unknown, false);
   assert.strictEqual(blog.commercial_share, 0);
-  assert.strictEqual(about.commercial, true);
-  assert.strictEqual(about.page_intent, 'commercial');
+  assert.strictEqual(about.commercial, null);
+  assert.strictEqual(about.page_intent, 'unknown');
   assert.strictEqual(about.intent_confident, false);
+  assert.strictEqual(about.intent_unknown, true);
   assert.strictEqual(about.commercial_share, null);
 });
 

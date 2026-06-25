@@ -77,6 +77,9 @@ const COMMERCIAL_SEGMENTS = new Set([
   'category', 'categories', 'c',
   'shop', 'store',
   'products', 'product', 'p',
+  // WooCommerce / типовые CMS-маркеры таксономии товаров
+  'product-category', 'product_category', 'product-cat', 'product_cat',
+  'product-tag', 'product_tag',
   'services', 'service',
   // 2. Спецпредложения и статусы товаров
   'sale', 'sales',
@@ -104,6 +107,12 @@ const COMMERCIAL_SEGMENTS = new Set([
 
 const INFORMATIONAL = 'informational';
 const COMMERCIAL = 'commercial';
+// ТЗ-правка: страница без явных маркеров (например, /domain/название) может
+// быть и коммерческой, и информационной — определить по URL не получилось.
+// Помечаем как 'unknown', чтобы такие страницы попали в оба списка
+// (commercial + informational) и в UI отображались с подписью
+// «не удалось распознать», вместо молчаливого попадания в коммерцию.
+const UNKNOWN = 'unknown';
 
 /**
  * Извлечь сегменты пути URL в нижнем регистре.
@@ -132,11 +141,14 @@ function _pathSegments(rawUrl) {
 /**
  * Классифицировать URL.
  * @param {string} url
- * @returns {{intent: 'informational'|'commercial', confident: boolean, marker: string|null}}
+ * @returns {{intent: 'informational'|'commercial'|'unknown', confident: boolean, marker: string|null}}
  *   intent     — итоговый интент страницы.
+ *                'unknown' — маркеров в URL не найдено, интент не определён;
+ *                в отчёте такие страницы показываем в обоих списках
+ *                (коммерческие и информационные) с пометкой «не удалось
+ *                распознать».
  *   confident  — true, если найден явный маркер (инфо- или коммерческий
- *                сегмент). false — когда маркеров нет и страница отнесена к
- *                коммерции по умолчанию.
+ *                сегмент). false — когда маркеров нет (intent='unknown').
  *   marker     — сегмент-маркер, по которому принято решение (для отладки/UI).
  */
 function classifyUrl(url) {
@@ -149,8 +161,8 @@ function classifyUrl(url) {
       return { intent: COMMERCIAL, confident: true, marker: seg };
     }
   }
-  // Нет маркеров — по умолчанию коммерция («все остальное это коммерция»).
-  return { intent: COMMERCIAL, confident: false, marker: null };
+  // Нет маркеров — интент не определён.
+  return { intent: UNKNOWN, confident: false, marker: null };
 }
 
 /** Удобный шорткат: true, если URL — информационная страница. */
@@ -163,6 +175,7 @@ module.exports = {
   isInformationalUrl,
   INFORMATIONAL,
   COMMERCIAL,
+  UNKNOWN,
   INFORMATIONAL_SEGMENTS,
   COMMERCIAL_SEGMENTS,
 };
