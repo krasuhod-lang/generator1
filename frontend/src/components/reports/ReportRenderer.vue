@@ -359,10 +359,20 @@ function autoLinkify(html) {
 
 function safeHtml(value) {
   const linked = autoLinkify(value || '');
-  return DOMPurify.sanitize(linked, {
+  const html = DOMPurify.sanitize(linked, {
     ALLOWED_TAGS: ['a', 'p', 'br', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'img'],
     ALLOWED_ATTR: ['href', 'target', 'rel', 'src', 'alt', 'width', 'style'],
     ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
+  });
+  // ТЗ: все ссылки внутри задач должны открываться в новой вкладке, чтобы
+  // отчёт оставался открытым (DOMPurify не делает этого сам). Допиливаем
+  // target=_blank + rel='noopener noreferrer' детерминированной заменой;
+  // ссылки, у которых уже стоит target, оставляем как есть.
+  return html.replace(/<a\b([^>]*)>/gi, (match, attrs) => {
+    let next = attrs;
+    if (!/\btarget=/i.test(next)) next += ' target="_blank"';
+    if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
+    return `<a${next}>`;
   });
 }
 
@@ -757,9 +767,11 @@ function formatNum(v) {
     >
       <h2>Топ-страницы и запросы</h2>
       <p class="chart-desc">
-        До {{ queriesSection?.pages_limit || 50 }} страниц по кликам. Тип страницы
-        (коммерческая / информационная) определяется по структуре URL.
-        Нажмите на строку, чтобы раскрыть запросы, по которым продвигается страница.
+        До {{ queriesSection?.pages_limit || 50 }} строк по кликам. Для Google — топ-страницы
+        (Тип определяется по структуре URL; при отсутствии маркеров — по большинству
+        запросов страницы). Для Яндекса показываем топ-запросы: Webmaster API не отдаёт
+        срез по URL. Нажмите на строку Google, чтобы развернуть запросы, по которым
+        продвигается страница.
       </p>
       <div v-if="commercialSummary" class="commercial-summary">
         <span class="cs-pill">
@@ -785,7 +797,7 @@ function formatNum(v) {
         <thead>
           <tr>
             <th></th>
-            <th>Страница</th>
+            <th>{{ pagesEngine === 'yandex' ? 'Запрос' : 'Страница' }}</th>
             <th>Тип</th>
             <th class="num">Клики</th>
             <th class="num">Показы</th>
@@ -795,14 +807,16 @@ function formatNum(v) {
         </thead>
         <tbody>
           <template v-for="(row, i) in filteredPages" :key="`pg-${pagesEngine}-${i}`">
-            <tr class="page-row" :class="{ expanded: expandedPages.has(row.url) }" @click="togglePage(row.url)">
+            <tr class="page-row" :class="{ expanded: expandedPages.has(row.url || row.query) }" @click="row.queries_count ? togglePage(row.url || row.query) : null">
               <td class="expand-cell">
-                <button class="expand-btn" v-if="row.queries_count" :aria-expanded="expandedPages.has(row.url)">
-                  {{ expandedPages.has(row.url) ? '−' : '+' }}
+                <button class="expand-btn" v-if="row.queries_count" :aria-expanded="expandedPages.has(row.url || row.query)">
+                  {{ expandedPages.has(row.url || row.query) ? '−' : '+' }}
                 </button>
               </td>
               <td class="page-cell">
-                <a :href="row.url" target="_blank" rel="noopener" @click.stop>{{ row.url }}</a>
+                <a v-if="row.url" :href="row.url" target="_blank" rel="noopener" @click.stop>{{ row.url }}</a>
+                <!-- Яндекс: запрос вместо URL — Webmaster API не отдаёт срез по страницам -->
+                <span v-else class="query-cell">{{ row.query }}</span>
                 <span v-if="row.queries_count" class="q-count">{{ row.queries_count }} запр.</span>
               </td>
               <td class="intent-cell">{{ pageIntentLabel(row.page_intent) }}</td>
@@ -811,7 +825,7 @@ function formatNum(v) {
               <td class="num">{{ formatPct(row.ctr) }}</td>
               <td class="num">{{ row.position != null ? row.position : '—' }}</td>
             </tr>
-            <tr v-if="expandedPages.has(row.url) && row.queries?.length" class="queries-row">
+            <tr v-if="expandedPages.has(row.url || row.query) && row.queries?.length" class="queries-row">
               <td></td>
               <td colspan="6">
                 <table class="rep-subtable">
@@ -834,7 +848,7 @@ function formatNum(v) {
           <tr v-if="!filteredPages.length">
             <td colspan="7" class="empty-cell">
               <template v-if="pagesEngine === 'yandex'">
-                Яндекс.Вебмастер не отдаёт разрез по страницам — данные доступны только по запросам.
+                Яндекс.Вебмастер пока не вернул запросов за этот период. Проверьте, подключён ли проект к Яндекс.Вебмастеру и накопил ли он данные.
               </template>
               <template v-else>За период по этому фильтру страниц нет.</template>
             </td>

@@ -15,6 +15,7 @@ const { splitSeriesIntoMonths } = require('../projects/periodResolver');
 const { applyOverrides } = require('./overridesApplier');
 const { classifyQuery, deriveBrandTokens } = require('../projects/commercialIntent');
 const { classifyUrl } = require('./urlClassifier');
+const { getProjectsConfig } = require('../projects/config');
 
 /**
  * Метаданные временных рядов для UI/KPI.
@@ -502,7 +503,7 @@ function _splitPages(pages, queryPageMap) {
  * @param {Array}  queryPage   срез query×page [{query, page, clicks, impressions, ctr, position}]
  * @param {string} engine      'google' | 'yandex' — пометка источника
  */
-function _buildPagesWithQueries(pages, queryPage, engine) {
+function _buildPagesWithQueries(pages, queryPage, engine, brandTokens) {
   // page -> массив запросов этой страницы
   const queriesByPage = new Map();
   for (const r of queryPage || []) {
@@ -523,8 +524,32 @@ function _buildPagesWithQueries(pages, queryPage, engine) {
     .sort(sortRows)
     .slice(0, PAGES_LIMIT)
     .map((p) => {
-      const { intent, confident, marker } = classifyUrl(p.key);
+      const urlIntent = classifyUrl(p.key);
       const queries = (queriesByPage.get(p.key) || []).sort(sortRows);
+      // Фолбэк интента: если URL не классифицирован (unknown), но у страницы
+      // есть запросы — выбираем интент по большинству кликов commercial vs
+      // informational. Без этого вкладки «Коммерческие/Информационные» в UI
+      // часто оказывались пустыми, потому что у проектов с произвольной
+      // структурой URL все страницы попадали в 'unknown' и показывались
+      // во всех табах одновременно.
+      let intent = urlIntent.intent;
+      let confident = urlIntent.confident;
+      let marker = urlIntent.marker;
+      if (intent === 'unknown' && queries.length) {
+        let comClicks = 0, infoClicks = 0;
+        for (const q of queries) {
+          const c = classifyQuery(q.query || '', { brandTokens });
+          if (c.commercial) comClicks += q.clicks;
+          else if (c.intent === 'informational') infoClicks += q.clicks;
+        }
+        if (comClicks > infoClicks && comClicks > 0) {
+          intent = 'commercial';
+          marker = 'queries-majority';
+        } else if (infoClicks > comClicks && infoClicks > 0) {
+          intent = 'informational';
+          marker = 'queries-majority';
+        }
+      }
       return {
         url: p.key,
         engine,
@@ -538,6 +563,45 @@ function _buildPagesWithQueries(pages, queryPage, engine) {
         intent_marker: marker,
         queries_count: queries.length,
         queries: queries.slice(0, PER_PAGE_QUERY_LIMIT),
+      };
+    });
+}
+
+/**
+ * Топ-запросы Яндекс.Вебмастера в формате «pages»: Webmaster API не отдаёт
+ * срез по URL, поэтому каждой строке соответствует не страница, а запрос
+ * (поле `query` вместо `url`). Структура совместима с фронтовой таблицей
+ * pages-table: одинаковый набор метрик + page_intent для фильтра по интенту.
+ * Запрос разворачивать некуда — queries=[], queries_count=0.
+ */
+function _buildYandexQueriesAsPages(topQueries, brandTokens) {
+  const sortRows = (a, b) => (b.clicks - a.clicks) || (b.impressions - a.impressions);
+  return (topQueries || [])
+    .slice()
+    .sort(sortRows)
+    .slice(0, PAGES_LIMIT)
+    .map((q) => {
+      const { intent, commercial } = classifyQuery(q.key || '', { brandTokens });
+      // У запроса нет «фактического» URL — но фильтр и счётчики UI работают
+      // по page_intent, поэтому маппим intent запроса в интент строки.
+      let pageIntent = intent;
+      if (commercial) pageIntent = 'commercial';
+      else if (intent === 'informational') pageIntent = 'informational';
+      else pageIntent = 'unknown';
+      return {
+        url: null,
+        query: q.key || '',
+        engine: 'yandex',
+        clicks: Number(q.clicks) || 0,
+        impressions: Number(q.impressions) || 0,
+        ctr: q.ctr != null ? Number(q.ctr) : null,
+        position: q.position != null ? Number(q.position) : null,
+        page_intent: pageIntent,
+        intent_confident: pageIntent !== 'unknown',
+        intent_unknown: pageIntent === 'unknown',
+        intent_marker: null,
+        queries_count: 0,
+        queries: [],
       };
     });
 }
@@ -598,9 +662,13 @@ async function _queriesSection(project, from, to) {
     const pagesInformational = taggedPages.filter((p) => p.commercial === false || p.commercial === null).sort(sortRows).slice(0, TOP_LIMIT);
 
     // ТЗ-правка: до 50 топ-страниц с разворачиваемым списком запросов (Google).
-    // Yandex.Вебмастер не отдаёт срез по страницам, поэтому pages по Яндексу
-    // недоступны — это честное ограничение API, помечаем engine.
-    const pagesGoogle = _buildPagesWithQueries(topPages, queryPage, 'google');
+    // Для Яндекс.Вебмастера срез по URL недоступен, поэтому в pages.yandex
+    // кладём не страницы, а топ-запросы (как «псевдо-строки») — клиент в
+    // отчёте видит, по каким запросам сайт показывается в Яндексе. Если
+    // Яндекс не подключён, секция остаётся пустой.
+    const pagesGoogle = _buildPagesWithQueries(topPages, queryPage, 'google', brandTokens);
+    const yandexQueries = await _safeFetchYandexQueries(project, from, to);
+    const pagesYandex = _buildYandexQueriesAsPages(yandexQueries, brandTokens);
 
     return {
       connected: true,
@@ -611,7 +679,7 @@ async function _queriesSection(project, from, to) {
       top_queries_other: split.other,
       top_pages_commercial: pagesCommercial,
       top_pages_informational: pagesInformational,
-      pages: { google: pagesGoogle, yandex: [] },
+      pages: { google: pagesGoogle, yandex: pagesYandex },
       pages_limit: PAGES_LIMIT,
       summary,
     };
@@ -639,6 +707,25 @@ async function _safeFetchQueryPage(project, from, to) {
     console.warn('[reports][queries] queryPage fetch failed:', err.message);
   }
   return [];
+}
+
+/**
+ * Безопасно тянем топ-запросы Яндекс.Вебмастера для секции «Топ-страницы и
+ * запросы». Если проект не подключён к Яндексу — возвращаем пусто.
+ * Лимитируем выборку через rowLimit (live-режим): без лимита Webmaster API
+ * может тянуть несколько секунд и удваивать время ответа отчёта.
+ */
+async function _safeFetchYandexQueries(project, from, to) {
+  if (!project.ydx_connected || !project.ydx_site_url) return [];
+  try {
+    const cfg = getProjectsConfig().ydx;
+    const rowLimit = Math.max(PAGES_LIMIT, Number(cfg.liveRowLimit) || 500);
+    const rows = await ydxService.fetchTopQueries(project, { from, to }, { rowLimit });
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    console.warn('[reports][queries] yandex fetch failed:', err.message);
+    return [];
+  }
 }
 
 function _mapCurrent(current) {
@@ -959,5 +1046,6 @@ module.exports = {
   _splitQueries,
   _splitPages,
   _buildPagesWithQueries,
+  _buildYandexQueriesAsPages,
   _summarizeCommercial,
 };

@@ -48,11 +48,19 @@ function sanitize(html) {
   // Разрешаем изображения (используются в описаниях задач отчётов: скриншоты
   // загружаются через /reports/upload-image и вставляются как <img>). data:
   // схема нужна, чтобы поддержать вставку из буфера до загрузки на сервер.
-  return DOMPurify.sanitize(html, {
+  const cleaned = DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
     ADD_TAGS: ['img'],
-    ADD_ATTR: ['src', 'alt', 'width', 'height', 'style'],
+    ADD_ATTR: ['src', 'alt', 'width', 'height', 'style', 'target', 'rel'],
     ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
+  });
+  // Все ссылки в задачах должны открываться в новой вкладке, чтобы отчёт
+  // оставался открытым у клиента (см. также safeHtml в ReportRenderer).
+  return cleaned.replace(/<a\b([^>]*)>/gi, (m, attrs) => {
+    let next = attrs;
+    if (!/\btarget=/i.test(next)) next += ' target="_blank"';
+    if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
+    return `<a${next}>`;
   });
 }
 

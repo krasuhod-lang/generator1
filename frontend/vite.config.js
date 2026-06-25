@@ -11,6 +11,13 @@ export default defineConfig({
         target: 'http://localhost:3000',
         changeOrigin: true,
       },
+      // Статика бэкенда (загруженные скриншоты задач отчётов и т.п.).
+      // Без проксирования картинки `/uploads/report-images/...` отдают 404
+      // с Vite-сервера и в задачах «изображения не работают».
+      '/uploads': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
     },
   },
 });
