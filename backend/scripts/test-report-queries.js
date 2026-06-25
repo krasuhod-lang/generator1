@@ -16,6 +16,7 @@ const {
   _splitQueries,
   _splitPages,
   _buildPagesWithQueries,
+  _buildYandexQueriesAsPages,
   _summarizeCommercial,
 } = require('../src/services/reports/dataAggregator');
 const { deriveBrandTokens } = require('../src/services/projects/commercialIntent');
@@ -135,6 +136,47 @@ test('_summarizeCommercial безопасен на пустом массиве',
   assert.strictEqual(s.total_clicks, 0);
   assert.strictEqual(s.commercial_clicks, 0);
   assert.strictEqual(s.commercial_share_pct, null);
+});
+
+test('_buildPagesWithQueries: при unknown-URL интент фолбэком берётся из запросов', () => {
+  // Страница /domain/page — без явных URL-маркеров; интент должен прийти
+  // от запросов: 200 коммерческих кликов против 0 информационных → commercial.
+  const pages = [{ key: '/domain/some-product', clicks: 220, impressions: 3000, ctr: 7, position: 5 }];
+  const queryPage = [
+    { query: 'купить some-product недорого', page: '/domain/some-product', clicks: 200, impressions: 2500, ctr: 8, position: 4 },
+    { query: 'some-product отзывы', page: '/domain/some-product', clicks: 20, impressions: 500, ctr: 4, position: 9 },
+  ];
+  const out = _buildPagesWithQueries(pages, queryPage, 'google', brandTokens);
+  assert.strictEqual(out[0].page_intent, 'commercial', 'majority-vote intent commercial');
+  assert.strictEqual(out[0].intent_marker, 'queries-majority');
+});
+
+test('_buildPagesWithQueries: без запросов unknown-URL остаётся unknown', () => {
+  const pages = [{ key: '/about', clicks: 5, impressions: 50, ctr: 10, position: 15 }];
+  const out = _buildPagesWithQueries(pages, [], 'google', brandTokens);
+  assert.strictEqual(out[0].page_intent, 'unknown');
+  assert.strictEqual(out[0].intent_unknown, true);
+});
+
+test('_buildYandexQueriesAsPages: каждый запрос — псевдо-строка с интентом по запросу', () => {
+  const yaQueries = [
+    { key: 'купить пластиковые окна', clicks: 120, impressions: 1500, ctr: 8, position: 4 },
+    { key: 'как помыть окна', clicks: 60, impressions: 1200, ctr: 5, position: 7 },
+    { key: 'noname brandless', clicks: 5, impressions: 80, ctr: 6, position: 20 },
+  ];
+  const out = _buildYandexQueriesAsPages(yaQueries, brandTokens);
+  assert.strictEqual(out.length, 3);
+  // url=null, query=исходный запрос, движок 'yandex'
+  assert.strictEqual(out[0].url, null);
+  assert.strictEqual(out[0].query, 'купить пластиковые окна');
+  assert.strictEqual(out[0].engine, 'yandex');
+  assert.strictEqual(out[0].page_intent, 'commercial');
+  // queries_count=0 (нечего разворачивать)
+  assert.strictEqual(out[0].queries_count, 0);
+  // Сортировка по убыванию кликов
+  assert.ok(out[0].clicks >= out[1].clicks && out[1].clicks >= out[2].clicks);
+  const info = out.find((r) => r.query.startsWith('как помыть'));
+  assert.strictEqual(info.page_intent, 'informational');
 });
 
 console.log(`\n${passed} passed`);
