@@ -355,7 +355,7 @@ async function runMetaTagTaskInner(taskId) {
       // staged-хелпер metaStages.runMetaStagesForKeyword, который переиспользуется
       // и в анализе проектов (projects/pageMetaAudit), чтобы логика этапов и
       // LSI-верификации не дублировалась.
-      const { serp, semantics, metas } = await runMetaStagesForKeyword({
+      const { serp, semantics, ctrAnalysis, metas } = await runMetaStagesForKeyword({
         keyword: kw,
         inputs,
         lr: task.lr,
@@ -394,7 +394,7 @@ async function runMetaTagTaskInner(taskId) {
         [taskId, totalTokensIn, totalTokensOut, totalCostUsd.toFixed(6), modelUsed],
       );
 
-      await pushResult(taskId, { keyword: kw, status: 'success', serp, semantics, metas });
+      await pushResult(taskId, { keyword: kw, status: 'success', serp, semantics, ctr_analysis: ctrAnalysis, metas });
       kwOk += 1;
       await appendLog(taskId,
         `✅ «${kw}» готово (Title ${metas.title_length}, Desc ${metas.description_length}` +
