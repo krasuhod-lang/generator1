@@ -97,6 +97,7 @@ function buildTsvAll() {
     'Keyword','Status','Intent','Title','Title length','Description','Description length',
     'Niche analysis','Detected year','Title LSI (≥35%)','Description LSI (15–35%)',
     'Used important words','Missed LSI',
+    'Obligatory LSI used','Differentiator LSI used','SERP formula',
     'Tokens in','Tokens out','Cost USD',
     'Error',
   ];
@@ -108,6 +109,7 @@ function buildTsvAll() {
       const s = it.semantics || {};
       const lsi = m.lsi_check || {};
       const missed = Array.isArray(lsi.missed_lsi) ? lsi.missed_lsi : [];
+      const ctrUsed = m.ctr_analysis_used || {};
       const meta = m._meta || {};
       rows.push([
         cell(it.keyword), 'success', cell(m.intent),
@@ -118,6 +120,9 @@ function buildTsvAll() {
         cell((s.description_mandatory_words || []).join(', ')),
         cell((m.used_important_words        || []).join(', ')),
         cell(missed.join(', ')),
+        cell((ctrUsed.matched_obligatory_lsi  || []).join(', ')),
+        cell((ctrUsed.applied_differentiators || []).join(', ')),
+        cell(ctrUsed.formula || ''),
         cell(meta.tokensIn  || 0),
         cell(meta.tokensOut || 0),
         cell(meta.costUsd != null ? Number(meta.costUsd).toFixed(6) : ''),
@@ -126,6 +131,7 @@ function buildTsvAll() {
     } else {
       rows.push([
         cell(it.keyword), 'error', '', '', '', '', '', '', '', '', '', '', '',
+        '', '', '',
         '', '', '',
         cell(it.error),
       ].join('\t'));
@@ -195,6 +201,17 @@ function toggleSerp(idx) {
   else expandedSerp.value.add(idx);
   // reactive trigger
   expandedSerp.value = new Set(expandedSerp.value);
+}
+
+// ТЗ §2.4: раскрываемый блок «Анализ выдачи и LSI» под каждым метатегом.
+const expandedCtr = ref(new Set());
+function toggleCtr(idx) {
+  if (expandedCtr.value.has(idx)) expandedCtr.value.delete(idx);
+  else expandedCtr.value.add(idx);
+  expandedCtr.value = new Set(expandedCtr.value);
+}
+function pct(v) {
+  return `${Math.round((Number(v) || 0) * 100)}%`;
 }
 </script>
 
@@ -424,6 +441,129 @@ function toggleSerp(idx) {
                       <span v-if="it.metas._meta.costUsd != null">
                         cost: <span class="text-emerald-300">${{ Number(it.metas._meta.costUsd).toFixed(5) }}</span>
                       </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Анализ выдачи и LSI (ТЗ §2.4) -->
+              <div v-if="it.ctr_analysis || it.metas?.ctr_analysis_used" class="mt-4">
+                <button @click="toggleCtr(idx)"
+                        class="text-xs font-bold text-emerald-400 hover:text-emerald-300">
+                  {{ expandedCtr.has(idx) ? '▾' : '▸' }} Анализ выдачи и LSI
+                  <span v-if="it.metas?.ctr_analysis_used?.formula" class="text-[10px] text-gray-500 ml-1 font-normal">
+                    · формула: {{ it.metas.ctr_analysis_used.formula }}
+                  </span>
+                </button>
+                <div v-if="expandedCtr.has(idx)" class="mt-2 p-3 bg-gray-950 rounded border border-gray-800 space-y-3">
+                  <!-- Паттерны выдачи -->
+                  <div v-if="it.ctr_analysis?.patterns" class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+                    <div class="bg-gray-900 rounded px-2 py-1 border border-gray-800">
+                      <div class="text-[9px] uppercase text-gray-500">Длина Title (p50/p90)</div>
+                      <div class="text-emerald-300 font-mono">{{ it.ctr_analysis.patterns.length_p50_title }} / {{ it.ctr_analysis.patterns.length_p90_title }}</div>
+                    </div>
+                    <div class="bg-gray-900 rounded px-2 py-1 border border-gray-800">
+                      <div class="text-[9px] uppercase text-gray-500">Длина Desc (p50/p90)</div>
+                      <div class="text-emerald-300 font-mono">{{ it.ctr_analysis.patterns.length_p50_desc }} / {{ it.ctr_analysis.patterns.length_p90_desc }}</div>
+                    </div>
+                    <div class="bg-gray-900 rounded px-2 py-1 border border-gray-800">
+                      <div class="text-[9px] uppercase text-gray-500">CTA</div>
+                      <div class="text-emerald-300 font-mono">{{ pct(it.ctr_analysis.patterns.cta_frequency) }}</div>
+                    </div>
+                    <div class="bg-gray-900 rounded px-2 py-1 border border-gray-800">
+                      <div class="text-[9px] uppercase text-gray-500">Год</div>
+                      <div class="text-emerald-300 font-mono">{{ pct(it.ctr_analysis.patterns.year_frequency) }}</div>
+                    </div>
+                    <div class="bg-gray-900 rounded px-2 py-1 border border-gray-800">
+                      <div class="text-[9px] uppercase text-gray-500">Цена</div>
+                      <div class="text-emerald-300 font-mono">{{ pct(it.ctr_analysis.patterns.price_frequency) }}</div>
+                    </div>
+                    <div class="bg-gray-900 rounded px-2 py-1 border border-gray-800">
+                      <div class="text-[9px] uppercase text-gray-500">Гео</div>
+                      <div class="text-emerald-300 font-mono">{{ pct(it.ctr_analysis.patterns.geo_frequency) }}</div>
+                    </div>
+                  </div>
+
+                  <!-- LSI чипы -->
+                  <div class="space-y-2 text-[11px]">
+                    <div v-if="(it.metas?.lsi_check?.obligatory_used || []).length || (it.metas?.lsi_check?.obligatory_missed || []).length">
+                      <span class="text-[10px] text-emerald-400 uppercase font-bold block mb-1">
+                        Обязательные LSI (есть у ≥50% ТОП-{{ it.serp?.length || 10 }})
+                      </span>
+                      <div class="flex flex-wrap gap-1">
+                        <span v-for="w in (it.metas?.lsi_check?.obligatory_used || [])" :key="`obl-u-${w}`"
+                              class="text-[10px] px-1.5 py-0.5 rounded border bg-emerald-900/30 text-emerald-300 border-emerald-800/50">{{ w }}</span>
+                        <span v-for="w in (it.metas?.lsi_check?.obligatory_missed || [])" :key="`obl-m-${w}`"
+                              class="text-[10px] px-1.5 py-0.5 rounded border bg-red-900/20 text-red-300 border-red-800/50">{{ w }} ❌</span>
+                      </div>
+                    </div>
+                    <div v-if="(it.semantics?.differentiator_lsi || []).length">
+                      <span class="text-[10px] text-fuchsia-400 uppercase font-bold block mb-1">
+                        Уникальные LSI (нет ни у кого в ТОП-10)
+                      </span>
+                      <div class="flex flex-wrap gap-1">
+                        <span v-for="w in (it.semantics?.differentiator_lsi || [])" :key="`diff-${w}`"
+                              :class="[
+                                'text-[10px] px-1.5 py-0.5 rounded border',
+                                (it.metas?.lsi_check?.differentiators_used || []).includes(w)
+                                  ? 'bg-fuchsia-900/30 text-fuchsia-300 border-fuchsia-800/50'
+                                  : 'bg-gray-800 text-gray-500 border-gray-700'
+                              ]">{{ w }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Рекомендации -->
+                  <div v-if="it.ctr_analysis?.recommendations" class="space-y-1.5 text-[11px]">
+                    <div v-if="(it.ctr_analysis.recommendations.must_have || []).length">
+                      <span class="text-[10px] text-emerald-400 uppercase font-bold block mb-0.5">Чем выигрываем у конкурентов</span>
+                      <ul class="list-disc list-inside text-gray-300 space-y-0.5">
+                        <li v-for="(r, ri) in it.ctr_analysis.recommendations.must_have" :key="`mh-${ri}`">{{ r }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="(it.ctr_analysis.recommendations.differentiation || []).length">
+                      <span class="text-[10px] text-fuchsia-400 uppercase font-bold block mb-0.5">Дифференциация</span>
+                      <ul class="list-disc list-inside text-gray-300 space-y-0.5">
+                        <li v-for="(r, ri) in it.ctr_analysis.recommendations.differentiation" :key="`df-${ri}`">{{ r }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="(it.ctr_analysis.recommendations.must_avoid || []).length">
+                      <span class="text-[10px] text-amber-400 uppercase font-bold block mb-0.5">Избегать</span>
+                      <ul class="list-disc list-inside text-gray-300 space-y-0.5">
+                        <li v-for="(r, ri) in it.ctr_analysis.recommendations.must_avoid" :key="`av-${ri}`">{{ r }}</li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  <!-- Таблица конкурентов -->
+                  <div v-if="(it.ctr_analysis?.competitor_titles || []).length" class="border-t border-gray-800 pt-2">
+                    <span class="text-[10px] uppercase font-bold text-gray-400 block mb-1">Title/Desc конкурентов</span>
+                    <div class="overflow-x-auto max-h-80 overflow-y-auto">
+                      <table class="w-full text-[10px]">
+                        <thead class="text-gray-500 sticky top-0 bg-gray-950">
+                          <tr>
+                            <th class="text-left py-1 pr-2">#</th>
+                            <th class="text-left py-1 pr-2">Title</th>
+                            <th class="text-right py-1 pr-2">Длина</th>
+                            <th class="text-center py-1 pr-2">CTA</th>
+                            <th class="text-center py-1 pr-2">Год</th>
+                            <th class="text-center py-1 pr-2">Цена</th>
+                            <th class="text-center py-1 pr-2">Гео</th>
+                          </tr>
+                        </thead>
+                        <tbody class="text-gray-300">
+                          <tr v-for="(ct, cti) in it.ctr_analysis.competitor_titles" :key="`ct-${cti}`"
+                              class="border-t border-gray-800/50">
+                            <td class="py-1 pr-2 text-gray-500">{{ cti + 1 }}</td>
+                            <td class="py-1 pr-2 truncate max-w-[28ch]" :title="ct.title">{{ ct.title }}</td>
+                            <td class="py-1 pr-2 text-right font-mono">{{ ct.length }}</td>
+                            <td class="py-1 pr-2 text-center">{{ (it.ctr_analysis.competitor_descriptions?.[cti]?.has_cta) ? '✓' : '—' }}</td>
+                            <td class="py-1 pr-2 text-center">{{ ct.has_year ? '✓' : '—' }}</td>
+                            <td class="py-1 pr-2 text-center">{{ ct.has_pricing ? '✓' : '—' }}</td>
+                            <td class="py-1 pr-2 text-center">{{ ct.has_geo ? '✓' : '—' }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
                     </div>
                   </div>
                 </div>

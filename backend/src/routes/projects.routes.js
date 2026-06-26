@@ -6,6 +6,7 @@ const multer    = require('multer');
 const auth      = require('../middleware/auth');
 
 const c = require('../controllers/projects.controller');
+const pos = require('../controllers/positionsProxy.controller');
 
 const router = express.Router();
 
@@ -104,5 +105,29 @@ router.get('/:id/works',                  auth, c.listWorks);
 router.post('/:id/works',                 auth, createLimiter, c.createWork);
 router.put('/:id/works/:workId',          auth, c.updateWork);
 router.delete('/:id/works/:workId',       auth, c.deleteWork);
+
+// Съём позиций — прокси-эндпоинты внутри проекта. Делегируют в
+// position_projects (связанный через positionBridge.ensureLinkedPositionProject)
+// с дефолтным гео из keys_so_region SEO-проекта (см. positionsProxy.controller).
+// Запуск съёма — отдельным лимитером.
+const positionRunLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max:      30,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Слишком много запусков съёма за минуту. Подождите.' },
+});
+router.get   ('/:id/positions/overview',                auth, pos.getOverview);
+router.get   ('/:id/positions/keywords',                auth, pos.getKeywordsTable);
+router.post  ('/:id/positions/keywords',                auth, pos.addKeywords);
+router.delete('/:id/positions/keywords/:kwId',          auth, pos.deleteKeyword);
+router.post  ('/:id/positions/runs',                    auth, positionRunLimiter, pos.startRun);
+router.get   ('/:id/positions/runs',                    auth, pos.listRuns);
+router.get   ('/:id/positions/series',                  auth, pos.getProjectSeries);
+router.get   ('/:id/positions/keywords/:kwId/series',   auth, pos.getKeywordSeries);
+router.get   ('/:id/positions/movers',                  auth, pos.getMovers);
+router.get   ('/:id/positions/tops-distribution',       auth, pos.getTopsDistribution);
+router.get   ('/:id/positions/settings',                auth, pos.getSettings);
+router.patch ('/:id/positions/settings',                auth, pos.updateSettings);
 
 module.exports = router;

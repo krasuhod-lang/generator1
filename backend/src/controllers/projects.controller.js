@@ -46,6 +46,7 @@ const { buildLeadContext } = require('../services/projects/leadContext');
 const snapshotsRepo = require('../services/projects/snapshotsRepo');
 const { compareSnapshots } = require('../services/projects/periodComparison');
 const { ensureLinkedPositionProject, syncLinkedPositionProject } = require('../services/projects/positionBridge');
+const { buildSharedPositionsSection } = require('../services/projects/sharedPositionsBuilder');
 const freshnessService = require('../services/projects/freshnessService');
 const worksService = require('../services/projects/worksService');
 
@@ -129,7 +130,7 @@ const PUBLIC_COLUMNS = `
   ydx_connected, ydx_site_url, ydx_available_sites,
   (ydx_refresh_token_enc IS NOT NULL) AS ydx_has_refresh,
   (SELECT pp.id FROM position_projects pp WHERE pp.parent_project_id = projects.id LIMIT 1) AS linked_position_project_id,
-  share_token, share_created_at, share_mode, share_expires_at, created_at, updated_at`;
+  share_token, share_created_at, share_mode, share_expires_at, share_includes_positions, created_at, updated_at`;
 
 function _frontendBase() {
   // Базовый URL фронта для редиректа после OAuth. По умолчанию — относительный
@@ -842,7 +843,7 @@ async function getSharedProject(req, res, next) {
     if (!isValidShareToken(token)) return res.status(400).json({ error: 'Некорректный токен' });
     const { rows } = await db.query(
       `SELECT id, name, url, audience_description, gsc_site_url, share_mode,
-              share_created_at, share_expires_at, created_at
+              share_created_at, share_expires_at, share_includes_positions, created_at
          FROM projects WHERE share_token = $1 LIMIT 1`,
       [token],
     );
@@ -864,9 +865,22 @@ async function getSharedProject(req, res, next) {
         ORDER BY completed_at DESC NULLS LAST LIMIT 1`,
       [project.id],
     );
+    // Секция «Съём позиций» в публичной ссылке — только если включён
+    // share_includes_positions и есть связанный position_projects с
+    // данными. В client-режиме данные дополнительно санитизируются.
+    let positions = null;
+    if (project.share_includes_positions !== false) {
+      try {
+        positions = await buildSharedPositionsSection(project.id, mode);
+      } catch (err) {
+        // Не валим всю публичную ссылку из-за позиций — логируем и идём дальше.
+        console.warn(`[getSharedProject] positions section failed for project ${project.id}:`, err.message);
+      }
+    }
     return res.json({
       project: sanitizeProject(project, mode),
       analysis: aRows[0] ? sanitizeAnalysis(aRows[0], mode) : null,
+      positions,
       view_mode: mode,
     });
   } catch (err) { return next(err); }

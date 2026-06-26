@@ -1399,6 +1399,9 @@ async function ensureSchema() {
     // безопасный default (без раскрытия тех. деталей).
     await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS share_mode       TEXT NOT NULL DEFAULT 'client'`);
     await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS share_expires_at TIMESTAMPTZ`);
+    // Migration 091: флаг, включать ли секцию позиций в публичный share-ответ.
+    // Старые проекты получают TRUE (см. комментарий в миграции).
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS share_includes_positions BOOLEAN NOT NULL DEFAULT TRUE`);
     await db.query(`
       DO $$
       BEGIN

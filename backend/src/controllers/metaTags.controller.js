@@ -15,6 +15,7 @@ const { processMetaTagTask } = require('../services/metaTags/pipeline');
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { csvCell, csvHeader } = require('../utils/csv');
 
 // ─── Валидация входных данных ─────────────────────────────────────
 const MAX_NAME_LEN     = 200;
@@ -140,16 +141,10 @@ async function deleteMetaTagTask(req, res, next) {
 }
 
 // ─── GET /api/meta-tags/:id/export.csv ────────────────────────────
-function csvCell(val) {
-  // CSV-кавычки: оборачиваем + экранируем " как ""
-  // CRLF/CR/LF внутри значений не разрешаем — заменяем на пробел, чтобы не
-  // ломать строки и потенциальные CSV-injection-вектора (= + - @) пропускаем,
-  // прибавляя апостроф в начало.
-  let s = val == null ? '' : String(val);
-  s = s.replace(/[\r\n]+/g, ' ');
-  if (/^[=+\-@]/.test(s)) s = `'${s}`;
-  return `"${s.replace(/"/g, '""')}"`;
-}
+// csvCell/csvHeader вынесены в utils/csv.js (общий хелпер с `sep=;`
+// директивой для корректного открытия в Excel-EN / Google Sheets /
+// LibreOffice — без неё все колонки сваливались в первую и пользователь
+// жаловался на «нечитаемый csv»).
 
 async function exportMetaTagTaskCsv(req, res, next) {
   try {
@@ -175,7 +170,7 @@ async function exportMetaTagTaskCsv(req, res, next) {
     ];
 
     const sep = ';'; // Excel в RU-локали ожидает ; как разделитель
-    let csv = '\uFEFF'; // BOM — Excel корректно поймёт UTF-8
+    let csv = csvHeader(sep); // BOM + `sep=;` директива для Excel-EN / Sheets
     csv += headers.map(csvCell).join(sep) + '\r\n';
 
     for (const it of items) {

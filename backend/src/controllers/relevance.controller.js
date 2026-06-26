@@ -19,6 +19,7 @@ const { withUserSlot } = require('../utils/perUserConcurrency');
 const { health: relevanceHealth, cocoons: relevanceCocoons, cocoonPlan: relevanceCocoonPlan } = require('../services/relevance/pythonClient');
 const rawStorage = require('../services/relevance/rawStorage');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { csvCell, csvHeader } = require('../utils/csv');
 
 const MAX_QUERY_LEN = 200;
 const MAX_LR_LEN    = 16;
@@ -399,13 +400,8 @@ async function exportJson(req, res, next) {
 }
 
 // ─── GET /api/relevance/:id/export.csv ────────────────────────────
-function csvCell(val) {
-  let s = val == null ? '' : String(val);
-  s = s.replace(/[\r\n]+/g, ' ');
-  // CSV-injection guard: значения, начинающиеся с =/+/-/@ — префиксуем апострофом
-  if (/^[=+\-@]/.test(s)) s = `'${s}`;
-  return `"${s.replace(/"/g, '""')}"`;
-}
+// csvCell/csvHeader вынесены в utils/csv.js (общий хелпер с `sep=;`
+// директивой — иначе Excel-EN / Google Sheets кладут всё в одну колонку).
 
 async function exportCsv(req, res, next) {
   try {
@@ -421,7 +417,7 @@ async function exportCsv(req, res, next) {
     const ngrams = Array.isArray(report?.ngrams)     ? report.ngrams     : [];
 
     const sep = ';';
-    let csv = '\uFEFF'; // BOM для Excel в RU-локали
+    let csv = csvHeader(sep); // BOM + `sep=;` директива (Excel-EN / Google Sheets)
     csv += `"# Relevance report"${sep}${csvCell(query)}\r\n`;
     csv += `"# Generated"${sep}${csvCell(new Date().toISOString())}\r\n\r\n`;
 

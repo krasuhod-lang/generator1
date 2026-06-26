@@ -16,6 +16,7 @@ const { processCategoryLeadTask } = require('../services/categoryLead/pipeline')
 const { getCategoryLeadConfig } = require('../services/categoryLead/config');
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { csvCell, csvHeader } = require('../utils/csv');
 
 function clipStr(s, max) {
   if (s == null) return '';
@@ -147,12 +148,8 @@ async function deleteCategoryLeadTask(req, res, next) {
 }
 
 // ─── CSV-helpers ──────────────────────────────────────────────────
-function csvCell(val) {
-  let s = val == null ? '' : String(val);
-  s = s.replace(/[\r\n]+/g, ' ');
-  if (/^[=+\-@]/.test(s)) s = `'${s}`;
-  return `"${s.replace(/"/g, '""')}"`;
-}
+// csvCell вынесен в utils/csv.js; csvHeader добавляет `sep=;` директиву,
+// без которой Excel-EN / Google Sheets кладут все колонки в одну.
 
 function safeFileName(name, fallback) {
   return String(name || fallback)
@@ -177,7 +174,7 @@ async function exportCategoryLeadCsv(req, res, next) {
       'Тип действия', 'Обоснование', 'Приоритет индексации',
     ];
     const sep = ';';
-    let csv = '\uFEFF' + headers.map(csvCell).join(sep) + '\r\n';
+    let csv = csvHeader(sep) + headers.map(csvCell).join(sep) + '\r\n';
     for (const r of tableRows) {
       csv += [
         csvCell(r.current),

@@ -24,6 +24,7 @@ import RankingFactorsCard from '../components/RankingFactorsCard.vue';
 import StrategyDiagram from '../components/StrategyDiagram.vue';
 import TopPageInsightsCard from '../components/TopPageInsightsCard.vue';
 import ActionPlanCard from '../components/ActionPlanCard.vue';
+import PositionsSection from '../components/PositionsSection.vue';
 import { useProjectsStore } from '../stores/projects.js';
 import { useReportsStore } from '../stores/reports.js';
 import { useViewModeStore } from '../stores/viewMode.js';
@@ -675,6 +676,12 @@ onMounted(() => {
   if (route.query.ydx === 'connected') { flash('Яндекс.Вебмастер подключён ✓'); activeTab.value = 'ydx'; }
   else if (route.query.ydx === 'error') { flash('Ошибка подключения Яндекс.Вебмастера: ' + (route.query.reason || '')); activeTab.value = 'ydx'; }
   if (route.query.gsc || route.query.ydx) router.replace({ path: route.path });
+  // Deep-link на конкретную вкладку (используется из ProjectsPage / PositionTrackerPage
+  // для входа сразу в раздел «Съём позиций»).
+  if (typeof route.query.tab === 'string'
+      && ['gsc', 'ydx', 'compare', 'positions', 'tasks'].includes(route.query.tab)) {
+    activeTab.value = route.query.tab;
+  }
   load();
 });
 onUnmounted(() => {
@@ -706,7 +713,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="flex flex-wrap gap-2">
-            <button v-if="positionProject?.id" class="btn-secondary" @click="router.push(`/position-tracker/${positionProject.id}`)">📈 Позиции</button>
+            <button class="btn-secondary" @click="switchTab('positions')">📈 Съём позиций</button>
             <!-- П.7: единая точка входа в отчёты проекта. Открывает последний
                  черновик или создаёт новый (28 дней) и редиректит туда.
                  «🧾 Новый отчёт» / ReportsPage остаются как глобальный реестр
@@ -784,6 +791,12 @@ onUnmounted(() => {
                   :class="activeTab === 'compare' ? 'border-fuchsia-500 text-fuchsia-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
                   @click="switchTab('compare')">
             Сравнение и рекомендации
+          </button>
+          <button type="button"
+                  class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
+                  :class="activeTab === 'positions' ? 'border-emerald-500 text-emerald-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                  @click="switchTab('positions')">
+            📈 Съём позиций
           </button>
           <button type="button"
                   class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
@@ -1220,6 +1233,12 @@ onUnmounted(() => {
           </section>
         </div>
         <!-- ============ /Вкладка Сравнение ============ -->
+
+        <!-- ============ Вкладка Съём позиций ============ -->
+        <div v-show="activeTab === 'positions'" class="space-y-5">
+          <PositionsSection :project-id="projectId" />
+        </div>
+        <!-- ============ /Вкладка Съём позиций ============ -->
 
         <!-- ============ Вкладка Задачи (ТЗ §5) ============ -->
         <div v-show="activeTab === 'tasks'" class="space-y-5">
