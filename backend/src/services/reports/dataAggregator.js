@@ -16,6 +16,7 @@ const { applyOverrides } = require('./overridesApplier');
 const { classifyQuery, deriveBrandTokens } = require('../projects/commercialIntent');
 const { classifyUrl } = require('./urlClassifier');
 const { getProjectsConfig } = require('../projects/config');
+const dataCache = require('./dataCache');
 
 /**
  * Метаданные временных рядов для UI/KPI.
@@ -1075,6 +1076,10 @@ async function aggregateForDraft(draft, opts = {}) {
   const to = _isoDate(opts.to || draft.date_to);
   const granularity = _granularity(opts.granularity || draft.config?.granularity || 'month');
   const viewMode = opts.viewMode || 'analyst';
+  // `?refresh=1` (или opts.refresh=true) — обход кэша; принудительно
+  // дёргаем источники заново. Удобно для кнопки «обновить данные» в UI и
+  // диагностики (часть UI сейчас ожидает кеш-таймаут ~60s).
+  const refresh = !!opts.refresh;
 
   const freshnessMap = await _loadFreshnessMap(project.id);
 
@@ -1082,14 +1087,29 @@ async function aggregateForDraft(draft, opts = {}) {
   // _*Section внутри ловят ошибки источников и возвращают status='error',
   // так что .all не падает целиком. Раньше modules ждали отдельно ПОСЛЕ
   // основного Promise.all и удваивали общее время ответа.
+  //
+  // ТЗ-кэш: тяжёлые секции (GSC/Яндекс/Keys.so/съём позиций/топ-запросы/
+  // модули) кэшируются по (project.id, period, granularity, configHash).
+  // Зависящие от черновика секции (tasks_blocks) остаются вне кэша —
+  // редактирование вручную сразу видно. См. services/reports/dataCache.js.
+  const sectionCacheKey = (kind, extra) => dataCache.makeKey([
+    'reports:section', kind, project.id, from, to, granularity,
+    ...(extra ? [extra] : []),
+  ]);
+  const wrap = (kind, loader, extra) => (refresh
+    ? Promise.resolve().then(loader)
+    : dataCache.cached(sectionCacheKey(kind, extra), loader));
+
+  const modulesConfigHash = dataCache.makeKey([draft.config?.modules || {}]);
   const [gsc, ywm, keysSo, position, tasks, queries, modules] = await Promise.all([
-    _gscSection(project, from, to, granularity, freshnessMap),
-    _ydxSection(project, from, to, granularity, freshnessMap),
-    _keysSoSection(project, from, to, freshnessMap),
-    _positionSection(project.id, from, to, granularity),
+    wrap('gsc', () => _gscSection(project, from, to, granularity, freshnessMap)),
+    wrap('ywm', () => _ydxSection(project, from, to, granularity, freshnessMap)),
+    wrap('keysSo', () => _keysSoSection(project, from, to, freshnessMap)),
+    wrap('position', () => _positionSection(project.id, from, to, granularity)),
+    // tasks зависит от draft.tasks_blocks / includeHidden — не кэшируем.
     _tasksSection(project.id, from, to, granularity, draft.tasks_blocks, { includeHidden: opts.includeHidden }),
-    _queriesSection(project, from, to),
-    _modulesSection(project, from, to, draft.config),
+    wrap('queries', () => _queriesSection(project, from, to)),
+    wrap('modules', () => _modulesSection(project, from, to, draft.config), modulesConfigHash),
   ]);
 
   // Сводный статус интеграций — нужен для UI-баннеров и для PDF footnote
@@ -1170,8 +1190,25 @@ async function aggregateForDraft(draft, opts = {}) {
   return sanitizeData(payload, viewMode);
 }
 
+/**
+ * Сбросить кэш секций отчёта для конкретного проекта (или всех проектов,
+ * если projectId не задан). Вызывается контроллером при правках черновика,
+ * меняющих конфиг/период, и при ручном refresh.
+ */
+function invalidateProjectCache(projectId) {
+  if (projectId == null) {
+    return dataCache.invalidatePrefix('reports:section|');
+  }
+  let n = 0;
+  for (const kind of ['gsc', 'ywm', 'keysSo', 'position', 'queries', 'modules']) {
+    n += dataCache.invalidatePrefix(`reports:section|${kind}|${projectId}|`);
+  }
+  return n;
+}
+
 module.exports = {
   aggregateForDraft,
+  invalidateProjectCache,
   _aggregateSeries,
   _aggregateByMonth,
   _isoDate,

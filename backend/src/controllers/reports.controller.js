@@ -32,7 +32,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const db = require('../config/db');
-const { aggregateForDraft } = require('../services/reports/dataAggregator');
+const { aggregateForDraft, invalidateProjectCache } = require('../services/reports/dataAggregator');
 const { generateSummary } = require('../services/reports/aiAnalyst');
 const tasksLog = require('../services/reports/tasksAutoLog');
 const { buildReportDocx } = require('../services/reports/docxExporter');
@@ -317,11 +317,15 @@ async function getDraftData(req, res) {
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   try {
     const viewMode = resolveViewMode(req);
+    const refresh = String(req.query.refresh || '') === '1'
+      || String(req.query.refresh || '').toLowerCase() === 'true';
+    if (refresh) invalidateProjectCache(draft.project_id);
     const data = await aggregateForDraft(draft, {
       from: req.query.from,
       to: req.query.to,
       granularity: req.query.granularity,
       viewMode,
+      refresh,
     });
     res.json({ data, view_mode: viewMode });
   } catch (err) {
