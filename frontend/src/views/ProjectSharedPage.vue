@@ -27,12 +27,14 @@ import BlogTopicsCard from '../components/BlogTopicsCard.vue';
 import EatTemplatesCard from '../components/EatTemplatesCard.vue';
 import SchemaAuditCard from '../components/SchemaAuditCard.vue';
 import AiVisibilityCard from '../components/AiVisibilityCard.vue';
+import PositionsSection from '../components/PositionsSection.vue';
 
 const route = useRoute();
 const loading = ref(true);
 const error = ref('');
 const project = ref(null);
 const analysis = ref(null);
+const positions = ref(null);
 const copyToast = ref('');
 
 const snap = computed(() => analysis.value?.gsc_snapshot || null);
@@ -116,11 +118,13 @@ async function copyCurrentUrl() {
 const hasGoogle = computed(() => !!(analysis.value?.report_markdown || snap.value));
 const hasYandex = computed(() => !!(analysis.value?.ydx_report_markdown || ydx.value));
 const hasSynthesis = computed(() => !!(analysis.value?.synthesis_markdown || analysis.value?.ranking_factors));
+const hasPositions = computed(() => !!(positions.value && positions.value.enabled && positions.value.has_data));
 
 const tabs = computed(() => [
   { key: 'google', label: 'Google', accent: 'indigo', show: hasGoogle.value },
   { key: 'yandex', label: 'Яндекс', accent: 'red', show: hasYandex.value },
   { key: 'synthesis', label: 'Сводная', accent: 'fuchsia', show: hasSynthesis.value },
+  { key: 'positions', label: 'Позиции', accent: 'emerald', show: hasPositions.value },
 ].filter((t) => t.show));
 
 const activeTab = ref('google');
@@ -166,6 +170,7 @@ onMounted(async () => {
     const { data } = await axios.get(`/api/public/project/${route.params.token}`);
     project.value = data.project;
     analysis.value = data.analysis;
+    positions.value = data.positions || null;
   } catch (err) {
     error.value = err.response?.data?.error || 'Ссылка недействительна или отозвана';
   } finally {
@@ -198,7 +203,7 @@ onMounted(async () => {
           </div>
         </header>
 
-        <div v-if="!analysis" class="text-sm text-gray-500 text-center py-12">
+        <div v-if="!analysis && !hasPositions" class="text-sm text-gray-500 text-center py-12">
           Отчёт ещё не сформирован.
         </div>
 
@@ -213,7 +218,7 @@ onMounted(async () => {
           </nav>
 
           <!-- ===================== GOOGLE ===================== -->
-          <div v-show="currentTab === 'google'" class="space-y-5">
+          <div v-if="analysis && currentTab === 'google'" class="space-y-5">
             <!-- Панель выбора периода -->
             <div class="date-controls">
               <div class="flex flex-wrap gap-1.5 items-center">
@@ -323,7 +328,7 @@ onMounted(async () => {
           </div>
 
           <!-- ===================== ЯНДЕКС ===================== -->
-          <div v-show="currentTab === 'yandex'" class="space-y-5">
+          <div v-if="analysis && currentTab === 'yandex'" class="space-y-5">
             <section v-if="ydx" class="panel space-y-4">
               <h2 class="panel-title text-red-300">Эффективность в Яндексе</h2>
               <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -354,13 +359,18 @@ onMounted(async () => {
           </div>
 
           <!-- ===================== СВОДНАЯ ===================== -->
-          <div v-show="currentTab === 'synthesis'" class="space-y-5">
+          <div v-if="analysis && currentTab === 'synthesis'" class="space-y-5">
             <section v-if="analysis.synthesis_markdown" class="panel space-y-3">
               <h2 class="panel-title text-fuchsia-300">Сводка закономерностей Google ↔ Яндекс</h2>
               <MarkdownView :source="analysis.synthesis_markdown" />
             </section>
 
             <RankingFactorsCard v-if="analysis.ranking_factors" :ranking-factors="analysis.ranking_factors" />
+          </div>
+
+          <!-- ===================== ПОЗИЦИИ ===================== -->
+          <div v-if="hasPositions && currentTab === 'positions'" class="space-y-5">
+            <PositionsSection :project-id="project.id" readonly :initial-data="positions" />
           </div>
         </template>
       </template>
