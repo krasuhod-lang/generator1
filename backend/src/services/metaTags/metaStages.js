@@ -20,6 +20,7 @@
 const { fetchYandexSerp } = require('./xmlstockClient');
 const { extractSemantics, checkLsiUsage } = require('./semantics');
 const { generateDrMaxMeta } = require('./metaGenerator');
+const { analyzeSerpCtr } = require('./serpCtrAnalyzer');
 const {
   analyzeAudienceAndNiche,
   serializeAnalysisForPrompt,
@@ -50,8 +51,18 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
     ? _mergeSemantics(semantics, serpSemantics)
     : serpSemantics;
 
+  // 2.5) Анализ кликабельности выдачи (ТЗ §2.1) — детерминированный
+  //      «фактчекинг конкурентов»: длины, CTA/USP/гео/год, формулы, штампы.
+  //      Передаём в генератор как inputs.ctrAnalysis для усиления промпта.
+  const ctrAnalysis = analyzeSerpCtr(serp, { keyword, semantics: merged });
+
   // 3) Gemini/Grok → Title + Description + H1.
-  const metas = await generateDrMaxMeta({ keyword, semantics: merged, serpData: serp, inputs });
+  const metas = await generateDrMaxMeta({
+    keyword,
+    semantics: merged,
+    serpData: serp,
+    inputs: { ...inputs, ctrAnalysis },
+  });
 
   // 4) LSI-верификация по объединённому тексту Title + Description + H1.
   const combinedMetaText = [
@@ -61,13 +72,42 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
   ].join(' ');
   const lsiTitleCheck = checkLsiUsage(combinedMetaText, merged.title_mandatory_words || []);
   const lsiDescCheck = checkLsiUsage(combinedMetaText, merged.description_mandatory_words || []);
+  // Двухуровневый LSI (ТЗ §2.3): отдельно проверяем «обязательные» и «дифференциаторы».
+  const obligatoryCheck     = checkLsiUsage(combinedMetaText, merged.obligatory_lsi     || []);
+  const differentiatorCheck = checkLsiUsage(combinedMetaText, merged.differentiator_lsi || []);
+
   metas.lsi_check = {
     title: lsiTitleCheck,
     description: lsiDescCheck,
     missed_lsi: [...lsiTitleCheck.missed_lsi, ...lsiDescCheck.missed_lsi],
+    obligatory_used:        obligatoryCheck.used_lsi,
+    obligatory_missed:      obligatoryCheck.missed_lsi,
+    differentiators_used:   differentiatorCheck.used_lsi,
+    differentiators_missed: differentiatorCheck.missed_lsi,
+  };
+  metas.ctr_analysis_used = {
+    matched_obligatory_lsi:  obligatoryCheck.used_lsi,
+    applied_differentiators: differentiatorCheck.used_lsi,
+    formula: (ctrAnalysis && ctrAnalysis.recommendations && ctrAnalysis.recommendations.suggested_title_formula) || '',
   };
 
-  return { serp, semantics: merged, metas };
+  // Заметки для UI: чего не хватает и почему важно.
+  metas.post_validation_notes = Array.isArray(metas.post_validation_notes)
+    ? metas.post_validation_notes : [];
+  if (obligatoryCheck.missed_lsi.length) {
+    const total = merged.serp_doc_count || (Array.isArray(serp) ? serp.length : 0);
+    metas.post_validation_notes.push(
+      `Пропущены обязательные LSI (есть у ≥50% ТОП-${total}): `
+      + `${obligatoryCheck.missed_lsi.join(', ')} — без них ниже CTR.`,
+    );
+  }
+  if ((merged.differentiator_lsi || []).length && !differentiatorCheck.used_lsi.length) {
+    metas.post_validation_notes.push(
+      'Метатег не использует уникальные LSI — есть риск однотипности с ТОП-10.',
+    );
+  }
+
+  return { serp, semantics: merged, ctrAnalysis, metas };
 }
 
 /**
@@ -80,6 +120,12 @@ function _mergeSemantics(target, extra) {
       ? target.title_mandatory_words.slice() : [],
     description_mandatory_words: Array.isArray(target.description_mandatory_words)
       ? target.description_mandatory_words.slice() : [],
+    obligatory_lsi: Array.isArray(target.obligatory_lsi)
+      ? target.obligatory_lsi.slice() : [],
+    differentiator_lsi: Array.isArray(target.differentiator_lsi)
+      ? target.differentiator_lsi.slice() : [],
+    df_map: { ...(target.df_map || {}) },
+    serp_doc_count: target.serp_doc_count || 0,
   };
   const merge = (key, max) => {
     const seen = new Set(out[key]);
@@ -90,6 +136,11 @@ function _mergeSemantics(target, extra) {
   };
   merge('title_mandatory_words', 6);
   merge('description_mandatory_words', 10);
+  merge('obligatory_lsi', 8);
+  merge('differentiator_lsi', 5);
+  // df_map берём от extra (SERP) если в target пуст — SERP-данные точнее по выдаче.
+  if (extra.df_map && !Object.keys(out.df_map).length) out.df_map = { ...extra.df_map };
+  if (!out.serp_doc_count && extra.serp_doc_count) out.serp_doc_count = extra.serp_doc_count;
   return out;
 }
 

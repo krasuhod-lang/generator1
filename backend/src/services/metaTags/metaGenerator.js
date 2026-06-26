@@ -197,6 +197,37 @@ ${inputs.audienceNicheDigest.trim()}`
 ${inputs.relevanceBrief.trim()}`
     : '';
 
+  // ТЗ §2.2: блок «Анализ кликабельности конкурентов» + двухуровневый LSI.
+  // Передаём в промпт детерминированные паттерны (длины p50/p90, частоту CTA/
+  // года/цены/гео) и явно перечисляем обязательные / уникальные LSI.
+  const ctr = inputs.ctrAnalysis;
+  let ctrBlock = '';
+  if (ctr && ctr.patterns) {
+    const p = ctr.patterns;
+    const pct = (v) => `${Math.round((v || 0) * 100)}%`;
+    const must = (ctr.recommendations && ctr.recommendations.must_have) || [];
+    const avoid = (ctr.recommendations && ctr.recommendations.must_avoid) || [];
+    const diff = (ctr.recommendations && ctr.recommendations.differentiation) || [];
+    const obligatoryLsi    = (semantics && semantics.obligatory_lsi)     || [];
+    const differentiatorLsi = (semantics && semantics.differentiator_lsi) || [];
+    ctrBlock = `
+
+[АНАЛИЗ КЛИКАБЕЛЬНОСТИ ВЫДАЧИ — фактчекинг ТОП-10, использовать обязательно]
+- Длина Title в ТОПе: p50=${p.length_p50_title}, p90=${p.length_p90_title} — укладывайся в этот диапазон.
+- Длина Description в ТОПе: p50=${p.length_p50_desc}, p90=${p.length_p90_desc}.
+- Частота CTA в Description конкурентов: ${pct(p.cta_frequency)}; года в Title: ${pct(p.year_frequency)}; цены: ${pct(p.price_frequency)}; гео: ${pct(p.geo_frequency)}; бренда: ${pct(p.brand_frequency)}.
+- Штампованные начала тайтлов («${(p.common_prefixes || []).join('», «') || '—'}») и хвосты («${(p.common_suffixes || []).join('», «') || '—'}») — НЕ повторяй, чтобы сниппет не сливался с ТОПом.
+- Рекомендуемая формула Title (на основе ТОПа): ${ctr.recommendations.suggested_title_formula || '—'}.${must.length ? `
+- ОБЯЗАТЕЛЬНО (есть у большинства конкурентов — без этого ниже CTR):
+  • ${must.join('\n  • ')}` : ''}${avoid.length ? `
+- ИЗБЕГАТЬ:
+  • ${avoid.join('\n  • ')}` : ''}${diff.length ? `
+- ДИФФЕРЕНЦИАЦИЯ (выделит сниппет на фоне ТОПа):
+  • ${diff.join('\n  • ')}` : ''}${obligatoryLsi.length ? `
+- LSI ОБЯЗАТЕЛЬНЫЕ для конкуренции (есть у ≥50% ТОП-10, должны быть в Title или Description): ${obligatoryLsi.join(', ')}.` : ''}${differentiatorLsi.length ? `
+- LSI ДЛЯ ДИФФЕРЕНЦИАЦИИ (нет ни у одного конкурента — добавь 1–2 ради уникальности): ${differentiatorLsi.join(', ')}.` : ''}`;
+  }
+
 
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Бренд (brand_name): ${inputs.brand || ''}
@@ -208,7 +239,7 @@ ${inputs.relevanceBrief.trim()}`
 - Краткий контекст / УТП страницы (page_context): ${pageContext}
 
 Примеры Title конкурентов из ТОП-выдачи (для анализа интента и формул):
-${competitorsTitles}${audienceBlock}${relevanceBlock}
+${competitorsTitles}${audienceBlock}${relevanceBlock}${ctrBlock}
 
 Создай мета-теги строго по правилам DrMax из system-prompt (формулы Title, длины,
 бренд / телефон / CTA в Description, H1 ≤70 символов и не копия Title).`;

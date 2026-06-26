@@ -18,6 +18,11 @@
 
 const { russianStem } = require('../../utils/russianStem');
 
+// Пороги «обязательных» (DF≥50%) и «дифференциаторов» (DF=0%) — для двухуровневого LSI.
+// Используются в extractSemantics (расширение под ТЗ §2.3 «Усиление LSI-проверки»).
+const OBLIGATORY_DF_THRESHOLD       = 0.5;
+const DIFFERENTIATOR_MAX_COUNT      = 5;
+
 // Кириллический корпус стоп-слов из beta-версии (без изменений).
 const STOP_WORDS = new Set([
   'и','в','во','не','что','он','на','я','с','со','как','а','то','все','она','так','его','но','да','ты','к','у','же',
@@ -112,7 +117,74 @@ function extractSemantics(keyword, serpData) {
   return {
     title_mandatory_words:       titleRaw.map((x) => x.word).slice(0, 6),
     description_mandatory_words: descRaw.map((x)  => x.word).slice(0, 10),
+    // ── Двухуровневый LSI (ТЗ §2.3) ──────────────────────────────────────
+    // obligatory_lsi: слова, встречающиеся у ≥OBLIGATORY_DF_THRESHOLD ТОП-10
+    //   → «без них ниже CTR» (нужны для конкуренции).
+    // differentiator_lsi: токены ключа/тайтлов, которых нет ни у одного
+    //   конкурента → «уникальность» (нужны для дифференциации).
+    obligatory_lsi:    _selectObligatoryLsi(docCounts, totalDocs),
+    differentiator_lsi: _selectDifferentiatorLsi(keyword, serpData, docCounts),
+    serp_doc_count:    totalDocs,
+    // df_map: нормализованное слово → доля документов ТОПа, в которых оно
+    // встречается (0..1). Используется в analyzeSerpCtr и UI-чипах
+    // «использовано N LSI из ТОП-10».
+    df_map: _buildDfMap(docCounts, totalDocs),
   };
+}
+
+/**
+ * Выбирает «обязательные» LSI: токены с DF ≥ 50% ТОПа, кроме самих обязательных
+ * слов Title (уже там). Возвращает максимум 8 штук, отсортированных по DF.
+ */
+function _selectObligatoryLsi(docCounts, totalDocs) {
+  if (!totalDocs) return [];
+  const out = [];
+  for (const [word, count] of Object.entries(docCounts)) {
+    const df = count / totalDocs;
+    if (df >= OBLIGATORY_DF_THRESHOLD) out.push({ word, df });
+  }
+  out.sort((a, b) => b.df - a.df);
+  return out.slice(0, 8).map((x) => x.word);
+}
+
+/**
+ * Выбирает «дифференциаторы»: токены ключа и заголовков, которых нет ни в одном
+ * сниппете ТОПа. Расширяет уникальность сниппета (нет ни у кого — есть только
+ * у нас). Максимум DIFFERENTIATOR_MAX_COUNT штук.
+ */
+function _selectDifferentiatorLsi(keyword, serpData, docCounts) {
+  if (!Array.isArray(serpData) || !serpData.length) return [];
+  // Кандидаты: токены самого запроса + n-gram (1-grams) из тайтлов первых 3 конкурентов
+  // ИНАЧЕ для коротких выдач (без LLM) ничего разумного не возьмём.
+  const candidates = new Set();
+  const addTokens = (text) => {
+    String(text || '')
+      .toLowerCase()
+      .replace(/[^а-яёa-z0-9]/g, ' ')
+      .split(/\s+/)
+      .forEach((w) => {
+        const n = normalizeWord(w);
+        if (n.length > 3 && !STOP_WORDS.has(n) && !/^\d+$/.test(n)) candidates.add(n);
+      });
+  };
+  addTokens(keyword);
+  serpData.slice(0, 3).forEach((d) => addTokens(d.title || ''));
+
+  const out = [];
+  for (const cand of candidates) {
+    // df_map считает уникальные документы; если 0 — никто не использует.
+    if (!docCounts[cand]) out.push(cand);
+  }
+  return out.slice(0, DIFFERENTIATOR_MAX_COUNT);
+}
+
+function _buildDfMap(docCounts, totalDocs) {
+  if (!totalDocs) return {};
+  const out = {};
+  for (const [word, count] of Object.entries(docCounts)) {
+    out[word] = +(count / totalDocs).toFixed(3);
+  }
+  return out;
 }
 
 /**
@@ -141,4 +213,11 @@ function checkLsiUsage(text, mandatoryLsi) {
   return { used_lsi: used, missed_lsi: missed };
 }
 
-module.exports = { extractSemantics, checkLsiUsage, normalizeWord, STOP_WORDS };
+module.exports = {
+  extractSemantics,
+  checkLsiUsage,
+  normalizeWord,
+  STOP_WORDS,
+  OBLIGATORY_DF_THRESHOLD,
+  DIFFERENTIATOR_MAX_COUNT,
+};
