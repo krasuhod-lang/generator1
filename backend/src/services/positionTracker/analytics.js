@@ -406,6 +406,97 @@ async function getKeywordsTable(projectId, { engine, period = 'week' } = {}) {
   }));
 }
 
+/**
+ * Чистый агрегатор «сколько ключей в каждом топ-ведре» (top-3 / top-5 / …).
+ * Используется и БД-функцией getTopsDistribution, и тестами.
+ *
+ * @param {Array<{position:(number|null)}>} positions — выборки последних
+ *   позиций по каждому ключу (одна запись на ключ).
+ * @param {number[]} [buckets] — границы топов; по умолчанию [3,5,10,20,50,100].
+ * @returns {Array<{bucket:number, label:string, count:number}>}
+ *   плюс отдельный bucket=null/label='not_top' для NULL и >maxBucket.
+ */
+function computeTopsDistribution(positions, buckets = [3, 5, 10, 20, 50, 100]) {
+  const sorted = [...new Set(buckets)].map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+  sorted.sort((a, b) => a - b);
+  const out = sorted.map((n) => ({ bucket: n, label: `top_${n}`, count: 0 }));
+  let notTop = 0;
+  for (const row of positions || []) {
+    const p = row && row.position != null ? Number(row.position) : null;
+    if (p == null || !Number.isFinite(p) || p <= 0) { notTop += 1; continue; }
+    let placed = false;
+    for (const b of out) {
+      if (p <= b.bucket) { b.count += 1; placed = true; break; }
+    }
+    if (!placed) notTop += 1;
+  }
+  out.push({ bucket: null, label: 'not_top', count: notTop });
+  return out;
+}
+
+/**
+ * Сводка «сколько ключей в каждом топе» по последней снимке за период
+ * (current) и по предыдущему равному периоду (previous), плюс дельты —
+ * для stacked-area-графика «График по топам» внутри проекта.
+ *
+ * @returns {{
+ *   buckets: number[],
+ *   current:  Array<{bucket:number|null, label:string, count:number}>,
+ *   previous: Array<{bucket:number|null, label:string, count:number}>,
+ *   deltas:   Array<{label:string, delta:number}>,
+ *   total_keywords: number,
+ *   period_days: number,
+ * }}
+ */
+async function getTopsDistribution(projectId, {
+  period = 'week',
+  engine,
+  buckets = [3, 5, 10, 20, 50, 100],
+} = {}) {
+  const days = _periodDays(VALID_PERIOD.has(period) ? period : 'week');
+  const params = [projectId];
+  let engineFilter = '';
+  if (engine) { params.push(engine); engineFilter = ` AND engine = $${params.length}`; }
+  const sql = `
+    WITH curr AS (
+      SELECT DISTINCT ON (keyword_id) keyword_id, position
+        FROM position_results
+       WHERE project_id = $1${engineFilter}
+         AND checked_at >= NOW() - ($${params.length + 1}::int || ' days')::interval
+       ORDER BY keyword_id, checked_at DESC
+    ),
+    prev AS (
+      SELECT DISTINCT ON (keyword_id) keyword_id, position
+        FROM position_results
+       WHERE project_id = $1${engineFilter}
+         AND checked_at <  NOW() - ($${params.length + 1}::int || ' days')::interval
+         AND checked_at >= NOW() - (($${params.length + 1}::int * 2) || ' days')::interval
+       ORDER BY keyword_id, checked_at DESC
+    ),
+    kws AS (
+      SELECT id FROM position_keywords WHERE project_id = $1 AND is_active = TRUE
+    )
+    SELECT k.id AS keyword_id, c.position AS curr_pos, p.position AS prev_pos
+      FROM kws k
+      LEFT JOIN curr c ON c.keyword_id = k.id
+      LEFT JOIN prev p ON p.keyword_id = k.id`;
+  params.push(days);
+  const { rows } = await db.query(sql, params);
+  const currPositions = rows.map((r) => ({ position: r.curr_pos == null ? null : Number(r.curr_pos) }));
+  const prevPositions = rows.map((r) => ({ position: r.prev_pos == null ? null : Number(r.prev_pos) }));
+  const current = computeTopsDistribution(currPositions, buckets);
+  const previous = computeTopsDistribution(prevPositions, buckets);
+  const deltas = current.map((b, i) => ({ label: b.label, delta: b.count - (previous[i]?.count || 0) }));
+  return {
+    buckets: [...new Set(buckets)].map(Number).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b),
+    current,
+    previous,
+    deltas,
+    total_keywords: rows.length,
+    period_days: days,
+  };
+}
+
 module.exports = {
   // pure helpers (testable)
   effectivePosition,
@@ -414,10 +505,12 @@ module.exports = {
   groupSeries,
   summarizeRows,
   pickMovers,
+  computeTopsDistribution,
   // db-backed
   getKeywordSeries,
   getProjectSeries,
   getProjectSummary,
   getMovers,
   getKeywordsTable,
+  getTopsDistribution,
 };

@@ -681,6 +681,22 @@ const PROJECTS_CONFIG = deepFreeze({
       gapDays: 2,
     },
   },
+
+  // Блок «Съём позиций внутри проекта» (см. positionBridge / positions-секция
+  // в ProjectDetailPage). Раздаётся вместе с GET /projects/:id для UI.
+  //   topsBuckets — границы топов для агрегата tops-distribution и
+  //   stacked-area-графика «График по топам».
+  //   defaultEngine/defaultDevice — дефолты для связанного position_projects.
+  //   sharedKeywordsLimit — сколько строк таблицы запросов отдаём в
+  //   публичную (шаринг) секцию (полные тысячи строк туда не отдаём, чтобы
+  //   не перегружать клиентский режим и не плодить PII в публичной ссылке).
+  positions: {
+    topsBuckets: [3, 5, 10, 20, 50, 100],
+    defaultEngine: 'both',
+    defaultDevice: 'desktop',
+    sharedKeywordsLimit: 50,
+    seriesGranularity: 'day',
+  },
 });
 
 function getProjectsConfig() {
