@@ -40,6 +40,7 @@ const serpB2bRoutes       = require('./src/routes/serpB2b.routes');
 const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
+const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -128,6 +129,7 @@ app.use('/api/serp-b2b',       serpB2bRoutes);
 app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
+app.use('/api/site-crawler',     siteCrawlerRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
@@ -2701,6 +2703,53 @@ async function ensureSchema() {
         ON aegis_internal_observations (scope, contribute) WHERE outcome IS NOT NULL`);
     } catch (e) {
       console.warn('[ensureSchema] aegis_internal_observations (mig 093) skipped:', e.message);
+    }
+
+    // Site Crawler (миграция 094) — собственный модуль парсинга сайта
+    // (задача 3): URL/H1/Title/Description, дерево, экспорт CSV/XLSX.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS site_crawl_tasks (
+          id          BIGSERIAL PRIMARY KEY,
+          user_id     INTEGER  NOT NULL,
+          project_id  INTEGER  NULL,
+          start_url   TEXT     NOT NULL,
+          options     JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          status      TEXT     NOT NULL DEFAULT 'queued',
+          stats       JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          error       TEXT     NULL,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          started_at  TIMESTAMPTZ NULL,
+          finished_at TIMESTAMPTZ NULL
+        )`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_site_crawl_tasks_user_created
+        ON site_crawl_tasks(user_id, created_at DESC)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_site_crawl_tasks_project
+        ON site_crawl_tasks(project_id) WHERE project_id IS NOT NULL`);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS site_crawl_pages (
+          id            BIGSERIAL PRIMARY KEY,
+          task_id       BIGINT  NOT NULL REFERENCES site_crawl_tasks(id) ON DELETE CASCADE,
+          url           TEXT    NOT NULL,
+          depth         INTEGER NOT NULL DEFAULT 0,
+          parent_url    TEXT    NULL,
+          http_status   INTEGER NULL,
+          content_type  TEXT    NULL,
+          title         TEXT    NULL,
+          h1            TEXT    NULL,
+          description   TEXT    NULL,
+          canonical     TEXT    NULL,
+          robots        TEXT    NULL,
+          fetched_at    TIMESTAMPTZ NULL,
+          duration_ms   INTEGER NULL,
+          error         TEXT    NULL
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_site_crawl_pages_task_url
+        ON site_crawl_pages(task_id, url)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_site_crawl_pages_task_depth
+        ON site_crawl_pages(task_id, depth)`);
+    } catch (e) {
+      console.warn('[ensureSchema] site_crawl_* (mig 094) skipped:', e.message);
     }
 
     console.log('[Schema] ensureSchema OK');
