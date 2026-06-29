@@ -49,6 +49,7 @@ const { ensureLinkedPositionProject, syncLinkedPositionProject } = require('../s
 const { buildSharedPositionsSection } = require('../services/projects/sharedPositionsBuilder');
 const freshnessService = require('../services/projects/freshnessService');
 const worksService = require('../services/projects/worksService');
+const projectGrants = require('../services/projects/projectGrants');
 
 const CFG = getProjectsConfig();
 
@@ -142,11 +143,10 @@ function _frontendBase() {
 // ── CRUD ────────────────────────────────────────────────────────────
 async function listProjects(req, res, next) {
   try {
-    const { rows } = await db.query(
-      `SELECT ${PUBLIC_COLUMNS} FROM projects
-        WHERE user_id = $1 ORDER BY created_at DESC`,
-      [req.user.id],
-    );
+    // Включаем как собственные, так и расшаренные через project_grants
+    // проекты (задача 1). Для каждого ряда добавляются поля access_role
+    // и access_scopes; фронт показывает их во вкладке «Доступные мне».
+    const rows = await projectGrants.listAccessibleProjects(req.user.id, PUBLIC_COLUMNS, db);
     return res.json({ projects: rows });
   } catch (err) { return next(err); }
 }
@@ -183,13 +183,25 @@ async function _loadOwned(id, userId) {
 
 async function getProject(req, res, next) {
   try {
+    // Доступ: владелец ИЛИ активный грант (project_grants).
+    const accessible = await projectGrants.loadAccessibleProject(req.params.id, req.user.id, db);
+    if (!accessible) return res.status(404).json({ error: 'Проект не найден' });
+    const { access } = accessible;
+    // Чтение проектной карточки требует scope 'project'.
+    if (!projectGrants.canAct(access, 'read', 'project')) {
+      return res.status(403).json({ error: 'Нет доступа к карточке проекта' });
+    }
     const { rows } = await db.query(
-      `SELECT ${PUBLIC_COLUMNS} FROM projects WHERE id = $1 AND user_id = $2`,
-      [req.params.id, req.user.id],
+      `SELECT ${PUBLIC_COLUMNS} FROM projects WHERE id = $1`,
+      [req.params.id],
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Проект не найден' });
-    const mode = resolveViewMode(req);
+    // viewer всегда видит client-вид (sanitizeProject срезает токены),
+    // analyst/manager/owner — режим по заголовку X-Client-Mode.
+    const mode = resolveViewMode(req, { grantRole: access.isOwner ? null : access.role });
     const project = sanitizeProject(rows[0], mode);
+    project.access_role = access.role;
+    project.access_scopes = access.scopes;
     const { rows: analyses } = await db.query(
       `SELECT id, status, range_key, period_from, period_to, created_at, completed_at,
               error_message
@@ -598,13 +610,16 @@ async function startAnalysis(req, res, next) {
 
 async function listAnalyses(req, res, next) {
   try {
-    const project = await _loadOwned(req.params.id, req.user.id);
-    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const accessible = await projectGrants.loadAccessibleProject(req.params.id, req.user.id, db);
+    if (!accessible) return res.status(404).json({ error: 'Проект не найден' });
+    if (!projectGrants.canAct(accessible.access, 'read', 'analyses')) {
+      return res.status(403).json({ error: 'Нет доступа к анализам проекта' });
+    }
     const { rows } = await db.query(
       `SELECT id, status, range_key, period_from, period_to, created_at, completed_at,
               error_message, cost_usd, snapshot_id
          FROM project_analyses WHERE project_id=$1 ORDER BY created_at DESC LIMIT 50`,
-      [project.id],
+      [accessible.project.id],
     );
     return res.json({ analyses: rows });
   } catch (err) { return next(err); }
@@ -612,18 +627,22 @@ async function listAnalyses(req, res, next) {
 
 async function getAnalysis(req, res, next) {
   try {
+    const accessible = await projectGrants.loadAccessibleProject(req.params.id, req.user.id, db);
+    if (!accessible) return res.status(404).json({ error: 'Проект не найден' });
+    if (!projectGrants.canAct(accessible.access, 'read', 'analyses')) {
+      return res.status(403).json({ error: 'Нет доступа к анализам проекта' });
+    }
     const { rows } = await db.query(
       `SELECT a.id, a.status, a.range_key, a.period_from, a.period_to,
               a.report_markdown, a.gsc_snapshot, a.llm_model, a.cost_usd,
               a.ydx_snapshot, a.ydx_report_markdown, a.synthesis_markdown, a.ranking_factors,
               a.error_message, a.created_at, a.completed_at, a.snapshot_id
          FROM project_analyses a
-         JOIN projects p ON p.id = a.project_id
-        WHERE a.id = $1 AND a.project_id = $2 AND p.user_id = $3`,
-      [req.params.aid, req.params.id, req.user.id],
+        WHERE a.id = $1 AND a.project_id = $2`,
+      [req.params.aid, req.params.id],
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Анализ не найден' });
-    const mode = resolveViewMode(req);
+    const mode = resolveViewMode(req, { grantRole: accessible.access.isOwner ? null : accessible.access.role });
     return res.json({ analysis: sanitizeAnalysis(rows[0], mode), view_mode: mode });
   } catch (err) { return next(err); }
 }

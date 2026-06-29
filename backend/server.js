@@ -2606,6 +2606,63 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_report_backlinks_project ON report_backlinks (project_id, added_at DESC)`);
 
+    // ── Migration 092: project_grants + project_grant_events + projects.contribute_to_brain ──
+    // Раздача доступов к проектам через панель администратора (задача 1).
+    // Опт-аут от обучения мозга Эгиды (задача 2) живёт в той же миграции.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS project_grants (
+          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          user_id     UUID NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+          role        TEXT NOT NULL,
+          scopes      JSONB NOT NULL DEFAULT '["project","analyses","reports"]'::jsonb,
+          granted_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+          granted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          expires_at  TIMESTAMPTZ,
+          revoked_at  TIMESTAMPTZ,
+          revoked_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+          note        TEXT
+        )
+      `);
+      await db.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'project_grants_role_chk') THEN
+            ALTER TABLE project_grants
+              ADD CONSTRAINT project_grants_role_chk
+              CHECK (role IN ('viewer','analyst','manager'));
+          END IF;
+        END $$;
+      `);
+      await db.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_project_grants_active
+          ON project_grants (project_id, user_id)
+          WHERE revoked_at IS NULL
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_project_grants_user
+        ON project_grants (user_id) WHERE revoked_at IS NULL`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_project_grants_project
+        ON project_grants (project_id, granted_at DESC)`);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS project_grant_events (
+          id         BIGSERIAL PRIMARY KEY,
+          grant_id   UUID,
+          project_id UUID NOT NULL,
+          user_id    UUID NOT NULL,
+          actor_id   UUID,
+          action     TEXT NOT NULL,
+          payload    JSONB,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_project_grant_events_project
+        ON project_grant_events (project_id, created_at DESC)`);
+      await db.query(`ALTER TABLE projects
+        ADD COLUMN IF NOT EXISTS contribute_to_brain BOOLEAN NOT NULL DEFAULT TRUE`);
+    } catch (e) {
+      console.warn('[ensureSchema] project_grants (mig 092) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

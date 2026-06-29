@@ -3,6 +3,7 @@
 const bcrypt = require('bcryptjs');
 const jwt    = require('jsonwebtoken');
 const db     = require('../config/db');
+const projectGrants = require('../services/projects/projectGrants');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -1044,6 +1045,164 @@ async function getAegisCostBreakdown(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Project grants — раздача доступов к проектам через панель администратора
+// (миграция 092, задача 1). Все эндпоинты под /api/admin/projects/.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/projects
+ * Список всех проектов с владельцем и количеством активных грантов.
+ * Параметры: page, limit, search (по имени/email владельца).
+ */
+async function listAdminProjects(req, res, next) {
+  try {
+    const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+    const search = (req.query.search || '').trim();
+    const params = [];
+    let where = '';
+    if (search) {
+      params.push(`%${search}%`);
+      where = `WHERE p.name ILIKE $${params.length} OR u.email ILIKE $${params.length}`;
+    }
+    const totalRes = await db.query(
+      `SELECT COUNT(*)::int AS n FROM projects p JOIN users u ON u.id = p.user_id ${where}`,
+      params,
+    );
+    params.push(limit, offset);
+    const { rows } = await db.query(
+      `SELECT p.id, p.name, p.url, p.created_at, p.contribute_to_brain,
+              u.id AS owner_id, u.email AS owner_email, u.name AS owner_name,
+              (SELECT COUNT(*)::int FROM project_grants g
+                 WHERE g.project_id = p.id AND g.revoked_at IS NULL
+                   AND (g.expires_at IS NULL OR g.expires_at > NOW())) AS active_grants
+         FROM projects p
+         JOIN users u ON u.id = p.user_id
+         ${where}
+         ORDER BY p.created_at DESC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    return res.json({
+      projects: rows,
+      pagination: { page, limit, total: totalRes.rows[0].n },
+    });
+  } catch (err) { return next(err); }
+}
+
+/** GET /api/admin/projects/:id/grants — все гранты проекта (вкл. revoked). */
+async function listAdminProjectGrants(req, res, next) {
+  try {
+    const projectId = req.params.id;
+    const { rows: projRows } = await db.query(
+      `SELECT p.id, p.name, u.id AS owner_id, u.email AS owner_email, u.name AS owner_name
+         FROM projects p JOIN users u ON u.id = p.user_id WHERE p.id = $1`,
+      [projectId],
+    );
+    if (!projRows.length) return res.status(404).json({ error: 'Проект не найден' });
+    const grants = await projectGrants.listGrants(projectId, { includeRevoked: true }, db);
+    return res.json({ project: projRows[0], grants });
+  } catch (err) { return next(err); }
+}
+
+/** POST /api/admin/projects/:id/grants */
+async function createAdminProjectGrant(req, res, next) {
+  try {
+    const projectId = req.params.id;
+    const body = req.body || {};
+    const userId  = body.user_id;
+    const role    = body.role;
+    const scopes  = body.scopes;
+    const expires = body.expires_at || null;
+    const note    = body.note || null;
+    if (!userId)                              return res.status(400).json({ error: 'user_id обязателен' });
+    if (!projectGrants.normalizeRole(role))   return res.status(400).json({ error: 'Неверная роль (viewer|analyst|manager)' });
+    if (!projectGrants.normalizeScopes(scopes)) return res.status(400).json({ error: 'Нужен хотя бы один валидный scope (project|analyses|reports)' });
+    try {
+      const { grant, action } = await projectGrants.upsertGrant({
+        projectId, userId, role, scopes,
+        grantedBy: req.user && req.user.id, expiresAt: expires, note,
+      }, db);
+      return res.status(action === 'created' ? 201 : 200).json({ grant, action });
+    } catch (e) {
+      if (/owner/.test(e.message)) return res.status(400).json({ error: 'Нельзя выдать доступ владельцу проекта' });
+      if (/project not found/.test(e.message)) return res.status(404).json({ error: 'Проект не найден' });
+      throw e;
+    }
+  } catch (err) { return next(err); }
+}
+
+/** PATCH /api/admin/projects/:id/grants/:grantId */
+async function updateAdminProjectGrant(req, res, next) {
+  try {
+    const { id: projectId, grantId } = req.params;
+    const { rows: gRows } = await db.query(
+      `SELECT user_id FROM project_grants WHERE id = $1 AND project_id = $2`,
+      [grantId, projectId],
+    );
+    if (!gRows.length) return res.status(404).json({ error: 'Грант не найден' });
+    const body = req.body || {};
+    const role    = body.role;
+    const scopes  = body.scopes;
+    const expires = ('expires_at' in body) ? (body.expires_at || null) : null;
+    const note    = ('note' in body) ? body.note : null;
+    if (!projectGrants.normalizeRole(role))   return res.status(400).json({ error: 'Неверная роль (viewer|analyst|manager)' });
+    if (!projectGrants.normalizeScopes(scopes)) return res.status(400).json({ error: 'Нужен хотя бы один валидный scope' });
+    const { grant, action } = await projectGrants.upsertGrant({
+      projectId, userId: gRows[0].user_id, role, scopes,
+      grantedBy: req.user && req.user.id, expiresAt: expires, note,
+    }, db);
+    return res.json({ grant, action });
+  } catch (err) { return next(err); }
+}
+
+/** DELETE /api/admin/projects/:id/grants/:grantId — soft-revoke. */
+async function revokeAdminProjectGrant(req, res, next) {
+  try {
+    const { id: projectId, grantId } = req.params;
+    const { rows: gRows } = await db.query(
+      `SELECT id FROM project_grants WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL`,
+      [grantId, projectId],
+    );
+    if (!gRows.length) return res.status(404).json({ error: 'Активный грант не найден' });
+    const g = await projectGrants.revokeGrant(grantId, req.user && req.user.id, db);
+    return res.json({ grant: g, action: 'revoked' });
+  } catch (err) { return next(err); }
+}
+
+/**
+ * GET /api/admin/projects/:id/grantable-users?search=
+ * Список кандидатов для выдачи доступа: все non-admin пользователи, кроме
+ * владельца. Используется автокомплитом модалки выдачи доступа.
+ */
+async function listAdminGrantableUsers(req, res, next) {
+  try {
+    const projectId = req.params.id;
+    const search = (req.query.search || '').trim();
+    const { rows: pRows } = await db.query(
+      `SELECT user_id FROM projects WHERE id = $1`, [projectId],
+    );
+    if (!pRows.length) return res.status(404).json({ error: 'Проект не найден' });
+    const ownerId = pRows[0].user_id;
+    const params = [ownerId];
+    let where = `WHERE u.id <> $1`;
+    if (search) {
+      params.push(`%${search}%`);
+      where += ` AND (u.email ILIKE $${params.length} OR u.name ILIKE $${params.length})`;
+    }
+    const { rows } = await db.query(
+      `SELECT u.id, u.email, u.name, u.role
+         FROM users u ${where}
+         ORDER BY u.email ASC
+         LIMIT 50`,
+      params,
+    );
+    return res.json({ users: rows });
+  } catch (err) { return next(err); }
+}
+
 module.exports = {
   adminLogin,
   listUsers,
@@ -1058,4 +1217,11 @@ module.exports = {
   getCrossTaskDetail,
   getFunnelBreakdown,
   getAegisCostBreakdown,
+  // Project grants (миграция 092, задача 1)
+  listAdminProjects,
+  listAdminProjectGrants,
+  createAdminProjectGrant,
+  updateAdminProjectGrant,
+  revokeAdminProjectGrant,
+  listAdminGrantableUsers,
 };

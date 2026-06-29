@@ -53,6 +53,7 @@ const routes = [
   { path: '/admin',           component: () => import('../views/admin/AdminDashboardPage.vue'),  meta: { admin: true } },
   { path: '/admin/users/:id', component: () => import('../views/admin/AdminUserDetailPage.vue'), meta: { admin: true } },
   { path: '/admin/tasks/:id', component: () => import('../views/admin/AdminTaskDetailPage.vue'), meta: { admin: true } },
+  { path: '/admin/projects',  component: () => import('../views/admin/AdminProjectsPage.vue'),   meta: { admin: true } },
 
   { path: '/:pathMatch(.*)*',   redirect: '/dashboard' },
 ];
