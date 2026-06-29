@@ -9,8 +9,8 @@
 
 CREATE TABLE IF NOT EXISTS site_crawl_tasks (
   id          BIGSERIAL PRIMARY KEY,
-  user_id     INTEGER  NOT NULL,
-  project_id  INTEGER  NULL,
+  user_id     UUID     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id  UUID     NULL     REFERENCES projects(id) ON DELETE SET NULL,
   start_url   TEXT     NOT NULL,
   options     JSONB    NOT NULL DEFAULT '{}'::jsonb,
   status      TEXT     NOT NULL DEFAULT 'queued',

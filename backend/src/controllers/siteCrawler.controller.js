@@ -46,74 +46,89 @@ async function _loadTask(taskId, userId, opts = {}) {
 }
 
 async function createTask(req, res) {
-  const userId    = req.user && req.user.id;
-  if (!userId) return res.status(401).json({ error: 'unauthorized' });
-  const startRaw  = req.body && req.body.start_url;
-  const projectId = (req.body && req.body.project_id) || null;
-  const options   = (req.body && req.body.options) || {};
+  try {
+    const userId    = req.user && req.user.id;
+    if (!userId) return res.status(401).json({ error: 'unauthorized' });
+    const startRaw  = req.body && req.body.start_url;
+    const projectId = (req.body && req.body.project_id) || null;
+    const options   = (req.body && req.body.options) || {};
 
-  const start = urlN.normalize(startRaw);
-  if (!start) return res.status(400).json({ error: 'invalid_start_url' });
+    const start = urlN.normalize(startRaw);
+    if (!start) return res.status(400).json({ error: 'invalid_start_url' });
 
-  if (projectId) {
-    try {
-      const access = await loadAccessibleProject(projectId, userId);
-      if (!access) return res.status(403).json({ error: 'project_forbidden' });
-      if (!canAct(access, 'read', 'analyses') && !access.isOwner) {
-        return res.status(403).json({ error: 'project_forbidden' });
-      }
-    } catch (_) { return res.status(403).json({ error: 'project_forbidden' }); }
+    if (projectId) {
+      try {
+        const accessRow = await loadAccessibleProject(projectId, userId);
+        if (!accessRow) return res.status(403).json({ error: 'project_forbidden' });
+        // loadAccessibleProject возвращает { project, access }, а canAct
+        // ждёт сам access; распаковываем перед проверкой.
+        const acc = accessRow.access || accessRow;
+        if (!acc.isOwner && !canAct(acc, 'read', 'analyses')) {
+          return res.status(403).json({ error: 'project_forbidden' });
+        }
+      } catch (_) { return res.status(403).json({ error: 'project_forbidden' }); }
+    }
+
+    // per-user limit на одновременные задачи
+    const { rows: running } = await db.query(
+      `SELECT COUNT(*)::int AS n FROM site_crawl_tasks
+         WHERE user_id=$1 AND status IN ('queued','running')`, [userId],
+    );
+    if ((running[0] && running[0].n) >= MAX_CONCURRENT_TASKS) {
+      return res.status(429).json({ error: 'too_many_running_tasks',
+        limit: MAX_CONCURRENT_TASKS });
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO site_crawl_tasks (user_id, project_id, start_url, options, status)
+       VALUES ($1, $2, $3, $4::jsonb, 'queued')
+       RETURNING id, status, created_at`,
+      [userId, projectId, start, JSON.stringify(options || {})],
+    );
+    const taskId = rows[0].id;
+
+    // Запуск в фоне — паттерн репозитория (см. setImmediate в analysisRunner).
+    setImmediate(() => {
+      crawler.runCrawl({ taskId, startUrl: start, options })
+        .catch(async (e) => {
+          try {
+            await db.query(
+              `UPDATE site_crawl_tasks
+                  SET status='error', error=$2, finished_at=NOW()
+                WHERE id=$1 AND status NOT IN ('done','cancelled')`,
+              [taskId, e.message.slice(0, 500)],
+            );
+          } catch (_) {}
+          // eslint-disable-next-line no-console
+          console.warn('[siteCrawler] runCrawl failed:', e.message);
+        });
+    });
+
+    res.status(201).json({ id: taskId, status: 'queued', start_url: start });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[siteCrawler.createTask]', e.stack || e.message);
+    res.status(e.status || 500).json({ error: e.message || 'internal_error' });
   }
-
-  // per-user limit на одновременные задачи
-  const { rows: running } = await db.query(
-    `SELECT COUNT(*)::int AS n FROM site_crawl_tasks
-       WHERE user_id=$1 AND status IN ('queued','running')`, [userId],
-  );
-  if ((running[0] && running[0].n) >= MAX_CONCURRENT_TASKS) {
-    return res.status(429).json({ error: 'too_many_running_tasks',
-      limit: MAX_CONCURRENT_TASKS });
-  }
-
-  const { rows } = await db.query(
-    `INSERT INTO site_crawl_tasks (user_id, project_id, start_url, options, status)
-     VALUES ($1, $2, $3, $4::jsonb, 'queued')
-     RETURNING id, status, created_at`,
-    [userId, projectId, start, JSON.stringify(options || {})],
-  );
-  const taskId = rows[0].id;
-
-  // Запуск в фоне — паттерн репозитория (см. setImmediate в analysisRunner).
-  setImmediate(() => {
-    crawler.runCrawl({ taskId, startUrl: start, options })
-      .catch(async (e) => {
-        try {
-          await db.query(
-            `UPDATE site_crawl_tasks
-                SET status='error', error=$2, finished_at=NOW()
-              WHERE id=$1 AND status NOT IN ('done','cancelled')`,
-            [taskId, e.message.slice(0, 500)],
-          );
-        } catch (_) {}
-        // eslint-disable-next-line no-console
-        console.warn('[siteCrawler] runCrawl failed:', e.message);
-      });
-  });
-
-  res.status(201).json({ id: taskId, status: 'queued', start_url: start });
 }
 
 async function listTasks(req, res) {
-  const userId = req.user.id;
-  const { rows } = await db.query(
-    `SELECT id, project_id, start_url, status, stats,
-            created_at, started_at, finished_at, error
-       FROM site_crawl_tasks
-      WHERE user_id = $1
-      ORDER BY created_at DESC
-      LIMIT 200`, [userId],
-  );
-  res.json({ items: rows });
+  try {
+    const userId = req.user.id;
+    const { rows } = await db.query(
+      `SELECT id, project_id, start_url, status, stats,
+              created_at, started_at, finished_at, error
+         FROM site_crawl_tasks
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 200`, [userId],
+    );
+    res.json({ items: rows });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[siteCrawler.listTasks]', e.stack || e.message);
+    res.status(e.status || 500).json({ error: e.message || 'internal_error' });
+  }
 }
 
 async function getTask(req, res) {

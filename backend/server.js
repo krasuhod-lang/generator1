@@ -2705,14 +2705,28 @@ async function ensureSchema() {
       console.warn('[ensureSchema] aegis_internal_observations (mig 093) skipped:', e.message);
     }
 
-    // Site Crawler (миграция 094) — собственный модуль парсинга сайта
-    // (задача 3): URL/H1/Title/Description, дерево, экспорт CSV/XLSX.
+    // Site Crawler (миграция 094 + фикс 095) — собственный модуль парсинга
+    // сайта (задача 3): URL/H1/Title/Description, дерево, экспорт CSV/XLSX.
+    // 095: типы user_id/project_id были INTEGER (а users.id/projects.id — UUID),
+    // из-за чего любой запрос к /api/site-crawler/tasks падал с
+    // invalid input syntax for type integer → nginx 502. Если таблица
+    // существует с битым типом — пересоздаём (полезных данных там быть
+    // не может: INSERT никогда не отрабатывал).
     try {
+      const { rows: colCheck } = await db.query(`
+        SELECT data_type
+          FROM information_schema.columns
+         WHERE table_name = 'site_crawl_tasks' AND column_name = 'user_id'`);
+      if (colCheck.length && colCheck[0].data_type !== 'uuid') {
+        await db.query(`DROP TABLE IF EXISTS site_crawl_pages CASCADE`);
+        await db.query(`DROP TABLE IF EXISTS site_crawl_tasks CASCADE`);
+        console.log('[ensureSchema] site_crawl_* recreated (mig 095 uuid fix)');
+      }
       await db.query(`
         CREATE TABLE IF NOT EXISTS site_crawl_tasks (
           id          BIGSERIAL PRIMARY KEY,
-          user_id     INTEGER  NOT NULL,
-          project_id  INTEGER  NULL,
+          user_id     UUID     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          project_id  UUID     NULL     REFERENCES projects(id) ON DELETE SET NULL,
           start_url   TEXT     NOT NULL,
           options     JSONB    NOT NULL DEFAULT '{}'::jsonb,
           status      TEXT     NOT NULL DEFAULT 'queued',
