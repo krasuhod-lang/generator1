@@ -195,15 +195,18 @@ async function listAccessibleProjects(userId, columnsSql, dbInstance = db) {
      WHERE user_id = $1`;
   const grantedSql = `
     SELECT ${columnsSql},
-           g.role  AS access_role,
-           g.scopes AS access_scopes,
+           gr.role  AS access_role,
+           gr.scopes AS access_scopes,
            false   AS access_is_owner
       FROM projects
-      JOIN project_grants g ON g.project_id = projects.id
-     WHERE g.user_id = $1
-       AND g.revoked_at IS NULL
-       AND (g.expires_at IS NULL OR g.expires_at > NOW())
-       AND projects.user_id <> $1`;
+      JOIN (
+        SELECT project_id, role, scopes
+          FROM project_grants
+         WHERE user_id = $1
+           AND revoked_at IS NULL
+           AND (expires_at IS NULL OR expires_at > NOW())
+      ) gr ON gr.project_id = projects.id
+     WHERE projects.user_id <> $1`;
   const { rows } = await dbInstance.query(
     `${ownSql} UNION ALL ${grantedSql} ORDER BY created_at DESC`,
     [userId],

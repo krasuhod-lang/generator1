@@ -104,7 +104,7 @@ const summary = computed(() => {
 // ── helpers ──────────────────────────────────────────────────────────
 async function fetchTasks() {
   try {
-    const { data } = await api.get('/api/site-crawler/tasks');
+    const { data } = await api.get('/site-crawler/tasks');
     tasks.value = data.items || [];
   } catch (e) { error.value = _msg(e); }
 }
@@ -124,7 +124,7 @@ async function startCrawl() {
         concurrency:       Number(form.value.concurrency) || 4,
       },
     };
-    const { data } = await api.post('/api/site-crawler/tasks', payload);
+    const { data } = await api.post('/site-crawler/tasks', payload);
     await fetchTasks();
     selectTask(data.id);
   } catch (e) { error.value = _msg(e); }
@@ -139,7 +139,7 @@ async function selectTask(id) {
 async function loadTask() {
   if (!selectedId.value) return;
   try {
-    const { data } = await api.get(`/api/site-crawler/tasks/${selectedId.value}`);
+    const { data } = await api.get(`/site-crawler/tasks/${selectedId.value}`);
     selected.value = data;
   } catch (e) { selected.value = null; }
 }
@@ -147,7 +147,7 @@ async function loadTask() {
 async function loadPages() {
   if (!selectedId.value) return;
   try {
-    const { data } = await api.get(`/api/site-crawler/tasks/${selectedId.value}/pages`, {
+    const { data } = await api.get(`/site-crawler/tasks/${selectedId.value}/pages`, {
       params: { limit: 500 },
     });
     pages.value = data.items || [];
@@ -157,7 +157,7 @@ async function loadPages() {
 async function loadTree() {
   if (!selectedId.value) return;
   try {
-    const { data } = await api.get(`/api/site-crawler/tasks/${selectedId.value}/tree`);
+    const { data } = await api.get(`/site-crawler/tasks/${selectedId.value}/tree`);
     tree.value = data.tree;
   } catch (_) { tree.value = null; }
 }
@@ -165,7 +165,7 @@ async function loadTree() {
 async function cancelTask() {
   if (!selectedId.value) return;
   try {
-    await api.post(`/api/site-crawler/tasks/${selectedId.value}/cancel`);
+    await api.post(`/site-crawler/tasks/${selectedId.value}/cancel`);
     await loadTask();
   } catch (e) { error.value = _msg(e); }
 }
@@ -173,7 +173,7 @@ async function cancelTask() {
 async function deleteTask(id) {
   if (!confirm('Удалить задачу?')) return;
   try {
-    await api.delete(`/api/site-crawler/tasks/${id}`);
+    await api.delete(`/site-crawler/tasks/${id}`);
     if (selectedId.value === id) { selectedId.value = null; selected.value = null; pages.value = []; tree.value = null; }
     await fetchTasks();
   } catch (e) { error.value = _msg(e); }
