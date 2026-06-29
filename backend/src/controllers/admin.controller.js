@@ -239,7 +239,8 @@ async function getStats(req, res, next) {
   try {
     const srcEntries = await _existingTaskSourceEntries();
     const { rows } = await db.query(`
-      WITH ut AS ( ${_statusUnionSql(srcEntries)} )
+      WITH ut AS ( ${_statusUnionSql(srcEntries)} ),
+           uc AS ( ${_userTaskUnionSql({ entries: srcEntries })} )
       SELECT
         (SELECT COUNT(*)::int FROM users) AS total_users,
         (SELECT COUNT(*)::int FROM users WHERE created_at >= NOW() - INTERVAL '1 day') AS users_today,
@@ -249,7 +250,7 @@ async function getStats(req, res, next) {
         (SELECT COUNT(*)::int FROM ut WHERE norm_status = 'completed') AS tasks_completed,
         (SELECT COUNT(*)::int FROM ut WHERE norm_status = 'failed') AS tasks_failed,
         (SELECT COUNT(*)::int FROM ut WHERE norm_status = 'processing') AS tasks_processing,
-        (SELECT COALESCE(SUM(total_cost_usd), 0)::numeric(10,4) FROM task_metrics) AS total_cost_usd,
+        (SELECT COALESCE(SUM(cost_usd), 0)::numeric(14,4) FROM uc) AS total_cost_usd,
         (SELECT COALESCE(AVG(lsi_coverage), 0)::numeric(5,1) FROM task_metrics WHERE lsi_coverage > 0) AS avg_lsi_coverage,
         (SELECT COALESCE(AVG(eeat_score), 0)::numeric(4,1) FROM task_metrics WHERE eeat_score > 0) AS avg_eeat_score
     `);
