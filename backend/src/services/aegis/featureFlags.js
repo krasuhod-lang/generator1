@@ -613,6 +613,36 @@ const AEGIS_FLAGS = deepFreeze({
     qualityGate: false,
     verbose:     false,
   },
+
+  // ── Внутренний мозг Эгиды на данных наших продуктов (задача 2) ────
+  // Sensor layer + reward calc + DSPy цикл, замкнутый только на
+  // observations из internal_product scope. По умолчанию ВЫКЛЮЧЕНО:
+  // включаем фича-флагом после прогона на staging. Если выключено —
+  // internalSensors.recordAnalysisObservation возвращает {skipped:true}
+  // и БД не трогается.
+  brain: {
+    internalLearning: _envBool('AEGIS_BRAIN_INTERNAL_LEARNING', false),
+    // Минимальный возраст observation (в днях), после которого мы
+    // считаем, что есть смысл подтягивать outcome из свежего snapshot.
+    outcomeAfterDays: _envInt('AEGIS_BRAIN_OUTCOME_AFTER_DAYS', 14),
+    // Веса reward (см. services/aegis/rewardCalculator.computeProjectReward).
+    rewards: {
+      // Проектные observation (изменение клик/позиций + качество рекомендации).
+      project: {
+        deltaClicks:   _envFloat('AEGIS_BRAIN_W_CLICKS',    1.0),
+        deltaPosition: _envFloat('AEGIS_BRAIN_W_POSITION',  1.0),
+        spq:           _envFloat('AEGIS_BRAIN_W_SPQ',       0.5),
+        ctrGapClosed:  _envFloat('AEGIS_BRAIN_W_CTR_GAP',   0.5),
+        budgetUsd:     _envFloat('AEGIS_BRAIN_W_BUDGET',    0.1),
+      },
+      // Reward для генераций (статьи/мета-теги).
+      generation: {
+        spq:           _envFloat('AEGIS_BRAIN_GEN_W_SPQ',         1.0),
+        factCheck:     _envFloat('AEGIS_BRAIN_GEN_W_FACTCHECK',   0.5),
+        plagiarism:    _envFloat('AEGIS_BRAIN_GEN_W_PLAGIARISM',  0.5),
+      },
+    },
+  },
 });
 
 // ── Валидация диапазонов (fail-fast при старте) ───────────────────

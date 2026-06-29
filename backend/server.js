@@ -2663,6 +2663,46 @@ async function ensureSchema() {
       console.warn('[ensureSchema] project_grants (mig 092) skipped:', e.message);
     }
 
+    // ── Migration 093: Aegis internal scope + observations (задача 2) ──
+    try {
+      await db.query(`
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'aegis_dspy_dataset') THEN
+            EXECUTE 'ALTER TABLE aegis_dspy_dataset
+                      ADD COLUMN IF NOT EXISTS aegis_source_scope TEXT NOT NULL DEFAULT ''internal_product''';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_aegis_dspy_dataset_scope
+                      ON aegis_dspy_dataset (aegis_source_scope)';
+          END IF;
+        END $$;
+      `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS aegis_internal_observations (
+          id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          analysis_id     UUID,
+          source          TEXT NOT NULL DEFAULT 'project_analysis',
+          taken_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          features        JSONB,
+          recommendation  JSONB,
+          predicted_kpi   JSONB,
+          outcome         JSONB,
+          reward          NUMERIC,
+          outcome_at      TIMESTAMPTZ,
+          scope           TEXT NOT NULL DEFAULT 'internal_product',
+          contribute      BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_internal_obs_project
+        ON aegis_internal_observations (project_id, taken_at DESC)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_internal_obs_outcome_pending
+        ON aegis_internal_observations (taken_at) WHERE outcome IS NULL`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_internal_obs_scope
+        ON aegis_internal_observations (scope, contribute) WHERE outcome IS NOT NULL`);
+    } catch (e) {
+      console.warn('[ensureSchema] aegis_internal_observations (mig 093) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);
