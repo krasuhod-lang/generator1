@@ -51,6 +51,7 @@ const tasks       = ref([]);
 const selectedId  = ref(null);
 const selected    = ref(null);
 const pages       = ref([]);
+const pagesTotal  = ref(0);                  // total из ответа /pages (могут быть лимиты)
 const tree        = ref(null);
 const tab         = ref('table');        // 'table' | 'tree' | 'summary'
 const loading     = ref(false);
@@ -61,8 +62,8 @@ const fieldsShow  = ref({ url: true, h1: true, title: true, description: true })
 
 const form = ref({
   start_url:         '',
-  maxPages:          500,
-  maxDepth:          5,
+  maxPages:          5000,
+  maxDepth:          10,
   includeSubdomains: false,
   respectRobots:     true,
   concurrency:       4,
@@ -151,7 +152,8 @@ async function loadPages() {
       params: { limit: 500 },
     });
     pages.value = data.items || [];
-  } catch (_) { pages.value = []; }
+    pagesTotal.value = Number(data.total) || pages.value.length;
+  } catch (_) { pages.value = []; pagesTotal.value = 0; }
 }
 
 async function loadTree() {
@@ -247,9 +249,12 @@ function startPolling() {
   pollHandle.value = setInterval(async () => {
     if (!selectedId.value) return;
     await loadTask();
+    await fetchTasks();                              // обновляем счётчик stats.pages в списке
     if (selected.value && (selected.value.status === 'running' || selected.value.status === 'queued')) {
       await loadPages();
-    } else if (selected.value && selected.value.status === 'done') {
+    } else if (selected.value && (selected.value.status === 'done'
+                               || selected.value.status === 'cancelled'
+                               || selected.value.status === 'error')) {
       await loadPages();
       await loadTree();
       stopPolling();
@@ -259,6 +264,24 @@ function startPolling() {
 function stopPolling() {
   if (pollHandle.value) { clearInterval(pollHandle.value); pollHandle.value = null; }
 }
+
+const statusLabel = (s) => ({
+  queued: 'в очереди', running: 'идёт обход', done: 'готово',
+  cancelled: 'отменено', error: 'ошибка', timeout: 'таймаут',
+}[s] || s || '—');
+
+// Сколько страниц уже найдено — приоритет: server stats → длина items.
+const foundCount = computed(() => {
+  const st = selected.value && selected.value.stats;
+  if (st && typeof st === 'object' && Number.isFinite(Number(st.pages))) {
+    return Number(st.pages);
+  }
+  return pagesTotal.value || pages.value.length;
+});
+const queuedCount = computed(() => {
+  const st = selected.value && selected.value.stats;
+  return (st && Number(st.queued)) || 0;
+});
 watch(selectedId, () => startPolling());
 
 onMounted(fetchTasks);
@@ -303,14 +326,14 @@ onUnmounted(stopPolling);
         <h2>Задачи</h2>
         <table class="tbl small">
           <thead>
-            <tr><th>#</th><th>URL</th><th>Статус</th><th>Страниц</th><th>Создана</th><th></th></tr>
+            <tr><th>#</th><th>URL</th><th>Статус</th><th>Найдено</th><th>Создана</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="t in tasks" :key="t.id" :class="{ active: t.id === selectedId }">
               <td><a href="#" @click.prevent="selectTask(t.id)">{{ t.id }}</a></td>
               <td class="ellipsis">{{ t.start_url }}</td>
-              <td><span :class="'badge badge-' + t.status">{{ t.status }}</span></td>
-              <td>{{ (t.stats && t.stats.pages) || 0 }}</td>
+              <td><span :class="'badge badge-' + t.status">{{ statusLabel(t.status) }}</span></td>
+              <td class="num">{{ (t.stats && t.stats.pages) || 0 }}</td>
               <td>{{ new Date(t.created_at).toLocaleString() }}</td>
               <td><button class="danger small" @click="deleteTask(t.id)">×</button></td>
             </tr>
@@ -323,11 +346,21 @@ onUnmounted(stopPolling);
         <div class="task-header">
           <div>
             <h2>Задача #{{ selected.id }}</h2>
-            <div class="muted">{{ selected.start_url }} · статус
-              <span :class="'badge badge-' + selected.status">{{ selected.status }}</span>
+            <div class="muted small-meta">{{ selected.start_url }} · статус
+              <span :class="'badge badge-' + selected.status">{{ statusLabel(selected.status) }}</span>
             </div>
+            <div v-if="selected.error" class="error small-meta">Ошибка: {{ selected.error }}</div>
           </div>
-          <div>
+          <div class="header-counters">
+            <div class="counter">
+              <div class="counter-lbl">Найдено страниц</div>
+              <div class="counter-val">{{ foundCount }}</div>
+            </div>
+            <div v-if="queuedCount > 0 && (selected.status === 'running' || selected.status === 'queued')"
+                 class="counter counter-muted">
+              <div class="counter-lbl">В очереди</div>
+              <div class="counter-val">{{ queuedCount }}</div>
+            </div>
             <button v-if="selected.status === 'running' || selected.status === 'queued'"
                     class="warn" @click="cancelTask">Отменить</button>
           </div>
@@ -350,6 +383,12 @@ onUnmounted(stopPolling);
             <button @click="copyToExcel">📋 Копировать в Excel</button>
             <button @click="downloadCsv">⬇ CSV</button>
             <button @click="downloadXlsx">⬇ XLSX</button>
+          </div>
+          <div class="results-count">
+            Показано: <b>{{ filteredPages.length }}</b>
+            <span v-if="searchText.trim()"> из {{ pages.length }}</span>
+            <span v-else> страниц</span>
+            <span v-if="pagesTotal > pages.length" class="muted"> · всего в БД: {{ pagesTotal }}</span>
           </div>
           <table class="tbl">
             <thead>
@@ -403,55 +442,103 @@ onUnmounted(stopPolling);
 </template>
 
 <style scoped>
-.crawler-page { padding: 1.25rem; max-width: 1400px; margin: 0 auto; }
-.hint  { color: #555; margin-bottom: 1rem; }
+.crawler-page { padding: 1.25rem; max-width: 1400px; margin: 0 auto; color: #1f2937; }
+.crawler-page h1 { color: #111827; margin-bottom: .5rem; }
+.crawler-page h2 { color: #111827; font-size: 1.05rem; margin: 0 0 .6rem; }
+.hint  { color: #374151; margin-bottom: 1rem; }
 .card  { background: #fff; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;
-         box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+         box-shadow: 0 1px 3px rgba(0,0,0,.06); border: 1px solid #e5e7eb; }
 .form-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1fr; gap: .75rem; align-items: end; margin-bottom: .75rem; }
-.form-grid label { display: flex; flex-direction: column; font-size: .85rem; color: #444; }
+.form-grid label { display: flex; flex-direction: column; font-size: .85rem; color: #374151; }
 .form-grid input[type="text"], .form-grid input[type="number"], .form-grid input:not([type]) {
-  padding: .4rem; border: 1px solid #ccc; border-radius: 4px;
+  padding: .4rem; border: 1px solid #cbd5e1; border-radius: 4px; color: #111827; background: #fff;
 }
-.checkbox { flex-direction: row !important; align-items: center; gap: .35rem; }
-button { padding: .4rem .8rem; border: 1px solid #ccc; background: #f7f7f7; border-radius: 4px; cursor: pointer; }
+.checkbox { flex-direction: row !important; align-items: center; gap: .35rem; color: #374151; }
+button { padding: .4rem .8rem; border: 1px solid #cbd5e1; background: #f3f4f6; color: #111827;
+         border-radius: 4px; cursor: pointer; }
+button:hover:not(:disabled) { background: #e5e7eb; }
 button.primary { background: #2b7cff; color: #fff; border-color: #2b7cff; }
+button.primary:hover:not(:disabled) { background: #1f6ae0; border-color: #1f6ae0; }
 button.danger  { background: #fff; color: #c33; border-color: #c33; }
 button.warn    { background: #f9b80b; color: #fff; border-color: #f9b80b; }
 button.small   { padding: .15rem .4rem; font-size: .8rem; }
+
+/* tabs */
+.tabs          { margin-bottom: .75rem; }
 .tabs button   { margin-right: .25rem; }
 .tabs button.active { background: #2b7cff; color: #fff; border-color: #2b7cff; }
-.tbl   { width: 100%; border-collapse: collapse; margin-top: .5rem; }
-.tbl th, .tbl td { border-bottom: 1px solid #eee; padding: .35rem .5rem; font-size: .85rem; text-align: left; vertical-align: top; }
-.tbl tr.active td { background: #eef5ff; }
-.tbl.small td, .tbl.small th { font-size: .8rem; }
+
+/* tables — общая выкладка с улучшенной читаемостью */
+.tbl   { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: .5rem;
+         background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; }
+.tbl th, .tbl td { padding: .55rem .7rem; font-size: .88rem; text-align: left; vertical-align: top;
+                   color: #111827; border-bottom: 1px solid #eef2f7; }
+.tbl th { background: #f8fafc; color: #1e293b; font-weight: 600; font-size: .8rem;
+          text-transform: uppercase; letter-spacing: .02em; border-bottom: 1px solid #cbd5e1; }
+.tbl tbody tr:nth-child(even) td { background: #fafbfc; }
+.tbl tbody tr:hover td { background: #eef5ff; }
+.tbl tr.active td { background: #e0ecff !important; }
+.tbl td a { color: #1d4ed8; text-decoration: none; }
+.tbl td a:hover { text-decoration: underline; }
+.tbl tbody tr:last-child td { border-bottom: 0; }
+.tbl.small td, .tbl.small th { font-size: .8rem; padding: .4rem .55rem; }
+.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
 .ellipsis { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.muted    { color: #888; }
-.error    { color: #c33; margin-top: .5rem; }
+.muted    { color: #6b7280; }
+.error    { color: #b91c1c; margin-top: .5rem; }
+.small-meta { font-size: .85rem; margin-top: .25rem; }
 .toolbar  { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
-.toolbar input { flex: 1; min-width: 200px; padding: .35rem; border: 1px solid #ccc; border-radius: 4px; }
-.badge    { display: inline-block; padding: 0 .4rem; border-radius: 10px; font-size: .75rem; line-height: 1.4; }
+.toolbar input { flex: 1; min-width: 200px; padding: .4rem .55rem; border: 1px solid #cbd5e1;
+                 border-radius: 4px; color: #111827; background: #fff; }
+.results-count { font-size: .85rem; color: #374151; margin: .25rem 0 .5rem; }
+.results-count b { color: #111827; }
+
+/* badges */
+.badge    { display: inline-block; padding: .1rem .5rem; border-radius: 10px; font-size: .75rem;
+            line-height: 1.4; font-weight: 600; }
 .badge-ok      { background: #d4edda; color: #155724; }
 .badge-warn    { background: #fff3cd; color: #856404; }
 .badge-error   { background: #f8d7da; color: #721c24; }
 .badge-info    { background: #d1ecf1; color: #0c5460; }
-.badge-muted   { background: #eee;    color: #555; }
+.badge-muted   { background: #e5e7eb; color: #374151; }
 .badge-running { background: #cfe2ff; color: #084298; }
 .badge-queued  { background: #e2e3e5; color: #41464b; }
 .badge-done    { background: #d4edda; color: #155724; }
 .badge-cancelled { background: #e2e3e5; color: #41464b; }
-.task-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: .75rem; }
-.tabs        { margin-bottom: .75rem; }
-.tree-wrap   { font-family: ui-monospace, monospace; font-size: .85rem; line-height: 1.45; max-height: 600px; overflow: auto; padding: .5rem; background: #fafafa; border-radius: 4px; }
+
+/* task header + live counters */
+.task-header { display: flex; justify-content: space-between; align-items: flex-start;
+               margin-bottom: .75rem; gap: 1rem; flex-wrap: wrap; }
+.task-header h2 { margin: 0 0 .15rem; }
+.header-counters { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.counter { background: #eef5ff; border: 1px solid #c7dbff; border-radius: 6px;
+           padding: .4rem .8rem; min-width: 110px; text-align: center; }
+.counter-lbl { font-size: .7rem; color: #1e3a8a; text-transform: uppercase;
+               letter-spacing: .03em; font-weight: 600; }
+.counter-val { font-size: 1.5rem; font-weight: 700; color: #0b2a6b;
+               font-variant-numeric: tabular-nums; line-height: 1.1; }
+.counter-muted { background: #f3f4f6; border-color: #e5e7eb; }
+.counter-muted .counter-lbl { color: #4b5563; }
+.counter-muted .counter-val { color: #1f2937; }
+
+/* tree */
+.tree-wrap   { font-family: ui-monospace, monospace; font-size: .85rem; line-height: 1.5;
+               max-height: 600px; overflow: auto; padding: .6rem; background: #fafafa;
+               border: 1px solid #e5e7eb; border-radius: 4px; color: #1f2937; }
 .tree-row    { display: flex; align-items: center; gap: .4rem; padding: 1px 0; }
-.tree-children { margin-left: 1rem; border-left: 1px dotted #ddd; padding-left: .5rem; }
+.tree-children { margin-left: 1rem; border-left: 1px dotted #cbd5e1; padding-left: .5rem; }
 .caret       { cursor: pointer; width: 1em; display: inline-block; color: #2b7cff; }
-.caret-empty { width: 1em; display: inline-block; color: #ccc; }
-.tree-url    { color: #1a4789; text-decoration: none; }
+.caret-empty { width: 1em; display: inline-block; color: #cbd5e1; }
+.tree-url    { color: #1d4ed8; text-decoration: none; }
 .tree-url:hover { text-decoration: underline; }
-.tree-title  { color: #666; font-size: .8rem; }
+.tree-title  { color: #374151; font-size: .8rem; }
+
+/* summary */
 .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .75rem; }
-.kpi  { background: #f7f8fa; border-radius: 6px; padding: .75rem; }
-.kpi .lbl { color: #666; font-size: .75rem; text-transform: uppercase; }
-.kpi .val { font-size: 1.5rem; font-weight: 600; margin-top: .25rem; }
+.kpi  { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 6px; padding: .75rem; }
+.kpi .lbl { color: #4b5563; font-size: .75rem; text-transform: uppercase; letter-spacing: .02em; }
+.kpi .val { font-size: 1.5rem; font-weight: 700; margin-top: .25rem; color: #111827;
+            font-variant-numeric: tabular-nums; }
 .kpi.wide { grid-column: 1 / -1; }
 </style>

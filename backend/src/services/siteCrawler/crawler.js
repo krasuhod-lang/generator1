@@ -43,8 +43,8 @@ const robots    = require('./robotsClient');
 const { assertPublicHost } = require('./ssrfGuard');
 
 const DEFAULTS = {
-  maxPages:         1000,
-  maxDepth:         5,
+  maxPages:         5000,
+  maxDepth:         10,
   includeSubdomains: false,
   respectRobots:    true,
   concurrency:      4,
@@ -52,6 +52,8 @@ const DEFAULTS = {
   maxBytes:         2 * 1024 * 1024,
   interRequestMs:   250,
   userAgent:        'EgidaSiteCrawler/1.0 (+https://egida.local; admin@egida.local)',
+  useSitemap:       true,    // подсасывать sitemap.xml / sitemap_index.xml
+  statsFlushEvery:  10,      // как часто (каждые N страниц) сохранять stats в БД
 };
 
 function _mergeOptions(opts) {
@@ -62,6 +64,8 @@ function _mergeOptions(opts) {
   out.requestTimeoutMs = Math.max(1000, Math.min(60000, Number(out.requestTimeoutMs) || DEFAULTS.requestTimeoutMs));
   out.interRequestMs   = Math.max(0, Math.min(10000, Number(out.interRequestMs)   || 0));
   out.maxBytes         = Math.max(64 * 1024, Math.min(20 * 1024 * 1024, Number(out.maxBytes) || DEFAULTS.maxBytes));
+  out.useSitemap       = (out.useSitemap !== false);
+  out.statsFlushEvery  = Math.max(1, Math.min(500, Number(out.statsFlushEvery) || DEFAULTS.statsFlushEvery));
   return out;
 }
 
@@ -83,6 +87,14 @@ function _parseHtml(html, baseUrl) {
 
   const links = [];
   $('a[href]').each((_, el) => {
+    const href = ($(el).attr('href') || '').trim();
+    if (!href) return;
+    const n = urlN.normalize(href, baseUrl);
+    if (n) links.push(n);
+  });
+  // pagination hints: <link rel="next"|"prev"> и <a rel="next"|"prev">.
+  // Без них пагинация типа /page/2 с JS-навигацией может не попасть в BFS.
+  $('link[rel="next"], link[rel="prev"], a[rel="next"], a[rel="prev"]').each((_, el) => {
     const href = ($(el).attr('href') || '').trim();
     if (!href) return;
     const n = urlN.normalize(href, baseUrl);
@@ -143,6 +155,72 @@ async function _savePage(db, row) {
 }
 
 /**
+ * Извлекает URL из sitemap.xml-ленты. Поддерживает <urlset> и <sitemapindex>
+ * (рекурсивно, в пределах depth=2, чтобы не уйти в бесконечный цикл).
+ * Возвращает Set нормализованных URL. Любая сетевая/парсинговая ошибка → пустой Set.
+ */
+async function _fetchSitemapUrls(origin, opts, depth = 0) {
+  const out = new Set();
+  if (depth > 2) return out;
+  const candidates = depth === 0
+    ? [origin.replace(/\/+$/, '') + '/sitemap.xml',
+       origin.replace(/\/+$/, '') + '/sitemap_index.xml']
+    : [origin];                                       // depth>0 — origin это уже URL карты
+  for (const url of candidates) {
+    let body;
+    try {
+      const res = await axios.get(url, {
+        timeout: opts.requestTimeoutMs,
+        maxContentLength: opts.maxBytes * 4,          // sitemap может быть крупным
+        maxRedirects: 5,
+        responseType: 'text',
+        transformResponse: (x) => x,
+        headers: { 'User-Agent': opts.userAgent, 'Accept': 'application/xml,text/xml,*/*' },
+        validateStatus: () => true,
+      });
+      if (res.status < 200 || res.status >= 300) continue;
+      body = typeof res.data === 'string' ? res.data : String(res.data || '');
+    } catch (_) { continue; }
+    if (!body) continue;
+    // Парсим вложенные sitemap-ы.
+    const nestedSitemaps = [];
+    const reSm = /<sitemap[^>]*>[\s\S]*?<loc>\s*([^<\s]+)\s*<\/loc>[\s\S]*?<\/sitemap>/gi;
+    let m;
+    while ((m = reSm.exec(body)) !== null) nestedSitemaps.push(m[1]);
+    if (nestedSitemaps.length) {
+      for (const sm of nestedSitemaps) {
+        const child = await _fetchSitemapUrls(sm, opts, depth + 1);
+        for (const u of child) out.add(u);
+      }
+    }
+    // Парсим обычные <url><loc>…</loc></url>.
+    const reUrl = /<url[^>]*>[\s\S]*?<loc>\s*([^<\s]+)\s*<\/loc>[\s\S]*?<\/url>/gi;
+    while ((m = reUrl.exec(body)) !== null) {
+      const n = urlN.normalize(m[1]);
+      if (n) out.add(n);
+    }
+    // Fallback: голые <loc>…</loc> вне <url>/<sitemap>.
+    if (!nestedSitemaps.length && !out.size) {
+      const reLoc = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
+      while ((m = reLoc.exec(body)) !== null) {
+        const n = urlN.normalize(m[1]);
+        if (n) out.add(n);
+      }
+    }
+  }
+  return out;
+}
+
+async function _persistStats(db, taskId, stats) {
+  try {
+    await db.query(
+      `UPDATE site_crawl_tasks SET stats=$2::jsonb WHERE id=$1`,
+      [taskId, JSON.stringify({ ...stats, updated_ms: Date.now() })],
+    );
+  } catch (_) { /* swallow — лучше потерять прогресс, чем уронить crawl */ }
+}
+
+/**
  * runCrawl — основная функция. taskId должен уже существовать в БД
  * (controller создаёт row перед запуском). Внутри — переводим status:
  * queued → running → done/error/cancelled/timeout.
@@ -186,7 +264,27 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
   queue.push({ url: start, depth: 0, parent: null });
   visited.add(start);
 
-  const stats = { pages: 0, errors: 0, by_status: {}, started_ms: Date.now() };
+  // Сидируем очередь из sitemap.xml — это даёт «детальный сканер» обещанный
+  // ТЗ: страницы, на которые нет внутренних ссылок (например, фильтры или
+  // глубокие листинги пагинации), всё равно попадают в обход.
+  if (opts.useSitemap) {
+    try {
+      const smUrls = await _fetchSitemapUrls(origin, opts);
+      for (const u of smUrls) {
+        if (visited.has(u)) continue;
+        try {
+          const lu = new URL(u);
+          if (!urlN.hostMatches(lu.hostname, startHost, opts.includeSubdomains)) continue;
+        } catch (_) { continue; }
+        visited.add(u);
+        // sitemap-страницы кладём с depth=1, parent=start (для дерева)
+        queue.push({ url: u, depth: 1, parent: start });
+      }
+    } catch (_) { /* ignore — sitemap optional */ }
+  }
+
+  const stats = { pages: 0, errors: 0, by_status: {}, started_ms: Date.now(),
+    queued: queue.length, visited: visited.size, from_sitemap: queue.length - 1 };
   let lastFetchByHost = Object.create(null);
   let cancelled = false;
 
@@ -262,7 +360,7 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
     if (item.depth + 1 > opts.maxDepth) return;
     for (const link of parsed.links) {
       if (visited.has(link)) continue;
-      if (visited.size >= opts.maxPages * 4) break; // anti-runaway очереди
+      if (visited.size >= opts.maxPages * 10) break; // anti-runaway очереди
       try {
         const lu = new URL(link);
         if (!urlN.hostMatches(lu.hostname, startHost, opts.includeSubdomains)) continue;
@@ -290,14 +388,20 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
       try { await processOne(item); }
       catch (e) { /* swallow */ stats.errors++; }
       inflight--;
-      // Каждые ~20 страниц проверяем cancel.
+      // обновляем счётчики очереди для UI и периодически сбрасываем stats в БД,
+      // чтобы фронт видел живое число найденных страниц.
+      stats.queued  = queue.length;
+      stats.visited = visited.size;
       cancelTick++;
       if (cancelTick % 20 === 0) { await checkCancelled(); }
+      if (cancelTick % opts.statsFlushEvery === 0) { await _persistStats(db, taskId, stats); }
     }
     if (inflight === 0) resolveDone();
   }
 
   const workers = [];
+  // первый «снимок» stats — чтобы UI сразу увидел число URL из sitemap.
+  await _persistStats(db, taskId, stats);
   for (let i = 0; i < opts.concurrency; i++) workers.push(worker());
   await Promise.race([done, Promise.all(workers)]);
 
