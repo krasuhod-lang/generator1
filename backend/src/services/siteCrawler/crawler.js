@@ -169,6 +169,10 @@ async function _fetchSitemapUrls(origin, opts, depth = 0) {
   for (const url of candidates) {
     let body;
     try {
+      // SSRF guard: для стартовых /sitemap.xml хост уже проверен снаружи,
+      // но вложенные <sitemap><loc> могут указывать на любой хост.
+      const u = new URL(url);
+      await assertPublicHost(u.hostname);
       const res = await axios.get(url, {
         timeout: opts.requestTimeoutMs,
         maxContentLength: opts.maxBytes * 4,          // sitemap может быть крупным
