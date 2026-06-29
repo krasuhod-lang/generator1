@@ -65,6 +65,22 @@ test('public share ignores X-Client-Mode (cannot escalate)', () => {
     'client',
   );
 });
+test('grant viewer → форсированный client (X-Client-Mode игнорируется)', () => {
+  assert.strictEqual(
+    resolveViewMode({ headers: { 'x-client-mode': 'analyst' }, query: { mode: 'analyst' } }, { grantRole: 'viewer' }),
+    'client',
+  );
+});
+test('grant analyst → обычный приоритет (X-Client-Mode работает)', () => {
+  assert.strictEqual(
+    resolveViewMode({ headers: { 'x-client-mode': 'client' }, query: {} }, { grantRole: 'analyst' }),
+    'client',
+  );
+  assert.strictEqual(
+    resolveViewMode({ headers: {}, query: {} }, { grantRole: 'analyst' }),
+    'analyst',
+  );
+});
 
 console.log('\n── sanitizeProject ─────────────────────────────');
 test('analyst → объект не мутируется и возвращается как есть', () => {

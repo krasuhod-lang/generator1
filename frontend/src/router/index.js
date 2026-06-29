@@ -33,6 +33,8 @@ const routes = [
   { path: '/position-tracker',     component: () => import('../views/PositionTrackerPage.vue'),    meta: { auth: true } },
   { path: '/position-tracker/:id', component: () => import('../views/PositionTrackerProjectPage.vue'), meta: { auth: true } },
 
+  { path: '/site-crawler',         component: () => import('../views/SiteCrawlerPage.vue'),        meta: { auth: true } },
+
   { path: '/projects',             component: () => import('../views/ProjectsPage.vue'),        meta: { auth: true } },
   { path: '/projects/:id',         component: () => import('../views/ProjectDetailPage.vue'),   meta: { auth: true } },
   // PR-4: Executive Summary — премиум-дашборд проекта (KPI + main chart).
@@ -53,6 +55,7 @@ const routes = [
   { path: '/admin',           component: () => import('../views/admin/AdminDashboardPage.vue'),  meta: { admin: true } },
   { path: '/admin/users/:id', component: () => import('../views/admin/AdminUserDetailPage.vue'), meta: { admin: true } },
   { path: '/admin/tasks/:id', component: () => import('../views/admin/AdminTaskDetailPage.vue'), meta: { admin: true } },
+  { path: '/admin/projects',  component: () => import('../views/admin/AdminProjectsPage.vue'),   meta: { admin: true } },
 
   { path: '/:pathMatch(.*)*',   redirect: '/dashboard' },
 ];

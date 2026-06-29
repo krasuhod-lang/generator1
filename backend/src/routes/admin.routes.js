@@ -17,6 +17,12 @@ const {
   getCrossTaskDetail,
   getFunnelBreakdown,
   getAegisCostBreakdown,
+  listAdminProjects,
+  listAdminProjectGrants,
+  createAdminProjectGrant,
+  updateAdminProjectGrant,
+  revokeAdminProjectGrant,
+  listAdminGrantableUsers,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -68,5 +74,14 @@ router.get('/funnels',            apiLimiter, adminAuth, getFunnelBreakdown);
 // стоимость USD, доля prompt-кэша). Фильтр периода from/to (aegis_llm_usage,
 // мигр. 055).
 router.get('/aegis-costs',        apiLimiter, adminAuth, getAegisCostBreakdown);
+
+// ── Project grants (миграция 092, задача 1) ─────────────────────────
+// Раздача доступов к проектам, их анализам и отчётам через панель админа.
+router.get   ('/projects',                           apiLimiter, adminAuth, listAdminProjects);
+router.get   ('/projects/:id/grants',                apiLimiter, adminAuth, listAdminProjectGrants);
+router.get   ('/projects/:id/grantable-users',       apiLimiter, adminAuth, listAdminGrantableUsers);
+router.post  ('/projects/:id/grants',                apiLimiter, adminAuth, createAdminProjectGrant);
+router.patch ('/projects/:id/grants/:grantId',       apiLimiter, adminAuth, updateAdminProjectGrant);
+router.delete('/projects/:id/grants/:grantId',       apiLimiter, adminAuth, revokeAdminProjectGrant);
 
 module.exports = router;

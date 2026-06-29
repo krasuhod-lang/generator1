@@ -43,14 +43,20 @@ function normalizeMode(value, fallback = VIEW_MODES.ANALYST) {
  * opts:
  *   • shareMode   — режим из БД для публичной ссылки (если есть).
  *   • isPublic    — запрос пришёл на публичный роут (без auth).
+ *   • grantRole   — роль пользователя по гранту (viewer|analyst|manager).
+ *                   Если 'viewer' — режим принудительно client (нельзя
+ *                   эскалировать через X-Client-Mode); analyst/manager
+ *                   могут переключать режим как обычный пользователь.
+ *                   См. projects/projectGrants.forcedClientMode.
  *
  * Заголовок и query учитываются только для авторизованных запросов:
  *   публичный токен сам определяет уровень доступа, и его нельзя
  *   «повысить» через X-Client-Mode.
  */
 function resolveViewMode(req, opts = {}) {
-  const { shareMode = null, isPublic = false } = opts;
+  const { shareMode = null, isPublic = false, grantRole = null } = opts;
   if (isPublic) return normalizeMode(shareMode, VIEW_MODES.CLIENT);
+  if (grantRole === 'viewer') return VIEW_MODES.CLIENT;
   const header = req && req.headers ? req.headers['x-client-mode'] : undefined;
   const query  = req && req.query   ? req.query.mode               : undefined;
   // X-Client-Mode: 1 / true / client — все эквивалентны.

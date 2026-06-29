@@ -26,6 +26,7 @@ function handleLogout() {
       </div>
       <div class="flex items-center gap-4">
         <router-link to="/admin" class="text-sm text-gray-400 hover:text-gray-200 transition-colors">Главная</router-link>
+        <router-link to="/admin/projects" class="text-sm text-gray-400 hover:text-gray-200 transition-colors">Доступы</router-link>
         <span class="text-sm text-gray-500">{{ admin.adminUser?.email || 'Admin' }}</span>
         <button @click="handleLogout" class="btn-ghost text-xs">Выйти</button>
       </div>

@@ -22,6 +22,7 @@ const { detectSeasonality } = require('./seasonalityDetector');
 const { splitQueries: splitBrand } = require('./brandSplit');
 const { getProjectsConfig } = require('./config');
 const { onAnalysisDone } = require('./aegisBridge');
+const internalSensors = require('../aegis/internalSensors');
 const { insertSnapshot } = require('./snapshotsRepo');
 const periodResolver = require('./periodResolver');
 const freshnessService = require('./freshnessService');
@@ -655,6 +656,20 @@ async function processAnalysis(analysisId) {
     } catch (e) {
       console.warn('[projects/analysisRunner] aegis hook failed:', e.message);
     }
+
+    // Internal brain sensor (задача 2). Off by default через фича-флаг
+    // featureFlags.brain.internalLearning; project.contribute_to_brain
+    // также проверяется внутри. Никогда не ломает основной анализ.
+    setImmediate(() => {
+      internalSensors
+        .recordAnalysisObservation({
+          projectId:  project.id,
+          analysisId,
+          snapshot,
+          costUsd:    result && result.cost_usd,
+        })
+        .catch((e) => console.warn('[projects/analysisRunner] internal sensor failed:', e.message));
+    });
   } catch (err) {
     await _setError(analysisId, err.message).catch(() => {});
   }

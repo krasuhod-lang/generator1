@@ -40,6 +40,7 @@ const serpB2bRoutes       = require('./src/routes/serpB2b.routes');
 const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
+const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -128,6 +129,7 @@ app.use('/api/serp-b2b',       serpB2bRoutes);
 app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
+app.use('/api/site-crawler',     siteCrawlerRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
@@ -2605,6 +2607,150 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_report_backlinks_project ON report_backlinks (project_id, added_at DESC)`);
+
+    // ── Migration 092: project_grants + project_grant_events + projects.contribute_to_brain ──
+    // Раздача доступов к проектам через панель администратора (задача 1).
+    // Опт-аут от обучения мозга Эгиды (задача 2) живёт в той же миграции.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS project_grants (
+          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          user_id     UUID NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+          role        TEXT NOT NULL,
+          scopes      JSONB NOT NULL DEFAULT '["project","analyses","reports"]'::jsonb,
+          granted_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+          granted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          expires_at  TIMESTAMPTZ,
+          revoked_at  TIMESTAMPTZ,
+          revoked_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+          note        TEXT
+        )
+      `);
+      await db.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'project_grants_role_chk') THEN
+            ALTER TABLE project_grants
+              ADD CONSTRAINT project_grants_role_chk
+              CHECK (role IN ('viewer','analyst','manager'));
+          END IF;
+        END $$;
+      `);
+      await db.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_project_grants_active
+          ON project_grants (project_id, user_id)
+          WHERE revoked_at IS NULL
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_project_grants_user
+        ON project_grants (user_id) WHERE revoked_at IS NULL`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_project_grants_project
+        ON project_grants (project_id, granted_at DESC)`);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS project_grant_events (
+          id         BIGSERIAL PRIMARY KEY,
+          grant_id   UUID,
+          project_id UUID NOT NULL,
+          user_id    UUID NOT NULL,
+          actor_id   UUID,
+          action     TEXT NOT NULL,
+          payload    JSONB,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_project_grant_events_project
+        ON project_grant_events (project_id, created_at DESC)`);
+      await db.query(`ALTER TABLE projects
+        ADD COLUMN IF NOT EXISTS contribute_to_brain BOOLEAN NOT NULL DEFAULT TRUE`);
+    } catch (e) {
+      console.warn('[ensureSchema] project_grants (mig 092) skipped:', e.message);
+    }
+
+    // ── Migration 093: Aegis internal scope + observations (задача 2) ──
+    try {
+      await db.query(`
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'aegis_dspy_dataset') THEN
+            EXECUTE 'ALTER TABLE aegis_dspy_dataset
+                      ADD COLUMN IF NOT EXISTS aegis_source_scope TEXT NOT NULL DEFAULT ''internal_product''';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_aegis_dspy_dataset_scope
+                      ON aegis_dspy_dataset (aegis_source_scope)';
+          END IF;
+        END $$;
+      `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS aegis_internal_observations (
+          id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          analysis_id     UUID,
+          source          TEXT NOT NULL DEFAULT 'project_analysis',
+          taken_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          features        JSONB,
+          recommendation  JSONB,
+          predicted_kpi   JSONB,
+          outcome         JSONB,
+          reward          NUMERIC,
+          outcome_at      TIMESTAMPTZ,
+          scope           TEXT NOT NULL DEFAULT 'internal_product',
+          contribute      BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_internal_obs_project
+        ON aegis_internal_observations (project_id, taken_at DESC)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_internal_obs_outcome_pending
+        ON aegis_internal_observations (taken_at) WHERE outcome IS NULL`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_internal_obs_scope
+        ON aegis_internal_observations (scope, contribute) WHERE outcome IS NOT NULL`);
+    } catch (e) {
+      console.warn('[ensureSchema] aegis_internal_observations (mig 093) skipped:', e.message);
+    }
+
+    // Site Crawler (миграция 094) — собственный модуль парсинга сайта
+    // (задача 3): URL/H1/Title/Description, дерево, экспорт CSV/XLSX.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS site_crawl_tasks (
+          id          BIGSERIAL PRIMARY KEY,
+          user_id     INTEGER  NOT NULL,
+          project_id  INTEGER  NULL,
+          start_url   TEXT     NOT NULL,
+          options     JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          status      TEXT     NOT NULL DEFAULT 'queued',
+          stats       JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          error       TEXT     NULL,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          started_at  TIMESTAMPTZ NULL,
+          finished_at TIMESTAMPTZ NULL
+        )`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_site_crawl_tasks_user_created
+        ON site_crawl_tasks(user_id, created_at DESC)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_site_crawl_tasks_project
+        ON site_crawl_tasks(project_id) WHERE project_id IS NOT NULL`);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS site_crawl_pages (
+          id            BIGSERIAL PRIMARY KEY,
+          task_id       BIGINT  NOT NULL REFERENCES site_crawl_tasks(id) ON DELETE CASCADE,
+          url           TEXT    NOT NULL,
+          depth         INTEGER NOT NULL DEFAULT 0,
+          parent_url    TEXT    NULL,
+          http_status   INTEGER NULL,
+          content_type  TEXT    NULL,
+          title         TEXT    NULL,
+          h1            TEXT    NULL,
+          description   TEXT    NULL,
+          canonical     TEXT    NULL,
+          robots        TEXT    NULL,
+          fetched_at    TIMESTAMPTZ NULL,
+          duration_ms   INTEGER NULL,
+          error         TEXT    NULL
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_site_crawl_pages_task_url
+        ON site_crawl_pages(task_id, url)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_site_crawl_pages_task_depth
+        ON site_crawl_pages(task_id, depth)`);
+    } catch (e) {
+      console.warn('[ensureSchema] site_crawl_* (mig 094) skipped:', e.message);
+    }
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
