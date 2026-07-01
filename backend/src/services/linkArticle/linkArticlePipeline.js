@@ -389,6 +389,7 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
       `author_name: ${authorName || '[не задано — пропусти byline-блок]'}`,
       `author_role: ${authorRole || '[не задано]'}`,
       `date_modified: ${dateModified}`,
+      `current_year: ${new Date().getFullYear()}`,
       // При активном LAKB вместо толстых JSON-дампов отправляем короткие
       // указатели на разделы LAKB (он уже уехал systemInstruction'ом /
       // в Gemini cachedContents). Это и есть «кэширование DeepSeek-аналитики

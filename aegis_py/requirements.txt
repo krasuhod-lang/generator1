@@ -27,11 +27,11 @@ neat-python==0.92
 # neo4j==5.25.0                      # GraphRAG (Phase 1)
 # networkx==3.4.2                    # Betweenness Centrality (Phase 1)
 # qdrant-client==1.12.1              # VectorDB (Phase 2)
-# rank-bm25==0.2.2                   # Sparse BM25 для гибридного поиска
+# rank-bm25==0.2.2                   # Sparse BM25 / SEO HybridScorer (иначе — встроенный fallback)
 # sentence-transformers==3.3.0       # Локальные эмбеддинги (если без Gemini)
 # ray==2.39.0                        # Ray Cluster (Phase 4)
-# langgraph==0.2.50                  # LangGraph runner (Phase 5)
-# dspy-ai==2.5.41                    # DSPy MIPROv2 (Phase 6)
+# langgraph==0.2.50                  # LangGraph runner / SEO State Machine (иначе — sequential fallback)
+# dspy-ai==2.5.41                    # DSPy MIPROv2 / SEO Drafting Assertions
 # google-analytics-data==0.18.16     # GA4 Reporting API v1 (Phase 7)
 # google-auth==2.35.0                # OAuth2 для GA4
 # brian2==2.7.1                      # BioBrain SNN (optional heavy)

@@ -64,6 +64,7 @@ check('После рендера НЕТ незаменённых {{...}} (для
     TARGET_URL: 'https://example.com/portugal',
     BRAND_HINT: 'Бренд X — консалтинг',
     TOPIC_COUNT: '7',
+    CURRENT_YEAR: '2026',
   });
   // Не должно остаться плейсхолдеров вообще.
   const leftover = rendered.match(/\{\{[A-Z_]+\}\}/g);
