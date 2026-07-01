@@ -298,7 +298,7 @@ const start = async () => {
       } catch (e) {
         console.warn('[Server] AEGIS dspyAutoRetrain skipped:', e.message);
       }
-      // Единая диагностика готовности контура обучения (DSPy + GA4 RL/PPO).
+      // Единая диагностика готовности контура обучения (DSPy + RL/PPO GSC/Яндекс).
       // Печатает один WARN со списком конкретных недостающих шагов, если
       // AEGIS_ENABLED=true, но env не сконфигурирован / py недоступен /
       // dataset пустой. Не блокирует старт.
@@ -1818,7 +1818,7 @@ async function ensureSchema() {
         quality_score   JSONB        NOT NULL,
         spq_overall     NUMERIC(5,2) NOT NULL,
         ppo_weight      NUMERIC(6,3) NOT NULL DEFAULT 1.0,
-        ga4_metrics     JSONB,
+        feedback_metrics JSONB,
         model_used      TEXT,
         cost_usd        NUMERIC(10,4),
         created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -1829,6 +1829,24 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_unused    ON aegis_dspy_dataset (used_in_retrain) WHERE used_in_retrain IS NULL`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS user_hash TEXT`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS source_kind TEXT`);
+    // Миграция 096: GA4 → GSC + Яндекс.Вебмастер. Переименовываем legacy-колонку
+    // ga4_metrics → feedback_metrics (RENAME сохраняет данные), затем гарантируем
+    // наличие колонки для свежесозданных таблиц.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'aegis_dspy_dataset' AND column_name = 'ga4_metrics'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'aegis_dspy_dataset' AND column_name = 'feedback_metrics'
+        ) THEN
+          EXECUTE 'ALTER TABLE aegis_dspy_dataset RENAME COLUMN ga4_metrics TO feedback_metrics';
+        END IF;
+      END $$;
+    `);
+    await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS feedback_metrics JSONB`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS prompt_hash TEXT`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS prompt_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await db.query(`
@@ -2141,7 +2159,7 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_actions_status ON aegis_seo_actions (status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_actions_type ON aegis_seo_actions (action_type)`);
 
-    // C1: observations — фактические GA4/GSC дельты + reward на URL/неделя.
+    // C1: observations — фактические GSC/Яндекс дельты + reward на URL/неделя.
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_seo_observations (
         id                BIGSERIAL    PRIMARY KEY,

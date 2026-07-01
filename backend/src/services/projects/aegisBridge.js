@@ -290,7 +290,7 @@ async function onAnalysisDone(db, { analysisId, project, snapshot, result } = {}
         // SPQ для проектного анализа агрегированно не считается; используем
         // фиктивный 85, как делает meta_tags pipeline (см. memory/citations).
         qualityScore: { overall: 85, subscores: { eeat: 85, fact_check: 85, plagiarism: 85 } },
-        gaMetrics: null,
+        feedbackMetrics: null,
         modelUsed: result && result.model || null,
         costUsd: _num(result && result.cost_usd, 0),
         userId: project && project.user_id || null,

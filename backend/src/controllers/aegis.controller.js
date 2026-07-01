@@ -151,7 +151,13 @@ async function getStatus(req, res) {
       next_retrain_eta_sec: dspyTel && dspyTel.next_retrain_eta_sec,
       dataset_rows: dspyTel && dspyTel.dataset_rows,
     },
-    rl_ga4:     { enabled: flags.rlGa4.enabled,     property_id_set: Boolean(flags.rlGa4.propertyId) },
+    rl_feedback: {
+      enabled: flags.rlFeedback.enabled,
+      sources: {
+        search_console: (flags.rlFeedback.sources || {}).searchConsole !== false,
+        yandex_webmaster: (flags.rlFeedback.sources || {}).yandexWebmaster !== false,
+      },
+    },
     selfmutate: {
       enabled: flags.selfmutate.enabled,
       require_human_review: flags.selfmutate.requireHumanReview,
@@ -322,7 +328,7 @@ async function triggerDspyRetrain(req, res) {
   res.json({ ok: true, body: r.body });
 }
 
-/** GET /api/aegis/training/health (auth) — единая диагностика DSPy + GA4. */
+/** GET /api/aegis/training/health (auth) — единая диагностика DSPy + RL/PPO (GSC + Яндекс.Вебмастер). */
 async function getTrainingHealth(req, res) {
   try {
     const report = await trainingHealth.buildTrainingHealth({ db });
@@ -643,8 +649,9 @@ module.exports.listTopFailures  = listTopFailures;
 
 /**
  * POST /api/aegis/seo-brain/pages/observe (admin)
- * Принимает GA4/GSC дельты по URL → считает reward и пишет в aegis_seo_observations.
- * Используется фоновым job/cron для backfill aegis_dspy_dataset.ga4_metrics.
+ * Принимает GSC/Яндекс.Вебмастер дельты по URL → считает reward и пишет в
+ * aegis_seo_observations. Используется фоновым job/cron для backfill
+ * aegis_dspy_dataset.feedback_metrics.
  */
 async function observeSeoPages(req, res) {
   if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });

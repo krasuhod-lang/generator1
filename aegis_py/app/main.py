@@ -9,7 +9,6 @@ GET  /ray/jobs/{id}        — статус Ray-job
 POST /langgraph/run        — запустить writer→critic→refiner граф
 POST /dspy/retrain         — MIPROv2 weekly retrain
 GET  /dspy/status          — статус последнего retrain
-POST /ga4/fetch            — агрегированные метрики GA4 по URL-путям
 POST /mutate/analyze       — DeepSeek-V4-Pro анализирует DOM-падение
 POST /shannon              — энтропия Шеннона (отладка)
 GET  /health               — общий healthcheck
@@ -32,7 +31,6 @@ from . import vectordb as vectordb_mod
 from . import ray_runner as ray_mod
 from . import langgraph_runner as lg_mod
 from . import dspy_optimizer as dspy_mod
-from . import ga4 as ga4_mod
 from . import mutator as mut_mod
 from . import backup as backup_mod
 from . import vector_gc as vector_gc_mod
@@ -124,7 +122,6 @@ def health() -> Dict[str, Any]:
             "ray":      ray_mod.is_available(),
             "langgraph": lg_mod.is_available(),
             "dspy":     dspy_mod.is_available(),
-            "ga4":      ga4_mod.is_available(),
             "mutator":  mut_mod.is_available(),
             "backup":   backup_mod.is_available(),
             "vector_gc": vector_gc_mod.is_available(),
@@ -559,20 +556,6 @@ def dspy_prompt(signature: str, req: DspyPromptRequest) -> Dict[str, Any]:
         "reason": "unknown_signature",
         "available": projects_dspy.available_signatures() + reddit_mapper_dspy.available_signatures(),
     }
-
-
-# ── /ga4 ──────────────────────────────────────────────────────────────
-class Ga4FetchRequest(BaseModel):
-    property_id: str
-    page_paths: List[str]
-    date_range: str = "14daysAgo"
-
-
-@app.post("/ga4/fetch")
-def ga4_fetch(req: Ga4FetchRequest) -> Dict[str, Any]:
-    if not ga4_mod.is_available():
-        raise _unavailable("ga4_disabled", ga4_mod.unavailable_reason())
-    return ga4_mod.fetch_page_metrics(req.property_id, req.page_paths, req.date_range)
 
 
 # ── /mutate ───────────────────────────────────────────────────────────

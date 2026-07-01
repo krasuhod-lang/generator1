@@ -442,7 +442,7 @@ async function runMetaTagTaskInner(taskId) {
         userPrompt: `${t.name || ''}\\n${Array.isArray(t.keywords) ? t.keywords.join('\\n') : ''}`,
         htmlOutput: JSON.stringify(t.results || []),
         qualityScore: { overall: 85, subscores: { eeat: 85, fact_check: 85, plagiarism: 85 } },
-        gaMetrics: null,
+        feedbackMetrics: null,
         modelUsed: t.gemini_model || null,
         costUsd: Number(t.total_cost_usd) || 0,
         userId: t.user_id || null,

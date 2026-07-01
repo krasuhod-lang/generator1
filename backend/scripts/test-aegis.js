@@ -13,7 +13,7 @@
  *   • brainStateRegistry._parseSimpleYaml: вложенность и multi-line.
  *   • deepseekMutator.isPathAllowed: allowlist / blocklist.
  *   • orchestrator.runRefineLoop: 1-iter pass и max-iter exhaustion.
- *   • ga4Client.computePpoWeights: квантили.
+ *   • searchConsoleFeedback.computePpoWeights: квантили + merge.
  *   • promptAudit: сканирование промтов и стабильные hash/meta для DSPy.
  *   • seoBrain: SEO-память, reward, диагностика и безопасный action-plan.
  */
@@ -203,20 +203,44 @@ async function main() {
     assert.strictEqual(result.needs_human_review, false);
   });
 
-  console.log('\n[aegis/ga4Client]');
-  const { computePpoWeights } = require('../src/services/aegis/ga4Client');
-  test('top 25% получают ppo_weight=3', () => {
+  console.log('\n[aegis/searchConsoleFeedback]');
+  const scFeedback = require('../src/services/aegis/searchConsoleFeedback');
+  const { computePpoWeights, mergePageMetrics, normalizePath } = scFeedback;
+  test('top 25% получают ppo_weight=3 (по CTR)', () => {
     const items = [
-      { pagePath: '/a', engagementRate: 0.1 },
-      { pagePath: '/b', engagementRate: 0.2 },
-      { pagePath: '/c', engagementRate: 0.3 },
-      { pagePath: '/d', engagementRate: 0.9 },
+      { pagePath: '/a', ctr: 0.1 },
+      { pagePath: '/b', ctr: 0.2 },
+      { pagePath: '/c', ctr: 0.3 },
+      { pagePath: '/d', ctr: 0.9 },
     ];
     const w = computePpoWeights(items, { topQuantile: 0.75, ppoWeight: 3 });
     const winner = w.find((x) => x.pagePath === '/d');
     assert.strictEqual(winner.ppo_weight, 3);
     const loser = w.find((x) => x.pagePath === '/a');
     assert.strictEqual(loser.ppo_weight, 1);
+  });
+  test('computePpoWeights обратно совместим с engagementRate', () => {
+    const items = [
+      { pagePath: '/a', engagementRate: 0.1 },
+      { pagePath: '/d', engagementRate: 0.9 },
+    ];
+    const w = computePpoWeights(items, { topQuantile: 0.75, ppoWeight: 3 });
+    assert.strictEqual(w.find((x) => x.pagePath === '/d').ppo_weight, 3);
+  });
+  test('mergePageMetrics: impression-weighted CTR по движкам', () => {
+    const merged = mergePageMetrics([
+      { source: 'search_console', items: [{ pagePath: '/x', clicks: 10, impressions: 100 }] },
+      { source: 'yandex_webmaster', items: [{ pagePath: '/x', clicks: 30, impressions: 100 }] },
+    ]);
+    const row = merged.find((r) => r.pagePath === '/x');
+    assert.strictEqual(row.clicks, 40);
+    assert.strictEqual(row.impressions, 200);
+    assert.ok(Math.abs(row.ctr - 0.2) < 1e-9);
+    assert.deepStrictEqual(row.sources.sort(), ['search_console', 'yandex_webmaster']);
+  });
+  test('normalizePath извлекает pathname из URL', () => {
+    assert.strictEqual(normalizePath('https://example.com/blog/post?a=1'), '/blog/post');
+    assert.strictEqual(normalizePath('/already/path'), '/already/path');
   });
 
   console.log('\n[aegis/promptAudit]');

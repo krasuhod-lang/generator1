@@ -163,11 +163,15 @@ const AEGIS_FLAGS = deepFreeze({
     autoRetrainMinSpacingSec:     21600,   // не чаще 1 раза в 6 часов
   },
 
-  // ── RL / GA4 feedback loop ───────────────────────────────────────
-  rlGa4: {
-    enabled:           _envBool('AEGIS_RL_GA4_ENABLED', false),
-    propertyId:        _envStr('AEGIS_GA4_PROPERTY_ID', ''),
-    serviceAccountJson: _envStr('AEGIS_GA4_SA_JSON', ''),
+  // ── RL feedback loop (per-URL CTR из GSC + Яндекс.Вебмастера) ─────
+  // Google Analytics у нас нет и не предусмотрено — реальный сигнал берём
+  // из уже интегрированных источников проекта (Search Console + Webmaster).
+  rlFeedback: {
+    enabled:           _envBool('AEGIS_RL_FEEDBACK_ENABLED', false),
+    sources: {
+      searchConsole:   _envBool('AEGIS_RL_GSC_ENABLED', true),
+      yandexWebmaster: _envBool('AEGIS_RL_YANDEX_ENABLED', true),
+    },
     topCtrQuantile:    _envFloat('AEGIS_RL_TOP_QUANTILE', 0.75),
     ppoWeight:         _envFloat('AEGIS_RL_PPO_WEIGHT', 3.0),
   },
@@ -665,8 +669,8 @@ const RANGES = [
   ['dspy.maxTrials',                  1, 1000],
   ['dspy.maxCostUsd',                 0, 100000],
   ['dspy.minImprovementPct',          0, 1000],
-  ['rlGa4.topCtrQuantile',            0, 1],
-  ['rlGa4.ppoWeight',                 1, 100],
+  ['rlFeedback.topCtrQuantile',       0, 1],
+  ['rlFeedback.ppoWeight',            1, 100],
   ['selfmutate.consecutiveFailuresTrigger', 1, 1000],
   // Phase 9–13 ranges
   ['telemetry.pushIntervalSec',       1, 86400],
