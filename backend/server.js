@@ -41,6 +41,7 @@ const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
+const cannibalizationRoutes = require('./src/routes/cannibalization.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -130,6 +131,7 @@ app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
 app.use('/api/site-crawler',     siteCrawlerRoutes);
+app.use('/api/cannibalization',  cannibalizationRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
@@ -2782,6 +2784,48 @@ async function ensureSchema() {
         ON site_crawl_pages(task_id, depth)`);
     } catch (e) {
       console.warn('[ensureSchema] site_crawl_* (mig 094) skipped:', e.message);
+    }
+
+    // ── Каннибализация (mig 096): SERP-overlap по H1 краулера ──────────────
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS cannibalization_tasks (
+          id            BIGSERIAL PRIMARY KEY,
+          user_id       UUID     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          project_id    UUID     NULL     REFERENCES projects(id) ON DELETE SET NULL,
+          crawl_task_id BIGINT   NULL     REFERENCES site_crawl_tasks(id) ON DELETE SET NULL,
+          lr            TEXT     NULL,
+          engine        TEXT     NOT NULL DEFAULT 'yandex',
+          options       JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          status        TEXT     NOT NULL DEFAULT 'queued',
+          stats         JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          result        JSONB    NULL,
+          error         TEXT     NULL,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          started_at    TIMESTAMPTZ NULL,
+          finished_at   TIMESTAMPTZ NULL
+        )`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_cannibalization_tasks_user_created
+        ON cannibalization_tasks(user_id, created_at DESC)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_cannibalization_tasks_crawl
+        ON cannibalization_tasks(crawl_task_id) WHERE crawl_task_id IS NOT NULL`);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS cannibalization_serp (
+          id           BIGSERIAL PRIMARY KEY,
+          task_id      BIGINT  NOT NULL REFERENCES cannibalization_tasks(id) ON DELETE CASCADE,
+          query        TEXT    NOT NULL,
+          source_url   TEXT    NULL,
+          position     INTEGER NOT NULL,
+          result_url   TEXT    NOT NULL,
+          result_title TEXT    NULL,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_cannibalization_serp_task_query_pos
+        ON cannibalization_serp(task_id, query, position)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_cannibalization_serp_task
+        ON cannibalization_serp(task_id)`);
+    } catch (e) {
+      console.warn('[ensureSchema] cannibalization_* (mig 096) skipped:', e.message);
     }
 
     console.log('[Schema] ensureSchema OK');
