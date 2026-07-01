@@ -234,6 +234,27 @@ function looksLikeExpertBody(body) {
   return false;
 }
 
+// Строгий детектор «мнения эксперта»: ищет именно МАРКИРОВАННУЮ цитату
+// <blockquote class="expert-opinion">…</blockquote>, которую info-article
+// pipeline гарантированно вставляет ровно один раз (см.
+// backend/src/services/infoArticle/infoArticlePipeline.js). В отличие от
+// looksLikeExpertBody (ловит любой blockquote) — этот детектор нужен, чтобы
+// квоту `expert` в JSON НЕ перехватила случайная обычная цитата из более
+// ранней секции. Так мнение эксперта ВСЕГДА попадает в отдельный expert-блок.
+function hasMarkedExpert(body) {
+  for (const n of body) {
+    if (tag(n) === 'blockquote' && n.classList && n.classList.contains('expert-opinion')
+        && (n.textContent || '').trim()) {
+      return true;
+    }
+    if (n && n.nodeType === 1 && typeof n.querySelector === 'function') {
+      const marked = n.querySelector('blockquote.expert-opinion');
+      if (marked && (marked.textContent || '').trim()) return true;
+    }
+  }
+  return false;
+}
+
 // «Похоже ли тело на Tabs» удалено вместе с buildTabsBlock —
 // соответствующий контент теперь упаковывается в blocks-layout.
 
@@ -246,8 +267,18 @@ function classifySection(section, ctx) {
   if (matchesKw(h2Canon, KW.faq) && looksLikeFaqBody(body)) return 'faq';
 
   // Expert — только если ещё не использован (квота 1 на массив).
-  if (!ctx.expertUsed && (matchesKw(h2Canon, KW.expert) || looksLikeExpertBody(body))) {
-    return 'expert';
+  if (!ctx.expertUsed) {
+    // Маркированное «мнение эксперта» (<blockquote class="expert-opinion">)
+    // всегда получает отдельный expert-блок — это жёсткое требование ТЗ.
+    if (hasMarkedExpert(body)) return 'expert';
+    // Немаркированный сигнал (ключевое слово в H2 или обычная цитата) отдаём
+    // в expert ТОЛЬКО если в статье вообще нет маркированной цитаты. Иначе
+    // бережём квоту под настоящий блок эксперта, который встретится ниже, —
+    // чтобы случайный ранний blockquote не «съел» слот.
+    if (!ctx.hasMarkedExpertInArticle
+        && (matchesKw(h2Canon, KW.expert) || looksLikeExpertBody(body))) {
+      return 'expert';
+    }
   }
 
   if (matchesKw(h2Canon, KW.price) || looksLikePriceBody(body)) return 'price';
@@ -929,7 +960,13 @@ export function buildAcfFromHtml(html, opts = {}) {
 // (квота expert) пробрасывается между секциями.
 function _buildPerSectionInternal(sections, getHintLayout) {
   const result = [];
-  const ctx = { expertUsed: false };
+  // hasMarkedExpertInArticle — есть ли где-либо маркированное «мнение эксперта».
+  // Считаем один раз, чтобы classifySection мог беречь квоту expert именно
+  // под настоящий блок эксперта (см. классификатор).
+  const ctx = {
+    expertUsed: false,
+    hasMarkedExpertInArticle: sections.some((s) => hasMarkedExpert(s.body)),
+  };
   for (let sectionIdx = 0; sectionIdx < sections.length; sectionIdx += 1) {
     const section = sections[sectionIdx];
     const hinted = typeof getHintLayout === 'function'
@@ -1056,5 +1093,7 @@ export const _internals = {
   stripInlineMedia,
   sliceByH2,
   classifySection,
+  hasMarkedExpert,
+  looksLikeExpertBody,
   KW,
 };

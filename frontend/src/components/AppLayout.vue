@@ -13,13 +13,18 @@ function setMode(mode) {
   viewMode.setMode(mode);
 }
 
-// Тумблер «Аналитик/Клиент» имеет смысл только там, где backend-санитайзер
-// что-то реально режет (модуль «Проекты»). В отчётах режим клиента задаётся
-// в модалке публикации (shared_reports.view_mode), а превью открывается
-// отдельной кнопкой «🔍 Превью для клиента». Чтобы не сбивать пользователя
-// «мёртвой» кнопкой, скрываем тумблер на маршрутах /reports/*.
-const showViewModeToggle = computed(() => !String(route.path || '').startsWith('/reports'));
+// Тумблер «Аналитик/Клиент» имеет смысл ТОЛЬКО в модуле «Проекты»: именно там
+// backend-санитайзер (services/projects/viewMode.js) реально срезает
+// технические поля из ответа по заголовку X-Client-Mode. В остальных модулях
+// кнопка была «мёртвой» и лишь сбивала пользователя, поэтому показываем тумблер
+// строго на маршрутах /projects/*. В отчётах режим клиента задаётся в модалке
+// публикации (shared_reports.view_mode) отдельной кнопкой «🔍 Превью».
+const showViewModeToggle = computed(() => String(route.path || '').startsWith('/projects'));
 
+// «Съём позиций» намеренно убран из верхнего меню: этот раздел живёт внутри
+// модуля «Проекты» (вкладка «📈 Съём позиций» → PositionsSection), поэтому
+// дублировать его отдельной кнопкой не нужно. Маршрут /position-tracker
+// остаётся рабочим для переходов из карточек проектов.
 const TABS = [
   { key: 'seo-text',       label: 'SEO текст',        icon: '📝', path: '/dashboard' },
   { key: 'copilot',        label: 'AI-редактор',      icon: '🤖', path: '/copilot' },
@@ -30,7 +35,6 @@ const TABS = [
   { key: 'forecaster',     label: 'Прогнозатор',      icon: '📈', path: '/forecaster' },
   { key: 'category-lead',  label: 'Lead-text',        icon: '🧭', path: '/category-lead' },
   { key: 'serp-b2b',       label: 'B2B-парсер',       icon: '🛰️', path: '/serp-b2b' },
-  { key: 'position-tracker', label: 'Съём позиций',  icon: '📍', path: '/position-tracker' },
   { key: 'site-crawler',   label: 'Парсер сайта',     icon: '🕷️', path: '/site-crawler' },
   { key: 'projects',       label: 'Проекты',          icon: '🗂️', path: '/projects' },
   { key: 'reports',        label: 'Отчёты',           icon: '📑', path: '/reports' },
@@ -122,8 +126,10 @@ function handleLogout() {
                    bg-gray-800 hover:bg-gray-700 text-gray-100 border border-gray-700
                    transition-colors"
           >
-            <span class="text-base">{{ activeTab.icon }}</span>
-            <span class="hidden sm:inline">{{ activeTab.label }}</span>
+            <span class="text-base leading-none">{{ activeTab.icon }}</span>
+            <!-- Фиксированная ширина ярлыка: не даём кнопке «прыгать» при смене
+                 активной вкладки (у ярлыков разная длина). -->
+            <span class="hidden sm:inline sm:w-32 truncate text-left">{{ activeTab.label }}</span>
             <svg
               class="w-4 h-4 text-gray-400 transition-transform duration-200"
               :class="{ 'rotate-180': menuOpen }"

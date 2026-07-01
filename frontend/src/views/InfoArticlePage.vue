@@ -8,6 +8,7 @@ import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import { useAuthStore } from '../stores/auth.js';
 import { useInfoArticleStore } from '../stores/infoArticle.js';
+import { buildAcfFromHtml } from '../utils/acfDeterministicBuilder.js';
 
 const store = useInfoArticleStore();
 const auth  = useAuthStore();
@@ -624,8 +625,72 @@ watch(() => store.tasks, (arr) => {
 }, { deep: true });
 
 // ── Result tabs + helpers ────────────────────────────────────────────
-const activeResultTab = ref('article'); // 'article' | 'links' | 'quality' | 'metrics'
+const activeResultTab = ref('article'); // 'article' | 'links' | 'quality' | 'metrics' | 'json'
 const articlePreviewRef = ref(null);
+
+// ── ACF JSON для статьи блога (задача: «Сформировать JSON») ────────────
+// Детерминированный (без LLM) конвертер HTML статьи → массив ACF Flexible
+// Content блоков. Гарантирует байт-в-байт сохранность текста и ровное
+// распределение контента по секциям, а «мнение эксперта»
+// (<blockquote class="expert-opinion">) всегда попадает в отдельный
+// expert-блок (см. utils/acfDeterministicBuilder.js).
+const acfJson       = ref('');
+const acfBlocks     = ref([]);
+const acfError      = ref('');
+const acfBuilding   = ref(false);
+
+const acfExpertCount = computed(
+  () => acfBlocks.value.filter((b) => b && b.acf_fc_layout === 'expert').length,
+);
+
+function buildArticleJson() {
+  acfError.value = '';
+  const html = selectedTask.value?.article_html || '';
+  if (!html.trim()) { acfError.value = 'Нет готовой статьи для формирования JSON.'; return; }
+  acfBuilding.value = true;
+  try {
+    const blocks = buildAcfFromHtml(html);
+    if (!Array.isArray(blocks) || !blocks.length) {
+      acfError.value = 'Не удалось разобрать статью в блоки JSON.';
+      acfBlocks.value = [];
+      acfJson.value = '';
+      return;
+    }
+    acfBlocks.value = blocks;
+    // Формат вывода — WordPress ACF: { acf: { content_blocks: [...] } }.
+    acfJson.value = JSON.stringify({ acf: { content_blocks: blocks } }, null, 2);
+  } catch (e) {
+    acfError.value = e?.message || 'Ошибка формирования JSON.';
+    acfBlocks.value = [];
+    acfJson.value = '';
+  } finally {
+    acfBuilding.value = false;
+  }
+}
+
+function copyArticleJson() {
+  if (!acfJson.value) return;
+  copyText(acfJson.value, 'JSON скопирован!');
+}
+
+function downloadArticleJson() {
+  if (!acfJson.value) return;
+  const blob = new Blob([acfJson.value], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${slug(selectedTask.value?.topic || 'article')}.json`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
+}
+
+// При смене выбранной задачи — сбрасываем ранее собранный JSON, чтобы не
+// показывать блоки от предыдущей статьи.
+watch(() => selectedTask.value?.id, () => {
+  acfJson.value = '';
+  acfBlocks.value = [];
+  acfError.value = '';
+});
 
 const sanitizedHtml = computed(() => {
   const html = selectedTask.value?.article_html || '';
@@ -1271,6 +1336,7 @@ onUnmounted(() => { stopTicker(); });
           <div class="border-b border-gray-800 flex gap-1 -mb-px">
             <button v-for="tab in [
                      { k: 'article', label: '📄 Статья' },
+                     { k: 'json',    label: '🧩 JSON' },
                      { k: 'links',   label: '🔗 Перелинковка' },
                      { k: 'quality', label: '🧪 Качество' },
                      { k: 'metrics', label: '💰 Метрики' },
@@ -1379,6 +1445,44 @@ onUnmounted(() => { stopTicker(); });
             <article ref="articlePreviewRef"
                      class="info-article-preview prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
                      v-html="sanitizedHtml"></article>
+          </div>
+
+          <!-- TAB: JSON (ACF Flexible Content) -->
+          <div v-if="activeResultTab === 'json'" class="space-y-3">
+            <p class="text-xs text-gray-400 leading-relaxed">
+              Формирует WordPress ACF Flexible Content из готовой статьи <b>без изменения текста</b>:
+              контент ровно распределяется по секциям (blocks / steps / bens / price / faq / attention),
+              а <b>мнение эксперта</b> всегда выносится в отдельный блок <code class="text-indigo-300">expert</code>.
+            </p>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <button class="btn-primary" :disabled="acfBuilding" @click="buildArticleJson">
+                🧩 Сформировать JSON
+              </button>
+              <button v-if="acfJson" class="btn-ghost border border-gray-700" @click="copyArticleJson">
+                📋 Скопировать JSON
+              </button>
+              <button v-if="acfJson" class="btn-ghost border border-gray-700" @click="downloadArticleJson">
+                ⬇ Скачать .json
+              </button>
+              <span v-if="acfBlocks.length" class="text-[11px] text-gray-500">
+                Блоков: <b class="text-gray-300">{{ acfBlocks.length }}</b>
+                · Мнение эксперта:
+                <b :class="acfExpertCount ? 'text-emerald-300' : 'text-amber-300'">
+                  {{ acfExpertCount ? '✓ выведено' : 'не найдено' }}
+                </b>
+              </span>
+            </div>
+
+            <div v-if="acfError" class="p-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">
+              {{ acfError }}
+            </div>
+
+            <pre v-if="acfJson"
+                 class="bg-gray-950 border border-gray-800 rounded-lg p-4 text-[12px] leading-relaxed text-gray-200 overflow-auto max-h-[560px] whitespace-pre">{{ acfJson }}</pre>
+            <div v-else-if="!acfError" class="text-sm text-gray-500">
+              Нажмите «Сформировать JSON», чтобы получить ACF-блоки для этой статьи.
+            </div>
           </div>
 
           <!-- TAB: Перелинковка -->
