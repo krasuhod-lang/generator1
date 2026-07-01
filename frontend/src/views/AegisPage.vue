@@ -4,7 +4,7 @@
  *
  * Показывает:
  *   • Статус всех подсистем (GraphRAG / VectorDB / Ray / LangGraph /
- *     DSPy / GA4 / SelfMutate) и их health (зелёный/жёлтый/красный).
+ *     DSPy / RL feedback / SelfMutate) и их health (зелёный/жёлтый/красный).
  *   • Состояние компилированного мозга (brain_state/compiled_writer.yaml).
  *   • Последние aegis_runs (Spq, итерации, стоимость, verdict).
  *   • GitHub-бэклог (issues с label aegis:ready).
@@ -239,10 +239,10 @@ function expBadge(status, outcome) {
               <td>last: {{ status.dspy.status?.body?.last_status || '—' }}</td>
             </tr>
             <tr>
-              <td>📊 GA4 RL/PPO feedback</td>
-              <td>{{ status.rl_ga4.enabled ? '✅' : '⛔' }}</td>
+              <td>📊 RL/PPO feedback (GSC + Яндекс)</td>
+              <td>{{ status.rl_feedback?.enabled ? '✅' : '⛔' }}</td>
               <td>—</td>
-              <td>property: {{ status.rl_ga4.property_id_set ? '✓' : '—' }}</td>
+              <td>GSC: {{ status.rl_feedback?.sources?.search_console ? '✓' : '—' }}, Яндекс: {{ status.rl_feedback?.sources?.yandex_webmaster ? '✓' : '—' }}</td>
             </tr>
             <tr>
               <td>🤖 Self-Mutation (DeepSeek-V4-Pro)</td>
@@ -318,7 +318,7 @@ function expBadge(status, outcome) {
           </span>
         </h2>
         <p class="subtle">
-          Единая диагностика Phase 6 (DSPy MIPROv2) и Phase 7 (GA4 RL/PPO):
+          Единая диагностика Phase 6 (DSPy MIPROv2) и Phase 7 (RL/PPO по CTR из GSC + Яндекс.Вебмастера):
           какие ENV выставлены, доступен ли <code>aegis_py</code>, сколько строк в
           <code>aegis_dspy_dataset</code>, что осталось сделать оператору.
           Подробности — <code>GET /api/aegis/training/health</code>.
@@ -362,26 +362,27 @@ function expBadge(status, outcome) {
             </ul>
           </div>
 
-          <!-- GA4 RL/PPO -->
+          <!-- RL/PPO feedback (GSC + Яндекс.Вебмастер) -->
           <div class="th-col">
-            <h3>📊 GA4 RL/PPO {{ dot(trainingHealth.rl_ga4?.ready) }}</h3>
+            <h3>📊 RL/PPO feedback {{ dot(trainingHealth.rl_feedback?.ready) }}</h3>
             <div class="kv-grid">
-              <span class="k">AEGIS_RL_GA4_ENABLED</span>
-              <span class="v">{{ trainingHealth.rl_ga4?.enabled ? '✅' : '⛔' }}</span>
-              <span class="k">property_id</span>
-              <span class="v"><code>{{ trainingHealth.rl_ga4?.property_id || '—' }}</code></span>
-              <span class="k">service account</span>
+              <span class="k">AEGIS_RL_FEEDBACK_ENABLED</span>
+              <span class="v">{{ trainingHealth.rl_feedback?.enabled ? '✅' : '⛔' }}</span>
+              <span class="k">Search Console</span>
               <span class="v">
-                <span v-if="trainingHealth.rl_ga4?.sa_json_valid === true" class="badge badge-ok">валиден</span>
-                <span v-else-if="trainingHealth.rl_ga4?.sa_json_valid === false" class="badge badge-bad">не парсится</span>
-                <span v-else class="badge badge-wait">не задан</span>
-                <span v-if="trainingHealth.rl_ga4?.sa_client_email" class="subtle"> {{ trainingHealth.rl_ga4.sa_client_email }}</span>
+                <span v-if="trainingHealth.rl_feedback?.sources?.search_console" class="badge badge-ok">вкл</span>
+                <span v-else class="badge badge-wait">выкл</span>
+              </span>
+              <span class="k">Яндекс.Вебмастер</span>
+              <span class="v">
+                <span v-if="trainingHealth.rl_feedback?.sources?.yandex_webmaster" class="badge badge-ok">вкл</span>
+                <span v-else class="badge badge-wait">выкл</span>
               </span>
               <span class="k">PPO weight × quantile</span>
-              <span class="v">×{{ trainingHealth.rl_ga4?.ppo_weight ?? '—' }} @ q{{ trainingHealth.rl_ga4?.top_ctr_quantile ?? '—' }}</span>
+              <span class="v">×{{ trainingHealth.rl_feedback?.ppo_weight ?? '—' }} @ q{{ trainingHealth.rl_feedback?.top_ctr_quantile ?? '—' }}</span>
             </div>
-            <ul v-if="trainingHealth.rl_ga4?.issues?.length" class="th-issues">
-              <li v-for="(it, idx) in trainingHealth.rl_ga4.issues" :key="`g${idx}`" :class="`lvl-${it.level}`">
+            <ul v-if="trainingHealth.rl_feedback?.issues?.length" class="th-issues">
+              <li v-for="(it, idx) in trainingHealth.rl_feedback.issues" :key="`g${idx}`" :class="`lvl-${it.level}`">
                 <strong>{{ it.message }}</strong>
                 <div class="subtle">→ {{ it.fix }}</div>
               </li>
@@ -967,7 +968,7 @@ function expBadge(status, outcome) {
 .badge-warn { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border-color: rgba(245, 158, 11, 0.4); }
 .badge-wait { background: rgba(148, 163, 184, 0.12); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.3); }
 .badge-info { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border-color: rgba(59, 130, 246, 0.4); }
-/* Готовность контура обучения: две колонки (DSPy / GA4) и список issues */
+/* Готовность контура обучения: две колонки (DSPy / RL feedback) и список issues */
 .th-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
 @media (max-width: 720px) { .th-grid { grid-template-columns: 1fr; } }
 .th-col h3 { margin: 0 0 6px; font-size: 0.98rem; color: #f3f4f6; }
