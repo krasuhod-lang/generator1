@@ -16,7 +16,7 @@
 | 4 — Ray | 150+ параллельных actors | **Ray cluster** (docker) | `RAY_ADDRESS` |
 | 5 — LangGraph | writer→critic→refiner | aegis_py | `AEGIS_LANGGRAPH_ENABLED=true` |
 | 6 — DSPy | weekly retrain мозга | aegis_py + PostgreSQL | `AEGIS_DSPY_ENABLED=true` |
-| 7 — RL/GA4 | PPO-веса по CTR | GA4 service account | `AEGIS_GA4_PROPERTY_ID`, `AEGIS_GA4_SA_JSON` |
+| 7 — RL feedback | PPO-веса по CTR | GSC + Яндекс.Вебмастер (креды проектов) | `AEGIS_RL_FEEDBACK_ENABLED` |
 | 8 — Self-Mutation | DeepSeek-V4-Pro чинит парсер | DeepSeek API key (уже есть) | `AEGIS_SELFMUTATE_ENABLED=true` |
 | **9 — Observability & FinOps** | метрики Prometheus + alerting Telegram/Slack + Kill Switch | **Prometheus/Grafana** (опц.), **Telegram bot** / **Slack webhook** (опц.) | `AEGIS_TELEMETRY_ENABLED=true`, `AEGIS_ALERTING_ENABLED=true` |
 | **10 — Context Compression** | LLMLingua-style сжатие промптов | — (внутри) | `AEGIS_COMPRESS_ENABLED=true` |
@@ -258,27 +258,37 @@ pip install dspy-ai==2.5.41
 
 ---
 
-## Phase 7 — RL / GA4 feedback loop
+## Phase 7 — RL feedback loop (Search Console + Яндекс.Вебмастер)
 
-### 1. Создать service account в Google Cloud
-1. https://console.cloud.google.com → IAM → Service Accounts → Create
-2. Скачать JSON key
-3. В GA4: Admin → Property Access → добавить email сервисного аккаунта с ролью Viewer
+> Google Analytics у нас **нет и не предусмотрено.** Реальный per-URL
+> CTR-сигнал для PPO-весов берётся из уже интегрированных в проекты
+> источников — Google Search Console (per-URL) и Яндекс.Вебмастер
+> (host-level). Отдельный service account / GA4 property **не нужны** —
+> используются OAuth-токены, которые проекты уже хранят.
+
+### 1. Предусловие
+Проекты должны быть подключены к Google Search Console и/или
+Яндекс.Вебмастеру (это делается в UI проекта, см. `GSC_SETUP.md` /
+`POSITION_TRACKER_SETUP.md`). Никаких дополнительных кред для RL-контура
+заводить не требуется.
 
 ### 2. Env
 ```bash
-AEGIS_RL_GA4_ENABLED=true
-AEGIS_GA4_PROPERTY_ID=123456789
-# Inline JSON (удобно для Heroku/Render):
-AEGIS_GA4_SA_JSON={"type":"service_account",...}
-# или путь к файлу:
-GOOGLE_APPLICATION_CREDENTIALS=/secrets/ga4-sa.json
+AEGIS_RL_FEEDBACK_ENABLED=true
+# Опционально — точечно выключить источник (по умолчанию оба on):
+AEGIS_RL_GSC_ENABLED=true          # Google Search Console (per-URL CTR)
+AEGIS_RL_YANDEX_ENABLED=true       # Яндекс.Вебмастер (host-level CTR)
+AEGIS_RL_TOP_QUANTILE=0.75         # порог топ-квантиля CTR
+AEGIS_RL_PPO_WEIGHT=3              # вес для CTR-победителей
 ```
 
-### 3. Deps
-```bash
-pip install google-analytics-data==0.18.16 google-auth==2.35.0
-```
+### 3. Как это работает
+`backend/src/services/aegis/searchConsoleFeedback.js` тянет per-URL клики/
+показы из GSC (dimension=page) и host-level из Яндекс.Вебмастера, сливает их
+в единый CTR-сигнал (взвешенный по показам между движками) и через
+`computePpoWeights` присваивает страницам-победителям повышенный
+`ppo_weight`. Никаких Python-зависимостей — всё в Node поверх существующих
+`gscService`/`ydxService`.
 
 ---
 
@@ -326,7 +336,7 @@ Forecaster (Модуль 5) находит «white-space LSI кластеры» 
 - [ ] **Neo4j** (Phase 1) — поднять контейнер, заполнить `AEGIS_NEO4J_*`.
 - [ ] **Qdrant** (Phase 2) — поднять контейнер, заполнить `AEGIS_QDRANT_URL`.
 - [ ] **aegis_py** — `docker compose -f docker-compose.aegis.yml --profile aegis up -d aegis_py` (с `--build-arg AEGIS_PY_INSTALL_HEAVY=true` если нужны Phase 1/2/4/6/7).
-- [ ] **GA4 service account** (Phase 7) — создать в Google Cloud + добавить в GA4 property.
+- [ ] **RL feedback** (Phase 7) — подключить проекты к GSC/Яндекс.Вебмастеру, выставить `AEGIS_RL_FEEDBACK_ENABLED=true` (отдельные креды не нужны).
 - [ ] **GitHub PAT** для бэклога — `repo` scope.
 
 После каждого Phase: проверка `GET /api/aegis/status` (фронт `/aegis`) — health всех подсистем должен стать 🟢.
@@ -362,7 +372,7 @@ git commit -m "aegis: rollback brain to <sha>"
 | `GET /api/aegis/runs?limit=20` | Последние циклы рефайна |
 | `GET /api/aegis/backlog` | Очередь работ |
 | `GET /api/aegis/brain/versions` | История DSPy retrain'ов |
-| `GET /api/aegis/training/health` | Готовность контура обучения (DSPy + GA4): ENV-чек-лист, ping aegis_py, dataset rows, baseline yaml, конкретные шаги для оператора. `ready_for_first_retrain: true/false`. |
+| `GET /api/aegis/training/health` | Готовность контура обучения (DSPy + RL/PPO GSC/Яндекс): ENV-чек-лист, ping aegis_py, dataset rows, baseline yaml, конкретные шаги для оператора. `ready_for_first_retrain: true/false`. |
 | `GET http://aegis_py:8800/health` | Здоровье Python-микросервиса |
 | `GET /api/aegis/metrics` | Prometheus-метрики (Phase 9, no auth) |
 | `GET /api/aegis/kill` | Состояние Kill Switch + spend rate + breakers (Phase 9) |
@@ -620,8 +630,8 @@ AEGIS_POISON_ON_FAIL=drop               # drop | mark
 4. **Гейт** (`qualityGate.minOverall=80`): если ниже — **Phase 5 refine loop** запускает рефайнер до `langgraph.maxRefineIters` (3 по умолчанию).
 5. Финальный pair `(user_prompt, html_output, quality_score)` пишется в `aegis_dspy_dataset`.
 
-### Петля 2 — Каждый клик в GA4 → PPO-вес (Phase 7)
-1. Раз в сутки `aegis_py/app/ga4.py` тянет CTR/dwell/scroll per-URL из GA4.
+### Петля 2 — Каждый поисковый клик (GSC/Яндекс) → PPO-вес (Phase 7)
+1. `backend/src/services/aegis/searchConsoleFeedback.js` тянет per-URL CTR/клики/показы из Google Search Console и host-level из Яндекс.Вебмастера, сливая их в единый CTR-сигнал (взвешенный по показам).
 2. `computePpoWeights` присваивает топ-25% статей `ppo_weight=3`, остальным `1`.
 3. Вес попадает в `aegis_dspy_dataset.ppo_weight` — будущий retrain «больше учится» на победителях.
 
@@ -663,8 +673,8 @@ AEGIS_POISON_ON_FAIL=drop               # drop | mark
                            │ tokens, cost, Spq, audit, html
                            ▼
                 ┌──────────────────────┐         ┌──────────────────────┐
-                │   aegis_dspy_dataset │         │ GA4 metrics (раз/сут)│
-                │  (Spq, prompt, html) │◄────────│  CTR / dwell / scroll│
+                │   aegis_dspy_dataset │         │ GSC + Яндекс (раз/сут)│
+                │  (Spq, prompt, html) │◄────────│  CTR / клики / показы │
                 └──────────┬───────────┘ PPO_w   └──────────────────────┘
                            │
             (раз в неделю) ▼
@@ -700,7 +710,7 @@ AEGIS_POISON_ON_FAIL=drop               # drop | mark
 | **Parallel actors** | в `aegis_py/ray_runner.py` | **Ray cluster** | 150+ workers |
 | **Writer→Critic→Refiner граф** | mini-LangGraph в Node | **aegis_py + LangGraph** | визуализация графа состояний |
 | **Weekly retrain мозга** | API-клиент | **aegis_py + DSPy MIPROv2** | автоматическое улучшение промпта |
-| **GA4 CTR feedback** | API-клиент | **GA4 service account** | реальный сигнал от пользователей |
+| **Поисковый CTR feedback** | `searchConsoleFeedback.js` (Node) | **GSC + Яндекс.Вебмастер** (креды проектов) | реальный сигнал от пользователей |
 | **Self-mutation парсера** | API-клиент к DeepSeek-V4-Pro | — (уже есть DeepSeek key) | — |
 | **Backups** | client + `aegis_py/backup.py` | **S3-совместимый bucket** (опц.) | долговременное хранение; без S3 — на локальный volume |
 | **LLM Routing/Fallback** | ✅ `llmRouter.js` + circuit-breaker | **vLLM** (опц.) | 100% офлайн-fallback (Llama 3 70B) |
@@ -708,7 +718,7 @@ AEGIS_POISON_ON_FAIL=drop               # drop | mark
 | **Issue-driven backlog** | API-клиент | **GitHub PAT** | глобальный todo для оператора |
 
 > **Принцип:** _везде, где можно — делаем внутри без зависимостей._  
-> Внешние сервисы добавляются ТОЛЬКО там, где они дают качественный прыжок (хранение онтологии в Neo4j, ML-retrain через DSPy, реальный сигнал из GA4). Phase 9, 10, 12, 13 целиком работают «в одиночку» — никаких docker-стэков поднимать не нужно.
+> Внешние сервисы добавляются ТОЛЬКО там, где они дают качественный прыжок (хранение онтологии в Neo4j, ML-retrain через DSPy, реальный сигнал из GSC/Яндекс.Вебмастера). Phase 9, 10, 12, 13 целиком работают «в одиночку» — никаких docker-стэков поднимать не нужно.
 | `GET http://qdrant:6333/healthz` | Qdrant |
 | `GET http://neo4j:7474/` | Neo4j browser |
 | `GET http://ray-head:8265/` | Ray dashboard |
@@ -717,19 +727,19 @@ AEGIS_POISON_ON_FAIL=drop               # drop | mark
 
 ---
 
-## Чек-лист включения GA4 RL и Self-Mutation (Phase 16)
+## Чек-лист включения RL feedback и Self-Mutation (Phase 16)
 
 Эти подсистемы по умолчанию выключены (см. лента `/aegis` → ⛔). Чтобы их включить, добавьте переменные окружения в продакшен-окружение (НЕ в `.env.example` — он намеренно зафиксирован; вся новая конфигурация хранится в коде, см. `backend/src/services/aegis/featureFlags.js`).
 
-### GA4 RL/PPO feedback (`📊 GA4 RL/PPO`)
+### RL/PPO feedback по CTR (`📊 RL/PPO GSC + Яндекс.Вебмастер`)
 
 | ENV | Значение | Комментарий |
 | --- | --- | --- |
-| `AEGIS_RL_GA4_ENABLED` | `true` | Главный гейт `rlGa4.enabled` |
-| `AEGIS_GA4_PROPERTY_ID` | `properties/000000000` | GA4 Data API property |
-| `AEGIS_GA4_SA_JSON` | JSON service account (одной строкой) | Доступ read-only к GA4 |
+| `AEGIS_RL_FEEDBACK_ENABLED` | `true` | Главный гейт `rlFeedback.enabled` |
+| `AEGIS_RL_GSC_ENABLED` | `true` (default) | Google Search Console как per-URL источник CTR |
+| `AEGIS_RL_YANDEX_ENABLED` | `true` (default) | Яндекс.Вебмастер как host-level источник CTR |
 
-После выставления — перезапустить процесс. В `/api/aegis/status.rl_ga4.property_id_set` появится `true`.
+Отдельные API-креды не нужны — используются OAuth-токены, уже сохранённые в подключённых проектах. После выставления — перезапустить процесс. В `/api/aegis/status.rl_feedback.enabled` появится `true`.
 
 ### Self-Mutation (`🤖 Self-Mutation DeepSeek-V4-Pro`)
 

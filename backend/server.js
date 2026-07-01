@@ -41,6 +41,7 @@ const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
+const cannibalizationRoutes = require('./src/routes/cannibalization.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -130,6 +131,7 @@ app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
 app.use('/api/site-crawler',     siteCrawlerRoutes);
+app.use('/api/cannibalization',  cannibalizationRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
@@ -298,7 +300,7 @@ const start = async () => {
       } catch (e) {
         console.warn('[Server] AEGIS dspyAutoRetrain skipped:', e.message);
       }
-      // Единая диагностика готовности контура обучения (DSPy + GA4 RL/PPO).
+      // Единая диагностика готовности контура обучения (DSPy + RL/PPO GSC/Яндекс).
       // Печатает один WARN со списком конкретных недостающих шагов, если
       // AEGIS_ENABLED=true, но env не сконфигурирован / py недоступен /
       // dataset пустой. Не блокирует старт.
@@ -1818,7 +1820,7 @@ async function ensureSchema() {
         quality_score   JSONB        NOT NULL,
         spq_overall     NUMERIC(5,2) NOT NULL,
         ppo_weight      NUMERIC(6,3) NOT NULL DEFAULT 1.0,
-        ga4_metrics     JSONB,
+        feedback_metrics JSONB,
         model_used      TEXT,
         cost_usd        NUMERIC(10,4),
         created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -1829,6 +1831,24 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_dspy_unused    ON aegis_dspy_dataset (used_in_retrain) WHERE used_in_retrain IS NULL`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS user_hash TEXT`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS source_kind TEXT`);
+    // Миграция 096: GA4 → GSC + Яндекс.Вебмастер. Переименовываем legacy-колонку
+    // ga4_metrics → feedback_metrics (RENAME сохраняет данные), затем гарантируем
+    // наличие колонки для свежесозданных таблиц.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'aegis_dspy_dataset' AND column_name = 'ga4_metrics'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'aegis_dspy_dataset' AND column_name = 'feedback_metrics'
+        ) THEN
+          EXECUTE 'ALTER TABLE aegis_dspy_dataset RENAME COLUMN ga4_metrics TO feedback_metrics';
+        END IF;
+      END $$;
+    `);
+    await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS feedback_metrics JSONB`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS prompt_hash TEXT`);
     await db.query(`ALTER TABLE aegis_dspy_dataset ADD COLUMN IF NOT EXISTS prompt_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await db.query(`
@@ -2141,7 +2161,7 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_actions_status ON aegis_seo_actions (status)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_aegis_seo_actions_type ON aegis_seo_actions (action_type)`);
 
-    // C1: observations — фактические GA4/GSC дельты + reward на URL/неделя.
+    // C1: observations — фактические GSC/Яндекс дельты + reward на URL/неделя.
     await db.query(`
       CREATE TABLE IF NOT EXISTS aegis_seo_observations (
         id                BIGSERIAL    PRIMARY KEY,
@@ -2764,6 +2784,48 @@ async function ensureSchema() {
         ON site_crawl_pages(task_id, depth)`);
     } catch (e) {
       console.warn('[ensureSchema] site_crawl_* (mig 094) skipped:', e.message);
+    }
+
+    // ── Каннибализация (mig 096): SERP-overlap по H1 краулера ──────────────
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS cannibalization_tasks (
+          id            BIGSERIAL PRIMARY KEY,
+          user_id       UUID     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          project_id    UUID     NULL     REFERENCES projects(id) ON DELETE SET NULL,
+          crawl_task_id BIGINT   NULL     REFERENCES site_crawl_tasks(id) ON DELETE SET NULL,
+          lr            TEXT     NULL,
+          engine        TEXT     NOT NULL DEFAULT 'yandex',
+          options       JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          status        TEXT     NOT NULL DEFAULT 'queued',
+          stats         JSONB    NOT NULL DEFAULT '{}'::jsonb,
+          result        JSONB    NULL,
+          error         TEXT     NULL,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          started_at    TIMESTAMPTZ NULL,
+          finished_at   TIMESTAMPTZ NULL
+        )`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_cannibalization_tasks_user_created
+        ON cannibalization_tasks(user_id, created_at DESC)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_cannibalization_tasks_crawl
+        ON cannibalization_tasks(crawl_task_id) WHERE crawl_task_id IS NOT NULL`);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS cannibalization_serp (
+          id           BIGSERIAL PRIMARY KEY,
+          task_id      BIGINT  NOT NULL REFERENCES cannibalization_tasks(id) ON DELETE CASCADE,
+          query        TEXT    NOT NULL,
+          source_url   TEXT    NULL,
+          position     INTEGER NOT NULL,
+          result_url   TEXT    NOT NULL,
+          result_title TEXT    NULL,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_cannibalization_serp_task_query_pos
+        ON cannibalization_serp(task_id, query, position)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_cannibalization_serp_task
+        ON cannibalization_serp(task_id)`);
+    } catch (e) {
+      console.warn('[ensureSchema] cannibalization_* (mig 096) skipped:', e.message);
     }
 
     console.log('[Schema] ensureSchema OK');

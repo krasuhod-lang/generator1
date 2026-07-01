@@ -6,7 +6,7 @@
 -- сохраняет новые веса в brain_state/compiled_writer.yaml.
 --
 -- RL/PPO: колонка ppo_weight применяется поверх классической loss-функции
--- (см. backend/src/services/aegis/ga4Client.js → computePpoWeights).
+-- (см. backend/src/services/aegis/searchConsoleFeedback.js → computePpoWeights).
 
 CREATE TABLE IF NOT EXISTS aegis_dspy_dataset (
     id              BIGSERIAL    PRIMARY KEY,

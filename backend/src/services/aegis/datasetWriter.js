@@ -70,7 +70,8 @@ async function recordTrainingExample({
   userPrompt,
   htmlOutput,
   qualityScore,
-  gaMetrics,
+  feedbackMetrics,
+  gaMetrics, // deprecated alias for feedbackMetrics (обратная совместимость)
   modelUsed,
   costUsd,
   userId,
@@ -81,6 +82,7 @@ async function recordTrainingExample({
   if (!_passesGate(qualityScore)) return { ok: false, reason: 'quality_gate_reject' };
 
   const promptSafe = String(userPrompt || '').slice(0, MAX_PROMPT_CHARS);
+  const feedback = feedbackMetrics != null ? feedbackMetrics : (gaMetrics != null ? gaMetrics : null);
   const linkage = promptHash
     ? { prompt_hash: promptHash, prompt_meta: promptMeta || {} }
     : buildPromptMeta({ kind, userPrompt });
@@ -91,7 +93,7 @@ async function recordTrainingExample({
     await db.query(
       `INSERT INTO aegis_dspy_dataset
          (article_ref, niche, user_prompt, html_output, quality_score,
-          spq_overall, ppo_weight, ga4_metrics, model_used, cost_usd,
+          spq_overall, ppo_weight, feedback_metrics, model_used, cost_usd,
           user_hash, source_kind, prompt_hash, prompt_meta)
        VALUES ($1, $2, $3, $4, $5::jsonb,
                $6, 1.0, $7::jsonb, $8, $9,
@@ -103,7 +105,7 @@ async function recordTrainingExample({
          html_output = EXCLUDED.html_output,
          quality_score = EXCLUDED.quality_score,
          spq_overall = EXCLUDED.spq_overall,
-         ga4_metrics = EXCLUDED.ga4_metrics,
+         feedback_metrics = EXCLUDED.feedback_metrics,
          model_used = EXCLUDED.model_used,
          cost_usd = EXCLUDED.cost_usd,
          user_hash = EXCLUDED.user_hash,
@@ -117,7 +119,7 @@ async function recordTrainingExample({
         String(htmlOutput),
         JSON.stringify(qualityScore || {}),
         spqOverall,
-        gaMetrics ? JSON.stringify(gaMetrics) : null,
+        feedback ? JSON.stringify(feedback) : null,
         modelUsed || null,
         _num(costUsd),
         _hashUser(userId),

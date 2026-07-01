@@ -2,7 +2,7 @@
 
 /**
  * aegis/trainingHealth — единая диагностика готовности контура обучения
- * мозга A.E.G.I.S. (Phase 6 DSPy + Phase 7 GA4 RL/PPO).
+ * мозга A.E.G.I.S. (Phase 6 DSPy + Phase 7 RL/PPO по CTR из GSC + Яндекс.Вебмастера).
  *
  * Зачем: до этого оператору приходилось вручную сверять ENV прод-инстанса,
  * GitHub-секреты, размер `aegis_dspy_dataset`, `aegis_brain_versions` и
@@ -223,37 +223,23 @@ async function buildDspySection(opts = {}) {
 }
 
 /**
- * buildGa4Section(opts) — собирает раздел RL/GA4.
+ * buildFeedbackSection(opts) — собирает раздел RL feedback loop
+ * (per-URL CTR из Google Search Console + Яндекс.Вебмастера).
  */
-function buildGa4Section(opts = {}) {
+function buildFeedbackSection(opts = {}) {
   const flags = opts.flags || getAegisFlags();
   const envHas = opts.envHas || _envPresence;
-  const cfg = flags.rlGa4 || {};
+  const cfg = flags.rlFeedback || {};
+  const sources = cfg.sources || {};
 
   const envChecks = [
-    { name: 'AEGIS_RL_GA4_ENABLED',  set: envHas('AEGIS_RL_GA4_ENABLED'),  required: true,
+    { name: 'AEGIS_RL_FEEDBACK_ENABLED', set: envHas('AEGIS_RL_FEEDBACK_ENABLED'), required: true,
       help: 'Главный гейт PPO-весов по CTR. Без него RL-контур использует uniform-веса.' },
-    { name: 'AEGIS_GA4_PROPERTY_ID', set: envHas('AEGIS_GA4_PROPERTY_ID'), required: true,
-      help: 'GA4 Data API property (например, properties/000000000).' },
-    { name: 'AEGIS_GA4_SA_JSON',     set: envHas('AEGIS_GA4_SA_JSON'),     required: true,
-      help: 'JSON сервисного аккаунта Google (одной строкой). Должен иметь Viewer к GA4 property.' },
-    { name: 'AEGIS_PY_URL',          set: envHas('AEGIS_PY_URL'),          required: true,
-      help: 'OAuth/JWT для GA4 делегируется в aegis_py (/ga4/fetch).' },
+    { name: 'AEGIS_RL_GSC_ENABLED',      set: envHas('AEGIS_RL_GSC_ENABLED'),      required: false,
+      help: 'Использовать Google Search Console как per-URL источник CTR (по умолчанию on).' },
+    { name: 'AEGIS_RL_YANDEX_ENABLED',   set: envHas('AEGIS_RL_YANDEX_ENABLED'),   required: false,
+      help: 'Использовать Яндекс.Вебмастер как host-level источник CTR (по умолчанию on).' },
   ];
-
-  // Sanity-проверка JSON сервисного аккаунта: парсится и содержит client_email + private_key.
-  let saJsonValid = null;
-  let saClientEmail = null;
-  const saRaw = process.env.AEGIS_GA4_SA_JSON;
-  if (saRaw) {
-    try {
-      const parsed = JSON.parse(saRaw);
-      saJsonValid = Boolean(parsed && parsed.client_email && parsed.private_key);
-      saClientEmail = parsed && parsed.client_email ? String(parsed.client_email) : null;
-    } catch (_) {
-      saJsonValid = false;
-    }
-  }
 
   const missingRequired = envChecks.filter((c) => c.required && !c.set).map((c) => c.name);
 
@@ -261,40 +247,32 @@ function buildGa4Section(opts = {}) {
   if (!cfg.enabled) {
     issues.push({
       level: 'info',
-      code: 'rl_ga4_disabled',
-      message: 'AEGIS_RL_GA4_ENABLED не выставлен — RL-контур использует uniform-веса (=1 для всех страниц).',
-      fix: 'Опционально: настроить GA4 service account и выставить AEGIS_RL_GA4_ENABLED=true.',
+      code: 'rl_feedback_disabled',
+      message: 'AEGIS_RL_FEEDBACK_ENABLED не выставлен — RL-контур использует uniform-веса (=1 для всех страниц).',
+      fix: 'Опционально: выставить AEGIS_RL_FEEDBACK_ENABLED=true (креды GSC/Яндекса берутся из подключённых проектов).',
     });
   }
-  for (const name of missingRequired) {
-    issues.push({
-      level: cfg.enabled ? 'error' : 'info',
-      code: `env_missing:${name}`,
-      message: `Не выставлена ${name}.`,
-      fix: `Добавить ${name} в .env прод-инстанса.`,
-    });
-  }
-  if (saRaw && saJsonValid === false) {
+  if (cfg.enabled && sources.searchConsole === false && sources.yandexWebmaster === false) {
     issues.push({
       level: 'error',
-      code: 'sa_json_invalid',
-      message: 'AEGIS_GA4_SA_JSON задан, но не парсится как JSON / не содержит client_email+private_key.',
-      fix: 'Выгрузить новый ключ сервис-аккаунта в JSON и записать в одну строку.',
+      code: 'rl_feedback_no_source',
+      message: 'RL feedback включён, но оба источника (GSC и Яндекс.Вебмастер) отключены.',
+      fix: 'Включить хотя бы один: AEGIS_RL_GSC_ENABLED=true или AEGIS_RL_YANDEX_ENABLED=true.',
     });
   }
 
   const blockingErrors = issues.filter((i) => i.level === 'error');
-  const ready = cfg.enabled
-    && missingRequired.length === 0
-    && saJsonValid === true
+  const ready = Boolean(cfg.enabled)
+    && (sources.searchConsole !== false || sources.yandexWebmaster !== false)
     && blockingErrors.length === 0;
 
   return {
     enabled: Boolean(cfg.enabled),
     env: envChecks,
-    sa_json_valid: saJsonValid,
-    sa_client_email: saClientEmail,
-    property_id: cfg.propertyId || null,
+    sources: {
+      search_console: sources.searchConsole !== false,
+      yandex_webmaster: sources.yandexWebmaster !== false,
+    },
     top_ctr_quantile: cfg.topCtrQuantile,
     ppo_weight: cfg.ppoWeight,
     issues,
@@ -312,13 +290,13 @@ async function buildTrainingHealth({ db } = {}) {
   try { autoTelemetry = require('./dspyAutoRetrain').getDspyAutoTelemetry(); } catch (_) {}
 
   const dspySection = await buildDspySection({ db, flags, autoTelemetry });
-  const ga4Section  = buildGa4Section({ flags });
+  const feedbackSection = buildFeedbackSection({ flags });
 
   return {
     generated_at: new Date().toISOString(),
     aegis_enabled: Boolean(flags.enabled),
     dspy: dspySection,
-    rl_ga4: ga4Section,
+    rl_feedback: feedbackSection,
     ready_for_first_retrain: dspySection.ready_for_first_retrain,
   };
 }
@@ -333,7 +311,7 @@ function logStartupAdvice(report, logger) {
   if (!report || !report.aegis_enabled) return;
   const blocking = [
     ...((report.dspy && report.dspy.issues) || []).filter((i) => i.level === 'error'),
-    ...((report.rl_ga4 && report.rl_ga4.issues) || []).filter((i) => i.level === 'error'),
+    ...((report.rl_feedback && report.rl_feedback.issues) || []).filter((i) => i.level === 'error'),
   ];
   if (!blocking.length) {
     log.log('[aegis/trainingHealth] ✓ контур обучения готов к первому retrain.');
@@ -350,6 +328,6 @@ function logStartupAdvice(report, logger) {
 module.exports = {
   buildTrainingHealth,
   buildDspySection,
-  buildGa4Section,
+  buildFeedbackSection,
   logStartupAdvice,
 };

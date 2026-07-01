@@ -635,7 +635,7 @@ async function processArticleTopicTask(taskId) {
         userPrompt,
         htmlOutput: result.text || '',
         qualityScore: { overall: 85, subscores: { eeat: 85, fact_check: 85, plagiarism: 85 } },
-        gaMetrics: null,
+        feedbackMetrics: null,
         modelUsed: result.model || null,
         costUsd,
         userId: task.user_id || null,

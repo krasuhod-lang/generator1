@@ -87,7 +87,7 @@ const seoBrainBody = express.json({ limit: '5mb' });
 router.get('/seo-brain',         auth, getSeoBrainSnapshot);
 router.post('/seo-brain/analyze', auth, writeLimiter, seoBrainBody, analyzeSeoBrain);
 
-// Phase 15.C: SEO observations (GA4/GSC delta → reward → dataset backfill).
+// Phase 15.C: SEO observations (GSC/Яндекс delta → reward → dataset backfill).
 router.post('/seo-brain/pages/observe', auth, writeLimiter, seoBrainBody, observeSeoPages);
 
 // Phase A4: retention для prompt audit (admin-only ручной/cron triggered cleanup).
@@ -118,7 +118,7 @@ router.post('/experiments/run',             auth, writeLimiter, runExperimentsNo
 router.post('/experiments/:id/dispatch',    auth, writeLimiter, dispatchExperimentHandler);
 router.post('/experiments/:id/measure',     auth, writeLimiter, express.json({ limit: '64kb' }), measureExperimentHandler);
 
-// Phase B: единая диагностика готовности контура обучения (DSPy + GA4 RL/PPO).
+// Phase B: единая диагностика готовности контура обучения (DSPy + RL/PPO по CTR из GSC + Яндекс.Вебмастера).
 // Возвращает env-чек-лист, ping aegis_py, статистику aegis_dspy_dataset,
 // последнюю запись aegis_brain_versions, размер baseline-yaml и список
 // конкретных шагов, которые остались оператору.

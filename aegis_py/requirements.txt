@@ -6,11 +6,13 @@
 #   • Ray Cluster submit/jobs
 #   • LangGraph runner (writer/critic/refiner)
 #   • DSPy MIPROv2 optimizer
-#   • GA4 reporter (RL/PPO feedback)
 #   • DeepSeek-V4-Pro mutator (НЕ Claude, по решению владельца продукта)
 #
-# Все тяжёлые зависимости (neo4j, qdrant-client, ray, langgraph, dspy-ai,
-# google-analytics-data) — ОПЦИОНАЛЬНЫЕ. Сервис стартует и без них
+# RL/PPO feedback берётся из Node (GSC + Яндекс.Вебмастер), не из GA4 —
+# Google Analytics у нас нет и не предусмотрено.
+#
+# Все тяжёлые зависимости (neo4j, qdrant-client, ray, langgraph, dspy-ai)
+# — ОПЦИОНАЛЬНЫЕ. Сервис стартует и без них
 # (try/except), просто соответствующие endpoint'ы вернут 503.
 #
 # Обязательные deps — лёгкие (fastapi, uvicorn, pydantic, requests).
@@ -32,6 +34,4 @@ neat-python==0.92
 # ray==2.39.0                        # Ray Cluster (Phase 4)
 # langgraph==0.2.50                  # LangGraph runner / SEO State Machine (иначе — sequential fallback)
 # dspy-ai==2.5.41                    # DSPy MIPROv2 / SEO Drafting Assertions
-# google-analytics-data==0.18.16     # GA4 Reporting API v1 (Phase 7)
-# google-auth==2.35.0                # OAuth2 для GA4
 # brian2==2.7.1                      # BioBrain SNN (optional heavy)

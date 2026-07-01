@@ -8,7 +8,7 @@ Phase 14:
     seed'ы из aegis_py.app.dspy_seed (10–12 эталонных TOP-1 SEO-статей).
   • ε-greedy: в `epsilon_rate` (0..0.20) проценте случаев применяет
     мутацию к compiled prompt'у (Mode Collapse mitigation). Если мутация
-    «выстрелит» (улучшит GA4-метрики), она закрепится в следующем retrain'е.
+    «выстрелит» (улучшит CTR-метрики GSC/Яндекса), она закрепится в следующем retrain'е.
 
 Графейс-деградирует: если dspy-ai не установлен → is_available() == False.
 """
@@ -38,7 +38,7 @@ _STATE_FILE = Path(os.environ.get("AEGIS_DSPY_STATE_FILE", "/tmp/aegis_dspy_stat
 # ── ε-greedy mutation taxonomy ───────────────────────────────────────
 # Каждая мутация — детерминированная трансформация системного промпта
 # (структура / порядок секций / длина / акценты), не меняющая смысла,
-# но дающая модели «новую перспективу». Если в GA4 неделей позже у
+# но дающая модели «новую перспективу». Если в поиске неделей позже у
 # контента, сгенерированного с мутацией M, CTR выше — в следующий
 # retrain эта мутация попадёт в обычный prompt-search space.
 MUTATION_KINDS: Tuple[str, ...] = (
@@ -154,7 +154,7 @@ def pick_mutation(*, seed_key: Optional[str] = None,
     Если задан `seed_key` (например, hash(niche + week_iso)), выбор
     становится детерминированным внутри недели → одинаковая мутация
     для всех задач этой недели/ниши, чтобы накопить статистически
-    значимый GA4-сигнал.
+    значимый CTR-сигнал (GSC/Яндекс).
     """
     if seed_key:
         digest = hashlib.sha256(seed_key.encode("utf-8")).digest()
@@ -253,7 +253,7 @@ def retrain(
     mutation_kind = None
     if mutation_applied:
         # Детерминированный seed_key по нише+неделе: одна и та же мутация
-        # для всех задач недели → статистически сравнимая GA4-метрика.
+        # для всех задач недели → статистически сравнимая CTR-метрика.
         week_iso = datetime.datetime.utcnow().strftime("%Y-W%U")
         mutation_kind = pick_mutation(
             seed_key=f"{niche or 'global'}|{week_iso}",

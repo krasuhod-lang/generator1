@@ -1,6 +1,6 @@
 # =============================================================================
 # A.E.G.I.S. Python microservice
-# Stateless coordinator + GraphRAG/VectorDB/Ray/DSPy/GA4/Mutator wrappers.
+# Stateless coordinator + GraphRAG/VectorDB/Ray/DSPy/Mutator wrappers.
 # Все тяжёлые deps опциональны (см. requirements.txt).
 # =============================================================================
 FROM python:3.11-slim
@@ -28,7 +28,6 @@ RUN if [ "$INSTALL_HEAVY" = "true" ]; then \
         pip install --no-cache-dir ray==2.39.0 || echo "[aegis_py] ray deps failed"; \
         pip install --no-cache-dir langgraph==0.2.50 || echo "[aegis_py] langgraph failed"; \
         pip install --no-cache-dir dspy-ai==2.5.41 || echo "[aegis_py] dspy failed"; \
-        pip install --no-cache-dir google-analytics-data==0.18.16 google-auth==2.35.0 || echo "[aegis_py] ga4 failed"; \
     fi
 
 COPY app /app/aegis_py/app

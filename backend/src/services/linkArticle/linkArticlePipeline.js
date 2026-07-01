@@ -903,7 +903,7 @@ async function processLinkArticleTask(taskId) {
             userPrompt: task.topic || '',
             htmlOutput: articleHtml || '',
             qualityScore: quality,
-            gaMetrics: null,
+            feedbackMetrics: null,
             modelUsed: quality.model_used || t.gemini_model || null,
             costUsd: Number(t.total_cost_usd) || 0,
             userId: task.user_id || null,

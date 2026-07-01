@@ -15,7 +15,7 @@ def test_health_ok():
     assert "version" in data
     assert "subsystems" in data
     # Все подсистемы должны быть disabled на чистом окружении (без heavy deps + env).
-    for k in ("graphrag", "vectordb", "ray", "langgraph", "dspy", "ga4", "mutator"):
+    for k in ("graphrag", "vectordb", "ray", "langgraph", "dspy", "mutator"):
         assert k in data["subsystems"], f"missing subsystem '{k}'"
 
 

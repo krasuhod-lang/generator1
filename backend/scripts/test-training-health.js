@@ -7,7 +7,7 @@
  * Покрывает:
  *   • buildDspySection с разными комбинациями ENV / py reachability /
  *     dataset rows / baseline yaml;
- *   • buildGa4Section с валидным/невалидным SA JSON и enabled/disabled;
+ *   • buildFeedbackSection с источниками GSC/Яндекс и enabled/disabled;
  *   • logStartupAdvice печатает WARN при ошибках и OK при готовности;
  *   • ready_for_first_retrain корректен по основным сценариям.
  */
@@ -51,7 +51,13 @@ function fakeFlags(over = {}) {
   return {
     enabled: true,
     dspy: { enabled: true, autoRetrainEnabled: true, autoRetrainMinRows: 10, ...((over && over.dspy) || {}) },
-    rlGa4: { enabled: false, propertyId: '', serviceAccountJson: '', topCtrQuantile: 0.75, ppoWeight: 3, ...((over && over.rlGa4) || {}) },
+    rlFeedback: {
+      enabled: false,
+      sources: { searchConsole: true, yandexWebmaster: true },
+      topCtrQuantile: 0.75,
+      ppoWeight: 3,
+      ...((over && over.rlFeedback) || {}),
+    },
     ...over,
   };
 }
@@ -162,63 +168,38 @@ test('DSPy: GitHub-секреты всегда упомянуты как info-is
   assert.ok(r.issues.some((i) => i.code === 'github_secrets_reminder' && i.level === 'info'));
 });
 
-// ── GA4 section ───────────────────────────────────────────────────
+// ── RL feedback section (GSC + Яндекс.Вебмастер) ──────────────────
 
-test('GA4: disabled (default) → ready=false, info issues, не блокирует DSPy', () => {
-  const r = trainingHealth.buildGa4Section({
-    flags: fakeFlags({ rlGa4: { enabled: false } }),
+test('feedback: disabled (default) → ready=false, info issue, не блокирует DSPy', () => {
+  const r = trainingHealth.buildFeedbackSection({
+    flags: fakeFlags({ rlFeedback: { enabled: false, sources: { searchConsole: true, yandexWebmaster: true } } }),
     envHas: envHasFromMap({}),
   });
   assert.strictEqual(r.enabled, false);
   assert.strictEqual(r.ready, false);
-  assert.ok(r.issues.some((i) => i.code === 'rl_ga4_disabled' && i.level === 'info'));
-  // Когда rlGa4 disabled — недостающие env идут как info, не error
+  assert.ok(r.issues.some((i) => i.code === 'rl_feedback_disabled' && i.level === 'info'));
   const errs = r.issues.filter((i) => i.level === 'error');
   assert.strictEqual(errs.length, 0);
 });
 
-test('GA4: enabled но env пустой → error issues', () => {
-  const r = trainingHealth.buildGa4Section({
-    flags: fakeFlags({ rlGa4: { enabled: true } }),
-    envHas: envHasFromMap({}),
+test('feedback: enabled + хотя бы один источник → ready=true', () => {
+  const r = trainingHealth.buildFeedbackSection({
+    flags: fakeFlags({ rlFeedback: { enabled: true, sources: { searchConsole: true, yandexWebmaster: false } } }),
+    envHas: envHasFromMap({ AEGIS_RL_FEEDBACK_ENABLED: 'true' }),
+  });
+  assert.strictEqual(r.enabled, true);
+  assert.strictEqual(r.ready, true, JSON.stringify(r.issues));
+  assert.strictEqual(r.sources.search_console, true);
+  assert.strictEqual(r.sources.yandex_webmaster, false);
+});
+
+test('feedback: enabled но оба источника выключены → error', () => {
+  const r = trainingHealth.buildFeedbackSection({
+    flags: fakeFlags({ rlFeedback: { enabled: true, sources: { searchConsole: false, yandexWebmaster: false } } }),
+    envHas: envHasFromMap({ AEGIS_RL_FEEDBACK_ENABLED: 'true' }),
   });
   assert.strictEqual(r.ready, false);
-  const errCodes = r.issues.filter((i) => i.level === 'error').map((i) => i.code);
-  assert.ok(errCodes.includes('env_missing:AEGIS_GA4_PROPERTY_ID'));
-  assert.ok(errCodes.includes('env_missing:AEGIS_GA4_SA_JSON'));
-});
-
-test('GA4: невалидный SA JSON → error sa_json_invalid', () => {
-  process.env.AEGIS_GA4_SA_JSON = 'not-json';
-  try {
-    const r = trainingHealth.buildGa4Section({
-      flags: fakeFlags({ rlGa4: { enabled: true, propertyId: 'properties/1' } }),
-      envHas: envHasFromMap({
-        AEGIS_RL_GA4_ENABLED: 'true', AEGIS_GA4_PROPERTY_ID: 'properties/1',
-        AEGIS_GA4_SA_JSON: 'not-json', AEGIS_PY_URL: 'http://x',
-      }),
-    });
-    assert.strictEqual(r.sa_json_valid, false);
-    assert.strictEqual(r.ready, false);
-    assert.ok(r.issues.some((i) => i.code === 'sa_json_invalid' && i.level === 'error'));
-  } finally { delete process.env.AEGIS_GA4_SA_JSON; }
-});
-
-test('GA4: валидный SA JSON + все ENV → ready=true, client_email вытащен', () => {
-  const sa = JSON.stringify({ type: 'service_account', client_email: 'svc@x.iam.gserviceaccount.com', private_key: '---KEY---' });
-  process.env.AEGIS_GA4_SA_JSON = sa;
-  try {
-    const r = trainingHealth.buildGa4Section({
-      flags: fakeFlags({ rlGa4: { enabled: true, propertyId: 'properties/1' } }),
-      envHas: envHasFromMap({
-        AEGIS_RL_GA4_ENABLED: 'true', AEGIS_GA4_PROPERTY_ID: 'properties/1',
-        AEGIS_GA4_SA_JSON: sa, AEGIS_PY_URL: 'http://x',
-      }),
-    });
-    assert.strictEqual(r.sa_json_valid, true);
-    assert.strictEqual(r.sa_client_email, 'svc@x.iam.gserviceaccount.com');
-    assert.strictEqual(r.ready, true, JSON.stringify(r.issues));
-  } finally { delete process.env.AEGIS_GA4_SA_JSON; }
+  assert.ok(r.issues.some((i) => i.code === 'rl_feedback_no_source' && i.level === 'error'));
 });
 
 // ── logStartupAdvice ──────────────────────────────────────────────
@@ -226,7 +207,7 @@ test('GA4: валидный SA JSON + все ENV → ready=true, client_email в
 test('logStartupAdvice: aegis disabled → молчит', () => {
   const captured = [];
   const log = { log: (m) => captured.push(['log', m]), warn: (m) => captured.push(['warn', m]) };
-  trainingHealth.logStartupAdvice({ aegis_enabled: false, dspy: { issues: [] }, rl_ga4: { issues: [] } }, log);
+  trainingHealth.logStartupAdvice({ aegis_enabled: false, dspy: { issues: [] }, rl_feedback: { issues: [] } }, log);
   assert.strictEqual(captured.length, 0);
 });
 
@@ -236,7 +217,7 @@ test('logStartupAdvice: есть error issues → WARN с перечнем', () 
   trainingHealth.logStartupAdvice({
     aegis_enabled: true,
     dspy:   { issues: [{ level: 'error', code: 'dspy_disabled', message: 'X', fix: 'Y' }] },
-    rl_ga4: { issues: [] },
+    rl_feedback: { issues: [] },
   }, log);
   assert.strictEqual(captured.length, 1);
   assert.strictEqual(captured[0][0], 'warn');
@@ -250,7 +231,7 @@ test('logStartupAdvice: нет error issues → один INFO log', () => {
   trainingHealth.logStartupAdvice({
     aegis_enabled: true,
     dspy:   { issues: [{ level: 'info', code: 'github_secrets_reminder', message: 'A', fix: 'B' }] },
-    rl_ga4: { issues: [] },
+    rl_feedback: { issues: [] },
   }, log);
   assert.strictEqual(captured.length, 1);
   assert.strictEqual(captured[0][0], 'log');

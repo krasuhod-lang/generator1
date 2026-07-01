@@ -391,7 +391,7 @@ async function _writeAegisTrainingExample({
     userPrompt,
     htmlOutput,
     qualityScore: { overall: 85, subscores: { eeat: 85, fact_check: 85, plagiarism: 85 } },
-    gaMetrics: null,
+    feedbackMetrics: null,
     modelUsed: model || null,
     costUsd: Number(costUsd) || 0,
     userId: task.user_id || null,
