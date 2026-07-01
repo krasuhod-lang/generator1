@@ -216,6 +216,7 @@ async function processArticleTopicTask(taskId) {
         SEARCH_ECOSYSTEM:   task.search_ecosystem || '',
         PARENT_CONTEXT:     parentContext || '(отсутствует — опирайся только на тренд и нишу)',
         SIBLING_DEEP_DIVES: siblingBlock,
+        CURRENT_YEAR:       String(new Date().getFullYear()),
       });
     } else if (task.mode === 'topic_ideas') {
       // Третий режим: подбор N тем статей + анализ рынка/сущностей/интентов
@@ -282,6 +283,7 @@ async function processArticleTopicTask(taskId) {
         TARGET_URL:  String(stashedInputs.target_url || '').slice(0, 300) || '(не указан)',
         BRAND_HINT:  String(stashedInputs.brand_hint || '').slice(0, 300) || '(не указано)',
         TOPIC_COUNT: String(requestedCount),
+        CURRENT_YEAR: String(new Date().getFullYear()),
         EXCLUDED_TOPICS_LIST:   excludedTopicsList,
         EXCLUDED_CLUSTERS_LIST: excludedClustersList,
       });
@@ -312,6 +314,7 @@ async function processArticleTopicTask(taskId) {
         MARKET_STAGE:     task.market_stage || '(не указано)',
         SEARCH_ECOSYSTEM: task.search_ecosystem || '(не указано)',
         TOP_COMPETITORS:  task.top_competitors || '(не указаны)',
+        CURRENT_YEAR:     String(new Date().getFullYear()),
       });
       userPrompt = projectContextBlockMain
         ? `${projectContextBlockMain}\n\n${mainBody}`

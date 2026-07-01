@@ -531,6 +531,7 @@ async function runWriter(task, args, ctx, opts = {}) {
       `author_name: ${authorName || '[не задано — пропусти byline-блок]'}`,
       `author_role: ${authorRole || '[не задано]'}`,
       `date_modified: ${dateModified}`,
+      `current_year: ${new Date().getFullYear()}`,
       `stage0_audience: ${pointerOrJson('§3 Аудитория и тон', audience, iakbReady, 3500)}`,
       `stage1_intents: ${pointerOrJson('§4 Сущности/интенты/jtbd', intents, iakbReady, 5000)}`,
       `whitespace_hints: ${pointerOrJson('§5 White-space', (whitespace && whitespace.article_hierarchy_hints) || {}, iakbReady, 2500)}`,
