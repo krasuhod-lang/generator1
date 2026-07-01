@@ -234,6 +234,36 @@ async function selectTask(id) {
   selectedId.value = id;
   resetCannibalization();
   await Promise.all([loadTask(), loadPages(), loadTree()]);
+  // Задача 1: результаты каннибализации сохраняются в БД и должны выводиться
+  // в каждой задаче парсера — подтягиваем последний прогон для этого краула.
+  await loadExistingCannibalization();
+}
+
+// Подтягиваем последнюю задачу каннибализации, привязанную к текущему краулу,
+// и восстанавливаем её результат/статус. Благодаря этому отчёт «переживает»
+// перезагрузку страницы и переключение между задачами (раньше он терялся,
+// т.к. resetCannibalization() очищал состояние при каждом выборе задачи).
+async function loadExistingCannibalization() {
+  if (!selectedId.value) return;
+  try {
+    const { data } = await api.get('/cannibalization/tasks');
+    const items = (data.items || []).filter(
+      (t) => Number(t.crawl_task_id) === Number(selectedId.value),
+    );
+    if (!items.length) return;
+    // Бэкенд отдаёт список ORDER BY created_at DESC — берём самый свежий.
+    const latest = items[0];
+    if (Number(selectedId.value) !== Number(latest.crawl_task_id)) return;
+    cann.value.task = latest;
+    if (latest.status === 'done') {
+      await loadCannResult();
+    } else if (latest.status === 'running' || latest.status === 'queued') {
+      cann.value.running = true;
+      startCannPolling();
+    } else if (latest.status === 'error') {
+      cann.value.error = latest.error || 'Ошибка сканирования';
+    }
+  } catch (_) { /* тихо игнорируем — вкладка каннибализации просто будет пустой */ }
 }
 
 async function loadTask() {
@@ -576,7 +606,7 @@ onUnmounted(() => { stopPolling(); stopCannPolling(); });
         <h2>Задачи</h2>
         <table class="tbl small">
           <thead>
-            <tr><th>#</th><th>URL</th><th>Статус</th><th>Найдено</th><th>Создана</th><th></th></tr>
+            <tr><th>#</th><th>URL</th><th>Статус</th><th>Найдено</th><th>Создана</th><th class="actions-col"></th></tr>
           </thead>
           <tbody>
             <tr v-for="t in tasks" :key="t.id" :class="{ active: t.id === selectedId }">
@@ -585,7 +615,12 @@ onUnmounted(() => { stopPolling(); stopCannPolling(); });
               <td><span :class="'badge badge-' + t.status">{{ statusLabel(t.status) }}</span></td>
               <td class="num">{{ (t.stats && t.stats.pages) || 0 }}</td>
               <td>{{ new Date(t.created_at).toLocaleString() }}</td>
-              <td><button class="danger small" @click="deleteTask(t.id)">×</button></td>
+              <td class="actions-col">
+                <div class="row-actions">
+                  <button class="primary small" @click="selectTask(t.id)">Открыть</button>
+                  <button class="danger small" @click="deleteTask(t.id)" title="Удалить задачу">×</button>
+                </div>
+              </td>
             </tr>
             <tr v-if="!tasks.length"><td colspan="6" class="muted">Задач пока нет</td></tr>
           </tbody>
@@ -659,7 +694,7 @@ onUnmounted(() => { stopPolling(); stopCannPolling(); });
                 <td>{{ p.depth }}</td>
                 <td v-if="fieldsShow.h1" class="ellipsis">{{ p.h1 }}</td>
                 <td v-if="fieldsShow.title" class="ellipsis">{{ p.title }}</td>
-                <td v-if="fieldsShow.description" class="ellipsis">{{ p.description }}</td>
+                <td v-if="fieldsShow.description" class="desc-cell">{{ p.description }}</td>
               </tr>
               <tr v-if="!filteredPages.length"><td colspan="7" class="muted">Пока пусто</td></tr>
             </tbody>
@@ -896,6 +931,11 @@ button.small   { padding: .15rem .4rem; font-size: .8rem; }
 .tbl td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 
 .ellipsis { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Задача 3: длинный Description переносится по словам и не выходит за поле. */
+.desc-cell { max-width: 420px; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+/* Задача 2/4: компактная колонка действий, кнопки не «прыгают» по ширине. */
+.actions-col { width: 1%; white-space: nowrap; }
+.row-actions { display: flex; gap: .35rem; justify-content: flex-end; align-items: center; }
 .muted    { color: #6b7280; }
 .error    { color: #b91c1c; margin-top: .5rem; }
 .small-meta { font-size: .85rem; margin-top: .25rem; }
