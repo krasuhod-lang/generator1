@@ -36,6 +36,11 @@ from . import ga4 as ga4_mod
 from . import mutator as mut_mod
 from . import backup as backup_mod
 from . import vector_gc as vector_gc_mod
+from .seo_engine import hybrid_scorer as seo_scorer_mod
+from .seo_engine import llm_config as seo_llm_mod
+from .seo_engine import pipeline as seo_pipeline_mod
+from .seo_engine.hybrid_scorer import HybridScorer
+from .seo_engine.drmax import build_drmax_signals
 from .biobrain.evolver import BioBrainEvolver
 from .biobrain.feature_vector import extract_features
 
@@ -124,6 +129,11 @@ def health() -> Dict[str, Any]:
             "backup":   backup_mod.is_available(),
             "vector_gc": vector_gc_mod.is_available(),
             "biobrain": BIOBRAIN.available,
+            "seo_engine": {
+                "langgraph": seo_pipeline_mod.is_available(),
+                "dspy": seo_llm_mod.is_available(),
+                "rank_bm25": seo_scorer_mod.rank_bm25_available(),
+            },
         },
     }
 
@@ -578,3 +588,58 @@ def mutate_analyze(req: MutateAnalyzeRequest) -> Dict[str, Any]:
     if not mut_mod.is_available():
         raise _unavailable("mutator_disabled", mut_mod.unavailable_reason())
     return mut_mod.analyze(req.file_path, req.old_code, req.error_context, req.dom_snippet)
+
+
+# ── /seo (SEO Content Engine v2.0) ────────────────────────────────────
+# Обёртки поверх текущего пайплайна: HybridScorer, DrMax-сигналы и прогон
+# LangGraph-стейт-машины. Heavy-deps (langgraph/dspy/rank-bm25) опциональны —
+# скоринг и DrMax работают всегда, /seo/run — с оффлайн-заглушками по умолчанию.
+class SeoScoreRequest(BaseModel):
+    project_id: str
+    keyword: str
+    text: str
+    lsi_terms: List[str] = Field(default_factory=list)
+    corpus: List[str] = Field(default_factory=list)
+    entities_top20: List[str] = Field(default_factory=list)
+    entities_generated: List[str] = Field(default_factory=list)
+    competitor_frequencies: Dict[str, float] = Field(default_factory=dict)
+    entities_required: List[str] = Field(default_factory=list)
+
+
+@app.post("/seo/score")
+def seo_score(req: SeoScoreRequest) -> Dict[str, Any]:
+    result = HybridScorer().score(
+        project_id=req.project_id,
+        keyword=req.keyword,
+        lsi_terms=req.lsi_terms,
+        text=req.text,
+        corpus=req.corpus,
+        entities_top20=req.entities_top20,
+        entities_generated=req.entities_generated,
+        competitor_frequencies=req.competitor_frequencies,
+        entities_required=req.entities_required,
+    )
+    return result.model_dump()
+
+
+class SeoDrmaxRequest(BaseModel):
+    keyword: str
+    is_commercial: bool = False
+
+
+@app.post("/seo/drmax")
+def seo_drmax(req: SeoDrmaxRequest) -> Dict[str, Any]:
+    return {"signals": build_drmax_signals(req.keyword, is_commercial=req.is_commercial)}
+
+
+class SeoRunRequest(BaseModel):
+    project_id: str
+    keyword: str
+
+
+@app.post("/seo/run")
+def seo_run(req: SeoRunRequest) -> Dict[str, Any]:
+    # Прогон стейт-машины. С langgraph — реальный граф, без него — встроенный
+    # последовательный исполнитель с той же маршрутизацией (ретраи → fallback).
+    state = seo_pipeline_mod.run_seo_pipeline(req.project_id, req.keyword)
+    return state.model_dump()

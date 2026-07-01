@@ -60,3 +60,28 @@ docker build --build-arg INSTALL_HEAVY=true -t aegis-py:full .
 | `LOG_LEVEL` | INFO / DEBUG |
 
 Подробная инструкция по подключению — `../AEGIS_SETUP.md`.
+
+## SEO Content Engine v2.0 (обёртки поверх пайплайна)
+
+Четыре модуля в `app/seo_engine/` добавляются **поверх** существующих ~20 этапов
+генерации, ничего в них не меняя (интеграции keys.so / xmlstock не трогаются):
+
+| Модуль | Файл | Роль |
+|---|---|---|
+| 1. HybridScorer | `hybrid_scorer.py` | Cross-Engine скор: Яндекс (BM25 + LSI + анти-переспам) × Google (Entity coverage + Information Gain), гибрид `0.45*yandex + 0.55*google`, порог 8.0 |
+| 2. DSPy Assertions | `drafting.py`, `text_utils.py` | Анти-галлюцинация (`fact_in_context`) + Zero-Fluff (`has_fluff`), offline-компиляция `.pkl` по `project_id` |
+| 3. LangGraph State Machine | `pipeline.py` | `DataIngestion → EntityResearch → Structure → Drafting → CriticFactCheck → {finalize / retry(<2) / fallback}` |
+| 4. DrMax E-E-A-T | `drmax.py` | `build_drmax_signals()` + промпты EntityResearch / Critic |
+
+Heavy-зависимости опциональны: без `rank-bm25` работает встроенный BM25,
+без `langgraph` — последовательный исполнитель с той же маршрутизацией, без
+`dspy-ai` — недоступны только Assertions/компиляция. Статус — в `GET /health`
+(ключ `seo_engine`).
+
+**Эндпоинты:** `POST /seo/score`, `POST /seo/drmax`, `POST /seo/run`.
+
+| Env | Назначение |
+|---|---|
+| `SEO_COMPILED_DIR` | каталог `.pkl` скомпилированных DSPy-программ (default `compiled_programs`) |
+| `DEEPSEEK_API_KEY` | аналитика/критика/структура (DeepSeek v4) |
+| `GOOGLE_API_KEY` | финальный райтинг (Gemini) |
