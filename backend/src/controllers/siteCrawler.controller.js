@@ -20,6 +20,7 @@ const db        = require('../config/db');
 const crawler   = require('../services/siteCrawler/crawler');
 const urlN      = require('../services/siteCrawler/urlNormalizer');
 const tree      = require('../services/siteCrawler/treeBuilder');
+const sections  = require('../services/siteCrawler/sectionClassifier');
 const csvExp    = require('../services/siteCrawler/exporters/csv');
 const xlsxExp   = require('../services/siteCrawler/exporters/xlsx');
 const { loadAccessibleProject, canAct } = require('../services/projects/projectGrants');
@@ -175,6 +176,7 @@ async function getTree(req, res) {
     );
     const origin = (() => { try { return new URL(t.start_url).origin; } catch (_) { return null; } })();
     const { tree: built } = tree.buildTree(rows, origin);
+    sections.annotate(built);
     res.json({ origin, tree: built });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 }

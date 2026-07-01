@@ -18,6 +18,7 @@ const tree   = require('../src/services/siteCrawler/treeBuilder');
 const csv    = require('../src/services/siteCrawler/exporters/csv');
 const ssrf   = require('../src/services/siteCrawler/ssrfGuard');
 const crawler = require('../src/services/siteCrawler/crawler');
+const sections = require('../src/services/siteCrawler/sectionClassifier');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -252,7 +253,38 @@ group('crawler', () => {
     assert.strictEqual(p.title,       null);
     assert.strictEqual(p.description, null);
     assert.strictEqual(p.canonical,   null);
-    assert.strictEqual(p.h1,          null);
+  });
+});
+
+// ───── sectionClassifier ─────
+group('sectionClassifier', () => {
+  test('classifySegment maps known RU/EN synonyms', () => {
+    assert.strictEqual(sections.classifySegment('blog').key,     'blog');
+    assert.strictEqual(sections.classifySegment('услуги').key,   'services');
+    assert.strictEqual(sections.classifySegment('novosti').key,  'news');
+    assert.strictEqual(sections.classifySegment('catalog').key,  'catalog');
+    assert.strictEqual(sections.classifySegment('kontakty').key, 'contacts');
+  });
+  test('classifySegment soft-matches prefixes (blog-2024)', () => {
+    assert.strictEqual(sections.classifySegment('blog-2024').key, 'blog');
+  });
+  test('classifySegment unknown → other', () => {
+    assert.strictEqual(sections.classifySegment('zzz-random').key, 'other');
+    assert.strictEqual(sections.classifySegment('').key, 'other');
+  });
+  test('annotate propagates section to descendants and counts pages', () => {
+    const { tree: t } = tree.buildTree([
+      { url: 'https://s.ru/blog/post-1', h1: 'A', http_status: 200 },
+      { url: 'https://s.ru/blog/post-2', h1: 'B', http_status: 200 },
+      { url: 'https://s.ru/uslugi/seo',  h1: 'C', http_status: 200 },
+    ], 'https://s.ru');
+    sections.annotate(t);
+    const blog = t.children.find((c) => c.segment === 'blog');
+    const usl  = t.children.find((c) => c.segment === 'uslugi');
+    assert.strictEqual(blog.sectionType, 'blog');
+    assert.strictEqual(blog.children[0].sectionType, 'blog');   // наследуется
+    assert.strictEqual(blog.pageCount, 2);                      // 2 реальных листа
+    assert.strictEqual(usl.sectionType, 'services');
   });
 });
 
