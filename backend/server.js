@@ -2828,6 +2828,58 @@ async function ensureSchema() {
       console.warn('[ensureSchema] cannibalization_* (mig 096) skipped:', e.message);
     }
 
+    // Миграция 097: Content Generator v2, Фаза 1 — Unified Quality Core (V1)
+    // + Prompt/Policy Registry (V6). См. migrations/097_content_quality_core.sql.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS content_policy_rules (
+          id          BIGSERIAL PRIMARY KEY,
+          scope       TEXT NOT NULL DEFAULT 'global',
+          scope_ref   TEXT NULL,
+          rule_type   TEXT NOT NULL,
+          payload     JSONB NOT NULL DEFAULT '{}'::jsonb,
+          active      BOOLEAN NOT NULL DEFAULT TRUE,
+          created_by  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_content_policy_rules_lookup
+        ON content_policy_rules(rule_type, scope, active)`);
+
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS information_gain_briefs (
+          id              BIGSERIAL PRIMARY KEY,
+          pipeline_type   TEXT NOT NULL,
+          task_id         BIGINT NOT NULL,
+          gaps            JSONB NOT NULL DEFAULT '[]'::jsonb,
+          value_adds      JSONB NOT NULL DEFAULT '[]'::jsonb,
+          delta_score     NUMERIC NULL,
+          blocking_reason TEXT NULL,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_information_gain_briefs_task
+        ON information_gain_briefs(pipeline_type, task_id)`);
+
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS quality_gate_reports (
+          id            BIGSERIAL PRIMARY KEY,
+          pipeline_type TEXT NOT NULL,
+          task_id       BIGINT NOT NULL,
+          gate_name     TEXT NOT NULL,
+          pass          BOOLEAN NOT NULL,
+          blocking      BOOLEAN NOT NULL DEFAULT FALSE,
+          score         NUMERIC NULL,
+          evidence      JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_gate_reports_task_gate
+        ON quality_gate_reports(pipeline_type, task_id, gate_name)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_quality_gate_reports_task
+        ON quality_gate_reports(pipeline_type, task_id)`);
+    } catch (e) {
+      console.warn('[ensureSchema] content_quality_core (mig 097) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

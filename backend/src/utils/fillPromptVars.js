@@ -20,6 +20,22 @@ const { richTextToPlain } = require('./stripHtmlTags');
 function fillPromptVars(prompt, task) {
   if (!prompt || !task) return prompt || '';
 
+  // ── FR5 (V6): обязательная инъекция актуального года ──────────────────
+  // Freshness-контракт: контент должен опираться на реальный текущий год,
+  // а не на захардкоженный литерал (Google прямо предупреждает против
+  // косметической смены даты). Год берём из task.current_year (если явно
+  // передан — например для тестов/бэкдейтинга) или из системного времени.
+  // Подставляем во все распространённые плейсхолдеры:
+  //   {{CURRENT_YEAR}}, {CURRENT_YEAR}, [текущий год], [год].
+  const currentYear = String(
+    (task && (task.current_year || task.currentYear)) || new Date().getFullYear(),
+  );
+  prompt = prompt
+    .replace(/\{\{\s*CURRENT_YEAR\s*\}\}/g, currentYear)
+    .replace(/\{\s*CURRENT_YEAR\s*\}/g, currentYear)
+    .replace(/\[\s*текущий\s+год\s*\]/gi, currentYear)
+    .replace(/\[\s*год\s*\]/gi, currentYear);
+
   // Маппинг: regex для строки → значение из task
   // Каждый regex ищет «- <Ключевое слово>...: [...]» и заменяет содержимое скобок
   const rules = [
