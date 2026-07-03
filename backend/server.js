@@ -42,6 +42,7 @@ const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
 const cannibalizationRoutes = require('./src/routes/cannibalization.routes');
+const contentPolicyRoutes   = require('./src/routes/contentPolicy.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -132,6 +133,7 @@ app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
 app.use('/api/site-crawler',     siteCrawlerRoutes);
 app.use('/api/cannibalization',  cannibalizationRoutes);
+app.use('/api/admin/content-policy', contentPolicyRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,

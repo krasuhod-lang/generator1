@@ -20,5 +20,6 @@
 
 const checkers = require('./checkers');
 const qualityGate = require('./qualityGate');
+const reportsRepo = require('./reportsRepo');
 
-module.exports = { checkers, qualityGate };
+module.exports = { checkers, qualityGate, reportsRepo };
