@@ -102,7 +102,7 @@ async function listTasks(req, res, next) {
          t.id, t.title, t.status, t.input_target_service,
          t.llm_provider, t.gemini_model,
          t.created_at, t.completed_at, t.started_at,
-         t.bull_job_id, t.error_message,
+         t.bull_job_id, t.error_message, t.quality_gate,
          m.lsi_coverage, m.eeat_score, m.total_cost_usd, m.bm25_score
        FROM tasks t
        LEFT JOIN task_metrics m ON m.task_id = t.id

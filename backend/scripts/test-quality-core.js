@@ -14,9 +14,20 @@ const { checkers, qualityGate } = require('../src/services/qualityCore');
 const policy = require('../src/services/contentPolicy');
 
 let passed = 0, failed = 0;
+const _asyncResults = [];
 function test(name, fn) {
-  try { fn(); passed++; console.log(`  ✔ ${name}`); }
-  catch (e) { failed++; console.log(`  ✘ ${name}\n    ${e.stack || e.message}`); }
+  try {
+    const r = fn();
+    if (r && typeof r.then === 'function') {
+      // async-тест: дожидаемся в конце файла
+      _asyncResults.push(
+        r.then(() => { passed++; console.log(`  ✔ ${name}`); })
+         .catch((e) => { failed++; console.log(`  ✘ ${name}\n    ${e.stack || e.message}`); }),
+      );
+    } else {
+      passed++; console.log(`  ✔ ${name}`);
+    }
+  } catch (e) { failed++; console.log(`  ✘ ${name}\n    ${e.stack || e.message}`); }
 }
 function group(name, fn) { console.log(name); fn(); }
 
@@ -258,5 +269,112 @@ group('qualityGate.finalize', () => {
   });
 });
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed) process.exit(1);
+// ── collectArtifacts (Фаза 3 адаптер) ────────────────────────────────
+const { collectArtifacts, riskFromEvaluator } = require('../src/services/qualityCore');
+group('collectArtifacts', () => {
+  test('plagiarism percent (overlapPctTotal) → ratio /100', () => {
+    const a = collectArtifacts('info', {
+      plagiarismReport: { summary: { overlapPctTotal: 40 } },
+    });
+    assert.strictEqual(a.plagiarismReport.summary.nearDuplicateRatio, 0.4);
+  });
+  test('fact-check supportedPct → confidence /100', () => {
+    const a = collectArtifacts('info', {
+      factReport: { summary: { supportedPct: 85 } },
+    });
+    assert.strictEqual(a.factReport.confidence, 0.85);
+  });
+  test('evaluatorReport → riskReport level = max severity', () => {
+    const a = collectArtifacts('seo', {
+      evaluatorReport: { regulatory_risks: [
+        { risk: 'r1', severity: 'low' },
+        { risk: 'r2', severity: 'high' },
+      ] },
+    });
+    assert.strictEqual(a.riskReport.level, 'high');
+    assert.deepStrictEqual(a.riskReport.issues, ['r1', 'r2']);
+  });
+  test('explicit riskReport приоритетнее evaluatorReport', () => {
+    const a = collectArtifacts('seo', {
+      riskReport: { level: 'critical', issues: ['x'] },
+      evaluatorReport: { regulatory_risks: [{ risk: 'y', severity: 'low' }] },
+    });
+    assert.strictEqual(a.riskReport.level, 'critical');
+  });
+  test('пустые regulatory_risks → level none', () => {
+    assert.strictEqual(riskFromEvaluator({ regulatory_risks: [] }).level, 'none');
+  });
+  test('отсутствующие отчёты не попадают в artifacts (нет ложных checker-ов)', () => {
+    const a = collectArtifacts('link', { html: '<p>hi</p>', niche: 'окна' });
+    assert.strictEqual(a.plagiarismReport, undefined);
+    assert.strictEqual(a.factReport, undefined);
+    assert.strictEqual(a.riskReport, undefined);
+    assert.strictEqual(a.html, '<p>hi</p>');
+  });
+});
+
+// ── qualityGate.runForTask (finalize + persist, graceful) ────────────
+group('qualityGate.runForTask', () => {
+  test('info: чистые сырые отчёты → canPublish + persist по строке на checker', async () => {
+    const saved = [];
+    const mockDb = { query: async (_sql, params) => { saved.push(params); return { rowCount: 1 }; } };
+    const res = await qualityGate.runForTask({
+      pipeline: 'info',
+      taskId: 123,
+      db: mockDb,
+      raw: {
+        html: '<p>Конкретные шаги. Актуально на 2026.</p>',
+        currentYear: 2026,
+        niche: 'пластиковые окна',
+        plagiarismReport: { summary: { overlapPctTotal: 2 } },   // 2% → 0.02 ratio
+        factReport: { summary: { supportedPct: 90 } },           // 90% → 0.9 conf
+        intentReport: { enabled: true, verdict: 'match' },
+        lsiOverdoseReport: { verdict: 'pass' },
+      },
+    });
+    assert.strictEqual(res.canPublish, true, res.summary);
+    assert.ok(res.gates.length >= 1);
+    assert.ok(saved.length >= 1, 'persistReport должен записать журнал');
+  });
+
+  test('seo: высокий плагиат (percent) → blocking через нормализацию', async () => {
+    const res = await qualityGate.runForTask({
+      pipeline: 'seo',
+      taskId: 5,
+      persist: false,
+      raw: {
+        html: '<p>Текст</p>', niche: 'окна',
+        plagiarismReport: { summary: { overlapPctTotal: 50 } }, // 50% → 0.5 > 0.15
+      },
+    });
+    assert.strictEqual(res.canPublish, false);
+    assert.ok(res.blockers.some((b) => b.name === 'plagiarism'));
+  });
+
+  test('никогда не бросает — при кривом db возвращает safe verdict', async () => {
+    const badDb = { query: async () => { throw new Error('db down'); } };
+    // finalize пройдёт, persistReport проглотит ошибку внутри → canPublish по контенту
+    const res = await qualityGate.runForTask({
+      pipeline: 'link', taskId: 1, db: badDb,
+      raw: { html: '<p>Гостевая статья 2026</p>', currentYear: 2026, niche: 'окна' },
+    });
+    assert.ok(res && typeof res.canPublish === 'boolean');
+  });
+
+  test('seo из evaluatorReport: risk не блокирует ниже critical', async () => {
+    const res = await qualityGate.runForTask({
+      pipeline: 'seo', taskId: 9, persist: false,
+      raw: {
+        html: '<p>Статья 2026</p>', currentYear: 2026, niche: 'окна',
+        evaluatorReport: { regulatory_risks: [{ risk: 'спорное утверждение', severity: 'high' }] },
+      },
+    });
+    // high (3) < critical (4) → risk gate pass, canPublish
+    assert.strictEqual(res.canPublish, true, res.summary);
+  });
+});
+
+Promise.all(_asyncResults).then(() => {
+  console.log(`\n${passed} passed, ${failed} failed`);
+  if (failed) process.exit(1);
+});

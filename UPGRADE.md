@@ -296,3 +296,50 @@ exact + Jaccard работает всегда.
 
 Ручной ввод имеет безусловный приоритет — если пользователь явно вписал
 тему в форму, она пройдёт даже если совпадает с историей.
+
+---
+
+## Обновление 2026-07 — Unified Quality Core (Content Generator v2, Фаза 3)
+
+Единый **quality gate** теперь подключён ко всем трём пайплайнам генерации
+(`seo` / `info` / `link`). Раньше `qualityCore.qualityGate.finalize()`
+существовал (Фазы 1–2), но не вызывался в реальной генерации — теперь контур
+замкнут: каждый пайплайн в точке финализации собирает свои отчёты, прогоняет
+единый gate, пишет журнал и сохраняет компактный вердикт в задачу.
+
+### Что добавлено
+
+| Категория | Файл / сущность |
+|---|---|
+| Backend | `backend/src/services/qualityCore/collectArtifacts.js` — адаптер нормализации сырых отчётов пайплайна под контракт `finalize()` |
+| Backend | `qualityCore/qualityGate.runForTask()` — сквозной хелпер: `collectArtifacts → finalize → persistReport`, никогда не бросает |
+| БД | колонка `quality_gate JSONB` в `tasks` / `info_article_tasks` / `link_article_tasks` |
+| Миграция | `migrations/098_quality_gate_verdict.sql` (+ идемпотентно в `ensureSchema()`) |
+| Backend | прогрев реестра `contentPolicy.refresh({ force:true })` при старте сервера |
+
+### Как это работает
+
+1. **Реестр политик** (stop-фразы, banned formulations, YMYL-маркеры, пороги)
+   редактируется через admin-API `/api/admin/content-policy` **без деплоя** и
+   прогревается в кэш при старте сервера. Пока таблица `content_policy_rules`
+   пуста — используются defaults из `contentPolicy/defaults.js`.
+2. **В точке финализации** пайплайн вызывает `qualityGate.runForTask({ pipeline,
+   taskId, raw })`. Адаптер `collectArtifacts` нормализует сырые отчёты
+   (например, plagiarism `overlapPctTotal` в процентах → near-duplicate ratio;
+   fact-check `supportedPct` → confidence; Stage 8 `regulatory_risks` →
+   `{ level, issues }`).
+3. **Вердикт** `{ canPublish, blockers[], warnings[], gates[] }` сохраняется:
+   пофичерно в `quality_gate_reports` (история/аналитика) и свёрнуто в
+   `tasks.quality_gate` (для UI-бейджа «прошло / на ревью»). Журнал читается
+   через `/api/admin/content-policy/gate-reports`.
+
+### Важно
+
+* Gate **никогда не роняет генерацию**: все вызовы graceful (ошибка БД или
+  адаптера → безопасный «пропускной» вердикт), а `persistReport` проглатывает
+  ошибки записи журнала.
+* По требованию заказчика gate **помечает, а не жёстко блокирует**: статус
+  задачи остаётся `done`, но `quality_gate.canPublish=false` сигнализирует, что
+  материал стоит отправить на ревью. Разделение blocking/warning настраивается
+  через пороги реестра (`rule_type='threshold'`).
+* Новых обязательных ENV-переменных нет.
