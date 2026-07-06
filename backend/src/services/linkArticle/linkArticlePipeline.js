@@ -1023,6 +1023,45 @@ async function processLinkArticleTask(taskId) {
       console.warn(`[linkArticle] JSON-LD build failed: ${schemaErr.message}`);
     }
 
+    // 8c. Unified Quality Core (Content Gen v2, Фаза 3): единый gate для
+    //     ссылочного пайплайна. У link-статей нет value-add требований
+    //     (цель — публикуемость, не топ SERP), поэтому finalize('link')
+    //     проверяет в основном freshness / stop-phrases / banned formulations
+    //     и disclosure. Graceful: НЕ роняет генерацию, НЕ меняет status.
+    let linkQualityGateVerdict = null;
+    try {
+      const { qualityGate } = require('../qualityCore');
+      const gateResult = await qualityGate.runForTask({
+        pipeline: 'link',
+        taskId,
+        raw: {
+          html: finalHtml,
+          niche: task.topic || task.region || '',
+          currentYear: new Date().getFullYear(),
+          authorship: {
+            byline:   authorByline || task.__authorName || null,
+            reviewer: task.__reviewerName || null,
+            sources:  Array.isArray(jsonLdBlocks) && jsonLdBlocks.length ? jsonLdBlocks : null,
+          },
+        },
+      });
+      linkQualityGateVerdict = {
+        canPublish: gateResult.canPublish,
+        ymyl:       gateResult.ymyl,
+        blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+        warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
+        summary:    gateResult.summary,
+        checked_at: new Date().toISOString(),
+      };
+      await appendLog(
+        taskId,
+        `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
+        gateResult.canPublish ? 'ok' : 'warn',
+      );
+    } catch (gateErr) {
+      console.warn(`[linkArticle] quality gate failed: ${gateErr.message}`);
+    }
+
     await db.query(
       `UPDATE link_article_tasks
           SET article_html             = $2,
@@ -1030,6 +1069,7 @@ async function processLinkArticleTask(taskId) {
               article_html_with_schema = $4,
               json_ld_blocks           = $5,
               author_byline            = $6,
+              quality_gate             = $7,
               status         = 'done',
               progress_pct   = 100,
               current_stage  = 'done',
@@ -1039,6 +1079,7 @@ async function processLinkArticleTask(taskId) {
       [
         taskId, finalHtml, finalPlain,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
+        linkQualityGateVerdict ? JSON.stringify(linkQualityGateVerdict) : null,
       ],
     );
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');

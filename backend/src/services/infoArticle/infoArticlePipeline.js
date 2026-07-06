@@ -2111,6 +2111,57 @@ async function processInfoArticleTask(taskId) {
       console.warn(`[infoArticle] JSON-LD build failed: ${schemaErr.message}`);
     }
 
+    // 14d. Unified Quality Core (Content Gen v2, Фаза 3): единый gate поверх
+    //      уже посчитанных отчётов. Собираем сырые отчёты из БД, нормализуем
+    //      адаптером collectArtifacts и прогоняем qualityGate.finalize('info').
+    //      Пишем пофичерный журнал (quality_gate_reports) + компактный вердикт
+    //      в info_article_tasks.quality_gate. Полностью graceful: gate НИКОГДА
+    //      не роняет генерацию и (по требованию заказчика — «помечать, а не
+    //      жёстко блокировать») НЕ меняет status='done', только фиксирует
+    //      canPublish/blockers для UI-бейджа «на ревью».
+    let qualityGateVerdict = null;
+    try {
+      const { qualityGate } = require('../qualityCore');
+      const { rows: [qr] } = await db.query(
+        `SELECT fact_check_report, plagiarism_report, lsi_overdose_report, intent_verdict
+           FROM info_article_tasks WHERE id = $1`,
+        [taskId],
+      );
+      const gateResult = await qualityGate.runForTask({
+        pipeline: 'info',
+        taskId,
+        raw: {
+          html: finalHtml,
+          niche: task.topic || task.region || '',
+          currentYear: new Date().getFullYear(),
+          factReport:        qr && qr.fact_check_report,
+          plagiarismReport:  qr && qr.plagiarism_report,
+          lsiOverdoseReport: qr && qr.lsi_overdose_report,
+          intentReport:      qr && qr.intent_verdict,
+          authorship: {
+            byline:   authorByline || task.__authorName || null,
+            reviewer: task.__reviewerName || null,
+            sources:  Array.isArray(jsonLdBlocks) && jsonLdBlocks.length ? jsonLdBlocks : null,
+          },
+        },
+      });
+      qualityGateVerdict = {
+        canPublish: gateResult.canPublish,
+        ymyl:       gateResult.ymyl,
+        blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+        warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
+        summary:    gateResult.summary,
+        checked_at: new Date().toISOString(),
+      };
+      await appendLog(
+        taskId,
+        `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
+        gateResult.canPublish ? 'ok' : 'warn',
+      );
+    } catch (gateErr) {
+      console.warn(`[infoArticle] quality gate failed: ${gateErr.message}`);
+    }
+
     await db.query(
       `UPDATE info_article_tasks
           SET article_html             = $2,
@@ -2120,6 +2171,7 @@ async function processInfoArticleTask(taskId) {
               article_html_with_schema = $6,
               json_ld_blocks           = $7,
               author_byline            = $8,
+              quality_gate             = $9,
               status          = 'done',
               progress_pct    = 100,
               current_stage   = 'done',
@@ -2129,6 +2181,7 @@ async function processInfoArticleTask(taskId) {
       [
         taskId, finalHtml, finalPlain, seoTitle, seoDescription,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
+        qualityGateVerdict ? JSON.stringify(qualityGateVerdict) : null,
       ],
     );
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');

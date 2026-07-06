@@ -21,5 +21,6 @@
 const checkers = require('./checkers');
 const qualityGate = require('./qualityGate');
 const reportsRepo = require('./reportsRepo');
+const { collectArtifacts, riskFromEvaluator } = require('./collectArtifacts');
 
-module.exports = { checkers, qualityGate, reportsRepo };
+module.exports = { checkers, qualityGate, reportsRepo, collectArtifacts, riskFromEvaluator };

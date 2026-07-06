@@ -37,6 +37,7 @@
 
 const checkers = require('./checkers');
 const contentPolicy = require('../contentPolicy');
+const { collectArtifacts } = require('./collectArtifacts');
 
 /**
  * Список требований value-add (V3) применяется только к коммерческому SEO
@@ -141,6 +142,41 @@ async function persistReport({ pipeline, taskId, result, db } = {}) {
 }
 
 /**
+ * runForTask — сквозной хелпер Фазы 3: нормализовать сырые артефакты
+ * пайплайна, прогнать finalize() и (опц.) записать журнал в
+ * quality_gate_reports. Никогда НЕ бросает — quality gate не должен ронять
+ * генерацию. При ошибке возвращает безопасный «пропускной» вердикт.
+ *
+ * @param {object} params
+ * @param {string} params.pipeline — 'seo' | 'link' | 'info'
+ * @param {number|string} [params.taskId] — id задачи (для persist)
+ * @param {object} params.raw — сырые данные пайплайна (см. collectArtifacts)
+ * @param {object} [params.opts] — прокидывается в finalize (thresholds, requireInPlan)
+ * @param {boolean} [params.persist=true] — писать ли журнал в БД
+ * @param {object} [params.db] — pg-клиент (для тестов)
+ * @returns {Promise<object>} результат finalize() (+ поле summary)
+ */
+async function runForTask({ pipeline, taskId, raw = {}, opts = {}, persist = true, db } = {}) {
+  try {
+    const artifacts = collectArtifacts(pipeline, raw);
+    const result = finalize(pipeline, artifacts, opts);
+    result.summary = summarize(result);
+    if (persist && taskId != null) {
+      await persistReport({ pipeline, taskId, result, db });
+    }
+    return result;
+  } catch (e) {
+    // graceful: gate никогда не должен ломать пайплайн
+    return {
+      pipeline, ymyl: false, canPublish: true,
+      blockers: [], warnings: [], gates: [],
+      summary: 'quality gate skipped (error)',
+      error: e && e.message ? e.message : String(e),
+    };
+  }
+}
+
+/**
  * summarize — краткая строка причин блокировки для UI/логов.
  * @param {object} result — вывод finalize()
  * @returns {string}
@@ -155,4 +191,4 @@ function summarize(result) {
   return `Заблокировано: ${result.blockers.map((b) => `${b.name}=${b.verdict}`).join('; ')}`;
 }
 
-module.exports = { finalize, persistReport, summarize, VALUE_ADDS_REQUIRED_PIPELINES };
+module.exports = { finalize, persistReport, summarize, runForTask, VALUE_ADDS_REQUIRED_PIPELINES };

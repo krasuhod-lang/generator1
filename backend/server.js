@@ -214,6 +214,20 @@ const start = async () => {
     // Auto-seed администратора из ENV
     await seedAdmin();
 
+    // Прогрев реестра политик контента (V6 / Content Gen v2, Фаза 3):
+    // подтягиваем active-правила (stop-фразы, banned formulations, YMYL,
+    // пороги) в процессный кэш ДО первой генерации, чтобы quality gate и
+    // stage5 anti-water работали на актуальном реестре сразу, а не лениво
+    // после первой admin-записи. Полностью graceful — реестр никогда не
+    // должен ломать старт/генерацию (fallback на defaults.js).
+    try {
+      const contentPolicy = require('./src/services/contentPolicy');
+      await contentPolicy.refresh({ force: true });
+      console.log('[Server] contentPolicy registry warmed');
+    } catch (err) {
+      console.warn('[Server] contentPolicy warm-up skipped:', err.message);
+    }
+
     // После рестарта переводим зависшие meta-tag-задачи в error
     try {
       const { recoverStuckMetaTagTasks } = require('./src/services/metaTags/pipeline');
@@ -2880,6 +2894,18 @@ async function ensureSchema() {
         ON quality_gate_reports(pipeline_type, task_id)`);
     } catch (e) {
       console.warn('[ensureSchema] content_quality_core (mig 097) skipped:', e.message);
+    }
+
+    // Миграция 098: Content Generator v2, Фаза 3 — компактный вердикт единого
+    // qualityGate.finalize() прямо в задаче (для UI-бейджа «прошло/на ревью»),
+    // дополнительно к пофичерному журналу quality_gate_reports (миг 097).
+    // См. migrations/098_quality_gate_verdict.sql.
+    try {
+      await db.query(`ALTER TABLE tasks              ADD COLUMN IF NOT EXISTS quality_gate JSONB`);
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS quality_gate JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS quality_gate JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] quality_gate verdict column (mig 098) skipped:', e.message);
     }
 
     console.log('[Schema] ensureSchema OK');
