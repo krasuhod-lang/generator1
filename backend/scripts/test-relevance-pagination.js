@@ -6,8 +6,8 @@
  * Проверяет:
  *   1. xmlstockClient.fetchYandexSerp поддерживает startPage и корректно
  *      формирует URL вида &page=2.
- *   2. relevance/pipeline.js при serp.length < MIN_SERP_AFTER_DEDUP делает
- *      второй вызов fetchYandexSerp({ startPage: 2 }).
+ *   2. relevance/pipeline.js при useful < serpTarget (= top_n) делает
+ *      добор fetchYandexSerp({ startPage: 2..9 }) вплоть до 10-й страницы.
  *
  * Используем монку модулей через require.cache — без реальных HTTP-вызовов.
  */
@@ -63,22 +63,36 @@ const path   = require('path');
       'utf8',
     );
     assert.ok(
-      /MIN_SERP_AFTER_DEDUP\s*=\s*18/.test(pipelineSource),
-      'MIN_SERP_AFTER_DEDUP=18 expected',
+      /DEFAULT_SERP_TARGET\s*=\s*20/.test(pipelineSource),
+      'DEFAULT_SERP_TARGET=20 expected (динамический порог = top_n)',
     );
     assert.ok(
-      /SERP_TOPUP_PAGES\s*=\s*\[\s*2\s*,\s*3\s*,\s*4\s*\]/.test(pipelineSource),
-      'SERP_TOPUP_PAGES=[2,3,4] expected (добор со стр. 3/4/5)',
+      !/MIN_SERP_AFTER_DEDUP/.test(pipelineSource),
+      'хардкод MIN_SERP_AFTER_DEDUP должен быть убран (порог теперь динамический = top_n)',
+    );
+    assert.ok(
+      /const\s+serpTarget\s*=/.test(pipelineSource),
+      'локальный serpTarget (= top_n) expected',
+    );
+    assert.ok(
+      /SERP_TOPUP_PAGES\s*=\s*\[\s*2\s*,\s*3\s*,\s*4\s*,\s*5\s*,\s*6\s*,\s*7\s*,\s*8\s*,\s*9\s*\]/.test(pipelineSource),
+      'SERP_TOPUP_PAGES=[2..9] expected (добор вплоть до 10-й страницы SERP, поз.21-100)',
     );
     assert.ok(
       /startPage:\s*page/.test(pipelineSource),
       'iterative startPage (по SERP_TOPUP_PAGES) expected in pipeline',
     );
     assert.ok(
-      /_usefulCount\(\)\s*<\s*MIN_SERP_AFTER_DEDUP/.test(pipelineSource),
-      'gate `_usefulCount() < MIN_SERP_AFTER_DEDUP` expected (post-фильтр-агрегаторов учёт)',
+      /_usefulCount\(\)\s*<\s*serpTarget/.test(pipelineSource),
+      'gate `_usefulCount() < serpTarget` expected (post-фильтр-агрегаторов учёт)',
     );
-    console.log('✓ relevance/pipeline.js wires multi-page topup (стр. 3/4/5)');
+    assert.ok(
+      /raw_total:\s*rawSerpTotal/.test(pipelineSource)
+        && /deduped_count:/.test(pipelineSource)
+        && /aggregators_skipped:/.test(pipelineSource),
+      'serp_meta funnel stats (raw_total/deduped_count/aggregators_skipped) expected',
+    );
+    console.log('✓ relevance/pipeline.js wires multi-page topup (стр. 3-10) + funnel meta');
 
     console.log('\n✅ test-relevance-pagination: all checks passed');
   })().catch((e) => {

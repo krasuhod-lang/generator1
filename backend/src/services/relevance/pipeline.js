@@ -47,15 +47,17 @@ const MIN_FETCHED_FOR_ANALYZE = (() => {
   return Number.isFinite(v) && v >= 1 ? v : 3;
 })();
 
-// Минимальное количество URL ПОСЛЕ dedup и фильтра агрегаторов, ниже
-// которого мы делаем «добор» с доп. страниц SERP (XMLStock page=2/3/4 →
-// позиции 21-30, 31-40, 41-50). Цель — получить 18+ полезных URL даже
-// если две первые страницы Яндекса забиты агрегаторами или дублями
-// домена. Захардкожено по требованию заказчика, env не используется.
-const MIN_SERP_AFTER_DEDUP = 18;
-// До скольких доп. страниц SERP добираем (XMLStock page index'ы — это
-// 2 (стр.3), 3 (стр.4), 4 (стр.5)). Один проход = +10 doc.
-const SERP_TOPUP_PAGES = [2, 3, 4];
+// Целевое число уникальных сайтов ПОСЛЕ dedup и фильтра агрегаторов. Ниже
+// него мы делаем «добор» с доп. страниц SERP, пока не наберём ровно столько
+// полезных URL. Порог динамический — равен `top_n` задачи (обычно 20), а не
+// захардкоженному 18: цель ТЗ — выдать ровно top_n чистых сайтов, если они
+// вообще есть в ТОП-100 Яндекса. Дефолт-фоллбек на случай кривого top_n.
+const DEFAULT_SERP_TARGET = 20;
+// До каких доп. страниц SERP добираем (XMLStock page index'ы; page=0 →
+// поз.1-10). Добираем вплоть до 10-й страницы выдачи (page=9 → поз.91-100),
+// останавливаясь раньше, как только набрали `top_n` уникальных сайтов.
+// Один проход = +10 doc. [2..9] = страницы 3-10 SERP (позиции 21-100).
+const SERP_TOPUP_PAGES = [2, 3, 4, 5, 6, 7, 8, 9];
 
 async function _setStage(reportId, stage, extra = {}) {
   const sets = ['current_stage = $2'];
@@ -209,6 +211,13 @@ async function processRelevanceReport(reportId) {
     await _setStage(reportId, 'serp', { status: 'fetching', started: true });
 
     const serpRaw = await fetchYandexSerp(query, { lr: lr || '', pages: 2 });
+    // Целевое число уникальных сайтов = top_n задачи (обычно 20). Порог
+    // добора совпадает с целью — стремимся выдать ровно top_n чистых URL.
+    const serpTarget = (Number.isFinite(topN) && topN > 0) ? topN : DEFAULT_SERP_TARGET;
+    // Воронка парсинга: сколько «сырых» doc'ов пришло от XMLStock суммарно
+    // (первые 2 страницы + все страницы добора) — до любого dedup/фильтра.
+    // Нужно фронту для прозрачности: «запросили N ссылок, чтобы выдать 20».
+    let rawSerpTotal = Array.isArray(serpRaw) ? serpRaw.length : 0;
     // Нормализуем + дедуп по URL и по домену + берём top_n.
     // Заказчик: «парсим один домен; если на один домен несколько ссылок —
     // оставляем первую попавшуюся». Дедуп по домену работает ПОСЛЕ
@@ -280,31 +289,36 @@ async function processRelevanceReport(reportId) {
       return split.kept.length;
     };
 
-    // ── 1.4. Добор с доп. страниц SERP (стр.3/4/5), пока не наберём 18 ────
+    // ── 1.4. Добор с доп. страниц SERP (стр.3-10), пока не наберём top_n ──
     // Заказчик: «если кол-во меньше 20 сайтов, парсим ещё страницу». Делаем
-    // это ИТЕРАТИВНО до 3-х доп. страниц XMLStock (позиции 21-30, 31-40,
-    // 41-50), останавливаемся при достижении MIN_SERP_AFTER_DEDUP полезных
-    // URL ИЛИ topN. Считаем именно «полезные» URL — после фильтра
-    // агрегаторов, чтобы при включённой галке не выскочить из условия с
-    // 18 URL, из которых 12 — Avito/hh/ozon.
+    // это ИТЕРАТИВНО вплоть до 10-й страницы XMLStock (позиции 21-100),
+    // останавливаясь при достижении serpTarget (= top_n) полезных URL ИЛИ
+    // topN. Считаем именно «полезные» URL — после фильтра агрегаторов, чтобы
+    // при включённой галке не выскочить из условия с 18 URL, из которых
+    // 12 — Avito/hh/ozon.
     const topupPages = [];
-    let needTopup = _usefulCount() < MIN_SERP_AFTER_DEDUP && serp.length < topN;
+    let needTopup = _usefulCount() < serpTarget && serp.length < topN;
+    // Отметка: добрались ли мы до последней доступной страницы добора. Нужно,
+    // чтобы warning «Добор исчерпан» показывался только когда мы реально
+    // упёрлись в 10-ю страницу SERP, а не при раннем выходе из цикла.
+    const LAST_TOPUP_PAGE = SERP_TOPUP_PAGES[SERP_TOPUP_PAGES.length - 1];
     if (needTopup) {
       for (const page of SERP_TOPUP_PAGES) {
         if (serp.length >= topN) break;
-        if (_usefulCount() >= MIN_SERP_AFTER_DEDUP) break;
+        if (_usefulCount() >= serpTarget) break;
         try {
           const extraRaw = await fetchYandexSerp(query, {
             lr: lr || '',
             pages: 1,
             startPage: page,
           });
+          rawSerpTotal += Array.isArray(extraRaw) ? extraRaw.length : 0;
           const added = _ingestSerp(extraRaw);
           topupPages.push({ page, added, useful: _usefulCount() });
           console.log(
             `[relevance] добор SERP page=${page} (поз. ${page * 10 + 1}-${page * 10 + 10}) `
             + `для отчёта ${reportId}: +${added} URL `
-            + `(итого ${serp.length}/${topN}, полезных ${_usefulCount()}, threshold=${MIN_SERP_AFTER_DEDUP})`,
+            + `(итого ${serp.length}/${topN}, полезных ${_usefulCount()}, threshold=${serpTarget})`,
           );
         } catch (e) {
           // Best-effort: если страница не пришла — пробуем следующую.
@@ -314,9 +328,11 @@ async function processRelevanceReport(reportId) {
           );
         }
       }
-      needTopup = _usefulCount() < MIN_SERP_AFTER_DEDUP;
+      needTopup = _usefulCount() < serpTarget;
     }
     const extendedFromExtraPages = topupPages.some((p) => (p.added || 0) > 0);
+    // Дошли ли мы фактически до последней страницы добора (10-й SERP).
+    const topupExhausted = topupPages.some((p) => p.page === LAST_TOPUP_PAGE);
 
     // ── 1.5. Фильтр агрегаторов (опционально, по чекбоксу формы) ───────
     // Avito/hh/ozon/dzen/… занимают ТОП Яндекса почти всегда, но сами
@@ -578,7 +594,17 @@ async function processRelevanceReport(reportId) {
         skipped_same_host:      skippedSameHost.length,
         removed_aggregators:    removedAggregators.length,
         topup_pages:            topupPages,
-        min_threshold:          MIN_SERP_AFTER_DEDUP,
+        min_threshold:          serpTarget,
+        // Воронка парсинга (для прозрачного UI: «запросили N ссылок, чтобы
+        // выдать M уникальных сайтов»). raw_total — все «сырые» doc'ы от
+        // XMLStock (первые 2 стр. + все страницы добора) ДО любого dedup.
+        raw_total:              rawSerpTotal,
+        deduped_count:          serp.length,
+        aggregators_skipped:    removedAggregators.length,
+        same_host_skipped:      skippedSameHost.length,
+        target:                 serpTarget,
+        target_reached:         serpForFetch.length >= serpTarget,
+        topup_exhausted:        topupExhausted,
       },
       // Человекочитаемые предупреждения (показываются баннером в UI).
       warnings: (() => {
@@ -599,10 +625,14 @@ async function processRelevanceReport(reportId) {
             + `${serp.length - successes.length} URL в корпусе не учтены.`,
           );
         }
-        if (serpForFetch.length < MIN_SERP_AFTER_DEDUP) {
+        // Предупреждаем об исчерпании добора ТОЛЬКО когда реально дошли до
+        // последней (10-й) страницы SERP и всё равно не набрали target — иначе
+        // это шумное сообщение при раннем (успешном) выходе из цикла.
+        if (serpForFetch.length < serpTarget && topupExhausted) {
           warns.push(
             `После dedup и фильтра агрегаторов осталось ${serpForFetch.length} URL `
-            + `(порог ${MIN_SERP_AFTER_DEDUP}). Добор с доп. страниц SERP исчерпан.`,
+            + `(цель ${serpTarget}). Добор с доп. страниц SERP исчерпан (дошли до `
+            + `10-й страницы Яндекса).`,
           );
         }
         if (!pageFetcher.HEADLESS_FETCHER_URL) {
