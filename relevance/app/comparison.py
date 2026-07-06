@@ -72,6 +72,7 @@ def compute_comparison(
     our_html_chars: int = 0,
     median_text_chars: float = 0.0,
     median_html_chars: float = 0.0,
+    top3_median_counts: Dict[str, float] | None = None,
 ) -> dict:
     """Считает сравнительный отчёт. Все аргументы keyword-only — не путаемся.
 
@@ -83,6 +84,10 @@ def compute_comparison(
         our_text_chars / our_html_chars: длины нашего документа (для text/HTML
             ratio в сравнении с корпусом).
         median_text_chars / median_html_chars: медианы по корпусу.
+        top3_median_counts: (SEO Relevance Analyzer 2.0) медиана вхождений
+            каждой леммы среди страниц ТОП-3. Если задано — добавляем
+            anti-overoptimization директивы (§17): «сократите переспам леммы X:
+            выше медианы top-3». Опционально, обратная совместимость сохранена.
     """
     our_counts = _doc_term_counts(our_lemmas)
 
@@ -233,6 +238,7 @@ def compute_comparison(
         directives.append({
             "lemma":     t["lemma"],
             "status":    t["status"],
+            "class":     "lexical",
             "important": t["important"],
             "delta":     delta,          # положит = добавить, отриц = убрать
             "our_count": t["our_count"],
@@ -241,6 +247,41 @@ def compute_comparison(
         })
         if len(directives) >= MAX_DIRECTIVES:
             break
+
+    # ── 5b. Anti-overoptimization директивы по медиане ТОП-3 (§17) ────────
+    # Продуктовый guardrail: не толкаем к переспаму. Если наше вхождение
+    # леммы заметно выше медианы среди лидеров (ТОП-3) — рекомендуем сократить.
+    if top3_median_counts:
+        existing = {d["lemma"] for d in directives}
+        extra: List[dict] = []
+        for t in sorted_terms:
+            lemma = t["lemma"]
+            if lemma in existing:
+                continue
+            m3 = top3_median_counts.get(lemma)
+            if m3 is None:
+                continue
+            our_count = t["our_count"]
+            # Значимый перебор: выше 1.5×медианы top-3 и минимум +5 абсолютно.
+            if our_count > max(m3 * OVER_RATIO, m3 + OVER_ABSOLUTE_BUFFER) and our_count > 0:
+                cut = max(our_count - int(round(m3)), 1)
+                extra.append({
+                    "lemma":      lemma,
+                    "status":     "over_top3",
+                    "class":      "lexical",
+                    "important":  t["important"],
+                    "delta":      -cut,
+                    "our_count":  our_count,
+                    "median_top": t["median_top"],
+                    "median_top3": round(m3, 2),
+                    "text": (
+                        f"Сократите переспам леммы «{lemma}»: у вас {our_count}, "
+                        f"медиана ТОП-3 — {int(round(m3))}. −{cut} (риск переоптимизации)."
+                    ),
+                })
+            if len(extra) >= MAX_DIRECTIVES:
+                break
+        directives.extend(extra)
 
     return {
         "summary":     summary,

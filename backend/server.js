@@ -1101,6 +1101,16 @@ async function ensureSchema() {
         ADD COLUMN IF NOT EXISTS cocoon_plan JSONB
     `);
 
+    // ─── Migration 099: SEO Relevance Analyzer 2.0 (Phase 1) ─────────────
+    // Сырая факторная матрица одного прогона (row-per-page): значения всех
+    // факторов + позиция URL в выдаче. Хранится отдельной additive-колонкой,
+    // чтобы пересчитывать корреляции офлайн без повторного обхода SERP (§14).
+    // nullable: на старых отчётах и при выключенном факторном слое → NULL.
+    await db.query(`
+      ALTER TABLE relevance_reports
+        ADD COLUMN IF NOT EXISTS factor_matrix JSONB
+    `);
+
     // ─── Migration 022: relevance → content bridge + images_count ─────────
     // 1) Связь tasks/info_article_tasks с исходным relevance_report — чтобы
     //    pipeline вливал mandatory_entities + competitor_signals в

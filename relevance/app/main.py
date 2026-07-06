@@ -25,6 +25,13 @@ from .bm25_calc import compute_vocabulary_bm25
 from .cocoons import compute_cocoons
 from .cocoon_planner import build_cocoon_plan, render_cocoon_markdown
 from .comparison import compute_comparison, per_competitor_table
+from .correlations import compute_factor_correlations
+from .factors import (
+    FACTOR_GROUPS,
+    FACTOR_NAMES,
+    build_factor_matrix,
+    top3_vs_top20_delta,
+)
 from .evidence import (
     DEFAULT_MAX_CHARS_PER_URL as EVIDENCE_DEFAULT_MAX_CHARS,
     DEFAULT_TOP_K as EVIDENCE_DEFAULT_TOP_K,
@@ -49,6 +56,17 @@ logging.basicConfig(
 logger = logging.getLogger("relevance")
 
 APP_VERSION = "1.0.0"
+
+
+def serp_factors_enabled() -> bool:
+    """Env kill-switch для факторного анализа (SEO Relevance Analyzer 2.0).
+    RELEVANCE_SERP_FACTORS=false|0|no|off — выключает секцию `serp_factors`
+    даже если запрос прислал include_serp_factors=true."""
+    val = os.environ.get("RELEVANCE_SERP_FACTORS", "").strip().lower()
+    if val in ("0", "false", "no", "off"):
+        return False
+    return True
+
 
 app = FastAPI(
     title="Relevance Analyzer",
@@ -79,6 +97,10 @@ def verify_internal_token(
 class DocumentIn(BaseModel):
     url: str
     html: str
+    # Позиция URL в выдаче (1-based). Опционально: если не задана, оркестратор
+    # `analyze` берёт порядковый индекс документа (документы приходят в порядке
+    # SERP). Нужна для факторного анализа (корреляции фактор↔позиция).
+    serp_position: Optional[int] = None
 
 
 class AnalyzeOptions(BaseModel):
@@ -120,6 +142,14 @@ class AnalyzeOptions(BaseModel):
     # Гейт также через RELEVANCE_COMPETITOR_SIGNALS=false (env-выключатель).
     include_competitor_signals: bool = Field(default=False)
     parsed_preview_chars: int = Field(default=20000, ge=500, le=200000)
+    # SEO Relevance Analyzer 2.0 — Phase 1. Если true — в ответе появятся
+    # секции `serp_factors` (факторная матрица row-per-page + корреляции
+    # Спирмена фактор↔позиция + дифференциал top3/top4-10/top11-20).
+    # Требует, чтобы у документов были serp_position (иначе берём индекс).
+    # Доп. env-выключатель на стороне Python: RELEVANCE_SERP_FACTORS=false.
+    include_serp_factors: bool = Field(default=False)
+    # Если true — вдобавок к Спирмену считаем Kendall tau как robustness-check.
+    serp_factors_include_kendall: bool = Field(default=False)
 
 
 class AnchorDocumentIn(BaseModel):
@@ -270,6 +300,59 @@ class CompetitorSignalsBlock(BaseModel):
     doc_count:         int        = 0
 
 
+class FactorMeta(BaseModel):
+    name: str
+    group: str
+
+
+class FactorCorrelationRow(BaseModel):
+    factor: str
+    rho: float
+    p_value: float
+    n: int
+    direction: str
+    interpretation: str
+    confidence: str
+    kendall_tau: Optional[float] = None
+
+
+class Top3Top20DeltaRow(BaseModel):
+    factor: str
+    group: str
+    median_top3: Optional[float] = None
+    median_top4_10: Optional[float] = None
+    median_top11_20: Optional[float] = None
+    delta_top3_minus_top20: Optional[float] = None
+    leader_advantage: Optional[float] = None
+
+
+class PageFactorVector(BaseModel):
+    url: str
+    serp_position: Optional[int] = None
+    values: Dict[str, Optional[float]] = Field(default_factory=dict)
+
+
+class SerpFactorsBlock(BaseModel):
+    """SEO Relevance Analyzer 2.0 — Phase 1.
+
+    Факторный анализ SERP 1–20: сырая матрица факторов (row-per-page),
+    ранговые корреляции Спирмена (фактор↔позиция) и дифференциал
+    top3 / top4-10 / top11-20. Все секции additive; при выключенном
+    флаге/env блок отсутствует. `enabled=false` + `error_reason` при
+    мягком сбое (§12: каждый дорогой модуль рапортует enabled/duration/reason).
+    """
+    enabled: bool = True
+    duration_ms: int = 0
+    error_reason: Optional[str] = None
+    backend: Optional[str] = None
+    n_pages: int = 0
+    factors: List[FactorMeta] = Field(default_factory=list)
+    factor_correlations: List[FactorCorrelationRow] = Field(default_factory=list)
+    top3_vs_top20_delta: List[Top3Top20DeltaRow] = Field(default_factory=list)
+    top3_vs_top20_buckets: Dict[str, int] = Field(default_factory=dict)
+    page_factor_vectors: List[PageFactorVector] = Field(default_factory=list)
+
+
 class AnalyzeResponse(BaseModel):
     stats: AnalyzeStats
     vocabulary: List[VocabRow]
@@ -283,6 +366,9 @@ class AnalyzeResponse(BaseModel):
     # Опционально, при include_competitor_signals=true и
     # RELEVANCE_COMPETITOR_SIGNALS != false (env).
     competitor_signals: Optional[CompetitorSignalsBlock] = None
+    # SEO Relevance Analyzer 2.0 — Phase 1. При include_serp_factors=true и
+    # RELEVANCE_SERP_FACTORS != false (env).
+    serp_factors: Optional[SerpFactorsBlock] = None
 
 
 # ── Cocoons (PR 2) ────────────────────────────────────────────────────────────
@@ -369,6 +455,92 @@ def health() -> dict:
         "version": APP_VERSION,
         "auth_required": bool(os.environ.get("RELEVANCE_INTERNAL_TOKEN", "").strip()),
     }
+
+
+def _top3_lemma_medians(parse_results, doc_lemmas) -> Dict[str, float]:
+    """Медиана вхождений каждой леммы среди документов ТОП-3.
+
+    Позиция документа: явная serp_position (DocumentIn) или индекс+1 (документы
+    приходят в порядке SERP). Возвращает {lemma: median_count} по леммам,
+    встретившимся хотя бы в одном top-3 документе. Используется для
+    anti-overoptimization директив (§17)."""
+    import statistics as _st
+    top3_indices: List[int] = []
+    for idx, (d, _pr) in enumerate(parse_results):
+        pos = d.serp_position if isinstance(getattr(d, "serp_position", None), int) else (idx + 1)
+        if 1 <= pos <= 3:
+            top3_indices.append(idx)
+    if not top3_indices:
+        return {}
+    # Собираем counts по каждой лемме внутри каждого top-3 документа.
+    per_doc_counts: List[Dict[str, int]] = []
+    for i in top3_indices:
+        lemmas = doc_lemmas[i] if i < len(doc_lemmas) else []
+        cnt: Dict[str, int] = {}
+        for l in lemmas:
+            cnt[l] = cnt.get(l, 0) + 1
+        per_doc_counts.append(cnt)
+    all_lemmas = set().union(*[set(c) for c in per_doc_counts]) if per_doc_counts else set()
+    out: Dict[str, float] = {}
+    for lemma in all_lemmas:
+        vals = [c.get(lemma, 0) for c in per_doc_counts]
+        # Медиана по документам, где лемма присутствует (иначе занижаем нулями).
+        present = [v for v in vals if v > 0]
+        if present:
+            out[lemma] = float(_st.median(present))
+    return out
+
+
+def _build_serp_factors(
+    *,
+    urls: List[str],
+    positions_by_url: Dict[str, Optional[int]],
+    signals_by_url: Dict[str, dict],
+    lex_rows_by_url: Dict[str, dict],
+    include_kendall: bool = False,
+) -> SerpFactorsBlock:
+    """Собирает SerpFactorsBlock из уже посчитанных артефактов.
+
+    Soft-fail (§12): при любой ошибке возвращает enabled=False + error_reason,
+    никогда не бросает наружу. duration_ms всегда заполнен.
+    """
+    t0 = time.perf_counter()
+    try:
+        per_doc = [
+            {
+                "url": u,
+                "serp_position": positions_by_url.get(u),
+                "lex_row": lex_rows_by_url.get(u),
+                "signals": signals_by_url.get(u),
+            }
+            for u in urls
+        ]
+        matrix = build_factor_matrix(per_doc)
+        corr = compute_factor_correlations(
+            matrix["rows"], FACTOR_NAMES, include_kendall=include_kendall,
+        )
+        delta = top3_vs_top20_delta(matrix["rows"], FACTOR_NAMES)
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        return SerpFactorsBlock(
+            enabled=True,
+            duration_ms=duration_ms,
+            backend=corr.get("backend"),
+            n_pages=int(corr.get("n_pages") or 0),
+            factors=[FactorMeta(**f) for f in matrix["factors"]],
+            factor_correlations=[
+                FactorCorrelationRow(**r) for r in corr.get("factor_correlations", [])
+            ],
+            top3_vs_top20_delta=[Top3Top20DeltaRow(**d) for d in delta.get("deltas", [])],
+            top3_vs_top20_buckets=delta.get("buckets", {}),
+            page_factor_vectors=[PageFactorVector(**row) for row in matrix["rows"]],
+        )
+    except Exception as e:  # pragma: no cover — defensive soft-fail
+        logger.warning("serp_factors failed: %s", e)
+        return SerpFactorsBlock(
+            enabled=False,
+            duration_ms=int((time.perf_counter() - t0) * 1000),
+            error_reason=f"serp_factors_exception: {str(e)[:160]}",
+        )
 
 
 @app.post("/analyze", response_model=AnalyzeResponse, dependencies=[Depends(verify_internal_token)])
@@ -581,6 +753,73 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             doc_count=int(agg.get("doc_count") or 0),
         )
 
+    # Шаг 4f. SERP Factor Analysis (SEO Relevance Analyzer 2.0 — Phase 1).
+    # Собираем факторную матрицу row-per-page из lexical-метрик
+    # (per_competitor_table) + non-lexical сигналов (signals.py) и считаем
+    # корреляции Спирмена фактор↔позиция + дифференциал top3/top4-10/top11-20.
+    # Гейт: include_serp_factors + env RELEVANCE_SERP_FACTORS. Soft-fail.
+    serp_factors_block: Optional[SerpFactorsBlock] = None
+    if opts.include_serp_factors and serp_factors_enabled():
+        # Позиции: явная serp_position документа, иначе индекс+1 (SERP-порядок).
+        positions_by_url: Dict[str, Optional[int]] = {}
+        for idx, (d, _pr) in enumerate(parse_results):
+            pos = d.serp_position if isinstance(d.serp_position, int) else (idx + 1)
+            positions_by_url[d.url] = pos
+
+        # Signals-by-url: переиспользуем уже посчитанные, иначе считаем здесь
+        # (лексический-only режим, если signals выключены глобально).
+        signals_by_url: Dict[str, dict] = {}
+        if competitor_signals_per_url:
+            for sig in competitor_signals_per_url:
+                if isinstance(sig, dict) and sig.get("url"):
+                    signals_by_url[sig["url"]] = sig
+        elif signals_enabled():
+            for d, _pr in parse_results:
+                try:
+                    signals_by_url[d.url] = extract_competitor_signals(
+                        d.html, d.url, payload.query,
+                    )
+                except Exception as e:
+                    logger.warning("serp_factors signals failed for %s: %s", d.url, e)
+
+        # Lexical rows: per_competitor_table по всем распарсенным документам.
+        lex_rows_by_url: Dict[str, dict] = {}
+        corpus_for_factors = [doc_lemmas[i] for i, (d, _) in enumerate(parse_results) if doc_lemmas[i]]
+        if vocabulary and corpus_for_factors:
+            try:
+                lex_rows = per_competitor_table(
+                    competitors=[
+                        {"url": d.url, "lemmas": doc_lemmas[i]}
+                        for i, (d, _) in enumerate(parse_results)
+                        if doc_lemmas[i]
+                    ],
+                    vocabulary=vocabulary,
+                    corpus_lemmas=corpus_for_factors,
+                    our_doc=None,
+                    text_chars_by_url={
+                        d.url: parse_results[i][1].diagnostics.text_chars
+                        for i, (d, _) in enumerate(parse_results) if doc_lemmas[i]
+                    },
+                    word_count_by_url={
+                        d.url: parse_results[i][1].diagnostics.word_count
+                        for i, (d, _) in enumerate(parse_results) if doc_lemmas[i]
+                    },
+                    serp_position_by_url=positions_by_url,
+                )
+                for r in lex_rows:
+                    if isinstance(r, dict) and r.get("url"):
+                        lex_rows_by_url[r["url"]] = r
+            except Exception as e:
+                logger.warning("serp_factors lexical table failed: %s", e)
+
+        serp_factors_block = _build_serp_factors(
+            urls=[d.url for d, _ in parse_results],
+            positions_by_url=positions_by_url,
+            signals_by_url=signals_by_url,
+            lex_rows_by_url=lex_rows_by_url,
+            include_kendall=opts.serp_factors_include_kendall,
+        )
+
     # Шаг 5. Наш документ — обрабатываем тем же стеком, но не подмешиваем
     # его в IDF/медианы корпуса (иначе бы исказил статистику).
     our_metrics: Optional[OurDocumentMetrics] = None
@@ -609,6 +848,9 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         comp_table = None
         corpus = [d for d in doc_lemmas if d]
         if our_lemmas and corpus and vocabulary:
+            # Медианы вхождений лемм среди страниц ТОП-3 (для anti-overopt
+            # директив, §17). Позиция документа: явная serp_position или индекс+1.
+            top3_median_counts = _top3_lemma_medians(parse_results, doc_lemmas)
             try:
                 comparison = compute_comparison(
                     our_lemmas=our_lemmas,
@@ -619,6 +861,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
                     our_html_chars=our_pr.diagnostics.html_chars,
                     median_text_chars=median_text_chars,
                     median_html_chars=median_html_chars,
+                    top3_median_counts=top3_median_counts,
                 )
                 comp_table = per_competitor_table(
                     competitors=[
@@ -714,7 +957,101 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         headings_intersection=headings_intersection,
         our_document=our_metrics,
         competitor_signals=competitor_signals_block,
+        serp_factors=serp_factors_block,
     )
+
+
+# ── /serp-factors ─────────────────────────────────────────────────────────────
+# SEO Relevance Analyzer 2.0 — Phase 1. Отдельный эндпоинт, который прогоняет
+# ТОЛЬКО факторный слой (parse → normalize → BM25 → signals → factor matrix →
+# корреляции). Полезен, когда оператор хочет пересчитать факторы, не гоняя
+# весь /analyze. Возвращает тот же SerpFactorsBlock, что и секция в /analyze.
+class SerpFactorsRequest(BaseModel):
+    query: str = ""
+    documents: List[DocumentIn]
+    include_kendall: bool = Field(default=False)
+    min_term_df: int = Field(default=2, ge=1, le=20)
+    max_terms: int = Field(default=5000, ge=10, le=20000)
+
+
+@app.post("/serp-factors", response_model=SerpFactorsBlock, dependencies=[Depends(verify_internal_token)])
+def serp_factors(payload: SerpFactorsRequest) -> SerpFactorsBlock:
+    """Считает только факторный слой по переданным документам."""
+    if not serp_factors_enabled():
+        return SerpFactorsBlock(enabled=False, error_reason="disabled_by_env")
+
+    t0 = time.perf_counter()
+    parse_results = []
+    for d in payload.documents:
+        try:
+            pr = extract_with_diagnostics(d.html)
+        except Exception as e:
+            logger.warning("serp-factors parser failed for %s: %s", d.url, e)
+            pr = ParseResult(
+                blocks=[], diagnostics=ParseDiagnostics(empty_reason="parser_exception"),
+                anchor_text="",
+            )
+        parse_results.append((d, pr))
+
+    doc_lemmas: List[List[str]] = []
+    for _d, pr in parse_results:
+        lemmas, _seq = normalize_document(pr.text)
+        doc_lemmas.append(lemmas)
+
+    positions_by_url: Dict[str, Optional[int]] = {}
+    for idx, (d, _pr) in enumerate(parse_results):
+        pos = d.serp_position if isinstance(d.serp_position, int) else (idx + 1)
+        positions_by_url[d.url] = pos
+
+    # Non-lexical сигналы (если не выключены глобально).
+    signals_by_url: Dict[str, dict] = {}
+    if signals_enabled():
+        for d, _pr in parse_results:
+            try:
+                signals_by_url[d.url] = extract_competitor_signals(d.html, d.url, payload.query)
+            except Exception as e:
+                logger.warning("serp-factors signals failed for %s: %s", d.url, e)
+
+    # Lexical rows.
+    lex_rows_by_url: Dict[str, dict] = {}
+    corpus = [d for d in doc_lemmas if d]
+    vocabulary = compute_vocabulary_bm25(corpus, min_df=payload.min_term_df, max_terms=payload.max_terms) if corpus else []
+    if vocabulary and corpus:
+        try:
+            lex_rows = per_competitor_table(
+                competitors=[
+                    {"url": d.url, "lemmas": doc_lemmas[i]}
+                    for i, (d, _) in enumerate(parse_results) if doc_lemmas[i]
+                ],
+                vocabulary=vocabulary,
+                corpus_lemmas=corpus,
+                our_doc=None,
+                text_chars_by_url={
+                    d.url: parse_results[i][1].diagnostics.text_chars
+                    for i, (d, _) in enumerate(parse_results) if doc_lemmas[i]
+                },
+                word_count_by_url={
+                    d.url: parse_results[i][1].diagnostics.word_count
+                    for i, (d, _) in enumerate(parse_results) if doc_lemmas[i]
+                },
+                serp_position_by_url=positions_by_url,
+            )
+            for r in lex_rows:
+                if isinstance(r, dict) and r.get("url"):
+                    lex_rows_by_url[r["url"]] = r
+        except Exception as e:
+            logger.warning("serp-factors lexical table failed: %s", e)
+
+    block = _build_serp_factors(
+        urls=[d.url for d, _ in parse_results],
+        positions_by_url=positions_by_url,
+        signals_by_url=signals_by_url,
+        lex_rows_by_url=lex_rows_by_url,
+        include_kendall=payload.include_kendall,
+    )
+    # Перекрываем duration совокупным временем (parse+signals+factors).
+    block.duration_ms = int((time.perf_counter() - t0) * 1000)
+    return block
 
 
 # ── /compare ────────────────────────────────────────────────────────────────
