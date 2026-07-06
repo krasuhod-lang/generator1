@@ -2918,6 +2918,20 @@ async function ensureSchema() {
       console.warn('[ensureSchema] quality_gate verdict column (mig 098) skipped:', e.message);
     }
 
+    // Миграция 100: content-grounded image pipeline — отчёты semantic image
+    // QA и image quality gate. Обогащённые поля слотов хранятся внутри
+    // image_prompts JSONB; здесь — только сводные отчёты уровня задачи.
+    // Nullable + IF NOT EXISTS: legacy-flow (флаги IMAGE_PIPELINE_* off) и
+    // старые задачи не ломаются. См. migrations/100_image_pipeline.sql.
+    try {
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS image_semantic_qa_report JSONB`);
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS image_gate               JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS image_semantic_qa_report JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS image_gate               JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] image pipeline columns (mig 100) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);
