@@ -9,10 +9,16 @@ const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
+const contentPolicy = require('../contentPolicy');
 
 /**
  * STOP_PHRASES — фразы-маркеры "воды".
  * Источник: v3.1 index.html (СТРОГО НЕТРОНУТО).
+ *
+ * ВНИМАНИЕ: этот массив — исторический fallback. Канонический (редактируемый
+ * без деплоя) список теперь живёт в реестре политики contentPolicy (V6):
+ * defaults.js хранит те же фразы, а content_policy_rules позволяет добавлять
+ * новые через БД. checkAntiWater объединяет реестр с этим массивом.
  */
 const STOP_PHRASES = [
   // Оригинальные (v3.1)
@@ -70,7 +76,12 @@ const STOP_PHRASES = [
  */
 function checkAntiWater(html) {
   const text = html.replace(/<[^>]+>/g, ' ');
-  return STOP_PHRASES.filter(phrase =>
+  // Реестр политики (V6) ∪ исторический STOP_PHRASES — редактируемо без деплоя.
+  let phrases = STOP_PHRASES;
+  try {
+    phrases = contentPolicy._mergeUnique(contentPolicy.getStopPhrasesSync(), STOP_PHRASES);
+  } catch (_) { /* graceful: остаёмся на историческом списке */ }
+  return phrases.filter(phrase =>
     text.toLowerCase().includes(phrase.toLowerCase())
   );
 }

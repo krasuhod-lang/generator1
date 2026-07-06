@@ -988,6 +988,50 @@ async function runPipeline(task, ctx) {
     }
   }
 
+  // ── Unified Quality Core (Content Gen v2, Фаза 3) ──────────────────
+  // Единый gate поверх финального HTML SEO-пайплайна. Risk берём из Stage 8
+  // evaluator_report (regulatory_risks), если он посчитан. Value-adds для
+  // 'seo' обязательны ТОЛЬКО при наличии information_gain_brief — сейчас
+  // пайплайн его не формирует, поэтому checker пропускается (без ложных
+  // блокировок). Пишем журнал (quality_gate_reports) + компактный вердикт
+  // в tasks.quality_gate. Полностью graceful, НЕ роняет пайплайн.
+  let qualityGateVerdict = null;
+  try {
+    const { qualityGate } = require('../qualityCore');
+    const gateResult = await qualityGate.runForTask({
+      pipeline: 'seo',
+      taskId,
+      raw: {
+        html: s7Result.finalHTML || finalBlocks.join('\n\n'),
+        niche: task.input_target_service || task.input_target_url || '',
+        currentYear: new Date().getFullYear(),
+        evaluatorReport: evaluatorReport || null,
+      },
+    });
+    qualityGateVerdict = {
+      canPublish: gateResult.canPublish,
+      ymyl:       gateResult.ymyl,
+      blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+      warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
+      summary:    gateResult.summary,
+      checked_at: new Date().toISOString(),
+    };
+    try {
+      await db.query(
+        `UPDATE tasks SET quality_gate = $1, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(qualityGateVerdict), taskId],
+      );
+    } catch (dbErr) {
+      log(`Quality gate: не удалось сохранить вердикт в БД (${dbErr.message})`, 'warn');
+    }
+    log(
+      `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
+      gateResult.canPublish ? 'info' : 'warn',
+    );
+  } catch (gateErr) {
+    log(`Quality gate: непойманное исключение — ${gateErr.message}`, 'warn');
+  }
+
   // Время генерации контента (в секундах)
   const generationTimeSec = Math.round((Date.now() - pipelineStartedAt) / 1000);
 
@@ -1004,6 +1048,7 @@ async function runPipeline(task, ctx) {
     tfIdfDensity:       s7Result.tfIdfDensity          || [],
     unusedInputs:       unusedInputsReport             || null,
     evaluatorReport:    evaluatorReport                || null,
+    qualityGate:        qualityGateVerdict             || null,
     generationTimeSec,
   });
 

@@ -42,6 +42,7 @@ const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
 const cannibalizationRoutes = require('./src/routes/cannibalization.routes');
+const contentPolicyRoutes   = require('./src/routes/contentPolicy.routes');
 
 const app  = express();
 const PORT = parseInt(process.env.PORT) || 3000;
@@ -132,6 +133,7 @@ app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
 app.use('/api/site-crawler',     siteCrawlerRoutes);
 app.use('/api/cannibalization',  cannibalizationRoutes);
+app.use('/api/admin/content-policy', contentPolicyRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
 // Google Cloud redirect_uri вида https://<домен>/api/oauth/google/callback.
 // Канонический путь — /api/public/projects/gsc/callback. Лимитируем так же,
@@ -211,6 +213,20 @@ const start = async () => {
 
     // Auto-seed администратора из ENV
     await seedAdmin();
+
+    // Прогрев реестра политик контента (V6 / Content Gen v2, Фаза 3):
+    // подтягиваем active-правила (stop-фразы, banned formulations, YMYL,
+    // пороги) в процессный кэш ДО первой генерации, чтобы quality gate и
+    // stage5 anti-water работали на актуальном реестре сразу, а не лениво
+    // после первой admin-записи. Полностью graceful — реестр никогда не
+    // должен ломать старт/генерацию (fallback на defaults.js).
+    try {
+      const contentPolicy = require('./src/services/contentPolicy');
+      await contentPolicy.refresh({ force: true });
+      console.log('[Server] contentPolicy registry warmed');
+    } catch (err) {
+      console.warn('[Server] contentPolicy warm-up skipped:', err.message);
+    }
 
     // После рестарта переводим зависшие meta-tag-задачи в error
     try {
@@ -1083,6 +1099,16 @@ async function ensureSchema() {
     await db.query(`
       ALTER TABLE relevance_reports
         ADD COLUMN IF NOT EXISTS cocoon_plan JSONB
+    `);
+
+    // ─── Migration 099: SEO Relevance Analyzer 2.0 (Phase 1) ─────────────
+    // Сырая факторная матрица одного прогона (row-per-page): значения всех
+    // факторов + позиция URL в выдаче. Хранится отдельной additive-колонкой,
+    // чтобы пересчитывать корреляции офлайн без повторного обхода SERP (§14).
+    // nullable: на старых отчётах и при выключенном факторном слое → NULL.
+    await db.query(`
+      ALTER TABLE relevance_reports
+        ADD COLUMN IF NOT EXISTS factor_matrix JSONB
     `);
 
     // ─── Migration 022: relevance → content bridge + images_count ─────────
@@ -2826,6 +2852,84 @@ async function ensureSchema() {
         ON cannibalization_serp(task_id)`);
     } catch (e) {
       console.warn('[ensureSchema] cannibalization_* (mig 096) skipped:', e.message);
+    }
+
+    // Миграция 097: Content Generator v2, Фаза 1 — Unified Quality Core (V1)
+    // + Prompt/Policy Registry (V6). См. migrations/097_content_quality_core.sql.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS content_policy_rules (
+          id          BIGSERIAL PRIMARY KEY,
+          scope       TEXT NOT NULL DEFAULT 'global',
+          scope_ref   TEXT NULL,
+          rule_type   TEXT NOT NULL,
+          payload     JSONB NOT NULL DEFAULT '{}'::jsonb,
+          active      BOOLEAN NOT NULL DEFAULT TRUE,
+          created_by  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_content_policy_rules_lookup
+        ON content_policy_rules(rule_type, scope, active)`);
+
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS information_gain_briefs (
+          id              BIGSERIAL PRIMARY KEY,
+          pipeline_type   TEXT NOT NULL,
+          task_id         BIGINT NOT NULL,
+          gaps            JSONB NOT NULL DEFAULT '[]'::jsonb,
+          value_adds      JSONB NOT NULL DEFAULT '[]'::jsonb,
+          delta_score     NUMERIC NULL,
+          blocking_reason TEXT NULL,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_information_gain_briefs_task
+        ON information_gain_briefs(pipeline_type, task_id)`);
+
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS quality_gate_reports (
+          id            BIGSERIAL PRIMARY KEY,
+          pipeline_type TEXT NOT NULL,
+          task_id       BIGINT NOT NULL,
+          gate_name     TEXT NOT NULL,
+          pass          BOOLEAN NOT NULL,
+          blocking      BOOLEAN NOT NULL DEFAULT FALSE,
+          score         NUMERIC NULL,
+          evidence      JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )`);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_quality_gate_reports_task_gate
+        ON quality_gate_reports(pipeline_type, task_id, gate_name)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_quality_gate_reports_task
+        ON quality_gate_reports(pipeline_type, task_id)`);
+    } catch (e) {
+      console.warn('[ensureSchema] content_quality_core (mig 097) skipped:', e.message);
+    }
+
+    // Миграция 098: Content Generator v2, Фаза 3 — компактный вердикт единого
+    // qualityGate.finalize() прямо в задаче (для UI-бейджа «прошло/на ревью»),
+    // дополнительно к пофичерному журналу quality_gate_reports (миг 097).
+    // См. migrations/098_quality_gate_verdict.sql.
+    try {
+      await db.query(`ALTER TABLE tasks              ADD COLUMN IF NOT EXISTS quality_gate JSONB`);
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS quality_gate JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS quality_gate JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] quality_gate verdict column (mig 098) skipped:', e.message);
+    }
+
+    // Миграция 100: content-grounded image pipeline — отчёты semantic image
+    // QA и image quality gate. Обогащённые поля слотов хранятся внутри
+    // image_prompts JSONB; здесь — только сводные отчёты уровня задачи.
+    // Nullable + IF NOT EXISTS: legacy-flow (флаги IMAGE_PIPELINE_* off) и
+    // старые задачи не ломаются. См. migrations/100_image_pipeline.sql.
+    try {
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS image_semantic_qa_report JSONB`);
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS image_gate               JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS image_semantic_qa_report JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS image_gate               JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] image pipeline columns (mig 100) skipped:', e.message);
     }
 
     console.log('[Schema] ensureSchema OK');

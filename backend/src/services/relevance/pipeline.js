@@ -91,30 +91,81 @@ async function _setStage(reportId, stage, extra = {}) {
 }
 
 async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed, extras = {}) {
-  await db.query(
-    `UPDATE relevance_reports
-       SET status='done',
-           current_stage='done',
-           report = $2::jsonb,
-           completed_at = NOW(),
-           duration_ms = $3,
-           raw_storage = $4,
-           raw_expires_at = $5,
-           raw_processed = $6::jsonb,
-           our_report = $7::jsonb,
-           comparison = $8::jsonb
-     WHERE id = $1`,
-    [
-      reportId,
-      JSON.stringify(report),
-      durationMs,
-      rawMeta?.stored ? 'redis' : 'none',
-      rawMeta?.stored ? rawMeta.expiresAt : null,
-      dbProcessed ? JSON.stringify(dbProcessed) : null,
-      extras.our_report  ? JSON.stringify(extras.our_report)  : null,
-      extras.comparison  ? JSON.stringify(extras.comparison)  : null,
-    ],
-  );
+  // SEO Relevance Analyzer 2.0 (Phase 1): сырую факторную матрицу храним
+  // отдельной additive-колонкой (мигр. 099), чтобы пересчитывать корреляции
+  // офлайн без повторного обхода SERP (§14). Колонка nullable — если
+  // факторный слой выключен или столбца ещё нет (старый инстанс), пишем NULL
+  // и не роняем сохранение отчёта.
+  const factorMatrix = (report?.serp_factors && Array.isArray(report.serp_factors.page_factor_vectors))
+    ? {
+      query:      report.query || null,
+      built_at:   new Date().toISOString(),
+      backend:    report.serp_factors.backend || null,
+      n_pages:    report.serp_factors.n_pages || 0,
+      factors:    Array.isArray(report.serp_factors.factors) ? report.serp_factors.factors : [],
+      page_factor_vectors: report.serp_factors.page_factor_vectors,
+    }
+    : null;
+  try {
+    await db.query(
+      `UPDATE relevance_reports
+         SET status='done',
+             current_stage='done',
+             report = $2::jsonb,
+             completed_at = NOW(),
+             duration_ms = $3,
+             raw_storage = $4,
+             raw_expires_at = $5,
+             raw_processed = $6::jsonb,
+             our_report = $7::jsonb,
+             comparison = $8::jsonb,
+             factor_matrix = $9::jsonb
+       WHERE id = $1`,
+      [
+        reportId,
+        JSON.stringify(report),
+        durationMs,
+        rawMeta?.stored ? 'redis' : 'none',
+        rawMeta?.stored ? rawMeta.expiresAt : null,
+        dbProcessed ? JSON.stringify(dbProcessed) : null,
+        extras.our_report  ? JSON.stringify(extras.our_report)  : null,
+        extras.comparison  ? JSON.stringify(extras.comparison)  : null,
+        factorMatrix ? JSON.stringify(factorMatrix) : null,
+      ],
+    );
+  } catch (e) {
+    // Обратная совместимость: если колонки factor_matrix ещё нет (миграция
+    // не применена на старом инстансе), повторяем UPDATE без неё, чтобы
+    // сохранение основного отчёта не падало.
+    if (/factor_matrix/i.test(String(e.message || ''))) {
+      await db.query(
+        `UPDATE relevance_reports
+           SET status='done',
+               current_stage='done',
+               report = $2::jsonb,
+               completed_at = NOW(),
+               duration_ms = $3,
+               raw_storage = $4,
+               raw_expires_at = $5,
+               raw_processed = $6::jsonb,
+               our_report = $7::jsonb,
+               comparison = $8::jsonb
+         WHERE id = $1`,
+        [
+          reportId,
+          JSON.stringify(report),
+          durationMs,
+          rawMeta?.stored ? 'redis' : 'none',
+          rawMeta?.stored ? rawMeta.expiresAt : null,
+          dbProcessed ? JSON.stringify(dbProcessed) : null,
+          extras.our_report  ? JSON.stringify(extras.our_report)  : null,
+          extras.comparison  ? JSON.stringify(extras.comparison)  : null,
+        ],
+      );
+    } else {
+      throw e;
+    }
+  }
 }
 
 async function _finishError(reportId, message) {
@@ -414,9 +465,24 @@ async function processRelevanceReport(reportId) {
     //   по структуре статьи.
     // include_parsed_preview=true — превью парсеннного текста для UI-кнопки
     //   «что собрал парсер» (ограничение по символам).
+    // Карта url → позиция в выдаче (1-based). `serp` уже отсортирован по
+    // позиции, поэтому индекс+1 — это ранг URL. Позиции нужны Relevance 2.0
+    // (Phase 1) для факторной матрицы и ранговых корреляций Спирмена.
+    const serpPositionByUrl = new Map();
+    for (let i = 0; i < serp.length; i++) {
+      const u = String(serp[i]?.url || '').trim();
+      if (u && !serpPositionByUrl.has(u)) serpPositionByUrl.set(u, i + 1);
+    }
+
     const analysisResp = await analyze({
       query,
-      documents: successes.map((s) => ({ url: s.url, html: s.html })),
+      documents: successes.map((s) => ({
+        url: s.url,
+        html: s.html,
+        // SEO Relevance Analyzer 2.0 (Phase 1): ранг URL в выдаче для
+        // факторной матрицы / корреляций. Отсутствует → Python подставит index+1.
+        serp_position: serpPositionByUrl.get(String(s.url || '').trim()) ?? null,
+      })),
       options: {
         return_processed: true,
         include_anchor_zone: true,
@@ -429,6 +495,10 @@ async function processRelevanceReport(reportId) {
         // occurrences, host-hygiene. Доп. env-выключатель на стороне Python:
         // RELEVANCE_COMPETITOR_SIGNALS=false.
         include_competitor_signals: true,
+        // SEO Relevance Analyzer 2.0 (Phase 1): факторная матрица (row-per-page),
+        // ранговые корреляции Спирмена (фактор↔позиция) и дифференциал
+        // top3/top4-10/top11-20. Env-выключатель: RELEVANCE_SERP_FACTORS=false.
+        include_serp_factors: true,
         parsed_preview_chars: 20000,
       },
     });
@@ -482,6 +552,15 @@ async function processRelevanceReport(reportId) {
       // Может быть null, если опция выключена через env на стороне Python.
       competitor_signals: (analysisResp?.competitor_signals && typeof analysisResp.competitor_signals === 'object')
         ? analysisResp.competitor_signals
+        : null,
+      // SEO Relevance Analyzer 2.0 (Phase 1): факторная матрица SERP 1–20,
+      // ранговые корреляции Спирмена (фактор↔позиция) и дифференциал
+      // top3/top4-10/top11-20. Может быть null, если флаг/env выключены на
+      // стороне Python. Сырая матрица (page_factor_vectors) также сохраняется
+      // отдельной JSONB-колонкой relevance_reports.factor_matrix (мигр. 099)
+      // для офлайн-пересчёта корреляций без повторного обхода SERP.
+      serp_factors: (analysisResp?.serp_factors && typeof analysisResp.serp_factors === 'object')
+        ? analysisResp.serp_factors
         : null,
       filter: {
         exclude_aggregators:  !!excludeAggregators,

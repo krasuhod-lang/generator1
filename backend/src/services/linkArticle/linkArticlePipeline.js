@@ -50,6 +50,16 @@ const { resolvePromptHash } = require('../aegis/promptAudit');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const { createFunnelTracker } = require('../aegis/funnelTracker');
 const biobrainClient = require('../aegis/biobrainClient');
+const {
+  getImageConfig: getImagePipelineConfig,
+  runSemanticImageQa,
+  persistImages,
+  evaluateImageGate,
+} = require('../images');
+const {
+  NEGATIVE_BASE: IMAGE_NEGATIVE_BASE,
+  NEGATIVE_STRICT_EXTRA: IMAGE_NEGATIVE_STRICT_EXTRA,
+} = require('../images/imagePromptComposer');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
@@ -533,17 +543,34 @@ async function runImagePromptsGen(task, structure, articleHtml, ctx) {
   );
 
   const prompts = Array.isArray(result?.image_prompts) ? result.image_prompts : [];
-  return prompts.slice(0, 3).map((p, idx) => ({
-    slot:            p.slot || idx + 1,
-    section_h2:      String(p.section_h2 || '').slice(0, 200),
-    visual_prompt:   String(p.visual_prompt || '').slice(0, 2000),
-    negative_prompt: String(p.negative_prompt || '').slice(0, 400),
-    alt_ru:          String(p.alt_ru || '').slice(0, 200),
-    status:          'pending',
-    image_base64:    null,
-    mime_type:       null,
-    error:           null,
-  }));
+  // editorial_mode=strict по умолчанию для внешних (биржевых) публикаций:
+  // усиливаем negative_prompt строгим editorial-скелетом (no text overlays /
+  // logos / surreal / malformed hands-faces / glossy generic stock),
+  // объединяя с тем, что вернул LLM. Это снижает AI-generic look и
+  // повышает editorial-safety для публикуемости.
+  const editorialMode = (getImagePipelineConfig().editorialModeDefault) || 'strict';
+  const strictNeg = editorialMode === 'strict'
+    ? [...IMAGE_NEGATIVE_BASE, ...IMAGE_NEGATIVE_STRICT_EXTRA]
+    : IMAGE_NEGATIVE_BASE;
+  return prompts.slice(0, 3).map((p, idx) => {
+    const llmNeg = String(p.negative_prompt || '').trim();
+    const merged = Array.from(new Set([
+      ...strictNeg,
+      ...(llmNeg ? llmNeg.split(',').map((s) => s.trim()).filter(Boolean) : []),
+    ])).join(', ').slice(0, 400);
+    return {
+      slot:            p.slot || idx + 1,
+      section_h2:      String(p.section_h2 || '').slice(0, 200),
+      visual_prompt:   String(p.visual_prompt || '').slice(0, 2000),
+      negative_prompt: merged,
+      alt_ru:          String(p.alt_ru || '').slice(0, 200),
+      editorial_mode:  editorialMode,
+      status:          'pending',
+      image_base64:    null,
+      mime_type:       null,
+      error:           null,
+    };
+  });
 }
 
 async function runImageGeneration(taskId, imagePrompts) {
@@ -579,16 +606,24 @@ function embedImages(html, imagePrompts) {
   for (const p of imagePrompts) {
     const placeholder = `<!-- IMAGE_SLOT_${p.slot} -->`;
     if (p.status === 'done' && p.image_base64) {
-      // Изображение вставляется «чистым»: без figcaption-комментария под картинкой.
       // alt-атрибут оставляем — он невидим на странице, но нужен для SEO/доступности
       // и обычно требуется биржевыми проверками. Поведение копирования (как HTML и
-      // как форматированный текст) от этого не страдает: <img> с data:base64 src
-      // переносится в буфер вместе с остальным контентом.
+      // как форматированный текст) от этого не страдает.
+      //
+      // Production-режим (storage_mode=cdn_upload) → <img> по URL с
+      // lazy/async/width/height для производительности страницы и Google
+      // Images; draft/fallback (inline_base64) → data:URI как раньше.
       const alt = escapeHtml(p.alt_ru || '');
-      const figure =
-        `<figure class="link-article-image">` +
-        `<img src="data:${p.mime_type};base64,${p.image_base64}" alt="${alt}" />` +
-        `</figure>`;
+      const useUrl = p.storage_mode === 'cdn_upload' && p.image_url;
+      const src = useUrl ? escapeHtml(p.image_url) : `data:${p.mime_type};base64,${p.image_base64}`;
+      const dims = [];
+      if (useUrl && Number(p.width) > 0) dims.push(`width="${Number(p.width)}"`);
+      if (useUrl && Number(p.height) > 0) dims.push(`height="${Number(p.height)}"`);
+      const perf = useUrl ? ' loading="lazy" decoding="async"' : '';
+      const img = `<img src="${src}" alt="${alt}"${dims.length ? ` ${dims.join(' ')}` : ''}${perf} />`;
+      const caption = p.caption_ru && String(p.caption_ru).trim()
+        ? `<figcaption>${escapeHtml(p.caption_ru)}</figcaption>` : '';
+      const figure = `<figure class="link-article-image">${img}${caption}</figure>`;
       out = out.replace(placeholder, figure);
     } else {
       // Неуспешный слот — просто убираем плейсхолдер, чтобы он не «торчал» в финальном HTML.
@@ -858,6 +893,40 @@ async function processLinkArticleTask(taskId) {
     const renderedImages = await runImageGeneration(taskId, imagePrompts);
     await saveStageResult(taskId, 'image_prompts', renderedImages);
 
+    // 7a. Production delivery + Semantic QA + Image Quality Gate
+    //     (content-grounded pipeline, services/images). Плейсхолдерная
+    //     механика сохранена — здесь только доставка/оценка. Behind flags,
+    //     никогда не роняет pipeline.
+    let deliveredImages = renderedImages;
+    try {
+      const imgCfg = getImagePipelineConfig();
+      if (imgCfg.storageMode === 'cdn_upload') {
+        deliveredImages = await persistImages(deliveredImages, taskId, imgCfg);
+        await saveStageResult(taskId, 'image_prompts', deliveredImages);
+        const storedN = deliveredImages.filter((p) => p && p.image_url).length;
+        await appendLog(taskId, `🗄 Production storage (cdn_upload): сохранено ${storedN} файл(ов)`, storedN ? 'ok' : 'info');
+      }
+      let semanticQa = null;
+      if (imgCfg.semanticQaEnabled) {
+        semanticQa = runSemanticImageQa(deliveredImages, { genericScoreThreshold: imgCfg.genericScoreThreshold });
+        await saveStageResult(taskId, 'image_semantic_qa_report', semanticQa);
+        for (const r of semanticQa.slots) {
+          const slot = deliveredImages.find((p) => (p.slot || 1) === r.slot);
+          if (slot) { slot.semantic_qa_result = r.verdict; slot.semantic_qa_scores = r.scores; }
+        }
+        await saveStageResult(taskId, 'image_prompts', deliveredImages);
+        const ss = semanticQa.summary;
+        const icon = ss.verdict === 'pass' ? '✅' : ss.verdict === 'review' ? '⚠' : ss.verdict === 'na' ? 'ℹ' : '❌';
+        await appendLog(taskId, `${icon} Semantic Image QA: pass=${ss.passSlots}/${ss.totalSlots} review=${ss.reviewSlots} fail=${ss.failSlots} verdict=${ss.verdict}`, ss.verdict === 'fail' ? 'warn' : 'info');
+      }
+      const gate = evaluateImageGate({ imagePrompts: deliveredImages, semanticQa, config: imgCfg });
+      await saveStageResult(taskId, 'image_gate', gate);
+      const gicon = gate.canFinalize ? (gate.verdict === 'pass' || gate.verdict === 'na' ? '✅' : '⚠') : '❌';
+      await appendLog(taskId, `${gicon} Image Gate: verdict=${gate.verdict} canFinalize=${gate.canFinalize}` + (gate.blockers.length ? ` | blockers: ${gate.blockers.slice(0, 3).join('; ')}` : ''), gate.canFinalize ? 'info' : 'warn');
+    } catch (imgErr) {
+      await appendLog(taskId, `⚠ Image delivery/semantic-QA/gate не выполнились: ${imgErr.message} — продолжаем`, 'warn');
+    }
+
     // 7b. Quality Score — детерминированный агрегат по eeat_audit и др.
     //     отчётам. Не делает сети. Используется в /api/admin/model-comparison.
     // Перед quality_score — финальный лог по статистике Gemini Context Cache.
@@ -944,7 +1013,7 @@ async function processLinkArticleTask(taskId) {
     }
 
     // 8. Embed images + strip any unused placeholders
-    const finalHtml  = embedImages(articleHtml, renderedImages);
+    const finalHtml  = embedImages(articleHtml, deliveredImages);
     const finalPlain = buildPlainText(finalHtml);
 
     // 8b. SEO/GEO 2026: JSON-LD (Article + Author + FAQPage [+ HowTo]).
@@ -1023,6 +1092,45 @@ async function processLinkArticleTask(taskId) {
       console.warn(`[linkArticle] JSON-LD build failed: ${schemaErr.message}`);
     }
 
+    // 8c. Unified Quality Core (Content Gen v2, Фаза 3): единый gate для
+    //     ссылочного пайплайна. У link-статей нет value-add требований
+    //     (цель — публикуемость, не топ SERP), поэтому finalize('link')
+    //     проверяет в основном freshness / stop-phrases / banned formulations
+    //     и disclosure. Graceful: НЕ роняет генерацию, НЕ меняет status.
+    let linkQualityGateVerdict = null;
+    try {
+      const { qualityGate } = require('../qualityCore');
+      const gateResult = await qualityGate.runForTask({
+        pipeline: 'link',
+        taskId,
+        raw: {
+          html: finalHtml,
+          niche: task.topic || task.region || '',
+          currentYear: new Date().getFullYear(),
+          authorship: {
+            byline:   authorByline || task.__authorName || null,
+            reviewer: task.__reviewerName || null,
+            sources:  Array.isArray(jsonLdBlocks) && jsonLdBlocks.length ? jsonLdBlocks : null,
+          },
+        },
+      });
+      linkQualityGateVerdict = {
+        canPublish: gateResult.canPublish,
+        ymyl:       gateResult.ymyl,
+        blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+        warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
+        summary:    gateResult.summary,
+        checked_at: new Date().toISOString(),
+      };
+      await appendLog(
+        taskId,
+        `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
+        gateResult.canPublish ? 'ok' : 'warn',
+      );
+    } catch (gateErr) {
+      console.warn(`[linkArticle] quality gate failed: ${gateErr.message}`);
+    }
+
     await db.query(
       `UPDATE link_article_tasks
           SET article_html             = $2,
@@ -1030,6 +1138,7 @@ async function processLinkArticleTask(taskId) {
               article_html_with_schema = $4,
               json_ld_blocks           = $5,
               author_byline            = $6,
+              quality_gate             = $7,
               status         = 'done',
               progress_pct   = 100,
               current_stage  = 'done',
@@ -1039,6 +1148,7 @@ async function processLinkArticleTask(taskId) {
       [
         taskId, finalHtml, finalPlain,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
+        linkQualityGateVerdict ? JSON.stringify(linkQualityGateVerdict) : null,
       ],
     );
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');

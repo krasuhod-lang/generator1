@@ -93,6 +93,7 @@ async function listInfoArticleTasks(req, res, next) {
               deepseek_tokens_in, deepseek_tokens_out,
               gemini_tokens_in, gemini_tokens_out,
               gemini_image_calls, cost_usd, eeat_score,
+              quality_gate,
               created_at, started_at, completed_at
          FROM info_article_tasks
         WHERE user_id = $1

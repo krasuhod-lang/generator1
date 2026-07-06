@@ -59,6 +59,14 @@ const {
 const { runFactCheck } = require('./factCheck.service');
 const { runPlagiarismCheck } = require('./plagiarism.service');
 const { runImageQa } = require('./imageQa.service');
+const {
+  getImageConfig: getImagePipelineConfig,
+  isNewPipelineEnabled: isGroundedImagePipelineEnabled,
+  buildGroundedImagePrompts,
+  runSemanticImageQa,
+  persistImages,
+  evaluateImageGate,
+} = require('../images');
 const { analyzeReadability } = require('./readability.service');
 const { verifyIntent } = require('./intentVerify.service');
 const { createValidationTracker } = require('./validationFailures.service');
@@ -805,6 +813,83 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, ima
   return normalized;
 }
 
+// ── New content-grounded image planning (services/images) ────────────
+
+/**
+ * buildSectionsFromArticle — разбивает готовый HTML статьи на секции по
+ * <h2>, извлекая текст блока (до следующего <h2>). Используется новым
+ * grounded image pipeline для per-block планирования визуалов вместо
+ * привязки «H2 → картинка».
+ */
+function buildSectionsFromArticle(articleHtml) {
+  const html = String(articleHtml || '');
+  const h2Re = /<h2\b[^>]*>([\s\S]*?)<\/h2\s*>/gi;
+  const marks = [];
+  let m;
+  while ((m = h2Re.exec(html)) !== null) {
+    marks.push({ index: m.index, endTag: m.index + m[0].length, title: m[1] });
+  }
+  const stripTags = (s) => String(s || '').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
+  const sections = [];
+  for (let i = 0; i < marks.length; i += 1) {
+    const start = marks[i].endTag;
+    const end = i + 1 < marks.length ? marks[i + 1].index : html.length;
+    const bodyHtml = html.slice(start, end);
+    sections.push({
+      key: `section_${i}`,
+      h2: stripTags(marks[i].title).slice(0, 200),
+      html: bodyHtml,
+      text: stripTags(bodyHtml),
+      anchor_block_id: `block_${i}`,
+      index: i,
+    });
+  }
+  return sections;
+}
+
+/**
+ * runGroundedImagePlanning — новый flow планировочного слоя: определяет,
+ * каким блокам нужен визуал (imageIntentPlanner), извлекает сцену
+ * (imageSceneExtractor) и собирает grounded-промпт (imagePromptComposer).
+ * Возвращает готовые слоты. Логирует решения (нужен/отклонён, intent, риск).
+ */
+async function runGroundedImagePlanning(task, outline, articleHtml, audience, ctx, imagesCount, styleProfile) {
+  const cfg = getImagePipelineConfig();
+  const sections = buildSectionsFromArticle(articleHtml);
+  const { slots, rejected } = buildGroundedImagePrompts({
+    articleType: 'infoArticle',
+    topic: task.topic,
+    sections,
+    audience,
+    styleProfile,
+    maxImages: imagesCount,
+    config: cfg,
+  });
+
+  if (task && task.id) {
+    for (const s of slots) {
+      await appendLog(
+        task.id,
+        `🧭 Slot ${s.slot} [${s.image_intent}] «${s.section_h2 || 'обложка'}» — ` +
+        `${s.value_reason} (generic_risk=${s.generic_risk})`,
+        'info',
+      );
+    }
+    const rejectedInfo = rejected.filter((r) => !r.need_image);
+    if (rejectedInfo.length) {
+      const preview = rejectedInfo.slice(0, 4)
+        .map((r) => `«${r.section_h2}»`).join(', ');
+      await appendLog(
+        task.id,
+        `🧭 Отклонено ${rejectedInfo.length} блок(ов) без визуальной ценности: ${preview}` +
+        (rejectedInfo.length > 4 ? ' …' : ''),
+        'info',
+      );
+    }
+  }
+  return slots;
+}
+
 async function runImageGeneration(taskId, imagePrompts) {
   const results = imagePrompts.map((p) => ({ ...p }));
   for (let i = 0; i < results.length; i += MAX_PARALLEL_IMAGES) {
@@ -867,9 +952,21 @@ function embedImages(html, imagePrompts) {
   const buildFigure = (p, klass) => {
     const alt  = escapeHtml(p.alt_ru || '');
     const mime = p.mime_type || 'image/png';
-    return `<figure class="${klass}">` +
-      `<img src="data:${mime};base64,${p.image_base64}" alt="${alt}" />` +
-      `</figure>`;
+    // Production-режим (storage_mode=cdn_upload) → <img> по URL с
+    // production-атрибутами (lazy/async/width/height) для производительности
+    // страницы и Google Images. Draft/fallback (inline_base64) → data:URI.
+    const useUrl = p.storage_mode === 'cdn_upload' && p.image_url;
+    const src = useUrl ? escapeHtml(p.image_url) : `data:${mime};base64,${p.image_base64}`;
+    const dims = [];
+    if (useUrl && Number.isFinite(Number(p.width)) && Number(p.width) > 0) dims.push(`width="${Number(p.width)}"`);
+    if (useUrl && Number.isFinite(Number(p.height)) && Number(p.height) > 0) dims.push(`height="${Number(p.height)}"`);
+    const perf = useUrl ? ' loading="lazy" decoding="async"' : '';
+    const img = `<img src="${src}" alt="${alt}"${dims.length ? ` ${dims.join(' ')}` : ''}${perf} />`;
+    // Если есть caption_ru — оборачиваем в <figure><figcaption>.
+    const caption = p.caption_ru && String(p.caption_ru).trim()
+      ? `<figcaption>${escapeHtml(p.caption_ru)}</figcaption>`
+      : '';
+    return `<figure class="${klass}">${img}${caption}</figure>`;
   };
 
   // ── 1) Cover (slot=1 / первый). ───────────────────────────────────
@@ -1813,16 +1910,31 @@ async function processInfoArticleTask(taskId) {
     };
     const imagesPhrase = RU_IMAGES_FORMS[imagesCount] || `${imagesCount} изображений`;
     await setStage(taskId, 'stage4_image_prompts', 84);
-    await appendLog(taskId, `🖼 Запрос на ${imagesPhrase} (slot=1 cover${imagesCount > 1 ? `, slot=2..${imagesCount} inline` : ''})`, 'info');
-    const imagePrompts = await runImagePromptsGen(task, outline, articleHtml, audience, ctx, imagesCount);
-    if (imagePrompts.length < 1) {
-      await appendLog(taskId, `⚠ DeepSeek не вернул промт обложки (image_prompts пусто)`, 'warn');
-    } else if (imagePrompts.length < imagesCount) {
-      await appendLog(
-        taskId,
-        `⚠ DeepSeek вернул ${imagePrompts.length}/${imagesCount} image_prompts — продолжаем с тем, что есть`,
-        'warn',
-      );
+    // Content-grounded image pipeline (services/images): планируем визуалы
+    // per-block (нужен ли, какой intent, извлекаем сцену, строим grounded
+    // prompt) вместо legacy «H2 → картинка». Включается флагами
+    // IMAGE_PIPELINE_ENABLE_INTENT_PLANNER / _SCENE_EXTRACTION. При
+    // выключенных флагах используется прежний runImagePromptsGen (BC).
+    const useGroundedImages = isGroundedImagePipelineEnabled();
+    let imagePrompts;
+    if (useGroundedImages) {
+      await appendLog(taskId, `🖼 Grounded image pipeline: планирование до ${imagesPhrase} по содержанию блоков`, 'info');
+      imagePrompts = await runGroundedImagePlanning(task, outline, articleHtml, audience, ctx, imagesCount, null);
+      if (imagePrompts.length < 1) {
+        await appendLog(taskId, `ℹ Grounded-планировщик не нашёл блоков с визуальной ценностью — картинки не генерируются`, 'info');
+      }
+    } else {
+      await appendLog(taskId, `🖼 Запрос на ${imagesPhrase} (slot=1 cover${imagesCount > 1 ? `, slot=2..${imagesCount} inline` : ''})`, 'info');
+      imagePrompts = await runImagePromptsGen(task, outline, articleHtml, audience, ctx, imagesCount);
+      if (imagePrompts.length < 1) {
+        await appendLog(taskId, `⚠ DeepSeek не вернул промт обложки (image_prompts пусто)`, 'warn');
+      } else if (imagePrompts.length < imagesCount) {
+        await appendLog(
+          taskId,
+          `⚠ DeepSeek вернул ${imagePrompts.length}/${imagesCount} image_prompts — продолжаем с тем, что есть`,
+          'warn',
+        );
+      }
     }
     await saveColumn(taskId, 'image_prompts', imagePrompts);
 
@@ -1886,6 +1998,67 @@ async function processInfoArticleTask(taskId) {
           'warn',
         );
       }
+    }
+
+    // 13d. Production delivery + Semantic QA + Image Quality Gate
+    //      (content-grounded pipeline, services/images). Всё behind flags:
+    //      • cdn_upload storage → сохраняем файлы, embed идёт по URL;
+    //      • semantic QA → per-slot relevance/usefulness/generic + verdict;
+    //      • image gate → блокирует финализацию при cover/inline fail и т.п.
+    //      Никогда не роняет pipeline (try/catch, fail-open gate).
+    try {
+      const imgCfg = getImagePipelineConfig();
+
+      // Production storage: сохраняем файлы и проставляем image_url.
+      if (imgCfg.storageMode === 'cdn_upload') {
+        renderedImages = await persistImages(renderedImages, taskId, imgCfg);
+        await saveColumn(taskId, 'image_prompts', renderedImages);
+        const storedN = renderedImages.filter((p) => p && p.image_url).length;
+        await appendLog(taskId, `🗄 Production storage (cdn_upload): сохранено ${storedN} файл(ов)`, storedN ? 'ok' : 'info');
+      }
+
+      // Semantic QA.
+      let semanticQa = null;
+      if (imgCfg.semanticQaEnabled) {
+        semanticQa = runSemanticImageQa(renderedImages, {
+          genericScoreThreshold: imgCfg.genericScoreThreshold,
+        });
+        await saveColumn(taskId, 'image_semantic_qa_report', semanticQa);
+        // Прошиваем per-slot вердикт/оценки обратно в слоты (для схемы слота).
+        for (const r of semanticQa.slots) {
+          const slot = renderedImages.find((p) => (p.slot || 1) === r.slot);
+          if (slot) { slot.semantic_qa_result = r.verdict; slot.semantic_qa_scores = r.scores; }
+        }
+        await saveColumn(taskId, 'image_prompts', renderedImages);
+        const ss = semanticQa.summary;
+        const icon = ss.verdict === 'pass' ? '✅' : ss.verdict === 'review' ? '⚠' : ss.verdict === 'na' ? 'ℹ' : '❌';
+        await appendLog(
+          taskId,
+          `${icon} Semantic Image QA: pass=${ss.passSlots}/${ss.totalSlots} ` +
+          `review=${ss.reviewSlots} fail=${ss.failSlots} (cover=${ss.coverVerdict}) verdict=${ss.verdict}`,
+          ss.verdict === 'pass' || ss.verdict === 'na' ? 'ok' : 'info',
+        );
+      }
+
+      // Image Quality Gate (обязательный, но fail-open по ошибке).
+      const technicalQa = (() => { try { return runImageQa(renderedImages); } catch (_) { return null; } })();
+      const gate = evaluateImageGate({
+        imagePrompts: renderedImages,
+        technicalQa,
+        semanticQa,
+        config: imgCfg,
+      });
+      await saveColumn(taskId, 'image_gate', gate);
+      const gicon = gate.verdict === 'pass' ? '✅' : gate.verdict === 'review' ? '⚠' : gate.verdict === 'na' ? 'ℹ' : '❌';
+      await appendLog(
+        taskId,
+        `${gicon} Image Gate: verdict=${gate.verdict} canFinalize=${gate.canFinalize}` +
+        (gate.blockers.length ? ` | blockers: ${gate.blockers.slice(0, 3).join('; ')}` : '') +
+        (gate.warnings.length ? ` | warnings: ${gate.warnings.length}` : ''),
+        gate.canFinalize ? (gate.verdict === 'pass' || gate.verdict === 'na' ? 'ok' : 'info') : 'warn',
+      );
+    } catch (imgErr) {
+      await appendLog(taskId, `⚠ Image delivery/semantic-QA/gate не выполнились: ${imgErr.message} — продолжаем`, 'warn');
     }
     } // end else (imagesCount > 0)
 
@@ -2111,6 +2284,57 @@ async function processInfoArticleTask(taskId) {
       console.warn(`[infoArticle] JSON-LD build failed: ${schemaErr.message}`);
     }
 
+    // 14d. Unified Quality Core (Content Gen v2, Фаза 3): единый gate поверх
+    //      уже посчитанных отчётов. Собираем сырые отчёты из БД, нормализуем
+    //      адаптером collectArtifacts и прогоняем qualityGate.finalize('info').
+    //      Пишем пофичерный журнал (quality_gate_reports) + компактный вердикт
+    //      в info_article_tasks.quality_gate. Полностью graceful: gate НИКОГДА
+    //      не роняет генерацию и (по требованию заказчика — «помечать, а не
+    //      жёстко блокировать») НЕ меняет status='done', только фиксирует
+    //      canPublish/blockers для UI-бейджа «на ревью».
+    let qualityGateVerdict = null;
+    try {
+      const { qualityGate } = require('../qualityCore');
+      const { rows: [qr] } = await db.query(
+        `SELECT fact_check_report, plagiarism_report, lsi_overdose_report, intent_verdict
+           FROM info_article_tasks WHERE id = $1`,
+        [taskId],
+      );
+      const gateResult = await qualityGate.runForTask({
+        pipeline: 'info',
+        taskId,
+        raw: {
+          html: finalHtml,
+          niche: task.topic || task.region || '',
+          currentYear: new Date().getFullYear(),
+          factReport:        qr && qr.fact_check_report,
+          plagiarismReport:  qr && qr.plagiarism_report,
+          lsiOverdoseReport: qr && qr.lsi_overdose_report,
+          intentReport:      qr && qr.intent_verdict,
+          authorship: {
+            byline:   authorByline || task.__authorName || null,
+            reviewer: task.__reviewerName || null,
+            sources:  Array.isArray(jsonLdBlocks) && jsonLdBlocks.length ? jsonLdBlocks : null,
+          },
+        },
+      });
+      qualityGateVerdict = {
+        canPublish: gateResult.canPublish,
+        ymyl:       gateResult.ymyl,
+        blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+        warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
+        summary:    gateResult.summary,
+        checked_at: new Date().toISOString(),
+      };
+      await appendLog(
+        taskId,
+        `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
+        gateResult.canPublish ? 'ok' : 'warn',
+      );
+    } catch (gateErr) {
+      console.warn(`[infoArticle] quality gate failed: ${gateErr.message}`);
+    }
+
     await db.query(
       `UPDATE info_article_tasks
           SET article_html             = $2,
@@ -2120,6 +2344,7 @@ async function processInfoArticleTask(taskId) {
               article_html_with_schema = $6,
               json_ld_blocks           = $7,
               author_byline            = $8,
+              quality_gate             = $9,
               status          = 'done',
               progress_pct    = 100,
               current_stage   = 'done',
@@ -2129,6 +2354,7 @@ async function processInfoArticleTask(taskId) {
       [
         taskId, finalHtml, finalPlain, seoTitle, seoDescription,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
+        qualityGateVerdict ? JSON.stringify(qualityGateVerdict) : null,
       ],
     );
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');
