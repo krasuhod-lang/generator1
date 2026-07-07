@@ -14,6 +14,20 @@
  *   • Постановка задачи:      POST https://arsenkin.ru/api/tools/set
  *       body: { tools_name: "<инструмент>", data: { ...параметры } }
  *       ответ: { task_id } (или { data: { task_id } })
+ *   • Инструмент «Проверка сезонности запросов» (официальные параметры):
+ *       tools_name: "wordstat"
+ *       data: {
+ *         type:      3,                — тип проверки (3 = сезонность)
+ *         queries:   ["фраза", …],     — массив фраз
+ *         region:    213,              — lr региона Яндекса (число, НЕ массив)
+ *         device:    "",               — desktop/mobile/phone/tablet; ""=все
+ *         group:     "month",          — группировка month/week/day
+ *         startdate: "2024-06-01",     — начальная дата (YYYY-MM-DD)
+ *         enddate:   "2025-05-31",     — конечная дата (YYYY-MM-DD)
+ *       }
+ *     Важно: статистика «по месяцам» доступна только для ПОЛНЫХ календарных
+ *     месяцев (минимум 3); «по неделям» — полные недели (пн–вс, минимум 3);
+ *     «по дням» — только последние 60 дней без текущего.
  *   • Проверка статуса:        POST https://arsenkin.ru/api/tools/check
  *       body: { task_id }   → { data: { status_id } }  (1 = в работе, 2 = готово)
  *   • Получение результата:    POST https://arsenkin.ru/api/tools/get
@@ -24,14 +38,18 @@
  * ENV (прописываются в корневом .env, backend получает через env_file):
  *   ARSENKIN_API_TOKEN          — обязательный. Токен из «Данные профиля»
  *                                 (тариф STANDARD/КОРПОРАТИВНЫЙ).
- *   ARSENKIN_TOOL_NAME          — имя инструмента сбора частот Вордстат
- *                                 (по умолчанию "wordstat").
+ *   ARSENKIN_TOOL_NAME          — имя инструмента (по умолчанию "wordstat").
  *   ARSENKIN_WORDSTAT_TYPE      — тип задачи внутри инструмента wordstat
- *                                 (по умолчанию 2 — история/сезонность;
- *                                 1 — разовая частотность). Если формат
- *                                 вашего тарифа отличается — поправьте env.
- *   ARSENKIN_WORDSTAT_EXTRA     — JSON-объект, домердживается в data
- *                                 (например {"ws":["base"],"device":""}).
+ *                                 (по умолчанию 3 — проверка сезонности,
+ *                                 согласно официальной документации).
+ *   ARSENKIN_WORDSTAT_DEVICE    — устройство: desktop/mobile/phone/tablet,
+ *                                 пустая строка = все устройства (default).
+ *   ARSENKIN_WORDSTAT_GROUP     — группировка month/week/day (default month).
+ *   ARSENKIN_WORDSTAT_EXTRA     — JSON-объект, домердживается в data ПОВЕРХ
+ *                                 остальных полей (можно переопределить
+ *                                 startdate/enddate и т.п.). Не добавляйте
+ *                                 сюда поля, которых нет в документации, —
+ *                                 API отвечает HTTP 422.
  *   ARSENKIN_BATCH_SIZE         — фраз в одной задаче (по умолчанию 100).
  *   ARSENKIN_POLL_INTERVAL_MS   — период поллинга статуса (default 10000;
  *                                 не ставьте < 3000 — упрётесь в 30 req/min).
@@ -59,7 +77,9 @@ function _cfg() {
   return {
     token:        String(process.env.ARSENKIN_API_TOKEN || '').trim(),
     toolName:     String(process.env.ARSENKIN_TOOL_NAME || 'wordstat').trim(),
-    wordstatType: Number(process.env.ARSENKIN_WORDSTAT_TYPE) || 2,
+    wordstatType: Number(process.env.ARSENKIN_WORDSTAT_TYPE) || 3,
+    device:       String(process.env.ARSENKIN_WORDSTAT_DEVICE || '').trim(),
+    group:        String(process.env.ARSENKIN_WORDSTAT_GROUP || 'month').trim() || 'month',
     extra,
     batchSize:    Math.max(1, Number(process.env.ARSENKIN_BATCH_SIZE) || 100),
     pollMs:       Math.max(3000, Number(process.env.ARSENKIN_POLL_INTERVAL_MS) || 10000),
@@ -105,6 +125,33 @@ function resolveRegionLr(label) {
 
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ── диапазон дат для сезонности ────────────────────────────────────
+// Статистика «по месяцам» доступна только для ПОЛНЫХ календарных месяцев,
+// поэтому окно: с 1-го числа месяца (12 месяцев назад) по последний день
+// предыдущего месяца — ровно 12 полных месяцев для годового цикла.
+// «По неделям» — полные недели пн–вс; «по дням» — максимум 60 дней
+// без учёта текущего дня.
+function seasonalityDateRange(group = 'month', now = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  if (group === 'day') {
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 60);
+    return { startdate: iso(start), enddate: iso(end) };
+  }
+  if (group === 'week') {
+    // последнее полное воскресенье и понедельник 52 недели назад
+    const dow = (now.getDay() + 6) % 7; // 0 = понедельник
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow - 1);
+    const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 52 * 7 + 1);
+    return { startdate: iso(start), enddate: iso(end) };
+  }
+  // month (default): последние 12 полных календарных месяцев
+  const end = new Date(now.getFullYear(), now.getMonth(), 0);            // последний день прошлого месяца
+  const start = new Date(now.getFullYear(), now.getMonth() - 12, 1);     // 1-е число 12 месяцев назад
+  return { startdate: iso(start), enddate: iso(end) };
+}
+
 // ── низкоуровневый POST с retry на 429 ─────────────────────────────
 async function _post(url, body, token, { retries = 4 } = {}) {
   let lastErr = null;
@@ -141,8 +188,10 @@ async function _post(url, body, token, { retries = 4 } = {}) {
       continue;
     }
     if (!resp.ok) {
-      const reason = (json && (json.error || json.message)) || `HTTP ${resp.status}`;
-      throw new Error(`Arsenkin API: ${reason}`);
+      const detail = (json && (json.error || json.message))
+        || (text ? String(text).slice(0, 300) : '')
+        || '';
+      throw new Error(`Arsenkin API: HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`);
     }
     if (json && String(json.status || '').toLowerCase() === 'error') {
       throw new Error(`Arsenkin API: ${json.error || json.code || 'unknown error'}`);
@@ -154,10 +203,17 @@ async function _post(url, body, token, { retries = 4 } = {}) {
 
 // ── постановка + ожидание + получение одной задачи ─────────────────
 async function _runOneTask({ phrases, regionLr, cfg }) {
+  // Формат по официальной документации «Проверка сезонности запросов»:
+  // type=3, region — ЧИСЛО lr Яндекса (не массив), device/group/даты обязательны.
+  const { startdate, enddate } = seasonalityDateRange(cfg.group);
   const data = {
-    type:    cfg.wordstatType,
-    queries: phrases,
-    regions: [regionLr],
+    type:      cfg.wordstatType,
+    queries:   phrases,
+    device:    cfg.device,
+    region:    regionLr,
+    group:     cfg.group,
+    startdate,
+    enddate,
     ...cfg.extra,
   };
   const setResp = await _post(API_SET, { tools_name: cfg.toolName, data }, cfg.token);
@@ -353,6 +409,7 @@ async function collectSeasonality({ phrases, regionLabel }) {
 module.exports = {
   collectSeasonality,
   resolveRegionLr,
+  seasonalityDateRange,
   // internals для тестов
   _normalizeResult,
   _rowFromHistory,
