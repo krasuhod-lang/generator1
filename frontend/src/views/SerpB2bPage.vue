@@ -110,6 +110,43 @@ const rows = computed(() => {
   return Array.isArray(r) ? r : [];
 });
 
+// Сводная статистика парсинга (diagnostics.stats с backend'а): покрытие
+// контактов, динамики keys.so и причины отсутствия данных.
+const parsingStats = computed(() => {
+  const d = activeTask.value?.diagnostics;
+  return (d && typeof d === 'object' && d.stats) ? d.stats : null;
+});
+
+const statsChips = computed(() => {
+  const s = parsingStats.value;
+  if (!s) return [];
+  const chips = [];
+  if (s.sites) {
+    chips.push({ label: `Сайтов: ${s.sites.total}`, kind: 'neutral' });
+    if (s.sites.ok) chips.push({ label: `с контактами: ${s.sites.ok}`, kind: 'ok' });
+    if (s.sites.empty) chips.push({ label: `пустых: ${s.sites.empty}`, kind: 'warn' });
+    if (s.sites.error) chips.push({ label: `ошибок: ${s.sites.error}`, kind: 'bad' });
+  }
+  if (s.contacts) {
+    if (s.contacts.with_inn) chips.push({ label: `ИНН: ${s.contacts.with_inn}`, kind: 'neutral' });
+    if (s.contacts.with_phones) chips.push({ label: `тел.: ${s.contacts.with_phones}`, kind: 'neutral' });
+    if (s.contacts.with_emails) chips.push({ label: `email: ${s.contacts.with_emails}`, kind: 'neutral' });
+  }
+  if (s.dynamics) {
+    chips.push({
+      label: `Динамика keys.so: ${s.dynamics.evaluated}/${(s.dynamics.evaluated || 0) + (s.dynamics.no_data || 0)}`,
+      kind: s.dynamics.no_data ? 'warn' : 'ok',
+      title: Object.entries(s.dynamics.reasons || {})
+        .map(([r, n]) => `${DYNAMICS_REASON_LABELS[r] || r}: ${n}`)
+        .join('; ') || undefined,
+    });
+  }
+  const engines = s.fetch_engines || {};
+  const antibot = (engines.curl_cffi || 0) + (engines.playwright || 0);
+  if (antibot) chips.push({ label: `антибот-обход: ${antibot}`, kind: 'neutral' });
+  return chips;
+});
+
 // ── Ранее запущенные задачи (для быстрого переключения) ─────────────
 const history = computed(() => store.tasks);
 
@@ -320,6 +357,26 @@ function dynamicsInfo(d) {
   return { label: `→ стагнация${pct}`, kind: 'neutral' };
 }
 
+// Причина отсутствия динамики (row.dynamics.errors.yandex / .google) —
+// backend сохраняет её вместо тихого null, чтобы было видно, почему у
+// сайта нет данных keys.so.
+const DYNAMICS_REASON_LABELS = {
+  not_found: 'домен не найден в базе keys.so',
+  no_history: 'в keys.so меньше 2 точек истории',
+  rate_limited: 'превышен лимит запросов keys.so',
+  unauthorized: 'ошибка API-ключа keys.so',
+  plan_restriction: 'ограничение тарифа keys.so',
+  no_api_key: 'keys.so не настроен',
+  network: 'ошибка сети при запросе keys.so',
+  no_google_base: 'для региона нет Google-базы keys.so',
+};
+
+function dynamicsReason(dynamics, engine) {
+  const reason = dynamics?.errors?.[engine];
+  if (!reason) return null;
+  return DYNAMICS_REASON_LABELS[reason] || reason;
+}
+
 function dynamicsText(d) {
   const info = dynamicsInfo(d);
   return info ? info.label : '';
@@ -430,6 +487,17 @@ onUnmounted(() => stopPolling());
         </div>
         <div v-else-if="isError" class="error-box">{{ progressLabel }}</div>
 
+        <!-- Сводная статистика парсинга (после завершения задачи) -->
+        <div v-if="isDone && statsChips.length" class="stats-line">
+          <span
+            v-for="(chip, i) in statsChips"
+            :key="i"
+            class="entity-badge"
+            :class="`entity-${chip.kind}`"
+            :title="chip.title"
+          >{{ chip.label }}</span>
+        </div>
+
         <div class="table-wrap">
           <table class="data-grid">
             <thead>
@@ -487,6 +555,11 @@ onUnmounted(() => stopPolling());
                         :title="`Яндекс: видимость топ-50, первая vs последняя точка keys.so`">
                     {{ dynamicsInfo(row.dynamics?.yandex).label }}
                   </span>
+                  <span v-else-if="dynamicsReason(row.dynamics, 'yandex')"
+                        class="entity-badge entity-neutral dyn-nodata"
+                        :title="`Яндекс: ${dynamicsReason(row.dynamics, 'yandex')}`">
+                    нет данных
+                  </span>
                   <template v-else>—</template>
                 </td>
                 <td>
@@ -494,6 +567,11 @@ onUnmounted(() => stopPolling());
                         class="entity-badge" :class="`entity-${dynamicsInfo(row.dynamics?.google).kind}`"
                         :title="`Google: видимость топ-50, первая vs последняя точка keys.so`">
                     {{ dynamicsInfo(row.dynamics?.google).label }}
+                  </span>
+                  <span v-else-if="dynamicsReason(row.dynamics, 'google')"
+                        class="entity-badge entity-neutral dyn-nodata"
+                        :title="`Google: ${dynamicsReason(row.dynamics, 'google')}`">
+                    нет данных
                   </span>
                   <template v-else>—</template>
                 </td>
@@ -849,6 +927,17 @@ onUnmounted(() => stopPolling());
 .entity-neutral {
   background: rgba(0, 0, 0, 0.06);
   color: var(--apple-muted);
+}
+.dyn-nodata {
+  opacity: 0.75;
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  cursor: help;
+}
+.stats-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 4px;
 }
 .source-badge {
   background: rgba(0, 113, 227, 0.10);

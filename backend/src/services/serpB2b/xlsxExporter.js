@@ -28,9 +28,23 @@ const TAIL_COLUMNS = [
 ];
 
 // Текст динамики видимости топ-50 (keys.so): рост / падение / стагнация
-// с процентом отклонения первой и последней точки истории.
-function _dynamicsText(d) {
-  if (!d || !d.trend) return '';
+// с процентом отклонения первой и последней точки истории. Если данных
+// нет — показываем причину (домен не найден в keys.so / нет истории и т.п.).
+const _DYNAMICS_REASON_LABELS = {
+  not_found: 'нет данных: домен не найден в keys.so',
+  no_history: 'нет данных: мало истории keys.so',
+  rate_limited: 'нет данных: лимит запросов keys.so',
+  unauthorized: 'нет данных: ошибка API-ключа keys.so',
+  plan_restriction: 'нет данных: ограничение тарифа keys.so',
+  no_api_key: 'нет данных: keys.so не настроен',
+  network: 'нет данных: ошибка сети keys.so',
+  no_google_base: 'нет данных: нет Google-базы региона',
+};
+
+function _dynamicsText(d, reason) {
+  if (!d || !d.trend) {
+    return reason ? (_DYNAMICS_REASON_LABELS[reason] || `нет данных: ${reason}`) : '';
+  }
   const label = d.trend === 'growth' ? 'рост' : d.trend === 'decline' ? 'падение' : 'стагнация';
   const pct = d.deviation_pct == null ? '' : ` (${d.deviation_pct > 0 ? '+' : ''}${d.deviation_pct}%)`;
   return `${label}${pct}`;
@@ -101,8 +115,14 @@ function _flat(item) {
     landline,
     emails,
     services,
-    dynamics_yandex: _dynamicsText(item.dynamics && item.dynamics.yandex),
-    dynamics_google: _dynamicsText(item.dynamics && item.dynamics.google),
+    dynamics_yandex: _dynamicsText(
+      item.dynamics && item.dynamics.yandex,
+      item.dynamics && item.dynamics.errors && item.dynamics.errors.yandex,
+    ),
+    dynamics_google: _dynamicsText(
+      item.dynamics && item.dynamics.google,
+      item.dynamics && item.dynamics.errors && item.dynamics.errors.google,
+    ),
     contact_url:    item.contact_url || '',
     status:         item.status || '',
     error:          item.error || '',

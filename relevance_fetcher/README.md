@@ -21,6 +21,7 @@ FastAPI-сервис, реализующий «headless»-извлечение H
 {
   "url": "https://www.avito.ru/...",
   "use_js_render": true,
+  "auto_escalate": false,
   "proxy": "******ip:port",
   "proxy_pool": ["******ip1:port", "******ip2:port"],
   "timeout_ms": 20000
@@ -29,6 +30,11 @@ FastAPI-сервис, реализующий «headless»-извлечение H
 
 * `use_js_render=false` → **Mode A** (`curl_cffi`).
 * `use_js_render=true`  → **Mode B** (Playwright + stealth).
+* `auto_escalate=true` (только с `use_js_render=false`) — если Mode A
+  исчерпал попытки (WAF / captcha / пустой ответ), сервис **сам** повторяет
+  запрос через Mode B в рамках того же HTTP-вызова. Используется
+  B2B-парсером (`backend/src/services/serpB2b/siteFetcher.js`), чтобы
+  не делать второй round-trip.
 * `proxy` — один прокси `scheme://[user:pass@]host:port`.
 * `proxy_pool` — опциональный пул; на каждой retry-попытке берётся следующий
   элемент по кругу (для ротации residential-прокси).
