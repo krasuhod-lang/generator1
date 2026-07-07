@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -84,6 +85,28 @@ LINK_DENSITY_NOISE_RATIO = float(
 # Минимальная длина блока, чтобы он попал в выдачу. Снижено с 8 до 4 в PR #90,
 # но мы оставляем 4 — короткие списки/теги тоже несут смысл.
 MIN_BLOCK_LEN_CHARS = 4
+
+# ── Валидация полноты извлечения («partial»-документы) ────────────────────────
+# Эвристика: если HTML большой, а извлечённый текст — крошечная доля от него,
+# документ считаем ЧАСТИЧНЫМ (WAF-огрызок, обрезанный ответ, SPA-скелет).
+# Такие документы помечаются is_partial=true, и потребитель (main.py) не
+# учитывает их при расчёте медиан корпуса — иначе один «огрызок» на 30 КБ
+# HTML/200 символов текста тянет median_text_chars вниз.
+PARTIAL_MIN_HTML_CHARS = _env_int(
+    "RELEVANCE_PARTIAL_MIN_HTML_CHARS", 20000, lo=1000, hi=10_000_000,
+)
+PARTIAL_MAX_TEXT_HTML_RATIO = float(
+    os.environ.get("RELEVANCE_PARTIAL_MAX_TEXT_HTML_RATIO", "0.005")
+)
+PARTIAL_MAX_TEXT_CHARS = _env_int(
+    "RELEVANCE_PARTIAL_MAX_TEXT_CHARS", 500, lo=0, hi=100000,
+)
+
+# Минимум символов из основного прохода, ниже которого пробуем вытащить текст
+# из SPA-state-блобов (__NEXT_DATA__ / window.__INITIAL_STATE__).
+SPA_STATE_MIN_CHARS = _env_int(
+    "RELEVANCE_SPA_STATE_MIN_CHARS", 400, lo=0, hi=100000,
+)
 
 # ── Флаг полно-DOM-режима парсинга (Слой 2, Sandbox) ──────────────────────────
 # По умолчанию ВЫКЛЮЧЕН: legacy-конвейер (heavy/trafilatura/readability/wide)
@@ -196,6 +219,18 @@ class ParseDiagnostics:
     hidden_chars: int = 0
     hidden_reasons: Dict[str, int] = field(default_factory=dict)
 
+    # ── Полнота извлечения ────────────────────────────────────────────────
+    # is_partial=true: HTML большой, а текста извлечено непропорционально
+    # мало → документ «частичный», его нельзя пускать в медианы корпуса.
+    is_partial: bool = False
+    partial_reason: Optional[str] = None
+    # Сколько символов текста извлечено из JSON-LD (description/FAQ/offers/
+    # howto) — отдельная зона, в основной корпус не попадает.
+    jsonld_chars: int = 0
+    # Сколько символов текста добыто из SPA-state (__NEXT_DATA__ /
+    # window.__INITIAL_STATE__) fallback-проходом.
+    spa_state_chars: int = 0
+
     def as_dict(self) -> dict:
         return {
             "method":           self.method,
@@ -212,6 +247,10 @@ class ParseDiagnostics:
             "zone_word_count":  dict(self.zone_word_count),
             "hidden_chars":     self.hidden_chars,
             "hidden_reasons":   dict(self.hidden_reasons),
+            "is_partial":       self.is_partial,
+            "partial_reason":   self.partial_reason,
+            "jsonld_chars":     self.jsonld_chars,
+            "spa_state_chars":  self.spa_state_chars,
         }
 
 
@@ -232,6 +271,9 @@ class ParseResult:
     # это сигнал потребителям, что сейчас работает старая логика, и
     # zoned_blocks недоступна. См. README full-DOM mode (Слой 2).
     zoned_blocks: Optional[List[Dict]] = None
+    # Текст, извлечённый из JSON-LD (description / FAQ-ответы / offers /
+    # howto-шаги) — отдельная зона, в основной корпус blocks НЕ входит.
+    jsonld_text: str = ""
 
     @property
     def text(self) -> str:
@@ -482,6 +524,199 @@ def extract_headings(html: str) -> List[Dict]:
     return out
 
 
+# ── JSON-LD content extraction ────────────────────────────────────────────────
+
+# Ключи JSON-LD, значения которых — «человеческий» текст, полезный корпусу
+# (description карточки, articleBody, ответы FAQ, шаги HowTo, отзывы).
+_JSONLD_TEXT_KEYS = frozenset({
+    "description", "text", "articlebody", "reviewbody", "headline", "caption",
+})
+# name берём только у типов, где это содержимое, а не бренд/организация:
+# вопросы FAQ, шаги/секции HowTo, офферы и товары.
+_JSONLD_NAME_TYPES = frozenset({
+    "question", "answer", "howtostep", "howtosection", "howtodirection",
+    "offer", "aggregateoffer", "product", "faqpage",
+})
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _jsonld_walk(node, out: List[str], depth: int = 0) -> None:
+    if depth > 20 or len(out) > 500:
+        return
+    if isinstance(node, dict):
+        types = node.get("@type") or ""
+        if isinstance(types, list):
+            types = " ".join(str(t) for t in types)
+        types_l = str(types).lower()
+        for k, v in node.items():
+            kl = str(k).lower()
+            if isinstance(v, str):
+                take = kl in _JSONLD_TEXT_KEYS or (
+                    kl == "name" and any(t in _JSONLD_NAME_TYPES for t in types_l.split())
+                )
+                if take:
+                    clean = _HTML_TAG_RE.sub(" ", v)
+                    clean = re.sub(r"\s+", " ", clean).strip()
+                    if len(clean) >= MIN_BLOCK_LEN_CHARS:
+                        out.append(clean)
+            elif isinstance(v, (dict, list)):
+                _jsonld_walk(v, out, depth + 1)
+    elif isinstance(node, list):
+        for item in node:
+            _jsonld_walk(item, out, depth + 1)
+
+
+def extract_jsonld_text(html: str) -> str:
+    """Извлекает «человеческий» текст из `<script type="application/ld+json">`:
+    description, articleBody, ответы FAQ (acceptedAnswer.text), шаги HowTo,
+    offers, отзывы. Возвращает один текст (блоки через перенос строки);
+    в основной корпус он НЕ входит — это отдельная зона `jsonld`."""
+    if not html or "ld+json" not in html:
+        return ""
+    try:
+        soup = _make_soup(html)
+    except Exception:
+        return ""
+    chunks: List[str] = []
+    seen = set()
+    for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = script.string or script.get_text() or ""
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            # Частый кейс: несколько JSON-объектов или мусорные запятые —
+            # пробуем вырезать управляющие символы и распарсить ещё раз.
+            try:
+                data = json.loads(re.sub(r"[\x00-\x1f]", " ", raw))
+            except Exception:
+                continue
+        found: List[str] = []
+        _jsonld_walk(data, found)
+        for c in found:
+            if c not in seen:
+                seen.add(c)
+                chunks.append(c)
+    return "\n".join(chunks)
+
+
+# ── SPA state extraction (__NEXT_DATA__ / window.__INITIAL_STATE__) ──────────
+
+_SPA_STATE_ASSIGN_RE = re.compile(
+    r"window\.__(?:INITIAL_STATE|NUXT|PRELOADED_STATE|APOLLO_STATE|INITIAL_DATA)__\s*=\s*",
+)
+# Ключи, значения которых — заведомо не контент (URL, идентификаторы, стили).
+_SPA_SKIP_KEY_RE = re.compile(
+    r"^(?:url|href|src|srcset|link|image|img|icon|id|key|slug|path|route|"
+    r"class(?:name)?|style|color|type|format|locale|lang|token|hash|"
+    r"session|uuid|guid|date|time|created|updated)s?$",
+    re.IGNORECASE,
+)
+_HUMAN_TEXT_RE = re.compile(r"[A-Za-zА-Яа-яЁё]{3,}\s+[A-Za-zА-Яа-яЁё]{2,}")
+
+
+def _balanced_json_slice(s: str) -> str:
+    """Возвращает сбалансированный `{…}` / `[…]` фрагмент с начала строки."""
+    if not s or s[0] not in "{[":
+        return ""
+    open_ch, close_ch = s[0], ("}" if s[0] == "{" else "]")
+    depth = 0
+    in_str = False
+    escape = False
+    for i, ch in enumerate(s):
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return s[: i + 1]
+    return ""
+
+
+def _spa_state_walk(node, out: List[str], depth: int = 0) -> None:
+    if depth > 30 or len(out) > 800:
+        return
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(v, str):
+                if _SPA_SKIP_KEY_RE.match(str(k)):
+                    continue
+                clean = _HTML_TAG_RE.sub(" ", v)
+                clean = re.sub(r"\s+", " ", clean).strip()
+                # Только «человеческие» строки: минимум два слова, ≥ 25 симв,
+                # не URL — иначе state-блоб зальёт корпус техническим мусором.
+                if (len(clean) >= 25 and not clean.lower().startswith(("http://", "https://", "//"))
+                        and _HUMAN_TEXT_RE.search(clean)):
+                    out.append(clean)
+            elif isinstance(v, (dict, list)):
+                _spa_state_walk(v, out, depth + 1)
+    elif isinstance(node, list):
+        for item in node:
+            _spa_state_walk(item, out, depth + 1)
+
+
+def extract_spa_state_blocks(html: str) -> List[str]:
+    """Fallback для SPA: извлекает текст из `__NEXT_DATA__` /
+    `window.__INITIAL_STATE__`-подобных JSON-блобов, когда даже headless-рендер
+    отдал неполный DOM. Возвращает список текстовых блоков (может быть пустым)."""
+    if not html:
+        return []
+    payloads: List[str] = []
+    try:
+        soup = _make_soup(html)
+        nd = soup.find("script", id="__NEXT_DATA__")
+        if nd:
+            raw = (nd.string or nd.get_text() or "").strip()
+            if raw:
+                payloads.append(raw)
+        # window.__INITIAL_STATE__ = {…}; — ищем в остальных скриптах.
+        for script in soup.find_all("script"):
+            raw = script.string or ""
+            if not raw:
+                continue
+            m = _SPA_STATE_ASSIGN_RE.search(raw)
+            if not m:
+                continue
+            sliced = _balanced_json_slice(raw[m.end():].lstrip())
+            if sliced:
+                payloads.append(sliced)
+    except Exception:
+        return []
+
+    blocks: List[str] = []
+    seen = set()
+    total = 0
+    for raw in payloads:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        found: List[str] = []
+        _spa_state_walk(data, found)
+        for b in found:
+            if b in seen:
+                continue
+            seen.add(b)
+            blocks.append(b)
+            total += len(b)
+            if total > 300_000:
+                return blocks
+    return blocks
+
+
 # ── Extraction passes ─────────────────────────────────────────────────────────
 
 def _heavy_bs4_pass(html: str) -> Tuple[List[str], BeautifulSoup]:
@@ -654,6 +889,26 @@ def extract_with_diagnostics(html: str) -> ParseResult:
             candidates["wide_bs4"] = wide_blocks
 
     method, blocks = _pick_best(candidates, html_chars=diag.html_chars)
+
+    # ── SPA-state fallback (__NEXT_DATA__ / window.__INITIAL_STATE__) ────────
+    # Если DOM-проходы дали слишком мало текста, пробуем достать контент из
+    # JSON-блобов состояния SPA — частый кейс, когда даже headless-рендер
+    # отдаёт неполный DOM (контент приходит после user-interaction).
+    if sum(len(b) for b in blocks) < SPA_STATE_MIN_CHARS:
+        try:
+            spa_blocks = extract_spa_state_blocks(html)
+        except Exception:  # pragma: no cover — fallback не должен ронять парсер
+            spa_blocks = []
+        if spa_blocks:
+            spa_chars = sum(len(b) for b in spa_blocks)
+            diag.spa_state_chars = spa_chars
+            diag.candidates["spa_state"] = spa_chars
+            if spa_chars > sum(len(b) for b in blocks):
+                # DOM-текст (если был) сохраняем в начале — обычно это
+                # заголовок/крошки, дальше идёт state-контент.
+                blocks = blocks + [b for b in spa_blocks if b not in set(blocks)]
+                method = "spa_state" if not method or method == "none" else f"{method}+spa_state"
+
     diag.method = method
     diag.text_chars = sum(len(b) for b in blocks)
     diag.block_count = len(blocks)
@@ -743,7 +998,15 @@ def extract_with_diagnostics(html: str) -> ParseResult:
                 and zb.get("zone") in VISIBLE_CONTENT_ZONES
                 and len(zb.get("text", "")) >= MIN_BLOCK_LEN_CHARS
             ]
-            blocks = visible_main_unknown
+            # Не затираем SPA-state-fallback: если walker нашёл меньше текста,
+            # чем добыто из __NEXT_DATA__/__INITIAL_STATE__, оставляем блоки
+            # fallback'а (walker в SPA-шаблоне видит только скелет).
+            if diag.spa_state_chars > 0 and (
+                sum(len(b) for b in visible_main_unknown) < sum(len(b) for b in blocks)
+            ):
+                pass  # keep spa-state blocks
+            else:
+                blocks = visible_main_unknown
             diag.text_chars = sum(len(b) for b in blocks)
             diag.block_count = len(blocks)
             diag.text_html_ratio = diag.text_chars / max(diag.html_chars, 1)
@@ -761,6 +1024,39 @@ def extract_with_diagnostics(html: str) -> ParseResult:
             if blocks and diag.empty_reason in ("noise_only", "tiny_html", "rendered_by_js"):
                 diag.empty_reason = None
 
+    # ── JSON-LD зона (description / FAQ / offers / howto) ────────────────────
+    jsonld_text = ""
+    try:
+        jsonld_text = extract_jsonld_text(html)
+    except Exception:  # pragma: no cover — best-effort
+        jsonld_text = ""
+    diag.jsonld_chars = len(jsonld_text)
+    if jsonld_text and zoned_blocks is not None:
+        zoned_blocks.append({
+            "text": jsonld_text,
+            "zone": "jsonld",
+            "tag": "script",
+            "is_hidden": False,
+            "hidden_reason": None,
+            "is_anchor": False,
+        })
+        diag.zone_chars["jsonld"] = len(jsonld_text)
+        diag.zone_word_count["jsonld"] = len(_WORD_COUNT_RE.findall(jsonld_text))
+
+    # ── Валидация полноты («partial»-документ) ────────────────────────────────
+    # Эвристика: большой HTML при крошечном тексте = скорее всего WAF-огрызок /
+    # SPA-скелет / обрезанный ответ. Такой документ помечаем is_partial —
+    # потребитель (main.py) не пускает его в медианы корпуса.
+    if diag.html_chars >= PARTIAL_MIN_HTML_CHARS and diag.text_chars > 0:
+        ratio = diag.text_chars / max(diag.html_chars, 1)
+        if diag.text_chars <= PARTIAL_MAX_TEXT_CHARS:
+            diag.is_partial = True
+            diag.partial_reason = "low_text_vs_html"
+        elif (ratio < PARTIAL_MAX_TEXT_HTML_RATIO
+              and diag.text_chars < PARTIAL_MAX_TEXT_CHARS * 10):
+            diag.is_partial = True
+            diag.partial_reason = "low_text_html_ratio"
+
     return ParseResult(
         blocks=blocks,
         diagnostics=diag,
@@ -768,6 +1064,7 @@ def extract_with_diagnostics(html: str) -> ParseResult:
         zoned_blocks=zoned_blocks,
         tag_zone_text=extract_tag_zone_text(html),
         headings=extract_headings(html),
+        jsonld_text=jsonld_text,
     )
 
 
@@ -1210,8 +1507,17 @@ def _full_dom_extract(html: str) -> Tuple[
             new_block_opened = True
 
         try:
+            # §C+: содержимое закрытого <details> (без атрибута open) визуально
+            # скрыто до клика — частый паттерн SEO-текстов/FAQ. Помечаем его
+            # hidden c причиной details_collapsed; <summary> остаётся видимым.
+            closed_details = (name == "details" and "open" not in (node.attrs or {}))
             for child in list(node.children):
-                _walk(child, eff_zone, cur_hidden, cur_reason,
+                child_hidden, child_reason = cur_hidden, cur_reason
+                if closed_details and not cur_hidden and not (
+                    isinstance(child, Tag) and (child.name or "").lower() == "summary"
+                ):
+                    child_hidden, child_reason = True, "details_collapsed"
+                _walk(child, eff_zone, child_hidden, child_reason,
                       cur_in_anchor, block_stack)
         finally:
             if new_block_opened:
