@@ -28,6 +28,7 @@ const { extractContactsFromPage, htmlToCleanText } = require('./extractors');
 const { isBlacklistedUrl, isBlacklistedHost, getRegistrableDomain } = require('./domainBlacklist');
 const { lookupByInn, isDadataEnabled } = require('./dadataClient');
 const { extractCompanyNameWithLLM } = require('./companyLLMExtractor');
+const { enrichResultsWithDynamics, isKeysSoConfigured } = require('./growthEvaluator');
 
 // ── Параметры ────────────────────────────────────────────────────────
 const SITE_CONCURRENCY = 4;          // параллельных сайтов
@@ -389,7 +390,7 @@ async function processSerpB2bTask(taskId) {
   let processed = 0;
   // Сохраняем результаты ИНКРЕМЕНТАЛЬНО — фронт поллит результат и
   // получает данные по мере появления.
-  await _runWithConcurrency(serpUrls, SITE_CONCURRENCY, async (siteRoot) => {
+  const allRows = await _runWithConcurrency(serpUrls, SITE_CONCURRENCY, async (siteRoot) => {
     let row;
     try {
       row = await _processSite(siteRoot);
@@ -411,6 +412,35 @@ async function processSerpB2bTask(taskId) {
   });
 
   diagnostics.steps.push({ step: 'sites', processed });
+
+  // Step 5: динамика видимости топ-50 через keys.so (Яндекс и Google отдельно).
+  // Первая vs последняя точка истории: ±10% — стагнация, минус — падение,
+  // плюс — рост. Graceful: без API-ключа / при ошибках шаг просто пропускается.
+  if (isKeysSoConfigured()) {
+    try {
+      const region = task.region || (task.inputs && task.inputs.region) || '';
+      await enrichResultsWithDynamics(allRows, {
+        region,
+        onProgress: async (rows, doneCount) => {
+          // Инкрементально переписываем results, чтобы фронт видел динамику
+          // по мере её появления (обновляем каждые 5 доменов и в конце).
+          if (doneCount % 5 === 0 || doneCount === rows.length) {
+            await db.query(
+              `UPDATE serp_b2b_tasks SET results = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+              [JSON.stringify(rows), taskId],
+            );
+          }
+        },
+      });
+      const withDynamics = allRows.filter((r) => r && r.dynamics).length;
+      diagnostics.steps.push({ step: 'keys_so_dynamics', evaluated: withDynamics, total: allRows.length });
+    } catch (err) {
+      diagnostics.steps.push({ step: 'keys_so_dynamics', error: err.message });
+    }
+  } else {
+    diagnostics.steps.push({ step: 'keys_so_dynamics', skipped: 'no_api_key' });
+  }
+
   await _setStatus(taskId, {
     status: 'done',
     completed_at: new Date(),

@@ -78,35 +78,65 @@ async function runEeatAuditCore({ adapter, system, userText, threshold, callOpti
       const chunkResults = [];
       for (const ch of chunks) {
         const chunkUser = chunkOpts.buildChunkUserText(ch);
-        try {
-          const r = await callLLM(adapter, system, chunkUser, {
-            ...callOptions,
-            callLabel: `${callOptions?.callLabel || 'EEAT audit'} [chunk ${ch.index + 1}/${chunks.length}]`,
-          });
-          chunkResults.push({ chunk: ch, audit: normalizeEeatAudit(r, threshold) });
-        } catch (e) {
+        const label = `${callOptions?.callLabel || 'EEAT audit'} [chunk ${ch.index + 1}/${chunks.length}]`;
+        let audit = null;
+        let lastErr = null;
+        // Бесперебойность (Б1+): каждый чанк получает до 2 попыток с
+        // backoff — одиночный LLM-сбой больше не превращается в score=0.
+        for (let attempt = 1; attempt <= 2 && !audit; attempt++) {
+          try {
+            const r = await callLLM(adapter, system, chunkUser, {
+              ...callOptions,
+              callLabel: attempt === 1 ? label : `${label} retry`,
+            });
+            audit = normalizeEeatAudit(r, threshold);
+          } catch (e) {
+            lastErr = e;
+            if (attempt < 2) await new Promise((res) => setTimeout(res, 800 * attempt));
+          }
+        }
+        if (audit) {
+          chunkResults.push({ chunk: ch, audit });
+        } else {
           chunkResults.push({
             chunk: ch,
             audit: {
               total_score: 0,
               verdict: 'refine',
-              issues: [`[chunk ${ch.index + 1}/${chunks.length}] LLM-сбой: ${e.message.slice(0, 200)}`],
+              issues: [`[chunk ${ch.index + 1}/${chunks.length}] LLM-сбой: ${String(lastErr?.message || 'unknown').slice(0, 200)}`],
               lsi_coverage_pct: 0,
+              audit_failed: true,
             },
           });
         }
       }
 
-      const agg = aggregateChunkAudits(chunkResults);
-      const verdict = agg.total_score >= threshold ? 'pass' : 'refine';
+      // Агрегация: сбойные чанки (audit_failed) не тянут средний балл к нулю —
+      // score считаем только по успешно проаудированным чанкам, а issues
+      // сбойных сохраняем для прозрачности. Если ВСЕ чанки сбойные —
+      // возвращаем refine со score 0 (как раньше).
+      const okResults = chunkResults.filter((cr) => !cr.audit.audit_failed);
+      const failedResults = chunkResults.filter((cr) => cr.audit.audit_failed);
+      const agg = aggregateChunkAudits(okResults.length ? okResults : chunkResults);
+      if (okResults.length && failedResults.length) {
+        for (const fr of failedResults) {
+          for (const issue of fr.audit.issues) {
+            agg.issues.push({ chunk: fr.chunk?.h2_text || '', text: String(issue) });
+          }
+        }
+      }
+      const verdict = okResults.length
+        ? (agg.total_score >= threshold ? 'pass' : 'refine')
+        : 'refine';
       const hasReject = chunkResults.some((cr) => cr.audit && cr.audit.verdict === 'reject');
       return {
-        total_score:      agg.total_score,
+        total_score:      okResults.length ? agg.total_score : 0,
         verdict:          hasReject ? 'reject' : verdict,
         issues:           agg.issues,
         lsi_coverage_pct: agg.lsi_coverage_pct,
         per_chunk:        agg.per_chunk,
         chunked:          true,
+        failed_chunks:    failedResults.length,
       };
     }
     // Только один чанк → fallback к single-call ниже.

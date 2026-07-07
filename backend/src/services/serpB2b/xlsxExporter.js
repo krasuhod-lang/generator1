@@ -20,10 +20,21 @@ const BASE_COLUMNS = [
 ];
 
 const TAIL_COLUMNS = [
+  { header: 'Динамика Яндекс', key: 'dynamics_yandex', width: 22 },
+  { header: 'Динамика Google', key: 'dynamics_google', width: 22 },
   { header: 'Контактная стр.', key: 'contact_url', width: 36 },
   { header: 'Статус',        key: 'status',       width: 14 },
   { header: 'Ошибка',        key: 'error',        width: 28 },
 ];
+
+// Текст динамики видимости топ-50 (keys.so): рост / падение / стагнация
+// с процентом отклонения первой и последней точки истории.
+function _dynamicsText(d) {
+  if (!d || !d.trend) return '';
+  const label = d.trend === 'growth' ? 'рост' : d.trend === 'decline' ? 'падение' : 'стагнация';
+  const pct = d.deviation_pct == null ? '' : ` (${d.deviation_pct > 0 ? '+' : ''}${d.deviation_pct}%)`;
+  return `${label}${pct}`;
+}
 
 // Excel поддерживает максимум 16 384 колонки на лист. Извлечение контактов
 // иногда захватывает аномально много телефонов/email с одного сайта (например,
@@ -90,6 +101,8 @@ function _flat(item) {
     landline,
     emails,
     services,
+    dynamics_yandex: _dynamicsText(item.dynamics && item.dynamics.yandex),
+    dynamics_google: _dynamicsText(item.dynamics && item.dynamics.google),
     contact_url:    item.contact_url || '',
     status:         item.status || '',
     error:          item.error || '',

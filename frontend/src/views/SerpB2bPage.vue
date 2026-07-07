@@ -195,7 +195,8 @@ function copyTable() {
   // разделяются запятой). Так данные корректно вставляются в Excel/Google Sheets.
   const headers = [
     '#', 'Сайт', 'Юр. лицо', 'ИНН', 'ОГРН',
-    'Сотовый', 'Городской', 'Email', 'Услуги', 'Статус',
+    'Сотовый', 'Городской', 'Email', 'Услуги',
+    'Динамика Яндекс', 'Динамика Google', 'Статус',
   ];
   const lines = [headers.join('\t')];
   rows.value.forEach((r, i) => {
@@ -210,6 +211,8 @@ function copyTable() {
       fmtList(landline),
       fmtList(r.emails),
       fmtList(r.services),
+      dynamicsText(r.dynamics?.yandex),
+      dynamicsText(r.dynamics?.google),
       rowStatusLabel(r.status),
     ].map(v => String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' '));
     lines.push(cells.join('\t'));
@@ -303,6 +306,23 @@ function companyStatusInfo(s) {
 function fmtDate(iso) {
   if (!iso) return '';
   try { return new Date(iso).toLocaleString('ru-RU'); } catch (_) { return iso; }
+}
+
+// Динамика видимости топ-50 из keys.so (row.dynamics.yandex / .google).
+// trend: growth | decline | stagnation; deviation_pct — отклонение
+// первой и последней точки истории (±10% = стагнация).
+function dynamicsInfo(d) {
+  if (!d || !d.trend) return null;
+  const pct = (d.deviation_pct == null) ? '' :
+    ` ${d.deviation_pct > 0 ? '+' : ''}${d.deviation_pct}%`;
+  if (d.trend === 'growth')  return { label: `↑ рост${pct}`,      kind: 'ok' };
+  if (d.trend === 'decline') return { label: `↓ падение${pct}`,   kind: 'bad' };
+  return { label: `→ стагнация${pct}`, kind: 'neutral' };
+}
+
+function dynamicsText(d) {
+  const info = dynamicsInfo(d);
+  return info ? info.label : '';
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
@@ -423,6 +443,8 @@ onUnmounted(() => stopPolling());
                 <th>Городской</th>
                 <th>Email</th>
                 <th>Услуги</th>
+                <th>Динамика Я</th>
+                <th>Динамика G</th>
                 <th>Статус</th>
               </tr>
             </thead>
@@ -460,6 +482,22 @@ onUnmounted(() => stopPolling());
                 <td class="email-cell">{{ fmtList(row.emails) || '—' }}</td>
                 <td class="services-cell">{{ fmtList(row.services) || '—' }}</td>
                 <td>
+                  <span v-if="dynamicsInfo(row.dynamics?.yandex)"
+                        class="entity-badge" :class="`entity-${dynamicsInfo(row.dynamics?.yandex).kind}`"
+                        :title="`Яндекс: видимость топ-50, первая vs последняя точка keys.so`">
+                    {{ dynamicsInfo(row.dynamics?.yandex).label }}
+                  </span>
+                  <template v-else>—</template>
+                </td>
+                <td>
+                  <span v-if="dynamicsInfo(row.dynamics?.google)"
+                        class="entity-badge" :class="`entity-${dynamicsInfo(row.dynamics?.google).kind}`"
+                        :title="`Google: видимость топ-50, первая vs последняя точка keys.so`">
+                    {{ dynamicsInfo(row.dynamics?.google).label }}
+                  </span>
+                  <template v-else>—</template>
+                </td>
+                <td>
                   <span class="row-badge" :class="`row-${row.status}`">
                     {{ rowStatusLabel(row.status) }}
                   </span>
@@ -468,10 +506,10 @@ onUnmounted(() => stopPolling());
               <!-- Skeleton-строки для ещё необработанных сайтов -->
               <tr v-for="n in skeletonCount" :key="`sk-${n}`" class="skeleton-row">
                 <td class="col-num col-sticky col-sticky-1">{{ rows.length + n }}</td>
-                <td colspan="9"><div class="skeleton-bar"></div></td>
+                <td colspan="11"><div class="skeleton-bar"></div></td>
               </tr>
               <tr v-if="!rows.length && !isRunning && isDone">
-                <td colspan="10" class="empty-row">
+                <td colspan="12" class="empty-row">
                   Не удалось извлечь контакты ни с одного сайта.
                 </td>
               </tr>
