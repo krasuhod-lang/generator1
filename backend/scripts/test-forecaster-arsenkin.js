@@ -12,7 +12,7 @@
 
 const assert = require('assert');
 const { filterKeywords, matchStopWord } = require('../src/services/forecaster/stopWordFilter');
-const { resolveRegionLr, seasonalityDateRange, _normalizeResult, _rowFromHistory } = require('../src/services/forecaster/arsenkinClient');
+const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory } = require('../src/services/forecaster/arsenkinClient');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -162,6 +162,34 @@ group('arsenkinClient.seasonalityDateRange', () => {
     const r = seasonalityDateRange('day', new Date(2026, 6, 7));
     assert.strictEqual(r.enddate, '2026-07-06');
     assert.strictEqual(r.startdate, '2026-05-08');
+  });
+});
+
+// ── arsenkinClient.normalizeDevice ─────────────────────────────────
+// API принимает только «пустота или desktop/mobile»; пустая строка
+// (или неизвестное значение) → поле device нужно ОПУСТИТЬ, иначе HTTP 422.
+group('arsenkinClient.normalizeDevice', () => {
+  test('пустая строка → "" (поле опускается)', () => {
+    assert.strictEqual(normalizeDevice(''), '');
+  });
+  test('null/undefined → ""', () => {
+    assert.strictEqual(normalizeDevice(null), '');
+    assert.strictEqual(normalizeDevice(undefined), '');
+  });
+  test('desktop сохраняется', () => {
+    assert.strictEqual(normalizeDevice('desktop'), 'desktop');
+    assert.strictEqual(normalizeDevice(' Desktop '), 'desktop');
+  });
+  test('mobile сохраняется', () => {
+    assert.strictEqual(normalizeDevice('mobile'), 'mobile');
+  });
+  test('phone/tablet сводятся к mobile', () => {
+    assert.strictEqual(normalizeDevice('phone'), 'mobile');
+    assert.strictEqual(normalizeDevice('tablet'), 'mobile');
+  });
+  test('неизвестное значение → "" (опускается, не шлём в API)', () => {
+    assert.strictEqual(normalizeDevice('all'), '');
+    assert.strictEqual(normalizeDevice('desktop1'), '');
   });
 });
 

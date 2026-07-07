@@ -20,7 +20,7 @@
  *         type:      3,                — тип проверки (3 = сезонность)
  *         queries:   ["фраза", …],     — массив фраз
  *         region:    213,              — lr региона Яндекса (число, НЕ массив)
- *         device:    "",               — desktop/mobile/phone/tablet; ""=все
+ *         device:    "",               — "" (опускается) либо desktop/mobile
  *         group:     "month",          — группировка month/week/day
  *         startdate: "2024-06-01",     — начальная дата (YYYY-MM-DD)
  *         enddate:   "2025-05-31",     — конечная дата (YYYY-MM-DD)
@@ -42,8 +42,9 @@
  *   ARSENKIN_WORDSTAT_TYPE      — тип задачи внутри инструмента wordstat
  *                                 (по умолчанию 3 — проверка сезонности,
  *                                 согласно официальной документации).
- *   ARSENKIN_WORDSTAT_DEVICE    — устройство: desktop/mobile/phone/tablet,
- *                                 пустая строка = все устройства (default).
+ *   ARSENKIN_WORDSTAT_DEVICE    — устройство: desktop или mobile; пустая
+ *                                 строка (или иное значение) = поле опускается
+ *                                 и статистика собирается по всем устройствам.
  *   ARSENKIN_WORDSTAT_GROUP     — группировка month/week/day (default month).
  *   ARSENKIN_WORDSTAT_EXTRA     — JSON-объект, домердживается в data ПОВЕРХ
  *                                 остальных полей (можно переопределить
@@ -124,6 +125,25 @@ function resolveRegionLr(label) {
 }
 
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── нормализация поля device ───────────────────────────────────────
+// Валидатор Арсенкина для «Проверки сезонности запросов» принимает поле
+// device только со значениями «пустота или desktop/mobile». Пустая строка
+// ("") НЕ считается «пустотой» — на неё API отвечает
+//   HTTP 422 {"code":"JSON_VALIDATION_ERROR", "msg":"Ошибки в поле device…"}.
+// Поэтому: пустое/неизвестное значение → поле НЕ добавляем в payload (omit),
+// а варианты phone/tablet сводим к mobile. Регистр значения не важен.
+const _DEVICE_ALIASES = {
+  desktop: 'desktop', pc: 'desktop', 'дескоп': 'desktop', 'десктоп': 'desktop',
+  mobile: 'mobile', phone: 'mobile', smartphone: 'mobile', tablet: 'mobile',
+  'моб': 'mobile', 'мобайл': 'mobile', 'телефон': 'mobile', 'планшет': 'mobile',
+};
+
+function normalizeDevice(raw) {
+  const s = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (!s) return ''; // «пустота» → поле нужно ОПУСТИТЬ, а не слать ""
+  return _DEVICE_ALIASES[s] || '';
+}
 
 // ── диапазон дат для сезонности ────────────────────────────────────
 // Статистика «по месяцам» доступна только для ПОЛНЫХ календарных месяцев,
@@ -209,13 +229,19 @@ async function _runOneTask({ phrases, regionLr, cfg }) {
   const data = {
     type:      cfg.wordstatType,
     queries:   phrases,
-    device:    cfg.device,
     region:    regionLr,
     group:     cfg.group,
     startdate,
     enddate,
     ...cfg.extra,
   };
+  // device: валидатор Арсенкина принимает только «пустота или desktop/mobile».
+  // Пустую строку API отвергает (HTTP 422), поэтому поле добавляем ТОЛЬКО при
+  // валидном значении; в остальных случаях (пусто/неизвестно) — опускаем.
+  // cfg.extra может переопределить device — нормализуем итоговое значение.
+  const deviceVal = normalizeDevice('device' in data ? data.device : cfg.device);
+  if (deviceVal) data.device = deviceVal;
+  else delete data.device;
   const setResp = await _post(API_SET, { tools_name: cfg.toolName, data }, cfg.token);
   const sj = setResp.json || {};
   const taskId = sj.task_id ?? sj.data?.task_id ?? sj.id ?? sj.data?.id;
@@ -410,6 +436,7 @@ module.exports = {
   collectSeasonality,
   resolveRegionLr,
   seasonalityDateRange,
+  normalizeDevice,
   // internals для тестов
   _normalizeResult,
   _rowFromHistory,

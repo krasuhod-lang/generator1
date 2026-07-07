@@ -37,6 +37,12 @@ export const useForecasterStore = defineStore('forecaster', {
       this.tasks = this.tasks.filter((t) => t.id !== id);
     },
 
+    /** Перезапускает расчёт задачи (на случай ошибок или обновления данных). */
+    async rerunTask(id) {
+      const { data } = await api.post(`/forecaster/${id}/rerun`);
+      return data?.task || null;
+    },
+
     async getTask(id) {
       const { data } = await api.get(`/forecaster/${id}`);
       return data?.task || null;

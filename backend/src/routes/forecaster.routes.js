@@ -9,6 +9,7 @@ const {
   createForecasterTask,
   getForecasterTask,
   deleteForecasterTask,
+  rerunForecasterTask,
   createShareLink,
   revokeShareLink,
 } = require('../controllers/forecaster.controller');
@@ -45,6 +46,7 @@ router.get('/',                  auth, listForecasterTasks);
 router.post('/',                 auth, bigJson, createLimiter, createForecasterTask);
 router.get('/:id',               auth, getForecasterTask);
 router.delete('/:id',            auth, deleteForecasterTask);
+router.post('/:id/rerun',        auth, createLimiter, rerunForecasterTask);
 router.post('/:id/share',        auth, createShareLink);
 router.delete('/:id/share',      auth, revokeShareLink);
 
