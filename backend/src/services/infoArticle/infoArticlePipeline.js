@@ -1240,6 +1240,7 @@ async function processInfoArticleTask(taskId) {
             top_ngrams:     relevanceArtifact.top_ngrams,
             shared_headings: relevanceArtifact.shared_headings,
             mandatory_entities: relevanceArtifact.mandatory_entities,
+            serp_intent: relevanceArtifact.serp_intent,
             schema_recommendation_markdown: relevanceArtifact.schema_recommendation_markdown,
             voice_of_customer: relevanceArtifact.voice_of_customer,
             our_url: relevanceArtifact.our_url,
@@ -1271,6 +1272,31 @@ async function processInfoArticleTask(taskId) {
     }
 
     const ctx = { ...buildCallCtx(taskId, 'info_article'), taskId };
+
+    // 0b. Анализ сайта-площадки публикации (стилистика и формат написания).
+    // Опционально: если пользователь указал target_site_url — парсим контент
+    // площадки и строим style-profile, который уйдёт в IAKB §9c. Graceful:
+    // любая ошибка ⇒ null, генерация идёт без стилевого профиля.
+    let targetSiteStyle = null;
+    if (task.target_site_url) {
+      try {
+        await appendLog(taskId, `🎨 Анализ сайта-площадки: ${task.target_site_url}…`, 'info');
+        const { analyzeTargetSiteStyle } = require('./targetSiteStyle');
+        targetSiteStyle = await analyzeTargetSiteStyle(task.target_site_url, ctx);
+        if (targetSiteStyle) {
+          await saveColumn(taskId, 'target_site_analysis', targetSiteStyle);
+          await appendLog(
+            taskId,
+            `🎨 Стиль площадки определён: «${String(targetSiteStyle.style_profile?.style_label || targetSiteStyle.style_profile?.tone || '').slice(0, 120)}» (страниц проанализировано: ${targetSiteStyle.sampled_pages.length}) — уйдёт в IAKB §9c`,
+            'info',
+          );
+        } else {
+          await appendLog(taskId, `⚠ Не удалось проанализировать сайт-площадку — продолжаем без стилевого профиля`, 'warn');
+        }
+      } catch (styleErr) {
+        await appendLog(taskId, `⚠ Анализ площадки: ошибка (${styleErr.message}) — продолжаем без него`, 'warn');
+      }
+    }
 
     // 1. Pre-Stage 0
     await setStage(taskId, 'pre_stage0', 5);
@@ -1384,6 +1410,7 @@ async function processInfoArticleTask(taskId) {
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
       relevanceSignals,
       relevanceContext,
+      targetSiteStyle,
       audienceResearch: audienceResearchResult.digest,
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');

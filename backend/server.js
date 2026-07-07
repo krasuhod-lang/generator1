@@ -957,6 +957,9 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_status       ON info_article_tasks (status)`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS source TEXT`);
+    // Migration 101: анализ сайта-площадки публикации (стилистика и формат).
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS target_site_url      TEXT`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS target_site_analysis JSONB`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
     // Migration 057: SEO-метатеги, генерируемые ИИ для статьи в блог.
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS seo_title       TEXT`);

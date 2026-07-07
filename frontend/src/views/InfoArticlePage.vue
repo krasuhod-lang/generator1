@@ -18,6 +18,9 @@ const route = useRoute();
 const form = ref({
   topic:         '',
   region:        '',
+  // URL сайта-площадки публикации (опционально): backend распарсит его контент
+  // и статья будет написана в стилистике и формате площадки (IAKB §9c).
+  target_site_url: '',
   brand_name:    '',
   author_name:   '',
   brand_facts:   '',
@@ -416,6 +419,9 @@ async function handleCreate() {
     };
     if (form.value.source_relevance_report_id) {
       payload.source_relevance_report_id = form.value.source_relevance_report_id;
+    }
+    if (form.value.target_site_url && form.value.target_site_url.trim()) {
+      payload.target_site_url = form.value.target_site_url.trim();
     }
     if (selectedProjectId.value) payload.project_id = selectedProjectId.value;
     const { id, normalized } = await store.createTask(payload);
@@ -1093,6 +1099,18 @@ onUnmounted(() => { stopTicker(); });
             <label class="label">Регион <span class="text-red-400">*</span></label>
             <input v-model="form.region" type="text" class="input" maxlength="200"
                    placeholder="Москва, РФ, Лиссабон, …" />
+          </div>
+
+          <div>
+            <label class="label">
+              Сайт для публикации
+              <span class="text-gray-500 text-[11px] font-normal">(опционально)</span>
+            </label>
+            <input v-model="form.target_site_url" type="text" class="input" maxlength="500"
+                   placeholder="https://example.ru/blog/" />
+            <div class="text-[11px] text-gray-500 mt-1">
+              Мы распарсим контент площадки и напишем статью в её стилистике и формате.
+            </div>
           </div>
 
           <!-- Excel uploader (опциональный) -->

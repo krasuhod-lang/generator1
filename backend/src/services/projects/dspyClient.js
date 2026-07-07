@@ -24,6 +24,45 @@ function _baseUrl() {
   return (process.env.AEGIS_PY_URL || '').trim();
 }
 
+// ── Бесперебойность DSPy (E-E-A-T-требование) ─────────────────────────
+// 1. Ретраи с backoff на transient-сбоях (network/timeout/5xx) — одиночный
+//    сетевой глюк больше не оставляет промпт без усиления.
+// 2. Circuit breaker: после N подряд неудач перестаём дёргать aegis_py на
+//    cooldown-период, чтобы каждый вызов пайплайна не ждал таймаут впустую.
+const DSPY_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.DSPY_MAX_ATTEMPTS || '2', 10) || 2);
+const DSPY_RETRY_BASE_MS = 500;
+const DSPY_CB_FAILURE_THRESHOLD = Math.max(1, parseInt(process.env.DSPY_CB_FAILURE_THRESHOLD || '3', 10) || 3);
+const DSPY_CB_COOLDOWN_MS = Math.max(5000, parseInt(process.env.DSPY_CB_COOLDOWN_MS || '60000', 10) || 60000);
+
+const _circuit = { consecutiveFailures: 0, openedUntil: 0 };
+
+function _circuitOpen() {
+  return _circuit.openedUntil > Date.now();
+}
+
+function _recordFailure() {
+  _circuit.consecutiveFailures += 1;
+  if (_circuit.consecutiveFailures >= DSPY_CB_FAILURE_THRESHOLD) {
+    _circuit.openedUntil = Date.now() + DSPY_CB_COOLDOWN_MS;
+    _circuit.consecutiveFailures = 0;
+    console.warn(`[dspyClient] circuit opened for ${DSPY_CB_COOLDOWN_MS}ms after repeated failures`);
+  }
+}
+
+function _recordSuccess() {
+  _circuit.consecutiveFailures = 0;
+  _circuit.openedUntil = 0;
+}
+
+function _isTransient(resp) {
+  if (!resp) return true;
+  if (resp.reason === 'network') return true;
+  if (resp.reason === 'http_status' && Number(resp.status) >= 500) return true;
+  return false;
+}
+
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Запрашивает у aegis_py усиленные инструкции по DSPy-сигнатуре.
  *
@@ -37,10 +76,20 @@ async function enhancePrompt(signature, context = {}) {
   if (!cfg.signatures.includes(signature)) return { ok: false, reason: 'unknown_signature' };
   const base = _baseUrl();
   if (!base) return { ok: false, reason: 'not_configured' };
+  if (_circuitOpen()) return { ok: false, reason: 'circuit_open' };
   try {
-    const resp = await http.post(base, `/dspy/prompt/${encodeURIComponent(signature)}`,
-      { context }, { timeoutMs: cfg.timeoutMs });
-    if (!resp.ok || !resp.body) return { ok: false, reason: resp.reason || 'no_response' };
+    let resp = null;
+    for (let attempt = 1; attempt <= DSPY_MAX_ATTEMPTS; attempt++) {
+      resp = await http.post(base, `/dspy/prompt/${encodeURIComponent(signature)}`,
+        { context }, { timeoutMs: cfg.timeoutMs });
+      if (resp.ok || !_isTransient(resp)) break;
+      if (attempt < DSPY_MAX_ATTEMPTS) await _sleep(DSPY_RETRY_BASE_MS * attempt);
+    }
+    if (!resp || !resp.ok || !resp.body) {
+      _recordFailure();
+      return { ok: false, reason: (resp && resp.reason) || 'no_response' };
+    }
+    _recordSuccess();
     const body = resp.body;
     return {
       ok: true,
@@ -50,6 +99,7 @@ async function enhancePrompt(signature, context = {}) {
       optimized: Boolean(body.optimized),
     };
   } catch (_) {
+    _recordFailure();
     return { ok: false, reason: 'error' };
   }
 }

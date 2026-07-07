@@ -132,6 +132,10 @@ async function createInfoArticleTask(req, res, next) {
     );
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId = await resolveOwnedProjectId(body.project_id, req.user.id);
+    // Сайт-площадка публикации (опционально): парсим её контент и учитываем
+    // стилистику/формат написания при генерации (IAKB §9c).
+    const { sanitizeUrl } = require('../services/parser/scraper');
+    const targetSiteUrl = body.target_site_url ? sanitizeUrl(clipStr(body.target_site_url, 500)) : null;
     // ТЗ §8: серверный fallback из контекста проекта. Если пользователь
     // не передал region/brand_name/brand_facts, но выбрал project_id —
     // подтягиваем из contextResolver (источник истины — БД, не доверяем
@@ -189,17 +193,17 @@ async function createInfoArticleTask(req, res, next) {
          (user_id, topic, region, brand_name, author_name, brand_facts, output_format,
            commercial_links, commercial_links_filename, commercial_links_count,
            images_count, source_relevance_report_id,
-           gemini_model, project_id, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'queued', 0)
+           gemini_model, project_id, target_site_url, status, progress_pct)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'queued', 0)
        RETURNING id, topic, region, brand_name, output_format,
                  commercial_links_filename, commercial_links_count,
                  images_count, source_relevance_report_id, gemini_model,
-                 project_id, status, progress_pct, created_at`,
+                 project_id, target_site_url, status, progress_pct, created_at`,
       [
         req.user.id, topic, effRegion, effBrandName || null, authorName || null,
         effBrandFacts || null, outputFormat,
         JSON.stringify(links), filename || null, links.length,
-        imagesCount, relevanceReportId, geminiModel, projectId,
+        imagesCount, relevanceReportId, geminiModel, projectId, targetSiteUrl,
       ],
     );
     const task = rows[0];
