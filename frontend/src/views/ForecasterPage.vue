@@ -21,6 +21,7 @@ const form = ref({
   name: '',
   file: null,
   fileName: '',
+  keywords_text: '',
   current_traffic_per_month: '',
   region: '',
   notes: '',
@@ -28,6 +29,18 @@ const form = ref({
   conversion_rate_pct: '',  // в %, переводим в дробь при отправке (0.02)
   intent: '',
 });
+
+// Режим источника: 'keywords' — список ключей (сезонность через Арсенкин),
+// 'file' — CSV/XLSX-выгрузка Wordstat (legacy-режим).
+const inputMode = ref('keywords');
+
+const keywordsList = computed(() =>
+  form.value.keywords_text
+    .split(/\r?\n/)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean),
+);
+const keywordsCount = computed(() => new Set(keywordsList.value.map((s) => s.toLowerCase())).size);
 
 const submitting = ref(false);
 const formError  = ref(null);
@@ -65,13 +78,27 @@ async function readFileAsRows(file) {
 
 async function handleSubmit() {
   formError.value = null;
-  if (!form.value.file) {
+  if (inputMode.value === 'keywords') {
+    if (keywordsCount.value === 0) {
+      formError.value = 'Введите хотя бы один ключевой запрос (по одному на строке)';
+      return;
+    }
+  } else if (!form.value.file) {
     formError.value = 'Загрузите CSV или XLSX-файл';
     return;
   }
   submitting.value = true;
   try {
-    const fileData = await readFileAsRows(form.value.file);
+    let source;
+    if (inputMode.value === 'keywords') {
+      source = { keywords: keywordsList.value };
+    } else {
+      const fileData = await readFileAsRows(form.value.file);
+      source = {
+        filename: form.value.fileName,
+        ...(fileData.kind === 'rows' ? { rows: fileData.rows } : { csv: fileData.csv }),
+      };
+    }
     // CR: user вводит в %, бэкенд хранит как дробь.
     const crPct = parseFloat(form.value.conversion_rate_pct);
     const cr = Number.isFinite(crPct) && crPct > 0 ? crPct / 100 : null;
@@ -87,10 +114,7 @@ async function handleSubmit() {
         conversion_rate: cr,
         intent: form.value.intent?.trim() || null,
       },
-      source: {
-        filename: form.value.fileName,
-        ...(fileData.kind === 'rows' ? { rows: fileData.rows } : { csv: fileData.csv }),
-      },
+      source,
     };
     const id = await store.createTask(payload);
     if (!id) throw new Error('Сервер не вернул id задачи');
@@ -148,12 +172,13 @@ function statusBadge(s) {
         <header class="mb-4">
           <h1 class="text-xl font-semibold text-gray-100">📈 Прогнозатор</h1>
           <p class="text-sm text-gray-400 mt-1">
-            Загрузите CSV/XLSX-выгрузку с помесячной частотностью ключевых запросов
-            (формат Wordstat-парсера). Система:
+            Вбейте список ключевых запросов — либо загрузите готовую CSV/XLSX-выгрузку
+            с помесячной частотностью. Система:
           </p>
           <ul class="text-sm text-gray-400 mt-2 list-disc pl-5 space-y-0.5">
-            <li>построит график спроса по месяцам,</li>
-            <li>подсветит зоны падения красным,</li>
+            <li>исключит запросы со стоп-словами (бесплатно, скачать, авито, вакансии…),</li>
+            <li>снимет сезонность через Арсенкин — частота в месяц по каждому запросу за последний год,</li>
+            <li>построит график спроса по месяцам и подсветит зоны падения красным,</li>
             <li>спрогнозирует спрос на 12 месяцев вперёд,</li>
             <li>оценит <span class="text-gray-300">реалистичный</span> трафик при выходе в ТОП-3 / 5 / 10
                 (с учётом текущего значения, а не «все запросы в ТОП»),</li>
@@ -163,6 +188,20 @@ function statusBadge(s) {
         </header>
 
         <form @submit.prevent="handleSubmit" class="space-y-3">
+          <!-- Переключатель источника -->
+          <div class="flex rounded-lg overflow-hidden border border-gray-700 text-sm">
+            <button type="button" @click="inputMode = 'keywords'"
+              class="flex-1 py-2 font-medium transition"
+              :class="inputMode === 'keywords' ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-gray-200'">
+              🔑 Список ключей
+            </button>
+            <button type="button" @click="inputMode = 'file'"
+              class="flex-1 py-2 font-medium transition"
+              :class="inputMode === 'file' ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-gray-200'">
+              📎 Файл CSV/XLSX
+            </button>
+          </div>
+
           <div>
             <label class="block text-xs text-gray-400 mb-1">Название задачи</label>
             <input v-model="form.name" type="text" maxlength="200"
@@ -170,8 +209,23 @@ function statusBadge(s) {
               placeholder="Например: Окна ПВХ — сезонность 2024-2025" />
           </div>
 
-          <div>
-            <label class="block text-xs text-gray-400 mb-1">Файл (CSV или XLSX), до 10 МБ</label>
+          <div v-if="inputMode === 'keywords'">
+            <label class="block text-xs text-gray-400 mb-1">Ключевые запросы — по одному на строке</label>
+            <textarea v-model="form.keywords_text" rows="8"
+              class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 font-mono"
+              placeholder="купить окна пвх&#10;окна пвх москва&#10;остекление балкона цена"></textarea>
+            <div class="flex items-center justify-between mt-1">
+              <p class="text-[11px] text-gray-500">
+                {{ keywordsCount }} уникальных запросов · до 10 000 за раз
+              </p>
+              <p class="text-[11px] text-gray-500">
+                Стоп-слова (бесплатно, скачать, авито…) будут исключены автоматически
+              </p>
+            </div>
+          </div>
+
+          <div v-else>
+            <label class="block text-xs text-gray-400 mb-1">Файл (CSV или XLSX)</label>
             <input type="file" accept=".csv,.xlsx,.xls,.tsv,text/csv" @change="onFileChange"
               class="block w-full text-sm text-gray-300 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0
                      file:text-sm file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500" />
@@ -189,10 +243,13 @@ function statusBadge(s) {
               </p>
             </div>
             <div>
-              <label class="block text-xs text-gray-400 mb-1">Регион / комментарий</label>
+              <label class="block text-xs text-gray-400 mb-1">Регион</label>
               <input v-model="form.region" type="text" maxlength="100"
                 class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
-                placeholder="Москва" />
+                placeholder="Москва / Россия / lr-код" />
+              <p v-if="inputMode === 'keywords'" class="text-[11px] text-gray-500 mt-1">
+                Регион сбора частот в Арсенкине. Пусто = Россия.
+              </p>
             </div>
           </div>
 
@@ -263,7 +320,7 @@ function statusBadge(s) {
 
         <div v-if="store.loading && store.tasks.length === 0" class="text-sm text-gray-500">Загрузка…</div>
         <div v-else-if="store.tasks.length === 0" class="text-sm text-gray-500">
-          Пока нет ни одного прогноза. Загрузите файл слева.
+          Пока нет ни одного прогноза. Введите ключевые запросы слева.
         </div>
 
         <ul v-else class="space-y-2 max-h-[600px] overflow-y-auto pr-1">
