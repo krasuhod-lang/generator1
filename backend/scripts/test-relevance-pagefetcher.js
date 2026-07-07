@@ -12,6 +12,11 @@
  *      с code='dns', без исключения.
  *   4. Поддержка прокси — при заданном RELEVANCE_PROXY_URL axios-запрос
  *      туннелируется через proxy-agent (httpsAgent установлен, proxy:false).
+ *   5. Диагностика/эскалация — categoryOf (категории fail-причин),
+ *      _tierOfMethod / per-domain память успешного метода с TTL
+ *      (RELEVANCE_DOMAIN_METHOD_TTL_MS), вывод FETCH_HTML_URL из
+ *      RELEVANCE_HEADLESS_FETCHER_URL и kill-switch
+ *      RELEVANCE_CURL_CFFI_ESCALATION.
  *
  * HTTP мокается через подмену require.cache (без реальной сети).
  */
@@ -201,6 +206,100 @@ function httpError(status) {
     console.log('✓ 6. proxies_enabled=false bypasses proxy');
     cleanup();
     delete process.env.RELEVANCE_PROXY_URL;
+  }
+
+  // ── 7. categoryOf: верхнеуровневая категория причины fail'а ──────────
+  {
+    const { mod } = loadFetcherWithMock({ handler: async () => ({ data: HTML_OK }) });
+    assert.strictEqual(mod.categoryOf('http_403'), 'waf');
+    assert.strictEqual(mod.categoryOf('http_429'), 'waf');
+    assert.strictEqual(mod.categoryOf('http_500', 'captcha detected'), 'captcha');
+    assert.strictEqual(mod.categoryOf('empty_body', 'подтвердите, что вы не робот'), 'captcha');
+    assert.strictEqual(mod.categoryOf('timeout'), 'timeout');
+    assert.strictEqual(mod.categoryOf('http_524'), 'timeout');
+    assert.strictEqual(mod.categoryOf('tls'), 'ssl');
+    assert.strictEqual(mod.categoryOf('dns'), 'dns');
+    assert.strictEqual(mod.categoryOf('empty_body'), 'empty');
+    assert.strictEqual(mod.categoryOf('http_404'), 'not_found');
+    assert.strictEqual(mod.categoryOf('http_503'), 'waf_or_5xx');
+    assert.strictEqual(mod.categoryOf('http_418'), 'http_error');
+    assert.strictEqual(mod.categoryOf('conn_reset'), 'network');
+    assert.strictEqual(mod.categoryOf('headless_fail'), 'headless');
+    assert.strictEqual(mod.categoryOf(''), 'unknown');
+    console.log('✓ 7. categoryOf maps codes/errors to diagnostic categories');
+    cleanup();
+  }
+
+  // ── 8. _tierOfMethod: имя метода → уровень эскалации ─────────────────
+  {
+    const { mod } = loadFetcherWithMock({ handler: async () => ({ data: HTML_OK }) });
+    assert.strictEqual(mod._tierOfMethod('axios'), 0);
+    assert.strictEqual(mod._tierOfMethod('axios_retry'), 0);
+    assert.strictEqual(mod._tierOfMethod('curl_cffi'), 1);
+    assert.strictEqual(mod._tierOfMethod('headless'), 2);
+    assert.strictEqual(mod._tierOfMethod('headless_spa'), 2);
+    assert.strictEqual(mod._tierOfMethod(''), 0);
+    assert.strictEqual(mod._tierOfMethod(null), 0);
+    console.log('✓ 8. _tierOfMethod maps method names to escalation tiers');
+    cleanup();
+  }
+
+  // ── 9. Per-domain память: remember → recommend, www-нормализация, TTL ─
+  {
+    const { mod } = loadFetcherWithMock({ handler: async () => ({ data: HTML_OK }) });
+    assert.strictEqual(mod._recommendedTier('https://fresh.example/x'), 0,
+      'unknown domain starts at tier 0');
+    mod._rememberDomainMethod('https://www.blocked.example/page', 'headless');
+    assert.strictEqual(mod._recommendedTier('https://blocked.example/other'), 2,
+      'www. prefix must be normalized to the same host');
+    mod._rememberDomainMethod('https://soft.example/a', 'curl_cffi');
+    assert.strictEqual(mod._recommendedTier('https://soft.example/b'), 1);
+    mod._rememberDomainMethod('not a url', 'headless'); // не должен бросать
+    assert.strictEqual(mod._recommendedTier('also not a url'), 0);
+    console.log('✓ 9. per-domain memory: remember/recommend + www normalization');
+    cleanup();
+  }
+
+  // ── 10. Per-domain память: протухание по RELEVANCE_DOMAIN_METHOD_TTL_MS ─
+  {
+    process.env.RELEVANCE_DOMAIN_METHOD_TTL_MS = '1';
+    const { mod } = loadFetcherWithMock({ handler: async () => ({ data: HTML_OK }) });
+    mod._rememberDomainMethod('https://stale.example/', 'headless');
+    await new Promise((r) => setTimeout(r, 10));
+    assert.strictEqual(mod._recommendedTier('https://stale.example/'), 0,
+      'expired record must fall back to tier 0');
+    assert.ok(!mod._domainMethodStats.has('stale.example'),
+      'expired record must be evicted from the map');
+    console.log('✓ 10. per-domain memory expires by TTL');
+    cleanup();
+    delete process.env.RELEVANCE_DOMAIN_METHOD_TTL_MS;
+  }
+
+  // ── 11. FETCH_HTML_URL выводится из HEADLESS_FETCHER_URL + kill-switch ─
+  {
+    process.env.RELEVANCE_HEADLESS_FETCHER_URL = 'http://relevance_fetcher:8001/fetch';
+    delete process.env.RELEVANCE_CURL_CFFI_ESCALATION;
+    let loaded = loadFetcherWithMock({ handler: async () => ({ data: HTML_OK }) });
+    assert.strictEqual(loaded.mod.FETCH_HTML_URL,
+      'http://relevance_fetcher:8001/fetch_html',
+      '/fetch tail must be rewritten to /fetch_html');
+    assert.strictEqual(loaded.mod.CURL_CFFI_ENABLED, true,
+      'curl_cffi escalation enabled by default when fetch_html URL is derivable');
+    cleanup();
+
+    process.env.RELEVANCE_CURL_CFFI_ESCALATION = 'false';
+    loaded = loadFetcherWithMock({ handler: async () => ({ data: HTML_OK }) });
+    assert.strictEqual(loaded.mod.CURL_CFFI_ENABLED, false,
+      'RELEVANCE_CURL_CFFI_ESCALATION=false is a kill-switch');
+    cleanup();
+
+    delete process.env.RELEVANCE_CURL_CFFI_ESCALATION;
+    delete process.env.RELEVANCE_HEADLESS_FETCHER_URL;
+    loaded = loadFetcherWithMock({ handler: async () => ({ data: HTML_OK }) });
+    assert.strictEqual(loaded.mod.CURL_CFFI_ENABLED, false,
+      'no headless fetcher URL → curl_cffi disabled');
+    cleanup();
+    console.log('✓ 11. FETCH_HTML_URL derivation + CURL_CFFI_ENABLED kill-switch');
   }
 
   console.log('\n✅ test-relevance-pagefetcher: all checks passed');

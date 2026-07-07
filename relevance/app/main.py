@@ -235,6 +235,15 @@ class DocumentDiagnostics(BaseModel):
     tag_zone_chars: int = 0
     # Заголовки h2..h6 (если include_headings=true).
     headings: Optional[List[Dict]] = None
+    # Полнота извлечения: документ помечен «частичным» (большой HTML при
+    # непропорционально малом тексте) — исключается из медиан корпуса.
+    is_partial: bool = False
+    partial_reason: Optional[str] = None
+    # Отдельные зоны извлечения (в основной корпус не входят).
+    jsonld_chars: int = 0
+    spa_state_chars: int = 0
+    hidden_chars: int = 0
+    hidden_reasons: Dict[str, int] = Field(default_factory=dict)
 
 
 class OurDocumentMetrics(BaseModel):
@@ -590,8 +599,12 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             tag_zone_lemmas.append(tz_lemmas)
 
         diag = pr.diagnostics
-        text_chars_list.append(diag.text_chars)
-        html_chars_list.append(diag.html_chars)
+        # «Partial»-документы (WAF-огрызки / SPA-скелеты) не пускаем в медианы
+        # корпуса — один такой документ на 30 КБ HTML / 200 симв. текста
+        # искажает median_text_chars вниз.
+        if not diag.is_partial:
+            text_chars_list.append(diag.text_chars)
+            html_chars_list.append(diag.html_chars)
 
         # Превью текста (для UI-кнопки «что собрал парсер») — по запросу.
         parsed_preview: Optional[str] = None
@@ -615,11 +628,23 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             parsed_preview=parsed_preview,
             tag_zone_chars=len(pr.tag_zone_text or ""),
             headings=(pr.headings if opts.include_headings else None),
+            is_partial=diag.is_partial,
+            partial_reason=diag.partial_reason,
+            jsonld_chars=diag.jsonld_chars,
+            spa_state_chars=diag.spa_state_chars,
+            hidden_chars=diag.hidden_chars,
+            hidden_reasons=dict(diag.hidden_reasons),
         ))
 
     parsed_doc_count = sum(1 for d in doc_lemmas if d)
     total_tokens = sum(len(d) for d in doc_lemmas)
     avg_len = (total_tokens / parsed_doc_count) if parsed_doc_count else 0.0
+
+    # Fallback: если ВСЕ документы оказались partial (весь корпус — огрызки),
+    # считаем медианы по ним же — лучше шумная медиана, чем нулевая.
+    if not text_chars_list:
+        text_chars_list = [pr.diagnostics.text_chars for _, pr in parse_results]
+        html_chars_list = [pr.diagnostics.html_chars for _, pr in parse_results]
 
     median_text_chars = float(statistics.median(text_chars_list)) if text_chars_list else 0.0
     median_html_chars = float(statistics.median(html_chars_list)) if html_chars_list else 0.0

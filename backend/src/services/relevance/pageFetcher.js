@@ -130,6 +130,32 @@ const HEADLESS_TIMEOUT_MS  = (() => {
 // сервисом `relevance`). Если переменная пустая — сервис тоже её не требует.
 const RELEVANCE_INTERNAL_TOKEN = (process.env.RELEVANCE_INTERNAL_TOKEN || '').trim();
 
+// URL двухрежимного эндпоинта `/fetch_html` (curl_cffi TLS-impersonation /
+// Playwright+stealth) того же relevance_fetcher-сервиса. Выводится из
+// RELEVANCE_HEADLESS_FETCHER_URL заменой хвоста `/fetch` → `/fetch_html`,
+// отдельная env-переменная не нужна. Пусто, если headless-сервис не настроен.
+const FETCH_HTML_URL = (() => {
+  if (!HEADLESS_FETCHER_URL) return '';
+  try {
+    const u = new URL(HEADLESS_FETCHER_URL);
+    if (/\/fetch_html\/?$/.test(u.pathname)) return u.toString();
+    u.pathname = u.pathname.replace(/\/fetch\/?$/, '/fetch_html');
+    if (!/\/fetch_html\/?$/.test(u.pathname)) {
+      u.pathname = `${u.pathname.replace(/\/$/, '')}/fetch_html`;
+    }
+    return u.toString();
+  } catch (_) {
+    return '';
+  }
+})();
+
+// Тумблер curl_cffi-эскалации (Mode A): по умолчанию включён, если доступен
+// fetch_html-эндпоинт. Kill-switch: RELEVANCE_CURL_CFFI_ESCALATION=false.
+const CURL_CFFI_ENABLED = !!FETCH_HTML_URL
+  && !['0', 'false', 'no', 'off'].includes(
+    String(process.env.RELEVANCE_CURL_CFFI_ESCALATION || '').trim().toLowerCase(),
+  );
+
 // ── Прокси (anti-bot / гео-обход) ──────────────────────────────────────────
 // TZ: «Архитектура функции должна поддерживать передачу прокси-серверов.
 // Предусмотреть возможность подключения proxy-ротатора».
@@ -432,6 +458,129 @@ function _categorize(err) {
   return 'unknown';
 }
 
+/**
+ * Верхнеуровневая категория причины fail'а для диагностики в отчёте:
+ * WAF / captcha / timeout / SSL / DNS / empty / not_found / http_error /
+ * network / headless / unknown. Отвечает на вопрос оператора «что именно
+ * требуется указать» (прокси, увеличенный таймаут и т.п.).
+ */
+function categoryOf(code, error = '') {
+  const c = String(code || 'unknown');
+  const e = String(error || '').toLowerCase();
+  if (e.includes('captcha') || e.includes('are you a human')
+    || e.includes('не робот')) return 'captcha';
+  if (c === 'http_403' || c === 'http_401' || c === 'http_429'
+    || e.includes('waf challenge') || e.includes('blocked')) return 'waf';
+  if (c === 'timeout' || c === 'http_408' || c === 'http_522'
+    || c === 'http_524' || e.includes('timeout')) return 'timeout';
+  if (c === 'tls' || e.includes('ssl') || e.includes('certificate')) return 'ssl';
+  if (c === 'dns') return 'dns';
+  if (c === 'empty_body') return 'empty';
+  if (c === 'http_404' || c === 'http_410' || c === 'http_451') return 'not_found';
+  if (/^http_5\d\d$/.test(c)) return 'waf_or_5xx';
+  if (/^http_\d+$/.test(c)) return 'http_error';
+  if (c === 'conn_reset' || c === 'conn_refused' || c === 'unreachable'
+    || c === 'http2_protocol') return 'network';
+  if (c.startsWith('headless_')) return 'headless';
+  return 'unknown';
+}
+
+// ── Per-domain память «какой метод сработал» ────────────────────────────────
+// При повторных анализах начинаем с уровня эскалации, который сработал для
+// домена в прошлый раз (axios → curl_cffi → headless), не тратя время на
+// заведомо провальные нижние уровни. In-memory с TTL — процесс живёт долго,
+// а свежесть важнее persistence (сайт мог снять WAF).
+const DOMAIN_METHOD_TTL_MS = (() => {
+  const v = parseInt(process.env.RELEVANCE_DOMAIN_METHOD_TTL_MS, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 24 * 3600 * 1000;
+})();
+const _domainMethodStats = new Map(); // host -> { tier, method, at }
+const _DOMAIN_STATS_MAX = 5000;
+
+function _hostOf(url) {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); }
+  catch (_) { return ''; }
+}
+
+/** Уровень эскалации по имени метода: axios* → 0, curl_cffi → 1, headless* → 2. */
+function _tierOfMethod(method) {
+  const m = String(method || '');
+  if (m.startsWith('headless')) return 2;
+  if (m.startsWith('curl_cffi')) return 1;
+  return 0;
+}
+
+function _rememberDomainMethod(url, method) {
+  const host = _hostOf(url);
+  if (!host) return;
+  if (_domainMethodStats.size >= _DOMAIN_STATS_MAX && !_domainMethodStats.has(host)) {
+    // Простейшая защита от роста без границ: выбрасываем самую старую запись.
+    const oldest = _domainMethodStats.keys().next().value;
+    if (oldest !== undefined) _domainMethodStats.delete(oldest);
+  }
+  _domainMethodStats.set(host, {
+    tier: _tierOfMethod(method), method: String(method || ''), at: Date.now(),
+  });
+}
+
+function _recommendedTier(url) {
+  const host = _hostOf(url);
+  if (!host) return 0;
+  const rec = _domainMethodStats.get(host);
+  if (!rec) return 0;
+  if (DOMAIN_METHOD_TTL_MS > 0 && Date.now() - rec.at > DOMAIN_METHOD_TTL_MS) {
+    _domainMethodStats.delete(host);
+    return 0;
+  }
+  return rec.tier;
+}
+
+/**
+ * Mode A: curl_cffi TLS-impersonation через POST /fetch_html
+ * (use_js_render=false). Быстрый обход Cloudflare/DDoS-Guard для статических
+ * страниц — «настоящий» TLS-handshake без полноценного браузера. Средний
+ * уровень эскалации между axios и Playwright.
+ * Возвращает { ok, html?, reason?, status? } — никогда не бросает.
+ */
+async function _curlCffiFetch(url, proxyUrl = null) {
+  if (!CURL_CFFI_ENABLED) {
+    return { ok: false, reason: 'curl_cffi_unavailable: fetch_html endpoint not configured' };
+  }
+  try {
+    const body = { url, use_js_render: false, timeout_ms: FETCH_TIMEOUT_MS };
+    if (proxyUrl) body.proxy = proxyUrl;
+    // Контракт proxy_pool сервиса fetch_html: каждая retry-попытка внутри
+    // сервиса берёт следующий прокси из пула (per-domain ротация при 403/429).
+    if (PROXY_POOL.length > 1) body.proxy_pool = PROXY_POOL;
+    const res = await axios.post(FETCH_HTML_URL, body, {
+      timeout: FETCH_TIMEOUT_MS * 3 + 5000,
+      maxContentLength: MAX_HTML_BYTES,
+      maxBodyLength:    MAX_HTML_BYTES,
+      validateStatus: (s) => s >= 200 && s < 300,
+      headers: RELEVANCE_INTERNAL_TOKEN
+        ? { 'X-Internal-Token': RELEVANCE_INTERNAL_TOKEN }
+        : undefined,
+    });
+    const data = res?.data || {};
+    const html = String(data.html || '');
+    const status = Number(data.status_code || 0);
+    if (data.success && html.trim() && !_looksLikeWafChallenge(html)) {
+      return { ok: true, html, status };
+    }
+    return {
+      ok: false,
+      status,
+      reason: `curl_cffi_fail: ${data.error_msg || `status=${status || 'n/a'}`}`,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: e?.response?.status || 0,
+      reason: `curl_cffi_fail: ${e?.code || e?.message || 'unknown'}`,
+    };
+  }
+}
+
 function _shouldRetry(err) {
   const status = err?.response?.status;
   if (status && RETRY_STATUS_CODES.has(status)) return true;
@@ -487,6 +636,18 @@ async function _headlessFetch(url, proxyUrl = null) {
 }
 
 async function fetchOne(url, opts = {}) {
+  const r = await _fetchOneInner(url, opts);
+  if (r && r.html) {
+    // Per-domain память: запоминаем сработавший метод, чтобы при повторных
+    // анализах начинать с этого уровня эскалации.
+    _rememberDomainMethod(url, r.method);
+  } else if (r) {
+    r.category = categoryOf(r.code, r.error);
+  }
+  return r;
+}
+
+async function _fetchOneInner(url, opts = {}) {
   const { proxiesEnabled } = opts;
   const client = _newAxiosWithJar();
   // Прокси выбираем один раз на URL (ротатор на уровне URL, не на уровне
@@ -518,6 +679,33 @@ async function fetchOne(url, opts = {}) {
     return null;
   };
 
+  // helper: средний уровень эскалации — curl_cffi TLS-impersonation (Mode A).
+  // Дешевле headless'а; пробуем ПЕРЕД Playwright при WAF/403/429.
+  let curlTried = false;
+  let lastCurlReason = null;
+  const _tryCurlCffi = async (reasonMethod) => {
+    if (!CURL_CFFI_ENABLED || curlTried) return null;
+    curlTried = true;
+    const cc = await _curlCffiFetch(url, proxyUrl);
+    if (cc && cc.ok && cc.html) {
+      return { url, html: cc.html, method: `curl_cffi_${reasonMethod}`, retries_used: retries };
+    }
+    if (cc && cc.reason) lastCurlReason = cc.reason;
+    return null;
+  };
+
+  // Per-domain память: если для этого домена в прошлый раз сработал более
+  // высокий уровень эскалации — начинаем сразу с него, не тратя время на
+  // заведомо провальные попытки axios'ом.
+  const startTier = _recommendedTier(url);
+  if (startTier === 1) {
+    const cc = await _tryCurlCffi('remembered');
+    if (cc) return cc;
+  } else if (startTier >= 2) {
+    const hh = await _tryHeadless('remembered');
+    if (hh) return hh;
+  }
+
   // Попытка №1 — реальный Chrome + cookie jar (Cloudflare cf_clearance ловится).
   let firstErr = null;
   try {
@@ -526,9 +714,12 @@ async function fetchOne(url, opts = {}) {
     if (!html.trim()) {
       throw Object.assign(new Error('empty body'), { code: 'EMPTY_BODY' });
     }
-    // Антибот-челлендж — сразу в headless (axios даже на retry его не
-    // пробьёт, нужно реальное JS-исполнение).
+    // Антибот-челлендж — эскалация: сначала curl_cffi (дешёвый TLS-обход),
+    // потом headless (axios даже на retry его не пробьёт, нужно реальное
+    // JS-исполнение либо «настоящий» TLS-fingerprint).
     if (_looksLikeWafChallenge(html)) {
+      const cc = await _tryCurlCffi('cf_challenge');
+      if (cc) return cc;
       const hh = await _tryHeadless('cf_challenge');
       if (hh) return hh;
     }
@@ -544,9 +735,11 @@ async function fetchOne(url, opts = {}) {
 
   // Если первый запрос упал на статусе из FORCE_HEADLESS_STATUSES (403/503/…) —
   // axios-retry даже с другим UA не пробьёт WAF (он привязывает челлендж к
-  // IP+TLS). Сразу пробуем headless.
+  // IP+TLS). Эскалация: curl_cffi (TLS-impersonation) → headless.
   const firstStatus = firstErr?.response?.status;
   if (firstStatus && FORCE_HEADLESS_STATUSES.has(firstStatus)) {
+    const cc = await _tryCurlCffi(`http_${firstStatus}`);
+    if (cc) return cc;
     const hh = await _tryHeadless(`http_${firstStatus}`);
     if (hh) return hh;
   }
@@ -600,9 +793,14 @@ async function fetchOne(url, opts = {}) {
     } catch (_) { /* ignored — последний fallback ниже */ }
   }
 
-  // Финальная попытка — headless, если включён, даже без предварительного
-  // успеха. Это покрывает SPA, которые без JS вообще ничего не отдают,
-  // и WAF-страницы, где axios подряд получает 403/503.
+  // Финальная эскалация: curl_cffi (если ещё не пробовали), затем headless.
+  // Это покрывает статические сайты под TLS-fingerprint-фильтром (curl_cffi),
+  // SPA, которые без JS вообще ничего не отдают, и WAF-страницы, где axios
+  // подряд получает 403/503 (Playwright+stealth).
+  {
+    const cc = await _tryCurlCffi('last_resort');
+    if (cc) return cc;
+  }
   if (HEADLESS_FETCHER_URL) {
     const hh = await _headlessFetch(url, proxyUrl);
     if (hh && hh.ok && hh.html) {
@@ -669,6 +867,7 @@ async function fetchPages(urls, opts = {}) {
         url:   r.url,
         error: r.error || 'unknown',
         code:  r.code  || 'unknown',
+        category: r.category || categoryOf(r.code, r.error),
         retries_used: r.retries_used || 0,
       });
     }
@@ -713,14 +912,17 @@ async function fetchHeadlessOnly(urls, opts = {}) {
       error: (hh && hh.reason) || 'headless_fail: unknown',
       code: hh && hh.reason && hh.reason.startsWith('headless_unavailable')
         ? 'headless_unavailable' : 'headless_fail',
+      category: 'headless',
       retries_used: 0,
     };
   });
   const successes = [];
   const failures = [];
   for (const r of all) {
-    if (r && r.html) successes.push(r);
-    else failures.push(r);
+    if (r && r.html) {
+      _rememberDomainMethod(r.url, r.method);
+      successes.push(r);
+    } else failures.push(r);
   }
   return { successes, failures };
 }
@@ -761,10 +963,18 @@ module.exports = {
   fetchOne,
   fetchHeadlessOnly,
   checkHeadlessHealth,
+  categoryOf,
   FETCH_CONCURRENCY,
   FETCH_TIMEOUT_MS,
   HEADLESS_FETCHER_URL,
+  FETCH_HTML_URL,
+  CURL_CFFI_ENABLED,
   COOKIE_JAR_AVAILABLE: !!_cookieJarSupport,
   PROXY_AVAILABLE,
   USER_AGENT_POOL,
+  // Внутренние помощники per-domain памяти — экспортируем для unit-тестов.
+  _tierOfMethod,
+  _rememberDomainMethod,
+  _recommendedTier,
+  _domainMethodStats,
 };
