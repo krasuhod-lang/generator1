@@ -12,7 +12,7 @@
 
 const assert = require('assert');
 const { filterKeywords, matchStopWord } = require('../src/services/forecaster/stopWordFilter');
-const { resolveRegionLr, _normalizeResult, _rowFromHistory } = require('../src/services/forecaster/arsenkinClient');
+const { resolveRegionLr, seasonalityDateRange, _normalizeResult, _rowFromHistory } = require('../src/services/forecaster/arsenkinClient');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -130,6 +130,38 @@ group('arsenkinClient result normalization', () => {
   });
   test('пустой ответ → []', () => {
     assert.deepStrictEqual(_normalizeResult({ json: {}, text: '' }), []);
+  });
+  test('точки с полной датой YYYY-MM-DD сворачиваются в месяц', () => {
+    const r = _rowFromHistory('окна', [
+      { date: '2025-06-01', value: 40 },
+      { date: '2025-07-01', value: 60 },
+    ]);
+    assert.deepStrictEqual(r.byPeriod, { '2025-06': 40, '2025-07': 60 });
+    assert.strictEqual(r.total, 100);
+  });
+});
+
+// ── arsenkinClient.seasonalityDateRange ────────────────────────────
+group('arsenkinClient.seasonalityDateRange', () => {
+  test('month: последние 12 полных календарных месяцев', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 6, 7)); // 7 июля 2026
+    assert.strictEqual(r.startdate, '2025-07-01');
+    assert.strictEqual(r.enddate, '2026-06-30');
+  });
+  test('month: границы года', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 0, 15)); // 15 января 2026
+    assert.strictEqual(r.startdate, '2025-01-01');
+    assert.strictEqual(r.enddate, '2025-12-31');
+  });
+  test('week: конец — воскресенье, старт — понедельник', () => {
+    const r = seasonalityDateRange('week', new Date(2026, 6, 7)); // вторник 7 июля 2026
+    assert.strictEqual(r.enddate, '2026-07-05');   // воскресенье
+    assert.strictEqual(r.startdate, '2025-07-07'); // понедельник, 52 недели
+  });
+  test('day: окно ≤60 дней без текущего дня', () => {
+    const r = seasonalityDateRange('day', new Date(2026, 6, 7));
+    assert.strictEqual(r.enddate, '2026-07-06');
+    assert.strictEqual(r.startdate, '2026-05-08');
   });
 });
 
