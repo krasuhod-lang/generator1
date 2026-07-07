@@ -26,9 +26,41 @@ const { estimateTraffic } = require('./trafficModel');
 const { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner } = require('./deepseekAnalyzer');
 const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
 const { fetchPhraseSignals, aggregateSignals } = require('./keyssoClient');
+const { collectSeasonality } = require('./arsenkinClient');
+const { filterKeywords } = require('./stopWordFilter');
 const { analyzeOpportunities } = require('./opportunityAnalyzer');
 const { getForecasterConfig } = require('./config');
 const { createFunnelTracker } = require('../aegis/funnelTracker');
+
+/**
+ * Конвертирует rows Арсенкина ({phrase,total,byPeriod}) в структуру,
+ * совместимую с выходом parseForecasterInput (monthCols = union периодов).
+ */
+function _parsedFromArsenkinRows(rows) {
+  const periods = new Set();
+  for (const r of rows) {
+    for (const p of Object.keys(r.byPeriod || {})) periods.add(p);
+  }
+  const monthCols = [...periods].sort().map((p, i) => ({ index: i + 1, header: p, period: p }));
+  const normRows = rows.map((r) => {
+    const byPeriod = {};
+    for (const mc of monthCols) {
+      const v = Number((r.byPeriod || {})[mc.period]);
+      byPeriod[mc.period] = Number.isFinite(v) ? v : 0;
+    }
+    const total = Number(r.total) || Object.values(byPeriod).reduce((a, b) => a + b, 0);
+    return { phrase: String(r.phrase || '').trim(), total, byPeriod };
+  }).filter((r) => r.phrase);
+  return {
+    filename: 'arsenkin-seasonality',
+    rowsCount: normRows.length,
+    phraseCol: 0,
+    totalCol: null,
+    monthCols,
+    rows: normRows,
+    warnings: [],
+  };
+}
 
 async function processForecasterTask(taskId) {
   if (!taskId) throw new Error('processForecasterTask: taskId required');
@@ -49,6 +81,7 @@ async function processForecasterTask(taskId) {
   const sourceColumns = task.source_columns || {};
   const rawTable = sourceColumns.raw_rows; // массив массивов строк (передан фронтом)
   const rawCsv   = sourceColumns.raw_csv;  // или CSV-строка
+  const rawKeywords = sourceColumns.keywords; // режим «список ключей» → сезонность через Арсенкин
   const filename = task.source_filename || '';
 
   await db.query(
@@ -60,14 +93,62 @@ async function processForecasterTask(taskId) {
 
   try {
     funnel.step('parse');
-    // 2. Парсер
+    // 2. Источник данных: список ключей (сезонность через Арсенкин) либо файл
     let parsed;
-    if (Array.isArray(rawTable)) {
+    let arsenkinReport = null;
+    if (Array.isArray(rawKeywords) && rawKeywords.length > 0) {
+      // 2a. Режим «список ключей»: ПЕРЕД сбором сезонности исключаем
+      // фразы со стоп-словами (бесплатно/скачать/авито/… — см. ТЗ),
+      // затем через Арсенкин снимаем помесячную частотность за год.
+      funnel.step('arsenkin_seasonality');
+      const { kept, excluded } = filterKeywords(rawKeywords);
+      if (kept.length === 0) {
+        arsenkinReport = {
+          verdict: 'error',
+          reason: 'Все ключевые запросы отфильтрованы стоп-словами',
+          keywords_input: rawKeywords.length,
+          keywords_kept: 0,
+          stop_words_excluded: excluded,
+        };
+        await db.query(
+          `UPDATE forecaster_tasks SET arsenkin_report=$2::jsonb, updated_at=NOW() WHERE id=$1`,
+          [taskId, JSON.stringify(arsenkinReport)],
+        );
+        throw new Error('Все ключевые запросы попали под стоп-слова — собирать сезонность не по чему');
+      }
+      const ars = await collectSeasonality({ phrases: kept, regionLabel: options.region });
+      arsenkinReport = {
+        verdict:     ars.verdict,
+        reason:      ars.reason || null,
+        requested:   ars.requested ?? kept.length,
+        matched:     ars.matched ?? 0,
+        region_lr:   ars.region_lr ?? null,
+        duration_ms: ars.duration_ms ?? null,
+        tasks:       ars.tasks || [],
+        keywords_input: rawKeywords.length,
+        keywords_kept:  kept.length,
+        stop_words_excluded: excluded,
+      };
+      // Сохраняем отчёт сразу — чтобы UI видел диагностику даже при ошибке.
+      await db.query(
+        `UPDATE forecaster_tasks SET arsenkin_report=$2::jsonb, updated_at=NOW() WHERE id=$1`,
+        [taskId, JSON.stringify(arsenkinReport)],
+      );
+      if (ars.verdict === 'skipped') {
+        throw new Error(ars.reason === 'no_api_key'
+          ? 'Не задан токен API Арсенкина (env ARSENKIN_API_TOKEN)'
+          : `Сбор сезонности пропущен: ${ars.reason}`);
+      }
+      if (ars.verdict !== 'ok' || !Array.isArray(ars.rows) || ars.rows.length === 0) {
+        throw new Error(`Сбор сезонности через Арсенкин не удался: ${ars.reason || 'пустой результат'}`);
+      }
+      parsed = _parsedFromArsenkinRows(ars.rows);
+    } else if (Array.isArray(rawTable)) {
       parsed = parseForecasterInput({ rows: rawTable }, { filename });
     } else if (typeof rawCsv === 'string' && rawCsv.length > 0) {
       parsed = parseForecasterInput(rawCsv, { filename });
     } else {
-      throw new Error('Файл не передан или пустой');
+      throw new Error('Не переданы данные: нужен файл (rows/csv) или список ключевых запросов (keywords)');
     }
     if (parsed.rowsCount === 0) {
       throw new Error('Не удалось извлечь ни одной строки из файла');
@@ -221,6 +302,7 @@ async function processForecasterTask(taskId) {
       month_cols: parsed.monthCols,
       warnings:   parsed.warnings,
       target_url: targetUrl,
+      source_kind: arsenkinReport ? 'arsenkin_keywords' : 'file',
     };
     // Компактная leads_summary — то, что фронт сможет показать без копания
     // в traffic_estimate.* (для шапки страницы результата).

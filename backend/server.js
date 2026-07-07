@@ -1394,6 +1394,9 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS expert_reports JSONB`);
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS leads_summary  JSONB`);
 
+    // Migration 102: интеграция Арсенкин (сбор сезонности по списку ключей).
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS arsenkin_report JSONB`);
+
     // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google
     // Search Console (OAuth-токены хранятся строго в зашифрованном виде) +
     // AI-аналитика DeepSeek + публичный read-only шаринг дашборда.

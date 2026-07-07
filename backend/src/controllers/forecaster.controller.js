@@ -89,6 +89,9 @@ async function listForecasterTasks(req, res, next) {
 // Файл (XLSX) парсится на фронте через read-excel-file, отправляется как
 // массив массивов строк. CSV-файл фронт может либо распарсить тем же путём,
 // либо отправить как { filename, csv: "<raw>" }.
+// Режим «список ключей»: { source: { keywords: string[] | "<по строке>" } } —
+// сезонность (помесячная частотность за год) снимается через API Арсенкина,
+// перед сбором фразы со стоп-словами исключаются (stopWordFilter.js).
 async function createForecasterTask(req, res, next) {
   try {
     const body = req.body || {};
@@ -97,9 +100,23 @@ async function createForecasterTask(req, res, next) {
     const filename = String(src.filename || '').slice(0, 255).trim();
     const rows = Array.isArray(src.rows) ? src.rows : null;
     const csv  = typeof src.csv === 'string' ? src.csv : null;
+    // Ключевые запросы: массив строк либо текст «по одному на строке».
+    let keywords = null;
+    if (Array.isArray(src.keywords)) {
+      keywords = src.keywords;
+    } else if (typeof src.keywords === 'string') {
+      keywords = src.keywords.split(/\r?\n/);
+    }
+    if (keywords) {
+      keywords = keywords
+        .map((k) => String(k || '').replace(/\s+/g, ' ').trim().slice(0, 300))
+        .filter(Boolean)
+        .slice(0, 10000);
+      if (keywords.length === 0) keywords = null;
+    }
 
-    if (!rows && !csv) {
-      return res.status(400).json({ error: 'Не передан файл: ожидается source.rows (array) или source.csv (string)' });
+    if (!rows && !csv && !keywords) {
+      return res.status(400).json({ error: 'Не переданы данные: ожидается source.rows (array), source.csv (string) или source.keywords (список ключевых запросов)' });
     }
     // Защитные потолки на размер файла/число строк намеренно сняты:
     // по требованию владельца продукта прогнозатор обязан учитывать все
@@ -124,7 +141,9 @@ async function createForecasterTask(req, res, next) {
       intent:                    _sanitizeIntent(opts.intent),
     };
 
-    const sourceColumns = rows ? { raw_rows: rows } : { raw_csv: csv };
+    const sourceColumns = keywords
+      ? { keywords }
+      : (rows ? { raw_rows: rows } : { raw_csv: csv });
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId = await resolveOwnedProjectId(req.body.project_id, req.user.id);
 
@@ -134,7 +153,8 @@ async function createForecasterTask(req, res, next) {
        VALUES ($1, $2, 'queued', $3, $4::jsonb, $5::jsonb, $6)
        RETURNING id, name, status, source_filename, project_id, created_at`,
       [
-        req.user.id, name, filename,
+        req.user.id, name,
+        filename || (keywords ? `ключевые запросы (${keywords.length})` : ''),
         JSON.stringify(options),
         JSON.stringify(sourceColumns),
         projectId,
@@ -164,6 +184,7 @@ async function getForecasterTask(req, res, next) {
               monthly_series, anomalies, forecast, trend,
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
+              arsenkin_report,
               deepseek_summary,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
@@ -181,6 +202,10 @@ async function getForecasterTask(req, res, next) {
       const sc = { ...t.source_columns };
       delete sc.raw_rows;
       delete sc.raw_csv;
+      if (Array.isArray(sc.keywords)) {
+        sc.keywords_count = sc.keywords.length;
+        delete sc.keywords;
+      }
       t.source_columns = sc;
     }
     return res.json({ task: t });
@@ -270,6 +295,7 @@ async function getSharedForecast(req, res, next) {
               monthly_series, anomalies, forecast, trend,
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
+              arsenkin_report,
               deepseek_summary,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks

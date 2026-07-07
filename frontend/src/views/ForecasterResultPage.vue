@@ -66,6 +66,9 @@ const targetUrl  = computed(() => task.value?.target_url || task.value?.options?
 const excludedSummary = computed(() => task.value?.monthly_series?.excludedSummary || null);
 const keyssoSignals   = computed(() => task.value?.keysso_signals || null);
 const keyssoAgg       = computed(() => keyssoSignals.value?.aggregate || null);
+const arsenkinReport  = computed(() => task.value?.arsenkin_report || null);
+const arsenkinExcluded = computed(() => arsenkinReport.value?.stop_words_excluded || []);
+const arsenkinExcludedOpen = ref(false);
 const opportunities   = computed(() => task.value?.opportunities || null);
 const oppList         = computed(() => opportunities.value?.opportunities || []);
 const oppClusters     = computed(() => opportunities.value?.clusters || []);
@@ -382,6 +385,59 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
                   Потолок (идеальная выдача): <span class="text-gray-300">{{ fmtNum(trafficEst[key].optimistic.annual) }}</span>
                   <span v-if="trafficEst[key].optimistic.uplift_x" class="text-gray-500"> · ×{{ trafficEst[key].optimistic.uplift_x }}</span>
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Сбор сезонности через Арсенкин (режим «список ключей») -->
+          <section v-if="arsenkinReport" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">
+              🌊 Сбор сезонности (Арсенкин)
+              <span class="ml-2 text-[10px] uppercase font-semibold border rounded px-1.5 py-0.5"
+                    :class="arsenkinReport.verdict === 'ok'
+                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                      : 'bg-rose-500/10 text-rose-300 border-rose-500/30'">
+                {{ arsenkinReport.verdict }}
+              </span>
+            </h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">Ключей введено</div>
+                <div class="text-lg font-semibold text-gray-100 mt-0.5">{{ arsenkinReport.keywords_input ?? '—' }}</div>
+              </div>
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">Исключено стоп-словами</div>
+                <div class="text-lg font-semibold text-amber-300 mt-0.5">{{ arsenkinExcluded.length }}</div>
+              </div>
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">Отправлено в сбор</div>
+                <div class="text-lg font-semibold text-sky-300 mt-0.5">{{ arsenkinReport.keywords_kept ?? '—' }}</div>
+              </div>
+              <div class="border border-gray-800 rounded p-2.5">
+                <div class="text-[10px] text-gray-500 uppercase">Частоты получены</div>
+                <div class="text-lg font-semibold text-emerald-300 mt-0.5">{{ arsenkinReport.matched ?? '—' }}</div>
+              </div>
+            </div>
+            <p v-if="arsenkinReport.reason" class="text-[11px] text-rose-400 mt-2">
+              ⚠ {{ arsenkinReport.reason }}
+            </p>
+            <div v-if="arsenkinExcluded.length > 0" class="mt-3">
+              <button @click="arsenkinExcludedOpen = !arsenkinExcludedOpen"
+                      class="text-xs text-indigo-400 hover:text-indigo-300">
+                {{ arsenkinExcludedOpen ? '▾ скрыть' : '▸ показать' }} исключённые запросы ({{ arsenkinExcluded.length }})
+              </button>
+              <div v-if="arsenkinExcludedOpen" class="mt-2 max-h-60 overflow-y-auto border border-gray-800 rounded">
+                <table class="w-full text-xs">
+                  <thead class="text-gray-500 sticky top-0 bg-gray-900">
+                    <tr><th class="text-left px-2 py-1.5">Запрос</th><th class="text-left px-2 py-1.5">Стоп-слово</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(e, i) in arsenkinExcluded" :key="i" class="border-t border-gray-800/60">
+                      <td class="px-2 py-1 text-gray-300">{{ e.phrase }}</td>
+                      <td class="px-2 py-1 text-amber-300">{{ e.matched }}</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
           </section>
