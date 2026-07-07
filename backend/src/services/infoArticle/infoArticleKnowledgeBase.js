@@ -282,6 +282,10 @@ function buildInfoArticleKnowledgeBase({
   // мог опереться на максимально подробную аналитику — заказчик хочет
   // «детализацию описания сущностей, интентов и высокий E-E-A-T».
   relevanceContext = null,
+  // 2026-07: стилевой профиль сайта-площадки публикации (target_site_url).
+  // Опциональный input: если null, §9c не рендерится. Источник —
+  // services/infoArticle/targetSiteStyle.analyzeTargetSiteStyle.
+  targetSiteStyle = null,
   // 2026-06: исследовательский слой Reddit Mapper V2 (голос аудитории — боли,
   // язык, вопросы, приоритетные темы). Опциональный input: если null, §10 не
   // рендерится. Источник — services/redditMapper/masterJson.buildResearchDigest.
@@ -327,6 +331,19 @@ function buildInfoArticleKnowledgeBase({
     } catch (_) { /* graceful */ }
   }
 
+  // §9c — Стиль сайта-площадки публикации. Writer обязан писать статью
+  // в стилистике и формате площадки (парсинг реального контента).
+  let sectionTargetSiteStyle = '';
+  if (targetSiteStyle) {
+    try {
+      const { renderTargetSiteStyleSection } = require('./targetSiteStyle');
+      const md = renderTargetSiteStyleSection(targetSiteStyle);
+      if (md && md.trim()) {
+        sectionTargetSiteStyle = '## §9c. Стилистика площадки публикации\n\n' + md;
+      }
+    } catch (_) { /* graceful */ }
+  }
+
   // §10 — Голос аудитории из Reddit Mapper V2 (Information Gain топливо:
   // реальные боли, язык, вопросы, приоритетные темы). Опционально, graceful.
   let sectionAudienceResearch = '';
@@ -360,6 +377,7 @@ function buildInfoArticleKnowledgeBase({
     sectionLinkPlan(linkPlan),
     sectionRelevance,
     sectionRelevanceCtx,
+    sectionTargetSiteStyle,
     sectionAudienceResearch,
   ].filter(Boolean);
 
