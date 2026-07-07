@@ -7,6 +7,7 @@
  *   POST   /api/forecaster          — создать задачу (CSV/JSON-rows загрузка)
  *   GET    /api/forecaster/:id      — детальная задача
  *   DELETE /api/forecaster/:id      — удалить
+ *   POST   /api/forecaster/:id/rerun   — перезапустить расчёт
  *   POST   /api/forecaster/:id/share   — выпустить share-токен
  *   DELETE /api/forecaster/:id/share   — отозвать
  *
@@ -228,6 +229,53 @@ async function deleteForecasterTask(req, res, next) {
   }
 }
 
+// ─── POST /api/forecaster/:id/rerun ────────────────────────────────
+// Перезапуск задачи: на случай ошибок сбора (напр. сбоя Арсенкина) или когда
+// нужно обновить данные. Источник (source_columns: raw_rows/raw_csv/keywords)
+// уже сохранён в БД, поэтому достаточно сбросить статус и заново прогнать
+// пайплайн. Результаты предыдущего прогона обнуляются, чтобы UI не показывал
+// устаревшие цифры во время повторного расчёта.
+async function rerunForecasterTask(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status FROM forecaster_tasks WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id],
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Задача не найдена' });
+    const current = rows[0];
+    if (current.status === 'queued' || current.status === 'running') {
+      return res.status(409).json({ error: 'Задача уже выполняется' });
+    }
+
+    const { rows: upd } = await db.query(
+      `UPDATE forecaster_tasks
+          SET status='queued',
+              error_message=NULL,
+              monthly_series=NULL, anomalies=NULL, forecast=NULL, trend=NULL,
+              traffic_estimate=NULL, junk_phrases=NULL, keysso_signals=NULL,
+              opportunities=NULL, expert_reports=NULL, leads_summary=NULL,
+              arsenkin_report=NULL, deepseek_summary=NULL,
+              llm_provider=DEFAULT, llm_model=NULL,
+              tokens_in=DEFAULT, tokens_out=DEFAULT, cost_usd=DEFAULT,
+              started_at=NULL, completed_at=NULL, updated_at=NOW()
+        WHERE id = $1 AND user_id = $2
+      RETURNING id, name, status, source_filename, project_id, created_at`,
+      [req.params.id, req.user.id],
+    );
+    const task = upd[0];
+
+    setImmediate(() => {
+      withUserSlot(req.user.id, () => processForecasterTask(task.id)).catch((err) => {
+        console.error('[forecaster] rerun task failed:', err.message);
+      });
+    });
+
+    return res.json({ task });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // ─── POST /api/forecaster/:id/share ────────────────────────────────
 async function createShareLink(req, res, next) {
   try {
@@ -317,6 +365,7 @@ module.exports = {
   createForecasterTask,
   getForecasterTask,
   deleteForecasterTask,
+  rerunForecasterTask,
   createShareLink,
   revokeShareLink,
   getSharedForecast,

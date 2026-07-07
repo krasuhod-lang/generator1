@@ -22,6 +22,7 @@ const err = ref(null);
 const shareToken = ref(null);
 const shareCopied = ref(false);
 const shareBusy = ref(false);
+const rerunBusy = ref(false);
 
 let pollHandle = null;
 
@@ -186,6 +187,25 @@ async function doRevoke() {
   }
 }
 
+async function doRerun() {
+  if (!task.value || rerunBusy.value) return;
+  if (task.value.status === 'queued' || task.value.status === 'running') return;
+  if (!confirm('Запустить расчёт заново? Текущие результаты будут пересчитаны.')) return;
+  rerunBusy.value = true;
+  try {
+    const t = await store.rerunTask(task.value.id);
+    if (t) {
+      task.value = { ...task.value, ...t };
+      shareToken.value = t.share_token || shareToken.value;
+    }
+    await load();
+  } catch (e) {
+    alert(e.response?.data?.error || e.message || 'Ошибка');
+  } finally {
+    rerunBusy.value = false;
+  }
+}
+
 function fmtNum(n) {
   if (n == null || !Number.isFinite(n)) return '—';
   return Math.round(n).toLocaleString('ru-RU');
@@ -218,23 +238,31 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
                        class="underline hover:text-indigo-200 break-all">{{ targetUrl }}</a>
           </p>
         </div>
-        <div v-if="task && task.status === 'done'" class="flex items-center gap-2">
-          <template v-if="shareToken">
-            <input :value="shareUrl" readonly
-                   class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 w-72" />
-            <button @click="copyShareLink"
-                    class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold">
-              {{ shareCopied ? '✓ Скопировано' : '📋 Копировать' }}
-            </button>
-            <button @click="doRevoke"
-                    class="text-xs px-2 py-1.5 rounded border border-gray-700 text-gray-400 hover:text-rose-300">
-              Отозвать
+        <div v-if="task && (task.status === 'done' || task.status === 'error')"
+             class="flex items-center gap-2">
+          <button @click="doRerun" :disabled="rerunBusy"
+                  class="text-sm px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white font-semibold"
+                  title="Перезапустить расчёт (на случай ошибок или обновления данных)">
+            🔄 {{ rerunBusy ? '…' : 'Запустить снова' }}
+          </button>
+          <template v-if="task.status === 'done'">
+            <template v-if="shareToken">
+              <input :value="shareUrl" readonly
+                     class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 w-72" />
+              <button @click="copyShareLink"
+                      class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold">
+                {{ shareCopied ? '✓ Скопировано' : '📋 Копировать' }}
+              </button>
+              <button @click="doRevoke"
+                      class="text-xs px-2 py-1.5 rounded border border-gray-700 text-gray-400 hover:text-rose-300">
+                Отозвать
+              </button>
+            </template>
+            <button v-else @click="doShare" :disabled="shareBusy"
+                    class="text-sm px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-semibold">
+              🔗 {{ shareBusy ? '…' : 'Поделиться' }}
             </button>
           </template>
-          <button v-else @click="doShare" :disabled="shareBusy"
-                  class="text-sm px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-semibold">
-            🔗 {{ shareBusy ? '…' : 'Поделиться' }}
-          </button>
         </div>
       </header>
 
@@ -252,7 +280,11 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
 
         <div v-else-if="task.status === 'error'"
              class="text-sm text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded p-4">
-          ⚠ Ошибка: {{ task.error_message || 'неизвестно' }}
+          <div>⚠ Ошибка: {{ task.error_message || 'неизвестно' }}</div>
+          <button @click="doRerun" :disabled="rerunBusy"
+                  class="mt-3 text-sm px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white font-semibold">
+            🔄 {{ rerunBusy ? 'Запускаю…' : 'Запустить снова' }}
+          </button>
         </div>
 
         <template v-else-if="task.status === 'done'">
