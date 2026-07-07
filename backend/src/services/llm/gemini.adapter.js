@@ -17,6 +17,73 @@ const DEFAULT_GEMINI_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw >= 1000 && raw <= 600000 ? raw : 300000;
 })();
 
+// Кол-во дополнительных повторов ОДНОГО прокси при транзиентной сетевой
+// ошибке (ETIMEDOUT / ECONNRESET / socket hang up и т.п.). Раньше при
+// единственном рабочем прокси такой сбой сразу валил задачу («⚠ read
+// ETIMEDOUT» при сборе тем статей). Настраивается через
+// GEMINI_TRANSIENT_RETRIES; 0 — отключить, ≤10.
+const GEMINI_TRANSIENT_RETRIES = (() => {
+  const raw = Number(process.env.GEMINI_TRANSIENT_RETRIES);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 10 ? raw : 2;
+})();
+
+// Коды Node/axios, которые считаем транзиентными и стоит повторить.
+const TRANSIENT_NET_CODES = new Set([
+  'ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'EAI_AGAIN',
+  'EPIPE', 'ENETUNREACH', 'ENETRESET', 'ECONNREFUSED',
+]);
+
+function _sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+/**
+ * Экспоненциальный backoff для транзиентных ретраев: 1с, 2с, 4с … cap 8с.
+ * @param {number} attempt — номер попытки повтора (1-based)
+ */
+function _transientBackoffMs(attempt) {
+  const base = 1000 * Math.pow(2, Math.max(0, attempt - 1));
+  return Math.min(base, 8000);
+}
+
+/**
+ * Транзиентна ли сетевая ошибка (стоит ли повторить тот же прокси).
+ * 407 (proxy auth) — детерминированная ошибка, НЕ транзиентная.
+ */
+function _isTransientNetworkError(err) {
+  if (!err) return false;
+  const msg = String(err.message || '');
+  // Ошибку авторизации прокси не ретраим — она детерминированная.
+  if (msg.includes('407') || /Proxy Authentication Required/i.test(msg)) return false;
+  if (err.code && TRANSIENT_NET_CODES.has(err.code)) return true;
+  return /timeout|timed out|socket hang up|ETIMEDOUT|ECONNRESET|ECONNABORTED|EAI_AGAIN/i.test(msg);
+}
+
+/**
+ * axios.post с ретраями ТОГО ЖЕ прокси на транзиентных сетевых ошибках.
+ * Возвращает axios-response либо пробрасывает последнюю ошибку (её ловит
+ * внешний цикл, который переключает прокси).
+ */
+async function _postWithTransientRetry(endpoint, payload, axiosCfg, proxyIdx, label = 'gemini') {
+  let lastErr = null;
+  for (let t = 0; t <= GEMINI_TRANSIENT_RETRIES; t++) {
+    try {
+      return await axios.post(endpoint, payload, axiosCfg);
+    } catch (err) {
+      lastErr = err;
+      if (t < GEMINI_TRANSIENT_RETRIES && _isTransientNetworkError(err)) {
+        const delay = _transientBackoffMs(t + 1);
+        console.warn(
+          `[${label}] Транзиентная сетевая ошибка через прокси [${proxyIdx}]: ${err.message} — `
+          + `повтор ${t + 1}/${GEMINI_TRANSIENT_RETRIES} через ${delay}ms`,
+        );
+        await _sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 // ────────────────────────────────────────────────────────────────────
 // MAX_GEMINI_INPUT_LENGTH — верхняя граница суммарной длины
 // (systemInstruction + userPrompt) в символах. Ранее было 100 КБ; увеличено
@@ -467,7 +534,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
 
     let response;
     try {
-      response = await axios.post(endpoint, payload, axiosCfg);
+      response = await _postWithTransientRetry(endpoint, payload, axiosCfg, proxyIdx, 'gemini');
     } catch (networkErr) {
       // Сетевая ошибка прокси (timeout, ECONNREFUSED и т.д.)
       // Переключаемся на следующий прокси
@@ -712,14 +779,14 @@ async function streamGenerate(systemInstruction, userPrompt, options = {}) {
 
     let response;
     try {
-      response = await axios.post(endpoint, payload, {
+      response = await _postWithTransientRetry(endpoint, payload, {
         timeout:        timeoutMs,
         headers:        { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         validateStatus: null,
         httpsAgent:     proxyAgent,
         proxy:          false,
         responseType:   'stream',
-      });
+      }, proxyIdx, 'gemini-stream');
     } catch (networkErr) {
       console.warn(`[gemini-stream] network error proxy [${proxyIdx}]: ${networkErr.message}`);
       lastError = networkErr;

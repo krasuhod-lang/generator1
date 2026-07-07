@@ -131,6 +131,34 @@ group('arsenkinClient result normalization', () => {
   test('пустой ответ → []', () => {
     assert.deepStrictEqual(_normalizeResult({ json: {}, text: '' }), []);
   });
+  test('type=3 сезонность: ключ "seasonal" + month-only через resolveMonth', () => {
+    const { _monthYearResolver } = require('../src/services/forecaster/arsenkinClient');
+    // Окно на 7 июля 2026 → enddate 2026-06-30, endMonth=6.
+    const resolveMonth = _monthYearResolver('month', new Date(2026, 6, 7));
+    const rows = _normalizeResult({
+      json: { status: 'ok', data: [
+        { query: 'летние шины', seasonal: [
+          { month: '05', count: 500 },  // ≤6 → 2026-05
+          { month: '07', count: 200 },  // >6  → 2025-07
+        ] },
+      ] },
+      text: '',
+      resolveMonth,
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].phrase, 'летние шины');
+    assert.strictEqual(rows[0].byPeriod['2026-05'], 500);
+    assert.strictEqual(rows[0].byPeriod['2025-07'], 200);
+    assert.strictEqual(rows[0].total, 700);
+  });
+  test('month-only БЕЗ resolveMonth → пустой byPeriod (не ломается)', () => {
+    const rows = _normalizeResult({
+      json: { data: [{ query: 'шины', seasonal: [{ month: '05', count: 5 }] }] },
+      text: '',
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.deepStrictEqual(rows[0].byPeriod, {});
+  });
   test('точки с полной датой YYYY-MM-DD сворачиваются в месяц', () => {
     const r = _rowFromHistory('окна', [
       { date: '2025-06-01', value: 40 },

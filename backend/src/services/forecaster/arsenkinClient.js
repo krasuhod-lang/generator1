@@ -31,7 +31,11 @@
  *   • Проверка статуса:        POST https://arsenkin.ru/api/tools/check
  *       body: { task_id }   → { data: { status_id } }  (1 = в работе, 2 = готово)
  *   • Получение результата:    POST https://arsenkin.ru/api/tools/get
- *       body: { task_id }   → JSON либо CSV-строка (зависит от инструмента)
+ *       body: { task_id }   → JSON либо CSV-строка (зависит от инструмента).
+ *       Для сезонности (type=3) типичная форма:
+ *         { status:"ok", data:[ { query:"…", seasonal:[{month:"01",count:…}, …] } ] }
+ *       Внимание: месяцы приходят БЕЗ года ("01".."12") — клиент восстанавливает
+ *       год из окна сезонности (_monthYearResolver).
  *   • Лимиты: ≤5 задач одновременно (очередь 50), ≤30 запросов/мин ко всем
  *     endpoint'ам; при превышении — {"status":"Error","code":"429"}.
  *
@@ -282,20 +286,61 @@ function _periodFromAny(v) {
   return null;
 }
 
-function _rowFromHistory(phrase, history) {
+/**
+ * Извлекает номер месяца (1–12) из значения БЕЗ года — инструмент сезонности
+ * Арсенкина (type=3) отдаёт месяцы как "01"…"12" (или 1…12). Возвращает
+ * целое 1–12 либо null. Осторожно: НЕ трактует "2024"/большие числа как месяц.
+ */
+function _monthNumFromAny(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!/^(0?[1-9]|1[0-2])$/.test(s)) return null;
+  const n = Number(s);
+  return n >= 1 && n <= 12 ? n : null;
+}
+
+/**
+ * Строит резолвер «номер месяца → YYYY-MM» для окна сезонности. В годовом
+ * окне (12 полных месяцев, оканчивающихся прошлым месяцем) каждый месяц
+ * встречается ровно один раз, поэтому маппинг детерминирован: месяцы ≤
+ * месяца конца окна относятся к году конца, остальные — к предыдущему.
+ * Возвращает функцию (monthNum:1-12) => 'YYYY-MM' | null.
+ */
+function _monthYearResolver(group = 'month', now = new Date()) {
+  const { enddate } = seasonalityDateRange(group, now);
+  const m = String(enddate || '').match(/^(\d{4})-(\d{2})/);
+  if (!m) return () => null;
+  const endYear  = Number(m[1]);
+  const endMonth = Number(m[2]);
+  return (monthNum) => {
+    if (!(monthNum >= 1 && monthNum <= 12)) return null;
+    const year = monthNum <= endMonth ? endYear : endYear - 1;
+    return `${year}-${String(monthNum).padStart(2, '0')}`;
+  };
+}
+
+function _rowFromHistory(phrase, history, resolveMonth = null) {
   const byPeriod = {};
   if (Array.isArray(history)) {
     // [{month|date|period, count|value|freq|ws}, ...]
     for (const pt of history) {
       if (!pt || typeof pt !== 'object') continue;
-      const period = _periodFromAny(pt.month ?? pt.date ?? pt.period);
+      const rawKey = pt.month ?? pt.date ?? pt.period;
+      let period = _periodFromAny(rawKey);
+      if (!period && resolveMonth) {
+        const mn = _monthNumFromAny(rawKey);
+        if (mn) period = resolveMonth(mn);
+      }
       const val = Number(pt.count ?? pt.value ?? pt.freq ?? pt.ws ?? pt.shows);
       if (period && Number.isFinite(val)) byPeriod[period] = val;
     }
   } else if (history && typeof history === 'object') {
-    // {"2024-01": 123, ...}
+    // {"2024-01": 123, ...} или {"01": 123, …} (month-only сезонность)
     for (const [k, v] of Object.entries(history)) {
-      const period = _periodFromAny(k);
+      let period = _periodFromAny(k);
+      if (!period && resolveMonth) {
+        const mn = _monthNumFromAny(k);
+        if (mn) period = resolveMonth(mn);
+      }
       const val = Number(v);
       if (period && Number.isFinite(val)) byPeriod[period] = val;
     }
@@ -307,11 +352,16 @@ function _rowFromHistory(phrase, history) {
 /**
  * Пытается вытащить rows из произвольного JSON-ответа /get.
  * Поддерживаются типовые формы:
- *   • { data: [ {phrase|query|keyword, history|months|dynamics|seasonality: …} ] }
+ *   • { data: [ {phrase|query|keyword, history|months|dynamics|seasonality|seasonal: …} ] }
  *   • { data: { "<фраза>": {"2024-01": n, …} | [ {month,count} ] } }
+ *   • Инструмент «Проверка сезонности» (type=3): месяцы приходят БЕЗ года
+ *     ("01"…"12") в ключе `seasonal` — маппятся в YYYY-MM через resolveMonth.
  *   • CSV-строка (фраза + помесячные колонки) — через parseForecasterInput.
+ *
+ * @param {Function|null} resolveMonth — (monthNum:1-12)=>'YYYY-MM' для
+ *   month-only ответов; см. _monthYearResolver.
  */
-function _normalizeResult({ json, text }) {
+function _normalizeResult({ json, text, resolveMonth = null }) {
   const payload = json && typeof json === 'object'
     ? (json.data ?? json.result ?? json.results ?? json)
     : null;
@@ -322,16 +372,17 @@ function _normalizeResult({ json, text }) {
       if (!item || typeof item !== 'object') continue;
       const phrase = String(item.phrase ?? item.query ?? item.keyword ?? item.word ?? '').trim();
       if (!phrase) continue;
-      const hist = item.history ?? item.months ?? item.dynamics ?? item.seasonality ?? item.data;
+      const hist = item.history ?? item.months ?? item.dynamics
+        ?? item.seasonality ?? item.seasonal ?? item.data;
       if (hist != null) {
-        rows.push(_rowFromHistory(phrase, hist));
+        rows.push(_rowFromHistory(phrase, hist, resolveMonth));
       } else {
         // возможно, помесячные значения лежат прямо в полях item ("2024-01": n)
         const flat = {};
         for (const [k, v] of Object.entries(item)) {
           if (_MONTH_KEY_RE.test(String(k).trim())) flat[k] = v;
         }
-        if (Object.keys(flat).length > 0) rows.push(_rowFromHistory(phrase, flat));
+        if (Object.keys(flat).length > 0) rows.push(_rowFromHistory(phrase, flat, resolveMonth));
       }
     }
   } else if (payload && typeof payload === 'object') {
@@ -339,7 +390,9 @@ function _normalizeResult({ json, text }) {
       const phrase = String(key).trim();
       if (!phrase || val == null) continue;
       if (typeof val === 'object') {
-        const r = _rowFromHistory(phrase, val.history ?? val.months ?? val.dynamics ?? val);
+        const hist = val.history ?? val.months ?? val.dynamics
+          ?? val.seasonality ?? val.seasonal ?? val;
+        const r = _rowFromHistory(phrase, hist, resolveMonth);
         if (Object.keys(r.byPeriod).length > 0) rows.push(r);
       }
     }
@@ -381,9 +434,11 @@ async function collectSeasonality({ phrases, regionLabel }) {
   if (list.length === 0) return { verdict: 'skipped', reason: 'no_phrases' };
 
   const regionLr = resolveRegionLr(regionLabel);
+  const resolveMonth = _monthYearResolver(cfg.group);
   const t0 = Date.now();
   const allRows = [];
   const tasksMeta = [];
+  let lastRawSample = null;
 
   try {
     // Батчим и выполняем ПОСЛЕДОВАТЕЛЬНО: лимит Арсенкина — 5 одновременных
@@ -393,7 +448,8 @@ async function collectSeasonality({ phrases, regionLabel }) {
       const batch = list.slice(i, i + cfg.batchSize);
       const res = await _runOneTask({ phrases: batch, regionLr, cfg });
       tasksMeta.push({ task_id: res.taskId, phrases_count: batch.length });
-      const rows = _normalizeResult(res);
+      lastRawSample = _rawSample(res);
+      const rows = _normalizeResult({ ...res, resolveMonth });
       allRows.push(...rows);
     }
   } catch (err) {
@@ -410,9 +466,15 @@ async function collectSeasonality({ phrases, regionLabel }) {
   }
 
   if (allRows.length === 0) {
+    // Добавляем усечённый образец сырого ответа /get — без него причину
+    // «пустого результата» (неизвестный формат ответа vs пустая выдача vs
+    // лимиты) невозможно диагностировать по логам.
+    const hint = lastRawSample
+      ? ` Ответ /get (образец): ${lastRawSample}`
+      : '';
     return {
       verdict: 'error',
-      reason: 'Арсенкин вернул пустой результат (проверьте ARSENKIN_TOOL_NAME/ARSENKIN_WORDSTAT_TYPE и лимиты аккаунта)',
+      reason: 'Арсенкин вернул пустой результат (проверьте ARSENKIN_TOOL_NAME/ARSENKIN_WORDSTAT_TYPE и лимиты аккаунта).' + hint,
       region_lr: regionLr,
       requested: list.length,
       matched: 0,
@@ -432,6 +494,22 @@ async function collectSeasonality({ phrases, regionLabel }) {
   };
 }
 
+/**
+ * Усечённый безопасный образец сырого ответа /get для диагностики
+ * «пустого результата» (не более ~500 символов).
+ */
+function _rawSample(res) {
+  try {
+    if (res && res.json != null) {
+      return JSON.stringify(res.json).slice(0, 500);
+    }
+    if (res && typeof res.text === 'string' && res.text.trim()) {
+      return res.text.trim().slice(0, 500);
+    }
+  } catch (_) { /* циклический JSON и пр. — игнорируем */ }
+  return null;
+}
+
 module.exports = {
   collectSeasonality,
   resolveRegionLr,
@@ -440,4 +518,5 @@ module.exports = {
   // internals для тестов
   _normalizeResult,
   _rowFromHistory,
+  _monthYearResolver,
 };
