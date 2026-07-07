@@ -422,7 +422,13 @@ _CAPTCHA_HINTS = (
     "are you a human",
     "checking your browser",
     "cf-chl-bypass",
+    "__cf_chl_",
+    "cdn-cgi/challenge-platform",
+    "just a moment",
     "ddos-guard",
+    "qrator.net",
+    "_incapsula_resource",
+    "sucuri_cloudproxy",
     "проверка вашего браузера",
     "доступ ограничен",
     "подтвердите, что вы не робот",
@@ -443,6 +449,11 @@ def _looks_like_block(status: int, html: str) -> bool:
 class FetchHtmlRequest(BaseModel):
     url: str = Field(..., min_length=4, max_length=4096)
     use_js_render: bool = False
+    # Авто-эскалация Mode A → Mode B: если curl_cffi не пробился (WAF /
+    # captcha / пустой ответ), пробуем Playwright+stealth в этом же запросе —
+    # без второго round-trip с backend-стороны. По умолчанию выключено, чтобы
+    # не менять контракт для существующих клиентов.
+    auto_escalate: bool = False
     # Один прокси `scheme://[user:pass@]host:port` — применяется ко всем
     # попыткам, если не задан proxy_pool.
     proxy: Optional[str] = Field(None, max_length=2048)
@@ -614,6 +625,18 @@ async def fetch_html(
             return last
         # Лёгкая пауза между ретраями, чтобы не словить rate-limit.
         await asyncio.sleep(0.5 * (attempt + 1))
+
+    # Auto-эскалация Mode A → Mode B: curl_cffi исчерпал попытки — значит,
+    # либо сайт за WAF с JS-челленджем, либо SPA. Пробуем Playwright+stealth
+    # (браузер уже поднят lifespan'ом, дополнительных процессов не создаём).
+    if payload.auto_escalate and not payload.use_js_render:
+        for attempt in range(FETCH_HTML_MAX_ATTEMPTS):
+            proxy = _select_proxy(attempt, payload.proxy, payload.proxy_pool)
+            escalated = await _fetch_playwright_html(url, timeout_ms, proxy)
+            if escalated.success:
+                return escalated
+            last = escalated
+            await asyncio.sleep(0.5 * (attempt + 1))
 
     # Окончательный фейл — отдаём structured JSON, без 5xx (graceful degradation).
     if last is None:  # pragma: no cover - defensive

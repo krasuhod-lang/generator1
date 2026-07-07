@@ -22,7 +22,17 @@
  *       deviation  > +10%  → growth
  *
  * Полностью graceful: нет API-ключа / ошибка сети / домен не найден —
- * dynamics у строки останется null, парсинг контактов не страдает.
+ * dynamics.yandex/.google у строки останутся null, парсинг контактов не
+ * страдает. Но причина отсутствия данных больше НЕ проглатывается: она
+ * сохраняется в dynamics.errors.{yandex,google} ('not_found' | 'no_history' |
+ * 'rate_limited' | 'network' | ...) и агрегируется в статистику задачи,
+ * чтобы было видно, почему у конкретного сайта нет динамики.
+ *
+ * Fallback покрытия: если регион задачи ≠ Москва и в региональной базе
+ * keys.so домена нет (или истории < 2 точек) — повторяем запрос по
+ * общероссийской базе 'msk'. Малые B2B-сайты часто отсутствуют в
+ * региональных базах, но есть в msk — это главная причина «динамика
+ * отобразилась не у всех».
  */
 
 const { getDomainDashboard, getGoogleBase } = require('../reports/keysSoClient');
@@ -112,46 +122,106 @@ function _evaluateHistory(history, base) {
   };
 }
 
+/** Машиночитаемая причина отсутствия динамики из ошибки keys.so-клиента. */
+function _reasonFromError(err) {
+  const code = err && err.code;
+  const status = err && err.status;
+  if (code === 'not_found') return 'not_found';          // домена нет в базе keys.so
+  if (code === 'unauthorized') return 'unauthorized';    // невалидный API-ключ
+  if (code === 'plan_restriction') return 'plan_restriction'; // тариф не позволяет
+  if (code === 'no_api_key') return 'no_api_key';
+  if (status === 429) return 'rate_limited';
+  return 'network';
+}
+
+/**
+ * Динамика одного домена в одной поисковой системе (одна база keys.so),
+ * с fallback на общероссийскую базу 'msk': малые региональные B2B-сайты
+ * часто отсутствуют в региональной базе, но присутствуют в msk.
+ *
+ * @returns {Promise<{result:object|null, reason:string|null}>}
+ */
+async function _evaluateOneEngine(domain, base, { fallbackBase = null } = {}) {
+  let reason = null;
+  try {
+    const { history } = await getDomainDashboard(domain, { base });
+    const result = _evaluateHistory(history, base);
+    if (result) return { result, reason: null };
+    reason = 'no_history'; // домен есть, но истории < 2 точек / нет метрик
+  } catch (err) {
+    reason = _reasonFromError(err);
+  }
+  // Fallback: причины, при которых имеет смысл попробовать другую базу.
+  const retriable = reason === 'not_found' || reason === 'no_history';
+  if (fallbackBase && fallbackBase !== base && retriable) {
+    await _sleep(REQUEST_INTERVAL_MS);
+    try {
+      const { history } = await getDomainDashboard(domain, { base: fallbackBase });
+      const result = _evaluateHistory(history, fallbackBase);
+      if (result) return { result, reason: null };
+    } catch (_) { /* остаёмся с первичной причиной */ }
+  }
+  return { result: null, reason };
+}
+
 /**
  * evaluateDomainDynamics — динамика одного домена, Яндекс и Google отдельно.
- * @returns {Promise<{yandex:object|null, google:object|null, evaluated_at:string}|null>}
+ * Всегда возвращает объект (не null), чтобы причины отсутствия данных
+ * были видны на фронте и в статистике.
+ * @returns {Promise<{yandex:object|null, google:object|null, errors:object, evaluated_at:string}|null>}
  */
 async function evaluateDomainDynamics(domain, { region } = {}) {
   if (!isKeysSoConfigured() || !domain) return null;
   const yandexBase = baseFromRegion(region);
   const googleBase = getGoogleBase(yandexBase);
 
-  let yandex = null;
-  let google = null;
+  const ya = await _evaluateOneEngine(domain, yandexBase, {
+    fallbackBase: yandexBase !== 'msk' ? 'msk' : null,
+  });
 
-  try {
-    const { history } = await getDomainDashboard(domain, { base: yandexBase });
-    yandex = _evaluateHistory(history, yandexBase);
-  } catch (_) { /* graceful: нет данных по домену / сеть */ }
-
+  let go = { result: null, reason: googleBase ? null : 'no_google_base' };
   if (googleBase) {
     await _sleep(REQUEST_INTERVAL_MS);
-    try {
-      const { history } = await getDomainDashboard(domain, { base: googleBase });
-      google = _evaluateHistory(history, googleBase);
-    } catch (_) { /* graceful */ }
+    go = await _evaluateOneEngine(domain, googleBase, {
+      fallbackBase: googleBase !== 'gru' ? 'gru' : null,
+    });
   }
 
-  if (!yandex && !google) return null;
-  return { yandex, google, evaluated_at: new Date().toISOString() };
+  const errors = {};
+  if (!ya.result && ya.reason) errors.yandex = ya.reason;
+  if (!go.result && go.reason) errors.google = go.reason;
+
+  return {
+    yandex: ya.result,
+    google: go.result,
+    ...(Object.keys(errors).length ? { errors } : {}),
+    evaluated_at: new Date().toISOString(),
+  };
 }
 
 /**
  * enrichResultsWithDynamics — обогащает массив result-строк B2B-задачи
  * полем `dynamics`. Последовательно (лимит keys.so 10 req/10s), c
- * onProgress-колбэком для инкрементального сохранения.
+ * onProgress-колбэком для инкрементального сохранения. Собирает
+ * статистику покрытия и причин отсутствия данных.
  *
  * @param {Array}  rows       — результаты задачи ({url, status, ...})
  * @param {object} opts       — { region, onProgress(rows, doneCount) }
- * @returns {Promise<Array>}  — те же rows (мутируются in-place)
+ * @returns {Promise<{rows:Array, stats:object}>} rows мутируются in-place
  */
 async function enrichResultsWithDynamics(rows, { region, onProgress } = {}) {
-  if (!Array.isArray(rows) || !rows.length || !isKeysSoConfigured()) return rows;
+  const stats = {
+    total: Array.isArray(rows) ? rows.length : 0,
+    evaluated: 0,       // есть динамика хотя бы по одной ПС
+    with_yandex: 0,
+    with_google: 0,
+    no_data: 0,         // ни Яндекс, ни Google
+    skipped: 0,         // error-строки / невалидный URL
+    reasons: {},        // 'not_found' → count, 'no_history' → count, ...
+  };
+  if (!Array.isArray(rows) || !rows.length || !isKeysSoConfigured()) {
+    return { rows: rows || [], stats };
+  }
   let done = 0;
   for (const row of rows) {
     let domain = null;
@@ -162,16 +232,31 @@ async function enrichResultsWithDynamics(rows, { region, onProgress } = {}) {
       } catch (_) {
         row.dynamics = null;
       }
-      await _sleep(REQUEST_INTERVAL_MS);
+      const d = row.dynamics;
+      if (d && (d.yandex || d.google)) {
+        stats.evaluated += 1;
+        if (d.yandex) stats.with_yandex += 1;
+        if (d.google) stats.with_google += 1;
+      } else {
+        stats.no_data += 1;
+      }
+      const errs = (d && d.errors) || {};
+      for (const reason of Object.values(errs)) {
+        stats.reasons[reason] = (stats.reasons[reason] || 0) + 1;
+      }
+      // Rate-limit backoff: keys.so ответил 429 — притормаживаем сильнее.
+      const hitRateLimit = Object.values(errs).includes('rate_limited');
+      await _sleep(hitRateLimit ? REQUEST_INTERVAL_MS * 5 : REQUEST_INTERVAL_MS);
     } else {
       row.dynamics = null;
+      stats.skipped += 1;
     }
     done += 1;
     if (typeof onProgress === 'function') {
       try { await onProgress(rows, done); } catch (_) { /* не валим цикл */ }
     }
   }
-  return rows;
+  return { rows, stats };
 }
 
 module.exports = {
@@ -183,4 +268,6 @@ module.exports = {
   STAGNATION_THRESHOLD_PCT,
   // exposed for tests
   _evaluateHistory,
+  _reasonFromError,
+  _evaluateOneEngine,
 };

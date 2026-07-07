@@ -72,6 +72,7 @@ function _initResultRow(siteRoot) {
     emails: [],
     services: [],
     contact_url: null,
+    fetch_engine: null, // 'axios' | 'curl_cffi' | 'playwright' (антибот-эскалация)
     status: 'pending',
     error: null,
   };
@@ -123,6 +124,44 @@ function _hasAnyContact(row) {
     || row.inn || row.ogrn || row.company_name;
 }
 
+/**
+ * Сводная статистика парсинга по строкам результата — сохраняется в
+ * diagnostics.stats, чтобы было видно покрытие: сколько сайтов
+ * обработано, у скольких собраны контакты/реквизиты/динамика и какими
+ * движками пришлось доставать HTML.
+ */
+function _buildParsingStats(rows) {
+  const stats = {
+    sites: { total: 0, ok: 0, empty: 0, error: 0 },
+    contacts: {
+      with_company_name: 0,
+      with_inn: 0,
+      with_phones: 0,
+      with_emails: 0,
+      with_services: 0,
+      complete: 0, // ИНН + (телефон или email) — «полная» карточка
+    },
+    fetch_engines: {},
+  };
+  for (const row of rows || []) {
+    if (!row) continue;
+    stats.sites.total += 1;
+    const st = row.status === 'ok' ? 'ok' : row.status === 'empty' ? 'empty' : 'error';
+    stats.sites[st] += 1;
+    if (row.company_name) stats.contacts.with_company_name += 1;
+    if (row.inn) stats.contacts.with_inn += 1;
+    if (Array.isArray(row.phones) && row.phones.length) stats.contacts.with_phones += 1;
+    if (Array.isArray(row.emails) && row.emails.length) stats.contacts.with_emails += 1;
+    if (Array.isArray(row.services) && row.services.length) stats.contacts.with_services += 1;
+    if (row.inn && ((row.phones && row.phones.length) || (row.emails && row.emails.length))) {
+      stats.contacts.complete += 1;
+    }
+    const engine = row.fetch_engine || (st === 'error' ? 'failed' : 'axios');
+    stats.fetch_engines[engine] = (stats.fetch_engines[engine] || 0) + 1;
+  }
+  return stats;
+}
+
 // ── SERP ─────────────────────────────────────────────────────────────
 
 /**
@@ -167,6 +206,7 @@ async function _processSite(siteRoot) {
   // Step 2a: главная.
   try {
     homepage = await fetchPage(siteRoot, { timeout: SITE_TIMEOUT_MS });
+    row.fetch_engine = homepage.engine || 'axios';
   } catch (err) {
     row.status = 'error';
     row.error = `homepage: ${err.message}`.slice(0, 200);
@@ -412,14 +452,16 @@ async function processSerpB2bTask(taskId) {
   });
 
   diagnostics.steps.push({ step: 'sites', processed });
+  diagnostics.stats = _buildParsingStats(allRows);
 
   // Step 5: динамика видимости топ-50 через keys.so (Яндекс и Google отдельно).
   // Первая vs последняя точка истории: ±10% — стагнация, минус — падение,
-  // плюс — рост. Graceful: без API-ключа / при ошибках шаг просто пропускается.
+  // плюс — рост. Graceful: без API-ключа / при ошибках шаг просто пропускается,
+  // но причины отсутствия данных агрегируются в diagnostics.stats.dynamics.
   if (isKeysSoConfigured()) {
     try {
       const region = task.region || (task.inputs && task.inputs.region) || '';
-      await enrichResultsWithDynamics(allRows, {
+      const { stats: dynStats } = await enrichResultsWithDynamics(allRows, {
         region,
         onProgress: async (rows, doneCount) => {
           // Инкрементально переписываем results, чтобы фронт видел динамику
@@ -432,8 +474,14 @@ async function processSerpB2bTask(taskId) {
           }
         },
       });
-      const withDynamics = allRows.filter((r) => r && r.dynamics).length;
-      diagnostics.steps.push({ step: 'keys_so_dynamics', evaluated: withDynamics, total: allRows.length });
+      diagnostics.stats.dynamics = dynStats;
+      diagnostics.steps.push({
+        step: 'keys_so_dynamics',
+        evaluated: dynStats.evaluated,
+        no_data: dynStats.no_data,
+        total: allRows.length,
+        reasons: dynStats.reasons,
+      });
     } catch (err) {
       diagnostics.steps.push({ step: 'keys_so_dynamics', error: err.message });
     }
@@ -480,4 +528,5 @@ module.exports = {
   // exposed for tests
   _gatherSerpUrls,
   _processSite,
+  _buildParsingStats,
 };
