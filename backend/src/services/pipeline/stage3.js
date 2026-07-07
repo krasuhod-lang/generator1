@@ -110,6 +110,59 @@ function buildPlaceholderBlock(block) {
  * Веса типов блоков для пропорционального распределения символов.
  * Источник: v3.1 index.html (неизменно).
  */
+/**
+ * buildFaqFallbackHtml — тематический fallback для FAQ-блоков.
+ * Раньше fallback брал сырые lsi_must-термины и генерировал «Что такое вопрос?» /
+ * «Что такое ответ?», если в LSI попадали служебные слова. Теперь:
+ *   1) в первую очередь берём реальные Q&A из faq_bank (Stage 0, собраны по теме);
+ *   2) затем — осмысленные LSI-термины (служебные слова отфильтрованы);
+ *   3) в крайнем случае — общие вопросы по основному запросу страницы.
+ */
+const FAQ_PLACEHOLDER_TERMS = new Set([
+  'вопрос', 'вопросы', 'ответ', 'ответы', 'вопрос-ответ', 'вопросы и ответы',
+  'faq', 'частые вопросы', 'question', 'questions', 'answer', 'answers', 'q&a',
+]);
+
+function buildFaqFallbackHtml(block, stage0Result, mainQuery) {
+  const h2 = block?.h2 || 'Вопросы и ответы';
+  const items = [];
+
+  // 1) Реальные тематические Q&A из Stage 0
+  for (const qa of (stage0Result?.faq_bank || [])) {
+    const q = String(qa?.question || '').trim();
+    const a = String(qa?.answer || '').trim();
+    if (q.length >= 10 && a.length >= 20) items.push({ q, a });
+    if (items.length >= 5) break;
+  }
+
+  // 2) Осмысленные LSI-термины блока (без служебных слов-заглушек)
+  if (!items.length) {
+    const terms = (block?.lsi_must || [])
+      .map(t => String(t || '').trim())
+      .filter(t => t.length >= 3 && !FAQ_PLACEHOLDER_TERMS.has(t.toLowerCase()));
+    for (const term of terms.slice(0, 5)) {
+      items.push({ q: `Что такое ${term}?`, a: 'Подробная информация доступна у наших специалистов.' });
+    }
+  }
+
+  // 3) Общие вопросы по основному запросу страницы
+  if (!items.length) {
+    const topic = String(mainQuery || '').trim() || 'услуга';
+    items.push(
+      { q: `Сколько стоит ${topic}?`, a: 'Стоимость зависит от объёма работ — уточните актуальную цену у наших специалистов.' },
+      { q: `Как заказать ${topic}?`, a: 'Оставьте заявку на сайте или позвоните нам — менеджер свяжется с вами и ответит на все вопросы.' },
+      { q: 'Какие сроки выполнения?', a: 'Сроки рассчитываются индивидуально после уточнения деталей заказа.' },
+    );
+  }
+
+  let faqHtml = `<h2>${h2}</h2>\n<div class="faq-section">\n`;
+  for (const it of items) {
+    faqHtml += `<div class="faq-item"><h3>${it.q}</h3><p>${it.a}</p></div>\n`;
+  }
+  faqHtml += '</div>';
+  return faqHtml;
+}
+
 const BLOCK_TYPE_WEIGHTS = {
   offer:     1.4,
   fit:       1.0,
@@ -272,12 +325,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
     // Fallback для FAQ-блоков
     if ((!stage3Result || !extractHtmlContent(stage3Result)) && block.type === 'faq') {
       log(`FAQ fallback для блока ${i + 1}`, 'warn');
-      const faqItems = (block.lsi_must || []).slice(0, 5);
-      let faqHtml = `<h2>${block.h2}</h2>\n<div class="faq-section">\n`;
-      for (const term of faqItems) {
-        faqHtml += `<div class="faq-item"><h3>Что такое ${term}?</h3><p>Подробная информация доступна у наших специалистов.</p></div>\n`;
-      }
-      faqHtml += '</div>';
+      const faqHtml = buildFaqFallbackHtml(block, stage0Result, targetService);
       stage3Result = { html_content: faqHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
     }
 
@@ -492,12 +540,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
   // Fallback для FAQ-блоков
   if ((!stage3Result || !extractHtmlContent(stage3Result)) && block.type === 'faq') {
     log(`FAQ fallback для блока ${blockIndex + 1}`, 'warn');
-    const faqItems = (block.lsi_must || []).slice(0, 5);
-    let faqHtml = `<h2>${block.h2}</h2>\n<div class="faq-section">\n`;
-    for (const term of faqItems) {
-      faqHtml += `<div class="faq-item"><h3>Что такое ${term}?</h3><p>Подробная информация доступна у наших специалистов.</p></div>\n`;
-    }
-    faqHtml += '</div>';
+    const faqHtml = buildFaqFallbackHtml(block, stage0Result, targetService);
     stage3Result = { html_content: faqHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
   }
 

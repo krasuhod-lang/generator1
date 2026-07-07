@@ -118,6 +118,7 @@ function fromReportRow(row) {
         .slice(0, MAX_ENTITIES),
     competitor_signals: csig,
     competitor_signals_digest: _digestSignals(csig),
+    serp_intent: topAgg.serp_intent || null,
     schema_recommendation_markdown:
       (topAgg.schema_profile
         && topAgg.schema_profile.summary

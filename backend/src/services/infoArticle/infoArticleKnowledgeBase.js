@@ -376,17 +376,23 @@ function buildInfoArticleKnowledgeBase({
  */
 function renderRelevanceContextSection(ctx) {
   const out = [];
+  const tfW = (v) => {
+    const parts = [];
+    if (v.tf_idf_score != null) parts.push(`tf-idf ${v.tf_idf_score}`);
+    if (v.bm25_score != null) parts.push(`bm25 ${v.bm25_score}`);
+    return parts.length ? `, ${parts.join(', ')}` : '';
+  };
   // Важные LSI (top-30, > 51% документов топа)
   const imp = Array.isArray(ctx.important_lsi) ? ctx.important_lsi : [];
   if (imp.length) {
-    out.push('### Обязательные LSI-леммы (≥51% документов топа)');
-    out.push(imp.slice(0, 30).map(v => `- **${v.lemma}** (${v.df_share_pct}% топа, медиана ${v.median_count})`).join('\n'));
+    out.push('### Обязательные LSI-леммы (≥51% документов топа, с TF-IDF/BM25-весами)');
+    out.push(imp.slice(0, 30).map(v => `- **${v.lemma}** (${v.df_share_pct}% топа, медиана ${v.median_count}${tfW(v)})`).join('\n'));
   }
   // Дополнительные LSI (top-20, 20–50%)
   const add = Array.isArray(ctx.additional_lsi) ? ctx.additional_lsi : [];
   if (add.length) {
     out.push('### Дополнительные LSI-леммы (20–50% документов топа)');
-    out.push(add.slice(0, 20).map(v => `- ${v.lemma} (${v.df_share_pct}%)`).join('\n'));
+    out.push(add.slice(0, 20).map(v => `- ${v.lemma} (${v.df_share_pct}%${tfW(v)})`).join('\n'));
   }
   // Высокочастотные n-граммы
   const ngrams = Array.isArray(ctx.top_ngrams) ? ctx.top_ngrams : [];
@@ -411,6 +417,22 @@ function renderRelevanceContextSection(ctx) {
     if (voc.target_audience) out.push(`**ЦА:** ${voc.target_audience}`);
     if (voc.niche_features) out.push(`**Особенности ниши:** ${voc.niche_features}`);
     if (voc.brand_facts) out.push(`**Факты о бренде / нише:** ${voc.brand_facts}`);
+  }
+  // Интент SERP — доминирующий интент и коммерческие блоки из анализа топа
+  const si = ctx.serp_intent && typeof ctx.serp_intent === 'object' ? ctx.serp_intent : null;
+  if (si && (si.dominant_intent || si.commercial_score != null)) {
+    out.push('### Интент SERP (анализ поисковой выдачи)');
+    const lines = [];
+    if (si.dominant_intent) lines.push(`- **Доминирующий интент:** ${si.dominant_intent}`);
+    if (si.commercial_score != null) lines.push(`- Коммерческий счёт: ${si.commercial_score}`);
+    const dist = si.distribution_pct && typeof si.distribution_pct === 'object' ? si.distribution_pct : null;
+    if (dist && Object.keys(dist).length) {
+      lines.push(`- Распределение интентов: ${Object.entries(dist).map(([k, v]) => `${k} ${v}%`).join(', ')}`);
+    }
+    const blocks = Array.isArray(si.commercial_blocks_required) ? si.commercial_blocks_required : [];
+    if (blocks.length) lines.push(`- Обязательные коммерческие блоки: ${blocks.slice(0, 10).join('; ')}`);
+    lines.push('- Пиши статью строго под доминирующий интент: раскрой то, что реально ищет пользователь.');
+    out.push(lines.join('\n'));
   }
   // Сущности (entity_coverage) — обязательные именованные сущности из NER
   const ent = Array.isArray(ctx.mandatory_entities) ? ctx.mandatory_entities : [];

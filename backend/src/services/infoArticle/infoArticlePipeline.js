@@ -1240,6 +1240,7 @@ async function processInfoArticleTask(taskId) {
             top_ngrams:     relevanceArtifact.top_ngrams,
             shared_headings: relevanceArtifact.shared_headings,
             mandatory_entities: relevanceArtifact.mandatory_entities,
+            serp_intent: relevanceArtifact.serp_intent,
             schema_recommendation_markdown: relevanceArtifact.schema_recommendation_markdown,
             voice_of_customer: relevanceArtifact.voice_of_customer,
             our_url: relevanceArtifact.our_url,
