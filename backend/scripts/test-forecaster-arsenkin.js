@@ -133,13 +133,13 @@ group('arsenkinClient result normalization', () => {
   });
   test('type=3 сезонность: ключ "seasonal" + month-only через resolveMonth', () => {
     const { _monthYearResolver } = require('../src/services/forecaster/arsenkinClient');
-    // Окно на 7 июля 2026 → enddate 2026-06-30, endMonth=6.
+    // Окно на 7 июля 2026 (день < лага публикации) → enddate 2026-05-31, endMonth=5.
     const resolveMonth = _monthYearResolver('month', new Date(2026, 6, 7));
     const rows = _normalizeResult({
       json: { status: 'ok', data: [
         { query: 'летние шины', seasonal: [
-          { month: '05', count: 500 },  // ≤6 → 2026-05
-          { month: '07', count: 200 },  // >6  → 2025-07
+          { month: '05', count: 500 },  // idx 0 ≠ июнь → legacy: ≤5 → 2026-05
+          { month: '07', count: 200 },  // idx 1 = июль от startdate → 2024-07
         ] },
       ] },
       text: '',
@@ -148,7 +148,7 @@ group('arsenkinClient result normalization', () => {
     assert.strictEqual(rows.length, 1);
     assert.strictEqual(rows[0].phrase, 'летние шины');
     assert.strictEqual(rows[0].byPeriod['2026-05'], 500);
-    assert.strictEqual(rows[0].byPeriod['2025-07'], 200);
+    assert.strictEqual(rows[0].byPeriod['2024-07'], 200);
     assert.strictEqual(rows[0].total, 700);
   });
   test('24-месячный ordered seasonal: month-only маппится по индексу от startdate', () => {
@@ -240,7 +240,7 @@ group('arsenkinClient result normalization', () => {
   });
   test('envelope TASK_RESULT: month-only seasonal через resolveMonth', () => {
     const { _monthYearResolver } = require('../src/services/forecaster/arsenkinClient');
-    const resolveMonth = _monthYearResolver('month', new Date(2026, 6, 7)); // enddate 2026-06
+    const resolveMonth = _monthYearResolver('month', new Date(2026, 6, 7)); // enddate 2026-05 (лаг публикации)
     const rows = _normalizeResult({
       json: {
         result: {
@@ -254,7 +254,7 @@ group('arsenkinClient result normalization', () => {
     });
     assert.strictEqual(rows.length, 1);
     assert.strictEqual(rows[0].byPeriod['2026-05'], 5);
-    assert.strictEqual(rows[0].byPeriod['2025-07'], 3);
+    assert.strictEqual(rows[0].byPeriod['2024-07'], 3); // idx 1 = июль от startdate 2024-06
   });
   test('envelope без сезонных данных (только queries) → []', () => {
     // Реальный кейс из бага: type=2 (парсинг фраз) вместо type=3 (сезонность).
@@ -279,15 +279,20 @@ group('arsenkinClient result normalization', () => {
 
 // ── arsenkinClient.seasonalityDateRange ────────────────────────────
 group('arsenkinClient.seasonalityDateRange', () => {
-  test('month: последние 24 полных календарных месяца', () => {
-    const r = seasonalityDateRange('month', new Date(2026, 6, 7)); // 7 июля 2026
+  test('month: начало месяца (день < лага) — окно заканчивается на месяц раньше', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 6, 7)); // 7 июля 2026 (< 20-го)
+    assert.strictEqual(r.startdate, '2024-06-01'); // «сегодня минус 2 года»
+    assert.strictEqual(r.enddate, '2026-05-31');   // июнь ещё не опубликован
+  });
+  test('month: после лага публикации — окно до конца прошлого месяца', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 6, 25)); // 25 июля 2026 (≥ 20-го)
     assert.strictEqual(r.startdate, '2024-07-01');
     assert.strictEqual(r.enddate, '2026-06-30');
   });
   test('month: границы года', () => {
-    const r = seasonalityDateRange('month', new Date(2026, 0, 15)); // 15 января 2026
-    assert.strictEqual(r.startdate, '2024-01-01');
-    assert.strictEqual(r.enddate, '2025-12-31');
+    const r = seasonalityDateRange('month', new Date(2026, 0, 15)); // 15 января 2026 (< 20-го)
+    assert.strictEqual(r.startdate, '2023-12-01');
+    assert.strictEqual(r.enddate, '2025-11-30');
   });
   test('week: конец — воскресенье, старт — понедельник', () => {
     const r = seasonalityDateRange('week', new Date(2026, 6, 7)); // вторник 7 июля 2026
@@ -299,25 +304,25 @@ group('arsenkinClient.seasonalityDateRange', () => {
     assert.strictEqual(r.enddate, '2026-07-06');
     assert.strictEqual(r.startdate, '2026-05-08');
   });
-  test('monthOffset=1: окно сжато на месяц с обеих сторон (лаг + ретеншен Вордстат)', () => {
+  test('monthOffset=1: окно сжато на месяц с обеих сторон поверх лага', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7), 1); // 7 июля 2026, сжатие 1 мес
-    assert.strictEqual(r.startdate, '2024-08-01'); // startdate ВПЕРЁД (не за ретеншен)
-    assert.strictEqual(r.enddate, '2026-05-31');   // enddate назад (лаг публикации)
+    assert.strictEqual(r.startdate, '2024-07-01'); // startdate ВПЕРЁД (не за ретеншен)
+    assert.strictEqual(r.enddate, '2026-04-30');   // enddate назад (лаг публикации)
   });
   test('monthOffset=2: окно сжато на два месяца с обеих сторон', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7), 2);
-    assert.strictEqual(r.startdate, '2024-09-01');
-    assert.strictEqual(r.enddate, '2026-04-30');
+    assert.strictEqual(r.startdate, '2024-08-01');
+    assert.strictEqual(r.enddate, '2026-03-31');
   });
   test('monthOffset: границы года (сжатие через январь)', () => {
-    const r = seasonalityDateRange('month', new Date(2026, 1, 5), 2); // 5 февраля 2026
-    assert.strictEqual(r.startdate, '2024-04-01');
-    assert.strictEqual(r.enddate, '2025-11-30');
+    const r = seasonalityDateRange('month', new Date(2026, 1, 5), 2); // 5 февраля 2026 (< 20-го)
+    assert.strictEqual(r.startdate, '2024-03-01');
+    assert.strictEqual(r.enddate, '2025-10-31');
   });
   test('monthOffset: короткая история не даёт пустого окна (минимум 1 месяц)', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7), 3, 4); // hm=4, off=3
-    assert.strictEqual(r.startdate, '2026-03-01');
-    assert.strictEqual(r.enddate, '2026-03-31');
+    assert.strictEqual(r.startdate, '2026-02-01');
+    assert.strictEqual(r.enddate, '2026-02-28');
   });
   test('monthOffset по умолчанию 0 = без сдвига', () => {
     const a = seasonalityDateRange('month', new Date(2026, 6, 7));
