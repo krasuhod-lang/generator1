@@ -34,7 +34,8 @@
  *     (день < ARSENKIN_WORDSTAT_LAG_DAYS, по умолчанию 20) окно сразу
  *     заканчивается на месяц раньше, а startdate — historyMonths (24 мес)
  *     назад от enddate. Если период всё равно отвергнут, клиент авто-повторяет
- *     задачу, сжимая окно на месяц с обеих сторон (до 3 раз) — см. _runOneTask.
+ *     задачу: сначала с периодом, подсказанным сервером в тексте ошибки,
+ *     затем сжимая окно на месяц с обеих сторон (до 6 раз) — см. _runOneTask.
  *   • Проверка статуса:        POST https://arsenkin.ru/api/tools/check
  *       body: { task_id }   → { data: { status_id } }  (1 = в работе, 2 = готово)
  *   • Получение результата:    POST https://arsenkin.ru/api/tools/get
@@ -91,7 +92,13 @@ function _cfg() {
       const parsed = JSON.parse(process.env.ARSENKIN_WORDSTAT_EXTRA);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) extra = parsed;
     }
-  } catch (_) { /* некорректный JSON в env — игнорируем */ }
+  } catch (_) {
+    // некорректный JSON в env — игнорируем, но предупреждаем один раз:
+    // частая причина — inline-комментарий после значения в .env
+    _logSkipOnce('bad_extra_json',
+      '[Forecaster] ARSENKIN_WORDSTAT_EXTRA содержит невалидный JSON и проигнорирован '
+      + '(проверьте, что после значения в .env нет inline-комментария)');
+  }
   return {
     token:        String(process.env.ARSENKIN_API_TOKEN || '').trim(),
     toolName:     String(process.env.ARSENKIN_TOOL_NAME || 'wordstat').trim(),
@@ -244,6 +251,39 @@ function _isWrongDatesError(err) {
     || /период\s+не\s+подходит/i.test(msg);
 }
 
+// Пытается вытащить из текста ошибки WRONG_WORDSTAT_DATES ДОПУСТИМЫЙ период,
+// который сервер Арсенкина подсказывает в msg («…выберите период с 01.08.2024
+// по 30.04.2026» / «…с 2024-08-01 по 2026-04-30»). Возвращает
+// {startdate, enddate} в ISO либо null, если дат в сообщении нет.
+function _datesFromErrorMessage(err) {
+  const msg = String((err && err.message) || err || '');
+  const pad = (n) => String(n).padStart(2, '0');
+  const found = [];
+  // ISO: YYYY-MM-DD (также YYYY.MM.DD / YYYY/MM/DD)
+  const isoRe = /(20\d{2})[-./](1[0-2]|0?[1-9])[-./](3[01]|[12]\d|0?[1-9])/g;
+  let m;
+  while ((m = isoRe.exec(msg)) !== null) {
+    found.push({ y: +m[1], mo: +m[2], d: +m[3], idx: m.index });
+  }
+  // RU: DD.MM.YYYY (также DD-MM-YYYY / DD/MM/YYYY)
+  const ruRe = /(3[01]|[12]\d|0?[1-9])[-./](1[0-2]|0?[1-9])[-./](20\d{2})/g;
+  while ((m = ruRe.exec(msg)) !== null) {
+    // не дублируем совпадения, уже разобранные как ISO
+    if (found.some((f) => Math.abs(f.idx - m.index) < 10)) continue;
+    found.push({ y: +m[3], mo: +m[2], d: +m[1], idx: m.index });
+  }
+  if (found.length < 2) return null;
+  found.sort((a, b) => a.idx - b.idx);
+  const [a, b] = [found[0], found[found.length - 1]];
+  const t = (f) => new Date(f.y, f.mo - 1, f.d).getTime();
+  const [start, end] = t(a) <= t(b) ? [a, b] : [b, a];
+  if (t(start) === t(end)) return null;
+  return {
+    startdate: `${start.y}-${pad(start.mo)}-${pad(start.d)}`,
+    enddate:   `${end.y}-${pad(end.mo)}-${pad(end.d)}`,
+  };
+}
+
 // ── низкоуровневый POST с retry на 429 ─────────────────────────────
 async function _post(url, body, token, { retries = 4 } = {}) {
   let lastErr = null;
@@ -280,8 +320,15 @@ async function _post(url, body, token, { retries = 4 } = {}) {
       continue;
     }
     if (!resp.ok) {
-      const detail = (json && (json.error || json.message))
-        || (text ? String(text).slice(0, 300) : '')
+      // Арсенкин кладёт человекочитаемую причину в json.msg (+ код в json.code);
+      // берём их из распарсенного JSON — иначе в ошибку попадает усечённый сырой
+      // текст с \u-эскейпами, обрезанный на полуслове, и подсказку сервера
+      // (например, допустимый период дат) невозможно прочитать.
+      const detail = (json && [json.code, json.msg, json.error, json.message]
+        .filter((v) => v != null && String(v).trim() !== '')
+        .map((v) => String(v))
+        .join(' — ').slice(0, 600))
+        || (text ? String(text).slice(0, 600) : '')
         || '';
       throw new Error(`Arsenkin API: HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`);
     }
@@ -298,9 +345,27 @@ async function _post(url, body, token, { retries = 4 } = {}) {
 // Каждое сжатие двигает enddate на месяц назад и startdate на месяц вперёд:
 // это перекрывает и лаг публикации последнего месяца (~7–14 дней), и
 // ретеншен Вордстат (~24 месяца от последнего опубликованного месяца).
-const _DATE_RETRY_MAX = 3;
+// 6 сжатий покрывают до полугода расхождения между нашим расчётом окна и
+// фактически опубликованным Вордстатом диапазоном.
+const _DATE_RETRY_MAX = 6;
 
-async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
+// Приводит произвольный диапазон дат к ПОЛНЫМ календарным месяцам
+// (startdate → 1-е число месяца, enddate → последний день месяца) —
+// требование Арсенкина для group=month.
+function _snapRangeToFullMonths(range) {
+  const m = (s) => String(s || '').match(/^(20\d{2})-(\d{2})-(\d{2})$/);
+  const s = m(range && range.startdate);
+  const e = m(range && range.enddate);
+  if (!s || !e) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  const lastDay = new Date(+e[1], +e[2], 0).getDate();
+  const startdate = `${s[1]}-${s[2]}-01`;
+  const enddate = `${e[1]}-${e[2]}-${pad(lastDay)}`;
+  if (startdate >= enddate) return null;
+  return { startdate, enddate };
+}
+
+async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset, forcedRange = null }) {
   // Формат по официальной документации «Проверка сезонности запросов»:
   // type=3, region — ЧИСЛО lr Яндекса (не массив), device/group/даты обязательны.
   const range = seasonalityDateRange(cfg.group, new Date(), monthOffset, cfg.historyMonths);
@@ -328,6 +393,12 @@ async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
   if (monthOffset > 0) {
     data.startdate = startdate;
     data.enddate = enddate;
+  }
+  // forcedRange — допустимый период, который сам сервер Арсенкина подсказал
+  // в тексте ошибки WRONG_WORDSTAT_DATES; имеет высший приоритет.
+  if (forcedRange && forcedRange.startdate && forcedRange.enddate) {
+    data.startdate = forcedRange.startdate;
+    data.enddate = forcedRange.enddate;
   }
   // Фактически применённое окно (с учётом extra-override) — по нему дальше
   // восстанавливается год для month-only ответов сезонности.
@@ -363,16 +434,39 @@ async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
 // Обёртка с авто-повтором на WRONG_WORDSTAT_DATES: если Вордстат ещё не
 // опубликовал данные за последний завершившийся период (лаг ~7–14 дней), запрос
 // «до конца прошлого месяца» отвергается с HTTP 422. Та же ошибка приходит,
-// если startdate старше ретеншена Вордстат (~24 мес). Пробуем окно, сжатое
-// на месяц с обеих сторон, пока не получим ответ либо не исчерпаем повторы.
+// если startdate старше ретеншена Вордстат (~24 мес).
+// Стратегия повторов:
+//   1. Если сервер в тексте ошибки подсказал допустимый период (например
+//      «выберите период с 01.08.2024 по 30.04.2026») — повторяем ровно с ним
+//      (для group=month даты выравниваются на полные календарные месяцы).
+//   2. Иначе сжимаем окно на месяц с обеих сторон и повторяем, пока не получим
+//      ответ либо не исчерпаем _DATE_RETRY_MAX повторов.
 async function _runOneTask({ phrases, regionLr, cfg }) {
   let lastErr = null;
+  let suggestedTried = false;
   for (let monthOffset = 0; monthOffset <= _DATE_RETRY_MAX; monthOffset++) {
     try {
       return await _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset });
     } catch (err) {
       lastErr = err;
       if (!_isWrongDatesError(err) || monthOffset === _DATE_RETRY_MAX) throw err;
+      // Сервер мог подсказать допустимый период прямо в тексте ошибки —
+      // пробуем его ПЕРЕД слепым сжатием окна (только один раз).
+      if (!suggestedTried) {
+        suggestedTried = true;
+        const suggested = _datesFromErrorMessage(err);
+        const range = cfg.group === 'month'
+          ? _snapRangeToFullMonths(suggested)
+          : suggested;
+        if (range) {
+          try {
+            return await _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset, forcedRange: range });
+          } catch (err2) {
+            lastErr = err2;
+            if (!_isWrongDatesError(err2)) throw err2;
+          }
+        }
+      }
       // иначе — сжимаем окно на месяц с обеих сторон и повторяем
     }
   }
@@ -982,4 +1076,6 @@ module.exports = {
   _resolverFromEnddate,
   _resolverFromRange,
   _isWrongDatesError,
+  _datesFromErrorMessage,
+  _snapRangeToFullMonths,
 };
