@@ -30,6 +30,13 @@ const form = ref({
   intent: '',
   main_query: '',
   h_max: 12,
+  // Тонкая настройка единой модели прогноза (все опциональны — есть дефолты).
+  target_ctr_pct: '',            // целевой CTR ядра, % (по умолчанию 3%)
+  c_yield_pct: '',               // живые клики (Zero-click), % (по умолчанию 65%)
+  semantic_expansion_pct: '',    // расширение ядра, %/мес (по умолчанию 0)
+  growth_k: '',                  // скорость роста (по умолчанию 0.35)
+  breakthrough_month: '',        // месяц прорыва (по умолчанию 6)
+  uncertainty_pct: '',           // погрешность за 1 мес, % (по умолчанию 5%)
 });
 
 // Режим источника: 'keywords' — список ключей (сезонность через Арсенкин),
@@ -64,6 +71,16 @@ function onFileChange(ev) {
   if (!form.value.name) {
     form.value.name = f.name.replace(/\.(csv|xlsx?|tsv)$/i, '');
   }
+}
+
+// Проценты из формы → доля (2 → 0.02). Пусто/невалидно → null (бэкенд возьмёт дефолт).
+function pctToFrac(v) {
+  const n = parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? n / 100 : null;
+}
+function numOrNull(v) {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 async function readFileAsRows(file) {
@@ -117,6 +134,13 @@ async function handleSubmit() {
         intent: form.value.intent?.trim() || null,
         main_query: form.value.main_query?.trim() || '',
         h_max: Math.max(1, Math.min(24, parseInt(form.value.h_max, 10) || 12)),
+        // ── Тонкая настройка единой модели (проценты → доли) ──────────
+        target_ctr: pctToFrac(form.value.target_ctr_pct),
+        c_yield: pctToFrac(form.value.c_yield_pct),
+        semantic_expansion_rate: pctToFrac(form.value.semantic_expansion_pct),
+        growth_k: numOrNull(form.value.growth_k),
+        breakthrough_month: numOrNull(form.value.breakthrough_month),
+        uncertainty_delta: pctToFrac(form.value.uncertainty_pct),
       },
       source,
     };
@@ -319,6 +343,75 @@ function statusBadge(s) {
             <textarea v-model="form.notes" rows="2" maxlength="1000"
               class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"></textarea>
           </div>
+
+          <!-- ─── Тонкая настройка модели прогноза (необязательно) ─── -->
+          <details class="bg-gray-950/50 border border-gray-800 rounded-lg">
+            <summary class="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-gray-300">
+              ⚙️ Тонкая настройка модели прогноза (необязательно)
+            </summary>
+            <div class="px-3 pb-3 pt-1 space-y-3">
+              <p class="text-[11px] text-gray-500 leading-relaxed">
+                Все поля можно оставить пустыми — тогда берутся разумные значения по умолчанию.
+                Меняйте их, только если понимаете, что делаете: это «ручки» будущего роста трафика.
+              </p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">Целевой CTR ядра, %</label>
+                  <input v-model="form.target_ctr_pct" type="number" min="0.1" max="30" step="0.1"
+                    class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                    placeholder="по умолчанию 3" />
+                  <p class="text-[11px] text-gray-500 mt-1">
+                    Какую долю всех кликов по вашим запросам реально соберёт сайт «на потолке». Обычно 1–5%.
+                  </p>
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">Живые клики (Zero-click), %</label>
+                  <input v-model="form.c_yield_pct" type="number" min="1" max="100" step="1"
+                    class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                    placeholder="по умолчанию 65" />
+                  <p class="text-[11px] text-gray-500 mt-1">
+                    Сколько людей реально кликают, а не читают ответ прямо в поиске. Обычно 60–70%.
+                  </p>
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">Расширение семантики, %/мес</label>
+                  <input v-model="form.semantic_expansion_pct" type="number" min="0" max="20" step="0.5"
+                    class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                    placeholder="по умолчанию 0" />
+                  <p class="text-[11px] text-gray-500 mt-1">
+                    Если каждый месяц добавляете новые страницы и темы — на сколько % растёт охват. 0 = ядро не растёт.
+                  </p>
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">Скорость роста (агрессивность)</label>
+                  <input v-model="form.growth_k" type="number" min="0.05" max="1.5" step="0.05"
+                    class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                    placeholder="по умолчанию 0.35" />
+                  <p class="text-[11px] text-gray-500 mt-1">
+                    Насколько круто идёт разгон продвижения. 0.3–0.5 — оптимально.
+                  </p>
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">Месяц прорыва</label>
+                  <input v-model="form.breakthrough_month" type="number" min="1" max="24" step="1"
+                    class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                    placeholder="по умолчанию 6" />
+                  <p class="text-[11px] text-gray-500 mt-1">
+                    На каком месяце ждём самый быстрый рост (перегиб S-кривой).
+                  </p>
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">Погрешность за 1 мес, %</label>
+                  <input v-model="form.uncertainty_pct" type="number" min="0" max="30" step="1"
+                    class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                    placeholder="по умолчанию 5" />
+                  <p class="text-[11px] text-gray-500 mt-1">
+                    Ширина «коридора» прогноза. Чем дальше месяц, тем шире неопределённость.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </details>
 
           <div v-if="formError" class="text-sm text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded px-3 py-2">
             ⚠ {{ formError }}
