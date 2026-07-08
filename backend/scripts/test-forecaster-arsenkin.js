@@ -151,6 +151,21 @@ group('arsenkinClient result normalization', () => {
     assert.strictEqual(rows[0].byPeriod['2025-07'], 200);
     assert.strictEqual(rows[0].total, 700);
   });
+  test('24-месячный ordered seasonal: month-only маппится по индексу от startdate', () => {
+    const { _resolverFromRange } = require('../src/services/forecaster/arsenkinClient');
+    const seasonal = [];
+    for (let i = 0; i < 24; i++) seasonal.push({ month: String(((6 + i) % 12) + 1).padStart(2, '0'), count: i + 1 });
+    const rows = _normalizeResult({
+      json: { data: [{ query: 'окна', seasonal }] },
+      text: '',
+      resolveMonth: _resolverFromRange('2024-07-01', '2026-06-30'),
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].byPeriod['2024-07'], 1);
+    assert.strictEqual(rows[0].byPeriod['2025-07'], 13);
+    assert.strictEqual(rows[0].byPeriod['2026-06'], 24);
+    assert.strictEqual(Object.keys(rows[0].byPeriod).length, 24);
+  });
   test('month-only БЕЗ resolveMonth → пустой byPeriod (не ломается)', () => {
     const rows = _normalizeResult({
       json: { data: [{ query: 'шины', seasonal: [{ month: '05', count: 5 }] }] },
@@ -264,14 +279,14 @@ group('arsenkinClient result normalization', () => {
 
 // ── arsenkinClient.seasonalityDateRange ────────────────────────────
 group('arsenkinClient.seasonalityDateRange', () => {
-  test('month: последние 12 полных календарных месяцев', () => {
+  test('month: последние 24 полных календарных месяца', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7)); // 7 июля 2026
-    assert.strictEqual(r.startdate, '2025-07-01');
+    assert.strictEqual(r.startdate, '2024-07-01');
     assert.strictEqual(r.enddate, '2026-06-30');
   });
   test('month: границы года', () => {
     const r = seasonalityDateRange('month', new Date(2026, 0, 15)); // 15 января 2026
-    assert.strictEqual(r.startdate, '2025-01-01');
+    assert.strictEqual(r.startdate, '2024-01-01');
     assert.strictEqual(r.enddate, '2025-12-31');
   });
   test('week: конец — воскресенье, старт — понедельник', () => {
@@ -286,12 +301,12 @@ group('arsenkinClient.seasonalityDateRange', () => {
   });
   test('monthOffset=1: окно сдвинуто на месяц назад (лаг WRONG_WORDSTAT_DATES)', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7), 1); // 7 июля 2026, сдвиг 1 мес
-    assert.strictEqual(r.startdate, '2025-06-01');
+    assert.strictEqual(r.startdate, '2024-06-01');
     assert.strictEqual(r.enddate, '2026-05-31');
   });
   test('monthOffset=2: окно сдвинуто на два месяца назад', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7), 2);
-    assert.strictEqual(r.startdate, '2025-05-01');
+    assert.strictEqual(r.startdate, '2024-05-01');
     assert.strictEqual(r.enddate, '2026-04-30');
   });
   test('monthOffset по умолчанию 0 = без сдвига', () => {

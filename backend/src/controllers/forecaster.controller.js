@@ -58,6 +58,33 @@ function _sanitizeCr(v) {
   return Math.round(n * 100000) / 100000;
 }
 
+
+function _sanitizeHMax(v) {
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n)) return 12;
+  return Math.max(1, Math.min(24, n));
+}
+
+function _sanitizeUnit(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(1, n));
+}
+
+function _sanitizeSerpElements(v) {
+  if (!Array.isArray(v)) return null;
+  const allowed = new Set(['direct', 'maps', 'market', 'goods_gallery', 'other']);
+  const out = [];
+  for (const it of v) {
+    if (!it || typeof it !== 'object') continue;
+    const type = allowed.has(String(it.type)) ? String(it.type) : 'other';
+    const count = Math.max(0, Math.floor(Number(it.count) || 0));
+    if (count > 0) out.push({ type, count });
+  }
+  return out;
+}
+
 function _sanitizeIntent(v) {
   const allowed = ['commercial', 'ecommerce', 'lead_gen', 'info', 'b2b'];
   const s = String(v || '').trim().toLowerCase();
@@ -140,6 +167,10 @@ async function createForecasterTask(req, res, next) {
       // Подсказка intent (commercial/ecommerce/lead_gen/info/b2b).
       // Используется только если conversion_rate не задан (выбирается preset).
       intent:                    _sanitizeIntent(opts.intent),
+      h_max:                     _sanitizeHMax(opts.h_max),
+      main_query:                String(opts.main_query || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+      comm_percent:              _sanitizeUnit(opts.comm_percent),
+      serp_elements:             _sanitizeSerpElements(opts.serp_elements),
     };
 
     const sourceColumns = keywords
@@ -185,7 +216,7 @@ async function getForecasterTask(req, res, next) {
               monthly_series, anomalies, forecast, trend,
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
-              arsenkin_report,
+              sov_forecast, arsenkin_report,
               deepseek_summary,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
@@ -254,7 +285,7 @@ async function rerunForecasterTask(req, res, next) {
               monthly_series=NULL, anomalies=NULL, forecast=NULL, trend=NULL,
               traffic_estimate=NULL, junk_phrases=NULL, keysso_signals=NULL,
               opportunities=NULL, expert_reports=NULL, leads_summary=NULL,
-              arsenkin_report=NULL, deepseek_summary=NULL,
+              sov_forecast=NULL, arsenkin_report=NULL, deepseek_summary=NULL,
               llm_provider=DEFAULT, llm_model=NULL,
               tokens_in=DEFAULT, tokens_out=DEFAULT, cost_usd=DEFAULT,
               started_at=NULL, completed_at=NULL, updated_at=NOW()
@@ -343,7 +374,7 @@ async function getSharedForecast(req, res, next) {
               monthly_series, anomalies, forecast, trend,
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
-              arsenkin_report,
+              sov_forecast, arsenkin_report,
               deepseek_summary,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks

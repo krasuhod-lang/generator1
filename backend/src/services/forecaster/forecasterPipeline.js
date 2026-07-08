@@ -26,11 +26,68 @@ const { estimateTraffic } = require('./trafficModel');
 const { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner } = require('./deepseekAnalyzer');
 const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
 const { fetchPhraseSignals, aggregateSignals } = require('./keyssoClient');
-const { collectSeasonality } = require('./arsenkinClient');
+const { collectSeasonality, collectCommercialization, collectSerpFeatures } = require('./arsenkinClient');
 const { filterKeywords } = require('./stopWordFilter');
 const { analyzeOpportunities } = require('./opportunityAnalyzer');
 const { getForecasterConfig } = require('./config');
+const { buildSovForecast } = require('./sovForecast');
 const { createFunnelTracker } = require('../aegis/funnelTracker');
+
+
+function _normPhrase(v) {
+  return String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function _clampInt(v, def, min, max) {
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, n));
+}
+
+function _sanitizeUnit(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(1, n));
+}
+
+function _sanitizeSerpElements(v) {
+  if (!Array.isArray(v)) return null;
+  const allowed = new Set(['direct', 'maps', 'market', 'goods_gallery', 'other']);
+  const out = [];
+  for (const it of v) {
+    if (!it || typeof it !== 'object') continue;
+    const type = allowed.has(String(it.type)) ? String(it.type) : 'other';
+    const count = Math.max(0, Math.floor(Number(it.count) || 0));
+    if (count > 0) out.push({ type, count });
+  }
+  return out;
+}
+
+function _resolveCrBase(options, cfg) {
+  const userCr = Number(options.conversion_rate);
+  if (Number.isFinite(userCr) && userCr >= cfg.leads.minCr && userCr <= cfg.leads.maxCr) return userCr;
+  const intent = options.intent ? String(options.intent).trim() : null;
+  if (intent && cfg.leads.intentPresets[intent] != null) return cfg.leads.intentPresets[intent];
+  return cfg.leads.defaultConversionRate;
+}
+
+function _phraseVolumes(rows, mainQuery) {
+  let clusterVolume = 0;
+  let maxTotal = 0;
+  let mainQueryVolume = 0;
+  const mainNorm = _normPhrase(mainQuery);
+  for (const r of rows || []) {
+    const total = Math.max(0, Number(r.total) || 0);
+    clusterVolume += total;
+    if (total > maxTotal) maxTotal = total;
+    if (mainNorm && _normPhrase(r.phrase) === mainNorm) mainQueryVolume = total;
+  }
+  return {
+    clusterVolume,
+    mainQueryVolume: mainQueryVolume > 0 ? mainQueryVolume : maxTotal,
+  };
+}
 
 /**
  * Конвертирует rows Арсенкина ({phrase,total,byPeriod}) в структуру,
@@ -174,7 +231,7 @@ async function processForecasterTask(taskId) {
     const excludeSet = new Set();
     for (const f of junkRaw.flagged) {
       if (f.exclude_from_forecast) {
-        excludeSet.add(String(f.phrase || '').trim().toLowerCase().replace(/\s+/g, ' '));
+        excludeSet.add(_normPhrase(f.phrase));
       }
     }
 
@@ -185,6 +242,15 @@ async function processForecasterTask(taskId) {
       throw new Error('После агрегации меньше 3 месяцев данных — недостаточно для анализа');
     }
 
+    const remainingRows = parsed.rows.filter((r) => {
+      const norm = _normPhrase(r.phrase);
+      return norm && !excludeSet.has(norm);
+    });
+    const topPhrases = [...remainingRows]
+      .sort((a, b) => Number(b.total || 0) - Number(a.total || 0))
+      .map((r) => String(r.phrase || '').trim())
+      .filter(Boolean);
+
     // 5. Аномалии
     funnel.step('anomalies');
     const anomalies = detectAnomalies(seriesData.monthly);
@@ -193,21 +259,48 @@ async function processForecasterTask(taskId) {
     funnel.step('forecast');
     const forecast = buildForecast(seriesData.monthly);
 
+    // 6a. SOV-прогноз: доля рынка строится на том же прогнозе спроса,
+    // а cluster/main объёмы временно берём из строк Wordstat. Позже сюда можно
+    // подключить точные totals из keys.so без изменения JSON-контракта.
+    funnel.step('sov_forecast');
+    const cfgAll = getForecasterConfig();
+    const hMax = _clampInt(options.h_max, cfgAll.sov.hMaxDefault, 1, cfgAll.sov.hMaxLimit);
+    const { clusterVolume, mainQueryVolume } = _phraseVolumes(remainingRows, options.main_query);
+    let commPercent = _sanitizeUnit(options.comm_percent);
+    let serpElements = _sanitizeSerpElements(options.serp_elements);
+    try {
+      if (commPercent == null) {
+        const collectedComm = await collectCommercialization({ phrases: topPhrases.slice(0, 50), regionLabel: options.region });
+        commPercent = _sanitizeUnit(collectedComm);
+      }
+    } catch (_) { commPercent = null; }
+    try {
+      if (serpElements == null) {
+        const collectedSerp = await collectSerpFeatures({ phrases: topPhrases.slice(0, 50), regionLabel: options.region });
+        serpElements = _sanitizeSerpElements(collectedSerp);
+      }
+    } catch (_) { serpElements = null; }
+    if (commPercent == null) commPercent = 1.0;
+    if (!Array.isArray(serpElements)) serpElements = [];
+    const sovForecast = buildSovForecast({
+      monthly: seriesData.monthly,
+      forecastPoints: forecast.points,
+      vCurrent: currentTraffic,
+      hMax,
+      crBase: _resolveCrBase(options, cfgAll),
+      commPercent,
+      serpElements,
+      clusterVolume,
+      mainQueryVolume,
+      cfg: cfgAll,
+    });
+
     // 6b. Keys.so signals (graceful skip без ключа). Шлём top-N фраз по total
     // (после фильтрации исключённых) — чтобы экономить квоту.
     funnel.step('keysso_signals');
     let keyssoSignalsReport = null;
     let keyssoSignalsMap    = null; // Map<normPhrase, signals> для opportunityAnalyzer
     try {
-      const remainingRows = parsed.rows.filter((r) => {
-        const norm = String(r.phrase || '').trim().toLowerCase().replace(/\s+/g, ' ');
-        return norm && !excludeSet.has(norm);
-      });
-      const topPhrases = [...remainingRows]
-        .sort((a, b) => Number(b.total || 0) - Number(a.total || 0))
-        .map((r) => String(r.phrase || '').trim())
-        .filter(Boolean);
-
       const ksResp = await fetchPhraseSignals({
         phrases: topPhrases,
         domain:  targetUrl,
@@ -332,6 +425,7 @@ async function processForecasterTask(taskId) {
          keysso_signals=$11::jsonb,
          opportunities=$12::jsonb,
          leads_summary=$13::jsonb,
+         sov_forecast=$14::jsonb,
          updated_at=NOW()
        WHERE id=$1`,
       [
@@ -348,6 +442,7 @@ async function processForecasterTask(taskId) {
         keyssoSignalsReport ? JSON.stringify(keyssoSignalsReport) : null,
         opportunitiesReport ? JSON.stringify(opportunitiesReport) : null,
         leadsSummary ? JSON.stringify(leadsSummary) : null,
+        JSON.stringify(sovForecast),
       ],
     );
 
