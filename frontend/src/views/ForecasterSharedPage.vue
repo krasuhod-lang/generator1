@@ -10,6 +10,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import axios from 'axios';
 import ForecastChart from '../components/ForecastChart.vue';
+import SovForecastChart from '../components/SovForecastChart.vue';
 
 const route = useRoute();
 const task = ref(null);
@@ -36,6 +37,7 @@ const anomalies  = computed(() => (task.value?.anomalies?.drops) || []);
 const trend      = computed(() => task.value?.trend || null);
 const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
+const sovForecast = computed(() => task.value?.sov_forecast || null);
 
 const annualForecast = computed(() => task.value?.forecast?.annual_total || 0);
 const annualHistorical = computed(() =>
@@ -54,6 +56,23 @@ function fmtCtr(c) {
   if (c == null || !Number.isFinite(c)) return '—';
   return (c * 100).toFixed(2) + '%';
 }
+function fmtPct(v, digits = 1) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  return (Number(v) * 100).toFixed(digits) + '%';
+}
+function fmtNumSafe(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  return Number(v).toLocaleString('ru-RU');
+}
+const sovSummaryRows = computed(() => {
+  const s = sovForecast.value?.summary;
+  if (!s) return [];
+  return [
+    { label: 'Доля рынка (SOV)', start: fmtPct(s.sov?.current, 1), target: fmtPct(s.sov?.target, 1), total: '—' },
+    { label: 'Трафик', start: fmtNum(s.traffic?.current), target: fmtNum(s.traffic?.at_h), total: fmtNum(s.traffic?.total) },
+    { label: 'Лиды', start: fmtNumSafe(s.leads?.current), target: fmtNumSafe(s.leads?.at_h), total: fmtNumSafe(s.leads?.total) },
+  ];
+});
 const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡';
 </script>
 
@@ -164,6 +183,33 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
               </div>
             </div>
           </div>
+        </section>
+
+
+        <!-- SOV-прогноз -->
+        <section v-if="sovForecast" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h2 class="text-sm font-semibold mb-3">📈 Прогноз доли рынка (SOV)</h2>
+          <div class="overflow-x-auto border border-gray-800 rounded-lg mb-4">
+            <table class="w-full text-sm">
+              <thead class="bg-gray-950 text-gray-400">
+                <tr>
+                  <th class="text-left px-3 py-2 font-normal">Метрика</th>
+                  <th class="text-right px-3 py-2 font-normal">На старте</th>
+                  <th class="text-right px-3 py-2 font-normal">Цель (через {{ sovForecast.h_max }} мес)</th>
+                  <th class="text-right px-3 py-2 font-normal">Суммарно за период</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in sovSummaryRows" :key="row.label" class="border-t border-gray-800">
+                  <td class="px-3 py-2 text-gray-300">{{ row.label }}</td>
+                  <td class="px-3 py-2 text-right text-gray-100">{{ row.start }}</td>
+                  <td class="px-3 py-2 text-right text-indigo-300 font-semibold">{{ row.target }}</td>
+                  <td class="px-3 py-2 text-right text-emerald-300">{{ row.total }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <SovForecastChart :sov-forecast="sovForecast" :height="360" />
         </section>
 
         <!-- DeepSeek -->

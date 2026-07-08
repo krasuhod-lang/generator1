@@ -1397,6 +1397,9 @@ async function ensureSchema() {
     // Migration 102: интеграция Арсенкин (сбор сезонности по списку ключей).
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS arsenkin_report JSONB`);
 
+    // Migration 103: SOV-прогноз (доля рынка / Share of Voice).
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS sov_forecast JSONB`);
+
     // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google
     // Search Console (OAuth-токены хранятся строго в зашифрованном виде) +
     // AI-аналитика DeepSeek + публичный read-only шаринг дашборда.

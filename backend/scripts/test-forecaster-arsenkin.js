@@ -12,7 +12,7 @@
 
 const assert = require('assert');
 const { filterKeywords, matchStopWord } = require('../src/services/forecaster/stopWordFilter');
-const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory } = require('../src/services/forecaster/arsenkinClient');
+const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory, _resolverFromEnddate, _isWrongDatesError } = require('../src/services/forecaster/arsenkinClient');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -151,6 +151,21 @@ group('arsenkinClient result normalization', () => {
     assert.strictEqual(rows[0].byPeriod['2025-07'], 200);
     assert.strictEqual(rows[0].total, 700);
   });
+  test('24-месячный ordered seasonal: month-only маппится по индексу от startdate', () => {
+    const { _resolverFromRange } = require('../src/services/forecaster/arsenkinClient');
+    const seasonal = [];
+    for (let i = 0; i < 24; i++) seasonal.push({ month: String(((6 + i) % 12) + 1).padStart(2, '0'), count: i + 1 });
+    const rows = _normalizeResult({
+      json: { data: [{ query: 'окна', seasonal }] },
+      text: '',
+      resolveMonth: _resolverFromRange('2024-07-01', '2026-06-30'),
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].byPeriod['2024-07'], 1);
+    assert.strictEqual(rows[0].byPeriod['2025-07'], 13);
+    assert.strictEqual(rows[0].byPeriod['2026-06'], 24);
+    assert.strictEqual(Object.keys(rows[0].byPeriod).length, 24);
+  });
   test('month-only БЕЗ resolveMonth → пустой byPeriod (не ломается)', () => {
     const rows = _normalizeResult({
       json: { data: [{ query: 'шины', seasonal: [{ month: '05', count: 5 }] }] },
@@ -264,14 +279,14 @@ group('arsenkinClient result normalization', () => {
 
 // ── arsenkinClient.seasonalityDateRange ────────────────────────────
 group('arsenkinClient.seasonalityDateRange', () => {
-  test('month: последние 12 полных календарных месяцев', () => {
+  test('month: последние 24 полных календарных месяца', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7)); // 7 июля 2026
-    assert.strictEqual(r.startdate, '2025-07-01');
+    assert.strictEqual(r.startdate, '2024-07-01');
     assert.strictEqual(r.enddate, '2026-06-30');
   });
   test('month: границы года', () => {
     const r = seasonalityDateRange('month', new Date(2026, 0, 15)); // 15 января 2026
-    assert.strictEqual(r.startdate, '2025-01-01');
+    assert.strictEqual(r.startdate, '2024-01-01');
     assert.strictEqual(r.enddate, '2025-12-31');
   });
   test('week: конец — воскресенье, старт — понедельник', () => {
@@ -283,6 +298,52 @@ group('arsenkinClient.seasonalityDateRange', () => {
     const r = seasonalityDateRange('day', new Date(2026, 6, 7));
     assert.strictEqual(r.enddate, '2026-07-06');
     assert.strictEqual(r.startdate, '2026-05-08');
+  });
+  test('monthOffset=1: окно сдвинуто на месяц назад (лаг WRONG_WORDSTAT_DATES)', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 6, 7), 1); // 7 июля 2026, сдвиг 1 мес
+    assert.strictEqual(r.startdate, '2024-06-01');
+    assert.strictEqual(r.enddate, '2026-05-31');
+  });
+  test('monthOffset=2: окно сдвинуто на два месяца назад', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 6, 7), 2);
+    assert.strictEqual(r.startdate, '2024-05-01');
+    assert.strictEqual(r.enddate, '2026-04-30');
+  });
+  test('monthOffset по умолчанию 0 = без сдвига', () => {
+    const a = seasonalityDateRange('month', new Date(2026, 6, 7));
+    const b = seasonalityDateRange('month', new Date(2026, 6, 7), 0);
+    assert.deepStrictEqual(a, b);
+  });
+});
+
+// ── arsenkinClient._isWrongDatesError ──────────────────────────────
+group('arsenkinClient._isWrongDatesError', () => {
+  test('распознаёт код WRONG_WORDSTAT_DATES', () => {
+    const err = new Error('Arsenkin API: HTTP 422 — {"code":"WRONG_WORDSTAT_DATES","msg":"..."}');
+    assert.strictEqual(_isWrongDatesError(err), true);
+  });
+  test('распознаёт русский текст «период не подходит»', () => {
+    assert.strictEqual(_isWrongDatesError(new Error('Указанный период не подходит для этого запроса')), true);
+  });
+  test('другие ошибки не трогает', () => {
+    assert.strictEqual(_isWrongDatesError(new Error('Arsenkin API: HTTP 429 Too Many Requests')), false);
+    assert.strictEqual(_isWrongDatesError(null), false);
+  });
+});
+
+// ── arsenkinClient._resolverFromEnddate ────────────────────────────
+// После сдвига окна назад год месяцев должен восстанавливаться по фактическому
+// enddate задачи, а не по «сегодня».
+group('arsenkinClient._resolverFromEnddate', () => {
+  test('enddate 2026-05-31: месяцы ≤5 → 2026, остальные → 2025', () => {
+    const resolve = _resolverFromEnddate('2026-05-31');
+    assert.strictEqual(resolve(5), '2026-05');
+    assert.strictEqual(resolve(6), '2025-06');
+    assert.strictEqual(resolve(12), '2025-12');
+  });
+  test('пустой/битый enddate → () => null', () => {
+    assert.strictEqual(_resolverFromEnddate('')(3), null);
+    assert.strictEqual(_resolverFromEnddate('нет даты')(3), null);
   });
 });
 

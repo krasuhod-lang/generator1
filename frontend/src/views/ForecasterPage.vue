@@ -28,6 +28,8 @@ const form = ref({
   target_url: '',
   conversion_rate_pct: '',  // в %, переводим в дробь при отправке (0.02)
   intent: '',
+  main_query: '',
+  h_max: 12,
 });
 
 // Режим источника: 'keywords' — список ключей (сезонность через Арсенкин),
@@ -113,6 +115,8 @@ async function handleSubmit() {
         // никакой выручки/маржи.
         conversion_rate: cr,
         intent: form.value.intent?.trim() || null,
+        main_query: form.value.main_query?.trim() || '',
+        h_max: Math.max(1, Math.min(24, parseInt(form.value.h_max, 10) || 12)),
       },
       source,
     };
@@ -262,6 +266,24 @@ function statusBadge(s) {
               Используется DeepSeek-аналитикой для контекста и AI-фильтром, чтобы исключить
               чужие бренды/нерелевантные запросы.
             </p>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Главный (маркерный) запрос</label>
+              <input v-model="form.main_query" type="text" maxlength="300"
+                class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100"
+                placeholder="например, окна пвх москва" />
+              <p class="text-[11px] text-gray-500 mt-1">
+                Нужен для расчёта λ: объём кластера / объём главного запроса.
+              </p>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Горизонт прогноза, мес</label>
+              <input v-model="form.h_max" type="number" min="1" max="24" step="1"
+                class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100" />
+              <p class="text-[11px] text-gray-500 mt-1">По умолчанию 12, максимум 24 месяца.</p>
+            </div>
           </div>
 
           <div class="grid grid-cols-2 gap-3">

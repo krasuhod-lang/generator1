@@ -4,7 +4,7 @@
  * forecaster/arsenkinClient.js — HTTP-клиент API «ARSENKIN TOOLS».
  *
  * Назначение: по списку ключевых запросов собрать СЕЗОННОСТЬ — помесячную
- * частотность Яндекс.Вордстат за последние 12 месяцев по каждой фразе.
+ * частотность Яндекс.Вордстат за последние 24 месяца по каждой фразе.
  * Результат конвертируется в структуру, совместимую с parser.js
  * (rows: [{phrase,total,byPeriod}] + monthCols), и дальше едет в обычный
  * пайплайн прогнозатора (агрегация → аномалии → прогноз на 12 мес).
@@ -27,7 +27,11 @@
  *       }
  *     Важно: статистика «по месяцам» доступна только для ПОЛНЫХ календарных
  *     месяцев (минимум 3); «по неделям» — полные недели (пн–вс, минимум 3);
- *     «по дням» — только последние 60 дней без текущего.
+ *     «по дням» — только последние 60 дней без текущего. Данные по последнему
+ *     завершившемуся периоду публикуются с лагом ~7–14 дней: в начале месяца
+ *     запрос «до конца прошлого месяца» отвергается с HTTP 422
+ *     {"code":"WRONG_WORDSTAT_DATES"}. На эту ошибку клиент авто-повторяет
+ *     задачу, сдвигая окно на месяц назад (до 3 раз) — см. _runOneTask.
  *   • Проверка статуса:        POST https://arsenkin.ru/api/tools/check
  *       body: { task_id }   → { data: { status_id } }  (1 = в работе, 2 = готово)
  *   • Получение результата:    POST https://arsenkin.ru/api/tools/get
@@ -66,6 +70,7 @@
  */
 
 const { parseForecasterInput } = require('./parser');
+const { getForecasterConfig } = require('./config');
 
 const API_SET   = 'https://arsenkin.ru/api/tools/set';
 const API_CHECK = 'https://arsenkin.ru/api/tools/check';
@@ -89,6 +94,9 @@ function _cfg() {
     batchSize:    Math.max(1, Number(process.env.ARSENKIN_BATCH_SIZE) || 100),
     pollMs:       Math.max(3000, Number(process.env.ARSENKIN_POLL_INTERVAL_MS) || 10000),
     timeoutMin:   Math.max(1, Number(process.env.ARSENKIN_TIMEOUT_MIN) || 30),
+    commToolName: String(process.env.ARSENKIN_COMM_TOOL_NAME || '').trim(),
+    wizardToolName: String(process.env.ARSENKIN_WIZARD_TOOL_NAME || '').trim(),
+    historyMonths: Math.max(12, Number(getForecasterConfig().forecast?.historyMonths) || 24),
   };
 }
 
@@ -151,29 +159,52 @@ function normalizeDevice(raw) {
 
 // ── диапазон дат для сезонности ────────────────────────────────────
 // Статистика «по месяцам» доступна только для ПОЛНЫХ календарных месяцев,
-// поэтому окно: с 1-го числа месяца (12 месяцев назад) по последний день
-// предыдущего месяца — ровно 12 полных месяцев для годового цикла.
+// поэтому окно: с 1-го числа месяца (historyMonths назад) по последний день
+// предыдущего месяца. По умолчанию берём 24 месяца: два годовых цикла нужны
+// Holt-Winters, а не только fallback-модели.
 // «По неделям» — полные недели пн–вс; «по дням» — максимум 60 дней
 // без учёта текущего дня.
-function seasonalityDateRange(group = 'month', now = new Date()) {
+//
+// monthOffset — сдвиг всего окна НАЗАД на указанное число месяцев. Нужен для
+// авто-повтора при ошибке WRONG_WORDSTAT_DATES: данные Яндекс.Вордстат по
+// последнему завершившемуся месяцу публикуются с лагом ~7–14 дней, поэтому в
+// начале месяца запрос «до конца прошлого месяца» ещё не подходит — сдвигаем
+// окно на месяц назад и пробуем снова (см. _runOneTask).
+function seasonalityDateRange(group = 'month', now = new Date(), monthOffset = 0, historyMonths = null) {
   const pad = (n) => String(n).padStart(2, '0');
   const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const off = Math.max(0, Number(monthOffset) || 0);
+  // Опорная дата, сдвинутая на off месяцев назад (день сохраняем — нормализация
+  // JS Date корректно обработает переполнение дней в коротких месяцах).
+  const ref = off
+    ? new Date(now.getFullYear(), now.getMonth() - off, now.getDate())
+    : now;
   if (group === 'day') {
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 60);
+    const end = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() - 1);
+    const start = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() - 60);
     return { startdate: iso(start), enddate: iso(end) };
   }
   if (group === 'week') {
     // последнее полное воскресенье и понедельник 52 недели назад
-    const dow = (now.getDay() + 6) % 7; // 0 = понедельник
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow - 1);
+    const dow = (ref.getDay() + 6) % 7; // 0 = понедельник
+    const end = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() - dow - 1);
     const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 52 * 7 + 1);
     return { startdate: iso(start), enddate: iso(end) };
   }
-  // month (default): последние 12 полных календарных месяцев
-  const end = new Date(now.getFullYear(), now.getMonth(), 0);            // последний день прошлого месяца
-  const start = new Date(now.getFullYear(), now.getMonth() - 12, 1);     // 1-е число 12 месяцев назад
+  // month (default): последние historyMonths полных календарных месяцев
+  const hm = Math.max(1, Number(historyMonths) || Number(getForecasterConfig().forecast?.historyMonths) || 24);
+  const end = new Date(ref.getFullYear(), ref.getMonth(), 0);
+  const start = new Date(ref.getFullYear(), ref.getMonth() - hm, 1);
   return { startdate: iso(start), enddate: iso(end) };
+}
+
+// Признак ошибки Арсенкина «указанный период не подходит для этого запроса».
+// Данные Вордстат по последнему завершившемуся месяцу ещё не опубликованы —
+// повторяем задачу с окном, сдвинутым на месяц назад.
+function _isWrongDatesError(err) {
+  const msg = String((err && err.message) || err || '');
+  return /WRONG_WORDSTAT_DATES/i.test(msg)
+    || /период\s+не\s+подходит/i.test(msg);
 }
 
 // ── низкоуровневый POST с retry на 429 ─────────────────────────────
@@ -226,10 +257,16 @@ async function _post(url, body, token, { retries = 4 } = {}) {
 }
 
 // ── постановка + ожидание + получение одной задачи ─────────────────
-async function _runOneTask({ phrases, regionLr, cfg }) {
+// Максимальное число сдвигов окна назад при ошибке WRONG_WORDSTAT_DATES.
+// Данные Вордстат хранятся ~24 месяца, поэтому 3 сдвига (до 3 месяцев назад)
+// безопасны и с запасом перекрывают лаг публикации последнего месяца.
+const _DATE_RETRY_MAX = 3;
+
+async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
   // Формат по официальной документации «Проверка сезонности запросов»:
   // type=3, region — ЧИСЛО lr Яндекса (не массив), device/group/даты обязательны.
-  const { startdate, enddate } = seasonalityDateRange(cfg.group);
+  const range = seasonalityDateRange(cfg.group, new Date(), monthOffset, cfg.historyMonths);
+  const { startdate, enddate } = range;
   const data = {
     type:      cfg.wordstatType,
     queries:   phrases,
@@ -271,7 +308,25 @@ async function _runOneTask({ phrases, regionLr, cfg }) {
   }
 
   const got = await _post(API_GET, { task_id: taskId }, cfg.token);
-  return { taskId, json: got.json, text: got.text };
+  return { taskId, json: got.json, text: got.text, range };
+}
+
+// Обёртка с авто-повтором на WRONG_WORDSTAT_DATES: если Вордстат ещё не
+// опубликовал данные за последний завершившийся период (лаг ~7–14 дней), запрос
+// «до конца прошлого месяца» отвергается с HTTP 422. Пробуем то же окно,
+// сдвинутое на месяц назад, пока не получим ответ либо не исчерпаем сдвиги.
+async function _runOneTask({ phrases, regionLr, cfg }) {
+  let lastErr = null;
+  for (let monthOffset = 0; monthOffset <= _DATE_RETRY_MAX; monthOffset++) {
+    try {
+      return await _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset });
+    } catch (err) {
+      lastErr = err;
+      if (!_isWrongDatesError(err) || monthOffset === _DATE_RETRY_MAX) throw err;
+      // иначе — сдвигаем окно на месяц назад и повторяем
+    }
+  }
+  throw lastErr || new Error('Arsenkin API: request failed');
 }
 
 // ── нормализация результата → rows/{phrase,total,byPeriod} ─────────
@@ -299,14 +354,45 @@ function _monthNumFromAny(v) {
 }
 
 /**
- * Строит резолвер «номер месяца → YYYY-MM» для окна сезонности. В годовом
- * окне (12 полных месяцев, оканчивающихся прошлым месяцем) каждый месяц
- * встречается ровно один раз, поэтому маппинг детерминирован: месяцы ≤
- * месяца конца окна относятся к году конца, остальные — к предыдущему.
- * Возвращает функцию (monthNum:1-12) => 'YYYY-MM' | null.
+ * Строит резолвер для month-only ответа Арсенкина. Для 24-месячного окна
+ * номер месяца сам по себе неоднозначен ("01" встречается дважды), поэтому
+ * массивы точек маппим по индексу от startdate. Для объектов {"01": n} остаётся
+ * legacy-маппинг по enddate: такой формат физически не может хранить 24 значения.
  */
-function _monthYearResolver(group = 'month', now = new Date()) {
-  const { enddate } = seasonalityDateRange(group, now);
+function _monthYearResolver(group = 'month', now = new Date(), monthOffset = 0) {
+  const range = seasonalityDateRange(group, now, monthOffset);
+  return _resolverFromRange(range.startdate, range.enddate);
+}
+
+function _addMonthsPeriod(startPeriod, idx) {
+  const m = String(startPeriod || '').match(/^(\d{4})-(\d{2})/);
+  if (!m || !Number.isFinite(Number(idx))) return null;
+  const base = (Number(m[1]) * 12) + (Number(m[2]) - 1) + Number(idx);
+  const y = Math.floor(base / 12);
+  const mo = (base % 12) + 1;
+  return `${y}-${String(mo).padStart(2, '0')}`;
+}
+
+function _resolverFromRange(startdate, enddate) {
+  const start = String(startdate || '').match(/^(\d{4})-(\d{2})/);
+  const legacy = _resolverFromEnddate(enddate);
+  return (monthNum, index = null) => {
+    if (!(monthNum >= 1 && monthNum <= 12)) return null;
+    if (start && Number.isFinite(Number(index))) {
+      const p = _addMonthsPeriod(`${start[1]}-${start[2]}`, index);
+      // Индексный маппинг применяем только если номер месяца совпал с точкой.
+      if (p && Number(p.slice(5, 7)) === monthNum) return p;
+    }
+    return legacy(monthNum);
+  };
+}
+
+/**
+ * Legacy-резолвер «номер месяца → YYYY-MM» по дате конца 12-месячного окна.
+ * Для 24-месячных массивов используйте _resolverFromRange(startdate,enddate),
+ * иначе одноимённые месяцы разных лет будут схлопнуты.
+ */
+function _resolverFromEnddate(enddate) {
   const m = String(enddate || '').match(/^(\d{4})-(\d{2})/);
   if (!m) return () => null;
   const endYear  = Number(m[1]);
@@ -322,13 +408,14 @@ function _rowFromHistory(phrase, history, resolveMonth = null) {
   const byPeriod = {};
   if (Array.isArray(history)) {
     // [{month|date|period, count|value|freq|ws}, ...]
-    for (const pt of history) {
+    for (let i = 0; i < history.length; i++) {
+      const pt = history[i];
       if (!pt || typeof pt !== 'object') continue;
       const rawKey = pt.month ?? pt.date ?? pt.period;
       let period = _periodFromAny(rawKey);
       if (!period && resolveMonth) {
         const mn = _monthNumFromAny(rawKey);
-        if (mn) period = resolveMonth(mn);
+        if (mn) period = resolveMonth(mn, i);
       }
       const val = Number(pt.count ?? pt.value ?? pt.freq ?? pt.ws ?? pt.shows);
       if (period && Number.isFinite(val)) byPeriod[period] = val;
@@ -492,7 +579,7 @@ function _rowsFromQueriesEnvelope(payload, resolveMonth) {
  *     ("01"…"12") в ключе `seasonal` — маппятся в YYYY-MM через resolveMonth.
  *   • CSV-строка (фраза + помесячные колонки) — через parseForecasterInput.
  *
- * @param {Function|null} resolveMonth — (monthNum:1-12)=>'YYYY-MM' для
+ * @param {Function|null} resolveMonth — (monthNum:1-12,index?)=>'YYYY-MM' для
  *   month-only ответов; см. _monthYearResolver.
  */
 function _normalizeResult({ json, text, resolveMonth = null }) {
@@ -524,8 +611,146 @@ function _normalizeResult({ json, text, resolveMonth = null }) {
   return [];
 }
 
+
+const _SKIP_LOGGED = new Set();
+function _logSkipOnce(key, msg) {
+  if (_SKIP_LOGGED.has(key)) return;
+  _SKIP_LOGGED.add(key);
+  console.warn(msg);
+}
+
+async function _runCustomTool({ phrases, regionLr, cfg, toolName }) {
+  const data = { queries: phrases, region: regionLr };
+  const setResp = await _post(API_SET, { tools_name: toolName, data }, cfg.token);
+  const sj = setResp.json || {};
+  const taskId = sj.task_id ?? sj.data?.task_id ?? sj.id ?? sj.data?.id;
+  if (taskId == null) throw new Error(`Arsenkin API: /set не вернул task_id (ответ: ${JSON.stringify(sj).slice(0, 300)})`);
+
+  const deadline = Date.now() + cfg.timeoutMin * 60 * 1000;
+  for (;;) {
+    await _sleep(cfg.pollMs);
+    if (Date.now() > deadline) throw new Error(`Arsenkin API: задача ${taskId} не завершилась за ${cfg.timeoutMin} мин`);
+    const chk = await _post(API_CHECK, { task_id: taskId }, cfg.token);
+    const cj = chk.json || {};
+    const statusId = cj.data?.status_id ?? cj.status_id;
+    const statusStr = String(cj.data?.status ?? cj.status ?? '').toLowerCase();
+    const finished = statusId === 2 || statusId === '2'
+      || ['finish', 'finished', 'done', 'complete', 'completed'].includes(statusStr);
+    const failed = ['error', 'failed', 'fail'].includes(statusStr);
+    if (failed) throw new Error(`Arsenkin API: задача ${taskId} завершилась с ошибкой`);
+    if (finished) break;
+  }
+  const got = await _post(API_GET, { task_id: taskId }, cfg.token);
+  return { taskId, json: got.json, text: got.text };
+}
+
+function _walkNumbers(v, keysRe, out = []) {
+  if (v == null) return out;
+  if (Array.isArray(v)) {
+    for (const it of v) _walkNumbers(it, keysRe, out);
+    return out;
+  }
+  if (typeof v === 'object') {
+    for (const [k, val] of Object.entries(v)) {
+      if (keysRe.test(String(k))) {
+        const n = Number(val);
+        if (Number.isFinite(n)) out.push(n > 1 ? n / 100 : n);
+      }
+      _walkNumbers(val, keysRe, out);
+    }
+  }
+  return out;
+}
+
+function _normalizeCommercialization(res) {
+  const payload = _unwrapPayload(res && res.json);
+  const nums = _walkNumbers(payload, /(comm|commercial|коммерц|percent|share|value|score)/i)
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  if (nums.length === 0) return null;
+  const avg = nums.reduce((a, b) => a + Math.min(1, b), 0) / nums.length;
+  return Math.max(0, Math.min(1, Math.round(avg * 10000) / 10000));
+}
+
+function _featureType(raw) {
+  const s = String(raw || '').toLowerCase().replace(/ё/g, 'е');
+  if (/директ|direct|реклам/.test(s)) return 'direct';
+  if (/карт|maps|map/.test(s)) return 'maps';
+  if (/маркет|market/.test(s)) return 'market';
+  if (/товар|галере|goods|gallery/.test(s)) return 'goods_gallery';
+  return 'other';
+}
+
+function _collectFeatureCounts(v, acc) {
+  if (v == null) return;
+  if (Array.isArray(v)) {
+    for (const it of v) _collectFeatureCounts(it, acc);
+    return;
+  }
+  if (typeof v === 'object') {
+    const typeVal = v.type ?? v.name ?? v.title ?? v.element ?? v.feature ?? v.kind;
+    if (typeVal != null) {
+      const type = _featureType(typeVal);
+      const count = Math.max(1, Number(v.count ?? v.qty ?? v.n ?? 1) || 1);
+      acc.set(type, (acc.get(type) || 0) + count);
+    }
+    for (const [k, val] of Object.entries(v)) {
+      if (typeof val === 'number' && /(директ|direct|карт|maps|маркет|market|товар|галере|goods|wizard|колдун)/i.test(k)) {
+        const type = _featureType(k);
+        acc.set(type, (acc.get(type) || 0) + Math.max(0, val));
+      } else {
+        _collectFeatureCounts(val, acc);
+      }
+    }
+  }
+}
+
+function _normalizeSerpFeatures(res) {
+  const payload = _unwrapPayload(res && res.json);
+  const acc = new Map();
+  _collectFeatureCounts(payload, acc);
+  return [...acc.entries()]
+    .filter(([, count]) => count > 0)
+    .map(([type, count]) => ({ type, count }));
+}
+
+async function collectCommercialization({ phrases, regionLabel }) {
+  const cfg = _cfg();
+  if (!cfg.commToolName) {
+    _logSkipOnce('comm_tool', '[Forecaster] ARSENKIN_COMM_TOOL_NAME не задан — коммерциализация пропущена');
+    return null;
+  }
+  if (!cfg.token) return null;
+  const list = (Array.isArray(phrases) ? phrases : []).map((p) => String(p || '').trim()).filter(Boolean);
+  if (list.length === 0) return null;
+  try {
+    const res = await _runCustomTool({ phrases: list, regionLr: resolveRegionLr(regionLabel), cfg, toolName: cfg.commToolName });
+    return _normalizeCommercialization(res);
+  } catch (err) {
+    console.warn('[Forecaster] Сбор коммерциализации Арсенкин пропущен:', (err && err.message) || String(err));
+    return null;
+  }
+}
+
+async function collectSerpFeatures({ phrases, regionLabel }) {
+  const cfg = _cfg();
+  if (!cfg.wizardToolName) {
+    _logSkipOnce('wizard_tool', '[Forecaster] ARSENKIN_WIZARD_TOOL_NAME не задан — колдунщики SERP пропущены');
+    return null;
+  }
+  if (!cfg.token) return null;
+  const list = (Array.isArray(phrases) ? phrases : []).map((p) => String(p || '').trim()).filter(Boolean);
+  if (list.length === 0) return null;
+  try {
+    const res = await _runCustomTool({ phrases: list, regionLr: resolveRegionLr(regionLabel), cfg, toolName: cfg.wizardToolName });
+    return _normalizeSerpFeatures(res);
+  } catch (err) {
+    console.warn('[Forecaster] Сбор колдунщиков Арсенкин пропущен:', (err && err.message) || String(err));
+    return null;
+  }
+}
+
 /**
- * Главный API: собрать сезонность (помесячная частотность за последний год)
+ * Главный API: собрать сезонность (помесячная частотность за 24 месяца)
  * по списку фраз через Арсенкин.
  *
  * @param {Object} p
@@ -549,7 +774,10 @@ async function collectSeasonality({ phrases, regionLabel }) {
   if (list.length === 0) return { verdict: 'skipped', reason: 'no_phrases' };
 
   const regionLr = resolveRegionLr(regionLabel);
-  const resolveMonth = _monthYearResolver(cfg.group);
+  // Резолвер года по умолчанию — для неполноценных ответов без range; для каждой
+  // задачи ниже строим отдельный резолвер по фактически применённому окну
+  // (авто-повтор WRONG_WORDSTAT_DATES мог сдвинуть окно на месяц-два назад).
+  const defaultResolveMonth = _monthYearResolver(cfg.group);
   const t0 = Date.now();
   const allRows = [];
   const tasksMeta = [];
@@ -566,13 +794,24 @@ async function collectSeasonality({ phrases, regionLabel }) {
       tasksMeta.push({ task_id: res.taskId, phrases_count: batch.length });
       lastRawSample = _rawSample(res);
       lastRawJson = res.json ?? null;
+      const resolveMonth = res.range
+        ? _resolverFromRange(res.range.startdate, res.range.enddate)
+        : defaultResolveMonth;
       const rows = _normalizeResult({ ...res, resolveMonth });
       allRows.push(...rows);
     }
   } catch (err) {
+    const baseReason = (err && err.message) || String(err);
+    // Если даже после сдвигов окна назад Вордстат отвергает период —
+    // добавляем понятную подсказку про лаг публикации данных.
+    const reason = _isWrongDatesError(err)
+      ? `${baseReason} (Яндекс.Вордстат ещё не опубликовал данные за запрошенный период — `
+        + `помесячная статистика выходит с лагом ~7–14 дней; попробуйте перезапустить задачу позже `
+        + `или задайте более раннее окно через ARSENKIN_WORDSTAT_EXTRA {startdate,enddate}).`
+      : baseReason;
     return {
       verdict: 'error',
-      reason: (err && err.message) || String(err),
+      reason,
       rows: allRows,
       region_lr: regionLr,
       requested: list.length,
@@ -681,6 +920,8 @@ function _rawSample(res) {
 
 module.exports = {
   collectSeasonality,
+  collectCommercialization,
+  collectSerpFeatures,
   resolveRegionLr,
   seasonalityDateRange,
   normalizeDevice,
@@ -688,4 +929,7 @@ module.exports = {
   _normalizeResult,
   _rowFromHistory,
   _monthYearResolver,
+  _resolverFromEnddate,
+  _resolverFromRange,
+  _isWrongDatesError,
 };

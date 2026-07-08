@@ -44,6 +44,9 @@ const FORECASTER_CONFIG = deepFreeze({
   // ── Прогноз ──────────────────────────────────────────────────────
   forecast: {
     horizonMonths: 12,
+    // Сколько полных месяцев истории запрашиваем у Арсенкина: 24 точки
+    // нужны, чтобы Holt-Winters видел два годовых сезона.
+    historyMonths: 24,
     season:        12,      // годовая сезонность
     // Грид-серч параметров Holt-Winters: α (level), β (trend), γ (season).
     gridAlpha:     [0.1, 0.3, 0.5, 0.7, 0.9],
@@ -135,6 +138,34 @@ const FORECASTER_CONFIG = deepFreeze({
       negative: 0.7,
       neutral:  1.0,
       positive: 1.0,
+    },
+  },
+
+
+  // ── SOV-прогноз (доля рынка / Share of Voice) ────────────────────
+  sov: {
+    hMaxDefault: 12,
+    hMaxLimit:   24,
+    scenarios: {
+      pessimistic: { pTarget: 7, k: 0.15 },
+      realistic:   { pTarget: 3, k: 0.25 },
+      optimistic:  { pTarget: 1, k: 0.40 },
+    },
+    ctrByPosition: {
+      1: 0.28,
+      2: 0.15,
+      3: 0.11,
+      4: 0.08,
+      5: 0.06,
+      6: 0.045,
+      7: 0.03,
+    },
+    serpWeights: {
+      direct:        0.10,
+      maps:          0.15,
+      market:        0.12,
+      goods_gallery: 0.12,
+      other:         0.05,
     },
   },
 

@@ -10,6 +10,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ForecastChart from '../components/ForecastChart.vue';
+import SovForecastChart from '../components/SovForecastChart.vue';
 import { useForecasterStore } from '../stores/forecaster.js';
 
 const route  = useRoute();
@@ -76,6 +77,7 @@ const oppClusters     = computed(() => opportunities.value?.clusters || []);
 const oppSummary      = computed(() => opportunities.value?.summary || null);
 const leadsSummary    = computed(() => task.value?.leads_summary || null);
 const expertReports   = computed(() => task.value?.expert_reports || null);
+const sovForecast     = computed(() => task.value?.sov_forecast || null);
 const nicheStrategist = computed(() => expertReports.value?.niche_strategist || null);
 const opportunityHunter = computed(() => expertReports.value?.opportunity_hunter || null);
 const clusterPlanner  = computed(() => expertReports.value?.cluster_planner || null);
@@ -216,6 +218,16 @@ function fmtCtr(c) {
 }
 
 const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡';
+
+const sovSummaryRows = computed(() => {
+  const s = sovForecast.value?.summary;
+  if (!s) return [];
+  return [
+    { label: 'Доля рынка (SOV)', start: fmtPct(s.sov?.current, 1), target: fmtPct(s.sov?.target, 1), total: '—' },
+    { label: 'Трафик', start: fmtNum(s.traffic?.current), target: fmtNum(s.traffic?.at_h), total: fmtNum(s.traffic?.total) },
+    { label: 'Лиды', start: fmtNumSafe(s.leads?.current), target: fmtNumSafe(s.leads?.at_h), total: fmtNumSafe(s.leads?.total) },
+  ];
+});
 </script>
 
 <template>
@@ -419,6 +431,36 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
                 </div>
               </div>
             </div>
+          </section>
+
+
+          <!-- SOV-прогноз -->
+          <section v-if="sovForecast" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">📈 Прогноз доли рынка (SOV)</h2>
+            <div class="overflow-x-auto border border-gray-800 rounded-lg mb-4">
+              <table class="w-full text-sm">
+                <thead class="bg-gray-950 text-gray-400">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-normal">Метрика</th>
+                    <th class="text-right px-3 py-2 font-normal">На старте</th>
+                    <th class="text-right px-3 py-2 font-normal">Цель (через {{ sovForecast.h_max }} мес)</th>
+                    <th class="text-right px-3 py-2 font-normal">Суммарно за период</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in sovSummaryRows" :key="row.label" class="border-t border-gray-800">
+                    <td class="px-3 py-2 text-gray-300">{{ row.label }}</td>
+                    <td class="px-3 py-2 text-right text-gray-100">{{ row.start }}</td>
+                    <td class="px-3 py-2 text-right text-indigo-300 font-semibold">{{ row.target }}</td>
+                    <td class="px-3 py-2 text-right text-emerald-300">{{ row.total }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <SovForecastChart :sov-forecast="sovForecast" :height="360" />
+            <p class="text-[11px] text-gray-500 mt-2">
+              λ={{ sovForecast.constants?.lambda }} · C_serp={{ sovForecast.constants?.c_serp }} · CR_final={{ fmtPct(sovForecast.constants?.cr_final, 2) }}.
+            </p>
           </section>
 
           <!-- Сбор сезонности через Арсенкин (режим «список ключей») -->
