@@ -30,7 +30,10 @@
  *     «по дням» — только последние 60 дней без текущего. Данные по последнему
  *     завершившемуся периоду публикуются с лагом ~7–14 дней: в начале месяца
  *     запрос «до конца прошлого месяца» отвергается с HTTP 422
- *     {"code":"WRONG_WORDSTAT_DATES"}. На эту ошибку клиент авто-повторяет
+ *     {"code":"WRONG_WORDSTAT_DATES"}. Поэтому в первые дни месяца
+ *     (день < ARSENKIN_WORDSTAT_LAG_DAYS, по умолчанию 20) окно сразу
+ *     заканчивается на месяц раньше, а startdate — historyMonths (24 мес)
+ *     назад от enddate. Если период всё равно отвергнут, клиент авто-повторяет
  *     задачу, сжимая окно на месяц с обеих сторон (до 3 раз) — см. _runOneTask.
  *   • Проверка статуса:        POST https://arsenkin.ru/api/tools/check
  *       body: { task_id }   → { data: { status_id } }  (1 = в работе, 2 = готово)
@@ -58,7 +61,12 @@
  *                                 остальных полей (можно переопределить
  *                                 startdate/enddate и т.п.). Не добавляйте
  *                                 сюда поля, которых нет в документации, —
- *                                 API отвечает HTTP 422.
+ *                                 API отвечает HTTP 422. При авто-повторе
+ *                                 WRONG_WORDSTAT_DATES заданные здесь даты
+ *                                 заменяются вычисленным (сжатым) окном.
+ *   ARSENKIN_WORDSTAT_LAG_DAYS  — день месяца, до которого последний
+ *                                 завершившийся месяц считается ещё не
+ *                                 опубликованным Вордстатом (default 20).
  *   ARSENKIN_BATCH_SIZE         — фраз в одной задаче (по умолчанию 100).
  *   ARSENKIN_POLL_INTERVAL_MS   — период поллинга статуса (default 10000;
  *                                 не ставьте < 3000 — упрётесь в 30 req/min).
@@ -174,6 +182,20 @@ function normalizeDevice(raw) {
 // за пределы ретеншена — и все повторы падали с тем же 422; сжатие окна
 // одновременно чинит и «слишком новый» enddate, и «слишком старый» startdate
 // (см. _runOneTask). Для group=day/week окно короткое и просто сдвигается.
+//
+// Лаг публикации помесячной статистики Вордстат — ~7–14 дней. Чтобы не
+// начинать каждый запуск с заведомо провального окна «до конца прошлого
+// месяца», в первые дни месяца (день < ARSENKIN_WORDSTAT_LAG_DAYS, по
+// умолчанию 20) последний месяц считаем ещё НЕ опубликованным и сразу
+// заканчиваем окно на месяц раньше. startdate при этом уезжает на
+// historyMonths назад от enddate — т.е. окно всегда «текущая безопасная
+// дата минус 2 года» (при historyMonths=24). Авто-повтор monthOffset
+// работает поверх этой базы.
+const _WORDSTAT_LAG_DAYS = (() => {
+  const n = Number(process.env.ARSENKIN_WORDSTAT_LAG_DAYS);
+  return Number.isFinite(n) && n >= 0 && n <= 28 ? n : 20;
+})();
+
 function seasonalityDateRange(group = 'month', now = new Date(), monthOffset = 0, historyMonths = null) {
   const pad = (n) => String(n).padStart(2, '0');
   const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -196,13 +218,19 @@ function seasonalityDateRange(group = 'month', now = new Date(), monthOffset = 0
     return { startdate: iso(start), enddate: iso(end) };
   }
   // month (default): последние historyMonths полных календарных месяцев.
-  // При off>0 окно СЖИМАЕТСЯ: enddate — от ref (off месяцев назад),
-  // startdate — от now, но на off месяцев ВПЕРЁД (защита от ретеншена
-  // Вордстат ~24 мес). Гарантируем минимум один полный месяц в окне.
+  // Базовое окно учитывает лаг публикации: в первые _WORDSTAT_LAG_DAYS дней
+  // месяца последний завершившийся месяц считаем неопубликованным и заканчиваем
+  // окно на месяц раньше; startdate — ровно historyMonths назад от enddate
+  // («текущая дата минус 2 года» при historyMonths=24).
+  // При off>0 окно СЖИМАЕТСЯ: enddate — ещё на off месяцев назад,
+  // startdate — на off месяцев ВПЕРЁД (защита от ретеншена Вордстат
+  // ~24 мес от последнего опубликованного месяца). Гарантируем минимум
+  // один полный месяц в окне.
   const hm = Math.max(1, Number(historyMonths) || Number(getForecasterConfig().forecast?.historyMonths) || 24);
-  const endMonthIdx = now.getMonth() - off; // индексы месяцев относительно now (JS нормализует)
+  const lagExtra = now.getDate() < _WORDSTAT_LAG_DAYS ? 1 : 0;
+  const endMonthIdx = now.getMonth() - lagExtra - off; // индексы месяцев относительно now (JS нормализует)
   const end = new Date(now.getFullYear(), endMonthIdx, 0);
-  const startMonthIdx = Math.min(now.getMonth() - hm + off, endMonthIdx - 1);
+  const startMonthIdx = Math.min(now.getMonth() - lagExtra - hm + off, endMonthIdx - 1);
   const start = new Date(now.getFullYear(), startMonthIdx, 1);
   return { startdate: iso(start), enddate: iso(end) };
 }
@@ -293,6 +321,17 @@ async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
   const deviceVal = normalizeDevice('device' in data ? data.device : cfg.device);
   if (deviceVal) data.device = deviceVal;
   else delete data.device;
+  // ARSENKIN_WORDSTAT_EXTRA может жёстко переопределить startdate/enddate.
+  // На первой попытке уважаем override пользователя, но при авто-повторе
+  // WRONG_WORDSTAT_DATES (monthOffset>0) возвращаем вычисленные даты —
+  // иначе все повторы шлют те же самые «плохие» даты и гарантированно падают.
+  if (monthOffset > 0) {
+    data.startdate = startdate;
+    data.enddate = enddate;
+  }
+  // Фактически применённое окно (с учётом extra-override) — по нему дальше
+  // восстанавливается год для month-only ответов сезонности.
+  const effRange = { startdate: data.startdate, enddate: data.enddate };
   const setResp = await _post(API_SET, { tools_name: cfg.toolName, data }, cfg.token);
   const sj = setResp.json || {};
   const taskId = sj.task_id ?? sj.data?.task_id ?? sj.id ?? sj.data?.id;
@@ -318,7 +357,7 @@ async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
   }
 
   const got = await _post(API_GET, { task_id: taskId }, cfg.token);
-  return { taskId, json: got.json, text: got.text, range };
+  return { taskId, json: got.json, text: got.text, range: effRange };
 }
 
 // Обёртка с авто-повтором на WRONG_WORDSTAT_DATES: если Вордстат ещё не
