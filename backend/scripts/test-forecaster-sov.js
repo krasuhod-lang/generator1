@@ -57,6 +57,20 @@ group('sovForecast.buildSovForecast', () => {
     const d24 = Math.abs(sc.sov[23] - sc.sov_target);
     assert.ok(d24 < d1);
   });
+  test('защита от падения: sov_target ≥ sov_current·(1+G), SOV не убывает', () => {
+    // Высокая текущая доля (500/1000 = 0.5) выше ctr·λ·c_serp → без защиты
+    // прогноз рушился бы к цели ниже текущей. Теперь floor держит цель.
+    const r = buildSovForecast({ monthly: monthly(1000), forecastPoints: points(), vCurrent: 500, clusterVolume: 1000, mainQueryVolume: 1000, cfg });
+    const G = cfg.sov.minGrowth;
+    for (const name of ['pessimistic', 'realistic', 'optimistic']) {
+      const sc = r.scenarios[name];
+      assert.ok(sc.sov_target >= Math.min(1, r.constants.sov_current * (1 + G)) - 1e-9, `${name}: target ${sc.sov_target}`);
+      for (let i = 1; i < sc.sov.length; i++) {
+        assert.ok(sc.sov[i] >= sc.sov[i - 1] - 1e-9, `${name}: SOV не должен падать`);
+      }
+      assert.ok(sc.sov.every((v) => v >= r.constants.sov_current - 1e-9), `${name}: SOV не ниже текущего`);
+    }
+  });
   test('трафик сценариев упорядочен optimistic ≥ realistic ≥ pessimistic', () => {
     const r = buildSovForecast({ monthly: monthly(), forecastPoints: points(), vCurrent: 0, clusterVolume: 1000, mainQueryVolume: 1000, cfg });
     for (let i = 0; i < r.h_max; i++) {
