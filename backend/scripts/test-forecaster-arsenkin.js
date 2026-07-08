@@ -26,6 +26,8 @@ async function testAsync(name, fn) {
 function group(name, fn) { console.log(name); fn(); }
 
 // ── stopWordFilter ─────────────────────────────────────────────────
+const { isCommercialPhrase } = require('../src/services/forecaster/stopWordFilter');
+
 group('stopWordFilter.matchStopWord', () => {
   test('чистый коммерческий запрос проходит', () => {
     assert.strictEqual(matchStopWord('купить окна пвх москва'), null);
@@ -36,8 +38,11 @@ group('stopWordFilter.matchStopWord', () => {
   test('словоформа «бесплатный» матчится по stem', () => {
     assert.strictEqual(matchStopWord('бесплатный замер окон'), 'бесплатн*');
   });
-  test('«вб» по границе слова: «купить на вб» — да', () => {
-    assert.ok(matchStopWord('купить на вб'));
+  test('коммерческий whitelist перевешивает стоп-слово: «купить на вб» → оставляем', () => {
+    assert.strictEqual(matchStopWord('купить на вб'), null);
+  });
+  test('«вб» матчится, когда нет коммерческих слов: «пвх на вб»', () => {
+    assert.ok(matchStopWord('пвх на вб'));
   });
   test('«вб» НЕ матчит «вбить гвоздь»', () => {
     assert.strictEqual(matchStopWord('вбить гвоздь'), null);
@@ -61,8 +66,32 @@ group('stopWordFilter.matchStopWord', () => {
   test('ё-нормализация: «чертёж» → чертеж*', () => {
     assert.ok(matchStopWord('чертёж окна'));
   });
-  test('регистр не важен', () => {
-    assert.ok(matchStopWord('Скачать ПРАЙС'));
+  test('коммерческое «прайс» перевешивает «скачать»: «Скачать ПРАЙС» → оставляем', () => {
+    assert.strictEqual(matchStopWord('Скачать ПРАЙС'), null);
+  });
+  test('«скачать инструкцию» — стоп-слово, коммерческого нет', () => {
+    assert.ok(matchStopWord('скачать инструкцию'));
+  });
+});
+
+group('stopWordFilter.isCommercialPhrase', () => {
+  test('купить / заказать / оптом / магазин / цена — коммерческие', () => {
+    assert.ok(isCommercialPhrase('купить телефон'));
+    assert.ok(isCommercialPhrase('заказать пиццу'));
+    assert.ok(isCommercialPhrase('шурупы оптом'));
+    assert.ok(isCommercialPhrase('магазин обуви'));
+    assert.ok(isCommercialPhrase('цена на бензин'));
+  });
+  test('словоформы через стем: «куплю», «оптовый», «продажа»', () => {
+    assert.ok(isCommercialPhrase('куплю авто'));
+    assert.ok(isCommercialPhrase('оптовый склад'));
+    assert.ok(isCommercialPhrase('продажа квартиры'));
+    assert.ok(isCommercialPhrase('доставка еды'));
+    assert.ok(isCommercialPhrase('услуги электрика'));
+  });
+  test('информационный запрос — не коммерческий', () => {
+    assert.strictEqual(isCommercialPhrase('что такое ipo'), false);
+    assert.strictEqual(isCommercialPhrase('окна пвх отзывы'), false);
   });
 });
 
@@ -73,6 +102,12 @@ group('stopWordFilter.filterKeywords', () => {
     assert.strictEqual(r.excluded.length, 1);
     assert.strictEqual(r.excluded[0].phrase, 'окна бесплатно');
     assert.strictEqual(r.excluded[0].matched, 'бесплатно');
+  });
+  test('коммерческий whitelist не даёт исключить «купить б/у на авито»', () => {
+    const r = filterKeywords(['купить бу на авито', 'окна пвх авито']);
+    assert.deepStrictEqual(r.kept, ['купить бу на авито']);
+    assert.strictEqual(r.excluded.length, 1);
+    assert.strictEqual(r.excluded[0].phrase, 'окна пвх авито');
   });
   test('пустой вход → пустой выход', () => {
     const r = filterKeywords([]);

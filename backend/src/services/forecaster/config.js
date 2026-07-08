@@ -252,10 +252,10 @@ const FORECASTER_CONFIG = deepFreeze({
   // ── Классификатор «шлак-запросов» ────────────────────────────────
   // Помечает фразы, которые НЕ стоит продвигать (или которые исказят
   // оценку трафика — например, ультрагенерики, инфо-запросы без коммерции,
-  // запросы конкурирующих брендов). Гейт: всегда ON, DeepSeek-обогащение
+  // запросы конкурирующих брендов). Гейт: всегда ON, Gemini-обогащение
   // включается только при наличии ключа (см. deepseekAnalyzer).
   junk: {
-    // Сколько кандидатов отдаём DeepSeek-у на разметку причин (защита
+    // Сколько кандидатов отдаём Gemini на разметку причин (защита
     // от размера промпта).
     deepseekTopK:        80,
     // Минимальная доля строк, которая считается стоп-словной (ругань,
@@ -318,7 +318,7 @@ const FORECASTER_CONFIG = deepFreeze({
     defaultRegion:     'msk',
   },
 
-  // ── DeepSeek-аналитик ────────────────────────────────────────────
+  // ── Gemini-аналитик (gemini-3.1-pro-preview, как в генераторах) ───
   deepseek: {
     // Гейт фичи: на случай если ключа нет — пайплайн просто пропускает шаг.
     enabled:       true,
@@ -369,7 +369,7 @@ const FORECASTER_CONFIG = deepFreeze({
   //   • lognormal      — честные p10/p50/p90 прогноза,
   //   • recovery       — восстановление трафика после просадки,
   //   • opportunity    — пороги ранжирования (drop_severity → priority),
-  //   • experts        — параметры DSPy-style DeepSeek-промптов.
+  //   • experts        — параметры DSPy-style Gemini-промптов.
   advanced: {
     enabled: true,
 
@@ -459,9 +459,9 @@ const FORECASTER_CONFIG = deepFreeze({
       },
     },
 
-    // DSPy-style эксперты (DeepSeek с типизированными JSON-схемами).
+    // DSPy-style эксперты (Gemini с типизированными JSON-схемами).
     // Каждый эксперт — отдельный вызов с фокусированным system-промптом
-    // и строгим JSON-output. Гейт каждого: feature flag + ключ DeepSeek.
+    // и строгим JSON-output. Гейт каждого: feature flag + ключ GEMINI_API_KEY.
     experts: {
       nicheStrategist:    { enabled: true, temperature: 0.25, maxTokens: 1200, timeoutMs: 60000 },
       opportunityHunter:  { enabled: true, temperature: 0.30, maxTokens: 1500, timeoutMs: 60000 },

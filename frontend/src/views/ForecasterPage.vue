@@ -30,6 +30,7 @@ const form = ref({
   intent: '',
   main_query: '',
   h_max: 12,
+  start_month: '',              // месяц старта работ (YYYY-MM); пусто → следующий месяц
   // Тонкая настройка единой модели прогноза (все опциональны — есть дефолты).
   target_ctr_pct: '',            // целевой CTR ядра, % (по умолчанию 3%)
   c_yield_pct: '',               // живые клики (Zero-click), % (по умолчанию 65%)
@@ -134,6 +135,7 @@ async function handleSubmit() {
         intent: form.value.intent?.trim() || null,
         main_query: form.value.main_query?.trim() || '',
         h_max: Math.max(1, Math.min(24, parseInt(form.value.h_max, 10) || 12)),
+        start_month: /^\d{4}-\d{2}$/.test(form.value.start_month || '') ? form.value.start_month : null,
         // ── Тонкая настройка единой модели (проценты → доли) ──────────
         target_ctr: pctToFrac(form.value.target_ctr_pct),
         c_yield: pctToFrac(form.value.c_yield_pct),
@@ -308,6 +310,16 @@ function statusBadge(s) {
                 class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100" />
               <p class="text-[11px] text-gray-500 mt-1">По умолчанию 12, максимум 24 месяца.</p>
             </div>
+          </div>
+
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Месяц старта работ</label>
+            <input v-model="form.start_month" type="month"
+              class="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100" />
+            <p class="text-[11px] text-gray-500 mt-1">
+              От этого месяца начинается отсчёт прогноза (t=1). Если оставить пустым — берётся
+              следующий календарный месяц после последней истории спроса.
+            </p>
           </div>
 
           <div class="grid grid-cols-2 gap-3">

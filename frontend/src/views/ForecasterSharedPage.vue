@@ -244,7 +244,7 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
           <SovForecastChart :sov-forecast="sovForecast" :height="360" />
         </section>
 
-        <!-- DeepSeek -->
+        <!-- Аналитические выводы (Gemini) -->
         <section v-if="dsSummary && dsSummary.verdict === 'ok'"
                  class="bg-gray-900 border border-gray-800 rounded-xl p-4">
           <h2 class="text-sm font-semibold mb-3">🤖 Аналитические выводы</h2>
