@@ -182,6 +182,9 @@ async function createForecasterTask(req, res, next) {
       // Используется только если conversion_rate не задан (выбирается preset).
       intent:                    _sanitizeIntent(opts.intent),
       h_max:                     _sanitizeHMax(opts.h_max),
+      // Месяц старта работ (YYYY-MM). Пусто/невалидно → null (пайплайн возьмёт
+      // следующий календарный месяц после последней истории).
+      start_month:               (/^\d{4}-\d{2}$/.test(String(opts.start_month || ''))) ? String(opts.start_month) : null,
       main_query:                String(opts.main_query || '').replace(/\s+/g, ' ').trim().slice(0, 300),
       comm_percent:              _sanitizeUnit(opts.comm_percent),
       serp_elements:             _sanitizeSerpElements(opts.serp_elements),

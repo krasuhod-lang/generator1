@@ -84,6 +84,8 @@ function buildSovForecast({
   clusterVolume = 0,
   mainQueryVolume = 0,
   cfg = {},
+  unifiedForecast = null,
+  startMonth = null,
 }) {
   const sovCfg = cfg.sov || cfg || {};
   const scenariosCfg = sovCfg.scenarios || {
@@ -112,7 +114,29 @@ function buildSovForecast({
   const sovCurrent = d0 > 0 ? _clamp(currentTraffic / d0, 0, 1) : 0;
 
   const demands = _extendDemand(monthly || [], forecastPoints || [], horizon);
-  const periods = _nextPeriods(monthly || [], forecastPoints || [], horizon);
+  // Периоды берём в приоритете из единой модели (если она есть) — тогда обе
+  // диаграммы (Прогноз трафика и SOV) идут по одной и той же оси времени
+  // (с учётом start_month). Иначе — из forecastPoints/monthly.
+  let periods;
+  const unifiedFc = unifiedForecast && Array.isArray(unifiedForecast.forecast)
+    ? unifiedForecast.forecast.slice(0, horizon)
+    : null;
+  if (unifiedFc && unifiedFc.length) {
+    periods = unifiedFc.map((p) => String(p.period));
+    // Добираем оставшиеся месяцы календарно (если h_max > длины unified.forecast).
+    if (periods.length < horizon) {
+      const tail = _nextPeriods(monthly || [], forecastPoints || [], horizon);
+      periods = periods.concat(tail.slice(periods.length));
+    }
+  } else if (startMonth && /^\d{4}-\d{2}$/.test(String(startMonth))) {
+    // Отсчёт от месяца старта работ.
+    const startIdx = _periodToIndex(String(startMonth));
+    periods = [];
+    let idx = startIdx;
+    while (periods.length < horizon) periods.push(_indexToPeriod(idx++));
+  } else {
+    periods = _nextPeriods(monthly || [], forecastPoints || [], horizon);
+  }
   const scenarios = {};
 
   for (const name of ['pessimistic', 'realistic', 'optimistic']) {
@@ -141,6 +165,51 @@ function buildSovForecast({
       traffic,
       leads,
     };
+  }
+
+  // Синхронизация с единой моделью: «реалистичный» сценарий должен показывать
+  // тот же трафик, что и график «🚀 Прогноз трафика». Раньше два графика
+  // считали трафик независимо (SOV не учитывал C_yield и логистику захвата),
+  // отсюда «на 2-м месяце трафик совершенно другой». Теперь realistic-линия и
+  // capture берутся из unifiedForecast, а пессимистичный/оптимистичный
+  // сохраняют роль коридора (перерасчёт трафика от новых SOV-таргетов).
+  if (unifiedFc && unifiedFc.length) {
+    const realTraffic = [];
+    const realLeads = [];
+    const realSov = [];
+    for (let h = 0; h < horizon; h++) {
+      const u = unifiedFc[h];
+      if (u) {
+        const v = Math.max(0, Math.round(Number(u.value) || 0));
+        realTraffic.push(v);
+        realLeads.push(Math.round(v * crFinal * 10) / 10);
+        realSov.push(_clamp(Number(u.capture) || 0, 0, 1));
+      } else {
+        // Хвост за пределом unified: fallback на прежний расчёт.
+        realTraffic.push(scenarios.realistic.traffic[h] || 0);
+        realLeads.push(scenarios.realistic.leads[h] || 0);
+        realSov.push((scenarios.realistic.sov[h] || 0) / 1);
+      }
+    }
+    const realSovTarget = realSov.length
+      ? _clamp(realSov[realSov.length - 1], 0, 1)
+      : scenarios.realistic.sov_target;
+    scenarios.realistic = {
+      p_target: scenarios.realistic.p_target,
+      k: scenarios.realistic.k,
+      sov_target: Math.round(realSovTarget * 10000) / 10000,
+      sov: realSov.map((v) => Math.round(v * 10000) / 10000),
+      traffic: realTraffic,
+      leads: realLeads,
+      source: 'unified',
+    };
+    // Пессимистичный ≤ реалистичный ≤ оптимистичный на каждом месяце
+    // (коридор не должен пересекать реалистичную линию).
+    for (let h = 0; h < horizon; h++) {
+      const rv = realTraffic[h];
+      if (scenarios.pessimistic.traffic[h] > rv) scenarios.pessimistic.traffic[h] = rv;
+      if (scenarios.optimistic.traffic[h] < rv) scenarios.optimistic.traffic[h] = rv;
+    }
   }
 
   const real = scenarios.realistic;

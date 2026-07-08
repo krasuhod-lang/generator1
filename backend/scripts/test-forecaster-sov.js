@@ -84,6 +84,50 @@ group('sovForecast.buildSovForecast', () => {
     assert.strictEqual(r.summary.traffic.total, r.scenarios.realistic.traffic.reduce((a, b) => a + b, 0));
     assert.strictEqual(r.summary.leads.current, 12.3);
   });
+
+  test('unifiedForecast → realistic-трафик и capture равны unified.value / unified.capture', () => {
+    const unified = {
+      forecast: Array.from({ length: 12 }, (_, i) => ({
+        period: `2026-${String(i + 1).padStart(2, '0')}`,
+        value: 500 + i * 50,
+        capture: 0.05 + i * 0.005,
+      })),
+    };
+    const r = buildSovForecast({
+      monthly: monthly(),
+      forecastPoints: points(),
+      vCurrent: 100, crBase: 0.02, commPercent: 1,
+      clusterVolume: 1000, mainQueryVolume: 1000, cfg,
+      unifiedForecast: unified,
+    });
+    // Периоды берутся из unified.
+    assert.strictEqual(r.periods[0], '2026-01');
+    assert.strictEqual(r.periods[11], '2026-12');
+    // Реалистичный трафик 1:1 совпадает с unified.value.
+    for (let i = 0; i < 12; i++) {
+      assert.strictEqual(r.scenarios.realistic.traffic[i], unified.forecast[i].value);
+      assert.ok(Math.abs(r.scenarios.realistic.sov[i] - unified.forecast[i].capture) < 1e-4);
+    }
+    assert.strictEqual(r.scenarios.realistic.source, 'unified');
+    // Коридор корректно клэмпится вокруг realistic.
+    for (let i = 0; i < 12; i++) {
+      assert.ok(r.scenarios.optimistic.traffic[i] >= r.scenarios.realistic.traffic[i]);
+      assert.ok(r.scenarios.pessimistic.traffic[i] <= r.scenarios.realistic.traffic[i]);
+    }
+  });
+
+  test('startMonth без unifiedForecast → периоды начинаются с указанного месяца', () => {
+    const r = buildSovForecast({
+      monthly: monthly(),
+      forecastPoints: [], // без forecastPoints — берём startMonth
+      vCurrent: 100, crBase: 0.02, commPercent: 1,
+      clusterVolume: 1000, mainQueryVolume: 1000, cfg,
+      startMonth: '2027-04',
+      hMax: 6,
+    });
+    assert.strictEqual(r.periods[0], '2027-04');
+    assert.strictEqual(r.periods[5], '2027-09');
+  });
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

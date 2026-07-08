@@ -68,8 +68,8 @@ const PROGRESS_STEPS = {
   aggregate:            { percent: 52,  label: 'Агрегация помесячного спроса' },
   anomalies:            { percent: 55,  label: 'Поиск аномалий' },
   forecast:             { percent: 58,  label: 'Прогноз спроса' },
-  sov_forecast:         { percent: 62,  label: 'Прогноз доли рынка (SOV)' },
-  unified_forecast:     { percent: 66,  label: 'Единая модель трафика' },
+  sov_forecast:         { percent: 66,  label: 'Прогноз доли рынка (SOV)' },
+  unified_forecast:     { percent: 62,  label: 'Единая модель трафика' },
   keysso_signals:       { percent: 70,  label: 'Сигналы keys.so' },
   traffic_estimate:     { percent: 78,  label: 'Оценка трафика' },
   persist_partial:      { percent: 82,  label: 'Сохранение результатов' },
@@ -325,10 +325,10 @@ async function processForecasterTask(taskId) {
     step('forecast');
     const forecast = buildForecast(seriesData.monthly);
 
-    // 6a. SOV-прогноз: доля рынка строится на том же прогнозе спроса,
-    // а cluster/main объёмы временно берём из строк Wordstat. Позже сюда можно
-    // подключить точные totals из keys.so без изменения JSON-контракта.
-    step('sov_forecast');
+    // 6a. Единая («перепрошитая») модель прогноза трафика: считаем ПЕРВОЙ,
+    // чтобы SOV-прогноз мог взять её realistic-трафик как эталон и оба
+    // графика (Прогноз трафика и Прогноз SOV) показывали ОДИН И ТОТ ЖЕ трафик.
+    step('unified_forecast');
     const cfgAll = getForecasterConfig();
     const hMax = _clampInt(options.h_max, cfgAll.sov.hMaxDefault, 1, cfgAll.sov.hMaxLimit);
     const { clusterVolume, mainQueryVolume } = _phraseVolumes(remainingRows, options.main_query);
@@ -348,23 +348,7 @@ async function processForecasterTask(taskId) {
     } catch (_) { serpElements = null; }
     if (commPercent == null) commPercent = 1.0;
     if (!Array.isArray(serpElements)) serpElements = [];
-    const sovForecast = buildSovForecast({
-      monthly: seriesData.monthly,
-      forecastPoints: forecast.points,
-      vCurrent: currentTraffic,
-      hMax,
-      crBase: _resolveCrBase(options, cfgAll),
-      commPercent,
-      serpElements,
-      clusterVolume,
-      mainQueryVolume,
-      cfg: cfgAll,
-    });
 
-    // 6c. Единая («перепрошитая») модель прогноза трафика: V̂(t) = TAC·SOV(t)
-    // с коридором погрешности δ·√t. Считает трафик напрямую (не через top3/5/10),
-    // учитывает Zero-click, расширение семантики и логистику захвата рынка.
-    step('unified_forecast');
     let unifiedForecast = null;
     try {
       const crFinalUnified = Math.round(
@@ -383,6 +367,26 @@ async function processForecasterTask(taskId) {
     } catch (err) {
       unifiedForecast = { verdict: 'error', reason: (err && err.message) || String(err) };
     }
+
+    // 6b. SOV-прогноз: доля рынка строится на том же прогнозе спроса,
+    // а cluster/main объёмы временно берём из строк Wordstat.
+    // «Реалистичный» сценарий берёт трафик и capture из unifiedForecast
+    // (устраняет расхождение «на 2-м месяце трафик совершенно другой»).
+    step('sov_forecast');
+    const sovForecast = buildSovForecast({
+      monthly: seriesData.monthly,
+      forecastPoints: forecast.points,
+      vCurrent: currentTraffic,
+      hMax,
+      crBase: _resolveCrBase(options, cfgAll),
+      commPercent,
+      serpElements,
+      clusterVolume,
+      mainQueryVolume,
+      cfg: cfgAll,
+      unifiedForecast,
+      startMonth: options.start_month || null,
+    });
 
     // 6b. Keys.so signals (graceful skip без ключа). Шлём top-N фраз по total
     // (после фильтрации исключённых) — чтобы экономить квоту.

@@ -102,6 +102,13 @@ function _resolveParam(userVal, def, min, max) {
   return _clamp(n, min, max);
 }
 
+function _periodToDateIndex(period) {
+  // "YYYY-MM" → absolute month index (используется для start_month)
+  const m = String(period || '').match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  return Number(m[1]) * 12 + (Number(m[2]) - 1);
+}
+
 /**
  * @param {Object} args
  * @param {Array<{period:string,demand:number}>} args.monthly — история спроса (после junk-фильтра)
@@ -182,6 +189,23 @@ function buildUnifiedForecast({
   const horizon = _clamp(Math.floor(Number(options.h_max) || sovCfg.hMaxDefault || 12), 1, hMaxLimit);
   const lastIdx = _periodToIndex(series[n - 1].period);
 
+  // «Месяц старта работ»: пользовательский якорь, от которого t=1..H. Если
+  // не задан, берём следующий календарный месяц после последней истории
+  // (совместимо с прежним поведением). Если задан ранее последней истории,
+  // клэмпим к последнему историческому месяцу.
+  const startMonthRaw = (options && (options.start_month || options.startMonth)) || null;
+  const startMonthAbs = _periodToDateIndex(String(startMonthRaw || ''));
+  // Переведём абсолютный индекс (YYYY·12+M) в «локальный» относительно 2000.
+  // _periodToIndex/_indexToPeriod из series.js используют базу 2000-01, поэтому
+  // startAnchor рассчитываем как относительный от той же базы.
+  let startAnchor = null;
+  if (startMonthAbs != null) {
+    startAnchor = startMonthAbs - 2000 * 12; // «локальный» индекс от 2000-01
+  }
+  // Дефолтная точка отсчёта t=0: последняя историческая точка.
+  const t0AnchorIdx = startAnchor != null ? startAnchor - 1 : lastIdx;
+  const startPeriod = startAnchor != null ? _indexToPeriod(startAnchor) : null;
+
   // Ретроданные: исторический трафик при ТЕКУЩЕМ захвате (demand·SOV_start).
   // На последнем месяце ≈ текущий трафик → бесшовный стык с прогнозом.
   const retro = series.map((p) => ({
@@ -190,23 +214,49 @@ function buildUnifiedForecast({
     traffic: Math.round(Math.max(0, Number(p.demand) || 0) * sovStart),
   }));
 
-  // Прогноз: перебираем t = 1..horizon.
-  // Два инварианта роста:
+  // Индексация исторического ряда по абсолютному month-index (для YoY-сравнения
+  // «этот месяц год назад» — traffic и demand).
+  const retroTrafficByIdx = new Map();
+  const retroDemandByIdx = new Map();
+  for (let i = 0; i < series.length; i++) {
+    const idx = _periodToIndex(series[i].period);
+    if (idx != null) {
+      retroTrafficByIdx.set(idx, retro[i].traffic);
+      retroDemandByIdx.set(idx, retro[i].demand);
+    }
+  }
+
+  // Прогноз: перебираем t = 1..horizon от t0AnchorIdx (по умолчанию —
+  // последний месяц истории; при заданном options.start_month — предыдущий
+  // месяц старта работ). Три инварианта роста:
   //   1. Доля рынка (capture) монотонно не убывает — защита от падения ниже
   //      стартовой (SOV_max ≥ SOV_start·(1+G) + монотонный floor поверх
   //      CTR-размытия новой семантики).
-  //   2. Десезонализированное ядро трафика монотонно не убывает — «плавномерный
-  //      рост согласно формулам». Сезонность накладывается ПОВЕРХ ядра, поэтому
-  //      в низкий сезон трафик может проседать — это закономерно.
+  //   2. Десезонализированное ядро трафика монотонно не убывает.
+  //   3. YoY-инвариант (два множителя «спрос × позиции»): традиционный расчёт
+  //      значения даёт value = ядро × сезонность и потому уже равен
+  //      traffic_prev_year × (demand_yoy × capture_growth). Если фактический
+  //      демандовый ряд проседает (например, на 15% YoY), а позиции растут в
+  //      1.3×, итоговый трафик = 0.85·1.3 = 1.105 → рост, а не падение.
+  //      Плюс — soft-floor «трафик не ниже уровня старта работ»: в первые 3
+  //      месяца рост скромный, но никогда не отрицательный.
   const fc = [];
   let prevCapture = sovStart;
   let prevCore = Math.max(0, L0) * cYield * sovStart; // ядро на t=0 ≈ текущий трафик (десезонализированный)
+  // «Стартовый» трафик (уровень t=0): десезонализированное ядро на месяце
+  // начала работ. Используется как soft-floor «не ниже старта».
+  const startCore = prevCore;
   for (let t = 1; t <= horizon; t++) {
-    const periodIdx = lastIdx != null ? lastIdx + t : null;
+    const periodIdx = t0AnchorIdx != null ? t0AnchorIdx + t : null;
     const period = periodIdx != null ? _indexToPeriod(periodIdx) : `m+${t}`;
     const cm = periodIdx != null ? periodIdx % 12 : (t - 1) % 12;
     const s = seasonal[cm];
+    // Индекс «того же месяца год назад» для YoY-сравнения. Может быть в
+    // истории (retroTrafficByIdx) или в прогнозе (fc[t-13].value).
+    const yoyIdx = periodIdx != null ? periodIdx - 12 : null;
     // Ёмкость рынка (TAC): деманд-потенциал → кликабельная ёмкость.
+    // Если start_month сдвинут вперёд относительно последней истории, часть
+    // роста тренда «съедается» до старта — считаем от t0AnchorIdx.
     const demandPotential = Math.max(0, (L0 + t * T) * s * (1 + r * t));
     const tac = demandPotential * cYield;
     // Функция захвата (S-кривая) — динамика основного (стартового) ядра.
@@ -219,10 +269,32 @@ function buildUnifiedForecast({
     // Десезонализированное ядро трафика: базовый спрос (без сезонности)
     // × живые клики × расширение ядра × захват. Монотонно не убывает.
     const coreRaw = Math.max(0, (L0 + t * T)) * (1 + r * t) * cYield * capture;
-    const core = Math.max(coreRaw, prevCore);
+    // Soft-floor «не ниже уровня старта работ»: даже если спрос проседает,
+    // трафик как минимум удерживает стартовый уровень (позиции растут).
+    let core = Math.max(coreRaw, prevCore, startCore);
     prevCore = core;
     // Итог: ядро × сезонность (сезонные просадки допустимы и закономерны).
-    const value = Math.max(0, core * s);
+    let value = Math.max(0, core * s);
+    // YoY-защита: трафик того же месяца год назад — верхний предел допустимой
+    // сезонной просадки. Если ниже — подтягиваем к YoY-уровню (позиции не
+    // должны позволить трафику упасть YoY, даже при просадке спроса).
+    let yoyPrevTraffic = null;
+    if (yoyIdx != null) {
+      if (retroTrafficByIdx.has(yoyIdx)) yoyPrevTraffic = retroTrafficByIdx.get(yoyIdx);
+      else if (t - 13 >= 0 && fc[t - 13]) yoyPrevTraffic = fc[t - 13].value;
+    }
+    if (yoyPrevTraffic != null && value < yoyPrevTraffic) {
+      value = yoyPrevTraffic;
+    }
+    // Два множителя (спрос × позиции) — прозрачность для маркетолога.
+    let demandYoy = null;
+    let captureGrowth = null;
+    if (yoyIdx != null && retroDemandByIdx.has(yoyIdx) && retroDemandByIdx.get(yoyIdx) > 0) {
+      demandYoy = _round(demandPotential / retroDemandByIdx.get(yoyIdx), 3);
+    }
+    if (sovStart > 0) {
+      captureGrowth = _round(capture / sovStart, 3);
+    }
     const widen = Math.sqrt(t);
     const upper = value * (1 + delta * widen);
     const lower = value * Math.max(0, 1 - delta * widen);
@@ -232,6 +304,8 @@ function buildUnifiedForecast({
       demand_potential: Math.round(demandPotential),
       tac: Math.round(tac),
       capture: _round(capture, 4),
+      capture_growth: captureGrowth, // capture(t) / SOV_start
+      demand_yoy: demandYoy,          // demand(t) / demand(t-12)
       core: Math.round(core),
       seasonal: _round(s, 3),
       value: Math.round(value),
@@ -249,6 +323,7 @@ function buildUnifiedForecast({
   return {
     verdict: 'ok',
     today_period: series[n - 1].period,
+    start_period: startPeriod || (lastIdx != null ? _indexToPeriod(lastIdx + 1) : null),
     horizon,
     params: {
       L0: Math.round(L0),
