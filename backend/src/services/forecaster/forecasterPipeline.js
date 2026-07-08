@@ -31,6 +31,7 @@ const { filterKeywords } = require('./stopWordFilter');
 const { analyzeOpportunities } = require('./opportunityAnalyzer');
 const { getForecasterConfig } = require('./config');
 const { buildSovForecast } = require('./sovForecast');
+const { buildUnifiedForecast } = require('./unifiedForecast');
 const { createFunnelTracker } = require('../aegis/funnelTracker');
 
 
@@ -173,7 +174,7 @@ async function processForecasterTask(taskId) {
         );
         throw new Error('Все ключевые запросы попали под стоп-слова — собирать сезонность не по чему');
       }
-      const ars = await collectSeasonality({ phrases: kept, regionLabel: options.region });
+      const ars = await collectSeasonality({ phrases: kept, regionLabel: options.region, regionLr: options.region_lr });
       arsenkinReport = {
         verdict:     ars.verdict,
         reason:      ars.reason || null,
@@ -270,13 +271,13 @@ async function processForecasterTask(taskId) {
     let serpElements = _sanitizeSerpElements(options.serp_elements);
     try {
       if (commPercent == null) {
-        const collectedComm = await collectCommercialization({ phrases: topPhrases.slice(0, 50), regionLabel: options.region });
+        const collectedComm = await collectCommercialization({ phrases: topPhrases.slice(0, 50), regionLabel: options.region, regionLr: options.region_lr });
         commPercent = _sanitizeUnit(collectedComm);
       }
     } catch (_) { commPercent = null; }
     try {
       if (serpElements == null) {
-        const collectedSerp = await collectSerpFeatures({ phrases: topPhrases.slice(0, 50), regionLabel: options.region });
+        const collectedSerp = await collectSerpFeatures({ phrases: topPhrases.slice(0, 50), regionLabel: options.region, regionLr: options.region_lr });
         serpElements = _sanitizeSerpElements(collectedSerp);
       }
     } catch (_) { serpElements = null; }
@@ -294,6 +295,29 @@ async function processForecasterTask(taskId) {
       mainQueryVolume,
       cfg: cfgAll,
     });
+
+    // 6c. Единая («перепрошитая») модель прогноза трафика: V̂(t) = TAC·SOV(t)
+    // с коридором погрешности δ·√t. Считает трафик напрямую (не через top3/5/10),
+    // учитывает Zero-click, расширение семантики и логистику захвата рынка.
+    funnel.step('unified_forecast');
+    let unifiedForecast = null;
+    try {
+      const crFinalUnified = Math.round(
+        _resolveCrBase(options, cfgAll) * Math.max(0, Math.min(1, Number(commPercent) || 0)) * 100000,
+      ) / 100000;
+      unifiedForecast = buildUnifiedForecast({
+        monthly: seriesData.monthly,
+        forecastPoints: forecast.points,
+        options: { ...options, h_max: hMax },
+        currentTrafficPerMonth: currentTraffic,
+        serpElements,
+        commPercent,
+        crFinal: crFinalUnified,
+        cfg: cfgAll,
+      });
+    } catch (err) {
+      unifiedForecast = { verdict: 'error', reason: (err && err.message) || String(err) };
+    }
 
     // 6b. Keys.so signals (graceful skip без ключа). Шлём top-N фраз по total
     // (после фильтрации исключённых) — чтобы экономить квоту.
@@ -409,6 +433,11 @@ async function processForecasterTask(taskId) {
       top3_annual:              trafficEstimate.top3?.leads?.annual,
       top5_annual:              trafficEstimate.top5?.leads?.annual,
       top10_annual:             trafficEstimate.top10?.leads?.annual,
+      // Главная цифра новой (единой) модели — для шапки результата.
+      unified_annual:           unifiedForecast?.summary?.annual?.value ?? null,
+      unified_annual_lower:     unifiedForecast?.summary?.annual?.lower ?? null,
+      unified_annual_upper:     unifiedForecast?.summary?.annual?.upper ?? null,
+      unified_leads_annual:     unifiedForecast?.summary?.leads_annual ?? null,
     } : null;
 
     await db.query(
@@ -426,6 +455,7 @@ async function processForecasterTask(taskId) {
          opportunities=$12::jsonb,
          leads_summary=$13::jsonb,
          sov_forecast=$14::jsonb,
+         unified_forecast=$15::jsonb,
          updated_at=NOW()
        WHERE id=$1`,
       [
@@ -443,6 +473,7 @@ async function processForecasterTask(taskId) {
         opportunitiesReport ? JSON.stringify(opportunitiesReport) : null,
         leadsSummary ? JSON.stringify(leadsSummary) : null,
         JSON.stringify(sovForecast),
+        JSON.stringify(unifiedForecast),
       ],
     );
 
@@ -458,6 +489,7 @@ async function processForecasterTask(taskId) {
       targetUrl,
       junkSummary: junkReport,
       keyssoSignals: keyssoSignalsReport,
+      unifiedForecast,
     });
 
     // 8b. Junk refinement — берём top-K кандидатов и просим DS дать verdict + reason

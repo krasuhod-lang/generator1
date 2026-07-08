@@ -23,6 +23,7 @@ const {
   generateShareToken,
   isValidShareToken,
 } = require('../services/forecaster/shareToken');
+const { resolveRegionLr } = require('../services/forecaster/arsenkinClient');
 
 const NAME_LIMIT = 200;
 
@@ -89,6 +90,15 @@ function _sanitizeIntent(v) {
   const allowed = ['commercial', 'ecommerce', 'lead_gen', 'info', 'b2b'];
   const s = String(v || '').trim().toLowerCase();
   return allowed.includes(s) ? s : null;
+}
+
+// Параметры единой модели прогноза (config.unified). Возвращаем число в
+// заданных границах или null (тогда пайплайн берёт дефолт из config).
+function _sanitizeRange(v, min, max) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(min, Math.min(max, n));
 }
 
 // ─── GET /api/forecaster ───────────────────────────────────────────
@@ -158,6 +168,10 @@ async function createForecasterTask(req, res, next) {
     const options = {
       current_traffic_per_month: Math.max(0, Math.floor(Number(opts.current_traffic_per_month) || 0)),
       region:                    String(opts.region || '').slice(0, 100),
+      // Вшиваем числовой lr в задачу сразу при создании (как в модуле
+      // релевантности, где lr — first-class поле). Дальше пайплайн передаёт
+      // его в Арсенкин без повторного резолва текстовой метки.
+      region_lr:                 resolveRegionLr(opts.region),
       notes:                     String(opts.notes  || '').slice(0, 1000),
       target_url:                targetUrl,
       // Конверсия сайта (0..0.5). Хранится как дробь (0.02 = 2 %).
@@ -171,6 +185,14 @@ async function createForecasterTask(req, res, next) {
       main_query:                String(opts.main_query || '').replace(/\s+/g, ' ').trim().slice(0, 300),
       comm_percent:              _sanitizeUnit(opts.comm_percent),
       serp_elements:             _sanitizeSerpElements(opts.serp_elements),
+      // ── Параметры единой модели прогноза (config.unified) ──────────
+      // Все опциональны: если null — пайплайн подставит дефолт из config.
+      c_yield:                   _sanitizeRange(opts.c_yield, 0.30, 1.00),
+      target_ctr:                _sanitizeRange(opts.target_ctr, 0.005, 0.10),
+      semantic_expansion_rate:   _sanitizeRange(opts.semantic_expansion_rate, 0.0, 0.10),
+      growth_k:                  _sanitizeRange(opts.growth_k, 0.15, 0.60),
+      breakthrough_month:        _sanitizeRange(opts.breakthrough_month, 1, 18),
+      uncertainty_delta:         _sanitizeRange(opts.uncertainty_delta, 0.02, 0.20),
     };
 
     const sourceColumns = keywords
@@ -216,7 +238,7 @@ async function getForecasterTask(req, res, next) {
               monthly_series, anomalies, forecast, trend,
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
-              sov_forecast, arsenkin_report,
+              sov_forecast, unified_forecast, arsenkin_report,
               deepseek_summary,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
@@ -285,7 +307,7 @@ async function rerunForecasterTask(req, res, next) {
               monthly_series=NULL, anomalies=NULL, forecast=NULL, trend=NULL,
               traffic_estimate=NULL, junk_phrases=NULL, keysso_signals=NULL,
               opportunities=NULL, expert_reports=NULL, leads_summary=NULL,
-              sov_forecast=NULL, arsenkin_report=NULL, deepseek_summary=NULL,
+              sov_forecast=NULL, unified_forecast=NULL, arsenkin_report=NULL, deepseek_summary=NULL,
               llm_provider=DEFAULT, llm_model=NULL,
               tokens_in=DEFAULT, tokens_out=DEFAULT, cost_usd=DEFAULT,
               started_at=NULL, completed_at=NULL, updated_at=NOW()
@@ -374,7 +396,7 @@ async function getSharedForecast(req, res, next) {
               monthly_series, anomalies, forecast, trend,
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
-              sov_forecast, arsenkin_report,
+              sov_forecast, unified_forecast, arsenkin_report,
               deepseek_summary,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks
