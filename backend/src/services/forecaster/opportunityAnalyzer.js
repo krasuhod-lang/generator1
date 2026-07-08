@@ -62,6 +62,14 @@ function _median(arr) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
+// Math.max(...arr) переполняет стек вызовов на больших массивах (ядро из
+// десятков тысяч фраз) — «Maximum call stack size exceeded». reduce()
+// работает итеративно и не имеет такого ограничения.
+function _maxOf(arr) {
+  if (!arr || arr.length === 0) return -Infinity;
+  return arr.reduce((m, x) => (x > m ? x : m), arr[0]);
+}
+
 function _normPhrase(s) {
   return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -233,7 +241,7 @@ function analyzeOpportunities({
   // Готовим демографию ядра — для нормирования composite_score.
   const demands = parsedRows.map((r) => Number(r.total || 0)).filter((x) => x > 0);
   const demandP50 = _median(demands);
-  const demandLogNorm = demands.length > 0 ? Math.log(1 + Math.max(...demands)) : 1;
+  const demandLogNorm = demands.length > 0 ? Math.log(1 + _maxOf(demands)) : 1;
 
   const horizon = oppCfg.horizonMonths;
   const efforts = oppCfg.effortLevels;
