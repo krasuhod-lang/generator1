@@ -193,7 +193,7 @@ async function processForecasterTask(taskId) {
 
   // Шаг воронки + обновление «ползунка» прогресса (fire-and-forget).
   const step = (name) => {
-    step(name);
+    funnel.step(name);
     const p = PROGRESS_STEPS[name];
     if (p) void _setProgress(taskId, { stage: name, ...p });
   };
