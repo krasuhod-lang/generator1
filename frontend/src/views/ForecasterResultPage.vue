@@ -3,7 +3,7 @@
  * ForecasterResultPage — детальная страница задачи «Прогнозатор».
  *   • SVG-график (история + прогноз + аномалии + тренд),
  *   • карточки с цифрами (годовой прогноз, max severity, top3/5/10 трафик),
- *   • выводы DeepSeek (если есть),
+ *   • аналитические AI-выводы (Gemini, если есть),
  *   • кнопка «Поделиться» — выпускает короткий публичный URL.
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
@@ -672,13 +672,13 @@ const sovSummaryRows = computed(() => {
                   </span>
                   <span v-if="junkReport.summary?.warn" class="text-amber-400">⚠ много мусора в ядре</span>
                   <span v-if="junkReport.deepseek?.verdict === 'ok'" class="text-emerald-300 ml-1">
-                    · 🤖 DeepSeek-разметка ({{ junkReport.deepseek.items_count }})
+                    · 🤖 AI-разметка ({{ junkReport.deepseek.items_count }})
                   </span>
                   <span v-else-if="junkReport.deepseek?.verdict === 'skipped'" class="text-gray-500 ml-1 italic">
-                    · DeepSeek-разметка пропущена: {{ junkReport.deepseek.reason }}
+                    · AI-разметка пропущена: {{ junkReport.deepseek.reason }}
                   </span>
                   <span v-else-if="junkReport.deepseek?.verdict === 'error'" class="text-amber-400 ml-1 italic">
-                    · DeepSeek-разметка недоступна: {{ junkReport.deepseek.reason }}
+                    · AI-разметка недоступна: {{ junkReport.deepseek.reason }}
                   </span>
                 </p>
                 <p v-if="junkReport.overflow" class="text-[11px] text-gray-500 mt-0.5 italic">
@@ -1002,9 +1002,9 @@ const sovSummaryRows = computed(() => {
             📋 ClusterPlanner: {{ clusterPlanner.verdict }}{{ clusterPlanner.reason ? ' — ' + clusterPlanner.reason : '' }}
           </section>
 
-          <!-- DeepSeek выводы -->
+          <!-- Аналитические выводы (Gemini) -->
           <section v-if="dsSummary" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <h2 class="text-sm font-semibold text-gray-200 mb-3">🤖 Аналитические выводы (DeepSeek)</h2>
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">🤖 Аналитические выводы</h2>
             <div v-if="dsSummary.verdict === 'ok'">
               <p v-if="dsSummary.summary" class="text-sm text-gray-200 mb-3 leading-relaxed">
                 {{ dsSummary.summary }}
@@ -1027,10 +1027,10 @@ const sovSummaryRows = computed(() => {
               </p>
             </div>
             <div v-else-if="dsSummary.verdict === 'skipped'" class="text-xs text-gray-500 italic">
-              DeepSeek пропущен: {{ dsSummary.reason }}
+              Аналитика пропущена: {{ dsSummary.reason }}
             </div>
             <div v-else-if="dsSummary.verdict === 'error'" class="text-xs text-amber-400 italic">
-              DeepSeek недоступен: {{ dsSummary.reason }}
+              Аналитика недоступна: {{ dsSummary.reason }}
             </div>
           </section>
         </template>
