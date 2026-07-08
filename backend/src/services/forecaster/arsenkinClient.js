@@ -31,7 +31,7 @@
  *     завершившемуся периоду публикуются с лагом ~7–14 дней: в начале месяца
  *     запрос «до конца прошлого месяца» отвергается с HTTP 422
  *     {"code":"WRONG_WORDSTAT_DATES"}. На эту ошибку клиент авто-повторяет
- *     задачу, сдвигая окно на месяц назад (до 3 раз) — см. _runOneTask.
+ *     задачу, сжимая окно на месяц с обеих сторон (до 3 раз) — см. _runOneTask.
  *   • Проверка статуса:        POST https://arsenkin.ru/api/tools/check
  *       body: { task_id }   → { data: { status_id } }  (1 = в работе, 2 = готово)
  *   • Получение результата:    POST https://arsenkin.ru/api/tools/get
@@ -165,11 +165,15 @@ function normalizeDevice(raw) {
 // «По неделям» — полные недели пн–вс; «по дням» — максимум 60 дней
 // без учёта текущего дня.
 //
-// monthOffset — сдвиг всего окна НАЗАД на указанное число месяцев. Нужен для
-// авто-повтора при ошибке WRONG_WORDSTAT_DATES: данные Яндекс.Вордстат по
-// последнему завершившемуся месяцу публикуются с лагом ~7–14 дней, поэтому в
-// начале месяца запрос «до конца прошлого месяца» ещё не подходит — сдвигаем
-// окно на месяц назад и пробуем снова (см. _runOneTask).
+// monthOffset — СЖАТИЕ окна на указанное число месяцев с обеих сторон
+// (для group=month): enddate уезжает на off месяцев назад, startdate — на off
+// месяцев вперёд. Нужен для авто-повтора при ошибке WRONG_WORDSTAT_DATES:
+// данные Яндекс.Вордстат по последнему завершившемуся месяцу публикуются с
+// лагом ~7–14 дней, а история хранится лишь ~24 месяца от последнего
+// ОПУБЛИКОВАННОГО месяца. Сдвиг всего окна назад целиком выталкивал startdate
+// за пределы ретеншена — и все повторы падали с тем же 422; сжатие окна
+// одновременно чинит и «слишком новый» enddate, и «слишком старый» startdate
+// (см. _runOneTask). Для group=day/week окно короткое и просто сдвигается.
 function seasonalityDateRange(group = 'month', now = new Date(), monthOffset = 0, historyMonths = null) {
   const pad = (n) => String(n).padStart(2, '0');
   const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -191,16 +195,21 @@ function seasonalityDateRange(group = 'month', now = new Date(), monthOffset = 0
     const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 52 * 7 + 1);
     return { startdate: iso(start), enddate: iso(end) };
   }
-  // month (default): последние historyMonths полных календарных месяцев
+  // month (default): последние historyMonths полных календарных месяцев.
+  // При off>0 окно СЖИМАЕТСЯ: enddate — от ref (off месяцев назад),
+  // startdate — от now, но на off месяцев ВПЕРЁД (защита от ретеншена
+  // Вордстат ~24 мес). Гарантируем минимум один полный месяц в окне.
   const hm = Math.max(1, Number(historyMonths) || Number(getForecasterConfig().forecast?.historyMonths) || 24);
-  const end = new Date(ref.getFullYear(), ref.getMonth(), 0);
-  const start = new Date(ref.getFullYear(), ref.getMonth() - hm, 1);
+  const endMonthIdx = now.getMonth() - off; // индексы месяцев относительно now (JS нормализует)
+  const end = new Date(now.getFullYear(), endMonthIdx, 0);
+  const startMonthIdx = Math.min(now.getMonth() - hm + off, endMonthIdx - 1);
+  const start = new Date(now.getFullYear(), startMonthIdx, 1);
   return { startdate: iso(start), enddate: iso(end) };
 }
 
 // Признак ошибки Арсенкина «указанный период не подходит для этого запроса».
 // Данные Вордстат по последнему завершившемуся месяцу ещё не опубликованы —
-// повторяем задачу с окном, сдвинутым на месяц назад.
+// повторяем задачу с окном, сжатым на месяц с обеих сторон.
 function _isWrongDatesError(err) {
   const msg = String((err && err.message) || err || '');
   return /WRONG_WORDSTAT_DATES/i.test(msg)
@@ -257,9 +266,10 @@ async function _post(url, body, token, { retries = 4 } = {}) {
 }
 
 // ── постановка + ожидание + получение одной задачи ─────────────────
-// Максимальное число сдвигов окна назад при ошибке WRONG_WORDSTAT_DATES.
-// Данные Вордстат хранятся ~24 месяца, поэтому 3 сдвига (до 3 месяцев назад)
-// безопасны и с запасом перекрывают лаг публикации последнего месяца.
+// Максимальное число сжатий окна при ошибке WRONG_WORDSTAT_DATES.
+// Каждое сжатие двигает enddate на месяц назад и startdate на месяц вперёд:
+// это перекрывает и лаг публикации последнего месяца (~7–14 дней), и
+// ретеншен Вордстат (~24 месяца от последнего опубликованного месяца).
 const _DATE_RETRY_MAX = 3;
 
 async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
@@ -313,8 +323,9 @@ async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset }) {
 
 // Обёртка с авто-повтором на WRONG_WORDSTAT_DATES: если Вордстат ещё не
 // опубликовал данные за последний завершившийся период (лаг ~7–14 дней), запрос
-// «до конца прошлого месяца» отвергается с HTTP 422. Пробуем то же окно,
-// сдвинутое на месяц назад, пока не получим ответ либо не исчерпаем сдвиги.
+// «до конца прошлого месяца» отвергается с HTTP 422. Та же ошибка приходит,
+// если startdate старше ретеншена Вордстат (~24 мес). Пробуем окно, сжатое
+// на месяц с обеих сторон, пока не получим ответ либо не исчерпаем повторы.
 async function _runOneTask({ phrases, regionLr, cfg }) {
   let lastErr = null;
   for (let monthOffset = 0; monthOffset <= _DATE_RETRY_MAX; monthOffset++) {
@@ -323,7 +334,7 @@ async function _runOneTask({ phrases, regionLr, cfg }) {
     } catch (err) {
       lastErr = err;
       if (!_isWrongDatesError(err) || monthOffset === _DATE_RETRY_MAX) throw err;
-      // иначе — сдвигаем окно на месяц назад и повторяем
+      // иначе — сжимаем окно на месяц с обеих сторон и повторяем
     }
   }
   throw lastErr || new Error('Arsenkin API: request failed');
@@ -776,7 +787,7 @@ async function collectSeasonality({ phrases, regionLabel }) {
   const regionLr = resolveRegionLr(regionLabel);
   // Резолвер года по умолчанию — для неполноценных ответов без range; для каждой
   // задачи ниже строим отдельный резолвер по фактически применённому окну
-  // (авто-повтор WRONG_WORDSTAT_DATES мог сдвинуть окно на месяц-два назад).
+  // (авто-повтор WRONG_WORDSTAT_DATES мог сжать окно на месяц-два).
   const defaultResolveMonth = _monthYearResolver(cfg.group);
   const t0 = Date.now();
   const allRows = [];
@@ -802,7 +813,7 @@ async function collectSeasonality({ phrases, regionLabel }) {
     }
   } catch (err) {
     const baseReason = (err && err.message) || String(err);
-    // Если даже после сдвигов окна назад Вордстат отвергает период —
+    // Если даже после сжатий окна Вордстат отвергает период —
     // добавляем понятную подсказку про лаг публикации данных.
     const reason = _isWrongDatesError(err)
       ? `${baseReason} (Яндекс.Вордстат ещё не опубликовал данные за запрошенный период — `

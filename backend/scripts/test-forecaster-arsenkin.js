@@ -299,15 +299,25 @@ group('arsenkinClient.seasonalityDateRange', () => {
     assert.strictEqual(r.enddate, '2026-07-06');
     assert.strictEqual(r.startdate, '2026-05-08');
   });
-  test('monthOffset=1: окно сдвинуто на месяц назад (лаг WRONG_WORDSTAT_DATES)', () => {
-    const r = seasonalityDateRange('month', new Date(2026, 6, 7), 1); // 7 июля 2026, сдвиг 1 мес
-    assert.strictEqual(r.startdate, '2024-06-01');
-    assert.strictEqual(r.enddate, '2026-05-31');
+  test('monthOffset=1: окно сжато на месяц с обеих сторон (лаг + ретеншен Вордстат)', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 6, 7), 1); // 7 июля 2026, сжатие 1 мес
+    assert.strictEqual(r.startdate, '2024-08-01'); // startdate ВПЕРЁД (не за ретеншен)
+    assert.strictEqual(r.enddate, '2026-05-31');   // enddate назад (лаг публикации)
   });
-  test('monthOffset=2: окно сдвинуто на два месяца назад', () => {
+  test('monthOffset=2: окно сжато на два месяца с обеих сторон', () => {
     const r = seasonalityDateRange('month', new Date(2026, 6, 7), 2);
-    assert.strictEqual(r.startdate, '2024-05-01');
+    assert.strictEqual(r.startdate, '2024-09-01');
     assert.strictEqual(r.enddate, '2026-04-30');
+  });
+  test('monthOffset: границы года (сжатие через январь)', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 1, 5), 2); // 5 февраля 2026
+    assert.strictEqual(r.startdate, '2024-04-01');
+    assert.strictEqual(r.enddate, '2025-11-30');
+  });
+  test('monthOffset: короткая история не даёт пустого окна (минимум 1 месяц)', () => {
+    const r = seasonalityDateRange('month', new Date(2026, 6, 7), 3, 4); // hm=4, off=3
+    assert.strictEqual(r.startdate, '2026-03-01');
+    assert.strictEqual(r.enddate, '2026-03-31');
   });
   test('monthOffset по умолчанию 0 = без сдвига', () => {
     const a = seasonalityDateRange('month', new Date(2026, 6, 7));
