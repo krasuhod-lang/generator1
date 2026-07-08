@@ -12,11 +12,15 @@
 
 const assert = require('assert');
 const { filterKeywords, matchStopWord } = require('../src/services/forecaster/stopWordFilter');
-const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory, _resolverFromEnddate, _isWrongDatesError, _datesFromErrorMessage, _snapRangeToFullMonths } = require('../src/services/forecaster/arsenkinClient');
+const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory, _resolverFromEnddate, _isWrongDatesError, _datesFromErrorMessage, _snapRangeToFullMonths, _mapWithConcurrency } = require('../src/services/forecaster/arsenkinClient');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
   try { fn(); passed++; console.log(`  ✔ ${name}`); }
+  catch (e) { failed++; console.log(`  ✘ ${name}\n    ${e.stack || e.message}`); }
+}
+async function testAsync(name, fn) {
+  try { await fn(); passed++; console.log(`  ✔ ${name}`); }
   catch (e) { failed++; console.log(`  ✘ ${name}\n    ${e.stack || e.message}`); }
 }
 function group(name, fn) { console.log(name); fn(); }
@@ -569,5 +573,57 @@ group('arsenkinClient.normalizeDevice', () => {
   });
 });
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed > 0 ? 1 : 0);
+// ── arsenkinClient._mapWithConcurrency ───────────────────────────
+(async () => {
+  console.log('arsenkinClient._mapWithConcurrency');
+  await testAsync('сохраняет порядок результата = порядку входа', async () => {
+    const items = [10, 20, 30, 40, 50];
+    const res = await _mapWithConcurrency(items, 3, async (n) => {
+      // Разные задержки: элементы завершатся не по порядку.
+      await new Promise((r) => setTimeout(r, (items.length - items.indexOf(n)) * 5));
+      return n * 2;
+    });
+    assert.deepStrictEqual(res, [20, 40, 60, 80, 100]);
+  });
+  await testAsync('уважает лимит concurrency (пик in-flight ≤ limit)', async () => {
+    let inFlight = 0, peak = 0;
+    const items = Array.from({ length: 12 }, (_, i) => i);
+    await _mapWithConcurrency(items, 3, async () => {
+      inFlight++; if (inFlight > peak) peak = inFlight;
+      await new Promise((r) => setTimeout(r, 10));
+      inFlight--;
+    });
+    assert.ok(peak <= 3, `peak in-flight = ${peak}, ожидалось ≤3`);
+    assert.ok(peak >= 2, `peak in-flight = ${peak}, пул не параллелит`);
+  });
+  await testAsync('первый reject прерывает пул и пробрасывается', async () => {
+    let calls = 0;
+    let err = null;
+    try {
+      await _mapWithConcurrency([1, 2, 3, 4, 5], 2, async (n) => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 5));
+        if (n === 2) throw new Error('boom');
+        return n;
+      });
+    } catch (e) { err = e; }
+    assert.ok(err && /boom/.test(err.message), 'ошибка должна пробрасываться');
+    assert.ok(calls < 5, 'пул должен остановиться после первой ошибки');
+  });
+  await testAsync('concurrency=1 → строго последовательный порядок исполнения', async () => {
+    const order = [];
+    await _mapWithConcurrency([1, 2, 3], 1, async (n) => {
+      order.push(`start:${n}`);
+      await new Promise((r) => setTimeout(r, 5));
+      order.push(`end:${n}`);
+    });
+    assert.deepStrictEqual(order, ['start:1', 'end:1', 'start:2', 'end:2', 'start:3', 'end:3']);
+  });
+  await testAsync('пустой массив → []', async () => {
+    const res = await _mapWithConcurrency([], 3, async () => 42);
+    assert.deepStrictEqual(res, []);
+  });
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed > 0 ? 1 : 0);
+})();
