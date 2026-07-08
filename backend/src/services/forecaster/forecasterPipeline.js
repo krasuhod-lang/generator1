@@ -35,6 +35,48 @@ const { buildUnifiedForecast } = require('./unifiedForecast');
 const { createFunnelTracker } = require('../aegis/funnelTracker');
 
 
+/**
+ * Прогресс выполнения задачи («ползунок» в UI). Fire-and-forget UPDATE —
+ * сбой записи прогресса не должен ломать пайплайн.
+ * @param {string} taskId
+ * @param {{stage:string, percent:number, label:string, detail?:string|null}} p
+ */
+async function _setProgress(taskId, { stage, percent, label, detail = null }) {
+  const payload = {
+    stage,
+    percent: Math.max(0, Math.min(100, Math.round(Number(percent) || 0))),
+    label,
+    detail,
+    updated_at: new Date().toISOString(),
+  };
+  try {
+    await db.query(
+      `UPDATE forecaster_tasks SET progress=$2::jsonb, updated_at=NOW() WHERE id=$1`,
+      [taskId, JSON.stringify(payload)],
+    );
+  } catch (err) {
+    console.warn(`[Forecaster] task ${taskId}: не удалось записать прогресс (${err.message})`);
+  }
+}
+
+// Проценты «ползунка» по шагам пайплайна. Сбор сезонности Арсенкина —
+// самый долгий этап, ему отведён диапазон 5..45 % (детализируется по батчам).
+const PROGRESS_STEPS = {
+  parse:                { percent: 3,   label: 'Чтение исходных данных' },
+  arsenkin_seasonality: { percent: 5,   label: 'Сбор сезонности (Вордстат)' },
+  junk_classify:        { percent: 48,  label: 'Фильтрация шлак-запросов' },
+  aggregate:            { percent: 52,  label: 'Агрегация помесячного спроса' },
+  anomalies:            { percent: 55,  label: 'Поиск аномалий' },
+  forecast:             { percent: 58,  label: 'Прогноз спроса' },
+  sov_forecast:         { percent: 62,  label: 'Прогноз доли рынка (SOV)' },
+  unified_forecast:     { percent: 66,  label: 'Единая модель трафика' },
+  keysso_signals:       { percent: 70,  label: 'Сигналы keys.so' },
+  traffic_estimate:     { percent: 78,  label: 'Оценка трафика' },
+  persist_partial:      { percent: 82,  label: 'Сохранение результатов' },
+  deepseek_analysis:    { percent: 86,  label: 'AI-аналитика' },
+  finalize:             { percent: 97,  label: 'Финализация' },
+};
+
 function _normPhrase(v) {
   return String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -149,8 +191,16 @@ async function processForecasterTask(taskId) {
 
   const funnel = createFunnelTracker({ kind: 'forecaster', taskRef: taskId, userId: task.user_id });
 
+  // Шаг воронки + обновление «ползунка» прогресса (fire-and-forget).
+  const step = (name) => {
+    step(name);
+    const p = PROGRESS_STEPS[name];
+    if (p) void _setProgress(taskId, { stage: name, ...p });
+  };
+  await _setProgress(taskId, { stage: 'start', percent: 1, label: 'Задача запущена' });
+
   try {
-    funnel.step('parse');
+    step('parse');
     // 2. Источник данных: список ключей (сезонность через Арсенкин) либо файл
     let parsed;
     let arsenkinReport = null;
@@ -158,7 +208,7 @@ async function processForecasterTask(taskId) {
       // 2a. Режим «список ключей»: ПЕРЕД сбором сезонности исключаем
       // фразы со стоп-словами (бесплатно/скачать/авито/… — см. ТЗ),
       // затем через Арсенкин снимаем помесячную частотность за год.
-      funnel.step('arsenkin_seasonality');
+      step('arsenkin_seasonality');
       const { kept, excluded } = filterKeywords(rawKeywords);
       if (kept.length === 0) {
         arsenkinReport = {
@@ -174,7 +224,22 @@ async function processForecasterTask(taskId) {
         );
         throw new Error('Все ключевые запросы попали под стоп-слова — собирать сезонность не по чему');
       }
-      const ars = await collectSeasonality({ phrases: kept, regionLabel: options.region, regionLr: options.region_lr });
+      const ars = await collectSeasonality({
+        phrases: kept,
+        regionLabel: options.region,
+        regionLr: options.region_lr,
+        // Детализация «ползунка» внутри самого долгого этапа: диапазон 5..45 %
+        // пропорционально числу уже собранных фраз.
+        onProgress: ({ done, total }) => {
+          const frac = total > 0 ? done / total : 0;
+          void _setProgress(taskId, {
+            stage: 'arsenkin_seasonality',
+            percent: 5 + Math.round(frac * 40),
+            label: 'Сбор сезонности (Вордстат)',
+            detail: `Получены данные по ${done} из ${total} фраз`,
+          });
+        },
+      });
       arsenkinReport = {
         verdict:     ars.verdict,
         reason:      ars.reason || null,
@@ -223,7 +288,7 @@ async function processForecasterTask(taskId) {
     // 3. Junk-классификатор фраз (детерминированный) — выполняется ДО
     //    агрегации, чтобы из суммы спроса вычесть однословные ВЧ /
     //    мёртвые / чужие бренды (см. cfg.junk.excludeFromForecastReasons).
-    funnel.step('junk_classify');
+    step('junk_classify');
     const junkRaw = classifyJunkPhrases({
       parsedRows: parsed.rows,
       monthCols:  parsed.monthCols,
@@ -237,7 +302,7 @@ async function processForecasterTask(taskId) {
     }
 
     // 4. Агрегация (с учётом исключённых фраз)
-    funnel.step('aggregate');
+    step('aggregate');
     const seriesData = aggregateMonthlySeries(parsed, { excludePhrases: excludeSet });
     if (seriesData.monthly.length < 3) {
       throw new Error('После агрегации меньше 3 месяцев данных — недостаточно для анализа');
@@ -253,17 +318,17 @@ async function processForecasterTask(taskId) {
       .filter(Boolean);
 
     // 5. Аномалии
-    funnel.step('anomalies');
+    step('anomalies');
     const anomalies = detectAnomalies(seriesData.monthly);
 
     // 6. Прогноз
-    funnel.step('forecast');
+    step('forecast');
     const forecast = buildForecast(seriesData.monthly);
 
     // 6a. SOV-прогноз: доля рынка строится на том же прогнозе спроса,
     // а cluster/main объёмы временно берём из строк Wordstat. Позже сюда можно
     // подключить точные totals из keys.so без изменения JSON-контракта.
-    funnel.step('sov_forecast');
+    step('sov_forecast');
     const cfgAll = getForecasterConfig();
     const hMax = _clampInt(options.h_max, cfgAll.sov.hMaxDefault, 1, cfgAll.sov.hMaxLimit);
     const { clusterVolume, mainQueryVolume } = _phraseVolumes(remainingRows, options.main_query);
@@ -299,7 +364,7 @@ async function processForecasterTask(taskId) {
     // 6c. Единая («перепрошитая») модель прогноза трафика: V̂(t) = TAC·SOV(t)
     // с коридором погрешности δ·√t. Считает трафик напрямую (не через top3/5/10),
     // учитывает Zero-click, расширение семантики и логистику захвата рынка.
-    funnel.step('unified_forecast');
+    step('unified_forecast');
     let unifiedForecast = null;
     try {
       const crFinalUnified = Math.round(
@@ -321,7 +386,7 @@ async function processForecasterTask(taskId) {
 
     // 6b. Keys.so signals (graceful skip без ключа). Шлём top-N фраз по total
     // (после фильтрации исключённых) — чтобы экономить квоту.
-    funnel.step('keysso_signals');
+    step('keysso_signals');
     let keyssoSignalsReport = null;
     let keyssoSignalsMap    = null; // Map<normPhrase, signals> для opportunityAnalyzer
     try {
@@ -361,7 +426,7 @@ async function processForecasterTask(taskId) {
     const intent = options.intent ? String(options.intent).trim() : null;
 
     // 7. Трафик (с калибровкой по keys.so + лиды по CR)
-    funnel.step('traffic_estimate');
+    step('traffic_estimate');
     const trafficEstimate = estimateTraffic({
       historicalMonthly: seriesData.monthly,
       forecastPoints:    forecast.points,
@@ -412,7 +477,7 @@ async function processForecasterTask(taskId) {
 
     // 7. Сохраняем «полу-готовое» состояние, чтобы UI мог показать
     // данные даже если DeepSeek потом упадёт.
-    funnel.step('persist_partial');
+    step('persist_partial');
     const sourceMeta = {
       phrase_col: parsed.phraseCol,
       total_col:  parsed.totalCol,
@@ -478,7 +543,7 @@ async function processForecasterTask(taskId) {
     );
 
     // 8. DeepSeek — graceful (анализ + junk refinement)
-    funnel.step('deepseek_analysis');
+    step('deepseek_analysis');
     const ds = await runDeepSeekAnalysis({
       sourceInfo: { filename, rowsCount: parsed.rowsCount },
       monthlySeries: seriesData.monthly,
@@ -587,7 +652,7 @@ async function processForecasterTask(taskId) {
     }
 
     // 9. Финал
-    funnel.step('finalize');
+    step('finalize');
     const dsCost     = ds.verdict === 'ok' ? (ds.cost_usd || 0) : 0;
     const refineCost = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.cost_usd || 0) : 0;
     const dsIn       = ds.verdict === 'ok' ? (ds.tokens_in || 0) : 0;
@@ -614,6 +679,7 @@ async function processForecasterTask(taskId) {
         dsCost + refineCost,
       ],
     );
+    await _setProgress(taskId, { stage: 'done', percent: 100, label: 'Готово' });
     console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'}, opp=${opportunitiesReport?.verdict || 'n/a'}, niche=${expertReports?.niche_strategist?.verdict || 'n/a'}, hunter=${expertReports?.opportunity_hunter?.verdict || 'n/a'}, planner=${expertReports?.cluster_planner?.verdict || 'n/a'})`);
     try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
   } catch (err) {

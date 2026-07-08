@@ -105,7 +105,7 @@ function _sanitizeRange(v, min, max) {
 async function listForecasterTasks(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, status, error_message,
+      `SELECT id, name, status, error_message, progress,
               source_filename, source_rows_count,
               llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
@@ -232,7 +232,7 @@ async function createForecasterTask(req, res, next) {
 async function getForecasterTask(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, user_id, name, status, error_message,
+      `SELECT id, user_id, name, status, error_message, progress,
               source_filename, source_rows_count, source_columns,
               options, target_url,
               monthly_series, anomalies, forecast, trend,
@@ -308,6 +308,7 @@ async function rerunForecasterTask(req, res, next) {
               traffic_estimate=NULL, junk_phrases=NULL, keysso_signals=NULL,
               opportunities=NULL, expert_reports=NULL, leads_summary=NULL,
               sov_forecast=NULL, unified_forecast=NULL, arsenkin_report=NULL, deepseek_summary=NULL,
+              progress=NULL,
               llm_provider=DEFAULT, llm_model=NULL,
               tokens_in=DEFAULT, tokens_out=DEFAULT, cost_usd=DEFAULT,
               started_at=NULL, completed_at=NULL, updated_at=NOW()
