@@ -69,8 +69,17 @@
  *                                 завершившийся месяц считается ещё не
  *                                 опубликованным Вордстатом (default 20).
  *   ARSENKIN_BATCH_SIZE         — фраз в одной задаче (по умолчанию 100).
+ *   ARSENKIN_CONCURRENCY        — сколько задач гоняем параллельно (default 3,
+ *                                 клампится в 1..5 под официальный лимит
+ *                                 Арсенкина «5 одновременных задач и 30 req/min»).
+ *                                 Для 1000 фраз даёт ~3× ускорение по сравнению
+ *                                 с последовательной обработкой.
  *   ARSENKIN_POLL_INTERVAL_MS   — период поллинга статуса (default 10000;
  *                                 не ставьте < 3000 — упрётесь в 30 req/min).
+ *   ARSENKIN_FIRST_CHECK_MS     — пауза перед ПЕРВЫМ /check (default 3000,
+ *                                 минимум 1000). Дальше клиент растит паузу
+ *                                 геометрически (×1.6) до pollMs. Экономит
+ *                                 5–10с на быстрых задачах сезонности.
  *   ARSENKIN_TIMEOUT_MIN        — максимум ожидания одной задачи (default 30).
  *
  * Graceful-политика как у keyssoClient: без токена → {verdict:'skipped'},
@@ -108,6 +117,17 @@ function _cfg() {
     extra,
     batchSize:    Math.max(1, Number(process.env.ARSENKIN_BATCH_SIZE) || 100),
     pollMs:       Math.max(3000, Number(process.env.ARSENKIN_POLL_INTERVAL_MS) || 10000),
+    // Пауза перед ПЕРВЫМ /check: обычно задача сезонности готова быстрее, чем
+    // за pollMs (=10с), поэтому спрашиваем раньше — экономит ~5–7с на батче.
+    // Минимум 1с, максимум = pollMs (не имеет смысла делать первый чек позже
+    // штатного шага). ENV: ARSENKIN_FIRST_CHECK_MS.
+    firstCheckMs: Math.max(1000, Number(process.env.ARSENKIN_FIRST_CHECK_MS) || 3000),
+    // Сколько батчей выполняем параллельно. Официальный лимит Арсенкина —
+    // 5 одновременных задач на пользователя и 30 запросов/мин суммарно;
+    // 3 — безопасное значение по умолчанию (укладывается в 30 req/min при
+    // pollMs≥5с, оставляет запас для параллельных инструментов). Значения
+    // выше 5 клампятся, ниже 1 — округляются вверх. ENV: ARSENKIN_CONCURRENCY.
+    concurrency:  Math.max(1, Math.min(5, Number(process.env.ARSENKIN_CONCURRENCY) || 3)),
     timeoutMin:   Math.max(1, Number(process.env.ARSENKIN_TIMEOUT_MIN) || 30),
     commToolName: String(process.env.ARSENKIN_COMM_TOOL_NAME || '').trim(),
     wizardToolName: String(process.env.ARSENKIN_WIZARD_TOOL_NAME || '').trim(),
@@ -411,8 +431,12 @@ async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset, forcedRang
   }
 
   const deadline = Date.now() + cfg.timeoutMin * 60 * 1000;
+  // Адаптивный поллинг: первый /check раньше (firstCheckMs, default 3с),
+  // дальше геометрически растим паузу до штатного pollMs. Для быстрых задач
+  // (готовы за 3–5с) это экономит 5–10с ожидания на батче.
+  let curDelay = Math.min(cfg.firstCheckMs, cfg.pollMs);
   for (;;) {
-    await _sleep(cfg.pollMs);
+    await _sleep(curDelay);
     if (Date.now() > deadline) {
       throw new Error(`Arsenkin API: задача ${taskId} не завершилась за ${cfg.timeoutMin} мин`);
     }
@@ -425,6 +449,7 @@ async function _runOneTaskOnce({ phrases, regionLr, cfg, monthOffset, forcedRang
     const failed = ['error', 'failed', 'fail'].includes(statusStr);
     if (failed) throw new Error(`Arsenkin API: задача ${taskId} завершилась с ошибкой`);
     if (finished) break;
+    curDelay = Math.min(cfg.pollMs, Math.ceil(curDelay * 1.6));
   }
 
   const got = await _post(API_GET, { task_id: taskId }, cfg.token);
@@ -611,10 +636,28 @@ function _resolverFromEnddate(enddate) {
   };
 }
 
+// Извлекает скаляр-частотность из значения точки. Арсенкин в разных версиях
+// API отдавал либо число ({"2024-06":123}), либо вложенный объект
+// ({"2024-06-01":{"frequency":123}}) — здесь поддерживаются оба варианта плюс
+// синонимы поля: count/value/freq/ws/shows/shows_count.
+function _pointValue(v) {
+  if (v == null) return NaN;
+  if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+    return Number(v);
+  }
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    return Number(
+      v.frequency ?? v.count ?? v.value ?? v.freq
+      ?? v.ws ?? v.shows ?? v.shows_count,
+    );
+  }
+  return NaN;
+}
+
 function _rowFromHistory(phrase, history, resolveMonth = null) {
   const byPeriod = {};
   if (Array.isArray(history)) {
-    // [{month|date|period, count|value|freq|ws}, ...]
+    // [{month|date|period, count|value|freq|frequency|ws|shows}, ...]
     for (let i = 0; i < history.length; i++) {
       const pt = history[i];
       if (!pt || typeof pt !== 'object') continue;
@@ -624,18 +667,24 @@ function _rowFromHistory(phrase, history, resolveMonth = null) {
         const mn = _monthNumFromAny(rawKey);
         if (mn) period = resolveMonth(mn, i);
       }
-      const val = Number(pt.count ?? pt.value ?? pt.freq ?? pt.ws ?? pt.shows);
+      const val = Number(
+        pt.count ?? pt.value ?? pt.freq ?? pt.frequency
+        ?? pt.ws ?? pt.shows ?? pt.shows_count,
+      );
       if (period && Number.isFinite(val)) byPeriod[period] = val;
     }
   } else if (history && typeof history === 'object') {
-    // {"2024-01": 123, ...} или {"01": 123, …} (month-only сезонность)
+    // {"2024-01": 123, ...} — legacy плоская карта;
+    // {"2024-06-01": {"frequency":123}} — актуальный формат Арсенкина
+    // (ключ YYYY-MM-DD, значение — объект с полем frequency);
+    // {"01": 123, …} — month-only сезонность (type=3).
     for (const [k, v] of Object.entries(history)) {
       let period = _periodFromAny(k);
       if (!period && resolveMonth) {
         const mn = _monthNumFromAny(k);
         if (mn) period = resolveMonth(mn);
       }
-      const val = Number(v);
+      const val = _pointValue(v);
       if (period && Number.isFinite(val)) byPeriod[period] = val;
     }
   }
@@ -826,6 +875,42 @@ function _logSkipOnce(key, msg) {
   console.warn(msg);
 }
 
+/**
+ * Параллельно применяет worker(item, index) к items с ограничением concurrency.
+ * Гарантирует, что порядок результата совпадает с порядком items (важно для
+ * стабильных tasksMeta/rows в collectSeasonality). Первый reject прерывает пул
+ * и пробрасывается наружу (совпадает с прежним поведением for/await/throw).
+ *
+ * @template T,R
+ * @param {T[]} items
+ * @param {number} concurrency — ≥1; клампится в вызывающем коде под лимит API.
+ * @param {(item:T, index:number)=>Promise<R>} worker
+ * @returns {Promise<R[]>}
+ */
+async function _mapWithConcurrency(items, concurrency, worker) {
+  const limit = Math.max(1, Math.min(items.length, Number(concurrency) || 1));
+  const results = new Array(items.length);
+  let nextIdx = 0;
+  let firstErr = null;
+  async function pump() {
+    for (;;) {
+      const i = nextIdx++;
+      if (i >= items.length || firstErr) return;
+      try {
+        results[i] = await worker(items[i], i);
+      } catch (err) {
+        if (!firstErr) firstErr = err;
+        return;
+      }
+    }
+  }
+  const workers = [];
+  for (let k = 0; k < limit; k++) workers.push(pump());
+  await Promise.all(workers);
+  if (firstErr) throw firstErr;
+  return results;
+}
+
 async function _runCustomTool({ phrases, regionLr, cfg, toolName }) {
   const data = { queries: phrases, region: regionLr };
   const setResp = await _post(API_SET, { tools_name: toolName, data }, cfg.token);
@@ -834,8 +919,9 @@ async function _runCustomTool({ phrases, regionLr, cfg, toolName }) {
   if (taskId == null) throw new Error(`Arsenkin API: /set не вернул task_id (ответ: ${JSON.stringify(sj).slice(0, 300)})`);
 
   const deadline = Date.now() + cfg.timeoutMin * 60 * 1000;
+  let curDelay = Math.min(cfg.firstCheckMs, cfg.pollMs);
   for (;;) {
-    await _sleep(cfg.pollMs);
+    await _sleep(curDelay);
     if (Date.now() > deadline) throw new Error(`Arsenkin API: задача ${taskId} не завершилась за ${cfg.timeoutMin} мин`);
     const chk = await _post(API_CHECK, { task_id: taskId }, cfg.token);
     const cj = chk.json || {};
@@ -846,6 +932,7 @@ async function _runCustomTool({ phrases, regionLr, cfg, toolName }) {
     const failed = ['error', 'failed', 'fail'].includes(statusStr);
     if (failed) throw new Error(`Arsenkin API: задача ${taskId} завершилась с ошибкой`);
     if (finished) break;
+    curDelay = Math.min(cfg.pollMs, Math.ceil(curDelay * 1.6));
   }
   const got = await _post(API_GET, { task_id: taskId }, cfg.token);
   return { taskId, json: got.json, text: got.text };
@@ -992,27 +1079,38 @@ async function collectSeasonality({ phrases, regionLabel }) {
   let lastRawJson = null;
 
   try {
-    // Батчим и выполняем ПОСЛЕДОВАТЕЛЬНО: лимит Арсенкина — 5 одновременных
-    // задач на пользователя и 30 запросов/мин; параллельные батчи легко
-    // выбивают 429 и место в очереди других инструментов.
+    // Батчируем фразы и выполняем задачи параллельно с лимитом cfg.concurrency
+    // (по умолчанию 3, клампится в 1..5 под официальный лимит Арсенкина —
+    // 5 одновременных задач/пользователь и 30 req/min). Для однобатчевых
+    // прогонов ведёт себя как последовательный (лимит=1).
+    const batches = [];
     for (let i = 0; i < list.length; i += cfg.batchSize) {
-      const batch = list.slice(i, i + cfg.batchSize);
+      batches.push(list.slice(i, i + cfg.batchSize));
+    }
+    const debug = String(process.env.ARSENKIN_DEBUG_SEASONALITY || '').toLowerCase();
+    const debugOn = debug === '1' || debug === 'true';
+    const perBatch = await _mapWithConcurrency(batches, cfg.concurrency, async (batch) => {
       const res = await _runOneTask({ phrases: batch, regionLr, cfg });
-      tasksMeta.push({ task_id: res.taskId, phrases_count: batch.length });
-      lastRawSample = _rawSample(res);
-      lastRawJson = res.json ?? null;
       // Диагностическая печать сырого /get-ответа: включается флагом
       // ARSENKIN_DEBUG_SEASONALITY=1. Нужна, когда Арсенкин меняет формат
       // ключей помесячных данных — иначе причину пустых byPeriod не видно
       // в логах (см. issue «Найдено только 0 помесячных колонок»).
-      if (String(process.env.ARSENKIN_DEBUG_SEASONALITY || '').toLowerCase() === '1'
-          || String(process.env.ARSENKIN_DEBUG_SEASONALITY || '').toLowerCase() === 'true') {
-        console.log(`[Forecaster] Arsenkin /get task_id=${res.taskId} raw:`, lastRawSample);
+      if (debugOn) {
+        console.log(`[Forecaster] Arsenkin /get task_id=${res.taskId} raw:`, _rawSample(res));
       }
       const resolveMonth = res.range
         ? _resolverFromRange(res.range.startdate, res.range.enddate)
         : defaultResolveMonth;
       const rows = _normalizeResult({ ...res, resolveMonth });
+      return { res, rows };
+    });
+    // Собираем tasksMeta и allRows в исходном порядке батчей — важно для
+    // консистентных отчётов (порядок фраз в forecaster_tasks.arsenkin_report).
+    for (let k = 0; k < perBatch.length; k++) {
+      const { res, rows } = perBatch[k];
+      tasksMeta.push({ task_id: res.taskId, phrases_count: batches[k].length });
+      lastRawSample = _rawSample(res);
+      lastRawJson = res.json ?? null;
       allRows.push(...rows);
     }
   } catch (err) {
@@ -1176,4 +1274,5 @@ module.exports = {
   _datesFromErrorMessage,
   _snapRangeToFullMonths,
   _periodFromAny,
+  _mapWithConcurrency,
 };
