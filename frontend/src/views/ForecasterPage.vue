@@ -450,6 +450,18 @@ function statusBadge(s) {
                   <span v-if="t.source_filename"> · 📎 {{ t.source_filename }}</span>
                 </div>
                 <div v-if="t.error_message" class="text-xs text-rose-400 mt-1 truncate">⚠ {{ t.error_message }}</div>
+                <!-- Ползунок прогресса выполняющейся задачи -->
+                <div v-if="(t.status === 'running' || t.status === 'queued') && t.progress"
+                     class="mt-2">
+                  <div class="flex items-center justify-between text-[10px] text-sky-300 mb-0.5">
+                    <span class="truncate">{{ t.progress.label || 'Обработка…' }}</span>
+                    <span class="tabular-nums ml-2">{{ Math.min(100, Math.max(0, Math.round(t.progress.percent || 0))) }} %</span>
+                  </div>
+                  <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div class="h-full bg-gradient-to-r from-sky-500 to-emerald-500 rounded-full transition-all duration-700"
+                         :style="{ width: Math.min(100, Math.max(0, Math.round(t.progress.percent || 0))) + '%' }"></div>
+                  </div>
+                </div>
               </div>
               <div class="flex flex-col items-end gap-1">
                 <span class="text-[10px] uppercase font-semibold border rounded px-1.5 py-0.5"

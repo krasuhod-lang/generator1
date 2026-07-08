@@ -100,6 +100,10 @@ function buildSovForecast({
   if (!Number.isFinite(lambda) || lambda < 1) lambda = 1.5;
   lambda = Math.round(lambda * 10000) / 10000;
 
+  // G — минимальный гарантированный рост SOV (алгоритмическая защита от
+  // падения): цель сценария не может быть ниже текущей доли × (1+G).
+  const minGrowth = Math.max(0, Number(sovCfg.minGrowth ?? sovCfg.min_growth ?? 0.2) || 0);
+
   const cSerp = Math.round(_serpCoefficient(serpElements, weights) * 10000) / 10000;
   const comm = _clamp(commPercent == null ? 1 : commPercent, 0, 1);
   const crFinal = Math.round(Math.max(0, Number(crBase) || 0) * comm * 100000) / 100000;
@@ -116,7 +120,9 @@ function buildSovForecast({
     const pTarget = Math.max(1, Math.round(Number(sc.pTarget ?? sc.p_target) || 1));
     const k = Math.max(0, Number(sc.k) || 0);
     const targetCtr = Number(ctr[pTarget]) || 0;
-    const sovTarget = _clamp(targetCtr * cSerp * lambda, 0, 1);
+    // sov_target ≥ sov_current·(1+G): прогнозируемая доля рынка никогда не
+    // опускается ниже текущей (защита от падения).
+    const sovTarget = _clamp(Math.max(targetCtr * cSerp * lambda, sovCurrent * (1 + minGrowth)), 0, 1);
     const traffic = [];
     const leads = [];
     const sov = [];
@@ -144,6 +150,7 @@ function buildSovForecast({
       lambda,
       c_serp: cSerp,
       cr_final: crFinal,
+      min_growth: minGrowth,
       sov_current: Math.round(sovCurrent * 10000) / 10000,
       d0,
     },

@@ -79,6 +79,11 @@ const oppSummary      = computed(() => opportunities.value?.summary || null);
 const leadsSummary    = computed(() => task.value?.leads_summary || null);
 const expertReports   = computed(() => task.value?.expert_reports || null);
 const sovForecast     = computed(() => task.value?.sov_forecast || null);
+const progress        = computed(() => task.value?.progress || null);
+const progressPct     = computed(() => {
+  const p = Number(progress.value?.percent);
+  return Number.isFinite(p) ? Math.max(0, Math.min(100, p)) : null;
+});
 const unified         = computed(() => {
   const u = task.value?.unified_forecast || null;
   return u && u.verdict === 'ok' ? u : null;
@@ -292,10 +297,21 @@ const sovSummaryRows = computed(() => {
       </div>
 
       <template v-else-if="task">
-        <!-- in-progress -->
+        <!-- in-progress: ползунок «сколько данных уже получили» -->
         <div v-if="task.status === 'queued' || task.status === 'running'"
-             class="text-sm text-sky-300 bg-sky-500/10 border border-sky-500/30 rounded p-4">
-          ↻ Задача обрабатывается… (автообновление каждые 3 сек)
+             class="text-sm text-sky-300 bg-sky-500/10 border border-sky-500/30 rounded p-4 space-y-3">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <span>↻ {{ progress?.label || 'Задача обрабатывается…' }}</span>
+            <span class="font-semibold tabular-nums">{{ progressPct != null ? progressPct + ' %' : '…' }}</span>
+          </div>
+          <div class="h-2.5 bg-gray-800 rounded-full overflow-hidden" role="progressbar"
+               :aria-valuenow="progressPct ?? 0" aria-valuemin="0" aria-valuemax="100">
+            <div class="h-full bg-gradient-to-r from-sky-500 to-emerald-500 rounded-full transition-all duration-700"
+                 :style="{ width: (progressPct ?? 2) + '%' }"></div>
+          </div>
+          <div class="text-xs text-sky-200/70">
+            <span v-if="progress?.detail">{{ progress.detail }} · </span>автообновление каждые 3 сек
+          </div>
         </div>
 
         <div v-else-if="task.status === 'error'"

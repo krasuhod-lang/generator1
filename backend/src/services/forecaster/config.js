@@ -196,6 +196,20 @@ const FORECASTER_CONFIG = deepFreeze({
     seasonalMin: 0.40,
     seasonalMax: 2.50,
 
+    // G — минимальный гарантированный рост доли рынка (алгоритмическая защита
+    // от падения): SOV_max = max(target_ctr·C_serp, SOV_start·(1+G)).
+    // Гарантирует, что прогнозируемая доля рынка не опустится ниже стартовой.
+    minGrowthDefault: 0.20,
+    minGrowthMin:     0.0,
+    minGrowthMax:     1.0,
+
+    // CTR_new — средняя кликабельность «свежей» семантики (новые страницы
+    // стартуют с дальних позиций, «песочница»). Используется во взвешенном
+    // размытии среднего CTR: CTR_avg(t) = (CTR_core(t) + CTR_new·r·t)/(1 + r·t).
+    ctrNewDefault: 0.005,
+    ctrNewMin:     0.0,
+    ctrNewMax:     0.05,
+
     // Пресеты target_ctr для «оптимистичного/реалистичного/осторожного»
     // сценариев, чтобы в UI показать вилку без ручного ввода.
     scenarioCtr: {
@@ -209,6 +223,9 @@ const FORECASTER_CONFIG = deepFreeze({
   sov: {
     hMaxDefault: 12,
     hMaxLimit:   24,
+    // G — минимальный гарантированный рост SOV (защита от падения):
+    // sov_target = max(ctr·C_serp·λ, sov_current·(1+G)).
+    minGrowth:   0.20,
     scenarios: {
       pessimistic: { pTarget: 7, k: 0.15 },
       realistic:   { pTarget: 3, k: 0.25 },

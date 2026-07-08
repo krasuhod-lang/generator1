@@ -14,7 +14,8 @@
  *      S (мультипликативная сезонность месяца), C_yield (Zero-click поправка).
  *   2. Расширение семантики: множитель (1 + r·t) — каждый месяц открываем новые
  *      страницы/кластеры.
- *   3. Ограничение рынка: SOV_max = target_ctr · C_serp (жёсткий потолок доли),
+ *   3. Ограничение рынка: SOV_max = max(target_ctr · C_serp, SOV_start·(1+G)) —
+ *      потолок доли, алгоритмически защищённый от падения ниже стартовой доли;
  *      SOV_start = текущий трафик / текущий спрос.
  *   4. Плавность роста: логистика с крутизной k и точкой перегиба t0.
  *
@@ -155,12 +156,19 @@ function buildUnifiedForecast({
   const targetCtr = _resolveParam(options.target_ctr, uCfg.targetCtrDefault, uCfg.targetCtrMin, uCfg.targetCtrMax);
   const cSerp = _round(_serpCoefficient(serpElements, weights), 4);
   const comm = _clamp(commPercent == null ? 1 : commPercent, 0, 1);
-  // SOV_max — жёсткий потолок доли рынка (целевой CTR × штраф за выдачу).
-  const sovMax = _clamp(targetCtr * cSerp, 0, 1);
   // SOV_start — текущий захват (трафик сейчас / спрос сейчас). Новый сайт = 0.
   const dNow = values[n - 1] > 0 ? values[n - 1] : (values.reduce((a, b) => a + b, 0) / n);
   const curTraffic = Math.max(0, Number(currentTrafficPerMonth) || 0);
   const sovStart = dNow > 0 ? _clamp(curTraffic / dNow, 0, 1) : 0;
+  // G — минимальный гарантированный рост доли рынка. Алгоритмическая защита
+  // от падения: SOV_max = max(CTR_target·C_serp, SOV_start·(1+G)), поэтому
+  // прогнозируемая доля НИКОГДА не опускается ниже стартовой.
+  const minGrowth = _resolveParam(options.min_growth, uCfg.minGrowthDefault ?? 0.2, uCfg.minGrowthMin ?? 0, uCfg.minGrowthMax ?? 1);
+  const sovMax = _clamp(Math.max(targetCtr * cSerp, sovStart * (1 + minGrowth)), 0, 1);
+  // CTR_new — кликабельность «свежей» семантики (страницы из «песочницы»).
+  // Взвешенное размытие: CTR_avg(t) = (CTR_core(t) + CTR_new·r·t)/(1 + r·t).
+  const ctrNew = _resolveParam(options.ctr_new, uCfg.ctrNewDefault ?? 0.005, uCfg.ctrNewMin ?? 0, uCfg.ctrNewMax ?? 0.05);
+  const sovNew = _clamp(ctrNew * cSerp, 0, 1);
 
   // ── Блок 4: логистика роста ─────────────────────────────────────
   const k = _resolveParam(options.growth_k, uCfg.kDefault, uCfg.kMin, uCfg.kMax);
@@ -183,7 +191,16 @@ function buildUnifiedForecast({
   }));
 
   // Прогноз: перебираем t = 1..horizon.
+  // Два инварианта роста:
+  //   1. Доля рынка (capture) монотонно не убывает — защита от падения ниже
+  //      стартовой (SOV_max ≥ SOV_start·(1+G) + монотонный floor поверх
+  //      CTR-размытия новой семантики).
+  //   2. Десезонализированное ядро трафика монотонно не убывает — «плавномерный
+  //      рост согласно формулам». Сезонность накладывается ПОВЕРХ ядра, поэтому
+  //      в низкий сезон трафик может проседать — это закономерно.
   const fc = [];
+  let prevCapture = sovStart;
+  let prevCore = Math.max(0, L0) * cYield * sovStart; // ядро на t=0 ≈ текущий трафик (десезонализированный)
   for (let t = 1; t <= horizon; t++) {
     const periodIdx = lastIdx != null ? lastIdx + t : null;
     const period = periodIdx != null ? _indexToPeriod(periodIdx) : `m+${t}`;
@@ -192,9 +209,20 @@ function buildUnifiedForecast({
     // Ёмкость рынка (TAC): деманд-потенциал → кликабельная ёмкость.
     const demandPotential = Math.max(0, (L0 + t * T) * s * (1 + r * t));
     const tac = demandPotential * cYield;
-    // Функция захвата (S-кривая).
-    const capture = sovStart + (sovMax - sovStart) / (1 + Math.exp(-k * (t - t0)));
-    const value = Math.max(0, tac * capture);
+    // Функция захвата (S-кривая) — динамика основного (стартового) ядра.
+    const captureCore = sovStart + (sovMax - sovStart) / (1 + Math.exp(-k * (t - t0)));
+    // Взвешенное размытие: новая семантика (вес r·t) кликается хуже ядра.
+    const captureBlend = (captureCore + sovNew * (r * t)) / (1 + r * t);
+    // Монотонный floor: доля рынка не может упасть ниже уже достигнутой.
+    const capture = Math.max(captureBlend, prevCapture);
+    prevCapture = capture;
+    // Десезонализированное ядро трафика: базовый спрос (без сезонности)
+    // × живые клики × расширение ядра × захват. Монотонно не убывает.
+    const coreRaw = Math.max(0, (L0 + t * T)) * (1 + r * t) * cYield * capture;
+    const core = Math.max(coreRaw, prevCore);
+    prevCore = core;
+    // Итог: ядро × сезонность (сезонные просадки допустимы и закономерны).
+    const value = Math.max(0, core * s);
     const widen = Math.sqrt(t);
     const upper = value * (1 + delta * widen);
     const lower = value * Math.max(0, 1 - delta * widen);
@@ -204,6 +232,7 @@ function buildUnifiedForecast({
       demand_potential: Math.round(demandPotential),
       tac: Math.round(tac),
       capture: _round(capture, 4),
+      core: Math.round(core),
       seasonal: _round(s, 3),
       value: Math.round(value),
       lower: Math.round(lower),
@@ -229,6 +258,9 @@ function buildUnifiedForecast({
       target_ctr: _round(targetCtr, 4),
       c_serp: cSerp,
       comm_percent: _round(comm, 3),
+      min_growth: _round(minGrowth, 3),
+      ctr_new: _round(ctrNew, 4),
+      sov_new: _round(sovNew, 4),
       sov_max: _round(sovMax, 4),
       sov_start: _round(sovStart, 4),
       k: _round(k, 3),
@@ -247,13 +279,13 @@ function buildUnifiedForecast({
     },
     // Пояснения «человеческим языком» для бизнесмена/маркетолога.
     explain: _buildExplain({
-      L0, T, cYield, r, targetCtr, cSerp, sovMax, sovStart, k, t0, delta, horizon, lastFc, curTraffic,
+      L0, T, cYield, r, targetCtr, cSerp, sovMax, sovStart, minGrowth, k, t0, delta, horizon, lastFc, curTraffic,
     }),
   };
 }
 
 // Пояснения простым языком: что за число, откуда и почему.
-function _buildExplain({ L0, T, cYield, r, targetCtr, cSerp, sovMax, sovStart, k, t0, delta, horizon, lastFc, curTraffic }) {
+function _buildExplain({ L0, T, cYield, r, targetCtr, cSerp, sovMax, sovStart, minGrowth, k, t0, delta, horizon, lastFc, curTraffic }) {
   const pct = (v) => `${(v * 100).toFixed(1)}%`;
   const trendWord = T > 0.5 ? 'рынок растёт' : T < -0.5 ? 'рынок проседает' : 'рынок стабилен';
   return {
@@ -273,7 +305,7 @@ function _buildExplain({ L0, T, cYield, r, targetCtr, cSerp, sovMax, sovStart, k
           ? 'Каждый месяц вы добавляете новые страницы/темы и охватываете больше запросов — потолок растёт.'
           : 'Расширение ядра не заложено (0%). Если планируете писать новые статьи — поднимите этот параметр.' },
       { key: 'sov_max', label: 'Потолок доли рынка', value: pct(sovMax),
-        plain: `Максимум трафика, который реально забрать: целевой CTR ${pct(targetCtr)} × штраф за «умную» выдачу ${cSerp}. Выше головы не прыгнуть.` },
+        plain: `Максимум трафика, который реально забрать: max(целевой CTR ${pct(targetCtr)} × штраф за «умную» выдачу ${cSerp}, текущая доля × ${(1 + minGrowth).toFixed(2)}). Потолок математически защищён от падения ниже вашей текущей доли.` },
       { key: 'sov_start', label: 'Доля рынка сейчас', value: pct(sovStart),
         plain: curTraffic > 0
           ? 'Какую часть спроса вы забираете уже сегодня (ваш трафик ÷ весь спрос).'

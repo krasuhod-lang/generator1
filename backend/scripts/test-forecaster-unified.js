@@ -104,12 +104,66 @@ group('Логистика + монотонность захвата', () => {
     assert.ok(caps[caps.length - 1] <= r.params.sov_max + 1e-9);
   });
 
-  test('переоценённый сайт (SOV_start > SOV_max) → трафик снижается', () => {
-    // sov_start = 500/1000 = 0.5, sov_max = 0.03 → должна быть убывающая кривая
+  test('переоценённый сайт (высокий SOV_start) → защита от падения: доля не снижается', () => {
+    // sov_start = 500/1000 = 0.5 > target_ctr·c_serp = 0.03,
+    // но SOV_max = max(0.03, 0.5·(1+G)) → доля рынка растёт, а не рушится.
     const r = buildUnifiedForecast({ monthly: flatMonthly(1000), options: { target_ctr: 0.03 }, currentTrafficPerMonth: 500, cfg });
-    assert.ok(r.params.sov_start > r.params.sov_max);
+    assert.ok(r.params.sov_max >= r.params.sov_start, `sov_max ${r.params.sov_max} ≥ sov_start ${r.params.sov_start}`);
     const v = r.forecast.map((p) => p.capture);
-    assert.ok(v[v.length - 1] < v[0]);
+    for (let i = 1; i < v.length; i++) assert.ok(v[i] >= v[i - 1] - 1e-9, `capture не должен падать: ${v[i-1]} → ${v[i]}`);
+    assert.ok(v.every((c) => c >= r.params.sov_start - 1e-9), 'capture никогда не ниже sov_start');
+  });
+
+  test('SOV_max = max(target_ctr·C_serp, sov_start·(1+G))', () => {
+    const G = cfg.unified.minGrowthDefault;
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000), options: { target_ctr: 0.03 }, currentTrafficPerMonth: 500, cfg });
+    assert.ok(Math.abs(r.params.sov_max - Math.min(1, 0.5 * (1 + G))) < 1e-6);
+  });
+
+  test('capture монотонен и не ниже старта при расширении семантики (CTR-размытие)', () => {
+    const r = buildUnifiedForecast({
+      monthly: flatMonthly(1000), options: { h_max: 24, semantic_expansion_rate: 0.1 },
+      currentTrafficPerMonth: 100, cfg,
+    });
+    const caps = r.forecast.map((p) => p.capture);
+    for (let i = 1; i < caps.length; i++) assert.ok(caps[i] >= caps[i - 1] - 1e-9);
+    assert.ok(caps.every((c) => c >= r.params.sov_start - 1e-9));
+  });
+});
+
+group('Плавномерный рост трафика (десезонализированное ядро)', () => {
+  // Убывающий рынок: спрос падает на 10/мес — раньше трафик падал вслед,
+  // теперь десезонализированное ядро (core) монотонно не убывает,
+  // просадки допускаются только сезонные.
+  function decliningMonthly() {
+    const out = [];
+    for (let i = 0; i < 24; i++) {
+      const y = 2024 + Math.floor(i / 12);
+      const m = (i % 12) + 1;
+      out.push({ period: `${y}-${String(m).padStart(2, '0')}`, demand: 2000 - i * 10 });
+    }
+    return out;
+  }
+
+  test('core (без сезонности) монотонно растёт даже на падающем рынке', () => {
+    const r = buildUnifiedForecast({ monthly: decliningMonthly(), options: { h_max: 12 }, currentTrafficPerMonth: 200, cfg });
+    const cores = r.forecast.map((p) => p.core);
+    for (let i = 1; i < cores.length; i++) {
+      assert.ok(cores[i] >= cores[i - 1], `ядро не должно падать: ${cores[i-1]} → ${cores[i]}`);
+    }
+  });
+
+  test('value = core × сезонность: сезонные просадки допустимы', () => {
+    const r = buildUnifiedForecast({ monthly: seasonalMonthly(), options: { h_max: 12 }, currentTrafficPerMonth: 200, cfg });
+    for (const p of r.forecast) {
+      assert.ok(Math.abs(p.value - Math.round(p.core * p.seasonal)) <= 2, `value≈core·s: ${p.value} vs ${p.core}·${p.seasonal}`);
+    }
+  });
+
+  test('ровный ряд без сезонности → трафик строго не убывает', () => {
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000), options: { h_max: 12 }, currentTrafficPerMonth: 100, cfg });
+    const vals = r.forecast.map((p) => p.value);
+    for (let i = 1; i < vals.length; i++) assert.ok(vals[i] >= vals[i - 1], `${vals[i-1]} → ${vals[i]}`);
   });
 });
 

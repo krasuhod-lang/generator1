@@ -1070,7 +1070,7 @@ async function collectSerpFeatures({ phrases, regionLabel, regionLr = null }) {
  *   duration_ms?: number,
  * }>}
  */
-async function collectSeasonality({ phrases, regionLabel, regionLr: regionLrIn = null }) {
+async function collectSeasonality({ phrases, regionLabel, regionLr: regionLrIn = null, onProgress = null }) {
   const cfg = _cfg();
   if (!cfg.token) return { verdict: 'skipped', reason: 'no_api_key' };
   const list = (Array.isArray(phrases) ? phrases : [])
@@ -1099,6 +1099,8 @@ async function collectSeasonality({ phrases, regionLabel, regionLr: regionLrIn =
     }
     const debug = String(process.env.ARSENKIN_DEBUG_SEASONALITY || '').toLowerCase();
     const debugOn = debug === '1' || debug === 'true';
+    let doneBatches = 0;
+    let donePhrases = 0;
     const perBatch = await _mapWithConcurrency(batches, cfg.concurrency, async (batch) => {
       const res = await _runOneTask({ phrases: batch, regionLr, cfg });
       // Диагностическая печать сырого /get-ответа: включается флагом
@@ -1112,6 +1114,20 @@ async function collectSeasonality({ phrases, regionLabel, regionLr: regionLrIn =
         ? _resolverFromRange(res.range.startdate, res.range.enddate)
         : defaultResolveMonth;
       const rows = _normalizeResult({ ...res, resolveMonth });
+      // Прогресс сбора данных: по завершению каждого батча сообщаем
+      // сколько фраз уже обработано (для «ползунка» в UI).
+      doneBatches += 1;
+      donePhrases += batch.length;
+      if (typeof onProgress === 'function') {
+        try {
+          onProgress({
+            done: donePhrases,
+            total: list.length,
+            batches_done: doneBatches,
+            batches_total: batches.length,
+          });
+        } catch (_) { /* прогресс не должен ломать сбор */ }
+      }
       return { res, rows };
     });
     // Собираем tasksMeta и allRows в исходном порядке батчей — важно для

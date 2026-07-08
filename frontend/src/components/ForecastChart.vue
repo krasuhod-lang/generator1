@@ -292,10 +292,16 @@ function fmtNum(v) {
             fill="none" stroke-dasharray="6 4"
             class="fc-line fc-line-fc" />
 
-      <!-- разделитель -->
+      <!-- разделитель история | прогноз + подписи зон -->
       <line v-if="fcStartX != null" :x1="fcStartX" :x2="fcStartX"
             :y1="PAD.t" :y2="PAD.t + innerH"
             stroke="#374151" stroke-width="1" stroke-dasharray="4 4" />
+      <g v-if="fcStartX != null">
+        <text :x="fcStartX - 8" :y="PAD.t - 8" text-anchor="end"
+              fill="#93c5fd" font-size="11" font-weight="600">◀ Ретроданные</text>
+        <text :x="fcStartX + 8" :y="PAD.t - 8" text-anchor="start"
+              fill="#fdba74" font-size="11" font-weight="600">Прогноз ▶</text>
+      </g>
 
       <!-- X-labels -->
       <g>
