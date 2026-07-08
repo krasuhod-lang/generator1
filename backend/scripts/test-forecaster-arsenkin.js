@@ -167,6 +167,99 @@ group('arsenkinClient result normalization', () => {
     assert.deepStrictEqual(r.byPeriod, { '2025-06': 40, '2025-07': 60 });
     assert.strictEqual(r.total, 100);
   });
+
+  // ── реальный envelope Арсенкина: {code:"TASK_RESULT", result:{…}} ──
+  test('envelope TASK_RESULT: queries[] + параллельный seasonal[] по индексу', () => {
+    const rows = _normalizeResult({
+      json: {
+        code: 'TASK_RESULT',
+        task_id: 30558137,
+        result: {
+          type: 3,
+          task_id: '30558137',
+          queries: ['укрывной материал', 'конский навоз москва'],
+          seasonal: [
+            [{ month: '2025-01', count: 100 }, { month: '2025-02', count: 200 }],
+            [{ month: '2025-01', count: 5 }, { month: '2025-02', count: 7 }],
+          ],
+        },
+      },
+      text: '',
+    });
+    assert.strictEqual(rows.length, 2);
+    assert.strictEqual(rows[0].phrase, 'укрывной материал');
+    assert.strictEqual(rows[0].byPeriod['2025-02'], 200);
+    assert.strictEqual(rows[1].phrase, 'конский навоз москва');
+    assert.strictEqual(rows[1].total, 12);
+  });
+  test('envelope TASK_RESULT: массив per-query объектов в result.data', () => {
+    const rows = _normalizeResult({
+      json: {
+        code: 'TASK_RESULT',
+        task_id: 1,
+        result: {
+          type: 3,
+          queries: ['окна пвх'],
+          data: [{ query: 'окна пвх', seasonal: [{ month: '2025-03', count: 42 }] }],
+        },
+      },
+      text: '',
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].phrase, 'окна пвх');
+    assert.strictEqual(rows[0].byPeriod['2025-03'], 42);
+  });
+  test('envelope TASK_RESULT: карта фраза→история в result.data', () => {
+    const rows = _normalizeResult({
+      json: {
+        result: {
+          type: 3,
+          queries: ['балкон'],
+          data: { 'балкон': { '2025-04': 10, '2025-05': 20 } },
+        },
+      },
+      text: '',
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].byPeriod['2025-05'], 20);
+  });
+  test('envelope TASK_RESULT: month-only seasonal через resolveMonth', () => {
+    const { _monthYearResolver } = require('../src/services/forecaster/arsenkinClient');
+    const resolveMonth = _monthYearResolver('month', new Date(2026, 6, 7)); // enddate 2026-06
+    const rows = _normalizeResult({
+      json: {
+        result: {
+          type: 3,
+          queries: ['шины'],
+          seasonal: [[{ month: '05', count: 5 }, { month: '07', count: 3 }]],
+        },
+      },
+      text: '',
+      resolveMonth,
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].byPeriod['2026-05'], 5);
+    assert.strictEqual(rows[0].byPeriod['2025-07'], 3);
+  });
+  test('envelope без сезонных данных (только queries) → []', () => {
+    // Реальный кейс из бага: type=2 (парсинг фраз) вместо type=3 (сезонность).
+    const rows = _normalizeResult({
+      json: {
+        code: 'TASK_RESULT',
+        task_id: 30558137,
+        result: { type: 2, task_id: '30558137', queries: ['a', 'b', 'c'] },
+      },
+      text: '',
+    });
+    assert.deepStrictEqual(rows, []);
+  });
+  test('служебные ключи envelope не превращаются в фразы', () => {
+    const rows = _normalizeResult({
+      json: { result: { type: 3, task_id: '1', status: 'ok', code: 'X' } },
+      text: '',
+    });
+    assert.deepStrictEqual(rows, []);
+  });
 });
 
 // ── arsenkinClient.seasonalityDateRange ────────────────────────────

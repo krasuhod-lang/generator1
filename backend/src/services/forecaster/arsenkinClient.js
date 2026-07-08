@@ -349,9 +349,143 @@ function _rowFromHistory(phrase, history, resolveMonth = null) {
   return { phrase, total, byPeriod };
 }
 
+// Служебные ключи ответа Арсенкина, которые НЕ являются ключевыми фразами
+// (в envelope /get: {"code":"TASK_RESULT","task_id":…,"result":{"type":…,
+// "task_id":…,"queries":[…], <данные сезонности>}}). При обходе объекта как
+// карты «фраза → история» такие ключи нужно пропускать, иначе они попадают в
+// rows как пустые фразы и портят выдачу.
+const _META_KEYS = new Set([
+  'code', 'type', 'status', 'status_id', 'statusid', 'error', 'message',
+  'task_id', 'taskid', 'id', 'tools_name', 'toolsname', 'queries',
+  'region', 'regions', 'group', 'device', 'startdate', 'enddate', 'ws',
+]);
+
+// Ключи-кандидаты, под которыми Арсенкин может отдавать помесячные данные
+// сезонности (массив, выровненный с queries, либо массив per-query объектов,
+// либо карта «фраза → история»).
+const _SEASONAL_KEYS = [
+  'seasonal', 'seasonality', 'result', 'results', 'data', 'values',
+  'graph', 'history', 'months', 'dynamics', 'frequency', 'stats', 'rows',
+];
+
+// Разворачивает вложенный envelope /get до полезной нагрузки. Поддерживает
+// как {data|result|results:…}, так и двойную вложенность result.result.
+function _unwrapPayload(json) {
+  if (!json || typeof json !== 'object') return null;
+  let p = json.data ?? json.result ?? json.results ?? json;
+  // Иногда результат завёрнут дважды: {result:{result:{…}}} — но НЕ разворачиваем
+  // объект, который сам по себе уже несёт queries/сезонные данные.
+  if (p && typeof p === 'object' && !Array.isArray(p)
+      && !Array.isArray(p.queries)
+      && (p.result != null || p.data != null)
+      && !_SEASONAL_KEYS.some((k) => _looksLikeHistory(p[k]))) {
+    const inner = p.data ?? p.result;
+    if (inner && typeof inner === 'object') p = inner;
+  }
+  return p;
+}
+
+// Похоже ли значение на помесячную историю (массив точек / карту месяцев)?
+function _looksLikeHistory(v) {
+  if (Array.isArray(v)) {
+    return v.some((pt) => pt && typeof pt === 'object'
+      && (pt.month != null || pt.date != null || pt.period != null
+          || pt.count != null || pt.value != null));
+  }
+  if (v && typeof v === 'object') {
+    return Object.keys(v).some((k) => _periodFromAny(k) || _monthNumFromAny(k));
+  }
+  return false;
+}
+
+// Массив per-phrase объектов: [{phrase|query|…, seasonal|history|…}] либо
+// объекты с помесячными полями прямо в корне ("2024-01": n).
+function _rowsFromArray(arr, resolveMonth) {
+  const rows = [];
+  for (const item of arr) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const phrase = String(item.phrase ?? item.query ?? item.keyword ?? item.word ?? '').trim();
+    if (!phrase) continue;
+    let hist = null;
+    for (const k of _SEASONAL_KEYS) {
+      if (item[k] != null) { hist = item[k]; break; }
+    }
+    if (hist == null && item.data != null) hist = item.data;
+    if (hist != null) {
+      rows.push(_rowFromHistory(phrase, hist, resolveMonth));
+    } else {
+      // помесячные значения лежат прямо в полях item ("2024-01": n)
+      const flat = {};
+      for (const [k, v] of Object.entries(item)) {
+        if (_MONTH_KEY_RE.test(String(k).trim())) flat[k] = v;
+      }
+      if (Object.keys(flat).length > 0) rows.push(_rowFromHistory(phrase, flat, resolveMonth));
+    }
+  }
+  return rows;
+}
+
+// Карта «фраза → история»: {"<фраза>": {"2024-01": n} | [ {month,count} ]}.
+// Служебные ключи envelope (_META_KEYS) пропускаются.
+function _rowsFromObjectMap(obj, resolveMonth) {
+  const rows = [];
+  for (const [key, val] of Object.entries(obj)) {
+    const phrase = String(key).trim();
+    if (!phrase || _META_KEYS.has(phrase.toLowerCase()) || val == null) continue;
+    if (typeof val === 'object') {
+      let hist = null;
+      for (const k of _SEASONAL_KEYS) {
+        if (val[k] != null) { hist = val[k]; break; }
+      }
+      if (hist == null) hist = val;
+      const r = _rowFromHistory(phrase, hist, resolveMonth);
+      if (Object.keys(r.byPeriod).length > 0) rows.push(r);
+    }
+  }
+  return rows;
+}
+
+// Реальный envelope Арсенкина: result.queries — массив строк-фраз, а помесячные
+// данные лежат в ПАРАЛЛЕЛЬНОЙ структуре под одним из _SEASONAL_KEYS. Собираем
+// строки, сопоставляя queries[i] с элементом данных: либо по индексу (массив
+// точек/чисел на фразу), либо по ключу-фразе (карта), либо элемент сам несёт
+// свою фразу (массив per-query объектов).
+function _rowsFromQueriesEnvelope(payload, resolveMonth) {
+  const queries = payload.queries.map((q) => String(q == null ? '' : q).trim());
+
+  // 1. Ищем параллельную структуру данных под известными ключами.
+  for (const k of _SEASONAL_KEYS) {
+    const data = payload[k];
+    if (data == null) continue;
+
+    if (Array.isArray(data)) {
+      // 1a. Массив per-query объектов, каждый несёт свою фразу.
+      const withPhrase = _rowsFromArray(data, resolveMonth);
+      if (withPhrase.length > 0) return withPhrase;
+
+      // 1b. Массив, выровненный с queries по индексу (история на фразу).
+      const rows = [];
+      for (let i = 0; i < data.length && i < queries.length; i++) {
+        if (!queries[i]) continue;
+        const r = _rowFromHistory(queries[i], data[i], resolveMonth);
+        if (Object.keys(r.byPeriod).length > 0) rows.push(r);
+      }
+      if (rows.length > 0) return rows;
+    } else if (typeof data === 'object') {
+      // 1c. Карта «фраза → история».
+      const rows = _rowsFromObjectMap(data, resolveMonth);
+      if (rows.length > 0) return rows;
+    }
+  }
+  return [];
+}
+
 /**
  * Пытается вытащить rows из произвольного JSON-ответа /get.
  * Поддерживаются типовые формы:
+ *   • Реальный envelope Арсенкина:
+ *     { code:"TASK_RESULT", result:{ type, task_id, queries:[…], <сезонность> } }
+ *     где помесячные данные лежат под seasonal/data/result/… параллельно queries.
  *   • { data: [ {phrase|query|keyword, history|months|dynamics|seasonality|seasonal: …} ] }
  *   • { data: { "<фраза>": {"2024-01": n, …} | [ {month,count} ] } }
  *   • Инструмент «Проверка сезонности» (type=3): месяцы приходят БЕЗ года
@@ -362,39 +496,20 @@ function _rowFromHistory(phrase, history, resolveMonth = null) {
  *   month-only ответов; см. _monthYearResolver.
  */
 function _normalizeResult({ json, text, resolveMonth = null }) {
-  const payload = json && typeof json === 'object'
-    ? (json.data ?? json.result ?? json.results ?? json)
-    : null;
+  const payload = _unwrapPayload(json);
 
-  const rows = [];
+  let rows = [];
   if (Array.isArray(payload)) {
-    for (const item of payload) {
-      if (!item || typeof item !== 'object') continue;
-      const phrase = String(item.phrase ?? item.query ?? item.keyword ?? item.word ?? '').trim();
-      if (!phrase) continue;
-      const hist = item.history ?? item.months ?? item.dynamics
-        ?? item.seasonality ?? item.seasonal ?? item.data;
-      if (hist != null) {
-        rows.push(_rowFromHistory(phrase, hist, resolveMonth));
-      } else {
-        // возможно, помесячные значения лежат прямо в полях item ("2024-01": n)
-        const flat = {};
-        for (const [k, v] of Object.entries(item)) {
-          if (_MONTH_KEY_RE.test(String(k).trim())) flat[k] = v;
-        }
-        if (Object.keys(flat).length > 0) rows.push(_rowFromHistory(phrase, flat, resolveMonth));
-      }
-    }
+    rows = _rowsFromArray(payload, resolveMonth);
   } else if (payload && typeof payload === 'object') {
-    for (const [key, val] of Object.entries(payload)) {
-      const phrase = String(key).trim();
-      if (!phrase || val == null) continue;
-      if (typeof val === 'object') {
-        const hist = val.history ?? val.months ?? val.dynamics
-          ?? val.seasonality ?? val.seasonal ?? val;
-        const r = _rowFromHistory(phrase, hist, resolveMonth);
-        if (Object.keys(r.byPeriod).length > 0) rows.push(r);
-      }
+    // Реальный envelope: result.queries[] + параллельные сезонные данные.
+    if (Array.isArray(payload.queries)) {
+      rows = _rowsFromQueriesEnvelope(payload, resolveMonth);
+    }
+    // Иначе (или если envelope не дал строк) — трактуем объект как карту
+    // «фраза → история», пропуская служебные ключи.
+    if (rows.length === 0) {
+      rows = _rowsFromObjectMap(payload, resolveMonth);
     }
   }
 
@@ -439,6 +554,7 @@ async function collectSeasonality({ phrases, regionLabel }) {
   const allRows = [];
   const tasksMeta = [];
   let lastRawSample = null;
+  let lastRawJson = null;
 
   try {
     // Батчим и выполняем ПОСЛЕДОВАТЕЛЬНО: лимит Арсенкина — 5 одновременных
@@ -449,6 +565,7 @@ async function collectSeasonality({ phrases, regionLabel }) {
       const res = await _runOneTask({ phrases: batch, regionLr, cfg });
       tasksMeta.push({ task_id: res.taskId, phrases_count: batch.length });
       lastRawSample = _rawSample(res);
+      lastRawJson = res.json ?? null;
       const rows = _normalizeResult({ ...res, resolveMonth });
       allRows.push(...rows);
     }
@@ -469,12 +586,13 @@ async function collectSeasonality({ phrases, regionLabel }) {
     // Добавляем усечённый образец сырого ответа /get — без него причину
     // «пустого результата» (неизвестный формат ответа vs пустая выдача vs
     // лимиты) невозможно диагностировать по логам.
+    const diag = _diagnoseEmpty(lastRawJson);
     const hint = lastRawSample
       ? ` Ответ /get (образец): ${lastRawSample}`
       : '';
     return {
       verdict: 'error',
-      reason: 'Арсенкин вернул пустой результат (проверьте ARSENKIN_TOOL_NAME/ARSENKIN_WORDSTAT_TYPE и лимиты аккаунта).' + hint,
+      reason: diag + hint,
       region_lr: regionLr,
       requested: list.length,
       matched: 0,
@@ -495,16 +613,67 @@ async function collectSeasonality({ phrases, regionLabel }) {
 }
 
 /**
+ * Формирует человекочитаемую причину пустого результата на основе сырого JSON
+ * ответа /get. Ключевая эвристика: если Арсенкин вернул РЕЗУЛЬТАТ ПАРСИНГА ФРАЗ
+ * (type=2 — только список `queries`, без помесячной сезонности) вместо проверки
+ * сезонности (type=3), значит инструмент/тип задачи выбран неверно — прямо
+ * подсказываем выставить ARSENKIN_WORDSTAT_TYPE=3.
+ */
+function _diagnoseEmpty(json) {
+  const base = 'Арсенкин вернул пустой результат (проверьте ARSENKIN_TOOL_NAME/ARSENKIN_WORDSTAT_TYPE и лимиты аккаунта).';
+  try {
+    const inner = (json && typeof json === 'object')
+      ? (json.result ?? json.data ?? json)
+      : null;
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      const type = Number(inner.type);
+      const hasQueries = Array.isArray(inner.queries);
+      const hasSeasonal = _SEASONAL_KEYS.some((k) => _looksLikeHistory(inner[k]));
+      if (!hasSeasonal && hasQueries && type === 2) {
+        return 'Арсенкин вернул результат парсинга фраз (type=2), а не помесячную сезонность (type=3). '
+          + 'Задайте ARSENKIN_WORDSTAT_TYPE=3 (проверка сезонности) и ARSENKIN_WORDSTAT_GROUP=month.';
+      }
+      if (!hasSeasonal && hasQueries) {
+        return 'Арсенкин вернул только список запросов без помесячных данных сезонности. '
+          + 'Проверьте, что ARSENKIN_WORDSTAT_TYPE=3 и тариф аккаунта включает проверку сезонности.';
+      }
+    }
+  } catch (_) { /* диагностика best-effort */ }
+  return base;
+}
+
+/**
  * Усечённый безопасный образец сырого ответа /get для диагностики
- * «пустого результата» (не более ~500 символов).
+ * «пустого результата». Кроме укороченного дампа, отдельно перечисляет
+ * структурные ключи envelope и его вложенного result — иначе при огромном
+ * массиве `queries` реальные ключи с данными сезонности выпадают за лимит
+ * усечения и причину сбоя не видно в логах.
  */
 function _rawSample(res) {
   try {
+    if (res && res.json != null && typeof res.json === 'object') {
+      const parts = [];
+      const topKeys = Object.keys(res.json);
+      if (topKeys.length) parts.push(`keys=[${topKeys.join(',')}]`);
+      const inner = res.json.result ?? res.json.data;
+      if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+        const innerKeys = Object.keys(inner).map((k) => {
+          const v = inner[k];
+          if (Array.isArray(v)) return `${k}[${v.length}]`;
+          if (v && typeof v === 'object') return `${k}{}`;
+          return k;
+        });
+        parts.push(`result.keys=[${innerKeys.join(',')}]`);
+      }
+      const dump = JSON.stringify(res.json).slice(0, 600);
+      parts.push(dump);
+      return parts.join(' ');
+    }
     if (res && res.json != null) {
-      return JSON.stringify(res.json).slice(0, 500);
+      return JSON.stringify(res.json).slice(0, 600);
     }
     if (res && typeof res.text === 'string' && res.text.trim()) {
-      return res.text.trim().slice(0, 500);
+      return res.text.trim().slice(0, 600);
     }
   } catch (_) { /* циклический JSON и пр. — игнорируем */ }
   return null;
