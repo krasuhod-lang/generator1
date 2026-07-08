@@ -611,10 +611,28 @@ function _resolverFromEnddate(enddate) {
   };
 }
 
+// Извлекает скаляр-частотность из значения точки. Арсенкин в разных версиях
+// API отдавал либо число ({"2024-06":123}), либо вложенный объект
+// ({"2024-06-01":{"frequency":123}}) — здесь поддерживаются оба варианта плюс
+// синонимы поля: count/value/freq/ws/shows/shows_count.
+function _pointValue(v) {
+  if (v == null) return NaN;
+  if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+    return Number(v);
+  }
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    return Number(
+      v.frequency ?? v.count ?? v.value ?? v.freq
+      ?? v.ws ?? v.shows ?? v.shows_count,
+    );
+  }
+  return NaN;
+}
+
 function _rowFromHistory(phrase, history, resolveMonth = null) {
   const byPeriod = {};
   if (Array.isArray(history)) {
-    // [{month|date|period, count|value|freq|ws}, ...]
+    // [{month|date|period, count|value|freq|frequency|ws|shows}, ...]
     for (let i = 0; i < history.length; i++) {
       const pt = history[i];
       if (!pt || typeof pt !== 'object') continue;
@@ -624,18 +642,24 @@ function _rowFromHistory(phrase, history, resolveMonth = null) {
         const mn = _monthNumFromAny(rawKey);
         if (mn) period = resolveMonth(mn, i);
       }
-      const val = Number(pt.count ?? pt.value ?? pt.freq ?? pt.ws ?? pt.shows);
+      const val = Number(
+        pt.count ?? pt.value ?? pt.freq ?? pt.frequency
+        ?? pt.ws ?? pt.shows ?? pt.shows_count,
+      );
       if (period && Number.isFinite(val)) byPeriod[period] = val;
     }
   } else if (history && typeof history === 'object') {
-    // {"2024-01": 123, ...} или {"01": 123, …} (month-only сезонность)
+    // {"2024-01": 123, ...} — legacy плоская карта;
+    // {"2024-06-01": {"frequency":123}} — актуальный формат Арсенкина
+    // (ключ YYYY-MM-DD, значение — объект с полем frequency);
+    // {"01": 123, …} — month-only сезонность (type=3).
     for (const [k, v] of Object.entries(history)) {
       let period = _periodFromAny(k);
       if (!period && resolveMonth) {
         const mn = _monthNumFromAny(k);
         if (mn) period = resolveMonth(mn);
       }
-      const val = Number(v);
+      const val = _pointValue(v);
       if (period && Number.isFinite(val)) byPeriod[period] = val;
     }
   }

@@ -268,6 +268,46 @@ group('arsenkinClient result normalization', () => {
     assert.strictEqual(Object.keys(rows[0].byPeriod).length, 3);
   });
 
+  test('envelope TASK_RESULT: seasonal.data с ключом YYYY-MM-DD и объектом {frequency}', () => {
+    // Актуальный формат Арсенкина (лето 2026): каждая точка — объект-обёртка
+    // {"2024-06-01":{"frequency":N}}, а ключ месяца приходит как полная дата.
+    // Раньше _rowFromHistory делал Number({frequency}) → NaN и byPeriod
+    // оставался пустым → «Найдено только 0 помесячных колонок».
+    const rows = _normalizeResult({
+      json: {
+        data: [
+          {
+            query: 'навоз купить в костроме',
+            data: {
+              '2024-06-01': { frequency: 0 },
+              '2024-07-01': { frequency: 4 },
+              '2024-08-01': { frequency: 1 },
+            },
+          },
+        ],
+      },
+      text: '',
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].phrase, 'навоз купить в костроме');
+    assert.deepStrictEqual(rows[0].byPeriod, {
+      '2024-06': 0, '2024-07': 4, '2024-08': 1,
+    });
+    assert.strictEqual(rows[0].total, 5);
+  });
+
+  test('_rowFromHistory: карта YYYY-MM-DD → {frequency} извлекает скаляр', () => {
+    const r = _rowFromHistory('окна', {
+      '2025-06-01': { frequency: 10 },
+      '2025-07-01': { frequency: 20 },
+      '2025-08-01': { frequency: 30 },
+    });
+    assert.deepStrictEqual(r.byPeriod, {
+      '2025-06': 10, '2025-07': 20, '2025-08': 30,
+    });
+    assert.strictEqual(r.total, 60);
+  });
+
   // ── реальный envelope Арсенкина: {code:"TASK_RESULT", result:{…}} ──
   test('envelope TASK_RESULT: queries[] + параллельный seasonal[] по индексу', () => {
     const rows = _normalizeResult({
