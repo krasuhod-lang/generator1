@@ -183,6 +183,91 @@ group('arsenkinClient result normalization', () => {
     assert.strictEqual(r.total, 100);
   });
 
+  test('_periodFromAny: расширенные форматы ключей от Арсенкина', () => {
+    const { _periodFromAny } = require('../src/services/forecaster/arsenkinClient');
+    // ISO / варианты разделителей
+    assert.strictEqual(_periodFromAny('2025-06'),      '2025-06');
+    assert.strictEqual(_periodFromAny('2025.06'),      '2025-06');
+    assert.strictEqual(_periodFromAny('2025/6'),       '2025-06');
+    // Полная дата — сворачиваем в месяц
+    assert.strictEqual(_periodFromAny('2025-06-01'),   '2025-06');
+    assert.strictEqual(_periodFromAny('2025.06.15'),   '2025-06');
+    // DD.MM.YYYY
+    assert.strictEqual(_periodFromAny('01.06.2025'),   '2025-06');
+    assert.strictEqual(_periodFromAny('15-06-2025'),   '2025-06');
+    // MM.YYYY
+    assert.strictEqual(_periodFromAny('06.2025'),      '2025-06');
+    assert.strictEqual(_periodFromAny('6/2025'),       '2025-06');
+    // YYYYMM без разделителя
+    assert.strictEqual(_periodFromAny('202506'),       '2025-06');
+    // Русские месяцы + год
+    assert.strictEqual(_periodFromAny('Январь 2024'),  '2024-01');
+    assert.strictEqual(_periodFromAny('янв.24'),       '2024-01');
+    assert.strictEqual(_periodFromAny('сен 2025'),     '2025-09');
+    assert.strictEqual(_periodFromAny("май'25"),       '2025-05');
+    // Английские месяцы + год
+    assert.strictEqual(_periodFromAny('Jan 2024'),     '2024-01');
+    assert.strictEqual(_periodFromAny('Jan-24'),       '2024-01');
+    assert.strictEqual(_periodFromAny('Sept 2025'),    '2025-09');
+    // Unix-timestamp (сек и мс)
+    // 1717200000 → 2024-06-01 00:00:00 UTC
+    assert.strictEqual(_periodFromAny(1717200000),      '2024-06');
+    assert.strictEqual(_periodFromAny(1717200000 * 1000), '2024-06');
+    // Отрицательные кейсы
+    assert.strictEqual(_periodFromAny('2025'),         null);   // только год
+    assert.strictEqual(_periodFromAny('13'),           null);   // не месяц
+    assert.strictEqual(_periodFromAny(''),             null);
+    assert.strictEqual(_periodFromAny(null),           null);
+  });
+
+  test('history-массив с расширенными форматами ключей', () => {
+    const r = _rowFromHistory('окна', [
+      { month: '2025-06-01', count: 10 },   // полная дата
+      { month: '07.2025',    count: 20 },   // MM.YYYY
+      { month: 'Август 2025', count: 30 },  // русский месяц
+      { month: 'Sep-2025',   count: 40 },   // английский месяц
+    ]);
+    assert.deepStrictEqual(r.byPeriod, {
+      '2025-06': 10, '2025-07': 20, '2025-08': 30, '2025-09': 40,
+    });
+    assert.strictEqual(r.total, 100);
+  });
+
+  test('history-объект с русскими названиями месяцев', () => {
+    const r = _rowFromHistory('окна', {
+      'Январь 2024': 100,
+      'Февраль 2024': 200,
+      'Март 2024': 300,
+    });
+    assert.strictEqual(r.byPeriod['2024-01'], 100);
+    assert.strictEqual(r.byPeriod['2024-02'], 200);
+    assert.strictEqual(r.byPeriod['2024-03'], 300);
+    assert.strictEqual(r.total, 600);
+  });
+
+  test('envelope TASK_RESULT: seasonal с полной датой YYYY-MM-DD', () => {
+    const rows = _normalizeResult({
+      json: {
+        code: 'TASK_RESULT',
+        result: {
+          type: 3,
+          queries: ['окна'],
+          seasonal: [[
+            { month: '2025-01-01', count: 100 },
+            { month: '2025-02-01', count: 200 },
+            { month: '2025-03-01', count: 300 },
+          ]],
+        },
+      },
+      text: '',
+    });
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].byPeriod['2025-01'], 100);
+    assert.strictEqual(rows[0].byPeriod['2025-02'], 200);
+    assert.strictEqual(rows[0].byPeriod['2025-03'], 300);
+    assert.strictEqual(Object.keys(rows[0].byPeriod).length, 3);
+  });
+
   // ── реальный envelope Арсенкина: {code:"TASK_RESULT", result:{…}} ──
   test('envelope TASK_RESULT: queries[] + параллельный seasonal[] по индексу', () => {
     const rows = _normalizeResult({

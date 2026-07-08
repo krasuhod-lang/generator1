@@ -474,14 +474,77 @@ async function _runOneTask({ phrases, regionLr, cfg }) {
 }
 
 // ── нормализация результата → rows/{phrase,total,byPeriod} ─────────
-const _MONTH_KEY_RE = /^(20\d{2})[-./](0?[1-9]|1[0-2])$/;
+// Ключ помесячной колонки. Помимо классических YYYY-MM / MM.YYYY поддерживаем
+// формы, которые Арсенкин отдавал в разных версиях API для type=3/group=month:
+// полную дату YYYY-MM-DD (например, "2024-01-01" в качестве метки месяца),
+// DD.MM.YYYY, YYYYMM без разделителя и русское/английское название месяца
+// с годом («Январь 2024», «янв 24», «Jan-2024»). См. _periodFromAny.
+const _MONTH_KEY_RE = new RegExp(
+  '^(?:'
+    + '(?:20\\d{2}|19\\d{2})[\\-./](?:0?[1-9]|1[0-2])(?:[\\-./]\\d{1,2})?'   // YYYY-MM[-DD]
+    + '|(?:0?[1-9]|1[0-2])[\\-./](?:20\\d{2}|19\\d{2})'                       // MM.YYYY
+    + '|\\d{1,2}[\\-./](?:0?[1-9]|1[0-2])[\\-./](?:20\\d{2}|19\\d{2})'         // DD.MM.YYYY
+    + '|(?:20\\d{2}|19\\d{2})(?:0[1-9]|1[0-2])'                                // YYYYMM
+    + '|[а-яёa-z]{3,9}[\\s\\-\'.]*(?:20|19)?\\d{2}'                            // "Янв 24"/"Январь 2024"
+  + ')$',
+  'i',
+);
+
+// Русские и английские сокращения месяцев (3–4 первые буквы).
+const _MONTH_RU_MAP = {
+  янв: 1, фев: 2, мар: 3, апр: 4, май: 5, мая: 5, июн: 6,
+  июл: 7, авг: 8, сен: 9, окт: 10, ноя: 11, дек: 12,
+};
+const _MONTH_EN_MAP = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
+};
 
 function _periodFromAny(v) {
-  const s = String(v || '').trim();
-  let m = s.match(/^(20\d{2})[-./](0?[1-9]|1[0-2])/);
+  if (v == null) return null;
+  // Unix-timestamp (сек или мс) — Арсенкин иногда отдаёт метку месяца числом.
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+    const ms = v < 1e12 ? v * 1000 : v;
+    const d = new Date(ms);
+    const yr = d.getUTCFullYear();
+    if (yr >= 2000 && yr <= 2099) {
+      return `${yr}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    }
+  }
+  const s = String(v).trim().toLowerCase();
+  if (!s) return null;
+
+  // 1) YYYY-MM или YYYY-MM-DD (а также / . как разделители).
+  let m = s.match(/^(20\d{2}|19\d{2})[-./](0?[1-9]|1[0-2])(?:[-./]\d{1,2})?$/);
   if (m) return `${m[1]}-${String(+m[2]).padStart(2, '0')}`;
-  m = s.match(/^(0?[1-9]|1[0-2])[-./](20\d{2})/);
+
+  // 2) MM.YYYY / MM-YYYY / MM/YYYY.
+  m = s.match(/^(0?[1-9]|1[0-2])[-./](20\d{2}|19\d{2})$/);
   if (m) return `${m[2]}-${String(+m[1]).padStart(2, '0')}`;
+
+  // 3) DD.MM.YYYY — берём MM/YYYY.
+  m = s.match(/^\d{1,2}[-./](0?[1-9]|1[0-2])[-./](20\d{2}|19\d{2})$/);
+  if (m) return `${m[2]}-${String(+m[1]).padStart(2, '0')}`;
+
+  // 4) YYYYMM без разделителя.
+  m = s.match(/^(20\d{2}|19\d{2})(0[1-9]|1[0-2])$/);
+  if (m) return `${m[1]}-${m[2]}`;
+
+  // 5) Русское/английское название месяца + год: «Январь 2024», «янв.24»,
+  //    «Jan-2024», «сент 25».
+  m = s.match(/^([а-яёa-z]{3,9})[\s\-'.]*((?:20|19)?\d{2})$/i);
+  if (m) {
+    const monKey = m[1].slice(0, 4);
+    let monNum = _MONTH_RU_MAP[monKey.slice(0, 3)] || _MONTH_EN_MAP[monKey.slice(0, 3)];
+    if (!monNum) monNum = _MONTH_EN_MAP[monKey];
+    if (monNum) {
+      let yr = parseInt(m[2], 10);
+      if (yr < 100) yr += 2000;
+      if (yr >= 2000 && yr <= 2099) {
+        return `${yr}-${String(monNum).padStart(2, '0')}`;
+      }
+    }
+  }
   return null;
 }
 
@@ -938,6 +1001,14 @@ async function collectSeasonality({ phrases, regionLabel }) {
       tasksMeta.push({ task_id: res.taskId, phrases_count: batch.length });
       lastRawSample = _rawSample(res);
       lastRawJson = res.json ?? null;
+      // Диагностическая печать сырого /get-ответа: включается флагом
+      // ARSENKIN_DEBUG_SEASONALITY=1. Нужна, когда Арсенкин меняет формат
+      // ключей помесячных данных — иначе причину пустых byPeriod не видно
+      // в логах (см. issue «Найдено только 0 помесячных колонок»).
+      if (String(process.env.ARSENKIN_DEBUG_SEASONALITY || '').toLowerCase() === '1'
+          || String(process.env.ARSENKIN_DEBUG_SEASONALITY || '').toLowerCase() === 'true') {
+        console.log(`[Forecaster] Arsenkin /get task_id=${res.taskId} raw:`, lastRawSample);
+      }
       const resolveMonth = res.range
         ? _resolverFromRange(res.range.startdate, res.range.enddate)
         : defaultResolveMonth;
@@ -979,6 +1050,32 @@ async function collectSeasonality({ phrases, regionLabel }) {
       region_lr: regionLr,
       requested: list.length,
       matched: 0,
+      tasks: tasksMeta,
+      duration_ms: Date.now() - t0,
+    };
+  }
+
+  // Даже если фразы «сматчились», у них могут быть пустые/полу-пустые byPeriod
+  // (неопознанный формат ключей дат). Даунстрим-пайплайн потребует minimum 3
+  // помесячных колонок и упадёт с «Найдено только 0 помесячных колонок» без
+  // диагностики. Проверяем объединение периодов здесь и возвращаем понятную
+  // ошибку с образцом сырого ответа, чтобы можно было расширить парсер дат.
+  const periodsUnion = new Set();
+  for (const r of allRows) {
+    for (const p of Object.keys(r.byPeriod || {})) periodsUnion.add(p);
+  }
+  if (periodsUnion.size < 3) {
+    const hint = lastRawSample ? ` Ответ /get (образец): ${lastRawSample}` : '';
+    return {
+      verdict: 'error',
+      reason: `Арсенкин вернул ${allRows.length} строк(и), но помесячных периодов распознано только `
+        + `${periodsUnion.size} (нужно минимум 3). Похоже, поменялся формат ключей дат в ответе — `
+        + `проверьте _periodFromAny в arsenkinClient.js и включите ARSENKIN_DEBUG_SEASONALITY=1 для дампа сырого ответа.`
+        + hint,
+      rows: allRows,
+      region_lr: regionLr,
+      requested: list.length,
+      matched: allRows.length,
       tasks: tasksMeta,
       duration_ms: Date.now() - t0,
     };
@@ -1078,4 +1175,5 @@ module.exports = {
   _isWrongDatesError,
   _datesFromErrorMessage,
   _snapRangeToFullMonths,
+  _periodFromAny,
 };
