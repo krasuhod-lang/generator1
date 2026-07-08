@@ -1400,6 +1400,9 @@ async function ensureSchema() {
     // Migration 103: SOV-прогноз (доля рынка / Share of Voice).
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS sov_forecast JSONB`);
 
+    // Migration 104: единая («перепрошитая») модель прогноза трафика.
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS unified_forecast JSONB`);
+
     // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google
     // Search Console (OAuth-токены хранятся строго в зашифрованном виде) +
     // AI-аналитика DeepSeek + публичный read-only шаринг дашборда.

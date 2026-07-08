@@ -171,6 +171,16 @@ function resolveRegionLr(label) {
   return 225;
 }
 
+// Определяет числовой lr задачи: приоритет — уже «вшитый» region_lr (как в
+// модуле релевантности, где lr — first-class поле задачи), иначе резолвим
+// из текстовой метки региона. Гарантирует, что при создании задачи lr
+// фиксируется один раз и дальше не «плывёт» между вызовами.
+function _pickRegionLr(regionLr, regionLabel) {
+  const n = Number(regionLr);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  return resolveRegionLr(regionLabel);
+}
+
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── нормализация поля device ───────────────────────────────────────
@@ -1007,7 +1017,7 @@ function _normalizeSerpFeatures(res) {
     .map(([type, count]) => ({ type, count }));
 }
 
-async function collectCommercialization({ phrases, regionLabel }) {
+async function collectCommercialization({ phrases, regionLabel, regionLr = null }) {
   const cfg = _cfg();
   if (!cfg.commToolName) {
     _logSkipOnce('comm_tool', '[Forecaster] ARSENKIN_COMM_TOOL_NAME не задан — коммерциализация пропущена');
@@ -1017,7 +1027,7 @@ async function collectCommercialization({ phrases, regionLabel }) {
   const list = (Array.isArray(phrases) ? phrases : []).map((p) => String(p || '').trim()).filter(Boolean);
   if (list.length === 0) return null;
   try {
-    const res = await _runCustomTool({ phrases: list, regionLr: resolveRegionLr(regionLabel), cfg, toolName: cfg.commToolName });
+    const res = await _runCustomTool({ phrases: list, regionLr: _pickRegionLr(regionLr, regionLabel), cfg, toolName: cfg.commToolName });
     return _normalizeCommercialization(res);
   } catch (err) {
     console.warn('[Forecaster] Сбор коммерциализации Арсенкин пропущен:', (err && err.message) || String(err));
@@ -1025,7 +1035,7 @@ async function collectCommercialization({ phrases, regionLabel }) {
   }
 }
 
-async function collectSerpFeatures({ phrases, regionLabel }) {
+async function collectSerpFeatures({ phrases, regionLabel, regionLr = null }) {
   const cfg = _cfg();
   if (!cfg.wizardToolName) {
     _logSkipOnce('wizard_tool', '[Forecaster] ARSENKIN_WIZARD_TOOL_NAME не задан — колдунщики SERP пропущены');
@@ -1035,7 +1045,7 @@ async function collectSerpFeatures({ phrases, regionLabel }) {
   const list = (Array.isArray(phrases) ? phrases : []).map((p) => String(p || '').trim()).filter(Boolean);
   if (list.length === 0) return null;
   try {
-    const res = await _runCustomTool({ phrases: list, regionLr: resolveRegionLr(regionLabel), cfg, toolName: cfg.wizardToolName });
+    const res = await _runCustomTool({ phrases: list, regionLr: _pickRegionLr(regionLr, regionLabel), cfg, toolName: cfg.wizardToolName });
     return _normalizeSerpFeatures(res);
   } catch (err) {
     console.warn('[Forecaster] Сбор колдунщиков Арсенкин пропущен:', (err && err.message) || String(err));
@@ -1060,14 +1070,14 @@ async function collectSerpFeatures({ phrases, regionLabel }) {
  *   duration_ms?: number,
  * }>}
  */
-async function collectSeasonality({ phrases, regionLabel }) {
+async function collectSeasonality({ phrases, regionLabel, regionLr: regionLrIn = null }) {
   const cfg = _cfg();
   if (!cfg.token) return { verdict: 'skipped', reason: 'no_api_key' };
   const list = (Array.isArray(phrases) ? phrases : [])
     .map((p) => String(p || '').trim()).filter(Boolean);
   if (list.length === 0) return { verdict: 'skipped', reason: 'no_phrases' };
 
-  const regionLr = resolveRegionLr(regionLabel);
+  const regionLr = _pickRegionLr(regionLrIn, regionLabel);
   // Резолвер года по умолчанию — для неполноценных ответов без range; для каждой
   // задачи ниже строим отдельный резолвер по фактически применённому окну
   // (авто-повтор WRONG_WORDSTAT_DATES мог сжать окно на месяц-два).

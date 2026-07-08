@@ -11,6 +11,7 @@ import { useRoute } from 'vue-router';
 import axios from 'axios';
 import ForecastChart from '../components/ForecastChart.vue';
 import SovForecastChart from '../components/SovForecastChart.vue';
+import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
 
 const route = useRoute();
 const task = ref(null);
@@ -38,6 +39,10 @@ const trend      = computed(() => task.value?.trend || null);
 const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
 const sovForecast = computed(() => task.value?.sov_forecast || null);
+const unified     = computed(() => {
+  const u = task.value?.unified_forecast || null;
+  return u && u.verdict === 'ok' ? u : null;
+});
 
 const annualForecast = computed(() => task.value?.forecast?.annual_total || 0);
 const annualHistorical = computed(() =>
@@ -161,6 +166,33 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
               <div class="text-xs text-rose-300 font-semibold">−{{ Math.round(a.drop_pct * 100) }}%</div>
             </li>
           </ul>
+        </section>
+
+        <!-- ✨ Единый прогноз трафика: ретроданные + прогноз -->
+        <section v-if="unified" class="bg-gray-900 border border-emerald-500/30 rounded-xl p-4">
+          <h2 class="text-base font-semibold text-emerald-200 mb-1">🚀 Прогноз трафика — сколько визитов вы получите</h2>
+          <p v-if="unified.explain?.summary" class="text-xs text-gray-400 mb-3 leading-relaxed">{{ unified.explain.summary }}</p>
+          <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
+            <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+              <div class="text-[11px] text-gray-500 uppercase">Трафик сейчас</div>
+              <div class="text-xl font-semibold text-gray-100 mt-1">{{ fmtNum(unified.summary?.current_traffic) }}</div>
+            </div>
+            <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+              <div class="text-[11px] text-gray-500 uppercase">Через {{ unified.horizon }} мес</div>
+              <div class="text-xl font-semibold text-emerald-300 mt-1">{{ fmtNum(unified.summary?.at_horizon?.value) }}</div>
+              <div class="text-[11px] text-gray-500">
+                от {{ fmtNum(unified.summary?.at_horizon?.lower) }} до {{ fmtNum(unified.summary?.at_horizon?.upper) }}
+              </div>
+            </div>
+            <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+              <div class="text-[11px] text-gray-500 uppercase">Всего за {{ unified.horizon }} мес</div>
+              <div class="text-xl font-semibold text-emerald-300 mt-1">{{ fmtNum(unified.summary?.annual?.value) }}</div>
+            </div>
+          </div>
+          <UnifiedForecastChart :unified="unified" :height="380" />
+          <p v-if="unified.explain?.horizon_line" class="text-sm text-emerald-200/90 mt-2 text-center">
+            {{ unified.explain.horizon_line }}
+          </p>
         </section>
 
         <!-- Трафик -->

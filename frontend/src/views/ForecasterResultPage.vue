@@ -11,6 +11,7 @@ import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ForecastChart from '../components/ForecastChart.vue';
 import SovForecastChart from '../components/SovForecastChart.vue';
+import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
 import { useForecasterStore } from '../stores/forecaster.js';
 
 const route  = useRoute();
@@ -78,6 +79,13 @@ const oppSummary      = computed(() => opportunities.value?.summary || null);
 const leadsSummary    = computed(() => task.value?.leads_summary || null);
 const expertReports   = computed(() => task.value?.expert_reports || null);
 const sovForecast     = computed(() => task.value?.sov_forecast || null);
+const unified         = computed(() => {
+  const u = task.value?.unified_forecast || null;
+  return u && u.verdict === 'ok' ? u : null;
+});
+const unifiedParams   = computed(() => unified.value?.params || null);
+const unifiedExplain  = computed(() => unified.value?.explain || null);
+const unifiedSummary  = computed(() => unified.value?.summary || null);
 const nicheStrategist = computed(() => expertReports.value?.niche_strategist || null);
 const opportunityHunter = computed(() => expertReports.value?.opportunity_hunter || null);
 const clusterPlanner  = computed(() => expertReports.value?.cluster_planner || null);
@@ -386,6 +394,76 @@ const sovSummaryRows = computed(() => {
             </span>
             <span class="text-gray-400">Цифры прогноза «честные» — без раздутого спроса.</span>
           </div>
+
+          <!-- ✨ Единый прогноз трафика (главная модель): ретроданные + прогноз -->
+          <section v-if="unified" class="bg-gradient-to-br from-gray-900 to-gray-900/60 border border-emerald-500/30 rounded-xl p-4">
+            <div class="flex items-start justify-between gap-3 mb-1">
+              <h2 class="text-base font-semibold text-emerald-200">
+                🚀 Прогноз трафика — сколько визитов вы получите
+              </h2>
+              <span class="text-[10px] uppercase font-semibold border border-emerald-500/40 text-emerald-300 rounded px-1.5 py-0.5 whitespace-nowrap">
+                единая модель
+              </span>
+            </div>
+            <p v-if="unifiedExplain?.summary" class="text-xs text-gray-400 mb-3 leading-relaxed">
+              {{ unifiedExplain.summary }}
+            </p>
+
+            <!-- Крупные цифры: сейчас → через горизонт -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] text-gray-500 uppercase">Трафик сейчас</div>
+                <div class="text-xl font-semibold text-gray-100 mt-1">{{ fmtNum(unifiedSummary?.current_traffic) }}</div>
+                <div class="text-[11px] text-gray-500">визитов / мес</div>
+              </div>
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] text-gray-500 uppercase">Через {{ unified.horizon }} мес</div>
+                <div class="text-xl font-semibold text-emerald-300 mt-1">{{ fmtNum(unifiedSummary?.at_horizon?.value) }}</div>
+                <div class="text-[11px] text-gray-500">
+                  от {{ fmtNum(unifiedSummary?.at_horizon?.lower) }} до {{ fmtNum(unifiedSummary?.at_horizon?.upper) }}
+                </div>
+              </div>
+              <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] text-gray-500 uppercase">Всего за {{ unified.horizon }} мес</div>
+                <div class="text-xl font-semibold text-emerald-300 mt-1">{{ fmtNum(unifiedSummary?.annual?.value) }}</div>
+                <div class="text-[11px] text-gray-500">
+                  {{ fmtNum(unifiedSummary?.annual?.lower) }} – {{ fmtNum(unifiedSummary?.annual?.upper) }}
+                </div>
+              </div>
+              <div v-if="unifiedSummary?.leads_annual != null" class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] text-gray-500 uppercase">Заявок за {{ unified.horizon }} мес</div>
+                <div class="text-xl font-semibold text-indigo-300 mt-1">{{ fmtNum(unifiedSummary?.leads_annual) }}</div>
+                <div class="text-[11px] text-gray-500">трафик × конверсия</div>
+              </div>
+            </div>
+
+            <UnifiedForecastChart :unified="unified" :height="400" />
+            <p v-if="unifiedExplain?.horizon_line" class="text-sm text-emerald-200/90 mt-2 text-center">
+              {{ unifiedExplain.horizon_line }}
+            </p>
+
+            <!-- Что где и почему: расшифровка факторов простым языком -->
+            <details class="mt-4 group">
+              <summary class="cursor-pointer text-sm text-gray-300 hover:text-emerald-200 select-none">
+                💡 Что где и почему — из чего собран этот прогноз (для маркетолога и бизнеса)
+              </summary>
+              <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                <div v-for="f in (unifiedExplain?.factors || [])" :key="f.key"
+                     class="border border-gray-800 rounded-lg p-3 bg-gray-950/40">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-xs font-semibold text-gray-200">{{ f.label }}</span>
+                    <span class="text-sm font-mono text-emerald-300">{{ f.value }}</span>
+                  </div>
+                  <p class="text-[11px] text-gray-400 mt-1 leading-relaxed">{{ f.plain }}</p>
+                </div>
+              </div>
+              <p class="text-[11px] text-gray-600 mt-2 italic">
+                Формула: Прогноз = (спрос × сезонность × живые клики × расширение ядра) × ваша доля рынка.
+                Зелёная зона на графике — «вилка» оптимистичного и осторожного сценария (растёт с горизонтом,
+                потому что будущее всегда менее точно).
+              </p>
+            </details>
+          </section>
 
           <!-- Трафик top3/5/10 -->
           <section v-if="trafficEst" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
