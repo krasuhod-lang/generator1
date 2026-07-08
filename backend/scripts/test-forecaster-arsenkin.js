@@ -12,7 +12,7 @@
 
 const assert = require('assert');
 const { filterKeywords, matchStopWord } = require('../src/services/forecaster/stopWordFilter');
-const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory, _resolverFromEnddate, _isWrongDatesError } = require('../src/services/forecaster/arsenkinClient');
+const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory, _resolverFromEnddate, _isWrongDatesError, _datesFromErrorMessage, _snapRangeToFullMonths } = require('../src/services/forecaster/arsenkinClient');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -343,6 +343,60 @@ group('arsenkinClient._isWrongDatesError', () => {
   test('другие ошибки не трогает', () => {
     assert.strictEqual(_isWrongDatesError(new Error('Arsenkin API: HTTP 429 Too Many Requests')), false);
     assert.strictEqual(_isWrongDatesError(null), false);
+  });
+});
+
+// ── arsenkinClient._datesFromErrorMessage / _snapRangeToFullMonths ─
+// Сервер Арсенкина в msg ошибки WRONG_WORDSTAT_DATES подсказывает допустимый
+// период — клиент должен уметь его извлечь и выровнять на полные месяцы.
+group('arsenkinClient._datesFromErrorMessage', () => {
+  test('извлекает ISO-даты YYYY-MM-DD', () => {
+    const err = new Error('Arsenkin API: HTTP 422 — WRONG_WORDSTAT_DATES — Указанный период не подходит. Выберите период с 2024-08-01 по 2026-04-30');
+    assert.deepStrictEqual(_datesFromErrorMessage(err), { startdate: '2024-08-01', enddate: '2026-04-30' });
+  });
+  test('извлекает русский формат DD.MM.YYYY', () => {
+    const err = new Error('Указанный период не подходит для этого запроса. Выберите период с 01.08.2024 по 30.04.2026');
+    assert.deepStrictEqual(_datesFromErrorMessage(err), { startdate: '2024-08-01', enddate: '2026-04-30' });
+  });
+  test('даты в обратном порядке упорядочиваются', () => {
+    const err = new Error('доступно до 30.04.2026, начиная с 01.08.2024');
+    assert.deepStrictEqual(_datesFromErrorMessage(err), { startdate: '2024-08-01', enddate: '2026-04-30' });
+  });
+  test('без дат в сообщении → null', () => {
+    assert.strictEqual(_datesFromErrorMessage(new Error('Указанный период не подходит для этого запроса')), null);
+    assert.strictEqual(_datesFromErrorMessage(null), null);
+  });
+  test('одна дата → null (нужен диапазон)', () => {
+    assert.strictEqual(_datesFromErrorMessage(new Error('данные доступны с 01.08.2024')), null);
+  });
+});
+
+group('arsenkinClient._snapRangeToFullMonths', () => {
+  test('startdate → 1-е число, enddate → последний день месяца', () => {
+    assert.deepStrictEqual(
+      _snapRangeToFullMonths({ startdate: '2024-08-15', enddate: '2026-04-10' }),
+      { startdate: '2024-08-01', enddate: '2026-04-30' },
+    );
+  });
+  test('февраль: последний день 28/29', () => {
+    assert.deepStrictEqual(
+      _snapRangeToFullMonths({ startdate: '2024-02-05', enddate: '2026-02-05' }),
+      { startdate: '2024-02-01', enddate: '2026-02-28' },
+    );
+  });
+  test('уже полные месяцы не меняются', () => {
+    assert.deepStrictEqual(
+      _snapRangeToFullMonths({ startdate: '2024-08-01', enddate: '2026-04-30' }),
+      { startdate: '2024-08-01', enddate: '2026-04-30' },
+    );
+  });
+  test('битый/пустой диапазон → null', () => {
+    assert.strictEqual(_snapRangeToFullMonths(null), null);
+    assert.strictEqual(_snapRangeToFullMonths({ startdate: 'oops', enddate: '2026-04-30' }), null);
+    assert.strictEqual(_snapRangeToFullMonths({ startdate: '2026-04-01', enddate: '2026-04-30' }) == null, false);
+  });
+  test('start после end → null', () => {
+    assert.strictEqual(_snapRangeToFullMonths({ startdate: '2026-05-01', enddate: '2026-04-30' }), null);
   });
 });
 
