@@ -616,6 +616,8 @@ async function processForecasterTask(taskId) {
         trafficRealism:  trafficEstimate?.realism || null,
         monthlySummary,
         targetUrl,
+        mainQuery:     options.main_query || null,
+        samplePhrases: topPhrases,
       });
       const hunter = (opportunitiesReport && opportunitiesReport.verdict === 'ok')
         ? await runOpportunityHunter({

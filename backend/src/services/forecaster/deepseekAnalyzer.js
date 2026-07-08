@@ -1,19 +1,20 @@
 'use strict';
 
 /**
- * forecaster/deepseekAnalyzer.js — обращение к DeepSeek для генерации
+ * forecaster/deepseekAnalyzer.js — обращение к Gemini (gemini-3.1-pro-preview,
+ * та же модель, что используется в генераторах контента) для генерации
  * аналитических выводов по числовым результатам прогноза.
  *
- * Промпт собирается из JSON-метрик (не из сырого CSV) — DeepSeek не получает
+ * Промпт собирается из JSON-метрик (не из сырого CSV) — модель не получает
  * клиентских данных, только агрегаты. Модель пишет 4-7 буллетов выводов и
  * 2-3 рекомендации (на русском).
  *
  * Гейт:
- *   • если DEEPSEEK_API_KEY не задан, или вызов упал — возвращаем
+ *   • если GEMINI_API_KEY не задан, или вызов упал — возвращаем
  *     { verdict: 'skipped', reason } и пайплайн продолжает работу.
  */
 
-const { callDeepSeek } = require('../llm/deepseek.adapter');
+const { callGemini } = require('../llm/gemini.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
 const { getForecasterConfig } = require('./config');
 
@@ -174,7 +175,7 @@ async function runDeepSeekAnalysis(payload) {
   if (!cfg.enabled) {
     return { verdict: 'skipped', reason: 'feature_disabled' };
   }
-  if (!process.env.DEEPSEEK_API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     return { verdict: 'skipped', reason: 'no_api_key' };
   }
 
@@ -182,7 +183,7 @@ async function runDeepSeekAnalysis(payload) {
 
   try {
     const t0 = Date.now();
-    const resp = await callDeepSeek(SYSTEM_PROMPT, userPrompt, {
+    const resp = await callGemini(SYSTEM_PROMPT, userPrompt, {
       temperature: cfg.temperature,
       maxTokens:   cfg.maxTokens,
       timeoutMs:   cfg.timeoutMs,
@@ -190,8 +191,8 @@ async function runDeepSeekAnalysis(payload) {
     const ms = Date.now() - t0;
     const tIn  = resp.tokensIn  || 0;
     const tOut = resp.tokensOut || 0;
-    const cached = resp.cacheHitTokens || 0;
-    const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+    const cached = resp.cachedTokens || 0;
+    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
     const parsed = _safeParseJson(resp.text || '');
 
     return {
@@ -204,7 +205,7 @@ async function runDeepSeekAnalysis(payload) {
       tokens_out:     tOut,
       cached_tokens:  cached,
       cost_usd:       Math.round(cost * 1e6) / 1e6,
-      model:          resp.model || 'deepseek',
+      model:          resp.model || 'gemini',
       duration_ms:    ms,
     };
   } catch (err) {
@@ -233,8 +234,8 @@ function _safeParseJsonArray(text) {
 }
 
 /**
- * Обогащает шлак-классификатор DeepSeek-комментариями (verdict + reason).
- * Никогда не бросает. Если DEEPSEEK_API_KEY отсутствует — возвращает
+ * Обогащает шлак-классификатор Gemini-комментариями (verdict + reason).
+ * Никогда не бросает. Если GEMINI_API_KEY отсутствует — возвращает
  * { verdict: 'skipped', reason }; пайплайн всё равно сохранит детерминированную
  * разметку.
  *
@@ -245,7 +246,7 @@ function _safeParseJsonArray(text) {
 async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
   const cfg = getForecasterConfig().deepseek;
   if (!cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!process.env.DEEPSEEK_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!process.env.GEMINI_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
   const list = Array.isArray(candidates) ? candidates : [];
   if (list.length === 0) return { verdict: 'skipped', reason: 'no_candidates' };
 
@@ -267,7 +268,7 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
 
   try {
     const t0 = Date.now();
-    const resp = await callDeepSeek(JUNK_SYSTEM_PROMPT, userPrompt, {
+    const resp = await callGemini(JUNK_SYSTEM_PROMPT, userPrompt, {
       temperature: cfg.temperature,
       maxTokens:   cfg.maxTokens,
       timeoutMs:   cfg.timeoutMs,
@@ -275,8 +276,8 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
     const ms = Date.now() - t0;
     const tIn  = resp.tokensIn  || 0;
     const tOut = resp.tokensOut || 0;
-    const cached = resp.cacheHitTokens || 0;
-    const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+    const cached = resp.cachedTokens || 0;
+    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
     const parsed = _safeParseJsonArray(resp.text || '');
     if (!parsed) {
       return { verdict: 'error', reason: 'invalid_json', tokens_in: tIn, tokens_out: tOut, cost_usd: cost };
@@ -301,7 +302,7 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
       tokens_out: tOut,
       cost_usd:   Math.round(cost * 1e6) / 1e6,
       duration_ms: ms,
-      model:      resp.model || 'deepseek',
+      model:      resp.model || 'gemini',
     };
   } catch (err) {
     return {
@@ -345,9 +346,14 @@ module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategis
 
 const NICHE_STRATEGIST_SYSTEM = [
   'Ты — стратег-аналитик уровня senior, специализация: продвижение в Яндексе/Google в коммерческом RU-сегменте.',
-  'На вход получишь сжатый портрет ниши (объём ядра, доля исключённого шлака, реализм-факторы',
-  'трафик-модели, агрегаты keys.so). Твоя задача — определить рамки стратегии:',
-  '1) niche_label (1-3 слова, например: "пластиковые окна Москва"),',
+  'На вход получишь сжатый портрет ниши: main_query и sample_phrases (реальные фразы ядра —',
+  'ГЛАВНЫЙ и ЕДИНСТВЕННЫЙ надёжный источник для определения бизнес-ниши), а также объём ядра,',
+  'долю исключённого шлака, реализм-факторы трафик-модели и агрегаты keys.so (это только',
+  'вспомогательные метрики конкуренции/динамики — по ним НЕЛЬЗЯ определять нишу). Твоя задача —',
+  'определить рамки стратегии:',
+  '1) niche_label (1-3 слова, строго на основе main_query/sample_phrases, например:',
+  '   "пластиковые окна Москва"; если sample_phrases пуст — используй main_query; никогда не',
+  '   выдумывай нишу из общих цифр конкуренции),',
   '2) niche_difficulty (1=лёгкая, 5=очень тяжёлая) — обоснованно по конкуренции, ',
   '   доле фраз в топ-10, momentum,',
   '3) strategy_lane: один из ["volume_play","precision_play","authority_play","reanimation_play"]',
@@ -434,11 +440,11 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'advanced_disabled' };
   const ex = cfg.experts[expertKey];
   if (!ex || !ex.enabled) return { verdict: 'skipped', reason: 'expert_disabled' };
-  if (!process.env.DEEPSEEK_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!process.env.GEMINI_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
 
   try {
     const t0 = Date.now();
-    const resp = await callDeepSeek(system, userPrompt, {
+    const resp = await callGemini(system, userPrompt, {
       temperature: ex.temperature,
       maxTokens:   ex.maxTokens,
       timeoutMs:   ex.timeoutMs,
@@ -446,8 +452,8 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
     const ms = Date.now() - t0;
     const tIn  = resp.tokensIn  || 0;
     const tOut = resp.tokensOut || 0;
-    const cached = resp.cacheHitTokens || 0;
-    const cost = calcCost('deepseek', tIn, tOut, { cachedTokens: cached });
+    const cached = resp.cachedTokens || 0;
+    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
     const parsed = parser(resp.text || '');
     if (parsed == null) {
       return {
@@ -464,7 +470,7 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
       tokens_in: tIn, tokens_out: tOut, cached_tokens: cached,
       cost_usd: Math.round(cost * 1e6) / 1e6,
       duration_ms: ms,
-      model: resp.model || 'deepseek',
+      model: resp.model || 'gemini',
     };
   } catch (err) {
     return { verdict: 'error', reason: (err && err.message) ? err.message : String(err) };
@@ -472,9 +478,14 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
 }
 
 /** NicheStrategist. */
-async function runNicheStrategist({ keyssoAggregate, junkSummary, trafficRealism, monthlySummary, targetUrl } = {}) {
+async function runNicheStrategist({ keyssoAggregate, junkSummary, trafficRealism, monthlySummary, targetUrl, mainQuery, samplePhrases } = {}) {
   const ctx = {
     target_url: targetUrl || null,
+    main_query: mainQuery || null,
+    // Реальные фразы ядра (top по частотности) — основной сигнал для
+    // определения ниши. Без них модель угадывала niche_label вслепую
+    // по агрегатам (competition/momentum), что часто давало неверную нишу.
+    sample_phrases: Array.isArray(samplePhrases) ? samplePhrases.slice(0, 40) : [],
     monthly_summary: monthlySummary || null,
     keysso_aggregate: keyssoAggregate || null,
     traffic_realism:  trafficRealism  || null,
