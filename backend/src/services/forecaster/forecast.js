@@ -18,6 +18,16 @@
 const { getForecasterConfig } = require('./config');
 const { _periodToIndex, _indexToPeriod } = require('./series');
 
+// Итеративный max: Math.max(...arr) при больших массивах (десятки/сотни
+// тысяч элементов) переполняет стек аргументов V8 — «Maximum call stack
+// size exceeded». reduce() работает без ограничения.
+function _maxOf(arr, fallback = 0) {
+  if (!arr || arr.length === 0) return fallback;
+  let m = arr[0];
+  for (let i = 1; i < arr.length; i++) if (arr[i] > m) m = arr[i];
+  return m > fallback ? m : fallback;
+}
+
 // ─── OLS-тренд y = a + b*t ─────────────────────────────────────────
 function olsTrend(values) {
   const n = values.length;
@@ -158,8 +168,9 @@ function buildForecast(monthly) {
 
   // OLS-тренд на полных данных (всегда, для UI)
   const tr = olsTrend(values);
-  const direction = tr.slope > 0.0001 * (Math.max(...values, 1)) ? 'up'
-                  : tr.slope < -0.0001 * (Math.max(...values, 1)) ? 'down'
+  const trendScale = _maxOf(values, 1);
+  const direction = tr.slope > 0.0001 * trendScale ? 'up'
+                  : tr.slope < -0.0001 * trendScale ? 'down'
                   : 'flat';
   const emaSeries = ema(values, 0.3);
 
