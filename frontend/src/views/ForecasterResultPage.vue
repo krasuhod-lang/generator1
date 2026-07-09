@@ -10,7 +10,6 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ForecastChart from '../components/ForecastChart.vue';
-import SovForecastChart from '../components/SovForecastChart.vue';
 import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
 import { useForecasterStore } from '../stores/forecaster.js';
 
@@ -415,7 +414,7 @@ const sovSummaryRows = computed(() => {
           <section v-if="unified" class="bg-gradient-to-br from-gray-900 to-gray-900/60 border border-emerald-500/30 rounded-xl p-4">
             <div class="flex items-start justify-between gap-3 mb-1">
               <h2 class="text-base font-semibold text-emerald-200">
-                🚀 Прогноз трафика — сколько визитов вы получите
+                🚀 Прогноз трафика, показов и лидов
               </h2>
               <span class="text-[10px] uppercase font-semibold border border-emerald-500/40 text-emerald-300 rounded px-1.5 py-0.5 whitespace-nowrap">
                 единая модель
@@ -446,10 +445,15 @@ const sovSummaryRows = computed(() => {
                   {{ fmtNum(unifiedSummary?.annual?.lower) }} – {{ fmtNum(unifiedSummary?.annual?.upper) }}
                 </div>
               </div>
+              <div v-if="unifiedSummary?.annual_impressions != null" class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
+                <div class="text-[11px] text-gray-500 uppercase">Показов за {{ unified.horizon }} мес</div>
+                <div class="text-xl font-semibold text-violet-300 mt-1">{{ fmtNum(unifiedSummary?.annual_impressions) }}</div>
+                <div class="text-[11px] text-gray-500">видимость в выдаче</div>
+              </div>
               <div v-if="unifiedSummary?.leads_annual != null" class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
                 <div class="text-[11px] text-gray-500 uppercase">Заявок за {{ unified.horizon }} мес</div>
                 <div class="text-xl font-semibold text-indigo-300 mt-1">{{ fmtNum(unifiedSummary?.leads_annual) }}</div>
-                <div class="text-[11px] text-gray-500">трафик × конверсия</div>
+                <div class="text-[11px] text-gray-500">визиты × конверсия</div>
               </div>
             </div>
 
@@ -528,33 +532,37 @@ const sovSummaryRows = computed(() => {
           </section>
 
 
-          <!-- SOV-прогноз -->
+          <!-- SOV-прогноз (детали) — график объединён в единый выше -->
           <section v-if="sovForecast" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <h2 class="text-sm font-semibold text-gray-200 mb-3">📈 Прогноз доли рынка (SOV)</h2>
-            <div class="overflow-x-auto border border-gray-800 rounded-lg mb-4">
-              <table class="w-full text-sm">
-                <thead class="bg-gray-950 text-gray-400">
-                  <tr>
-                    <th class="text-left px-3 py-2 font-normal">Метрика</th>
-                    <th class="text-right px-3 py-2 font-normal">На старте</th>
-                    <th class="text-right px-3 py-2 font-normal">Цель (через {{ sovForecast.h_max }} мес)</th>
-                    <th class="text-right px-3 py-2 font-normal">Суммарно за период</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="row in sovSummaryRows" :key="row.label" class="border-t border-gray-800">
-                    <td class="px-3 py-2 text-gray-300">{{ row.label }}</td>
-                    <td class="px-3 py-2 text-right text-gray-100">{{ row.start }}</td>
-                    <td class="px-3 py-2 text-right text-indigo-300 font-semibold">{{ row.target }}</td>
-                    <td class="px-3 py-2 text-right text-emerald-300">{{ row.total }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <SovForecastChart :sov-forecast="sovForecast" :height="360" />
-            <p class="text-[11px] text-gray-500 mt-2">
-              λ={{ sovForecast.constants?.lambda }} · C_serp={{ sovForecast.constants?.c_serp }} · CR_final={{ fmtPct(sovForecast.constants?.cr_final, 2) }}.
-            </p>
+            <details>
+              <summary class="cursor-pointer select-none text-sm font-semibold text-gray-200">
+                📈 Детали доли рынка (SOV) — старт → цель → сумма за период
+              </summary>
+              <div class="overflow-x-auto border border-gray-800 rounded-lg mt-3">
+                <table class="w-full text-sm">
+                  <thead class="bg-gray-950 text-gray-400">
+                    <tr>
+                      <th class="text-left px-3 py-2 font-normal">Метрика</th>
+                      <th class="text-right px-3 py-2 font-normal">На старте</th>
+                      <th class="text-right px-3 py-2 font-normal">Цель (через {{ sovForecast.h_max }} мес)</th>
+                      <th class="text-right px-3 py-2 font-normal">Суммарно за период</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in sovSummaryRows" :key="row.label" class="border-t border-gray-800">
+                      <td class="px-3 py-2 text-gray-300">{{ row.label }}</td>
+                      <td class="px-3 py-2 text-right text-gray-100">{{ row.start }}</td>
+                      <td class="px-3 py-2 text-right text-indigo-300 font-semibold">{{ row.target }}</td>
+                      <td class="px-3 py-2 text-right text-emerald-300">{{ row.total }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="text-[11px] text-gray-500 mt-2">
+                λ={{ sovForecast.constants?.lambda }} · C_serp={{ sovForecast.constants?.c_serp }} · CR_final={{ fmtPct(sovForecast.constants?.cr_final, 2) }}.
+                Динамика доли рынка учтена в едином графике выше (в тултипе — SOV по каждому месяцу).
+              </p>
+            </details>
           </section>
 
           <!-- Сбор сезонности через Арсенкин (режим «список ключей») -->

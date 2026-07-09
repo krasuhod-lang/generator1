@@ -10,7 +10,6 @@ import { ref, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import axios from 'axios';
 import ForecastChart from '../components/ForecastChart.vue';
-import SovForecastChart from '../components/SovForecastChart.vue';
 import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
 
 const route = useRoute();
@@ -170,7 +169,7 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
 
         <!-- ✨ Единый прогноз трафика: ретроданные + прогноз -->
         <section v-if="unified" class="bg-gray-900 border border-emerald-500/30 rounded-xl p-4">
-          <h2 class="text-base font-semibold text-emerald-200 mb-1">🚀 Прогноз трафика — сколько визитов вы получите</h2>
+          <h2 class="text-base font-semibold text-emerald-200 mb-1">🚀 Прогноз трафика, показов и лидов</h2>
           <p v-if="unified.explain?.summary" class="text-xs text-gray-400 mb-3 leading-relaxed">{{ unified.explain.summary }}</p>
           <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
             <div class="bg-gray-950/60 border border-gray-800 rounded-lg p-3">
@@ -218,30 +217,33 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
         </section>
 
 
-        <!-- SOV-прогноз -->
+        <!-- SOV-прогноз (детали) — график объединён в единый выше -->
         <section v-if="sovForecast" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <h2 class="text-sm font-semibold mb-3">📈 Прогноз доли рынка (SOV)</h2>
-          <div class="overflow-x-auto border border-gray-800 rounded-lg mb-4">
-            <table class="w-full text-sm">
-              <thead class="bg-gray-950 text-gray-400">
-                <tr>
-                  <th class="text-left px-3 py-2 font-normal">Метрика</th>
-                  <th class="text-right px-3 py-2 font-normal">На старте</th>
-                  <th class="text-right px-3 py-2 font-normal">Цель (через {{ sovForecast.h_max }} мес)</th>
-                  <th class="text-right px-3 py-2 font-normal">Суммарно за период</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in sovSummaryRows" :key="row.label" class="border-t border-gray-800">
-                  <td class="px-3 py-2 text-gray-300">{{ row.label }}</td>
-                  <td class="px-3 py-2 text-right text-gray-100">{{ row.start }}</td>
-                  <td class="px-3 py-2 text-right text-indigo-300 font-semibold">{{ row.target }}</td>
-                  <td class="px-3 py-2 text-right text-emerald-300">{{ row.total }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <SovForecastChart :sov-forecast="sovForecast" :height="360" />
+          <details>
+            <summary class="cursor-pointer select-none text-sm font-semibold">
+              📈 Детали доли рынка (SOV)
+            </summary>
+            <div class="overflow-x-auto border border-gray-800 rounded-lg mt-3">
+              <table class="w-full text-sm">
+                <thead class="bg-gray-950 text-gray-400">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-normal">Метрика</th>
+                    <th class="text-right px-3 py-2 font-normal">На старте</th>
+                    <th class="text-right px-3 py-2 font-normal">Цель (через {{ sovForecast.h_max }} мес)</th>
+                    <th class="text-right px-3 py-2 font-normal">Суммарно за период</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in sovSummaryRows" :key="row.label" class="border-t border-gray-800">
+                    <td class="px-3 py-2 text-gray-300">{{ row.label }}</td>
+                    <td class="px-3 py-2 text-right text-gray-100">{{ row.start }}</td>
+                    <td class="px-3 py-2 text-right text-indigo-300 font-semibold">{{ row.target }}</td>
+                    <td class="px-3 py-2 text-right text-emerald-300">{{ row.total }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
         </section>
 
         <!-- Аналитические выводы (Gemini) -->
