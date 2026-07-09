@@ -196,6 +196,7 @@ async function createForecasterTask(req, res, next) {
       growth_k:                  _sanitizeRange(opts.growth_k, 0.15, 0.60),
       breakthrough_month:        _sanitizeRange(opts.breakthrough_month, 1, 18),
       uncertainty_delta:         _sanitizeRange(opts.uncertainty_delta, 0.02, 0.20),
+      impression_ctr:            _sanitizeRange(opts.impression_ctr, 0.05, 0.60),
     };
 
     const sourceColumns = keywords

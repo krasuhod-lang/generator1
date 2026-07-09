@@ -1,22 +1,24 @@
 <script setup>
 /**
- * UnifiedForecastChart.vue — главный график единой модели прогноза трафика.
+ * UnifiedForecastChart.vue — единый график прогноза «трафик + показы + лиды».
  *
- * Показывает ТОЛЬКО прогноз (ретроданные намеренно скрыты по требованию
- * продукта: «в график 🚀 Прогноз трафика ретроданные не нужны»). Оси —
- * будущие месяцы от «месяца старта работ» (u.start_period).
+ * Объединяет прежние два графика (🚀 Прогноз трафика и 📈 SOV) в один.
+ * Показывает динамику от СТАРТОВОГО значения трафика (u.start — точка t=0,
+ * ровно введённый пользователем текущий трафик) по будущим месяцам:
  *
- *   • Прогноз — сплошная зелёная линия,
+ *   • Трафик (визиты) — основная зелёная линия,
+ *   • Показы — фиолетовая линия (объём видимости в выдаче),
+ *   • Лиды — столбцы по правой оси,
  *   • Коридор — закрашенная зона (пессимистичный ↔ оптимистичный сценарий),
  *   • Вертикальная отметка «Старт работ» на первом месяце прогноза,
- *   • Рыночный спрос — тонкая фиолетовая линия-контекст.
+ *   • Доля рынка (SOV/capture) — в тултипе.
  *
- * Единица измерения — «визиты в месяц». В тултипе — два множителя «спрос ×
- * позиции»: capture_growth и demand_yoy (для маркетолога).
+ * Единица измерения — «в месяц». Учитывает конверсии между этапами
+ * (показы → визиты → лиды) по среднестатистическим коэффициентам.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as echarts from 'echarts/core';
-import { LineChart } from 'echarts/charts';
+import { LineChart, BarChart } from 'echarts/charts';
 import {
   GridComponent, LegendComponent, TooltipComponent,
   MarkLineComponent, MarkAreaComponent, GraphicComponent,
@@ -24,7 +26,7 @@ import {
 import { CanvasRenderer } from 'echarts/renderers';
 
 echarts.use([
-  LineChart, GridComponent, LegendComponent, TooltipComponent,
+  LineChart, BarChart, GridComponent, LegendComponent, TooltipComponent,
   MarkLineComponent, MarkAreaComponent, GraphicComponent, CanvasRenderer,
 ]);
 
@@ -42,18 +44,25 @@ const model = computed(() => props.unified || {});
 const option = computed(() => {
   const u = model.value;
   const fc = Array.isArray(u.forecast) ? u.forecast : [];
+  const start = u.start || u.summary?.start || null;
 
-  // По требованию продукта график «🚀 Прогноз трафика» показывает ТОЛЬКО
-  // прогноз (без ретроданных). Ось X — исключительно будущие месяцы,
-  // начиная с месяца старта работ (u.start_period) или следующего календарного
-  // месяца после последней истории (совместимо с прежним поведением).
-  const periods = fc.map((p) => p.period);
-  const startPeriod = u.start_period || periods[0] || null;
+  // Ось X начинается со СТАРТОВОЙ точки (t=0) — ровно текущий трафик, от него
+  // строится вся динамика. Далее — будущие месяцы прогноза.
+  const fcPeriods = fc.map((p) => p.period);
+  const startPeriod = (start && start.period) || u.start_period || fcPeriods[0] || null;
+  const periods = start && start.period ? [start.period, ...fcPeriods] : fcPeriods;
+  // Отметка «Старт работ» ставится на первый месяц прогноза (после старта).
+  const startMarkPeriod = u.start_period || fcPeriods[0] || null;
 
-  const fcLine   = fc.map((p) => Math.round(p.value));
-  const lowerLine = fc.map((p) => Math.round(p.lower));
-  const bandLine  = fc.map((p) => Math.max(0, Math.round(p.upper - p.lower)));
-  const demandLine = fc.map((p) => Math.round(p.demand_potential || 0));
+  const prepend = (headVal, arr) => (start && start.period ? [headVal, ...arr] : arr);
+
+  const trafficLine    = prepend(start ? Math.round(start.traffic) : null, fc.map((p) => Math.round(p.value)));
+  const impressionsLine = prepend(start ? Math.round(start.impressions || 0) : null, fc.map((p) => Math.round(p.impressions || 0)));
+  const leadsBars      = prepend(start && start.leads != null ? start.leads : null, fc.map((p) => (p.leads != null ? p.leads : null)));
+  const lowerLine      = prepend(start ? Math.round(start.traffic) : null, fc.map((p) => Math.round(p.lower)));
+  const bandLine       = prepend(0, fc.map((p) => Math.max(0, Math.round(p.upper - p.lower))));
+
+  const hasLeads = leadsBars.some((v) => v != null && v > 0);
 
   const fmt = (v) => Number(v || 0).toLocaleString('ru-RU');
 
@@ -69,34 +78,44 @@ const option = computed(() => {
         if (!params || !params.length) return '';
         const p0 = params[0];
         const idx = p0.dataIndex;
-        let html = `<div style="font-weight:600;margin-bottom:4px">${p0.axisValue} · прогноз</div>`;
+        const isStart = start && start.period && idx === 0;
+        const point = isStart ? start : fc[start && start.period ? idx - 1 : idx];
+        const title = isStart ? `${p0.axisValue} · старт` : `${p0.axisValue} · прогноз`;
+        let html = `<div style="font-weight:600;margin-bottom:4px">${title}</div>`;
         const pick = (name) => params.find((p) => p.seriesName === name);
-        const ff = pick('Прогноз трафика');
-        if (ff && ff.value != null) html += `<div>🟢 Прогноз: <b>${fmt(ff.value)}</b> визитов/мес</div>`;
-        if (fc[idx]) {
-          html += `<div style="color:#94a3b8">↕ Коридор: ${fmt(fc[idx].lower)} … ${fmt(fc[idx].upper)}</div>`;
-          html += `<div style="color:#94a3b8">Доля рынка: ${(fc[idx].capture * 100).toFixed(2)}%</div>`;
-          // Два множителя (спрос × позиции) — прозрачность для маркетолога.
-          if (fc[idx].capture_growth != null) {
-            html += `<div style="color:#94a3b8">Позиции ×${fc[idx].capture_growth.toFixed(2)} к старту</div>`;
+        const ff = pick('Трафик (визиты)');
+        if (ff && ff.value != null) html += `<div>🟢 Визиты: <b>${fmt(ff.value)}</b>/мес</div>`;
+        const imp = pick('Показы');
+        if (imp && imp.value != null) html += `<div>🟣 Показы: <b>${fmt(imp.value)}</b>/мес</div>`;
+        const ld = pick('Лиды');
+        if (ld && ld.value != null) html += `<div>🟦 Лиды: <b>${fmt(ld.value)}</b>/мес</div>`;
+        if (point) {
+          if (!isStart && point.lower != null && point.upper != null) {
+            html += `<div style="color:#94a3b8">↕ Коридор: ${fmt(point.lower)} … ${fmt(point.upper)}</div>`;
           }
-          if (fc[idx].demand_yoy != null) {
-            const dy = fc[idx].demand_yoy;
-            const arrow = dy >= 1 ? '📈' : '📉';
-            html += `<div style="color:#94a3b8">${arrow} Спрос YoY ×${dy.toFixed(2)}</div>`;
+          if (point.capture != null) {
+            html += `<div style="color:#94a3b8">Доля рынка (SOV): ${(point.capture * 100).toFixed(2)}%</div>`;
+          }
+          if (point.demand != null) {
+            html += `<div style="color:#a78bfa">Спрос (поисков): ${fmt(point.demand)}/мес</div>`;
+          }
+          if (point.capture_growth != null) {
+            html += `<div style="color:#94a3b8">Позиции ×${point.capture_growth.toFixed(2)} к старту</div>`;
+          }
+          if (point.demand_yoy != null) {
+            const dy = point.demand_yoy;
+            html += `<div style="color:#94a3b8">${dy >= 1 ? '📈' : '📉'} Спрос YoY ×${dy.toFixed(2)}</div>`;
           }
         }
-        const dd = pick('Рыночный спрос');
-        if (dd && dd.value != null) html += `<div style="color:#a78bfa">🟣 Спрос (поисков): ${fmt(dd.value)}/мес</div>`;
         return html;
       },
     },
     legend: {
       top: 0,
       textStyle: { color: '#9ca3af' },
-      data: ['Прогноз трафика', 'Коридор прогноза', 'Рыночный спрос'],
+      data: ['Показы', 'Трафик (визиты)', 'Коридор прогноза', ...(hasLeads ? ['Лиды'] : [])],
     },
-    grid: { left: 58, right: 24, top: 58, bottom: 52 },
+    grid: { left: 58, right: hasLeads ? 58 : 24, top: 58, bottom: 52 },
     xAxis: {
       type: 'category',
       boundaryGap: false,
@@ -104,23 +123,33 @@ const option = computed(() => {
       axisLabel: { color: '#9ca3af', rotate: 35 },
       axisLine: { lineStyle: { color: '#374151' } },
     },
-    yAxis: {
-      type: 'value',
-      name: 'Визиты / мес',
-      nameTextStyle: { color: '#9ca3af' },
-      axisLabel: { color: '#9ca3af', formatter: (v) => (v >= 1000 ? (v / 1000) + 'k' : v) },
-      splitLine: { lineStyle: { color: '#1f2937' } },
-    },
-    series: [
-      // Рыночный спрос (контекст, тонкая фиолетовая).
+    yAxis: [
       {
-        name: 'Рыночный спрос',
+        type: 'value',
+        name: 'В месяц',
+        nameTextStyle: { color: '#9ca3af' },
+        axisLabel: { color: '#9ca3af', formatter: (v) => (v >= 1000 ? (v / 1000) + 'k' : v) },
+        splitLine: { lineStyle: { color: '#1f2937' } },
+      },
+      {
+        type: 'value',
+        name: 'Лиды',
+        nameTextStyle: { color: '#9ca3af' },
+        axisLabel: { color: '#9ca3af' },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      // Показы (объём видимости в выдаче).
+      {
+        name: 'Показы',
         type: 'line',
-        data: demandLine,
+        data: impressionsLine,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 1, color: '#a78bfa', type: 'dotted', opacity: 0.7 },
-        z: 1,
+        lineStyle: { width: 1.5, color: '#a78bfa', type: 'dashed', opacity: 0.85 },
+        areaStyle: { color: 'rgba(167,139,250,0.06)' },
+        z: 2,
       },
       // Нижняя граница коридора (невидимая база стека).
       {
@@ -147,28 +176,37 @@ const option = computed(() => {
         emphasis: { disabled: true },
         z: 1,
       },
-      // Прогноз — зелёная сплошная линия с отметкой «Старт работ».
+      // Трафик (визиты) — зелёная сплошная линия с отметкой «Старт работ».
       {
-        name: 'Прогноз трафика',
+        name: 'Трафик (визиты)',
         type: 'line',
-        data: fcLine,
+        data: trafficLine,
         smooth: true,
         symbol: 'circle',
         symbolSize: 5,
         lineStyle: { width: 3, color: '#22c55e' },
         itemStyle: { color: '#22c55e' },
-        z: 3,
-        markLine: startPeriod ? {
+        z: 4,
+        markLine: startMarkPeriod ? {
           symbol: 'none',
           label: { formatter: 'Старт работ', color: '#e2e8f0', position: 'insideEndTop' },
           lineStyle: { color: '#64748b', type: 'solid', width: 1 },
-          data: [{ xAxis: startPeriod }],
+          data: [{ xAxis: startMarkPeriod }],
         } : undefined,
       },
+      // Лиды — столбцы по правой оси.
+      ...(hasLeads ? [{
+        name: 'Лиды',
+        type: 'bar',
+        yAxisIndex: 1,
+        data: leadsBars,
+        itemStyle: { color: 'rgba(56,189,248,0.45)', borderColor: 'rgba(56,189,248,0.75)' },
+        z: 3,
+      }] : []),
     ],
     graphic: [{
       type: 'text', left: '50%', top: 30,
-      style: { text: 'ПРОГНОЗ (с месяца старта работ)', fill: '#22c55e', font: '600 11px sans-serif', textAlign: 'center' },
+      style: { text: 'ТРАФИК · ПОКАЗЫ · ЛИДЫ (с месяца старта работ)', fill: '#22c55e', font: '600 11px sans-serif', textAlign: 'center' },
     }],
   };
 });
@@ -194,5 +232,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="chartEl" class="w-full" :style="{ height: `${height}px` }"
-       role="img" aria-label="Единый прогноз трафика: ретроданные и прогноз"></div>
+       role="img" aria-label="Единый прогноз: трафик, показы и лиды"></div>
 </template>
+
