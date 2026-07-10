@@ -17,6 +17,7 @@
  */
 
 const axios   = require('axios');
+const crypto  = require('crypto');
 const ExcelJS = require('exceljs');
 const db      = require('../config/db');
 const { assertPublicHost } = require('../services/siteCrawler/ssrfGuard');
@@ -259,7 +260,7 @@ async function getReport(req, res) {
   }
 }
 
-// ── GET /api/audit/export/:id?format=csv|xlsx ────────────────────────────────
+// ── GET /api/audit/export/:id?section=all|pages|issues|duplicates|orphans&format=csv|xlsx ──
 function _csvCell(v) {
   if (v == null) return '';
   const s = String(v);
@@ -274,8 +275,22 @@ function _xlsxCell(v) {
   return /^[=+\-@]/.test(s) ? `'${s}` : s;
 }
 
+// Цветовая подсветка критичности в Excel (ТЗ 8)
+const SEVERITY_COLORS = {
+  critical: 'FFFF4444', high: 'FFFF8C00', medium: 'FFFFD700',
+  low: 'FFD3D3D3', info: 'FFE0E7FF',
+};
+
 const PAGE_COLUMNS = ['URL','Статус','Глубина','Время ответа (мс)','Размер (байт)','Title',
   'Длина title','Description','Кол-во H1','Слов','Text/HTML','Hash','HTTPS','Индексируется','Ошибки'];
+
+// issues страницы: legacy ["code",...] или новый формат [{code,count},...]
+function _issueCodesText(issues) {
+  if (!Array.isArray(issues)) return '';
+  return issues.map((i) => (i && typeof i === 'object')
+    ? (Number(i.count) > 1 ? `${i.code} ×${i.count}` : String(i.code))
+    : String(i)).join(', ');
+}
 
 function _pageRow(r) {
   return [
@@ -283,33 +298,112 @@ function _pageRow(r) {
     r.title, r.title_length, r.meta_description, r.h1_count, r.word_count,
     r.text_html_ratio, r.content_hash, r.is_https ? 'да' : 'нет',
     r.indexable ? 'да' : 'нет',
-    Array.isArray(r.issues) ? r.issues.join(', ') : '',
+    _issueCodesText(r.issues),
   ];
 }
 
-async function _exportXlsx(res, task, pageRows) {
-  const wb = new ExcelJS.Workbook();
+async function _loadPagesRows(taskId) {
+  const { rows } = await db.query(
+    `SELECT url, status_code, crawl_depth, response_time_ms, content_size_bytes,
+            title, title_length, meta_description, h1_count, word_count,
+            text_html_ratio, content_hash, is_https, indexable, issues
+       FROM audit_pages WHERE task_id=$1 ORDER BY crawl_depth, url`, [taskId]);
+  return rows;
+}
 
-  const wsPages = wb.addWorksheet('Страницы');
-  wsPages.addRow(PAGE_COLUMNS).font = { bold: true };
-  for (const r of pageRows) wsPages.addRow(_pageRow(r).map(_xlsxCell));
-  wsPages.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 16; });
-
-  const { rows: issueRows } = await db.query(
+async function _loadIssueRows(taskId) {
+  const { rows } = await db.query(
     `SELECT page_url, issue_code, severity, context
        FROM audit_issues WHERE task_id=$1
       ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-                             WHEN 'medium' THEN 2 ELSE 3 END, issue_code`, [task.id]);
-  const wsIssues = wb.addWorksheet('Ошибки');
-  wsIssues.addRow(['URL', 'Код ошибки', 'Критичность', 'Контекст']).font = { bold: true };
-  for (const it of issueRows) {
-    wsIssues.addRow([it.page_url, it.issue_code, it.severity,
-      JSON.stringify(it.context || {})].map(_xlsxCell));
+                             WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, issue_code`, [taskId]);
+  return rows;
+}
+
+async function _loadReportJson(taskId) {
+  const { rows } = await db.query(`SELECT report FROM audit_tasks WHERE id=$1`, [taskId]);
+  return (rows[0] && rows[0].report) || {};
+}
+
+const ISSUE_COLUMNS = ['URL', 'Ошибка', 'Критичность', 'Описание', 'Как исправить'];
+function _issueRow(it, defs) {
+  const meta = defs[it.issue_code] || {};
+  return [it.page_url, meta.title || it.issue_code, it.severity,
+    meta.description || meta.hint || '', meta.fix || ''];
+}
+
+const DUP_COLUMNS = ['Группа', 'URL', 'Хеш'];
+function _duplicateRows(report) {
+  const out = [];
+  const dups = report.duplicates || {};
+  let i = 0;
+  for (const [hash, urls] of Object.entries(dups)) {
+    i += 1;
+    for (const url of urls || []) out.push([`Группа #${i}`, url, hash]);
   }
-  wsIssues.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 22; });
+  return out;
+}
+
+const ORPHAN_COLUMNS = ['URL', 'Рекомендация'];
+function _orphanRows(report) {
+  return (report.orphan_pages || []).map((u) => [u, 'Добавить внутренние ссылки']);
+}
+
+// Excel «всё» — 5 вкладок: Сводка / Ошибки (подсветка) / Дубликаты / Сироты / Страницы
+async function _exportXlsx(res, task, section) {
+  const wb = new ExcelJS.Workbook();
+  const report = await _loadReportJson(task.id);
+  const defs = report.issue_defs || {};
+
+  const addSummary = () => {
+    const ws = wb.addWorksheet('Сводка');
+    for (const [k, v] of Object.entries(report.summary || {})) ws.addRow([k, _xlsxCell(v)]);
+    ws.columns.forEach((c, i) => { c.width = i === 0 ? 28 : 16; });
+  };
+
+  const addIssues = async () => {
+    const ws = wb.addWorksheet('Ошибки');
+    ws.addRow(ISSUE_COLUMNS).font = { bold: true };
+    const issueRows = await _loadIssueRows(task.id);
+    for (const it of issueRows) {
+      const row = ws.addRow(_issueRow(it, defs).map(_xlsxCell));
+      const color = SEVERITY_COLORS[it.severity];
+      if (color) row.eachCell((cell) => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: color } };
+      });
+    }
+    ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 30; });
+  };
+
+  const addDuplicates = () => {
+    const ws = wb.addWorksheet('Дубликаты');
+    ws.addRow(DUP_COLUMNS).font = { bold: true };
+    for (const r of _duplicateRows(report)) ws.addRow(r.map(_xlsxCell));
+    ws.columns.forEach((c, i) => { c.width = i === 1 ? 60 : 20; });
+  };
+
+  const addOrphans = () => {
+    const ws = wb.addWorksheet('Сироты');
+    ws.addRow(ORPHAN_COLUMNS).font = { bold: true };
+    for (const r of _orphanRows(report)) ws.addRow(r.map(_xlsxCell));
+    ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 30; });
+  };
+
+  const addPages = async () => {
+    const ws = wb.addWorksheet('Страницы');
+    ws.addRow(PAGE_COLUMNS).font = { bold: true };
+    for (const r of await _loadPagesRows(task.id)) ws.addRow(_pageRow(r).map(_xlsxCell));
+    ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 16; });
+  };
+
+  if (section === 'issues') await addIssues();
+  else if (section === 'duplicates') addDuplicates();
+  else if (section === 'orphans') addOrphans();
+  else if (section === 'pages') await addPages();
+  else { addSummary(); await addIssues(); addDuplicates(); addOrphans(); await addPages(); }
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="audit-${task.id}.xlsx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="audit-${task.id}${section === 'all' ? '' : '-' + section}.xlsx"`);
   await wb.xlsx.write(res);
   res.end();
 }
@@ -318,22 +412,35 @@ async function exportReport(req, res) {
   try {
     const task = await _loadTask(req.params.id, req.user.id);
     if (task.status !== 'done') return res.status(409).json({ error: 'not_ready' });
-    const { rows } = await db.query(
-      `SELECT url, status_code, crawl_depth, response_time_ms, content_size_bytes,
-              title, title_length, meta_description, h1_count, word_count,
-              text_html_ratio, content_hash, is_https, indexable, issues
-         FROM audit_pages WHERE task_id=$1 ORDER BY crawl_depth, url`, [task.id]);
 
-    if (String(req.query.format || 'csv').toLowerCase() === 'xlsx') {
-      return await _exportXlsx(res, task, rows);
+    let section = String(req.query.section || 'all').toLowerCase();
+    if (!['all', 'pages', 'issues', 'duplicates', 'orphans'].includes(section)) section = 'all';
+    const format = String(req.query.format || 'csv').toLowerCase() === 'xlsx' ? 'xlsx' : 'csv';
+
+    if (format === 'xlsx') return await _exportXlsx(res, task, section);
+
+    // CSV — по одной секции (all → страницы, как раньше)
+    let columns, rows;
+    if (section === 'issues') {
+      const report = await _loadReportJson(task.id);
+      const defs = report.issue_defs || {};
+      columns = ISSUE_COLUMNS;
+      rows = (await _loadIssueRows(task.id)).map((it) => _issueRow(it, defs));
+    } else if (section === 'duplicates') {
+      columns = DUP_COLUMNS;
+      rows = _duplicateRows(await _loadReportJson(task.id));
+    } else if (section === 'orphans') {
+      columns = ORPHAN_COLUMNS;
+      rows = _orphanRows(await _loadReportJson(task.id));
+    } else {
+      columns = PAGE_COLUMNS;
+      rows = (await _loadPagesRows(task.id)).map(_pageRow);
     }
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="audit-${task.id}.csv"`);
-    res.write('\uFEFF' + PAGE_COLUMNS.map(_csvCell).join(';') + '\n');
-    for (const r of rows) {
-      res.write(_pageRow(r).map(_csvCell).join(';') + '\n');
-    }
+    res.setHeader('Content-Disposition', `attachment; filename="audit-${task.id}${section === 'all' ? '' : '-' + section}.csv"`);
+    res.write('\uFEFF' + columns.map(_csvCell).join(';') + '\n');
+    for (const r of rows) res.write(r.map(_csvCell).join(';') + '\n');
     res.end();
   } catch (e) {
     console.error('[audit.exportReport]', e.message);
@@ -380,6 +487,120 @@ async function compareTask(req, res) {
   }
 }
 
+// ── Публичный шаринг отчёта (ТЗ 9) ───────────────────────────────────────────
+const SHARE_DEFAULT_DAYS = 30;
+const SHARE_MAX_DAYS = 365;
+
+function _generateShareToken() {
+  // 12 байт crypto-random → base64url ≈ 16 символов (96 бит энтропии)
+  return crypto.randomBytes(12).toString('base64url');
+}
+
+function _isValidShareToken(s) {
+  return typeof s === 'string' && s.length >= 8 && s.length <= 32 && /^[A-Za-z0-9_-]+$/.test(s);
+}
+
+// POST /api/audit/:id/share  { days?, fix_note? } → { token, url, expires_at }
+async function createShareLink(req, res) {
+  try {
+    const task = await _loadTask(req.params.id, req.user.id);
+    if (task.status !== 'done') return res.status(409).json({ error: 'not_ready' });
+
+    const days = Math.min(Math.max(parseInt((req.body || {}).days, 10) || SHARE_DEFAULT_DAYS, 1), SHARE_MAX_DAYS);
+    const fixNote = String((req.body || {}).fix_note || '').slice(0, 4000) || null;
+
+    // Действующая ссылка переиспользуется (продлеваем срок + обновляем блок)
+    const { rows: existing } = await db.query(
+      `UPDATE audit_share_links
+          SET expires_at = NOW() + ($2 || ' days')::interval,
+              fix_note   = COALESCE($3, fix_note)
+        WHERE task_id = $1 AND expires_at > NOW()
+        RETURNING token, expires_at`,
+      [task.id, String(days), fixNote]);
+    if (existing.length) {
+      return res.json({ token: existing[0].token, url: `/audit/share/${existing[0].token}`,
+        expires_at: existing[0].expires_at });
+    }
+
+    const token = _generateShareToken();
+    const { rows } = await db.query(
+      `INSERT INTO audit_share_links (token, task_id, fix_note, expires_at)
+       VALUES ($1, $2, $3, NOW() + ($4 || ' days')::interval)
+       RETURNING token, expires_at`,
+      [token, task.id, fixNote, String(days)]);
+    res.status(201).json({ token: rows[0].token, url: `/audit/share/${rows[0].token}`,
+      expires_at: rows[0].expires_at });
+  } catch (e) {
+    console.error('[audit.createShareLink]', e.message);
+    res.status(e.status || 500).json({ error: e.message || 'internal_error' });
+  }
+}
+
+// DELETE /api/audit/:id/share — отозвать все ссылки аудита
+async function revokeShareLink(req, res) {
+  try {
+    const task = await _loadTask(req.params.id, req.user.id);
+    await db.query(`DELETE FROM audit_share_links WHERE task_id=$1`, [task.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[audit.revokeShareLink]', e.message);
+    res.status(e.status || 500).json({ error: e.message || 'internal_error' });
+  }
+}
+
+// GET /api/public/audit/:token — урезанный клиентский отчёт (без auth).
+// Скрыто: вкладка «Страницы» и технические детали. Только Health Score,
+// ошибки с человеческими объяснениями, дубликаты, сироты + блок «Что мы исправим».
+async function getSharedReport(req, res) {
+  try {
+    const token = req.params.token;
+    if (!_isValidShareToken(token)) return res.status(404).json({ error: 'not_found' });
+
+    const { rows } = await db.query(
+      `UPDATE audit_share_links SET view_count = view_count + 1
+        WHERE token = $1 AND expires_at > NOW()
+        RETURNING task_id, fix_note, expires_at`,
+      [token]);
+    if (!rows.length) return res.status(404).json({ error: 'not_found' });
+    const link = rows[0];
+
+    const { rows: tasks } = await db.query(
+      `SELECT url, status, summary, report, finished_at FROM audit_tasks WHERE id=$1`,
+      [link.task_id]);
+    if (!tasks.length || tasks[0].status !== 'done') return res.status(404).json({ error: 'not_found' });
+
+    const t = tasks[0];
+    const report = t.report || {};
+    let host = t.url;
+    try { host = new URL(t.url).hostname; } catch (_) {}
+
+    // Группируем ошибки по коду: без сырых context/JSON, только URL-списки
+    const groups = new Map();
+    for (const it of (report.issues || [])) {
+      if (!groups.has(it.code)) groups.set(it.code, { code: it.code, severity: it.severity, count: 0, urls: [] });
+      const g = groups.get(it.code);
+      g.count += 1;
+      if (g.urls.length < 100 && it.page_url) g.urls.push(it.page_url);
+    }
+
+    res.json({
+      host,
+      url: t.url,
+      finished_at: t.finished_at,
+      summary: t.summary || report.summary || {},
+      issue_defs: report.issue_defs || {},
+      issue_groups: [...groups.values()],
+      duplicates: report.duplicates || {},
+      orphan_pages: report.orphan_pages || [],
+      fix_note: link.fix_note,
+      expires_at: link.expires_at,
+    });
+  } catch (e) {
+    console.error('[audit.getSharedReport]', e.message);
+    res.status(500).json({ error: 'internal_error' });
+  }
+}
+
 // ── DELETE /api/audit/:id ────────────────────────────────────────────────────
 async function deleteTask(req, res) {
   try {
@@ -393,4 +614,5 @@ async function deleteTask(req, res) {
   }
 }
 
-module.exports = { startAudit, listTasks, getStatus, getReport, exportReport, compareTask, deleteTask };
+module.exports = { startAudit, listTasks, getStatus, getReport, exportReport, compareTask,
+  createShareLink, revokeShareLink, getSharedReport, deleteTask };

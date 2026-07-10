@@ -38,6 +38,35 @@ _MIXED_SELECTORS = [("img", "src"), ("script", "src"), ("link", "href"),
 
 _SKIP_SCHEMES = ("mailto:", "tel:", "javascript:", "data:", "#")
 
+# БАГФИКС #2: порог «полноценного текста». trafilatura возвращает пустую
+# строку для страниц-листингов (/services/, /blog/) — MD5 от пустоты совпадал
+# на десятках страниц и весь сайт помечался дублем.
+MIN_TEXT_LEN = 150
+
+
+def get_content_hash(raw_html: str, clean_text: str) -> dict:
+    """Умный хеш контента (БАГФИКС #2).
+
+    text_len >= 150 — хеш нормализованного текста (type=text_content);
+    иначе (листинг/пустая страница) — хеш HTML-структуры без
+    script/style/svg (type=html_structure). duplicate_content считается
+    только для type == "text_content".
+    """
+    text_len = len((clean_text or "").strip())
+
+    if text_len < MIN_TEXT_LEN:
+        stripped = re.sub(
+            r"<(script|style|svg)[^>]*>.*?</\1>",
+            "", raw_html or "", flags=re.DOTALL | re.IGNORECASE,
+        )
+        stripped = re.sub(r"\s+", " ", stripped).strip()
+        h = hashlib.md5(stripped.encode("utf-8"), usedforsecurity=False).hexdigest() if stripped else None
+        return {"hash": h, "type": "html_structure", "text_len": text_len}
+
+    normalized = re.sub(r"\s+", " ", clean_text.strip().lower())
+    h = hashlib.md5(normalized.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return {"hash": h, "type": "text_content", "text_len": text_len}
+
 
 def _clean_text(html: str, soup: BeautifulSoup) -> str:
     """trafilatura → readability-lxml → BS4 get_text() (последний рубеж)."""
@@ -183,6 +212,8 @@ def parse_page(url: str, html: str) -> dict:
     clean = _clean_text(html or "", soup) or ""
     raw_len = len((html or "").encode("utf-8")) or 1
     clean_bytes = clean.encode("utf-8")
+    # БАГФИКС #2: умный хеш с порогом MIN_TEXT_LEN (MD5 — только дедупликация).
+    ch = get_content_hash(html or "", clean)
 
     return {
         "parsed": True,
@@ -201,7 +232,9 @@ def parse_page(url: str, html: str) -> dict:
         "word_count": len(clean.split()),
         "text_html_ratio": round(len(clean_bytes) / raw_len, 4),
         # MD5 — только для дедупликации контента (не криптография).
-        "content_hash": hashlib.md5(clean_bytes, usedforsecurity=False).hexdigest() if clean else None,
+        "content_hash": ch["hash"],
+        "content_hash_type": ch["type"],
+        "clean_text_len": ch["text_len"],
         "indexability": {
             "meta_robots": meta_robots,
             "canonical": canonical,

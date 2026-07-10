@@ -44,6 +44,7 @@ const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
 const auditRoutes           = require('./src/routes/audit.routes');
+const auditPublicRoutes     = require('./src/routes/auditPublic.routes');
 const cannibalizationRoutes = require('./src/routes/cannibalization.routes');
 const contentPolicyRoutes   = require('./src/routes/contentPolicy.routes');
 
@@ -138,6 +139,7 @@ app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
 app.use('/api/site-crawler',     siteCrawlerRoutes);
 app.use('/api/audit',            auditRoutes);
+app.use('/api/public',           auditPublicRoutes);
 app.use('/api/cannibalization',  cannibalizationRoutes);
 app.use('/api/admin/content-policy', contentPolicyRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
@@ -1587,6 +1589,21 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_issues_task ON audit_issues(task_id)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_issues_task_severity
       ON audit_issues(task_id, severity)`);
+
+    // Migration 109: публичный шаринг отчёта аудита для клиентов
+    // (см. migrations/109_audit_share.sql).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS audit_share_links (
+        token      VARCHAR(32) PRIMARY KEY,
+        task_id    UUID NOT NULL REFERENCES audit_tasks(id) ON DELETE CASCADE,
+        fix_note   TEXT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        view_count INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_share_links_task
+      ON audit_share_links(task_id)`);
 
 
     // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google

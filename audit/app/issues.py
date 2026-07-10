@@ -10,60 +10,115 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-SEVERITY_WEIGHTS = {"critical": 10.0, "high": 3.0, "medium": 1.0, "low": 0.3}
+SEVERITY_WEIGHTS = {"critical": 10.0, "high": 3.0, "medium": 1.0, "low": 0.3, "info": 0.0}
 
-# Код ошибки → (критичность, человекочитаемое описание для UI-подсказок)
+# Код ошибки → критичность + человекочитаемые описание/исправление для UI
+# (аккордеон ошибок, экспорт, публичная клиентская страница).
 ISSUE_DEFS: Dict[str, Dict[str, str]] = {
     "404_page":              {"severity": "critical", "title": "Страница 404",
-                              "hint": "Страница отдаёт 404. Удалите ссылки на неё или восстановите контент/настройте 301-редирект."},
+                              "description": "Страница отдаёт 404 — посетители и поисковик попадают в тупик, ссылочный вес теряется.",
+                              "hint": "Страница отдаёт 404. Удалите ссылки на неё или восстановите контент/настройте 301-редирект.",
+                              "fix": "Удалите ссылки на неё или восстановите контент/настройте 301-редирект."},
     "404_image":             {"severity": "high", "title": "Битое изображение (404)",
-                              "hint": "Изображение недоступно. Исправьте src или загрузите файл."},
+                              "description": "Изображение недоступно — на странице «дырка», ухудшается восприятие и поведенческие факторы.",
+                              "hint": "Изображение недоступно. Исправьте src или загрузите файл.",
+                              "fix": "Исправьте src или загрузите файл."},
     "5xx_error":             {"severity": "critical", "title": "Ошибка сервера 5xx",
-                              "hint": "Сервер вернул 5xx. Проверьте логи приложения/хостинг."},
+                              "description": "Сервер вернул 5xx — страница недоступна ни людям, ни роботам, позиции быстро падают.",
+                              "hint": "Сервер вернул 5xx. Проверьте логи приложения/хостинг.",
+                              "fix": "Проверьте логи приложения/хостинг."},
     "redirect_chain":        {"severity": "medium", "title": "Цепочка редиректов",
-                              "hint": "Более одного редиректа подряд. Ссылайтесь сразу на конечный URL."},
+                              "description": "Страница проходит 2+ переадресации. Теряется ссылочный вес и замедляется загрузка.",
+                              "hint": "Более одного редиректа подряд. Ссылайтесь сразу на конечный URL.",
+                              "fix": "Замените цепочку 301→301→URL на прямой 301→URL."},
     "redirect_loop":         {"severity": "critical", "title": "Петля редиректов",
-                              "hint": "URL встречается в цепочке дважды — бесконечный редирект. Исправьте правила."},
-    "missing_title":         {"severity": "high", "title": "Отсутствует title",
-                              "hint": "Добавьте уникальный тег <title> с ключевым запросом страницы."},
+                              "description": "URL встречается в цепочке дважды — бесконечный редирект, страница недоступна.",
+                              "hint": "URL встречается в цепочке дважды — бесконечный редирект. Исправьте правила.",
+                              "fix": "Исправьте правила редиректов на сервере."},
+    "missing_title":         {"severity": "high", "title": "Нет тега Title",
+                              "description": "Страница без заголовка. Title — ключевой фактор ранжирования.",
+                              "hint": "Добавьте уникальный тег <title> с ключевым запросом страницы.",
+                              "fix": "Добавьте уникальный Title 50-70 символов с ключевым словом в начале."},
     "missing_description":   {"severity": "medium", "title": "Отсутствует description",
-                              "hint": "Добавьте meta description 70–160 символов."},
+                              "description": "Без meta description поисковик сам собирает сниппет — часто неудачный, CTR ниже.",
+                              "hint": "Добавьте meta description 70–160 символов.",
+                              "fix": "Добавьте meta description 70–160 символов."},
     "missing_h1":            {"severity": "high", "title": "Отсутствует H1",
-                              "hint": "Добавьте один заголовок H1, отражающий содержание страницы."},
+                              "description": "Нет главного заголовка — поисковику сложнее понять тему страницы.",
+                              "hint": "Добавьте один заголовок H1, отражающий содержание страницы.",
+                              "fix": "Добавьте один заголовок H1, отражающий содержание страницы."},
     "duplicate_title":       {"severity": "high", "title": "Дубликат title",
-                              "hint": "Title совпадает с другими страницами. Сделайте уникальным."},
+                              "description": "Title совпадает с другими страницами — они конкурируют между собой в выдаче.",
+                              "hint": "Title совпадает с другими страницами. Сделайте уникальным.",
+                              "fix": "Сделайте Title каждой страницы уникальным."},
     "duplicate_description": {"severity": "medium", "title": "Дубликат description",
-                              "hint": "Description совпадает с другими страницами. Сделайте уникальным."},
+                              "description": "Description совпадает с другими страницами — сниппеты неинформативны.",
+                              "hint": "Description совпадает с другими страницами. Сделайте уникальным.",
+                              "fix": "Сделайте description каждой страницы уникальным."},
     "title_too_long":        {"severity": "medium", "title": "Title слишком длинный",
-                              "hint": "Более 70 символов — обрежется в выдаче. Сократите."},
+                              "description": "Более 70 символов — обрежется в выдаче, ключевые слова в хвосте не видны.",
+                              "hint": "Более 70 символов — обрежется в выдаче. Сократите.",
+                              "fix": "Сократите Title до 50–70 символов."},
     "title_too_short":       {"severity": "low", "title": "Title слишком короткий",
-                              "hint": "Менее 30 символов — не использует потенциал сниппета."},
+                              "description": "Менее 30 символов — не использует потенциал сниппета.",
+                              "hint": "Менее 30 символов — не использует потенциал сниппета.",
+                              "fix": "Расширьте Title до 50–70 символов с ключевым словом."},
     "description_too_long":  {"severity": "medium", "title": "Description слишком длинный",
-                              "hint": "Более 160 символов — обрежется в выдаче. Сократите."},
+                              "description": "Более 160 символов — обрежется в выдаче.",
+                              "hint": "Более 160 символов — обрежется в выдаче. Сократите.",
+                              "fix": "Сократите description до 70–160 символов."},
     "multiple_h1":           {"severity": "high", "title": "Несколько H1",
-                              "hint": "На странице больше одного H1. Оставьте один."},
+                              "description": "На странице больше одного H1 — размывается главная тема страницы.",
+                              "hint": "На странице больше одного H1. Оставьте один.",
+                              "fix": "Оставьте один H1, остальные замените на H2/H3."},
     "duplicate_content":     {"severity": "critical", "title": "Дубликат контента",
-                              "hint": "Текст страницы полностью совпадает с другой. Настройте canonical или объедините страницы."},
+                              "description": "Несколько страниц с одинаковым текстом. Поисковик не знает, какую показывать, и занижает позиции всем.",
+                              "hint": "Текст страницы полностью совпадает с другой. Настройте canonical или объедините страницы.",
+                              "fix": "Добавьте тег canonical на дубли, указывающий на основную страницу."},
     "mixed_content":         {"severity": "high", "title": "Mixed content (http на https)",
-                              "hint": "HTTPS-страница грузит ресурсы по http:// — браузеры блокируют. Замените на https://."},
-    "orphan_page":           {"severity": "high", "title": "Страница-сирота",
-                              "hint": "URL есть в sitemap, но на него нет внутренних ссылок. Добавьте перелинковку."},
-    "large_image":           {"severity": "medium", "title": "Тяжёлое изображение (>100KB)",
-                              "hint": "Сожмите изображение (WebP/AVIF) — ускорит загрузку."},
+                              "description": "HTTPS-страница грузит ресурсы по http:// — браузеры их блокируют.",
+                              "hint": "HTTPS-страница грузит ресурсы по http:// — браузеры блокируют. Замените на https://.",
+                              "fix": "Замените http:// на https:// во всех ресурсах страницы."},
+    "orphan_page":           {"severity": "high", "title": "Страницы-сироты",
+                              "description": "Страница есть в sitemap, но на неё нет внутренних ссылок.",
+                              "hint": "URL есть в sitemap, но на него нет внутренних ссылок. Добавьте перелинковку.",
+                              "fix": "Добавьте ссылки на эти страницы из тематически близких разделов."},
+    "large_image":           {"severity": "medium", "title": "Тяжёлые изображения (>100 КБ)",
+                              "description": "Тяжёлые картинки замедляют загрузку страницы.",
+                              "hint": "Сожмите изображение (WebP/AVIF) — ускорит загрузку.",
+                              "fix": "Сожмите через TinyPNG/Squoosh, конвертируйте в WebP или AVIF."},
     "missing_alt":           {"severity": "medium", "title": "Изображение без alt",
-                              "hint": "Добавьте атрибут alt с описанием изображения."},
+                              "description": "Картинка без alt не участвует в поиске по изображениям и мешает доступности.",
+                              "hint": "Добавьте атрибут alt с описанием изображения.",
+                              "fix": "Добавьте атрибут alt с описанием изображения."},
     "canonical_conflict":    {"severity": "high", "title": "Конфликт canonical",
-                              "hint": "Canonical указывает на URL вне обхода — сигналы ранжирования уходят «в никуда»."},
+                              "description": "Canonical указывает на URL вне обхода — сигналы ранжирования уходят «в никуда».",
+                              "hint": "Canonical указывает на URL вне обхода — сигналы ранжирования уходят «в никуда».",
+                              "fix": "Направьте canonical на существующую индексируемую страницу сайта."},
     "noindex_in_sitemap":    {"severity": "critical", "title": "noindex в sitemap",
-                              "hint": "Страница с noindex присутствует в sitemap. Уберите её из sitemap или снимите noindex."},
+                              "description": "Страница с noindex присутствует в sitemap — противоречивые сигналы поисковику.",
+                              "hint": "Страница с noindex присутствует в sitemap. Уберите её из sitemap или снимите noindex.",
+                              "fix": "Уберите её из sitemap или снимите noindex."},
     "deep_page":             {"severity": "low", "title": "Глубокая страница (>4 кликов)",
-                              "hint": "Страница дальше 4 кликов от главной — хуже краулится. Сократите вложенность."},
+                              "description": "Страница дальше 4 кликов от главной — хуже краулится и медленнее индексируется.",
+                              "hint": "Страница дальше 4 кликов от главной — хуже краулится. Сократите вложенность.",
+                              "fix": "Сократите вложенность, добавьте ссылки с верхних уровней."},
     "low_text_ratio":        {"severity": "medium", "title": "Низкий text/HTML ratio (<10%)",
-                              "hint": "Мало текста относительно кода. Добавьте контент или облегчите разметку."},
+                              "description": "Мало текста относительно кода — страница может считаться малополезной.",
+                              "hint": "Мало текста относительно кода. Добавьте контент или облегчите разметку.",
+                              "fix": "Добавьте контент или облегчите разметку."},
+    "robots_blocked":        {"severity": "info", "title": "Закрыто в robots.txt",
+                              "description": "Страница запрещена к сканированию. Поисковик её не видит.",
+                              "hint": "Страница запрещена в robots.txt — краулер её не сканировал.",
+                              "fix": "Если страница должна быть в индексе — откройте в robots.txt."},
+    "fetch_error":           {"severity": "high", "title": "Ошибка загрузки",
+                              "description": "Страницу не удалось скачать (таймаут/сетевая ошибка) — робот тоже может её не получить.",
+                              "hint": "Страница не скачалась. Проверьте доступность сервера и таймауты.",
+                              "fix": "Проверьте доступность сервера, таймауты и блокировки ботов."},
 }
 
 TITLE_MAX_CHARS = 70
@@ -107,12 +162,21 @@ def page_issues(page: dict) -> List[dict]:
         issues.append(_issue("404_page", url, {"status_code": status}))
     if status is not None and status >= 500:
         issues.append(_issue("5xx_error", url, {"status_code": status}))
+    if status is None and page.get("error") and not page.get("robots_blocked"):
+        issues.append(_issue("fetch_error", url, {"error": page.get("error")}))
 
     chain = page.get("redirect_chain") or []
-    if len(chain) > 1:
+    # Хопы цепочки могут быть строками (legacy) или {"url","status"} (БАГФИКС #4).
+    chain_urls = [c.get("url") if isinstance(c, dict) else c for c in chain]
+    if len(chain_urls) > 1:
         issues.append(_issue("redirect_chain", url, {"chain": chain}))
-    if len(chain) != len(set(chain)):
+    if len(chain_urls) != len(set(chain_urls)):
         issues.append(_issue("redirect_loop", url, {"chain": chain}))
+
+    # Заблокировано в robots.txt — страница не сканировалась (БАГФИКС #3).
+    if page.get("robots_blocked"):
+        issues.append(_issue("robots_blocked", url))
+        return issues
 
     # Контентные проверки имеют смысл только для успешно скачанных HTML.
     if status is None or status != 200 or not page.get("parsed"):
@@ -167,11 +231,27 @@ def page_issues(page: dict) -> List[dict]:
     return issues
 
 
+def deduplicate_issues(raw_issues: List[str]) -> List[dict]:
+    """Компактный формат кодов ошибок страницы (ТЗ 6):
+    ["missing_alt","missing_alt","large_image"] →
+    [{"code":"missing_alt","count":2},{"code":"large_image","count":1}]."""
+    counts = Counter(raw_issues)
+    return [{"code": code, "count": cnt} for code, cnt in counts.items()]
+
+
 def find_duplicate_content(pages: dict) -> Dict[str, List[str]]:
-    """content_hash → [urls] для хешей, встречающихся у >1 URL."""
+    """content_hash → [urls] для хешей, встречающихся у >1 URL.
+
+    БАГФИКС #2: дубли считаются только для страниц с полноценным текстом
+    (content_hash_type == "text_content"). Листинги (html_structure)
+    исключаются — их пустой clean_text давал ложные дубли всего сайта.
+    Legacy-страницы без content_hash_type учитываются как раньше."""
     hash_map = defaultdict(list)
     for url, data in pages.items():
         h = data.get("content_hash")
+        htype = data.get("content_hash_type")
+        if htype is not None and htype != "text_content":
+            continue
         if h and data.get("status_code") == 200:
             hash_map[h].append(url)
     return {h: urls for h, urls in hash_map.items() if len(urls) > 1}
@@ -236,7 +316,7 @@ def site_issues(pages: dict, sitemap_urls: set) -> List[dict]:
 
 
 def summarize(issues: List[dict], total_pages: int) -> dict:
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for it in issues:
         sev = it.get("severity")
         if sev in counts:
@@ -250,5 +330,6 @@ def summarize(issues: List[dict], total_pages: int) -> dict:
         "issues_high": counts["high"],
         "issues_medium": counts["medium"],
         "issues_low": counts["low"],
+        "issues_info": counts["info"],
         "health_score": max(0, round(score)),
     }

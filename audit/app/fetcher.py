@@ -24,6 +24,8 @@ from typing import Optional
 
 import aiohttp
 
+from .urls import normalize_url
+
 logger = logging.getLogger("audit.fetcher")
 
 USER_AGENTS = [
@@ -166,10 +168,13 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
                         nxt = str(_YURL(current).join(_YURL(loc)))
                     except Exception:
                         nxt = loc
-                    res.redirect_chain.append(current)
-                    if nxt in res.redirect_chain:
+                    # БАГФИКС #1+#4: нормализуем цель редиректа, чтобы
+                    # /page/ и /page не считались разными хопами.
+                    nxt = normalize_url(nxt) or nxt
+                    res.redirect_chain.append({"url": current, "status": resp.status})
+                    if any(h["url"] == nxt for h in res.redirect_chain):
                         # петля: фиксируем дубликат в цепочке и выходим
-                        res.redirect_chain.append(nxt)
+                        res.redirect_chain.append({"url": nxt, "status": None})
                         break
                     if not await assert_public_host(nxt):
                         res.error = "ssrf_blocked_redirect"

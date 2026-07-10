@@ -45,6 +45,7 @@ const routes = [
   // Раздел «Аудиты» (технический и SEO-аудит; включает старый парсер структуры)
   { path: '/audits',               component: () => import('../views/AuditsPage.vue'),             meta: { auth: true } },
   { path: '/audits/:taskId',       component: () => import('../views/AuditReportPage.vue'),        meta: { auth: true } },
+  { path: '/audit/share/:token',   component: () => import('../views/AuditSharedPage.vue'),        meta: { guest: false, public: true } },
 
   { path: '/projects',             component: () => import('../views/ProjectsPage.vue'),        meta: { auth: true } },
   { path: '/projects/:id',         component: () => import('../views/ProjectDetailPage.vue'),   meta: { auth: true } },
