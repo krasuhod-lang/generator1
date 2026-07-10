@@ -203,7 +203,13 @@ function statusBadge(s) {
       <!-- ─── Форма ─────────────────────────────────────────────── -->
       <section class="bg-gray-900 border border-gray-800 rounded-xl p-5">
         <header class="mb-4">
-          <h1 class="text-xl font-semibold text-gray-100">📈 Прогнозатор</h1>
+          <div class="flex items-center justify-between gap-3">
+            <h1 class="text-xl font-semibold text-gray-100">📈 Прогнозатор</h1>
+            <router-link to="/proposals"
+              class="shrink-0 px-3 py-1.5 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition">
+              🧱 Фронт работ (КП)
+            </router-link>
+          </div>
           <p class="text-sm text-gray-400 mt-1">
             Вбейте список ключевых запросов — либо загрузите готовую CSV/XLSX-выгрузку
             с помесячной частотностью. Система:

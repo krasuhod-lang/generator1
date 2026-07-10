@@ -49,6 +49,7 @@ const activeTabKey = computed(() => {
   if (p.startsWith('/info-article'))   return 'info-article';
   if (p.startsWith('/article-topics')) return 'article-topics';
   if (p.startsWith('/forecaster'))     return 'forecaster';
+  if (p.startsWith('/proposals'))      return 'forecaster';
   if (p.startsWith('/category-lead'))  return 'category-lead';
   if (p.startsWith('/serp-b2b'))       return 'serp-b2b';
   if (p.startsWith('/position-tracker')) return 'position-tracker';
