@@ -90,12 +90,33 @@ for (let i = 0; i < 36; i++) {
 }
 const fc = buildForecast(longSeries);
 ok('forecast points=12',  fc.points.length === 12, `got ${fc.points.length}`);
-ok('forecast method=HW',  fc.method === 'holt_winters_additive', fc.method);
+ok('forecast method=HW',  fc.method === 'holt_winters_multiplicative' || fc.method === 'holt_winters_additive', fc.method);
 ok('forecast annual_total > 0', fc.annual_total > 0, String(fc.annual_total));
 ok('forecast trend direction=up', fc.trend.direction === 'up', JSON.stringify(fc.trend));
 ok('forecast CI hi>=value>=lo (sample)',
    fc.points.every((p) => p.hi >= p.value && p.value >= p.lo),
    JSON.stringify(fc.points.slice(0,2)));
+
+// Мультипликативная модель — основная на положительном ряду
+ok('forecast HW multiplicative on positive series',
+   fc.method === 'holt_winters_multiplicative', fc.method);
+ok('forecast params.model=multiplicative',
+   fc.params && fc.params.model === 'multiplicative', JSON.stringify(fc.params));
+
+// Нули в истории (запуск нового продукта) → фолбэк на аддитивную модель
+const zeroSeries = longSeries.map((p, i) => ({ ...p, demand: i < 3 ? 0 : p.demand }));
+const fcZero = buildForecast(zeroSeries);
+ok('forecast zeros → additive fallback',
+   fcZero.method === 'holt_winters_additive', fcZero.method);
+ok('forecast zeros fallback_reason mentions нулевые',
+   /нулев/i.test(fcZero.fallback_reason || ''), fcZero.fallback_reason);
+ok('forecast zeros points=12 and non-negative',
+   fcZero.points.length === 12 && fcZero.points.every((p) => p.value >= 0));
+
+// Прямой вызов мультипликативной модели: нули → null (не определена)
+const { holtWintersMultiplicative } = require('../src/services/forecaster/forecast');
+ok('HW multiplicative rejects zeros',
+   holtWintersMultiplicative([0,1,2,3,4,5,6,7,8,9,10,11,0,1,2,3,4,5,6,7,8,9,10,11], 12, 0.3, 0.1, 0.1) === null);
 
 // Короткий ряд → fallback на trend_with_seasonal_means
 const shortSeries = longSeries.slice(0, 10);

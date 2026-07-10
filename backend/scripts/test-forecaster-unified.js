@@ -321,5 +321,32 @@ group('YoY-множители: спрос × позиции — прозрачн
   });
 });
 
+group('SOV-floor: current_traffic > Demand₀ × target_SOV (краевой случай)', () => {
+  test('capture(t) никогда не опускается ниже SOV_start — роста нет в минус', () => {
+    // Спрос 1000/мес, target_ctr=1% → Demand₀×target_SOV = 10 визитов.
+    // Пользователь вводит текущий трафик 300 (SOV_start=0.3 >> target).
+    const r = buildUnifiedForecast({
+      monthly: flatMonthly(1000),
+      options: { h_max: 12, target_ctr: 0.01 },
+      currentTrafficPerMonth: 300,
+      serpElements: [],
+      cfg,
+    });
+    assert.strictEqual(r.verdict, 'ok');
+    const sovStart = r.params.sov_start;
+    assert.ok(sovStart >= 0.29, `sov_start=${sovStart}`);
+    // Жёсткий floor: SOV_max = max(target·C_serp, SOV_start·(1+G)) ≥ SOV_start.
+    assert.ok(r.params.sov_max >= sovStart, `sov_max=${r.params.sov_max} < sov_start=${sovStart}`);
+    for (const p of r.forecast) {
+      assert.ok(p.capture >= sovStart - 1e-9, `t=${p.t}: capture=${p.capture} < sov_start=${sovStart}`);
+    }
+    // Десезонализированное ядро не проседает ниже стартового трафика:
+    // логистическая S-кривая не даёт «отрицательного роста».
+    for (const p of r.forecast) {
+      assert.ok(p.core >= 300, `t=${p.t}: core=${p.core} < 300`);
+    }
+  });
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

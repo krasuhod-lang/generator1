@@ -23,7 +23,7 @@ const { aggregateMonthlySeries } = require('./series');
 const { detectAnomalies } = require('./anomalyDetector');
 const { buildForecast } = require('./forecast');
 const { estimateTraffic } = require('./trafficModel');
-const { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner } = require('./deepseekAnalyzer');
+const { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner, runVangaSummary } = require('./deepseekAnalyzer');
 const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
 const { fetchPhraseSignals, aggregateSignals } = require('./keyssoClient');
 const { collectSeasonality, collectCommercialization, collectSerpFeatures } = require('./arsenkinClient');
@@ -74,6 +74,7 @@ const PROGRESS_STEPS = {
   traffic_estimate:     { percent: 78,  label: 'Оценка трафика' },
   persist_partial:      { percent: 82,  label: 'Сохранение результатов' },
   deepseek_analysis:    { percent: 86,  label: 'AI-аналитика' },
+  vanga_summary:        { percent: 93,  label: 'Ванга: бизнес-саммари' },
   finalize:             { percent: 97,  label: 'Финализация' },
 };
 
@@ -201,6 +202,10 @@ async function processForecasterTask(taskId) {
 
   try {
     step('parse');
+    // Строгий коммерческий фильтр (режим «список ключей»): при включённом
+    // commercial_only ядро уже отфильтровано до коммерческих фраз, поэтому
+    // ниже коэффициент коммерциализации НЕ домножается повторно (=1.0).
+    const commercialOnly = options.commercial_only === true;
     // 2. Источник данных: список ключей (сезонность через Арсенкин) либо файл
     let parsed;
     let arsenkinReport = null;
@@ -208,20 +213,34 @@ async function processForecasterTask(taskId) {
       // 2a. Режим «список ключей»: ПЕРЕД сбором сезонности исключаем
       // фразы со стоп-словами (бесплатно/скачать/авито/… — см. ТЗ),
       // затем через Арсенкин снимаем помесячную частотность за год.
+      // При options.commercial_only=true включается СТРОГИЙ фильтр:
+      // остаются только фразы с коммерческим маркером (купить/цена/
+      // «под ключ»/«интернет-магазин»/…). Fail-safe: если коммерческих
+      // фраз меньше порога — задача завершается с кодом
+      // failed_no_commercial_intent (никакого division by zero дальше).
       step('arsenkin_seasonality');
-      const { kept, excluded } = filterKeywords(rawKeywords);
-      if (kept.length === 0) {
+      const { kept, excluded } = filterKeywords(rawKeywords, { commercialOnly });
+      const minCommercial = Math.max(1, Number(getForecasterConfig().keywordsFilter?.minCommercialPhrases) || 1);
+      if (kept.length === 0 || (commercialOnly && kept.length < minCommercial)) {
         arsenkinReport = {
           verdict: 'error',
-          reason: 'Все ключевые запросы отфильтрованы стоп-словами',
+          reason: commercialOnly
+            ? 'В списке нет коммерческих запросов (строгий фильтр commercial_only)'
+            : 'Все ключевые запросы отфильтрованы стоп-словами',
+          commercial_only: commercialOnly,
           keywords_input: rawKeywords.length,
-          keywords_kept: 0,
+          keywords_kept: kept.length,
           stop_words_excluded: excluded,
         };
         await db.query(
           `UPDATE forecaster_tasks SET arsenkin_report=$2::jsonb, updated_at=NOW() WHERE id=$1`,
           [taskId, JSON.stringify(arsenkinReport)],
         );
+        if (commercialOnly) {
+          const e = new Error('В вашем списке нет коммерческих запросов — прогнозировать нечего. Отключите строгий фильтр или добавьте коммерческие фразы (купить, цена, заказать…).');
+          e.code = 'failed_no_commercial_intent';
+          throw e;
+        }
         throw new Error('Все ключевые запросы попали под стоп-слова — собирать сезонность не по чему');
       }
       const ars = await collectSeasonality({
@@ -248,6 +267,7 @@ async function processForecasterTask(taskId) {
         region_lr:   ars.region_lr ?? null,
         duration_ms: ars.duration_ms ?? null,
         tasks:       ars.tasks || [],
+        commercial_only: commercialOnly,
         keywords_input: rawKeywords.length,
         keywords_kept:  kept.length,
         stop_words_excluded: excluded,
@@ -334,6 +354,12 @@ async function processForecasterTask(taskId) {
     const { clusterVolume, mainQueryVolume } = _phraseVolumes(remainingRows, options.main_query);
     let commPercent = _sanitizeUnit(options.comm_percent);
     let serpElements = _sanitizeSerpElements(options.serp_elements);
+    if (commercialOnly) {
+      // Ядро уже отфильтровано до коммерческих фраз строгим фильтром —
+      // повторное домножение на коэффициент коммерциализации занизило бы
+      // прогноз дважды. Сбор коммерциализации через Арсенкин пропускаем.
+      commPercent = 1.0;
+    }
     try {
       if (commPercent == null) {
         const collectedComm = await collectCommercialization({ phrases: topPhrases.slice(0, 50), regionLabel: options.region, regionLr: options.region_lr });
@@ -595,7 +621,41 @@ async function processForecasterTask(taskId) {
       );
     }
 
-    // 8c. DSPy-style эксперты (NicheStrategist / OpportunityHunter / ClusterPlanner).
+    // 8c. «Ванга» — лаконичное бизнес-саммари (Gemini). Graceful: любой сбой
+    // API (429/500/timeout) даёт verdict skipped/error, пайплайн продолжается,
+    // математический прогноз не страдает. Фронт при не-ok показывает
+    // плейсхолдер «Аналитика ИИ временно недоступна…».
+    step('vanga_summary');
+    const vanga = await runVangaSummary({
+      unifiedForecast,
+      sovForecast,
+      trafficEstimate,
+      monthlySummary: {
+        months_count: seriesData.monthly.length,
+        annual_total_forecast: forecast.annual_total,
+        trend_direction: forecast.trend?.direction,
+      },
+      targetUrl,
+      mainQuery: options.main_query || null,
+    });
+    await db.query(
+      `UPDATE forecaster_tasks SET
+         vanga_summary=$2::jsonb,
+         tokens_in=tokens_in+$3,
+         tokens_out=tokens_out+$4,
+         cost_usd=cost_usd+$5,
+         updated_at=NOW()
+       WHERE id=$1`,
+      [
+        taskId,
+        JSON.stringify(vanga),
+        vanga.tokens_in || 0,
+        vanga.tokens_out || 0,
+        vanga.cost_usd || 0,
+      ],
+    );
+
+    // 8d. DSPy-style эксперты (NicheStrategist / OpportunityHunter / ClusterPlanner).
     // Все три graceful: skipped без ключа или если advanced.enabled=false.
     // Запускаем последовательно — на типовом ядре все три уложатся в ~2-3 мин
     // и расходуют умеренный бюджет токенов (max ~5k tokens out суммарно).
@@ -668,6 +728,7 @@ async function processForecasterTask(taskId) {
     await db.query(
       `UPDATE forecaster_tasks SET
          status='done',
+         error_code=NULL,
          completed_at=NOW(),
          updated_at=NOW(),
          deepseek_summary=$2::jsonb,
@@ -686,14 +747,15 @@ async function processForecasterTask(taskId) {
       ],
     );
     await _setProgress(taskId, { stage: 'done', percent: 100, label: 'Готово' });
-    console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'}, opp=${opportunitiesReport?.verdict || 'n/a'}, niche=${expertReports?.niche_strategist?.verdict || 'n/a'}, hunter=${expertReports?.opportunity_hunter?.verdict || 'n/a'}, planner=${expertReports?.cluster_planner?.verdict || 'n/a'})`);
+    console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'}, vanga=${vanga?.verdict || 'n/a'}, opp=${opportunitiesReport?.verdict || 'n/a'}, niche=${expertReports?.niche_strategist?.verdict || 'n/a'}, hunter=${expertReports?.opportunity_hunter?.verdict || 'n/a'}, planner=${expertReports?.cluster_planner?.verdict || 'n/a'})`);
     try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
-    console.error(`[Forecaster] task ${taskId} failed: ${msg}`);
+    const errCode = (err && typeof err.code === 'string' && /^[a-z0-9_]{1,64}$/.test(err.code)) ? err.code : null;
+    console.error(`[Forecaster] task ${taskId} failed: ${msg}${errCode ? ` (code=${errCode})` : ''}`);
     await db.query(
-      `UPDATE forecaster_tasks SET status='error', error_message=$2, completed_at=NOW(), updated_at=NOW() WHERE id=$1`,
-      [taskId, msg.slice(0, 2000)],
+      `UPDATE forecaster_tasks SET status='error', error_message=$2, error_code=$3, completed_at=NOW(), updated_at=NOW() WHERE id=$1`,
+      [taskId, msg.slice(0, 2000), errCode],
     );
     try { await funnel.finish({ status: 'failed', error: err }); } catch (_e) { /* no-op */ }
   }
