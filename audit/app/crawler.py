@@ -37,6 +37,39 @@ CONCURRENCY = 50
 DOMAIN_DELAY_S = 0.2  # вежливый краулинг: 200ms между запросами на домен
 MAX_IMAGES_CHECK = 500  # потолок HEAD-проверок изображений на весь аудит
 SITEMAP_MAX_URLS = 20000
+GRAPH_MAX_NODES = 600   # потолок узлов в экспорте графа для UI-визуализации
+GRAPH_MAX_EDGES = 3000
+
+
+def _export_graph(graph: "nx.DiGraph", pages: Dict[str, dict]) -> dict:
+    """Граф структуры сайта для UI (ТЗ 7.2 «Граф»): узлы с глубиной и числом
+    ошибок + рёбра. Обрезается по GRAPH_MAX_NODES (приоритет — меньшая глубина,
+    затем больше inlinks), чтобы отчёт не разбухал на больших сайтах."""
+    def _key(url: str):
+        p = pages.get(url) or {}
+        return (p.get("crawl_depth") if p.get("crawl_depth") is not None else 99,
+                -graph.in_degree(url) if graph.has_node(url) else 0)
+
+    urls = sorted(pages.keys(), key=_key)[:GRAPH_MAX_NODES]
+    keep = set(urls)
+    nodes = []
+    for url in urls:
+        p = pages.get(url) or {}
+        nodes.append({
+            "id": url,
+            "depth": p.get("crawl_depth") or 0,
+            "issues": len(p.get("issues") or []),
+            "status_code": p.get("status_code"),
+            "inlinks": graph.in_degree(url) if graph.has_node(url) else 0,
+        })
+    edges = []
+    for s, t in graph.edges():
+        if s in keep and t in keep:
+            edges.append([s, t])
+            if len(edges) >= GRAPH_MAX_EDGES:
+                break
+    return {"nodes": nodes, "edges": edges,
+            "truncated": graph.number_of_nodes() > len(nodes)}
 
 _SKIP_EXTENSIONS = (
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".pdf", ".zip",
@@ -325,6 +358,8 @@ async def run_audit(start_url: str, *,
 
     summary = issues_mod.summarize(all_issues, len(pages))
 
+    graph_export = _export_graph(graph, pages)
+
     # Обрезаем тяжёлые поля страниц для финального JSON (anchors/outlinks дают
     # мегабайты; в отчёте оставляем counts + top-примеры).
     slim_pages = []
@@ -352,4 +387,5 @@ async def run_audit(start_url: str, *,
         "orphan_pages": orphans,
         "sitemap_url_count": len(sitemap_urls),
         "graph_stats": graph_stats,
+        "graph": graph_export,
     }

@@ -11,12 +11,14 @@
  *   GET    /api/audit/tasks            — список аудитов пользователя
  *   GET    /api/audit/status/:id       — статус + прогресс (проксирует Python)
  *   GET    /api/audit/report/:id       — финальный отчёт (persist в PG при done)
- *   GET    /api/audit/export/:id       — CSV-экспорт (?format=csv)
+ *   GET    /api/audit/export/:id       — экспорт (?format=csv|xlsx)
+ *   GET    /api/audit/compare/:id      — сравнение с предыдущим аудитом домена
  *   DELETE /api/audit/:id              — удалить аудит
  */
 
-const axios = require('axios');
-const db    = require('../config/db');
+const axios   = require('axios');
+const ExcelJS = require('exceljs');
+const db      = require('../config/db');
 const { assertPublicHost } = require('../services/siteCrawler/ssrfGuard');
 
 const BASE_URL = (process.env.AUDIT_INTERNAL_URL || 'http://audit:8002')
@@ -257,13 +259,59 @@ async function getReport(req, res) {
   }
 }
 
-// ── GET /api/audit/export/:id?format=csv ─────────────────────────────────────
+// ── GET /api/audit/export/:id?format=csv|xlsx ────────────────────────────────
 function _csvCell(v) {
   if (v == null) return '';
   const s = String(v);
   // Guard от CSV-formula injection + экранирование
   const guarded = /^[=+\-@]/.test(s) ? `'${s}` : s;
   return `"${guarded.replace(/"/g, '""')}"`;
+}
+
+function _xlsxCell(v) {
+  if (v == null) return '';
+  const s = String(v);
+  return /^[=+\-@]/.test(s) ? `'${s}` : s;
+}
+
+const PAGE_COLUMNS = ['URL','Статус','Глубина','Время ответа (мс)','Размер (байт)','Title',
+  'Длина title','Description','Кол-во H1','Слов','Text/HTML','Hash','HTTPS','Индексируется','Ошибки'];
+
+function _pageRow(r) {
+  return [
+    r.url, r.status_code, r.crawl_depth, r.response_time_ms, r.content_size_bytes,
+    r.title, r.title_length, r.meta_description, r.h1_count, r.word_count,
+    r.text_html_ratio, r.content_hash, r.is_https ? 'да' : 'нет',
+    r.indexable ? 'да' : 'нет',
+    Array.isArray(r.issues) ? r.issues.join(', ') : '',
+  ];
+}
+
+async function _exportXlsx(res, task, pageRows) {
+  const wb = new ExcelJS.Workbook();
+
+  const wsPages = wb.addWorksheet('Страницы');
+  wsPages.addRow(PAGE_COLUMNS).font = { bold: true };
+  for (const r of pageRows) wsPages.addRow(_pageRow(r).map(_xlsxCell));
+  wsPages.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 16; });
+
+  const { rows: issueRows } = await db.query(
+    `SELECT page_url, issue_code, severity, context
+       FROM audit_issues WHERE task_id=$1
+      ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                             WHEN 'medium' THEN 2 ELSE 3 END, issue_code`, [task.id]);
+  const wsIssues = wb.addWorksheet('Ошибки');
+  wsIssues.addRow(['URL', 'Код ошибки', 'Критичность', 'Контекст']).font = { bold: true };
+  for (const it of issueRows) {
+    wsIssues.addRow([it.page_url, it.issue_code, it.severity,
+      JSON.stringify(it.context || {})].map(_xlsxCell));
+  }
+  wsIssues.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 22; });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="audit-${task.id}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
 }
 
 async function exportReport(req, res) {
@@ -276,23 +324,58 @@ async function exportReport(req, res) {
               text_html_ratio, content_hash, is_https, indexable, issues
          FROM audit_pages WHERE task_id=$1 ORDER BY crawl_depth, url`, [task.id]);
 
-    const header = ['URL','Статус','Глубина','Время ответа (мс)','Размер (байт)','Title',
-      'Длина title','Description','Кол-во H1','Слов','Text/HTML','Hash','HTTPS','Индексируется','Ошибки'];
+    if (String(req.query.format || 'csv').toLowerCase() === 'xlsx') {
+      return await _exportXlsx(res, task, rows);
+    }
+
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="audit-${task.id}.csv"`);
-    res.write('\uFEFF' + header.map(_csvCell).join(';') + '\n');
+    res.write('\uFEFF' + PAGE_COLUMNS.map(_csvCell).join(';') + '\n');
     for (const r of rows) {
-      res.write([
-        r.url, r.status_code, r.crawl_depth, r.response_time_ms, r.content_size_bytes,
-        r.title, r.title_length, r.meta_description, r.h1_count, r.word_count,
-        r.text_html_ratio, r.content_hash, r.is_https ? 'да' : 'нет',
-        r.indexable ? 'да' : 'нет',
-        Array.isArray(r.issues) ? r.issues.join(', ') : '',
-      ].map(_csvCell).join(';') + '\n');
+      res.write(_pageRow(r).map(_csvCell).join(';') + '\n');
     }
     res.end();
   } catch (e) {
     console.error('[audit.exportReport]', e.message);
+    res.status(e.status || 500).json({ error: e.message || 'internal_error' });
+  }
+}
+
+// ── GET /api/audit/compare/:id ───────────────────────────────────────────────
+// Режим сравнения (ТЗ 7.2): текущий аудит + предыдущий завершённый аудит того
+// же домена (host) этого пользователя.
+async function compareTask(req, res) {
+  try {
+    const task = await _loadTask(req.params.id, req.user.id);
+    let host;
+    try { host = new URL(task.url).hostname; } catch (_) { host = null; }
+
+    const _pick = (r) => ({
+      id: r.id, url: r.url, summary: r.summary || {},
+      graph_stats: r.graph_stats || {},
+      started_at: r.started_at, finished_at: r.finished_at,
+    });
+
+    const { rows: cur } = await db.query(
+      `SELECT id, url, summary, report->'graph_stats' AS graph_stats,
+              started_at, finished_at
+         FROM audit_tasks WHERE id=$1`, [task.id]);
+
+    let previous = null;
+    if (host) {
+      const { rows: prev } = await db.query(
+        `SELECT id, url, summary, report->'graph_stats' AS graph_stats,
+                started_at, finished_at
+           FROM audit_tasks
+          WHERE user_id=$1 AND id<>$2 AND status='done'
+            AND lower(split_part(split_part(url, '://', 2), '/', 1)) = lower($3)
+          ORDER BY finished_at DESC NULLS LAST LIMIT 1`,
+        [req.user.id, task.id, host]);
+      if (prev.length) previous = _pick(prev[0]);
+    }
+    res.json({ current: _pick(cur[0]), previous });
+  } catch (e) {
+    console.error('[audit.compareTask]', e.message);
     res.status(e.status || 500).json({ error: e.message || 'internal_error' });
   }
 }
@@ -310,4 +393,4 @@ async function deleteTask(req, res) {
   }
 }
 
-module.exports = { startAudit, listTasks, getStatus, getReport, exportReport, deleteTask };
+module.exports = { startAudit, listTasks, getStatus, getReport, exportReport, compareTask, deleteTask };

@@ -113,6 +113,42 @@ class TestSiteIssues(unittest.TestCase):
         self.assertEqual(s["health_score"], 0)
 
 
+class TestGraphExport(unittest.TestCase):
+    def test_export_graph_nodes_edges(self):
+        import networkx as nx
+        from . import crawler
+        g = nx.DiGraph()
+        g.add_edge("https://e.com/", "https://e.com/a")
+        g.add_edge("https://e.com/", "https://e.com/b")
+        pages = {
+            "https://e.com/":  _page(url="https://e.com/", crawl_depth=0, issues=[]),
+            "https://e.com/a": _page(url="https://e.com/a", crawl_depth=1, issues=["missing_h1"]),
+            "https://e.com/b": _page(url="https://e.com/b", crawl_depth=1, issues=[]),
+        }
+        out = crawler._export_graph(g, pages)
+        self.assertEqual(len(out["nodes"]), 3)
+        self.assertEqual(len(out["edges"]), 2)
+        self.assertFalse(out["truncated"])
+        root = next(n for n in out["nodes"] if n["id"] == "https://e.com/")
+        self.assertEqual(root["depth"], 0)
+        a = next(n for n in out["nodes"] if n["id"] == "https://e.com/a")
+        self.assertEqual(a["issues"], 1)
+        self.assertEqual(a["inlinks"], 1)
+
+    def test_export_graph_truncation(self):
+        import networkx as nx
+        from . import crawler
+        g = nx.DiGraph()
+        pages = {}
+        for i in range(crawler.GRAPH_MAX_NODES + 50):
+            u = f"https://e.com/p{i}"
+            g.add_node(u)
+            pages[u] = _page(url=u, crawl_depth=i % 5, issues=[])
+        out = crawler._export_graph(g, pages)
+        self.assertEqual(len(out["nodes"]), crawler.GRAPH_MAX_NODES)
+        self.assertTrue(out["truncated"])
+
+
 class TestPageParser(unittest.TestCase):
     HTML = """
     <html><head>

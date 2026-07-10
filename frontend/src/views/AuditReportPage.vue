@@ -4,13 +4,16 @@
  *
  * Верх: круговой Health Score (зелёный >80 / жёлтый 50–79 / красный <50) +
  * счётчики Critical/High/Medium/Low. Табы: Обзор (все ошибки с фильтрами),
- * Страницы (таблица URL), Дубликаты (группы по хешу), Сироты, Экспорт CSV.
+ * Страницы (таблица URL), Дубликаты (группы по хешу), Сироты, Граф
+ * (force-graph структуры), Сравнение (с предыдущим аудитом домена),
+ * Экспорт CSV/XLSX.
  * Клик по строке страницы — боковая панель (Drawer) с деталями.
  * Пока аудит running — прогресс-бар с поллингом статуса.
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AuditGraphChart from '../components/AuditGraphChart.vue';
 import api from '../api.js';
 
 const route = useRoute();
@@ -27,6 +30,9 @@ const issueFilterCode = ref('');
 const pageSearch = ref('');
 const pageSort = ref({ key: 'crawl_depth', dir: 1 });
 const drawerPage = ref(null);
+const compareData = ref(null);   // { current, previous } из /audit/compare/:id
+const compareError = ref(null);
+const orphansCopied = ref(false);
 
 const _msg = (e) => e?.response?.data?.error || e?.message || 'Ошибка';
 
@@ -165,17 +171,72 @@ function stopPolling() {
   if (pollHandle.value) { clearInterval(pollHandle.value); pollHandle.value = null; }
 }
 
-function downloadCsv() {
+function downloadCsv() { downloadExport('csv'); }
+
+function downloadExport(format) {
   const token = localStorage.getItem('seo_token') || '';
-  fetch(`/api/audit/export/${taskId}?format=csv`, {
+  fetch(`/api/audit/export/${taskId}?format=${format}`, {
     headers: { Authorization: 'Bearer ' + token },
   }).then((r) => r.blob()).then((b) => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(b);
-    a.download = `audit-${taskId}.csv`;
+    a.download = `audit-${taskId}.${format}`;
     a.click();
     URL.revokeObjectURL(a.href);
   }).catch((e) => { error.value = _msg(e); });
+}
+
+// ── Сравнение с предыдущим аудитом домена ──
+async function fetchCompare() {
+  if (compareData.value) return;
+  try {
+    const { data } = await api.get(`/audit/compare/${taskId}`);
+    compareData.value = data;
+    compareError.value = null;
+  } catch (e) { compareError.value = _msg(e); }
+}
+
+function openTab(tab) {
+  activeTab.value = tab;
+  if (tab === 'compare') fetchCompare();
+}
+
+function delta(cur, prev) {
+  const d = (Number(cur) || 0) - (Number(prev) || 0);
+  return d > 0 ? `+${d}` : String(d);
+}
+
+const COMPARE_ROWS = [
+  { key: 'health_score',    label: 'Health Score',  goodUp: true },
+  { key: 'total_pages',     label: 'Страниц',       goodUp: null },
+  { key: 'issues_critical', label: 'Critical',      goodUp: false },
+  { key: 'issues_high',     label: 'High',          goodUp: false },
+  { key: 'issues_medium',   label: 'Medium',        goodUp: false },
+  { key: 'issues_low',      label: 'Low',           goodUp: false },
+];
+
+function deltaClass(row, cur, prev) {
+  const d = (Number(cur) || 0) - (Number(prev) || 0);
+  if (!d || row.goodUp === null) return 'muted';
+  return (d > 0) === row.goodUp ? 'delta-good' : 'delta-bad';
+}
+
+// ── Сироты: «Добавить в sitemap ТЗ» — копирует список URL для вставки в ТЗ ──
+async function copyOrphansForSitemap() {
+  const urls = report.value?.orphan_pages || [];
+  if (!urls.length) return;
+  const text = 'Добавить в sitemap / перелинковку (страницы-сироты):\n'
+    + urls.map((u) => `- ${u}`).join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    orphansCopied.value = true;
+    setTimeout(() => { orphansCopied.value = false; }, 2000);
+  } catch (e) { error.value = 'Не удалось скопировать в буфер обмена'; }
+}
+
+function openPageByUrl(url) {
+  const p = (report.value?.pages || []).find((x) => x.url === url);
+  if (p) drawerPage.value = p;
 }
 
 onMounted(async () => {
@@ -235,13 +296,16 @@ onUnmounted(stopPolling);
       <!-- Tabs -->
       <section v-if="report" class="card">
         <div class="tabs">
-          <button :class="{ active: activeTab === 'overview' }" @click="activeTab = 'overview'">Обзор</button>
-          <button :class="{ active: activeTab === 'pages' }" @click="activeTab = 'pages'">Страницы</button>
-          <button :class="{ active: activeTab === 'duplicates' }" @click="activeTab = 'duplicates'">
+          <button :class="{ active: activeTab === 'overview' }" @click="openTab('overview')">Обзор</button>
+          <button :class="{ active: activeTab === 'pages' }" @click="openTab('pages')">Страницы</button>
+          <button :class="{ active: activeTab === 'duplicates' }" @click="openTab('duplicates')">
             Дубликаты <span class="tab-count">{{ duplicateGroups.length }}</span></button>
-          <button :class="{ active: activeTab === 'orphans' }" @click="activeTab = 'orphans'">
+          <button :class="{ active: activeTab === 'orphans' }" @click="openTab('orphans')">
             Сироты <span class="tab-count">{{ (report.orphan_pages || []).length }}</span></button>
-          <button class="export-btn" @click="downloadCsv">⬇ CSV</button>
+          <button :class="{ active: activeTab === 'graph' }" @click="openTab('graph')">Граф</button>
+          <button :class="{ active: activeTab === 'compare' }" @click="openTab('compare')">Сравнение</button>
+          <button class="export-btn ml-auto" @click="downloadCsv">⬇ CSV</button>
+          <button class="export-btn" @click="downloadExport('xlsx')">⬇ Excel</button>
         </div>
 
         <!-- Обзор: сводка ошибок -->
@@ -329,11 +393,72 @@ onUnmounted(stopPolling);
         <div v-if="activeTab === 'orphans'">
           <p class="muted" v-if="!(report.orphan_pages || []).length">
             Страниц-сирот нет: все URL из sitemap достижимы по внутренним ссылкам.</p>
-          <table v-else class="tbl small">
-            <thead><tr><th>URL (есть в sitemap, нет в обходе)</th></tr></thead>
+          <template v-else>
+            <div class="toolbar">
+              <button class="action-btn" @click="copyOrphansForSitemap">
+                {{ orphansCopied ? '✓ Скопировано' : '📋 Добавить в sitemap ТЗ' }}</button>
+              <span class="muted">Скопирует список URL для вставки в ТЗ на перелинковку/sitemap</span>
+            </div>
+            <table class="tbl small">
+              <thead><tr><th>URL (есть в sitemap, нет в обходе)</th></tr></thead>
+              <tbody>
+                <tr v-for="u in report.orphan_pages" :key="u">
+                  <td><a :href="u" target="_blank" rel="noopener">{{ u }}</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
+        </div>
+
+        <!-- Граф структуры сайта -->
+        <div v-if="activeTab === 'graph'">
+          <p class="muted" v-if="!(report.graph && (report.graph.nodes || []).length)">
+            Данные графа недоступны для этого отчёта (аудит был выполнен старой версией сервиса).</p>
+          <template v-else>
+            <p class="muted small-meta">
+              Узел = страница, цвет = глубина, красный = есть ошибки, размер = входящие ссылки.
+              Клик по узлу — детали страницы. Колесо мыши — масштаб.
+              <span v-if="report.graph.truncated">Показаны первые {{ report.graph.nodes.length }} узлов.</span>
+            </p>
+            <AuditGraphChart :graph="report.graph" @select="openPageByUrl" />
+          </template>
+        </div>
+
+        <!-- Сравнение с предыдущим аудитом -->
+        <div v-if="activeTab === 'compare'">
+          <p v-if="compareError" class="error">{{ compareError }}</p>
+          <p class="muted" v-else-if="!compareData">Загрузка…</p>
+          <p class="muted" v-else-if="!compareData.previous">
+            Предыдущих завершённых аудитов этого домена не найдено. Сравнение станет
+            доступно после повторного аудита.</p>
+          <table v-else class="tbl small compare-tbl">
+            <thead>
+              <tr>
+                <th>Метрика</th>
+                <th>Предыдущий<br><span class="muted small-meta">{{ new Date(compareData.previous.finished_at).toLocaleString('ru-RU') }}</span></th>
+                <th>Текущий<br><span class="muted small-meta">{{ compareData.current.finished_at ? new Date(compareData.current.finished_at).toLocaleString('ru-RU') : '' }}</span></th>
+                <th>Δ</th>
+              </tr>
+            </thead>
             <tbody>
-              <tr v-for="u in report.orphan_pages" :key="u">
-                <td><a :href="u" target="_blank" rel="noopener">{{ u }}</a></td>
+              <tr v-for="row in COMPARE_ROWS" :key="row.key">
+                <td>{{ row.label }}</td>
+                <td class="num">{{ compareData.previous.summary[row.key] ?? '—' }}</td>
+                <td class="num">{{ compareData.current.summary[row.key] ?? '—' }}</td>
+                <td class="num" :class="deltaClass(row, compareData.current.summary[row.key], compareData.previous.summary[row.key])">
+                  {{ delta(compareData.current.summary[row.key], compareData.previous.summary[row.key]) }}</td>
+              </tr>
+              <tr>
+                <td>Сирот</td>
+                <td class="num">{{ (compareData.previous.graph_stats || {}).orphan_count ?? '—' }}</td>
+                <td class="num">{{ (compareData.current.graph_stats || {}).orphan_count ?? '—' }}</td>
+                <td class="num muted">{{ delta((compareData.current.graph_stats || {}).orphan_count, (compareData.previous.graph_stats || {}).orphan_count) }}</td>
+              </tr>
+              <tr>
+                <td>Средняя глубина</td>
+                <td class="num">{{ (compareData.previous.graph_stats || {}).avg_depth ?? '—' }}</td>
+                <td class="num">{{ (compareData.current.graph_stats || {}).avg_depth ?? '—' }}</td>
+                <td></td>
               </tr>
             </tbody>
           </table>
@@ -415,8 +540,16 @@ onUnmounted(stopPolling);
 .tabs button { padding: .4rem .8rem; border: 1px solid #cbd5e1; background: #f3f4f6;
                border-radius: 6px; cursor: pointer; color: #111827; }
 .tabs button.active { background: #2b7cff; color: #fff; border-color: #2b7cff; }
-.tabs .export-btn { margin-left: auto; background: #fff; }
+.tabs .export-btn { background: #fff; }
+.tabs .ml-auto { margin-left: auto; }
 .tab-count { background: rgba(0,0,0,.12); border-radius: 8px; padding: 0 .35rem; font-size: .75rem; }
+
+.action-btn { padding: .4rem .8rem; border: 1px solid #2b7cff; background: #eff6ff; color: #1d4ed8;
+              border-radius: 6px; cursor: pointer; font-weight: 600; }
+.action-btn:hover { background: #dbeafe; }
+.compare-tbl td:first-child { font-weight: 600; }
+.delta-good { color: #16a34a; font-weight: 700; }
+.delta-bad  { color: #dc2626; font-weight: 700; }
 
 .toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
 .toolbar input, .toolbar select { padding: .4rem .55rem; border: 1px solid #cbd5e1; border-radius: 4px;
