@@ -32,6 +32,8 @@ const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 const relevanceRoutes     = require('./src/routes/relevance.routes');
 const forecasterRoutes    = require('./src/routes/forecaster.routes');
 const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
+const proposalsRoutes     = require('./src/routes/proposals.routes');
+const proposalsPublicRoutes = require('./src/routes/proposalsPublic.routes');
 const projectsRoutes      = require('./src/routes/projects.routes');
 const projectsPublicRoutes = require('./src/routes/projectsPublic.routes');
 const aegisRoutes         = require('./src/routes/aegis.routes');
@@ -124,6 +126,8 @@ app.use('/api/acf-json',       acfJsonRoutes);
 app.use('/api/relevance',      relevanceRoutes);
 app.use('/api/forecaster',     forecasterRoutes);
 app.use('/api/public',         forecasterPublicRoutes);
+app.use('/api/proposals',      proposalsRoutes);
+app.use('/api/public',         proposalsPublicRoutes);
 app.use('/api/projects',       projectsRoutes);
 app.use('/api/public',         projectsPublicRoutes);
 app.use('/api/category-lead',  categoryLeadRoutes);
@@ -1410,6 +1414,118 @@ async function ensureSchema() {
     // и бизнес-саммари «Ванга» (Gemini).
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS error_code    TEXT`);
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS vanga_summary JSONB`);
+
+    // Migration 107: модуль «Фронт работ» (конструктор КП) внутри раздела
+    // «Прогнозатор» — справочник модулей/задач (редактируемый, seed из
+    // SEO_Front_2026), КП, задачи КП, стоимость, прайс-лист, share-ссылки.
+    // См. migrations/107_proposals.sql.
+    await db.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'proposal_status') THEN
+          CREATE TYPE proposal_status AS ENUM ('draft', 'sent', 'accepted', 'rejected');
+        END IF;
+      END$$;
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS proposal_modules (
+        id             SERIAL PRIMARY KEY,
+        name           VARCHAR(255) NOT NULL,
+        description    TEXT,
+        estimated_days VARCHAR(100),
+        sort_order     INTEGER NOT NULL DEFAULT 0,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS proposal_module_tasks (
+        id          VARCHAR(10) PRIMARY KEY,
+        module_id   INTEGER NOT NULL REFERENCES proposal_modules(id) ON DELETE CASCADE,
+        title       VARCHAR(500) NOT NULL,
+        description TEXT,
+        tool        VARCHAR(255),
+        priority    VARCHAR(20) NOT NULL DEFAULT 'medium',
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_pmt_module ON proposal_module_tasks (module_id, sort_order)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS proposals (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title            VARCHAR(255) NOT NULL,
+        client           VARCHAR(255),
+        manager          VARCHAR(255),
+        horizon          INTEGER NOT NULL DEFAULT 3,
+        start_date       DATE,
+        status           proposal_status NOT NULL DEFAULT 'draft',
+        cloned_from_id   UUID REFERENCES proposals(id) ON DELETE SET NULL,
+        share_token      TEXT UNIQUE,
+        share_created_at TIMESTAMPTZ,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_proposals_user_created ON proposals (user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_proposals_share_token  ON proposals (share_token) WHERE share_token IS NOT NULL`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS proposal_tasks (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        proposal_id      UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+        module_id        INTEGER,
+        module_name      VARCHAR(255),
+        task_id          VARCHAR(10),
+        task_title       VARCHAR(500) NOT NULL,
+        task_description TEXT,
+        priority         VARCHAR(20) NOT NULL DEFAULT 'medium',
+        tool             VARCHAR(255),
+        month            INTEGER NOT NULL DEFAULT 1,
+        responsible      VARCHAR(255),
+        status           VARCHAR(20) NOT NULL DEFAULT 'not_started',
+        comment          TEXT,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_ptasks_proposal ON proposal_tasks (proposal_id, month)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS proposal_pricing (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        proposal_id       UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+        item_name         VARCHAR(255) NOT NULL,
+        base_budget       DECIMAL(15,2) NOT NULL DEFAULT 0,
+        additional_budget DECIMAL(15,2),
+        additional_note   TEXT,
+        month             INTEGER,
+        currency          VARCHAR(10) NOT NULL DEFAULT 'RUB',
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_ppricing_proposal ON proposal_pricing (proposal_id, month)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS proposal_pricing_templates (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        item_name   VARCHAR(255) NOT NULL,
+        base_budget DECIMAL(15,2) NOT NULL DEFAULT 0,
+        note        TEXT,
+        currency    VARCHAR(10) NOT NULL DEFAULT 'RUB',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    // Идемпотентный seed справочника (только если каталог пуст — правки
+    // пользователя сохраняются): 10 модулей SEO_Front_2026 + чеклист Google 2026.
+    try {
+      const { seedProposalCatalog } = require('./src/services/proposals/seedCatalog');
+      const seeded = await seedProposalCatalog();
+      if (seeded) console.log('✅ Справочник «Фронт работ» наполнен (seed SEO_Front_2026)');
+    } catch (seedErr) {
+      console.error('⚠️ Seed справочника «Фронт работ» не выполнен:', seedErr.message);
+    }
+
 
     // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google
     // Search Console (OAuth-токены хранятся строго в зашифрованном виде) +

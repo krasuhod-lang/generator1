@@ -25,6 +25,13 @@ const routes = [
   { path: '/forecaster/:id',       component: () => import('../views/ForecasterResultPage.vue'), meta: { auth: true } },
   { path: '/forecast/share/:token',component: () => import('../views/ForecasterSharedPage.vue'), meta: { guest: false, public: true } },
 
+  // «Фронт работ» — конструктор КП внутри раздела «Прогнозатор»
+  { path: '/proposals',            component: () => import('../views/ProposalsPage.vue'),            meta: { auth: true } },
+  { path: '/proposals/new',        component: () => import('../views/ProposalConstructorPage.vue'),  meta: { auth: true } },
+  { path: '/proposals/pricing',    component: () => import('../views/ProposalPricingPage.vue'),      meta: { auth: true } },
+  { path: '/proposals/:id',        component: () => import('../views/ProposalConstructorPage.vue'),  meta: { auth: true } },
+  { path: '/proposal/share/:token',component: () => import('../views/ProposalSharedPage.vue'),       meta: { guest: false, public: true } },
+
   { path: '/category-lead',        component: () => import('../views/CategoryLeadPage.vue'),       meta: { auth: true } },
   { path: '/category-lead/:id',    component: () => import('../views/CategoryLeadResultPage.vue'), meta: { auth: true } },
 
