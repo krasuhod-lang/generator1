@@ -21,6 +21,8 @@ router.get   ('/status/:id', readLimiter,  auth, c.getStatus);
 router.get   ('/report/:id', readLimiter,  auth, c.getReport);
 router.get   ('/export/:id', readLimiter,  auth, c.exportReport);
 router.get   ('/compare/:id', readLimiter, auth, c.compareTask);
+router.post  ('/:id/share',  writeLimiter, auth, c.createShareLink);
+router.delete('/:id/share',  writeLimiter, auth, c.revokeShareLink);
 router.delete('/:id',        writeLimiter, auth, c.deleteTask);
 
 module.exports = router;
