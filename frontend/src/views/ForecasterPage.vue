@@ -22,6 +22,7 @@ const form = ref({
   file: null,
   fileName: '',
   keywords_text: '',
+  commercial_only: false,       // строгий фильтр: только коммерческие запросы
   current_traffic_per_month: '',
   region: '',
   notes: '',
@@ -136,6 +137,8 @@ async function handleSubmit() {
         main_query: form.value.main_query?.trim() || '',
         h_max: Math.max(1, Math.min(24, parseInt(form.value.h_max, 10) || 12)),
         start_month: /^\d{4}-\d{2}$/.test(form.value.start_month || '') ? form.value.start_month : null,
+        // Строгий коммерческий фильтр — только для режима «список ключей».
+        commercial_only: inputMode.value === 'keywords' && form.value.commercial_only === true,
         // ── Тонкая настройка единой модели (проценты → доли) ──────────
         target_ctr: pctToFrac(form.value.target_ctr_pct),
         c_yield: pctToFrac(form.value.c_yield_pct),
@@ -252,6 +255,17 @@ function statusBadge(s) {
                 Стоп-слова (бесплатно, скачать, авито…) будут исключены автоматически
               </p>
             </div>
+            <label class="flex items-start gap-2 mt-2 cursor-pointer select-none">
+              <input v-model="form.commercial_only" type="checkbox"
+                class="mt-0.5 rounded border-gray-600 bg-gray-950 text-indigo-600 focus:ring-indigo-500" />
+              <span class="text-xs text-gray-300">
+                Только коммерческие запросы (строгий фильтр)
+                <span class="block text-[11px] text-gray-500">
+                  Останутся только фразы с коммерческим маркером: купить, цена, заказать, «под ключ», интернет-магазин…
+                  Коэффициент коммерциализации повторно не применяется.
+                </span>
+              </span>
+            </label>
           </div>
 
           <div v-else>

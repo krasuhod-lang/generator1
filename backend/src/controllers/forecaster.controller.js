@@ -187,6 +187,10 @@ async function createForecasterTask(req, res, next) {
       start_month:               (/^\d{4}-\d{2}$/.test(String(opts.start_month || ''))) ? String(opts.start_month) : null,
       main_query:                String(opts.main_query || '').replace(/\s+/g, ' ').trim().slice(0, 300),
       comm_percent:              _sanitizeUnit(opts.comm_percent),
+      // Строгий коммерческий фильтр (режим «список ключей»): оставляем ТОЛЬКО
+      // фразы с коммерческим маркером (купить/цена/«под ключ»/…). При этом
+      // коэффициент коммерциализации повторно НЕ применяется (см. pipeline).
+      commercial_only:           opts.commercial_only === true,
       serp_elements:             _sanitizeSerpElements(opts.serp_elements),
       // ── Параметры единой модели прогноза (config.unified) ──────────
       // Все опциональны: если null — пайплайн подставит дефолт из config.
@@ -236,14 +240,14 @@ async function createForecasterTask(req, res, next) {
 async function getForecasterTask(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, user_id, name, status, error_message, progress,
+      `SELECT id, user_id, name, status, error_message, error_code, progress,
               source_filename, source_rows_count, source_columns,
               options, target_url,
               monthly_series, anomalies, forecast, trend,
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
               sov_forecast, unified_forecast, arsenkin_report,
-              deepseek_summary,
+              deepseek_summary, vanga_summary,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
               created_at, started_at, completed_at, updated_at
@@ -308,10 +312,12 @@ async function rerunForecasterTask(req, res, next) {
       `UPDATE forecaster_tasks
           SET status='queued',
               error_message=NULL,
+              error_code=NULL,
               monthly_series=NULL, anomalies=NULL, forecast=NULL, trend=NULL,
               traffic_estimate=NULL, junk_phrases=NULL, keysso_signals=NULL,
               opportunities=NULL, expert_reports=NULL, leads_summary=NULL,
               sov_forecast=NULL, unified_forecast=NULL, arsenkin_report=NULL, deepseek_summary=NULL,
+              vanga_summary=NULL,
               progress=NULL,
               llm_provider=DEFAULT, llm_model=NULL,
               tokens_in=DEFAULT, tokens_out=DEFAULT, cost_usd=DEFAULT,
@@ -402,7 +408,7 @@ async function getSharedForecast(req, res, next) {
               traffic_estimate, junk_phrases, keysso_signals,
               opportunities, expert_reports, leads_summary,
               sov_forecast, unified_forecast, arsenkin_report,
-              deepseek_summary,
+              deepseek_summary, vanga_summary,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks
         WHERE share_token = $1 AND status='done'

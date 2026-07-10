@@ -1406,6 +1406,11 @@ async function ensureSchema() {
     // Migration 105: прогресс выполнения задачи (ползунок в UI).
     await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS progress JSONB`);
 
+    // Migration 106: машиночитаемый код ошибки (failed_no_commercial_intent)
+    // и бизнес-саммари «Ванга» (Gemini).
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS error_code    TEXT`);
+    await db.query(`ALTER TABLE forecaster_tasks ADD COLUMN IF NOT EXISTS vanga_summary JSONB`);
+
     // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google
     // Search Console (OAuth-токены хранятся строго в зашифрованном виде) +
     // AI-аналитика DeepSeek + публичный read-only шаринг дашборда.

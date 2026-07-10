@@ -116,6 +116,42 @@ group('stopWordFilter.filterKeywords', () => {
   });
 });
 
+group('stopWordFilter.filterKeywords commercialOnly (строгий фильтр)', () => {
+  test('оставляет только коммерческие; остальные → non_commercial', () => {
+    const r = filterKeywords(['купить окна', 'окна пвх отзывы владельцев', 'цена на двери'], { commercialOnly: true });
+    assert.deepStrictEqual(r.kept, ['купить окна', 'цена на двери']);
+    assert.strictEqual(r.excluded.length, 1);
+    assert.strictEqual(r.excluded[0].phrase, 'окна пвх отзывы владельцев');
+    assert.strictEqual(r.excluded[0].matched, 'non_commercial');
+  });
+  test('регистронезависимость и лишние пробелы: «Купить  Окна ПВХ»', () => {
+    const r = filterKeywords(['Купить  Окна ПВХ'], { commercialOnly: true });
+    assert.deepStrictEqual(r.kept, ['Купить Окна ПВХ']);
+  });
+  test('дефис ≡ пробел: «Интернет-Магазин мебели» коммерческая', () => {
+    const r = filterKeywords(['Интернет-Магазин мебели'], { commercialOnly: true });
+    assert.strictEqual(r.kept.length, 1);
+  });
+  test('«ремонт квартир Под Ключ» — коммерческий маркер «под ключ»', () => {
+    const r = filterKeywords(['ремонт квартир Под Ключ'], { commercialOnly: true });
+    assert.strictEqual(r.kept.length, 1);
+  });
+  test('словоформы через стем: «оптовые поставки труб»', () => {
+    const r = filterKeywords(['оптовые поставки труб'], { commercialOnly: true });
+    assert.strictEqual(r.kept.length, 1);
+  });
+  test('100% некоммерческих → kept пуст, без исключений/деления на ноль', () => {
+    const r = filterKeywords(['что такое сайдинг', 'как выбрать ламинат'], { commercialOnly: true });
+    assert.deepStrictEqual(r.kept, []);
+    assert.strictEqual(r.excluded.length, 2);
+    assert.ok(r.excluded.every((e) => e.matched === 'non_commercial'));
+  });
+  test('без опции поведение прежнее (некоммерческая инфо-фраза без стоп-слов остаётся)', () => {
+    const r = filterKeywords(['окна пвх отзывы владельцев']);
+    assert.deepStrictEqual(r.kept, ['окна пвх отзывы владельцев']);
+  });
+});
+
 // ── arsenkinClient.resolveRegionLr ────────────────────────────────
 group('arsenkinClient.resolveRegionLr', () => {
   test('пусто → Россия (225)', () => assert.strictEqual(resolveRegionLr(''), 225));

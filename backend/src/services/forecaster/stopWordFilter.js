@@ -93,7 +93,8 @@ const COMMERCIAL_WORDS = [
   'аренда', 'арендовать', 'арендую', 'снять', 'сдать', 'сдача',
   'прокат',
   // b2b
-  'на заказ', 'под заказ',
+  'на заказ', 'под заказ', 'под ключ',
+  'монтаж', 'установка', 'внедрение',
   // каталог / купить где
   'каталог', 'ассортимент',
   'где купить',
@@ -122,6 +123,9 @@ const COMMERCIAL_STEM_PREFIXES = [
   'тариф',      // тариф, тарифы, тарификация
   'услуг',      // услуга, услуги, услугой
   'арендн',     // арендный, арендная
+  'монтаж',     // монтаж, монтажный, монтажник
+  'установк',   // установка, установки
+  'внедрен',    // внедрение, внедрения
 ];
 
 function _norm(s) {
@@ -216,8 +220,16 @@ function matchStopWord(phrase) {
 /**
  * Фильтрует список ключевых запросов, отбрасывая содержащие стоп-слова.
  * Дедуплицирует по нормализованной форме, пустые строки выкидывает.
+ *
+ * @param {string[]} list
+ * @param {{commercialOnly?:boolean}} [opts] — commercialOnly=true включает
+ *   СТРОГИЙ режим: остаются ТОЛЬКО фразы с коммерческим маркером
+ *   (isCommercialPhrase); остальные попадают в excluded с
+ *   matched='non_commercial'. Матчинг регистронезависимый, дефисы и
+ *   лишние пробелы нормализуются («Интернет-Магазин» ≡ «интернет магазин»).
  */
-function filterKeywords(list) {
+function filterKeywords(list, opts = {}) {
+  const commercialOnly = !!(opts && opts.commercialOnly);
   const kept = [];
   const excluded = [];
   const seen = new Set();
@@ -227,6 +239,10 @@ function filterKeywords(list) {
     const norm = _norm(phrase);
     if (seen.has(norm)) continue;
     seen.add(norm);
+    if (commercialOnly && !isCommercialPhrase(phrase)) {
+      excluded.push({ phrase, matched: 'non_commercial' });
+      continue;
+    }
     const matched = matchStopWord(phrase);
     if (matched) excluded.push({ phrase, matched });
     else kept.push(phrase);

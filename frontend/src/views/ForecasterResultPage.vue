@@ -63,6 +63,8 @@ const anomalies = computed(() => (task.value?.anomalies?.drops) || []);
 const trend = computed(() => task.value?.trend || null);
 const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
+const vangaSummary = computed(() => task.value?.vanga_summary || null);
+const noCommercialIntent = computed(() => task.value?.error_code === 'failed_no_commercial_intent');
 const junkReport = computed(() => task.value?.junk_phrases || null);
 const targetUrl  = computed(() => task.value?.target_url || task.value?.options?.target_url || null);
 const excludedSummary = computed(() => task.value?.monthly_series?.excludedSummary || null);
@@ -311,6 +313,20 @@ const sovSummaryRows = computed(() => {
           <div class="text-xs text-sky-200/70">
             <span v-if="progress?.detail">{{ progress.detail }} · </span>автообновление каждые 3 сек
           </div>
+        </div>
+
+        <div v-else-if="task.status === 'error' && noCommercialIntent"
+             class="text-sm text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-4">
+          <div class="font-semibold">🛒 В вашем списке нет коммерческих запросов</div>
+          <p class="text-xs text-amber-200/80 mt-2 leading-relaxed">
+            Включён строгий коммерческий фильтр, но ни одна фраза не содержит коммерческого маркера
+            (купить, цена, заказать, «под ключ», интернет-магазин…). Добавьте коммерческие запросы
+            или создайте задачу без строгого фильтра.
+          </p>
+          <button @click="doRerun" :disabled="rerunBusy"
+                  class="mt-3 text-sm px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white font-semibold">
+            🔄 {{ rerunBusy ? 'Запускаю…' : 'Запустить снова' }}
+          </button>
         </div>
 
         <div v-else-if="task.status === 'error'"
@@ -575,6 +591,10 @@ const sovSummaryRows = computed(() => {
                       : 'bg-rose-500/10 text-rose-300 border-rose-500/30'">
                 {{ arsenkinReport.verdict }}
               </span>
+              <span v-if="arsenkinReport.commercial_only"
+                    class="ml-1 text-[10px] uppercase font-semibold border rounded px-1.5 py-0.5 bg-indigo-500/10 text-indigo-300 border-indigo-500/30">
+                только коммерческие
+              </span>
             </h2>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
               <div class="border border-gray-800 rounded p-2.5">
@@ -605,12 +625,12 @@ const sovSummaryRows = computed(() => {
               <div v-if="arsenkinExcludedOpen" class="mt-2 max-h-60 overflow-y-auto border border-gray-800 rounded">
                 <table class="w-full text-xs">
                   <thead class="text-gray-500 sticky top-0 bg-gray-900">
-                    <tr><th class="text-left px-2 py-1.5">Запрос</th><th class="text-left px-2 py-1.5">Стоп-слово</th></tr>
+                    <tr><th class="text-left px-2 py-1.5">Запрос</th><th class="text-left px-2 py-1.5">Причина</th></tr>
                   </thead>
                   <tbody>
                     <tr v-for="(e, i) in arsenkinExcluded" :key="i" class="border-t border-gray-800/60">
                       <td class="px-2 py-1 text-gray-300">{{ e.phrase }}</td>
-                      <td class="px-2 py-1 text-amber-300">{{ e.matched }}</td>
+                      <td class="px-2 py-1 text-amber-300">{{ e.matched === 'non_commercial' ? 'нет коммерческого маркера' : e.matched }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -1008,6 +1028,21 @@ const sovSummaryRows = computed(() => {
           <section v-else-if="clusterPlanner && clusterPlanner.verdict !== 'ok'"
                    class="bg-gray-900 border border-gray-800 rounded-xl p-3 text-xs text-gray-500">
             📋 ClusterPlanner: {{ clusterPlanner.verdict }}{{ clusterPlanner.reason ? ' — ' + clusterPlanner.reason : '' }}
+          </section>
+
+          <!-- Ванга — бизнес-саммари (Gemini) -->
+          <section v-if="vangaSummary" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-3">🔮 Ванга — что вас ждёт</h2>
+            <div v-if="vangaSummary.verdict === 'ok'">
+              <p class="text-sm text-gray-200 leading-relaxed whitespace-pre-line">{{ vangaSummary.text }}</p>
+              <p class="text-[10px] text-gray-600 mt-3">
+                Модель: {{ vangaSummary.model || '—' }} · in {{ vangaSummary.tokens_in }} · out {{ vangaSummary.tokens_out }}
+                · ${{ (vangaSummary.cost_usd || 0).toFixed(4) }}
+              </p>
+            </div>
+            <div v-else class="text-xs text-gray-500 italic">
+              Аналитика ИИ временно недоступна, но математический прогноз готов.
+            </div>
           </section>
 
           <!-- Аналитические выводы (Gemini) -->

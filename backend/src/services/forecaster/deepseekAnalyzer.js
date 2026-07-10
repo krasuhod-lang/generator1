@@ -312,7 +312,106 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
   }
 }
 
-module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner };
+module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner, runVangaSummary };
+
+// ─────────────────────────────────────────────────────────────────────
+// «Ванга» — лаконичное бизнес-саммари прогноза для владельца бизнеса.
+//
+// Отдельный короткий Gemini-вызов: человеческим языком «что меня ждёт»
+// по итогам математического прогноза. Cost control: жёсткий лимит объёма
+// вывода в системном промпте (символы/слова из config.vanga) плюс
+// серверная обрезка до maxChars. Ошибки Gemini (429/500/timeout) НИКОГДА
+// не прерывают пайплайн: возвращаем { verdict:'skipped'|'error', reason },
+// фронт показывает плейсхолдер «Аналитика ИИ временно недоступна…».
+
+function _vangaSystemPrompt(cfg) {
+  return [
+    'Ты — «Ванга»: бизнес-аналитик, который в двух абзацах говорит владельцу',
+    'бизнеса, что его ждёт по итогам SEO-прогноза. Пиши просто, по-деловому,',
+    'без SEO-жаргона, цифры округляй до читабельных («≈12 тыс. визитов»).',
+    '',
+    `ЖЁСТКОЕ ОГРАНИЧЕНИЕ ОБЪЁМА: максимум ${cfg.maxChars} символов`,
+    `и максимум ${cfg.maxWords} слов. Никаких вступлений («Итак…»), никаких`,
+    'списков и markdown — только связный текст 1–2 абзаца.',
+    '',
+    'Структура: 1) главный вывод (какой рост трафика/заявок реален и когда);',
+    '2) главный риск или условие успеха. Не обещай ×10 и «гарантий».',
+    '',
+    'Ответ — ТОЛЬКО текст саммари, без JSON и пояснений.',
+  ].join('\n');
+}
+
+/**
+ * Лаконичное бизнес-саммари («Ванга»). Никогда не бросает.
+ * @returns {{verdict:'ok'|'skipped'|'error', text?:string, reason?:string}}
+ */
+async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, monthlySummary, targetUrl, mainQuery } = {}) {
+  const cfg = getForecasterConfig().vanga;
+  if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
+  if (!process.env.GEMINI_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+
+  const uf = (unifiedForecast && unifiedForecast.verdict === 'ok') ? unifiedForecast : null;
+  const ctx = {
+    target_url: targetUrl || null,
+    main_query: mainQuery || null,
+    monthly_summary: monthlySummary || null,
+    unified: uf ? {
+      horizon: uf.horizon,
+      current_traffic: uf.summary?.current_traffic,
+      annual: uf.summary?.annual,
+      at_horizon: uf.summary?.at_horizon,
+      leads_annual: uf.summary?.leads_annual,
+      sov_start: uf.params?.sov_start,
+      sov_max: uf.params?.sov_max,
+      explain_summary: uf.explain?.summary || null,
+    } : null,
+    sov_realistic: sovForecast?.scenarios?.realistic ? {
+      sov_target: sovForecast.scenarios.realistic.sov_target,
+      p_target: sovForecast.scenarios.realistic.p_target,
+    } : null,
+    traffic_realism: trafficEstimate?.realism || null,
+  };
+  const userPrompt = [
+    'Данные прогноза ниже. Напиши бизнес-саммари по правилам из системного промпта.',
+    '```json',
+    JSON.stringify(ctx, null, 2),
+    '```',
+  ].join('\n');
+
+  try {
+    const t0 = Date.now();
+    const resp = await callGemini(_vangaSystemPrompt(cfg), userPrompt, {
+      temperature: cfg.temperature,
+      maxTokens:   cfg.maxTokens,
+      timeoutMs:   cfg.timeoutMs,
+    });
+    const ms = Date.now() - t0;
+    const tIn  = resp.tokensIn  || 0;
+    const tOut = resp.tokensOut || 0;
+    const cached = resp.cachedTokens || 0;
+    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
+    // Серверная страховка cost-control: обрезаем текст до maxChars,
+    // даже если модель «разлилась мыслью по древу».
+    let text = String(resp.text || '').replace(/```[a-z]*\s*|```/gi, '').trim();
+    const truncated = text.length > cfg.maxChars;
+    if (truncated) text = text.slice(0, cfg.maxChars).replace(/\s+\S*$/, '') + '…';
+    if (!text) return { verdict: 'error', reason: 'empty_response' };
+    return {
+      verdict: 'ok',
+      text,
+      truncated,
+      tokens_in: tIn,
+      tokens_out: tOut,
+      cached_tokens: cached,
+      cost_usd: Math.round(cost * 1e6) / 1e6,
+      model: resp.model || 'gemini',
+      duration_ms: ms,
+    };
+  } catch (err) {
+    // 429/500/timeout и любые прочие сбои — graceful skip, не прерываем пайплайн.
+    return { verdict: 'skipped', reason: (err && err.message) ? err.message : String(err) };
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // DSPy-style эксперты («Signature → strict JSON I/O»).

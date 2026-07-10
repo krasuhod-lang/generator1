@@ -37,6 +37,7 @@ const anomalies  = computed(() => (task.value?.anomalies?.drops) || []);
 const trend      = computed(() => task.value?.trend || null);
 const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
+const vangaSummary = computed(() => task.value?.vanga_summary || null);
 const sovForecast = computed(() => task.value?.sov_forecast || null);
 const unified     = computed(() => {
   const u = task.value?.unified_forecast || null;
@@ -244,6 +245,13 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
               </table>
             </div>
           </details>
+        </section>
+
+        <!-- Ванга — бизнес-саммари (Gemini) -->
+        <section v-if="vangaSummary && vangaSummary.verdict === 'ok'"
+                 class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h2 class="text-sm font-semibold mb-3">🔮 Ванга — что вас ждёт</h2>
+          <p class="text-sm text-gray-200 leading-relaxed whitespace-pre-line">{{ vangaSummary.text }}</p>
         </section>
 
         <!-- Аналитические выводы (Gemini) -->

@@ -108,15 +108,80 @@ function holtWintersAdditive(values, m, alpha, beta, gamma) {
   const mse = cnt > 0 ? sse / cnt : Infinity;
   // std остатков (для CI)
   const stdRes = cnt > 0 ? Math.sqrt(sse / cnt) : 0;
-  return { L, T, S: Sarr, mse, stdRes, residuals };
+  return { model: 'additive', L, T, S: Sarr, mse, stdRes, residuals };
 }
 
-function _gridSearchHW(values, m, cfg) {
+// ─── Holt-Winters multiplicative ───────────────────────────────────
+// y_hat_{t+h} = (L_t + h*T_t) * S_{t+h-m}. Основная модель для спроса:
+// сезонность в поиске мультипликативна (пик = ×k от уровня, а не +конст).
+// НЕ применима при нулях/отрицательных значениях в истории (деление на
+// уровень) — в этом случае buildForecast откатывается на аддитивную
+// (частый кейс: запуск нового продукта, спрос стартует с нуля).
+function _initSeasonalMultiplicative(values, m) {
+  const seasons = Math.max(1, Math.floor(values.length / m));
+  const seasonAvg = [];
+  for (let s = 0; s < seasons; s++) {
+    const slice = values.slice(s * m, (s + 1) * m);
+    const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
+    seasonAvg.push(avg);
+  }
+  const overallAvg = seasonAvg.reduce((a, b) => a + b, 0) / seasonAvg.length;
+  if (!(overallAvg > 0)) return null;
+  // S_i = mean_over_seasons(y_{s*m+i} / seasonAvg_s)
+  const S = new Array(m).fill(1);
+  for (let i = 0; i < m; i++) {
+    let acc = 0, cnt = 0;
+    for (let s = 0; s < seasons; s++) {
+      const idx = s * m + i;
+      if (idx < values.length && seasonAvg[s] > 0) { acc += values[idx] / seasonAvg[s]; cnt += 1; }
+    }
+    S[i] = cnt > 0 ? acc / cnt : 1;
+    if (!(S[i] > 0)) S[i] = 1;
+  }
+  return { L0: overallAvg, T0: 0, S };
+}
+
+function holtWintersMultiplicative(values, m, alpha, beta, gamma) {
+  const n = values.length;
+  if (n < m * 2) return null;                       // нужно хотя бы 2 полных сезона
+  if (values.some((v) => !(v > 0))) return null;    // нули/отрицательные → модель не определена
+  const init = _initSeasonalMultiplicative(values, m);
+  if (!init) return null;
+  let L = init.L0;
+  let T = init.T0;
+  const S0 = [...init.S];
+  const Sarr = [...init.S];
+  const residuals = [];
+  for (let t = 0; t < n; t++) {
+    const sIdx = t % m;
+    const Lprev = L;
+    const Tprev = T;
+    L = alpha * (values[t] / Sarr[sIdx]) + (1 - alpha) * (Lprev + Tprev);
+    T = beta  * (L - Lprev)              + (1 - beta)  * Tprev;
+    Sarr[sIdx] = gamma * (values[t] / L) + (1 - gamma) * Sarr[sIdx];
+    if (!(Sarr[sIdx] > 0) || !Number.isFinite(Sarr[sIdx])) Sarr[sIdx] = S0[sIdx];
+    if (!Number.isFinite(L) || !Number.isFinite(T)) return null; // разошлась
+    const pred = (Lprev + Tprev) * S0[sIdx];        // одношаговый прогноз (исходные сезонные коэф.)
+    residuals.push(values[t] - pred);
+  }
+  const warm = Math.min(m, residuals.length);
+  let sse = 0, cnt = 0;
+  for (let i = warm; i < residuals.length; i++) {
+    sse += residuals[i] ** 2;
+    cnt += 1;
+  }
+  const mse = cnt > 0 ? sse / cnt : Infinity;
+  const stdRes = cnt > 0 ? Math.sqrt(sse / cnt) : 0;
+  return { model: 'multiplicative', L, T, S: Sarr, mse, stdRes, residuals };
+}
+
+function _gridSearchHW(values, m, cfg, model = 'additive') {
+  const fitFn = model === 'multiplicative' ? holtWintersMultiplicative : holtWintersAdditive;
   let best = null;
   for (const a of cfg.gridAlpha) {
     for (const b of cfg.gridBeta) {
       for (const g of cfg.gridGamma) {
-        const fit = holtWintersAdditive(values, m, a, b, g);
+        const fit = fitFn(values, m, a, b, g);
         if (!fit) return null;
         if (!best || fit.mse < best.mse) {
           best = { ...fit, alpha: a, beta: b, gamma: g };
@@ -131,7 +196,9 @@ function _forecastFromHW(fit, m, horizon) {
   const out = [];
   for (let h = 1; h <= horizon; h++) {
     const sIdx = (fit.S.length + (h - 1)) % m; // циклический индекс сезонных коэф.
-    const v = fit.L + h * fit.T + fit.S[sIdx];
+    const v = fit.model === 'multiplicative'
+      ? (fit.L + h * fit.T) * fit.S[sIdx]
+      : fit.L + h * fit.T + fit.S[sIdx];
     out.push(Math.max(0, v));
   }
   return out;
@@ -194,19 +261,34 @@ function buildForecast(monthly) {
 
   const lastIdx = _periodToIndex(monthly[n - 1].period);
 
-  // Holt-Winters путь (предпочтительный)
-  let method = 'holt_winters_additive';
+  // Holt-Winters путь (предпочтительный). Основная модель — мультипликативная
+  // (сезонность поискового спроса пропорциональна уровню); при нулях в истории
+  // (запуск новых продуктов) — фолбэк на аддитивную, затем на трендовую.
+  let method = 'holt_winters_multiplicative';
   let fcstValues = null;
   let stdRes = 0;
   let params = null;
   let fallbackReason = null;
 
   if (n >= cfg.minPointsForHoltWinters) {
-    const fit = _gridSearchHW(values, cfg.season, cfg);
+    const hasNonPositive = values.some((v) => !(v > 0));
+    let fit = null;
+    if (!hasNonPositive) {
+      fit = _gridSearchHW(values, cfg.season, cfg, 'multiplicative');
+    }
+    if (!fit) {
+      method = 'holt_winters_additive';
+      if (hasNonPositive) {
+        fallbackReason = 'В истории спроса есть нулевые месяцы — мультипликативная модель не применима, используем аддитивную';
+      } else {
+        fallbackReason = 'Мультипликативный Holt-Winters не сходится — используем аддитивную модель';
+      }
+      fit = _gridSearchHW(values, cfg.season, cfg, 'additive');
+    }
     if (fit) {
       fcstValues = _forecastFromHW(fit, cfg.season, cfg.horizonMonths);
       stdRes = fit.stdRes;
-      params = { alpha: fit.alpha, beta: fit.beta, gamma: fit.gamma, mse: Math.round(fit.mse * 100) / 100 };
+      params = { model: fit.model, alpha: fit.alpha, beta: fit.beta, gamma: fit.gamma, mse: Math.round(fit.mse * 100) / 100 };
     } else {
       fallbackReason = 'Holt-Winters не сходится — используем трендовую модель';
     }
@@ -287,5 +369,6 @@ module.exports = {
   buildForecast,
   olsTrend,
   holtWintersAdditive,
+  holtWintersMultiplicative,
   ema,
 };
