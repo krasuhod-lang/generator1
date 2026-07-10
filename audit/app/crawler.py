@@ -28,6 +28,7 @@ import networkx as nx
 from . import issues as issues_mod
 from . import page_parser
 from .fetcher import FetchResult, assert_public_host, fetch_page, head_request, _headers
+from .urls import normalize_url
 
 logger = logging.getLogger("audit.crawler")
 
@@ -79,24 +80,17 @@ _SKIP_EXTENSIONS = (
 
 
 def _norm(url: str) -> Optional[str]:
-    """Нормализация URL для visited-set: без фрагмента, чистка utm."""
+    """Нормализация URL для visited-set (БАГФИКС #1): единая каноническая
+    форма через normalize_url (без trailing slash, отсортированный query,
+    без fragment) + отсев не-HTML расширений."""
     try:
-        u = url.split("#", 1)[0].strip()
-        if not u:
+        n = normalize_url(url)
+        if not n:
             return None
-        parts = urlsplit(u)
-        if parts.scheme not in ("http", "https"):
-            return None
-        path = parts.path or "/"
-        low = path.lower()
+        low = (urlsplit(n).path or "/").lower()
         if any(low.endswith(ext) for ext in _SKIP_EXTENSIONS):
             return None
-        host = (parts.hostname or "").lower()
-        if not host:
-            return None
-        netloc = host if not parts.port or parts.port in (80, 443) else f"{host}:{parts.port}"
-        q = parts.query
-        return f"{parts.scheme}://{netloc}{path}" + (f"?{q}" if q else "")
+        return n
     except Exception:
         return None
 
@@ -203,8 +197,17 @@ async def run_audit(start_url: str, *,
 
     connector = aiohttp.TCPConnector(limit=CONCURRENCY)
     async with aiohttp.ClientSession(connector=connector) as session:
-        # 1. robots.txt + sitemap (кешируются на задачу — один запрос)
+        # 1. robots.txt + sitemap (кешируются на задачу — один запрос,
+        #    БАГФИКС #3: RobotsCache инициализируется 1 раз при старте задачи)
         rp, sitemap_locs = await load_robots(session, start)
+        if rp is not None:
+            # Уважаем Crawl-delay из robots.txt (не меньше дефолтной вежливой паузы)
+            try:
+                cd = rp.crawl_delay("*")
+                if cd:
+                    throttle._delay = max(DOMAIN_DELAY_S, float(cd))
+            except Exception:
+                pass
         sitemap_urls = await load_sitemap_urls(session, sitemap_locs, base_host)
 
         # 2. BFS
@@ -214,20 +217,45 @@ async def run_audit(start_url: str, *,
 
         async def process(url: str, depth: int):
             nonlocal total_found
-            async with sem:
-                await throttle.wait(url)
-                res: FetchResult = await fetch_page(session, url, use_playwright=use_playwright)
-
+            # БАГФИКС #3: запрещённые в robots.txt страницы НЕ сканируем —
+            # фиксируем факт блокировки без HTTP-запроса.
             robots_blocked = False
             if rp is not None:
                 try:
                     robots_blocked = not rp.can_fetch("*", url)
                 except Exception:
                     robots_blocked = False
+            if robots_blocked:
+                return {
+                    "url": url,
+                    "status_code": None,
+                    "fetch_status": "robots_blocked",
+                    "robots_blocked": True,
+                    "response_time_ms": None,
+                    "content_size_bytes": None,
+                    "crawl_depth": depth,
+                    "is_https": url.startswith("https://"),
+                    "redirect_chain": [],
+                    "fetch_method": None,
+                    "error": None,
+                    "indexability": {
+                        "meta_robots": None,
+                        "x_robots_tag": None,
+                        "robots_txt_blocked": True,
+                        "canonical": None,
+                    },
+                    "indexable": False,
+                    "parsed": False,
+                }
+
+            async with sem:
+                await throttle.wait(url)
+                res: FetchResult = await fetch_page(session, url, use_playwright=use_playwright)
 
             page = {
                 "url": url,
                 "status_code": res.status_code,
+                "final_url": res.final_url,
                 "response_time_ms": res.response_time_ms,
                 "content_size_bytes": res.content_size_bytes,
                 "crawl_depth": depth,
@@ -238,7 +266,7 @@ async def run_audit(start_url: str, *,
                 "indexability": {
                     "meta_robots": None,
                     "x_robots_tag": None,
-                    "robots_txt_blocked": robots_blocked,
+                    "robots_txt_blocked": False,
                     "canonical": None,
                 },
                 "parsed": False,
@@ -328,19 +356,20 @@ async def run_audit(start_url: str, *,
 
     # 5. Ошибки + сводка
     all_issues = []
+    raw_codes: Dict[str, list] = {}
     for url, page in pages.items():
         page_iss = issues_mod.page_issues(page)
-        page["issues"] = [i["code"] for i in page_iss]
+        raw_codes[url] = [i["code"] for i in page_iss]
         all_issues.extend(page_iss)
     cross = issues_mod.site_issues(pages, sitemap_urls)
     # раскидываем cross-page коды по страницам
-    by_url: Dict[str, list] = {}
     for it in cross:
-        by_url.setdefault(it["page_url"], []).append(it["code"])
-    for url, codes in by_url.items():
-        if url in pages:
-            pages[url]["issues"] = list(dict.fromkeys((pages[url].get("issues") or []) + codes))
+        if it["page_url"] in raw_codes:
+            raw_codes[it["page_url"]].append(it["code"])
     all_issues.extend(cross)
+    # Дедупликация кодов (ТЗ 6): [{"code","count"}] перед сохранением в БД
+    for url, codes in raw_codes.items():
+        pages[url]["issues"] = issues_mod.deduplicate_issues(codes)
 
     duplicates = issues_mod.find_duplicate_content(pages)
     orphans = issues_mod.find_orphan_pages(

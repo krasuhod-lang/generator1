@@ -6,6 +6,71 @@
 import unittest
 
 from . import issues, page_parser
+from .urls import normalize_url
+
+
+class TestNormalizeUrl(unittest.TestCase):
+    """БАГФИКС #1: /page/ == /page, сортировка query, без fragment."""
+
+    def test_trailing_slash(self):
+        self.assertEqual(normalize_url("https://e.com/page/"), "https://e.com/page")
+        self.assertEqual(normalize_url("https://e.com/"), "https://e.com/")
+        self.assertEqual(normalize_url("https://e.com"), "https://e.com/")
+
+    def test_query_sorted(self):
+        self.assertEqual(normalize_url("https://e.com/p?pg=2&cat=1"),
+                         normalize_url("https://e.com/p?cat=1&pg=2"))
+
+    def test_fragment_removed(self):
+        self.assertEqual(normalize_url("https://e.com/p#anchor"), "https://e.com/p")
+
+    def test_host_lower_default_port(self):
+        self.assertEqual(normalize_url("HTTPS://E.com:443/p"), "https://e.com/p")
+        self.assertEqual(normalize_url("https://e.com:8080/p"), "https://e.com:8080/p")
+
+    def test_invalid(self):
+        self.assertIsNone(normalize_url("mailto:x@y.z"))
+        self.assertIsNone(normalize_url(""))
+
+
+class TestContentHash(unittest.TestCase):
+    """БАГФИКС #2: умный хеш с порогом 150 символов."""
+
+    def test_short_text_uses_html_structure(self):
+        h = page_parser.get_content_hash("<html><body><nav>menu</nav></body></html>", "")
+        self.assertEqual(h["type"], "html_structure")
+        self.assertIsNotNone(h["hash"])
+
+    def test_listing_pages_differ(self):
+        # Разные листинги с пустым clean_text не должны давать одинаковый хеш
+        h1 = page_parser.get_content_hash("<html><body><a href='/a'>Услуги</a></body></html>", "")
+        h2 = page_parser.get_content_hash("<html><body><a href='/b'>Блог</a></body></html>", "")
+        self.assertNotEqual(h1["hash"], h2["hash"])
+
+    def test_script_style_stripped(self):
+        base = "<html><body><p>x</p></body></html>"
+        with_js = "<html><body><script>var t=Date.now()</script><p>x</p></body></html>"
+        self.assertEqual(page_parser.get_content_hash(base, "")["hash"],
+                         page_parser.get_content_hash(with_js, "")["hash"])
+
+    def test_long_text_uses_text_content(self):
+        text = "слово " * 50
+        h = page_parser.get_content_hash("<html>...</html>", text)
+        self.assertEqual(h["type"], "text_content")
+        # Нормализация регистра и пробелов
+        h2 = page_parser.get_content_hash("<other></other>", text.upper() + "  ")
+        self.assertEqual(h["hash"], h2["hash"])
+
+
+class TestDeduplicateIssues(unittest.TestCase):
+    def test_dedup(self):
+        out = issues.deduplicate_issues(
+            ["missing_alt", "missing_alt", "missing_alt", "large_image", "large_image"])
+        self.assertEqual(out, [{"code": "missing_alt", "count": 3},
+                               {"code": "large_image", "count": 2}])
+
+    def test_empty(self):
+        self.assertEqual(issues.deduplicate_issues([]), [])
 
 
 def _page(**kw):
@@ -43,6 +108,23 @@ class TestPageIssues(unittest.TestCase):
     def test_redirect_chain_and_loop(self):
         self.assertIn("redirect_chain", self.codes(_page(redirect_chain=["a", "b"])))
         self.assertIn("redirect_loop", self.codes(_page(redirect_chain=["a", "b", "a"])))
+
+    def test_redirect_chain_dict_hops(self):
+        # БАГФИКС #4: хопы цепочки — {"url","status"}
+        chain = [{"url": "a", "status": 301}, {"url": "b", "status": 301}]
+        self.assertIn("redirect_chain", self.codes(_page(redirect_chain=chain)))
+        loop = chain + [{"url": "a", "status": None}]
+        self.assertIn("redirect_loop", self.codes(_page(redirect_chain=loop)))
+        one_hop = [{"url": "a", "status": 301}]
+        self.assertNotIn("redirect_chain", self.codes(_page(redirect_chain=one_hop)))
+
+    def test_robots_blocked_page(self):
+        # БАГФИКС #3: заблокированная страница получает только robots_blocked
+        c = self.codes(_page(status_code=None, robots_blocked=True, parsed=False))
+        self.assertEqual(c, {"robots_blocked"})
+
+    def test_fetch_error(self):
+        self.assertIn("fetch_error", self.codes(_page(status_code=None, error="timeout", parsed=False)))
 
     def test_missing_title_description_h1(self):
         c = self.codes(_page(title={"text": "", "length_chars": 0},
@@ -87,6 +169,22 @@ class TestSiteIssues(unittest.TestCase):
         self.assertIn(("duplicate_content", "https://e.com/a"), codes)
         self.assertIn(("duplicate_title", "https://e.com/a"), codes)
         self.assertIn(("orphan_page", "https://e.com/orphan"), codes)
+
+    def test_duplicates_exclude_html_structure(self):
+        # БАГФИКС #2: листинги (html_structure) не считаются дублями
+        pages = {
+            "https://e.com/a": _page(url="https://e.com/a", content_hash="H1",
+                                     content_hash_type="html_structure"),
+            "https://e.com/b": _page(url="https://e.com/b", content_hash="H1",
+                                     content_hash_type="html_structure"),
+            "https://e.com/c": _page(url="https://e.com/c", content_hash="H2",
+                                     content_hash_type="text_content"),
+            "https://e.com/d": _page(url="https://e.com/d", content_hash="H2",
+                                     content_hash_type="text_content"),
+        }
+        dups = issues.find_duplicate_content(pages)
+        self.assertNotIn("H1", dups)
+        self.assertIn("H2", dups)
 
     def test_noindex_in_sitemap(self):
         p = _page(url="https://e.com/a")
