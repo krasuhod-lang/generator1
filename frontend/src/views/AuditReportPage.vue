@@ -14,6 +14,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import AuditGraphChart from '../components/AuditGraphChart.vue';
+import IssueAccordion from '../components/IssueAccordion.vue';
 import api from '../api.js';
 
 const route = useRoute();
@@ -36,8 +37,8 @@ const orphansCopied = ref(false);
 
 const _msg = (e) => e?.response?.data?.error || e?.message || 'Ошибка';
 
-const SEVERITY_LABELS = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
-const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
+const SEVERITY_LABELS = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low', info: 'Info' };
+const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 
 function scoreColor(score) {
   if (score == null) return '#6b7280';
@@ -75,21 +76,29 @@ const filteredIssues = computed(() => {
     (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
 });
 
-// Группировка ошибок по коду для сводки «Обзор»
-const issueGroups = computed(() => {
+// Группировка ошибок по коду для аккордеона «Обзор» (ТЗ 7)
+const accordionGroups = computed(() => {
   const map = new Map();
   for (const i of filteredIssues.value) {
-    if (!map.has(i.code)) map.set(i.code, { code: i.code, severity: i.severity, items: [] });
-    map.get(i.code).items.push(i);
+    if (!map.has(i.code)) map.set(i.code, { code: i.code, severity: i.severity, count: 0, urls: [] });
+    const g = map.get(i.code);
+    g.count += 1;
+    if (i.page_url && !g.urls.includes(i.page_url)) g.urls.push(i.page_url);
   }
-  return [...map.values()].sort((a, b) =>
-    (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9) || b.items.length - a.items.length);
+  return [...map.values()];
 });
-const expandedGroups = ref(new Set());
-function toggleGroup(code) {
-  const s = new Set(expandedGroups.value);
-  if (s.has(code)) s.delete(code); else s.add(code);
-  expandedGroups.value = s;
+
+// issues страницы: legacy ["code"] или новый формат [{code,count}]
+function pageIssueList(p) {
+  return (p.issues || []).map((i) =>
+    (i && typeof i === 'object') ? i : { code: i, count: 1 });
+}
+
+// Хопы цепочки редиректов: legacy строки или {url,status} (БАГФИКС #4)
+function redirectChainText(chain) {
+  return (chain || []).map((c) =>
+    (c && typeof c === 'object') ? `${c.url}${c.status ? ` (${c.status})` : ''}` : c)
+    .join(' → ') || 'нет';
 }
 
 const filteredPages = computed(() => {
@@ -173,17 +182,33 @@ function stopPolling() {
 
 function downloadCsv() { downloadExport('csv'); }
 
-function downloadExport(format) {
+function downloadExport(format, section = 'all') {
   const token = localStorage.getItem('seo_token') || '';
-  fetch(`/api/audit/export/${taskId}?format=${format}`, {
+  fetch(`/api/audit/export/${taskId}?format=${format}&section=${section}`, {
     headers: { Authorization: 'Bearer ' + token },
   }).then((r) => r.blob()).then((b) => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(b);
-    a.download = `audit-${taskId}.${format}`;
+    a.download = `audit-${taskId}${section === 'all' ? '' : '-' + section}.${format}`;
     a.click();
     URL.revokeObjectURL(a.href);
   }).catch((e) => { error.value = _msg(e); });
+}
+
+// ── Публичная ссылка для клиента (ТЗ 9) ──
+const shareCopied = ref(false);
+const shareBusy = ref(false);
+async function shareReport() {
+  if (shareBusy.value) return;
+  shareBusy.value = true;
+  try {
+    const { data } = await api.post(`/audit/${taskId}/share`, {});
+    const url = window.location.origin + data.url;
+    await navigator.clipboard.writeText(url);
+    shareCopied.value = true;
+    setTimeout(() => { shareCopied.value = false; }, 2500);
+  } catch (e) { error.value = _msg(e); }
+  finally { shareBusy.value = false; }
 }
 
 // ── Сравнение с предыдущим аудитом домена ──
@@ -284,6 +309,7 @@ onUnmounted(stopPolling);
             <div class="sev-counter sev-high"><b>{{ summary.issues_high }}</b><span>High</span></div>
             <div class="sev-counter sev-medium"><b>{{ summary.issues_medium }}</b><span>Medium</span></div>
             <div class="sev-counter sev-low"><b>{{ summary.issues_low }}</b><span>Low</span></div>
+            <div v-if="summary.issues_info" class="sev-counter sev-info"><b>{{ summary.issues_info }}</b><span>Info</span></div>
           </div>
           <div class="muted stats-line">
             {{ summary.total_pages }} страниц · средняя глубина {{ (report.graph_stats || {}).avg_depth }}
@@ -304,11 +330,13 @@ onUnmounted(stopPolling);
             Сироты <span class="tab-count">{{ (report.orphan_pages || []).length }}</span></button>
           <button :class="{ active: activeTab === 'graph' }" @click="openTab('graph')">Граф</button>
           <button :class="{ active: activeTab === 'compare' }" @click="openTab('compare')">Сравнение</button>
-          <button class="export-btn ml-auto" @click="downloadCsv">⬇ CSV</button>
+          <button class="export-btn ml-auto" @click="shareReport" :disabled="shareBusy">
+            {{ shareCopied ? '✓ Ссылка скопирована' : '🔗 Поделиться' }}</button>
+          <button class="export-btn" @click="downloadCsv">⬇ CSV</button>
           <button class="export-btn" @click="downloadExport('xlsx')">⬇ Excel</button>
         </div>
 
-        <!-- Обзор: сводка ошибок -->
+        <!-- Обзор: аккордеон ошибок (ТЗ 7) -->
         <div v-if="activeTab === 'overview'">
           <div class="toolbar">
             <select v-model="issueFilterSeverity">
@@ -320,25 +348,10 @@ onUnmounted(stopPolling);
               <option v-for="c in issueCodes" :key="c" :value="c">{{ issueTitle(c) }}</option>
             </select>
             <span class="muted">Всего: {{ filteredIssues.length }}</span>
+            <button class="export-btn ml-auto" @click="downloadExport('csv', 'issues')">⬇ CSV ошибок</button>
           </div>
-          <div v-for="g in issueGroups" :key="g.code" class="issue-group">
-            <div class="issue-group-head" @click="toggleGroup(g.code)">
-              <span class="caret">{{ expandedGroups.has(g.code) ? '▾' : '▸' }}</span>
-              <span :class="'sev-badge sev-' + g.severity">{{ SEVERITY_LABELS[g.severity] }}</span>
-              <b>{{ issueTitle(g.code) }}</b>
-              <span class="issue-count">{{ g.items.length }}</span>
-              <span class="tooltip-icon" :title="issueHint(g.code)">ⓘ</span>
-            </div>
-            <table v-if="expandedGroups.has(g.code)" class="tbl small">
-              <tbody>
-                <tr v-for="(it, i) in g.items.slice(0, 200)" :key="i">
-                  <td class="ellipsis"><a :href="it.page_url" target="_blank" rel="noopener">{{ it.page_url }}</a></td>
-                  <td class="ctx-cell muted">{{ JSON.stringify(it.context) }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p v-if="!issueGroups.length" class="muted">Ошибок не найдено 🎉</p>
+          <IssueAccordion :groups="accordionGroups" :defs="issueDefs"
+                          :duplicates="report.duplicates || {}" @open-url="openPageByUrl" />
         </div>
 
         <!-- Страницы -->
@@ -346,6 +359,7 @@ onUnmounted(stopPolling);
           <div class="toolbar">
             <input v-model="pageSearch" placeholder="Поиск по URL / Title…" />
             <span class="muted">{{ filteredPages.length }} стр.</span>
+            <button class="export-btn ml-auto" @click="downloadExport('csv', 'pages')">⬇ CSV страниц</button>
           </div>
           <table class="tbl small">
             <thead>
@@ -368,10 +382,10 @@ onUnmounted(stopPolling);
                 <td class="num">{{ p.crawl_depth }}</td>
                 <td class="num">{{ p.response_time_ms }}</td>
                 <td>
-                  <span v-for="c in (p.issues || []).slice(0, 4)" :key="c"
-                        :class="'sev-badge tiny sev-' + ((issueDefs[c] || {}).severity || 'low')"
-                        :title="issueTitle(c) + '. ' + issueHint(c)">{{ issueTitle(c) }}</span>
-                  <span v-if="(p.issues || []).length > 4" class="muted">+{{ p.issues.length - 4 }}</span>
+                  <span v-for="i in pageIssueList(p).slice(0, 4)" :key="i.code"
+                        :class="'sev-badge tiny sev-' + ((issueDefs[i.code] || {}).severity || 'low')"
+                        :title="issueTitle(i.code) + '. ' + issueHint(i.code)">{{ issueTitle(i.code) }}<template v-if="i.count > 1"> ×{{ i.count }}</template></span>
+                  <span v-if="pageIssueList(p).length > 4" class="muted">+{{ pageIssueList(p).length - 4 }}</span>
                 </td>
               </tr>
             </tbody>
@@ -381,12 +395,17 @@ onUnmounted(stopPolling);
         <!-- Дубликаты -->
         <div v-if="activeTab === 'duplicates'">
           <p class="muted" v-if="!duplicateGroups.length">Дубликатов контента не найдено.</p>
-          <div v-for="d in duplicateGroups" :key="d.hash" class="dup-group">
-            <div class="dup-hash">hash: <code>{{ d.hash }}</code> · {{ d.urls.length }} URL</div>
-            <ul>
-              <li v-for="u in d.urls" :key="u"><a :href="u" target="_blank" rel="noopener">{{ u }}</a></li>
-            </ul>
-          </div>
+          <template v-else>
+            <div class="toolbar">
+              <button class="export-btn ml-auto" @click="downloadExport('csv', 'duplicates')">⬇ CSV дублей</button>
+            </div>
+            <div v-for="d in duplicateGroups" :key="d.hash" class="dup-group">
+              <div class="dup-hash">hash: <code>{{ d.hash }}</code> · {{ d.urls.length }} URL</div>
+              <ul>
+                <li v-for="u in d.urls" :key="u"><a :href="u" target="_blank" rel="noopener">{{ u }}</a></li>
+              </ul>
+            </div>
+          </template>
         </div>
 
         <!-- Сироты -->
@@ -398,6 +417,7 @@ onUnmounted(stopPolling);
               <button class="action-btn" @click="copyOrphansForSitemap">
                 {{ orphansCopied ? '✓ Скопировано' : '📋 Добавить в sitemap ТЗ' }}</button>
               <span class="muted">Скопирует список URL для вставки в ТЗ на перелинковку/sitemap</span>
+              <button class="export-btn ml-auto" @click="downloadExport('csv', 'orphans')">⬇ CSV сирот</button>
             </div>
             <table class="tbl small">
               <thead><tr><th>URL (есть в sitemap, нет в обходе)</th></tr></thead>
@@ -483,17 +503,17 @@ onUnmounted(stopPolling);
             <dt>Canonical</dt><dd>{{ (drawerPage.indexability || {}).canonical || '—' }}</dd>
             <dt>Meta robots</dt><dd>{{ (drawerPage.indexability || {}).meta_robots || '—' }}</dd>
             <dt>robots.txt</dt><dd>{{ (drawerPage.indexability || {}).robots_txt_blocked ? 'заблокирован' : 'разрешён' }}</dd>
-            <dt>Редиректы</dt><dd>{{ (drawerPage.redirect_chain || []).join(' → ') || 'нет' }}</dd>
+            <dt>Редиректы</dt><dd>{{ redirectChainText(drawerPage.redirect_chain) }}</dd>
             <dt>Входящие ссылки</dt><dd>{{ drawerPage.inlinks_count }}</dd>
             <dt>Исходящие (внутр./внеш.)</dt><dd>{{ drawerPage.outlinks_internal_count }} / {{ drawerPage.outlinks_external_count }}</dd>
             <dt>Изображений</dt><dd>{{ drawerPage.images_count }}</dd>
             <dt>Ошибки</dt>
             <dd>
-              <div v-for="c in drawerPage.issues || []" :key="c" class="drawer-issue">
-                <span :class="'sev-badge tiny sev-' + ((issueDefs[c] || {}).severity || 'low')">{{ issueTitle(c) }}</span>
-                <span class="muted small-meta">{{ issueHint(c) }}</span>
+              <div v-for="i in pageIssueList(drawerPage)" :key="i.code" class="drawer-issue">
+                <span :class="'sev-badge tiny sev-' + ((issueDefs[i.code] || {}).severity || 'low')">{{ issueTitle(i.code) }}<template v-if="i.count > 1"> ×{{ i.count }}</template></span>
+                <span class="muted small-meta">{{ issueHint(i.code) }}</span>
               </div>
-              <span v-if="!(drawerPage.issues || []).length" class="muted">нет</span>
+              <span v-if="!pageIssueList(drawerPage).length" class="muted">нет</span>
             </dd>
           </dl>
         </aside>
@@ -533,6 +553,7 @@ onUnmounted(stopPolling);
 .sev-counter.sev-high     { background: #ffedd5; color: #7c2d12; }
 .sev-counter.sev-medium   { background: #fef9c3; color: #713f12; }
 .sev-counter.sev-low      { background: #f3f4f6; color: #374151; }
+.sev-counter.sev-info     { background: #dbeafe; color: #1e3a8a; }
 .stats-line { font-size: .85rem; }
 
 /* tabs */
@@ -574,6 +595,7 @@ onUnmounted(stopPolling);
 .sev-high     { background: #fed7aa; color: #7c2d12; }
 .sev-medium   { background: #fef08a; color: #713f12; }
 .sev-low      { background: #e5e7eb; color: #374151; }
+.sev-info     { background: #dbeafe; color: #1e3a8a; }
 
 /* tables */
 .tbl { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: .25rem;
