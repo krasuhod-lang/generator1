@@ -74,6 +74,8 @@ services:
       # Headless-fallback (Playwright + stealth) для WAF/Cloudflare/SPA URL.
       # Контейнер `relevance_fetcher` поднимается ниже; наружу не торчит.
       RELEVANCE_HEADLESS_FETCHER_URL: ${RELEVANCE_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch}
+      # Аудиты: внутренний URL Python-микросервиса технического/SEO-аудита.
+      AUDIT_INTERNAL_URL: ${AUDIT_INTERNAL_URL:-http://audit:8002}
       # Прокси для Gemini API — загружаются из .env через env_file
       # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
       # 🧬 Bio-Brain: внутренний URL aegis_py в docker-сети.
@@ -182,6 +184,36 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # ── Audit Service (FastAPI + aiohttp BFS crawler + BS4 + networkx) ───────
+  # Модуль «Аудиты»: технический и SEO-аудит сайта. Принимает URL, запускает
+  # асинхронный BFS-краулинг (Semaphore(50), вежливые 200ms/домен), считает
+  # 23 типа ошибок и Health Score. Антибот/SPA — эскалация к relevance_fetcher
+  # (curl_cffi → Playwright). Наружу не торчит; Node ходит на http://audit:8002
+  # с X-Internal-Token. Состояние задач — Redis (TTL 24ч), финальный отчёт
+  # персистится Node-бэкендом в PostgreSQL.
+  audit:
+    build:
+      context: ./audit
+      dockerfile: Dockerfile
+    container_name: seo_audit
+    restart: unless-stopped
+    environment:
+      RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
+      REDIS_URL: redis://redis:6379
+      AUDIT_HEADLESS_FETCHER_URL: ${AUDIT_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch_html}
+      LOG_LEVEL: ${AUDIT_LOG_LEVEL:-INFO}
+    expose:
+      - "8002"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ── A.E.G.I.S. Python (Bio-Brain NEAT + DSPy + GraphRAG-фасад) ──────────
   # 🧬 Поднимаем по умолчанию в основном стеке, чтобы Bio-Brain «жил

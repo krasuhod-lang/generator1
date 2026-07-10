@@ -43,6 +43,7 @@ const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
+const auditRoutes           = require('./src/routes/audit.routes');
 const cannibalizationRoutes = require('./src/routes/cannibalization.routes');
 const contentPolicyRoutes   = require('./src/routes/contentPolicy.routes');
 
@@ -136,6 +137,7 @@ app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
 app.use('/api/site-crawler',     siteCrawlerRoutes);
+app.use('/api/audit',            auditRoutes);
 app.use('/api/cannibalization',  cannibalizationRoutes);
 app.use('/api/admin/content-policy', contentPolicyRoutes);
 // Алиас OAuth-колбэка Google для совместимости с ранее настроенным в
@@ -1525,6 +1527,66 @@ async function ensureSchema() {
     } catch (seedErr) {
       console.error('⚠️ Seed справочника «Фронт работ» не выполнен:', seedErr.message);
     }
+
+    // Migration 108: модуль «Аудиты» (технический и SEO-аудит сайта).
+    // Раздел «Парсер сайта» переименован в «Аудиты»; краулинг выполняет
+    // Python-микросервис audit/ (см. migrations/108_audits.sql).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS audit_tasks (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        url          VARCHAR(2048) NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        config       JSONB NOT NULL DEFAULT '{}'::jsonb,
+        progress     JSONB NOT NULL DEFAULT '{}'::jsonb,
+        summary      JSONB NOT NULL DEFAULT '{}'::jsonb,
+        report       JSONB NULL,
+        error        TEXT NULL,
+        started_at   TIMESTAMPTZ NULL,
+        finished_at  TIMESTAMPTZ NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_tasks_user_created
+      ON audit_tasks(user_id, created_at DESC)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS audit_pages (
+        id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        task_id            UUID NOT NULL REFERENCES audit_tasks(id) ON DELETE CASCADE,
+        url                TEXT NOT NULL,
+        status_code        INTEGER,
+        crawl_depth        INTEGER,
+        response_time_ms   INTEGER,
+        content_size_bytes INTEGER,
+        title              TEXT,
+        title_length       INTEGER,
+        meta_description   TEXT,
+        h1_count           INTEGER,
+        word_count         INTEGER,
+        text_html_ratio    DECIMAL(5,4),
+        content_hash       VARCHAR(32),
+        is_https           BOOLEAN,
+        indexable          BOOLEAN,
+        canonical          TEXT,
+        issues             JSONB NOT NULL DEFAULT '[]'::jsonb
+      );
+    `);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_pages_task_url
+      ON audit_pages(task_id, url)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_pages_task ON audit_pages(task_id)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS audit_issues (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        task_id    UUID NOT NULL REFERENCES audit_tasks(id) ON DELETE CASCADE,
+        page_url   TEXT,
+        issue_code VARCHAR(50) NOT NULL,
+        severity   TEXT NOT NULL,
+        context    JSONB NOT NULL DEFAULT '{}'::jsonb
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_issues_task ON audit_issues(task_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_issues_task_severity
+      ON audit_issues(task_id, severity)`);
 
 
     // Migration 058: модуль «Проекты» — SEO-проекты + интеграция с Google

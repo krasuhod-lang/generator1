@@ -42,6 +42,10 @@ const routes = [
 
   { path: '/site-crawler',         component: () => import('../views/SiteCrawlerPage.vue'),        meta: { auth: true } },
 
+  // Раздел «Аудиты» (технический и SEO-аудит; включает старый парсер структуры)
+  { path: '/audits',               component: () => import('../views/AuditsPage.vue'),             meta: { auth: true } },
+  { path: '/audits/:taskId',       component: () => import('../views/AuditReportPage.vue'),        meta: { auth: true } },
+
   { path: '/projects',             component: () => import('../views/ProjectsPage.vue'),        meta: { auth: true } },
   { path: '/projects/:id',         component: () => import('../views/ProjectDetailPage.vue'),   meta: { auth: true } },
   // PR-4: Executive Summary — премиум-дашборд проекта (KPI + main chart).

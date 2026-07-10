@@ -35,7 +35,7 @@ const TABS = [
   { key: 'forecaster',     label: 'Прогнозатор',      icon: '📈', path: '/forecaster' },
   { key: 'category-lead',  label: 'Lead-text',        icon: '🧭', path: '/category-lead' },
   { key: 'serp-b2b',       label: 'B2B-парсер',       icon: '🛰️', path: '/serp-b2b' },
-  { key: 'site-crawler',   label: 'Парсер сайта',     icon: '🕷️', path: '/site-crawler' },
+  { key: 'audits',         label: 'Аудиты',           icon: '🕷️', path: '/audits' },
   { key: 'projects',       label: 'Проекты',          icon: '🗂️', path: '/projects' },
   { key: 'reports',        label: 'Отчёты',           icon: '📑', path: '/reports' },
   { key: 'acf-json',       label: 'JSON',             icon: '🧩', path: '/acf-json' },
@@ -53,7 +53,8 @@ const activeTabKey = computed(() => {
   if (p.startsWith('/category-lead'))  return 'category-lead';
   if (p.startsWith('/serp-b2b'))       return 'serp-b2b';
   if (p.startsWith('/position-tracker')) return 'position-tracker';
-  if (p.startsWith('/site-crawler'))   return 'site-crawler';
+  if (p.startsWith('/site-crawler'))   return 'audits';
+  if (p.startsWith('/audits'))         return 'audits';
   if (p.startsWith('/projects'))       return 'projects';
   if (p.startsWith('/reports'))        return 'reports';
   if (p.startsWith('/acf-json'))       return 'acf-json';

@@ -571,7 +571,8 @@ onUnmounted(() => { stopPolling(); stopCannPolling(); });
 <template>
   <AppLayout>
     <div class="crawler-page">
-      <h1>Парсер сайта</h1>
+      <div style="margin-bottom:.5rem"><router-link to="/audits" style="color:#1d4ed8;text-decoration:none">← Аудиты</router-link></div>
+      <h1>Парсер структуры сайта</h1>
       <p class="hint">Введите URL — соберём структуру URL, H1, Title и Description.
         Результат можно посмотреть таблицей, в виде дерева, скопировать в Excel или
         выгрузить CSV/XLSX.</p>
