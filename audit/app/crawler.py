@@ -44,14 +44,29 @@ GRAPH_MAX_EDGES = 3000
 
 def _export_graph(graph: "nx.DiGraph", pages: Dict[str, dict]) -> dict:
     """Граф структуры сайта для UI (ТЗ 7.2 «Граф»): узлы с глубиной и числом
-    ошибок + рёбра. Обрезается по GRAPH_MAX_NODES (приоритет — меньшая глубина,
-    затем больше inlinks), чтобы отчёт не разбухал на больших сайтах."""
+    ошибок + рёбра. ТЗ 7: robots_blocked, noindex и canonical-дубли не
+    экспортируются, чтобы мусорные узлы не вытесняли реальные страницы за
+    порог GRAPH_MAX_NODES. Приоритет — меньшая глубина, затем больше inlinks."""
+    def _exportable(url: str) -> bool:
+        p = pages.get(url) or {}
+        if p.get("robots_blocked"):
+            return False
+        if graph.has_node(url) and graph.nodes[url].get("robots_blocked"):
+            return False
+        idx = p.get("indexability") or {}
+        if "noindex" in (idx.get("meta_robots") or "").lower():
+            return False
+        if issues_mod._external_canonical(p):
+            return False
+        return True
+
     def _key(url: str):
         p = pages.get(url) or {}
         return (p.get("crawl_depth") if p.get("crawl_depth") is not None else 99,
                 -graph.in_degree(url) if graph.has_node(url) else 0)
 
-    urls = sorted(pages.keys(), key=_key)[:GRAPH_MAX_NODES]
+    exportable = [u for u in pages.keys() if _exportable(u)] or list(pages.keys())
+    urls = sorted(exportable, key=_key)[:GRAPH_MAX_NODES]
     keep = set(urls)
     nodes = []
     for url in urls:
@@ -269,6 +284,7 @@ async def run_audit(start_url: str, *,
                 "url": url,
                 "status_code": res.status_code,
                 "final_url": res.final_url,
+                "fetch_status": res.fetch_status,
                 "response_time_ms": res.response_time_ms,
                 "content_size_bytes": res.content_size_bytes,
                 "crawl_depth": depth,
@@ -287,11 +303,14 @@ async def run_audit(start_url: str, *,
 
             if res.html and res.status_code == 200:
                 try:
-                    parsed = page_parser.parse_page(res.final_url or url, res.html)
-                    idx = parsed.pop("indexability")
-                    page["indexability"]["meta_robots"] = idx.get("meta_robots")
-                    page["indexability"]["canonical"] = idx.get("canonical")
-                    page.update(parsed)
+                    # ТЗ 5: парсинг в пуле потоков с таймаутом, чтобы тяжёлый
+                    # HTML не блокировал event loop и волну gather.
+                    parsed = await page_parser.parse_page_async(res.final_url or url, res.html)
+                    if parsed is not None:
+                        idx = parsed.pop("indexability")
+                        page["indexability"]["meta_robots"] = idx.get("meta_robots")
+                        page["indexability"]["canonical"] = idx.get("canonical")
+                        page.update(parsed)
                 except Exception as e:
                     logger.warning("parse failed for %s: %s", url, e)
             return page

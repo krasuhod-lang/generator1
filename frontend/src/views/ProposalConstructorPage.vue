@@ -2,7 +2,7 @@
 /**
  * ProposalConstructorPage — конструктор КП «Фронт работ» (5 шагов).
  *   Шаг 1 — настройки КП (название, клиент, горизонт 3/6, дата, менеджер, исполнитель).
- *   Шаг 2 — выбор задач: аккордеон модулей с чекбоксами, месяц для каждой задачи,
+ *   Шаг 2 — выбор задач: аккордеон модулей с чекбоксами, один или несколько месяцев для каждой задачи,
  *           фильтры (приоритет / месяц / поиск / только выбранные), боковая панель
  *           со счётчиком по месяцам, редактирование справочника (модули и задачи
  *           можно добавлять/менять/удалять — правки сохраняются для всех КП).
@@ -38,7 +38,7 @@ const modules = ref([]);
 const openModules = ref({});
 const catalogLoading = ref(false);
 
-// selection: catalogTaskId → { month, responsible }
+// selection: catalogTaskId → { months: [1, 2, …], responsible }
 const selection = reactive({});
 // Задачи КП, которых нет в справочнике (например, задача каталога удалена).
 const extraTasks = ref([]);
@@ -69,7 +69,7 @@ const onlySelected = ref(false);
 function taskVisible(t) {
   if (filterPriority.value && t.priority !== filterPriority.value) return false;
   if (onlySelected.value && !selection[t.id]) return false;
-  if (filterMonth.value && (!selection[t.id] || String(selection[t.id].month) !== String(filterMonth.value))) return false;
+  if (filterMonth.value && (!selection[t.id] || !(selection[t.id].months || []).some((m) => String(m) === String(filterMonth.value)))) return false;
   if (filterText.value) {
     const q = filterText.value.toLowerCase();
     if (!`${t.title} ${t.description || ''} ${t.tool || ''}`.toLowerCase().includes(q)) return false;
@@ -89,8 +89,10 @@ const countsByMonth = computed(() => {
   const counts = {};
   for (const m of months.value) counts[m] = 0;
   for (const sel of Object.values(selection)) {
-    const m = Math.min(Number(sel.month) || 1, Number(form.horizon));
-    counts[m] = (counts[m] || 0) + 1;
+    for (const mo of sel.months || []) {
+      const m = Math.min(Number(mo) || 1, Number(form.horizon));
+      counts[m] = (counts[m] || 0) + 1;
+    }
   }
   for (const t of extraTasks.value) {
     const m = Math.min(Number(t.month) || 1, Number(form.horizon));
@@ -101,12 +103,23 @@ const countsByMonth = computed(() => {
 
 function toggleTask(t, moduleObj) {
   if (selection[t.id]) delete selection[t.id];
-  else selection[t.id] = { month: 1, responsible: form.responsible || '', _module: moduleObj.id };
+  else selection[t.id] = { months: [1], responsible: form.responsible || '', _module: moduleObj.id };
 }
 function selectAllModule(m, on) {
   for (const t of m.tasks || []) {
-    if (on && !selection[t.id]) selection[t.id] = { month: 1, responsible: form.responsible || '', _module: m.id };
+    if (on && !selection[t.id]) selection[t.id] = { months: [1], responsible: form.responsible || '', _module: m.id };
     if (!on && selection[t.id]) delete selection[t.id];
+  }
+}
+// Переключение месяца у выбранной задачи (мультивыбор, минимум один месяц).
+function toggleTaskMonth(taskId, mo) {
+  const sel = selection[taskId];
+  if (!sel) return;
+  const months = sel.months || [];
+  if (months.includes(mo)) {
+    if (months.length > 1) sel.months = months.filter((m) => m !== mo);
+  } else {
+    sel.months = [...months, mo].sort((a, b) => a - b);
   }
 }
 function moduleSelectedCount(m) {
@@ -116,7 +129,8 @@ function moduleSelectedCount(m) {
 // При смене горизонта 6 → 3 задачи из месяцев 4–6 переезжают в месяц 3.
 watch(() => form.horizon, (h) => {
   for (const sel of Object.values(selection)) {
-    if (Number(sel.month) > Number(h)) sel.month = Number(h);
+    const clamped = [...new Set((sel.months || []).map((m) => Math.min(Number(m) || 1, Number(h))))].sort((a, b) => a - b);
+    sel.months = clamped.length ? clamped : [1];
   }
   for (const t of extraTasks.value) {
     if (Number(t.month) > Number(h)) t.month = Number(h);
@@ -133,17 +147,19 @@ function buildTasks() {
     for (const t of m.tasks || []) {
       const sel = selection[t.id];
       if (!sel) continue;
-      out.push({
-        module_id: m.id,
-        module_name: m.name,
-        task_id: t.id,
-        task_title: t.title,
-        task_description: t.description,
-        priority: t.priority,
-        tool: t.tool,
-        month: sel.month,
-        responsible: sel.responsible || form.responsible || '',
-      });
+      for (const mo of sel.months || [1]) {
+        out.push({
+          module_id: m.id,
+          module_name: m.name,
+          task_id: t.id,
+          task_title: t.title,
+          task_description: t.description,
+          priority: t.priority,
+          tool: t.tool,
+          month: Number(mo) || 1,
+          responsible: sel.responsible || form.responsible || '',
+        });
+      }
     }
   }
   for (const t of extraTasks.value) out.push({ ...t });
@@ -410,7 +426,14 @@ async function loadProposal(id) {
   extraTasks.value = [];
   for (const t of p.tasks || []) {
     if (t.task_id && catalogIds.has(t.task_id)) {
-      selection[t.task_id] = { month: Number(t.month) || 1, responsible: t.responsible || '' };
+      const mo = Number(t.month) || 1;
+      if (selection[t.task_id]) {
+        if (!selection[t.task_id].months.includes(mo)) {
+          selection[t.task_id].months = [...selection[t.task_id].months, mo].sort((a, b) => a - b);
+        }
+      } else {
+        selection[t.task_id] = { months: [mo], responsible: t.responsible || '' };
+      }
     } else {
       extraTasks.value.push({
         module_id: t.module_id, module_name: t.module_name, task_id: t.task_id,
@@ -604,10 +627,15 @@ onUnmounted(() => {
                   </span>
                 </label>
                 <div class="flex items-center gap-1 shrink-0">
-                  <select v-if="selection[t.id]" v-model.number="selection[t.id].month"
-                    class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-100">
-                    <option v-for="mo in months" :key="mo" :value="mo">Месяц {{ mo }}</option>
-                  </select>
+                  <div v-if="selection[t.id]" class="flex flex-wrap gap-1" title="Можно выбрать несколько месяцев">
+                    <button v-for="mo in months" :key="mo" type="button" @click="toggleTaskMonth(t.id, mo)"
+                      class="px-2 py-1 text-xs rounded-lg border transition"
+                      :class="(selection[t.id].months || []).includes(mo)
+                        ? 'bg-indigo-600 border-indigo-500 text-white'
+                        : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200'">
+                      М{{ mo }}
+                    </button>
+                  </div>
                   <template v-if="catalogEdit">
                     <button @click="openTaskEditor(m.id, t)" class="text-xs text-gray-400 hover:text-white px-1" title="Изменить задачу">✏️</button>
                     <button @click="deleteCatalogTask(t)" class="text-xs text-gray-400 hover:text-red-400 px-1" title="Удалить задачу">🗑️</button>

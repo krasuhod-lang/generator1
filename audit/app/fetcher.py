@@ -36,9 +36,14 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
 ]
 
-DEFAULT_TIMEOUT_S = float(os.getenv("AUDIT_FETCH_TIMEOUT_S", "20"))
+DEFAULT_TIMEOUT_S = float(os.getenv("AUDIT_FETCH_TIMEOUT_S", "30"))
 MAX_REDIRECTS = 10
 MAX_BODY_BYTES = int(os.getenv("AUDIT_MAX_BODY_BYTES", str(8 * 1024 * 1024)))  # 8 МБ
+
+# ТЗ 6: гранулярный таймаут — total на весь запрос, connect на установку
+# соединения, sock_read на чтение, чтобы медленный сервер/антибот не завесил
+# волну asyncio.gather.
+FETCH_TIMEOUT = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT_S, connect=10, sock_read=20)
 
 HEADLESS_URL = (os.getenv("AUDIT_HEADLESS_FETCHER_URL")
                 or "http://relevance_fetcher:8001/fetch_html").strip()
@@ -118,7 +123,8 @@ def looks_blocked(html: str, status: int) -> bool:
 
 class FetchResult:
     __slots__ = ("url", "final_url", "status_code", "html", "response_time_ms",
-                 "content_size_bytes", "redirect_chain", "error", "method")
+                 "content_size_bytes", "redirect_chain", "error", "method",
+                 "fetch_status")
 
     def __init__(self, url: str):
         self.url = url
@@ -130,6 +136,7 @@ class FetchResult:
         self.redirect_chain: list = []
         self.error: Optional[str] = None
         self.method: str = "aiohttp"
+        self.fetch_status: str = "ok"  # ok|timeout|connection_error|error|ssrf_blocked
 
 
 async def fetch_page(session: aiohttp.ClientSession, url: str,
@@ -142,6 +149,7 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
     res = FetchResult(url)
     if not await assert_public_host(url):
         res.error = "ssrf_blocked"
+        res.fetch_status = "ssrf_blocked"
         return res
     if use_playwright:
         ok = await _fetch_headless(res, url)
@@ -156,7 +164,7 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
                 current,
                 headers=_headers(),
                 allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT_S),
+                timeout=FETCH_TIMEOUT,
             ) as resp:
                 res.status_code = resp.status
                 if resp.status in (301, 302, 303, 307, 308):
@@ -196,10 +204,13 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
                 break
     except asyncio.TimeoutError:
         res.error = "timeout"
+        res.fetch_status = "timeout"
     except aiohttp.ClientError as e:
         res.error = f"client_error: {e.__class__.__name__}"
+        res.fetch_status = "connection_error"
     except Exception as e:  # pragma: no cover
         res.error = f"error: {e.__class__.__name__}"
+        res.fetch_status = "error"
     res.response_time_ms = int((time.monotonic() - started) * 1000)
 
     # Эскалация: пустой body / 403 / антибот-заглушка → headless-фетчер
@@ -238,6 +249,7 @@ async def _fetch_headless(res: FetchResult, url: str) -> bool:
     res.response_time_ms = int((time.monotonic() - started) * 1000)
     res.method = (data or {}).get("method") or "headless"
     res.error = None
+    res.fetch_status = "ok"
     return True
 
 
