@@ -351,6 +351,35 @@ const FORECASTER_CONFIG = deepFreeze({
     maxWords:    150,      // лимит из системного промпта (для модели)
   },
 
+  // ── AI-аналитика прогноза (forecastReport.js) ─────────────────────
+  // Полный структурированный отчёт «Senior SEO Strategist»: executive
+  // summary, нарратив роста, семантические пробелы, точки роста, риски,
+  // план действий. Формулы считают — AI объясняет: LLM никогда не
+  // пересчитывает числа, работает только с готовыми расчётами.
+  // Аналитический режим: низкая температура, JSON-ответ, до 2 попыток
+  // при непарсящемся JSON (self-correction). Fire-and-forget: сбой LLM
+  // не мешает задаче завершиться, ai_report остаётся null/error.
+  report: {
+    enabled:     true,
+    temperature: 0.3,      // аналитический режим, минимум творчества
+    maxTokens:   4096,
+    timeoutMs:   90000,
+    maxAttempts: 2,        // self-correction: повторный вызов при плохом JSON
+  },
+
+  // ── Граф охвата семантики (buildSemanticDistribution) ─────────────
+  // Параметры проекции распределения ключей по топам на горизонте
+  // прогноза. Цели по долям берутся из traffic.realisticShareTopN;
+  // для ТОП-20 отдельного конфига нет — берём share_top10 × top20Factor
+  // (с потолком top20Cap). Прогресс к цели идёт по S-кривой захвата
+  // из unifiedForecast (или логистике-fallback).
+  semantic: {
+    top20Factor: 1.8,
+    top20Cap:    0.95,
+    // Fallback-логистика, если unifiedForecast недоступен.
+    fallbackK:   0.35,
+  },
+
   // ── Фильтр ключевых запросов (режим «список ключей») ─────────────
   keywordsFilter: {
     // Порог fail-safe для строгого коммерческого фильтра (commercial_only):

@@ -22,7 +22,8 @@ const { parseForecasterInput } = require('./parser');
 const { aggregateMonthlySeries } = require('./series');
 const { detectAnomalies } = require('./anomalyDetector');
 const { buildForecast } = require('./forecast');
-const { estimateTraffic } = require('./trafficModel');
+const { estimateTraffic, buildSemanticDistribution } = require('./trafficModel');
+const { generateForecastReport } = require('./forecastReport');
 const { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner, runVangaSummary } = require('./deepseekAnalyzer');
 const { classifyJunkPhrases, REASON_LABELS } = require('./junkClassifier');
 const { fetchPhraseSignals, aggregateSignals } = require('./keyssoClient');
@@ -466,6 +467,21 @@ async function processForecasterTask(taskId) {
       intent,
     });
 
+    // 7a. Граф охвата семантики: распределение ключей по топам на горизонте
+    // прогноза (замена статичных карточек ТОП-3/5/10). Детерминированно,
+    // graceful — сбой не ломает пайплайн.
+    let semanticDistribution = null;
+    try {
+      semanticDistribution = buildSemanticDistribution(remainingRows, {
+        unifiedForecast,
+        trafficEstimate,
+        keyssoAggregate: keyssoSignalsReport?.verdict === 'ok' ? keyssoSignalsReport.aggregate : null,
+      });
+    } catch (err) {
+      console.warn(`[Forecaster] task ${taskId}: semantic_distribution failed (${err.message})`);
+      semanticDistribution = null;
+    }
+
     // 7c. Advanced analytics: opportunityAnalyzer (точечные просадки + ранжированные «точки усиления»).
     // Работает только на фразах, оставшихся после junk-фильтра. Гейт — advanced.enabled.
     let opportunitiesReport = null;
@@ -551,6 +567,7 @@ async function processForecasterTask(taskId) {
          leads_summary=$13::jsonb,
          sov_forecast=$14::jsonb,
          unified_forecast=$15::jsonb,
+         semantic_distribution=$16::jsonb,
          updated_at=NOW()
        WHERE id=$1`,
       [
@@ -569,6 +586,7 @@ async function processForecasterTask(taskId) {
         leadsSummary ? JSON.stringify(leadsSummary) : null,
         JSON.stringify(sovForecast),
         JSON.stringify(unifiedForecast),
+        semanticDistribution ? JSON.stringify(semanticDistribution) : null,
       ],
     );
 
@@ -749,6 +767,15 @@ async function processForecasterTask(taskId) {
     await _setProgress(taskId, { stage: 'done', percent: 100, label: 'Готово' });
     console.log(`[Forecaster] task ${taskId} done (rows=${parsed.rowsCount}, months=${seriesData.monthly.length}, ds=${ds.verdict}, junk=${junkReport.counts.junk_count}, ds_junk=${junkRefine?.verdict || 'n/a'}, vanga=${vanga?.verdict || 'n/a'}, opp=${opportunitiesReport?.verdict || 'n/a'}, niche=${expertReports?.niche_strategist?.verdict || 'n/a'}, hunter=${expertReports?.opportunity_hunter?.verdict || 'n/a'}, planner=${expertReports?.cluster_planner?.verdict || 'n/a'})`);
     try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
+
+    // 10. AI-аналитика прогноза (полный отчёт) — fire-and-forget.
+    // Задача уже помечена done; если LLM упадёт, ai_report останется
+    // с verdict error/skipped, пользователь сможет перегенерировать кнопкой.
+    setImmediate(() => {
+      runAiReportForTask(taskId).catch((err) => {
+        console.warn(`[Forecaster] task ${taskId}: ai_report failed (${err.message})`);
+      });
+    });
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     const errCode = (err && typeof err.code === 'string' && /^[a-z0-9_]{1,64}$/.test(err.code)) ? err.code : null;
@@ -761,4 +788,50 @@ async function processForecasterTask(taskId) {
   }
 }
 
-module.exports = { processForecasterTask };
+/**
+ * Генерация AI-отчёта («AI-аналитика прогноза») по уже завершённой задаче.
+ * Помечает ai_report как generating, вызывает LLM и сохраняет результат.
+ * Используется пайплайном (fire-and-forget при финализации) и контроллером
+ * (POST /api/forecaster/:id/regenerate-report).
+ * @param {string} taskId
+ * @returns {Object|null} результат generateForecastReport или null (нет задачи)
+ */
+async function runAiReportForTask(taskId) {
+  const { rows } = await db.query(
+    `SELECT id, status, options, target_url, llm_provider,
+            monthly_series, forecast, traffic_estimate,
+            keysso_signals, unified_forecast, semantic_distribution
+       FROM forecaster_tasks
+      WHERE id = $1`,
+    [taskId],
+  );
+  if (rows.length === 0) return null;
+  const task = rows[0];
+  if (task.status !== 'done') return null;
+
+  await db.query(
+    `UPDATE forecaster_tasks SET ai_report='{"verdict":"generating"}'::jsonb, updated_at=NOW() WHERE id=$1`,
+    [taskId],
+  );
+  const report = await generateForecastReport(task, task.llm_provider);
+  await db.query(
+    `UPDATE forecaster_tasks SET
+       ai_report=$2::jsonb,
+       tokens_in=tokens_in+$3,
+       tokens_out=tokens_out+$4,
+       cost_usd=cost_usd+$5,
+       updated_at=NOW()
+     WHERE id=$1`,
+    [
+      taskId,
+      JSON.stringify(report),
+      report.tokens_in || 0,
+      report.tokens_out || 0,
+      report.cost_usd || 0,
+    ],
+  );
+  console.log(`[Forecaster] task ${taskId} ai_report: ${report.verdict}${report.reason ? ` (${report.reason})` : ''}`);
+  return report;
+}
+
+module.exports = { processForecasterTask, runAiReportForTask };
