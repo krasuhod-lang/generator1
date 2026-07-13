@@ -156,6 +156,23 @@ class TestPageIssues(unittest.TestCase):
         self.assertIn("deep_page", self.codes(_page(crawl_depth=5)))
         self.assertIn("low_text_ratio", self.codes(_page(text_html_ratio=0.05)))
 
+    def test_external_canonical_skips_content_issues(self):
+        # ТЗ 3: canonical на другой URL → контентные ошибки не считаются
+        p = _page(url="https://e.com/?cat=1",
+                  title={"text": "", "length_chars": 0},
+                  meta_description={"text": "", "length_chars": 0}, h1=[],
+                  text_html_ratio=0.01,
+                  indexability={"meta_robots": None, "canonical": "https://e.com/main/",
+                                "robots_txt_blocked": False, "x_robots_tag": None})
+        self.assertEqual(issues.page_issues(p), [])
+
+    def test_self_canonical_keeps_issues(self):
+        p = _page(url="https://e.com/page",
+                  title={"text": "", "length_chars": 0},
+                  indexability={"meta_robots": None, "canonical": "https://e.com/page/",
+                                "robots_txt_blocked": False, "x_robots_tag": None})
+        self.assertIn("missing_title", {i["code"] for i in issues.page_issues(p)})
+
 
 class TestSiteIssues(unittest.TestCase):
     def test_duplicates_and_orphans(self):
@@ -246,6 +263,30 @@ class TestGraphExport(unittest.TestCase):
         self.assertEqual(len(out["nodes"]), crawler.GRAPH_MAX_NODES)
         self.assertTrue(out["truncated"])
 
+    def test_export_graph_filters_blocked_and_canonical(self):
+        # ТЗ 7: robots_blocked и canonical-дубли не попадают в экспорт графа
+        import networkx as nx
+        from . import crawler
+        g = nx.DiGraph()
+        g.add_edge("https://e.com/", "https://e.com/a")
+        g.add_node("https://e.com/?s=x", robots_blocked=True)
+        g.add_edge("https://e.com/", "https://e.com/?s=x")
+        pages = {
+            "https://e.com/":  _page(url="https://e.com/", crawl_depth=0, issues=[]),
+            "https://e.com/a": _page(url="https://e.com/a", crawl_depth=1, issues=[]),
+            "https://e.com/?cat=1": _page(
+                url="https://e.com/?cat=1", crawl_depth=1, issues=[],
+                indexability={"meta_robots": None, "canonical": "https://e.com/",
+                              "robots_txt_blocked": False, "x_robots_tag": None}),
+            "https://e.com/hidden": _page(
+                url="https://e.com/hidden", crawl_depth=1, issues=[],
+                indexability={"meta_robots": "noindex,follow", "canonical": None,
+                              "robots_txt_blocked": False, "x_robots_tag": None}),
+        }
+        out = crawler._export_graph(g, pages)
+        ids = {n["id"] for n in out["nodes"]}
+        self.assertEqual(ids, {"https://e.com/", "https://e.com/a"})
+
 
 class TestRobotsWildcard(unittest.TestCase):
     """БАГФИКС #1: Protego (в отличие от urllib.robotparser) корректно
@@ -316,6 +357,32 @@ class TestPageParser(unittest.TestCase):
     def test_length_px(self):
         p = page_parser.parse_page("https://e.com/", "<html><head><title>ABCD</title></head><body></body></html>")
         self.assertEqual(p["title"]["length_px"], 30)  # 4 * 7.5
+
+
+class TestParseTimeout(unittest.TestCase):
+    """ТЗ 5: парсинг HTML в пуле потоков с таймаутом."""
+
+    def test_parse_page_async_ok(self):
+        import asyncio
+        out = asyncio.run(page_parser.parse_page_async(
+            "https://e.com/", "<html><head><title>t</title></head><body>x</body></html>"))
+        self.assertIsNotNone(out)
+        self.assertTrue(out["parsed"])
+        self.assertEqual(out["title"]["text"], "t")
+
+
+class TestFetcherTimeouts(unittest.TestCase):
+    """ТЗ 6: гранулярный ClientTimeout + fetch_status."""
+
+    def test_granular_timeout(self):
+        from . import fetcher
+        self.assertEqual(fetcher.FETCH_TIMEOUT.connect, 10)
+        self.assertEqual(fetcher.FETCH_TIMEOUT.sock_read, 20)
+        self.assertGreaterEqual(fetcher.FETCH_TIMEOUT.total, 20)
+
+    def test_fetch_result_default_status(self):
+        from . import fetcher
+        self.assertEqual(fetcher.FetchResult("https://e.com/").fetch_status, "ok")
 
 
 if __name__ == "__main__":

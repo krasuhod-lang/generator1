@@ -152,6 +152,17 @@ def _norm_url(u: str) -> str:
         return u
 
 
+def _external_canonical(page: dict) -> bool:
+    """True если canonical страницы указывает на ДРУГОЙ URL (БАГФИКС #5 / ТЗ 3):
+    такие страницы (?cat=1, ?sort=...) поисковик не индексирует — контентные
+    ошибки (missing_h1, low_text_ratio, дубли) на них не считаем, чтобы не
+    занижать Health Score."""
+    canonical = (page.get("indexability") or {}).get("canonical") or page.get("canonical")
+    if not canonical:
+        return False
+    return _norm_url(canonical) != _norm_url(page.get("url", ""))
+
+
 def page_issues(page: dict) -> List[dict]:
     """Проверки по одной странице (без cross-page контекста)."""
     issues: List[dict] = []
@@ -180,6 +191,11 @@ def page_issues(page: dict) -> List[dict]:
 
     # Контентные проверки имеют смысл только для успешно скачанных HTML.
     if status is None or status != 200 or not page.get("parsed"):
+        return issues
+
+    # ТЗ 3: canonical на другой URL → страница не индексируется, контентные
+    # ошибки не фиксируем (только статусные/редиректные выше).
+    if _external_canonical(page):
         return issues
 
     title = (page.get("title") or {}).get("text", "") or ""
@@ -252,6 +268,8 @@ def find_duplicate_content(pages: dict) -> Dict[str, List[str]]:
         htype = data.get("content_hash_type")
         if htype is not None and htype != "text_content":
             continue
+        if _external_canonical(data):
+            continue
         if h and data.get("status_code") == 200:
             hash_map[h].append(url)
     return {h: urls for h, urls in hash_map.items() if len(urls) > 1}
@@ -274,6 +292,8 @@ def site_issues(pages: dict, sitemap_urls: set) -> List[dict]:
     descr_map = defaultdict(list)
     for url, p in pages.items():
         if p.get("status_code") != 200 or not p.get("parsed"):
+            continue
+        if _external_canonical(p):
             continue
         t = ((p.get("title") or {}).get("text") or "").strip().lower()
         d = ((p.get("meta_description") or {}).get("text") or "").strip().lower()
