@@ -167,6 +167,102 @@ function _profileDescription(item) {
   };
 }
 
+/**
+ * Детерминированная оценка CTR-потенциала сниппета конкурента (0–100).
+ * Эвристика по проверенным CTR-факторам: вхождение запроса, год, цифры,
+ * цена, гео, эмоциональные триггеры в Title + CTA/USP/цена в Description.
+ * Используется ПЕРЕД генерацией, чтобы показать модели «лучших» конкурентов
+ * и потребовать написать версию сильнее их (DSPy-style усиление промпта).
+ */
+function _ctrScore(titleProfile, descProfile) {
+  let score = 0;
+  // Title-факторы (до 60 баллов)
+  score += Math.min(3, titleProfile.tokens_in_query || 0) * 8; // вхождение запроса
+  if (titleProfile.has_year)           score += 8;
+  if (titleProfile.has_number)         score += 6;
+  if (titleProfile.has_pricing)        score += 8;
+  if (titleProfile.has_geo)            score += 6;
+  if (titleProfile.emotional_triggers) score += 8;
+  // Description-факторы (до 30 баллов)
+  if (descProfile) {
+    if (descProfile.has_cta)          score += 12;
+    if (descProfile.has_usp)          score += 10;
+    if (descProfile.has_price_signal) score += 8;
+  }
+  // Длина Title в «рабочем» диапазоне (до 10 баллов)
+  if (titleProfile.length >= 40 && titleProfile.length <= 80) score += 10;
+  else if (titleProfile.length >= 25) score += 4;
+  return Math.min(100, score);
+}
+
+// Слова-маркеры интента для LSI-анализа (нормализованные корни сравниваются
+// через normalizeWord, поэтому здесь — исходные формы).
+const COMMERCIAL_LSI_MARKERS = [
+  'купить', 'заказать', 'цена', 'стоимость', 'недорого', 'доставка',
+  'каталог', 'магазин', 'прайс', 'скидка', 'акция', 'оптом', 'аренда',
+  'услуга', 'установка', 'монтаж', 'ремонт', 'производитель', 'гарантия',
+];
+const INFORMATIONAL_LSI_MARKERS = [
+  'как', 'почему', 'обзор', 'отзывы', 'рейтинг', 'сравнение', 'инструкция',
+  'своими', 'руками', 'выбрать', 'топ', 'гайд', 'советы', 'виды', 'типы',
+  'отличия', 'характеристики',
+];
+
+/**
+ * Анализ интента на основании LSI-семантики выдачи (ТЗ «усиление мета-тегов»,
+ * п.4). Дополняет частотный SERP-интент: смотрит, какие LSI реально
+ * доминируют в семантике ТОПа (title_mandatory + description_mandatory +
+ * obligatory_lsi), и классифицирует их на коммерческие / информационные.
+ *
+ * ЧИСТАЯ функция, без сети/LLM.
+ *
+ * @param {object} semantics — результат extractSemantics
+ * @returns {{value:string, commercial_lsi:string[], informational_lsi:string[],
+ *            neutral_lsi:string[], confidence:number}}
+ */
+function analyzeLsiIntent(semantics = {}) {
+  const commercialSet = new Set(COMMERCIAL_LSI_MARKERS.map(normalizeWord));
+  const informationalSet = new Set(INFORMATIONAL_LSI_MARKERS.map(normalizeWord));
+
+  const seen = new Set();
+  const allLsi = [];
+  [
+    ...(semantics.title_mandatory_words || []),
+    ...(semantics.description_mandatory_words || []),
+    ...(semantics.obligatory_lsi || []),
+  ].forEach((w) => {
+    const n = normalizeWord(String(w || '').toLowerCase());
+    if (n && !seen.has(n)) { seen.add(n); allLsi.push({ raw: String(w), norm: n }); }
+  });
+
+  const commercial = [];
+  const informational = [];
+  const neutral = [];
+  allLsi.forEach(({ raw, norm }) => {
+    if (commercialSet.has(norm)) commercial.push(raw);
+    else if (informationalSet.has(norm)) informational.push(raw);
+    else neutral.push(raw);
+  });
+
+  const signalTotal = commercial.length + informational.length;
+  let value = 'Mixed/Unclear';
+  if (signalTotal > 0) {
+    if (commercial.length > informational.length) value = 'Commercial/Transactional';
+    else if (informational.length > commercial.length) value = 'Informational';
+  }
+  const confidence = signalTotal
+    ? +(Math.max(commercial.length, informational.length) / signalTotal).toFixed(2)
+    : 0;
+
+  return {
+    value,
+    commercial_lsi: commercial,
+    informational_lsi: informational,
+    neutral_lsi: neutral,
+    confidence,
+  };
+}
+
 function _commonPrefixSuffix(titles, minRepeat = 2) {
   const prefixes = new Map();
   const suffixes = new Map();
@@ -202,6 +298,11 @@ function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
   const arr = Array.isArray(serp) ? serp.slice(0, 10) : [];
   const competitorTitles = arr.map((it) => _profileTitle(it, keyword));
   const competitorDescriptions = arr.map(_profileDescription);
+  // Оценка CTR каждого конкурента (0–100) ПЕРЕД генерацией — чтобы промпт
+  // мог показать «лучших» и потребовать написать версию сильнее их.
+  competitorTitles.forEach((tp, i) => {
+    tp.ctr_score = _ctrScore(tp, competitorDescriptions[i]);
+  });
 
   const total = arr.length || 1;
   const titleLengths = competitorTitles.map((p) => p.length).filter((n) => n > 0);
@@ -316,6 +417,8 @@ function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
 
   return {
     serp_intent:              serpIntent,
+    // Интент на основании LSI-семантики выдачи (п.4 ТЗ «усиление мета-тегов»).
+    lsi_intent:               analyzeLsiIntent(semantics || {}),
     competitor_titles:       competitorTitles,
     competitor_descriptions: competitorDescriptions,
     patterns,
@@ -325,9 +428,11 @@ function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
 
 module.exports = {
   analyzeSerpCtr,
+  analyzeLsiIntent,
   // экспорт для тестов
   _percentile,
   _profileTitle,
   _profileDescription,
   _detectSerpIntent,
+  _ctrScore,
 };

@@ -19,6 +19,7 @@ const form = ref({
   brand:    '',
   phone:    '',
   summary:  '',
+  price_data: '',
   keywords: '',
   llm_provider: 'gemini',
   gemini_model: 'gemini-3.1-pro-preview',
@@ -84,6 +85,7 @@ async function handleCreate() {
       brand:    form.value.brand.trim(),
       phone:    form.value.phone.trim(),
       summary:  form.value.summary.trim(),
+      price_data: (form.value.price_data || '').trim(),
       keywords: keywordsList.value,
       llm_provider: form.value.llm_provider === 'grok' ? 'grok' : 'gemini',
       gemini_model: form.value.gemini_model,
@@ -225,6 +227,12 @@ function formatDate(d) {
             <label class="label">Общее УТП (опционально)</label>
             <input v-model="form.summary" type="text" class="input" placeholder="Гарантия 24 мес., доставка сегодня..." />
           </div>
+        </div>
+
+        <div>
+          <label class="label">Стоимость (опционально)</label>
+          <input v-model="form.price_data" type="text" class="input" placeholder="от 9 990 ₽" />
+          <p class="text-gray-500 text-xs mt-1">Если указана — подтверждённая цена попадёт в Description; если пусто — упоминания цены запрещены.</p>
         </div>
 
         <div>

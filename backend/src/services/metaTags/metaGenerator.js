@@ -7,7 +7,7 @@
  *
  * Ключевые правила:
  *   • H1 — UX-заголовок (≤70 символов), а не копия SEO Title;
- *   • Title ≤75, Description 150–160 символов;
+ *   • Title 70–80, Description 180–190 символов;
  *   • SERP intent и CTR-команды вычисляются до LLM;
  *   • Анализ ЦА/ниши (analyzeAudienceAndNiche) пробрасывается в
  *     user-prompt как `[АНАЛИЗ ЦА И НИШИ]`-блок через inputs.audienceNicheDigest.
@@ -18,10 +18,10 @@ const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
 const { checkLsiUsage } = require('./semantics');
 
-const TITLE_MIN = 50;
-const TITLE_MAX = 75;
-const DESC_MIN  = 150;
-const DESC_MAX  = 160;
+const TITLE_MIN = 70;
+const TITLE_MAX = 80;
+const DESC_MIN  = 180;
+const DESC_MAX  = 190;
 const H1_MAX    = 70;
 const META_GENERATION_MODEL = 'gemini-3.1-pro-preview';
 
@@ -31,11 +31,14 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 
 <Ограничения и правила DrMax>
 
-1. Title (до 75 символов, включая пробелы):
+1. Title (70–80 символов, включая пробелы):
    - Главный ключ должен быть в первых 3 словах.
    - Главный ключ и главное УТП / differentiator_lsi ОБЯЗАНЫ находиться в первых
      50 символах — хвост после 50 символов может быть обрезан в выдаче.
-   - Обязательно используй 2–4 «важных слова» из списка.
+   - ИСПОЛЬЗУЙ ВСЕ «важные слова» из important_words_list — по возможности
+     каждое должно попасть именно в Title. Если какое-то слово никак не
+     вписывается без переспама — перенеси его в Description или H1 и честно
+     отметь это в coverage_self_audit.
    - Выбери одну из формул:
      a) «Ключ + выгода + срок/гарантия»
      b) «Регион + ключ + год + цена»
@@ -45,9 +48,12 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
      ёлочки («»). Только прямые кавычки (").
    - Пример: «Кредит под залог недвижимости | Ставка от 9% | Одобрение за 24ч»
 
-2. Meta Description (150–160 символов, включая пробелы):
+2. Meta Description (180–190 символов, включая пробелы):
    - Законченное предложение (не обрывай на полуслове).
-   - Вплети оставшиеся «важные слова» и 2–3 слова из {lsi_list}.
+   - Description строится ИЗ ОПРЕДЕЛЁННОГО ИНТЕНТА И LSI: сначала отработай
+     переданный SERP_INTENT (коммерческий → факты/УТП/цена, информационный →
+     тизер ответа), затем органично вплети оставшиеся «важные слова» и LSI из
+     {lsi_list} / блока LSI-интента.
    - Правило покрытия LSI (приоритет — читаемость и CTR, не «галочка»):
      стремись покрыть ВСЕ важные слова между Title и Description, но НЕ ценой
      читаемости. Лучше органично упустить 1 слово, чем получить переспам.
@@ -123,6 +129,15 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
    - Не оставляй главное УТП после 120-го символа и не обрывай мысль.
    - Не выдумывай эмоциональные триггеры, социальные доказательства, цифры,
      гарантии или наличие — используй только входные данные.
+
+10. КОНКУРЕНТНОЕ ПРЕВОСХОДСТВО (главная цель):
+   - Тебе передан ПОЛНЫЙ список Title и Description конкурентов ТОП-10 с их
+     CTR-оценками. Внимательно изучи, как пишут конкуренты — особенно лучших
+     по CTR-оценке.
+   - У тебя есть требования по LSI и интенту, которых нет у конкурентов.
+     Учти ВСЁ, что передано (конкуренты, LSI, интент, CTR-паттерны, УТП,
+     цена), и напиши ЛУЧШУЮ версию мета-тегов: сниппет должен быть кликабельнее
+     самого сильного конкурента, но не сливаться с ТОПом.
 
 </Ограничения и правила DrMax>
 
@@ -212,8 +227,21 @@ function extractPriceData(inputs = {}) {
 function buildUserPrompt({ keyword, semantics, serpData, inputs, year }) {
   const importantWords   = (semantics.title_mandatory_words       || []).slice(0, 6);
   const recommendedWords = (semantics.description_mandatory_words || []).slice(0, 10);
-  const competitorsTitles = (serpData || [])
-    .map((c, i) => `[${i + 1}] ${c.title}`)
+  // Полные мета-теги конкурентов — БЕЗ ограничения по символам (Title и
+  // Description передаются как спарсились). CTR-оценки подтягиваются из
+  // ctrAnalysis (по URL), чтобы модель видела самых кликабельных конкурентов.
+  const ctrScoreByIdx = new Map();
+  if (inputs.ctrAnalysis && Array.isArray(inputs.ctrAnalysis.competitor_titles)) {
+    inputs.ctrAnalysis.competitor_titles.forEach((p, i) => {
+      if (typeof p.ctr_score === 'number') ctrScoreByIdx.set(i, p.ctr_score);
+    });
+  }
+  const competitorsMetas = (serpData || [])
+    .map((c, i) => {
+      const score = ctrScoreByIdx.has(i) ? ` (CTR-оценка: ${ctrScoreByIdx.get(i)}/100)` : '';
+      const desc = c.snippet || c.description || '';
+      return `[${i + 1}]${score} Title: ${c.title}${desc ? `\n    Description: ${desc}` : ''}`;
+    })
     .join('\n');
 
   // Контекст страницы: бизнес-УТП + регион + название ниши.
@@ -264,12 +292,18 @@ ${inputs.relevanceBrief.trim()}`
     const obligatoryLsi    = (semantics && semantics.obligatory_lsi)     || [];
     const differentiatorLsi = (semantics && semantics.differentiator_lsi) || [];
     const serpIntent = ctr.serp_intent || {};
+    const lsiIntent = ctr.lsi_intent || null;
+    const lsiIntentBlock = lsiIntent ? `
+- LSI-ИНТЕНТ (анализ интента по LSI-семантике ТОПа): ${lsiIntent.value} (уверенность ${pct(lsiIntent.confidence)}).${(lsiIntent.commercial_lsi || []).length ? `
+  • Коммерческие LSI: ${lsiIntent.commercial_lsi.join(', ')}.` : ''}${(lsiIntent.informational_lsi || []).length ? `
+  • Информационные LSI: ${lsiIntent.informational_lsi.join(', ')}.` : ''}
+  • Description строй ИЗ этого интента и этих LSI: интент задаёт тональность/структуру, LSI — словарь.` : '';
     ctrBlock = `
 
 [АНАЛИЗ КЛИКАБЕЛЬНОСТИ ВЫДАЧИ — фактчекинг ТОП-10, использовать обязательно]
-- SERP_INTENT: ${serpIntent.value || 'Mixed/Unclear'} (commercial=${pct(serpIntent.commercial_frequency)}, informational=${pct(serpIntent.informational_frequency)}). Это жёсткое условие, не переопределяй его.
-- Длина Title в ТОПе: p50=${p.length_p50_title}, p90=${p.length_p90_title} — укладывайся в этот диапазон.
-- Длина Description в ТОПе: p50=${p.length_p50_desc}, p90=${p.length_p90_desc}.
+- SERP_INTENT: ${serpIntent.value || 'Mixed/Unclear'} (commercial=${pct(serpIntent.commercial_frequency)}, informational=${pct(serpIntent.informational_frequency)}). Это жёсткое условие, не переопределяй его.${lsiIntentBlock}
+- Длина Title в ТОПе: p50=${p.length_p50_title}, p90=${p.length_p90_title}. Твой целевой диапазон: 70–80 символов.
+- Длина Description в ТОПе: p50=${p.length_p50_desc}, p90=${p.length_p90_desc}. Твой целевой диапазон: 180–190 символов.
 - Частота CTA в Description конкурентов: ${pct(p.cta_frequency)}; года в Title: ${pct(p.year_frequency)}; цены: ${pct(p.price_frequency)}; гео: ${pct(p.geo_frequency)}; бренда: ${pct(p.brand_frequency)}.
 - Штампованные начала тайтлов («${(p.common_prefixes || []).join('», «') || '—'}») и хвосты («${(p.common_suffixes || []).join('», «') || '—'}») — НЕ повторяй, чтобы сниппет не сливался с ТОПом.
 - Рекомендуемая формула Title (на основе ТОПа): ${ctr.recommendations.suggested_title_formula || '—'}.${must.length ? `
@@ -289,14 +323,18 @@ ${inputs.relevanceBrief.trim()}`
   - Год (current_year): ${year}
   - Проверенная цена ([price_data]): ${priceData || 'null'}
 - Главный поисковый запрос (target_keyword): ${keyword}
-- Важные слова из ТОП-10 (important_words_list) — ИСПОЛЬЗОВАТЬ ВСЕ, распределить между Title / Description / H1, каждое ≥1 раз: ${importantWords.join(', ')}
+- Важные слова из ТОП-10 (important_words_list) — ИСПОЛЬЗОВАТЬ ВСЕ; по возможности КАЖДОЕ должно попасть в Title, остальные распределить между Description / H1, каждое ≥1 раз: ${importantWords.join(', ')}
 - LSI-слова (lsi_list) — вплести 2–3 в Description, остальное по возможности: ${recommendedWords.join(', ')}
 - Краткий контекст / УТП страницы (page_context): ${pageContext}
 
-Примеры Title конкурентов из ТОП-выдачи (для анализа интента и формул):
-${competitorsTitles}${audienceBlock}${relevanceBlock}${ctrBlock}
+Полные мета-теги конкурентов из ТОП-выдачи (Title + Description, без обрезки,
+с CTR-оценками; для анализа интента, формул и конкурентного превосходства):
+${competitorsMetas}${audienceBlock}${relevanceBlock}${ctrBlock}
 
-Создай мета-теги строго по правилам DrMax из system-prompt (формулы Title, длины,
+Итог: вот как пишут конкуренты (выше, с CTR-оценками), вот наши требования по
+LSI и интентам (блоки выше). Учти ВСЁ переданное и напиши ЛУЧШУЮ версию
+мета-тегов — кликабельнее сильнейшего конкурента, строго по правилам DrMax из
+system-prompt (формулы Title, Title 70–80 симв., Description 180–190 симв.,
 бренд / CTA в Description, H1 ≤70 символов и не копия Title).`;
 }
 
@@ -323,7 +361,7 @@ function postValidate(result, inputs) {
   }
   if (typeof result.title === 'string') result.title_length = result.title.length;
 
-  // 2. Description: обрезаем по последнему предложению при превышении (DESC_MAX = 155).
+  // 2. Description: обрезаем по последнему предложению при превышении (DESC_MAX).
   if (typeof result.description === 'string' && result.description.length > DESC_MAX) {
     result.description = trimToLastSentence(result.description, DESC_MAX - 3);
     notes.push(`Description обрезан до ${result.description.length} симв.`);
@@ -556,8 +594,8 @@ ${lastViolations.map((v) => `- ${v}.`).join('\n')}
 Перепиши Title и Description так, чтобы каждое из этих слов появилось
 ОРГАНИЧНО (внутри осмысленного предложения, без перечислений через запятую,
 без хвостов «Также: …» / «Ключи: …»). Сохрани:
-- длину Title до 75 символов; ключ + главное УТП в первых 50,
-- длину Description 150–160 символов,
+- длину Title 70–80 символов; ключ + главное УТП в первых 50,
+- длину Description 180–190 символов,
 - H1 ≤ 70 символов и НЕ копию Title,
 - CTA в конце Description,
 - бренд / CTA / год / price_data по тем же правилам, что и раньше.

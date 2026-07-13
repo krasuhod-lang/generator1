@@ -14,8 +14,8 @@ const initialLoad = ref(true);
 
 let pollTimer = null;
 
-const TITLE_RANGE = { min: 50, max: 60 };
-const DESC_RANGE  = { min: 140, max: 160 };
+const TITLE_RANGE = { min: 70, max: 80 };
+const DESC_RANGE  = { min: 180, max: 190 };
 
 async function reload() {
   try {
