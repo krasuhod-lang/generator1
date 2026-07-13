@@ -373,7 +373,7 @@ async function runMetaTagTaskInner(taskId) {
       const tOut = Number(meta.tokensOut) || 0;
       const tThoughts = Number(meta.thoughtsTokens) || 0;
       const tCached   = Number(meta.cachedTokens)   || 0;
-      const cost = calcCost(inputs.llm_provider || 'gemini', tIn, tOut, {
+      const cost = calcCost(meta.provider || inputs.llm_provider || 'gemini', tIn, tOut, {
         thoughtsTokens: tThoughts,
         cachedTokens:   tCached,
       });

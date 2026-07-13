@@ -39,6 +39,15 @@ const PRICE_PATTERNS = [
 
 const QUESTION_PATTERNS = [/\?$/, /(?:^|\s)(как|почему|где|когда|сколько|какой)\s/i];
 
+const COMMERCIAL_INTENT_PATTERNS = [
+  /(?:^|\W)(цен[ауы]?|стоимост|руб(?:\.|лей)?|₽)(?:\W|$)/i,
+  /(?:^|\W)(купить|заказать|доставка|интернет-магазин|каталог)(?:\W|$)/i,
+];
+
+const INFORMATIONAL_INTENT_PATTERNS = [
+  /(?:^|\W)(как|почему|отзывы?|обзор|своими\s+руками|топ|рейтинг)(?:\W|$)/i,
+];
+
 const GEO_PATTERNS = [
   /москв/i, /санкт-петербург/i, /питере?(?:\s|$|\.|,)/i, /екатеринбург/i,
   /новосибирск/i, /казан/i, /краснодар/i, /сочи(?:\s|$|\.|,)/i,
@@ -102,10 +111,47 @@ function _profileTitle(item, keyword) {
     has_number:        /\d/.test(title),
     has_question:      _matches(title, QUESTION_PATTERNS),
     has_pricing:       _matches(title, PRICE_PATTERNS),
+    has_exact_price:   /\d[\d\s]*(?:руб(?:\.|лей)?|₽|р\.)/i.test(title),
     has_geo:           _matches(title, GEO_PATTERNS),
     emotional_triggers: _matches(title, EMOTIONAL_PATTERNS),
     tokens_in_query:   tokensInQuery,
     formula_tag:       formula,
+  };
+}
+
+function _detectSerpIntent(items) {
+  const total = items.length;
+  if (!total) {
+    return {
+      value: 'Mixed/Unclear',
+      commercial_frequency: 0,
+      informational_frequency: 0,
+      confidence: 0,
+    };
+  }
+
+  let commercial = 0;
+  let informational = 0;
+  items.forEach((item) => {
+    const text = `${item.title || ''} ${item.snippet || item.description || ''} ${item.url || item.link || ''}`;
+    if (_matches(text, COMMERCIAL_INTENT_PATTERNS)) commercial += 1;
+    if (_matches(text, INFORMATIONAL_INTENT_PATTERNS)) informational += 1;
+  });
+
+  const commercialFrequency = commercial / total;
+  const informationalFrequency = informational / total;
+  let value = 'Mixed/Unclear';
+  if (commercialFrequency > 0.5 && commercialFrequency >= informationalFrequency) {
+    value = 'Commercial/Transactional';
+  } else if (informationalFrequency > 0.5) {
+    value = 'Informational';
+  }
+
+  return {
+    value,
+    commercial_frequency: +commercialFrequency.toFixed(2),
+    informational_frequency: +informationalFrequency.toFixed(2),
+    confidence: +Math.max(commercialFrequency, informationalFrequency).toFixed(2),
   };
 }
 
@@ -167,6 +213,8 @@ function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
                    + competitorDescriptions.filter((p) => p.has_price_signal).length;
   const geoCount   = competitorTitles.filter((p) => p.has_geo).length;
   const brandCount = competitorTitles.filter((p) => p.has_brand).length;
+  const exactPriceTitleCount = competitorTitles.filter((p) => p.has_exact_price).length;
+  const serpIntent = _detectSerpIntent(arr);
 
   const { common_prefixes, common_suffixes } = _commonPrefixSuffix(arr.map((d) => d.title));
 
@@ -189,6 +237,7 @@ function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
     price_frequency:  +(Math.min(total, priceCount) / total).toFixed(2),
     geo_frequency:    +(geoCount   / total).toFixed(2),
     brand_frequency:  +(brandCount / total).toFixed(2),
+    exact_price_title_frequency: +(exactPriceTitleCount / total).toFixed(2),
     questionable_titles: weakTitles,
   };
 
@@ -204,10 +253,14 @@ function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
     suggested_title_formula: '',
   };
 
-  if (patterns.year_frequency >= 0.4) {
+  if (patterns.year_frequency >= 0.8) {
+    recommendations.must_have.push(`Указать current_year — год есть у ${Math.round(patterns.year_frequency * 100)}% ТОПа`);
+  } else if (patterns.year_frequency >= 0.4) {
     recommendations.must_have.push(`Указать год (${new Date().getFullYear()}) — есть у ${Math.round(patterns.year_frequency * 100)}% ТОПа`);
   }
-  if (patterns.price_frequency >= 0.4) {
+  if (patterns.exact_price_title_frequency >= 0.9) {
+    recommendations.must_have.push('Указать точную подтверждённую цену в рублях — она есть в Title у ≥90% конкурентов');
+  } else if (patterns.price_frequency >= 0.4) {
     recommendations.must_have.push('Сигнал цены / «от X ₽» — конкуренты в выдаче делают то же');
   }
   if (patterns.cta_frequency >= 0.5) {
@@ -262,6 +315,7 @@ function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
     : 'Запрос + USP + Гео + Год';
 
   return {
+    serp_intent:              serpIntent,
     competitor_titles:       competitorTitles,
     competitor_descriptions: competitorDescriptions,
     patterns,
@@ -275,4 +329,5 @@ module.exports = {
   _percentile,
   _profileTitle,
   _profileDescription,
+  _detectSerpIntent,
 };

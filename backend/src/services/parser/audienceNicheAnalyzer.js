@@ -353,6 +353,7 @@ async function analyzeAudienceAndNiche(task, ctx, extra = {}) {
         stageName:   'audience_niche_analysis',
         callLabel:   'Audience & Niche Deep Analysis',
         temperature: 0.4,
+        model:       'deepseek-v4-pro',
         log,
         onTokens,
       }
