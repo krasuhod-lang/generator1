@@ -199,7 +199,7 @@ function _commonPrefixSuffix(titles, minRepeat = 2) {
  *   / patterns / recommendations
  */
 function analyzeSerpCtr(serp, { keyword = '', semantics = null } = {}) {
-  const arr = Array.isArray(serp) ? serp : [];
+  const arr = Array.isArray(serp) ? serp.slice(0, 10) : [];
   const competitorTitles = arr.map((it) => _profileTitle(it, keyword));
   const competitorDescriptions = arr.map(_profileDescription);
 

@@ -261,6 +261,7 @@ async function runMetaTagTaskInner(taskId) {
     toponym: task.toponym || '',
     phone:   task.phone   || '',
     summary: task.summary || '',
+    price_data: task.price_data || null,
     // audienceNicheDigest проставляется ниже, после однократного запуска
     // analyzeAudienceAndNiche на уровне всей задачи (не на каждый ключ —
     // экономия токенов, цена $0.02-0.05 на одну meta-tag-задачу).

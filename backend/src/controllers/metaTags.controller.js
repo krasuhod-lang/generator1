@@ -70,6 +70,7 @@ async function createMetaTagTask(req, res, next) {
     const brand    = clipStr(body.brand,    MAX_FIELD_LEN);
     const phone    = clipStr(body.phone,    MAX_FIELD_LEN);
     const summary  = clipStr(body.summary,  MAX_FIELD_LEN);
+    const priceData = clipStr(body.price_data, MAX_FIELD_LEN);
     const keywords = parseKeywords(body.keywords).slice(0, MAX_KEYWORDS);
 
     if (keywords.length === 0) {
@@ -85,11 +86,11 @@ async function createMetaTagTask(req, res, next) {
 
     const { rows } = await db.query(
       `INSERT INTO meta_tag_tasks
-         (user_id, name, niche, lr, toponym, brand, phone, summary, keywords,
+         (user_id, name, niche, lr, toponym, brand, phone, summary, price_data, keywords,
            status, progress_total, llm_provider, gemini_model, project_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending', $10, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'pending', $11, $12, $13, $14)
        RETURNING id, name, status, progress_total, llm_provider, gemini_model, project_id, created_at`,
-      [req.user.id, name, niche, lr, toponym, brand, phone, summary,
+      [req.user.id, name, niche, lr, toponym, brand, phone, summary, priceData,
         JSON.stringify(keywords), keywords.length, llmProvider, geminiModel, projectId],
     );
     const task = rows[0];

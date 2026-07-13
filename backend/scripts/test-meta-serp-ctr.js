@@ -148,6 +148,19 @@ test('analyzeSerpCtr: SERP intent is deterministic from a >50% majority', () => 
   assert.strictEqual(informational.serp_intent.value, 'Informational');
 });
 
+test('analyzeSerpCtr: intent uses TOP-10 only', () => {
+  const top = Array.from({ length: 10 }, () => ({
+    title: 'Как выбрать кирпич', snippet: 'Обзор и рейтинг',
+  }));
+  const tail = Array.from({ length: 10 }, () => ({
+    title: 'Купить кирпич', snippet: 'Цена, заказ и доставка',
+  }));
+  assert.strictEqual(
+    analyzeSerpCtr([...top, ...tail], { keyword: 'кирпич' }).serp_intent.value,
+    'Informational',
+  );
+});
+
 test('analyzeSerpCtr: exact price/year dominance becomes must_have', () => {
   const dominant = Array.from({ length: 10 }, (_, i) => ({
     title: `${i < 9 ? 'Кирпич 18 руб' : 'Кирпич'} ${i < 8 ? '2026' : ''}`,
@@ -192,6 +205,10 @@ test('meta prompt uses verified price, deterministic intent and new limits', () 
   assert.match(prompt, /SERP_INTENT: Commercial\/Transactional/);
   assert.match(prompt, /\[price_data\]\): цена от 18 руб/i);
   assert.strictEqual(extractPriceData(inputs), 'цена от 18 руб');
+  assert.strictEqual(
+    extractPriceData({ summary: 'Бесплатная доставка от 5 000 руб. Гарантия качества.' }),
+    null,
+  );
   assert.strictEqual(TITLE_MAX, 75);
   assert.strictEqual(DESC_MIN, 150);
   assert.strictEqual(DESC_MAX, 160);

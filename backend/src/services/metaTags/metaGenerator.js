@@ -204,8 +204,8 @@ function extractPriceData(inputs = {}) {
   if (!source) return null;
 
   const match = source.match(
-    /(?:(?:цена|стоимость)\s*[:—-]?\s*(?:от\s*)?|от\s*)\d[\d\s]*(?:[.,]\d+)?\s*(?:₽|руб(?:\.|лей)?|р\.)/i,
-  ) || source.match(/\d[\d\s]*(?:[.,]\d+)?\s*(?:₽|руб(?:\.|лей)?|р\.)/i);
+    /(?:цена|стоимость)\s*[:—-]?\s*(?:от\s*)?\d[\d\s]*(?:[.,]\d+)?\s*(?:₽|руб(?:\.|лей)?|р\.)/i,
+  );
   return match ? match[0].trim().slice(0, 160) : null;
 }
 
@@ -572,6 +572,11 @@ ${lastViolations.map((v) => `- ${v}.`).join('\n')}
     lastMissed.forEach((word) => {
       allNotes.push(`⚠️ LSI слово «${word}» не интегрировано, так как нарушает читаемость.`);
     });
+  }
+  if (lastViolations.length) {
+    throw new Error(
+      `Мета-теги отклонены после ${MAX_ATTEMPTS} попыток: ${lastViolations.join('; ')}`,
+    );
   }
 
   result.detected_year = year;

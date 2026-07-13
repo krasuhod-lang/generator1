@@ -574,6 +574,7 @@ async function ensureSchema() {
         brand            TEXT,
         phone            TEXT,
         summary          TEXT,
+        price_data       TEXT,
         keywords         JSONB NOT NULL DEFAULT '[]'::jsonb,
         status           meta_tag_task_status NOT NULL DEFAULT 'pending',
         progress_current INTEGER NOT NULL DEFAULT 0,
@@ -593,6 +594,7 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS total_cost_usd   NUMERIC(12, 6) NOT NULL DEFAULT 0`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS llm_model        TEXT`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS gemini_model     TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS price_data       TEXT`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS source           TEXT`);
     await db.query(`ALTER TABLE meta_tag_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
     // Migration 053: source_relevance_report_id для meta_tag_tasks
