@@ -264,4 +264,151 @@ function estimateTraffic({
   return result;
 }
 
-module.exports = { estimateTraffic };
+// ─────────────────────────────────────────────────────────────────────
+// Граф охвата семантики — time-series распределения ключей по топам.
+//
+// Заменяет статичные карточки ТОП-3/5/10: по каждому месяцу прогноза
+// считаем, сколько ключей (и какой объём спроса) находится в ТОП-3 /
+// ТОП-10 / ТОП-20 / вне топа, плюс реалистичный и оптимистичный трафик.
+//
+// Модель детерминированная:
+//   • стартовое распределение — из агрегатов keys.so (phrases_in_top10_pct
+//     и phrases_in_top30_pct); без keys.so старт = 0 (новый сайт);
+//   • целевые доли на горизонте — realisticShareTopN × competition_factor
+//     (те же данные, что в realism-блоке estimateTraffic); для ТОП-20
+//     отдельного конфига нет — share_top10 × cfg.semantic.top20Factor;
+//   • прогресс от старта к цели — S-кривая захвата из unifiedForecast
+//     (capture(t) нормированный), fallback — логистика по t.
+
+const _MONTH_NAMES_RU = [
+  'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+  'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+];
+
+function _periodLabelRu(period) {
+  const m = String(period || '').match(/^(\d{4})-(\d{2})$/);
+  if (!m) return String(period || '');
+  const mi = Number(m[2]) - 1;
+  if (mi < 0 || mi > 11) return String(period);
+  return `${_MONTH_NAMES_RU[mi]} ${m[1]}`;
+}
+
+function _clamp01(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+/**
+ * @param {Array<{phrase:string,total:number}>} keywords — ядро после
+ *   junk-фильтра (total = суммарный спрос фразы за историю).
+ * @param {Object} monthlyForecast — источники помесячного прогноза:
+ * @param {Object} [monthlyForecast.unifiedForecast] — buildUnifiedForecast()
+ * @param {Object} [monthlyForecast.trafficEstimate] — estimateTraffic()
+ * @param {Object} [monthlyForecast.keyssoAggregate] — aggregateSignals()
+ * @returns {Array|null} time-series для графика SemanticCoverageChart
+ */
+function buildSemanticDistribution(keywords, monthlyForecast = {}) {
+  const cfgAll = getForecasterConfig();
+  const semCfg = cfgAll.semantic || {};
+  const { unifiedForecast, trafficEstimate, keyssoAggregate } = monthlyForecast;
+
+  const rows = Array.isArray(keywords) ? keywords : [];
+  const totalCount = rows.length;
+  if (totalCount === 0) return null;
+  let totalVolume = 0;
+  for (const r of rows) totalVolume += Math.max(0, Number(r.total) || 0);
+
+  // Месяцы прогноза: приоритет — unifiedForecast (там есть capture-кривая).
+  const uf = (unifiedForecast && unifiedForecast.verdict === 'ok'
+              && Array.isArray(unifiedForecast.forecast) && unifiedForecast.forecast.length > 0)
+    ? unifiedForecast : null;
+  const teTop10 = trafficEstimate?.top10 || null;
+  const months = uf
+    ? uf.forecast
+    : (teTop10 && Array.isArray(teTop10.monthly) ? teTop10.monthly : []);
+  if (months.length === 0) return null;
+
+  // Стартовое распределение (доли ключей в топах сейчас).
+  const top10Start = keyssoAggregate?.phrases_in_top10_pct != null
+    ? _clamp01(Number(keyssoAggregate.phrases_in_top10_pct) / 100) : 0;
+  const top30Start = keyssoAggregate?.phrases_in_top30_pct != null
+    ? _clamp01(Number(keyssoAggregate.phrases_in_top30_pct) / 100) : top10Start;
+  const top3Start  = top10Start * 0.3; // консервативная оценка: ~треть топ-10 — в топ-3
+  const top20Start = Math.max(top10Start, top10Start + (top30Start - top10Start) * 0.5);
+
+  // Целевые доли на горизонте — реализм-факторы трафик-модели.
+  const realism = trafficEstimate?.realism || null;
+  const trafficCfg = cfgAll.traffic;
+  const share3  = realism ? Number(realism.share_top3)  : trafficCfg.realisticShareTop3;
+  const share10 = realism ? Number(realism.share_top10) : trafficCfg.realisticShareTop10;
+  const top20Factor = Number(semCfg.top20Factor) || 1.8;
+  const top20Cap    = Number(semCfg.top20Cap) || 0.95;
+  const top3Target  = Math.max(top3Start,  _clamp01(share3));
+  const top10Target = Math.max(top10Start, _clamp01(share10));
+  const top20Target = Math.max(top20Start, Math.min(top20Cap, _clamp01(share10) * top20Factor));
+
+  // Прогресс к цели: нормированная S-кривая захвата из unified, иначе логистика.
+  const capStart = uf ? Number(uf.params?.sov_start) : null;
+  const capMax   = uf ? Number(uf.params?.sov_max)   : null;
+  const useCapture = uf && Number.isFinite(capStart) && Number.isFinite(capMax) && capMax > capStart;
+  const fallbackK = Number(semCfg.fallbackK) || 0.35;
+  const H = months.length;
+
+  const out = [];
+  for (let i = 0; i < H; i++) {
+    const p = months[i];
+    const t = i + 1;
+    let s;
+    if (useCapture && p.capture != null) {
+      s = _clamp01((Number(p.capture) - capStart) / (capMax - capStart));
+    } else {
+      s = 1 / (1 + Math.exp(-fallbackK * (t - H / 2)));
+    }
+    // Кумулятивные доли (монотонность топов: top3 ≤ top10 ≤ top20 ≤ 1).
+    const c3  = _clamp01(top3Start  + (top3Target  - top3Start)  * s);
+    const c10 = Math.max(c3,  _clamp01(top10Start + (top10Target - top10Start) * s));
+    const c20 = Math.max(c10, _clamp01(top20Start + (top20Target - top20Start) * s));
+
+    const cnt3  = Math.round(c3 * totalCount);
+    const cnt10 = Math.round(c10 * totalCount);
+    const cnt20 = Math.round(c20 * totalCount);
+    const vol3  = Math.round(c3 * totalVolume);
+    const vol10 = Math.round(c10 * totalVolume);
+    const vol20 = Math.round(c20 * totalVolume);
+
+    // Трафик: реалистичный = основной прогноз, оптимистичный = верхняя
+    // граница коридора unified (или optimistic-ряд трафик-модели).
+    let trafficRealistic = null;
+    let trafficOptimistic = null;
+    if (uf) {
+      trafficRealistic  = Math.round(Number(p.value) || 0);
+      trafficOptimistic = Math.round(Number(p.upper) || 0);
+    } else if (teTop10) {
+      trafficRealistic  = Math.round(Number(p.traffic) || 0);
+      trafficOptimistic = Math.round(Number(teTop10.optimistic?.monthly?.[i]?.traffic) || 0) || null;
+    }
+
+    out.push({
+      month:  `M${t}`,
+      label:  _periodLabelRu(p.period),
+      period: p.period || null,
+      distribution: {
+        top3:  { count: cnt3,               volume: vol3 },
+        top10: { count: cnt10 - cnt3,        volume: vol10 - vol3 },
+        top20: { count: cnt20 - cnt10,       volume: vol20 - vol10 },
+        out:   { count: totalCount - cnt20,  volume: totalVolume - vol20 },
+      },
+      coverage: {
+        top3:  Math.round(c3 * 1000) / 1000,
+        top10: Math.round(c10 * 1000) / 1000,
+        top20: Math.round(c20 * 1000) / 1000,
+      },
+      traffic_realistic:  trafficRealistic,
+      traffic_optimistic: trafficOptimistic,
+    });
+  }
+  return out;
+}
+
+module.exports = { estimateTraffic, buildSemanticDistribution };

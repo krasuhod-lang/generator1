@@ -11,6 +11,8 @@ import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import ForecastChart from '../components/ForecastChart.vue';
 import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
+import SemanticCoverageChart from '../components/SemanticCoverageChart.vue';
+import ForecastAIReport from '../components/ForecastAIReport.vue';
 import { useForecasterStore } from '../stores/forecaster.js';
 
 const route  = useRoute();
@@ -48,9 +50,10 @@ async function load() {
 onMounted(async () => {
   await load();
   pollHandle = setInterval(() => {
-    if (task.value && (task.value.status === 'queued' || task.value.status === 'running')) {
-      load();
-    }
+    if (!task.value) return;
+    const running = task.value.status === 'queued' || task.value.status === 'running';
+    const reportGenerating = task.value.ai_report?.verdict === 'generating';
+    if (running || reportGenerating) load();
   }, 3000);
 });
 onUnmounted(() => {
@@ -61,7 +64,6 @@ const monthly = computed(() => (task.value?.monthly_series?.monthly) || []);
 const fcPoints = computed(() => (task.value?.forecast?.points) || []);
 const anomalies = computed(() => (task.value?.anomalies?.drops) || []);
 const trend = computed(() => task.value?.trend || null);
-const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
 const vangaSummary = computed(() => task.value?.vanga_summary || null);
 const noCommercialIntent = computed(() => task.value?.error_code === 'failed_no_commercial_intent');
@@ -93,6 +95,27 @@ const unifiedParams   = computed(() => unified.value?.params || null);
 const unifiedExplain  = computed(() => unified.value?.explain || null);
 const unifiedSummary  = computed(() => unified.value?.summary || null);
 const nicheStrategist = computed(() => expertReports.value?.niche_strategist || null);
+const aiReport = computed(() => task.value?.ai_report || null);
+const semanticDistribution = computed(() => {
+  const d = task.value?.semantic_distribution;
+  return Array.isArray(d) && d.length > 0 ? d : null;
+});
+
+// Перегенерация AI-аналитики (только владелец задачи).
+const reportBusy = ref(false);
+async function regenerateReport() {
+  if (!task.value || reportBusy.value) return;
+  reportBusy.value = true;
+  try {
+    await store.regenerateReport(task.value.id);
+    // Мгновенный skeleton — дальше poll подтянет готовый отчёт.
+    task.value = { ...task.value, ai_report: { verdict: 'generating' } };
+  } catch (e) {
+    alert(e.response?.data?.error || e.message || 'Ошибка');
+  } finally {
+    reportBusy.value = false;
+  }
+}
 const opportunityHunter = computed(() => expertReports.value?.opportunity_hunter || null);
 const clusterPlanner  = computed(() => expertReports.value?.cluster_planner || null);
 
@@ -225,10 +248,6 @@ async function doRerun() {
 function fmtNum(n) {
   if (n == null || !Number.isFinite(n)) return '—';
   return Math.round(n).toLocaleString('ru-RU');
-}
-function fmtCtr(c) {
-  if (c == null || !Number.isFinite(c)) return '—';
-  return (c * 100).toFixed(2) + '%';
 }
 
 const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡';
@@ -375,6 +394,13 @@ const sovSummaryRows = computed(() => {
             </div>
           </div>
 
+          <!-- 🤖 AI-аналитика прогноза (сразу после шапки с KPI) -->
+          <ForecastAIReport
+            :report="aiReport"
+            :can-regenerate="true"
+            :busy="reportBusy"
+            @regenerate="regenerateReport" />
+
           <!-- График -->
           <section class="bg-gray-900 border border-gray-800 rounded-xl p-4">
             <h2 class="text-sm font-semibold text-gray-200 mb-3">График спроса (история + прогноз 12 мес)</h2>
@@ -501,50 +527,13 @@ const sovSummaryRows = computed(() => {
             </details>
           </section>
 
-          <!-- Трафик top3/5/10 -->
-          <section v-if="trafficEst" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <h2 class="text-sm font-semibold text-gray-200 mb-3">🎯 Реалистичная оценка трафика при росте позиций</h2>
+          <!-- 🎯 Граф охвата семантики (по месяцам прогноза) -->
+          <section v-if="semanticDistribution" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-semibold text-gray-200 mb-1">🎯 Граф охвата семантики</h2>
             <p class="text-xs text-gray-500 mb-3">
-              Текущий трафик/мес: <span class="text-gray-200">{{ fmtNum(trafficEst.current_traffic_input) || 'не указан' }}</span>
-              · Неявный CTR сейчас: <span class="text-gray-200">{{ fmtCtr(trafficEst.implied_ctr_now) }}</span>
-              <span class="text-gray-600 ml-1">({{ trafficEst.implied_ctr_now_source }})</span>
+              Как семантика перетекает в ТОПы по месяцам прогноза и сколько трафика это даёт.
             </p>
-            <details v-if="trafficEst.realism" class="mb-3 text-[11px] text-gray-400">
-              <summary class="cursor-pointer hover:text-gray-300">
-                ℹ Как считается «реалистичный» прогноз (никто не выходит в ТОП по ВСЕМ запросам)
-              </summary>
-              <p class="mt-1 leading-relaxed">{{ trafficEst.realism.explanation }}</p>
-              <p class="mt-1">
-                Доли фраз, реально доходящих до ТОП: ТОП-3 {{ Math.round(trafficEst.realism.share_top3 * 100) }}%,
-                ТОП-5 {{ Math.round(trafficEst.realism.share_top5 * 100) }}%,
-                ТОП-10 {{ Math.round(trafficEst.realism.share_top10 * 100) }}%.
-                Кап от текущего трафика: ×{{ trafficEst.realism.max_uplift_top3 }} / ×{{ trafficEst.realism.max_uplift_top5 }} / ×{{ trafficEst.realism.max_uplift_top10 }}.
-              </p>
-            </details>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div v-for="key in ['top3','top5','top10']" :key="key"
-                   class="border border-gray-800 rounded-lg p-3">
-                <div class="text-[11px] text-gray-500 uppercase">
-                  ТОП-{{ key.replace('top','') }}
-                  · реал. CTR <span class="text-gray-300">{{ fmtCtr(trafficEst[key].realistic_ctr ?? (trafficEst[key].target_ctr * (trafficEst.realism?.['share_' + key] ?? 1))) }}</span>
-                </div>
-                <div class="text-2xl font-semibold text-emerald-300 mt-1">{{ fmtNum(trafficEst[key].annual) }}</div>
-                <div class="text-[11px] text-gray-500">визитов в год (реалистично)</div>
-                <div v-if="trafficEst[key].uplift_x" class="text-xs text-emerald-400 mt-1">
-                  ×{{ trafficEst[key].uplift_x }} vs текущий
-                  <span v-if="trafficEst[key].uplift_capped" class="text-amber-400 ml-1" :title="`Ограничено максимумом ×${trafficEst[key].max_uplift_x} (защита от нереалистичного скачка)`">
-                    🛡 cap
-                  </span>
-                </div>
-                <div v-if="trafficEst[key].annual_vs_current != null" class="text-[11px] text-gray-500 mt-0.5">
-                  Δ = {{ trafficEst[key].annual_vs_current > 0 ? '+' : '' }}{{ fmtNum(trafficEst[key].annual_vs_current) }}
-                </div>
-                <div v-if="trafficEst[key].optimistic" class="mt-2 pt-2 border-t border-gray-800 text-[11px] text-gray-500">
-                  Потолок (идеальная выдача): <span class="text-gray-300">{{ fmtNum(trafficEst[key].optimistic.annual) }}</span>
-                  <span v-if="trafficEst[key].optimistic.uplift_x" class="text-gray-500"> · ×{{ trafficEst[key].optimistic.uplift_x }}</span>
-                </div>
-              </div>
-            </div>
+            <SemanticCoverageChart :distribution="semanticDistribution" />
           </section>
 
 

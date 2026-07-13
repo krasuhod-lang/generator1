@@ -43,6 +43,11 @@ export const useForecasterStore = defineStore('forecaster', {
       return data?.task || null;
     },
 
+    async regenerateReport(id) {
+      const { data } = await api.post(`/forecaster/${id}/regenerate-report`);
+      return data;
+    },
+
     async getTask(id) {
       const { data } = await api.get(`/forecaster/${id}`);
       return data?.task || null;

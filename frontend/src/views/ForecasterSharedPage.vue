@@ -11,6 +11,8 @@ import { useRoute } from 'vue-router';
 import axios from 'axios';
 import ForecastChart from '../components/ForecastChart.vue';
 import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
+import SemanticCoverageChart from '../components/SemanticCoverageChart.vue';
+import ForecastAIReport from '../components/ForecastAIReport.vue';
 
 const route = useRoute();
 const task = ref(null);
@@ -35,8 +37,12 @@ const monthly    = computed(() => (task.value?.monthly_series?.monthly) || []);
 const fcPoints   = computed(() => (task.value?.forecast?.points) || []);
 const anomalies  = computed(() => (task.value?.anomalies?.drops) || []);
 const trend      = computed(() => task.value?.trend || null);
-const trafficEst = computed(() => task.value?.traffic_estimate || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
+const aiReport   = computed(() => task.value?.ai_report || null);
+const semanticDistribution = computed(() => {
+  const d = task.value?.semantic_distribution;
+  return Array.isArray(d) && d.length > 0 ? d : null;
+});
 const vangaSummary = computed(() => task.value?.vanga_summary || null);
 const sovForecast = computed(() => task.value?.sov_forecast || null);
 const unified     = computed(() => {
@@ -56,10 +62,6 @@ const growthPct = computed(() => {
 function fmtNum(n) {
   if (n == null || !Number.isFinite(n)) return '—';
   return Math.round(n).toLocaleString('ru-RU');
-}
-function fmtCtr(c) {
-  if (c == null || !Number.isFinite(c)) return '—';
-  return (c * 100).toFixed(2) + '%';
 }
 function fmtPct(v, digits = 1) {
   if (v == null || !Number.isFinite(Number(v))) return '—';
@@ -141,6 +143,11 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
           </div>
         </div>
 
+        <!-- 🤖 AI-аналитика прогноза (read-only) -->
+        <ForecastAIReport v-if="aiReport?.verdict === 'ok'"
+          :report="aiReport"
+          :can-regenerate="false" />
+
         <!-- График -->
         <section class="bg-gray-900 border border-gray-800 rounded-xl p-4">
           <h2 class="text-sm font-semibold mb-3">График спроса (история + прогноз 12 мес)</h2>
@@ -195,26 +202,13 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
           </p>
         </section>
 
-        <!-- Трафик -->
-        <section v-if="trafficEst" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <h2 class="text-sm font-semibold mb-3">🎯 Потенциальный трафик при росте позиций</h2>
+        <!-- 🎯 Граф охвата семантики -->
+        <section v-if="semanticDistribution" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h2 class="text-sm font-semibold mb-1">🎯 Граф охвата семантики</h2>
           <p class="text-xs text-gray-500 mb-3">
-            Текущий трафик/мес: <span class="text-gray-200">{{ fmtNum(trafficEst.current_traffic_input) || 'не указан' }}</span>
-            · Базовый CTR: <span class="text-gray-200">{{ fmtCtr(trafficEst.implied_ctr_now) }}</span>
+            Как семантика перетекает в ТОПы по месяцам прогноза и сколько трафика это даёт.
           </p>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div v-for="key in ['top3','top5','top10']" :key="key"
-                 class="border border-gray-800 rounded-lg p-3">
-              <div class="text-[11px] text-gray-500 uppercase">
-                ТОП-{{ key.replace('top','') }} · CTR {{ fmtCtr(trafficEst[key].target_ctr) }}
-              </div>
-              <div class="text-2xl font-semibold text-emerald-300 mt-1">{{ fmtNum(trafficEst[key].annual) }}</div>
-              <div class="text-[11px] text-gray-500">визитов в год</div>
-              <div v-if="trafficEst[key].uplift_x" class="text-xs text-emerald-400 mt-1">
-                ×{{ trafficEst[key].uplift_x }} vs текущий
-              </div>
-            </div>
-          </div>
+          <SemanticCoverageChart :distribution="semanticDistribution" />
         </section>
 
 

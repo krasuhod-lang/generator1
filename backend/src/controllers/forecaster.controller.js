@@ -16,7 +16,7 @@
  */
 
 const db = require('../config/db');
-const { processForecasterTask } = require('../services/forecaster/forecasterPipeline');
+const { processForecasterTask, runAiReportForTask } = require('../services/forecaster/forecasterPipeline');
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const {
@@ -248,6 +248,7 @@ async function getForecasterTask(req, res, next) {
               opportunities, expert_reports, leads_summary,
               sov_forecast, unified_forecast, arsenkin_report,
               deepseek_summary, vanga_summary,
+              ai_report, semantic_distribution,
               llm_provider, llm_model, tokens_in, tokens_out, cost_usd,
               share_token, share_created_at,
               created_at, started_at, completed_at, updated_at
@@ -318,6 +319,7 @@ async function rerunForecasterTask(req, res, next) {
               opportunities=NULL, expert_reports=NULL, leads_summary=NULL,
               sov_forecast=NULL, unified_forecast=NULL, arsenkin_report=NULL, deepseek_summary=NULL,
               vanga_summary=NULL,
+              ai_report=NULL, semantic_distribution=NULL,
               progress=NULL,
               llm_provider=DEFAULT, llm_model=NULL,
               tokens_in=DEFAULT, tokens_out=DEFAULT, cost_usd=DEFAULT,
@@ -335,6 +337,40 @@ async function rerunForecasterTask(req, res, next) {
     });
 
     return res.json({ task });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/forecaster/:id/regenerate-report ────────────────────
+// Перегенерация AI-аналитики прогноза (только владелец, только done-задача).
+// Ставит ai_report в состояние generating и запускает LLM в фоне —
+// фронт опрашивает задачу и показывает skeleton, пока отчёт не готов.
+async function regenerateForecastReport(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status, ai_report FROM forecaster_tasks
+        WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id],
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Задача не найдена' });
+    const t = rows[0];
+    if (t.status !== 'done') {
+      return res.status(409).json({ error: 'AI-аналитика доступна только для завершённой задачи' });
+    }
+    if (t.ai_report && t.ai_report.verdict === 'generating') {
+      return res.status(409).json({ error: 'Отчёт уже генерируется' });
+    }
+    await db.query(
+      `UPDATE forecaster_tasks SET ai_report='{"verdict":"generating"}'::jsonb, updated_at=NOW() WHERE id=$1`,
+      [t.id],
+    );
+    setImmediate(() => {
+      runAiReportForTask(t.id).catch((err) => {
+        console.error('[forecaster] regenerate-report failed:', err.message);
+      });
+    });
+    return res.status(202).json({ ok: true, status: 'generating' });
   } catch (err) {
     return next(err);
   }
@@ -409,6 +445,7 @@ async function getSharedForecast(req, res, next) {
               opportunities, expert_reports, leads_summary,
               sov_forecast, unified_forecast, arsenkin_report,
               deepseek_summary, vanga_summary,
+              ai_report, semantic_distribution,
               share_created_at, created_at, completed_at
          FROM forecaster_tasks
         WHERE share_token = $1 AND status='done'
@@ -430,6 +467,7 @@ module.exports = {
   getForecasterTask,
   deleteForecasterTask,
   rerunForecasterTask,
+  regenerateForecastReport,
   createShareLink,
   revokeShareLink,
   getSharedForecast,
