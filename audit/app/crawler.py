@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import urllib.robotparser
 from collections import deque
 from typing import Callable, Dict, Optional, Set
 from urllib.parse import urljoin, urlsplit
@@ -24,6 +23,7 @@ from xml.etree import ElementTree
 
 import aiohttp
 import networkx as nx
+from protego import Protego
 
 from . import issues as issues_mod
 from . import page_parser
@@ -130,15 +130,19 @@ async def _fetch_text(session: aiohttp.ClientSession, url: str, limit: int = 4 *
 
 
 async def load_robots(session: aiohttp.ClientSession, base_url: str):
-    """Скачивает robots.txt один раз, возвращает (RobotFileParser|None, sitemap_urls)."""
+    """Скачивает robots.txt один раз, возвращает (Protego|None, sitemap_urls).
+
+    БАГФИКС #1 (Health Score = 0): urllib.robotparser не понимает wildcard-
+    директивы (`Disallow: /*?`, `Disallow: */feed/` и т.п.), из-за чего такие
+    страницы реально скачивались краулером, ловили 404/дубли и обнуляли
+    health_score. Protego корректно поддерживает `*`/`$`."""
     parts = urlsplit(base_url)
     robots_url = f"{parts.scheme}://{parts.netloc}/robots.txt"
     text = await _fetch_text(session, robots_url, limit=512 * 1024)
     sitemaps = []
     rp = None
     if text:
-        rp = urllib.robotparser.RobotFileParser()
-        rp.parse(text.splitlines())
+        rp = Protego.parse(text)
         for line in text.splitlines():
             if line.lower().startswith("sitemap:"):
                 sitemaps.append(line.split(":", 1)[1].strip())
@@ -214,17 +218,26 @@ async def run_audit(start_url: str, *,
         queue: deque = deque([(start, 0)])
         queued.add(start)
         total_found = 1
+        # БАГФИКС #1: Protego (в отличие от urllib.robotparser) корректно
+        # матчит wildcard-директивы (`/*?`, `*/feed/`), но только если ему
+        # передать RAW-ссылку (с исходным query, до normalize_url, которая
+        # обрезает trailing slash и может съесть "?"). raw_map хранит первую
+        # встреченную сырую форму для каждой нормализованной ссылки.
+        raw_map: Dict[str, str] = {start: start}
+
+        def _robots_blocked(url: str) -> bool:
+            if rp is None:
+                return False
+            try:
+                return not rp.can_fetch(raw_map.get(url, url), "*")
+            except Exception:
+                return False
 
         async def process(url: str, depth: int):
             nonlocal total_found
             # БАГФИКС #3: запрещённые в robots.txt страницы НЕ сканируем —
             # фиксируем факт блокировки без HTTP-запроса.
-            robots_blocked = False
-            if rp is not None:
-                try:
-                    robots_blocked = not rp.can_fetch("*", url)
-                except Exception:
-                    robots_blocked = False
+            robots_blocked = _robots_blocked(url)
             if robots_blocked:
                 return {
                     "url": url,
@@ -311,6 +324,14 @@ async def run_audit(start_url: str, *,
                 for link in page.get("outlinks_internal") or []:
                     n = _norm(link)
                     if not n or page_parser.base_hostname(n) != base_host:
+                        continue
+                    raw_map.setdefault(n, link)
+                    # БАГФИКС #2: проверяем robots.txt ДО добавления в граф/очередь —
+                    # заблокированные URL с GET-параметрами не тратят max_pages и не
+                    # засоряют граф структуры сайта.
+                    if _robots_blocked(n):
+                        graph.add_node(n, robots_blocked=True)
+                        graph.add_edge(u, n)
                         continue
                     graph.add_edge(u, n)
                     if n not in visited and n not in queued and len(queued) < max_pages * 3:

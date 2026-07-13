@@ -20,6 +20,7 @@ const {
 } = require('../src/services/metaTags/semantics');
 const {
   extractPriceData, buildUserPrompt, postValidate, findHardViolations,
+  parseMetaJson, extractFirstJsonObject,
   TITLE_MAX, DESC_MIN, DESC_MAX, META_GENERATION_MODEL,
 } = require('../src/services/metaTags/metaGenerator');
 
@@ -318,6 +319,39 @@ test('prompt includes full competitor descriptions with CTR scores and LSI inten
   assert.match(prompt, /LSI-ИНТЕНТ/);
   assert.match(prompt, /напиши ЛУЧШУЮ версию/i);
   assert.match(prompt, /КАЖДОЕ должно попасть в Title/);
+});
+
+test('parseMetaJson: болтливость Gemini после закрывающей } игнорируется', () => {
+  const raw = '{ "title": "Тайтл" } "niche_analysis": "какой-то текст", "intent":';
+  assert.deepStrictEqual(parseMetaJson(raw), { title: 'Тайтл' });
+});
+
+test('parseMetaJson: мусор после } со своими скобками не ломает парсинг', () => {
+  const raw = '{"title":"Тайтл","h1":"Заголовок"} "niche_analysis": "текст с } внутри", "extra": {"a":1}';
+  assert.deepStrictEqual(parseMetaJson(raw), { title: 'Тайтл', h1: 'Заголовок' });
+});
+
+test('parseMetaJson: markdown-fences + вступительная фраза', () => {
+  const raw = 'Конечно! Вот JSON:\n```json\n{"title":"X"}\n```\nНадеюсь, помог!';
+  assert.deepStrictEqual(parseMetaJson(raw), { title: 'X' });
+});
+
+test('parseMetaJson: обрыв ответа восстанавливается autoCloseJSON', () => {
+  const raw = '{"title":"Тайтл","description":"Обрыв на полпути';
+  const parsed = parseMetaJson(raw);
+  assert.strictEqual(parsed.title, 'Тайтл');
+});
+
+test('parseMetaJson: полный не-JSON кидает осмысленную ошибку', () => {
+  assert.throws(() => parseMetaJson('просто текст без скобок'), /не-JSON/);
+  assert.throws(() => parseMetaJson(''), /пустой ответ/);
+});
+
+test('extractFirstJsonObject: скобки внутри строк не считаются', () => {
+  const raw = '{"a":"{нес}балансированные {скобки","b":"x\\"y}"} хвост }';
+  assert.strictEqual(extractFirstJsonObject(raw), '{"a":"{нес}балансированные {скобки","b":"x\\"y}"}');
+  assert.strictEqual(extractFirstJsonObject('нет объекта'), null);
+  assert.strictEqual(extractFirstJsonObject('{"незакрыт":1'), null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

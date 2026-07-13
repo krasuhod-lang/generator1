@@ -247,6 +247,38 @@ class TestGraphExport(unittest.TestCase):
         self.assertTrue(out["truncated"])
 
 
+class TestRobotsWildcard(unittest.TestCase):
+    """БАГФИКС #1: Protego (в отличие от urllib.robotparser) корректно
+    матчит wildcard-директивы (`/*?`, `*/feed/`), из-за которых страницы
+    с GET-параметрами ошибочно скачивались и обнуляли health_score."""
+
+    def test_disallow_query_wildcard(self):
+        from protego import Protego
+        rp = Protego.parse("User-agent: *\nDisallow: /*?\n")
+        self.assertTrue(rp.can_fetch("https://site.com/page/", "*"))
+        self.assertFalse(rp.can_fetch("https://site.com/?sort=price", "*"))
+        self.assertFalse(rp.can_fetch("https://site.com/page/?cat=1", "*"))
+
+    def test_disallow_feed_wildcard(self):
+        from protego import Protego
+        rp = Protego.parse("User-agent: *\nDisallow: */feed/\n")
+        self.assertFalse(rp.can_fetch("https://site.com/category/feed/", "*"))
+        self.assertTrue(rp.can_fetch("https://site.com/category/", "*"))
+
+    def test_allow_css_wildcard(self):
+        from protego import Protego
+        rp = Protego.parse("User-agent: *\nDisallow: /\nAllow: /*.css\n")
+        self.assertTrue(rp.can_fetch("https://site.com/assets/style.css", "*"))
+        self.assertFalse(rp.can_fetch("https://site.com/assets/script.js", "*"))
+
+    def test_crawl_delay(self):
+        from protego import Protego
+        rp = Protego.parse("User-agent: *\nCrawl-delay: 5\n")
+        self.assertEqual(rp.crawl_delay("*"), 5.0)
+        rp2 = Protego.parse("User-agent: *\nDisallow:\n")
+        self.assertIsNone(rp2.crawl_delay("*"))
+
+
 class TestPageParser(unittest.TestCase):
     HTML = """
     <html><head>

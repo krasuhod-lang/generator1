@@ -457,6 +457,45 @@ function findHardViolations(result, inputs) {
  * При полной невозможности — кидает осмысленную ошибку с фрагментом
  * сырого текста, чтобы её было видно в логах задачи.
  */
+
+/**
+ * extractFirstJsonObject — вырезает ПЕРВЫЙ сбалансированный JSON-объект.
+ *
+ * «Синдром болтливости» Gemini: модель корректно закрывает объект, а затем
+ * дописывает мусор («"niche_analysis": "..."» в пустоту). Если в мусоре есть
+ * своя }, срез «первая { … последняя }» даёт невалидный JSON и JSON.parse
+ * падает с «Unexpected non-whitespace character after JSON at position N».
+ * Поэтому сканируем от первой { с учётом строк/экранирования и режем ровно
+ * там, где глубина скобок вернулась к нулю.
+ *
+ * @param {string} text
+ * @returns {string|null} — подстрока с объектом или null, если объект не закрыт
+ */
+function extractFirstJsonObject(text) {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+
+  let inString = false;
+  let escapeNext = false;
+  let depth = 0;
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (inString) {
+      if (char === '\\') escapeNext = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === '{') depth += 1;
+    else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return text.substring(start, i + 1);
+    }
+  }
+  return null; // объект не закрыт (обрыв по MAX_TOKENS)
+}
+
 function parseMetaJson(rawText) {
   const raw = String(rawText || '').trim();
   if (!raw) throw new Error('Gemini вернул пустой ответ');
@@ -464,12 +503,17 @@ function parseMetaJson(rawText) {
   // 1) Снимаем markdown fences
   let t = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
 
-  // 2) Берём срез от первой { до последней }
+  // 2) Вырезаем первый СБАЛАНСИРОВАННЫЙ объект — игнорируем весь мусор,
+  //    который модель дописала после закрывающей } (в т.ч. с лишними скобками).
+  const balanced = extractFirstJsonObject(t);
+  if (balanced) {
+    try { return JSON.parse(balanced); } catch (_) { /* fallback ниже */ }
+  }
+
+  // 3) Запасной срез от первой { до последней } + прямой JSON.parse
   const fb = t.indexOf('{');
   const lb = t.lastIndexOf('}');
   if (fb !== -1 && lb > fb) t = t.substring(fb, lb + 1);
-
-  // 3) Прямой JSON.parse
   try { return JSON.parse(t); } catch (_) { /* fallback */ }
 
   // 4) autoCloseJSON — восстановление обрыва
@@ -535,7 +579,20 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
     totalCachedTokens   += callRes.cachedTokens   || 0;
     model = callRes.model || model;
 
-    const parsed = parseMetaJson(callRes.text);
+    // Ошибка парсинга (болтливость/обрыв ответа) — не валим задачу сразу,
+    // а повторяем запрос к Gemini в рамках общего лимита попыток.
+    let parsed;
+    try {
+      parsed = parseMetaJson(callRes.text);
+    } catch (parseErr) {
+      if (attempt === MAX_ATTEMPTS) throw parseErr;
+      allNotes.push(
+        `Попытка ${attempt}: не удалось распарсить ответ Gemini `
+        + `(${parseErr.message.slice(0, 160)}). Повторяем запрос.`,
+      );
+      userPrompt = baseUserPrompt;
+      continue;
+    }
     const { result: validated, notes } = postValidate(parsed, inputs);
     result = validated;
     lastViolations = findHardViolations(result, inputs);
@@ -637,6 +694,8 @@ module.exports = {
   buildUserPrompt,
   postValidate,
   findHardViolations,
+  parseMetaJson,
+  extractFirstJsonObject,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX, H1_MAX,
   META_GENERATION_MODEL,
 };
