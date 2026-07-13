@@ -331,7 +331,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         callOpts.timeoutMs = timeoutMs;
       }
-      if (adapter === 'gemini' && model) {
+      if (model) {
         callOpts.model = model;
       }
       if (adapter === 'gemini' && activeCachedContent) {

@@ -59,6 +59,13 @@ function normalizeWord(word) {
   return russianStem(String(word).toLowerCase());
 }
 
+// Общие коммерческие штампы не являются differentiator_lsi: они встречаются
+// в копирайтинге повсеместно и не должны выдаваться модели за уникальное УТП.
+const GENERIC_CTR_WORDS = new Set([
+  'купить', 'заказать', 'цена', 'стоимость', 'недорого', 'лучший',
+  'качественный', 'выгодный', 'предлагаем', 'компания',
+].map(normalizeWord));
+
 /**
  * @param {string} keyword
  * @param {Array<{title:string, snippet:string}>} serpData
@@ -164,7 +171,12 @@ function _selectDifferentiatorLsi(keyword, serpData, docCounts) {
       .split(/\s+/)
       .forEach((w) => {
         const n = normalizeWord(w);
-        if (n.length > 3 && !STOP_WORDS.has(n) && !/^\d+$/.test(n)) candidates.add(n);
+        if (n.length > 3
+            && !STOP_WORDS.has(n)
+            && !GENERIC_CTR_WORDS.has(n)
+            && !/^\d+$/.test(n)) {
+          candidates.add(n);
+        }
       });
   };
   addTokens(keyword);
@@ -220,4 +232,5 @@ module.exports = {
   STOP_WORDS,
   OBLIGATORY_DF_THRESHOLD,
   DIFFERENTIATOR_MAX_COUNT,
+  GENERIC_CTR_WORDS,
 };

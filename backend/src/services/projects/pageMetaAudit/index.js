@@ -233,6 +233,8 @@ async function auditPages({ project, snapshot, queryPage, regenerate } = {}) {
       };
       const lengths = analyzeMetaLengths(before);
       const semantics = buildSemanticsFromQueries(cand.queries);
+      const { extractPriceData } = require('../../metaTags/metaGenerator');
+      const priceData = extractPriceData({ page_context: scraped.markdown || scraped.content || '' });
 
       const entry = {
         url: cand.url,
@@ -240,6 +242,7 @@ async function auditPages({ project, snapshot, queryPage, regenerate } = {}) {
         before,
         lengths,
         mandatory_words: semantics.title_mandatory_words,
+        price_data: priceData,
         queries: cand.queries,
         serp_analyzed: false,
         suggested: null,
@@ -248,7 +251,9 @@ async function auditPages({ project, snapshot, queryPage, regenerate } = {}) {
 
       if (doRegenerate && semantics.title_mandatory_words.length > 0) {
         try {
-          const generated = await _regenerateOne({ project, cand, before, semantics, cfg });
+          const generated = await _regenerateOne({
+            project, cand, before, semantics, cfg, priceData,
+          });
           if (generated) {
             entry.suggested = generated.suggested;
             entry.diff = generated.diff;
@@ -274,7 +279,9 @@ async function auditPages({ project, snapshot, queryPage, regenerate } = {}) {
  *
  * @param {object} [audienceNicheDigest] — разовый digest ЦА/ниши (опционально)
  */
-async function _regenerateOne({ project, cand, before, semantics, cfg, audienceNicheDigest = '' }) {
+async function _regenerateOne({
+  project, cand, before, semantics, cfg, audienceNicheDigest = '', priceData = null,
+}) {
   const { runMetaStagesForKeyword } = require('../../metaTags/metaStages');
   const serpCfg = (cfg && cfg.serpAnalysis) || {};
 
@@ -292,6 +299,7 @@ async function _regenerateOne({ project, cand, before, semantics, cfg, audienceN
       niche: (cand.queries[0] && cand.queries[0].query) || '',
       page_context: before.description || before.title || '',
       summary: before.description || before.title || '',
+      price_data: priceData,
       audienceNicheDigest: audienceNicheDigest || '',
     },
   });
@@ -351,6 +359,7 @@ async function regenerateMetaForPages({ project, pages = [], funnel = null } = {
         semantics,
         cfg,
         audienceNicheDigest,
+        priceData: page.price_data || null,
       });
       if (generated) {
         entry.suggested = generated.suggested;

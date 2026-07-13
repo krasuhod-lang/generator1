@@ -13,7 +13,13 @@
 
 const assert = require('assert');
 const { analyzeSerpCtr, _percentile } = require('../src/services/metaTags/serpCtrAnalyzer');
-const { extractSemantics, checkLsiUsage } = require('../src/services/metaTags/semantics');
+const {
+  extractSemantics, checkLsiUsage, GENERIC_CTR_WORDS,
+} = require('../src/services/metaTags/semantics');
+const {
+  extractPriceData, buildUserPrompt, postValidate, findHardViolations,
+  TITLE_MAX, DESC_MIN, DESC_MAX, META_GENERATION_MODEL,
+} = require('../src/services/metaTags/metaGenerator');
 
 let passed = 0;
 let failed = 0;
@@ -126,6 +132,45 @@ test('analyzeSerpCtr: suggested_title_formula non-empty', () => {
   assert.ok(ctr.recommendations.suggested_title_formula.length > 0);
 });
 
+test('analyzeSerpCtr: SERP intent is deterministic from a >50% majority', () => {
+  const commercial = analyzeSerpCtr([
+    { title: 'Каталог кирпича', snippet: 'Купить с доставкой', url: '/catalog' },
+    { title: 'Кирпич', snippet: 'Цена 18 руб', url: '/shop' },
+    { title: 'Заказать кирпич', snippet: 'Интернет-магазин', url: '/order' },
+  ], { keyword: 'кирпич' });
+  assert.strictEqual(commercial.serp_intent.value, 'Commercial/Transactional');
+
+  const informational = analyzeSerpCtr([
+    { title: 'Как выбрать кирпич', snippet: 'Пошаговый обзор', url: '/blog/1' },
+    { title: 'Рейтинг кирпича', snippet: 'Отзывы владельцев', url: '/blog/2' },
+    { title: 'Кирпич своими руками', snippet: 'Почему важна марка', url: '/blog/3' },
+  ], { keyword: 'кирпич' });
+  assert.strictEqual(informational.serp_intent.value, 'Informational');
+});
+
+test('analyzeSerpCtr: intent uses TOP-10 only', () => {
+  const top = Array.from({ length: 10 }, () => ({
+    title: 'Как выбрать кирпич', snippet: 'Обзор и рейтинг',
+  }));
+  const tail = Array.from({ length: 10 }, () => ({
+    title: 'Купить кирпич', snippet: 'Цена, заказ и доставка',
+  }));
+  assert.strictEqual(
+    analyzeSerpCtr([...top, ...tail], { keyword: 'кирпич' }).serp_intent.value,
+    'Informational',
+  );
+});
+
+test('analyzeSerpCtr: exact price/year dominance becomes must_have', () => {
+  const dominant = Array.from({ length: 10 }, (_, i) => ({
+    title: `${i < 9 ? 'Кирпич 18 руб' : 'Кирпич'} ${i < 8 ? '2026' : ''}`,
+    snippet: 'Каталог и доставка',
+  }));
+  const ctr = analyzeSerpCtr(dominant, { keyword: 'кирпич' });
+  assert.ok(ctr.recommendations.must_have.some((r) => /точную подтверждённую цену/i.test(r)));
+  assert.ok(ctr.recommendations.must_have.some((r) => /current_year/i.test(r)));
+});
+
 test('analyzeSerpCtr: empty SERP returns sane defaults', () => {
   const ctr = analyzeSerpCtr([], { keyword: 'foo' });
   assert.strictEqual(ctr.competitor_titles.length, 0);
@@ -139,6 +184,61 @@ test('checkLsiUsage: stemmed match counts as used', () => {
   const res = checkLsiUsage('Купить пластиковые окна в Москве', ['окна', 'москва']);
   assert.strictEqual(res.used_lsi.length, 2, `used: ${res.used_lsi.join(',')}`);
   assert.strictEqual(res.missed_lsi.length, 0);
+});
+
+test('generic commercial boilerplate is not a differentiator', () => {
+  const sem = extractSemantics('кирпич купить недорого редкийформат', [
+    { title: 'Облицовочный кирпич', snippet: 'Каталог продукции' },
+  ]);
+  assert.ok(GENERIC_CTR_WORDS.size > 0);
+  assert.ok(!sem.differentiator_lsi.some((w) => /куп|недорог/.test(w)));
+  assert.ok(sem.differentiator_lsi.some((w) => /редк/.test(w)));
+});
+
+test('meta prompt uses verified price, deterministic intent and new limits', () => {
+  const ctrAnalysis = analyzeSerpCtr(serp, { keyword: 'окна' });
+  const inputs = { summary: 'Монтаж, цена от 18 руб', ctrAnalysis };
+  const prompt = buildUserPrompt({
+    keyword: 'окна', semantics: extractSemantics('окна', serp), serpData: serp,
+    inputs, year: '2026',
+  });
+  assert.match(prompt, /SERP_INTENT: Commercial\/Transactional/);
+  assert.match(prompt, /\[price_data\]\): цена от 18 руб/i);
+  assert.strictEqual(extractPriceData(inputs), 'цена от 18 руб');
+  assert.strictEqual(
+    extractPriceData({ summary: 'Бесплатная доставка от 5 000 руб. Гарантия качества.' }),
+    null,
+  );
+  assert.strictEqual(TITLE_MAX, 75);
+  assert.strictEqual(DESC_MIN, 150);
+  assert.strictEqual(DESC_MAX, 160);
+  assert.strictEqual(META_GENERATION_MODEL, 'gemini-3.1-pro-preview');
+});
+
+test('post-validation pins intent and never inserts a phone', () => {
+  const ctrAnalysis = analyzeSerpCtr(serp, { keyword: 'окна' });
+  const source = {
+    intent: 'Informational',
+    title: 'Пластиковые окна в Москве — монтаж с гарантией',
+    description: 'Пластиковые окна с монтажом и гарантией. Бесплатный замер от мастера. Оставьте заявку онлайн.',
+    h1: 'Пластиковые окна для дома',
+  };
+  const { result } = postValidate(source, { phone: '+74951234567', ctrAnalysis });
+  assert.strictEqual(result.intent, 'Commercial/Transactional');
+  assert.ok(!result.description.includes('495'));
+});
+
+test('hard validation rejects commercial questions and unverified prices', () => {
+  const ctrAnalysis = { serp_intent: {
+    value: 'Commercial/Transactional', commercial_frequency: 0.8, informational_frequency: 0.1,
+  } };
+  const violations = findHardViolations({
+    description: 'Ищете кирпич по цене 18 руб?',
+    h1: 'Купить кирпич недорого',
+  }, { ctrAnalysis });
+  assert.ok(violations.some((v) => /вопрос/i.test(v)));
+  assert.ok(violations.some((v) => /price_data отсутствует/i.test(v)));
+  assert.ok(violations.some((v) => /H1/i.test(v)));
 });
 
 test('extractSemantics → analyzeSerpCtr integration: obligatory LSI reach prompt', () => {

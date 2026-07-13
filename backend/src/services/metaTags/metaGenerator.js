@@ -5,27 +5,25 @@
  * Использует общий callGemini-адаптер (прокси, JSON-strict guard, квоты,
  * ретраи) — та же модель/инфраструктура, что и Stage 3/5/6 пайплайна.
  *
- * v2 отличия от v1:
- *   • H1 ВКЛЮЧЁН (≤70 символов, главный ключ, не копия Title);
- *   • Description: 140–155 символов (раньше 140–160);
- *   • Бренд — обязательно в середине/конце, телефон — в формате
- *     +7 (XXX) XXX-XX-XX перед CTA для коммерческих интентов;
+ * Ключевые правила:
+ *   • H1 — UX-заголовок (≤70 символов), а не копия SEO Title;
+ *   • Title ≤75, Description 150–160 символов;
+ *   • SERP intent и CTR-команды вычисляются до LLM;
  *   • Анализ ЦА/ниши (analyzeAudienceAndNiche) пробрасывается в
  *     user-prompt как `[АНАЛИЗ ЦА И НИШИ]`-блок через inputs.audienceNicheDigest.
  */
 
 const { callGemini } = require('../llm/gemini.adapter');
-const { callGrok }   = require('../llm/grok.adapter');
-const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
 const { checkLsiUsage } = require('./semantics');
 
 const TITLE_MIN = 50;
-const TITLE_MAX = 60;
-const DESC_MIN  = 140;
-const DESC_MAX  = 155;
+const TITLE_MAX = 75;
+const DESC_MIN  = 150;
+const DESC_MAX  = 160;
 const H1_MAX    = 70;
+const META_GENERATION_MODEL = 'gemini-3.1-pro-preview';
 
 const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Data-Driven копирайтер.
 Задача: создать идеальные мета-теги (Title, Description) и H1 для веб-страницы,
@@ -33,8 +31,10 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 
 <Ограничения и правила DrMax>
 
-1. Title (строго 50–60 символов, включая пробелы):
+1. Title (до 75 символов, включая пробелы):
    - Главный ключ должен быть в первых 3 словах.
+   - Главный ключ и главное УТП / differentiator_lsi ОБЯЗАНЫ находиться в первых
+     50 символах — хвост после 50 символов может быть обрезан в выдаче.
    - Обязательно используй 2–4 «важных слова» из списка.
    - Выбери одну из формул:
      a) «Ключ + выгода + срок/гарантия»
@@ -45,7 +45,7 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
      ёлочки («»). Только прямые кавычки (").
    - Пример: «Кредит под залог недвижимости | Ставка от 9% | Одобрение за 24ч»
 
-2. Meta Description (строго 140–155 символов, включая пробелы):
+2. Meta Description (150–160 символов, включая пробелы):
    - Законченное предложение (не обрывай на полуслове).
    - Вплети оставшиеся «важные слова» и 2–3 слова из {lsi_list}.
    - Правило покрытия LSI (приоритет — читаемость и CTR, не «галочка»):
@@ -58,27 +58,24 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
      {page_context}.
    - Если передан {brand_name}: ОБЯЗАТЕЛЬНО добавь его в середину или конец
      текста (например: «… от компании "Seniko"»). НЕ ставь бренд в самое начало.
-   - Если определён интент transactional или commercial_investigation И передан
-     {phone_number}: добавь телефон в формате +7 (XXX) XXX-XX-XX в конце,
-     перед CTA.
    - ОБЯЗАТЕЛЕН CTA (призыв к действию) в самом конце (например: «Узнайте цены!»,
      «Оставьте заявку онлайн.», «Запишитесь онлайн.»).
-   - Пример: «Нужен кредит под залог? ООО 'Финанс Плюс' выдаёт от 500 тыс. до
-     30 млн. Ставка 9%. Звоните: +7 (495) 123-45-67. Оставьте заявку онлайн.»
 
 3. H1 (до 70 символов):
-   - Понятный человеку, содержит главный ключ.
+   - Это заголовок ДЛЯ ЧЕЛОВЕКА, который уже перешёл на сайт; он не должен
+     выглядеть как SEO-спам.
+   - Понятный, вовлекающий, раскрывает суть страницы и содержит главный ключ.
    - НЕ копирует Title один в один — измени порядок слов или используй синоним.
-   - Пример: «Кредит под залог недвижимости — быстрое решение»
+   - Не пиши топонимы/города, если они не критичны для смысла.
+   - Запрещены коммерческие хвосты «цена», «недорого», «купить» — они допустимы
+     только в Title.
 
-4. Изолированный Интент:
-   - Определи ОДИН из четырёх типов:
-     transactional | commercial_investigation | informational | navigational.
-   - Кратко обоснуй выбор.
+4. SERP_INTENT:
+   - НЕ определяй интент самостоятельно. Используй переданный SERP_INTENT как
+     жёсткое условие и верни его без изменения.
 
 5. АНТИ-ГАЛЛЮЦИНАЦИИ (КРИТИЧНО):
    - НЕ придумывай цены, скидки, гарантии, если их нет в {page_context}.
-   - НЕ придумывай телефон, если {phone_number} пуст.
    - НЕ используй другой год, кроме {current_year}. Если пусто — не пиши год вообще.
      ЗАПРЕЩЕНО упоминать год МЕНЬШЕ {current_year} (устаревший SERP-кэш не оправдание).
    - Если внутри текста нужны кавычки, используй одинарные ('), чтобы не
@@ -93,6 +90,40 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
    - Конкретную поисковую систему называй ТОЛЬКО если это явно следует из
      {page_context} / {brand_facts} (например, кейс именно по Google Ads).
 
+7. ПРАВИЛА ФОРМИРОВАНИЯ DESCRIPTION:
+   - Если SERP_INTENT = "Commercial/Transactional":
+     • СТРОГО ЗАПРЕЩЕНЫ знак «?» и начало с вопроса («Ищете», «Нужен», «Хотите»).
+     • Используй инвертированную пирамиду: главный ключ/бренд → проверенные
+      факты, УТП и цифры → CTA.
+     • Главный ключ должен встретиться в первых 80 символах.
+     • По возможности включи 4 CTR-компонента: Primary Keyword; подтверждённое
+      УТП/эмоциональный триггер; социальное доказательство, если оно есть во
+      входных данных; мягкий CTA в самом конце.
+     • CTA: «Сравните условия!», «Забронируйте онлайн!», «Скачайте прайс!»,
+      «Узнайте условия!».
+   - Если SERP_INTENT = "Informational":
+     • Вопрос в начале разрешён, но сразу после него дай тизер ответа.
+     • CTA информационный и стоит в конце: «Читайте пошаговый гайд!»,
+      «Узнайте подробности!», «Смотрите обзор!».
+   - Если SERP_INTENT = "Mixed/Unclear": не имитируй коммерческий интент;
+     используй нейтральную фактическую формулировку и CTA по контексту.
+   - Самое важное УТП размести до 120-го символа.
+
+8. ПРАВИЛА РАБОТЫ С ЦЕНАМИ:
+   - Если [price_data] содержит точную подтверждённую цену, ОБЯЗАТЕЛЬНО перенеси
+     именно эту цифру в Description, желательно в первую половину.
+   - Если [price_data] = null, КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ слова «цена»,
+     «стоимость», «руб», «₽» и любые выдуманные числа. Используй другие
+     подтверждённые УТП: ассортимент, гарантии, скорость доставки.
+
+9. NEGATIVE PROMPT:
+   - Запрещён keyword stuffing и перечисление вариантов ключа через запятую.
+   - Запрещены пустые штампы «В этой статье мы расскажем», «Наша компания
+     предлагает», «Добро пожаловать на сайт».
+   - Не оставляй главное УТП после 120-го символа и не обрывай мысль.
+   - Не выдумывай эмоциональные триггеры, социальные доказательства, цифры,
+     гарантии или наличие — используй только входные данные.
+
 </Ограничения и правила DrMax>
 
 Выдай ответ СТРОГО в формате валидного JSON. Без markdown-обёрток (без \`\`\`json),
@@ -102,8 +133,8 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 Структура JSON:
 {
   "niche_analysis":      "Краткий анализ ниши на основе ключа и контекста (2-3 предложения)",
-  "intent":              "transactional | commercial_investigation | informational | navigational",
-  "intent_reason":       "почему выбран именно этот интент",
+  "intent":              "переданный SERP_INTENT без изменения",
+  "intent_reason":       "SERP_INTENT определён детерминированно по ТОП-10",
   "title":               "твой вариант Title",
   "title_length":        число,
   "description":         "твой вариант Description",
@@ -160,6 +191,24 @@ function detectYear(importantWords, recommendedWords, serpData) {
   return detected;
 }
 
+function extractPriceData(inputs = {}) {
+  const explicit = inputs.price_data ?? inputs.priceData;
+  if (explicit != null && String(explicit).trim()) {
+    return String(explicit).replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
+
+  const source = [
+    inputs.page_context,
+    inputs.summary,
+  ].filter(Boolean).join(' | ').replace(/\s+/g, ' ');
+  if (!source) return null;
+
+  const match = source.match(
+    /(?:цена|стоимость)\s*[:—-]?\s*(?:от\s*)?\d[\d\s]*(?:[.,]\d+)?\s*(?:₽|руб(?:\.|лей)?|р\.)/i,
+  );
+  return match ? match[0].trim().slice(0, 160) : null;
+}
+
 function buildUserPrompt({ keyword, semantics, serpData, inputs, year }) {
   const importantWords   = (semantics.title_mandatory_words       || []).slice(0, 6);
   const recommendedWords = (semantics.description_mandatory_words || []).slice(0, 10);
@@ -173,7 +222,11 @@ function buildUserPrompt({ keyword, semantics, serpData, inputs, year }) {
   if (inputs.niche)    pageContextParts.push(`Тема страницы: ${inputs.niche}`);
   if (inputs.toponym)  pageContextParts.push(`Регион: ${inputs.toponym}`);
   if (inputs.summary)  pageContextParts.push(`УТП / факты: ${inputs.summary}`);
+  if (inputs.page_context && inputs.page_context !== inputs.summary) {
+    pageContextParts.push(`Данные страницы: ${inputs.page_context}`);
+  }
   const pageContext = pageContextParts.join(' | ') || 'Нет данных';
+  const priceData = extractPriceData(inputs);
 
   // Опциональный блок: сжатый анализ ЦА и ниши, выполненный один раз на задачу
   // (см. pipeline.runMetaTagTaskInner → analyzeAudienceAndNiche). Если анализа
@@ -210,9 +263,11 @@ ${inputs.relevanceBrief.trim()}`
     const diff = (ctr.recommendations && ctr.recommendations.differentiation) || [];
     const obligatoryLsi    = (semantics && semantics.obligatory_lsi)     || [];
     const differentiatorLsi = (semantics && semantics.differentiator_lsi) || [];
+    const serpIntent = ctr.serp_intent || {};
     ctrBlock = `
 
 [АНАЛИЗ КЛИКАБЕЛЬНОСТИ ВЫДАЧИ — фактчекинг ТОП-10, использовать обязательно]
+- SERP_INTENT: ${serpIntent.value || 'Mixed/Unclear'} (commercial=${pct(serpIntent.commercial_frequency)}, informational=${pct(serpIntent.informational_frequency)}). Это жёсткое условие, не переопределяй его.
 - Длина Title в ТОПе: p50=${p.length_p50_title}, p90=${p.length_p90_title} — укладывайся в этот диапазон.
 - Длина Description в ТОПе: p50=${p.length_p50_desc}, p90=${p.length_p90_desc}.
 - Частота CTA в Description конкурентов: ${pct(p.cta_frequency)}; года в Title: ${pct(p.year_frequency)}; цены: ${pct(p.price_frequency)}; гео: ${pct(p.geo_frequency)}; бренда: ${pct(p.brand_frequency)}.
@@ -231,8 +286,8 @@ ${inputs.relevanceBrief.trim()}`
 
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Бренд (brand_name): ${inputs.brand || ''}
-- Телефон (phone_number): ${inputs.phone || ''}
-- Год (current_year): ${year}
+  - Год (current_year): ${year}
+  - Проверенная цена ([price_data]): ${priceData || 'null'}
 - Главный поисковый запрос (target_keyword): ${keyword}
 - Важные слова из ТОП-10 (important_words_list) — ИСПОЛЬЗОВАТЬ ВСЕ, распределить между Title / Description / H1, каждое ≥1 раз: ${importantWords.join(', ')}
 - LSI-слова (lsi_list) — вплести 2–3 в Description, остальное по возможности: ${recommendedWords.join(', ')}
@@ -242,51 +297,23 @@ ${inputs.relevanceBrief.trim()}`
 ${competitorsTitles}${audienceBlock}${relevanceBlock}${ctrBlock}
 
 Создай мета-теги строго по правилам DrMax из system-prompt (формулы Title, длины,
-бренд / телефон / CTA в Description, H1 ≤70 символов и не копия Title).`;
+бренд / CTA в Description, H1 ≤70 символов и не копия Title).`;
 }
 
 /**
- * Нормализует телефонный номер к виду «+7 (XXX) XXX-XX-XX».
- *
- * Поддерживаемые входные форматы:
- *   • 11-значный с лидирующей 7 или 8: «+74951234567», «8 (495) 123-45-67»
- *   • 10-значный (без кода страны):     «4951234567»  → достраиваем «7»
- *
- * Если на входе мусор / меньше 10 цифр / нероссийский номер — возвращаем
- * исходную строку (trim), так как промпт явно запрещает выдумывать номер,
- * а вшивать неполный — хуже, чем оставить как есть.
- */
-function formatPhoneRu(raw) {
-  const s = String(raw || '');
-  const digits = s.replace(/\D/g, '');
-  let core = digits;
-  if (core.length === 11 && (core.startsWith('7') || core.startsWith('8'))) {
-    core = `7${core.slice(1)}`;
-  } else if (core.length === 10) {
-    core = `7${core}`;
-  } else {
-    // Пустая строка, <10 цифр, >11 цифр или 11 цифр не с 7/8 → не наш формат.
-    return s.trim();
-  }
-  // core = '7XXXXXXXXXX' (11)
-  const a = core.slice(1, 4);
-  const b = core.slice(4, 7);
-  const c = core.slice(7, 9);
-  const d = core.slice(9, 11);
-  return `+7 (${a}) ${b}-${c}-${d}`;
-}
-
-/**
- * Постобработка ответа модели: гарантирует длины Title/Description/H1, бренд,
- * телефон. Покрытие важных LSI здесь НЕ форсируется — этим занимается
- * оркестратор generateDrMaxMeta (retry-вызовом + мягкой подстановкой), чтобы
- * не ломать читаемость Description «костыльными» хвостами вида «Также: …».
+ * Постобработка ответа модели: гарантирует длины Title/Description/H1 и бренд.
+ * Покрытие важных LSI здесь не форсируется, чтобы не ломать читаемость.
  *
  * @param {object} result — распарсенный JSON от Gemini
  * @param {object} inputs — { niche, brand, toponym, phone, summary }
  */
 function postValidate(result, inputs) {
   const notes = [];
+  const serpIntent = inputs.ctrAnalysis && inputs.ctrAnalysis.serp_intent;
+  if (serpIntent && serpIntent.value) {
+    result.intent = serpIntent.value;
+    result.intent_reason = `Определено по ТОП-10: commercial ${Math.round(serpIntent.commercial_frequency * 100)}%, informational ${Math.round(serpIntent.informational_frequency * 100)}%`;
+  }
 
   // 1. Title: укорачиваем, если перебор. Если короче 50 — оставляем как есть,
   //    модель почти всегда лучше, чем механическое расширение.
@@ -316,36 +343,13 @@ function postValidate(result, inputs) {
     }
   }
 
-  // 4. Force phone для коммерческих интентов — в формате +7 (XXX) XXX-XX-XX
-  //    перед CTA (по правилу 2 спеки v2).
-  const rawPhone = (inputs.phone || '').trim();
-  const isCommercial =
-    result.intent === 'transactional' || result.intent === 'commercial_investigation';
-  if (rawPhone && isCommercial && typeof result.description === 'string') {
-    const phone = formatPhoneRu(rawPhone);
-    // Считаем «телефон уже есть», если в Description встречается либо
-    // отформатированная, либо сырая (digits-only) форма.
-    const digitsInDesc = result.description.replace(/\D/g, '');
-    const phoneDigits  = phone.replace(/\D/g, '');
-    if (phoneDigits && !digitsInDesc.includes(phoneDigits)) {
-      const insertion = ` Звоните: ${phone}.`;
-      const stripped = result.description.replace(/[\s.!?]+$/, '') + '.';
-      if ((stripped + insertion).length <= DESC_MAX) {
-        result.description = `${stripped}${insertion}`;
-        notes.push(`Телефон ${phone} добавлен в Description (коммерческий интент).`);
-      } else {
-        notes.push(`⚠️ Телефон ${phone} не уместился в Description (лимит ${DESC_MAX}).`);
-      }
-    }
-  }
-
-  // 5. Финальный контроль длины Description после всех вставок.
+  // 4. Финальный контроль длины Description после всех вставок.
   if (typeof result.description === 'string' && result.description.length > DESC_MAX) {
     result.description = trimToLastSentence(result.description, DESC_MAX - 3);
   }
   if (typeof result.description === 'string') result.description_length = result.description.length;
 
-  // 6. H1 (v2 — поле теперь поддерживается). Жёсткий лимит 70 символов,
+  // 5. H1 (v2 — поле теперь поддерживается). Жёсткий лимит 70 символов,
   //    обрезаем по последнему слову при перепреве. Если модель вернула
   //    Title и H1 идентично — фиксируем замечание (но не правим: это работа
   //    промпта/retry, копирование ради уникальности нельзя сделать механически
@@ -374,46 +378,33 @@ function postValidate(result, inputs) {
   return { result, notes };
 }
 
-/**
- * Мягкая «последняя соломинка»: если после двух Gemini-попыток в Description
- * всё ещё пропущены важные LSI — пробуем вставить их в существующий
- * перечислительный ряд (после первой запятой), чтобы грамматика осталась
- * корректной. Триггер — наличие запятой в Description: только тогда
- * добавление «, WORD» читается как продолжение списка, а не как костыль.
- *
- * Если в Description нет запятой — НЕ трогаем текст: лучше зафиксировать
- * пропуск в notes, чем испортить CTR неестественной концовкой.
- *
- * @returns {{description: string, injected: string[]}}
- */
-function trySoftLsiInjection(description, missedWords) {
-  if (typeof description !== 'string' || !description) {
-    return { description, injected: [] };
-  }
-  if (!Array.isArray(missedWords) || !missedWords.length) {
-    return { description, injected: [] };
-  }
-  // Нужна хотя бы одна запятая, чтобы новые слова продолжили существующий
-  // ряд однородных членов и не выглядели как ярлыки/теги.
-  if (!/,\s/.test(description)) {
-    return { description, injected: [] };
-  }
+function findHardViolations(result, inputs) {
+  const violations = [];
+  const description = String(result.description || '');
+  const h1 = String(result.h1 || '');
+  const intent = inputs.ctrAnalysis && inputs.ctrAnalysis.serp_intent
+    && inputs.ctrAnalysis.serp_intent.value;
+  const priceData = extractPriceData(inputs);
 
-  let base = description.replace(/[\s.!?]+$/, '');
-  const injected = [];
-  for (const word of missedWords) {
-    const candidate = `${base}, ${word}`;
-    const candidateWithPeriod = `${candidate}.`;
-    if (candidateWithPeriod.length <= DESC_MAX) {
-      base = candidate;
-      injected.push(word);
-    } else {
-      // suffix только удлиняется — следующие слова тоже не влезут
-      break;
-    }
+  if (intent === 'Commercial/Transactional'
+      && (description.includes('?') || /^(ищете|нужен|нужна|нужно|хотите)\b/i.test(description.trim()))) {
+    violations.push('Commercial Description не должен содержать вопрос или начинаться с «Ищете/Нужен/Хотите»');
   }
-  if (!injected.length) return { description, injected: [] };
-  return { description: `${base}.`, injected };
+  if (!priceData && /(?:цен[ауы]?|стоимост|руб(?:\.|лей)?|₽)/i.test(description)) {
+    violations.push('price_data отсутствует: запрещены цена, стоимость, руб и ₽');
+  }
+  const priceValue = priceData && priceData.match(/\d[\d\s]*(?:[.,]\d+)?\s*(?:₽|руб(?:\.|лей)?|р\.)/i);
+  if (priceData && priceValue
+      && !description.replace(/\s+/g, ' ').toLowerCase().includes(priceValue[0].replace(/\s+/g, ' ').toLowerCase())) {
+    violations.push(`точная price_data «${priceData}» не перенесена в Description`);
+  }
+  if (/(?:^|\W)(купить|цена|недорого)(?:\W|$)/i.test(h1)) {
+    violations.push('H1 содержит запрещённый коммерческий хвост');
+  }
+  if (/^(в этой статье мы расскажем|наша компания предлагает|добро пожаловать на сайт)/i.test(description.trim())) {
+    violations.push('Description начинается с запрещённого пустого штампа');
+  }
+  return violations;
 }
 
 /**
@@ -458,10 +449,8 @@ function parseMetaJson(rawText) {
  *   2) Если важные слова всё-таки пропущены — второй Gemini-вызов с явным
  *      корректирующим блоком в user-prompt («не использованы: X, Y — перепиши
  *      органично»). DSPy-style self-correction, как в TZ-extractor.
- *   3) Если и после второй попытки слова пропущены — мягкая подстановка в
- *      существующий перечислительный ряд Description (только при наличии
- *      запятой). Что не помещается / не вписывается — фиксируется в
- *      post_validation_notes с маркером ⚠️, текст не корраптится.
+ *   3) Если после трёх попыток слова пропущены — фиксируем warning для редактора,
+ *      но не вклеиваем LSI механически.
  *
  * @param {object} args
  * @param {string} args.keyword
@@ -477,19 +466,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
   const baseUserPrompt = buildUserPrompt({ keyword, semantics, serpData, inputs, year });
 
-  const MAX_ATTEMPTS = (() => {
-    // DSPy-style: число попыток зависит от модели Gemini (Flash менее
-    // дисциплинирован, нужно больше ретраев). Для Grok оставляем legacy=2.
-    if (inputs && inputs.llm_provider === 'grok') return 2;
-    try {
-      const { getGeminiProfile } = require('../llm/geminiProfiles');
-      const m = normalizeGeminiCopywritingModel(inputs && inputs.gemini_model);
-      const p = getGeminiProfile(m);
-      return Math.max(2, p.selfCorrectionMaxRetries || 2);
-    } catch (_) {
-      return 2;
-    }
-  })();
+  const MAX_ATTEMPTS = 3;
   const allNotes = [];
   let result = null;
   let lastMissed = [];
@@ -500,20 +477,16 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
   let model = '';
   let attemptsMade = 0;
   let userPrompt = baseUserPrompt;
+  let lastViolations = [];
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     attemptsMade = attempt;
-    // callGemini / callGrok автоматически: JSON-strict guard в systemInstruction,
+    // callGemini автоматически: JSON-strict guard в systemInstruction,
     // прокси, ретраи на сетевых/5xx/429, агрегация text-частей. maxTokens=8192:
-    // gemini-3.x thinking-модель тратит часть бюджета на «мысли»; для Grok
-    // бюджет тоже хватает с запасом для Title+Description+H1.
-    const provider = (inputs && inputs.llm_provider === 'grok') ? 'grok' : 'gemini';
-    const callFn   = provider === 'grok' ? callGrok : callGemini;
+    // gemini-3.x thinking-модель тратит часть бюджета на «мысли».
     const callOptions = { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 };
-    if (provider === 'gemini') {
-      callOptions.model = normalizeGeminiCopywritingModel(inputs && inputs.gemini_model);
-    }
-    const callRes = await callFn(
+    callOptions.model = META_GENERATION_MODEL;
+    const callRes = await callGemini(
       SYSTEM_PROMPT,
       userPrompt,
       callOptions,
@@ -527,6 +500,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
     const parsed = parseMetaJson(callRes.text);
     const { result: validated, notes } = postValidate(parsed, inputs);
     result = validated;
+    lastViolations = findHardViolations(result, inputs);
     if (attempt > 1) allNotes.push(`— Попытка ${attempt} (перегенерация) —`);
     allNotes.push(...notes);
 
@@ -535,25 +509,36 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
         || typeof result.title !== 'string'
         || typeof result.description !== 'string') {
       lastMissed = [];
-      break;
+      if (!lastViolations.length) break;
+    } else {
+      const combined = `${result.title} ${result.description}`;
+      const { missed_lsi } = checkLsiUsage(combined, importantWords);
+      lastMissed = missed_lsi;
     }
-    const combined = `${result.title} ${result.description}`;
-    const { missed_lsi } = checkLsiUsage(combined, importantWords);
-    lastMissed = missed_lsi;
 
-    if (!lastMissed.length) break;
+    if (!lastMissed.length && !lastViolations.length) break;
     if (attempt === MAX_ATTEMPTS) {
-      allNotes.push(
-        `Попытка ${attempt}: после перегенерации остались непокрытые важные LSI: `
-        + `${lastMissed.join(', ')}.`,
-      );
+      if (lastMissed.length) {
+        allNotes.push(
+          `Попытка ${attempt}: после перегенерации остались непокрытые важные LSI: `
+          + `${lastMissed.join(', ')}.`,
+        );
+      }
+      if (lastViolations.length) {
+        allNotes.push(`Попытка ${attempt}: остались нарушения: ${lastViolations.join('; ')}.`);
+      }
       break;
     }
 
-    allNotes.push(
-      `Попытка ${attempt}: пропущены важные LSI: ${lastMissed.join(', ')}. `
-      + 'Запрашиваем органичную перегенерацию у Gemini.',
-    );
+    if (lastMissed.length) {
+      allNotes.push(
+        `Попытка ${attempt}: пропущены важные LSI: ${lastMissed.join(', ')}. `
+        + 'Запрашиваем органичную перегенерацию у Gemini.',
+      );
+    }
+    if (lastViolations.length) {
+      allNotes.push(`Попытка ${attempt}: нарушения правил CTR: ${lastViolations.join('; ')}.`);
+    }
 
     // Корректирующий блок к user-prompt: явно перечисляем пропущенные слова и
     // запрещаем «костыли» (хвосты «Также: …», голые перечисления).
@@ -564,40 +549,34 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 - Title: ${result.title}
 - Description: ${result.description}
 
-В ней НЕ использованы обязательные «важные слова»: ${lastMissed.join(', ')}.
+Нарушения, которые необходимо исправить:
+${lastMissed.length ? `- Не использованы обязательные важные слова: ${lastMissed.join(', ')}.` : ''}
+${lastViolations.map((v) => `- ${v}.`).join('\n')}
 
 Перепиши Title и Description так, чтобы каждое из этих слов появилось
 ОРГАНИЧНО (внутри осмысленного предложения, без перечислений через запятую,
 без хвостов «Также: …» / «Ключи: …»). Сохрани:
-- длину Title 50–60 символов,
-- длину Description 140–155 символов,
+- длину Title до 75 символов; ключ + главное УТП в первых 50,
+- длину Description 150–160 символов,
 - H1 ≤ 70 символов и НЕ копию Title,
 - CTA в конце Description,
-- бренд / телефон / год по тем же правилам, что и раньше.
+- бренд / CTA / год / price_data по тем же правилам, что и раньше.
 
 Если какое-то слово невозможно вписать без переспама или нарушения
 читаемости — лучше честно опусти его (отметь это в coverage_self_audit),
 чем испортить сниппет ради «галочки».`;
   }
 
-  // Ступень 3 — мягкая подстановка как «последняя соломинка».
+  // После трёх попыток не вклеиваем LSI механически: читаемость и CTR важнее.
   if (lastMissed.length) {
-    const soft = trySoftLsiInjection(result.description, lastMissed);
-    if (soft.injected.length) {
-      result.description = soft.description;
-      result.description_length = result.description.length;
-      allNotes.push(
-        `Мягко вшиты в существующий ряд Description пропущенные LSI: `
-        + `${soft.injected.join(', ')}.`,
-      );
-    }
-    const stillMissed = lastMissed.filter((w) => !soft.injected.includes(w));
-    if (stillMissed.length) {
-      allNotes.push(
-        `⚠️ Не удалось органично вписать важные LSI (оставлены ради читаемости/CTR): `
-        + `${stillMissed.join(', ')}. SEO-специалист может решить, нужны ли они для этого ключа.`,
-      );
-    }
+    lastMissed.forEach((word) => {
+      allNotes.push(`⚠️ LSI слово «${word}» не интегрировано, так как нарушает читаемость.`);
+    });
+  }
+  if (lastViolations.length) {
+    throw new Error(
+      `Мета-теги отклонены после ${MAX_ATTEMPTS} попыток: ${lastViolations.join('; ')}`,
+    );
   }
 
   result.detected_year = year;
@@ -609,12 +588,17 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
     thoughtsTokens:  totalThoughtsTokens,
     cachedTokens:    totalCachedTokens,
     attempts: attemptsMade,
+    provider: 'gemini',
   };
   return result;
 }
 
 module.exports = {
   generateDrMaxMeta,
-  formatPhoneRu,
+  extractPriceData,
+  buildUserPrompt,
+  postValidate,
+  findHardViolations,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX, H1_MAX,
+  META_GENERATION_MODEL,
 };
