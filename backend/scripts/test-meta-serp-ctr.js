@@ -12,7 +12,9 @@
  */
 
 const assert = require('assert');
-const { analyzeSerpCtr, _percentile } = require('../src/services/metaTags/serpCtrAnalyzer');
+const {
+  analyzeSerpCtr, analyzeLsiIntent, _percentile, _ctrScore,
+} = require('../src/services/metaTags/serpCtrAnalyzer');
 const {
   extractSemantics, checkLsiUsage, GENERIC_CTR_WORDS,
 } = require('../src/services/metaTags/semantics');
@@ -209,9 +211,9 @@ test('meta prompt uses verified price, deterministic intent and new limits', () 
     extractPriceData({ summary: 'Бесплатная доставка от 5 000 руб. Гарантия качества.' }),
     null,
   );
-  assert.strictEqual(TITLE_MAX, 75);
-  assert.strictEqual(DESC_MIN, 150);
-  assert.strictEqual(DESC_MAX, 160);
+  assert.strictEqual(TITLE_MAX, 80);
+  assert.strictEqual(DESC_MIN, 180);
+  assert.strictEqual(DESC_MAX, 190);
   assert.strictEqual(META_GENERATION_MODEL, 'gemini-3.1-pro-preview');
 });
 
@@ -246,6 +248,76 @@ test('extractSemantics → analyzeSerpCtr integration: obligatory LSI reach prom
   const ctr = analyzeSerpCtr(serp, { keyword: 'пластиковые окна', semantics: sem });
   const obligatoryMention = ctr.recommendations.must_have.find((r) => /Обязательные LSI/i.test(r));
   assert.ok(obligatoryMention, `must_have should list obligatory LSI: ${ctr.recommendations.must_have.join('|')}`);
+});
+
+test('analyzeLsiIntent: commercial LSI dominance → Commercial/Transactional', () => {
+  const intent = analyzeLsiIntent({
+    title_mandatory_words: ['купить', 'цена', 'доставка', 'окна'],
+    description_mandatory_words: ['заказать', 'москва'],
+    obligatory_lsi: ['гарантия'],
+  });
+  assert.strictEqual(intent.value, 'Commercial/Transactional');
+  assert.ok(intent.commercial_lsi.length >= 4, `commercial: ${intent.commercial_lsi.join(',')}`);
+  assert.ok(intent.confidence > 0.5, `confidence=${intent.confidence}`);
+});
+
+test('analyzeLsiIntent: informational LSI dominance → Informational', () => {
+  const intent = analyzeLsiIntent({
+    title_mandatory_words: ['как', 'выбрать', 'обзор'],
+    description_mandatory_words: ['рейтинг', 'отзывы'],
+    obligatory_lsi: [],
+  });
+  assert.strictEqual(intent.value, 'Informational');
+  assert.ok(intent.informational_lsi.length >= 4);
+});
+
+test('analyzeLsiIntent: no intent markers → Mixed/Unclear, confidence 0', () => {
+  const intent = analyzeLsiIntent({
+    title_mandatory_words: ['окна', 'пвх'],
+    description_mandatory_words: [],
+  });
+  assert.strictEqual(intent.value, 'Mixed/Unclear');
+  assert.strictEqual(intent.confidence, 0);
+  assert.ok(intent.neutral_lsi.length >= 2);
+});
+
+test('analyzeSerpCtr: lsi_intent present when semantics passed', () => {
+  const sem = extractSemantics('пластиковые окна москва', serp);
+  const ctr = analyzeSerpCtr(serp, { keyword: 'пластиковые окна москва', semantics: sem });
+  assert.ok(ctr.lsi_intent && typeof ctr.lsi_intent.value === 'string');
+});
+
+test('analyzeSerpCtr: ctr_score assigned to each competitor title', () => {
+  const ctr = analyzeSerpCtr(serp, { keyword: 'пластиковые окна москва' });
+  assert.ok(ctr.competitor_titles.every((t) => typeof t.ctr_score === 'number'));
+  // Сильный сниппет (год + цена + гео + CTA) должен обойти слабый «Дешёвые окна».
+  const strong = ctr.competitor_titles[0].ctr_score;
+  const weak = ctr.competitor_titles[3].ctr_score;
+  assert.ok(strong > weak, `strong=${strong} weak=${weak}`);
+});
+
+test('_ctrScore: bounded 0..100', () => {
+  const maxed = _ctrScore({
+    tokens_in_query: 5, has_year: true, has_number: true, has_pricing: true,
+    has_geo: true, emotional_triggers: true, length: 60,
+  }, { has_cta: true, has_usp: true, has_price_signal: true });
+  assert.ok(maxed <= 100);
+  const zero = _ctrScore({ tokens_in_query: 0, length: 5 }, null);
+  assert.strictEqual(zero, 0);
+});
+
+test('prompt includes full competitor descriptions with CTR scores and LSI intent', () => {
+  const sem = extractSemantics('окна', serp);
+  const ctrAnalysis = analyzeSerpCtr(serp, { keyword: 'окна', semantics: sem });
+  const prompt = buildUserPrompt({
+    keyword: 'окна', semantics: sem, serpData: serp,
+    inputs: { ctrAnalysis }, year: '2026',
+  });
+  assert.match(prompt, /Description: Закажите окна с гарантией 10 лет/);
+  assert.match(prompt, /CTR-оценка: \d+\/100/);
+  assert.match(prompt, /LSI-ИНТЕНТ/);
+  assert.match(prompt, /напиши ЛУЧШУЮ версию/i);
+  assert.match(prompt, /КАЖДОЕ должно попасть в Title/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
