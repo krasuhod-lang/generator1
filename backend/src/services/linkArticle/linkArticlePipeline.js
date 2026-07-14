@@ -1013,8 +1013,35 @@ async function processLinkArticleTask(taskId) {
     }
 
     // 8. Embed images + strip any unused placeholders
-    const finalHtml  = embedImages(articleHtml, deliveredImages);
-    const finalPlain = buildPlainText(finalHtml);
+    let finalHtml  = embedImages(articleHtml, deliveredImages);
+    let finalPlain = buildPlainText(finalHtml);
+
+    // 8a-bis. LinguaForensic v3.6 — детекция AI-текста + fluency-рерайт
+    //     (skill skills/AI-detect-v-3-6.md, общий с gist_py M8). Усиливает
+    //     каркас, не заменяя его: graceful, при ошибке/низкой роботности
+    //     текст не меняется. Отчёт попадает в quality_gate.lingua_forensic.
+    let linguaForensicReport = null;
+    try {
+      const { runLinguaForensicPass } = require('../linguaForensic');
+      await setStage(taskId, 'linguaforensic', 98);
+      const lfResult = await runLinguaForensicPass(finalHtml, {
+        pipeline: 'link',
+        taskId,
+        log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+      });
+      linguaForensicReport = lfResult.report;
+      if (lfResult.report?.verdict === 'rewritten') {
+        finalHtml  = lfResult.html;
+        finalPlain = buildPlainText(finalHtml);
+        await appendLog(
+          taskId,
+          `🕵️ LinguaForensic: рерайт принят — роботность ${lfResult.report.robotness_before}% → ${lfResult.report.robotness_after}%`,
+          'ok',
+        );
+      }
+    } catch (lfErr) {
+      console.warn(`[linkArticle] LinguaForensic failed: ${lfErr.message}`);
+    }
 
     // 8b. SEO/GEO 2026: JSON-LD (Article + Author + FAQPage [+ HowTo]).
     let articleHtmlWithSchema = finalHtml;
@@ -1120,6 +1147,14 @@ async function processLinkArticleTask(taskId) {
         blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
         warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
         summary:    gateResult.summary,
+        lingua_forensic: linguaForensicReport
+          ? {
+              verdict:          linguaForensicReport.verdict,
+              robotness_before: linguaForensicReport.robotness_before ?? null,
+              robotness_after:  linguaForensicReport.robotness_after ?? null,
+              passes:           linguaForensicReport.passes ?? 0,
+            }
+          : null,
         checked_at: new Date().toISOString(),
       };
       await appendLog(

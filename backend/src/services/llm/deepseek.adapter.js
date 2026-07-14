@@ -3,7 +3,9 @@
 const axios = require('axios');
 
 const DEEPSEEK_ENDPOINT = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1';
-const DEEPSEEK_MODEL    = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+// Все аналитические функции пайплайнов идут через DeepSeek-V4-Pro
+// (копирайтинг — через Gemini, см. geminiModels.js).
+const DEEPSEEK_MODEL    = process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
 /**
  * Определяет, является ли модель DeepSeek reasoning-моделью (R1/reasoner).

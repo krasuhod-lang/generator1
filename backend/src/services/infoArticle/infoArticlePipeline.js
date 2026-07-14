@@ -174,7 +174,7 @@ const INFO_ARTICLE_GEMINI_MODEL =
 const INFO_ARTICLE_DEEPSEEK_MODEL =
   process.env.INFO_ARTICLE_DEEPSEEK_MODEL ||
   process.env.DEEPSEEK_MODEL ||
-  'deepseek-chat';
+  'deepseek-v4-pro';
 
 const MAX_PARALLEL_IMAGES = (() => {
   const v = parseInt(process.env.INFO_ARTICLE_MAX_PARALLEL_IMAGES, 10);
@@ -2207,8 +2207,35 @@ async function processInfoArticleTask(taskId) {
     //     HTML / форматированного текста картинка уезжала вместе со статьёй.
     //     image_prompts при этом всё равно сохраняется отдельно — пользователь
     //     может скачать обложку из галереи, если нужен файл для отдельной публикации.
-    const finalHtml  = embedImages(articleHtml, renderedImages);
-    const finalPlain = buildPlainText(finalHtml);
+    let finalHtml  = embedImages(articleHtml, renderedImages);
+    let finalPlain = buildPlainText(finalHtml);
+
+    // 14a-bis. LinguaForensic v3.6 — детекция AI-текста + fluency-рерайт
+    //      (skill skills/AI-detect-v-3-6.md, общий с gist_py M8). Усиливает
+    //      каркас, не заменяя его: graceful, при ошибке/низкой роботности
+    //      текст не меняется. Отчёт попадает в quality_gate.lingua_forensic.
+    let linguaForensicReport = null;
+    try {
+      const { runLinguaForensicPass } = require('../linguaForensic');
+      await setStage(taskId, 'linguaforensic', 98);
+      const lfResult = await runLinguaForensicPass(finalHtml, {
+        pipeline: 'info',
+        taskId,
+        log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+      });
+      linguaForensicReport = lfResult.report;
+      if (lfResult.report?.verdict === 'rewritten') {
+        finalHtml  = lfResult.html;
+        finalPlain = buildPlainText(finalHtml);
+        await appendLog(
+          taskId,
+          `🕵️ LinguaForensic: рерайт принят — роботность ${lfResult.report.robotness_before}% → ${lfResult.report.robotness_after}%`,
+          'ok',
+        );
+      }
+    } catch (lfErr) {
+      console.warn(`[infoArticle] LinguaForensic failed: ${lfErr.message}`);
+    }
 
     // 14b. SEO-метатеги (Часть 1 эпика): ИИ формирует title (≤60) и
     //      description (≤160) строго по тематике статьи. Полностью graceful —
@@ -2351,6 +2378,14 @@ async function processInfoArticleTask(taskId) {
         blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
         warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
         summary:    gateResult.summary,
+        lingua_forensic: linguaForensicReport
+          ? {
+              verdict:          linguaForensicReport.verdict,
+              robotness_before: linguaForensicReport.robotness_before ?? null,
+              robotness_after:  linguaForensicReport.robotness_after ?? null,
+              passes:           linguaForensicReport.passes ?? 0,
+            }
+          : null,
         checked_at: new Date().toISOString(),
       };
       await appendLog(

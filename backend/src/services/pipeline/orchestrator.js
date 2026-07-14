@@ -966,6 +966,32 @@ async function runPipeline(task, ctx) {
     log(`Unused inputs report ошибка: ${e.message} — пропускаем`, 'warn');
   }
 
+  // ── LinguaForensic v3.6 (детекция AI-текста + fluency-рерайт) ──────
+  // Дополнительный слой поверх финального HTML — НЕ заменяет каркас.
+  // Skill: skills/AI-detect-v-3-6.md (тот же, что в gist_py M8). Graceful:
+  // при ошибке/отключении текст не меняется. Если рерайт принят — Stage 8
+  // и Quality gate работают уже с улучшенной версией.
+  let linguaForensicReport = null;
+  try {
+    const { runLinguaForensicPass } = require('../linguaForensic');
+    const lfResult = await runLinguaForensicPass(
+      s7Result.finalHTML || finalBlocks.join('\n\n'),
+      { pipeline: 'seo', taskId, log, onTokens },
+    );
+    linguaForensicReport = lfResult.report;
+    if (lfResult.report?.verdict === 'rewritten') {
+      s7Result.finalHTML = lfResult.html;
+      log(
+        `LinguaForensic: рерайт принят — роботность ${lfResult.report.robotness_before}% → ` +
+        `${lfResult.report.robotness_after}%`,
+        'success',
+      );
+    }
+    publish(taskId, { type: 'linguaforensic_report', report: linguaForensicReport });
+  } catch (e) {
+    log(`LinguaForensic: непойманное исключение — ${e.message} — пропускаем`, 'warn');
+  }
+
   // ── Stage 8 (опц.): Quality Evaluator ─────────────────────────────
   // Default OFF. Включается ENV STAGE8_EVALUATOR_ENABLED=true. Не блокирует
   // и не перегенерирует контент; пишет evaluator_report в БД и SSE.
@@ -1014,6 +1040,14 @@ async function runPipeline(task, ctx) {
       blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
       warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
       summary:    gateResult.summary,
+      lingua_forensic: linguaForensicReport
+        ? {
+            verdict:          linguaForensicReport.verdict,
+            robotness_before: linguaForensicReport.robotness_before ?? null,
+            robotness_after:  linguaForensicReport.robotness_after ?? null,
+            passes:           linguaForensicReport.passes ?? 0,
+          }
+        : null,
       checked_at: new Date().toISOString(),
     };
     try {
@@ -1048,6 +1082,7 @@ async function runPipeline(task, ctx) {
     tfIdfDensity:       s7Result.tfIdfDensity          || [],
     unusedInputs:       unusedInputsReport             || null,
     evaluatorReport:    evaluatorReport                || null,
+    linguaForensic:     linguaForensicReport           || null,
     qualityGate:        qualityGateVerdict             || null,
     generationTimeSec,
   });

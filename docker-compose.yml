@@ -80,6 +80,8 @@ services:
       # (GEMINI_PROXY_URL, _HOST, _PORT, _USER, _PASS, _PROTO, _2, _3, _4, _5)
       # 🧬 Bio-Brain: внутренний URL aegis_py в docker-сети.
       AEGIS_PY_URL: ${AEGIS_PY_URL:-http://aegis_py:8800}
+      # LinguaForensic v3.6 — общий skill-файл детектора AI-текста
+      LINGUAFORENSIC_SKILL_PATH: ${LINGUAFORENSIC_SKILL_PATH:-/app/skills/AI-detect-v-3-6.md}
     ports:
       - "3000:3000"
     depends_on:
@@ -93,6 +95,8 @@ services:
       # Bind-mount, чтобы (1) уже существующие yaml-файлы видны контейнеру,
       # (2) DSPy retrain мог писать новые версии и они переживали restart.
       - ./brain_state:/app/brain_state
+      # Skill-файлы (LinguaForensic v3.6 и др.)
+      - ./skills:/app/skills:ro
 
   # ── Worker (BullMQ) ──────────────────────────────────────────────────────
   # Отдельный контейнер для воркера — не блокирует HTTP-сервер
@@ -111,6 +115,8 @@ services:
       RELEVANCE_INTERNAL_URL: ${RELEVANCE_INTERNAL_URL:-http://relevance:8000}
       RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
       RELEVANCE_HEADLESS_FETCHER_URL: ${RELEVANCE_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch}
+      # LinguaForensic v3.6 — общий skill-файл детектора AI-текста
+      LINGUAFORENSIC_SKILL_PATH: ${LINGUAFORENSIC_SKILL_PATH:-/app/skills/AI-detect-v-3-6.md}
     command: node src/queue/worker.js
     depends_on:
       postgres:
@@ -120,6 +126,8 @@ services:
     volumes:
       - uploads:/app/uploads
       - ./brain_state:/app/brain_state
+      # Skill-файлы (LinguaForensic v3.6 и др.)
+      - ./skills:/app/skills:ro
 
   # ── Frontend (Vue 3 SPA → Nginx) ─────────────────────────────────────────
   frontend:
@@ -215,6 +223,44 @@ services:
       retries: 3
       start_period: 20s
 
+  # ── GIST + LinguaForensic DSPy pipeline (gist_py, FastAPI :8003) ────────
+  # Генерация SEO-контента по логике GIST: M0 Relevance Scanner → M1 Scraper
+  # → M2 Noise → M3 Gap Finder → M4–M6 генерация → M7 Redundancy →
+  # M8 LinguaForensic v3.6 → M9 Fluency Rewriter → M10 SEO Formatter.
+  # Наружу не торчит: Node-бэкенд ходит на http://gist:8003 с X-Internal-Token.
+  gist:
+    build:
+      context: ./gist_py
+      dockerfile: Dockerfile
+      args:
+        INSTALL_HEAVY: ${GIST_PY_INSTALL_HEAVY:-false}
+    container_name: seo_gist
+    restart: unless-stopped
+    environment:
+      GIST_INTERNAL_TOKEN: ${GIST_INTERNAL_TOKEN:-}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+      SERPAPI_API_KEY: ${SERPAPI_API_KEY:-}
+      GIST_LLM_API_BASE: ${GIST_LLM_API_BASE:-}
+      GIST_LLM_API_KEY: ${GIST_LLM_API_KEY:-}
+      GIST_LLM_MODEL: ${GIST_LLM_MODEL:-gemini-3.1-pro-preview}
+      GIST_EMBED_API_BASE: ${GIST_EMBED_API_BASE:-}
+      GIST_EMBED_API_KEY: ${GIST_EMBED_API_KEY:-}
+      GIST_LINGUAFORENSIC_SKILL: ${GIST_LINGUAFORENSIC_SKILL:-/app/skills/AI-detect-v-3-6.md}
+      RELEVANCE_HEADLESS_FETCHER_URL: ${RELEVANCE_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch}
+      DATABASE_URL: ${GIST_DATABASE_URL:-}
+      LOG_LEVEL: ${GIST_LOG_LEVEL:-INFO}
+    volumes:
+      # Skill-файл LinguaForensic v3.6 (skills/AI-detect-v-3-6.md, в git)
+      - ./skills:/app/skills:ro
+    expose:
+      - "8003"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   # ── A.E.G.I.S. Python (Bio-Brain NEAT + DSPy + GraphRAG-фасад) ──────────
   # 🧬 Поднимаем по умолчанию в основном стеке, чтобы Bio-Brain «жил
   # своей жизнью»: фоновый поток `_biobrain_evolve_loop` в aegis_py/app/main.py
@@ -242,7 +288,7 @@ services:
       GOOGLE_API_KEY:       ${GOOGLE_API_KEY:-}
       GEMINI_API_KEY:       ${GEMINI_API_KEY:-}
       DEEPSEEK_API_KEY:     ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_MODEL:       ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_MODEL:       ${DEEPSEEK_MODEL:-deepseek-v4-pro}
       # Папка с лучшим геномом + persistent buffer (см. biobrain/storage.py).
       AEGIS_BIOBRAIN_DIR: /app/brain_state
     volumes:
