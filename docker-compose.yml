@@ -288,7 +288,7 @@ services:
       GOOGLE_API_KEY:       ${GOOGLE_API_KEY:-}
       GEMINI_API_KEY:       ${GEMINI_API_KEY:-}
       DEEPSEEK_API_KEY:     ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_MODEL:       ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_MODEL:       ${DEEPSEEK_MODEL:-deepseek-v4-pro}
       # Папка с лучшим геномом + persistent buffer (см. biobrain/storage.py).
       AEGIS_BIOBRAIN_DIR: /app/brain_state
     volumes:

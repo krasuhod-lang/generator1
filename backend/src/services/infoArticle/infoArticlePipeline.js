@@ -174,7 +174,7 @@ const INFO_ARTICLE_GEMINI_MODEL =
 const INFO_ARTICLE_DEEPSEEK_MODEL =
   process.env.INFO_ARTICLE_DEEPSEEK_MODEL ||
   process.env.DEEPSEEK_MODEL ||
-  'deepseek-chat';
+  'deepseek-v4-pro';
 
 const MAX_PARALLEL_IMAGES = (() => {
   const v = parseInt(process.env.INFO_ARTICLE_MAX_PARALLEL_IMAGES, 10);
