@@ -1281,8 +1281,20 @@ async function listProjectTasks(req, res, next) {
  */
 async function listProjectOptions(req, res, next) {
   try {
+    // Как и listProjects, включаем не только собственные проекты, но и
+    // расшаренные через project_grants — иначе пикер показывает лишь
+    // часть проектов, доступных пользователю в разделе «Проекты».
     const { rows } = await db.query(
-      `SELECT id, name, url FROM projects WHERE user_id = $1 ORDER BY name ASC`,
+      `SELECT id, name, url FROM projects WHERE user_id = $1
+       UNION
+       SELECT p.id, p.name, p.url
+         FROM projects p
+         JOIN project_grants g ON g.project_id = p.id
+        WHERE g.user_id = $1
+          AND g.revoked_at IS NULL
+          AND (g.expires_at IS NULL OR g.expires_at > NOW())
+          AND p.user_id <> $1
+       ORDER BY name ASC`,
       [req.user.id],
     );
     return res.json({ items: rows });

@@ -37,7 +37,8 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   // Проверка параметров
   if (temperature < 0 || temperature > 2) throw new Error('Invalid temperature');
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
-  if (timeoutMs < 1000 || timeoutMs > 300000) throw new Error('Invalid timeout');
+  // timeoutMs = 0 → без ограничения по времени (axios: timeout 0 = disabled)
+  if (timeoutMs !== 0 && timeoutMs < 1000) throw new Error('Invalid timeout');
 
   // API ключ DeepSeek — из переменной окружения
   const apiKey = process.env.DEEPSEEK_API_KEY;

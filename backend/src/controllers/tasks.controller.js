@@ -1060,8 +1060,9 @@ async function callExtractorLLM(tzText) {
   // Системная инструкция — оптимизированная для DeepSeek
   const systemMsg = 'Ты — аналитик ТЗ и специалист по сбору бизнес-данных. Извлекай данные СТРОГО из текста. Возвращай только корректный JSON без markdown-обёрток. ВАЖНО: для полей target_audience, niche_features, constraints, priority_page_types, audience_segments, brand_usp, service_process — давай РАЗВЁРНУТЫЕ описания из 2-5 предложений, НЕ одно слово. Описывай подробно: кто аудитория, какие особенности ниши, какие ограничения, какие УТП, как работает процесс. Собирай ВСЕ факты о бренде: цены, условия, гарантии, лицензии, опыт, команда.';
 
-  // Увеличенный timeout для стабильности; temperature=0 для детерминизма
-  const llmOptions = { temperature: 0.0, maxTokens: 8192, timeoutMs: 150000 };
+  // Без ограничения по времени (timeoutMs: 0 → адаптеры отключают timeout);
+  // temperature=0 для детерминизма
+  const llmOptions = { temperature: 0.0, maxTokens: 8192, timeoutMs: 0 };
 
   const MAX_RETRIES = 2; // DSPy self-correction: до 2 попыток с feedback
   let lastErrors = [];

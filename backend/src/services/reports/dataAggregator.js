@@ -984,6 +984,10 @@ async function _positionSection(projectId, from, to, granularity) {
 async function _tasksSection(projectId, from, to, granularity, manualBlocks, opts = {}) {
   const includeHidden = opts.includeHidden === true;
   try {
+    // Backfill лога из таблиц модулей ПЕРЕД выборкой: без этого «Подтянуть
+    // работы» не видит завершённые ранее генерации (мета-теги, статьи,
+    // анализы и т.д.) — пайплайны сами tasks_auto_log не пишут.
+    await tasksLog.syncFromModules(projectId);
     const [items, summary] = await Promise.all([
       tasksLog.listForPeriod(projectId, from, to, { includeHidden }),
       tasksLog.summarizeByType(projectId, from, to),
