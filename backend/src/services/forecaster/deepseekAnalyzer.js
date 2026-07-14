@@ -1,21 +1,21 @@
 'use strict';
 
 /**
- * forecaster/deepseekAnalyzer.js — обращение к Gemini (gemini-3.1-pro-preview,
- * та же модель, что используется в генераторах контента) для генерации
- * аналитических выводов по числовым результатам прогноза.
+ * forecaster/deepseekAnalyzer.js — аналитические LLM-вызовы прогнозатора.
+ * Все обращения идут через analyticLLM.js: приоритетно DeepSeek (модель из
+ * env DEEPSEEK_MODEL, по умолчанию deepseek-v4-pro), Gemini — фолбэк.
  *
  * Промпт собирается из JSON-метрик (не из сырого CSV) — модель не получает
  * клиентских данных, только агрегаты. Модель пишет 4-7 буллетов выводов и
  * 2-3 рекомендации (на русском).
  *
  * Гейт:
- *   • если GEMINI_API_KEY не задан, или вызов упал — возвращаем
- *     { verdict: 'skipped', reason } и пайплайн продолжает работу.
+ *   • если ни DEEPSEEK_API_KEY, ни GEMINI_API_KEY не заданы, или вызов
+ *     упал — возвращаем { verdict: 'skipped', reason } и пайплайн
+ *     продолжает работу.
  */
 
-const { callGemini } = require('../llm/gemini.adapter');
-const { calcCost } = require('../metrics/priceCalculator');
+const { callAnalyticLLM, hasAnalyticLLMKey, analyticCallCost } = require('./analyticLLM');
 const { getForecasterConfig } = require('./config');
 
 const SYSTEM_PROMPT = [
@@ -175,7 +175,7 @@ async function runDeepSeekAnalysis(payload) {
   if (!cfg.enabled) {
     return { verdict: 'skipped', reason: 'feature_disabled' };
   }
-  if (!process.env.GEMINI_API_KEY) {
+  if (!hasAnalyticLLMKey()) {
     return { verdict: 'skipped', reason: 'no_api_key' };
   }
 
@@ -183,7 +183,7 @@ async function runDeepSeekAnalysis(payload) {
 
   try {
     const t0 = Date.now();
-    const resp = await callGemini(SYSTEM_PROMPT, userPrompt, {
+    const { resp, provider } = await callAnalyticLLM(SYSTEM_PROMPT, userPrompt, {
       temperature: cfg.temperature,
       maxTokens:   cfg.maxTokens,
       timeoutMs:   cfg.timeoutMs,
@@ -191,8 +191,8 @@ async function runDeepSeekAnalysis(payload) {
     const ms = Date.now() - t0;
     const tIn  = resp.tokensIn  || 0;
     const tOut = resp.tokensOut || 0;
-    const cached = resp.cachedTokens || 0;
-    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
+    const cached = resp.cachedTokens || resp.cacheHitTokens || 0;
+    const cost = analyticCallCost(provider, resp);
     const parsed = _safeParseJson(resp.text || '');
 
     return {
@@ -205,7 +205,7 @@ async function runDeepSeekAnalysis(payload) {
       tokens_out:     tOut,
       cached_tokens:  cached,
       cost_usd:       Math.round(cost * 1e6) / 1e6,
-      model:          resp.model || 'gemini',
+      model:          resp.model || provider,
       duration_ms:    ms,
     };
   } catch (err) {
@@ -234,8 +234,8 @@ function _safeParseJsonArray(text) {
 }
 
 /**
- * Обогащает шлак-классификатор Gemini-комментариями (verdict + reason).
- * Никогда не бросает. Если GEMINI_API_KEY отсутствует — возвращает
+ * Обогащает шлак-классификатор LLM-комментариями (verdict + reason).
+ * Никогда не бросает. Если ни один API-ключ не задан — возвращает
  * { verdict: 'skipped', reason }; пайплайн всё равно сохранит детерминированную
  * разметку.
  *
@@ -246,7 +246,7 @@ function _safeParseJsonArray(text) {
 async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
   const cfg = getForecasterConfig().deepseek;
   if (!cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!process.env.GEMINI_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
   const list = Array.isArray(candidates) ? candidates : [];
   if (list.length === 0) return { verdict: 'skipped', reason: 'no_candidates' };
 
@@ -268,7 +268,7 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
 
   try {
     const t0 = Date.now();
-    const resp = await callGemini(JUNK_SYSTEM_PROMPT, userPrompt, {
+    const { resp, provider } = await callAnalyticLLM(JUNK_SYSTEM_PROMPT, userPrompt, {
       temperature: cfg.temperature,
       maxTokens:   cfg.maxTokens,
       timeoutMs:   cfg.timeoutMs,
@@ -276,8 +276,7 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
     const ms = Date.now() - t0;
     const tIn  = resp.tokensIn  || 0;
     const tOut = resp.tokensOut || 0;
-    const cached = resp.cachedTokens || 0;
-    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
+    const cost = analyticCallCost(provider, resp);
     const parsed = _safeParseJsonArray(resp.text || '');
     if (!parsed) {
       return { verdict: 'error', reason: 'invalid_json', tokens_in: tIn, tokens_out: tOut, cost_usd: cost };
@@ -302,7 +301,7 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
       tokens_out: tOut,
       cost_usd:   Math.round(cost * 1e6) / 1e6,
       duration_ms: ms,
-      model:      resp.model || 'gemini',
+      model:      resp.model || provider,
     };
   } catch (err) {
     return {
@@ -348,7 +347,7 @@ function _vangaSystemPrompt(cfg) {
 async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, monthlySummary, targetUrl, mainQuery } = {}) {
   const cfg = getForecasterConfig().vanga;
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!process.env.GEMINI_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const uf = (unifiedForecast && unifiedForecast.verdict === 'ok') ? unifiedForecast : null;
   const ctx = {
@@ -380,7 +379,7 @@ async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, 
 
   try {
     const t0 = Date.now();
-    const resp = await callGemini(_vangaSystemPrompt(cfg), userPrompt, {
+    const { resp, provider } = await callAnalyticLLM(_vangaSystemPrompt(cfg), userPrompt, {
       temperature: cfg.temperature,
       maxTokens:   cfg.maxTokens,
       timeoutMs:   cfg.timeoutMs,
@@ -388,8 +387,8 @@ async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, 
     const ms = Date.now() - t0;
     const tIn  = resp.tokensIn  || 0;
     const tOut = resp.tokensOut || 0;
-    const cached = resp.cachedTokens || 0;
-    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
+    const cached = resp.cachedTokens || resp.cacheHitTokens || 0;
+    const cost = analyticCallCost(provider, resp);
     // Серверная страховка cost-control: обрезаем текст до maxChars,
     // даже если модель «разлилась мыслью по древу».
     let text = String(resp.text || '').replace(/```[a-z]*\s*|```/gi, '').trim();
@@ -404,7 +403,7 @@ async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, 
       tokens_out: tOut,
       cached_tokens: cached,
       cost_usd: Math.round(cost * 1e6) / 1e6,
-      model: resp.model || 'gemini',
+      model: resp.model || provider,
       duration_ms: ms,
     };
   } catch (err) {
@@ -539,11 +538,11 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'advanced_disabled' };
   const ex = cfg.experts[expertKey];
   if (!ex || !ex.enabled) return { verdict: 'skipped', reason: 'expert_disabled' };
-  if (!process.env.GEMINI_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
 
   try {
     const t0 = Date.now();
-    const resp = await callGemini(system, userPrompt, {
+    const { resp, provider } = await callAnalyticLLM(system, userPrompt, {
       temperature: ex.temperature,
       maxTokens:   ex.maxTokens,
       timeoutMs:   ex.timeoutMs,
@@ -551,8 +550,8 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
     const ms = Date.now() - t0;
     const tIn  = resp.tokensIn  || 0;
     const tOut = resp.tokensOut || 0;
-    const cached = resp.cachedTokens || 0;
-    const cost = calcCost('gemini', tIn, tOut, { cachedTokens: cached, thoughtsTokens: resp.thoughtsTokens || 0 });
+    const cached = resp.cachedTokens || resp.cacheHitTokens || 0;
+    const cost = analyticCallCost(provider, resp);
     const parsed = parser(resp.text || '');
     if (parsed == null) {
       return {
@@ -569,7 +568,7 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
       tokens_in: tIn, tokens_out: tOut, cached_tokens: cached,
       cost_usd: Math.round(cost * 1e6) / 1e6,
       duration_ms: ms,
-      model: resp.model || 'gemini',
+      model: resp.model || provider,
     };
   } catch (err) {
     return { verdict: 'error', reason: (err && err.message) ? err.message : String(err) };

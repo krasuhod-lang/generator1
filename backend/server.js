@@ -392,9 +392,13 @@ const start = async () => {
       console.warn('[Server] Reports keysSoScheduler skipped:', e.message);
     }
 
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`[Server] SEO Genius v4.0 running on port ${PORT} [${process.env.NODE_ENV}]`);
     });
+    // Снимаем дефолтный 5-минутный requestTimeout Node — долгие LLM-запросы
+    // (анализ ТЗ, аналитика прогнозатора) не должны обрываться по времени.
+    // headersTimeout остаётся дефолтным (60с) — защита от slowloris сохраняется.
+    server.requestTimeout = 0;
   } catch (err) {
     console.error('[Server] Failed to start:', err.message);
     process.exit(1);

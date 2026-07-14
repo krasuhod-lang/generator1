@@ -20,8 +20,7 @@
  * пользователя (POST /api/forecaster/:id/regenerate-report).
  */
 
-const { callGemini } = require('../llm/gemini.adapter');
-const { calcCost } = require('../metrics/priceCalculator');
+const { callAnalyticLLM, hasAnalyticLLMKey, analyticCallCost } = require('./analyticLLM');
 const { getForecasterConfig } = require('./config');
 
 const SYSTEM_PROMPT = [
@@ -177,14 +176,16 @@ function _normalizeReport(raw) {
 
 /**
  * Генерация AI-отчёта по уже рассчитанной задаче. Никогда не бросает.
+ * Аналитика идёт через DeepSeek (env DEEPSEEK_MODEL, по умолчанию
+ * deepseek-v4-pro) с фолбэком на Gemini — см. analyticLLM.js.
  * @param {Object} task — строка forecaster_tasks (расчётные JSONB-поля).
- * @param {string} [llmProvider] — task.llm_provider; сейчас поддержан
- *   только Gemini (как и весь forecaster, см. deepseekAnalyzer.js).
+ * @param {string} [llmProvider] — task.llm_provider (не используется:
+ *   роутинг определяется наличием API-ключей).
  */
 async function generateForecastReport(task, llmProvider = null) {
   const cfg = getForecasterConfig().report;
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!process.env.GEMINI_API_KEY) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const ctx = _buildContext(task);
   const userPrompt = [
@@ -201,17 +202,15 @@ async function generateForecastReport(task, llmProvider = null) {
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const resp = await callGemini(SYSTEM_PROMPT, userPrompt, {
+      const { resp, provider } = await callAnalyticLLM(SYSTEM_PROMPT, userPrompt, {
         temperature: cfg.temperature,
         maxTokens:   cfg.maxTokens,
         timeoutMs:   cfg.timeoutMs,
       });
       totalIn  += resp.tokensIn  || 0;
       totalOut += resp.tokensOut || 0;
-      totalCost += calcCost('gemini', resp.tokensIn || 0, resp.tokensOut || 0, {
-        cachedTokens: resp.cachedTokens || 0, thoughtsTokens: resp.thoughtsTokens || 0,
-      });
-      model = resp.model || 'gemini';
+      totalCost += analyticCallCost(provider, resp);
+      model = resp.model || provider;
       const report = _normalizeReport(_extractJson(resp.text));
       return {
         verdict: 'ok',

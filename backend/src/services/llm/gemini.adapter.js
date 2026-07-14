@@ -438,7 +438,8 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   // Проверка параметров
   if (temperature < 0 || temperature > 2) throw new Error('Invalid temperature');
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
-  if (timeoutMs < 1000 || timeoutMs > 600000) throw new Error('Invalid timeout');
+  // timeoutMs = 0 → без ограничения по времени (axios: timeout 0 = disabled)
+  if (timeoutMs !== 0 && timeoutMs < 1000) throw new Error('Invalid timeout');
 
   // API ключ Gemini — только из переменной окружения (без хардкода)
   const apiKey = requireGeminiApiKey();

@@ -120,7 +120,7 @@ export const useTasksStore = defineStore('tasks', () => {
     fd.append('file', file);
     const { data } = await api.post('/tasks/parse-tz', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 180000,
+      timeout: 0, // без ограничения по времени — анализ ТЗ может идти долго
     });
     return data;
   }
