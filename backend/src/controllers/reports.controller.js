@@ -338,6 +338,7 @@ async function listProjectTasks(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   const includeHidden = String(req.query.include_hidden || '') === 'true';
+  await tasksLog.syncFromModules(draft.project_id);
   const items = await tasksLog.listForPeriod(draft.project_id, draft.date_from, draft.date_to, { includeHidden });
   res.json({ items });
 }

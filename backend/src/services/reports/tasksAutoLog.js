@@ -8,6 +8,11 @@
  *                         ломал основную задачу).
  *   listForPeriod(projectId, from, to, {includeHidden}) — выборка для отчёта.
  *   listForProject(...) — без даты.
+ *   syncFromModules(projectId) — backfill лога из таблиц модулей: завершённые
+ *                         задачи (статьи, мета-теги, ссылочные, темы,
+ *                         релевантность, прогнозы, SERP B2B, AI-аналитика)
+ *                         с project_id попадают в лог идемпотентно (по
+ *                         ref_table/ref_id), включая сделанные ранее.
  */
 
 const db = require('../../config/db');
@@ -48,6 +53,92 @@ async function recordTask(payload = {}) {
   } catch (err) {
     console.warn('[tasksAutoLog] recordTask failed:', err.message);
     return null;
+  }
+}
+
+// Сегменты backfill'а из таблиц модулей. Каждый SELECT приводится к общему
+// виду (project_id, user_id, task_type, title, performed_at, ref_table,
+// ref_id) и берёт только завершённые задачи, привязанные к проекту.
+// Названия типов должны проходить CHECK-констрейнт tasks_auto_log.task_type.
+const MODULE_SEGMENTS = [
+  `SELECT project_id, user_id, 'content_generation' AS task_type,
+          ('Статья: ' || COALESCE(NULLIF(topic, ''), 'без темы')) AS title,
+          COALESCE(updated_at, created_at)::date AS performed_at,
+          'info_article_tasks' AS ref_table, id AS ref_id
+     FROM info_article_tasks
+    WHERE project_id = $1 AND status = 'done'`,
+  `SELECT project_id, user_id, 'link_article' AS task_type,
+          ('Ссылочная статья: ' || COALESCE(NULLIF(topic, ''), NULLIF(anchor_text, ''), 'без темы')) AS title,
+          COALESCE(updated_at, created_at)::date AS performed_at,
+          'link_article_tasks' AS ref_table, id AS ref_id
+     FROM link_article_tasks
+    WHERE project_id = $1 AND status = 'done'`,
+  `SELECT project_id, user_id, 'meta_update' AS task_type,
+          ('Мета-теги: ' || COALESCE(NULLIF(name, ''), 'без названия')) AS title,
+          created_at::date AS performed_at,
+          'meta_tag_tasks' AS ref_table, id AS ref_id
+     FROM meta_tag_tasks
+    WHERE project_id = $1 AND status = 'done'`,
+  `SELECT project_id, user_id, 'content_generation' AS task_type,
+          ('Подбор тем статей: ' || COALESCE(NULLIF(niche, ''), 'без ниши')) AS title,
+          COALESCE(updated_at, created_at)::date AS performed_at,
+          'article_topic_tasks' AS ref_table, id AS ref_id
+     FROM article_topic_tasks
+    WHERE project_id = $1 AND status = 'done'`,
+  `SELECT project_id, user_id, 'other' AS task_type,
+          ('Анализ релевантности: ' || COALESCE(NULLIF(query, ''), 'без запроса')) AS title,
+          created_at::date AS performed_at,
+          'relevance_reports' AS ref_table, id AS ref_id
+     FROM relevance_reports
+    WHERE project_id = $1 AND status = 'done'`,
+  `SELECT project_id, user_id, 'other' AS task_type,
+          ('Прогноз трафика: ' || COALESCE(NULLIF(name, ''), 'без названия')) AS title,
+          COALESCE(updated_at, created_at)::date AS performed_at,
+          'forecaster_tasks' AS ref_table, id AS ref_id
+     FROM forecaster_tasks
+    WHERE project_id = $1 AND status = 'done'`,
+  `SELECT project_id, user_id, 'other' AS task_type,
+          ('SERP-анализ B2B: ' || COALESCE(NULLIF(name, ''), NULLIF(query, ''), 'без запроса')) AS title,
+          COALESCE(updated_at, created_at)::date AS performed_at,
+          'serp_b2b_tasks' AS ref_table, id AS ref_id
+     FROM serp_b2b_tasks
+    WHERE project_id = $1 AND status = 'done'`,
+  `SELECT project_id, user_id, 'other' AS task_type,
+          'AI-аналитика проекта (GSC)' AS title,
+          COALESCE(completed_at, created_at)::date AS performed_at,
+          'project_analyses' AS ref_table, id AS ref_id
+     FROM project_analyses
+    WHERE project_id = $1 AND status = 'done'`,
+];
+
+/**
+ * Идемпотентный backfill tasks_auto_log из таблиц модулей: пайплайны
+ * генерации сами лог не пишут, поэтому «Подтянуть работы» без синка
+ * возвращал пустоту. Дедупликация — по (project_id, ref_table, ref_id).
+ * Best-effort: ошибка синка не должна ломать сборку отчёта.
+ */
+async function syncFromModules(projectId) {
+  if (!projectId) return 0;
+  try {
+    const unionSql = MODULE_SEGMENTS.join(' UNION ALL ');
+    const { rowCount } = await db.query(
+      `INSERT INTO tasks_auto_log
+         (project_id, user_id, task_type, title, performed_at, source, ref_table, ref_id)
+       SELECT s.project_id, s.user_id, s.task_type, LEFT(s.title, 512),
+              s.performed_at, 'platform_auto', s.ref_table, s.ref_id
+         FROM (${unionSql}) s
+        WHERE NOT EXISTS (
+                SELECT 1 FROM tasks_auto_log l
+                 WHERE l.project_id = s.project_id
+                   AND l.ref_table = s.ref_table
+                   AND l.ref_id = s.ref_id
+              )`,
+      [projectId],
+    );
+    return rowCount || 0;
+  } catch (err) {
+    console.warn('[tasksAutoLog] syncFromModules failed:', err.message);
+    return 0;
   }
 }
 
@@ -93,4 +184,4 @@ async function summarizeByType(projectId, dateFrom, dateTo) {
   return { total_generated: total, by_type: map };
 }
 
-module.exports = { recordTask, listForPeriod, listForProject: listForPeriod, setHidden, summarizeByType };
+module.exports = { recordTask, listForPeriod, listForProject: listForPeriod, setHidden, summarizeByType, syncFromModules };
