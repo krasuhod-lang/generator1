@@ -32,7 +32,7 @@ const TABS = [
   { key: 'link-article',   label: 'Ссылочная статья', icon: '🔗', path: '/link-article' },
   { key: 'info-article',   label: 'Статья в блог',    icon: '📰', path: '/info-article' },
   { key: 'article-topics', label: 'Темы статей',      icon: '🔮', path: '/article-topics' },
-  { key: 'forecaster',     label: 'Прогнозатор',      icon: '📈', path: '/forecaster' },
+  { key: 'forecaster',     label: 'Создать КП',       icon: '📈', path: '/forecaster' },
   { key: 'category-lead',  label: 'Lead-text',        icon: '🧭', path: '/category-lead' },
   { key: 'serp-b2b',       label: 'B2B-парсер',       icon: '🛰️', path: '/serp-b2b' },
   { key: 'audits',         label: 'Аудиты',           icon: '🕷️', path: '/audits' },

@@ -219,23 +219,28 @@ async function exportPdf() {
   }
 }
 
+const autologLoading = ref(false);
 async function loadAutolog() {
-  // Доп. правка из плана: «Подтянуть работы» теперь не пишет items
-  // только в локальный data.tasks.items (исчезали при следующем
-  // refreshData), а вызывает refreshData — бэкенд пересобирает blocks из
-  // актуального tasksAutoLog и сохраняет их в составе payload секции.
-  // Параллельно, чтобы группированные blocks тоже отражали свежие
-  // элементы и переживали закрытие/открытие редактора, мы дополнительно
-  // персистим их в report_drafts.tasks_blocks через updateTasksBlocks.
-  if (!route.params.id) return;
+  // «Подтянуть работы»: пересобирает секцию «Работы» из актуального
+  // tasksAutoLog. Бэкенд (_groupTasks) возвращает сохранённые manualBlocks,
+  // если они не пусты, поэтому сначала сбрасываем report_drafts.tasks_blocks
+  // (PUT []), затем refreshData — агрегатор сгруппирует свежие items заново,
+  // и результат персистим обратно, чтобы он пережил закрытие редактора.
+  if (!route.params.id || autologLoading.value) return;
+  autologLoading.value = true;
+  dataError.value = null;
   try {
-    await refreshData();
+    await store.updateTasksBlocks(route.params.id, []);
+    await store.fetchData(route.params.id, { ...viewRange.value, viewMode: previewMode.value });
     const blocks = data.value?.tasks?.blocks;
-    if (Array.isArray(blocks)) {
-      try { await store.updateTasksBlocks(route.params.id, blocks); }
-      catch (_) { /* persist — best-effort, секция всё равно подтянется при следующем refreshData */ }
+    if (Array.isArray(blocks) && blocks.length) {
+      await store.updateTasksBlocks(route.params.id, blocks);
     }
-  } catch (_) { /* */ }
+  } catch (err) {
+    dataError.value = err.response?.data?.error || err.message || 'Не удалось подтянуть работы';
+  } finally {
+    autologLoading.value = false;
+  }
 }
 
 const sources = computed(() => {
@@ -313,7 +318,9 @@ function _stateOf(section) {
             <button class="btn btn-secondary" :disabled="dataLoading" @click="refreshData">
               {{ dataLoading ? 'Обновление…' : 'Обновить данные' }}
             </button>
-            <button class="btn btn-secondary" @click="loadAutolog">Подтянуть работы</button>
+            <button class="btn btn-secondary" :disabled="autologLoading" @click="loadAutolog">
+              {{ autologLoading ? 'Подтягиваю…' : 'Подтянуть работы' }}
+            </button>
             <div v-if="dataError" class="src-err">{{ dataError }}</div>
           </div>
 

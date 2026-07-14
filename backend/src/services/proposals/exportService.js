@@ -4,8 +4,10 @@
  * proposals/exportService.js — серверный экспорт КП («Фронт работ»).
  *
  *   buildProposalPdf(proposal)  → Buffer (PDF, pdfkit + DejaVuSans для кириллицы)
- *   buildProposalXlsx(proposal) → Buffer (XLSX, exceljs: 3 листа —
- *                                 «Фронт работ», «Стоимость» (с формулами), «Сводка»)
+ *   buildProposalXlsx(proposal) → Buffer (XLSX, exceljs: 4 листа —
+ *                                 «Фронт работ», «Медиа-план» (месяцы × работы,
+ *                                 закрашенные ячейки), «Стоимость» (с формулами),
+ *                                 «Сводка»)
  *
  * proposal: { title, client, manager, horizon, start_date, created_at,
  *             tasks: [...proposal_tasks], pricing: [...proposal_pricing] }
@@ -192,7 +194,43 @@ async function buildProposalXlsx(proposal = {}) {
     });
   }
 
-  // Лист 2 — «Стоимость» (итоговые формулы Excel)
+  // Лист 2 — «Медиа-план»: месяцы сверху, работы слева, закрашенные ячейки.
+  const horizonMp = Math.max(_num(proposal.horizon) || 3, ...tasks.map((t) => Number(t.month) || 1));
+  const ws1b = wb.addWorksheet('Медиа-план');
+  ws1b.columns = [
+    { header: 'Модуль', key: 'module', width: 26 },
+    { header: 'Задача', key: 'title', width: 44 },
+    { header: 'Описание', key: 'description', width: 56 },
+    ...Array.from({ length: horizonMp }, (_, i) => ({ header: `Месяц ${i + 1}`, key: `m${i + 1}`, width: 10 })),
+  ];
+  ws1b.getRow(1).font = { bold: true };
+  const mpMap = new Map();
+  for (const t of sorted) {
+    const key = `${t.module_id || t.module_name || ''}·${t.task_id || ''}·${t.task_title || ''}`;
+    if (!mpMap.has(key)) {
+      mpMap.set(key, {
+        module: _text(t.module_name),
+        title: `${_text(t.task_id)} · ${_text(t.task_title)}`.replace(/^ · /, ''),
+        description: _text(t.task_description),
+        months: new Set(),
+      });
+    }
+    mpMap.get(key).months.add(Number(t.month) || 1);
+  }
+  for (const rowData of mpMap.values()) {
+    const row = ws1b.addRow({ module: rowData.module, title: rowData.title, description: rowData.description });
+    for (let m = 1; m <= horizonMp; m += 1) {
+      if (rowData.months.has(m)) {
+        const cell = row.getCell(3 + m);
+        cell.value = '✓';
+        cell.alignment = { horizontal: 'center' };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF6366F1' } };
+        cell.font = { color: { argb: 'FFFFFFFF' }, bold: true };
+      }
+    }
+  }
+
+  // Лист 3 — «Стоимость» (итоговые формулы Excel)
   const ws2 = wb.addWorksheet('Стоимость');
   ws2.columns = [
     { header: 'Статья', key: 'item', width: 36 },
@@ -228,7 +266,7 @@ async function buildProposalXlsx(proposal = {}) {
     ws2.getRow(totalRow).font = { bold: true };
   }
 
-  // Лист 3 — «Сводка»
+  // Лист 4 — «Сводка»
   const ws3 = wb.addWorksheet('Сводка');
   ws3.columns = [
     { header: 'Параметр', key: 'k', width: 32 },

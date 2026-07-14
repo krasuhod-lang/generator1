@@ -96,6 +96,9 @@ const unifiedExplain  = computed(() => unified.value?.explain || null);
 const unifiedSummary  = computed(() => unified.value?.summary || null);
 const nicheStrategist = computed(() => expertReports.value?.niche_strategist || null);
 const aiReport = computed(() => task.value?.ai_report || null);
+// Временный флаг: «Граф охвата семантики» скрыт до починки модели
+// распределения (показатели не соответствуют прогнозному росту).
+const SHOW_SEMANTIC_CHART = false;
 const semanticDistribution = computed(() => {
   const d = task.value?.semantic_distribution;
   return Array.isArray(d) && d.length > 0 ? d : null;
@@ -527,8 +530,11 @@ const sovSummaryRows = computed(() => {
             </details>
           </section>
 
-          <!-- 🎯 Граф охвата семантики (по месяцам прогноза) -->
-          <section v-if="semanticDistribution" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <!-- 🎯 Граф охвата семантики (по месяцам прогноза).
+               Временно скрыт: показатели распределения не соответствуют
+               прогнозному росту — включим обратно после починки модели
+               (SHOW_SEMANTIC_CHART = true). -->
+          <section v-if="SHOW_SEMANTIC_CHART && semanticDistribution" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
             <h2 class="text-sm font-semibold text-gray-200 mb-1">🎯 Граф охвата семантики</h2>
             <p class="text-xs text-gray-500 mb-3">
               Как семантика перетекает в ТОПы по месяцам прогноза и сколько трафика это даёт.

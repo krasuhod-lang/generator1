@@ -39,6 +39,8 @@ const anomalies  = computed(() => (task.value?.anomalies?.drops) || []);
 const trend      = computed(() => task.value?.trend || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
 const aiReport   = computed(() => task.value?.ai_report || null);
+// Временный флаг: «Граф охвата семантики» скрыт до починки модели.
+const SHOW_SEMANTIC_CHART = false;
 const semanticDistribution = computed(() => {
   const d = task.value?.semantic_distribution;
   return Array.isArray(d) && d.length > 0 ? d : null;
@@ -202,8 +204,9 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
           </p>
         </section>
 
-        <!-- 🎯 Граф охвата семантики -->
-        <section v-if="semanticDistribution" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <!-- 🎯 Граф охвата семантики. Временно скрыт: показатели не
+             соответствуют прогнозному росту — включим после починки. -->
+        <section v-if="SHOW_SEMANTIC_CHART && semanticDistribution" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
           <h2 class="text-sm font-semibold mb-1">🎯 Граф охвата семантики</h2>
           <p class="text-xs text-gray-500 mb-3">
             Как семантика перетекает в ТОПы по месяцам прогноза и сколько трафика это даёт.

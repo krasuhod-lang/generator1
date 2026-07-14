@@ -109,6 +109,12 @@ export const useAdminStore = defineStore('admin', () => {
     return data.user;
   }
 
+  // ── Удаление пользователя (все данные удаляются каскадно) ────────────
+  async function deleteUser(userId) {
+    const { data } = await adminApi.delete(`/admin/users/${userId}`);
+    return data;
+  }
+
   // ── Задачи пользователя (legacy SEO only — оставляем для обратной совместимости) ─
   async function fetchUserTasks(userId, params = {}) {
     const query = new URLSearchParams();
@@ -199,6 +205,7 @@ export const useAdminStore = defineStore('admin', () => {
     adminLogout,
     fetchUsers,
     fetchUserDetail,
+    deleteUser,
     fetchUserTasks,
     fetchUserAllTasks,
     fetchStats,
