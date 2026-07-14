@@ -1,0 +1,17 @@
+# Обязательные зависимости (лёгкие, быстрая установка)
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+requests==2.32.3
+beautifulsoup4==4.12.3
+python-multipart==0.0.17
+pymorphy3==2.0.2
+pymorphy3-dicts-ru==2.4.417150.4580142
+pytest==8.3.3
+
+# Опциональные зависимости (тяжёлые, могут не собраться / не нужны в CI)
+# Раскомментируйте для полной функциональности:
+# dspy-ai==2.5.41                 # DSPy-оркестрация + MIPROv2 (Sprint 4)
+# sentence-transformers==3.2.1    # embeddings multilingual-e5-large
+# playwright==1.48.0              # рендер JS-страниц (иначе — relevance_fetcher)
+# psycopg2-binary==2.9.10         # прямая запись метрик в article_tasks

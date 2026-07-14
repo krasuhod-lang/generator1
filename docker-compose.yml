@@ -215,6 +215,44 @@ services:
       retries: 3
       start_period: 20s
 
+  # ── GIST + LinguaForensic DSPy pipeline (gist_py, FastAPI :8003) ────────
+  # Генерация SEO-контента по логике GIST: M0 Relevance Scanner → M1 Scraper
+  # → M2 Noise → M3 Gap Finder → M4–M6 генерация → M7 Redundancy →
+  # M8 LinguaForensic v3.6 → M9 Fluency Rewriter → M10 SEO Formatter.
+  # Наружу не торчит: Node-бэкенд ходит на http://gist:8003 с X-Internal-Token.
+  gist:
+    build:
+      context: ./gist_py
+      dockerfile: Dockerfile
+      args:
+        INSTALL_HEAVY: ${GIST_PY_INSTALL_HEAVY:-false}
+    container_name: seo_gist
+    restart: unless-stopped
+    environment:
+      GIST_INTERNAL_TOKEN: ${GIST_INTERNAL_TOKEN:-}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+      SERPAPI_API_KEY: ${SERPAPI_API_KEY:-}
+      GIST_LLM_API_BASE: ${GIST_LLM_API_BASE:-}
+      GIST_LLM_API_KEY: ${GIST_LLM_API_KEY:-}
+      GIST_LLM_MODEL: ${GIST_LLM_MODEL:-gemini-3.1-pro-preview}
+      GIST_EMBED_API_BASE: ${GIST_EMBED_API_BASE:-}
+      GIST_EMBED_API_KEY: ${GIST_EMBED_API_KEY:-}
+      GIST_LINGUAFORENSIC_SKILL: ${GIST_LINGUAFORENSIC_SKILL:-/app/skills/AI-detect-v-3-6.md}
+      RELEVANCE_HEADLESS_FETCHER_URL: ${RELEVANCE_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch}
+      DATABASE_URL: ${GIST_DATABASE_URL:-}
+      LOG_LEVEL: ${GIST_LOG_LEVEL:-INFO}
+    volumes:
+      # Skill-файл LinguaForensic v3.6 кладётся на хост (не в git)
+      - ./skills:/app/skills:ro
+    expose:
+      - "8003"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   # ── A.E.G.I.S. Python (Bio-Brain NEAT + DSPy + GraphRAG-фасад) ──────────
   # 🧬 Поднимаем по умолчанию в основном стеке, чтобы Bio-Brain «жил
   # своей жизнью»: фоновый поток `_biobrain_evolve_loop` в aegis_py/app/main.py
