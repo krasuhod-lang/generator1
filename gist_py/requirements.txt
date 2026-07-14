@@ -4,9 +4,7 @@ uvicorn[standard]==0.32.0
 pydantic==2.9.2
 requests==2.32.3
 beautifulsoup4==4.12.3
-python-multipart==0.0.17
-pymorphy3==2.0.2
-pymorphy3-dicts-ru==2.4.417150.4580142
+python-multipart==0.0.30
 pytest==8.3.3
 
 # Опциональные зависимости (тяжёлые, могут не собраться / не нужны в CI)
@@ -15,3 +13,5 @@ pytest==8.3.3
 # sentence-transformers==3.2.1    # embeddings multilingual-e5-large
 # playwright==1.48.0              # рендер JS-страниц (иначе — relevance_fetcher)
 # psycopg2-binary==2.9.10         # прямая запись метрик в article_tasks
+# pymorphy3==2.0.2                # морфоанализ RU (LSI-леммы, Sprint 2+)
+# pymorphy3-dicts-ru==2.4.417150.4580142
