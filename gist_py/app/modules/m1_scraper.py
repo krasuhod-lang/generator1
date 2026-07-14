@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from .. import config
 from ..config import CONFIG
 
 logger = logging.getLogger("gist_py.m1")
@@ -34,10 +35,11 @@ USER_AGENT = (
 def fetch_serp(keyword: str, top_n: Optional[int] = None) -> List[Dict]:
     """Получить органическую выдачу через Serper API или SerpAPI."""
     top_n = top_n or CONFIG["serp_top_n"]
-    if CONFIG["serper_api_key"]:
+    serper_key = config.serper_api_key()
+    if serper_key:
         resp = requests.post(
             "https://google.serper.dev/search",
-            headers={"X-API-KEY": CONFIG["serper_api_key"]},
+            headers={"X-API-KEY": serper_key},
             json={"q": keyword, "gl": "ru", "hl": "ru", "num": top_n + 10},
             timeout=30,
         )
@@ -48,7 +50,8 @@ def fetch_serp(keyword: str, top_n: Optional[int] = None) -> List[Dict]:
             for r in organic
             if r.get("link")
         ]
-    if CONFIG["serpapi_api_key"]:
+    serpapi_key = config.serpapi_api_key()
+    if serpapi_key:
         resp = requests.get(
             "https://serpapi.com/search.json",
             params={
@@ -57,7 +60,7 @@ def fetch_serp(keyword: str, top_n: Optional[int] = None) -> List[Dict]:
                 "gl": "ru",
                 "hl": "ru",
                 "num": top_n + 10,
-                "api_key": CONFIG["serpapi_api_key"],
+                "api_key": serpapi_key,
             },
             timeout=30,
         )

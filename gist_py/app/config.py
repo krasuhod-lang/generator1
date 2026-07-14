@@ -59,8 +59,6 @@ CONFIG = {
     "aio_snippet_min_words": _i("GIST_AIO_MIN_WORDS", 40),
     "aio_snippet_max_words": _i("GIST_AIO_MAX_WORDS", 60),
     # Внешние сервисы
-    "serper_api_key": os.environ.get("SERPER_API_KEY", ""),
-    "serpapi_api_key": os.environ.get("SERPAPI_API_KEY", ""),
     "headless_fetcher_url": os.environ.get(
         "RELEVANCE_HEADLESS_FETCHER_URL", "http://relevance_fetcher:8001/fetch"
     ),
@@ -70,6 +68,22 @@ CONFIG = {
     ),
     # LLM
     "llm_model": os.environ.get("GIST_LLM_MODEL", "gemini-3.1-pro-preview"),
-    "internal_token": os.environ.get("GIST_INTERNAL_TOKEN", ""),
-    "database_url": os.environ.get("DATABASE_URL", ""),
 }
+
+
+# ── Секреты держим отдельно от CONFIG (не попадают в логи/дампы) ────────────
+
+def serper_api_key() -> str:
+    return os.environ.get("SERPER_API_KEY", "")
+
+
+def serpapi_api_key() -> str:
+    return os.environ.get("SERPAPI_API_KEY", "")
+
+
+def internal_token() -> str:
+    return os.environ.get("GIST_INTERNAL_TOKEN", "")
+
+
+def database_url() -> str:
+    return os.environ.get("DATABASE_URL", "")

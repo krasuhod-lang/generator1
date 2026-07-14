@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
-from .config import CONFIG
+from . import config
 from .llm import LLMClient
 from .modules import m0_relevance
 from .pipeline import GistPipeline
@@ -39,7 +39,7 @@ app = FastAPI(
 
 
 def _check_token(token: Optional[str]) -> None:
-    expected = CONFIG["internal_token"]
+    expected = config.internal_token()
     if expected and token != expected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="bad internal token"

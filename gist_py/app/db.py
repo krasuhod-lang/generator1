@@ -11,7 +11,7 @@ import json
 import logging
 from typing import Dict, Optional
 
-from .config import CONFIG
+from . import config
 
 logger = logging.getLogger("gist_py.db")
 
@@ -57,7 +57,7 @@ _SCALAR_FIELDS = {
 
 
 def available() -> bool:
-    return _PG_AVAILABLE and bool(CONFIG["database_url"])
+    return _PG_AVAILABLE and bool(config.database_url())
 
 
 def save_task_metrics(task_id: Optional[str], metrics: Dict) -> bool:
@@ -65,23 +65,28 @@ def save_task_metrics(task_id: Optional[str], metrics: Dict) -> bool:
     if not task_id or not available():
         return False
     sets, values = [], []
-    for key, value in metrics.items():
-        if key in _JSON_FIELDS:
-            sets.append(f"{key} = %s::jsonb")
-            values.append(json.dumps(value, ensure_ascii=False))
-        elif key in _SCALAR_FIELDS:
-            sets.append(f"{key} = %s")
-            values.append(value)
+    # Имена колонок берём ТОЛЬКО из литеральных whitelist-множеств —
+    # ключи из metrics не попадают в текст запроса, значения параметризованы.
+    for column in sorted(_JSON_FIELDS):
+        if column in metrics:
+            sets.append(column + " = %s::jsonb")
+            values.append(json.dumps(metrics[column], ensure_ascii=False))
+    for column in sorted(_SCALAR_FIELDS):
+        if column in metrics:
+            sets.append(column + " = %s")
+            values.append(metrics[column])
     if not sets:
         return False
     sets.append("updated_at = now()")
     values.append(task_id)
     try:
-        conn = psycopg2.connect(CONFIG["database_url"])
+        conn = psycopg2.connect(config.database_url())
         try:
             with conn, conn.cursor() as cur:
                 cur.execute(
-                    f"UPDATE article_tasks SET {', '.join(sets)} WHERE id = %s",
+                    "UPDATE article_tasks SET "
+                    + ", ".join(sets)
+                    + " WHERE id = %s",
                     values,
                 )
         finally:

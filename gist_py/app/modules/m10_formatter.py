@@ -29,11 +29,10 @@ def split_sections(article_text: str) -> List[Dict]:
     sections: List[Dict] = []
     current: Optional[Dict] = None
     for line in (article_text or "").splitlines():
-        m = re.match(r"^##\s+(.+)$", line)
-        if m:
+        if line.startswith("## ") and not line.startswith("###"):
             if current:
                 sections.append(current)
-            current = {"h2": m.group(1).strip(), "lines": []}
+            current = {"h2": line[3:].strip(), "lines": []}
         elif current is not None:
             current["lines"].append(line)
     if current:
