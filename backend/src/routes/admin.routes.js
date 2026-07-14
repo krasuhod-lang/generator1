@@ -7,6 +7,7 @@ const {
   adminLogin,
   listUsers,
   getUserDetail,
+  deleteUser,
   getUserTasks,
   getStats,
   listAllTasks,
@@ -51,6 +52,7 @@ router.post('/login', loginLimiter, adminLogin);
 // Все остальные — через adminAuth middleware + rate limit
 router.get('/users',              apiLimiter, adminAuth, listUsers);
 router.get('/users/:userId',      apiLimiter, adminAuth, getUserDetail);
+router.delete('/users/:userId',   apiLimiter, adminAuth, deleteUser);
 router.get('/users/:userId/tasks', apiLimiter, adminAuth, getUserTasks);
 router.get('/users/:userId/all-tasks', apiLimiter, adminAuth, getUserAllTasks);
 router.get('/stats',              apiLimiter, adminAuth, getStats);

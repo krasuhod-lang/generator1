@@ -349,7 +349,7 @@ async function rerunForecasterTask(req, res, next) {
 async function regenerateForecastReport(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, status, ai_report FROM forecaster_tasks
+      `SELECT id, status, ai_report, updated_at FROM forecaster_tasks
         WHERE id = $1 AND user_id = $2`,
       [req.params.id, req.user.id],
     );
@@ -359,7 +359,15 @@ async function regenerateForecastReport(req, res, next) {
       return res.status(409).json({ error: 'AI-аналитика доступна только для завершённой задачи' });
     }
     if (t.ai_report && t.ai_report.verdict === 'generating') {
-      return res.status(409).json({ error: 'Отчёт уже генерируется' });
+      // Защита от «вечного generating»: если процесс упал/перезапустился во
+      // время генерации, флаг остаётся навсегда и блокирует перегенерацию.
+      // Считаем generating протухшим спустя 10 минут и разрешаем перезапуск.
+      const STALE_MS = 10 * 60 * 1000;
+      const ageMs = Date.now() - new Date(t.updated_at).getTime();
+      if (Number.isFinite(ageMs) && ageMs < STALE_MS) {
+        return res.status(409).json({ error: 'Отчёт уже генерируется' });
+      }
+      console.warn(`[forecaster] task ${t.id}: stale ai_report=generating (${Math.round(ageMs / 60000)} мин) — разрешаем перегенерацию`);
     }
     await db.query(
       `UPDATE forecaster_tasks SET ai_report='{"verdict":"generating"}'::jsonb, updated_at=NOW() WHERE id=$1`,

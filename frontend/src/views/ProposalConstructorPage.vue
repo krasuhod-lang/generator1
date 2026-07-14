@@ -171,7 +171,27 @@ const previewTasks = computed(() => buildTasks().sort((a, b) =>
   || ((a.module_id || 0) - (b.module_id || 0))
   || String(a.task_id || '').localeCompare(String(b.task_id || ''), undefined, { numeric: true })));
 
-const previewMode = ref('table'); // table | list | kanban
+const previewMode = ref('table'); // table | list | kanban | mediaplan
+
+// Медиа-план: уникальные задачи (строки) × месяцы (колонки), Set месяцев на задачу.
+const mediaPlanRows = computed(() => {
+  const map = new Map();
+  for (const t of previewTasks.value) {
+    const key = `${t.module_id || ''}·${t.task_id || ''}·${t.task_title || ''}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        module_name: t.module_name,
+        task_id: t.task_id,
+        task_title: t.task_title,
+        task_description: t.task_description,
+        priority: t.priority,
+        months: new Set(),
+      });
+    }
+    map.get(key).months.add(Number(t.month) || 1);
+  }
+  return Array.from(map.values());
+});
 
 // ── Стоимость ──
 const pricing = ref([]);
@@ -672,7 +692,7 @@ onUnmounted(() => {
       <section v-if="step === 3">
         <div class="flex items-center justify-between mb-3">
           <div class="flex rounded-lg overflow-hidden border border-gray-700 text-sm">
-            <button v-for="v in [['table','Таблица'],['list','Список'],['kanban','Kanban']]" :key="v[0]"
+            <button v-for="v in [['table','Таблица'],['list','Список'],['kanban','Kanban'],['mediaplan','Медиа-план']]" :key="v[0]"
               @click="previewMode = v[0]"
               class="px-4 py-1.5 font-medium transition"
               :class="previewMode === v[0] ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-gray-200'">
@@ -732,7 +752,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Kanban -->
-        <div v-else class="grid gap-3" :style="{ gridTemplateColumns: `repeat(${months.length}, minmax(220px, 1fr))` }">
+        <div v-else-if="previewMode === 'kanban'" class="grid gap-3" :style="{ gridTemplateColumns: `repeat(${months.length}, minmax(220px, 1fr))` }">
           <div v-for="m in months" :key="m" class="bg-gray-900 border border-gray-800 rounded-xl p-3 min-h-[140px]">
             <h3 class="text-xs font-semibold text-gray-300 mb-2">Месяц {{ m }} · {{ previewTasks.filter((t) => t.month === m).length }}</h3>
             <div v-for="(t, i) in previewTasks.filter((x) => x.month === m)" :key="i"
@@ -742,6 +762,34 @@ onUnmounted(() => {
               <span class="block mt-1 px-1.5 py-0.5 rounded w-fit" :class="PRIORITY_BADGE[t.priority]?.cls">{{ PRIORITY_BADGE[t.priority]?.label }}</span>
             </div>
           </div>
+        </div>
+
+        <!-- Медиа-план: месяцы сверху, работы слева, закрашенные ячейки -->
+        <div v-else class="overflow-x-auto rounded-xl border border-gray-800">
+          <table class="min-w-full text-sm">
+            <thead class="bg-gray-900 text-gray-400 text-left">
+              <tr>
+                <th class="px-3 py-2 font-medium sticky left-0 bg-gray-900 min-w-[280px]">Фронт работ</th>
+                <th v-for="m in months" :key="m" class="px-3 py-2 font-medium text-center whitespace-nowrap">Месяц {{ m }}</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-800 bg-gray-950">
+              <tr v-for="(row, i) in mediaPlanRows" :key="i">
+                <td class="px-3 py-2 sticky left-0 bg-gray-950">
+                  <span class="text-gray-500 text-xs block">{{ row.module_name }}</span>
+                  <span class="text-gray-100">{{ row.task_id }} · {{ row.task_title }}
+                    <span class="ml-1 text-xs px-1.5 py-0.5 rounded" :class="PRIORITY_BADGE[row.priority]?.cls">{{ PRIORITY_BADGE[row.priority]?.label }}</span>
+                  </span>
+                  <span v-if="row.task_description" class="block text-xs text-gray-500 mt-0.5 max-w-md">{{ row.task_description }}</span>
+                </td>
+                <td v-for="m in months" :key="m" class="px-1.5 py-1.5 text-center align-middle">
+                  <div class="h-7 rounded-md mx-auto"
+                    :class="row.months.has(m) ? 'bg-indigo-500/80 shadow-[0_0_8px_rgba(99,102,241,0.35)]' : 'bg-gray-900 border border-gray-800/60'"
+                    :title="row.months.has(m) ? `Месяц ${m}: выполняется` : ''"></div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
         <div class="flex justify-between mt-4">

@@ -8,6 +8,7 @@
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import KpSectionTabs from '../components/KpSectionTabs.vue';
 import api from '../api.js';
 
 const router = useRouter();
@@ -127,6 +128,7 @@ onMounted(load);
 <template>
   <AppLayout>
     <div class="p-6 max-w-7xl mx-auto">
+      <KpSectionTabs class="mb-5" />
       <header class="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
           <h1 class="text-xl font-semibold text-gray-100">🧱 Фронт работ — история КП</h1>

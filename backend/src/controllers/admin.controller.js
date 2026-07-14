@@ -186,6 +186,39 @@ async function getUserDetail(req, res, next) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/admin/users/:userId
+// Удаление пользователя. Все связанные данные (задачи, проекты, КП и т.д.)
+// удаляются каскадно по FK ON DELETE CASCADE. Нельзя удалить админа и себя.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function deleteUser(req, res, next) {
+  try {
+    const { userId } = req.params;
+
+    if (req.user && String(req.user.id) === String(userId)) {
+      return res.status(400).json({ error: 'Нельзя удалить собственную учётную запись' });
+    }
+
+    const { rows } = await db.query(
+      'SELECT id, email, role FROM users WHERE id = $1',
+      [userId],
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+    if (rows[0].role === 'admin') {
+      return res.status(400).json({ error: 'Нельзя удалить пользователя с ролью администратора' });
+    }
+
+    await db.query('DELETE FROM users WHERE id = $1', [userId]);
+    console.log(`[admin] user ${rows[0].email} (${userId}) deleted by admin ${req.user?.email || req.user?.id}`);
+    return res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/admin/users/:userId/tasks
 // Задачи конкретного пользователя
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1208,6 +1241,7 @@ module.exports = {
   adminLogin,
   listUsers,
   getUserDetail,
+  deleteUser,
   getUserTasks,
   getStats,
   listAllTasks,

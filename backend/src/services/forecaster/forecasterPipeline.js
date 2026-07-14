@@ -813,23 +813,35 @@ async function runAiReportForTask(taskId) {
     `UPDATE forecaster_tasks SET ai_report='{"verdict":"generating"}'::jsonb, updated_at=NOW() WHERE id=$1`,
     [taskId],
   );
-  const report = await generateForecastReport(task, task.llm_provider);
-  await db.query(
-    `UPDATE forecaster_tasks SET
-       ai_report=$2::jsonb,
-       tokens_in=tokens_in+$3,
-       tokens_out=tokens_out+$4,
-       cost_usd=cost_usd+$5,
-       updated_at=NOW()
-     WHERE id=$1`,
-    [
-      taskId,
-      JSON.stringify(report),
-      report.tokens_in || 0,
-      report.tokens_out || 0,
-      report.cost_usd || 0,
-    ],
-  );
+  let report;
+  try {
+    report = await generateForecastReport(task, task.llm_provider);
+    await db.query(
+      `UPDATE forecaster_tasks SET
+         ai_report=$2::jsonb,
+         tokens_in=tokens_in+$3,
+         tokens_out=tokens_out+$4,
+         cost_usd=cost_usd+$5,
+         updated_at=NOW()
+       WHERE id=$1`,
+      [
+        taskId,
+        JSON.stringify(report),
+        report.tokens_in || 0,
+        report.tokens_out || 0,
+        report.cost_usd || 0,
+      ],
+    );
+  } catch (err) {
+    // Никогда не оставляем ai_report «зависшим» в generating — иначе
+    // regenerate-report вернёт 409 и пользователь не сможет перезапустить.
+    const msg = (err && err.message) ? err.message : String(err);
+    await db.query(
+      `UPDATE forecaster_tasks SET ai_report=$2::jsonb, updated_at=NOW() WHERE id=$1`,
+      [taskId, JSON.stringify({ verdict: 'error', reason: msg.slice(0, 500) })],
+    ).catch(() => { /* если БД недоступна — protухший generating разрулит staleness-гейт контроллера */ });
+    throw err;
+  }
   console.log(`[Forecaster] task ${taskId} ai_report: ${report.verdict}${report.reason ? ` (${report.reason})` : ''}`);
   return report;
 }

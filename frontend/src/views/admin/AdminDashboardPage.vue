@@ -91,6 +91,22 @@ async function copyPassword(pwd) {
     // Старые браузеры / небезопасный контекст — игнорируем тихо.
   }
 }
+
+// ── Удаление пользователя ──────────────────────────────────────────
+const deletingId = ref(null);
+async function removeUser(u) {
+  if (deletingId.value) return;
+  if (!confirm(`Удалить пользователя ${u.email}?\n\nВсе его задачи, проекты и данные будут удалены безвозвратно.`)) return;
+  deletingId.value = u.id;
+  try {
+    await admin.deleteUser(u.id);
+    await loadUsers();
+  } catch (e) {
+    alert(e.response?.data?.error || e.message || 'Не удалось удалить пользователя');
+  } finally {
+    deletingId.value = null;
+  }
+}
 </script>
 
 <template>
@@ -217,12 +233,24 @@ async function copyPassword(pwd) {
               <td class="py-3 px-3 text-gray-400">{{ fmtDate(u.last_task_at) }}</td>
               <td class="py-3 px-3 text-gray-300">{{ fmtCost(u.total_cost_usd) }}</td>
               <td class="py-3 px-3">
-                <router-link
-                  :to="`/admin/users/${u.id}`"
-                  class="text-emerald-400 hover:text-emerald-300 text-xs font-medium transition-colors"
-                >
-                  Подробнее →
-                </router-link>
+                <div class="flex items-center gap-3">
+                  <router-link
+                    :to="`/admin/users/${u.id}`"
+                    class="text-emerald-400 hover:text-emerald-300 text-xs font-medium transition-colors"
+                  >
+                    Подробнее →
+                  </router-link>
+                  <button
+                    v-if="u.role !== 'admin'"
+                    type="button"
+                    class="text-red-500 hover:text-red-400 text-xs font-medium transition-colors disabled:opacity-50"
+                    :disabled="deletingId === u.id"
+                    title="Удалить пользователя"
+                    @click="removeUser(u)"
+                  >
+                    {{ deletingId === u.id ? '…' : '🗑 Удалить' }}
+                  </button>
+                </div>
               </td>
             </tr>
             <tr v-if="!admin.users.length && !admin.loading">

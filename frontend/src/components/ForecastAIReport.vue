@@ -24,6 +24,17 @@ const emit = defineEmits(['regenerate']);
 const verdict = computed(() => props.report?.verdict || null);
 const rep = computed(() => (verdict.value === 'ok' ? props.report?.report || null : null));
 
+// Человеко-читаемые причины skipped/error вместо технических кодов.
+const REASON_LABEL = {
+  no_api_key: 'на сервере не задан GEMINI_API_KEY',
+  feature_disabled: 'функция отключена в конфигурации',
+};
+const reasonText = computed(() => {
+  const r = props.report?.reason;
+  if (!r) return '';
+  return REASON_LABEL[r] || r;
+});
+
 const impactBadge = (impact) => {
   if (impact === 'high') return { label: 'HIGH', cls: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' };
   if (impact === 'low')  return { label: 'LOW',  cls: 'bg-gray-500/15 border-gray-500/40 text-gray-400' };
@@ -69,7 +80,7 @@ const impactBadge = (impact) => {
     <!-- Ошибка → плашка «Повторить» -->
     <div v-else-if="verdict !== 'ok'"
          class="text-sm text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-3">
-      <div>⚠ Не удалось сгенерировать аналитику{{ report?.reason ? `: ${report.reason}` : '' }}.</div>
+      <div>⚠ Не удалось сгенерировать аналитику{{ reasonText ? `: ${reasonText}` : '' }}.</div>
       <button v-if="canRegenerate" @click="emit('regenerate')" :disabled="busy"
               class="mt-2 text-xs px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white font-semibold">
         {{ busy ? '…' : '🔄 Повторить' }}
