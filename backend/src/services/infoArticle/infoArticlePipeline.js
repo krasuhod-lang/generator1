@@ -77,6 +77,7 @@ const {
   buildGistRewriteIssues,
 } = require('./gistAudit');
 const { runEeatAuditCore } = require('../eeatAudit/core');
+const { runQualityEvaluator } = require('../pipeline/stage8');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
@@ -271,6 +272,8 @@ function buildCallCtx(taskId, stageName) {
   // нет FK-связи с task_metrics; собственные счётчики идут через onTokens.
   return {
     stageName,
+    pipeline: 'info',
+    traceTaskId: taskId,
     log: (msg, level = 'info') => appendLog(taskId, msg, level).catch(() => {}),
     onTokens: (adapter, tIn, tOut, cost) => {
       recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
@@ -2597,6 +2600,32 @@ async function processInfoArticleTask(taskId) {
       );
     } catch (gateErr) {
       console.warn(`[infoArticle] quality gate failed: ${gateErr.message}`);
+    }
+
+    // 14e. Stage 8 composite evaluator — fail-open, default ON. Пишет
+    // composite_quality_score в info_article_tasks; отчёт возвращается в логах.
+    try {
+      const evaluator = await runQualityEvaluator({
+        pipeline: 'info',
+        taskId,
+        articleHtml: finalHtml,
+        artifacts: {
+          gist_delta_json: gistDeltaArtifact || (whitespace && whitespace.gist_audit
+            ? { information_delta: whitespace.information_delta || [], coverage_score: whitespace.gist_audit.gist_coverage_score }
+            : null),
+          eeat_score: eeatAudit && eeatAudit.total_score,
+          eeat_report: eeatAudit,
+          lsi_coverage: lsiCov,
+          quality_gate: qualityGateVerdict,
+        },
+        task,
+        log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+      });
+      if (evaluator && evaluator.composite_quality_score != null) {
+        await appendLog(taskId, `📊 Stage 8 composite quality: ${evaluator.composite_quality_score}/100`, 'info');
+      }
+    } catch (stage8Err) {
+      await appendLog(taskId, `⚠ Stage 8 evaluator не выполнился: ${stage8Err.message} — продолжаем`, 'warn');
     }
 
     await db.query(

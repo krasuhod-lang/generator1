@@ -9,6 +9,7 @@ const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
 const { getCachedResponse, setCachedResponse } = require('./responseCache');
 const responseCacheModule = require('./responseCache');
 const { withProviderSlot } = require('./rateLimiter');
+const { recordTrace } = require('./pipelineTrace');
 
 // ────────────────────────────────────────────────────────────────────
 // Per-task token budget guard
@@ -170,10 +171,39 @@ function parseJSON(text) {
 /**
  * Сохраняет запись о вызове LLM в task_stages и обновляет task_metrics.
  */
-async function persistStageCall({ taskId, stageName, callLabel, model, promptSize, tokensIn, tokensOut, costUsd, resultJson, startedAt }) {
-  if (!taskId) return;
+function inferPipeline(stageName, pipeline) {
+  if (pipeline) return pipeline;
+  const s = String(stageName || '').toLowerCase();
+  if (s.includes('info')) return 'info';
+  if (s.includes('link')) return 'link';
+  return 'seo';
+}
 
+async function persistStageCall({
+  taskId, traceTaskId, pipeline, stageName, callLabel, model, promptSize,
+  tokensIn, tokensOut, costUsd, resultJson, startedAt, promptVersion,
+  qualityScore, triggeredRefine,
+}) {
   const completedAt = new Date();
+  const traceId = traceTaskId || taskId;
+
+  // Дублируем task_stages в универсальный pipeline_traces. Для info/link
+  // taskId в task_stages не передаётся из-за FK на tasks, но traceTaskId
+  // позволяет всё равно видеть LLM-трафик в общей таблице.
+  await recordTrace({
+    stage: stageName,
+    pipeline: inferPipeline(stageName, pipeline),
+    taskId: traceId,
+    model,
+    promptVersion,
+    inputTokens: tokensIn,
+    outputTokens: tokensOut,
+    durationMs: startedAt ? completedAt.getTime() - new Date(startedAt).getTime() : null,
+    qualityScore,
+    triggeredRefine,
+  });
+
+  if (!taskId) return;
 
   try {
     // Вставляем запись о вызове
@@ -274,6 +304,11 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     tokenBudget   = Infinity,
     brand         = '',
     model         = null,
+    pipeline      = null,
+    traceTaskId   = null,
+    promptVersion = null,
+    qualityScore  = null,
+    triggeredRefine = false,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -387,7 +422,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
       // Сохраняем метрики асинхронно, не блокируем пайплайн
       persistStageCall({
-        taskId, stageName, callLabel,
+        taskId, traceTaskId, pipeline, stageName, callLabel,
         model:      result.model,
         promptSize,
         tokensIn:   result.tokensIn,
@@ -397,6 +432,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
           ? Object.assign({}, parsed, { _cacheHitTokens: result.cacheHitTokens })
           : parsed,
         startedAt,
+        promptVersion,
+        qualityScore,
+        triggeredRefine,
       }).catch(() => {}); // ошибки уже логируются внутри
 
       if (result.logprobs) {

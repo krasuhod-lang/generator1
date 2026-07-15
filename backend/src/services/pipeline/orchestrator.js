@@ -1029,6 +1029,13 @@ async function runPipeline(task, ctx) {
         {
           finalHTML:     s7Result.finalHTML || finalBlocks.join('\n\n'),
           moduleContext: task.__moduleContext || null,
+          artifacts: {
+            stage7_result:     s7Result.globalAudit || s7Result,
+            gist_score:        stage0Result?.gist_score ?? null,
+            globalLSICoverage: s7Result.globalLSICoverage,
+            eeat_score:        s7Result.globalEEATScore,
+            tz_compliance:     s7Result.tzCompliance || s7Result.globalAudit?.tz_compliance || null,
+          },
         }
       );
       if (evaluatorReport) {

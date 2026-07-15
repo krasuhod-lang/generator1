@@ -27,6 +27,7 @@
 const db = require('../../config/db');
 const { callLLM, resetTaskBudget } = require('../llm/callLLM');
 const { runEeatAuditCore } = require('../eeatAudit/core');
+const { runQualityEvaluator } = require('../pipeline/stage8');
 const { loadLinkArticlePrompt } = require('../../prompts/linkArticle');
 const { generateImage, IMAGE_PRICE_USD } = require('./nanoBananaPro.adapter');
 const { calcCost } = require('../metrics/priceCalculator');
@@ -157,6 +158,8 @@ function buildCallCtx(taskId, stageName) {
   // таблица). Собственные метрики кладём через onTokens → recordTextTokens.
   return {
     stageName,
+    pipeline: 'link',
+    traceTaskId: taskId,
     log: (msg, level = 'info') => appendLog(taskId, msg, level).catch(() => {}),
     onTokens: (adapter, tIn, tOut, cost) => {
       // adapter: 'deepseek' | 'gemini' | 'grok'
@@ -1442,6 +1445,30 @@ async function processLinkArticleTask(taskId) {
       );
     } catch (gateErr) {
       console.warn(`[linkArticle] quality gate failed: ${gateErr.message}`);
+    }
+
+    // 8c-bis. Stage 8 composite evaluator — fail-open, default ON. Пишет
+    // composite_quality_score в link_article_tasks и не влияет на status.
+    try {
+      const evaluator = await runQualityEvaluator({
+        pipeline: 'link',
+        taskId,
+        articleHtml: finalHtml,
+        artifacts: {
+          gist_delta_json: gistDelta,
+          eeat_score: eeatAudit && eeatAudit.total_score,
+          eeat_audit: eeatAudit,
+          lsi_coverage: linkLsiReport,
+          quality_gate: linkQualityGateVerdict,
+        },
+        task,
+        log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+      });
+      if (evaluator && evaluator.composite_quality_score != null) {
+        await appendLog(taskId, `📊 Stage 8 composite quality: ${evaluator.composite_quality_score}/100`, 'info');
+      }
+    } catch (stage8Err) {
+      await appendLog(taskId, `⚠ Stage 8 evaluator не выполнился: ${stage8Err.message} — продолжаем`, 'warn');
     }
 
     // 8d. Мета-теги для ссылочной статьи (Задача D — GIST Meta Filter
