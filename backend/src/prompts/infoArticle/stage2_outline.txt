@@ -28,6 +28,7 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
         "jtbd_cluster":           "string",     // ОБЯЗАТЕЛЬНО — один из stage1_intents.jtbd_clusters[*].cluster
         "lsi_focus":              ["string"],   // 3–6 ключевых терминов для этой секции
         "must_include_entities":  ["string"],
+        "gist_expert":            false,        // true, если H2 строится вокруг тезиса §11 GIST Delta
         "subsections":            [{ "h3": "string", "descriptor": "string" }],
         "image_slot":             null,
         "recommended_word_count": 180
@@ -141,6 +142,15 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
      Иначе is_howto=false и howto_steps=[]. Эти шаги используются
      post-processing'ом для генерации HowTo JSON-LD; писатель оформит
      их как <ol class="howto"><li>Шаг N. …</li></ol> в подходящей секции.
+ 14. ⚠️ GIST DELTA (§11, если блок непустой).
+     §11 GIST Delta содержит информационную дельту — тезисы, которых нет
+     у конкурентов. Если §11 передан и содержит тезисы:
+       • не менее 2 H2-секций плана строй вокруг тезисов из §11;
+       • у таких sections добавь поле `"gist_expert": true`;
+       • в `descriptor` явно укажи, какой тезис §11 раскрывается;
+       • можно также добавить тег [GIST_EXPERT_BLOCK] в начало `h2`, если
+         это не ломает естественность заголовка, но основной контракт —
+         именно boolean-поле `gist_expert: true`.
 
 [OUTPUT CONTRACT]
   - Только валидный JSON.
@@ -157,6 +167,7 @@ INFO-ARTICLE STAGE 2 — Структура статьи в блог: H1/H2/H3 +
   - toc_required = true.
   - summary_block.bullets — 3–6 непустых строк ≤140 символов каждая.
   - is_howto — boolean; если true, howto_steps содержит ≥2 валидных шагов.
+  - Если §11 GIST Delta непустой — минимум 2 sections имеют `"gist_expert": true`.
 
 [SELF-AUDIT — silent]
   ✓ Каждый user_question из Stage 1 закрыт ровно одной H2/H3 ИЛИ вошёл в faq_block?

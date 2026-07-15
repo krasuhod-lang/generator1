@@ -46,6 +46,8 @@ const ANTI_PATTERNS = `ЖЁСТКО ЗАПРЕЩЕНО (антипаттерны
 - бренд как differentiator в description, если бренд уже есть в title;
 - логика «любое число = хорошо»: число обязано быть decision-relevant;
 - копирование CTA-паттерна у конкурентов;
+- повтор фраз из входного блока [COMPETITOR_NOISE] — это шум ТОПа, а не
+  дифференциатор;
 - повтор одного и того же факта между title и description (кроме явного
   standalone exception);
 - fallback в общие слова без прохождения forced-choice sequence.`;
@@ -87,6 +89,8 @@ Step 8.4 — Map what competitors already say. По переданным title/d
 - часто используемые слова-пустышки.
 Любой кандидат, совпадающий с общим шаблоном конкурентов, помечается
 disqualified_by_template: true (первый pass Replaceability).
+Если передан [COMPETITOR_NOISE], кандидаты НЕ должны повторять эти фразы как
+уникальный факт или differentiator.
 
 ${GIST_TESTS}
 

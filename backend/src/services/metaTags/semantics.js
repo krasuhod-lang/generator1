@@ -225,9 +225,68 @@ function checkLsiUsage(text, mandatoryLsi) {
   return { used_lsi: used, missed_lsi: missed };
 }
 
+function _tokenPositions(text) {
+  const out = [];
+  const re = /[а-яёa-z0-9]+/gi;
+  let match;
+  while ((match = re.exec(String(text || ''))) !== null) {
+    const raw = match[0];
+    const norm = normalizeWord(raw);
+    if (norm) out.push({ raw, norm, index: match.index });
+  }
+  return out;
+}
+
+function _consonantKey(word) {
+  return String(word || '').toLowerCase().replace(/[аеёиоуыэюяaeiouy]/gi, '');
+}
+
+function _wordMatches(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const min = Math.min(a.length, b.length);
+  if (min >= 4 && (a.startsWith(b) || b.startsWith(a))) return true;
+  const ca = _consonantKey(a);
+  const cb = _consonantKey(b);
+  const cmin = Math.min(ca.length, cb.length);
+  return cmin >= 2 && (ca.startsWith(cb) || cb.startsWith(ca));
+}
+
+/**
+ * Проверяет, что главный ключ (полная фраза или первый токен по стемму)
+ * начинается в первых 35 символах Title. Возвращает 0-based позицию.
+ */
+function checkKeywordPosition(title, keyword) {
+  const titleTokens = _tokenPositions(title);
+  const keywordTokens = _tokenPositions(keyword)
+    .map((t) => t.norm)
+    .filter((n) => n && !STOP_WORDS.has(n));
+  if (!titleTokens.length || !keywordTokens.length) {
+    return { ok: false, position: -1 };
+  }
+
+  let position = -1;
+  for (let i = 0; i <= titleTokens.length - keywordTokens.length; i += 1) {
+    const fullMatch = keywordTokens.every((kw, j) => _wordMatches(titleTokens[i + j].norm, kw));
+    if (fullMatch) {
+      position = titleTokens[i].index;
+      break;
+    }
+  }
+
+  if (position === -1) {
+    const first = keywordTokens[0];
+    const hit = titleTokens.find((t) => _wordMatches(t.norm, first));
+    if (hit) position = hit.index;
+  }
+
+  return { ok: position >= 0 && position < 35, position };
+}
+
 module.exports = {
   extractSemantics,
   checkLsiUsage,
+  checkKeywordPosition,
   normalizeWord,
   STOP_WORDS,
   OBLIGATORY_DF_THRESHOLD,

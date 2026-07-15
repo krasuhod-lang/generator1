@@ -23,6 +23,7 @@
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { analyzeSnippets } = require('./snippetAnalyzer');
 
 // Кириллические safe ranges (§4 ТЗ) — синхронны с gistMetaFilter.
 const TITLE_MIN = 40;
@@ -565,12 +566,18 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
   // Копирайтерская модель задачи (та же конвенция, что у пайплайнов статей).
   const copywriterModel = normalizeGeminiCopywritingModel(inputs && inputs.gemini_model);
+  const safeInputs = { ...(inputs || {}) };
+  if (!safeInputs.snippetAnalysis) {
+    try {
+      safeInputs.snippetAnalysis = analyzeSnippets(serpData || []);
+    } catch (_) { /* fail-open: генерация возможна без анализа сниппетов */ }
+  }
 
   const result = await runGistMetaPipeline({
     keyword,
     semantics: semantics || {},
     serpData: serpData || [],
-    inputs: inputs || {},
+    inputs: safeInputs,
     options: { copywriterModel },
   });
 
@@ -579,7 +586,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
   result.description_length = String(result.description || '').length;
   result.detected_year = year;
 
-  const serpIntent = inputs && inputs.ctrAnalysis && inputs.ctrAnalysis.serp_intent;
+  const serpIntent = safeInputs && safeInputs.ctrAnalysis && safeInputs.ctrAnalysis.serp_intent;
   if (serpIntent && serpIntent.value) {
     result.intent = serpIntent.value;
     result.intent_reason = `Определено по ТОП-10: commercial ${Math.round((serpIntent.commercial_frequency || 0) * 100)}%, informational ${Math.round((serpIntent.informational_frequency || 0) * 100)}%`;
@@ -588,7 +595,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
   // Детерминированные guard'ы прежней версии (цены без price_data,
   // коммерческие вопросы, штампы, H1-хвосты) — теперь только warnings:
   // selection-логика GIST-пайплайна первична.
-  const violations = findHardViolations(result, inputs || {});
+  const violations = findHardViolations(result, safeInputs || {});
   if (violations.length) {
     result.post_validation_notes = result.post_validation_notes || [];
     violations.forEach((v) => result.post_validation_notes.push(`⚠️ Guard: ${v}.`));

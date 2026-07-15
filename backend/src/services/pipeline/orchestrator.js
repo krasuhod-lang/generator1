@@ -123,6 +123,7 @@ const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adap
 const { resetTaskBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { normalizeTz, hasTz } = require('./tzParser');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -223,6 +224,25 @@ async function runPipeline(task, ctx) {
   ];
   for (const f of RICH_TEXT_FIELDS) {
     if (task[f]) task[f] = richTextToPlain(task[f]);
+  }
+
+  // ── TZ Binding: если parse-tz уже заполнил input_tz_parsed_json, но новая
+  // нормализованная колонка ещё пустая, один раз переносим ТЗ в tz_json.
+  if (!hasTz(task) && task.input_tz_parsed_json && !task.tz_json) {
+    try {
+      const normalizedTz = normalizeTz(task.input_tz_parsed_json);
+      task.tz_json = normalizedTz;
+      task.tz_source = 'relevance_tool';
+      await db.query(
+        `UPDATE tasks
+            SET tz_json = $1, tz_source = $2, updated_at = NOW()
+          WHERE id = $3 AND tz_json IS NULL`,
+        [JSON.stringify(normalizedTz), task.tz_source, taskId],
+      );
+      log('TZ Binding: input_tz_parsed_json нормализован в tasks.tz_json', 'info');
+    } catch (e) {
+      log(`TZ Binding: нормализация ТЗ пропущена (${e.message})`, 'warn');
+    }
   }
 
   const pipelineStartedAt = Date.now();
@@ -1037,6 +1057,7 @@ async function runPipeline(task, ctx) {
         niche: task.input_target_service || task.input_target_url || '',
         currentYear: new Date().getFullYear(),
         evaluatorReport: evaluatorReport || null,
+        tzCompliance: s7Result.tzCompliance || s7Result.globalAudit?.tz_compliance || null,
         informationDelta: Array.isArray(stage0Result?.information_delta)
           ? stage0Result.information_delta
           : null,
@@ -1104,6 +1125,7 @@ async function runPipeline(task, ctx) {
     evaluatorReport:    evaluatorReport                || null,
     linguaForensic:     linguaForensicReport           || null,
     qualityGate:        qualityGateVerdict             || null,
+    tzCompliance:       s7Result.tzCompliance || s7Result.globalAudit?.tz_compliance || null,
     generationTimeSec,
   });
 

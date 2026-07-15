@@ -60,6 +60,7 @@ const {
   NEGATIVE_BASE: IMAGE_NEGATIVE_BASE,
   NEGATIVE_STRICT_EXTRA: IMAGE_NEGATIVE_STRICT_EXTRA,
 } = require('../images/imagePromptComposer');
+const { detectBannedPatterns } = require('./qualityPatterns');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
@@ -93,6 +94,11 @@ const LINK_ARTICLE_EEAT_TARGET = (() => {
   const env = parseFloat(process.env.LINK_ARTICLE_EEAT_TARGET);
   if (Number.isFinite(env) && env > 0 && env <= 10) return env;
   return EEAT_PQ_TARGET;
+})();
+
+const LINK_ARTICLE_LF_MAX_PASSES = (() => {
+  const v = parseInt(process.env.LINK_ARTICLE_LF_MAX_PASSES, 10);
+  return Number.isFinite(v) && v >= 0 && v <= 3 ? v : 2;
 })();
 
 const IN_PROGRESS = new Set(); // taskId — защита от двойного старта
@@ -233,6 +239,130 @@ async function runWhitespace(task, strategy, audience, ctx) {
   );
 }
 
+function isLinkGoogleSerpEnabled() {
+  return String(process.env.LINK_GOOGLE_SERP_ENABLED ?? 'true').toLowerCase() !== 'false';
+}
+
+function primaryAudienceLabel(audience) {
+  const personas = Array.isArray(audience?.audience_personas) ? audience.audience_personas : [];
+  if (personas[0]) return [personas[0].name, personas[0].context].filter(Boolean).join(' — ');
+  const clusters = Array.isArray(audience?.audience_clusters) ? audience.audience_clusters : [];
+  if (clusters[0]) return [clusters[0].name, clusters[0].intent_bias].filter(Boolean).join(' — ');
+  return '';
+}
+
+async function runGoogleSerpGistDelta(task, audience, ctx) {
+  const result = {
+    enabled: isLinkGoogleSerpEnabled(),
+    serp_results: [],
+    information_delta: [],
+    gist_score: null,
+    top10_claims: [],
+    error: null,
+  };
+  if (!result.enabled) return result;
+
+  try {
+    let fetchGoogleSerpWithContent;
+    try {
+      ({ fetchGoogleSerpWithContent } = require('../infoArticle/fetchGoogleSerp'));
+    } catch (e) {
+      result.error = `fetchGoogleSerpWithContent unavailable: ${e.message}`;
+      return result;
+    }
+    const topN = parseInt(process.env.LINK_GOOGLE_SERP_TOP_N || '10', 10);
+    const serp = await fetchGoogleSerpWithContent({
+      keyword: task.topic,
+      region: task.region || 'ru',
+      top_n: Number.isFinite(topN) && topN > 0 ? topN : 10,
+      extract_content: true,
+    });
+    result.serp_results = (Array.isArray(serp) ? serp : []).map((item) => ({
+      url: item.url,
+      serp_title: item.serp_title,
+      serp_description: item.serp_description,
+      word_count: item.word_count || 0,
+      page_content: String(item.page_content || '').slice(0, 24000),
+    }));
+
+    const competitorsText = result.serp_results
+      .map((item) => item.page_content)
+      .filter((text) => typeof text === 'string' && text.trim());
+    if (!competitorsText.length) return result;
+
+    let runGistGapFinder;
+    try {
+      ({ runGistGapFinder } = require('../gist/gistClient'));
+    } catch (e) {
+      result.error = `runGistGapFinder unavailable: ${e.message}`;
+      return result;
+    }
+    const gist = await runGistGapFinder({
+      keyword: task.topic,
+      competitors_text: competitorsText,
+      page_type: 'link',
+      target_audience: primaryAudienceLabel(audience),
+    });
+    result.information_delta = Array.isArray(gist?.information_delta) ? gist.information_delta : [];
+    result.gist_score = gist?.gist_score ?? null;
+    result.top10_claims = Array.isArray(gist?.top10_claims) ? gist.top10_claims : [];
+    return result;
+  } catch (e) {
+    result.error = e.message;
+    if (ctx && typeof ctx.log === 'function') ctx.log(`GIST delta skipped: ${e.message}`, 'warn');
+    return result;
+  }
+}
+
+async function runCompetitivePurchaseBrief(task, strategy, audience, whitespace, gistDelta, ctx) {
+  const serpDigest = (Array.isArray(gistDelta?.serp_results) ? gistDelta.serp_results : [])
+    .slice(0, 6)
+    .map((item) => ({
+      title: item.serp_title,
+      description: item.serp_description,
+      url: item.url,
+      excerpt: String(item.page_content || '').slice(0, 900),
+    }));
+  const system = [
+    'LINK-ARTICLE §10/§11 ANALYST.',
+    'Верни только JSON без markdown:',
+    '{',
+    '  "competitive_failures": ["5-7 коротких тезисов: что конкуренты делают слабо"],',
+    '  "purchase_arguments": ["5-7 конкретных аргументов для перехода по анкорной ссылке"]',
+    '}',
+    'Не выдумывай статистику, бренды и факты; опирайся на SERP/white-space/стратегию.',
+  ].join('\n');
+  const user = [
+    `[INPUTS]`,
+    `topic: ${task.topic}`,
+    `anchor_text: ${task.anchor_text}`,
+    `anchor_url: ${task.anchor_url}`,
+    `focus_notes: ${task.focus_notes || '[не задано]'}`,
+    `strategy_digest: ${JSON.stringify(strategy || {}).slice(0, 3500)}`,
+    `stage0_audience: ${JSON.stringify(audience || {}).slice(0, 2500)}`,
+    `whitespace_analysis: ${JSON.stringify(whitespace || {}).slice(0, 3500)}`,
+    `serp_digest: ${JSON.stringify(serpDigest).slice(0, 7000)}`,
+    `gist_information_delta: ${JSON.stringify(gistDelta?.information_delta || []).slice(0, 3500)}`,
+  ].join('\n');
+  try {
+    const raw = await callLLM(
+      'deepseek',
+      system,
+      user,
+      { retries: 2, temperature: 0.25, callLabel: 'LinkArticle §10/§11 Analyst', ...ctx },
+    );
+    return {
+      competitive_failures: Array.isArray(raw?.competitive_failures)
+        ? raw.competitive_failures.slice(0, 7) : [],
+      purchase_arguments: Array.isArray(raw?.purchase_arguments)
+        ? raw.purchase_arguments.slice(0, 7) : [],
+    };
+  } catch (e) {
+    if (ctx && typeof ctx.log === 'function') ctx.log(`§10/§11 skipped: ${e.message}`, 'warn');
+    return { competitive_failures: [], purchase_arguments: [], error: e.message };
+  }
+}
+
 async function runStructure(task, audience, intents, whitespace, ctx) {
   const hints = (whitespace && whitespace.article_hierarchy_hints) || {};
   const user = [
@@ -298,6 +428,106 @@ function stripTags(s) {
     out = next;
   }
   return out.replace(/\s+/g, ' ');
+}
+
+function normalizeForCoverage(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function termStems(term) {
+  return normalizeForCoverage(term)
+    .split(/\s+/)
+    .filter((w) => w.length >= 4)
+    .map((w) => w.slice(0, Math.min(6, w.length)));
+}
+
+function extractMandatoryLsi(task, strategy, intents) {
+  const terms = [];
+  const art = task.__relevanceArtifact;
+  if (art && Array.isArray(art.important_lsi)) {
+    for (const item of art.important_lsi.slice(0, 40)) {
+      terms.push(typeof item === 'string' ? item : (item.term || item.lemma || item.text || item.keyword));
+    }
+  }
+  if (strategy && Array.isArray(strategy.lsi_entities)) {
+    for (const e of strategy.lsi_entities) {
+      if (!e || e.must_appear === false) continue;
+      terms.push(e.entity);
+    }
+  }
+  if (intents && Array.isArray(intents.semantic_anchors)) {
+    terms.push(...intents.semantic_anchors.slice(0, 20));
+  }
+  return Array.from(new Set(terms.map((t) => String(t || '').trim()).filter(Boolean))).slice(0, 50);
+}
+
+function measureLinkLsiCoverage(articleHtml, task, strategy, intents) {
+  const mandatory = extractMandatoryLsi(task, strategy, intents);
+  if (!mandatory.length) return { coverage_pct: 100, present: [], missing: [], total: 0 };
+  const text = normalizeForCoverage(stripTags(articleHtml));
+  const present = [];
+  const missing = [];
+  for (const term of mandatory) {
+    const exact = normalizeForCoverage(term);
+    const stems = termStems(term);
+    const found = (exact && text.includes(exact)) ||
+      (stems.length > 0 && stems.every((stem) => text.includes(stem)));
+    (found ? present : missing).push(term);
+  }
+  return {
+    coverage_pct: Math.round((present.length / mandatory.length) * 100),
+    present,
+    missing,
+    total: mandatory.length,
+  };
+}
+
+function buildQualityRefineIssues({ eeatAudit, patternReport, lsiReport }) {
+  const issues = [];
+  const auditIssues = Array.isArray(eeatAudit?.issues) ? eeatAudit.issues : [];
+  issues.push(...auditIssues.filter((it) => it && it.needs_refine !== false));
+  if (patternReport && patternReport.banned_intros && patternReport.banned_intros.length) {
+    issues.push({
+      severity: 'major',
+      category: 'banned_intro',
+      where: 'intro',
+      problem: `Запрещённые вводные: ${patternReport.banned_intros.join(', ')}`,
+      fix_instruction: 'Убери вводные-пустышки и начни с конкретной пользы/факта из LAKB.',
+    });
+  }
+  if (patternReport?.repetitive_structure) {
+    issues.push({
+      severity: 'major',
+      category: 'repetitive_structure',
+      where: 'article',
+      problem: 'Три и более соседних абзаца построены одинаково.',
+      fix_instruction: 'Разнообразь синтаксис и логику соседних абзацев без добавления воды.',
+    });
+  }
+  if (patternReport && patternReport.has_table_or_list === false) {
+    issues.push({
+      severity: 'major',
+      category: 'fact_table_or_list',
+      where: 'article',
+      problem: 'Нет таблицы или маркированного/нумерованного списка с конкретными фактами.',
+      fix_instruction: 'Добавь один компактный список или таблицу с фактами из LAKB.',
+    });
+  }
+  if (lsiReport && lsiReport.coverage_pct < 60) {
+    issues.push({
+      severity: 'major',
+      category: 'lsi_coverage',
+      where: 'article',
+      problem: `LSI coverage ${lsiReport.coverage_pct}% < 60%; пропущено: ${lsiReport.missing.slice(0, 12).join(', ')}`,
+      fix_instruction: 'Естественно встрои недостающие обязательные LSI-термины без переспама.',
+    });
+  }
+  return issues;
 }
 
 function validateWriterOutput(html, task) {
@@ -765,6 +995,24 @@ async function processLinkArticleTask(taskId) {
     const whitespace = await runWhitespace(task, strategy, audience, ctx);
     await saveStageResult(taskId, 'whitespace_analysis', whitespace);
 
+    // 3c. Google SERP → GIST delta + §10/§11 аналитика (fail-open).
+    await setStage(taskId, 'stage1b_gist_delta', 42);
+    const gistDelta = await runGoogleSerpGistDelta(task, audience, ctx);
+    await saveStageResult(taskId, 'gist_delta_json', gistDelta);
+    if (gistDelta.information_delta.length) {
+      await appendLog(
+        taskId,
+        `🔎 GIST delta: ${gistDelta.information_delta.length} тезис(ов), SERP pages=${gistDelta.serp_results.length}`,
+        'info',
+      );
+    } else if (gistDelta.error) {
+      await appendLog(taskId, `⚠ GIST delta пропущена: ${gistDelta.error}`, 'warn');
+    }
+
+    const competitiveBrief = await runCompetitivePurchaseBrief(
+      task, strategy, audience, whitespace, gistDelta, ctx,
+    );
+
     // 4. Stage 2 (структура — с учётом whitespace.article_hierarchy_hints)
     await setStage(taskId, 'stage2_structure', 48);
     const structure = await runStructure(task, audience, intents, whitespace, ctx);
@@ -773,7 +1021,7 @@ async function processLinkArticleTask(taskId) {
     // 4b. Build LAKB (LINK-ARTICLE KNOWLEDGE BASE) + optional Gemini cachedContents.
     //     Это и есть «кэширование DeepSeek-аналитики и передача её в Gemini».
     task.__lakb = buildLinkArticleKnowledgeBase({
-      task, strategy, audience, intents, whitespace, structure,
+      task, strategy, audience, intents, whitespace, structure, competitiveBrief, gistDelta,
     });
     await appendLog(taskId, `🧠 LAKB собрана (${task.__lakb.length} символов)`, 'info');
 
@@ -823,6 +1071,8 @@ async function processLinkArticleTask(taskId) {
     //     проход writer'а с передачей prior_eeat_issues.
     await setStage(taskId, 'stage5_eeat_audit', 68);
     let eeatAudit = null;
+    let linkQualityPatternsReport = detectBannedPatterns(articleHtml);
+    let linkLsiReport = measureLinkLsiCoverage(articleHtml, task, strategy, intents);
     try {
       eeatAudit = await runEeatAudit(task, audience, intents, articleHtml, ctx);
       await db.query(
@@ -837,23 +1087,35 @@ async function processLinkArticleTask(taskId) {
         eeatAudit.verdict === 'pass' ? 'ok' : 'info',
       );
 
+      linkQualityPatternsReport = detectBannedPatterns(articleHtml);
+      linkLsiReport = measureLinkLsiCoverage(articleHtml, task, strategy, intents);
       const needsRefine =
         eeatAudit.verdict === 'refine' ||
-        (eeatAudit.verdict !== 'reject' && eeatAudit.total_score < LINK_ARTICLE_EEAT_TARGET);
+        (eeatAudit.verdict !== 'reject' && eeatAudit.total_score < LINK_ARTICLE_EEAT_TARGET) ||
+        linkLsiReport.coverage_pct < 60 ||
+        linkQualityPatternsReport.ok === false;
+      const refineIssues = buildQualityRefineIssues({
+        eeatAudit,
+        patternReport: linkQualityPatternsReport,
+        lsiReport: linkLsiReport,
+      });
 
-      if (needsRefine && eeatAudit.issues.length) {
+      if (needsRefine && refineIssues.length) {
         await setStage(taskId, 'stage3_writer_eeat_refine', 72);
         await appendLog(
           taskId,
-          `↻ E-E-A-T < ${LINK_ARTICLE_EEAT_TARGET} — корректировочный прогон writer'а`,
+          `↻ Quality refine: E-E-A-T target=${LINK_ARTICLE_EEAT_TARGET}, ` +
+          `LSI=${linkLsiReport.coverage_pct}%, patterns_ok=${linkQualityPatternsReport.ok}`,
           'info',
         );
         const refined = await runWriter(
           task, audience, intents, structure, whitespace, ctx,
-          { priorEeatIssues: eeatAudit.issues, callLabel: 'LinkArticle Stage 3 (E-E-A-T refine)' },
+          { priorEeatIssues: refineIssues, callLabel: 'LinkArticle Stage 3 (quality refine)' },
         );
         if (refined.html) {
           articleHtml = refined.html;
+          linkQualityPatternsReport = detectBannedPatterns(articleHtml);
+          linkLsiReport = measureLinkLsiCoverage(articleHtml, task, strategy, intents);
           // Re-audit refined version (best-effort; не падаем при ошибке).
           try {
             const reaudit = await runEeatAudit(task, audience, intents, articleHtml, ctx);
@@ -1021,6 +1283,7 @@ async function processLinkArticleTask(taskId) {
     //     каркас, не заменяя его: graceful, при ошибке/низкой роботности
     //     текст не меняется. Отчёт попадает в quality_gate.lingua_forensic.
     let linguaForensicReport = null;
+    let linguaForensicManualReview = false;
     try {
       const { runLinguaForensicPass } = require('../linguaForensic');
       await setStage(taskId, 'linguaforensic', 98);
@@ -1028,16 +1291,27 @@ async function processLinkArticleTask(taskId) {
         pipeline: 'link',
         taskId,
         log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+        maxRobotness: 25,
+        maxPasses: LINK_ARTICLE_LF_MAX_PASSES,
+        maxStrategy: 'medium',
+        strategySequence: ['light', 'medium'].slice(0, LINK_ARTICLE_LF_MAX_PASSES),
       });
       linguaForensicReport = lfResult.report;
+      const robotnessAfter = Number(lfResult.report?.robotness_after);
+      linguaForensicManualReview = Number.isFinite(robotnessAfter) && robotnessAfter > 25;
       if (lfResult.report?.verdict === 'rewritten') {
         finalHtml  = lfResult.html;
         finalPlain = buildPlainText(finalHtml);
+        linkQualityPatternsReport = detectBannedPatterns(finalHtml);
+        linkLsiReport = measureLinkLsiCoverage(finalHtml, task, strategy, intents);
         await appendLog(
           taskId,
           `🕵️ LinguaForensic: рерайт принят — роботность ${lfResult.report.robotness_before}% → ${lfResult.report.robotness_after}%`,
           'ok',
         );
+      }
+      if (linguaForensicManualReview) {
+        await appendLog(taskId, '⚠ LinguaForensic: роботность выше 25% после лимита проходов — manual_review', 'warn');
       }
     } catch (lfErr) {
       console.warn(`[linkArticle] LinguaForensic failed: ${lfErr.message}`);
@@ -1153,8 +1427,12 @@ async function processLinkArticleTask(taskId) {
               robotness_before: linguaForensicReport.robotness_before ?? null,
               robotness_after:  linguaForensicReport.robotness_after ?? null,
               passes:           linguaForensicReport.passes ?? 0,
+              manual_review_required: linguaForensicManualReview,
             }
           : null,
+        quality_patterns: linkQualityPatternsReport,
+        lsi_coverage: linkLsiReport,
+        manual_review_required: linguaForensicManualReview,
         checked_at: new Date().toISOString(),
       };
       await appendLog(

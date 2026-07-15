@@ -124,7 +124,7 @@ function mergeContentGaps(whiteSpace, informationDelta, top10Claims) {
   };
 }
 
-/** Форматирует дельту в маркированный список для §4-GIST блока промптов. */
+/** Форматирует дельту в маркированный список для §11/§4-GIST блока промптов. */
 function formatDeltaAsBullets(informationDelta, { max = 20, maxLen = 300 } = {}) {
   return (Array.isArray(informationDelta) ? informationDelta : [])
     .slice(0, max)
@@ -139,18 +139,20 @@ function formatDeltaAsBullets(informationDelta, { max = 20, maxLen = 300 } = {})
 }
 
 /**
- * §4-GIST блок для system-брифа Stage 2 (архитектор структуры).
+ * §11 GIST Delta блок для Stage 2/IAKB. Legacy marker §4-GIST оставлен,
+ * чтобы старые промпты/логи не потеряли привязку.
  * Пустая строка, если дельты нет.
  */
 function buildGistDeltaBrief(informationDelta) {
   const bullets = formatDeltaAsBullets(informationDelta);
   if (!bullets) return '';
   return [
-    '§4-GIST. ИНФОРМАЦИОННАЯ ДЕЛЬТА (данные которых нет у конкурентов):',
+    '§11 GIST Delta — Missing Semantic Nodes (legacy §4-GIST):',
+    'ИНФОРМАЦИОННАЯ ДЕЛЬТА (тезисы, которых нет у конкурентов):',
     bullets,
     '',
-    'ИНСТРУКЦИЯ: Каждый тезис из GIST-дельты ДОЛЖЕН быть отражён минимум в одном H2',
-    'или в экспертном блоке. Блоки помечай тегом [GIST-DELTA].',
+    'ИНСТРУКЦИЯ: Каждый тезис из §11 GIST-дельты ДОЛЖЕН быть отражён минимум в одном H2',
+    'или в экспертном блоке. Не менее 2 H2 помечай gist_expert=true или [GIST_EXPERT_BLOCK].',
     'GIST Score цели: ≥30% параграфов должны покрывать хотя бы один тезис дельты.',
   ].join('\n');
 }

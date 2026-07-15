@@ -382,6 +382,42 @@ function checkGistScore(html, informationDelta, { thresholds } = {}) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 13. TZ Compliance (Task C).
+//     Stage 7 уже посчитал детерминированный отчёт соблюдения ТЗ. Здесь
+//     только переводим его в fail-open warning для единого qualityGate.
+// ─────────────────────────────────────────────────────────────────────
+function checkTzCompliance(tzCompliance, { minScore = 80 } = {}) {
+  if (!tzCompliance || typeof tzCompliance !== 'object') {
+    return _verdict('tzCompliance', {
+      pass: true,
+      blocking: false,
+      verdict: 'skipped',
+      evidence: { reason: 'no_tz_compliance_report' },
+    });
+  }
+
+  const score = _firstNumber([tzCompliance.tz_compliance_score, tzCompliance.score]);
+  const threshold = _firstNumber([tzCompliance.threshold, minScore]) ?? 80;
+  const pass = score == null || score >= threshold;
+  return _verdict('tzCompliance', {
+    pass,
+    blocking: false,
+    score,
+    verdict: pass ? 'tz_ok' : `tz_score ${score} < ${threshold}`,
+    evidence: {
+      threshold,
+      needs_rewrite: tzCompliance.needs_rewrite || [],
+      h1_match: tzCompliance.h1_match || null,
+      h2_required_present: tzCompliance.h2_required_present || [],
+      lsi_required_coverage: tzCompliance.lsi_required_coverage ?? null,
+      lsi_forbidden_violations: tzCompliance.lsi_forbidden_violations || [],
+      fail_open: tzCompliance.fail_open === true,
+      error: tzCompliance.error || null,
+    },
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 function _firstNumber(candidates) {
   for (const c of candidates) {
@@ -403,6 +439,7 @@ module.exports = {
   checkAuthorship,
   checkValueAdds,
   checkGistScore,
+  checkTzCompliance,
   // helpers for tests
   _internal: { _plainLower, _firstNumber, RISK_ORDER, _extractParagraphs },
 };

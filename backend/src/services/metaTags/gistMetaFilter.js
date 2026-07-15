@@ -34,6 +34,8 @@ const {
   PAIR_ASSEMBLER_SYSTEM,
   CONFLICT_CHECKER_SYSTEM,
 } = require('./gistMetaPrompts');
+const { analyzeSnippets } = require('./snippetAnalyzer');
+const { checkKeywordPosition } = require('./semantics');
 
 // Кириллические safe ranges (§4 ТЗ). Английские лимиты не применимы.
 const TITLE_MIN = 40;
@@ -62,6 +64,34 @@ const VALID_SOURCES = new Set([
   'page_angle', 'missing_node', 'failure_mode', 'hidden_info', 'limitation',
   'disqualifier', 'quantifiable', 'fallback_supercategory', 'fallback_structural',
 ]);
+
+function _ensureSnippetAnalysis(serpData, inputs = {}) {
+  if (inputs.snippetAnalysis && Array.isArray(inputs.snippetAnalysis.competitor_noise)) {
+    return inputs.snippetAnalysis;
+  }
+  try {
+    return analyzeSnippets(serpData || []);
+  } catch (_) {
+    return null;
+  }
+}
+
+function _buildCompetitorNoiseBlock(snippetAnalysis) {
+  if (!snippetAnalysis || !Array.isArray(snippetAnalysis.competitor_noise)
+      || !snippetAnalysis.competitor_noise.length) {
+    return '';
+  }
+  const titleStats = snippetAnalysis.competitor_title_lengths || {};
+  const descStats = snippetAnalysis.competitor_desc_lengths || {};
+  return `
+
+[COMPETITOR_NOISE]
+Фразы и паттерны конкурентов, которые ЗАПРЕЩЕНО повторять:
+- Запрещённые фразы/паттерны: ${snippetAnalysis.competitor_noise.slice(0, 20).join('; ')}
+- Доминирующий title-паттерн ТОПа: ${snippetAnalysis.dominant_title_pattern || 'plain'} — не копируй его дословно.
+- Длины конкурентов: Title min=${titleStats.min || 0}, max=${titleStats.max || 0}, avg=${titleStats.avg || 0}; Description min=${descStats.min || 0}, max=${descStats.max || 0}, avg=${descStats.avg || 0}.
+- CTA конкурентов: ${(snippetAnalysis.cta_patterns || []).join(', ') || '—'}.`;
+}
 
 function _parseJson(text) {
   // Ленивый require — metaGenerator требует этот модуль (избегаем циклической
@@ -140,7 +170,9 @@ async function _callCopywriterJson(userPrompt, usage, opts = {}) {
 
 // ─── Фаза 1: Candidate generation (Steps 8.1–8.4) ──────────────────
 
-function _buildCandidateUserPrompt({ keyword, semantics = {}, serpData = [], inputs = {} }) {
+function _buildCandidateUserPrompt({
+  keyword, semantics = {}, serpData = [], inputs = {}, snippetAnalysis = null,
+}) {
   const contextParts = [];
   if (inputs.niche) contextParts.push(`Тема страницы: ${inputs.niche}`);
   if (inputs.toponym) contextParts.push(`Регион: ${inputs.toponym}`);
@@ -182,6 +214,8 @@ function _buildCandidateUserPrompt({ keyword, semantics = {}, serpData = [], inp
       : '',
   ].filter(Boolean).join('\n');
 
+  const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Контекст страницы: ${contextParts.join(' | ') || 'Нет данных'}
@@ -192,13 +226,15 @@ ${lsiBlock}` : ''}
 
 [TITLE/DESCRIPTION КОНКУРЕНТОВ ТОП-ВЫДАЧИ]
 ${competitors || 'Нет данных о конкурентах — оцени общий шаблон категории по своим знаниям выдачи.'}${ctrBlock}
+${competitorNoiseBlock}
 
 Выполни Steps 8.1–8.4 и верни JSON по контракту.`;
 }
 
 // ─── Фаза 2: Filter + scoring (Steps 8.5 / 8.5b / 8.6) ─────────────
 
-function _buildRankerUserPrompt({ keyword, phase1 }) {
+function _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis = null }) {
+  const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Задача поля (Step 8.1): ${JSON.stringify(phase1.field_job || {}, null, 2)}
@@ -206,6 +242,7 @@ function _buildRankerUserPrompt({ keyword, phase1 }) {
 
 [КАНДИДАТЫ-ФАКТЫ]
 ${JSON.stringify(phase1.candidates || [], null, 2)}
+${competitorNoiseBlock}
 
 Кандидаты с disqualified_by_template: true уже провалили первый pass
 Replaceability — исключи их (survived: false), кроме случая, когда без них
@@ -249,9 +286,11 @@ function _normalizeRankedItem(item) {
 // ─── Фаза 3: Pair generation (Steps 8.7–8.8) ───────────────────────
 
 function _buildAssemblerUserPrompt({
-  keyword, inputs = {}, winner, alternates, phase1, standaloneExposure, feedback,
+  keyword, inputs = {}, winner, alternates, phase1, standaloneExposure,
+  feedback, snippetAnalysis = null,
 }) {
   const alternateFacts = alternates.map((a) => `- ${a.fact} (source: ${a.source})`).join('\n');
+  const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Бренд: ${inputs.brand || '—'}
@@ -265,6 +304,7 @@ ${JSON.stringify(winner, null, 2)}
 
 [ЗАПАСНЫЕ КАНДИДАТЫ — lead fact для DESCRIPTION]
 ${alternateFacts || '— (запасных нет: используй новую смысловую ось того же факта — спецификацию/число/proof, не перефразирование)'}
+${competitorNoiseBlock}
 ${feedback ? `
 [ФИДБЕК ПРЕДЫДУЩЕЙ ПОПЫТКИ — ОБЯЗАТЕЛЬНО ИСПРАВИТЬ]
 ${feedback}` : ''}
@@ -304,6 +344,17 @@ function _deterministicPairIssues(pair) {
   const desc = String(pair.description || '');
   if (desc.length < DESC_MIN) {
     issues.push(`description короче safe range (${desc.length} < ${DESC_MIN})`);
+  }
+  return issues;
+}
+
+function _deterministicPairSoftIssues(pair, keyword) {
+  const issues = [];
+  const keywordPos = checkKeywordPosition(String(pair.title || ''), keyword);
+  if (!keywordPos.ok) {
+    issues.push(
+      `главный ключ не начинается в первых 35 символах title (position=${keywordPos.position})`,
+    );
   }
   return issues;
 }
@@ -398,11 +449,14 @@ async function runGistMetaPipeline({
   const notes = [];
   const standaloneExposure = inputs.standalone_exposure === true
     || inputs.standaloneExposure === true;
+  const snippetAnalysis = _ensureSnippetAnalysis(serpData, inputs);
 
   // ── Фаза 1: Candidate generation (Steps 8.1–8.4) ──
   const phase1 = await _callAnalyticJson(
     CANDIDATE_GENERATOR_SYSTEM,
-    _buildCandidateUserPrompt({ keyword, semantics, serpData, inputs }),
+    _buildCandidateUserPrompt({
+      keyword, semantics, serpData, inputs, snippetAnalysis,
+    }),
     usage,
   );
   const candidates = Array.isArray(phase1.candidates)
@@ -415,7 +469,7 @@ async function runGistMetaPipeline({
   // ── Фаза 2: Filter + scoring (Steps 8.5 / 8.5b / 8.6) ──
   const phase2 = await _callAnalyticJson(
     FILTER_RANKER_SYSTEM,
-    _buildRankerUserPrompt({ keyword, phase1 }),
+    _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis }),
     usage,
   );
   const rankedAll = Array.isArray(phase2.ranked)
@@ -458,7 +512,8 @@ async function runGistMetaPipeline({
 
     pair = await _callCopywriterJson(
       _buildAssemblerUserPrompt({
-        keyword, inputs, winner, alternates, phase1, standaloneExposure, feedback,
+        keyword, inputs, winner, alternates, phase1, standaloneExposure,
+        feedback, snippetAnalysis,
       }),
       usage,
       { model: options.copywriterModel },
@@ -473,6 +528,10 @@ async function runGistMetaPipeline({
     }
     if (hardIssues.length) {
       notes.push(`⚠️ Остались нарушения после ${attempt} попыток: ${hardIssues.join('; ')}.`);
+    }
+    const softIssues = _deterministicPairSoftIssues(pair, keyword);
+    if (softIssues.length) {
+      notes.push(`⚠️ Post-validation: ${softIssues.join('; ')}.`);
     }
 
     // Steps 8.9–8.10 — semantic conflict + pair replaceability.

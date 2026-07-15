@@ -164,6 +164,17 @@ function sectionWhitespace(ws) {
   return lines.join('\n');
 }
 
+function sectionGistDelta(ws) {
+  const delta = ws && Array.isArray(ws.information_delta) ? ws.information_delta : [];
+  if (!delta.length) return '';
+  const lines = ['§11 GIST Delta — Missing Semantic Nodes'];
+  lines.push('  Тезисы ниже — информационная дельта: их не хватает у конкурентов.');
+  lines.push('  Writer/outline обязаны использовать их как основу экспертных блоков, а не как справочник определений.');
+  lines.push(bullet(delta, 20));
+  if (ws.gist_score != null) lines.push(`  gist_score: ${ws.gist_score}`);
+  return lines.join('\n');
+}
+
 function sectionOutline(outline) {
   if (!outline || typeof outline !== 'object') return '';
   const lines = ['§6. СТРУКТУРА СТАТЬИ (Stage 2)'];
@@ -174,6 +185,9 @@ function sectionOutline(outline) {
     for (const s of outline.sections.slice(0, 12)) {
       const flags = [];
       if (s.image_slot != null) flags.push(`IMG#${s.image_slot}`);
+      if (s.gist_expert === true || /\[GIST(?:_EXPERT_BLOCK|-DELTA)\]/i.test(String(s.h2 || ''))) {
+        flags.push('GIST_EXPERT_BLOCK');
+      }
       const flagStr = flags.length ? ` [${flags.join(',')}]` : '';
       lines.push(`    ${s.index || '?'}. ${s.h2 || '?'}${flagStr}`);
       if (s.descriptor)   lines.push(`        – ${clip(s.descriptor, 240)}`);
@@ -300,7 +314,8 @@ function buildInfoArticleKnowledgeBase({
     'systemInstruction для Gemini (через cachedContents API, если включён',
     'INFO_ARTICLE_GEMINI_CACHE_ENABLED). Gemini обязан опираться на §1..§9',
     'как на «фон» статьи и не выходить за их рамки. ЗАПРЕЩЕНО выдумывать',
-    'факты, бренды, статистику, цитаты, ссылки.',
+    'факты, бренды, статистику, цитаты, ссылки. §11 GIST Delta — обязательный',
+    'источник экспертных смысловых блоков, если он непустой.',
     '',
   ].join('\n');
 
@@ -379,6 +394,7 @@ function buildInfoArticleKnowledgeBase({
     sectionRelevanceCtx,
     sectionTargetSiteStyle,
     sectionAudienceResearch,
+    sectionGistDelta(whitespace),
   ].filter(Boolean);
 
   let text = header + parts.join('\n\n');

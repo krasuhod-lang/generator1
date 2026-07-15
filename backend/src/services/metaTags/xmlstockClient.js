@@ -89,8 +89,25 @@ function collapseWs(s) {
 }
 
 /**
+ * Детерминированно размечает тип сниппета и видимые SERP-фичи.
+ */
+function _deriveSerpFeatures(titleOrDescription, maybeDescription) {
+  const description = maybeDescription == null ? titleOrDescription : maybeDescription;
+  const text = maybeDescription == null
+    ? String(titleOrDescription || '')
+    : `${titleOrDescription || ''} ${maybeDescription || ''}`;
+  return {
+    type: String(description || '').length > 160 ? 'extended' : 'regular',
+    has_date: /(?:\b20\d{2}\b|\b\d{1,2}[./-]\d{1,2}[./-](?:20)?\d{2}\b)/i.test(text),
+    has_price: /(?:руб(?:\.|лей)?|₽|цен[ауы]?|(?:^|\s)от\s+\d)/i.test(text),
+    has_rating: /(?:★|рейтинг|отзыв|\b\d[.,]\d\s+из\s+5\b)/i.test(text),
+  };
+}
+
+/**
  * Разбирает одну XML-страницу ответа xmlstock (общий формат для Яндекса и
- * Google) в массив {title, snippet, url}. Бросает при <error> от API.
+ * Google) в массив {title, snippet, url, serp_title, serp_description,
+ * serp_features}. Бросает при <error> от API.
  */
 function _extractDocsFromXml(xmlText) {
   // cheerio с xmlMode корректно парсит namespace-free XML xmlstock.
@@ -119,7 +136,17 @@ function _extractDocsFromXml(xmlText) {
       .get()
       .filter(Boolean);
     const snippet = [headline, ...passages].filter(Boolean).join(' ');
-    if (title) docs.push({ title, snippet, url: link });
+    if (title) {
+      docs.push({
+        title,
+        snippet,
+        url: link,
+        serp_title: title,
+        serp_description: snippet,
+        serp_features: _deriveSerpFeatures(title, snippet),
+        serp_position: docs.length + 1,
+      });
+    }
   });
   return docs;
 }
@@ -211,7 +238,7 @@ async function fetchYandexSerp(keyword, opts = {}) {
       `&groupby=${groupBy}${lrPart}&page=${page}`;
     try {
       const docs = await _fetchSerpPage(url, 'yandex');
-      for (const d of docs) extracted.push(d);
+      for (const d of docs) extracted.push({ ...d, serp_position: extracted.length + 1 });
     } catch (err) {
       lastErr = err;
       // Если хоть что-то уже набрали — не валим весь запрос из-за одной
@@ -265,7 +292,7 @@ async function fetchGoogleSerp(keyword, opts = {}) {
       `&groupby=${groupBy}${lrPart}${domainPart}${devicePart}${locPart}&page=${page}`;
     try {
       const docs = await _fetchSerpPage(url, 'google');
-      for (const d of docs) extracted.push(d);
+      for (const d of docs) extracted.push({ ...d, serp_position: extracted.length + 1 });
     } catch (err) {
       lastErr = err;
       if (extracted.length) break;
@@ -280,4 +307,5 @@ async function fetchGoogleSerp(keyword, opts = {}) {
 
 module.exports = {
   fetchYandexSerp, fetchGoogleSerp, XMLSTOCK_URL, GOOGLE_XMLSTOCK_URL,
+  _extractDocsFromXml, _deriveSerpFeatures,
 };
