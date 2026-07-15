@@ -7,7 +7,8 @@
  * мета-тегов (pipeline.js):
  *   1) fetchYandexSerp        — анализ поисковой выдачи (XMLStock)
  *   2) extractSemantics       — TF-IDF семантика конкурентов
- *   3) generateDrMaxMeta      — Title / Description / H1 (Gemini/Grok)
+ *   3) generateDrMaxMeta      — GIST Meta Filter Pipeline (11 шагов):
+ *      кандидаты → фильтр/ранкер → пара title/description + conflict check
  *   4) checkLsiUsage          — LSI-верификация готовых тегов
  * + разовый buildAudienceNicheDigest (analyzeAudienceAndNiche), который
  *   запускается ОДИН раз на набор страниц/ключей.

@@ -3150,6 +3150,16 @@ async function ensureSchema() {
       console.warn('[ensureSchema] gist_score column (mig 114) skipped:', e.message);
     }
 
+    // Миграция 115: мета-теги ссылочных статей (GIST Meta Filter Pipeline,
+    // Задача D) — пара title/description с JSON-контрактом §8, чтобы
+    // копировать мета-теги отдельно от статьи.
+    // См. migrations/115_link_article_meta.sql.
+    try {
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS meta_tags JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] meta_tags column (mig 115) skipped:', e.message);
+    }
+
     // Миграция 100: content-grounded image pipeline — отчёты semantic image
     // QA и image quality gate. Обогащённые поля слотов хранятся внутри
     // image_prompts JSONB; здесь — только сводные отчёты уровня задачи.

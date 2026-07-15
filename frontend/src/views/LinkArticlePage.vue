@@ -159,6 +159,8 @@ function stageLabel(s) {
     stage3_writer_eeat_refine:  'E-E-A-T улучшение',
     stage4_image_prompts:       'Промпты изображений',
     image_generation:           'Генерация изображений',
+    linguaforensic:             'LinguaForensic',
+    meta_tags:                  'Мета-теги (GIST)',
     done:                       'Готово',
   })[s] || s || '—';
 }
@@ -424,6 +426,21 @@ const eeatBadgeClass = computed(() => {
 });
 
 const hasResult = computed(() => !!selectedTask.value?.article_html);
+
+// ── Мета-теги (GIST Meta Filter, Задача D) ──────────────────────────
+const metaTags = computed(() => {
+  const mt = selectedTask.value?.meta_tags;
+  return mt && (mt.title || mt.description) ? mt : null;
+});
+async function copyMetaField(label, value) {
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    flashToast(`✅ ${label} скопирован`);
+  } catch (_) {
+    flashToast('⚠️ Не удалось скопировать');
+  }
+}
 </script>
 
 <template>
@@ -621,6 +638,37 @@ const hasResult = computed(() => !!selectedTask.value?.article_html);
             <button class="btn-ghost border border-gray-700" @click="copyAsFormattedText">
               📝 Скопировать как форматированный текст
             </button>
+          </div>
+
+          <!-- Мета-теги (GIST Meta Filter) — копируются отдельно от статьи -->
+          <div v-if="metaTags" class="bg-gray-950 border border-gray-800 rounded-lg p-4 space-y-3">
+            <div class="flex items-center gap-2">
+              <h3 class="text-sm font-semibold text-indigo-300 uppercase tracking-wider">🏷 Мета-теги (GIST)</h3>
+              <span v-if="metaTags.manual_review_required"
+                    class="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-800/60 uppercase">
+                manual review
+              </span>
+            </div>
+            <div class="space-y-1">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] text-gray-500 uppercase">Title · {{ (metaTags.title || '').length }} симв.</span>
+                <button class="btn-ghost text-xs border border-gray-700 px-2 py-0.5"
+                        @click="copyMetaField('Title', metaTags.title)">📋 Копировать</button>
+              </div>
+              <div class="text-sm text-gray-200 bg-gray-900 border border-gray-800 rounded px-3 py-2 break-words">{{ metaTags.title }}</div>
+            </div>
+            <div class="space-y-1">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] text-gray-500 uppercase">Description · {{ (metaTags.description || '').length }} симв.</span>
+                <button class="btn-ghost text-xs border border-gray-700 px-2 py-0.5"
+                        @click="copyMetaField('Description', metaTags.description)">📋 Копировать</button>
+              </div>
+              <div class="text-sm text-gray-200 bg-gray-900 border border-gray-800 rounded px-3 py-2 break-words">{{ metaTags.description }}</div>
+            </div>
+            <div v-if="metaTags.winner_fact" class="text-[11px] text-gray-500">
+              GIST-фактор: <span class="text-gray-300">{{ metaTags.winner_fact }}</span>
+              <template v-if="metaTags.winner_source"> · источник: {{ metaTags.winner_source }}</template>
+            </div>
           </div>
 
           <!-- Preview -->
