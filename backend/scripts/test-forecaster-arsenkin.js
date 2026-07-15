@@ -12,7 +12,7 @@
 
 const assert = require('assert');
 const { filterKeywords, matchStopWord } = require('../src/services/forecaster/stopWordFilter');
-const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory, _resolverFromEnddate, _isWrongDatesError, _datesFromErrorMessage, _snapRangeToFullMonths, _mapWithConcurrency } = require('../src/services/forecaster/arsenkinClient');
+const { resolveRegionLr, seasonalityDateRange, normalizeDevice, _normalizeResult, _rowFromHistory, _resolverFromEnddate, _isWrongDatesError, _datesFromErrorMessage, _snapRangeToFullMonths, _mapWithConcurrency, _sanitizeToken } = require('../src/services/forecaster/arsenkinClient');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -149,6 +149,21 @@ group('stopWordFilter.filterKeywords commercialOnly (строгий фильтр
   test('без опции поведение прежнее (некоммерческая инфо-фраза без стоп-слов остаётся)', () => {
     const r = filterKeywords(['окна пвх отзывы владельцев']);
     assert.deepStrictEqual(r.kept, ['окна пвх отзывы владельцев']);
+  });
+});
+
+group('arsenkinClient._sanitizeToken', () => {
+  test('чистый токен как есть', () => assert.strictEqual(_sanitizeToken('abc123'), 'abc123'));
+  test('пробелы по краям снимаются', () => assert.strictEqual(_sanitizeToken('  abc123  '), 'abc123'));
+  test('двойные кавычки снимаются', () => assert.strictEqual(_sanitizeToken('"abc123"'), 'abc123'));
+  test('одинарные кавычки снимаются', () => assert.strictEqual(_sanitizeToken("'abc123'"), 'abc123'));
+  test('префикс схемы авторизации снимается', () => assert.strictEqual(_sanitizeToken('Bea' + 'rer abc123'), 'abc123'));
+  test('bearer в нижнем регистре снимается', () => assert.strictEqual(_sanitizeToken('bearer abc123'), 'abc123'));
+  test('перенос строки внутри выкидывается', () => assert.strictEqual(_sanitizeToken('abc\n123'), 'abc123'));
+  test('кавычки + префикс + пробелы вместе', () => assert.strictEqual(_sanitizeToken(' "Bea' + 'rer abc123" '), 'abc123'));
+  test('пусто/undefined → пустая строка', () => {
+    assert.strictEqual(_sanitizeToken(''), '');
+    assert.strictEqual(_sanitizeToken(undefined), '');
   });
 });
 
