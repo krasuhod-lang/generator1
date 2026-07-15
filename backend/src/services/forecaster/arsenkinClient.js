@@ -94,6 +94,22 @@ const API_SET   = 'https://arsenkin.ru/api/tools/set';
 const API_CHECK = 'https://arsenkin.ru/api/tools/check';
 const API_GET   = 'https://arsenkin.ru/api/tools/get';
 
+// Санитизация токена из ENV: частые ошибки при вставке в .env — значение в
+// кавычках (docker `env_file` НЕ снимает кавычки — они уезжают в заголовок
+// Authorization как есть), префикс схемы «Bearer», переводы строк/пробелы внутри
+// скопированного значения. Всё это приводит к HTTP 401 USER_NOT_FOUND,
+// хотя сам токен верный. Приводим значение к «голому» токену.
+function _sanitizeToken(raw) {
+  let t = String(raw || '').trim();
+  // снимаем одинарные/двойные кавычки по краям (в т.ч. парные)
+  t = t.replace(/^['"]+/, '').replace(/['"]+$/, '');
+  // убираем случайно скопированный префикс схемы авторизации
+  t = t.replace(/^Bearer\s+/i, '');
+  // выкидываем внутренние пробельные символы (перенос строки при копировании)
+  t = t.replace(/\s+/g, '');
+  return t;
+}
+
 function _cfg() {
   let extra = {};
   try {
@@ -109,7 +125,7 @@ function _cfg() {
       + '(проверьте, что после значения в .env нет inline-комментария)');
   }
   return {
-    token:        String(process.env.ARSENKIN_API_TOKEN || '').trim(),
+    token:        _sanitizeToken(process.env.ARSENKIN_API_TOKEN),
     toolName:     String(process.env.ARSENKIN_TOOL_NAME || 'wordstat').trim(),
     wordstatType: Number(process.env.ARSENKIN_WORDSTAT_TYPE) || 3,
     device:       String(process.env.ARSENKIN_WORDSTAT_DEVICE || '').trim(),
@@ -360,7 +376,16 @@ async function _post(url, body, token, { retries = 4 } = {}) {
         .join(' — ').slice(0, 600))
         || (text ? String(text).slice(0, 600) : '')
         || '';
-      throw new Error(`Arsenkin API: HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`);
+      // 401 USER_NOT_FOUND — токен не распознан сервером Арсенкина. Даём
+      // пользователю конкретную подсказку: проблема в значении
+      // ARSENKIN_API_TOKEN, а не в самом сервисе.
+      const authHint = resp.status === 401
+        ? '. Проверьте токен ARSENKIN_API_TOKEN в .env: скопируйте его заново из '
+          + '«Данные профиля» на arsenkin.ru (без кавычек и пробелов), убедитесь, '
+          + 'что тариф поддерживает API, и перезапустите backend '
+          + '(docker compose up -d --force-recreate backend)'
+        : '';
+      throw new Error(`Arsenkin API: HTTP ${resp.status}${detail ? ` — ${detail}` : ''}${authHint}`);
     }
     if (json && String(json.status || '').toLowerCase() === 'error') {
       throw new Error(`Arsenkin API: ${json.error || json.code || 'unknown error'}`);
@@ -1301,4 +1326,5 @@ module.exports = {
   _snapRangeToFullMonths,
   _periodFromAny,
   _mapWithConcurrency,
+  _sanitizeToken,
 };
