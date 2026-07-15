@@ -82,6 +82,9 @@ services:
       AEGIS_PY_URL: ${AEGIS_PY_URL:-http://aegis_py:8800}
       # LinguaForensic v3.6 — общий skill-файл детектора AI-текста
       LINGUAFORENSIC_SKILL_PATH: ${LINGUAFORENSIC_SKILL_PATH:-/app/skills/AI-detect-v-3-6.md}
+      # GIST Content Logic: внутренний URL gist_py (M3 Gap Finder для пайплайнов)
+      GIST_SERVICE_URL: ${GIST_SERVICE_URL:-http://gist:8003}
+      GIST_INTERNAL_TOKEN: ${GIST_INTERNAL_TOKEN:-}
     ports:
       - "3000:3000"
     depends_on:
@@ -117,6 +120,9 @@ services:
       RELEVANCE_HEADLESS_FETCHER_URL: ${RELEVANCE_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch}
       # LinguaForensic v3.6 — общий skill-файл детектора AI-текста
       LINGUAFORENSIC_SKILL_PATH: ${LINGUAFORENSIC_SKILL_PATH:-/app/skills/AI-detect-v-3-6.md}
+      # GIST Content Logic: внутренний URL gist_py (M3 Gap Finder для пайплайнов)
+      GIST_SERVICE_URL: ${GIST_SERVICE_URL:-http://gist:8003}
+      GIST_INTERNAL_TOKEN: ${GIST_INTERNAL_TOKEN:-}
     command: node src/queue/worker.js
     depends_on:
       postgres:

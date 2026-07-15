@@ -3139,6 +3139,17 @@ async function ensureSchema() {
       console.warn('[ensureSchema] quality_gate verdict column (mig 098) skipped:', e.message);
     }
 
+    // Миграция 114: GIST Score (12-й чекер Quality Gate, ТЗ «GIST Content
+    // Logic» §3.2) — метрика покрытия информационной дельты в задачах.
+    // См. migrations/114_gist_score.sql.
+    try {
+      await db.query(`ALTER TABLE tasks              ADD COLUMN IF NOT EXISTS gist_score INT DEFAULT NULL`);
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS gist_score INT DEFAULT NULL`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS gist_score INT DEFAULT NULL`);
+    } catch (e) {
+      console.warn('[ensureSchema] gist_score column (mig 114) skipped:', e.message);
+    }
+
     // Миграция 100: content-grounded image pipeline — отчёты semantic image
     // QA и image quality gate. Обогащённые поля слотов хранятся внутри
     // image_prompts JSONB; здесь — только сводные отчёты уровня задачи.

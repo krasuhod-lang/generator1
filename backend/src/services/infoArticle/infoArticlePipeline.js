@@ -335,6 +335,8 @@ async function runWhitespace(task, strategy, audience, ctx) {
 
 async function runOutline(task, audience, intents, whitespace, ctx) {
   const hints = (whitespace && whitespace.article_hierarchy_hints) || {};
+  const { buildGistDeltaBrief } = require('../gist/gistClient');
+  const gistBrief = buildGistDeltaBrief(whitespace && whitespace.information_delta);
   const user = [
     `[INPUTS]`,
     `topic: ${task.topic}`,
@@ -342,6 +344,7 @@ async function runOutline(task, audience, intents, whitespace, ctx) {
     `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
     `stage1_intents: ${JSON.stringify(intents).slice(0, 8000)}`,
     `whitespace_hints: ${JSON.stringify(hints).slice(0, 4000)}`,
+    ...(gistBrief ? ['', gistBrief] : []),
   ].join('\n');
   return callLLM(
     'deepseek',
@@ -1313,9 +1316,42 @@ async function processInfoArticleTask(taskId) {
     const intents = await runIntents(task, strategy, audience, ctx);
     await saveColumn(taskId, 'stage1_intents', intents);
 
-    // 4. Stage 1B
+    // 4. Stage 1B: белые пятна (DeepSeek) + GIST M3 Gap Finder (gist_py :8003)
+    //    параллельно. GIST fail-open: при недоступности сервиса продолжаем
+    //    без информационной дельты (Задача A ТЗ «GIST Content Logic»).
     await setStage(taskId, 'stage1b_whitespace', 28);
-    const whitespace = await runWhitespace(task, strategy, audience, ctx);
+    const { runGistGapFinder, mergeContentGaps } = require('../gist/gistClient');
+    const [wsSettled, gistSettled] = await Promise.allSettled([
+      runWhitespace(task, strategy, audience, ctx),
+      runGistGapFinder({
+        keyword: task.topic,
+        page_type: 'info',
+        target_audience: typeof task.audience === 'string' ? task.audience : '',
+      }),
+    ]);
+    if (wsSettled.status === 'rejected') throw wsSettled.reason;
+    let whitespace = wsSettled.value;
+    if (gistSettled.status === 'fulfilled') {
+      const { information_delta, gist_score, top10_claims } = gistSettled.value;
+      whitespace = {
+        ...whitespace,
+        information_delta,
+        gist_score,
+        top10_claims,
+        content_gaps_merged: mergeContentGaps(whitespace, information_delta, top10_claims),
+      };
+      await appendLog(
+        taskId,
+        `🧠 GIST Gap Finder: дельта ${information_delta.length} тезисов, шум конкурентов ${top10_claims.length} claims`,
+        'info',
+      );
+    } else {
+      await appendLog(
+        taskId,
+        `GIST Gap Finder недоступен (${gistSettled.reason?.message || 'ошибка'}) — продолжаем без дельты`,
+        'warn',
+      );
+    }
     await saveColumn(taskId, 'whitespace_analysis', whitespace);
 
     // 5. Stage 2 outline
@@ -2365,6 +2401,7 @@ async function processInfoArticleTask(taskId) {
           plagiarismReport:  qr && qr.plagiarism_report,
           lsiOverdoseReport: qr && qr.lsi_overdose_report,
           intentReport:      qr && qr.intent_verdict,
+          informationDelta:  (whitespace && whitespace.information_delta) || null,
           authorship: {
             byline:   authorByline || task.__authorName || null,
             reviewer: task.__reviewerName || null,
@@ -2388,6 +2425,18 @@ async function processInfoArticleTask(taskId) {
           : null,
         checked_at: new Date().toISOString(),
       };
+      // §3.2 ТЗ GIST: фиксируем gist_score в info_article_tasks (fail-open)
+      try {
+        const gistGate = (gateResult.gates || []).find((g) => g.name === 'gistScore');
+        if (gistGate && gistGate.score != null) {
+          await db.query(
+            'UPDATE info_article_tasks SET gist_score = $1 WHERE id = $2',
+            [gistGate.score, taskId],
+          );
+        }
+      } catch (gsErr) {
+        console.warn(`[infoArticle] gist_score persist failed: ${gsErr.message}`);
+      }
       await appendLog(
         taskId,
         `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,

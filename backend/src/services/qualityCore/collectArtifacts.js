@@ -106,6 +106,9 @@ function collectArtifacts(pipeline, raw = {}) {
   if (Array.isArray(raw.links)) out.links = raw.links;
   if (raw.authorship) out.authorship = raw.authorship;
   if (raw.informationGainBrief) out.informationGainBrief = raw.informationGainBrief;
+  if (Array.isArray(raw.informationDelta) && raw.informationDelta.length) {
+    out.informationDelta = raw.informationDelta;
+  }
 
   // ── Risk: явный riskReport приоритетнее, иначе — из Stage 8 evaluator ─
   if (raw.riskReport) {

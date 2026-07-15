@@ -384,6 +384,11 @@ async function runPipeline(task, ctx) {
   }
 
   // ── Stage 2 ──────────────────────────────────────────────────────
+  // §4-GIST: информационная дельта Stage 0 (GIST M3 Gap Finder) уходит
+  // в брифы Stage 2 (2A/2B/2C) через task.__informationDelta (fail-open).
+  task.__informationDelta = Array.isArray(stage0Result?.information_delta)
+    ? stage0Result.information_delta
+    : [];
   let taxonomy, stage2Raw, enrichedStage1;
   if (resumeFrom?.taxonomy) {
     taxonomy       = resumeFrom.taxonomy;
@@ -1032,6 +1037,9 @@ async function runPipeline(task, ctx) {
         niche: task.input_target_service || task.input_target_url || '',
         currentYear: new Date().getFullYear(),
         evaluatorReport: evaluatorReport || null,
+        informationDelta: Array.isArray(stage0Result?.information_delta)
+          ? stage0Result.information_delta
+          : null,
       },
     });
     qualityGateVerdict = {
@@ -1050,6 +1058,18 @@ async function runPipeline(task, ctx) {
         : null,
       checked_at: new Date().toISOString(),
     };
+    // §3.2 ТЗ GIST: фиксируем gist_score в tasks (fail-open)
+    try {
+      const gistGate = (gateResult.gates || []).find((g) => g.name === 'gistScore');
+      if (gistGate && gistGate.score != null) {
+        await db.query(
+          'UPDATE tasks SET gist_score = $1 WHERE id = $2',
+          [gistGate.score, taskId],
+        );
+      }
+    } catch (gsErr) {
+      log(`Quality gate: не удалось сохранить gist_score (${gsErr.message})`, 'warn');
+    }
     try {
       await db.query(
         `UPDATE tasks SET quality_gate = $1, updated_at = NOW() WHERE id = $2`,

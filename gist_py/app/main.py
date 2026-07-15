@@ -85,10 +85,17 @@ async def relevance_scan_csv(
 
 
 class PipelineRequest(BaseModel):
-    query: str
+    query: str = ""
+    keyword: str = ""  # alias для Node gistClient (Задача A ТЗ)
     target_audience: str = ""
     domain: str = "SEO-статья"
+    page_type: str = ""
+    competitors_text: Optional[List[str]] = None
+    modules: Optional[List[str]] = None  # напр. ["M2","M3"] → режим Gap Finder
     task_id: Optional[str] = None
+
+
+GAP_FINDER_MODULES = {"M1", "M2", "M3"}
 
 
 @app.post("/pipeline/run")
@@ -96,15 +103,25 @@ def pipeline_run(
     body: PipelineRequest,
     x_internal_token: Optional[str] = Header(default=None),
 ) -> Dict:
-    """Полный пайплайн M0–M10: контент + мета + schema + все метрики."""
+    """Полный пайплайн M0–M10 (default) или режим Gap Finder (modules=[M2,M3]):
+    контент + мета + schema + метрики / только top10_claims + information_delta."""
     _check_token(x_internal_token)
+    query = (body.query or body.keyword or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="query/keyword is empty")
     pipeline = GistPipeline(task_id=body.task_id)
     try:
+        if body.modules and set(body.modules).issubset(GAP_FINDER_MODULES):
+            return pipeline.run_gap_finder(
+                query,
+                target_audience=body.target_audience,
+                competitors_text=body.competitors_text,
+            )
         return pipeline.run(
-            body.query,
+            query,
             target_audience=body.target_audience,
             domain=body.domain,
         )
     except Exception as exc:
-        logger.exception("Pipeline failed for %s", body.query)
+        logger.exception("Pipeline failed for %s", query)
         raise HTTPException(status_code=500, detail=str(exc)) from exc

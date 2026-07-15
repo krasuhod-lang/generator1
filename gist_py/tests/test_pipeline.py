@@ -88,6 +88,22 @@ class FakeLLM(LLMClient):
         )
 
 
+def test_gap_finder_mode_with_node_texts():
+    """Режим Gap Finder (Node gistClient): M2+M3 без генерации контента."""
+    llm = FakeLLM()
+    pipe = GistPipeline(llm=llm)
+    result = pipe.run_gap_finder(
+        "как выбрать газовый котёл",
+        competitors_text=["текст конкурента " * 100, "  ", "второй текст " * 100],
+    )
+    assert result["mode"] == "gap_finder"
+    assert result["pages_count"] == 2  # пустые тексты отброшены
+    assert len(result["top10_claims"]) == 2
+    assert len(result["information_delta"]) == 2
+    assert result["gist_score"] is None  # статьи ещё нет — score считает Node Quality Gate
+    assert "content" not in result
+
+
 def test_full_pipeline_accept_first_pass():
     llm = FakeLLM(robotness_scores=[10.0])
     pipe = GistPipeline(llm=llm)
