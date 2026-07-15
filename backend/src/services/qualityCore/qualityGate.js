@@ -98,6 +98,11 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   if (VALUE_ADDS_REQUIRED_PIPELINES.has(pipeline) && artifacts.informationGainBrief) {
     gates.push(checkers.checkValueAdds(artifacts.informationGainBrief, { thresholds }));
   }
+  // GIST Score (12-й чекер): применяется только при наличии информационной
+  // дельты (GIST M3 Gap Finder). Warning, не blocker — fail-open.
+  if (Array.isArray(artifacts.informationDelta) && artifacts.informationDelta.length) {
+    gates.push(checkers.checkGistScore(artifacts.html, artifacts.informationDelta, { thresholds }));
+  }
 
   const blockers = gates.filter((g) => g.blocking && !g.pass);
   const warnings = gates.filter((g) => !g.pass && !g.blocking);

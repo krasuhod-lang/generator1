@@ -302,6 +302,86 @@ function checkValueAdds(brief, { thresholds } = {}) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 12. GIST Score (ТЗ «GIST Content Logic», Задача B).
+//     gist_score = |{параграфов, покрывающих ≥1 тезис дельты}| / |параграфов|.
+//     Fail-open: warning, НЕ blocker; при отсутствии дельты — skip (pass).
+// ─────────────────────────────────────────────────────────────────────
+
+/** Параграфы контента: p, li, td (видимый текст, ≥ 20 символов). */
+function _extractParagraphs(html) {
+  const out = [];
+  const re = /<(p|li|td)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m;
+  while ((m = re.exec(String(html || ''))) !== null) {
+    const text = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text.length >= 20) out.push(text);
+  }
+  return out;
+}
+
+/** Ключевые слова тезиса дельты: item.keywords | [item.claim] | [item]. */
+function _deltaKeywords(item) {
+  if (item && typeof item === 'object') {
+    if (Array.isArray(item.keywords) && item.keywords.length) return item.keywords.map(String);
+    return [String(item.claim || item.thesis || item.topic || '')];
+  }
+  return [String(item ?? '')];
+}
+
+/** Параграф «покрывает» тезис при пересечении значимых слов ≥ 50% (как gist_py m3_gap). */
+function _paragraphCoversClaim(paraLower, claimText) {
+  const words = (t) => new Set((String(t).toLowerCase().match(/[а-яёa-z0-9]{4,}/g) || []));
+  const dw = words(claimText);
+  if (!dw.size) return false;
+  const pw = words(paraLower);
+  let overlap = 0;
+  for (const w of dw) if (pw.has(w)) overlap += 1;
+  return overlap / dw.size >= 0.5;
+}
+
+function checkGistScore(html, informationDelta, { thresholds } = {}) {
+  const th = contentPolicy.getThresholds(thresholds);
+  const minScore = _firstNumber([th.gistScoreMin]) ?? 0.30;
+  const greenScore = _firstNumber([th.gistScoreGreen]) ?? 0.40;
+
+  if (!Array.isArray(informationDelta) || informationDelta.length === 0) {
+    return _verdict('gistScore', {
+      pass: true,
+      blocking: false,
+      verdict: 'skipped',
+      evidence: { skip: true, reason: 'no_delta_available' },
+    });
+  }
+
+  const paragraphs = _extractParagraphs(html);
+  const deltaClaims = informationDelta.flatMap(_deltaKeywords).filter((k) => k && k.trim());
+
+  let coveredCount = 0;
+  for (const para of paragraphs) {
+    const paraLower = para.toLowerCase();
+    const covers = deltaClaims.some(
+      (kw) => paraLower.includes(kw.toLowerCase()) || _paragraphCoversClaim(paraLower, kw),
+    );
+    if (covers) coveredCount += 1;
+  }
+
+  const score = paragraphs.length > 0 ? coveredCount / paragraphs.length : 0;
+  const pct = Math.round(score * 100);
+  const pass = score >= minScore;
+  const level = score >= greenScore ? 'green' : score >= minScore ? 'yellow' : 'red';
+
+  return _verdict('gistScore', {
+    pass,
+    blocking: false, // warning, не blocker (fail-open)
+    score: pct,
+    verdict: pass
+      ? `GIST Score ${pct}%`
+      : `GIST Score ${pct}% < ${Math.round(minScore * 100)}% — информационная дельта не раскрыта`,
+    evidence: { level, coveredCount, totalParagraphs: paragraphs.length, deltaClaims: deltaClaims.length },
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 function _firstNumber(candidates) {
   for (const c of candidates) {
@@ -322,6 +402,7 @@ module.exports = {
   checkRisk,
   checkAuthorship,
   checkValueAdds,
+  checkGistScore,
   // helpers for tests
-  _internal: { _plainLower, _firstNumber, RISK_ORDER },
+  _internal: { _plainLower, _firstNumber, RISK_ORDER, _extractParagraphs },
 };

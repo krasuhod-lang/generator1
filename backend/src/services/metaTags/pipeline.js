@@ -311,6 +311,7 @@ async function runMetaTagTaskInner(taskId) {
   let modelUsed      = null;
   let kwOk           = 0;
   let kwFail         = 0;
+  const generatedTitles = []; // Step 8.11: template-level GIST check по батчу
 
   funnel.step('audience_niche');
 
@@ -396,6 +397,7 @@ async function runMetaTagTaskInner(taskId) {
       );
 
       await pushResult(taskId, { keyword: kw, status: 'success', serp, semantics, ctr_analysis: ctrAnalysis, metas });
+      if (metas.title) generatedTitles.push(metas.title);
       kwOk += 1;
       await appendLog(taskId,
         `✅ «${kw}» готово (Title ${metas.title_length}, Desc ${metas.description_length}` +
@@ -413,6 +415,21 @@ async function runMetaTagTaskInner(taskId) {
     if (i < keywords.length - 1) {
       await sleep(COOLDOWN_BETWEEN_KEYWORDS_MS);
     }
+  }
+
+  // Step 8.11 — Template-level GIST для батча: если один и тот же фактор
+  // появляется более чем в 70% title и это не реально общее свойство каталога,
+  // шаблон нужно усложнить вторым слотом.
+  if (generatedTitles.length >= 3) {
+    try {
+      const { checkTemplateLevelConflict } = require('./gistMetaFilter');
+      const tpl = checkTemplateLevelConflict(generatedTitles);
+      if (!tpl.passed) {
+        await appendLog(taskId,
+          `⚠️ Template-level conflict (Step 8.11): фактор «${tpl.dominant_factor}» встречается в ${Math.round(tpl.share * 100)}% title — усложните шаблон вторым слотом.`,
+          'warn');
+      }
+    } catch (_e) { /* best-effort */ }
   }
 
   // Записываем исход стадии генерации: все ключи упали → fail, иначе ok

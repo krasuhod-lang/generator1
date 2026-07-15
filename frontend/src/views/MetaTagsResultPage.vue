@@ -14,8 +14,9 @@ const initialLoad = ref(true);
 
 let pollTimer = null;
 
-const TITLE_RANGE = { min: 70, max: 80 };
-const DESC_RANGE  = { min: 180, max: 190 };
+// Кириллические safe ranges GIST Meta Filter (Задача D §4).
+const TITLE_RANGE = { min: 40, max: 50 };
+const DESC_RANGE  = { min: 130, max: 145 };
 
 async function reload() {
   try {

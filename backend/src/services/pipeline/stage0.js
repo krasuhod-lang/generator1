@@ -171,8 +171,12 @@ ${ownSiteContent ? `OUR SITE CURRENT STATE: ${ownSiteContent.content.substring(0
 
 OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_layers (array), topic_clusters (array), competitor_gaps (array), strategic_priorities (array). NO markdown.`;
 
-  // Запускаем оба вызова параллельно — они используют разные промпты и не зависят друг от друга
-  const [serpRealityResult, nicheLandscapeResult] = await Promise.all([
+  // Запускаем оба вызова параллельно — они используют разные промпты и не зависят друг от друга.
+  // Плюс параллельный GIST M3 Gap Finder (gist_py :8003) по спарсенным текстам —
+  // fail-open: если GIST недоступен, пайплайн продолжает без информационной дельты.
+  const { runGistGapFinder } = require('../gist/gistClient');
+  const scrapedTexts = onlyCompetitors.map(c => c.content).filter(Boolean);
+  const [serpRealityResult, nicheLandscapeResult, gistSettled] = await Promise.all([
     callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
       retries:   3,
       taskId,
@@ -192,7 +196,28 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
       log,
       onTokens,
     }).catch(e => { log(`Stage 0 Call 2 error: ${e.message}`, 'warn'); return null; }),
+
+    runGistGapFinder({
+      keyword: task.input_target_service,
+      competitors_text: scrapedTexts,
+      page_type: 'seo',
+      target_audience: task.input_target_audience || '',
+    }).then(v => ({ status: 'fulfilled', value: v }))
+      .catch(e => {
+        log(`Stage 0 GIST Gap Finder недоступен: ${e.message} — продолжаем без дельты`, 'warn');
+        return { status: 'rejected', reason: e };
+      }),
   ]);
+
+  const informationDelta = gistSettled.status === 'fulfilled'
+    ? gistSettled.value.information_delta
+    : [];  // fail-open: если GIST недоступен — продолжаем без дельты
+  const gistTop10Claims = gistSettled.status === 'fulfilled'
+    ? gistSettled.value.top10_claims
+    : [];
+  if (informationDelta.length) {
+    log(`Stage 0 GIST: информационная дельта ${informationDelta.length} тезисов, шум конкурентов ${gistTop10Claims.length} claims`, 'success');
+  }
 
   progress(8, 'stage0');
 
@@ -210,7 +235,7 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
     }).catch(() => null);
 
     if (!fallbackResult) throw new Error('Stage 0: все запросы вернули ошибки');
-    return { ...fallbackResult };
+    return { ...fallbackResult, information_delta: informationDelta, gist_top10_claims: gistTop10Claims };
   }
 
   // Объединяем результаты
@@ -221,6 +246,9 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
     topic_clusters:       nicheLandscapeResult?.topic_clusters       || [],
     competitor_gaps:      nicheLandscapeResult?.competitor_gaps      || [],
     strategic_priorities: nicheLandscapeResult?.strategic_priorities || [],
+    // GIST M3 Gap Finder (fail-open): дельта уходит в Stage 2 (§4-GIST)
+    information_delta:    informationDelta,
+    gist_top10_claims:    gistTop10Claims,
   };
 
   // Сохраняем в tasks

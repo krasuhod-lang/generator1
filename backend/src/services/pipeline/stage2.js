@@ -174,15 +174,20 @@ async function runStage2(task, ctx, stage1Result) {
     ? `\n\n===== STRATEGY CONTEXT (Pre-Stage 0) =====\n${strategyDigest}\n`
     : '';
 
+  // §4-GIST: информационная дельта из Stage 0 (GIST M3 Gap Finder).
+  const { buildGistDeltaBrief } = require('../gist/gistClient');
+  const gistDeltaBrief = buildGistDeltaBrief(task.__informationDelta);
+  const gistAppendix = gistDeltaBrief ? `\n\n${gistDeltaBrief}\n` : '';
+
   // ── Stage 2A + 2B: Buyer Journey + Content Format (параллельно) ──
-  const buyerJourneyContext = `${strategyAppendix}\n\n===== INPUT DATA =====
+  const buyerJourneyContext = `${strategyAppendix}${gistAppendix}\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 STAGE 1 RESULT: ${stage1JsonFull}
 LSI TERMS (первые 800 символов): ${lsiForContext}
 
 OUTPUT: Return JSON with buyer_journey_stages (array of stages with queries, content_needs, formats, trust_level). NO markdown.`;
 
-  const contentFormatContext = `${strategyAppendix}\n\n===== INPUT DATA =====
+  const contentFormatContext = `${strategyAppendix}${gistAppendix}\n\n===== INPUT DATA =====
 NICHE / TARGET SERVICE: ${targetService}
 BUSINESS TYPE: commercial service
 STAGE 1 RESULT: ${stage1JsonFull}
@@ -267,6 +272,10 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
 
     if (strategyDigest) {
       prompt += `\n\n${strategyAppendix.trim()}\nUSE strategy context above to ensure taxonomy covers wedge opportunities, must-have E-E-A-T signals and journey-stage queries.`;
+    }
+
+    if (gistDeltaBrief) {
+      prompt += `\n\n${gistDeltaBrief}`;
     }
 
     // Inject structure limits into taxonomy prompt

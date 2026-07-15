@@ -1166,6 +1166,39 @@ async function processLinkArticleTask(taskId) {
       console.warn(`[linkArticle] quality gate failed: ${gateErr.message}`);
     }
 
+    // 8d. Мета-теги для ссылочной статьи (Задача D — GIST Meta Filter
+    //     Pipeline): пара title/description, которую можно скопировать
+    //     отдельно от статьи. Graceful: ошибка генерации мета-тегов НЕ
+    //     роняет готовую статью.
+    let linkMetaTags = null;
+    try {
+      const { generateLinkArticleMeta } = require('../metaTags/gistMetaFilter');
+      await setStage(taskId, 'meta_tags', 99);
+      linkMetaTags = await generateLinkArticleMeta({
+        topic: task.topic || '',
+        anchorText: task.anchor_text || '',
+        articlePlain: finalPlain,
+        focusNotes: task.focus_notes || '',
+        geminiModel: normalizeGeminiCopywritingModel(task.gemini_model),
+      });
+      await appendLog(
+        taskId,
+        `🏷 Мета-теги (GIST): Title ${String(linkMetaTags.title || '').length} симв., Description ${String(linkMetaTags.description || '').length} симв.${linkMetaTags.manual_review_required ? ' · ⚠️ manual review' : ''}`,
+        linkMetaTags.manual_review_required ? 'warn' : 'ok',
+      );
+      const metaUsage = linkMetaTags._meta || {};
+      await recordTextTokens(
+        taskId,
+        metaUsage.provider === 'deepseek' ? 'deepseek' : 'gemini',
+        metaUsage.tokensIn || 0,
+        metaUsage.tokensOut || 0,
+        0,
+      );
+    } catch (metaErr) {
+      console.warn(`[linkArticle] meta tags generation failed: ${metaErr.message}`);
+      await appendLog(taskId, `⚠️ Мета-теги не сгенерированы: ${metaErr.message}`, 'warn');
+    }
+
     await db.query(
       `UPDATE link_article_tasks
           SET article_html             = $2,
@@ -1174,6 +1207,7 @@ async function processLinkArticleTask(taskId) {
               json_ld_blocks           = $5,
               author_byline            = $6,
               quality_gate             = $7,
+              meta_tags                = $8,
               status         = 'done',
               progress_pct   = 100,
               current_stage  = 'done',
@@ -1184,6 +1218,7 @@ async function processLinkArticleTask(taskId) {
         taskId, finalHtml, finalPlain,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
         linkQualityGateVerdict ? JSON.stringify(linkQualityGateVerdict) : null,
+        linkMetaTags ? JSON.stringify(linkMetaTags) : null,
       ],
     );
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');

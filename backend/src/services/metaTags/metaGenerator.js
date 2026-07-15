@@ -1,27 +1,34 @@
 'use strict';
 
 /**
- * DrMax meta-tag generator (v2 spec — Title + Description + H1).
- * Использует общий callGemini-адаптер (прокси, JSON-strict guard, квоты,
- * ретраи) — та же модель/инфраструктура, что и Stage 3/5/6 пайплайна.
+ * Meta-tag generator (Задача D — GIST Meta Filter Pipeline).
  *
- * Ключевые правила:
- *   • H1 — UX-заголовок (≤70 символов), а не копия SEO Title;
- *   • Title 70–80, Description 180–190 символов;
- *   • SERP intent и CTR-команды вычисляются до LLM;
- *   • Анализ ЦА/ниши (analyzeAudienceAndNiche) пробрасывается в
- *     user-prompt как `[АНАЛИЗ ЦА И НИШИ]`-блок через inputs.audienceNicheDigest.
+ * generateDrMaxMeta теперь делегирует генерацию трёхфазному GIST Meta Filter
+ * Pipeline (gistMetaFilter.runGistMetaPipeline, 11 шагов Steps 8.1–8.11):
+ *   1) Candidate generation — page angle + missing nodes + 5 эвристик;
+ *   2) Filter + scoring — 4 теста GIST, fallback sequence, tie-break ranker;
+ *   3) Pair generation + conflict check — сборка title/description, semantic
+ *      conflict (Step 8.9) и pair replaceability (Step 8.10).
+ *
+ * Кириллические safe ranges (§4 ТЗ):
+ *   • Title 40–50 символов (GIST-фактор в первых 35);
+ *   • Description desktop 130–145 (GIST-фактор в первых 90), mobile 90–105;
+ *   • H1 — UX-заголовок (≤70 символов), а не копия SEO Title.
+ *
+ * Легаси-хелперы одновызовной DrMax-версии (SYSTEM_PROMPT, buildUserPrompt,
+ * postValidate, findHardViolations) сохранены: postValidate/findHardViolations
+ * используются как детерминированные guard'ы поверх результата GIST-пайплайна.
  */
 
-const { callGemini } = require('../llm/gemini.adapter');
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
 const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
-const { checkLsiUsage } = require('./semantics');
+const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 
-const TITLE_MIN = 70;
-const TITLE_MAX = 80;
-const DESC_MIN  = 180;
-const DESC_MAX  = 190;
+// Кириллические safe ranges (§4 ТЗ) — синхронны с gistMetaFilter.
+const TITLE_MIN = 40;
+const TITLE_MAX = 50;
+const DESC_MIN  = 130;
+const DESC_MAX  = 145;
 const H1_MAX    = 70;
 const META_GENERATION_MODEL = 'gemini-3.1-pro-preview';
 
@@ -524,167 +531,69 @@ function parseMetaJson(rawText) {
 }
 
 /**
- * Главная функция: генерирует метатеги по одному ключу.
+ * Главная функция: генерирует метатеги по одному ключу через GIST Meta Filter
+ * Pipeline (Задача D). Трёхфазная схема вместо одного вызова:
  *
- * Стратегия покрытия важных LSI (DF ≥ 35%) — три ступени по убыванию качества:
- *   1) Первый Gemini-вызов с self-audit полем (Chain-of-Verification в один запрос).
- *   2) Если важные слова всё-таки пропущены — второй Gemini-вызов с явным
- *      корректирующим блоком в user-prompt («не использованы: X, Y — перепиши
- *      органично»). DSPy-style self-correction, как в TZ-extractor.
- *   3) Если после трёх попыток слова пропущены — фиксируем warning для редактора,
- *      но не вклеиваем LSI механически.
+ *   1) Candidate generation (Steps 8.1–8.4) — задача поля, 3–5 кандидатов
+ *      (page angle + missing nodes + 5 эвристик), карта шаблонов конкурентов;
+ *   2) Filter + scoring (Steps 8.5/8.5b/8.6) — 4 бинарных теста, forced-choice
+ *      fallback sequence, tie-break scoring 0–2;
+ *   3) Pair generation + conflict check (Steps 8.7–8.10) — title вокруг одного
+ *      strongest fact, description как compact sequence, semantic conflict и
+ *      pair replaceability с ретраями.
+ *
+ * Возвращает JSON-контракт §8 (winner_fact, winner_source, scores,
+ * conflict_check, replaceability_check, temporary_gist_factor, review_date,
+ * manual_review_required) + легаси-поля (h1, title_length, description_length,
+ * post_validation_notes, _meta) для обратной совместимости с metaStages /
+ * pageMetaAudit / UI.
  *
  * @param {object} args
  * @param {string} args.keyword
  * @param {object} args.semantics  — результат extractSemantics()
  * @param {Array}  args.serpData
- * @param {object} args.inputs     — { niche, brand, toponym, phone, summary }
+ * @param {object} args.inputs     — { niche, brand, toponym, phone, summary,
+ *   ctrAnalysis, price_data, pageAngle, missingNodes, standalone_exposure,
+ *   gemini_model }
  * @returns {Promise<object>}
  */
 async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
-  const importantWords   = (semantics.title_mandatory_words       || []).slice(0, 6);
-  const recommendedWords = (semantics.description_mandatory_words || []).slice(0, 10);
+  const { runGistMetaPipeline } = require('./gistMetaFilter');
+  const importantWords   = ((semantics && semantics.title_mandatory_words) || []).slice(0, 6);
+  const recommendedWords = ((semantics && semantics.description_mandatory_words) || []).slice(0, 10);
   const year = detectYear(importantWords, recommendedWords, serpData);
 
-  const baseUserPrompt = buildUserPrompt({ keyword, semantics, serpData, inputs, year });
+  // Копирайтерская модель задачи (та же конвенция, что у пайплайнов статей).
+  const copywriterModel = normalizeGeminiCopywritingModel(inputs && inputs.gemini_model);
 
-  const MAX_ATTEMPTS = 3;
-  const allNotes = [];
-  let result = null;
-  let lastMissed = [];
-  let totalTokensIn = 0;
-  let totalTokensOut = 0;
-  let totalThoughtsTokens = 0;
-  let totalCachedTokens   = 0;
-  let model = '';
-  let attemptsMade = 0;
-  let userPrompt = baseUserPrompt;
-  let lastViolations = [];
+  const result = await runGistMetaPipeline({
+    keyword,
+    semantics: semantics || {},
+    serpData: serpData || [],
+    inputs: inputs || {},
+    options: { copywriterModel },
+  });
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    attemptsMade = attempt;
-    // callGemini автоматически: JSON-strict guard в systemInstruction,
-    // прокси, ретраи на сетевых/5xx/429, агрегация text-частей. maxTokens=8192:
-    // gemini-3.x thinking-модель тратит часть бюджета на «мысли».
-    const callOptions = { temperature: 0.4, maxTokens: 8192, timeoutMs: 90000 };
-    callOptions.model = META_GENERATION_MODEL;
-    const callRes = await callGemini(
-      SYSTEM_PROMPT,
-      userPrompt,
-      callOptions,
-    );
-    totalTokensIn       += callRes.tokensIn       || 0;
-    totalTokensOut      += callRes.tokensOut      || 0;
-    totalThoughtsTokens += callRes.thoughtsTokens || 0;
-    totalCachedTokens   += callRes.cachedTokens   || 0;
-    model = callRes.model || model;
-
-    // Ошибка парсинга (болтливость/обрыв ответа) — не валим задачу сразу,
-    // а повторяем запрос к Gemini в рамках общего лимита попыток.
-    let parsed;
-    try {
-      parsed = parseMetaJson(callRes.text);
-    } catch (parseErr) {
-      if (attempt === MAX_ATTEMPTS) throw parseErr;
-      allNotes.push(
-        `Попытка ${attempt}: не удалось распарсить ответ Gemini `
-        + `(${parseErr.message.slice(0, 160)}). Повторяем запрос.`,
-      );
-      userPrompt = baseUserPrompt;
-      continue;
-    }
-    const { result: validated, notes } = postValidate(parsed, inputs);
-    result = validated;
-    lastViolations = findHardViolations(result, inputs);
-    if (attempt > 1) allNotes.push(`— Попытка ${attempt} (перегенерация) —`);
-    allNotes.push(...notes);
-
-    // Проверяем покрытие важных LSI между Title и Description.
-    if (!importantWords.length
-        || typeof result.title !== 'string'
-        || typeof result.description !== 'string') {
-      lastMissed = [];
-      if (!lastViolations.length) break;
-    } else {
-      const combined = `${result.title} ${result.description}`;
-      const { missed_lsi } = checkLsiUsage(combined, importantWords);
-      lastMissed = missed_lsi;
-    }
-
-    if (!lastMissed.length && !lastViolations.length) break;
-    if (attempt === MAX_ATTEMPTS) {
-      if (lastMissed.length) {
-        allNotes.push(
-          `Попытка ${attempt}: после перегенерации остались непокрытые важные LSI: `
-          + `${lastMissed.join(', ')}.`,
-        );
-      }
-      if (lastViolations.length) {
-        allNotes.push(`Попытка ${attempt}: остались нарушения: ${lastViolations.join('; ')}.`);
-      }
-      break;
-    }
-
-    if (lastMissed.length) {
-      allNotes.push(
-        `Попытка ${attempt}: пропущены важные LSI: ${lastMissed.join(', ')}. `
-        + 'Запрашиваем органичную перегенерацию у Gemini.',
-      );
-    }
-    if (lastViolations.length) {
-      allNotes.push(`Попытка ${attempt}: нарушения правил CTR: ${lastViolations.join('; ')}.`);
-    }
-
-    // Корректирующий блок к user-prompt: явно перечисляем пропущенные слова и
-    // запрещаем «костыли» (хвосты «Также: …», голые перечисления).
-    userPrompt = `${baseUserPrompt}
-
-=== УТОЧНЕНИЕ К ПРЕДЫДУЩЕМУ ОТВЕТУ ===
-Предыдущая версия ответа:
-- Title: ${result.title}
-- Description: ${result.description}
-
-Нарушения, которые необходимо исправить:
-${lastMissed.length ? `- Не использованы обязательные важные слова: ${lastMissed.join(', ')}.` : ''}
-${lastViolations.map((v) => `- ${v}.`).join('\n')}
-
-Перепиши Title и Description так, чтобы каждое из этих слов появилось
-ОРГАНИЧНО (внутри осмысленного предложения, без перечислений через запятую,
-без хвостов «Также: …» / «Ключи: …»). Сохрани:
-- длину Title 70–80 символов; ключ + главное УТП в первых 50,
-- длину Description 180–190 символов,
-- H1 ≤ 70 символов и НЕ копию Title,
-- CTA в конце Description,
-- бренд / CTA / год / price_data по тем же правилам, что и раньше.
-
-Если какое-то слово невозможно вписать без переспама или нарушения
-читаемости — лучше честно опусти его (отметь это в coverage_self_audit),
-чем испортить сниппет ради «галочки».`;
-  }
-
-  // После трёх попыток не вклеиваем LSI механически: читаемость и CTR важнее.
-  if (lastMissed.length) {
-    lastMissed.forEach((word) => {
-      allNotes.push(`⚠️ LSI слово «${word}» не интегрировано, так как нарушает читаемость.`);
-    });
-  }
-  if (lastViolations.length) {
-    throw new Error(
-      `Мета-теги отклонены после ${MAX_ATTEMPTS} попыток: ${lastViolations.join('; ')}`,
-    );
-  }
-
+  // Легаси-поля для metaStages / pageMetaAudit / UI.
+  result.title_length = String(result.title || '').length;
+  result.description_length = String(result.description || '').length;
   result.detected_year = year;
-  result.post_validation_notes = allNotes;
-  result._meta = {
-    model,
-    tokensIn:        totalTokensIn,
-    tokensOut:       totalTokensOut,
-    thoughtsTokens:  totalThoughtsTokens,
-    cachedTokens:    totalCachedTokens,
-    attempts: attemptsMade,
-    provider: 'gemini',
-  };
+
+  const serpIntent = inputs && inputs.ctrAnalysis && inputs.ctrAnalysis.serp_intent;
+  if (serpIntent && serpIntent.value) {
+    result.intent = serpIntent.value;
+    result.intent_reason = `Определено по ТОП-10: commercial ${Math.round((serpIntent.commercial_frequency || 0) * 100)}%, informational ${Math.round((serpIntent.informational_frequency || 0) * 100)}%`;
+  }
+
+  // Детерминированные guard'ы прежней версии (цены без price_data,
+  // коммерческие вопросы, штампы, H1-хвосты) — теперь только warnings:
+  // selection-логика GIST-пайплайна первична.
+  const violations = findHardViolations(result, inputs || {});
+  if (violations.length) {
+    result.post_validation_notes = result.post_validation_notes || [];
+    violations.forEach((v) => result.post_validation_notes.push(`⚠️ Guard: ${v}.`));
+  }
+
   return result;
 }
 

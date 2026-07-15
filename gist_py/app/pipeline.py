@@ -63,6 +63,51 @@ class GistPipeline:
             except Exception:  # колбэк не должен ронять пайплайн
                 logger.exception("on_stage callback failed")
 
+    def run_gap_finder(
+        self,
+        query: str,
+        target_audience: str = "",
+        competitors_text: Optional[List[str]] = None,
+        pages: Optional[List[Dict]] = None,
+    ) -> Dict:
+        """Лёгкий режим для Node-пайплайнов (M2+M3, без генерации контента).
+
+        Принимает готовые тексты конкурентов (`competitors_text`, Stage 0
+        Node-скрейпера) либо скрейпит ТОП сам (M1). Возвращает
+        {top10_claims, information_delta, gist_score} — контракт
+        gistClient.runGistGapFinder() на стороне Node.
+        """
+        result: Dict = {"query": query, "mode": "gap_finder"}
+
+        # 1. M1 — страницы конкурентов (готовые тексты приоритетнее скрейпа)
+        if pages is None:
+            texts = [t for t in (competitors_text or []) if str(t).strip()]
+            if texts:
+                pages = [
+                    {"url": f"node://competitor/{i + 1}", "body_text": str(t)}
+                    for i, t in enumerate(texts)
+                ]
+            else:
+                pages = m1_scraper.scrape_competitors(query)
+        result["pages_count"] = len(pages)
+
+        # 2. M2 — шум top10_claims
+        self._stage("M2")
+        top10_claims = m2_noise.extract_noise(pages, query, self.llm)
+        result["top10_claims"] = top10_claims
+
+        # 3. M3 — information_delta
+        self._stage("M3", {"top10_claims_json": top10_claims})
+        gaps = m3_gap.find_gaps(query, target_audience, top10_claims, self.llm)
+        result["information_delta"] = gaps["information_delta"]
+        result["gap_reasoning"] = gaps["gap_reasoning"]
+
+        # GIST Score считается по готовой статье (Node Quality Gate);
+        # на этапе gap-finder статьи ещё нет.
+        result["gist_score"] = None
+        self._stage("DONE", {"information_delta_json": gaps["information_delta"]})
+        return result
+
     def run(
         self,
         query: str,

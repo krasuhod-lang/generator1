@@ -17,8 +17,18 @@
  *                                  отсутствии skill-файла слой сам отключается)
  *   LINGUAFORENSIC_SKILL_PATH    — путь к skill-файлу
  *                                  (default: <repo>/skills/AI-detect-v-3-6.md)
- *   LINGUAFORENSIC_MAX_ROBOTNESS — порог рерайта, % (default: 40)
- *   LINGUAFORENSIC_MAX_PASSES    — максимум рерайт-итераций (default: 1)
+ *   LF_TARGET_ROBOTNESS          — порог рерайта, % (default: 25 — стандарт
+ *                                  GIST M9; legacy-алиас LINGUAFORENSIC_MAX_ROBOTNESS)
+ *   LF_MAX_PASSES                — максимум рерайт-итераций (default: 3 — как
+ *                                  в GIST M8→M9; legacy-алиас LINGUAFORENSIC_MAX_PASSES)
+ *   LF_STRATEGY_THRESHOLDS       — пороги градуированных стратегий
+ *                                  light/medium/deep/full (default: '35,55,75')
+ *
+ * Градуированный выбор стратегии (ТЗ GIST, Задача C):
+ *   strategy = light  если r ≤ 35%
+ *              medium если 35% < r ≤ 55%
+ *              deep   если 55% < r ≤ 75%
+ *              full   если r > 75%
  *
  * Тот же skill-файл использует gist_py (M8 LinguaForensic) — единый источник
  * правды для детектора во всех пайплайнах.
@@ -37,9 +47,37 @@ const DEFAULT_SKILL_PATH = path.resolve(__dirname, '../../../..', 'skills', 'AI-
 
 const ENABLED        = String(process.env.LINGUAFORENSIC_ENABLED ?? 'true') === 'true';
 const SKILL_PATH     = process.env.LINGUAFORENSIC_SKILL_PATH || DEFAULT_SKILL_PATH;
-const MAX_ROBOTNESS  = Number(process.env.LINGUAFORENSIC_MAX_ROBOTNESS || 40);
-const MAX_PASSES     = Math.max(0, Number(process.env.LINGUAFORENSIC_MAX_PASSES || 1));
+const MAX_ROBOTNESS  = Number(
+  process.env.LF_TARGET_ROBOTNESS ?? process.env.LINGUAFORENSIC_MAX_ROBOTNESS ?? 25,
+);
+const MAX_PASSES     = Math.max(
+  0,
+  Number(process.env.LF_MAX_PASSES ?? process.env.LINGUAFORENSIC_MAX_PASSES ?? 3),
+);
 const VOLUME_TOLERANCE = 0.15; // ±15% объёма (см. «Параметры рерайта» в skill)
+
+// Пороги градуированных стратегий рерайта (light/medium/deep) — как в GIST M9.
+const STRATEGY_THRESHOLDS = (() => {
+  const raw = String(process.env.LF_STRATEGY_THRESHOLDS || '35,55,75')
+    .split(',').map((v) => Number(v.trim())).filter((v) => Number.isFinite(v));
+  return raw.length === 3 ? raw : [35, 55, 75];
+})();
+
+// Интенсивность рерайта в терминах skill-файла (Light|Medium|Deep|Full).
+const STRATEGY_INTENSITY = { light: 'Light', medium: 'Medium', deep: 'Deep', full: 'Full' };
+
+/**
+ * pickRewriteStrategy — градуированный выбор стратегии по роботности r (%):
+ * light (r≤35), medium (35<r≤55), deep (55<r≤75), full (r>75).
+ */
+function pickRewriteStrategy(robotness) {
+  const r = Number(robotness) || 0;
+  const [t1, t2, t3] = STRATEGY_THRESHOLDS;
+  if (r <= t1) return 'light';
+  if (r <= t2) return 'medium';
+  if (r <= t3) return 'deep';
+  return 'full';
+}
 
 // Домены skill-файла для трёх генераторов контента
 const PIPELINE_DOMAINS = {
@@ -101,11 +139,15 @@ function buildRewritePrompt(articleHtml, report, domainHint) {
   const fluency = (report.fluency_issues || []).map((m) => `- ${m}`).join('\n') || '-';
   const topCats = (report.top_contributing_categories || [])
     .map((c) => `- ${c.category}: +${c.contribution_pct}%`).join('\n') || '-';
+  // Градуированная интенсивность по текущей роботности (light/medium/deep/full)
+  const gradStrategy  = pickRewriteStrategy(report.robotness_score);
+  const gradIntensity = STRATEGY_INTENSITY[gradStrategy];
   return [
     'Режим 3. Стратегический рерайт.',
     `Доменная подсказка: ${domainHint}.`,
     `Текущая роботность: ${report.robotness_score}%.`,
-    `Стратегия: ${report.recommended_strategy || 'по домену'}; интенсивность: ${report.recommended_intensity || 'Light'}.`,
+    `Стратегия: ${report.recommended_strategy || 'по домену'}; интенсивность: ${gradIntensity} ` +
+      `(градуированная стратегия «${gradStrategy}» по роботности; пороги ${STRATEGY_THRESHOLDS.join('/')}%).`,
     '',
     'Вклад TOP-категорий:',
     topCats,
@@ -288,7 +330,9 @@ async function runLinguaForensicPass(articleHtml, opts = {}) {
     for (let i = 0; i < maxPasses; i++) {
       logFn(
         `LinguaForensic: роботность ${detection.robotness_score}% > порога ${maxRobotness}% — ` +
-        `рерайт (стратегия: ${detection.recommended_strategy || 'auto'}, проход ${i + 1}/${maxPasses})`,
+        `рерайт (стратегия: ${pickRewriteStrategy(detection.robotness_score)}` +
+        `${detection.recommended_strategy ? ` / ${detection.recommended_strategy}` : ''}, ` +
+        `проход ${i + 1}/${maxPasses})`,
         'info',
       );
       const res = await rewrite(html, detection, { pipeline, taskId, log, onTokens });
@@ -328,5 +372,10 @@ module.exports = {
   rewrite,
   runLinguaForensicPass,
   // для тестов
-  _internal: { buildDetectPrompt, buildRewritePrompt, _volumeOk, _wordCount, _normalizeReport, SKILL_PATH, PIPELINE_DOMAINS },
+  pickRewriteStrategy,
+  // для тестов
+  _internal: {
+    buildDetectPrompt, buildRewritePrompt, _volumeOk, _wordCount, _normalizeReport,
+    SKILL_PATH, PIPELINE_DOMAINS, STRATEGY_THRESHOLDS, MAX_ROBOTNESS, MAX_PASSES,
+  },
 };

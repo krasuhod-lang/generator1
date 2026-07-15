@@ -208,6 +208,44 @@ group('checkValueAdds', () => {
 });
 
 // ── qualityGate.finalize ─────────────────────────────────────────────
+// ── checkGistScore (12-й чекер, ТЗ GIST Задача B) ────────────────────
+group('checkGistScore', () => {
+  test('нет дельты → skip (pass, no delta)', () => {
+    const r = checkers.checkGistScore('<p>Просто длинный текст статьи без дельты</p>', []);
+    assert.strictEqual(r.pass, true);
+    assert.strictEqual(r.verdict, 'skipped');
+    assert.strictEqual(r.evidence.reason, 'no_delta_available');
+  });
+  test('дельта покрыта ≥30% параграфов → pass, score', () => {
+    const html = '<p>Гарантия 5 лет на монтаж пластиковых окон в договоре</p>' +
+                 '<li>гарантия 5 лет монтаж окон подтверждена</li>';
+    const r = checkers.checkGistScore(html, ['гарантия 5 лет на монтаж окон']);
+    assert.strictEqual(r.pass, true);
+    assert.strictEqual(r.blocking, false);
+    assert.ok(r.score >= 30);
+  });
+  test('дельта не раскрыта → warning (не blocking)', () => {
+    const html = '<p>Первый параграф совсем про другое и длинный</p>' +
+                 '<p>Второй параграф тоже не о том, о чём дельта</p>' +
+                 '<p>Третий параграф про погоду и природу вокруг</p>';
+    const r = checkers.checkGistScore(html, ['криотерапия жидким азотом стоимость сеанса']);
+    assert.strictEqual(r.pass, false);
+    assert.strictEqual(r.blocking, false); // warning, не blocker (fail-open)
+    assert.strictEqual(r.evidence.level, 'red');
+  });
+  test('finalize: низкий gistScore попадает в warnings, canPublish не блокируется', () => {
+    const res = qualityGate.finalize('info', {
+      html: '<p>Длинный параграф совсем не про информационную дельту</p>',
+      currentYear: 2026,
+      niche: 'окна',
+      informationDelta: ['криотерапия жидким азотом стоимость сеанса'],
+    });
+    assert.ok(res.gates.some((g) => g.name === 'gistScore'));
+    assert.ok(res.warnings.some((w) => w.name === 'gistScore'));
+    assert.ok(!res.blockers.some((b) => b.name === 'gistScore'));
+  });
+});
+
 group('qualityGate.finalize', () => {
   test('чистая info-статья → canPublish', () => {
     const res = qualityGate.finalize('info', {
