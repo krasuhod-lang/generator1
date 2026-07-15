@@ -21,7 +21,7 @@
  * фильтр/ранкер, валидатор) — DeepSeek (fallback на Gemini при отсутствии
  * ключа/ошибке), копирайтинг (сборка пары) — Gemini.
  *
- * Кириллические safe ranges (§4): Title 40–50, Description desktop 130–145,
+ * Кириллические safe ranges (§4): Title 70–80, Description desktop 180–190,
  * Description mobile 90–105; GIST-фактор — в первых 35 симв. title и первых
  * 90 симв. description.
  */
@@ -34,12 +34,14 @@ const {
   PAIR_ASSEMBLER_SYSTEM,
   CONFLICT_CHECKER_SYSTEM,
 } = require('./gistMetaPrompts');
+const { analyzeSnippets } = require('./snippetAnalyzer');
+const { checkKeywordPosition } = require('./semantics');
 
 // Кириллические safe ranges (§4 ТЗ). Английские лимиты не применимы.
-const TITLE_MIN = 40;
-const TITLE_MAX = 50;
-const DESC_MIN = 130;
-const DESC_MAX = 145;
+const TITLE_MIN = 70;
+const TITLE_MAX = 80;
+const DESC_MIN = 180;
+const DESC_MAX = 190;
 const DESC_MOBILE_MIN = 90;
 const DESC_MOBILE_MAX = 105;
 const H1_MAX = 70;
@@ -62,6 +64,34 @@ const VALID_SOURCES = new Set([
   'page_angle', 'missing_node', 'failure_mode', 'hidden_info', 'limitation',
   'disqualifier', 'quantifiable', 'fallback_supercategory', 'fallback_structural',
 ]);
+
+function _ensureSnippetAnalysis(serpData, inputs = {}) {
+  if (inputs.snippetAnalysis && Array.isArray(inputs.snippetAnalysis.competitor_noise)) {
+    return inputs.snippetAnalysis;
+  }
+  try {
+    return analyzeSnippets(serpData || []);
+  } catch (_) {
+    return null;
+  }
+}
+
+function _buildCompetitorNoiseBlock(snippetAnalysis) {
+  if (!snippetAnalysis || !Array.isArray(snippetAnalysis.competitor_noise)
+      || !snippetAnalysis.competitor_noise.length) {
+    return '';
+  }
+  const titleStats = snippetAnalysis.competitor_title_lengths || {};
+  const descStats = snippetAnalysis.competitor_desc_lengths || {};
+  return `
+
+[COMPETITOR_NOISE]
+Фразы и паттерны конкурентов, которые ЗАПРЕЩЕНО повторять:
+- Запрещённые фразы/паттерны: ${snippetAnalysis.competitor_noise.slice(0, 20).join('; ')}
+- Доминирующий title-паттерн ТОПа: ${snippetAnalysis.dominant_title_pattern || 'plain'} — не копируй его дословно.
+- Длины конкурентов: Title min=${titleStats.min || 0}, max=${titleStats.max || 0}, avg=${titleStats.avg || 0}; Description min=${descStats.min || 0}, max=${descStats.max || 0}, avg=${descStats.avg || 0}.
+- CTA конкурентов: ${(snippetAnalysis.cta_patterns || []).join(', ') || '—'}.`;
+}
 
 function _parseJson(text) {
   // Ленивый require — metaGenerator требует этот модуль (избегаем циклической
@@ -140,7 +170,9 @@ async function _callCopywriterJson(userPrompt, usage, opts = {}) {
 
 // ─── Фаза 1: Candidate generation (Steps 8.1–8.4) ──────────────────
 
-function _buildCandidateUserPrompt({ keyword, semantics = {}, serpData = [], inputs = {} }) {
+function _buildCandidateUserPrompt({
+  keyword, semantics = {}, serpData = [], inputs = {}, snippetAnalysis = null,
+}) {
   const contextParts = [];
   if (inputs.niche) contextParts.push(`Тема страницы: ${inputs.niche}`);
   if (inputs.toponym) contextParts.push(`Регион: ${inputs.toponym}`);
@@ -182,6 +214,8 @@ function _buildCandidateUserPrompt({ keyword, semantics = {}, serpData = [], inp
       : '',
   ].filter(Boolean).join('\n');
 
+  const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Контекст страницы: ${contextParts.join(' | ') || 'Нет данных'}
@@ -192,13 +226,15 @@ ${lsiBlock}` : ''}
 
 [TITLE/DESCRIPTION КОНКУРЕНТОВ ТОП-ВЫДАЧИ]
 ${competitors || 'Нет данных о конкурентах — оцени общий шаблон категории по своим знаниям выдачи.'}${ctrBlock}
+${competitorNoiseBlock}
 
 Выполни Steps 8.1–8.4 и верни JSON по контракту.`;
 }
 
 // ─── Фаза 2: Filter + scoring (Steps 8.5 / 8.5b / 8.6) ─────────────
 
-function _buildRankerUserPrompt({ keyword, phase1 }) {
+function _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis = null }) {
+  const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Задача поля (Step 8.1): ${JSON.stringify(phase1.field_job || {}, null, 2)}
@@ -206,6 +242,7 @@ function _buildRankerUserPrompt({ keyword, phase1 }) {
 
 [КАНДИДАТЫ-ФАКТЫ]
 ${JSON.stringify(phase1.candidates || [], null, 2)}
+${competitorNoiseBlock}
 
 Кандидаты с disqualified_by_template: true уже провалили первый pass
 Replaceability — исключи их (survived: false), кроме случая, когда без них
@@ -249,9 +286,11 @@ function _normalizeRankedItem(item) {
 // ─── Фаза 3: Pair generation (Steps 8.7–8.8) ───────────────────────
 
 function _buildAssemblerUserPrompt({
-  keyword, inputs = {}, winner, alternates, phase1, standaloneExposure, feedback,
+  keyword, inputs = {}, winner, alternates, phase1, standaloneExposure,
+  feedback, snippetAnalysis = null,
 }) {
   const alternateFacts = alternates.map((a) => `- ${a.fact} (source: ${a.source})`).join('\n');
+  const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Бренд: ${inputs.brand || '—'}
@@ -265,6 +304,7 @@ ${JSON.stringify(winner, null, 2)}
 
 [ЗАПАСНЫЕ КАНДИДАТЫ — lead fact для DESCRIPTION]
 ${alternateFacts || '— (запасных нет: используй новую смысловую ось того же факта — спецификацию/число/proof, не перефразирование)'}
+${competitorNoiseBlock}
 ${feedback ? `
 [ФИДБЕК ПРЕДЫДУЩЕЙ ПОПЫТКИ — ОБЯЗАТЕЛЬНО ИСПРАВИТЬ]
 ${feedback}` : ''}
@@ -304,6 +344,17 @@ function _deterministicPairIssues(pair) {
   const desc = String(pair.description || '');
   if (desc.length < DESC_MIN) {
     issues.push(`description короче safe range (${desc.length} < ${DESC_MIN})`);
+  }
+  return issues;
+}
+
+function _deterministicPairSoftIssues(pair, keyword) {
+  const issues = [];
+  const keywordPos = checkKeywordPosition(String(pair.title || ''), keyword);
+  if (!keywordPos.ok) {
+    issues.push(
+      `главный ключ не начинается в первых 35 символах title (position=${keywordPos.position})`,
+    );
   }
   return issues;
 }
@@ -398,11 +449,14 @@ async function runGistMetaPipeline({
   const notes = [];
   const standaloneExposure = inputs.standalone_exposure === true
     || inputs.standaloneExposure === true;
+  const snippetAnalysis = _ensureSnippetAnalysis(serpData, inputs);
 
   // ── Фаза 1: Candidate generation (Steps 8.1–8.4) ──
   const phase1 = await _callAnalyticJson(
     CANDIDATE_GENERATOR_SYSTEM,
-    _buildCandidateUserPrompt({ keyword, semantics, serpData, inputs }),
+    _buildCandidateUserPrompt({
+      keyword, semantics, serpData, inputs, snippetAnalysis,
+    }),
     usage,
   );
   const candidates = Array.isArray(phase1.candidates)
@@ -415,7 +469,7 @@ async function runGistMetaPipeline({
   // ── Фаза 2: Filter + scoring (Steps 8.5 / 8.5b / 8.6) ──
   const phase2 = await _callAnalyticJson(
     FILTER_RANKER_SYSTEM,
-    _buildRankerUserPrompt({ keyword, phase1 }),
+    _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis }),
     usage,
   );
   const rankedAll = Array.isArray(phase2.ranked)
@@ -458,7 +512,8 @@ async function runGistMetaPipeline({
 
     pair = await _callCopywriterJson(
       _buildAssemblerUserPrompt({
-        keyword, inputs, winner, alternates, phase1, standaloneExposure, feedback,
+        keyword, inputs, winner, alternates, phase1, standaloneExposure,
+        feedback, snippetAnalysis,
       }),
       usage,
       { model: options.copywriterModel },
@@ -473,6 +528,10 @@ async function runGistMetaPipeline({
     }
     if (hardIssues.length) {
       notes.push(`⚠️ Остались нарушения после ${attempt} попыток: ${hardIssues.join('; ')}.`);
+    }
+    const softIssues = _deterministicPairSoftIssues(pair, keyword);
+    if (softIssues.length) {
+      notes.push(`⚠️ Post-validation: ${softIssues.join('; ')}.`);
     }
 
     // Steps 8.9–8.10 — semantic conflict + pair replaceability.
@@ -569,10 +628,94 @@ async function runGistMetaPipeline({
 
 // ─── Мета-теги для ссылочных статей ────────────────────────────────
 
+// Полный трёхфазный пайплайн для ссылочной статьи повторяем при сбое:
+// LINK_META_PIPELINE_ATTEMPTS полных прогонов, затем fallback-сборка пары.
+const LINK_META_PIPELINE_ATTEMPTS = 2;
+
+/**
+ * Fallback-сборка пары title/description для ссылочной статьи, когда полный
+ * трёхфазный пайплайн не отработал (ошибка LLM / парсинга / пустой пул
+ * кандидатов). Использует тот же системный промпт MetaPairAssembler
+ * (Steps 8.7–8.8): модель сама выбирает один сильнейший GIST-факт из текста
+ * статьи и собирает пару по кириллическим safe ranges. Результат помечается
+ * manual_review_required: true.
+ */
+async function _fallbackLinkArticleMeta({
+  topic, anchorText, excerpt, focusNotes, geminiModel, pipelineError,
+}) {
+  const usage = {
+    tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
+    calls: 0, model: '', providers: new Set(),
+  };
+  const notes = [
+    `⚠️ GIST Meta Filter Pipeline не отработал (${pipelineError ? pipelineError.message : 'нет деталей'}) — пара собрана fallback-вызовом MetaPairAssembler (Steps 8.7–8.8).`,
+  ];
+
+  const userPrompt = `[ВХОДНЫЕ ДАННЫЕ]
+- Главный поисковый запрос: ${topic}
+- Бренд: —
+- Регион: —
+- Контекст / УТП страницы: ${focusNotes || 'Нет данных'}${anchorText ? `
+- Статья подводит к переходу по анкору «${anchorText}»` : ''}
+- standalone_exposure: true (ссылочная статья распространяется standalone: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)
+
+[ТЕКСТ ГОТОВОЙ СТАТЬИ — ИСТОЧНИК ФАКТОВ]
+${excerpt || 'Текст статьи недоступен — опирайся на главный запрос и контекст.'}
+
+[WINNER FACT]
+Полный пайплайн отбора кандидатов недоступен. САМ выбери из текста статьи
+РОВНО ОДИН самый сильный конкретный факт (проходящий 4 теста GIST:
+Concreteness, Decision-relevance, Replaceability, Verifiability) и используй
+его как winner fact для title. Для description возьми ДРУГОЙ факт статьи как
+lead fact. Дополнительно добавь в JSON поле "winner_fact" — краткую
+формулировку выбранного факта.
+
+Собери пару по Steps 8.7–8.8 и верни JSON по контракту.`;
+
+  const pair = await _callCopywriterJson(userPrompt, usage, {
+    model: geminiModel || undefined,
+  });
+  _deterministicPairFix(pair, notes);
+
+  return {
+    title: String(pair.title || ''),
+    description: String(pair.description || ''),
+    description_mobile: String(pair.description_mobile || ''),
+    h1: String(pair.h1 || ''),
+    winner_fact: String(pair.winner_fact || '') || null,
+    winner_source: 'fallback_structural',
+    scores: null,
+    conflict_check: { passed: true, detail: null },
+    replaceability_check: { passed: true, detail: null },
+    temporary_gist_factor: false,
+    review_date: null,
+    manual_review_required: true,
+    field_job: null,
+    competitor_pattern: null,
+    candidates: [],
+    fallback_used: 'assembler_direct',
+    standalone_exposure: true,
+    post_validation_notes: notes,
+    _meta: {
+      model: usage.model,
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      thoughtsTokens: usage.thoughtsTokens,
+      cachedTokens: usage.cachedTokens,
+      attempts: usage.calls,
+      provider: usage.providers.size === 1 ? [...usage.providers][0] : 'mixed',
+    },
+  };
+}
+
 /**
  * Генерация пары title/description для готовой ссылочной статьи через тот же
  * GIST Meta Filter Pipeline. SERP не запрашивается (статья публикуется на
  * внешнем доноре) — конкурентный шаблон оценивается моделью по категории.
+ *
+ * Надёжность: полный пайплайн повторяется до LINK_META_PIPELINE_ATTEMPTS раз;
+ * при полном провале пара собирается fallback-вызовом MetaPairAssembler
+ * (_fallbackLinkArticleMeta) — мета-теги для статьи создаются всегда.
  *
  * @param {object} args
  * @param {string} args.topic        — тема статьи (главный запрос)
@@ -586,7 +729,7 @@ async function generateLinkArticleMeta({
   topic, anchorText = '', articlePlain = '', focusNotes = '', geminiModel = '',
 } = {}) {
   const excerpt = String(articlePlain || '').replace(/\s+/g, ' ').trim().slice(0, 6000);
-  return runGistMetaPipeline({
+  const pipelineArgs = {
     keyword: String(topic || '').trim(),
     semantics: {},
     serpData: [],
@@ -603,6 +746,22 @@ async function generateLinkArticleMeta({
       pageAngle: anchorText ? `Статья подводит к переходу по анкору «${anchorText}»` : '',
     },
     options: { copywriterModel: geminiModel || undefined },
+  };
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= LINK_META_PIPELINE_ATTEMPTS; attempt += 1) {
+    try {
+      return await runGistMetaPipeline(pipelineArgs);
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[gistMetaFilter] link meta pipeline attempt ${attempt}/${LINK_META_PIPELINE_ATTEMPTS} failed: ${err.message}`);
+    }
+  }
+
+  // Полный пайплайн не отработал — собираем пару напрямую через
+  // MetaPairAssembler, чтобы мета-теги создавались всегда.
+  return _fallbackLinkArticleMeta({
+    topic, anchorText, excerpt, focusNotes, geminiModel, pipelineError: lastErr,
   });
 }
 

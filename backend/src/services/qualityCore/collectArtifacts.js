@@ -60,7 +60,8 @@ function riskFromEvaluator(evaluator) {
  * @param {object} raw — сырые данные пайплайна. Поддерживаемые ключи:
  *   { html, niche, currentYear, ymyl,
  *     plagiarismReport, factReport, intentReport, lsiOverdoseReport,
- *     links, riskReport, evaluatorReport, authorship, informationGainBrief }
+ *     links, riskReport, evaluatorReport, authorship, informationGainBrief,
+ *     informationDelta, tzCompliance }
  * @returns {object} artifacts для qualityGate.finalize()
  */
 function collectArtifacts(pipeline, raw = {}) {
@@ -108,6 +109,9 @@ function collectArtifacts(pipeline, raw = {}) {
   if (raw.informationGainBrief) out.informationGainBrief = raw.informationGainBrief;
   if (Array.isArray(raw.informationDelta) && raw.informationDelta.length) {
     out.informationDelta = raw.informationDelta;
+  }
+  if (raw.tzCompliance && typeof raw.tzCompliance === 'object') {
+    out.tzCompliance = raw.tzCompliance;
   }
 
   // ── Risk: явный riskReport приоритетнее, иначе — из Stage 8 evaluator ─

@@ -32,6 +32,7 @@
  *     riskReport,           // { level, issues } (Stage 8)
  *     authorship,           // { byline, reviewer, sources }
  *     informationGainBrief, // { value_adds, gaps }
+ *     tzCompliance,         // детерминированный отчёт Stage 7 по ТЗ
  *   }
  */
 
@@ -102,6 +103,10 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   // дельты (GIST M3 Gap Finder). Warning, не blocker — fail-open.
   if (Array.isArray(artifacts.informationDelta) && artifacts.informationDelta.length) {
     gates.push(checkers.checkGistScore(artifacts.html, artifacts.informationDelta, { thresholds }));
+  }
+  // TZ compliance (13-й чекер): warning/fail-open, не blocker.
+  if (artifacts.tzCompliance) {
+    gates.push(checkers.checkTzCompliance(artifacts.tzCompliance));
   }
 
   const blockers = gates.filter((g) => g.blocking && !g.pass);

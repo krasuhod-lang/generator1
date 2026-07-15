@@ -71,7 +71,13 @@ const { analyzeReadability } = require('./readability.service');
 const { verifyIntent } = require('./intentVerify.service');
 const { createValidationTracker } = require('./validationFailures.service');
 const { generateSeoMeta } = require('./seoMeta.service');
+const { fetchGoogleSerpWithContent } = require('./fetchGoogleSerp');
+const {
+  normalizeGistAuditReport,
+  buildGistRewriteIssues,
+} = require('./gistAudit');
 const { runEeatAuditCore } = require('../eeatAudit/core');
+const { runQualityEvaluator } = require('../pipeline/stage8');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
@@ -147,6 +153,16 @@ const INFO_ARTICLE_IMAGE_QA_ENABLED =
 // Ничего не валит, только пишет отчёт + лог. Default ON (чек безопасный).
 const INFO_ARTICLE_READABILITY_ENABLED =
   String(process.env.INFO_ARTICLE_READABILITY_ENABLED || 'true').toLowerCase() === 'true';
+
+// ── GIST Google SERP + Stage 5C audit (Task B) ───────────────────────
+// Default ON: сбор Google competitor content fail-open и нужен только для
+// улучшения information_delta. Kill-switch: INFO_GOOGLE_SERP_ENABLED=false.
+const INFO_GOOGLE_SERP_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.INFO_GOOGLE_SERP_ENABLED || 'true').toLowerCase());
+const GIST_COVERAGE_MIN = (() => {
+  const v = parseFloat(process.env.GIST_COVERAGE_MIN);
+  return Number.isFinite(v) && v >= 0 && v <= 100 ? v : 40;
+})();
 
 // ── Phase 2 / Б5: Intent verifier ───────────────────────────────────
 // Сравнивает программно определённый интент финальной статьи с
@@ -256,6 +272,8 @@ function buildCallCtx(taskId, stageName) {
   // нет FK-связи с task_metrics; собственные счётчики идут через onTokens.
   return {
     stageName,
+    pipeline: 'info',
+    traceTaskId: taskId,
     log: (msg, level = 'info') => appendLog(taskId, msg, level).catch(() => {}),
     onTokens: (adapter, tIn, tOut, cost) => {
       recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
@@ -740,6 +758,38 @@ async function runLinkAudit(articleHtml, linkPlan, deterministicCheck, ctx) {
     verdict:             deterministicCheck.verdict,
     audit_notes:         (llm && typeof llm.audit_notes === 'string') ? llm.audit_notes.slice(0, 500) : '',
   };
+}
+
+async function runGistAudit(task, informationDelta, articleHtml, ctx) {
+  const delta = Array.isArray(informationDelta) ? informationDelta : [];
+  if (!delta.length) {
+    return normalizeGistAuditReport({
+      thesis_coverage: [],
+      section_audit: [],
+      gist_coverage_score: 100,
+      needs_rewrite: [],
+    }, delta);
+  }
+  const sections = buildSectionsFromArticle(articleHtml)
+    .map((s) => ({
+      index: s.index + 1,
+      h2: s.h2,
+      text: String(s.text || '').slice(0, 3000),
+    }))
+    .slice(0, 14);
+  const user = [
+    `[INPUTS]`,
+    `topic: ${task.topic}`,
+    `information_delta: ${JSON.stringify(delta).slice(0, 6000)}`,
+    `article_sections: ${JSON.stringify(sections).slice(0, 14000)}`,
+  ].join('\n');
+  const raw = await callLLM(
+    'deepseek',
+    loadInfoArticlePrompt('stage5cGist'),
+    user,
+    { retries: 2, temperature: 0.2, callLabel: 'InfoArticle Stage 5C (GIST audit)', ...ctx },
+  );
+  return normalizeGistAuditReport(raw, delta);
 }
 
 // ── Stage 4: image prompts + Nano Banana Pro ────────────────────────
@@ -1321,18 +1371,52 @@ async function processInfoArticleTask(taskId) {
     //    без информационной дельты (Задача A ТЗ «GIST Content Logic»).
     await setStage(taskId, 'stage1b_whitespace', 28);
     const { runGistGapFinder, mergeContentGaps } = require('../gist/gistClient');
-    const [wsSettled, gistSettled] = await Promise.allSettled([
+    const googleSerpPromise = INFO_GOOGLE_SERP_ENABLED
+      ? fetchGoogleSerpWithContent({
+          keyword: task.topic,
+          region:  task.region || 'ru',
+          lang:    'ru',
+          top_n:   10,
+        })
+      : Promise.resolve([]);
+    const gistPromise = googleSerpPromise.then((serpPages) => runGistGapFinder({
+      keyword: task.topic,
+      competitors_text: Array.isArray(serpPages)
+        ? serpPages.map((p) => p.page_content).filter(Boolean)
+        : [],
+      page_type: 'info',
+      target_audience: typeof task.audience === 'string' ? task.audience : '',
+    }));
+    const [wsSettled, gistSettled, googleSerpSettled] = await Promise.allSettled([
       runWhitespace(task, strategy, audience, ctx),
-      runGistGapFinder({
-        keyword: task.topic,
-        page_type: 'info',
-        target_audience: typeof task.audience === 'string' ? task.audience : '',
-      }),
+      gistPromise,
+      googleSerpPromise,
     ]);
     if (wsSettled.status === 'rejected') throw wsSettled.reason;
     let whitespace = wsSettled.value;
+    const googleSerpPages = googleSerpSettled.status === 'fulfilled' && Array.isArray(googleSerpSettled.value)
+      ? googleSerpSettled.value
+      : [];
+    if (INFO_GOOGLE_SERP_ENABLED) {
+      await appendLog(
+        taskId,
+        `🔎 Google SERP для GIST: собрано ${googleSerpPages.length} страниц с текстом`,
+        googleSerpPages.length ? 'info' : 'warn',
+      );
+    }
+    let gistDeltaArtifact = null;
     if (gistSettled.status === 'fulfilled') {
       const { information_delta, gist_score, top10_claims } = gistSettled.value;
+      gistDeltaArtifact = {
+        information_delta,
+        top10_claims,
+        gist_score,
+        serp: googleSerpPages.map((p) => ({
+          url: p.url,
+          serp_title: p.serp_title,
+          word_count: p.word_count,
+        })),
+      };
       whitespace = {
         ...whitespace,
         information_delta,
@@ -1353,6 +1437,7 @@ async function processInfoArticleTask(taskId) {
       );
     }
     await saveColumn(taskId, 'whitespace_analysis', whitespace);
+    if (gistDeltaArtifact) await saveColumn(taskId, 'gist_delta_json', gistDeltaArtifact);
 
     // 5. Stage 2 outline
     await setStage(taskId, 'stage2_outline', 36);
@@ -1701,6 +1786,77 @@ async function processInfoArticleTask(taskId) {
         } catch (e) {
           await appendLog(taskId, `⚠ Re-audit не выполнился: ${e.message}`, 'warn');
         }
+      }
+    }
+
+    // 11a. Stage 5C — GIST Delta audit + максимум один дополнительный refine.
+    // Проверяем, что writer реально раскрыл §11, а не оставил дельту в плане.
+    const informationDelta = (whitespace && Array.isArray(whitespace.information_delta))
+      ? whitespace.information_delta
+      : [];
+    if (informationDelta.length) {
+      let gistAudit = null;
+      try {
+        await setStage(taskId, 'stage5c_gist_audit', 78);
+        gistAudit = await runGistAudit(task, informationDelta, articleHtml, ctx);
+        await appendLog(
+          taskId,
+          `🧠 GIST audit: coverage=${gistAudit.gist_coverage_score}% needs_rewrite=${gistAudit.needs_rewrite.length}`,
+          gistAudit.gist_coverage_score >= GIST_COVERAGE_MIN ? 'ok' : 'warn',
+        );
+
+        if (gistAudit.gist_coverage_score < GIST_COVERAGE_MIN) {
+          const gistIssues = buildGistRewriteIssues(gistAudit);
+          if (gistIssues.length) {
+            await setStage(taskId, 'stage3_writer_gist_refine', 79);
+            await appendLog(
+              taskId,
+              `↻ GIST refine: coverage<${GIST_COVERAGE_MIN}, переписываем ${gistIssues.length} секций`,
+              'info',
+            );
+            const refined = await runWriter(
+              task,
+              { audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan },
+              ctx,
+              {
+                callLabel: 'InfoArticle Stage 3 (GIST refine)',
+                priorEeatIssues: gistIssues,
+              },
+            );
+            validationTracker.recordPass('writer_gist_refine', refined.remainingIssues || []);
+            if (refined.html) {
+              articleHtml = refined.html;
+              try {
+                gistAudit = await runGistAudit(task, informationDelta, articleHtml, ctx);
+                await appendLog(
+                  taskId,
+                  `🧠 GIST re-audit: coverage=${gistAudit.gist_coverage_score}%`,
+                  gistAudit.gist_coverage_score >= GIST_COVERAGE_MIN ? 'ok' : 'warn',
+                );
+              } catch (reauditErr) {
+                await appendLog(taskId, `⚠ GIST re-audit не выполнился: ${reauditErr.message}`, 'warn');
+              }
+            }
+          }
+        }
+      } catch (gistAuditErr) {
+        await appendLog(taskId, `⚠ GIST audit пропущен: ${gistAuditErr.message}`, 'warn');
+      }
+      if (gistAudit) {
+        whitespace = {
+          ...whitespace,
+          gist_audit: gistAudit,
+        };
+        await saveColumn(taskId, 'whitespace_analysis', whitespace);
+        await saveColumn(taskId, 'gist_delta_json', {
+          ...(gistDeltaArtifact || {
+            information_delta: informationDelta,
+            top10_claims: whitespace.top10_claims || [],
+            gist_score: whitespace.gist_score ?? null,
+            serp: [],
+          }),
+          coverage_score: gistAudit.gist_coverage_score,
+        });
       }
     }
 
@@ -2444,6 +2600,32 @@ async function processInfoArticleTask(taskId) {
       );
     } catch (gateErr) {
       console.warn(`[infoArticle] quality gate failed: ${gateErr.message}`);
+    }
+
+    // 14e. Stage 8 composite evaluator — fail-open, default ON. Пишет
+    // composite_quality_score в info_article_tasks; отчёт возвращается в логах.
+    try {
+      const evaluator = await runQualityEvaluator({
+        pipeline: 'info',
+        taskId,
+        articleHtml: finalHtml,
+        artifacts: {
+          gist_delta_json: gistDeltaArtifact || (whitespace && whitespace.gist_audit
+            ? { information_delta: whitespace.information_delta || [], coverage_score: whitespace.gist_audit.gist_coverage_score }
+            : null),
+          eeat_score: eeatAudit && eeatAudit.total_score,
+          eeat_report: eeatAudit,
+          lsi_coverage: lsiCov,
+          quality_gate: qualityGateVerdict,
+        },
+        task,
+        log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+      });
+      if (evaluator && evaluator.composite_quality_score != null) {
+        await appendLog(taskId, `📊 Stage 8 composite quality: ${evaluator.composite_quality_score}/100`, 'info');
+      }
+    } catch (stage8Err) {
+      await appendLog(taskId, `⚠ Stage 8 evaluator не выполнился: ${stage8Err.message} — продолжаем`, 'warn');
     }
 
     await db.query(

@@ -34,6 +34,7 @@ const PROMPTS = {
   stage4Images: readPromptFile('stage4_image_prompts.txt'),
   stage5Eeat:   readPromptFile('stage5_eeat_audit.txt'),
   stage5bLink:  readPromptFile('stage5b_link_audit.txt'),
+  stage5cGist:  readPromptFile('stage5c_gist_audit.txt'),
 };
 
 function loadInfoArticlePrompt(name) {

@@ -6,6 +6,7 @@ const { fillPromptVars }     = require('../../utils/fillPromptVars');
 const db                     = require('../../config/db');
 const { serializeForPrompt, getEntityClusters } = require('../../utils/knowledgeGraph');
 const { getStructureLimits } = require('../../utils/objectiveMetrics');
+const { normalizeTz, hasTz } = require('./tzParser');
 
 /**
  * DeepSeek-адаптер бросает 'Input text too long' при userPrompt.length > 100000
@@ -140,6 +141,51 @@ function routeLSIToBlocksFallback(taxonomy, allLSITerms, allNgramTerms) {
   });
 
   return blocks;
+}
+
+function formatTzHardConstraints(task) {
+  if (!hasTz(task)) return '';
+  const tz = normalizeTz(task.tz_json);
+  const line = (value, empty = 'нет') => {
+    if (Array.isArray(value)) return value.length ? value.join('; ') : empty;
+    return value !== null && value !== undefined && value !== '' ? String(value) : empty;
+  };
+
+  return `\n\nОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ ИЗ ТЗ (не нарушать):
+— H1: ${line(tz.h1_required)} — использовать дословно или минимально адаптировать.
+— Обязательные H2 разделы: ${line(tz.h2_required)} — каждый должен быть в структуре.
+— Минимальный объём: ${line(tz.min_words)} слов.
+— Обязательные LSI-ключи: ${line(tz.lsi_required)}.
+— Запрещённые слова/фразы: ${line(tz.lsi_forbidden)}.`;
+}
+
+function _normHeader(s) {
+  return String(s || '').toLowerCase().replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function ensureTzRequiredH2(taxonomy, task) {
+  if (!hasTz(task)) return taxonomy;
+  const tz = normalizeTz(task.tz_json);
+  if (!tz.h2_required.length) return taxonomy;
+
+  const out = Array.isArray(taxonomy) ? [...taxonomy] : [];
+  for (const requiredH2 of tz.h2_required) {
+    const requiredNorm = _normHeader(requiredH2);
+    const exists = out.some((block) => {
+      const h2Norm = _normHeader(block && block.h2);
+      return h2Norm && (h2Norm.includes(requiredNorm) || requiredNorm.includes(h2Norm));
+    });
+    if (!exists) {
+      out.push({
+        h2: requiredH2,
+        type: 'tz_required',
+        primary_intent: 'tz_requirement',
+        lsi_must: [...tz.lsi_required],
+        ngrams_must: [],
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -278,6 +324,8 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
       prompt += `\n\n${gistDeltaBrief}`;
     }
 
+    prompt += formatTzHardConstraints(task);
+
     // Inject structure limits into taxonomy prompt
     const totalChars = parseInt(task.input_max_chars) || 3500;
     const structureLimitsLocal = getStructureLimits(totalChars);
@@ -384,9 +432,11 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
     throw new Error('Stage 2: не удалось получить структуру страницы (taxonomy)');
   }
 
+  extractedTaxonomy = ensureTzRequiredH2(extractedTaxonomy, task);
+
   // Trim taxonomy to maxSections if needed (priority: faq > offer > trust > process > pricing > objection > fit > generic)
   if (extractedTaxonomy.length > structureLimits.maxSections) {
-    const typePriority = { faq: 0, offer: 1, trust: 2, process: 3, pricing: 4, objection: 5, fit: 6, generic: 7 };
+    const typePriority = { tz_required: 0, faq: 1, offer: 2, trust: 3, process: 4, pricing: 5, objection: 6, fit: 7, generic: 8 };
     const sorted = extractedTaxonomy
       .map((b, idx) => ({ ...b, _origIdx: idx }))
       .sort((a, b) => (typePriority[a.type] ?? 99) - (typePriority[b.type] ?? 99));
@@ -398,7 +448,8 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
   }
 
   // ── Stage 2.5: Semantic LSI + N-gram routing через Gemini ─────────
-  const allLSITerms   = rawLSI.split('\n').map(s => s.trim()).filter(Boolean);
+  const tzLSIRequired = hasTz(task) ? normalizeTz(task.tz_json).lsi_required : [];
+  const allLSITerms   = Array.from(new Set([...rawLSI.split('\n').map(s => s.trim()).filter(Boolean), ...tzLSIRequired]));
   const allNgramTerms = (task.input_ngrams || '').split(',').map(s => s.trim()).filter(Boolean);
 
   log(`Stage 2.5: Семантический роутинг ${allLSITerms.length} LSI + ${allNgramTerms.length} n-грамм через DeepSeek...`, 'info');

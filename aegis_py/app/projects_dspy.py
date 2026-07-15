@@ -57,7 +57,7 @@ _SIGNATURES: Dict[str, Dict[str, Any]] = {
     "BlogTopicSuggest": {
         "instructions": (
             "Выдавай НЕ МЕНЕЕ 5 тем статей для блога. Каждая = {тема, H1, title "
-            "(50–60 симв), description (140–155 симв), интент целевого URL, "
+            "(70–80 симв), description (180–190 симв), интент целевого URL, "
             "опорные запросы из GSC}. Бери темы из инфо-запросов в striking "
             "distance и непокрытых инфо-запросов. Title/description — под CTR, "
             "без переспама."
@@ -158,7 +158,7 @@ _SIGNATURES: Dict[str, Dict[str, Any]] = {
     },
     "MetaUplift": {
         "instructions": (
-            "Усиль title (50–60 симв) и description (140–155 симв): главный ключ "
+            "Усиль title (70–80 симв) и description (180–190 симв): главный ключ "
             "в первых словах title, выгода/срок/цена, бренд в середине/конце, "
             "CTA в конце description, без переспама и обрыва на полуслове. Покажи "
             "diff «было → стало» с обоснованием."

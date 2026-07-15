@@ -250,6 +250,37 @@ function sectionStructure(structure) {
   return lines.join('\n');
 }
 
+function sectionCompetitiveFailures(competitiveBrief) {
+  const items = asArray(competitiveBrief && competitiveBrief.competitive_failures);
+  if (!items.length) return '';
+  return [
+    '§10. КОНКУРЕНТНЫЕ ПРОВАЛЫ',
+    '  Что конкуренты раскрывают слабо; writer обязан использовать это как анти-шаблон:',
+    bullet(items, 7),
+  ].join('\n');
+}
+
+function sectionPurchaseArguments(competitiveBrief) {
+  const items = asArray(competitiveBrief && competitiveBrief.purchase_arguments);
+  if (!items.length) return '';
+  return [
+    '§11. АРГУМЕНТЫ ПОКУПКИ / ПЕРЕХОДА ПО АНКОРНОЙ ССЫЛКЕ',
+    '  5–7 аргументов, влияющих на решение читателя; все должны быть отражены в статье явно или косвенно:',
+    bullet(items, 7),
+  ].join('\n');
+}
+
+function sectionGistDelta(gistDelta) {
+  const delta = asArray(gistDelta && gistDelta.information_delta);
+  if (!delta.length) return '';
+  return [
+    '§12 GIST Delta — Информационная дельта',
+    '  Тезисы, которые нужно раскрыть как экспертное отличие от выдачи:',
+    bullet(delta, 10),
+    '  Инструкция writer: минимум 1 секция с тегом [GIST_EXPERT_BLOCK] на основе §12.',
+  ].join('\n');
+}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 /**
@@ -264,9 +295,20 @@ function sectionStructure(structure) {
  * @param {object} [args.whitespace] — Stage 1B
  * @param {object} [args.structure]  — Stage 2 (опционально, может быть пустым,
  *                                     если вызов делается до Stage 2)
+ * @param {object} [args.competitiveBrief] — §10/§11 DeepSeek-выжимка
+ * @param {object} [args.gistDelta] — §12 GIST information_delta
  * @returns {string}
  */
-function buildLinkArticleKnowledgeBase({ task, strategy, audience, intents, whitespace, structure } = {}) {
+function buildLinkArticleKnowledgeBase({
+  task,
+  strategy,
+  audience,
+  intents,
+  whitespace,
+  structure,
+  competitiveBrief,
+  gistDelta,
+} = {}) {
   if (!task) return '';
   const header = [
     'LINK-ARTICLE KNOWLEDGE BASE (LAKB).',
@@ -275,7 +317,7 @@ function buildLinkArticleKnowledgeBase({ task, strategy, audience, intents, whit
     'Он строится один раз после стадий DeepSeek-анализа и используется как',
     'systemInstruction для Gemini (через cachedContents API, если включён',
     'LINK_ARTICLE_GEMINI_CACHE_ENABLED). При написании секций Gemini обязан',
-    'опираться на ВСЕ §1..§6 ниже как на «фон» статьи и не выходить за их',
+    'опираться на ВСЕ разделы ниже как на «фон» статьи и не выходить за их',
     'рамки. ЗАПРЕЩЕНО выдумывать факты, бренды, статистику, цитаты.',
     '',
   ].join('\n');
@@ -287,6 +329,9 @@ function buildLinkArticleKnowledgeBase({ task, strategy, audience, intents, whit
     sectionIntents(intents),
     sectionWhitespace(whitespace),
     sectionStructure(structure),
+    sectionCompetitiveFailures(competitiveBrief),
+    sectionPurchaseArguments(competitiveBrief),
+    sectionGistDelta(gistDelta),
   ].filter(Boolean);
 
   let text = header + parts.join('\n\n');

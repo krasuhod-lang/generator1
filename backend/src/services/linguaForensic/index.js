@@ -70,13 +70,18 @@ const STRATEGY_INTENSITY = { light: 'Light', medium: 'Medium', deep: 'Deep', ful
  * pickRewriteStrategy — градуированный выбор стратегии по роботности r (%):
  * light (r≤35), medium (35<r≤55), deep (55<r≤75), full (r>75).
  */
-function pickRewriteStrategy(robotness) {
+function pickRewriteStrategy(robotness, thresholds = STRATEGY_THRESHOLDS, maxStrategy = 'full') {
   const r = Number(robotness) || 0;
-  const [t1, t2, t3] = STRATEGY_THRESHOLDS;
-  if (r <= t1) return 'light';
-  if (r <= t2) return 'medium';
-  if (r <= t3) return 'deep';
-  return 'full';
+  const [t1, t2, t3] = Array.isArray(thresholds) && thresholds.length === 3
+    ? thresholds : STRATEGY_THRESHOLDS;
+  let strategy = 'full';
+  if (r <= t1) strategy = 'light';
+  else if (r <= t2) strategy = 'medium';
+  else if (r <= t3) strategy = 'deep';
+  const order = ['light', 'medium', 'deep', 'full'];
+  const maxIdx = order.includes(maxStrategy) ? order.indexOf(maxStrategy) : order.length - 1;
+  const strategyIdx = order.indexOf(strategy);
+  return order[Math.min(strategyIdx, maxIdx)];
 }
 
 // Домены skill-файла для трёх генераторов контента
@@ -134,20 +139,21 @@ function buildDetectPrompt(articleText, domainHint) {
   ].join('\n');
 }
 
-function buildRewritePrompt(articleHtml, report, domainHint) {
+function buildRewritePrompt(articleHtml, report, domainHint, opts = {}) {
   const markers = (report.structural_markers_found || []).map((m) => `- ${m}`).join('\n') || '-';
   const fluency = (report.fluency_issues || []).map((m) => `- ${m}`).join('\n') || '-';
   const topCats = (report.top_contributing_categories || [])
     .map((c) => `- ${c.category}: +${c.contribution_pct}%`).join('\n') || '-';
   // Градуированная интенсивность по текущей роботности (light/medium/deep/full)
-  const gradStrategy  = pickRewriteStrategy(report.robotness_score);
+  const gradStrategy  = report.__lfStrategyOverride ||
+    pickRewriteStrategy(report.robotness_score, opts.thresholds, opts.maxStrategy);
   const gradIntensity = STRATEGY_INTENSITY[gradStrategy];
   return [
     'Режим 3. Стратегический рерайт.',
     `Доменная подсказка: ${domainHint}.`,
     `Текущая роботность: ${report.robotness_score}%.`,
     `Стратегия: ${report.recommended_strategy || 'по домену'}; интенсивность: ${gradIntensity} ` +
-      `(градуированная стратегия «${gradStrategy}» по роботности; пороги ${STRATEGY_THRESHOLDS.join('/')}%).`,
+      `(градуированная стратегия «${gradStrategy}» по роботности; пороги ${(opts.thresholds || STRATEGY_THRESHOLDS).join('/')}%).`,
     '',
     'Вклад TOP-категорий:',
     topCats,
@@ -244,14 +250,18 @@ async function detect(articleHtml, { pipeline = 'seo', taskId = null, log = null
  * Возвращает { html, accepted, changes } — при нарушении объёма/разметки
  * рерайт отклоняется и остаётся оригинал.
  */
-async function rewrite(articleHtml, report, { pipeline = 'seo', taskId = null, log = null, onTokens = null } = {}) {
+async function rewrite(
+  articleHtml,
+  report,
+  { pipeline = 'seo', taskId = null, log = null, onTokens = null, thresholds, maxStrategy = 'full' } = {},
+) {
   const skill = loadSkill();
   if (!skill) throw new Error(`Skill-файл LinguaForensic не найден: ${SKILL_PATH}`);
   const domainHint = PIPELINE_DOMAINS[pipeline] || PIPELINE_DOMAINS.seo;
   const raw = await callLLM(
     'gemini',
     skill,
-    buildRewritePrompt(articleHtml, report, domainHint),
+    buildRewritePrompt(articleHtml, report, domainHint, { thresholds, maxStrategy }),
     {
       retries: 2, taskId, stageName: 'linguaforensic',
       callLabel: 'LinguaForensic Rewrite (Режим 3)',
@@ -278,7 +288,8 @@ async function rewrite(articleHtml, report, { pipeline = 'seo', taskId = null, l
  *
  * @param {string} articleHtml — финальный HTML статьи
  * @param {object} opts — { pipeline: 'seo'|'info'|'link', taskId, log, onTokens,
- *                          maxRobotness, maxPasses }
+ *                          maxRobotness, maxPasses, thresholds, maxStrategy,
+ *                          strategySequence }
  * @returns {Promise<{html: string, report: object}>}
  *   report: { verdict: 'ok'|'rewritten'|'skipped'|'error',
  *             robotness_before, robotness_after, detection, passes, changes }
@@ -291,6 +302,9 @@ async function runLinguaForensicPass(articleHtml, opts = {}) {
     onTokens = null,
     maxRobotness = MAX_ROBOTNESS,
     maxPasses = MAX_PASSES,
+    thresholds = STRATEGY_THRESHOLDS,
+    maxStrategy = 'full',
+    strategySequence = null,
   } = opts;
   const logFn = typeof log === 'function' ? log : () => {};
 
@@ -328,14 +342,20 @@ async function runLinguaForensicPass(articleHtml, opts = {}) {
     let passes = 0;
     const allChanges = [];
     for (let i = 0; i < maxPasses; i++) {
+      const strategyOverride = Array.isArray(strategySequence) ? strategySequence[i] : null;
+      const rewriteReport = strategyOverride
+        ? { ...detection, __lfStrategyOverride: strategyOverride }
+        : detection;
       logFn(
         `LinguaForensic: роботность ${detection.robotness_score}% > порога ${maxRobotness}% — ` +
-        `рерайт (стратегия: ${pickRewriteStrategy(detection.robotness_score)}` +
+        `рерайт (стратегия: ${strategyOverride || pickRewriteStrategy(detection.robotness_score, thresholds, maxStrategy)}` +
         `${detection.recommended_strategy ? ` / ${detection.recommended_strategy}` : ''}, ` +
         `проход ${i + 1}/${maxPasses})`,
         'info',
       );
-      const res = await rewrite(html, detection, { pipeline, taskId, log, onTokens });
+      const res = await rewrite(html, rewriteReport, {
+        pipeline, taskId, log, onTokens, thresholds, maxStrategy,
+      });
       allChanges.push(res.changes);
       if (!res.accepted) {
         logFn('LinguaForensic: рерайт отклонён (объём ±15% или пустой ответ) — оставляем текущую версию', 'warn');

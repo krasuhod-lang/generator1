@@ -19,9 +19,10 @@
  */
 
 const { fetchYandexSerp } = require('./xmlstockClient');
-const { extractSemantics, checkLsiUsage } = require('./semantics');
+const { extractSemantics, checkLsiUsage, checkKeywordPosition } = require('./semantics');
 const { generateDrMaxMeta } = require('./metaGenerator');
 const { analyzeSerpCtr } = require('./serpCtrAnalyzer');
+const { analyzeSnippets } = require('./snippetAnalyzer');
 const {
   analyzeAudienceAndNiche,
   serializeAnalysisForPrompt,
@@ -56,13 +57,14 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
   //      «фактчекинг конкурентов»: длины, CTA/USP/гео/год, формулы, штампы.
   //      Передаём в генератор как inputs.ctrAnalysis для усиления промпта.
   const ctrAnalysis = analyzeSerpCtr(serp, { keyword, semantics: merged });
+  const snippetAnalysis = analyzeSnippets(serp);
 
   // 3) Gemini/Grok → Title + Description + H1.
   const metas = await generateDrMaxMeta({
     keyword,
     semantics: merged,
     serpData: serp,
-    inputs: { ...inputs, ctrAnalysis },
+    inputs: { ...inputs, ctrAnalysis, snippetAnalysis },
   });
 
   // 4) LSI-верификация по объединённому тексту Title + Description + H1.
@@ -76,6 +78,7 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
   // Двухуровневый LSI (ТЗ §2.3): отдельно проверяем «обязательные» и «дифференциаторы».
   const obligatoryCheck     = checkLsiUsage(combinedMetaText, merged.obligatory_lsi     || []);
   const differentiatorCheck = checkLsiUsage(combinedMetaText, merged.differentiator_lsi || []);
+  const keywordPositionCheck = checkKeywordPosition(metas.title || '', keyword);
 
   metas.lsi_check = {
     title: lsiTitleCheck,
@@ -85,6 +88,8 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
     obligatory_missed:      obligatoryCheck.missed_lsi,
     differentiators_used:   differentiatorCheck.used_lsi,
     differentiators_missed: differentiatorCheck.missed_lsi,
+    keyword_position_ok:    keywordPositionCheck.ok,
+    keyword_position:       keywordPositionCheck.position,
   };
   metas.ctr_analysis_used = {
     matched_obligatory_lsi:  obligatoryCheck.used_lsi,
@@ -108,7 +113,7 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
     );
   }
 
-  return { serp, semantics: merged, ctrAnalysis, metas };
+  return { serp, semantics: merged, ctrAnalysis, snippetAnalysis, metas };
 }
 
 /**

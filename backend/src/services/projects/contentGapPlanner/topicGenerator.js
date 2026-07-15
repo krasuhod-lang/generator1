@@ -19,8 +19,8 @@
 const { getProjectsConfig } = require('../config');
 const { classifyQuery } = require('../commercialIntent');
 
-const TITLE_MIN = 50; const TITLE_MAX = 60;
-const DESC_MIN = 140; const DESC_MAX = 155;
+const TITLE_MIN = 70; const TITLE_MAX = 80;
+const DESC_MIN = 180; const DESC_MAX = 190;
 
 function _cap(s) { s = String(s || '').trim(); return s ? s[0].toUpperCase() + s.slice(1) : s; }
 function _clamp(s, max) { s = String(s || '').trim(); return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s; }
@@ -69,13 +69,13 @@ function buildTopicFromGap(gap, project, brandTokens = []) {
   const h1 = _cap(q);
   const brand = (project && project.name) ? ` | ${project.name}` : '';
   let title = `${_cap(q)}: гид и инструкция`;
-  title = _pad(title, TITLE_MIN, ['пошагово', 'с примерами', 'кратко']);
+  title = _pad(title, TITLE_MIN, ['пошагово', 'с примерами', 'кратко', 'советы экспертов', 'для начинающих', 'обзор']);
   // Бренд добавляем только если целиком помещается в лимит (без обрезки слова).
   if (brand && (title.length + brand.length) <= TITLE_MAX) title += brand;
   title = _clamp(title, TITLE_MAX);
 
   let description = `Разбираем «${q}»: что важно знать, как выбрать и не ошибиться. Практические советы, ответы на частые вопросы и рекомендации экспертов.`;
-  description = _pad(description, DESC_MIN, ['Читайте подробный разбор.']);
+  description = _pad(description, DESC_MIN, ['Читайте подробный разбор.', 'Только проверенные факты.', 'Примеры из практики.']);
   description = _clamp(description, DESC_MAX);
 
   // Подтверждающие запросы со статистикой (факт-обоснование темы).
@@ -172,7 +172,7 @@ async function _llmRefine({ base, project, llmFn, promptSuffix }) {
     '— Поле supporting_queries должно содержать ИМЕННО исходный запрос темы (дословно), без новых запросов.',
     '— Если данных мало — переформулируй заголовок/описание, но не добавляй вымышленных деталей.',
     `Перепиши ${base.length} тем статей привлекательнее. Для каждой верни JSON-объект:`,
-    '{topic, h1, title (50-60 симв), description (140-155 симв), supporting_queries[]}.',
+    '{topic, h1, title (70-80 симв), description (180-190 симв), supporting_queries[]}.',
     'Верни ТОЛЬКО JSON-массив той же длины и в том же порядке.',
     promptSuffix || '',
     'Темы (по фактам GSC):',
@@ -199,8 +199,8 @@ async function _llmRefine({ base, project, llmFn, promptSuffix }) {
       ...baseTopic, // факты (intent, evidence, supporting_queries, impressions) — из базы
       topic: p.topic || baseTopic.topic,
       h1: p.h1 || baseTopic.h1,
-      title: _clamp(_pad(String(p.title || baseTopic.title), TITLE_MIN, ['гид', 'инструкция']), TITLE_MAX),
-      description: _clamp(_pad(String(p.description || baseTopic.description), DESC_MIN, ['Подробный разбор и советы.']), DESC_MAX),
+      title: _clamp(_pad(String(p.title || baseTopic.title), TITLE_MIN, ['гид', 'инструкция', 'советы экспертов', 'для начинающих']), TITLE_MAX),
+      description: _clamp(_pad(String(p.description || baseTopic.description), DESC_MIN, ['Подробный разбор и советы.', 'Только проверенные факты.', 'Примеры из практики.']), DESC_MAX),
     });
   });
   return out.length ? out : null;

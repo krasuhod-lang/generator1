@@ -5,6 +5,8 @@ const { SYSTEM_PROMPTS } = require('../../prompts/systemPrompts');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
 const { calculateBM25 }  = require('../metrics/bm25');
 const db                 = require('../../config/db');
+const { hasTz }          = require('./tzParser');
+const { checkTzCompliance } = require('./tzComplianceChecker');
 
 /**
  * computeTfIdfDensity — программный подсчёт TF-IDF плотности по финальному HTML.
@@ -113,6 +115,8 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   const tfIdfDensity = computeTfIdfDensity(fullHTML, tfIdfArr);
   const tfIdfOveruse  = tfIdfDensity.filter(t => t.status === 'overuse').length;
   const tfIdfUnderuse = tfIdfDensity.filter(t => t.status === 'underuse').length;
+  const tzMinScore = Number(process.env.TZ_COMPLIANCE_MIN || 80);
+  let tzCompliance = null;
 
   log(
     `Stage 7: E-E-A-T score=${globalEEATScore}, LSI coverage=${globalLSICoverage}%, ` +
@@ -121,12 +125,38 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     'success'
   );
 
+  if (hasTz(task)) {
+    try {
+      tzCompliance = checkTzCompliance({ tz: task.tz_json, fullHtml: fullHTML });
+      tzCompliance.threshold = Number.isFinite(tzMinScore) ? tzMinScore : 80;
+      tzCompliance.tz_compliance_failed = tzCompliance.tz_compliance_score < tzCompliance.threshold;
+      if (tzCompliance.tz_compliance_failed) {
+        log(
+          `TZ compliance: score=${tzCompliance.tz_compliance_score} < ${tzCompliance.threshold}; ` +
+          `needs_rewrite=${(tzCompliance.needs_rewrite || []).join(', ') || 'unknown'}`,
+          'warn'
+        );
+      } else {
+        log(`TZ compliance: score=${tzCompliance.tz_compliance_score}`, 'success');
+      }
+    } catch (e) {
+      log(`TZ compliance: ошибка проверки (${e.message}) — продолжаем без блокировки`, 'warn');
+      tzCompliance = { error: e.message, tz_compliance_failed: false, fail_open: true };
+    }
+  }
+
   // Обогащаем s7Result программными данными (более точные чем LLM-оценка)
   const enrichedResult = {
     ...(s7Result || {}),
     computed_tfidf_density: tfIdfDensity,
     computed_lsi_coverage:  { percent: globalLSICoverage, covered: finalCov.covered, missing: finalCov.missing },
     computed_bm25:          bm25,
+    ...(tzCompliance ? {
+      tz_compliance:        tzCompliance,
+      tz_compliance_score:  tzCompliance.tz_compliance_score ?? null,
+      tz_compliance_failed: !!tzCompliance.tz_compliance_failed,
+      needs_rewrite:        tzCompliance.needs_rewrite || [],
+    } : {}),
   };
 
   // Сохраняем финальные метрики в task_metrics
@@ -148,14 +178,26 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   );
 
   // Обновляем tasks: сохраняем финальный HTML и отчёт Stage 7 (с программными данными)
-  await db.query(
-    `UPDATE tasks SET
-       stage7_result = $1,
-       full_html     = $2,
-       updated_at    = NOW()
-     WHERE id = $3`,
-    [JSON.stringify(enrichedResult), fullHTML, taskId]
-  );
+  if (tzCompliance) {
+    await db.query(
+      `UPDATE tasks SET
+         stage7_result  = $1,
+         full_html      = $2,
+         tz_compliance  = $3,
+         updated_at     = NOW()
+       WHERE id = $4`,
+      [JSON.stringify(enrichedResult), fullHTML, JSON.stringify(tzCompliance), taskId]
+    );
+  } else {
+    await db.query(
+      `UPDATE tasks SET
+         stage7_result = $1,
+         full_html     = $2,
+         updated_at    = NOW()
+       WHERE id = $3`,
+      [JSON.stringify(enrichedResult), fullHTML, taskId]
+    );
+  }
 
   log('<strong>Генерация и аудит полностью завершены!</strong>', 'success');
   progress(98, 'stage7');
@@ -168,6 +210,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     bm25,
     tfIdfDensity,
     eeatBreakdown:     eeatBreakdown || null,
+    tzCompliance,
   };
 }
 

@@ -15,8 +15,8 @@
  *      conflict пары + pair-level replaceability).
  *
  * Кириллические safe ranges (§4 ТЗ):
- *   Title 40–50 симв. (GIST-фактор в первых 35),
- *   Description desktop 130–145 симв. (GIST-фактор в первых 90),
+ *   Title 70–80 симв. (GIST-фактор в первых 35),
+ *   Description desktop 180–190 симв. (GIST-фактор в первых 90),
  *   Description mobile 90–105 симв.
  */
 
@@ -46,6 +46,8 @@ const ANTI_PATTERNS = `ЖЁСТКО ЗАПРЕЩЕНО (антипаттерны
 - бренд как differentiator в description, если бренд уже есть в title;
 - логика «любое число = хорошо»: число обязано быть decision-relevant;
 - копирование CTA-паттерна у конкурентов;
+- повтор фраз из входного блока [COMPETITOR_NOISE] — это шум ТОПа, а не
+  дифференциатор;
 - повтор одного и того же факта между title и description (кроме явного
   standalone exception);
 - fallback в общие слова без прохождения forced-choice sequence.`;
@@ -87,6 +89,8 @@ Step 8.4 — Map what competitors already say. По переданным title/d
 - часто используемые слова-пустышки.
 Любой кандидат, совпадающий с общим шаблоном конкурентов, помечается
 disqualified_by_template: true (первый pass Replaceability).
+Если передан [COMPETITOR_NOISE], кандидаты НЕ должны повторять эти фразы как
+уникальный факт или differentiator.
 
 ${GIST_TESTS}
 
@@ -191,7 +195,7 @@ GIST-фактора (winner fact).
 
 Step 8.7 — Title вокруг одного strongest fact:
 - В title идёт РОВНО ОДИН strongest fact, максимально близко к началу строки.
-- Кириллический safe range: 40–50 символов (включая пробелы).
+- Кириллический safe range: 70–80 символов (включая пробелы).
 - GIST-фактор обязан быть размещён ДО 35-го символа (не теряется при обрезке).
 - Главный поисковый запрос должен присутствовать в title.
 - Разделители: вертикальная черта (|) или длинное тире (—). Без ёлочек («»).
@@ -201,7 +205,7 @@ lead fact → concrete specification / number → verifiable credibility marker 
 soft CTA.
 - Каждый элемент «зарабатывает место»; CTA добавляется ТОЛЬКО если он снимает
   реальную фрикцию, а не потому что «в дескрипшенах так принято».
-- Кириллический safe range desktop: 130–145 символов; GIST-фактор description —
+- Кириллический safe range desktop: 180–190 символов; GIST-фактор description —
   в первых 90 символах.
 - Дополнительно собери мобильную версию description: 90–105 символов.
 - Description НЕ повторяет GIST-фактор title (у description свой lead fact из

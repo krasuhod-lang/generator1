@@ -42,11 +42,11 @@ ISSUE_DEFS: Dict[str, Dict[str, str]] = {
     "missing_title":         {"severity": "high", "title": "Нет тега Title",
                               "description": "Страница без заголовка. Title — ключевой фактор ранжирования.",
                               "hint": "Добавьте уникальный тег <title> с ключевым запросом страницы.",
-                              "fix": "Добавьте уникальный Title 50-70 символов с ключевым словом в начале."},
+                              "fix": "Добавьте уникальный Title 70–80 символов с ключевым словом в начале."},
     "missing_description":   {"severity": "medium", "title": "Отсутствует description",
                               "description": "Без meta description поисковик сам собирает сниппет — часто неудачный, CTR ниже.",
-                              "hint": "Добавьте meta description 70–160 символов.",
-                              "fix": "Добавьте meta description 70–160 символов."},
+                              "hint": "Добавьте meta description 180–190 символов.",
+                              "fix": "Добавьте meta description 180–190 символов."},
     "missing_h1":            {"severity": "high", "title": "Отсутствует H1",
                               "description": "Нет главного заголовка — поисковику сложнее понять тему страницы.",
                               "hint": "Добавьте один заголовок H1, отражающий содержание страницы.",
@@ -60,17 +60,21 @@ ISSUE_DEFS: Dict[str, Dict[str, str]] = {
                               "hint": "Description совпадает с другими страницами. Сделайте уникальным.",
                               "fix": "Сделайте description каждой страницы уникальным."},
     "title_too_long":        {"severity": "medium", "title": "Title слишком длинный",
-                              "description": "Более 70 символов — обрежется в выдаче, ключевые слова в хвосте не видны.",
-                              "hint": "Более 70 символов — обрежется в выдаче. Сократите.",
-                              "fix": "Сократите Title до 50–70 символов."},
+                              "description": "Более 80 символов — обрежется в выдаче, ключевые слова в хвосте не видны.",
+                              "hint": "Более 80 символов — обрежется в выдаче. Сократите.",
+                              "fix": "Сократите Title до 70–80 символов."},
     "title_too_short":       {"severity": "low", "title": "Title слишком короткий",
-                              "description": "Менее 30 символов — не использует потенциал сниппета.",
-                              "hint": "Менее 30 символов — не использует потенциал сниппета.",
-                              "fix": "Расширьте Title до 50–70 символов с ключевым словом."},
+                              "description": "Менее 70 символов — не использует потенциал сниппета.",
+                              "hint": "Менее 70 символов — не использует потенциал сниппета.",
+                              "fix": "Расширьте Title до 70–80 символов с ключевым словом."},
+    "description_too_short": {"severity": "low", "title": "Description слишком короткий",
+                              "description": "Менее 180 символов — не использует потенциал сниппета.",
+                              "hint": "Менее 180 символов — не использует потенциал сниппета.",
+                              "fix": "Расширьте description до 180–190 символов."},
     "description_too_long":  {"severity": "medium", "title": "Description слишком длинный",
-                              "description": "Более 160 символов — обрежется в выдаче.",
-                              "hint": "Более 160 символов — обрежется в выдаче. Сократите.",
-                              "fix": "Сократите description до 70–160 символов."},
+                              "description": "Более 190 символов — обрежется в выдаче.",
+                              "hint": "Более 190 символов — обрежется в выдаче. Сократите.",
+                              "fix": "Сократите description до 180–190 символов."},
     "multiple_h1":           {"severity": "high", "title": "Несколько H1",
                               "description": "На странице больше одного H1 — размывается главная тема страницы.",
                               "hint": "На странице больше одного H1. Оставьте один.",
@@ -121,9 +125,10 @@ ISSUE_DEFS: Dict[str, Dict[str, str]] = {
                               "fix": "Проверьте доступность сервера, таймауты и блокировки ботов."},
 }
 
-TITLE_MAX_CHARS = 70
-TITLE_MIN_CHARS = 30
-DESCRIPTION_MAX_CHARS = 160
+TITLE_MAX_CHARS = 80
+TITLE_MIN_CHARS = 70
+DESCRIPTION_MAX_CHARS = 190
+DESCRIPTION_MIN_CHARS = 180
 LARGE_IMAGE_BYTES = 102400  # 100 KB
 DEEP_PAGE_DEPTH = 4
 LOW_TEXT_RATIO = 0.10
@@ -217,6 +222,8 @@ def page_issues(page: dict) -> List[dict]:
         dlen = (page.get("meta_description") or {}).get("length_chars", len(descr))
         if dlen > DESCRIPTION_MAX_CHARS:
             issues.append(_issue("description_too_long", url, {"length_chars": dlen}))
+        elif dlen < DESCRIPTION_MIN_CHARS:
+            issues.append(_issue("description_too_short", url, {"length_chars": dlen}))
 
     if len(h1) == 0:
         issues.append(_issue("missing_h1", url))
