@@ -3,7 +3,7 @@
 const { callDeepSeek } = require('./deepseek.adapter');
 const { callGemini }   = require('./gemini.adapter');
 const { callGrok }     = require('./grok.adapter');
-const { autoCloseJSON } = require('../../utils/autoCloseJSON');
+const { autoCloseJSON, extractBalancedJson } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
 const { getCachedResponse, setCachedResponse } = require('./responseCache');
@@ -129,6 +129,17 @@ function normalizeKeys(parsed) {
 function parseJSON(text) {
   // Убираем Markdown-обёртку если есть
   let t = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+  // Попытка 0: первый СБАЛАНСИРОВАННЫЙ JSON-объект/массив — игнорируем
+  // любой мусор после закрывающей скобки (второй JSON-блок, пояснения
+  // модели со скобками и т.п.). Именно такой хвост даёт ошибку
+  // «Unexpected non-whitespace character after JSON at position N».
+  const balanced = extractBalancedJson(t);
+  if (balanced) {
+    try {
+      return JSON.parse(balanced);
+    } catch (_) { /* fallback ниже */ }
+  }
 
   // Находим границы JSON-объекта или массива
   const fb  = t.indexOf('{');

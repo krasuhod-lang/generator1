@@ -569,10 +569,94 @@ async function runGistMetaPipeline({
 
 // ─── Мета-теги для ссылочных статей ────────────────────────────────
 
+// Полный трёхфазный пайплайн для ссылочной статьи повторяем при сбое:
+// LINK_META_PIPELINE_ATTEMPTS полных прогонов, затем fallback-сборка пары.
+const LINK_META_PIPELINE_ATTEMPTS = 2;
+
+/**
+ * Fallback-сборка пары title/description для ссылочной статьи, когда полный
+ * трёхфазный пайплайн не отработал (ошибка LLM / парсинга / пустой пул
+ * кандидатов). Использует тот же системный промпт MetaPairAssembler
+ * (Steps 8.7–8.8): модель сама выбирает один сильнейший GIST-факт из текста
+ * статьи и собирает пару по кириллическим safe ranges. Результат помечается
+ * manual_review_required: true.
+ */
+async function _fallbackLinkArticleMeta({
+  topic, anchorText, excerpt, focusNotes, geminiModel, pipelineError,
+}) {
+  const usage = {
+    tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
+    calls: 0, model: '', providers: new Set(),
+  };
+  const notes = [
+    `⚠️ GIST Meta Filter Pipeline не отработал (${pipelineError ? pipelineError.message : 'нет деталей'}) — пара собрана fallback-вызовом MetaPairAssembler (Steps 8.7–8.8).`,
+  ];
+
+  const userPrompt = `[ВХОДНЫЕ ДАННЫЕ]
+- Главный поисковый запрос: ${topic}
+- Бренд: —
+- Регион: —
+- Контекст / УТП страницы: ${focusNotes || 'Нет данных'}${anchorText ? `
+- Статья подводит к переходу по анкору «${anchorText}»` : ''}
+- standalone_exposure: true (ссылочная статья распространяется standalone: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)
+
+[ТЕКСТ ГОТОВОЙ СТАТЬИ — ИСТОЧНИК ФАКТОВ]
+${excerpt || 'Текст статьи недоступен — опирайся на главный запрос и контекст.'}
+
+[WINNER FACT]
+Полный пайплайн отбора кандидатов недоступен. САМ выбери из текста статьи
+РОВНО ОДИН самый сильный конкретный факт (проходящий 4 теста GIST:
+Concreteness, Decision-relevance, Replaceability, Verifiability) и используй
+его как winner fact для title. Для description возьми ДРУГОЙ факт статьи как
+lead fact. Дополнительно добавь в JSON поле "winner_fact" — краткую
+формулировку выбранного факта.
+
+Собери пару по Steps 8.7–8.8 и верни JSON по контракту.`;
+
+  const pair = await _callCopywriterJson(userPrompt, usage, {
+    model: geminiModel || undefined,
+  });
+  _deterministicPairFix(pair, notes);
+
+  return {
+    title: String(pair.title || ''),
+    description: String(pair.description || ''),
+    description_mobile: String(pair.description_mobile || ''),
+    h1: String(pair.h1 || ''),
+    winner_fact: String(pair.winner_fact || '') || null,
+    winner_source: 'fallback_structural',
+    scores: null,
+    conflict_check: { passed: true, detail: null },
+    replaceability_check: { passed: true, detail: null },
+    temporary_gist_factor: false,
+    review_date: null,
+    manual_review_required: true,
+    field_job: null,
+    competitor_pattern: null,
+    candidates: [],
+    fallback_used: 'assembler_direct',
+    standalone_exposure: true,
+    post_validation_notes: notes,
+    _meta: {
+      model: usage.model,
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      thoughtsTokens: usage.thoughtsTokens,
+      cachedTokens: usage.cachedTokens,
+      attempts: usage.calls,
+      provider: usage.providers.size === 1 ? [...usage.providers][0] : 'mixed',
+    },
+  };
+}
+
 /**
  * Генерация пары title/description для готовой ссылочной статьи через тот же
  * GIST Meta Filter Pipeline. SERP не запрашивается (статья публикуется на
  * внешнем доноре) — конкурентный шаблон оценивается моделью по категории.
+ *
+ * Надёжность: полный пайплайн повторяется до LINK_META_PIPELINE_ATTEMPTS раз;
+ * при полном провале пара собирается fallback-вызовом MetaPairAssembler
+ * (_fallbackLinkArticleMeta) — мета-теги для статьи создаются всегда.
  *
  * @param {object} args
  * @param {string} args.topic        — тема статьи (главный запрос)
@@ -586,7 +670,7 @@ async function generateLinkArticleMeta({
   topic, anchorText = '', articlePlain = '', focusNotes = '', geminiModel = '',
 } = {}) {
   const excerpt = String(articlePlain || '').replace(/\s+/g, ' ').trim().slice(0, 6000);
-  return runGistMetaPipeline({
+  const pipelineArgs = {
     keyword: String(topic || '').trim(),
     semantics: {},
     serpData: [],
@@ -603,6 +687,22 @@ async function generateLinkArticleMeta({
       pageAngle: anchorText ? `Статья подводит к переходу по анкору «${anchorText}»` : '',
     },
     options: { copywriterModel: geminiModel || undefined },
+  };
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= LINK_META_PIPELINE_ATTEMPTS; attempt += 1) {
+    try {
+      return await runGistMetaPipeline(pipelineArgs);
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[gistMetaFilter] link meta pipeline attempt ${attempt}/${LINK_META_PIPELINE_ATTEMPTS} failed: ${err.message}`);
+    }
+  }
+
+  // Полный пайплайн не отработал — собираем пару напрямую через
+  // MetaPairAssembler, чтобы мета-теги создавались всегда.
+  return _fallbackLinkArticleMeta({
+    topic, anchorText, excerpt, focusNotes, geminiModel, pipelineError: lastErr,
   });
 }
 

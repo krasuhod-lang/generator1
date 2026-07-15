@@ -23,6 +23,7 @@ const {
   parseMetaJson, extractFirstJsonObject,
   TITLE_MAX, DESC_MIN, DESC_MAX, META_GENERATION_MODEL,
 } = require('../src/services/metaTags/metaGenerator');
+const { extractBalancedJson } = require('../src/utils/autoCloseJSON');
 
 let passed = 0;
 let failed = 0;
@@ -352,6 +353,22 @@ test('extractFirstJsonObject: скобки внутри строк не счит
   assert.strictEqual(extractFirstJsonObject(raw), '{"a":"{нес}балансированные {скобки","b":"x\\"y}"}');
   assert.strictEqual(extractFirstJsonObject('нет объекта'), null);
   assert.strictEqual(extractFirstJsonObject('{"незакрыт":1'), null);
+});
+
+test('extractBalancedJson: мусор после закрывающей } (в т.ч. со скобками) отрезается', () => {
+  const raw = 'Вот JSON:\n{"a":1,"b":"x}y"} а дальше пояснение модели { со скобками }';
+  assert.strictEqual(extractBalancedJson(raw), '{"a":1,"b":"x}y"}');
+  assert.deepStrictEqual(JSON.parse(extractBalancedJson(raw)), { a: 1, b: 'x}y' });
+});
+
+test('extractBalancedJson: поддерживает массивы и берёт первое значение', () => {
+  assert.strictEqual(extractBalancedJson('[1,2,{"a":"]"}] хвост ]'), '[1,2,{"a":"]"}]');
+  assert.strictEqual(extractBalancedJson('текст ["x"] потом {"y":1}'), '["x"]');
+});
+
+test('extractBalancedJson: незакрытое значение / отсутствие JSON → null', () => {
+  assert.strictEqual(extractBalancedJson('{"незакрыт":1'), null);
+  assert.strictEqual(extractBalancedJson('просто текст'), null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
