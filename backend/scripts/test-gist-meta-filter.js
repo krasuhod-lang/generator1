@@ -34,11 +34,11 @@ function test(name, fn) {
   }
 }
 
-test('кириллические safe ranges (§4): Title 40–50, Desc 130–145, mobile 90–105', () => {
-  assert.strictEqual(TITLE_MIN, 40);
-  assert.strictEqual(TITLE_MAX, 50);
-  assert.strictEqual(DESC_MIN, 130);
-  assert.strictEqual(DESC_MAX, 145);
+test('кириллические safe ranges (§4): Title 70–80, Desc 180–190, mobile 90–105', () => {
+  assert.strictEqual(TITLE_MIN, 70);
+  assert.strictEqual(TITLE_MAX, 80);
+  assert.strictEqual(DESC_MIN, 180);
+  assert.strictEqual(DESC_MAX, 190);
   assert.strictEqual(DESC_MOBILE_MIN, 90);
   assert.strictEqual(DESC_MOBILE_MAX, 105);
   assert.strictEqual(TITLE_FACT_WINDOW, 35);
@@ -91,8 +91,8 @@ test('промпты: 4 DSPy-модуля с ключевыми шагами и 
   assert.match(prompts.FILTER_RANKER_SYSTEM, /fallback_supercategory/);
   assert.match(prompts.FILTER_RANKER_SYSTEM, /manual_review_required/);
   assert.match(prompts.FILTER_RANKER_SYSTEM, /intent_specificity/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /40–50/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /130–145/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /70–80/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /180–190/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /35-го символа|ДО 35-го/);
   assert.match(prompts.CONFLICT_CHECKER_SYSTEM, /Step 8\.9/);
   assert.match(prompts.CONFLICT_CHECKER_SYSTEM, /Step 8\.10/);

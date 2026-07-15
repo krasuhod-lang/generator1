@@ -81,8 +81,8 @@ def _page(**kw):
         "crawl_depth": 1,
         "is_https": True,
         "redirect_chain": [],
-        "title": {"text": "Нормальный заголовок страницы про SEO-аудит", "length_chars": 42},
-        "meta_description": {"text": "О" * 100, "length_chars": 100},
+        "title": {"text": "З" * 75, "length_chars": 75},
+        "meta_description": {"text": "О" * 185, "length_chars": 185},
         "h1": [{"text": "H1"}],
         "text_html_ratio": 0.25,
         "mixed_content": [],
@@ -132,7 +132,7 @@ class TestPageIssues(unittest.TestCase):
         self.assertTrue({"missing_title", "missing_description", "missing_h1"} <= c)
 
     def test_title_length_bounds(self):
-        self.assertIn("title_too_long", self.codes(_page(title={"text": "x" * 80, "length_chars": 80})))
+        self.assertIn("title_too_long", self.codes(_page(title={"text": "x" * 90, "length_chars": 90})))
         self.assertIn("title_too_short", self.codes(_page(title={"text": "x" * 10, "length_chars": 10})))
 
     def test_description_too_long(self):

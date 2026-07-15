@@ -11,8 +11,8 @@
  *      conflict (Step 8.9) и pair replaceability (Step 8.10).
  *
  * Кириллические safe ranges (§4 ТЗ):
- *   • Title 40–50 символов (GIST-фактор в первых 35);
- *   • Description desktop 130–145 (GIST-фактор в первых 90), mobile 90–105;
+ *   • Title 70–80 символов (GIST-фактор в первых 35);
+ *   • Description desktop 180–190 (GIST-фактор в первых 90), mobile 90–105;
  *   • H1 — UX-заголовок (≤70 символов), а не копия SEO Title.
  *
  * Легаси-хелперы одновызовной DrMax-версии (SYSTEM_PROMPT, buildUserPrompt,
@@ -26,10 +26,10 @@ const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { analyzeSnippets } = require('./snippetAnalyzer');
 
 // Кириллические safe ranges (§4 ТЗ) — синхронны с gistMetaFilter.
-const TITLE_MIN = 40;
-const TITLE_MAX = 50;
-const DESC_MIN  = 130;
-const DESC_MAX  = 145;
+const TITLE_MIN = 70;
+const TITLE_MAX = 80;
+const DESC_MIN  = 180;
+const DESC_MAX  = 190;
 const H1_MAX    = 70;
 const META_GENERATION_MODEL = 'gemini-3.1-pro-preview';
 

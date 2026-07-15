@@ -213,9 +213,9 @@ test('meta prompt uses verified price, deterministic intent and new limits', () 
     extractPriceData({ summary: 'Бесплатная доставка от 5 000 руб. Гарантия качества.' }),
     null,
   );
-  assert.strictEqual(TITLE_MAX, 50);
-  assert.strictEqual(DESC_MIN, 130);
-  assert.strictEqual(DESC_MAX, 145);
+  assert.strictEqual(TITLE_MAX, 80);
+  assert.strictEqual(DESC_MIN, 180);
+  assert.strictEqual(DESC_MAX, 190);
   assert.strictEqual(META_GENERATION_MODEL, 'gemini-3.1-pro-preview');
 });
 

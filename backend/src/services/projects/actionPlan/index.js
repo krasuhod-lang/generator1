@@ -109,11 +109,11 @@ const REASON_RU = {
 /** Список проблем длины текущих тегов на человеческом языке. */
 const ISSUE_RU = {
   empty_title: 'нет title',
-  title_too_short: 'title короче 50 символов',
-  title_too_long: 'title длиннее 60 символов',
+  title_too_short: 'title короче 70 символов',
+  title_too_long: 'title длиннее 80 символов',
   empty_description: 'нет description',
-  description_too_short: 'description короче 140 символов',
-  description_too_long: 'description длиннее 155 символов',
+  description_too_short: 'description короче 180 символов',
+  description_too_long: 'description длиннее 190 символов',
   empty_h1: 'нет H1',
   h1_too_long: 'H1 длиннее 70 символов',
   h1_duplicates_title: 'H1 дублирует title',

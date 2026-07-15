@@ -21,7 +21,7 @@
  * фильтр/ранкер, валидатор) — DeepSeek (fallback на Gemini при отсутствии
  * ключа/ошибке), копирайтинг (сборка пары) — Gemini.
  *
- * Кириллические safe ranges (§4): Title 40–50, Description desktop 130–145,
+ * Кириллические safe ranges (§4): Title 70–80, Description desktop 180–190,
  * Description mobile 90–105; GIST-фактор — в первых 35 симв. title и первых
  * 90 симв. description.
  */
@@ -38,10 +38,10 @@ const { analyzeSnippets } = require('./snippetAnalyzer');
 const { checkKeywordPosition } = require('./semantics');
 
 // Кириллические safe ranges (§4 ТЗ). Английские лимиты не применимы.
-const TITLE_MIN = 40;
-const TITLE_MAX = 50;
-const DESC_MIN = 130;
-const DESC_MAX = 145;
+const TITLE_MIN = 70;
+const TITLE_MAX = 80;
+const DESC_MIN = 180;
+const DESC_MAX = 190;
 const DESC_MOBILE_MIN = 90;
 const DESC_MOBILE_MAX = 105;
 const H1_MAX = 70;
