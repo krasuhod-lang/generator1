@@ -133,6 +133,8 @@ test('экспорт: runGistMetaPipeline / generateLinkArticleMeta — функ
   assert.strictEqual(typeof runGistMetaPipeline, 'function');
   assert.strictEqual(typeof generateLinkArticleMeta, 'function');
   assert.strictEqual(typeof metaGenerator.generateDrMaxMeta, 'function');
+  const gist = require('../src/services/metaTags/gistMetaFilter');
+  assert.strictEqual(typeof gist.runResilientMetaPipeline, 'function');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

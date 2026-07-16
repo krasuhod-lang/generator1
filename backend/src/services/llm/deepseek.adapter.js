@@ -116,6 +116,10 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
       model:     data.model               || model,
       cacheHitTokens: usage.prompt_cache_hit_tokens || 0,
       reasoningTokens: usage.completion_tokens_details?.reasoning_tokens || 0,
+      // finish_reason = 'length' → ответ обрезан лимитом max_tokens (аналог
+      // Gemini MAX_TOKENS). Пробрасываем наверх, чтобы вызывающая сторона
+      // могла повысить лимит и повторить запрос, а не падать на JSON.parse.
+      finishReason: data.choices?.[0]?.finish_reason || '',
       logprobs: logprobsData,
     };
   } catch (err) {

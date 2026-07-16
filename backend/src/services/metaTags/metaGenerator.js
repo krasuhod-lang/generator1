@@ -504,6 +504,49 @@ function extractFirstJsonObject(text) {
   return null; // объект не закрыт (обрыв по MAX_TOKENS)
 }
 
+/**
+ * recoverTruncatedObject — спасает обрванный по MAX_TOKENS объект, собирая из
+ * него все ПОЛНОСТЬЮ завершённые свойства верхнего уровня.
+ *
+ * Идея (та же, что «сначала блоки, потом компоновка JSON»): свойства идут
+ * последовательно (title → description → …). Даже если хвост обрван на
+ * полу-ключе («…"description_lead_» без значения, что валит autoCloseJSON),
+ * первые завершённые свойства (title, description) целы. Сканируем root-объект,
+ * запоминаем позицию после каждого завершённого свойства верхнего уровня
+ * (запятая на глубине 1) и обрезаем ровно там, закрывая объект «}».
+ *
+ * @param {string} text
+ * @returns {string|null} — валидный (усечённый) JSON-объект или null
+ */
+function recoverTruncatedObject(text) {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+
+  let inString = false;
+  let escapeNext = false;
+  let depth = 0;
+  let lastSafeEnd = -1; // индекс запятой верхнего уровня (граница свойства)
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (inString) {
+      if (char === '\\') escapeNext = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === '{' || char === '[') depth += 1;
+    else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth === 0) return text.substring(start, i + 1); // объект всё же закрыт
+    } else if (char === ',' && depth === 1) {
+      lastSafeEnd = i; // завершилось очередное свойство root-объекта
+    }
+  }
+  if (lastSafeEnd === -1) return null; // ни одного целого свойства не набралось
+  return `${text.substring(start, lastSafeEnd)}}`;
+}
+
 function parseMetaJson(rawText) {
   const raw = String(rawText || '').trim();
   if (!raw) throw new Error('Gemini вернул пустой ответ');
@@ -525,10 +568,18 @@ function parseMetaJson(rawText) {
   try { return JSON.parse(t); } catch (_) { /* fallback */ }
 
   // 4) autoCloseJSON — восстановление обрыва
-  try { return JSON.parse(autoCloseJSON(t)); } catch (e) {
-    const snippet = raw.slice(0, 240).replace(/\s+/g, ' ');
-    throw new Error(`Gemini вернул не-JSON ответ: ${e.message}. Фрагмент: «${snippet}»`);
+  try { return JSON.parse(autoCloseJSON(t)); } catch (_) { /* fallback ниже */ }
+
+  // 5) Спасение обрыва по MAX_TOKENS: собираем все завершённые свойства
+  //    верхнего уровня (title/description целы, даже если хвост обрван
+  //    на полу-ключе — именно этот кейс валит autoCloseJSON).
+  const recovered = recoverTruncatedObject(t);
+  if (recovered) {
+    try { return JSON.parse(recovered); } catch (_) { /* fallback ниже */ }
   }
+
+  const snippet = raw.slice(0, 240).replace(/\s+/g, ' ');
+  throw new Error(`Gemini вернул не-JSON ответ (не удалось восстановить даже частичный JSON — вероятен обрыв по лимиту токенов). Фрагмент: «${snippet}»`);
 }
 
 /**
@@ -542,6 +593,11 @@ function parseMetaJson(rawText) {
  *   3) Pair generation + conflict check (Steps 8.7–8.10) — title вокруг одного
  *      strongest fact, description как compact sequence, semantic conflict и
  *      pair replaceability с ретраями.
+ *
+ * Безотказность: вызов идёт через runResilientMetaPipeline — полный пайплайн
+ * повторяется, а при полном провале (пустой пул кандидатов / битый JSON /
+ * сетевой сбой после ретраев) пара собирается напрямую через MetaPairAssembler
+ * (manual_review_required=true). GIST усиливает качество, но не роняет ключ.
  *
  * Возвращает JSON-контракт §8 (winner_fact, winner_source, scores,
  * conflict_check, replaceability_check, temporary_gist_factor, review_date,
@@ -559,7 +615,7 @@ function parseMetaJson(rawText) {
  * @returns {Promise<object>}
  */
 async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
-  const { runGistMetaPipeline } = require('./gistMetaFilter');
+  const { runResilientMetaPipeline } = require('./gistMetaFilter');
   const importantWords   = ((semantics && semantics.title_mandatory_words) || []).slice(0, 6);
   const recommendedWords = ((semantics && semantics.description_mandatory_words) || []).slice(0, 10);
   const year = detectYear(importantWords, recommendedWords, serpData);
@@ -573,7 +629,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
     } catch (_) { /* fail-open: генерация возможна без анализа сниппетов */ }
   }
 
-  const result = await runGistMetaPipeline({
+  const result = await runResilientMetaPipeline({
     keyword,
     semantics: semantics || {},
     serpData: serpData || [],
@@ -612,6 +668,7 @@ module.exports = {
   findHardViolations,
   parseMetaJson,
   extractFirstJsonObject,
+  recoverTruncatedObject,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX, H1_MAX,
   META_GENERATION_MODEL,
 };

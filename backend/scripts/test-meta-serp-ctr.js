@@ -20,7 +20,7 @@ const {
 } = require('../src/services/metaTags/semantics');
 const {
   extractPriceData, buildUserPrompt, postValidate, findHardViolations,
-  parseMetaJson, extractFirstJsonObject,
+  parseMetaJson, extractFirstJsonObject, recoverTruncatedObject,
   TITLE_MAX, DESC_MIN, DESC_MAX, META_GENERATION_MODEL,
 } = require('../src/services/metaTags/metaGenerator');
 const { extractBalancedJson } = require('../src/utils/autoCloseJSON');
@@ -341,6 +341,25 @@ test('parseMetaJson: обрыв ответа восстанавливается 
   const raw = '{"title":"Тайтл","description":"Обрыв на полпути';
   const parsed = parseMetaJson(raw);
   assert.strictEqual(parsed.title, 'Тайтл');
+});
+
+test('parseMetaJson: обрыв на полу-ключе — спасаем целые title/description', () => {
+  // Реальный кейс из логов: title и description целы, хвост обрван на
+  // незавершённом ключе «description_lead_» (autoCloseJSON давал невалидный
+  // JSON «..."description_lead_"}»). recoverTruncatedObject собирает
+  // завершённые свойства верхнего уровня.
+  const raw = '{ "title": "Как выбрать ипотеку на квартиру: 2 траектории для жильцов", '
+    + '"description": "Пошаговая инструкция: чек-листы для жильца и инвестора.", '
+    + '"description_mobile": "Чек-листы жильцу и инвестору", "description_lead_';
+  const parsed = parseMetaJson(raw);
+  assert.strictEqual(parsed.title, 'Как выбрать ипотеку на квартиру: 2 траектории для жильцов');
+  assert.strictEqual(parsed.description, 'Пошаговая инструкция: чек-листы для жильца и инвестора.');
+  assert.strictEqual(parsed.description_mobile, 'Чек-листы жильцу и инвестору');
+});
+
+test('recoverTruncatedObject: без единого целого свойства → null', () => {
+  assert.strictEqual(recoverTruncatedObject('{ "title": "обрыв прямо в первом'), null);
+  assert.strictEqual(recoverTruncatedObject('нет объекта'), null);
 });
 
 test('parseMetaJson: полный не-JSON кидает осмысленную ошибку', () => {
