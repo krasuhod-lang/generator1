@@ -35,7 +35,7 @@ const {
   CONFLICT_CHECKER_SYSTEM,
 } = require('./gistMetaPrompts');
 const { analyzeSnippets } = require('./snippetAnalyzer');
-const { checkKeywordPosition } = require('./semantics');
+const { checkKeywordPosition, checkLsiUsage } = require('./semantics');
 
 // Кириллические safe ranges (§4 ТЗ). Английские лимиты не применимы.
 const TITLE_MIN = 70;
@@ -209,6 +209,9 @@ function _buildCandidateUserPrompt({
     (semantics.title_mandatory_words || []).length
       ? `- Важные слова ТОПа: ${semantics.title_mandatory_words.slice(0, 6).join(', ')}`
       : '',
+    (semantics.obligatory_lsi || []).length
+      ? `- Обязательные LSI ТОПа (есть у ≥50% конкурентов — обязаны попасть в мета-теги): ${semantics.obligatory_lsi.join(', ')}`
+      : '',
     (semantics.differentiator_lsi || []).length
       ? `- Уникальные LSI (нет ни у одного конкурента — сырьё для кандидатов): ${semantics.differentiator_lsi.join(', ')}`
       : '',
@@ -286,13 +289,22 @@ function _normalizeRankedItem(item) {
 // ─── Фаза 3: Pair generation (Steps 8.7–8.8) ───────────────────────
 
 function _buildAssemblerUserPrompt({
-  keyword, inputs = {}, winner, alternates, phase1, standaloneExposure,
-  feedback, snippetAnalysis = null,
+  keyword, inputs = {}, semantics = {}, winner, alternates, phase1,
+  standaloneExposure, feedback, snippetAnalysis = null,
 }) {
   const alternateFacts = alternates.map((a) => `- ${a.fact} (source: ${a.source})`).join('\n');
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+  const obligatoryLsi = (semantics.obligatory_lsi || []).filter(Boolean);
+  const mandatoryWords = (semantics.title_mandatory_words || []).filter(Boolean).slice(0, 6);
+  const lsiBlock = obligatoryLsi.length || mandatoryWords.length
+    ? `
+
+[ОБЯЗАТЕЛЬНЫЕ LSI ТОПа]${obligatoryLsi.length ? `
+- Обязательные LSI (есть у ≥50% ТОП-выдачи — без них ниже CTR; КАЖДОЕ слово органично включи в title или description, словоформы допустимы): ${obligatoryLsi.join(', ')}` : ''}${mandatoryWords.length ? `
+- Важные слова ТОПа (по возможности используй в title): ${mandatoryWords.join(', ')}` : ''}`
+    : '';
   return `[ВХОДНЫЕ ДАННЫЕ]
-- Главный поисковый запрос: ${keyword}
+- Главный поисковый запрос (title обязан НАЧИНАТЬСЯ с него, старт в первых 35 символах): ${keyword}
 - Бренд: ${inputs.brand || '—'}
 - Регион: ${inputs.toponym || '—'}
 - Контекст / УТП страницы: ${inputs.summary || inputs.page_context || 'Нет данных'}
@@ -303,7 +315,7 @@ function _buildAssemblerUserPrompt({
 ${JSON.stringify(winner, null, 2)}
 
 [ЗАПАСНЫЕ КАНДИДАТЫ — lead fact для DESCRIPTION]
-${alternateFacts || '— (запасных нет: используй новую смысловую ось того же факта — спецификацию/число/proof, не перефразирование)'}
+${alternateFacts || '— (запасных нет: используй новую смысловую ось того же факта — спецификацию/число/proof, не перефразирование)'}${lsiBlock}
 ${competitorNoiseBlock}
 ${feedback ? `
 [ФИДБЕК ПРЕДЫДУЩЕЙ ПОПЫТКИ — ОБЯЗАТЕЛЬНО ИСПРАВИТЬ]
@@ -317,7 +329,12 @@ function _deterministicPairFix(pair, notes) {
     notes.push(`Title обрезан до ${pair.title.length} симв. (кириллический лимит ${TITLE_MAX}).`);
   }
   if (typeof pair.description === 'string' && pair.description.length > DESC_MAX) {
-    pair.description = trimToLastSentence(pair.description, DESC_MAX);
+    // Сначала пытаемся обрезать до предложения; если результат выпал ниже
+    // safe range (например 179 < 180) — обрезаем до слова, оставаясь в range.
+    const bySentence = trimToLastSentence(pair.description, DESC_MAX);
+    pair.description = bySentence.length >= DESC_MIN
+      ? bySentence
+      : trimToLastWord(pair.description, DESC_MAX);
     notes.push(`Description обрезан до ${pair.description.length} симв. (лимит ${DESC_MAX}).`);
   }
   if (typeof pair.description_mobile === 'string' && pair.description_mobile.length > DESC_MOBILE_MAX) {
@@ -348,13 +365,23 @@ function _deterministicPairIssues(pair) {
   return issues;
 }
 
-function _deterministicPairSoftIssues(pair, keyword) {
+function _deterministicPairSoftIssues(pair, keyword, semantics = {}) {
   const issues = [];
   const keywordPos = checkKeywordPosition(String(pair.title || ''), keyword);
   if (!keywordPos.ok) {
     issues.push(
-      `главный ключ не начинается в первых 35 символах title (position=${keywordPos.position})`,
+      `главный ключ не начинается в первых 35 символах title (position=${keywordPos.position}) — начни title с «${keyword}»`,
     );
+  }
+  const obligatoryLsi = (semantics.obligatory_lsi || []).filter(Boolean);
+  if (obligatoryLsi.length) {
+    const combined = [pair.title || '', pair.description || '', pair.h1 || ''].join(' ');
+    const lsiCheck = checkLsiUsage(combined, obligatoryLsi);
+    if (lsiCheck.missed_lsi.length) {
+      issues.push(
+        `пропущены обязательные LSI ТОПа: ${lsiCheck.missed_lsi.join(', ')} — органично включи их в title/description`,
+      );
+    }
   }
   return issues;
 }
@@ -512,24 +539,30 @@ async function runGistMetaPipeline({
 
     pair = await _callCopywriterJson(
       _buildAssemblerUserPrompt({
-        keyword, inputs, winner, alternates, phase1, standaloneExposure,
-        feedback, snippetAnalysis,
+        keyword, inputs, semantics, winner, alternates, phase1,
+        standaloneExposure, feedback, snippetAnalysis,
       }),
       usage,
       { model: options.copywriterModel },
     );
     _deterministicPairFix(pair, notes);
 
+    // Детерминированные проверки перед LLM-валидатором: пока пара нарушает
+    // длины / позицию ключа / обязательные LSI — не тратим вызов checker'а,
+    // а пересобираем с комбинированным фидбеком (одна пересборка чинит всё).
     const hardIssues = _deterministicPairIssues(pair);
-    if (hardIssues.length && attempt < MAX_PAIR_ATTEMPTS) {
-      feedback = `Детерминированные нарушения: ${hardIssues.join('; ')}. Перепиши пару, устранив их.`;
-      notes.push(`Попытка ${attempt}: ${hardIssues.join('; ')} — пересборка.`);
+    const softIssues = _deterministicPairSoftIssues(pair, keyword, semantics);
+    const retryIssues = [...hardIssues, ...softIssues];
+    if (retryIssues.length && attempt < MAX_PAIR_ATTEMPTS) {
+      feedback = `Детерминированные нарушения: ${retryIssues.join('; ')}. `
+        + `Перепиши пару, устранив ВСЕ нарушения за один заход. `
+        + `Целевые длины: title 72–78 симв. (начинается с «${keyword}»), description 183–188 симв.`;
+      notes.push(`Попытка ${attempt}: ${retryIssues.join('; ')} — пересборка.`);
       continue;
     }
     if (hardIssues.length) {
       notes.push(`⚠️ Остались нарушения после ${attempt} попыток: ${hardIssues.join('; ')}.`);
     }
-    const softIssues = _deterministicPairSoftIssues(pair, keyword);
     if (softIssues.length) {
       notes.push(`⚠️ Post-validation: ${softIssues.join('; ')}.`);
     }

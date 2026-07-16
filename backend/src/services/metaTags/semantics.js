@@ -210,16 +210,23 @@ function checkLsiUsage(text, mandatoryLsi) {
   if (!Array.isArray(mandatoryLsi) || mandatoryLsi.length === 0) {
     return { used_lsi: [], missed_lsi: [] };
   }
-  const norm = String(text || '')
-    .toLowerCase()
-    .replace(/[^а-яёa-z0-9]/g, ' ')
-    .split(/\s+/)
-    .map((w) => normalizeWord(w));
-  const set = new Set(norm);
+  const tokens = [...new Set(
+    String(text || '')
+      .toLowerCase()
+      .replace(/[^а-яёa-z0-9]/g, ' ')
+      .split(/\s+/)
+      .map((w) => normalizeWord(w))
+      .filter(Boolean),
+  )];
   const used = [];
   const missed = [];
   mandatoryLsi.forEach((w) => {
-    if (set.has(normalizeWord(String(w).toLowerCase()))) used.push(w);
+    const target = normalizeWord(String(w).toLowerCase());
+    // LSI часто приходят уже нормализованными («дебетов», «покупк») — повторный
+    // стемминг может укоротить их иначе, чем словоформу из текста («дебетовая»
+    // → «дебетов», но «дебетов» → «дебет»). Поэтому сверяем и по равенству,
+    // и по префиксу (_wordMatches), а не только по точному совпадению стемма.
+    if (tokens.some((t) => _wordMatches(t, target))) used.push(w);
     else missed.push(w);
   });
   return { used_lsi: used, missed_lsi: missed };
