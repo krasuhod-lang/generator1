@@ -590,22 +590,17 @@ async function processForecasterTask(taskId) {
       ],
     );
 
-    // 8. DeepSeek — graceful (анализ + junk refinement)
-    step('deepseek_analysis');
-    const ds = await runDeepSeekAnalysis({
-      sourceInfo: { filename, rowsCount: parsed.rowsCount },
-      monthlySeries: seriesData.monthly,
-      anomalies,
-      forecast,
-      trend: forecast.trend,
-      trafficEstimate,
-      targetUrl,
-      junkSummary: junkReport,
-      keyssoSignals: keyssoSignalsReport,
-      unifiedForecast,
-    });
+    // Короткий контекст помесячной динамики — общий для экспертов, DeepSeek и «Ванги».
+    const monthlySummary = {
+      months_count: seriesData.monthly.length,
+      annual_total_forecast: forecast.annual_total,
+      trend_direction: forecast.trend?.direction,
+      trend_slope_per_month: forecast.trend?.slope_per_month,
+      anomalies_count: anomalies?.summary?.count || 0,
+      max_severity:    anomalies?.summary?.max_severity || null,
+    };
 
-    // 8b. Junk refinement — берём top-K кандидатов и просим DS дать verdict + reason
+    // 8a. Junk refinement — берём top-K кандидатов и просим DS дать verdict + reason
     const cfgJunk = getForecasterConfig().junk;
     const candidates = flaggedTrimmed.slice(0, cfgJunk.deepseekTopK);
     const junkRefine = await runDeepSeekJunkRefine({ candidates, targetUrl });
@@ -639,55 +634,13 @@ async function processForecasterTask(taskId) {
       );
     }
 
-    // 8c. «Ванга» — лаконичное бизнес-саммари (Gemini). Graceful: любой сбой
-    // API (429/500/timeout) даёт verdict skipped/error, пайплайн продолжается,
-    // математический прогноз не страдает. Фронт при не-ok показывает
-    // плейсхолдер «Аналитика ИИ временно недоступна…».
-    step('vanga_summary');
-    const vanga = await runVangaSummary({
-      unifiedForecast,
-      sovForecast,
-      trafficEstimate,
-      monthlySummary: {
-        months_count: seriesData.monthly.length,
-        annual_total_forecast: forecast.annual_total,
-        trend_direction: forecast.trend?.direction,
-      },
-      targetUrl,
-      mainQuery: options.main_query || null,
-    });
-    await db.query(
-      `UPDATE forecaster_tasks SET
-         vanga_summary=$2::jsonb,
-         tokens_in=tokens_in+$3,
-         tokens_out=tokens_out+$4,
-         cost_usd=cost_usd+$5,
-         updated_at=NOW()
-       WHERE id=$1`,
-      [
-        taskId,
-        JSON.stringify(vanga),
-        vanga.tokens_in || 0,
-        vanga.tokens_out || 0,
-        vanga.cost_usd || 0,
-      ],
-    );
-
-    // 8d. DSPy-style эксперты (NicheStrategist / OpportunityHunter / ClusterPlanner).
+    // 8b. DSPy-style эксперты (NicheStrategist / OpportunityHunter / ClusterPlanner).
     // Все три graceful: skipped без ключа или если advanced.enabled=false.
-    // Запускаем последовательно — на типовом ядре все три уложатся в ~2-3 мин
-    // и расходуют умеренный бюджет токенов (max ~5k tokens out суммарно).
+    // Запускаем ДО «Аналитических выводов» и «Ванги», чтобы их перечни работ
+    // (точки усиления, план по кластерам, ранжированные действия) попали в
+    // клиентские AI-разделы. Последовательно — на типовом ядре ~2-3 мин.
     let expertReports = null;
     if (advCfg && advCfg.enabled) {
-      // monthly_summary — короткий контекст для NicheStrategist.
-      const monthlySummary = {
-        months_count: seriesData.monthly.length,
-        annual_total_forecast: forecast.annual_total,
-        trend_direction: forecast.trend?.direction,
-        trend_slope_per_month: forecast.trend?.slope_per_month,
-        anomalies_count: anomalies?.summary?.count || 0,
-        max_severity:    anomalies?.summary?.max_severity || null,
-      };
       const niche = await runNicheStrategist({
         keyssoAggregate: keyssoSignalsReport?.verdict === 'ok' ? keyssoSignalsReport.aggregate : null,
         junkSummary:     junkReport,
@@ -734,6 +687,68 @@ async function processForecasterTask(taskId) {
         cluster_planner:    { verdict: 'skipped', reason: 'advanced_disabled' },
       };
     }
+
+    // 8c. DeepSeek — «Аналитические выводы» (детальный клиентский разбор:
+    // спрос, трафик, лиды, факторы ранжирования, GIST-охват, подводные камни
+    // и привязка к перечню работ). Graceful.
+    step('deepseek_analysis');
+    const ds = await runDeepSeekAnalysis({
+      sourceInfo: { filename, rowsCount: parsed.rowsCount },
+      monthlySeries: seriesData.monthly,
+      anomalies,
+      forecast,
+      trend: forecast.trend,
+      trafficEstimate,
+      targetUrl,
+      mainQuery: options.main_query || null,
+      region: options.region || null,
+      junkSummary: junkReport,
+      keyssoSignals: keyssoSignalsReport,
+      unifiedForecast,
+      sovForecast,
+      leadsSummary,
+      opportunities: opportunitiesReport,
+      expertReports,
+      semanticDistribution,
+    });
+
+    // 8d. «Ванга» — бизнес-саммари (Gemini). Graceful: любой сбой API
+    // (429/500/timeout) даёт verdict skipped/error, пайплайн продолжается,
+    // математический прогноз не страдает. Фронт при не-ok показывает
+    // плейсхолдер «Аналитика ИИ временно недоступна…».
+    step('vanga_summary');
+    const vanga = await runVangaSummary({
+      unifiedForecast,
+      sovForecast,
+      trafficEstimate,
+      monthlySummary: {
+        months_count: seriesData.monthly.length,
+        annual_total_forecast: forecast.annual_total,
+        trend_direction: forecast.trend?.direction,
+      },
+      targetUrl,
+      mainQuery: options.main_query || null,
+      leadsSummary,
+      opportunities: opportunitiesReport,
+      expertReports,
+      semanticDistribution,
+    });
+    await db.query(
+      `UPDATE forecaster_tasks SET
+         vanga_summary=$2::jsonb,
+         tokens_in=tokens_in+$3,
+         tokens_out=tokens_out+$4,
+         cost_usd=cost_usd+$5,
+         updated_at=NOW()
+       WHERE id=$1`,
+      [
+        taskId,
+        JSON.stringify(vanga),
+        vanga.tokens_in || 0,
+        vanga.tokens_out || 0,
+        vanga.cost_usd || 0,
+      ],
+    );
 
     // 9. Финал
     step('finalize');

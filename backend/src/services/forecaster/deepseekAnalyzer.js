@@ -19,38 +19,62 @@ const { callAnalyticLLM, hasAnalyticLLMKey, analyticCallCost } = require('./anal
 const { getForecasterConfig } = require('./config');
 
 const SYSTEM_PROMPT = [
-  'Ты — старший SEO-аналитик и data-аналитик.',
-  'На вход получаешь сводку по сезонному спросу и прогнозу: помесячные данные,',
-  'тренд, найденные зоны падения и оценки трафика при выходе в ТОП-3/5/10.',
-  'Если задан target_url — это URL продвигаемого сайта; учти его профиль',
-  '(коммерческий/контентный/услуги) при рекомендациях.',
+  'Роль: Senior SEO-аналитик и Growth-стратег. Ты пишешь «Аналитические выводы»',
+  'по SEO-прогнозу — раздел, который увидит КЛИЕНТ. Он должен быть детальным,',
+  'предметным и без воды: за него не должно быть стыдно.',
   '',
-  'ВАЖНО — РЕАЛИСТИЧНОСТЬ ПРОГНОЗА (ключевое требование):',
-  '• ×100 и ×10 за год — практически не достижимы без качественного скачка домена,',
-  '  редизайна, бренд-PR-волны или резкого изменения ниши. Не обещай таких чисел.',
-  '• Если в KEYSSO_SIGNALS видна тяжёлая ниша (median_competition высокая,',
-  '  большая доля фраз вне топ-50, отрицательный momentum) — явно скажи об этом',
-  '  и сдержанно скорректируй ожидания клиента.',
-  '• Если KEYSSO_SIGNALS показывает positive momentum и долю в топ-10 ≥ 30 %,',
-  '  оптимистичный сценарий допустим, но всё равно соблюдай капы из realism-блока.',
-  '• Конкретно объясни, какие фразы / группы фраз дают основной вклад в прогноз',
-  '  и почему cap (если он сработал) был оправдан.',
+  'Принцип: формулы уже посчитали числа — ты их ИНТЕРПРЕТИРУЕШЬ, а не',
+  'пересчитываешь и не выдумываешь. Все цифры бери строго из входных данных.',
+  'Если задан target_url — учти профиль сайта (коммерческий/услуги/контентный).',
   '',
-  'Твоя задача — кратко, по-деловому, без воды:',
-  '1) Указать ключевые сезонные паттерны (когда пик/спад).',
-  '2) Прокомментировать аномальные зоны (если они есть): что могло вызвать,',
-  '   на что обратить внимание клиенту.',
-  '3) Дать оценку реалистичности прогноза (с учётом качества входных данных,',
-  '   realism-факторов и KEYSSO_SIGNALS — там реальные позиции и конкуренция).',
-  '4) Предложить 2–3 практических шага для роста (контент-план, расширение',
-  '   ядра, лендинг-страницы, перелинковка). По возможности — со ссылкой на',
-  '   target_url, если он задан.',
+  'ВАЖНО — РЕАЛИСТИЧНОСТЬ (ключевое требование):',
+  '• ×100 и ×10 за год практически недостижимы без качественного скачка домена,',
+  '  редизайна, бренд-PR-волны или смены ниши. Не обещай таких чисел и «гарантий».',
+  '• Тяжёлая ниша в KEYSSO_SIGNALS (высокая median_competition, большая доля фраз',
+  '  вне топ-50, отрицательный momentum) — честно скажи об этом и сдержанно',
+  '  скорректируй ожидания.',
+  '• positive momentum и доля в топ-10 ≥ 30 % — оптимистичный сценарий допустим,',
+  '  но соблюдай капы из realism-блока. Объясни, какие фразы/группы дают основной',
+  '  вклад и почему cap (если сработал) оправдан.',
   '',
-  'Ответ — на русском, в формате JSON:',
+  'РАЗБЕРИ ПОДРОБНО, опираясь на данные:',
+  '1) СПРОС: сезонные паттерны (пик/спад), тренд, аномальные зоны падения — что',
+  '   могло вызвать и на что смотреть.',
+  '2) ТРАФИК: реалистичность прогноза ТОП-3/5/10 и единой модели (unified),',
+  '   драйверы роста, где сработали капы и почему.',
+  '3) ЛИДЫ/ЗАЯВКИ: как объём трафика конвертируется в заявки (по leads_summary,',
+  '   CR и intent). Никакой выручки/маржи/ROI — только трафик, показы, заявки.',
+  '4) ФАКТОРЫ РАНЖИРОВАНИЯ: пройдись по чек-листу и отметь, что критично',
+  '   закрыть для роста в этой нише. Учитывай, что у поисковиков они разные',
+  '   (Google: релевантность/контент, E-E-A-T, ссылки, Page Experience;',
+  '   Яндекс: поведенческие, коммерческие, региональность, текстовые факторы).',
+  '   Чек-лист: Релевантность и покрытие интента; Глубина и полнота контента;',
+  '   Кликабельность сниппета (CTR); Запросы у входа в топ (3–20);',
+  '   Каннибализация; Деградация страниц; E-E-A-T; Микроразметка Schema.org;',
+  '   Ссылочный профиль; Мобильный UX/Core Web Vitals; Видимость в нейровыдаче',
+  '   (AI Overviews/SGE); Контентные дыры (непокрытый спрос).',
+  '5) GIST / ОХВАТ СЕМАНТИКИ: по semantic_distribution и opportunities оцени, где',
+  '   узкие места охвата (какие группы фраз не в топах) и что закрывает разрыв.',
+  '6) ПОДВОДНЫЕ КАМНИ: честно перечисли риски (сезонный спад, тяжёлая',
+  '   конкуренция, шлак в ядре, качество входных данных, каннибализация, долгий',
+  '   ramp-up, зависимость от ссылок/поведенческих).',
+  '7) ПЕРЕЧЕНЬ РАБОТ: если переданы works_plan (точки усиления/кластеры/действия',
+  '   экспертов) — свяжи выводы с этими работами: что именно они закрывают и',
+  '   какой эффект дадут. Продублируй ключевые работы в рекомендациях.',
+  '',
+  'Ответ — на русском, в формате JSON (все текстовые поля — предметные, без воды):',
   '{',
-  '  "summary": "1–2 предложения общего вывода",',
-  '  "bullets": ["…", "…", "…"],',
-  '  "recommendations": ["…", "…"]',
+  '  "summary": "2–3 предложения — главный вывод по прогнозу",',
+  '  "demand_analysis": "абзац: спрос, сезонность, тренд, аномалии",',
+  '  "traffic_analysis": "абзац: реалистичность прогноза трафика и драйверы",',
+  '  "leads_analysis": "абзац: заявки/лиды (объём, CR, intent)",',
+  '  "bullets": ["ключевые наблюдения, 3–6 пунктов"],',
+  '  "ranking_factors": [',
+  '    { "factor": "название фактора", "status": "ok|gap|critical", "note": "что и почему" }',
+  '  ],',
+  '  "pitfalls": ["подводные камни/риски, 2–5 пунктов"],',
+  '  "works_alignment": "как перечень работ закрывает пробелы (или пусто, если работ нет)",',
+  '  "recommendations": ["конкретные шаги, 3–6 пунктов; приоритет по влияние×усилие"]',
   '}',
   'Никакого markdown вне JSON. Никаких пояснений до или после.',
 ].join('\n');
@@ -73,15 +97,95 @@ const JUNK_SYSTEM_PROMPT = [
   'Никакого markdown вне JSON.',
 ].join('\n');
 
+// ─────────────────────────────────────────────────────────────────────
+// Компактный контекст «перечня работ» прогнозатора для LLM: точки усиления
+// (opportunityAnalyzer), план работ по кластерам и ранжированные действия
+// (DSPy-эксперты). Используется и в «Аналитических выводах», и в «Ванге».
+function _worksPlanContext({ opportunities, expertReports, unifiedForecast, sovForecast, leadsSummary, semanticDistribution } = {}) {
+  const uf = (unifiedForecast && unifiedForecast.verdict === 'ok') ? unifiedForecast : null;
+  const opp = (opportunities && opportunities.verdict === 'ok') ? opportunities : null;
+  const exp = expertReports || {};
+  const niche   = (exp.niche_strategist   && exp.niche_strategist.verdict   === 'ok') ? exp.niche_strategist   : null;
+  const hunter  = (exp.opportunity_hunter && exp.opportunity_hunter.verdict === 'ok') ? exp.opportunity_hunter : null;
+  const planner = (exp.cluster_planner    && exp.cluster_planner.verdict    === 'ok') ? exp.cluster_planner    : null;
+
+  return {
+    unified_forecast: uf ? {
+      horizon: uf.horizon,
+      current_traffic: uf.summary?.current_traffic,
+      annual: uf.summary?.annual,
+      at_horizon: uf.summary?.at_horizon,
+      leads_annual: uf.summary?.leads_annual,
+      explain_summary: uf.explain?.summary || null,
+    } : null,
+    sov_realistic: sovForecast?.scenarios?.realistic ? {
+      sov_target: sovForecast.scenarios.realistic.sov_target,
+      p_target:   sovForecast.scenarios.realistic.p_target,
+    } : null,
+    leads_summary: leadsSummary ? {
+      conversion_rate_pct:    leadsSummary.conversion_rate_pct,
+      conversion_rate_source: leadsSummary.conversion_rate_source,
+      intent:                 leadsSummary.intent,
+      current_leads_per_month: leadsSummary.current_leads_per_month,
+      current_leads_annual:   leadsSummary.current_leads_annual,
+      top3_annual:            leadsSummary.top3_annual,
+      top5_annual:            leadsSummary.top5_annual,
+      top10_annual:           leadsSummary.top10_annual,
+      unified_leads_annual:   leadsSummary.unified_leads_annual,
+    } : null,
+    semantic_coverage: Array.isArray(semanticDistribution)
+      ? semanticDistribution.slice(0, 12).map((d) => ({
+          bucket: d.bucket || d.label || null,
+          share_now: d.share_now ?? d.current_share ?? null,
+          share_target: d.share_target ?? d.target_share ?? null,
+        }))
+      : null,
+    // Перечни работ прогнозатора ↓
+    opportunities_top: opp ? (opp.opportunities || []).slice(0, 12).map((o) => ({
+      phrase: o.phrase,
+      demand_monthly: o.demand_monthly,
+      current_position: o.current_position,
+      drop_pct: o.drop_pct,
+      composite_score: o.composite_score,
+      expected_traffic_top3: o.scenarios?.high?.top3?.expected_traffic_monthly ?? null,
+      expected_leads_top3:   o.scenarios?.high?.top3?.expected_leads_monthly ?? null,
+    })) : null,
+    niche_strategy: niche?.payload ? {
+      niche_label:      niche.payload.niche_label,
+      niche_difficulty: niche.payload.niche_difficulty,
+      strategy_lane:    niche.payload.strategy_lane,
+      primary_levers:   niche.payload.primary_levers,
+      expected_horizon_months: niche.payload.expected_horizon_months,
+    } : null,
+    ranked_actions: hunter?.payload ? (hunter.payload.ranked_actions || hunter.payload || [])
+      .slice(0, 10).map((a) => ({
+        phrase: a.phrase, action_type: a.action_type, why: a.why,
+        effort_estimate_h: a.effort_estimate_h, confidence: a.confidence,
+      })) : null,
+    cluster_plan: planner?.payload ? (Array.isArray(planner.payload) ? planner.payload : [])
+      .slice(0, 8).map((c) => ({
+        cluster_centroid: c.cluster_centroid,
+        content_units_target: c.content_units_target,
+        page_types: c.page_types,
+        expected_coverage_gain: c.expected_coverage_gain,
+        phases: Array.isArray(c.phases) ? c.phases.map((p) => ({ month: p.month, milestone: p.milestone })) : null,
+      })) : null,
+  };
+}
+
 function _buildUserPrompt(payload) {
   const {
     monthlySeries, anomalies, forecast, trend, trafficEstimate,
-    sourceInfo, targetUrl, junkSummary, keyssoSignals,
+    sourceInfo, targetUrl, junkSummary, keyssoSignals, mainQuery, region,
+    opportunities, expertReports, unifiedForecast, sovForecast, leadsSummary,
+    semanticDistribution,
   } = payload;
   // Сжимаем ряды: для DeepSeek хватит сводных полей + последние 18 точек.
   const tail = (monthlySeries || []).slice(-18);
   const ctx = {
     target_url: targetUrl || null,
+    main_query: mainQuery || null,
+    region: region || null,
     source: {
       filename: sourceInfo?.filename || '',
       rows_count: sourceInfo?.rowsCount || 0,
@@ -138,6 +242,10 @@ function _buildUserPrompt(payload) {
       by_reason:  junkSummary.counts?.by_reason,
       top_examples: junkSummary.summary?.top_examples,
     } : null,
+    // Единая модель, лиды, охват семантики и перечни работ прогнозатора.
+    works_plan: _worksPlanContext({
+      opportunities, expertReports, unifiedForecast, sovForecast, leadsSummary, semanticDistribution,
+    }),
   };
   return [
     'Ниже — все числовые данные по задаче. Верни JSON по описанной схеме.',
@@ -195,11 +303,29 @@ async function runDeepSeekAnalysis(payload) {
     const cost = analyticCallCost(provider, resp);
     const parsed = _safeParseJson(resp.text || '');
 
+    const _strList = (v) => (Array.isArray(v) ? v : [])
+      .map((x) => (typeof x === 'string' ? x.trim() : x))
+      .filter((x) => x && (typeof x !== 'string' || x.length));
+    const _rankingFactors = (Array.isArray(parsed?.ranking_factors) ? parsed.ranking_factors : [])
+      .filter((f) => f && typeof f === 'object' && (f.factor || f.note))
+      .slice(0, 14)
+      .map((f) => ({
+        factor: String(f.factor || '').slice(0, 120),
+        status: ['ok', 'gap', 'critical'].includes(String(f.status)) ? String(f.status) : 'gap',
+        note:   String(f.note || '').slice(0, 400),
+      }));
+
     return {
       verdict: 'ok',
       summary:        parsed?.summary || (resp.text || '').slice(0, 600),
-      bullets:        Array.isArray(parsed?.bullets) ? parsed.bullets : [],
-      recommendations: Array.isArray(parsed?.recommendations) ? parsed.recommendations : [],
+      demand_analysis:  parsed?.demand_analysis  ? String(parsed.demand_analysis).slice(0, 2000)  : '',
+      traffic_analysis: parsed?.traffic_analysis ? String(parsed.traffic_analysis).slice(0, 2000) : '',
+      leads_analysis:   parsed?.leads_analysis   ? String(parsed.leads_analysis).slice(0, 2000)   : '',
+      bullets:        _strList(parsed?.bullets),
+      ranking_factors: _rankingFactors,
+      pitfalls:       _strList(parsed?.pitfalls),
+      works_alignment: parsed?.works_alignment ? String(parsed.works_alignment).slice(0, 2000) : '',
+      recommendations: _strList(parsed?.recommendations),
       raw_text:       parsed ? null : (resp.text || ''),
       tokens_in:      tIn,
       tokens_out:     tOut,
@@ -325,16 +451,24 @@ module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategis
 
 function _vangaSystemPrompt(cfg) {
   return [
-    'Ты — «Ванга»: бизнес-аналитик, который в двух абзацах говорит владельцу',
+    'Ты — «Ванга»: бизнес-аналитик, который человеческим языком говорит владельцу',
     'бизнеса, что его ждёт по итогам SEO-прогноза. Пиши просто, по-деловому,',
-    'без SEO-жаргона, цифры округляй до читабельных («≈12 тыс. визитов»).',
+    'без SEO-жаргона; цифры округляй до читабельных («≈12 тыс. визитов»,',
+    '«≈180 заявок в год»). Это КЛИЕНТСКИЙ текст — он должен быть тёплым,',
+    'уверенным и честным, чтобы за него не было стыдно.',
     '',
-    `ЖЁСТКОЕ ОГРАНИЧЕНИЕ ОБЪЁМА: максимум ${cfg.maxChars} символов`,
-    `и максимум ${cfg.maxWords} слов. Никаких вступлений («Итак…»), никаких`,
-    'списков и markdown — только связный текст 1–2 абзаца.',
+    `ОГРАНИЧЕНИЕ ОБЪЁМА: максимум ${cfg.maxChars} символов и максимум`,
+    `${cfg.maxWords} слов. Никаких вступлений («Итак…»), списков и markdown —`,
+    'только связный текст в 2–3 абзаца.',
     '',
-    'Структура: 1) главный вывод (какой рост трафика/заявок реален и когда);',
-    '2) главный риск или условие успеха. Не обещай ×10 и «гарантий».',
+    'Структура (без заголовков, связным текстом):',
+    '1) Что реально вырастет — трафик и заявки/лиды, к какому сроку и почему',
+    '   (сошлись на спрос и сезонность). Не обещай ×10 и «гарантий».',
+    '2) За счёт чего: если переданы works_plan (точки усиления, план по',
+    '   кластерам, действия) — назови 1–2 ключевых направления работ, которые',
+    '   дадут этот рост.',
+    '3) Главный риск или условие успеха (сезонность, конкуренция, качество',
+    '   входных данных, длительный разгон) — честно и без нагнетания.',
     '',
     'Ответ — ТОЛЬКО текст саммари, без JSON и пояснений.',
   ].join('\n');
@@ -344,7 +478,7 @@ function _vangaSystemPrompt(cfg) {
  * Лаконичное бизнес-саммари («Ванга»). Никогда не бросает.
  * @returns {{verdict:'ok'|'skipped'|'error', text?:string, reason?:string}}
  */
-async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, monthlySummary, targetUrl, mainQuery } = {}) {
+async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, monthlySummary, targetUrl, mainQuery, leadsSummary, opportunities, expertReports, semanticDistribution } = {}) {
   const cfg = getForecasterConfig().vanga;
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
   if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
@@ -369,6 +503,10 @@ async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, 
       p_target: sovForecast.scenarios.realistic.p_target,
     } : null,
     traffic_realism: trafficEstimate?.realism || null,
+    // Перечни работ прогнозатора + лиды — чтобы «Ванга» назвала, ЗА СЧЁТ ЧЕГО рост.
+    works_plan: _worksPlanContext({
+      opportunities, expertReports, unifiedForecast, sovForecast, leadsSummary, semanticDistribution,
+    }),
   };
   const userPrompt = [
     'Данные прогноза ниже. Напиши бизнес-саммари по правилам из системного промпта.',

@@ -1047,11 +1047,47 @@ const sovSummaryRows = computed(() => {
               <p v-if="dsSummary.summary" class="text-sm text-gray-200 mb-3 leading-relaxed">
                 {{ dsSummary.summary }}
               </p>
+              <div v-if="dsSummary.demand_analysis" class="mb-3">
+                <div class="text-xs text-gray-500 uppercase mb-1">📊 Спрос и сезонность</div>
+                <p class="text-sm text-gray-300 leading-relaxed whitespace-pre-line">{{ dsSummary.demand_analysis }}</p>
+              </div>
+              <div v-if="dsSummary.traffic_analysis" class="mb-3">
+                <div class="text-xs text-gray-500 uppercase mb-1">🚀 Трафик</div>
+                <p class="text-sm text-gray-300 leading-relaxed whitespace-pre-line">{{ dsSummary.traffic_analysis }}</p>
+              </div>
+              <div v-if="dsSummary.leads_analysis" class="mb-3">
+                <div class="text-xs text-gray-500 uppercase mb-1">🎯 Заявки и лиды</div>
+                <p class="text-sm text-gray-300 leading-relaxed whitespace-pre-line">{{ dsSummary.leads_analysis }}</p>
+              </div>
               <div v-if="dsSummary.bullets && dsSummary.bullets.length">
                 <div class="text-xs text-gray-500 uppercase mb-1">Ключевые наблюдения</div>
                 <ul class="list-disc pl-5 text-sm text-gray-300 space-y-1">
                   <li v-for="(b, i) in dsSummary.bullets" :key="'b'+i">{{ b }}</li>
                 </ul>
+              </div>
+              <div v-if="dsSummary.ranking_factors && dsSummary.ranking_factors.length" class="mt-3">
+                <div class="text-xs text-gray-500 uppercase mb-1">Факторы ранжирования</div>
+                <ul class="space-y-1 text-sm">
+                  <li v-for="(f, i) in dsSummary.ranking_factors" :key="'rf'+i" class="flex items-start gap-2">
+                    <span class="text-[10px] shrink-0 mt-0.5 rounded px-1.5 py-0.5 border"
+                          :class="f.status === 'critical' ? 'bg-rose-500/10 border-rose-500/30 text-rose-300' :
+                                  f.status === 'ok' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' :
+                                  'bg-amber-500/10 border-amber-500/30 text-amber-300'">
+                      {{ f.status }}
+                    </span>
+                    <span class="text-gray-300"><b class="text-gray-200">{{ f.factor }}</b><span v-if="f.note"> — {{ f.note }}</span></span>
+                  </li>
+                </ul>
+              </div>
+              <div v-if="dsSummary.pitfalls && dsSummary.pitfalls.length" class="mt-3">
+                <div class="text-xs text-gray-500 uppercase mb-1">⚠ Подводные камни</div>
+                <ul class="list-disc pl-5 text-sm text-amber-200/90 space-y-1">
+                  <li v-for="(p, i) in dsSummary.pitfalls" :key="'pf'+i">{{ p }}</li>
+                </ul>
+              </div>
+              <div v-if="dsSummary.works_alignment" class="mt-3">
+                <div class="text-xs text-gray-500 uppercase mb-1">🧩 Связь с перечнем работ</div>
+                <p class="text-sm text-gray-300 leading-relaxed whitespace-pre-line">{{ dsSummary.works_alignment }}</p>
               </div>
               <div v-if="dsSummary.recommendations && dsSummary.recommendations.length" class="mt-3">
                 <div class="text-xs text-gray-500 uppercase mb-1">Рекомендации</div>
