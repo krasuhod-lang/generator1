@@ -594,6 +594,11 @@ function parseMetaJson(rawText) {
  *      strongest fact, description как compact sequence, semantic conflict и
  *      pair replaceability с ретраями.
  *
+ * Безотказность: вызов идёт через runResilientMetaPipeline — полный пайплайн
+ * повторяется, а при полном провале (пустой пул кандидатов / битый JSON /
+ * сетевой сбой после ретраев) пара собирается напрямую через MetaPairAssembler
+ * (manual_review_required=true). GIST усиливает качество, но не роняет ключ.
+ *
  * Возвращает JSON-контракт §8 (winner_fact, winner_source, scores,
  * conflict_check, replaceability_check, temporary_gist_factor, review_date,
  * manual_review_required) + легаси-поля (h1, title_length, description_length,
@@ -610,7 +615,7 @@ function parseMetaJson(rawText) {
  * @returns {Promise<object>}
  */
 async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
-  const { runGistMetaPipeline } = require('./gistMetaFilter');
+  const { runResilientMetaPipeline } = require('./gistMetaFilter');
   const importantWords   = ((semantics && semantics.title_mandatory_words) || []).slice(0, 6);
   const recommendedWords = ((semantics && semantics.description_mandatory_words) || []).slice(0, 10);
   const year = detectYear(importantWords, recommendedWords, serpData);
@@ -624,7 +629,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
     } catch (_) { /* fail-open: генерация возможна без анализа сниппетов */ }
   }
 
-  const result = await runGistMetaPipeline({
+  const result = await runResilientMetaPipeline({
     keyword,
     semantics: semantics || {},
     serpData: serpData || [],

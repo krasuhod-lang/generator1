@@ -712,6 +712,10 @@ async function runGistMetaPipeline({
 // LINK_META_PIPELINE_ATTEMPTS полных прогонов, затем fallback-сборка пары.
 const LINK_META_PIPELINE_ATTEMPTS = 2;
 
+// Обычная (SERP) генерация мета-тегов: столько полных прогонов пайплайна перед
+// откатом к прямой сборке пары. GIST усиливает качество, но не роняет ключ.
+const META_PIPELINE_ATTEMPTS = 2;
+
 /**
  * Fallback-сборка пары title/description для ссылочной статьи, когда полный
  * трёхфазный пайплайн не отработал (ошибка LLM / парсинга / пустой пул
@@ -845,8 +849,135 @@ async function generateLinkArticleMeta({
   });
 }
 
+// ─── Обычная (SERP) генерация: безотказный режим ───────────────────
+
+/**
+ * Fallback-сборка пары title/description для обычного (SERP) ключа, когда
+ * полный трёхфазный GIST Meta Filter Pipeline не отработал (ошибка LLM /
+ * парсинга / пустой пул кандидатов после ретраев). Использует тот же системный
+ * промпт MetaPairAssembler (Steps 8.7–8.8): модель сама выбирает один
+ * сильнейший GIST-факт по категории/выдаче и собирает пару по кириллическим
+ * safe ranges, не копируя competitor_noise. Результат помечается
+ * manual_review_required: true — метатеги создаются всегда.
+ */
+async function _fallbackSerpMeta({
+  keyword, semantics = {}, inputs = {}, snippetAnalysis = null,
+  standaloneExposure = false, copywriterModel, pipelineError,
+}) {
+  const usage = {
+    tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
+    calls: 0, model: '', providers: new Set(),
+  };
+  const notes = [
+    `⚠️ GIST Meta Filter Pipeline не отработал (${pipelineError ? pipelineError.message : 'нет деталей'}) — пара собрана fallback-вызовом MetaPairAssembler (Steps 8.7–8.8).`,
+  ];
+
+  const obligatoryLsi = (semantics.obligatory_lsi || []).filter(Boolean);
+  const mandatoryWords = (semantics.title_mandatory_words || []).filter(Boolean).slice(0, 6);
+  const lsiBlock = obligatoryLsi.length || mandatoryWords.length
+    ? `
+
+[ОБЯЗАТЕЛЬНЫЕ LSI ТОПа]${obligatoryLsi.length ? `
+- Обязательные LSI (есть у ≥50% ТОП-выдачи — без них ниже CTR; КАЖДОЕ слово органично включи в title или description, словоформы допустимы): ${obligatoryLsi.join(', ')}` : ''}${mandatoryWords.length ? `
+- Важные слова ТОПа (по возможности используй в title): ${mandatoryWords.join(', ')}` : ''}`
+    : '';
+  const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+
+  const userPrompt = `[ВХОДНЫЕ ДАННЫЕ]
+- Главный поисковый запрос (title обязан НАЧИНАТЬСЯ с него, старт в первых 35 символах): ${keyword}
+- Бренд: ${inputs.brand || '—'}
+- Регион: ${inputs.toponym || '—'}
+- Контекст / УТП страницы: ${inputs.summary || inputs.page_context || 'Нет данных'}
+- standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}
+
+[WINNER FACT]
+Полный пайплайн отбора кандидатов недоступен. САМ выбери РОВНО ОДИН самый
+сильный конкретный факт по этой категории/выдаче (проходящий 4 теста GIST:
+Concreteness, Decision-relevance, Replaceability, Verifiability) и используй
+его как winner fact для title. Для description возьми ДРУГОЙ факт как lead fact.
+Не копируй запрещённые фразы конкурентов. Дополнительно добавь в JSON поле
+"winner_fact" — краткую формулировку выбранного факта.${lsiBlock}
+${competitorNoiseBlock}
+Собери пару по Steps 8.7–8.8 и верни JSON по контракту.`;
+
+  const pair = await _callCopywriterJson(userPrompt, usage, {
+    model: copywriterModel || undefined,
+  });
+  _deterministicPairFix(pair, notes);
+
+  return {
+    title: String(pair.title || ''),
+    description: String(pair.description || ''),
+    description_mobile: String(pair.description_mobile || ''),
+    h1: String(pair.h1 || ''),
+    winner_fact: String(pair.winner_fact || '') || null,
+    winner_source: 'fallback_structural',
+    scores: null,
+    conflict_check: { passed: true, detail: null },
+    replaceability_check: { passed: true, detail: null },
+    temporary_gist_factor: false,
+    review_date: null,
+    manual_review_required: true,
+    field_job: null,
+    competitor_pattern: null,
+    candidates: [],
+    fallback_used: 'assembler_direct',
+    standalone_exposure: standaloneExposure,
+    post_validation_notes: notes,
+    _meta: {
+      model: usage.model,
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      thoughtsTokens: usage.thoughtsTokens,
+      cachedTokens: usage.cachedTokens,
+      attempts: usage.calls,
+      provider: usage.providers.size === 1 ? [...usage.providers][0] : 'mixed',
+    },
+  };
+}
+
+/**
+ * Безотказная обёртка обычной (SERP) генерации мета-тегов. Полный GIST Meta
+ * Filter Pipeline повторяется до META_PIPELINE_ATTEMPTS раз; при полном
+ * провале (пустой пул кандидатов / битый JSON / сетевой сбой после ретраев)
+ * пара собирается напрямую через MetaPairAssembler (_fallbackSerpMeta) —
+ * метатеги для ключа создаются всегда. GIST остаётся слоем усиления качества,
+ * но никогда не роняет генерацию (как у link-статей generateLinkArticleMeta).
+ *
+ * @param {object} args — те же аргументы, что у runGistMetaPipeline
+ * @returns {Promise<object>} тот же JSON-контракт, что runGistMetaPipeline
+ */
+async function runResilientMetaPipeline(args = {}) {
+  const {
+    keyword, semantics = {}, serpData = [], inputs = {}, options = {},
+  } = args;
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= META_PIPELINE_ATTEMPTS; attempt += 1) {
+    try {
+      return await runGistMetaPipeline({ keyword, semantics, serpData, inputs, options });
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[gistMetaFilter] meta pipeline attempt ${attempt}/${META_PIPELINE_ATTEMPTS} failed for "${keyword}": ${err.message}`);
+    }
+  }
+
+  const standaloneExposure = inputs.standalone_exposure === true
+    || inputs.standaloneExposure === true;
+  return _fallbackSerpMeta({
+    keyword,
+    semantics,
+    inputs,
+    snippetAnalysis: _ensureSnippetAnalysis(serpData, inputs),
+    standaloneExposure,
+    copywriterModel: options.copywriterModel,
+    pipelineError: lastErr,
+  });
+}
+
 module.exports = {
   runGistMetaPipeline,
+  runResilientMetaPipeline,
   generateLinkArticleMeta,
   checkTemplateLevelConflict,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX,
