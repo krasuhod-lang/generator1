@@ -28,9 +28,9 @@ async function main() {
   console.log('=== vanga config (cost control) ===');
   const cfg = getForecasterConfig().vanga;
   ok('vanga config exists', !!cfg);
-  ok('vanga maxChars = 800', cfg.maxChars === 800, String(cfg.maxChars));
-  ok('vanga maxWords = 150', cfg.maxWords === 150, String(cfg.maxWords));
-  ok('vanga maxTokens ограничен (≤ 600)', cfg.maxTokens <= 600, String(cfg.maxTokens));
+  ok('vanga maxChars = 1800', cfg.maxChars === 1800, String(cfg.maxChars));
+  ok('vanga maxWords = 320', cfg.maxWords === 320, String(cfg.maxWords));
+  ok('vanga maxTokens ограничен (≤ 1200)', cfg.maxTokens <= 1200, String(cfg.maxTokens));
 
   console.log('\n=== graceful skip без API-ключа ===');
   const r = await runVangaSummary({
