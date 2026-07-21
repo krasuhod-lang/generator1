@@ -3174,6 +3174,17 @@ async function ensureSchema() {
       console.warn('[ensureSchema] image pipeline columns (mig 100) skipped:', e.message);
     }
 
+    // Миграция 120: M-1 Topic Discovery (InfoGapRadar) — результат этапа
+    // сохраняется для метаданных статьи и обучения AEGIS (Phase 5).
+    // Nullable + IF NOT EXISTS: при TOPIC_DISCOVERY_ENABLED=off и на старых
+    // задачах колонка просто пустая. См. migrations/120_topic_discovery.sql.
+    try {
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS topic_discovery JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS topic_discovery JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] topic_discovery column (mig 120) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

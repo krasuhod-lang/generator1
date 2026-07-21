@@ -5,6 +5,7 @@ from aegis_py.app import dspy_seed
 def test_count_seeds_at_least_10():
     n = dspy_seed.count_seeds()
     assert n >= 10, f"need ≥10 seed rows, got {n}"
+    assert n >= 50, f"need ≥50 seed rows, got {n}"
 
 
 def test_seed_rows_have_required_fields():
@@ -23,6 +24,7 @@ def test_seed_niches_returns_list():
     niches = dspy_seed.seed_niches()
     assert isinstance(niches, list)
     assert len(niches) >= 1
+    assert {"medicina", "it", "finance"}.issubset(set(niches))
 
 
 def test_load_seed_dataset_niche_filter():

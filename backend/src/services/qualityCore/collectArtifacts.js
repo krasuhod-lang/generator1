@@ -61,7 +61,7 @@ function riskFromEvaluator(evaluator) {
  *   { html, niche, currentYear, ymyl,
  *     plagiarismReport, factReport, intentReport, lsiOverdoseReport,
  *     links, riskReport, evaluatorReport, authorship, informationGainBrief,
- *     informationDelta, tzCompliance }
+ *     informationDelta, tzCompliance, asessorReport }
  * @returns {object} artifacts для qualityGate.finalize()
  */
 function collectArtifacts(pipeline, raw = {}) {
@@ -101,6 +101,15 @@ function collectArtifacts(pipeline, raw = {}) {
     out.factReport = fc;
   }
 
+  // ── Semantic fact-check availability (Задача 3) ─────────────────────
+  // Явный semanticFactcheck приоритетнее, иначе — из factReport.semantic
+  // (runSemanticFactCheck аннотирует его failMode/unavailable/isYmyl).
+  if (raw.semanticFactcheck && typeof raw.semanticFactcheck === 'object') {
+    out.semanticFactcheck = raw.semanticFactcheck;
+  } else if (fc && fc.semantic && typeof fc.semantic === 'object') {
+    out.semanticFactcheck = fc.semantic;
+  }
+
   // ── Pass-through отчёты (checkers уже понимают их схему) ─────────────
   if (raw.intentReport) out.intentReport = raw.intentReport;
   if (raw.lsiOverdoseReport) out.lsiOverdoseReport = raw.lsiOverdoseReport;
@@ -112,6 +121,12 @@ function collectArtifacts(pipeline, raw = {}) {
   }
   if (raw.tzCompliance && typeof raw.tzCompliance === 'object') {
     out.tzCompliance = raw.tzCompliance;
+  }
+  if (raw.asessorReport && typeof raw.asessorReport === 'object') {
+    out.asessorReport = raw.asessorReport;
+  }
+  if (raw.topicDiscovery && typeof raw.topicDiscovery === 'object') {
+    out.topicDiscovery = raw.topicDiscovery;
   }
 
   // ── Risk: явный riskReport приоритетнее, иначе — из Stage 8 evaluator ─

@@ -21,8 +21,10 @@ from . import db
 from .config import CONFIG
 from .llm import DSPY_AVAILABLE, LLMClient
 from .modules import (
+    m_minus_1_discovery,
     m0_relevance,
     m1_scraper,
+    m1_5_cleansing,
     m2_noise,
     m3_gap,
     m4_architect,
@@ -36,7 +38,10 @@ from .modules import (
 
 logger = logging.getLogger("gist_py.pipeline")
 
-STAGES = ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "GIST", "M8", "M9", "M10", "DONE"]
+STAGES = [
+    "M-1", "M0", "M1", "M1.5", "M2", "M3", "M4", "M5", "M6",
+    "M7", "GIST", "M8", "M9", "M10", "DONE",
+]
 
 
 class GistPipeline:
@@ -91,6 +96,16 @@ class GistPipeline:
                 pages = m1_scraper.scrape_competitors(query)
         result["pages_count"] = len(pages)
 
+        if CONFIG["cleansing_enabled"]:
+            self._stage("M1.5", {"pages_count": len(pages)})
+            try:
+                cleansing = m1_5_cleansing.run_cleansing(pages, query, self.llm)
+                pages = cleansing["pages"]
+                result["core_classification"] = cleansing["core_classification"]
+            except Exception as exc:
+                logger.warning("M1.5 в gap-finder пропущен: %s", exc)
+                result["core_classification"] = {"llm_skipped": True}
+
         # 2. M2 — шум top10_claims
         self._stage("M2")
         top10_claims = m2_noise.extract_noise(pages, query, self.llm)
@@ -107,6 +122,23 @@ class GistPipeline:
         result["gist_score"] = None
         self._stage("DONE", {"information_delta_json": gaps["information_delta"]})
         return result
+
+    def run_topic_discovery(
+        self,
+        query: str,
+        trends_data=None,
+        reddit_insights=None,
+        paa_questions=None,
+    ) -> Dict:
+        """Запустить M-1 Topic Discovery как отдельный fail-open этап."""
+        self._stage("M-1")
+        return m_minus_1_discovery.discover_topic(
+            query,
+            trends_data=trends_data,
+            reddit_insights=reddit_insights,
+            paa_questions=paa_questions,
+            llm=self.llm,
+        )
 
     def run(
         self,
@@ -137,6 +169,16 @@ class GistPipeline:
             pages = m1_scraper.scrape_competitors(query)
         result["pages_count"] = len(pages)
 
+        if CONFIG["cleansing_enabled"]:
+            self._stage("M1.5", {"pages_count": len(pages)})
+            try:
+                cleansing = m1_5_cleansing.run_cleansing(pages, query, self.llm)
+                pages = cleansing["pages"]
+                result["core_classification"] = cleansing["core_classification"]
+            except Exception as exc:
+                logger.warning("M1.5 пропущен: %s", exc)
+                result["core_classification"] = {"llm_skipped": True}
+
         # 3. M2 — шум top10_claims
         self._stage("M2")
         top10_claims = m2_noise.extract_noise(pages, query, self.llm)
@@ -148,11 +190,26 @@ class GistPipeline:
         delta = gaps["information_delta"]
         result["information_delta"] = delta
 
-        # 5. M4 — структура
-        self._stage("M4", {"information_delta_json": delta})
+        # 5. M4 — Entity Footprint + структура
+        entity_footprint = m4_architect.build_entity_footprint(
+            query,
+            target_audience,
+            top10_claims,
+            delta,
+            self.llm,
+            is_listicle=relevance["content_type"] == "LIST",
+        )
+        result["entity_footprint"] = entity_footprint
+        self._stage(
+            "M4",
+            {
+                "information_delta_json": delta,
+                "entity_count": len(entity_footprint.get("entities", [])),
+            },
+        )
         outline = m4_architect.build_outline(
             query, target_audience, relevance["content_type"],
-            top10_claims, delta, self.llm,
+            top10_claims, delta, self.llm, entity_footprint=entity_footprint,
         )
         result["outline"] = outline
 
@@ -219,6 +276,7 @@ class GistPipeline:
                 "content": formatted["content"],
                 "meta": formatted["meta"],
                 "schema": formatted["schema"],
+                "multimodal": formatted["multimodal"],
                 "lsi_coverage_pct": formatted["lsi_coverage_pct"],
                 "aio_snippets_count": formatted["aio_snippets_count"],
                 "aio_issues": formatted["aio_issues"],

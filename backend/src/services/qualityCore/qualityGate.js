@@ -82,6 +82,15 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   if (artifacts.factReport) {
     gates.push(checkers.checkFactConfidence(artifacts.factReport, { thresholds }));
   }
+  // Semantic fact-check availability (16-й чекер, Задача 3): fail-closed
+  // для YMYL при недоступной семантике → blocker semantic_factcheck_unavailable.
+  if (artifacts.semanticFactcheck) {
+    gates.push(checkers.checkSemanticFactcheck(artifacts.semanticFactcheck, {
+      ymyl,
+      failMode: opts.failMode,
+      niche: artifacts.niche || '',
+    }));
+  }
   if (artifacts.intentReport) {
     gates.push(checkers.checkIntent(artifacts.intentReport, { thresholds }));
   }
@@ -107,6 +116,14 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   // TZ compliance (13-й чекер): warning/fail-open, не blocker.
   if (artifacts.tzCompliance) {
     gates.push(checkers.checkTzCompliance(artifacts.tzCompliance));
+  }
+  // Asessor-MC-Quality-Audit (14-й чекер): LLM-судья MC, если отчёт уже собран.
+  if (artifacts.asessorReport) {
+    gates.push(checkers.checkAsessorAudit(artifacts.asessorReport, { thresholds }));
+  }
+  // Topic Discovery (15-й чекер): warning при balance + manual_review.
+  if (artifacts.topicDiscovery) {
+    gates.push(checkers.checkTopicDiscovery(artifacts.topicDiscovery));
   }
 
   const blockers = gates.filter((g) => g.blocking && !g.pass);

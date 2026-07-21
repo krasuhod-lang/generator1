@@ -101,6 +101,11 @@ const DEFAULT_THRESHOLDS = {
   minValueAdds:         3,     // минимум measurable value-adds в brief (V3)
   riskBlockLevel:       'critical', // risk-уровень, при котором blocking
   freshnessStaleYears:  2,     // «обновлено N лет назад» → warning
+  gistScoreBlockMin:    0.25,  // ниже → blocking GIST Score
+  gistScoreMin:         0.30,  // ниже → warning, выше → pass
+  gistScoreGreen:       0.40,  // зелёная зона информационной дельты
+  asessorMinOverall:    60,    // Asessor-MC: ниже → warning
+  asessorBlockOverall:  40,    // Asessor-MC: ниже → blocking
 };
 
 // ── Каталог value-add объектов (V3) ───────────────────────────────────

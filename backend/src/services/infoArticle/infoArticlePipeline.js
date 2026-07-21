@@ -56,7 +56,7 @@ const {
   buildSerpEvidence,
   renderEvidenceForPrompt,
 } = require('./serpEvidence.service');
-const { runFactCheck } = require('./factCheck.service');
+const { runFactCheck, runSemanticFactCheck } = require('./factCheck.service');
 const { runPlagiarismCheck } = require('./plagiarism.service');
 const { runImageQa } = require('./imageQa.service');
 const {
@@ -129,6 +129,23 @@ const INFO_ARTICLE_GROUNDING_ENABLED =
 // grounding-флага, но требует наличия task.__serpEvidence (иначе skip).
 const INFO_ARTICLE_FACTCHECK_ENABLED =
   String(process.env.INFO_ARTICLE_FACTCHECK_ENABLED || '').toLowerCase() === 'true';
+const FACTCHECK_SEMANTIC_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.FACTCHECK_SEMANTIC_ENABLED || '1').toLowerCase());
+
+// ── M-1 Topic Discovery (Итерация 2, Задача 1.3) ──────────────────────
+// Проводка реальных сигналов спроса/предложения (Reddit Mapper + PAA +
+// Google Trends) → gist_py POST /topic/discover до Stage 0. Fail-open.
+const TOPIC_DISCOVERY_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.TOPIC_DISCOVERY_ENABLED || '1').toLowerCase());
+// Автопивот на подтему при topic_state=abundance (по умолчанию OFF).
+const TOPIC_AUTO_PIVOT =
+  ['1', 'true', 'yes', 'on'].includes(String(process.env.TOPIC_AUTO_PIVOT || '').toLowerCase());
+
+// ── Видимый блок «Об авторе» (Итерация 2, Задача 2) ───────────────────
+const AUTHOR_BLOCK_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.AUTHOR_BLOCK_ENABLED || '1').toLowerCase());
+
+
 
 // ── Anti-plagiarism (Phase 1 / P0-3) ──────────────────────────────────
 // Детерминированная сверка финального articleHtml с теми же
@@ -526,11 +543,13 @@ async function runWriter(task, args, ctx, opts = {}) {
   // НЕ выдумывал ФИО. date_modified — текущая дата в формате YYYY-MM-DD.
   const authorName = personaMeta && personaMeta.display_name ? personaMeta.display_name : '';
   const authorRole = personaMeta && personaMeta.role ? personaMeta.role : '';
+  const authorBioShort = personaMeta && personaMeta.bio_short ? personaMeta.bio_short : '';
   const dateModified = new Date().toISOString().slice(0, 10);
   // Прокидываем меты в task, чтобы pipeline на этапе post-processing
   // мог собрать byline + JSON-LD без повторного выбора персоны.
   task.__authorName = authorName;
   task.__authorRole = authorRole;
+  task.__authorBioShort = authorBioShort;
   task.__authorPersonaKey = personaKey;
   task.__dateModified = dateModified;
 
@@ -1351,6 +1370,51 @@ async function processInfoArticleTask(taskId) {
       }
     }
 
+    // 0. M-1 Topic Discovery (InfoGapRadar) — до Stage 0, за флагом
+    //    TOPIC_DISCOVERY_ENABLED (default on, fail-open). Собирает реальные
+    //    сигналы спроса/предложения (Reddit Mapper + PAA + Google Trends) и
+    //    вызывает gist_py POST /topic/discover. Результат — в article_meta
+    //    (колонка topic_discovery) для AEGIS Phase 5. Задача 1.3 ТЗ.
+    if (TOPIC_DISCOVERY_ENABLED) {
+      try {
+        const topicDiscovery = require('../topicDiscovery/topicDiscovery.service');
+        const td = await topicDiscovery.runTopicDiscovery({
+          query: task.topic,
+          niche: task.topic || '',
+          serpVerification: relevanceArtifact && relevanceArtifact.serpVerification
+            ? relevanceArtifact.serpVerification
+            : null,
+          log: (m) => { console.log(`[infoArticle:${taskId}] ${m}`); },
+        });
+        await saveColumn(taskId, 'topic_discovery', td);
+        await appendLog(
+          taskId,
+          `🧭 Topic Discovery: state=${td.topic_state}`
+            + `${td.topic_score != null ? ` score=${td.topic_score}` : ''}`
+            + `${td.manual_review ? ' (manual_review)' : ''}`,
+          td.manual_review ? 'warn' : 'ok',
+        );
+        // Abundance → авто-пивот на подтему за флагом TOPIC_AUTO_PIVOT (default off).
+        if (td.topic_state === 'abundance' && td.sub_niche_suggestions.length) {
+          if (TOPIC_AUTO_PIVOT) {
+            await appendLog(
+              taskId,
+              `↪ Abundance: авто-пивот на подтему «${td.sub_niche_suggestions[0]}»`,
+              'ok',
+            );
+          } else {
+            await appendLog(
+              taskId,
+              `⚠ Abundance: рекомендованы подтемы — ${td.sub_niche_suggestions.slice(0, 3).join('; ')}`,
+              'warn',
+            );
+          }
+        }
+      } catch (tdErr) {
+        await appendLog(taskId, `⚠ Topic Discovery: ошибка (${tdErr.message}) — продолжаем`, 'warn');
+      }
+    }
+
     // 1. Pre-Stage 0
     await setStage(taskId, 'pre_stage0', 5);
     const strategy = await runPreStrategy(task, ctx);
@@ -1901,7 +1965,18 @@ async function processInfoArticleTask(taskId) {
     //      сверять). Не валит pipeline ни при каких сбоях — graceful warn.
     if (INFO_ARTICLE_FACTCHECK_ENABLED && task.__serpEvidence) {
       try {
-        const factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+        let factCheck;
+        if (FACTCHECK_SEMANTIC_ENABLED) {
+          try {
+            factCheck = await runSemanticFactCheck(articleHtml, task.__serpEvidence, {
+              niche: task.topic || task.region || '',
+            });
+          } catch (_semanticErr) {
+            factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+          }
+        } else {
+          factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+        }
         await saveColumn(taskId, 'fact_check_report', factCheck);
         const s = factCheck.summary;
         const verdictIcon = s.verdict === 'pass' ? '✅'
@@ -2480,6 +2555,34 @@ async function processInfoArticleTask(taskId) {
         ? `${task.__dateModified}T00:00:00.000Z`
         : new Date().toISOString();
 
+      // Видимый блок «Об авторе» (E-E-A-T, Итерация 2, Задача 2) + sameAs
+      // для обогащения Article JSON-LD author. Fail-open: без имени автора
+      // блок пустой и HTML не меняется.
+      let authorSameAs = [];
+      let visibleAuthorHtml = '';
+      if (AUTHOR_BLOCK_ENABLED && task.__authorName) {
+        try {
+          const { buildAuthorBlock } = require('../seo/authorBlock.service');
+          const ab = buildAuthorBlock({
+            persona: {
+              name: task.__authorName,
+              role: task.__authorRole,
+              short_bio: task.__authorBioShort || '',
+            },
+            company: {
+              company_name: task.brand_name || task.brand || '',
+              company_url: task.target_site_url || '',
+              social_links: Array.isArray(task.__companySocialLinks) ? task.__companySocialLinks : [],
+            },
+            dateModified: task.__dateModified || '',
+          });
+          authorSameAs = ab.sameAs || [];
+          visibleAuthorHtml = ab.html || '';
+        } catch (abErr) {
+          console.warn(`[infoArticle] author block failed: ${abErr.message}`);
+        }
+      }
+
       const article = buildArticleJsonLd({
         articleType: 'BlogPosting',
         headline,
@@ -2490,6 +2593,7 @@ async function processInfoArticleTask(taskId) {
         author: task.__authorName ? {
           name: task.__authorName,
           jobTitle: task.__authorRole || '',
+          sameAs: authorSameAs,
         } : null,
         image: extractCoverImage(finalHtml),
       });
@@ -2508,11 +2612,16 @@ async function processInfoArticleTask(taskId) {
         }
       }
 
+      // Видимый блок автора добавляем в тело статьи ПЕРЕД JSON-LD скриптами.
+      const bodyHtml = visibleAuthorHtml ? `${finalHtml}\n${visibleAuthorHtml}` : finalHtml;
+
       const blocks = [article, faq, howto].filter(Boolean);
       if (blocks.length > 0) {
         const scripts = assembleJsonLdScripts(blocks);
-        articleHtmlWithSchema = `${finalHtml}\n${scripts.join('\n')}`;
+        articleHtmlWithSchema = `${bodyHtml}\n${scripts.join('\n')}`;
         jsonLdBlocks = blocks;
+      } else if (visibleAuthorHtml) {
+        articleHtmlWithSchema = bodyHtml;
       }
 
       if (task.__authorName) {
@@ -2542,7 +2651,7 @@ async function processInfoArticleTask(taskId) {
     try {
       const { qualityGate } = require('../qualityCore');
       const { rows: [qr] } = await db.query(
-        `SELECT fact_check_report, plagiarism_report, lsi_overdose_report, intent_verdict
+        `SELECT fact_check_report, plagiarism_report, lsi_overdose_report, intent_verdict, topic_discovery
            FROM info_article_tasks WHERE id = $1`,
         [taskId],
       );
@@ -2557,6 +2666,7 @@ async function processInfoArticleTask(taskId) {
           plagiarismReport:  qr && qr.plagiarism_report,
           lsiOverdoseReport: qr && qr.lsi_overdose_report,
           intentReport:      qr && qr.intent_verdict,
+          topicDiscovery:    qr && qr.topic_discovery,
           informationDelta:  (whitespace && whitespace.information_delta) || null,
           authorship: {
             byline:   authorByline || task.__authorName || null,
@@ -2598,6 +2708,36 @@ async function processInfoArticleTask(taskId) {
         `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
         gateResult.canPublish ? 'ok' : 'warn',
       );
+
+      // §Задача 3: fail-closed Semantic Fact-Check для YMYL. Если gate выдал
+      // blocker semantic_factcheck_unavailable — статья идёт в очередь ретраев
+      // (1/5/15 мин, 3 попытки), после исчерпания — в ручную модерацию.
+      // Персистится через quality_gate (canPublish=false) + пометку статуса.
+      try {
+        const semBlocker = (gateResult.blockers || []).find(
+          (b) => b.name === 'semantic_factcheck',
+        );
+        if (semBlocker) {
+          const policy = require('./semanticFactcheckPolicy');
+          const schedule = policy.retrySchedule().map((ms) => `${Math.round(ms / 60000)}м`).join('/');
+          // Помечаем вердикт: очередь ретраев, затем ручная модерация.
+          if (qualityGateVerdict) {
+            qualityGateVerdict.semantic_factcheck = {
+              action: 'retry_then_manual_moderation',
+              max_retries: policy.MAX_RETRIES,
+              retry_schedule_ms: policy.retrySchedule(),
+            };
+          }
+          await appendLog(
+            taskId,
+            `🛑 Semantic fact-check недоступен для YMYL-ниши — статья в очередь ретраев ` +
+            `(${policy.MAX_RETRIES} попытки: ${schedule}), затем ручная модерация`,
+            'warn',
+          );
+        }
+      } catch (semErr) {
+        console.warn(`[infoArticle] semantic fail-closed handling: ${semErr.message}`);
+      }
     } catch (gateErr) {
       console.warn(`[infoArticle] quality gate failed: ${gateErr.message}`);
     }

@@ -23,6 +23,20 @@ _QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CYR_MAP = str.maketrans(
+    {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    }
+)
+_SLUG_STOP_WORDS = {
+    "i", "v", "vo", "na", "po", "k", "ko", "ot", "do", "dlya", "bez", "ili",
+    "kak", "chto", "eto", "the", "and", "or", "for", "with", "a", "an", "of",
+}
+
 
 def split_sections(article_text: str) -> List[Dict]:
     """Разбить Markdown-статью на секции по H2."""
@@ -91,6 +105,23 @@ def build_schema(outline: Dict, content_format: str) -> Dict:
     }
 
 
+def build_slug(h1_or_keyword: str) -> str:
+    """Собрать чистый URL-slug: латиница, дефисы, без цифр и стоп-слов."""
+    text = (h1_or_keyword or "").lower().translate(_CYR_MAP)
+    text = re.sub(r"\d+", " ", text)
+    words = re.findall(r"[a-z]+", text)
+    filtered = [w for w in words if w not in _SLUG_STOP_WORDS and len(w) > 1]
+    return "-".join(filtered[:5]) or "article"
+
+
+def count_multimodal_placeholders(text: str) -> Dict:
+    """Посчитать плейсхолдеры [IMAGE: ...] и [VIDEO: ...]."""
+    return {
+        "images": len(re.findall(r"\[IMAGE\s*:[^\]]+\]", text or "", flags=re.I)),
+        "videos": len(re.findall(r"\[VIDEO\s*:[^\]]+\]", text or "", flags=re.I)),
+    }
+
+
 def format_article(
     article_text: str,
     outline: Dict,
@@ -105,7 +136,12 @@ def format_article(
     if audit["issues"]:
         try:
             fixed = llm.complete(
-                prompts.render(prompts.G3_AIO_CHECK, article_text=article_text),
+                prompts.render(
+                    prompts.G3_AIO_CHECK,
+                    article_text=article_text,
+                    aio_passage_min_words=CONFIG["aio_passage_min_words"],
+                    aio_passage_max_words=CONFIG["aio_passage_max_words"],
+                ),
                 temperature=0.4,
             )
             fixed = re.sub(r"```(?:markdown|json)?[\s\S]*?```\s*$", "", fixed).strip()
@@ -115,15 +151,19 @@ def format_article(
         except Exception as exc:
             logger.warning("G3-AIO-CHECK не удался: %s", exc)
     schema = build_schema(outline, content_format)
+    slug = build_slug(outline.get("h1") or outline.get("meta_title") or "")
+    multimodal = count_multimodal_placeholders(final_text)
     return {
         "content": final_text,
         "meta": {
             "title": outline.get("meta_title", ""),
             "description": outline.get("meta_description", ""),
             "h1": outline.get("h1", ""),
+            "slug": slug,
         },
         "schema": schema,
         "schema_json_ld": json.dumps(schema, ensure_ascii=False),
+        "multimodal": multimodal,
         "aio_snippets_count": audit["aio_snippets_count"],
         "aio_issues": audit["issues"],
         "lsi_coverage_pct": lsi_coverage(final_text, top10_claims),

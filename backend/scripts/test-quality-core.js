@@ -224,16 +224,48 @@ group('checkGistScore', () => {
     assert.strictEqual(r.blocking, false);
     assert.ok(r.score >= 30);
   });
-  test('дельта не раскрыта → warning (не blocking)', () => {
+  test('score 0.20 → blocker', () => {
+    const html = Array.from({ length: 10 }, (_, i) => (
+      i < 2
+        ? `<p>гарантия монтаж окна договор подтверждение ${i}</p>`
+        : `<p>Нейтральный параграф без нужной информационной дельты ${i}</p>`
+    )).join('');
+    const r = checkers.checkGistScore(html, ['гарантия монтаж окна договор']);
+    assert.strictEqual(r.pass, false);
+    assert.strictEqual(r.blocking, true);
+    assert.strictEqual(r.score, 20);
+  });
+  test('score около 0.27 → warning, не blocker', () => {
+    const html = Array.from({ length: 11 }, (_, i) => (
+      i < 3
+        ? `<p>гарантия монтаж окна договор подтверждение ${i}</p>`
+        : `<p>Нейтральный параграф без нужной информационной дельты ${i}</p>`
+    )).join('');
+    const r = checkers.checkGistScore(html, ['гарантия монтаж окна договор']);
+    assert.strictEqual(r.pass, false);
+    assert.strictEqual(r.blocking, false);
+    assert.strictEqual(r.score, 27);
+  });
+  test('score около 0.35 → pass', () => {
+    const html = Array.from({ length: 11 }, (_, i) => (
+      i < 4
+        ? `<p>гарантия монтаж окна договор подтверждение ${i}</p>`
+        : `<p>Нейтральный параграф без нужной информационной дельты ${i}</p>`
+    )).join('');
+    const r = checkers.checkGistScore(html, ['гарантия монтаж окна договор']);
+    assert.strictEqual(r.pass, true);
+    assert.strictEqual(r.blocking, false);
+  });
+  test('дельта совсем не раскрыта → blocking red', () => {
     const html = '<p>Первый параграф совсем про другое и длинный</p>' +
                  '<p>Второй параграф тоже не о том, о чём дельта</p>' +
                  '<p>Третий параграф про погоду и природу вокруг</p>';
     const r = checkers.checkGistScore(html, ['криотерапия жидким азотом стоимость сеанса']);
     assert.strictEqual(r.pass, false);
-    assert.strictEqual(r.blocking, false); // warning, не blocker (fail-open)
+    assert.strictEqual(r.blocking, true);
     assert.strictEqual(r.evidence.level, 'red');
   });
-  test('finalize: низкий gistScore попадает в warnings, canPublish не блокируется', () => {
+  test('finalize: критически низкий gistScore попадает в blockers', () => {
     const res = qualityGate.finalize('info', {
       html: '<p>Длинный параграф совсем не про информационную дельту</p>',
       currentYear: 2026,
@@ -241,8 +273,41 @@ group('checkGistScore', () => {
       informationDelta: ['криотерапия жидким азотом стоимость сеанса'],
     });
     assert.ok(res.gates.some((g) => g.name === 'gistScore'));
-    assert.ok(res.warnings.some((w) => w.name === 'gistScore'));
-    assert.ok(!res.blockers.some((b) => b.name === 'gistScore'));
+    assert.ok(res.blockers.some((b) => b.name === 'gistScore'));
+    assert.strictEqual(res.canPublish, false);
+  });
+});
+
+group('checkAsessorAudit', () => {
+  test('verdict reject → blocker', () => {
+    const r = checkers.checkAsessorAudit({
+      overall: 75,
+      verdict: 'reject',
+      thin_content_risk: 'high',
+      refiner_brief: 'Переписать MC с примерами.',
+    });
+    assert.strictEqual(r.pass, false);
+    assert.strictEqual(r.blocking, true);
+    assert.ok(r.evidence.refiner_brief.includes('Переписать'));
+  });
+  test('skipped → na pass', () => {
+    const r = checkers.checkAsessorAudit({ skipped: true, reason: 'no key' });
+    assert.strictEqual(r.pass, true);
+    assert.strictEqual(r.blocking, false);
+    assert.strictEqual(r.verdict, 'na');
+  });
+  test('overall 50 needs_rework → warning band', () => {
+    const r = checkers.checkAsessorAudit({ overall: 50, verdict: 'needs_rework' });
+    assert.strictEqual(r.pass, false);
+    assert.strictEqual(r.blocking, false);
+  });
+  test('finalize добавляет asessorAudit gate при наличии отчёта', () => {
+    const res = qualityGate.finalize('info', {
+      html: '<p>Конкретный текст без запрещённых формулировок</p>',
+      niche: 'окна',
+      asessorReport: { overall: 85, verdict: 'publish' },
+    });
+    assert.ok(res.gates.some((g) => g.name === 'asessorAudit'));
   });
 });
 
@@ -348,6 +413,11 @@ group('collectArtifacts', () => {
     assert.strictEqual(a.factReport, undefined);
     assert.strictEqual(a.riskReport, undefined);
     assert.strictEqual(a.html, '<p>hi</p>');
+  });
+  test('asessorReport прокидывается как raw artifact', () => {
+    const report = { overall: 80, verdict: 'publish' };
+    const a = collectArtifacts('info', { asessorReport: report });
+    assert.strictEqual(a.asessorReport, report);
   });
 });
 

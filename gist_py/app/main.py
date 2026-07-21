@@ -1,6 +1,7 @@
 """FastAPI entrypoint микросервиса gist_py (GIST + LinguaForensic pipeline).
 
 POST /relevance/scan   — M0: классификация запросов (список или GSC CSV)
+POST /topic/discover   — M-1: InfoGapRadar оценка темы
 POST /pipeline/run     — полный пайплайн M0–M10 для одного запроса
 GET  /health           — public healthcheck
 
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
@@ -93,9 +94,36 @@ class PipelineRequest(BaseModel):
     competitors_text: Optional[List[str]] = None
     modules: Optional[List[str]] = None  # напр. ["M2","M3"] → режим Gap Finder
     task_id: Optional[str] = None
+    skip_discovery: bool = True
 
 
-GAP_FINDER_MODULES = {"M1", "M2", "M3"}
+GAP_FINDER_MODULES = {"M1", "M1.5", "M2", "M3"}
+
+
+class TopicDiscoveryRequest(BaseModel):
+    query: str
+    niche: str = ""
+    trends_data: Optional[Dict] = None
+    reddit_insights: Optional[Any] = None
+    paa_questions: Optional[Any] = None
+
+
+@app.post("/topic/discover")
+def topic_discover(
+    body: TopicDiscoveryRequest,
+    x_internal_token: Optional[str] = Header(default=None),
+) -> Dict:
+    """M-1 Topic Discovery: InfoGapRadar go/no-go для темы."""
+    _check_token(x_internal_token)
+    query = (body.query or body.niche or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="query is empty")
+    return GistPipeline().run_topic_discovery(
+        query,
+        trends_data=body.trends_data,
+        reddit_insights=body.reddit_insights,
+        paa_questions=body.paa_questions,
+    )
 
 
 @app.post("/pipeline/run")

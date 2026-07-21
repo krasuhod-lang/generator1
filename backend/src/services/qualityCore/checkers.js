@@ -305,7 +305,7 @@ function checkValueAdds(brief, { thresholds } = {}) {
 // ─────────────────────────────────────────────────────────────────────
 // 12. GIST Score (ТЗ «GIST Content Logic», Задача B).
 //     gist_score = |{параграфов, покрывающих ≥1 тезис дельты}| / |параграфов|.
-//     Fail-open: warning, НЕ blocker; при отсутствии дельты — skip (pass).
+//     Fail-open при отсутствии артефактов; score ниже blockMin — blocker.
 // ─────────────────────────────────────────────────────────────────────
 
 /** Параграфы контента: p, li, td (видимый текст, ≥ 20 символов). */
@@ -342,10 +342,11 @@ function _paragraphCoversClaim(paraLower, claimText) {
 
 function checkGistScore(html, informationDelta, { thresholds } = {}) {
   const th = contentPolicy.getThresholds(thresholds);
+  const blockMinScore = _firstNumber([th.gistScoreBlockMin]) ?? 0.25;
   const minScore = _firstNumber([th.gistScoreMin]) ?? 0.30;
   const greenScore = _firstNumber([th.gistScoreGreen]) ?? 0.40;
 
-  if (!Array.isArray(informationDelta) || informationDelta.length === 0) {
+  if (!html || !Array.isArray(informationDelta) || informationDelta.length === 0) {
     return _verdict('gistScore', {
       pass: true,
       blocking: false,
@@ -369,16 +370,17 @@ function checkGistScore(html, informationDelta, { thresholds } = {}) {
   const score = paragraphs.length > 0 ? coveredCount / paragraphs.length : 0;
   const pct = Math.round(score * 100);
   const pass = score >= minScore;
-  const level = score >= greenScore ? 'green' : score >= minScore ? 'yellow' : 'red';
+  const blocking = score < blockMinScore;
+  const level = score >= greenScore ? 'green' : score >= minScore ? 'yellow' : score >= blockMinScore ? 'orange' : 'red';
 
   return _verdict('gistScore', {
     pass,
-    blocking: false, // warning, не blocker (fail-open)
+    blocking,
     score: pct,
     verdict: pass
       ? `GIST Score ${pct}%`
       : `GIST Score ${pct}% < ${Math.round(minScore * 100)}% — информационная дельта не раскрыта`,
-    evidence: { level, coveredCount, totalParagraphs: paragraphs.length, deltaClaims: deltaClaims.length },
+    evidence: { level, coveredCount, totalParagraphs: paragraphs.length, deltaClaims: deltaClaims.length, blockMin: blockMinScore, min: minScore },
   });
 }
 
@@ -418,6 +420,138 @@ function checkTzCompliance(tzCompliance, { minScore = 80 } = {}) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 14. Asessor-MC-Quality-Audit: LLM-судья по 10 осям MC + E-E-A-T.
+//     Чистый checker принимает готовый auditReport; сам LLM не вызывает.
+// ─────────────────────────────────────────────────────────────────────
+function checkAsessorAudit(auditReport, { thresholds } = {}) {
+  const th = contentPolicy.getThresholds(thresholds);
+  if (!auditReport || auditReport.skipped === true) {
+    return _verdict('asessorAudit', {
+      pass: true,
+      blocking: false,
+      verdict: 'na',
+      score: null,
+      evidence: { reason: auditReport && auditReport.reason ? auditReport.reason : 'no_asessor_report' },
+    });
+  }
+
+  const overall = _firstNumber([auditReport.overall]) ?? 0;
+  const verdict = String(auditReport.verdict || '').toLowerCase();
+  const minOverall = _firstNumber([th.asessorMinOverall]) ?? 60;
+  const blockOverall = _firstNumber([th.asessorBlockOverall]) ?? 40;
+  const pass = overall >= minOverall && verdict !== 'reject';
+  const blocking = verdict === 'reject' || overall < blockOverall;
+
+  return _verdict('asessorAudit', {
+    pass,
+    blocking,
+    score: overall,
+    verdict: pass ? 'publish' : (verdict || 'needs_rework'),
+    evidence: {
+      overall,
+      minOverall,
+      blockOverall,
+      thin_content_risk: auditReport.thin_content_risk || null,
+      eeat: auditReport.eeat ?? null,
+      axes: auditReport.axes || {},
+      key_weaknesses: Array.isArray(auditReport.key_weaknesses) ? auditReport.key_weaknesses.slice(0, 10) : [],
+      refiner_brief: auditReport.refiner_brief || '',
+    },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 15. Topic Discovery (M-1 InfoGapRadar). Никогда не блокирует. Warning,
+//     если тема в состоянии balance + manual_review (нужна ручная проверка
+//     спроса/предложения) — Итерация 2, Задача 1.3 ТЗ.
+// ─────────────────────────────────────────────────────────────────────
+function checkTopicDiscovery(topicDiscovery) {
+  if (!topicDiscovery || typeof topicDiscovery !== 'object') {
+    return _verdict('topicDiscovery', {
+      pass: true,
+      blocking: false,
+      verdict: 'na',
+      score: null,
+      evidence: { reason: 'no_topic_discovery' },
+    });
+  }
+  const state = String(topicDiscovery.topic_state || topicDiscovery.topic_status || '').toLowerCase();
+  const manualReview = topicDiscovery.manual_review === true;
+  // Warning только для balance + manual_review; остальные состояния — pass.
+  const pass = !(state === 'balance' && manualReview);
+  return _verdict('topicDiscovery', {
+    pass,
+    blocking: false, // никогда не blocker (ТЗ §1.3)
+    score: Number.isFinite(Number(topicDiscovery.topic_score)) ? Number(topicDiscovery.topic_score) : null,
+    verdict: pass ? (state || 'ok') : 'balance_manual_review',
+    evidence: {
+      topic_state: state || null,
+      manual_review: manualReview,
+      sub_niche_suggestions: Array.isArray(topicDiscovery.sub_niche_suggestions)
+        ? topicDiscovery.sub_niche_suggestions.slice(0, 5)
+        : [],
+      signals_used: topicDiscovery.signals_used || null,
+    },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 16. Semantic Fact-Check availability (fail-closed для YMYL — Итерация 2,
+//     Задача 3). Если семантическая верификация не смогла выполниться
+//     (LLM недоступен / таймаут / невалидный ответ) и режим FACTCHECK_FAIL_MODE
+//     требует блокировки для этой ниши — blocker semantic_factcheck_unavailable.
+//     Иначе (fail-open) — warning (как сейчас). Каждый fail-closed случай
+//     фиксируется в метриках (счётчик + ниша + причина).
+// ─────────────────────────────────────────────────────────────────────
+function checkSemanticFactcheck(semanticReport, { ymyl = false, failMode, niche } = {}) {
+  const policy = require('../infoArticle/semanticFactcheckPolicy');
+  if (!semanticReport || typeof semanticReport !== 'object') {
+    return _verdict('semantic_factcheck', {
+      pass: true, blocking: false, verdict: 'na',
+      evidence: { reason: 'no_semantic_report' },
+    });
+  }
+
+  const mode = policy.resolveFailMode(failMode);
+  const unavailable = semanticReport.unavailable === true
+    || semanticReport.semanticSkipped === true;
+
+  // Семантика отработала — проверка проходит без изменений.
+  if (!unavailable) {
+    return _verdict('semantic_factcheck', {
+      pass: true, blocking: false, verdict: 'ran',
+      evidence: { mode, ymyl: !!ymyl },
+    });
+  }
+
+  const reason = semanticReport.reason || 'semantic verification unavailable';
+  const isYmyl = typeof semanticReport.isYmyl === 'boolean' ? semanticReport.isYmyl : !!ymyl;
+  const failClosed = policy.shouldFailClosed({ failMode: mode, isYmyl });
+  const nicheKey = niche || semanticReport.niche || null;
+
+  if (failClosed) {
+    // Единственный побочный эффект чекера: инкремент процессного счётчика
+    // fail-closed для мониторинга доли блокировок (ниша + причина).
+    policy.recordFailClosed({ niche: nicheKey, reason });
+    return _verdict('semantic_factcheck', {
+      pass: false, blocking: true, verdict: 'unavailable',
+      evidence: {
+        blocker: 'semantic_factcheck_unavailable',
+        mode, ymyl: isYmyl, niche: nicheKey, reason,
+        retry_schedule_ms: policy.retrySchedule(),
+        max_retries: policy.MAX_RETRIES,
+      },
+    });
+  }
+
+  // Fail-open: недоступность семантики — только предупреждение.
+  return _verdict('semantic_factcheck', {
+    pass: false, blocking: false, verdict: 'unavailable_warning',
+    evidence: { mode, ymyl: isYmyl, niche: nicheKey, reason },
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 function _firstNumber(candidates) {
   for (const c of candidates) {
@@ -440,6 +574,9 @@ module.exports = {
   checkValueAdds,
   checkGistScore,
   checkTzCompliance,
+  checkAsessorAudit,
+  checkTopicDiscovery,
+  checkSemanticFactcheck,
   // helpers for tests
   _internal: { _plainLower, _firstNumber, RISK_ORDER, _extractParagraphs },
 };
