@@ -108,7 +108,7 @@ const PROJECTS_CONFIG = deepFreeze({
     enabled: true,
     model: 'deepseek-reasoner',
     temperature: 0.4,
-    maxTokens: 8000,        // развёрнутый markdown-отчёт + bandwidth для reasoning
+    maxTokens: 16000,       // развёрнутый markdown-отчёт + bandwidth для reasoning
     timeoutMs: 240000,      // до 4 минут — reasoner думает дольше chat-модели
     topQueries: 50,         // топ-50 запросов в срез
     topPages: 20,           // топ-20 страниц в срез

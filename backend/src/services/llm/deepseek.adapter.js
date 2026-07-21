@@ -6,6 +6,12 @@ const DEEPSEEK_ENDPOINT = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek
 // Все аналитические функции пайплайнов идут через DeepSeek-V4-Pro
 // (копирайтинг — через Gemini, см. geminiModels.js).
 const DEEPSEEK_MODEL    = process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
+// Дефолтный лимит выходных токенов. 8000 обрезал крупные JSON-ответы —
+// увеличен до 16000; можно переопределить через .env.
+const DEEPSEEK_DEFAULT_MAX_TOKENS = Math.min(
+  Math.max(Number(process.env.DEEPSEEK_MAX_TOKENS) || 16000, 1),
+  32000,
+);
 
 /**
  * Определяет, является ли модель DeepSeek reasoning-моделью (R1/reasoner).
@@ -28,7 +34,7 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
 
   const {
     temperature = 0.4,
-    maxTokens   = 8000,
+    maxTokens   = DEEPSEEK_DEFAULT_MAX_TOKENS,
     timeoutMs   = 120000,
     logprobs    = false,
     model       = DEEPSEEK_MODEL,
