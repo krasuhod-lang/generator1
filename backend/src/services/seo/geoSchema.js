@@ -132,6 +132,10 @@ function buildArticleJsonLd(args = {}) {
     if (authorUrl) author.url = authorUrl;
     const authorJobTitle = sanitizeText(args.author.jobTitle, 200);
     if (authorJobTitle) author.jobTitle = authorJobTitle;
+    if (Array.isArray(args.author.sameAs)) {
+      const authorSameAs = args.author.sameAs.map(sanitizeUrl).filter(Boolean);
+      if (authorSameAs.length > 0) author.sameAs = authorSameAs;
+    }
     out.author = author;
   }
 

@@ -62,6 +62,42 @@ async function runGistGapFinder({ keyword, competitors_text, page_type, target_a
 }
 
 /**
+ * M-1 Topic Discovery (InfoGapRadar): агрегированные сигналы спроса/предложения
+ * → topic_state (void|lack|balance|abundance) + go/no-go + подниши.
+ *
+ * @param {object} params
+ * @param {string} params.query — ключевой запрос/тема
+ * @param {object|null} [params.trends_data] — сигналы Google Trends (demand/supply)
+ * @param {Array|object|null} [params.reddit_insights] — боли/темы аудитории (Reddit Mapper)
+ * @param {Array|object|null} [params.paa_questions] — вопросы People Also Ask
+ * @returns {Promise<{topic_status:string, topic_score:number|null,
+ *   go_decision:boolean, sub_niche_suggestions:string[], reasoning:string,
+ *   manual_review?:boolean}>}
+ */
+async function runTopicDiscovery({ query, trends_data = null, reddit_insights = null, paa_questions = null } = {}) {
+  const response = await axios.post(
+    `${GIST_URL}/topic/discover`,
+    {
+      query,
+      trends_data: trends_data || null,
+      reddit_insights: reddit_insights || null,
+      paa_questions: paa_questions || null,
+    },
+    { headers: _headers(), timeout: 45000 },
+  );
+  const data = response.data || {};
+  const suggestions = Array.isArray(data.sub_niche_suggestions) ? data.sub_niche_suggestions : [];
+  return {
+    topic_status: typeof data.topic_status === 'string' ? data.topic_status : 'balance',
+    topic_score: data.topic_score ?? null,
+    go_decision: data.go_decision !== false,
+    sub_niche_suggestions: suggestions,
+    reasoning: typeof data.reasoning === 'string' ? data.reasoning : '',
+    manual_review: data.manual_review === true,
+  };
+}
+
+/**
  * M0 Relevance Scanner для одного ключа.
  * @param {object} params — { keyword }
  * @returns {Promise<{aio_group: string|null, trigger_rate: number|null, intent_type: string|null}>}
@@ -159,6 +195,7 @@ function buildGistDeltaBrief(informationDelta) {
 
 module.exports = {
   runGistGapFinder,
+  runTopicDiscovery,
   scanRelevance,
   mergeContentGaps,
   formatDeltaAsBullets,

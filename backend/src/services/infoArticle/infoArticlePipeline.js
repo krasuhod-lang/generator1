@@ -132,6 +132,21 @@ const INFO_ARTICLE_FACTCHECK_ENABLED =
 const FACTCHECK_SEMANTIC_ENABLED =
   !['0', 'false', 'no', 'off'].includes(String(process.env.FACTCHECK_SEMANTIC_ENABLED || '1').toLowerCase());
 
+// ── M-1 Topic Discovery (Итерация 2, Задача 1.3) ──────────────────────
+// Проводка реальных сигналов спроса/предложения (Reddit Mapper + PAA +
+// Google Trends) → gist_py POST /topic/discover до Stage 0. Fail-open.
+const TOPIC_DISCOVERY_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.TOPIC_DISCOVERY_ENABLED || '1').toLowerCase());
+// Автопивот на подтему при topic_state=abundance (по умолчанию OFF).
+const TOPIC_AUTO_PIVOT =
+  ['1', 'true', 'yes', 'on'].includes(String(process.env.TOPIC_AUTO_PIVOT || '').toLowerCase());
+
+// ── Видимый блок «Об авторе» (Итерация 2, Задача 2) ───────────────────
+const AUTHOR_BLOCK_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.AUTHOR_BLOCK_ENABLED || '1').toLowerCase());
+
+
+
 // ── Anti-plagiarism (Phase 1 / P0-3) ──────────────────────────────────
 // Детерминированная сверка финального articleHtml с теми же
 // SERP-evidence сниппетами по n-gram overlap. Цель — поймать прямые
@@ -528,11 +543,13 @@ async function runWriter(task, args, ctx, opts = {}) {
   // НЕ выдумывал ФИО. date_modified — текущая дата в формате YYYY-MM-DD.
   const authorName = personaMeta && personaMeta.display_name ? personaMeta.display_name : '';
   const authorRole = personaMeta && personaMeta.role ? personaMeta.role : '';
+  const authorBioShort = personaMeta && personaMeta.bio_short ? personaMeta.bio_short : '';
   const dateModified = new Date().toISOString().slice(0, 10);
   // Прокидываем меты в task, чтобы pipeline на этапе post-processing
   // мог собрать byline + JSON-LD без повторного выбора персоны.
   task.__authorName = authorName;
   task.__authorRole = authorRole;
+  task.__authorBioShort = authorBioShort;
   task.__authorPersonaKey = personaKey;
   task.__dateModified = dateModified;
 
@@ -1350,6 +1367,51 @@ async function processInfoArticleTask(taskId) {
         }
       } catch (styleErr) {
         await appendLog(taskId, `⚠ Анализ площадки: ошибка (${styleErr.message}) — продолжаем без него`, 'warn');
+      }
+    }
+
+    // 0. M-1 Topic Discovery (InfoGapRadar) — до Stage 0, за флагом
+    //    TOPIC_DISCOVERY_ENABLED (default on, fail-open). Собирает реальные
+    //    сигналы спроса/предложения (Reddit Mapper + PAA + Google Trends) и
+    //    вызывает gist_py POST /topic/discover. Результат — в article_meta
+    //    (колонка topic_discovery) для AEGIS Phase 5. Задача 1.3 ТЗ.
+    if (TOPIC_DISCOVERY_ENABLED) {
+      try {
+        const topicDiscovery = require('../topicDiscovery/topicDiscovery.service');
+        const td = await topicDiscovery.runTopicDiscovery({
+          query: task.topic,
+          niche: task.topic || '',
+          serpVerification: relevanceArtifact && relevanceArtifact.serpVerification
+            ? relevanceArtifact.serpVerification
+            : null,
+          log: (m) => { console.log(`[infoArticle:${taskId}] ${m}`); },
+        });
+        await saveColumn(taskId, 'topic_discovery', td);
+        await appendLog(
+          taskId,
+          `🧭 Topic Discovery: state=${td.topic_state}`
+            + `${td.topic_score != null ? ` score=${td.topic_score}` : ''}`
+            + `${td.manual_review ? ' (manual_review)' : ''}`,
+          td.manual_review ? 'warn' : 'ok',
+        );
+        // Abundance → авто-пивот на подтему за флагом TOPIC_AUTO_PIVOT (default off).
+        if (td.topic_state === 'abundance' && td.sub_niche_suggestions.length) {
+          if (TOPIC_AUTO_PIVOT) {
+            await appendLog(
+              taskId,
+              `↪ Abundance: авто-пивот на подтему «${td.sub_niche_suggestions[0]}»`,
+              'ok',
+            );
+          } else {
+            await appendLog(
+              taskId,
+              `⚠ Abundance: рекомендованы подтемы — ${td.sub_niche_suggestions.slice(0, 3).join('; ')}`,
+              'warn',
+            );
+          }
+        }
+      } catch (tdErr) {
+        await appendLog(taskId, `⚠ Topic Discovery: ошибка (${tdErr.message}) — продолжаем`, 'warn');
       }
     }
 
@@ -2491,6 +2553,34 @@ async function processInfoArticleTask(taskId) {
         ? `${task.__dateModified}T00:00:00.000Z`
         : new Date().toISOString();
 
+      // Видимый блок «Об авторе» (E-E-A-T, Итерация 2, Задача 2) + sameAs
+      // для обогащения Article JSON-LD author. Fail-open: без имени автора
+      // блок пустой и HTML не меняется.
+      let authorSameAs = [];
+      let visibleAuthorHtml = '';
+      if (AUTHOR_BLOCK_ENABLED && task.__authorName) {
+        try {
+          const { buildAuthorBlock } = require('../seo/authorBlock.service');
+          const ab = buildAuthorBlock({
+            persona: {
+              name: task.__authorName,
+              role: task.__authorRole,
+              short_bio: task.__authorBioShort || '',
+            },
+            company: {
+              company_name: task.brand_name || task.brand || '',
+              company_url: task.target_site_url || '',
+              social_links: Array.isArray(task.__companySocialLinks) ? task.__companySocialLinks : [],
+            },
+            dateModified: task.__dateModified || '',
+          });
+          authorSameAs = ab.sameAs || [];
+          visibleAuthorHtml = ab.html || '';
+        } catch (abErr) {
+          console.warn(`[infoArticle] author block failed: ${abErr.message}`);
+        }
+      }
+
       const article = buildArticleJsonLd({
         articleType: 'BlogPosting',
         headline,
@@ -2501,6 +2591,7 @@ async function processInfoArticleTask(taskId) {
         author: task.__authorName ? {
           name: task.__authorName,
           jobTitle: task.__authorRole || '',
+          sameAs: authorSameAs,
         } : null,
         image: extractCoverImage(finalHtml),
       });
@@ -2519,11 +2610,16 @@ async function processInfoArticleTask(taskId) {
         }
       }
 
+      // Видимый блок автора добавляем в тело статьи ПЕРЕД JSON-LD скриптами.
+      const bodyHtml = visibleAuthorHtml ? `${finalHtml}\n${visibleAuthorHtml}` : finalHtml;
+
       const blocks = [article, faq, howto].filter(Boolean);
       if (blocks.length > 0) {
         const scripts = assembleJsonLdScripts(blocks);
-        articleHtmlWithSchema = `${finalHtml}\n${scripts.join('\n')}`;
+        articleHtmlWithSchema = `${bodyHtml}\n${scripts.join('\n')}`;
         jsonLdBlocks = blocks;
+      } else if (visibleAuthorHtml) {
+        articleHtmlWithSchema = bodyHtml;
       }
 
       if (task.__authorName) {
@@ -2553,7 +2649,7 @@ async function processInfoArticleTask(taskId) {
     try {
       const { qualityGate } = require('../qualityCore');
       const { rows: [qr] } = await db.query(
-        `SELECT fact_check_report, plagiarism_report, lsi_overdose_report, intent_verdict
+        `SELECT fact_check_report, plagiarism_report, lsi_overdose_report, intent_verdict, topic_discovery
            FROM info_article_tasks WHERE id = $1`,
         [taskId],
       );
@@ -2568,6 +2664,7 @@ async function processInfoArticleTask(taskId) {
           plagiarismReport:  qr && qr.plagiarism_report,
           lsiOverdoseReport: qr && qr.lsi_overdose_report,
           intentReport:      qr && qr.intent_verdict,
+          topicDiscovery:    qr && qr.topic_discovery,
           informationDelta:  (whitespace && whitespace.information_delta) || null,
           authorship: {
             byline:   authorByline || task.__authorName || null,

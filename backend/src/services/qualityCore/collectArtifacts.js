@@ -116,6 +116,9 @@ function collectArtifacts(pipeline, raw = {}) {
   if (raw.asessorReport && typeof raw.asessorReport === 'object') {
     out.asessorReport = raw.asessorReport;
   }
+  if (raw.topicDiscovery && typeof raw.topicDiscovery === 'object') {
+    out.topicDiscovery = raw.topicDiscovery;
+  }
 
   // ── Risk: явный riskReport приоритетнее, иначе — из Stage 8 evaluator ─
   if (raw.riskReport) {

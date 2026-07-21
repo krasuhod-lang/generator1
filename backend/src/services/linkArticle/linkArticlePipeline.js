@@ -83,6 +83,15 @@ const MAX_PARALLEL_IMAGES = (() => {
 const LINK_ARTICLE_GEMINI_CACHE_ENABLED =
   String(process.env.LINK_ARTICLE_GEMINI_CACHE_ENABLED || '').toLowerCase() === 'true';
 
+// ── M-1 Topic Discovery (Итерация 2, Задача 1.3) ──────────────────────
+const TOPIC_DISCOVERY_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.TOPIC_DISCOVERY_ENABLED || '1').toLowerCase());
+const TOPIC_AUTO_PIVOT =
+  ['1', 'true', 'yes', 'on'].includes(String(process.env.TOPIC_AUTO_PIVOT || '').toLowerCase());
+const AUTHOR_BLOCK_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.AUTHOR_BLOCK_ENABLED || '1').toLowerCase());
+
+
 // TTL Gemini кэша. Дефолт 900 сек = 15 минут — хватает на Stage 3 + corrective + Stage 4.
 const LINK_ARTICLE_GEMINI_CACHE_TTL_S = (() => {
   const v = parseInt(process.env.LINK_ARTICLE_GEMINI_CACHE_TTL_S, 10);
@@ -919,6 +928,7 @@ async function processLinkArticleTask(taskId) {
   // Tracked across try/catch/finally for cleanup paths.
   let geminiCacheName = null;
   let funnel = null;
+  let topicDiscoveryResult = null;
 
   try {
     const { rows } = await db.query(
@@ -976,6 +986,40 @@ async function processLinkArticleTask(taskId) {
     );
     publishEvent(taskId, 'status', { status: 'running' });
     await appendLog(taskId, '🚀 Старт генерации ссылочной статьи', 'ok');
+
+    // 0. M-1 Topic Discovery (InfoGapRadar) — до Stage 0, за флагом
+    //    TOPIC_DISCOVERY_ENABLED (default on, fail-open). Задача 1.3 ТЗ.
+    if (TOPIC_DISCOVERY_ENABLED) {
+      try {
+        const topicDiscovery = require('../topicDiscovery/topicDiscovery.service');
+        const td = await topicDiscovery.runTopicDiscovery({
+          query: task.topic,
+          niche: task.topic || '',
+          serpVerification: task.__relevanceArtifact && task.__relevanceArtifact.serpVerification
+            ? task.__relevanceArtifact.serpVerification
+            : null,
+          log: (m) => { console.log(`[linkArticle:${taskId}] ${m}`); },
+        });
+        await saveStageResult(taskId, 'topic_discovery', td);
+        topicDiscoveryResult = td;
+        await appendLog(
+          taskId,
+          `🧭 Topic Discovery: state=${td.topic_state}`
+            + `${td.topic_score != null ? ` score=${td.topic_score}` : ''}`
+            + `${td.manual_review ? ' (manual_review)' : ''}`,
+          td.manual_review ? 'warn' : 'ok',
+        );
+        if (td.topic_state === 'abundance' && td.sub_niche_suggestions.length && !TOPIC_AUTO_PIVOT) {
+          await appendLog(
+            taskId,
+            `⚠ Abundance: рекомендованы подтемы — ${td.sub_niche_suggestions.slice(0, 3).join('; ')}`,
+            'warn',
+          );
+        }
+      } catch (tdErr) {
+        await appendLog(taskId, `⚠ Topic Discovery: ошибка (${tdErr.message}) — продолжаем`, 'warn');
+      }
+    }
 
     // 1. Pre-Stage 0
     await setStage(taskId, 'pre_stage0', 8);
@@ -1348,6 +1392,32 @@ async function processLinkArticleTask(taskId) {
         ? `${task.__dateModified}T00:00:00.000Z`
         : new Date().toISOString();
 
+      // Видимый блок «Об авторе» (E-E-A-T, Задача 2) + sameAs для JSON-LD.
+      let authorSameAs = [];
+      let visibleAuthorHtml = '';
+      if (AUTHOR_BLOCK_ENABLED && task.__authorName) {
+        try {
+          const { buildAuthorBlock } = require('../seo/authorBlock.service');
+          const ab = buildAuthorBlock({
+            persona: {
+              name: task.__authorName,
+              role: task.__authorRole,
+              short_bio: task.author_bio || '',
+            },
+            company: {
+              company_name: task.brand_name || task.brand || '',
+              company_url: task.target_site_url || task.anchor_url || '',
+              social_links: Array.isArray(task.__companySocialLinks) ? task.__companySocialLinks : [],
+            },
+            dateModified: task.__dateModified || '',
+          });
+          authorSameAs = ab.sameAs || [];
+          visibleAuthorHtml = ab.html || '';
+        } catch (abErr) {
+          console.warn(`[linkArticle] author block failed: ${abErr.message}`);
+        }
+      }
+
       const article = buildArticleJsonLd({
         articleType: 'BlogPosting',
         headline,
@@ -1358,6 +1428,7 @@ async function processLinkArticleTask(taskId) {
         author: task.__authorName ? {
           name: task.__authorName,
           jobTitle: task.__authorRole || '',
+          sameAs: authorSameAs,
         } : null,
         image: extractCoverImage(finalHtml),
       });
@@ -1376,11 +1447,15 @@ async function processLinkArticleTask(taskId) {
         }
       }
 
+      const bodyHtml = visibleAuthorHtml ? `${finalHtml}\n${visibleAuthorHtml}` : finalHtml;
+
       const blocks = [article, faq, howto].filter(Boolean);
       if (blocks.length > 0) {
         const scripts = assembleJsonLdScripts(blocks);
-        articleHtmlWithSchema = `${finalHtml}\n${scripts.join('\n')}`;
+        articleHtmlWithSchema = `${bodyHtml}\n${scripts.join('\n')}`;
         jsonLdBlocks = blocks;
+      } else if (visibleAuthorHtml) {
+        articleHtmlWithSchema = bodyHtml;
       }
       if (task.__authorName) {
         authorByline = task.__authorRole
@@ -1411,6 +1486,7 @@ async function processLinkArticleTask(taskId) {
           html: finalHtml,
           niche: task.topic || task.region || '',
           currentYear: new Date().getFullYear(),
+          topicDiscovery: topicDiscoveryResult,
           authorship: {
             byline:   authorByline || task.__authorName || null,
             reviewer: task.__reviewerName || null,

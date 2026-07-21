@@ -112,6 +112,10 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   if (artifacts.asessorReport) {
     gates.push(checkers.checkAsessorAudit(artifacts.asessorReport, { thresholds }));
   }
+  // Topic Discovery (15-й чекер): warning при balance + manual_review.
+  if (artifacts.topicDiscovery) {
+    gates.push(checkers.checkTopicDiscovery(artifacts.topicDiscovery));
+  }
 
   const blockers = gates.filter((g) => g.blocking && !g.pass);
   const warnings = gates.filter((g) => !g.pass && !g.blocking);

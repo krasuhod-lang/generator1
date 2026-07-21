@@ -461,6 +461,41 @@ function checkAsessorAudit(auditReport, { thresholds } = {}) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 15. Topic Discovery (M-1 InfoGapRadar). Никогда не блокирует. Warning,
+//     если тема в состоянии balance + manual_review (нужна ручная проверка
+//     спроса/предложения) — Итерация 2, Задача 1.3 ТЗ.
+// ─────────────────────────────────────────────────────────────────────
+function checkTopicDiscovery(topicDiscovery) {
+  if (!topicDiscovery || typeof topicDiscovery !== 'object') {
+    return _verdict('topicDiscovery', {
+      pass: true,
+      blocking: false,
+      verdict: 'na',
+      score: null,
+      evidence: { reason: 'no_topic_discovery' },
+    });
+  }
+  const state = String(topicDiscovery.topic_state || topicDiscovery.topic_status || '').toLowerCase();
+  const manualReview = topicDiscovery.manual_review === true;
+  // Warning только для balance + manual_review; остальные состояния — pass.
+  const pass = !(state === 'balance' && manualReview);
+  return _verdict('topicDiscovery', {
+    pass,
+    blocking: false, // никогда не blocker (ТЗ §1.3)
+    score: Number.isFinite(Number(topicDiscovery.topic_score)) ? Number(topicDiscovery.topic_score) : null,
+    verdict: pass ? (state || 'ok') : 'balance_manual_review',
+    evidence: {
+      topic_state: state || null,
+      manual_review: manualReview,
+      sub_niche_suggestions: Array.isArray(topicDiscovery.sub_niche_suggestions)
+        ? topicDiscovery.sub_niche_suggestions.slice(0, 5)
+        : [],
+      signals_used: topicDiscovery.signals_used || null,
+    },
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 function _firstNumber(candidates) {
   for (const c of candidates) {
@@ -484,6 +519,7 @@ module.exports = {
   checkGistScore,
   checkTzCompliance,
   checkAsessorAudit,
+  checkTopicDiscovery,
   // helpers for tests
   _internal: { _plainLower, _firstNumber, RISK_ORDER, _extractParagraphs },
 };
