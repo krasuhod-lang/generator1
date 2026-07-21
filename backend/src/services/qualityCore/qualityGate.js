@@ -108,6 +108,10 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   if (artifacts.tzCompliance) {
     gates.push(checkers.checkTzCompliance(artifacts.tzCompliance));
   }
+  // Asessor-MC-Quality-Audit (14-й чекер): LLM-судья MC, если отчёт уже собран.
+  if (artifacts.asessorReport) {
+    gates.push(checkers.checkAsessorAudit(artifacts.asessorReport, { thresholds }));
+  }
 
   const blockers = gates.filter((g) => g.blocking && !g.pass);
   const warnings = gates.filter((g) => !g.pass && !g.blocking);

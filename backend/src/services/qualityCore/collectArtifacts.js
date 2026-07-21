@@ -61,7 +61,7 @@ function riskFromEvaluator(evaluator) {
  *   { html, niche, currentYear, ymyl,
  *     plagiarismReport, factReport, intentReport, lsiOverdoseReport,
  *     links, riskReport, evaluatorReport, authorship, informationGainBrief,
- *     informationDelta, tzCompliance }
+ *     informationDelta, tzCompliance, asessorReport }
  * @returns {object} artifacts для qualityGate.finalize()
  */
 function collectArtifacts(pipeline, raw = {}) {
@@ -112,6 +112,9 @@ function collectArtifacts(pipeline, raw = {}) {
   }
   if (raw.tzCompliance && typeof raw.tzCompliance === 'object') {
     out.tzCompliance = raw.tzCompliance;
+  }
+  if (raw.asessorReport && typeof raw.asessorReport === 'object') {
+    out.asessorReport = raw.asessorReport;
   }
 
   // ── Risk: явный riskReport приоритетнее, иначе — из Stage 8 evaluator ─

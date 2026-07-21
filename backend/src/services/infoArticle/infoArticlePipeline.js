@@ -56,7 +56,7 @@ const {
   buildSerpEvidence,
   renderEvidenceForPrompt,
 } = require('./serpEvidence.service');
-const { runFactCheck } = require('./factCheck.service');
+const { runFactCheck, runSemanticFactCheck } = require('./factCheck.service');
 const { runPlagiarismCheck } = require('./plagiarism.service');
 const { runImageQa } = require('./imageQa.service');
 const {
@@ -129,6 +129,8 @@ const INFO_ARTICLE_GROUNDING_ENABLED =
 // grounding-флага, но требует наличия task.__serpEvidence (иначе skip).
 const INFO_ARTICLE_FACTCHECK_ENABLED =
   String(process.env.INFO_ARTICLE_FACTCHECK_ENABLED || '').toLowerCase() === 'true';
+const FACTCHECK_SEMANTIC_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.FACTCHECK_SEMANTIC_ENABLED || '1').toLowerCase());
 
 // ── Anti-plagiarism (Phase 1 / P0-3) ──────────────────────────────────
 // Детерминированная сверка финального articleHtml с теми же
@@ -1901,7 +1903,16 @@ async function processInfoArticleTask(taskId) {
     //      сверять). Не валит pipeline ни при каких сбоях — graceful warn.
     if (INFO_ARTICLE_FACTCHECK_ENABLED && task.__serpEvidence) {
       try {
-        const factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+        let factCheck;
+        if (FACTCHECK_SEMANTIC_ENABLED) {
+          try {
+            factCheck = await runSemanticFactCheck(articleHtml, task.__serpEvidence);
+          } catch (_semanticErr) {
+            factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+          }
+        } else {
+          factCheck = runFactCheck(articleHtml, task.__serpEvidence);
+        }
         await saveColumn(taskId, 'fact_check_report', factCheck);
         const s = factCheck.summary;
         const verdictIcon = s.verdict === 'pass' ? '✅'

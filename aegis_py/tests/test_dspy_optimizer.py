@@ -7,6 +7,14 @@ from aegis_py.app import dspy_optimizer as opt
 def test_mutation_kinds_nonempty():
     assert isinstance(opt.MUTATION_KINDS, tuple)
     assert len(opt.MUTATION_KINDS) >= 5
+    assert {
+        "aio_first_paragraph",
+        "entity_dense_list",
+        "faq_schema_block",
+        "contrast_semantics",
+        "comparison_table_first",
+        "multimodal_placeholders",
+    }.issubset(set(opt.MUTATION_KINDS))
     for k in opt.MUTATION_KINDS:
         assert isinstance(k, str) and len(k) > 0
 
@@ -50,6 +58,10 @@ def test_apply_mutation_adds_marker():
     out = opt.apply_mutation("Base prompt.", "shorter_intro")
     assert "Base prompt." in out
     assert "[MUTATION/ε-greedy]" in out
+    aio = opt.apply_mutation("Base prompt.", "aio_first_paragraph")
+    assert "Base prompt." in aio
+    assert "[MUTATION/ε-greedy]" in aio
+    assert "130–170" in aio
 
 
 def test_apply_mutation_unknown_kind_returns_prompt():

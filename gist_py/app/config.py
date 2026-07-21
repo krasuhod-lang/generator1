@@ -23,6 +23,13 @@ def _i(name: str, default: int) -> int:
         return default
 
 
+def _b(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 CONFIG = {
     # M1 Competitor Scraper
     "serp_top_n": _i("GIST_SERP_TOP_N", 10),
@@ -55,9 +62,21 @@ CONFIG = {
     # Stop criteria (§15)
     "robotness_stop": _f("GIST_ROBOTNESS_STOP", 25.0),
     "max_rewrite_iterations": _i("GIST_MAX_REWRITES", 3),
+    "fact_preservation_max_retries": _i("GIST_FACT_RETRIES", 2),
+    # M-1 Topic Discovery
+    "topic_score_go_states": [
+        s.strip()
+        for s in os.environ.get("GIST_TOPIC_SCORE_GO_STATES", "void,lack").split(",")
+        if s.strip()
+    ],
+    # M1.5 SERP Cleansing
+    "cleansing_enabled": _b("GIST_CLEANSING_ENABLED", True),
     # AIO-snippet: 40–60 слов
     "aio_snippet_min_words": _i("GIST_AIO_MIN_WORDS", 40),
     "aio_snippet_max_words": _i("GIST_AIO_MAX_WORDS", 60),
+    # AIO passage: самодостаточные пассажи 130–170 слов
+    "aio_passage_min_words": _i("GIST_AIO_PASSAGE_MIN", 130),
+    "aio_passage_max_words": _i("GIST_AIO_PASSAGE_MAX", 170),
     # Внешние сервисы
     "headless_fetcher_url": os.environ.get(
         "RELEVANCE_HEADLESS_FETCHER_URL", "http://relevance_fetcher:8001/fetch"
