@@ -85,6 +85,12 @@ services:
       # GIST Content Logic: внутренний URL gist_py (M3 Gap Finder для пайплайнов)
       GIST_SERVICE_URL: ${GIST_SERVICE_URL:-http://gist:8003}
       GIST_INTERNAL_TOKEN: ${GIST_INTERNAL_TOKEN:-}
+      # M-1 Topic Discovery (InfoGapRadar) + видимый блок автора (E-E-A-T)
+      TOPIC_DISCOVERY_ENABLED: ${TOPIC_DISCOVERY_ENABLED:-1}
+      TOPIC_AUTO_PIVOT: ${TOPIC_AUTO_PIVOT:-0}
+      TOPIC_TRENDS_ENABLED: ${TOPIC_TRENDS_ENABLED:-1}
+      TOPIC_TRENDS_GEO: ${TOPIC_TRENDS_GEO:-}
+      AUTHOR_BLOCK_ENABLED: ${AUTHOR_BLOCK_ENABLED:-1}
     ports:
       - "3000:3000"
     depends_on:
@@ -123,6 +129,12 @@ services:
       # GIST Content Logic: внутренний URL gist_py (M3 Gap Finder для пайплайнов)
       GIST_SERVICE_URL: ${GIST_SERVICE_URL:-http://gist:8003}
       GIST_INTERNAL_TOKEN: ${GIST_INTERNAL_TOKEN:-}
+      # M-1 Topic Discovery (InfoGapRadar) + видимый блок автора (E-E-A-T)
+      TOPIC_DISCOVERY_ENABLED: ${TOPIC_DISCOVERY_ENABLED:-1}
+      TOPIC_AUTO_PIVOT: ${TOPIC_AUTO_PIVOT:-0}
+      TOPIC_TRENDS_ENABLED: ${TOPIC_TRENDS_ENABLED:-1}
+      TOPIC_TRENDS_GEO: ${TOPIC_TRENDS_GEO:-}
+      AUTHOR_BLOCK_ENABLED: ${AUTHOR_BLOCK_ENABLED:-1}
     command: node src/queue/worker.js
     depends_on:
       postgres:
