@@ -91,6 +91,7 @@ services:
       TOPIC_TRENDS_ENABLED: ${TOPIC_TRENDS_ENABLED:-1}
       TOPIC_TRENDS_GEO: ${TOPIC_TRENDS_GEO:-}
       AUTHOR_BLOCK_ENABLED: ${AUTHOR_BLOCK_ENABLED:-1}
+      FACTCHECK_FAIL_MODE: ${FACTCHECK_FAIL_MODE:-open}
     ports:
       - "3000:3000"
     depends_on:
@@ -135,6 +136,7 @@ services:
       TOPIC_TRENDS_ENABLED: ${TOPIC_TRENDS_ENABLED:-1}
       TOPIC_TRENDS_GEO: ${TOPIC_TRENDS_GEO:-}
       AUTHOR_BLOCK_ENABLED: ${AUTHOR_BLOCK_ENABLED:-1}
+      FACTCHECK_FAIL_MODE: ${FACTCHECK_FAIL_MODE:-open}
     command: node src/queue/worker.js
     depends_on:
       postgres:

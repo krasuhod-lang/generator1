@@ -1968,7 +1968,9 @@ async function processInfoArticleTask(taskId) {
         let factCheck;
         if (FACTCHECK_SEMANTIC_ENABLED) {
           try {
-            factCheck = await runSemanticFactCheck(articleHtml, task.__serpEvidence);
+            factCheck = await runSemanticFactCheck(articleHtml, task.__serpEvidence, {
+              niche: task.topic || task.region || '',
+            });
           } catch (_semanticErr) {
             factCheck = runFactCheck(articleHtml, task.__serpEvidence);
           }
@@ -2706,6 +2708,36 @@ async function processInfoArticleTask(taskId) {
         `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
         gateResult.canPublish ? 'ok' : 'warn',
       );
+
+      // §Задача 3: fail-closed Semantic Fact-Check для YMYL. Если gate выдал
+      // blocker semantic_factcheck_unavailable — статья идёт в очередь ретраев
+      // (1/5/15 мин, 3 попытки), после исчерпания — в ручную модерацию.
+      // Персистится через quality_gate (canPublish=false) + пометку статуса.
+      try {
+        const semBlocker = (gateResult.blockers || []).find(
+          (b) => b.name === 'semantic_factcheck',
+        );
+        if (semBlocker) {
+          const policy = require('./semanticFactcheckPolicy');
+          const schedule = policy.retrySchedule().map((ms) => `${Math.round(ms / 60000)}м`).join('/');
+          // Помечаем вердикт: очередь ретраев, затем ручная модерация.
+          if (qualityGateVerdict) {
+            qualityGateVerdict.semantic_factcheck = {
+              action: 'retry_then_manual_moderation',
+              max_retries: policy.MAX_RETRIES,
+              retry_schedule_ms: policy.retrySchedule(),
+            };
+          }
+          await appendLog(
+            taskId,
+            `🛑 Semantic fact-check недоступен для YMYL-ниши — статья в очередь ретраев ` +
+            `(${policy.MAX_RETRIES} попытки: ${schedule}), затем ручная модерация`,
+            'warn',
+          );
+        }
+      } catch (semErr) {
+        console.warn(`[infoArticle] semantic fail-closed handling: ${semErr.message}`);
+      }
     } catch (gateErr) {
       console.warn(`[infoArticle] quality gate failed: ${gateErr.message}`);
     }

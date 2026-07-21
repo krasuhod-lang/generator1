@@ -82,6 +82,15 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   if (artifacts.factReport) {
     gates.push(checkers.checkFactConfidence(artifacts.factReport, { thresholds }));
   }
+  // Semantic fact-check availability (16-й чекер, Задача 3): fail-closed
+  // для YMYL при недоступной семантике → blocker semantic_factcheck_unavailable.
+  if (artifacts.semanticFactcheck) {
+    gates.push(checkers.checkSemanticFactcheck(artifacts.semanticFactcheck, {
+      ymyl,
+      failMode: opts.failMode,
+      niche: artifacts.niche || '',
+    }));
+  }
   if (artifacts.intentReport) {
     gates.push(checkers.checkIntent(artifacts.intentReport, { thresholds }));
   }

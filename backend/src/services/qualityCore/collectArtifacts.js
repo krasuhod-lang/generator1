@@ -101,6 +101,15 @@ function collectArtifacts(pipeline, raw = {}) {
     out.factReport = fc;
   }
 
+  // ── Semantic fact-check availability (Задача 3) ─────────────────────
+  // Явный semanticFactcheck приоритетнее, иначе — из factReport.semantic
+  // (runSemanticFactCheck аннотирует его failMode/unavailable/isYmyl).
+  if (raw.semanticFactcheck && typeof raw.semanticFactcheck === 'object') {
+    out.semanticFactcheck = raw.semanticFactcheck;
+  } else if (fc && fc.semantic && typeof fc.semantic === 'object') {
+    out.semanticFactcheck = fc.semantic;
+  }
+
   // ── Pass-through отчёты (checkers уже понимают их схему) ─────────────
   if (raw.intentReport) out.intentReport = raw.intentReport;
   if (raw.lsiOverdoseReport) out.lsiOverdoseReport = raw.lsiOverdoseReport;

@@ -496,6 +496,62 @@ function checkTopicDiscovery(topicDiscovery) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 16. Semantic Fact-Check availability (fail-closed для YMYL — Итерация 2,
+//     Задача 3). Если семантическая верификация не смогла выполниться
+//     (LLM недоступен / таймаут / невалидный ответ) и режим FACTCHECK_FAIL_MODE
+//     требует блокировки для этой ниши — blocker semantic_factcheck_unavailable.
+//     Иначе (fail-open) — warning (как сейчас). Каждый fail-closed случай
+//     фиксируется в метриках (счётчик + ниша + причина).
+// ─────────────────────────────────────────────────────────────────────
+function checkSemanticFactcheck(semanticReport, { ymyl = false, failMode, niche } = {}) {
+  const policy = require('../infoArticle/semanticFactcheckPolicy');
+  if (!semanticReport || typeof semanticReport !== 'object') {
+    return _verdict('semantic_factcheck', {
+      pass: true, blocking: false, verdict: 'na',
+      evidence: { reason: 'no_semantic_report' },
+    });
+  }
+
+  const mode = policy.resolveFailMode(failMode);
+  const unavailable = semanticReport.unavailable === true
+    || semanticReport.semanticSkipped === true;
+
+  // Семантика отработала — проверка проходит без изменений.
+  if (!unavailable) {
+    return _verdict('semantic_factcheck', {
+      pass: true, blocking: false, verdict: 'ran',
+      evidence: { mode, ymyl: !!ymyl },
+    });
+  }
+
+  const reason = semanticReport.reason || 'semantic verification unavailable';
+  const isYmyl = typeof semanticReport.isYmyl === 'boolean' ? semanticReport.isYmyl : !!ymyl;
+  const failClosed = policy.shouldFailClosed({ failMode: mode, isYmyl });
+  const nicheKey = niche || semanticReport.niche || null;
+
+  if (failClosed) {
+    // Единственный побочный эффект чекера: инкремент процессного счётчика
+    // fail-closed для мониторинга доли блокировок (ниша + причина).
+    policy.recordFailClosed({ niche: nicheKey, reason });
+    return _verdict('semantic_factcheck', {
+      pass: false, blocking: true, verdict: 'unavailable',
+      evidence: {
+        blocker: 'semantic_factcheck_unavailable',
+        mode, ymyl: isYmyl, niche: nicheKey, reason,
+        retry_schedule_ms: policy.retrySchedule(),
+        max_retries: policy.MAX_RETRIES,
+      },
+    });
+  }
+
+  // Fail-open: недоступность семантики — только предупреждение.
+  return _verdict('semantic_factcheck', {
+    pass: false, blocking: false, verdict: 'unavailable_warning',
+    evidence: { mode, ymyl: isYmyl, niche: nicheKey, reason },
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 function _firstNumber(candidates) {
   for (const c of candidates) {
@@ -520,6 +576,7 @@ module.exports = {
   checkTzCompliance,
   checkAsessorAudit,
   checkTopicDiscovery,
+  checkSemanticFactcheck,
   // helpers for tests
   _internal: { _plainLower, _firstNumber, RISK_ORDER, _extractParagraphs },
 };
