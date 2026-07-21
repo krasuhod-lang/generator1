@@ -41,8 +41,8 @@ test('привязка к сущности компании (worksFor + ссыл
   });
   assert.ok(/itemprop="worksFor"/.test(r.html));
   assert.ok(r.html.includes('ACME'));
-  assert.ok(r.html.includes('href="https://acme.example"'));
-  assert.ok(r.sameAs.includes('https://acme.example'));
+  assert.ok(/href="https:\/\/acme\.example"/.test(r.html));
+  assert.ok(r.sameAs.some((u) => u === 'https://acme.example'));
 });
 
 test('sameAs: соцпрофили + сайт, дедупликация', () => {
@@ -88,7 +88,7 @@ test('author-выход пригоден для buildArticleJsonLd + sameAs', ()
   assert.strictEqual(jsonld.author['@type'], 'Person');
   assert.strictEqual(jsonld.author.name, 'Иван');
   assert.ok(Array.isArray(jsonld.author.sameAs));
-  assert.ok(jsonld.author.sameAs.includes('https://t.me/acme'));
+  assert.ok(jsonld.author.sameAs.some((u) => u === 'https://t.me/acme'));
 });
 
 test('brand_name/target_site_url как fallback company-полей', () => {
@@ -97,7 +97,7 @@ test('brand_name/target_site_url как fallback company-полей', () => {
     company: { brand_name: 'BrandX', target_site_url: 'https://brandx.example' },
   });
   assert.ok(r.html.includes('BrandX'));
-  assert.ok(r.sameAs.includes('https://brandx.example'));
+  assert.ok(r.sameAs.some((u) => u === 'https://brandx.example'));
 });
 
 test('дата обновления рендерится', () => {
