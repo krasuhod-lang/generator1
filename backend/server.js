@@ -3215,6 +3215,18 @@ async function ensureSchema() {
       console.warn('[ensureSchema] outreach tables (mig 121) skipped:', e.message);
     }
 
+    // Миграция 122: апгрейд Outreach — фикс бага отписок (unsubscribed_at)
+    // и числовая динамика keys.so (dynamics_detail JSONB) для писем с цифрами.
+    // Файл идемпотентен. См. migrations/122_outreach_upgrade.sql.
+    try {
+      const fs   = require('fs');
+      const sqlPath = path.join(__dirname, '..', 'migrations', '122_outreach_upgrade.sql');
+      const sql  = fs.readFileSync(sqlPath, 'utf8');
+      await db.query(sql);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach upgrade (mig 122) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

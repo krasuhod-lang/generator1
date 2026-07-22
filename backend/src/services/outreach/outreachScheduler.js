@@ -111,7 +111,7 @@ async function runCampaignCycle(campaign) {
       const unsubUrl = `${appUrl}/unsubscribe?email=${encodeURIComponent(email)}&token=${unsubToken}`;
 
       const composed = await composeEmail({
-        prospect: { ...prospect, niche: campaign.niche },
+        prospect: { ...prospect, niche: campaign.niche, dynamics_detail: prospect.dynamics_detail },
         senderName: fromName,
         senderCompany: fromName,
         unsubscribeUrl: unsubUrl,
@@ -224,12 +224,27 @@ async function collectNewProspects(campaign) {
         const { score, breakdown } = scoreProspect(site);
         if (score < 30) continue; // отсеиваем совсем плохие лиды
 
+        // Числовая динамика keys.so для писем с цифрами (миграция 122):
+        // deviation_pct + first/last points из growthEvaluator.
+        const dynamicsDetail = {};
+        for (const engine of ['yandex', 'google']) {
+          const d = site.dynamics?.[engine];
+          if (!d) continue;
+          dynamicsDetail[engine] = {
+            trend: d.trend,
+            deviation_pct: d.deviation_pct,
+            first: d.first_point || null,
+            last: d.last_point || null,
+            metric: d.metric || 'keywords_top50',
+            months: d.months_tracked || null,
+          };
+        }
         await db.query(
           `INSERT INTO outreach_prospects
              (campaign_id, user_id, url, company_name, inn, emails, phones,
               niche, city, services, dynamics_yandex, dynamics_google,
-              score, score_breakdown, source_serp_task)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              dynamics_detail, score, score_breakdown, source_serp_task)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
            ON CONFLICT (url, campaign_id) DO NOTHING`,
           [
             campaign.id, campaign.user_id, site.url, site.company_name,
@@ -237,6 +252,7 @@ async function collectNewProspects(campaign) {
             taskParams._niche, taskParams._city, site.services || [],
             site.dynamics?.yandex?.trend || null,
             site.dynamics?.google?.trend || null,
+            Object.keys(dynamicsDetail).length ? JSON.stringify(dynamicsDetail) : null,
             score, JSON.stringify(breakdown), serpTaskId,
           ],
         );

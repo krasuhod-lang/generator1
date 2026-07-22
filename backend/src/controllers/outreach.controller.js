@@ -463,12 +463,14 @@ async function handleResendEvent(event) {
     );
   }
 
-  // Жалоба на спам → отписываем автоматически.
+  // Жалоба на спам → отписываем автоматически (РЕАЛЬНАЯ отписка:
+  // ставим unsubscribed_at, чтобы emailSender блокировал отправку — миграция 122).
   if (type === 'email.complained' && email.recipient_email) {
     const addr = email.recipient_email.toLowerCase();
     await db.query(
-      `INSERT INTO outreach_unsubscribes (email, domain, token)
-       VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING`,
+      `INSERT INTO outreach_unsubscribes (email, domain, token, unsubscribed_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (email) DO UPDATE SET unsubscribed_at = COALESCE(outreach_unsubscribes.unsubscribed_at, NOW())`,
       [addr, email.recipient_domain, require('crypto').randomBytes(16).toString('hex')],
     );
     await db.query(
@@ -522,20 +524,19 @@ async function unsubscribe(req, res, next) {
       return res.status(404).json({ ok: false, error: 'Ссылка недействительна' });
     }
 
-    // Помечаем связанные лиды отписанными.
-    const domain = email.split('@')[1] || '';
+        // Помечаем связанные лиды отписанными.
     await db.query(
       `UPDATE outreach_prospects SET status = 'unsubscribed'
         WHERE $1 = ANY(emails)`,
       [email],
     );
-    // Гарантируем наличие записи (на случай ручного вызова).
+    // Фиксируем РЕАЛЬНУЮ отписку: ставим unsubscribed_at (см. миграцию 122).
+    // Запись с токеном уже существует (создана при отправке).
     await db.query(
-      `INSERT INTO outreach_unsubscribes (email, domain, token)
-       VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING`,
-      [email, domain, token],
+      `UPDATE outreach_unsubscribes SET unsubscribed_at = NOW()
+        WHERE email = $1 AND unsubscribed_at IS NULL`,
+      [email],
     );
-
     return res.json({ ok: true, email });
   } catch (err) {
     return next(err);

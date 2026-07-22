@@ -35,10 +35,17 @@ async function checkCooldown(domain) {
 
 /**
  * Проверяет, не отписался ли получатель.
+ *
+ * Важно: таблица outreach_unsubscribes хранит И токены отписки
+ * (создаются при постановке в очередь, unsubscribed_at IS NULL)
+ * И реальные отписки (unsubscribed_at IS NOT NULL, по клику в письме).
+ * Блокируем отправку ТОЛЬКО при реальной отписке (фикс бага
+ * «система сама себя отписывала», см. миграцию 122).
  */
 async function isUnsubscribed(email) {
   const { rows } = await db.query(
-    `SELECT email FROM outreach_unsubscribes WHERE email = $1 LIMIT 1`,
+    `SELECT email FROM outreach_unsubscribes
+      WHERE email = $1 AND unsubscribed_at IS NOT NULL LIMIT 1`,
     [email.toLowerCase()],
   );
   return rows.length > 0;
