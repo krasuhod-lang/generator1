@@ -3227,6 +3227,19 @@ async function ensureSchema() {
       console.warn('[ensureSchema] outreach upgrade (mig 122) skipped:', e.message);
     }
 
+    // Миграция 123: доработка Outreach — полный HTML письма (html_full) для
+    // корректного превью, стратегия темы (subject_strategy) и флаг ручной
+    // проверки (manual_review_required). Файл идемпотентен.
+    // См. migrations/123_outreach_dspy_charts.sql.
+    try {
+      const fs   = require('fs');
+      const sqlPath = path.join(__dirname, '..', 'migrations', '123_outreach_dspy_charts.sql');
+      const sql  = fs.readFileSync(sqlPath, 'utf8');
+      await db.query(sql);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach charts (mig 123) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

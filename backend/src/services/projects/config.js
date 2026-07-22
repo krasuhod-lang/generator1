@@ -386,7 +386,9 @@ const PROJECTS_CONFIG = deepFreeze({
     signatures: ['LinkRecommend', 'BlogTopicSuggest', 'EatRecommend',
       'GeoAeoBoost', 'MetaUplift', 'SchemaSuggest',
       // Раздельный анализ источников + сводка закономерностей + ranking-gaps.
-      'YandexQueryAnalysis', 'ProjectGrowthSynthesis', 'RankingFactorGaps'],
+      'YandexQueryAnalysis', 'ProjectGrowthSynthesis', 'RankingFactorGaps',
+      // Outreach: «человеческий» тон холодных писем (emailComposer).
+      'OutreachColdEmail'],
   },
 
   // Каталог важных факторов ранжирования — детерминированный аудит «чего не
