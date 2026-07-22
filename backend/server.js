@@ -39,6 +39,7 @@ const projectsPublicRoutes = require('./src/routes/projectsPublic.routes');
 const aegisRoutes         = require('./src/routes/aegis.routes');
 const categoryLeadRoutes  = require('./src/routes/categoryLead.routes');
 const serpB2bRoutes       = require('./src/routes/serpB2b.routes');
+const outreachRoutes      = require('./src/routes/outreach.routes');
 const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
@@ -93,7 +94,12 @@ app.options('*', cors());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // Парсинг JSON и form-data
-app.use(express.json({ limit: '10mb' }));
+// verify-колбэк сохраняет сырое тело (req.rawBody) — нужно для проверки
+// HMAC-подписи Resend/Svix webhook (см. outreach.controller.js).
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Статические файлы для загрузок (DOCX и т.д.)
@@ -134,6 +140,7 @@ app.use('/api/projects',       projectsRoutes);
 app.use('/api/public',         projectsPublicRoutes);
 app.use('/api/category-lead',  categoryLeadRoutes);
 app.use('/api/serp-b2b',       serpB2bRoutes);
+app.use('/api/outreach',       outreachRoutes);
 app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
@@ -390,6 +397,16 @@ const start = async () => {
       startKeysSoScheduler();
     } catch (e) {
       console.warn('[Server] Reports keysSoScheduler skipped:', e.message);
+    }
+
+    // 📨 Outreach — планировщик email-кампаний + worker очереди отправки.
+    try {
+      const { startOutreachScheduler } = require('./src/services/outreach/outreachScheduler');
+      const { startEmailWorker } = require('./src/services/outreach/emailQueue');
+      startOutreachScheduler();
+      startEmailWorker();
+    } catch (e) {
+      console.warn('[Server] Outreach scheduler skipped:', e.message);
     }
 
     const server = app.listen(PORT, () => {
@@ -3183,6 +3200,19 @@ async function ensureSchema() {
       await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS topic_discovery JSONB`);
     } catch (e) {
       console.warn('[ensureSchema] topic_discovery column (mig 120) skipped:', e.message);
+    }
+
+    // Миграция 121: Модуль Outreach (email-рассылки) — кампании, лиды,
+    // письма, отписки, логи и справочник прогрева. Файл идемпотентен
+    // (IF NOT EXISTS / DO $$), поэтому безопасно выполнять на каждый старт.
+    // См. migrations/121_outreach.sql.
+    try {
+      const fs   = require('fs');
+      const sqlPath = path.join(__dirname, '..', 'migrations', '121_outreach.sql');
+      const sql  = fs.readFileSync(sqlPath, 'utf8');
+      await db.query(sql);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach tables (mig 121) skipped:', e.message);
     }
 
     console.log('[Schema] ensureSchema OK');
