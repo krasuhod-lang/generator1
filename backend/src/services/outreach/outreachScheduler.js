@@ -192,7 +192,7 @@ async function runCampaignCycle(campaign) {
         subject: composed.subject,
         html: composed.html,
         fromEmail, fromName,
-      }, { delay: delayMs, jobId: `email:${emailId}` });
+      }, { delay: delayMs, jobId: `email-${emailId}` });
 
       // Обновляем статус лида
       await db.query(
