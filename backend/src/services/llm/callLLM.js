@@ -124,6 +124,35 @@ function normalizeKeys(parsed) {
 }
 
 /**
+ * Определяет, обрезан ли JSON-ответ LLM (незакрытые скобки).
+ * Работает независимо от finish_reason.
+ */
+function _isJsonTruncated(text) {
+  if (!text) return false;
+  const t = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+  // Находим первую открывающую скобку
+  const start = Math.min(
+    t.indexOf('{') === -1 ? Infinity : t.indexOf('{'),
+    t.indexOf('[') === -1 ? Infinity : t.indexOf('[')
+  );
+  if (start === Infinity) return false;
+  // Считаем баланс скобок
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < t.length; i++) {
+    const ch = t[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\' && inString) { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') depth--;
+  }
+  return depth > 0; // если depth > 0 — JSON незакрыт
+}
+
+/**
  * Пытается распарсить JSON из сырого текста LLM.
  * Применяет autoCloseJSON при обрыве.
  */
@@ -393,12 +422,14 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         thoughtsTokens: result.thoughtsTokens || 0,
         cachedTokens:   result.cachedTokens   || 0,
       });
-      // Если DeepSeek обрезал ответ по max_tokens — автоматически удваиваем лимит и повторяем.
-      // Это главная причина JSON parse ошибок в outreach emailComposer/nicheExpander.
-      if (result.finishReason === 'length' && attempt < retries - 1) {
+      // Если ответ обрезан по max_tokens (детекция: finish_reason=length ИЛИ незакрытый JSON) —
+      // автоматически удваиваем лимит и повторяем. Главная причина
+      // JSON parse ошибок в outreach emailComposer/nicheExpander.
+      const isTruncated = result.finishReason === 'length' || _isJsonTruncated(result.text);
+      if (isTruncated && attempt < retries - 1) {
         const curMax = callOpts.maxTokens || maxTokens || 1000;
         const newMax = Math.min(curMax * 2, 32000);
-        log(`${callLabel || stageName} finish_reason=length (maxTokens=${curMax}), retry ${attempt + 1} with maxTokens=${newMax}`, 'warn');
+        log(`${callLabel || stageName} truncated response (finishReason=${result.finishReason || 'unknown'}, maxTokens=${curMax}), retry ${attempt + 1} with maxTokens=${newMax}`, 'warn');
         callOpts.maxTokens = newMax;
         maxTokens = newMax;
         continue;
