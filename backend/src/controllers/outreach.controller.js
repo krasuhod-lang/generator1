@@ -179,7 +179,7 @@ async function updateCampaign(req, res, next) {
       sets.push(`sender_name = $${idx++}`); vals.push(_clip(body.sender_name, 120) || null);
     }
     if (body.run_now === true) {
-      // Форсируем запуск на ближайший тик и переводим в active.
+      // Форсируем запуск немедленно: обновляем next_run_at И вызываем runTick().
       sets.push(`next_run_at = NOW()`);
       if (body.status === undefined) { sets.push(`status = 'active'`); }
     }
@@ -197,12 +197,20 @@ async function updateCampaign(req, res, next) {
       RETURNING *`,
       vals,
     );
+        // Если run_now — немедленно запускаем тик планировщика (не ждём 1 час).
+    if (body.run_now === true && rows[0]) {
+      try {
+        const { runTick } = require('../services/outreach/outreachScheduler');
+        runTick().catch((e) => console.warn('[outreach/runNow] tick error:', e.message));
+      } catch (e) {
+        console.warn('[outreach/runNow] scheduler unavailable:', e.message);
+      }
+    }
     return res.json({ campaign: rows[0] });
   } catch (err) {
     return next(err);
   }
 }
-
 // ─── DELETE /api/outreach/campaigns/:id ───────────────────────────
 async function deleteCampaign(req, res, next) {
   try {
