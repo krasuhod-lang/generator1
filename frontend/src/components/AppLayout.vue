@@ -34,7 +34,7 @@ const TABS = [
   { key: 'article-topics', label: 'Темы статей',      icon: '🔮', path: '/article-topics' },
   { key: 'forecaster',     label: 'Создать КП',       icon: '📈', path: '/forecaster' },
   { key: 'category-lead',  label: 'Lead-text',        icon: '🧭', path: '/category-lead' },
-  { key: 'serp-b2b',       label: 'B2B-парсер',       icon: '🛰️', path: '/serp-b2b' },
+  { key: 'outreach',       label: 'Outreach',         icon: '📨', path: '/outreach' },
   { key: 'audits',         label: 'Аудиты',           icon: '🕷️', path: '/audits' },
   { key: 'projects',       label: 'Проекты',          icon: '🗂️', path: '/projects' },
   { key: 'reports',        label: 'Отчёты',           icon: '📑', path: '/reports' },
@@ -51,7 +51,8 @@ const activeTabKey = computed(() => {
   if (p.startsWith('/forecaster'))     return 'forecaster';
   if (p.startsWith('/proposals'))      return 'forecaster';
   if (p.startsWith('/category-lead'))  return 'category-lead';
-  if (p.startsWith('/serp-b2b'))       return 'serp-b2b';
+  if (p.startsWith('/serp-b2b'))       return 'outreach';
+  if (p.startsWith('/outreach'))       return 'outreach';
   if (p.startsWith('/position-tracker')) return 'position-tracker';
   if (p.startsWith('/site-crawler'))   return 'audits';
   if (p.startsWith('/audits'))         return 'audits';

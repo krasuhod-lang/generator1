@@ -35,7 +35,10 @@ const routes = [
   { path: '/category-lead',        component: () => import('../views/CategoryLeadPage.vue'),       meta: { auth: true } },
   { path: '/category-lead/:id',    component: () => import('../views/CategoryLeadResultPage.vue'), meta: { auth: true } },
 
-  { path: '/serp-b2b',             component: () => import('../views/SerpB2bPage.vue'),            meta: { auth: true } },
+  { path: '/serp-b2b',             redirect: '/outreach' },
+  { path: '/outreach',             component: () => import('../views/OutreachPage.vue'),           meta: { auth: true } },
+  { path: '/outreach/campaigns/:id', component: () => import('../views/OutreachCampaignPage.vue'), meta: { auth: true } },
+  { path: '/unsubscribe',          component: () => import('../views/UnsubscribePage.vue'),        meta: { public: true } },
 
   { path: '/position-tracker',     component: () => import('../views/PositionTrackerPage.vue'),    meta: { auth: true } },
   { path: '/position-tracker/:id', component: () => import('../views/PositionTrackerProjectPage.vue'), meta: { auth: true } },
