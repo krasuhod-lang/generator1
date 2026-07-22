@@ -17,8 +17,37 @@ const { processSerpB2bTask } = require('../serpB2b/pipeline');
 
 const POLL_MS = 60 * 60 * 1000; // 1 час
 let _timer = null;
+let _schemaReady = null;
+
+/**
+ * Идемпотентно гарантирует наличие колонок модуля Outreach, добавленных
+ * поздними миграциями (122, 123). Планировщик может стартовать раньше, чем
+ * основной ensureSchema успеет применить миграции на проде, либо бэкенд мог
+ * не перезапускаться после деплоя — тогда INSERT в outreach_prospects падал
+ * с «column "dynamics_detail" ... does not exist». Эта функция самовосстанавливает
+ * схему прямо из планировщика (безопасно выполнять на каждый старт).
+ */
+function ensureOutreachSchema() {
+  if (_schemaReady) return _schemaReady;
+  _schemaReady = (async () => {
+    // Миграция 122: числовая динамика keys.so + разделение токенов/отписок.
+    await db.query(`ALTER TABLE outreach_prospects ADD COLUMN IF NOT EXISTS dynamics_detail JSONB`);
+    await db.query(`ALTER TABLE outreach_unsubscribes ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMPTZ`);
+    // Миграция 123: полный HTML письма, стратегия темы, флаг ручной проверки.
+    await db.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS html_full TEXT`);
+    await db.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS subject_strategy TEXT`);
+    await db.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS manual_review_required BOOLEAN DEFAULT FALSE`);
+  })().catch((e) => {
+    // Не кэшируем ошибку — дадим следующему тику попробовать снова.
+    _schemaReady = null;
+    throw e;
+  });
+  return _schemaReady;
+}
 
 async function runTick() {
+  await ensureOutreachSchema();
+
   // Находим кампании, которым пора запуститься
   const { rows: campaigns } = await db.query(
     `SELECT * FROM outreach_campaigns
