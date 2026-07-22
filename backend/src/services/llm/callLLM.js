@@ -393,6 +393,16 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         thoughtsTokens: result.thoughtsTokens || 0,
         cachedTokens:   result.cachedTokens   || 0,
       });
+      // Если DeepSeek обрезал ответ по max_tokens — автоматически удваиваем лимит и повторяем.
+      // Это главная причина JSON parse ошибок в outreach emailComposer/nicheExpander.
+      if (result.finishReason === 'length' && attempt < retries - 1) {
+        const curMax = callOpts.maxTokens || maxTokens || 1000;
+        const newMax = Math.min(curMax * 2, 32000);
+        log(`${callLabel || stageName} finish_reason=length (maxTokens=${curMax}), retry ${attempt + 1} with maxTokens=${newMax}`, 'warn');
+        callOpts.maxTokens = newMax;
+        maxTokens = newMax;
+        continue;
+      }
       const parsed    = normalizeKeys(parseJSON(result.text));
 
       // Аккумулируем расход для guard'а
