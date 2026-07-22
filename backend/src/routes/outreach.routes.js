@@ -38,11 +38,21 @@ const readLimiter = rateLimit({
   message: { error: 'Слишком много запросов. Попробуйте позже.' },
 });
 
+// Публичные эндпоинты (webhook/отписка) без auth — ограничиваем по IP,
+// чтобы защитить БД от злоупотреблений.
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max:      120,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Слишком много запросов. Попробуйте позже.' },
+});
+
 // ── Публичные эндпоинты (без auth) ────────────────────────────────
 // Resend webhook — подпись проверяется внутри контроллера (svix HMAC).
-router.post('/webhooks/resend', resendWebhook);
+router.post('/webhooks/resend', publicLimiter, resendWebhook);
 // Страница отписки — публичная, защищена токеном.
-router.get('/unsubscribe', unsubscribe);
+router.get('/unsubscribe', publicLimiter, unsubscribe);
 
 // ── Приватные эндпоинты ───────────────────────────────────────────
 router.use(readLimiter);
