@@ -135,13 +135,19 @@
 
         <!-- ── ЛОГИ ────────────────────────────────────────────── -->
         <section v-show="tab === 'logs'" class="oc-panel">
-          <div class="logs" ref="logsBox">
-            <div v-for="l in logs" :key="l.id" class="log-row" :class="`lg-${l.level}`">
-              <span class="lg-dot"></span>
-              <span class="lg-time">{{ formatTime(l.created_at) }}</span>
-              <span class="lg-msg">{{ l.message }}</span>
+          <div class="logs-wrap">
+            <div class="logs" ref="logsBox" @scroll="onLogsScroll">
+              <div v-for="l in logs" :key="l.id" class="log-row" :class="`lg-${l.level}`">
+                <span class="lg-dot"></span>
+                <span class="lg-time">{{ formatTime(l.created_at) }}</span>
+                <span class="lg-msg">{{ l.message }}</span>
+              </div>
+              <div v-if="!logs.length" class="muted">Логов пока нет</div>
             </div>
-            <div v-if="!logs.length" class="muted">Логов пока нет</div>
+            <button
+              v-if="!stickToBottom && logs.length"
+              class="logs-jump" @click="jumpToBottom"
+            >↓ К свежим</button>
           </div>
         </section>
       </template>
@@ -155,8 +161,18 @@
           </div>
           <div class="modal-meta">
             Кому: {{ modalEmail.recipient_email }} · Статус: {{ modalEmail.status }}
+            <span v-if="modalEmail.subject_strategy" class="badge badge-strategy">{{ strategyLabel(modalEmail.subject_strategy) }}</span>
+            <span v-if="modalEmail.manual_review_required" class="badge badge-review">⚠ ручная проверка</span>
           </div>
-          <div class="modal-preview" v-html="sanitizedPreview(modalEmail.html_preview)"></div>
+          <!-- Полный HTML письма в изолированном iframe (sandbox без скриптов):
+               показываем письмо ровно так, как его увидит получатель. -->
+          <iframe
+            v-if="modalEmail.html_full"
+            class="modal-frame"
+            sandbox=""
+            :srcdoc="modalEmail.html_full"
+          ></iframe>
+          <div v-else class="modal-preview" v-html="sanitizedPreview(modalEmail.html_preview)"></div>
         </div>
       </div>
     </div>
@@ -202,6 +218,10 @@ const tab = ref('overview');
 const acting = ref(false);
 const modalEmail = ref(null);
 const logsBox = ref(null);
+// Автоскролл логов «прилипает» к низу только если пользователь уже внизу —
+// иначе поллинг (loadLogs каждые 5с) не будет дёргать прокрутку вверх при
+// чтении истории (фикс «логи прыгают вниз при прокрутке»).
+const stickToBottom = ref(true);
 
 const prospectFilter = ref({ status: '', city: '', minScore: null });
 
@@ -229,6 +249,14 @@ function scoreClass(s) {
 }
 function emailStatusIcon(s) {
   return { queued: '📤', sent: '✅', delivered: '📬', opened: '👁', clicked: '🖱', bounced: '⚠️', complained: '🚫', failed: '❌' }[s] || '•';
+}
+function strategyLabel(s) {
+  return {
+    numeric_drop: '📉 цифра падения',
+    competitor: '⚔ конкуренты',
+    question: '❓ вопрос',
+    fallback: '🛟 шаблон',
+  }[s] || s;
 }
 // Простая санитизация превью: показываем только как текст с сохранением
 // переносов — исключаем исполнение потенциально опасного HTML.
@@ -287,7 +315,7 @@ async function switchTab(key) {
   tab.value = key;
   if (key === 'prospects') await loadProspects();
   else if (key === 'emails') await loadEmails();
-  else if (key === 'logs') { await loadLogs(); scrollLogs(); }
+  else if (key === 'logs') { stickToBottom.value = true; await loadLogs(); scrollLogs(); }
   else if (key === 'overview') await loadStats();
 }
 
@@ -296,7 +324,20 @@ function scrollLogs() {
     if (logsBox.value) logsBox.value.scrollTop = logsBox.value.scrollHeight;
   });
 }
-watch(logs, () => { if (tab.value === 'logs') scrollLogs(); });
+// Обновляем флаг «внизу ли пользователь» на каждый скролл контейнера логов.
+function onLogsScroll() {
+  const el = logsBox.value;
+  if (!el) return;
+  const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+  stickToBottom.value = distanceFromBottom <= 40;
+}
+// Ручной переход к свежим логам (кнопка «↓ К свежим»).
+function jumpToBottom() {
+  stickToBottom.value = true;
+  scrollLogs();
+}
+// Автоскролл только когда пользователь уже у нижнего края.
+watch(logs, () => { if (tab.value === 'logs' && stickToBottom.value) scrollLogs(); });
 
 async function setStatus(status) {
   acting.value = true;
@@ -400,10 +441,18 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 .sc-mid { background: #ff9f0a; }
 .sc-low { background: #ff3b30; }
 
+.logs-wrap { position: relative; }
 .logs {
   background: #1d1d1f; border-radius: 12px; padding: 16px;
   max-height: 460px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 13px;
 }
+.logs-jump {
+  position: absolute; right: 16px; bottom: 16px;
+  border: none; border-radius: 999px; padding: 8px 14px; cursor: pointer;
+  background: #0a84ff; color: #fff; font-size: 12px; font-weight: 600;
+  box-shadow: 0 4px 12px rgba(10,132,255,.4);
+}
+.logs-jump:hover { background: #0071e3; }
 .log-row { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; color: #d1d1d6; }
 .lg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: #0a84ff; }
 .lg-success .lg-dot { background: #34c759; }
@@ -434,6 +483,10 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 .modal-head h3 { margin: 0; font-size: 17px; }
 .modal-meta { color: #86868b; font-size: 13px; margin: 8px 0 14px; }
 .modal-preview { border: 1px solid #f0f0f2; border-radius: 10px; padding: 16px; font-size: 14px; color: #333; }
+.modal-frame { width: 100%; height: 60vh; border: 1px solid #f0f0f2; border-radius: 10px; background: #fff; }
+.badge { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge-strategy { background: #eef4ff; color: #0071e3; }
+.badge-review { background: #fff4e5; color: #b26a00; }
 .chip-x { border: none; background: none; cursor: pointer; font-size: 22px; line-height: 1; color: #86868b; }
 
 @media (max-width: 720px) {

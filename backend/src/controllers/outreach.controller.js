@@ -275,7 +275,8 @@ async function listEmails(req, res, next) {
 
     const { rows } = await db.query(
       `SELECT id, prospect_id, recipient_email, recipient_domain, subject,
-              html_preview, status, error_message, queued_at, sent_at,
+              html_preview, html_full, subject_strategy, manual_review_required,
+              status, error_message, queued_at, sent_at,
               delivered_at, opened_at, clicked_at, replied_at, bounced_at
          FROM outreach_emails
         WHERE campaign_id = $1

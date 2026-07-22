@@ -12,6 +12,7 @@ const { expandNicheToGeo } = require('./nicheExpander');
 const { scoreProspect, isCorporateEmail } = require('./prospectScorer');
 const { composeEmail } = require('./emailComposer');
 const { emailQueue } = require('./emailQueue');
+const { precheckRecipient } = require('./emailSender');
 const { processSerpB2bTask } = require('../serpB2b/pipeline');
 
 const POLL_MS = 60 * 60 * 1000; // 1 час
@@ -106,6 +107,19 @@ async function runCampaignCycle(campaign) {
       const email = prospect.emails.find(isCorporateEmail) || prospect.emails[0];
       if (!email) continue;
 
+      // Предпроверка получателя ДО генерации/постановки в очередь: отсекаем
+      // бесплатные провайдеры, реальные отписки и домены на cooldown, чтобы
+      // не тратить LLM-вызов и не засорять очередь непроходными письмами.
+      const precheck = await precheckRecipient(email);
+      if (!precheck.ok) {
+        await log(campaign.id, 'info', `Пропуск ${email}: ${precheck.reason}`);
+        await db.query(
+          `UPDATE outreach_prospects SET status = 'rejected' WHERE id = $1`,
+          [prospect.id],
+        );
+        continue;
+      }
+
       // Генерируем письмо
       const unsubToken = crypto.randomBytes(16).toString('hex');
       const unsubUrl = `${appUrl}/unsubscribe?email=${encodeURIComponent(email)}&token=${unsubToken}`;
@@ -117,16 +131,19 @@ async function runCampaignCycle(campaign) {
         unsubscribeUrl: unsubUrl,
       });
 
-      // Создаём запись письма в БД
+      // Создаём запись письма в БД. Храним ПОЛНЫЙ HTML (html_full) для
+      // корректного превью в UI + короткий html_preview для списков.
       const { rows: emailRows } = await db.query(
         `INSERT INTO outreach_emails
-           (prospect_id, campaign_id, user_id, recipient_email, recipient_domain, subject, html_preview, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued')
+           (prospect_id, campaign_id, user_id, recipient_email, recipient_domain,
+            subject, html_preview, html_full, subject_strategy, manual_review_required, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')
          RETURNING id`,
         [
           prospect.id, campaign.id, campaign.user_id,
           email, email.split('@')[1],
-          composed.subject, composed.html.slice(0, 500),
+          composed.subject, composed.html.slice(0, 500), composed.html,
+          composed.strategy || null, composed.manual_review_required === true,
         ],
       );
       const emailId = emailRows[0].id;
@@ -138,14 +155,15 @@ async function runCampaignCycle(campaign) {
         [email.toLowerCase(), email.split('@')[1], unsubToken],
       );
 
-      // Ставим в очередь с задержкой (равномерно в течение рабочего дня)
+      // Ставим в очередь с задержкой (равномерно в течение рабочего дня).
+      // jobId = emailId → идемпотентность: повторный тик не создаст дубль job.
       const delayMs = calculateSendDelay(queued, prospects.length);
       await emailQueue.add('send-email', {
         emailId, to: email,
         subject: composed.subject,
         html: composed.html,
         fromEmail, fromName,
-      }, { delay: delayMs });
+      }, { delay: delayMs, jobId: `email:${emailId}` });
 
       // Обновляем статус лида
       await db.query(

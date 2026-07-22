@@ -99,4 +99,21 @@ async function sendEmail({ emailId, to, subject, html, fromEmail, fromName }) {
   return { resendId: data.id };
 }
 
-module.exports = { sendEmail, checkCooldown, isUnsubscribed };
+/**
+ * Предпроверка получателя ДО постановки письма в очередь (Блок 4.2 ТЗ):
+ * бесплатный провайдер / реальная отписка / cooldown 30 дней на домен.
+ * Позволяет не создавать письмо и не засорять очередь заведомо
+ * непроходными job'ами (иначе они падают в failed и уходят в ретраи BullMQ).
+ * @returns {Promise<{ok:boolean, reason?:string}>}
+ */
+async function precheckRecipient(email) {
+  const addr = String(email || '').trim().toLowerCase();
+  const domain = addr.split('@')[1];
+  if (!domain) return { ok: false, reason: 'invalid_email' };
+  if (FREE_EMAIL_PROVIDERS.has(domain)) return { ok: false, reason: 'free_provider' };
+  if (await isUnsubscribed(addr)) return { ok: false, reason: 'unsubscribed' };
+  if (!(await checkCooldown(domain))) return { ok: false, reason: 'cooldown' };
+  return { ok: true };
+}
+
+module.exports = { sendEmail, checkCooldown, isUnsubscribed, precheckRecipient };
