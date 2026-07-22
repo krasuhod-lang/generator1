@@ -187,10 +187,14 @@ function assertComplete(html) {
   // Текст последнего абзаца должен оканчиваться завершённым предложением.
   const paras = s.match(/<p[^>]*>([\s\S]*?)<\/p>/gi) || [];
   if (!paras.length) return false;
-  const lastInner = paras[paras.length - 1]
-    .replace(/<[^>]*>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .trim();
+  // Снимаем теги многопроходно (пока строка меняется), чтобы вложенные/битые
+  // конструкции не оставляли остатков. Текст используется ТОЛЬКО для проверки
+  // завершённости предложения и никуда не рендерится.
+  let lastInner = paras[paras.length - 1];
+  let prev;
+  do { prev = lastInner; lastInner = lastInner.replace(/<[^>]*>/g, ''); }
+  while (lastInner !== prev);
+  lastInner = lastInner.replace(/&nbsp;/g, ' ').trim();
   if (lastInner.length < 3) return false;
   if (!/[.!?…»")]$/.test(lastInner)) return false;
 
