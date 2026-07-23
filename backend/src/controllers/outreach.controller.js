@@ -56,12 +56,58 @@ function _sanitizeCities(input) {
   return out;
 }
 
+// Наш сайт для подписи письма: нормализуем в https-URL, иначе null.
+function _normalizeSenderSite(raw) {
+  const s = _clip(raw, 200);
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(s)) return `https://${s}`;
+  return null;
+}
+
+// Telegram отправителя: принимаем @user | user | t.me/user | ссылку,
+// сохраняем как каноничную t.me-ссылку, иначе null.
+function _normalizeSenderTelegram(raw) {
+  const s = _clip(raw, 200);
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  const user = s.replace(/^@/, '').replace(/^t\.me\//i, '').replace(/\/+$/, '');
+  if (!user || !/^[a-zA-Z0-9_]{3,64}$/.test(user)) return null;
+  return `https://t.me/${user}`;
+}
+
+// Разбирает список получателей прямой рассылки (req 5): массив строк или
+// объектов { email, site }. Возвращает [{ email, site }] с валидным email.
+const _EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+function _parseDirectRecipients(input) {
+  const items = Array.isArray(input) ? input : [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of items) {
+    let email = '';
+    let site = '';
+    if (typeof raw === 'string') {
+      email = raw.trim();
+    } else if (raw && typeof raw === 'object') {
+      email = _clip(raw.email, 200);
+      site = _clip(raw.site || raw.url, 200);
+    }
+    email = email.toLowerCase();
+    if (!_EMAIL_RE.test(email) || seen.has(email)) continue;
+    seen.add(email);
+    out.push({ email, site: _normalizeSenderSite(site) || site || null });
+    if (out.length >= 500) break;
+  }
+  return out;
+}
+
 // ─── GET /api/outreach/campaigns ──────────────────────────────────
 async function listCampaigns(req, res, next) {
   try {
     const { rows } = await db.query(
       `SELECT id, name, keyword, niche, business_type, cities, search_engine,
               depth_pages, daily_limit, warmup_week, sender_name, sender_email,
+              sender_site, sender_telegram,
               status, total_prospects, total_sent, total_opened, total_clicked,
               total_replied, last_run_at, next_run_at, error_message,
               created_at, updated_at
@@ -87,6 +133,8 @@ async function createCampaign(req, res, next) {
     const depthPages = _clampInt(body.depth_pages, MIN_DEPTH, MAX_DEPTH, 3);
     const dailyLimit = _clampInt(body.daily_limit, MIN_DAILY_LIMIT, MAX_DAILY_LIMIT, 30);
     const senderName = _clip(body.sender_name, 120) || null;
+    const senderSite = _normalizeSenderSite(body.sender_site);
+    const senderTelegram = _normalizeSenderTelegram(body.sender_telegram);
     const name = _clip(body.name, MAX_NAME_LEN) || keyword;
     const senderEmail = _clip(body.sender_email, 200) || process.env.OUTREACH_FROM_EMAIL || null;
 
@@ -105,18 +153,28 @@ async function createCampaign(req, res, next) {
     // Стартуем сразу активной, чтобы планировщик подхватил кампанию.
     const status = body.status === 'draft' ? 'draft' : 'active';
 
+    // Перед запуском кампании обязательно указываем наш сайт и Telegram,
+    // чтобы получатели могли связаться (req 3). Для черновика — не требуем.
+    if (status !== 'draft' && (!senderSite || !senderTelegram)) {
+      return res.status(400).json({
+        error: 'Перед запуском укажите наш сайт (sender_site) и ссылку на Telegram (sender_telegram) — они попадут в подпись письма.',
+      });
+    }
+
     const { rows } = await db.query(
       `INSERT INTO outreach_campaigns
           (user_id, name, keyword, cities, search_engine, depth_pages,
-           daily_limit, sender_name, sender_email, status, next_run_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW())
+           daily_limit, sender_name, sender_email, sender_site, sender_telegram,
+           status, next_run_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW())
        RETURNING id, name, keyword, niche, business_type, cities, search_engine,
                  depth_pages, daily_limit, warmup_week, sender_name, sender_email,
+                 sender_site, sender_telegram,
                  status, total_prospects, total_sent, total_opened, total_clicked,
                  total_replied, last_run_at, next_run_at, created_at`,
       [
         req.user.id, name, keyword, cities, searchEngine, depthPages,
-        dailyLimit, senderName, senderEmail, status,
+        dailyLimit, senderName, senderEmail, senderSite, senderTelegram, status,
       ],
     );
 
@@ -156,6 +214,27 @@ async function updateCampaign(req, res, next) {
     const sets = [];
     const vals = [];
     let idx = 1;
+
+    // Итоговые значения контактов отправителя (с учётом обновления) —
+    // нужны для проверки перед активацией кампании (req 3).
+    let nextSite = campaign.sender_site;
+    let nextTelegram = campaign.sender_telegram;
+    if (body.sender_site !== undefined) {
+      nextSite = _normalizeSenderSite(body.sender_site);
+      sets.push(`sender_site = $${idx++}`); vals.push(nextSite);
+    }
+    if (body.sender_telegram !== undefined) {
+      nextTelegram = _normalizeSenderTelegram(body.sender_telegram);
+      sets.push(`sender_telegram = $${idx++}`); vals.push(nextTelegram);
+    }
+
+    const willActivate = (body.status !== undefined && _clip(body.status, 16).toLowerCase() === 'active')
+      || body.run_now === true;
+    if (willActivate && (!nextSite || !nextTelegram)) {
+      return res.status(400).json({
+        error: 'Перед запуском укажите наш сайт (sender_site) и ссылку на Telegram (sender_telegram) — они попадут в подпись письма.',
+      });
+    }
 
     if (body.status !== undefined) {
       const status = _clip(body.status, 16).toLowerCase();
@@ -242,7 +321,7 @@ async function listProspects(req, res, next) {
     const total = countRows[0]?.total || 0;
 
     const { rows } = await db.query(
-      `SELECT id, url, company_name, inn, emails, phones, niche, city, services,
+      `SELECT id, url, company_name, inn, emails, phones, messengers, niche, city, services,
               dynamics_yandex, dynamics_google, score, score_breakdown,
               status, created_at
          FROM outreach_prospects
@@ -543,6 +622,94 @@ async function unsubscribe(req, res, next) {
   }
 }
 
+// ─── POST /api/outreach/campaigns/:id/direct-send ─────────────────
+// Прямая рассылка по заданному списку адресатов (req 5). Пользователь
+// передаёт список email (и, опционально, сайтов). Для каждого создаётся
+// лид, после чего письма проходят тот же конвейер генерации и отправки,
+// что и общий поток кампании.
+async function directSend(req, res, next) {
+  try {
+    const campaign = await _findCampaign(req.params.id, req.user.id);
+    if (!campaign) return res.status(404).json({ error: 'Кампания не найдена' });
+
+    // Контакты отправителя обязательны (как и при обычном запуске, req 3).
+    if (!campaign.sender_site || !campaign.sender_telegram) {
+      return res.status(400).json({
+        error: 'Укажите наш сайт и ссылку на Telegram в настройках кампании перед рассылкой.',
+      });
+    }
+
+    const recipients = _parseDirectRecipients(req.body?.recipients);
+    if (recipients.length === 0) {
+      return res.status(400).json({ error: 'Укажите хотя бы один валидный email в списке recipients.' });
+    }
+
+    const appUrl = process.env.APP_URL || 'https://localhost:3000';
+    const fromEmail = process.env.OUTREACH_FROM_EMAIL || campaign.sender_email;
+    const fromName = process.env.OUTREACH_FROM_NAME || campaign.sender_name || 'SEO Team';
+
+    let queued = 0;
+    let skipped = 0;
+    const errors = [];
+
+    // Ленивая загрузка сервисов (совпадает с общим конвейером).
+    const { prepareAndQueueEmail } = require('../services/outreach/outreachScheduler');
+
+    for (let i = 0; i < recipients.length; i++) {
+      const { email, site } = recipients[i];
+      try {
+        const url = site || `mailto:${email}`;
+        const domain = email.split('@')[1];
+
+        // Создаём (или переиспользуем) лид под этого адресата.
+        const { rows } = await db.query(
+          `INSERT INTO outreach_prospects
+             (campaign_id, user_id, url, emails, status)
+           VALUES ($1, $2, $3, $4, 'new')
+           ON CONFLICT (url, campaign_id)
+           DO UPDATE SET emails = EXCLUDED.emails
+           RETURNING *`,
+          [campaign.id, req.user.id, url, [email]],
+        );
+        const prospect = rows[0];
+
+        const ok = await prepareAndQueueEmail(campaign, prospect, {
+          fromEmail, fromName, appUrl, index: i, total: recipients.length,
+        });
+        if (ok) queued++; else skipped++;
+      } catch (err) {
+        skipped++;
+        errors.push({ email, error: err.message });
+      }
+    }
+
+    await db.query(
+      `INSERT INTO outreach_logs (campaign_id, level, message, meta)
+       VALUES ($1, 'info', $2, $3)`,
+      [
+        campaign.id,
+        `Прямая рассылка: поставлено ${queued}, пропущено ${skipped}`,
+        JSON.stringify({ queued, skipped, total: recipients.length }),
+      ],
+    );
+
+    // Учитываем поставленные письма в счётчике кампании.
+    if (queued > 0) {
+      await db.query(
+        `UPDATE outreach_campaigns
+            SET total_prospects = total_prospects + $1,
+                last_run_at = NOW(), updated_at = NOW()
+          WHERE id = $2`,
+        [queued, campaign.id],
+      );
+    }
+
+    return res.json({ ok: true, queued, skipped, total: recipients.length, errors });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listCampaigns,
   createCampaign,
@@ -553,6 +720,7 @@ module.exports = {
   listEmails,
   listLogs,
   getCampaignStats,
+  directSend,
   resendWebhook,
   unsubscribe,
   handleResendEvent,

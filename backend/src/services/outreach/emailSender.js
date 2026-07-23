@@ -55,7 +55,7 @@ async function isUnsubscribed(email) {
  * Основная функция отправки.
  * @returns {Promise<{resendId: string}>}
  */
-async function sendEmail({ emailId, to, subject, html, fromEmail, fromName }) {
+async function sendEmail({ emailId, to, subject, html, text, fromEmail, fromName, replyTo, unsubscribeUrl }) {
   // 1. Проверяем корпоративный email
   const domain = to.split('@')[1]?.toLowerCase();
   if (FREE_EMAIL_PROVIDERS.has(domain)) {
@@ -78,13 +78,30 @@ async function sendEmail({ emailId, to, subject, html, fromEmail, fromName }) {
     ? `${fromName} <${fromEmail}>`
     : fromEmail;
 
-  const { data, error } = await resend.emails.send({
+  // Заголовки для доставляемости (req 4 — не попадать в спам):
+  //  • List-Unsubscribe + One-Click (RFC 8058) — почтовики (Gmail/Mail.ru)
+  //    сильно повышают репутацию отправителям с корректной отпиской.
+  //  • X-Email-Id — для внутреннего трекинга.
+  const headers = { 'X-Email-Id': emailId };
+  if (unsubscribeUrl) {
+    headers['List-Unsubscribe'] = `<${unsubscribeUrl}>`;
+    headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+  }
+
+  const payload = {
     from: fromAddress,
     to,
     subject,
     html,
-    headers: { 'X-Email-Id': emailId }, // для трекинга
-  });
+    headers,
+  };
+  // Текстовая версия (multipart/alternative) — обязательна для хорошей
+  // доставляемости, письма «только HTML» чаще попадают в спам.
+  if (text) payload.text = text;
+  // Reply-To на реальный ящик, чтобы ответы доходили до отправителя.
+  if (replyTo) payload.replyTo = replyTo;
+
+  const { data, error } = await resend.emails.send(payload);
 
   if (error) throw new Error(`Resend error: ${error.message}`);
 

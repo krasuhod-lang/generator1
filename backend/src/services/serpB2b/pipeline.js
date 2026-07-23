@@ -69,6 +69,7 @@ function _initResultRow(siteRoot) {
     phones: [],
     phones_mobile: [],
     phones_landline: [],
+    messengers: [],
     emails: [],
     services: [],
     contact_url: null,
@@ -104,6 +105,13 @@ function _mergeContacts(target, contacts, contactUrl) {
   if (Array.isArray(contacts.phones_landline)) {
     const set = new Set(target.phones_landline);
     for (const p of contacts.phones_landline) if (!set.has(p)) { set.add(p); target.phones_landline.push(p); }
+  }
+  if (Array.isArray(contacts.messengers)) {
+    const set = new Set(target.messengers.map((x) => `${x.type}:${x.url}`));
+    for (const mgr of contacts.messengers) {
+      const key = `${mgr.type}:${mgr.url}`;
+      if (!set.has(key)) { set.add(key); target.messengers.push(mgr); }
+    }
   }
   if (Array.isArray(contacts.emails)) {
     const set = new Set(target.emails);

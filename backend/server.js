@@ -3237,6 +3237,19 @@ async function ensureSchema() {
       console.warn('[ensureSchema] outreach upgrade (mig 122) skipped:', e.message);
     }
 
+    // Миграция 124: доработки Outreach — контакты отправителя
+    // (sender_site / sender_telegram) для подписи письма и мессенджеры
+    // лида (messengers JSONB). Файл идемпотентен.
+    // См. migrations/124_outreach_enhancements.sql.
+    try {
+      const fs   = require('fs');
+      const sqlPath = path.join(__dirname, '..', 'migrations', '124_outreach_enhancements.sql');
+      const sql  = fs.readFileSync(sqlPath, 'utf8');
+      await db.query(sql);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach enhancements (mig 124) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

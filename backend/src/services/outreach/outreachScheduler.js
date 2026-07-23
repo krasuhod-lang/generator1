@@ -103,57 +103,10 @@ async function runCampaignCycle(campaign) {
   let queued = 0;
   for (const prospect of prospects) {
     try {
-      const email = prospect.emails.find(isCorporateEmail) || prospect.emails[0];
-      if (!email) continue;
-
-      // Генерируем письмо
-      const unsubToken = crypto.randomBytes(16).toString('hex');
-      const unsubUrl = `${appUrl}/unsubscribe?email=${encodeURIComponent(email)}&token=${unsubToken}`;
-
-      const composed = await composeEmail({
-        prospect: { ...prospect, niche: campaign.niche, dynamics_detail: prospect.dynamics_detail },
-        senderName: fromName,
-        senderCompany: fromName,
-        unsubscribeUrl: unsubUrl,
+      const ok = await prepareAndQueueEmail(campaign, prospect, {
+        fromEmail, fromName, appUrl, index: queued, total: prospects.length,
       });
-
-      // Создаём запись письма в БД
-      const { rows: emailRows } = await db.query(
-        `INSERT INTO outreach_emails
-           (prospect_id, campaign_id, user_id, recipient_email, recipient_domain, subject, html_preview, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued')
-         RETURNING id`,
-        [
-          prospect.id, campaign.id, campaign.user_id,
-          email, email.split('@')[1],
-          composed.subject, composed.html.slice(0, 500),
-        ],
-      );
-      const emailId = emailRows[0].id;
-
-      // Сохраняем токен отписки
-      await db.query(
-        `INSERT INTO outreach_unsubscribes (email, domain, token)
-         VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING`,
-        [email.toLowerCase(), email.split('@')[1], unsubToken],
-      );
-
-      // Ставим в очередь с задержкой (равномерно в течение рабочего дня)
-      const delayMs = calculateSendDelay(queued, prospects.length);
-      await emailQueue.add('send-email', {
-        emailId, to: email,
-        subject: composed.subject,
-        html: composed.html,
-        fromEmail, fromName,
-      }, { delay: delayMs });
-
-      // Обновляем статус лида
-      await db.query(
-        `UPDATE outreach_prospects SET status = 'queued' WHERE id = $1`,
-        [prospect.id],
-      );
-
-      queued++;
+      if (ok) queued++;
     } catch (err) {
       await log(campaign.id, 'warn', `Ошибка подготовки письма для ${prospect.url}: ${err.message}`);
     }
@@ -174,6 +127,75 @@ async function runCampaignCycle(campaign) {
   await checkWarmupProgression(campaign);
 
   await log(campaign.id, 'success', `Поставлено в очередь: ${queued} писем`);
+}
+
+/**
+ * Готовит и ставит в очередь одно письмо для лида: генерирует текст,
+ * создаёт запись outreach_emails, сохраняет токен отписки и отправляет
+ * в BullMQ. Используется общим конвейером и прямой рассылкой (req 5).
+ * @returns {Promise<boolean>} true — если письмо поставлено в очередь.
+ */
+async function prepareAndQueueEmail(campaign, prospect, opts) {
+  const { fromEmail, fromName, appUrl, index = 0, total = 1 } = opts;
+
+  const email = (prospect.emails || []).find(isCorporateEmail) || (prospect.emails || [])[0];
+  if (!email) return false;
+
+  const domain = email.split('@')[1];
+
+  // Генерируем письмо
+  const unsubToken = crypto.randomBytes(16).toString('hex');
+  const unsubUrl = `${appUrl}/unsubscribe?email=${encodeURIComponent(email)}&token=${unsubToken}`;
+
+  const composed = await composeEmail({
+    prospect: { ...prospect, niche: prospect.niche || campaign.niche, dynamics_detail: prospect.dynamics_detail },
+    senderName: fromName,
+    senderCompany: fromName,
+    unsubscribeUrl: unsubUrl,
+    senderSite: campaign.sender_site,
+    senderTelegram: campaign.sender_telegram,
+  });
+
+  // Создаём запись письма в БД
+  const { rows: emailRows } = await db.query(
+    `INSERT INTO outreach_emails
+       (prospect_id, campaign_id, user_id, recipient_email, recipient_domain, subject, html_preview, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued')
+     RETURNING id`,
+    [
+      prospect.id, campaign.id, campaign.user_id,
+      email, domain,
+      composed.subject, composed.html.slice(0, 500),
+    ],
+  );
+  const emailId = emailRows[0].id;
+
+  // Сохраняем токен отписки
+  await db.query(
+    `INSERT INTO outreach_unsubscribes (email, domain, token)
+     VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING`,
+    [email.toLowerCase(), domain, unsubToken],
+  );
+
+  // Ставим в очередь с задержкой (равномерно в течение рабочего дня, МСК).
+  const delayMs = calculateSendDelay(index, total);
+  await emailQueue.add('send-email', {
+    emailId, to: email,
+    subject: composed.subject,
+    html: composed.html,
+    text: composed.text,
+    fromEmail, fromName,
+    replyTo: campaign.sender_email || fromEmail,
+    unsubscribeUrl: unsubUrl,
+  }, { delay: delayMs });
+
+  // Обновляем статус лида
+  await db.query(
+    `UPDATE outreach_prospects SET status = 'queued' WHERE id = $1`,
+    [prospect.id],
+  );
+
+  return true;
 }
 
 async function collectNewProspects(campaign) {
@@ -242,13 +264,14 @@ async function collectNewProspects(campaign) {
         await db.query(
           `INSERT INTO outreach_prospects
              (campaign_id, user_id, url, company_name, inn, emails, phones,
-              niche, city, services, dynamics_yandex, dynamics_google,
+              messengers, niche, city, services, dynamics_yandex, dynamics_google,
               dynamics_detail, score, score_breakdown, source_serp_task)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
            ON CONFLICT (url, campaign_id) DO NOTHING`,
           [
             campaign.id, campaign.user_id, site.url, site.company_name,
             site.inn, site.emails || [], site.phones || [],
+            JSON.stringify(Array.isArray(site.messengers) ? site.messengers : []),
             taskParams._niche, taskParams._city, site.services || [],
             site.dynamics?.yandex?.trend || null,
             site.dynamics?.google?.trend || null,
@@ -271,24 +294,36 @@ async function collectNewProspects(campaign) {
   await log(campaign.id, 'info', `Собрано новых лидов: ${collected}`);
 }
 
-// Равномерно распределяем отправку в рабочие часы (9:00-18:00)
+// Равномерно распределяем отправку в рабочие часы по МСК (07:00–18:00),
+// чтобы письма уходили в «человеческое» время и не выглядели как спам-бот.
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000; // UTC+3
+const WORK_START_HOUR = 7;
+const WORK_END_HOUR = 18;
+
 function calculateSendDelay(index, total) {
   const now = new Date();
-  const workStart = new Date(now);
-  workStart.setHours(9, 0, 0, 0);
-  const workEnd = new Date(now);
-  workEnd.setHours(18, 0, 0, 0);
+  // Текущее МСК-время как «настенное».
+  const msk = new Date(now.getTime() + MSK_OFFSET_MS);
+  const y = msk.getUTCFullYear();
+  const mo = msk.getUTCMonth();
+  const d = msk.getUTCDate();
 
-  if (now > workEnd) {
-    workStart.setDate(workStart.getDate() + 1);
-    workEnd.setDate(workEnd.getDate() + 1);
+  // Границы окна отправки в МСК, переведённые обратно в UTC-таймстемпы.
+  let workStart = Date.UTC(y, mo, d, WORK_START_HOUR, 0, 0) - MSK_OFFSET_MS;
+  let workEnd = Date.UTC(y, mo, d, WORK_END_HOUR, 0, 0) - MSK_OFFSET_MS;
+
+  // Если рабочий день по МСК уже закончился — переносим на завтра.
+  if (now.getTime() > workEnd) {
+    workStart = Date.UTC(y, mo, d + 1, WORK_START_HOUR, 0, 0) - MSK_OFFSET_MS;
+    workEnd = Date.UTC(y, mo, d + 1, WORK_END_HOUR, 0, 0) - MSK_OFFSET_MS;
   }
+  // Если ещё не начался — ждём открытия окна.
+  const start = Math.max(workStart, now.getTime());
 
-  const workMs = workEnd - workStart;
+  const workMs = Math.max(0, workEnd - start);
   const step = workMs / Math.max(total, 1);
-  const target = new Date(workStart.getTime() + step * index);
-  const delay = target - now;
-  return Math.max(0, delay);
+  const target = start + step * index;
+  return Math.max(0, target - now.getTime());
 }
 
 async function checkWarmupProgression(campaign) {
@@ -324,4 +359,7 @@ function stopOutreachScheduler() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { startOutreachScheduler, stopOutreachScheduler, runTick };
+module.exports = {
+  startOutreachScheduler, stopOutreachScheduler, runTick,
+  prepareAndQueueEmail, calculateSendDelay,
+};

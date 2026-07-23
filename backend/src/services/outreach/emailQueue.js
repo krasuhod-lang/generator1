@@ -32,10 +32,12 @@ function startEmailWorker() {
   if (emailWorker) return;
 
   emailWorker = new Worker(EMAIL_QUEUE_NAME, async (job) => {
-    const { emailId, to, subject, html, fromEmail, fromName } = job.data;
+    const { emailId, to, subject, html, text, fromEmail, fromName, replyTo, unsubscribeUrl } = job.data;
 
     try {
-      const { resendId } = await sendEmail({ emailId, to, subject, html, fromEmail, fromName });
+      const { resendId } = await sendEmail({
+        emailId, to, subject, html, text, fromEmail, fromName, replyTo, unsubscribeUrl,
+      });
 
       // Логируем успех
       await db.query(
