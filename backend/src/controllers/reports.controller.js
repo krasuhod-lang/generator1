@@ -940,8 +940,11 @@ async function publicExportPdf(req, res) {
 async function uploadTaskImage(req, res) {
   try {
     if (!req.file) return _bad(res, 400, 'Файл не загружен');
-    // Return the public URL to the uploaded file
-    const url = `/uploads/report-images/${req.file.filename}`;
+    // Return the public URL to the uploaded file. Используем `/api/uploads/...`,
+    // а не «голый» `/uploads/...`: в проде nginx проксирует на backend только
+    // `/api/`, поэтому относительный `/uploads/...` отдаёт SPA/404 и картинка
+    // не отрисовывается. Путь `/api/uploads` смонтирован в server.js.
+    const url = `/api/uploads/report-images/${req.file.filename}`;
     res.json({ url });
   } catch (err) {
     return _bad(res, 500, err.message || 'upload_failed');

@@ -102,8 +102,15 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Статические файлы для загрузок (DOCX и т.д.)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Статические файлы для загрузок (DOCX, скриншоты задач в отчётах и т.д.)
+// Отдаём и по `/uploads`, и по `/api/uploads`: в проде nginx проксирует на
+// backend только `/api/`, поэтому «голый» `/uploads/...` отдаёт SPA/404, и
+// картинки в задачах не отрисовываются (видна заглушка). Дублирующий mount
+// под `/api/uploads` гарантирует, что <img> дойдёт до бэкенда через тот же
+// прокси, что и API. Первый mount оставлен для обратной совместимости.
+const uploadsDir = path.join(__dirname, 'uploads');
+app.use('/uploads', express.static(uploadsDir));
+app.use('/api/uploads', express.static(uploadsDir));
 
 // -----------------------------------------------------------------
 // Health check (не требует JWT)

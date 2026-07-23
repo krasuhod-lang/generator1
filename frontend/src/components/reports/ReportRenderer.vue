@@ -398,18 +398,23 @@ function safeHtml(value) {
   const html = DOMPurify.sanitize(linked, {
     ALLOWED_TAGS: ['a', 'p', 'br', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'img'],
     ALLOWED_ATTR: ['href', 'target', 'rel', 'src', 'alt', 'width', 'style'],
-    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
+    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/(?:api\/)?uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
   });
   // ТЗ: все ссылки внутри задач должны открываться в новой вкладке, чтобы
   // отчёт оставался открытым (DOMPurify не делает этого сам). Допиливаем
   // target=_blank + rel='noopener noreferrer' детерминированной заменой;
   // ссылки, у которых уже стоит target, оставляем как есть.
-  return html.replace(/<a\b([^>]*)>/gi, (match, attrs) => {
-    let next = attrs;
-    if (!/\btarget=/i.test(next)) next += ' target="_blank"';
-    if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
-    return `<a${next}>`;
-  });
+  return html
+    // Legacy: раньше картинки сохранялись как `/uploads/...`, но nginx в проде
+    // проксирует на backend только `/api/`. Переписываем src на `/api/uploads/`,
+    // чтобы ранее добавленные скриншоты тоже отрисовывались.
+    .replace(/(<img\b[^>]*\bsrc=["'])\/uploads\//gi, '$1/api/uploads/')
+    .replace(/<a\b([^>]*)>/gi, (match, attrs) => {
+      let next = attrs;
+      if (!/\btarget=/i.test(next)) next += ' target="_blank"';
+      if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
+      return `<a${next}>`;
+    });
 }
 
 // ── Image upload helpers ───────────────────────────────────────────────────
@@ -440,10 +445,12 @@ async function uploadImageFile(file) {
 function resolveUploadUrl(url) {
   if (!url) return url;
   if (/^https?:\/\//i.test(url)) return url; // уже абсолютный
+  // Legacy `/uploads/...` → `/api/uploads/...` (nginx проксирует только `/api/`).
+  const normalized = url.replace(/^\/uploads\//i, '/api/uploads/');
   const base = (import.meta.env?.VITE_API_BASE_URL || '').replace(/\/+$/, '');
-  if (!base) return url; // same-origin / проксирование — оставляем как есть
+  if (!base) return normalized; // same-origin / проксирование — оставляем как есть
   const origin = base.replace(/\/api$/i, ''); // статика живёт вне /api
-  return `${origin}${url.startsWith('/') ? '' : '/'}${url}`;
+  return `${origin}${normalized.startsWith('/') ? '' : '/'}${normalized}`;
 }
 
 async function onDescriptionPaste(ev, i, j, k) {
