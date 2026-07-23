@@ -6,8 +6,10 @@ const assert = require('assert');
 const {
   fromReportRow,
   renderForPromptBrief,
+  buildCocoonBrief,
   _splitHeadingsByLevel,
   _digestSignals,
+  _extractDirectives,
 } = require('../src/services/relevance/relevanceArtifacts');
 
 let passed = 0;
@@ -126,6 +128,61 @@ t('renderForPromptBrief: содержит блоки и маркеры', () => {
 
 t('renderForPromptBrief: null/empty → пустая строка', () => {
   assert.strictEqual(renderForPromptBrief(null), '');
+});
+
+// ── ТЗ 23.07.2026 п.2.1/2.2: директивы + cocoon brief ──────────────────
+t('_extractDirectives: нормализует comparison.directives', () => {
+  const dirs = _extractDirectives({
+    directives: [
+      { lemma: 'купить', status: 'over', important: true, delta: -5, our_count: 12, median_top: 7, text: 'Сократите «купить»' },
+      { lemma: 'цена', status: 'missing', delta: 4, our_count: 0, median_top: 4, text: 'Добавьте «цена»' },
+      { lemma: '', status: 'under', text: 'skip — нет леммы' },
+    ],
+  });
+  assert.strictEqual(dirs.length, 2);
+  assert.strictEqual(dirs[0].lemma, 'купить');
+  assert.strictEqual(dirs[0].delta, -5);
+  assert.strictEqual(dirs[0].important, true);
+  assert.strictEqual(dirs[1].status, 'missing');
+});
+
+t('_extractDirectives: null/пусто → []', () => {
+  assert.deepStrictEqual(_extractDirectives(null), []);
+  assert.deepStrictEqual(_extractDirectives({}), []);
+});
+
+t('fromReportRow: пробрасывает directives из report.comparison', () => {
+  const art = fromReportRow({
+    id: 'rd', our_report: {},
+    comparison: { directives: [{ lemma: 'crm', status: 'under', delta: 2, text: 'Добавьте «crm»' }] },
+  });
+  assert.strictEqual(art.directives.length, 1);
+  assert.strictEqual(art.directives[0].lemma, 'crm');
+});
+
+t('renderForPromptBrief: включает директивы', () => {
+  const art = fromReportRow({
+    id: 'rd2', our_report: {},
+    comparison: { directives: [{ lemma: 'crm', status: 'under', delta: 2, text: 'Добавьте «crm» +2' }] },
+  });
+  const s = renderForPromptBrief(art);
+  assert.ok(s.includes('Директивы'));
+  assert.ok(s.includes('Добавьте «crm» +2'));
+});
+
+t('buildCocoonBrief: рендерит кластеры или пусто', () => {
+  assert.strictEqual(buildCocoonBrief(null), '');
+  assert.strictEqual(buildCocoonBrief({ mothers: [] }), '');
+  const brief = buildCocoonBrief({
+    mothers: [
+      { label: 'Выбор CRM', children: [{ title: 'Критерии выбора' }, { title: 'Сравнение' }] },
+      { title: 'Внедрение' },
+    ],
+  });
+  assert.ok(brief.includes('COCOON_PLAN'));
+  assert.ok(brief.includes('Выбор CRM'));
+  assert.ok(brief.includes('Критерии выбора'));
+  assert.ok(brief.includes('Внедрение'));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -377,6 +377,10 @@ async function runCompetitivePurchaseBrief(task, strategy, audience, whitespace,
 
 async function runStructure(task, audience, intents, whitespace, ctx) {
   const hints = (whitespace && whitespace.article_hierarchy_hints) || {};
+  // ТЗ 23.07.2026 п.2.2: семантические кластеры конкурентов (cocoon_plan) →
+  // опора для H2/H3, чтобы покрыть все микро-интенты ТОПа.
+  const { buildCocoonBrief } = require('../relevance/relevanceArtifacts');
+  const cocoonBrief = buildCocoonBrief(task && task.__relevanceArtifact && task.__relevanceArtifact.cocoon_plan);
   const user = [
     `[INPUTS]`,
     `topic: ${task.topic}`,
@@ -386,6 +390,7 @@ async function runStructure(task, audience, intents, whitespace, ctx) {
     `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
     `stage1_intents: ${JSON.stringify(intents).slice(0, 8000)}`,
     `whitespace_hints: ${JSON.stringify(hints).slice(0, 4000)}`,
+    ...(cocoonBrief ? ['', cocoonBrief] : []),
   ].join('\n');
 
   return callLLM(
@@ -663,6 +668,9 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
           base.push('');
           base.push(brief);
           base.push('Обязательно: использовать перечисленные LSI-леммы и n-граммы естественным образом; раскрыть темы из H2/H3-набросков (можно адаптировать формулировку).');
+          if (Array.isArray(task.__relevanceArtifact.directives) && task.__relevanceArtifact.directives.length) {
+            base.push('Обязательно выполни ДИРЕКТИВЫ (наш сайт vs ТОП): добавь недостающие слова (under/missing) и сократи использование переспамленных слов (over).');
+          }
         }
       } catch (_) { /* graceful */ }
     }

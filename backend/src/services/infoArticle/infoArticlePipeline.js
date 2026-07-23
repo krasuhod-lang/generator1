@@ -372,6 +372,10 @@ async function runOutline(task, audience, intents, whitespace, ctx) {
   const hints = (whitespace && whitespace.article_hierarchy_hints) || {};
   const { buildGistDeltaBrief } = require('../gist/gistClient');
   const gistBrief = buildGistDeltaBrief(whitespace && whitespace.information_delta);
+  // ТЗ 23.07.2026 п.2.2: семантические кластеры конкурентов (cocoon_plan) →
+  // опора для H2/H3, чтобы покрыть все микро-интенты ТОПа.
+  const { buildCocoonBrief } = require('../relevance/relevanceArtifacts');
+  const cocoonBrief = buildCocoonBrief(task && task.__relevanceArtifact && task.__relevanceArtifact.cocoon_plan);
   const user = [
     `[INPUTS]`,
     `topic: ${task.topic}`,
@@ -380,6 +384,7 @@ async function runOutline(task, audience, intents, whitespace, ctx) {
     `stage1_intents: ${JSON.stringify(intents).slice(0, 8000)}`,
     `whitespace_hints: ${JSON.stringify(hints).slice(0, 4000)}`,
     ...(gistBrief ? ['', gistBrief] : []),
+    ...(cocoonBrief ? ['', cocoonBrief] : []),
   ].join('\n');
   return callLLM(
     'deepseek',
@@ -1316,6 +1321,10 @@ async function processInfoArticleTask(taskId) {
             schema_recommendation_markdown: relevanceArtifact.schema_recommendation_markdown,
             voice_of_customer: relevanceArtifact.voice_of_customer,
             our_url: relevanceArtifact.our_url,
+            // ТЗ 23.07.2026 п.2.1: директивы «наш сайт vs ТОП» → §9d IAKB.
+            directives: relevanceArtifact.directives || [],
+            // ТЗ 23.07.2026 п.2.2: план кластеров конкурентов → Stage 2 (DeepSeek).
+            cocoon_plan: relevanceArtifact.cocoon_plan || null,
           };
           if (relevanceSignals) {
             await appendLog(

@@ -359,6 +359,19 @@ function buildInfoArticleKnowledgeBase({
     } catch (_) { /* graceful */ }
   }
 
+  // §9d — Корректировка семантики (Директивы). ТЗ 23.07.2026 п.2.1: конкретные
+  // директивы «наш сайт vs ТОП» (переспам/недоспам/отсутствующие леммы).
+  // Копирайтер (Gemini) ОБЯЗАН их выполнить, устраняя семантические гэпы.
+  let sectionDirectives = '';
+  if (relevanceContext && Array.isArray(relevanceContext.directives) && relevanceContext.directives.length) {
+    try {
+      const md = renderDirectivesSection(relevanceContext.directives);
+      if (md && md.trim()) {
+        sectionDirectives = '## §9d. Корректировка семантики (Директивы)\n\n' + md;
+      }
+    } catch (_) { /* graceful */ }
+  }
+
   // §10 — Голос аудитории из Reddit Mapper V2 (Information Gain топливо:
   // реальные боли, язык, вопросы, приоритетные темы). Опционально, graceful.
   let sectionAudienceResearch = '';
@@ -393,6 +406,7 @@ function buildInfoArticleKnowledgeBase({
     sectionRelevance,
     sectionRelevanceCtx,
     sectionTargetSiteStyle,
+    sectionDirectives,
     sectionAudienceResearch,
     sectionGistDelta(whitespace),
   ].filter(Boolean);
@@ -473,6 +487,39 @@ function renderRelevanceContextSection(ctx) {
   if (ent.length) {
     out.push('### Обязательные именованные сущности (NER, в ≥50% топа)');
     out.push(ent.slice(0, 20).map(e => `- ${e.text || e}${e.df_share_pct ? ' (' + e.df_share_pct + '%)' : ''}`).join('\n'));
+  }
+  return out.join('\n\n');
+}
+
+/**
+ * §9d — render директив «наш сайт vs ТОП» (ТЗ 23.07.2026 п.2.1).
+ * Группирует по типу: under/missing (недоспам — добавить) и over/over_top3
+ * (переспам — сократить). Каждый пункт — готовая инструкция копирайтеру.
+ */
+function renderDirectivesSection(directives) {
+  const list = Array.isArray(directives) ? directives.filter((d) => d && d.lemma) : [];
+  if (!list.length) return '';
+  const under = list.filter((d) => d.status === 'missing' || d.status === 'under');
+  const over  = list.filter((d) => d.status === 'over' || d.status === 'over_top3');
+  const out = [];
+  out.push(
+    'ОБЯЗАТЕЛЬНО выполни директивы ниже: добавь недостающие слова (under/missing) и ' +
+    'сократи использование переспамленных слов (over). Это устраняет семантические ' +
+    'гэпы относительно ТОПа выдачи. Не жертвуй читабельностью — вписывай леммы естественно.',
+  );
+  if (under.length) {
+    out.push('### ➕ Недоспам — добавить (наш сайт < ТОП)');
+    out.push(under.slice(0, 25).map((d) => {
+      const tag = d.important ? ' _(важная)_' : '';
+      return `- **${d.lemma}**${tag}: ${d.text}`;
+    }).join('\n'));
+  }
+  if (over.length) {
+    out.push('### ➖ Переспам — сократить (наш сайт > ТОП)');
+    out.push(over.slice(0, 25).map((d) => {
+      const tag = d.important ? ' _(важная)_' : '';
+      return `- **${d.lemma}**${tag}: ${d.text}`;
+    }).join('\n'));
   }
   return out.join('\n\n');
 }
