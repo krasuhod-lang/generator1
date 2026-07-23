@@ -8,6 +8,17 @@ const { Resend } = require('resend');
 const db = require('../../config/db');
 const { FREE_EMAIL_PROVIDERS } = require('./prospectScorer');
 
+// По умолчанию в рассылке может участвовать ЛЮБАЯ почта, включая бесплатные
+// провайдеры (gmail.com / yandex.ru / mail.ru / …). Чтобы вернуть прежнее
+// поведение и отсекать бесплатные ящики, выставите
+// OUTREACH_BLOCK_FREE_PROVIDERS=true.
+const BLOCK_FREE_PROVIDERS =
+  String(process.env.OUTREACH_BLOCK_FREE_PROVIDERS || '').trim().toLowerCase() === 'true';
+
+function isFreeProviderBlocked(domain) {
+  return BLOCK_FREE_PROVIDERS && FREE_EMAIL_PROVIDERS.has(domain);
+}
+
 let _resend = null;
 function getResend() {
   if (!_resend) {
@@ -71,9 +82,10 @@ async function sendEmail({ emailId, to, subject, html, fromEmail, fromName }) {
     }
   }
 
-  // 1. Проверяем корпоративный email
+  // 1. Проверяем корпоративный email (по умолчанию отключено — участвует любая
+  // почта; включается через OUTREACH_BLOCK_FREE_PROVIDERS=true)
   const domain = to.split('@')[1]?.toLowerCase();
-  if (FREE_EMAIL_PROVIDERS.has(domain)) {
+  if (isFreeProviderBlocked(domain)) {
     throw new Error(`Пропускаем бесплатный провайдер: ${domain}`);
   }
 
@@ -116,7 +128,9 @@ async function sendEmail({ emailId, to, subject, html, fromEmail, fromName }) {
 
 /**
  * Предпроверка получателя ДО постановки письма в очередь (Блок 4.2 ТЗ):
- * бесплатный провайдер / реальная отписка / cooldown 30 дней на домен.
+ * реальная отписка / cooldown 30 дней на домен. По умолчанию в рассылке
+ * участвует любая почта; фильтр бесплатных провайдеров включается через
+ * OUTREACH_BLOCK_FREE_PROVIDERS=true.
  * Позволяет не создавать письмо и не засорять очередь заведомо
  * непроходными job'ами (иначе они падают в failed и уходят в ретраи BullMQ).
  * @returns {Promise<{ok:boolean, reason?:string}>}
@@ -125,7 +139,7 @@ async function precheckRecipient(email) {
   const addr = String(email || '').trim().toLowerCase();
   const domain = addr.split('@')[1];
   if (!domain) return { ok: false, reason: 'invalid_email' };
-  if (FREE_EMAIL_PROVIDERS.has(domain)) return { ok: false, reason: 'free_provider' };
+  if (isFreeProviderBlocked(domain)) return { ok: false, reason: 'free_provider' };
   if (await isUnsubscribed(addr)) return { ok: false, reason: 'unsubscribed' };
   if (!(await checkCooldown(domain))) return { ok: false, reason: 'cooldown' };
   return { ok: true };
