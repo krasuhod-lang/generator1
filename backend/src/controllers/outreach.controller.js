@@ -89,6 +89,8 @@ async function createCampaign(req, res, next) {
     const senderName = _clip(body.sender_name, 120) || null;
     const name = _clip(body.name, MAX_NAME_LEN) || keyword;
     const senderEmail = _clip(body.sender_email, 200) || process.env.OUTREACH_FROM_EMAIL || null;
+    const senderSite = _clip(body.sender_site, 300) || null;
+    const senderTelegram = _clip(body.sender_telegram, 120) || null;
 
     if (!keyword) {
       return res.status(400).json({ error: 'Укажите нишу / запрос (keyword)' });
@@ -108,15 +110,17 @@ async function createCampaign(req, res, next) {
     const { rows } = await db.query(
       `INSERT INTO outreach_campaigns
           (user_id, name, keyword, cities, search_engine, depth_pages,
-           daily_limit, sender_name, sender_email, status, next_run_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW())
+           daily_limit, sender_name, sender_email, sender_site, sender_telegram,
+           status, next_run_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW())
        RETURNING id, name, keyword, niche, business_type, cities, search_engine,
                  depth_pages, daily_limit, warmup_week, sender_name, sender_email,
+                 sender_site, sender_telegram,
                  status, total_prospects, total_sent, total_opened, total_clicked,
                  total_replied, last_run_at, next_run_at, created_at`,
       [
         req.user.id, name, keyword, cities, searchEngine, depthPages,
-        dailyLimit, senderName, senderEmail, status,
+        dailyLimit, senderName, senderEmail, senderSite, senderTelegram, status,
       ],
     );
 
@@ -177,6 +181,12 @@ async function updateCampaign(req, res, next) {
     }
     if (body.sender_name !== undefined) {
       sets.push(`sender_name = $${idx++}`); vals.push(_clip(body.sender_name, 120) || null);
+    }
+    if (body.sender_site !== undefined) {
+      sets.push(`sender_site = $${idx++}`); vals.push(_clip(body.sender_site, 300) || null);
+    }
+    if (body.sender_telegram !== undefined) {
+      sets.push(`sender_telegram = $${idx++}`); vals.push(_clip(body.sender_telegram, 120) || null);
     }
     if (body.run_now === true) {
       // Форсируем запуск немедленно: обновляем next_run_at И вызываем runTick().

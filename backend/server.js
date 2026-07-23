@@ -3252,6 +3252,18 @@ async function ensureSchema() {
       console.warn('[ensureSchema] outreach warmup ramp (mig 124) skipped:', e.message);
     }
 
+    // Миграция 125: контактные данные отправителя (sender_site, sender_telegram)
+    // для подписи письма и призыва написать в Telegram. Файл идемпотентен.
+    // См. migrations/125_outreach_contacts.sql.
+    try {
+      const fs   = require('fs');
+      const sqlPath = path.join(__dirname, '..', 'migrations', '125_outreach_contacts.sql');
+      const sql  = fs.readFileSync(sqlPath, 'utf8');
+      await db.query(sql);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach contacts (mig 125) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

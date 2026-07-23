@@ -47,6 +47,7 @@ require.cache[llmPath] = {
 
 const {
   composeEmail, buildCatchySubject, assertComplete, isValidSubject,
+  _buildGreeting, _buildContactBlock,
 } = require('../src/services/outreach/emailComposer');
 const { buildDynamicsChart } = require('../src/services/outreach/emailChart');
 
@@ -133,6 +134,65 @@ const PROSPECT = {
     assert.ok(r.html.includes('example-clinic.ru'), 'fallback без домена');
     assert.ok(r.html.includes('видео'), 'fallback без оффера');
     assert.ok(r.subject.length <= 55 && r.subject.length > 0, 'нет темы у fallback');
+  });
+
+  // ── Приветствие по времени суток (МСК) ─────────────────────────────
+  await test('_buildGreeting: утро / день / вечер / ночь по МСК', () => {
+    const at = (h) => _buildGreeting(Date.UTC(2026, 0, 15, h - 3, 0, 0)); // h — час МСК
+    assert.ok(at(8).includes('Доброе утро'), 'утро');
+    assert.ok(at(14).includes('Добрый день'), 'день');
+    assert.ok(at(20).includes('Добрый вечер'), 'вечер');
+    assert.ok(at(2).includes('Здравствуйте'), 'ночь');
+  });
+
+  await test('composeEmail: письмо начинается с приветствия', async () => {
+    _llmResponses = [{ subject: 'example-clinic.ru: −42% в Google', html: COMPLETE_HTML }];
+    const r = await composeEmail({ prospect: PROSPECT, senderName: 'Иван', senderCompany: 'SEO', unsubscribeUrl: 'https://app/u?t=1' });
+    assert.ok(/^<p[^>]*>(Доброе утро|Добрый день|Добрый вечер|Здравствуйте)/.test(r.html.trim()), 'нет приветствия в начале');
+  });
+
+  // ── Блок контактов (сайт + Telegram-CTA) ───────────────────────────
+  await test('_buildContactBlock: пусто без данных', () => {
+    assert.strictEqual(_buildContactBlock({}), '');
+    assert.strictEqual(_buildContactBlock({ site: '', telegram: '' }), '');
+  });
+
+  await test('_buildContactBlock: сайт нормализуется в https + host-подпись', () => {
+    const html = _buildContactBlock({ site: 'example.ru' });
+    assert.ok(html.includes('href="https://example.ru"'), 'нет https-ссылки');
+    assert.ok(html.includes('>example.ru<'), 'нет подписи домена');
+  });
+
+  await test('_buildContactBlock: Telegram — CTA + t.me из @username', () => {
+    const html = _buildContactBlock({ telegram: '@seo_expert' });
+    assert.ok(html.includes('href="https://t.me/seo_expert"'), 'нет t.me ссылки');
+    assert.ok(html.includes('Telegram'), 'нет призыва в Telegram');
+    assert.ok(html.includes('@seo_expert'), 'нет подписи username');
+  });
+
+  await test('_buildContactBlock: Telegram из t.me/ ссылки', () => {
+    const html = _buildContactBlock({ telegram: 'https://t.me/seo_expert' });
+    assert.ok(html.includes('href="https://t.me/seo_expert"'), 'ссылка t.me не распознана');
+  });
+
+  await test('_buildContactBlock: экранирует имя (защита от инъекций)', () => {
+    const html = _buildContactBlock({ site: 'example.ru', senderName: '<script>' });
+    assert.ok(!html.includes('<script>'), 'имя не экранировано');
+    assert.ok(html.includes('&lt;script&gt;'), 'нет экранированного имени');
+  });
+
+  await test('composeEmail: блок контактов попадает в письмо', async () => {
+    _llmResponses = [{ subject: 'example-clinic.ru: −42% в Google', html: COMPLETE_HTML }];
+    const r = await composeEmail({
+      prospect: PROSPECT, senderName: 'Иван', senderCompany: 'SEO',
+      senderSite: 'agency.ru', senderTelegram: '@seo_expert',
+      unsubscribeUrl: 'https://app/u?t=1',
+    });
+    assert.ok(r.html.includes('href="https://agency.ru"'), 'нет ссылки на сайт');
+    assert.ok(r.html.includes('href="https://t.me/seo_expert"'), 'нет ссылки на Telegram');
+    // Контакты идут ПОСЛЕ тела письма и ПЕРЕД footer-отпиской.
+    assert.ok(r.html.indexOf('Оффер три.') < r.html.indexOf('t.me/seo_expert'), 'контакты выше тела');
+    assert.ok(r.html.indexOf('t.me/seo_expert') < r.html.indexOf('Отписаться'), 'контакты ниже footer');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

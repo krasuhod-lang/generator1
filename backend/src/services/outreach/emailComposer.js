@@ -77,10 +77,12 @@ const REPAIR_HINT = `
  * @param {object} params.prospect — данные о лиде (включая dynamics_detail из миграции 122)
  * @param {string} params.senderName — имя отправителя
  * @param {string} params.senderCompany — название компании отправителя
+ * @param {string} params.senderSite — ссылка на сайт отправителя (подпись письма)
+ * @param {string} params.senderTelegram — Telegram отправителя (призыв написать)
  * @param {string} params.unsubscribeUrl — URL для отписки
  * @returns {Promise<{subject:string, html:string, strategy:string, manual_review_required:boolean}>}
  */
-async function composeEmail({ prospect, senderName, senderCompany, unsubscribeUrl }) {
+async function composeEmail({ prospect, senderName, senderCompany, senderSite, senderTelegram, unsubscribeUrl }) {
   const detail = _parseDetail(prospect.dynamics_detail);
   const dynamicsText = formatDynamicsNumeric(prospect, detail);
 
@@ -118,6 +120,8 @@ ${dynamicsText}
   // чтобы цифры всегда совпадали с данными keys.so.
   const dynamicsTable = buildDynamicsTable(detail);
   const dynamicsChart = buildDynamicsChart(detail).html;
+  const greeting = _buildGreeting();
+  const contactBlock = _buildContactBlock({ site: senderSite, telegram: senderTelegram, senderName });
   const footer = _buildFooter(unsubscribeUrl);
 
   // ── Эскалация maxTokens + проверка завершённости письма ──────────────
@@ -158,7 +162,7 @@ ${dynamicsText}
 
   return {
     subject,
-    html: bodyHtml + dynamicsChart + dynamicsTable + footer,
+    html: greeting + bodyHtml + dynamicsChart + dynamicsTable + contactBlock + footer,
     strategy: subjectPlan.strategy,
     manual_review_required: manualReviewRequired,
   };
@@ -256,9 +260,125 @@ function _domainOf(url) {
   catch (_) { return String(url).replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0]; }
 }
 
+/**
+ * Приветствие по времени суток (по московскому времени, как и окно отправки
+ * писем 07:00–18:00 МСК). Рендерится детерминированно кодом отдельным абзацем
+ * ПЕРЕД телом письма, поэтому в системном промпте LLM просим не здороваться.
+ * @param {number} [nowMs] — текущий момент в ms (для тестов).
+ * @returns {string} HTML-абзац с приветствием.
+ */
+function _buildGreeting(nowMs) {
+  const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+  const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const hour = new Date(ms + MSK_OFFSET_MS).getUTCHours();
+
+  let text;
+  if (hour >= 5 && hour < 12) text = 'Доброе утро!';
+  else if (hour >= 12 && hour < 18) text = 'Добрый день!';
+  else if (hour >= 18 && hour < 23) text = 'Добрый вечер!';
+  else text = 'Здравствуйте!';
+
+  return `<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;line-height:1.6;margin:0 0 14px;">${text}</p>`;
+}
+
+/**
+ * Блок контактов отправителя в подписи письма: ссылка на сайт и призыв
+ * написать в Telegram. Рендерится только при наличии данных (site/telegram),
+ * иначе возвращает пустую строку.
+ * @param {object} params
+ * @param {string} [params.site] — ссылка на сайт.
+ * @param {string} [params.telegram] — Telegram (@username, ссылка или t.me/...).
+ * @param {string} [params.senderName] — имя отправителя (для подписи).
+ * @returns {string} HTML-блок контактов или ''.
+ */
+function _buildContactBlock({ site, telegram, senderName } = {}) {
+  const siteUrl = _normalizeUrl(site);
+  const tg = _normalizeTelegram(telegram);
+  if (!siteUrl && !tg) return '';
+
+  const rows = [];
+  if (tg) {
+    rows.push(
+      `<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;line-height:1.6;margin:0 0 8px;">` +
+      `Удобнее в мессенджере? Напишите мне в Telegram — ` +
+      `<a href="${tg.url}" style="color:#0071E3;text-decoration:none;">${tg.label}</a>, отвечу лично.</p>`,
+    );
+  }
+
+  const contactLinks = [];
+  if (siteUrl) {
+    contactLinks.push(`Сайт: <a href="${siteUrl.url}" style="color:#0071E3;text-decoration:none;">${siteUrl.label}</a>`);
+  }
+  if (tg) {
+    contactLinks.push(`Telegram: <a href="${tg.url}" style="color:#0071E3;text-decoration:none;">${tg.label}</a>`);
+  }
+
+  const signature = senderName ? `${_escapeHtml(senderName)}<br>` : '';
+  rows.push(
+    `<p style="font-family:Arial,sans-serif;font-size:13px;color:#666;line-height:1.6;margin:16px 0 0;">` +
+    `${signature}${contactLinks.join(' &nbsp;•&nbsp; ')}</p>`,
+  );
+
+  return rows.join('');
+}
+
+/** Нормализует ссылку на сайт → {url, label} или null. */
+function _normalizeUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const withScheme = /^https?:\/\//i.test(s) ? s : `https://${s}`;
+  let host;
+  try { host = new URL(withScheme).hostname.replace(/^www\./, ''); }
+  catch (_) { return null; }
+  if (!host) return null;
+  return { url: _escapeHtml(withScheme), label: _escapeHtml(host) };
+}
+
+/**
+ * Нормализует Telegram-контакт → {url, label}.
+ * Принимает: @username, username, t.me/username, https://t.me/username,
+ * а также телефон (+7...) для чата по номеру.
+ */
+function _normalizeTelegram(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+
+  // Полная ссылка t.me / telegram.me / telegram.dog
+  const linkMatch = s.match(/(?:https?:\/\/)?(?:t\.me|telegram\.me|telegram\.dog)\/(\+?[A-Za-z0-9_]+)/i);
+  if (linkMatch) {
+    const handle = linkMatch[1];
+    const label = handle.startsWith('+') ? handle : `@${handle}`;
+    return { url: `https://t.me/${_escapeHtml(handle)}`, label: _escapeHtml(label) };
+  }
+
+  // Телефон (+код) → чат по номеру
+  const phone = s.replace(/[\s()-]/g, '');
+  if (/^\+?\d{7,15}$/.test(phone)) {
+    const digits = phone.replace(/^\+/, '');
+    return { url: `https://t.me/+${_escapeHtml(digits)}`, label: _escapeHtml(phone) };
+  }
+
+  // username (с @ или без)
+  const uname = s.replace(/^@/, '');
+  if (/^[A-Za-z0-9_]{3,64}$/.test(uname)) {
+    return { url: `https://t.me/${_escapeHtml(uname)}`, label: `@${_escapeHtml(uname)}` };
+  }
+
+  return null;
+}
+
+/** Экранирует спецсимволы HTML (защита от инъекций в подписи/контактах). */
+function _escapeHtml(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /** Обязательный footer с отпиской. */
-function _buildFooter(unsubscribeUrl) {
-  return `
+function _buildFooter(unsubscribeUrl) {  return `
 <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:11px;color:#999;font-family:Arial,sans-serif;">
   Вы получили это письмо, так как ваш сайт был найден в поисковой выдаче по тематике вашего бизнеса.
   <a href="${unsubscribeUrl}" style="color:#999;">Отписаться от рассылки</a>
@@ -292,7 +412,7 @@ function _fallbackBody(prospect, detail, senderName) {
   }
 
   return [
-    p(`Здравствуйте! Посмотрел ваш сайт ${domain}${nicheTxt}${cityTxt}.`),
+    p(`Посмотрел ваш сайт ${domain}${nicheTxt}${cityTxt}.`),
     p(problem),
     p('Готов записать короткое видео с разбором минимум 3 конкретных точек роста именно по вашему сайту. Бесплатно и ни к чему не обязывает.'),
     p(`Прислать видео-разбор? Ответьте на это письмо — подготовлю в течение 2 дней.<br>— ${senderName || 'SEO Team'}`),
@@ -385,4 +505,6 @@ module.exports = {
   buildCatchySubject,
   assertComplete,
   isValidSubject,
+  _buildGreeting,
+  _buildContactBlock,
 };
