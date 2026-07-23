@@ -73,7 +73,7 @@
             <label for="daily">Лимит / день</label>
             <input
               id="daily" v-model.number="form.daily_limit"
-              type="number" min="1" max="200"
+              type="number" min="1" max="500"
               :disabled="submitting"
             />
             <span class="hint">прогрев: авто</span>
@@ -105,8 +105,9 @@
           <span class="chev">{{ warmupOpen ? '▲' : '▼' }}</span>
         </button>
         <div v-if="warmupOpen" class="warmup-body">
-          Неделя 1: <b>10</b> писем/день → Неделя 2: <b>25</b> → Неделя 3:
-          <b>60</b> → Неделя 4: <b>120</b> → Неделя 5: <b>200</b>.
+          Неделя 1: <b>25</b> писем/день (до 3/час) → Неделя 2: <b>50</b> →
+          Неделя 3: <b>100</b> → Неделя 4: <b>250</b> → Неделя 5: <b>500</b>.
+          Отправка равномерно распределяется в окне <b>07:00–18:00 МСК</b>.
           Лимит повышается автоматически, чтобы сохранить репутацию домена
           и высокий open-rate.
         </div>
@@ -180,7 +181,7 @@ import { useOutreachStore } from '../stores/outreach.js';
 const store = useOutreachStore();
 const router = useRouter();
 
-const WARMUP_LIMITS = [10, 25, 60, 120, 200];
+const WARMUP_LIMITS = [25, 50, 100, 250, 500];
 
 const CITY_SUGGESTIONS = [
   'Москва', 'Санкт-Петербург', 'Краснодар', 'Екатеринбург', 'Новосибирск',
@@ -193,7 +194,7 @@ const form = ref({
   cities: [],
   search_engine: 'yandex',
   depth_pages: 3,
-  daily_limit: 30,
+  daily_limit: 500,
   sender_name: '',
 });
 const cityInput = ref('');
@@ -238,7 +239,7 @@ async function createCampaign() {
     await store.createCampaign({ ...form.value });
     form.value = {
       keyword: '', cities: [], search_engine: 'yandex',
-      depth_pages: 3, daily_limit: 30, sender_name: '',
+      depth_pages: 3, daily_limit: 500, sender_name: '',
     };
     await store.fetchCampaigns();
   } catch (err) {
@@ -290,6 +291,7 @@ onUnmounted(() => {
   font-size: 28px;
   font-weight: 700;
   margin: 0 0 6px;
+  color: #fff;
 }
 .subtitle {
   color: #6e6e73;

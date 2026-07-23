@@ -3240,6 +3240,18 @@ async function ensureSchema() {
       console.warn('[ensureSchema] outreach charts (mig 123) skipped:', e.message);
     }
 
+    // Миграция 124: новый график прогрева Outreach — дневные лимиты
+    // 25/50/100/250/500, часовые лимиты 3/6/12/30/55, окно 07:00–18:00 МСК.
+    // Файл идемпотентен. См. migrations/124_outreach_warmup_ramp.sql.
+    try {
+      const fs   = require('fs');
+      const sqlPath = path.join(__dirname, '..', 'migrations', '124_outreach_warmup_ramp.sql');
+      const sql  = fs.readFileSync(sqlPath, 'utf8');
+      await db.query(sql);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach warmup ramp (mig 124) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

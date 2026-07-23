@@ -37,6 +37,21 @@ function ensureOutreachSchema() {
     await db.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS html_full TEXT`);
     await db.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS subject_strategy TEXT`);
     await db.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS manual_review_required BOOLEAN DEFAULT FALSE`);
+    // Миграция 124: график прогрева — часовой лимит + новые дневные лимиты.
+    // Самовосстановление на случай, если ensureSchema ещё не применил mig 124.
+    await db.query(`ALTER TABLE outreach_warmup_schedule ADD COLUMN IF NOT EXISTS hourly_limit INTEGER NOT NULL DEFAULT 3`);
+    await db.query(
+      `INSERT INTO outreach_warmup_schedule (week_number, daily_limit, hourly_limit, description) VALUES
+         (1, 25,  3,  'Прогрев: 1-я неделя — 25 писем/день, до 3 писем/час, окно 07:00–18:00 МСК'),
+         (2, 50,  6,  'Прогрев: 2-я неделя — 50 писем/день, до 6 писем/час'),
+         (3, 100, 12, 'Прогрев: 3-я неделя — 100 писем/день, до 12 писем/час'),
+         (4, 250, 30, 'Прогрев: 4-я неделя — 250 писем/день, до 30 писем/час'),
+         (5, 500, 55, 'Прогрев: 5-я неделя — 500 писем/день, до 55 писем/час')
+       ON CONFLICT (week_number) DO UPDATE
+         SET daily_limit  = EXCLUDED.daily_limit,
+             hourly_limit = EXCLUDED.hourly_limit,
+             description  = EXCLUDED.description`,
+    );
   })().catch((e) => {
     // Не кэшируем ошибку — дадим следующему тику попробовать снова.
     _schemaReady = null;
@@ -77,15 +92,16 @@ async function runCampaignCycle(campaign) {
 
   await log(campaign.id, 'info', `Запуск цикла кампании: ${campaign.name}`);
 
-  // 1. Определяем дневной лимит по расписанию прогрева
+  // 1. Определяем дневной и часовой лимит по расписанию прогрева
   const { rows: warmup } = await db.query(
-    `SELECT daily_limit FROM outreach_warmup_schedule WHERE week_number = $1`,
+    `SELECT daily_limit, hourly_limit FROM outreach_warmup_schedule WHERE week_number = $1`,
     [campaign.warmup_week],
   );
   const dailyLimit = Math.min(
     campaign.daily_limit,
-    warmup[0]?.daily_limit || 10,
+    warmup[0]?.daily_limit || 25,
   );
+  const hourlyLimit = warmup[0]?.hourly_limit || 3;
 
   // 2. Считаем сколько уже отправили сегодня
   const { rows: todaySent } = await db.query(
@@ -186,13 +202,13 @@ async function runCampaignCycle(campaign) {
 
       // Ставим в очередь с задержкой (равномерно в течение рабочего дня).
       // jobId = emailId → идемпотентность: повторный тик не создаст дубль job.
-      const delayMs = calculateSendDelay(queued, prospects.length);
+      const delayMs = calculateSendDelay(queued, canSendToday, hourlyLimit);
       await emailQueue.add('send-email', {
         emailId, to: email,
         subject: composed.subject,
         html: composed.html,
         fromEmail, fromName,
-      }, { delay: delayMs, jobId: `email:${emailId}` });
+      }, { delay: delayMs, jobId: `email-${emailId}` });
 
       // Обновляем статус лида
       await db.query(
@@ -318,24 +334,50 @@ async function collectNewProspects(campaign) {
   await log(campaign.id, 'info', `Собрано новых лидов: ${collected}`);
 }
 
-// Равномерно распределяем отправку в рабочие часы (9:00-18:00)
-function calculateSendDelay(index, total) {
-  const now = new Date();
-  const workStart = new Date(now);
-  workStart.setHours(9, 0, 0, 0);
-  const workEnd = new Date(now);
-  workEnd.setHours(18, 0, 0, 0);
+// Смещение московского времени относительно UTC (МСК = UTC+3, без переходов).
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+const WORK_START_HOUR = 7;   // 07:00 МСК
+const WORK_END_HOUR = 18;    // 18:00 МСК
 
-  if (now > workEnd) {
-    workStart.setDate(workStart.getDate() + 1);
-    workEnd.setDate(workEnd.getDate() + 1);
+// Границы рабочего окна (07:00–18:00 МСК) для дня, в котором находится nowMs,
+// возвращаются как UTC-таймстампы.
+function mskWindowBounds(nowMs) {
+  // Сдвигаем на +3ч и читаем UTC-компоненты — получаем «настенное» время МСК.
+  const msk = new Date(nowMs + MSK_OFFSET_MS);
+  const y = msk.getUTCFullYear();
+  const mo = msk.getUTCMonth();
+  const d = msk.getUTCDate();
+  const startUtc = Date.UTC(y, mo, d, WORK_START_HOUR, 0, 0) - MSK_OFFSET_MS;
+  const endUtc = Date.UTC(y, mo, d, WORK_END_HOUR, 0, 0) - MSK_OFFSET_MS;
+  return { startUtc, endUtc };
+}
+
+// Равномерно распределяем отправку в рабочем окне 07:00–18:00 МСК, соблюдая
+// часовой лимит прогрева (не быстрее, чем hourlyLimit писем в час).
+// index — порядковый номер письма в текущем цикле, total — план на день.
+function calculateSendDelay(index, total, hourlyLimit = 0) {
+  const now = Date.now();
+  let { startUtc, endUtc } = mskWindowBounds(now);
+
+  // Если рабочее окно на сегодня уже закрылось — планируем на завтра.
+  if (now > endUtc) {
+    ({ startUtc, endUtc } = mskWindowBounds(now + 24 * 60 * 60 * 1000));
   }
 
-  const workMs = workEnd - workStart;
-  const step = workMs / Math.max(total, 1);
-  const target = new Date(workStart.getTime() + step * index);
-  const delay = target - now;
-  return Math.max(0, delay);
+  const windowMs = Math.max(endUtc - startUtc, 1);
+  // Базовый равномерный шаг по всему окну.
+  let step = windowMs / Math.max(total, 1);
+  // Не отправляем быстрее часового лимита прогрева.
+  if (hourlyLimit > 0) {
+    step = Math.max(step, (60 * 60 * 1000) / hourlyLimit);
+  }
+
+  // Абсолютный слот отсчитываем от начала окна (07:00 МСК), чтобы сохранить
+  // ровные интервалы. Уже «просроченные» слоты (если цикл стартовал в середине
+  // дня) отправляются как можно скорее, будущие — держат свои слоты.
+  const slot = startUtc + step * index;
+  const target = Math.max(now, slot);
+  return Math.max(0, target - now);
 }
 
 async function checkWarmupProgression(campaign) {
@@ -347,7 +389,7 @@ async function checkWarmupProgression(campaign) {
       `UPDATE outreach_campaigns SET warmup_week = $1 WHERE id = $2`,
       [expectedWeek, campaign.id],
     );
-    await log(campaign.id, 'info', `Прогрев: переход на неделю ${expectedWeek} (лимит ${[10, 25, 60, 120, 200][expectedWeek - 1]} писем/день)`);
+    await log(campaign.id, 'info', `Прогрев: переход на неделю ${expectedWeek} (лимит ${[25, 50, 100, 250, 500][expectedWeek - 1]} писем/день)`);
   }
 }
 
