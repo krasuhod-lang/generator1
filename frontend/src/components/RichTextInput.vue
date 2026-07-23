@@ -18,6 +18,13 @@ const props = defineProps({
 });
 const emit = defineEmits(['update:modelValue']);
 
+// Последнее значение, которое мы сами отправили наверх через update:modelValue.
+// Нужно, чтобы отличить «эхо» собственного ввода (родитель вернул тот же HTML
+// обратно в modelValue) от настоящего внешнего изменения. Без этого watch
+// пересобирал контент на каждом нажатии клавиши и сбрасывал курсор в конец —
+// из-за чего «улетал» курсор и терялись пробелы при наборе.
+let lastEmittedHtml = null;
+
 /**
  * Если modelValue выглядит как plain-text (не содержит HTML-тегов),
  * конвертируем переносы строк в <p> для корректного отображения,
@@ -94,15 +101,22 @@ const editor = useEditor({
     },
   },
   onUpdate: ({ editor: ed }) => {
-    emit('update:modelValue', ed.getHTML());
+    const html = ed.getHTML();
+    lastEmittedHtml = html;
+    emit('update:modelValue', html);
   },
 });
 
 watch(() => props.modelValue, (newVal) => {
   if (!editor.value) return;
+  // Эхо нашего собственного ввода — родитель вернул тот же HTML обратно.
+  // Ничего не делаем: контент в редакторе уже актуален, а повторный
+  // setContent сбросил бы позицию курсора и «съел» набираемые пробелы.
+  if (newVal === lastEmittedHtml) return;
   const current = editor.value.getHTML();
   const incoming = sanitize(plainToHtml(newVal || ''));
-  // Избегаем бесконечного цикла: обновляем только если контент действительно изменился
+  // Обновляем только при настоящем внешнем изменении (вставка картинки,
+  // подгрузка данных и т.п.), чтобы не трогать курсор во время набора.
   if (current !== incoming) {
     editor.value.commands.setContent(incoming, false);
   }
