@@ -11,6 +11,7 @@ const assert = require('assert');
 const {
   _applyCanonicalNumbers,
   _classifyMetric,
+  _buildMetricsDigest,
 } = require('../src/services/reports/aiAnalyst');
 
 let total = 0, failed = 0;
@@ -72,6 +73,78 @@ test('очищает числа у нераспознанных метрик (н
   assert.strictEqual(row.delta_pct, '');
   assert.strictEqual(row.trend_direction, '');
   assert.strictEqual(row.attribution, 'z');
+});
+
+console.log('── регрессия «Динамика за период» ─────────────');
+
+// Точная копия _linregress из frontend/src/components/reports/ReportTrendChart.vue —
+// эталон, с которым сверяем бэкенд-дайджест.
+function refLinregress(data) {
+  const pts = [];
+  (data || []).forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) return;
+    pts.push([i, v]);
+  });
+  if (pts.length < 2) {
+    const only = pts.length === 1 ? pts[0][1] : null;
+    return { slope: 0, fitFirst: only, fitLast: only, n: pts.length };
+  }
+  const n = pts.length;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const [x, y] of pts) { sx += x; sy += y; sxx += x * x; sxy += x * y; }
+  const denom = n * sxx - sx * sx;
+  const slope = denom !== 0 ? (n * sxy - sx * sy) / denom : 0;
+  const intercept = (sy - slope * sx) / n;
+  return { slope, fitFirst: slope * pts[0][0] + intercept, fitLast: slope * pts[pts.length - 1][0] + intercept, n };
+}
+
+test('дайджест GSC-кликов совпадает с регрессией графика (перфектная линия)', () => {
+  const series = [{ clicks: 100 }, { clicks: 200 }, { clicks: 300 }];
+  const d = _buildMetricsDigest({ gsc: { series, totals: { clicks: 600 } } });
+  const ref = refLinregress(series.map((r) => r.clicks));
+  assert.strictEqual(d.gsc_clicks_prev, ref.fitFirst);
+  assert.strictEqual(d.gsc_clicks_last, ref.fitLast);
+  assert.strictEqual(d.gsc_clicks_dir, 'up');
+  assert.strictEqual(d.gsc_clicks_delta_pct, 200); // (300-100)/100*100
+});
+
+test('дайджест совпадает с регрессией на «шумном» ряду', () => {
+  const series = [{ clicks: 120 }, { clicks: 90 }, { clicks: 160 }, { clicks: 210 }];
+  const d = _buildMetricsDigest({ gsc: { series, totals: { clicks: 580 } } });
+  const ref = refLinregress(series.map((r) => r.clicks));
+  const refPct = ref.fitFirst !== 0 ? (ref.fitLast - ref.fitFirst) / Math.abs(ref.fitFirst) * 100 : null;
+  assert.strictEqual(d.gsc_clicks_prev, ref.fitFirst);
+  assert.strictEqual(d.gsc_clicks_last, ref.fitLast);
+  assert.strictEqual(d.gsc_clicks_delta_pct, Math.round(refPct * 10) / 10);
+  assert.strictEqual(d.gsc_clicks_dir, ref.slope > 0 ? 'up' : (ref.slope < 0 ? 'down' : 'stable'));
+});
+
+test('нисходящий тренд → dir=down, канон-числа форматируются (ru-RU, 1 знак)', () => {
+  const series = [{ clicks: 300 }, { clicks: 200 }, { clicks: 100 }];
+  const d = _buildMetricsDigest({ gsc: { series, totals: { clicks: 600 } } });
+  assert.strictEqual(d.gsc_clicks_dir, 'down');
+  const [row] = _applyCanonicalNumbers([{ metric: 'Клики из Google', attribution: 't' }], d);
+  assert.strictEqual(row.trend_direction, 'down');
+  assert.strictEqual(row.delta_pct, '-66,7%'); // (100-300)/300*100 = -66.67
+  assert.strictEqual(row.delta_value, '-200 кликов');
+});
+
+test('менее двух точек → дельта скрыта (null)', () => {
+  const d = _buildMetricsDigest({ gsc: { series: [{ clicks: 500 }], totals: { clicks: 500 } } });
+  assert.strictEqual(d.gsc_clicks_delta_pct, null);
+  assert.strictEqual(d.gsc_clicks_prev, null);
+  assert.strictEqual(d.gsc_clicks_last, null);
+  assert.strictEqual(d.gsc_clicks_dir, null);
+});
+
+test('видимость Keys.so: показывается процент, абсолют скрыт', () => {
+  const series = [{ visibility: 0.10 }, { visibility: 0.14 }, { visibility: 0.18 }];
+  const d = _buildMetricsDigest({ keys_so: { yandex: { series, current: { visibility: 0.18, top10: 12 } } } });
+  assert.strictEqual(d.keys_so_visibility_dir, 'up');
+  const [row] = _applyCanonicalNumbers([{ metric: 'Видимость Keys.so (Яндекс)', attribution: 'y' }], d);
+  assert.strictEqual(row.trend_direction, 'up');
+  assert.strictEqual(row.delta_value, ''); // абсолют намеренно скрыт
+  assert.ok(row.delta_pct.startsWith('+'), 'процент должен показываться');
 });
 
 console.log(`\n${total - failed}/${total} passed`);
