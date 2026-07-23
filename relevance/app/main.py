@@ -44,7 +44,9 @@ from .ngrams import compute_ngrams
 from .normalizer import normalize_document
 from .parser import ParseDiagnostics, ParseResult, extract_with_diagnostics
 from .signals import (
+    cluster_synonyms,
     compute_top_signals_aggregate,
+    embeddings_enabled as signals_embeddings_enabled,
     extract_competitor_signals,
     signals_enabled,
 )
@@ -175,6 +177,10 @@ class VocabRow(BaseModel):
     bm25_score: float
     tf_idf_score: float = 0.0
     status: str
+    # Диагностика structured-data boost'а (таблицы/списки). Присутствуют
+    # только у лемм, встретившихся в структурированных данных.
+    structured_df: int = 0
+    structured_boost: float = 1.0
 
 
 class NgramRow(BaseModel):
@@ -578,6 +584,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     doc_seqs = []
     anchor_lemmas: List[List[str]] = []
     tag_zone_lemmas: List[List[str]] = []
+    structured_lemma_sets: List[set] = []   # леммы из таблиц/списков (для BM25-boost)
     diagnostics: List[DocumentDiagnostics] = []
     text_chars_list: List[int] = []
     html_chars_list: List[int] = []
@@ -586,6 +593,14 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         lemmas, seq = normalize_document(pr.text)
         doc_lemmas.append(lemmas)
         doc_seqs.append(seq)
+
+        # Структурированные данные (таблицы/списки) — отдельный набор лемм.
+        # Используется для повышающего коэффициента BM25 (см. compute_vocabulary_bm25).
+        struct_set: set = set()
+        for block in (pr.structured_data or []):
+            s_lemmas, _ = normalize_document(block)
+            struct_set.update(s_lemmas)
+        structured_lemma_sets.append(struct_set)
 
         # Anchor-zone: отдельный мини-корпус из текста <a> того же документа.
         if opts.include_anchor_zone:
@@ -655,11 +670,17 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     ]
     median_text_html_ratio = float(statistics.median(ratios)) if ratios else 0.0
 
-    # Шаг 3. BM25 по словарю.
+    # Шаг 3. BM25 по словарю. Леммы, встречающиеся в структурированных данных
+    # (таблицы/списки), получают повышающий коэффициент — их семантический вес
+    # в нише выше «сплошного» текста.
+    _struct_sets_kept = [
+        structured_lemma_sets[i] for i, d in enumerate(doc_lemmas) if d
+    ]
     vocabulary = compute_vocabulary_bm25(
         [d for d in doc_lemmas if d],
         min_df=opts.min_term_df,
         max_terms=opts.max_terms,
+        structured_lemmas_by_doc=_struct_sets_kept,
     )
 
     # Шаг 4. N-граммы.
@@ -876,6 +897,20 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             # Медианы вхождений лемм среди страниц ТОП-3 (для anti-overopt
             # директив, §17). Позиция документа: явная serp_position или индекс+1.
             top3_median_counts = _top3_lemma_medians(parse_results, doc_lemmas)
+            # Семантическая кластеризация синонимов (ТЗ п.1.1): группируем
+            # important/additional леммы, чтобы our_count учитывал синонимы
+            # («автомобиль» ← «машина»). No-op без эмбеддингов.
+            synonym_map: Dict[str, str] = {}
+            try:
+                if signals_embeddings_enabled():
+                    cluster_input = [
+                        v.get("lemma", "") for v in vocabulary
+                        if v.get("status") in ("important", "additional") and v.get("lemma")
+                    ][:400]
+                    synonym_map = cluster_synonyms(cluster_input) or {}
+            except Exception as e:  # pragma: no cover — эмбеддинги опциональны
+                logger.warning("synonym clustering failed: %s", e)
+                synonym_map = {}
             try:
                 comparison = compute_comparison(
                     our_lemmas=our_lemmas,
@@ -887,6 +922,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
                     median_text_chars=median_text_chars,
                     median_html_chars=median_html_chars,
                     top3_median_counts=top3_median_counts,
+                    synonym_map=synonym_map,
                 )
                 comp_table = per_competitor_table(
                     competitors=[

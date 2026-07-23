@@ -274,6 +274,10 @@ class ParseResult:
     # Текст, извлечённый из JSON-LD (description / FAQ-ответы / offers /
     # howto-шаги) — отдельная зона, в основной корпус blocks НЕ входит.
     jsonld_text: str = ""
+    # Структурированный контент (таблицы <table> и списки <ul>/<ol>) —
+    # отдельными блоками. Используется для BM25-boost'а лемм, встречающихся
+    # в таблицах/списках (характеристики, «топ N», пошаговые инструкции).
+    structured_data: List[str] = field(default_factory=list)
 
     @property
     def text(self) -> str:
@@ -524,7 +528,60 @@ def extract_headings(html: str) -> List[Dict]:
     return out
 
 
-# ── JSON-LD content extraction ────────────────────────────────────────────────
+# ── Structured data extraction (tables / lists) ───────────────────────────────
+
+# Теги структурированного контента: таблицы и списки. Текст из них часто
+# несёт ключевую семантику (характеристики, «топ N», пошаговые списки), но
+# при обычном сборе блоков растворяется в общей массе и теряет вес. Извлекаем
+# их отдельным массивом, чтобы BM25 мог применить повышающий коэффициент.
+STRUCTURED_TAGS = ("table", "ul", "ol")
+
+
+def extract_structured_data(html: str) -> List[str]:
+    """Извлекает текст таблиц и списков (<table>, <ul>, <ol>) отдельными
+    блоками. Возвращает список строк — по одной на каждый внешний
+    структурный элемент.
+
+    * шум (header/footer/nav/aside/меню) вырезаем через _strip_noise;
+    * вложенные списки/таблицы не дублируем — берём только внешний элемент;
+    * чисто-навигационные списки (сплошь ссылки) отбрасываем по link-density;
+    * слишком короткие блоки (< MIN_BLOCK_LEN_CHARS) отбрасываем.
+    """
+    if not html or not html.strip():
+        return []
+    try:
+        soup = _make_soup(html)
+    except Exception:
+        return []
+    _strip_noise(soup)
+
+    out: List[str] = []
+    for el in soup.find_all(STRUCTURED_TAGS):
+        # Только внешний элемент — если есть предок table/ul/ol, пропускаем,
+        # чтобы не считать вложенный список дважды.
+        if el.find_parent(STRUCTURED_TAGS) is not None:
+            continue
+        text = el.get_text(separator=" ", strip=True)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or len(text) < MIN_BLOCK_LEN_CHARS:
+            continue
+        # Отбрасываем навигационные списки (почти сплошь текст ссылок).
+        anchor_len = sum(len(a.get_text(" ", strip=True)) for a in el.find_all("a"))
+        if anchor_len > 0.6 * len(text):
+            continue
+        out.append(text)
+    return out
+
+
+def _safe_structured_data(html: str) -> List[str]:
+    """Обёртка extract_structured_data — best-effort, не роняет парсер."""
+    try:
+        return extract_structured_data(html)
+    except Exception:  # pragma: no cover — best-effort
+        return []
+
+
+
 
 # Ключи JSON-LD, значения которых — «человеческий» текст, полезный корпусу
 # (description карточки, articleBody, ответы FAQ, шаги HowTo, отзывы).
@@ -1065,6 +1122,7 @@ def extract_with_diagnostics(html: str) -> ParseResult:
         tag_zone_text=extract_tag_zone_text(html),
         headings=extract_headings(html),
         jsonld_text=jsonld_text,
+        structured_data=_safe_structured_data(html),
     )
 
 

@@ -64,6 +64,8 @@ def compute_vocabulary_bm25(
     *,
     min_df: int = 2,
     max_terms: int = 5000,
+    structured_lemmas_by_doc: List[set] | None = None,
+    structured_boost: float = 1.3,
 ) -> List[dict]:
     """Возвращает список `{lemma, df, median_count, bm25_score, tf_idf_score, status}`,
     отсортированный по убыванию bm25_score.
@@ -74,6 +76,13 @@ def compute_vocabulary_bm25(
         max_terms: ограничение на размер словаря (защита от patological-edge).
             По умолчанию 5000 — все «интересные» леммы влезают, ничего не
             отбрасываем без необходимости.
+        structured_lemmas_by_doc: для каждого документа — множество лемм,
+            встретившихся в структурированных данных (таблицы/списки). Если
+            передано, к bm25_score/tf_idf_score таких лемм применяется
+            повышающий коэффициент `structured_boost` (леммы из таблиц/списков
+            несут больше семантического веса, чем «сплошной» текст).
+        structured_boost: множитель для лемм из структурированных данных
+            (≥1.0; по умолчанию 1.3). При 1.0 boost отключён.
     """
     if not doc_lemmas:
         return []
@@ -83,6 +92,16 @@ def compute_vocabulary_bm25(
     df_map = _document_frequency(doc_counts)
 
     n_docs = len(doc_lemmas)
+
+    # Доля документов, в структурированных данных которых встретилась лемма —
+    # используется для расчёта boost-множителя (чем в большем числе таблиц/
+    # списков лемма встречается, тем выше её структурный вес).
+    struct_df: Dict[str, int] = {}
+    use_boost = bool(structured_lemmas_by_doc) and structured_boost and structured_boost > 1.0
+    if use_boost:
+        for s in structured_lemmas_by_doc:
+            for lemma in (s or ()):
+                struct_df[lemma] = struct_df.get(lemma, 0) + 1
 
     # Фильтруем словарь по min_df.
     vocab = [lemma for lemma, df in df_map.items() if df >= min_df]
@@ -107,7 +126,7 @@ def compute_vocabulary_bm25(
         # Медиана числа вхождений по документам, где терм встретился.
         median_count = float(statistics.median(per_doc_counts)) if per_doc_counts else 0.0
 
-        rows.append({
+        row = {
             "lemma": lemma,
             "df": df_l,
             # Доля документов корпуса, в которых встретилась лемма (любая
@@ -118,7 +137,24 @@ def compute_vocabulary_bm25(
             # Округляем до 4 знаков, чтобы JSON не пух.
             "bm25_score":   round(bm25_sum, 4),
             "tf_idf_score": round(float(tf_idf_sum), 4),
-        })
+        }
+
+        # Boost для лемм из структурированных данных (таблицы/списки). Величина
+        # boost'а масштабируется долей структурных документов, чтобы разовое
+        # появление в одной таблице не переоценивало лемму. BM25 может быть
+        # отрицательным (idf-штраф за сверх-частые слова) — такие НЕ усиливаем,
+        # иначе boost парадоксально утопит лемму ещё ниже. TF-IDF всегда ≥0,
+        # поэтому его усиливаем всегда.
+        if use_boost and lemma in struct_df:
+            share = struct_df[lemma] / max(n_docs, 1)
+            factor = 1.0 + (structured_boost - 1.0) * share
+            if bm25_sum > 0:
+                row["bm25_score"] = round(bm25_sum * factor, 4)
+            row["tf_idf_score"] = round(float(tf_idf_sum) * factor, 4)
+            row["structured_df"] = struct_df[lemma]
+            row["structured_boost"] = round(factor, 3)
+
+        rows.append(row)
 
     rows.sort(key=lambda r: r["bm25_score"], reverse=True)
     rows = rows[:max_terms]

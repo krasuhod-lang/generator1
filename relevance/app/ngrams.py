@@ -25,12 +25,15 @@ ALLOWED_BIGRAM_PATTERNS = {
     ("NOUN", "NOUN"),
     ("ADJ",  "NOUN"),
     ("VERB", "NOUN"),
+    ("NUMR", "NOUN"),   # «10 способов», «5 лет»
 }
 ALLOWED_TRIGRAM_PATTERNS = {
     ("NOUN", "ADJ",  "NOUN"),
     ("NOUN", "NOUN", "NOUN"),
     ("ADJ",  "ADJ",  "NOUN"),
     ("ADJ",  "NOUN", "NOUN"),
+    ("NOUN", "NUMR", "NOUN"),   # «топ 10 способов»
+    ("NUMR", "ADJ",  "NOUN"),   # «5 лучших способов»
 }
 ALLOWED_4GRAM_PATTERNS = {
     ("NOUN", "NOUN", "ADJ",  "NOUN"),

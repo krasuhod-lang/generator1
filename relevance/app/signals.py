@@ -2004,19 +2004,40 @@ def _detect_title_patterns(titles: Sequence[str]) -> Dict[str, Any]:
 # Реальная имплементация — в relevance/app/embeddings.py (импортируется лениво,
 # не падает если sentence-transformers отсутствует).
 def embeddings_enabled() -> bool:
-    """True, если RELEVANCE_EMBEDDINGS=true И пакет sentence-transformers
-    реально установлен. Самого факта наличия `embeddings.py` недостаточно —
-    модуль написан так, чтобы импортироваться даже без heavy-deps; реальная
-    модель грузится только в `_load_model()`. Проверяем `find_spec`, чтобы
-    не оттригерить компиляцию модели.
+    """True, если пакет sentence-transformers установлен И эмбеддинги не
+    выключены явно через RELEVANCE_EMBEDDINGS=false.
+
+    ⚠️ Изменение (ТЗ 23.07.2026, п.1.1): эмбеддинги теперь ВКЛЮЧЕНЫ ПО
+    УМОЛЧАНИЮ. Раньше требовался явный флаг RELEVANCE_EMBEDDINGS=true; теперь
+    достаточно наличия установленного пакета. Отключить можно только явно —
+    RELEVANCE_EMBEDDINGS=false/0/no/off. Если пакет sentence-transformers не
+    установлен, деградируем мягко (возвращаем False), не роняя пайплайн.
     """
-    if os.environ.get("RELEVANCE_EMBEDDINGS", "").strip().lower() not in ("1", "true", "yes", "on"):
+    val = os.environ.get("RELEVANCE_EMBEDDINGS", "").strip().lower()
+    if val in ("0", "false", "no", "off"):
         return False
     try:  # pragma: no cover — гейт для опциональной зависимости
         from importlib.util import find_spec
         return find_spec("sentence_transformers") is not None
     except Exception:
         return False
+
+
+def cluster_synonyms(terms: Sequence[str]) -> Dict[str, str]:
+    """Семантическая кластеризация синонимов (ТЗ 23.07.2026, п.1.1).
+
+    Возвращает mapping `lemma -> canonical`. Синонимы («автомобиль»/«машина»)
+    получают общий canonical, что позволяет comparison.py объединять их
+    per_term_gap. No-op (пустой dict) без эмбеддингов — вызывающий код тогда
+    работает как раньше, по отдельным леммам.
+    """
+    if not embeddings_enabled():
+        return {}
+    try:  # pragma: no cover — гейт для опциональной зависимости
+        from . import embeddings as _emb
+        return _emb.cluster_terms(terms)
+    except Exception:
+        return {}
 
 
 def compute_topical_signals(
