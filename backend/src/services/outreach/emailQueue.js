@@ -64,7 +64,11 @@ function startEmailWorker() {
     connection,
     concurrency: 1,
     limiter: {
-      max: 10,          // 10 писем
+      // Глобальный предохранитель воркера. Реальный темп задаёт задержка job'ов
+      // (calculateSendDelay) по часовому лимиту прогрева; лимитер лишь страхует
+      // от всплесков. Поднят до 60/час, чтобы не тормозить недели 3–5
+      // (до 55 писем/час). Переопределяется через OUTREACH_MAX_PER_HOUR.
+      max: Number(process.env.OUTREACH_MAX_PER_HOUR) || 60,
       duration: 3600000, // за 1 час
     },
   });
@@ -73,7 +77,7 @@ function startEmailWorker() {
     console.error('[outreach/emailWorker] error:', err.message);
   });
 
-  console.log('[outreach] Email worker запущен (лимит: 10 писем/час)');
+  console.log(`[outreach] Email worker запущен (лимит: ${Number(process.env.OUTREACH_MAX_PER_HOUR) || 60} писем/час)`);
 }
 
 function stopEmailWorker() {

@@ -28,7 +28,7 @@ const MIN_DEPTH = 1;
 const MAX_DEPTH = 10;
 const MAX_CITIES = 30;
 const MIN_DAILY_LIMIT = 1;
-const MAX_DAILY_LIMIT = 200;
+const MAX_DAILY_LIMIT = 500;
 
 const ALLOWED_ENGINES = new Set(['yandex', 'google']);
 const ALLOWED_STATUS_TRANSITIONS = new Set(['draft', 'active', 'paused']);
@@ -85,7 +85,7 @@ async function createCampaign(req, res, next) {
     const cities = _sanitizeCities(body.cities);
     const searchEngine = _clip(body.search_engine, 16).toLowerCase() || 'yandex';
     const depthPages = _clampInt(body.depth_pages, MIN_DEPTH, MAX_DEPTH, 3);
-    const dailyLimit = _clampInt(body.daily_limit, MIN_DAILY_LIMIT, MAX_DAILY_LIMIT, 30);
+    const dailyLimit = _clampInt(body.daily_limit, MIN_DAILY_LIMIT, MAX_DAILY_LIMIT, 500);
     const senderName = _clip(body.sender_name, 120) || null;
     const name = _clip(body.name, MAX_NAME_LEN) || keyword;
     const senderEmail = _clip(body.sender_email, 200) || process.env.OUTREACH_FROM_EMAIL || null;

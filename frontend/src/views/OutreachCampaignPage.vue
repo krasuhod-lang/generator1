@@ -203,7 +203,7 @@ const TABS = [
   { key: 'emails', label: 'Письма' },
   { key: 'logs', label: 'Логи' },
 ];
-const WARMUP_LIMITS = [10, 25, 60, 120, 200];
+const WARMUP_LIMITS = [25, 50, 100, 250, 500];
 
 const route = useRoute();
 const store = useOutreachStore();
