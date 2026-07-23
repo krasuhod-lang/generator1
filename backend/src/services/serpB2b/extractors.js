@@ -209,6 +209,55 @@ function extractEmailsFromHrefs(html, { maxItems = 10 } = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Мессенджеры для связи с клиентом: WhatsApp / Telegram / MAX.
+// Собираем ТОЛЬКО прямой контакт (ссылку «написать»), а не публичные
+// каналы/паблики/чаты. Возвращаем массив { type, url }.
+// ─────────────────────────────────────────────────────────────────────
+
+// Паттерны публичных каналов/чатов, которые НЕ являются личным контактом.
+const _CHANNEL_HINTS = /\/(joinchat|\+|s\/|channel|chat|group|public|addstickers)/i;
+
+function extractMessengerLinks(html, { maxItems = 6 } = {}) {
+  if (!html) return [];
+  const out = [];
+  const seen = new Set();
+
+  // Все href из разметки.
+  const re = /href\s*=\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    if (out.length >= maxItems) break;
+    let url = String(m[1]).trim();
+    if (!url) continue;
+    // Нормализуем протокол-относительные и без схемы ссылки.
+    if (url.startsWith('//')) url = 'https:' + url;
+    const low = url.toLowerCase();
+
+    let type = null;
+    if (/(?:^|\/\/|\.)(wa\.me|whatsapp\.com|api\.whatsapp\.com)/i.test(low)) {
+      type = 'whatsapp';
+    } else if (/(?:^|\/\/|\.)(t\.me|telegram\.me|telegram\.dog|tg:\/\/)/i.test(low)) {
+      type = 'telegram';
+    } else if (/(?:^|\/\/|\.)(max\.ru|max\.me)/i.test(low)) {
+      type = 'max';
+    } else {
+      continue;
+    }
+
+    // Отбрасываем публичные каналы/чаты (не личный контакт для связи).
+    // Для Telegram допускаем t.me/username и t.me/+phone-подобный контакт,
+    // но исключаем joinchat/каналы/группы.
+    if (_CHANNEL_HINTS.test(url) && !/wa\.me|api\.whatsapp/i.test(low)) continue;
+
+    const key = `${type}:${low}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ type, url });
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // ИНН / ОГРН / КПП
 // ─────────────────────────────────────────────────────────────────────
 
@@ -733,6 +782,7 @@ function extractContactsFromPage(html, text) {
     phones,
     phones_mobile,
     phones_landline,
+    messengers: extractMessengerLinks(html),
     inn,
     ogrn,
     kpp,
@@ -748,6 +798,7 @@ module.exports = {
   extractPhones,
   extractEmailsFromHrefs,
   extractPhonesFromHrefs,
+  extractMessengerLinks,
   extractInn,
   extractOgrn,
   extractKpp,

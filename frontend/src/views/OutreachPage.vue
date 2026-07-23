@@ -88,6 +88,26 @@
             />
           </div>
 
+          <div class="field">
+            <label for="sender_site">Наш сайт <span class="req">*</span></label>
+            <input
+              id="sender_site" v-model="form.sender_site"
+              type="text" placeholder="myseo.ru"
+              :disabled="submitting"
+            />
+            <span class="hint">попадёт в подпись письма</span>
+          </div>
+
+          <div class="field">
+            <label for="sender_tg">Telegram <span class="req">*</span></label>
+            <input
+              id="sender_tg" v-model="form.sender_telegram"
+              type="text" placeholder="@username или t.me/username"
+              :disabled="submitting"
+            />
+            <span class="hint">для связи с вами</span>
+          </div>
+
           <div class="field field-actions">
             <button class="btn btn-primary" :disabled="submitting" @click="createCampaign">
               <span v-if="submitting">Создаём…</span>
@@ -195,6 +215,8 @@ const form = ref({
   depth_pages: 3,
   daily_limit: 30,
   sender_name: '',
+  sender_site: '',
+  sender_telegram: '',
 });
 const cityInput = ref('');
 const submitting = ref(false);
@@ -232,6 +254,8 @@ async function createCampaign() {
   formError.value = '';
   if (!form.value.keyword.trim()) { formError.value = 'Укажите нишу / запрос'; return; }
   if (!form.value.cities.length) { formError.value = 'Добавьте хотя бы один город'; return; }
+  if (!form.value.sender_site.trim()) { formError.value = 'Укажите наш сайт — он попадёт в подпись письма'; return; }
+  if (!form.value.sender_telegram.trim()) { formError.value = 'Укажите ссылку на Telegram для связи'; return; }
 
   submitting.value = true;
   try {
@@ -239,6 +263,7 @@ async function createCampaign() {
     form.value = {
       keyword: '', cities: [], search_engine: 'yandex',
       depth_pages: 3, daily_limit: 30, sender_name: '',
+      sender_site: '', sender_telegram: '',
     };
     await store.fetchCampaigns();
   } catch (err) {
@@ -327,6 +352,7 @@ input:focus, select:focus {
   box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.15);
 }
 .hint { font-size: 12px; color: #86868b; }
+.req { color: #d70015; }
 .radio-row { display: flex; gap: 18px; align-items: center; padding-top: 6px; }
 .radio { display: flex; gap: 6px; align-items: center; font-weight: 400; font-size: 14px; }
 

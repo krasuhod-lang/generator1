@@ -65,5 +65,10 @@ export const useOutreachStore = defineStore('outreach', {
       const { data } = await api.get(`/outreach/campaigns/${id}/prospects`, { params: { page } });
       return data || { prospects: [], total: 0, page };
     },
+
+    async directSend(id, recipients) {
+      const { data } = await api.post(`/outreach/campaigns/${id}/direct-send`, { recipients });
+      return data || { ok: false, queued: 0, skipped: 0 };
+    },
   },
 });
