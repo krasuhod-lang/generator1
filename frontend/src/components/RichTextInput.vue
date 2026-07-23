@@ -52,16 +52,20 @@ function sanitize(html) {
     USE_PROFILES: { html: true },
     ADD_TAGS: ['img'],
     ADD_ATTR: ['src', 'alt', 'width', 'height', 'style', 'target', 'rel'],
-    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
+    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/(?:api\/)?uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
   });
   // Все ссылки в задачах должны открываться в новой вкладке, чтобы отчёт
   // оставался открытым у клиента (см. также safeHtml в ReportRenderer).
-  return cleaned.replace(/<a\b([^>]*)>/gi, (m, attrs) => {
-    let next = attrs;
-    if (!/\btarget=/i.test(next)) next += ' target="_blank"';
-    if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
-    return `<a${next}>`;
-  });
+  return cleaned
+    // Legacy: картинки, сохранённые как `/uploads/...`, недоступны в проде
+    // (nginx проксирует на backend только `/api/`) — переписываем на `/api/uploads/`.
+    .replace(/(<img\b[^>]*\bsrc=["'])\/uploads\//gi, '$1/api/uploads/')
+    .replace(/<a\b([^>]*)>/gi, (m, attrs) => {
+      let next = attrs;
+      if (!/\btarget=/i.test(next)) next += ' target="_blank"';
+      if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
+      return `<a${next}>`;
+    });
 }
 
 const editor = useEditor({

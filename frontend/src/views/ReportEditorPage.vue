@@ -46,7 +46,7 @@ let pollTimer = null;
 onMounted(async () => {
   await load();
 });
-onBeforeUnmount(() => stopPolling());
+onBeforeUnmount(() => { stopPolling(); flushTasksBlocks(); });
 
 async function load() {
   await store.fetchDraft(route.params.id);
@@ -134,9 +134,34 @@ function stopPolling() {
 }
 
 async function onTasksBlocksUpdate(next) {
-  // Локальный апдейт + persist в БД.
+  // Локальный апдейт мгновенно (реактивность превью), а persist в БД —
+  // с дебаунсом. Каждое нажатие клавиши в описании/названии задачи иначе
+  // шлёт PUT /tasks-blocks: писательский rate-limit (60 запросов/мин, общий
+  // для всех write-роутов, включая PATCH /summary при публикации) быстро
+  // исчерпывается и сервер отвечает 429. Дебаунс схлопывает серию правок
+  // в один запрос.
   if (store.current) store.current.tasks_blocks = next;
-  await store.updateTasksBlocks(route.params.id, next);
+  pendingTasksBlocks = next;
+  if (tasksSaveTimer) clearTimeout(tasksSaveTimer);
+  tasksSaveTimer = setTimeout(() => { flushTasksBlocks(); }, TASKS_SAVE_DEBOUNCE_MS);
+}
+
+const TASKS_SAVE_DEBOUNCE_MS = 1200;
+let tasksSaveTimer = null;
+let pendingTasksBlocks = null;
+
+// Немедленно сохраняет отложенные правки блоков работ (перед публикацией/
+// экспортом/уходом со страницы), чтобы ничего не потерялось.
+async function flushTasksBlocks() {
+  if (tasksSaveTimer) { clearTimeout(tasksSaveTimer); tasksSaveTimer = null; }
+  if (pendingTasksBlocks === null) return;
+  const blocks = pendingTasksBlocks;
+  pendingTasksBlocks = null;
+  try {
+    await store.updateTasksBlocks(route.params.id, blocks);
+  } catch (e) {
+    console.warn('[reports] flushTasksBlocks failed:', e);
+  }
 }
 
 // ТЗ-правка: включение/выключение графика в клиентском борде. Храним в
@@ -185,6 +210,9 @@ async function publish() {
     // публикация всегда отражала актуальное состояние редактора и ничего не
     // затирала устаревшим снимком.
     await flushSummary();
+    // Гарантируем, что все отложенные (дебаунс) правки блоков работ сохранены
+    // до публикации, иначе «живая» ссылка отдаст устаревшие задачи.
+    await flushTasksBlocks();
     const payload = {
       mode: publishForm.value.mode,
       password: publishForm.value.password || undefined,
@@ -222,6 +250,7 @@ async function exportDocx() {
   if (!route.params.id || !previewRef.value) return;
   exporting.value = true;
   try {
+    await flushTasksBlocks();
     const chartImages = await collectReportChartImages(previewRef.value);
     const blob = await store.exportDocx(route.params.id, {
       ...viewRange.value,
@@ -237,6 +266,7 @@ async function exportPdf() {
   if (!route.params.id) return;
   exporting.value = true;
   try {
+    await flushTasksBlocks();
     const blob = await store.exportPdf(route.params.id, { ...viewRange.value });
     downloadBlob(blob, `${(draft.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.pdf`);
   } finally {
@@ -254,6 +284,10 @@ async function loadAutolog() {
   if (!route.params.id || autologLoading.value) return;
   autologLoading.value = true;
   dataError.value = null;
+  // Отменяем отложенный debounce-save, чтобы он не перезаписал пересобранные
+  // блоки устаревшим снимком после завершения loadAutolog.
+  if (tasksSaveTimer) { clearTimeout(tasksSaveTimer); tasksSaveTimer = null; }
+  pendingTasksBlocks = null;
   try {
     await store.updateTasksBlocks(route.params.id, []);
     await store.fetchData(route.params.id, { ...viewRange.value, viewMode: previewMode.value });

@@ -111,7 +111,7 @@ const navItems = computed(() => {
   if (hasModules.value) items.push({ id: 'modules', label: 'Точки роста' });
   if (hasAnyPages.value) items.push({ id: 'pages', label: 'Страницы' });
   items.push({ id: 'tasks', label: 'Работы' });
-  if (props.summary?.executive_summary || props.summary?.highlights?.length) {
+  if (props.summary?.growth_attribution?.length || props.summary?.highlights?.length) {
     items.push({ id: 'ai-analysis', label: 'AI-выводы' });
   }
   if (props.summary?.next_month_forecast) {
@@ -390,7 +390,6 @@ function renderRichText(value) {
     .replace(/\n/g, '<br>');
   return DOMPurify.sanitize(bolded, { ALLOWED_TAGS: ['strong', 'br'], ALLOWED_ATTR: [] });
 }
-const summaryHtml = computed(() => renderRichText(props.summary?.executive_summary));
 const nextMonthForecastHtml = computed(() => renderRichText(props.summary?.next_month_forecast));
 
 function safeHtml(value) {
@@ -398,18 +397,23 @@ function safeHtml(value) {
   const html = DOMPurify.sanitize(linked, {
     ALLOWED_TAGS: ['a', 'p', 'br', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'img'],
     ALLOWED_ATTR: ['href', 'target', 'rel', 'src', 'alt', 'width', 'style'],
-    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
+    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|\/(?:api\/)?uploads\/|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)/i,
   });
   // ТЗ: все ссылки внутри задач должны открываться в новой вкладке, чтобы
   // отчёт оставался открытым (DOMPurify не делает этого сам). Допиливаем
   // target=_blank + rel='noopener noreferrer' детерминированной заменой;
   // ссылки, у которых уже стоит target, оставляем как есть.
-  return html.replace(/<a\b([^>]*)>/gi, (match, attrs) => {
-    let next = attrs;
-    if (!/\btarget=/i.test(next)) next += ' target="_blank"';
-    if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
-    return `<a${next}>`;
-  });
+  return html
+    // Legacy: раньше картинки сохранялись как `/uploads/...`, но nginx в проде
+    // проксирует на backend только `/api/`. Переписываем src на `/api/uploads/`,
+    // чтобы ранее добавленные скриншоты тоже отрисовывались.
+    .replace(/(<img\b[^>]*\bsrc=["'])\/uploads\//gi, '$1/api/uploads/')
+    .replace(/<a\b([^>]*)>/gi, (match, attrs) => {
+      let next = attrs;
+      if (!/\btarget=/i.test(next)) next += ' target="_blank"';
+      if (!/\brel=/i.test(next)) next += ' rel="noopener noreferrer"';
+      return `<a${next}>`;
+    });
 }
 
 // ── Image upload helpers ───────────────────────────────────────────────────
@@ -440,10 +444,12 @@ async function uploadImageFile(file) {
 function resolveUploadUrl(url) {
   if (!url) return url;
   if (/^https?:\/\//i.test(url)) return url; // уже абсолютный
+  // Legacy `/uploads/...` → `/api/uploads/...` (nginx проксирует только `/api/`).
+  const normalized = url.replace(/^\/uploads\//i, '/api/uploads/');
   const base = (import.meta.env?.VITE_API_BASE_URL || '').replace(/\/+$/, '');
-  if (!base) return url; // same-origin / проксирование — оставляем как есть
+  if (!base) return normalized; // same-origin / проксирование — оставляем как есть
   const origin = base.replace(/\/api$/i, ''); // статика живёт вне /api
-  return `${origin}${url.startsWith('/') ? '' : '/'}${url}`;
+  return `${origin}${normalized.startsWith('/') ? '' : '/'}${normalized}`;
 }
 
 async function onDescriptionPaste(ev, i, j, k) {
@@ -676,11 +682,6 @@ function formatNum(v) {
     <ExecutiveHeadline :headline="data?.headline"
                        :view-mode="viewMode"
                        :accent="accent" />
-
-    <section v-if="summary?.executive_summary" id="report-ai-analysis" class="rblk">
-      <h2>Executive Summary</h2>
-      <p class="summary-text" v-html="summaryHtml"></p>
-    </section>
 
     <section v-if="summary?.next_month_forecast" id="report-forecast" class="rblk forecast-card">
       <h2>📈 Прогноз роста на следующий месяц</h2>
@@ -939,7 +940,7 @@ function formatNum(v) {
       </div>
     </section>
 
-    <section v-if="growthItems.length" class="rblk">
+    <section v-if="growthItems.length" id="report-ai-analysis" class="rblk">
       <h2>Анализ показателей</h2>
       <div class="growth-rows">
         <article

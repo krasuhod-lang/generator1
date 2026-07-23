@@ -93,18 +93,9 @@ function buildReportPdf(payload = {}) {
       }
       if (kpi.length) { H('Ключевые показатели'); kpi.forEach(bullet); }
 
-      // ── Executive Summary ──
       // TZ Reports Fixes §4: снимаем markdown-звёздочки жирного (**...**) —
       // PDFKit не рендерит inline-bold внутри абзаца, а «сырые» ** портят текст.
       const _md = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1');
-      H('Executive Summary');
-      if (summary.executive_summary) {
-        for (const part of String(summary.executive_summary).split(/\n{2,}/)) {
-          if (part.trim()) { P(_md(part.trim())); doc.moveDown(0.2); }
-        }
-      } else {
-        P('Резюме не сформировано. Сгенерируйте AI-резюме в редакторе отчёта.', { color: '#6b7280' });
-      }
 
       if (summary.next_month_forecast) {
         H('Прогноз роста на следующий месяц', 12);

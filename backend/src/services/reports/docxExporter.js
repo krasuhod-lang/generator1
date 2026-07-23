@@ -170,16 +170,6 @@ async function buildReportDocx(payload = {}) {
     });
   }
 
-  if (payload.summary?.executive_summary) {
-    children.push(_heading('Executive Summary'));
-    for (const part of String(payload.summary.executive_summary).split(/\n{2,}/)) {
-      if (part.trim()) children.push(_richParagraph(part.trim()));
-    }
-  } else {
-    children.push(_heading('Executive Summary'));
-    children.push(_paragraph('Резюме не сформировано. Сгенерируйте AI-резюме в редакторе отчёта.'));
-  }
-
   if (payload.summary?.next_month_forecast) {
     children.push(_heading('Прогноз роста на следующий месяц'));
     children.push(_richParagraph(String(payload.summary.next_month_forecast)));
