@@ -23,6 +23,7 @@ require.cache[require.resolve('../src/config/db')] = {
 
 const {
   buildCatchySubject, buildHeroHeading, buildContactBlock,
+  buildDynamicsChart, _buildGreeting,
 } = require('../src/services/outreach/emailComposer');
 const { extractMessengerLinks } = require('../src/services/serpB2b/extractors');
 const { calculateSendDelay } = require('../src/services/outreach/outreachScheduler');
@@ -109,6 +110,30 @@ console.log('\n[outreach] Окно отправки МСК (req 4)');
   ok('задержка неотрицательна', d0 >= 0 && d5 >= 0);
   ok('задержка ограничена 48 часами', d0 < 48 * 3600 * 1000 && d5 < 48 * 3600 * 1000);
   ok('индекс дальше по списку → не раньше по времени', d5 >= d0);
+}
+
+console.log('\n[outreach] График динамики топ-50 в письме');
+{
+  const chart = buildDynamicsChart(detail);
+  ok('содержит заголовок графика', chart.includes('Запросы сайта в топ-50'));
+  ok('легенда Яндекса с трендом ▼ и %', /Яндекс ▼ -42\.1%/.test(chart));
+  ok('легенда Google с трендом ▲ и %', /Google ▲ \+12\.0%/.test(chart));
+  ok('рисует столбцы фиксированной высоты', /height:\d+px/.test(chart));
+  ok('содержит значения было/сейчас', chart.includes('810') && chart.includes('469'));
+  ok('нет inline-SVG (вырезается почтовиками)', !/<svg/i.test(chart));
+  ok('без числовых данных возвращает пусто', buildDynamicsChart(null) === '' && buildDynamicsChart({}) === '');
+}
+
+console.log('\n[outreach] Приветствие по времени суток (МСК)');
+{
+  const seed = 'https://a-clinic.ru';
+  // MSK = UTC+3, поэтому подбираем UTC-час так, чтобы МСК-час был нужным.
+  const at = (mskHour) => new Date(Date.UTC(2026, 0, 1, (mskHour - 3 + 24) % 24, 0, 0));
+  ok('утро (08 МСК) → «Доброе утро»', _buildGreeting(at(8), seed) === 'Доброе утро');
+  ok('день (14 МСК) → «Добрый день»', _buildGreeting(at(14), seed) === 'Добрый день');
+  ok('вечер (20 МСК) → «Добрый вечер»', _buildGreeting(at(20), seed) === 'Добрый вечер');
+  ok('ночь (03 МСК) → «Здравствуйте»', _buildGreeting(at(3), seed) === 'Здравствуйте');
+  ok('приветствие детерминировано для одного лида', _buildGreeting(at(14), seed) === _buildGreeting(at(14), seed));
 }
 
 console.log('');

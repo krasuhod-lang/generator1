@@ -11,25 +11,38 @@
  */
 const { callLLM } = require('../llm/callLLM');
 
-const SYSTEM_PROMPT = `Ты — senior B2B-копирайтер SEO-агентства. Отвечай ТОЛЬКО валидным JSON без markdown.
+const SYSTEM_PROMPT = `Ты — senior B2B-копирайтер SEO-агентства с опытом в перформанс-маркетинге.
+Отвечай ТОЛЬКО валидным JSON без markdown.
 
-ЗАДАЧА: написать персонализированное холодное письмо владельцу сайта.
+ЗАДАЧА: написать персонализированное холодное письмо владельцу сайта, ГЛУБОКО погрузившись
+в его нишу, проанализировав цифры видимости и упаковав полноценное убедительное письмо.
 
-СТРУКТУРА ПИСЬМА (строго 4 коротких абзаца, всего 120-170 слов):
+ПОГРУЖЕНИЕ В НИШУ (обязательно перед написанием — обдумай про себя):
+- Как именно этот бизнес зарабатывает (средний чек, цикл сделки, сезонность спроса).
+- Что для него значит поисковый трафик: сколько это заявок/звонков/визитов и какая примерно
+  конверсия из визита в обращение для этой сферы (напр. для медуслуг/ремонта/юруслуг конверсия
+  и стоимость лида разные — учитывай это в проекции).
+- Кто его конкуренты в этом городе и почему падение видимости = переток клиентов к ним.
+Используй это понимание, чтобы проекция «потеря видимости → потеря денег» звучала как от отраслевого эксперта.
+
+СТРУКТУРА ПИСЬМА (строго 4 коротких абзаца, всего 120-180 слов):
 1. Зацепка: конкретный факт о ИХ сайте (домен, ниша, город). Без воды.
 2. Проблема В ЦИФРАХ: если в данных есть числовая динамика — используй её ДОСЛОВНО
    (например: "за последние N месяцев видимость в Google снизилась на 42%: с 810 до 469 запросов в топ-50").
-   Затем проекция: что это значит в потерянном трафике и заявках
-   (пример: "для ниши имплантации это примерно X-Y недополученных обращений в месяц").
+   Затем отраслевая проекция: что это значит в потерянном трафике, заявках и упущенной выручке
+   именно для ЭТОЙ ниши (пример: "для имплантации в вашем городе это ~X-Y недополученных
+   первичных обращений в месяц"). Числа проекции — правдоподобная вилка, не абсолют.
 3. Оффер: бесплатный ВИДЕО-АУДИТ их сайта — запишем видео с разбором минимум
-   3 конкретных точек роста. Бесплатно, ни к чему не обязывает.
+   3 конкретных точек роста именно по их сайту. Бесплатно, ни к чему не обязывает.
 4. CTA: короткий вопрос — "Прислать видео-разбор?" или "Ответьте на письмо — пришлём в течение 2 дней".
 
 ПРАВИЛА:
 - Пиши ЗАКОНЧЕННЫЕ предложения. НИКОГДА не обрывай мысль на середине.
+- НЕ пиши приветствие ("Здравствуйте"/"Добрый день") — оно подставляется отдельно. Начинай сразу с сути.
 - ЗАПРЕЩЕНЫ слова: уникальный, эффективный, профессиональный, качественный, комплексный, инновационный
-- Не выдумывай цифры. Используй ТОЛЬКО цифры из блока "Числовая динамика". Если цифр нет — пиши про нишу и конкурентов без конкретных процентов.
-- Тон: деловой, живой, уверенный. Как эксперт эксперту.
+- Не выдумывай цифры видимости. Используй ТОЛЬКО цифры из блока "Числовая динамика".
+  Если цифр нет — пиши про нишу и конкурентов без конкретных процентов.
+- Тон: деловой, живой, уверенный. Как отраслевой эксперт эксперту, без канцелярита и клише.
 - subject: до 55 символов, без спам-слов (бесплатно/скидка/срочно), лучше с названием их домена.
 
 HTML: только inline-стили. Шрифт Arial 14px, цвет #333, ссылки #0071E3.
@@ -94,6 +107,16 @@ ${dynamicsText}
   // чтобы цифры в таблице всегда совпадали с данными keys.so.
   const dynamicsTable = buildDynamicsTable(detail);
 
+  // Визуальный график динамики топ-50 (email-safe HTML/CSS столбцы «было/сейчас»
+  // по Яндексу и Google). Рендерится кодом — цифры совпадают с данными keys.so.
+  const dynamicsChart = buildDynamicsChart(detail);
+
+  // Приветствие клиента по времени суток (МСК): «Доброе утро/день/вечер».
+  // Подставляется кодом, а не LLM, чтобы соответствовать реальному времени отправки.
+  const greeting = _buildGreeting(new Date(), prospect?.url || '');
+  const greetingHtml = `
+<p style="font-family:Arial,sans-serif;font-size:14px;color:#333;line-height:1.6;margin:0 0 14px;">${_escapeHtml(greeting)}!</p>`;
+
   // Блок контактов отправителя (req 3): наш сайт + ссылка на Telegram,
   // чтобы получатель мог связаться. Обязательная «отсылка» внизу письма.
   const contactBlock = buildContactBlock({ senderName, senderCompany, senderSite, senderTelegram });
@@ -106,7 +129,7 @@ ${dynamicsText}
 </div>`;
 
   const body = `
-<div style="padding:22px 24px 4px;">${result.html || ''}${dynamicsTable}</div>`;
+<div style="padding:22px 24px 4px;">${greetingHtml}${result.html || ''}${dynamicsChart}${dynamicsTable}</div>`;
 
   const html = `
 <div style="max-width:600px;margin:0 auto;border:1px solid #eee;border-radius:10px;overflow:hidden;background:#ffffff;">
@@ -117,7 +140,7 @@ ${dynamicsText}
   return {
     subject,
     html,
-    text: buildPlainText({ heroHeading, html: result.html, senderName, senderCompany, senderSite, senderTelegram, unsubscribeUrl }),
+    text: buildPlainText({ greeting, heroHeading, html: result.html, senderName, senderCompany, senderSite, senderTelegram, unsubscribeUrl }),
   };
 }
 
@@ -294,7 +317,7 @@ function _stripTags(s) {
 }
 
 /** Текстовая (plain-text) версия письма — повышает доставляемость (req 4). */
-function buildPlainText({ heroHeading, html, senderName, senderCompany, senderSite, senderTelegram, unsubscribeUrl }) {
+function buildPlainText({ greeting, heroHeading, html, senderName, senderCompany, senderSite, senderTelegram, unsubscribeUrl }) {
   const withBreaks = String(html || '')
     .replace(/<\/(p|div|tr|h[1-6])>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n');
@@ -316,6 +339,7 @@ function buildPlainText({ heroHeading, html, senderName, senderCompany, senderSi
   return [
     heroHeading,
     '',
+    greeting ? `${greeting}!` : '',
     bodyText,
     '',
     sign ? `С уважением, ${sign}` : 'С уважением',
@@ -404,7 +428,134 @@ function buildDynamicsTable(detail) {
 </div>`;
 }
 
+/**
+ * Приветствие по времени суток в МСК (UTC+3). Разнообразим формулировку
+ * детерминированно по seed (домен), чтобы письма не были одинаковыми.
+ * @param {Date} now — текущий момент (UTC)
+ * @param {string} seed — строка для выбора варианта (обычно url лида)
+ * @returns {string} например «Доброе утро»
+ */
+function _buildGreeting(now = new Date(), seed = '') {
+  const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+  const msk = new Date((now instanceof Date ? now.getTime() : Date.now()) + MSK_OFFSET_MS);
+  const h = msk.getUTCHours();
+
+  let variants;
+  if (h >= 5 && h < 12) {
+    variants = ['Доброе утро'];
+  } else if (h >= 12 && h < 18) {
+    variants = ['Добрый день'];
+  } else if (h >= 18 && h < 23) {
+    variants = ['Добрый вечер'];
+  } else {
+    // Глубокая ночь — нейтральное приветствие вместо «Доброй ночи».
+    variants = ['Здравствуйте'];
+  }
+
+  const idx = _hash(String(seed) + ':' + h) % variants.length;
+  return variants[idx];
+}
+
+/** Округляет вверх до «красивого» значения для верхней отметки оси графика. */
+function _niceCeil(v) {
+  const val = Number(v);
+  if (!Number.isFinite(val) || val <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(val)));
+  const n = val / mag;
+  let f;
+  if (n <= 1) f = 1;
+  else if (n <= 2) f = 2;
+  else if (n <= 2.5) f = 2.5;
+  else if (n <= 5) f = 5;
+  else f = 10;
+  return f * mag;
+}
+
+/**
+ * Email-safe визуальный график динамики топ-50: сгруппированные столбцы
+ * «Было / Сейчас» по Яндексу и Google. Рендерится таблицами/div c фикс.
+ * высотами (inline-SVG вырезается Gmail/Outlook, поэтому используем HTML/CSS).
+ * Цифры совпадают с данными keys.so. Возвращает '' если данных нет.
+ * @param {object} detail — dynamics_detail { yandex?, google? }
+ * @returns {string}
+ */
+function buildDynamicsChart(detail) {
+  if (!detail) return '';
+
+  const engines = [];
+  for (const engine of ['yandex', 'google']) {
+    const d = detail[engine];
+    if (!d || !Number.isFinite(Number(d.deviation_pct)) || !d.first || !d.last) continue;
+    const first = Number(d.first.value);
+    const last = Number(d.last.value);
+    if (!Number.isFinite(first) || !Number.isFinite(last)) continue;
+    engines.push({
+      label: engine === 'yandex' ? 'Яндекс' : 'Google',
+      first,
+      last,
+      trend: d.trend,
+      pct: Number(d.deviation_pct),
+    });
+  }
+  if (!engines.length) return '';
+
+  const H = 150; // высота области графика, px
+  const maxVal = Math.max(...engines.flatMap((e) => [e.first, e.last]), 1);
+  const top = _niceCeil(maxVal);
+  const mid = top / 2;
+  const barPx = (v) => Math.max(2, Math.round((Math.max(0, Number(v)) / top) * H));
+  const fmtTick = (v) => Math.round(v).toLocaleString('ru-RU');
+
+  const GREY = '#C7CDD4'; // «Было» — нейтральный
+  const colorFor = (trend) => (trend === 'decline' ? '#D32F2F' : trend === 'growth' ? '#2E7D32' : '#757575');
+  const arrowFor = (trend) => (trend === 'decline' ? '▼' : trend === 'growth' ? '▲' : '●');
+
+  // Один столбец (div заданной высоты с подписью значения сверху).
+  const bar = (value, color) => `
+    <td valign="bottom" align="center" style="padding:0 5px;">
+      <div style="font-family:Arial,sans-serif;font-size:10px;color:#666;margin:0 0 3px;">${fmtTick(value)}</div>
+      <div style="width:26px;height:${barPx(value)}px;background:${color};border-radius:3px 3px 0 0;line-height:0;font-size:0;">&nbsp;</div>
+    </td>`;
+
+  // Группа столбцов по одной поисковой системе: «Было» (серый) + «Сейчас» (цвет тренда).
+  const group = (e) => `
+    <td valign="bottom" style="padding:0 14px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+        <tr>${bar(e.first, GREY)}${bar(e.last, colorFor(e.trend))}</tr>
+        <tr><td colspan="2" align="center" style="padding:6px 0 0;font-family:Arial,sans-serif;font-size:12px;color:#333;">${e.label}</td></tr>
+      </table>
+    </td>`;
+
+  const legend = engines
+    .map((e) => {
+      const sign = e.pct > 0 ? '+' : '';
+      return `<span style="font-family:Arial,sans-serif;font-size:12px;color:${colorFor(e.trend)};white-space:nowrap;margin-right:14px;">${e.label} ${arrowFor(e.trend)} ${sign}${e.pct.toFixed(1)}%</span>`;
+    })
+    .join('');
+
+  // Ось Y (0 / mid / top) слева от области столбцов.
+  const yAxis = `
+    <td valign="top" style="padding:0 8px 0 0;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;height:${H}px;">
+        <tr style="height:${Math.round(H / 2)}px;"><td valign="top" style="font-family:Arial,sans-serif;font-size:10px;color:#999;">${fmtTick(top)}</td></tr>
+        <tr style="height:${Math.round(H / 2)}px;"><td valign="top" style="font-family:Arial,sans-serif;font-size:10px;color:#999;">${fmtTick(mid)}</td></tr>
+        <tr style="height:0;"><td valign="bottom" style="font-family:Arial,sans-serif;font-size:10px;color:#999;">0</td></tr>
+      </table>
+    </td>`;
+
+  return `
+<div style="margin:18px 0 4px;">
+  <div style="font-family:Arial,sans-serif;font-size:13px;font-weight:bold;color:#333;margin:0 0 10px;">Запросы сайта в топ-50 (динамика)</div>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border-bottom:1px solid #e5e5e5;">
+    <tr>${yAxis}${engines.map(group).join('')}</tr>
+  </table>
+  <div style="margin:10px 0 4px;">
+    <span style="font-family:Arial,sans-serif;font-size:11px;color:#999;margin-right:14px;">▮ Было (серый) · ▮ Сейчас (цвет)</span>${legend}
+  </div>
+</div>`;
+}
+
 module.exports = {
-  composeEmail, buildDynamicsTable, formatDynamicsNumeric,
-  buildCatchySubject, buildHeroHeading, buildContactBlock,
+  composeEmail, buildDynamicsTable, buildDynamicsChart, formatDynamicsNumeric,
+  buildCatchySubject, buildHeroHeading, buildContactBlock, _buildGreeting,
 };
