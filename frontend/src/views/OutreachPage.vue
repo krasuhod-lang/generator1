@@ -291,6 +291,7 @@ onUnmounted(() => {
   font-size: 28px;
   font-weight: 700;
   margin: 0 0 6px;
+  color: #fff;
 }
 .subtitle {
   color: #6e6e73;
