@@ -71,13 +71,13 @@ console.log('\n[outreach] Блок контактов отправителя (re
     senderName: 'Иван', senderCompany: 'SEO Team',
     senderSite: 'myseo.ru', senderTelegram: '@ivan_seo',
   });
-  ok('содержит сайт', block.includes('myseo.ru'));
-  ok('нормализует сайт в https', block.includes('https://myseo.ru'));
-  ok('содержит Telegram-ссылку', block.includes('https://t.me/ivan_seo'));
+  ok('содержит сайт', /myseo\.ru/.test(block));
+  ok('нормализует сайт в https', /href="https:\/\/myseo\.ru"/.test(block));
+  ok('содержит Telegram-ссылку', /href="https:\/\/t\.me\/ivan_seo"/.test(block));
   ok('содержит имя отправителя', block.includes('Иван'));
 
   const empty = buildContactBlock({ senderName: 'Иван', senderCompany: 'Иван' });
-  ok('без контактов не падает и не дублирует имя', empty.includes('Иван') && !empty.includes('http'));
+  ok('без контактов не падает и не дублирует имя', empty.includes('Иван') && !/href=/.test(empty));
 }
 
 console.log('\n[outreach] Мессенджеры (req 6) — только личный контакт, без каналов');
@@ -96,9 +96,9 @@ console.log('\n[outreach] Мессенджеры (req 6) — только лич
   ok('нашёл WhatsApp', types.includes('whatsapp'));
   ok('нашёл Telegram (личный)', links.some((l) => l.type === 'telegram' && l.url.includes('company_manager')));
   ok('нашёл MAX (нормализовал протокол)', links.some((l) => l.type === 'max' && l.url.startsWith('https://')));
-  ok('исключил joinchat-канал', !links.some((l) => l.url.includes('joinchat')));
-  ok('исключил публичный канал /s/', !links.some((l) => l.url.includes('/s/')));
-  ok('не считает VK/почту мессенджером', !links.some((l) => l.url.includes('vk.com') || l.url.includes('mailto')));
+  ok('исключил joinchat-канал', !links.some((l) => /joinchat/.test(l.url)));
+  ok('исключил публичный канал /s/', !links.some((l) => /\/s\//.test(l.url)));
+  ok('не считает VK/почту мессенджером', !links.some((l) => /vk\.com/.test(l.url) || /mailto/.test(l.url)));
 }
 
 console.log('\n[outreach] Окно отправки МСК (req 4)');

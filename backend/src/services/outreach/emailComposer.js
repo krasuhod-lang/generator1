@@ -285,12 +285,20 @@ function _normalizeTelegram(raw) {
   return { url: `https://t.me/${user}`, label: `@${user}` };
 }
 
+/** Удаляет HTML-теги устойчиво к вложенным конструкциям (<scr<script>ipt>). */
+function _stripTags(s) {
+  let prev;
+  let out = String(s || '');
+  do { prev = out; out = out.replace(/<[^>]*>/g, ''); } while (out !== prev);
+  return out;
+}
+
 /** Текстовая (plain-text) версия письма — повышает доставляемость (req 4). */
 function buildPlainText({ heroHeading, html, senderName, senderCompany, senderSite, senderTelegram, unsubscribeUrl }) {
-  const bodyText = String(html || '')
+  const withBreaks = String(html || '')
     .replace(/<\/(p|div|tr|h[1-6])>/gi, '\n')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+    .replace(/<br\s*\/?>/gi, '\n');
+  const bodyText = _stripTags(withBreaks)
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/\n{3,}/g, '\n\n')
