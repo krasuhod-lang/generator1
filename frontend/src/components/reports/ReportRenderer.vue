@@ -114,6 +114,9 @@ const navItems = computed(() => {
   if (props.summary?.executive_summary || props.summary?.highlights?.length) {
     items.push({ id: 'ai-analysis', label: 'AI-выводы' });
   }
+  if (props.summary?.next_month_forecast) {
+    items.push({ id: 'forecast', label: 'Прогноз' });
+  }
   return items;
 });
 
@@ -372,6 +375,24 @@ function autoLinkify(html) {
   }).join('');
 }
 
+// ТЗ Reports Fixes §4: AI-резюме приходит с **жирными** тезисами (markdown).
+// Рендерим их как <strong>, сохраняя абзацы. Экранируем HTML до конвертации,
+// затем прогоняем через DOMPurify — на выходе только <strong>/<br>.
+function renderRichText(value) {
+  const raw = String(value || '');
+  if (!raw.trim()) return '';
+  const escaped = raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const bolded = escaped
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+  return DOMPurify.sanitize(bolded, { ALLOWED_TAGS: ['strong', 'br'], ALLOWED_ATTR: [] });
+}
+const summaryHtml = computed(() => renderRichText(props.summary?.executive_summary));
+const nextMonthForecastHtml = computed(() => renderRichText(props.summary?.next_month_forecast));
+
 function safeHtml(value) {
   const linked = autoLinkify(value || '');
   const html = DOMPurify.sanitize(linked, {
@@ -403,12 +424,26 @@ async function uploadImageFile(file) {
     const { data } = await api.post('/reports/upload-image', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
-    return data?.url || null;
+    return resolveUploadUrl(data?.url) || null;
   } catch {
     return null;
   } finally {
     uploadingImage.value = false;
   }
+}
+
+// ТЗ Reports Fixes §1: бэкенд возвращает относительный `/uploads/...`. В деве
+// Vite проксирует `/uploads` на backend, в проде фронт и API на одном origin —
+// поэтому относительный путь работает. Но если задан VITE_API_BASE_URL
+// (фронт и API на разных доменах), достраиваем абсолютный URL, иначе
+// картинка отдаст 404 с origin фронта.
+function resolveUploadUrl(url) {
+  if (!url) return url;
+  if (/^https?:\/\//i.test(url)) return url; // уже абсолютный
+  const base = (import.meta.env?.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+  if (!base) return url; // same-origin / проксирование — оставляем как есть
+  const origin = base.replace(/\/api$/i, ''); // статика живёт вне /api
+  return `${origin}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
 async function onDescriptionPaste(ev, i, j, k) {
@@ -644,7 +679,12 @@ function formatNum(v) {
 
     <section v-if="summary?.executive_summary" id="report-ai-analysis" class="rblk">
       <h2>Executive Summary</h2>
-      <p class="summary-text">{{ summary.executive_summary }}</p>
+      <p class="summary-text" v-html="summaryHtml"></p>
+    </section>
+
+    <section v-if="summary?.next_month_forecast" id="report-forecast" class="rblk forecast-card">
+      <h2>📈 Прогноз роста на следующий месяц</h2>
+      <p class="forecast-text" v-html="nextMonthForecastHtml"></p>
     </section>
 
     <section v-if="summary?.traffic_value || data?.traffic_value?.label" class="rblk savings-card">
@@ -955,20 +995,6 @@ function formatNum(v) {
       </ul>
     </section>
 
-    <section v-if="summary?.vulnerabilities?.length" class="rblk">
-      <h2>Уязвимые места</h2>
-      <ul class="list">
-        <li v-for="(item, idx) in summary.vulnerabilities" :key="idx">{{ item }}</li>
-      </ul>
-    </section>
-
-    <section v-if="summary?.roadmap?.length" class="rblk">
-      <h2>Roadmap</h2>
-      <ol class="list ordered">
-        <li v-for="(item, idx) in summary.roadmap" :key="idx">{{ item }}</li>
-      </ol>
-    </section>
-
     <ReportModulesCard :modules="data?.modules || {}" :view-mode="viewMode" />
 
     <section id="report-tasks" class="rblk">
@@ -1092,6 +1118,8 @@ function formatNum(v) {
   font-size: 12px; font-weight: 600;
 }
 .summary-text { white-space: pre-wrap; line-height: 1.7; }
+.forecast-card { background: linear-gradient(135deg, #e8f7ee 0%, #ffffff 100%); }
+.forecast-text { line-height: 1.7; font-size: 1.02rem; }
 .keys-engine-toggle {
   display: inline-flex; gap: 0; border-radius: 10px; overflow: hidden;
   border: 1px solid rgba(60,60,67,0.15); margin-bottom: 12px;

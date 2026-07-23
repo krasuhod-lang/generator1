@@ -34,6 +34,26 @@ function _paragraph(text) {
   });
 }
 
+// TZ Reports Fixes §4: AI-резюме содержит **жирные** тезисы (markdown).
+// Разбиваем строку на обычные/жирные фрагменты для корректного DOCX.
+function _richRuns(text) {
+  const raw = String(text || '');
+  const runs = [];
+  const re = /\*\*(.+?)\*\*/g;
+  let last = 0, m;
+  while ((m = re.exec(raw)) !== null) {
+    if (m.index > last) runs.push(new TextRun(raw.slice(last, m.index)));
+    runs.push(new TextRun({ text: m[1], bold: true }));
+    last = m.index + m[0].length;
+  }
+  if (last < raw.length) runs.push(new TextRun(raw.slice(last)));
+  return runs.length ? runs : [new TextRun(raw)];
+}
+
+function _richParagraph(text) {
+  return new Paragraph({ spacing: { after: 120 }, children: _richRuns(String(text || '').trim()) });
+}
+
 function _htmlToParagraphs(html) {
   const value = _text(html);
   if (!value) return [];
@@ -153,11 +173,16 @@ async function buildReportDocx(payload = {}) {
   if (payload.summary?.executive_summary) {
     children.push(_heading('Executive Summary'));
     for (const part of String(payload.summary.executive_summary).split(/\n{2,}/)) {
-      if (part.trim()) children.push(_paragraph(part.trim()));
+      if (part.trim()) children.push(_richParagraph(part.trim()));
     }
   } else {
     children.push(_heading('Executive Summary'));
     children.push(_paragraph('Резюме не сформировано. Сгенерируйте AI-резюме в редакторе отчёта.'));
+  }
+
+  if (payload.summary?.next_month_forecast) {
+    children.push(_heading('Прогноз роста на следующий месяц'));
+    children.push(_richParagraph(String(payload.summary.next_month_forecast)));
   }
 
   if (payload.summary?.highlights?.length) {
@@ -191,20 +216,6 @@ async function buildReportDocx(payload = {}) {
         spacing: { after: 60 },
         children: [new TextRun(`${item.query || 'Запрос'} — позиция ${item.position || '—'}. ${item.plan || ''}`.trim())],
       }));
-    });
-  }
-
-  if (payload.summary?.vulnerabilities?.length) {
-    children.push(_heading('Уязвимые места'));
-    payload.summary.vulnerabilities.forEach((item) => {
-      children.push(new Paragraph({ bullet: { level: 0 }, spacing: { after: 60 }, children: [new TextRun(String(item))] }));
-    });
-  }
-
-  if (payload.summary?.roadmap?.length) {
-    children.push(_heading('Roadmap на следующий месяц'));
-    payload.summary.roadmap.forEach((item) => {
-      children.push(new Paragraph({ bullet: { level: 0 }, spacing: { after: 60 }, children: [new TextRun(String(item))] }));
     });
   }
 

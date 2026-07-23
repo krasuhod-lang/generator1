@@ -94,13 +94,21 @@ function buildReportPdf(payload = {}) {
       if (kpi.length) { H('Ключевые показатели'); kpi.forEach(bullet); }
 
       // ── Executive Summary ──
+      // TZ Reports Fixes §4: снимаем markdown-звёздочки жирного (**...**) —
+      // PDFKit не рендерит inline-bold внутри абзаца, а «сырые» ** портят текст.
+      const _md = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1');
       H('Executive Summary');
       if (summary.executive_summary) {
         for (const part of String(summary.executive_summary).split(/\n{2,}/)) {
-          if (part.trim()) { P(part.trim()); doc.moveDown(0.2); }
+          if (part.trim()) { P(_md(part.trim())); doc.moveDown(0.2); }
         }
       } else {
         P('Резюме не сформировано. Сгенерируйте AI-резюме в редакторе отчёта.', { color: '#6b7280' });
+      }
+
+      if (summary.next_month_forecast) {
+        H('Прогноз роста на следующий месяц', 12);
+        P(_md(String(summary.next_month_forecast)));
       }
 
       if (Array.isArray(summary.highlights) && summary.highlights.length) {
@@ -119,14 +127,6 @@ function buildReportPdf(payload = {}) {
         summary.quick_wins.forEach((item) => bullet(
           `${item.query || 'Запрос'} — позиция ${item.position || '—'}. ${item.plan || ''}`.trim(),
         ));
-      }
-      if (Array.isArray(summary.vulnerabilities) && summary.vulnerabilities.length) {
-        H('Уязвимые места', 12);
-        summary.vulnerabilities.forEach((item) => bullet(String(item)));
-      }
-      if (Array.isArray(summary.roadmap) && summary.roadmap.length) {
-        H('Roadmap на следующий месяц', 12);
-        summary.roadmap.forEach((item) => bullet(String(item)));
       }
       if (summary.traffic_value) { H('SEO Traffic Value', 12); P(summary.traffic_value); }
 

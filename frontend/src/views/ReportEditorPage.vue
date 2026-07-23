@@ -179,6 +179,12 @@ async function onOverrideReset(path) {
 async function publish() {
   publishError.value = null;
   try {
+    // ТЗ Reports Fixes §2: перед публикацией гарантируем, что все текущие
+    // правки сохранены. Overrides сохраняются точечно при каждом изменении,
+    // а AI-блоки (llm_*) фиксируем здесь через patchSummary, чтобы «живая»
+    // публикация всегда отражала актуальное состояние редактора и ничего не
+    // затирала устаревшим снимком.
+    await flushSummary();
     const payload = {
       mode: publishForm.value.mode,
       password: publishForm.value.password || undefined,
@@ -190,6 +196,25 @@ async function publish() {
     await store.fetchDraft(route.params.id);
   } catch (err) {
     publishError.value = err.response?.data?.error || err.message || 'Ошибка публикации';
+  }
+}
+
+// Идемпотентное сохранение AI-блоков отчёта перед публикацией/экспортом.
+// Не блокирует основной поток при ошибке (best-effort автосейв).
+async function flushSummary() {
+  const d = draft.value;
+  if (!d) return;
+  const payload = {
+    llm_summary: d.llm_summary ?? null,
+    llm_highlights: d.llm_highlights ?? [],
+    llm_quick_wins: d.llm_quick_wins ?? [],
+    llm_traffic_value: d.llm_traffic_value ?? null,
+    llm_next_month_forecast: d.llm_next_month_forecast ?? null,
+  };
+  try {
+    await store.patchSummary(route.params.id, payload);
+  } catch (e) {
+    console.warn('[reports] flushSummary before publish failed:', e);
   }
 }
 
@@ -383,9 +408,8 @@ function _stateOf(section) {
                 highlights: draft.llm_highlights,
                 growth_attribution: draft.llm_growth,
                 quick_wins: draft.llm_quick_wins,
-                vulnerabilities: draft.llm_vulnerabilities,
-                roadmap: draft.llm_roadmap,
                 traffic_value: draft.llm_traffic_value,
+                next_month_forecast: draft.llm_next_month_forecast,
               }"
               :tasks-blocks="draft.tasks_blocks || []"
               :title="draft.title"

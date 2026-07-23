@@ -2552,6 +2552,7 @@ async function ensureSchema() {
         llm_vulnerabilities JSONB,
         llm_roadmap       JSONB,
         llm_traffic_value TEXT,
+        llm_next_month_forecast TEXT,
         llm_status        VARCHAR(16) NOT NULL DEFAULT 'idle'
                           CHECK (llm_status IN ('idle','queued','running','done','error')),
         llm_job_id        UUID,
@@ -2737,6 +2738,8 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_vulnerabilities JSONB`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_roadmap JSONB`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_traffic_value TEXT`);
+    // ТЗ Reports Fixes §6: прогноз роста на следующий месяц (см. migrations/123).
+    await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS llm_next_month_forecast TEXT`);
     // ТЗ §6: ручные правки чисел/AI-блоков (миграция 088)
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await db.query(`ALTER TABLE report_drafts ADD COLUMN IF NOT EXISTS overrides_meta JSONB NOT NULL DEFAULT '{}'::jsonb`);
