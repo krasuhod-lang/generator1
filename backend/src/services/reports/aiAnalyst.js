@@ -68,20 +68,43 @@ function _pctChange(curr, prev) {
   return Math.round(((curr - prev) / prev) * 1000) / 10; // 1 знак после запятой
 }
 
-function _seriesDelta(series, key = 'clicks') {
-  if (!Array.isArray(series) || series.length < 2) return null;
-  // Определяем, является ли последний бакет текущим (неполным) месяцем.
-  // Если да — пропускаем его и берём два последних полных месяца.
+/**
+ * Возвращает помесячные бакеты ТОЛЬКО за полные (календарно закрытые + с
+ * учётом лага источника) месяцы. Приоритетно берём авторитетный
+ * `series_meta.monthly_periods` (см. dataAggregator/periodResolver), где
+ * `is_complete` уже учитывает закрытие месяца, лаг выгрузки и отставание
+ * источника. Если меты нет (напр. Keys.so) — падаем на серию, исключая
+ * текущий календарный месяц по дате бакета.
+ *
+ * Принимает секцию `{series, series_meta}` или «сырой» массив серии.
+ * Возвращает массив бакетов, где значение метрики лежит по ключу `key`.
+ */
+function _completeMonths(input) {
+  const section = Array.isArray(input) ? { series: input } : (input || {});
+  const monthly = section.series_meta && Array.isArray(section.series_meta.monthly_periods)
+    ? section.series_meta.monthly_periods
+    : null;
+  if (monthly) {
+    return monthly.filter((m) => m && m.is_complete);
+  }
+  // Fallback без меты: исключаем текущий (неполный) календарный месяц.
+  const series = Array.isArray(section.series) ? section.series : [];
   const now = new Date();
   const curY = now.getFullYear();
   const curM = now.getMonth() + 1;
-  const fullMonths = series.filter((row) => {
+  return series.filter((row) => {
     const m = String(row?.date || '').match(/^(\d{4})-(\d{2})/);
     if (!m) return true; // если формат не месяц — оставляем
     return !(+m[1] === curY && +m[2] === curM);
   });
-  // Нужно минимум 2 полных месяца.
-  const src = fullMonths.length >= 2 ? fullMonths : series;
+}
+
+function _seriesDelta(input, key = 'clicks') {
+  // Сравниваем ТОЛЬКО полные месяцы: нельзя брать пол-месяца и сравнивать с
+  // предыдущим полным месяцем — это даёт ложную отрицательную динамику.
+  const src = _completeMonths(input);
+  // Нужно минимум 2 полных месяца, иначе честнее не показывать дельту вовсе.
+  if (!Array.isArray(src) || src.length < 2) return null;
   const last = Number(src[src.length - 1]?.[key]) || 0;
   const prev = Number(src[src.length - 2]?.[key]) || 0;
   return { last, prev, deltaPct: _pctChange(last, prev) };
@@ -94,28 +117,20 @@ function _seriesDelta(series, key = 'clicks') {
  * полный месяц» даёт ложные минусы). Возвращает массив
  * [{ month: 'YYYY-MM', value }] от старого к новому.
  */
-function _seriesTrend(series, key = 'clicks', maxPoints = 3) {
-  if (!Array.isArray(series) || !series.length) return [];
-  const now = new Date();
-  const curY = now.getFullYear();
-  const curM = now.getMonth() + 1;
-  const fullMonths = series.filter((row) => {
-    const m = String(row?.date || '').match(/^(\d{4})-(\d{2})/);
-    if (!m) return true;
-    return !(+m[1] === curY && +m[2] === curM);
-  });
-  const src = fullMonths.length ? fullMonths : series;
+function _seriesTrend(input, key = 'clicks', maxPoints = 3) {
+  const src = _completeMonths(input);
+  if (!Array.isArray(src) || !src.length) return [];
   return src.slice(-maxPoints).map((row) => ({
-    month: String(row?.date || '').slice(0, 7),
+    month: String(row?.key || row?.date || '').slice(0, 7),
     value: Number(row?.[key]) || 0,
   }));
 }
 
 function _buildMetricsDigest(data) {
-  const gscClicksDelta = _seriesDelta(data.gsc?.series, 'clicks');
-  const gscImprDelta = _seriesDelta(data.gsc?.series, 'impressions');
-  const ywmClicksDelta = _seriesDelta(data.ywm?.series, 'clicks');
-  const ywmImprDelta = _seriesDelta(data.ywm?.series, 'impressions');
+  const gscClicksDelta = _seriesDelta(data.gsc, 'clicks');
+  const gscImprDelta = _seriesDelta(data.gsc, 'impressions');
+  const ywmClicksDelta = _seriesDelta(data.ywm, 'clicks');
+  const ywmImprDelta = _seriesDelta(data.ywm, 'impressions');
   // Яндекс Keys.so (по умолчанию — top-level series/current для обратной совместимости)
   const ydxSeries = data.keys_so?.yandex?.series || data.keys_so?.series || [];
   const ydxCurrent = data.keys_so?.yandex?.current || data.keys_so?.current || null;
@@ -146,22 +161,22 @@ function _buildMetricsDigest(data) {
     gsc_clicks_delta_pct: gscClicksDelta?.deltaPct ?? null,
     gsc_clicks_prev: gscClicksDelta?.prev ?? null,
     gsc_clicks_last: gscClicksDelta?.last ?? null,
-    gsc_clicks_trend_3m: _seriesTrend(data.gsc?.series, 'clicks'),
+    gsc_clicks_trend_3m: _seriesTrend(data.gsc, 'clicks'),
     gsc_impressions: data.gsc?.totals?.impressions || 0,
     gsc_impressions_delta_pct: gscImprDelta?.deltaPct ?? null,
     gsc_impressions_prev: gscImprDelta?.prev ?? null,
     gsc_impressions_last: gscImprDelta?.last ?? null,
-    gsc_impressions_trend_3m: _seriesTrend(data.gsc?.series, 'impressions'),
+    gsc_impressions_trend_3m: _seriesTrend(data.gsc, 'impressions'),
     ywm_clicks: data.ywm?.totals?.clicks || 0,
     ywm_clicks_delta_pct: ywmClicksDelta?.deltaPct ?? null,
     ywm_clicks_prev: ywmClicksDelta?.prev ?? null,
     ywm_clicks_last: ywmClicksDelta?.last ?? null,
-    ywm_clicks_trend_3m: _seriesTrend(data.ywm?.series, 'clicks'),
+    ywm_clicks_trend_3m: _seriesTrend(data.ywm, 'clicks'),
     ywm_impressions: data.ywm?.totals?.impressions || 0,
     ywm_impressions_delta_pct: ywmImprDelta?.deltaPct ?? null,
     ywm_impressions_prev: ywmImprDelta?.prev ?? null,
     ywm_impressions_last: ywmImprDelta?.last ?? null,
-    ywm_impressions_trend_3m: _seriesTrend(data.ywm?.series, 'impressions'),
+    ywm_impressions_trend_3m: _seriesTrend(data.ywm, 'impressions'),
     // Яндекс Keys.so
     keys_so_visibility_current: ydxCurrent?.visibility ?? null,
     keys_so_visibility_delta_pct: visDelta?.deltaPct ?? null,
