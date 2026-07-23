@@ -3241,13 +3241,29 @@ async function ensureSchema() {
     // (sender_site / sender_telegram) для подписи письма и мессенджеры
     // лида (messengers JSONB). Файл идемпотентен.
     // См. migrations/124_outreach_enhancements.sql.
+    //
+    // ВАЖНО: колонки применяем ОТДЕЛЬНЫМИ запросами. Node-драйвер pg
+    // выполняет многооператорную строку как одну неявную транзакцию,
+    // поэтому если ALTER на outreach_prospects упадёт, откатятся и
+    // колонки outreach_campaigns (sender_site/sender_telegram) →
+    // «column "sender_site" ... does not exist». Разделение гарантирует,
+    // что контакты отправителя добавятся независимо от блока messengers.
     try {
-      const fs   = require('fs');
-      const sqlPath = path.join(__dirname, '..', 'migrations', '124_outreach_enhancements.sql');
-      const sql  = fs.readFileSync(sqlPath, 'utf8');
-      await db.query(sql);
+      await db.query(`
+        ALTER TABLE outreach_campaigns
+          ADD COLUMN IF NOT EXISTS sender_site     TEXT,
+          ADD COLUMN IF NOT EXISTS sender_telegram TEXT
+      `);
     } catch (e) {
-      console.warn('[ensureSchema] outreach enhancements (mig 124) skipped:', e.message);
+      console.warn('[ensureSchema] outreach sender contacts (mig 124) skipped:', e.message);
+    }
+    try {
+      await db.query(`
+        ALTER TABLE outreach_prospects
+          ADD COLUMN IF NOT EXISTS messengers JSONB NOT NULL DEFAULT '[]'::jsonb
+      `);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach prospect messengers (mig 124) skipped:', e.message);
     }
 
     console.log('[Schema] ensureSchema OK');
