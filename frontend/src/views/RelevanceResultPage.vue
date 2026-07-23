@@ -76,7 +76,7 @@ async function exportPdf() {
       heightLeft -= pageH;
     }
     const name = (report.value?.query || 'relevance-report')
-      .replace(/[^\wа-яё0-9]+/gi, '_').slice(0, 60);
+      .replace(/[^\wа-яё]+/gi, '_').slice(0, 60);
     pdf.save(`${name}.pdf`);
   } catch (e) {
     console.error('[relevance] PDF export failed:', e);
