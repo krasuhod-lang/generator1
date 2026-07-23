@@ -111,7 +111,7 @@ const navItems = computed(() => {
   if (hasModules.value) items.push({ id: 'modules', label: 'Точки роста' });
   if (hasAnyPages.value) items.push({ id: 'pages', label: 'Страницы' });
   items.push({ id: 'tasks', label: 'Работы' });
-  if (props.summary?.executive_summary || props.summary?.highlights?.length) {
+  if (props.summary?.growth_attribution?.length || props.summary?.highlights?.length) {
     items.push({ id: 'ai-analysis', label: 'AI-выводы' });
   }
   if (props.summary?.next_month_forecast) {
@@ -390,7 +390,6 @@ function renderRichText(value) {
     .replace(/\n/g, '<br>');
   return DOMPurify.sanitize(bolded, { ALLOWED_TAGS: ['strong', 'br'], ALLOWED_ATTR: [] });
 }
-const summaryHtml = computed(() => renderRichText(props.summary?.executive_summary));
 const nextMonthForecastHtml = computed(() => renderRichText(props.summary?.next_month_forecast));
 
 function safeHtml(value) {
@@ -684,11 +683,6 @@ function formatNum(v) {
                        :view-mode="viewMode"
                        :accent="accent" />
 
-    <section v-if="summary?.executive_summary" id="report-ai-analysis" class="rblk">
-      <h2>Executive Summary</h2>
-      <p class="summary-text" v-html="summaryHtml"></p>
-    </section>
-
     <section v-if="summary?.next_month_forecast" id="report-forecast" class="rblk forecast-card">
       <h2>📈 Прогноз роста на следующий месяц</h2>
       <p class="forecast-text" v-html="nextMonthForecastHtml"></p>
@@ -946,7 +940,7 @@ function formatNum(v) {
       </div>
     </section>
 
-    <section v-if="growthItems.length" class="rblk">
+    <section v-if="growthItems.length" id="report-ai-analysis" class="rblk">
       <h2>Анализ показателей</h2>
       <div class="growth-rows">
         <article
