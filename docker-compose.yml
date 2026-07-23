@@ -61,6 +61,9 @@ services:
       dockerfile: Dockerfile
     container_name: seo_backend
     restart: unless-stopped
+    # Даём время на graceful shutdown (остановка outreach-воркера, закрытие БД)
+    # при обновлении/перезапуске — иначе SIGKILL оборвёт активную рассылку.
+    stop_grace_period: 60s
     env_file: .env
     environment:
       NODE_ENV: development
@@ -116,6 +119,10 @@ services:
       dockerfile: Dockerfile
     container_name: seo_worker
     restart: unless-stopped
+    # Долгие LLM-стадии: даём воркеру время завершить текущий шаг и корректно
+    # освободить lock job'а (worker.close()) до принудительного SIGKILL.
+    # Незавершённый job продолжится с checkpoint после рестарта.
+    stop_grace_period: 120s
     env_file: .env
     environment:
       NODE_ENV: development

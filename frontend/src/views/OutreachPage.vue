@@ -88,6 +88,26 @@
             />
           </div>
 
+          <div class="field field-wide">
+            <label for="sender-site">Ссылка на сайт</label>
+            <input
+              id="sender-site" v-model="form.sender_site"
+              type="text" placeholder="https://example.ru"
+              :disabled="submitting"
+            />
+            <span class="hint">в подписи письма</span>
+          </div>
+
+          <div class="field field-wide">
+            <label for="sender-tg">Telegram</label>
+            <input
+              id="sender-tg" v-model="form.sender_telegram"
+              type="text" placeholder="@username или t.me/username"
+              :disabled="submitting"
+            />
+            <span class="hint">призыв написать в письме</span>
+          </div>
+
           <div class="field field-actions">
             <button class="btn btn-primary" :disabled="submitting" @click="createCampaign">
               <span v-if="submitting">Создаём…</span>
@@ -196,6 +216,8 @@ const form = ref({
   depth_pages: 3,
   daily_limit: 500,
   sender_name: '',
+  sender_site: '',
+  sender_telegram: '',
 });
 const cityInput = ref('');
 const submitting = ref(false);
@@ -240,6 +262,7 @@ async function createCampaign() {
     form.value = {
       keyword: '', cities: [], search_engine: 'yandex',
       depth_pages: 3, daily_limit: 500, sender_name: '',
+      sender_site: '', sender_telegram: '',
     };
     await store.fetchCampaigns();
   } catch (err) {

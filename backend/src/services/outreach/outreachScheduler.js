@@ -89,6 +89,9 @@ async function runCampaignCycle(campaign) {
   const appUrl = process.env.APP_URL || 'https://localhost:3000';
   const fromEmail = process.env.OUTREACH_FROM_EMAIL || campaign.sender_email;
   const fromName = process.env.OUTREACH_FROM_NAME || campaign.sender_name || 'SEO Team';
+  // Контактные данные для подписи письма и призыва написать в Telegram.
+  const senderSite = campaign.sender_site || process.env.OUTREACH_SENDER_SITE || null;
+  const senderTelegram = campaign.sender_telegram || process.env.OUTREACH_SENDER_TELEGRAM || null;
 
   await log(campaign.id, 'info', `Запуск цикла кампании: ${campaign.name}`);
 
@@ -173,6 +176,8 @@ async function runCampaignCycle(campaign) {
         prospect: { ...prospect, niche: campaign.niche, dynamics_detail: prospect.dynamics_detail },
         senderName: fromName,
         senderCompany: fromName,
+        senderSite: senderSite,
+        senderTelegram: senderTelegram,
         unsubscribeUrl: unsubUrl,
       });
 
@@ -413,4 +418,4 @@ function stopOutreachScheduler() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { startOutreachScheduler, stopOutreachScheduler, runTick };
+module.exports = { startOutreachScheduler, stopOutreachScheduler, runTick, calculateSendDelay };

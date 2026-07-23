@@ -56,6 +56,21 @@ async function isUnsubscribed(email) {
  * @returns {Promise<{resendId: string}>}
  */
 async function sendEmail({ emailId, to, subject, html, fromEmail, fromName }) {
+  // 0. Идемпотентность: если письмо уже отправлено (рестарт воркера / повтор
+  // job'а BullMQ с тем же jobId), не отправляем повторно — иначе получатель
+  // получит дубль. Источник истины — статус строки в outreach_emails.
+  if (emailId) {
+    const { rows } = await db.query(
+      `SELECT status, resend_id FROM outreach_emails WHERE id = $1 LIMIT 1`,
+      [emailId],
+    );
+    const row = rows[0];
+    if (row && (row.resend_id ||
+        ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'].includes(row.status))) {
+      return { resendId: row.resend_id || null, skipped: true };
+    }
+  }
+
   // 1. Проверяем корпоративный email
   const domain = to.split('@')[1]?.toLowerCase();
   if (FREE_EMAIL_PROVIDERS.has(domain)) {

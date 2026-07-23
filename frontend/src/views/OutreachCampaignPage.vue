@@ -44,11 +44,11 @@
         <section v-show="tab === 'overview'" class="oc-panel">
           <div class="kpi-grid">
             <div class="kpi"><span class="kpi-v">{{ campaign.total_prospects }}</span><span class="kpi-l">Лидов</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_sent }}</span><span class="kpi-l">Отправлено</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.sent ?? campaign.total_sent }}</span><span class="kpi-l">Отправлено</span></div>
             <div class="kpi"><span class="kpi-v">{{ stats?.totals?.open_rate ?? 0 }}%</span><span class="kpi-l">Open rate</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_opened }}</span><span class="kpi-l">Открыто</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_clicked }}</span><span class="kpi-l">Кликов</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_replied }}</span><span class="kpi-l">Ответов</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.opened ?? campaign.total_opened }}</span><span class="kpi-l">Открыто</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.clicked ?? campaign.total_clicked }}</span><span class="kpi-l">Кликов</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.replied ?? campaign.total_replied }}</span><span class="kpi-l">Ответов</span></div>
           </div>
 
           <div class="card">
@@ -113,6 +113,36 @@
 
         <!-- ── ПИСЬМА ──────────────────────────────────────────── -->
         <section v-show="tab === 'emails'" class="oc-panel">
+          <div class="card ds-card">
+            <h3 class="card-h">Прямая отправка по адресам</h3>
+            <p class="muted ds-hint">
+              Укажите пул email-адресов (через запятую или с новой строки) — для
+              каждого будет сгенерировано письмо и поставлено в очередь отправки.
+            </p>
+            <textarea
+              v-model="directEmails"
+              class="ds-textarea"
+              rows="3"
+              placeholder="info@example.ru, sales@company.com"
+            ></textarea>
+            <div class="ds-row">
+              <input v-model="directNiche" type="text" class="ds-input" placeholder="Ниша (необязательно)" />
+              <input v-model="directCity" type="text" class="ds-input" placeholder="Город (необязательно)" />
+              <button class="btn btn-primary" :disabled="dsSending || !directEmails.trim()" @click="sendDirect">
+                {{ dsSending ? 'Отправка…' : 'Сгенерировать и отправить' }}
+              </button>
+            </div>
+            <div v-if="dsResult" class="ds-result">
+              <span v-if="dsResult.error" class="ds-skip">{{ dsResult.error }}</span>
+              <template v-else>
+                <span class="ds-ok">В очередь: {{ dsResult.queued }}</span>
+                <span v-if="dsResult.skipped_count" class="ds-skip">Пропущено: {{ dsResult.skipped_count }}</span>
+                <ul v-if="dsResult.skipped && dsResult.skipped.length" class="ds-skip-list">
+                  <li v-for="s in dsResult.skipped" :key="s.email">{{ s.email }} — {{ s.reason }}</li>
+                </ul>
+              </template>
+            </div>
+          </div>
           <div class="table-wrap">
             <table class="tbl">
               <thead>
@@ -224,6 +254,13 @@ const logsBox = ref(null);
 const stickToBottom = ref(true);
 
 const prospectFilter = ref({ status: '', city: '', minScore: null });
+
+// Прямая отправка по пулу адресов (вкладка «Письма»).
+const directEmails = ref('');
+const directNiche = ref('');
+const directCity = ref('');
+const dsSending = ref(false);
+const dsResult = ref(null);
 
 let pollTimer = null;
 
@@ -354,6 +391,28 @@ async function runNow() {
 
 function openEmail(e) { modalEmail.value = e; }
 
+async function sendDirect() {
+  if (dsSending.value || !directEmails.value.trim()) return;
+  dsSending.value = true;
+  dsResult.value = null;
+  try {
+    dsResult.value = await store.directSend(campaignId, {
+      emails: directEmails.value,
+      niche: directNiche.value || undefined,
+      city: directCity.value || undefined,
+    });
+    if (dsResult.value?.queued > 0) {
+      directEmails.value = '';
+      await loadEmails();
+      await loadCampaign();
+    }
+  } catch (err) {
+    dsResult.value = { queued: 0, skipped_count: 0, error: err?.response?.data?.error || err.message };
+  } finally {
+    dsSending.value = false;
+  }
+}
+
 function pollActive() {
   loadCampaign();
   if (tab.value === 'overview') loadStats();
@@ -467,6 +526,25 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 .btn-sm { padding: 7px 12px; font-size: 13px; }
 .btn-secondary { background: #f0f0f2; color: #1d1d1f; }
 .btn-ghost { background: #fff; color: #0071e3; border: 1px solid #d2d2d7; }
+.btn-primary { background: #0071e3; color: #fff; }
+.btn-primary:hover { background: #0062c4; }
+
+/* Прямая отправка по пулу адресов */
+.ds-card { margin-bottom: 14px; }
+.ds-hint { padding: 0 0 10px; }
+.ds-textarea {
+  width: 100%; box-sizing: border-box; border: 1px solid #d2d2d7; border-radius: 8px;
+  padding: 10px; font-size: 14px; background: #fbfbfd; resize: vertical; font-family: inherit;
+}
+.ds-row { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+.ds-input {
+  flex: 1 1 160px; border: 1px solid #d2d2d7; border-radius: 8px; padding: 9px 10px;
+  font-size: 14px; background: #fbfbfd;
+}
+.ds-result { margin-top: 12px; font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+.ds-ok { color: #34c759; font-weight: 600; }
+.ds-skip { color: #ff9f0a; font-weight: 600; }
+.ds-skip-list { margin: 4px 0 0; padding-left: 18px; color: #86868b; font-size: 13px; }
 
 .muted { color: #86868b; font-size: 14px; padding: 12px; }
 
