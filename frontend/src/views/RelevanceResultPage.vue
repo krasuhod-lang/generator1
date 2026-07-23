@@ -3,6 +3,8 @@ import { ref, computed, onMounted, onUnmounted, watch, unref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import api from '../api.js';
 import AppLayout from '../components/AppLayout.vue';
+import RelevanceRadarChart from '../components/RelevanceRadarChart.vue';
+import RelevanceHeatmap from '../components/RelevanceHeatmap.vue';
 import { useRelevanceStore } from '../stores/relevance.js';
 import { findRegionByCode } from '../data/yandexRegions.js';
 
@@ -14,6 +16,77 @@ const report      = ref(null);
 const loadError   = ref(null);
 const initialLoad = ref(true);
 let pollTimer    = null;
+
+// ── ТЗ 3.3: липкая навигация по разделам + экспорт в PDF ────────────────
+const reportTabs = [
+  { id: 'rel-overview', label: 'Обзор' },
+  { id: 'rel-compare',  label: 'Сравнение' },
+  { id: 'rel-vocab',    label: 'Словарь' },
+  { id: 'rel-factors',  label: 'Факторы' },
+];
+const activeTab = ref('rel-overview');
+const pdfExporting = ref(false);
+
+function scrollToSection(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  activeTab.value = id;
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Подсветка активной вкладки по позиции скролла (без внешних зависимостей).
+function updateActiveTabOnScroll() {
+  let current = reportTabs[0].id;
+  for (const tab of reportTabs) {
+    const el = document.getElementById(tab.id);
+    if (el && el.getBoundingClientRect().top <= 120) current = tab.id;
+  }
+  activeTab.value = current;
+}
+
+async function exportPdf() {
+  if (pdfExporting.value) return;
+  pdfExporting.value = true;
+  try {
+    const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+      import('jspdf'),
+      import('html2canvas'),
+    ]);
+    const target = document.getElementById('rel-overview')?.closest('.max-w-7xl') || document.body;
+    const canvas = await html2canvas(target, {
+      backgroundColor: '#0b1020',
+      scale: Math.min(2, window.devicePixelRatio || 1),
+      useCORS: true,
+      logging: false,
+    });
+    const imgData = canvas.toDataURL('image/png');
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW;
+    const imgH = (canvas.height * imgW) / canvas.width;
+    let heightLeft = imgH;
+    let position = 0;
+    pdf.addImage(imgData, 'PNG', 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while (heightLeft > 0) {
+      position -= pageH;
+      pdf.addPage();
+      pdf.addImage(imgData, 'PNG', 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+    const name = (report.value?.query || 'relevance-report')
+      .replace(/[^\wа-яё0-9]+/gi, '_').slice(0, 60);
+    pdf.save(`${name}.pdf`);
+  } catch (e) {
+    console.error('[relevance] PDF export failed:', e);
+    loadError.value = null; // не ломаем страницу
+    copyHint.value = 'Не удалось сформировать PDF';
+    setTimeout(() => { copyHint.value = ''; }, 2500);
+  } finally {
+    pdfExporting.value = false;
+  }
+}
 
 // ── Filters / paging для таблиц ──────────────────────────────────────────
 const vocabFilter = ref('all'); // 'all' | 'important' | 'additional'
@@ -208,8 +281,12 @@ onMounted(() => {
       reload();
     }
   }, 2500);
+  window.addEventListener('scroll', updateActiveTabOnScroll, { passive: true });
 });
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer);
+  window.removeEventListener('scroll', updateActiveTabOnScroll);
+});
 
 // ── Derived ──────────────────────────────────────────────────────────────
 const vocabulary = computed(() => {
@@ -1103,8 +1180,27 @@ function copyTagZone() {
       <!-- ── Готовый отчёт ── -->
       <template v-else-if="report?.status === 'done'">
 
+        <!-- ТЗ 3.3: липкая навигация по разделам + экспорт в PDF -->
+        <nav class="sticky top-0 z-30 -mx-6 px-6 py-2 mb-1 bg-gray-950/95 backdrop-blur
+                    border-b border-gray-800 flex items-center gap-2 flex-wrap">
+          <span class="text-[11px] text-gray-500 uppercase tracking-wider mr-1">Разделы:</span>
+          <button v-for="tab in reportTabs" :key="tab.id"
+                  @click="scrollToSection(tab.id)"
+                  :class="['px-3 py-1 rounded text-xs font-semibold transition',
+                           activeTab === tab.id
+                             ? 'bg-indigo-600 text-white'
+                             : 'bg-gray-900 text-gray-400 hover:text-gray-200']">
+            {{ tab.label }}
+          </button>
+          <button @click="exportPdf" :disabled="pdfExporting"
+                  class="btn-secondary text-xs ml-auto disabled:opacity-50"
+                  title="Скачать красивый PDF-отчёт для клиента">
+            {{ pdfExporting ? '⏳ Готовим PDF…' : '📄 Экспорт в PDF' }}
+          </button>
+        </nav>
+
         <!-- Stats summary -->
-        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div id="rel-overview" class="grid grid-cols-2 md:grid-cols-5 gap-3">
           <div class="card py-3 text-center">
             <div class="text-2xl font-bold text-white">{{ stats.parsed_doc_count || 0 }}<span class="text-gray-500 text-base">/{{ stats.doc_count || 0 }}</span></div>
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mt-1">Документов</div>
@@ -1172,7 +1268,7 @@ function copyTagZone() {
         </div>
 
         <!-- ── PR3: Сравнение «наш сайт vs ТОП» ── -->
-        <div v-if="comparison && !comparison.error" class="card border-indigo-700/50">
+        <div v-if="comparison && !comparison.error" id="rel-compare" class="card border-indigo-700/50">
           <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-2">
               ⚖ Сравнение: ваш сайт vs ТОП конкурентов
@@ -1223,6 +1319,19 @@ function copyTagZone() {
                 ТОП медиана:
                 {{ ((comparison.summary?.median_text_html_ratio_top ?? 0) * 100).toFixed(1) }}%
               </div>
+            </div>
+          </div>
+
+          <!-- ТЗ 3.1: Radar Chart «наш сайт vs медиана/лидер ТОПа» -->
+          <div v-if="comparison.competitor_table && comparison.competitor_table.length > 1" class="mb-5">
+            <h3 class="text-xs font-bold text-gray-300 uppercase tracking-wider mb-2">
+              🕸 Лепестковая диаграмма гэпов
+              <span class="text-[10px] text-gray-500 font-normal normal-case ml-1">
+                (объём, BM25, LSI, охват лемм — нормировано к 100% по каждой оси)
+              </span>
+            </h3>
+            <div class="rounded bg-gray-950 border border-gray-800 p-2">
+              <RelevanceRadarChart :comparison="comparison" :height="360" />
             </div>
           </div>
 
@@ -1329,6 +1438,12 @@ function copyTagZone() {
                 </button>
               </div>
             </div>
+
+            <!-- ТЗ 3.2: Тепловая карта переспама/недоспама -->
+            <div class="mb-3 rounded bg-gray-950 border border-gray-800 p-2">
+              <RelevanceHeatmap :directives="directivesVisible" :height="300" />
+            </div>
+
             <ol class="space-y-1 text-xs">
               <li v-for="(d, i) in directivesVisible.slice(0, 100)" :key="d.lemma + ':' + i"
                   :class="['flex items-start gap-2 py-1 px-2 rounded',
@@ -1616,7 +1731,7 @@ function copyTagZone() {
         </div>
 
         <!-- ── Таблица 1: LSI словарь (BM25 + TF-IDF) ── -->
-        <div class="card">
+        <div id="rel-vocab" class="card">
           <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">
               📑 Словарь LSI (BM25 + TF-IDF) — {{ vocabFiltered.length }} лемм
@@ -2133,7 +2248,7 @@ function copyTagZone() {
         </div>
 
         <!-- ── (13) Wave 1: SEO-сигналы из утечек Google/Yandex ── -->
-        <div v-if="competitorSignals && (competitorSignals.doc_count || 0) > 0" class="card">
+        <div v-if="competitorSignals && (competitorSignals.doc_count || 0) > 0" id="rel-factors" class="card">
           <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h2 class="text-base font-bold text-fuchsia-300 uppercase tracking-wider">
               🎯 Сигналы топа (утечки Google / Yandex) — {{ competitorSignals.doc_count }} страниц
