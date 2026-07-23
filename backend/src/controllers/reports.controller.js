@@ -477,7 +477,6 @@ async function publishDraft(req, res) {
   const expiresAt = expiresInDays
     ? new Date(Date.now() + expiresInDays * 86400_000)
     : null;
-  const uuid = crypto.randomUUID();
 
   let snapshotData = null;
   if (mode === 'snapshot') {
@@ -502,13 +501,41 @@ async function publishDraft(req, res) {
     }
   }
 
-  const { rows } = await db.query(
-    `INSERT INTO shared_reports
-       (draft_id, user_id, uuid, mode, view_mode, snapshot_data, expires_at, password_hash)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
-     RETURNING id, uuid, mode, view_mode, expires_at, is_active, created_at`,
-    [draft.id, req.user.id, uuid, mode, viewMode, snapshotData, expiresAt, passwordHash],
+  // Ссылка отчёта у конкретного проекта должна оставаться КОНСТАНТОЙ: при
+  // повторной публикации переиспользуем самую раннюю (исходную) shared-ссылку
+  // проекта, обновляя её содержимое, но сохраняя тот же uuid и публичный URL.
+  const { rows: existingRows } = await db.query(
+    `SELECT sr.id, sr.uuid
+       FROM shared_reports sr
+       JOIN report_drafts d ON d.id = sr.draft_id
+      WHERE d.project_id = $1 AND sr.user_id = $2
+      ORDER BY sr.created_at ASC
+      LIMIT 1`,
+    [draft.project_id, req.user.id],
   );
+
+  let shared;
+  if (existingRows.length) {
+    const { rows } = await db.query(
+      `UPDATE shared_reports
+          SET draft_id = $2, mode = $3, view_mode = $4, snapshot_data = $5::jsonb,
+              expires_at = $6, password_hash = $7, is_active = TRUE, updated_at = NOW()
+        WHERE id = $1
+      RETURNING id, uuid, mode, view_mode, expires_at, is_active, created_at`,
+      [existingRows[0].id, draft.id, mode, viewMode, snapshotData, expiresAt, passwordHash],
+    );
+    shared = rows[0];
+  } else {
+    const uuid = crypto.randomUUID();
+    const { rows } = await db.query(
+      `INSERT INTO shared_reports
+         (draft_id, user_id, uuid, mode, view_mode, snapshot_data, expires_at, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+       RETURNING id, uuid, mode, view_mode, expires_at, is_active, created_at`,
+      [draft.id, req.user.id, uuid, mode, viewMode, snapshotData, expiresAt, passwordHash],
+    );
+    shared = rows[0];
+  }
 
   await db.query(
     `UPDATE report_drafts SET status = 'published', updated_at = NOW() WHERE id = $1`,
@@ -517,8 +544,8 @@ async function publishDraft(req, res) {
 
   const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
   res.status(201).json({
-    shared: rows[0],
-    public_url: `${baseUrl}/r/${uuid}`,
+    shared,
+    public_url: `${baseUrl}/r/${shared.uuid}`,
   });
 }
 

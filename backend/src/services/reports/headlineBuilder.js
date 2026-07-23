@@ -226,11 +226,6 @@ function _topAchievements(data, summary, mainDelta) {
     }
   }
 
-  if (out.length < 3) {
-    const done = _num(data?.tasks?.total_generated);
-    if (done > 0) out.push(`Выполнено работ по SEO: ${_formatNumberRu(done)}.`);
-  }
-
   return out.slice(0, 3);
 }
 
