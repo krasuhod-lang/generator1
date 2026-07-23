@@ -4,7 +4,6 @@ import DOMPurify from 'dompurify';
 import api from '../../api.js';
 import ReportTrendChart from './ReportTrendChart.vue';
 import PositionChart from '../PositionChart.vue';
-import ReportModulesCard from './ReportModulesCard.vue';
 import DataStateWrapper from '../DataStateWrapper.vue';
 import ExecutiveHeadline from './ExecutiveHeadline.vue';
 import EditableValue from './EditableValue.vue';
@@ -82,13 +81,6 @@ const hasYandexKeys = computed(() => {
   return _engineHasSeries(k?.yandex?.series) || _engineHasSeries(k?.series);
 });
 
-const hasModules = computed(() => {
-  const m = props.data?.modules;
-  return !!(m && !m.disabled && !m.error && (
-    m.striking_distance || m.ctr_gap || m.content_health || m.off_page || m.tech_audit
-  ));
-});
-
 // --- Section state helpers ---
 function sectionState(section) {
   if (!section) return 'empty';
@@ -108,7 +100,6 @@ const navItems = computed(() => {
   if (props.data?.gsc) items.push({ id: 'gsc', label: 'GSC' });
   if (props.data?.ywm) items.push({ id: 'ywm', label: 'Яндекс' });
   if (props.data?.keys_so) items.push({ id: 'keys-so', label: 'Keys.so' });
-  if (hasModules.value) items.push({ id: 'modules', label: 'Точки роста' });
   if (hasAnyPages.value) items.push({ id: 'pages', label: 'Страницы' });
   items.push({ id: 'tasks', label: 'Работы' });
   if (props.summary?.growth_attribution?.length || props.summary?.highlights?.length) {
@@ -532,7 +523,6 @@ const hasPartialTail = computed(() => {
 // определяется по URL страницы (см. backend urlClassifier), а основной разрез
 // — топ-страницы с разворачиваемым списком запросов по каждой странице.
 const queriesSection = computed(() => props.data?.queries || null);
-const commercialSummary = computed(() => queriesSection.value?.summary || null);
 
 // Движок для топ-страниц. Срез по страницам отдаёт только Google (GSC);
 // Яндекс.Вебмастер не предоставляет page-разрез — вкладка информирует об этом.
@@ -846,15 +836,6 @@ function formatNum(v) {
         срез по URL. Нажмите на строку Google, чтобы развернуть запросы, по которым
         продвигается страница.
       </p>
-      <div v-if="commercialSummary" class="commercial-summary">
-        <span class="cs-pill">
-          Коммерческий трафик: <b>{{ formatNum(commercialSummary.commercial_clicks) }}</b>
-          кликов из <b>{{ formatNum(commercialSummary.total_clicks) }}</b>
-          <span v-if="commercialSummary.commercial_share_pct != null">
-            ({{ commercialSummary.commercial_share_pct }}%)
-          </span>
-        </span>
-      </div>
       <!-- Движок: Google (есть page-разрез) / Яндекс (нет page-разреза) -->
       <div class="keys-engine-toggle">
         <button class="engine-btn" :class="{ active: pagesEngine === 'google' }" @click="pagesEngine = 'google'">Google</button>
@@ -995,8 +976,6 @@ function formatNum(v) {
         </li>
       </ul>
     </section>
-
-    <ReportModulesCard :modules="data?.modules || {}" :view-mode="viewMode" />
 
     <section id="report-tasks" class="rblk">
       <div class="tasks-head">
@@ -1372,11 +1351,6 @@ function formatNum(v) {
 }
 
 /* ТЗ §4: вкладки и таблицы коммерческих/информационных запросов */
-.commercial-summary { margin: 8px 0 12px; }
-.cs-pill {
-  display: inline-block; padding: 6px 12px; border-radius: 999px;
-  background: var(--accent-bg, #f0f4ff); color: #234; font-size: 13px;
-}
 .intent-tabs { display: flex; gap: 6px; margin: 10px 0 12px; flex-wrap: wrap; }
 .intent-tab {
   padding: 6px 14px; border-radius: 999px; border: 1px solid #d6dbe3;

@@ -24,10 +24,6 @@ function _text(v) { return String(v == null ? '' : v).trim(); }
 function _num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 function _ru(v) { return _num(v).toLocaleString('ru-RU'); }
 
-const PRIORITY_LABEL = { high: 'Высокий', medium: 'Средний', low: 'Низкий' };
-const LEVEL_LABEL = { critical: 'Критический', warning: 'Предупреждение' };
-const HEALTH_LABEL = { healthy: 'Здорова', needs_work: 'Требует работы', critical: 'Критично' };
-
 /**
  * @param {object} payload {title, period, project:{name,url}, data, summary, tasks_blocks}
  * @returns {Promise<Buffer>}
@@ -110,9 +106,6 @@ function buildReportPdf(payload = {}) {
         });
       }
 
-      // ── TЗ-модули ──
-      _renderModules(doc, data.modules, { H, P, bullet, FONT, FONT_B });
-
       if (Array.isArray(summary.quick_wins) && summary.quick_wins.length) {
         H('Quick Wins', 12);
         summary.quick_wins.forEach((item) => bullet(
@@ -139,62 +132,6 @@ function buildReportPdf(payload = {}) {
       reject(err);
     }
   });
-}
-
-function _renderModules(doc, modules, ctx) {
-  if (!modules || modules.disabled || modules.error) return;
-  const { H, P, bullet } = ctx;
-  const enabled = new Set(modules.enabled || []);
-  const has = (name, obj) => (enabled.size ? enabled.has(name) : true) && obj;
-
-  // Striking Distance
-  const sd = modules.striking_distance;
-  if (has('striking_distance', sd)) {
-    H('Striking Distance — точки роста', 12);
-    const s = sd.summary || {};
-    P(`Всего: ${_num(s.total)} · высокий ${_num(s.high)} · средний ${_num(s.medium)} · низкий ${_num(s.low)} · потенциал кликов: ${_ru(s.total_opportunity_clicks)}`, { color: '#374151' });
-    (sd.items || []).slice(0, 10).forEach((it) => bullet(
-      `${it.query} — поз. ${it.avg_position}, score ${it.opportunity_score} (${PRIORITY_LABEL[it.priority] || it.priority})`,
-    ));
-  }
-
-  // CTR Gap
-  const cg = modules.ctr_gap;
-  if (has('ctr_gap', cg)) {
-    H('CTR Gap — недобор кликов', 12);
-    const s = cg.summary || {};
-    P(`Всего: ${_num(s.total)} · критич. ${_num(s.critical)} · предупр. ${_num(s.warning)} · упущено кликов: ${_ru(s.lost_clicks)}`, { color: '#374151' });
-    (cg.items || []).slice(0, 10).forEach((it) => bullet(
-      `${it.query} — поз. ${it.position}, CTR ${it.ctr}% против ${it.benchmark_ctr}% (${LEVEL_LABEL[it.level] || it.level})`,
-    ));
-  }
-
-  // Content Health
-  const ch = modules.content_health;
-  if (has('content_health', ch)) {
-    H('Content Health', 12);
-    const s = ch.summary || {};
-    P(`Средний балл: ${_num(s.avg_score)} · здоровых ${_num(s.healthy)} · требуют работы ${_num(s.needs_work)} · критичных ${_num(s.critical)}`, { color: '#374151' });
-    (ch.items || []).slice(0, 8).forEach((it) => bullet(
-      `${it.url || '—'} — ${it.score}/100 (${HEALTH_LABEL[it.status] || it.status})`,
-    ));
-  }
-
-  // Off-Page
-  const op = modules.off_page;
-  if (has('off_page', op)) {
-    H('Off-Page Monitor', 12);
-    const s = op.summary || {};
-    P(`Ссылок: ${_num(s.total)} · доноров: ${_num(s.unique_donors)} · в индексе Яндекс: ${_num(s.indexed_yandex)} · Google: ${_num(s.indexed_google)} · битых: ${_num(s.broken)}`, { color: '#374151' });
-  }
-
-  // Tech Audit
-  const ta = modules.tech_audit;
-  if (has('tech_audit', ta)) {
-    H('Tech Audit', 12);
-    const s = ta.summary || {};
-    P(`Страниц: ${_num(s.pages)} · изображений: ${_ru(s.total_images)} · без alt: ${_ru(s.images_no_alt)} · не webp: ${_ru(s.images_non_webp)} · битых: ${_num(s.broken)}`, { color: '#374151' });
-  }
 }
 
 module.exports = { buildReportPdf };
