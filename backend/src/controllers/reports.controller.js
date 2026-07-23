@@ -79,6 +79,7 @@ function _serializeDraft(row) {
     llm_vulnerabilities: row.llm_vulnerabilities || [],
     llm_roadmap: row.llm_roadmap || [],
     llm_traffic_value: row.llm_traffic_value || '',
+    llm_next_month_forecast: row.llm_next_month_forecast || '',
     llm_status: row.llm_status,
     llm_generated_at: row.llm_generated_at,
     llm_error: row.llm_error || null,
@@ -110,6 +111,7 @@ function _summaryPayloadFromDraft(row) {
     vulnerabilities: row.llm_vulnerabilities || [],
     roadmap: row.llm_roadmap || [],
     traffic_value: row.llm_traffic_value || '',
+    next_month_forecast: row.llm_next_month_forecast || '',
   };
 }
 
@@ -288,18 +290,19 @@ async function patchOverrides(req, res) {
  * llm_growth, llm_quick_wins, llm_vulnerabilities, llm_roadmap,
  * llm_traffic_value. Неизвестные поля игнорируются.
  */
-const SUMMARY_FIELDS = ['llm_summary', 'llm_highlights', 'llm_growth', 'llm_quick_wins', 'llm_vulnerabilities', 'llm_roadmap', 'llm_traffic_value'];
+const SUMMARY_FIELDS = ['llm_summary', 'llm_highlights', 'llm_growth', 'llm_quick_wins', 'llm_vulnerabilities', 'llm_roadmap', 'llm_traffic_value', 'llm_next_month_forecast'];
 async function patchSummary(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
   const body = req.body || {};
   const sets = [];
   const params = [draft.id, req.user.id];
+  const TEXT_FIELDS = new Set(['llm_summary', 'llm_traffic_value', 'llm_next_month_forecast']);
   for (const f of SUMMARY_FIELDS) {
     if (!(f in body)) continue;
     const v = body[f];
-    params.push(f === 'llm_summary' || f === 'llm_traffic_value' ? (v == null ? null : String(v)) : JSON.stringify(v));
-    sets.push(`${f} = $${params.length}${f === 'llm_summary' || f === 'llm_traffic_value' ? '' : '::jsonb'}`);
+    params.push(TEXT_FIELDS.has(f) ? (v == null ? null : String(v)) : JSON.stringify(v));
+    sets.push(`${f} = $${params.length}${TEXT_FIELDS.has(f) ? '' : '::jsonb'}`);
   }
   if (!sets.length) return _bad(res, 400, 'нет полей для обновления');
   sets.push(`updated_at = NOW()`);
@@ -400,6 +403,7 @@ async function _runSummaryJob(draftId, userId, jobId, opts = {}) {
               llm_vulnerabilities = $7,
               llm_roadmap = $8,
               llm_traffic_value = $9,
+              llm_next_month_forecast = $11,
               llm_generated_at = NOW(),
               llm_error = NULL,
               updated_at = NOW()
@@ -415,6 +419,7 @@ async function _runSummaryJob(draftId, userId, jobId, opts = {}) {
         JSON.stringify(summary.roadmap || []),
         summary.traffic_value || '',
         jobId,
+        summary.next_month_forecast || '',
       ],
     );
   } catch (err) {
@@ -443,6 +448,7 @@ async function getSummaryStatus(req, res) {
     vulnerabilities: draft.llm_vulnerabilities || [],
     roadmap: draft.llm_roadmap || [],
     traffic_value: draft.llm_traffic_value || '',
+    next_month_forecast: draft.llm_next_month_forecast || '',
     generated_at: draft.llm_generated_at,
   });
 }
@@ -646,6 +652,7 @@ async function _loadShared(uuid) {
     `SELECT s.*, d.title AS draft_title, d.tasks_blocks, d.config,
             d.llm_summary, d.llm_highlights, d.llm_growth, d.llm_quick_wins,
             d.llm_vulnerabilities, d.llm_roadmap, d.llm_traffic_value,
+            d.llm_next_month_forecast,
             d.date_from, d.date_to,
             d.user_id AS owner_id,
             p.id AS project_id, p.name AS project_name, p.url AS project_url,
