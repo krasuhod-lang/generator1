@@ -266,6 +266,16 @@ function connectSSE() {
 function onSseOpen() {
   reconnectCount = 0; // сбрасываем счётчик реконнектов при успешном подключении
   pushLog({ ts: ts(), msg: `SSE подключён (попытка #${reconnectCount + 1})`, level: 'system' });
+  // После (пере)подключения синхронизируем актуальный статус задачи из REST —
+  // при рестарте бэкенда задача могла быть авто-восстановлена (processing→queued
+  // →processing) или уже завершиться, пока SSE был оборван.
+  store.fetchTask(taskId).then((t) => {
+    if (!t) return;
+    task.value = t;
+    if (t.status === 'done' || t.status === 'completed') { done.value = true; closeSSE(); }
+    else if (t.status === 'failed') { failed.value = true; closeSSE(); }
+    else if (t.status === 'paused') { paused.value = true; }
+  }).catch(() => {});
 }
 
 function onSseMessage(event) {

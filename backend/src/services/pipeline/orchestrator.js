@@ -388,6 +388,11 @@ async function runPipeline(task, ctx) {
     } catch (e) {
       log(`Stage 0 упал: ${e.message} — продолжаем без Stage 0 данных`, 'warn');
     }
+    // Ранний checkpoint: сохраняем прогресс до старта Stage 1, чтобы рестарт
+    // сервера на ранних стадиях не терял дорогие результаты Stage 0 / анализа.
+    await savePipelineCheckpoint(taskId, {
+      audienceNicheAnalysis, strategyContext, stage0Result, resumeFromBlock: 0,
+    }).catch((e) => log(`Checkpoint (Stage 0) не сохранён: ${e.message}`, 'warn'));
   }
 
   // ── Stage 1 ──────────────────────────────────────────────────────
@@ -401,6 +406,9 @@ async function runPipeline(task, ctx) {
     } catch (e) {
       throw new Error(`Stage 1 критическая ошибка: ${e.message}`);
     }
+    await savePipelineCheckpoint(taskId, {
+      audienceNicheAnalysis, strategyContext, stage0Result, stage1Result, resumeFromBlock: 0,
+    }).catch((e) => log(`Checkpoint (Stage 1) не сохранён: ${e.message}`, 'warn'));
   }
 
   // ── Stage 2 ──────────────────────────────────────────────────────
@@ -423,6 +431,13 @@ async function runPipeline(task, ctx) {
     } catch (e) {
       throw new Error(`Stage 2 критическая ошибка: ${e.message}`);
     }
+    // Checkpoint после Stage 2: таксономия готова, впереди дорогой блочный
+    // цикл. С этой точки рестарт продолжит генерацию с блока 0, не пересобирая
+    // Stage 0-2 заново.
+    await savePipelineCheckpoint(taskId, {
+      audienceNicheAnalysis, strategyContext, stage0Result, stage1Result,
+      taxonomy, stage2Raw, enrichedStage1, resumeFromBlock: 0,
+    }).catch((e) => log(`Checkpoint (Stage 2) не сохранён: ${e.message}`, 'warn'));
   }
 
   publish(taskId, { type: 'taxonomy', taxonomy });

@@ -80,10 +80,15 @@ function startEmailWorker() {
   console.log(`[outreach] Email worker запущен (лимит: ${Number(process.env.OUTREACH_MAX_PER_HOUR) || 60} писем/час)`);
 }
 
-function stopEmailWorker() {
+async function stopEmailWorker() {
   if (emailWorker) {
-    emailWorker.close();
+    const w = emailWorker;
     emailWorker = null;
+    try {
+      await w.close(); // дожидаемся завершения активной отправки, освобождаем lock
+    } catch (e) {
+      console.warn('[outreach/emailWorker] ошибка при закрытии:', e.message);
+    }
   }
 }
 

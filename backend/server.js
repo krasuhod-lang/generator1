@@ -416,11 +416,60 @@ const start = async () => {
     // (анализ ТЗ, аналитика прогнозатора) не должны обрываться по времени.
     // headersTimeout остаётся дефолтным (60с) — защита от slowloris сохраняется.
     server.requestTimeout = 0;
+
+    // ♻️ Recovery-sweep: поднимаем «осиротевшие» задачи генерации, оставшиеся
+    // в processing/queued после рестарта без живого Bull-job. Идемпотентно;
+    // задача продолжится с последнего checkpoint. Не блокируем старт сервера.
+    try {
+      const { recoverOrphanTasks } = require('./src/queue/recoverTasks');
+      recoverOrphanTasks().catch((e) => console.warn('[Server] recoverOrphanTasks failed:', e.message));
+    } catch (e) {
+      console.warn('[Server] recoverOrphanTasks skipped:', e.message);
+    }
+
+    // 🛑 Graceful shutdown: при обновлении Docker шлёт SIGTERM. Останавливаем
+    // HTTP-сервер, планировщик и воркер outreach, затем закрываем пул БД —
+    // чтобы рассылка/задачи не обрывались на полуслове.
+    registerGracefulShutdown(server);
   } catch (err) {
     console.error('[Server] Failed to start:', err.message);
     process.exit(1);
   }
 };
+
+let _shuttingDown = false;
+function registerGracefulShutdown(server) {
+  const shutdown = async (signal) => {
+    if (_shuttingDown) return;
+    _shuttingDown = true;
+    console.log(`[Server] Получен ${signal} — graceful shutdown...`);
+
+    try {
+      const { stopOutreachScheduler } = require('./src/services/outreach/outreachScheduler');
+      const { stopEmailWorker } = require('./src/services/outreach/emailQueue');
+      stopOutreachScheduler();
+      await stopEmailWorker();
+    } catch (e) {
+      console.warn('[Server] Ошибка остановки outreach:', e.message);
+    }
+
+    try {
+      await new Promise((resolve) => server.close(resolve));
+    } catch (e) {
+      console.warn('[Server] Ошибка закрытия HTTP-сервера:', e.message);
+    }
+
+    try {
+      const dbMod = require('./src/config/db');
+      if (dbMod.pool && typeof dbMod.pool.end === 'function') await dbMod.pool.end();
+    } catch (_) { /* пул мог быть уже закрыт */ }
+
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Runtime schema migrations (idempotent — safe to run on every startup)
