@@ -75,6 +75,78 @@ def _cosine_distance(a, b) -> float:
     return round(1.0 - sim, 4)
 
 
+# Порог косинусной близости для склейки лемм в один семантический кластер.
+# Переопределяется через RELEVANCE_SYNONYM_THRESHOLD (0..1). 0.78 —
+# консервативно: ловит явные синонимы («автомобиль»/«машина»), но не сливает
+# просто тематически близкие слова.
+def _synonym_threshold() -> float:
+    try:
+        return float(os.environ.get("RELEVANCE_SYNONYM_THRESHOLD", "0.78"))
+    except (TypeError, ValueError):
+        return 0.78
+
+
+def cluster_terms(
+    terms: Sequence[str],
+    *,
+    threshold: Optional[float] = None,
+    max_terms: int = 400,
+) -> Dict[str, str]:
+    """Кластеризует список лемм по семантической близости эмбеддингов.
+
+    Возвращает mapping `lemma -> canonical` (каноничная лемма кластера —
+    первая в порядке входа, т.е. при отсортированном по BM25 входе это самая
+    «весомая» лемма кластера). Синонимы («автомобиль», «машина») получают один
+    canonical, что позволяет comparison.py группировать их per_term_gap.
+
+    Все ошибки — мягкие: при недоступной модели возвращаем singleton-mapping
+    (каждая лемма сама себе canonical), т.е. поведение как без кластеризации.
+    """
+    uniq = [t for t in dict.fromkeys(terms) if t][:max_terms]
+    if len(uniq) < 2:
+        return {t: t for t in uniq}
+
+    try:
+        model = _load_model()
+        import numpy as np
+    except Exception:
+        return {t: t for t in uniq}
+
+    thr = threshold if threshold is not None else _synonym_threshold()
+    embs = model.encode(uniq, normalize_embeddings=True)
+
+    # Union-find по парам с косинусной близостью ≥ threshold.
+    parent = list(range(len(uniq)))
+
+    def _find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            # меньший индекс (более весомая лемма) остаётся корнем
+            parent[max(ra, rb)] = min(ra, rb)
+
+    sim = np.asarray(embs) @ np.asarray(embs).T
+    n = len(uniq)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if float(sim[i][j]) >= thr:
+                _union(i, j)
+
+    root_canon: Dict[int, str] = {}
+    mapping: Dict[str, str] = {}
+    for idx, term in enumerate(uniq):
+        r = _find(idx)
+        if r not in root_canon:
+            root_canon[r] = uniq[r]
+        mapping[term] = root_canon[r]
+    return mapping
+
+
 def _split_blocks(text: str, max_blocks: int = 30) -> List[str]:
     """Делит текст на укрупнённые блоки для page_radius. Cap чтобы не
     эмбеддить тысячи коротких предложений."""

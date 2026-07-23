@@ -434,7 +434,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 .oc-back { margin-bottom: 12px; }
 .oc-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .oc-title { display: flex; align-items: center; gap: 10px; }
-.oc-title h1 { font-size: 24px; font-weight: 700; margin: 0; }
+.oc-title h1 { font-size: 24px; font-weight: 700; margin: 0; color: #fff; }
 .oc-controls { display: flex; gap: 8px; }
 .oc-sub { color: #6e6e73; font-size: 14px; margin: 6px 0 18px; }
 

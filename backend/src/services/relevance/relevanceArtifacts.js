@@ -25,6 +25,7 @@ const { richTextToPlain } = require('../../utils/stripHtmlTags');
  *     schema_recommendation_markdown: string,
  *     voice_of_customer: { target_audience, niche_features, brand_facts },
  *     cocoon_plan: { ... } | null,
+ *     directives: [{ lemma, status, delta, our_count, median_top, text }],
  *   }
  *
  * loadArtifact(db, { reportId, userId }) — graceful, при ошибках/отсутствии
@@ -40,6 +41,7 @@ const MAX_NGRAMS = 40;
 const MAX_HEADINGS = 40;
 const MAX_H_DRAFTS = 25;
 const MAX_ENTITIES = 25;
+const MAX_DIRECTIVES = 40;
 
 function _arr(x) { return Array.isArray(x) ? x : []; }
 
@@ -83,12 +85,45 @@ function _digestSignals(csig) {
   };
 }
 
+/**
+ * _extractDirectives — нормализует comparison.directives (из Python relevance)
+ * в компактный список для §9d и промпта копирайтера (Gemini).
+ * Каждая директива: { lemma, status, delta, our_count, median_top, text }.
+ * status: missing | under | over | over_top3.
+ */
+function _extractDirectives(comparison) {
+  if (!comparison || typeof comparison !== 'object') return [];
+  const raw = _arr(comparison.directives);
+  const out = [];
+  for (const d of raw) {
+    if (!d || !d.lemma) continue;
+    out.push({
+      lemma:      String(d.lemma),
+      status:     String(d.status || ''),
+      important:  !!d.important,
+      delta:      Number.isFinite(d.delta) ? d.delta : 0,
+      our_count:  Number(d.our_count) || 0,
+      median_top: Number(d.median_top) || 0,
+      median_top3: (d.median_top3 !== undefined && d.median_top3 !== null)
+        ? Number(d.median_top3) : null,
+      text:       String(d.text || ''),
+    });
+    if (out.length >= MAX_DIRECTIVES) break;
+  }
+  return out;
+}
+
 function fromReportRow(row) {
   if (!row) return null;
   const rep = row.report || {};
   const our = row.our_report || {};
   const voc = row.llm_enrichment || rep.llm_enrichment || null;
 
+  const comparison =
+    (row.comparison && typeof row.comparison === 'object') ? row.comparison
+    : (rep.comparison && typeof rep.comparison === 'object') ? rep.comparison
+    : (our.comparison && typeof our.comparison === 'object') ? our.comparison
+    : null;
   const vocab = _arr(rep.vocabulary);
   const important = vocab
     .filter((v) => v && v.status === 'important')
@@ -129,6 +164,9 @@ function fromReportRow(row) {
       brand_facts:     richTextToPlain(voc.input_brand_facts     || voc.brand_facts     || ''),
     } : null,
     cocoon_plan: row.cocoon_plan || null,
+    // Директивы «наш сайт vs ТОП» (ТЗ 23.07.2026 п.2.1): переспам/недоспам/
+    // отсутствующие леммы. Проброс в §9d и промпт Gemini.
+    directives: _extractDirectives(comparison),
   };
 }
 
@@ -136,7 +174,7 @@ async function loadArtifact(db, { reportId, userId } = {}) {
   if (!db || !reportId || !userId) return null;
   try {
     const { rows } = await db.query(
-      `SELECT id, report, our_report, our_url, llm_enrichment, cocoon_plan
+      `SELECT id, report, our_report, our_url, llm_enrichment, cocoon_plan, comparison
          FROM relevance_reports
         WHERE id = $1 AND user_id = $2 AND status = 'done'
         LIMIT 1`,
@@ -183,14 +221,51 @@ function renderForPromptBrief(art, opts = {}) {
     out.push('Сущности (NER, обязательные): ' +
       art.mandatory_entities.slice(0, 12).map((e) => (e.text || e)).join(', '));
   }
+  if (art.directives && art.directives.length) {
+    const dLimit = Number(opts.directivesLimit) || 15;
+    out.push('Директивы (наш сайт vs ТОП — обязательно исправить):');
+    art.directives.slice(0, dLimit).forEach((d) => out.push(`  • ${d.text}`));
+  }
   out.push('[/RELEVANCE_ARTIFACT]');
   return out.join('\n');
+}
+
+/**
+ * buildCocoonBrief — компактная сводка семантических кластеров конкурентов из
+ * cocoon_plan для DeepSeek Stage 2 (ТЗ 23.07.2026 п.2.2). Материнские темы →
+ * кандидаты H2, дочерние → кандидаты H3. Graceful: '' если пусто.
+ */
+function buildCocoonBrief(cocoonPlan, opts = {}) {
+  if (!cocoonPlan || typeof cocoonPlan !== 'object') return '';
+  const mothers = Array.isArray(cocoonPlan.mothers) ? cocoonPlan.mothers : [];
+  if (!mothers.length) return '';
+  const motherLimit = Number(opts.motherLimit) || 12;
+  const childLimit  = Number(opts.childLimit) || 8;
+  const lines = [
+    '[COCOON_PLAN — семантические кластеры конкурентов]',
+    'При формировании H2/H3 опирайся на семантические кластеры из cocoon_plan, ' +
+    'чтобы покрыть все микро-интенты конкурентов. Каждый кластер (материнская ' +
+    'тема) — кандидат в раздел H2, дочерние темы — кандидаты в H3.',
+  ];
+  mothers.slice(0, motherLimit).forEach((m) => {
+    const label = String((m && (m.label || m.title)) || '').trim();
+    if (!label) return;
+    lines.push(`- Кластер: ${label}`);
+    const children = Array.isArray(m.children) ? m.children : [];
+    children.slice(0, childLimit).forEach((c) => {
+      const t = String((c && (c.title || c.label)) || '').trim();
+      if (t) lines.push(`  · ${t}`);
+    });
+  });
+  return lines.length > 2 ? lines.join('\n') : '';
 }
 
 module.exports = {
   loadArtifact,
   fromReportRow,
   renderForPromptBrief,
+  buildCocoonBrief,
   _splitHeadingsByLevel,
   _digestSignals,
+  _extractDirectives,
 };

@@ -73,6 +73,7 @@ def compute_comparison(
     median_text_chars: float = 0.0,
     median_html_chars: float = 0.0,
     top3_median_counts: Dict[str, float] | None = None,
+    synonym_map: Dict[str, str] | None = None,
 ) -> dict:
     """Считает сравнительный отчёт. Все аргументы keyword-only — не путаемся.
 
@@ -88,8 +89,26 @@ def compute_comparison(
             каждой леммы среди страниц ТОП-3. Если задано — добавляем
             anti-overoptimization директивы (§17): «сократите переспам леммы X:
             выше медианы top-3». Опционально, обратная совместимость сохранена.
+        synonym_map: (ТЗ 23.07.2026, п.1.1) mapping `lemma -> canonical` от
+            семантической кластеризации синонимов. Если задан, our_count леммы
+            считается по всему её кластеру (напр. «автомобиль» засчитывает и
+            «машина»), устраняя ложные «missing» из-за использования синонимов.
     """
     our_counts = _doc_term_counts(our_lemmas)
+
+    # Кластерные (синонимичные) счётчики: для каждой леммы — суммарный our_count
+    # по всему семантическому кластеру. Даёт устойчивость к синонимам.
+    cluster_counts: Dict[str, int] = {}
+    if synonym_map:
+        clusters: Dict[str, set] = {}
+        for term, canon in synonym_map.items():
+            members = clusters.setdefault(canon, set())
+            members.add(term)
+            members.add(canon)
+        for canon, members in clusters.items():
+            total = sum(our_counts.get(m, 0) for m in members)
+            for m in members:
+                cluster_counts[m] = total
 
     # ── 1) Vocabulary gap (per-term) ──────────────────────────────────────
     important_lemmas: List[str] = []
@@ -104,7 +123,9 @@ def compute_comparison(
         if not lemma:
             continue
         median = float(v.get("median_count") or 0)
-        our_count = int(our_counts.get(lemma, 0))
+        own_count = int(our_counts.get(lemma, 0))
+        # our_count с учётом синонимичного кластера (если кластеризация активна).
+        our_count = int(cluster_counts.get(lemma, own_count))
         status = _classify(our_count, median)
         is_important = (v.get("status") == "important")
         if is_important:
@@ -114,7 +135,7 @@ def compute_comparison(
                 important_hits += 1
         if our_count > 0:
             vocab_hits += 1
-        per_term.append({
+        row = {
             "lemma":         lemma,
             "df":            int(v.get("df") or 0),
             "median_top":    median,
@@ -123,7 +144,15 @@ def compute_comparison(
             "tf_idf_score":  float(v.get("tf_idf_score") or 0),
             "important":     is_important,
             "status":        status,    # missing / under / ok / over
-        })
+        }
+        # Если синоним-кластер добавил вхождения сверх собственных — помечаем,
+        # чтобы UI/копирайтер понимали, что покрытие достигнуто синонимом.
+        canon = (synonym_map or {}).get(lemma)
+        if canon and canon != lemma:
+            row["synonym_of"] = canon
+        if our_count != own_count:
+            row["own_count"] = own_count
+        per_term.append(row)
 
     # ── 2) N-grams gap ────────────────────────────────────────────────────
     # Считаем фразы у нас «грубо»: сшиваем леммы подряд и ищем подстроку.
