@@ -13,6 +13,7 @@
  *   GET    /api/outreach/campaigns/:id/emails    — письма (пагинация)
  *   GET    /api/outreach/campaigns/:id/logs      — логи кампании (последние 200)
  *   GET    /api/outreach/campaigns/:id/stats     — статистика (для графиков)
+ *   POST   /api/outreach/campaigns/:id/direct-send — ручная отправка по пулу адресов
  *
  *   POST   /api/outreach/webhooks/resend         — Resend Webhook (без auth, HMAC)
  *   GET    /api/outreach/unsubscribe             — отписка (публичная)
@@ -350,16 +351,37 @@ async function getCampaignStats(req, res, next) {
       [campaign.id],
     );
 
+    // Показатели считаем напрямую из таблицы писем (источник истины), а не из
+    // счётчиков кампании: webhook Resend может присылать несколько событий
+    // open/click на одно письмо, поэтому уникальный подсчёт по timestamp даёт
+    // корректный open rate и реальное число прочитавших («сколько людей»).
+    const { rows: aggRows } = await db.query(
+      `SELECT
+          COUNT(*) FILTER (
+            WHERE sent_at IS NOT NULL
+               OR status IN ('sent','delivered','opened','clicked')
+          )::int AS sent,
+          COUNT(*) FILTER (WHERE opened_at  IS NOT NULL)::int AS opened,
+          COUNT(*) FILTER (WHERE clicked_at IS NOT NULL)::int AS clicked,
+          COUNT(*) FILTER (WHERE replied_at IS NOT NULL)::int AS replied
+         FROM outreach_emails
+        WHERE campaign_id = $1`,
+      [campaign.id],
+    );
+    const agg = aggRows[0] || {};
+    const sent = agg.sent || 0;
+    const opened = agg.opened || 0;
+    const clicked = agg.clicked || 0;
+    const replied = agg.replied || 0;
+
     const totals = {
       prospects: campaign.total_prospects,
-      sent: campaign.total_sent,
-      opened: campaign.total_opened,
-      clicked: campaign.total_clicked,
-      replied: campaign.total_replied,
-      open_rate: campaign.total_sent > 0
-        ? +(campaign.total_opened / campaign.total_sent * 100).toFixed(1) : 0,
-      click_rate: campaign.total_sent > 0
-        ? +(campaign.total_clicked / campaign.total_sent * 100).toFixed(1) : 0,
+      sent,
+      opened,
+      clicked,
+      replied,
+      open_rate: sent > 0 ? +(opened / sent * 100).toFixed(1) : 0,
+      click_rate: sent > 0 ? +(clicked / sent * 100).toFixed(1) : 0,
     };
 
     return res.json({
@@ -446,14 +468,22 @@ async function handleResendEvent(event) {
   const email = rows[0];
   if (!email) return;
 
-  // Обновляем статус и timestamp письма.
+  // Обновляем статус и timestamp письма. Отслеживаем, был ли это ПЕРВЫЙ
+  // переход (timestamp был NULL) — только тогда инкрементируем счётчик
+  // кампании, иначе повторные webhook-события (Resend шлёт по одному на
+  // каждое открытие/клик) задвоят total_opened/total_clicked и завысят
+  // open rate выше 100%.
+  let firstTransition = false;
   if (mapping.col) {
-    await db.query(
-      `UPDATE outreach_emails
-          SET status = $1, ${mapping.col} = COALESCE(${mapping.col}, NOW())
-        WHERE id = $2`,
+    const { rows: upd } = await db.query(
+      `UPDATE outreach_emails AS e
+          SET status = $1, ${mapping.col} = COALESCE(e.${mapping.col}, NOW())
+         FROM (SELECT ${mapping.col} AS prev_col FROM outreach_emails WHERE id = $2) AS prev
+        WHERE e.id = $2
+      RETURNING (prev.prev_col IS NULL) AS first_transition`,
       [mapping.status, email.id],
     );
+    firstTransition = upd[0]?.first_transition === true;
   } else {
     await db.query(
       `UPDATE outreach_emails SET status = $1 WHERE id = $2`,
@@ -461,12 +491,12 @@ async function handleResendEvent(event) {
     );
   }
 
-  // Инкрементируем счётчики кампании (только на первом переходе).
+  // Инкрементируем счётчики кампании только на первом переходе (уникально).
   const counterCol = {
     'email.opened':  'total_opened',
     'email.clicked': 'total_clicked',
   }[type];
-  if (counterCol) {
+  if (counterCol && firstTransition) {
     await db.query(
       `UPDATE outreach_campaigns SET ${counterCol} = ${counterCol} + 1, updated_at = NOW()
         WHERE id = $1`,
@@ -554,6 +584,168 @@ async function unsubscribe(req, res, next) {
   }
 }
 
+// ─── POST /api/outreach/campaigns/:id/direct-send ─────────────────
+// Ручная отправка: пользователь указывает пул адресов, для каждого адреса
+// генерируется письмо (composeEmail) и ставится в очередь с учётом прогрева
+// (часовой лимит + рабочее окно). Позволяет адресно написать конкретным
+// получателям, не дожидаясь автоматического сбора лидов.
+const MAX_DIRECT_EMAILS = 50;
+
+function _sanitizeEmails(input) {
+  // Принимаем массив адресов или строку (через запятую/точку с запятой/перенос).
+  let raw = [];
+  if (Array.isArray(input)) raw = input;
+  else if (typeof input === 'string') raw = input.split(/[\s,;]+/);
+  const out = [];
+  const seen = new Set();
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  for (const item of raw) {
+    const addr = _clip(item, 254).toLowerCase();
+    if (!addr || seen.has(addr)) continue;
+    if (!re.test(addr)) continue;
+    seen.add(addr);
+    out.push(addr);
+    if (out.length >= MAX_DIRECT_EMAILS) break;
+  }
+  return out;
+}
+
+async function directSend(req, res, next) {
+  try {
+    const campaign = await _findCampaign(req.params.id, req.user.id);
+    if (!campaign) return res.status(404).json({ error: 'Кампания не найдена' });
+
+    const body = req.body || {};
+    const emails = _sanitizeEmails(body.emails);
+    if (emails.length === 0) {
+      return res.status(400).json({
+        error: 'Укажите хотя бы один корректный email-адрес (не более ' + MAX_DIRECT_EMAILS + ')',
+      });
+    }
+
+    const niche = _clip(body.niche, MAX_KEYWORD_LEN) || campaign.niche || null;
+    const city = _clip(body.city, 80) || null;
+    const companyName = body.company_name ? _clip(body.company_name, 200) : null;
+
+    // Ленивая загрузка сервисов отправки (BullMQ/Redis уже подняты в server.js).
+    const crypto = require('crypto');
+    const { composeEmail } = require('../services/outreach/emailComposer');
+    const { emailQueue } = require('../services/outreach/emailQueue');
+    const { precheckRecipient } = require('../services/outreach/emailSender');
+    const { calculateSendDelay } = require('../services/outreach/outreachScheduler');
+
+    const appUrl = process.env.APP_URL || 'https://localhost:3000';
+    const fromEmail = process.env.OUTREACH_FROM_EMAIL || campaign.sender_email;
+    const fromName = process.env.OUTREACH_FROM_NAME || campaign.sender_name || 'SEO Team';
+    const senderSite = campaign.sender_site || process.env.OUTREACH_SENDER_SITE || null;
+    const senderTelegram = campaign.sender_telegram || process.env.OUTREACH_SENDER_TELEGRAM || null;
+
+    // Часовой лимит прогрева — прямая отправка тоже соблюдает темп рассылки.
+    const { rows: warmup } = await db.query(
+      `SELECT hourly_limit FROM outreach_warmup_schedule WHERE week_number = $1`,
+      [campaign.warmup_week],
+    );
+    const hourlyLimit = warmup[0]?.hourly_limit || 3;
+
+    const queuedList = [];
+    const skipped = [];
+    let index = 0;
+
+    for (const email of emails) {
+      const precheck = await precheckRecipient(email);
+      if (!precheck.ok) {
+        skipped.push({ email, reason: precheck.reason });
+        continue;
+      }
+
+      const domain = email.split('@')[1];
+
+      // Синтетический лид: outreach_emails.prospect_id NOT NULL, а также
+      // чтобы webhook-события (open/click/bounce) находили лид по адресу.
+      const { rows: prospectRows } = await db.query(
+        `INSERT INTO outreach_prospects
+           (campaign_id, user_id, url, company_name, emails, niche, city, status, score)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 0)
+         ON CONFLICT (url, campaign_id) DO UPDATE
+           SET status = 'queued', emails = EXCLUDED.emails
+         RETURNING id`,
+        [campaign.id, campaign.user_id, `mailto:${email}`, companyName, [email], niche, city],
+      );
+      const prospectId = prospectRows[0].id;
+
+      const unsubToken = crypto.randomBytes(16).toString('hex');
+      const unsubUrl = `${appUrl}/unsubscribe?email=${encodeURIComponent(email)}&token=${unsubToken}`;
+
+      const composed = await composeEmail({
+        prospect: {
+          url: `mailto:${email}`,
+          company_name: companyName,
+          niche, city, services: [], dynamics_detail: null,
+        },
+        senderName: fromName,
+        senderCompany: fromName,
+        senderSite,
+        senderTelegram,
+        unsubscribeUrl: unsubUrl,
+      });
+
+      const { rows: emailRows } = await db.query(
+        `INSERT INTO outreach_emails
+           (prospect_id, campaign_id, user_id, recipient_email, recipient_domain,
+            subject, html_preview, html_full, subject_strategy, manual_review_required, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')
+         RETURNING id`,
+        [prospectId, campaign.id, campaign.user_id, email, domain,
+         composed.subject, composed.html.slice(0, 500), composed.html,
+         composed.strategy || null, composed.manual_review_required === true],
+      );
+      const emailId = emailRows[0].id;
+
+      await db.query(
+        `INSERT INTO outreach_unsubscribes (email, domain, token)
+         VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING`,
+        [email, domain, unsubToken],
+      );
+
+      const delayMs = calculateSendDelay(index, emails.length, hourlyLimit);
+      await emailQueue.add('send-email', {
+        emailId, to: email,
+        subject: composed.subject,
+        html: composed.html,
+        fromEmail, fromName,
+      }, { delay: delayMs, jobId: `email-${emailId}` });
+
+      await db.query(
+        `INSERT INTO outreach_logs (campaign_id, level, message, meta)
+         VALUES ($1, 'info', $2, $3)`,
+        [campaign.id, `Прямая отправка: письмо для ${email} поставлено в очередь`,
+         JSON.stringify({ emailId, direct: true })],
+      );
+
+      queuedList.push({ email, emailId, subject: composed.subject });
+      index += 1;
+    }
+
+    if (queuedList.length > 0) {
+      await db.query(
+        `UPDATE outreach_campaigns
+            SET total_sent = total_sent + $1, updated_at = NOW()
+          WHERE id = $2`,
+        [queuedList.length, campaign.id],
+      );
+    }
+
+    return res.status(queuedList.length > 0 ? 201 : 200).json({
+      queued: queuedList.length,
+      skipped_count: skipped.length,
+      queued_emails: queuedList,
+      skipped,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listCampaigns,
   createCampaign,
@@ -564,6 +756,7 @@ module.exports = {
   listEmails,
   listLogs,
   getCampaignStats,
+  directSend,
   resendWebhook,
   unsubscribe,
   handleResendEvent,

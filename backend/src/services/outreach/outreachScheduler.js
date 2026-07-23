@@ -418,4 +418,4 @@ function stopOutreachScheduler() {
   if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { startOutreachScheduler, stopOutreachScheduler, runTick };
+module.exports = { startOutreachScheduler, stopOutreachScheduler, runTick, calculateSendDelay };

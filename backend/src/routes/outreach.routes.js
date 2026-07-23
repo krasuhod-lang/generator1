@@ -14,6 +14,7 @@ const {
   listEmails,
   listLogs,
   getCampaignStats,
+  directSend,
   resendWebhook,
   unsubscribe,
 } = require('../controllers/outreach.controller');
@@ -67,5 +68,7 @@ router.get('/campaigns/:id/prospects', auth, listProspects);
 router.get('/campaigns/:id/emails',    auth, listEmails);
 router.get('/campaigns/:id/logs',      auth, listLogs);
 router.get('/campaigns/:id/stats',     auth, getCampaignStats);
+// Прямая (ручная) отправка по пулу адресов: генерируем письмо для каждого.
+router.post('/campaigns/:id/direct-send', auth, createLimiter, directSend);
 
 module.exports = router;
