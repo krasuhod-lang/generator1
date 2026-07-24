@@ -158,4 +158,4 @@ function stripThinkBlocks(text) {
   return text.replace(/<think>.*?<\/think>/gis, '').trim();
 }
 
-module.exports = { callDeepSeek, isReasoningModel };
+module.exports = { callDeepSeek, isReasoningModel, DEEPSEEK_DEFAULT_MAX_TOKENS };
