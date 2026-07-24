@@ -42,7 +42,7 @@ function bullet(items, max = 12) {
 
 function sectionTask(task) {
   const links = asArray(task.commercial_links);
-  return [
+  const lines = [
     '§1. ЗАДАЧА (входы пользователя)',
     `  • topic         : ${clip(task.topic, 280)}`,
     `  • region        : ${clip(task.region || '[не задано]', 200)}`,
@@ -51,7 +51,16 @@ function sectionTask(task) {
     `  • output_format : ${task.output_format || 'html'}`,
     `  • commercial_links_count : ${links.length}`,
     `  • brand_facts   : ${clip(task.brand_facts || '[не задано]', 800)}`,
-  ].join('\n');
+  ];
+  // GEO 2026: конкретный вопрос для прямого lead-answer в первом абзаце
+  // (Google AI Overviews / Яндекс Нейро). Если задан — статья ОБЯЗАНА начать
+  // с прямого ответа на него под H1 (lead_answer_brief в Stage 2 outline).
+  if (task.ai_answer_trigger && String(task.ai_answer_trigger).trim()) {
+    lines.push(`  • ai_answer_trigger : ${clip(task.ai_answer_trigger, 500)}`);
+    lines.push('    ↳ ОБЯЗАТЕЛЬНО: первый абзац под H1 (lead-answer) даёт прямой,'
+      + ' исчерпывающий ответ именно на этот вопрос — фактор попадания в AI-выдачу.');
+  }
+  return lines.join('\n');
 }
 
 function sectionStrategy(strategy) {

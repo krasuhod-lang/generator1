@@ -27,6 +27,7 @@
 
 const gistClient = require('../gist/gistClient');
 const trendsCollector = require('./trendsCollector');
+const { callLLM } = require('../llm/callLLM');
 
 const ALLOWED_STATES = ['void', 'lack', 'balance', 'abundance'];
 
@@ -101,6 +102,56 @@ function _collectPaaQuestions({ paaQuestions, serpVerification }) {
 }
 
 /**
+ * Собрать актуальные тренды/частые вопросы ниши через Perplexity (fail-open).
+ *
+ * GEO 2026: под алгоритмы AI-выдачи (Google AI Overviews / Яндекс Нейро) темам
+ * нужна свежая фактология и живые формулировки вопросов. Здесь мы дёргаем
+ * Perplexity как AI-аналитика трендов и извлекаем до 5 сигналов, которые затем
+ * подмешиваются в массив сигналов, передаваемых в генератор тем.
+ *
+ * @returns {Promise<Array<string>>}
+ */
+async function _collectPerplexityTrends({ niche, query, deps, log }) {
+  // Kill-switch + отсутствие ключа → тихо пропускаем (fail-open).
+  if (!_bool(process.env.TOPIC_DISCOVERY_PERPLEXITY_ENABLED, true)) return [];
+  if (!process.env.PERPLEXITY_API_KEY) return [];
+  const topic = String(niche || query || '').trim();
+  if (!topic) return [];
+
+  try {
+    const call = typeof deps.callLLM === 'function' ? deps.callLLM : callLLM;
+    const perplexityContext = `Собери 5 самых актуальных трендов и частых вопросов пользователей в 2026 году по нише: ${topic}.`;
+    const raw = await call('perplexity', 'Ты AI-аналитик трендов.', perplexityContext, {
+      maxTokens: 1000,
+      temperature: 0.2,
+      stageName: 'topic-discovery-perplexity',
+    });
+    return _extractPerplexityTrends(raw);
+  } catch (err) {
+    log(`[topic-discovery] perplexity fail-open: ${err && err.message ? err.message : err}`);
+    return [];
+  }
+}
+
+/**
+ * Извлечь список трендов/вопросов из ответа Perplexity. Ответ может прийти
+ * строкой (маркированный/нумерованный список) или объектом { text }.
+ * @returns {Array<string>}
+ */
+function _extractPerplexityTrends(raw) {
+  let text = '';
+  if (typeof raw === 'string') text = raw;
+  else if (raw && typeof raw === 'object') text = raw.text || raw.content || '';
+  if (!text) return [];
+  const lines = String(text)
+    .split(/\r?\n/)
+    // убираем маркеры списка/нумерацию и лишние пробелы
+    .map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim())
+    .filter(Boolean);
+  return _asStringList(lines, 5);
+}
+
+/**
  * Нормализовать ответ M-1 в стабильный контракт пайплайна.
  */
 function _normalizeResult(raw, signalsUsed) {
@@ -131,7 +182,7 @@ function _safeFallback(signalsUsed, reason) {
     sub_niche_suggestions: [],
     manual_review: true,
     reasoning: reason || 'Topic Discovery недоступен — требуется ручная проверка.',
-    signals_used: signalsUsed || { reddit: 0, paa: 0, trends: false },
+    signals_used: signalsUsed || { reddit: 0, paa: 0, trends: false, perplexity: 0 },
     collected_at: new Date().toISOString(),
   };
 }
@@ -158,7 +209,7 @@ async function runTopicDiscovery(params = {}) {
   const log = typeof params.log === 'function' ? params.log : () => {};
   const deps = params.deps || {};
 
-  const signalsUsed = { reddit: 0, paa: 0, trends: false };
+  const signalsUsed = { reddit: 0, paa: 0, trends: false, perplexity: 0 };
 
   if (!query || !String(query).trim()) {
     return _safeFallback(signalsUsed, 'Пустой запрос — Topic Discovery пропущен.');
@@ -174,6 +225,14 @@ async function runTopicDiscovery(params = {}) {
   // 2) PAA (детерминированно, без сети).
   const paa = _collectPaaQuestions({ paaQuestions, serpVerification });
   signalsUsed.paa = paa.length;
+
+  // 2b) Perplexity — актуальные тренды/частые вопросы ниши (GEO 2026, fail-open).
+  const perplexityTrends = await _collectPerplexityTrends({ niche, query, deps, log });
+  signalsUsed.perplexity = perplexityTrends.length;
+
+  // Тренды Perplexity — это тоже сигналы спроса/вопросов пользователей, поэтому
+  // добавляем их в массив сигналов (paa_questions), передаваемых в генератор тем.
+  const paaSignals = _asStringList(paa.concat(perplexityTrends), 20);
 
   // 3) Google Trends (fail-open null).
   let trendsData = null;
@@ -197,7 +256,7 @@ async function runTopicDiscovery(params = {}) {
       query,
       trends_data: trendsData,
       reddit_insights: redditInsights.length ? redditInsights : null,
-      paa_questions: paa.length ? paa : null,
+      paa_questions: paaSignals.length ? paaSignals : null,
     });
     return _normalizeResult(raw, signalsUsed);
   } catch (err) {
@@ -210,6 +269,7 @@ module.exports = {
   runTopicDiscovery,
   isEnabled: _isEnabled,
   _internal: {
-    _collectRedditInsights, _collectPaaQuestions, _normalizeResult, _safeFallback, _asStringList,
+    _collectRedditInsights, _collectPaaQuestions, _collectPerplexityTrends,
+    _extractPerplexityTrends, _normalizeResult, _safeFallback, _asStringList,
   },
 };

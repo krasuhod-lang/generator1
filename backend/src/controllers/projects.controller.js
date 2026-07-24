@@ -1124,6 +1124,7 @@ async function generateBlogArticle(req, res, next) {
       region: body.region,
       geminiModel: body.gemini_model,
       imagesCount: body.images_count,
+      aiAnswerTrigger: typeof body.ai_answer_trigger === 'string' ? body.ai_answer_trigger : undefined,
     });
     return res.status(201).json(result);
   } catch (err) {
