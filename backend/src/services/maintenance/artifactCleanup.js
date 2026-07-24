@@ -46,7 +46,7 @@ async function removeDir(absDir) {
     return true;
   } catch (err) {
     if (err && err.code === 'ENOENT') return false;
-    console.warn(`[artifactCleanup] Не удалось удалить каталог ${absDir}:`, err.message);
+    console.warn('[artifactCleanup] Не удалось удалить каталог:', absDir, err.message);
     return false;
   }
 }
@@ -103,7 +103,7 @@ async function removeFile(absPath) {
     return true;
   } catch (err) {
     if (err && err.code === 'ENOENT') return false;
-    console.warn(`[artifactCleanup] Не удалось удалить файл ${absPath}:`, err.message);
+    console.warn('[artifactCleanup] Не удалось удалить файл:', absPath, err.message);
     return false;
   }
 }
