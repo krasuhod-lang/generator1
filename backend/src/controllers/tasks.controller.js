@@ -9,6 +9,7 @@ const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -579,15 +580,9 @@ async function deleteTask(req, res, next) {
     // 4. Каскадное удаление из БД (ON DELETE CASCADE покрывает stages, blocks, metrics)
     await db.query(`DELETE FROM tasks WHERE id = $1 AND user_id = $2`, [task.id, req.user.id]);
 
-    // 5. Удаляем загруженный DOCX с диска (если есть)
-    if (task.input_tz_docx_path) {
-      const fullPath = path.resolve(__dirname, '../../', task.input_tz_docx_path);
-      fs.unlink(fullPath, (unlinkErr) => {
-        if (unlinkErr && unlinkErr.code !== 'ENOENT') {
-          console.warn(`[Delete] Could not unlink file ${fullPath}:`, unlinkErr.message);
-        }
-      });
-    }
+    // 5. Удаляем файлы задачи с диска: каталог сгенерированных картинок
+    //    storage/images/<taskId> и загруженный DOCX (best-effort, ENOENT игнор).
+    await cleanupTaskArtifacts({ taskId: task.id, docxPath: task.input_tz_docx_path });
 
     return res.status(204).send();
   } catch (err) {
