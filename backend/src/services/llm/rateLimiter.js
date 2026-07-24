@@ -47,18 +47,20 @@ function _readLimit(envName, defaultVal) {
 }
 
 const LIMITS = Object.freeze({
-  deepseek: _readLimit('DEEPSEEK_MAX_CONCURRENT', 8),
-  gemini:   _readLimit('GEMINI_MAX_CONCURRENT',   6),
-  grok:     _readLimit('XAI_MAX_CONCURRENT',      4),
+  deepseek:   _readLimit('DEEPSEEK_MAX_CONCURRENT', 8),
+  gemini:     _readLimit('GEMINI_MAX_CONCURRENT',   6),
+  grok:       _readLimit('XAI_MAX_CONCURRENT',      4),
+  perplexity: _readLimit('PERPLEXITY_MAX_CONCURRENT', 4),
 });
 
 const QUEUE_WARN_MS = _readLimit('LLM_QUEUE_WARN_MS', 5000);
 
 // Состояние per-provider: { active: number, waiters: Array<resolveFn> }
 const _state = {
-  deepseek: { active: 0, waiters: [] },
-  gemini:   { active: 0, waiters: [] },
-  grok:     { active: 0, waiters: [] },
+  deepseek:   { active: 0, waiters: [] },
+  gemini:     { active: 0, waiters: [] },
+  grok:       { active: 0, waiters: [] },
+  perplexity: { active: 0, waiters: [] },
 };
 
 /**

@@ -174,9 +174,15 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
   // Запускаем оба вызова параллельно — они используют разные промпты и не зависят друг от друга.
   // Плюс параллельный GIST M3 Gap Finder (gist_py :8003) по спарсенным текстам —
   // fail-open: если GIST недоступен, пайплайн продолжает без информационной дельты.
+  // Плюс Perplexity Real-Time Research (модель sonar-pro): собирает свежие факты,
+  // цифры, ставки, законы и цитаты экспертов из интернета в реальном времени —
+  // fail-open: без ключа/при ошибке возвращает null, пайплайн продолжает без актуалки.
   const { runGistGapFinder } = require('../gist/gistClient');
   const scrapedTexts = onlyCompetitors.map(c => c.content).filter(Boolean);
-  const [serpRealityResult, nicheLandscapeResult, gistSettled] = await Promise.all([
+
+  const perplexityContext = `Собери актуальные данные для темы: ${task.input_target_service}. Регион: ${task.input_region || 'Россия'}.`;
+
+  const [serpRealityResult, nicheLandscapeResult, gistSettled, perplexityResult] = await Promise.all([
     callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
       retries:   3,
       taskId,
@@ -207,7 +213,26 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
         log(`Stage 0 GIST Gap Finder недоступен: ${e.message} — продолжаем без дельты`, 'warn');
         return { status: 'rejected', reason: e };
       }),
+
+    callLLM('perplexity', fillPromptVars(SYSTEM_PROMPTS_EXT.perplexityResearcher, task), perplexityContext, {
+      retries: 2,
+      taskId,
+      stageName: 'stage0',
+      callLabel: 'Perplexity Real-Time Research',
+      temperature: 0.2,
+      log,
+      onTokens,
+    }).catch(e => { log(`Stage 0 Perplexity error: ${e.message}`, 'warn'); return null; }),
   ]);
+
+  if (perplexityResult) {
+    log(
+      `Stage 0 Perplexity: актуальных фактов ${(perplexityResult.current_stats||[]).length}, ` +
+      `цитат экспертов ${(perplexityResult.expert_quotes||[]).length}, ` +
+      `трендов ${(perplexityResult.latest_trends||[]).length}`,
+      'success'
+    );
+  }
 
   const informationDelta = gistSettled.status === 'fulfilled'
     ? gistSettled.value.information_delta
@@ -235,7 +260,15 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
     }).catch(() => null);
 
     if (!fallbackResult) throw new Error('Stage 0: все запросы вернули ошибки');
-    return { ...fallbackResult, information_delta: informationDelta, gist_top10_claims: gistTop10Claims };
+    return {
+      ...fallbackResult,
+      information_delta: informationDelta,
+      gist_top10_claims: gistTop10Claims,
+      realtime_facts:    perplexityResult?.current_stats          || [],
+      expert_quotes:     perplexityResult?.expert_quotes          || [],
+      latest_trends:     perplexityResult?.latest_trends          || [],
+      legal_updates:     perplexityResult?.legal_or_price_updates || [],
+    };
   }
 
   // Объединяем результаты
@@ -249,6 +282,12 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
     // GIST M3 Gap Finder (fail-open): дельта уходит в Stage 2 (§4-GIST)
     information_delta:    informationDelta,
     gist_top10_claims:    gistTop10Claims,
+    // Perplexity Real-Time Research (fail-open): актуальные данные текущего
+    // месяца уходят в Article Knowledge Base (§2b REAL-TIME DATA).
+    realtime_facts:       perplexityResult?.current_stats          || [],
+    expert_quotes:        perplexityResult?.expert_quotes          || [],
+    latest_trends:        perplexityResult?.latest_trends          || [],
+    legal_updates:        perplexityResult?.legal_or_price_updates || [],
   };
 
   // Сохраняем в tasks

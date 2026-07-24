@@ -3,6 +3,7 @@
 const { callDeepSeek, DEEPSEEK_DEFAULT_MAX_TOKENS } = require('./deepseek.adapter');
 const { callGemini }   = require('./gemini.adapter');
 const { callGrok }     = require('./grok.adapter');
+const { callPerplexity, PERPLEXITY_DEFAULT_MAX_TOKENS } = require('./perplexity.adapter');
 const { autoCloseJSON, extractBalancedJson } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
@@ -18,9 +19,10 @@ const { recordTrace } = require('./pipelineTrace');
 // адаптера (напр. DeepSeek 16000), поэтому «удваивать» надо от него, а не
 // от заниженной константы — иначе ретрай УМЕНЬШАЛ бы лимит и усугублял обрыв.
 const ADAPTER_DEFAULT_MAX_TOKENS = {
-  deepseek: DEEPSEEK_DEFAULT_MAX_TOKENS, // 16000 (env DEEPSEEK_MAX_TOKENS)
-  gemini:   16384,                       // gemini.adapter profile default
-  grok:     8192,                        // grok.adapter default
+  deepseek:   DEEPSEEK_DEFAULT_MAX_TOKENS, // 16000 (env DEEPSEEK_MAX_TOKENS)
+  gemini:     16384,                       // gemini.adapter profile default
+  grok:       8192,                        // grok.adapter default
+  perplexity: PERPLEXITY_DEFAULT_MAX_TOKENS, // 8000 (env PERPLEXITY_MAX_TOKENS)
 };
 
 // ────────────────────────────────────────────────────────────────────
@@ -365,10 +367,18 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     ? callGemini
     : adapter === 'grok'
       ? callGrok
-      : callDeepSeek;
+      : adapter === 'perplexity'
+        ? callPerplexity
+        : callDeepSeek;
   // Provider-class для метрик и budget guard'а: Grok идёт по той же
   // дорожке, что и Gemini (платный текстовый провайдер с per-task budget'ом).
-  const providerClass = adapter === 'deepseek' ? 'deepseek' : 'gemini-class';
+  // Perplexity — отдельный класс 'perplexity-class' (real-time research в
+  // Stage 0, не участвует в Gemini token-budget guard'е).
+  const providerClass = adapter === 'deepseek'
+    ? 'deepseek'
+    : adapter === 'perplexity'
+      ? 'perplexity-class'
+      : 'gemini-class';
   const startedAt = new Date();
   const promptSize = estimateTokens(system + prompt);
 

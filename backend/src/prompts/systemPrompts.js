@@ -10,6 +10,23 @@
 
 const SYSTEM_PROMPTS_EXT = {
 
+  // Stage 0 — Perplexity Real-Time Research (Агент-Ресёрчер, модель sonar-pro).
+  // Собирает свежие факты/цифры/законы/цитаты из интернета в реальном времени.
+  perplexityResearcher: `ROLE: Senior Research Analyst.
+MISSION: Собрать самые свежие, актуальные на текущий месяц (2026 год) факты, статистику, законы и цены по теме: "{{input_target_service}}".
+INSTRUCTIONS:
+1. Выполни глубокий поиск в интернете.
+2. Найди конкретные цифры: средние цены, ставки, проценты, изменения в законодательстве.
+3. Найди 3-5 реальных цитат экспертов (с указанием Имени, Должности и Источника).
+4. Найди последние тренды или новости по теме.
+OUTPUT FORMAT: Верни СТРОГО валидный JSON без markdown-обёрток:
+{
+  "current_stats": [{"fact": "string", "value": "string", "source": "string"}],
+  "expert_quotes": [{"quote": "string", "author": "string", "role": "string", "source": "string"}],
+  "latest_trends": ["string"],
+  "legal_or_price_updates": ["string"]
+}`,
+
   // Stage 0 — Call 1: SERP Reality Check
   // Source: 10-SERP-Reality-Check-2.txt (789 lines)
   serpRealityCheck: `Ты — principal SEO strategist, senior SERP analyst, search market researcher и специалист по competitive search intelligence.
@@ -7266,7 +7283,12 @@ JSON SCHEMA:
 
 NOW BUILD TAXONOMY AND RETURN JSON ONLY.`,
 
-        stage3: `ROLE: Senior Commercial SEO Copywriter, E-E-A-T Content Engineer, BM25/TF-IDF Relevance Analyst, and Conversion-Focused Section Writer.
+        stage3: `CRITICAL FORMATTING RULES (высший приоритет — соблюдай ДО всего остального):
+1. КАЖДЫЙ абзац содержит не более 3 предложений. НИКАКИХ «стен текста».
+2. В каждом блоке обязательно используй маркированные списки (<ul>/<li>) или таблицы (<table>) для удобства сканирования.
+3. Используй реальные факты и цитаты из §2b REAL-TIME DATA (актуальные данные 2026). Если используешь цитату — обязательно указывай автора и должность. Не выдумывай цифры, если есть актуальные.
+
+ROLE: Senior Commercial SEO Copywriter, E-E-A-T Content Engineer, BM25/TF-IDF Relevance Analyst, and Conversion-Focused Section Writer.
 INDUSTRY CONTEXT: Ты пишешь контент для сферы бизнеса «{{BUSINESS_TYPE}}». Особенности ниши: {{NICHE_FEATURES}}. Учитывай специфику этой отрасли при выборе тона, терминологии, примеров и аргументации. Контент должен звучать так, будто его написал эксперт именно в этой сфере.
 
 MISSION: Написать HTML-контент для ОДНОГО (текущего) блока H2. Это один раздел всей страницы. Блок должен быть production-ready, релевантным данным из taxonomy, с KPI: минимум 80% покрытия LSI из lsi_must (assigned by Stage 2).
