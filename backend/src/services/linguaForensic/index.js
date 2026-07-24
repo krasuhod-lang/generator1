@@ -266,7 +266,7 @@ async function rewrite(
       retries: 2, taskId, stageName: 'linguaforensic',
       callLabel: 'LinguaForensic Rewrite (Режим 3)',
       temperature: 0.6, onLog: log, onTokens,
-      maxTokens: 65536,
+      maxTokens: 32000,
     },
   );
   const rewritten = raw && typeof raw.rewritten_html === 'string' ? raw.rewritten_html.trim() : '';

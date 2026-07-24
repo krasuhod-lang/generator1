@@ -1324,14 +1324,14 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
     'и важные термины ТОП-10, сигналы топовых конкурентов). По этим данным восстанови реальный голос ' +
     'аудитории и зафиксируй конкретные факты, цифры и доказательства, которые используют конкуренты в ТОПе. ' +
     'Возвращай СТРОГО JSON-объект без markdown-обёрток с пятью строковыми ключами: ' +
-    'target_audience, niche_features, brand_facts, project_limits, priority_pages.\n\n' +
+    'target_audience, niche_features, brand_facts, project_constraints, priority_page_types.\n\n' +
     '— target_audience: 2–6 предложений. Портрет ЦА: сегменты, демография, JTBD, ключевые боли, ' +
     'эмоциональные триггеры, как они сами называют свою проблему и желаемый результат.\n' +
     '— niche_features: 2–6 предложений. Особенности ниши: тип бизнеса, YMYL/не-YMYL, сезонность, ' +
     'локальная привязка, уровень конкуренции, регуляторные требования, специфика buyer journey.\n' +
-    '— project_limits: 1–3 предложения. Ограничения проекта: что нельзя писать, tone of voice, ' +
+    '— project_constraints: 1–3 предложения. Ограничения проекта: что нельзя писать, tone of voice, ' +
     'юридические и регуляторные ограничения ниши, запретные темы и обещания.\n' +
-    '— priority_pages: 1–2 предложения. Приоритетные типы страниц (например, коммерческие лендинги, ' +
+    '— priority_page_types: 1–2 предложения. Приоритетные типы страниц (например, коммерческие лендинги, ' +
     'информационные статьи, карточки товаров, категории), которые дадут максимум трафика/конверсии в этой нише.\n' +
     '— brand_facts: РАЗВЁРНУТЫЙ структурированный текст-дайджест (10–25 предложений, можно с короткими ' +
     'подзаголовками вида «Боли:», «Возражения:», «Критерии выбора:», «Цифры/доказательства из ТОПа:», ' +
@@ -1377,10 +1377,10 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
     `Сначала мысленно пройди по фреймворку community voice (problem language → outcome language → ` +
     `objections → decision criteria → trust signals → recurring questions → myths → segments → journey ` +
     `stages → typical proof points конкурентов в ТОПе). Затем верни ТОЛЬКО JSON по схеме ` +
-    `{"target_audience":"…","niche_features":"…","brand_facts":"…","project_limits":"…","priority_pages":"…"} без каких-либо обёрток. ` +
+    `{"target_audience":"…","niche_features":"…","brand_facts":"…","project_constraints":"…","priority_page_types":"…"} без каких-либо обёрток. ` +
     `Поле brand_facts — самое объёмное и структурированное (с подзаголовками внутри строки), ` +
     `target_audience и niche_features — компактные 2–6 предложений, ` +
-    `project_limits — 1–3 предложения, priority_pages — 1–2 предложения.`;
+    `project_constraints — 1–3 предложения, priority_page_types — 1–2 предложения.`;
 
   try {
     const ds = await callDeepSeek(systemMsg, userPrompt, {
@@ -1401,8 +1401,8 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
       target_audience: pick('target_audience'),
       niche_features:  pick('niche_features'),
       brand_facts:     pick('brand_facts'),
-      project_limits:  pick('project_limits'),
-      priority_pages:  pick('priority_pages'),
+      project_constraints:  pick('project_constraints') || pick('project_limits'),
+      priority_page_types:  pick('priority_page_types') || pick('priority_pages'),
     };
   } catch (err) {
     // fail-soft: пробрасываем как { _error } — вызывающий решит, как показать.
@@ -1496,8 +1496,8 @@ async function getRelevancePrefill(req, res, next) {
         input_target_audience: llmRaw.target_audience || '',
         input_niche_features:  llmRaw.niche_features  || '',
         input_brand_facts:     llmRaw.brand_facts     || '',
-        input_project_limits:  llmRaw.project_limits  || '',
-        input_page_priorities: llmRaw.priority_pages  || '',
+        input_project_limits:  llmRaw.project_constraints || '',
+        input_page_priorities: llmRaw.priority_page_types || '',
       };
       llmUsed = !!(
         llm.input_target_audience ||

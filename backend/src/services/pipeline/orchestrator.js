@@ -1084,6 +1084,11 @@ async function runPipeline(task, ctx) {
         informationDelta: Array.isArray(stage0Result?.information_delta)
           ? stage0Result.information_delta
           : null,
+        authorship: {
+          byline: task.input_author_name || 'Редакция',
+          reviewer: null,
+          sources: [],
+        },
       },
     });
     qualityGateVerdict = {
