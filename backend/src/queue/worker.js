@@ -2,10 +2,17 @@
 
 const { Worker } = require('bullmq');
 const { connection, JOB_RETENTION } = require('./queue');
+const { generationQueue } = require('./queue');
 const db             = require('../config/db');
 const { publish }    = require('../services/sse/sseManager');
 
 const { runPipeline, PipelinePausedError } = require('../services/pipeline/orchestrator');
+
+// Максимум автоматических возобновлений задачи после ошибки пайплайна.
+// Задача НЕ падает сразу в "failed": воркер сам переставляет её на возобновление
+// с последнего checkpoint (без потери прогресса и без ручной перенастройки),
+// и только исчерпав попытки — помечает "failed".
+const PIPELINE_AUTO_RETRIES = Math.max(0, parseInt(process.env.PIPELINE_AUTO_RETRIES, 10) || 3);
 
 // -----------------------------------------------------------------
 // Вспомогательные функции
@@ -135,6 +142,58 @@ const worker = new Worker(
       // ── 5b. Обработка ошибки пайплайна ───────────────────────────
       const errMsg = pipelineErr.message || String(pipelineErr);
 
+      // ── 5b-i. Авто-возобновление ─────────────────────────────────
+      // Не роняем задачу сразу: пытаемся автоматически продолжить с последнего
+      // checkpoint (orchestrator сохраняет его перед каждым блоком). Так задача
+      // не требует ручной перенастройки и перезапуска после разовых сбоев
+      // (таймауты LLM, сетевые ошибки и т.п.).
+      const autoRetries = job.data.autoRetries || 0;
+      if (autoRetries < PIPELINE_AUTO_RETRIES) {
+        const attempt = autoRetries + 1;
+        try {
+          // Свежий checkpoint (может быть обновлён во время выполнения)
+          const fresh = await loadTask(taskId);
+          const checkpoint = fresh.pipeline_checkpoint || null;
+
+          // Экспоненциальный backoff с потолком 60с
+          const delay = Math.min(60000, 5000 * Math.pow(2, autoRetries));
+
+          const retryJob = await generationQueue.add(
+            'generate',
+            { taskId, resumeFrom: checkpoint, autoRetries: attempt },
+            { jobId: `${taskId}-autoretry-${Date.now()}`, attempts: 1, delay }
+          );
+
+          await updateTask(taskId, {
+            status:        'queued',
+            bull_job_id:   String(retryJob.id),
+            error_message: null,
+          });
+
+          log(
+            taskId,
+            `Ошибка пайплайна: ${errMsg}. Авто-возобновление ${attempt}/${PIPELINE_AUTO_RETRIES} через ${Math.round(delay / 1000)}с...`,
+            'warn'
+          );
+
+          publish(taskId, {
+            type:    'retrying',
+            attempt,
+            maxAttempts: PIPELINE_AUTO_RETRIES,
+            delay,
+            msg:     errMsg,
+          });
+
+          // Не пробрасываем — эта job "обработана" (перепоставлена в очередь),
+          // BullMQ не должен считать её failed.
+          return;
+        } catch (retryErr) {
+          // Если не удалось поставить авто-возобновление — падаем в failed ниже.
+          console.error(`[Worker][${taskId.substring(0, 8)}] Не удалось запланировать авто-возобновление:`, retryErr.message);
+        }
+      }
+
+      // ── 5b-ii. Финальная ошибка (авто-попытки исчерпаны) ─────────
       await updateTask(taskId, {
         status:        'failed',
         error_message: errMsg.substring(0, 1000),

@@ -822,6 +822,12 @@ async function runPipeline(task, ctx) {
     resumeFromBlock: blockIndex,
   });
 
+  // Сохраняем checkpoint сразу после Stage 2: даже если генерация упадёт на
+  // самом первом блоке, дорогие Stage 0/1/2 (конкурентный анализ, таксономия,
+  // LSI-роутинг) не потеряются и авто-возобновление стартует с блока resumeFromBlock,
+  // а не с нуля.
+  await savePipelineCheckpoint(taskId, buildCheckpoint(resumeFromBlock));
+
   for (let i = 0; i < taxonomy.length; i++) {
     const block = taxonomy[i];
 
@@ -846,6 +852,16 @@ async function runPipeline(task, ctx) {
       await savePipelineCheckpoint(taskId, checkpoint);
       throw new PipelinePausedError(checkpoint);
     }
+
+    // ── Checkpoint перед генерацией блока ──
+    // Фиксируем прогресс ДО тяжёлой генерации/аудита блока i. Если пайплайн
+    // упадёт с ошибкой на этом блоке, авто-возобновление в воркере продолжит
+    // ровно с блока i (блоки 0..i-1 подтянутся из БД), а не с самого начала —
+    // пользователю не нужно перенастраивать и перезапускать задачу вручную.
+    // Math.max — не даём индексу возобновления откатиться назад, если блок
+    // ниже resumeFromBlock отсутствовал в БД и перегенерируется.
+    await savePipelineCheckpoint(taskId, buildCheckpoint(Math.max(i, resumeFromBlock)));
+
     const blockTargetChars = Math.round(totalTarget * (blockWeights[i] / weightSum)) || 1500;
     const blockMinChars    = Math.round(minChars    * (blockWeights[i] / weightSum)) || 600;
     const blockMaxChars    = Math.round(maxChars    * (blockWeights[i] / weightSum)) || 2500;

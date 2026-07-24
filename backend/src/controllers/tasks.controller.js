@@ -422,14 +422,15 @@ async function startTask(req, res, next) {
 
     // Добавляем в BullMQ. Используем уникальный jobId, чтобы повторный старт после fail
     // не ломался из-за оставшегося старого job-а с тем же task.id.
+    // attempts: 1 — внутренний ретрай BullMQ отключён; авто-возобновление после
+    // ошибки выполняет воркер с сохранением прогресса (checkpoint).
     const jobId = `${task.id}-${Date.now()}`;
     const job = await generationQueue.add(
       'generate',
       { taskId: task.id },
       {
         jobId,
-        attempts: 2,
-        backoff:  { type: 'exponential', delay: 5000 },
+        attempts: 1,
       }
     );
 
