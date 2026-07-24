@@ -132,8 +132,21 @@ function extractBaseSeed({ intents, outline, max = 60 }) {
  * @param {object} args.callContext    — { taskId, stageName, onLog, onTokens }
  * @returns {Promise<object>}          — { lsi_set, base_seed, corrective_used }
  */
-async function synthesizeLsiSet({ adapter = 'deepseek', task, intents, outline, callContext = {} }) {
-  const baseSeed = extractBaseSeed({ intents, outline, max: 50 });
+async function synthesizeLsiSet({ adapter = 'deepseek', task, intents, outline, callContext = {}, relevanceSeed = [] }) {
+  const derivedSeed = extractBaseSeed({ intents, outline, max: 50 });
+  // Пункт 2 ТЗ: подмешиваем термины релевантности (важные LSI + n-граммы топа)
+  // в начало seed'а, чтобы итоговый LSI-набор гарантированно содержал реальные
+  // термины выдачи. Дедуп по нормализованной поверхности.
+  const relSeed = Array.isArray(relevanceSeed)
+    ? relevanceSeed.map((t) => String(t || '').trim().toLowerCase()).filter((t) => t.length >= 3 && t.length <= 60)
+    : [];
+  const seen = new Set();
+  const baseSeed = [];
+  for (const t of [...relSeed, ...derivedSeed]) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    baseSeed.push(t);
+  }
   const system = loadInfoArticlePrompt('stage2bLsi');
 
   const buildUser = (priorMissed = []) => {

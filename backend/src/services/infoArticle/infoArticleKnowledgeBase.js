@@ -304,6 +304,11 @@ function buildInfoArticleKnowledgeBase({
   // язык, вопросы, приоритетные темы). Опциональный input: если null, §10 не
   // рендерится. Источник — services/redditMapper/masterJson.buildResearchDigest.
   audienceResearch = null,
+  // 2026-07 (пункт 1 ТЗ): Perplexity Real-Time Research (Агент-Ресёрчер).
+  // Свежие факты/цифры/законы/цитаты текущего месяца. Опциональный input:
+  // если null / пусто, §2b не рендерится. Источник —
+  // services/llm/realtimeResearch.runRealtimeResearch.
+  realtimeResearch = null,
 } = {}) {
   if (!task) return '';
   const header = [
@@ -381,9 +386,21 @@ function buildInfoArticleKnowledgeBase({
     } catch (_) { /* graceful: модуль не подключён — без §10 */ }
   }
 
+  // §2b — REAL-TIME DATA (Perplexity sonar-pro). Свежие факты/цитаты/тренды/
+  // законы текущего месяца. Опционально, graceful.
+  let sectionRealtime = '';
+  if (realtimeResearch) {
+    try {
+      const { renderRealtimeDataSection } = require('../llm/realtimeResearch');
+      const md = renderRealtimeDataSection(realtimeResearch);
+      if (md && md.trim()) sectionRealtime = md;
+    } catch (_) { /* graceful — без §2b */ }
+  }
+
   const parts = [
     sectionTask(task),
     sectionStrategy(strategy),
+    sectionRealtime,
     sectionAudience(audience),
     sectionIntents(intents),
     sectionWhitespace(whitespace),
@@ -416,29 +433,29 @@ function renderRelevanceContextSection(ctx) {
     if (v.bm25_score != null) parts.push(`bm25 ${v.bm25_score}`);
     return parts.length ? `, ${parts.join(', ')}` : '';
   };
-  // Важные LSI (top-30, > 51% документов топа)
+  // Важные LSI (все собранные важные леммы из артефакта, > 51% топа)
   const imp = Array.isArray(ctx.important_lsi) ? ctx.important_lsi : [];
   if (imp.length) {
     out.push('### Обязательные LSI-леммы (≥51% документов топа, с TF-IDF/BM25-весами)');
-    out.push(imp.slice(0, 30).map(v => `- **${v.lemma}** (${v.df_share_pct}% топа, медиана ${v.median_count}${tfW(v)})`).join('\n'));
+    out.push(imp.slice(0, 50).map(v => `- **${v.lemma}** (${v.df_share_pct}% топа, медиана ${v.median_count}${tfW(v)})`).join('\n'));
   }
-  // Дополнительные LSI (top-20, 20–50%)
+  // Дополнительные LSI (20–50%)
   const add = Array.isArray(ctx.additional_lsi) ? ctx.additional_lsi : [];
   if (add.length) {
     out.push('### Дополнительные LSI-леммы (20–50% документов топа)');
-    out.push(add.slice(0, 20).map(v => `- ${v.lemma} (${v.df_share_pct}%${tfW(v)})`).join('\n'));
+    out.push(add.slice(0, 30).map(v => `- ${v.lemma} (${v.df_share_pct}%${tfW(v)})`).join('\n'));
   }
-  // Высокочастотные n-граммы
+  // Высокочастотные n-граммы (все собранные — df=число сайтов топа)
   const ngrams = Array.isArray(ctx.top_ngrams) ? ctx.top_ngrams : [];
   if (ngrams.length) {
     out.push('### Высокочастотные фразы топа (готовые long-tail для H2/H3)');
-    out.push(ngrams.slice(0, 25).map(n => `- "${n.phrase}" — df=${n.df} (${n.df_share_pct}%)`).join('\n'));
+    out.push(ngrams.slice(0, 40).map(n => `- "${n.phrase}" — df=${n.df} (${n.df_share_pct}%)`).join('\n'));
   }
   // Заголовки топа (общие H2/H3) — основа скелета статьи
   const heads = Array.isArray(ctx.shared_headings) ? ctx.shared_headings : [];
   if (heads.length) {
     out.push('### Общие заголовки конкурентов (что обязательно раскрыть)');
-    out.push(heads.slice(0, 25).map(h => `- ${h.sample || h.text} _(на ${h.df} сайтах, ${h.df_share_pct}%)_`).join('\n'));
+    out.push(heads.slice(0, 40).map(h => `- ${h.sample || h.text} _(на ${h.df} сайтах, ${h.df_share_pct}%)_`).join('\n'));
   }
   // Микроразметка — готовый блок «что внедрить»
   if (ctx.schema_recommendation_markdown && ctx.schema_recommendation_markdown.trim()) {
@@ -472,7 +489,7 @@ function renderRelevanceContextSection(ctx) {
   const ent = Array.isArray(ctx.mandatory_entities) ? ctx.mandatory_entities : [];
   if (ent.length) {
     out.push('### Обязательные именованные сущности (NER, в ≥50% топа)');
-    out.push(ent.slice(0, 20).map(e => `- ${e.text || e}${e.df_share_pct ? ' (' + e.df_share_pct + '%)' : ''}`).join('\n'));
+    out.push(ent.slice(0, 25).map(e => `- ${e.text || e}${e.df_share_pct ? ' (' + e.df_share_pct + '%)' : ''}`).join('\n'));
   }
   return out.join('\n\n');
 }

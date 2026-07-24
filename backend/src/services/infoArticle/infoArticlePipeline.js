@@ -48,6 +48,7 @@ const {
   pointerOrJson,
 } = require('./infoArticleKnowledgeBase');
 const { synthesizeLsiSet, measureLsiCoverageInHtml, measureLsiCoverageSemantic } = require('./lsiPipeline');
+const { runRealtimeResearch, hasRealtimeData } = require('../llm/realtimeResearch');
 const { resolveAudienceResearch } = require('./audienceResearch.service');
 const { checkLsiOverdose } = require('./lsiDensity.service');
 const { planSemanticLinks, auditHtmlAgainstPlan } = require('./semanticLinkPlanner');
@@ -187,6 +188,15 @@ const GIST_COVERAGE_MIN = (() => {
 // привязана к relevance_report). Только soft-warning, никогда не валит.
 const INFO_ARTICLE_INTENT_VERIFY_ENABLED =
   String(process.env.INFO_ARTICLE_INTENT_VERIFY_ENABLED || 'true').toLowerCase() === 'true';
+
+// ── Perplexity Real-Time Research (Агент-Ресёрчер) ──────────────────
+// Тот же алгоритм, что зашит в основном SEO-пайплайне (services/pipeline/
+// stage0.js): Perplexity sonar-pro собирает свежие факты/цифры/законы и
+// реальные цитаты экспортов текущего месяца. Результат уходит в §2b
+// REAL-TIME DATA IAKB. Fail-open: без PERPLEXITY_API_KEY / при ошибке —
+// пропускается. Kill-switch: INFO_ARTICLE_REALTIME_RESEARCH_ENABLED=false.
+const INFO_ARTICLE_REALTIME_RESEARCH_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.INFO_ARTICLE_REALTIME_RESEARCH_ENABLED || '1').toLowerCase());
 
 // ── Phase 2 / Б2: Семантическая LSI-метрика ─────────────────────────
 // Гибрид substring+stem-bigram cosine: уменьшает ложные corrective-retry
@@ -335,13 +345,14 @@ async function runAudience(task, strategy, ctx) {
   );
 }
 
-async function runIntents(task, strategy, audience, ctx) {
+async function runIntents(task, strategy, audience, ctx, relevanceBrief = '') {
   const user = [
     `[INPUTS]`,
     `topic: ${task.topic}`,
     `region: ${task.region || '[не задано]'}`,
     `strategy_digest: ${JSON.stringify(strategy).slice(0, 4000)}`,
     `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
+    ...(relevanceBrief ? ['', relevanceBrief] : []),
   ].join('\n');
   return callLLM(
     'deepseek',
@@ -351,7 +362,7 @@ async function runIntents(task, strategy, audience, ctx) {
   );
 }
 
-async function runWhitespace(task, strategy, audience, ctx) {
+async function runWhitespace(task, strategy, audience, ctx, relevanceBrief = '') {
   const user = [
     `[INPUTS]`,
     `topic: ${task.topic}`,
@@ -359,6 +370,7 @@ async function runWhitespace(task, strategy, audience, ctx) {
     `brand_facts: ${task.brand_facts || '[не задано]'}`,
     `strategy_digest: ${JSON.stringify(strategy).slice(0, 4000)}`,
     `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
+    ...(relevanceBrief ? ['', relevanceBrief] : []),
   ].join('\n');
   return callLLM(
     'deepseek',
@@ -368,7 +380,7 @@ async function runWhitespace(task, strategy, audience, ctx) {
   );
 }
 
-async function runOutline(task, audience, intents, whitespace, ctx) {
+async function runOutline(task, audience, intents, whitespace, ctx, relevanceBrief = '') {
   const hints = (whitespace && whitespace.article_hierarchy_hints) || {};
   const { buildGistDeltaBrief } = require('../gist/gistClient');
   const gistBrief = buildGistDeltaBrief(whitespace && whitespace.information_delta);
@@ -380,6 +392,7 @@ async function runOutline(task, audience, intents, whitespace, ctx) {
     `stage1_intents: ${JSON.stringify(intents).slice(0, 8000)}`,
     `whitespace_hints: ${JSON.stringify(hints).slice(0, 4000)}`,
     ...(gistBrief ? ['', gistBrief] : []),
+    ...(relevanceBrief ? ['', relevanceBrief] : []),
   ].join('\n');
   return callLLM(
     'deepseek',
@@ -1345,6 +1358,43 @@ async function processInfoArticleTask(taskId) {
 
     const ctx = { ...buildCallCtx(taskId, 'info_article'), taskId };
 
+    // Пункт 2 ТЗ: единый бриф релевантности для DeepSeek-стадий генерации.
+    // Строится один раз из relevanceArtifact и связывает данные топа (LSI,
+    // n-граммы, заголовки, сущности, VoC) со стадиями intents/white-space/
+    // outline/LSI — не только с финальным writer'ом (через IAKB). Без
+    // relevance-отчёта brief='' и стадии работают как раньше.
+    let relevanceStageBrief = '';
+    let relevanceLsiSeed = [];
+    if (relevanceArtifact) {
+      try {
+        const { buildRelevanceStageBrief, relevanceSeedTerms } = require('../relevance/relevanceArtifacts');
+        relevanceStageBrief = buildRelevanceStageBrief(relevanceArtifact);
+        relevanceLsiSeed = relevanceSeedTerms(relevanceArtifact);
+        if (relevanceStageBrief) {
+          await appendLog(
+            taskId,
+            `🧩 Relevance-бриф подключён ко всем стадиям (LSI-seed=${relevanceLsiSeed.length} терминов)`,
+            'info',
+          );
+        }
+      } catch (briefErr) {
+        await appendLog(taskId, `⚠ Relevance-бриф не собран (${briefErr.message}) — стадии без него`, 'warn');
+        relevanceStageBrief = '';
+        relevanceLsiSeed = [];
+      }
+    }
+
+    // Пункт 1 ТЗ: Perplexity Real-Time Research (Агент-Ресёрчер). Стартуем
+    // рано и параллельно DeepSeek-стадиям — свежие факты/цифры/законы/цитаты
+    // текущего месяца уйдут в §2b REAL-TIME DATA IAKB. Fail-open.
+    const realtimePromise = INFO_ARTICLE_REALTIME_RESEARCH_ENABLED
+      ? runRealtimeResearch({
+          topic: task.topic,
+          region: task.region,
+          callOptions: buildCallCtx(taskId, 'realtime_research'),
+        }).catch(() => null)
+      : Promise.resolve(null);
+
     // 0b. Анализ сайта-площадки публикации (стилистика и формат написания).
     // Опционально: если пользователь указал target_site_url — парсим контент
     // площадки и строим style-profile, который уйдёт в IAKB §9c. Graceful:
@@ -1427,7 +1477,7 @@ async function processInfoArticleTask(taskId) {
 
     // 3. Stage 1
     await setStage(taskId, 'stage1_intents', 20);
-    const intents = await runIntents(task, strategy, audience, ctx);
+    const intents = await runIntents(task, strategy, audience, ctx, relevanceStageBrief);
     await saveColumn(taskId, 'stage1_intents', intents);
 
     // 4. Stage 1B: белые пятна (DeepSeek) + GIST M3 Gap Finder (gist_py :8003)
@@ -1452,7 +1502,7 @@ async function processInfoArticleTask(taskId) {
       target_audience: typeof task.audience === 'string' ? task.audience : '',
     }));
     const [wsSettled, gistSettled, googleSerpSettled] = await Promise.allSettled([
-      runWhitespace(task, strategy, audience, ctx),
+      runWhitespace(task, strategy, audience, ctx, relevanceStageBrief),
       gistPromise,
       googleSerpPromise,
     ]);
@@ -1505,13 +1555,13 @@ async function processInfoArticleTask(taskId) {
 
     // 5. Stage 2 outline
     await setStage(taskId, 'stage2_outline', 36);
-    const outline = await runOutline(task, audience, intents, whitespace, ctx);
+    const outline = await runOutline(task, audience, intents, whitespace, ctx, relevanceStageBrief);
     await saveColumn(taskId, 'stage2_outline', outline);
 
     // 6. Stage 2B LSI synth
     await setStage(taskId, 'stage2b_lsi', 44);
     const { lsi_set: lsiSet, base_seed: lsiBaseSeed, corrective_used: lsiCorrective } =
-      await synthesizeLsiSet({ task, intents, outline, callContext: ctx });
+      await synthesizeLsiSet({ task, intents, outline, callContext: ctx, relevanceSeed: relevanceLsiSeed });
     await saveColumn(taskId, 'lsi_set', lsiSet);
     await appendLog(
       taskId,
@@ -1591,12 +1641,35 @@ async function processInfoArticleTask(taskId) {
     }
 
     // 8. Build IAKB + optional Gemini cachedContents
+    // Пункт 1 ТЗ: дожидаемся Perplexity Real-Time Research (стартовал рано,
+    // параллельно стадиям) и вливаем в §2b REAL-TIME DATA IAKB. Fail-open.
+    let realtimeResearch = null;
+    try {
+      realtimeResearch = await realtimePromise;
+    } catch (_) {
+      realtimeResearch = null;
+    }
+    if (realtimeResearch && hasRealtimeData(realtimeResearch)) {
+      await saveColumn(taskId, 'realtime_research', realtimeResearch);
+      task.__realtimeResearch = realtimeResearch;
+      await appendLog(
+        taskId,
+        `🌐 Perplexity Real-Time: фактов ${realtimeResearch.realtime_facts.length}, ` +
+        `цитат ${realtimeResearch.expert_quotes.length}, трендов ${realtimeResearch.latest_trends.length}, ` +
+        `законы/цены ${realtimeResearch.legal_updates.length} → §2b IAKB`,
+        'ok',
+      );
+    } else if (INFO_ARTICLE_REALTIME_RESEARCH_ENABLED) {
+      await appendLog(taskId, `🌐 Perplexity Real-Time: данных нет (нет ключа / пусто) — §2b пропущена`, 'info');
+    }
+
     task.__iakb = buildInfoArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
       relevanceSignals,
       relevanceContext,
       targetSiteStyle,
       audienceResearch: audienceResearchResult.digest,
+      realtimeResearch,
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
 

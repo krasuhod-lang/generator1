@@ -308,6 +308,9 @@ function buildLinkArticleKnowledgeBase({
   structure,
   competitiveBrief,
   gistDelta,
+  // 2026-07 (пункт 1 ТЗ): Perplexity Real-Time Research (Агент-Ресёрчер).
+  // Свежие факты/цифры/законы/цитаты текущего месяца → §2b. Опционально.
+  realtimeResearch = null,
 } = {}) {
   if (!task) return '';
   const header = [
@@ -322,9 +325,19 @@ function buildLinkArticleKnowledgeBase({
     '',
   ].join('\n');
 
+  let sectionRealtime = '';
+  if (realtimeResearch) {
+    try {
+      const { renderRealtimeDataSection } = require('../llm/realtimeResearch');
+      const md = renderRealtimeDataSection(realtimeResearch);
+      if (md && md.trim()) sectionRealtime = md;
+    } catch (_) { /* graceful — без §2b */ }
+  }
+
   const parts = [
     sectionTask(task),
     sectionStrategy(strategy),
+    sectionRealtime,
     sectionAudience(audience),
     sectionIntents(intents),
     sectionWhitespace(whitespace),
