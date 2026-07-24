@@ -316,6 +316,9 @@ async function persistStageCall({
  * @returns {Promise<object>}   — распарсенный JSON-ответ
  */
 async function callLLM(adapter, system, prompt, opts = {}) {
+  // maxTokens объявлен через let, т.к. при автодетекции обрезанного JSON
+  // мы удваиваем лимит и переприсваиваем значение внутри цикла attempt.
+  let { maxTokens } = opts;
   const {
     retries   = 6,
     taskId    = null,
@@ -325,7 +328,6 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     log: optLog = null,  // stages передают { log } — принимаем оба варианта
     onTokens   = null,   // callback(model, tokensIn, tokensOut, costUsd) — для SSE
     temperature,
-    maxTokens,
     timeoutMs,
     logprobs = false,
     cachedContent = null,
