@@ -3266,6 +3266,17 @@ async function ensureSchema() {
       console.warn('[ensureSchema] outreach prospect messengers (mig 124) skipped:', e.message);
     }
 
+    // Миграция 125: Perplexity Real-Time Research для блог- и ссылочных статей.
+    // Колонка realtime_research хранит нормализованный результат Агента-Ресёрчера
+    // (Perplexity sonar-pro) → §2b REAL-TIME DATA в IAKB/LAKB. Nullable +
+    // IF NOT EXISTS. См. migrations/125_realtime_research.sql.
+    try {
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS realtime_research JSONB`);
+      await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS realtime_research JSONB`);
+    } catch (e) {
+      console.warn('[ensureSchema] realtime_research columns (mig 125) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);

@@ -6,6 +6,8 @@ const assert = require('assert');
 const {
   fromReportRow,
   renderForPromptBrief,
+  buildRelevanceStageBrief,
+  relevanceSeedTerms,
   _splitHeadingsByLevel,
   _digestSignals,
 } = require('../src/services/relevance/relevanceArtifacts');
@@ -126,6 +128,43 @@ t('renderForPromptBrief: содержит блоки и маркеры', () => {
 
 t('renderForPromptBrief: null/empty → пустая строка', () => {
   assert.strictEqual(renderForPromptBrief(null), '');
+});
+
+t('buildRelevanceStageBrief: содержит все блоки данных релевантности', () => {
+  const art = fromReportRow({
+    id: 'r5',
+    report: {
+      vocabulary: [
+        { lemma: 'crm', status: 'important', df_share_pct: 80, median_count: 5 },
+        { lemma: 'воронка', status: 'additional', df_share_pct: 30 },
+      ],
+      ngrams: [{ phrase: 'внедрение crm', df: 8, df_share_pct: 70 }],
+      headings_intersection: [{ sample: 'Что такое CRM', df: 5, df_share_pct: 50, levels: ['h2'] }],
+    },
+  });
+  const s = buildRelevanceStageBrief(art);
+  assert.ok(s.startsWith('[RELEVANCE_STAGE_BRIEF]'));
+  assert.ok(s.endsWith('[/RELEVANCE_STAGE_BRIEF]'));
+  assert.ok(s.includes('crm'));
+  assert.ok(s.includes('медиана 5'));       // важная LSI с частотностью
+  assert.ok(s.includes('воронка'));          // дополнительная LSI
+  assert.ok(s.includes('внедрение crm'));    // n-грамма
+  assert.ok(s.includes('df=8'));             // число сайтов для n-граммы
+  assert.ok(s.includes('Что такое CRM'));    // общий заголовок топа
+});
+
+t('buildRelevanceStageBrief: null → пустая строка', () => {
+  assert.strictEqual(buildRelevanceStageBrief(null), '');
+});
+
+t('relevanceSeedTerms: важные LSI + n-граммы, дедуп и порядок', () => {
+  const art = {
+    important_lsi: [{ lemma: 'crm' }, { lemma: 'воронка' }],
+    top_ngrams: [{ phrase: 'внедрение crm' }, { phrase: 'crm' }],
+  };
+  const terms = relevanceSeedTerms(art);
+  assert.deepStrictEqual(terms, ['crm', 'воронка', 'внедрение crm']); // 'crm' не дублируется
+  assert.deepStrictEqual(relevanceSeedTerms(null), []);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

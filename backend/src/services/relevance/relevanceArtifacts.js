@@ -187,10 +187,144 @@ function renderForPromptBrief(art, opts = {}) {
   return out.join('\n');
 }
 
+/**
+ * buildRelevanceStageBrief — развёрнутый бриф релевантности для DeepSeek-стадий
+ * генерации блог-статьи (intents / white-space / outline).
+ *
+ * В отличие от renderForPromptBrief (короткий бриф для writer'а), этот бриф
+ * передаёт МАКСИМУМ собранных данных релевантности — важные и дополнительные
+ * LSI c частотностью, n-граммы с числом сайтов (df), общие H2/H3 топа, сущности
+ * (NER) и голос аудитории — чтобы структура и семантика статьи строились из
+ * реальных данных топа, а не только у финального writer'а. Бизнес-требование:
+ * «все данные по релевантности передавались и связывались со всеми этапами
+ * генерации».
+ *
+ * @param {object|null} art — артефакт из loadArtifact/fromReportRow.
+ * @param {object} [opts]
+ * @returns {string} — многострочный [RELEVANCE_STAGE_BRIEF] или ''.
+ */
+function buildRelevanceStageBrief(art, opts = {}) {
+  if (!art) return '';
+  const impLimit  = Number(opts.lsiLimit)      || MAX_IMPORTANT_LSI;
+  const addLimit  = Number(opts.additionalLsiLimit) || MAX_ADDITIONAL_LSI;
+  const ngLimit   = Number(opts.ngramsLimit)   || MAX_NGRAMS;
+  const headLimit = Number(opts.headingsLimit) || MAX_HEADINGS;
+  const entLimit  = Number(opts.entitiesLimit) || MAX_ENTITIES;
+
+  const out = ['[RELEVANCE_STAGE_BRIEF]',
+    'Данные релевантности из анализа топа выдачи. Используй их как жёсткие',
+    'ориентиры: раскрой обязательные LSI/n-граммы, закрой общие подтемы топа.'];
+
+  const imp = Array.isArray(art.important_lsi) ? art.important_lsi : [];
+  if (imp.length) {
+    out.push('', 'Важные LSI (обязательные, ≥51% топа) [лемма | % топа | медиана вхождений]:');
+    out.push(imp.slice(0, impLimit).map((v) => {
+      const pct = v.df_share_pct != null ? `${v.df_share_pct}%` : '?';
+      const med = v.median_count != null ? `, медиана ${v.median_count}` : '';
+      return `- ${v.lemma} (${pct}${med})`;
+    }).join('\n'));
+  }
+
+  const add = Array.isArray(art.additional_lsi) ? art.additional_lsi : [];
+  if (add.length) {
+    out.push('', 'Дополнительные LSI (желательные):');
+    out.push(add.slice(0, addLimit).map((v) => {
+      const pct = v.df_share_pct != null ? ` (${v.df_share_pct}%)` : '';
+      return `- ${v.lemma}${pct}`;
+    }).join('\n'));
+  }
+
+  const ngrams = Array.isArray(art.top_ngrams) ? art.top_ngrams : [];
+  if (ngrams.length) {
+    out.push('', 'N-граммы топа [фраза | df=число сайтов | % топа]:');
+    out.push(ngrams.slice(0, ngLimit).map((n) => {
+      const df  = n.df != null ? `df=${n.df}` : '';
+      const pct = n.df_share_pct != null ? ` (${n.df_share_pct}%)` : '';
+      return `- "${n.phrase}"${df ? ` — ${df}${pct}` : ''}`;
+    }).join('\n'));
+  }
+
+  const heads = Array.isArray(art.shared_headings) ? art.shared_headings : [];
+  if (heads.length) {
+    out.push('', 'Общие заголовки топа (must-cover подтемы):');
+    out.push(heads.slice(0, headLimit).map((h) => {
+      const sample = h.sample || h.text || String(h);
+      const meta = h.df != null ? ` (на ${h.df} сайтах${h.df_share_pct != null ? `, ${h.df_share_pct}%` : ''})` : '';
+      return `- ${sample}${meta}`;
+    }).join('\n'));
+  }
+
+  if (Array.isArray(art.h2_drafts) && art.h2_drafts.length) {
+    out.push('', 'H2-наброски (из общих заголовков топа):');
+    art.h2_drafts.slice(0, Number(opts.h2Limit) || 25).forEach((h, i) => out.push(`  ${i + 1}. ${h}`));
+  }
+  if (Array.isArray(art.h3_drafts) && art.h3_drafts.length) {
+    out.push('', 'H3-наброски:');
+    art.h3_drafts.slice(0, Number(opts.h3Limit) || 25).forEach((h, i) => out.push(`  ${i + 1}. ${h}`));
+  }
+
+  const ent = Array.isArray(art.mandatory_entities) ? art.mandatory_entities : [];
+  if (ent.length) {
+    out.push('', 'Обязательные сущности (NER):');
+    out.push(ent.slice(0, entLimit).map((e) => {
+      const text = e && (e.text || e);
+      const pct  = e && e.df_share_pct != null ? ` (${e.df_share_pct}%)` : '';
+      return `- ${text}${pct}`;
+    }).join('\n'));
+  }
+
+  if (art.serp_intent) {
+    out.push('', `Доминирующий интент выдачи: ${art.serp_intent}`);
+  }
+
+  const voc = art.voice_of_customer || null;
+  if (voc && (voc.target_audience || voc.niche_features || voc.brand_facts)) {
+    out.push('', 'Голос аудитории (VoC):');
+    if (voc.target_audience) out.push(`- аудитория: ${String(voc.target_audience).slice(0, 400)}`);
+    if (voc.niche_features)  out.push(`- особенности ниши: ${String(voc.niche_features).slice(0, 400)}`);
+    if (voc.brand_facts)     out.push(`- факты бренда: ${String(voc.brand_facts).slice(0, 400)}`);
+  }
+
+  out.push('[/RELEVANCE_STAGE_BRIEF]');
+  return out.join('\n');
+}
+
+/**
+ * relevanceSeedTerms — плоский список ключевых терминов (важные LSI + n-граммы)
+ * для подмешивания в LSI-seed синтеза (Stage 2B блог-статьи), чтобы итоговый
+ * LSI-набор гарантированно содержал термины топа выдачи.
+ *
+ * @param {object|null} art
+ * @param {object} [opts]
+ * @returns {string[]}
+ */
+function relevanceSeedTerms(art, opts = {}) {
+  if (!art) return [];
+  const lsiLimit = Number(opts.lsiLimit) || MAX_IMPORTANT_LSI;
+  const ngLimit  = Number(opts.ngramsLimit) || MAX_NGRAMS;
+  const terms = [];
+  for (const v of (Array.isArray(art.important_lsi) ? art.important_lsi : []).slice(0, lsiLimit)) {
+    if (v && v.lemma) terms.push(String(v.lemma));
+  }
+  for (const n of (Array.isArray(art.top_ngrams) ? art.top_ngrams : []).slice(0, ngLimit)) {
+    if (n && n.phrase) terms.push(String(n.phrase));
+  }
+  // dedupe, сохраняем порядок
+  const seen = new Set();
+  return terms.filter((t) => {
+    const k = t.trim().toLowerCase();
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 module.exports = {
   loadArtifact,
   fromReportRow,
   renderForPromptBrief,
+  buildRelevanceStageBrief,
+  relevanceSeedTerms,
   _splitHeadingsByLevel,
   _digestSignals,
 };
