@@ -28,6 +28,7 @@ const MAX_TOPIC_LEN = 250;
 const MAX_REGION_LEN = 120;
 const MAX_BRAND_LEN = 200;
 const MAX_FACTS_LEN = 6000;
+const MAX_AI_TRIGGER_LEN = 500;
 const DEFAULT_REGION = 'Россия';
 
 function _clip(v, max) {
@@ -85,6 +86,8 @@ async function gatherCompanyFacts(project, opts = {}) {
  * @param {string} [params.geminiModel]
  * @param {number} [params.imagesCount]
  * @param {object} [params.companyFacts] — заранее собранные факты (иначе соберём)
+ * @param {string} [params.aiAnswerTrigger] — конкретный вопрос для прямого
+ *        lead-answer (GEO 2026: тема сгенерирована с полем ai_answer_trigger)
  * @returns {Promise<{task:object, company_facts:object|null}>}
  */
 async function generateBlogArticleFromProject(params) {
@@ -107,16 +110,19 @@ async function generateBlogArticleFromProject(params) {
   const brandFacts = (facts && facts.brandFacts) || null;
   const geminiModel = normalizeGeminiCopywritingModel(params.geminiModel);
   const imagesCount = _clampImages(params.imagesCount);
+  // GEO 2026: если тема несёт ai_answer_trigger — передаём его в задачу, чтобы
+  // Stage 2/3 начали статью с прямого ответа (lead-answer) на этот вопрос.
+  const aiAnswerTrigger = _clip(params.aiAnswerTrigger, MAX_AI_TRIGGER_LEN) || null;
 
   const { rows } = await db.query(
     `INSERT INTO info_article_tasks
        (user_id, topic, region, brand_name, brand_facts, output_format,
          commercial_links, commercial_links_count,
-         images_count, gemini_model, project_id, status, progress_pct)
-     VALUES ($1, $2, $3, $4, $5, 'html', '[]'::jsonb, 0, $6, $7, $8, 'queued', 0)
+         images_count, gemini_model, project_id, ai_answer_trigger, status, progress_pct)
+     VALUES ($1, $2, $3, $4, $5, 'html', '[]'::jsonb, 0, $6, $7, $8, $9, 'queued', 0)
      RETURNING id, topic, region, brand_name, output_format,
-               images_count, gemini_model, project_id, status, progress_pct, created_at`,
-    [userId, topic, region, brandName, brandFacts, imagesCount, geminiModel, project?.id || null],
+               images_count, gemini_model, project_id, ai_answer_trigger, status, progress_pct, created_at`,
+    [userId, topic, region, brandName, brandFacts, imagesCount, geminiModel, project?.id || null, aiAnswerTrigger],
   );
   const task = rows[0];
 

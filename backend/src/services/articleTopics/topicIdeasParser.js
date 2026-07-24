@@ -48,6 +48,7 @@ const FORMAT_OK = new Set([
   'how-to', 'listicle', 'guide', 'comparison', 'case', 'faq',
 ]);
 const CONFIDENCE_OK = new Set(['low', 'medium', 'high']);
+const GEO_POTENTIAL_OK = new Set(['low', 'medium', 'high']);
 const DECISION_STAGE_OK = new Set(['TOFU', 'MOFU', 'BOFU']);
 const DUPLICATE_SOURCE_OK = new Set(['exact', 'fuzzy', 'llm']);
 
@@ -220,6 +221,11 @@ function _normTopic(t) {
     difficulty:              _intRange(o.difficulty,           1, 5),
     uniqueness_angle:        _str(o.uniqueness_angle, LIM.longStr),
     why_now:                 _str(o.why_now,          LIM.longStr),
+
+    // GEO 2026: потенциал попадания в AI-выдачу (Google AI Overviews /
+    // Яндекс Нейро) и конкретный вопрос для прямого lead-answer в статье.
+    geo_potential:           _enum(o.geo_potential, GEO_POTENTIAL_OK),
+    ai_answer_trigger:       _str(o.ai_answer_trigger, LIM.longStr),
 
     // Расширенные intent-поля (PR-3) — модель может пропустить любое из них.
     // Все нормализуются в массив строк или null, чтобы CSV не падал.

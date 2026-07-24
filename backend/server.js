@@ -3277,6 +3277,15 @@ async function ensureSchema() {
       console.warn('[ensureSchema] realtime_research columns (mig 125) skipped:', e.message);
     }
 
+    // Колонка ai_answer_trigger — конкретный вопрос для прямого lead-answer
+    // (GEO 2026: Google AI Overviews / Яндекс Нейро). Nullable + IF NOT EXISTS.
+    // См. migrations/126_info_article_ai_answer_trigger.sql.
+    try {
+      await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS ai_answer_trigger TEXT`);
+    } catch (e) {
+      console.warn('[ensureSchema] ai_answer_trigger column (mig 126) skipped:', e.message);
+    }
+
     console.log('[Schema] ensureSchema OK');
   } catch (err) {
     console.error(`[Schema] ensureSchema FAILED: ${err.message}`);
