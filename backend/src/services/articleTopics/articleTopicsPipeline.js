@@ -33,6 +33,7 @@ const { detectDuplicates, filterDuplicates } = require('./topicDuplicateDetector
 const { recordTopics, loadHistory } = require('./brandTopicHistory');
 const { resolveBrandKey, autoLinkSimilar } = require('./brandAliases');
 const { filterCannibalizingCandidates } = require('./semanticExclusionFilter');
+const { runTopicIdeasResearch, hasTopicResearch, renderTopicResearchBlock } = require('./topicIdeasResearch');
 const { buildProjectContextBlock } = require('../projects/projectContextBlock');
 const { getQualityFlags } = require('../qualityLayers/featureFlags');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
@@ -43,6 +44,12 @@ const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
 
 const PROMPTS_DIR = path.join(__dirname, '..', '..', 'prompts', 'articleTopics');
+
+// Kill-switch для Perplexity real-time ресёрча интентов в режиме подбора тем.
+// По умолчанию включён; ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED=0|false|no|off
+// отключает его (подбор тем продолжается без real-time данных).
+const ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED =
+  !['0', 'false', 'no', 'off'].includes(String(process.env.ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED || '1').toLowerCase());
 
 // Кэшируем тексты промптов в память при первом обращении — файлы не меняются.
 let _mainPromptCache     = null;
@@ -276,6 +283,25 @@ async function processArticleTopicTask(taskId) {
       );
       const excludedClustersList = _renderExclusionList(userClusters, '(нет)');
 
+      // Perplexity real-time ресёрч интентов: собираем реальные поисковые
+      // запросы/интенты, вопросы PAA/AI Overviews и смежные семантические темы
+      // ниши ДО рендера промта, чтобы Gemini строил план тем строго от интентов
+      // пользователя и покрывал как классический поиск, так и ответы ИИ-выдачи.
+      // Fail-open: без ключа/при ошибке → null, блок = fallback-строка.
+      let topicResearch = null;
+      if (ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED) {
+        funnel.step('realtime_research');
+        topicResearch = await runTopicIdeasResearch({
+          niche:     task.niche,
+          region:    task.region,
+          audience:  task.audience,
+          brandHint: stashedInputs.brand_hint,
+          targetUrl: stashedInputs.target_url,
+        }).catch(() => null);
+        funnel.step('realtime_research_done', { has_data: hasTopicResearch(topicResearch) });
+      }
+      const realtimeResearchBlock = renderTopicResearchBlock(topicResearch);
+
       const topicIdeasBody = _interpolate(_loadTopicIdeasPrompt(), {
         NICHE:       task.niche || '',
         REGION:      task.region || '(не указан)',
@@ -286,10 +312,14 @@ async function processArticleTopicTask(taskId) {
         CURRENT_YEAR: String(new Date().getFullYear()),
         EXCLUDED_TOPICS_LIST:   excludedTopicsList,
         EXCLUDED_CLUSTERS_LIST: excludedClustersList,
+        REALTIME_RESEARCH_BLOCK: realtimeResearchBlock,
       });
       userPrompt = projectContextBlock
         ? `${projectContextBlock}\n\n${topicIdeasBody}`
         : topicIdeasBody;
+
+      // Сохраним признак использования ресёрча для пост-обработки/аудита.
+      task._topicResearchUsed = hasTopicResearch(topicResearch);
 
       // Сохраним для пост-фильтра.
       funnel.step('exclusion_inputs_collected', {
@@ -548,6 +578,7 @@ async function processArticleTopicTask(taskId) {
       ru_cis_block:      trendsJson ? trendsJson.ru_cis_block_present : null,
       topic_ideas_returned: topicCountReturned,
       topic_ideas_warnings: topicIdeasWarnings,
+      realtime_research_used: task.mode === 'topic_ideas' ? !!task._topicResearchUsed : null,
       brand_key:            brandKey || null,
       brand_alias_resolved: brandAliasInfo,
       brand_dedup:          brandDedupStats,

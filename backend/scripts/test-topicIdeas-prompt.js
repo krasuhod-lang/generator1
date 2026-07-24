@@ -65,6 +65,9 @@ check('После рендера НЕТ незаменённых {{...}} (для
     BRAND_HINT: 'Бренд X — консалтинг',
     TOPIC_COUNT: '7',
     CURRENT_YEAR: '2026',
+    EXCLUDED_TOPICS_LIST:    '(нет — генерируй свободно)',
+    EXCLUDED_CLUSTERS_LIST:  '(нет)',
+    REALTIME_RESEARCH_BLOCK: '(real-time ресёрч недоступен)',
   });
   // Не должно остаться плейсхолдеров вообще.
   const leftover = rendered.match(/\{\{[A-Z_]+\}\}/g);
