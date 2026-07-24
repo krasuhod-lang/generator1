@@ -339,6 +339,56 @@ function buildArticleKnowledgeBase(input = {}) {
     sections.push('_Нет данных об аудитории._');
   }
 
+  // ── 2b. REAL-TIME DATA (2026) — Perplexity sonar-pro ────────────
+  // Свежие факты/цифры/законы/цитаты, собранные Агентом-Ресёрчером в Stage 0.
+  // Явно указываем Gemini использовать их вместо выдуманных данных.
+  if (stage0Result) {
+    const rtFacts   = Array.isArray(stage0Result.realtime_facts) ? stage0Result.realtime_facts : [];
+    const rtQuotes  = Array.isArray(stage0Result.expert_quotes)  ? stage0Result.expert_quotes  : [];
+    const rtTrends  = Array.isArray(stage0Result.latest_trends)  ? stage0Result.latest_trends  : [];
+    const rtLegal   = Array.isArray(stage0Result.legal_updates)  ? stage0Result.legal_updates  : [];
+
+    if (rtFacts.length || rtQuotes.length || rtTrends.length || rtLegal.length) {
+      sections.push('\n## 2b. REAL-TIME DATA (2026)');
+      sections.push(
+        'Актуальные данные текущего месяца, собранные веб-поиском (Perplexity sonar-pro). ' +
+        'Используй эти актуальные факты и реальные цитаты экспертов в тексте вместо выдуманных данных. ' +
+        'Каждую цитату сопровождай именем и должностью автора.'
+      );
+
+      if (rtFacts.length) {
+        const facts = rtFacts
+          .map(f => {
+            if (typeof f === 'string') return f;
+            const parts = [f.fact, f.value].filter(Boolean).join(' — ');
+            return f.source ? `${parts} (источник: ${f.source})` : parts;
+          })
+          .filter(Boolean);
+        if (facts.length) sections.push(`### Актуальные факты и цифры\n${formatList(facts, 12)}`);
+      }
+
+      if (rtQuotes.length) {
+        const quotes = rtQuotes
+          .map(q => {
+            if (typeof q === 'string') return q;
+            const attribution = [q.author, q.role].filter(Boolean).join(', ');
+            const src = q.source ? ` [${q.source}]` : '';
+            return q.quote ? `«${q.quote}» — ${attribution || 'эксперт'}${src}` : '';
+          })
+          .filter(Boolean);
+        if (quotes.length) sections.push(`### Реальные цитаты экспертов\n${formatList(quotes, 8)}`);
+      }
+
+      if (rtTrends.length) {
+        sections.push(`### Последние тренды и новости\n${formatList(rtTrends, 8)}`);
+      }
+
+      if (rtLegal.length) {
+        sections.push(`### Изменения в законодательстве / ценах\n${formatList(rtLegal, 8)}`);
+      }
+    }
+  }
+
   // ── 3. Voice & Terminology ──────────────────────────────────────
   sections.push('\n## 3. Voice & Terminology');
   if (contentVoice) {

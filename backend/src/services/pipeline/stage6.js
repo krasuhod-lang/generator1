@@ -22,7 +22,7 @@ const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract
  * @param {string}   htmlContent   — HTML блока после Stage 5
  * @param {string[]} lsiMust       — обязательные LSI для этого блока
  * @param {object}   [blockCharLimits] { minChars, maxChars } — per-block лимиты;
- *   при инъекции HTML не должен превышать maxChars*1.25, иначе результат отвергается.
+ *   при инъекции HTML не должен превышать maxChars*1.5, иначе результат отвергается.
  * @returns {{ html: string, lsiCoverage: number, finalCoverage: object }}
  */
 async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharLimits = null) {
@@ -37,12 +37,12 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
   const maxLoops  = 3;
 
   // Length guard: LSI-инъекция должна быть микро-вставкой. Если итерация
-  // увеличивает HTML > 1.25× от исходного ИЛИ выходит за blockMax×1.25 —
+  // увеличивает HTML > 1.5× от исходного ИЛИ выходит за blockMax×1.5 —
   // отвергаем результат и оставляем pre-injection HTML.
   const startLength    = htmlContent.length;
-  const expansionCap   = Math.round(startLength * 1.25);
+  const expansionCap   = Math.round(startLength * 1.5);
   const absoluteCap    = blockCharLimits
-    ? Math.round(blockCharLimits.maxChars * 1.25)
+    ? Math.round(blockCharLimits.maxChars * 1.5)
     : Infinity;
   const maxAllowedChars = Math.min(expansionCap, absoluteCap);
 
@@ -110,7 +110,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
         log(
           `Stage 6 блок ${blockIndex + 1}: цикл ${loopCount} ОТКЛОНЁН — ` +
           `HTML ${stage6Result.html_content.length} символов > лимит ${maxAllowedChars} ` +
-          `(start=${startLength}, cap=min(start×1.25, blockMax×1.25)). ` +
+          `(start=${startLength}, cap=min(start×1.5, blockMax×1.5)). ` +
           `Оставляем HTML до инъекции (${currentHTML.length} символов).`,
           'warn'
         );

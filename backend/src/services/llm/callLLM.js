@@ -1,8 +1,9 @@
 'use strict';
 
-const { callDeepSeek } = require('./deepseek.adapter');
+const { callDeepSeek, DEEPSEEK_DEFAULT_MAX_TOKENS } = require('./deepseek.adapter');
 const { callGemini }   = require('./gemini.adapter');
 const { callGrok }     = require('./grok.adapter');
+const { callPerplexity, PERPLEXITY_DEFAULT_MAX_TOKENS } = require('./perplexity.adapter');
 const { autoCloseJSON, extractBalancedJson } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
@@ -10,6 +11,19 @@ const { getCachedResponse, setCachedResponse } = require('./responseCache');
 const responseCacheModule = require('./responseCache');
 const { withProviderSlot } = require('./rateLimiter');
 const { recordTrace } = require('./pipelineTrace');
+
+// Дефолтный лимит выходных токенов по адаптерам — соответствует значениям
+// по умолчанию внутри самих адаптеров. Используется как fallback в логике
+// авто-удвоения maxTokens при обрезанном ответе: если вызывающая сторона
+// не передала maxTokens явно, реальный первый запрос ушёл с дефолтом
+// адаптера (напр. DeepSeek 16000), поэтому «удваивать» надо от него, а не
+// от заниженной константы — иначе ретрай УМЕНЬШАЛ бы лимит и усугублял обрыв.
+const ADAPTER_DEFAULT_MAX_TOKENS = {
+  deepseek:   DEEPSEEK_DEFAULT_MAX_TOKENS, // 16000 (env DEEPSEEK_MAX_TOKENS)
+  gemini:     16384,                       // gemini.adapter profile default
+  grok:       8192,                        // grok.adapter default
+  perplexity: PERPLEXITY_DEFAULT_MAX_TOKENS, // 8000 (env PERPLEXITY_MAX_TOKENS)
+};
 
 // ────────────────────────────────────────────────────────────────────
 // Per-task token budget guard
@@ -316,6 +330,9 @@ async function persistStageCall({
  * @returns {Promise<object>}   — распарсенный JSON-ответ
  */
 async function callLLM(adapter, system, prompt, opts = {}) {
+  // maxTokens объявлен через let, т.к. при автодетекции обрезанного JSON
+  // мы удваиваем лимит и переприсваиваем значение внутри цикла attempt.
+  let { maxTokens } = opts;
   const {
     retries   = 6,
     taskId    = null,
@@ -325,7 +342,6 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     log: optLog = null,  // stages передают { log } — принимаем оба варианта
     onTokens   = null,   // callback(model, tokensIn, tokensOut, costUsd) — для SSE
     temperature,
-    maxTokens,
     timeoutMs,
     logprobs = false,
     cachedContent = null,
@@ -351,10 +367,18 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     ? callGemini
     : adapter === 'grok'
       ? callGrok
-      : callDeepSeek;
+      : adapter === 'perplexity'
+        ? callPerplexity
+        : callDeepSeek;
   // Provider-class для метрик и budget guard'а: Grok идёт по той же
   // дорожке, что и Gemini (платный текстовый провайдер с per-task budget'ом).
-  const providerClass = adapter === 'deepseek' ? 'deepseek' : 'gemini-class';
+  // Perplexity — отдельный класс 'perplexity-class' (real-time research в
+  // Stage 0, не участвует в Gemini token-budget guard'е).
+  const providerClass = adapter === 'deepseek'
+    ? 'deepseek'
+    : adapter === 'perplexity'
+      ? 'perplexity-class'
+      : 'gemini-class';
   const startedAt = new Date();
   const promptSize = estimateTokens(system + prompt);
 
@@ -427,7 +451,11 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // JSON parse ошибок в outreach emailComposer/nicheExpander.
       const isTruncated = result.finishReason === 'length' || _isJsonTruncated(result.text);
       if (isTruncated && attempt < retries - 1) {
-        const curMax = callOpts.maxTokens || maxTokens || 1000;
+        // Когда maxTokens не задан явно, реальный запрос ушёл с дефолтом
+        // адаптера (напр. DeepSeek 16000), а не с 1000 — берём его как базу,
+        // чтобы удвоение ПОВЫШАЛО лимит, а не понижало его.
+        const adapterDefault = ADAPTER_DEFAULT_MAX_TOKENS[adapter] || 1000;
+        const curMax = callOpts.maxTokens || maxTokens || adapterDefault;
         const newMax = Math.min(curMax * 2, 32000);
         log(`${callLabel || stageName} truncated response (finishReason=${result.finishReason || 'unknown'}, maxTokens=${curMax}), retry ${attempt + 1} with maxTokens=${newMax}`, 'warn');
         callOpts.maxTokens = newMax;

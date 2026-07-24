@@ -422,14 +422,15 @@ async function startTask(req, res, next) {
 
     // Добавляем в BullMQ. Используем уникальный jobId, чтобы повторный старт после fail
     // не ломался из-за оставшегося старого job-а с тем же task.id.
+    // attempts: 1 — внутренний ретрай BullMQ отключён; авто-возобновление после
+    // ошибки выполняет воркер с сохранением прогресса (checkpoint).
     const jobId = `${task.id}-${Date.now()}`;
     const job = await generationQueue.add(
       'generate',
       { taskId: task.id },
       {
         jobId,
-        attempts: 2,
-        backoff:  { type: 'exponential', delay: 5000 },
+        attempts: 1,
       }
     );
 
@@ -1322,12 +1323,16 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
     'На вход ты получаешь данные аналитического отчёта по поисковой выдаче (запрос, регион, n-граммы ' +
     'и важные термины ТОП-10, сигналы топовых конкурентов). По этим данным восстанови реальный голос ' +
     'аудитории и зафиксируй конкретные факты, цифры и доказательства, которые используют конкуренты в ТОПе. ' +
-    'Возвращай СТРОГО JSON-объект без markdown-обёрток с тремя строковыми ключами: ' +
-    'target_audience, niche_features, brand_facts.\n\n' +
+    'Возвращай СТРОГО JSON-объект без markdown-обёрток с пятью строковыми ключами: ' +
+    'target_audience, niche_features, brand_facts, project_constraints, priority_page_types.\n\n' +
     '— target_audience: 2–6 предложений. Портрет ЦА: сегменты, демография, JTBD, ключевые боли, ' +
     'эмоциональные триггеры, как они сами называют свою проблему и желаемый результат.\n' +
     '— niche_features: 2–6 предложений. Особенности ниши: тип бизнеса, YMYL/не-YMYL, сезонность, ' +
     'локальная привязка, уровень конкуренции, регуляторные требования, специфика buyer journey.\n' +
+    '— project_constraints: 1–3 предложения. Ограничения проекта: что нельзя писать, tone of voice, ' +
+    'юридические и регуляторные ограничения ниши, запретные темы и обещания.\n' +
+    '— priority_page_types: 1–2 предложения. Приоритетные типы страниц (например, коммерческие лендинги, ' +
+    'информационные статьи, карточки товаров, категории), которые дадут максимум трафика/конверсии в этой нише.\n' +
     '— brand_facts: РАЗВЁРНУТЫЙ структурированный текст-дайджест (10–25 предложений, можно с короткими ' +
     'подзаголовками вида «Боли:», «Возражения:», «Критерии выбора:», «Цифры/доказательства из ТОПа:», ' +
     '«Trust-сигналы:», «Часто задаваемые вопросы:», «Мифы и заблуждения:», «Сценарии использования:»). ' +
@@ -1372,9 +1377,10 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
     `Сначала мысленно пройди по фреймворку community voice (problem language → outcome language → ` +
     `objections → decision criteria → trust signals → recurring questions → myths → segments → journey ` +
     `stages → typical proof points конкурентов в ТОПе). Затем верни ТОЛЬКО JSON по схеме ` +
-    `{"target_audience":"…","niche_features":"…","brand_facts":"…"} без каких-либо обёрток. ` +
+    `{"target_audience":"…","niche_features":"…","brand_facts":"…","project_constraints":"…","priority_page_types":"…"} без каких-либо обёрток. ` +
     `Поле brand_facts — самое объёмное и структурированное (с подзаголовками внутри строки), ` +
-    `target_audience и niche_features — компактные 2–6 предложений.`;
+    `target_audience и niche_features — компактные 2–6 предложений, ` +
+    `project_constraints — 1–3 предложения, priority_page_types — 1–2 предложения.`;
 
   try {
     const ds = await callDeepSeek(systemMsg, userPrompt, {
@@ -1395,6 +1401,8 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
       target_audience: pick('target_audience'),
       niche_features:  pick('niche_features'),
       brand_facts:     pick('brand_facts'),
+      project_constraints:  pick('project_constraints') || pick('project_limits'),
+      priority_page_types:  pick('priority_page_types') || pick('priority_pages'),
     };
   } catch (err) {
     // fail-soft: пробрасываем как { _error } — вызывающий решит, как показать.
@@ -1474,7 +1482,13 @@ async function getRelevancePrefill(req, res, next) {
       competitorUrls,
     });
 
-    let llm = { input_target_audience: '', input_niche_features: '', input_brand_facts: '' };
+    let llm = {
+      input_target_audience: '',
+      input_niche_features: '',
+      input_brand_facts: '',
+      input_project_limits: '',
+      input_page_priorities: '',
+    };
     let llmUsed = false;
     let llmError = null;
     if (llmRaw && !llmRaw._error) {
@@ -1482,8 +1496,16 @@ async function getRelevancePrefill(req, res, next) {
         input_target_audience: llmRaw.target_audience || '',
         input_niche_features:  llmRaw.niche_features  || '',
         input_brand_facts:     llmRaw.brand_facts     || '',
+        input_project_limits:  llmRaw.project_constraints || '',
+        input_page_priorities: llmRaw.priority_page_types || '',
       };
-      llmUsed = !!(llm.input_target_audience || llm.input_niche_features || llm.input_brand_facts);
+      llmUsed = !!(
+        llm.input_target_audience ||
+        llm.input_niche_features ||
+        llm.input_brand_facts ||
+        llm.input_project_limits ||
+        llm.input_page_priorities
+      );
     } else if (llmRaw && llmRaw._error) {
       llmError = String(llmRaw._error).slice(0, 400);
     }

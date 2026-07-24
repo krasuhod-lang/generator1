@@ -215,6 +215,14 @@ function handleSSEMessage(msg) {
       pushLog({ ts: ts(), msg: `▶ ${msg.message || 'Возобновляем задачу...'}`, level: 'info' });
       break;
 
+    case 'retrying':
+      // Авто-возобновление после сбоя: задача не упала, продолжаем.
+      // Текст уведомления приходит отдельным 'log'-событием из воркера.
+      failed.value  = false;
+      paused.value  = false;
+      pausing.value = false;
+      break;
+
     case 'error':
       failed.value = true;
       stopGenerationTimer();

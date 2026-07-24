@@ -38,8 +38,10 @@ const JOB_RETENTION = Object.freeze({
 const generationQueue = new Queue('content-generation', {
   connection,
   defaultJobOptions: {
-    attempts: 2,
-    backoff: { type: 'fixed', delay: 5000 },
+    // Ретраи выполняются явно в воркере (checkpoint-aware авто-возобновление),
+    // поэтому внутренний ретрай BullMQ отключён (attempts: 1), чтобы не
+    // дублировать перезапуски.
+    attempts: 1,
     removeOnComplete: JOB_RETENTION.completed,
     removeOnFail:     JOB_RETENTION.failed,
   },

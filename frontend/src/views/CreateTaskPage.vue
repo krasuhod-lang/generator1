@@ -209,6 +209,8 @@ async function prefillFromRelevanceReport(reportId) {
       'input_target_audience',
       'input_niche_features',
       'input_brand_facts',
+      'input_project_limits',
+      'input_page_priorities',
     ];
     for (const k of llmMap) {
       const incoming = (llm[k] || '').toString().trim();
@@ -217,7 +219,7 @@ async function prefillFromRelevanceReport(reportId) {
     }
 
     // Открываем релевантные секции — чтобы юзер сразу увидел подстановки.
-    if (det.input_target_url || llm.input_target_audience || llm.input_niche_features) openSections.s1 = true;
+    if (det.input_target_url || llm.input_target_audience || llm.input_niche_features || llm.input_project_limits || llm.input_page_priorities) openSections.s1 = true;
     if (det.input_ngrams || incomingTfidf) openSections.s2 = true;
     if (llm.input_brand_facts) openSections.s3 = true;
     if (det.input_competitor_urls) openSections.s4 = true;

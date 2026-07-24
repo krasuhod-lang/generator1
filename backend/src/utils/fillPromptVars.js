@@ -36,6 +36,18 @@ function fillPromptVars(prompt, task) {
     .replace(/\[\s*текущий\s+год\s*\]/gi, currentYear)
     .replace(/\[\s*год\s*\]/gi, currentYear);
 
+  // ── Generic {{input_*}} substitution ─────────────────────────────────
+  // Некоторые расширенные промпты (напр. perplexityResearcher) ссылаются на
+  // поля задачи напрямую через {{input_target_service}} / {{input_region}}.
+  // Подставляем ТОЛЬКО поля с префиксом input_ (uppercase-плейсхолдеры вроде
+  // {{BUSINESS_TYPE}} заполняются позже в stage3.js и здесь не затрагиваются).
+  prompt = prompt.replace(/\{\{\s*(input_[a-zA-Z0-9_]+)\s*\}\}/g, (m, key) => {
+    if (Object.prototype.hasOwnProperty.call(task, key) && task[key] != null && task[key] !== '') {
+      return richTextToPlain(String(task[key]));
+    }
+    return m;
+  });
+
   // Маппинг: regex для строки → значение из task
   // Каждый regex ищет «- <Ключевое слово>...: [...]» и заменяет содержимое скобок
   const rules = [
