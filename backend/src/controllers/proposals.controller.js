@@ -29,6 +29,7 @@
  *   Прайс-лист: GET/POST /api/pricing-templates, PUT/DELETE /api/pricing-templates/:id
  *
  *   Публично (без auth): GET /api/public/proposal/:token
+ *                        GET /api/public/proposal/:token/export/pdf
  */
 
 const db = require('../config/db');
@@ -41,6 +42,7 @@ const {
   buildProposalXlsx,
   buildPricingTotals,
 } = require('../services/proposals/exportService');
+const { buildMediaPlan } = require('../services/proposals/mediaPlan');
 
 const STATUSES = ['draft', 'sent', 'accepted', 'rejected'];
 const TASK_STATUSES = ['not_started', 'in_progress', 'done'];
@@ -181,45 +183,67 @@ async function getProposal(req, res) {
 }
 
 async function _replaceTasks(proposalId, tasks, horizon) {
-  await db.query('DELETE FROM proposal_tasks WHERE proposal_id = $1', [proposalId]);
-  for (const t of tasks.slice(0, 1000)) {
-    await db.query(
-      `INSERT INTO proposal_tasks
-         (proposal_id, module_id, module_name, task_id, task_title, task_description,
-          priority, tool, month, responsible, status, comment)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [
-        proposalId,
-        Number.isFinite(Number(t.module_id)) ? Number(t.module_id) : null,
-        _sOrNull(t.module_name),
-        _sOrNull(t.task_id, 10),
-        _s(t.task_title, 500) || 'Задача',
-        _sOrNull(t.task_description, 5000),
-        _priority(t.priority),
-        _sOrNull(t.tool),
-        _month(t.month, horizon),
-        _sOrNull(t.responsible),
-        TASK_STATUSES.includes(t.status) ? t.status : 'not_started',
-        _sOrNull(t.comment, 5000),
-      ],
-    );
+  // DELETE + INSERT в одной транзакции: при ошибке в середине вставки
+  // клиент не остаётся с частично затёртым фронтом работ.
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM proposal_tasks WHERE proposal_id = $1', [proposalId]);
+    for (const t of tasks.slice(0, 1000)) {
+      await client.query(
+        `INSERT INTO proposal_tasks
+           (proposal_id, module_id, module_name, task_id, task_title, task_description,
+            priority, tool, month, responsible, status, comment)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [
+          proposalId,
+          Number.isFinite(Number(t.module_id)) ? Number(t.module_id) : null,
+          _sOrNull(t.module_name),
+          _sOrNull(t.task_id, 10),
+          _s(t.task_title, 500) || 'Задача',
+          _sOrNull(t.task_description, 5000),
+          _priority(t.priority),
+          _sOrNull(t.tool),
+          _month(t.month, horizon),
+          _sOrNull(t.responsible),
+          TASK_STATUSES.includes(t.status) ? t.status : 'not_started',
+          _sOrNull(t.comment, 5000),
+        ],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
 async function _replacePricing(proposalId, pricing, horizon) {
-  await db.query('DELETE FROM proposal_pricing WHERE proposal_id = $1', [proposalId]);
-  for (const p of pricing.slice(0, 500)) {
-    if (!_s(p.item_name)) continue;
-    await db.query(
-      `INSERT INTO proposal_pricing
-         (proposal_id, item_name, base_budget, additional_budget, additional_note, month, currency)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        proposalId, _s(p.item_name), _budget(p.base_budget),
-        _budgetOrNull(p.additional_budget), _sOrNull(p.additional_note, 5000),
-        _monthOrNull(p.month, horizon), _s(p.currency, 10) || 'RUB',
-      ],
-    );
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM proposal_pricing WHERE proposal_id = $1', [proposalId]);
+    for (const p of pricing.slice(0, 500)) {
+      if (!_s(p.item_name)) continue;
+      await client.query(
+        `INSERT INTO proposal_pricing
+           (proposal_id, item_name, base_budget, additional_budget, additional_note, month, currency)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          proposalId, _s(p.item_name), _budget(p.base_budget),
+          _budgetOrNull(p.additional_budget), _sOrNull(p.additional_note, 5000),
+          _monthOrNull(p.month, horizon), _s(p.currency, 10) || 'RUB',
+        ],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -386,18 +410,25 @@ async function revokeProposalShare(req, res) {
   }
 }
 
+async function _loadSharedByToken(token) {
+  if (!isValidShareToken(token)) return null;
+  const { rows } = await db.query(
+    `SELECT id, title, client, manager, horizon, start_date, status, created_at
+     FROM proposals WHERE share_token = $1`,
+    [token],
+  );
+  if (!rows[0]) return null;
+  return _loadFull(rows[0]);
+}
+
 async function getSharedProposal(req, res) {
   try {
-    const token = req.params.token;
-    if (!isValidShareToken(token)) return res.status(404).json({ error: 'Ссылка не найдена' });
-    const { rows } = await db.query(
-      `SELECT id, title, client, manager, horizon, start_date, status, created_at
-       FROM proposals WHERE share_token = $1`,
-      [token],
-    );
-    if (!rows[0]) return res.status(404).json({ error: 'Ссылка не найдена' });
-    const full = await _loadFull(rows[0]);
+    const full = await _loadSharedByToken(req.params.token);
+    if (!full) return res.status(404).json({ error: 'Ссылка не найдена' });
     const totals = buildPricingTotals(full.pricing);
+    // Медиа-план (работа × месяцы) считается на бэкенде тем же билдером,
+    // что и экспорт PDF/Excel — клиентский вид всегда совпадает с документами.
+    const plan = buildMediaPlan(full.tasks, full.horizon);
     res.json({
       proposal: {
         title: full.title, client: full.client, manager: full.manager,
@@ -408,6 +439,15 @@ async function getSharedProposal(req, res) {
         task_title: t.task_title, task_description: t.task_description,
         priority: t.priority, tool: t.tool, month: t.month, responsible: t.responsible,
       })),
+      media_plan: {
+        horizon: plan.horizon,
+        months: plan.months,
+        rows: plan.rows,
+        modules: plan.modules,
+        counts_by_month: plan.counts_by_month,
+        total_tasks: plan.total_tasks,
+        total_slots: plan.total_slots,
+      },
       pricing: full.pricing.map((p) => ({
         item_name: p.item_name, base_budget: p.base_budget,
         additional_budget: p.additional_budget, additional_note: p.additional_note,
@@ -418,6 +458,22 @@ async function getSharedProposal(req, res) {
   } catch (err) {
     console.error('[proposals] shared error:', err.message);
     res.status(500).json({ error: 'Не удалось загрузить КП' });
+  }
+}
+
+// Клиент может скачать то же КП в PDF прямо с публичной страницы —
+// без авторизации, только по действующему share-токену.
+async function exportSharedProposalPdf(req, res) {
+  try {
+    const full = await _loadSharedByToken(req.params.token);
+    if (!full) return res.status(404).json({ error: 'Ссылка не найдена' });
+    const buf = await buildProposalPdf(full);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${_filename(full.title, 'pdf')}`);
+    res.send(buf);
+  } catch (err) {
+    console.error('[proposals] shared pdf error:', err.message);
+    res.status(500).json({ error: 'Не удалось сформировать PDF' });
   }
 }
 
@@ -801,7 +857,7 @@ async function deletePricingTemplate(req, res) {
 module.exports = {
   listProposals, createProposal, getProposal, updateProposal, deleteProposal,
   cloneProposal, exportProposalPdf, exportProposalXlsx,
-  createProposalShare, revokeProposalShare, getSharedProposal,
+  createProposalShare, revokeProposalShare, getSharedProposal, exportSharedProposalPdf,
   addProposalTask, updateProposalTask, deleteProposalTask,
   addProposalPricing, updateProposalPricing, deleteProposalPricing,
   listModules, createModule, updateModule, deleteModule,

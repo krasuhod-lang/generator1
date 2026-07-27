@@ -8,7 +8,10 @@
 const express   = require('express');
 const rateLimit = require('express-rate-limit');
 
-const { getSharedProposal } = require('../controllers/proposals.controller');
+const {
+  getSharedProposal,
+  exportSharedProposalPdf,
+} = require('../controllers/proposals.controller');
 
 const router = express.Router();
 
@@ -22,6 +25,16 @@ const publicLimiter = rateLimit({
 
 router.use(publicLimiter);
 
+// Генерация PDF заметно дороже чтения JSON — отдельный, более строгий лимит.
+const pdfLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max:      10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { error: 'Слишком много запросов на выгрузку. Попробуйте позже.' },
+});
+
 router.get('/proposal/:token', getSharedProposal);
+router.get('/proposal/:token/export/pdf', pdfLimiter, exportSharedProposalPdf);
 
 module.exports = router;
