@@ -174,6 +174,14 @@ test('best-of: при равном статусе выигрывает CTR-ск�
   assert.strictEqual(best.id, 'first');
 });
 
+test('best-of: при равном CTR-скоре выигрывает более поздняя попытка (собрана по фидбеку)', () => {
+  const best = _pickBestPairAttempt([
+    { id: 'first', passed: false, ctrScore: 60 },
+    { id: 'last', passed: false, ctrScore: 60 },
+  ]);
+  assert.strictEqual(best.id, 'last');
+});
+
 test('best-of: единственная/пустая серия попыток не ломает выбор', () => {
   assert.strictEqual(_pickBestPairAttempt([]), null);
   assert.strictEqual(_pickBestPairAttempt(null), null);

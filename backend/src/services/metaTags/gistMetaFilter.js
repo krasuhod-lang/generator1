@@ -676,10 +676,14 @@ function checkTemplateLevelConflict(titles = [], opts = {}) {
 // ─── Главный оркестратор ───────────────────────────────────────────
 
 /**
- * Best-of внутри GIST: из накопленных попыток сборки пары выбирает лучшую.
+ * Best-of внутри GIST: из ПРОВЕРЕННЫХ попыток сборки пары выбирает лучшую.
  * Приоритет — прошедшая проверки (conflict + replaceability); при равенстве
- * выигрывает большее значение CTR-скора. Последняя попытка не обязательно
- * лучшая: пересборка «по фидбеку» иногда только ухудшает формулировку.
+ * выигрывает большее значение CTR-скора, а при равном скоре — более поздняя
+ * попытка. Последняя попытка не обязательно лучшая: пересборка «по фидбеку»
+ * иногда только ухудшает формулировку.
+ *
+ * Черновики, отсеянные детерминированными проверками, сюда не попадают: они
+ * не проходили Steps 8.9–8.10, и отдавать их наружу нельзя.
  *
  * @param {Array<{passed: boolean, ctrScore: number}>} attempts
  * @returns {object|null} лучшая попытка (или null, если попыток нет)
@@ -688,7 +692,9 @@ function _pickBestPairAttempt(attempts) {
   if (!Array.isArray(attempts) || !attempts.length) return null;
   return attempts.reduce((acc, cur) => {
     if (acc.passed !== cur.passed) return acc.passed ? acc : cur;
-    return cur.ctrScore > acc.ctrScore ? cur : acc;
+    // При равном CTR-скоре выигрывает более поздняя попытка: она собрана
+    // с учётом фидбека предыдущей.
+    return cur.ctrScore >= acc.ctrScore ? cur : acc;
   });
 }
 
@@ -772,10 +778,13 @@ async function runGistMetaPipeline({
   let feedback = '';
 
   // Best-of: попытки различаются по качеству, а последняя не обязательно
-  // лучшая. Копим кандидатов пары и в конце берём лучшую (сначала — прошедшую
-  // проверки, затем — по CTR-скору), а не ту, на которой закончился цикл.
+  // лучшая. Копим только те пары, что дошли до LLM-валидатора (Steps 8.9–8.10):
+  // черновики, отсеянные детерминированными проверками, кандидатами не
+  // считаются — иначе наружу может уйти пара с нарушенными длинами и с
+  // непроставленными результатами проверок.
   const pairAttempts = [];
-  const _rememberAttempt = (candidatePair, idx, checks) => {
+  let pairAttemptsMade = 0;
+  const _rememberAttempt = (candidatePair, idx, checks, issues) => {
     if (!candidatePair) return;
     let ctrScoreValue = 0;
     try {
@@ -787,9 +796,11 @@ async function runGistMetaPipeline({
     pairAttempts.push({
       pair: { ...candidatePair },
       winnerIdx: idx,
-      passed: !!(checks && checks.conflictPassed && checks.replaceabilityPassed),
-      conflictCheck: (checks && checks.conflictCheck) || { passed: true, detail: null },
-      replaceabilityCheck: (checks && checks.replaceabilityCheck) || { passed: true, detail: null },
+      passed: !!(checks.conflictPassed && checks.replaceabilityPassed),
+      conflictCheck: checks.conflictCheck,
+      replaceabilityCheck: checks.replaceabilityCheck,
+      hardIssues: (issues && issues.hardIssues) || [],
+      softIssues: (issues && issues.softIssues) || [],
       ctrScore: ctrScoreValue,
     });
   };
@@ -797,6 +808,7 @@ async function runGistMetaPipeline({
   for (let attempt = 1; attempt <= MAX_PAIR_ATTEMPTS; attempt += 1) {
     const winner = survivors[winnerIdx];
     const alternates = survivors.filter((_, i) => i !== winnerIdx).slice(0, 3);
+    pairAttemptsMade = attempt;
 
     pair = await _callCopywriterJson(
       _buildAssemblerUserPrompt({
@@ -824,19 +836,14 @@ async function runGistMetaPipeline({
     const softIssues = _deterministicPairSoftIssues(pair, keyword, semantics);
     const retryIssues = [...hardIssues, ...softIssues];
     if (retryIssues.length && attempt < MAX_PAIR_ATTEMPTS) {
-      _rememberAttempt(pair, winnerIdx, null);
       feedback = `Детерминированные нарушения: ${retryIssues.join('; ')}. `
         + `Перепиши пару, устранив ВСЕ нарушения за один заход. `
         + `Целевые длины: title ${TITLE_TARGET_MIN}–${TITLE_TARGET_MAX} симв. (начинается с «${keyword}»), description ${DESC_TARGET_MIN}–${DESC_TARGET_MAX} симв.`;
       notes.push(`Попытка ${attempt}: ${retryIssues.join('; ')} — пересборка.`);
       continue;
     }
-    if (hardIssues.length) {
-      notes.push(`⚠️ Остались нарушения после ${attempt} попыток: ${hardIssues.join('; ')}.`);
-    }
-    if (softIssues.length) {
-      notes.push(`⚠️ Post-validation: ${softIssues.join('; ')}.`);
-    }
+    // Заметки о нарушениях привязаны к конкретной попытке и выводятся ниже —
+    // после best-of, чтобы описывать именно ту пару, что ушла наружу.
 
     // Steps 8.9–8.10 — semantic conflict + pair replaceability.
     const check = await _callAnalyticJson(
@@ -858,7 +865,7 @@ async function runGistMetaPipeline({
       replaceabilityPassed: replaceabilityCheck.passed,
       conflictCheck,
       replaceabilityCheck,
-    });
+    }, { hardIssues, softIssues });
     if (conflictCheck.passed && replaceabilityCheck.passed) break;
     if (attempt === MAX_PAIR_ATTEMPTS) {
       notes.push('⚠️ Пара не прошла все проверки за отведённые попытки — требуется ручная правка.');
@@ -893,20 +900,29 @@ async function runGistMetaPipeline({
     }
   }
 
-  // Best-of: если попыток было несколько — берём лучшую (прошедшая проверки
-  // приоритетнее, при равенстве — выше CTR-скор), а не последнюю по циклу.
-  if (pairAttempts.length > 1) {
-    const best = _pickBestPairAttempt(pairAttempts);
+  // Best-of: если проверенных попыток было несколько — берём лучшую
+  // (прошедшая проверки приоритетнее, при равенстве — выше CTR-скор),
+  // а не ту, на которой закончился цикл.
+  const bestAttempt = _pickBestPairAttempt(pairAttempts);
+  if (bestAttempt) {
     const last = pairAttempts[pairAttempts.length - 1];
-    if (best !== last) {
-      pair = best.pair;
-      winnerIdx = best.winnerIdx;
-      conflictCheck = best.conflictCheck;
-      replaceabilityCheck = best.replaceabilityCheck;
+    if (bestAttempt !== last) {
+      pair = bestAttempt.pair;
+      winnerIdx = bestAttempt.winnerIdx;
+      conflictCheck = bestAttempt.conflictCheck;
+      replaceabilityCheck = bestAttempt.replaceabilityCheck;
       notes.push(
-        `Best-of: из ${pairAttempts.length} попыток выбрана лучшая `
-        + `(CTR-скор ${best.ctrScore} против ${last.ctrScore} у последней).`,
+        `Best-of: из ${pairAttempts.length} проверенных попыток (всего ${pairAttemptsMade}) выбрана лучшая `
+        + `(CTR-скор ${bestAttempt.ctrScore} против ${last.ctrScore} у последней).`,
       );
+    }
+    // Заметки о детерминированных нарушениях выводим здесь — по итоговой паре,
+    // а не по той попытке, на которой оборвался цикл.
+    if (bestAttempt.hardIssues.length) {
+      notes.push(`⚠️ Остались нарушения после ${pairAttemptsMade} попыток: ${bestAttempt.hardIssues.join('; ')}.`);
+    }
+    if (bestAttempt.softIssues.length) {
+      notes.push(`⚠️ Post-validation: ${bestAttempt.softIssues.join('; ')}.`);
     }
   }
 
