@@ -230,4 +230,35 @@ console.log('\n§4 — обогащение inputs (pageAngle / missingNodes):')
     preset.pageAngle === 'ручной угол' && preset.missingNodes[0] === 'ручной узел');
 }
 
+// ── §8: слияние расхода при автоперегенерации ─────────────────────
+{
+  console.log('\n§8 — mergeUsageMeta (расход обеих версий):');
+  const { mergeUsageMeta } = require('../src/services/metaTags/metaStages');
+
+  const merged = mergeUsageMeta(
+    { tokensIn: 1000, tokensOut: 300, thoughtsTokens: 50, cachedTokens: 10, attempts: 2, model: 'a', provider: 'gemini' },
+    { tokensIn: 900, tokensOut: 250, thoughtsTokens: 40, cachedTokens: 5, attempts: 1, model: 'b', provider: 'gemini' },
+  );
+  check('токены обеих версий суммируются',
+    merged.tokensIn === 1900 && merged.tokensOut === 550);
+  check('thoughts/cached/attempts суммируются',
+    merged.thoughtsTokens === 90 && merged.cachedTokens === 15 && merged.attempts === 3);
+  check('провайдер сохраняется, если он один', merged.provider === 'gemini');
+  check('модель берётся от последнего прогона', merged.model === 'b');
+
+  const mixed = mergeUsageMeta(
+    { tokensIn: 10, tokensOut: 5, provider: 'gemini' },
+    { tokensIn: 20, tokensOut: 5, provider: 'deepseek' },
+  );
+  check('разные провайдеры → mixed', mixed.provider === 'mixed');
+
+  const noCost = mergeUsageMeta({ tokensIn: 10 }, { tokensOut: 5 });
+  check('без costUsd поле остаётся пустым (стоимость посчитает фасад)',
+    noCost.costUsd === undefined);
+
+  const oneSide = mergeUsageMeta(undefined, { tokensIn: 7, tokensOut: 3 });
+  check('пустой первый прогон не ломает слияние',
+    oneSide.tokensIn === 7 && oneSide.tokensOut === 3);
+}
+
 console.log(`\n✅ Все проверки пройдены: ${passed}`);

@@ -31,6 +31,31 @@ const {
 } = require('../parser/audienceNicheAnalyzer');
 
 /**
+ * Складывает счётчики двух прогонов генерации (§8 ТЗ: одна автоперегенерация
+ * при низком CTR-скоре). Каждый прогон ведёт собственный usage-аккумулятор,
+ * поэтому без слияния расход одной из версий терялся бы в отчётности.
+ */
+function mergeUsageMeta(a = {}, b = {}) {
+  const first = a || {};
+  const second = b || {};
+  const num = (x) => Number(x) || 0;
+  const providers = [first.provider, second.provider].filter(Boolean);
+  const uniqueProviders = [...new Set(providers)];
+  return {
+    ...first,
+    ...second,
+    tokensIn: num(first.tokensIn) + num(second.tokensIn),
+    tokensOut: num(first.tokensOut) + num(second.tokensOut),
+    thoughtsTokens: num(first.thoughtsTokens) + num(second.thoughtsTokens),
+    cachedTokens: num(first.cachedTokens) + num(second.cachedTokens),
+    attempts: num(first.attempts) + num(second.attempts),
+    costUsd: num(first.costUsd) + num(second.costUsd) || undefined,
+    model: second.model || first.model || '',
+    provider: uniqueProviders.length > 1 ? 'mixed' : (uniqueProviders[0] || ''),
+  };
+}
+
+/**
  * Прогоняет один ключ через все этапы генерации мета-тега и навешивает
  * lsi_check (как в pipeline.js). Сеть/LLM-ошибки пробрасываются наружу —
  * вызывающий решает, обрабатывать ли поштучно.
@@ -92,6 +117,10 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
   if (metas.ctr_score.needs_review) {
     try {
       const retryMetas = await genOnce();
+      // Расход перегенерации обязан попасть в отчётность независимо от того,
+      // какую версию мы в итоге оставим: каждый genOnce() заводит собственный
+      // usage-аккумулятор, поэтому суммируем оба _meta вручную.
+      const totalMeta = mergeUsageMeta(metas._meta, retryMetas._meta);
       if (retryMetas.ctr_score.score > metas.ctr_score.score) {
         retryMetas.post_validation_notes = Array.isArray(retryMetas.post_validation_notes)
           ? retryMetas.post_validation_notes : [];
@@ -101,6 +130,7 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
         );
         metas = retryMetas;
       }
+      metas._meta = { ...(metas._meta || {}), ...totalMeta };
     } catch (_e) { /* fail-open: остаёмся с первой версией */ }
   }
 
@@ -257,5 +287,6 @@ async function buildAudienceNicheDigest({ niche, brand, toponym, summary, ctx = 
 module.exports = {
   runMetaStagesForKeyword,
   buildAudienceNicheDigest,
+  mergeUsageMeta,
   _mergeSemantics,
 };
