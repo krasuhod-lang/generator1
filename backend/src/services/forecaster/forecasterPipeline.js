@@ -752,12 +752,14 @@ async function processForecasterTask(taskId) {
 
     // 9. Финал
     step('finalize');
-    const dsCost     = ds.verdict === 'ok' ? (ds.cost_usd || 0) : 0;
-    const refineCost = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.cost_usd || 0) : 0;
-    const dsIn       = ds.verdict === 'ok' ? (ds.tokens_in || 0) : 0;
-    const refineIn   = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.tokens_in || 0) : 0;
-    const dsOut      = ds.verdict === 'ok' ? (ds.tokens_out || 0) : 0;
-    const refineOut  = junkRefine && junkRefine.verdict === 'ok' ? (junkRefine.tokens_out || 0) : 0;
+    // Токены/стоимость учитываем даже при verdict='error': вызов состоялся и
+    // оплачен (обрезанный ответ модели тоже тарифицируется).
+    const dsCost     = ds.cost_usd || 0;
+    const refineCost = junkRefine ? (junkRefine.cost_usd || 0) : 0;
+    const dsIn       = ds.tokens_in || 0;
+    const refineIn   = junkRefine ? (junkRefine.tokens_in || 0) : 0;
+    const dsOut      = ds.tokens_out || 0;
+    const refineOut  = junkRefine ? (junkRefine.tokens_out || 0) : 0;
     await db.query(
       `UPDATE forecaster_tasks SET
          status='done',

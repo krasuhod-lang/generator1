@@ -65,6 +65,18 @@ const fcPoints = computed(() => (task.value?.forecast?.points) || []);
 const anomalies = computed(() => (task.value?.anomalies?.drops) || []);
 const trend = computed(() => task.value?.trend || null);
 const dsSummary  = computed(() => task.value?.deepseek_summary || null);
+// Старые задачи в БД могли сохраниться с verdict='ok', но пустыми полями
+// (обрезанный ответ модели). Не рисуем голый заголовок — показываем
+// плейсхолдер, как при ошибке.
+const dsSummaryHasContent = computed(() => {
+  const d = dsSummary.value;
+  if (!d) return false;
+  const texts = [d.summary, d.demand_analysis, d.traffic_analysis, d.leads_analysis,
+                 d.works_alignment];
+  const lists = [d.bullets, d.ranking_factors, d.pitfalls, d.recommendations];
+  return texts.some((t) => typeof t === 'string' && t.trim().length > 0)
+      || lists.some((l) => Array.isArray(l) && l.length > 0);
+});
 const vangaSummary = computed(() => task.value?.vanga_summary || null);
 const noCommercialIntent = computed(() => task.value?.error_code === 'failed_no_commercial_intent');
 const junkReport = computed(() => task.value?.junk_phrases || null);
@@ -1040,10 +1052,10 @@ const sovSummaryRows = computed(() => {
             </div>
           </section>
 
-          <!-- Аналитические выводы (Gemini) -->
+          <!-- Аналитические выводы (DeepSeek) -->
           <section v-if="dsSummary" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
             <h2 class="text-sm font-semibold text-gray-200 mb-3">🤖 Аналитические выводы</h2>
-            <div v-if="dsSummary.verdict === 'ok'">
+            <div v-if="dsSummary.verdict === 'ok' && dsSummaryHasContent">
               <p v-if="dsSummary.summary" class="text-sm text-gray-200 mb-3 leading-relaxed">
                 {{ dsSummary.summary }}
               </p>
@@ -1103,8 +1115,8 @@ const sovSummaryRows = computed(() => {
             <div v-else-if="dsSummary.verdict === 'skipped'" class="text-xs text-gray-500 italic">
               Аналитика пропущена: {{ dsSummary.reason }}
             </div>
-            <div v-else-if="dsSummary.verdict === 'error'" class="text-xs text-amber-400 italic">
-              Аналитика недоступна: {{ dsSummary.reason }}
+            <div v-else class="text-xs text-amber-400 italic">
+              Аналитика недоступна{{ dsSummary.reason ? ': ' + dsSummary.reason : '' }}. Математический прогноз готов.
             </div>
           </section>
         </template>

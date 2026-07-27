@@ -18,6 +18,20 @@
 const { callAnalyticLLM, hasAnalyticLLMKey, analyticCallCost } = require('./analyticLLM');
 const { getForecasterConfig } = require('./config');
 
+/**
+ * Причина, по которой ответ модели не удалось использовать:
+ *   'truncated'      — лимит вывода исчерпан даже после ретраев (analyticLLM),
+ *   'empty_response' — модель вернула пустой текст,
+ *   'invalid_json'   — текст есть, но это не JSON нужной формы.
+ * Разделение нужно, чтобы по логам/UI было видно обрезку, а не «плохой формат».
+ */
+function _failReason(resp) {
+  if (!resp) return 'empty_response';
+  if (resp.truncated) return 'truncated';
+  if (!String(resp.text || '').trim()) return 'empty_response';
+  return 'invalid_json';
+}
+
 const SYSTEM_PROMPT = [
   'Роль: Senior SEO-аналитик и Growth-стратег. Ты пишешь «Аналитические выводы»',
   'по SEO-прогнозу — раздел, который увидит КЛИЕНТ. Он должен быть детальным,',
@@ -315,18 +329,36 @@ async function runDeepSeekAnalysis(payload) {
         note:   String(f.note || '').slice(0, 400),
       }));
 
+    const summary  = parsed?.summary ? String(parsed.summary).slice(0, 2000) : '';
+    const bullets  = _strList(parsed?.bullets);
+    // Раньше здесь всегда возвращался verdict 'ok': при непарсящемся ответе
+    // раздел «Аналитические выводы» рисовался пустым заголовком без причины.
+    // Теперь пустой/битый ответ — честная ошибка с reason и raw_text.
+    if (!parsed || (!summary && bullets.length === 0)) {
+      return {
+        verdict:    'error',
+        reason:     parsed ? 'empty_payload' : _failReason(resp),
+        raw_text:   String(resp.text || '').slice(0, 400),
+        tokens_in:  tIn,
+        tokens_out: tOut,
+        cost_usd:   Math.round(cost * 1e6) / 1e6,
+        model:      resp.model || provider,
+        duration_ms: ms,
+      };
+    }
+
     return {
       verdict: 'ok',
-      summary:        parsed?.summary || (resp.text || '').slice(0, 600),
+      summary,
       demand_analysis:  parsed?.demand_analysis  ? String(parsed.demand_analysis).slice(0, 2000)  : '',
       traffic_analysis: parsed?.traffic_analysis ? String(parsed.traffic_analysis).slice(0, 2000) : '',
       leads_analysis:   parsed?.leads_analysis   ? String(parsed.leads_analysis).slice(0, 2000)   : '',
-      bullets:        _strList(parsed?.bullets),
+      bullets,
       ranking_factors: _rankingFactors,
       pitfalls:       _strList(parsed?.pitfalls),
       works_alignment: parsed?.works_alignment ? String(parsed.works_alignment).slice(0, 2000) : '',
       recommendations: _strList(parsed?.recommendations),
-      raw_text:       parsed ? null : (resp.text || ''),
+      raw_text:       null,
       tokens_in:      tIn,
       tokens_out:     tOut,
       cached_tokens:  cached,
@@ -405,7 +437,7 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
     const cost = analyticCallCost(provider, resp);
     const parsed = _safeParseJsonArray(resp.text || '');
     if (!parsed) {
-      return { verdict: 'error', reason: 'invalid_json', tokens_in: tIn, tokens_out: tOut, cost_usd: cost };
+      return { verdict: 'error', reason: _failReason(resp), tokens_in: tIn, tokens_out: tOut, cost_usd: cost };
     }
     // нормализуем: индексируем по нормализованной phrase для устойчивости
     const map = new Map();
@@ -437,7 +469,7 @@ async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
   }
 }
 
-module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner, runVangaSummary };
+module.exports = { runDeepSeekAnalysis, runDeepSeekJunkRefine, runNicheStrategist, runOpportunityHunter, runClusterPlanner, runVangaSummary, _failReason };
 
 // ─────────────────────────────────────────────────────────────────────
 // «Ванга» — лаконичное бизнес-саммари прогноза для владельца бизнеса.
@@ -694,7 +726,7 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
     if (parsed == null) {
       return {
         verdict: 'error',
-        reason:  'invalid_json',
+        reason:  _failReason(resp),
         raw_text: (resp.text || '').slice(0, 400),
         tokens_in: tIn, tokens_out: tOut, cost_usd: Math.round(cost * 1e6) / 1e6,
         duration_ms: ms,
