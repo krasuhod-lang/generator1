@@ -327,13 +327,17 @@ const FORECASTER_CONFIG = deepFreeze({
     defaultRegion:     'msk',
   },
 
-  // ── Gemini-аналитик (gemini-3.1-pro-preview, как в генераторах) ───
+  // ── DeepSeek-аналитик («Аналитические выводы») ───────────────────
+  // ВАЖНО про maxTokens: deepseek-v4-pro и gemini-3.x — reasoning-модели,
+  // рассуждения тарифицируются и расходуют тот же бюджет вывода. При
+  // лимите ~3К модель успевала «подумать», но не успевала выдать JSON —
+  // приходил пустой/обрезанный ответ и раздел оставался пустым.
   deepseek: {
     // Гейт фичи: на случай если ключа нет — пайплайн просто пропускает шаг.
     enabled:       true,
     temperature:   0.3,
-    maxTokens:     3200,
-    timeoutMs:     90000,
+    maxTokens:     8000,
+    timeoutMs:     120000,
   },
 
   // ── «Ванга» — бизнес-саммари прогноза (Gemini) ───────────────────
@@ -362,8 +366,8 @@ const FORECASTER_CONFIG = deepFreeze({
   report: {
     enabled:     true,
     temperature: 0.3,      // аналитический режим, минимум творчества
-    maxTokens:   4096,
-    timeoutMs:   90000,
+    maxTokens:   8000,     // с запасом на reasoning-токены (см. deepseek выше)
+    timeoutMs:   120000,
     maxAttempts: 2,        // self-correction: повторный вызов при плохом JSON
   },
 
@@ -521,13 +525,15 @@ const FORECASTER_CONFIG = deepFreeze({
       },
     },
 
-    // DSPy-style эксперты (Gemini с типизированными JSON-схемами).
+    // DSPy-style эксперты (DeepSeek с типизированными JSON-схемами).
     // Каждый эксперт — отдельный вызов с фокусированным system-промптом
-    // и строгим JSON-output. Гейт каждого: feature flag + ключ GEMINI_API_KEY.
+    // и строгим JSON-output. Гейт каждого: feature flag + API-ключ.
+    // maxTokens берём с запасом на reasoning-токены: при 1200-1500 модель
+    // отдавала пустой/обрезанный ответ → verdict error/invalid_json.
     experts: {
-      nicheStrategist:    { enabled: true, temperature: 0.25, maxTokens: 1200, timeoutMs: 60000 },
-      opportunityHunter:  { enabled: true, temperature: 0.30, maxTokens: 1500, timeoutMs: 60000 },
-      clusterPlanner:     { enabled: true, temperature: 0.30, maxTokens: 1500, timeoutMs: 60000 },
+      nicheStrategist:    { enabled: true, temperature: 0.25, maxTokens: 5000, timeoutMs: 120000 },
+      opportunityHunter:  { enabled: true, temperature: 0.30, maxTokens: 6000, timeoutMs: 120000 },
+      clusterPlanner:     { enabled: true, temperature: 0.30, maxTokens: 6000, timeoutMs: 120000 },
       // Сколько top-возможностей передаём в OpportunityHunter (защита промпта).
       hunterTopN:         15,
       // Сколько top-кластеров передаём в ClusterPlanner.
