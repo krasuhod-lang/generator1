@@ -16,6 +16,7 @@ const { withUserSlot } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 const MAX_TOPIC_LEN   = 250;
 const MIN_TOPIC_LEN   = 5;
@@ -134,6 +135,8 @@ async function deleteLinkArticleTask(req, res, next) {
     if (rowCount === 0) {
       return res.status(404).json({ error: 'Задача не найдена' });
     }
+    // Чистим файлы задачи с диска (каталог картинок storage/images/<id>).
+    await cleanupTaskArtifacts({ taskId: req.params.id });
     return res.json({ ok: true });
   } catch (err) {
     return next(err);

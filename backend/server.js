@@ -416,6 +416,15 @@ const start = async () => {
       console.warn('[Server] Outreach scheduler skipped:', e.message);
     }
 
+    // 🧹 Storage retention — суточная авто-очистка старых/упавших генераций
+    // из БД и с диска (gating через STORAGE_RETENTION_ENABLED=1).
+    try {
+      const { startStorageRetentionScheduler } = require('./src/services/maintenance/scheduler');
+      startStorageRetentionScheduler();
+    } catch (e) {
+      console.warn('[Server] Storage-retention scheduler skipped:', e.message);
+    }
+
     const server = app.listen(PORT, () => {
       console.log(`[Server] SEO Genius v4.0 running on port ${PORT} [${process.env.NODE_ENV}]`);
     });

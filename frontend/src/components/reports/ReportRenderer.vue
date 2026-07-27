@@ -165,6 +165,7 @@ const gscChart = computed(() => {
     annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
     range,
+    normalizedIndex: series.findIndex((r) => r && r.is_normalized === true),
   };
 });
 
@@ -185,6 +186,7 @@ const ywmChart = computed(() => {
     annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
     showSecondAxis: true,
     range,
+    normalizedIndex: series.findIndex((r) => r && r.is_normalized === true),
   };
 });
 
@@ -741,7 +743,7 @@ function formatNum(v) {
       <div v-else-if="!gscChart" class="section-empty">
         За выбранный период данных нет.
       </div>
-      <ReportTrendChart v-else :labels="gscChart.labels" :datasets="gscChart.datasets" :annotations="gscChart.annotations" :show-second-axis="gscChart.showSecondAxis" :range="gscChart.range" />
+      <ReportTrendChart v-else :labels="gscChart.labels" :datasets="gscChart.datasets" :annotations="gscChart.annotations" :show-second-axis="gscChart.showSecondAxis" :range="gscChart.range" :normalized-index="gscChart.normalizedIndex" />
     </section>
 
     <!-- Яндекс.Вебмастер -->
@@ -764,7 +766,7 @@ function formatNum(v) {
       <div v-else-if="!ywmChart" class="section-empty">
         За выбранный период данных нет.
       </div>
-      <ReportTrendChart v-else :labels="ywmChart.labels" :datasets="ywmChart.datasets" :annotations="ywmChart.annotations" :show-second-axis="ywmChart.showSecondAxis" :range="ywmChart.range" />
+      <ReportTrendChart v-else :labels="ywmChart.labels" :datasets="ywmChart.datasets" :annotations="ywmChart.annotations" :show-second-axis="ywmChart.showSecondAxis" :range="ywmChart.range" :normalized-index="ywmChart.normalizedIndex" />
     </section>
 
     <!-- Keys.so -->

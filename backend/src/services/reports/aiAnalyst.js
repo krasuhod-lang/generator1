@@ -106,21 +106,47 @@ function _seriesValues(input, key) {
   return series.map((r) => (r && r[key] != null ? Number(r[key]) : null));
 }
 
+// Порог «абсурдного» процента: если |pct| превышает его, число считается
+// недостоверным (обычно из-за старта с микро-базы, напр. 1 клик → 500) и в
+// отчёт/дайджест выводится ТОЛЬКО абсолютная дельта, без процента. Держим
+// метрико-агностичным (кап по величине, а не по абсолюту базы) — так одна и
+// та же логика honestly работает и для кликов/показов, и для долей видимости.
+const PCT_UNRELIABLE_CAP = 1000;
+
 /**
- * Считает регрессионный тренд ряда графика по ключу и возвращает
- * { first: fitLast_начала, last: fitLast_конца, delta, pct, dir } —
- * идентично панели «Динамика за период» на фронте (trendSummary):
- *   delta = fitLast − fitFirst; pct = delta / |fitFirst| × 100; dir по знаку slope.
- * Возвращает null, если точек меньше двух (тренд не определён — цифру скрываем).
+ * Считает тренд ряда графика по ключу и возвращает
+ * { first, last, delta, pct, dir, pct_unreliable }.
+ *
+ * ТЗ (математика отчётов): дельта и процент считаются по РЕАЛЬНЫМ (или уже
+ * нормализованным на неполный месяц) крайним точкам ряда — first = первое
+ * непустое значение, last = последнее. Линейная регрессия используется ТОЛЬКО
+ * для направления тренда (dir по знаку slope), чтобы стрелка ▲/▼ совпадала с
+ * наклоном линии на графике, а цифры справа — с реальными концами ряда, как их
+ * воспринимает клиент («Январь vs Май»), а не с точками аппроксимации.
+ *
+ * Защита от абсурдных процентов:
+ *   • first ≤ 0            → pct = null (деление невозможно/некорректно);
+ *   • |pct| > CAP          → pct_unreliable = true (микро-база даёт тысячи %).
+ * При pct_unreliable потребитель показывает только абсолютную дельту.
+ *
+ * Возвращает null, если непустых точек меньше двух (тренд не определён).
  */
 function _regressAttr(input, key) {
   const values = _seriesValues(input, key);
-  const { slope, fitFirst, fitLast, n } = _linregress(values);
-  if (fitFirst === null || fitLast === null || n < 2) return null;
-  const delta = fitLast - fitFirst;
-  const pct = fitFirst !== 0 ? (delta / Math.abs(fitFirst)) * 100 : null;
+  const finite = values.filter((v) => v != null && Number.isFinite(v));
+  const { slope, n } = _linregress(values);
+  if (n < 2 || finite.length < 2) return null;
+  const first = finite[0];
+  const last = finite[finite.length - 1];
+  const delta = last - first;
+  let pct = first > 0 ? (delta / first) * 100 : null;
+  let pct_unreliable = false;
+  if (pct == null || !Number.isFinite(pct) || Math.abs(pct) > PCT_UNRELIABLE_CAP) {
+    pct_unreliable = true;
+    pct = null;
+  }
   const dir = slope > 0 ? 'up' : (slope < 0 ? 'down' : 'stable');
-  return { first: fitFirst, last: fitLast, delta, pct, dir };
+  return { first, last, delta, pct, dir, pct_unreliable };
 }
 
 // Округление процента до 1 знака для хранения в digest (текст fallback/промпта).
