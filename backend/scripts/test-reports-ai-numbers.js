@@ -75,48 +75,46 @@ test('очищает числа у нераспознанных метрик (н
   assert.strictEqual(row.attribution, 'z');
 });
 
-console.log('── регрессия «Динамика за период» ─────────────');
+console.log('── дельта/процент по реальным точкам ──────────');
 
-// Точная копия _linregress из frontend/src/components/reports/ReportTrendChart.vue —
-// эталон, с которым сверяем бэкенд-дайджест.
-function refLinregress(data) {
-  const pts = [];
-  (data || []).forEach((v, i) => {
-    if (v == null || !Number.isFinite(v)) return;
-    pts.push([i, v]);
-  });
-  if (pts.length < 2) {
-    const only = pts.length === 1 ? pts[0][1] : null;
-    return { slope: 0, fitFirst: only, fitLast: only, n: pts.length };
-  }
-  const n = pts.length;
-  let sx = 0, sy = 0, sxx = 0, sxy = 0;
-  for (const [x, y] of pts) { sx += x; sy += y; sxx += x * x; sxy += x * y; }
-  const denom = n * sxx - sx * sx;
-  const slope = denom !== 0 ? (n * sxy - sx * sy) / denom : 0;
-  const intercept = (sy - slope * sx) / n;
-  return { slope, fitFirst: slope * pts[0][0] + intercept, fitLast: slope * pts[pts.length - 1][0] + intercept, n };
-}
-
-test('дайджест GSC-кликов совпадает с регрессией графика (перфектная линия)', () => {
+test('дайджест GSC-кликов: дельта/процент по реальным крайним точкам', () => {
   const series = [{ clicks: 100 }, { clicks: 200 }, { clicks: 300 }];
   const d = _buildMetricsDigest({ gsc: { series, totals: { clicks: 600 } } });
-  const ref = refLinregress(series.map((r) => r.clicks));
-  assert.strictEqual(d.gsc_clicks_prev, ref.fitFirst);
-  assert.strictEqual(d.gsc_clicks_last, ref.fitLast);
+  assert.strictEqual(d.gsc_clicks_prev, 100); // реальная первая точка
+  assert.strictEqual(d.gsc_clicks_last, 300); // реальная последняя точка
   assert.strictEqual(d.gsc_clicks_dir, 'up');
   assert.strictEqual(d.gsc_clicks_delta_pct, 200); // (300-100)/100*100
 });
 
-test('дайджест совпадает с регрессией на «шумном» ряду', () => {
+test('дельта/процент по реальным точкам на «шумном» ряду (не по регрессии)', () => {
   const series = [{ clicks: 120 }, { clicks: 90 }, { clicks: 160 }, { clicks: 210 }];
   const d = _buildMetricsDigest({ gsc: { series, totals: { clicks: 580 } } });
-  const ref = refLinregress(series.map((r) => r.clicks));
-  const refPct = ref.fitFirst !== 0 ? (ref.fitLast - ref.fitFirst) / Math.abs(ref.fitFirst) * 100 : null;
-  assert.strictEqual(d.gsc_clicks_prev, ref.fitFirst);
-  assert.strictEqual(d.gsc_clicks_last, ref.fitLast);
-  assert.strictEqual(d.gsc_clicks_delta_pct, Math.round(refPct * 10) / 10);
-  assert.strictEqual(d.gsc_clicks_dir, ref.slope > 0 ? 'up' : (ref.slope < 0 ? 'down' : 'stable'));
+  // Реальные концы: 120 → 210, а не точки регрессионной прямой.
+  assert.strictEqual(d.gsc_clicks_prev, 120);
+  assert.strictEqual(d.gsc_clicks_last, 210);
+  assert.strictEqual(d.gsc_clicks_delta_pct, 75); // (210-120)/120*100
+  assert.strictEqual(d.gsc_clicks_dir, 'up'); // slope > 0
+});
+
+test('микро-база: абсурдный процент скрыт, дельта показана', () => {
+  // Старт с 1 клика → рост до 500 дал бы +49900% — это скрываем.
+  const series = [{ clicks: 1 }, { clicks: 200 }, { clicks: 500 }];
+  const d = _buildMetricsDigest({ gsc: { series, totals: { clicks: 701 } } });
+  assert.strictEqual(d.gsc_clicks_delta_pct, null); // процент недостоверен → скрыт
+  assert.strictEqual(d.gsc_clicks_prev, 1);
+  assert.strictEqual(d.gsc_clicks_last, 500);
+  assert.strictEqual(d.gsc_clicks_dir, 'up'); // направление всё равно известно
+  const [row] = _applyCanonicalNumbers([{ metric: 'Клики из Google', attribution: 't' }], d);
+  assert.strictEqual(row.delta_pct, ''); // процент не выводится
+  assert.strictEqual(row.trend_direction, 'up');
+  assert.strictEqual(row.delta_value, '+499 кликов'); // абсолютная дельта показана
+});
+
+test('старт с нуля: процент скрыт (деление на ноль)', () => {
+  const series = [{ clicks: 0 }, { clicks: 50 }, { clicks: 120 }];
+  const d = _buildMetricsDigest({ gsc: { series, totals: { clicks: 170 } } });
+  assert.strictEqual(d.gsc_clicks_delta_pct, null);
+  assert.strictEqual(d.gsc_clicks_dir, 'up');
 });
 
 test('нисходящий тренд → dir=down, канон-числа форматируются (ru-RU, 1 знак)', () => {
@@ -145,6 +143,54 @@ test('видимость Keys.so: показывается процент, аб�
   assert.strictEqual(row.trend_direction, 'up');
   assert.strictEqual(row.delta_value, ''); // абсолют намеренно скрыт
   assert.ok(row.delta_pct.startsWith('+'), 'процент должен показываться');
+});
+
+console.log('── нормализация неполного месяца ──────────────');
+
+const { _normalizePartialSeries } = require('../src/services/reports/dataAggregator');
+
+test('экстраполирует clicks/impressions неполного месяца по normFactor', () => {
+  // Апрель (30 дней), собрано 15 дней → normFactor = 2.
+  const series = [
+    { date: '2026-02-01', clicks: 300, impressions: 3000 },
+    { date: '2026-03-01', clicks: 320, impressions: 3200 },
+    { date: '2026-04-01', clicks: 150, impressions: 1500 },
+  ];
+  const meta = {
+    monthly_periods: [
+      { key: '2026-02', is_partial: false, days: 28 },
+      { key: '2026-03', is_partial: false, days: 31 },
+      { key: '2026-04', is_partial: true, days: 15 },
+    ],
+  };
+  const out = _normalizePartialSeries(series, meta);
+  assert.strictEqual(out[0].clicks, 300); // полные месяцы не трогаем
+  assert.strictEqual(out[2].is_normalized, true);
+  assert.strictEqual(out[2].norm_factor, 2);
+  assert.strictEqual(out[2].clicks, 300); // 150 * 30/15
+  assert.strictEqual(out[2].impressions, 3000);
+  assert.strictEqual(out[2].actual_clicks, 150); // фактическое сохранено
+});
+
+test('мало дней (< порога) → не масштабируем, только метим', () => {
+  const series = [
+    { date: '2026-03-01', clicks: 300, impressions: 3000 },
+    { date: '2026-04-01', clicks: 20, impressions: 200 },
+  ];
+  const meta = { monthly_periods: [
+    { key: '2026-03', is_partial: false, days: 31 },
+    { key: '2026-04', is_partial: true, days: 2 },
+  ] };
+  const out = _normalizePartialSeries(series, meta);
+  assert.strictEqual(out[1].is_normalized, false);
+  assert.strictEqual(out[1].clicks, 20); // не изменено
+  assert.strictEqual(out[1].is_partial_month, true);
+});
+
+test('нет неполных месяцев → серия не меняется', () => {
+  const series = [{ date: '2026-03-01', clicks: 100 }];
+  const meta = { monthly_periods: [{ key: '2026-03', is_partial: false, days: 31 }] };
+  assert.strictEqual(_normalizePartialSeries(series, meta), series);
 });
 
 console.log(`\n${total - failed}/${total} passed`);

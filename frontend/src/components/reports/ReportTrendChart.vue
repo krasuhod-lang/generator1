@@ -39,7 +39,15 @@ const props = defineProps({
   //   • баннера «Источник вернул данные с DD.MM.YYYY — раньше истории нет»,
   //     когда actual_from > range.from.
   range: { type: Object, default: () => null },
+  // ТЗ (математика отчётов): индекс точки, значение которой экстраполировано
+  // из неполного (текущего) месяца до конца месяца. Отрисовываем её полым
+  // маркером-«кольцом» и подписью, чтобы клиент понимал, что это прогноз.
+  normalizedIndex: { type: Number, default: -1 },
 });
+
+// Порог «абсурдного» процента (совпадает с backend aiAnalyst.PCT_UNRELIABLE_CAP):
+// при |pct| выше него число недостоверно (микро-база), показываем только дельту.
+const PCT_UNRELIABLE_CAP = 1000;
 
 function _fmtRu(iso) {
   if (!iso || typeof iso !== 'string') return '';
@@ -258,19 +266,28 @@ function _linregress(data) {
 
 const trendSummary = computed(() => {
   return props.datasets.map((ds, di) => {
-    const { slope, fitFirst, fitLast, n } = _linregress(ds.data);
-    if (fitFirst === null || fitLast === null || n < 1) {
+    const { slope, n } = _linregress(ds.data);
+    const finite = (ds.data || []).filter((v) => v != null && Number.isFinite(v));
+    if (n < 1 || finite.length < 1) {
       return { label: ds.label, color: ds.color, hidden: hiddenSeries.value.has(di), empty: true };
     }
-    const delta = fitLast - fitFirst;
-    const pct = fitFirst !== 0 ? (delta / Math.abs(fitFirst)) * 100 : null;
+    // ТЗ (математика отчётов): дельта/процент — по РЕАЛЬНЫМ крайним точкам ряда
+    // (первое/последнее непустое значение; последнее уже нормализовано на
+    // неполный месяц бэкендом). Регрессия используется только для направления
+    // тренда (стрелка ▲/▼ совпадает с наклоном линии). Абсурдные проценты от
+    // микро-базы (|pct| > CAP или first ≤ 0) скрываем — показываем только дельту.
+    const first = finite[0];
+    const last = finite[finite.length - 1];
+    const delta = last - first;
+    let pct = first > 0 ? (delta / first) * 100 : null;
+    if (pct == null || !Number.isFinite(pct) || Math.abs(pct) > PCT_UNRELIABLE_CAP) pct = null;
     const dir = slope > 0 ? 'up' : (slope < 0 ? 'down' : 'flat');
     return {
       label: ds.label,
       color: ds.color,
       hidden: hiddenSeries.value.has(di),
       empty: false,
-      first: fitFirst, last: fitLast, delta, pct, dir, slope,
+      first, last, delta, pct, dir, slope,
     };
   });
 });
@@ -292,6 +309,22 @@ const trendLines = computed(() => {
       y2: yFor(slope * (n - 1) + intercept, axis),
     };
   }).filter(Boolean);
+});
+
+// ТЗ (математика отчётов): полые маркеры-«кольца» на экстраполированной точке
+// неполного месяца (normalizedIndex) для каждой видимой серии — визуальный
+// сигнал «это прогноз до конца месяца», а не фактические данные.
+const normalizedMarkers = computed(() => {
+  const idx = props.normalizedIndex;
+  if (idx == null || idx < 0 || idx >= props.labels.length) return [];
+  const out = [];
+  props.datasets.forEach((ds, di) => {
+    if (hiddenSeries.value.has(di)) return;
+    const v = ds.data?.[idx];
+    if (v == null || !Number.isFinite(v)) return;
+    out.push({ cx: xFor(idx), cy: yFor(v, ds.yAxisID || 'y'), color: ds.color });
+  });
+  return out;
 });
 
 function _fmtDelta(v) {
@@ -365,6 +398,12 @@ function _fmtPct(v) {
             stroke-dasharray="7,5" stroke-opacity="0.65"
             stroke-linecap="round" />
 
+      <!-- ТЗ: полые маркеры на экстраполированной точке неполного месяца -->
+      <circle v-for="(nm, ni) in normalizedMarkers" :key="`nm${ni}`"
+              :cx="nm.cx" :cy="nm.cy" r="4.5"
+              fill="#fff" :stroke="nm.color" stroke-width="2"
+              stroke-dasharray="2,1.5" />
+
       <!-- Hover crosshair + dots -->
       <template v-if="hoverIndex >= 0 && hoverIndex < labels.length">
         <line :x1="xFor(hoverIndex)" :x2="xFor(hoverIndex)"
@@ -432,6 +471,10 @@ function _fmtPct(v) {
         <span class="legend-text" :style="{ color: hiddenSeries.has(i) ? 'rgba(0,0,0,0.3)' : ds.color }">{{ ds.label }}</span>
       </button>
     </div>
+    <!-- ТЗ: подпись, что последняя точка неполного месяца экстраполирована. -->
+    <div v-if="normalizedIndex >= 0" class="chart-normalized-note">
+      ◌ Последняя точка — прогноз до конца месяца (данные неполного месяца экстраполированы)
+    </div>
     <!-- ТЗ #1: подпись диапазона под графиком, чтобы клиент видел, какой
          именно период визуализирован, и понимал размер оси X. -->
     <div v-if="rangeCaption" class="chart-range-caption">{{ rangeCaption }}</div>
@@ -452,6 +495,13 @@ function _fmtPct(v) {
 .chart-range-caption {
   margin-top: 6px;
   color: #6e6e73;
+  font-size: 11px;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+.chart-normalized-note {
+  margin-top: 6px;
+  color: #92400e;
   font-size: 11px;
   text-align: center;
   letter-spacing: 0.02em;

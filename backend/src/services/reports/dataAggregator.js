@@ -51,6 +51,79 @@ function _seriesMeta(rawSeries) {
   };
 }
 
+// Минимум дней неполного месяца, при котором экстраполяция считается
+// осмысленной. Меньше — слишком шумно (1-2 дня «раздуваются» в весь месяц),
+// поэтому такой месяц помечаем как неполный, но НЕ масштабируем.
+const _MIN_DAYS_FOR_NORM = 3;
+
+// Число календарных дней в месяце по ключу 'YYYY-MM'.
+function _daysInMonthOf(monthKey) {
+  const m = /^(\d{4})-(\d{2})/.exec(String(monthKey || ''));
+  if (!m) return null;
+  return new Date(Date.UTC(+m[1], +m[2], 0)).getUTCDate();
+}
+
+/**
+ * Нормализация неполного (текущего) месяца в помесячной серии графика.
+ *
+ * ТЗ (математика отчётов): текущий незакрытый месяц (например, 15 дней из 31)
+ * несопоставим с полными месяцами и «обваливает» тренд вниз. Экстраполируем
+ * его абсолютные накопительные метрики (clicks, impressions) до конца месяца:
+ *   normFactor = daysInMonth / days;  value *= normFactor
+ * Относительные метрики (ctr, position) НЕ масштабируем. Снимок-метрики
+ * Keys.so (visibility/top10) сюда не попадают — их нормализация не имеет смысла.
+ *
+ * Гейт: если данных меньше `_MIN_DAYS_FOR_NORM` дней — не масштабируем (шум),
+ * только помечаем точку. Если месяц уже фактически полный (days >= daysInMonth,
+ * напр. is_partial из-за лага источника) — тоже оставляем как есть.
+ *
+ * Источник дней/периодов — авторитетный `series_meta.monthly_periods`
+ * (см. periodResolver). Возвращает НОВЫЙ массив; исходные строки не мутируются.
+ * На нормализованной точке проставляются флаги для фронта:
+ *   is_partial_month, is_normalized, norm_factor, days_in_month,
+ *   partial_days, actual_clicks, actual_impressions.
+ */
+function _normalizePartialSeries(series, meta) {
+  if (!Array.isArray(series) || !series.length || !meta) return series;
+  const periods = Array.isArray(meta.monthly_periods) ? meta.monthly_periods : [];
+  const partialByMonth = new Map();
+  for (const p of periods) {
+    if (p && p.is_partial && p.key) partialByMonth.set(String(p.key), p);
+  }
+  if (!partialByMonth.size) return series;
+
+  return series.map((row) => {
+    const monthKey = String(row?.date || '').slice(0, 7);
+    const period = partialByMonth.get(monthKey);
+    if (!period) return row;
+
+    const daysInMonth = _daysInMonthOf(period.key);
+    const days = Number(period.days) || 0;
+    // Недостаточно данных или месяц уже полон → метим, но не экстраполируем.
+    if (!daysInMonth || days < _MIN_DAYS_FOR_NORM || days >= daysInMonth) {
+      return { ...row, is_partial_month: true, partial_days: days, is_normalized: false };
+    }
+
+    const factor = daysInMonth / days;
+    const out = {
+      ...row,
+      is_partial_month: true,
+      is_normalized: true,
+      norm_factor: Math.round(factor * 100) / 100,
+      days_in_month: daysInMonth,
+      partial_days: days,
+    };
+    for (const k of ['clicks', 'impressions']) {
+      const v = row[k];
+      if (v != null && Number.isFinite(Number(v))) {
+        out[`actual_${k}`] = Number(v);
+        out[k] = Math.round(Number(v) * factor);
+      }
+    }
+    return out;
+  });
+}
+
 function _totalsFromMonths(months) {
   if (!Array.isArray(months) || !months.length) return null;
   let clicks = 0, impressions = 0, posSum = 0, posDays = 0;
@@ -432,12 +505,16 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
     const { series, range } = _alignSeriesToRange(aggregated, from, to, granularity);
     const isPartial = freshnessMap?.gsc?.status === 'partial' || freshnessMap?.gsc?.status === 'gap';
     const completePeriods = await _completePeriodTotals(data.series, prevPromise);
+    // ТЗ: экстраполируем неполный (текущий) месяц до конца месяца, чтобы он не
+    // «обваливал» тренд/график. Нормализованная серия идёт и в digest (регрессия
+    // в aiAnalyst), и на фронт (chart) — единый источник истины.
+    const normSeries = _normalizePartialSeries(series, completePeriods.meta);
     return {
       connected: true,
       status: aggregated.length ? (isPartial ? 'partial' : 'ready') : 'empty',
       reason: aggregated.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
-      series,
+      series: normSeries,
       series_meta: completePeriods.meta,
       totals: data.totals || null,
       totals_complete: completePeriods.totals_complete,
@@ -483,12 +560,14 @@ async function _ydxSection(project, from, to, granularity, freshnessMap) {
     const { series, range } = _alignSeriesToRange(aggregated, from, to, granularity);
     const isPartial = freshnessMap?.yandex_webmaster?.status === 'partial' || freshnessMap?.yandex_webmaster?.status === 'gap';
     const completePeriods = await _completePeriodTotals(data.series, prevPromise);
+    // ТЗ: нормализация неполного месяца (см. _gscSection).
+    const normSeries = _normalizePartialSeries(series, completePeriods.meta);
     return {
       connected: true,
       status: aggregated.length ? (isPartial ? 'partial' : 'ready') : 'empty',
       reason: aggregated.length ? (isPartial ? 'source_lag' : null) : 'no_rows',
       last_sync_at,
-      series,
+      series: normSeries,
       series_meta: completePeriods.meta,
       totals: data.totals || null,
       totals_complete: completePeriods.totals_complete,
@@ -1217,6 +1296,7 @@ module.exports = {
   _aggregateByMonth,
   _isoDate,
   _seriesMeta,
+  _normalizePartialSeries,
   _totalsFromMonths,
   _completePeriodTotals,
   _classifyQueries,
