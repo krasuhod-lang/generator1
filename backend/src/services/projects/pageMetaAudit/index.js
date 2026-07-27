@@ -302,6 +302,13 @@ async function _regenerateOne({
       summary: before.description || before.title || '',
       price_data: priceData,
       audienceNicheDigest: audienceNicheDigest || '',
+      // §4 ТЗ: pageAngle аудируемой страницы берём из её фактического
+      // контента (текущие мета-теги / H1) — конкретнее автосинтеза по нише.
+      pageAngle: [
+        before.h1 ? `H1 страницы: ${before.h1}` : '',
+        before.title ? `Текущий Title: ${before.title}` : '',
+        before.description ? `Текущее описание: ${before.description}` : '',
+      ].filter(Boolean).join(' | ').slice(0, 500),
     },
   });
 
@@ -310,6 +317,7 @@ async function _regenerateOne({
     suggested: after,
     diff: diffMeta(before, after),
     lsi_check: metas.lsi_check || null,
+    ctr_score: metas.ctr_score || null,
     serp_analyzed: Boolean(serp && serp.length),
   };
 }

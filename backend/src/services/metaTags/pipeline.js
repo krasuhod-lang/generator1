@@ -274,6 +274,11 @@ async function runMetaTagTaskInner(taskId) {
     // generateDrMaxMeta → callGemini/callGrok через args.inputs.
     llm_provider: (task.llm_provider || 'gemini').toString().toLowerCase() === 'grok' ? 'grok' : 'gemini',
     gemini_model: task.gemini_model || '',
+    // §4/§5 ТЗ: pageAngle и missingNodes собираются детерминированно внутри
+    // runMetaStagesForKeyword (metaContext.enrichMetaInputs) — там доступны
+    // ctrAnalysis/snippetAnalysis по конкретному ключу. Здесь задаём только
+    // флаг standalone-дистрибуции страницы (по умолчанию false).
+    standalone_exposure: task.standalone_exposure === true,
   };
 
   // Sprint B: подключаем relevance-артефакт (если есть).
@@ -365,6 +370,15 @@ async function runMetaTagTaskInner(taskId) {
         lr: task.lr,
       });
       await appendLog(taskId, `📡 SERP получен: ${serp.length} результатов`, 'info');
+      const ctxUsed = metas.context_used || {};
+      if ((ctxUsed.missing_nodes || []).length) {
+        await appendLog(taskId,
+          `🧩 Missing nodes (${ctxUsed.missing_nodes.length}): ${ctxUsed.missing_nodes.join(' | ')}`,
+          'info');
+      }
+      if (ctxUsed.page_angle) {
+        await appendLog(taskId, `🎯 Page angle: ${ctxUsed.page_angle}`, 'info');
+      }
       await appendLog(taskId,
         `🔢 LSI: важных ${semantics.title_mandatory_words.length}, рекомендованных ${semantics.description_mandatory_words.length}`,
         'info');
@@ -412,6 +426,7 @@ async function runMetaTagTaskInner(taskId) {
       kwOk += 1;
       await appendLog(taskId,
         `✅ «${kw}» готово (Title ${metas.title_length}, Desc ${metas.description_length}` +
+        `, CTR-скор ${metas.ctr_score ? metas.ctr_score.score : '—'}/100` +
         `, ${tIn + tOut} ток., $${cost.toFixed(4)})`,
         'ok');
     } catch (err) {

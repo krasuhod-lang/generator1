@@ -27,7 +27,9 @@
  */
 
 const { callGemini } = require('../llm/gemini.adapter');
-const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
+const {
+  trimToLastWord, trimToLastSentence, compressPreservingCta, hasCta,
+} = require('./lengthHelpers');
 const {
   CANDIDATE_GENERATOR_SYSTEM,
   FILTER_RANKER_SYSTEM,
@@ -56,6 +58,12 @@ const TEMPORAL_RE = /(скидк\w*|акци\w*|распродаж\w*|до\s+к�
 
 // Пауза review для временного GIST-фактора в title (§6): +30 дней.
 const TEMPORAL_REVIEW_DAYS = 30;
+
+// Kill-switch LLM-рефрейминга длины (§5 ТЗ). При 'false' поведение прежнее:
+// сразу детерминированное сжатие/обрезка.
+function _isReframeEnabled() {
+  return String(process.env.META_LENGTH_REFRAME_ENABLED ?? 'true').toLowerCase() !== 'false';
+}
 
 const MAX_PAIR_ATTEMPTS = 3;
 const MAX_PARSE_ATTEMPTS = 3;
@@ -266,10 +274,15 @@ function _buildCandidateUserPrompt({
 
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
 
+  // Год приходит из единого источника (metaGenerator.detectYear): '' означает
+  // исторический контекст — год в мета-тегах форсировать нельзя (§7 ТЗ).
+  const currentYear = String(inputs.current_year ?? '').trim();
+
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Контекст страницы: ${contextParts.join(' | ') || 'Нет данных'}
-- Проверенная цена (price_data): ${priceData || 'null'}${pageAngle ? `
+- Проверенная цена (price_data): ${priceData || 'null'}
+- Актуальный год (current_year): ${currentYear || 'не использовать год — исторический контекст страницы'}${pageAngle ? `
 - Page angle страницы (первый кандидат): ${pageAngle}` : ''}${missingNodes.length ? `
 - Missing semantic nodes страницы (первые кандидаты): ${missingNodes.join('; ')}` : ''}${lsiBlock ? `
 ${lsiBlock}` : ''}
@@ -342,18 +355,22 @@ function _buildAssemblerUserPrompt({
   const alternateFacts = alternates.map((a) => `- ${a.fact} (source: ${a.source})`).join('\n');
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
   const obligatoryLsi = (semantics.obligatory_lsi || []).filter(Boolean);
+  const differentiatorLsi = (semantics.differentiator_lsi || []).filter(Boolean).slice(0, 3);
   const mandatoryWords = (semantics.title_mandatory_words || []).filter(Boolean).slice(0, 6);
   const lsiBlock = obligatoryLsi.length || mandatoryWords.length
     ? `
 
-[ОБЯЗАТЕЛЬНЫЕ LSI ТОПа]${obligatoryLsi.length ? `
-- Обязательные LSI (есть у ≥50% ТОП-выдачи — без них ниже CTR; КАЖДОЕ слово органично включи в title или description, словоформы допустимы): ${obligatoryLsi.join(', ')}` : ''}${mandatoryWords.length ? `
-- Важные слова ТОПа (по возможности используй в title): ${mandatoryWords.join(', ')}` : ''}`
+[LSI ТОПа — ПРИОРИТЕТЫ]${obligatoryLsi.length ? `
+- Приоритет 1 (есть у ≥50% ТОП-выдачи): ${obligatoryLsi.join(', ')} — органично вплети 2–3 наиболее релевантных (словоформы допустимы)` : ''}${differentiatorLsi.length ? `
+- Приоритет 2 — дифференциаторы (нет ни у одного конкурента): ${differentiatorLsi.join(', ')} — добавь 1–2 ради уникальности` : ''}${mandatoryWords.length ? `
+- Важные слова ТОПа (по возможности, приоритет 3): ${mandatoryWords.join(', ')}` : ''}
+- Читаемость и CTR важнее полноты покрытия LSI: переспам и перечисления ключей запрещены.`
     : '';
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос (title обязан НАЧИНАТЬСЯ с него, старт в первых 35 символах): ${keyword}
 - Бренд: ${inputs.brand || '—'}
 - Регион: ${inputs.toponym || '—'}
+- Актуальный год (используй ТОЛЬКО его, если год уместен): ${String(inputs.current_year ?? '').trim() || 'не использовать год — исторический контекст'}
 - Контекст / УТП страницы: ${inputs.summary || inputs.page_context || 'Нет данных'}
 - Задача поля (Step 8.1): ${JSON.stringify(phase1.field_job || {})}
 - standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}
@@ -370,19 +387,101 @@ ${feedback}` : ''}
 Собери пару по Steps 8.7–8.8 и верни JSON по контракту.`;
 }
 
+/** true, если пара вылезла за кириллические safe ranges. */
+function _pairExceedsLimits(pair) {
+  return String(pair.title || '').length > TITLE_MAX
+    || String(pair.description || '').length > DESC_MAX;
+}
+
+/**
+ * Шаг 1 стратегии «умной обработки превышения длины» (§5 ТЗ): LLM-рефрейминг.
+ * Вместо механической обрезки просим ту же копирайтерскую модель СОКРАТИТЬ
+ * пару, сохранив GIST-факт и CTA в конце description. Ровно одна попытка и
+ * короткий таймаут — это дешёвая оптимизация, а не новый пайплайн.
+ *
+ * Fail-open: любая ошибка/невалидный ответ → пара не меняется, дальше
+ * отработают детерминированные ветки 2–3 (_deterministicPairFix).
+ *
+ * @returns {Promise<boolean>} true, если рефрейминг применён
+ */
+async function _reframeLengths(pair, { keyword, winnerFact, usage, notes, copywriterModel }) {
+  if (!_pairExceedsLimits(pair)) return false;
+  const title = String(pair.title || '');
+  const description = String(pair.description || '');
+
+  const userPrompt = `[ЗАДАЧА — СОКРАЩЕНИЕ БЕЗ ПОТЕРИ СМЫСЛА]
+Пара мета-тегов превысила кириллические лимиты. Перепиши её КОРОЧЕ, сохранив:
+- главный поисковый запрос «${keyword}» в начале title (старт в первых ${TITLE_FACT_WINDOW} символах);
+- GIST-факт: ${winnerFact || '— (сохрани ключевой конкретный факт исходной пары)'};
+- CTA (побудительную конструкцию) В САМОМ КОНЦЕ description — он даёт CTR и
+  обрезать его НЕЛЬЗЯ.
+
+[ТЕКУЩАЯ ПАРА]
+- Title (${title.length} симв., лимит ${TITLE_MAX}): ${title}
+- Description (${description.length} симв., лимит ${DESC_MAX}): ${description}
+
+[ЖЁСТКИЕ ТРЕБОВАНИЯ]
+- Title: ${TITLE_MIN}–${TITLE_MAX} символов (цель 72–78).
+- Description: ${DESC_MIN}–${DESC_MAX} символов (цель 183–188), CTA в конце.
+- description_mobile: ${DESC_MOBILE_MIN}–${DESC_MOBILE_MAX} символов.
+- h1: до ${H1_MAX} символов, не копия title.
+- Ничего не выдумывай: только факты исходной пары.
+
+Верни JSON по контракту (title, description, description_mobile, h1).`;
+
+  try {
+    const reframed = await _callCopywriterJson(userPrompt, usage, {
+      model: copywriterModel || undefined,
+      temperature: 0.2,
+      maxTokens: 2000,
+      timeoutMs: 20000,
+    });
+    const newTitle = String(reframed.title || '').trim();
+    const newDesc = String(reframed.description || '').trim();
+    if (!newTitle || !newDesc) return false;
+    if (newTitle.length > TITLE_MAX || newDesc.length > DESC_MAX) {
+      // Рефрейминг не уложился — отдаём работу детерминированным веткам.
+      return false;
+    }
+    pair.title = newTitle;
+    pair.description = newDesc;
+    if (String(reframed.description_mobile || '').trim()) {
+      pair.description_mobile = String(reframed.description_mobile).trim();
+    }
+    if (String(reframed.h1 || '').trim()) pair.h1 = String(reframed.h1).trim();
+    notes.push(
+      `Длина приведена LLM-рефреймингом (${title.length}→${newTitle.length} / `
+      + `${description.length}→${newDesc.length} симв.), CTA и GIST-факт сохранены.`,
+    );
+    return true;
+  } catch (err) {
+    notes.push(`LLM-рефрейминг длины не удался (${err.message}) — используем детерминированное сжатие.`);
+    return false;
+  }
+}
+
 function _deterministicPairFix(pair, notes) {
   if (typeof pair.title === 'string' && pair.title.length > TITLE_MAX) {
     pair.title = trimToLastWord(pair.title, TITLE_MAX);
     notes.push(`Title обрезан до ${pair.title.length} симв. (кириллический лимит ${TITLE_MAX}).`);
   }
   if (typeof pair.description === 'string' && pair.description.length > DESC_MAX) {
-    // Сначала пытаемся обрезать до предложения; если результат выпал ниже
-    // safe range (например 179 < 180) — обрезаем до слова, оставаясь в range.
-    const bySentence = trimToLastSentence(pair.description, DESC_MAX);
-    pair.description = bySentence.length >= DESC_MIN
-      ? bySentence
-      : trimToLastWord(pair.description, DESC_MAX);
-    notes.push(`Description обрезан до ${pair.description.length} симв. (лимит ${DESC_MAX}).`);
+    // Ветка 2 (§5 ТЗ): сжимаем с сохранением CTA — он стоит в конце и первым
+    // страдал от механической обрезки по последнему предложению.
+    const hadCta = hasCta(pair.description);
+    const compressed = compressPreservingCta(pair.description, DESC_MAX);
+    // Ветка 3: если CTA-сжатие выбросило нас ниже safe range, а обрезка по
+    // слову укладывается в range — берём её (историческое поведение).
+    if (compressed.text.length < DESC_MIN) {
+      const byWord = trimToLastWord(pair.description, DESC_MAX);
+      pair.description = byWord.length >= DESC_MIN ? byWord : compressed.text;
+    } else {
+      pair.description = compressed.text;
+    }
+    notes.push(
+      `Description сжат до ${pair.description.length} симв. (лимит ${DESC_MAX})`
+      + (hadCta ? (hasCta(pair.description) ? ', CTA сохранён.' : ' ⚠️ CTA потерян.') : '.'),
+    );
   }
   if (typeof pair.description_mobile === 'string' && pair.description_mobile.length > DESC_MOBILE_MAX) {
     pair.description_mobile = trimToLastSentence(pair.description_mobile, DESC_MOBILE_MAX);
@@ -420,13 +519,16 @@ function _deterministicPairSoftIssues(pair, keyword, semantics = {}) {
       `главный ключ не начинается в первых 35 символах title (position=${keywordPos.position}) — начни title с «${keyword}»`,
     );
   }
+  // LSI приоритета 1: пересборку запрашиваем только при ПОЛНОМ игнорировании
+  // списка (§6 ТЗ: покрытие — метрика качества, а не жёсткое требование;
+  // требование «все слова» провоцировало keyword stuffing).
   const obligatoryLsi = (semantics.obligatory_lsi || []).filter(Boolean);
   if (obligatoryLsi.length) {
     const combined = [pair.title || '', pair.description || '', pair.h1 || ''].join(' ');
     const lsiCheck = checkLsiUsage(combined, obligatoryLsi);
-    if (lsiCheck.missed_lsi.length) {
+    if (!lsiCheck.used_lsi.length) {
       issues.push(
-        `пропущены обязательные LSI ТОПа: ${lsiCheck.missed_lsi.join(', ')} — органично включи их в title/description`,
+        `не использовано НИ ОДНО LSI приоритета 1 (${obligatoryLsi.slice(0, 5).join(', ')}) — вплети 2–3 органично`,
       );
     }
   }
@@ -592,6 +694,15 @@ async function runGistMetaPipeline({
       usage,
       { model: options.copywriterModel },
     );
+    if (_isReframeEnabled()) {
+      await _reframeLengths(pair, {
+        keyword,
+        winnerFact: winner && winner.fact,
+        usage,
+        notes,
+        copywriterModel: options.copywriterModel,
+      });
+    }
     _deterministicPairFix(pair, notes);
 
     // Детерминированные проверки перед LLM-валидатором: пока пара нарушает
@@ -759,6 +870,15 @@ lead fact. Дополнительно добавь в JSON поле "winner_fact
   const pair = await _callCopywriterJson(userPrompt, usage, {
     model: geminiModel || undefined,
   });
+  if (_isReframeEnabled()) {
+    await _reframeLengths(pair, {
+      keyword: topic,
+      winnerFact: pair.winner_fact,
+      usage,
+      notes,
+      copywriterModel: geminiModel,
+    });
+  }
   _deterministicPairFix(pair, notes);
 
   return {
@@ -873,13 +993,16 @@ async function _fallbackSerpMeta({
   ];
 
   const obligatoryLsi = (semantics.obligatory_lsi || []).filter(Boolean);
+  const differentiatorLsi = (semantics.differentiator_lsi || []).filter(Boolean).slice(0, 3);
   const mandatoryWords = (semantics.title_mandatory_words || []).filter(Boolean).slice(0, 6);
   const lsiBlock = obligatoryLsi.length || mandatoryWords.length
     ? `
 
-[ОБЯЗАТЕЛЬНЫЕ LSI ТОПа]${obligatoryLsi.length ? `
-- Обязательные LSI (есть у ≥50% ТОП-выдачи — без них ниже CTR; КАЖДОЕ слово органично включи в title или description, словоформы допустимы): ${obligatoryLsi.join(', ')}` : ''}${mandatoryWords.length ? `
-- Важные слова ТОПа (по возможности используй в title): ${mandatoryWords.join(', ')}` : ''}`
+[LSI ТОПа — ПРИОРИТЕТЫ]${obligatoryLsi.length ? `
+- Приоритет 1 (есть у ≥50% ТОП-выдачи): ${obligatoryLsi.join(', ')} — органично вплети 2–3 наиболее релевантных (словоформы допустимы)` : ''}${differentiatorLsi.length ? `
+- Приоритет 2 — дифференциаторы (нет ни у одного конкурента): ${differentiatorLsi.join(', ')} — добавь 1–2 ради уникальности` : ''}${mandatoryWords.length ? `
+- Важные слова ТОПа (по возможности, приоритет 3): ${mandatoryWords.join(', ')}` : ''}
+- Читаемость и CTR важнее полноты покрытия LSI: переспам и перечисления ключей запрещены.`
     : '';
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
 
@@ -903,6 +1026,15 @@ ${competitorNoiseBlock}
   const pair = await _callCopywriterJson(userPrompt, usage, {
     model: copywriterModel || undefined,
   });
+  if (_isReframeEnabled()) {
+    await _reframeLengths(pair, {
+      keyword,
+      winnerFact: pair.winner_fact,
+      usage,
+      notes,
+      copywriterModel,
+    });
+  }
   _deterministicPairFix(pair, notes);
 
   return {
@@ -980,6 +1112,9 @@ module.exports = {
   runResilientMetaPipeline,
   generateLinkArticleMeta,
   checkTemplateLevelConflict,
+  // экспорт для unit-тестов
+  _deterministicPairFix,
+  _reframeLengths,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX,
   DESC_MOBILE_MIN, DESC_MOBILE_MAX, H1_MAX,
   TITLE_FACT_WINDOW, DESC_FACT_WINDOW,

@@ -23,6 +23,8 @@ const { extractSemantics, checkLsiUsage, checkKeywordPosition } = require('./sem
 const { generateDrMaxMeta } = require('./metaGenerator');
 const { analyzeSerpCtr } = require('./serpCtrAnalyzer');
 const { analyzeSnippets } = require('./snippetAnalyzer');
+const { enrichMetaInputs } = require('./metaContext');
+const { snippetCtrScore } = require('./ctrScore');
 const {
   analyzeAudienceAndNiche,
   serializeAnalysisForPrompt,
@@ -59,13 +61,48 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
   const ctrAnalysis = analyzeSerpCtr(serp, { keyword, semantics: merged });
   const snippetAnalysis = analyzeSnippets(serp);
 
-  // 3) Gemini/Grok → Title + Description + H1.
-  const metas = await generateDrMaxMeta({
+  // 2.6) Обогащение inputs (§4 ТЗ): pageAngle + missingNodes собираются
+  //      детерминированно из ctrAnalysis / snippetAnalysis — GIST-пайплайн
+  //      умеет их читать, но раньше они всегда были пустыми.
+  const enrichedInputs = enrichMetaInputs({
     keyword,
-    semantics: merged,
-    serpData: serp,
     inputs: { ...inputs, ctrAnalysis, snippetAnalysis },
+    semantics: merged,
+    ctrAnalysis,
+    snippetAnalysis,
   });
+
+  // 3) Gemini/Grok → Title + Description + H1.
+  //    §8 ТЗ: если CTR-скор сниппета ниже порога — ОДНА автоматическая
+  //    перегенерация (полный resilient-пайплайн), берём лучший вариант.
+  const genOnce = async () => {
+    const m = await generateDrMaxMeta({
+      keyword,
+      semantics: merged,
+      serpData: serp,
+      inputs: enrichedInputs,
+    });
+    m.ctr_score = snippetCtrScore({
+      metas: m, keyword, inputs: enrichedInputs, ctrAnalysis, snippetAnalysis,
+    });
+    return m;
+  };
+
+  let metas = await genOnce();
+  if (metas.ctr_score.needs_review) {
+    try {
+      const retryMetas = await genOnce();
+      if (retryMetas.ctr_score.score > metas.ctr_score.score) {
+        retryMetas.post_validation_notes = Array.isArray(retryMetas.post_validation_notes)
+          ? retryMetas.post_validation_notes : [];
+        retryMetas.post_validation_notes.push(
+          `CTR-скор первой версии ${metas.ctr_score.score}/100 — выполнена перегенерация `
+          + `(итог ${retryMetas.ctr_score.score}/100).`,
+        );
+        metas = retryMetas;
+      }
+    } catch (_e) { /* fail-open: остаёмся с первой версией */ }
+  }
 
   // 4) LSI-верификация по объединённому тексту Title + Description + H1.
   const combinedMetaText = [
@@ -97,14 +134,36 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
     formula: (ctrAnalysis && ctrAnalysis.recommendations && ctrAnalysis.recommendations.suggested_title_formula) || '',
   };
 
+  // Обогащённый контекст — для UI/логов: видно, что реально ушло в GIST и
+  //  какие из missing nodes отработали (попали в итоговый факт/теги).
+  const missingNodes = enrichedInputs.missingNodes || [];
+  const appliedText = [metas.winner_fact || '', metas.title || '', metas.description || '']
+    .join(' ').toLowerCase();
+  const appliedNodes = missingNodes.filter((node) => {
+    const terms = String(node).toLowerCase().match(/[а-яёa-z0-9]{5,}/g) || [];
+    return terms.some((t) => appliedText.includes(t));
+  });
+  metas.context_used = {
+    page_angle: enrichedInputs.pageAngle || '',
+    missing_nodes: missingNodes,
+    missing_nodes_applied: appliedNodes,
+    standalone_exposure: enrichedInputs.standalone_exposure === true,
+  };
+  metas._meta = { ...(metas._meta || {}), context_used: metas.context_used };
+
   // Заметки для UI: чего не хватает и почему важно.
   metas.post_validation_notes = Array.isArray(metas.post_validation_notes)
     ? metas.post_validation_notes : [];
   if (obligatoryCheck.missed_lsi.length) {
     const total = merged.serp_doc_count || (Array.isArray(serp) ? serp.length : 0);
     metas.post_validation_notes.push(
-      `Пропущены обязательные LSI (есть у ≥50% ТОП-${total}): `
-      + `${obligatoryCheck.missed_lsi.join(', ')} — без них ниже CTR.`,
+      `Рекомендация: не использованы LSI приоритета 1 (есть у ≥50% ТОП-${total}): `
+      + `${obligatoryCheck.missed_lsi.join(', ')}. Добавьте, если это не ухудшит читаемость.`,
+    );
+  }
+  if (metas.ctr_score.needs_review) {
+    metas.post_validation_notes.push(
+      `⚠️ CTR-скор сниппета ${metas.ctr_score.score}/100 (< ${metas.ctr_score.threshold}) — нужна ручная проверка.`,
     );
   }
   if ((merged.differentiator_lsi || []).length && !differentiatorCheck.used_lsi.length) {
