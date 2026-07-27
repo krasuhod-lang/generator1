@@ -355,4 +355,71 @@ console.log('\n§4 — обогащение inputs (pageAngle / missingNodes):')
   });
 }
 
+
+// ── §10: человеческие заметки пост-валидации ──────────────────────
+{
+  console.log('\n§10 — metaNotes: русификация причин и группировка заметок:');
+  const { humanizeReviewReason, classifyNotes } = require('../src/services/metaTags/metaNotes');
+
+  // Реальный дамп ranker'а из фидбека: в UI он бесполезен.
+  const raw = 'No candidate passed all GIST Meta Filter tests (concreteness, '
+    + 'decision_relevance, replaceability, verifiability). The only surviving '
+    + 'candidate (missing_node) failed replaceability. Fallback sequence did not '
+    + 'yield a valid GIST factor: relax_verifiability requires '
+    + 'concreteness+decision_relevance+replaceability all 1, no candidate '
+    + 'qualifies; no supercategory or structural facts available. Manual review required.';
+  const human = humanizeReviewReason(raw);
+  check('английский дамп ranker\'а переведён', /[а-яё]/i.test(human));
+  check('в переводе нет сырых английских терминов',
+    !/replaceability|relax_verifiability|supercategory/i.test(human));
+  check('перевод объясняет, что делать', human.includes('Что делать'));
+  check('перевод короче исходного дампа', human.length < raw.length);
+
+  check('русская причина остаётся как есть',
+    humanizeReviewReason('Ни один кандидат не прошёл отбор') === 'Ни один кандидат не прошёл отбор');
+  check('пустая причина → пустая строка', humanizeReviewReason(null) === '');
+  check('незнакомая английская причина помечается технической',
+    /техническая причина/.test(humanizeReviewReason('weird ranker output')));
+
+  const report = classifyNotes([
+    '⚠️ Guard: price_data отсутствует: запрещены цена, стоимость, руб и ₽.',
+    'Рекомендация: не использованы LSI приоритета 1: ставка.',
+    'CTR-скор первой версии 50/100 — выполнена перегенерация (итог 63/100).',
+    '⚠️ Пара не прошла все проверки за отведённые попытки — требуется ручная правка.',
+  ]);
+  check('ошибки отделены от остального', report.errors.length === 2);
+  check('рекомендации отделены', report.recommendations.length === 1
+    && report.recommendations[0].startsWith('Рекомендация'));
+  check('информационные заметки — в warnings', report.warnings.length === 1);
+  check('плоский список сохранён для совместимости', report.all.length === 4);
+  check('пустой вход не ломает группировку',
+    classifyNotes(null).errors.length === 0 && classifyNotes(null).all.length === 0);
+}
+
+// ── §11: competitor_noise — клише против лексики ниши ─────────────
+{
+  console.log('\n§11 — snippetAnalyzer: клише (запрет) vs лексика ниши (можно):');
+  const { analyzeSnippets } = require('../src/services/metaTags/snippetAnalyzer');
+
+  // «кредит наличными» встречается у 2 из 6 — это лексика ниши, а не клише,
+  // и запрещать её нельзя: без неё дескрипшен теряет смысл.
+  const serp = [
+    { title: 'Кредит наличными в Москве', snippet: 'Кредит наличными на любые цели. Индивидуальный подход к каждому клиенту.' },
+    { title: 'Кредит наличными онлайн', snippet: 'Кредит наличными без справок. Индивидуальный подход к каждому клиенту.' },
+    { title: 'Взять кредит в банке', snippet: 'Ставка от 5%. Индивидуальный подход к каждому клиенту.' },
+    { title: 'Кредиты для всех', snippet: 'Оформите заявку онлайн за 5 минут.' },
+    { title: 'Займы и кредиты', snippet: 'Оформите заявку онлайн и получите решение.' },
+    { title: 'Потребительский кредит', snippet: 'Срок до 7 лет, сумма до 5 млн.' },
+  ];
+  const res = analyzeSnippets(serp);
+  check('analyzeSnippets вернул competitor_cliches', Array.isArray(res.competitor_cliches));
+  check('analyzeSnippets вернул niche_lexicon', Array.isArray(res.niche_lexicon));
+  check('competitor_noise остаётся синонимом клише (обратная совместимость)',
+    JSON.stringify(res.competitor_noise) === JSON.stringify(res.competitor_cliches));
+  const cliches = res.competitor_cliches.join(' | ').toLowerCase();
+  check('клише из 3+ сниппетов попало в запрет', cliches.includes('индивидуальный подход'));
+  check('фраза из 2 сниппетов НЕ попала в жёсткий запрет',
+    !cliches.includes('кредит наличными'));
+}
+
 console.log(`\n✅ Все проверки пройдены: ${passed}`);

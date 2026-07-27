@@ -13,6 +13,8 @@ const {
   runGistMetaPipeline,
   generateLinkArticleMeta,
   checkTemplateLevelConflict,
+  _pickBestPairAttempt,
+  _buildCompetitorNoiseBlock,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX,
   DESC_MOBILE_MIN, DESC_MOBILE_MAX,
   TITLE_FACT_WINDOW, DESC_FACT_WINDOW,
@@ -153,6 +155,61 @@ test('экспорт: runGistMetaPipeline / generateLinkArticleMeta — функ
   assert.strictEqual(typeof metaGenerator.generateDrMaxMeta, 'function');
   const gist = require('../src/services/metaTags/gistMetaFilter');
   assert.strictEqual(typeof gist.runResilientMetaPipeline, 'function');
+});
+
+
+test('best-of: прошедшая проверки попытка выигрывает у более кликабельной', () => {
+  const best = _pickBestPairAttempt([
+    { id: 'a', passed: false, ctrScore: 90 },
+    { id: 'b', passed: true, ctrScore: 61 },
+  ]);
+  assert.strictEqual(best.id, 'b');
+});
+
+test('best-of: при равном статусе выигрывает CTR-скор, а не порядок', () => {
+  const best = _pickBestPairAttempt([
+    { id: 'first', passed: true, ctrScore: 78 },
+    { id: 'last', passed: true, ctrScore: 55 },
+  ]);
+  assert.strictEqual(best.id, 'first');
+});
+
+test('best-of: единственная/пустая серия попыток не ломает выбор', () => {
+  assert.strictEqual(_pickBestPairAttempt([]), null);
+  assert.strictEqual(_pickBestPairAttempt(null), null);
+  const only = _pickBestPairAttempt([{ id: 'x', passed: false, ctrScore: 10 }]);
+  assert.strictEqual(only.id, 'x');
+});
+
+test('COMPETITOR_NOISE: клише запрещены, лексика ниши разрешена как обычные слова', () => {
+  const block = _buildCompetitorNoiseBlock({
+    competitor_cliches: ['индивидуальный подход к каждому'],
+    niche_lexicon: ['кредит наличными'],
+    cta_patterns: ['узнайте'],
+    dominant_title_pattern: 'plain',
+  });
+  assert.match(block, /ЗАПРЕЩЕНО повторять: индивидуальный подход/);
+  assert.match(block, /Частотная лексика ниши.*кредит наличными/);
+  assert.match(block, /НЕ как дифференциатор/);
+});
+
+test('COMPETITOR_NOISE: пустой анализ не даёт пустого блока', () => {
+  assert.strictEqual(_buildCompetitorNoiseBlock(null), '');
+  assert.strictEqual(_buildCompetitorNoiseBlock({ competitor_cliches: [], niche_lexicon: [] }), '');
+});
+
+test('PAIR_ASSEMBLER: запрет мета-речи и few-shot «плохо → хорошо»', () => {
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /мета-речь/i);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /мы не выдаём/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /отсеиваем рекламный шум/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ПРИМЕРЫ «ПЛОХО → ХОРОШО»/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ПРАВИЛА ПОД ИНТЕНТ/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /SERP_INTENT/);
+  // Структура «что получает → чем подтверждается → одно действие».
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /что человек получает/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ОДНО действие в конце/);
+  // Гвард по цене должен быть в самом промпте, а не только в пост-валидации.
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /price_data = null/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

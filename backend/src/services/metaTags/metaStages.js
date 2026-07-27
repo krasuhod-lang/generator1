@@ -25,6 +25,7 @@ const { analyzeSerpCtr } = require('./serpCtrAnalyzer');
 const { analyzeSnippets } = require('./snippetAnalyzer');
 const { enrichMetaInputs } = require('./metaContext');
 const { snippetCtrScore } = require('./ctrScore');
+const { classifyNotes } = require('./metaNotes');
 const {
   analyzeAudienceAndNiche,
   serializeAnalysisForPrompt,
@@ -198,9 +199,13 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
   }
   if ((merged.differentiator_lsi || []).length && !differentiatorCheck.used_lsi.length) {
     metas.post_validation_notes.push(
-      'Метатег не использует уникальные LSI — есть риск однотипности с ТОП-10.',
+      'Рекомендация: метатег не использует уникальные LSI — есть риск однотипности с ТОП-10.',
     );
   }
+
+  // Сгруппированный вид тех же заметок для UI: ошибки (требуют правки),
+  // предупреждения и рекомендации. Плоский список остаётся для совместимости.
+  metas.post_validation_report = classifyNotes(metas.post_validation_notes);
 
   return { serp, semantics: merged, ctrAnalysis, snippetAnalysis, metas };
 }

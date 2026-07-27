@@ -15,7 +15,9 @@
 | `metaGenerator.js` | `generateDrMaxMeta` — обёртка над GIST, длины, `detectYear`, `postValidate` |
 | `gistMetaFilter.js` | Ядро GIST: кандидаты фактов → фильтр → сборка пары → конфликты → рефрейминг длин |
 | `gistMetaPrompts.js` | Системные/пользовательские промпты шагов GIST |
-| `metaContext.js` | Детерминированная сборка `pageAngle` и `missingNodes` |
+| `metaContext.js` | Детерминированная сборка `pageAngle`, `missingNodes` (факты) и `avoidPatterns` (запреты) |
+| `lengthConfig.js` | **Единая точка правды по длинам**: целевые коридоры и жёсткие максимумы Title/Description |
+| `metaNotes.js` | Русификация причин ручной проверки + группировка заметок на ошибки / предупреждения / рекомендации |
 | `ctrScore.js` | Детерминированный `snippetCtrScore` (0–100), без сетевых вызовов |
 | `lengthHelpers.js` | Длины, безопасные диапазоны, CTA-безопасное сжатие |
 | `serpCtrAnalyzer.js` / `snippetAnalyzer.js` / `semantics.js` | Анализ выдачи и семантики |
@@ -92,7 +94,7 @@ const meta = await generateMetaForContent({
   lsi_check,               // покрытие LSI — метрика качества, не жёсткое требование
   context_used,            // { page_angle, missing_nodes, missing_nodes_applied, standalone_exposure }
   manual_review_required,
-  notes: [],
+  notes: [],               // плоский список (совместимость); группировка — в post_validation_report
   usage: { tokensIn, tokensOut, thoughtsTokens, cachedTokens, cost, model, provider },
 }
 ```
@@ -106,8 +108,48 @@ const meta = await generateMetaForContent({
 | `META_LENGTH_REFRAME_ENABLED` | `true` | LLM-рефрейминг при превышении длин (шаг 1 стратегии сжатия) |
 | `META_CTR_SCORE_THRESHOLD` | `60` | Порог CTR-скора, ниже которого делается одна автоперегенерация и ставится пометка «нужна ручная проверка» |
 
+## Длины: единая точка правды
+
+Коридоры живут в `lengthConfig.js` и оттуда расходятся в `gistMetaFilter`,
+`metaGenerator`, `ctrScore`, промпты и (через `GET /api/meta-tags/limits`) в UI.
+Раньше числа дублировались, и страница результатов подсвечивала свой коридор
+(40–50 / 130–145), которого движок никогда не достигал.
+
+| Поле | Целевой коридор | Жёсткий максимум |
+|---|---|---|
+| Title | 60–70 | 80 |
+| Description (desktop) | 150–170 | 190 |
+| Description (mobile) | 90–105 | 105 |
+| H1 | — | 70 |
+
+Целевой коридор — то, за что `snippetCtrScore` даёт полный балл; попадание
+между целью и жёстким максимумом даёт половину. Description сознательно
+смещён вниз: в описании на 185+ символов третье предложение почти всегда вода.
+
 ## Ключевые правила качества
 
+- **Факты отдельно, запреты отдельно.** `buildMissingNodes` возвращает только
+  реальные смысловые пробелы (уникальные LSI, неиспользованные гео/год/цена);
+  анти-паттерны ТОПа, клише конкурентов и «CTA редок» уходят в
+  `buildAvoidPatterns` и передаются в промпт блоком «[НЕ ПОВТОРЯТЬ]». Пока они
+  лежали в одном списке, модель брала «отсеиваем рекламный шум» как факт для
+  описания.
+- **Клише ≠ лексика ниши.** `analyzeSnippets` делит повторы ТОПа на
+  `competitor_cliches` (порог ≥3 документов или ≥40% выдачи — жёсткий запрет,
+  штрафуется в `ctrScore`) и `niche_lexicon` (частотная лексика: использовать
+  можно, но не как дифференциатор). `competitor_noise` сохранён как алиас
+  клише для обратной совместимости.
+- **Запрет мета-речи.** `PAIR_ASSEMBLER_SYSTEM` запрещает рассказ о собственном
+  процессе («мы не выдаём», «отсеиваем шум», «наш помощник сравнил»), задаёт
+  структуру «что получает пользователь → чем подтверждается → одно действие»,
+  правила под интент выдачи и few-shot «плохо → хорошо».
+- **Best-of.** Каждая попытка сборки пары скорится `snippetCtrScore`; наружу
+  идёт лучшая (сначала — прошедшая conflict/replaceability, затем — по скору),
+  а не последняя по циклу.
+- **Кириллические границы слов.** В JS `\b` и `\w` не работают с кириллицей,
+  поэтому guard'ы (`PRICE_MENTION_RE`, `CTA_RE`) используют
+  `(?<![а-яё])` / `(?![а-яё])`. Иначе «оценка» и «процент» считались
+  упоминанием цены, а `подробн\w*` вообще не матчился.
 - **CTA не режется.** При превышении длины работает трёхуровневая стратегия:
   LLM-рефрейминг → детерминированное сжатие тела с сохранением CTA
   (`compressPreservingCta`) → механическая обрезка. Вставка бренда делается до
@@ -144,7 +186,8 @@ const meta = await generateMetaForContent({
 ## Тесты
 
 ```bash
-node backend/scripts/test-meta-clickability.js   # длины/CTA, detectYear, CTR-скор, pageAngle/missingNodes
+node backend/scripts/test-meta-clickability.js   # длины/CTA-лексикон, price-guard, стоп-слова, CTR-скор, missingNodes vs avoidPatterns, metaNotes
 node backend/scripts/test-meta-facade.js         # каскад деградации фасада с моками LLM/SERP
-node backend/scripts/test-gist-meta-filter.js    # ядро GIST
+node backend/scripts/test-gist-meta-filter.js    # ядро GIST: коридоры длин, best-of, промпты
+node backend/scripts/test-meta-serp-ctr.js       # анализ выдачи, интент, price_data
 ```

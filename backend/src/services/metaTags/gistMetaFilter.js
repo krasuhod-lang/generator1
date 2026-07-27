@@ -21,7 +21,8 @@
  * фильтр/ранкер, валидатор) — DeepSeek (fallback на Gemini при отсутствии
  * ключа/ошибке), копирайтинг (сборка пары) — Gemini.
  *
- * Кириллические safe ranges (§4): Title 70–80, Description desktop 180–190,
+ * Кириллические коридоры (metaTags/lengthConfig): Title цель 60–70 (max 80),
+ * Description desktop цель 150–170 (max 190),
  * Description mobile 90–105; GIST-фактор — в первых 35 симв. title и первых
  * 90 симв. description.
  */
@@ -38,6 +39,7 @@ const {
 } = require('./gistMetaPrompts');
 const { analyzeSnippets } = require('./snippetAnalyzer');
 const { snippetCtrScore } = require('./ctrScore');
+const { humanizeReviewReason } = require('./metaNotes');
 const { checkKeywordPosition, checkLsiUsage } = require('./semantics');
 
 // Кириллические safe ranges — единая точка правды (metaTags/lengthConfig).
@@ -674,6 +676,23 @@ function checkTemplateLevelConflict(titles = [], opts = {}) {
 // ─── Главный оркестратор ───────────────────────────────────────────
 
 /**
+ * Best-of внутри GIST: из накопленных попыток сборки пары выбирает лучшую.
+ * Приоритет — прошедшая проверки (conflict + replaceability); при равенстве
+ * выигрывает большее значение CTR-скора. Последняя попытка не обязательно
+ * лучшая: пересборка «по фидбеку» иногда только ухудшает формулировку.
+ *
+ * @param {Array<{passed: boolean, ctrScore: number}>} attempts
+ * @returns {object|null} лучшая попытка (или null, если попыток нет)
+ */
+function _pickBestPairAttempt(attempts) {
+  if (!Array.isArray(attempts) || !attempts.length) return null;
+  return attempts.reduce((acc, cur) => {
+    if (acc.passed !== cur.passed) return acc.passed ? acc : cur;
+    return cur.ctrScore > acc.ctrScore ? cur : acc;
+  });
+}
+
+/**
  * GIST Meta Filter Pipeline (11 шагов, три фазы).
  *
  * @param {object} args
@@ -739,7 +758,7 @@ async function runGistMetaPipeline({
     );
   }
   if (manualReviewRequired) {
-    notes.push(`⚠️ manual_review_required: ${manualReviewReason || 'см. fallback sequence (Step 8.5b)'}`);
+    notes.push(`⚠️ Требуется ручная правка: ${humanizeReviewReason(manualReviewReason) || 'см. fallback sequence (Step 8.5b)'}`);
   }
   if (phase2.fallback_used) {
     notes.push(`Fallback sequence (Step 8.5b): использован «${phase2.fallback_used}».`);
@@ -877,10 +896,7 @@ async function runGistMetaPipeline({
   // Best-of: если попыток было несколько — берём лучшую (прошедшая проверки
   // приоритетнее, при равенстве — выше CTR-скор), а не последнюю по циклу.
   if (pairAttempts.length > 1) {
-    const best = pairAttempts.reduce((acc, cur) => {
-      if (acc.passed !== cur.passed) return acc.passed ? acc : cur;
-      return cur.ctrScore > acc.ctrScore ? cur : acc;
-    });
+    const best = _pickBestPairAttempt(pairAttempts);
     const last = pairAttempts[pairAttempts.length - 1];
     if (best !== last) {
       pair = best.pair;
@@ -922,6 +938,7 @@ async function runGistMetaPipeline({
     temporary_gist_factor: temporal.temporary_gist_factor,
     review_date: temporal.review_date,
     manual_review_required: manualReviewRequired,
+    manual_review_reason: humanizeReviewReason(manualReviewReason) || null,
     field_job: phase1.field_job || null,
     competitor_pattern: phase1.competitor_pattern || null,
     candidates: rankedAll,
@@ -936,6 +953,11 @@ async function runGistMetaPipeline({
       cachedTokens: usage.cachedTokens,
       attempts: usage.calls,
       provider: usage.providers.size === 1 ? [...usage.providers][0] : 'mixed',
+      // Сырой вывод ranker'а держим только в логах/`_meta`: в UI он бесполезен.
+      manual_review_reason_raw: manualReviewReason || null,
+      pair_attempts: pairAttempts.map((a) => ({
+        winner_idx: a.winnerIdx, passed: a.passed, ctr_score: a.ctrScore,
+      })),
     },
   };
 }
@@ -1129,12 +1151,35 @@ async function _fallbackSerpMeta({
     : '';
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
 
+  // Тот же контекст, что и в основном ассемблере: без интента и price_data
+  // fallback скатывается в рекламные абстракции и выдуманные цены.
+  const ctr = inputs.ctrAnalysis || null;
+  const serpIntent = (ctr && ctr.serp_intent) || null;
+  const intentLine = serpIntent
+    ? `\n- SERP_INTENT: ${serpIntent.value || 'Mixed/Unclear'} — жёсткое условие тональности.`
+    : '';
+  const priceData = (() => {
+    const { extractPriceData } = require('./metaGenerator');
+    return extractPriceData(inputs);
+  })();
+  const audienceDigest = String(inputs.audienceNicheDigest || inputs.audience_niche_digest || '').trim();
+  const audienceBlock = audienceDigest
+    ? `\n\n[АНАЛИЗ ЦА И НИШИ — тон, персона, терминология]\n${audienceDigest.slice(0, 1500)}`
+    : '';
+  const avoidPatterns = Array.isArray(inputs.avoidPatterns || inputs.avoid_patterns)
+    ? (inputs.avoidPatterns || inputs.avoid_patterns).filter(Boolean).slice(0, 8)
+    : [];
+  const avoidBlock = avoidPatterns.length
+    ? `\n\n[НЕ ПОВТОРЯТЬ]\nОграничения формы, а не факты:\n- ${avoidPatterns.join('\n- ')}`
+    : '';
+
   const userPrompt = `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос (title обязан НАЧИНАТЬСЯ с него, старт в первых 35 символах): ${keyword}
 - Бренд: ${inputs.brand || '—'}
 - Регион: ${inputs.toponym || '—'}
+- Проверенная цена (price_data): ${priceData || 'null — запрещены слова «цена», «стоимость», «руб», «₽» и любые суммы'}
 - Контекст / УТП страницы: ${inputs.summary || inputs.page_context || 'Нет данных'}
-- standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}
+- standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}${intentLine}
 
 [WINNER FACT]
 Полный пайплайн отбора кандидатов недоступен. САМ выбери РОВНО ОДИН самый
@@ -1142,8 +1187,8 @@ async function _fallbackSerpMeta({
 Concreteness, Decision-relevance, Replaceability, Verifiability) и используй
 его как winner fact для title. Для description возьми ДРУГОЙ факт как lead fact.
 Не копируй запрещённые фразы конкурентов. Дополнительно добавь в JSON поле
-"winner_fact" — краткую формулировку выбранного факта.${lsiBlock}
-${competitorNoiseBlock}
+"winner_fact" — краткую формулировку выбранного факта.${lsiBlock}${audienceBlock}
+${competitorNoiseBlock}${avoidBlock}
 Собери пару по Steps 8.7–8.8 и верни JSON по контракту.`;
 
   const pair = await _callCopywriterJson(userPrompt, usage, {
@@ -1238,6 +1283,8 @@ module.exports = {
   // экспорт для unit-тестов
   _deterministicPairFix,
   _reframeLengths,
+  _pickBestPairAttempt,
+  _buildCompetitorNoiseBlock,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX,
   DESC_MOBILE_MIN, DESC_MOBILE_MAX, H1_MAX,
   TITLE_FACT_WINDOW, DESC_FACT_WINDOW,

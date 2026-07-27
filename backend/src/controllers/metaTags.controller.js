@@ -3,6 +3,7 @@
 /**
  * Controller для bulk-генератора метатегов (Title + Description, без H1).
  * REST endpoints:
+ *   GET    /api/meta-tags/limits         — коридоры длин Title/Description
  *   GET    /api/meta-tags                — список задач пользователя
  *   POST   /api/meta-tags                — создать и запустить задачу
  *   GET    /api/meta-tags/:id            — детальная задача (с результатами)
@@ -16,6 +17,7 @@ const { withUserSlot } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { csvCell, csvHeader } = require('../utils/csv');
+const { describeLengthRanges } = require('../services/metaTags/lengthConfig');
 
 // ─── Валидация входных данных ─────────────────────────────────────
 const MAX_NAME_LEN     = 200;
@@ -224,7 +226,17 @@ async function exportMetaTagTaskCsv(req, res, next) {
   }
 }
 
+/**
+ * GET /api/meta-tags/limits — коридоры длин из единой точки правды
+ * (services/metaTags/lengthConfig). UI подсвечивает счётчики по ним, чтобы не
+ * расходиться с движком генерации.
+ */
+function getMetaTagLimits(req, res) {
+  return res.json({ length_ranges: describeLengthRanges() });
+}
+
 module.exports = {
+  getMetaTagLimits,
   listMetaTagTasks,
   createMetaTagTask,
   getMetaTagTask,
