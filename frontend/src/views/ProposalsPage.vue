@@ -84,8 +84,10 @@ async function download(p, ext) {
     const url = URL.createObjectURL(data);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${p.title}.${ext}`;
+    a.download = `${String(p.title || 'proposal').replace(/[\\/:*?"<>|]+/g, '_')}.${ext}`;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
   } catch (e) {
     alert('Не удалось скачать файл');

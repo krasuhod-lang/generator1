@@ -122,6 +122,36 @@ function toggleTaskMonth(taskId, mo) {
     sel.months = [...months, mo].sort((a, b) => a - b);
   }
 }
+// Быстрая периодичность: ежемесячно / через месяц / разово (месяц 1).
+function setTaskRecurrence(taskId, mode) {
+  const sel = selection[taskId];
+  if (!sel) return;
+  const h = Number(form.horizon) || 3;
+  if (mode === 'monthly') sel.months = months.value.slice();
+  else if (mode === 'every_2') sel.months = months.value.filter((m) => m % 2 === 1);
+  else sel.months = [Math.min(sel.months?.[0] || 1, h)];
+}
+// Подпись периодичности — та же логика, что показывается клиенту
+// (backend/src/services/proposals/mediaPlan.js).
+function recurrenceLabel(monthsArr = []) {
+  const uniq = [...new Set(monthsArr.map((m) => Number(m) || 1))].sort((a, b) => a - b);
+  if (!uniq.length) return '—';
+  if (uniq.length === 1) return `Разово · М${uniq[0]}`;
+  const h = Number(form.horizon) || 3;
+  if (uniq.length === h && uniq[0] === 1 && uniq[uniq.length - 1] === h) return 'Ежемесячно';
+  const steps = uniq.slice(1).map((m, i) => m - uniq[i]);
+  if (steps.every((s) => s === 2)) return `Раз в 2 месяца · ${uniq.map((m) => `М${m}`).join(', ')}`;
+  return uniq.map((m) => `М${m}`).join(', ');
+}
+// Склонение: 1 работа / 2 работы / 5 работ.
+function worksWord(n) {
+  const abs = Math.abs(Number(n) || 0) % 100;
+  const last = abs % 10;
+  if (abs > 10 && abs < 20) return 'работ';
+  if (last > 1 && last < 5) return 'работы';
+  if (last === 1) return 'работа';
+  return 'работ';
+}
 function moduleSelectedCount(m) {
   return (m.tasks || []).filter((t) => selection[t.id]).length;
 }
@@ -174,12 +204,14 @@ const previewTasks = computed(() => buildTasks().sort((a, b) =>
 const previewMode = ref('table'); // table | list | kanban | mediaplan
 
 // Медиа-план: уникальные задачи (строки) × месяцы (колонки), Set месяцев на задачу.
+// Ровно тот же вид, который получает клиент по публичной ссылке и в PDF/Excel.
 const mediaPlanRows = computed(() => {
   const map = new Map();
   for (const t of previewTasks.value) {
     const key = `${t.module_id || ''}·${t.task_id || ''}·${t.task_title || ''}`;
     if (!map.has(key)) {
       map.set(key, {
+        module_id: t.module_id,
         module_name: t.module_name,
         task_id: t.task_id,
         task_title: t.task_title,
@@ -191,6 +223,31 @@ const mediaPlanRows = computed(() => {
     map.get(key).months.add(Number(t.month) || 1);
   }
   return Array.from(map.values());
+});
+
+// Медиа-план, сгруппированный по модулям (как в клиентском виде).
+const mediaPlanModules = computed(() => {
+  const groups = [];
+  for (const row of mediaPlanRows.value) {
+    const key = row.module_id ?? row.module_name;
+    let group = groups.find((g) => (g.module_id ?? g.module_name) === key);
+    if (!group) {
+      group = { module_id: row.module_id, module_name: row.module_name || 'Прочие работы', rows: [] };
+      groups.push(group);
+    }
+    group.rows.push(row);
+  }
+  return groups;
+});
+
+const previewCountsByMonth = computed(() => {
+  const counts = {};
+  for (const m of months.value) counts[m] = 0;
+  for (const t of previewTasks.value) {
+    const m = Number(t.month) || 1;
+    counts[m] = (counts[m] || 0) + 1;
+  }
+  return counts;
 });
 
 // ── Стоимость ──
@@ -297,6 +354,28 @@ function resetAll() {
 const generating = ref(false);
 const shareUrl = ref('');
 
+// Предупреждение о несохранённых изменениях при закрытии вкладки.
+function beforeUnload(e) {
+  if (!dirty.value) return;
+  e.preventDefault();
+  e.returnValue = '';
+}
+
+// Чек-лист готовности КП — что ещё стоит заполнить перед отправкой клиенту.
+const readiness = computed(() => [
+  { ok: !!form.title.trim(), label: 'Название КП заполнено' },
+  { ok: !!form.client.trim(), label: 'Указан клиент (сайт / компания)' },
+  { ok: previewTasks.value.length > 0, label: 'Выбраны работы' },
+  {
+    ok: months.value.every((m) => (previewCountsByMonth.value[m] || 0) > 0),
+    label: 'В каждом месяце есть работы',
+  },
+  { ok: pricingTotals.value.grand > 0, label: 'Заполнена стоимость' },
+  { ok: !!form.manager.trim(), label: 'Указан менеджер (контакт для клиента)' },
+  { ok: !!form.start_date, label: 'Указана дата начала' },
+]);
+const readinessScore = computed(() => readiness.value.filter((r) => r.ok).length);
+
 async function generate() {
   generating.value = true;
   try {
@@ -317,8 +396,10 @@ async function download(ext) {
     const url = URL.createObjectURL(data);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${form.title || 'proposal'}.${ext}`;
+    a.download = `${(form.title || 'proposal').replace(/[\\/:*?"<>|]+/g, '_')}.${ext}`;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
   } catch (e) {
     error.value = 'Не удалось скачать файл';
@@ -443,6 +524,9 @@ async function loadProposal(id) {
   const catalogIds = new Set();
   for (const m of modules.value) for (const t of m.tasks || []) catalogIds.add(t.id);
 
+  // Полный сброс прошлого выбора: иначе при переходе между КП в одном
+  // экземпляре страницы задачи предыдущего КП «прилипают» к текущему.
+  for (const k of Object.keys(selection)) delete selection[k];
   extraTasks.value = [];
   for (const t of p.tasks || []) {
     if (t.task_id && catalogIds.has(t.task_id)) {
@@ -488,10 +572,12 @@ onMounted(async () => {
   }, 30_000);
   // Сброс dirty после первичной загрузки.
   setTimeout(() => { dirty.value = false; }, 0);
+  window.addEventListener('beforeunload', beforeUnload);
 });
 onUnmounted(() => {
   clearInterval(autosaveTimer);
   clearTimeout(noticeTimer);
+  window.removeEventListener('beforeunload', beforeUnload);
 });
 </script>
 
@@ -647,14 +733,28 @@ onUnmounted(() => {
                   </span>
                 </label>
                 <div class="flex items-center gap-1 shrink-0">
-                  <div v-if="selection[t.id]" class="flex flex-wrap gap-1" title="Можно выбрать несколько месяцев">
-                    <button v-for="mo in months" :key="mo" type="button" @click="toggleTaskMonth(t.id, mo)"
-                      class="px-2 py-1 text-xs rounded-lg border transition"
-                      :class="(selection[t.id].months || []).includes(mo)
-                        ? 'bg-indigo-600 border-indigo-500 text-white'
-                        : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200'">
-                      М{{ mo }}
-                    </button>
+                  <div v-if="selection[t.id]" class="flex flex-col items-end gap-1">
+                    <div class="flex flex-wrap gap-1" title="Можно выбрать несколько месяцев">
+                      <button v-for="mo in months" :key="mo" type="button" @click="toggleTaskMonth(t.id, mo)"
+                        class="px-2 py-1 text-xs rounded-lg border transition"
+                        :class="(selection[t.id].months || []).includes(mo)
+                          ? 'bg-indigo-600 border-indigo-500 text-white'
+                          : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200'">
+                        М{{ mo }}
+                      </button>
+                    </div>
+                    <div class="flex flex-wrap gap-1 justify-end">
+                      <button type="button" @click="setTaskRecurrence(t.id, 'monthly')"
+                        class="px-2 py-0.5 text-[11px] rounded border border-gray-700 text-gray-400 hover:text-white transition"
+                        title="Работа выполняется каждый месяц">Ежемесячно</button>
+                      <button type="button" @click="setTaskRecurrence(t.id, 'every_2')"
+                        class="px-2 py-0.5 text-[11px] rounded border border-gray-700 text-gray-400 hover:text-white transition"
+                        title="Работа выполняется через месяц">Через месяц</button>
+                      <button type="button" @click="setTaskRecurrence(t.id, 'once')"
+                        class="px-2 py-0.5 text-[11px] rounded border border-gray-700 text-gray-400 hover:text-white transition"
+                        title="Работа выполняется один раз">Разово</button>
+                      <span class="text-[11px] text-gray-500 self-center">{{ recurrenceLabel(selection[t.id].months || []) }}</span>
+                    </div>
                   </div>
                   <template v-if="catalogEdit">
                     <button @click="openTaskEditor(m.id, t)" class="text-xs text-gray-400 hover:text-white px-1" title="Изменить задачу">✏️</button>
@@ -765,31 +865,49 @@ onUnmounted(() => {
         </div>
 
         <!-- Медиа-план: месяцы сверху, работы слева, закрашенные ячейки -->
-        <div v-else class="overflow-x-auto rounded-xl border border-gray-800">
-          <table class="min-w-full text-sm">
-            <thead class="bg-gray-900 text-gray-400 text-left">
-              <tr>
-                <th class="px-3 py-2 font-medium sticky left-0 bg-gray-900 min-w-[280px]">Фронт работ</th>
-                <th v-for="m in months" :key="m" class="px-3 py-2 font-medium text-center whitespace-nowrap">Месяц {{ m }}</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-800 bg-gray-950">
-              <tr v-for="(row, i) in mediaPlanRows" :key="i">
-                <td class="px-3 py-2 sticky left-0 bg-gray-950">
-                  <span class="text-gray-500 text-xs block">{{ row.module_name }}</span>
-                  <span class="text-gray-100">{{ row.task_id }} · {{ row.task_title }}
-                    <span class="ml-1 text-xs px-1.5 py-0.5 rounded" :class="PRIORITY_BADGE[row.priority]?.cls">{{ PRIORITY_BADGE[row.priority]?.label }}</span>
-                  </span>
-                  <span v-if="row.task_description" class="block text-xs text-gray-500 mt-0.5 max-w-md">{{ row.task_description }}</span>
-                </td>
-                <td v-for="m in months" :key="m" class="px-1.5 py-1.5 text-center align-middle">
-                  <div class="h-7 rounded-md mx-auto"
-                    :class="row.months.has(m) ? 'bg-indigo-500/80 shadow-[0_0_8px_rgba(99,102,241,0.35)]' : 'bg-gray-900 border border-gray-800/60'"
-                    :title="row.months.has(m) ? `Месяц ${m}: выполняется` : ''"></div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div v-else>
+          <p class="mb-2 text-xs text-gray-500">👁 Именно так фронт работ увидит клиент по публичной ссылке и в PDF/Excel.</p>
+          <div class="overflow-x-auto rounded-xl border border-gray-800">
+            <table class="min-w-full text-sm">
+              <thead class="bg-gray-900 text-gray-400 text-left">
+                <tr>
+                  <th class="px-3 py-2 font-medium sticky left-0 bg-gray-900 min-w-[280px]">Фронт работ</th>
+                  <th class="px-3 py-2 font-medium min-w-[130px]">Периодичность</th>
+                  <th v-for="m in months" :key="m" class="px-3 py-2 font-medium text-center whitespace-nowrap">Месяц {{ m }}</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-800 bg-gray-950">
+                <template v-for="mod in mediaPlanModules" :key="mod.module_id ?? mod.module_name">
+                  <tr class="bg-gray-900/60">
+                    <td :colspan="months.length + 2" class="px-3 py-1.5 text-xs font-semibold text-indigo-300 sticky left-0 bg-gray-900/60">
+                      {{ mod.module_name }} · {{ mod.rows.length }} {{ worksWord(mod.rows.length) }}
+                    </td>
+                  </tr>
+                  <tr v-for="(row, i) in mod.rows" :key="`${mod.module_id}-${i}`">
+                    <td class="px-3 py-2 sticky left-0 bg-gray-950">
+                      <span class="text-gray-100">{{ row.task_id }} · {{ row.task_title }}
+                        <span class="ml-1 text-xs px-1.5 py-0.5 rounded" :class="PRIORITY_BADGE[row.priority]?.cls">{{ PRIORITY_BADGE[row.priority]?.label }}</span>
+                      </span>
+                      <span v-if="row.task_description" class="block text-xs text-gray-500 mt-0.5 max-w-md">{{ row.task_description }}</span>
+                    </td>
+                    <td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">{{ recurrenceLabel([...row.months]) }}</td>
+                    <td v-for="m in months" :key="m" class="px-1.5 py-1.5 text-center align-middle">
+                      <div class="h-7 rounded-md mx-auto"
+                        :class="row.months.has(m) ? 'bg-indigo-500/80 shadow-[0_0_8px_rgba(99,102,241,0.35)]' : 'bg-gray-900 border border-gray-800/60'"
+                        :title="row.months.has(m) ? `Месяц ${m}: выполняется` : ''"></div>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+              <tfoot>
+                <tr class="bg-gray-900 text-gray-400">
+                  <td class="px-3 py-2 text-xs font-medium sticky left-0 bg-gray-900">Работ в месяце</td>
+                  <td class="px-3 py-2"></td>
+                  <td v-for="m in months" :key="m" class="px-3 py-2 text-center text-xs text-gray-200">{{ previewCountsByMonth[m] || 0 }}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
 
         <div class="flex justify-between mt-4">
@@ -878,6 +996,21 @@ onUnmounted(() => {
             <li>• Итоговый бюджет: <span class="text-gray-100">{{ fmtMoney(pricingTotals.grand) }} ₽</span></li>
           </ul>
 
+          <!-- Чек-лист готовности КП -->
+          <div class="rounded-lg border border-gray-800 bg-gray-950 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-sm font-semibold text-gray-200">✅ Готовность КП</h3>
+              <span class="text-xs" :class="readinessScore === readiness.length ? 'text-emerald-400' : 'text-yellow-400'">
+                {{ readinessScore }} / {{ readiness.length }}
+              </span>
+            </div>
+            <ul class="space-y-1 text-sm">
+              <li v-for="(r, i) in readiness" :key="i" :class="r.ok ? 'text-gray-400' : 'text-yellow-300'">
+                {{ r.ok ? '✅' : '⚠️' }} {{ r.label }}
+              </li>
+            </ul>
+          </div>
+
           <div class="flex flex-wrap gap-2">
             <button @click="generate" :disabled="generating"
               class="px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50 transition">
@@ -889,10 +1022,12 @@ onUnmounted(() => {
 
           <div class="pt-3 border-t border-gray-800">
             <h3 class="text-sm font-semibold text-gray-200 mb-2">🔗 Публичная ссылка</h3>
-            <p class="text-xs text-gray-500 mb-2">Клиент увидит фронт работ и стоимость в отдельных вкладках (read-only, без авторизации).</p>
+            <p class="text-xs text-gray-500 mb-2">Клиент увидит фронт работ в трёх форматах (медиа-план, канбан, таблица) и стоимость — read-only, без авторизации, с кнопкой «Скачать PDF».</p>
             <div v-if="shareUrl" class="flex flex-wrap items-center gap-2">
               <input :value="shareUrl" readonly class="flex-1 min-w-[220px] bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300" />
               <button @click="copyShare" class="px-3 py-2 text-sm rounded-lg border border-gray-700 text-gray-300 hover:text-white transition">Копировать</button>
+              <a :href="shareUrl" target="_blank" rel="noopener"
+                class="px-3 py-2 text-sm rounded-lg border border-gray-700 text-gray-300 hover:text-white transition">👁 Посмотреть как клиент</a>
               <button @click="revokeShare" class="px-3 py-2 text-sm rounded-lg border border-red-900 text-red-400 transition">Отозвать</button>
             </div>
             <button v-else @click="createShare" class="px-4 py-2 text-sm rounded-lg border border-gray-700 text-gray-300 hover:text-white transition">Создать ссылку</button>

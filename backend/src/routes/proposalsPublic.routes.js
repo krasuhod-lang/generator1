@@ -8,7 +8,10 @@
 const express   = require('express');
 const rateLimit = require('express-rate-limit');
 
-const { getSharedProposal } = require('../controllers/proposals.controller');
+const {
+  getSharedProposal,
+  exportSharedProposalPdf,
+} = require('../controllers/proposals.controller');
 
 const router = express.Router();
 
@@ -23,5 +26,6 @@ const publicLimiter = rateLimit({
 router.use(publicLimiter);
 
 router.get('/proposal/:token', getSharedProposal);
+router.get('/proposal/:token/export/pdf', exportSharedProposalPdf);
 
 module.exports = router;
