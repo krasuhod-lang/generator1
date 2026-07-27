@@ -35,6 +35,8 @@ const state = {
   legacyFails: false,
   serpCalls: 0,
   gistCalls: 0,
+  linkCalls: 0,
+  forceCostUsd: null,
   legacyCalls: 0,
 };
 
@@ -47,7 +49,8 @@ const DEMO_META = {
   description_mobile: 'Монтаж вентиляции за 3 дня, гарантия 5 лет. Закажите расчёт.',
   winner_fact: 'монтаж за 3 дня с гарантией 5 лет',
   post_validation_notes: [],
-  _meta: { tokensIn: 1200, tokensOut: 400, costUsd: 0.0021, model: 'mock-model' },
+  // Движки GIST возвращают только токены — стоимость считает сам фасад.
+  _meta: { tokensIn: 1200, tokensOut: 400, model: 'mock-model', provider: 'gemini' },
 };
 
 function mock(file, exports) {
@@ -84,7 +87,18 @@ mock('metaGenerator.js', {
   generateDrMaxMeta: async () => {
     state.gistCalls += 1;
     if (state.gistFails) throw new Error('mock: GIST недоступен');
-    return { ...DEMO_META };
+    return state.forceCostUsd
+      ? { ...DEMO_META, _meta: { ...DEMO_META._meta, costUsd: state.forceCostUsd } }
+      : { ...DEMO_META };
+  },
+});
+
+// Движок ссылочных статей: фасад обязан звать именно его для pipeline='link'.
+mock('gistMetaFilter.js', {
+  generateLinkArticleMeta: async () => {
+    state.linkCalls += 1;
+    if (state.gistFails) throw new Error('mock: GIST недоступен');
+    return { ...DEMO_META, standalone_exposure: true, winner_source: 'fallback_structural' };
   },
 });
 
@@ -111,6 +125,7 @@ mock('metaGenerator.js', {
   require.cache[legacyId] = m;
 }
 
+const { calcCost } = require(path.join(__dirname, '..', 'src', 'services', 'metrics', 'priceCalculator'));
 const { generateMetaForContent, buildSummaryFromContent, extractH1 } = require(resolve('metaFacade.js'));
 
 const HTML = '<h1>Монтаж вентиляции под ключ</h1>'
@@ -151,14 +166,17 @@ const BASE = {
     const res = await generateMetaForContent({
       ...BASE,
       pipeline: 'seo',
-      ctx: { onTokens: (i, o, c) => tokens.push([i, o, c]) },
+      ctx: { onTokens: (provider, i, o, c) => tokens.push([provider, i, o, c]) },
     });
     check('ветка 1: source=gist_serp', res.source === 'gist_serp');
     check('ветка 1: единый контракт заполнен',
       !!res.title && !!res.description && res.h1 === DEMO_META.h1
       && res.gist_fact === DEMO_META.winner_fact);
-    check('ветка 1: usage прокинут в ctx.onTokens',
-      tokens.length === 1 && tokens[0][0] === 1200 && tokens[0][1] === 400);
+    check('ветка 1: usage прокинут в ctx.onTokens (provider, in, out, cost)',
+      tokens.length === 1 && tokens[0][0] === 'gemini'
+      && tokens[0][1] === 1200 && tokens[0][2] === 400
+      && Math.abs(tokens[0][3] - calcCost('gemini', 1200, 400)) < 1e-12
+      && tokens[0][3] > 0);
     check('ветка 1: контекст (pageAngle/missingNodes) дошёл до движка',
       res.context_used && res.context_used.missing_nodes.length === 1);
   }
@@ -171,6 +189,43 @@ const BASE = {
     check('ветка 2: source=gist', res.source === 'gist');
     check('ветка 2: GIST вызван', state.gistCalls === before + 1);
     check('ветка 2: CTR-скор посчитан', res.ctr_score && typeof res.ctr_score.score === 'number');
+  }
+
+  // 2b) Ссылочная статья: свой движок без выдачи + реальная стоимость.
+  {
+    state.serpFails = false; state.gistFails = false;
+    const beforeLink = state.linkCalls;
+    const beforeSerp = state.serpCalls;
+    const tokens = [];
+    const res = await generateMetaForContent({
+      ...BASE,
+      pipeline: 'link',
+      context: { ...BASE.context, useSerp: false, anchorText: 'купить вентиляцию' },
+      ctx: { onTokens: (provider, i, o, c) => tokens.push([provider, i, o, c]) },
+    });
+    check('link: SERP не запрашивается', state.serpCalls === beforeSerp);
+    check('link: вызван generateLinkArticleMeta', state.linkCalls === beforeLink + 1);
+    check('link: source=gist_link', res.source === 'gist_link');
+    check('link: standalone_exposure проброшен в контракт',
+      res.context_used && res.context_used.standalone_exposure === true);
+    check('link: winner_source сохранён как gist_fact_source',
+      res.gist_fact_source === 'fallback_structural');
+    check('link: CTR-скор посчитан', res.ctr_score && typeof res.ctr_score.score === 'number');
+    check('link: usage прокинут', tokens.length === 1 && tokens[0][0] === 'gemini');
+  }
+
+  // 2c) Если движок вернул costUsd — фасад его уважает и не пересчитывает.
+  {
+    state.serpFails = true; state.gistFails = false;
+    state.forceCostUsd = 0.0021;
+    const tokens = [];
+    await generateMetaForContent({
+      ...BASE,
+      pipeline: 'info',
+      ctx: { onTokens: (provider, i, o, c) => tokens.push([provider, i, o, c]) },
+    });
+    check('явный costUsd движка не пересчитывается', tokens.length === 1 && tokens[0][3] === 0.0021);
+    state.forceCostUsd = null;
   }
 
   // 3) GIST упал → legacy seoMeta.service.

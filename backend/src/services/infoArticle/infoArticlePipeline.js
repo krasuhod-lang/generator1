@@ -289,8 +289,10 @@ async function saveColumn(taskId, column, data) {
       `UPDATE info_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1`,
       [taskId, data != null ? JSON.stringify(data) : null],
     );
+    return true;
   } catch (err) {
     console.error(`[infoArticle] saveColumn(${column}) failed:`, err.message);
+    return false;
   }
 }
 
@@ -2653,6 +2655,12 @@ async function processInfoArticleTask(taskId) {
         ctx: {
           taskId,
           log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+          // Расход мета-генерации идёт в собственные счётчики info-задачи
+          // (у info_article_tasks нет FK на task_metrics), поэтому фасаду
+          // запрещаем писать в task_metrics: только pipeline_traces.
+          onTokens: (adapter, tIn, tOut, cost) => {
+            recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
+          },
         },
       });
       seoTitle = metaResult.title || null;
@@ -2683,7 +2691,15 @@ async function processInfoArticleTask(taskId) {
       }
     }
     if (seoMetaReport) {
-      try { await saveColumn(taskId, 'seo_meta_report', seoMetaReport); } catch (_) { /* колонки может не быть */ }
+      const saved = await saveColumn(taskId, 'seo_meta_report', seoMetaReport);
+      if (!saved) {
+        await appendLog(
+          taskId,
+          '⚠️ Отчёт мета-тегов не сохранён (нет колонки seo_meta_report — примените миграцию 127). '
+          + 'Сами Title/Description сохранены.',
+          'warn',
+        );
+      }
     }
 
     // 14c. SEO/GEO 2026: JSON-LD (Article + Author + FAQPage [+ HowTo]).

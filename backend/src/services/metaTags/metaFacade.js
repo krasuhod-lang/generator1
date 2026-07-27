@@ -25,8 +25,12 @@
  */
 
 const { snippetCtrScore } = require('./ctrScore');
+const { calcCost } = require('../metrics/priceCalculator');
 
 const SUMMARY_MAX = 1500;
+
+/** Имя стадии для телеметрии (pipeline_traces / task_stages). */
+const META_STAGE_NAME = 'meta_tags';
 
 function _envFlag(name, def = true) {
   const raw = process.env[name];
@@ -79,16 +83,48 @@ function buildSummaryFromContent({ html = '', plain = '', brandFacts = '', extra
 }
 
 function _emptyUsage() {
-  return { tokensIn: 0, tokensOut: 0, cost: 0, model: '' };
+  return {
+    tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
+    cost: 0, model: '', provider: '',
+  };
+}
+
+/**
+ * Провайдер → модель тарификатора. GIST зовёт адаптеры напрямую (минуя
+ * callLLM), поэтому стоимость мета-генерации считаем здесь сами; 'mixed'
+ * тарифицируем как gemini — консервативная (более дорогая) оценка.
+ */
+function _priceModel(provider) {
+  const p = String(provider || '').toLowerCase();
+  if (p.startsWith('deepseek')) return 'deepseek';
+  if (p.startsWith('grok')) return 'grok';
+  return 'gemini';
+}
+
+/** Провайдер для колонок метрик (deepseek/grok/gemini). */
+function _metricsProvider(provider) {
+  return _priceModel(provider);
 }
 
 function _usageFromMeta(meta = {}) {
+  const tokensIn = Number(meta.tokensIn) || 0;
+  const tokensOut = Number(meta.tokensOut) || 0;
+  const thoughtsTokens = Number(meta.thoughtsTokens) || 0;
+  const cachedTokens = Number(meta.cachedTokens) || 0;
+  const provider = meta.provider || '';
+  // _meta движка GIST не содержит costUsd — считаем сами по тем же тарифам,
+  // что и callLLM, иначе расход мета-тегов уходит в отчётность нулём.
+  const cost = Number(meta.costUsd) > 0
+    ? Number(meta.costUsd)
+    : calcCost(_priceModel(provider), tokensIn, tokensOut, { thoughtsTokens, cachedTokens });
   return {
-    tokensIn: Number(meta.tokensIn) || 0,
-    tokensOut: Number(meta.tokensOut) || 0,
-    cost: Number(meta.costUsd) || 0,
+    tokensIn,
+    tokensOut,
+    thoughtsTokens,
+    cachedTokens,
+    cost: Number.isFinite(cost) ? cost : 0,
     model: meta.model || '',
-    provider: meta.provider || '',
+    provider,
   };
 }
 
@@ -100,6 +136,7 @@ function _contract(metas, source, extra = {}) {
     description_mobile: String(metas.description_mobile || ''),
     source,
     gist_fact: metas.winner_fact || null,
+    gist_fact_source: metas.winner_source || null,
     ctr_score: metas.ctr_score || null,
     lsi_check: metas.lsi_check || null,
     context_used: metas.context_used || null,
@@ -108,6 +145,76 @@ function _contract(metas, source, extra = {}) {
     usage: _usageFromMeta(metas._meta || {}),
     ...extra,
   };
+}
+
+/**
+ * Персист расхода мета-генерации. GIST зовёт адаптеры напрямую, поэтому
+ * штатный учёт callLLM (task_stages + task_metrics) её не видит и стоимость
+ * мета-тегов терялась целиком.
+ *
+ * - pipeline 'seo' → task_metrics/task_stages (taskId ссылается на tasks);
+ * - остальные пайплайны ведут собственные счётчики (recordTextTokens),
+ *   поэтому здесь только телеметрия pipeline_traces.
+ *
+ * Полностью fail-open: любая ошибка БД — только warn в консоль.
+ */
+async function _persistUsage({ pipeline, taskId, usage, source, durationMs }) {
+  if (!taskId || !usage) return;
+  try {
+    const { recordTrace } = require('../llm/pipelineTrace');
+    await recordTrace({
+      stage: META_STAGE_NAME,
+      pipeline: pipeline === 'seo' || pipeline === 'info' || pipeline === 'link' ? pipeline : 'seo',
+      taskId,
+      model: usage.model || _metricsProvider(usage.provider),
+      inputTokens: usage.tokensIn,
+      outputTokens: usage.tokensOut,
+      durationMs: durationMs == null ? null : durationMs,
+    });
+  } catch (err) {
+    console.warn(`[metaFacade] recordTrace failed: ${err.message}`);
+  }
+
+  if (pipeline !== 'seo') return;
+  if (!usage.tokensIn && !usage.tokensOut) return;
+
+  const provider = _metricsProvider(usage.provider);
+  const cols = provider === 'deepseek'
+    ? { in: 'deepseek_tokens_in', out: 'deepseek_tokens_out', cost: 'deepseek_cost_usd' }
+    : provider === 'grok'
+      ? { in: 'grok_tokens_in', out: 'grok_tokens_out', cost: 'grok_cost_usd' }
+      : { in: 'gemini_tokens_in', out: 'gemini_tokens_out', cost: 'gemini_cost_usd' };
+
+  try {
+    const db = require('../../config/db');
+    await db.query(
+      `INSERT INTO task_metrics (task_id, ${cols.in}, ${cols.out}, ${cols.cost}, total_tokens, total_cost_usd)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (task_id) DO UPDATE SET
+         ${cols.in}     = task_metrics.${cols.in}     + EXCLUDED.${cols.in},
+         ${cols.out}    = task_metrics.${cols.out}    + EXCLUDED.${cols.out},
+         ${cols.cost}   = task_metrics.${cols.cost}   + EXCLUDED.${cols.cost},
+         total_tokens   = task_metrics.total_tokens   + EXCLUDED.total_tokens,
+         total_cost_usd = task_metrics.total_cost_usd + EXCLUDED.total_cost_usd,
+         updated_at     = NOW()`,
+      [
+        taskId, usage.tokensIn, usage.tokensOut, usage.cost,
+        usage.tokensIn + usage.tokensOut, usage.cost,
+      ],
+    );
+    await db.query(
+      `INSERT INTO task_stages
+         (task_id, stage_name, call_label, status, model_used, prompt_size,
+          tokens_in, tokens_out, cost_usd, started_at, completed_at)
+       VALUES ($1,$2,$3,'completed',$4,0,$5,$6,$7,NOW(),NOW())`,
+      [
+        taskId, META_STAGE_NAME, `meta:${source || 'unknown'}`,
+        usage.model || provider, usage.tokensIn, usage.tokensOut, usage.cost,
+      ],
+    );
+  } catch (err) {
+    console.warn(`[metaFacade] persist meta metrics failed: ${err.message}`);
+  }
 }
 
 /**
@@ -121,7 +228,9 @@ function _contract(metas, source, extra = {}) {
  * @param {object} [args.context]        — { brand, niche, toponym, phone, summary,
  *   price_data, pageAngle, missingNodes, standalone_exposure, audienceNicheDigest,
  *   relevanceBrief, llm_provider, gemini_model, lr, brandFacts }
- * @param {object} [args.ctx]            — { taskId, log, onTokens }
+ * @param {object} [args.ctx]            — { taskId, log, onTokens, persistMetrics }
+ *   `onTokens(provider, tokensIn, tokensOut, costUsd)` — та же сигнатура, что у
+ *   оркестратора и `recordTextTokens` инфо-/ссылочных статей.
  * @returns {Promise<object>} единый контракт (см. _contract)
  */
 async function generateMetaForContent({
@@ -153,11 +262,25 @@ async function generateMetaForContent({
     gemini_model: context.gemini_model || '',
   };
 
-  const report = (result) => {
-    if (onTokens && result && result.usage) {
-      try {
-        onTokens(result.usage.tokensIn, result.usage.tokensOut, result.usage.cost);
-      } catch (_) { /* graceful */ }
+  const startedAt = Date.now();
+  const report = async (result) => {
+    if (result && result.usage) {
+      const provider = _metricsProvider(result.usage.provider);
+      if (onTokens) {
+        try {
+          // Единая для проекта сигнатура: (provider, tokensIn, tokensOut, costUsd).
+          onTokens(provider, result.usage.tokensIn, result.usage.tokensOut, result.usage.cost);
+        } catch (_) { /* graceful */ }
+      }
+      if (ctx.persistMetrics !== false) {
+        await _persistUsage({
+          pipeline,
+          taskId: ctx.taskId,
+          usage: result.usage,
+          source: result.source,
+          durationMs: Date.now() - startedAt,
+        });
+      }
     }
     return result;
   };
@@ -189,19 +312,35 @@ async function generateMetaForContent({
   }
 
   // ── Ветка 2: GIST без SERP ────────────────────────────────────────
+  // Для ссылочных статей используем специализированный движок
+  // generateLinkArticleMeta: он не ходит в выдачу (статья публикуется на
+  // внешнем доноре), повторяет полный пайплайн и при полном провале всё
+  // равно собирает пару через MetaPairAssembler.
   try {
-    const { generateDrMaxMeta } = require('./metaGenerator');
-    const metas = await generateDrMaxMeta({
-      keyword: kw, semantics: {}, serpData: [], inputs,
-    });
+    let metas;
+    if (pipeline === 'link') {
+      const { generateLinkArticleMeta } = require('./gistMetaFilter');
+      metas = await generateLinkArticleMeta({
+        topic: kw,
+        anchorText: context.anchorText || '',
+        articlePlain: plain || String(html || '').replace(/<[^>]+>/g, ' '),
+        focusNotes: context.focusNotes || context.summary || '',
+        geminiModel: context.gemini_model || '',
+      });
+    } else {
+      const { generateDrMaxMeta } = require('./metaGenerator');
+      metas = await generateDrMaxMeta({
+        keyword: kw, semantics: {}, serpData: [], inputs,
+      });
+    }
     metas.ctr_score = snippetCtrScore({ metas, keyword: kw, inputs });
     metas.context_used = {
       page_angle: inputs.pageAngle || '',
       missing_nodes: inputs.missingNodes || [],
-      standalone_exposure: inputs.standalone_exposure,
+      standalone_exposure: metas.standalone_exposure === true || inputs.standalone_exposure === true,
     };
     log(`Мета-теги: GIST без SERP готов (CTR-скор ${metas.ctr_score.score}/100)`, 'info');
-    return report(_contract(metas, 'gist'));
+    return report(_contract(metas, pipeline === 'link' ? 'gist_link' : 'gist'));
   } catch (err) {
     log(`Мета-теги: GIST не отработал (${err.message}) — деградируем до seoMeta.service`, 'warn');
   }
