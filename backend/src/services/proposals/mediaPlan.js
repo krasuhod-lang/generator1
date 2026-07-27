@@ -107,11 +107,16 @@ function buildMediaPlan(tasks = [], horizon = 3) {
       || String(a.task_id).localeCompare(String(b.task_id), 'ru', { numeric: true }));
 
   const modules = [];
+  const moduleIndex = new Map();
   for (const row of rows) {
-    const key = row.module_id ?? row.module_name;
-    let group = modules.find((g) => (g.module_id ?? g.module_name) === key);
+    // Модуль мог не проставиться (module_id и module_name пустые) — такие
+    // работы собираем в одну общую группу, а не в отдельную на каждую строку.
+    const name = row.module_name || 'Прочие работы';
+    const key = row.module_id ?? `name:${name}`;
+    let group = moduleIndex.get(key);
     if (!group) {
-      group = { module_id: row.module_id, module_name: row.module_name || 'Прочие работы', rows: [] };
+      group = { module_id: row.module_id, module_name: name, rows: [] };
+      moduleIndex.set(key, group);
       modules.push(group);
     }
     group.rows.push(row);

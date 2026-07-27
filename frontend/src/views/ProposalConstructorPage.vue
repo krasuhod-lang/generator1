@@ -201,7 +201,9 @@ const previewTasks = computed(() => buildTasks().sort((a, b) =>
   || ((a.module_id || 0) - (b.module_id || 0))
   || String(a.task_id || '').localeCompare(String(b.task_id || ''), undefined, { numeric: true })));
 
-const previewMode = ref('table'); // table | list | kanban | mediaplan
+// По умолчанию — медиа-план: именно этот формат первым видит клиент
+// на публичной странице КП.
+const previewMode = ref('mediaplan'); // mediaplan | kanban | table | list
 
 // Медиа-план: уникальные задачи (строки) × месяцы (колонки), Set месяцев на задачу.
 // Ровно тот же вид, который получает клиент по публичной ссылке и в PDF/Excel.
@@ -228,11 +230,15 @@ const mediaPlanRows = computed(() => {
 // Медиа-план, сгруппированный по модулям (как в клиентском виде).
 const mediaPlanModules = computed(() => {
   const groups = [];
+  const index = new Map();
   for (const row of mediaPlanRows.value) {
-    const key = row.module_id ?? row.module_name;
-    let group = groups.find((g) => (g.module_id ?? g.module_name) === key);
+    // Работы без модуля собираются в одну общую группу.
+    const name = row.module_name || 'Прочие работы';
+    const key = row.module_id ?? `name:${name}`;
+    let group = index.get(key);
     if (!group) {
-      group = { module_id: row.module_id, module_name: row.module_name || 'Прочие работы', rows: [] };
+      group = { key, module_id: row.module_id, module_name: name, rows: [] };
+      index.set(key, group);
       groups.push(group);
     }
     group.rows.push(row);
@@ -792,7 +798,7 @@ onUnmounted(() => {
       <section v-if="step === 3">
         <div class="flex items-center justify-between mb-3">
           <div class="flex rounded-lg overflow-hidden border border-gray-700 text-sm">
-            <button v-for="v in [['table','Таблица'],['list','Список'],['kanban','Kanban'],['mediaplan','Медиа-план']]" :key="v[0]"
+            <button v-for="v in [['mediaplan','🗓 Медиа-план'],['kanban','🧩 Kanban'],['table','📋 Таблица'],['list','📝 Список']]" :key="v[0]"
               @click="previewMode = v[0]"
               class="px-4 py-1.5 font-medium transition"
               :class="previewMode === v[0] ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-gray-200'">
@@ -877,13 +883,13 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-800 bg-gray-950">
-                <template v-for="mod in mediaPlanModules" :key="mod.module_id ?? mod.module_name">
+                <template v-for="mod in mediaPlanModules" :key="mod.key">
                   <tr class="bg-gray-900/60">
                     <td :colspan="months.length + 2" class="px-3 py-1.5 text-xs font-semibold text-indigo-300 sticky left-0 bg-gray-900/60">
                       {{ mod.module_name }} · {{ mod.rows.length }} {{ worksWord(mod.rows.length) }}
                     </td>
                   </tr>
-                  <tr v-for="(row, i) in mod.rows" :key="`${mod.module_id}-${i}`">
+                  <tr v-for="(row, i) in mod.rows" :key="`${mod.key}-${i}`">
                     <td class="px-3 py-2 sticky left-0 bg-gray-950">
                       <span class="text-gray-100">{{ row.task_id }} · {{ row.task_title }}
                         <span class="ml-1 text-xs px-1.5 py-0.5 rounded" :class="PRIORITY_BADGE[row.priority]?.cls">{{ PRIORITY_BADGE[row.priority]?.label }}</span>

@@ -238,13 +238,13 @@ onMounted(async () => {
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-800 bg-gray-950">
-                  <template v-for="mod in planModules" :key="mod.module_id ?? mod.module_name">
+                  <template v-for="(mod, mi) in planModules" :key="mi">
                     <tr class="bg-gray-900/60">
                       <td :colspan="months.length + 2" class="px-3 py-1.5 text-xs font-semibold text-indigo-300 sticky left-0 bg-gray-900/60">
                         {{ mod.module_name }} · {{ mod.rows.length }} {{ worksWord(mod.rows.length) }}
                       </td>
                     </tr>
-                    <tr v-for="(row, i) in mod.rows" :key="`${mod.module_id}-${i}`">
+                    <tr v-for="(row, i) in mod.rows" :key="`${mi}-${i}`">
                       <td class="px-3 py-2 sticky left-0 bg-gray-950">
                         <span class="text-gray-100">{{ row.task_title }}</span>
                         <span class="ml-1 text-xs px-1.5 py-0.5 rounded" :class="PRIORITY_BADGE[row.priority]?.cls">{{ PRIORITY_BADGE[row.priority]?.label }}</span>

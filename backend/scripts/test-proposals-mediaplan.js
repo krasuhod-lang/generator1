@@ -105,6 +105,18 @@ test('buildMediaPlan: пустой список задач', () => {
   assert.deepStrictEqual(plan.modules, []);
 });
 
+test('buildMediaPlan: работы без модуля собираются в одну группу', () => {
+  const plan = buildMediaPlan([
+    { module_id: null, module_name: null, task_id: '', task_title: 'Без модуля 1', month: 1 },
+    { module_id: null, module_name: '', task_id: '', task_title: 'Без модуля 2', month: 2 },
+    { module_id: 5, module_name: 'Аналитика', task_id: '5.1', task_title: 'Отчётность', month: 1 },
+  ], 3);
+  const other = plan.modules.filter((m) => m.module_name === 'Прочие работы');
+  assert.strictEqual(other.length, 1, `ожидалась одна группа «Прочие работы», получено ${other.length}`);
+  assert.strictEqual(other[0].rows.length, 2);
+  assert.strictEqual(plan.modules.length, 2);
+});
+
 test('detectRecurrence: разово / ежемесячно / через месяц / график', () => {
   assert.strictEqual(detectRecurrence([2], 3), 'once');
   assert.strictEqual(detectRecurrence([1, 2, 3], 3), 'monthly');
