@@ -37,18 +37,16 @@ const {
   CONFLICT_CHECKER_SYSTEM,
 } = require('./gistMetaPrompts');
 const { analyzeSnippets } = require('./snippetAnalyzer');
+const { snippetCtrScore } = require('./ctrScore');
 const { checkKeywordPosition, checkLsiUsage } = require('./semantics');
 
-// Кириллические safe ranges (§4 ТЗ). Английские лимиты не применимы.
-const TITLE_MIN = 70;
-const TITLE_MAX = 80;
-const DESC_MIN = 180;
-const DESC_MAX = 190;
-const DESC_MOBILE_MIN = 90;
-const DESC_MOBILE_MAX = 105;
-const H1_MAX = 70;
-const TITLE_FACT_WINDOW = 35;
-const DESC_FACT_WINDOW = 90;
+// Кириллические safe ranges — единая точка правды (metaTags/lengthConfig).
+const {
+  TITLE_MIN, TITLE_MAX, TITLE_TARGET_MIN, TITLE_TARGET_MAX,
+  DESC_MIN, DESC_MAX, DESC_TARGET_MIN, DESC_TARGET_MAX,
+  DESC_MOBILE_MIN, DESC_MOBILE_MAX, H1_MAX,
+  TITLE_FACT_WINDOW, DESC_FACT_WINDOW,
+} = require('./lengthConfig');
 
 // §7: абстрактные слова, запрещённые как differentiator в title.
 const ABSTRACT_WORDS_RE = /(?:^|[\s,—|-])(качественн\w*|лучш\w*|надежн\w*|надёжн\w*|выгодн\w*|идеальн\w*|профессиональн\w*|широкий\s+ассортимент|индивидуальный\s+подход|доступн\w+\s+цен\w*|высокое\s+качество)(?=[\s,.!?—|-]|$)/i;
@@ -110,20 +108,24 @@ function _ensureSnippetAnalysis(serpData, inputs = {}) {
 }
 
 function _buildCompetitorNoiseBlock(snippetAnalysis) {
-  if (!snippetAnalysis || !Array.isArray(snippetAnalysis.competitor_noise)
-      || !snippetAnalysis.competitor_noise.length) {
-    return '';
-  }
+  if (!snippetAnalysis) return '';
+  const cliches = Array.isArray(snippetAnalysis.competitor_cliches)
+    ? snippetAnalysis.competitor_cliches
+    : (Array.isArray(snippetAnalysis.competitor_noise) ? snippetAnalysis.competitor_noise : []);
+  const lexicon = Array.isArray(snippetAnalysis.niche_lexicon) ? snippetAnalysis.niche_lexicon : [];
+  if (!cliches.length && !lexicon.length) return '';
   const titleStats = snippetAnalysis.competitor_title_lengths || {};
   const descStats = snippetAnalysis.competitor_desc_lengths || {};
+  const lexiconLine = lexicon.length
+    ? `\n- Частотная лексика ниши (использовать МОЖНО как обычные слова, но НЕ как дифференциатор): ${lexicon.slice(0, 15).join('; ')}.`
+    : '';
   return `
 
 [COMPETITOR_NOISE]
-Фразы и паттерны конкурентов, которые ЗАПРЕЩЕНО повторять:
-- Запрещённые фразы/паттерны: ${snippetAnalysis.competitor_noise.slice(0, 20).join('; ')}
+- Клише и шаблоны ТОПа, которые ЗАПРЕЩЕНО повторять: ${cliches.slice(0, 20).join('; ') || '—'}.${lexiconLine}
 - Доминирующий title-паттерн ТОПа: ${snippetAnalysis.dominant_title_pattern || 'plain'} — не копируй его дословно.
 - Длины конкурентов: Title min=${titleStats.min || 0}, max=${titleStats.max || 0}, avg=${titleStats.avg || 0}; Description min=${descStats.min || 0}, max=${descStats.max || 0}, avg=${descStats.avg || 0}.
-- CTA конкурентов: ${(snippetAnalysis.cta_patterns || []).join(', ') || '—'}.`;
+- CTA конкурентов: ${(snippetAnalysis.cta_patterns || []).join(', ') || '—'} — не копируй их формулировки.`;
 }
 
 function _parseJson(text) {
@@ -239,10 +241,15 @@ function _buildCandidateUserPrompt({
   const priceData = inputs.price_data ?? inputs.priceData ?? null;
 
   // Page angle / missing nodes (Steps 1–7 GIST страницы, если проходились) —
-  // первые кандидаты по ТЗ Step 8.2.
+  // первые кандидаты по ТЗ Step 8.2. Здесь ТОЛЬКО реальные смысловые пробелы:
+  // анти-паттерны и штампы ТОПа идут отдельным блоком «не повторять»
+  // (иначе LLM берёт «отсеиваем рекламный шум» как факт для копирайта).
   const pageAngle = String(inputs.pageAngle || inputs.page_angle || '').trim();
   const missingNodes = Array.isArray(inputs.missingNodes || inputs.missing_nodes)
     ? (inputs.missingNodes || inputs.missing_nodes).filter(Boolean).slice(0, 8)
+    : [];
+  const avoidPatterns = Array.isArray(inputs.avoidPatterns || inputs.avoid_patterns)
+    ? (inputs.avoidPatterns || inputs.avoid_patterns).filter(Boolean).slice(0, 8)
     : [];
 
   const competitors = (serpData || [])
@@ -273,6 +280,14 @@ function _buildCandidateUserPrompt({
   ].filter(Boolean).join('\n');
 
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+  const avoidBlock = avoidPatterns.length
+    ? `
+
+[НЕ ПОВТОРЯТЬ]
+Это НЕ факты и НЕ кандидаты — это ограничения формы. Не бери их в текст
+мета-тегов и не пересказывай своими словами:
+- ${avoidPatterns.join('\n- ')}`
+    : '';
 
   // Год приходит из единого источника (metaGenerator.detectYear): '' означает
   // исторический контекст — год в мета-тегах форсировать нельзя (§7 ТЗ).
@@ -289,7 +304,7 @@ ${lsiBlock}` : ''}
 
 [TITLE/DESCRIPTION КОНКУРЕНТОВ ТОП-ВЫДАЧИ]
 ${competitors || 'Нет данных о конкурентах — оцени общий шаблон категории по своим знаниям выдачи.'}${ctrBlock}
-${competitorNoiseBlock}
+${competitorNoiseBlock}${avoidBlock}
 
 Выполни Steps 8.1–8.4 и верни JSON по контракту.`;
 }
@@ -366,21 +381,71 @@ function _buildAssemblerUserPrompt({
 - Важные слова ТОПа (по возможности, приоритет 3): ${mandatoryWords.join(', ')}` : ''}
 - Читаемость и CTR важнее полноты покрытия LSI: переспам и перечисления ключей запрещены.`
     : '';
+
+  // Контекст, который раньше оседал в легаси-промпте metaGenerator и до
+  // ассемблера не доходил: интент выдачи, проверенная цена, дайджест ЦА/ниши,
+  // relevance-артефакт и телефон.
+  const ctr = inputs.ctrAnalysis || null;
+  const serpIntent = (ctr && ctr.serp_intent) || null;
+  const lsiIntent = (ctr && ctr.lsi_intent) || null;
+  const pct = (v) => `${Math.round((v || 0) * 100)}%`;
+  const intentBlock = serpIntent
+    ? `
+- SERP_INTENT: ${serpIntent.value || 'Mixed/Unclear'} (commercial=${pct(serpIntent.commercial_frequency)}, informational=${pct(serpIntent.informational_frequency)}). Это жёсткое условие тональности, не переопределяй его.${lsiIntent ? `
+- LSI-интент (по семантике ТОПа): ${lsiIntent.value}${(lsiIntent.commercial_lsi || []).length ? `; коммерческие LSI: ${lsiIntent.commercial_lsi.slice(0, 6).join(', ')}` : ''}${(lsiIntent.informational_lsi || []).length ? `; информационные LSI: ${lsiIntent.informational_lsi.slice(0, 6).join(', ')}` : ''}.` : ''}`
+    : '';
+
+  const priceData = (() => {
+    // Ленивый require: metaGenerator требует этот модуль (циклическая инициализация CJS).
+    const { extractPriceData } = require('./metaGenerator');
+    return extractPriceData(inputs);
+  })();
+  const phone = String(inputs.phone || '').trim();
+
+  const audienceDigest = String(inputs.audienceNicheDigest || inputs.audience_niche_digest || '').trim();
+  const audienceBlock = audienceDigest
+    ? `
+
+[АНАЛИЗ ЦА И НИШИ — тон, персона, терминология]
+${audienceDigest.slice(0, 1500)}`
+    : '';
+
+  const relevanceBrief = String(inputs.relevanceBrief || inputs.relevance_brief || '').trim();
+  const relevanceBlock = relevanceBrief
+    ? `
+
+[RELEVANCE-АРТЕФАКТ — общий контекст ниши из отчёта релевантности]
+${relevanceBrief.slice(0, 1500)}`
+    : '';
+
+  const avoidPatterns = Array.isArray(inputs.avoidPatterns || inputs.avoid_patterns)
+    ? (inputs.avoidPatterns || inputs.avoid_patterns).filter(Boolean).slice(0, 8)
+    : [];
+  const avoidBlock = avoidPatterns.length
+    ? `
+
+[НЕ ПОВТОРЯТЬ]
+Ограничения формы, а не факты. Не бери их в текст и не пересказывай:
+- ${avoidPatterns.join('\n- ')}`
+    : '';
+
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос (title обязан НАЧИНАТЬСЯ с него, старт в первых 35 символах): ${keyword}
 - Бренд: ${inputs.brand || '—'}
 - Регион: ${inputs.toponym || '—'}
 - Актуальный год (используй ТОЛЬКО его, если год уместен): ${String(inputs.current_year ?? '').trim() || 'не использовать год — исторический контекст'}
+- Проверенная цена (price_data): ${priceData || 'null — запрещены слова «цена», «стоимость», «руб», «₽» и любые суммы'}${phone ? `
+- Телефон (использовать только если он реально снимает фрикцию): ${phone}` : ''}
 - Контекст / УТП страницы: ${inputs.summary || inputs.page_context || 'Нет данных'}
 - Задача поля (Step 8.1): ${JSON.stringify(phase1.field_job || {})}
-- standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}
+- standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}${intentBlock}
 
 [WINNER FACT — единственный GIST-фактор для TITLE]
 ${JSON.stringify(winner, null, 2)}
 
 [ЗАПАСНЫЕ КАНДИДАТЫ — lead fact для DESCRIPTION]
-${alternateFacts || '— (запасных нет: используй новую смысловую ось того же факта — спецификацию/число/proof, не перефразирование)'}${lsiBlock}
-${competitorNoiseBlock}
+${alternateFacts || '— (запасных нет: используй новую смысловую ось того же факта — спецификацию/число/proof, не перефразирование)'}${lsiBlock}${audienceBlock}${relevanceBlock}
+${competitorNoiseBlock}${avoidBlock}
 ${feedback ? `
 [ФИДБЕК ПРЕДЫДУЩЕЙ ПОПЫТКИ — ОБЯЗАТЕЛЬНО ИСПРАВИТЬ]
 ${feedback}` : ''}
@@ -421,8 +486,8 @@ async function _reframeLengths(pair, { keyword, winnerFact, usage, notes, copywr
 - Description (${description.length} симв., лимит ${DESC_MAX}): ${description}
 
 [ЖЁСТКИЕ ТРЕБОВАНИЯ]
-- Title: ${TITLE_MIN}–${TITLE_MAX} символов (цель 72–78).
-- Description: ${DESC_MIN}–${DESC_MAX} символов (цель 183–188), CTA в конце.
+- Title: ${TITLE_TARGET_MIN}–${TITLE_TARGET_MAX} символов (жёсткий максимум ${TITLE_MAX}).
+- Description: ${DESC_TARGET_MIN}–${DESC_TARGET_MAX} символов (жёсткий максимум ${DESC_MAX}), CTA в конце.
 - description_mobile: ${DESC_MOBILE_MIN}–${DESC_MOBILE_MAX} символов.
 - h1: до ${H1_MAX} символов, не копия title.
 - Ничего не выдумывай: только факты исходной пары.
@@ -687,6 +752,29 @@ async function runGistMetaPipeline({
   let replaceabilityCheck = { passed: true, detail: null };
   let feedback = '';
 
+  // Best-of: попытки различаются по качеству, а последняя не обязательно
+  // лучшая. Копим кандидатов пары и в конце берём лучшую (сначала — прошедшую
+  // проверки, затем — по CTR-скору), а не ту, на которой закончился цикл.
+  const pairAttempts = [];
+  const _rememberAttempt = (candidatePair, idx, checks) => {
+    if (!candidatePair) return;
+    let ctrScoreValue = 0;
+    try {
+      const scored = snippetCtrScore({
+        metas: candidatePair, keyword, inputs, ctrAnalysis: inputs.ctrAnalysis || null, snippetAnalysis,
+      });
+      ctrScoreValue = typeof scored.score === 'number' ? scored.score : 0;
+    } catch (_) { /* fail-open: скоринг не должен ронять пайплайн */ }
+    pairAttempts.push({
+      pair: { ...candidatePair },
+      winnerIdx: idx,
+      passed: !!(checks && checks.conflictPassed && checks.replaceabilityPassed),
+      conflictCheck: (checks && checks.conflictCheck) || { passed: true, detail: null },
+      replaceabilityCheck: (checks && checks.replaceabilityCheck) || { passed: true, detail: null },
+      ctrScore: ctrScoreValue,
+    });
+  };
+
   for (let attempt = 1; attempt <= MAX_PAIR_ATTEMPTS; attempt += 1) {
     const winner = survivors[winnerIdx];
     const alternates = survivors.filter((_, i) => i !== winnerIdx).slice(0, 3);
@@ -717,9 +805,10 @@ async function runGistMetaPipeline({
     const softIssues = _deterministicPairSoftIssues(pair, keyword, semantics);
     const retryIssues = [...hardIssues, ...softIssues];
     if (retryIssues.length && attempt < MAX_PAIR_ATTEMPTS) {
+      _rememberAttempt(pair, winnerIdx, null);
       feedback = `Детерминированные нарушения: ${retryIssues.join('; ')}. `
         + `Перепиши пару, устранив ВСЕ нарушения за один заход. `
-        + `Целевые длины: title 72–78 симв. (начинается с «${keyword}»), description 183–188 симв.`;
+        + `Целевые длины: title ${TITLE_TARGET_MIN}–${TITLE_TARGET_MAX} симв. (начинается с «${keyword}»), description ${DESC_TARGET_MIN}–${DESC_TARGET_MAX} симв.`;
       notes.push(`Попытка ${attempt}: ${retryIssues.join('; ')} — пересборка.`);
       continue;
     }
@@ -745,6 +834,12 @@ async function runGistMetaPipeline({
       passed: !!(check.replaceability_check && check.replaceability_check.passed),
       detail: (check.replaceability_check && check.replaceability_check.detail) || null,
     };
+    _rememberAttempt(pair, winnerIdx, {
+      conflictPassed: conflictCheck.passed,
+      replaceabilityPassed: replaceabilityCheck.passed,
+      conflictCheck,
+      replaceabilityCheck,
+    });
     if (conflictCheck.passed && replaceabilityCheck.passed) break;
     if (attempt === MAX_PAIR_ATTEMPTS) {
       notes.push('⚠️ Пара не прошла все проверки за отведённые попытки — требуется ручная правка.');
@@ -759,8 +854,11 @@ async function runGistMetaPipeline({
         feedback = `Предыдущая пара провалила pair-level Replaceability: ${replaceabilityCheck.detail || 'конкурент может переиспользовать пару'}. Собери пару вокруг НОВОГО winner fact.`;
         notes.push(`Попытка ${attempt}: replaceability failed — переход к следующему кандидату (Step 8.10).`);
       } else {
-        feedback = `Пара провалила pair-level Replaceability: ${replaceabilityCheck.detail || ''}. Других кандидатов нет — усили специфичность формулировок вокруг того же факта.`;
-        notes.push(`Попытка ${attempt}: replaceability failed, кандидаты исчерпаны — пересборка формулировок.`);
+        feedback = `Пара провалила pair-level Replaceability: ${replaceabilityCheck.detail || ''}. `
+          + `Других кандидатов нет — СМЕНИ СМЫСЛОВУЮ ОСЬ: возьми другой проверяемый факт о странице `
+          + `(механизм, условие, число, ограничение, состав данных), а не переформулируй прежний. `
+          + `Усиление эпитетов и «специфичность формулировок» тут не помогают.`;
+        notes.push(`Попытка ${attempt}: replaceability failed, кандидаты исчерпаны — пересборка вокруг другого факта.`);
       }
     } else if (!conflictCheck.passed) {
       // Step 8.9: конфликт — description перестраивается вокруг другого
@@ -773,6 +871,26 @@ async function runGistMetaPipeline({
         feedback = `Semantic conflict: ${conflictCheck.detail || ''}. Запасных кандидатов нет — перенеси GIST-фактор в начало description и перестрой title вокруг новой смысловой оси (спецификация/процесс), сохранив главный запрос.`;
         notes.push(`Попытка ${attempt}: semantic conflict без запасных кандидатов — перенос GIST-фактора в description (Step 8.9).`);
       }
+    }
+  }
+
+  // Best-of: если попыток было несколько — берём лучшую (прошедшая проверки
+  // приоритетнее, при равенстве — выше CTR-скор), а не последнюю по циклу.
+  if (pairAttempts.length > 1) {
+    const best = pairAttempts.reduce((acc, cur) => {
+      if (acc.passed !== cur.passed) return acc.passed ? acc : cur;
+      return cur.ctrScore > acc.ctrScore ? cur : acc;
+    });
+    const last = pairAttempts[pairAttempts.length - 1];
+    if (best !== last) {
+      pair = best.pair;
+      winnerIdx = best.winnerIdx;
+      conflictCheck = best.conflictCheck;
+      replaceabilityCheck = best.replaceabilityCheck;
+      notes.push(
+        `Best-of: из ${pairAttempts.length} попыток выбрана лучшая `
+        + `(CTR-скор ${best.ctrScore} против ${last.ctrScore} у последней).`,
+      );
     }
   }
 

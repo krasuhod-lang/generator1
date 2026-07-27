@@ -18,7 +18,7 @@ const {
 } = require('../src/services/metaTags/lengthHelpers');
 const { snippetCtrScore } = require('../src/services/metaTags/ctrScore');
 const {
-  buildPageAngle, buildMissingNodes, enrichMetaInputs,
+  buildPageAngle, buildMissingNodes, buildAvoidPatterns, enrichMetaInputs,
 } = require('../src/services/metaTags/metaContext');
 
 let passed = 0;
@@ -202,24 +202,34 @@ console.log('\n§4 — обогащение inputs (pageAngle / missingNodes):')
   check('pageAngle содержит регион и УТП',
     angle.includes('Москва') && angle.includes('монтаж за 1 день'));
 
-  const nodes = buildMissingNodes({
-    inputs, semantics, ctrAnalysis,
-    snippetAnalysis: { competitor_noise: ['лучшие цены в городе'] },
-  });
+  const snippetAnalysis = { competitor_cliches: ['лучшие цены в городе'], competitor_noise: ['лучшие цены в городе'] };
+  const nodes = buildMissingNodes({ inputs, semantics, ctrAnalysis });
   check('missingNodes не пустые', nodes.length > 0);
   check('missingNodes ≤ 8', nodes.length <= 8);
   check('в missingNodes попали уникальные LSI',
     nodes.some((n) => n.includes('теплопакет')));
   check('в missingNodes попал пробел по цене',
     nodes.some((n) => n.includes('12 000')));
-  check('в missingNodes попали анти-паттерны',
-    nodes.some((n) => n.includes('Анти-паттерны')));
+  // Ключевая правка: анти-паттерны и штампы ТОПа — это НЕ факты-кандидаты,
+  // иначе LLM берёт «отсеиваем рекламный шум» в текст описания.
+  check('анти-паттернов НЕТ среди missingNodes',
+    !nodes.some((n) => n.includes('Анти-паттерны') || n.includes('Штампы ТОПа')));
+  check('запретов на повтор фраз конкурентов НЕТ среди missingNodes',
+    !nodes.some((n) => n.toLowerCase().includes('не повторя')));
+
+  const avoid = buildAvoidPatterns({ ctrAnalysis, snippetAnalysis });
+  check('avoidPatterns не пустые', avoid.length > 0);
+  check('в avoidPatterns попали анти-паттерны ТОПа',
+    avoid.some((n) => n.includes('Анти-паттерны')));
+  check('в avoidPatterns попали клише конкурентов',
+    avoid.some((n) => n.includes('лучшие цены в городе')));
 
   const enriched = enrichMetaInputs({
     keyword: 'пластиковые окна', inputs, semantics, ctrAnalysis,
   });
   check('enrichMetaInputs проставил pageAngle', !!enriched.pageAngle);
   check('enrichMetaInputs проставил missingNodes', (enriched.missingNodes || []).length > 0);
+  check('enrichMetaInputs проставил avoidPatterns', Array.isArray(enriched.avoidPatterns));
 
   const preset = enrichMetaInputs({
     keyword: 'пластиковые окна',
@@ -259,6 +269,90 @@ console.log('\n§4 — обогащение inputs (pageAngle / missingNodes):')
   const oneSide = mergeUsageMeta(undefined, { tokensIn: 7, tokensOut: 3 });
   check('пустой первый прогон не ломает слияние',
     oneSide.tokensIn === 7 && oneSide.tokensOut === 3);
+}
+
+
+// ── §9: CTA-лексикон, price-guard и стоп-слова ────────────────────
+{
+  console.log('\n§9 — CTA-лексикон (ложные −15 баллов и лишние перегенерации):');
+
+  // Реальные дескрипшены из фидбека: раньше hasCta() возвращал false и
+  // сниппет терял 15 баллов CTR-скора, уходя на перегенерацию впустую.
+  const ctaPositives = [
+    'Сравните условия по 40 программам.',
+    'Сравнить условия.',
+    'Подберите программу под свой бюджет.',
+    'Заполните одну анкету на все банки.',
+    'Оцените шансы на одобрение.',
+    'Проверьте требования банка.',
+    'Читайте разбор условий.',
+    'Изучите таблицу ставок.',
+    'Рассчитайте платёж в калькуляторе.',
+    'Оформите заявку онлайн.',
+    'Смотрите подробные условия.',
+    'Узнать сумму переплаты.',
+  ];
+  ctaPositives.forEach((text) => {
+    check(`hasCta: «${text}»`, hasCta(text) === true);
+  });
+
+  // Ложных срабатываний быть не должно: однокоренные существительные и
+  // прошедшее время — это не призыв к действию.
+  const ctaNegatives = [
+    'Оценка залога проводится банком.',
+    'Кредиты без проверок кредитной истории.',
+    'Наш помощник сравнил предложения Москвы.',
+    'Сравнение условий по 40 банкам в одной таблице.',
+    'Программа подбора работает по 12 параметрам.',
+    'Оформление занимает один день.',
+  ];
+  ctaNegatives.forEach((text) => {
+    check(`hasCta НЕ срабатывает: «${text}»`, hasCta(text) === false);
+  });
+}
+
+{
+  console.log('\n§9 — price-guard: границы слова (цена ≠ оценка/процент):');
+  const { findHardViolations } = require('../src/services/metaTags/metaGenerator');
+
+  const noPrice = { price_data: null };
+  const falsePositives = [
+    'Кредиты без оценки прошлого и лишних проверок заёмщика.',
+    'Сравнение по проценту одобрения и сроку рассмотрения.',
+    'Ценность сервиса — в прозрачности условий отбора.',
+    'Рубрика с разбором программ господдержки.',
+    'Оценить шансы можно за минуту.',
+  ];
+  falsePositives.forEach((desc) => {
+    const v = findHardViolations({ title: 'Кредиты', description: desc }, noPrice);
+    check(`price-guard молчит: «${desc.slice(0, 42)}…»`,
+      !v.some((x) => /price_data/i.test(x)));
+  });
+
+  const realViolations = [
+    'Цена подбора — 0 рублей для заёмщика.',
+    'Стоимость обслуживания карты указана в таблице.',
+    'Программы от 3000 ₽ в месяц.',
+  ];
+  realViolations.forEach((desc) => {
+    const v = findHardViolations({ title: 'Кредиты', description: desc }, noPrice);
+    check(`price-guard ловит: «${desc.slice(0, 42)}…»`,
+      v.some((x) => /price_data/i.test(x)));
+  });
+}
+
+{
+  console.log('\n§9 — стоп-слова стеммируются (котор/можн/лет не попадают в LSI):');
+  const { normalizeWord, STOP_WORDS } = require('../src/services/metaTags/semantics');
+
+  ['который', 'которые', 'можно', 'лучший', 'больше', 'также', 'наш', 'нужно'].forEach((w) => {
+    check(`стоп-слово отсеивается после стемминга: «${w}»`,
+      STOP_WORDS.has(normalizeWord(w)));
+  });
+  ['кредит', 'ставка', 'заёмщик', 'одобрение', 'студент'].forEach((w) => {
+    check(`значимое слово НЕ считается стоп-словом: «${w}»`,
+      !STOP_WORDS.has(normalizeWord(w)));
+  });
 }
 
 console.log(`\n✅ Все проверки пройдены: ${passed}`);

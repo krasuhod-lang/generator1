@@ -27,12 +27,10 @@ const {
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { analyzeSnippets } = require('./snippetAnalyzer');
 
-// Кириллические safe ranges (§4 ТЗ) — синхронны с gistMetaFilter.
-const TITLE_MIN = 70;
-const TITLE_MAX = 80;
-const DESC_MIN  = 180;
-const DESC_MAX  = 190;
-const H1_MAX    = 70;
+// Кириллические safe ranges — единая точка правды (metaTags/lengthConfig).
+const {
+  TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX, H1_MAX,
+} = require('./lengthConfig');
 // Анти-стаффинг (§6 ТЗ): сколько «рекомендованных» LSI отдаём модели.
 const LSI_RECOMMENDED_LIMIT = 8;
 const META_GENERATION_MODEL = 'gemini-3.1-pro-preview';
@@ -180,6 +178,24 @@ description / h1. Если какое-то слово пришлось опус�
 // Маркеры исторической справки: при них год в Title форсировать НЕЛЬЗЯ —
 // страница говорит о прошлом, а не об актуальном предложении.
 const HISTORICAL_CONTEXT_RE = /(истори[ячи]\w*|историческ\w*|архив\w*|ретро|летопис\w*|в\s+19\d{2}|\b19\d{2}\s*(?:год\w*)?|хроник\w*|музе[йяю]\w*)/i;
+
+/**
+ * Упоминание цены в тексте (guard «price_data отсутствует»).
+ *
+ * Границы слова заданы явно: `\b` в JS не работает по кириллице, а прежний
+ * `цен[ауы]?` без границ ловил «оценка», «процент», «ценность» и давал
+ * ложное предупреждение на честных дескрипшенах. Аналогично `руб` без границ
+ * срабатывал на «рубрика» / «рубеж».
+ */
+const PRICE_MENTION_RE = new RegExp(
+  '(?<![а-яё])(?:'
+  + 'цен(?:а|ы|у|е|ой|ам|ами|ах)?'
+  + '|стоимост(?:ь|и|ью|ей)?'
+  + '|прайс(?:а|у|е|ы)?'
+  + '|руб(?:\\.|л(?:ь|я|ю|ей|ям|ями|ях))?'
+  + ')(?![а-яё])|₽',
+  'i',
+);
 
 /**
  * Возвращает год для подстановки в Title.
@@ -478,7 +494,7 @@ function findHardViolations(result, inputs) {
       && (description.includes('?') || /^(ищете|нужен|нужна|нужно|хотите)\b/i.test(description.trim()))) {
     violations.push('Commercial Description не должен содержать вопрос или начинаться с «Ищете/Нужен/Хотите»');
   }
-  if (!priceData && /(?:цен[ауы]?|стоимост|руб(?:\.|лей)?|₽)/i.test(description)) {
+  if (!priceData && PRICE_MENTION_RE.test(description)) {
     violations.push('price_data отсутствует: запрещены цена, стоимость, руб и ₽');
   }
   const priceValue = priceData && priceData.match(/\d[\d\s]*(?:[.,]\d+)?\s*(?:₽|руб(?:\.|лей)?|р\.)/i);

@@ -8,17 +8,26 @@
 
 const { normalizeWord, STOP_WORDS } = require('./semantics');
 
+// Синхронно с lengthHelpers.CTA_RE: помимо императива учитываем инфинитивы
+// («Сравнить условия», «Подобрать программу») — они частотны в сниппетах.
 const CTA_DEFS = [
-  ['узнайте', /узна[йй]те?/i],
+  ['узнайте', /узна(?:йте|й|ть)(?![а-яё])/i],
   ['записывайтесь', /запис(?:ывайтесь|ать(?:ся)?|итесь|ьтесь)/i],
   ['подробнее', /подробн/i],
-  ['закажите', /закаж(?:ите|и|ем|ать)/i],
-  ['купите', /куп(?:ите|ить|и)/i],
-  ['звоните', /звон(?:ите|ок|и)/i],
+  ['закажите', /закаж(?:ите|и|ем)(?![а-яё])|заказать(?![а-яё])/i],
+  ['купите', /куп(?:ите|ить|и)(?![а-яё])/i],
+  ['звоните', /звон(?:ите|ок|и)(?![а-яё])/i],
   ['оставьте заявку', /оставьте?\s+заявк/i],
-  ['получите', /получ(?:ите|ить)/i],
-  ['выберите', /выбер(?:ите|и)|выберите/i],
-  ['скачайте', /скач(?:айте|ать)/i],
+  ['получите', /получ(?:ите|ить)(?![а-яё])/i],
+  ['выберите', /выбер(?:ите|и)(?![а-яё])|выбрать(?![а-яё])/i],
+  ['скачайте', /скач(?:айте|ать)(?![а-яё])/i],
+  ['сравните', /сравн(?:ите|и|ить)(?![а-яё])/i],
+  ['подберите', /подбер(?:ите|и)(?![а-яё])|подобрать(?![а-яё])/i],
+  ['заполните', /заполн(?:ите|и|ить)(?![а-яё])/i],
+  ['оцените', /оцен(?:ите|и|ить)(?![а-яё])/i],
+  ['проверьте', /провер(?:ьте|ь|ить)(?![а-яё])/i],
+  ['оформите', /оформ(?:ите|ить|и)(?![а-яё])/i],
+  ['читайте', /чита(?:йте|й)(?![а-яё])|прочит(?:айте|ать)(?![а-яё])/i],
 ];
 
 const CLICHES = [
@@ -62,7 +71,7 @@ function _tokens(text) {
     ));
 }
 
-function _collectRepeatedPhrases(items) {
+function _collectRepeatedPhrases(items, minDocs = 2) {
   const phraseDocs = new Map();
   items.forEach((item, docIdx) => {
     const tokens = _tokens(`${_serpTitle(item)} ${_serpDescription(item)}`);
@@ -81,7 +90,7 @@ function _collectRepeatedPhrases(items) {
     }
   });
   return [...phraseDocs.values()]
-    .filter((entry) => entry.docs.size >= 2)
+    .filter((entry) => entry.docs.size >= minDocs)
     .sort((a, b) => b.docs.size - a.docs.size || a.phrase.localeCompare(b.phrase, 'ru'))
     .map((entry) => entry.phrase)
     .slice(0, 20);
@@ -142,28 +151,48 @@ function _cliches(items) {
   return [...found].sort((a, b) => a.localeCompare(b, 'ru'));
 }
 
+/**
+ * Порог «частотной лексики ниши»: фраза считается общей для ТОПа, если она
+ * встречается минимум в 3 сниппетах И минимум у 40% выдачи. Прежний порог «≥2
+ * документа» записывал в запрещённый шум обычный язык ниши («кредит
+ * наличными», «процентная ставка») — модель вынужденно уходила в вычурные
+ * синонимы, и дескрипшены звучали неестественно.
+ */
+function _frequentPhraseThreshold(docCount) {
+  if (docCount <= 0) return Infinity;
+  return Math.max(3, Math.ceil(docCount * 0.4));
+}
+
 function analyzeSnippets(serpSnippets) {
   const items = Array.isArray(serpSnippets) ? serpSnippets.filter(Boolean).slice(0, 10) : [];
   const titles = items.map(_serpTitle);
   const descriptions = items.map(_serpDescription);
   const allText = `${titles.join(' ')} ${descriptions.join(' ')}`;
   const repeatedPhrases = _collectRepeatedPhrases(items);
+  const nicheLexicon = _collectRepeatedPhrases(items, _frequentPhraseThreshold(items.length));
   const ctaEntries = _collectCtas(items);
   const ctaPatterns = ctaEntries.map(([label]) => label);
   const ctaNoise = ctaEntries.filter(([, count]) => count >= 2).map(([label]) => label);
-  const noise = [...new Set([...repeatedPhrases, ...ctaNoise, ..._cliches(items)])]
+  // Жёсткий запрет — только рекламные клише и растиражированные CTA-шаблоны.
+  const cliches = [...new Set([..._cliches(items), ...ctaNoise])]
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b, 'ru'));
 
   return {
     dominant_title_pattern: _dominantPattern(titles),
     repeated_phrases: repeatedPhrases,
+    // Частотная лексика ниши: использовать МОЖНО (это язык темы), но она не
+    // годится как дифференциатор — отдаётся промптам отдельным блоком.
+    niche_lexicon: nicheLexicon,
     used_numbers: /\d/.test(allText),
     used_year: /\b20\d{2}\b/.test(allText),
     cta_patterns: ctaPatterns,
     competitor_title_lengths: _stats(titles.map((t) => t.length)),
     competitor_desc_lengths: _stats(descriptions.map((d) => d.length)),
-    competitor_noise: noise,
+    competitor_cliches: cliches,
+    // competitor_noise сохраняем как имя контракта (промпты, ctrScore, UI),
+    // но теперь это именно клише/CTA-штампы, а не вся частотная лексика.
+    competitor_noise: cliches,
   };
 }
 

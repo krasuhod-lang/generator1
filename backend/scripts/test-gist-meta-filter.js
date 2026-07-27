@@ -18,6 +18,7 @@ const {
   TITLE_FACT_WINDOW, DESC_FACT_WINDOW,
 } = require('../src/services/metaTags/gistMetaFilter');
 const prompts = require('../src/services/metaTags/gistMetaPrompts');
+const lengthConfig = require('../src/services/metaTags/lengthConfig');
 const metaGenerator = require('../src/services/metaTags/metaGenerator');
 
 let passed = 0;
@@ -34,15 +35,30 @@ function test(name, fn) {
   }
 }
 
-test('кириллические safe ranges (§4): Title 70–80, Desc 180–190, mobile 90–105', () => {
-  assert.strictEqual(TITLE_MIN, 70);
+test('кириллические коридоры: Title цель 60–70 (max 80), Desc цель 150–170 (max 190), mobile 90–105', () => {
+  assert.strictEqual(TITLE_MIN, 60);
   assert.strictEqual(TITLE_MAX, 80);
-  assert.strictEqual(DESC_MIN, 180);
+  assert.strictEqual(DESC_MIN, 150);
   assert.strictEqual(DESC_MAX, 190);
   assert.strictEqual(DESC_MOBILE_MIN, 90);
   assert.strictEqual(DESC_MOBILE_MAX, 105);
   assert.strictEqual(TITLE_FACT_WINDOW, 35);
   assert.strictEqual(DESC_FACT_WINDOW, 90);
+});
+
+test('lengthConfig — единая точка правды для длин', () => {
+  assert.strictEqual(lengthConfig.TITLE_TARGET_MIN, 60);
+  assert.strictEqual(lengthConfig.TITLE_TARGET_MAX, 70);
+  assert.strictEqual(lengthConfig.DESC_TARGET_MIN, 150);
+  assert.strictEqual(lengthConfig.DESC_TARGET_MAX, 170);
+  assert.ok(lengthConfig.TITLE_TARGET_MAX <= lengthConfig.TITLE_MAX);
+  assert.ok(lengthConfig.DESC_TARGET_MAX <= lengthConfig.DESC_MAX);
+  const ranges = lengthConfig.describeLengthRanges();
+  assert.strictEqual(ranges.title.target_min, 60);
+  assert.strictEqual(ranges.title.hard_max, 80);
+  assert.strictEqual(ranges.description.target_max, 170);
+  assert.strictEqual(ranges.description.hard_max, 190);
+  assert.strictEqual(ranges.description_mobile.target_min, 90);
 });
 
 test('metaGenerator использует те же кириллические лимиты', () => {
@@ -91,12 +107,12 @@ test('промпты: 4 DSPy-модуля с ключевыми шагами и 
   assert.match(prompts.FILTER_RANKER_SYSTEM, /fallback_supercategory/);
   assert.match(prompts.FILTER_RANKER_SYSTEM, /manual_review_required/);
   assert.match(prompts.FILTER_RANKER_SYSTEM, /intent_specificity/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /70–80/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /180–190/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /60–70 символов/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /150–170 символов/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /максимум — 80 символов/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /максимум —\s*\n?\s*190/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /в первых 35 символах/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /НАЧИНАЕТСЯ с главного поискового запроса/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /72–78/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /183–188/);
   // v4.1: блок LSI переформулирован как приоритеты (анти-стаффинг), см. Шаг 6 ТЗ.
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /LSI — ПРИОРИТЕТЫ, А НЕ ОБЯЗАТЕЛЬСТВА/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ВАЖНЕЕ 100% покрытия LSI/);
