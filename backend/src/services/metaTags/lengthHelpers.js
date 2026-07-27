@@ -38,4 +38,98 @@ function trimToLastSentence(str, maxLen) {
   return trimmed;
 }
 
-module.exports = { trimToLastWord, trimToLastSentence };
+/**
+ * Словарь побудительных конструкций (CTA). Синхронен с CTA_DEFS
+ * snippetAnalyzer / CTA_PATTERNS serpCtrAnalyzer: по правилам DrMax CTA стоит
+ * в самом конце Description, и именно он первым страдает от механической
+ * обрезки — поэтому его нужно уметь отделять и возвращать на место.
+ */
+// NB: \b в JS работает только по латинице/цифрам, поэтому границу слова для
+// кириллицы задаём отрицательным просмотром вперёд (?![а-яё]).
+const CTA_RE = /(узна[йи]те|запи(?:ш(?:итесь|ись)|с(?:ывайтесь|аться|ь))|подробн\w*|закаж(?:ите|и|ем)|заказыв\w*|куп(?:ите|ить|и)(?![а-яё])|звон(?:ите|и)(?![а-яё])|оставьте?\s+заявк\w*|получ(?:ите|и)(?![а-яё])|выбер(?:ите|и)(?![а-яё])|скач(?:айте|ай)|оформ(?:ите|и)(?![а-яё])|приходите|обращайтесь|рассчита[йе]те|смотрите)/i;
+
+/** Делит текст на предложения, сохраняя завершающую пунктуацию. */
+function splitSentences(str) {
+  const s = String(str || '').trim();
+  if (!s) return [];
+  const parts = s.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
+  return (parts || [s]).map((p) => p.trim()).filter(Boolean);
+}
+
+/**
+ * Отделяет CTA-хвост от «тела» описания.
+ * CTA считается последнее предложение, содержащее побудительную конструкцию.
+ *
+ * @returns {{body:string, cta:string}} cta === '' если CTA не найден
+ */
+function splitCta(str) {
+  const sentences = splitSentences(str);
+  if (sentences.length < 2) {
+    return { body: String(str || '').trim(), cta: '' };
+  }
+  const last = sentences[sentences.length - 1];
+  if (!CTA_RE.test(last)) {
+    return { body: String(str || '').trim(), cta: '' };
+  }
+  return {
+    body: sentences.slice(0, -1).join(' ').trim(),
+    cta: last.trim(),
+  };
+}
+
+/** true, если строка содержит побудительную конструкцию (CTA). */
+function hasCta(str) {
+  return CTA_RE.test(String(str || ''));
+}
+
+/**
+ * Детерминированное сжатие Description с сохранением CTA (ветка 2 стратегии
+ * «умной обработки превышения длины»): CTA отделяется, тело обрезается по
+ * последнему предложению/слову так, чтобы CTA поместился целиком, и
+ * приклеивается обратно.
+ *
+ * Если CTA нет либо он сам длиннее лимита — деградируем до обычной обрезки
+ * по последнему предложению (историческое поведение).
+ *
+ * @param {string} str    — исходное описание
+ * @param {number} maxLen — жёсткий лимит символов
+ * @returns {{text:string, cta_preserved:boolean}}
+ */
+function compressPreservingCta(str, maxLen) {
+  const source = String(str || '').trim();
+  if (source.length <= maxLen) {
+    return { text: source, cta_preserved: hasCta(source) };
+  }
+
+  const { body, cta } = splitCta(source);
+  // +1 на пробел между телом и CTA.
+  if (cta && cta.length + 1 < maxLen) {
+    const bodyBudget = maxLen - cta.length - 1;
+    let newBody = trimToLastSentence(body, bodyBudget);
+    if (!newBody.trim()) newBody = trimToLastWord(body, bodyBudget);
+    newBody = newBody.replace(/[\s,;:—-]+$/, '').trim();
+    if (newBody) {
+      if (!/[.!?]$/.test(newBody)) newBody += '.';
+      const merged = `${newBody} ${cta}`.trim();
+      if (merged.length <= maxLen) {
+        return { text: merged, cta_preserved: true };
+      }
+    }
+    // Тело не помещается вовсе — оставляем один CTA, он ценнее обрывка.
+    return { text: cta, cta_preserved: true };
+  }
+
+  const fallback = trimToLastSentence(source, maxLen);
+  const text = fallback.trim() ? fallback : trimToLastWord(source, maxLen);
+  return { text, cta_preserved: hasCta(text) };
+}
+
+module.exports = {
+  trimToLastWord,
+  trimToLastSentence,
+  splitSentences,
+  splitCta,
+  hasCta,
+  compressPreservingCta,
+  CTA_RE,
+};

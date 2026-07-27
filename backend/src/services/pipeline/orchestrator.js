@@ -115,6 +115,7 @@ const { analyzeAudienceAndNiche, serializeAnalysisForPrompt } = require('../pars
 const { getRelatedEntities } = require('../../utils/knowledgeGraph');
 const { runPreStage0, buildStrategyDigest } = require('./preStage0');
 const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
+const { extractPriceData: extractMetaPriceData } = require('../metaTags/metaGenerator');
 const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
 const { deriveModuleContext } = require('../../utils/moduleContext');
 const { richTextToPlain }    = require('../../utils/stripHtmlTags');
@@ -1033,6 +1034,72 @@ async function runPipeline(task, ctx) {
     log(`LinguaForensic: непойманное исключение — ${e.message} — пропускаем`, 'warn');
   }
 
+  // ── Stage 7.5: SEO мета-теги (GIST Meta Filter через metaFacade) ──
+  // Раньше основной SEO-пайплайн не генерировал мета-теги вообще: самый
+  // сильный движок проекта работал только в инструменте мета-тегов. Теперь
+  // после LinguaForensic (summary строится по ФИНАЛЬНОМУ тексту) и до quality
+  // gate вызывается единый фасад. Полностью graceful: ошибка меты не роняет
+  // задачу. Kill-switch: META_FACADE_ENABLED=false.
+  let seoMetaResult = null;
+  try {
+    const { generateMetaForContent } = require('../metaTags/metaFacade');
+    const finalHTMLForMeta = s7Result.finalHTML || finalBlocks.join('\n\n');
+    const metaKeyword = [
+      task.input_target_service || '',
+      task.input_region || '',
+    ].filter((x) => String(x).trim()).join(' ').trim();
+
+    seoMetaResult = await generateMetaForContent({
+      keyword: metaKeyword || task.input_target_service || '',
+      pipeline: 'seo',
+      html: finalHTMLForMeta,
+      plain: finalHTMLForMeta.replace(/<[^>]+>/g, ' '),
+      context: {
+        brand:    task.input_brand_name || '',
+        niche:    task.input_target_service || '',
+        toponym:  task.input_region || '',
+        brandFacts: task.input_brand_facts || '',
+        pageAngle: buildSeoPageAngle(task, strategyContext, targetPageAnalysis),
+        missingNodes: buildSeoMissingNodes(stage0Result, unusedInputsReport),
+        // Ту же эвристику цены переиспользуем из генератора мета-тегов.
+        price_data: extractMetaPriceData({
+          summary: [targetPageAnalysis?.brand_facts, task.input_brand_facts]
+            .filter(Boolean).join(' | '),
+        }),
+        // Разовый анализ ЦА/ниши уже посчитан в Stage 3 — НЕ запускаем заново.
+        audienceNicheDigest: [
+          task.__contentVoiceText || '',
+          (task.__nicheDeepDiveText || '').slice(0, 600),
+          (task.__audiencePersonasText || '').slice(0, 500),
+        ].filter(Boolean).join('\n\n').slice(0, 1500),
+        gemini_model: task.gemini_model || '',
+        standalone_exposure: false,
+      },
+      ctx: { taskId, log, onTokens },
+    });
+
+    await db.query(
+      `UPDATE tasks
+          SET seo_title = $1, seo_description = $2, seo_meta = $3, updated_at = NOW()
+        WHERE id = $4`,
+      [
+        seoMetaResult.title || null,
+        seoMetaResult.description || null,
+        JSON.stringify(seoMetaResult),
+        taskId,
+      ],
+    );
+    publish(taskId, { type: 'meta_tags_ready', meta: seoMetaResult });
+    log(
+      `Stage 7.5: мета-теги готовы (${seoMetaResult.source}, Title ${String(seoMetaResult.title || '').length} симв., `
+      + `Desc ${String(seoMetaResult.description || '').length} симв.`
+      + `${seoMetaResult.ctr_score ? `, CTR-скор ${seoMetaResult.ctr_score.score}/100` : ''})`,
+      'info',
+    );
+  } catch (metaErr) {
+    log(`Stage 7.5: мета-теги не сгенерированы (${metaErr.message}) — продолжаем`, 'warn');
+  }
+
   // ── Stage 8 (опц.): Quality Evaluator ─────────────────────────────
   // Default OFF. Включается ENV STAGE8_EVALUATOR_ENABLED=true. Не блокирует
   // и не перегенерирует контент; пишет evaluator_report в БД и SSE.
@@ -1153,6 +1220,7 @@ async function runPipeline(task, ctx) {
     evaluatorReport:    evaluatorReport                || null,
     linguaForensic:     linguaForensicReport           || null,
     qualityGate:        qualityGateVerdict             || null,
+    seoMeta:            seoMetaResult                  || null,
     tzCompliance:       s7Result.tzCompliance || s7Result.globalAudit?.tz_compliance || null,
     generationTimeSec,
   });
@@ -1181,4 +1249,55 @@ async function runPipeline(task, ctx) {
   return s7Result;
 }
 
-module.exports = { runPipeline, PipelinePausedError };
+/**
+ * Page angle страницы для GIST Meta Filter (§2 ТЗ мета-тегов): позиционирование,
+ * бизнес-цель и УТП собираются детерминированно из стратегического контекста
+ * (pre-Stage 0) и анализа целевой страницы — без дополнительных LLM-вызовов.
+ */
+function buildSeoPageAngle(task, strategyContext, targetPageAnalysis) {
+  const parts = [`Страница по услуге «${task.input_target_service || ''}»`];
+  if (task.input_region) parts.push(`регион: ${task.input_region}`);
+  const goal = task.input_business_goal
+    || (strategyContext && (strategyContext.business_goal || strategyContext.positioning));
+  if (goal) parts.push(`бизнес-цель: ${goal}`);
+  const positioning = (strategyContext && strategyContext.positioning_statement)
+    || (targetPageAnalysis && targetPageAnalysis.detected_business_goal);
+  if (positioning) parts.push(`позиционирование: ${positioning}`);
+  const usp = (targetPageAnalysis && targetPageAnalysis.brand_facts) || task.input_brand_facts;
+  if (usp) parts.push(`УТП: ${usp}`);
+  return parts.join(' | ').replace(/\s+/g, ' ').slice(0, 500);
+}
+
+/**
+ * Missing semantic nodes страницы: пробелы конкурентов (Stage 0) + входные
+ * данные, не вошедшие в текст (unused inputs) — часто именно они и есть
+ * уникальные факты, которыми стоит отстроить сниппет от ТОПа.
+ */
+function buildSeoMissingNodes(stage0Result, unusedInputsReport) {
+  const nodes = [];
+  const gaps = (stage0Result && stage0Result.competitor_gaps) || [];
+  gaps.slice(0, 3).forEach((g) => {
+    const text = typeof g === 'string' ? g : (g && (g.gap || g.topic || g.title));
+    if (text) nodes.push(`Пробел конкурентов: ${text}`);
+  });
+  const whiteSpaces = (stage0Result && stage0Result.white_spaces) || [];
+  whiteSpaces.slice(0, 2).forEach((w) => {
+    if (w) nodes.push(`White space ниши: ${typeof w === 'string' ? w : JSON.stringify(w)}`);
+  });
+  const delta = (stage0Result && stage0Result.information_delta) || [];
+  delta.slice(0, 2).forEach((d) => {
+    const text = typeof d === 'string' ? d : (d && (d.claim || d.thesis || d.text));
+    if (text) nodes.push(`Информационная дельта: ${text}`);
+  });
+  const unusedBrandFacts = unusedInputsReport?.categories?.brand_facts?.items_unused || [];
+  unusedBrandFacts.slice(0, 2).forEach((f) => {
+    const text = typeof f === 'string' ? f : (f && (f.item || f.text));
+    if (text) nodes.push(`Неиспользованный факт бренда: ${text}`);
+  });
+  return nodes
+    .map((n) => String(n).replace(/\s+/g, ' ').trim().slice(0, 240))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+module.exports = { runPipeline, PipelinePausedError, buildSeoPageAngle, buildSeoMissingNodes };

@@ -18,6 +18,12 @@ const blocks  = ref([]);     // массив task_content_blocks
 const metrics = ref(null);   // task_metrics
 const verdict = ref(null);   // task.stage7_result (JSONB)
 const fullHtml = ref('');    // task.full_html
+const seoMeta = ref(null);   // task.seo_meta (Stage 7.5, GIST Meta Filter)
+
+function copyToClipboard(text) {
+  if (!text) return;
+  navigator.clipboard?.writeText(text);
+}
 
 // ── Вкладки HTML-превью ────────────────────────────────────────────────────
 const htmlTab = ref('preview');  // 'preview' | 'code'
@@ -43,6 +49,10 @@ onMounted(async () => {
     metrics.value = data.metrics || {};
     verdict.value = data.task?.stage7_result || null;
     fullHtml.value = data.task?.full_html_edited || data.task?.full_html || '';
+    seoMeta.value = data.task?.seo_meta
+      || (data.task?.seo_title
+        ? { title: data.task.seo_title, description: data.task.seo_description }
+        : null);
   } catch (e) {
     error.value = e.response?.data?.error || e.message || 'Ошибка загрузки результата';
   } finally {
@@ -424,6 +434,54 @@ function fmt(n, digits = 0) {
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- ══ Ряд 3.5: SEO мета-теги (Stage 7.5) ═════════════════════════ -->
+      <div class="card" v-if="seoMeta && (seoMeta.title || seoMeta.description)">
+        <div class="flex flex-wrap items-center gap-3 mb-4">
+          <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">SEO мета-теги</p>
+          <span v-if="seoMeta.ctr_score" class="badge text-xs"
+            :class="seoMeta.ctr_score.score >= 75 ? 'bg-green-900 text-green-300'
+              : seoMeta.ctr_score.score >= 60 ? 'bg-yellow-900 text-yellow-300'
+              : 'bg-red-900 text-red-300'">
+            CTR-скор {{ seoMeta.ctr_score.score }}/100
+          </span>
+          <span v-if="seoMeta.manual_review_required"
+            class="badge text-xs bg-amber-900 text-amber-300">нужна ручная проверка</span>
+          <span v-if="seoMeta.source" class="text-xs text-gray-600">источник: {{ seoMeta.source }}</span>
+        </div>
+
+        <div class="space-y-3">
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <p class="text-xs text-gray-500">Title ({{ (seoMeta.title || '').length }} симв.)</p>
+              <button class="btn-ghost text-xs" @click="copyToClipboard(seoMeta.title)">Копировать</button>
+            </div>
+            <p class="text-sm text-gray-200 bg-gray-800 rounded-md p-3">{{ seoMeta.title }}</p>
+          </div>
+
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <p class="text-xs text-gray-500">Description ({{ (seoMeta.description || '').length }} симв.)</p>
+              <button class="btn-ghost text-xs" @click="copyToClipboard(seoMeta.description)">Копировать</button>
+            </div>
+            <p class="text-sm text-gray-200 bg-gray-800 rounded-md p-3">{{ seoMeta.description }}</p>
+          </div>
+
+          <div v-if="seoMeta.h1">
+            <p class="text-xs text-gray-500 mb-1">H1 ({{ seoMeta.h1.length }} симв.)</p>
+            <p class="text-sm text-gray-200 bg-gray-800 rounded-md p-3">{{ seoMeta.h1 }}</p>
+          </div>
+
+          <div v-if="seoMeta.gist_fact">
+            <p class="text-xs text-gray-500 mb-1">GIST-факт</p>
+            <p class="text-sm text-gray-300">{{ seoMeta.gist_fact }}</p>
+          </div>
+
+          <ul v-if="seoMeta.notes && seoMeta.notes.length" class="text-xs text-gray-500 space-y-1">
+            <li v-for="(n, i) in seoMeta.notes" :key="i">• {{ n }}</li>
+          </ul>
         </div>
       </div>
 

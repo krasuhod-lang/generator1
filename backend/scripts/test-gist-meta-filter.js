@@ -97,7 +97,9 @@ test('промпты: 4 DSPy-модуля с ключевыми шагами и 
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /НАЧИНАЕТСЯ с главного поискового запроса/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /72–78/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /183–188/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ОБЯЗАТЕЛЬНЫЕ LSI/);
+  // v4.1: блок LSI переформулирован как приоритеты (анти-стаффинг), см. Шаг 6 ТЗ.
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /LSI — ПРИОРИТЕТЫ, А НЕ ОБЯЗАТЕЛЬСТВА/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ВАЖНЕЕ 100% покрытия LSI/);
   assert.match(prompts.CANDIDATE_GENERATOR_SYSTEM, /главным поисковым запросом/);
   assert.match(prompts.CONFLICT_CHECKER_SYSTEM, /Step 8\.9/);
   assert.match(prompts.CONFLICT_CHECKER_SYSTEM, /Step 8\.10/);

@@ -1589,33 +1589,48 @@ async function processLinkArticleTask(taskId) {
       await appendLog(taskId, `⚠ Stage 8 evaluator не выполнился: ${stage8Err.message} — продолжаем`, 'warn');
     }
 
-    // 8d. Мета-теги для ссылочной статьи (Задача D — GIST Meta Filter
-    //     Pipeline): пара title/description, которую можно скопировать
-    //     отдельно от статьи. Graceful: ошибка генерации мета-тегов НЕ
-    //     роняет готовую статью.
+    // 8d. Мета-теги для ссылочной статьи — через единый фасад metaFacade
+    //     (§1 ТЗ): тот же движок GIST Meta Filter, но с CTR-скором, единым
+    //     контрактом и каскадом деградации. SERP не запрашивается (статья
+    //     публикуется на внешнем доноре) — useSerp: false. Graceful: ошибка
+    //     генерации мета-тегов НЕ роняет готовую статью.
     let linkMetaTags = null;
     try {
-      const { generateLinkArticleMeta } = require('../metaTags/gistMetaFilter');
+      const { generateMetaForContent } = require('../metaTags/metaFacade');
       await setStage(taskId, 'meta_tags', 99);
-      linkMetaTags = await generateLinkArticleMeta({
-        topic: task.topic || '',
-        anchorText: task.anchor_text || '',
-        articlePlain: finalPlain,
-        focusNotes: task.focus_notes || '',
-        geminiModel: normalizeGeminiCopywritingModel(task.gemini_model),
+      linkMetaTags = await generateMetaForContent({
+        keyword: task.topic || '',
+        pipeline: 'link',
+        plain: finalPlain,
+        html: finalHtml,
+        context: {
+          niche: task.topic || '',
+          useSerp: false,
+          anchorText: task.anchor_text || '',
+          focusNotes: task.focus_notes || '',
+          summary: task.focus_notes || '',
+          pageAngle: task.anchor_text
+            ? `Статья подводит к переходу по анкору «${task.anchor_text}»`
+            : '',
+          standalone_exposure: true,
+          gemini_model: normalizeGeminiCopywritingModel(task.gemini_model),
+        },
+        ctx: {
+          taskId,
+          log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+          // У link_article_tasks нет FK на task_metrics — собственные счётчики.
+          onTokens: (adapter, tIn, tOut, cost) => {
+            recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
+          },
+        },
       });
       await appendLog(
         taskId,
-        `🏷 Мета-теги (GIST): Title ${String(linkMetaTags.title || '').length} симв., Description ${String(linkMetaTags.description || '').length} симв.${linkMetaTags.manual_review_required ? ' · ⚠️ manual review' : ''}`,
+        `🏷 Мета-теги (${linkMetaTags.source}): Title ${String(linkMetaTags.title || '').length} симв., `
+        + `Description ${String(linkMetaTags.description || '').length} симв.`
+        + `${linkMetaTags.ctr_score ? ` · CTR-скор ${linkMetaTags.ctr_score.score}/100` : ''}`
+        + `${linkMetaTags.manual_review_required ? ' · ⚠️ manual review' : ''}`,
         linkMetaTags.manual_review_required ? 'warn' : 'ok',
-      );
-      const metaUsage = linkMetaTags._meta || {};
-      await recordTextTokens(
-        taskId,
-        metaUsage.provider === 'deepseek' ? 'deepseek' : 'gemini',
-        metaUsage.tokensIn || 0,
-        metaUsage.tokensOut || 0,
-        0,
       );
     } catch (metaErr) {
       console.warn(`[linkArticle] meta tags generation failed: ${metaErr.message}`);

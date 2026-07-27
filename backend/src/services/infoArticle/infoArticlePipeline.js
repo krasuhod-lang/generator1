@@ -289,9 +289,55 @@ async function saveColumn(taskId, column, data) {
       `UPDATE info_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1`,
       [taskId, data != null ? JSON.stringify(data) : null],
     );
+    return true;
   } catch (err) {
     console.error(`[infoArticle] saveColumn(${column}) failed:`, err.message);
+    return false;
   }
+}
+
+/**
+ * Page angle статьи блога для GIST Meta Filter (§3 ТЗ): угол/интент статьи
+ * собирается детерминированно из артефактов Stage 1 (intents) и Stage 1B
+ * (whitespace) — без дополнительных LLM-вызовов.
+ */
+function buildInfoPageAngle(task, intents, whitespace) {
+  const parts = [`Статья блога по теме «${task.topic || ''}»`];
+  const mainIntent = (intents && Array.isArray(intents.subintents) && intents.subintents[0])
+    ? intents.subintents[0].intent || intents.subintents[0].user_goal
+    : '';
+  if (mainIntent) parts.push(`ведущий интент: ${mainIntent}`);
+  const verdict = (whitespace && whitespace.executive_verdict) || {};
+  if (verdict.main_opportunity) parts.push(`главная возможность: ${verdict.main_opportunity}`);
+  if (verdict.main_gap_zone) parts.push(`зона пробела ТОПа: ${verdict.main_gap_zone}`);
+  return parts.join(' | ').replace(/\s+/g, ' ').slice(0, 500);
+}
+
+/**
+ * Missing semantic nodes статьи: пробелы конкурентов из whitespace-анализа
+ * (topic_gaps / intent_gaps / ai_search_gaps) + GIST information_delta.
+ * Именно они позволяют отстроить сниппет от ТОПа.
+ */
+function buildInfoMissingNodes(whitespace) {
+  if (!whitespace || typeof whitespace !== 'object') return [];
+  const nodes = [];
+  (whitespace.topic_gaps || []).slice(0, 3).forEach((g) => {
+    if (g && g.title) nodes.push(`Пробел ТОПа: ${g.title}${g.why_gap ? ` — ${g.why_gap}` : ''}`);
+  });
+  (whitespace.intent_gaps || []).slice(0, 2).forEach((g) => {
+    if (g && g.uncovered_intent) nodes.push(`Не закрытый конкурентами интент: ${g.uncovered_intent}`);
+  });
+  (whitespace.ai_search_gaps || []).slice(0, 2).forEach((g) => {
+    if (g && g.opportunity) nodes.push(`AI-поиск: ${g.opportunity}`);
+  });
+  (whitespace.information_delta || []).slice(0, 3).forEach((d) => {
+    const text = typeof d === 'string' ? d : (d && (d.claim || d.thesis || d.text));
+    if (text) nodes.push(`Информационная дельта: ${text}`);
+  });
+  return nodes
+    .map((n) => String(n).replace(/\s+/g, ' ').trim().slice(0, 240))
+    .filter(Boolean)
+    .slice(0, 8);
 }
 
 function buildCallCtx(taskId, stageName) {
@@ -2577,26 +2623,83 @@ async function processInfoArticleTask(taskId) {
       console.warn(`[infoArticle] LinguaForensic failed: ${lfErr.message}`);
     }
 
-    // 14b. SEO-метатеги (Часть 1 эпика): ИИ формирует title (≤60) и
-    //      description (≤160) строго по тематике статьи. Полностью graceful —
-    //      при сбое используется детерминированный fallback из <h1>/абзаца.
+    // 14b. SEO-метатеги: единый движок GIST Meta Filter через metaFacade
+    //      (§1/§3 ТЗ «Максимальная кликабельность мета-тегов»). Статья блога
+    //      расходится standalone (соцсети / AI summaries), поэтому
+    //      standalone_exposure=true — GIST-факт выносится в начало description.
+    //      Полностью graceful: каскад GIST → seoMeta.service → детерминированный
+    //      fallback внутри фасада; при META_FACADE_ENABLED=false — прежнее
+    //      поведение (одиночный вызов seoMeta.service).
     let seoTitle = null;
     let seoDescription = null;
+    let seoMetaReport = null;
     try {
       await setStage(taskId, 'seo_meta', 99);
-      const seo = await generateSeoMeta({
-        topic: task.topic,
-        region: task.region || '',
-        brand: task.brand_name || task.brand || '',
-        articleHtml: finalHtml,
-        articlePlain: finalPlain,
-        ctx: { taskId, onLog: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); } },
+      const { generateMetaForContent } = require('../metaTags/metaFacade');
+      const metaResult = await generateMetaForContent({
+        keyword: task.topic,
+        pipeline: 'info',
+        html: finalHtml,
+        plain: finalPlain,
+        context: {
+          brand: task.brand_name || task.brand || '',
+          niche: task.topic,
+          toponym: task.region || '',
+          brandFacts: task.brand_facts || '',
+          pageAngle: buildInfoPageAngle(task, intents, whitespace),
+          missingNodes: buildInfoMissingNodes(whitespace),
+          relevanceBrief: relevanceStageBrief || '',
+          gemini_model: task.gemini_model || '',
+          standalone_exposure: true,
+        },
+        ctx: {
+          taskId,
+          log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
+          // Расход мета-генерации идёт в собственные счётчики info-задачи
+          // (у info_article_tasks нет FK на task_metrics), поэтому фасаду
+          // запрещаем писать в task_metrics: только pipeline_traces.
+          onTokens: (adapter, tIn, tOut, cost) => {
+            recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
+          },
+        },
       });
-      seoTitle = seo.title || null;
-      seoDescription = seo.description || null;
-      await appendLog(taskId, `🏷 SEO-метатеги готовы (${seo.source})`, 'info');
+      seoTitle = metaResult.title || null;
+      seoDescription = metaResult.description || null;
+      seoMetaReport = metaResult;
+      await appendLog(
+        taskId,
+        `🏷 SEO-метатеги готовы (${metaResult.source}`
+        + `${metaResult.ctr_score ? `, CTR-скор ${metaResult.ctr_score.score}/100` : ''})`,
+        'info',
+      );
     } catch (seoErr) {
-      console.warn(`[infoArticle] generateSeoMeta failed: ${seoErr.message}`);
+      console.warn(`[infoArticle] meta facade failed: ${seoErr.message}`);
+      // Прямой запасной путь на случай непойманного исключения фасада.
+      try {
+        const seo = await generateSeoMeta({
+          topic: task.topic,
+          region: task.region || '',
+          brand: task.brand_name || task.brand || '',
+          articleHtml: finalHtml,
+          articlePlain: finalPlain,
+          ctx: { taskId, onLog: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); } },
+        });
+        seoTitle = seo.title || null;
+        seoDescription = seo.description || null;
+      } catch (fallbackErr) {
+        console.warn(`[infoArticle] generateSeoMeta fallback failed: ${fallbackErr.message}`);
+      }
+    }
+    if (seoMetaReport) {
+      const saved = await saveColumn(taskId, 'seo_meta_report', seoMetaReport);
+      if (!saved) {
+        await appendLog(
+          taskId,
+          '⚠️ Отчёт мета-тегов не сохранён (нет колонки seo_meta_report — примените миграцию 127). '
+          + 'Сами Title/Description сохранены.',
+          'warn',
+        );
+      }
     }
 
     // 14c. SEO/GEO 2026: JSON-LD (Article + Author + FAQPage [+ HowTo]).

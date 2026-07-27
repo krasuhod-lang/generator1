@@ -856,6 +856,33 @@ async function copyText(text, label = 'Скопировано!') {
   }
 }
 
+// ── SEO-метатеги (metaFacade, GIST Meta Filter) ─────────────────────
+// Кириллические safe ranges движка: Title 70–80, Description 180–190.
+// Длина вне диапазона — подсказка, а не ошибка: красным подсвечиваем только
+// выход за верхнюю границу, жёлтым — недобор.
+const META_TITLE_RANGE = { min: 70, max: 80 };
+const META_DESC_RANGE  = { min: 180, max: 190 };
+
+function metaLenClass(len, range) {
+  if (!len) return 'text-gray-500';
+  if (len > range.max) return 'text-red-400';
+  if (len < range.min) return 'text-amber-400';
+  return 'text-emerald-400';
+}
+
+// Отчёт metaFacade (seo_meta_report, миграция 127): CTR-скор, источник,
+// GIST-факт и пометка ручной проверки. У старых задач его нет — блок
+// деградирует до простых Title/Description.
+const seoMetaReport = computed(() => selectedTask.value?.seo_meta_report || null);
+
+const seoCtrScoreClass = computed(() => {
+  const s = seoMetaReport.value?.ctr_score?.score;
+  if (s == null) return 'bg-gray-800 text-gray-300';
+  if (s >= 75) return 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/60';
+  if (s >= 60) return 'bg-amber-900/40 text-amber-300 border border-amber-800/60';
+  return 'bg-red-900/40 text-red-300 border border-red-800/60';
+});
+
 const renderedImages = computed(() => {
   const arr = Array.isArray(selectedTask.value?.image_prompts) ? selectedTask.value.image_prompts : [];
   return arr.filter((p) => p.status === 'done' && p.image_base64);
@@ -1369,16 +1396,35 @@ onUnmounted(() => { stopTicker(); });
 
           <!-- TAB: Статья -->
           <div v-if="activeResultTab === 'article'" class="space-y-3">
-            <!-- 🏷 SEO-метатеги: title (≤60) и description (≤160), сгенерированные
-                 ИИ строго по тематике статьи. Каждое поле — с кнопкой «Скопировать»
-                 для быстрого переноса в CMS. -->
+            <!-- 🏷 SEO-метатеги (metaFacade, GIST Meta Filter): кириллические
+                 safe ranges Title 70–80 и Description 180–190 символов.
+                 Каждое поле — с кнопкой «Скопировать» для переноса в CMS. -->
             <div v-if="selectedTask.seo_title || selectedTask.seo_description"
-                 class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                 class="space-y-2">
+              <div v-if="seoMetaReport" class="flex flex-wrap items-center gap-2">
+                <span v-if="seoMetaReport.ctr_score"
+                      class="text-[11px] px-2 py-0.5 rounded font-medium"
+                      :class="seoCtrScoreClass">
+                  CTR-скор {{ seoMetaReport.ctr_score.score }}/100
+                </span>
+                <span v-if="seoMetaReport.manual_review_required"
+                      class="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-800/60 uppercase">
+                  нужна ручная проверка
+                </span>
+                <span v-if="seoMetaReport.source" class="text-[11px] text-gray-600">
+                  источник: {{ seoMetaReport.source }}
+                </span>
+                <span v-if="seoMetaReport.gist_fact" class="text-[11px] text-gray-500">
+                  GIST-факт: <span class="text-gray-300">{{ seoMetaReport.gist_fact }}</span>
+                </span>
+              </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div class="bg-gray-950 border border-indigo-900/60 rounded-lg p-3 space-y-1.5">
                 <div class="flex items-center justify-between">
                   <span class="text-xs uppercase tracking-wider text-indigo-300 font-semibold">SEO Title</span>
-                  <span class="text-[11px]" :class="(selectedTask.seo_title || '').length > 60 ? 'text-red-400' : 'text-gray-500'">
-                    {{ (selectedTask.seo_title || '').length }}/60
+                  <span class="text-[11px]" :class="metaLenClass((selectedTask.seo_title || '').length, META_TITLE_RANGE)">
+                    {{ (selectedTask.seo_title || '').length }}/{{ META_TITLE_RANGE.min }}–{{ META_TITLE_RANGE.max }}
                   </span>
                 </div>
                 <input type="text" readonly :value="selectedTask.seo_title || ''"
@@ -1392,8 +1438,8 @@ onUnmounted(() => { stopTicker(); });
               <div class="bg-gray-950 border border-indigo-900/60 rounded-lg p-3 space-y-1.5">
                 <div class="flex items-center justify-between">
                   <span class="text-xs uppercase tracking-wider text-indigo-300 font-semibold">SEO Description</span>
-                  <span class="text-[11px]" :class="(selectedTask.seo_description || '').length > 160 ? 'text-red-400' : 'text-gray-500'">
-                    {{ (selectedTask.seo_description || '').length }}/160
+                  <span class="text-[11px]" :class="metaLenClass((selectedTask.seo_description || '').length, META_DESC_RANGE)">
+                    {{ (selectedTask.seo_description || '').length }}/{{ META_DESC_RANGE.min }}–{{ META_DESC_RANGE.max }}
                   </span>
                 </div>
                 <textarea readonly rows="2" :value="selectedTask.seo_description || ''"
@@ -1404,6 +1450,7 @@ onUnmounted(() => { stopTicker(); });
                   📋 Скопировать
                 </button>
               </div>
+            </div>
             </div>
 
             <div class="flex flex-wrap gap-2">

@@ -21,7 +21,9 @@
  */
 
 const { autoCloseJSON } = require('../../utils/autoCloseJSON');
-const { trimToLastWord, trimToLastSentence } = require('./lengthHelpers');
+const {
+  trimToLastWord, compressPreservingCta, hasCta,
+} = require('./lengthHelpers');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { analyzeSnippets } = require('./snippetAnalyzer');
 
@@ -31,6 +33,8 @@ const TITLE_MAX = 80;
 const DESC_MIN  = 180;
 const DESC_MAX  = 190;
 const H1_MAX    = 70;
+// Анти-стаффинг (§6 ТЗ): сколько «рекомендованных» LSI отдаём модели.
+const LSI_RECOMMENDED_LIMIT = 8;
 const META_GENERATION_MODEL = 'gemini-3.1-pro-preview';
 
 const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Data-Driven копирайтер.
@@ -173,6 +177,10 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 description / h1. Если какое-то слово пришлось опустить ради читаемости —
 честно напиши это в coverage_self_audit, не подделывай результат.`;
 
+// Маркеры исторической справки: при них год в Title форсировать НЕЛЬЗЯ —
+// страница говорит о прошлом, а не об актуальном предложении.
+const HISTORICAL_CONTEXT_RE = /(истори[ячи]\w*|историческ\w*|архив\w*|ретро|летопис\w*|в\s+19\d{2}|\b19\d{2}\s*(?:год\w*)?|хроник\w*|музе[йяю]\w*)/i;
+
 /**
  * Возвращает год для подстановки в Title.
  *
@@ -182,17 +190,33 @@ description / h1. Если какое-то слово пришлось опус�
  *   3) первые три Title конкурентов;
  *   4) если нигде не нашли — текущий календарный год.
  *
- * Дополнительно: если найденный в SERP год МЕНЬШЕ текущего (типичный случай —
- * закэшированная выдача с прошлогодней цифрой), принудительно возвращаем
- * текущий календарный год. Так в Title не попадает устаревший год.
+ * Нормализация (§ «Динамический год»): найденный год всегда зажимается в
+ * коридор [currentYear; currentYear + 1]. Прошлогодняя цифра из закэшированной
+ * выдачи поднимается до текущего года, слишком далёкий будущий год (2030 и
+ * т.п.) опускается до currentYear + 1 — при этом легальный «следующий год»
+ * (конец года, когда ТОП уже переехал) сохраняется.
  *
- * @returns {string} строка с годом (например "2026"); пустая строка не
- *   возвращается никогда — это позволяет верхнему коду всегда иметь
- *   актуальный {current_year} для промпта.
+ * Если контекст исторический (ключ/семантика содержат «история», «архив»,
+ * «в 19xx»), год не возвращается вовсе — форсировать его в Title нельзя.
+ *
+ * @param {string[]} importantWords
+ * @param {string[]} recommendedWords
+ * @param {Array}    serpData
+ * @param {object}   [opts] — { keyword } для проверки исторического контекста
+ * @returns {string} строка с годом («2026») либо '' для исторического контекста.
  */
-function detectYear(importantWords, recommendedWords, serpData) {
+function detectYear(importantWords, recommendedWords, serpData, opts = {}) {
   const yearRe = /20\d{2}/;
   const currentYear = new Date().getFullYear();
+
+  // Исторический контекст — год не форсируем (иначе «История завода 2026»).
+  const historicalSource = [
+    opts.keyword || '',
+    ...(importantWords || []),
+    ...(recommendedWords || []),
+  ].join(' ');
+  if (HISTORICAL_CONTEXT_RE.test(historicalSource)) return '';
+
   let detected = '';
   const inImp = (importantWords || []).find((w) => yearRe.test(w));
   if (inImp) detected = String(inImp).match(yearRe)[0];
@@ -206,12 +230,12 @@ function detectYear(importantWords, recommendedWords, serpData) {
     if (m) detected = m[0];
   }
   if (!detected) return String(currentYear);
-  // Если в SERP попался устаревший год — заменяем на текущий.
+
+  // Жёсткая нормализация: clamp(detected, currentYear, currentYear + 1).
   const detectedNum = parseInt(detected, 10);
-  if (Number.isFinite(detectedNum) && detectedNum < currentYear) {
-    return String(currentYear);
-  }
-  return detected;
+  if (!Number.isFinite(detectedNum)) return String(currentYear);
+  const clamped = Math.min(Math.max(detectedNum, currentYear), currentYear + 1);
+  return String(clamped);
 }
 
 function extractPriceData(inputs = {}) {
@@ -234,7 +258,9 @@ function extractPriceData(inputs = {}) {
 
 function buildUserPrompt({ keyword, semantics, serpData, inputs, year }) {
   const importantWords   = (semantics.title_mandatory_words       || []).slice(0, 6);
-  const recommendedWords = (semantics.description_mandatory_words || []).slice(0, 10);
+  // Анти-стаффинг: рекомендованных слов передаём 8 вместо 10 — при большем
+  // объёме модель жертвует читаемостью ради 100% покрытия (см. §6 ТЗ).
+  const recommendedWords = (semantics.description_mandatory_words || []).slice(0, LSI_RECOMMENDED_LIMIT);
   // Полные мета-теги конкурентов — БЕЗ ограничения по символам (Title и
   // Description передаются как спарсились). CTR-оценки подтягиваются из
   // ctrAnalysis (по URL), чтобы модель видела самых кликабельных конкурентов.
@@ -321,8 +347,8 @@ ${inputs.relevanceBrief.trim()}`
   • ${avoid.join('\n  • ')}` : ''}${diff.length ? `
 - ДИФФЕРЕНЦИАЦИЯ (выделит сниппет на фоне ТОПа):
   • ${diff.join('\n  • ')}` : ''}${obligatoryLsi.length ? `
-- LSI ОБЯЗАТЕЛЬНЫЕ для конкуренции (есть у ≥50% ТОП-10, должны быть в Title или Description): ${obligatoryLsi.join(', ')}.` : ''}${differentiatorLsi.length ? `
-- LSI ДЛЯ ДИФФЕРЕНЦИАЦИИ (нет ни у одного конкурента — добавь 1–2 ради уникальности): ${differentiatorLsi.join(', ')}.` : ''}`;
+- LSI ПРИОРИТЕТА 1 (есть у ≥50% ТОП-10 — включи те, что ложатся естественно): ${obligatoryLsi.join(', ')}.` : ''}${differentiatorLsi.length ? `
+- LSI ПРИОРИТЕТА 2 — дифференциаторы (нет ни у одного конкурента, добавь 1–2 ради уникальности): ${differentiatorLsi.join(', ')}.` : ''}`;
   }
 
 
@@ -331,19 +357,23 @@ ${inputs.relevanceBrief.trim()}`
   - Год (current_year): ${year}
   - Проверенная цена ([price_data]): ${priceData || 'null'}
 - Главный поисковый запрос (target_keyword): ${keyword}
-- Важные слова из ТОП-10 (important_words_list) — ИСПОЛЬЗОВАТЬ ВСЕ; по возможности КАЖДОЕ должно попасть в Title, остальные распределить между Description / H1, каждое ≥1 раз: ${importantWords.join(', ')}
-- LSI-слова (lsi_list) — вплести 2–3 в Description, остальное по возможности: ${recommendedWords.join(', ')}
+- Важные слова из ТОП-10 (important_words_list), приоритет 1 — органично вплети 2–3 НАИБОЛЕЕ релевантных (лучше в Title): ${importantWords.join(', ')}
+- LSI-слова (lsi_list), приоритет 3 — 1–2 по возможности в Description: ${recommendedWords.join(', ')}
+- ВАЖНО: читаемость и кликабельность (CTR) приоритетнее полноты покрытия LSI.
+  Keyword stuffing и перечисления ключей без связок ЗАПРЕЩЕНЫ: лучше опустить
+  слово, чем испортить формулировку.
 - Краткий контекст / УТП страницы (page_context): ${pageContext}
 
 Полные мета-теги конкурентов из ТОП-выдачи (Title + Description, без обрезки,
 с CTR-оценками; для анализа интента, формул и конкурентного превосходства):
 ${competitorsMetas}${audienceBlock}${relevanceBlock}${ctrBlock}
 
-Итог: вот как пишут конкуренты (выше, с CTR-оценками), вот наши требования по
+Итог: вот как пишут конкуренты (выше, с CTR-оценками), вот наши приоритеты по
 LSI и интентам (блоки выше). Учти ВСЁ переданное и напиши ЛУЧШУЮ версию
 мета-тегов — кликабельнее сильнейшего конкурента, строго по правилам DrMax из
 system-prompt (формулы Title, Title 70–80 симв., Description 180–190 симв.,
-бренд / CTA в Description, H1 ≤70 символов и не копия Title).`;
+бренд / CTA в Description, H1 ≤70 символов и не копия Title). Естественность
+формулировок важнее числа вплетённых LSI.`;
 }
 
 /**
@@ -369,14 +399,23 @@ function postValidate(result, inputs) {
   }
   if (typeof result.title === 'string') result.title_length = result.title.length;
 
-  // 2. Description: обрезаем по последнему предложению при превышении (DESC_MAX).
+  // 2. Description: сжимаем с СОХРАНЕНИЕМ CTA (ветка 2 стратегии §5 ТЗ).
+  //    Механическая обрезка по последнему предложению срезала бы CTA, который
+  //    по правилам DrMax стоит в самом конце, — это прямая потеря CTR.
   if (typeof result.description === 'string' && result.description.length > DESC_MAX) {
-    result.description = trimToLastSentence(result.description, DESC_MAX - 3);
-    notes.push(`Description обрезан до ${result.description.length} симв.`);
+    const hadCta = hasCta(result.description);
+    const compressed = compressPreservingCta(result.description, DESC_MAX);
+    result.description = compressed.text;
+    notes.push(
+      `Description сжат до ${result.description.length} симв.`
+      + (hadCta ? (compressed.cta_preserved ? ' (CTA сохранён).' : ' ⚠️ CTA не удалось сохранить.') : ''),
+    );
   }
 
   // 3. Force brand в Description (новая v2-формулировка: «… от компании "Brand"»),
   //    но БЕЗ голого «Бренд: X.» хвоста. Если бренд уже есть — не трогаем.
+  //    Приоритет при нехватке места: CTA важнее бренда (§5 ТЗ) — бренд просто
+  //    не вставляем, вместо того чтобы выталкивать им побудительный хвост.
   const brand = (inputs.brand || '').trim();
   if (brand && typeof result.description === 'string' && !result.description.includes(brand)) {
     const insertion = ` от компании "${brand}"`;
@@ -385,13 +424,16 @@ function postValidate(result, inputs) {
       result.description = `${stripped}${insertion}.`;
       notes.push(`Бренд «${brand}» добавлен в Description (отсутствовал).`);
     } else {
-      notes.push(`⚠️ Бренд «${brand}» не уместился в Description (лимит ${DESC_MAX}).`);
+      notes.push(
+        `⚠️ Бренд «${brand}» не уместился в Description (лимит ${DESC_MAX}) — `
+        + 'приоритет отдан CTA.',
+      );
     }
   }
 
-  // 4. Финальный контроль длины Description после всех вставок.
+  // 4. Финальный контроль длины Description после всех вставок (тоже CTA-safe).
   if (typeof result.description === 'string' && result.description.length > DESC_MAX) {
-    result.description = trimToLastSentence(result.description, DESC_MAX - 3);
+    result.description = compressPreservingCta(result.description, DESC_MAX).text;
   }
   if (typeof result.description === 'string') result.description_length = result.description.length;
 
@@ -618,11 +660,13 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
   const { runResilientMetaPipeline } = require('./gistMetaFilter');
   const importantWords   = ((semantics && semantics.title_mandatory_words) || []).slice(0, 6);
   const recommendedWords = ((semantics && semantics.description_mandatory_words) || []).slice(0, 10);
-  const year = detectYear(importantWords, recommendedWords, serpData);
+  const year = detectYear(importantWords, recommendedWords, serpData, { keyword });
 
   // Копирайтерская модель задачи (та же конвенция, что у пайплайнов статей).
   const copywriterModel = normalizeGeminiCopywritingModel(inputs && inputs.gemini_model);
-  const safeInputs = { ...(inputs || {}) };
+  // Год считается ОДИН раз здесь и прокидывается в GIST-ветку (§7 ТЗ):
+  // '' означает исторический контекст — год форсировать нельзя.
+  const safeInputs = { ...(inputs || {}), current_year: year };
   if (!safeInputs.snippetAnalysis) {
     try {
       safeInputs.snippetAnalysis = analyzeSnippets(serpData || []);
@@ -662,6 +706,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
 module.exports = {
   generateDrMaxMeta,
+  detectYear,
   extractPriceData,
   buildUserPrompt,
   postValidate,
