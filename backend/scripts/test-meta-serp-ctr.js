@@ -319,7 +319,9 @@ test('prompt includes full competitor descriptions with CTR scores and LSI inten
   assert.match(prompt, /CTR-оценка: \d+\/100/);
   assert.match(prompt, /LSI-ИНТЕНТ/);
   assert.match(prompt, /напиши ЛУЧШУЮ версию/i);
-  assert.match(prompt, /КАЖДОЕ должно попасть в Title/);
+  // v4.1: жёсткое «использовать ВСЕ LSI» заменено на приоритеты (анти-стаффинг), Шаг 6 ТЗ.
+  assert.match(prompt, /органично вплети 2–3 НАИБОЛЕЕ релевантных/);
+  assert.match(prompt, /читаемость и кликабельность \(CTR\) приоритетнее полноты покрытия LSI/);
 });
 
 test('parseMetaJson: болтливость Gemini после закрывающей } игнорируется', () => {

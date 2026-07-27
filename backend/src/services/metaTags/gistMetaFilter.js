@@ -470,13 +470,18 @@ function _deterministicPairFix(pair, notes) {
     // страдал от механической обрезки по последнему предложению.
     const hadCta = hasCta(pair.description);
     const compressed = compressPreservingCta(pair.description, DESC_MAX);
-    // Ветка 3: если CTA-сжатие выбросило нас ниже safe range, а обрезка по
-    // слову укладывается в range — берём её (историческое поведение).
-    if (compressed.text.length < DESC_MIN) {
-      const byWord = trimToLastWord(pair.description, DESC_MAX);
-      pair.description = byWord.length >= DESC_MIN ? byWord : compressed.text;
+    if (compressed.cta_preserved || !hadCta) {
+      // CTA сохранён (или его и не было) — берём сжатую версию.
+      // Ветка 3: если CTA не было и сжатие выбросило ниже safe range,
+      // предпочитаем обрезку по слову (историческое поведение).
+      if (!hadCta && compressed.text.length < DESC_MIN) {
+        const byWord = trimToLastWord(pair.description, DESC_MAX);
+        pair.description = byWord.length >= DESC_MIN ? byWord : compressed.text;
+      } else {
+        pair.description = compressed.text;
+      }
     } else {
-      pair.description = compressed.text;
+      pair.description = trimToLastWord(pair.description, DESC_MAX);
     }
     notes.push(
       `Description сжат до ${pair.description.length} симв. (лимит ${DESC_MAX})`

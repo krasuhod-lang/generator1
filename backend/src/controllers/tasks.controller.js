@@ -634,6 +634,10 @@ async function getResult(req, res, next) {
         stage7_result: task.stage7_result,
         full_html:     task.full_html,
         full_html_edited: task.full_html_edited || null,
+        // Мета-теги Stage 7.5 (GIST Meta Filter через metaFacade).
+        seo_title:       task.seo_title || null,
+        seo_description: task.seo_description || null,
+        seo_meta:        task.seo_meta || null,
       },
       blocks,
       metrics: metricsRows[0] || null,

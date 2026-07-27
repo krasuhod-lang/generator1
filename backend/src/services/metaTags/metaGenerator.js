@@ -706,6 +706,7 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
 
 module.exports = {
   generateDrMaxMeta,
+  detectYear,
   extractPriceData,
   buildUserPrompt,
   postValidate,
