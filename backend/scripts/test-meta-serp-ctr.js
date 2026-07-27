@@ -214,7 +214,9 @@ test('meta prompt uses verified price, deterministic intent and new limits', () 
     null,
   );
   assert.strictEqual(TITLE_MAX, 80);
-  assert.strictEqual(DESC_MIN, 180);
+  // Целевой коридор дескрипшена смещён вниз (см. metaTags/lengthConfig):
+  // короче = меньше воды, лучше читается в выдаче.
+  assert.strictEqual(DESC_MIN, 150);
   assert.strictEqual(DESC_MAX, 190);
   assert.strictEqual(META_GENERATION_MODEL, 'gemini-3.1-pro-preview');
 });

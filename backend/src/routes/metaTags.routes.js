@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const auth      = require('../middleware/auth');
 
 const {
+  getMetaTagLimits,
   listMetaTagTasks, createMetaTagTask,
   getMetaTagTask, deleteMetaTagTask,
   exportMetaTagTaskCsv,
@@ -32,6 +33,8 @@ const readLimiter = rateLimit({
 
 router.use(readLimiter);
 
+// Статический маршрут объявляем ДО '/:id', иначе параметрический перехватит.
+router.get('/limits',             auth, getMetaTagLimits);
 router.get('/',                   auth, listMetaTagTasks);
 router.post('/',                  auth, createLimiter, createMetaTagTask);
 router.get('/:id',                auth, getMetaTagTask);

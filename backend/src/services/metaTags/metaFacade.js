@@ -226,8 +226,8 @@ async function _persistUsage({ pipeline, taskId, usage, source, durationMs }) {
  * @param {string} [args.html]           — финальный HTML (для summary/H1)
  * @param {string} [args.plain]          — plain-текст
  * @param {object} [args.context]        — { brand, niche, toponym, phone, summary,
- *   price_data, pageAngle, missingNodes, standalone_exposure, audienceNicheDigest,
- *   relevanceBrief, llm_provider, gemini_model, lr, brandFacts }
+ *   price_data, pageAngle, missingNodes, avoidPatterns, standalone_exposure,
+ *   audienceNicheDigest, relevanceBrief, llm_provider, gemini_model, lr, brandFacts }
  * @param {object} [args.ctx]            — { taskId, log, onTokens, persistMetrics }
  *   `onTokens(provider, tokensIn, tokensOut, costUsd)` — та же сигнатура, что у
  *   оркестратора и `recordTextTokens` инфо-/ссылочных статей.
@@ -255,6 +255,9 @@ async function generateMetaForContent({
     price_data: context.price_data || null,
     pageAngle: context.pageAngle || '',
     missingNodes: Array.isArray(context.missingNodes) ? context.missingNodes.filter(Boolean) : [],
+    // Запреты (анти-паттерны ТОПа, клише) идут отдельно от фактов-кандидатов —
+    // иначе модель берёт их в текст мета-тегов как содержание.
+    avoidPatterns: Array.isArray(context.avoidPatterns) ? context.avoidPatterns.filter(Boolean) : [],
     standalone_exposure: context.standalone_exposure === true,
     audienceNicheDigest: context.audienceNicheDigest || '',
     relevanceBrief: context.relevanceBrief || '',

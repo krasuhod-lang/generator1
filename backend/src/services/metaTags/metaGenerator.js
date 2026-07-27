@@ -10,9 +10,10 @@
  *   3) Pair generation + conflict check — сборка title/description, semantic
  *      conflict (Step 8.9) и pair replaceability (Step 8.10).
  *
- * Кириллические safe ranges (§4 ТЗ):
- *   • Title 70–80 символов (GIST-фактор в первых 35);
- *   • Description desktop 180–190 (GIST-фактор в первых 90), mobile 90–105;
+ * Кириллические коридоры длин — в metaTags/lengthConfig (единая точка правды):
+ *   • Title цель 60–70 символов, максимум 80 (GIST-фактор в первых 35);
+ *   • Description desktop цель 150–170, максимум 190 (фактор в первых 90),
+ *     mobile 90–105;
  *   • H1 — UX-заголовок (≤70 символов), а не копия SEO Title.
  *
  * Легаси-хелперы одновызовной DrMax-версии (SYSTEM_PROMPT, buildUserPrompt,
@@ -27,12 +28,11 @@ const {
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { analyzeSnippets } = require('./snippetAnalyzer');
 
-// Кириллические safe ranges (§4 ТЗ) — синхронны с gistMetaFilter.
-const TITLE_MIN = 70;
-const TITLE_MAX = 80;
-const DESC_MIN  = 180;
-const DESC_MAX  = 190;
-const H1_MAX    = 70;
+// Кириллические safe ranges — единая точка правды (metaTags/lengthConfig).
+const {
+  TITLE_MIN, TITLE_MAX, TITLE_TARGET_MIN, TITLE_TARGET_MAX,
+  DESC_MIN, DESC_MAX, DESC_TARGET_MIN, DESC_TARGET_MAX, H1_MAX,
+} = require('./lengthConfig');
 // Анти-стаффинг (§6 ТЗ): сколько «рекомендованных» LSI отдаём модели.
 const LSI_RECOMMENDED_LIMIT = 8;
 const META_GENERATION_MODEL = 'gemini-3.1-pro-preview';
@@ -43,7 +43,7 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
 
 <Ограничения и правила DrMax>
 
-1. Title (70–80 символов, включая пробелы):
+1. Title (цель 60–70 символов, максимум 80, включая пробелы):
    - Главный ключ должен быть в первых 3 словах.
    - Главный ключ и главное УТП / differentiator_lsi ОБЯЗАНЫ находиться в первых
      50 символах — хвост после 50 символов может быть обрезан в выдаче.
@@ -60,7 +60,7 @@ const SYSTEM_PROMPT = `Ты — Senior Technical SEO-специалист и Dat
      ёлочки («»). Только прямые кавычки (").
    - Пример: «Кредит под залог недвижимости | Ставка от 9% | Одобрение за 24ч»
 
-2. Meta Description (180–190 символов, включая пробелы):
+2. Meta Description (цель 150–170 символов, максимум 190, включая пробелы):
    - Законченное предложение (не обрывай на полуслове).
    - Description строится ИЗ ОПРЕДЕЛЁННОГО ИНТЕНТА И LSI: сначала отработай
      переданный SERP_INTENT (коммерческий → факты/УТП/цена, информационный →
@@ -180,6 +180,24 @@ description / h1. Если какое-то слово пришлось опус�
 // Маркеры исторической справки: при них год в Title форсировать НЕЛЬЗЯ —
 // страница говорит о прошлом, а не об актуальном предложении.
 const HISTORICAL_CONTEXT_RE = /(истори[ячи]\w*|историческ\w*|архив\w*|ретро|летопис\w*|в\s+19\d{2}|\b19\d{2}\s*(?:год\w*)?|хроник\w*|музе[йяю]\w*)/i;
+
+/**
+ * Упоминание цены в тексте (guard «price_data отсутствует»).
+ *
+ * Границы слова заданы явно: `\b` в JS не работает по кириллице, а прежний
+ * `цен[ауы]?` без границ ловил «оценка», «процент», «ценность» и давал
+ * ложное предупреждение на честных дескрипшенах. Аналогично `руб` без границ
+ * срабатывал на «рубрика» / «рубеж».
+ */
+const PRICE_MENTION_RE = new RegExp(
+  '(?<![а-яё])(?:'
+  + 'цен(?:а|ы|у|е|ой|ам|ами|ах)?'
+  + '|стоимост(?:ь|и|ью|ей)?'
+  + '|прайс(?:а|у|е|ы)?'
+  + '|руб(?:\\.|л(?:ь|я|ю|ей|ям|ями|ях))?'
+  + ')(?![а-яё])|₽',
+  'i',
+);
 
 /**
  * Возвращает год для подстановки в Title.
@@ -336,8 +354,8 @@ ${inputs.relevanceBrief.trim()}`
 
 [АНАЛИЗ КЛИКАБЕЛЬНОСТИ ВЫДАЧИ — фактчекинг ТОП-10, использовать обязательно]
 - SERP_INTENT: ${serpIntent.value || 'Mixed/Unclear'} (commercial=${pct(serpIntent.commercial_frequency)}, informational=${pct(serpIntent.informational_frequency)}). Это жёсткое условие, не переопределяй его.${lsiIntentBlock}
-- Длина Title в ТОПе: p50=${p.length_p50_title}, p90=${p.length_p90_title}. Твой целевой диапазон: 70–80 символов.
-- Длина Description в ТОПе: p50=${p.length_p50_desc}, p90=${p.length_p90_desc}. Твой целевой диапазон: 180–190 символов.
+- Длина Title в ТОПе: p50=${p.length_p50_title}, p90=${p.length_p90_title}. Твой целевой диапазон: ${TITLE_TARGET_MIN}–${TITLE_TARGET_MAX} символов (максимум ${TITLE_MAX}).
+- Длина Description в ТОПе: p50=${p.length_p50_desc}, p90=${p.length_p90_desc}. Твой целевой диапазон: ${DESC_TARGET_MIN}–${DESC_TARGET_MAX} символов (максимум ${DESC_MAX}).
 - Частота CTA в Description конкурентов: ${pct(p.cta_frequency)}; года в Title: ${pct(p.year_frequency)}; цены: ${pct(p.price_frequency)}; гео: ${pct(p.geo_frequency)}; бренда: ${pct(p.brand_frequency)}.
 - Штампованные начала тайтлов («${(p.common_prefixes || []).join('», «') || '—'}») и хвосты («${(p.common_suffixes || []).join('», «') || '—'}») — НЕ повторяй, чтобы сниппет не сливался с ТОПом.
 - Рекомендуемая формула Title (на основе ТОПа): ${ctr.recommendations.suggested_title_formula || '—'}.${must.length ? `
@@ -371,7 +389,7 @@ ${competitorsMetas}${audienceBlock}${relevanceBlock}${ctrBlock}
 Итог: вот как пишут конкуренты (выше, с CTR-оценками), вот наши приоритеты по
 LSI и интентам (блоки выше). Учти ВСЁ переданное и напиши ЛУЧШУЮ версию
 мета-тегов — кликабельнее сильнейшего конкурента, строго по правилам DrMax из
-system-prompt (формулы Title, Title 70–80 симв., Description 180–190 симв.,
+system-prompt (формулы Title, Title ${TITLE_TARGET_MIN}–${TITLE_TARGET_MAX} симв., Description ${DESC_TARGET_MIN}–${DESC_TARGET_MAX} симв.,
 бренд / CTA в Description, H1 ≤70 символов и не копия Title). Естественность
 формулировок важнее числа вплетённых LSI.`;
 }
@@ -478,7 +496,7 @@ function findHardViolations(result, inputs) {
       && (description.includes('?') || /^(ищете|нужен|нужна|нужно|хотите)\b/i.test(description.trim()))) {
     violations.push('Commercial Description не должен содержать вопрос или начинаться с «Ищете/Нужен/Хотите»');
   }
-  if (!priceData && /(?:цен[ауы]?|стоимост|руб(?:\.|лей)?|₽)/i.test(description)) {
+  if (!priceData && PRICE_MENTION_RE.test(description)) {
     violations.push('price_data отсутствует: запрещены цена, стоимость, руб и ₽');
   }
   const priceValue = priceData && priceData.match(/\d[\d\s]*(?:[.,]\d+)?\s*(?:₽|руб(?:\.|лей)?|р\.)/i);

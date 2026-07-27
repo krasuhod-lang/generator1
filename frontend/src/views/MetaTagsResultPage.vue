@@ -14,9 +14,21 @@ const initialLoad = ref(true);
 
 let pollTimer = null;
 
-// Кириллические safe ranges GIST Meta Filter (Задача D §4).
-const TITLE_RANGE = { min: 40, max: 50 };
-const DESC_RANGE  = { min: 130, max: 145 };
+// Коридоры длин приходят из бэкенда (services/metaTags/lengthConfig — единая
+// точка правды). Локальные значения ниже используются только как fallback,
+// если эндпоинт недоступен, и должны совпадать с lengthConfig.
+const FALLBACK_TITLE_RANGE = { min: 60, max: 70, hardMax: 80 };
+const FALLBACK_DESC_RANGE  = { min: 150, max: 170, hardMax: 190 };
+const lengthRanges = ref(null);
+
+const TITLE_RANGE = computed(() => {
+  const r = lengthRanges.value?.title;
+  return r ? { min: r.target_min, max: r.target_max, hardMax: r.hard_max } : FALLBACK_TITLE_RANGE;
+});
+const DESC_RANGE = computed(() => {
+  const r = lengthRanges.value?.description;
+  return r ? { min: r.target_min, max: r.target_max, hardMax: r.hard_max } : FALLBACK_DESC_RANGE;
+});
 
 async function reload() {
   try {
@@ -30,6 +42,11 @@ async function reload() {
 }
 
 onMounted(async () => {
+  // Коридоры длин — до первой отрисовки счётчиков; ошибка не критична
+  // (останутся fallback-константы).
+  store.fetchLengthRanges()
+    .then((r) => { lengthRanges.value = r; })
+    .catch(() => { lengthRanges.value = null; });
   await reload();
   pollTimer = setInterval(() => {
     if (task.value && (task.value.status === 'pending' || task.value.status === 'in_progress')) {
@@ -58,13 +75,20 @@ const stats = computed(() => {
 // ── Длиновые предупреждения ────────────────────────────────────────
 function lenColor(len, range) {
   if (!len) return 'text-gray-500';
+  if (range.hardMax && len > range.hardMax) return 'text-red-400';
   if (len >= range.min && len <= range.max) return 'text-emerald-400';
   return 'text-amber-400';
 }
 function lenBarPct(len, range) {
   // визуализируем длину относительно диапазона
-  const max = range.max + 20;
+  const max = (range.hardMax || range.max) + 20;
   return Math.min(100, Math.round((len / max) * 100));
+}
+function lenBarClass(len, range) {
+  const color = lenColor(len, range);
+  if (color === 'text-emerald-400') return 'bg-emerald-500';
+  if (color === 'text-red-400') return 'bg-red-500';
+  return 'bg-amber-500';
 }
 
 // ── Копирование/экспорт ────────────────────────────────────────────
@@ -214,6 +238,42 @@ function toggleCtr(idx) {
 function pct(v) {
   return `${Math.round((Number(v) || 0) * 100)}%`;
 }
+
+// Разбивка CTR-скора: показываем по клику, чтобы карточка не разрасталась.
+const expandedCtrScore = ref(new Set());
+function toggleCtrScore(idx) {
+  if (expandedCtrScore.value.has(idx)) expandedCtrScore.value.delete(idx);
+  else expandedCtrScore.value.add(idx);
+  expandedCtrScore.value = new Set(expandedCtrScore.value);
+}
+
+// Заметки пост-валидации, сгруппированные бэкендом (post_validation_report).
+// Старые задачи хранят только плоский список — тогда группируем на месте по
+// тем же маркерам, что и backend/src/services/metaTags/metaNotes.js.
+const NOTE_ERROR_RE = /^⚠️|не прошла все проверки|manual_review_required|остались нарушения|guard:/i;
+const NOTE_RECOMMENDATION_RE = /^рекомендация|добавьте, если|есть риск однотипности/i;
+
+function notesReport(item) {
+  const report = item?.metas?.post_validation_report;
+  if (report && Array.isArray(report.errors)) {
+    return {
+      errors: report.errors || [],
+      warnings: report.warnings || [],
+      recommendations: report.recommendations || [],
+    };
+  }
+  const flat = Array.isArray(item?.metas?.post_validation_notes)
+    ? item.metas.post_validation_notes : [];
+  const out = { errors: [], warnings: [], recommendations: [] };
+  flat.forEach((n) => {
+    const note = String(n || '').trim();
+    if (!note) return;
+    if (NOTE_RECOMMENDATION_RE.test(note)) out.recommendations.push(note);
+    else if (NOTE_ERROR_RE.test(note)) out.errors.push(note);
+    else out.warnings.push(note);
+  });
+  return out;
+}
 </script>
 
 <template>
@@ -352,7 +412,7 @@ function pct(v) {
                     <div class="text-base font-bold text-sky-300 leading-snug">{{ it.metas.title }}</div>
                     <div class="w-full bg-gray-800 rounded-full h-1 mt-2 overflow-hidden">
                       <div class="h-full transition-all"
-                           :class="lenColor(it.metas.title_length, TITLE_RANGE) === 'text-emerald-400' ? 'bg-emerald-500' : 'bg-amber-500'"
+                           :class="lenBarClass(it.metas.title_length, TITLE_RANGE)"
                            :style="{ width: lenBarPct(it.metas.title_length, TITLE_RANGE) + '%' }"></div>
                     </div>
                   </div>
@@ -371,7 +431,7 @@ function pct(v) {
                     <div class="text-sm text-gray-200 leading-relaxed">{{ it.metas.description }}</div>
                     <div class="w-full bg-gray-800 rounded-full h-1 mt-2 overflow-hidden">
                       <div class="h-full transition-all"
-                           :class="lenColor(it.metas.description_length, DESC_RANGE) === 'text-emerald-400' ? 'bg-emerald-500' : 'bg-amber-500'"
+                           :class="lenBarClass(it.metas.description_length, DESC_RANGE)"
                            :style="{ width: lenBarPct(it.metas.description_length, DESC_RANGE) + '%' }"></div>
                     </div>
                   </div>
@@ -429,10 +489,68 @@ function pct(v) {
                       </div>
                     </div>
 
-                    <div v-if="it.metas.post_validation_notes?.length" class="pt-1 border-t border-gray-800 text-[11px] text-amber-300">
+                    <div v-if="it.metas.winner_fact || it.metas.description_mobile"
+                         class="pt-1 border-t border-gray-800 text-[11px] space-y-1">
+                      <div v-if="it.metas.winner_fact">
+                        <span class="text-[10px] text-violet-400 uppercase font-bold block mb-0.5">
+                          Winner-факт (вокруг него собран Title)
+                        </span>
+                        <span class="text-gray-300">{{ it.metas.winner_fact }}</span>
+                      </div>
+                      <div v-if="it.metas.description_mobile">
+                        <span class="text-[10px] text-violet-400 uppercase font-bold block mb-0.5">
+                          Description для мобильной выдачи
+                          <span class="font-mono text-gray-500 normal-case">
+                            ({{ it.metas.description_mobile.length }} симв.)
+                          </span>
+                        </span>
+                        <span class="text-gray-300">{{ it.metas.description_mobile }}</span>
+                      </div>
+                    </div>
+
+                    <div v-if="it.metas.ctr_score" class="pt-1 border-t border-gray-800 text-[11px]">
+                      <button @click="toggleCtrScore(idx)"
+                              class="text-[10px] uppercase font-bold"
+                              :class="it.metas.ctr_score.needs_review ? 'text-amber-300' : 'text-emerald-300'">
+                        {{ expandedCtrScore.has(idx) ? '▾' : '▸' }}
+                        CTR-скор: {{ it.metas.ctr_score.score }}/100
+                        <span class="font-normal normal-case text-gray-500">
+                          (порог {{ it.metas.ctr_score.threshold }})
+                        </span>
+                      </button>
+                      <div v-if="expandedCtrScore.has(idx)" class="mt-1 space-y-0.5">
+                        <div v-for="(b, bi) in (it.metas.ctr_score.breakdown || [])" :key="`b-${bi}`"
+                             class="flex justify-between gap-2 text-gray-400">
+                          <span>{{ b.name }}<span v-if="b.detail" class="text-gray-600"> — {{ b.detail }}</span></span>
+                          <span class="font-mono shrink-0"
+                                :class="b.points >= b.max ? 'text-emerald-400' : 'text-gray-500'">
+                            {{ b.points }}/{{ b.max }}
+                          </span>
+                        </div>
+                        <div v-for="(p, pi) in (it.metas.ctr_score.penalties || [])" :key="`p-${pi}`"
+                             class="flex justify-between gap-2 text-rose-300">
+                          <span>{{ p.name }}<span v-if="p.detail" class="text-rose-400/70"> — {{ p.detail }}</span></span>
+                          <span class="font-mono shrink-0">−{{ p.points }}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div v-if="notesReport(it).errors.length" class="pt-1 border-t border-gray-800 text-[11px] text-rose-300">
+                      <span class="text-[10px] uppercase font-bold block mb-0.5">Требует правки:</span>
+                      <ul class="list-disc list-inside space-y-0.5">
+                        <li v-for="(n, ni) in notesReport(it).errors" :key="`e-${ni}`">{{ n }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="notesReport(it).warnings.length" class="pt-1 border-t border-gray-800 text-[11px] text-amber-300">
                       <span class="text-[10px] uppercase font-bold block mb-0.5">Пост-обработка:</span>
                       <ul class="list-disc list-inside space-y-0.5">
-                        <li v-for="(n, ni) in it.metas.post_validation_notes" :key="ni">{{ n }}</li>
+                        <li v-for="(n, ni) in notesReport(it).warnings" :key="`w-${ni}`">{{ n }}</li>
+                      </ul>
+                    </div>
+                    <div v-if="notesReport(it).recommendations.length" class="pt-1 border-t border-gray-800 text-[11px] text-sky-300">
+                      <span class="text-[10px] uppercase font-bold block mb-0.5">Рекомендации:</span>
+                      <ul class="list-disc list-inside space-y-0.5">
+                        <li v-for="(n, ni) in notesReport(it).recommendations" :key="`r-${ni}`">{{ n }}</li>
                       </ul>
                     </div>
 

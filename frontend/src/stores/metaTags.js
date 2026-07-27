@@ -12,6 +12,7 @@ export const useMetaTagsStore = defineStore('metaTags', {
     tasks:   [],
     loading: false,
     error:   null,
+    lengthRanges: null,
   }),
 
   actions: {
@@ -45,6 +46,18 @@ export const useMetaTagsStore = defineStore('metaTags', {
     async getTask(id) {
       const { data } = await api.get(`/meta-tags/${id}`);
       return data?.task || null;
+    },
+
+    /**
+     * Коридоры длин Title/Description из бэкенда (services/metaTags/lengthConfig).
+     * Кэшируем на время сессии: значения статичные, а страница результатов
+     * поллится каждые 2.5 секунды.
+     */
+    async fetchLengthRanges() {
+      if (this.lengthRanges) return this.lengthRanges;
+      const { data } = await api.get('/meta-tags/limits');
+      this.lengthRanges = data?.length_ranges || null;
+      return this.lengthRanges;
     },
   },
 });

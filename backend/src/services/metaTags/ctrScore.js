@@ -13,11 +13,10 @@
 
 const { checkKeywordPosition } = require('./semantics');
 const { hasCta, splitCta } = require('./lengthHelpers');
-
-const TITLE_MIN = 70;
-const TITLE_MAX = 80;
-const DESC_MIN = 180;
-const DESC_MAX = 190;
+const {
+  TITLE_MAX, TITLE_TARGET_MIN, TITLE_TARGET_MAX,
+  DESC_MAX, DESC_TARGET_MIN, DESC_TARGET_MAX,
+} = require('./lengthConfig');
 
 // Порог, ниже которого сниппет считается слабым и требует перегенерации.
 const CTR_SCORE_THRESHOLD = Number(process.env.META_CTR_SCORE_THRESHOLD || 60);
@@ -91,15 +90,25 @@ function snippetCtrScore({
   }
 
   // 2. Длины в целевых коридорах — 20 (по 10 на title/description).
+  //    Полный балл — за целевой коридор, половина — за попадание в жёсткие
+  //    границы выдачи (пара читаема, но длиннее/короче оптимума).
   const titleLen = title.length;
-  if (titleLen >= TITLE_MIN && titleLen <= TITLE_MAX) add('title_length', 10, 10, `${titleLen} симв.`);
-  else if (titleLen >= TITLE_MIN - 10 && titleLen <= TITLE_MAX + 5) add('title_length', 5, 10, `${titleLen} симв. (около коридора)`);
-  else add('title_length', 0, 10, `${titleLen} симв. вне коридора ${TITLE_MIN}–${TITLE_MAX}`);
+  if (titleLen >= TITLE_TARGET_MIN && titleLen <= TITLE_TARGET_MAX) {
+    add('title_length', 10, 10, `${titleLen} симв.`);
+  } else if (titleLen >= TITLE_TARGET_MIN - 10 && titleLen <= TITLE_MAX) {
+    add('title_length', 5, 10, `${titleLen} симв. (около коридора ${TITLE_TARGET_MIN}–${TITLE_TARGET_MAX})`);
+  } else {
+    add('title_length', 0, 10, `${titleLen} симв. вне коридора ${TITLE_TARGET_MIN}–${TITLE_TARGET_MAX} (максимум ${TITLE_MAX})`);
+  }
 
   const descLen = description.length;
-  if (descLen >= DESC_MIN && descLen <= DESC_MAX) add('description_length', 10, 10, `${descLen} симв.`);
-  else if (descLen >= DESC_MIN - 20 && descLen <= DESC_MAX + 5) add('description_length', 5, 10, `${descLen} симв. (около коридора)`);
-  else add('description_length', 0, 10, `${descLen} симв. вне коридора ${DESC_MIN}–${DESC_MAX}`);
+  if (descLen >= DESC_TARGET_MIN && descLen <= DESC_TARGET_MAX) {
+    add('description_length', 10, 10, `${descLen} симв.`);
+  } else if (descLen >= DESC_TARGET_MIN - 20 && descLen <= DESC_MAX) {
+    add('description_length', 5, 10, `${descLen} симв. (около коридора ${DESC_TARGET_MIN}–${DESC_TARGET_MAX})`);
+  } else {
+    add('description_length', 0, 10, `${descLen} симв. вне коридора ${DESC_TARGET_MIN}–${DESC_TARGET_MAX} (максимум ${DESC_MAX})`);
+  }
 
   // 3. Попадание в p50/p90 ТОПа — 10.
   const patterns = (ctrAnalysis && ctrAnalysis.patterns) || null;

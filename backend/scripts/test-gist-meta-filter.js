@@ -13,11 +13,14 @@ const {
   runGistMetaPipeline,
   generateLinkArticleMeta,
   checkTemplateLevelConflict,
+  _pickBestPairAttempt,
+  _buildCompetitorNoiseBlock,
   TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX,
   DESC_MOBILE_MIN, DESC_MOBILE_MAX,
   TITLE_FACT_WINDOW, DESC_FACT_WINDOW,
 } = require('../src/services/metaTags/gistMetaFilter');
 const prompts = require('../src/services/metaTags/gistMetaPrompts');
+const lengthConfig = require('../src/services/metaTags/lengthConfig');
 const metaGenerator = require('../src/services/metaTags/metaGenerator');
 
 let passed = 0;
@@ -34,15 +37,30 @@ function test(name, fn) {
   }
 }
 
-test('кириллические safe ranges (§4): Title 70–80, Desc 180–190, mobile 90–105', () => {
-  assert.strictEqual(TITLE_MIN, 70);
+test('кириллические коридоры: Title цель 60–70 (max 80), Desc цель 150–170 (max 190), mobile 90–105', () => {
+  assert.strictEqual(TITLE_MIN, 60);
   assert.strictEqual(TITLE_MAX, 80);
-  assert.strictEqual(DESC_MIN, 180);
+  assert.strictEqual(DESC_MIN, 150);
   assert.strictEqual(DESC_MAX, 190);
   assert.strictEqual(DESC_MOBILE_MIN, 90);
   assert.strictEqual(DESC_MOBILE_MAX, 105);
   assert.strictEqual(TITLE_FACT_WINDOW, 35);
   assert.strictEqual(DESC_FACT_WINDOW, 90);
+});
+
+test('lengthConfig — единая точка правды для длин', () => {
+  assert.strictEqual(lengthConfig.TITLE_TARGET_MIN, 60);
+  assert.strictEqual(lengthConfig.TITLE_TARGET_MAX, 70);
+  assert.strictEqual(lengthConfig.DESC_TARGET_MIN, 150);
+  assert.strictEqual(lengthConfig.DESC_TARGET_MAX, 170);
+  assert.ok(lengthConfig.TITLE_TARGET_MAX <= lengthConfig.TITLE_MAX);
+  assert.ok(lengthConfig.DESC_TARGET_MAX <= lengthConfig.DESC_MAX);
+  const ranges = lengthConfig.describeLengthRanges();
+  assert.strictEqual(ranges.title.target_min, 60);
+  assert.strictEqual(ranges.title.hard_max, 80);
+  assert.strictEqual(ranges.description.target_max, 170);
+  assert.strictEqual(ranges.description.hard_max, 190);
+  assert.strictEqual(ranges.description_mobile.target_min, 90);
 });
 
 test('metaGenerator использует те же кириллические лимиты', () => {
@@ -91,12 +109,12 @@ test('промпты: 4 DSPy-модуля с ключевыми шагами и 
   assert.match(prompts.FILTER_RANKER_SYSTEM, /fallback_supercategory/);
   assert.match(prompts.FILTER_RANKER_SYSTEM, /manual_review_required/);
   assert.match(prompts.FILTER_RANKER_SYSTEM, /intent_specificity/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /70–80/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /180–190/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /60–70 символов/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /150–170 символов/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /максимум — 80 символов/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /максимум —\s*\n?\s*190/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /в первых 35 символах/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /НАЧИНАЕТСЯ с главного поискового запроса/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /72–78/);
-  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /183–188/);
   // v4.1: блок LSI переформулирован как приоритеты (анти-стаффинг), см. Шаг 6 ТЗ.
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /LSI — ПРИОРИТЕТЫ, А НЕ ОБЯЗАТЕЛЬСТВА/);
   assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ВАЖНЕЕ 100% покрытия LSI/);
@@ -137,6 +155,69 @@ test('экспорт: runGistMetaPipeline / generateLinkArticleMeta — функ
   assert.strictEqual(typeof metaGenerator.generateDrMaxMeta, 'function');
   const gist = require('../src/services/metaTags/gistMetaFilter');
   assert.strictEqual(typeof gist.runResilientMetaPipeline, 'function');
+});
+
+
+test('best-of: прошедшая проверки попытка выигрывает у более кликабельной', () => {
+  const best = _pickBestPairAttempt([
+    { id: 'a', passed: false, ctrScore: 90 },
+    { id: 'b', passed: true, ctrScore: 61 },
+  ]);
+  assert.strictEqual(best.id, 'b');
+});
+
+test('best-of: при равном статусе выигрывает CTR-скор, а не порядок', () => {
+  const best = _pickBestPairAttempt([
+    { id: 'first', passed: true, ctrScore: 78 },
+    { id: 'last', passed: true, ctrScore: 55 },
+  ]);
+  assert.strictEqual(best.id, 'first');
+});
+
+test('best-of: при равном CTR-скоре выигрывает более поздняя попытка (собрана по фидбеку)', () => {
+  const best = _pickBestPairAttempt([
+    { id: 'first', passed: false, ctrScore: 60 },
+    { id: 'last', passed: false, ctrScore: 60 },
+  ]);
+  assert.strictEqual(best.id, 'last');
+});
+
+test('best-of: единственная/пустая серия попыток не ломает выбор', () => {
+  assert.strictEqual(_pickBestPairAttempt([]), null);
+  assert.strictEqual(_pickBestPairAttempt(null), null);
+  const only = _pickBestPairAttempt([{ id: 'x', passed: false, ctrScore: 10 }]);
+  assert.strictEqual(only.id, 'x');
+});
+
+test('COMPETITOR_NOISE: клише запрещены, лексика ниши разрешена как обычные слова', () => {
+  const block = _buildCompetitorNoiseBlock({
+    competitor_cliches: ['индивидуальный подход к каждому'],
+    niche_lexicon: ['кредит наличными'],
+    cta_patterns: ['узнайте'],
+    dominant_title_pattern: 'plain',
+  });
+  assert.match(block, /ЗАПРЕЩЕНО повторять: индивидуальный подход/);
+  assert.match(block, /Частотная лексика ниши.*кредит наличными/);
+  assert.match(block, /НЕ как дифференциатор/);
+});
+
+test('COMPETITOR_NOISE: пустой анализ не даёт пустого блока', () => {
+  assert.strictEqual(_buildCompetitorNoiseBlock(null), '');
+  assert.strictEqual(_buildCompetitorNoiseBlock({ competitor_cliches: [], niche_lexicon: [] }), '');
+});
+
+test('PAIR_ASSEMBLER: запрет мета-речи и few-shot «плохо → хорошо»', () => {
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /мета-речь/i);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /мы не выдаём/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /отсеиваем рекламный шум/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ПРИМЕРЫ «ПЛОХО → ХОРОШО»/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ПРАВИЛА ПОД ИНТЕНТ/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /SERP_INTENT/);
+  // Структура «что получает → чем подтверждается → одно действие».
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /что человек получает/);
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /ОДНО действие в конце/);
+  // Гвард по цене должен быть в самом промпте, а не только в пост-валидации.
+  assert.match(prompts.PAIR_ASSEMBLER_SYSTEM, /price_data = null/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
