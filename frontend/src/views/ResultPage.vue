@@ -447,6 +447,8 @@ function fmt(n, digits = 0) {
               : 'bg-red-900 text-red-300'">
             CTR-скор {{ seoMeta.ctr_score.score }}/100
           </span>
+          <span v-if="seoMeta.manual_review_required"
+            class="badge text-xs bg-amber-900 text-amber-300">нужна ручная проверка</span>
           <span v-if="seoMeta.source" class="text-xs text-gray-600">источник: {{ seoMeta.source }}</span>
         </div>
 

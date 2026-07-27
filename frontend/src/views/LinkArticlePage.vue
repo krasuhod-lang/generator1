@@ -428,9 +428,25 @@ const eeatBadgeClass = computed(() => {
 const hasResult = computed(() => !!selectedTask.value?.article_html);
 
 // ── Мета-теги (GIST Meta Filter, Задача D) ──────────────────────────
+// Контракт metaFacade (source/gist_fact/ctr_score/...). Старые задачи хранят
+// «сырой» результат GIST (winner_fact/winner_source) — нормализуем оба вида,
+// чтобы блок одинаково работал и для уже сгенерированных статей.
 const metaTags = computed(() => {
   const mt = selectedTask.value?.meta_tags;
-  return mt && (mt.title || mt.description) ? mt : null;
+  if (!mt || (!mt.title && !mt.description)) return null;
+  return {
+    ...mt,
+    gist_fact: mt.gist_fact || mt.winner_fact || null,
+    gist_fact_source: mt.gist_fact_source || mt.winner_source || null,
+  };
+});
+
+const metaCtrClass = computed(() => {
+  const s = metaTags.value?.ctr_score?.score;
+  if (s == null) return 'bg-gray-800 text-gray-300 border border-gray-700';
+  if (s >= 75) return 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/60';
+  if (s >= 60) return 'bg-amber-900/40 text-amber-300 border border-amber-800/60';
+  return 'bg-red-900/40 text-red-300 border border-red-800/60';
 });
 async function copyMetaField(label, value) {
   if (!value) return;
@@ -644,10 +660,14 @@ async function copyMetaField(label, value) {
           <div v-if="metaTags" class="bg-gray-950 border border-gray-800 rounded-lg p-4 space-y-3">
             <div class="flex items-center gap-2">
               <h3 class="text-sm font-semibold text-indigo-300 uppercase tracking-wider">🏷 Мета-теги (GIST)</h3>
+              <span v-if="metaTags.ctr_score" class="text-[11px] px-2 py-0.5 rounded font-medium" :class="metaCtrClass">
+                CTR-скор {{ metaTags.ctr_score.score }}/100
+              </span>
               <span v-if="metaTags.manual_review_required"
                     class="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-800/60 uppercase">
                 manual review
               </span>
+              <span v-if="metaTags.source" class="text-[11px] text-gray-600">источник: {{ metaTags.source }}</span>
             </div>
             <div class="space-y-1">
               <div class="flex items-center justify-between gap-2">
@@ -665,10 +685,13 @@ async function copyMetaField(label, value) {
               </div>
               <div class="text-sm text-gray-200 bg-gray-900 border border-gray-800 rounded px-3 py-2 break-words">{{ metaTags.description }}</div>
             </div>
-            <div v-if="metaTags.winner_fact" class="text-[11px] text-gray-500">
-              GIST-фактор: <span class="text-gray-300">{{ metaTags.winner_fact }}</span>
-              <template v-if="metaTags.winner_source"> · источник: {{ metaTags.winner_source }}</template>
+            <div v-if="metaTags.gist_fact" class="text-[11px] text-gray-500">
+              GIST-фактор: <span class="text-gray-300">{{ metaTags.gist_fact }}</span>
+              <template v-if="metaTags.gist_fact_source"> · источник факта: {{ metaTags.gist_fact_source }}</template>
             </div>
+            <ul v-if="metaTags.notes && metaTags.notes.length" class="text-[11px] text-gray-500 space-y-0.5">
+              <li v-for="(n, i) in metaTags.notes" :key="i">• {{ n }}</li>
+            </ul>
           </div>
 
           <!-- Preview -->
