@@ -39,6 +39,41 @@ function _canonicalHost(url) {
   }
 }
 
+/**
+ * Символы, недопустимые внутри JSON, который кастуется в `jsonb`:
+ * NUL и одиночные (непарные) суррогаты.
+ */
+const _JSONB_UNSAFE_RE = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * Готовит значение для параметра `::jsonb`.
+ *
+ * Postgres не умеет хранить NUL (`\u0000`) в text/jsonb и падает с
+ * «unsupported Unicode escape sequence» (SQLSTATE 22P05) — одного нулевого
+ * символа, приехавшего со страницы конкурента (кривой charset, UTF-16,
+ * бинарь под видом HTML), достаточно, чтобы уже посчитанный отчёт не
+ * сохранился. Такую же ошибку («Unicode low surrogate must follow a high
+ * surrogate») даёт одиночный суррогат — он появляется, например, при
+ * `.slice()` строки ровно по середине эмодзи в title/snippet выдачи.
+ *
+ * Основная защита стоит на входе (pageFetcher чистит скачанный HTML), эта —
+ * последний рубеж перед записью в БД.
+ *
+ * @param {*} value — сериализуемое значение или null/undefined.
+ * @returns {string|null} — JSON-строка, безопасная для каста в jsonb.
+ */
+function _toJsonbParam(value) {
+  if (value === null || value === undefined) return null;
+  const json = JSON.stringify(value, (_k, v) => (
+    typeof v === 'string' ? v.replace(_JSONB_UNSAFE_RE, '') : v
+  ));
+  if (typeof json !== 'string') return null;
+  // Ключи объектов replacer'ом не правятся — подчищаем уцелевшие escape'ы
+  // на уровне готового JSON. Пары обратных слэшей пропускаем, чтобы не
+  // порезать литеральный текст «\u0000» внутри данных.
+  return json.replace(/(?<!\\)((?:\\\\)*)\\u0000/g, '$1');
+}
+
 const MIN_FETCHED_FOR_ANALYZE = (() => {
   const v = parseInt(process.env.RELEVANCE_MIN_FETCHED, 10);
   // По умолчанию 3 (раньше было 5). Анализ по 3 точкам шумный, но
@@ -75,12 +110,12 @@ async function _setStage(reportId, stage, extra = {}) {
   }
   if (extra.serp != null) {
     sets.push(`serp = $${i}::jsonb`);
-    params.push(JSON.stringify(extra.serp));
+    params.push(_toJsonbParam(extra.serp));
     i += 1;
   }
   if (extra.failed_urls != null) {
     sets.push(`failed_urls = $${i}::jsonb`);
-    params.push(JSON.stringify(extra.failed_urls));
+    params.push(_toJsonbParam(extra.failed_urls));
     i += 1;
   }
   if (extra.started) {
@@ -125,14 +160,14 @@ async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed, ext
        WHERE id = $1`,
       [
         reportId,
-        JSON.stringify(report),
+        _toJsonbParam(report),
         durationMs,
         rawMeta?.stored ? 'redis' : 'none',
         rawMeta?.stored ? rawMeta.expiresAt : null,
-        dbProcessed ? JSON.stringify(dbProcessed) : null,
-        extras.our_report  ? JSON.stringify(extras.our_report)  : null,
-        extras.comparison  ? JSON.stringify(extras.comparison)  : null,
-        factorMatrix ? JSON.stringify(factorMatrix) : null,
+        _toJsonbParam(dbProcessed),
+        _toJsonbParam(extras.our_report),
+        _toJsonbParam(extras.comparison),
+        _toJsonbParam(factorMatrix),
       ],
     );
   } catch (e) {
@@ -155,13 +190,13 @@ async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed, ext
          WHERE id = $1`,
         [
           reportId,
-          JSON.stringify(report),
+          _toJsonbParam(report),
           durationMs,
           rawMeta?.stored ? 'redis' : 'none',
           rawMeta?.stored ? rawMeta.expiresAt : null,
-          dbProcessed ? JSON.stringify(dbProcessed) : null,
-          extras.our_report  ? JSON.stringify(extras.our_report)  : null,
-          extras.comparison  ? JSON.stringify(extras.comparison)  : null,
+          _toJsonbParam(dbProcessed),
+          _toJsonbParam(extras.our_report),
+          _toJsonbParam(extras.comparison),
         ],
       );
     } else {
@@ -171,7 +206,9 @@ async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed, ext
 }
 
 async function _finishError(reportId, message) {
-  const safe = String(message || 'unknown error').slice(0, 1000);
+  // Из текста ошибки тоже убираем NUL — Postgres не принимает его и в `text`.
+  const safe = String(message || 'unknown error').replace(_JSONB_UNSAFE_RE, '').slice(0, 1000)
+    || 'unknown error';
   await db.query(
     `UPDATE relevance_reports
        SET status='error',
@@ -926,4 +963,4 @@ async function _runComparison({ ourUrl, analysisResp, processedDocs, serp, query
   };
 }
 
-module.exports = { processRelevanceReport };
+module.exports = { processRelevanceReport, _toJsonbParam };

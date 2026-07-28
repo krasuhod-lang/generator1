@@ -410,21 +410,39 @@ function _detectCharset(buf, headers) {
   return 'utf-8';
 }
 
+// C0-контролы, которые не имеют смысла в HTML-тексте и ломают дальнейшую
+// обработку. Главный из них — NUL (\u0000): Postgres не принимает его ни в
+// `text`, ни в `jsonb` («unsupported Unicode escape sequence», SQLSTATE 22P05),
+// поэтому одна страница с нулевыми байтами (кривой charset, UTF-16, бинарный
+// мусор под видом HTML) роняет сохранение уже посчитанного отчёта.
+// \t \n \r сохраняем — они значимы для парсера.
+const _CONTROL_CHARS_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
+
+/**
+ * Убирает управляющие символы из скачанного HTML. Удаляем (а не заменяем на
+ * пробел), чтобы страницы в UTF-16, прочитанные как однобайтовая кодировка
+ * (`h\0e\0l\0l\0o\0`), не превращались в «h e l l o».
+ */
+function _stripControlChars(s) {
+  if (typeof s !== 'string' || !s) return s;
+  return s.replace(_CONTROL_CHARS_RE, '');
+}
+
 function _decodeBodyToString(body, headers) {
   // Если уже строка (например при responseType:'text' где-то выше) — возвращаем.
-  if (typeof body === 'string') return body;
+  if (typeof body === 'string') return _stripControlChars(body);
   const buf = Buffer.isBuffer(body) ? body : Buffer.from(body || []);
   const enc = _detectCharset(buf, headers);
   // node:TextDecoder поддерживает большой список кодировок (utf-8, windows-1251,
   // koi8-r, и т.д.). Если конкретная не поддерживается — пробуем iconv-lite.
   try {
-    return new TextDecoder(enc, { fatal: false }).decode(buf);
+    return _stripControlChars(new TextDecoder(enc, { fatal: false }).decode(buf));
   } catch (_) {
     if (_iconv && _iconv.encodingExists(enc)) {
-      try { return _iconv.decode(buf, enc); } catch (_e) { /* fallthrough */ }
+      try { return _stripControlChars(_iconv.decode(buf, enc)); } catch (_e) { /* fallthrough */ }
     }
     // Последний фоллбэк — UTF-8.
-    return buf.toString('utf-8');
+    return _stripControlChars(buf.toString('utf-8'));
   }
 }
 
@@ -562,7 +580,7 @@ async function _curlCffiFetch(url, proxyUrl = null) {
         : undefined,
     });
     const data = res?.data || {};
-    const html = String(data.html || '');
+    const html = _stripControlChars(String(data.html || ''));
     const status = Number(data.status_code || 0);
     if (data.success && html.trim() && !_looksLikeWafChallenge(html)) {
       return { ok: true, html, status };
@@ -620,7 +638,7 @@ async function _headlessFetch(url, proxyUrl = null) {
           : undefined,
       },
     );
-    const html = String(res?.data?.html || '');
+    const html = _stripControlChars(String(res?.data?.html || ''));
     const status = Number(res?.data?.status || 0);
     if (!html.trim()) {
       return { ok: false, reason: `headless_fail: empty body (status=${status || 'n/a'})`, status };
@@ -977,4 +995,5 @@ module.exports = {
   _rememberDomainMethod,
   _recommendedTier,
   _domainMethodStats,
+  _stripControlChars,
 };
