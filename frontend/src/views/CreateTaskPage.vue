@@ -61,6 +61,9 @@ const selectedProject   = ref(null);
 
 function handleProjectSelected(project) {
   selectedProject.value = project || null;
+  // «Последний выбранный проект» запоминаем только для формы создания:
+  // в режиме редактирования проект принадлежит конкретной задаче.
+  if (isEdit.value) return;
   try {
     if (selectedProjectId.value) {
       localStorage.setItem(PROJECT_ID_LS_KEY, String(selectedProjectId.value));
@@ -130,6 +133,20 @@ function applyProjectPrefill() {
   return filled;
 }
 
+/**
+ * Идут ли сейчас более точные источники предзаполнения (разбор ТЗ, аналитика
+ * отчёта релевантности). Пока идут — проект ждёт своей очереди.
+ */
+function isPrefillIdle() {
+  return !relevancePrefilling.value && !llmUploading.value;
+}
+
+/** Долив из проекта, когда все более точные источники отработали. */
+function applyProjectPrefillWhenIdle() {
+  if (!isPrefillIdle()) return 0;
+  return applyProjectPrefill();
+}
+
 /** Фолбэк для старого формата ответа /projects/:id/context (без task_prefill). */
 function prefillFromRawContext(ctx) {
   const project = ctx.project || {};
@@ -150,6 +167,12 @@ function handleProjectFull(ctx) {
     ? { ...prefillFromRawContext(ctx), ...ctx.task_prefill }
     : prefillFromRawContext(ctx);
   projectPrefill.value = prefill;
+  // Контекст проекта приходит за доли секунды, а разбор ТЗ и аналитика
+  // отчёта релевантности — за десятки секунд. Если ждём их, НЕ заполняем
+  // поля сейчас: иначе общий текст проекта займёт места, предназначенные
+  // для более точных данных. Долив сделает тот, кто закончит последним
+  // (см. applyProjectPrefillWhenIdle).
+  if (!isPrefillIdle()) return;
   const filled = applyProjectPrefill();
   if (filled > 0) {
     // Раскрываем секции, чтобы подставленные данные были видны сразу.
@@ -159,20 +182,16 @@ function handleProjectFull(ctx) {
 
 // Загружаем черновик при редактировании
 onMounted(async () => {
-  // Восстанавливаем выбранный проект (ТЗ §5/§8) — независимо от режима edit.
-  try {
-    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
-    if (pid) {
-      const n = Number(pid);
-      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
-    }
-  } catch (_) { /* ignore */ }
-
   if (isEdit.value) {
     loading.value = true;
     try {
       const task = await store.fetchTask(route.params.id);
       if (task) Object.keys(form).forEach(k => { if (task[k] !== undefined) form[k] = task[k]; });
+      // Проект редактируемой задачи берём из неё самой. Использовать здесь
+      // localStorage формы создания нельзя: PATCH теперь принимает
+      // project_id, и «последний выбранный» проект молча перепривязал бы
+      // чужую задачу вместе с её контекстом.
+      selectedProjectId.value = task?.project_id || null;
     } catch (e) {
       error.value = 'Не удалось загрузить задачу';
     } finally {
@@ -181,6 +200,15 @@ onMounted(async () => {
     // В режиме редактирования query-прифилл не имеет смысла — выходим.
     return;
   }
+
+  // Новая задача: восстанавливаем последний выбранный проект (ТЗ §5/§8).
+  try {
+    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
+    if (pid) {
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
+  } catch (_) { /* ignore */ }
 
   // Прифилл из query-параметров (используется кнопкой «📝 Создать SEO-статью»
   // на странице Article Topics — закрывает петлю «foresight → готовая
@@ -291,7 +319,7 @@ async function prefillFromRelevanceReport(reportId) {
 
     // Чего не дал отчёт — добираем из выбранного проекта (ограничения, типы
     // страниц, факты бренда), чтобы поля не оставались пустыми.
-    filled += applyProjectPrefill();
+    filled += llmUploading.value ? 0 : applyProjectPrefill();
 
     if (filled > 0) {
       const llmNote = data?.llm_used ? ' (включая ЦА/нишу/факты от DeepSeek)' : '';
@@ -308,6 +336,10 @@ async function prefillFromRelevanceReport(reportId) {
       || 'Не удалось получить данные из отчёта релевантности';
   } finally {
     relevancePrefilling.value = false;
+    // Даже если отчёт не отдал полей (ошибка/таймаут) — заполняем то,
+    // что известно из проекта. Если параллельно ещё разбирается ТЗ —
+    // долив сделает он.
+    applyProjectPrefillWhenIdle();
   }
 }
 
@@ -484,7 +516,7 @@ async function handleLLMTzUpload(e) {
 
     // Чего не было в ТЗ (часто — ограничения, типы страниц, факты бренда) —
     // добираем из выбранного проекта.
-    filled += applyProjectPrefill();
+    filled += relevancePrefilling.value ? 0 : applyProjectPrefill();
 
     // Открываем секции с заполненными данными
     if (ext.keyword || ext.niche)        openSections.s1 = true;
@@ -511,7 +543,7 @@ async function handleLLMTzUpload(e) {
         if (taskId) {
           try {
             const payload = { ...form };
-            if (selectedProjectId.value) payload.project_id = selectedProjectId.value;
+            payload.project_id = selectedProjectId.value || null;
             await store.updateTask(taskId, payload);
           } catch (_) { /* поля уже в форме, ошибка не критична */ }
         }
@@ -534,6 +566,9 @@ async function handleLLMTzUpload(e) {
   } finally {
     llmUploading.value = false;
     if (llmTimer) { clearInterval(llmTimer); llmTimer = null; }
+    // Контекст проекта мог приехать, пока разбирался файл — доливаем пустые
+    // поля (если не ждём ещё и аналитику отчёта релевантности).
+    applyProjectPrefillWhenIdle();
     // Сбрасываем input чтобы можно было повторно выбрать тот же файл
     e.target.value = '';
   }
@@ -614,8 +649,8 @@ async function saveDraft({ silent = false } = {}) {
     const payload = { ...form };
     if (!payload.title) payload.title = payload.input_target_service || 'Черновик';
     // ТЗ §5/§8: пробрасываем выбранный проект (бэкенд снимет project_context_snapshot
-    // и подтянет недостающие поля из buildProjectContext).
-    if (selectedProjectId.value) payload.project_id = selectedProjectId.value;
+    // и подтянет недостающие поля из buildProjectContext). null = «без проекта».
+    payload.project_id = selectedProjectId.value || null;
 
     if (isEdit.value) {
       await store.updateTask(route.params.id, payload);
