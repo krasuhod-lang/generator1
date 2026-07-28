@@ -9,6 +9,9 @@ const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { buildTaskFormPrefill }  = require('../services/projects/taskFormPrefill');
+const { isBlankRichText }       = require('../utils/stripHtmlTags');
+const { salvageJsonStrings }    = require('../utils/salvageJson');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -133,6 +136,17 @@ function toText(val) {
   return JSON.stringify(val);
 }
 
+/**
+ * Как toText, но для описательных rich-text полей: «визуально пустой»
+ * HTML (`<p></p>`, одинокий маркер `• `) сохраняем как NULL. Иначе такие
+ * строки считаются заполненными и блокируют автозаполнение из проекта,
+ * ТЗ и анализа целевой страницы (Stage -1 в orchestrator).
+ */
+function toRichText(val) {
+  if (typeof val === 'string' && isBlankRichText(val)) return null;
+  return toText(val);
+}
+
 async function createTask(req, res, next) {
   try {
     const {
@@ -197,8 +211,10 @@ async function createTask(req, res, next) {
     const projectId = await resolveOwnedProjectId(project_id, req.user.id);
 
     // ТЗ §8: серверный fallback из контекста проекта. Если пользователь
-    // не передал region/brand_name/brand_facts/audience/business_type,
-    // но выбрал project_id — подтягиваем из contextResolver. Поля, которые
+    // не заполнил описательные поля (регион, бренд, ЦА, особенности ниши,
+    // ограничения, приоритетные типы страниц, факты), но выбрал project_id —
+    // подтягиваем их из contextResolver через общий билдер buildTaskFormPrefill
+    // (тот же, что отдаётся форме в GET /projects/:id/context). Поля, которые
     // пользователь ввёл явно, имеют приоритет (правило согласовано с
     // partial _projectContext.partial.txt).
     let effRegion       = input_region;
@@ -206,6 +222,9 @@ async function createTask(req, res, next) {
     let effBrandFacts   = input_brand_facts;
     let effAudience     = input_target_audience;
     let effBusinessType = input_business_type;
+    let effProjectLimits  = input_project_limits;
+    let effPagePriorities = input_page_priorities;
+    let effNicheFeatures  = input_niche_features;
     let projectCtxSnapshot = null;
     if (projectId) {
       try {
@@ -213,13 +232,17 @@ async function createTask(req, res, next) {
         const ctx = await buildProjectContext(projectId, req.user.id);
         if (ctx) {
           projectCtxSnapshot = ctx;
-          if (!effRegion       && ctx.project?.region)      effRegion       = ctx.project.region;
-          if (!effBrandName    && ctx.brand?.name)          effBrandName    = ctx.brand.name;
-          if (!effBrandFacts   && Array.isArray(ctx.brand?.facts) && ctx.brand.facts.length) {
-            effBrandFacts = ctx.brand.facts.join('. ');
-          }
-          if (!effAudience     && ctx.project?.audience)    effAudience     = ctx.project.audience;
-          if (!effBusinessType && ctx.project?.niche)       effBusinessType = ctx.project.niche;
+          const pf = buildTaskFormPrefill(ctx);
+          if (isBlankRichText(effRegion)          && pf.input_region)          effRegion          = pf.input_region;
+          if (isBlankRichText(effBrandName)       && pf.input_brand_name)      effBrandName       = pf.input_brand_name;
+          if (isBlankRichText(effBrandFacts)      && pf.input_brand_facts)     effBrandFacts      = pf.input_brand_facts;
+          if (isBlankRichText(effAudience)        && pf.input_target_audience) effAudience        = pf.input_target_audience;
+          if (isBlankRichText(effProjectLimits)   && pf.input_project_limits)  effProjectLimits   = pf.input_project_limits;
+          if (isBlankRichText(effPagePriorities)  && pf.input_page_priorities) effPagePriorities  = pf.input_page_priorities;
+          if (isBlankRichText(effNicheFeatures)   && pf.input_niche_features)  effNicheFeatures   = pf.input_niche_features;
+          // business_type — select с фиксированным списком опций, поэтому
+          // берём нишу проекта только как подсказку «как есть».
+          if (isBlankRichText(effBusinessType) && ctx.project?.niche) effBusinessType = ctx.project.niche;
         }
       } catch (e) { console.warn('[tasks] project context fallback failed:', e.message); }
     }
@@ -260,22 +283,22 @@ async function createTask(req, res, next) {
         req.user.id,
         toText(title) || targetService,
         targetService,
-        toText(input_brand_name),
+        toText(effBrandName),
         toText(input_author_name),
         toText(effRegion),
         toText(input_language),
         toText(effBusinessType),
         toText(input_site_type),
-        toText(effAudience),
+        toRichText(effAudience),
         toText(input_business_goal),
         toText(input_monetization),
-        toText(input_project_limits),
-        toText(input_page_priorities),
-        toText(input_niche_features),
+        toRichText(effProjectLimits),
+        toRichText(effPagePriorities),
+        toRichText(effNicheFeatures),
         toText(input_raw_lsi),
         toText(input_ngrams),
         toText(input_tfidf_json),
-        toText(effBrandFacts),
+        toRichText(effBrandFacts),
         toText(input_competitor_urls),
         minChars,
         maxChars,
@@ -338,6 +361,11 @@ async function updateTask(req, res, next) {
       'llm_provider',
       'gemini_model',
       'source_relevance_report_id',
+      // ТЗ §5/§8: привязка к проекту редактируемого черновика. Раньше поля
+      // не было в whitelist — выбор проекта в форме молча терялся при
+      // сохранении уже созданного черновика (а вместе с ним и контекст
+      // проекта в промтах).
+      'project_id',
     ];
 
     const fields = [];
@@ -347,14 +375,21 @@ async function updateTask(req, res, next) {
     const JSON_FIELDS = new Set(['input_ngrams', 'input_tfidf_json', 'input_competitor_urls']);
     // Поля, которые хранят INTEGER
     const INT_FIELDS  = new Set(['input_min_chars', 'input_max_chars']);
+    // Описательные rich-text поля: «визуально пустой» HTML → NULL
+    const RICH_TEXT_FIELDS = new Set([
+      'input_target_audience', 'input_project_limits', 'input_page_priorities',
+      'input_niche_features', 'input_brand_facts',
+    ]);
     // Поля с whitelist-валидацией
     const ENUM_FIELDS = { llm_provider: new Set(['gemini', 'grok']) };
 
+    let newProjectId;
     for (const key of ALLOWED) {
       if (key in req.body) {
         let val = req.body[key];
         if (INT_FIELDS.has(key))  val = parseInt(val) || null;
         else if (JSON_FIELDS.has(key)) val = toText(val);
+        else if (RICH_TEXT_FIELDS.has(key)) val = toRichText(val);
         else if (ENUM_FIELDS[key]) {
           const lc = (val == null ? '' : String(val).toLowerCase().trim());
           val = ENUM_FIELDS[key].has(lc) ? lc : 'gemini';
@@ -364,10 +399,34 @@ async function updateTask(req, res, next) {
           val = await resolveOwnedRelevanceReportId(val, req.user.id);
         } else if (key === 'gemini_model') {
           val = normalizeGeminiCopywritingModel(val);
+        } else if (key === 'project_id') {
+          // Владение проектом проверяем на сервере (не доверяем фронту).
+          val = await resolveOwnedProjectId(val, req.user.id);
+          newProjectId = val;
         }
         fields.push(`${key} = $${values.length + 1}`);
         values.push(val);
       }
+    }
+
+    // Проект задачи изменился/переприслан → пересобираем слепок контекста,
+    // чтобы промты работали с актуальным брендом/фактами/ограничениями.
+    // Если контекст собрать не удалось, пишем NULL: пайплайн в этом случае
+    // строит контекст из project_id на лету (orchestrator, «Снапшота нет»),
+    // а вот оставленный слепок ПРЕДЫДУЩЕГО проекта молча подмешивал бы в
+    // промты чужой бренд.
+    if (newProjectId !== undefined) {
+      let snapshot = null;
+      if (newProjectId) {
+        try {
+          const { buildProjectContext } = require('../services/projects/contextResolver');
+          snapshot = await buildProjectContext(newProjectId, req.user.id);
+        } catch (e) {
+          console.warn('[tasks] project context snapshot refresh failed:', e.message);
+        }
+      }
+      fields.push(`project_context_snapshot = $${values.length + 1}::jsonb`);
+      values.push(snapshot ? JSON.stringify(snapshot) : null);
     }
 
     if (!fields.length) {
@@ -904,6 +963,7 @@ async function uploadTZ(req, res, next) {
 const pdfParse  = require('pdf-parse');
 const mammoth   = require('mammoth');
 const { TZ_EXTRACTOR_PROMPT } = require('../prompts/systemPrompts');
+const { deriveMissingTzFields } = require('../services/tz/tzFieldDeriver');
 const { callDeepSeek }        = require('../services/llm/deepseek.adapter');
 const { callGemini }          = require('../services/llm/gemini.adapter');
 
@@ -1150,7 +1210,17 @@ async function parseTZWithLLM(req, res, next) {
 
     const extracted = await callExtractorLLM(tzText);
 
-    return res.json({ success: true, extracted });
+    // Описательные поля («Целевая аудитория», «Особенности ниши»,
+    // «Ограничения проекта», «Приоритетные типы страниц») экстрактор берёт
+    // строго из текста и почти всегда возвращает пустыми — реальные ТЗ таких
+    // разделов не содержат. Дожимаем их отдельным fail-soft шагом, чтобы
+    // форма создания задачи не оставалась пустой.
+    const derived = await deriveMissingTzFields(tzText, extracted);
+    if (derived.error) {
+      console.warn('[parseTZWithLLM] derive step failed:', derived.error);
+    }
+
+    return res.json({ success: true, extracted, derived_fields: derived.filled });
   } catch (err) {
     next(err);
   } finally {
@@ -1316,6 +1386,11 @@ function _ngramsToCsv(ngrams, limit = 25) {
  * Возвращает { target_audience, niche_features, brand_facts } или null
  * при ошибке (не бросает — fail-soft).
  */
+const RELEVANCE_LLM_KEYS = [
+  'target_audience', 'niche_features', 'brand_facts',
+  'project_constraints', 'priority_page_types',
+];
+
 async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary, competitorSignals, ourUrl, competitorUrls }) {
   const systemMsg =
     'Ты — senior SEO-стратег, voice-of-customer аналитик и специалист по conversational demand mining. ' +
@@ -1384,14 +1459,23 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
   try {
     const ds = await callDeepSeek(systemMsg, userPrompt, {
       temperature: 0.3,
-      maxTokens:   3500,
+      // brand_facts просим на 10–25 предложений + ещё 4 поля: на 3500 токенах
+      // ответ обрезался, JSON не парсился и форма не получала НИ ОДНОГО поля.
+      maxTokens:   8000,
       timeoutMs:   120000,
     });
     const raw = (ds.text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const start = raw.indexOf('{');
     const end   = raw.lastIndexOf('}');
-    if (start === -1 || end === -1) return null;
-    const parsed = JSON.parse(raw.slice(start, end + 1));
+    let parsed = null;
+    if (start !== -1 && end > start) {
+      try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch (_) { parsed = null; }
+    }
+    // Ответ мог оборваться по лимиту токенов (brand_facts — самое длинное
+    // поле). Раньше JSON.parse бросал и форма не получала НИ ОДНОГО из пяти
+    // полей — вытаскиваем то, что модель успела написать.
+    if (!parsed) parsed = salvageJsonStrings(raw, RELEVANCE_LLM_KEYS);
+    if (!parsed) return { _error: 'DeepSeek вернул неразборный ответ' };
     const pick = (k) => {
       const v = parsed && parsed[k];
       return (typeof v === 'string') ? v.trim().slice(0, 4000) : '';

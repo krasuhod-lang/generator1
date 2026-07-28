@@ -78,4 +78,26 @@ function richTextToPlain(s) {
   return text.trim();
 }
 
-module.exports = { stripHtmlTagsLoop, stripHtmlTagsToText, richTextToPlain };
+/**
+ * Is a rich-text field visually empty?
+ *
+ * The WYSIWYG editor (TipTap) emits `<p></p>` for an empty field, and the
+ * TZ auto-fill used to write a bare bullet marker (`• `). A plain
+ * `!value?.trim()` check treats both as filled, which permanently blocks
+ * every later auto-fill (project context, relevance report, target page
+ * analysis). Decide by the text that is left after tags and list markers.
+ *
+ * @param {string|null|undefined} value
+ * @returns {boolean}
+ */
+function isBlankRichText(value) {
+  if (value == null) return true;
+  const s = String(value);
+  if (!s.trim()) return true;
+  if (/<img\b/i.test(s)) return false; // an image is content
+  return !richTextToPlain(s)
+    .replace(/&nbsp;|&#160;|&#xa0;/gi, ' ')
+    .replace(/[\s\u00a0\u2022\u00b7|\u2014\u2013-]+/g, '');
+}
+
+module.exports = { stripHtmlTagsLoop, stripHtmlTagsToText, richTextToPlain, isBlankRichText };

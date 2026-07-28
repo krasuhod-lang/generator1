@@ -61,6 +61,9 @@ const selectedProject   = ref(null);
 
 function handleProjectSelected(project) {
   selectedProject.value = project || null;
+  // «Последний выбранный проект» запоминаем только для формы создания:
+  // в режиме редактирования проект принадлежит конкретной задаче.
+  if (isEdit.value) return;
   try {
     if (selectedProjectId.value) {
       localStorage.setItem(PROJECT_ID_LS_KEY, String(selectedProjectId.value));
@@ -70,42 +73,125 @@ function handleProjectSelected(project) {
   } catch (_) { /* ignore */ }
 }
 
+/**
+ * Поля, которые умеет предзаполнять проект (см. backend
+ * services/projects/taskFormPrefill.js — один и тот же маппинг используется
+ * и при создании задачи на бэкенде).
+ */
+const PROJECT_PREFILL_FIELDS = [
+  'input_region',
+  'input_brand_name',
+  'input_target_audience',
+  'input_niche_features',
+  'input_project_limits',
+  'input_page_priorities',
+  'input_brand_facts',
+];
+
+// Последний полученный от проекта набор значений. Держим в ref, чтобы
+// «долить» пустые поля после загрузки ТЗ или прифилла из релевантности —
+// они приходят асинхронно и раньше затирали/блокировали друг друга.
+const projectPrefill = ref(null);
+
+/**
+ * Пустое ли поле формы. RichTextInput (TipTap) отдаёт `<p></p>` для пустого
+ * редактора, а прежний прифилл из ТЗ мог записать одинокий маркер «• » —
+ * обычная проверка `.trim()` считала такое значение заполненным и навсегда
+ * блокировала автозаполнение поля (в т.ч. на бэкенде, Stage -1).
+ */
+function isBlank(value) {
+  if (value == null) return true;
+  const raw = String(value);
+  if (/<img\b/i.test(raw)) return false; // картинка — это контент
+  const text = raw
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u2022\u00b7*\-\u2013\u2014\s]/g, '');
+  return text === '';
+}
+
+/**
+ * Доливает в форму значения из выбранного проекта — только в пустые поля,
+ * ручной ввод и данные из ТЗ/релевантности имеют приоритет.
+ * @returns {number} сколько полей заполнено
+ */
+function applyProjectPrefill() {
+  const prefill = projectPrefill.value;
+  if (!prefill) return 0;
+  let filled = 0;
+  for (const key of PROJECT_PREFILL_FIELDS) {
+    const incoming = String(prefill[key] ?? '').trim();
+    if (!incoming) continue;
+    if (!isBlank(form[key])) continue;
+    form[key] = incoming;
+    filled++;
+  }
+  if (isBlank(form.input_business_type) && prefill.input_business_type) {
+    const normalized = normalizeSelectValue('input_business_type', String(prefill.input_business_type));
+    if (normalized) { form.input_business_type = normalized; filled++; }
+  }
+  return filled;
+}
+
+/**
+ * Идут ли сейчас более точные источники предзаполнения (разбор ТЗ, аналитика
+ * отчёта релевантности). Пока идут — проект ждёт своей очереди.
+ */
+function isPrefillIdle() {
+  return !relevancePrefilling.value && !llmUploading.value;
+}
+
+/** Долив из проекта, когда все более точные источники отработали. */
+function applyProjectPrefillWhenIdle() {
+  if (!isPrefillIdle()) return 0;
+  return applyProjectPrefill();
+}
+
+/** Фолбэк для старого формата ответа /projects/:id/context (без task_prefill). */
+function prefillFromRawContext(ctx) {
+  const project = ctx.project || {};
+  const brand   = ctx.brand   || {};
+  const facts   = Array.isArray(brand.facts) ? brand.facts.filter(Boolean) : [];
+  return {
+    input_region:          project.region   || '',
+    input_brand_name:      brand.name       || '',
+    input_target_audience: project.audience || '',
+    input_brand_facts:     facts.length ? facts.slice(0, 10).map((f) => `• ${f}`).join('\n') : '',
+    input_business_type:   project.niche    || '',
+  };
+}
+
 function handleProjectFull(ctx) {
   if (!ctx) return;
-  // Предзаполняем ТОЛЬКО пустые поля — ручной ввод имеет приоритет.
-  if (!form.input_region?.trim() && ctx.market?.region) {
-    form.input_region = ctx.market.region;
-  }
-  if (!form.input_brand_name?.trim() && ctx.brand?.name) {
-    form.input_brand_name = ctx.brand.name;
-  }
-  if (!form.input_target_audience?.trim() && ctx.brand?.audience) {
-    form.input_target_audience = ctx.brand.audience;
-  }
-  if (!form.input_brand_facts?.trim() && Array.isArray(ctx.brand?.facts) && ctx.brand.facts.length) {
-    form.input_brand_facts = ctx.brand.facts.slice(0, 8).map((f) => `• ${f}`).join('\n');
-  }
-  if (!form.input_business_type?.trim() && ctx.brand?.business_type) {
-    form.input_business_type = ctx.brand.business_type;
+  const prefill = (ctx.task_prefill && typeof ctx.task_prefill === 'object')
+    ? { ...prefillFromRawContext(ctx), ...ctx.task_prefill }
+    : prefillFromRawContext(ctx);
+  projectPrefill.value = prefill;
+  // Контекст проекта приходит за доли секунды, а разбор ТЗ и аналитика
+  // отчёта релевантности — за десятки секунд. Если ждём их, НЕ заполняем
+  // поля сейчас: иначе общий текст проекта займёт места, предназначенные
+  // для более точных данных. Долив сделает тот, кто закончит последним
+  // (см. applyProjectPrefillWhenIdle).
+  if (!isPrefillIdle()) return;
+  const filled = applyProjectPrefill();
+  if (filled > 0) {
+    // Раскрываем секции, чтобы подставленные данные были видны сразу.
+    Object.keys(openSections).forEach((k) => { openSections[k] = true; });
   }
 }
 
 // Загружаем черновик при редактировании
 onMounted(async () => {
-  // Восстанавливаем выбранный проект (ТЗ §5/§8) — независимо от режима edit.
-  try {
-    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
-    if (pid) {
-      const n = Number(pid);
-      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
-    }
-  } catch (_) { /* ignore */ }
-
   if (isEdit.value) {
     loading.value = true;
     try {
       const task = await store.fetchTask(route.params.id);
       if (task) Object.keys(form).forEach(k => { if (task[k] !== undefined) form[k] = task[k]; });
+      // Проект редактируемой задачи берём из неё самой. Использовать здесь
+      // localStorage формы создания нельзя: PATCH теперь принимает
+      // project_id, и «последний выбранный» проект молча перепривязал бы
+      // чужую задачу вместе с её контекстом.
+      selectedProjectId.value = task?.project_id || null;
     } catch (e) {
       error.value = 'Не удалось загрузить задачу';
     } finally {
@@ -114,6 +200,15 @@ onMounted(async () => {
     // В режиме редактирования query-прифилл не имеет смысла — выходим.
     return;
   }
+
+  // Новая задача: восстанавливаем последний выбранный проект (ТЗ §5/§8).
+  try {
+    const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
+    if (pid) {
+      const n = Number(pid);
+      selectedProjectId.value = Number.isInteger(n) && n > 0 ? n : pid;
+    }
+  } catch (_) { /* ignore */ }
 
   // Прифилл из query-параметров (используется кнопкой «📝 Создать SEO-статью»
   // на странице Article Topics — закрывает петлю «foresight → готовая
@@ -193,8 +288,7 @@ async function prefillFromRelevanceReport(reportId) {
     ];
     for (const k of detMap) {
       const incoming = (det[k] || '').toString().trim();
-      const current  = (form[k] || '').toString().trim();
-      if (incoming && !current) { form[k] = incoming; filled++; }
+      if (incoming && isBlank(form[k])) { form[k] = incoming; filled++; }
     }
     // input_tfidf_json — пустым считаем '[]' / '' / невалидный JSON-массив.
     const incomingTfidf = (det.input_tfidf_json || '').toString().trim();
@@ -214,8 +308,7 @@ async function prefillFromRelevanceReport(reportId) {
     ];
     for (const k of llmMap) {
       const incoming = (llm[k] || '').toString().trim();
-      const current  = (form[k] || '').toString().trim();
-      if (incoming && !current) { form[k] = incoming; filled++; }
+      if (incoming && isBlank(form[k])) { form[k] = incoming; filled++; }
     }
 
     // Открываем релевантные секции — чтобы юзер сразу увидел подстановки.
@@ -223,6 +316,10 @@ async function prefillFromRelevanceReport(reportId) {
     if (det.input_ngrams || incomingTfidf) openSections.s2 = true;
     if (llm.input_brand_facts) openSections.s3 = true;
     if (det.input_competitor_urls) openSections.s4 = true;
+
+    // Чего не дал отчёт — добираем из выбранного проекта (ограничения, типы
+    // страниц, факты бренда), чтобы поля не оставались пустыми.
+    filled += llmUploading.value ? 0 : applyProjectPrefill();
 
     if (filled > 0) {
       const llmNote = data?.llm_used ? ' (включая ЦА/нишу/факты от DeepSeek)' : '';
@@ -239,6 +336,10 @@ async function prefillFromRelevanceReport(reportId) {
       || 'Не удалось получить данные из отчёта релевантности';
   } finally {
     relevancePrefilling.value = false;
+    // Даже если отчёт не отдал полей (ошибка/таймаут) — заполняем то,
+    // что известно из проекта. Если параллельно ещё разбирается ТЗ —
+    // долив сделает он.
+    applyProjectPrefillWhenIdle();
   }
 }
 
@@ -335,21 +436,30 @@ async function handleLLMTzUpload(e) {
     const ext = result?.extracted || {};
     let filled = 0;
 
+    // Описательные поля приходят массивами и рендерятся буллитами.
+    const DESCRIPTIVE_FIELDS = ['constraints', 'priority_page_types', 'niche_features', 'audience_segments'];
+
     for (const [extKey, formKey] of Object.entries(LLM_FIELD_MAP)) {
       const val = ext[extKey];
       if (val === null || val === undefined || val === '') continue;
-      // Массивы → строка: для описательных полей через bullet points, для остальных через "\n"
-      const DESCRIPTIVE_FIELDS = ['constraints', 'priority_page_types', 'niche_features', 'audience_segments'];
-      const strVal = Array.isArray(val)
-        ? (DESCRIPTIVE_FIELDS.includes(extKey) ? '• ' + val.join('\n• ') : val.join('\n'))
-        : String(val);
+      // Массивы → строка. ВАЖНО: пустой массив раньше превращался в одинокий
+      // маркер «• » — поле выглядело пустым, но считалось заполненным и блокировало
+      // все последующие автозаполнения (проект, релевантность, Stage -1).
+      let strVal;
+      if (Array.isArray(val)) {
+        const items = val.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (!items.length) continue;
+        strVal = DESCRIPTIVE_FIELDS.includes(extKey) ? items.map((v) => `• ${v}`).join('\n') : items.join('\n');
+      } else {
+        strVal = String(val);
+      }
       if (!strVal.trim()) continue;
       // Не перезаписываем уже заполненное поле (кроме явного Intent из keyword)
-      if (extKey === 'niche' && form[formKey]?.trim()) continue;
+      if (extKey === 'niche' && !isBlank(form[formKey])) continue;
       // audience_segments дополняет target_audience, а не перезаписывает
       if (extKey === 'audience_segments') {
-        if (form[formKey]?.trim()) {
-          form[formKey] = form[formKey].trim() + '\n\nСегменты аудитории:\n' + strVal;
+        if (!isBlank(form[formKey])) {
+          form[formKey] = String(form[formKey]).trim() + '\n\nСегменты аудитории:\n' + strVal;
         } else {
           form[formKey] = 'Сегменты аудитории:\n' + strVal;
         }
@@ -372,7 +482,7 @@ async function handleLLMTzUpload(e) {
     }
 
     // known_terms → добавляем к LSI если поле пустое
-    if (ext.known_terms?.length && !form.input_raw_lsi.trim()) {
+    if (ext.known_terms?.length && isBlank(form.input_raw_lsi)) {
       form.input_raw_lsi = ext.known_terms.join('\n');
       filled++;
     }
@@ -396,13 +506,17 @@ async function handleLLMTzUpload(e) {
 
     if (brandFactParts.length > 0) {
       const brandFactsStr = brandFactParts.join('\n');
-      if (form.input_brand_facts?.trim()) {
-        form.input_brand_facts = form.input_brand_facts.trim() + '\n\n' + brandFactsStr;
+      if (!isBlank(form.input_brand_facts)) {
+        form.input_brand_facts = String(form.input_brand_facts).trim() + '\n\n' + brandFactsStr;
       } else {
         form.input_brand_facts = brandFactsStr;
       }
       filled++;
     }
+
+    // Чего не было в ТЗ (часто — ограничения, типы страниц, факты бренда) —
+    // добираем из выбранного проекта.
+    filled += relevancePrefilling.value ? 0 : applyProjectPrefill();
 
     // Открываем секции с заполненными данными
     if (ext.keyword || ext.niche)        openSections.s1 = true;
@@ -428,14 +542,22 @@ async function handleLLMTzUpload(e) {
         const taskId = isEdit.value ? route.params.id : store.current?.id;
         if (taskId) {
           try {
-            await store.updateTask(taskId, { ...form });
+            const payload = { ...form };
+            payload.project_id = selectedProjectId.value || null;
+            await store.updateTask(taskId, payload);
           } catch (_) { /* поля уже в форме, ошибка не критична */ }
         }
       }
     }
 
+    // Часть полей экстрактор не нашёл в тексте и бэкенд вывел их по нише —
+    // честно предупреждаем, что это предположение, а не цитата из ТЗ.
+    const derivedCount = Array.isArray(result?.derived_fields) ? result.derived_fields.length : 0;
+    const derivedNote  = derivedCount > 0
+      ? ` ${derivedCount} полей (ЦА / особенности ниши / ограничения / типы страниц) в ТЗ не найдены и выведены по нише — проверьте их особенно внимательно.`
+      : '';
     llmMsg.value = filled > 0
-      ? `ИИ заполнил ${filled} полей. Проверьте и при необходимости скорректируйте.`
+      ? `ИИ заполнил ${filled} полей. Проверьте и при необходимости скорректируйте.${derivedNote}`
       : 'ТЗ проанализировано, но распознаваемых полей не найдено — заполните вручную.';
   } catch (err) {
     llmError.value = err.code === 'ECONNABORTED' || err.message?.includes('timeout')
@@ -444,6 +566,9 @@ async function handleLLMTzUpload(e) {
   } finally {
     llmUploading.value = false;
     if (llmTimer) { clearInterval(llmTimer); llmTimer = null; }
+    // Контекст проекта мог приехать, пока разбирался файл — доливаем пустые
+    // поля (если не ждём ещё и аналитику отчёта релевантности).
+    applyProjectPrefillWhenIdle();
     // Сбрасываем input чтобы можно было повторно выбрать тот же файл
     e.target.value = '';
   }
@@ -524,8 +649,8 @@ async function saveDraft({ silent = false } = {}) {
     const payload = { ...form };
     if (!payload.title) payload.title = payload.input_target_service || 'Черновик';
     // ТЗ §5/§8: пробрасываем выбранный проект (бэкенд снимет project_context_snapshot
-    // и подтянет недостающие поля из buildProjectContext).
-    if (selectedProjectId.value) payload.project_id = selectedProjectId.value;
+    // и подтянет недостающие поля из buildProjectContext). null = «без проекта».
+    payload.project_id = selectedProjectId.value || null;
 
     if (isEdit.value) {
       await store.updateTask(route.params.id, payload);

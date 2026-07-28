@@ -118,7 +118,7 @@ const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
 const { extractPriceData: extractMetaPriceData } = require('../metaTags/metaGenerator');
 const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
 const { deriveModuleContext } = require('../../utils/moduleContext');
-const { richTextToPlain }    = require('../../utils/stripHtmlTags');
+const { richTextToPlain, isBlankRichText } = require('../../utils/stripHtmlTags');
 const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { resetTaskBudget } = require('../llm/callLLM');
@@ -224,7 +224,11 @@ async function runPipeline(task, ctx) {
     'input_page_priorities', 'input_niche_features', 'input_brand_facts',
   ];
   for (const f of RICH_TEXT_FIELDS) {
-    if (task[f]) task[f] = richTextToPlain(task[f]);
+    // «Визуально пустые» значения (`<p></p>`, одинокий маркер «• ») сбрасываем
+    // в '': иначе они считаются заполненными и блокируют дозаполнение из
+    // анализа целевой страницы ниже, а в промты уходит пустой буллит.
+    if (isBlankRichText(task[f])) task[f] = '';
+    else if (task[f]) task[f] = richTextToPlain(task[f]);
   }
 
   // ── TZ Binding: если parse-tz уже заполнил input_tz_parsed_json, но новая
