@@ -101,6 +101,19 @@ function _collectPaaQuestions({ paaQuestions, serpVerification }) {
   return _asStringList(collected, 15);
 }
 
+// System-промт «AI-аналитика трендов». callLLM всегда прогоняет ответ через
+// parseJSON, поэтому контракт обязан быть строго JSON: свободный текст (даже
+// корректный markdown-список) роняет парсер, а JSON-ошибка не считается
+// детерминированной → вызов уходит в полный цикл платных ретраев и всё равно
+// возвращает пустой результат.
+const PERPLEXITY_TRENDS_SYSTEM = `ROLE: AI-аналитик трендов ниши.
+MISSION: Через поиск в интернете собрать самые актуальные тренды и реальные частые вопросы пользователей по нише.
+RULES: Опирайся только на найденные данные, не выдумывай. Формулировки — живые, как их пишут сами пользователи. Если данных нет — верни пустой массив.
+OUTPUT FORMAT: Верни СТРОГО валидный JSON без markdown-обёрток и без пояснений:
+{
+  "trends": ["string"]
+}`;
+
 /**
  * Собрать актуальные тренды/частые вопросы ниши через Perplexity (fail-open).
  *
@@ -120,11 +133,18 @@ async function _collectPerplexityTrends({ niche, query, deps, log }) {
 
   try {
     const call = typeof deps.callLLM === 'function' ? deps.callLLM : callLLM;
-    const perplexityContext = `Собери 5 самых актуальных трендов и частых вопросов пользователей в 2026 году по нише: ${topic}.`;
-    const raw = await call('perplexity', 'Ты AI-аналитик трендов.', perplexityContext, {
+    const year = new Date().getFullYear();
+    const perplexityContext =
+      `Собери 5 самых актуальных трендов и частых вопросов пользователей в ${year} году по нише: ${topic}. ` +
+      'Верни их одним JSON-объектом вида {"trends": ["..."]}.';
+    const raw = await call('perplexity', PERPLEXITY_TRENDS_SYSTEM, perplexityContext, {
       maxTokens: 1000,
       temperature: 0.2,
+      // Сигнал вспомогательный (fail-open) — не жжём бюджет длинной цепочкой
+      // ретраев, как это делает дефолт callLLM (retries=6 с бэкоффом).
+      retries: 2,
       stageName: 'topic-discovery-perplexity',
+      callLabel: 'Topic Discovery Trends (Perplexity)',
     });
     return _extractPerplexityTrends(raw);
   } catch (err) {
@@ -134,11 +154,33 @@ async function _collectPerplexityTrends({ niche, query, deps, log }) {
 }
 
 /**
- * Извлечь список трендов/вопросов из ответа Perplexity. Ответ может прийти
- * строкой (маркированный/нумерованный список) или объектом { text }.
+ * Извлечь список трендов/вопросов из ответа Perplexity.
+ *
+ * Штатная форма (контракт PERPLEXITY_TRENDS_SYSTEM) — объект { trends: [...] }
+ * после parseJSON внутри callLLM. Дополнительно поддержаны голый массив и
+ * текстовый список (маркированный/нумерованный) — на случай, если модель
+ * вернула нестрогий формат, а parseJSON пропустил его как строку.
  * @returns {Array<string>}
  */
 function _extractPerplexityTrends(raw) {
+  if (Array.isArray(raw)) return _asStringList(raw, 5);
+
+  if (raw && typeof raw === 'object') {
+    for (const key of ['trends', 'questions', 'items', 'latest_trends']) {
+      if (Array.isArray(raw[key]) && raw[key].length) {
+        return _asStringList(
+          // элементом может прийти объект вида { trend: '...' } / { question: '...' }
+          raw[key].map((it) => (
+            it && typeof it === 'object'
+              ? (it.trend || it.question || it.title || it.text || '')
+              : it
+          )),
+          5,
+        );
+      }
+    }
+  }
+
   let text = '';
   if (typeof raw === 'string') text = raw;
   else if (raw && typeof raw === 'object') text = raw.text || raw.content || '';
