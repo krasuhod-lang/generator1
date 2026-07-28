@@ -1308,13 +1308,19 @@ async function listProjectOptions(req, res, next) {
  * GET /api/projects/:id/context — единый контекст проекта для
  * предзаполнения форм создания задач (ТЗ §8). Делегирует в
  * services/projects/contextResolver.buildProjectContext.
+ *
+ * Дополнительно отдаём `context.task_prefill` — готовый маппинг контекста
+ * в поля формы задачи (ЦА, особенности ниши, ограничения, приоритетные
+ * типы страниц, факты). Считается тем же билдером, что и серверный
+ * fallback в POST /api/tasks, чтобы форма и БД не расходились.
  */
 async function getProjectContext(req, res, next) {
   try {
     const { buildProjectContext } = require('../services/projects/contextResolver');
+    const { buildTaskFormPrefill } = require('../services/projects/taskFormPrefill');
     const ctx = await buildProjectContext(req.params.id, req.user.id);
     if (!ctx) return res.status(404).json({ error: 'Проект не найден' });
-    return res.json({ context: ctx });
+    return res.json({ context: { ...ctx, task_prefill: buildTaskFormPrefill(ctx) } });
   } catch (err) {
     return next(err);
   }

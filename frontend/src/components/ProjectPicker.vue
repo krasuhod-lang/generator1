@@ -38,6 +38,10 @@ const projects = ref([]);
 const loading = ref(false);
 const error = ref(null);
 
+// id проекта, по которому уже отдан `fullContext` — чтобы не дёргать
+// /projects/:id/context повторно при каждом ре-эмите `context`.
+let lastFullContextId = null;
+
 async function load() {
   loading.value = true;
   try {
@@ -50,7 +54,34 @@ async function load() {
   }
 }
 
-onMounted(load);
+/**
+ * Тянет полный контекст проекта (бренд, факты, регион, ЦА — ТЗ §8) и отдаёт
+ * его родителю. Вызывается не только при клике по селекту, но и когда
+ * project_id восстановлен из localStorage / проброшен через v-model — иначе
+ * формы, открытые с уже выбранным проектом, не получали предзаполнения.
+ */
+function emitFullContext(id) {
+  if (id == null || String(id) === String(lastFullContextId)) return;
+  lastFullContextId = id;
+  api.get(`/projects/${id}/context`).then((r) => {
+    const ctx = r?.data?.context;
+    if (ctx && String(props.modelValue) === String(id)) emit('fullContext', ctx);
+  }).catch((e) => {
+    if (String(lastFullContextId) === String(id)) lastFullContextId = null;
+    console.warn('[ProjectPicker] context fetch failed:', e?.message);
+  });
+}
+
+onMounted(async () => {
+  await load();
+  // Проект мог быть выбран до монтирования (restore из localStorage,
+  // прифилл из query) — эмитим контекст сразу после загрузки списка.
+  if (props.modelValue != null) {
+    const proj = projects.value.find((p) => String(p.id) === String(props.modelValue)) || null;
+    if (proj) emit('context', proj);
+    emitFullContext(props.modelValue);
+  }
+});
 
 const selected = computed({
   get: () => props.modelValue,
@@ -59,22 +90,20 @@ const selected = computed({
     // Не приводим к Number — это ломает UUID.
     const id = v === '' || v == null ? null : v;
     emit('update:modelValue', id);
-    if (id == null) { emit('context', null); return; }
+    if (id == null) { lastFullContextId = null; emit('context', null); return; }
     // Лёгкий объект из cache, чтобы UI обновился немедленно.
     const proj = projects.value.find((p) => String(p.id) === String(id)) || null;
     emit('context', proj);
     // Параллельно тянем полный контекст (бренд, факты, регион — ТЗ §8).
-    api.get(`/projects/${id}/context`).then((r) => {
-      const ctx = r?.data?.context;
-      if (ctx) emit('fullContext', ctx);
-    }).catch((e) => { console.warn('[ProjectPicker] context fetch failed:', e?.message); });
+    emitFullContext(id);
   },
 });
 
 watch(() => props.modelValue, (v) => {
-  if (v == null) return;
+  if (v == null) { lastFullContextId = null; return; }
   const proj = projects.value.find((p) => String(p.id) === String(v));
   if (proj) emit('context', proj);
+  emitFullContext(v);
 });
 </script>
 

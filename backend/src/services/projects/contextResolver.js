@@ -59,7 +59,12 @@ async function buildProjectContext(projectId, userId) {
       site_url: project.url || project.gsc_site_url || null,
       region: project.region || pageSnapshot?.detected_region || null,
       niche: project.niche || pageSnapshot?.niche || null,
-      audience: project.audience || pageSnapshot?.audience || null,
+      // В таблице projects аудитория лежит в `audience_description`
+      // (миграция 058) — это единственное поле, которое пользователь
+      // реально заполняет в карточке проекта. Колонки `audience` нет,
+      // поэтому без этого фолбэка ctx.project.audience всегда был null
+      // и формы задач не получали ЦА из проекта.
+      audience: project.audience || project.audience_description || pageSnapshot?.audience || null,
       default_year: project.default_year || null,
       default_currency: project.default_currency || null,
       pricing_notes: project.pricing_notes || null,
@@ -142,20 +147,24 @@ async function _loadProject(id, userId) {
 /**
  * project_page_snapshots — кеш targetPageAnalyzer (мигр. 067 в основном
  * deployment'е). Если таблицы нет — вернём null без шума.
+ *
+ * ВАЖНО: в таблице нет колонки created_at (см. migrations/067) — сортируем
+ * по parsed_at. Раньше ORDER BY created_at падал с 42703 и снапшот всегда
+ * получался null, из-за чего бренд-факты/тон проекта не доезжали в формы.
  */
 async function _loadLatestPageSnapshot(projectId) {
   try {
     const { rows } = await db.query(
       `SELECT * FROM project_page_snapshots
         WHERE project_id = $1
-        ORDER BY created_at DESC NULLS LAST
+        ORDER BY parsed_at DESC NULLS LAST
         LIMIT 1`,
       [projectId],
     );
     return rows[0] || null;
   } catch (e) {
-    // Таблицы может не быть на старых деплоях — это не повод падать.
-    if (e.code === '42P01') return null;
+    // Таблицы/колонки может не быть на старых деплоях — это не повод падать.
+    if (e.code === '42P01' || e.code === '42703') return null;
     throw e;
   }
 }
