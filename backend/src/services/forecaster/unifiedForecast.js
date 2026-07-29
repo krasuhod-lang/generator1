@@ -17,7 +17,11 @@
  *   3. Ограничение рынка: SOV_max = max(target_ctr · C_serp, SOV_start·(1+G)) —
  *      потолок доли, алгоритмически защищённый от падения ниже стартовой доли;
  *      SOV_start = текущий трафик / текущий спрос.
- *   4. Плавность роста: логистика с крутизной k и точкой перегиба t0.
+ *   4. Плавность роста: логистика с крутизной k и точкой перегиба t0,
+ *      сглаженная на старте ramp-up-множителем min(1, t/rampUpMonths).
+ *   5. Защита от «прыжка» в первый месяц: жёсткий cap прироста ядра
+ *      относительно текущего трафика —
+ *      cap(t) = max(V0·(1 + growthCapPerMonth·t), V0 + absGrowthPerMonth·t).
  *
  * Коридор погрешности (дисперсия растёт ∝ √t):
  *   V_upper(t) = V̂(t)·(1 + δ·√t)
@@ -180,6 +184,13 @@ function buildUnifiedForecast({
   // ── Блок 4: логистика роста ─────────────────────────────────────
   const k = _resolveParam(options.growth_k, uCfg.kDefault, uCfg.kMin, uCfg.kMax);
   const t0 = _resolveParam(options.breakthrough_month, uCfg.t0Default, uCfg.t0Min, uCfg.t0Max);
+  // Ramp-up: логистика при t=1 и t0=6 уже даёт ~15 % пути к потолку — на
+  // большом ядре это «прыжок» трафика в первый же месяц. Множитель плавно
+  // отпускает кривую захвата с 0 до 1 за первые rampUpMonths месяцев.
+  const rampUpMonths = Math.max(1, Number(uCfg.rampUpMonths) || 1);
+  // Жёсткий cap прироста трафика относительно старта (см. config.unified).
+  const growthCapPerMonth = Math.max(0, Number(uCfg.growthCapPerMonth) || 0);
+  const absGrowthPerMonth = Math.max(0, Number(uCfg.absGrowthPerMonth) || 0);
 
   // ── Коридор погрешности ─────────────────────────────────────────
   const delta = _resolveParam(options.uncertainty_delta, uCfg.deltaDefault, uCfg.deltaMin, uCfg.deltaMax);
@@ -253,7 +264,9 @@ function buildUnifiedForecast({
   // последний месяц истории; при заданном options.start_month — предыдущий
   // месяц старта работ). Логика роста:
   //   1. Доля рынка (capture) монотонно не убывает — позиции только растут
-  //      (SOV_max ≥ SOV_start·(1+G)). Это «двигатель» роста трафика.
+  //      (SOV_max ≥ SOV_start·(1+G)). Это «двигатель» роста трафика. Первые
+  //      месяцы сглажены ramp-up-множителем, а при срабатывании cap'а на
+  //      прирост трафика capture пересчитывается обратным счётом.
   //   2. Спрос — модификатор СКОРОСТИ: (L0 + t·T)·(1 + r·t). Если рынок
   //      растёт — трафик ускоряется; если проседает — рост замедляется и
   //      десезонализированное ядро может снижаться, НО не ниже стартового
@@ -273,17 +286,40 @@ function buildUnifiedForecast({
     const demandPotential = Math.max(0, (L0 + t * T) * s * (1 + r * t));
     const tac = demandPotential * cYield;
     // Функция захвата (S-кривая) — динамика основного (стартового) ядра.
-    const captureCore = sovStart + (sovMax - sovStart) / (1 + Math.exp(-k * (t - t0)));
+    // Ramp-up привязывает кривую к стартовой доле на первых месяцах: без него
+    // логистика при t=1 сразу закладывает ~15 % пути к потолку, что на большом
+    // ядре даёт нереалистичный скачок трафика в первый же месяц.
+    const rawLogistic = 1 / (1 + Math.exp(-k * (t - t0)));
+    const rampFactor = Math.min(1, t / rampUpMonths);
+    const captureCore = sovStart + (sovMax - sovStart) * rawLogistic * rampFactor;
     // Взвешенное размытие: новая семантика (вес r·t) кликается хуже ядра.
     const captureBlend = (captureCore + sovNew * (r * t)) / (1 + r * t);
     // Монотонный floor: доля рынка не может упасть ниже уже достигнутой.
-    const capture = Math.max(captureBlend, prevCapture);
+    let capture = Math.max(captureBlend, prevCapture);
     prevCapture = capture;
     // Десезонализированное ядро трафика: базовый спрос (без сезонности)
     // × живые клики × расширение ядра × захват × калибровка к старту.
     // Спрос (L0 + t·T) выступает модификатором скорости: падающий рынок
     // тормозит рост, растущий — ускоряет.
-    const coreRaw = Math.max(0, (L0 + t * T)) * (1 + r * t) * cYield * capture * calib;
+    const coreDenom = Math.max(0, (L0 + t * T)) * (1 + r * t) * cYield * calib;
+    let coreRaw = coreDenom * capture;
+    // Жёсткий cap прироста относительно старта: трафик не может вырасти
+    // быстрее, чем на growthCapPerMonth за месяц (t=1 → ×1.4, t=2 → ×1.8…),
+    // но маленьким сайтам разрешаем абсолютный прирост absGrowthPerMonth
+    // визитов в месяц — иначе старт «100 визитов» никогда не разгонится.
+    if (curTraffic > 0) {
+      const capValue = Math.max(
+        curTraffic * (1 + growthCapPerMonth * t),
+        curTraffic + absGrowthPerMonth * t,
+      );
+      if (coreRaw > capValue) {
+        coreRaw = capValue;
+        // Обратный счёт capture — чтобы отчёт (и SOV-график) показывал долю,
+        // которая реально соответствует обрезанному трафику.
+        capture = coreDenom > 0 ? _clamp(coreRaw / coreDenom, 0, 1) : capture;
+        prevCapture = capture; // следующий месяц опирается на обрезанное значение
+      }
+    }
     // Soft-floor «не ниже уровня старта работ»: даже если спрос проседает,
     // десезонализированное ядро удерживает стартовый уровень (позиции растут).
     // Монотонность НЕ навязывается — при спаде спроса ядро может замедляться.
@@ -364,6 +400,9 @@ function buildUnifiedForecast({
       sov_start: _round(sovStart, 4),
       k: _round(k, 3),
       t0,
+      ramp_up_months: rampUpMonths,
+      growth_cap_per_month: _round(growthCapPerMonth, 3),
+      abs_growth_per_month: absGrowthPerMonth,
       delta: _round(delta, 3),
       cr_final: _round(crFinal, 5),
       impression_ctr: _round(impressionCtr, 4),
