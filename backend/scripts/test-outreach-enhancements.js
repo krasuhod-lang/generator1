@@ -42,6 +42,7 @@ const cases = [{
   leads_min: 40, leads_max: 70,
   top_keywords: [{ phrase: 'имплантация зубов', volume: 5400 }],
 }];
+const UNSUB_URL = 'https://app.example/unsubscribe';
 const sender = {
   senderName: 'Иван', senderCompany: 'SEO Team',
   senderSite: 'https://myseo.ru', senderTelegram: '@ivan_seo',
@@ -52,7 +53,7 @@ function build(extra = {}) {
     prospect: { url: 'https://klinika.ru', city: 'Казань' },
     competitors, prospectTraffic: 900, cases,
     unit: 'пациентов', sampleQuery: 'стоматология казань',
-    sender, unsubscribeUrl: 'https://app.example/unsubscribe',
+    sender, unsubscribeUrl: UNSUB_URL,
     ...extra,
   });
 }
@@ -76,7 +77,8 @@ console.log('\n[рассылка] Тело письма');
   ok('показан трафик лида', letter.html.includes('900'));
   ok('есть блок кейсов', letter.html.includes('top-dent.ru'));
   ok('единица ниши подставлена', letter.html.includes('пациентов'));
-  ok('есть ссылка отписки', letter.html.includes('https://app.example/unsubscribe'));
+  const hrefs = [...letter.html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
+  ok('есть ссылка отписки', hrefs.includes(UNSUB_URL));
   ok('нет inline-SVG (вырезается почтовиками)', !/<svg/i.test(letter.html));
 
   const empty = build({ competitors: [], cases: [], prospectTraffic: 0 });
