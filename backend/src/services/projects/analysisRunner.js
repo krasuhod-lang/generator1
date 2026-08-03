@@ -867,8 +867,8 @@ async function recoverStaleAnalyses() {
               error_message = 'Анализ прерван (перезапуск сервера или превышено время выполнения)',
               completed_at = NOW()
         WHERE status IN ('queued', 'running')
-          AND COALESCE(started_at, created_at) < NOW() - ($1::bigint * INTERVAL '1 millisecond')`,
-      [staleMs],
+          AND COALESCE(started_at, created_at) < NOW() - make_interval(secs => $1::double precision)`,
+      [staleMs / 1000],
     );
     if (rowCount) {
       console.warn(`[projects/analysisRunner] watchdog: помечено ошибкой зависших анализов — ${rowCount}`);
