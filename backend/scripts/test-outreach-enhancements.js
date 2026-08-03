@@ -78,7 +78,7 @@ console.log('\n[рассылка] Тело письма');
   ok('есть блок кейсов', letter.html.includes('top-dent.ru'));
   ok('единица ниши подставлена', letter.html.includes('пациентов'));
   const hrefs = [...letter.html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
-  ok('есть ссылка отписки', hrefs.includes(UNSUB_URL));
+  ok('есть ссылка отписки', hrefs.some((h) => h === UNSUB_URL));
   ok('нет inline-SVG (вырезается почтовиками)', !/<svg/i.test(letter.html));
 
   const empty = build({ competitors: [], cases: [], prospectTraffic: 0 });
