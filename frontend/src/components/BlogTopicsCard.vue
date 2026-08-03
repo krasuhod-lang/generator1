@@ -19,6 +19,9 @@ const emit = defineEmits(['generate']);
 const available = computed(() => props.blogPlan && props.blogPlan.available);
 const topics = computed(() => (props.blogPlan && props.blogPlan.topics) || []);
 const insufficient = computed(() => props.blogPlan && props.blogPlan.insufficient);
+// Темы, уже закрытые страницами сайта: новую статью писать нельзя (дубль),
+// нужно усилить существующий материал.
+const alreadyCovered = computed(() => (props.blogPlan && props.blogPlan.already_covered) || []);
 const copied = ref(false);
 
 function supportImpressions(t) {
@@ -51,7 +54,7 @@ async function copyAllForExcel() {
 </script>
 
 <template>
-  <section v-if="available && (topics.length || insufficient)" class="card space-y-3">
+  <section v-if="available && (topics.length || insufficient || alreadyCovered.length)" class="card space-y-3">
     <div class="flex items-center justify-between gap-2">
       <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">
         ✍️ План публикаций в блог ({{ topics.length }} тем)
@@ -105,6 +108,26 @@ async function copyAllForExcel() {
             ✓ Статья создана — открыть генерацию →
           </a>
         </div>
+      </div>
+    </div>
+
+    <div v-if="alreadyCovered.length" class="space-y-2 pt-1">
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-400">
+        Уже есть на сайте — не дублируем ({{ alreadyCovered.length }})
+      </h3>
+      <p class="text-[11px] text-gray-500">
+        По этим темам на сайте уже есть страница. Новую статью создавать нельзя — будет дубль тематики
+        и каннибализация запросов. Вместо этого дорабатываем существующий материал.
+      </p>
+      <div v-for="(c, i) in alreadyCovered" :key="`cov-${i}`"
+           class="rounded-lg bg-gray-800/30 p-2 text-xs space-y-1">
+        <div class="font-medium text-gray-200">{{ c.query }}</div>
+        <div class="text-gray-400">
+          <a :href="c.existing_url" target="_blank" rel="noopener"
+             class="text-indigo-300 hover:text-indigo-200 underline break-all">{{ c.existing_url }}</a>
+          <span v-if="c.existing_title" class="text-gray-500"> — {{ c.existing_title }}</span>
+        </div>
+        <div class="text-gray-400">{{ c.recommendation }}</div>
       </div>
     </div>
   </section>

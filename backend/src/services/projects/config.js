@@ -487,6 +487,17 @@ const PROJECTS_CONFIG = deepFreeze({
     strikingDistance: { minPosition: 5, maxPosition: 30, minImpressions: 20 },
     // Минимум показов по стране, чтобы считать её гео-спросом без локализации.
     geoMinImpressions: 100,
+    // Анти-дубли тематик. Тема не должна повторять то, что уже есть на сайте:
+    //  • existingPageSimilarity — порог Jaccard по стеммам «тема ↔ заголовок/
+    //    слаг существующей инфо-страницы» (выше порога — тема считается
+    //    закрытой, уходит в already_covered как «доработать существующее»);
+    //  • topicSimilarity — порог схожести тем между собой (дубли склеиваются в
+    //    одну тему, лишние запросы уходят в supporting_queries).
+    dedup: {
+      enabled: true,
+      existingPageSimilarity: 0.6,
+      topicSimilarity: 0.6,
+    },
   },
 
   // п.4 — Аудит и усиление мета-тегов топ-страниц. Парсим текущие title/desc

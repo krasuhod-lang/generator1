@@ -246,6 +246,10 @@ const activeGscSubTab = computed(() => {
 // Мультиисточниковая аналитика: отдельный отчёт Яндекса, сводка закономерностей
 // и аудит факторов ранжирования (что мешает росту).
 const ydxReportMarkdown = computed(() => currentAnalysis.value?.ydx_report_markdown || null);
+// Статус отдельного прохода по Яндексу: кладётся в ydx_snapshot аналайзером,
+// чтобы вкладка объясняла, почему отчёта нет, вместо общей фразы.
+const ydxAnalysisStatus = computed(() => currentAnalysis.value?.ydx_snapshot?.status || null);
+const ydxAnalysisReason = computed(() => currentAnalysis.value?.ydx_snapshot?.status_reason || null);
 const synthesisMarkdown = computed(() => currentAnalysis.value?.synthesis_markdown || null);
 const rankingFactorsData = computed(() => currentAnalysis.value?.ranking_factors || null);
 
@@ -958,6 +962,14 @@ onUnmounted(() => {
           <div v-else-if="currentAnalysis?.status === 'error'" class="text-sm text-red-400">
             Ошибка анализа: {{ currentAnalysis.error_message }}
           </div>
+          <!-- Частичный успех: Google не отдал отчёт, но анализ Яндекса прошёл. -->
+          <div v-else-if="currentAnalysis?.status === 'done' && !currentAnalysis.report_markdown"
+               class="text-sm text-amber-300">
+            Отчёт по Google не построен: {{ currentAnalysis.error_message || 'нет данных Google Search Console' }}.
+            <span v-if="ydxReportMarkdown" class="text-gray-400">
+              Отчёт по Яндекс.Вебмастеру построен — смотрите вкладку «Яндекс.Вебмастер».
+            </span>
+          </div>
           <MarkdownView v-else-if="currentAnalysis?.status === 'done'" :source="currentAnalysis.report_markdown" />
         </section>
         </div>
@@ -1136,10 +1148,17 @@ onUnmounted(() => {
             <h2 class="text-sm font-semibold uppercase tracking-wider text-red-300">Отчёт AI-аналитика · Яндекс</h2>
             <MarkdownView :source="ydxReportMarkdown" />
           </section>
-          <section v-else-if="ydxReady && currentAnalysis?.status === 'done'" class="card">
-            <p class="text-xs text-gray-500">
-              Отдельный AI-отчёт по Яндексу появится после запуска анализа на вкладке Google
-              (кнопка «Анализировать показатели проекта») — Яндекс анализируется автоматически вместе с Google.
+          <section v-else-if="ydxReady && currentAnalysis?.status === 'done'" class="card space-y-2">
+            <p v-if="ydxAnalysisReason" class="text-xs text-amber-300">
+              ⚠ {{ ydxAnalysisReason }}
+            </p>
+            <p v-else class="text-xs text-gray-500">
+              Отдельный AI-отчёт по Яндексу появится после запуска анализа
+              (кнопка «Анализировать показатели проекта») — Яндекс.Вебмастер анализируется отдельным
+              проходом и не зависит от Google Search Console.
+            </p>
+            <p v-if="ydxAnalysisStatus && ydxAnalysisStatus !== 'ok'" class="text-[11px] text-gray-500">
+              Статус прохода по Яндексу: {{ ydxAnalysisStatus }}
             </p>
           </section>
         </div>

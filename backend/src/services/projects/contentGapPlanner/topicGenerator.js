@@ -18,6 +18,7 @@
 
 const { getProjectsConfig } = require('../config');
 const { classifyQuery } = require('../commercialIntent');
+const { topicTokens, jaccard } = require('./existingContent');
 
 const TITLE_MIN = 70; const TITLE_MAX = 80;
 const DESC_MIN = 180; const DESC_MAX = 190;
@@ -103,10 +104,36 @@ function buildTopicFromGap(gap, project, brandTokens = []) {
 }
 
 /**
+ * Дедуп тем между собой: две «дыры» часто описывают одну и ту же тематику
+ * («как выбрать насос» и «выбор насоса для дачи»). Публиковать обе — значит
+ * плодить дубли и каннибализировать собственные запросы. Оставляем тему с
+ * бо́льшими показами, остальные добавляем ей в supporting_queries.
+ */
+function dedupeTopics(topics, minSimilarity = 0.6) {
+  const sorted = (topics || []).slice().sort((a, b) => (b.impressions || 0) - (a.impressions || 0));
+  const kept = [];
+  const merged = [];
+  sorted.forEach((t) => {
+    const tokens = topicTokens([t.topic, (t.supporting_queries || [])[0]].filter(Boolean).join(' '));
+    const dup = kept.find((k) => jaccard(tokens, k._tokens) >= minSimilarity);
+    if (dup) {
+      const q = (t.supporting_queries || [])[0];
+      if (q && !dup.supporting_queries.includes(q)) dup.supporting_queries.push(q);
+      if (t.evidence && t.evidence[0]) dup.evidence.push(t.evidence[0]);
+      merged.push({ query: q || t.topic, merged_into: dup.topic });
+      return;
+    }
+    kept.push({ ...t, _tokens: tokens, supporting_queries: (t.supporting_queries || []).slice(), evidence: (t.evidence || []).slice() });
+  });
+  kept.forEach((t) => { delete t._tokens; });
+  return { topics: kept, merged };
+}
+
+/**
  * Главная точка. Строит темы СТРОГО из дыр (факты статистики), опционально
  * переформулирует через LLM (без права менять запросы/интенты). Не добивает
  * синтетикой: если тем меньше minTopics — возвращает сколько есть + флаг
- * дефицита данных.
+ * дефицита данных. Перед выдачей темы дедуплицируются между собой.
  *
  * @param {object} args { gaps:[], signals, project, brandTokens, llmFn?, dspyClient? }
  */
@@ -114,11 +141,17 @@ async function generateTopics({ gaps = [], signals = {}, project = {}, brandToke
   const cfg = getProjectsConfig().blogTopics;
   if (!cfg || !cfg.enabled) return null;
   const min = cfg.minTopics || 5;
+  const dedupCfg = cfg.dedup || {};
+  const dedupEnabled = dedupCfg.enabled !== false;
+  const topicSimilarity = Number(dedupCfg.topicSimilarity) || 0.6;
 
   // Детерминированная база — только темы с реальным подтверждающим запросом.
-  const base = (gaps || [])
+  const rawBase = (gaps || [])
     .filter((g) => String(g.query || '').trim())
     .map((g) => buildTopicFromGap(g, project, brandTokens));
+
+  const dedup = dedupEnabled ? dedupeTopics(rawBase, topicSimilarity) : { topics: rawBase, merged: [] };
+  const base = dedup.topics;
 
   let topics = base;
   // Опциональный LLM-слой (graceful): переформулирует, не трогая факты.
@@ -142,7 +175,8 @@ async function generateTopics({ gaps = [], signals = {}, project = {}, brandToke
     available: true,
     topics: out,
     count: out.length,
-    signals,
+    signals: { ...signals, merged_duplicate_topics: dedup.merged.length },
+    merged_duplicates: dedup.merged,
     insufficient,
   };
 }
@@ -208,4 +242,4 @@ async function _llmRefine({ base, project, llmFn, promptSuffix }) {
   return out.length ? out : null;
 }
 
-module.exports = { generateTopics, buildTopicFromGap, TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX };
+module.exports = { generateTopics, buildTopicFromGap, dedupeTopics, TITLE_MIN, TITLE_MAX, DESC_MIN, DESC_MAX };

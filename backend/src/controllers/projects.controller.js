@@ -591,8 +591,12 @@ async function startAnalysis(req, res, next) {
   try {
     const project = await _loadOwned(req.params.id, req.user.id);
     if (!project) return res.status(404).json({ error: 'Проект не найден' });
-    if (!project.gsc_connected || !project.gsc_site_url) {
-      return res.status(409).json({ error: 'Подключите GSC и выберите домен перед анализом' });
+    // Достаточно любого подключённого источника: Яндекс.Вебмастер
+    // анализируется отдельно и не требует Google Search Console.
+    const hasGsc = Boolean(project.gsc_connected && project.gsc_site_url);
+    const hasYdx = Boolean(project.ydx_connected && project.ydx_site_url);
+    if (!hasGsc && !hasYdx) {
+      return res.status(409).json({ error: 'Подключите Google Search Console или Яндекс.Вебмастер перед анализом' });
     }
     const { rangeKey, from, to } = _normalizeRangeInput(req.body || {});
     const { rows } = await db.query(

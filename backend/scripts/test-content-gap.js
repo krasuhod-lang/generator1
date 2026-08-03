@@ -104,6 +104,61 @@ async function asyncBlock() {
     });
     passed += 1; console.log('  ✓ generateTopics keeps supporting_queries factual under LLM hallucination');
   }
+
+  // ── Анти-дубли: тема, уже закрытая страницей сайта, не идёт в новые статьи ──
+  {
+    // Запрос приземляется на статью блога → тема уже есть на сайте.
+    const qp = [{ query: 'как выбрать насос', page: 'https://x.ru/blog/kak-vybrat-nasos', impressions: 300, position: 11 }];
+    const { gaps, covered } = detectGaps({ topQueries, queryPage: qp, breakdowns, brandTokens: [] });
+    assert.ok(!gaps.some((g) => g.query === 'как выбрать насос'), 'covered topic must not be a gap');
+    const c = covered.find((x) => x.query === 'как выбрать насос');
+    assert.ok(c, 'covered list must contain the topic');
+    assert.strictEqual(c.match, 'landing');
+    assert.strictEqual(c.existing_url, 'https://x.ru/blog/kak-vybrat-nasos');
+    passed += 1; console.log('  ✓ detectGaps drops topics already covered by a landing blog page');
+  }
+  // Дубль по заголовку существующей статьи (title из аудита мета-тегов).
+  {
+    const pageMetaAudit = {
+      pages: [{ url: 'https://x.ru/blog/vybor-nasosa', before: { title: 'Как выбрать насос: подробный гид', h1: 'Как выбрать насос' } }],
+    };
+    const { gaps, covered } = detectGaps({
+      topQueries, queryPage: [], breakdowns, brandTokens: [], pageMetaAudit,
+    });
+    assert.ok(!gaps.some((g) => g.query === 'как выбрать насос'), 'similar existing article must block the topic');
+    assert.ok(covered.some((x) => x.match === 'similar' && x.existing_url === 'https://x.ru/blog/vybor-nasosa'));
+    passed += 1; console.log('  ✓ detectGaps drops topics duplicating an existing article title');
+  }
+  // Коммерческая страница НЕ закрывает информационную тему.
+  {
+    const qp = [{ query: 'как выбрать насос', page: 'https://x.ru/catalog/nasosy', impressions: 300, position: 11 }];
+    const { gaps } = detectGaps({ topQueries, queryPage: qp, breakdowns, brandTokens: [] });
+    assert.ok(gaps.some((g) => g.query === 'как выбрать насос'), 'commerce landing must not cover an info topic');
+    passed += 1; console.log('  ✓ commerce landing page does not count as existing coverage');
+  }
+  // Дедуп тем между собой: две «дыры» об одном и том же → одна тема.
+  {
+    const gaps = [
+      { query: 'как выбрать насос', reason: 'striking_info', impressions: 500, position: 12 },
+      { query: 'как выбрать насос для дачи', reason: 'striking_info', impressions: 120, position: 15 },
+      { query: 'что такое дренажный насос', reason: 'striking_info', impressions: 200, position: 9 },
+    ];
+    const res = await generateTopics({ gaps, project: { name: 'AquaShop' } });
+    assert.strictEqual(res.topics.length, 2, `expected 2 unique topics, got ${res.topics.length}`);
+    const main = res.topics.find((t) => t.supporting_queries.includes('как выбрать насос'));
+    assert.ok(main && main.supporting_queries.includes('как выбрать насос для дачи'), 'duplicate query merged into supporting_queries');
+    assert.strictEqual(res.merged_duplicates.length, 1);
+    passed += 1; console.log('  ✓ generateTopics merges duplicate topics instead of publishing both');
+  }
+  // buildBlogPlan прокидывает already_covered наружу.
+  {
+    const qp = [{ query: 'как выбрать насос', page: 'https://x.ru/blog/kak-vybrat-nasos', impressions: 300, position: 11 }];
+    const plan = await buildBlogPlan({ project: { name: 'AquaShop' }, topQueries, queryPage: qp, breakdowns, brandTokens: [] });
+    assert.strictEqual(plan.available, true);
+    assert.ok(plan.already_covered_count >= 1);
+    assert.ok(!plan.topics.some((t) => t.supporting_queries.includes('как выбрать насос')));
+    passed += 1; console.log('  ✓ buildBlogPlan exposes already_covered and skips duplicate topics');
+  }
 }
 
 (async () => {
