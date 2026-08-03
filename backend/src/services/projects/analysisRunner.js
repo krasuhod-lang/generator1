@@ -163,7 +163,8 @@ async function collectSnapshot(project, range) {
   const schemaAudit = await _withDeadline(
     _buildSchemaAudit(eat, project, projectsCfg.schemaAudit), stepMs, 'schemaAudit');
   const blogPlan = await _withDeadline(
-    _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification), stepMs, 'blogPlan');
+    _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification, pageMetaAudit),
+    stepMs, 'blogPlan');
   const geoAeo = await _withDeadline(
     _buildGeoAeo(project, top, schemaAudit, breakdowns, brandTokens), stepMs, 'geoAeo');
   const topPageInsights = await _withDeadline(
@@ -438,18 +439,45 @@ async function _buildLinkStrategy(project, commercial, top, queryPage) {
 }
 
 /** План публикаций в блог (п.3). */
-async function _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification) {
+async function _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification, pageMetaAudit) {
   try {
+    const siteCrawlPages = await _fetchSiteCrawlPages(project);
     return await buildBlogPlan({
       project,
       topQueries: top.topQueries,
+      topPages: top.topPages,
       queryPage,
       breakdowns,
       brandTokens,
       serpVerification,
+      pageMetaAudit,
+      siteCrawlPages,
       dspyClient,
     });
   } catch (_) { return null; }
+}
+
+/**
+ * Страницы последнего успешного краула проекта — фактический список того, что
+ * уже опубликовано на сайте. Нужен, чтобы не предлагать темы-дубли. Graceful:
+ * краула нет / таблицы нет → пустой список (дедуп отработает по GSC-данным).
+ */
+async function _fetchSiteCrawlPages(project) {
+  if (!project || !project.id) return [];
+  try {
+    const { rows } = await db.query(
+      `SELECT c.url, c.title, c.h1
+         FROM site_crawl_pages c
+         JOIN site_crawl_tasks t ON t.id = c.task_id
+        WHERE t.project_id = $1
+          AND t.status = 'done'
+          AND COALESCE(c.http_status, 200) < 400
+        ORDER BY t.created_at DESC, c.id ASC
+        LIMIT 2000`,
+      [project.id],
+    );
+    return rows || [];
+  } catch (_) { return []; }
 }
 
 /** GEO/AEO — нейровыдача (п.7). Probe внутри пайплайна выключен (лимиты ключа). */
@@ -497,6 +525,68 @@ async function _setError(analysisId, message) {
       WHERE id = $1`,
     [analysisId, String(message || 'unknown').slice(0, 1000)],
   );
+}
+
+/**
+ * Раздельный проход по Яндекс.Вебмастеру: сбор снапшота + отдельный AI-отчёт.
+ * НЕ зависит от Google: выполняется даже если GSC не подключён или его анализ
+ * упал. Всегда возвращает объект со статусом и человекочитаемой причиной —
+ * чтобы вкладка «Яндекс» показывала, что именно произошло, а не молчала.
+ *
+ * @returns {Promise<{snapshot, payload, report, status, reason}>}
+ */
+async function runYandexPass(project, range) {
+  const out = { snapshot: null, payload: null, report: null, status: 'skipped', reason: null };
+  const acfg = getProjectsConfig().analyzer;
+  if (!acfg || !acfg.yandex || !acfg.yandex.enabled) {
+    out.reason = 'Анализ Яндекса отключён в конфигурации';
+    return out;
+  }
+  if (!project || !project.ydx_connected || !project.ydx_site_url) {
+    out.status = 'not_connected';
+    out.reason = 'Яндекс.Вебмастер не подключён к проекту — подключите его во вкладке «Яндекс.Вебмастер»';
+    return out;
+  }
+
+  try {
+    const ydx = await collectYdxSnapshot(project, range);
+    if (ydx) { out.snapshot = ydx.snapshot; out.payload = ydx.payload; }
+  } catch (e) {
+    console.warn('[projects/analysisRunner] ydx collect failed:', e.message);
+    out.status = 'collect_failed';
+    out.reason = `Не удалось получить данные Яндекс.Вебмастера: ${e.message}`;
+    return out;
+  }
+  if (!out.payload) {
+    out.status = 'collect_failed';
+    out.reason = 'Не удалось получить данные Яндекс.Вебмастера (нет доступа или пустой ответ API)';
+    return out;
+  }
+
+  try {
+    const yr = await runYandexAnalysis(out.payload);
+    if (yr && yr.verdict === 'ok' && yr.markdown) {
+      out.report = yr.markdown;
+      out.status = 'ok';
+    } else {
+      out.status = 'analysis_failed';
+      out.reason = (yr && yr.reason === 'no_api_key')
+        ? 'Не задан ключ LLM-провайдера — отчёт по Яндексу не построен (данные Вебмастера собраны)'
+        : `AI-отчёт по Яндексу не построен: ${(yr && (yr.reason || yr.verdict)) || 'неизвестная причина'}`;
+    }
+  } catch (e) {
+    console.warn('[projects/analysisRunner] ydx analysis failed:', e.message);
+    out.status = 'analysis_failed';
+    out.reason = `AI-отчёт по Яндексу не построен: ${e.message}`;
+  }
+
+  // Статус кладём внутрь снапшота: он персистится в ydx_snapshot и доезжает до
+  // UI, поэтому вкладка Яндекса всегда объясняет своё состояние.
+  if (out.snapshot) {
+    out.snapshot.status = out.status;
+    out.snapshot.status_reason = out.reason;
+  }
+  return out;
 }
 
 /**
@@ -553,9 +643,19 @@ async function processAnalysis(analysisId) {
     ).catch(() => ({ rows: [] }));
     const userId = uRows[0] && uRows[0].user_id || null;
 
+    // ── Яндекс.Вебмастер анализируется ОТДЕЛЬНО ──
+    // Запускаем до сбора GSC и не зависим от его результата: проект может быть
+    // подключён только к Яндексу, а сбой Google не должен «съедать» отчёт по
+    // Яндексу (раньше при ошибке GSC/LLM анализ завершался до этого блока).
+    const ydxPass = await runYandexPass(project, range);
+    const ydxSnapshot = ydxPass.snapshot;
+    const ydxPayload = ydxPass.payload;
+    const ydxReport = ydxPass.report;
+
     // Сбор «голой» выгрузки GSC + все детерминированные срезы.
-    let snapshot;
-    let payload;
+    let snapshot = null;
+    let payload = null;
+    let gscError = null;
     try {
       const runCfg = getProjectsConfig().analysisRun || {};
       const collected = await _withDeadline(
@@ -570,13 +670,16 @@ async function processAnalysis(analysisId) {
           projectId: project.id, source: 'gsc', error: e,
         });
       } catch (_) { /* graceful */ }
-      throw e;
+      // Если Яндекс отработал — не валим весь анализ: сохраняем отчёт по Яндексу.
+      if (!ydxSnapshot) throw e;
+      gscError = `Google Search Console: ${e.message}`;
+      console.warn('[projects/analysisRunner] gsc collect failed, continue with yandex:', e.message);
     }
 
     // Сразу сохраняем снимок как отдельную строку — он остаётся даже если
     // LLM-вызов ниже упадёт. PR 1 «снимки как first-class сущность».
     let snapshotId = null;
-    if (userId) {
+    if (userId && snapshot) {
       try {
         const ins = await insertSnapshot({
           projectId: project.id,
@@ -598,66 +701,67 @@ async function processAnalysis(analysisId) {
       }
     }
 
-    const batchCfg = getProjectsConfig().batch;
-    const workload = estimateWorkload({
-      topQueries: payload.top.topQueries,
-      topPages: payload.top.topPages,
-      queryPage: payload.queryPage,
-    });
-    const useBatch = shouldBatch(workload, batchCfg);
+    let result = null;
+    if (payload) {
+      const batchCfg = getProjectsConfig().batch;
+      const workload = estimateWorkload({
+        topQueries: payload.top.topQueries,
+        topPages: payload.top.topPages,
+        queryPage: payload.queryPage,
+      });
+      const useBatch = shouldBatch(workload, batchCfg);
 
-    const result = useBatch
-      ? await runProjectAnalysisBatched(payload)
-      : await runProjectAnalysis(payload);
+      result = useBatch
+        ? await runProjectAnalysisBatched(payload)
+        : await runProjectAnalysis(payload);
 
-    if (result.verdict !== 'ok') {
-      // Понятная формулировка вместо технического «skipped: no_api_key» —
-      // самая частая причина «анализ не проходит» на новом окружении.
-      const msg = result.reason === 'no_api_key'
-        ? 'Не задан ключ LLM-провайдера (GEMINI_API_KEY или DEEPSEEK_API_KEY) — анализ не может быть построен'
-        : `Анализатор ${result.verdict}: ${result.reason || ''}`;
-      await _setError(analysisId, msg);
-      return;
-    }
-
-    // ── Раздельный анализ Яндекса + сводка закономерностей + ranking-gaps ──
-    // Всё graceful: сбой любого из проходов не валит основной (Google) отчёт.
-    let ydxSnapshot = null;
-    let ydxPayload = null;
-    let ydxReport = null;
-    try {
-      const ydx = await collectYdxSnapshot(project, range);
-      if (ydx) { ydxSnapshot = ydx.snapshot; ydxPayload = ydx.payload; }
-    } catch (e) {
-      console.warn('[projects/analysisRunner] ydx collect failed:', e.message);
-    }
-    if (ydxPayload) {
-      try {
-        const yr = await runYandexAnalysis(ydxPayload);
-        if (yr && yr.verdict === 'ok') ydxReport = yr.markdown;
-      } catch (e) {
-        console.warn('[projects/analysisRunner] ydx analysis failed:', e.message);
+      if (result.verdict !== 'ok') {
+        // Понятная формулировка вместо технического «skipped: no_api_key» —
+        // самая частая причина «анализ не проходит» на новом окружении.
+        const msg = result.reason === 'no_api_key'
+          ? 'Не задан ключ LLM-провайдера (GEMINI_API_KEY или DEEPSEEK_API_KEY) — анализ не может быть построен'
+          : `Анализатор ${result.verdict}: ${result.reason || ''}`;
+        // Отчёт по Яндексу самодостаточен — сохраняем его, а не теряем.
+        if (!ydxReport) {
+          await _setError(analysisId, msg);
+          return;
+        }
+        gscError = msg;
+        result = null;
+        console.warn('[projects/analysisRunner] google analysis failed, keep yandex report:', msg);
       }
     }
 
+    // Ни одного источника — фиксируем ошибку.
+    if (!result && !ydxSnapshot) {
+      await _setError(analysisId, gscError || 'Нет данных ни из Google Search Console, ни из Яндекс.Вебмастера');
+      return;
+    }
+
+    // ── Сводка закономерностей + ranking-gaps ──
+    // Всё graceful: сбой любого из проходов не валит основной отчёт.
     // Детерминированный аудит факторов ранжирования (что мешает росту).
     let rankingFactors = null;
     try { rankingFactors = buildRankingFactors(snapshot, ydxSnapshot); } catch (_) { rankingFactors = null; }
 
     // Визуальная схема стратегии (ТЗ п.5) — строим из факторов ранжирования и
     // кладём в снапшот, чтобы и кабинет, и публичный отчёт рисовали её одинаково.
-    try { snapshot.strategy_map = buildStrategyMap(rankingFactors); } catch (_) { snapshot.strategy_map = null; }
+    if (snapshot) {
+      try { snapshot.strategy_map = buildStrategyMap(rankingFactors); } catch (_) { snapshot.strategy_map = null; }
+    }
 
     // Финальная сводка закономерностей Google ↔ Яндекс + подсветка пробелов.
+    // Достаточно одного источника: синтез умеет работать и без отчёта Яндекса,
+    // и без отчёта Google (в промпте есть явные ветки «нет отчёта …»).
     let synthesisMarkdown = null;
     const synthCfg = getProjectsConfig().analyzer;
-    if (synthCfg && synthCfg.synthesis && synthCfg.synthesis.enabled) {
+    if (synthCfg && synthCfg.synthesis && synthCfg.synthesis.enabled && (result || ydxReport)) {
       try {
         const syn = await runSynthesis({
           project,
-          gscReport: result.markdown,
+          gscReport: result ? result.markdown : null,
           ydxReport,
-          gscPerformance: payload.performance,
+          gscPerformance: payload ? payload.performance : null,
           ydxPerformance: ydxPayload ? ydxPayload.performance : null,
           rankingFactors,
           gscSnapshot: snapshot,
@@ -682,49 +786,55 @@ async function processAnalysis(analysisId) {
               ydx_report_markdown = $9,
               synthesis_markdown = $10,
               ranking_factors = $11,
+              error_message = $12,
               completed_at = NOW()
         WHERE id = $1`,
       [
         analysisId,
-        result.markdown,
-        JSON.stringify(snapshot),
-        result.model,
-        result.tokens_in,
-        result.tokens_out,
-        result.cost_usd,
+        result ? result.markdown : null,
+        snapshot ? JSON.stringify(snapshot) : null,
+        result ? result.model : null,
+        result ? result.tokens_in : 0,
+        result ? result.tokens_out : 0,
+        result ? result.cost_usd : 0,
         ydxSnapshot ? JSON.stringify(ydxSnapshot) : null,
         ydxReport,
         synthesisMarkdown,
         rankingFactors ? JSON.stringify(rankingFactors) : null,
+        gscError,
       ],
     );
 
     // Aegis-петля (best-effort): seoBrain snapshot + training example +
     // biobrain feedback. Любая ошибка — warn и продолжаем.
-    try {
-      await onAnalysisDone(db, {
-        analysisId,
-        project: { ...project, user_id: userId },
-        snapshot,
-        result,
-      });
-    } catch (e) {
-      console.warn('[projects/analysisRunner] aegis hook failed:', e.message);
+    if (snapshot && result) {
+      try {
+        await onAnalysisDone(db, {
+          analysisId,
+          project: { ...project, user_id: userId },
+          snapshot,
+          result,
+        });
+      } catch (e) {
+        console.warn('[projects/analysisRunner] aegis hook failed:', e.message);
+      }
     }
 
     // Internal brain sensor (задача 2). Off by default через фича-флаг
     // featureFlags.brain.internalLearning; project.contribute_to_brain
     // также проверяется внутри. Никогда не ломает основной анализ.
-    setImmediate(() => {
-      internalSensors
-        .recordAnalysisObservation({
-          projectId:  project.id,
-          analysisId,
-          snapshot,
-          costUsd:    result && result.cost_usd,
-        })
-        .catch((e) => console.warn('[projects/analysisRunner] internal sensor failed:', e.message));
-    });
+    if (snapshot) {
+      setImmediate(() => {
+        internalSensors
+          .recordAnalysisObservation({
+            projectId:  project.id,
+            analysisId,
+            snapshot,
+            costUsd:    result && result.cost_usd,
+          })
+          .catch((e) => console.warn('[projects/analysisRunner] internal sensor failed:', e.message));
+      });
+    }
   } catch (err) {
     await _setError(analysisId, err.message).catch(() => {});
   }
@@ -903,6 +1013,7 @@ module.exports = {
   processAnalysis,
   collectSnapshot,
   collectYdxSnapshot,
+  runYandexPass,
   recoverStaleAnalyses,
   startAnalysisWatchdog,
   stopAnalysisWatchdog,

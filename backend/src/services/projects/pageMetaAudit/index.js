@@ -250,7 +250,7 @@ async function auditPages({ project, snapshot, queryPage, regenerate } = {}) {
         diff: null,
       };
 
-      if (doRegenerate && semantics.title_mandatory_words.length > 0) {
+      if (doRegenerate) {
         try {
           const generated = await _regenerateOne({
             project, cand, before, semantics, cfg, priceData,
@@ -264,8 +264,26 @@ async function auditPages({ project, snapshot, queryPage, regenerate } = {}) {
         } catch (_) { /* keep audit without suggestion */ }
       }
       pages.push(entry);
-    } catch (_) {
-      pages.push({ url: cand.url, reason: cand.reason, error: 'scrape_failed' });
+    } catch (err) {
+      // Парсинг страницы упал — это НЕ повод отказывать в генерации мета-тегов.
+      // Отдаём полноценную запись (пустое «было» + запросы из GSC), чтобы
+      // regenerateMetaForPages мог отработать по запросам/слагу URL, а UI
+      // показал предупреждение, а не тупик «не удалось спарсить».
+      const before = { title: '', description: '', h1: '' };
+      const semantics = buildSemanticsFromQueries(cand.queries);
+      pages.push({
+        url: cand.url,
+        reason: cand.reason,
+        before,
+        lengths: analyzeMetaLengths(before),
+        mandatory_words: semantics.title_mandatory_words,
+        price_data: null,
+        queries: cand.queries,
+        serp_analyzed: false,
+        suggested: null,
+        diff: null,
+        scrape_error: String((err && err.message) || 'scrape_failed'),
+      });
     }
   }
 
@@ -288,7 +306,9 @@ async function _regenerateOne({
 
   const keyword = (cand.queries[0] && cand.queries[0].query)
     || _fallbackKeyword(before, cand.url);
-  if (!keyword) return null;
+  if (!keyword) {
+    throw new Error('Не удалось определить ключевой запрос страницы (нет запросов GSC, title/H1 и слага URL)');
+  }
 
   const { metas, serp } = await runMetaStagesForKeyword({
     keyword,
@@ -323,10 +343,49 @@ async function _regenerateOne({
 }
 
 /**
+ * Пауза между попытками регенерации (экспоненциальный backoff).
+ */
+function _sleep(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+/**
+ * Регенерация одной страницы с повторами: сетевые сбои SERP/LLM транзиентны,
+ * поэтому одна неудачная попытка не должна оставлять страницу без мета-тегов.
+ * Возвращает {generated, error}; наружу не бросает.
+ */
+async function _regenerateOneWithRetry(args, cfg) {
+  const retryCfg = (cfg && cfg.regenerateRetry) || {};
+  const attempts = Math.max(1, Number(retryCfg.attempts) || 3);
+  const baseDelay = Number(retryCfg.delayMs) >= 0 ? Number(retryCfg.delayMs) : 1500;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const generated = await _regenerateOne(args);
+      if (generated && generated.suggested
+        && (generated.suggested.title || generated.suggested.description)) {
+        return { generated, error: null, attempts: attempt };
+      }
+      lastError = 'empty_generation';
+    } catch (err) {
+      lastError = String((err && err.message) || err) || 'generation_failed';
+    }
+    if (attempt < attempts && baseDelay > 0) {
+      await _sleep(baseDelay * attempt);
+    }
+  }
+  return { generated: null, error: lastError || 'generation_failed', attempts };
+}
+
+/**
  * Staged-регенерация мета-тегов для набора уже выбранных страниц (отдельный шаг
  * «генерация» вне тяжёлого анализа GSC). Разово строит digest ЦА/ниши и гоняет
  * каждую страницу через runMetaStagesForKeyword. Этапы трекаются через
  * переданный funnel (audience_niche / generate_meta / finalize).
+ *
+ * Ошибка предыдущего прогона (в т.ч. неудавшийся парсинг страницы) НЕ блокирует
+ * генерацию: она сбрасывается перед новой попыткой, а сами попытки повторяются
+ * с backoff — «там, где ошибка», генерация обязана отрабатывать.
  *
  * @param {object} args { project, pages:[{url, reason, before, lengths, queries, mandatory_words}], funnel }
  * @returns {Promise<{available:boolean, pages:Array, generated:boolean}>}
@@ -359,29 +418,32 @@ async function regenerateMetaForPages({ project, pages = [], funnel = null } = {
   for (const page of pages) {
     const before = page.before || { title: '', description: '', h1: '' };
     const semantics = buildSemanticsFromQueries(page.queries);
-    const entry = { ...page, suggested: null, diff: null };
-    try {
-      const generated = await _regenerateOne({
-        project,
-        cand: { url: page.url, queries: page.queries || [] },
-        before,
-        semantics,
-        cfg,
-        audienceNicheDigest,
-        priceData: page.price_data || null,
-      });
-      if (generated) {
-        entry.suggested = generated.suggested;
-        entry.diff = generated.diff;
-        entry.lsi_check = generated.lsi_check;
-        entry.serp_analyzed = generated.serp_analyzed;
-        okCount += 1;
-      }
-    } catch (err) {
+    // Сбрасываем ошибку прошлого прогона — иначе успешная регенерация всё равно
+    // выглядела бы как провал (страница «залипала» в состоянии ошибки).
+    const entry = { ...page, suggested: null, diff: null, error: null };
+    const { generated, error, attempts } = await _regenerateOneWithRetry({
+      project,
+      cand: { url: page.url, queries: page.queries || [] },
+      before,
+      semantics,
+      cfg,
+      audienceNicheDigest,
+      priceData: page.price_data || null,
+    }, cfg);
+
+    if (generated) {
+      entry.suggested = generated.suggested;
+      entry.diff = generated.diff;
+      entry.lsi_check = generated.lsi_check;
+      entry.serp_analyzed = generated.serp_analyzed;
+      entry.attempts = attempts;
+      okCount += 1;
+    } else {
       // Не глотаем причину молча — прокидываем в строку, чтобы UI показал,
       // почему «Стало» не сгенерировалось (например, сбой SERP/ключей), а не
       // оставлял оператора в неведении («ничего не произошло»).
-      entry.error = String((err && err.message) || err) || 'generation_failed';
+      entry.error = error;
+      entry.attempts = attempts;
     }
     out.push(entry);
   }
@@ -431,4 +493,5 @@ module.exports = {
   mergeGeneratedMetaIntoAudit,
   auditPages,
   regenerateMetaForPages,
+  _regenerateOneWithRetry,
 };

@@ -113,6 +113,64 @@ test('recommendLinks uses striking distance commercial queries', () => {
   assert.ok(rec.recommendations.some((r) => r.target_url.includes('/catalog/nasos')));
 });
 
+// ── Ссылочная стратегия в первую очередь усиливает коммерцию ──────────
+test('recommendLinks ставит коммерческие запросы первыми (выше инфо-орфанов)', () => {
+  const infoOrphan = 'https://aquashop.ru/blog/kak-vybrat-nasos';
+  const audit = auditLinks({
+    project,
+    links: { anchors: [], pages: [], sites: [] },
+    topPages: [{ key: infoOrphan, impressions: 5000 }],
+  });
+  const rec = recommendLinks({
+    project,
+    commercial: {
+      striking_distance: [
+        { query: 'насос для дачи', position: 12, impressions: 300, intent: 'commercial', landing_page: 'https://aquashop.ru/catalog/nasos' },
+      ],
+    },
+    linkAudit: audit,
+    topPages: [{ key: infoOrphan, impressions: 5000 }],
+  });
+  assert.strictEqual(rec.recommendations[0].target_url, 'https://aquashop.ru/catalog/nasos',
+    'коммерческий запрос — рекомендация №1');
+  const infoRec = rec.recommendations.find((r) => r.target_url === infoOrphan);
+  assert.ok(infoRec, 'инфо-орфан остаётся в списке');
+  assert.strictEqual(infoRec.commercial, false, 'инфо-страница не помечена коммерческой');
+  assert.strictEqual(infoRec.anchor_type, 'generic');
+});
+
+test('recommendLinks сортирует коммерческие запросы transactional → investigation', () => {
+  const audit = auditLinks({ project, links: { anchors: [], pages: [], sites: [] }, topPages: [] });
+  const rec = recommendLinks({
+    project,
+    commercial: {
+      striking_distance: [
+        { query: 'обзор насосов', position: 9, impressions: 900, intent: 'investigation', landing_page: 'https://aquashop.ru/catalog/obzor' },
+        { query: 'насос купить', position: 11, impressions: 100, intent: 'transactional', landing_page: 'https://aquashop.ru/catalog/kupit' },
+      ],
+    },
+    linkAudit: audit,
+    topPages: [],
+  });
+  assert.strictEqual(rec.recommendations[0].target_url, 'https://aquashop.ru/catalog/kupit',
+    'transactional важнее investigation даже при меньших показах');
+  assert.ok(rec.commercial_count >= 2);
+});
+
+test('recommendLinks восстанавливает landing_page коммерческого запроса из query×page', () => {
+  const audit = auditLinks({ project, links: { anchors: [], pages: [], sites: [] }, topPages: [] });
+  const rec = recommendLinks({
+    project,
+    // striking_distance без landing_page — раньше ссылка уходила на главную
+    commercial: { striking_distance: [{ query: 'насос для дачи', position: 12, impressions: 300, intent: 'commercial' }] },
+    linkAudit: audit,
+    topPages: [],
+    queryPage: [{ query: 'насос для дачи', page: 'https://aquashop.ru/catalog/nasos-dacha', impressions: 300 }],
+  });
+  const target = rec.recommendations[0];
+  assert.strictEqual(target.target_url, 'https://aquashop.ru/catalog/nasos-dacha');
+});
+
 // ── п.1 ТЗ: анкор = поисковый запрос из GSC, а не окончание URL ───────
 test('recommendLinks uses real GSC query as anchor for orphans (not URL slug)', () => {
   const orphanUrl = 'https://aquashop.ru/catalog/nasos-dlya-skvazhiny';

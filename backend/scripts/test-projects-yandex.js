@@ -322,6 +322,34 @@ atest('fetchPerformanceSeries position fallback is bounded (no unlimited pull)',
   } finally { ydx.queryHistory = origHistory; }
 });
 
+// ── Раздельный проход по Яндексу (не зависит от Google) ──
+const analysisRunner = require('../src/services/projects/analysisRunner');
+
+atest('runYandexPass сообщает, что Яндекс не подключён', async () => {
+  const res = await analysisRunner.runYandexPass({ id: 'p1', ydx_connected: false }, { days: 28 });
+  assert.strictEqual(res.status, 'not_connected');
+  assert.ok(res.reason && res.reason.includes('не подключён'));
+  assert.strictEqual(res.report, null);
+});
+
+atest('runYandexPass фиксирует причину сбоя сбора данных Вебмастера', async () => {
+  // collectYdxSnapshot глотает ошибки и отдаёт null — проверяем, что проход
+  // не молчит, а возвращает статус и человекочитаемую причину.
+  const ydxSvc = require('../src/services/projects/ydxService');
+  const origFetch = ydxSvc.fetchPerformanceSeries;
+  ydxSvc.fetchPerformanceSeries = async () => { throw new Error('403 Forbidden'); };
+  try {
+    const res = await analysisRunner.runYandexPass(
+      { id: 'p1', name: 'X', ydx_connected: true, ydx_site_url: 'https://x.ru/' }, { days: 28 },
+    );
+    assert.strictEqual(res.status, 'collect_failed');
+    assert.ok(res.reason && res.reason.length > 0, 'причина сбоя должна быть заполнена');
+    assert.strictEqual(res.snapshot, null);
+  } finally {
+    ydxSvc.fetchPerformanceSeries = origFetch;
+  }
+});
+
 // eslint-disable-next-line no-console
 (async () => {
   for (const run of asyncQueue) { await run(); } // eslint-disable-line no-await-in-loop
