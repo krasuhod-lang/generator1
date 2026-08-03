@@ -315,6 +315,28 @@ function combinedIntent(queryIntent, landing) {
 }
 
 /**
+ * Карта «нормализованный запрос → лучшая по показам посадочная страница».
+ * Нужна, чтобы точки роста (striking distance) несли конкретный URL, который
+ * надо усиливать, а не абстрактный запрос.
+ */
+function _bestPageByQuery(queryPage) {
+  const out = new Map();
+  if (!Array.isArray(queryPage) || !queryPage.length) return out;
+  const best = new Map(); // normQuery → impressions лучшей строки
+  for (const r of queryPage) {
+    const k = _norm(r && r.query);
+    const page = r && r.page;
+    if (!k || !page) continue;
+    const impr = Number(r.impressions) || 0;
+    if (!best.has(k) || impr > best.get(k)) {
+      best.set(k, impr);
+      out.set(k, page);
+    }
+  }
+  return out;
+}
+
+/**
  * Главная функция. Строит коммерческий срез из данных GSC.
  *
  * @param {Object} params
@@ -403,7 +425,11 @@ function analyzeCommercial(params = {}) {
     .sort((a, b) => b.clicks - a.clicks);
 
   // 2) Striking distance — коммерческие запросы у входа в топ.
+  // landing_page проставляем сразу здесь (лучшая по показам страница запроса из
+  // query×page): без него потребители (ссылочная стратегия) не знали, какую
+  // именно посадочную усиливать, и деградировали до главной страницы.
   const sd = cfg.strikingDistance;
+  const bestPageByQuery = _bestPageByQuery(queryPage);
   const strikingDistance = classified
     .filter((r) => r.commercial
       && r.position >= sd.minPosition && r.position <= sd.maxPosition
@@ -414,6 +440,7 @@ function analyzeCommercial(params = {}) {
       query: r.key, intent: r.intent,
       clicks: r.clicks, impressions: r.impressions,
       ctr: r.ctr, position: r.position,
+      landing_page: bestPageByQuery.get(_norm(r.key)) || null,
     }));
 
   // 3) CTR-аномалии — топовые позиции с CTR заметно ниже бенчмарка.

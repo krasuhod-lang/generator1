@@ -115,50 +115,50 @@ async function copyAllForExcel() {
           <span v-if="p.reason" class="text-[11px] text-amber-300">{{ p.reason }}</span>
         </div>
 
-        <div v-if="p.error" class="text-xs text-red-300">Не удалось спарсить страницу.</div>
+        <div v-if="p.scrape_error" class="text-xs text-amber-300">
+          ⚠ Не удалось спарсить страницу ({{ p.scrape_error }}) — генерация запустится по запросам GSC / URL.
+        </div>
 
-        <template v-else>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <div class="rounded bg-gray-900/50 p-2">
-              <div class="text-[11px] text-gray-500 uppercase">Было</div>
-              <div class="text-xs"><b>Title:</b> {{ p.before && p.before.title || '—' }}</div>
-              <div class="text-xs"><b>Desc:</b> {{ p.before && p.before.description || '—' }}</div>
-            </div>
-            <div class="rounded bg-gray-900/50 p-2">
-              <div class="text-[11px] text-gray-500 uppercase">Стало</div>
-              <template v-if="p.suggested">
-                <div class="flex items-start justify-between gap-2">
-                  <div class="text-xs min-w-0"><b>Title:</b> {{ p.suggested.title }}</div>
-                  <CopyButton :text="p.suggested.title" label="Title" />
-                </div>
-                <div class="flex items-start justify-between gap-2 mt-1">
-                  <div class="text-xs min-w-0"><b>Desc:</b> {{ p.suggested.description }}</div>
-                  <CopyButton :text="p.suggested.description" label="Desc" />
-                </div>
-              </template>
-              <div v-else class="text-xs text-gray-500">
-                Рекомендация не сгенерирована.
-                <span v-if="p.error" class="block text-amber-300 mt-0.5">⚠ {{ p.error }}</span>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div class="rounded bg-gray-900/50 p-2">
+            <div class="text-[11px] text-gray-500 uppercase">Было</div>
+            <div class="text-xs"><b>Title:</b> {{ p.before && p.before.title || '—' }}</div>
+            <div class="text-xs"><b>Desc:</b> {{ p.before && p.before.description || '—' }}</div>
+          </div>
+          <div class="rounded bg-gray-900/50 p-2">
+            <div class="text-[11px] text-gray-500 uppercase">Стало</div>
+            <template v-if="p.suggested">
+              <div class="flex items-start justify-between gap-2">
+                <div class="text-xs min-w-0"><b>Title:</b> {{ p.suggested.title }}</div>
+                <CopyButton :text="p.suggested.title" label="Title" />
               </div>
+              <div class="flex items-start justify-between gap-2 mt-1">
+                <div class="text-xs min-w-0"><b>Desc:</b> {{ p.suggested.description }}</div>
+                <CopyButton :text="p.suggested.description" label="Desc" />
+              </div>
+            </template>
+            <div v-else class="text-xs text-gray-500">
+              Рекомендация не сгенерирована.
+              <span v-if="p.error" class="block text-amber-300 mt-0.5">⚠ {{ p.error }}</span>
             </div>
           </div>
+        </div>
 
-          <!-- Диагностика покрытия ключей (LSI) в готовых тегах -->
-          <div v-if="p.suggested" class="text-[11px]">
-            <span v-if="missedLsi(p).length === 0" class="text-emerald-300">✓ Все ключи покрыты</span>
-            <span v-else class="text-amber-300">
-              ⚠ Непокрытые LSI: {{ missedLsi(p).slice(0, 8).join(', ') }}
-            </span>
-          </div>
+        <!-- Диагностика покрытия ключей (LSI) в готовых тегах -->
+        <div v-if="p.suggested" class="text-[11px]">
+          <span v-if="missedLsi(p).length === 0" class="text-emerald-300">✓ Все ключи покрыты</span>
+          <span v-else class="text-amber-300">
+            ⚠ Непокрытые LSI: {{ missedLsi(p).slice(0, 8).join(', ') }}
+          </span>
+        </div>
 
-          <div class="flex flex-wrap items-center gap-2">
-            <button v-if="projectId" class="btn-secondary text-xs" :disabled="busy[i]" @click="regenerate(p, i)">
-              {{ busy[i] ? 'Этапы: ЦА → SERP → генерация → LSI…' : 'Перегенерировать через Meta Tags' }}
-            </button>
-            <CopyButton v-if="p.suggested" :text="bothMeta(p)" label="Title + Description" />
-            <span v-if="errors[i]" class="text-[11px] text-rose-300">⚠ {{ errors[i] }}</span>
-          </div>
-        </template>
+        <div class="flex flex-wrap items-center gap-2">
+          <button v-if="projectId" class="btn-secondary text-xs" :disabled="busy[i]" @click="regenerate(p, i)">
+            {{ busy[i] ? 'Этапы: ЦА → SERP → генерация → LSI…' : 'Перегенерировать через Meta Tags' }}
+          </button>
+          <CopyButton v-if="p.suggested" :text="bothMeta(p)" label="Title + Description" />
+          <span v-if="errors[i]" class="text-[11px] text-rose-300">⚠ {{ errors[i] }}</span>
+        </div>
       </div>
     </div>
   </section>

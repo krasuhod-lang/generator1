@@ -13,6 +13,7 @@ const {
   buildSemanticsFromQueries,
   diffMeta,
   mergeGeneratedMetaIntoAudit,
+  _regenerateOneWithRetry,
 } = require('../src/services/projects/pageMetaAudit');
 const { _mergeSemantics } = require('../src/services/metaTags/metaStages');
 
@@ -21,6 +22,9 @@ function test(name, fn) {
   try { fn(); passed += 1; console.log(`  ✓ ${name}`); }
   catch (err) { failed += 1; console.error(`  ✗ ${name}\n    ${err.message}`); }
 }
+
+const _asyncQueue = [];
+function testAsync(name, fn) { _asyncQueue.push({ name, fn }); }
 
 test('analyzeMetaLengths flags short/long/empty meta', () => {
   const r = analyzeMetaLengths({ title: '', description: 'x'.repeat(200), h1: 'Заголовок' });
@@ -101,5 +105,80 @@ test('metaStages._mergeSemantics keeps GSC words first, no dup, respects caps', 
   assert.ok(merged.description_mandatory_words.includes('дренажный'));
 });
 
-console.log(`\nPage-meta-audit smoke test: ${passed} passed, ${failed} failed`);
-process.exit(failed === 0 ? 0 : 1);
+// ── Регенерация «там, где ошибка»: повтор попыток и понятная причина ──
+function _stubMetaStages(impl) {
+  const p = require.resolve('../src/services/metaTags/metaStages');
+  const original = require.cache[p];
+  require.cache[p] = {
+    id: p, filename: p, loaded: true, children: [], paths: [],
+    exports: { runMetaStagesForKeyword: impl, buildAudienceNicheDigest: async () => '' },
+  };
+  return () => { if (original) require.cache[p] = original; else delete require.cache[p]; };
+}
+
+const RETRY_CFG = { regenerateRetry: { attempts: 3, delayMs: 0 }, serpAnalysis: {} };
+
+testAsync('регенерация повторяет попытку после транзиентной ошибки SERP', async () => {
+  let calls = 0;
+  const restore = _stubMetaStages(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('SERP timeout');
+    return { metas: { title: 'Новый Title', description: 'Новый Description', h1: 'H1' }, serp: [{}] };
+  });
+  try {
+    const res = await _regenerateOneWithRetry({
+      project: { name: 'AquaShop' },
+      cand: { url: 'https://x.ru/catalog/nasos', queries: [{ query: 'купить насос' }] },
+      before: { title: '', description: '', h1: '' },
+      semantics: { title_mandatory_words: [], description_mandatory_words: [] },
+      cfg: RETRY_CFG,
+    }, RETRY_CFG);
+    assert.strictEqual(res.error, null, 'вторая попытка успешна');
+    assert.strictEqual(res.generated.suggested.title, 'Новый Title');
+    assert.strictEqual(res.attempts, 2);
+  } finally { restore(); }
+});
+
+testAsync('регенерация возвращает причину после исчерпания попыток', async () => {
+  const restore = _stubMetaStages(async () => { throw new Error('нет ключа XMLStock'); });
+  try {
+    const res = await _regenerateOneWithRetry({
+      project: {},
+      cand: { url: 'https://x.ru/catalog/nasos', queries: [] },
+      before: { title: '', description: '', h1: '' },
+      semantics: { title_mandatory_words: [], description_mandatory_words: [] },
+      cfg: RETRY_CFG,
+    }, RETRY_CFG);
+    assert.strictEqual(res.generated, null);
+    assert.match(res.error, /XMLStock/);
+    assert.strictEqual(res.attempts, 3);
+  } finally { restore(); }
+});
+
+testAsync('регенерация работает без запросов GSC — ключ берётся из слага URL', async () => {
+  let usedKeyword = '';
+  const restore = _stubMetaStages(async ({ keyword }) => {
+    usedKeyword = keyword;
+    return { metas: { title: 'T', description: 'D', h1: 'H' }, serp: [] };
+  });
+  try {
+    const res = await _regenerateOneWithRetry({
+      project: {},
+      cand: { url: 'https://x.ru/catalog/nasos-dlya-dachi', queries: [] },
+      before: { title: '', description: '', h1: '' },
+      semantics: { title_mandatory_words: [], description_mandatory_words: [] },
+      cfg: RETRY_CFG,
+    }, RETRY_CFG);
+    assert.strictEqual(res.error, null);
+    assert.strictEqual(usedKeyword, 'nasos dlya dachi');
+  } finally { restore(); }
+});
+
+(async () => {
+  for (const t of _asyncQueue) {
+    try { await t.fn(); passed += 1; console.log(`  ✓ ${t.name}`); }
+    catch (err) { failed += 1; console.error(`  ✗ ${t.name}\n    ${err.message}`); }
+  }
+  console.log(`\nPage-meta-audit smoke test: ${passed} passed, ${failed} failed`);
+  process.exit(failed === 0 ? 0 : 1);
+})();
