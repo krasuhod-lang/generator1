@@ -40,8 +40,8 @@ services:
     restart: unless-stopped
     command: >
       redis-server
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory 1gb
+      --maxmemory-policy noeviction
       --save 60 1
     volumes:
       - redis_data:/data

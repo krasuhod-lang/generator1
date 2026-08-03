@@ -153,6 +153,12 @@ async function createCampaign(req, res, next) {
     // Стартуем сразу активной, чтобы планировщик подхватил кампанию.
     const status = body.status === 'draft' ? 'draft' : 'active';
 
+    // Режим письма: 'classic' (по умолчанию) | 'provocation' (V2). Из «Рассылка V2»
+    // приходит 'provocation'. Без этого поля кампания молча оставалась classic.
+    const emailMode = ['classic', 'provocation'].includes(String(body.email_mode || '').toLowerCase())
+      ? String(body.email_mode).toLowerCase()
+      : 'classic';
+
     // Перед запуском кампании обязательно указываем наш сайт и Telegram,
     // чтобы получатели могли связаться (req 3). Для черновика — не требуем.
     if (status !== 'draft' && (!senderSite || !senderTelegram)) {
@@ -165,8 +171,8 @@ async function createCampaign(req, res, next) {
       `INSERT INTO outreach_campaigns
           (user_id, name, keyword, cities, search_engine, depth_pages,
            daily_limit, sender_name, sender_email, sender_site, sender_telegram,
-           status, next_run_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW())
+           status, email_mode, next_run_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
        RETURNING id, name, keyword, niche, business_type, cities, search_engine,
                  depth_pages, daily_limit, warmup_week, sender_name, sender_email,
                  sender_site, sender_telegram,
@@ -174,7 +180,7 @@ async function createCampaign(req, res, next) {
                  total_replied, last_run_at, next_run_at, created_at`,
       [
         req.user.id, name, keyword, cities, searchEngine, depthPages,
-        dailyLimit, senderName, senderEmail, senderSite, senderTelegram, status,
+        dailyLimit, senderName, senderEmail, senderSite, senderTelegram, status, emailMode,
       ],
     );
 
@@ -256,6 +262,14 @@ async function updateCampaign(req, res, next) {
     }
     if (body.sender_name !== undefined) {
       sets.push(`sender_name = $${idx++}`); vals.push(_clip(body.sender_name, 120) || null);
+    }
+    // Режим письма: 'classic' (по умолчанию) | 'provocation' (V2). Аддитивно.
+    if (body.email_mode !== undefined) {
+      const mode = _clip(body.email_mode, 20).toLowerCase();
+      if (!['classic', 'provocation'].includes(mode)) {
+        return res.status(400).json({ error: "email_mode должен быть 'classic' или 'provocation'" });
+      }
+      sets.push(`email_mode = $${idx++}`); vals.push(mode);
     }
     if (body.run_now === true) {
       // Форсируем запуск немедленно: обновляем next_run_at И вызываем runTick().

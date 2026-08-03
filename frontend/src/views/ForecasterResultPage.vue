@@ -13,6 +13,7 @@ import ForecastChart from '../components/ForecastChart.vue';
 import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
 import SemanticCoverageChart from '../components/SemanticCoverageChart.vue';
 import ForecastAIReport from '../components/ForecastAIReport.vue';
+import ForecasterHumanSummaryV2 from '../components/ForecasterHumanSummaryV2.vue';
 import { useForecasterStore } from '../stores/forecaster.js';
 
 const route  = useRoute();
@@ -1036,6 +1037,10 @@ const sovSummaryRows = computed(() => {
                    class="bg-gray-900 border border-gray-800 rounded-xl p-3 text-xs text-gray-500">
             📋 ClusterPlanner: {{ clusterPlanner.verdict }}{{ clusterPlanner.reason ? ' — ' + clusterPlanner.reason : '' }}
           </section>
+
+          <!-- ДОПОЛНЕНИЕ (V2): «Простыми словами» — человеческое резюме выводов.
+               Показывается только если backend-переводчик отработал (флаг включён). -->
+          <ForecasterHumanSummaryV2 :data="dsSummary?.human_summary" />
 
           <!-- Ванга — бизнес-саммари (Gemini) -->
           <section v-if="vangaSummary" class="bg-gray-900 border border-gray-800 rounded-xl p-4">

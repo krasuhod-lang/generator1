@@ -348,5 +348,77 @@ group('SOV-floor: current_traffic > Demand₀ × target_SOV (краевой сл
   });
 });
 
+group('Ramp-up старта и cap прироста (защита от скачка в M1)', () => {
+  const logistic = (t) => 1 / (1 + Math.exp(-cfg.unified.kDefault * (t - cfg.unified.t0Default)));
+
+  test('params отдают ramp_up_months и параметры cap', () => {
+    const r = buildUnifiedForecast({ monthly: flatMonthly(), options: {}, currentTrafficPerMonth: 100, cfg });
+    assert.strictEqual(r.params.ramp_up_months, cfg.unified.rampUpMonths);
+    assert.strictEqual(r.params.growth_cap_per_month, cfg.unified.growthCapPerMonth);
+    assert.strictEqual(r.params.abs_growth_per_month, cfg.unified.absGrowthPerMonth);
+  });
+
+  test('t=1: capture сглажен ramp-множителем (1/rampUpMonths от логистики)', () => {
+    // Новый сайт (cap не применяется), r=0 → capture = captureCore.
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000), options: { h_max: 12 }, currentTrafficPerMonth: 0, cfg });
+    const sovMax = r.params.sov_max;
+    const ramp = 1 / cfg.unified.rampUpMonths;
+    const expected = sovMax * logistic(1) * ramp;
+    assert.ok(Math.abs(r.forecast[0].capture - expected) < 1e-4,
+      `t=1 capture=${r.forecast[0].capture}, ожидали ${expected.toFixed(5)}`);
+    // Без ramp-up было бы вчетверо больше — это и есть «прыжок» M1.
+    assert.ok(r.forecast[0].capture < sovMax * logistic(1) - 1e-6);
+  });
+
+  test('t ≥ rampUpMonths: ramp отпущен, работает чистая логистика', () => {
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000), options: { h_max: 12 }, currentTrafficPerMonth: 0, cfg });
+    const t = cfg.unified.rampUpMonths + 2;
+    const expected = r.params.sov_max * logistic(t);
+    assert.ok(Math.abs(r.forecast[t - 1].capture - expected) < 1e-4,
+      `t=${t} capture=${r.forecast[t - 1].capture}, ожидали ${expected.toFixed(5)}`);
+  });
+
+  test('огромное ядро + маленький старт: M1 не «прыгает» (cap ×1.4 / +300)', () => {
+    // L0 = 1 000 000, текущий трафик 100 — раньше M1 давал ~4500 визитов.
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000000), options: { h_max: 12 }, currentTrafficPerMonth: 100, cfg });
+    const cap1 = Math.max(100 * (1 + cfg.unified.growthCapPerMonth), 100 + cfg.unified.absGrowthPerMonth);
+    assert.ok(r.forecast[0].value <= cap1 + 1, `M1=${r.forecast[0].value} > cap ${cap1}`);
+    assert.ok(r.forecast[0].value >= 100, 'M1 не ниже старта');
+    // Каждый месяц не выходит за свой потолок прироста.
+    for (const p of r.forecast) {
+      const capT = Math.max(100 * (1 + cfg.unified.growthCapPerMonth * p.t), 100 + cfg.unified.absGrowthPerMonth * p.t);
+      assert.ok(p.value <= capT + 1, `t=${p.t}: ${p.value} > cap ${capT}`);
+    }
+  });
+
+  test('после cap рост остаётся плавным и монотонным', () => {
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000000), options: { h_max: 12 }, currentTrafficPerMonth: 100, cfg });
+    const vals = r.forecast.map((p) => p.value);
+    for (let i = 1; i < vals.length; i++) assert.ok(vals[i] >= vals[i - 1], `${vals[i - 1]} → ${vals[i]}`);
+    const caps = r.forecast.map((p) => p.capture);
+    for (let i = 1; i < caps.length; i++) assert.ok(caps[i] >= caps[i - 1] - 1e-9, `capture ${caps[i - 1]} → ${caps[i]}`);
+  });
+
+  test('cap не занижает адекватный прогноз (трафик в масштабе ядра)', () => {
+    // Текущий трафик 50 000 при спросе 1 000 000 — модель и так растёт
+    // медленнее потолка, cap не должен вмешиваться.
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000000), options: { h_max: 12 }, currentTrafficPerMonth: 50000, cfg });
+    for (const p of r.forecast) {
+      const capT = Math.max(50000 * (1 + cfg.unified.growthCapPerMonth * p.t), 50000 + cfg.unified.absGrowthPerMonth * p.t);
+      assert.ok(p.core < capT, `t=${p.t}: cap не должен связывать (${p.core} vs ${capT})`);
+    }
+    assert.ok(r.forecast[11].value > 50000, 'трафик растёт относительно старта');
+  });
+
+  test('новый сайт (curTraffic=0): cap не применяется, но ramp сглаживает старт', () => {
+    const r = buildUnifiedForecast({ monthly: flatMonthly(1000000), options: { h_max: 12 }, currentTrafficPerMonth: 0, cfg });
+    assert.ok(r.forecast[0].value > 0, 'новый сайт всё же растёт с нуля');
+    assert.ok(r.forecast[0].value < r.forecast[1].value, 'M1 < M2 — плавный старт');
+    // M1 ≈ четверть от «сырой» логистики: прыжок ×4 убран.
+    const raw = 1000000 * cfg.unified.cYieldDefault * r.params.sov_max * logistic(1);
+    assert.ok(r.forecast[0].value < raw * 0.5, `M1=${r.forecast[0].value} должен быть заметно ниже ${Math.round(raw)}`);
+  });
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

@@ -3,19 +3,18 @@
     <div class="outreach-root">
       <!-- ── Заголовок ───────────────────────────────────────────── -->
       <header class="page-header">
-        <h1>📨 Outreach — автоматические email-рассылки</h1>
+        <h1>🆕 Рассылка V2 — ваше письмо</h1>
         <p class="subtitle">
           Соберите лиды по нише и гео, оцените их по качеству и запустите
           персонализированную рассылку с прогревом домена.
         </p>
       </header>
 
-      <!-- Явное предупреждение: это СТАРОЕ письмо, не путать с V2 -->
-      <div style="margin:0 0 18px;padding:14px 18px;background:#FFF4E5;border:1px solid #FFB84D;border-radius:10px;color:#7a4a00;font-size:14px;line-height:1.5;">
-        ⚠️ Это <b>старая</b> рассылка — она отправляет <b>оригинальное</b> письмо.
-        Чтобы рассылка шла <b>вашим</b> письмом (прямые конкуренты + кейсы),
-        создавайте кампанию в разделе
-        <router-link to="/outreach-v2" style="color:#0071E3;font-weight:bold;">«🆕 Рассылка V2»</router-link>.
+      <!-- Явное подтверждение: здесь уходит ВАШЕ письмо -->
+      <div style="margin:0 0 18px;padding:14px 18px;background:#EAF7EE;border:1px solid #58C27D;border-radius:10px;color:#1c6b3a;font-size:14px;line-height:1.5;">
+        ✅ Здесь рассылка идёт <b>вашим</b> письмом: прямые конкуренты бизнеса
+        в его городе + разрыв по трафику + ваши кейсы из других городов (в ТОП-10).
+        Оригинальная («старая») рассылка — в разделе «📨 Outreach».
       </div>
 
       <!-- ── Форма создания кампании ─────────────────────────────── -->
@@ -160,6 +159,10 @@
           </div>
 
           <div class="cc-meta">
+            <span
+              v-if="c.email_mode"
+              :style="'display:inline-block;padding:2px 8px;border-radius:6px;font-weight:bold;font-size:12px;margin-right:8px;' + (c.email_mode === 'provocation' ? 'background:#EAF7EE;color:#1c6b3a;border:1px solid #58C27D;' : 'background:#FFF4E5;color:#7a4a00;border:1px solid #FFB84D;')"
+            >{{ c.email_mode === 'provocation' ? '🆕 ваше письмо (V2)' : '📨 старое письмо' }}</span>
             Создана: {{ formatDate(c.created_at) }} ·
             Неделя прогрева: {{ c.warmup_week }}
             (лимит: {{ warmupLimit(c.warmup_week) }}/день)
@@ -267,7 +270,7 @@ async function createCampaign() {
 
   submitting.value = true;
   try {
-    await store.createCampaign({ ...form.value });
+    await store.createCampaign({ ...form.value, email_mode: 'provocation' }); // V2: провокационный режим
     form.value = {
       keyword: '', cities: [], search_engine: 'yandex',
       depth_pages: 3, daily_limit: 30, sender_name: '',

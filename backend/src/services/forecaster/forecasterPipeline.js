@@ -712,6 +712,27 @@ async function processForecasterTask(taskId) {
       semanticDistribution,
     });
 
+    // 8c-bis. «Переводчик» (V2) — человеческое резюме выводов для владельца.
+    // СТРОГО ПОД ФЛАГОМ, по умолчанию ВЫКЛЮЧЕН: без флага пайплайн работает как
+    // раньше (ноль лишних вызовов/токенов). Включение:
+    //   • глобально  — env FORECAST_HUMANIZE=1 (или 'true');
+    //   • точечно    — options.humanize === true у конкретной задачи.
+    // Аддитивно: результат кладём ВНУТРЬ ds. Graceful: сбой не ломает прогноз.
+    const humanizeEnabled = process.env.FORECAST_HUMANIZE === '1'
+      || process.env.FORECAST_HUMANIZE === 'true'
+      || options?.humanize === true;
+    if (humanizeEnabled) {
+      try {
+        const { humanizeConclusionsV2 } = require('./humanizeConclusions');
+        ds.human_summary = await humanizeConclusionsV2(ds, { taskId });
+        ds.tokens_in  = (ds.tokens_in  || 0) + (ds.human_summary.tokens_in  || 0);
+        ds.tokens_out = (ds.tokens_out || 0) + (ds.human_summary.tokens_out || 0);
+        ds.cost_usd   = (ds.cost_usd   || 0) + (ds.human_summary.cost_usd   || 0);
+      } catch (e) {
+        ds.human_summary = { verdict: 'error', reason: e.message };
+      }
+    }
+
     // 8d. «Ванга» — бизнес-саммари (Gemini). Graceful: любой сбой API
     // (429/500/timeout) даёт verdict skipped/error, пайплайн продолжается,
     // математический прогноз не страдает. Фронт при не-ok показывает

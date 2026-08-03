@@ -13,6 +13,7 @@ import ForecastChart from '../components/ForecastChart.vue';
 import UnifiedForecastChart from '../components/UnifiedForecastChart.vue';
 import SemanticCoverageChart from '../components/SemanticCoverageChart.vue';
 import ForecastAIReport from '../components/ForecastAIReport.vue';
+import ForecasterHumanSummaryV2 from '../components/ForecasterHumanSummaryV2.vue';
 
 const route = useRoute();
 const task = ref(null);
@@ -243,6 +244,9 @@ const severityIcon = (s) => s === 'high' ? '🔴' : s === 'mid' ? '🟠' : '🟡
             </div>
           </details>
         </section>
+
+        <!-- ДОПОЛНЕНИЕ (V2): «Простыми словами» — показывается только при наличии данных. -->
+        <ForecasterHumanSummaryV2 :data="dsSummary?.human_summary" />
 
         <!-- Ванга — бизнес-саммари (Gemini) -->
         <section v-if="vangaSummary && vangaSummary.verdict === 'ok'"

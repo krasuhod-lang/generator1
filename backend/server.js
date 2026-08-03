@@ -32,6 +32,7 @@ const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 const relevanceRoutes     = require('./src/routes/relevance.routes');
 const forecasterRoutes    = require('./src/routes/forecaster.routes');
 const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
+const forecasterPrefillRoutes = require('./src/routes/forecasterPrefill.routes'); // V2 авто-заполнение по сайту
 const proposalsRoutes     = require('./src/routes/proposals.routes');
 const proposalsPublicRoutes = require('./src/routes/proposalsPublic.routes');
 const projectsRoutes      = require('./src/routes/projects.routes');
@@ -40,6 +41,7 @@ const aegisRoutes         = require('./src/routes/aegis.routes');
 const categoryLeadRoutes  = require('./src/routes/categoryLead.routes');
 const serpB2bRoutes       = require('./src/routes/serpB2b.routes');
 const outreachRoutes      = require('./src/routes/outreach.routes');
+const outreachProvocationRoutes = require('./src/routes/outreachProvocation.routes'); // V2 провокационный режим
 const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
@@ -140,6 +142,7 @@ app.use('/api/article-topics', articleTopicsRoutes);
 app.use('/api/acf-json',       acfJsonRoutes);
 app.use('/api/relevance',      relevanceRoutes);
 app.use('/api/forecaster',     forecasterRoutes);
+app.use('/api/forecaster',     forecasterPrefillRoutes); // V2: prefill-from-domain (отдельный роутер, не задевает existing)
 app.use('/api/public',         forecasterPublicRoutes);
 app.use('/api/proposals',      proposalsRoutes);
 app.use('/api/public',         proposalsPublicRoutes);
@@ -148,6 +151,7 @@ app.use('/api/public',         projectsPublicRoutes);
 app.use('/api/category-lead',  categoryLeadRoutes);
 app.use('/api/serp-b2b',       serpB2bRoutes);
 app.use('/api/outreach',       outreachRoutes);
+app.use('/api/outreach',       outreachProvocationRoutes); // V2: preview-provocation (отдельный роутер, не задевает classic)
 app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
@@ -410,8 +414,10 @@ const start = async () => {
     try {
       const { startOutreachScheduler } = require('./src/services/outreach/outreachScheduler');
       const { startEmailWorker } = require('./src/services/outreach/emailQueue');
+      const { startEmailWorkerV2 } = require('./src/services/outreach/provocation/emailQueueV2'); // V2: отдельный воркер
       startOutreachScheduler();
       startEmailWorker();
+      startEmailWorkerV2();
     } catch (e) {
       console.warn('[Server] Outreach scheduler skipped:', e.message);
     }
@@ -3273,6 +3279,67 @@ async function ensureSchema() {
       `);
     } catch (e) {
       console.warn('[ensureSchema] outreach prospect messengers (mig 124) skipped:', e.message);
+    }
+
+    // Миграция 128: провокационный режим outreach (V2) — таблица outreach_cases
+    // (пул кейсов-доказательств) + nullable-поля конкурента/прогноза у лида
+    // (competitors/forecast_*) + переключатель email_mode. ИНЛАЙН-SQL (как блок
+    // 124), а не чтение файла: папки migrations нет в backend-образе. Только
+    // добавляет объекты (IF NOT EXISTS), классическую рассылку не трогает.
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS outreach_cases (
+          id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id          uuid,
+          campaign_id      uuid,
+          source_serp_task uuid,
+          domain           text NOT NULL,
+          city             text,
+          city_lr          text,
+          niche            text,
+          business_type    text,
+          traffic_month    integer,
+          leads_min        integer,
+          leads_max        integer,
+          lead_unit        text,
+          keywords         jsonb DEFAULT '[]'::jsonb,
+          growth_pct       numeric,
+          is_client        boolean DEFAULT false,
+          active           boolean DEFAULT true,
+          collected_at     timestamptz DEFAULT now(),
+          updated_at       timestamptz DEFAULT now()
+        )
+      `);
+      await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS outreach_cases_domain_city_key ON outreach_cases (domain, city)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS outreach_cases_niche_active_idx ON outreach_cases (niche, active)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS outreach_cases_user_idx ON outreach_cases (user_id)`);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach_cases (mig 128) skipped:', e.message);
+    }
+    try {
+      await db.query(`
+        ALTER TABLE outreach_prospects
+          ADD COLUMN IF NOT EXISTS forecast_task_id     uuid,
+          ADD COLUMN IF NOT EXISTS forecast_share_token text,
+          ADD COLUMN IF NOT EXISTS forecast_status      text,
+          ADD COLUMN IF NOT EXISTS competitors          jsonb DEFAULT '[]'::jsonb,
+          ADD COLUMN IF NOT EXISTS competitor_domain    text,
+          ADD COLUMN IF NOT EXISTS competitor_traffic   integer,
+          ADD COLUMN IF NOT EXISTS competitor_leads_min integer,
+          ADD COLUMN IF NOT EXISTS competitor_leads_max integer,
+          ADD COLUMN IF NOT EXISTS competitor_growing   boolean,
+          ADD COLUMN IF NOT EXISTS prospect_traffic     integer,
+          ADD COLUMN IF NOT EXISTS gap_ratio            numeric,
+          ADD COLUMN IF NOT EXISTS lead_unit            text,
+          ADD COLUMN IF NOT EXISTS provocation_ready    boolean DEFAULT false
+      `);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach_prospects V2 cols (mig 128) skipped:', e.message);
+    }
+    try {
+      await db.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS email_mode text DEFAULT 'classic'`);
+    } catch (e) {
+      console.warn('[ensureSchema] outreach_campaigns email_mode (mig 128) skipped:', e.message);
     }
 
     // Миграция 125: Perplexity Real-Time Research для блог- и ссылочных статей.

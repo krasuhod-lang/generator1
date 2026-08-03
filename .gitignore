@@ -8,3 +8,4 @@ __pycache__/
 brain_state/biobrain_buffer.json
 # AEGIS Bio-Brain generation log (rolling JSONL, regenerated at runtime)
 brain_state/biobrain_generations.jsonl
+.env.example
