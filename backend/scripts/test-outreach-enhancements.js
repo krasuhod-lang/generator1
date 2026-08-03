@@ -1,15 +1,15 @@
 'use strict';
 
 /**
- * Smoke-tests для доработок модуля Outreach.
+ * Smoke-tests модуля «Рассылка».
  *
  * Покрывает:
- *   • разнообразные и короткие темы писем с гео/цифрами (req 1);
- *   • заголовок-плашку письма с гео/цифрами (req 1/2);
- *   • блок контактов отправителя (сайт + Telegram) в подписи (req 3);
- *   • plain-text версию письма (req 4);
- *   • окно отправки по МСК в calculateSendDelay (req 4);
- *   • извлечение мессенджеров WhatsApp/Telegram/MAX без каналов (req 6).
+ *   • тему письма (короткая, с гео/конкурентом);
+ *   • блоки письма: конкуренты, кейсы, подпись с контактами;
+ *   • plain-text версию письма;
+ *   • ОТСУТСТВИЕ прогнозов в письме (клиентам прогнозы не отправляем);
+ *   • окно отправки по МСК в calculateSendDelay;
+ *   • извлечение мессенджеров WhatsApp/Telegram/MAX без каналов.
  *
  * Запуск:  node backend/scripts/test-outreach-enhancements.js
  */
@@ -22,9 +22,8 @@ require.cache[require.resolve('../src/config/db')] = {
 };
 
 const {
-  buildCatchySubject, buildHeroHeading, buildContactBlock,
-  buildDynamicsChart, _buildGreeting,
-} = require('../src/services/outreach/emailComposer');
+  composeProvocationEmailV2, buildSubject,
+} = require('../src/services/outreach/provocation/emailComposerProvocation');
 const { extractMessengerLinks } = require('../src/services/serpB2b/extractors');
 const { calculateSendDelay } = require('../src/services/outreach/outreachScheduler');
 
@@ -34,54 +33,86 @@ function ok(name, cond) {
   else { console.log(`  ✗ ${name}`); failures++; }
 }
 
-const detail = {
-  yandex: { trend: 'decline', deviation_pct: -42.1, first: { value: 810 }, last: { value: 469 }, months: 7 },
-  google: { trend: 'growth', deviation_pct: 12, first: { value: 100 }, last: { value: 112 } },
+const competitors = [
+  { domain: 'a-clinic.ru', company_name: 'А-Клиника', traffic_month: 12000 },
+  { domain: 'b-dent.ru', company_name: null, traffic_month: 8400 },
+];
+const cases = [{
+  domain: 'top-dent.ru', city: 'Пермь', traffic_month: 9100,
+  leads_min: 40, leads_max: 70,
+  top_keywords: [{ phrase: 'имплантация зубов', volume: 5400 }],
+}];
+const sender = {
+  senderName: 'Иван', senderCompany: 'SEO Team',
+  senderSite: 'https://myseo.ru', senderTelegram: '@ivan_seo',
 };
 
-console.log('\n[outreach] Темы писем (req 1) — разнообразие + читаемая длина');
-{
-  const subjects = new Set();
-  const urls = ['https://a-clinic.ru', 'https://b-dent.ru', 'https://c-implant.ru', 'https://d-med.ru'];
-  for (const url of urls) {
-    const s = buildCatchySubject({ prospect: { url, city: 'Казань' }, detail });
-    subjects.add(s);
-    ok(`тема ≤ 50 симв. для ${url} ("${s}")`, s.length <= 50 && s.length > 0);
-  }
-  ok('темы различаются между разными сайтами', subjects.size > 1);
-
-  // Цифры/гео подтягиваются, когда есть падение.
-  const withNum = buildCatchySubject({ prospect: { url: 'https://a.ru', city: 'Пермь' }, detail });
-  ok('без падения детерминирована (стабильна)',
-    buildCatchySubject({ prospect: { url: 'https://only.ru' } }) === buildCatchySubject({ prospect: { url: 'https://only.ru' } }));
-  ok('строка не пустая', withNum.length > 0);
-}
-
-console.log('\n[outreach] Заголовок-плашка (req 1/2)');
-{
-  const hero = buildHeroHeading({ prospect: { url: 'https://klinika.ru', city: 'Сочи' }, detail });
-  ok('заголовок не пустой', typeof hero === 'string' && hero.length > 0);
-  ok('заголовок стабилен для одного лида',
-    buildHeroHeading({ prospect: { url: 'https://x.ru' }, detail: null }) ===
-    buildHeroHeading({ prospect: { url: 'https://x.ru' }, detail: null }));
-}
-
-console.log('\n[outreach] Блок контактов отправителя (req 3)');
-{
-  const block = buildContactBlock({
-    senderName: 'Иван', senderCompany: 'SEO Team',
-    senderSite: 'myseo.ru', senderTelegram: '@ivan_seo',
+function build(extra = {}) {
+  return composeProvocationEmailV2({
+    prospect: { url: 'https://klinika.ru', city: 'Казань' },
+    competitors, prospectTraffic: 900, cases,
+    unit: 'пациентов', sampleQuery: 'стоматология казань',
+    sender, unsubscribeUrl: 'https://app.example/unsubscribe',
+    ...extra,
   });
-  ok('содержит сайт', /myseo\.ru/.test(block));
-  ok('нормализует сайт в https', /href="https:\/\/myseo\.ru"/.test(block));
-  ok('содержит Telegram-ссылку', /href="https:\/\/t\.me\/ivan_seo"/.test(block));
-  ok('содержит имя отправителя', block.includes('Иван'));
-
-  const empty = buildContactBlock({ senderName: 'Иван', senderCompany: 'Иван' });
-  ok('без контактов не падает и не дублирует имя', empty.includes('Иван') && !/href=/.test(empty));
 }
 
-console.log('\n[outreach] Мессенджеры (req 6) — только личный контакт, без каналов');
+console.log('\n[рассылка] Тема письма');
+{
+  const s = buildSubject({ anchorDomain: 'a-clinic.ru', city: 'Казань', prospectDomain: 'klinika.ru' });
+  ok(`тема ≤ 60 симв. ("${s}")`, s.length > 0 && s.length <= 60);
+  ok('тема содержит конкурента', s.includes('a-clinic.ru'));
+  ok('тема детерминирована', s === buildSubject({ anchorDomain: 'a-clinic.ru', city: 'Казань', prospectDomain: 'klinika.ru' }));
+
+  const noComp = buildSubject({ anchorDomain: null, city: '', prospectDomain: 'klinika.ru' });
+  ok('без конкурента тема не пустая', noComp.length > 0);
+}
+
+console.log('\n[рассылка] Тело письма');
+{
+  const letter = build();
+  ok('есть subject/html/text', Boolean(letter.subject && letter.html && letter.text));
+  ok('в письме перечислены конкуренты', letter.html.includes('a-clinic.ru') && letter.html.includes('b-dent.ru'));
+  ok('показан трафик лида', letter.html.includes('900'));
+  ok('есть блок кейсов', letter.html.includes('top-dent.ru'));
+  ok('единица ниши подставлена', letter.html.includes('пациентов'));
+  ok('есть ссылка отписки', letter.html.includes('https://app.example/unsubscribe'));
+  ok('нет inline-SVG (вырезается почтовиками)', !/<svg/i.test(letter.html));
+
+  const empty = build({ competitors: [], cases: [], prospectTraffic: 0 });
+  ok('без данных письмо всё равно собирается', Boolean(empty.html && empty.text));
+}
+
+console.log('\n[рассылка] Прогнозы клиентам НЕ отправляем');
+{
+  const letter = build();
+  const body = `${letter.subject}\n${letter.html}\n${letter.text}`;
+  ok('нет слова «прогноз»', !/прогноз/i.test(body));
+  ok('нет ссылки на публичный прогноз', !/\/forecast\//i.test(body));
+  ok('нет кнопки «Смотреть прогноз»', !/Смотреть прогноз/i.test(body));
+}
+
+console.log('\n[рассылка] Блок контактов отправителя');
+{
+  const letter = build();
+  ok('содержит сайт отправителя', /myseo\.ru/.test(letter.html));
+  ok('содержит Telegram-ссылку', /href="https:\/\/t\.me\/ivan_seo"/.test(letter.html));
+  ok('содержит имя отправителя', letter.html.includes('Иван'));
+
+  const noContacts = build({ sender: { senderName: 'Иван', senderCompany: 'Иван' } });
+  ok('без контактов не падает и не дублирует имя',
+    noContacts.html.includes('Иван') && !/t\.me/.test(noContacts.html));
+}
+
+console.log('\n[рассылка] Plain-text версия');
+{
+  const { text } = build();
+  ok('текстовая версия не пустая', typeof text === 'string' && text.length > 0);
+  ok('без HTML-тегов', !/<[a-z][\s\S]*>/i.test(text));
+  ok('содержит конкурента', text.includes('a-clinic.ru'));
+}
+
+console.log('\n[рассылка] Мессенджеры — только личный контакт, без каналов');
 {
   const html = `
     <a href="https://wa.me/79001234567">WhatsApp</a>
@@ -102,7 +133,7 @@ console.log('\n[outreach] Мессенджеры (req 6) — только лич
   ok('не считает VK/почту мессенджером', !links.some((l) => /vk\.com/.test(l.url) || /mailto/.test(l.url)));
 }
 
-console.log('\n[outreach] Окно отправки МСК (req 4)');
+console.log('\n[рассылка] Окно отправки МСК');
 {
   // Всегда неотрицательная задержка и в разумных пределах (< 48 ч).
   const d0 = calculateSendDelay(0, 10);
@@ -110,30 +141,6 @@ console.log('\n[outreach] Окно отправки МСК (req 4)');
   ok('задержка неотрицательна', d0 >= 0 && d5 >= 0);
   ok('задержка ограничена 48 часами', d0 < 48 * 3600 * 1000 && d5 < 48 * 3600 * 1000);
   ok('индекс дальше по списку → не раньше по времени', d5 >= d0);
-}
-
-console.log('\n[outreach] График динамики топ-50 в письме');
-{
-  const chart = buildDynamicsChart(detail);
-  ok('содержит заголовок графика', chart.includes('Запросы сайта в топ-50'));
-  ok('легенда Яндекса с трендом ▼ и %', /Яндекс ▼ -42\.1%/.test(chart));
-  ok('легенда Google с трендом ▲ и %', /Google ▲ \+12\.0%/.test(chart));
-  ok('рисует столбцы фиксированной высоты', /height:\d+px/.test(chart));
-  ok('содержит значения было/сейчас', chart.includes('810') && chart.includes('469'));
-  ok('нет inline-SVG (вырезается почтовиками)', !/<svg/i.test(chart));
-  ok('без числовых данных возвращает пусто', buildDynamicsChart(null) === '' && buildDynamicsChart({}) === '');
-}
-
-console.log('\n[outreach] Приветствие по времени суток (МСК)');
-{
-  const seed = 'https://a-clinic.ru';
-  // MSK = UTC+3, поэтому подбираем UTC-час так, чтобы МСК-час был нужным.
-  const at = (mskHour) => new Date(Date.UTC(2026, 0, 1, (mskHour - 3 + 24) % 24, 0, 0));
-  ok('утро (08 МСК) → «Доброе утро»', _buildGreeting(at(8), seed) === 'Доброе утро');
-  ok('день (14 МСК) → «Добрый день»', _buildGreeting(at(14), seed) === 'Добрый день');
-  ok('вечер (20 МСК) → «Добрый вечер»', _buildGreeting(at(20), seed) === 'Добрый вечер');
-  ok('ночь (03 МСК) → «Здравствуйте»', _buildGreeting(at(3), seed) === 'Здравствуйте');
-  ok('приветствие детерминировано для одного лида', _buildGreeting(at(14), seed) === _buildGreeting(at(14), seed));
 }
 
 console.log('');

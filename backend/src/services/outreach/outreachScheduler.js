@@ -164,7 +164,6 @@ async function prepareAndQueueEmail(campaign, prospect, opts) {
         senderTelegram: campaign.sender_telegram,
       },
       unsubscribeUrl: unsubUrl,
-      appUrl,
     });
   } catch (err) {
     await log(campaign.id, 'warn', `Письмо не собралось для ${prospect.url} — лид пропущен: ${err.message}`);
@@ -332,7 +331,6 @@ const _provocationEnriching = new Set();
 async function enrichProvocationCampaignV2(campaign) {
   if (_provocationEnriching.has(campaign.id)) return;
   _provocationEnriching.add(campaign.id);
-  const appUrl = process.env.APP_URL || '';
   try {
     // 1. Пул кейсов из выдачи кампании (растущие сайты, что в ТОП-10).
     try {
@@ -358,7 +356,7 @@ async function enrichProvocationCampaignV2(campaign) {
     let done = 0;
     for (const pr of toPrep) {
       try {
-        await prepareProspectProvocationV2(pr, { campaign, appUrl });
+        await prepareProspectProvocationV2(pr, { campaign });
         done++;
       } catch (e) {
         await log(campaign.id, 'warn', `Обогащение: подготовка ${pr.url} пропущена: ${e.message}`);

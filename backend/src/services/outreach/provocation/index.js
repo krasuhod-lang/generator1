@@ -1,20 +1,20 @@
 'use strict';
 /**
- * Провокационный режим outreach — оркестратор.
+ * Рассылка — оркестратор письма.
  *
  * buildProvocationEmailV2(): на входе лид + кампания → на выходе готовое письмо.
  *
  * ДВА ПУТИ:
- *   • FAST (provocation_ready): конкуренты/прогноз уже посчитаны при сборе лида
+ *   • FAST (provocation_ready): конкуренты уже посчитаны при сборе лида
  *     (prepareProspect) и лежат в БД — просто рендерим. Отправка быстрая.
- *   • LIVE: если предрасчёта нет — считаем на месте (competitorGap + forecast).
+ *   • LIVE: если предрасчёта нет — считаем на месте (competitorGap).
  * Кейсы подбираются из БД в обоих случаях (дёшево). Всё «мягко»: недоступный
  * источник → блок не рисуется, письмо остаётся валидным.
  *
- * ИЗОЛЯЦИЯ: полностью новый путь. Классическую рассылку не трогает.
+ * ПРОГНОЗЫ КЛИЕНТАМ НЕ ОТПРАВЛЯЕМ: письмо содержит только факты по конкурентам
+ * и наши кейсы — никаких прогнозов трафика/заявок и ссылок на них.
  */
 const { computeCompetitorGapV2 } = require('./competitorGap');
-const { ensureForecastForProspectV2, _publicUrl } = require('./forecastForProspect');
 const { selectCasesForProspectV2 } = require('./caseSelector');
 const { resolveNicheProfile } = require('./nicheProfile');
 const { composeProvocationEmailV2 } = require('./emailComposerProvocation');
@@ -31,12 +31,10 @@ function _parseCompetitors(raw) {
  * @param {object} [p.campaign]       — строка outreach_campaigns
  * @param {object} p.sender           — {senderName, senderCompany, senderSite, senderTelegram}
  * @param {string} p.unsubscribeUrl
- * @param {string} [p.appUrl]         — база публичного URL (для ссылки прогноза)
- * @param {boolean} [p.skipForecast]  — не считать прогноз (быстрый preview live-пути)
  * @returns {Promise<{subject, html, text, meta}>}
  */
 async function buildProvocationEmailV2(p) {
-  const { prospect, campaign, sender = {}, unsubscribeUrl, appUrl, skipForecast = false } = p;
+  const { prospect, campaign, sender = {}, unsubscribeUrl } = p;
   const niche = prospect.niche || campaign?.niche || '';
 
   const profile = await resolveNicheProfile(niche, { keyword: campaign?.keyword }).catch(() => null);
@@ -44,7 +42,6 @@ async function buildProvocationEmailV2(p) {
 
   let competitors = [];
   let prospectTraffic = 0;
-  let forecastUrl = null;
   let gapRatio = null;
   let source;
 
@@ -54,21 +51,13 @@ async function buildProvocationEmailV2(p) {
     prospectTraffic = prospect.prospect_traffic || 0;
     gapRatio = prospect.gap_ratio || null;
     unit = prospect.lead_unit || unit;
-    forecastUrl = (prospect.forecast_status === 'done' && prospect.forecast_share_token)
-      ? _publicUrl(appUrl, prospect.forecast_share_token)
-      : null;
     source = 'precomputed';
   } else {
     // ── LIVE: считаем на месте ──
-    const [gap, forecast] = await Promise.all([
-      computeCompetitorGapV2(prospect, {}).catch(() => null),
-      skipForecast ? Promise.resolve(null)
-        : ensureForecastForProspectV2(prospect, { campaign, appUrl }).catch(() => null),
-    ]);
+    const gap = await computeCompetitorGapV2(prospect, {}).catch(() => null);
     competitors = gap?.competitors || [];
     prospectTraffic = gap?.prospect_traffic || 0;
     gapRatio = gap?.gap_ratio || null;
-    forecastUrl = forecast?.url || null;
     source = 'live';
   }
 
@@ -79,11 +68,6 @@ async function buildProvocationEmailV2(p) {
 
   const sampleQuery = competitors[0]?.top_keywords?.[0]?.phrase || campaign?.keyword || '';
 
-  // ВРЕМЕННО: ссылка прогноза битая → полностью убираем прогноз из письма
-  // (композер при пустом URL не рисует ни кнопку, ни подводку). Вернуть прогноз
-  // — удалить эту строку.
-  forecastUrl = null;
-
   const letter = composeProvocationEmailV2({
     prospect,
     competitors: competitors.map((c) => ({
@@ -91,7 +75,6 @@ async function buildProvocationEmailV2(p) {
     })),
     prospectTraffic,
     cases,
-    forecastUrl,
     unit,
     sampleQuery,
     sender,
@@ -104,7 +87,6 @@ async function buildProvocationEmailV2(p) {
       unit,
       competitors: competitors.length,
       gap_ratio: gapRatio,
-      forecast: !!forecastUrl,
       cases: cases.length,
       source,
     },

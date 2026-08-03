@@ -37,17 +37,11 @@ async function previewProvocationV2(req, res, next) {
       senderTelegram: campaign?.sender_telegram || '',
     };
 
-    // skipForecast=1 — быстрый предпросмотр без пересчёта прогноза
-    // (полезно, пока лид ещё не обогащён; ссылка прогноза тогда не рисуется).
-    const skipForecast = ['1', 'true', 'yes'].includes(String(req.query.skipForecast || '').toLowerCase());
-
     const letter = await buildProvocationEmailV2({
       prospect,
       campaign,
       sender,
       unsubscribeUrl: appUrl ? `${appUrl.replace(/\/+$/, '')}/unsubscribe` : '#',
-      appUrl,
-      skipForecast,
     });
 
     return res.json({ prospect_id: id, ...letter });

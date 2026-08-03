@@ -1,26 +1,25 @@
 'use strict';
 /**
- * prepareProspect — ПРЕДРАСЧЁТ провокационных данных лида (при сборе), чтобы
- * отправка была быстрой: считаем конкурентов + прогноз ЗАРАНЕЕ и кладём в БД.
+ * prepareProspect — ПРЕДРАСЧЁТ данных лида (при сборе), чтобы отправка была
+ * быстрой: считаем конкурентов ЗАРАНЕЕ и кладём в БД.
  *
  * Сохраняет у лида: competitors (jsonb), якорь конкурента, prospect_traffic,
- * gap_ratio, lead_unit, provocation_ready=true. Прогноз (forecast_*) пишет сам
- * ensureForecastForProspectV2. Дальше buildProvocationEmailV2 берёт готовое.
+ * gap_ratio, lead_unit, provocation_ready=true. Дальше buildProvocationEmailV2
+ * берёт готовое. Прогнозы клиентам не рассылаем — они здесь не считаются.
  *
- * ИЗОЛЯЦИЯ: новый модуль. Пишет только в outreach_prospects (свои поля из mig 128).
+ * Пишет только в outreach_prospects (свои поля из mig 128).
  */
 const db = require('../../../config/db');
 const { computeCompetitorGapV2 } = require('./competitorGap');
-const { ensureForecastForProspectV2 } = require('./forecastForProspect');
 const { resolveNicheProfile } = require('./nicheProfile');
 
 /**
  * @param {object|string} prospectOrId — строка лида или его id
- * @param {object} [opts] — { campaign, appUrl }
- * @returns {Promise<null | {competitors:number, forecast:boolean}>}
+ * @param {object} [opts] — { campaign }
+ * @returns {Promise<null | {competitors:number}>}
  */
 async function prepareProspectProvocationV2(prospectOrId, opts = {}) {
-  const { campaign, appUrl } = opts;
+  const { campaign } = opts;
 
   let prospect = prospectOrId;
   if (typeof prospectOrId === 'string') {
@@ -34,11 +33,8 @@ async function prepareProspectProvocationV2(prospectOrId, opts = {}) {
   const profile = await resolveNicheProfile(niche, { keyword: campaign?.keyword }).catch(() => null);
   const unit = profile?.lead_unit_gen || 'заявок';
 
-  // Прогноз в V2 ВРЕМЕННО ОТКЛЮЧЁН: ссылка была битая, а расчёт плодил
-  // forecaster_tasks и жёг квоту Арсенкина. Считаем ТОЛЬКО конкурентов
-  // (агрегаторы уже отфильтрованы в computeCompetitorGapV2). Вернуть прогноз —
-  // восстановить вызов ensureForecastForProspectV2 здесь + гейт forecastDone,
-  // и снять `forecastUrl = null` в provocation/index.js.
+  // Прогнозы клиентам не отправляем — считаем ТОЛЬКО конкурентов
+  // (агрегаторы уже отфильтрованы в computeCompetitorGapV2).
   const gap = await computeCompetitorGapV2(prospect, {}).catch(() => null);
 
   const competitors = (gap?.competitors || []).map((c) => ({
