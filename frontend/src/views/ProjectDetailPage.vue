@@ -523,16 +523,36 @@ async function runAnalysis() {
 
 function pollAnalysis(aid) {
   if (analysisTimer) clearTimeout(analysisTimer);
+  // Ограничиваем поллинг: без этого при постоянных ошибках запроса статуса
+  // (404/500/сеть) страница вечно висела в состоянии «ИИ анализирует…».
+  const MAX_FAILS = 10;      // ~30 c подряд неудачных запросов
+  const MAX_TICKS = 1200;    // ~60 минут ожидания анализа
+  let fails = 0;
+  let ticks = 0;
   const tick = async () => {
+    ticks += 1;
     try {
       const a = await store.getAnalysis(projectId, aid);
+      fails = 0;
       currentAnalysis.value = a;
       if (a.status === 'done' || a.status === 'error') {
         analyzing.value = false;
         await refreshAnalysesList();
         return;
       }
-    } catch (_) { /* keep polling */ }
+    } catch (_) {
+      fails += 1;
+      if (fails >= MAX_FAILS) {
+        analyzing.value = false;
+        flash('Не удалось получить статус анализа — обновите страницу');
+        return;
+      }
+    }
+    if (ticks >= MAX_TICKS) {
+      analyzing.value = false;
+      flash('Анализ выполняется слишком долго — проверьте статус позже');
+      return;
+    }
     analysisTimer = setTimeout(tick, 3000);
   };
   analysisTimer = setTimeout(tick, 3000);

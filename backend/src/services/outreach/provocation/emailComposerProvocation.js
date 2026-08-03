@@ -1,14 +1,15 @@
 'use strict';
 /**
- * emailComposerProvocation — сборка «провокационного» письма.
+ * emailComposerProvocation — сборка письма рассылки.
  *
- * Отдельный НОВЫЙ композер (старый emailComposer.js не трогаем). Собирает
- * письмо по согласованной логике:
+ * Единственный композер письма. Собирает письмо по согласованной логике:
  *   провокация (прямые конкуренты + разрыв, объяснение механики выдачи)
  *   → авторитет («знаем, за счёт чего они наверху»)
- *   → прогноз (кнопка-ссылка по сайту лида)
  *   → неоспоримый пруф (наши топ-сайты из ДРУГИХ городов + запросы с объёмом)
  *   → CTA («ответьте — пришлём план»).
+ *
+ * ПРОГНОЗЫ КЛИЕНТАМ НЕ ОТПРАВЛЯЕМ: в письме нет ни прогнозных цифр по сайту
+ * лида, ни ссылок на прогноз — только факты по конкурентам и наши кейсы.
  *
  * Все цифры рисует КОД (детерминированно). LLM пишет только живые связки
  * (intro/authority/cta) — опционально; при отсутствии есть текстовый фолбэк,
@@ -137,17 +138,10 @@ function _competitorBlock({ competitors, prospectTraffic, city, sampleQuery, uni
  * Авторитетный блок: «они наверху не случайно — за этим проверенный алгоритм,
  * мы его знаем и умеем повторять для вас». Это смысловой мост от конкурентов
  * (проблема) к кейсам (доказательство) — показывается ВСЕГДА, чтобы логика
- * письма не рвалась. Кнопка-прогноз добавляется ТОЛЬКО при валидной ссылке;
- * если прогноза нет — блок остаётся связным и без «висящих» обещаний.
+ * письма не рвалась. Прогнозов здесь нет и быть не должно.
  */
-function _authorityBlock(forecastUrl, unit) {
-  const intro = `<p style="${TEXT}">Они наверху не случайно — за этим стоит <b>проверенный алгоритм продвижения</b>, по которому агентства выводят сайты в топ. Мы этот алгоритм знаем — и умеем повторять его для вашего сайта.</p>`;
-  if (!forecastUrl) return intro;
-  return `${intro}
-<p style="${TEXT}">Мы уже посчитали, на какой трафик и сколько ${_esc(unit)} по нему реально выйти вашему сайту:</p>
-<div style="margin:0 0 18px;">
-  <a href="${_esc(forecastUrl)}" style="display:inline-block;background:#0071E3;color:#fff;${P}font-size:15px;font-weight:bold;text-decoration:none;padding:13px 24px;border-radius:8px;">▶ Смотреть прогноз по вашему сайту</a>
-</div>`;
+function _authorityBlock() {
+  return `<p style="${TEXT}">Они наверху не случайно — за этим стоит <b>проверенный алгоритм продвижения</b>, по которому агентства выводят сайты в топ. Мы этот алгоритм знаем — и умеем повторять его для вашего сайта.</p>`;
 }
 
 /** Блок кейсов: наши топ-сайты из ДРУГИХ городов + запросы с объёмом. */
@@ -212,7 +206,6 @@ function buildSubject({ anchorDomain, city, prospectDomain }) {
  * @param {Array}  p.competitors         — [{domain, traffic_month}], отсортированы по силе
  * @param {number} [p.prospectTraffic]   — трафик самого лида (визиты/мес)
  * @param {Array}  p.cases               — [{domain, city, traffic_month, leads_min, leads_max, top_keywords}]
- * @param {string} [p.forecastUrl]       — ссылка на прогноз
  * @param {string} p.unit                — слово-единица под нишу (пациентов/заявок/…)
  * @param {string} [p.sampleQuery]       — пример запроса ниши (для механики выдачи)
  * @param {object} p.sender              — {senderName, senderCompany, senderSite, senderTelegram}
@@ -222,7 +215,7 @@ function buildSubject({ anchorDomain, city, prospectDomain }) {
  */
 function composeProvocationEmailV2(p) {
   const {
-    prospect, competitors = [], prospectTraffic, cases = [], forecastUrl,
+    prospect, competitors = [], prospectTraffic, cases = [],
     unit = 'заявок', sampleQuery, sender = {}, unsubscribeUrl, connective = {},
   } = p;
 
@@ -252,7 +245,7 @@ function composeProvocationEmailV2(p) {
   <p style="${TEXT}">${_esc(greeting)}!</p>
   ${intro}
   ${_section(_competitorBlock({ competitors, prospectTraffic, city, sampleQuery, unit }), '#FFF6F5', '#F3D6D2')}
-  ${_section(_authorityBlock(forecastUrl, unit), '#EFF6FF', '#CFE3FF')}
+  ${_section(_authorityBlock(), '#EFF6FF', '#CFE3FF')}
   ${_section(_casesBlock(cases, unit), '#F4FBF5', '#CFE8D4')}
   ${_ctaBox(ctaText)}
 </div>`;
@@ -274,11 +267,11 @@ function composeProvocationEmailV2(p) {
   return {
     subject: buildSubject({ anchorDomain, city, prospectDomain: _domain(prospect?.url) }),
     html,
-    text: _plainText({ greeting, anchorDomain, city, competitors, prospectTraffic, forecastUrl, cases, unit, ctaText, sender, unsubscribeUrl }),
+    text: _plainText({ greeting, anchorDomain, city, competitors, prospectTraffic, cases, unit, ctaText, sender, unsubscribeUrl }),
   };
 }
 
-function _plainText({ greeting, anchorDomain, city, competitors, prospectTraffic, forecastUrl, cases, unit, ctaText, sender, unsubscribeUrl }) {
+function _plainText({ greeting, anchorDomain, city, competitors, prospectTraffic, cases, unit, ctaText, sender, unsubscribeUrl }) {
   const lines = [`${greeting}!`, ''];
   if (anchorDomain) {
     lines.push(`${anchorDomain} — ваш прямой конкурент${city ? ` в ${_prep(city)}` : ''}, он забирает ваших клиентов из поиска.`, '');
@@ -292,7 +285,6 @@ function _plainText({ greeting, anchorDomain, city, competitors, prospectTraffic
     lines.push('');
   }
   lines.push('Они наверху не случайно — за этим стоит проверенный алгоритм продвижения. Мы его знаем и умеем повторять для вашего сайта.', '');
-  if (forecastUrl) lines.push(`Прогноз по вашему сайту (трафик и ${unit}): ${forecastUrl}`, '');
   if (cases.length) {
     lines.push('Сайты, которые мы вывели в ТОП-10 (проверьте в поиске):');
     cases.forEach((c) => {

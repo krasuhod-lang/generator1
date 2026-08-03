@@ -22,7 +22,6 @@ const routes = [
   { path: '/relevance',    component: () => import('../views/RelevancePage.vue'),    meta: { auth: true } },
   { path: '/relevance/:id',component: () => import('../views/RelevanceResultPage.vue'), meta: { auth: true } },
   { path: '/forecaster',           component: () => import('../views/ForecasterPage.vue'),       meta: { auth: true } },
-  { path: '/forecaster-v2',        component: () => import('../views/ForecasterPageV2.vue'),     meta: { auth: true } }, // V2: отдельная страница
   { path: '/forecaster/:id',       component: () => import('../views/ForecasterResultPage.vue'), meta: { auth: true } },
   { path: '/forecast/share/:token',component: () => import('../views/ForecasterSharedPage.vue'), meta: { guest: false, public: true } },
 
@@ -38,7 +37,8 @@ const routes = [
 
   { path: '/serp-b2b',             redirect: '/outreach' },
   { path: '/outreach',             component: () => import('../views/OutreachPage.vue'),           meta: { auth: true } },
-  { path: '/outreach-v2',          component: () => import('../views/OutreachPageV2.vue'),         meta: { auth: true } }, // V2: провокационная рассылка
+  // Старый адрес V2-страницы: рассылка теперь одна и живёт на /outreach.
+  { path: '/outreach-v2',          redirect: '/outreach' },
   { path: '/outreach/campaigns/:id', component: () => import('../views/OutreachCampaignPage.vue'), meta: { auth: true } },
   { path: '/unsubscribe',          component: () => import('../views/UnsubscribePage.vue'),        meta: { public: true } },
 

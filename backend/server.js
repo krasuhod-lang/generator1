@@ -32,7 +32,6 @@ const acfJsonRoutes       = require('./src/routes/acfJson.routes');
 const relevanceRoutes     = require('./src/routes/relevance.routes');
 const forecasterRoutes    = require('./src/routes/forecaster.routes');
 const forecasterPublicRoutes = require('./src/routes/forecasterPublic.routes');
-const forecasterPrefillRoutes = require('./src/routes/forecasterPrefill.routes'); // V2 авто-заполнение по сайту
 const proposalsRoutes     = require('./src/routes/proposals.routes');
 const proposalsPublicRoutes = require('./src/routes/proposalsPublic.routes');
 const projectsRoutes      = require('./src/routes/projects.routes');
@@ -142,7 +141,6 @@ app.use('/api/article-topics', articleTopicsRoutes);
 app.use('/api/acf-json',       acfJsonRoutes);
 app.use('/api/relevance',      relevanceRoutes);
 app.use('/api/forecaster',     forecasterRoutes);
-app.use('/api/forecaster',     forecasterPrefillRoutes); // V2: prefill-from-domain (отдельный роутер, не задевает existing)
 app.use('/api/public',         forecasterPublicRoutes);
 app.use('/api/proposals',      proposalsRoutes);
 app.use('/api/public',         proposalsPublicRoutes);
@@ -410,16 +408,24 @@ const start = async () => {
       console.warn('[Server] Reports keysSoScheduler skipped:', e.message);
     }
 
-    // 📨 Outreach — планировщик email-кампаний + worker очереди отправки.
+    // 📨 Рассылка — планировщик email-кампаний + worker очереди отправки.
     try {
       const { startOutreachScheduler } = require('./src/services/outreach/outreachScheduler');
-      const { startEmailWorker } = require('./src/services/outreach/emailQueue');
-      const { startEmailWorkerV2 } = require('./src/services/outreach/provocation/emailQueueV2'); // V2: отдельный воркер
+      const { startEmailWorkerV2 } = require('./src/services/outreach/provocation/emailQueueV2');
       startOutreachScheduler();
-      startEmailWorker();
       startEmailWorkerV2();
     } catch (e) {
       console.warn('[Server] Outreach scheduler skipped:', e.message);
+    }
+
+    // 🔍 Проекты — watchdog зависших анализов. Анализ выполняется в этом же
+    // процессе, поэтому после рестарта строки могли навсегда остаться в
+    // статусе running/queued (фронт бесконечно показывал «ИИ анализирует…»).
+    try {
+      const { startAnalysisWatchdog } = require('./src/services/projects/analysisRunner');
+      startAnalysisWatchdog();
+    } catch (e) {
+      console.warn('[Server] Projects analysis watchdog skipped:', e.message);
     }
 
     // 🧹 Storage retention — суточная авто-очистка старых/упавших генераций
@@ -3336,10 +3342,14 @@ async function ensureSchema() {
     } catch (e) {
       console.warn('[ensureSchema] outreach_prospects V2 cols (mig 128) skipped:', e.message);
     }
+    // Рассылка одна (персональное письмо): классического режима больше нет.
+    // Нормализуем колонку — старые кампании переводим на актуальный режим.
     try {
-      await db.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS email_mode text DEFAULT 'classic'`);
+      await db.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS email_mode text DEFAULT 'provocation'`);
+      await db.query(`ALTER TABLE outreach_campaigns ALTER COLUMN email_mode SET DEFAULT 'provocation'`);
+      await db.query(`UPDATE outreach_campaigns SET email_mode = 'provocation' WHERE email_mode IS DISTINCT FROM 'provocation'`);
     } catch (e) {
-      console.warn('[ensureSchema] outreach_campaigns email_mode (mig 128) skipped:', e.message);
+      console.warn('[ensureSchema] outreach_campaigns email_mode (mig 128/129) skipped:', e.message);
     }
 
     // Миграция 125: Perplexity Real-Time Research для блог- и ссылочных статей.

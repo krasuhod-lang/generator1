@@ -10,10 +10,8 @@ const crypto = require('crypto');
 const db = require('../../config/db');
 const { expandNicheToGeo } = require('./nicheExpander');
 const { scoreProspect, isCorporateEmail } = require('./prospectScorer');
-const { composeEmail } = require('./emailComposer');
-const { buildProvocationEmailV2 } = require('./provocation'); // V2 провокационный режим (email_mode='provocation')
-const { emailQueueV2 } = require('./provocation/emailQueueV2'); // V2: отдельная очередь отправки
-const { emailQueue } = require('./emailQueue');
+const { buildProvocationEmailV2 } = require('./provocation'); // единственный композер письма
+const { emailQueueV2 } = require('./provocation/emailQueueV2'); // очередь отправки
 const { processSerpB2bTask } = require('../serpB2b/pipeline');
 
 const POLL_MS = 60 * 60 * 1000; // 1 час
@@ -78,17 +76,16 @@ async function runCampaignCycle(campaign) {
     return;
   }
 
-  // 3. Берём лиды с высоким score, которым ещё не отправляли.
-  //    Для V2 (provocation) — ТОЛЬКО полностью подготовленные (provocation_ready):
-  //    письмо уходит лишь когда по лиду собрано всё (конкуренты + прогноз + кейсы).
-  const readyFilter = campaign.email_mode === 'provocation' ? 'AND provocation_ready = TRUE' : '';
+  // 3. Берём лиды с высоким score, которым ещё не отправляли. Только
+  //    полностью подготовленные (provocation_ready): письмо уходит лишь когда
+  //    по лиду собрано всё (конкуренты + кейсы).
   const { rows: prospects } = await db.query(
     `SELECT * FROM outreach_prospects
       WHERE campaign_id = $1
         AND status = 'new'
         AND array_length(emails, 1) > 0
         AND score >= 50
-        ${readyFilter}
+        AND provocation_ready = TRUE
       ORDER BY score DESC
       LIMIT $2`,
     [campaign.id, canSendToday],
@@ -153,43 +150,28 @@ async function prepareAndQueueEmail(campaign, prospect, opts) {
   const unsubToken = crypto.randomBytes(16).toString('hex');
   const unsubUrl = `${appUrl}/unsubscribe?email=${encodeURIComponent(email)}&token=${unsubToken}`;
 
-  // Выбор письма по режиму кампании:
-  //   • 'provocation' (V2) — отправляем ТОЛЬКО провокационное письмо. Если оно
-  //     почему-то не собралось — лид ПРОПУСКАЕМ и НЕ шлём старое классическое
-  //     вместо него (иначе клиенту уходит «не то письмо»). Дособерётся позже.
-  //   • 'classic' — прежнее поведение без изменений.
+  // Персональное письмо под лида. Если оно почему-то не собралось — лид
+  // ПРОПУСКАЕМ (дособерётся в следующем цикле), ничего вместо него не шлём.
   let composed;
-  if (campaign.email_mode === 'provocation') {
-    try {
-      composed = await buildProvocationEmailV2({
-        prospect: { ...prospect, niche: prospect.niche || campaign.niche },
-        campaign,
-        sender: {
-          senderName: fromName,
-          senderCompany: fromName,
-          senderSite: campaign.sender_site,
-          senderTelegram: campaign.sender_telegram,
-        },
-        unsubscribeUrl: unsubUrl,
-        appUrl,
-      });
-    } catch (err) {
-      await log(campaign.id, 'warn', `V2-письмо не собралось для ${prospect.url} — лид пропущен (старое НЕ шлём): ${err.message}`);
-      return false;
-    }
-    if (!composed) {
-      await log(campaign.id, 'warn', `V2-письмо пустое для ${prospect.url} — лид пропущен (старое НЕ шлём)`);
-      return false;
-    }
-  } else {
-    composed = await composeEmail({
-      prospect: { ...prospect, niche: prospect.niche || campaign.niche, dynamics_detail: prospect.dynamics_detail },
-      senderName: fromName,
-      senderCompany: fromName,
+  try {
+    composed = await buildProvocationEmailV2({
+      prospect: { ...prospect, niche: prospect.niche || campaign.niche },
+      campaign,
+      sender: {
+        senderName: fromName,
+        senderCompany: fromName,
+        senderSite: campaign.sender_site,
+        senderTelegram: campaign.sender_telegram,
+      },
       unsubscribeUrl: unsubUrl,
-      senderSite: campaign.sender_site,
-      senderTelegram: campaign.sender_telegram,
     });
+  } catch (err) {
+    await log(campaign.id, 'warn', `Письмо не собралось для ${prospect.url} — лид пропущен: ${err.message}`);
+    return false;
+  }
+  if (!composed) {
+    await log(campaign.id, 'warn', `Письмо пустое для ${prospect.url} — лид пропущен`);
+    return false;
   }
 
   // Создаём запись письма в БД
@@ -215,10 +197,7 @@ async function prepareAndQueueEmail(campaign, prospect, opts) {
 
   // Ставим в очередь с задержкой (равномерно в течение рабочего дня, МСК).
   const delayMs = calculateSendDelay(index, total);
-  // Маршрутизация очереди: V2-кампании (provocation) → ОТДЕЛЬНАЯ чистая очередь
-  // с защитой от сирот. Классика ('classic') → прежняя очередь, без изменений.
-  const targetQueue = campaign.email_mode === 'provocation' ? emailQueueV2 : emailQueue;
-  await targetQueue.add('send-email', {
+  await emailQueueV2.add('send-email', {
     emailId, to: email,
     subject: composed.subject,
     html: composed.html,
@@ -330,13 +309,11 @@ async function collectNewProspects(campaign) {
     [collected, campaign.id],
   );
 
-  // Провокационный режим (V2): обогащение запускаем В ФОНЕ и НЕ ждём его —
-  // сбор лидов завершается сразу. Фон сам наполнит пул кейсов и посчитает
-  // конкурентов+прогноз под каждый лид; готовые лиды подхватит фаза отправки.
-  if (campaign.email_mode === 'provocation') {
-    setImmediate(() => enrichProvocationCampaignV2(campaign).catch((e) =>
-      console.warn(`[outreach] Провокация(фон) ${campaign.id}: ${e.message}`)));
-  }
+  // Обогащение запускаем В ФОНЕ и НЕ ждём его — сбор лидов завершается сразу.
+  // Фон сам наполнит пул кейсов и посчитает конкурентов под каждый лид;
+  // готовые лиды подхватит фаза отправки.
+  setImmediate(() => enrichProvocationCampaignV2(campaign).catch((e) =>
+    console.warn(`[outreach] Обогащение(фон) ${campaign.id}: ${e.message}`)));
 
   await log(campaign.id, 'info', `Собрано новых лидов: ${collected}`);
 }
@@ -346,30 +323,28 @@ async function collectNewProspects(campaign) {
 const _provocationEnriching = new Set();
 
 /**
- * Фоновое обогащение провокационной кампании (V2). НЕ блокирует сбор/отправку.
+ * Фоновое обогащение кампании. НЕ блокирует сбор/отправку.
  * 1) пул кейсов (растущие ТОП-10 сайты по городам кампании);
- * 2) под КАЖДЫЙ email-worthy лид — конкуренты + прогноз (provocation_ready=true).
+ * 2) под КАЖДЫЙ email-worthy лид — прямые конкуренты (provocation_ready=true).
  * Готовые лиды затем берёт обычная фаза отправки (только provocation_ready).
- * ИЗОЛЯЦИЯ: работает лишь для email_mode='provocation', пишет в V2-поля.
  */
 async function enrichProvocationCampaignV2(campaign) {
   if (_provocationEnriching.has(campaign.id)) return;
   _provocationEnriching.add(campaign.id);
-  const appUrl = process.env.APP_URL || '';
   try {
     // 1. Пул кейсов из выдачи кампании (растущие сайты, что в ТОП-10).
     try {
       const { harvestCasesForCampaignV2 } = require('./provocation/caseHarvester');
       const h = await harvestCasesForCampaignV2(campaign.id, {});
-      if (h.cases) await log(campaign.id, 'info', `Провокация: собрано кейсов (ТОП-10): ${h.cases}`);
+      if (h.cases) await log(campaign.id, 'info', `Обогащение: собрано кейсов (ТОП-10): ${h.cases}`);
     } catch (e) {
-      await log(campaign.id, 'warn', `Провокация: сбор кейсов пропущен: ${e.message}`);
+      await log(campaign.id, 'warn', `Обогащение: сбор кейсов пропущен: ${e.message}`);
     }
 
-    // 2. Полный предрасчёт каждого лида: конкуренты + прогноз.
+    // 2. Предрасчёт каждого лида: прямые конкуренты и разрыв по трафику.
     const { prepareProspectProvocationV2 } = require('./provocation/prepareProspect');
-    // Дособираем любых НЕ готовых email-worthy лидов (конкуренты; прогноз в V2
-    // отключён). Как только найден хотя бы один прямой конкурент — лид ready.
+    // Дособираем любых НЕ готовых email-worthy лидов. Как только найден хотя бы
+    // один прямой конкурент — лид ready.
     const { rows: toPrep } = await db.query(
       `SELECT * FROM outreach_prospects
         WHERE campaign_id = $1 AND status = 'new'
@@ -381,15 +356,15 @@ async function enrichProvocationCampaignV2(campaign) {
     let done = 0;
     for (const pr of toPrep) {
       try {
-        await prepareProspectProvocationV2(pr, { campaign, appUrl });
+        await prepareProspectProvocationV2(pr, { campaign });
         done++;
       } catch (e) {
-        await log(campaign.id, 'warn', `Провокация: подготовка ${pr.url} пропущена: ${e.message}`);
+        await log(campaign.id, 'warn', `Обогащение: подготовка ${pr.url} пропущена: ${e.message}`);
       }
     }
     if (done) {
       await log(campaign.id, 'success',
-        `Провокация: полностью готово лидов: ${done} — уходят в отправку индивидуальными письмами`);
+        `Обогащение: полностью готово лидов: ${done} — уходят в отправку индивидуальными письмами`);
     }
   } finally {
     _provocationEnriching.delete(campaign.id);
