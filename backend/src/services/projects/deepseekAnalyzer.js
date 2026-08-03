@@ -491,10 +491,22 @@ function _renderLinkStrategyLines(link) {
 /** [ПЛАН БЛОГА] (раздел 10, ≥5 тем). */
 function _renderBlogPlanLines(blog) {
   if (!blog || !blog.available || !Array.isArray(blog.topics) || blog.topics.length === 0) return [];
-  return ['', '[ПЛАН БЛОГА] (раздел 10 — выдай ≥5 тем статей)',
+  const out = ['', '[ПЛАН БЛОГА] (раздел 10 — выдай ≥5 тем статей)',
     'Темы (topic, h1, title, description, target_url_intent, supporting_queries):',
     JSON.stringify(blog.topics),
     `Гео-сигналы: ${JSON.stringify((blog.gap_signals && blog.gap_signals.geo) || [])}`];
+  // Явно перечисляем уже закрытые темы — LLM не должен предлагать по ним новые
+  // статьи (дубль тематики и каннибализация собственных запросов).
+  if (Array.isArray(blog.already_covered) && blog.already_covered.length) {
+    out.push(
+      'ВАЖНО — эти темы уже закрыты страницами сайта. НЕ предлагай по ним новые статьи,'
+      + ' только доработку существующего URL:',
+      JSON.stringify(blog.already_covered.slice(0, 30).map((c) => ({
+        query: c.query, existing_url: c.existing_url, existing_title: c.existing_title,
+      }))),
+    );
+  }
+  return out;
 }
 
 /** [ПОСТРАНИЧНЫЙ МЕТА-АУДИТ] (усиливает раздел 4). */

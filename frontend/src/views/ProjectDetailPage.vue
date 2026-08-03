@@ -272,6 +272,10 @@ async function load() {
     }
     if (gscReady.value) {
       await loadPerformance();
+    }
+    // Анализ загружаем при любом подключённом источнике: Яндекс.Вебмастер
+    // анализируется отдельно и не требует Google Search Console.
+    if (gscReady.value || ydxReady.value) {
       await loadLatestAnalysis();
     }
   } catch (err) {
@@ -1141,6 +1145,16 @@ onUnmounted(() => {
             <div v-else-if="ydxPerfError" class="text-sm text-red-400">{{ ydxPerfError }}</div>
             <GscPerformanceChart v-else-if="ydxPerf && ydxPerf.series.length" :series="ydxPerf.series" />
             <div v-else class="text-sm text-gray-500 text-center py-6">Нет данных за выбранный период.</div>
+
+            <!-- Запуск анализа прямо с вкладки Яндекса: проход по Вебмастеру
+                 отдельный и не требует подключённого Google Search Console. -->
+            <div class="pt-2 border-t border-gray-800 flex flex-wrap items-center gap-3">
+              <button class="btn-primary !bg-gradient-to-r from-red-600 to-orange-600"
+                      :disabled="analyzing" @click="runAnalysis">
+                🧠 Анализировать показатели проекта
+              </button>
+              <span v-if="analyzing" class="text-sm text-red-300 animate-pulse">ИИ анализирует ваши данные…</span>
+            </div>
           </section>
 
           <!-- Отдельный AI-отчёт по Яндексу (поведенческие/коммерч./регион.) -->

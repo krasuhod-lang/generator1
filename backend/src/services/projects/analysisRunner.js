@@ -751,15 +751,17 @@ async function processAnalysis(analysisId) {
     }
 
     // Финальная сводка закономерностей Google ↔ Яндекс + подсветка пробелов.
+    // Достаточно одного источника: синтез умеет работать и без отчёта Яндекса,
+    // и без отчёта Google (в промпте есть явные ветки «нет отчёта …»).
     let synthesisMarkdown = null;
     const synthCfg = getProjectsConfig().analyzer;
-    if (synthCfg && synthCfg.synthesis && synthCfg.synthesis.enabled && result && ydxReport) {
+    if (synthCfg && synthCfg.synthesis && synthCfg.synthesis.enabled && (result || ydxReport)) {
       try {
         const syn = await runSynthesis({
           project,
-          gscReport: result.markdown,
+          gscReport: result ? result.markdown : null,
           ydxReport,
-          gscPerformance: payload.performance,
+          gscPerformance: payload ? payload.performance : null,
           ydxPerformance: ydxPayload ? ydxPayload.performance : null,
           rankingFactors,
           gscSnapshot: snapshot,
