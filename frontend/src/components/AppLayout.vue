@@ -33,10 +33,8 @@ const TABS = [
   { key: 'info-article',   label: 'Статья в блог',    icon: '📰', path: '/info-article' },
   { key: 'article-topics', label: 'Темы статей',      icon: '🔮', path: '/article-topics' },
   { key: 'forecaster',     label: 'Создать КП',       icon: '📈', path: '/forecaster' },
-  { key: 'forecaster-v2',  label: 'Прогнозатор V2',   icon: '🆕', path: '/forecaster-v2' },
   { key: 'category-lead',  label: 'Lead-text',        icon: '🧭', path: '/category-lead' },
-  { key: 'outreach',       label: 'Outreach',         icon: '📨', path: '/outreach' },
-  { key: 'outreach-v2',    label: 'Рассылка V2',      icon: '🆕', path: '/outreach-v2' },
+  { key: 'outreach',       label: 'Рассылка',         icon: '📨', path: '/outreach' },
   { key: 'audits',         label: 'Аудиты',           icon: '🕷️', path: '/audits' },
   { key: 'projects',       label: 'Проекты',          icon: '🗂️', path: '/projects' },
   { key: 'reports',        label: 'Отчёты',           icon: '📑', path: '/reports' },
@@ -50,11 +48,9 @@ const activeTabKey = computed(() => {
   if (p.startsWith('/link-article'))   return 'link-article';
   if (p.startsWith('/info-article'))   return 'info-article';
   if (p.startsWith('/article-topics')) return 'article-topics';
-  if (p.startsWith('/forecaster-v2'))  return 'forecaster-v2';
   if (p.startsWith('/forecaster'))     return 'forecaster';
   if (p.startsWith('/proposals'))      return 'forecaster';
   if (p.startsWith('/category-lead'))  return 'category-lead';
-  if (p.startsWith('/outreach-v2'))    return 'outreach-v2';
   if (p.startsWith('/serp-b2b'))       return 'outreach';
   if (p.startsWith('/outreach'))       return 'outreach';
   if (p.startsWith('/position-tracker')) return 'position-tracker';

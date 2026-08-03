@@ -30,12 +30,19 @@ async function getValidAccessToken(project) {
   const refresh = project.gsc_refresh_token_enc ? decryptToken(project.gsc_refresh_token_enc) : '';
   const refreshed = await gsc.refreshAccessToken(refresh);
   const newExpiry = new Date(Date.now() + refreshed.expiresIn * 1000);
+  const encrypted = encryptToken(refreshed.accessToken);
   await db.query(
     `UPDATE projects
         SET gsc_access_token_enc = $2, gsc_token_expiry = $3, updated_at = NOW()
       WHERE id = $1`,
-    [project.id, encryptToken(refreshed.accessToken), newExpiry],
+    [project.id, encrypted, newExpiry],
   );
+  // Обновляем и объект в памяти: фоновый анализ переиспользует один и тот же
+  // `project` в десятке GSC-хелперов и без этого рефрешил токен на каждом шаге.
+  try {
+    project.gsc_access_token_enc = encrypted;
+    project.gsc_token_expiry = newExpiry;
+  } catch (_) { /* объект может быть заморожен — не критично */ }
   return refreshed.accessToken;
 }
 

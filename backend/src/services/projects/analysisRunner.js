@@ -61,6 +61,31 @@ async function _donorTopicLlmFn(prompt, opts = {}) {
 }
 
 /**
+ * Ограничивает шаг сбора по времени. Возвращает `fallback`, если шаг не
+ * уложился в дедлайн: анализ обязан завершиться, даже когда внешний сервис
+ * (парсер страниц / LLM / SERP) висит без ответа.
+ *
+ * @param {Promise|Function} task промис или функция, возвращающая промис
+ * @param {number} ms дедлайн, мс (0/undefined — без ограничения)
+ * @param {string} label имя шага для лога
+ * @param {*} [fallback] что вернуть при таймауте
+ */
+function _withDeadline(task, ms, label, fallback = null) {
+  const p = typeof task === 'function' ? Promise.resolve().then(task) : Promise.resolve(task);
+  const limit = Number(ms) || 0;
+  if (!limit) return p;
+  let timer = null;
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[projects/analysisRunner] шаг «${label}» превысил ${limit} мс — пропускаем`);
+      resolve(fallback);
+    }, limit);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([p, guard]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+/**
  * Собирает «голую» выгрузку GSC за переданный диапазон + детерминированные
  * срезы (commercial, breakdowns, period_compare, page_decay, brand_split).
  * Используется и фоновым анализом (processAnalysis), и эндпоинтом
@@ -76,6 +101,8 @@ async function collectSnapshot(project, range) {
   const resolved = resolveRange(range);
 
   const projectsCfg = getProjectsConfig();
+  const runCfg = projectsCfg.analysisRun || {};
+  const stepMs = runCfg.stepTimeoutMs || 0;
   const commercialCfg = projectsCfg.commercial;
   const brandTokens = deriveBrandTokens({
     name: project.name, siteUrl: project.gsc_site_url, url: project.url,
@@ -84,7 +111,11 @@ async function collectSnapshot(project, range) {
   let queryPage = [];
   if (commercialCfg.enabled) {
     try {
-      queryPage = await fetchQueryPageMatrix(project, range);
+      // Без rowLimit срез «запрос × страница» тянулся постранично до 40×25000
+      // строк — самый долгий шаг анализа. Лимит из конфига был, но не передавался.
+      queryPage = await fetchQueryPageMatrix(project, range, {
+        rowLimit: commercialCfg.queryPageRowLimit,
+      });
     } catch (_) { queryPage = []; }
     commercial = analyzeCommercial({
       topQueries: top.topQueries,
@@ -98,32 +129,45 @@ async function collectSnapshot(project, range) {
   const serpCfg = projectsCfg.serpVerification;
   if (serpCfg.enabled && commercial && Array.isArray(commercial.cannibalization)
     && commercial.cannibalization.length > 0) {
-    try {
-      serpVerification = await verifyCannibalization({
-        candidates: commercial.cannibalization,
-      });
-    } catch (_) { serpVerification = null; }
+    serpVerification = await _withDeadline(
+      verifyCannibalization({ candidates: commercial.cannibalization })
+        .catch(() => null),
+      stepMs, 'serpVerification',
+    );
   }
 
-  const breakdowns = await _fetchBreakdowns(project, range, projectsCfg.gscBreakdowns);
-  const periodCompare = await _buildPeriodCompare(project, range, top, projectsCfg.periodCompare, performance);
-  const pageDecay = await _buildPageDecay(project, range, top.topPages, projectsCfg.pageDecay);
-  const brandSplit = await _buildBrandSplit(project, range, projectsCfg.brandSplit, project.gsc_site_url);
+  const breakdowns = await _withDeadline(
+    _fetchBreakdowns(project, range, projectsCfg.gscBreakdowns), stepMs, 'breakdowns');
+  const periodCompare = await _withDeadline(
+    _buildPeriodCompare(project, range, top, projectsCfg.periodCompare, performance), stepMs, 'periodCompare');
+  const pageDecay = await _withDeadline(
+    _buildPageDecay(project, range, top.topPages, projectsCfg.pageDecay), stepMs, 'pageDecay');
+  const brandSplit = await _withDeadline(
+    _buildBrandSplit(project, range, projectsCfg.brandSplit, project.gsc_site_url), stepMs, 'brandSplit');
   // Закономерности спада на дистанции в несколько месяцев (ТЗ п.4) — строим
   // из уже собранного дневного ряда totals, без дополнительных запросов.
   const seasonality = _buildSeasonality(performance.series, projectsCfg.seasonality);
 
-  // --- Новые слои (п.1-8 ТЗ). Все graceful: ошибка → null, пайплайн не падает.
-  // Порядок учитывает зависимости: linkAudit → eat(linkedUrls) → schema(eat) → geo(schema).
-  const pageMetaAudit = await _buildPageMetaAudit(project, top, commercial, pageDecay, queryPage, projectsCfg.pageMetaAudit);
-  const linkAudit = await _buildLinkStrategy(project, commercial, top, queryPage);
+  // --- Новые слои (п.1-8 ТЗ). Все graceful: ошибка/таймаут → null, пайплайн
+  // не падает и не зависает. Порядок учитывает зависимости:
+  // linkAudit → eat(linkedUrls) → schema(eat) → geo(schema).
+  const pageMetaAudit = await _withDeadline(
+    _buildPageMetaAudit(project, top, commercial, pageDecay, queryPage, projectsCfg.pageMetaAudit),
+    stepMs, 'pageMetaAudit');
+  const linkAudit = await _withDeadline(
+    _buildLinkStrategy(project, commercial, top, queryPage), stepMs, 'linkStrategy');
   const linkedUrls = linkAudit && linkAudit.audit && Array.isArray(linkAudit.audit._linked_urls)
     ? new Set(linkAudit.audit._linked_urls) : null;
-  const eat = await _buildEat(project, top, linkedUrls, projectsCfg.eat);
-  const schemaAudit = await _buildSchemaAudit(eat, project, projectsCfg.schemaAudit);
-  const blogPlan = await _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification);
-  const geoAeo = await _buildGeoAeo(project, top, schemaAudit, breakdowns, brandTokens);
-  const topPageInsights = await _buildTopPageInsights(project, top, queryPage);
+  const eat = await _withDeadline(
+    _buildEat(project, top, linkedUrls, projectsCfg.eat), stepMs, 'eat');
+  const schemaAudit = await _withDeadline(
+    _buildSchemaAudit(eat, project, projectsCfg.schemaAudit), stepMs, 'schemaAudit');
+  const blogPlan = await _withDeadline(
+    _buildBlogPlan(project, top, queryPage, breakdowns, brandTokens, serpVerification), stepMs, 'blogPlan');
+  const geoAeo = await _withDeadline(
+    _buildGeoAeo(project, top, schemaAudit, breakdowns, brandTokens), stepMs, 'geoAeo');
+  const topPageInsights = await _withDeadline(
+    _buildTopPageInsights(project, top, queryPage), stepMs, 'topPageInsights');
 
   // _scans — транзиентные данные парсинга (hiddenLayers) для schema/geo, в
   // снапшот НЕ кладём (тяжёлый HTML), очищаем перед сохранением.
@@ -212,7 +256,8 @@ async function collectSnapshot(project, range) {
   // ТЗ п.3 — «План действий»: связываем все срезы в конкретные, посчитанные
   // рекомендации (что→на что→зачем→эффект). Граничный шаг: добирает конкретные
   // мета-теги через мета-генератор + xmlstock + парсинг (graceful без ключей).
-  const actionPlan = await _buildActionPlan(project, snapshot, queryPage);
+  const actionPlan = await _withDeadline(
+    _buildActionPlan(project, snapshot, queryPage), stepMs, 'actionPlan');
   snapshot.action_plan = actionPlan;
 
   const payload = {
@@ -512,7 +557,12 @@ async function processAnalysis(analysisId) {
     let snapshot;
     let payload;
     try {
-      ({ snapshot, payload } = await collectSnapshot(project, range));
+      const runCfg = getProjectsConfig().analysisRun || {};
+      const collected = await _withDeadline(
+        collectSnapshot(project, range), runCfg.collectTimeoutMs, 'collectSnapshot', null,
+      );
+      if (!collected) throw new Error('Сбор данных не уложился в отведённое время');
+      ({ snapshot, payload } = collected);
     } catch (e) {
       // ТЗ §5.2 — фиксируем ошибку sync GSC.
       try {
@@ -561,7 +611,12 @@ async function processAnalysis(analysisId) {
       : await runProjectAnalysis(payload);
 
     if (result.verdict !== 'ok') {
-      await _setError(analysisId, `Анализатор ${result.verdict}: ${result.reason || ''}`);
+      // Понятная формулировка вместо технического «skipped: no_api_key» —
+      // самая частая причина «анализ не проходит» на новом окружении.
+      const msg = result.reason === 'no_api_key'
+        ? 'Не задан ключ LLM-провайдера (GEMINI_API_KEY или DEEPSEEK_API_KEY) — анализ не может быть построен'
+        : `Анализатор ${result.verdict}: ${result.reason || ''}`;
+      await _setError(analysisId, msg);
       return;
     }
 
@@ -793,4 +848,62 @@ async function _buildBrandSplit(project, range, cfg, siteUrl) {
   }
 }
 
-module.exports = { processAnalysis, collectSnapshot, collectYdxSnapshot };
+/**
+ * Watchdog зависших анализов. Анализ выполняется прямо в web-процессе
+ * (setImmediate из контроллера) — при рестарте/падении процесса строка
+ * навсегда оставалась в статусе `queued`/`running`, а фронт бесконечно
+ * поллил её и показывал «ИИ анализирует…». Помечаем такие строки ошибкой.
+ *
+ * @returns {Promise<number>} сколько строк переведено в 'error'
+ */
+async function recoverStaleAnalyses() {
+  const cfg = getProjectsConfig().analysisRun || {};
+  const staleMs = Number(cfg.staleAfterMs) || 0;
+  if (!staleMs) return 0;
+  try {
+    const { rowCount } = await db.query(
+      `UPDATE project_analyses
+          SET status = 'error',
+              error_message = 'Анализ прерван (перезапуск сервера или превышено время выполнения)',
+              completed_at = NOW()
+        WHERE status IN ('queued', 'running')
+          AND COALESCE(started_at, created_at) < NOW() - ($1::bigint * INTERVAL '1 millisecond')`,
+      [staleMs],
+    );
+    if (rowCount) {
+      console.warn(`[projects/analysisRunner] watchdog: помечено ошибкой зависших анализов — ${rowCount}`);
+    }
+    return rowCount || 0;
+  } catch (e) {
+    console.warn('[projects/analysisRunner] watchdog failed:', e.message);
+    return 0;
+  }
+}
+
+let _watchdogTimer = null;
+
+/** Запускает периодический watchdog (идемпотентно). */
+function startAnalysisWatchdog() {
+  if (_watchdogTimer) return;
+  const cfg = getProjectsConfig().analysisRun || {};
+  const everyMs = Number(cfg.watchdogIntervalMs) || 0;
+  if (!everyMs) return;
+  recoverStaleAnalyses().catch(() => {});
+  _watchdogTimer = setInterval(() => { recoverStaleAnalyses().catch(() => {}); }, everyMs);
+  if (_watchdogTimer.unref) _watchdogTimer.unref();
+  console.log('[projects] Watchdog анализов запущен (подчищает зависшие queued/running)');
+}
+
+/** Останавливает watchdog (для тестов/graceful shutdown). */
+function stopAnalysisWatchdog() {
+  if (_watchdogTimer) { clearInterval(_watchdogTimer); _watchdogTimer = null; }
+}
+
+module.exports = {
+  processAnalysis,
+  collectSnapshot,
+  collectYdxSnapshot,
+  recoverStaleAnalyses,
+  startAnalysisWatchdog,
+  stopAnalysisWatchdog,
+};

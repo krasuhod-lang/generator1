@@ -153,11 +153,9 @@ async function createCampaign(req, res, next) {
     // Стартуем сразу активной, чтобы планировщик подхватил кампанию.
     const status = body.status === 'draft' ? 'draft' : 'active';
 
-    // Режим письма: 'classic' (по умолчанию) | 'provocation' (V2). Из «Рассылка V2»
-    // приходит 'provocation'. Без этого поля кампания молча оставалась classic.
-    const emailMode = ['classic', 'provocation'].includes(String(body.email_mode || '').toLowerCase())
-      ? String(body.email_mode).toLowerCase()
-      : 'classic';
+    // Режим письма один: персональное письмо (прямые конкуренты + кейсы).
+    // Колонка сохранена для обратной совместимости со старыми кампаниями.
+    const emailMode = 'provocation';
 
     // Перед запуском кампании обязательно указываем наш сайт и Telegram,
     // чтобы получатели могли связаться (req 3). Для черновика — не требуем.
@@ -262,14 +260,6 @@ async function updateCampaign(req, res, next) {
     }
     if (body.sender_name !== undefined) {
       sets.push(`sender_name = $${idx++}`); vals.push(_clip(body.sender_name, 120) || null);
-    }
-    // Режим письма: 'classic' (по умолчанию) | 'provocation' (V2). Аддитивно.
-    if (body.email_mode !== undefined) {
-      const mode = _clip(body.email_mode, 20).toLowerCase();
-      if (!['classic', 'provocation'].includes(mode)) {
-        return res.status(400).json({ error: "email_mode должен быть 'classic' или 'provocation'" });
-      }
-      sets.push(`email_mode = $${idx++}`); vals.push(mode);
     }
     if (body.run_now === true) {
       // Форсируем запуск немедленно: обновляем next_run_at И вызываем runTick().
