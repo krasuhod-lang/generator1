@@ -965,7 +965,54 @@ const mammoth   = require('mammoth');
 const { TZ_EXTRACTOR_PROMPT } = require('../prompts/systemPrompts');
 const { deriveMissingTzFields } = require('../services/tz/tzFieldDeriver');
 const { callDeepSeek }        = require('../services/llm/deepseek.adapter');
-const { callGemini }          = require('../services/llm/gemini.adapter');
+const { callLLM }             = require('../services/llm/callLLM');
+const { withProviderSlot }    = require('../services/llm/rateLimiter');
+const { autoCloseJSON, extractBalancedJson } = require('../utils/autoCloseJSON');
+
+// Лимит выходных токенов TZ-экстрактора. Схема ~40 полей с развёрнутыми
+// описаниями не помещалась в прежние 8192 токена: ответ обрывался, JSON не
+// парсился и пользователь получал «LLM не вернул корректный JSON».
+const TZ_EXTRACTOR_MAX_TOKENS = 16000;
+// Единый таймаут HTTP-запроса к LLM для TZ-шагов (5 минут). Раньше здесь
+// стоял timeoutMs=0 (без ограничения) — зависший запрос держал соединение
+// и слот провайдера до бесконечности.
+const TZ_LLM_TIMEOUT_MS = 300000;
+
+/** true только для «обычного» JSON-объекта (не массив, не null). */
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Разбирает JSON-объект из сырого ответа LLM.
+ *   1) сбалансированный срез { … } — игнорирует пояснения/второй блок после
+ *      закрывающей скобки («Unexpected non-whitespace character after JSON»);
+ *   2) autoCloseJSON — восстанавливает ответ, обрезанный лимитом токенов.
+ * Возвращает объект либо null (никогда не бросает).
+ */
+function _parseLlmJsonObject(rawText) {
+  const text = String(rawText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
+  if (!text) return null;
+
+  const candidates = [];
+  const balanced = extractBalancedJson(text);
+  if (balanced) candidates.push(balanced);
+
+  const start = text.indexOf('{');
+  if (start !== -1) {
+    const end = text.lastIndexOf('}');
+    const sliced = end > start ? text.slice(start, end + 1) : text.slice(start);
+    candidates.push(sliced, autoCloseJSON(sliced));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const obj = JSON.parse(candidate);
+      if (isPlainObject(obj)) return obj;
+    } catch (_) { /* пробуем следующий вариант */ }
+  }
+  return null;
+}
 
 /**
  * Извлекает сырой текст из загруженного файла (PDF / DOCX / TXT).
@@ -1108,6 +1155,12 @@ function validateAndRepairTzOutput(obj) {
  * Вызывает LLM с промптом-экстрактором и возвращает распарсенный JSON.
  * DSPy-inspired: используем self-correction (retry с feedback) при ошибке парсинга/валидации.
  * Предпочитает DeepSeek (последняя модель), при ошибке пробует Gemini.
+ *
+ * Вызовы идут через общий `callLLM`, а не напрямую через адаптер: он даёт
+ * (1) устойчивый парсер JSON (сбалансированный срез + autoCloseJSON),
+ * (2) авто-повтор с удвоенным maxTokens при обрыве ответа по лимиту токенов,
+ * (3) семафор провайдера и бэкофф на 429/503 — это критично, когда ТЗ
+ * параллельно загружают несколько пользователей.
  */
 async function callExtractorLLM(tzText) {
   const MAX_TZ_CHARS = 40000; // защита от слишком длинных ТЗ
@@ -1120,12 +1173,21 @@ async function callExtractorLLM(tzText) {
   // Системная инструкция — оптимизированная для DeepSeek
   const systemMsg = 'Ты — аналитик ТЗ и специалист по сбору бизнес-данных. Извлекай данные СТРОГО из текста. Возвращай только корректный JSON без markdown-обёрток. ВАЖНО: для полей target_audience, niche_features, constraints, priority_page_types, audience_segments, brand_usp, service_process — давай РАЗВЁРНУТЫЕ описания из 2-5 предложений, НЕ одно слово. Описывай подробно: кто аудитория, какие особенности ниши, какие ограничения, какие УТП, как работает процесс. Собирай ВСЕ факты о бренде: цены, условия, гарантии, лицензии, опыт, команда.';
 
-  // Без ограничения по времени (timeoutMs: 0 → адаптеры отключают timeout);
-  // temperature=0 для детерминизма
-  const llmOptions = { temperature: 0.0, maxTokens: 8192, timeoutMs: 0 };
+  // temperature=0 — детерминизм; maxTokens=16000 (дефолт DeepSeek): схема
+  // содержит ~40 полей с развёрнутыми описаниями, на 8192 токенах ответ
+  // регулярно обрывался на середине и не парсился как JSON.
+  const llmOptions = {
+    temperature: 0.0,
+    maxTokens:   TZ_EXTRACTOR_MAX_TOKENS,
+    timeoutMs:   TZ_LLM_TIMEOUT_MS,
+    retries:     2,
+    stageName:   'tz_extractor',
+    callLabel:   'TZ Extractor',
+  };
 
   const MAX_RETRIES = 2; // DSPy self-correction: до 2 попыток с feedback
   let lastErrors = [];
+  let lastFailure = '';
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const currentPrompt = attempt === 0
@@ -1134,46 +1196,45 @@ async function callExtractorLLM(tzText) {
         lastErrors.join('\n') +
         '\n\nИсправь эти ошибки и верни корректный JSON строго по схеме.';
 
-    let rawText = '';
+    const providerErrors = [];
+    let parsed = null;
+    let deterministicFailures = 0;
+
     try {
-      const dsResult = await callDeepSeek(systemMsg, currentPrompt, llmOptions);
-      rawText = dsResult.text || '';
+      parsed = await callLLM('deepseek', systemMsg, currentPrompt, llmOptions);
     } catch (deepseekErr) {
       console.warn('[parseTZWithLLM] DeepSeek failed, trying Gemini:', deepseekErr.message);
+      providerErrors.push(`DeepSeek: ${deepseekErr.message}`);
+      if (deepseekErr.isDeterministic) deterministicFailures++;
+    }
+
+    // Фолбэк на Gemini не только при исключении адаптера, но и когда DeepSeek
+    // вернул не-объект (пустой ответ / массив / строка) — раньше такой ответ
+    // сразу валил запрос с «LLM не вернул корректный JSON».
+    if (!isPlainObject(parsed)) {
       try {
-        const gmResult = await callGemini(systemMsg, currentPrompt, llmOptions);
-        rawText = gmResult.text || '';
+        parsed = await callLLM('gemini', systemMsg, currentPrompt, llmOptions);
       } catch (geminiErr) {
         console.error('[parseTZWithLLM] Gemini also failed:', geminiErr.message);
-        throw new Error('Не удалось обработать ТЗ. Сервис LLM временно недоступен, попробуйте позже.');
+        providerErrors.push(`Gemini: ${geminiErr.message}`);
+        if (geminiErr.isDeterministic) deterministicFailures++;
       }
     }
 
-    // Нормализуем и парсим JSON
-    const cleaned = rawText
-      .replace(/```json/gi, '')
-      .replace(/```/g, '')
-      .trim();
-
-    const start = cleaned.indexOf('{');
-    const end   = cleaned.lastIndexOf('}');
-    if (start === -1 || end === -1) {
-      if (attempt < MAX_RETRIES - 1) {
+    if (!isPlainObject(parsed)) {
+      if (providerErrors.length) lastFailure = providerErrors.join(' | ');
+      // Оба провайдера упали с детерминированной ошибкой (нет ключа, гео-блок,
+      // слишком длинный ввод) — повтор ничего не изменит, отвечаем сразу.
+      const hopeless = deterministicFailures >= 2;
+      if (!hopeless && attempt < MAX_RETRIES - 1) {
         lastErrors = ['LLM не вернул JSON-объект. Ответ должен начинаться с { и заканчиваться }.'];
         continue;
       }
-      throw new Error('LLM не вернул корректный JSON');
-    }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned.slice(start, end + 1));
-    } catch (parseErr) {
-      if (attempt < MAX_RETRIES - 1) {
-        lastErrors = [`JSON parse error: ${parseErr.message}`];
-        continue;
-      }
-      throw new Error('LLM вернул невалидный JSON');
+      throw new Error(
+        'Не удалось разобрать ответ ИИ по этому ТЗ' +
+        (lastFailure ? ` (${lastFailure.slice(0, 300)})` : '') +
+        '. Попробуйте повторить загрузку или сократить файл ТЗ.'
+      );
     }
 
     // DSPy-inspired validation + repair
@@ -1457,20 +1518,17 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
     `project_constraints — 1–3 предложения, priority_page_types — 1–2 предложения.`;
 
   try {
-    const ds = await callDeepSeek(systemMsg, userPrompt, {
+    const ds = await withProviderSlot('deepseek', () => callDeepSeek(systemMsg, userPrompt, {
       temperature: 0.3,
       // brand_facts просим на 10–25 предложений + ещё 4 поля: на 3500 токенах
       // ответ обрезался, JSON не парсился и форма не получала НИ ОДНОГО поля.
       maxTokens:   8000,
       timeoutMs:   120000,
-    });
+    }));
     const raw = (ds.text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-    const start = raw.indexOf('{');
-    const end   = raw.lastIndexOf('}');
-    let parsed = null;
-    if (start !== -1 && end > start) {
-      try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch (_) { parsed = null; }
-    }
+    // Сначала — сбалансированный срез (игнорирует мусор после закрывающей
+    // скобки), затем autoCloseJSON (чинит обрыв по лимиту токенов).
+    let parsed = _parseLlmJsonObject(raw);
     // Ответ мог оборваться по лимиту токенов (brand_facts — самое длинное
     // поле). Раньше JSON.parse бросал и форма не получала НИ ОДНОГО из пяти
     // полей — вытаскиваем то, что модель успела написать.
