@@ -977,6 +977,11 @@ const TZ_EXTRACTOR_MAX_TOKENS = 16000;
 // стоял timeoutMs=0 (без ограничения) — зависший запрос держал соединение
 // и слот провайдера до бесконечности.
 const TZ_LLM_TIMEOUT_MS = 300000;
+// Общий бюджет времени на разбор одного ТЗ. Ограничивает суммарную
+// длительность цепочки «DeepSeek → Gemini → повтор с feedback»: лучше отдать
+// пользователю понятную ошибку через несколько минут, чем держать форму в
+// спиннере десятки минут.
+const TZ_EXTRACTOR_DEADLINE_MS = 600000;
 
 /** true только для «обычного» JSON-объекта (не массив, не null). */
 function isPlainObject(value) {
@@ -1186,6 +1191,7 @@ async function callExtractorLLM(tzText) {
   };
 
   const MAX_RETRIES = 2; // DSPy self-correction: до 2 попыток с feedback
+  const deadlineAt  = Date.now() + TZ_EXTRACTOR_DEADLINE_MS;
   let lastErrors = [];
   let lastFailure = '';
 
@@ -1211,7 +1217,7 @@ async function callExtractorLLM(tzText) {
     // Фолбэк на Gemini не только при исключении адаптера, но и когда DeepSeek
     // вернул не-объект (пустой ответ / массив / строка) — раньше такой ответ
     // сразу валил запрос с «LLM не вернул корректный JSON».
-    if (!isPlainObject(parsed)) {
+    if (!isPlainObject(parsed) && Date.now() < deadlineAt) {
       try {
         parsed = await callLLM('gemini', systemMsg, currentPrompt, llmOptions);
       } catch (geminiErr) {
@@ -1225,7 +1231,7 @@ async function callExtractorLLM(tzText) {
       if (providerErrors.length) lastFailure = providerErrors.join(' | ');
       // Оба провайдера упали с детерминированной ошибкой (нет ключа, гео-блок,
       // слишком длинный ввод) — повтор ничего не изменит, отвечаем сразу.
-      const hopeless = deterministicFailures >= 2;
+      const hopeless = deterministicFailures >= 2 || Date.now() >= deadlineAt;
       if (!hopeless && attempt < MAX_RETRIES - 1) {
         lastErrors = ['LLM не вернул JSON-объект. Ответ должен начинаться с { и заканчиваться }.'];
         continue;
@@ -1240,7 +1246,7 @@ async function callExtractorLLM(tzText) {
     // DSPy-inspired validation + repair
     const { valid, errors, repaired } = validateAndRepairTzOutput(parsed);
 
-    if (!valid && attempt < MAX_RETRIES - 1) {
+    if (!valid && attempt < MAX_RETRIES - 1 && Date.now() < deadlineAt) {
       lastErrors = errors;
       continue; // retry with feedback
     }
