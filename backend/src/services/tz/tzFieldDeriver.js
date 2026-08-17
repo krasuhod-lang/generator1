@@ -18,7 +18,7 @@
  * Kill-switch: TZ_DERIVE_ENABLED=false отключает шаг целиком.
  */
 
-const { callDeepSeek } = require('../llm/deepseek.adapter');
+const { callLLM } = require('../llm/callLLM');
 
 // Поля, которые имеет смысл выводить: ровно те описательные поля формы,
 // которые оставались пустыми после загрузки ТЗ.
@@ -28,6 +28,11 @@ const ARRAY_FIELDS = new Set(['niche_features', 'constraints', 'priority_page_ty
 const MAX_TZ_CHARS = 12000;
 const MAX_ITEMS    = 6;
 const MAX_ITEM_LEN = 500;
+// 2500 токенов не хватало на 4 развёрнутых поля — ответ обрывался и шаг
+// молча возвращал «LLM не вернул JSON». callLLM сам удвоит лимит, если
+// ответ всё же окажется обрезанным.
+const MAX_OUTPUT_TOKENS = 6000;
+const TIMEOUT_MS        = 180000;
 
 const FIELD_SPECS = {
   target_audience:
@@ -94,12 +99,7 @@ async function deriveMissingTzFields(tzText, extracted) {
     'Верни ТОЛЬКО JSON-объект с этими ключами и никакими другими.';
 
   try {
-    const resp = await callDeepSeek(systemMsg, userPrompt, {
-      temperature: 0.3,
-      maxTokens:   2500,
-      timeoutMs:   120000,
-    });
-    const parsed = _parseJsonObject(resp && resp.text);
+    const parsed = await _callWithFallback(systemMsg, userPrompt);
     if (!parsed) return { filled: [], error: 'LLM не вернул JSON' };
 
     const filled = [];
@@ -113,6 +113,35 @@ async function deriveMissingTzFields(tzText, extracted) {
   } catch (err) {
     return { filled: [], error: (err && err.message) || 'DeepSeek error' };
   }
+}
+
+/**
+ * DeepSeek → Gemini (fail-soft). callLLM берёт на себя устойчивый парсинг
+ * JSON, повтор с удвоенным лимитом токенов при обрыве ответа, семафор
+ * провайдера и бэкофф на 429/503.
+ *
+ * @returns {Promise<object|null>} распарсенный объект либо null
+ */
+async function _callWithFallback(systemMsg, userPrompt) {
+  const opts = {
+    temperature: 0.3,
+    maxTokens:   MAX_OUTPUT_TOKENS,
+    timeoutMs:   TIMEOUT_MS,
+    retries:     2,
+    stageName:   'tz_derive',
+    callLabel:   'TZ Field Deriver',
+  };
+
+  for (const adapter of ['deepseek', 'gemini']) {
+    try {
+      const parsed = await callLLM(adapter, systemMsg, userPrompt, opts);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      console.warn(`[tzFieldDeriver] ${adapter} вернул не-объект — пробуем следующий провайдер`);
+    } catch (err) {
+      console.warn(`[tzFieldDeriver] ${adapter} failed: ${err.message}`);
+    }
+  }
+  return null;
 }
 
 /** Короткая сводка уже извлечённых данных — контекст для вывода. */
@@ -137,17 +166,6 @@ function _knownFacts(extracted) {
   push('Целевая аудитория', ext.target_audience);
   push('Требования к контенту', ext.content_requirements);
   return parts.length ? parts.join('\n') : '(в ТЗ почти нет структурированных данных)';
-}
-
-function _parseJsonObject(raw) {
-  const text = String(raw || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-  const start = text.indexOf('{');
-  const end   = text.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) return null;
-  try {
-    const obj = JSON.parse(text.slice(start, end + 1));
-    return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : null;
-  } catch (_) { return null; }
 }
 
 /** Приводит значение к типу поля из TZ_SCHEMA; пустое → null. */

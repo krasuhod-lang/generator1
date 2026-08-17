@@ -187,10 +187,14 @@ function normalizeProxyUrl(raw) {
 function requireGeminiApiKey() {
   const k = (process.env.GEMINI_API_KEY || '').trim();
   if (!k) {
-    throw new Error(
+    const err = new Error(
       'GEMINI_API_KEY не задан. Добавьте его в .env (см. .env.example) — ' +
       'ключ нужен для генерации SEO-контента, AI-редактора и мета-тегов.'
     );
+    // Ретраить бессмысленно: ключ не появится между попытками. Без этого
+    // флага callLLM крутил экспоненциальный бэкофф на заведомо мёртвом вызове.
+    err.isDeterministic = true;
+    throw err;
   }
   return k;
 }
