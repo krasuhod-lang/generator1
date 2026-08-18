@@ -59,6 +59,7 @@ const routes = [
   { path: '/share/project/:token', component: () => import('../views/ProjectSharedPage.vue'),   meta: { guest: false, public: true } },
 
   { path: '/aegis',                component: () => import('../views/AegisPage.vue'),            meta: { auth: true } },
+  { path: '/parsers',              component: () => import('../views/ParsersPage.vue'),          meta: { auth: true } },
 
   // Smart Report Builder
   { path: '/reports',              component: () => import('../views/ReportsPage.vue'),       meta: { auth: true } },

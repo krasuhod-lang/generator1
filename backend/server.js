@@ -37,6 +37,7 @@ const proposalsPublicRoutes = require('./src/routes/proposalsPublic.routes');
 const projectsRoutes      = require('./src/routes/projects.routes');
 const projectsPublicRoutes = require('./src/routes/projectsPublic.routes');
 const aegisRoutes         = require('./src/routes/aegis.routes');
+const parsersRoutes       = require('./src/routes/parsers.routes');
 const categoryLeadRoutes  = require('./src/routes/categoryLead.routes');
 const serpB2bRoutes       = require('./src/routes/serpB2b.routes');
 const outreachRoutes      = require('./src/routes/outreach.routes');
@@ -178,6 +179,7 @@ app.get('/api/oauth/yandex/callback',
   oauthAliasLimiter,
   require('./src/controllers/projects.controller').handleYdxCallback);
 app.use('/api/aegis',          aegisRoutes);
+app.use('/api/parsers',        parsersRoutes);
 
 // -----------------------------------------------------------------
 // 404 handler

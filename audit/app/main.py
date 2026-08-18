@@ -26,6 +26,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from . import crawler, store
+from .parsers import parse_url_dspy
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("audit.main")
@@ -138,6 +139,31 @@ async def audit_delete(task_id: str):
     await store.delete_task(task_id)
     return {"ok": True}
 
+
+class ParserExtractRequest(BaseModel):
+    urls: list[str]
+    extract_contacts: bool = False
+    extract_about: bool = False
+    extract_services: bool = False
+    api_key: str = ""
+
+@app.post("/audit/parsers/extract", dependencies=[Depends(_auth)])
+async def extract_parsers(req: ParserExtractRequest):
+    if not req.urls:
+        raise HTTPException(status_code=422, detail="No urls provided")
+    
+    # Process them concurrently
+    tasks = [parse_url_dspy(url, req.extract_contacts, req.extract_about, req.extract_services, req.api_key) for url in req.urls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    final_results = []
+    for url, res in zip(req.urls, results):
+        if isinstance(res, Exception):
+            final_results.append({"url": url, "status": f"Ошибка: {str(res)[:100]}"})
+        else:
+            final_results.append(res)
+            
+    return {"results": final_results}
 
 @app.get("/health")
 async def health():
