@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import hashlib
 from typing import List, Optional
 import dspy
 from bs4 import BeautifulSoup
@@ -8,6 +9,7 @@ import aiohttp
 
 from .page_parser import _clean_text
 from .fetcher import fetch_page
+from .store import _redis
 
 logger = logging.getLogger("audit.parsers")
 
@@ -25,6 +27,18 @@ class ExtractCompanyServices(dspy.Signature):
     main_focus = dspy.OutputField(desc="На чем компания делает упор (УТП, специализация, 1-2 предложения)")
 
 async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, extract_services: bool, deepseek_api_key: str) -> dict:
+    key_str = f"{url}_{extract_contacts}_{extract_about}_{extract_services}"
+    url_hash = hashlib.md5(key_str.encode()).hexdigest()
+    cache_key = f"parser:result:v1:{url_hash}"
+
+    if _redis is not None:
+        try:
+            cached = await _redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.debug(f"redis get failed: {e}")
+
     pages_to_fetch = [url]
     # Patterns for internal links
     patterns = ["/about", "/contact", "/service", "/услуги", "/контакты", "/о-компании"]
@@ -87,6 +101,11 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
 
     if not clean_text.strip():
         result["status"] = "Ошибка: пустой контент"
+        if _redis is not None:
+            try:
+                await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=259200)
+            except Exception as e:
+                logger.debug(f"redis set failed: {e}")
         return result
 
     if extract_services or extract_about or extract_contacts:
@@ -125,5 +144,11 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
             logger.exception(f"DSPy extraction failed for {url}")
             result["status"] = f"Ошибка ИИ: {str(e)[:100]}"
             
+    if _redis is not None and result["status"] == "Успешно":
+        try:
+            await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=259200)
+        except Exception as e:
+            logger.debug(f"redis set failed: {e}")
+
     return result
 

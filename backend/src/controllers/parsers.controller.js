@@ -12,11 +12,26 @@ const tasksStore = new Map();
 
 exports.startParsing = async (req, res) => {
     try {
-        const { urls, options } = req.body;
+        let { urls, options } = req.body;
         // options: { contacts: bool, about: bool, services: bool, deepseek_api_key: string }
         
         if (!urls || !Array.isArray(urls)) {
             urls = [];
+        } else {
+            // Validation, normalization and deduplication
+            const validUrls = new Set();
+            for (let u of urls) {
+                if (typeof u === 'string') {
+                    u = u.trim();
+                    if (u) {
+                        if (!/^https?:\/\//i.test(u)) {
+                            u = 'https://' + u;
+                        }
+                        validUrls.add(u);
+                    }
+                }
+            }
+            urls = Array.from(validUrls);
         }
         
         if (urls.length === 0 && !options?.search_query) {
@@ -67,28 +82,72 @@ async function processUrls(taskId, urls, options) {
             }
         }
 
+        // Apply same validation to search results
+        const validFinalUrls = new Set();
+        for (let u of finalUrls) {
+            if (typeof u === 'string') {
+                u = u.trim();
+                if (u) {
+                    if (!/^https?:\/\//i.test(u)) {
+                        u = 'https://' + u;
+                    }
+                    validFinalUrls.add(u);
+                }
+            }
+        }
+        finalUrls = Array.from(validFinalUrls);
+
         if (finalUrls.length === 0) {
             throw new Error('No URLs to parse');
         }
+        
+        task.total = finalUrls.length;
 
-        const payload = {
-            urls: finalUrls,
-            extract_contacts: options?.contacts || false,
-            extract_about: options?.about || false,
-            extract_services: options?.services || false,
-            api_key: process.env.DEEPSEEK_API_KEY || options?.deepseek_api_key || ""
+        const AUDIT_URL = process.env.AUDIT_URL || 'http://seo_audit:8002';
+        const results = [];
+        
+        const CONCURRENCY = 5;
+        let index = 0;
+        
+        const worker = async () => {
+            while (index < finalUrls.length) {
+                const i = index++;
+                const currentUrl = finalUrls[i];
+                
+                try {
+                    const payload = {
+                        urls: [currentUrl],
+                        extract_contacts: options?.contacts || false,
+                        extract_about: options?.about || false,
+                        extract_services: options?.services || false,
+                        api_key: process.env.DEEPSEEK_API_KEY || options?.deepseek_api_key || ""
+                    };
+                    
+                    const response = await axios.post(`${AUDIT_URL}/audit/parsers/extract`, payload, {
+                        headers: {
+                            'X-Internal-Token': process.env.RELEVANCE_INTERNAL_TOKEN || ''
+                        },
+                        timeout: 300000 // 5 mins
+                    });
+                    
+                    if (response.data && response.data.results && response.data.results.length > 0) {
+                        results.push(response.data.results[0]);
+                    } else {
+                        results.push({ url: currentUrl, status: "Ошибка: пустой ответ от сервиса" });
+                    }
+                } catch (err) {
+                    results.push({ url: currentUrl, status: `Ошибка API: ${err.message}` });
+                }
+                
+                task.progress++;
+            }
         };
 
-        // Call python microservice audit
-        const AUDIT_URL = process.env.AUDIT_URL || 'http://seo_audit:8002';
-        const response = await axios.post(`${AUDIT_URL}/audit/parsers/extract`, payload, {
-            headers: {
-                'X-Internal-Token': process.env.RELEVANCE_INTERNAL_TOKEN || ''
-            },
-            timeout: 600000 // 10 mins
-        });
-        
-        const results = response.data.results;
+        const workers = [];
+        for (let w = 0; w < CONCURRENCY; w++) {
+            workers.push(worker());
+        }
+        await Promise.all(workers);
         
         // Generate Excel
         const workbook = new exceljs.Workbook();
