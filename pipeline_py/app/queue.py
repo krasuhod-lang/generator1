@@ -144,21 +144,23 @@ class UrlQueue:
         """Разрешить путь к файлу ингеста только внутри ``self.ingest_dir``.
 
         Защита от path traversal: из недоверенного ввода берётся только базовое
-        имя файла, которое обязано присутствовать в списке файлов разрешённого
-        каталога (allowlist), иначе — ``ValueError``.
+        имя файла и сверяется с реальными записями каталога; наружу возвращается
+        путь, полученный из ``os.scandir`` (из доверенного каталога), а не
+        собранный из пользовательского ввода.
         """
         name = os.path.basename(path)
         if not name or name in (".", ".."):
             raise ValueError(f"Недопустимое имя файла ингеста: {path!r}")
         try:
-            allowed = set(os.listdir(self.ingest_dir))
+            with os.scandir(self.ingest_dir) as entries:
+                for entry in entries:
+                    if entry.name == name and entry.is_file():
+                        return entry.path
         except OSError as exc:
             raise ValueError(f"Каталог ингеста недоступен: {exc}") from exc
-        if name not in allowed:
-            raise ValueError(
-                f"Файл {name!r} не найден в каталоге ингеста {self.ingest_dir!r}"
-            )
-        return os.path.join(self.ingest_dir, name)
+        raise ValueError(
+            f"Файл {name!r} не найден в каталоге ингеста {self.ingest_dir!r}"
+        )
 
     def _ingest_csv_stream(self, fh, url_column: str) -> int:
         reader = csv.DictReader(fh)
