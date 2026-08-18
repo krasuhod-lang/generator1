@@ -234,6 +234,10 @@ services:
       RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
       REDIS_URL: redis://redis:6379
       AUDIT_HEADLESS_FETCHER_URL: ${AUDIT_HEADLESS_FETCHER_URL:-http://relevance_fetcher:8001/fetch_html}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      DEEPSEEK_PARSER_MODEL: ${DEEPSEEK_PARSER_MODEL:-}
       LOG_LEVEL: ${AUDIT_LOG_LEVEL:-INFO}
     expose:
       - "8002"
