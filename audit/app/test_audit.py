@@ -443,6 +443,82 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertEqual(parsers._coerce_to_list(""), [])
         self.assertEqual(parsers._coerce_to_list(None), [])
 
+    def test_uses_env_api_key_when_request_key_empty(self):
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        html = (
+            "<html><head><title>Главная</title></head><body>"
+            "<p>" + ("Компания оказывает услуги SEO и контекстной рекламы. " * 8) + "</p>"
+            "</body></html>"
+        )
+
+        class _Res:
+            def __init__(self, html):
+                self.html = html
+
+        async def _fake_fetch(session, url):
+            return _Res(html)
+
+        captured = {}
+
+        class _Pred:
+            def __call__(self, website_text=""):
+                class _Out:
+                    contacts_summary = ""
+                    about_summary = "Агентство интернет-маркетинга."
+                    services_list = '["SEO"]'
+                    main_focus = "Продвижение сайтов"
+                    client_segments = '["B2B-компании — SEO"]'
+                    works_with = "B2B: компании услуг"
+                return _Out()
+
+        def _fake_lm(*args, **kwargs):
+            captured["api_key"] = kwargs.get("api_key")
+            return object()
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None), \
+             mock.patch.object(parsers, "DEEPSEEK_API_KEY", "env-deepseek-key"), \
+             mock.patch.object(parsers.dspy, "LM", _fake_lm), \
+             mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
+             mock.patch.object(parsers.dspy, "Predict", lambda sig: _Pred()):
+            out = asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/", extract_contacts=False, extract_about=True,
+                extract_services=True, deepseek_api_key="", extract_clients=True))
+
+        self.assertEqual(captured.get("api_key"), "env-deepseek-key")
+        self.assertEqual(out["status"], "Успешно")
+
+    def test_missing_api_key_returns_explicit_status(self):
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        html = (
+            "<html><head><title>Главная</title></head><body>"
+            "<p>" + ("Компания оказывает услуги SEO и контекстной рекламы. " * 8) + "</p>"
+            "</body></html>"
+        )
+
+        class _Res:
+            def __init__(self, html):
+                self.html = html
+
+        async def _fake_fetch(session, url):
+            return _Res(html)
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None), \
+             mock.patch.object(parsers, "DEEPSEEK_API_KEY", ""), \
+             mock.patch.object(parsers.dspy, "LM", side_effect=AssertionError("LM should not be called")):
+            out = asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/", extract_contacts=False, extract_about=True,
+                extract_services=True, deepseek_api_key="", extract_clients=True))
+
+        self.assertEqual(out["status"], "Ошибка ИИ: не задан DEEPSEEK_API_KEY")
+
     def test_subpages_reach_website_text(self):
         # ГЛАВНЫЙ БАГФИКС: текст докачанных подстраниц (клиенты/кейсы) должен
         # реально попадать в website_text, передаваемый в LLM, а не теряться.

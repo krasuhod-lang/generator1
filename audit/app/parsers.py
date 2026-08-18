@@ -20,6 +20,7 @@ logger = logging.getLogger("audit.parsers")
 # как заявлено в UI. Переопределяется через окружение.
 DEEPSEEK_PARSER_MODEL = os.getenv("DEEPSEEK_PARSER_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-pro"
 DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
+DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
 
 # Максимум внутренних подстраниц, докачиваемых сверх главной. Поднят, чтобы
 # успевали попасть страницы клиентов/кейсов/портфолио без взрыва задержки.
@@ -378,6 +379,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
         "works_with": "",
         "status": "Успешно"
     }
+    effective_api_key = (deepseek_api_key or DEEPSEEK_API_KEY or "").strip()
 
     if not clean_text.strip():
         result["status"] = "Ошибка: пустой контент"
@@ -389,50 +391,53 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
         return result
 
     if extract_services or extract_about or extract_contacts or extract_clients:
-        try:
-            # Set up DSPy with DeepSeek model
-            # DeepSeek uses OpenAI compatible API
-            lm = dspy.LM(
-                f"openai/{DEEPSEEK_PARSER_MODEL}",
-                api_key=deepseek_api_key,
-                api_base=DEEPSEEK_API_BASE,
-                max_tokens=2500,
-                temperature=0.3
-            )
-            dspy.settings.configure(lm=lm)
+        if not effective_api_key:
+            result["status"] = "Ошибка ИИ: не задан DEEPSEEK_API_KEY"
+        else:
+            try:
+                # Set up DSPy with DeepSeek model
+                # DeepSeek uses OpenAI compatible API
+                lm = dspy.LM(
+                    f"openai/{DEEPSEEK_PARSER_MODEL}",
+                    api_key=effective_api_key,
+                    api_base=DEEPSEEK_API_BASE,
+                    max_tokens=2500,
+                    temperature=0.3
+                )
+                dspy.settings.configure(lm=lm)
 
-            # Define predictor
-            extractor = dspy.Predict(ExtractCompanyServices)
-            
-            # Since dspy is synchronous, we run it in an executor
-            def _run_dspy():
-                return extractor(website_text=clean_text)
+                # Define predictor
+                extractor = dspy.Predict(ExtractCompanyServices)
                 
-            loop = asyncio.get_running_loop()
-            pred = await loop.run_in_executor(None, _run_dspy)
-            _apply_ai_fields(
-                result,
-                pred,
-                extract_contacts=extract_contacts,
-                extract_about=extract_about,
-                extract_services=extract_services,
-                extract_clients=extract_clients,
-            )
-                 
-        except Exception as e:
-            recovered = _latest_lm_fields(locals().get("lm"))
-            if recovered:
+                # Since dspy is synchronous, we run it in an executor
+                def _run_dspy():
+                    return extractor(website_text=clean_text)
+                    
+                loop = asyncio.get_running_loop()
+                pred = await loop.run_in_executor(None, _run_dspy)
                 _apply_ai_fields(
                     result,
-                    recovered,
+                    pred,
                     extract_contacts=extract_contacts,
                     extract_about=extract_about,
                     extract_services=extract_services,
                     extract_clients=extract_clients,
                 )
-            else:
-                logger.exception(f"DSPy extraction failed for {url}")
-                result["status"] = f"Ошибка ИИ: {str(e)[:100]}"
+                     
+            except Exception as e:
+                recovered = _latest_lm_fields(locals().get("lm"))
+                if recovered:
+                    _apply_ai_fields(
+                        result,
+                        recovered,
+                        extract_contacts=extract_contacts,
+                        extract_about=extract_about,
+                        extract_services=extract_services,
+                        extract_clients=extract_clients,
+                    )
+                else:
+                    logger.exception(f"DSPy extraction failed for {url}")
+                    result["status"] = f"Ошибка ИИ: {str(e)[:100]}"
             
     # Кэшируем только успешные результаты. Если ИИ-извлечение было запрошено, но
     # модель не вернула ни одного поля — вероятен молчаливый сбой, не кэшируем,
