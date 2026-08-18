@@ -101,8 +101,8 @@ _AI_FIELD_ALIASES = {
 
 
 def _canonical_ai_field(name: Any) -> str:
-    key = re.sub(r"[*_`]+", "", str(name or "")).strip().lower()
-    key = re.sub(r"[\s-]+", " ", key)
+    key = re.sub(r"[*`]+", "", str(name or "")).strip().lower()
+    key = re.sub(r"[_\s-]+", " ", key)
     return _AI_FIELD_ALIASES.get(key) or _AI_FIELD_ALIASES.get(key.replace(" ", "_"), "")
 
 
