@@ -86,9 +86,16 @@ def test_ingest_csv(tmp_path):
 def test_ingest_csv_rejects_path_traversal(tmp_path):
     import pytest
 
+    # Файл-секрет вне разрешённого каталога ингеста.
+    outside = tmp_path.parent / "secret.csv"
+    outside.write_text("url\nhttps://leaked.example\n", encoding="utf-8")
+
     q = _q(tmp_path)  # ingest_dir = tmp_path
-    with pytest.raises(ValueError):
-        q.ingest_csv("../../etc/passwd", url_column="url")
+    # Обход каталога отбрасывается: компоненты пути игнорируются, читается
+    # только базовое имя внутри ingest_dir — секрет снаружи не попадает в очередь.
+    with pytest.raises((ValueError, FileNotFoundError, OSError)):
+        q.ingest_csv("../secret.csv", url_column="url")
+    assert q.pending_count() == 0
 
 
 def test_google_sheet_url_validation_rejects_non_google():

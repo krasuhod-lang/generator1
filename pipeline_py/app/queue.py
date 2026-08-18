@@ -99,7 +99,14 @@ class UrlQueue:
         доверенными доменами Google по http(s) (защита от SSRF).
         """
         export_url = _google_sheet_csv_url(sheet_url)
-        _validate_google_sheet_url(export_url)
+        # Инлайн-барьер против SSRF: разрешаем только http(s) на доверенные
+        # домены Google; дополнительно проверяем, что хост не резолвится в
+        # приватную сеть.
+        parsed = urlparse(export_url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in ("http", "https") or host not in _ALLOWED_SHEET_HOSTS:
+            raise ValueError(f"Недопустимый URL Google Sheets: {export_url!r}")
+        _assert_public_host(host, parsed.port or 443)
         req = urllib.request.Request(export_url, method="GET")
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 (URL валидирован)
             data = resp.read().decode("utf-8-sig")
@@ -140,14 +147,19 @@ class UrlQueue:
     def _safe_ingest_path(self, path: str) -> str:
         """Разрешить путь к файлу ингеста только внутри ``self.ingest_dir``.
 
-        Защита от path traversal: путь нормализуется и обязан находиться внутри
-        разрешённого базового каталога, иначе — ``ValueError``.
+        Защита от path traversal: используется только базовое имя файла
+        (все компоненты каталога отбрасываются), после чего путь нормализуется
+        и обязан находиться внутри разрешённого каталога.
         """
-        candidate = os.path.realpath(os.path.join(self.ingest_dir, path))
-        base = self.ingest_dir
-        if candidate != base and not candidate.startswith(base + os.sep):
+        # Отбрасываем любые компоненты каталога из недоверенного ввода —
+        # это устраняет обход вида ``../../etc/passwd``.
+        name = os.path.basename(path)
+        if not name or name in (".", ".."):
+            raise ValueError(f"Недопустимое имя файла ингеста: {path!r}")
+        candidate = os.path.realpath(os.path.join(self.ingest_dir, name))
+        if os.path.commonpath([self.ingest_dir, candidate]) != self.ingest_dir:
             raise ValueError(
-                f"Путь ингеста вне разрешённого каталога {base!r}: {path!r}"
+                f"Путь ингеста вне разрешённого каталога {self.ingest_dir!r}: {path!r}"
             )
         return candidate
 
@@ -329,26 +341,30 @@ _ALLOWED_SHEET_HOSTS = frozenset(
 )
 
 
-def _validate_google_sheet_url(url: str) -> None:
-    """Проверить, что URL безопасен для загрузки: http(s) + домен Google.
-
-    Дополнительно резолвит хост и отклоняет приватные/loopback-адреса, чтобы
-    не допустить SSRF в внутреннюю сеть.
-    """
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError(f"Недопустимая схема URL: {parsed.scheme!r}")
-    host = (parsed.hostname or "").lower()
-    if host not in _ALLOWED_SHEET_HOSTS:
-        raise ValueError(f"Хост не в списке доверенных Google-доменов: {host!r}")
+def _assert_public_host(host: str, port: int) -> None:
+    """Отклонить хост, резолвящийся в приватный/loopback адрес (anti-SSRF)."""
     try:
-        infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except OSError as exc:
         raise ValueError(f"Не удалось разрешить хост {host!r}: {exc}") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             raise ValueError(f"Хост {host!r} резолвится в приватный адрес {ip}")
+
+
+def _validate_google_sheet_url(url: str) -> None:
+    """Проверить, что URL безопасен для загрузки: http(s) + домен Google.
+
+    Используется в тестах; основная проверка встроена в ``ingest_google_sheet``.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Недопустимая схема URL: {parsed.scheme!r}")
+    if host not in _ALLOWED_SHEET_HOSTS:
+        raise ValueError(f"Хост не в списке доверенных Google-доменов: {host!r}")
+    _assert_public_host(host, parsed.port or 443)
 
 
 __all__ = ["UrlQueue"]
