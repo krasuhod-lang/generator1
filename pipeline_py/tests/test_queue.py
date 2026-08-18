@@ -101,11 +101,23 @@ def test_ingest_csv_rejects_path_traversal(tmp_path):
 def test_google_sheet_url_validation_rejects_non_google():
     import pytest
 
-    from app.queue import _validate_google_sheet_url
+    from app.queue import _google_sheet_export_url
 
+    # Не Google Sheets ссылки / SSRF-пейлоады не содержат ID таблицы -> отказ.
     with pytest.raises(ValueError):
-        _validate_google_sheet_url("http://169.254.169.254/latest/meta-data")
+        _google_sheet_export_url("http://169.254.169.254/latest/meta-data")
     with pytest.raises(ValueError):
-        _validate_google_sheet_url("file:///etc/passwd")
+        _google_sheet_export_url("file:///etc/passwd")
     with pytest.raises(ValueError):
-        _validate_google_sheet_url("https://evil.example/export?format=csv")
+        _google_sheet_export_url("https://evil.example/export?format=csv")
+
+
+def test_google_sheet_url_built_from_template():
+    from app.queue import _google_sheet_export_url
+
+    url = _google_sheet_export_url(
+        "https://docs.google.com/spreadsheets/d/AbC-123_xyz/edit#gid=42"
+    )
+    assert url == (
+        "https://docs.google.com/spreadsheets/d/AbC-123_xyz/export?format=csv&gid=42"
+    )

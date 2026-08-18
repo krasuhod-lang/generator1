@@ -16,12 +16,12 @@ import csv
 import io
 import ipaddress
 import os
+import re
 import socket
 import sqlite3
 import urllib.request
 from contextlib import closing
 from typing import Iterable, Iterator, List, Optional
-from urllib.parse import urlparse
 
 from .config import CONFIG
 from .models import Task, TaskStatus
@@ -94,21 +94,17 @@ class UrlQueue:
     def ingest_google_sheet(self, sheet_url: str, url_column: str = "url") -> int:
         """Ингест из Google Sheets.
 
-        Принимает как обычную ссылку на таблицу, так и прямой CSV-export URL —
-        ссылка нормализуется в ``.../export?format=csv``. URL ограничен
-        доверенными доменами Google по http(s) (защита от SSRF).
+        Из ссылки извлекается идентификатор таблицы (строго проверяется по
+        allowlist-регэкспу ``[A-Za-z0-9_-]``), после чего CSV-export URL
+        собирается из константного шаблона на домене ``docs.google.com``.
+        Тем самым полный URL запроса не контролируется пользователем (защита
+        от SSRF).
         """
-        export_url = _google_sheet_csv_url(sheet_url)
-        # Инлайн-барьер против SSRF: разрешаем только http(s) на доверенные
-        # домены Google; дополнительно проверяем, что хост не резолвится в
-        # приватную сеть.
-        parsed = urlparse(export_url)
-        host = (parsed.hostname or "").lower()
-        if parsed.scheme not in ("http", "https") or host not in _ALLOWED_SHEET_HOSTS:
-            raise ValueError(f"Недопустимый URL Google Sheets: {export_url!r}")
-        _assert_public_host(host, parsed.port or 443)
-        req = urllib.request.Request(export_url, method="GET")
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 (URL валидирован)
+        export_url = _google_sheet_export_url(sheet_url)
+        # Домен фиксирован шаблоном; дополнительно убеждаемся, что он не
+        # резолвится в приватную сеть (defense-in-depth).
+        _assert_public_host(_SHEET_HOST, 443)
+        with urllib.request.urlopen(export_url, timeout=30) as resp:  # noqa: S310 (URL из шаблона)
             data = resp.read().decode("utf-8-sig")
         return self._ingest_csv_stream(io.StringIO(data), url_column)
 
@@ -147,21 +143,22 @@ class UrlQueue:
     def _safe_ingest_path(self, path: str) -> str:
         """Разрешить путь к файлу ингеста только внутри ``self.ingest_dir``.
 
-        Защита от path traversal: используется только базовое имя файла
-        (все компоненты каталога отбрасываются), после чего путь нормализуется
-        и обязан находиться внутри разрешённого каталога.
+        Защита от path traversal: из недоверенного ввода берётся только базовое
+        имя файла, которое обязано присутствовать в списке файлов разрешённого
+        каталога (allowlist), иначе — ``ValueError``.
         """
-        # Отбрасываем любые компоненты каталога из недоверенного ввода —
-        # это устраняет обход вида ``../../etc/passwd``.
         name = os.path.basename(path)
         if not name or name in (".", ".."):
             raise ValueError(f"Недопустимое имя файла ингеста: {path!r}")
-        candidate = os.path.realpath(os.path.join(self.ingest_dir, name))
-        if os.path.commonpath([self.ingest_dir, candidate]) != self.ingest_dir:
+        try:
+            allowed = set(os.listdir(self.ingest_dir))
+        except OSError as exc:
+            raise ValueError(f"Каталог ингеста недоступен: {exc}") from exc
+        if name not in allowed:
             raise ValueError(
-                f"Путь ингеста вне разрешённого каталога {self.ingest_dir!r}: {path!r}"
+                f"Файл {name!r} не найден в каталоге ингеста {self.ingest_dir!r}"
             )
-        return candidate
+        return os.path.join(self.ingest_dir, name)
 
     def _ingest_csv_stream(self, fh, url_column: str) -> int:
         reader = csv.DictReader(fh)
@@ -322,23 +319,34 @@ class UrlQueue:
         self.close()
 
 
-def _google_sheet_csv_url(sheet_url: str) -> str:
-    """Нормализовать ссылку Google Sheets в CSV-export URL."""
-    if "format=csv" in sheet_url:
-        return sheet_url
-    if "/edit" in sheet_url:
-        base = sheet_url.split("/edit", 1)[0]
-        gid = ""
-        if "gid=" in sheet_url:
-            gid = "&gid=" + sheet_url.split("gid=", 1)[1].split("&", 1)[0]
-        return f"{base}/export?format=csv{gid}"
-    return sheet_url
+_SHEET_HOST = "docs.google.com"
+# Идентификатор таблицы / gid: строгий allowlist символов (защита от SSRF).
+_SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
+_SHEET_ID_ALLOWED = re.compile(r"^[A-Za-z0-9_-]+$")
+_SHEET_GID_RE = re.compile(r"[?&#]gid=([0-9]+)")
 
 
-# Доверенные хосты Google для ингеста таблиц (защита от SSRF).
-_ALLOWED_SHEET_HOSTS = frozenset(
-    {"docs.google.com", "sheets.googleapis.com", "drive.google.com"}
-)
+def _google_sheet_export_url(sheet_url: str) -> str:
+    """Собрать CSV-export URL из константного шаблона по ID таблицы.
+
+    Полный URL запроса НЕ контролируется пользователем: из ссылки извлекается
+    только идентификатор таблицы (и опциональный gid), которые проверяются по
+    allowlist-регэкспу; сам URL строится из констант.
+    """
+    match = _SHEET_ID_RE.search(sheet_url or "")
+    if not match:
+        raise ValueError(
+            "Не удалось извлечь идентификатор таблицы из URL Google Sheets"
+        )
+    sheet_id = match.group(1)
+    if not _SHEET_ID_ALLOWED.match(sheet_id):
+        raise ValueError(f"Некорректный идентификатор таблицы: {sheet_id!r}")
+    gid_match = _SHEET_GID_RE.search(sheet_url)
+    gid = gid_match.group(1) if gid_match else "0"
+    return (
+        f"https://{_SHEET_HOST}/spreadsheets/d/{sheet_id}"
+        f"/export?format=csv&gid={gid}"
+    )
 
 
 def _assert_public_host(host: str, port: int) -> None:
@@ -351,20 +359,6 @@ def _assert_public_host(host: str, port: int) -> None:
         ip = ipaddress.ip_address(info[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             raise ValueError(f"Хост {host!r} резолвится в приватный адрес {ip}")
-
-
-def _validate_google_sheet_url(url: str) -> None:
-    """Проверить, что URL безопасен для загрузки: http(s) + домен Google.
-
-    Используется в тестах; основная проверка встроена в ``ingest_google_sheet``.
-    """
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError(f"Недопустимая схема URL: {parsed.scheme!r}")
-    if host not in _ALLOWED_SHEET_HOSTS:
-        raise ValueError(f"Хост не в списке доверенных Google-доменов: {host!r}")
-    _assert_public_host(host, parsed.port or 443)
 
 
 __all__ = ["UrlQueue"]
