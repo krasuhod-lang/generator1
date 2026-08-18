@@ -103,7 +103,7 @@ async function processUrls(taskId, urls, options) {
         
         task.total = finalUrls.length;
 
-        const AUDIT_URL = process.env.AUDIT_URL || 'http://seo_audit:8002';
+        const AUDIT_URL = process.env.AUDIT_INTERNAL_URL || 'http://audit:8002';
         const results = [];
         
         const CONCURRENCY = 5;
@@ -136,7 +136,12 @@ async function processUrls(taskId, urls, options) {
                         results.push({ url: currentUrl, status: "Ошибка: пустой ответ от сервиса" });
                     }
                 } catch (err) {
-                    results.push({ url: currentUrl, status: `Ошибка API: ${err.message}` });
+                    const code = err.code || '';
+                    if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT') {
+                        results.push({ url: currentUrl, status: 'Сервис парсинга недоступен' });
+                    } else {
+                        results.push({ url: currentUrl, status: `Ошибка API: ${err.message}` });
+                    }
                 }
                 
                 task.progress++;
