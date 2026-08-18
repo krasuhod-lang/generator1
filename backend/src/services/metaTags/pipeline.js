@@ -529,13 +529,12 @@ async function recoverStuckMetaTagTasks() {
   try {
     const { rowCount } = await db.query(
       `UPDATE meta_tag_tasks
-          SET status        = 'error',
-              error_message = 'Сервер был перезапущен во время выполнения задачи',
-              completed_at  = NOW()
+          SET status        = 'queued',
+              error_message = 'Задача возобновлена после обновления системы'
         WHERE status = 'in_progress'`,
     );
     if (rowCount > 0) {
-      console.log(`[metaTags] Recovered ${rowCount} stuck in_progress task(s)`);
+      console.log(`[metaTags] Re-queued ${rowCount} stuck in_progress task(s)`);
     }
   } catch (err) {
     // Таблица может ещё не существовать на самом первом запуске до миграций — ок.

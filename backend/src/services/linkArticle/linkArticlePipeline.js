@@ -1745,14 +1745,13 @@ async function recoverStuckLinkArticleTasks() {
   try {
     const { rowCount } = await db.query(
       `UPDATE link_article_tasks
-          SET status = 'error',
-              error_message = 'Сервер был перезапущен во время выполнения задачи',
-              completed_at  = NOW(),
+          SET status = 'queued',
+              error_message = 'Задача возобновлена после обновления системы',
               updated_at    = NOW()
         WHERE status = 'running'`,
     );
     if (rowCount > 0) {
-      console.log(`[linkArticle] Recovered ${rowCount} stuck running task(s)`);
+      console.log(`[linkArticle] Re-queued ${rowCount} stuck running task(s)`);
     }
   } catch (err) {
     if (!/relation .* does not exist/i.test(err.message)) {

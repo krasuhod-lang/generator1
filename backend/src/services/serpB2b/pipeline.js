@@ -514,15 +514,14 @@ async function recoverStuckSerpB2bTasks() {
   try {
     const { rowCount } = await db.query(
       `UPDATE serp_b2b_tasks
-          SET status = 'error',
-              error_message = 'Сервер был перезапущен во время выполнения задачи',
-              completed_at = NOW(),
+          SET status = 'queued',
+              error_message = 'Задача возобновлена после обновления системы',
               updated_at = NOW()
-        WHERE status IN ('queued', 'running')`,
+        WHERE status = 'running'`,
     );
     if (rowCount > 0) {
       // eslint-disable-next-line no-console
-      console.log(`[serpB2b] recovered ${rowCount} stuck task(s)`);
+      console.log(`[serpB2b] re-queued ${rowCount} stuck task(s)`);
     }
   } catch (err) {
     // eslint-disable-next-line no-console

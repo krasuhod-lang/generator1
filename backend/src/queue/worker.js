@@ -216,6 +216,10 @@ const worker = new Worker(
   {
     connection,
     concurrency: parseInt(process.env.WORKER_CONCURRENCY) || 3,
+    // Stalled job detection: if a job's lock is not renewed within this interval,
+    // BullMQ considers it stalled and re-delivers it (up to maxStalledCount).
+    stalledInterval: 30000,
+    maxStalledCount: 2,
     // Храним job для диагностики, но с жёстким age/count cap, чтобы Redis
     // не раздувался от SEO-задач.
     removeOnComplete: JOB_RETENTION.completed,
@@ -235,8 +239,29 @@ worker.on('failed', (job, err) => {
   console.error(`[Worker] Job ${job?.id} failed (task: ${job?.data?.taskId}): ${err.message}`);
 });
 
+worker.on('stalled', (jobId) => {
+  console.warn(`[Worker] Job ${jobId} stalled — BullMQ will retry it automatically`);
+});
+
 worker.on('error', (err) => {
   console.error('[Worker] Worker-level error:', err.message);
 });
+
+// ── Graceful shutdown ─────────────────────────────────────────────────────
+// On SIGTERM/SIGINT, close the worker so BullMQ returns active jobs to the
+// queue instead of leaving them stalled.
+async function gracefulShutdown(signal) {
+  console.log(`[Worker] ${signal} received — closing worker gracefully...`);
+  try {
+    await worker.close();
+    console.log('[Worker] Worker closed, active jobs returned to queue');
+  } catch (err) {
+    console.error('[Worker] Error during graceful shutdown:', err.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
 module.exports = { worker };

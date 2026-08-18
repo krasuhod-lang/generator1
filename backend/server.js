@@ -254,7 +254,53 @@ const start = async () => {
       console.warn('[Server] contentPolicy warm-up skipped:', err.message);
     }
 
-    // После рестарта переводим зависшие meta-tag-задачи в error
+    // ── После рестарта: авто-возобновление зависших задач ──────────────────
+    // Вместо перевода в error — re-queue задачи, чтобы пользователи не теряли
+    // прогресс при обновлении Docker. Макс. 3 recovery-попытки (recovery_attempts).
+    const MAX_RECOVERY_ATTEMPTS = parseInt(process.env.MAX_RECOVERY_ATTEMPTS, 10) || 3;
+
+    // Recover main content-generation tasks (BullMQ-based)
+    try {
+      const _db = require('./src/config/db');
+      const { generationQueue } = require('./src/queue/queue');
+      const { rows } = await _db.query(
+        `SELECT id, pipeline_checkpoint, COALESCE(recovery_attempts, 0) AS recovery_attempts
+           FROM tasks
+          WHERE status IN ('processing', 'queued')`,
+      );
+      for (const t of rows) {
+        if (t.recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
+          await _db.query(
+            `UPDATE tasks SET status = 'failed', error_message = 'Исчерпаны попытки автовозобновления после перезагрузки', updated_at = NOW() WHERE id = $1`,
+            [t.id]
+          );
+        } else {
+          const jobId = `${t.id}-recover-${Date.now()}`;
+          await generationQueue.add('generate', {
+            taskId: t.id,
+            resumeFrom: t.pipeline_checkpoint || null,
+            autoRetries: 0,
+          }, { jobId, attempts: 1 });
+          await _db.query(
+            `UPDATE tasks SET status = 'queued', bull_job_id = $2, recovery_attempts = COALESCE(recovery_attempts, 0) + 1, updated_at = NOW() WHERE id = $1`,
+            [t.id, jobId]
+          );
+        }
+      }
+      if (rows.length > 0) console.log(`[Server] Re-queued ${rows.length} stuck generation task(s)`);
+    } catch (err) {
+      if (!/relation .* does not exist|column .* does not exist/i.test(err.message)) {
+        console.warn('[Server] Generation tasks recovery skipped:', err.message);
+      }
+    }
+
+    // Ensure recovery_attempts column exists for tasks table
+    try {
+      const _db = require('./src/config/db');
+      await _db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS recovery_attempts INT DEFAULT 0`);
+    } catch (_) { /* ignore */ }
+
+    // После рестарта — re-queue зависших meta-tag-задачи
     try {
       const { recoverStuckMetaTagTasks } = require('./src/services/metaTags/pipeline');
       await recoverStuckMetaTagTasks();
@@ -262,7 +308,7 @@ const start = async () => {
       console.warn('[Server] Meta-tag recovery skipped:', err.message);
     }
 
-    // После рестарта переводим зависшие category-lead-задачи в error
+    // После рестарта — re-queue зависших category-lead-задачи
     try {
       const { recoverStuckCategoryLeadTasks } = require('./src/services/categoryLead/pipeline');
       await recoverStuckCategoryLeadTasks();
@@ -270,7 +316,7 @@ const start = async () => {
       console.warn('[Server] Category-lead recovery skipped:', err.message);
     }
 
-    // После рестарта переводим зависшие serp-b2b-задачи в error
+    // После рестарта — re-queue зависших serp-b2b-задачи
     try {
       const { recoverStuckSerpB2bTasks } = require('./src/services/serpB2b/pipeline');
       await recoverStuckSerpB2bTasks();
@@ -278,7 +324,7 @@ const start = async () => {
       console.warn('[Server] Serp-b2b recovery skipped:', err.message);
     }
 
-    // После рестарта переводим зависшие link-article-задачи в error
+    // После рестарта — re-queue зависших link-article-задачи
     try {
       const { recoverStuckLinkArticleTasks } = require('./src/services/linkArticle/linkArticlePipeline');
       await recoverStuckLinkArticleTasks();
@@ -3373,6 +3419,23 @@ async function ensureSchema() {
     } catch (e) {
       console.warn('[ensureSchema] ai_answer_trigger column (mig 126) skipped:', e.message);
     }
+
+    // Migration: parser_tasks table (persistent store for parser tasks, replaces in-memory Map)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS parser_tasks (
+        id              UUID PRIMARY KEY,
+        user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
+        status          VARCHAR(20) NOT NULL DEFAULT 'running',
+        progress        INT NOT NULL DEFAULT 0,
+        total           INT NOT NULL DEFAULT 0,
+        results         JSONB,
+        error           TEXT,
+        file_path       TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_parser_tasks_user_status ON parser_tasks(user_id, status)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

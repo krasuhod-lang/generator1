@@ -4,11 +4,47 @@ const exceljs = require('exceljs');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const db = require('../config/db');
 
-// in-memory store for tasks
-const tasksStore = new Map();
+// ─────────────────────────────────────────────────────────────────────────────
+// DB helpers for parser_tasks
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Optional: you can integrate this with the existing sseManager if you want SSE
+async function createTask(taskId, userId, total) {
+    await db.query(
+        `INSERT INTO parser_tasks (id, user_id, status, progress, total)
+         VALUES ($1, $2, 'running', 0, $3)`,
+        [taskId, userId || null, total]
+    );
+}
+
+async function updateTaskProgress(taskId, progress) {
+    await db.query(
+        `UPDATE parser_tasks SET progress = $2, updated_at = NOW() WHERE id = $1`,
+        [taskId, progress]
+    );
+}
+
+async function completeTask(taskId, results, filePath) {
+    await db.query(
+        `UPDATE parser_tasks SET status = 'done', progress = total, results = $2, file_path = $3, updated_at = NOW() WHERE id = $1`,
+        [taskId, JSON.stringify(results), filePath]
+    );
+}
+
+async function failTask(taskId, error) {
+    await db.query(
+        `UPDATE parser_tasks SET status = 'error', error = $2, updated_at = NOW() WHERE id = $1`,
+        [taskId, (error || '').substring(0, 2000)]
+    );
+}
+
+async function getTask(taskId) {
+    const { rows } = await db.query(`SELECT * FROM parser_tasks WHERE id = $1`, [taskId]);
+    return rows[0] || null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 exports.startParsing = async (req, res) => {
     try {
@@ -39,17 +75,10 @@ exports.startParsing = async (req, res) => {
         }
 
         const taskId = uuidv4();
+        const userId = req.user?.id || null;
         
-        // Save initial state
-        tasksStore.set(taskId, {
-            id: taskId,
-            status: 'running', // running, done, error
-            progress: 0,
-            total: urls.length || 10, // Assuming 10 from search
-            results: [],
-            error: null,
-            file_path: null
-        });
+        // Save initial state to DB
+        await createTask(taskId, userId, urls.length || 10);
 
         res.json({ task_id: taskId });
 
@@ -63,7 +92,6 @@ exports.startParsing = async (req, res) => {
 };
 
 async function processUrls(taskId, urls, options) {
-    const task = tasksStore.get(taskId);
     try {
         let finalUrls = urls;
 
@@ -101,13 +129,15 @@ async function processUrls(taskId, urls, options) {
             throw new Error('No URLs to parse');
         }
         
-        task.total = finalUrls.length;
+        // Update total in DB
+        await db.query(`UPDATE parser_tasks SET total = $2, updated_at = NOW() WHERE id = $1`, [taskId, finalUrls.length]);
 
-        const AUDIT_URL = process.env.AUDIT_URL || 'http://seo_audit:8002';
+        const AUDIT_URL = process.env.AUDIT_INTERNAL_URL || 'http://audit:8002';
         const results = [];
         
         const CONCURRENCY = 5;
         let index = 0;
+        let progressCount = 0;
         
         const worker = async () => {
             while (index < finalUrls.length) {
@@ -136,10 +166,19 @@ async function processUrls(taskId, urls, options) {
                         results.push({ url: currentUrl, status: "Ошибка: пустой ответ от сервиса" });
                     }
                 } catch (err) {
-                    results.push({ url: currentUrl, status: `Ошибка API: ${err.message}` });
+                    const code = err.code || '';
+                    if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT') {
+                        results.push({ url: currentUrl, status: 'Сервис парсинга недоступен' });
+                    } else {
+                        results.push({ url: currentUrl, status: `Ошибка API: ${err.message}` });
+                    }
                 }
                 
-                task.progress++;
+                progressCount++;
+                // Batch DB updates every 3 items or on last item
+                if (progressCount % 3 === 0 || progressCount === finalUrls.length) {
+                    await updateTaskProgress(taskId, progressCount).catch(() => {});
+                }
             }
         };
 
@@ -183,21 +222,17 @@ async function processUrls(taskId, urls, options) {
         const filePath = path.join(uploadsDir, `parsers_${taskId}.xlsx`);
         await workbook.xlsx.writeFile(filePath);
         
-        task.status = 'done';
-        task.progress = task.total;
-        task.results = results;
-        task.file_path = filePath;
+        await completeTask(taskId, results, filePath);
         
     } catch (err) {
         console.error('Parsers background error:', err);
-        task.status = 'error';
-        task.error = err.message;
+        await failTask(taskId, err.message);
     }
 }
 
 exports.getTaskStatus = async (req, res) => {
     const { taskId } = req.params;
-    const task = tasksStore.get(taskId);
+    const task = await getTask(taskId);
     if (!task) {
         return res.status(404).json({ error: 'Task not found' });
     }
@@ -212,7 +247,7 @@ exports.getTaskStatus = async (req, res) => {
 
 exports.downloadReport = async (req, res) => {
     const { taskId } = req.params;
-    const task = tasksStore.get(taskId);
+    const task = await getTask(taskId);
     if (!task) {
         return res.status(404).json({ error: 'Task not found' });
     }
