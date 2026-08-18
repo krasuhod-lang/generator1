@@ -7,6 +7,7 @@ from app.queue import UrlQueue
 
 
 def _q(tmp_path, **kw):
+    kw.setdefault("ingest_dir", str(tmp_path))
     return UrlQueue(os.path.join(str(tmp_path), "q.sqlite3"), **kw)
 
 
@@ -80,3 +81,24 @@ def test_ingest_csv(tmp_path):
     q = _q(tmp_path)
     assert q.ingest_csv(csv_path, url_column="url") == 2
     assert q.pending_count() == 2
+
+
+def test_ingest_csv_rejects_path_traversal(tmp_path):
+    import pytest
+
+    q = _q(tmp_path)  # ingest_dir = tmp_path
+    with pytest.raises(ValueError):
+        q.ingest_csv("../../etc/passwd", url_column="url")
+
+
+def test_google_sheet_url_validation_rejects_non_google():
+    import pytest
+
+    from app.queue import _validate_google_sheet_url
+
+    with pytest.raises(ValueError):
+        _validate_google_sheet_url("http://169.254.169.254/latest/meta-data")
+    with pytest.raises(ValueError):
+        _validate_google_sheet_url("file:///etc/passwd")
+    with pytest.raises(ValueError):
+        _validate_google_sheet_url("https://evil.example/export?format=csv")

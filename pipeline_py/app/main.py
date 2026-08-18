@@ -22,7 +22,11 @@ app = FastAPI(title="pipeline_py", version="0.1.0")
 
 
 def _queue() -> UrlQueue:
-    return UrlQueue(CONFIG["queue_db_path"], max_retries=CONFIG["max_retries"])
+    return UrlQueue(
+        CONFIG["queue_db_path"],
+        max_retries=CONFIG["max_retries"],
+        ingest_dir=CONFIG["ingest_dir"] or None,
+    )
 
 
 def _fetcher() -> Fetcher:

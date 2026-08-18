@@ -37,6 +37,10 @@ CONFIG = {
     "url_column": _s("PIPELINE_URL_COLUMN", "url"),
     # Максимум попыток обработки одной задачи (1 основная + retry).
     "max_retries": _i("PIPELINE_MAX_RETRIES", 3),
+    # Базовый каталог, из которого разрешён ингест CSV/Excel файлов.
+    # Файлы вне этого каталога отклоняются (защита от path traversal).
+    # Пусто => текущий рабочий каталог процесса.
+    "ingest_dir": _s("PIPELINE_INGEST_DIR", ""),
 
     # --- Слой 2: fetcher -----------------------------------------------------
     # Базовый URL сервиса relevance_fetcher (endpoint /fetch_html).

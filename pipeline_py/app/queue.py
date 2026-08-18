@@ -14,12 +14,17 @@ from __future__ import annotations
 
 import csv
 import io
+import ipaddress
+import os
+import socket
 import sqlite3
 import urllib.request
 from contextlib import closing
 from typing import Iterable, Iterator, List, Optional
+from urllib.parse import urlparse
 
-from .models import TERMINAL_STATUSES, Task, TaskStatus
+from .config import CONFIG
+from .models import Task, TaskStatus
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS url_queue (
@@ -48,9 +53,13 @@ class UrlQueue:
         q.mark_success(task.task_id, result={...})
     """
 
-    def __init__(self, db_path: str, max_retries: int = 3) -> None:
+    def __init__(self, db_path: str, max_retries: int = 3, ingest_dir: Optional[str] = None) -> None:
         self.db_path = db_path
         self.max_retries = max_retries
+        # Каталог, из которого разрешено читать файлы для ингеста (Слой 1).
+        # Ограничивает path traversal: файлы вне него отклоняются.
+        base = ingest_dir if ingest_dir is not None else CONFIG.get("ingest_dir", "")
+        self.ingest_dir = os.path.realpath(base or os.getcwd())
         # ``check_same_thread=False`` — очередь может использоваться воркерами.
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -78,17 +87,21 @@ class UrlQueue:
 
     def ingest_csv(self, path: str, url_column: str = "url") -> int:
         """Ингест из CSV-файла с колонкой ``url_column``."""
-        with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+        safe_path = self._safe_ingest_path(path)
+        with open(safe_path, "r", encoding="utf-8-sig", newline="") as fh:
             return self._ingest_csv_stream(fh, url_column)
 
     def ingest_google_sheet(self, sheet_url: str, url_column: str = "url") -> int:
         """Ингест из Google Sheets.
 
         Принимает как обычную ссылку на таблицу, так и прямой CSV-export URL —
-        ссылка нормализуется в ``.../export?format=csv``.
+        ссылка нормализуется в ``.../export?format=csv``. URL ограничен
+        доверенными доменами Google по http(s) (защита от SSRF).
         """
         export_url = _google_sheet_csv_url(sheet_url)
-        with urllib.request.urlopen(export_url) as resp:  # noqa: S310 (доверенный источник)
+        _validate_google_sheet_url(export_url)
+        req = urllib.request.Request(export_url, method="GET")
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 (URL валидирован)
             data = resp.read().decode("utf-8-sig")
         return self._ingest_csv_stream(io.StringIO(data), url_column)
 
@@ -101,7 +114,7 @@ class UrlQueue:
                 "Для ингеста Excel установите зависимость 'openpyxl'"
             ) from exc
 
-        wb = load_workbook(path, read_only=True, data_only=True)
+        wb = load_workbook(self._safe_ingest_path(path), read_only=True, data_only=True)
         try:
             ws = wb.active
             rows = ws.iter_rows(values_only=True)
@@ -123,6 +136,20 @@ class UrlQueue:
             return self.ingest_iterable(urls)
         finally:
             wb.close()
+
+    def _safe_ingest_path(self, path: str) -> str:
+        """Разрешить путь к файлу ингеста только внутри ``self.ingest_dir``.
+
+        Защита от path traversal: путь нормализуется и обязан находиться внутри
+        разрешённого базового каталога, иначе — ``ValueError``.
+        """
+        candidate = os.path.realpath(os.path.join(self.ingest_dir, path))
+        base = self.ingest_dir
+        if candidate != base and not candidate.startswith(base + os.sep):
+            raise ValueError(
+                f"Путь ингеста вне разрешённого каталога {base!r}: {path!r}"
+            )
+        return candidate
 
     def _ingest_csv_stream(self, fh, url_column: str) -> int:
         reader = csv.DictReader(fh)
@@ -294,6 +321,34 @@ def _google_sheet_csv_url(sheet_url: str) -> str:
             gid = "&gid=" + sheet_url.split("gid=", 1)[1].split("&", 1)[0]
         return f"{base}/export?format=csv{gid}"
     return sheet_url
+
+
+# Доверенные хосты Google для ингеста таблиц (защита от SSRF).
+_ALLOWED_SHEET_HOSTS = frozenset(
+    {"docs.google.com", "sheets.googleapis.com", "drive.google.com"}
+)
+
+
+def _validate_google_sheet_url(url: str) -> None:
+    """Проверить, что URL безопасен для загрузки: http(s) + домен Google.
+
+    Дополнительно резолвит хост и отклоняет приватные/loopback-адреса, чтобы
+    не допустить SSRF в внутреннюю сеть.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Недопустимая схема URL: {parsed.scheme!r}")
+    host = (parsed.hostname or "").lower()
+    if host not in _ALLOWED_SHEET_HOSTS:
+        raise ValueError(f"Хост не в списке доверенных Google-доменов: {host!r}")
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ValueError(f"Не удалось разрешить хост {host!r}: {exc}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError(f"Хост {host!r} резолвится в приватный адрес {ip}")
 
 
 __all__ = ["UrlQueue"]
