@@ -145,6 +145,7 @@ class ParserExtractRequest(BaseModel):
     extract_contacts: bool = False
     extract_about: bool = False
     extract_services: bool = False
+    extract_clients: bool = False
     api_key: str = ""
 
 @app.post("/audit/parsers/extract", dependencies=[Depends(_auth)])
@@ -153,7 +154,7 @@ async def extract_parsers(req: ParserExtractRequest):
         raise HTTPException(status_code=422, detail="No urls provided")
     
     # Process them concurrently
-    tasks = [parse_url_dspy(url, req.extract_contacts, req.extract_about, req.extract_services, req.api_key) for url in req.urls]
+    tasks = [parse_url_dspy(url, req.extract_contacts, req.extract_about, req.extract_services, req.api_key, req.extract_clients) for url in req.urls]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     final_results = []

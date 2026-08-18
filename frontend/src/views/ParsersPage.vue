@@ -29,6 +29,7 @@ const options = ref({
   contacts: true,
   about: true,
   services: true,
+  clients: true,
 });
 
 const loading = ref(false);
@@ -56,7 +57,7 @@ const parsedKeywords = computed(() =>
 );
 
 const anyObjectSelected = computed(
-  () => options.value.contacts || options.value.about || options.value.services
+  () => options.value.contacts || options.value.about || options.value.services || options.value.clients
 );
 
 const canStart = computed(() => {
@@ -295,7 +296,7 @@ onUnmounted(() => {
         <!-- Объекты парсинга -->
         <div>
           <div class="label">Что извлекать</div>
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
             <label
               class="flex items-start gap-2.5 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2.5 cursor-pointer hover:border-gray-700 transition-colors"
             >
@@ -333,6 +334,19 @@ onUnmounted(() => {
               <span class="min-w-0">
                 <span class="block text-sm font-medium text-gray-100">🧾 Услуги</span>
                 <span class="block text-[11px] text-gray-500">Разбор через DeepSeek v4 pro</span>
+              </span>
+            </label>
+            <label
+              class="flex items-start gap-2.5 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2.5 cursor-pointer hover:border-gray-700 transition-colors"
+            >
+              <input
+                type="checkbox"
+                v-model="options.clients"
+                class="mt-0.5 h-4 w-4 rounded border-gray-700 bg-gray-900 text-indigo-600 focus:ring-indigo-700"
+              />
+              <span class="min-w-0">
+                <span class="block text-sm font-medium text-gray-100">🎯 Клиенты и сегменты ЦА</span>
+                <span class="block text-[11px] text-gray-500">Категории клиентов и с кем работают</span>
               </span>
             </label>
           </div>

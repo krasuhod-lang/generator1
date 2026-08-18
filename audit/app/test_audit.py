@@ -385,5 +385,48 @@ class TestFetcherTimeouts(unittest.TestCase):
         self.assertEqual(fetcher.FetchResult("https://e.com/").fetch_status, "ok")
 
 
+class TestParsersClientSegmentation(unittest.TestCase):
+    """Client segmentation: новые поля client_segments/works_with и расширенный краул."""
+
+    def test_signature_has_client_fields(self):
+        from . import parsers
+        fields = parsers.ExtractCompanyServices.output_fields
+        self.assertIn("client_segments", fields)
+        self.assertIn("works_with", fields)
+
+    def test_link_patterns_include_client_pages(self):
+        from . import parsers
+        for p in ("/clients", "/клиенты", "/cases", "/кейсы", "/portfolio",
+                  "/projects", "/partners", "/reviews", "/отзывы"):
+            self.assertIn(p, parsers.LINK_PATTERNS)
+
+    def test_subpage_cap_is_constant(self):
+        from . import parsers
+        self.assertIsInstance(parsers.MAX_SUBPAGES, int)
+        self.assertGreaterEqual(parsers.MAX_SUBPAGES, 5)
+
+    def test_empty_content_yields_empty_segments(self):
+        # При пустом контенте LLM не вызывается, а новые поля остаются пустыми.
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        class _Res:
+            html = ""
+
+        async def _fake_fetch(session, url):
+            return _Res()
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None):
+            out = asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/", extract_contacts=True, extract_about=True,
+                extract_services=True, deepseek_api_key="x", extract_clients=True))
+
+        self.assertEqual(out["client_segments"], [])
+        self.assertEqual(out["works_with"], "")
+        self.assertEqual(out["status"], "Ошибка: пустой контент")
+
+
 if __name__ == "__main__":
     unittest.main()

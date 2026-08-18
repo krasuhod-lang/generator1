@@ -135,7 +135,7 @@ async function processUrls(taskId, urls, options) {
         const AUDIT_URL = process.env.AUDIT_INTERNAL_URL || 'http://audit:8002';
         const results = [];
         
-        const CONCURRENCY = 5;
+        const CONCURRENCY = Number(process.env.PARSER_CONCURRENCY) || 5; // до 5 сайтов одновременно
         let index = 0;
         let progressCount = 0;
         
@@ -150,6 +150,7 @@ async function processUrls(taskId, urls, options) {
                         extract_contacts: options?.contacts || false,
                         extract_about: options?.about || false,
                         extract_services: options?.services || false,
+                        extract_clients: options?.clients || false,
                         api_key: process.env.DEEPSEEK_API_KEY || options?.deepseek_api_key || ""
                     };
                     
@@ -199,6 +200,8 @@ async function processUrls(taskId, urls, options) {
             { header: 'О компании', key: 'about', width: 30 },
             { header: 'Список услуг', key: 'services', width: 30 },
             { header: 'Ключевой упор (Фокус)', key: 'focus', width: 30 },
+            { header: 'Категории клиентов', key: 'client_segments', width: 40 },
+            { header: 'С кем работает', key: 'works_with', width: 30 },
             { header: 'Статус парсинга', key: 'status', width: 20 }
         ];
 
@@ -210,6 +213,8 @@ async function processUrls(taskId, urls, options) {
                 about: item.about,
                 services: Array.isArray(item.services) ? item.services.join(', ') : item.services,
                 focus: item.focus,
+                client_segments: Array.isArray(item.client_segments) ? item.client_segments.join('\n') : item.client_segments,
+                works_with: item.works_with,
                 status: item.status
             });
         }
