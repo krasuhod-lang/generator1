@@ -739,15 +739,14 @@ async function processArticleTopicTask(taskId) {
 async function recoverStuckArticleTopicTasks() {
   const { rowCount } = await db.query(
     `UPDATE article_topic_tasks
-        SET status = 'error',
+        SET status = 'queued',
             error_message = COALESCE(error_message,
-                                     'Server restart while task was running'),
-            completed_at  = NOW(),
+                                     'Задача возобновлена после обновления системы'),
             updated_at    = NOW()
       WHERE status = 'running'`,
   );
   if (rowCount > 0) {
-    console.log(`[articleTopics] Recovered ${rowCount} stuck task(s)`);
+    console.log(`[articleTopics] Re-queued ${rowCount} stuck task(s)`);
   }
 }
 

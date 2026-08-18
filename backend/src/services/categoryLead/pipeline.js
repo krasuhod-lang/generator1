@@ -406,13 +406,13 @@ async function recoverStuckCategoryLeadTasks() {
   try {
     const { rowCount } = await db.query(
       `UPDATE category_lead_tasks
-          SET status = 'error',
-              error_message = 'Прервано рестартом сервера',
-              completed_at = NOW(), updated_at = NOW()
-        WHERE status IN ('queued', 'running')`,
+          SET status = 'queued',
+              error_message = 'Задача возобновлена после обновления системы',
+              updated_at = NOW()
+        WHERE status = 'running'`,
     );
     if (rowCount > 0) {
-      console.log(`[categoryLead] recovered ${rowCount} stuck task(s)`);
+      console.log(`[categoryLead] re-queued ${rowCount} stuck task(s)`);
     }
   } catch (err) {
     console.warn('[categoryLead] recoverStuck failed:', err.message);

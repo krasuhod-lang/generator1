@@ -42,7 +42,10 @@ services:
       redis-server
       --maxmemory 1gb
       --maxmemory-policy noeviction
-      --save 60 1
+      --save 10 1
+      --save 60 100
+      --appendonly yes
+      --appendfsync everysec
     volumes:
       - redis_data:/data
     ports:
@@ -61,6 +64,7 @@ services:
       dockerfile: Dockerfile
     container_name: seo_backend
     restart: unless-stopped
+    stop_grace_period: 60s
     env_file: .env
     environment:
       NODE_ENV: development
