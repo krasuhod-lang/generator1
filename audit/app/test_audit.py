@@ -505,6 +505,60 @@ class TestParsersClientSegmentation(unittest.TestCase):
                          ["стоматологии — маркетинг", "автосервисы — маркетинг"])
         self.assertEqual(out["status"], "Успешно")
 
+    def test_dspy_string_items_error_recovers_from_lm_history(self):
+        # DSPy JSONAdapter может упасть с "'str' object has no attribute 'items'",
+        # если модель вернула JSON как строку. Берём сырой ответ из lm.history.
+        import asyncio
+        import json
+        from unittest import mock
+        from . import parsers
+
+        html = (
+            "<html><head><title>Главная</title></head><body>"
+            "<p>" + ("Компания оказывает услуги SEO и контекстной рекламы. " * 8) + "</p>"
+            "</body></html>"
+        )
+
+        class _Res:
+            def __init__(self, html):
+                self.html = html
+
+        async def _fake_fetch(session, url):
+            return _Res(html)
+
+        raw_output = json.dumps({
+            "contacts_summary": "Телефон не найден",
+            "about_summary": "Агентство интернет-маркетинга.",
+            "services_list": ["SEO", "контекстная реклама"],
+            "main_focus": "Продвижение сайтов",
+            "client_segments": ["B2B-компании — SEO"],
+            "works_with": "B2B: компании услуг",
+        }, ensure_ascii=False)
+
+        class _LM:
+            history = [{"outputs": [raw_output]}]
+
+        class _Pred:
+            def __call__(self, website_text=""):
+                raise AttributeError("'str' object has no attribute 'items'")
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None), \
+             mock.patch.object(parsers.dspy, "LM", lambda *a, **k: _LM()), \
+             mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
+             mock.patch.object(parsers.dspy, "Predict", lambda sig: _Pred()):
+            out = asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/", extract_contacts=True, extract_about=True,
+                extract_services=True, deepseek_api_key="x", extract_clients=True))
+
+        self.assertEqual(out["status"], "Успешно")
+        self.assertEqual(out["contacts"], "Телефон не найден")
+        self.assertEqual(out["about"], "Агентство интернет-маркетинга.")
+        self.assertEqual(out["services"], ["SEO", "контекстная реклама"])
+        self.assertEqual(out["focus"], "Продвижение сайтов")
+        self.assertEqual(out["client_segments"], ["B2B-компании — SEO"])
+        self.assertEqual(out["works_with"], "B2B: компании услуг")
+
     def test_link_join_uses_urljoin(self):
         # Относительные ссылки склеиваются через urljoin (без обрезки пути базы),
         # protocol-relative и внешние домены отсекаются.

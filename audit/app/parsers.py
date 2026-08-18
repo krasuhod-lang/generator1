@@ -4,7 +4,7 @@ import json
 import hashlib
 import os
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 import dspy
 from bs4 import BeautifulSoup
@@ -70,6 +70,173 @@ def _coerce_to_list(value) -> list:
         if item:
             items.append(item)
     return items or [text]
+
+
+_AI_FIELD_ALIASES = {
+    "contacts summary": "contacts_summary",
+    "contacts": "contacts_summary",
+    "контакты": "contacts_summary",
+    "contacts_summary": "contacts_summary",
+    "about summary": "about_summary",
+    "about": "about_summary",
+    "о компании": "about_summary",
+    "about_summary": "about_summary",
+    "services list": "services_list",
+    "services": "services_list",
+    "список услуг": "services_list",
+    "услуги": "services_list",
+    "services_list": "services_list",
+    "main focus": "main_focus",
+    "focus": "main_focus",
+    "фокус": "main_focus",
+    "ключевой упор": "main_focus",
+    "main_focus": "main_focus",
+    "client segments": "client_segments",
+    "client_segments": "client_segments",
+    "категории клиентов": "client_segments",
+    "works with": "works_with",
+    "works_with": "works_with",
+    "с кем работает": "works_with",
+}
+
+
+def _canonical_ai_field(name: Any) -> str:
+    key = re.sub(r"[*_`]+", "", str(name or "")).strip().lower()
+    key = re.sub(r"[\s-]+", " ", key)
+    return _AI_FIELD_ALIASES.get(key) or _AI_FIELD_ALIASES.get(key.replace(" ", "_"), "")
+
+
+def _strip_json_fence(text: str) -> str:
+    text = (text or "").strip()
+    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else text
+
+
+def _normalize_ai_fields(data: Dict[Any, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, v in (data or {}).items():
+        canon = _canonical_ai_field(k)
+        if canon:
+            out[canon] = v
+    return out
+
+
+def _parse_json_ai_output(text: str) -> Dict[str, Any]:
+    raw = _strip_json_fence(text)
+    candidates = [raw]
+    start, end = raw.find("{"), raw.rfind("}")
+    if 0 <= start < end:
+        candidates.append(raw[start:end + 1])
+
+    for candidate in candidates:
+        current = candidate
+        for _ in range(2):
+            try:
+                parsed = json.loads(current)
+            except Exception:
+                break
+            if isinstance(parsed, dict):
+                return _normalize_ai_fields(parsed)
+            if isinstance(parsed, str):
+                current = _strip_json_fence(parsed)
+                continue
+            break
+    return {}
+
+
+def _parse_labeled_ai_output(text: str) -> Dict[str, Any]:
+    fields: Dict[str, str] = {}
+    current: Optional[str] = None
+    buf: List[str] = []
+
+    def flush():
+        if current:
+            value = "\n".join(buf).strip()
+            if value:
+                fields[current] = value
+
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        marker = re.match(r"^\[\[\s*##\s*([\w_]+)\s*##\s*\]\]$", stripped)
+        if marker:
+            flush()
+            current = _canonical_ai_field(marker.group(1))
+            buf = []
+            continue
+
+        label_match = re.match(r"^[-*•\s]*([^:：]{2,60})[:：]\s*(.*)$", stripped)
+        if label_match:
+            canon = _canonical_ai_field(label_match.group(1))
+            if canon:
+                flush()
+                current = canon
+                buf = [label_match.group(2).strip()] if label_match.group(2).strip() else []
+                continue
+
+        if current:
+            buf.append(line)
+
+    flush()
+    return fields
+
+
+def _parse_ai_output(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return _normalize_ai_fields(value)
+    if value is None:
+        return {}
+    text = str(value).strip()
+    if not text:
+        return {}
+    return _parse_json_ai_output(text) or _parse_labeled_ai_output(text)
+
+
+def _ai_field(pred: Any, name: str) -> Any:
+    if isinstance(pred, dict):
+        return pred.get(name, "")
+    return getattr(pred, name, "")
+
+
+def _coerce_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(v).strip() for v in value if str(v).strip())
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _latest_lm_fields(lm: Any) -> Dict[str, Any]:
+    """DSPy 2.5 may fail while parsing a valid-but-string response.
+    Recover fields from raw LM history so the parser task is not marked failed."""
+    for entry in reversed(getattr(lm, "history", []) or []):
+        for output in reversed(entry.get("outputs") or []):
+            fields = _parse_ai_output(output)
+            if fields:
+                return fields
+    return {}
+
+
+def _apply_ai_fields(
+    result: Dict[str, Any],
+    pred: Any,
+    *,
+    extract_contacts: bool,
+    extract_about: bool,
+    extract_services: bool,
+    extract_clients: bool,
+) -> None:
+    if extract_contacts:
+        result["contacts"] = _coerce_to_text(_ai_field(pred, "contacts_summary"))
+    if extract_about:
+        result["about"] = _coerce_to_text(_ai_field(pred, "about_summary"))
+    if extract_services:
+        result["services"] = _coerce_to_list(_ai_field(pred, "services_list"))
+        result["focus"] = _coerce_to_text(_ai_field(pred, "main_focus"))
+    if extract_clients:
+        result["client_segments"] = _coerce_to_list(_ai_field(pred, "client_segments"))
+        result["works_with"] = _coerce_to_text(_ai_field(pred, "works_with"))
 
 
 class ExtractCompanyServices(dspy.Signature):
@@ -243,21 +410,29 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                 
             loop = asyncio.get_running_loop()
             pred = await loop.run_in_executor(None, _run_dspy)
-            
-            if extract_contacts:
-                result["contacts"] = pred.contacts_summary
-            if extract_about:
-                result["about"] = pred.about_summary
-            if extract_services:
-                result["services"] = _coerce_to_list(pred.services_list)
-                result["focus"] = pred.main_focus
-            if extract_clients:
-                result["client_segments"] = _coerce_to_list(pred.client_segments)
-                result["works_with"] = pred.works_with
-                
+            _apply_ai_fields(
+                result,
+                pred,
+                extract_contacts=extract_contacts,
+                extract_about=extract_about,
+                extract_services=extract_services,
+                extract_clients=extract_clients,
+            )
+                 
         except Exception as e:
-            logger.exception(f"DSPy extraction failed for {url}")
-            result["status"] = f"Ошибка ИИ: {str(e)[:100]}"
+            recovered = _latest_lm_fields(locals().get("lm"))
+            if recovered:
+                _apply_ai_fields(
+                    result,
+                    recovered,
+                    extract_contacts=extract_contacts,
+                    extract_about=extract_about,
+                    extract_services=extract_services,
+                    extract_clients=extract_clients,
+                )
+            else:
+                logger.exception(f"DSPy extraction failed for {url}")
+                result["status"] = f"Ошибка ИИ: {str(e)[:100]}"
             
     # Кэшируем только успешные результаты. Если ИИ-извлечение было запрошено, но
     # модель не вернула ни одного поля — вероятен молчаливый сбой, не кэшируем,
@@ -274,4 +449,3 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
             logger.debug(f"redis set failed: {e}")
 
     return result
-
