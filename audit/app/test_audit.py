@@ -427,6 +427,122 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertEqual(out["works_with"], "")
         self.assertEqual(out["status"], "Ошибка: пустой контент")
 
+    def test_coerce_to_list_formats(self):
+        from . import parsers
+        # JSON-массив
+        self.assertEqual(parsers._coerce_to_list('["a", "b"]'), ["a", "b"])
+        # Список через перевод строки с маркерами
+        self.assertEqual(
+            parsers._coerce_to_list("- стоматологии — SEO\n- госзаказчики — тендеры"),
+            ["стоматологии — SEO", "госзаказчики — тендеры"])
+        # Нумерованный список
+        self.assertEqual(parsers._coerce_to_list("1. one\n2) two"), ["one", "two"])
+        # Уже список
+        self.assertEqual(parsers._coerce_to_list([" x ", "", "y"]), ["x", "y"])
+        # Пустые значения
+        self.assertEqual(parsers._coerce_to_list(""), [])
+        self.assertEqual(parsers._coerce_to_list(None), [])
+
+    def test_subpages_reach_website_text(self):
+        # ГЛАВНЫЙ БАГФИКС: текст докачанных подстраниц (клиенты/кейсы) должен
+        # реально попадать в website_text, передаваемый в LLM, а не теряться.
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        main_html = (
+            "<html><head><title>Главная</title></head><body>"
+            "<p>" + ("Главная компания оказывает услуги маркетинга. " * 8) + "</p>"
+            "<a href='/clients'>Клиенты</a></body></html>"
+        )
+        clients_html = (
+            "<html><head><title>Клиенты</title></head><body>"
+            "<p>" + ("Работаем со стоматологиями и автосервисами по всей стране. " * 8) + "</p>"
+            "</body></html>"
+        )
+        pages = {
+            "https://example.com/": main_html,
+            "https://example.com/clients": clients_html,
+        }
+
+        class _Res:
+            def __init__(self, html):
+                self.html = html
+
+        async def _fake_fetch(session, url):
+            return _Res(pages.get(url, ""))
+
+        captured = {}
+
+        class _Pred:
+            def __call__(self, website_text=""):
+                captured["website_text"] = website_text
+
+                class _Out:
+                    contacts_summary = ""
+                    about_summary = "О компании"
+                    services_list = '["маркетинг"]'
+                    main_focus = "маркетинг"
+                    client_segments = '["стоматологии — маркетинг", "автосервисы — маркетинг"]'
+                    works_with = "B2B: малый бизнес"
+                return _Out()
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None), \
+             mock.patch.object(parsers.dspy, "LM", lambda *a, **k: object()), \
+             mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
+             mock.patch.object(parsers.dspy, "Predict", lambda sig: _Pred()):
+            out = asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/", extract_contacts=False, extract_about=True,
+                extract_services=True, deepseek_api_key="x", extract_clients=True))
+
+        # Текст подстраницы клиентов дошёл до LLM.
+        self.assertIn("стоматологиями", captured.get("website_text", ""))
+        self.assertIn("Главная компания", captured.get("website_text", ""))
+        # Строковый ответ модели нормализован в массив.
+        self.assertEqual(out["services"], ["маркетинг"])
+        self.assertEqual(out["client_segments"],
+                         ["стоматологии — маркетинг", "автосервисы — маркетинг"])
+        self.assertEqual(out["status"], "Успешно")
+
+    def test_link_join_uses_urljoin(self):
+        # Относительные ссылки склеиваются через urljoin (без обрезки пути базы),
+        # protocol-relative и внешние домены отсекаются.
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        main_html = (
+            "<html><head><title>t</title></head><body>"
+            "<p>" + ("Контент главной страницы для наполнения текста. " * 6) + "</p>"
+            "<a href='/clients'>Клиенты</a>"
+            "<a href='//example.com/cases'>Кейсы</a>"
+            "<a href='https://other.com/clients'>Чужие клиенты</a>"
+            "</body></html>"
+        )
+        fetched = []
+
+        class _Res:
+            def __init__(self, html):
+                self.html = html
+
+        async def _fake_fetch(session, url):
+            fetched.append(url)
+            return _Res(main_html if url == "https://example.com/ru" else "<html><body>sub</body></html>")
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None):
+            asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/ru", extract_contacts=False, extract_about=False,
+                extract_services=False, deepseek_api_key="x", extract_clients=False))
+
+        # /clients склеен с корнем домена, а не с /ru → /ru/clients.
+        self.assertIn("https://example.com/clients", fetched)
+        # protocol-relative //example.com/cases → https-схема.
+        self.assertIn("https://example.com/cases", fetched)
+        # Чужой домен отсечён.
+        self.assertNotIn("https://other.com/clients", fetched)
+
 
 if __name__ == "__main__":
     unittest.main()

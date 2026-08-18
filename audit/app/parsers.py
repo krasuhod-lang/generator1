@@ -3,12 +3,14 @@ import logging
 import json
 import hashlib
 import os
+import re
 from typing import List, Optional
+from urllib.parse import urljoin
 import dspy
 from bs4 import BeautifulSoup
 import aiohttp
 
-from .page_parser import _clean_text
+from .page_parser import _clean_text, _same_domain, base_hostname
 from .fetcher import fetch_page
 from .store import _redis
 
@@ -21,7 +23,13 @@ DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
 
 # Максимум внутренних подстраниц, докачиваемых сверх главной. Поднят, чтобы
 # успевали попасть страницы клиентов/кейсов/портфолио без взрыва задержки.
-MAX_SUBPAGES = 8
+MAX_SUBPAGES = int(os.getenv("PARSER_MAX_SUBPAGES") or 8)
+
+# Сколько подстраниц качаем параллельно (asyncio.gather с ограничением).
+SUBPAGE_CONCURRENCY = int(os.getenv("PARSER_SUBPAGE_CONCURRENCY") or 4)
+
+# TTL кэша результатов парсинга (по умолчанию 3 дня).
+CACHE_TTL_SECONDS = int(os.getenv("PARSER_CACHE_TTL_SECONDS") or 259200)
 
 # Паттерны внутренних ссылок, по которым ищем подстраницы с доказательной базой
 # (услуги/о компании/контакты + клиенты/кейсы/портфолио/проекты/партнёры/отзывы).
@@ -30,6 +38,39 @@ LINK_PATTERNS = [
     "/clients", "/клиенты", "/cases", "/кейсы", "/portfolio", "/портфолио",
     "/projects", "/проекты", "/partners", "/партнеры", "/reviews", "/otzyvy", "/отзывы",
 ]
+
+# Ссылки, которые заведомо не являются навигацией по сайту.
+_SKIP_HREF_PREFIXES = ("mailto:", "tel:", "javascript:", "#", "data:")
+
+
+def _coerce_to_list(value) -> list:
+    """DSPy OutputField возвращает строку, а не массив. Приводим ответ модели
+    к списку строк: поддерживаем JSON-массив, а также перечисления через
+    перевод строки / точку с запятой с маркерами списка."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    # JSON-массив (модель часто возвращает именно его).
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(v).strip() for v in parsed if str(v).strip()]
+        except Exception:
+            pass
+    # Иначе разбиваем по строкам / «;», убирая маркеры списка.
+    items = []
+    for raw in re.split(r"[\n;]+", text):
+        item = raw.strip().lstrip("-•*").strip()
+        item = re.sub(r"^\d+[.)]\s*", "", item).strip()
+        if item:
+            items.append(item)
+    return items or [text]
+
 
 class ExtractCompanyServices(dspy.Signature):
     """
@@ -84,7 +125,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
     patterns = LINK_PATTERNS
     
     htmls = []
-    base_host = url.split("://")[-1].split("/")[0]
+    base_host = base_hostname(url)
 
     async with aiohttp.ClientSession() as session:
         try:
@@ -95,37 +136,67 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
             # Extract links from main page to find subpages
             soup = BeautifulSoup(html or "", "lxml")
             for a in soup.find_all("a", href=True):
-                href = a.get("href", "").lower()
-                if any(p in href for p in patterns):
-                    if href.startswith("http"):
-                        if base_host in href and href not in pages_to_fetch:
-                            pages_to_fetch.append(href)
-                    elif href.startswith("/"):
-                        full_url = url.rstrip("/") + href
-                        if full_url not in pages_to_fetch:
-                            pages_to_fetch.append(full_url)
-                            
-            # Fetch found subpages (limit to MAX_SUBPAGES)
-            for sub_url in pages_to_fetch[1:MAX_SUBPAGES + 1]:
-                try:
-                    sub_res = await fetch_page(session, sub_url)
-                    if sub_res.html:
-                        htmls.append(sub_res.html)
-                except Exception:
+                raw_href = (a.get("href") or "").strip()
+                if not raw_href:
                     continue
+                href_l = raw_href.lower()
+                if href_l.startswith(_SKIP_HREF_PREFIXES):
+                    continue
+                if not any(p in href_l for p in patterns):
+                    continue
+                # urljoin корректно склеивает относительные/protocol-relative
+                # ссылки с учётом пути базового URL, без обрезки хвоста.
+                full_url = urljoin(url, raw_href).split("#")[0]
+                if not full_url.startswith(("http://", "https://")):
+                    continue
+                # Только внутренние ссылки того же домена (без ложных совпадений
+                # по подстроке — используем разбор хоста из page_parser).
+                if not _same_domain(full_url, base_host):
+                    continue
+                if full_url not in pages_to_fetch:
+                    pages_to_fetch.append(full_url)
+                            
+            # Fetch found subpages (limit to MAX_SUBPAGES) параллельно, с
+            # ограничением одновременных запросов, чтобы не ждать их по очереди.
+            sub_urls = pages_to_fetch[1:MAX_SUBPAGES + 1]
+            if sub_urls:
+                sem = asyncio.Semaphore(SUBPAGE_CONCURRENCY)
+
+                async def _fetch_sub(sub_url):
+                    async with sem:
+                        try:
+                            sub_res = await fetch_page(session, sub_url)
+                            return sub_res.html if sub_res and sub_res.html else None
+                        except Exception:
+                            return None
+
+                for sub_html in await asyncio.gather(*[_fetch_sub(u) for u in sub_urls]):
+                    if sub_html:
+                        htmls.append(sub_html)
         except Exception as e:
             logger.exception(f"Failed to fetch {url}")
             return {"url": url, "status": f"Ошибка доступа: {str(e)[:100]}"}
 
-    combined_html = "\n\n".join(htmls)
+    combined_html = "\n\n".join(h for h in htmls if h)
     soup = BeautifulSoup(combined_html or "", "lxml")
     
-    # Extract titles and metadata
+    # Extract titles and metadata (заголовок берём с главной страницы)
     title_text = ""
     if soup.title and soup.title.string:
         title_text = soup.title.string.strip()
     
-    clean_text = _clean_text(html or "", soup) or ""
+    # БАГФИКС: чистим КАЖДУЮ страницу отдельно (trafilatura/readability
+    # работают по одному документу) и склеиваем, иначе до LLM доходила только
+    # главная страница, а докачанные подстраницы клиентов/кейсов терялись.
+    cleaned_parts = []
+    for h in htmls:
+        if not h:
+            continue
+        part = _clean_text(h, BeautifulSoup(h, "lxml")) or ""
+        part = part.strip()
+        if part:
+            cleaned_parts.append(part)
+    clean_text = "\n\n".join(cleaned_parts)
     # Trim to ~15000-20000 tokens (approx 60000 chars)
     clean_text = clean_text[:60000]
     
@@ -145,7 +216,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
         result["status"] = "Ошибка: пустой контент"
         if _redis is not None:
             try:
-                await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=259200)
+                await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=CACHE_TTL_SECONDS)
             except Exception as e:
                 logger.debug(f"redis set failed: {e}")
         return result
@@ -178,19 +249,27 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
             if extract_about:
                 result["about"] = pred.about_summary
             if extract_services:
-                result["services"] = pred.services_list
+                result["services"] = _coerce_to_list(pred.services_list)
                 result["focus"] = pred.main_focus
             if extract_clients:
-                result["client_segments"] = pred.client_segments
+                result["client_segments"] = _coerce_to_list(pred.client_segments)
                 result["works_with"] = pred.works_with
                 
         except Exception as e:
             logger.exception(f"DSPy extraction failed for {url}")
             result["status"] = f"Ошибка ИИ: {str(e)[:100]}"
             
-    if _redis is not None and result["status"] == "Успешно":
+    # Кэшируем только успешные результаты. Если ИИ-извлечение было запрошено, но
+    # модель не вернула ни одного поля — вероятен молчаливый сбой, не кэшируем,
+    # чтобы следующий запрос повторил попытку, а не читал «пустышку».
+    llm_requested = extract_services or extract_about or extract_contacts or extract_clients
+    produced_any = bool(
+        result["contacts"] or result["about"] or result["services"]
+        or result["focus"] or result["client_segments"] or result["works_with"]
+    )
+    if _redis is not None and result["status"] == "Успешно" and (not llm_requested or produced_any):
         try:
-            await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=259200)
+            await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=CACHE_TTL_SECONDS)
         except Exception as e:
             logger.debug(f"redis set failed: {e}")
 
