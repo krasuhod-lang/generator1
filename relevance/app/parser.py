@@ -346,31 +346,32 @@ def _strip_high_link_density(soup: BeautifulSoup) -> None:
     тоже список ссылок, но короткий), требуем ещё минимум 80 символов
     суммарного текста: иначе блок проще оставить, риск удалить осмысленный
     короткий список выше, чем риск пропустить мини-меню."""
-    for tag_name in ("ul", "ol", "div", "section"):
-        # копируем список — будем удалять во время итерации
-        for el in list(soup.find_all(tag_name)):
-            if el.attrs is None:
-                continue
-            text = el.get_text(" ", strip=True)
-            n = len(text)
-            if n < 80:
-                continue
-            anchor_chars = sum(
-                len(a.get_text(" ", strip=True))
-                for a in el.find_all("a")
-            )
-            if anchor_chars / max(n, 1) >= LINK_DENSITY_NOISE_RATIO:
-                try:
-                    el.decompose()
-                except Exception:
-                    pass
+    for el in reversed(soup.find_all(["ul", "ol", "div", "section"])):
+        if el.parent is None or el.attrs is None:
+            continue
+        text = el.get_text(" ", strip=True)
+        n = len(text)
+        if n < 80:
+            continue
+        anchor_chars = sum(
+            len(a.get_text(" ", strip=True))
+            for a in el.find_all("a")
+        )
+        if anchor_chars / max(n, 1) >= LINK_DENSITY_NOISE_RATIO:
+            try:
+                el.decompose()
+            except Exception:
+                pass
 
 
 def _collect_text_blocks(soup: BeautifulSoup, tags: Tuple[str, ...]) -> List[str]:
-    """Собирает текстовые блоки из заданных тегов с дедупликацией по строке."""
+    """Собирает текстовые блоки из заданных тегов с дедупликацией по DOM и строке."""
     seen: List[str] = []
     seen_set = set()
+    tag_set = set(tags)
     for tag in soup.find_all(tags):
+        if any(p.name in tag_set for p in tag.parents):
+            continue
         text = tag.get_text(separator=" ", strip=True)
         text = re.sub(r"\s+", " ", text).strip()
         if len(text) < MIN_BLOCK_LEN_CHARS:
@@ -382,22 +383,6 @@ def _collect_text_blocks(soup: BeautifulSoup, tags: Tuple[str, ...]) -> List[str
     return seen
 
 
-def _strip_text_dups(blocks: List[str]) -> List[str]:
-    """Убирает блоки, целиком содержащиеся в более длинном соседе."""
-    if len(blocks) <= 1:
-        return blocks
-    accepted: List[str] = []
-    for b in sorted(blocks, key=len, reverse=True):
-        is_subset = False
-        for a in accepted:
-            if len(b) < len(a) and b in a:
-                is_subset = True
-                break
-        if not is_subset:
-            accepted.append(b)
-    order = {b: i for i, b in enumerate(blocks)}
-    accepted.sort(key=lambda x: order.get(x, 1 << 30))
-    return accepted
 
 
 def _collect_anchor_text(soup: BeautifulSoup) -> str:
@@ -725,7 +710,7 @@ def _heavy_bs4_pass(html: str) -> Tuple[List[str], BeautifulSoup]:
     _strip_noise(soup)
     _strip_high_link_density(soup)
     blocks = _collect_text_blocks(soup, HEAVY_CONTENT_TAGS)
-    blocks = _strip_text_dups(blocks)
+    
     return blocks, soup
 
 
@@ -777,7 +762,7 @@ def _readability_pass(html: str) -> List[str]:
     _strip_noise(soup_main)
     _strip_high_link_density(soup_main)
     blocks = _collect_text_blocks(soup_main, HEAVY_CONTENT_TAGS)
-    return _strip_text_dups(blocks)
+    return blocks
 
 
 def _wide_bs4_pass(html: str) -> List[str]:
@@ -788,7 +773,7 @@ def _wide_bs4_pass(html: str) -> List[str]:
     _strip_noise(soup)
     _strip_high_link_density(soup)
     blocks = _collect_text_blocks(soup, WIDE_CONTENT_TAGS)
-    blocks = _strip_text_dups(blocks)
+    
     return blocks
 
 
