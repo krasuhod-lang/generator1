@@ -670,6 +670,155 @@ GPT-5.5 должен выполнять работу небольшими про
 
 ---
 
+## 15. Обязательное требование: задачи не должны слетать при обновлении сервера
+
+### 15.1. Результат анализа текущей реализации
+
+В текущем проекте обнаружены независимые причины, из-за которых задачи могут потеряться или навсегда остаться в состоянии выполнения.
+
+| Компонент | Текущая проблема | Последствие после рестарта |
+|---|---|---|
+| `parser_tasks` | `processUrls()` запускается из HTTP-контроллера через fire-and-forget вызов; промежуточные результаты хранятся в памяти и сохраняются только после всего batch | Задача остается `running`, результаты и Excel теряются |
+| `site_crawl_tasks` | `crawler.runCrawl()` запускается через `setImmediate`; нет startup-recovery worker для `queued/running` | После рестарта задача может остаться без процесса-владельца |
+| Python audit `/audit/start` | Выполнение живет в `asyncio.create_task()` внутри одного процесса | Redis может сохранить статус, но не восстановить coroutine после рестарта |
+| Audit store | При проблеме Redis происходит in-memory fallback | При перезапуске теряются рабочие snapshots |
+| Backend shutdown | Нет общего SIGTERM/SIGINT shutdown для HTTP-сервера и фоновых schedulers | Обновление может оборвать работу между критическими операциями |
+| Parser progress | Результат сайта не сохраняется после каждого item | При сбое теряется уже выполненная работа |
+
+В репозитории уже есть эталон надежного выполнения: BullMQ worker основного пайплайна использует checkpoint-aware auto-resume, stalled-job detection и graceful shutdown по SIGTERM/SIGINT [7]. Этот подход необходимо применить к parser и site-crawler worker.
+
+### 15.2. Требуемая гарантия надежности
+
+Под «бесперебойной работой» понимать следующие гарантии:
+
+1. Обновление или рестарт сервера не приводит к потере задания, URL, обработанных страниц и сохраненного результата.
+2. После запуска новой версии незавершенные задачи автоматически продолжаются с последней подтвержденной точки.
+3. Во время короткого перезапуска допускается пауза, но пользователь не создает задачу заново.
+4. Один item может быть выполнен повторно после аварии, но идемпотентная запись не создает дубликат результата.
+5. Задание не находится бесконечно в `queued` или `running` без heartbeat, recovery или финального статуса.
+6. При окончательной ошибке сохраняются `partial/error`, причина, счетчики и возможность повторить только неуспешные items.
+
+Полное отсутствие паузы требует нескольких worker-реплик и rolling/blue-green deployment. Базовая реализация обязана обеспечить непотерю задач и автоматическое возобновление при временном перезапуске контейнера.
+
+### 15.3. Разделение API и выполнения
+
+Нельзя выполнять длительный parser, crawler или audit непосредственно в процессе HTTP-запроса и нельзя считать `setImmediate()` надежной очередью.
+
+| Роль | Обязанность |
+|---|---|
+| API backend | Валидирует запрос, создает записи заданий/items и ставит job в очередь |
+| PostgreSQL | Хранит источник истины: статусы, lease, checkpoint, результаты и ошибки |
+| Redis/BullMQ | Доставляет job worker-у, обнаруживает stalled jobs, retry/backoff |
+| Parser/crawler worker | Обрабатывает items, регулярно сохраняет checkpoint и heartbeat |
+| Audit service | Выполняет fetch/clean/LLM-анализ по запросу worker-а, но не владеет всей жизнью задания |
+| Recovery/watchdog | Возвращает зависшие items в очередь и восстанавливает рассинхронизацию |
+
+В репозитории уже используется отдельный BullMQ worker-контейнер [10]. Для parser и crawler создать отдельные очереди, например `parser-scans` и `site-crawls`, чтобы тяжелые операции не блокировали генерацию контента.
+
+### 15.4. Очередь и транзакционная постановка
+
+Создать записи задания и items в PostgreSQL до запуска обработки. Предпочтительно использовать **transactional outbox**: в одной транзакции создать task, items и outbox-событие; publisher с `FOR UPDATE SKIP LOCKED` публикует job в BullMQ и отмечает событие опубликованным. При сбое publisher повторяет отправку.
+
+Допустим упрощенный reconciler, который каждые 30–60 секунд ищет `queued` items без активной BullMQ job и повторно ставит их в очередь. Запись только в памяти запрещена. Нельзя считать задачу надежно поставленной, если сохранен только ответ `queue.add()`, но не состояние PostgreSQL.
+
+### 15.5. Lease, heartbeat и checkpoint
+
+Для `parser_scan_item`, `site_crawl_task` и долгого audit item добавить:
+
+```text
+status: queued | running | retry_wait | done | partial | error | cancelled
+attempts: integer
+worker_id: text nullable
+lease_token: uuid nullable
+lease_until: timestamptz nullable
+heartbeat_at: timestamptz nullable
+checkpoint: jsonb nullable
+last_error_code: text nullable
+last_error_message: text nullable
+```
+
+Worker получает уникальный `lease_token`. Все записи выполнять с условием `WHERE id = $1 AND lease_token = $2`, чтобы старый worker после истечения lease не мог перезаписать результат нового worker-а.
+
+Heartbeat обновлять каждые 10–15 секунд, lease продлевать примерно на 60 секунд. Для parser сохранять checkpoint после каждого URL. Для crawler — после каждой страницы либо батча максимум из 10 страниц. Checkpoint должен включать последний URL, глубину, посещенные URL/очередь, настройки обхода, версию worker и хеш входного задания.
+
+### 15.6. Startup recovery
+
+При старте backend/worker выполнить recovery под PostgreSQL advisory lock:
+
+1. Дождаться healthcheck PostgreSQL и Redis.
+2. Найти `running` items с истекшим `lease_until` или устаревшим heartbeat.
+3. Перевести их в `retry_wait`/`queued`, увеличить `attempts`, записать `worker_restarted`.
+4. Найти `queued` items без активной BullMQ job и восстановить публикацию через outbox/reconciler.
+5. Не трогать `done`, `cancelled`, `partial` и финальный `error`, если пользователь не запросил retry.
+6. Запустить worker и watchdog только после успешной инициализации схемы.
+
+Для audit `/audit/start` Node worker должен владеть родительским заданием и повторять запрос к audit-сервису после временной потери Python-контейнера. Если audit остается асинхронным, его `queued/running` задачи должны иметь durable queue/lease и startup recovery. Redis snapshot сам по себе не восстанавливает `asyncio.create_task()` [8] [9].
+
+### 15.7. Watchdog и зависшие задачи
+
+Добавить `taskRecoveryScheduler` либо расширить существующий watchdog-паттерн для зависших project analyses [11]. Минимальные интервалы:
+
+| Проверка | Интервал | Действие |
+|---|---:|---|
+| Heartbeat | 10–15 с | Обновление lease активного item |
+| Recovery expired leases | 30 с | Возврат просроченных `running` в очередь |
+| Queue reconciler | 30–60 с | Поиск queued items без BullMQ job |
+| Stale queued alert | 1–5 мин | Предупреждение о голодании очереди |
+| Maximum execution timeout | По типу задачи | Retry/partial/error |
+
+Watchdog сначала должен вернуть item в очередь, а не сразу ставить ошибку. В `error` переводить после исчерпания attempts или абсолютного timeout. Логировать `task_id`, `item_id`, `worker_id`, старый/новый статус, причину, attempt и длительность. Добавить метрики `queue_depth`, `oldest_queued_age`, `active_jobs`, `stale_reclaimed_total`, `retry_total`, `task_completed_total`, `task_failed_total`.
+
+### 15.8. Graceful shutdown и Docker update
+
+Для parser worker, crawler worker и audit worker реализовать SIGTERM/SIGINT по аналогии с текущим BullMQ worker [7]: перестать брать новые jobs, сохранить checkpoint, вернуть текущий item в очередь либо продлить lease, закрыть очередь и DB-транзакции, затем завершить процесс.
+
+Для API backend добавить graceful shutdown: прекратить прием новых длительных операций, закрыть HTTP server, остановить schedulers/watchdog и закрыть DB/Redis connections. Длительная обработка не должна удерживаться API-процессом.
+
+В `docker-compose.yml` задать `stop_grace_period` для всех worker-контейнеров, healthcheck для backend/worker и зависимости от PostgreSQL/Redis. Обновление проводить в следующем порядке:
+
+```text
+1. Применить backward-compatible миграции под advisory lock.
+2. Запустить новую версию worker рядом со старой либо дождаться graceful drain.
+3. Проверить healthcheck и наличие worker-а.
+4. Перезапустить API backend.
+5. Запустить recovery/reconciler.
+6. Проверить отсутствие running items без heartbeat.
+```
+
+Миграции сначала должны быть совместимы со старой версией приложения. Нельзя удалять колонки, пока старый worker еще может выполнять jobs.
+
+### 15.9. Обязательные тесты рестарта
+
+| Сценарий | Проверка |
+|---|---|
+| SIGTERM parser/crawler worker | item продолжает работу, результат не теряется |
+| SIGKILL worker | истекший lease автоматически возвращается в очередь |
+| Restart backend до публикации job | outbox/reconciler публикует job повторно |
+| Restart audit во время LLM | Node worker выполняет retry, задача не зависает |
+| Restart Redis | PostgreSQL-статус сохраняется, очередь восстанавливается |
+| Restart PostgreSQL | worker делает backoff и продолжает после восстановления |
+| `docker compose up -d --build` | незавершенные items не теряются |
+| Duplicate BullMQ job | нет дубля благодаря lease и idempotent upsert |
+| Два worker-а одновременно | только владелец lease может сохранить результат |
+| Медленный/недоступный сайт | timeout/retry не блокирует остальные сайты |
+| Старый queued item | watchdog восстанавливает его или выдает понятный alert |
+
+Smoke-test проверяет не только финальный статус, но и наличие всех items, checkpoint, attempts и отсутствие `running` без свежего heartbeat.
+
+### 15.10. Дополнительные критерии приемки
+
+1. После SIGTERM, SIGKILL и пересоздания контейнера незавершенная задача автоматически продолжается.
+2. Ни один item не находится в `running` дольше lease TTL без recovery.
+3. Результат каждого завершенного сайта сохраняется независимо от завершения batch.
+4. API-процесс не является единственным местом хранения очереди или выполнения длительной задачи.
+5. Задание, созданное до обновления, обрабатывается новой версией без ручного переноса.
+6. Publisher/reconciler устраняет рассинхронизацию PostgreSQL и BullMQ.
+7. Worker имеет graceful shutdown и собственный Docker `stop_grace_period`.
+8. В мониторинге видны размер очереди, возраст старейшей задачи, retry, recovery и ошибки worker-а.
+9. В PR приложен протокол теста с перезапуском контейнеров и перечнем восстановленных задач.
+
+---
+
 ## References
 
 [1]: https://github.com/krasuhod-lang/generator1/blob/main/audit/app/parsers.py "Основной Python-модуль парсинга и LLM-извлечения"
@@ -683,3 +832,13 @@ GPT-5.5 должен выполнять работу небольшими про
 [5]: https://github.com/krasuhod-lang/generator1/blob/main/audit/requirements.txt "Зависимости audit-сервиса, включая dspy и protego"
 
 [6]: https://github.com/krasuhod-lang/generator1/blob/main/frontend/src/views/ParsersPage.vue "Текущий интерфейс запуска парсера"
+
+[7]: https://github.com/krasuhod-lang/generator1/blob/main/backend/src/queue/worker.js "Эталонный BullMQ worker с checkpoint, stalled-job recovery и graceful shutdown"
+
+[8]: https://github.com/krasuhod-lang/generator1/blob/main/audit/app/main.py "Audit-сервис с in-process asyncio-задачами"
+
+[9]: https://github.com/krasuhod-lang/generator1/blob/main/audit/app/store.py "Хранилище snapshot-статусов audit-задач с Redis TTL и in-memory fallback"
+
+[10]: https://github.com/krasuhod-lang/generator1/blob/main/docker-compose.yml "Docker Compose с backend, worker, Redis, PostgreSQL и audit"
+
+[11]: https://github.com/krasuhod-lang/generator1/blob/main/backend/src/services/projects/analysisRunner.js "Существующий watchdog зависших project analyses"
