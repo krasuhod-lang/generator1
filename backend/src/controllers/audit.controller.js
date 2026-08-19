@@ -25,8 +25,8 @@ const { assertPublicHost } = require('../services/siteCrawler/ssrfGuard');
 const BASE_URL = (process.env.AUDIT_INTERNAL_URL || 'http://audit:8002')
   .trim().replace(/\/$/, '');
 const TOKEN = (process.env.RELEVANCE_INTERNAL_TOKEN || '').trim();
-
 const MAX_CONCURRENT_TASKS = 2;
+const AUDIT_RECOVERY_MAX_ATTEMPTS = Math.max(1, Number(process.env.AUDIT_RECOVERY_MAX_ATTEMPTS) || 3);
 
 function _authHeaders() {
   return TOKEN ? { 'X-Internal-Token': TOKEN } : {};
@@ -45,7 +45,9 @@ async function _py(method, path, data) {
 
 async function _loadTask(taskId, userId) {
   const { rows } = await db.query(
-    `SELECT id, user_id, url, status, config, progress, summary, report IS NOT NULL AS has_report,
+    `SELECT id, user_id, url, status, config, python_task_id, worker_id,
+            lease_until, heartbeat_at, recovery_attempts, updated_at,
+            progress, summary, report IS NOT NULL AS has_report,
             error, started_at, finished_at, created_at
        FROM audit_tasks WHERE id = $1`, [taskId],
   );
@@ -97,8 +99,9 @@ async function startAudit(req, res) {
     }
 
     const { rows } = await db.query(
-      `INSERT INTO audit_tasks (id, user_id, url, status, config, started_at)
-       VALUES ($1, $2, $3, 'running', $4::jsonb, NOW())
+      `INSERT INTO audit_tasks
+         (id, user_id, url, status, config, python_task_id, started_at, heartbeat_at, updated_at)
+       VALUES ($1, $2, $3, 'running', $4::jsonb, $1, NOW(), NOW(), NOW())
        RETURNING id, status, created_at`,
       [py.task_id, userId, parsed.href, JSON.stringify(config)],
     );
@@ -107,6 +110,59 @@ async function startAudit(req, res) {
     console.error('[audit.startAudit]', e.stack || e.message);
     res.status(e.status || 500).json({ error: e.message || 'internal_error' });
   }
+}
+
+function isPythonTaskMissing(error) {
+  return Number(error?.response?.status) === 404;
+}
+
+async function restartPythonAudit(task) {
+  const config = task.config || {};
+  const py = await _py('post', '/audit/start', {
+    url: task.url,
+    max_pages: config.max_pages,
+    max_depth: config.max_depth,
+    use_playwright: !!config.use_playwright,
+    check_images: config.check_images !== false,
+  });
+  await db.query(
+    `UPDATE audit_tasks
+        SET python_task_id=$2, status='running', error=NULL,
+            recovery_attempts=COALESCE(recovery_attempts,0)+1,
+            attempts=COALESCE(attempts,0)+1, heartbeat_at=NOW(), updated_at=NOW()
+      WHERE id=$1 AND status IN ('pending','running')`,
+    [task.id, py.task_id],
+  );
+  return py;
+}
+
+/** Reattaches Node-owned audit parents to the Python runtime after a restart. */
+async function recoverRunningAudits() {
+  const { rows } = await db.query(
+    `SELECT id, url, status, config, python_task_id, recovery_attempts
+       FROM audit_tasks
+      WHERE status IN ('pending','running')
+        AND COALESCE(recovery_attempts,0) < $1
+      ORDER BY created_at
+      LIMIT 100`, [AUDIT_RECOVERY_MAX_ATTEMPTS]);
+  let restarted = 0;
+  for (const task of rows) {
+    const pythonId = task.python_task_id || task.id;
+    try {
+      await _py('get', `/audit/status/${encodeURIComponent(pythonId)}`);
+      await db.query(`UPDATE audit_tasks SET heartbeat_at=NOW(), updated_at=NOW() WHERE id=$1`, [task.id]);
+    } catch (e) {
+      if (!isPythonTaskMissing(e)) continue;
+      try {
+        await restartPythonAudit(task);
+        restarted += 1;
+      } catch (restartError) {
+        console.warn(`[AuditRecovery] restart ${task.id} delayed:`, restartError.message);
+      }
+    }
+  }
+  if (restarted) console.log(`[AuditRecovery] restarted ${restarted} lost Python task(s)`);
+  return restarted;
 }
 
 // ── GET /api/audit/tasks ─────────────────────────────────────────────────────
@@ -137,19 +193,29 @@ async function getStatus(req, res) {
       });
     }
     let py;
-    try { py = await _py('get', `/audit/status/${encodeURIComponent(task.id)}`); }
+    const pythonId = task.python_task_id || task.id;
+    try { py = await _py('get', `/audit/status/${encodeURIComponent(pythonId)}`); }
     catch (e) {
-      // Python потерял задачу (рестарт без Redis) → failed
-      await db.query(
-        `UPDATE audit_tasks SET status='failed', error='audit_service_lost_task', finished_at=NOW()
-          WHERE id=$1 AND status IN ('pending','running')`, [task.id]);
-      return res.json({ status: 'failed', error: 'audit_service_lost_task', progress: task.progress || {} });
+      if (isPythonTaskMissing(e) && (task.recovery_attempts || 0) < AUDIT_RECOVERY_MAX_ATTEMPTS) {
+        try {
+          py = await restartPythonAudit(task);
+        } catch (restartError) {
+          await db.query(
+            `UPDATE audit_tasks SET heartbeat_at=NOW(), updated_at=NOW(), error=$2 WHERE id=$1`,
+            [task.id, `recovery_pending: ${String(restartError.message).slice(0, 300)}`]);
+          return res.json({ status: task.status, recovery_pending: true, error: 'audit_service_unavailable', progress: task.progress || {} });
+        }
+      } else {
+        await db.query(`UPDATE audit_tasks SET heartbeat_at=NOW(), updated_at=NOW() WHERE id=$1`, [task.id]);
+        return res.json({ status: task.status, recovery_pending: true, error: 'audit_service_unavailable', progress: task.progress || {} });
+      }
     }
     if (py.status === 'done') {
-      await _persistReport(task.id);
+      await _persistReport(task.id, py.task_id || pythonId);
     } else {
       await db.query(
-        `UPDATE audit_tasks SET status=$2, progress=$3::jsonb, error=$4 WHERE id=$1`,
+        `UPDATE audit_tasks SET status=$2, progress=$3::jsonb, error=$4,
+                heartbeat_at=NOW(), updated_at=NOW() WHERE id=$1`,
         [task.id, py.status, JSON.stringify(py.progress || {}), py.error || null]);
     }
     const fresh = await _loadTask(task.id, req.user.id);
@@ -164,13 +230,13 @@ async function getStatus(req, res) {
 }
 
 // Забирает финальный отчёт из Python и персистит в PG (report + pages + issues).
-async function _persistReport(taskId) {
+async function _persistReport(taskId, pythonTaskId = null) {
   const { rows } = await db.query(
     `SELECT status, report IS NOT NULL AS has_report FROM audit_tasks WHERE id=$1`, [taskId]);
   if (!rows.length || rows[0].has_report) return;
 
   const report = await axios({
-    method: 'get', url: `${BASE_URL}/audit/report/${encodeURIComponent(taskId)}`,
+    method: 'get', url: `${BASE_URL}/audit/report/${encodeURIComponent(pythonTaskId || taskId)}`,
     timeout: 120000,
     headers: _authHeaders(),
     maxContentLength: 512 * 1024 * 1024,
@@ -243,8 +309,8 @@ async function getReport(req, res) {
     if (task.status !== 'done') {
       // возможно отчёт уже готов на стороне Python — синхронизируем
       try {
-        const py = await _py('get', `/audit/status/${encodeURIComponent(task.id)}`);
-        if (py.status === 'done') await _persistReport(task.id);
+        const py = await _py('get', `/audit/status/${encodeURIComponent(task.python_task_id || task.id)}`);
+        if (py.status === 'done') await _persistReport(task.id, task.python_task_id || task.id);
         else return res.status(409).json({ error: 'not_ready', status: py.status, progress: py.progress });
       } catch (_) {
         return res.status(409).json({ error: 'not_ready', status: task.status });
@@ -615,4 +681,4 @@ async function deleteTask(req, res) {
 }
 
 module.exports = { startAudit, listTasks, getStatus, getReport, exportReport, compareTask,
-  createShareLink, revokeShareLink, getSharedReport, deleteTask };
+  createShareLink, revokeShareLink, getSharedReport, deleteTask, recoverRunningAudits };

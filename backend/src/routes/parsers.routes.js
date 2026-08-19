@@ -1,8 +1,9 @@
+'use strict';
+
 const express = require('express');
-const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const router = express.Router();
 const parsersController = require('../controllers/parsers.controller');
-// const { authenticate } = require('../middleware/auth'); // If needed
 
 const downloadLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -14,6 +15,8 @@ const downloadLimiter = rateLimit({
 
 router.post('/start', parsersController.startParsing);
 router.get('/status/:taskId', parsersController.getTaskStatus);
+router.post('/cancel/:taskId', parsersController.cancelTask);
+router.post('/retry-failed/:taskId', parsersController.retryFailed);
 router.get('/download/:taskId', downloadLimiter, parsersController.downloadReport);
 
 module.exports = router;

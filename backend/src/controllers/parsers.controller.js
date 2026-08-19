@@ -1,263 +1,150 @@
+'use strict';
+
 const { v4: uuidv4 } = require('uuid');
-const axios = require('axios');
-const exceljs = require('exceljs');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
 const db = require('../config/db');
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DB helpers for parser_tasks
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function createTask(taskId, userId, total) {
-    await db.query(
-        `INSERT INTO parser_tasks (id, user_id, status, progress, total)
-         VALUES ($1, $2, 'running', 0, $3)`,
-        [taskId, userId || null, total]
-    );
-}
-
-async function updateTaskProgress(taskId, progress) {
-    await db.query(
-        `UPDATE parser_tasks SET progress = $2, updated_at = NOW() WHERE id = $1`,
-        [taskId, progress]
-    );
-}
-
-async function completeTask(taskId, results, filePath) {
-    await db.query(
-        `UPDATE parser_tasks SET status = 'done', progress = total, results = $2, file_path = $3, updated_at = NOW() WHERE id = $1`,
-        [taskId, JSON.stringify(results), filePath]
-    );
-}
-
-async function failTask(taskId, error) {
-    await db.query(
-        `UPDATE parser_tasks SET status = 'error', error = $2, updated_at = NOW() WHERE id = $1`,
-        [taskId, (error || '').substring(0, 2000)]
-    );
-}
+const {
+  normalizeUrls,
+  createParserTask,
+  updateTaskProgress,
+  finalizeParserTask,
+} = require('../services/parser/parserTaskService');
+const { enqueueOutbox, publishPendingOutbox } = require('../services/tasks/reliability');
 
 async function getTask(taskId) {
-    const { rows } = await db.query(`SELECT * FROM parser_tasks WHERE id = $1`, [taskId]);
-    return rows[0] || null;
+  const { rows } = await db.query(
+    `SELECT id, user_id, status, progress, total, results, error, file_path,
+            heartbeat_at, lease_until, recovery_attempts, updated_at, finished_at
+       FROM parser_tasks WHERE id=$1`, [taskId]);
+  return rows[0] || null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+async function getProgress(taskId) {
+  const { rows } = await db.query(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE status IN ('completed','partial','failed'))::int AS processed,
+       COUNT(*) FILTER (WHERE status='completed')::int AS completed,
+       COUNT(*) FILTER (WHERE status='partial')::int AS partial,
+       COUNT(*) FILTER (WHERE status='failed')::int AS failed,
+       COUNT(*) FILTER (WHERE status IN ('queued','running','retry_wait'))::int AS pending
+     FROM parser_task_items WHERE task_id=$1`, [taskId]);
+  return rows[0] || { total: 0, processed: 0, completed: 0, partial: 0, failed: 0, pending: 0 };
+}
 
 exports.startParsing = async (req, res) => {
-    try {
-        let { urls, options } = req.body;
-        // options: { contacts: bool, about: bool, services: bool, deepseek_api_key: string }
-        
-        if (!urls || !Array.isArray(urls)) {
-            urls = [];
-        } else {
-            // Validation, normalization and deduplication
-            const validUrls = new Set();
-            for (let u of urls) {
-                if (typeof u === 'string') {
-                    u = u.trim();
-                    if (u) {
-                        if (!/^https?:\/\//i.test(u)) {
-                            u = 'https://' + u;
-                        }
-                        validUrls.add(u);
-                    }
-                }
-            }
-            urls = Array.from(validUrls);
-        }
-        
-        if (urls.length === 0 && !options?.search_query) {
-            return res.status(400).json({ error: 'List of URLs or search_query is required' });
-        }
-
-        const taskId = uuidv4();
-        const userId = req.user?.id || null;
-        
-        // Save initial state to DB
-        await createTask(taskId, userId, urls.length || 10);
-
-        res.json({ task_id: taskId });
-
-        // Start background process
-        processUrls(taskId, urls, options);
-        
-    } catch (error) {
-        console.error('startParsing error:', error);
-        res.status(500).json({ error: error.message });
+  try {
+    const options = (req.body && req.body.options) || {};
+    const rawUrls = Array.isArray(req.body?.urls) ? req.body.urls : [];
+    const validUrls = normalizeUrls(rawUrls);
+    if (!validUrls.length && !options.search_query) {
+      return res.status(400).json({ error: 'List of URLs or search_query is required' });
     }
+    if (rawUrls.length && !validUrls.length && !options.search_query) {
+      return res.status(400).json({ error: 'No valid URLs were provided' });
+    }
+
+    const taskId = uuidv4();
+    const userId = req.user?.id || null;
+    await createParserTask({ taskId, userId, urls: rawUrls, options });
+    const total = validUrls.length || 0;
+    res.status(202).json({ task_id: taskId, status: 'queued', total });
+  } catch (error) {
+    console.error('[parsers.startParsing]', error.stack || error.message);
+    res.status(500).json({ error: error.message || 'internal_error' });
+  }
 };
 
-async function processUrls(taskId, urls, options) {
-    try {
-        let finalUrls = urls;
-
-        if (urls.length === 0 && options?.search_query) {
-            // Fetch from xmlstock if search_query is provided
-            const { fetchYandexSerp } = require('../services/metaTags/xmlstockClient');
-            try {
-                const serp = await fetchYandexSerp({
-                    query: options.search_query,
-                    page: 0
-                });
-                finalUrls = (serp.organic || []).map(r => r.url).slice(0, 10);
-            } catch (err) {
-                console.warn('Failed to fetch SERP:', err.message);
-                finalUrls = [];
-            }
-        }
-
-        // Apply same validation to search results
-        const validFinalUrls = new Set();
-        for (let u of finalUrls) {
-            if (typeof u === 'string') {
-                u = u.trim();
-                if (u) {
-                    if (!/^https?:\/\//i.test(u)) {
-                        u = 'https://' + u;
-                    }
-                    validFinalUrls.add(u);
-                }
-            }
-        }
-        finalUrls = Array.from(validFinalUrls);
-
-        if (finalUrls.length === 0) {
-            throw new Error('No URLs to parse');
-        }
-        
-        // Update total in DB
-        await db.query(`UPDATE parser_tasks SET total = $2, updated_at = NOW() WHERE id = $1`, [taskId, finalUrls.length]);
-
-        const AUDIT_URL = process.env.AUDIT_INTERNAL_URL || 'http://audit:8002';
-        const results = [];
-        
-        const CONCURRENCY = Number(process.env.PARSER_CONCURRENCY) || 5; // до 5 сайтов одновременно
-        let index = 0;
-        let progressCount = 0;
-        
-        const worker = async () => {
-            while (index < finalUrls.length) {
-                const i = index++;
-                const currentUrl = finalUrls[i];
-                
-                try {
-                    const payload = {
-                        urls: [currentUrl],
-                        extract_contacts: options?.contacts || false,
-                        extract_about: options?.about || false,
-                        extract_services: options?.services || false,
-                        extract_clients: options?.clients || false,
-                        api_key: process.env.DEEPSEEK_API_KEY || options?.deepseek_api_key || ""
-                    };
-                    
-                    const response = await axios.post(`${AUDIT_URL}/audit/parsers/extract`, payload, {
-                        headers: {
-                            'X-Internal-Token': process.env.RELEVANCE_INTERNAL_TOKEN || ''
-                        },
-                        timeout: 300000 // 5 mins
-                    });
-                    
-                    if (response.data && response.data.results && response.data.results.length > 0) {
-                        results.push(response.data.results[0]);
-                    } else {
-                        results.push({ url: currentUrl, status: "Ошибка: пустой ответ от сервиса" });
-                    }
-                } catch (err) {
-                    const code = err.code || '';
-                    if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT') {
-                        results.push({ url: currentUrl, status: 'Сервис парсинга недоступен' });
-                    } else {
-                        results.push({ url: currentUrl, status: `Ошибка API: ${err.message}` });
-                    }
-                }
-                
-                progressCount++;
-                // Batch DB updates every 3 items or on last item
-                if (progressCount % 3 === 0 || progressCount === finalUrls.length) {
-                    await updateTaskProgress(taskId, progressCount).catch(() => {});
-                }
-            }
-        };
-
-        const workers = [];
-        for (let w = 0; w < CONCURRENCY; w++) {
-            workers.push(worker());
-        }
-        await Promise.all(workers);
-        
-        // Generate Excel
-        const workbook = new exceljs.Workbook();
-        const worksheet = workbook.addWorksheet('Parsers');
-        
-        worksheet.columns = [
-            { header: 'URL сайта', key: 'url', width: 30 },
-            { header: 'Title главной страницы', key: 'title', width: 30 },
-            { header: 'Контакты', key: 'contacts', width: 30 },
-            { header: 'О компании', key: 'about', width: 30 },
-            { header: 'Список услуг', key: 'services', width: 30 },
-            { header: 'Ключевой упор (Фокус)', key: 'focus', width: 30 },
-            { header: 'Категории клиентов', key: 'client_segments', width: 40 },
-            { header: 'С кем работает', key: 'works_with', width: 30 },
-            { header: 'Статус парсинга', key: 'status', width: 20 }
-        ];
-
-        for (const item of results) {
-            worksheet.addRow({
-                url: item.url,
-                title: item.title,
-                contacts: item.contacts,
-                about: item.about,
-                services: Array.isArray(item.services) ? item.services.join(', ') : item.services,
-                focus: item.focus,
-                client_segments: Array.isArray(item.client_segments) ? item.client_segments.join('\n') : item.client_segments,
-                works_with: item.works_with,
-                status: item.status
-            });
-        }
-        
-        const uploadsDir = path.join(os.tmpdir(), 'generator_uploads');
-        if (!fs.existsSync(uploadsDir)) {
-            fs.mkdirSync(uploadsDir, { recursive: true });
-        }
-        
-        const filePath = path.join(uploadsDir, `parsers_${taskId}.xlsx`);
-        await workbook.xlsx.writeFile(filePath);
-        
-        await completeTask(taskId, results, filePath);
-        
-    } catch (err) {
-        console.error('Parsers background error:', err);
-        await failTask(taskId, err.message);
-    }
-}
-
 exports.getTaskStatus = async (req, res) => {
-    const { taskId } = req.params;
-    const task = await getTask(taskId);
-    if (!task) {
-        return res.status(404).json({ error: 'Task not found' });
-    }
+  try {
+    const task = await getTask(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const progress = await getProgress(task.id);
+    const heartbeatAgeMs = task.heartbeat_at ? Date.now() - new Date(task.heartbeat_at).getTime() : null;
     res.json({
-        id: task.id,
-        status: task.status,
-        progress: task.progress,
-        total: task.total,
-        error: task.error
+      id: task.id,
+      status: task.status,
+      progress: progress.processed,
+      total: progress.total || task.total || 0,
+      progress_detail: progress,
+      error: task.error,
+      recovery_attempts: task.recovery_attempts || 0,
+      heartbeat_at: task.heartbeat_at,
+      heartbeat_stale: heartbeatAgeMs != null && heartbeatAgeMs > 90000,
+      updated_at: task.updated_at,
+      finished_at: task.finished_at,
     });
+  } catch (error) {
+    console.error('[parsers.getTaskStatus]', error.message);
+    res.status(500).json({ error: 'internal_error' });
+  }
+};
+
+exports.cancelTask = async (req, res) => {
+  try {
+    const taskId = req.params.taskId;
+    const { rowCount } = await db.query(
+      `UPDATE parser_tasks SET status='cancelled', error='Отменено пользователем',
+              finished_at=NOW(), updated_at=NOW(), heartbeat_at=NOW()
+        WHERE id=$1 AND status NOT IN ('done','error','cancelled')`, [taskId]);
+    await db.query(
+      `UPDATE parser_task_items SET status='cancelled', lease_token=NULL, lease_until=NULL,
+              heartbeat_at=NOW(), updated_at=NOW(), finished_at=NOW()
+        WHERE task_id=$1 AND status IN ('queued','running','retry_wait')`, [taskId]);
+    res.json({ id: taskId, status: rowCount ? 'cancelled' : 'unchanged' });
+  } catch (error) {
+    console.error('[parsers.cancelTask]', error.message);
+    res.status(500).json({ error: 'internal_error' });
+  }
+};
+
+exports.retryFailed = async (req, res) => {
+  try {
+    const taskId = req.params.taskId;
+    const { rows } = await db.query(
+      `UPDATE parser_task_items
+          SET status='queued', attempts=0, error_code=NULL, error_message=NULL,
+              next_attempt_at=NULL, finished_at=NULL, updated_at=NOW()
+        WHERE task_id=$1 AND status='failed'
+        RETURNING id`, [taskId]);
+    await db.query(
+      `UPDATE parser_tasks SET status='queued', error=NULL, finished_at=NULL, updated_at=NOW()
+        WHERE id=$1 AND status IN ('done','error','partial','cancelled')`, [taskId]);
+    for (const row of rows) {
+      await enqueueOutbox({
+        queueName: 'parser-scans',
+        jobName: 'parse-url',
+        jobId: `parser:${taskId}:${row.id}:manual:${Date.now()}`,
+        payload: { taskId, itemId: row.id },
+      });
+    }
+    await publishPendingOutbox(db, 100);
+    res.json({ id: taskId, queued: rows.length });
+  } catch (error) {
+    console.error('[parsers.retryFailed]', error.message);
+    res.status(500).json({ error: 'internal_error' });
+  }
 };
 
 exports.downloadReport = async (req, res) => {
-    const { taskId } = req.params;
-    const task = await getTask(taskId);
-    if (!task) {
-        return res.status(404).json({ error: 'Task not found' });
-    }
+  try {
+    const task = await getTask(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
     if (task.status !== 'done' || !task.file_path) {
-        return res.status(400).json({ error: 'Report not ready' });
+      // A crash during finalization should not discard already persisted items.
+      const progress = await updateTaskProgress(task.id);
+      if (progress.pending === 0 && progress.total > 0) {
+        await finalizeParserTask(task.id);
+      }
     }
-    res.download(task.file_path, `parsers_report.xlsx`);
+    const fresh = await getTask(req.params.taskId);
+    if (!fresh || fresh.status !== 'done' || !fresh.file_path) {
+      return res.status(409).json({ error: 'Report not ready', status: fresh?.status || 'not_found' });
+    }
+    res.download(fresh.file_path, `parsers_report.xlsx`);
+  } catch (error) {
+    console.error('[parsers.downloadReport]', error.message);
+    res.status(500).json({ error: error.message || 'internal_error' });
+  }
 };
+
+module.exports = exports;

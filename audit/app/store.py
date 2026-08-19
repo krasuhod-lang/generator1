@@ -61,3 +61,31 @@ async def delete_task(task_id: str):
             await _redis.delete(_PREFIX + task_id)
         except Exception as e:
             logger.debug("redis del failed: %s", e)
+
+
+async def list_active_tasks(limit: int = 200):
+    """Return durable running/queued task snapshots for startup recovery."""
+    found = {}
+    for task_id, data in _mem.items():
+        if data and data.get("status") in {"running", "queued"}:
+            data = dict(data)
+            data.setdefault("task_id", task_id)
+            found[task_id] = data
+
+    if _redis is not None:
+        try:
+            async for key in _redis.scan_iter(match=_PREFIX + "*", count=100):
+                if len(found) >= limit:
+                    break
+                raw = await _redis.get(key)
+                if not raw:
+                    continue
+                data = json.loads(raw)
+                if data.get("status") in {"running", "queued"}:
+                    task_id = data.get("task_id") or key.removeprefix(_PREFIX)
+                    data["task_id"] = task_id
+                    found[task_id] = data
+        except Exception as e:
+            logger.warning("active task scan failed: %s", e)
+
+    return list(found.values())[:limit]

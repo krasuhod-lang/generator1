@@ -17,13 +17,13 @@
  */
 
 const db        = require('../config/db');
-const crawler   = require('../services/siteCrawler/crawler');
 const urlN      = require('../services/siteCrawler/urlNormalizer');
 const tree      = require('../services/siteCrawler/treeBuilder');
 const sections  = require('../services/siteCrawler/sectionClassifier');
 const csvExp    = require('../services/siteCrawler/exporters/csv');
 const xlsxExp   = require('../services/siteCrawler/exporters/xlsx');
 const { loadAccessibleProject, canAct } = require('../services/projects/projectGrants');
+const { publishPendingOutbox } = require('../services/tasks/reliability');
 
 const MAX_CONCURRENT_TASKS = 2;
 const PAGE_COLUMNS = [
@@ -33,7 +33,8 @@ const PAGE_COLUMNS = [
 
 async function _loadTask(taskId, userId, opts = {}) {
   const { rows } = await db.query(
-    `SELECT id, user_id, project_id, start_url, options, status, stats, error,
+      `SELECT id, user_id, project_id, start_url, options, status, stats, error,
+            worker_id, heartbeat_at, lease_until, recovery_attempts, updated_at,
             created_at, started_at, finished_at
        FROM site_crawl_tasks
       WHERE id = $1`, [taskId],
@@ -80,30 +81,31 @@ async function createTask(req, res) {
         limit: MAX_CONCURRENT_TASKS });
     }
 
-    const { rows } = await db.query(
-      `INSERT INTO site_crawl_tasks (user_id, project_id, start_url, options, status)
-       VALUES ($1, $2, $3, $4::jsonb, 'queued')
-       RETURNING id, status, created_at`,
-      [userId, projectId, start, JSON.stringify(options || {})],
-    );
-    const taskId = rows[0].id;
-
-    // Запуск в фоне — паттерн репозитория (см. setImmediate в analysisRunner).
-    setImmediate(() => {
-      crawler.runCrawl({ taskId, startUrl: start, options })
-        .catch(async (e) => {
-          try {
-            await db.query(
-              `UPDATE site_crawl_tasks
-                  SET status='error', error=$2, finished_at=NOW()
-                WHERE id=$1 AND status NOT IN ('done','cancelled')`,
-              [taskId, e.message.slice(0, 500)],
-            );
-          } catch (_) {}
-          // eslint-disable-next-line no-console
-          console.warn('[siteCrawler] runCrawl failed:', e.message);
-        });
-    });
+    const client = await db.getClient();
+    let taskId;
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `INSERT INTO site_crawl_tasks (user_id, project_id, start_url, options, status, heartbeat_at, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, 'queued', NOW(), NOW())
+         RETURNING id, status, created_at`,
+        [userId, projectId, start, JSON.stringify(options || {})],
+      );
+      taskId = rows[0].id;
+      await client.query(
+        `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
+         VALUES ('site-crawls','crawl-site',$1,$2::jsonb)
+         ON CONFLICT (queue_name,job_id) DO NOTHING`,
+        [`site-crawl:${taskId}`, JSON.stringify({ taskId, startUrl: start, options: options || {} })],
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw e;
+    } finally {
+      client.release();
+    }
+    publishPendingOutbox(db, 50).catch((e) => console.warn('[siteCrawler] outbox delayed:', e.message));
 
     res.status(201).json({ id: taskId, status: 'queued', start_url: start });
   } catch (e) {
@@ -117,8 +119,8 @@ async function listTasks(req, res) {
   try {
     const userId = req.user.id;
     const { rows } = await db.query(
-      `SELECT id, project_id, start_url, status, stats,
-              created_at, started_at, finished_at, error
+      `SELECT id, project_id, start_url, status, stats, worker_id, heartbeat_at,
+              lease_until, recovery_attempts, updated_at, created_at, started_at, finished_at, error
          FROM site_crawl_tasks
         WHERE user_id = $1
         ORDER BY created_at DESC
@@ -222,7 +224,8 @@ async function cancelTask(req, res) {
     }
     await db.query(
       `UPDATE site_crawl_tasks
-          SET status='cancelled', finished_at=COALESCE(finished_at, NOW())
+          SET status='cancelled', finished_at=COALESCE(finished_at, NOW()),
+              lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
         WHERE id=$1`, [t.id],
     );
     res.json({ id: t.id, status: 'cancelled' });
