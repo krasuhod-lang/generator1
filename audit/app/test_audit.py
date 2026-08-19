@@ -385,6 +385,159 @@ class TestFetcherTimeouts(unittest.TestCase):
         self.assertEqual(fetcher.FetchResult("https://e.com/").fetch_status, "ok")
 
 
+class TestAiResponseNormalizer(unittest.TestCase):
+    def test_dict_response(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({
+            "contacts": "8 800",
+            "about": "Компания",
+            "services": ["SEO"],
+            "focus": "Маркетинг",
+            "client_segments": ["стоматологии — SEO"],
+            "works_with": "B2B: медицина",
+        })
+        self.assertEqual(out["source_type"], "json")
+        self.assertEqual(out["parse_status"], "ok")
+        self.assertEqual(out["fields"]["contacts_summary"], "8 800")
+        self.assertEqual(out["fields"]["services_list"], ["SEO"])
+
+    def test_json_string_response(self):
+        import json
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response(json.dumps({
+            "about_summary": "Агентство",
+            "client_segments": ["клиники — лидогенерация"],
+            "works_with": "B2B: клиники",
+        }, ensure_ascii=False))
+        self.assertEqual(out["source_type"], "json")
+        self.assertEqual(out["parse_status"], "partial")
+        self.assertEqual(out["fields"]["about_summary"], "Агентство")
+
+    def test_double_serialized_json_response(self):
+        import json
+        from .ai_response_normalizer import normalize_llm_response
+
+        inner = json.dumps({"services_list": ["SEO"], "works_with": "B2B"}, ensure_ascii=False)
+        out = normalize_llm_response(json.dumps(inner, ensure_ascii=False))
+        self.assertEqual(out["fields"]["services_list"], ["SEO"])
+        self.assertEqual(out["fields"]["works_with"], "B2B")
+
+    def test_fenced_json_response(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response('```json\n{"main_focus":"SEO","services_list":["аудит"]}\n```')
+        self.assertEqual(out["fields"]["main_focus"], "SEO")
+        self.assertEqual(out["fields"]["services_list"], ["аудит"])
+
+    def test_openai_choices_response(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({
+            "choices": [{"message": {"content": '{"about_summary":"О компании"}'}}],
+        })
+        self.assertEqual(out["source_type"], "openai_response")
+        self.assertEqual(out["fields"]["about_summary"], "О компании")
+
+    def test_dspy_prediction_attrs(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        class Prediction:
+            contacts_summary = ""
+            about_summary = "Описание"
+            services_list = '["SEO", "PPC"]'
+            main_focus = "Продвижение"
+            client_segments = "стоматологии — SEO\nмедцентры — PPC"
+            works_with = "B2B: медицина"
+
+        out = normalize_llm_response(Prediction())
+        self.assertEqual(out["source_type"], "dspy_prediction")
+        self.assertEqual(out["fields"]["services_list"], ["SEO", "PPC"])
+        self.assertEqual(out["fields"]["client_segments"], ["стоматологии — SEO", "медцентры — PPC"])
+
+    def test_lm_history_outputs_string(self):
+        import json
+        from .ai_response_normalizer import normalize_lm_history
+
+        raw = json.dumps({"about_summary": "Из history", "works_with": "B2B"}, ensure_ascii=False)
+
+        class LM:
+            history = [{"outputs": raw}]
+
+        out = normalize_lm_history(LM())
+        self.assertEqual(out["source_type"], "history")
+        self.assertEqual(out["fields"]["about_summary"], "Из history")
+
+    def test_labeled_text_ru(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response("""
+        О компании: Производитель оборудования
+        Список услуг:
+        - проектирование
+        - монтаж
+        Категории клиентов: заводы — оборудование
+        С кем работает: B2B: промышленные предприятия
+        """)
+        self.assertEqual(out["source_type"], "labeled_text")
+        self.assertEqual(out["fields"]["services_list"], ["проектирование", "монтаж"])
+        self.assertEqual(out["fields"]["works_with"], "B2B: промышленные предприятия")
+
+    def test_client_segments_shapes(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({
+            "client_segments": ("стоматологии — SEO", "", {"segment": "клиники"}),
+            "works_with": None,
+        })
+        self.assertIn("стоматологии — SEO", out["fields"]["client_segments"])
+        self.assertTrue(any("dict item" in w for w in out["warnings"]))
+        self.assertEqual(out["fields"]["works_with"], "")
+
+    def test_unknown_type_no_items_error(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response(42)
+        self.assertEqual(out["parse_status"], "invalid")
+        self.assertIn("unsupported scalar", " ".join(out["warnings"]))
+
+    def test_corrupted_response_is_invalid(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response("{not json")
+        self.assertEqual(out["parse_status"], "invalid")
+        self.assertEqual(out["fields"], {})
+
+    def test_deduplicates_and_drops_empty_items(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({"services_list": [" SEO ", "", "seo", "PPC"]})
+        self.assertEqual(out["fields"]["services_list"], ["SEO", "PPC"])
+
+    def test_partial_response_status(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({"about_summary": "Только описание"})
+        self.assertEqual(out["parse_status"], "partial")
+        self.assertEqual(out["fields"]["about_summary"], "Только описание")
+
+    def test_sentinel_values_are_preserved_as_text(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        msg = "Не определено — на сайте нет явных данных о категориях клиентов"
+        out = normalize_llm_response({"client_segments": [msg], "works_with": msg})
+        self.assertEqual(out["fields"]["client_segments"], [msg])
+        self.assertEqual(out["fields"]["works_with"], msg)
+
+    def test_brand_only_segment_is_dropped(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({"client_segments": ["REHAU", "оконные компании — поставки"]})
+        self.assertEqual(out["fields"]["client_segments"], ["оконные компании — поставки"])
+        self.assertTrue(any("dropped non-category" in w for w in out["warnings"]))
+
+
 class TestParsersClientSegmentation(unittest.TestCase):
     """Client segmentation: новые поля client_segments/works_with и расширенный краул."""
 

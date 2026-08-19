@@ -13,6 +13,7 @@ import aiohttp
 from .page_parser import _clean_text, _same_domain, base_hostname
 from .fetcher import fetch_page
 from .store import _redis
+from .ai_response_normalizer import normalize_llm_response, normalize_lm_history
 
 logger = logging.getLogger("audit.parsers")
 
@@ -270,6 +271,10 @@ def _ai_field(pred: Any, name: str) -> Any:
 
 
 def _prediction_fields(pred: Any) -> Dict[str, Any]:
+    normalized = normalize_llm_response(pred)
+    if normalized.get("parse_status") != "invalid":
+        return normalized.get("fields") or {}
+
     parsed = _parse_ai_output(pred)
     if parsed:
         return parsed
@@ -328,6 +333,10 @@ def _iter_lm_history_outputs(value: Any):
 def _latest_lm_fields(lm: Any) -> Dict[str, Any]:
     """DSPy 2.5 may fail while parsing a valid-but-string response.
     Recover fields from raw LM history so the parser task is not marked failed."""
+    normalized = normalize_lm_history(lm)
+    if normalized.get("parse_status") != "invalid":
+        return normalized.get("fields") or {}
+
     for entry in reversed(getattr(lm, "history", []) or []):
         outputs = list(_iter_lm_history_outputs(entry))
         for output in reversed(outputs):
