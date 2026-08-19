@@ -46,6 +46,7 @@ const reportsRoutes       = require('./src/routes/reports.routes');
 const reportsPublicRoutes = require('./src/routes/reportsPublic.routes');
 const positionTrackerRoutes = require('./src/routes/positionTracker.routes');
 const siteCrawlerRoutes     = require('./src/routes/siteCrawler.routes');
+const parserBotRoutes       = require('./src/routes/parserBot.routes');
 const auditRoutes           = require('./src/routes/audit.routes');
 const auditPublicRoutes     = require('./src/routes/auditPublic.routes');
 const cannibalizationRoutes = require('./src/routes/cannibalization.routes');
@@ -155,6 +156,7 @@ app.use('/api/reports',        reportsRoutes);
 app.use('/api/public',         reportsPublicRoutes);
 app.use('/api/position-tracker', positionTrackerRoutes);
 app.use('/api/site-crawler',     siteCrawlerRoutes);
+app.use('/api/parser-bot',       parserBotRoutes);
 app.use('/api/audit',            auditRoutes);
 app.use('/api/public',           auditPublicRoutes);
 app.use('/api/cannibalization',  cannibalizationRoutes);
@@ -483,6 +485,14 @@ const start = async () => {
       startStorageRetentionScheduler();
     } catch (e) {
       console.warn('[Server] Storage-retention scheduler skipped:', e.message);
+    }
+
+    // Durable parser-bot worker: PostgreSQL queue + retry + heartbeat + resume.
+    try {
+      const { startParserBotWorker } = require('./src/services/parserBot/worker');
+      startParserBotWorker();
+    } catch (e) {
+      console.warn('[Server] parser-bot worker skipped:', e.message);
     }
 
     const server = app.listen(PORT, () => {
@@ -3436,6 +3446,59 @@ async function ensureSchema() {
       )
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_parser_tasks_user_status ON parser_tasks(user_id, status)`);
+
+    // Migration 130: durable parser-bot queue with per-URL retry/heartbeat/resume.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS parser_scan_tasks (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        project_id   UUID NULL REFERENCES projects(id) ON DELETE SET NULL,
+        status       TEXT NOT NULL DEFAULT 'queued',
+        options      JSONB NOT NULL DEFAULT '{}'::jsonb,
+        total        INT NOT NULL DEFAULT 0,
+        processed    INT NOT NULL DEFAULT 0,
+        succeeded    INT NOT NULL DEFAULT 0,
+        failed       INT NOT NULL DEFAULT 0,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        started_at   TIMESTAMPTZ NULL,
+        finished_at  TIMESTAMPTZ NULL,
+        heartbeat_at TIMESTAMPTZ NULL,
+        worker_id    TEXT NULL,
+        error        TEXT NULL
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_parser_scan_tasks_user_created
+      ON parser_scan_tasks(user_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_parser_scan_tasks_status
+      ON parser_scan_tasks(status, created_at ASC)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS parser_scan_items (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        task_id         UUID NOT NULL REFERENCES parser_scan_tasks(id) ON DELETE CASCADE,
+        input_url       TEXT NOT NULL,
+        normalized_url  TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'queued',
+        attempts        INT NOT NULL DEFAULT 0,
+        next_attempt_at TIMESTAMPTZ NULL,
+        started_at      TIMESTAMPTZ NULL,
+        heartbeat_at    TIMESTAMPTZ NULL,
+        finished_at     TIMESTAMPTZ NULL,
+        result          JSONB NULL,
+        field_status    JSONB NULL,
+        evidence        JSONB NULL,
+        stats           JSONB NULL,
+        error_code      TEXT NULL,
+        error_message   TEXT NULL,
+        content_hash    TEXT NULL,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(task_id, normalized_url)
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_parser_scan_items_claim
+      ON parser_scan_items(status, next_attempt_at, created_at ASC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_parser_scan_items_task_status
+      ON parser_scan_items(task_id, status)`);
 
     console.log('[Schema] ensureSchema OK');
   } catch (err) {

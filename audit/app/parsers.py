@@ -13,6 +13,7 @@ import aiohttp
 from .page_parser import _clean_text, _same_domain, base_hostname
 from .fetcher import fetch_page
 from .store import _redis
+from .ai_response_normalizer import normalize_llm_response, normalize_lm_history
 
 logger = logging.getLogger("audit.parsers")
 
@@ -70,6 +71,28 @@ _NON_HTML_EXTENSIONS = (
     ".css", ".js", ".mp4", ".mp3", ".avi", ".mov",
 )
 
+CLIENT_FALLBACKS = {
+    "not_found": {
+        "client_segments": "Не определено — на сайте нет явных данных о категориях клиентов",
+        "works_with": "Не определено — на сайте нет явных указаний, с кем работает компания",
+    },
+    "fetch_error": {
+        "client_segments": "Не определено — сайт недоступен или не удалось получить его содержимое",
+        "works_with": "Не определено — анализ невозможен из-за ошибки доступа к сайту",
+    },
+    "llm_error": {
+        "client_segments": "Не удалось определить — ошибка анализа ИИ",
+        "works_with": "Не удалось определить — ошибка анализа ИИ",
+    },
+}
+
+AUDIENCE_SIGNAL_RE = re.compile(
+    r"(работа(?:ем|ет|ют)\s+с|для\s+[а-яa-z]|наши\s+клиент|клиент(?:ы|ам|ов)|"
+    r"заказчик|кейсы?|портфолио|проекты?|отрасл|решени[ея]\s+для|"
+    r"\bB2B\b|\bB2C\b|\bB2G\b)",
+    re.IGNORECASE,
+)
+
 
 def _normalize_internal_link(base_url: str, raw_href: str, base_host: str) -> Optional[str]:
     href = (raw_href or "").strip()
@@ -83,6 +106,210 @@ def _normalize_internal_link(base_url: str, raw_href: str, base_host: str) -> Op
     if not _same_domain(full_url, base_host):
         return None
     return full_url
+
+
+def _base_result(url: str, title: str = "") -> Dict[str, Any]:
+    return {
+        "url": url,
+        "title": title,
+        "contacts": "",
+        "about": "",
+        "services": [],
+        "focus": "",
+        "client_segments": [],
+        "works_with": "",
+        "status": "ok",
+        "field_status": {},
+        "evidence": [],
+        "warnings": [],
+        "stats": {"pages_scanned": 0},
+    }
+
+
+def _requested_status_fields(
+    *,
+    extract_contacts: bool,
+    extract_about: bool,
+    extract_services: bool,
+    extract_clients: bool,
+) -> List[str]:
+    fields: List[str] = []
+    if extract_contacts:
+        fields.append("contacts")
+    if extract_about:
+        fields.append("about")
+    if extract_services:
+        fields.extend(["services", "focus"])
+    if extract_clients:
+        fields.extend(["client_segments", "works_with"])
+    return fields
+
+
+def _mark_requested_statuses(result: Dict[str, Any], status: str, **flags: bool) -> None:
+    for field in _requested_status_fields(**flags):
+        result.setdefault("field_status", {})[field] = status
+
+
+def _append_warning(result: Dict[str, Any], warning: str) -> None:
+    warning = (warning or "").strip()
+    if warning:
+        result.setdefault("warnings", []).append(warning[:500])
+
+
+def _apply_client_fallback(result: Dict[str, Any], status: str) -> None:
+    fallback = CLIENT_FALLBACKS.get(status) or CLIENT_FALLBACKS["not_found"]
+    result["client_segments"] = [fallback["client_segments"]]
+    result["works_with"] = fallback["works_with"]
+    result.setdefault("field_status", {})["client_segments"] = status
+    result.setdefault("field_status", {})["works_with"] = status
+
+
+def _mark_non_client_field_statuses(
+    result: Dict[str, Any],
+    *,
+    extract_contacts: bool,
+    extract_about: bool,
+    extract_services: bool,
+    missing_status: str = "not_found",
+) -> None:
+    field_status = result.setdefault("field_status", {})
+    if extract_contacts:
+        field_status["contacts"] = "found" if result.get("contacts") else missing_status
+    if extract_about:
+        field_status["about"] = "found" if result.get("about") else missing_status
+    if extract_services:
+        field_status["services"] = "found" if result.get("services") else missing_status
+        field_status["focus"] = "found" if result.get("focus") else missing_status
+
+
+def _short_quote(text: str, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].strip() + "…"
+
+
+def _signal_type(text: str) -> str:
+    low = (text or "").lower()
+    if "кейс" in low or "case" in low:
+        return "case"
+    if "портфолио" in low or "portfolio" in low or "проект" in low:
+        return "case"
+    if "услуг" in low or "service" in low or "решени" in low:
+        return "service_page"
+    if "заяв" in low or "остав" in low or "получ" in low:
+        return "cta"
+    if "о компании" in low or "about" in low:
+        return "about"
+    return "explicit_phrase"
+
+
+def _sentences(text: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?。！？])\s+|\n+", text or "")
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _extract_audience_evidence(page_texts: List[Dict[str, str]], limit: int = 20) -> List[Dict[str, Any]]:
+    evidence: List[Dict[str, Any]] = []
+    seen = set()
+    for page in page_texts:
+        page_url = page.get("url") or ""
+        for sentence in _sentences(page.get("text") or ""):
+            if not AUDIENCE_SIGNAL_RE.search(sentence):
+                continue
+            quote = _short_quote(sentence)
+            if len(quote) < 20:
+                continue
+            key = (page_url, quote.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence.append({
+                "field": "client_segments",
+                "url": page_url,
+                "quote": quote,
+                "signal_type": _signal_type(quote),
+                "confidence": 0.8,
+            })
+            if len(evidence) >= limit:
+                return evidence
+    return evidence
+
+
+def _client_evidence_for_segments(
+    segments: List[str],
+    works_with: str,
+    audience_evidence: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not segments or not audience_evidence:
+        return []
+    out: List[Dict[str, Any]] = []
+    for idx, _segment in enumerate(segments):
+        ev = dict(audience_evidence[idx % len(audience_evidence)])
+        ev["field"] = "client_segments"
+        out.append(ev)
+    if works_with:
+        ev = dict(audience_evidence[0])
+        ev["field"] = "works_with"
+        out.append(ev)
+    return out
+
+
+def _finalize_client_fields(
+    result: Dict[str, Any],
+    *,
+    extract_clients: bool,
+    audience_evidence: List[Dict[str, Any]],
+    llm_failed: bool = False,
+) -> None:
+    if not extract_clients:
+        return
+
+    if llm_failed:
+        _apply_client_fallback(result, "llm_error")
+        return
+
+    segments = _coerce_to_list(result.get("client_segments"))
+    works_with = _coerce_to_text(result.get("works_with"))
+    evidence = _client_evidence_for_segments(segments, works_with, audience_evidence)
+
+    if segments and evidence:
+        result["client_segments"] = segments
+        result["evidence"] = [*result.get("evidence", []), *evidence]
+        result.setdefault("field_status", {})["client_segments"] = "found"
+        if works_with:
+            result["works_with"] = works_with
+            result.setdefault("field_status", {})["works_with"] = "found"
+        else:
+            result["works_with"] = CLIENT_FALLBACKS["not_found"]["works_with"]
+            result.setdefault("field_status", {})["works_with"] = "not_found"
+            _append_warning(result, "На сайте не найдено явных указаний, с кем работает компания")
+        return
+
+    _apply_client_fallback(result, "not_found")
+    if segments and not evidence:
+        _append_warning(result, "Категории клиентов отброшены: не найдено проверяемых цитат-доказательств")
+
+
+def _finalize_site_status(result: Dict[str, Any]) -> None:
+    statuses = list((result.get("field_status") or {}).values())
+    if not statuses:
+        result["status"] = "ok"
+        return
+    if all(s == "fetch_error" for s in statuses):
+        result["status"] = "fetch_error"
+    elif "fetch_error" in statuses:
+        result["status"] = "partial"
+    elif all(s == "llm_error" for s in statuses):
+        result["status"] = "llm_error"
+    elif "llm_error" in statuses:
+        result["status"] = "partial"
+    elif "partial" in statuses or ("found" in statuses and "not_found" in statuses):
+        result["status"] = "partial"
+    elif all(s == "not_found" for s in statuses):
+        result["status"] = "not_found"
+    else:
+        result["status"] = "ok"
 
 
 def _link_score(url: str, anchor_text: str = "") -> int:
@@ -270,9 +497,27 @@ def _ai_field(pred: Any, name: str) -> Any:
 
 
 def _prediction_fields(pred: Any) -> Dict[str, Any]:
+    normalized = _normalized_prediction(pred)
+    if normalized.get("parse_status") != "invalid":
+        return normalized.get("fields") or {}
+
+    return {}
+
+
+def _normalized_prediction(pred: Any) -> Dict[str, Any]:
+    normalized = normalize_llm_response(pred)
+    if normalized.get("parse_status") != "invalid":
+        return normalized
+
     parsed = _parse_ai_output(pred)
     if parsed:
-        return parsed
+        return {
+            "fields": parsed,
+            "raw_text": _coerce_to_text(pred),
+            "source_type": "legacy_parser",
+            "warnings": ["legacy parser fallback used"],
+            "parse_status": "partial",
+        }
 
     for method_name in ("toDict", "to_dict", "model_dump", "dict"):
         method = getattr(pred, method_name, None)
@@ -280,7 +525,13 @@ def _prediction_fields(pred: Any) -> Dict[str, Any]:
             try:
                 parsed = _parse_ai_output(method())
                 if parsed:
-                    return parsed
+                    return {
+                        "fields": parsed,
+                        "raw_text": "",
+                        "source_type": "legacy_prediction_method",
+                        "warnings": [f"{method_name} legacy parser fallback used"],
+                        "parse_status": "partial",
+                    }
             except Exception:
                 pass
 
@@ -292,7 +543,13 @@ def _prediction_fields(pred: Any) -> Dict[str, Any]:
         value = getattr(pred, name, None)
         if value not in (None, "", [], {}):
             fields[name] = value
-    return fields
+    return {
+        "fields": fields,
+        "raw_text": str(pred)[:8000],
+        "source_type": "legacy_prediction_attrs",
+        "warnings": [],
+        "parse_status": "partial" if fields else "invalid",
+    }
 
 
 def _coerce_to_text(value: Any) -> str:
@@ -328,6 +585,10 @@ def _iter_lm_history_outputs(value: Any):
 def _latest_lm_fields(lm: Any) -> Dict[str, Any]:
     """DSPy 2.5 may fail while parsing a valid-but-string response.
     Recover fields from raw LM history so the parser task is not marked failed."""
+    normalized = normalize_lm_history(lm)
+    if normalized.get("parse_status") != "invalid":
+        return normalized.get("fields") or {}
+
     for entry in reversed(getattr(lm, "history", []) or []):
         outputs = list(_iter_lm_history_outputs(entry))
         for output in reversed(outputs):
@@ -345,8 +606,11 @@ def _apply_ai_fields(
     extract_about: bool,
     extract_services: bool,
     extract_clients: bool,
-) -> None:
-    pred = _prediction_fields(pred)
+) -> Dict[str, Any]:
+    normalized = _normalized_prediction(pred)
+    pred = normalized.get("fields") or {}
+    for warning in normalized.get("warnings") or []:
+        _append_warning(result, warning)
     if extract_contacts:
         result["contacts"] = _coerce_to_text(_ai_field(pred, "contacts_summary"))
     if extract_about:
@@ -357,6 +621,7 @@ def _apply_ai_fields(
     if extract_clients:
         result["client_segments"] = _coerce_to_list(_ai_field(pred, "client_segments"))
         result["works_with"] = _coerce_to_text(_ai_field(pred, "works_with"))
+    return normalized
 
 
 class ExtractCompanyServices(dspy.Signature):
@@ -411,6 +676,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
             logger.debug(f"redis get failed: {e}")
 
     htmls = []
+    page_htmls: List[Tuple[str, str]] = []
     base_host = base_hostname(url)
 
     async with aiohttp.ClientSession() as session:
@@ -418,6 +684,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
             res = await fetch_page(session, url)
             html = res.html if res and res.html else ""
             htmls.append(html)
+            page_htmls.append((url, html))
 
             seen_urls = {url}
             queue: List[Tuple[str, int, int]] = []
@@ -445,6 +712,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                     if not sub_html:
                         continue
                     htmls.append(sub_html)
+                    page_htmls.append((sub_url, sub_html))
                     if len(htmls) >= MAX_SUBPAGES + 1 or depth >= PARSER_MAX_DEPTH:
                         continue
                     for link, score in _extract_internal_links(sub_html, sub_url, base_host):
@@ -456,7 +724,20 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                         queue.append((link, depth + 1, score))
         except Exception as e:
             logger.exception(f"Failed to fetch {url}")
-            return {"url": url, "status": f"Ошибка доступа: {str(e)[:100]}"}
+            result = _base_result(url)
+            result["status"] = "fetch_error"
+            result["error"] = f"Ошибка доступа: {str(e)[:100]}"
+            _mark_requested_statuses(
+                result,
+                "fetch_error",
+                extract_contacts=extract_contacts,
+                extract_about=extract_about,
+                extract_services=extract_services,
+                extract_clients=extract_clients,
+            )
+            if extract_clients:
+                _apply_client_fallback(result, "fetch_error")
+            return result
 
     combined_html = "\n\n".join(h for h in htmls if h)
     soup = BeautifulSoup(combined_html or "", "lxml")
@@ -470,32 +751,37 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
     # работают по одному документу) и склеиваем, иначе до LLM доходила только
     # главная страница, а докачанные подстраницы клиентов/кейсов терялись.
     cleaned_parts = []
-    for h in htmls:
+    page_texts: List[Dict[str, str]] = []
+    for page_url, h in page_htmls:
         if not h:
             continue
         part = _clean_text(h, BeautifulSoup(h, "lxml")) or ""
         part = part.strip()
         if part:
-            cleaned_parts.append(part)
+            page_texts.append({"url": page_url, "text": part})
+            cleaned_parts.append(f"Источник: {page_url}\n{part}")
     clean_text = "\n\n".join(cleaned_parts)
     # Trim to ~15000-20000 tokens (approx 60000 chars)
     clean_text = clean_text[:60000]
     
-    result = {
-        "url": url,
-        "title": title_text,
-        "contacts": "",
-        "about": "",
-        "services": [],
-        "focus": "",
-        "client_segments": [],
-        "works_with": "",
-        "status": "Успешно"
-    }
+    result = _base_result(url, title_text)
+    result["stats"]["pages_scanned"] = len(page_texts)
+    audience_evidence = _extract_audience_evidence(page_texts)
     effective_api_key = (deepseek_api_key or DEEPSEEK_API_KEY or "").strip()
 
     if not clean_text.strip():
-        result["status"] = "Ошибка: пустой контент"
+        result["status"] = "fetch_error"
+        result["error"] = "Ошибка: пустой контент"
+        _mark_requested_statuses(
+            result,
+            "fetch_error",
+            extract_contacts=extract_contacts,
+            extract_about=extract_about,
+            extract_services=extract_services,
+            extract_clients=extract_clients,
+        )
+        if extract_clients:
+            _apply_client_fallback(result, "fetch_error")
         if _redis is not None:
             try:
                 await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=CACHE_TTL_SECONDS)
@@ -505,8 +791,20 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
 
     if extract_services or extract_about or extract_contacts or extract_clients:
         if not effective_api_key:
-            result["status"] = "Ошибка ИИ: не задан DEEPSEEK_API_KEY"
+            result["status"] = "llm_error"
+            result["error"] = "Ошибка ИИ: не задан DEEPSEEK_API_KEY"
+            _mark_requested_statuses(
+                result,
+                "llm_error",
+                extract_contacts=extract_contacts,
+                extract_about=extract_about,
+                extract_services=extract_services,
+                extract_clients=extract_clients,
+            )
+            if extract_clients:
+                _apply_client_fallback(result, "llm_error")
         else:
+            llm_failed = False
             try:
                 # Set up DSPy with DeepSeek model
                 # DeepSeek uses OpenAI compatible API
@@ -538,7 +836,8 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                 )
                      
             except Exception as e:
-                recovered = _latest_lm_fields(locals().get("lm"))
+                recovered_normalized = normalize_lm_history(locals().get("lm"))
+                recovered = recovered_normalized.get("fields") if recovered_normalized.get("parse_status") != "invalid" else {}
                 if recovered:
                     _apply_ai_fields(
                         result,
@@ -548,9 +847,30 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                         extract_services=extract_services,
                         extract_clients=extract_clients,
                     )
+                    for warning in recovered_normalized.get("warnings") or []:
+                        _append_warning(result, warning)
                 else:
                     logger.exception(f"DSPy extraction failed for {url}")
-                    result["status"] = f"Ошибка ИИ: {str(e)[:100]}"
+                    result["status"] = "llm_error"
+                    result["error"] = f"Ошибка ИИ: {str(e)[:100]}"
+                    llm_failed = True
+
+            _mark_non_client_field_statuses(
+                result,
+                extract_contacts=extract_contacts,
+                extract_about=extract_about,
+                extract_services=extract_services,
+                missing_status="llm_error" if llm_failed else "not_found",
+            )
+            _finalize_client_fields(
+                result,
+                extract_clients=extract_clients,
+                audience_evidence=audience_evidence,
+                llm_failed=llm_failed,
+            )
+            _finalize_site_status(result)
+    else:
+        _finalize_site_status(result)
             
     # Кэшируем только успешные результаты. Если ИИ-извлечение было запрошено, но
     # модель не вернула ни одного поля — вероятен молчаливый сбой, не кэшируем,
@@ -560,7 +880,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
         result["contacts"] or result["about"] or result["services"]
         or result["focus"] or result["client_segments"] or result["works_with"]
     )
-    if _redis is not None and result["status"] == "Успешно" and (not llm_requested or produced_any):
+    if _redis is not None and result["status"] in {"ok", "partial", "not_found"} and (not llm_requested or produced_any):
         try:
             await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=CACHE_TTL_SECONDS)
         except Exception as e:
