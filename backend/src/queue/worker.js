@@ -1,6 +1,6 @@
 'use strict';
 
-const { Worker } = require('bullmq');
+const { Worker, DelayedError } = require('bullmq');
 const crypto = require('crypto');
 const os = require('os');
 const { connection, JOB_RETENTION } = require('./queue');
@@ -26,6 +26,9 @@ const { publish }    = require('../services/sse/sseManager');
 const { runPipeline, PipelinePausedError } = require('../services/pipeline/orchestrator');
 const { createParserWorker } = require('./parserWorker');
 const { createSiteCrawlerWorker } = require('./siteCrawlerWorker');
+const {
+  claimGenerationTask: claimGenerationTaskWithProfileSlot,
+} = require('../services/tasks/generationAdmission');
 
 // Максимум автоматических возобновлений задачи после ошибки пайплайна.
 // Задача НЕ падает сразу в "failed": воркер сам переставляет её на возобновление
@@ -54,20 +57,6 @@ async function loadTask(taskId) {
   return rows[0];
 }
 
-async function claimGenerationTask(taskId, jobId, leaseToken) {
-  const { rowCount } = await db.query(
-    `UPDATE tasks
-        SET status='processing', started_at=COALESCE(started_at,NOW()),
-            bull_job_id=$2, worker_id=$3, lease_token=$4::uuid,
-            lease_until=NOW()+make_interval(secs => $5), heartbeat_at=NOW(),
-            last_error_code=NULL, updated_at=NOW()
-      WHERE id=$1
-        AND status IN ('queued','processing')
-        AND (status='queued' OR lease_until IS NULL OR lease_until < NOW())`,
-    [taskId, String(jobId), WORKER_ID, leaseToken, GENERATOR_LEASE_SECONDS],
-  );
-  return rowCount === 1;
-}
 
 /**
  * Обновляет поля задачи в БД.
@@ -130,10 +119,31 @@ const worker = new Worker(
     // ── 1. Загрузка задачи ────────────────────────────────────────
     const task = await loadTask(taskId);
 
-    // ── 2. Атомарно claim-им task и получаем lease ─────────────────
+    // ── 2. Атомарно claim-им task и профильный slot ─────────────────
     const leaseToken = crypto.randomUUID();
-    const claimed = await claimGenerationTask(taskId, job.id, leaseToken);
-    if (!claimed) {
+    const claim = await claimGenerationTaskWithProfileSlot({
+      taskId,
+      jobId: job.id,
+      leaseToken,
+      workerId: WORKER_ID,
+      leaseSeconds: GENERATOR_LEASE_SECONDS,
+    });
+    if (!claim.claimed) {
+      if (claim.reason === 'profile_limit') {
+        // Не превращаем нормальное ожидание свободного slot в failed. BullMQ
+        // вернет тот же job в delayed, после чего он снова будет проверен.
+        const delayMs = Math.min(30000, 5000 + claim.activeCount * 1000);
+        try {
+          await job.moveToDelayed(Date.now() + delayMs, job.token);
+          throw new DelayedError();
+        } catch (error) {
+          if (error instanceof DelayedError) throw error;
+          console.warn(`[Worker] profile slot defer failed for ${taskId}:`, error.message);
+          throw Object.assign(new Error('profile_slot_unavailable'), {
+            code: 'profile_slot_unavailable',
+          });
+        }
+      }
       console.log(`[Worker] skip job ${job.id}: task ${taskId} is owned by another worker or terminal`);
       return { skipped: true, reason: 'generation_lease_not_acquired' };
     }
@@ -286,7 +296,12 @@ const worker = new Worker(
 
   {
     connection,
-    concurrency: parseInt(process.env.WORKER_CONCURRENCY) || 3,
+    // Must be larger than the per-profile limit so different profiles do not
+    // block each other. Admission itself is enforced transactionally in DB.
+    concurrency: Math.max(
+      5,
+      Math.min(100, Number(process.env.GENERATION_GLOBAL_CONCURRENCY) || Number(process.env.WORKER_CONCURRENCY) || 50),
+    ),
     // Stalled job detection: if a job's lock is not renewed within this interval,
     // BullMQ considers it stalled and re-delivers it (up to maxStalledCount).
     stalledInterval: 30000,

@@ -93,14 +93,28 @@ async function publishPendingOutbox(db = dbDefault, limit = 50) {
         );
         published += 1;
       } catch (e) {
-        await client.query(
-          `UPDATE generator_task_outbox
-              SET attempts=attempts+1,
-                  last_error=$2,
-                  available_at=NOW()+make_interval(secs => LEAST(300, GREATEST(5, attempts * 5)))
-            WHERE id=$1`,
-          [row.id, String(e.message || e).slice(0, 500)],
-        );
+        const message = String(e.message || e).slice(0, 500);
+        // Redis may have accepted queue.add() before PostgreSQL was able to
+        // mark outbox.published_at. Treat an existing deterministic jobId as
+        // idempotent success; otherwise the outbox remains pending forever.
+        if (/already exists|job.*exists|duplicated/i.test(message)) {
+          await client.query(
+            `UPDATE generator_task_outbox
+                SET published_at=NOW(), attempts=attempts+1, last_error=NULL
+              WHERE id=$1`,
+            [row.id],
+          );
+          published += 1;
+        } else {
+          await client.query(
+            `UPDATE generator_task_outbox
+                SET attempts=attempts+1,
+                    last_error=$2,
+                    available_at=NOW()+make_interval(secs => LEAST(300, GREATEST(5, attempts * 5)))
+              WHERE id=$1`,
+            [row.id, message],
+          );
+        }
       }
     }
     await client.query('COMMIT');
@@ -393,7 +407,11 @@ async function reconcileGenerationTasks(db = dbDefault) {
     );
     for (const task of assigned) {
       const existing = await generationQueue.getJob(String(task.bull_job_id)).catch(() => null);
-      if (existing) continue;
+      if (existing) {
+        const state = await existing.getState().catch(() => 'unknown');
+        const liveStates = new Set(['waiting', 'active', 'delayed', 'prioritized', 'waiting-children']);
+        if (liveStates.has(state)) continue;
+      }
       const jobId = `generation:${task.id}:reconcile:${Number(task.recovery_attempts || 0) + 1}`;
       await client.query(
         `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)

@@ -3,13 +3,16 @@
 const dbDefault = require('../../config/db');
 
 /**
- * Runtime-safe mirror of migrations/130_durable_generator_tasks.sql.
+ * Runtime-safe mirror of the durable execution migrations 130–132.
  * Docker init scripts only run for a fresh PostgreSQL volume, therefore the
  * running application must apply these idempotent statements on old volumes.
  */
 async function ensureDurableTaskSchema(db = dbDefault) {
   const statements = [
     `CREATE EXTENSION IF NOT EXISTS pgcrypto`,
+    `ALTER TYPE task_status ADD VALUE IF NOT EXISTS 'pausing'`,
+    `ALTER TYPE task_status ADD VALUE IF NOT EXISTS 'paused'`,
+    `ALTER TYPE task_status ADD VALUE IF NOT EXISTS 'cancelled'`,
     `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS worker_id TEXT`,
     `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS lease_token UUID`,
     `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ`,
@@ -18,6 +21,7 @@ async function ensureDurableTaskSchema(db = dbDefault) {
     `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_error_code TEXT`,
     `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS recovery_attempts INTEGER NOT NULL DEFAULT 0`,
     `CREATE INDEX IF NOT EXISTS idx_tasks_reliability_recovery ON tasks(status, lease_until) WHERE status IN ('queued','processing')`,
+    `CREATE INDEX IF NOT EXISTS idx_tasks_generation_profile_active ON tasks(user_id, status, lease_until) WHERE status IN ('queued','processing')`,
 
     `ALTER TABLE parser_tasks ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '{}'::jsonb`,
     `ALTER TABLE parser_tasks ADD COLUMN IF NOT EXISTS input_urls JSONB NOT NULL DEFAULT '[]'::jsonb`,

@@ -130,6 +130,26 @@ async function listItems(taskId, userId, { status, limit = 100, offset = 0 } = {
   return rows;
 }
 
+async function listAllItems(taskId, userId, db = dbDefault) {
+  // Keep the public listItems cap at 500, but let exports fetch every item in
+  // deterministic batches. This avoids a silent truncation while preserving
+  // the existing pagination contract used by the UI.
+  await loadTask(taskId, userId, db);
+  const all = [];
+  const batchSize = 500;
+  let offset = 0;
+  while (true) {
+    const batch = await listItems(taskId, userId, {
+      limit: batchSize,
+      offset,
+    }, db);
+    all.push(...batch);
+    if (batch.length < batchSize) break;
+    offset += batch.length;
+  }
+  return all;
+}
+
 async function getItem(taskId, itemId, userId, db = dbDefault) {
   await loadTask(taskId, userId, db);
   const { rows } = await db.query(
@@ -376,6 +396,7 @@ module.exports = {
   loadTask,
   listScans,
   listItems,
+  listAllItems,
   getItem,
   claimItem,
   heartbeat,

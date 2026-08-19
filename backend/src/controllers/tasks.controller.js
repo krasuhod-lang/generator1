@@ -14,6 +14,7 @@ const { buildTaskFormPrefill }  = require('../services/projects/taskFormPrefill'
 const { isBlankRichText }       = require('../utils/stripHtmlTags');
 const { salvageJsonStrings }    = require('../utils/salvageJson');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
+const { getProfileQueueHealth } = require('../services/tasks/generationAdmission');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -466,6 +467,16 @@ async function getTaskHealth(req, res, next) {
       );
       pendingOutbox = rows[0]?.count || 0;
     } catch (_) { /* old schema during migration */ }
+    const profileQueue = await getProfileQueueHealth(task.user_id, task.id);
+    let bullJobState = null;
+    if (task.bull_job_id) {
+      try {
+        const job = await generationQueue.getJob(String(task.bull_job_id));
+        bullJobState = job ? await job.getState() : 'missing';
+      } catch (_) {
+        bullJobState = 'unavailable';
+      }
+    }
     res.json({
       task_id: task.id,
       status: task.status,
@@ -475,6 +486,12 @@ async function getTaskHealth(req, res, next) {
       worker_id: task.worker_id || null,
       recovery_attempts: task.recovery_attempts || 0,
       pending_outbox: pendingOutbox,
+      bull_job_id: task.bull_job_id || null,
+      bull_job_state: bullJobState,
+      profile_queue: profileQueue,
+      queue_reason: task.status === 'queued'
+        ? (profileQueue.availableSlots === 0 ? 'profile_limit' : (bullJobState || 'waiting_for_publisher'))
+        : null,
       pipeline_checkpoint: task.pipeline_checkpoint || null,
       updated_at: task.updated_at || null,
     });

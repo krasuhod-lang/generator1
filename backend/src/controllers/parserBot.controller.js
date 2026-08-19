@@ -109,7 +109,7 @@ async function retryFailed(req, res) {
 async function exportJson(req, res) {
   try {
     const task = await queue.loadTask(req.params.id, req.user.id);
-    const items = await queue.listItems(task.id, req.user.id, { limit: 500, offset: 0 });
+    const items = await queue.listAllItems(task.id, req.user.id);
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="parser-scan-${task.id}.json"`);
     res.json({ task, items });
@@ -121,7 +121,7 @@ async function exportJson(req, res) {
 async function exportXlsx(req, res) {
   try {
     const task = await queue.loadTask(req.params.id, req.user.id);
-    const items = await queue.listItems(task.id, req.user.id, { limit: 500, offset: 0 });
+    const items = await queue.listAllItems(task.id, req.user.id);
     const workbook = new exceljs.Workbook();
     const sheet = workbook.addWorksheet('Parser Bot');
     sheet.columns = [

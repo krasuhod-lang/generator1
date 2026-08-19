@@ -608,6 +608,10 @@ def _apply_ai_fields(
     extract_clients: bool,
 ) -> Dict[str, Any]:
     normalized = _normalized_prediction(pred)
+    if normalized.get("parse_status") == "invalid":
+        raise ValueError(
+            "DSPy returned an unrecognized response; expected structured_result JSON"
+        )
     pred = normalized.get("fields") or {}
     for warning in normalized.get("warnings") or []:
         _append_warning(result, warning)
@@ -626,41 +630,65 @@ def _apply_ai_fields(
 
 class ExtractCompanyServices(dspy.Signature):
     """
-    Ты — строгий бизнес-аналитик, который сегментирует аудиторию компании по её сайту.
-    Твоя задача — погрузиться в текст сайта и понять: что компания делает, на чём
-    делает упор, И — главное — КТО её клиенты (категории, а не названия) и с кем она работает.
+    Ты — строгий бизнес-аналитик. Проанализируй текст сайта и верни РОВНО ОДИН
+    валидный JSON-объект без Markdown, пояснений, комментариев и ```-блоков.
 
-    Отвечай максимально кратко, по делу, без маркетинговой «воды» и общих фраз.
+    DSPy JSONAdapter требует внешний envelope с единственным ключом
+    structured_result. Значение structured_result должно быть JSON-encoded
+    строкой, а не вложенным Python-объектом. Схема ответа:
+    {
+      "structured_result": "{\\"contacts_summary\\":\\"строка\\",\\"about_summary\\":\\"2-3 конкретных предложения или пустая строка\\",\\"services_list\\":[\\"конкретная услуга\\"],\\"main_focus\\":\\"конкретная специализация или пустая строка\\",\\"client_segments\\":[\\"категория клиента — что компания делает для нее\\"],\\"works_with\\":\\"B2B/B2C/B2G: тип клиентов или пустая строка\\"}"
+    }
 
-    Алгоритм анализа клиентов (client_segments) выполняй строго по шагам:
-      Шаг 1 — Собери сигналы аудитории со ВСЕХ страниц, которые попали в текст:
-              «Клиенты», «Кейсы», «Портфолио», «Проекты», «Отзывы», «Отрасли»,
-              страницы услуг/решений/тарифов, формулировки «для …», «работаем с …»,
-              CTA, описания болей и задач под конкретный тип заказчика.
-      Шаг 2 — Сгруппируй сигналы в КАТЕГОРИИ клиентов (сегменты), а не в отдельные бренды.
-      Шаг 3 — Для каждого сегмента назови, какую работу/услугу компания делает именно
-              для него. Формат элемента: «<категория клиента> — <что делает для них>»
-              (например: «стоматологии — SEO и маркетинг», «госзаказчики — тендерное сопровождение»).
-
-    ЖЁСТКИЕ ПРАВИЛА:
-      • НИКОГДА не выдумывай. Заполняй client_segments и works_with ТОЛЬКО если на сайте
-        есть текстовые доказательства: явные клиентские разделы, кейсы, страницы услуг,
-        отраслевые решения, CTA или формулировки задач/болей для конкретной аудитории.
-        Если информации о клиентах нет — верни пустой массив [] для client_segments и
-        пустую строку "" для works_with. Не догадывайся без опоры на текст.
-      • ЗАПРЕЩЕНО указывать конкретные названия клиентов, брендов или логотипов —
-        всегда обобщай до КАТЕГОРИИ (отрасль/тип бизнеса/тип заказчика).
-      • works_with — одна короткая фраза о позиционировании: B2B / B2C / B2G и тип
-        клиентов (например: «B2B: агентства и производители» или «B2C: частные клиенты»).
+    Правила качества:
+    1. Используй только факты из переданного текста сайта. Не выдумывай.
+    2. client_segments — категории/отрасли/типы заказчиков, а не названия брендов.
+    3. Для каждого client_segments укажи конкретную услугу или задачу для этой категории.
+    4. works_with заполняй только при явном сигнале «работаем с», «для», отраслевом
+       решении, кейсе, портфолио, отзыве или ином доказательстве.
+    5. Если доказательств нет, верни client_segments: [] и works_with: "".
+    6. Не добавляй поля кроме шести полей схемы. Не оборачивай JSON в Markdown.
     """
-    website_text = dspy.InputField(desc="Сырой текстовый контент сайта (Главная, Услуги, О компании, Клиенты, Кейсы, Портфолио)")
-    
-    contacts_summary = dspy.OutputField(desc="Сводка контактов (если применимо и найдено)")
-    about_summary = dspy.OutputField(desc="Краткое описание 'О компании' (2-3 предложения)")
-    services_list = dspy.OutputField(desc="Массив строк: точный перечень оказываемых услуг")
-    main_focus = dspy.OutputField(desc="На чем компания делает упор (УТП, специализация, 1-2 предложения)")
-    client_segments = dspy.OutputField(desc="Массив строк с КАТЕГОРИЯМИ клиентов в формате «<категория> — <что делает для них>». Только на основе данных сайта, без названий брендов. Пустой массив [], если данных нет")
-    works_with = dspy.OutputField(desc="Одна короткая фраза: B2B/B2C/B2G и тип клиентов, с кем работает компания. Пустая строка, если данных нет")
+    website_text = dspy.InputField(
+        desc="Текст главной, услуг, о компании, клиентов, кейсов, портфолио и контактов с URL-источниками"
+    )
+    structured_result = dspy.OutputField(
+        desc=(
+            "Только внешний JSON с единственным ключом structured_result; его "
+            "значение — JSON-encoded строка с шестью обязательными ключами. "
+            "Массивы — JSON-массивы строк, неизвестные значения — [] или пустая строка."
+        )
+    )
+
+
+def _run_dspy_prediction(extractor: Any, lm: Any, website_text: str) -> Any:
+    """Run DSPy with a request-local LM context when the installed version supports it.
+
+    The previous implementation called ``dspy.settings.configure`` for every URL
+    from concurrent executor threads. That global mutation can route one site's
+    request through another site's LM configuration and makes failures intermittent.
+    """
+    adapter_cls = getattr(dspy, "JSONAdapter", None)
+    context_kwargs = {"lm": lm}
+    if callable(adapter_cls):
+        context_kwargs["adapter"] = adapter_cls()
+
+    context_factory = getattr(dspy, "context", None)
+    if callable(context_factory):
+        with context_factory(**context_kwargs):
+            return extractor(website_text=website_text)
+
+    settings = getattr(dspy, "settings", None)
+    settings_context = getattr(settings, "context", None)
+    if callable(settings_context):
+        with settings_context(**context_kwargs):
+            return extractor(website_text=website_text)
+
+    # Compatibility fallback for older DSPy builds. This path is only used when
+    # the request-local context API is absent.
+    dspy.settings.configure(**context_kwargs)
+    return extractor(website_text=website_text)
+
 
 async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, extract_services: bool, deepseek_api_key: str, extract_clients: bool = False) -> dict:
     key_str = f"{url}_{extract_contacts}_{extract_about}_{extract_services}_{extract_clients}"
@@ -792,6 +820,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
     if extract_services or extract_about or extract_contacts or extract_clients:
         if not effective_api_key:
             result["status"] = "llm_error"
+            result["error_code"] = "missing_deepseek_api_key"
             result["error"] = "Ошибка ИИ: не задан DEEPSEEK_API_KEY"
             _mark_requested_statuses(
                 result,
@@ -815,17 +844,17 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                     max_tokens=2500,
                     temperature=0.3
                 )
-                dspy.settings.configure(lm=lm)
-
-                # Define predictor
+                # Use one structured JSON OutputField. The normalizer accepts
+                # both DSPy Prediction attributes and string JSON from that field.
                 extractor = dspy.Predict(ExtractCompanyServices)
-                
-                # Since dspy is synchronous, we run it in an executor
-                def _run_dspy():
-                    return extractor(website_text=clean_text)
-                    
+
+                # DSPy is synchronous; run it outside the event loop and keep the
+                # LM binding request-local where supported by the installed version.
                 loop = asyncio.get_running_loop()
-                pred = await loop.run_in_executor(None, _run_dspy)
+                pred = await loop.run_in_executor(
+                    None,
+                    lambda: _run_dspy_prediction(extractor, lm, clean_text),
+                )
                 _apply_ai_fields(
                     result,
                     pred,
@@ -852,7 +881,9 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                 else:
                     logger.exception(f"DSPy extraction failed for {url}")
                     result["status"] = "llm_error"
-                    result["error"] = f"Ошибка ИИ: {str(e)[:100]}"
+                    result["error_code"] = "dspy_extraction_failed"
+                    result["error"] = f"Ошибка ИИ: {str(e)[:500]}"
+                    _append_warning(result, "DSPy не вернул валидный структурированный JSON-ответ")
                     llm_failed = True
 
             _mark_non_client_field_statuses(

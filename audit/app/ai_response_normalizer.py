@@ -255,9 +255,33 @@ def _extract_openai_content(value: Dict[str, Any]) -> Optional[Any]:
     return None
 
 
+_STRUCTURED_WRAPPER_KEYS = (
+    "result_json",
+    "structured_result",
+    "json_result",
+    "parser_result",
+    "answer_json",
+)
+
+
 def _normalize_dict(value: Dict[Any, Any], warnings: List[str], source_type: str) -> Dict[str, Any]:
     fields_obj = value.get("fields") if isinstance(value.get("fields"), dict) else value
     fields, recognized = _validate_fields(fields_obj, warnings)
+
+    # DSPy can return one strongly-instructed JSON string inside a named
+    # OutputField. Do not call .items() on that string: recursively normalize
+    # the wrapper value instead.
+    if not recognized:
+        for wrapper_key in _STRUCTURED_WRAPPER_KEYS:
+            if wrapper_key not in value:
+                continue
+            nested = normalize_llm_response(value.get(wrapper_key))
+            if nested.get("parse_status") != "invalid":
+                nested["source_type"] = source_type
+                nested["raw_text"] = _safe_json_dumps(value)[:8000]
+                nested["warnings"] = [*warnings, *nested.get("warnings", [])]
+                return nested
+
     return _result(
         fields=fields,
         raw_text=_safe_json_dumps(value)[:8000],
@@ -415,6 +439,18 @@ def normalize_llm_response(value: Any) -> Dict[str, Any]:
         normalized = _normalize_dict(mapped, warnings, "dspy_prediction")
         if normalized.get("parse_status") != "invalid":
             return normalized
+
+    # Some DSPy versions expose OutputField values as attributes but do not
+    # include them in toDict()/to_dict(). Handle the structured JSON field
+    # explicitly before looking for legacy individual attributes.
+    for wrapper_key in _STRUCTURED_WRAPPER_KEYS:
+        raw_wrapper = getattr(value, wrapper_key, None)
+        if raw_wrapper not in (None, ""):
+            nested = normalize_llm_response(raw_wrapper)
+            if nested.get("parse_status") != "invalid":
+                nested["source_type"] = "dspy_prediction"
+                nested["warnings"] = [*warnings, *nested.get("warnings", [])]
+                return nested
 
     attrs = _prediction_attrs(value)
     if attrs:

@@ -33,6 +33,7 @@ const options = ref({
 });
 
 const loading = ref(false);
+const downloadBusy = ref(false);
 const taskId = ref(null);
 const scanMode = ref('legacy');     // legacy | bot
 const status = ref('');            // '' | queued | running | done | partial | error | cancelled
@@ -97,24 +98,24 @@ const statusBadge = computed(() => {
 
 const fieldStatusMeta = (value) => {
   const map = {
-    found: { text: 'found', cls: 'bg-emerald-900/40 text-emerald-300 border border-emerald-800' },
-    not_found: { text: 'not_found', cls: 'bg-amber-900/30 text-amber-300 border border-amber-900' },
-    partial: { text: 'partial', cls: 'bg-amber-900/40 text-amber-300 border border-amber-800' },
-    llm_error: { text: 'llm_error', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
-    fetch_error: { text: 'fetch_error', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
+    found: { text: 'Найдено', cls: 'bg-emerald-900/40 text-emerald-300 border border-emerald-800' },
+    not_found: { text: 'Не найдено на сайте', cls: 'bg-amber-900/30 text-amber-300 border border-amber-900' },
+    partial: { text: 'Частично', cls: 'bg-amber-900/40 text-amber-300 border border-amber-800' },
+    llm_error: { text: 'Ошибка ИИ — повторите', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
+    fetch_error: { text: 'Ошибка доступа к сайту', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
   };
   return map[value] || { text: value || '—', cls: 'bg-gray-800 text-gray-400 border border-gray-700' };
 };
 
 const siteStatusMeta = (value) => {
   const map = {
-    ok: { text: 'ok', cls: 'bg-emerald-900/40 text-emerald-300 border border-emerald-800' },
-    done: { text: 'done', cls: 'bg-emerald-900/40 text-emerald-300 border border-emerald-800' },
-    not_found: { text: 'not_found', cls: 'bg-amber-900/30 text-amber-300 border border-amber-900' },
-    partial: { text: 'partial', cls: 'bg-amber-900/40 text-amber-300 border border-amber-800' },
-    llm_error: { text: 'llm_error', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
-    fetch_error: { text: 'fetch_error', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
-    error: { text: 'error', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
+    ok: { text: 'Готово', cls: 'bg-emerald-900/40 text-emerald-300 border border-emerald-800' },
+    done: { text: 'Готово', cls: 'bg-emerald-900/40 text-emerald-300 border border-emerald-800' },
+    not_found: { text: 'Нет данных на сайте', cls: 'bg-amber-900/30 text-amber-300 border border-amber-900' },
+    partial: { text: 'Частично', cls: 'bg-amber-900/40 text-amber-300 border border-amber-800' },
+    llm_error: { text: 'Ошибка анализа ИИ', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
+    fetch_error: { text: 'Сайт недоступен', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
+    error: { text: 'Ошибка', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
   };
   return map[value] || { text: value || 'queued', cls: 'bg-gray-800 text-gray-400 border border-gray-700' };
 };
@@ -126,6 +127,7 @@ const itemClientSegments = (item) => {
   return Array.isArray(value) ? value.join('\n') : (value || '');
 };
 const itemEvidence = (item) => itemResult(item).evidence || item?.evidence || [];
+const itemError = (item) => itemResult(item).error || item?.error_message || item?.error || '';
 const itemFieldStatus = (item) => itemResult(item).field_status || item?.field_status || {};
 const terminalStatuses = new Set(['done', 'partial', 'error', 'cancelled']);
 
@@ -249,13 +251,48 @@ const checkStatus = async () => {
   }
 };
 
-const downloadReport = () => {
-  if (!taskId.value) return;
-  if (scanMode.value === 'bot') {
-    window.open(`/api/parser-bot/scans/${taskId.value}/export.xlsx`, '_blank');
-  } else {
-    // baseURL инстанса axios = '/api', поэтому явный префикс не нужен.
-    window.open(`/api/parsers/download/${taskId.value}`, '_blank');
+const downloadAuthenticatedFile = async (url, fallbackName) => {
+  const token = localStorage.getItem('seo_token') || '';
+  const response = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!response.ok) {
+    let message = `Сервер вернул HTTP ${response.status}`;
+    try {
+      const payload = await response.json();
+      message = payload.error || payload.detail || message;
+    } catch (_) { /* response is not JSON */ }
+    throw new Error(message);
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i);
+  const fileName = match?.[1] ? decodeURIComponent(match[1].trim()) : fallbackName;
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+};
+
+const downloadReport = async () => {
+  if (!taskId.value || downloadBusy.value) return;
+  downloadBusy.value = true;
+  errorMessage.value = '';
+  try {
+    const url = scanMode.value === 'bot'
+      ? `/api/parser-bot/scans/${taskId.value}/export.xlsx`
+      : `/api/parsers/download/${taskId.value}`;
+    await downloadAuthenticatedFile(url, `parsers_report-${taskId.value}.xlsx`);
+  } catch (err) {
+    errorMessage.value = `Не удалось скачать Excel-отчёт: ${err?.message || 'неизвестная ошибка'}`;
+  } finally {
+    downloadBusy.value = false;
   }
 };
 
@@ -561,10 +598,13 @@ onUnmounted(() => {
 
         <div v-if="status === 'done' || status === 'partial'" class="flex items-center gap-3 pt-1 flex-wrap">
           <button
+            type="button"
             @click="downloadReport"
-            class="btn-primary bg-emerald-600 hover:bg-emerald-500"
+            :disabled="downloadBusy"
+            class="btn-primary bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60"
           >
-            📥 Скачать Excel-отчёт
+            <span v-if="downloadBusy">⏳ Формирование…</span>
+            <span v-else>📥 Скачать Excel-отчёт</span>
           </button>
           <span class="text-[11px] text-gray-500">
             Файл: <span class="font-mono text-gray-400">parsers_report.xlsx</span>
@@ -615,8 +655,8 @@ onUnmounted(() => {
                   >
                     {{ itemResult(item).url || item.normalized_url }}
                   </a>
-                  <div v-if="item.error_message" class="text-[11px] text-red-300 mt-1">
-                    {{ item.error_message }}
+                  <div v-if="itemError(item)" class="text-[11px] text-red-300 mt-1">
+                    {{ itemError(item) }}
                   </div>
                 </td>
                 <td class="py-3 pr-4">

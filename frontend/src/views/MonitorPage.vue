@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
 import { useAuthStore } from '../stores/auth.js';
 import ResultModal from '../components/ResultModal.vue';
+import api from '../api';
 
 const route  = useRoute();
 const router = useRouter();
@@ -17,6 +18,7 @@ const taskId = route.params.id;
 
 // ── Состояние ──────────────────────────────────────────────────────────────
 const task     = ref(null);
+const taskHealth = ref(null);
 const logs     = ref([]);           // { ts, msg, level }
 const progress = ref(0);
 const stage    = ref('—');
@@ -46,6 +48,7 @@ const generationStartTime = ref(null);
 const generationElapsed   = ref(0);    // секунды
 const generationTimeFinal = ref(null); // финальное время из pipeline_done
 let   timerInterval       = null;
+let   healthTimer          = null;
 
 function startGenerationTimer() {
   generationStartTime.value = Date.now();
@@ -354,6 +357,35 @@ const STAGE_LABELS = {
 
 const stageLabel = computed(() => STAGE_LABELS[stage.value] || stage.value);
 
+const queueStatusMessage = computed(() => {
+  const health = taskHealth.value || {};
+  const currentStatus = health.status || task.value?.status;
+  if (currentStatus !== 'queued') return '';
+  const profile = health.profile_queue || {};
+  if (health.queue_reason === 'profile_limit' || profile.availableSlots === 0) {
+    return `Профиль занят: выполняются ${profile.activeCount || 0} из ${profile.maxConcurrent || 5} задач. Эта задача автоматически запустится после освобождения слота.`;
+  }
+  if (health.queue_reason === 'waiting_for_publisher' || health.pending_outbox > 0) {
+    return 'Задача сохранена и ожидает публикации в очередь. Повторная публикация выполняется автоматически.';
+  }
+  if (health.bull_job_state === 'waiting' || health.bull_job_state === 'delayed') {
+    return 'Задача находится в очереди и запустится автоматически.';
+  }
+  if (health.bull_job_state === 'missing') {
+    return 'Задача сохранена, но очередь восстанавливает её автоматически.';
+  }
+  return 'Задача сохранена и ожидает запуска worker-а.';
+});
+
+async function loadTaskHealth() {
+  try {
+    const { data } = await api.get(`/tasks/${taskId}/health`);
+    taskHealth.value = data;
+  } catch (error) {
+    console.warn('[Monitor] task health load failed:', error?.message || error);
+  }
+}
+
 // Процент выполненных блоков
 const blocksTotal = computed(() => blockList.value.length);
 const blocksDone  = computed(() => blockList.value.filter(b => b.status === 'done').length);
@@ -446,12 +478,18 @@ onMounted(async () => {
   // Сначала подмёрджим историю (чтобы log-терминал и таблица блоков были
   // заполнены), потом откроем SSE — он продолжит дописывать живые события.
   await loadHistory();
+  await loadTaskHealth();
+  healthTimer = setInterval(loadTaskHealth, 5000);
   connectSSE();
 });
 
 onUnmounted(() => {
   closeSSE();
   stopGenerationTimer();
+  if (healthTimer) {
+    clearInterval(healthTimer);
+    healthTimer = null;
+  }
 });
 </script>
 
@@ -496,6 +534,12 @@ onUnmounted(() => {
               class="h-full bg-indigo-500 rounded-full transition-all duration-500"
               :style="{ width: progress + '%' }"
             />
+          </div>
+          <div
+            v-if="queueStatusMessage"
+            class="mt-3 rounded-md border border-amber-800/70 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+          >
+            {{ queueStatusMessage }}
           </div>
           <!-- Прогресс блоков -->
           <p v-if="blocksTotal > 0" class="text-xs text-gray-600 mt-2">

@@ -83,6 +83,28 @@ async function callAudit(item) {
   if (!result || typeof result !== 'object') {
     return buildWorkerErrorResult(item, 'llm_error', 'Пустой ответ audit-сервиса');
   }
+
+  // Старый audit endpoint мог вернуть {status: "Ошибка: ..."}. Такой объект
+  // нельзя передавать дальше: itemStatusFromResult иначе посчитает его done.
+  const status = String(result.status || '').toLowerCase();
+  if (status.startsWith('ошибка') || status === 'error' || result.error_code === 'audit_parser_exception') {
+    return {
+      ...buildWorkerErrorResult(item, 'llm_error', result.error || result.status || 'Ошибка audit/DSPy'),
+      audit_error_code: result.error_code || 'audit_parser_error',
+    };
+  }
+
+  const hasStructuredPayload = [
+    result.contacts,
+    result.about,
+    result.services,
+    result.focus,
+    result.client_segments,
+    result.works_with,
+  ].some((value) => Array.isArray(value) ? value.length > 0 : String(value || '').trim());
+  if (!hasStructuredPayload && result.status === undefined) {
+    return buildWorkerErrorResult(item, 'llm_error', 'Audit-сервис не вернул структурированные поля');
+  }
   return result;
 }
 

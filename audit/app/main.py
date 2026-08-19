@@ -200,6 +200,42 @@ class ParserExtractRequest(BaseModel):
     extract_clients: bool = False
     api_key: str = ""
 
+
+def _parser_exception_result(url: str, req: ParserExtractRequest, exc: Exception) -> dict:
+    """Keep the parser-bot contract stable even when DSPy raises unexpectedly."""
+    message = str(exc or "unknown parser exception").strip()[:500]
+    result = {
+        "url": url,
+        "title": "",
+        "contacts": "",
+        "about": "",
+        "services": [],
+        "focus": "",
+        "client_segments": [],
+        "works_with": "",
+        "status": "llm_error",
+        "error_code": "audit_parser_exception",
+        "error": f"Ошибка ИИ: {message}",
+        "field_status": {},
+        "evidence": [],
+        "warnings": ["Audit/DSPy exception was converted to a structured parser result"],
+        "stats": {"pages_scanned": 0},
+    }
+    if req.extract_contacts:
+        result["field_status"]["contacts"] = "llm_error"
+    if req.extract_about:
+        result["field_status"]["about"] = "llm_error"
+    if req.extract_services:
+        result["field_status"]["services"] = "llm_error"
+        result["field_status"]["focus"] = "llm_error"
+    if req.extract_clients:
+        result["client_segments"] = ["Не удалось определить — ошибка анализа ИИ"]
+        result["works_with"] = "Не удалось определить — ошибка анализа ИИ"
+        result["field_status"]["client_segments"] = "llm_error"
+        result["field_status"]["works_with"] = "llm_error"
+    return result
+
+
 @app.post("/audit/parsers/extract", dependencies=[Depends(_auth)])
 async def extract_parsers(req: ParserExtractRequest):
     if not req.urls:
@@ -212,7 +248,13 @@ async def extract_parsers(req: ParserExtractRequest):
     final_results = []
     for url, res in zip(req.urls, results):
         if isinstance(res, Exception):
-            final_results.append({"url": url, "status": f"Ошибка: {str(res)[:100]}"})
+            final_results.append(_parser_exception_result(url, req, res))
+        elif not isinstance(res, dict):
+            final_results.append(_parser_exception_result(
+                url,
+                req,
+                TypeError(f"audit returned {type(res).__name__}, expected object"),
+            ))
         else:
             final_results.append(res)
             

@@ -456,6 +456,32 @@ class TestAiResponseNormalizer(unittest.TestCase):
         self.assertEqual(out["fields"]["services_list"], ["SEO", "PPC"])
         self.assertEqual(out["fields"]["client_segments"], ["стоматологии — SEO", "медцентры — PPC"])
 
+    def test_dspy_structured_result_string(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        raw = '{"about_summary":"Агентство","services_list":["SEO"],"client_segments":["клиники — SEO"],"works_with":"B2B: клиники"}'
+        out = normalize_llm_response({"structured_result": raw})
+        self.assertEqual(out["source_type"], "json")
+        self.assertEqual(out["fields"]["services_list"], ["SEO"])
+        self.assertEqual(out["fields"]["works_with"], "B2B: клиники")
+
+    def test_dspy_structured_result_prediction_attribute(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        class Prediction:
+            structured_result = '{"client_segments":["заводы — оборудование"],"works_with":"B2B: производство"}'
+
+        out = normalize_llm_response(Prediction())
+        self.assertEqual(out["source_type"], "dspy_prediction")
+        self.assertEqual(out["fields"]["client_segments"], ["заводы — оборудование"])
+
+    def test_string_mapping_never_calls_items(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({"structured_result": "Не удалось определить"})
+        self.assertEqual(out["parse_status"], "invalid")
+        self.assertEqual(out["fields"], {})
+
     def test_lm_history_outputs_string(self):
         import json
         from .ai_response_normalizer import normalize_lm_history
@@ -541,11 +567,13 @@ class TestAiResponseNormalizer(unittest.TestCase):
 class TestParsersClientSegmentation(unittest.TestCase):
     """Client segmentation: новые поля client_segments/works_with и расширенный краул."""
 
-    def test_signature_has_client_fields(self):
+    def test_signature_has_structured_result_contract(self):
         from . import parsers
         fields = parsers.ExtractCompanyServices.output_fields
-        self.assertIn("client_segments", fields)
-        self.assertIn("works_with", fields)
+        self.assertIn("structured_result", fields)
+        instructions = parsers.ExtractCompanyServices.__doc__
+        self.assertIn('client_segments', instructions)
+        self.assertIn('works_with', instructions)
 
     def test_link_patterns_include_client_pages(self):
         from . import parsers
