@@ -48,7 +48,7 @@ function buildAuditPayload(item) {
   };
 }
 
-function buildWorkerErrorResult(item, status, message) {
+function buildWorkerErrorResult(item, status, message, errorCode = '') {
   const options = item.task?.options || {};
   const fallback = CLIENT_FALLBACKS[status] || CLIENT_FALLBACKS.llm_error;
   const fieldStatus = {};
@@ -81,6 +81,7 @@ function buildWorkerErrorResult(item, status, message) {
     evidence: [],
     warnings: [String(message || '').slice(0, 500)].filter(Boolean),
     stats: { pages_scanned: 0 },
+    error_code: errorCode || '',
     error: String(message || '').slice(0, 1000),
   };
 }
@@ -115,7 +116,15 @@ async function callAudit(item) {
     result.works_with,
   ].some((value) => Array.isArray(value) ? value.length > 0 : String(value || '').trim());
   if (!hasStructuredPayload && result.status === undefined) {
-    return buildWorkerErrorResult(item, 'llm_error', 'Audit-сервис не вернул структурированные поля');
+    return buildWorkerErrorResult(item, 'llm_error', 'Audit-сервис не вернул структурированные поля', 'empty_structured_result');
+  }
+  const resultErrorCode = String(result.error_code || '').toLowerCase();
+  if (String(result.status || '').toLowerCase() === 'llm_error'
+      && ['dspy_extraction_failed', 'dspy_parse_failed', 'empty_structured_result'].includes(resultErrorCode)) {
+    const retryable = new Error(result.error || 'Временная ошибка структурированного ответа DSPy');
+    retryable.code = 'AUDIT_LLM_RETRYABLE';
+    retryable.errorCode = resultErrorCode;
+    throw retryable;
   }
   result.execution = {
     ...(result.execution || {}),
@@ -154,7 +163,12 @@ async function processNext() {
     } else {
       await queue.completeItem(
         item.id,
-        buildWorkerErrorResult(item, isBlockedLike ? 'blocked' : (isFetchLike ? 'fetch_error' : 'llm_error'), err.message || String(err)),
+        buildWorkerErrorResult(
+          item,
+          isBlockedLike ? 'blocked' : (isFetchLike ? 'fetch_error' : 'llm_error'),
+          err.message || String(err),
+          err.errorCode || (isBlockedLike ? 'blocked_response' : (isFetchLike ? 'fetch_error' : 'worker_error')),
+        ),
       );
     }
   } finally {

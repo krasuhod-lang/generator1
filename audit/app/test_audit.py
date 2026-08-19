@@ -499,6 +499,25 @@ class TestAiResponseNormalizer(unittest.TestCase):
         self.assertEqual(out["source_type"], "history")
         self.assertEqual(out["fields"]["about_summary"], "Из history")
 
+    def test_latest_lm_fields_recovers_structured_result_wrapper(self):
+        import json
+        from . import parsers
+
+        nested = json.dumps({
+            "about_summary": "Тендерное сопровождение",
+            "services_list": ["сопровождение закупок"],
+            "client_segments": ["компании — участие в закупках"],
+            "works_with": "B2B: коммерческие компании",
+        }, ensure_ascii=False)
+        raw = json.dumps({"structured_result": nested}, ensure_ascii=False)
+
+        class LM:
+            history = [{"outputs": [raw]}]
+
+        fields = parsers._latest_lm_fields(LM())
+        self.assertEqual(fields["services_list"], ["сопровождение закупок"])
+        self.assertEqual(fields["works_with"], "B2B: коммерческие компании")
+
     def test_labeled_text_ru(self):
         from .ai_response_normalizer import normalize_llm_response
 

@@ -366,6 +366,8 @@ def _finalize_client_fields(
     _apply_client_fallback(result, "not_found")
     if segments and not evidence:
         _append_warning(result, "Категории клиентов отброшены: не найдено проверяемых цитат-доказательств")
+    elif not segments and not works_with:
+        _append_warning(result, "Не найдено проверяемых данных о категориях клиентов и профиле заказчиков")
 
 
 def _finalize_site_status(result: Dict[str, Any]) -> None:
@@ -664,8 +666,12 @@ def _iter_lm_history_outputs(value: Any):
 
 
 def _latest_lm_fields(lm: Any) -> Dict[str, Any]:
-    """DSPy 2.5 may fail while parsing a valid-but-string response.
-    Recover fields from raw LM history so the parser task is not marked failed."""
+    """Recover fields from the newest raw LM response after a DSPy adapter error.
+
+    DSPy can raise before returning a Prediction even when the provider response
+    contains usable JSON. Try the shared normalizer first, then the legacy parser
+    for unusual history shapes. The function never treats an error string as data.
+    """
     normalized = normalize_lm_history(lm)
     if normalized.get("parse_status") != "invalid":
         return normalized.get("fields") or {}
@@ -673,6 +679,9 @@ def _latest_lm_fields(lm: Any) -> Dict[str, Any]:
     for entry in reversed(getattr(lm, "history", []) or []):
         outputs = list(_iter_lm_history_outputs(entry))
         for output in reversed(outputs):
+            normalized_output = normalize_llm_response(output)
+            if normalized_output.get("parse_status") != "invalid":
+                return normalized_output.get("fields") or {}
             fields = _parse_ai_output(output)
             if fields:
                 return fields
@@ -707,6 +716,17 @@ def _apply_ai_fields(
         result["client_segments"] = _coerce_to_list(_ai_field(pred, "client_segments"))
         result["works_with"] = _coerce_to_text(_ai_field(pred, "works_with"))
     return normalized
+
+
+class ExtractCompanyServicesFallback(dspy.Signature):
+    """Fallback DSPy contract used only when the single JSON envelope cannot parse."""
+    website_text = dspy.InputField(desc="Факты сайта с URL-источниками")
+    contacts_summary = dspy.OutputField(desc="Контакты или пустая строка")
+    about_summary = dspy.OutputField(desc="Краткое описание компании или пустая строка")
+    services_list = dspy.OutputField(desc="JSON-массив конкретных услуг")
+    main_focus = dspy.OutputField(desc="Основной фокус или пустая строка")
+    client_segments = dspy.OutputField(desc="JSON-массив категорий клиентов с услугой")
+    works_with = dspy.OutputField(desc="B2B/B2C/B2G и тип клиентов или пустая строка")
 
 
 class ExtractCompanyServices(dspy.Signature):
@@ -966,6 +986,7 @@ async def parse_url_dspy(
                 _apply_client_fallback(result, "llm_error")
         else:
             llm_failed = False
+            result["stats"]["llm_attempts"] = 1
             try:
                 # Set up DSPy with DeepSeek model
                 # DeepSeek uses OpenAI compatible API
@@ -997,8 +1018,8 @@ async def parse_url_dspy(
                 )
                      
             except Exception as e:
-                recovered_normalized = normalize_lm_history(locals().get("lm"))
-                recovered = recovered_normalized.get("fields") if recovered_normalized.get("parse_status") != "invalid" else {}
+                lm_obj = locals().get("lm")
+                recovered = _latest_lm_fields(lm_obj)
                 if recovered:
                     _apply_ai_fields(
                         result,
@@ -1008,15 +1029,36 @@ async def parse_url_dspy(
                         extract_services=extract_services,
                         extract_clients=extract_clients,
                     )
-                    for warning in recovered_normalized.get("warnings") or []:
-                        _append_warning(result, warning)
+                    result["stats"]["llm_recovered_from_history"] = True
+                    _append_warning(result, "DSPy adapter не разобрал ответ; поля восстановлены из raw LM history")
                 else:
-                    logger.exception(f"DSPy extraction failed for {url}")
-                    result["status"] = "llm_error"
-                    result["error_code"] = "dspy_extraction_failed"
-                    result["error"] = f"Ошибка ИИ: {str(e)[:500]}"
-                    _append_warning(result, "DSPy не вернул валидный структурированный JSON-ответ")
-                    llm_failed = True
+                    # One bounded second attempt uses plain OutputFields instead of
+                    # the single JSON envelope. This handles providers that return
+                    # valid field values but violate the envelope serialization.
+                    try:
+                        result["stats"]["llm_attempts"] = 2
+                        fallback_extractor = dspy.Predict(ExtractCompanyServicesFallback)
+                        loop = asyncio.get_running_loop()
+                        fallback_pred = await loop.run_in_executor(
+                            None,
+                            lambda: _run_dspy_prediction(fallback_extractor, lm_obj, clean_text),
+                        )
+                        _apply_ai_fields(
+                            result,
+                            fallback_pred,
+                            extract_contacts=extract_contacts,
+                            extract_about=extract_about,
+                            extract_services=extract_services,
+                            extract_clients=extract_clients,
+                        )
+                        _append_warning(result, "Результат получен после повторной DSPy-попытки с fallback-схемой")
+                    except Exception as fallback_error:
+                        logger.exception(f"DSPy extraction failed for {url}")
+                        result["status"] = "llm_error"
+                        result["error_code"] = "dspy_extraction_failed"
+                        result["error"] = f"Ошибка ИИ: {str(fallback_error)[:500]}"
+                        _append_warning(result, "DSPy не вернул валидный структурированный JSON-ответ после 2 попыток")
+                        llm_failed = True
 
             _mark_non_client_field_statuses(
                 result,
