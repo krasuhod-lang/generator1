@@ -199,6 +199,9 @@ class ParserExtractRequest(BaseModel):
     extract_services: bool = False
     extract_clients: bool = False
     api_key: str = ""
+    task_id: str = ""
+    item_id: str = ""
+    use_result_cache: bool = False
 
 
 def _parser_exception_result(url: str, req: ParserExtractRequest, exc: Exception) -> dict:
@@ -207,6 +210,11 @@ def _parser_exception_result(url: str, req: ParserExtractRequest, exc: Exception
     result = {
         "url": url,
         "title": "",
+        "execution": {
+            "run_id": req.task_id,
+            "item_id": req.item_id,
+            "result_source": "fresh",
+        },
         "contacts": "",
         "about": "",
         "services": [],
@@ -242,7 +250,17 @@ async def extract_parsers(req: ParserExtractRequest):
         raise HTTPException(status_code=422, detail="No urls provided")
     
     # Process them concurrently
-    tasks = [parse_url_dspy(url, req.extract_contacts, req.extract_about, req.extract_services, req.api_key, req.extract_clients) for url in req.urls]
+    tasks = [parse_url_dspy(
+        url,
+        req.extract_contacts,
+        req.extract_about,
+        req.extract_services,
+        req.api_key,
+        req.extract_clients,
+        task_id=req.task_id,
+        item_id=req.item_id,
+        use_result_cache=req.use_result_cache,
+    ) for url in req.urls]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     final_results = []

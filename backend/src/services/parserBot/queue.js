@@ -294,7 +294,7 @@ async function heartbeat(itemId, workerId, db = dbDefault) {
 
 function itemStatusFromResult(result = {}) {
   if (result.status === 'partial') return 'partial';
-  if (result.status === 'fetch_error' || result.status === 'llm_error') return 'error';
+  if (result.status === 'fetch_error' || result.status === 'llm_error' || result.status === 'blocked') return 'error';
   if (result.status === 'cancelled') return 'cancelled';
   return 'done';
 }

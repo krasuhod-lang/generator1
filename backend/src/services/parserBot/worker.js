@@ -12,6 +12,10 @@ const CLIENT_FALLBACKS = {
     client_segments: 'Не определено — сайт недоступен или не удалось получить его содержимое',
     works_with: 'Не определено — анализ невозможен из-за ошибки доступа к сайту',
   },
+  blocked: {
+    client_segments: 'Не определено — автоматический доступ к сайту заблокирован',
+    works_with: 'Не определено — сайт запретил автоматический анализ',
+  },
   llm_error: {
     client_segments: 'Не удалось определить — ошибка анализа ИИ',
     works_with: 'Не удалось определить — ошибка анализа ИИ',
@@ -33,6 +37,9 @@ function buildAuditPayload(item) {
   const options = item.task?.options || {};
   return {
     urls: [item.normalized_url || item.input_url],
+    task_id: item.task_id || item.task?.id || '',
+    item_id: item.id || '',
+    use_result_cache: Boolean(options.use_result_cache),
     extract_contacts: boolOption(options, ['extract_contacts', 'contacts']),
     extract_about: boolOption(options, ['extract_about', 'about']),
     extract_services: boolOption(options, ['extract_services', 'services']),
@@ -58,6 +65,11 @@ function buildWorkerErrorResult(item, status, message) {
   return {
     url: item.normalized_url || item.input_url,
     title: '',
+    execution: {
+      run_id: item.task_id || item.task?.id || '',
+      item_id: item.id || '',
+      result_source: 'fresh',
+    },
     contacts: '',
     about: '',
     services: [],
@@ -105,6 +117,12 @@ async function callAudit(item) {
   if (!hasStructuredPayload && result.status === undefined) {
     return buildWorkerErrorResult(item, 'llm_error', 'Audit-сервис не вернул структурированные поля');
   }
+  result.execution = {
+    ...(result.execution || {}),
+    run_id: item.task_id || item.task?.id || result.execution?.run_id || '',
+    item_id: item.id || result.execution?.item_id || '',
+    result_source: result.execution?.result_source || 'fresh',
+  };
   return result;
 }
 
@@ -127,6 +145,7 @@ async function processNext() {
     await queue.completeItem(item.id, result);
   } catch (err) {
     const code = err.code || '';
+    const isBlockedLike = code === 'ERR_BAD_REQUEST' && /403|429|captcha|blocked|forbidden/i.test(err.message || '');
     const isFetchLike = code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT';
     const options = item.task?.options || {};
     const retryLimit = queue.retryLimit(options);
@@ -135,7 +154,7 @@ async function processNext() {
     } else {
       await queue.completeItem(
         item.id,
-        buildWorkerErrorResult(item, isFetchLike ? 'fetch_error' : 'llm_error', err.message || String(err)),
+        buildWorkerErrorResult(item, isBlockedLike ? 'blocked' : (isFetchLike ? 'fetch_error' : 'llm_error'), err.message || String(err)),
       );
     }
   } finally {

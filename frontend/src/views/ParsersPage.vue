@@ -103,6 +103,7 @@ const fieldStatusMeta = (value) => {
     partial: { text: 'Частично', cls: 'bg-amber-900/40 text-amber-300 border border-amber-800' },
     llm_error: { text: 'Ошибка ИИ — повторите', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
     fetch_error: { text: 'Ошибка доступа к сайту', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
+    blocked: { text: 'Доступ заблокирован', cls: 'bg-orange-900/40 text-orange-300 border border-orange-800' },
   };
   return map[value] || { text: value || '—', cls: 'bg-gray-800 text-gray-400 border border-gray-700' };
 };
@@ -115,6 +116,7 @@ const siteStatusMeta = (value) => {
     partial: { text: 'Частично', cls: 'bg-amber-900/40 text-amber-300 border border-amber-800' },
     llm_error: { text: 'Ошибка анализа ИИ', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
     fetch_error: { text: 'Сайт недоступен', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
+    blocked: { text: 'Автоматический доступ заблокирован', cls: 'bg-orange-900/40 text-orange-300 border border-orange-800' },
     error: { text: 'Ошибка', cls: 'bg-red-900/40 text-red-300 border border-red-800' },
   };
   return map[value] || { text: value || 'queued', cls: 'bg-gray-800 text-gray-400 border border-gray-700' };
@@ -128,6 +130,7 @@ const itemClientSegments = (item) => {
 };
 const itemEvidence = (item) => itemResult(item).evidence || item?.evidence || [];
 const itemError = (item) => itemResult(item).error || item?.error_message || item?.error || '';
+const itemExecution = (item) => itemResult(item).execution || {};
 const itemFieldStatus = (item) => itemResult(item).field_status || item?.field_status || {};
 const terminalStatuses = new Set(['done', 'partial', 'error', 'cancelled']);
 
@@ -638,6 +641,7 @@ onUnmounted(() => {
               <tr>
                 <th class="text-left py-2 pr-4">URL</th>
                 <th class="text-left py-2 pr-4">Статус</th>
+                <th class="text-left py-2 pr-4">Источник / доступ</th>
                 <th class="text-left py-2 pr-4">Категории клиентов</th>
                 <th class="text-left py-2 pr-4">С кем работает</th>
                 <th class="text-left py-2 pr-4">Страниц</th>
@@ -666,6 +670,13 @@ onUnmounted(() => {
                   <div class="text-[11px] text-gray-500 mt-1">
                     попыток: {{ item.attempts || 0 }}
                   </div>
+                </td>
+                <td class="py-3 pr-4 min-w-[190px] text-xs text-gray-400">
+                  <div>Источник: {{ itemExecution(item).result_source || 'fresh' }}</div>
+                  <div v-if="itemResult(item).access?.status || itemResult(item).error_code" class="mt-1 text-orange-300">
+                    {{ itemResult(item).access?.status || itemResult(item).error_code }}
+                  </div>
+                  <div v-if="itemResult(item).access?.status_code" class="mt-1">HTTP {{ itemResult(item).access.status_code }}</div>
                 </td>
                 <td class="py-3 pr-4 min-w-[260px] whitespace-pre-line text-gray-200">
                   {{ itemClientSegments(item) || '—' }}

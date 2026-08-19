@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 import dspy
 from bs4 import BeautifulSoup
 import aiohttp
+from protego import Protego
 
 from .page_parser import _clean_text, _same_domain, base_hostname
 from .fetcher import fetch_page
@@ -38,8 +39,12 @@ DISCOVERY_CANDIDATE_LIMIT = int(os.getenv("PARSER_DISCOVERY_CANDIDATE_LIMIT") or
 # Сколько подстраниц качаем параллельно (asyncio.gather с ограничением).
 SUBPAGE_CONCURRENCY = int(os.getenv("PARSER_SUBPAGE_CONCURRENCY") or 4)
 
-# TTL кэша результатов парсинга (по умолчанию 3 дня).
+# Result cache is opt-in. Every parser task is fresh by default so a previous
+# run cannot hide a current block/LLM failure. When enabled, only successful
+# results are cached under a versioned/model-aware key.
+PARSER_CACHE_ENABLED = (os.getenv("PARSER_CACHE_ENABLED") or "0").strip().lower() in {"1", "true", "yes", "on"}
 CACHE_TTL_SECONDS = int(os.getenv("PARSER_CACHE_TTL_SECONDS") or 259200)
+CACHE_SCHEMA_VERSION = "v3"
 
 # Паттерны внутренних ссылок, по которым ищем подстраницы с доказательной базой
 # (услуги/о компании/контакты + клиенты/кейсы/портфолио/проекты/партнёры/отзывы).
@@ -80,6 +85,10 @@ CLIENT_FALLBACKS = {
         "client_segments": "Не определено — сайт недоступен или не удалось получить его содержимое",
         "works_with": "Не определено — анализ невозможен из-за ошибки доступа к сайту",
     },
+    "blocked": {
+        "client_segments": "Не определено — автоматический доступ к сайту заблокирован",
+        "works_with": "Не определено — сайт запретил автоматический анализ",
+    },
     "llm_error": {
         "client_segments": "Не удалось определить — ошибка анализа ИИ",
         "works_with": "Не удалось определить — ошибка анализа ИИ",
@@ -92,6 +101,30 @@ AUDIENCE_SIGNAL_RE = re.compile(
     r"\bB2B\b|\bB2C\b|\bB2G\b)",
     re.IGNORECASE,
 )
+
+
+async def _robots_allowed(session: aiohttp.ClientSession, url: str) -> Tuple[bool, Optional[str]]:
+    """Respect robots.txt for this parser run; never use old cross-run decisions."""
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return False, "invalid_url"
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    try:
+        timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
+        async with session.get(robots_url, timeout=timeout, allow_redirects=True) as response:
+            if response.status >= 400:
+                return True, None
+            text = await response.text(errors="replace")
+        if not text.strip():
+            return True, None
+        policy = Protego.parse(text)
+        if not policy.can_fetch("*", url):
+            return False, "robots_disallow"
+    except Exception:
+        # Unavailable robots.txt is not treated as a blanket denial; the actual
+        # page request still produces its own explicit access status.
+        return True, None
+    return True, None
 
 
 def _normalize_internal_link(base_url: str, raw_href: str, base_host: str) -> Optional[str]:
@@ -108,10 +141,15 @@ def _normalize_internal_link(base_url: str, raw_href: str, base_host: str) -> Op
     return full_url
 
 
-def _base_result(url: str, title: str = "") -> Dict[str, Any]:
+def _base_result(url: str, title: str = "", task_id: Optional[str] = None, item_id: Optional[str] = None) -> Dict[str, Any]:
     return {
         "url": url,
         "title": title,
+        "execution": {
+            "run_id": task_id or "",
+            "item_id": item_id or "",
+            "result_source": "fresh",
+        },
         "contacts": "",
         "about": "",
         "services": [],
@@ -162,6 +200,45 @@ def _apply_client_fallback(result: Dict[str, Any], status: str) -> None:
     result["works_with"] = fallback["works_with"]
     result.setdefault("field_status", {})["client_segments"] = status
     result.setdefault("field_status", {})["works_with"] = status
+
+
+def _access_failure_result(
+    url: str,
+    *,
+    task_id: Optional[str],
+    item_id: Optional[str],
+    access_status: str,
+    error_code: str,
+    message: str,
+    status_code: Optional[int] = None,
+    method: Optional[str] = None,
+    final_url: Optional[str] = None,
+    extract_contacts: bool,
+    extract_about: bool,
+    extract_services: bool,
+    extract_clients: bool,
+) -> Dict[str, Any]:
+    result = _base_result(url, task_id=task_id, item_id=item_id)
+    result["status"] = access_status
+    result["error_code"] = error_code
+    result["error"] = message[:1000]
+    result["access"] = {
+        "status": access_status,
+        "status_code": status_code,
+        "method": method,
+        "final_url": final_url or url,
+    }
+    _mark_requested_statuses(
+        result,
+        access_status,
+        extract_contacts=extract_contacts,
+        extract_about=extract_about,
+        extract_services=extract_services,
+        extract_clients=extract_clients,
+    )
+    if extract_clients:
+        _apply_client_fallback(result, access_status)
+    return result
 
 
 def _mark_non_client_field_statuses(
@@ -298,6 +375,10 @@ def _finalize_site_status(result: Dict[str, Any]) -> None:
         return
     if all(s == "fetch_error" for s in statuses):
         result["status"] = "fetch_error"
+    elif all(s == "blocked" for s in statuses):
+        result["status"] = "blocked"
+    elif "blocked" in statuses:
+        result["status"] = "partial"
     elif "fetch_error" in statuses:
         result["status"] = "partial"
     elif all(s == "llm_error" for s in statuses):
@@ -690,16 +771,37 @@ def _run_dspy_prediction(extractor: Any, lm: Any, website_text: str) -> Any:
     return extractor(website_text=website_text)
 
 
-async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, extract_services: bool, deepseek_api_key: str, extract_clients: bool = False) -> dict:
-    key_str = f"{url}_{extract_contacts}_{extract_about}_{extract_services}_{extract_clients}"
+async def parse_url_dspy(
+    url: str,
+    extract_contacts: bool,
+    extract_about: bool,
+    extract_services: bool,
+    deepseek_api_key: str,
+    extract_clients: bool = False,
+    *,
+    task_id: str = "",
+    item_id: str = "",
+    use_result_cache: bool = False,
+) -> dict:
+    key_str = (
+        f"{CACHE_SCHEMA_VERSION}|{url}|{extract_contacts}|{extract_about}|"
+        f"{extract_services}|{extract_clients}|{DEEPSEEK_PARSER_MODEL}"
+    )
     url_hash = hashlib.md5(key_str.encode()).hexdigest()
-    cache_key = f"parser:result:v2:{url_hash}"
+    cache_key = f"parser:result:{CACHE_SCHEMA_VERSION}:{url_hash}"
 
-    if _redis is not None:
+    cache_allowed = bool(PARSER_CACHE_ENABLED and use_result_cache)
+    if cache_allowed and _redis is not None:
         try:
             cached = await _redis.get(cache_key)
             if cached:
-                return json.loads(cached)
+                cached_result = json.loads(cached)
+                if isinstance(cached_result, dict):
+                    execution = cached_result.setdefault("execution", {})
+                    execution["run_id"] = task_id
+                    execution["item_id"] = item_id
+                    execution["result_source"] = "validated_cache"
+                    return cached_result
         except Exception as e:
             logger.debug(f"redis get failed: {e}")
 
@@ -709,7 +811,37 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
 
     async with aiohttp.ClientSession() as session:
         try:
+            allowed, robots_reason = await _robots_allowed(session, url)
+            if not allowed:
+                return _access_failure_result(
+                    url,
+                    task_id=task_id,
+                    item_id=item_id,
+                    access_status="blocked",
+                    error_code=robots_reason or "robots_disallow",
+                    message="Автоматический анализ запрещен правилами robots.txt",
+                    extract_contacts=extract_contacts,
+                    extract_about=extract_about,
+                    extract_services=extract_services,
+                    extract_clients=extract_clients,
+                )
             res = await fetch_page(session, url)
+            if res and getattr(res, "fetch_status", "") == "blocked":
+                return _access_failure_result(
+                    url,
+                    task_id=task_id,
+                    item_id=item_id,
+                    access_status="blocked",
+                    error_code=getattr(res, "error", None) or "blocked_response",
+                    message=f"Автоматический доступ к сайту заблокирован: {getattr(res, 'error', None) or 'blocked_response'}",
+                    status_code=getattr(res, "status_code", None),
+                    method=getattr(res, "method", None),
+                    final_url=getattr(res, "final_url", None),
+                    extract_contacts=extract_contacts,
+                    extract_about=extract_about,
+                    extract_services=extract_services,
+                    extract_clients=extract_clients,
+                )
             html = res.html if res and res.html else ""
             htmls.append(html)
             page_htmls.append((url, html))
@@ -752,7 +884,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
                         queue.append((link, depth + 1, score))
         except Exception as e:
             logger.exception(f"Failed to fetch {url}")
-            result = _base_result(url)
+            result = _base_result(url, task_id=task_id, item_id=item_id)
             result["status"] = "fetch_error"
             result["error"] = f"Ошибка доступа: {str(e)[:100]}"
             _mark_requested_statuses(
@@ -792,7 +924,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
     # Trim to ~15000-20000 tokens (approx 60000 chars)
     clean_text = clean_text[:60000]
     
-    result = _base_result(url, title_text)
+    result = _base_result(url, title_text, task_id=task_id, item_id=item_id)
     result["stats"]["pages_scanned"] = len(page_texts)
     audience_evidence = _extract_audience_evidence(page_texts)
     effective_api_key = (deepseek_api_key or DEEPSEEK_API_KEY or "").strip()
@@ -810,7 +942,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
         )
         if extract_clients:
             _apply_client_fallback(result, "fetch_error")
-        if _redis is not None:
+        if cache_allowed and _redis is not None:
             try:
                 await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=CACHE_TTL_SECONDS)
             except Exception as e:
@@ -911,7 +1043,7 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
         result["contacts"] or result["about"] or result["services"]
         or result["focus"] or result["client_segments"] or result["works_with"]
     )
-    if _redis is not None and result["status"] in {"ok", "partial", "not_found"} and (not llm_requested or produced_any):
+    if cache_allowed and _redis is not None and result["status"] in {"ok", "partial", "not_found"} and (not llm_requested or produced_any):
         try:
             await _redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=CACHE_TTL_SECONDS)
         except Exception as e:

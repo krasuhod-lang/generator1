@@ -125,6 +125,9 @@ async function exportXlsx(req, res) {
     const workbook = new exceljs.Workbook();
     const sheet = workbook.addWorksheet('Parser Bot');
     sheet.columns = [
+      { header: 'ID запуска', key: 'run_id', width: 38 },
+      { header: 'ID элемента запуска', key: 'item_id', width: 38 },
+      { header: 'Источник результата', key: 'result_source', width: 18 },
       { header: 'URL сайта', key: 'url', width: 30 },
       { header: 'Title главной страницы', key: 'title', width: 30 },
       { header: 'Контакты', key: 'contacts', width: 30 },
@@ -139,12 +142,19 @@ async function exportXlsx(req, res) {
       { header: 'Доказательства клиентов', key: 'evidence', width: 60 },
       { header: 'Предупреждения', key: 'warnings', width: 50 },
       { header: 'Количество просканированных страниц', key: 'pages_scanned', width: 22 },
+      { header: 'Статус доступа к сайту', key: 'access_status', width: 24 },
+      { header: 'Код/причина доступа', key: 'access_reason', width: 30 },
     ];
     for (const item of items) {
       const result = item.result || {};
       const fieldStatus = result.field_status || item.field_status || {};
       const stats = result.stats || item.stats || {};
+      const execution = result.execution || {};
+      const access = result.access || {};
       sheet.addRow({
+        run_id: execution.run_id || task.id,
+        item_id: execution.item_id || item.id,
+        result_source: execution.result_source || 'fresh',
         url: result.url || item.normalized_url,
         title: result.title || '',
         contacts: result.contacts || '',
@@ -159,6 +169,8 @@ async function exportXlsx(req, res) {
         evidence: evidenceText(result.evidence || item.evidence),
         warnings: lines(result.warnings),
         pages_scanned: stats.pages_scanned ?? '',
+        access_status: access.status || (result.status === 'blocked' ? 'blocked' : ''),
+        access_reason: access.status_code || result.error_code || result.error || '',
       });
     }
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

@@ -9,6 +9,10 @@ from . import issues, page_parser
 from .urls import normalize_url
 
 
+async def _allow_robots(*_args, **_kwargs):
+    return True, None
+
+
 class TestNormalizeUrl(unittest.TestCase):
     """БАГФИКС #1: /page/ == /page, сортировка query, без fragment."""
 
@@ -600,6 +604,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
             return _Res()
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None):
             out = asyncio.run(parsers.parse_url_dspy(
                 "https://example.com/", extract_contacts=True, extract_about=True,
@@ -610,6 +615,98 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertEqual(out["field_status"]["client_segments"], "fetch_error")
         self.assertEqual(out["field_status"]["works_with"], "fetch_error")
         self.assertEqual(out["status"], "fetch_error")
+
+    def test_blocked_fetch_is_explicit_and_does_not_call_llm(self):
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        class _Blocked:
+            html = '<html><title>captcha</title><body>checking your browser</body></html>'
+            fetch_status = 'blocked'
+            error = 'captcha_or_antibot'
+            status_code = 403
+            method = 'aiohttp'
+            final_url = 'https://example.com/'
+
+        async def _fake_fetch(_session, _url):
+            return _Blocked()
+
+        with mock.patch.object(parsers, 'fetch_page', _fake_fetch), \
+             mock.patch.object(parsers, '_robots_allowed', _allow_robots), \
+             mock.patch.object(parsers, '_redis', None), \
+             mock.patch.object(parsers.dspy, 'LM', side_effect=AssertionError('LLM must not run for blocked site')):
+            out = asyncio.run(parsers.parse_url_dspy(
+                'https://example.com/', extract_contacts=True, extract_about=False,
+                extract_services=False, deepseek_api_key='x', extract_clients=True,
+                task_id='run-1', item_id='item-1'))
+
+        self.assertEqual(out['status'], 'blocked')
+        self.assertEqual(out['error_code'], 'captcha_or_antibot')
+        self.assertEqual(out['execution']['run_id'], 'run-1')
+        self.assertEqual(out['execution']['item_id'], 'item-1')
+        self.assertEqual(out['field_status']['client_segments'], 'blocked')
+        self.assertIn('заблокирован', out['client_segments'][0].lower())
+
+    def test_robots_disallow_is_explicit_and_fresh(self):
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        async def _must_not_fetch(_session, _url):
+            raise AssertionError('page fetch must not run after robots disallow')
+
+        async def _deny_robots(*_args, **_kwargs):
+            return False, 'robots_disallow'
+
+        with mock.patch.object(parsers, 'fetch_page', _must_not_fetch), \
+             mock.patch.object(parsers, '_robots_allowed', _deny_robots), \
+             mock.patch.object(parsers, '_redis', None):
+            out = asyncio.run(parsers.parse_url_dspy(
+                'https://example.com/', extract_contacts=False, extract_about=False,
+                extract_services=False, deepseek_api_key='x', extract_clients=True,
+                task_id='run-2', item_id='item-2'))
+
+        self.assertEqual(out['status'], 'blocked')
+        self.assertEqual(out['error_code'], 'robots_disallow')
+        self.assertEqual(out['execution']['result_source'], 'fresh')
+
+    def test_cache_is_opt_in_and_not_read_for_new_run(self):
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        calls = []
+        class _Redis:
+            async def get(self, _key):
+                calls.append('get')
+                return b'{"status":"llm_error"}'
+            async def set(self, *_args, **_kwargs):
+                calls.append('set')
+
+        class _Res:
+            html = '<html><head><title>Fresh</title></head><body>' + ('Company services. ' * 30) + '</body></html>'
+            fetch_status = 'ok'
+            error = None
+            status_code = 200
+            method = 'aiohttp'
+            final_url = 'https://example.com/'
+
+        async def _fake_fetch(_session, _url):
+            return _Res()
+
+        with mock.patch.object(parsers, 'fetch_page', _fake_fetch), \
+             mock.patch.object(parsers, '_robots_allowed', _allow_robots), \
+             mock.patch.object(parsers, '_redis', _Redis()), \
+             mock.patch.object(parsers, 'PARSER_CACHE_ENABLED', False), \
+             mock.patch.object(parsers.dspy, 'LM', side_effect=AssertionError('LLM should not be called without requested fields')):
+            out = asyncio.run(parsers.parse_url_dspy(
+                'https://example.com/', extract_contacts=False, extract_about=False,
+                extract_services=False, deepseek_api_key='x', extract_clients=False,
+                task_id='run-3', item_id='item-3'))
+
+        self.assertEqual(calls, [])
+        self.assertEqual(out['execution']['result_source'], 'fresh')
 
     def test_coerce_to_list_formats(self):
         from . import parsers
@@ -663,6 +760,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
             return object()
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None), \
              mock.patch.object(parsers, "DEEPSEEK_API_KEY", "env-deepseek-key"), \
              mock.patch.object(parsers.dspy, "LM", _fake_lm), \
@@ -696,6 +794,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
             return _Res(html)
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None), \
              mock.patch.object(parsers, "DEEPSEEK_API_KEY", ""), \
              mock.patch.object(parsers.dspy, "LM", side_effect=AssertionError("LM should not be called")):
@@ -737,6 +836,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 return _Out()
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None), \
              mock.patch.object(parsers.dspy, "LM", lambda *a, **k: object()), \
              mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
@@ -797,6 +897,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 return _Out()
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None), \
              mock.patch.object(parsers.dspy, "LM", lambda *a, **k: object()), \
              mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
@@ -855,6 +956,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 raise AttributeError("'str' object has no attribute 'items'")
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None), \
              mock.patch.object(parsers.dspy, "LM", lambda *a, **k: _LM()), \
              mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
@@ -943,6 +1045,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 return _Out()
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None), \
              mock.patch.object(parsers, "MAX_SUBPAGES", 3), \
              mock.patch.object(parsers, "PARSER_MAX_DEPTH", 2), \
@@ -987,6 +1090,7 @@ class TestParsersClientSegmentation(unittest.TestCase):
             return _Res(main_html if url == "https://example.com/ru" else "<html><body>sub</body></html>")
 
         with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_robots_allowed", _allow_robots), \
              mock.patch.object(parsers, "_redis", None):
             asyncio.run(parsers.parse_url_dspy(
                 "https://example.com/ru", extract_contacts=False, extract_about=False,

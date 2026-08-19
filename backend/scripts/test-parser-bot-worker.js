@@ -47,13 +47,18 @@ test('buildAuditPayload maps parser-bot options to audit endpoint contract', () 
   const payload = buildAuditPayload({
     normalized_url: 'https://example.com/',
     input_url: 'example.com',
-    task: { options: { extract_contacts: true, about: true, services: false, clients: true } },
+    id: 'item-1',
+    task_id: 'run-1',
+    task: { id: 'run-1', options: { extract_contacts: true, about: true, services: false, clients: true } },
   });
   assert.deepStrictEqual(payload.urls, ['https://example.com/']);
   assert.strictEqual(payload.extract_contacts, true);
   assert.strictEqual(payload.extract_about, true);
   assert.strictEqual(payload.extract_services, false);
   assert.strictEqual(payload.extract_clients, true);
+  assert.strictEqual(payload.task_id, 'run-1');
+  assert.strictEqual(payload.item_id, 'item-1');
+  assert.strictEqual(payload.use_result_cache, false);
 });
 
 test('buildWorkerErrorResult returns non-empty client sentinel fields', () => {
@@ -62,6 +67,7 @@ test('buildWorkerErrorResult returns non-empty client sentinel fields', () => {
     task: { options: { clients: true, contacts: true } },
   }, 'fetch_error', 'timeout');
   assert.strictEqual(result.status, 'fetch_error');
+  assert.strictEqual(result.execution.result_source, 'fresh');
   assert.strictEqual(result.field_status.client_segments, 'fetch_error');
   assert.ok(result.client_segments[0].includes('Не определено'));
   assert.ok(result.works_with);
@@ -73,6 +79,7 @@ test('itemStatusFromResult maps site statuses to durable item statuses', () => {
   assert.strictEqual(itemStatusFromResult({ status: 'partial' }), 'partial');
   assert.strictEqual(itemStatusFromResult({ status: 'llm_error' }), 'error');
   assert.strictEqual(itemStatusFromResult({ status: 'fetch_error' }), 'error');
+  assert.strictEqual(itemStatusFromResult({ status: 'blocked' }), 'error');
 });
 
 test('retryLimit is clamped to safe range', () => {

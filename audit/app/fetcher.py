@@ -121,6 +121,21 @@ def looks_blocked(html: str, status: int) -> bool:
     return any(m in low for m in _BLOCK_MARKERS)
 
 
+def block_reason(html: str, status: int) -> str:
+    if status == 429:
+        return "rate_limited_429"
+    if status == 403:
+        return "forbidden_403"
+    if status == 503:
+        return "service_unavailable_503"
+    low = (html or "")[:5000].lower()
+    if any(marker in low for marker in _BLOCK_MARKERS):
+        return "captcha_or_antibot"
+    if not html:
+        return "empty_block_page"
+    return "blocked_response"
+
+
 class FetchResult:
     __slots__ = ("url", "final_url", "status_code", "html", "response_time_ms",
                  "content_size_bytes", "redirect_chain", "error", "method",
@@ -213,10 +228,22 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
         res.fetch_status = "error"
     res.response_time_ms = int((time.monotonic() - started) * 1000)
 
-    # Эскалация: пустой body / 403 / антибот-заглушка → headless-фетчер
-    if not use_playwright and (res.error or looks_blocked(res.html, res.status_code or 0)) \
+    # Эскалация: пустой body / 403 / антибот-заглушка → штатный headless-фетчер.
+    # Если защитный ответ не удалось получить разрешенным способом, не передаем
+    # HTML-заглушку в LLM: сохраняем explicit blocked status и причину.
+    blocked_signal = bool(
+        res.status_code in (403, 429, 503)
+        or (res.status_code is not None and looks_blocked(res.html, res.status_code))
+    )
+    if not use_playwright and (res.error or blocked_signal) \
             and (res.status_code is None or res.status_code < 500 or res.status_code in (503,)):
-        await _fetch_headless(res, url)
+        headless_ok = await _fetch_headless(res, url)
+        if not headless_ok and blocked_signal:
+            res.fetch_status = "blocked"
+            res.error = block_reason(res.html, res.status_code or 0)
+    elif blocked_signal and not res.error:
+        res.fetch_status = "blocked"
+        res.error = block_reason(res.html, res.status_code or 0)
     return res
 
 
@@ -239,15 +266,20 @@ async def _fetch_headless(res: FetchResult, url: str) -> bool:
     except Exception as e:
         logger.debug("headless fetch failed for %s: %s", url, e)
         return False
-    html = (data or {}).get("html") or ""
-    if not html:
-        return False
-    res.html = html[: MAX_BODY_BYTES]
-    res.status_code = int((data or {}).get("status") or 200)
-    res.final_url = (data or {}).get("final_url") or url
-    res.content_size_bytes = len(res.html.encode("utf-8"))
+    data = data or {}
+    html = data.get("html") or ""
+    res.status_code = int(data.get("status_code") or data.get("status") or 0)
+    res.final_url = data.get("final_url") or url
+    res.method = data.get("method") or "headless"
+    if html:
+        res.html = html[: MAX_BODY_BYTES]
+        res.content_size_bytes = len(res.html.encode("utf-8"))
     res.response_time_ms = int((time.monotonic() - started) * 1000)
-    res.method = (data or {}).get("method") or "headless"
+    success = bool(data.get("success")) and not looks_blocked(res.html, res.status_code)
+    if not success:
+        res.fetch_status = "blocked" if looks_blocked(res.html, res.status_code) or data.get("error_msg") else "error"
+        res.error = data.get("error_msg") or block_reason(res.html, res.status_code)
+        return False
     res.error = None
     res.fetch_status = "ok"
     return True
