@@ -499,6 +499,18 @@ class TestAiResponseNormalizer(unittest.TestCase):
         self.assertEqual(out["source_type"], "history")
         self.assertEqual(out["fields"]["about_summary"], "Из history")
 
+    def test_raw_json_repair_normalizes_provider_list_response(self):
+        from . import parsers
+
+        class LM:
+            def __call__(self, **_kwargs):
+                return ['{"about_summary":"Компания","works_with":"B2B: подрядчики",'
+                        '"client_segments":["подрядчики — сопровождение"]}']
+
+        fields = parsers._run_raw_json_repair(LM(), "Факты сайта")
+        self.assertEqual(fields["about_summary"], "Компания")
+        self.assertEqual(fields["client_segments"], ["подрядчики — сопровождение"])
+
     def test_latest_lm_fields_recovers_structured_result_wrapper(self):
         import json
         from . import parsers
@@ -533,6 +545,21 @@ class TestAiResponseNormalizer(unittest.TestCase):
         self.assertEqual(out["fields"]["services_list"], ["проектирование", "монтаж"])
         self.assertEqual(out["fields"]["works_with"], "B2B: промышленные предприятия")
 
+    def test_client_segment_dicts_become_readable_segments(self):
+        from .ai_response_normalizer import normalize_llm_response
+
+        out = normalize_llm_response({
+            "client_segments": [
+                {"segment": "Поставщики", "service": "тендерное сопровождение"},
+                {"category": "Заказчики", "solution": "создание тендеров"},
+            ],
+        })
+        self.assertEqual(
+            out["fields"]["client_segments"],
+            ["Поставщики — тендерное сопровождение", "Заказчики — создание тендеров"],
+        )
+        self.assertFalse(any("dict item converted" in warning for warning in out["warnings"]))
+
     def test_client_segments_shapes(self):
         from .ai_response_normalizer import normalize_llm_response
 
@@ -541,7 +568,8 @@ class TestAiResponseNormalizer(unittest.TestCase):
             "works_with": None,
         })
         self.assertIn("стоматологии — SEO", out["fields"]["client_segments"])
-        self.assertTrue(any("dict item" in w for w in out["warnings"]))
+        self.assertIn("клиники", out["fields"]["client_segments"])
+        self.assertFalse(any("dict item converted" in w for w in out["warnings"]))
         self.assertEqual(out["fields"]["works_with"], "")
 
     def test_unknown_type_no_items_error(self):
@@ -608,6 +636,45 @@ class TestParsersClientSegmentation(unittest.TestCase):
         from . import parsers
         self.assertIsInstance(parsers.MAX_SUBPAGES, int)
         self.assertGreaterEqual(parsers.MAX_SUBPAGES, 5)
+
+    def test_sitemap_discovery_returns_relevant_same_domain_links(self):
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        sitemap_xml = """<?xml version="1.0"?><urlset>
+              <url><loc>https://example.com/clients</loc></url>
+              <url><loc>https://example.com/tenders</loc></url>
+              <url><loc>https://other.example.org/secret</loc></url>
+            </urlset>"""
+
+        class _Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def text(self, **_kwargs):
+                return sitemap_xml
+
+        class _Session:
+            def get(self, *_args, **_kwargs):
+                return _Response()
+
+        async def _allow(*_args, **_kwargs):
+            return True, None
+
+        with mock.patch.object(parsers, "_robots_allowed", _allow):
+            out = asyncio.run(parsers._discover_sitemap_links(
+                _Session(), "https://example.com/", "example.com"))
+
+        urls = [url for url, _score in out]
+        self.assertIn("https://example.com/clients", urls)
+        self.assertIn("https://example.com/tenders", urls)
+        self.assertNotIn("https://other.example.org/secret", urls)
 
     def test_empty_content_yields_fetch_error_sentinel_segments(self):
         # При пустом контенте LLM не вызывается, а клиентские поля получают

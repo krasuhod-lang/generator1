@@ -25,9 +25,17 @@ function evidenceText(evidence) {
     .join('\n');
 }
 
+function formatListItem(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return String(value || '').trim();
+  const segment = value.segment || value.category || value.client || value.audience || value.industry || '';
+  const service = value.service || value.solution || value.offer || value.need || '';
+  if (segment) return service ? `${segment} — ${service}` : String(segment);
+  return JSON.stringify(value);
+}
+
 function lines(value) {
-  if (Array.isArray(value)) return value.filter(Boolean).join('\n');
-  if (value && typeof value === 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return value.map(formatListItem).filter(Boolean).join('\n');
+  if (value && typeof value === 'object') return formatListItem(value);
   return value || '';
 }
 

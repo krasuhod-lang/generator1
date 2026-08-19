@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import re
+from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 import dspy
@@ -35,6 +36,7 @@ PARSER_MAX_DEPTH = int(os.getenv("PARSER_MAX_DEPTH") or 2)
 # Верхний предел очереди обнаруженных URL, чтобы случайный сайт с мегаменю не
 # раздувал память и не превращал извлечение одного сайта в полноценный краул.
 DISCOVERY_CANDIDATE_LIMIT = int(os.getenv("PARSER_DISCOVERY_CANDIDATE_LIMIT") or 80)
+SITEMAP_DISCOVERY_LIMIT = int(os.getenv("PARSER_SITEMAP_DISCOVERY_LIMIT") or 40)
 
 # Сколько подстраниц качаем параллельно (asyncio.gather с ограничением).
 SUBPAGE_CONCURRENCY = int(os.getenv("PARSER_SUBPAGE_CONCURRENCY") or 4)
@@ -59,6 +61,8 @@ AUDIENCE_LINK_HINTS = [
     "industry", "industries", "solution", "solutions", "segment", "audience",
     "for-", "/for/", "для-", "/для/", "клиент", "заказчик", "кейс", "проект",
     "портфолио", "партнер", "партнёр", "отзыв", "отрасл", "решени", "кому",
+    "supplier", "vendor", "buyer", "procurement", "tender", "trade", "purchase",
+    "поставщик", "подрядчик", "заказчик", "закуп", "тендер", "торг", "контракт",
 ]
 
 NOISY_LINK_HINTS = [
@@ -125,6 +129,58 @@ async def _robots_allowed(session: aiohttp.ClientSession, url: str) -> Tuple[boo
         # page request still produces its own explicit access status.
         return True, None
     return True, None
+
+
+async def _discover_sitemap_links(
+    session: aiohttp.ClientSession,
+    base_url: str,
+    base_host: str,
+) -> List[Tuple[str, int]]:
+    """Discover relevant same-domain pages from standard XML sitemaps.
+
+    Many accessible sites render navigation through JavaScript or expose only a
+    small mobile menu in HTML. Sitemap discovery keeps the parser useful without
+    bypassing access controls and is bounded to a small number of candidates.
+    """
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    sitemap_candidates = [
+        f"{origin}/sitemap.xml",
+        f"{origin}/sitemap_index.xml",
+        f"{origin}/sitemap-index.xml",
+    ]
+    sitemap_queue = list(sitemap_candidates)
+    seen_sitemaps = set()
+    found: Dict[str, int] = {}
+    timeout = aiohttp.ClientTimeout(total=12, connect=5, sock_read=10)
+
+    while sitemap_queue and len(seen_sitemaps) < 4 and len(found) < SITEMAP_DISCOVERY_LIMIT:
+        sitemap_url = sitemap_queue.pop(0)
+        if sitemap_url in seen_sitemaps:
+            continue
+        seen_sitemaps.add(sitemap_url)
+        try:
+            allowed, _reason = await _robots_allowed(session, sitemap_url)
+            if not allowed:
+                continue
+            async with session.get(sitemap_url, timeout=timeout, allow_redirects=True) as response:
+                if response.status >= 400:
+                    continue
+                body = await response.text(errors="replace")
+            locs = [unescape(value).strip() for value in re.findall(r"<loc[^>]*>(.*?)</loc>", body, re.IGNORECASE | re.DOTALL)]
+            for raw_loc in locs:
+                loc = _normalize_internal_link(base_url, raw_loc, base_host)
+                if loc:
+                    haystack = loc.casefold()
+                    score = 90 if any(hint.casefold() in haystack for hint in AUDIENCE_LINK_HINTS) else 20
+                    if score > 20 or len(found) < max(5, SITEMAP_DISCOVERY_LIMIT // 5):
+                        found[loc] = max(found.get(loc, -1), score)
+                elif raw_loc.lower().endswith((".xml", ".xml.gz")) and len(sitemap_queue) < 3:
+                    sitemap_queue.append(raw_loc)
+        except Exception as exc:
+            logger.debug("sitemap discovery failed for %s: %s", sitemap_url, exc)
+
+    return sorted(found.items(), key=lambda item: item[1], reverse=True)[:SITEMAP_DISCOVERY_LIMIT]
 
 
 def _normalize_internal_link(base_url: str, raw_href: str, base_host: str) -> Optional[str]:
@@ -313,22 +369,58 @@ def _extract_audience_evidence(page_texts: List[Dict[str, str]], limit: int = 20
     return evidence
 
 
+def _evidence_tokens(text: str) -> set[str]:
+    tokens = set()
+    for token in re.findall(r"[a-zа-яё0-9]{4,}", (text or "").casefold()):
+        if token in {"клиенты", "компании", "бизнес", "заказчики", "услуги", "работаем"}:
+            continue
+        tokens.add(token)
+        if len(token) >= 6:
+            tokens.add(token[:6])
+    return tokens
+
+
 def _client_evidence_for_segments(
     segments: List[str],
     works_with: str,
     audience_evidence: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    if not segments or not audience_evidence:
+    if not audience_evidence:
         return []
     out: List[Dict[str, Any]] = []
-    for idx, _segment in enumerate(segments):
-        ev = dict(audience_evidence[idx % len(audience_evidence)])
-        ev["field"] = "client_segments"
-        out.append(ev)
+    used = set()
+    for segment in segments:
+        segment_tokens = _evidence_tokens(segment)
+        candidates = []
+        for idx, evidence in enumerate(audience_evidence):
+            if idx in used:
+                continue
+            quote_tokens = _evidence_tokens(evidence.get("quote") or "")
+            overlap = len(segment_tokens & quote_tokens)
+            if overlap:
+                candidates.append((overlap, idx, evidence))
+        if candidates:
+            _overlap, idx, evidence = max(candidates, key=lambda row: row[0])
+            ev = dict(evidence)
+            ev["field"] = "client_segments"
+            ev["confidence"] = min(0.95, 0.75 + 0.05 * _overlap)
+            out.append(ev)
+            used.add(idx)
+
     if works_with:
-        ev = dict(audience_evidence[0])
-        ev["field"] = "works_with"
-        out.append(ev)
+        works_tokens = _evidence_tokens(works_with)
+        candidates = []
+        for idx, evidence in enumerate(audience_evidence):
+            quote_tokens = _evidence_tokens(evidence.get("quote") or "")
+            overlap = len(works_tokens & quote_tokens)
+            if overlap:
+                candidates.append((overlap, idx, evidence))
+        if candidates:
+            _overlap, _idx, evidence = max(candidates, key=lambda row: row[0])
+            ev = dict(evidence)
+            ev["field"] = "works_with"
+            ev["confidence"] = min(0.95, 0.75 + 0.05 * _overlap)
+            out.append(ev)
     return out
 
 
@@ -349,8 +441,9 @@ def _finalize_client_fields(
     segments = _coerce_to_list(result.get("client_segments"))
     works_with = _coerce_to_text(result.get("works_with"))
     evidence = _client_evidence_for_segments(segments, works_with, audience_evidence)
+    segment_evidence = [ev for ev in evidence if ev.get("field") == "client_segments"]
 
-    if segments and evidence:
+    if segments and segment_evidence:
         result["client_segments"] = segments
         result["evidence"] = [*result.get("evidence", []), *evidence]
         result.setdefault("field_status", {})["client_segments"] = "found"
@@ -364,7 +457,7 @@ def _finalize_client_fields(
         return
 
     _apply_client_fallback(result, "not_found")
-    if segments and not evidence:
+    if segments and not segment_evidence:
         _append_warning(result, "Категории клиентов отброшены: не найдено проверяемых цитат-доказательств")
     elif not segments and not works_with:
         _append_warning(result, "Не найдено проверяемых данных о категориях клиентов и профиле заказчиков")
@@ -762,6 +855,29 @@ class ExtractCompanyServices(dspy.Signature):
     )
 
 
+def _run_raw_json_repair(lm: Any, website_text: str) -> Dict[str, Any]:
+    """Ask the already configured LM for plain JSON without DSPy Prediction parsing."""
+    if not callable(lm):
+        raise TypeError("LM is not callable for raw JSON repair")
+    prompt = f"""
+Ты выполняешь восстановление структурированного результата анализа сайта.
+Верни только один валидный JSON-объект без Markdown и пояснений. Обязательно
+присутствуют все шесть ключей; если данных нет, используй пустую строку или []:
+contacts_summary (строка), about_summary (строка), services_list (массив строк),
+main_focus (строка), client_segments (массив строк), works_with (строка).
+Используй только факты из текста. Для client_segments пиши «категория — услуга»,
+не названия брендов. Не выдумывай данные.
+
+ТЕКСТ САЙТА:
+{website_text[:60000]}
+""".strip()
+    raw = lm(prompt=prompt, temperature=0.1, max_tokens=2200, cache=False)
+    normalized = normalize_llm_response(raw)
+    if normalized.get("parse_status") == "invalid":
+        raise ValueError("raw JSON repair returned an unrecognized response")
+    return normalized.get("fields") or {}
+
+
 def _run_dspy_prediction(extractor: Any, lm: Any, website_text: str) -> Any:
     """Run DSPy with a request-local LM context when the installed version supports it.
 
@@ -868,7 +984,9 @@ async def parse_url_dspy(
 
             seen_urls = {url}
             queue: List[Tuple[str, int, int]] = []
-            for link, score in _extract_internal_links(html, url, base_host):
+            sitemap_links = await _discover_sitemap_links(session, url, base_host)
+            discovered_links = [*sitemap_links, *_extract_internal_links(html, url, base_host)]
+            for link, score in discovered_links:
                 if link in seen_urls:
                     continue
                 seen_urls.add(link)
@@ -1019,19 +1137,29 @@ async def parse_url_dspy(
                      
             except Exception as e:
                 lm_obj = locals().get("lm")
-                recovered = _latest_lm_fields(lm_obj)
+                try:
+                    recovered = _latest_lm_fields(lm_obj)
+                except Exception as history_error:
+                    logger.warning("LM history recovery failed for %s: %s", url, history_error)
+                    recovered = {}
+                recovery_applied = False
                 if recovered:
-                    _apply_ai_fields(
-                        result,
-                        recovered,
-                        extract_contacts=extract_contacts,
-                        extract_about=extract_about,
-                        extract_services=extract_services,
-                        extract_clients=extract_clients,
-                    )
-                    result["stats"]["llm_recovered_from_history"] = True
-                    _append_warning(result, "DSPy adapter не разобрал ответ; поля восстановлены из raw LM history")
-                else:
+                    try:
+                        _apply_ai_fields(
+                            result,
+                            recovered,
+                            extract_contacts=extract_contacts,
+                            extract_about=extract_about,
+                            extract_services=extract_services,
+                            extract_clients=extract_clients,
+                        )
+                        result["stats"]["llm_recovered_from_history"] = True
+                        _append_warning(result, "DSPy adapter не разобрал ответ; поля восстановлены из raw LM history")
+                        recovery_applied = True
+                    except Exception as recovery_error:
+                        _append_warning(result, f"Не удалось применить raw LM history: {str(recovery_error)[:200]}")
+
+                if not recovery_applied:
                     # One bounded second attempt uses plain OutputFields instead of
                     # the single JSON envelope. This handles providers that return
                     # valid field values but violate the envelope serialization.
@@ -1053,12 +1181,25 @@ async def parse_url_dspy(
                         )
                         _append_warning(result, "Результат получен после повторной DSPy-попытки с fallback-схемой")
                     except Exception as fallback_error:
-                        logger.exception(f"DSPy extraction failed for {url}")
-                        result["status"] = "llm_error"
-                        result["error_code"] = "dspy_extraction_failed"
-                        result["error"] = f"Ошибка ИИ: {str(fallback_error)[:500]}"
-                        _append_warning(result, "DSPy не вернул валидный структурированный JSON-ответ после 2 попыток")
-                        llm_failed = True
+                        try:
+                            result["stats"]["llm_attempts"] = 3
+                            repaired_fields = _run_raw_json_repair(lm_obj, clean_text)
+                            _apply_ai_fields(
+                                result,
+                                repaired_fields,
+                                extract_contacts=extract_contacts,
+                                extract_about=extract_about,
+                                extract_services=extract_services,
+                                extract_clients=extract_clients,
+                            )
+                            _append_warning(result, "Результат восстановлен прямым JSON-запросом после ошибки DSPy-адаптера")
+                        except Exception as repair_error:
+                            logger.exception(f"DSPy extraction failed for {url}")
+                            result["status"] = "llm_error"
+                            result["error_code"] = "dspy_extraction_failed"
+                            result["error"] = f"Ошибка ИИ: {str(repair_error)[:500]}"
+                            _append_warning(result, "DSPy не вернул валидный структурированный JSON-ответ после 3 попыток")
+                            llm_failed = True
 
             _mark_non_client_field_statuses(
                 result,

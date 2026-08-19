@@ -172,8 +172,28 @@ def _coerce_list(value: Any, field: str, warnings: List[str]) -> List[str]:
     seen = set()
     for item in values:
         if isinstance(item, dict):
-            warnings.append(f"{field}: dict item converted to JSON string")
-            text = _safe_json_dumps(item)
+            if field == "client_segments":
+                segment = _clean_scalar(
+                    item.get("segment")
+                    or item.get("category")
+                    or item.get("client")
+                    or item.get("audience")
+                    or item.get("industry")
+                )
+                service = _clean_scalar(
+                    item.get("service")
+                    or item.get("solution")
+                    or item.get("offer")
+                    or item.get("need")
+                )
+                if segment:
+                    text = f"{segment} — {service}" if service else segment
+                else:
+                    warnings.append(f"{field}: dict has no segment/category value")
+                    text = _safe_json_dumps(item)
+            else:
+                warnings.append(f"{field}: dict item converted to JSON string")
+                text = _safe_json_dumps(item)
         elif isinstance(item, (list, tuple, set)):
             text = " ".join(_clean_scalar(x) for x in item)
         else:
