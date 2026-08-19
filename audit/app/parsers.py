@@ -4,7 +4,7 @@ import json
 import hashlib
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 import dspy
 from bs4 import BeautifulSoup
@@ -26,6 +26,14 @@ DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
 # успевали попасть страницы клиентов/кейсов/портфолио без взрыва задержки.
 MAX_SUBPAGES = int(os.getenv("PARSER_MAX_SUBPAGES") or 8)
 
+# Глубина мини-краула внутри одного сайта. Парсер контента — не полный SEO-аудит,
+# но должен вести себя как ограниченный паук, а не читать только главную.
+PARSER_MAX_DEPTH = int(os.getenv("PARSER_MAX_DEPTH") or 2)
+
+# Верхний предел очереди обнаруженных URL, чтобы случайный сайт с мегаменю не
+# раздувал память и не превращал извлечение одного сайта в полноценный краул.
+DISCOVERY_CANDIDATE_LIMIT = int(os.getenv("PARSER_DISCOVERY_CANDIDATE_LIMIT") or 80)
+
 # Сколько подстраниц качаем параллельно (asyncio.gather с ограничением).
 SUBPAGE_CONCURRENCY = int(os.getenv("PARSER_SUBPAGE_CONCURRENCY") or 4)
 
@@ -40,8 +48,68 @@ LINK_PATTERNS = [
     "/projects", "/проекты", "/partners", "/партнеры", "/reviews", "/otzyvy", "/отзывы",
 ]
 
+AUDIENCE_LINK_HINTS = [
+    "client", "customer", "case", "portfolio", "project", "partner", "review",
+    "industry", "industries", "solution", "solutions", "segment", "audience",
+    "for-", "/for/", "для-", "/для/", "клиент", "заказчик", "кейс", "проект",
+    "портфолио", "партнер", "партнёр", "отзыв", "отрасл", "решени", "кому",
+]
+
+NOISY_LINK_HINTS = [
+    "/login", "/register", "/cart", "/basket", "/checkout", "/privacy",
+    "/policy", "/terms", "/user", "/account", "/wp-admin", "/tag/", "/feed",
+    "utm_", "print=", "sort=", "filter=", "add-to-cart",
+]
+
 # Ссылки, которые заведомо не являются навигацией по сайту.
 _SKIP_HREF_PREFIXES = ("mailto:", "tel:", "javascript:", "#", "data:")
+
+_NON_HTML_EXT_RE = re.compile(
+    r"\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|jpg|jpeg|png|gif|webp|svg|css|js|mp4|mp3|avi|mov)(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_internal_link(base_url: str, raw_href: str, base_host: str) -> Optional[str]:
+    href = (raw_href or "").strip()
+    if not href or href.lower().startswith(_SKIP_HREF_PREFIXES):
+        return None
+    full_url = urljoin(base_url, href).split("#")[0].strip()
+    if not full_url.startswith(("http://", "https://")):
+        return None
+    if _NON_HTML_EXT_RE.search(full_url):
+        return None
+    if not _same_domain(full_url, base_host):
+        return None
+    return full_url
+
+
+def _link_score(url: str, anchor_text: str = "") -> int:
+    haystack = f"{url} {anchor_text}".lower()
+    if any(noise in haystack for noise in NOISY_LINK_HINTS):
+        return -50
+    score = 0
+    if any(pattern in haystack for pattern in LINK_PATTERNS):
+        score += 100
+    if any(hint in haystack for hint in AUDIENCE_LINK_HINTS):
+        score += 80
+    if len(url) < 120:
+        score += 5
+    return score
+
+
+def _extract_internal_links(html: str, page_url: str, base_host: str) -> List[Tuple[str, int]]:
+    soup = BeautifulSoup(html or "", "lxml")
+    found: Dict[str, int] = {}
+    for a in soup.find_all("a", href=True):
+        full_url = _normalize_internal_link(page_url, a.get("href") or "", base_host)
+        if not full_url:
+            continue
+        score = _link_score(full_url, a.get_text(" ", strip=True))
+        if score < 0:
+            continue
+        found[full_url] = max(score, found.get(full_url, -999))
+    return sorted(found.items(), key=lambda item: item[1], reverse=True)
 
 
 def _coerce_to_list(value) -> list:
@@ -114,6 +182,8 @@ def _strip_json_fence(text: str) -> str:
 
 
 def _normalize_ai_fields(data: Dict[Any, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
     out: Dict[str, Any] = {}
     for k, v in (data or {}).items():
         canon = _canonical_ai_field(k)
@@ -198,6 +268,32 @@ def _ai_field(pred: Any, name: str) -> Any:
     return getattr(pred, name, "")
 
 
+def _prediction_fields(pred: Any) -> Dict[str, Any]:
+    parsed = _parse_ai_output(pred)
+    if parsed:
+        return parsed
+
+    for method_name in ("toDict", "to_dict", "model_dump", "dict"):
+        method = getattr(pred, method_name, None)
+        if callable(method):
+            try:
+                parsed = _parse_ai_output(method())
+                if parsed:
+                    return parsed
+            except Exception:
+                pass
+
+    fields: Dict[str, Any] = {}
+    for name in (
+        "contacts_summary", "about_summary", "services_list", "main_focus",
+        "client_segments", "works_with",
+    ):
+        value = getattr(pred, name, None)
+        if value not in (None, "", [], {}):
+            fields[name] = value
+    return fields
+
+
 def _coerce_to_text(value: Any) -> str:
     if value is None:
         return ""
@@ -208,11 +304,32 @@ def _coerce_to_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _iter_lm_history_outputs(value: Any):
+    if value is None:
+        return
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, dict):
+        for key in ("outputs", "output", "response", "content", "text", "message", "choices"):
+            if key in value:
+                yield from _iter_lm_history_outputs(value.get(key))
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_lm_history_outputs(item)
+        return
+    content = getattr(value, "content", None) or getattr(value, "text", None)
+    if content:
+        yield from _iter_lm_history_outputs(content)
+
+
 def _latest_lm_fields(lm: Any) -> Dict[str, Any]:
     """DSPy 2.5 may fail while parsing a valid-but-string response.
     Recover fields from raw LM history so the parser task is not marked failed."""
     for entry in reversed(getattr(lm, "history", []) or []):
-        for output in reversed(entry.get("outputs") or []):
+        outputs = list(_iter_lm_history_outputs(entry))
+        for output in reversed(outputs):
             fields = _parse_ai_output(output)
             if fields:
                 return fields
@@ -228,6 +345,7 @@ def _apply_ai_fields(
     extract_services: bool,
     extract_clients: bool,
 ) -> None:
+    pred = _prediction_fields(pred)
     if extract_contacts:
         result["contacts"] = _coerce_to_text(_ai_field(pred, "contacts_summary"))
     if extract_about:
@@ -249,9 +367,10 @@ class ExtractCompanyServices(dspy.Signature):
     Отвечай максимально кратко, по делу, без маркетинговой «воды» и общих фраз.
 
     Алгоритм анализа клиентов (client_segments) выполняй строго по шагам:
-      Шаг 1 — Собери сигналы аудитории: разделы «Клиенты», «Кейсы», «Портфолио»,
-              «Проекты», «Отзывы», «Отрасли», формулировки «для …», «работаем с …»,
-              описания решаемых задач под конкретный тип заказчика.
+      Шаг 1 — Собери сигналы аудитории со ВСЕХ страниц, которые попали в текст:
+              «Клиенты», «Кейсы», «Портфолио», «Проекты», «Отзывы», «Отрасли»,
+              страницы услуг/решений/тарифов, формулировки «для …», «работаем с …»,
+              CTA, описания болей и задач под конкретный тип заказчика.
       Шаг 2 — Сгруппируй сигналы в КАТЕГОРИИ клиентов (сегменты), а не в отдельные бренды.
       Шаг 3 — Для каждого сегмента назови, какую работу/услугу компания делает именно
               для него. Формат элемента: «<категория клиента> — <что делает для них>»
@@ -259,8 +378,10 @@ class ExtractCompanyServices(dspy.Signature):
 
     ЖЁСТКИЕ ПРАВИЛА:
       • НИКОГДА не выдумывай. Заполняй client_segments и works_with ТОЛЬКО если на сайте
-        есть прямые доказательства. Если информации о клиентах нет — верни пустой массив
-        [] для client_segments и пустую строку "" для works_with. Не догадывайся.
+        есть текстовые доказательства: явные клиентские разделы, кейсы, страницы услуг,
+        отраслевые решения, CTA или формулировки задач/болей для конкретной аудитории.
+        Если информации о клиентах нет — верни пустой массив [] для client_segments и
+        пустую строку "" для works_with. Не догадывайся без опоры на текст.
       • ЗАПРЕЩЕНО указывать конкретные названия клиентов, брендов или логотипов —
         всегда обобщай до КАТЕГОРИИ (отрасль/тип бизнеса/тип заказчика).
       • works_with — одна короткая фраза о позиционировании: B2B / B2C / B2G и тип
@@ -288,59 +409,50 @@ async def parse_url_dspy(url: str, extract_contacts: bool, extract_about: bool, 
         except Exception as e:
             logger.debug(f"redis get failed: {e}")
 
-    pages_to_fetch = [url]
-    # Patterns for internal links (услуги/о компании/контакты + клиенты/кейсы/портфолио)
-    patterns = LINK_PATTERNS
-    
     htmls = []
     base_host = base_hostname(url)
 
     async with aiohttp.ClientSession() as session:
         try:
             res = await fetch_page(session, url)
-            html = res.html
+            html = res.html if res and res.html else ""
             htmls.append(html)
-            
-            # Extract links from main page to find subpages
-            soup = BeautifulSoup(html or "", "lxml")
-            for a in soup.find_all("a", href=True):
-                raw_href = (a.get("href") or "").strip()
-                if not raw_href:
-                    continue
-                href_l = raw_href.lower()
-                if href_l.startswith(_SKIP_HREF_PREFIXES):
-                    continue
-                if not any(p in href_l for p in patterns):
-                    continue
-                # urljoin корректно склеивает относительные/protocol-relative
-                # ссылки с учётом пути базового URL, без обрезки хвоста.
-                full_url = urljoin(url, raw_href).split("#")[0]
-                if not full_url.startswith(("http://", "https://")):
-                    continue
-                # Только внутренние ссылки того же домена (без ложных совпадений
-                # по подстроке — используем разбор хоста из page_parser).
-                if not _same_domain(full_url, base_host):
-                    continue
-                if full_url not in pages_to_fetch:
-                    pages_to_fetch.append(full_url)
-                            
-            # Fetch found subpages (limit to MAX_SUBPAGES) параллельно, с
-            # ограничением одновременных запросов, чтобы не ждать их по очереди.
-            sub_urls = pages_to_fetch[1:MAX_SUBPAGES + 1]
-            if sub_urls:
-                sem = asyncio.Semaphore(SUBPAGE_CONCURRENCY)
 
-                async def _fetch_sub(sub_url):
-                    async with sem:
-                        try:
-                            sub_res = await fetch_page(session, sub_url)
-                            return sub_res.html if sub_res and sub_res.html else None
-                        except Exception:
-                            return None
+            seen_urls = {url}
+            queue: List[Tuple[str, int, int]] = []
+            for link, score in _extract_internal_links(html, url, base_host):
+                if link in seen_urls:
+                    continue
+                seen_urls.add(link)
+                queue.append((link, 1, score))
 
-                for sub_html in await asyncio.gather(*[_fetch_sub(u) for u in sub_urls]):
-                    if sub_html:
-                        htmls.append(sub_html)
+            async def _fetch_sub(item: Tuple[str, int, int]):
+                sub_url, depth, score = item
+                try:
+                    sub_res = await fetch_page(session, sub_url)
+                    sub_html = sub_res.html if sub_res and sub_res.html else None
+                    return sub_url, depth, score, sub_html
+                except Exception:
+                    return sub_url, depth, score, None
+
+            while queue and len(htmls) < MAX_SUBPAGES + 1:
+                queue.sort(key=lambda item: item[2], reverse=True)
+                batch = queue[:SUBPAGE_CONCURRENCY]
+                queue = queue[SUBPAGE_CONCURRENCY:]
+
+                for sub_url, depth, _score, sub_html in await asyncio.gather(*[_fetch_sub(item) for item in batch]):
+                    if not sub_html:
+                        continue
+                    htmls.append(sub_html)
+                    if len(htmls) >= MAX_SUBPAGES + 1 or depth >= PARSER_MAX_DEPTH:
+                        continue
+                    for link, score in _extract_internal_links(sub_html, sub_url, base_host):
+                        if link in seen_urls:
+                            continue
+                        if len(seen_urls) >= DISCOVERY_CANDIDATE_LIMIT:
+                            break
+                        seen_urls.add(link)
+                        queue.append((link, depth + 1, score))
         except Exception as e:
             logger.exception(f"Failed to fetch {url}")
             return {"url": url, "status": f"Ошибка доступа: {str(e)[:100]}"}

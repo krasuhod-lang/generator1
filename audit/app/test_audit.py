@@ -635,6 +635,93 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertEqual(out["client_segments"], ["B2B-компании — SEO"])
         self.assertEqual(out["works_with"], "B2B: компании услуг")
 
+    def test_lm_history_outputs_can_be_raw_string(self):
+        import json
+        from . import parsers
+
+        raw_output = json.dumps({
+            "about_summary": "Агентство интернет-маркетинга.",
+            "client_segments": ["B2B-компании — SEO"],
+            "works_with": "B2B: компании услуг",
+        }, ensure_ascii=False)
+
+        class _LM:
+            history = [{"outputs": raw_output}]
+
+        fields = parsers._latest_lm_fields(_LM())
+        self.assertEqual(fields["about_summary"], "Агентство интернет-маркетинга.")
+        self.assertEqual(fields["client_segments"], ["B2B-компании — SEO"])
+        self.assertEqual(fields["works_with"], "B2B: компании услуг")
+
+    def test_generic_spider_reaches_second_depth_audience_page(self):
+        # Парсер должен вести себя как ограниченный паук: идти не только по
+        # client/about/service URL, но и по обычным внутренним страницам.
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        main_html = (
+            "<html><head><title>Главная</title></head><body>"
+            "<p>" + ("Главная страница агентства с описанием услуг. " * 8) + "</p>"
+            "<a href='/foo'>Подробнее</a></body></html>"
+        )
+        foo_html = (
+            "<html><head><title>Раздел</title></head><body>"
+            "<p>" + ("Промежуточная страница с обзором направлений. " * 8) + "</p>"
+            "<a href='/bar'>Следующая страница</a></body></html>"
+        )
+        bar_html = (
+            "<html><head><title>Аудитория</title></head><body>"
+            "<p>" + ("Работаем с клиниками и медицинскими центрами: привлекаем пациентов и заявки. " * 8) + "</p>"
+            "</body></html>"
+        )
+        pages = {
+            "https://example.com/": main_html,
+            "https://example.com/foo": foo_html,
+            "https://example.com/bar": bar_html,
+        }
+        fetched = []
+
+        class _Res:
+            def __init__(self, html):
+                self.html = html
+
+        async def _fake_fetch(session, url):
+            fetched.append(url)
+            return _Res(pages.get(url, ""))
+
+        captured = {}
+
+        class _Pred:
+            def __call__(self, website_text=""):
+                captured["website_text"] = website_text
+
+                class _Out:
+                    contacts_summary = ""
+                    about_summary = "Агентство для медицинского маркетинга."
+                    services_list = '["привлечение пациентов"]'
+                    main_focus = "Маркетинг клиник"
+                    client_segments = '["клиники и медицинские центры — привлечение пациентов"]'
+                    works_with = "B2B: медицинские организации"
+                return _Out()
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None), \
+             mock.patch.object(parsers, "MAX_SUBPAGES", 3), \
+             mock.patch.object(parsers, "PARSER_MAX_DEPTH", 2), \
+             mock.patch.object(parsers.dspy, "LM", lambda *a, **k: object()), \
+             mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
+             mock.patch.object(parsers.dspy, "Predict", lambda sig: _Pred()):
+            out = asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/", extract_contacts=False, extract_about=True,
+                extract_services=True, deepseek_api_key="x", extract_clients=True))
+
+        self.assertIn("https://example.com/foo", fetched)
+        self.assertIn("https://example.com/bar", fetched)
+        self.assertIn("медицинскими центрами", captured.get("website_text", ""))
+        self.assertEqual(out["client_segments"], ["клиники и медицинские центры — привлечение пациентов"])
+        self.assertEqual(out["works_with"], "B2B: медицинские организации")
+
     def test_link_join_uses_urljoin(self):
         # Относительные ссылки склеиваются через urljoin (без обрезки пути базы),
         # protocol-relative и внешние домены отсекаются.
