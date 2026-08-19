@@ -5,7 +5,7 @@ import hashlib
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import dspy
 from bs4 import BeautifulSoup
 import aiohttp
@@ -64,9 +64,10 @@ NOISY_LINK_HINTS = [
 # Ссылки, которые заведомо не являются навигацией по сайту.
 _SKIP_HREF_PREFIXES = ("mailto:", "tel:", "javascript:", "#", "data:")
 
-_NON_HTML_EXT_RE = re.compile(
-    r"\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|jpg|jpeg|png|gif|webp|svg|css|js|mp4|mp3|avi|mov)(?:[?#].*)?$",
-    re.IGNORECASE,
+_NON_HTML_EXTENSIONS = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip",
+    ".rar", ".7z", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+    ".css", ".js", ".mp4", ".mp3", ".avi", ".mov",
 )
 
 
@@ -77,7 +78,7 @@ def _normalize_internal_link(base_url: str, raw_href: str, base_host: str) -> Op
     full_url = urljoin(base_url, href).split("#")[0].strip()
     if not full_url.startswith(("http://", "https://")):
         return None
-    if _NON_HTML_EXT_RE.search(full_url):
+    if urlparse(full_url).path.lower().endswith(_NON_HTML_EXTENSIONS):
         return None
     if not _same_domain(full_url, base_host):
         return None
