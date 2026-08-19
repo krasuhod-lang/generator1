@@ -1,18 +1,40 @@
 'use strict';
 
 const { Worker } = require('bullmq');
+const crypto = require('crypto');
+const os = require('os');
 const { connection, JOB_RETENTION } = require('./queue');
 const { generationQueue } = require('./queue');
 const db             = require('../config/db');
+const { ensureDurableTaskSchema } = require('../services/tasks/durableSchema');
+const schemaReady = (async () => {
+  let lastError;
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
+    try {
+      await ensureDurableTaskSchema();
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(`[Worker] reliability schema attempt ${attempt}/20 failed:`, error.message);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(15000, attempt * 1000)));
+    }
+  }
+  throw lastError;
+})();
 const { publish }    = require('../services/sse/sseManager');
 
 const { runPipeline, PipelinePausedError } = require('../services/pipeline/orchestrator');
+const { createParserWorker } = require('./parserWorker');
+const { createSiteCrawlerWorker } = require('./siteCrawlerWorker');
 
 // Максимум автоматических возобновлений задачи после ошибки пайплайна.
 // Задача НЕ падает сразу в "failed": воркер сам переставляет её на возобновление
 // с последнего checkpoint (без потери прогресса и без ручной перенастройки),
 // и только исчерпав попытки — помечает "failed".
 const PIPELINE_AUTO_RETRIES = Math.max(0, parseInt(process.env.PIPELINE_AUTO_RETRIES, 10) || 3);
+const GENERATOR_LEASE_SECONDS = Math.max(30, Number(process.env.TASK_LEASE_SECONDS) || 60);
+const GENERATOR_HEARTBEAT_MS = Math.max(5000, Number(process.env.TASK_HEARTBEAT_MS) || 15000);
+const WORKER_ID = `${os.hostname()}:${process.pid}:${crypto.randomUUID()}`;
 
 // -----------------------------------------------------------------
 // Вспомогательные функции
@@ -32,22 +54,44 @@ async function loadTask(taskId) {
   return rows[0];
 }
 
+async function claimGenerationTask(taskId, jobId, leaseToken) {
+  const { rowCount } = await db.query(
+    `UPDATE tasks
+        SET status='processing', started_at=COALESCE(started_at,NOW()),
+            bull_job_id=$2, worker_id=$3, lease_token=$4::uuid,
+            lease_until=NOW()+make_interval(secs => $5), heartbeat_at=NOW(),
+            last_error_code=NULL, updated_at=NOW()
+      WHERE id=$1
+        AND status IN ('queued','processing')
+        AND (status='queued' OR lease_until IS NULL OR lease_until < NOW())`,
+    [taskId, String(jobId), WORKER_ID, leaseToken, GENERATOR_LEASE_SECONDS],
+  );
+  return rowCount === 1;
+}
+
 /**
  * Обновляет поля задачи в БД.
  * @param {string} taskId
  * @param {object} fields — { status, bull_job_id, started_at, completed_at, error_message, ... }
  */
-async function updateTask(taskId, fields) {
-  const keys   = Object.keys(fields);
+async function updateTask(taskId, fields, expectedLeaseToken = null) {
+  const keys = Object.keys(fields);
   const values = Object.values(fields);
-  const setClause = keys
-    .map((k, i) => `${k} = $${i + 2}`)
-    .join(', ');
-
-  await db.query(
-    `UPDATE tasks SET ${setClause}, updated_at = NOW() WHERE id = $1`,
-    [taskId, ...values]
+  const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
+  const params = [taskId, ...values];
+  let where = 'id = $1';
+  if (expectedLeaseToken) {
+    params.push(expectedLeaseToken);
+    where += ` AND lease_token = $${params.length}`;
+  }
+  const result = await db.query(
+    `UPDATE tasks SET ${setClause}, updated_at = NOW() WHERE ${where}`,
+    params,
   );
+  if (expectedLeaseToken && result.rowCount !== 1) {
+    throw new Error('generator_lease_lost');
+  }
+  return result;
 }
 
 /**
@@ -80,17 +124,27 @@ const worker = new Worker(
   'content-generation',
 
   async (job) => {
+    await schemaReady;
     const { taskId } = job.data;
 
     // ── 1. Загрузка задачи ────────────────────────────────────────
     const task = await loadTask(taskId);
 
-    // ── 2. Переводим в статус processing ─────────────────────────
-    await updateTask(taskId, {
-      status:     'processing',
-      started_at: new Date(),
-      bull_job_id: String(job.id),
-    });
+    // ── 2. Атомарно claim-им task и получаем lease ─────────────────
+    const leaseToken = crypto.randomUUID();
+    const claimed = await claimGenerationTask(taskId, job.id, leaseToken);
+    if (!claimed) {
+      console.log(`[Worker] skip job ${job.id}: task ${taskId} is owned by another worker or terminal`);
+      return { skipped: true, reason: 'generation_lease_not_acquired' };
+    }
+
+    const heartbeatTimer = setInterval(() => {
+      updateTask(taskId, {
+        heartbeat_at: new Date(),
+        lease_until: new Date(Date.now() + GENERATOR_LEASE_SECONDS * 1000),
+      }, leaseToken).catch((e) => console.warn(`[Worker][${taskId.substring(0, 8)}] heartbeat failed:`, e.message));
+    }, GENERATOR_HEARTBEAT_MS);
+    if (heartbeatTimer.unref) heartbeatTimer.unref();
 
     log(taskId, `Задача "${task.input_target_service}" запущена в работу`, 'info');
     progress(taskId, 0, 'stage0');
@@ -106,10 +160,14 @@ const worker = new Worker(
 
       // ── 4. Завершение ─────────────────────────────────────────────
       await updateTask(taskId, {
-        status:       'completed',
+        status: 'completed',
         completed_at: new Date(),
-      });
+        heartbeat_at: new Date(),
+        lease_token: null,
+        lease_until: null,
+      }, leaseToken);
 
+      clearInterval(heartbeatTimer);
       progress(taskId, 100, 'done');
       log(taskId, 'Задача успешно завершена', 'success');
 
@@ -122,10 +180,14 @@ const worker = new Worker(
     } catch (pipelineErr) {
       // ── 5a. Graceful pause (кнопка "Стоп") ───────────────────────
       if (pipelineErr instanceof PipelinePausedError) {
+        clearInterval(heartbeatTimer);
         await updateTask(taskId, {
-          status:              'paused',
+          status: 'paused',
           pipeline_checkpoint: JSON.stringify(pipelineErr.checkpoint || {}),
-        });
+          heartbeat_at: new Date(),
+          lease_token: null,
+          lease_until: null,
+        }, leaseToken);
 
         log(taskId, 'Задача приостановлена пользователем', 'info');
 
@@ -164,11 +226,15 @@ const worker = new Worker(
             { jobId: `${taskId}-autoretry-${Date.now()}`, attempts: 1, delay }
           );
 
+          clearInterval(heartbeatTimer);
           await updateTask(taskId, {
-            status:        'queued',
-            bull_job_id:   String(retryJob.id),
+            status: 'queued',
+            bull_job_id: String(retryJob.id),
             error_message: null,
-          });
+            heartbeat_at: new Date(),
+            lease_token: null,
+            lease_until: null,
+          }, leaseToken);
 
           log(
             taskId,
@@ -194,11 +260,16 @@ const worker = new Worker(
       }
 
       // ── 5b-ii. Финальная ошибка (авто-попытки исчерпаны) ─────────
+      clearInterval(heartbeatTimer);
       await updateTask(taskId, {
-        status:        'failed',
+        status: 'failed',
         error_message: errMsg.substring(0, 1000),
-        completed_at:  new Date(),
-      });
+        last_error_code: 'pipeline_error',
+        completed_at: new Date(),
+        heartbeat_at: new Date(),
+        lease_token: null,
+        lease_until: null,
+      }, leaseToken);
 
       log(taskId, `Ошибка пайплайна: ${errMsg}`, 'error');
 
@@ -227,6 +298,19 @@ const worker = new Worker(
   }
 );
 
+// Dedicated durable workers share the same process/container but have
+// independent queues and concurrency limits. A Redis outage leaves the
+// PostgreSQL outbox intact; the reliability scheduler in API reconciles it.
+let parserWorker = null;
+let siteCrawlerWorker = null;
+schemaReady
+  .then(() => {
+    parserWorker = createParserWorker();
+    siteCrawlerWorker = createSiteCrawlerWorker();
+    console.log('[Worker] parser/site-crawler workers started after reliability schema check');
+  })
+  .catch((e) => console.error('[Worker] parser/site-crawler workers not started:', e.message));
+
 // -----------------------------------------------------------------
 // Глобальные события воркера
 // -----------------------------------------------------------------
@@ -251,10 +335,14 @@ worker.on('error', (err) => {
 // On SIGTERM/SIGINT, close the worker so BullMQ returns active jobs to the
 // queue instead of leaving them stalled.
 async function gracefulShutdown(signal) {
-  console.log(`[Worker] ${signal} received — closing worker gracefully...`);
+  console.log(`[Worker] ${signal} received — closing all workers gracefully...`);
   try {
-    await worker.close();
-    console.log('[Worker] Worker closed, active jobs returned to queue');
+    await Promise.all([
+      worker.close(),
+      parserWorker ? parserWorker.close() : Promise.resolve(),
+      siteCrawlerWorker ? siteCrawlerWorker.close() : Promise.resolve(),
+    ]);
+    console.log('[Worker] All workers closed, active jobs returned to queues');
   } catch (err) {
     console.error('[Worker] Error during graceful shutdown:', err.message);
   }
@@ -264,4 +352,4 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
-module.exports = { worker };
+module.exports = { worker, parserWorker, siteCrawlerWorker };

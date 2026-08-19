@@ -8,8 +8,9 @@ const authMiddleware = require('../middleware/auth');
 const {
   listTasks,
   createTask,
-  getTask,
-  updateTask,
+    getTask,
+    getTaskHealth,
+    updateTask,
   startTask,
   pauseTask,
   resumeTask,
@@ -164,6 +165,7 @@ const relevancePrefillLimiter = rateLimit({
 router.get('/relevance-prefill/:reportId', relevancePrefillLimiter, authMiddleware, getRelevancePrefill);
 
 // Конкретная задача
+router.get('/:id/health',  authMiddleware, getTaskHealth); // GET /api/tasks/:id/health
 router.get('/:id',         authMiddleware, getTask);    // GET    /api/tasks/:id
 router.patch('/:id',       authMiddleware, updateTask); // PATCH  /api/tasks/:id
 router.delete('/:id',      authMiddleware, deleteTask); // DELETE /api/tasks/:id

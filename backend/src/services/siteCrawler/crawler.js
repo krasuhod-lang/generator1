@@ -215,13 +215,27 @@ async function _fetchSitemapUrls(origin, opts, depth = 0) {
   return out;
 }
 
-async function _persistStats(db, taskId, stats) {
+async function _persistStats(db, taskId, stats, { leaseToken = null, checkpoint = null } = {}) {
   try {
-    await db.query(
-      `UPDATE site_crawl_tasks SET stats=$2::jsonb WHERE id=$1`,
-      [taskId, JSON.stringify({ ...stats, updated_ms: Date.now() })],
-    );
-  } catch (_) { /* swallow — лучше потерять прогресс, чем уронить crawl */ }
+    const snapshot = JSON.stringify({ ...stats, updated_ms: Date.now() });
+    if (leaseToken) {
+      await db.query(
+        `UPDATE site_crawl_tasks
+            SET stats=$2::jsonb, checkpoint=$3::jsonb, heartbeat_at=NOW(),
+                lease_until=NOW()+make_interval(secs => 60), updated_at=NOW()
+          WHERE id=$1 AND status='running' AND lease_token=$4::uuid`,
+        [taskId, snapshot, JSON.stringify(checkpoint || {}), leaseToken],
+      );
+    } else {
+      await db.query(
+        `UPDATE site_crawl_tasks SET stats=$2::jsonb, checkpoint=$3::jsonb,
+                heartbeat_at=NOW(), updated_at=NOW() WHERE id=$1`,
+        [taskId, snapshot, JSON.stringify(checkpoint || {})],
+      );
+    }
+  } catch (e) {
+    console.warn('[siteCrawler] progress persistence failed:', e.message);
+  }
 }
 
 /**
@@ -231,20 +245,36 @@ async function _persistStats(db, taskId, stats) {
  *
  * Возвращает { stats }.
  */
-async function runCrawl({ taskId, startUrl, options }, dbInstance) {
+async function runCrawl({ taskId, startUrl, options, leaseToken = null, workerId = null }, dbInstance) {
   const db   = dbInstance || dbDefault;
   const opts = _mergeOptions(options);
 
   const start = urlN.normalize(startUrl);
   if (!start) throw new Error('invalid start_url');
+  const savedCheckpoint = options?.checkpoint && typeof options.checkpoint === 'object'
+    ? options.checkpoint : null;
+  const previousStats = options?.previousStats && typeof options.previousStats === 'object'
+    ? options.previousStats : {};
   const startUrlObj = new URL(start);
   const startHost   = startUrlObj.hostname;
   const origin      = startUrlObj.origin;
 
-  await db.query(
-    `UPDATE site_crawl_tasks SET status='running', started_at=NOW() WHERE id=$1`,
-    [taskId],
-  );
+  if (leaseToken) {
+    const claimed = await db.query(
+      `UPDATE site_crawl_tasks
+          SET status='running', started_at=COALESCE(started_at,NOW()), worker_id=$2,
+              heartbeat_at=NOW(), lease_until=NOW()+make_interval(secs => 60), updated_at=NOW()
+        WHERE id=$1 AND status='running' AND lease_token=$3::uuid`,
+      [taskId, workerId || null, leaseToken],
+    );
+    if (claimed.rowCount !== 1) throw new Error('site_crawl_lease_lost_before_start');
+  } else {
+    await db.query(
+      `UPDATE site_crawl_tasks SET status='running', started_at=NOW(), heartbeat_at=NOW(),
+              lease_until=NOW()+make_interval(secs => 60), updated_at=NOW() WHERE id=$1`,
+      [taskId],
+    );
+  }
 
   // SSRF на стартовый хост (для остальных — на каждом fetch).
   try { await assertPublicHost(startHost); }
@@ -263,15 +293,21 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
     catch (_) { rules = { groups: [] }; }
   }
 
-  const visited = new Set();
-  const queue   = [];
-  queue.push({ url: start, depth: 0, parent: null });
-  visited.add(start);
+  const visited = new Set(Array.isArray(savedCheckpoint?.visited) ? savedCheckpoint.visited : []);
+  const queue = Array.isArray(savedCheckpoint?.queue)
+    ? savedCheckpoint.queue.filter((item) => item && item.url)
+    : [];
+  const hasResumeCheckpoint = !!savedCheckpoint;
+  if (!hasResumeCheckpoint) {
+    queue.push({ url: start, depth: 0, parent: null });
+    visited.add(start);
+  } else if (!visited.size) {
+    visited.add(start);
+  }
 
-  // Сидируем очередь из sitemap.xml — это даёт «детальный сканер» обещанный
-  // ТЗ: страницы, на которые нет внутренних ссылок (например, фильтры или
-  // глубокие листинги пагинации), всё равно попадают в обход.
-  if (opts.useSitemap) {
+  // Сидируем очередь из sitemap.xml только для нового обхода. При recovery
+  // checkpoint является источником истины и повторный sitemap не нужен.
+  if (!hasResumeCheckpoint && opts.useSitemap) {
     try {
       const smUrls = await _fetchSitemapUrls(origin, opts);
       for (const u of smUrls) {
@@ -287,8 +323,17 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
     } catch (_) { /* ignore — sitemap optional */ }
   }
 
-  const stats = { pages: 0, errors: 0, by_status: {}, started_ms: Date.now(),
-    queued: queue.length, visited: visited.size, from_sitemap: queue.length - 1 };
+  const stats = {
+    pages: Number(previousStats.pages) || 0,
+    errors: Number(previousStats.errors) || 0,
+    by_status: previousStats.by_status && typeof previousStats.by_status === 'object' ? previousStats.by_status : {},
+    started_ms: Number(previousStats.started_ms) || Date.now(),
+    last_heartbeat_ms: Date.now(),
+    last_url: savedCheckpoint?.last_url || previousStats.last_url || null,
+    queued: queue.length,
+    visited: visited.size,
+    from_sitemap: Number(previousStats.from_sitemap) || Math.max(0, queue.length - 1),
+  };
   let lastFetchByHost = Object.create(null);
   let cancelled = false;
 
@@ -296,6 +341,17 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
     const { rows } = await db.query(`SELECT status FROM site_crawl_tasks WHERE id=$1`, [taskId]);
     if (rows[0] && rows[0].status === 'cancelled') cancelled = true;
     return cancelled;
+  }
+
+  async function persistProgress() {
+    const checkpoint = {
+      version: 1,
+      last_url: stats.last_url || null,
+      queue: queue.slice(0, 2000),
+      visited: Array.from(visited).slice(-5000),
+      depth: opts.maxDepth,
+    };
+    await _persistStats(db, taskId, stats, { leaseToken, checkpoint });
   }
 
   async function processOne(item) {
@@ -344,6 +400,7 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
     }
 
     stats.pages++;
+    stats.last_url = item.url;
     stats.by_status[String(resp.status)] = (stats.by_status[String(resp.status)] || 0) + 1;
 
     const ct = (resp.contentType || '').toLowerCase();
@@ -398,14 +455,17 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
       stats.visited = visited.size;
       cancelTick++;
       if (cancelTick % 20 === 0) { await checkCancelled(); }
-      if (cancelTick % opts.statsFlushEvery === 0) { await _persistStats(db, taskId, stats); }
+      if (cancelTick % opts.statsFlushEvery === 0 || (Date.now() - stats.last_heartbeat_ms) >= 10000) {
+        stats.last_heartbeat_ms = Date.now();
+        await persistProgress();
+      }
     }
     if (inflight === 0) resolveDone();
   }
 
   const workers = [];
   // первый «снимок» stats — чтобы UI сразу увидел число URL из sitemap.
-  await _persistStats(db, taskId, stats);
+  await persistProgress();
   for (let i = 0; i < opts.concurrency; i++) workers.push(worker());
   await Promise.race([done, Promise.all(workers)]);
 
@@ -413,12 +473,23 @@ async function runCrawl({ taskId, startUrl, options }, dbInstance) {
   stats.avg_ms = stats.pages ? Math.round(stats.duration_ms / stats.pages) : null;
 
   const finalStatus = cancelled ? 'cancelled' : 'done';
-  await db.query(
-    `UPDATE site_crawl_tasks
-        SET status=$2, stats=$3::jsonb, finished_at=NOW()
-      WHERE id=$1`,
-    [taskId, finalStatus, JSON.stringify(stats)],
-  );
+  if (leaseToken) {
+    await db.query(
+      `UPDATE site_crawl_tasks
+          SET status=$2, stats=$3::jsonb, checkpoint=NULL, lease_token=NULL,
+              lease_until=NULL, heartbeat_at=NOW(), finished_at=NOW(), updated_at=NOW()
+        WHERE id=$1 AND lease_token=$4::uuid`,
+      [taskId, finalStatus, JSON.stringify(stats), leaseToken],
+    );
+  } else {
+    await db.query(
+      `UPDATE site_crawl_tasks
+          SET status=$2, stats=$3::jsonb, checkpoint=NULL, lease_token=NULL,
+              lease_until=NULL, heartbeat_at=NOW(), finished_at=NOW(), updated_at=NOW()
+        WHERE id=$1`,
+      [taskId, finalStatus, JSON.stringify(stats)],
+    );
+  }
   return { stats, status: finalStatus };
 }
 

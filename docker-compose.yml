@@ -111,6 +111,12 @@ services:
       - ./brain_state:/app/brain_state
       # Skill-файлы (LinguaForensic v3.6 и др.)
       - ./skills:/app/skills:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ── Worker (BullMQ) ──────────────────────────────────────────────────────
   # Отдельный контейнер для воркера — не блокирует HTTP-сервер
@@ -120,6 +126,7 @@ services:
       dockerfile: Dockerfile
     container_name: seo_worker
     restart: unless-stopped
+    stop_grace_period: 90s
     env_file: .env
     environment:
       NODE_ENV: development
@@ -141,6 +148,12 @@ services:
       TOPIC_TRENDS_GEO: ${TOPIC_TRENDS_GEO:-}
       AUTHOR_BLOCK_ENABLED: ${AUTHOR_BLOCK_ENABLED:-1}
       FACTCHECK_FAIL_MODE: ${FACTCHECK_FAIL_MODE:-open}
+      TASK_LEASE_SECONDS: ${TASK_LEASE_SECONDS:-60}
+      TASK_RECOVERY_INTERVAL_MS: ${TASK_RECOVERY_INTERVAL_MS:-30000}
+      PARSER_WORKER_CONCURRENCY: ${PARSER_WORKER_CONCURRENCY:-3}
+      SITE_CRAWL_WORKER_CONCURRENCY: ${SITE_CRAWL_WORKER_CONCURRENCY:-2}
+      PARSER_ITEM_MAX_ATTEMPTS: ${PARSER_ITEM_MAX_ATTEMPTS:-3}
+      SITE_CRAWL_MAX_ATTEMPTS: ${SITE_CRAWL_MAX_ATTEMPTS:-3}
     command: node src/queue/worker.js
     depends_on:
       postgres:
@@ -230,6 +243,7 @@ services:
       dockerfile: Dockerfile
     container_name: seo_audit
     restart: unless-stopped
+    stop_grace_period: 90s
     environment:
       RELEVANCE_INTERNAL_TOKEN: ${RELEVANCE_INTERNAL_TOKEN:-}
       REDIS_URL: redis://redis:6379

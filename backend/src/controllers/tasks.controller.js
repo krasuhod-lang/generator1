@@ -5,6 +5,7 @@ const fs   = require('fs');
 const db   = require('../config/db');
 const { parseTZ } = require('../utils/parseTZ');
 const { generationQueue } = require('../queue/queue');
+const { publishPendingOutbox } = require('../services/tasks/reliability');
 const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
@@ -447,6 +448,41 @@ async function updateTask(req, res, next) {
   }
 }
 
+// GET /api/tasks/:id/health — durable execution diagnostics
+async function getTaskHealth(req, res, next) {
+  try {
+    const task = await loadOwnTask(req.params.id, req.user.id);
+    const heartbeatAgeMs = task.heartbeat_at
+      ? Date.now() - new Date(task.heartbeat_at).getTime()
+      : null;
+    let pendingOutbox = 0;
+    try {
+      const { rows } = await db.query(
+        `SELECT COUNT(*)::int AS count
+           FROM generator_task_outbox
+          WHERE published_at IS NULL
+            AND (payload->>'taskId'=$1 OR job_id LIKE $2)`,
+        [task.id, `${task.id}%`],
+      );
+      pendingOutbox = rows[0]?.count || 0;
+    } catch (_) { /* old schema during migration */ }
+    res.json({
+      task_id: task.id,
+      status: task.status,
+      heartbeat_at: task.heartbeat_at || null,
+      heartbeat_stale: heartbeatAgeMs != null && heartbeatAgeMs > 90000,
+      lease_until: task.lease_until || null,
+      worker_id: task.worker_id || null,
+      recovery_attempts: task.recovery_attempts || 0,
+      pending_outbox: pendingOutbox,
+      pipeline_checkpoint: task.pipeline_checkpoint || null,
+      updated_at: task.updated_at || null,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/tasks/:id/start
 // Запустить задачу — добавить в очередь BullMQ
@@ -480,32 +516,31 @@ async function startTask(req, res, next) {
       return res.status(422).json({ errors });
     }
 
-    // Добавляем в BullMQ. Используем уникальный jobId, чтобы повторный старт после fail
-    // не ломался из-за оставшегося старого job-а с тем же task.id.
-    // attempts: 1 — внутренний ретрай BullMQ отключён; авто-возобновление после
-    // ошибки выполняет воркер с сохранением прогресса (checkpoint).
-    const jobId = `${task.id}-${Date.now()}`;
-    const job = await generationQueue.add(
-      'generate',
-      { taskId: task.id },
-      {
-        jobId,
-        attempts: 1,
-      }
-    );
+    // DB state и outbox создаются атомарно. Если Redis недоступен, publisher
+    // повторит queue.add(), а пользователь не потеряет задачу.
+    const jobId = `generation:${task.id}:start:${Date.now()}`;
+    const client = await db.getClient();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
+                lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
+          WHERE id=$2`, [jobId, task.id]);
+      await client.query(
+        `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
+         VALUES ('content-generation','generate',$1,$2::jsonb)
+         ON CONFLICT (queue_name,job_id) DO NOTHING`,
+        [jobId, JSON.stringify({ taskId: task.id })]);
+      await client.query('COMMIT');
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw e;
+    } finally {
+      client.release();
+    }
+    publishPendingOutbox(db, 50).catch((e) => console.warn('[StartTask] outbox delayed:', e.message));
 
-    // Переводим статус в queued и сохраняем bull_job_id
-    await db.query(
-      `UPDATE tasks SET status = 'queued', bull_job_id = $1, updated_at = NOW() WHERE id = $2`,
-      [String(job.id), task.id]
-    );
-
-    return res.json({
-      message:    'Задача поставлена в очередь',
-      jobId:      job.id,
-      taskId:     task.id,
-      status:     'queued',
-    });
+    return res.json({ message: 'Задача поставлена в очередь', jobId, taskId: task.id, status: 'queued' });
   } catch (err) {
     // BullMQ бросает если jobId уже занят
     if (err.message?.includes('Job') && err.message?.includes('already')) {
@@ -572,21 +607,28 @@ async function resumeTask(req, res, next) {
     const checkpoint = task.pipeline_checkpoint || null;
     const resumeFromBlock = checkpoint?.resumeFromBlock ?? 0;
 
-    // Добавляем в BullMQ с данными для resume
-    const jobId = `${task.id}-resume-${Date.now()}`;
-    const job = await generationQueue.add(
-      'generate',
-      { taskId: task.id, resumeFrom: checkpoint },
-      {
-        jobId,
-        attempts: 1,  // При resume — 1 попытка (не дублируем)
-      }
-    );
-
-    await db.query(
-      `UPDATE tasks SET status = 'queued', bull_job_id = $1, error_message = NULL, updated_at = NOW() WHERE id = $2`,
-      [String(job.id), task.id]
-    );
+    // Resume также проходит через transactional outbox.
+    const jobId = `generation:${task.id}:resume:${Date.now()}`;
+    const client = await db.getClient();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
+                lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
+          WHERE id=$2`, [jobId, task.id]);
+      await client.query(
+        `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
+         VALUES ('content-generation','generate',$1,$2::jsonb)
+         ON CONFLICT (queue_name,job_id) DO NOTHING`,
+        [jobId, JSON.stringify({ taskId: task.id, resumeFrom: checkpoint })]);
+      await client.query('COMMIT');
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw e;
+    } finally {
+      client.release();
+    }
+    publishPendingOutbox(db, 50).catch((e) => console.warn('[ResumeTask] outbox delayed:', e.message));
 
     // SSE-уведомление
     publish(task.id, {
@@ -1674,6 +1716,7 @@ module.exports = {
   listTasks,
   createTask,
   getTask,
+  getTaskHealth,
   updateTask,
   startTask,
   pauseTask,

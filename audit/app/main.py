@@ -33,9 +33,59 @@ logger = logging.getLogger("audit.main")
 
 INTERNAL_TOKEN = (os.getenv("RELEVANCE_INTERNAL_TOKEN") or "").strip()
 
-app = FastAPI(title="Site Audit Service", version="1.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="Site Audit Service", version="1.0", docs_url=None, redoc_url=None)
 
 _running_tasks: dict = {}
+
+
+@app.on_event("startup")
+async def recover_runtime_tasks():
+    """Reattach durable Redis snapshots to new asyncio tasks after restart."""
+    try:
+        active = await store.list_active_tasks(limit=200)
+    except Exception as e:
+        logger.warning("audit startup recovery scan failed: %s", e)
+        return
+    recovered = 0
+    for state in active:
+        task_id = state.get("task_id")
+        url = state.get("url")
+        if not task_id or not url or task_id in _running_tasks:
+            continue
+        try:
+            config = dict(state.get("config") or {})
+            config.setdefault("url", url)
+            req = StartRequest.model_validate(config)
+        except Exception as e:
+            state["status"] = "failed"
+            state["error"] = f"invalid_recovery_config: {str(e)[:300]}"
+            await store.save_task(task_id, state)
+            continue
+        state["status"] = "running"
+        state["recovered_at"] = _now()
+        state["heartbeat_at"] = _now()
+        await store.save_task(task_id, state)
+        _running_tasks[task_id] = asyncio.create_task(_run(task_id, req))
+        recovered += 1
+    if recovered:
+        logger.info("audit startup recovery: reattached %s task(s)", recovered)
+
+
+@app.on_event("shutdown")
+async def stop_runtime_tasks():
+    """Persist resumable state before the process receives a container stop."""
+    tasks = list(_running_tasks.items())
+    for task_id, task in tasks:
+        if task.done():
+            continue
+        state = await store.get_task(task_id) or {"task_id": task_id}
+        state["status"] = "queued"
+        state["error"] = "audit_service_shutdown"
+        state["heartbeat_at"] = _now()
+        await store.save_task(task_id, state)
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
 
 
 async def _auth(x_internal_token: Optional[str] = Header(default=None)):
@@ -60,6 +110,7 @@ async def _run(task_id: str, req: StartRequest):
 
     def on_progress(p: dict):
         state["progress"] = p
+        state["heartbeat_at"] = _now()
         # fire-and-forget: не блокируем краулер записью в Redis
         asyncio.get_event_loop().create_task(store.save_task(task_id, state))
 
@@ -101,6 +152,7 @@ async def start_audit(req: StartRequest):
         "config": req.model_dump(),
         "progress": {"crawled": 0, "total_found": 0},
         "started_at": _now(),
+        "heartbeat_at": _now(),
     }
     await store.save_task(task_id, state)
     _running_tasks[task_id] = asyncio.create_task(_run(task_id, req))
