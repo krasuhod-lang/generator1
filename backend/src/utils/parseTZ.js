@@ -99,8 +99,13 @@ async function parseTZ(filePath) {
     for (let i = competitorSectionIdx + 1; i < lines.length; i++) {
       const line = lines[i];
       if (/^(Общие|Обязательные|Дополнительные|LSI|Технические|Структура|Общие требования)/i.test(line)) break;
-      const urlMatch = line.match(/(https?:\/\/[^\s,;]+)/i);
-      if (urlMatch) urls.push(urlMatch[1]);
+      const urlMatches = line.match(/(https?:\/\/[^\s,;]+)/ig);
+      if (urlMatches) {
+        for (const u of urlMatches) {
+          urls.push(u);
+          if (urls.length >= 4) break;
+        }
+      }
       if (urls.length >= 4) break;
     }
     result.input_competitor_urls = urls.join('\n');
@@ -166,7 +171,7 @@ async function parseTZ(filePath) {
       const phrase = line.trim();
       if (phrase.length > 1) phrases.push(phrase);
     }
-    result.input_ngrams = phrases.join(', ');
+    result.input_ngrams = phrases.join('\n');
   }
 
   // ── 6. TF-IDF — из блока "Добавить на страницу важные слова" ────────────────
@@ -188,7 +193,7 @@ async function parseTZ(filePath) {
       if (/^(Сократить|Промт|Рекомендации|Медианное|ТЗ для|Можно ориентироваться)/i.test(line)) break;
       // Парсим строки вида:
       // "Слово (...) места у вас повторяется ... от 2 и до 8..."
-      const m = line.match(/Слово\s+\([^)]+\)\s+(\S+)\s+у вас.*?от\s+(\d+)\s+и\s+до\s+(\d+)/i);
+      const m = line.match(/Слово\s+\([^)]+\)\s+([«"']?.*?[»"']?)\s+у вас.*?от\s+(\d+)\s+и\s+до\s+(\d+)/i);
       if (m) {
         const term    = m[1].trim();
         const rangeMin = parseInt(m[2]);

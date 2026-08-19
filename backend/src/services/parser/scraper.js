@@ -62,7 +62,7 @@ const NOISE_SELECTORS = [
   'iframe', 'svg', 'picture > source', 'template',
   'ins.adsbygoogle', 'ins[class*="ad" i]',
   '[class*="cookie" i]', '[id*="cookie" i]',
-  '[class*="banner" i]', '[class*="popup" i]', '[class*="modal" i]',
+  '[class~="banner" i]', '[class*="cookie-banner" i]', '[class*="promo-banner" i]', '[class~="popup" i]', '[class*="cookie-popup" i]', '[class~="modal" i]',
   '[id*="comments" i]', '[class*="comments" i]',
   '[class*="subscribe" i]', '[class*="newsletter" i]',
   '.related', '.share', '.social', '.author-bio',
@@ -411,14 +411,19 @@ async function scrapeUrl(url, timeout = 30000) {
     '.popup, .modal, .banner, .related, .share, .social, .author-bio, ' +
     '[role="navigation"], [role="banner"], [role="complementary"], ' +
     '[class*="cookie" i], [id*="cookie" i], ' +
-    '[class*="popup" i], [class*="banner" i], ' +
+    '[class~="popup" i], [class*="cookie-popup" i], [class~="banner" i], [class*="cookie-banner" i], [class*="promo-banner" i], ' +
     '[id*="comments" i], [class*="comments" i], ' +
     '[class*="subscribe" i], [class*="newsletter" i], ' +
     'ins.adsbygoogle, ins[class*="ad" i]'
   ).remove();
 
   const title    = $('title').text().trim() || $('h1').first().text().trim();
-  let   bodyText = $('body').text().replace(/\s{2,}/g, ' ').trim();
+  const turndown = new TurndownService({
+    headingStyle:     'atx',
+    bulletListMarker: '-',
+    codeBlockStyle:   'fenced',
+  });
+  let bodyText = turndown.turndown($('body').html() || '');
   bodyText = _stripFooterArtifacts(bodyText);
 
   return {
