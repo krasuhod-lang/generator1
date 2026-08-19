@@ -46,6 +46,75 @@ async function getTask(taskId) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+const CLIENT_FALLBACKS = {
+    not_found: {
+        client_segments: 'Не определено — на сайте нет явных данных о категориях клиентов',
+        works_with: 'Не определено — на сайте нет явных указаний, с кем работает компания',
+    },
+    fetch_error: {
+        client_segments: 'Не определено — сайт недоступен или не удалось получить его содержимое',
+        works_with: 'Не определено — анализ невозможен из-за ошибки доступа к сайту',
+    },
+    llm_error: {
+        client_segments: 'Не удалось определить — ошибка анализа ИИ',
+        works_with: 'Не удалось определить — ошибка анализа ИИ',
+    },
+};
+
+function asLines(value) {
+    if (Array.isArray(value)) return value.filter(Boolean).join('\n');
+    if (value && typeof value === 'object') return JSON.stringify(value);
+    return value || '';
+}
+
+function buildParserErrorResult(url, status, message, options = {}) {
+    const fallback = CLIENT_FALLBACKS[status] || CLIENT_FALLBACKS.llm_error;
+    const fieldStatus = {};
+    if (options?.contacts) fieldStatus.contacts = status;
+    if (options?.about) fieldStatus.about = status;
+    if (options?.services) {
+        fieldStatus.services = status;
+        fieldStatus.focus = status;
+    }
+    if (options?.clients) {
+        fieldStatus.client_segments = status;
+        fieldStatus.works_with = status;
+    }
+    return {
+        url,
+        title: '',
+        contacts: '',
+        about: '',
+        services: [],
+        focus: '',
+        client_segments: options?.clients ? [fallback.client_segments] : [],
+        works_with: options?.clients ? fallback.works_with : '',
+        status,
+        field_status: fieldStatus,
+        evidence: [],
+        warnings: message ? [String(message).slice(0, 500)] : [],
+        stats: { pages_scanned: 0 },
+        error: message ? String(message).slice(0, 1000) : undefined,
+    };
+}
+
+function evidenceText(evidence) {
+    if (!Array.isArray(evidence)) return '';
+    return evidence
+        .filter((ev) => ev && (ev.url || ev.quote))
+        .map((ev) => {
+            const field = ev.field ? `[${ev.field}] ` : '';
+            const quote = ev.quote ? `«${ev.quote}»` : '';
+            return `${field}${ev.url || ''}${quote ? ` — ${quote}` : ''}`.trim();
+        })
+        .join('\n');
+}
+
+function warningsText(warnings) {
+    if (Array.isArray(warnings)) return warnings.filter(Boolean).join('\n');
+    return warnings || '';
+}
+
 exports.startParsing = async (req, res) => {
     try {
         let { urls, options } = req.body;
@@ -164,14 +233,14 @@ async function processUrls(taskId, urls, options) {
                     if (response.data && response.data.results && response.data.results.length > 0) {
                         results.push(response.data.results[0]);
                     } else {
-                        results.push({ url: currentUrl, status: "Ошибка: пустой ответ от сервиса" });
+                        results.push(buildParserErrorResult(currentUrl, 'llm_error', 'Ошибка: пустой ответ от сервиса', options));
                     }
                 } catch (err) {
                     const code = err.code || '';
                     if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT') {
-                        results.push({ url: currentUrl, status: 'Сервис парсинга недоступен' });
+                        results.push(buildParserErrorResult(currentUrl, 'fetch_error', 'Сервис парсинга недоступен', options));
                     } else {
-                        results.push({ url: currentUrl, status: `Ошибка API: ${err.message}` });
+                        results.push(buildParserErrorResult(currentUrl, 'llm_error', `Ошибка API: ${err.message}`, options));
                     }
                 }
                 
@@ -202,10 +271,17 @@ async function processUrls(taskId, urls, options) {
             { header: 'Ключевой упор (Фокус)', key: 'focus', width: 30 },
             { header: 'Категории клиентов', key: 'client_segments', width: 40 },
             { header: 'С кем работает', key: 'works_with', width: 30 },
-            { header: 'Статус парсинга', key: 'status', width: 20 }
+            { header: 'Статус парсинга', key: 'status', width: 20 },
+            { header: 'Статус категорий клиентов', key: 'client_segments_status', width: 26 },
+            { header: 'Статус поля «С кем работает»', key: 'works_with_status', width: 28 },
+            { header: 'Доказательства клиентов', key: 'client_evidence', width: 60 },
+            { header: 'Предупреждения', key: 'warnings', width: 50 },
+            { header: 'Количество просканированных страниц', key: 'pages_scanned', width: 22 }
         ];
 
         for (const item of results) {
+            const fieldStatus = item.field_status || {};
+            const stats = item.stats || {};
             worksheet.addRow({
                 url: item.url,
                 title: item.title,
@@ -213,9 +289,14 @@ async function processUrls(taskId, urls, options) {
                 about: item.about,
                 services: Array.isArray(item.services) ? item.services.join(', ') : item.services,
                 focus: item.focus,
-                client_segments: Array.isArray(item.client_segments) ? item.client_segments.join('\n') : item.client_segments,
+                client_segments: asLines(item.client_segments),
                 works_with: item.works_with,
-                status: item.status
+                status: item.status,
+                client_segments_status: fieldStatus.client_segments || '',
+                works_with_status: fieldStatus.works_with || '',
+                client_evidence: evidenceText(item.evidence),
+                warnings: warningsText(item.warnings),
+                pages_scanned: stats.pages_scanned ?? item.pages_scanned ?? ''
             });
         }
         

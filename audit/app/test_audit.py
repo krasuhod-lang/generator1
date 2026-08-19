@@ -558,8 +558,9 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertIsInstance(parsers.MAX_SUBPAGES, int)
         self.assertGreaterEqual(parsers.MAX_SUBPAGES, 5)
 
-    def test_empty_content_yields_empty_segments(self):
-        # При пустом контенте LLM не вызывается, а новые поля остаются пустыми.
+    def test_empty_content_yields_fetch_error_sentinel_segments(self):
+        # При пустом контенте LLM не вызывается, а клиентские поля получают
+        # понятный fetch_error fallback вместо пустых значений.
         import asyncio
         from unittest import mock
         from . import parsers
@@ -576,9 +577,11 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 "https://example.com/", extract_contacts=True, extract_about=True,
                 extract_services=True, deepseek_api_key="x", extract_clients=True))
 
-        self.assertEqual(out["client_segments"], [])
-        self.assertEqual(out["works_with"], "")
-        self.assertEqual(out["status"], "Ошибка: пустой контент")
+        self.assertEqual(out["client_segments"], ["Не определено — сайт недоступен или не удалось получить его содержимое"])
+        self.assertEqual(out["works_with"], "Не определено — анализ невозможен из-за ошибки доступа к сайту")
+        self.assertEqual(out["field_status"]["client_segments"], "fetch_error")
+        self.assertEqual(out["field_status"]["works_with"], "fetch_error")
+        self.assertEqual(out["status"], "fetch_error")
 
     def test_coerce_to_list_formats(self):
         from . import parsers
@@ -642,7 +645,9 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 extract_services=True, deepseek_api_key="", extract_clients=True))
 
         self.assertEqual(captured.get("api_key"), "env-deepseek-key")
-        self.assertEqual(out["status"], "Успешно")
+        self.assertEqual(out["status"], "partial")
+        self.assertEqual(out["field_status"]["about"], "found")
+        self.assertEqual(out["field_status"]["services"], "found")
 
     def test_missing_api_key_returns_explicit_status(self):
         import asyncio
@@ -670,7 +675,54 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 "https://example.com/", extract_contacts=False, extract_about=True,
                 extract_services=True, deepseek_api_key="", extract_clients=True))
 
-        self.assertEqual(out["status"], "Ошибка ИИ: не задан DEEPSEEK_API_KEY")
+        self.assertEqual(out["status"], "llm_error")
+        self.assertEqual(out["field_status"]["client_segments"], "llm_error")
+        self.assertEqual(out["client_segments"], ["Не удалось определить — ошибка анализа ИИ"])
+
+    def test_available_site_without_client_signals_uses_not_found_sentinel(self):
+        import asyncio
+        from unittest import mock
+        from . import parsers
+
+        html = (
+            "<html><head><title>Главная</title></head><body>"
+            "<p>" + ("Компания оказывает SEO и контекстную рекламу для продвижения сайтов. " * 8) + "</p>"
+            "</body></html>"
+        )
+
+        class _Res:
+            def __init__(self, html):
+                self.html = html
+
+        async def _fake_fetch(session, url):
+            return _Res(html)
+
+        class _Pred:
+            def __call__(self, website_text=""):
+                class _Out:
+                    contacts_summary = ""
+                    about_summary = "Маркетинговое агентство."
+                    services_list = '["SEO"]'
+                    main_focus = "Продвижение сайтов"
+                    client_segments = "[]"
+                    works_with = ""
+                return _Out()
+
+        with mock.patch.object(parsers, "fetch_page", _fake_fetch), \
+             mock.patch.object(parsers, "_redis", None), \
+             mock.patch.object(parsers.dspy, "LM", lambda *a, **k: object()), \
+             mock.patch.object(parsers.dspy, "settings", mock.MagicMock()), \
+             mock.patch.object(parsers.dspy, "Predict", lambda sig: _Pred()):
+            out = asyncio.run(parsers.parse_url_dspy(
+                "https://example.com/", extract_contacts=False, extract_about=True,
+                extract_services=True, deepseek_api_key="x", extract_clients=True))
+
+        self.assertEqual(out["client_segments"], ["Не определено — на сайте нет явных данных о категориях клиентов"])
+        self.assertEqual(out["works_with"], "Не определено — на сайте нет явных указаний, с кем работает компания")
+        self.assertEqual(out["field_status"]["client_segments"], "not_found")
+        self.assertEqual(out["field_status"]["works_with"], "not_found")
+        self.assertEqual(out["evidence"], [])
+        self.assertEqual(out["status"], "partial")
 
     def test_subpages_reach_website_text(self):
         # ГЛАВНЫЙ БАГФИКС: текст докачанных подстраниц (клиенты/кейсы) должен
@@ -732,7 +784,10 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertEqual(out["services"], ["маркетинг"])
         self.assertEqual(out["client_segments"],
                          ["стоматологии — маркетинг", "автосервисы — маркетинг"])
-        self.assertEqual(out["status"], "Успешно")
+        self.assertEqual(out["field_status"]["client_segments"], "found")
+        self.assertEqual(out["field_status"]["works_with"], "found")
+        self.assertTrue(out["evidence"])
+        self.assertEqual(out["status"], "ok")
 
     def test_dspy_string_items_error_recovers_from_lm_history(self):
         # DSPy JSONAdapter может упасть с "'str' object has no attribute 'items'",
@@ -780,13 +835,14 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 "https://example.com/", extract_contacts=True, extract_about=True,
                 extract_services=True, deepseek_api_key="x", extract_clients=True))
 
-        self.assertEqual(out["status"], "Успешно")
+        self.assertEqual(out["status"], "partial")
         self.assertEqual(out["contacts"], "Телефон не найден")
         self.assertEqual(out["about"], "Агентство интернет-маркетинга.")
         self.assertEqual(out["services"], ["SEO", "контекстная реклама"])
         self.assertEqual(out["focus"], "Продвижение сайтов")
-        self.assertEqual(out["client_segments"], ["B2B-компании — SEO"])
-        self.assertEqual(out["works_with"], "B2B: компании услуг")
+        self.assertEqual(out["client_segments"], ["Не определено — на сайте нет явных данных о категориях клиентов"])
+        self.assertEqual(out["works_with"], "Не определено — на сайте нет явных указаний, с кем работает компания")
+        self.assertEqual(out["field_status"]["client_segments"], "not_found")
 
     def test_lm_history_outputs_can_be_raw_string(self):
         import json
@@ -874,6 +930,8 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertIn("медицинскими центрами", captured.get("website_text", ""))
         self.assertEqual(out["client_segments"], ["клиники и медицинские центры — привлечение пациентов"])
         self.assertEqual(out["works_with"], "B2B: медицинские организации")
+        self.assertEqual(out["field_status"]["client_segments"], "found")
+        self.assertTrue(any(ev["url"] == "https://example.com/bar" for ev in out["evidence"]))
 
     def test_link_join_uses_urljoin(self):
         # Относительные ссылки склеиваются через urljoin (без обрезки пути базы),
