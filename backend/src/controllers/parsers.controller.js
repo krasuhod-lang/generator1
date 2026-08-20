@@ -9,6 +9,7 @@ const {
   finalizeParserTask,
 } = require('../services/parser/parserTaskService');
 const { enqueueOutbox, publishPendingOutbox } = require('../services/tasks/reliability');
+const { makeBullJobId } = require('../queue/jobIds');
 
 async function getTask(taskId) {
   const { rows } = await db.query(
@@ -113,7 +114,7 @@ exports.retryFailed = async (req, res) => {
       await enqueueOutbox({
         queueName: 'parser-scans',
         jobName: 'parse-url',
-        jobId: `parser:${taskId}:${row.id}:manual:${Date.now()}`,
+        jobId: makeBullJobId('parser', taskId, row.id, 'manual', Date.now()),
         payload: { taskId, itemId: row.id },
       });
     }

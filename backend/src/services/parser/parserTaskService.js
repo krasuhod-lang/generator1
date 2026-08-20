@@ -8,6 +8,7 @@ const os = require('os');
 const dbDefault = require('../../config/db');
 const { sanitizeUrl } = require('./scraper');
 const { publishPendingOutbox } = require('../tasks/reliability');
+const { makeBullJobId } = require('../../queue/jobIds');
 
 function normalizeUrls(rawUrls) {
   const out = [];
@@ -24,7 +25,7 @@ function normalizeUrls(rawUrls) {
 
 function jobIdFor(taskId, itemId, suffix = 'initial') {
   const digest = crypto.createHash('sha1').update(`${taskId}:${itemId}:${suffix}`).digest('hex').slice(0, 32);
-  return `parser:${taskId}:${digest}`;
+  return makeBullJobId('parser', taskId, digest);
 }
 
 async function createParserTask({ taskId, userId, urls, options = {} }, db = dbDefault) {
@@ -59,7 +60,7 @@ async function createParserTask({ taskId, userId, urls, options = {} }, db = dbD
     }
 
     if (!items.length && options.search_query) {
-      const jobId = `parser:${taskId}:dispatch`;
+      const jobId = makeBullJobId('parser', taskId, 'dispatch');
       await client.query(
         `INSERT INTO generator_task_outbox (queue_name, job_name, job_id, payload)
          VALUES ('parser-scans','dispatch-search',$1,$2::jsonb)

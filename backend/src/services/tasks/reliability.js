@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const os = require('os');
 const dbDefault = require('../../config/db');
+const { normalizeBullJobId, makeBullJobId } = require('../../queue/jobIds');
 const {
   generationQueue,
   parserQueue,
@@ -36,12 +37,13 @@ function leaseSql(seconds = LEASE_SECONDS) {
 
 async function enqueueOutbox({ queueName, jobName, jobId, payload }, db = dbDefault) {
   if (!QUEUES[queueName]) throw new Error(`Unknown reliability queue: ${queueName}`);
+  const safeJobId = normalizeBullJobId(jobId);
   const { rows } = await db.query(
     `INSERT INTO generator_task_outbox (queue_name, job_name, job_id, payload)
      VALUES ($1,$2,$3,$4::jsonb)
      ON CONFLICT (queue_name, job_id) DO NOTHING
      RETURNING id`,
-    [queueName, jobName, jobId, JSON.stringify(payload || {})],
+    [queueName, jobName, safeJobId, JSON.stringify(payload || {})],
   );
   return rows[0]?.id || null;
 }
@@ -78,18 +80,23 @@ async function publishPendingOutbox(db = dbDefault, limit = 50) {
         );
         continue;
       }
+      const safeJobId = normalizeBullJobId(row.job_id);
       try {
         await queue.add(row.job_name, row.payload || {}, {
-          jobId: row.job_id,
+          jobId: safeJobId,
           attempts: 1,
           removeOnComplete: { age: 3 * 24 * 3600, count: 1000 },
           removeOnFail: { age: 7 * 24 * 3600, count: 500 },
         });
         await client.query(
           `UPDATE generator_task_outbox
-              SET published_at=NOW(), attempts=attempts+1, last_error=NULL
+              SET job_id=$2, published_at=NOW(), attempts=attempts+1, last_error=NULL
             WHERE id=$1`,
-          [row.id],
+          [row.id, safeJobId],
+        );
+        await client.query(
+          `UPDATE tasks SET bull_job_id=$2, updated_at=NOW() WHERE bull_job_id=$1`,
+          [row.job_id, safeJobId],
         );
         published += 1;
       } catch (e) {
@@ -100,9 +107,13 @@ async function publishPendingOutbox(db = dbDefault, limit = 50) {
         if (/already exists|job.*exists|duplicated/i.test(message)) {
           await client.query(
             `UPDATE generator_task_outbox
-                SET published_at=NOW(), attempts=attempts+1, last_error=NULL
+                SET job_id=$2, published_at=NOW(), attempts=attempts+1, last_error=NULL
               WHERE id=$1`,
-            [row.id],
+            [row.id, safeJobId],
+          );
+          await client.query(
+            `UPDATE tasks SET bull_job_id=$2, updated_at=NOW() WHERE bull_job_id=$1`,
+            [row.job_id, safeJobId],
           );
           published += 1;
         } else {
@@ -319,7 +330,7 @@ async function reconcileParserAndCrawlerJobs(db = dbDefault) {
     const inserted = await enqueueOutbox({
       queueName: 'parser-scans',
       jobName: 'dispatch-search',
-      jobId: `parser:${task.id}:dispatch:reconcile`,
+      jobId: makeBullJobId('parser', task.id, 'dispatch', 'reconcile'),
       payload: { taskId: task.id },
     }, db);
     if (inserted) parserQueued += 1;
@@ -336,7 +347,7 @@ async function reconcileParserAndCrawlerJobs(db = dbDefault) {
       LIMIT 100`,
   );
   for (const item of parserItems) {
-    const jobId = `parser:${item.task_id}:${item.id}:reconcile`;
+    const jobId = makeBullJobId('parser', item.task_id, item.id, 'reconcile');
     const inserted = await enqueueOutbox({
       queueName: 'parser-scans',
       jobName: 'parse-url',
@@ -357,7 +368,7 @@ async function reconcileParserAndCrawlerJobs(db = dbDefault) {
     const inserted = await enqueueOutbox({
       queueName: 'site-crawls',
       jobName: 'crawl-site',
-      jobId: `site-crawl:${task.id}:reconcile`,
+      jobId: makeBullJobId('site-crawl', task.id, 'reconcile'),
       payload: { taskId: task.id, startUrl: task.start_url, options: task.options || {} },
     }, db);
     if (inserted) crawlQueued += 1;
@@ -382,7 +393,7 @@ async function reconcileGenerationTasks(db = dbDefault) {
         LIMIT 100
         FOR UPDATE SKIP LOCKED`, [MAX_RECOVERY_ATTEMPTS]);
     for (const task of rows) {
-      const jobId = `generation:${task.id}:reconcile`;
+      const jobId = makeBullJobId('generation', task.id, 'reconcile');
       await generationQueue.add('generate', {
         taskId: task.id,
         resumeFrom: task.pipeline_checkpoint || null,
@@ -412,7 +423,7 @@ async function reconcileGenerationTasks(db = dbDefault) {
         const liveStates = new Set(['waiting', 'active', 'delayed', 'prioritized', 'waiting-children']);
         if (liveStates.has(state)) continue;
       }
-      const jobId = `generation:${task.id}:reconcile:${Number(task.recovery_attempts || 0) + 1}`;
+      const jobId = makeBullJobId('generation', task.id, 'reconcile', Number(task.recovery_attempts || 0) + 1);
       await client.query(
         `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
          VALUES ('content-generation','generate',$1,$2::jsonb)

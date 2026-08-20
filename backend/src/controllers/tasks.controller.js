@@ -5,6 +5,7 @@ const fs   = require('fs');
 const db   = require('../config/db');
 const { parseTZ } = require('../utils/parseTZ');
 const { generationQueue } = require('../queue/queue');
+const { makeBullJobId } = require('../queue/jobIds');
 const { publishPendingOutbox } = require('../services/tasks/reliability');
 const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
@@ -564,7 +565,7 @@ async function startTask(req, res, next) {
 
     // DB state и outbox создаются атомарно. Если Redis недоступен, publisher
     // повторит queue.add(), а пользователь не потеряет задачу.
-    const jobId = `generation:${task.id}:start:${Date.now()}`;
+    const jobId = makeBullJobId('generation', task.id, 'start', Date.now());
     const client = await db.getClient();
     try {
       await client.query('BEGIN');
@@ -665,7 +666,7 @@ async function resumeTask(req, res, next) {
     const resumeFromBlock = checkpoint?.resumeFromBlock ?? 0;
 
     // Resume также проходит через transactional outbox.
-    const jobId = `generation:${task.id}:resume:${Date.now()}`;
+    const jobId = makeBullJobId('generation', task.id, 'resume', Date.now());
     const client = await db.getClient();
     try {
       await client.query('BEGIN');

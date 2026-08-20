@@ -4,6 +4,7 @@ const axios = require('axios');
 const { Worker } = require('bullmq');
 const db = require('../config/db');
 const { connection, JOB_RETENTION } = require('./queue');
+const { makeBullJobId } = require('./jobIds');
 const { WORKER_ID, claimParserItem, retryParserItem, finishParserItem, publishPendingOutbox } = require('../services/tasks/reliability');
 const {
   insertSearchItems,
@@ -42,7 +43,7 @@ async function retryOrFail(item, token, error) {
     const delay = Math.min(60000, RETRY_BASE_MS * Math.pow(2, attempts - 1));
     const released = await retryParserItem(item.id, token, error, delay, db);
     if (released) {
-      const jobId = `parser:${released.task_id}:${item.id}:retry:${attempts}`;
+      const jobId = makeBullJobId('parser', released.task_id, item.id, 'retry', attempts);
       await db.query(
         `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload,available_at)
          VALUES ('parser-scans','parse-url',$1,$2::jsonb,NOW()+make_interval(secs => $3))
