@@ -180,7 +180,22 @@ async function runMetaStagesForKeyword({ keyword, inputs = {}, lr = '', semantic
     missing_nodes_applied: appliedNodes,
     standalone_exposure: enrichedInputs.standalone_exposure === true,
   };
-  metas._meta = { ...(metas._meta || {}), context_used: metas.context_used };
+  metas.intent_contract = metas.intent_contract
+    || enrichedInputs.intentContract
+    || enrichedInputs.gistSignals?.intent_contract
+    || null;
+  metas.gist_selection = metas.gist_selection || {
+    winner_fact: metas.winner_fact || null,
+    winner_source: metas.winner_source || null,
+    candidates: Array.isArray(metas.candidates) ? metas.candidates.slice(0, 12) : [],
+    fallback_used: metas.fallback_used || null,
+    manual_review_required: metas.manual_review_required === true,
+  };
+  metas._meta = {
+    ...(metas._meta || {}),
+    context_used: metas.context_used,
+    intent_contract: metas.intent_contract,
+  };
 
   // Заметки для UI: чего не хватает и почему важно.
   metas.post_validation_notes = Array.isArray(metas.post_validation_notes)

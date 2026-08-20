@@ -282,6 +282,25 @@ function _buildCandidateUserPrompt({
   ].filter(Boolean).join('\n');
 
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+  const intentContract = inputs.intentContract || inputs.intent_contract
+    || (inputs.gistSignals && inputs.gistSignals.intent_contract) || null;
+  const intentBlock = intentContract
+    ? `
+
+[ARTICLE_INTENT_CONTRACT — жёсткое ограничение]
+${JSON.stringify(intentContract)}
+Используй этот intent/page job для candidate selection и предотврати wrong click.`
+    : '';
+  const gistSignals = inputs.gistSignals || {};
+  const gistEvidenceBlock = gistSignals.heuristic_nodes || gistSignals.factual_anchors
+    ? `
+
+[ARTICLE-GROUNDED GIST EVIDENCE]
+- heuristic nodes: ${JSON.stringify(gistSignals.heuristic_nodes || {})}
+- factual anchors: ${(gistSignals.factual_anchors || []).join('; ') || '—'}
+- distinctive sections: ${(gistSignals.distinctive_sections || []).join('; ') || '—'}
+Используй эти сигналы только как candidate leads; подтверждай факт по контексту страницы.`
+    : '';
   const governanceBlock = String(inputs.governanceBlock || '').trim();
   const governancePromptBlock = governanceBlock
     ? `\n\n[BRANDCORE/TGA — ОБЯЗАТЕЛЬНЫЕ ОГРАНИЧЕНИЯ]\n${governanceBlock.slice(0, 4200)}\n`
@@ -309,16 +328,19 @@ function _buildCandidateUserPrompt({
 ${lsiBlock}` : ''}
 
 [TITLE/DESCRIPTION КОНКУРЕНТОВ ТОП-ВЫДАЧИ]
-${competitors || 'Нет данных о конкурентах — оцени общий шаблон категории по своим знаниям выдачи.'}${ctrBlock}
-${competitorNoiseBlock}${avoidBlock}${governancePromptBlock}
+  ${competitors || 'Нет данных о конкурентах — оцени общий шаблон категории по своим знаниям выдачи.'}${ctrBlock}
+  ${competitorNoiseBlock}${intentBlock}${gistEvidenceBlock}${avoidBlock}${governancePromptBlock}
 
-Выполни Steps 8.1–8.4 и верни JSON по контракту. Не добавляй в Title/Description факт, число, гарантию, лицензию, награду или результат, которого нет в готовой странице и подтверждённом контексте.`;
+  Выполни Steps 8.1–8.4 и верни JSON по контракту. Не добавляй в Title/Description факт, число, гарантию, лицензию, награду или результат, которого нет в готовой странице и подтверждённом контексте.`;
 }
 
 // ─── Фаза 2: Filter + scoring (Steps 8.5 / 8.5b / 8.6) ─────────────
 
-function _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis = null }) {
+function _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis = null, intentContract = null }) {
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+  const intentBlock = intentContract
+    ? `\n[ARTICLE_INTENT_CONTRACT]\n${JSON.stringify(intentContract)}\nПроверяй decision_relevance относительно этого page job.`
+    : '';
   return `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${keyword}
 - Задача поля (Step 8.1): ${JSON.stringify(phase1.field_job || {}, null, 2)}
@@ -326,7 +348,7 @@ function _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis = null }) {
 
 [КАНДИДАТЫ-ФАКТЫ]
 ${JSON.stringify(phase1.candidates || [], null, 2)}
-${competitorNoiseBlock}
+${competitorNoiseBlock}${intentBlock}
 
 Кандидаты с disqualified_by_template: true уже провалили первый pass
 Replaceability — исключи их (survived: false), кроме случая, когда без них
@@ -400,6 +422,14 @@ function _buildAssemblerUserPrompt({
 - SERP_INTENT: ${serpIntent.value || 'Mixed/Unclear'} (commercial=${pct(serpIntent.commercial_frequency)}, informational=${pct(serpIntent.informational_frequency)}). Это жёсткое условие тональности, не переопределяй его.${lsiIntent ? `
 - LSI-интент (по семантике ТОПа): ${lsiIntent.value}${(lsiIntent.commercial_lsi || []).length ? `; коммерческие LSI: ${lsiIntent.commercial_lsi.slice(0, 6).join(', ')}` : ''}${(lsiIntent.informational_lsi || []).length ? `; информационные LSI: ${lsiIntent.informational_lsi.slice(0, 6).join(', ')}` : ''}.` : ''}`
     : '';
+  const articleIntentContract = inputs.intentContract || inputs.intent_contract
+    || (inputs.gistSignals && inputs.gistSignals.intent_contract) || null;
+  const articleIntentBlock = articleIntentContract
+    ? `
+- ARTICLE_INTENT_CONTRACT: ${JSON.stringify(articleIntentContract)}
+  Это обязательный job страницы: не меняй intent, не обещай результат wrong-click и
+  выбирай LSI только если они помогают этому job.`
+    : '';
 
   const priceData = (() => {
     // Ленивый require: metaGenerator требует этот модуль (циклическая инициализация CJS).
@@ -448,7 +478,7 @@ ${relevanceBrief.slice(0, 1500)}`
 - Телефон (использовать только если он реально снимает фрикцию): ${phone}` : ''}
 - Контекст / УТП страницы: ${inputs.summary || inputs.page_context || 'Нет данных'}
 - Задача поля (Step 8.1): ${JSON.stringify(phase1.field_job || {})}
-- standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}${intentBlock}
+- standalone_exposure: ${standaloneExposure ? 'true (страница рассчитана на standalone-дистрибуцию: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)' : 'false'}${intentBlock}${articleIntentBlock}
 
 [WINNER FACT — единственный GIST-фактор для TITLE]
 ${JSON.stringify(winner, null, 2)}
@@ -591,8 +621,11 @@ function _deterministicPairIssues(pair) {
   return issues;
 }
 
-function _deterministicPairSoftIssues(pair, keyword, semantics = {}) {
+function _deterministicPairSoftIssues(pair, keyword, semantics = {}, options = {}) {
   const issues = [];
+  const winner = options.winner || null;
+  const standaloneExposure = options.standaloneExposure === true;
+  const intentContract = options.intentContract || null;
   const keywordPos = checkKeywordPosition(String(pair.title || ''), keyword);
   if (!keywordPos.ok) {
     issues.push(
@@ -612,17 +645,52 @@ function _deterministicPairSoftIssues(pair, keyword, semantics = {}) {
       );
     }
   }
+
+  const titleText = String(pair.title || '').toLowerCase();
+  const descriptionText = String(pair.description || '').toLowerCase();
+  const winnerTokens = String(winner?.fact || '')
+    .toLowerCase()
+    .match(/[а-яёa-z0-9]{5,}/g) || [];
+  const meaningfulWinnerTokens = [...new Set(winnerTokens)].slice(0, 6);
+  if (meaningfulWinnerTokens.length >= 2) {
+    const titleFactHits = meaningfulWinnerTokens.filter((t) => titleText.includes(t));
+    const descFactHits = meaningfulWinnerTokens.filter((t) => descriptionText.includes(t));
+    if (titleFactHits.length === 0) {
+      issues.push('winner fact не отражён в title — вынеси один подтверждённый GIST-факт ближе к началу');
+    } else {
+      const firstFactPosition = Math.min(...titleFactHits.map((t) => titleText.indexOf(t)));
+      if (firstFactPosition >= 35) {
+        issues.push(`GIST-факт начинается после окна ${35} символов title — перемести его ближе к ключу`);
+      }
+    }
+    if (!standaloneExposure && descFactHits.length >= 2 && titleFactHits.length >= 2) {
+      issues.push('description повторяет тот же winner fact — используй другую смысловую ось/proof');
+    }
+  }
+
+  const intentValue = String(intentContract?.value || '').toLowerCase();
+  if (/inform|research|смешан/.test(intentValue)
+    && /купить|заказать|оформить заявку|оставить заявку/.test(descriptionText)) {
+    issues.push('informational/link intent drift: description обещает транзакционное действие');
+  }
+  if (/commercial|transaction|коммерч/.test(intentValue)
+    && /что такое|история|обзор без действия/.test(descriptionText)) {
+    issues.push('commercial intent drift: description звучит как общий информационный обзор');
+  }
   return issues;
 }
 
 // ─── Валидатор: Steps 8.9–8.10 ─────────────────────────────────────
 
-function _buildCheckerUserPrompt({ pair, winner, standaloneExposure, phase1 }) {
+function _buildCheckerUserPrompt({ pair, winner, standaloneExposure, phase1, intentContract = null }) {
+  const intentBlock = intentContract
+    ? `\n- ARTICLE_INTENT_CONTRACT: ${JSON.stringify(intentContract)} — проверь отсутствие intent drift.`
+    : '';
   return `[ПАРА ДЛЯ ПРОВЕРКИ]
 - Title: ${pair.title}
 - Description: ${pair.description}
 - GIST-фактор title (winner fact): ${winner.fact}
-- standalone_exposure: ${standaloneExposure ? 'true' : 'false'}
+- standalone_exposure: ${standaloneExposure ? 'true' : 'false'}${intentBlock}
 - Общий шаблон конкурентов: ${JSON.stringify((phase1 && phase1.competitor_pattern) || {})}
 
 Выполни Steps 8.9 и 8.10 и верни JSON по контракту.`;
@@ -748,7 +816,12 @@ async function runGistMetaPipeline({
   // ── Фаза 2: Filter + scoring (Steps 8.5 / 8.5b / 8.6) ──
   const phase2 = await _callAnalyticJson(
     FILTER_RANKER_SYSTEM,
-    _buildRankerUserPrompt({ keyword, phase1, snippetAnalysis }),
+    _buildRankerUserPrompt({
+      keyword,
+      phase1,
+      snippetAnalysis,
+      intentContract: inputs.intentContract || inputs.gistSignals?.intent_contract || null,
+    }),
     usage,
   );
   const rankedAll = Array.isArray(phase2.ranked)
@@ -841,7 +914,12 @@ async function runGistMetaPipeline({
     // длины / позицию ключа / обязательные LSI — не тратим вызов checker'а,
     // а пересобираем с комбинированным фидбеком (одна пересборка чинит всё).
     const hardIssues = _deterministicPairIssues(pair);
-    const softIssues = _deterministicPairSoftIssues(pair, keyword, semantics);
+    const softIssues = _deterministicPairSoftIssues(pair, keyword, semantics, {
+      winner,
+      standaloneExposure,
+      intentContract: inputs.intentContract || inputs.intent_contract
+        || inputs.gistSignals?.intent_contract || null,
+    });
     const retryIssues = [...hardIssues, ...softIssues];
     if (retryIssues.length && attempt < MAX_PAIR_ATTEMPTS) {
       feedback = `Детерминированные нарушения: ${retryIssues.join('; ')}. `
@@ -856,7 +934,14 @@ async function runGistMetaPipeline({
     // Steps 8.9–8.10 — semantic conflict + pair replaceability.
     const check = await _callAnalyticJson(
       CONFLICT_CHECKER_SYSTEM,
-      _buildCheckerUserPrompt({ pair, winner, standaloneExposure, phase1 }),
+      _buildCheckerUserPrompt({
+        pair,
+        winner,
+        standaloneExposure,
+        phase1,
+        intentContract: inputs.intentContract || inputs.intent_contract
+          || inputs.gistSignals?.intent_contract || null,
+      }),
       usage,
       { maxTokens: 2000 },
     );
@@ -1005,7 +1090,15 @@ const META_PIPELINE_ATTEMPTS = 2;
  * manual_review_required: true.
  */
 async function _fallbackLinkArticleMeta({
-  topic, anchorText, excerpt, focusNotes, geminiModel, pipelineError,
+  topic,
+  anchorText,
+  excerpt,
+  focusNotes,
+  geminiModel,
+  gistSignals = null,
+  intentContract = null,
+  semantics = {},
+  pipelineError,
 }) {
   const usage = {
     tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
@@ -1014,6 +1107,21 @@ async function _fallbackLinkArticleMeta({
   const notes = [
     `⚠️ GIST Meta Filter Pipeline не отработал (${pipelineError ? pipelineError.message : 'нет деталей'}) — пара собрана fallback-вызовом MetaPairAssembler (Steps 8.7–8.8).`,
   ];
+  const intentBlock = intentContract
+    ? `\n- Intent contract: ${JSON.stringify(intentContract)}\n- Используй этот intent как ограничение тональности и wrong-click guard.`
+    : '';
+  const heuristicBlock = gistSignals?.heuristic_nodes
+    ? `\n- GIST heuristic nodes из статьи: ${JSON.stringify(gistSignals.heuristic_nodes)}\n- Не выдумывай узлы, используй только подтверждённые предложения статьи.`
+    : '';
+  const lsiBlock = [
+    ...(semantics.title_mandatory_words || []),
+    ...(semantics.description_mandatory_words || []),
+    ...(semantics.obligatory_lsi || []),
+    ...(semantics.differentiator_lsi || []),
+  ].filter(Boolean).slice(0, 12);
+  const lsiLine = lsiBlock.length
+    ? `\n- LSI-кандидаты: ${lsiBlock.join(', ')}. Вплетай только естественные и intent-relevant словоформы, без stuffing.`
+    : '';
 
   const userPrompt = `[ВХОДНЫЕ ДАННЫЕ]
 - Главный поисковый запрос: ${topic}
@@ -1021,7 +1129,7 @@ async function _fallbackLinkArticleMeta({
 - Регион: —
 - Контекст / УТП страницы: ${focusNotes || 'Нет данных'}${anchorText ? `
 - Статья подводит к переходу по анкору «${anchorText}»` : ''}
-- standalone_exposure: true (ссылочная статья распространяется standalone: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)
+- standalone_exposure: true (ссылочная статья распространяется standalone: соцсети / AI summaries / voice previews — GIST-фактор осознанно ставится в начало description)${intentBlock}${heuristicBlock}${lsiLine}
 
 [ТЕКСТ ГОТОВОЙ СТАТЬИ — ИСТОЧНИК ФАКТОВ]
 ${excerpt || 'Текст статьи недоступен — опирайся на главный запрос и контекст.'}
@@ -1099,12 +1207,22 @@ lead fact. Дополнительно добавь в JSON поле "winner_fact
  * @returns {Promise<object>} тот же JSON-контракт, что runGistMetaPipeline
  */
 async function generateLinkArticleMeta({
-  topic, anchorText = '', articlePlain = '', focusNotes = '', governanceBlock = '', geminiModel = '',
+  topic,
+  anchorText = '',
+  articleHtml = '',
+  articlePlain = '',
+  focusNotes = '',
+  governanceBlock = '',
+  geminiModel = '',
+  articleType = 'link',
+  intentContract = null,
+  gistSignals = null,
+  semantics = {},
 } = {}) {
   const excerpt = String(articlePlain || '').replace(/\s+/g, ' ').trim().slice(0, 6000);
   const pipelineArgs = {
     keyword: String(topic || '').trim(),
-    semantics: {},
+    semantics: semantics && typeof semantics === 'object' ? semantics : {},
     serpData: [],
     inputs: {
       niche: topic,
@@ -1112,6 +1230,12 @@ async function generateLinkArticleMeta({
       page_context: excerpt
         ? `Текст готовой статьи (источник фактов-кандидатов): ${excerpt}`
         : '',
+      articleType,
+      articleHtml,
+      articlePlain,
+      intentContract,
+      gistSignals,
+      intentHint: intentContract?.value || '',
       brand: '',
       // Ссылочные статьи часто распространяются standalone (шаринг, превью,
       // AI summaries) — осознанный override (§5 ТЗ).
@@ -1135,7 +1259,15 @@ async function generateLinkArticleMeta({
   // Полный пайплайн не отработал — собираем пару напрямую через
   // MetaPairAssembler, чтобы мета-теги создавались всегда.
   return _fallbackLinkArticleMeta({
-    topic, anchorText, excerpt, focusNotes, geminiModel, pipelineError: lastErr,
+    topic,
+    anchorText,
+    excerpt,
+    focusNotes,
+    geminiModel,
+    gistSignals,
+    intentContract,
+    semantics,
+    pipelineError: lastErr,
   });
 }
 

@@ -21,8 +21,14 @@ const {
 // Порог, ниже которого сниппет считается слабым и требует перегенерации.
 const CTR_SCORE_THRESHOLD = Number(process.env.META_CTR_SCORE_THRESHOLD || 60);
 
-// GIST-факт: число, цена, срок, гарантия, процент, «от N».
-const FACT_RE = /(\d+\s*(?:₽|руб|%|лет|год|дн|час|мин|шт|км|м²|кг)|\bот\s+\d|гаранти\w*|сертифиц\w*|лиценз\w*|срок\w*\s+\d)/i;
+// GIST-факт: не только число/цена, но и named mechanism/material/process,
+// limitation, scenario or comparison criterion — именно такие facts могут быть
+// полезнее для informational/blog snippets, даже когда они нечисловые.
+const FACT_RE = /(\d+\s*(?:₽|руб|%|лет|год|дн|час|мин|шт|км|м²|кг)|\bот\s+\d|гаранти\w*|сертифиц\w*|лиценз\w*|срок\w*\s+\d|технологи\w*|механизм\w*|материал\w*|состав\w*|процесс\w*|метод\w*|сценари\w*|ограничен\w*|не\s+подходит|подходит\s+для|сравн\w*|критери\w*|пошаг\w*|ГОСТ|ISO|IEC|API)/i;
+
+const COMMERCIAL_RE = /купить|заказать|цена|стоимость|доставк|заявк|подобрать|условия|оформить|монтаж|каталог/i;
+const INFORMATIONAL_RE = /как\b|почему|что такое|разбор|обзор|объясн|пошаг|совет|ошибк|причин|когда|зачем|ограничен|не подходит/i;
+const COMPARISON_RE = /сравн|отличи|разниц|против|\bvs\b|критери|плюс[ыа]|минус[ыа]|лучше для/i;
 const YEAR_RE = /\b20\d{2}\b/;
 
 function _pct(part, total) {
@@ -115,11 +121,11 @@ function snippetCtrScore({
   if (patterns && patterns.length_p50_title) {
     const okTitle = titleLen >= patterns.length_p50_title;
     const okDesc = !patterns.length_p50_desc || descLen >= patterns.length_p50_desc;
-    add('serp_length_fit', (okTitle ? 5 : 0) + (okDesc ? 5 : 0), 10,
+    add('serp_length_fit', (okTitle ? 3 : 0) + (okDesc ? 2 : 0), 5,
       `p50 ТОПа: title ${patterns.length_p50_title}, desc ${patterns.length_p50_desc || '—'}`);
   } else {
     // Нет данных выдачи (статьи, link-меты) — начисляем нейтрально.
-    add('serp_length_fit', 5, 10, 'нет данных SERP — нейтральная оценка');
+    add('serp_length_fit', 3, 5, 'нет данных SERP — нейтральная оценка');
   }
 
   // 4. GIST-факт (число / цена / срок / гарантия) — 20.
@@ -141,27 +147,44 @@ function snippetCtrScore({
   const geoRelevant = !!String(inputs.toponym || '').trim();
   if (geoRelevant) {
     const geoOk = combined.toLowerCase().includes(String(inputs.toponym).toLowerCase().slice(0, 5));
-    add('geo', geoOk ? 5 : 0, 5, geoOk ? 'гео указано' : 'гео задано, но не использовано');
+    add('geo', geoOk ? 3 : 0, 3, geoOk ? 'гео указано' : 'гео задано, но не использовано');
   } else {
-    add('geo', 5, 5, 'гео не требуется');
+    add('geo', 3, 3, 'гео не требуется');
   }
 
   const yearRelevant = !!String(inputs.current_year ?? '').trim()
     && (!patterns || (patterns.year_frequency ?? 0) >= 0.3);
   if (yearRelevant) {
-    add('year', YEAR_RE.test(combined) ? 5 : 0, 5,
+    add('year', YEAR_RE.test(combined) ? 3 : 0, 3,
       YEAR_RE.test(combined) ? 'год указан' : 'год ожидается выдачей, но не указан');
   } else {
-    add('year', 5, 5, 'год не требуется');
+    add('year', 3, 3, 'год не требуется');
   }
 
   const brand = String(inputs.brand || '').trim();
   if (brand) {
     const brandOk = combined.includes(brand);
-    add('brand', brandOk ? 5 : 0, 5, brandOk ? 'бренд указан' : 'бренд задан, но не использован');
+    add('brand', brandOk ? 4 : 0, 4, brandOk ? 'бренд указан' : 'бренд задан, но не использован');
   } else {
-    add('brand', 5, 5, 'бренд не требуется');
+    add('brand', 4, 4, 'бренд не требуется');
   }
+
+  // 7. Intent-fit — title/description должны выполнять job страницы, а не
+  // просто содержать keyword. Это особенно важно для blog/link meta без SERP.
+  const intentContract = inputs.intentContract || inputs.intent_contract || {};
+  const intentValue = String(
+    intentContract.value || intentContract.intent || inputs.intent ||
+    (ctrAnalysis && ctrAnalysis.serp_intent && ctrAnalysis.serp_intent.value) ||
+    (inputs.articleType === 'link' ? 'Informational/Research' : ''),
+  );
+  const intentRegex = /compar|сравн|против|vs/i.test(intentValue)
+    ? COMPARISON_RE
+    : /commercial|transaction|коммерч|покуп|заказ/i.test(intentValue)
+      ? COMMERCIAL_RE
+      : INFORMATIONAL_RE;
+  const intentHits = [title, description].filter((part) => intentRegex.test(part)).length;
+  add('intent_fit', intentHits === 2 ? 10 : intentHits === 1 ? 5 : 0, 10,
+    `${intentValue || 'не определён'}: ${intentHits}/2 полей отражают intent`);
 
   // ── Штрафы ──
   const prefixes = (patterns && patterns.common_prefixes) || [];

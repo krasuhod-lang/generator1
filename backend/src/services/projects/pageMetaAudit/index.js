@@ -19,15 +19,13 @@
 
 const { getProjectsConfig } = require('../config');
 const { normalizeWord, STOP_WORDS } = require('../../metaTags/semantics');
-
-// Лимиты мета-тегов — кириллические safe ranges GIST Meta Filter (Задача D §4,
-// синхронны с metaTags/gistMetaFilter). Дублируем константами, чтобы не тянуть
-// LLM-адаптеры в детерминированный слой.
-const TITLE_MIN = 70;
-const TITLE_MAX = 80;
-const DESC_MIN = 180;
-const DESC_MAX = 190;
-const H1_MAX = 70;
+const {
+  TITLE_MIN,
+  TITLE_MAX,
+  DESC_MIN,
+  DESC_MAX,
+  H1_MAX,
+} = require('../../metaTags/lengthConfig');
 
 function _len(s) { return String(s || '').length; }
 

@@ -25,6 +25,7 @@
  */
 
 const { snippetCtrScore } = require('./ctrScore');
+const { buildGistSignals, buildArticleSemantics } = require('./metaContext');
 const { calcCost } = require('../metrics/priceCalculator');
 
 const SUMMARY_MAX = 1500;
@@ -140,6 +141,11 @@ function _contract(metas, source, extra = {}) {
     ctr_score: metas.ctr_score || null,
     lsi_check: metas.lsi_check || null,
     context_used: metas.context_used || null,
+    intent_contract: metas.intent_contract || extra.intent_contract || null,
+    gist_selection: metas.gist_selection || extra.gist_selection || null,
+    temporal_review: metas.temporal_gist_factor === true
+      ? { temporary_gist_factor: true, review_date: metas.review_date || null }
+      : null,
     manual_review_required: metas.manual_review_required === true,
     notes: Array.isArray(metas.post_validation_notes) ? metas.post_validation_notes : [],
     usage: _usageFromMeta(metas._meta || {}),
@@ -248,6 +254,7 @@ async function generateMetaForContent({
   const inputs = {
     niche: context.niche || kw,
     brand: context.brand || '',
+    brandFacts: context.brandFacts || '',
     toponym: context.toponym || '',
     phone: context.phone || '',
     summary,
@@ -262,9 +269,35 @@ async function generateMetaForContent({
     audienceNicheDigest: context.audienceNicheDigest || '',
     relevanceBrief: context.relevanceBrief || '',
     governanceBlock: context.governanceBlock || '',
+    articleType: context.articleType || pipeline,
+    articleHtml: html,
+    articlePlain: plain,
+    intentHint: context.intentHint || context.intent_hint || '',
+    intentContract: context.intentContract || context.intent_contract || null,
     llm_provider: context.llm_provider || 'gemini',
     gemini_model: context.gemini_model || '',
   };
+
+  // Детерминированно готовим GIST-контракт из финальной страницы до SERP
+  // enrichment. Это не добавляет LLM-вызовов и гарантирует, что meta fields
+  // строятся из фактического intent/decision job статьи, а не только keyword.
+  const gistSignals = buildGistSignals({
+    keyword: kw,
+    articleType: inputs.articleType,
+    articleHtml: html,
+    plain,
+    inputs,
+    intentHint: inputs.intentHint,
+    intentContract: inputs.intentContract,
+  });
+  inputs.gistSignals = gistSignals;
+  inputs.intentContract = inputs.intentContract || gistSignals.intent_contract;
+  inputs.articleSemantics = buildArticleSemantics({
+    keyword: kw,
+    articleHtml: html,
+    plain,
+    headings: gistSignals.distinctive_sections || [],
+  });
 
   const startedAt = Date.now();
   const report = async (result) => {
@@ -327,10 +360,16 @@ async function generateMetaForContent({
         metas = await generateLinkArticleMeta({
         topic: kw,
         anchorText: context.anchorText || '',
+        articleHtml: html,
         articlePlain: plain || String(html || '').replace(/<[^>]+>/g, ' '),
         focusNotes: context.focusNotes || context.summary || '',
         governanceBlock: context.governanceBlock || '',
         geminiModel: context.gemini_model || '',
+        articleType: context.articleType || 'link',
+        intentContract: inputs.intentContract,
+        gistSignals: inputs.gistSignals,
+        semantics: context.semantics && Object.keys(context.semantics).length
+          ? context.semantics : inputs.articleSemantics,
       });
     } else {
       const { generateDrMaxMeta } = require('./metaGenerator');
@@ -343,6 +382,14 @@ async function generateMetaForContent({
       page_angle: inputs.pageAngle || '',
       missing_nodes: inputs.missingNodes || [],
       standalone_exposure: metas.standalone_exposure === true || inputs.standalone_exposure === true,
+    };
+    metas.intent_contract = metas.intent_contract || inputs.intentContract || inputs.gistSignals?.intent_contract || null;
+    metas.gist_selection = metas.gist_selection || {
+      winner_fact: metas.winner_fact || null,
+      winner_source: metas.winner_source || null,
+      candidates: Array.isArray(metas.candidates) ? metas.candidates.slice(0, 12) : [],
+      fallback_used: metas.fallback_used || null,
+      manual_review_required: metas.manual_review_required === true,
     };
     log(`Мета-теги: GIST без SERP готов (CTR-скор ${metas.ctr_score.score}/100)`, 'info');
     return report(_contract(metas, pipeline === 'link' ? 'gist_link' : 'gist'));
