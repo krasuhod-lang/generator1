@@ -25,10 +25,18 @@
 // ── Классификация issues ──────────────────────────────────────────────
 
 const ISSUE_PATTERNS = [
-  { kind: 'h1_count',           re: /<h1>/i },
+  { kind: 'h1_count',           re: /<h1>|h1_count/i },
+  { kind: 'byline',              re: /byline|автор.*обновлен|author/i },
+  { kind: 'lead_answer',         re: /lead-answer|прямой ответ/i },
+  { kind: 'toc',                 re: /nav.*toc|оглавлен|toc_coverage|dead_toc_anchor/i },
+  { kind: 'h2_anchor',           re: /h2-якор|h2_anchor|sec-/i },
+  { kind: 'answer_lead',         re: /answer-lead|answer_lead/i },
   { kind: 'expert_opinion',     re: /мнение эксперта|expert-opinion/i },
   { kind: 'faq_block',          re: /faq|часто задаваемые/i },
-  { kind: 'faq_questions',      re: /вопросов \(<h3>\)/i },
+  { kind: 'faq_questions',      re: /вопросов \(<h3>|faq_questions/i },
+  { kind: 'summary_block',       re: /итоги|summary_block|summary_items/i },
+  { kind: 'conclusion',          re: /заключени|conclusion/i },
+  { kind: 'future_date',         re: /future_date|будущ.*дат|future_year/i },
   { kind: 'hallucination',      re: /галлюцинац|подозрение/i },
   { kind: 'link_coverage',      re: /покрытие плана ссылок/i },
   { kind: 'link_misplaced',     re: /не в свои h2|вставлены не в свои/i },

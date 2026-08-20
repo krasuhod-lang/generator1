@@ -588,6 +588,37 @@ function checkContentGovernance(governanceReport) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 18. HTML article contract. Проверяет детерминированный отчёт структуры,
+// который собран над готовым HTML и не зависит от self_audit LLM-поля.
+// Любой blocker здесь запрещает publication readiness, но не роняет task.
+// ─────────────────────────────────────────────────────────────────────
+function checkHtmlContract(report) {
+  if (!report || typeof report !== 'object') {
+    return _verdict('html_contract', {
+      pass: true,
+      blocking: false,
+      verdict: 'na',
+      evidence: { reason: 'html_contract_report_not_available' },
+    });
+  }
+  const issues = Array.isArray(report.issues) ? report.issues : [];
+  const blockers = issues.filter((item) => item && item.severity === 'blocker');
+  const pass = report.ok === true && blockers.length === 0;
+  return _verdict('html_contract', {
+    pass,
+    blocking: true,
+    score: pass ? 1 : 0,
+    verdict: pass ? 'valid' : 'structural_blockers',
+    evidence: {
+      pipeline: report.pipeline || null,
+      blockers: blockers.slice(0, 30),
+      warnings: issues.filter((item) => item && item.severity !== 'blocker').slice(0, 30),
+      counts: report.counts || {},
+    },
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 function _firstNumber(candidates) {
   for (const c of candidates) {
@@ -614,6 +645,7 @@ module.exports = {
   checkTopicDiscovery,
   checkSemanticFactcheck,
   checkContentGovernance,
+  checkHtmlContract,
   // helpers for tests
   _internal: { _plainLower, _firstNumber, RISK_ORDER, _extractParagraphs },
 };

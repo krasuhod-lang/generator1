@@ -33,6 +33,7 @@
  *     authorship,           // { byline, reviewer, sources }
  *     informationGainBrief, // { value_adds, gaps }
  *     tzCompliance,         // детерминированный отчёт Stage 7 по ТЗ
+ *     htmlContractReport,    // deterministic article HTML contract report
  *   }
  */
 
@@ -70,6 +71,9 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
   // его явно и получают единый verdict в журнале quality_gate_reports.
   if (artifacts.governanceReport) {
     gates.push(checkers.checkContentGovernance(artifacts.governanceReport));
+  }
+  if (artifacts.htmlContractReport) {
+    gates.push(checkers.checkHtmlContract(artifacts.htmlContractReport));
   }
 
   // Всегда применимы, если есть HTML.

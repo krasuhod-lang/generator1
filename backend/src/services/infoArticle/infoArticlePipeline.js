@@ -71,6 +71,7 @@ const {
 const { analyzeReadability } = require('./readability.service');
 const { verifyIntent } = require('./intentVerify.service');
 const { createValidationTracker } = require('./validationFailures.service');
+const { validateArticleHtmlContract } = require('../content/articleHtmlContract');
 const { generateSeoMeta } = require('./seoMeta.service');
 const { fetchGoogleSerpWithContent } = require('./fetchGoogleSerp');
 const {
@@ -473,12 +474,31 @@ function countOccurrences(haystack, needle) {
  * patterns, expert opinion, FAQ block, and link_plan compliance (ground-truth via
  * auditHtmlAgainstPlan).
  */
-function validateWriterOutput(html, linkPlan) {
+function validateWriterOutput(html, linkPlan, outline = null) {
   const issues = [];
   if (typeof html !== 'string' || html.trim().length < 600) {
     issues.push('article_html слишком короткий или пустой');
     return issues;
   }
+
+  const contractReport = validateArticleHtmlContract(html, {
+    pipeline: 'info',
+    outline,
+    currentYear: new Date().getFullYear(),
+    requireByline: true,
+    requireLeadAnswer: true,
+    requireToc: true,
+    requireAnswerLead: true,
+    requireExpertOpinion: true,
+    requireFaq: true,
+    requireSummary: true,
+    requireConclusion: true,
+    faqMin: 4,
+    faqMax: 6,
+    summaryMin: 3,
+    summaryMax: 6,
+  });
+  issues.push(...contractReport.issueTexts);
 
   // image slots: для info-article генерируется ровно 1 cover-изображение
   // (см. runImagePromptsGen / runImageGeneration). В HTML картинка НЕ
@@ -598,8 +618,12 @@ async function runWriter(task, args, ctx, opts = {}) {
   // SEO/GEO 2026: видимый byline (автор + дата обновления) и Author JSON-LD.
   // author_name / author_role строго из persona-метаданных, чтобы writer
   // НЕ выдумывал ФИО. date_modified — текущая дата в формате YYYY-MM-DD.
-  const authorName = personaMeta && personaMeta.display_name ? personaMeta.display_name : '';
-  const authorRole = personaMeta && personaMeta.role ? personaMeta.role : '';
+  const authorName = personaMeta && personaMeta.display_name
+    ? personaMeta.display_name
+    : String(task.author_name || task.brand_name || 'Редакция').trim();
+  const authorRole = personaMeta && personaMeta.role
+    ? personaMeta.role
+    : String(task.author_role || 'редакционная команда').trim();
   const authorBioShort = personaMeta && personaMeta.bio_short ? personaMeta.bio_short : '';
   const dateModified = new Date().toISOString().slice(0, 10);
   // Прокидываем меты в task, чтобы pipeline на этапе post-processing
@@ -633,8 +657,13 @@ async function runWriter(task, args, ctx, opts = {}) {
       `brand_name: ${task.brand_name || '[авто]'}`,
       `brand_facts: ${task.brand_facts || '[не задано]'}`,
       `output_format: ${task.output_format || 'html'}`,
-      `author_name: ${authorName || '[не задано — пропусти byline-блок]'}`,
-      `author_role: ${authorRole || '[не задано]'}`,
+      `author_name: ${authorName}`,
+      `author_role: ${authorRole}`,
+      `expert_role: ${String(
+        (outline && outline.expert_opinion_slot && outline.expert_opinion_slot.expert_role)
+        || task.expert_role
+        || 'практикующий специалист по теме материала',
+      ).trim()}`,
       `date_modified: ${dateModified}`,
       `current_year: ${new Date().getFullYear()}`,
       `stage0_audience: ${pointerOrJson('§3 Аудитория и тон', audience, iakbReady, 3500)}`,
@@ -709,7 +738,7 @@ async function runWriter(task, args, ctx, opts = {}) {
   );
 
   let html = typeof result?.article_html === 'string' ? result.article_html : '';
-  let issues = validateWriterOutput(html, linkPlan);
+  let issues = validateWriterOutput(html, linkPlan, outline);
 
   if (issues.length) {
     await appendLog(ctx.taskId, `⚠ Статья не прошла валидацию: ${issues.length} проблем — corrective retry`, 'warn').catch(() => {});
@@ -728,7 +757,7 @@ async function runWriter(task, args, ctx, opts = {}) {
       },
     );
     const retryHtml = typeof retry?.article_html === 'string' ? retry.article_html : '';
-    const retryIssues = validateWriterOutput(retryHtml, linkPlan);
+    const retryIssues = validateWriterOutput(retryHtml, linkPlan, outline);
     if (retryIssues.length < issues.length && retryHtml) {
       html = retryHtml;
       result = retry;
@@ -736,7 +765,16 @@ async function runWriter(task, args, ctx, opts = {}) {
     }
   }
 
-  return { html, selfAudit: result?.self_audit || null, remainingIssues: issues };
+  return {
+    html,
+    selfAudit: result?.self_audit || null,
+    remainingIssues: issues,
+    structuralReport: validateArticleHtmlContract(html, {
+      pipeline: 'info',
+      outline,
+      currentYear: new Date().getFullYear(),
+    }),
+  };
 }
 
 // Note: INFO_ARTICLE_GEMINI_MODEL / INFO_ARTICLE_DEEPSEEK_MODEL are read at
@@ -2872,6 +2910,11 @@ async function processInfoArticleTask(taskId) {
         taskId,
         raw: {
           html: finalHtml,
+          htmlContractReport: validateArticleHtmlContract(finalHtml, {
+            pipeline: 'info',
+            outline,
+            currentYear: new Date().getFullYear(),
+          }),
           niche: task.topic || task.region || '',
           currentYear: new Date().getFullYear(),
           factReport:        qr && qr.fact_check_report,

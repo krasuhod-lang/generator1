@@ -65,6 +65,7 @@ const {
   NEGATIVE_STRICT_EXTRA: IMAGE_NEGATIVE_STRICT_EXTRA,
 } = require('../images/imagePromptComposer');
 const { detectBannedPatterns } = require('./qualityPatterns');
+const { validateArticleHtmlContract } = require('../content/articleHtmlContract');
 const { runImageQa } = require('../infoArticle/imageQa.service');
 
 // ── Config via env ───────────────────────────────────────────────────
@@ -553,12 +554,31 @@ function buildQualityRefineIssues({ eeatAudit, patternReport, lsiReport }) {
   return issues;
 }
 
-function validateWriterOutput(html, task) {
+function validateWriterOutput(html, task, structure = null) {
   const issues = [];
   if (typeof html !== 'string' || html.trim().length < 400) {
     issues.push('article_html слишком короткий или пустой');
     return issues;
   }
+
+  const contractReport = validateArticleHtmlContract(html, {
+    pipeline: 'link',
+    outline: structure,
+    currentYear: Number(task.current_year) || new Date().getFullYear(),
+    requireByline: true,
+    requireLeadAnswer: true,
+    requireToc: true,
+    requireAnswerLead: true,
+    requireExpertOpinion: true,
+    requireFaq: true,
+    requireSummary: true,
+    requireConclusion: true,
+    faqMin: 4,
+    faqMax: 6,
+    summaryMin: 3,
+    summaryMax: 6,
+  });
+  issues.push(...contractReport.issueTexts);
 
   const anchorUrl  = task.anchor_url;
   const anchorText = task.anchor_text;
@@ -633,12 +653,20 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
   const eeatIssues = Array.isArray(opts.priorEeatIssues) ? opts.priorEeatIssues : null;
 
   const buildUser = (correctiveIssues = null) => {
-    // SEO/GEO 2026: byline + Author JSON-LD. linkArticle не использует
-    // систему персон info-article; берём author из task, если задан,
-    // иначе пропускаем byline (writer оставит блок пустым).
-    const authorName = String(task.author_name || task.__authorName || '').trim();
-    const authorRole = String(task.author_role || task.__authorRole || '').trim();
-    const dateModified = task.__dateModified || new Date().toISOString().slice(0, 10);
+    // SEO/GEO: byline обязателен. Если персональный автор не передан,
+    // используется прозрачная редакционная атрибуция без выдуманного ФИО.
+    const authorName = String(
+      task.author_name || task.__authorName || task.brand_name || 'Редакция',
+    ).trim();
+    const authorRole = String(
+      task.author_role || task.__authorRole || 'редакционная команда',
+    ).trim();
+    const today = new Date().toISOString().slice(0, 10);
+    const candidateDate = String(task.__dateModified || task.date_modified || '').trim();
+    const dateModified = /^\d{4}-\d{2}-\d{2}$/.test(candidateDate)
+      && candidateDate <= today
+      ? candidateDate
+      : today;
     task.__dateModified = dateModified;
     task.__authorName = authorName;
     task.__authorRole = authorRole;
@@ -649,8 +677,9 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
       `anchor_url: ${task.anchor_url}`,
       `focus_notes: ${task.focus_notes || '[не задано]'}`,
       `output_format: ${task.output_format || 'html'}`,
-      `author_name: ${authorName || '[не задано — пропусти byline-блок]'}`,
-      `author_role: ${authorRole || '[не задано]'}`,
+      `author_name: ${authorName}`,
+      `author_role: ${authorRole}`,
+      `expert_role: ${String(task.expert_role || 'практикующий специалист по теме материала').trim()}`,
       `date_modified: ${dateModified}`,
       `current_year: ${new Date().getFullYear()}`,
       // При активном LAKB вместо толстых JSON-дампов отправляем короткие
@@ -719,7 +748,7 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
   );
 
   let html = typeof result?.article_html === 'string' ? result.article_html : '';
-  let issues = validateWriterOutput(html, task);
+  let issues = validateWriterOutput(html, task, structure);
 
   if (issues.length) {
     await appendLog(ctx.taskId, `⚠ Статья не прошла валидацию: ${issues.length} проблем — делаем корректировочный прогон`, 'warn');
@@ -737,7 +766,7 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
       },
     );
     const retryHtml = typeof retry?.article_html === 'string' ? retry.article_html : '';
-    const retryIssues = validateWriterOutput(retryHtml, task);
+    const retryIssues = validateWriterOutput(retryHtml, task, structure);
     if (retryIssues.length < issues.length && retryHtml) {
       html   = retryHtml;
       result = retry;
@@ -745,7 +774,16 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
     }
   }
 
-  return { html, selfAudit: result?.self_audit || null, remainingIssues: issues };
+  return {
+    html,
+    selfAudit: result?.self_audit || null,
+    remainingIssues: issues,
+    structuralReport: validateArticleHtmlContract(html, {
+      pipeline: 'link',
+      outline: structure,
+      currentYear: Number(task.current_year) || new Date().getFullYear(),
+    }),
+  };
 }
 
 // ── Stage 5: E-E-A-T audit (DeepSeek) ──────────────────────────────────
@@ -1642,6 +1680,11 @@ async function processLinkArticleTask(taskId) {
         taskId,
         raw: {
           html: finalHtml,
+          htmlContractReport: validateArticleHtmlContract(finalHtml, {
+            pipeline: 'link',
+            outline: structure,
+            currentYear: Number(task.current_year) || new Date().getFullYear(),
+          }),
           niche: task.topic || task.region || '',
           currentYear: new Date().getFullYear(),
           topicDiscovery: topicDiscoveryResult,
