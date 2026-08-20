@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import ast
 import json
 import hashlib
 import os
@@ -359,12 +360,20 @@ def _extract_audience_evidence(page_texts: List[Dict[str, str]], limit: int = 20
             if key in seen:
                 continue
             seen.add(key)
+            page_title = ""
+            try:
+                page_soup = BeautifulSoup(page.get("html") or "", "lxml")
+                page_title = (page_soup.title.string or "").strip() if page_soup.title else ""
+            except Exception:
+                page_title = ""
+            is_title_only = bool(page_title and quote.casefold() == page_title.casefold())
             evidence.append({
                 "field": "client_segments",
                 "url": page_url,
                 "quote": quote,
                 "signal_type": _signal_type(quote),
-                "confidence": 0.8,
+                "evidence_type": "title_only" if is_title_only else "body_text",
+                "confidence": 0.55 if is_title_only else 0.8,
             })
             if len(evidence) >= limit:
                 return evidence
@@ -390,13 +399,10 @@ def _client_evidence_for_segments(
     if not audience_evidence:
         return []
     out: List[Dict[str, Any]] = []
-    used = set()
     for segment in segments:
         segment_tokens = _evidence_tokens(segment)
         candidates = []
         for idx, evidence in enumerate(audience_evidence):
-            if idx in used:
-                continue
             quote_tokens = _evidence_tokens(evidence.get("quote") or "")
             overlap = len(segment_tokens & quote_tokens)
             if overlap:
@@ -405,9 +411,10 @@ def _client_evidence_for_segments(
             _overlap, idx, evidence = max(candidates, key=lambda row: row[0])
             ev = dict(evidence)
             ev["field"] = "client_segments"
+            ev["segment"] = segment
+            ev["evidence_type"] = ev.get("evidence_type") or "body_text"
             ev["confidence"] = min(0.95, 0.75 + 0.05 * _overlap)
             out.append(ev)
-            used.add(idx)
 
     if works_with:
         works_tokens = _evidence_tokens(works_with)
@@ -421,6 +428,8 @@ def _client_evidence_for_segments(
             _overlap, _idx, evidence = max(candidates, key=lambda row: row[0])
             ev = dict(evidence)
             ev["field"] = "works_with"
+            ev["value"] = works_with
+            ev["evidence_type"] = ev.get("evidence_type") or "body_text"
             ev["confidence"] = min(0.95, 0.75 + 0.05 * _overlap)
             out.append(ev)
     return out
@@ -438,18 +447,47 @@ def _finalize_client_fields(
 
     if llm_failed:
         _apply_client_fallback(result, "llm_error")
+        result["evidence_coverage"] = {
+            "total_segments": 0,
+            "verified_segments": 0,
+            "coverage_ratio": 0.0,
+            "works_with_verified": False,
+            "evidence_types": {},
+        }
         return
 
     segments = _coerce_to_list(result.get("client_segments"))
     works_with = _coerce_to_text(result.get("works_with"))
     evidence = _client_evidence_for_segments(segments, works_with, audience_evidence)
     segment_evidence = [ev for ev in evidence if ev.get("field") == "client_segments"]
+    works_evidence = [ev for ev in evidence if ev.get("field") == "works_with"]
+    verified_segments = []
+    for ev in segment_evidence:
+        value = _coerce_to_text(ev.get("segment"))
+        if value and value not in verified_segments:
+            verified_segments.append(value)
+    coverage_ratio = (len(verified_segments) / len(segments)) if segments else 0.0
+    evidence_types: Dict[str, int] = {}
+    for ev in evidence:
+        kind = ev.get("evidence_type") or "body_text"
+        evidence_types[kind] = evidence_types.get(kind, 0) + 1
+    result["evidence_coverage"] = {
+        "total_segments": len(segments),
+        "verified_segments": len(verified_segments),
+        "unverified_segments": max(0, len(segments) - len(verified_segments)),
+        "coverage_ratio": round(coverage_ratio, 3),
+        "works_with_verified": bool(works_evidence),
+        "evidence_types": evidence_types,
+    }
 
-    if segments and segment_evidence:
-        result["client_segments"] = segments
+    if verified_segments:
+        result["client_segments"] = verified_segments
         result["evidence"] = [*result.get("evidence", []), *evidence]
-        result.setdefault("field_status", {})["client_segments"] = "found"
-        if works_with:
+        client_status = "found" if coverage_ratio == 1.0 else "partial"
+        result.setdefault("field_status", {})["client_segments"] = client_status
+        if coverage_ratio < 1.0:
+            _append_warning(result, f"Подтверждено категорий клиентов: {len(verified_segments)} из {len(segments)}")
+        if works_evidence and works_with:
             result["works_with"] = works_with
             result.setdefault("field_status", {})["works_with"] = "found"
         else:
@@ -459,9 +497,9 @@ def _finalize_client_fields(
         return
 
     _apply_client_fallback(result, "not_found")
-    if segments and not segment_evidence:
+    if segments:
         _append_warning(result, "Категории клиентов отброшены: не найдено проверяемых цитат-доказательств")
-    elif not segments and not works_with:
+    elif not works_with:
         _append_warning(result, "Не найдено проверяемых данных о категориях клиентов и профиле заказчиков")
 
 
@@ -518,33 +556,51 @@ def _extract_internal_links(html: str, page_url: str, base_host: str) -> List[Tu
     return sorted(found.items(), key=lambda item: item[1], reverse=True)
 
 
+def _format_client_segment(value: Any) -> str:
+    if isinstance(value, dict):
+        segment = value.get("segment") or value.get("category") or value.get("client") or value.get("audience") or ""
+        service = value.get("service") or value.get("services") or value.get("task") or value.get("need") or ""
+        segment = str(segment).strip()
+        service = str(service).strip()
+        if segment and service:
+            return f"{segment} — {service}"
+        return segment or service
+    return str(value or "").strip()
+
+
 def _coerce_to_list(value) -> list:
-    """DSPy OutputField возвращает строку, а не массив. Приводим ответ модели
-    к списку строк: поддерживаем JSON-массив, а также перечисления через
-    перевод строки / точку с запятой с маркерами списка."""
+    """Convert DSPy/JSON/Python-repr list values to readable strings.
+
+    A DSPy fallback may return ``[{'segment': '...', 'service': '...'}]``
+    using Python single quotes. ``ast.literal_eval`` is used only for this
+    local data representation; no arbitrary code is executed.
+    """
     if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
+        items = [_format_client_segment(item) for item in value]
+        return [item for item in items if item]
+    if isinstance(value, dict):
+        item = _format_client_segment(value)
+        return [item] if item else []
     if value is None:
         return []
     text = str(value).strip()
     if not text:
         return []
-    # JSON-массив (модель часто возвращает именно его).
     if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, list):
-                return [str(v).strip() for v in parsed if str(v).strip()]
-        except Exception:
-            pass
-    # Иначе разбиваем по строкам / «;», убирая маркеры списка.
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(text)
+                if isinstance(parsed, (list, dict)):
+                    return _coerce_to_list(parsed)
+            except Exception:
+                continue
     items = []
     for raw in re.split(r"[\n;]+", text):
         item = raw.strip().lstrip("-•*").strip()
         item = re.sub(r"^\d+[.)]\s*", "", item).strip()
         if item:
-            items.append(item)
-    return items or [text]
+            items.append(_format_client_segment(item))
+    return [item for item in items if item] or [text]
 
 
 _AI_FIELD_ALIASES = {
@@ -945,6 +1001,15 @@ async def parse_url_dspy(
 
     htmls = []
     page_htmls: List[Tuple[str, str]] = []
+    discovery_stats: Dict[str, Any] = {
+        "sitemap_candidates": 0,
+        "html_candidates": 0,
+        "unique_candidates": 0,
+        "pages_fetch_attempted": 0,
+        "pages_fetch_succeeded": 0,
+        "pages_fetch_failed": 0,
+        "queue_remaining": 0,
+    }
     base_host = base_hostname(url)
 
     async with aiohttp.ClientSession() as session:
@@ -982,13 +1047,22 @@ async def parse_url_dspy(
                     extract_clients=extract_clients,
                 )
             html = res.html if res and res.html else ""
+            discovery_stats["pages_fetch_attempted"] = 1
+            if html:
+                discovery_stats["pages_fetch_succeeded"] = 1
+            else:
+                discovery_stats["pages_fetch_failed"] = 1
             htmls.append(html)
             page_htmls.append((url, html))
 
             seen_urls = {url}
             queue: List[Tuple[str, int, int]] = []
             sitemap_links = await _discover_sitemap_links(session, url, base_host)
-            discovered_links = [*sitemap_links, *_extract_internal_links(html, url, base_host)]
+            html_links = _extract_internal_links(html, url, base_host)
+            discovery_stats["sitemap_candidates"] = len(sitemap_links)
+            discovery_stats["html_candidates"] = len(html_links)
+            discovered_links = [*sitemap_links, *html_links]
+            discovery_stats["unique_candidates"] = len({link for link, _score in discovered_links if link != url})
             for link, score in discovered_links:
                 if link in seen_urls:
                     continue
@@ -998,10 +1072,17 @@ async def parse_url_dspy(
             async def _fetch_sub(item: Tuple[str, int, int]):
                 sub_url, depth, score = item
                 try:
+                    discovery_stats["pages_fetch_attempted"] += 1
                     sub_res = await fetch_page(session, sub_url)
                     sub_html = sub_res.html if sub_res and sub_res.html else None
+                    if sub_html:
+                        discovery_stats["pages_fetch_succeeded"] += 1
+                    else:
+                        discovery_stats["pages_fetch_failed"] += 1
                     return sub_url, depth, score, sub_html
                 except Exception:
+                    discovery_stats["pages_fetch_attempted"] += 1
+                    discovery_stats["pages_fetch_failed"] += 1
                     return sub_url, depth, score, None
 
             while queue and len(htmls) < MAX_SUBPAGES + 1:
@@ -1023,6 +1104,7 @@ async def parse_url_dspy(
                             break
                         seen_urls.add(link)
                         queue.append((link, depth + 1, score))
+                discovery_stats["queue_remaining"] = len(queue)
         except Exception as e:
             logger.exception(f"Failed to fetch {url}")
             result = _base_result(url, task_id=task_id, item_id=item_id)
@@ -1059,7 +1141,7 @@ async def parse_url_dspy(
         part = _clean_text(h, BeautifulSoup(h, "lxml")) or ""
         part = part.strip()
         if part:
-            page_texts.append({"url": page_url, "text": part})
+            page_texts.append({"url": page_url, "text": part, "html": h})
             cleaned_parts.append(f"Источник: {page_url}\n{part}")
     clean_text = "\n\n".join(cleaned_parts)
     # Trim to ~15000-20000 tokens (approx 60000 chars)
@@ -1067,6 +1149,7 @@ async def parse_url_dspy(
     
     result = _base_result(url, title_text, task_id=task_id, item_id=item_id)
     result["stats"]["pages_scanned"] = len(page_texts)
+    result["stats"]["discovery"] = discovery_stats
     audience_evidence = _extract_audience_evidence(page_texts)
     effective_api_key = (deepseek_api_key or DEEPSEEK_API_KEY or "").strip()
 

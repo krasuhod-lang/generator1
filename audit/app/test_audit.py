@@ -60,6 +60,45 @@ class TestAccessDetection(unittest.TestCase):
         self.assertIn("cf-challenge", challenge_fingerprint(html, 200)["strong_markers"])
 
 
+class TestClientCoverage(unittest.TestCase):
+    def test_python_repr_client_segments_are_readable(self):
+        from . import parsers
+        value = "[{'segment': 'Поставщики', 'service': 'Тендерное сопровождение'}, {'segment': 'Заказчики', 'service': 'Закупки'}]"
+        self.assertEqual(parsers._coerce_to_list(value), [
+            'Поставщики — Тендерное сопровождение',
+            'Заказчики — Закупки',
+        ])
+
+    def test_partial_evidence_coverage_is_not_marked_found(self):
+        from . import parsers
+        result = {
+            'client_segments': ['Поставщики — тендеры', 'Заказчики — закупки'],
+            'works_with': 'B2B: поставщики и заказчики',
+            'evidence': [],
+            'field_status': {},
+        }
+        evidence = [{
+            'field': 'client_segments',
+            'url': 'https://example.com/',
+            'quote': 'Мы работаем с поставщиками и помогаем участвовать в тендерах.',
+            'evidence_type': 'body_text',
+        }]
+        parsers._finalize_client_fields(result, extract_clients=True, audience_evidence=evidence)
+        self.assertEqual(result['field_status']['client_segments'], 'partial')
+        self.assertEqual(result['evidence_coverage']['verified_segments'], 1)
+        self.assertEqual(result['evidence_coverage']['total_segments'], 2)
+
+    def test_title_only_evidence_has_lower_confidence(self):
+        from . import parsers
+        evidence = parsers._extract_audience_evidence([{
+            'url': 'https://example.com/',
+            'text': 'Участие в тендерах для поставщиков',
+            'html': '<html><head><title>Участие в тендерах для поставщиков</title></head><body></body></html>',
+        }])
+        self.assertEqual(evidence[0]['evidence_type'], 'title_only')
+        self.assertLess(evidence[0]['confidence'], 0.8)
+
+
 class TestContentHash(unittest.TestCase):
     """БАГФИКС #2: умный хеш с порогом 150 символов."""
 
@@ -1023,9 +1062,9 @@ class TestParsersClientSegmentation(unittest.TestCase):
         self.assertEqual(out["client_segments"],
                          ["стоматологии — маркетинг", "автосервисы — маркетинг"])
         self.assertEqual(out["field_status"]["client_segments"], "found")
-        self.assertEqual(out["field_status"]["works_with"], "found")
+        self.assertEqual(out["field_status"]["works_with"], "not_found")
         self.assertTrue(out["evidence"])
-        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["status"], "partial")
 
     def test_dspy_string_items_error_recovers_from_lm_history(self):
         # DSPy JSONAdapter может упасть с "'str' object has no attribute 'items'",

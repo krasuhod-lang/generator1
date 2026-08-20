@@ -21,7 +21,11 @@ function evidenceText(evidence) {
   if (!Array.isArray(evidence)) return '';
   return evidence
     .filter((ev) => ev && (ev.url || ev.quote))
-    .map((ev) => `${ev.field ? `[${ev.field}] ` : ''}${ev.url || ''}${ev.quote ? ` — «${ev.quote}»` : ''}`.trim())
+    .map((ev) => {
+      const type = ev.evidence_type ? `/${ev.evidence_type}` : '';
+      const confidence = ev.confidence != null ? `, confidence=${ev.confidence}` : '';
+      return `${ev.field ? `[${ev.field}${type}${confidence}] ` : ''}${ev.url || ''}${ev.quote ? ` — «${ev.quote}»` : ''}`.trim();
+    })
     .join('\n');
 }
 
@@ -155,6 +159,15 @@ async function exportXlsx(req, res) {
       { header: 'Попытки ИИ', key: 'llm_attempts', width: 14 },
       { header: 'Код/причина доступа', key: 'access_reason', width: 42 },
       { header: 'Диагностика доступа', key: 'access_diagnostics', width: 50 },
+      { header: 'Покрытие доказательствами', key: 'evidence_coverage', width: 30 },
+      { header: 'Типы доказательств', key: 'evidence_types', width: 28 },
+      { header: 'Sitemap-кандидаты', key: 'sitemap_candidates', width: 18 },
+      { header: 'HTML-кандидаты', key: 'html_candidates', width: 18 },
+      { header: 'Уникальные кандидаты', key: 'unique_candidates', width: 20 },
+      { header: 'Попытки загрузки страниц', key: 'pages_fetch_attempted', width: 24 },
+      { header: 'Успешно загружено страниц', key: 'pages_fetch_succeeded', width: 24 },
+      { header: 'Ошибки загрузки страниц', key: 'pages_fetch_failed', width: 22 },
+      { header: 'Осталось в очереди discovery', key: 'queue_remaining', width: 24 },
     ];
     for (const item of items) {
       const result = item.result || {};
@@ -168,6 +181,13 @@ async function exportXlsx(req, res) {
         access.reason || '',
       ].filter(Boolean).join('; ') || result.error || '';
       const diagnostics = access.diagnostics || {};
+      const coverage = result.evidence_coverage || {};
+      const discovery = stats.discovery || {};
+      const evidenceCoverage = coverage.total_segments != null
+        ? `${coverage.verified_segments || 0}/${coverage.total_segments || 0} (${Math.round((coverage.coverage_ratio || 0) * 100)}%)`
+        : '';
+      const evidenceTypes = Object.entries(coverage.evidence_types || {})
+        .map(([key, value]) => `${key}=${value}`).join(', ');
       const accessDiagnostics = [
         diagnostics.score != null ? `score=${diagnostics.score}` : '',
         diagnostics.visible_text_chars != null ? `visible_text_chars=${diagnostics.visible_text_chars}` : '',
@@ -199,6 +219,15 @@ async function exportXlsx(req, res) {
         access_status: access.status || (result.status === 'blocked' ? 'blocked' : ''),
         access_reason: accessReason,
         access_diagnostics: accessDiagnostics,
+        evidence_coverage: evidenceCoverage,
+        evidence_types: evidenceTypes,
+        sitemap_candidates: discovery.sitemap_candidates ?? '',
+        html_candidates: discovery.html_candidates ?? '',
+        unique_candidates: discovery.unique_candidates ?? '',
+        pages_fetch_attempted: discovery.pages_fetch_attempted ?? '',
+        pages_fetch_succeeded: discovery.pages_fetch_succeeded ?? '',
+        pages_fetch_failed: discovery.pages_fetch_failed ?? '',
+        queue_remaining: discovery.queue_remaining ?? '',
       });
     }
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
