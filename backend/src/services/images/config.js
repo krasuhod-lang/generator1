@@ -13,6 +13,7 @@
  *   IMAGE_PIPELINE_ENABLE_INTENT_PLANNER    = true|false   (default false)
  *   IMAGE_PIPELINE_ENABLE_SCENE_EXTRACTION  = true|false   (default false)
  *   IMAGE_PIPELINE_ENABLE_SEMANTIC_QA       = true|false   (default false)
+ *   IMAGE_PIPELINE_ENABLE_GROUNDED_LINK     = true|false   (default false)
  *   IMAGE_PIPELINE_STORAGE_MODE             = inline_base64|cdn_upload
  *   IMAGE_PIPELINE_REQUIRE_PRODUCTION_URL   = true|false   (default false)
  *   IMAGE_PIPELINE_GENERIC_SCORE_THRESHOLD  = 0..1         (default 0.65)
@@ -66,6 +67,7 @@ function getImageConfig() {
     intentPlannerEnabled:   _bool('IMAGE_PIPELINE_ENABLE_INTENT_PLANNER', false),
     sceneExtractionEnabled: _bool('IMAGE_PIPELINE_ENABLE_SCENE_EXTRACTION', false),
     semanticQaEnabled:      _bool('IMAGE_PIPELINE_ENABLE_SEMANTIC_QA', false),
+    groundedLinkEnabled:    _bool('IMAGE_PIPELINE_ENABLE_GROUNDED_LINK', false),
     storageMode:            _enum('IMAGE_PIPELINE_STORAGE_MODE', STORAGE_MODES, 'inline_base64'),
     requireProductionUrl:   _bool('IMAGE_PIPELINE_REQUIRE_PRODUCTION_URL', false),
     genericScoreThreshold:  _float('IMAGE_PIPELINE_GENERIC_SCORE_THRESHOLD', 0.65, 0, 1),

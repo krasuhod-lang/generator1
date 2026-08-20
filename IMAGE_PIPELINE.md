@@ -41,7 +41,7 @@ section-based схема (`runImagePromptsGen`).
 
 | Файл | Назначение |
 |------|------------|
-| `config.js` | Чтение `IMAGE_PIPELINE_*` ENV → замороженный snapshot; `getImageConfig()`, `isNewPipelineEnabled()`. |
+| `config.js` | Чтение `IMAGE_PIPELINE_*` ENV → замороженный snapshot; `getImageConfig()`, `isNewPipelineEnabled()`, grounded-link flag. |
 | `slug.js` | `transliterate()`, `slugify()` — RU→LAT для `filename_slug`. |
 | `textSignals.js` | Детерминированный разбор текста блока: маркеры process/comparison/object/trust/usage + оценка абстрактности. |
 | `imageIntentPlanner.js` | `planImageIntents()` — нужен ли визуал в блоке и какого типа (`image_intent`), `value_reason`, `placement_mode`, `priority`. Обложка планируется при наличии topic. |
@@ -87,7 +87,8 @@ width, height, filesize_bytes, semantic_qa_result, semantic_qa_scores
 
 - **cover** — после первого блока, как и раньше.
 - **inline** — по `anchor_block_id`/ближайшему релевантному якорю (infoArticle),
-  либо через плейсхолдеры `<!-- IMAGE_SLOT_i -->` (linkArticle).
+  либо перед соответствующим `<h2>` в grounded linkArticle flow; legacy linkArticle
+  сохраняет плейсхолдеры `<!-- IMAGE_SLOT_i -->`.
 - `storage_mode=cdn_upload` → `<img src="URL" loading="lazy" decoding="async"
   width height>`; `inline_base64` → `data:`-URI (fallback).
 - При наличии `caption_ru` — `<figure>…<figcaption>`.
@@ -118,6 +119,7 @@ cover = `fail`; более половины inline = `fail`; отсутству�
 | `IMAGE_PIPELINE_ENABLE_INTENT_PLANNER` | `false` | Планирование потребности/типа визуала. |
 | `IMAGE_PIPELINE_ENABLE_SCENE_EXTRACTION` | `false` | Извлечение сцены из контента блока. |
 | `IMAGE_PIPELINE_ENABLE_SEMANTIC_QA` | `false` | Семантический QA + влияние на gate. |
+| `IMAGE_PIPELINE_ENABLE_GROUNDED_LINK` | `false` | Content-grounded planning для linkArticle; legacy flow остаётся fallback. |
 | `IMAGE_PIPELINE_STORAGE_MODE` | `inline_base64` | `inline_base64` \| `cdn_upload`. |
 | `IMAGE_PIPELINE_REQUIRE_PRODUCTION_URL` | `false` | `true` → нет `image_url` = блок gate. |
 | `IMAGE_PIPELINE_GENERIC_SCORE_THRESHOLD` | `0.65` | Порог «шаблонности» (0..1). |
@@ -135,8 +137,11 @@ cover = `fail`; более половины inline = `fail`; отсутству�
 
 ## Обратная совместимость
 
-- Новый flow активируется только флагами; по умолчанию **всё ВЫКЛЮЧЕНО** →
-  используется legacy section-based схема.
+- InfoArticle grounded flow активируется существующими planner/scene flags.
+- LinkArticle grounded flow активируется отдельно `IMAGE_PIPELINE_ENABLE_GROUNDED_LINK=true`;
+  по умолчанию **выключен** и использует legacy section-based схему.
+- Для grounded link flow approved slots могут быть меньше трёх: декоративные изображения
+  не генерируются, а оставшиеся legacy placeholders удаляются перед публикацией.
 - Новые поля не ломают чтение старых задач (лежат внутри `image_prompts`).
 - Ошибка одного слота не роняет весь batch; semantic QA и gate — fail-open.
 - `IMAGE_PIPELINE_SEMANTIC_QA_FALLBACK=warn_only|hard_fail` — конфигурируемое
@@ -147,5 +152,6 @@ cover = `fail`; более половины inline = `fail`; отсутству�
 ## Тесты
 
 ```bash
-node backend/scripts/test-images-pipeline.js   # 22/22 (детерминированно, без сети)
+node backend/scripts/test-images-pipeline.js       # 23/23 (детерминированно, без сети)
+node backend/scripts/test-link-image-grounded.js    # grounded H2 placement smoke test
 ```

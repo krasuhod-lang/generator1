@@ -25,7 +25,10 @@ const { composePrompt } = require(path.join(IMG, 'imagePromptComposer'));
 const { runSemanticImageQa } = require(path.join(IMG, 'semanticImageQa.service'));
 const { persistImages, storeSlot } = require(path.join(IMG, 'imageStorage.service'));
 const { evaluateImageGate } = require(path.join(IMG, 'imageQualityGate'));
-const { buildGroundedImagePrompts } = require(path.join(IMG, 'index'));
+const {
+  buildGroundedImagePrompts,
+  buildSectionsFromArticle,
+} = require(path.join(IMG, 'index'));
 
 let _cases = 0, _pass = 0;
 function check(name, fn) {
@@ -92,6 +95,7 @@ async function main() {
     delete process.env.IMAGE_PIPELINE_ENABLE_SCENE_EXTRACTION;
     const cfg = getImageConfig();
     assert.strictEqual(cfg.intentPlannerEnabled, false);
+    assert.strictEqual(cfg.groundedLinkEnabled, false);
     assert.strictEqual(cfg.storageMode, 'inline_base64');
     assert.strictEqual(cfg.editorialModeDefault, 'strict');
     assert.strictEqual(isNewPipelineEnabled(cfg), false);
@@ -105,6 +109,8 @@ async function main() {
     const cfg = getImageConfig();
     assert.strictEqual(cfg.intentPlannerEnabled, true);
     assert.strictEqual(cfg.genericScoreThreshold, 0.4);
+    process.env.IMAGE_PIPELINE_ENABLE_GROUNDED_LINK = 'true';
+    assert.strictEqual(getImageConfig().groundedLinkEnabled, true);
     assert.strictEqual(cfg.storageMode, 'cdn_upload');
     assert.ok(isNewPipelineEnabled(cfg));
     process.env = saved;
@@ -173,7 +179,18 @@ async function main() {
     assert.ok(/no text overlays/.test(out.negative_prompt));
     assert.ok(/no logos/.test(out.negative_prompt));
     assert.ok(/no glossy generic stock/.test(out.negative_prompt));
+    assert.ok(/Factual rule:/.test(out.visual_prompt));
+    assert.ok(/one coherent scene/.test(out.visual_prompt));
     assert.ok(out.alt_ru.length > 0);
+
+    const illustrated = composePrompt({
+      scene,
+      imageIntent: 'explainer_scene',
+      styleProfile: { style_label: 'editorial vector illustration' },
+      editorialMode: 'relaxed',
+    });
+    assert.ok(/editorial vector illustration/.test(illustrated.visual_prompt));
+    assert.ok(!/photorealistic/.test(illustrated.visual_prompt));
     assert.ok(out.filename_slug.length > 0 && /^[a-z0-9-]+$/.test(out.filename_slug));
   });
 
@@ -267,6 +284,17 @@ async function main() {
       config: {},
     });
     assert.strictEqual(gate.verdict, 'pass');
+  });
+
+  console.log('shared article section extractor');
+  await check('buildSectionsFromArticle maps H2 and body text', () => {
+    const article = '<h1>Title</h1><h2>Первый раздел</h2><p>Текст один.</p>'
+      + '<h2>Второй раздел</h2><p>Текст два.</p>';
+    const sections = buildSectionsFromArticle(article);
+    assert.strictEqual(sections.length, 2);
+    assert.strictEqual(sections[0].h2, 'Первый раздел');
+    assert.ok(/Текст один/.test(sections[0].text));
+    assert.strictEqual(sections[1].anchor_block_id, 'block_1');
   });
 
   console.log('facade buildGroundedImagePrompts');

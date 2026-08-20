@@ -54,6 +54,8 @@ const { createFunnelTracker } = require('../aegis/funnelTracker');
 const biobrainClient = require('../aegis/biobrainClient');
 const {
   getImageConfig: getImagePipelineConfig,
+  buildGroundedImagePrompts,
+  buildSectionsFromArticle,
   runSemanticImageQa,
   persistImages,
   evaluateImageGate,
@@ -63,6 +65,7 @@ const {
   NEGATIVE_STRICT_EXTRA: IMAGE_NEGATIVE_STRICT_EXTRA,
 } = require('../images/imagePromptComposer');
 const { detectBannedPatterns } = require('./qualityPatterns');
+const { runImageQa } = require('../infoArticle/imageQa.service');
 
 // ── Config via env ───────────────────────────────────────────────────
 const LINK_ARTICLE_GEMINI_MODEL =
@@ -824,6 +827,50 @@ async function runImagePromptsGen(task, structure, articleHtml, ctx) {
   });
 }
 
+async function runGroundedImagePromptsGen(task, articleHtml, ctx) {
+  const cfg = getImagePipelineConfig();
+  const sections = buildSectionsFromArticle(articleHtml);
+  const { slots, rejected } = buildGroundedImagePrompts({
+    articleType: 'linkArticle',
+    topic: task.topic,
+    sections,
+    maxImages: 3,
+    audience: task.__audience || null,
+    styleProfile: task.__imageStyleProfile || null,
+    editorialMode: cfg.editorialModeDefault,
+    config: cfg,
+  });
+
+  if (task?.id) {
+    for (const slot of slots) {
+      await appendLog(
+        task.id,
+        `🧭 Grounded image slot ${slot.slot} [${slot.image_intent}] `
+        + `«${slot.section_h2 || 'обложка'}» — ${slot.value_reason}`,
+        'info',
+      );
+    }
+    const rejectedUseful = rejected.filter((item) => !item.need_image);
+    if (rejectedUseful.length) {
+      await appendLog(
+        task.id,
+        `🧭 Grounded planner отклонил ${rejectedUseful.length} блок(ов) `
+        + 'без самостоятельной визуальной ценности',
+        'info',
+      );
+    }
+  }
+
+  // Writer contract still contains IMAGE_SLOT_1..3 placeholders. The embed
+  // stage removes unused placeholders, so quality planning may return fewer
+  // than three images instead of generating decorative filler.
+  return slots.map((slot) => ({
+    ...slot,
+    editorial_mode: cfg.editorialModeDefault,
+    grounded_planning: true,
+  }));
+}
+
 async function runImageGeneration(taskId, imagePrompts) {
   const results = imagePrompts.map((p) => ({ ...p }));
 
@@ -875,13 +922,30 @@ function embedImages(html, imagePrompts) {
       const caption = p.caption_ru && String(p.caption_ru).trim()
         ? `<figcaption>${escapeHtml(p.caption_ru)}</figcaption>` : '';
       const figure = `<figure class="link-article-image">${img}${caption}</figure>`;
-      out = out.replace(placeholder, figure);
+      let insertedAtSection = false;
+      if (p.grounded_planning && p.section_h2) {
+        const targetH2 = normalizeForCoverage(p.section_h2);
+        const h2Re = /<h2\b[^>]*>([\s\S]*?)<\/h2\s*>/gi;
+        out = out.replace(h2Re, (h2Block, title) => {
+          if (insertedAtSection) return h2Block;
+          const currentH2 = normalizeForCoverage(stripTags(title));
+          const matches = currentH2 === targetH2
+            || currentH2.includes(targetH2)
+            || targetH2.includes(currentH2);
+          if (!matches) return h2Block;
+          insertedAtSection = true;
+          return `${figure}\n${h2Block}`;
+        });
+      }
+      if (!insertedAtSection) out = out.replace(placeholder, figure);
     } else {
       // Неуспешный слот — просто убираем плейсхолдер, чтобы он не «торчал» в финальном HTML.
       out = out.replace(placeholder, '');
     }
   }
-  return out;
+  // Grounded planning may intentionally return fewer than three useful slots;
+  // never leak legacy placeholders into published HTML.
+  return out.replace(/<!--\s*IMAGE_SLOT_\d+\s*-->/gi, '');
 }
 
 function escapeHtml(s) {
@@ -1263,9 +1327,18 @@ async function processLinkArticleTask(taskId) {
 
     // 6. Stage 4 (image prompts)
     await setStage(taskId, 'stage4_image_prompts', 78);
-    const imagePrompts = await runImagePromptsGen(task, structure, articleHtml, ctx);
+    const imageCfg = getImagePipelineConfig();
+    const useGroundedImages = imageCfg.groundedLinkEnabled === true;
+    const imagePrompts = useGroundedImages
+      ? await runGroundedImagePromptsGen(task, articleHtml, ctx)
+      : await runImagePromptsGen(task, structure, articleHtml, ctx);
     if (imagePrompts.length < 3) {
-      await appendLog(taskId, `⚠ DeepSeek вернул только ${imagePrompts.length} image-промпта вместо 3`, 'warn');
+      await appendLog(
+        taskId,
+        `${useGroundedImages ? 'ℹ Grounded planner выбрал' : '⚠ DeepSeek вернул только'} `
+        + ` ${imagePrompts.length}/3 image-промпта — декоративные слоты не добавляются`,
+        useGroundedImages ? 'info' : 'warn',
+      );
     }
     await saveStageResult(taskId, 'image_prompts', imagePrompts);
 
@@ -1300,7 +1373,15 @@ async function processLinkArticleTask(taskId) {
         const icon = ss.verdict === 'pass' ? '✅' : ss.verdict === 'review' ? '⚠' : ss.verdict === 'na' ? 'ℹ' : '❌';
         await appendLog(taskId, `${icon} Semantic Image QA: pass=${ss.passSlots}/${ss.totalSlots} review=${ss.reviewSlots} fail=${ss.failSlots} verdict=${ss.verdict}`, ss.verdict === 'fail' ? 'warn' : 'info');
       }
-      const gate = evaluateImageGate({ imagePrompts: deliveredImages, semanticQa, config: imgCfg });
+      const technicalQa = (() => {
+        try { return runImageQa(deliveredImages); } catch (_) { return null; }
+      })();
+      const gate = evaluateImageGate({
+        imagePrompts: deliveredImages,
+        technicalQa,
+        semanticQa,
+        config: imgCfg,
+      });
       await saveStageResult(taskId, 'image_gate', gate);
       const gicon = gate.canFinalize ? (gate.verdict === 'pass' || gate.verdict === 'na' ? '✅' : '⚠') : '❌';
       await appendLog(taskId, `${gicon} Image Gate: verdict=${gate.verdict} canFinalize=${gate.canFinalize}` + (gate.blockers.length ? ` | blockers: ${gate.blockers.slice(0, 3).join('; ')}` : ''), gate.canFinalize ? 'info' : 'warn');

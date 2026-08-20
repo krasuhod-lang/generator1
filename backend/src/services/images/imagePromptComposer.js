@@ -32,11 +32,21 @@ const NEGATIVE_BASE = [
 const NEGATIVE_STRICT_EXTRA = [
   'no cartoonish or 3d-render style',
   'no oversaturated colors',
-  'no collage or multiple frames',
+  'no collage or multiple unrelated frames',
   'no lens flare or heavy vignette',
 ];
 
 const DEFAULT_STYLE_LABEL = 'editorial realistic clean';
+
+const INTENT_DIRECTIVE = {
+  cover: 'Create a clear page-level visual concept with one dominant subject.',
+  explainer_scene: 'Make the described principle understandable at a glance.',
+  step_by_step: 'Show one coherent process with an unmistakable sequence of actions.',
+  comparison_scene: 'Show exactly two relevant options side by side in one coherent frame.',
+  object_visual: 'Show the described object with credible shape, scale, and materials.',
+  trust_visual: 'Show a concrete documentary situation that supports trust without claims.',
+  context_of_use: 'Show the described service or object in a realistic use context.',
+};
 
 function _join(parts) {
   return parts.filter((p) => p && String(p).trim()).map((p) => String(p).trim());
@@ -63,22 +73,32 @@ function composePrompt(input = {}) {
   const styleLabel = String(
     (input.styleProfile && input.styleProfile.style_label) || DEFAULT_STYLE_LABEL,
   ).slice(0, 120);
+  const articleType = String(input.articleType || 'article');
+  const intentDirective = INTENT_DIRECTIVE[intent] || INTENT_DIRECTIVE.explainer_scene;
 
   const subject = String(scene.subject || input.sectionH2 || input.topic || '').trim();
   const objects = Array.isArray(scene.objects) ? scene.objects : [];
+  const nonPhotorealistic = /illustrat|vector|isometric|watercolor|anime|3d\b|render/i.test(styleLabel);
+  const styleInstruction = nonPhotorealistic
+    ? `Style: ${styleLabel}, coherent editorial composition, high detail`
+    : `Style: ${styleLabel}, natural lighting, high detail, photorealistic`;
   const mustInclude = Array.isArray(scene.must_include) ? scene.must_include : [];
   const anchors = Array.isArray(scene.factual_anchors) ? scene.factual_anchors : [];
 
   // ── visual_prompt: строгий порядок смысловых слотов. ────────────────
   const promptParts = _join([
+    `Article type: ${articleType === 'linkArticle' ? 'editorial reference article' : 'informational blog article'}`,
+    `Visual role: ${intentDirective}`,
     subject ? `Subject: ${subject}` : '',
     objects.length ? `Key objects: ${objects.slice(0, 6).join(', ')}` : '',
     scene.environment ? `Environment: ${scene.environment}` : '',
     scene.action ? `Action: ${scene.action}` : '',
     scene.composition ? `Composition: ${scene.composition}` : '',
-    `Style: ${styleLabel}, natural lighting, high detail, photorealistic`,
+    styleInstruction,
+    'Focal hierarchy: one coherent scene, clear foreground subject, restrained background, no decorative filler',
     mustInclude.length ? `Must include: ${mustInclude.slice(0, 5).join('; ')}` : '',
     anchors.length ? `Grounded in facts: ${anchors.slice(0, 4).join('; ')}` : '',
+    'Factual rule: use only the grounded subject and anchors; do not invent brand claims, measurements, labels, or results',
   ]);
   // brandRules.require → добавляем как жёсткие требования.
   if (input.brandRules && Array.isArray(input.brandRules.require)) {

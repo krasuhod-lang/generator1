@@ -22,6 +22,38 @@ const { evaluateImageGate } = require('./imageQualityGate');
 const { slugify } = require('./slug');
 
 /**
+ * buildSectionsFromArticle — общий deterministic extractor для link/info
+ * pipeline. Сохраняет H2, тело секции и anchor_block_id, чтобы image slot
+ * можно было встроить перед конкретным блоком без нового LLM-вызова.
+ */
+function buildSectionsFromArticle(articleHtml) {
+  const html = String(articleHtml || '');
+  const h2Re = /<h2\b[^>]*>([\s\S]*?)<\/h2\s*>/gi;
+  const marks = [];
+  let match;
+  while ((match = h2Re.exec(html)) !== null) {
+    marks.push({ index: match.index, endTag: match.index + match[0].length, title: match[1] });
+  }
+  const stripTags = (value) => String(value || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z#0-9]+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return marks.map((mark, index) => {
+    const end = index + 1 < marks.length ? marks[index + 1].index : html.length;
+    const bodyHtml = html.slice(mark.endTag, end);
+    return {
+      key: `section_${index}`,
+      h2: stripTags(mark.title).slice(0, 200),
+      html: bodyHtml,
+      text: stripTags(bodyHtml),
+      anchor_block_id: `block_${index}`,
+      index,
+    };
+  });
+}
+
+/**
  * buildGroundedImagePrompts — превращает секции статьи в готовые слоты
  * для генерации: для каждого нужного слота выполняет scene extraction и
  * prompt composition. Слоты с need_image=false возвращаются в
@@ -73,16 +105,17 @@ function buildGroundedImagePrompts(input = {}) {
       : sectionByKey.get(p.section_key);
     const sectionText = section ? (section.text != null ? section.text : section.html) : '';
 
-    const scene = cfg.sceneExtractionEnabled || true
-      ? extractScene({
-        sectionText,
-        imageIntent: p.image_intent,
-        sectionH2: p.section_h2,
-        topic: input.topic,
-        articleType: input.articleType,
-        audience: input.audience,
-      })
-      : null;
+    // Once the grounded facade is requested, scene extraction is always part
+    // of its contract. The config flag controls activation at pipeline level;
+    // keeping extraction here unconditional prevents silent generic prompts.
+    const scene = extractScene({
+      sectionText,
+      imageIntent: p.image_intent,
+      sectionH2: p.section_h2,
+      topic: input.topic,
+      articleType: input.articleType,
+      audience: input.audience,
+    });
     // Прикрепляем intent к сцене — используется в semantic QA.
     if (scene) scene.image_intent = p.image_intent;
 
@@ -137,6 +170,7 @@ module.exports = {
   extractScene,
   composePrompt,
   buildGroundedImagePrompts,
+  buildSectionsFromArticle,
   // qa / storage / gate
   runSemanticImageQa,
   persistImages,
