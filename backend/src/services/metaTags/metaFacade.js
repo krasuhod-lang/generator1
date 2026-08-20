@@ -261,6 +261,7 @@ async function generateMetaForContent({
     standalone_exposure: context.standalone_exposure === true,
     audienceNicheDigest: context.audienceNicheDigest || '',
     relevanceBrief: context.relevanceBrief || '',
+    governanceBlock: context.governanceBlock || '',
     llm_provider: context.llm_provider || 'gemini',
     gemini_model: context.gemini_model || '',
   };
@@ -323,11 +324,12 @@ async function generateMetaForContent({
     let metas;
     if (pipeline === 'link') {
       const { generateLinkArticleMeta } = require('./gistMetaFilter');
-      metas = await generateLinkArticleMeta({
+        metas = await generateLinkArticleMeta({
         topic: kw,
         anchorText: context.anchorText || '',
         articlePlain: plain || String(html || '').replace(/<[^>]+>/g, ' '),
         focusNotes: context.focusNotes || context.summary || '',
+        governanceBlock: context.governanceBlock || '',
         geminiModel: context.gemini_model || '',
       });
     } else {

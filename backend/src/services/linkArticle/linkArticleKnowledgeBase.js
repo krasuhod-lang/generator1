@@ -311,6 +311,8 @@ function buildLinkArticleKnowledgeBase({
   // 2026-07 (пункт 1 ТЗ): Perplexity Real-Time Research (Агент-Ресёрчер).
   // Свежие факты/цифры/законы/цитаты текущего месяца → §2b. Опционально.
   realtimeResearch = null,
+  // BRANDCORE/TGA: факты, claims, E-E-A-T, границы темы и manual review.
+  governanceBlock = '',
 } = {}) {
   if (!task) return '';
   const header = [
@@ -335,6 +337,7 @@ function buildLinkArticleKnowledgeBase({
   }
 
   const parts = [
+    governanceBlock ? `## §0.5 BRANDCORE/TGA governance\n\n${governanceBlock}` : '',
     sectionTask(task),
     sectionStrategy(strategy),
     sectionRealtime,

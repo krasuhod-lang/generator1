@@ -1709,6 +1709,31 @@ async function processInfoArticleTask(taskId) {
       await appendLog(taskId, `🌐 Perplexity Real-Time: данных нет (нет ключа / пусто) — §2b пропущена`, 'info');
     }
 
+    // BRANDCORE/TGA: единый governance-контекст для блоговой статьи.
+    const { buildGovernanceReport, renderGovernanceBlock } = require('../contentGovernance');
+    const governanceSemanticContext = {
+      entities: intents?.entities || [],
+      intents: intents?.subintents || intents?.intents || [],
+      questions: intents?.user_questions || intents?.questions || [],
+      lsi: lsiSet?.important || lsiSet?.important_lsi || lsiSet?.importantTerms || [],
+    };
+    const governanceReport = buildGovernanceReport({
+      contentType: 'info',
+      task,
+      projectContext: task.project_context_snapshot || null,
+      semanticContext: governanceSemanticContext,
+    });
+    const governanceBlock = renderGovernanceBlock({
+      report: governanceReport,
+      contentType: 'info',
+      task,
+      projectContext: task.project_context_snapshot || null,
+      semanticContext: governanceSemanticContext,
+    });
+    task.__governanceReport = governanceReport;
+    task.__governanceBlock = governanceBlock;
+    await appendLog(taskId, `BRANDCORE/TGA: ${governanceReport.status}; facts=${governanceReport.confirmed_facts}, claims=${governanceReport.confirmed_claims}`, governanceReport.blockers.length ? 'warn' : 'info');
+
     task.__iakb = buildInfoArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
       relevanceSignals,
@@ -1716,6 +1741,7 @@ async function processInfoArticleTask(taskId) {
       targetSiteStyle,
       audienceResearch: audienceResearchResult.digest,
       realtimeResearch,
+      governanceBlock,
     });
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
 
@@ -2649,6 +2675,7 @@ async function processInfoArticleTask(taskId) {
           pageAngle: buildInfoPageAngle(task, intents, whitespace),
           missingNodes: buildInfoMissingNodes(whitespace),
           relevanceBrief: relevanceStageBrief || '',
+          governanceBlock,
           gemini_model: task.gemini_model || '',
           standalone_exposure: true,
         },
@@ -2843,6 +2870,7 @@ async function processInfoArticleTask(taskId) {
           lsiOverdoseReport: qr && qr.lsi_overdose_report,
           intentReport:      qr && qr.intent_verdict,
           topicDiscovery:    qr && qr.topic_discovery,
+          governanceReport,
           informationDelta:  (whitespace && whitespace.information_delta) || null,
           authorship: {
             byline:   authorByline || task.__authorName || null,
@@ -2857,6 +2885,7 @@ async function processInfoArticleTask(taskId) {
         blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
         warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
         summary:    gateResult.summary,
+        governance: governanceReport,
         lingua_forensic: linguaForensicReport
           ? {
               verdict:          linguaForensicReport.verdict,

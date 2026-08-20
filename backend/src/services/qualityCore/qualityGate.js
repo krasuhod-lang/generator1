@@ -65,6 +65,13 @@ function finalize(pipeline, artifacts = {}, opts = {}) {
 
   const gates = [];
 
+  // BRANDCORE/TGA governance — deterministic source/claims/E-E-A-T policy.
+  // Отсутствие отчёта не блокирует исторические задачи; новые pipeline передают
+  // его явно и получают единый verdict в журнале quality_gate_reports.
+  if (artifacts.governanceReport) {
+    gates.push(checkers.checkContentGovernance(artifacts.governanceReport));
+  }
+
   // Всегда применимы, если есть HTML.
   if (typeof artifacts.html === 'string' && artifacts.html) {
     gates.push(checkers.checkFreshness(artifacts.html, { currentYear, thresholds }));

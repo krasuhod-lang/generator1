@@ -281,6 +281,38 @@ async function runMetaTagTaskInner(taskId) {
     standalone_exposure: task.standalone_exposure === true,
   };
 
+  // BRANDCORE/TGA: единый контекст правил для всех keyword runs.
+  let governanceReport = null;
+  try {
+    const { buildGovernanceReport, renderGovernanceBlock } = require('../contentGovernance');
+    governanceReport = buildGovernanceReport({
+      contentType: 'meta',
+      task,
+      projectContext: task.project_context_snapshot || null,
+      semanticContext: {
+        entities: task.entities || [],
+        intents: task.intents || [],
+        questions: task.user_questions || [],
+        lsi: task.important_lsi || [],
+      },
+    });
+    inputs.governanceBlock = renderGovernanceBlock({
+      report: governanceReport,
+      contentType: 'meta',
+      task,
+      projectContext: task.project_context_snapshot || null,
+      semanticContext: {
+        entities: task.entities || [],
+        intents: task.intents || [],
+        questions: task.user_questions || [],
+        lsi: task.important_lsi || [],
+      },
+    });
+    await appendLog(taskId, `BRANDCORE/TGA: ${governanceReport.status}; facts=${governanceReport.confirmed_facts}, claims=${governanceReport.confirmed_claims}`, governanceReport.blockers.length ? 'warn' : 'info');
+  } catch (governanceErr) {
+    await appendLog(taskId, `BRANDCORE/TGA: governance layer skipped (${governanceErr.message})`, 'warn');
+  }
+
   // Sprint B: подключаем relevance-артефакт (если есть).
   if (task.source_relevance_report_id) {
     try {
@@ -370,6 +402,7 @@ async function runMetaTagTaskInner(taskId) {
         lr: task.lr,
       });
       await appendLog(taskId, `📡 SERP получен: ${serp.length} результатов`, 'info');
+      metas.governance = governanceReport || null;
       const ctxUsed = metas.context_used || {};
       if ((ctxUsed.missing_nodes || []).length) {
         await appendLog(taskId,

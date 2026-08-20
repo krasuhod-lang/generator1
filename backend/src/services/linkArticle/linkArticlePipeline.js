@@ -1108,9 +1108,35 @@ async function processLinkArticleTask(taskId) {
       await appendLog(taskId, `🌐 Perplexity Real-Time: данных нет (нет ключа / пусто) — §2b пропущена`, 'info');
     }
 
+    // BRANDCORE/TGA: governance-контекст для ссылочной статьи.
+    const { buildGovernanceReport, renderGovernanceBlock } = require('../contentGovernance');
+    const governanceSemanticContext = {
+      entities: intents?.entities || [],
+      intents: intents?.subintents || intents?.intents || [],
+      questions: intents?.user_questions || intents?.questions || [],
+      lsi: structure?.lsi || structure?.important_lsi || [],
+    };
+    const governanceReport = buildGovernanceReport({
+      contentType: 'link',
+      task,
+      projectContext: task.project_context_snapshot || null,
+      semanticContext: governanceSemanticContext,
+    });
+    const governanceBlock = renderGovernanceBlock({
+      report: governanceReport,
+      contentType: 'link',
+      task,
+      projectContext: task.project_context_snapshot || null,
+      semanticContext: governanceSemanticContext,
+    });
+    task.__governanceReport = governanceReport;
+    task.__governanceBlock = governanceBlock;
+    await appendLog(taskId, `BRANDCORE/TGA: ${governanceReport.status}; facts=${governanceReport.confirmed_facts}, claims=${governanceReport.confirmed_claims}`, governanceReport.blockers.length ? 'warn' : 'info');
+
     task.__lakb = buildLinkArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, structure, competitiveBrief, gistDelta,
       realtimeResearch,
+      governanceBlock,
     });
     await appendLog(taskId, `🧠 LAKB собрана (${task.__lakb.length} символов)`, 'info');
 
@@ -1529,6 +1555,7 @@ async function processLinkArticleTask(taskId) {
           niche: task.topic || task.region || '',
           currentYear: new Date().getFullYear(),
           topicDiscovery: topicDiscoveryResult,
+          governanceReport,
           authorship: {
             byline:   authorByline || task.__authorName || null,
             reviewer: task.__reviewerName || null,
@@ -1542,6 +1569,7 @@ async function processLinkArticleTask(taskId) {
         blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
         warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
         summary:    gateResult.summary,
+        governance: governanceReport,
         lingua_forensic: linguaForensicReport
           ? {
               verdict:          linguaForensicReport.verdict,
@@ -1613,6 +1641,7 @@ async function processLinkArticleTask(taskId) {
             ? `Статья подводит к переходу по анкору «${task.anchor_text}»`
             : '',
           standalone_exposure: true,
+          governanceBlock,
           gemini_model: normalizeGeminiCopywritingModel(task.gemini_model),
         },
         ctx: {

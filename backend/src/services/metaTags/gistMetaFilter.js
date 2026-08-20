@@ -282,6 +282,10 @@ function _buildCandidateUserPrompt({
   ].filter(Boolean).join('\n');
 
   const competitorNoiseBlock = _buildCompetitorNoiseBlock(snippetAnalysis);
+  const governanceBlock = String(inputs.governanceBlock || '').trim();
+  const governancePromptBlock = governanceBlock
+    ? `\n\n[BRANDCORE/TGA — ОБЯЗАТЕЛЬНЫЕ ОГРАНИЧЕНИЯ]\n${governanceBlock.slice(0, 4200)}\n`
+    : '';
   const avoidBlock = avoidPatterns.length
     ? `
 
@@ -306,9 +310,9 @@ ${lsiBlock}` : ''}
 
 [TITLE/DESCRIPTION КОНКУРЕНТОВ ТОП-ВЫДАЧИ]
 ${competitors || 'Нет данных о конкурентах — оцени общий шаблон категории по своим знаниям выдачи.'}${ctrBlock}
-${competitorNoiseBlock}${avoidBlock}
+${competitorNoiseBlock}${avoidBlock}${governancePromptBlock}
 
-Выполни Steps 8.1–8.4 и верни JSON по контракту.`;
+Выполни Steps 8.1–8.4 и верни JSON по контракту. Не добавляй в Title/Description факт, число, гарантию, лицензию, награду или результат, которого нет в готовой странице и подтверждённом контексте.`;
 }
 
 // ─── Фаза 2: Filter + scoring (Steps 8.5 / 8.5b / 8.6) ─────────────
@@ -427,8 +431,12 @@ ${relevanceBrief.slice(0, 1500)}`
     ? `
 
 [НЕ ПОВТОРЯТЬ]
-Ограничения формы, а не факты. Не бери их в текст и не пересказывай:
+Ограничения формы, а не факты:
 - ${avoidPatterns.join('\n- ')}`
+    : '';
+  const governanceBlock = String(inputs.governanceBlock || '').trim();
+  const governancePromptBlock = governanceBlock
+    ? `\n\n[BRANDCORE/TGA — ФИНАЛЬНАЯ ПРОВЕРКА CLAIMS]\n${governanceBlock.slice(0, 4200)}\n`
     : '';
 
   return `[ВХОДНЫЕ ДАННЫЕ]
@@ -447,11 +455,11 @@ ${JSON.stringify(winner, null, 2)}
 
 [ЗАПАСНЫЕ КАНДИДАТЫ — lead fact для DESCRIPTION]
 ${alternateFacts || '— (запасных нет: используй новую смысловую ось того же факта — спецификацию/число/proof, не перефразирование)'}${lsiBlock}${audienceBlock}${relevanceBlock}
-${competitorNoiseBlock}${avoidBlock}
+${competitorNoiseBlock}${avoidBlock}${governancePromptBlock}
 ${feedback ? `
 [ФИДБЕК ПРЕДЫДУЩЕЙ ПОПЫТКИ — ОБЯЗАТЕЛЬНО ИСПРАВИТЬ]
-${feedback}` : ''}
-Собери пару по Steps 8.7–8.8 и верни JSON по контракту.`;
+    ${feedback}` : ''}
+  Собери пару по Steps 8.7–8.8 и верни JSON по контракту. Если подтверждённого факта нет, используй нейтральное описание страницы без конкретной гарантии, цифры или неподтверждённого преимущества.`;
 }
 
 /** true, если пара вылезла за кириллические safe ranges. */
@@ -1091,7 +1099,7 @@ lead fact. Дополнительно добавь в JSON поле "winner_fact
  * @returns {Promise<object>} тот же JSON-контракт, что runGistMetaPipeline
  */
 async function generateLinkArticleMeta({
-  topic, anchorText = '', articlePlain = '', focusNotes = '', geminiModel = '',
+  topic, anchorText = '', articlePlain = '', focusNotes = '', governanceBlock = '', geminiModel = '',
 } = {}) {
   const excerpt = String(articlePlain || '').replace(/\s+/g, ' ').trim().slice(0, 6000);
   const pipelineArgs = {
@@ -1109,6 +1117,7 @@ async function generateLinkArticleMeta({
       // AI summaries) — осознанный override (§5 ТЗ).
       standalone_exposure: true,
       pageAngle: anchorText ? `Статья подводит к переходу по анкору «${anchorText}»` : '',
+      governanceBlock,
     },
     options: { copywriterModel: geminiModel || undefined },
   };

@@ -552,6 +552,42 @@ function checkSemanticFactcheck(semanticReport, { ymyl = false, failMode, niche 
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// 17. Content governance (BRANDCORE/TGA). Проверяет только уже собранный
+// детерминированный report; LLM не вызывается. Конфликт источников или
+// неподтверждённое blocking-правило останавливает публикационную готовность.
+// Отсутствие необязательного факта само по себе не блокирует: контент должен
+// перейти к нейтральной формулировке или ручной проверке.
+// ─────────────────────────────────────────────────────────────────────
+function checkContentGovernance(governanceReport) {
+  if (!governanceReport || typeof governanceReport !== 'object') {
+    return _verdict('content_governance', {
+      pass: true,
+      blocking: false,
+      verdict: 'na',
+      evidence: { reason: 'governance_report_not_available' },
+    });
+  }
+  const blockers = Array.isArray(governanceReport.blockers) ? governanceReport.blockers : [];
+  const warnings = Array.isArray(governanceReport.warnings) ? governanceReport.warnings : [];
+  const pass = blockers.length === 0 && governanceReport.can_generate !== false;
+  return _verdict('content_governance', {
+    pass,
+    blocking: true,
+    score: pass ? 1 : 0,
+    verdict: governanceReport.status || (pass ? 'ready' : 'blocked'),
+    evidence: {
+      content_type: governanceReport.content_type || null,
+      sensitive_topic: governanceReport.sensitive_topic === true,
+      blocker_codes: blockers.map((item) => item.code).filter(Boolean),
+      warning_codes: warnings.map((item) => item.code).filter(Boolean),
+      confirmed_facts: Number(governanceReport.confirmed_facts) || 0,
+      confirmed_claims: Number(governanceReport.confirmed_claims) || 0,
+      semantic_counts: governanceReport.semantic_counts || {},
+    },
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 function _firstNumber(candidates) {
   for (const c of candidates) {
@@ -577,6 +613,7 @@ module.exports = {
   checkAsessorAudit,
   checkTopicDiscovery,
   checkSemanticFactcheck,
+  checkContentGovernance,
   // helpers for tests
   _internal: { _plainLower, _firstNumber, RISK_ORDER, _extractParagraphs },
 };

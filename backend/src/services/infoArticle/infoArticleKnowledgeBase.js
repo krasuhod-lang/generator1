@@ -318,6 +318,8 @@ function buildInfoArticleKnowledgeBase({
   // если null / пусто, §2b не рендерится. Источник —
   // services/llm/realtimeResearch.runRealtimeResearch.
   realtimeResearch = null,
+  // BRANDCORE/TGA: детерминированный слой фактов, claims, E-E-A-T и ручной проверки.
+  governanceBlock = '',
 } = {}) {
   if (!task) return '';
   const header = [
@@ -407,6 +409,7 @@ function buildInfoArticleKnowledgeBase({
   }
 
   const parts = [
+    governanceBlock ? `## §0.5 BRANDCORE/TGA governance\n\n${governanceBlock}` : '',
     sectionTask(task),
     sectionStrategy(strategy),
     sectionRealtime,

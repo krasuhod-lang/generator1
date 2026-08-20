@@ -262,6 +262,7 @@ function buildArticleKnowledgeBase(input = {}) {
     moduleContext       = null,
     relevanceSignals    = null, // Wave 2/3: report.competitor_signals из relevance-pipeline
     projectContextBlock = '',   // ТЗ §5/§8: рендер из projects/projectContextBlock
+    governanceBlock      = '',   // BRANDCORE/TGA: единые fact/E-E-A-T/semantic rules
   } = input;
 
   // Реальные тексты аудитории/ниши приходят как сериализованные
@@ -306,6 +307,14 @@ function buildArticleKnowledgeBase(input = {}) {
   if (projectContextBlock && projectContextBlock.trim()) {
     sections.push('\n## 0. КОНТЕКСТ ПРОЕКТА');
     sections.push(projectContextBlock.trim());
+  }
+
+  // ── 0.5. BRANDCORE/TGA GOVERNANCE ────────────────────────────────
+  // Слой правил, а не фактов: подтверждённые claims, E-E-A-T,
+  // семантические границы, ручная проверка и запрет выдуманных данных.
+  if (governanceBlock && governanceBlock.trim()) {
+    sections.push('\n## 0.5. BRANDCORE/TGA GOVERNANCE');
+    sections.push(governanceBlock.trim());
   }
 
   // ── 1. Brand & Offer ─────────────────────────────────────────────

@@ -523,9 +523,11 @@ async function runPipeline(task, ctx) {
   // отдельной секцией «КОНТЕКСТ ПРОЕКТА», чтобы LLM на всех стадиях знала
   // бренд/нишу/регион/факты/конкурентов/коммерческий интент проекта.
   let projectContextBlock = '';
+  let projectContextData = null;
   try {
     const snap = task.project_context_snapshot || null;
     if (snap && typeof snap === 'object') {
+      projectContextData = snap;
       const { buildProjectContextBlock } = require('../projects/projectContextBlock');
       projectContextBlock = buildProjectContextBlock(snap, { maxBlockChars: 6000 });
     } else if (task.project_id && task.user_id) {
@@ -534,12 +536,49 @@ async function runPipeline(task, ctx) {
       const { buildProjectContext } = require('../projects/contextResolver');
       const ctx = await buildProjectContext(task.project_id, task.user_id);
       if (ctx) {
+        projectContextData = ctx;
         const { buildProjectContextBlock } = require('../projects/projectContextBlock');
         projectContextBlock = buildProjectContextBlock(ctx, { maxBlockChars: 6000 });
       }
     }
   } catch (ctxErr) {
     log(`ARTICLE_KNOWLEDGE_BASE: контекст проекта пропущен — ${ctxErr.message}`, 'warn');
+  }
+
+  // ── BRANDCORE/TGA governance — единый слой для всех SEO writer stages ──
+  // Правила не заменяют факты задачи: они запрещают выдуманные claims,
+  // удерживают границу интента и фиксируют E-E-A-T/manual-review состояние.
+  let governanceReport = null;
+  let governanceBlock = '';
+  try {
+    const {
+      buildGovernanceReport,
+      renderGovernanceBlock,
+    } = require('../contentGovernance');
+    const governanceSemanticContext = {
+      entities: stage1Result?.entities || stage1Result?.knowledge_graph?.nodes || [],
+      intents: stage1Result?.subintents || stage1Result?.intents || [],
+      questions: stage1Result?.user_questions || stage1Result?.questions || [],
+      lsi: stage2Raw?.lsi?.important || stage2Raw?.important_lsi || stage2Raw?.lsi_set || [],
+    };
+    governanceReport = buildGovernanceReport({
+      contentType: 'seo',
+      task,
+      projectContext: projectContextData || null,
+      semanticContext: governanceSemanticContext,
+    });
+    governanceBlock = renderGovernanceBlock({
+      report: governanceReport,
+      contentType: 'seo',
+      task,
+      projectContext: projectContextData || null,
+      semanticContext: governanceSemanticContext,
+    });
+    task.__governanceReport = governanceReport;
+    task.__governanceBlock = governanceBlock;
+    log(`BRANDCORE/TGA: ${governanceReport.status}; facts=${governanceReport.confirmed_facts}, claims=${governanceReport.confirmed_claims}`, governanceReport.blockers.length ? 'warn' : 'info');
+  } catch (governanceErr) {
+    log(`BRANDCORE/TGA: governance layer skipped (${governanceErr.message})`, 'warn');
   }
 
   try {
@@ -552,6 +591,7 @@ async function runPipeline(task, ctx) {
       knowledgeGraph: stage1Result?.knowledge_graph || null,
       moduleContext:  task.__moduleContext || null,
       projectContextBlock,
+      governanceBlock,
     });
     const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
     const akbTokens = estimateTokens(task.__articleKnowledgeBase);
@@ -1076,6 +1116,7 @@ async function runPipeline(task, ctx) {
           (task.__nicheDeepDiveText || '').slice(0, 600),
           (task.__audiencePersonasText || '').slice(0, 500),
         ].filter(Boolean).join('\n\n').slice(0, 1500),
+        governanceBlock,
         gemini_model: task.gemini_model || '',
         standalone_exposure: false,
       },
@@ -1151,6 +1192,7 @@ async function runPipeline(task, ctx) {
         niche: task.input_target_service || task.input_target_url || '',
         currentYear: new Date().getFullYear(),
         evaluatorReport: evaluatorReport || null,
+        governanceReport: governanceReport || null,
         tzCompliance: s7Result.tzCompliance || s7Result.globalAudit?.tz_compliance || null,
         informationDelta: Array.isArray(stage0Result?.information_delta)
           ? stage0Result.information_delta
@@ -1168,6 +1210,7 @@ async function runPipeline(task, ctx) {
       blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
       warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
       summary:    gateResult.summary,
+      governance: governanceReport || null,
       lingua_forensic: linguaForensicReport
         ? {
             verdict:          linguaForensicReport.verdict,
