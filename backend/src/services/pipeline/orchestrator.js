@@ -121,7 +121,7 @@ const { deriveModuleContext } = require('../../utils/moduleContext');
 const { richTextToPlain, isBlankRichText } = require('../../utils/stripHtmlTags');
 const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
-const { resetTaskBudget } = require('../llm/callLLM');
+const { resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { normalizeTz, hasTz } = require('./tzParser');
@@ -635,13 +635,14 @@ async function runPipeline(task, ctx) {
     }
   }
 
-  // ── Per-task token budget (Gemini input tokens) ──────────────────
-  // Защита от runaway-стоимости. Если пользователь не задал лимит — Infinity.
-  const budgetEnv = parseInt(process.env.GEMINI_TASK_TOKEN_BUDGET, 10);
-  task.__tokenBudget = (Number.isFinite(budgetEnv) && budgetEnv > 0) ? budgetEnv : Infinity;
+  // ── Per-task token budget (Gemini/Grok input tokens) ──────────────
+  // Защита от runaway-стоимости. Дефолт конечный и общий с info/link.
+  task.__tokenBudget = getConfiguredTaskTokenBudget();
   resetTaskBudget(taskId);
   if (Number.isFinite(task.__tokenBudget)) {
-    log(`Gemini token budget на задачу: ${task.__tokenBudget} input-токенов.`, 'info');
+    log(`Gemini/Grok token budget на задачу: ${task.__tokenBudget} input-токенов.`, 'info');
+  } else {
+    log('Gemini/Grok token budget отключён явным значением GEMINI_TASK_TOKEN_BUDGET=0.', 'warn');
   }
 
   // ── Stage 3–6: Pipeline Interleaving ──────────────────────────────

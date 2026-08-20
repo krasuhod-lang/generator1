@@ -30,6 +30,52 @@ const MAX_SAMPLE_PAGES  = 3;      // стартовая + до 2 внутрен�
 const PAGE_TEXT_LIMIT   = 6000;   // символов текста с одной страницы в промпт
 const DISCOVER_TIMEOUT  = 15000;
 const ARTICLE_PATH_HINT = /(blog|news|articles?|stati|post|zhurnal|journal|media|wiki|baza-znanij|knowledge)/i;
+const STYLE_CACHE_TTL_MS = Math.max(
+  5 * 60 * 1000,
+  parseInt(process.env.INFO_ARTICLE_TARGET_STYLE_CACHE_TTL_MS, 10) || 24 * 60 * 60 * 1000,
+);
+const STYLE_CACHE_MAX_ENTRIES = Math.max(
+  8,
+  Math.min(512, parseInt(process.env.INFO_ARTICLE_TARGET_STYLE_CACHE_MAX, 10) || 128),
+);
+const STYLE_CACHE = new Map();
+
+function _styleCacheKey(url) {
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    u.search = '';
+    u.hostname = u.hostname.toLowerCase();
+    // Style analysis is page/site-level; avoid duplicate keys for a final slash.
+    if (u.pathname.length > 1) u.pathname = u.pathname.replace(/\/+$/, '');
+    return u.toString();
+  } catch {
+    return String(url || '').trim();
+  }
+}
+
+function _getCachedStyle(key) {
+  const item = STYLE_CACHE.get(key);
+  if (!item) return null;
+  if (item.expiresAt <= Date.now()) {
+    STYLE_CACHE.delete(key);
+    return null;
+  }
+  // LRU touch without storing page content or raw scraped text.
+  STYLE_CACHE.delete(key);
+  STYLE_CACHE.set(key, item);
+  return { ...item.analysis, cache_hit: true };
+}
+
+function _rememberStyle(key, analysis) {
+  STYLE_CACHE.delete(key);
+  STYLE_CACHE.set(key, { analysis, expiresAt: Date.now() + STYLE_CACHE_TTL_MS });
+  while (STYLE_CACHE.size > STYLE_CACHE_MAX_ENTRIES) {
+    const oldest = STYLE_CACHE.keys().next().value;
+    if (oldest === undefined) break;
+    STYLE_CACHE.delete(oldest);
+  }
+}
 
 const STYLE_ANALYSIS_PROMPT = `Ты — редактор-аналитик. Тебе дан контент нескольких страниц сайта-площадки, куда будет опубликована новая статья для блога.
 Твоя задача — выделить стилистику и формат написания этой площадки, чтобы новая статья выглядела «родной».
@@ -111,6 +157,9 @@ async function _discoverArticleLinks(entryUrl) {
 async function analyzeTargetSiteStyle(targetSiteUrl, ctx = {}) {
   const entryUrl = sanitizeUrl(targetSiteUrl);
   if (!entryUrl) return null;
+  const cacheKey = _styleCacheKey(entryUrl);
+  const cached = _getCachedStyle(cacheKey);
+  if (cached) return cached;
 
   try {
     await assertPublicHost(new URL(entryUrl).hostname);
@@ -152,11 +201,15 @@ async function analyzeTargetSiteStyle(targetSiteUrl, ctx = {}) {
   }
   if (!profile || typeof profile !== 'object' || (!profile.tone && !profile.style_label)) return null;
 
-  return {
+  const analysis = {
+    target_site_url: entryUrl,
     style_profile: profile,
     sampled_pages: pages.map((p) => ({ url: p.url, title: p.title })),
     analyzed_at: new Date().toISOString(),
+    cache_hit: false,
   };
+  _rememberStyle(cacheKey, analysis);
+  return { ...analysis };
 }
 
 /**

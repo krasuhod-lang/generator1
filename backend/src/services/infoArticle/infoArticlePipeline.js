@@ -28,7 +28,7 @@
  */
 
 const db = require('../../config/db');
-const { callLLM, resetTaskBudget } = require('../llm/callLLM');
+const { callLLM, resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { loadInfoArticlePrompt } = require('../../prompts/infoArticle');
 const { buildPersonaSystemBlock } = require('../../prompts/infoArticle/personas');
 const { generateImage, IMAGE_PRICE_USD } = require('../linkArticle/nanoBananaPro.adapter');
@@ -1332,6 +1332,10 @@ async function processInfoArticleTask(taskId) {
     const task = rows[0];
     if (!task) { console.error(`[infoArticle] task ${taskId} not found`); return; }
 
+    // Общий per-task budget для всех Gemini/Grok writer/refine вызовов.
+    task.__tokenBudget = getConfiguredTaskTokenBudget();
+    resetTaskBudget(taskId);
+
     funnel = createFunnelTracker({ kind: 'info_article', taskRef: taskId, userId: task.user_id, niche: task.topic || null });
     FUNNELS.set(taskId, funnel);
 
@@ -1455,7 +1459,8 @@ async function processInfoArticleTask(taskId) {
           await saveColumn(taskId, 'target_site_analysis', targetSiteStyle);
           await appendLog(
             taskId,
-            `🎨 Стиль площадки определён: «${String(targetSiteStyle.style_profile?.style_label || targetSiteStyle.style_profile?.tone || '').slice(0, 120)}» (страниц проанализировано: ${targetSiteStyle.sampled_pages.length}) — уйдёт в IAKB §9c`,
+            `🎨 Стиль площадки определён: «${String(targetSiteStyle.style_profile?.style_label || targetSiteStyle.style_profile?.tone || '').slice(0, 120)}» (страниц проанализировано: ${targetSiteStyle.sampled_pages.length})` +
+            `${targetSiteStyle.cache_hit ? ' [style-cache hit]' : ''} — уйдёт в IAKB §9c`,
             'info',
           );
         } else {

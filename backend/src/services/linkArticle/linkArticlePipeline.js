@@ -25,7 +25,7 @@
  */
 
 const db = require('../../config/db');
-const { callLLM, resetTaskBudget } = require('../llm/callLLM');
+const { callLLM, resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { runEeatAuditCore } = require('../eeatAudit/core');
 const { runQualityEvaluator } = require('../pipeline/stage8');
 const { loadLinkArticlePrompt } = require('../../prompts/linkArticle');
@@ -949,6 +949,10 @@ async function processLinkArticleTask(taskId) {
       console.error(`[linkArticle] task ${taskId} not found`);
       return;
     }
+
+    // Общий per-task budget для всех Gemini/Grok writer/refine вызовов.
+    task.__tokenBudget = getConfiguredTaskTokenBudget();
+    resetTaskBudget(taskId);
 
     funnel = createFunnelTracker({ kind: 'link_article', taskRef: taskId, userId: task.user_id, niche: task.topic || null });
     FUNNELS.set(taskId, funnel);

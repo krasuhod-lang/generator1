@@ -3,7 +3,7 @@
 /**
  * Stage 8 — Quality Evaluator (evaluator-first).
  *
- * Default ON (`STAGE8_EVALUATOR_ENABLED=false` отключает). Всегда fail-open:
+ * Default OFF (`STAGE8_EVALUATOR_ENABLED=true` включает). Всегда fail-open:
  * ошибка LLM/БД только даёт warn и null, публикацию не блокирует. Generic API
  * `runQualityEvaluator()` используется SEO/info/link пайплайнами; pairwise API
  * ниже оставлен для offline DSPy-MIPRO прогонов и не подключён в прод-flow.
@@ -174,7 +174,9 @@ function normalizePairwiseResult(result) {
 }
 
 function isStage8Enabled() {
-  return !['0', 'false', 'no', 'off'].includes(String(process.env.STAGE8_EVALUATOR_ENABLED ?? 'true').toLowerCase());
+  return ['1', 'true', 'yes', 'on'].includes(
+    String(process.env.STAGE8_EVALUATOR_ENABLED || '').toLowerCase()
+  );
 }
 
 function isPairwiseEnabled() {

@@ -36,10 +36,29 @@ const ADAPTER_DEFAULT_MAX_TOKENS = {
 // плодил ретраи. Внешние стадии могут поймать ошибку и решить, что делать
 // (например, пропустить Stage 6 cycle 2/3).
 //
-// Состояние per-task хранится в Map(taskId → {gemini:number, deepseek:number}).
+// Состояние per-task хранится в Map(taskId → {gemini, deepseek, reservedGemini}).
 // ────────────────────────────────────────────────────────────────────
 
-const tokenBudgetState = new Map(); // taskId → { gemini: tokensConsumed }
+const tokenBudgetState = new Map(); // taskId → { gemini, deepseek, reservedGemini }
+
+// Без явного лимита runaway-сценарии (Stage 5/6 refine, corrective retry)
+// могли бесконечно наращивать Gemini input spend. 200k — консервативный
+// production default: обычная SEO/info/link задача укладывается в него, а
+// патологическая задача останавливает только необязательные последующие вызовы.
+const DEFAULT_GEMINI_TASK_TOKEN_BUDGET = 200000;
+
+function getConfiguredTaskTokenBudget() {
+  const raw = process.env.GEMINI_TASK_TOKEN_BUDGET;
+  // 0/отрицательное значение сохраняет явный opt-out для аварийной
+  // совместимости со старыми окружениями; отсутствие переменной — конечный
+  // защитный default.
+  if (raw !== undefined && raw !== '') {
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n)) return DEFAULT_GEMINI_TASK_TOKEN_BUDGET;
+    return n > 0 ? n : Infinity;
+  }
+  return DEFAULT_GEMINI_TASK_TOKEN_BUDGET;
+}
 
 class BudgetExceededError extends Error {
   constructor(message) {
@@ -65,11 +84,63 @@ function getTaskBudgetSpent(taskId, adapter = 'gemini') {
   return st ? (st[adapter] || 0) : 0;
 }
 
+function _getBudgetState(taskId) {
+  if (!taskId) return null;
+  const st = tokenBudgetState.get(taskId) || {
+    gemini: 0,
+    deepseek: 0,
+    reservedGemini: 0,
+  };
+  if (!Number.isFinite(st.reservedGemini)) st.reservedGemini = 0;
+  tokenBudgetState.set(taskId, st);
+  return st;
+}
+
 function _accumulateTokens(taskId, adapter, tokensIn) {
   if (!taskId) return;
-  const st = tokenBudgetState.get(taskId) || { gemini: 0, deepseek: 0 };
-  st[adapter] = (st[adapter] || 0) + tokensIn;
+  const st = _getBudgetState(taskId);
+  st[adapter] = (st[adapter] || 0) + Math.max(0, Number(tokensIn) || 0);
   tokenBudgetState.set(taskId, st);
+}
+
+/**
+ * Reserving the estimated prompt budget before the HTTP request closes the
+ * race where several independent Gemini calls all see the same pre-spend.
+ * The reservation is released and replaced by actual usage on success.
+ */
+function _reserveGeminiBudget(taskId, tokenBudget, estimatedTokens) {
+  if (!taskId || !Number.isFinite(tokenBudget)) return null;
+  const st = _getBudgetState(taskId);
+  const estimate = Math.max(1, Math.ceil(Number(estimatedTokens) || 0));
+  const committed = Math.max(0, Number(st.gemini) || 0);
+  const reserved = Math.max(0, Number(st.reservedGemini) || 0);
+  if (committed + reserved + estimate > tokenBudget) {
+    throw new BudgetExceededError(
+      `gemini token budget exhausted for task ${taskId}: `
+      + `${committed + reserved}/${tokenBudget} input tokens reserved. `
+      + 'Skip non-essential calls (Stage 6 cycle, Stage 5 retries) and continue.'
+    );
+  }
+  st.reservedGemini = reserved + estimate;
+  tokenBudgetState.set(taskId, st);
+  let released = false;
+  return {
+    commit(actualTokens) {
+      if (released) return;
+      released = true;
+      const current = _getBudgetState(taskId);
+      current.reservedGemini = Math.max(0, (current.reservedGemini || 0) - estimate);
+      current.gemini = (current.gemini || 0) + Math.max(0, Number(actualTokens) || 0);
+      tokenBudgetState.set(taskId, current);
+    },
+    release() {
+      if (released) return;
+      released = true;
+      const current = _getBudgetState(taskId);
+      current.reservedGemini = Math.max(0, (current.reservedGemini || 0) - estimate);
+      tokenBudgetState.set(taskId, current);
+    },
+  };
 }
 
 /**
@@ -318,7 +389,8 @@ async function persistStageCall({
  *                                                    после вызова callLLM однократно перезапросит
  *                                                    без cachedContent.
  * @param {number}              [opts.tokenBudget]  — лимит input-токенов на задачу (для Gemini).
- *                                                    Infinity по умолчанию. При исчерпании —
+ *                                                    Production default — 200000; передайте
+ *                                                    Infinity явно для opt-out. При исчерпании —
  *                                                    BudgetExceededError (isDeterministic).
  * @param {string}              [opts.brand]        — наименование бренда из задачи
  *                                                    (task.brand / brand_name). Используется
@@ -346,7 +418,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     logprobs = false,
     cachedContent = null,
     onCacheMiss   = null,
-    tokenBudget   = Infinity,
+    tokenBudget   = getConfiguredTaskTokenBudget(),
     brand         = '',
     model         = null,
     pipeline      = null,
@@ -382,17 +454,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   const startedAt = new Date();
   const promptSize = estimateTokens(system + prompt);
 
-  // Token budget pre-check (Gemini/Grok — на DeepSeek не действует, чтобы
-  // не блокировать дешёвый аналитический трафик).
-  if (providerClass === 'gemini-class' && Number.isFinite(tokenBudget) && taskId) {
-    const spent = getTaskBudgetSpent(taskId, 'gemini');
-    if (spent >= tokenBudget) {
-      throw new BudgetExceededError(
-        `${adapter} token budget exhausted for task ${taskId}: ${spent}/${tokenBudget} input tokens. ` +
-        `Skip non-essential calls (Stage 6 cycle, Stage 5 retries) and continue.`
-      );
-    }
-  }
+  // Budget проверяется после response-cache lookup: cache-hit не вызывает
+  // провайдера и не должен блокироваться из-за уже исчерпанного бюджета.
 
   // Локальная копия cachedContent — может «сгореть» при cache miss.
   // Только для Gemini; Grok не поддерживает cachedContent.
@@ -424,8 +487,15 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     return cacheResult.value;
   }
 
+  const budgetTaskId = taskId || traceTaskId;
+  const budgetKey = providerClass === 'gemini-class' ? 'gemini' : adapter;
+
   for (let attempt = 0; attempt < retries; attempt++) {
+    let budgetReservation = null;
     try {
+      if (providerClass === 'gemini-class' && Number.isFinite(tokenBudget) && budgetTaskId) {
+        budgetReservation = _reserveGeminiBudget(budgetTaskId, tokenBudget, promptSize);
+      }
       const callOpts = { temperature, maxTokens, logprobs };
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         callOpts.timeoutMs = timeoutMs;
@@ -438,6 +508,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       }
 
       const result    = await withProviderSlot(adapter, () => callFn(system, prompt, callOpts));
+      if (budgetReservation) budgetReservation.commit(result.tokensIn || promptSize);
       const cacheHit  = adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0;
       // Для Gemini подмешиваем thoughts/cached токены из usageMetadata в формулу
       // стоимости. Для DeepSeek/Grok эти поля не существуют → undefined → не влияют.
@@ -446,6 +517,12 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         thoughtsTokens: result.thoughtsTokens || 0,
         cachedTokens:   result.cachedTokens   || 0,
       });
+      // Usage фиксируем ДО проверки truncation/JSON: retry после обрезанного
+      // ответа тоже является реальным provider-вызовом и должен попасть в budget.
+      if (!budgetReservation && providerClass === 'gemini-class' && budgetTaskId) {
+        _accumulateTokens(budgetTaskId, budgetKey, result.tokensIn || 0);
+      }
+
       // Если ответ обрезан по max_tokens (детекция: finish_reason=length ИЛИ незакрытый JSON) —
       // автоматически удваиваем лимит и повторяем. Главная причина
       // JSON parse ошибок в outreach emailComposer/nicheExpander.
@@ -463,11 +540,6 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         continue;
       }
       const parsed    = normalizeKeys(parseJSON(result.text));
-
-      // Аккумулируем расход для guard'а
-      if (providerClass === 'gemini-class') {
-        _accumulateTokens(taskId, 'gemini', result.tokensIn || 0);
-      }
 
       const cacheNote   = cacheHit ? ` | cache_hit: ${result.cacheHitTokens}` : '';
       const cachedNote  = (adapter === 'gemini' && activeCachedContent) ? ' | gemini_cached' : '';
@@ -522,6 +594,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       return parsed;
 
     } catch (err) {
+      if (budgetReservation) budgetReservation.release();
       // ── Cache miss / expiry: однократная повторная попытка без кэша ──
       if (err.isCacheMiss && activeCachedContent) {
         log(
@@ -568,4 +641,11 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   }
 }
 
-module.exports = { callLLM, BudgetExceededError, resetTaskBudget, getTaskBudgetSpent };
+module.exports = {
+  callLLM,
+  BudgetExceededError,
+  resetTaskBudget,
+  getTaskBudgetSpent,
+  getConfiguredTaskTokenBudget,
+  DEFAULT_GEMINI_TASK_TOKEN_BUDGET,
+};

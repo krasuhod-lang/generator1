@@ -515,6 +515,7 @@ function iakbSystem(task) {
 function iakbCallOpts(task, extra = {}) {
   const opts = { ...extra };
   opts.model = normalizeGeminiCopywritingModel(task?.gemini_model);
+  if (task && task.__tokenBudget !== undefined) opts.tokenBudget = task.__tokenBudget;
   if (task?.__geminiCacheName) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };

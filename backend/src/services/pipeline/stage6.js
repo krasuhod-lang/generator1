@@ -34,7 +34,14 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
 
   let currentHTML = htmlContent;
   let loopCount   = 0;
-  const maxLoops  = 3;
+  const configuredLoops = parseInt(process.env.SEO_STAGE6_MAX_LOOPS, 10);
+  const maxLoops  = Number.isFinite(configuredLoops) && configuredLoops >= 1
+    ? Math.min(3, configuredLoops)
+    : 3;
+  const configuredGain = Number(process.env.SEO_STAGE6_MIN_COVERAGE_GAIN_PCT);
+  const minCoverageGain = Number.isFinite(configuredGain) && configuredGain >= 0
+    ? configuredGain
+    : 2;
 
   // Length guard: LSI-инъекция должна быть микро-вставкой. Если итерация
   // увеличивает HTML > 1.5× от исходного ИЛИ выходит за blockMax×1.5 —
@@ -117,7 +124,30 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
         break;
       }
       currentHTML = stage6Result.html_content;
-      log(`Stage 6 блок ${blockIndex + 1}: цикл ${loopCount} завершён, HTML ${currentHTML.length} символов`, 'success');
+      const nextCoverage = calculateCoverage(currentHTML, lsiMust);
+      const coverageGain = nextCoverage.percent - coverage.percent;
+      log(
+        `Stage 6 блок ${blockIndex + 1}: цикл ${loopCount} завершён, `
+        + `HTML ${currentHTML.length} символов, coverage ${coverage.percent}% → ${nextCoverage.percent}% `
+        + `(gain ${coverageGain.toFixed(1)} п.п.)`,
+        'success'
+      );
+      // Если модель не добавила покрытие либо прирост уже ниже порога,
+      // следующий полный Gemini rewrite обычно даёт только стоимость и
+      // риск раздувания текста. Оставляем best-so-far; env позволяет
+      // отключить эвристику значением 0 или сделать её строже.
+      if (
+        nextCoverage.percent < LSI_COVERAGE_TARGET
+        && nextCoverage.missing.length > 0
+        && coverageGain < minCoverageGain
+      ) {
+        log(
+          `Stage 6 блок ${blockIndex + 1}: ранний выход — прирост coverage `
+          + `${coverageGain.toFixed(1)} п.п. < ${minCoverageGain} п.п.`,
+          'info'
+        );
+        break;
+      }
     } else {
       log(`Stage 6 блок ${blockIndex + 1}: цикл ${loopCount} — html_content не получен. Прерываем цикл.`, 'warn');
       break;
