@@ -15,6 +15,7 @@ const { isBlankRichText }       = require('../utils/stripHtmlTags');
 const { salvageJsonStrings }    = require('../utils/salvageJson');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 const { getProfileQueueHealth } = require('../services/tasks/generationAdmission');
+const { resolveQueueReason } = require('../services/tasks/queueDiagnostics');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -489,14 +490,42 @@ async function getTaskHealth(req, res, next) {
       bull_job_id: task.bull_job_id || null,
       bull_job_state: bullJobState,
       profile_queue: profileQueue,
-      queue_reason: task.status === 'queued'
-        ? (profileQueue.availableSlots === 0 ? 'profile_limit' : (bullJobState || 'waiting_for_publisher'))
-        : null,
+      queue_reason: resolveQueueReason({
+        status: task.status,
+        availableSlots: profileQueue.availableSlots,
+        bullJobState,
+        pendingOutbox,
+      }),
       pipeline_checkpoint: task.pipeline_checkpoint || null,
       updated_at: task.updated_at || null,
     });
   } catch (err) {
     next(err);
+  }
+}
+
+async function publishTaskOutboxNow(jobId) {
+  try {
+    await publishPendingOutbox(db, 50);
+    const { rows } = await db.query(
+      `SELECT published_at, attempts, last_error
+         FROM generator_task_outbox
+        WHERE job_id = $1
+        LIMIT 1`,
+      [jobId],
+    );
+    const row = rows[0] || {};
+    return {
+      published: Boolean(row.published_at),
+      attempts: Number(row.attempts || 0),
+      lastError: row.last_error || null,
+    };
+  } catch (error) {
+    return {
+      published: false,
+      attempts: 0,
+      lastError: String(error.message || error).slice(0, 300),
+    };
   }
 }
 
@@ -555,9 +584,20 @@ async function startTask(req, res, next) {
     } finally {
       client.release();
     }
-    publishPendingOutbox(db, 50).catch((e) => console.warn('[StartTask] outbox delayed:', e.message));
+    const publication = await publishTaskOutboxNow(jobId);
 
-    return res.json({ message: 'Задача поставлена в очередь', jobId, taskId: task.id, status: 'queued' });
+    return res.json({
+      message: publication.published
+        ? 'Задача опубликована в очередь'
+        : 'Задача сохранена; ожидает публикации в очередь',
+      jobId,
+      taskId: task.id,
+      status: 'queued',
+      queuePublished: publication.published,
+      queueReason: publication.published ? 'waiting' : 'waiting_for_publisher',
+      queueAttempts: publication.attempts,
+      queueError: publication.lastError,
+    });
   } catch (err) {
     // BullMQ бросает если jobId уже занят
     if (err.message?.includes('Job') && err.message?.includes('already')) {
@@ -645,7 +685,7 @@ async function resumeTask(req, res, next) {
     } finally {
       client.release();
     }
-    publishPendingOutbox(db, 50).catch((e) => console.warn('[ResumeTask] outbox delayed:', e.message));
+    const publication = await publishTaskOutboxNow(jobId);
 
     // SSE-уведомление
     publish(task.id, {
@@ -655,8 +695,14 @@ async function resumeTask(req, res, next) {
     });
 
     return res.json({
-      message:          'Задача поставлена на возобновление',
+      message:          publication.published
+        ? 'Задача опубликована для возобновления'
+        : 'Задача сохранена; ожидает публикации для возобновления',
       status:           'queued',
+      queuePublished:   publication.published,
+      queueReason:      publication.published ? 'waiting' : 'waiting_for_publisher',
+      queueAttempts:    publication.attempts,
+      queueError:       publication.lastError,
       resumeFromBlock,
     });
   } catch (err) {

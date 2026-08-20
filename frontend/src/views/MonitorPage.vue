@@ -365,14 +365,20 @@ const queueStatusMessage = computed(() => {
   if (health.queue_reason === 'profile_limit' || profile.availableSlots === 0) {
     return `Профиль занят: выполняются ${profile.activeCount || 0} из ${profile.maxConcurrent || 5} задач. Эта задача автоматически запустится после освобождения слота.`;
   }
-  if (health.queue_reason === 'waiting_for_publisher' || health.pending_outbox > 0) {
-    return 'Задача сохранена и ожидает публикации в очередь. Повторная публикация выполняется автоматически.';
-  }
   if (health.bull_job_state === 'waiting' || health.bull_job_state === 'delayed') {
-    return 'Задача находится в очереди и запустится автоматически.';
+    return 'Задача опубликована в очередь и запустится автоматически.';
   }
-  if (health.bull_job_state === 'missing') {
+  if (health.bull_job_state === 'active') {
+    return 'Задача уже передана worker-у и начинает выполняться.';
+  }
+  if (health.queue_reason === 'waiting_for_publisher' || health.pending_outbox > 0) {
+    return 'Задача сохранена; очередь ещё публикует её в BullMQ. Повторная публикация выполняется автоматически.';
+  }
+  if (health.bull_job_state === 'missing' && health.queue_reason === 'recovery_pending') {
     return 'Задача сохранена, но очередь восстанавливает её автоматически.';
+  }
+  if (health.queue_reason === 'publisher_unavailable') {
+    return 'Очередь временно недоступна; задача сохранена и будет опубликована после восстановления Redis/worker.';
   }
   return 'Задача сохранена и ожидает запуска worker-а.';
 });
