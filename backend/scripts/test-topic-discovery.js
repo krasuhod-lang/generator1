@@ -199,95 +199,96 @@ function makeRawTrends({ values = [10, 20, 30], top = ['a'], rising = ['b'] } = 
     assert.deepStrictEqual(payload.paa_questions.sort(), ['q1', 'q2', 'q3']);
   });
 
-  console.log('── topicDiscovery: Perplexity-сигналы ──');
+  console.log('── topicDiscovery: research-сигналы ──');
 
-  await run('_extractPerplexityTrends: JSON-контракт { trends: [...] }', async () => {
-    const out = topicDiscovery._internal._extractPerplexityTrends({
+  await run('_extractResearchTrends: JSON-контракт { trends: [...] }', async () => {
+    const out = topicDiscovery._internal._extractResearchTrends({
       trends: ['рост спроса', 'новые ГОСТы', 'рост спроса'],
     });
     assert.deepStrictEqual(out, ['рост спроса', 'новые ГОСТы']);
   });
 
-  await run('_extractPerplexityTrends: массив объектов и голый массив', async () => {
+  await run('_extractResearchTrends: массив объектов и голый массив', async () => {
     assert.deepStrictEqual(
-      topicDiscovery._internal._extractPerplexityTrends({ questions: [{ question: 'сколько стоит?' }] }),
+      topicDiscovery._internal._extractResearchTrends({ questions: [{ question: 'сколько стоит?' }] }),
       ['сколько стоит?'],
     );
     assert.deepStrictEqual(
-      topicDiscovery._internal._extractPerplexityTrends(['a', 'b']),
+      topicDiscovery._internal._extractResearchTrends(['a', 'b']),
       ['a', 'b'],
     );
   });
 
-  await run('_extractPerplexityTrends: текстовый список (обратная совместимость)', async () => {
-    const out = topicDiscovery._internal._extractPerplexityTrends({ text: '1. первый\n- второй' });
+  await run('_extractResearchTrends: текстовый список (обратная совместимость)', async () => {
+    const out = topicDiscovery._internal._extractResearchTrends({ text: '1. первый\n- второй' });
     assert.deepStrictEqual(out, ['первый', 'второй']);
   });
 
-  await run('_collectPerplexityTrends: просит строгий JSON и ограничивает retries', async () => {
-    const prevKey = process.env.PERPLEXITY_API_KEY;
-    process.env.PERPLEXITY_API_KEY = 'test-key';
+  await run('_collectResearchTrends: structured JSON через injected research provider', async () => {
+    const prevFlag = process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+    process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = 'true';
     try {
       let seen = null;
-      const trends = await topicDiscovery._internal._collectPerplexityTrends({
+      const trends = await topicDiscovery._internal._collectResearchTrends({
         niche: 'шины',
         query: 'зимние шины',
+        evidence: 'Пользовательский вопрос: какие шины выбрать?',
         log: () => {},
         deps: {
-          callLLM: async (adapter, system, prompt, opts) => {
-            seen = { adapter, system, prompt, opts };
-            return { trends: ['тренд 1', 'тренд 2'] };
+          callResearchProvider: async (args) => {
+            seen = args;
+            return { provider: 'deepseek', raw: { trends: ['тренд 1', 'тренд 2'] } };
           },
         },
       });
       assert.deepStrictEqual(trends, ['тренд 1', 'тренд 2']);
-      assert.strictEqual(seen.adapter, 'perplexity');
+      assert.ok(seen.callLabel.includes('Research'));
       assert.ok(/JSON/i.test(seen.system), 'system-промт обязан требовать JSON');
       assert.ok(/"trends"/.test(seen.system), 'system-промт обязан задавать контракт trends');
-      assert.ok(/JSON/i.test(seen.prompt), 'user-промт обязан требовать JSON');
-      assert.strictEqual(seen.opts.retries, 2);
+      assert.ok(/SOURCE EVIDENCE/i.test(seen.prompt), 'user-промт обязан содержать evidence guard');
     } finally {
-      if (prevKey === undefined) delete process.env.PERPLEXITY_API_KEY;
-      else process.env.PERPLEXITY_API_KEY = prevKey;
+      if (prevFlag === undefined) delete process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+      else process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = prevFlag;
     }
   });
 
-  await run('_collectPerplexityTrends: сбой LLM → fail-open []', async () => {
-    const prevKey = process.env.PERPLEXITY_API_KEY;
-    process.env.PERPLEXITY_API_KEY = 'test-key';
+  await run('_collectResearchTrends: сбой LLM → fail-open []', async () => {
+    const prevFlag = process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+    process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = 'true';
     try {
-      const trends = await topicDiscovery._internal._collectPerplexityTrends({
+      const trends = await topicDiscovery._internal._collectResearchTrends({
         niche: 'шины',
         log: () => {},
-        deps: { callLLM: async () => { throw new Error('JSON parse failed'); } },
+        deps: { callResearchProvider: async () => { throw new Error('JSON parse failed'); } },
       });
       assert.deepStrictEqual(trends, []);
     } finally {
-      if (prevKey === undefined) delete process.env.PERPLEXITY_API_KEY;
-      else process.env.PERPLEXITY_API_KEY = prevKey;
+      if (prevFlag === undefined) delete process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+      else process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = prevFlag;
     }
   });
 
-  await run('_collectPerplexityTrends: без PERPLEXITY_API_KEY вызова нет', async () => {
-    const prevKey = process.env.PERPLEXITY_API_KEY;
-    delete process.env.PERPLEXITY_API_KEY;
+  await run('_collectResearchTrends: выключенный feature flag не вызывает provider', async () => {
+    const prevFlag = process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+    process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = 'false';
     try {
       let called = 0;
-      const trends = await topicDiscovery._internal._collectPerplexityTrends({
+      const trends = await topicDiscovery._internal._collectResearchTrends({
         niche: 'шины',
         log: () => {},
-        deps: { callLLM: async () => { called += 1; return { trends: ['x'] }; } },
+        deps: { callResearchProvider: async () => { called += 1; return { raw: { trends: ['x'] } }; } },
       });
       assert.deepStrictEqual(trends, []);
       assert.strictEqual(called, 0);
     } finally {
-      if (prevKey !== undefined) process.env.PERPLEXITY_API_KEY = prevKey;
+      if (prevFlag === undefined) delete process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+      else process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = prevFlag;
     }
   });
 
-  await run('runTopicDiscovery: тренды Perplexity попадают в paa_questions', async () => {
-    const prevKey = process.env.PERPLEXITY_API_KEY;
-    process.env.PERPLEXITY_API_KEY = 'test-key';
+  await run('runTopicDiscovery: research trends попадают в paa_questions', async () => {
+    const prevFlag = process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+    process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = 'true';
     try {
       let payload = null;
       const result = await topicDiscovery.runTopicDiscovery({
@@ -296,16 +297,16 @@ function makeRawTrends({ values = [10, 20, 30], top = ['a'], rising = ['b'] } = 
         paaQuestions: ['какие шины лучше'],
         deps: {
           collectTrends: async () => null,
-          callLLM: async () => ({ trends: ['шипы vs липучка 2026'] }),
+          callResearchProvider: async () => ({ raw: { trends: ['шипы vs липучка 2026'] } }),
           runTopicDiscovery: async (p) => { payload = p; return { topic_status: 'lack' }; },
         },
       });
-      assert.strictEqual(result.signals_used.perplexity, 1);
+      assert.strictEqual(result.signals_used.research, 1);
       assert.ok(payload.paa_questions.includes('шипы vs липучка 2026'));
       assert.ok(payload.paa_questions.includes('какие шины лучше'));
     } finally {
-      if (prevKey === undefined) delete process.env.PERPLEXITY_API_KEY;
-      else process.env.PERPLEXITY_API_KEY = prevKey;
+      if (prevFlag === undefined) delete process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED;
+      else process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED = prevFlag;
     }
   });
 

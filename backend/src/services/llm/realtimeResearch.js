@@ -1,26 +1,25 @@
 'use strict';
 
 /**
- * realtimeResearch — общий «Агент-Ресёрчер» (Perplexity sonar-pro) для
- * пайплайнов статьи в блог (infoArticle) и ссылочной статьи (linkArticle).
+ * realtimeResearch — общий evidence-based research helper для infoArticle и
+ * linkArticle. Использует DeepSeek как primary structured analyst и Gemini как
+ * fallback. Ни один из этих adapters не является веб-поиском: в prompt передаём
+ * только фактический контекст статьи/конкурентов/SERP, а неподтверждённые данные
+ * должны отбрасываться.
  *
- * Основной SEO-пайплайн (services/pipeline/stage0.js) уже вызывает Perplexity
- * как real-time research-агента и кладёт результат в §2b REAL-TIME DATA основной
- * Article Knowledge Base. Этот модуль переиспользует ту же логику (тот же
- * системный промпт SYSTEM_PROMPTS_EXT.perplexityResearcher и модель sonar-pro),
- * чтобы блог- и ссылочные статьи тоже опирались на свежие факты/цифры/законы и
- * реальные цитаты экспертов, а не на устаревшую обучающую выборку DeepSeek/Gemini.
- *
- * Fail-open: без PERPLEXITY_API_KEY или при любой ошибке возвращает null, и
- * пайплайн продолжает работу без актуальных данных (как раньше).
+ * Fail-open: при отсутствии обоих доступных ключей или любой ошибке возвращает
+ * null, и пайплайн продолжает работу без research evidence.
  */
 
-const { callLLM } = require('./callLLM');
 const { fillPromptVars } = require('../../utils/fillPromptVars');
 const { SYSTEM_PROMPTS_EXT } = require('../../prompts/systemPrompts');
+const {
+  callResearchProvider,
+  hasResearchProvider,
+} = require('./researchProvider');
 
 /**
- * Приводит сырой ответ Perplexity (JSON-контракт perplexityResearcher) к
+ * Приводит сырой ответ DeepSeek/Gemini research contract к
  * единой форме, совпадающей с полями stage0Result основного пайплайна.
  * @param {object|null} raw
  * @returns {{realtime_facts:Array, expert_quotes:Array, latest_trends:Array, legal_updates:Array}|null}
@@ -50,35 +49,52 @@ function hasRealtimeData(rt) {
 }
 
 /**
- * runRealtimeResearch — единичный вызов Perplexity sonar-pro по теме статьи.
+ * runRealtimeResearch — evidence-based research по теме статьи.
  *
  * @param {object}  args
  * @param {string}  args.topic        — тема статьи (обязательно).
- * @param {string} [args.region]      — регион/гео (для точности ресёрча).
- * @param {object} [args.callOptions] — прокидывается в callLLM (log/onTokens/
- *                                      stageName/traceTaskId/pipeline и т.д.).
+ * @param {string} [args.region]      — регион/гео.
+ * @param {string} [args.evidence]    — SERP/конкурентный/статейный evidence.
+ * @param {string} [args.sourceContext] — дополнительный подтверждённый контекст.
+ * @param {object} [args.callOptions] — прокидывается в callLLM через router.
  * @returns {Promise<object|null>}    — { realtime_facts, expert_quotes,
  *                                      latest_trends, legal_updates } или null.
  */
-async function runRealtimeResearch({ topic, region, callOptions = {} } = {}) {
-  if (!topic || !String(topic).trim()) return null;
-  // Fail-open: без ключа Perplexity не дёргаем сеть — сразу null.
-  if (!process.env.PERPLEXITY_API_KEY) return null;
+async function runRealtimeResearch({
+  topic,
+  region,
+  evidence = '',
+  sourceContext = '',
+  callOptions = {},
+} = {}) {
+  if (!topic || !String(topic).trim() || !hasResearchProvider()) return null;
 
-  const synthTask = { input_target_service: String(topic), input_region: region || '' };
-  const system  = fillPromptVars(SYSTEM_PROMPTS_EXT.perplexityResearcher, synthTask);
-  const context = `Собери актуальные данные для темы: ${topic}. Регион: ${region || 'Россия'}.`;
+  const synthTask = {
+    input_target_service: String(topic),
+    input_region: region || '',
+  };
+  const system = fillPromptVars(SYSTEM_PROMPTS_EXT.deepseekResearcher, synthTask);
+  const evidenceBlock = [evidence, sourceContext]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .slice(0, 30000);
+  const context = [
+    `Статья/тема: ${topic}. Регион: ${region || 'Россия'}.`,
+    'SOURCE EVIDENCE (единственный источник фактов; при отсутствии evidence верни пустые массивы):',
+    evidenceBlock || '[нет переданного evidence]',
+  ].join('\n\n');
 
   try {
-    const raw = await callLLM('perplexity', system, context, {
-      retries: 2,
-      temperature: 0.2,
-      callLabel: 'Real-Time Research (Perplexity)',
-      ...callOptions,
+    const result = await callResearchProvider({
+      system,
+      prompt: context,
+      callOptions,
+      callLabel: 'Research Evidence',
+      log: callOptions.log,
     });
-    return normalizeResearch(raw);
+    return result ? normalizeResearch(result.raw) : null;
   } catch (_) {
-    // Fail-open: пайплайн продолжается без актуальных данных.
     return null;
   }
 }
@@ -91,7 +107,7 @@ function formatList(items, max) {
 }
 
 /**
- * renderRealtimeDataSection — markdown-секция «REAL-TIME DATA» для IAKB/LAKB.
+ * renderRealtimeDataSection — markdown-секция «RESEARCH EVIDENCE» для IAKB/LAKB.
  * Совпадает по смыслу с §2b основной AKB (articleKnowledgeBase.js). Все блоки
  * опциональны; если данных нет — возвращает пустую строку.
  *
@@ -102,15 +118,15 @@ function formatList(items, max) {
  */
 function renderRealtimeDataSection(rt, opts = {}) {
   if (!hasRealtimeData(rt)) return '';
-  const heading = opts.heading || '## §2b. REAL-TIME DATA (2026) — актуальные данные веб-поиска (Perplexity)';
+  const heading = opts.heading || '## §2b. RESEARCH EVIDENCE — DeepSeek/Gemini';
 
   const out = [
     heading,
     '',
-    'Свежие данные текущего месяца, собранные веб-поиском (Perplexity sonar-pro). ' +
-    'Опирайся на эти актуальные факты, цифры и реальные цитаты экспертов вместо ' +
-    'выдуманных данных. Каждую цитату сопровождай именем и должностью автора. ' +
-    'ЗАПРЕЩЕНО искажать цифры и приписывать несуществующие источники.',
+    'Ниже приведены только evidence-grounded факты и сигналы из переданного ' +
+    'контекста. Не называй данные свежими без даты/источника, не добавляй ' +
+    'неподтверждённые цены или законы. Каждую цитату сопровождай автором, ' +
+    'должностью и источником; при отсутствии подтверждения не используй её.',
   ];
 
   const rtFacts = Array.isArray(rt.realtime_facts) ? rt.realtime_facts : [];

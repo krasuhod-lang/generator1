@@ -27,7 +27,7 @@
 
 const gistClient = require('../gist/gistClient');
 const trendsCollector = require('./trendsCollector');
-const { callLLM } = require('../llm/callLLM');
+const { callResearchProvider } = require('../llm/researchProvider');
 
 const ALLOWED_STATES = ['void', 'lack', 'balance', 'abundance'];
 
@@ -101,68 +101,56 @@ function _collectPaaQuestions({ paaQuestions, serpVerification }) {
   return _asStringList(collected, 15);
 }
 
-// System-промт «AI-аналитика трендов». callLLM всегда прогоняет ответ через
-// parseJSON, поэтому контракт обязан быть строго JSON: свободный текст (даже
-// корректный markdown-список) роняет парсер, а JSON-ошибка не считается
-// детерминированной → вызов уходит в полный цикл платных ретраев и всё равно
-// возвращает пустой результат.
-const PERPLEXITY_TRENDS_SYSTEM = `ROLE: AI-аналитик трендов ниши.
-MISSION: Через поиск в интернете собрать самые актуальные тренды и реальные частые вопросы пользователей по нише.
-RULES: Опирайся только на найденные данные, не выдумывай. Формулировки — живые, как их пишут сами пользователи. Если данных нет — верни пустой массив.
+// System-промт evidence trend analyst. callLLM прогоняет ответ через parseJSON,
+// поэтому контракт обязан быть строго JSON: свободный текст роняет парсер, а
+// JSON-ошибка не должна превращаться в длинную цепочку платных retries.
+const RESEARCH_TRENDS_SYSTEM = `ROLE: Evidence-based AI analyst of niche trends.
+MISSION: Извлеки тренды и частые вопросы только из SOURCE EVIDENCE по нише.
+RULES: DeepSeek/Gemini не являются веб-поиском. Не выдумывай спрос, свежесть или источники. Если SOURCE EVIDENCE пуст, верни пустой массив.
 OUTPUT FORMAT: Верни СТРОГО валидный JSON без markdown-обёрток и без пояснений:
 {
   "trends": ["string"]
 }`;
 
 /**
- * Собрать актуальные тренды/частые вопросы ниши через Perplexity (fail-open).
- *
- * GEO 2026: под алгоритмы AI-выдачи (Google AI Overviews / Яндекс Нейро) темам
- * нужна свежая фактология и живые формулировки вопросов. Здесь мы дёргаем
- * Perplexity как AI-аналитика трендов и извлекаем до 5 сигналов, которые затем
- * подмешиваются в массив сигналов, передаваемых в генератор тем.
+ * Собрать тренды/частые вопросы ниши из переданного evidence (fail-open).
+ * Извлекаем до 5 сигналов, которые затем подмешиваются в массив сигналов,
+ * передаваемых в генератор тем. Веб-поиск здесь намеренно не имитируется.
  *
  * @returns {Promise<Array<string>>}
  */
-async function _collectPerplexityTrends({ niche, query, deps, log }) {
-  // Kill-switch + отсутствие ключа → тихо пропускаем (fail-open).
-  if (!_bool(process.env.TOPIC_DISCOVERY_PERPLEXITY_ENABLED, true)) return [];
-  if (!process.env.PERPLEXITY_API_KEY) return [];
+async function _collectResearchTrends({ niche, query, evidence = '', deps, log }) {
   const topic = String(niche || query || '').trim();
-  if (!topic) return [];
+  if (!topic || !_bool(process.env.TOPIC_DISCOVERY_RESEARCH_ENABLED, true)) return [];
 
   try {
-    const call = typeof deps.callLLM === 'function' ? deps.callLLM : callLLM;
-    const year = new Date().getFullYear();
-    const perplexityContext =
-      `Собери 5 самых актуальных трендов и частых вопросов пользователей в ${year} году по нише: ${topic}. ` +
-      'Верни их одним JSON-объектом вида {"trends": ["..."]}.';
-    const raw = await call('perplexity', PERPLEXITY_TRENDS_SYSTEM, perplexityContext, {
-      maxTokens: 1000,
-      temperature: 0.2,
-      // Сигнал вспомогательный (fail-open) — не жжём бюджет длинной цепочкой
-      // ретраев, как это делает дефолт callLLM (retries=6 с бэкоффом).
-      retries: 2,
-      stageName: 'topic-discovery-perplexity',
-      callLabel: 'Topic Discovery Trends (Perplexity)',
+    const call = typeof deps.callResearchProvider === 'function'
+      ? deps.callResearchProvider
+      : callResearchProvider;
+    const research = await call({
+      system: RESEARCH_TRENDS_SYSTEM,
+      prompt: `Ниша: ${topic}.\nSOURCE EVIDENCE (не выдумывай без него):\n${String(evidence || '').slice(0, 20000) || '[нет evidence]'}`,
+      callOptions: { maxTokens: 1000, stageName: 'topic-discovery-research' },
+      callLabel: 'Topic Discovery Research',
+      log,
     });
-    return _extractPerplexityTrends(raw);
+    return _extractResearchTrends(research?.raw || research);
   } catch (err) {
-    log(`[topic-discovery] perplexity fail-open: ${err && err.message ? err.message : err}`);
+    log(`[topic-discovery] research fail-open: ${err && err.message ? err.message : err}`);
     return [];
   }
 }
 
 /**
- * Извлечь список трендов/вопросов из ответа Perplexity.
+ * Извлечь список трендов/вопросов из ответа research provider.
  *
- * Штатная форма (контракт PERPLEXITY_TRENDS_SYSTEM) — объект { trends: [...] }
+ * Штатная форма — объект { trends: [...] }
  * после parseJSON внутри callLLM. Дополнительно поддержаны голый массив и
  * текстовый список (маркированный/нумерованный) — на случай, если модель
  * вернула нестрогий формат, а parseJSON пропустил его как строку.
  * @returns {Array<string>}
  */
-function _extractPerplexityTrends(raw) {
+function _extractResearchTrends(raw) {
   if (Array.isArray(raw)) return _asStringList(raw, 5);
 
   if (raw && typeof raw === 'object') {
@@ -224,7 +212,7 @@ function _safeFallback(signalsUsed, reason) {
     sub_niche_suggestions: [],
     manual_review: true,
     reasoning: reason || 'Topic Discovery недоступен — требуется ручная проверка.',
-    signals_used: signalsUsed || { reddit: 0, paa: 0, trends: false, perplexity: 0 },
+    signals_used: signalsUsed || { reddit: 0, paa: 0, trends: false, research: 0 },
     collected_at: new Date().toISOString(),
   };
 }
@@ -251,7 +239,7 @@ async function runTopicDiscovery(params = {}) {
   const log = typeof params.log === 'function' ? params.log : () => {};
   const deps = params.deps || {};
 
-  const signalsUsed = { reddit: 0, paa: 0, trends: false, perplexity: 0 };
+  const signalsUsed = { reddit: 0, paa: 0, trends: false, research: 0 };
 
   if (!query || !String(query).trim()) {
     return _safeFallback(signalsUsed, 'Пустой запрос — Topic Discovery пропущен.');
@@ -268,13 +256,19 @@ async function runTopicDiscovery(params = {}) {
   const paa = _collectPaaQuestions({ paaQuestions, serpVerification });
   signalsUsed.paa = paa.length;
 
-  // 2b) Perplexity — актуальные тренды/частые вопросы ниши (GEO 2026, fail-open).
-  const perplexityTrends = await _collectPerplexityTrends({ niche, query, deps, log });
-  signalsUsed.perplexity = perplexityTrends.length;
+  // 2b) Evidence research — дополнительные тренды/вопросы (fail-open).
+  const researchEvidence = [
+    ...paa,
+    ..._asStringList(redditInsights, 15),
+  ].join('\n');
+  const researchTrends = await _collectResearchTrends({
+    niche, query, evidence: researchEvidence, deps, log,
+  });
+  signalsUsed.research = researchTrends.length;
 
-  // Тренды Perplexity — это тоже сигналы спроса/вопросов пользователей, поэтому
-  // добавляем их в массив сигналов (paa_questions), передаваемых в генератор тем.
-  const paaSignals = _asStringList(paa.concat(perplexityTrends), 20);
+  // Research trends — это сигналы спроса/вопросов, поэтому добавляем их в
+  // paa_questions, передаваемые в генератор тем.
+  const paaSignals = _asStringList(paa.concat(researchTrends), 20);
 
   // 3) Google Trends (fail-open null).
   let trendsData = null;
@@ -311,7 +305,7 @@ module.exports = {
   runTopicDiscovery,
   isEnabled: _isEnabled,
   _internal: {
-    _collectRedditInsights, _collectPaaQuestions, _collectPerplexityTrends,
-    _extractPerplexityTrends, _normalizeResult, _safeFallback, _asStringList,
+    _collectRedditInsights, _collectPaaQuestions, _collectResearchTrends,
+    _extractResearchTrends, _normalizeResult, _safeFallback, _asStringList,
   },
 };

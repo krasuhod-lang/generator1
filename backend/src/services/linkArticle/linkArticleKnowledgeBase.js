@@ -308,8 +308,8 @@ function buildLinkArticleKnowledgeBase({
   structure,
   competitiveBrief,
   gistDelta,
-  // 2026-07 (пункт 1 ТЗ): Perplexity Real-Time Research (Агент-Ресёрчер).
-  // Свежие факты/цифры/законы/цитаты текущего месяца → §2b. Опционально.
+  // Evidence Research (DeepSeek → Gemini fallback): подтверждённые факты,
+  // цифры, законы и цитаты из переданного контекста → §2b. Опционально.
   realtimeResearch = null,
   // BRANDCORE/TGA: факты, claims, E-E-A-T, границы темы и manual review.
   governanceBlock = '',

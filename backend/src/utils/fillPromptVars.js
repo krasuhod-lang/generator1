@@ -37,7 +37,7 @@ function fillPromptVars(prompt, task) {
     .replace(/\[\s*год\s*\]/gi, currentYear);
 
   // ── Generic {{input_*}} substitution ─────────────────────────────────
-  // Некоторые расширенные промпты (напр. perplexityResearcher) ссылаются на
+  // Некоторые расширенные research-промпты (например, deepseekResearcher) ссылаются на
   // поля задачи напрямую через {{input_target_service}} / {{input_region}}.
   // Подставляем ТОЛЬКО поля с префиксом input_ (uppercase-плейсхолдеры вроде
   // {{BUSINESS_TYPE}} заполняются позже в stage3.js и здесь не затрагиваются).

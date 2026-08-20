@@ -3,8 +3,9 @@
 const { callLLM }             = require('../llm/callLLM');
 const { scrapeCompetitors }   = require('../parser/scraper');
 const { SYSTEM_PROMPTS_EXT }  = require('../../prompts/systemPrompts');
-const { fillPromptVars }      = require('../../utils/fillPromptVars');
-const db                      = require('../../config/db');
+const { fillPromptVars }       = require('../../utils/fillPromptVars');
+const { callResearchProvider } = require('../llm/researchProvider');
+const db                       = require('../../config/db');
 
 /**
  * Определяет, является ли URL собственным сайтом задачи.
@@ -174,15 +175,17 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
   // Запускаем оба вызова параллельно — они используют разные промпты и не зависят друг от друга.
   // Плюс параллельный GIST M3 Gap Finder (gist_py :8003) по спарсенным текстам —
   // fail-open: если GIST недоступен, пайплайн продолжает без информационной дельты.
-  // Плюс Perplexity Real-Time Research (модель sonar-pro): собирает свежие факты,
-  // цифры, ставки, законы и цитаты экспертов из интернета в реальном времени —
-  // fail-open: без ключа/при ошибке возвращает null, пайплайн продолжает без актуалки.
+  // Evidence research DeepSeek → Gemini fallback: структурирует только факты
+  // из переданного competitor/SERP контекста. Ни один доступный adapter не
+  // является веб-поиском, поэтому unsupported fresh facts отбрасываются.
   const { runGistGapFinder } = require('../gist/gistClient');
   const scrapedTexts = onlyCompetitors.map(c => c.content).filter(Boolean);
 
-  const perplexityContext = `Собери актуальные данные для темы: ${task.input_target_service}. Регион: ${task.input_region || 'Россия'}.`;
+  const researchContext = `Тема: ${task.input_target_service}. Регион: ${task.input_region || 'Россия'}.\n`
+    + 'SOURCE EVIDENCE — используй только эти материалы; без подтверждения верни пустой массив:\n'
+    + onlyCompetitors.map(c => `URL: ${c.url || ''}\n${String(c.content || '').substring(0, 10000)}`).join('\n\n---\n\n');
 
-  const [serpRealityResult, nicheLandscapeResult, gistSettled, perplexityResult] = await Promise.all([
+  const [serpRealityResult, nicheLandscapeResult, gistSettled, researchResult] = await Promise.all([
     callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
       retries:   3,
       taskId,
@@ -214,22 +217,21 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
         return { status: 'rejected', reason: e };
       }),
 
-    callLLM('perplexity', fillPromptVars(SYSTEM_PROMPTS_EXT.perplexityResearcher, task), perplexityContext, {
-      retries: 2,
-      taskId,
-      stageName: 'stage0',
-      callLabel: 'Perplexity Real-Time Research',
-      temperature: 0.2,
+    callResearchProvider({
+      system: fillPromptVars(SYSTEM_PROMPTS_EXT.deepseekResearcher, task),
+      prompt: researchContext,
+      callOptions: { taskId, stageName: 'stage0', log, onTokens },
+      callLabel: 'Stage 0 Research Evidence',
       log,
-      onTokens,
-    }).catch(e => { log(`Stage 0 Perplexity error: ${e.message}`, 'warn'); return null; }),
+    }).catch(e => { log(`Stage 0 Research error: ${e.message}`, 'warn'); return null; }),
   ]);
 
-  if (perplexityResult) {
+  const researchRaw = researchResult?.raw || null;
+  if (researchRaw) {
     log(
-      `Stage 0 Perplexity: актуальных фактов ${(perplexityResult.current_stats||[]).length}, ` +
-      `цитат экспертов ${(perplexityResult.expert_quotes||[]).length}, ` +
-      `трендов ${(perplexityResult.latest_trends||[]).length}`,
+      `Stage 0 Research: фактов ${(researchRaw.current_stats || []).length}, ` +
+      `цитат экспертов ${(researchRaw.expert_quotes || []).length}, ` +
+      `трендов ${(researchRaw.latest_trends || []).length}`,
       'success'
     );
   }
@@ -251,7 +253,7 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
     const fallbackSystem = `ROLE: Senior SEO Competitive Intelligence Analyst.
 MISSION: Провести глубокий реверс-инжиниринг контента конкурентов для ниши "${task.input_target_service}".`;
 
-    const fallbackPrompt = `INPUT DATA: ${onlyCompetitors.map(c => `URL: ${c.url}\n${c.content.substring(0, 5000)}`).join('\n\n---\n\n')}${ownSiteContent ? `\n\nOUR SITE: URL: ${ownSiteContent.url}\n${ownSiteContent.content.substring(0, 3000)}` : ''}
+    const fallbackPrompt = `INPUT DATA: ${onlyCompetitors.map(c => `URL: ${c.url || ''}\n${String(c.content || '').substring(0, 5000)}`).join('\n\n---\n\n')}${ownSiteContent ? `\n\nOUR SITE: URL: ${ownSiteContent.url || ''}\n${String(ownSiteContent.content || '').substring(0, 3000)}` : ''}
 JSON SCHEMA: {"competitor_facts":[{"fact":"string","source_url":"string","category":"string"}],"core_entities":[{"entity":"string","type":"string","trust_signal":true,"context":"string"}],"audience_pains":[{"pain":"string","priority":"high|medium|low","solution_signal":"string"}],"trust_triggers":[{"trigger":"string","type":"string","strength":"string"}],"white_spaces":["string"],"content_patterns":["string"],"faq_bank":[{"question":"string","answer":"string"}]}
 RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Минимум 5 записей в каждом массиве. OUTPUT: JSON ONLY.`;
 
@@ -264,10 +266,10 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
       ...fallbackResult,
       information_delta: informationDelta,
       gist_top10_claims: gistTop10Claims,
-      realtime_facts:    perplexityResult?.current_stats          || [],
-      expert_quotes:     perplexityResult?.expert_quotes          || [],
-      latest_trends:     perplexityResult?.latest_trends          || [],
-      legal_updates:     perplexityResult?.legal_or_price_updates || [],
+      realtime_facts:    researchRaw?.current_stats          || [],
+      expert_quotes:     researchRaw?.expert_quotes          || [],
+      latest_trends:     researchRaw?.latest_trends          || [],
+      legal_updates:     researchRaw?.legal_or_price_updates || [],
     };
   }
 
@@ -282,12 +284,12 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
     // GIST M3 Gap Finder (fail-open): дельта уходит в Stage 2 (§4-GIST)
     information_delta:    informationDelta,
     gist_top10_claims:    gistTop10Claims,
-    // Perplexity Real-Time Research (fail-open): актуальные данные текущего
-    // месяца уходят в Article Knowledge Base (§2b REAL-TIME DATA).
-    realtime_facts:       perplexityResult?.current_stats          || [],
-    expert_quotes:        perplexityResult?.expert_quotes          || [],
-    latest_trends:        perplexityResult?.latest_trends          || [],
-    legal_updates:        perplexityResult?.legal_or_price_updates || [],
+    // Evidence research (fail-open): подтверждённые данные уходят в Article
+    // Knowledge Base (§2b RESEARCH EVIDENCE).
+    realtime_facts:       researchRaw?.current_stats          || [],
+    expert_quotes:        researchRaw?.expert_quotes          || [],
+    latest_trends:        researchRaw?.latest_trends          || [],
+    legal_updates:        researchRaw?.legal_or_price_updates || [],
   };
 
   // Сохраняем в tasks

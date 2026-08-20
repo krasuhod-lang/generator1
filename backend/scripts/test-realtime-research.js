@@ -1,7 +1,7 @@
 'use strict';
 
-/* Smoke-тест realtimeResearch: normalizeResearch + hasRealtimeData +
- * renderRealtimeDataSection (§2b REAL-TIME DATA для IAKB/LAKB). */
+/* Smoke-тест research evidence: normalizeResearch + hasRealtimeData +
+ * renderRealtimeDataSection (§2b для IAKB/LAKB). */
 
 const assert = require('assert');
 const {
@@ -17,7 +17,7 @@ function t(name, fn) {
   catch (e) { console.error('✗', name, '\n  ', e.message); failed++; }
 }
 
-t('normalizeResearch: маппит контракт perplexityResearcher', () => {
+t('normalizeResearch: маппит DeepSeek/Gemini research contract', () => {
   const out = normalizeResearch({
     current_stats: [{ fact: 'x', value: '1' }],
     expert_quotes: [{ quote: 'q', author: 'A' }],
@@ -62,7 +62,7 @@ t('renderRealtimeDataSection: рендерит §2b со всеми блокам
     legal_updates: ['новый закон о рекламе'],
   };
   const md = renderRealtimeDataSection(rt);
-  assert.ok(md.includes('§2b. REAL-TIME DATA'));
+  assert.ok(md.includes('§2b. RESEARCH EVIDENCE'));
   assert.ok(md.includes('Ставка ЦБ — 18% (источник: ЦБ РФ)'));
   assert.ok(md.includes('«важно» — Иван Петров, аналитик [РБК]'));
   assert.ok(md.includes('рост спроса'));

@@ -45,9 +45,9 @@ const { resolvePromptHash } = require('../aegis/promptAudit');
 
 const PROMPTS_DIR = path.join(__dirname, '..', '..', 'prompts', 'articleTopics');
 
-// Kill-switch для Perplexity real-time ресёрча интентов в режиме подбора тем.
+// Kill-switch для evidence research интентов в режиме подбора тем.
 // По умолчанию включён; ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED=0|false|no|off
-// отключает его (подбор тем продолжается без real-time данных).
+// отключает его (подбор тем продолжается без research evidence).
 const ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED =
   !['0', 'false', 'no', 'off'].includes(String(process.env.ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED || '1').toLowerCase());
 
@@ -283,11 +283,10 @@ async function processArticleTopicTask(taskId) {
       );
       const excludedClustersList = _renderExclusionList(userClusters, '(нет)');
 
-      // Perplexity real-time ресёрч интентов: собираем реальные поисковые
-      // запросы/интенты, вопросы PAA/AI Overviews и смежные семантические темы
-      // ниши ДО рендера промта, чтобы Gemini строил план тем строго от интентов
-      // пользователя и покрывал как классический поиск, так и ответы ИИ-выдачи.
-      // Fail-open: без ключа/при ошибке → null, блок = fallback-строка.
+      // Evidence research интентов: DeepSeek структурирует переданные
+      // project/PAA/competitor signals, Gemini — fallback. До рендера промта
+      // Gemini получает только подтверждённые intent signals. Fail-open: при
+      // отсутствии ключей/ошибке → null, блок = fallback-строка.
       let topicResearch = null;
       if (ARTICLE_TOPICS_REALTIME_RESEARCH_ENABLED) {
         funnel.step('realtime_research');
@@ -297,6 +296,12 @@ async function processArticleTopicTask(taskId) {
           audience:  task.audience,
           brandHint: stashedInputs.brand_hint,
           targetUrl: stashedInputs.target_url,
+          evidence: [
+            projectContextBlock,
+            stashedInputs.paa_questions,
+            stashedInputs.serp_evidence,
+            stashedInputs.competitor_evidence,
+          ].filter(Boolean).join('\n\n').slice(0, 30000),
         }).catch(() => null);
         funnel.step('realtime_research_done', { has_data: hasTopicResearch(topicResearch) });
       }

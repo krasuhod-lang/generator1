@@ -189,12 +189,10 @@ const GIST_COVERAGE_MIN = (() => {
 const INFO_ARTICLE_INTENT_VERIFY_ENABLED =
   String(process.env.INFO_ARTICLE_INTENT_VERIFY_ENABLED || 'true').toLowerCase() === 'true';
 
-// ── Perplexity Real-Time Research (Агент-Ресёрчер) ──────────────────
-// Тот же алгоритм, что зашит в основном SEO-пайплайне (services/pipeline/
-// stage0.js): Perplexity sonar-pro собирает свежие факты/цифры/законы и
-// реальные цитаты экспортов текущего месяца. Результат уходит в §2b
-// REAL-TIME DATA IAKB. Fail-open: без PERPLEXITY_API_KEY / при ошибке —
-// пропускается. Kill-switch: INFO_ARTICLE_REALTIME_RESEARCH_ENABLED=false.
+// ── Research Evidence (DeepSeek → Gemini fallback) ──────────────────
+// Структурирует только переданные task/article evidence и сохраняет результат
+// в §2b IAKB. Ни один доступный adapter не является веб-поиском; unsupported
+// facts отбрасываются. Kill-switch: INFO_ARTICLE_REALTIME_RESEARCH_ENABLED=false.
 const INFO_ARTICLE_REALTIME_RESEARCH_ENABLED =
   !['0', 'false', 'no', 'off'].includes(String(process.env.INFO_ARTICLE_REALTIME_RESEARCH_ENABLED || '1').toLowerCase());
 
@@ -1434,14 +1432,20 @@ async function processInfoArticleTask(taskId) {
       }
     }
 
-    // Пункт 1 ТЗ: Perplexity Real-Time Research (Агент-Ресёрчер). Стартуем
-    // рано и параллельно DeepSeek-стадиям — свежие факты/цифры/законы/цитаты
-    // текущего месяца уйдут в §2b REAL-TIME DATA IAKB. Fail-open.
+    // Evidence Research (DeepSeek → Gemini fallback). Стартуем рано и
+    // параллельно DeepSeek-стадиям; в §2b попадут только подтверждённые
+    // сигналы из переданного task context. Fail-open.
     const realtimePromise = INFO_ARTICLE_REALTIME_RESEARCH_ENABLED
       ? runRealtimeResearch({
           topic: task.topic,
           region: task.region,
-          callOptions: buildCallCtx(taskId, 'realtime_research'),
+          sourceContext: [
+            `Аудитория: ${task.target_audience || ''}`,
+            `Цель бизнеса: ${task.business_goal || ''}`,
+            `Тип сайта: ${task.site_type || ''}`,
+            `Особенности ниши: ${task.niche_features || ''}`,
+          ].join('\n'),
+          callOptions: buildCallCtx(taskId, 'research_evidence'),
         }).catch(() => null)
       : Promise.resolve(null);
 
@@ -1692,8 +1696,8 @@ async function processInfoArticleTask(taskId) {
     }
 
     // 8. Build IAKB + optional Gemini cachedContents
-    // Пункт 1 ТЗ: дожидаемся Perplexity Real-Time Research (стартовал рано,
-    // параллельно стадиям) и вливаем в §2b REAL-TIME DATA IAKB. Fail-open.
+    // Дожидаемся evidence research (стартовал рано параллельно стадиям) и
+    // вливаем подтверждённые данные в §2b IAKB. Fail-open.
     let realtimeResearch = null;
     try {
       realtimeResearch = await realtimePromise;
@@ -1705,13 +1709,13 @@ async function processInfoArticleTask(taskId) {
       task.__realtimeResearch = realtimeResearch;
       await appendLog(
         taskId,
-        `🌐 Perplexity Real-Time: фактов ${realtimeResearch.realtime_facts.length}, ` +
+        `🔎 Research Evidence (DeepSeek/Gemini): фактов ${realtimeResearch.realtime_facts.length}, ` +
         `цитат ${realtimeResearch.expert_quotes.length}, трендов ${realtimeResearch.latest_trends.length}, ` +
         `законы/цены ${realtimeResearch.legal_updates.length} → §2b IAKB`,
         'ok',
       );
     } else if (INFO_ARTICLE_REALTIME_RESEARCH_ENABLED) {
-      await appendLog(taskId, `🌐 Perplexity Real-Time: данных нет (нет ключа / пусто) — §2b пропущена`, 'info');
+      await appendLog(taskId, '🔎 Research Evidence: данных нет (нет доступного DeepSeek/Gemini ключа или пусто) — §2b пропущена', 'info');
     }
 
     // BRANDCORE/TGA: единый governance-контекст для блоговой статьи.

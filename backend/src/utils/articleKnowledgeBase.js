@@ -348,8 +348,8 @@ function buildArticleKnowledgeBase(input = {}) {
     sections.push('_Нет данных об аудитории._');
   }
 
-  // ── 2b. REAL-TIME DATA (2026) — Perplexity sonar-pro ────────────
-  // Свежие факты/цифры/законы/цитаты, собранные Агентом-Ресёрчером в Stage 0.
+  // ── 2b. RESEARCH EVIDENCE — DeepSeek/Gemini ─────────────────────
+  // Проверяемые факты/цифры/законы/цитаты, структурированные в Stage 0.
   // Явно указываем Gemini использовать их вместо выдуманных данных.
   if (stage0Result) {
     const rtFacts   = Array.isArray(stage0Result.realtime_facts) ? stage0Result.realtime_facts : [];
@@ -358,11 +358,11 @@ function buildArticleKnowledgeBase(input = {}) {
     const rtLegal   = Array.isArray(stage0Result.legal_updates)  ? stage0Result.legal_updates  : [];
 
     if (rtFacts.length || rtQuotes.length || rtTrends.length || rtLegal.length) {
-      sections.push('\n## 2b. REAL-TIME DATA (2026)');
+      sections.push('\n## 2b. RESEARCH EVIDENCE — DeepSeek/Gemini');
       sections.push(
-        'Актуальные данные текущего месяца, собранные веб-поиском (Perplexity sonar-pro). ' +
-        'Используй эти актуальные факты и реальные цитаты экспертов в тексте вместо выдуманных данных. ' +
-        'Каждую цитату сопровождай именем и должностью автора.'
+        'Используй только evidence-grounded факты и цитаты из переданного контекста. ' +
+        'Не называй данные свежими без даты/источника и не добавляй выдуманные цены, ' +
+        'законы или авторов. Каждую цитату сопровождай именем, должностью и источником.'
       );
 
       if (rtFacts.length) {

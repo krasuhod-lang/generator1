@@ -95,10 +95,9 @@ const TOPIC_AUTO_PIVOT =
 const AUTHOR_BLOCK_ENABLED =
   !['0', 'false', 'no', 'off'].includes(String(process.env.AUTHOR_BLOCK_ENABLED || '1').toLowerCase());
 
-// ── Perplexity Real-Time Research (Агент-Ресёрчер) ──────────────────
-// Пункт 1 ТЗ: тот же алгоритм, что в основном SEO-пайплайне (services/pipeline/
-// stage0.js) — Perplexity sonar-pro собирает свежие факты/цифры/законы/цитаты
-// текущего месяца. Результат уходит в §2b REAL-TIME DATA LAKB. Fail-open.
+// ── Research Evidence (DeepSeek → Gemini fallback) ──────────────────
+// Evidence из task context структурируется и уходит в §2b LAKB. Ни один
+// доступный adapter не является веб-поиском; unsupported facts отбрасываются.
 // Kill-switch: LINK_ARTICLE_REALTIME_RESEARCH_ENABLED=false.
 const LINK_ARTICLE_REALTIME_RESEARCH_ENABLED =
   !['0', 'false', 'no', 'off'].includes(String(process.env.LINK_ARTICLE_REALTIME_RESEARCH_ENABLED || '1').toLowerCase());
@@ -1102,14 +1101,20 @@ async function processLinkArticleTask(taskId) {
     await setStage(taskId, 'pre_stage0', 8);
     const ctx = buildCallCtx(taskId, 'link_article');
 
-    // Пункт 1 ТЗ: Perplexity Real-Time Research (Агент-Ресёрчер). Стартуем
-    // рано и параллельно DeepSeek-стадиям — свежие факты/цифры/законы/цитаты
-    // уйдут в §2b REAL-TIME DATA LAKB. Fail-open.
+    // Evidence Research (DeepSeek → Gemini fallback). Стартуем рано и
+    // параллельно DeepSeek-стадиям; в §2b попадут только подтверждённые
+    // сигналы из task context. Fail-open.
     const realtimePromise = LINK_ARTICLE_REALTIME_RESEARCH_ENABLED
       ? runRealtimeResearch({
           topic: task.topic,
           region: task.region,
-          callOptions: buildCallCtx(taskId, 'realtime_research'),
+          sourceContext: [
+            `Анкор/ссылка: ${task.anchor_text || task.anchor || ''}`,
+            `Целевой URL: ${task.target_url || task.target_site_url || ''}`,
+            `Аудитория: ${task.target_audience || ''}`,
+            `Цель публикации: ${task.business_goal || ''}`,
+          ].join('\n'),
+          callOptions: buildCallCtx(taskId, 'research_evidence'),
         }).catch(() => null)
       : Promise.resolve(null);
 
@@ -1156,7 +1161,7 @@ async function processLinkArticleTask(taskId) {
 
     // 4b. Build LAKB (LINK-ARTICLE KNOWLEDGE BASE) + optional Gemini cachedContents.
     //     Это и есть «кэширование DeepSeek-аналитики и передача её в Gemini».
-    // Пункт 1 ТЗ: дожидаемся Perplexity Real-Time Research и вливаем в §2b LAKB.
+    // Дожидаемся evidence research и вливаем подтверждённые данные в §2b LAKB.
     let realtimeResearch = null;
     try {
       realtimeResearch = await realtimePromise;
@@ -1167,13 +1172,13 @@ async function processLinkArticleTask(taskId) {
       await saveStageResult(taskId, 'realtime_research', realtimeResearch);
       await appendLog(
         taskId,
-        `🌐 Perplexity Real-Time: фактов ${realtimeResearch.realtime_facts.length}, ` +
+        `🔎 Research Evidence (DeepSeek/Gemini): фактов ${realtimeResearch.realtime_facts.length}, ` +
         `цитат ${realtimeResearch.expert_quotes.length}, трендов ${realtimeResearch.latest_trends.length}, ` +
         `законы/цены ${realtimeResearch.legal_updates.length} → §2b LAKB`,
         'ok',
       );
     } else if (LINK_ARTICLE_REALTIME_RESEARCH_ENABLED) {
-      await appendLog(taskId, `🌐 Perplexity Real-Time: данных нет (нет ключа / пусто) — §2b пропущена`, 'info');
+      await appendLog(taskId, '🔎 Research Evidence: данных нет (нет доступного DeepSeek/Gemini ключа или пусто) — §2b пропущена', 'info');
     }
 
     // BRANDCORE/TGA: governance-контекст для ссылочной статьи.

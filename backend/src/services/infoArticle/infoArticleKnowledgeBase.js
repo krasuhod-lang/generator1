@@ -313,8 +313,8 @@ function buildInfoArticleKnowledgeBase({
   // язык, вопросы, приоритетные темы). Опциональный input: если null, §10 не
   // рендерится. Источник — services/redditMapper/masterJson.buildResearchDigest.
   audienceResearch = null,
-  // 2026-07 (пункт 1 ТЗ): Perplexity Real-Time Research (Агент-Ресёрчер).
-  // Свежие факты/цифры/законы/цитаты текущего месяца. Опциональный input:
+  // Evidence Research (DeepSeek → Gemini fallback): подтверждённые факты,
+  // цифры, законы и цитаты из переданного контекста. Опциональный input:
   // если null / пусто, §2b не рендерится. Источник —
   // services/llm/realtimeResearch.runRealtimeResearch.
   realtimeResearch = null,
@@ -397,8 +397,8 @@ function buildInfoArticleKnowledgeBase({
     } catch (_) { /* graceful: модуль не подключён — без §10 */ }
   }
 
-  // §2b — REAL-TIME DATA (Perplexity sonar-pro). Свежие факты/цитаты/тренды/
-  // законы текущего месяца. Опционально, graceful.
+  // §2b — RESEARCH EVIDENCE (DeepSeek/Gemini). Проверяемые факты/цитаты/
+  // тренды/законы из переданного контекста. Опционально, graceful.
   let sectionRealtime = '';
   if (realtimeResearch) {
     try {

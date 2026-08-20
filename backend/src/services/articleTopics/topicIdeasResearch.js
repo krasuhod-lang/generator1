@@ -1,27 +1,27 @@
 'use strict';
 
 /**
- * topicIdeasResearch — Perplexity-исследователь интентов для режима подбора
- * тем статей (article_topic_tasks, mode='topic_ideas').
+ * topicIdeasResearch — evidence-based исследователь интентов для режима
+ * подбора тем статей (article_topic_tasks, mode='topic_ideas'). DeepSeek primary,
+ * Gemini fallback; оба провайдера получают только переданный evidence.
  *
- * В отличие от общего services/llm/realtimeResearch (который собирает свежие
- * факты/цифры/законы для writer'а статьи) этот модуль собирает РЕАЛЬНЫЙ
- * поисковый спрос ниши: живые формулировки запросов, их интенты/фасеты/стадию
- * воронки, вопросы People-Also-Ask и AI Overviews, смежные семантические темы
- * и ключевые сущности. Эти данные подмешиваются в промт topicIdeas.txt, чтобы
- * Gemini строил план тем строго от интентов пользователя и покрывал как
- * классический поиск, так и ответы ИИ-выдачи.
+ * В отличие от общего services/llm/realtimeResearch этот модуль структурирует
+ * переданный SERP/PAA/Reddit/competitor evidence: формулировки запросов,
+ * интенты/фасеты/стадии воронки, вопросы People-Also-Ask и AI Overviews,
+ * смежные семантические темы и сущности. Эти данные подмешиваются в промт
+ * topicIdeas.txt, чтобы Gemini строил план тем строго от подтверждённых
+ * intent signals.
  *
- * Fail-open: без PERPLEXITY_API_KEY или при любой ошибке возвращает null, и
- * подбор тем продолжается без real-time данных (как раньше).
+ * Fail-open: при отсутствии DeepSeek/Gemini keys или любой ошибке возвращает
+ * null, и подбор тем продолжается без research evidence.
  */
 
-const { callLLM } = require('../llm/callLLM');
 const { fillPromptVars } = require('../../utils/fillPromptVars');
+const { callResearchProvider } = require('../llm/researchProvider');
 const { SYSTEM_PROMPTS_EXT } = require('../../prompts/systemPrompts');
 
 /**
- * Приводит сырой ответ Perplexity (контракт perplexityTopicResearcher) к
+ * Приводит сырой ответ DeepSeek/Gemini topic research contract к
  * единой форме с гарантированными массивами.
  * @param {object|null} raw
  * @returns {{user_intents:Array, adjacent_topics:Array, paa_questions:Array,
@@ -60,44 +60,56 @@ function hasTopicResearch(r) {
 }
 
 /**
- * runTopicIdeasResearch — единичный вызов Perplexity sonar-pro по нише.
+ * runTopicIdeasResearch — evidence-based call по нише.
  *
  * @param {object}  args
  * @param {string}  args.niche       — ниша/тема (обязательно).
  * @param {string} [args.region]     — регион/гео.
- * @param {string} [args.audience]   — описание ЦА (для точности ресёрча).
+ * @param {string} [args.audience]   — описание ЦА.
  * @param {string} [args.brandHint]  — краткое описание бренда.
  * @param {string} [args.targetUrl]  — URL целевой страницы.
+ * @param {string} [args.evidence]   — SERP/PAA/Reddit/competitor evidence.
  * @param {object} [args.callOptions] — прокидывается в callLLM.
  * @returns {Promise<object|null>}
  */
-async function runTopicIdeasResearch({ niche, region, audience, brandHint, targetUrl, callOptions = {} } = {}) {
+async function runTopicIdeasResearch({
+  niche,
+  region,
+  audience,
+  brandHint,
+  targetUrl,
+  evidence = '',
+  callOptions = {},
+} = {}) {
   if (!niche || !String(niche).trim()) return null;
-  // Fail-open: без ключа Perplexity не дёргаем сеть — сразу null.
-  if (!process.env.PERPLEXITY_API_KEY) return null;
 
-  const synthTask = { input_target_service: String(niche), input_region: region || 'Россия' };
-  const system = fillPromptVars(SYSTEM_PROMPTS_EXT.perplexityTopicResearcher, synthTask);
-
+  const synthTask = {
+    input_target_service: String(niche),
+    input_region: region || 'Россия',
+  };
+  const system = fillPromptVars(SYSTEM_PROMPTS_EXT.deepseekTopicResearcher, synthTask);
   const contextParts = [
-    `Собери реальный поисковый спрос и интенты пользователей по нише: ${niche}.`,
+    `Ниша: ${niche}.`,
     `Регион: ${region || 'Россия'}.`,
   ];
-  if (audience && String(audience).trim())  contextParts.push(`Целевая аудитория: ${String(audience).slice(0, 300)}.`);
+  if (audience && String(audience).trim()) contextParts.push(`Целевая аудитория: ${String(audience).slice(0, 300)}.`);
   if (brandHint && String(brandHint).trim()) contextParts.push(`Бренд/проект: ${String(brandHint).slice(0, 300)}.`);
   if (targetUrl && String(targetUrl).trim()) contextParts.push(`Целевая страница: ${String(targetUrl).slice(0, 300)}.`);
-  const context = contextParts.join(' ');
+  contextParts.push(
+    'SOURCE EVIDENCE (единственный источник реальных запросов/фактов; без evidence верни пустые массивы):',
+    String(evidence || '').slice(0, 30000) || '[нет переданного evidence]',
+  );
 
   try {
-    const raw = await callLLM('perplexity', system, context, {
-      retries: 2,
-      temperature: 0.2,
-      callLabel: 'Topic Intent Research (Perplexity)',
-      ...callOptions,
+    const result = await callResearchProvider({
+      system,
+      prompt: contextParts.join('\n'),
+      callOptions,
+      callLabel: 'Topic Intent Research',
+      log: callOptions.log,
     });
-    return normalizeTopicResearch(raw);
+    return result ? normalizeTopicResearch(result.raw) : null;
   } catch (_) {
-    // Fail-open: подбор тем продолжается без real-time данных.
     return null;
   }
 }
@@ -120,15 +132,15 @@ function _clip(s, n) {
 function renderTopicResearchBlock(r, opts = {}) {
   const fallback = opts.fallback != null
     ? opts.fallback
-    : '(real-time ресёрч недоступен — опирайся на нишу, аудиторию и собственные знания об интентах)';
+    : '(research evidence недоступен — опирайся на нишу, аудиторию и текущий task context)';
   if (!hasTopicResearch(r)) return fallback;
 
   const out = [
     '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    'REAL-TIME РЕСЁРЧ ИНТЕНТОВ (Perplexity sonar-pro, веб-поиск)',
+    'RESEARCH EVIDENCE ИНТЕНТОВ (DeepSeek/Gemini)',
     '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    'Ниже — РЕАЛЬНЫЕ поисковые запросы, вопросы и смежные темы, собранные',
-    'веб-поиском по этой нише. Строй план тем СТРОГО от этих интентов',
+    'Ниже — поисковые запросы, вопросы и смежные темы, извлечённые из',
+    'переданного SERP/PAA/Reddit evidence. Строй план тем СТРОГО от этих интентов',
     'пользователей. Используй смежные темы и семантические кластеры, чтобы',
     'полностью покрыть спектр интентов и семантику. Формулируй темы так,',
     'чтобы они ранжировались в классическом поиске И попадали в ответы',

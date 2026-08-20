@@ -1,7 +1,7 @@
 'use strict';
 
 /* Smoke-тест topicIdeasResearch: normalizeTopicResearch + hasTopicResearch +
- * renderTopicResearchBlock (real-time ресёрч интентов для подбора тем). */
+ * renderTopicResearchBlock (evidence-based ресёрч интентов для подбора тем). */
 
 const assert = require('assert');
 const {
@@ -17,7 +17,7 @@ function t(name, fn) {
   catch (e) { console.error('✗', name, '\n  ', e.message); failed++; }
 }
 
-t('normalizeTopicResearch: маппит контракт perplexityTopicResearcher', () => {
+t('normalizeTopicResearch: маппит DeepSeek/Gemini topic research contract', () => {
   const out = normalizeTopicResearch({
     user_intents: [{ query: 'как выбрать ВНЖ', intent: 'informational', facet: 'how-to', stage: 'TOFU' }],
     adjacent_topics: [{ topic: 'налоги для релокантов', why: 'ищут следом', semantic_cluster: 'релокация' }],
@@ -71,7 +71,7 @@ t('renderTopicResearchBlock: рендерит все секции', () => {
     latest_trends: ['рост релокации'],
   });
   const md = renderTopicResearchBlock(r);
-  assert.ok(md.includes('REAL-TIME РЕСЁРЧ ИНТЕНТОВ'));
+  assert.ok(md.includes('RESEARCH EVIDENCE ИНТЕНТОВ'));
   assert.ok(md.includes('«как выбрать ВНЖ» — informational / how-to / TOFU'));
   assert.ok(md.includes('налоги для релокантов'));
   assert.ok(md.includes('сколько стоит ВНЖ?'));
@@ -91,13 +91,18 @@ t('renderTopicResearchBlock: строковые интенты/темы тоже
 (async () => {
   // Дожидаемся async-теста fail-open.
   const { runTopicIdeasResearch } = require('../src/services/articleTopics/topicIdeasResearch');
-  const saved = process.env.PERPLEXITY_API_KEY;
-  delete process.env.PERPLEXITY_API_KEY;
+  const savedDeepSeek = process.env.DEEPSEEK_API_KEY;
+  const savedGemini = process.env.GEMINI_API_KEY;
+  delete process.env.DEEPSEEK_API_KEY;
+  delete process.env.GEMINI_API_KEY;
   try {
     assert.strictEqual(await runTopicIdeasResearch({ niche: 'ВНЖ' }), null);
     console.log('✓ runTopicIdeasResearch: async fail-open verified'); passed++;
   } catch (e) { console.error('✗ async fail-open', e.message); failed++; }
-  finally { if (saved !== undefined) process.env.PERPLEXITY_API_KEY = saved; }
+  finally {
+    if (savedDeepSeek !== undefined) process.env.DEEPSEEK_API_KEY = savedDeepSeek;
+    if (savedGemini !== undefined) process.env.GEMINI_API_KEY = savedGemini;
+  }
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);

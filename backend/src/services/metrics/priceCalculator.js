@@ -47,14 +47,7 @@ const PRICES = {
     input:  0.000002000,
     output: 0.000006000,
   },
-  // Perplexity sonar-pro (Stage 0 real-time research). Ориентировочный тариф
-  // (актуальная документация Perplexity 2025–2026): $3.00 / 1M input tokens,
-  // $15.00 / 1M output tokens. Переопределяется env
-  // PERPLEXITY_INPUT_PRICE_USD_PER_1M / PERPLEXITY_OUTPUT_PRICE_USD_PER_1M.
-  perplexity: {
-    input:  0.000003000,
-    output: 0.000015000,
-  },
+
 };
 
 /** Порог контекста Gemini: до 200 000 токенов — короткий тариф */
@@ -77,7 +70,7 @@ function estimateTokens(text) {
 /**
  * Рассчитывает стоимость вызова LLM в USD.
  *
- * @param {'deepseek'|'gemini'|'grok'|'perplexity'} model
+ * @param {'deepseek'|'gemini'|'grok'} model
  * @param {number} tokensIn
  * @param {number} tokensOut
  * @param {boolean|object} [cacheHitOrUsage=false]
@@ -133,16 +126,6 @@ function calcCost(model, tokensIn, tokensOut, cacheHitOrUsage = false) {
     return tokensIn * inputRate + tokensOut * outputRate;
   }
 
-  if (model === 'perplexity') {
-    // Env-override: sonar-pro тариф может меняться — позволяем править без кода.
-    const inputRate  = parseFloat(process.env.PERPLEXITY_INPUT_PRICE_USD_PER_1M)  > 0
-      ? parseFloat(process.env.PERPLEXITY_INPUT_PRICE_USD_PER_1M)  / 1_000_000
-      : PRICES.perplexity.input;
-    const outputRate = parseFloat(process.env.PERPLEXITY_OUTPUT_PRICE_USD_PER_1M) > 0
-      ? parseFloat(process.env.PERPLEXITY_OUTPUT_PRICE_USD_PER_1M) / 1_000_000
-      : PRICES.perplexity.output;
-    return tokensIn * inputRate + tokensOut * outputRate;
-  }
 
   return 0;
 }
