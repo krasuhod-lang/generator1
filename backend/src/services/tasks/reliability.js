@@ -62,7 +62,7 @@ async function publishPendingOutbox(db = dbDefault, limit = 50) {
       `SELECT id, queue_name, job_name, job_id, payload
          FROM generator_task_outbox
         WHERE published_at IS NULL
-          AND available_at <= NOW()
+          AND (available_at <= NOW() OR job_id LIKE '%:%')
         ORDER BY id
         LIMIT $1
         FOR UPDATE SKIP LOCKED`,
