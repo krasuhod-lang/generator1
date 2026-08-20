@@ -73,6 +73,29 @@ test('buildWorkerErrorResult returns non-empty client sentinel fields', () => {
   assert.ok(result.works_with);
 });
 
+test('terminal AI error preserves collected site data as partial', () => {
+  const result = buildWorkerErrorResult({
+    normalized_url: 'https://example.com/',
+    id: 'item-1',
+    task_id: 'run-1',
+    task: { options: { clients: true, about: true, services: true } },
+  }, 'llm_error', 'raw JSON repair failed', 'dspy_extraction_failed', {
+    url: 'https://example.com/',
+    title: 'Компания',
+    about: 'Описание компании',
+    services: ['SEO'],
+    stats: { pages_scanned: 3 },
+    field_status: { about: 'found', services: 'found' },
+    warnings: [],
+  });
+  assert.strictEqual(result.status, 'partial');
+  assert.strictEqual(result.title, 'Компания');
+  assert.strictEqual(result.about, 'Описание компании');
+  assert.deepStrictEqual(result.services, ['SEO']);
+  assert.strictEqual(result.stats.pages_scanned, 3);
+  assert.strictEqual(result.error_code, 'dspy_extraction_failed');
+});
+
 test('itemStatusFromResult maps site statuses to durable item statuses', () => {
   assert.strictEqual(itemStatusFromResult({ status: 'ok' }), 'done');
   assert.strictEqual(itemStatusFromResult({ status: 'not_found' }), 'done');

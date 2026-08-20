@@ -154,6 +154,7 @@ async function exportXlsx(req, res) {
       { header: 'Код ошибки', key: 'error_code', width: 30 },
       { header: 'Попытки ИИ', key: 'llm_attempts', width: 14 },
       { header: 'Код/причина доступа', key: 'access_reason', width: 42 },
+      { header: 'Диагностика доступа', key: 'access_diagnostics', width: 50 },
     ];
     for (const item of items) {
       const result = item.result || {};
@@ -166,6 +167,15 @@ async function exportXlsx(req, res) {
         result.error_code || '',
         access.reason || '',
       ].filter(Boolean).join('; ') || result.error || '';
+      const diagnostics = access.diagnostics || {};
+      const accessDiagnostics = [
+        diagnostics.score != null ? `score=${diagnostics.score}` : '',
+        diagnostics.visible_text_chars != null ? `visible_text_chars=${diagnostics.visible_text_chars}` : '',
+        Array.isArray(diagnostics.strong_markers) && diagnostics.strong_markers.length
+          ? `strong=${diagnostics.strong_markers.join(', ')}` : '',
+        Array.isArray(diagnostics.soft_markers) && diagnostics.soft_markers.length
+          ? `soft=${diagnostics.soft_markers.join(', ')}` : '',
+      ].filter(Boolean).join('; ');
       sheet.addRow({
         run_id: execution.run_id || task.id,
         item_id: execution.item_id || item.id,
@@ -188,6 +198,7 @@ async function exportXlsx(req, res) {
         llm_attempts: stats.llm_attempts ?? '',
         access_status: access.status || (result.status === 'blocked' ? 'blocked' : ''),
         access_reason: accessReason,
+        access_diagnostics: accessDiagnostics,
       });
     }
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

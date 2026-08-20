@@ -19,7 +19,9 @@ import asyncio
 import logging
 import os
 import random
+import re
 import time
+from html import unescape
 from typing import Optional
 
 import aiohttp
@@ -49,10 +51,13 @@ HEADLESS_URL = (os.getenv("AUDIT_HEADLESS_FETCHER_URL")
                 or "http://relevance_fetcher:8001/fetch_html").strip()
 INTERNAL_TOKEN = (os.getenv("RELEVANCE_INTERNAL_TOKEN") or "").strip()
 
-_BLOCK_MARKERS = (
-    "cf-challenge", "cf_chl_", "cloudflare", "captcha", "ddos-guard",
-    "checking your browser", "attention required", "just a moment",
+_STRONG_BLOCK_MARKERS = (
+    "cf-challenge", "cf_chl_", "captcha", "g-recaptcha", "hcaptcha",
+    "ddos-guard", "checking your browser", "attention required",
+    "just a moment", "verify you are human", "проверка браузера",
+    "подтвердите, что вы не робот",
 )
+_SOFT_BLOCK_MARKERS = ("cloudflare", "challenge-platform", "turnstile")
 
 # ── SSRF guard ────────────────────────────────────────────────────────────────
 # Краулер ходит по ссылкам/редиректам, найденным на чужих страницах, поэтому
@@ -112,13 +117,59 @@ def _headers() -> dict:
     }
 
 
+def _visible_text(html: str) -> str:
+    without_code = re.sub(r"<(script|style|noscript|template|svg)\b[^>]*>.*?</\1>", " ", html or "", flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", without_code)
+    return re.sub(r"\s+", " ", unescape(text)).strip()
+
+
+def challenge_fingerprint(html: str, status: int) -> dict:
+    raw = (html or "")[:20000].lower()
+    visible_lower = _visible_text(html).lower()
+    visible_chars = len(visible_lower)
+    strong = [marker for marker in _STRONG_BLOCK_MARKERS if marker in raw or marker in visible_lower]
+    soft = [marker for marker in _SOFT_BLOCK_MARKERS if marker in raw]
+    has_form_context = bool(re.search(
+        r"<(form|iframe|input)\b[^>]*(captcha|recaptcha|hcaptcha|challenge|turnstile)",
+        raw,
+        flags=re.IGNORECASE,
+    ))
+    has_challenge_phrase = any(marker in visible_lower for marker in (
+        "checking your browser", "just a moment", "verify you are human",
+        "подтвердите, что вы не робот", "проверка браузера",
+    ))
+    # A site may legitimately mention CAPTCHA in an article or include a
+    # Cloudflare library. Keep those markers only when challenge context is
+    # visible or the page is extremely short and has no normal content.
+    if strong == ["captcha"] and not has_form_context and not has_challenge_phrase:
+        strong = []
+    score = 0
+    if status in (403, 429, 503):
+        score += 3
+    score += min(3, len(strong) * 2)
+    if soft and visible_chars < 240:
+        score += 1
+    if has_form_context or has_challenge_phrase:
+        score += 2
+    return {
+        "score": score,
+        "strong_markers": strong[:8],
+        "soft_markers": soft[:4],
+        "visible_text_chars": visible_chars,
+        "has_form_context": has_form_context,
+        "has_challenge_phrase": has_challenge_phrase,
+    }
+
+
 def looks_blocked(html: str, status: int) -> bool:
+    fingerprint = challenge_fingerprint(html, status)
     if status in (403, 429, 503):
         return True
-    if not html or len(html) < 400:
-        return True
-    low = html[:5000].lower()
-    return any(m in low for m in _BLOCK_MARKERS)
+    if not html:
+        return status not in (200, 204)
+    # A short normal page is not a challenge by itself. Require a positive
+    # challenge signal, preventing false blocks for minimal landing pages.
+    return bool(fingerprint["strong_markers"] and fingerprint["score"] >= 2)
 
 
 def block_reason(html: str, status: int) -> str:
@@ -128,18 +179,20 @@ def block_reason(html: str, status: int) -> str:
         return "forbidden_403"
     if status == 503:
         return "service_unavailable_503"
-    low = (html or "")[:5000].lower()
-    if any(marker in low for marker in _BLOCK_MARKERS):
+    fingerprint = challenge_fingerprint(html, status)
+    if fingerprint["strong_markers"]:
         return "captcha_or_antibot"
+    if fingerprint["soft_markers"]:
+        return "antibot_challenge"
     if not html:
-        return "empty_block_page"
+        return "empty_response"
     return "blocked_response"
 
 
 class FetchResult:
     __slots__ = ("url", "final_url", "status_code", "html", "response_time_ms",
                  "content_size_bytes", "redirect_chain", "error", "method",
-                 "fetch_status")
+                 "fetch_status", "block_fingerprint")
 
     def __init__(self, url: str):
         self.url = url
@@ -152,6 +205,7 @@ class FetchResult:
         self.error: Optional[str] = None
         self.method: str = "aiohttp"
         self.fetch_status: str = "ok"  # ok|timeout|connection_error|error|ssrf_blocked
+        self.block_fingerprint: dict = {}
 
 
 async def fetch_page(session: aiohttp.ClientSession, url: str,
@@ -227,6 +281,7 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
         res.error = f"error: {e.__class__.__name__}"
         res.fetch_status = "error"
     res.response_time_ms = int((time.monotonic() - started) * 1000)
+    res.block_fingerprint = challenge_fingerprint(res.html, res.status_code or 0)
 
     # Эскалация: пустой body / 403 / антибот-заглушка → штатный headless-фетчер.
     # Если защитный ответ не удалось получить разрешенным способом, не передаем
@@ -275,6 +330,7 @@ async def _fetch_headless(res: FetchResult, url: str) -> bool:
         res.html = html[: MAX_BODY_BYTES]
         res.content_size_bytes = len(res.html.encode("utf-8"))
     res.response_time_ms = int((time.monotonic() - started) * 1000)
+    res.block_fingerprint = challenge_fingerprint(res.html, res.status_code or 0)
     success = bool(data.get("success")) and not looks_blocked(res.html, res.status_code)
     if not success:
         res.fetch_status = "blocked" if looks_blocked(res.html, res.status_code) or data.get("error_msg") else "error"

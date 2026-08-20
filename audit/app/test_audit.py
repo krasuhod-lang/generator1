@@ -37,6 +37,29 @@ class TestNormalizeUrl(unittest.TestCase):
         self.assertIsNone(normalize_url(""))
 
 
+class TestAccessDetection(unittest.TestCase):
+    def test_short_valid_html_is_not_blocked(self):
+        from .fetcher import looks_blocked
+        html = "<html><head><title>Контакты</title></head><body><p>Телефон: +7 000 000-00-00</p></body></html>"
+        self.assertFalse(looks_blocked(html, 200))
+
+    def test_cloudflare_library_marker_alone_is_not_blocked(self):
+        from .fetcher import looks_blocked
+        html = "<html><body><h1>Наша компания</h1><script src=\"/cloudflare.js\"></script></body></html>"
+        self.assertFalse(looks_blocked(html, 200))
+
+    def test_captcha_word_in_normal_article_is_not_blocked(self):
+        from .fetcher import looks_blocked
+        html = "<html><body><h1>Безопасность</h1><p>Мы рассказываем, что такое CAPTCHA и как её использовать в формах.</p></body></html>"
+        self.assertFalse(looks_blocked(html, 200))
+
+    def test_captcha_challenge_is_blocked(self):
+        from .fetcher import looks_blocked, challenge_fingerprint
+        html = "<html><head><title>Checking your browser</title></head><body><div class=\"cf-challenge\">Please verify you are human</div></body></html>"
+        self.assertTrue(looks_blocked(html, 200))
+        self.assertIn("cf-challenge", challenge_fingerprint(html, 200)["strong_markers"])
+
+
 class TestContentHash(unittest.TestCase):
     """БАГФИКС #2: умный хеш с порогом 150 символов."""
 

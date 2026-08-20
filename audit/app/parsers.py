@@ -269,6 +269,7 @@ def _access_failure_result(
     status_code: Optional[int] = None,
     method: Optional[str] = None,
     final_url: Optional[str] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
     extract_contacts: bool,
     extract_about: bool,
     extract_services: bool,
@@ -283,6 +284,7 @@ def _access_failure_result(
         "status_code": status_code,
         "method": method,
         "final_url": final_url or url,
+        "diagnostics": diagnostics or {},
     }
     _mark_requested_statuses(
         result,
@@ -973,6 +975,7 @@ async def parse_url_dspy(
                     status_code=getattr(res, "status_code", None),
                     method=getattr(res, "method", None),
                     final_url=getattr(res, "final_url", None),
+                    diagnostics=getattr(res, "block_fingerprint", None),
                     extract_contacts=extract_contacts,
                     extract_about=extract_about,
                     extract_services=extract_services,

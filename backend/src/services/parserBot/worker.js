@@ -48,41 +48,54 @@ function buildAuditPayload(item) {
   };
 }
 
-function buildWorkerErrorResult(item, status, message, errorCode = '') {
+function buildWorkerErrorResult(item, status, message, errorCode = '', previousResult = {}) {
   const options = item.task?.options || {};
   const fallback = CLIENT_FALLBACKS[status] || CLIENT_FALLBACKS.llm_error;
-  const fieldStatus = {};
-  if (boolOption(options, ['extract_contacts', 'contacts'])) fieldStatus.contacts = status;
-  if (boolOption(options, ['extract_about', 'about'])) fieldStatus.about = status;
+  const previous = previousResult && typeof previousResult === 'object' ? previousResult : {};
+  const previousStats = previous.stats && typeof previous.stats === 'object' ? previous.stats : {};
+  const hasSiteData = Boolean(
+    previous.title || previous.about || previous.contacts || previous.services?.length
+      || previous.focus || Number(previousStats.pages_scanned || 0) > 0,
+  );
+  const effectiveStatus = status === 'llm_error' && hasSiteData ? 'partial' : status;
+  const fieldStatus = { ...(previous.field_status || {}) };
+  if (boolOption(options, ['extract_contacts', 'contacts']) && !fieldStatus.contacts) fieldStatus.contacts = status;
+  if (boolOption(options, ['extract_about', 'about']) && !fieldStatus.about) fieldStatus.about = status;
   if (boolOption(options, ['extract_services', 'services'])) {
-    fieldStatus.services = status;
-    fieldStatus.focus = status;
+    fieldStatus.services = fieldStatus.services || status;
+    fieldStatus.focus = fieldStatus.focus || status;
   }
   if (boolOption(options, ['extract_clients', 'clients'])) {
-    fieldStatus.client_segments = status;
-    fieldStatus.works_with = status;
+    fieldStatus.client_segments = fieldStatus.client_segments || status;
+    fieldStatus.works_with = fieldStatus.works_with || status;
   }
+  const warnings = Array.isArray(previous.warnings) ? [...previous.warnings] : [];
+  const warning = String(message || '').slice(0, 500);
+  if (warning && !warnings.includes(warning)) warnings.push(warning);
   return {
-    url: item.normalized_url || item.input_url,
-    title: '',
+    ...previous,
+    url: previous.url || item.normalized_url || item.input_url,
+    title: previous.title || '',
     execution: {
-      run_id: item.task_id || item.task?.id || '',
-      item_id: item.id || '',
-      result_source: 'fresh',
+      ...(previous.execution || {}),
+      run_id: item.task_id || item.task?.id || previous.execution?.run_id || '',
+      item_id: item.id || previous.execution?.item_id || '',
+      result_source: previous.execution?.result_source || 'fresh',
     },
-    contacts: '',
-    about: '',
-    services: [],
-    focus: '',
-    client_segments: fieldStatus.client_segments ? [fallback.client_segments] : [],
-    works_with: fieldStatus.works_with ? fallback.works_with : '',
-    status,
+    contacts: previous.contacts || (boolOption(options, ['extract_contacts', 'contacts']) ? fallback.contacts : ''),
+    about: previous.about || (boolOption(options, ['extract_about', 'about']) ? fallback.about : ''),
+    services: Array.isArray(previous.services) && previous.services.length ? previous.services : (boolOption(options, ['extract_services', 'services']) ? fallback.services : []),
+    focus: previous.focus || (boolOption(options, ['extract_services', 'services']) ? fallback.focus : ''),
+    client_segments: Array.isArray(previous.client_segments) && previous.client_segments.length
+      ? previous.client_segments : (fieldStatus.client_segments ? [fallback.client_segments] : []),
+    works_with: previous.works_with || (fieldStatus.works_with ? fallback.works_with : ''),
+    status: effectiveStatus,
     field_status: fieldStatus,
-    evidence: [],
-    warnings: [String(message || '').slice(0, 500)].filter(Boolean),
-    stats: { pages_scanned: 0 },
-    error_code: errorCode || '',
-    error: String(message || '').slice(0, 1000),
+    evidence: Array.isArray(previous.evidence) ? previous.evidence : [],
+    warnings,
+    stats: { ...previousStats, llm_terminal_error: true },
+    error_code: errorCode || previous.error_code || '',
+    error: String(message || previous.error || '').slice(0, 1000),
   };
 }
 
@@ -101,10 +114,11 @@ async function callAudit(item) {
   // нельзя передавать дальше: itemStatusFromResult иначе посчитает его done.
   const status = String(result.status || '').toLowerCase();
   if (status.startsWith('ошибка') || status === 'error' || result.error_code === 'audit_parser_exception') {
-    return {
-      ...buildWorkerErrorResult(item, 'llm_error', result.error || result.status || 'Ошибка audit/DSPy'),
-      audit_error_code: result.error_code || 'audit_parser_error',
-    };
+          return {
+        ...buildWorkerErrorResult(item, 'llm_error', result.error || result.status || 'Ошибка audit/DSPy', result.error_code || 'audit_parser_error', result),
+        audit_error_code: result.error_code || 'audit_parser_error',
+      };
+
   }
 
   const hasStructuredPayload = [
@@ -124,6 +138,7 @@ async function callAudit(item) {
     const retryable = new Error(result.error || 'Временная ошибка структурированного ответа DSPy');
     retryable.code = 'AUDIT_LLM_RETRYABLE';
     retryable.errorCode = resultErrorCode;
+    retryable.auditResult = result;
     throw retryable;
   }
   result.execution = {
@@ -168,6 +183,7 @@ async function processNext() {
           isBlockedLike ? 'blocked' : (isFetchLike ? 'fetch_error' : 'llm_error'),
           err.message || String(err),
           err.errorCode || (isBlockedLike ? 'blocked_response' : (isFetchLike ? 'fetch_error' : 'worker_error')),
+          err.auditResult || {},
         ),
       );
     }
