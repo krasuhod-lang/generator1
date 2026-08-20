@@ -85,6 +85,10 @@ test('terminal AI error preserves collected site data as partial', () => {
     about: 'Описание компании',
     services: ['SEO'],
     stats: { pages_scanned: 3 },
+    crawl_status: 'partial',
+    ai_status: 'failed',
+    data_status: 'partial',
+    subpage_errors: [{ url: 'https://example.com/private', reason: 'forbidden_403' }],
     field_status: { about: 'found', services: 'found' },
     warnings: [],
   });
@@ -94,6 +98,10 @@ test('terminal AI error preserves collected site data as partial', () => {
   assert.deepStrictEqual(result.services, ['SEO']);
   assert.strictEqual(result.stats.pages_scanned, 3);
   assert.strictEqual(result.error_code, 'dspy_extraction_failed');
+  assert.strictEqual(result.crawl_status, 'partial');
+  assert.strictEqual(result.ai_status, 'failed');
+  assert.strictEqual(result.data_status, 'partial');
+  assert.strictEqual(result.subpage_errors[0].reason, 'forbidden_403');
 });
 
 test('itemStatusFromResult maps site statuses to durable item statuses', () => {

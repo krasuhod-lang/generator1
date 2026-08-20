@@ -132,6 +132,10 @@ const itemEvidence = (item) => itemResult(item).evidence || item?.evidence || []
 const itemError = (item) => itemResult(item).error || item?.error_message || item?.error || '';
 const itemExecution = (item) => itemResult(item).execution || {};
 const itemFieldStatus = (item) => itemResult(item).field_status || item?.field_status || {};
+const itemStats = (item) => itemResult(item).stats || item?.stats || {};
+const itemCoverage = (item) => itemResult(item).evidence_coverage || {};
+const itemDiscovery = (item) => itemStats(item).discovery || {};
+const itemSubpageErrors = (item) => itemResult(item).subpage_errors || itemDiscovery(item).subpage_errors || [];
 const terminalStatuses = new Set(['done', 'partial', 'error', 'cancelled']);
 
 // ── Действия ──────────────────────────────────────────────────────────────
@@ -641,10 +645,10 @@ onUnmounted(() => {
               <tr>
                 <th class="text-left py-2 pr-4">URL</th>
                 <th class="text-left py-2 pr-4">Статус</th>
-                <th class="text-left py-2 pr-4">Источник / доступ</th>
-                <th class="text-left py-2 pr-4">Категории клиентов</th>
+                <th class="text-left py-2 pr-4">Lifecycle / доступ</th>
+                <th class="text-left py-2 pr-4">Категории клиентов / coverage</th>
                 <th class="text-left py-2 pr-4">С кем работает</th>
-                <th class="text-left py-2 pr-4">Страниц</th>
+                <th class="text-left py-2 pr-4">Страницы / discovery</th>
                 <th class="text-left py-2">Доказательства</th>
               </tr>
             </thead>
@@ -671,15 +675,29 @@ onUnmounted(() => {
                     попыток: {{ item.attempts || 0 }}
                   </div>
                 </td>
-                <td class="py-3 pr-4 min-w-[190px] text-xs text-gray-400">
+                <td class="py-3 pr-4 min-w-[220px] text-xs text-gray-400">
                   <div>Источник: {{ itemExecution(item).result_source || 'fresh' }}</div>
+                  <div class="flex flex-wrap gap-1 mt-1">
+                    <span class="badge">crawl: {{ itemResult(item).crawl_status || '—' }}</span>
+                    <span class="badge">AI: {{ itemResult(item).ai_status || '—' }}</span>
+                    <span class="badge">data: {{ itemResult(item).data_status || '—' }}</span>
+                  </div>
                   <div v-if="itemResult(item).access?.status || itemResult(item).error_code" class="mt-1 text-orange-300">
                     {{ itemResult(item).access?.status || itemResult(item).error_code }}
                   </div>
                   <div v-if="itemResult(item).access?.status_code" class="mt-1">HTTP {{ itemResult(item).access.status_code }}</div>
+                  <div v-if="itemSubpageErrors(item).length" class="mt-2 text-amber-300">
+                    Ошибок подстраниц: {{ itemSubpageErrors(item).length }}
+                  </div>
                 </td>
                 <td class="py-3 pr-4 min-w-[260px] whitespace-pre-line text-gray-200">
                   {{ itemClientSegments(item) || '—' }}
+                  <div v-if="itemCoverage(item).total_segments != null" class="text-[11px] text-gray-500 mt-1">
+                    Подтверждено: {{ itemCoverage(item).verified_segments || 0 }}/{{ itemCoverage(item).total_segments || 0 }}
+                    ({{ Math.round((itemCoverage(item).coverage_ratio || 0) * 100) }}%)
+                    · AI: {{ itemCoverage(item).ai_segments_received || 0 }}
+                    · удалено: {{ itemCoverage(item).dropped_segments || 0 }}
+                  </div>
                   <div class="mt-2">
                     <span :class="['badge', fieldStatusMeta(itemFieldStatus(item).client_segments).cls]">
                       {{ fieldStatusMeta(itemFieldStatus(item).client_segments).text }}
@@ -694,8 +712,17 @@ onUnmounted(() => {
                     </span>
                   </div>
                 </td>
-                <td class="py-3 pr-4 text-gray-300 tabular-nums">
-                  {{ itemResult(item).stats?.pages_scanned ?? item.stats?.pages_scanned ?? '—' }}
+                <td class="py-3 pr-4 text-gray-300 tabular-nums min-w-[180px]">
+                  <div>{{ itemStats(item).pages_scanned ?? '—' }}</div>
+                  <div class="text-[11px] text-gray-500 mt-1">
+                    sitemap: {{ itemDiscovery(item).sitemap_candidates ?? 0 }} · HTML: {{ itemDiscovery(item).html_candidates ?? 0 }}
+                  </div>
+                  <div class="text-[11px] text-gray-500">
+                    успешно: {{ itemDiscovery(item).pages_fetch_succeeded ?? 0 }} · ошибок: {{ itemDiscovery(item).pages_fetch_failed ?? 0 }}
+                  </div>
+                  <div v-if="itemDiscovery(item).queue_remaining" class="text-[11px] text-amber-300">
+                    в очереди: {{ itemDiscovery(item).queue_remaining }}
+                  </div>
                 </td>
                 <td class="py-3 min-w-[280px]">
                   <div v-if="itemEvidence(item).length" class="space-y-2">
@@ -713,7 +740,11 @@ onUnmounted(() => {
                         {{ ev.url }}
                       </a>
                       <div class="text-gray-300 mt-1">«{{ ev.quote }}»</div>
-                      <div class="text-gray-500 mt-1">{{ ev.field }} · {{ ev.signal_type }}</div>
+                      <div class="text-gray-500 mt-1">
+                        {{ ev.field }} · {{ ev.evidence_type || ev.signal_type }}
+                        <span v-if="ev.supports_segments?.length">· {{ ev.supports_segments.join(', ') }}</span>
+                        <span v-if="ev.supports_works_with">· works_with</span>
+                      </div>
                     </div>
                   </div>
                   <span v-else class="text-xs text-gray-500">Нет доказательств</span>

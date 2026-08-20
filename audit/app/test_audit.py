@@ -950,7 +950,9 @@ class TestParsersClientSegmentation(unittest.TestCase):
                 "https://example.com/", extract_contacts=False, extract_about=True,
                 extract_services=True, deepseek_api_key="", extract_clients=True))
 
-        self.assertEqual(out["status"], "llm_error")
+        self.assertEqual(out["status"], "partial")
+        self.assertEqual(out["ai_status"], "failed")
+        self.assertEqual(out["data_status"], "partial")
         self.assertEqual(out["field_status"]["client_segments"], "llm_error")
         self.assertEqual(out["client_segments"], ["Не удалось определить — ошибка анализа ИИ"])
 
@@ -1254,3 +1256,55 @@ class TestParsersClientSegmentation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestParserPartialLifecycle(unittest.TestCase):
+    def test_evidence_is_deduplicated_and_supports_multiple_fields(self):
+        from . import parsers
+        evidence = parsers._client_evidence_for_segments(
+            ['Поставщики — тендеры', 'Заказчики — закупки'],
+            'B2B: поставщики и заказчики',
+            [{
+                'field': 'client_segments',
+                'url': 'https://example.com/',
+                'quote': 'Работаем с поставщиками и заказчиками, сопровождаем тендеры и закупки.',
+                'evidence_type': 'body_text',
+            }],
+        )
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(len(evidence[0]['supports_segments']), 2)
+        self.assertTrue(evidence[0]['supports_works_with'])
+
+    def test_deterministic_fallback_preserves_crawled_data(self):
+        from . import parsers
+        result = parsers._base_result('https://example.com/', 'Example')
+        result['stats']['pages_scanned'] = 2
+        parsers._apply_deterministic_fallback(
+            result,
+            [{
+                'url': 'https://example.com/',
+                'text': 'Компания оказывает услуги тендерного сопровождения. Телефон: +7 (900) 123-45-67.',
+            }],
+            extract_contacts=True,
+            extract_about=True,
+            extract_services=True,
+        )
+        self.assertIn('+7 (900) 123-45-67', result['contacts'])
+        self.assertTrue(result['about'])
+        self.assertTrue(result['services'])
+        self.assertEqual(result['data_status'], 'partial')
+        self.assertTrue(result['stats']['deterministic_fallback_used'])
+
+    def test_subpage_failure_reasons_are_aggregated(self):
+        from . import parsers
+        stats = {'subpage_error_counts': {}, 'subpage_errors': []}
+        class Res:
+            status_code = 403
+            fetch_status = 'blocked'
+            error = 'forbidden_403'
+            method = 'aiohttp'
+            final_url = 'https://example.com/private'
+        parsers._record_subpage_failure(stats, 'https://example.com/private', Res())
+        parsers._record_subpage_failure(stats, 'https://example.com/private-2', Res())
+        self.assertEqual(stats['subpage_error_counts']['forbidden_403'], 2)
+        self.assertEqual(len(stats['subpage_errors']), 2)

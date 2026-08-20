@@ -24,7 +24,10 @@ function evidenceText(evidence) {
     .map((ev) => {
       const type = ev.evidence_type ? `/${ev.evidence_type}` : '';
       const confidence = ev.confidence != null ? `, confidence=${ev.confidence}` : '';
-      return `${ev.field ? `[${ev.field}${type}${confidence}] ` : ''}${ev.url || ''}${ev.quote ? ` — «${ev.quote}»` : ''}`.trim();
+      const supports = Array.isArray(ev.supports_segments) && ev.supports_segments.length
+        ? `; supports=${ev.supports_segments.join(' | ')}` : '';
+      const works = ev.supports_works_with ? '; supports=works_with' : '';
+      return `${ev.field ? `[${ev.field}${type}${confidence}] ` : ''}${ev.url || ''}${ev.quote ? ` — «${ev.quote}»` : ''}${supports}${works}`.trim();
     })
     .join('\n');
 }
@@ -149,6 +152,9 @@ async function exportXlsx(req, res) {
       { header: 'Категории клиентов', key: 'client_segments', width: 40 },
       { header: 'С кем работает', key: 'works_with', width: 30 },
       { header: 'Статус парсинга', key: 'status', width: 20 },
+      { header: 'Статус обхода', key: 'crawl_status', width: 18 },
+      { header: 'Статус AI', key: 'ai_status', width: 18 },
+      { header: 'Статус данных', key: 'data_status', width: 18 },
       { header: 'Статус категорий клиентов', key: 'client_segments_status', width: 26 },
       { header: 'Статус поля «С кем работает»', key: 'works_with_status', width: 28 },
       { header: 'Доказательства клиентов', key: 'evidence', width: 60 },
@@ -168,6 +174,10 @@ async function exportXlsx(req, res) {
       { header: 'Успешно загружено страниц', key: 'pages_fetch_succeeded', width: 24 },
       { header: 'Ошибки загрузки страниц', key: 'pages_fetch_failed', width: 22 },
       { header: 'Осталось в очереди discovery', key: 'queue_remaining', width: 24 },
+      { header: 'Причины ошибок подстраниц', key: 'subpage_error_summary', width: 42 },
+      { header: 'Примеры ошибок подстраниц', key: 'subpage_error_examples', width: 65 },
+      { header: 'AI-категорий получено', key: 'ai_segments_received', width: 22 },
+      { header: 'AI-категорий удалено', key: 'dropped_segments', width: 20 },
     ];
     for (const item of items) {
       const result = item.result || {};
@@ -184,10 +194,17 @@ async function exportXlsx(req, res) {
       const coverage = result.evidence_coverage || {};
       const discovery = stats.discovery || {};
       const evidenceCoverage = coverage.total_segments != null
-        ? `${coverage.verified_segments || 0}/${coverage.total_segments || 0} (${Math.round((coverage.coverage_ratio || 0) * 100)}%)`
+        ? `${coverage.verified_segments || 0}/${coverage.total_segments || 0} (${Math.round((coverage.coverage_ratio || 0) * 100)}%); AI=${coverage.ai_segments_received || 0}; dropped=${coverage.dropped_segments || 0}`
         : '';
       const evidenceTypes = Object.entries(coverage.evidence_types || {})
         .map(([key, value]) => `${key}=${value}`).join(', ');
+      const subpageErrorCounts = discovery.subpage_error_counts || {};
+      const subpageErrorSummary = Object.entries(subpageErrorCounts)
+        .map(([key, value]) => `${key}=${value}`).join(', ');
+      const subpageErrorExamples = (result.subpage_errors || discovery.subpage_errors || [])
+        .slice(0, 10)
+        .map((entry) => `${entry.status_code || '-'} ${entry.reason || 'unknown'} ${entry.url || ''}`.trim())
+        .join('\n');
       const accessDiagnostics = [
         diagnostics.score != null ? `score=${diagnostics.score}` : '',
         diagnostics.visible_text_chars != null ? `visible_text_chars=${diagnostics.visible_text_chars}` : '',
@@ -209,6 +226,9 @@ async function exportXlsx(req, res) {
         client_segments: lines(result.client_segments),
         works_with: result.works_with || '',
         status: result.status || item.status,
+        crawl_status: result.crawl_status || '',
+        ai_status: result.ai_status || '',
+        data_status: result.data_status || '',
         client_segments_status: fieldStatus.client_segments || '',
         works_with_status: fieldStatus.works_with || '',
         evidence: evidenceText(result.evidence || item.evidence),
@@ -228,6 +248,10 @@ async function exportXlsx(req, res) {
         pages_fetch_succeeded: discovery.pages_fetch_succeeded ?? '',
         pages_fetch_failed: discovery.pages_fetch_failed ?? '',
         queue_remaining: discovery.queue_remaining ?? '',
+        subpage_error_summary: subpageErrorSummary,
+        subpage_error_examples: subpageErrorExamples,
+        ai_segments_received: coverage.ai_segments_received ?? '',
+        dropped_segments: coverage.dropped_segments ?? '',
       });
     }
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

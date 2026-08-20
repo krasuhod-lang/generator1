@@ -214,9 +214,13 @@ def _base_result(url: str, title: str = "", task_id: Optional[str] = None, item_
         "client_segments": [],
         "works_with": "",
         "status": "ok",
+        "crawl_status": "pending",
+        "ai_status": "pending",
+        "data_status": "pending",
         "field_status": {},
         "evidence": [],
         "warnings": [],
+        "subpage_errors": [],
         "stats": {"pages_scanned": 0},
     }
 
@@ -278,6 +282,9 @@ def _access_failure_result(
 ) -> Dict[str, Any]:
     result = _base_result(url, task_id=task_id, item_id=item_id)
     result["status"] = access_status
+    result["crawl_status"] = access_status
+    result["ai_status"] = "not_started"
+    result["data_status"] = "empty"
     result["error_code"] = error_code
     result["error"] = message[:1000]
     result["access"] = {
@@ -398,41 +405,50 @@ def _client_evidence_for_segments(
 ) -> List[Dict[str, Any]]:
     if not audience_evidence:
         return []
-    out: List[Dict[str, Any]] = []
+    by_quote: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    def add_match(evidence: Dict[str, Any], overlap: int, *, segment: Optional[str] = None, works: bool = False) -> None:
+        key = ((evidence.get("url") or "").strip(), (evidence.get("quote") or "").casefold().strip())
+        if key not in by_quote:
+            by_quote[key] = {
+                **evidence,
+                "field": "client_segments",
+                "evidence_type": evidence.get("evidence_type") or "body_text",
+                "supports_segments": [],
+                "supports_works_with": False,
+                "confidence": 0.0,
+            }
+        target = by_quote[key]
+        target["confidence"] = max(float(target.get("confidence") or 0), min(0.95, 0.75 + 0.05 * overlap))
+        if segment and segment not in target["supports_segments"]:
+            target["supports_segments"].append(segment)
+        if works:
+            target["supports_works_with"] = True
+
     for segment in segments:
         segment_tokens = _evidence_tokens(segment)
         candidates = []
-        for idx, evidence in enumerate(audience_evidence):
+        for evidence in audience_evidence:
             quote_tokens = _evidence_tokens(evidence.get("quote") or "")
             overlap = len(segment_tokens & quote_tokens)
             if overlap:
-                candidates.append((overlap, idx, evidence))
+                candidates.append((overlap, evidence))
         if candidates:
-            _overlap, idx, evidence = max(candidates, key=lambda row: row[0])
-            ev = dict(evidence)
-            ev["field"] = "client_segments"
-            ev["segment"] = segment
-            ev["evidence_type"] = ev.get("evidence_type") or "body_text"
-            ev["confidence"] = min(0.95, 0.75 + 0.05 * _overlap)
-            out.append(ev)
+            overlap, evidence = max(candidates, key=lambda row: row[0])
+            add_match(evidence, overlap, segment=segment)
 
     if works_with:
         works_tokens = _evidence_tokens(works_with)
         candidates = []
-        for idx, evidence in enumerate(audience_evidence):
+        for evidence in audience_evidence:
             quote_tokens = _evidence_tokens(evidence.get("quote") or "")
             overlap = len(works_tokens & quote_tokens)
             if overlap:
-                candidates.append((overlap, idx, evidence))
+                candidates.append((overlap, evidence))
         if candidates:
-            _overlap, _idx, evidence = max(candidates, key=lambda row: row[0])
-            ev = dict(evidence)
-            ev["field"] = "works_with"
-            ev["value"] = works_with
-            ev["evidence_type"] = ev.get("evidence_type") or "body_text"
-            ev["confidence"] = min(0.95, 0.75 + 0.05 * _overlap)
-            out.append(ev)
-    return out
+            overlap, evidence = max(candidates, key=lambda row: row[0])
+            add_match(evidence, overlap, works=True)
+    return list(by_quote.values())
 
 
 def _finalize_client_fields(
@@ -448,6 +464,8 @@ def _finalize_client_fields(
     if llm_failed:
         _apply_client_fallback(result, "llm_error")
         result["evidence_coverage"] = {
+            "ai_segments_received": 0,
+            "dropped_segments": 0,
             "total_segments": 0,
             "verified_segments": 0,
             "coverage_ratio": 0.0,
@@ -457,21 +475,34 @@ def _finalize_client_fields(
         return
 
     segments = _coerce_to_list(result.get("client_segments"))
+    dropped_segments = sum(
+        1 for warning in (result.get("warnings") or [])
+        if str(warning).startswith("client_segments: dropped")
+    )
     works_with = _coerce_to_text(result.get("works_with"))
     evidence = _client_evidence_for_segments(segments, works_with, audience_evidence)
     segment_evidence = [ev for ev in evidence if ev.get("field") == "client_segments"]
-    works_evidence = [ev for ev in evidence if ev.get("field") == "works_with"]
+    works_evidence = [
+        ev for ev in evidence
+        if ev.get("field") == "works_with" or ev.get("supports_works_with")
+    ]
     verified_segments = []
     for ev in segment_evidence:
-        value = _coerce_to_text(ev.get("segment"))
-        if value and value not in verified_segments:
-            verified_segments.append(value)
+        values = ev.get("supports_segments") or []
+        if not values and ev.get("segment"):
+            values = [ev.get("segment")]
+        for value in values:
+            value = _coerce_to_text(value)
+            if value and value not in verified_segments:
+                verified_segments.append(value)
     coverage_ratio = (len(verified_segments) / len(segments)) if segments else 0.0
     evidence_types: Dict[str, int] = {}
     for ev in evidence:
         kind = ev.get("evidence_type") or "body_text"
         evidence_types[kind] = evidence_types.get(kind, 0) + 1
     result["evidence_coverage"] = {
+        "ai_segments_received": len(segments) + dropped_segments,
+        "dropped_segments": dropped_segments,
         "total_segments": len(segments),
         "verified_segments": len(verified_segments),
         "unverified_segments": max(0, len(segments) - len(verified_segments)),
@@ -965,6 +996,93 @@ def _run_dspy_prediction(extractor: Any, lm: Any, website_text: str) -> Any:
     return extractor(website_text=website_text)
 
 
+def _record_subpage_failure(
+    discovery_stats: Dict[str, Any],
+    sub_url: str,
+    fetch_result: Any = None,
+    exc: Optional[Exception] = None,
+) -> None:
+    status_code = getattr(fetch_result, "status_code", None) if fetch_result is not None else None
+    fetch_status = getattr(fetch_result, "fetch_status", None) if fetch_result is not None else None
+    error = getattr(fetch_result, "error", None) if fetch_result is not None else None
+    method = getattr(fetch_result, "method", None) if fetch_result is not None else None
+    final_url = getattr(fetch_result, "final_url", None) if fetch_result is not None else None
+    if exc is not None:
+        reason = f"exception:{exc.__class__.__name__}"
+    elif error:
+        reason = str(error)
+    elif status_code in (403, 429, 503):
+        reason = {403: "forbidden_403", 429: "rate_limited_429", 503: "service_unavailable_503"}[status_code]
+    elif fetch_status == "blocked":
+        reason = "blocked_response"
+    elif fetch_status in {"timeout", "connection_error", "error", "ssrf_blocked"}:
+        reason = str(fetch_status)
+    else:
+        reason = "empty_or_non_html_response"
+    counts = discovery_stats.setdefault("subpage_error_counts", {})
+    counts[reason] = int(counts.get(reason, 0)) + 1
+    examples = discovery_stats.setdefault("subpage_errors", [])
+    if len(examples) < 20:
+        examples.append({
+            "url": sub_url,
+            "reason": reason,
+            "status_code": status_code,
+            "fetch_status": fetch_status,
+            "method": method,
+            "final_url": final_url or sub_url,
+        })
+
+
+def _apply_deterministic_fallback(
+    result: Dict[str, Any],
+    page_texts: List[Dict[str, str]],
+    *,
+    extract_contacts: bool,
+    extract_about: bool,
+    extract_services: bool,
+) -> None:
+    texts = [re.sub(r"\s+", " ", page.get("text") or "").strip() for page in page_texts]
+    combined = " ".join(texts)
+    if not combined:
+        return
+    if extract_contacts and not result.get("contacts"):
+        phones = re.findall(r"(?:\+?7|8)[\s\-()\d]{9,}", combined)
+        emails = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", combined, flags=re.IGNORECASE)
+        contacts = []
+        for value in [*phones, *emails]:
+            value = re.sub(r"\s+", " ", value).strip(" ,.;")
+            if value and value not in contacts:
+                contacts.append(value)
+        result["contacts"] = ", ".join(contacts[:5])
+        if result["contacts"]:
+            result.setdefault("field_status", {})["contacts"] = "fallback"
+    if extract_about and not result.get("about"):
+        sentences = _sentences(texts[0])
+        result["about"] = " ".join(sentences[:2])[:700]
+        if result["about"]:
+            result.setdefault("field_status", {})["about"] = "fallback"
+    if extract_services and not result.get("services"):
+        service_re = re.compile(r"(услуг|сопровожд|обучени|подготов|мониторинг|участ(?:ие|ия)|тендер|закуп|консультац|разработ)", re.IGNORECASE)
+        services = []
+        for sentence in _sentences(combined):
+            sentence = sentence.strip()
+            if len(sentence) < 18 or not service_re.search(sentence):
+                continue
+            if sentence not in services:
+                services.append(sentence[:240])
+            if len(services) >= 8:
+                break
+        result["services"] = services
+        result["focus"] = services[0] if services else ""
+        if services:
+            result.setdefault("field_status", {})["services"] = "fallback"
+            result.setdefault("field_status", {})["focus"] = "fallback"
+    if result.get("contacts") or result.get("about") or result.get("services") or result.get("focus"):
+        result["data_status"] = "partial"
+        result["stats"]["deterministic_fallback_used"] = True
+        _append_warning(result, "AI-анализ не завершился; сохранены детерминированные поля из загруженного текста сайта")
+
+
 async def parse_url_dspy(
     url: str,
     extract_contacts: bool,
@@ -1009,6 +1127,8 @@ async def parse_url_dspy(
         "pages_fetch_succeeded": 0,
         "pages_fetch_failed": 0,
         "queue_remaining": 0,
+        "subpage_error_counts": {},
+        "subpage_errors": [],
     }
     base_host = base_hostname(url)
 
@@ -1079,10 +1199,12 @@ async def parse_url_dspy(
                         discovery_stats["pages_fetch_succeeded"] += 1
                     else:
                         discovery_stats["pages_fetch_failed"] += 1
+                        _record_subpage_failure(discovery_stats, sub_url, sub_res)
                     return sub_url, depth, score, sub_html
-                except Exception:
+                except Exception as exc:
                     discovery_stats["pages_fetch_attempted"] += 1
                     discovery_stats["pages_fetch_failed"] += 1
+                    _record_subpage_failure(discovery_stats, sub_url, exc=exc)
                     return sub_url, depth, score, None
 
             while queue and len(htmls) < MAX_SUBPAGES + 1:
@@ -1150,10 +1272,16 @@ async def parse_url_dspy(
     result = _base_result(url, title_text, task_id=task_id, item_id=item_id)
     result["stats"]["pages_scanned"] = len(page_texts)
     result["stats"]["discovery"] = discovery_stats
+    result["subpage_errors"] = discovery_stats.get("subpage_errors", [])
+    result["crawl_status"] = "partial" if discovery_stats.get("pages_fetch_failed") else ("ok" if page_texts else "empty")
+    result["data_status"] = "raw_available" if page_texts else "empty"
     audience_evidence = _extract_audience_evidence(page_texts)
     effective_api_key = (deepseek_api_key or DEEPSEEK_API_KEY or "").strip()
 
     if not clean_text.strip():
+        result["crawl_status"] = "empty"
+        result["data_status"] = "empty"
+        result["ai_status"] = "not_started"
         result["status"] = "fetch_error"
         result["error"] = "Ошибка: пустой контент"
         _mark_requested_statuses(
@@ -1173,8 +1301,12 @@ async def parse_url_dspy(
                 logger.debug(f"redis set failed: {e}")
         return result
 
+    llm_failed = False
     if extract_services or extract_about or extract_contacts or extract_clients:
+        result["ai_status"] = "running"
         if not effective_api_key:
+            llm_failed = True
+            result["ai_status"] = "failed"
             result["status"] = "llm_error"
             result["error_code"] = "missing_deepseek_api_key"
             result["error"] = "Ошибка ИИ: не задан DEEPSEEK_API_KEY"
@@ -1189,7 +1321,6 @@ async def parse_url_dspy(
             if extract_clients:
                 _apply_client_fallback(result, "llm_error")
         else:
-            llm_failed = False
             result["stats"]["llm_attempts"] = 1
             try:
                 # Set up DSPy with DeepSeek model
@@ -1220,6 +1351,7 @@ async def parse_url_dspy(
                     extract_services=extract_services,
                     extract_clients=extract_clients,
                 )
+                result["ai_status"] = "ok"
                      
             except Exception as e:
                 lm_obj = locals().get("lm")
@@ -1240,6 +1372,7 @@ async def parse_url_dspy(
                             extract_clients=extract_clients,
                         )
                         result["stats"]["llm_recovered_from_history"] = True
+                        result["ai_status"] = "recovered"
                         _append_warning(result, "DSPy adapter не разобрал ответ; поля восстановлены из raw LM history")
                         recovery_applied = True
                     except Exception as recovery_error:
@@ -1265,6 +1398,7 @@ async def parse_url_dspy(
                             extract_services=extract_services,
                             extract_clients=extract_clients,
                         )
+                        result["ai_status"] = "recovered"
                         _append_warning(result, "Результат получен после повторной DSPy-попытки с fallback-схемой")
                     except Exception as fallback_error:
                         try:
@@ -1278,30 +1412,44 @@ async def parse_url_dspy(
                                 extract_services=extract_services,
                                 extract_clients=extract_clients,
                             )
+                            result["ai_status"] = "recovered"
                             _append_warning(result, "Результат восстановлен прямым JSON-запросом после ошибки DSPy-адаптера")
                         except Exception as repair_error:
                             logger.exception(f"DSPy extraction failed for {url}")
+                            result["ai_status"] = "failed"
                             result["status"] = "llm_error"
                             result["error_code"] = "dspy_extraction_failed"
                             result["error"] = f"Ошибка ИИ: {str(repair_error)[:500]}"
                             _append_warning(result, "DSPy не вернул валидный структурированный JSON-ответ после 3 попыток")
                             llm_failed = True
 
-            _mark_non_client_field_statuses(
+        _mark_non_client_field_statuses(
+            result,
+            extract_contacts=extract_contacts,
+            extract_about=extract_about,
+            extract_services=extract_services,
+            missing_status="llm_error" if llm_failed else "not_found",
+        )
+        _finalize_client_fields(
+            result,
+            extract_clients=extract_clients,
+            audience_evidence=audience_evidence,
+            llm_failed=llm_failed,
+        )
+        _finalize_site_status(result)
+        if result["ai_status"] == "failed":
+            _apply_deterministic_fallback(
                 result,
+                page_texts,
                 extract_contacts=extract_contacts,
                 extract_about=extract_about,
                 extract_services=extract_services,
-                missing_status="llm_error" if llm_failed else "not_found",
-            )
-            _finalize_client_fields(
-                result,
-                extract_clients=extract_clients,
-                audience_evidence=audience_evidence,
-                llm_failed=llm_failed,
             )
             _finalize_site_status(result)
+        result["data_status"] = "partial" if result["ai_status"] in {"failed", "recovered"} else "complete"
     else:
+        result["ai_status"] = "not_requested"
+        result["data_status"] = "complete" if page_texts else "empty"
         _finalize_site_status(result)
             
     # Кэшируем только успешные результаты. Если ИИ-извлечение было запрошено, но
