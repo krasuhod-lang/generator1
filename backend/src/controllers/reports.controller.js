@@ -40,6 +40,8 @@ const { buildReportPdf } = require('../services/reports/pdfExporter');
 const { resolveViewMode } = require('../services/projects/viewMode');
 const { sanitizeDraft, sanitizeData, sanitizeSummary } = require('../services/reports/viewModeSanitizer');
 const { deepMerge } = require('../services/reports/overridesApplier');
+const { enqueueOutbox } = require('../services/tasks/reliability');
+const { makeBullJobId } = require('../queue/jobIds');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -83,6 +85,12 @@ function _serializeDraft(row) {
     llm_status: row.llm_status,
     llm_generated_at: row.llm_generated_at,
     llm_error: row.llm_error || null,
+    analysis_id: row.analysis_id || null,
+    snapshot_id: row.snapshot_id || null,
+    report_model_version: row.report_model_version || 'reports-v2',
+    client_insights: row.client_insights || {},
+    selected_opportunity_ids: row.selected_opportunity_ids || [],
+    data_quality: row.data_quality || {},
     overrides: row.overrides || {},
     overrides_meta: row.overrides_meta || {},
     logo_url: row.logo_url || null,
@@ -168,10 +176,20 @@ async function createDraft(req, res) {
   );
   if (!pRows.length) return _bad(res, 404, 'Проект не найден');
 
+  const { rows: provenanceRows } = await db.query(
+    `SELECT id, snapshot_id
+       FROM project_analyses
+      WHERE project_id=$1 AND user_id=$2 AND status='done'
+      ORDER BY completed_at DESC NULLS LAST, created_at DESC
+      LIMIT 1`,
+    [project_id, req.user.id],
+  );
+  const provenance = provenanceRows[0] || {};
+
   const { rows } = await db.query(
     `INSERT INTO report_drafts
-       (project_id, user_id, title, date_from, date_to, config, tasks_blocks)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (project_id, user_id, title, date_from, date_to, config, tasks_blocks, analysis_id, snapshot_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id`,
     [
       project_id,
@@ -181,6 +199,8 @@ async function createDraft(req, res) {
       date_to,
       JSON.stringify(config || {}),
       JSON.stringify(tasks_blocks || []),
+      provenance.id || null,
+      provenance.snapshot_id || null,
     ],
   );
   const draft = await _ownedDraft(rows[0].id, req.user.id);
@@ -352,86 +372,28 @@ async function generateSummaryEndpoint(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
 
-  const jobId = crypto.randomUUID();
+  const jobId = makeBullJobId('report-summary', draft.id, crypto.randomUUID());
   await db.query(
     `UPDATE report_drafts
-        SET llm_status = 'queued', llm_job_id = $3, llm_error = NULL, updated_at = NOW()
+        SET llm_status = 'queued', llm_job_id = $3, llm_error = NULL,
+            llm_last_error_code = NULL, llm_recovery_attempts = 0, updated_at = NOW()
       WHERE id = $1 AND user_id = $2`,
     [draft.id, req.user.id, jobId],
   );
 
-  // Capture filter state from request before going async.
   const summaryOpts = {
     from: req.query?.from || undefined,
     to: req.query?.to || undefined,
     granularity: req.query?.granularity || undefined,
   };
+  await enqueueOutbox({
+    queueName: 'report-summary',
+    jobName: 'run-summary',
+    jobId,
+    payload: { draftId: draft.id, userId: req.user.id, jobId, opts: summaryOpts },
+  });
 
-  // Запуск без ожидания: возвращаем 202 с jobId, фронт опрашивает status.
-  setImmediate(() => _runSummaryJob(draft.id, req.user.id, jobId, summaryOpts).catch((err) => {
-    console.error('[reports] summary job crashed:', err.message);
-  }));
-
-  res.status(202).json({ job_id: jobId, status: 'queued' });
-}
-
-async function _runSummaryJob(draftId, userId, jobId, opts = {}) {
-  await db.query(
-    `UPDATE report_drafts SET llm_status = 'running', updated_at = NOW()
-      WHERE id = $1 AND user_id = $2 AND llm_job_id = $3`,
-    [draftId, userId, jobId],
-  );
-  try {
-    const draft = await _ownedDraft(draftId, userId);
-    if (!draft) return;
-    const data = await aggregateForDraft(draft, {
-      from: opts.from,
-      to: opts.to,
-      granularity: opts.granularity,
-    });
-    const summary = await generateSummary(data, {
-      brandName: draft.project_name,
-      period: _periodLabel(draft.date_from, draft.date_to),
-    });
-    await db.query(
-      `UPDATE report_drafts
-          SET llm_status = 'done',
-              llm_summary = $3,
-              llm_highlights = $4,
-              llm_growth = $5,
-              llm_quick_wins = $6,
-              llm_vulnerabilities = $7,
-              llm_roadmap = $8,
-              llm_traffic_value = $9,
-              llm_next_month_forecast = $11,
-              llm_generated_at = NOW(),
-              llm_error = NULL,
-              updated_at = NOW()
-        WHERE id = $1 AND user_id = $2 AND llm_job_id = $10`,
-      [
-        draftId,
-        userId,
-        summary.executive_summary || '',
-        JSON.stringify(summary.highlights || []),
-        JSON.stringify(summary.growth_attribution || []),
-        JSON.stringify(summary.quick_wins || []),
-        JSON.stringify(summary.vulnerabilities || []),
-        JSON.stringify(summary.roadmap || []),
-        summary.traffic_value || '',
-        jobId,
-        summary.next_month_forecast || '',
-      ],
-    );
-  } catch (err) {
-    await db.query(
-      `UPDATE report_drafts
-          SET llm_status = 'error',
-              llm_error = $3,
-              updated_at = NOW()
-        WHERE id = $1 AND user_id = $2 AND llm_job_id = $4`,
-      [draftId, userId, String(err.message || err).slice(0, 1000), jobId],
-    );
-  }
+  res.status(202).json({ job_id: jobId, status: 'queued', dispatch: 'durable_outbox' });
 }
 
 async function getSummaryStatus(req, res) {

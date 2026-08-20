@@ -96,6 +96,9 @@ const perfError = ref('');
 
 // Analysis
 const currentAnalysis = ref(null);
+const growthOpportunities = ref([]);
+const growthLoading = ref(false);
+const growthError = ref('');
 const analyzing = ref(false);
 let analysisTimer = null;
 
@@ -513,6 +516,26 @@ function applyCustom() {
 }
 
 // ── AI-аналитика ──────────────────────────────────────────────────
+async function loadGrowthOpportunities() {
+  growthLoading.value = true;
+  growthError.value = '';
+  try {
+    const { data } = await api.get(`/projects/${projectId}/growth`, { params: { status: 'open', limit: 10 } });
+    growthOpportunities.value = data?.opportunities || [];
+  } catch (err) {
+    growthError.value = err.response?.data?.error || 'Не удалось загрузить точки роста';
+  } finally {
+    growthLoading.value = false;
+  }
+}
+
+function growthCategoryLabel(category) {
+  return ({ striking_distance: 'Позиции 11–20', ctr_gap: 'CTR', content: 'Контент', off_page: 'Ссылки', technical: 'Техническое' }[category] || 'SEO');
+}
+function growthPriorityLabel(priority) {
+  return ({ critical: 'Критично', high: 'Высокий', medium: 'Средний', low: 'Низкий' }[priority] || 'Средний');
+}
+
 async function runAnalysis() {
   analyzing.value = true;
   currentAnalysis.value = null;
@@ -546,6 +569,7 @@ function pollAnalysis(aid) {
       if (a.status === 'done' || a.status === 'error') {
         analyzing.value = false;
         await refreshAnalysesList();
+        await loadGrowthOpportunities();
         return;
       }
     } catch (_) {
@@ -576,6 +600,7 @@ async function loadLatestAnalysis() {
   if (done) {
     try { currentAnalysis.value = await store.getAnalysis(projectId, done.id); } catch (_) { /* no-op */ }
   }
+  await loadGrowthOpportunities();
 }
 
 async function openAnalysis(a) {
@@ -1180,6 +1205,30 @@ onUnmounted(() => {
 
         <!-- ============ Вкладка: Сравнение и рекомендации ============ -->
         <div v-show="activeTab === 'compare'" class="space-y-5">
+          <section class="card space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 class="text-sm font-semibold uppercase tracking-wider text-emerald-300">Точки роста проекта</h2>
+                <p class="text-xs text-gray-400 mt-1">Единый список возможностей из анализа, источников данных и задач. Каждая точка имеет действие и проверяемый результат.</p>
+              </div>
+              <button class="btn-secondary" :disabled="growthLoading" @click="loadGrowthOpportunities">{{ growthLoading ? 'Обновляем…' : 'Обновить' }}</button>
+            </div>
+            <p v-if="growthError" class="text-xs text-amber-300">{{ growthError }}</p>
+            <div v-else-if="growthLoading && !growthOpportunities.length" class="text-sm text-gray-500">Загружаем точки роста…</div>
+            <div v-else-if="!growthOpportunities.length" class="text-sm text-gray-500">После завершения анализа появятся подтверждённые возможности роста.</div>
+            <div v-else class="grid md:grid-cols-2 gap-3">
+              <article v-for="item in growthOpportunities.slice(0, 6)" :key="item.id || item.opportunity_key" class="rounded-lg border border-gray-800 bg-gray-900/40 p-4 space-y-2">
+                <div class="flex items-center justify-between gap-2 text-[11px] uppercase tracking-wider">
+                  <span class="text-emerald-300">{{ growthCategoryLabel(item.category) }}</span>
+                  <span class="text-gray-400">{{ growthPriorityLabel(item.priority) }}</span>
+                </div>
+                <h3 class="text-sm font-semibold text-gray-100">{{ item.title }}</h3>
+                <p v-if="item.observed_fact" class="text-xs text-gray-300"><b>Факт:</b> {{ item.observed_fact }}</p>
+                <p v-if="item.recommendation" class="text-xs text-gray-400"><b>Действие:</b> {{ item.recommendation }}</p>
+                <p v-if="item.success_metric" class="text-xs text-emerald-200"><b>Проверка:</b> {{ item.success_metric }}</p>
+              </article>
+            </div>
+          </section>
           <!-- Аудит факторов ранжирования: чего не хватает для роста -->
           <RankingFactorsCard v-if="rankingFactorsData" :ranking-factors="rankingFactorsData" />
 

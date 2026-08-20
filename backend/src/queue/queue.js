@@ -53,12 +53,16 @@ const generationQueue = makeQueue('content-generation');
 const parserQueue = makeQueue('parser-scans');
 const siteCrawlerQueue = makeQueue('site-crawls');
 const auditQueue = makeQueue('audit-jobs');
+const projectAnalysisQueue = makeQueue('project-analysis');
+const reportSummaryQueue = makeQueue('report-summary');
 
 module.exports = {
   generationQueue,
   parserQueue,
   siteCrawlerQueue,
   auditQueue,
+  projectAnalysisQueue,
+  reportSummaryQueue,
   connection,
   JOB_RETENTION,
   DEFAULT_JOB_OPTIONS,

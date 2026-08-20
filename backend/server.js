@@ -459,6 +459,14 @@ const start = async () => {
       console.warn('[Server] Reliability scheduler skipped:', e.message);
     }
 
+    // Durable Projects -> Reports workers: analysis и AI summary переживают рестарт.
+    try {
+      const { startProjectReportWorkers } = require('./src/queue/projectReportWorker');
+      startProjectReportWorkers().catch((e) => console.warn('[Server] Project/report workers skipped:', e.message));
+    } catch (e) {
+      console.warn('[Server] Project/report workers skipped:', e.message);
+    }
+
     // 🧹 Storage retention — суточная авто-очистка старых/упавших генераций
     // из БД и с диска (gating через STORAGE_RETENTION_ENABLED=1).
     try {
@@ -494,6 +502,7 @@ const start = async () => {
       try {
         await new Promise((resolve) => server.close(() => resolve()));
         try { require('./src/services/tasks/reliability').stopReliabilityScheduler(); } catch (_) {}
+        try { await require('./src/queue/projectReportWorker').stopProjectReportWorkers(); } catch (_) {}
         try {
           const queues = require('./src/queue/queue');
           await Promise.all(Object.values(queues)

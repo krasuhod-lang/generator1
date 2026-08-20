@@ -34,8 +34,9 @@ async function recordTask(payload = {}) {
     const { rows } = await db.query(
       `INSERT INTO tasks_auto_log
         (project_id, user_id, task_type, title, description,
-         performed_at, source, ref_table, ref_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         performed_at, source, ref_table, ref_id, opportunity_id, analysis_id,
+         source_snapshot_id, success_metric, after_check_due_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING id`,
       [
         projectId,
@@ -47,6 +48,11 @@ async function recordTask(payload = {}) {
         source,
         payload.refTable || null,
         payload.refId || null,
+        payload.opportunityId || payload.opportunity_id || null,
+        payload.analysisId || payload.analysis_id || null,
+        payload.sourceSnapshotId || payload.source_snapshot_id || null,
+        payload.successMetric || payload.success_metric || null,
+        payload.afterCheckDueAt || payload.after_check_due_at || null,
       ],
     );
     return rows[0]?.id || null;
@@ -64,49 +70,57 @@ const MODULE_SEGMENTS = [
   `SELECT project_id, user_id, 'content_generation' AS task_type,
           ('Статья: ' || COALESCE(NULLIF(topic, ''), 'без темы')) AS title,
           COALESCE(updated_at, created_at)::date AS performed_at,
-          'info_article_tasks' AS ref_table, id AS ref_id
+          'info_article_tasks' AS ref_table, id AS ref_id,
+          opportunity_id, analysis_id, source_snapshot_id, NULL::text AS success_metric
      FROM info_article_tasks
     WHERE project_id = $1 AND status = 'done'`,
   `SELECT project_id, user_id, 'link_article' AS task_type,
           ('Ссылочная статья: ' || COALESCE(NULLIF(topic, ''), NULLIF(anchor_text, ''), 'без темы')) AS title,
           COALESCE(updated_at, created_at)::date AS performed_at,
-          'link_article_tasks' AS ref_table, id AS ref_id
+          'link_article_tasks' AS ref_table, id AS ref_id,
+          opportunity_id, analysis_id, source_snapshot_id, NULL::text AS success_metric
      FROM link_article_tasks
     WHERE project_id = $1 AND status = 'done'`,
   `SELECT project_id, user_id, 'meta_update' AS task_type,
           ('Мета-теги: ' || COALESCE(NULLIF(name, ''), 'без названия')) AS title,
           created_at::date AS performed_at,
-          'meta_tag_tasks' AS ref_table, id AS ref_id
+          'meta_tag_tasks' AS ref_table, id AS ref_id,
+          opportunity_id, analysis_id, source_snapshot_id, NULL::text AS success_metric
      FROM meta_tag_tasks
     WHERE project_id = $1 AND status = 'done'`,
   `SELECT project_id, user_id, 'content_generation' AS task_type,
           ('Подбор тем статей: ' || COALESCE(NULLIF(niche, ''), 'без ниши')) AS title,
           COALESCE(updated_at, created_at)::date AS performed_at,
-          'article_topic_tasks' AS ref_table, id AS ref_id
+          'article_topic_tasks' AS ref_table, id AS ref_id,
+          NULL::uuid AS opportunity_id, NULL::uuid AS analysis_id, NULL::uuid AS source_snapshot_id, NULL::text AS success_metric
      FROM article_topic_tasks
     WHERE project_id = $1 AND status = 'done'`,
   `SELECT project_id, user_id, 'other' AS task_type,
           ('Анализ релевантности: ' || COALESCE(NULLIF(query, ''), 'без запроса')) AS title,
           created_at::date AS performed_at,
-          'relevance_reports' AS ref_table, id AS ref_id
+          'relevance_reports' AS ref_table, id AS ref_id,
+          NULL::uuid AS opportunity_id, NULL::uuid AS analysis_id, NULL::uuid AS source_snapshot_id, NULL::text AS success_metric
      FROM relevance_reports
     WHERE project_id = $1 AND status = 'done'`,
   `SELECT project_id, user_id, 'other' AS task_type,
           ('Прогноз трафика: ' || COALESCE(NULLIF(name, ''), 'без названия')) AS title,
           COALESCE(updated_at, created_at)::date AS performed_at,
-          'forecaster_tasks' AS ref_table, id AS ref_id
+          'forecaster_tasks' AS ref_table, id AS ref_id,
+          NULL::uuid AS opportunity_id, NULL::uuid AS analysis_id, NULL::uuid AS source_snapshot_id, NULL::text AS success_metric
      FROM forecaster_tasks
     WHERE project_id = $1 AND status = 'done'`,
   `SELECT project_id, user_id, 'other' AS task_type,
           ('SERP-анализ B2B: ' || COALESCE(NULLIF(name, ''), NULLIF(query, ''), 'без запроса')) AS title,
           COALESCE(updated_at, created_at)::date AS performed_at,
-          'serp_b2b_tasks' AS ref_table, id AS ref_id
+          'serp_b2b_tasks' AS ref_table, id AS ref_id,
+          NULL::uuid AS opportunity_id, NULL::uuid AS analysis_id, NULL::uuid AS source_snapshot_id, NULL::text AS success_metric
      FROM serp_b2b_tasks
     WHERE project_id = $1 AND status = 'done'`,
   `SELECT project_id, user_id, 'other' AS task_type,
           'AI-аналитика проекта (GSC)' AS title,
           COALESCE(completed_at, created_at)::date AS performed_at,
-          'project_analyses' AS ref_table, id AS ref_id
+          'project_analyses' AS ref_table, id AS ref_id,
+          NULL::uuid AS opportunity_id, id AS analysis_id, snapshot_id AS source_snapshot_id, NULL::text AS success_metric
      FROM project_analyses
     WHERE project_id = $1 AND status = 'done'`,
 ];
@@ -123,9 +137,11 @@ async function syncFromModules(projectId) {
     const unionSql = MODULE_SEGMENTS.join(' UNION ALL ');
     const { rowCount } = await db.query(
       `INSERT INTO tasks_auto_log
-         (project_id, user_id, task_type, title, performed_at, source, ref_table, ref_id)
+         (project_id, user_id, task_type, title, performed_at, source, ref_table, ref_id,
+          opportunity_id, analysis_id, source_snapshot_id, success_metric)
        SELECT s.project_id, s.user_id, s.task_type, LEFT(s.title, 512),
-              s.performed_at, 'platform_auto', s.ref_table, s.ref_id
+              s.performed_at, 'platform_auto', s.ref_table, s.ref_id,
+              s.opportunity_id, s.analysis_id, s.source_snapshot_id, s.success_metric
          FROM (${unionSql}) s
         WHERE NOT EXISTS (
                 SELECT 1 FROM tasks_auto_log l
@@ -146,7 +162,8 @@ async function listForPeriod(projectId, dateFrom, dateTo, opts = {}) {
   const includeHidden = opts.includeHidden === true;
   const { rows } = await db.query(
     `SELECT id, task_type, title, description, performed_at,
-            source, is_hidden, ref_table, ref_id
+            source, is_hidden, ref_table, ref_id, opportunity_id, analysis_id,
+            source_snapshot_id, success_metric, after_check_due_at
        FROM tasks_auto_log
       WHERE project_id = $1
         AND performed_at >= $2::date

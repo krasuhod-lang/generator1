@@ -78,7 +78,8 @@ async function loadBacklinks(projectId) {
   }
 }
 
-async function _gscQueryPageRows(project, from, to) {
+async function _gscQueryPageRows(project, from, to, providedRows = null) {
+  if (Array.isArray(providedRows)) return providedRows;
   if (!project.gsc_connected || !project.gsc_site_url) return [];
   try {
     return await gscService.fetchQueryPageMatrix(project, { from, to });
@@ -97,7 +98,7 @@ async function buildModulesForProject(project, opts = {}) {
   const config = opts.config || {};
   const [settings, queryPageRows, techAudit, backlinks] = await Promise.all([
     loadSettings(project.id),
-    _gscQueryPageRows(project, from, to),
+    _gscQueryPageRows(project, from, to, opts.queryPageRows),
     loadTechAudit(project.id),
     loadBacklinks(project.id),
   ]);

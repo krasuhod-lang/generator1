@@ -124,6 +124,51 @@ function _sanitizeSection(section) {
   return _stripKeys(section, SECTION_TECH_FIELDS);
 }
 
+function _sanitizeGrowthOpportunity(item) {
+  if (!_isObj(item)) return item;
+  return {
+    id: item.id,
+    opportunity_key: item.opportunity_key,
+    category: item.category,
+    status: item.status,
+    priority: item.priority,
+    title: item.title,
+    target: item.target || {},
+    current_metric: item.current_metric || {},
+    impact: item.impact || {},
+    observed_fact: item.observed_fact || null,
+    recommendation: item.recommendation || null,
+    success_metric: item.success_metric || null,
+    measurement: item.measurement || {},
+    next_check_at: item.next_check_at || null,
+    measured_at: item.measured_at || null,
+    linked_task_ids: Array.isArray(item.linked_task_ids) ? item.linked_task_ids.slice(0, 10) : [],
+    confidence: item.confidence ?? null,
+    evidence: Array.isArray(item.evidence)
+      ? item.evidence.slice(0, 2).map((e) => ({
+        source: e?.source || null,
+        url: e?.url || null,
+        query: e?.query || null,
+        fact: e?.fact || null,
+      }))
+      : [],
+    updated_at: item.updated_at || null,
+  };
+}
+
+function _sanitizeGrowthBlock(growth) {
+  if (!_isObj(growth)) return growth;
+  const opportunities = Array.isArray(growth.opportunities)
+    ? growth.opportunities.slice(0, CLIENT_ITEMS_LIMIT).map(_sanitizeGrowthOpportunity)
+    : [];
+  return {
+    opportunities,
+    top: opportunities.slice(0, 5),
+    count: Number(growth.count) || opportunities.length,
+    updated_at: growth.updated_at || null,
+  };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────
 
 /**
@@ -169,6 +214,7 @@ function sanitizeData(data, mode) {
     if (_isObj(copy[key])) copy[key] = _sanitizeSection(copy[key]);
   }
   if (_isObj(copy.modules)) copy.modules = _sanitizeModulesBlock(copy.modules);
+  if (_isObj(copy.growth)) copy.growth = _sanitizeGrowthBlock(copy.growth);
   // tasks.items в client mode не должны содержать description (HTML с внутренними
   // пометками) — оставим только client-safe поля.
   if (_isObj(copy.tasks) && Array.isArray(copy.tasks.items)) {
@@ -213,5 +259,7 @@ module.exports = {
     _sanitizeModule,
     _sanitizeModulesBlock,
     _sanitizeSection,
+    _sanitizeGrowthBlock,
+    _sanitizeGrowthOpportunity,
   },
 };

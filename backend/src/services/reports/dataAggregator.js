@@ -13,6 +13,10 @@ const freshnessService = require('../projects/freshnessService');
 const { buildHeadline } = require('./headlineBuilder');
 const { splitSeriesIntoMonths } = require('../projects/periodResolver');
 const { applyOverrides } = require('./overridesApplier');
+const {
+  upsertGrowthOpportunities,
+  listGrowthOpportunities,
+} = require('../projects/growthOpportunities');
 const { classifyQuery, deriveBrandTokens } = require('../projects/commercialIntent');
 const { classifyUrl } = require('./urlClassifier');
 const { getProjectsConfig } = require('../projects/config');
@@ -1222,6 +1226,23 @@ async function aggregateForDraft(draft, opts = {}) {
     failed_sources: coreIntegrations.filter((i) => i.status === 'error').map((i) => i.label),
   };
 
+  let growthOpportunities = [];
+  try {
+    if (opts.persistGrowth) {
+      await upsertGrowthOpportunities({
+        projectId: project.id,
+        analysisId: opts.analysisId || null,
+        snapshotId: opts.snapshotId || null,
+        modules,
+        source: opts.growthSource || 'report_aggregation',
+        observedAt: new Date().toISOString(),
+      });
+    }
+    growthOpportunities = await listGrowthOpportunities(project.id, { status: 'all', limit: 50 });
+  } catch (error) {
+    console.warn('[reports][growth] opportunity materialization failed:', error.message);
+  }
+
   const payload = {
     project: {
       id: project.id,
@@ -1238,9 +1259,27 @@ async function aggregateForDraft(draft, opts = {}) {
     position,
     tasks,
     modules,
+    growth: {
+      opportunities: growthOpportunities,
+      top: growthOpportunities.slice(0, 5),
+      count: growthOpportunities.length,
+      source: opts.persistGrowth ? (opts.growthSource || 'report_aggregation') : 'persisted_analysis',
+      updated_at: growthOpportunities[0]?.updated_at || null,
+    },
     queries,
     integrations,
     completeness,
+    data_quality: {
+      completeness,
+      integrations: integrations.map((item) => ({
+        id: item.id,
+        label: item.label,
+        status: item.status,
+        reason: item.reason || null,
+        last_sync_at: item.last_sync_at || null,
+      })),
+      generated_at: new Date().toISOString(),
+    },
     view_mode: viewMode,
     traffic_value: _buildTrafficValue(keysSo, gsc, ywm),
     forecast: _buildForecast(gsc, keysSo),

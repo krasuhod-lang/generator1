@@ -105,6 +105,7 @@ const navItems = computed(() => {
   if (props.summary?.growth_attribution?.length || props.summary?.highlights?.length) {
     items.push({ id: 'ai-analysis', label: 'AI-выводы' });
   }
+  if (growthOpportunities.value.length) items.push({ id: 'growth', label: 'Точки роста' });
   if (props.summary?.next_month_forecast) {
     items.push({ id: 'forecast', label: 'Прогноз' });
   }
@@ -626,6 +627,31 @@ function formatPct(v) {
 function formatNum(v) {
   return v == null ? '—' : Number(v).toLocaleString('ru-RU');
 }
+
+const growthOpportunities = computed(() => {
+  const rows = Array.isArray(props.data?.growth?.opportunities)
+    ? props.data.growth.opportunities
+    : [];
+  return rows.slice(0, isClient.value ? 5 : 20);
+});
+
+function growthCategoryLabel(category) {
+  const labels = {
+    striking_distance: 'Позиции 11–20',
+    ctr_gap: 'CTR',
+    content: 'Контент',
+    off_page: 'Ссылки',
+    technical: 'Техническое',
+  };
+  return labels[category] || 'SEO-возможность';
+}
+function growthPriorityLabel(priority) {
+  const labels = { critical: 'Критично', high: 'Высокий', medium: 'Средний', low: 'Низкий' };
+  return labels[priority] || 'Средний';
+}
+function growthTargetLabel(item) {
+  return item?.target?.url || item?.target?.query || item?.target?.donor_domain || '';
+}
 </script>
 
 <template>
@@ -674,6 +700,40 @@ function formatNum(v) {
     <ExecutiveHeadline :headline="data?.headline"
                        :view-mode="viewMode"
                        :accent="accent" />
+
+    <section v-if="growthOpportunities.length" id="report-growth" class="rblk growth-overview">
+      <div class="growth-overview-head">
+        <div>
+          <h2>Точки роста</h2>
+          <p class="chart-desc">Приоритетные возможности, подтверждённые данными проекта. Каждая рекомендация связана с измеримым следующим шагом.</p>
+        </div>
+        <span v-if="data?.growth?.updated_at" class="growth-updated">Обновлено {{ formatDateTime(data.growth.updated_at) }}</span>
+      </div>
+      <div class="growth-opportunity-grid">
+        <article v-for="item in growthOpportunities" :key="item.id || item.opportunity_key" class="growth-opportunity-card">
+          <div class="growth-opportunity-meta">
+            <span class="growth-category">{{ growthCategoryLabel(item.category) }}</span>
+            <span :class="['growth-priority', `priority-${item.priority || 'medium'}`]">{{ growthPriorityLabel(item.priority) }}</span>
+          </div>
+          <h3>{{ item.title }}</h3>
+          <a v-if="growthTargetLabel(item)" class="growth-target" :href="item.target?.url || undefined" target="_blank" rel="noopener">
+            {{ growthTargetLabel(item) }}
+          </a>
+          <p v-if="item.observed_fact" class="growth-observed"><strong>Факт:</strong> {{ item.observed_fact }}</p>
+          <p v-if="item.recommendation" class="growth-action"><strong>Действие:</strong> {{ item.recommendation }}</p>
+          <p v-if="item.success_metric" class="growth-success"><strong>Проверка результата:</strong> {{ item.success_metric }}</p>
+          <p v-if="item.next_check_at" class="growth-check-date">Повторная проверка: {{ item.next_check_at }}</p>
+          <p v-if="item.linked_task_ids?.length" class="growth-linked-tasks">Связано задач: {{ item.linked_task_ids.length }}</p>
+          <details v-if="!isClient && item.evidence?.length" class="growth-evidence">
+            <summary>Источник и evidence</summary>
+            <div v-for="(evidence, evidenceIndex) in item.evidence" :key="evidenceIndex">
+              {{ evidence.source || 'project analysis' }}<span v-if="evidence.url"> · {{ evidence.url }}</span>
+              <span v-if="evidence.fact"> — {{ evidence.fact }}</span>
+            </div>
+          </details>
+        </article>
+      </div>
+    </section>
 
     <section v-if="summary?.next_month_forecast" id="report-forecast" class="rblk forecast-card">
       <h2>📈 Прогноз роста на следующий месяц</h2>
@@ -1051,6 +1111,25 @@ function formatNum(v) {
 </template>
 
 <style scoped>
+.growth-overview-head { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
+.growth-updated { color:#6e6e73; font-size:12px; white-space:nowrap; }
+.growth-opportunity-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:14px; }
+.growth-opportunity-card { border:1px solid rgba(60,60,67,.12); border-radius:14px; padding:16px; background:#fbfbfd; display:flex; flex-direction:column; gap:8px; min-width:0; }
+.growth-opportunity-card h3 { margin:0; font-size:16px; line-height:1.35; }
+.growth-opportunity-meta { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+.growth-category { color:var(--accent); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+.growth-priority { border-radius:999px; padding:3px 8px; font-size:11px; font-weight:700; background:#eef2f7; color:#4b5563; }
+.growth-priority.priority-critical, .growth-priority.priority-high { background:#fff1f2; color:#be123c; }
+.growth-priority.priority-low { background:#ecfdf5; color:#047857; }
+.growth-target { color:var(--accent); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.growth-observed, .growth-action, .growth-success { margin:0; font-size:13px; line-height:1.45; color:#3a3a3c; }
+.growth-success { color:#166534; }
+.growth-check-date, .growth-linked-tasks { margin:0; font-size:12px; color:#6b7280; }
+.growth-linked-tasks { color:var(--accent); }
+.growth-evidence { margin-top:4px; font-size:12px; color:#6b7280; }
+.growth-evidence summary { cursor:pointer; color:var(--accent); }
+@media (max-width: 640px) { .growth-overview-head { flex-direction:column; } .growth-updated { white-space:normal; } }
+
 .completeness-banner {
   display: flex;
   gap: 0.5rem;

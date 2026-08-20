@@ -42,6 +42,8 @@ const { runYandexAnalysis } = require('./ydxAnalyzer');
 const { buildRankingFactors } = require('./rankingFactors');
 const { buildStrategyMap } = require('./strategyMap');
 const { runSynthesis } = require('./synthesisAnalyzer');
+const { buildModulesForProject } = require('../reports/reportModulesService');
+const { upsertGrowthOpportunities } = require('./growthOpportunities');
 
 /**
  * llmFn для donorTopicGenerator («Темы статей под анкоры»). Один батч-вызов
@@ -518,12 +520,20 @@ async function _buildActionPlan(project, snapshot, queryPage) {
   } catch (_) { return null; }
 }
 
-async function _setError(analysisId, message) {
+async function _setError(analysisId, message, leaseToken = null) {
+  const params = [analysisId, String(message || 'unknown').slice(0, 1000)];
+  let where = 'id = $1';
+  if (leaseToken) {
+    params.push(leaseToken);
+    where += ' AND lease_token = $3::uuid';
+  }
   await db.query(
     `UPDATE project_analyses
-        SET status = 'error', error_message = $2, completed_at = NOW()
-      WHERE id = $1`,
-    [analysisId, String(message || 'unknown').slice(0, 1000)],
+        SET status = 'error', error_message = $2, last_error_code = 'analysis_failed',
+            lease_token = NULL, lease_until = NULL, heartbeat_at = NOW(),
+            completed_at = NOW(), updated_at = NOW()
+      WHERE ${where}`,
+    params,
   );
 }
 
@@ -592,9 +602,15 @@ async function runYandexPass(project, range) {
 /**
  * @param {string} analysisId  id строки project_analyses (status='queued')
  */
-async function processAnalysis(analysisId) {
+async function processAnalysis(analysisId, durableContext = null) {
   let project;
   let range;
+  let heartbeatTimer = null;
+  const durable = durableContext && durableContext.leaseToken ? durableContext : null;
+  const checkpoint = async (value) => {
+    if (!durable || typeof durable.heartbeat !== 'function') return;
+    await durable.heartbeat(value || {});
+  };
   try {
     const { rows } = await db.query(
       `SELECT a.id, a.project_id, a.period_from, a.period_to, a.range_key,
@@ -631,10 +647,31 @@ async function processAnalysis(analysisId) {
       ? { from: _isoDate(row.period_from), to: _isoDate(row.period_to) }
       : { days: _daysForKey(row.range_key) };
 
-    await db.query(
-      `UPDATE project_analyses SET status = 'running', started_at = NOW() WHERE id = $1`,
-      [analysisId],
-    );
+    const started = durable
+      ? await db.query(
+        `UPDATE project_analyses
+            SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+          WHERE id = $1 AND lease_token = $2::uuid AND status = 'running'`,
+        [analysisId, durable.leaseToken],
+      )
+      : await db.query(
+        `UPDATE project_analyses SET status = 'running', started_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [analysisId],
+      );
+    if (durable && started.rowCount !== 1) {
+      const err = new Error('analysis_lease_lost');
+      err.code = 'analysis_lease_lost';
+      throw err;
+    }
+    await checkpoint({ stage: 'started', percent: 1 });
+    if (durable) {
+      heartbeatTimer = setInterval(() => {
+        checkpoint({ stage: 'heartbeat' }).catch((e) => {
+          console.warn(`[projects][${analysisId}] heartbeat failed:`, e.message);
+        });
+      }, durable.heartbeatMs || 15000);
+      if (heartbeatTimer.unref) heartbeatTimer.unref();
+    }
 
     // Загружаем user_id один раз — потребуется и для project_snapshots,
     // и для aegis-петли в конце.
@@ -648,6 +685,7 @@ async function processAnalysis(analysisId) {
     // подключён только к Яндексу, а сбой Google не должен «съедать» отчёт по
     // Яндексу (раньше при ошибке GSC/LLM анализ завершался до этого блока).
     const ydxPass = await runYandexPass(project, range);
+    await checkpoint({ stage: 'yandex_pass', percent: 15 });
     const ydxSnapshot = ydxPass.snapshot;
     const ydxPayload = ydxPass.payload;
     const ydxReport = ydxPass.report;
@@ -655,6 +693,7 @@ async function processAnalysis(analysisId) {
     // Сбор «голой» выгрузки GSC + все детерминированные срезы.
     let snapshot = null;
     let payload = null;
+    let growthModules = null;
     let gscError = null;
     try {
       const runCfg = getProjectsConfig().analysisRun || {};
@@ -663,6 +702,23 @@ async function processAnalysis(analysisId) {
       );
       if (!collected) throw new Error('Сбор данных не уложился в отведённое время');
       ({ snapshot, payload } = collected);
+      try {
+        growthModules = await buildModulesForProject(project, {
+          from: range.from || range.startDate,
+          to: range.to || range.endDate,
+          queryPageRows: Array.isArray(payload?.queryPage) ? payload.queryPage : [],
+          config: {
+            striking_distance: true,
+            ctr_gap: true,
+            content_health: true,
+            off_page: true,
+            tech_audit: true,
+          },
+        });
+      } catch (error) {
+        console.warn('[projects/analysisRunner] growth modules failed:', error.message);
+      }
+      await checkpoint({ stage: 'snapshot_collected', percent: 35 });
     } catch (e) {
       // ТЗ §5.2 — фиксируем ошибку sync GSC.
       try {
@@ -692,12 +748,28 @@ async function processAnalysis(analysisId) {
         });
         snapshotId = ins.id;
         await db.query(
-          `UPDATE project_analyses SET snapshot_id = $2 WHERE id = $1`,
-          [analysisId, snapshotId],
+          `UPDATE project_analyses SET snapshot_id = $2, updated_at = NOW()
+             WHERE id = $1${durable ? ' AND lease_token = $3::uuid' : ''}`,
+          durable ? [analysisId, snapshotId, durable.leaseToken] : [analysisId, snapshotId],
         );
       } catch (e) {
         // best-effort: при сбое продолжаем без snapshot_id (старое поведение).
         console.warn('[projects/analysisRunner] snapshot persist failed:', e.message);
+      }
+    }
+    if (growthModules) {
+      try {
+        await upsertGrowthOpportunities({
+          projectId: project.id,
+          analysisId,
+          snapshotId,
+          modules: growthModules,
+          source: 'project_analysis',
+          observedAt: new Date().toISOString(),
+        });
+        await checkpoint({ stage: 'growth_opportunities', percent: 45 });
+      } catch (error) {
+        console.warn('[projects/analysisRunner] growth opportunities persist failed:', error.message);
       }
     }
 
@@ -723,7 +795,7 @@ async function processAnalysis(analysisId) {
           : `Анализатор ${result.verdict}: ${result.reason || ''}`;
         // Отчёт по Яндексу самодостаточен — сохраняем его, а не теряем.
         if (!ydxReport) {
-          await _setError(analysisId, msg);
+          await _setError(analysisId, msg, durable?.leaseToken);
           return;
         }
         gscError = msg;
@@ -734,7 +806,7 @@ async function processAnalysis(analysisId) {
 
     // Ни одного источника — фиксируем ошибку.
     if (!result && !ydxSnapshot) {
-      await _setError(analysisId, gscError || 'Нет данных ни из Google Search Console, ни из Яндекс.Вебмастера');
+      await _setError(analysisId, gscError || 'Нет данных ни из Google Search Console, ни из Яндекс.Вебмастера', durable?.leaseToken);
       return;
     }
 
@@ -773,7 +845,8 @@ async function processAnalysis(analysisId) {
       }
     }
 
-    await db.query(
+    await checkpoint({ stage: 'synthesis', percent: 92 });
+    const finalUpdate = await db.query(
       `UPDATE project_analyses
           SET status = 'done',
               report_markdown = $2,
@@ -787,8 +860,12 @@ async function processAnalysis(analysisId) {
               synthesis_markdown = $10,
               ranking_factors = $11,
               error_message = $12,
-              completed_at = NOW()
-        WHERE id = $1`,
+              completed_at = NOW(),
+              lease_token = NULL,
+              lease_until = NULL,
+              heartbeat_at = NOW(),
+              updated_at = NOW()
+        WHERE id = $1${durable ? ' AND lease_token = $13::uuid' : ''}`,
       [
         analysisId,
         result ? result.markdown : null,
@@ -802,8 +879,14 @@ async function processAnalysis(analysisId) {
         synthesisMarkdown,
         rankingFactors ? JSON.stringify(rankingFactors) : null,
         gscError,
+        ...(durable ? [durable.leaseToken] : []),
       ],
     );
+    if (durable && finalUpdate.rowCount !== 1) {
+      const err = new Error('analysis_lease_lost');
+      err.code = 'analysis_lease_lost';
+      throw err;
+    }
 
     // Aegis-петля (best-effort): seoBrain snapshot + training example +
     // biobrain feedback. Любая ошибка — warn и продолжаем.
@@ -836,7 +919,12 @@ async function processAnalysis(analysisId) {
       });
     }
   } catch (err) {
-    await _setError(analysisId, err.message).catch(() => {});
+    if (err.code !== 'analysis_lease_lost') {
+      await _setError(analysisId, err.message, durable?.leaseToken).catch(() => {});
+    }
+    throw err;
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
 }
 
@@ -959,10 +1047,9 @@ async function _buildBrandSplit(project, range, cfg, siteUrl) {
 }
 
 /**
- * Watchdog зависших анализов. Анализ выполняется прямо в web-процессе
- * (setImmediate из контроллера) — при рестарте/падении процесса строка
- * навсегда оставалась в статусе `queued`/`running`, а фронт бесконечно
- * поллил её и показывал «ИИ анализирует…». Помечаем такие строки ошибкой.
+ * Legacy watchdog зависших анализов. Durable rows с job_id теперь обрабатываются
+ * lease/recovery scheduler и сюда не попадают; watchdog оставлен только для
+ * старых analysis rows, созданных до durable outbox.
  *
  * @returns {Promise<number>} сколько строк переведено в 'error'
  */
@@ -977,6 +1064,7 @@ async function recoverStaleAnalyses() {
               error_message = 'Анализ прерван (перезапуск сервера или превышено время выполнения)',
               completed_at = NOW()
         WHERE status IN ('queued', 'running')
+          AND job_id IS NULL
           AND COALESCE(started_at, created_at) < NOW() - make_interval(secs => $1::double precision)`,
       [staleMs / 1000],
     );

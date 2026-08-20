@@ -16,6 +16,7 @@ const { processMetaTagTask } = require('../services/metaTags/pipeline');
 const { withUserSlot } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const { csvCell, csvHeader } = require('../utils/csv');
 const { describeLengthRanges } = require('../services/metaTags/lengthConfig');
 
@@ -85,15 +86,16 @@ async function createMetaTagTask(req, res, next) {
     const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId = await resolveOwnedProjectId(body.project_id, req.user.id);
+    const opportunityId = await resolveOwnedOpportunityId(body.opportunity_id, projectId);
 
     const { rows } = await db.query(
       `INSERT INTO meta_tag_tasks
          (user_id, name, niche, lr, toponym, brand, phone, summary, price_data, keywords,
-           status, progress_total, llm_provider, gemini_model, project_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'pending', $11, $12, $13, $14)
-       RETURNING id, name, status, progress_total, llm_provider, gemini_model, project_id, created_at`,
+           status, progress_total, llm_provider, gemini_model, project_id, opportunity_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'pending', $11, $12, $13, $14, $15)
+       RETURNING id, name, status, progress_total, llm_provider, gemini_model, project_id, opportunity_id, created_at`,
       [req.user.id, name, niche, lr, toponym, brand, phone, summary, priceData,
-        JSON.stringify(keywords), keywords.length, llmProvider, geminiModel, projectId],
+        JSON.stringify(keywords), keywords.length, llmProvider, geminiModel, projectId, opportunityId],
     );
     const task = rows[0];
 

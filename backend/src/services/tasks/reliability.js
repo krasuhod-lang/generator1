@@ -9,6 +9,8 @@ const {
   parserQueue,
   siteCrawlerQueue,
   auditQueue,
+  projectAnalysisQueue,
+  reportSummaryQueue,
 } = require('../../queue/queue');
 
 const LEASE_SECONDS = Math.max(30, Number(process.env.TASK_LEASE_SECONDS) || 60);
@@ -21,6 +23,8 @@ const QUEUES = Object.freeze({
   'parser-scans': parserQueue,
   'site-crawls': siteCrawlerQueue,
   'audit-jobs': auditQueue,
+  'project-analysis': projectAnalysisQueue,
+  'report-summary': reportSummaryQueue,
 });
 
 function newToken() {
@@ -242,6 +246,46 @@ async function finishSiteCrawlerTask(taskId, token, status, stats, error = null,
   return rowCount === 1;
 }
 
+async function claimProjectAnalysis(analysisId, jobId, workerId = shortWorkerId(), db = dbDefault) {
+  const token = newToken();
+  const { rows } = await db.query(
+    `UPDATE project_analyses
+        SET status='running', worker_id=$3, lease_token=$4::uuid,
+            lease_until=NOW()+make_interval(secs => $5), heartbeat_at=NOW(),
+            attempts=COALESCE(attempts,0)+1, started_at=COALESCE(started_at,NOW()),
+            updated_at=NOW()
+      WHERE id=$1 AND job_id=$2 AND status IN ('queued','running')
+        AND (lease_until IS NULL OR lease_until < NOW())
+      RETURNING *`,
+    [analysisId, jobId, workerId, token, LEASE_SECONDS],
+  );
+  return rows[0] ? { row: rows[0], token } : null;
+}
+
+async function heartbeatProjectAnalysis(analysisId, token, checkpoint = {}, db = dbDefault) {
+  const { rowCount } = await db.query(
+    `UPDATE project_analyses
+        SET heartbeat_at=NOW(), lease_until=NOW()+make_interval(secs => $3),
+            checkpoint=$4::jsonb, updated_at=NOW()
+      WHERE id=$1 AND status='running' AND lease_token=$2::uuid`,
+    [analysisId, token, LEASE_SECONDS, JSON.stringify(checkpoint || {})],
+  );
+  return rowCount === 1;
+}
+
+async function finishProjectAnalysis(analysisId, token, status, error = null, db = dbDefault) {
+  const { rowCount } = await db.query(
+    `UPDATE project_analyses
+        SET status=$3, error_message=$4, last_error_code=$5,
+            lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(),
+            completed_at=CASE WHEN $3 IN ('done','error') THEN NOW() ELSE completed_at END,
+            updated_at=NOW()
+      WHERE id=$1 AND status='running' AND lease_token=$2::uuid`,
+    [analysisId, token, status, error?.message || null, error?.code || null],
+  );
+  return rowCount === 1;
+}
+
 async function recoverExpiredWork(db = dbDefault) {
   const recovered = { tasks: 0, parserTasks: 0, parserItems: 0, crawls: 0 };
 
@@ -312,12 +356,42 @@ async function recoverExpiredWork(db = dbDefault) {
   );
   recovered.crawls = crawls.rowCount || 0;
 
+  const projectAnalyses = await db.query(
+    `UPDATE project_analyses
+        SET status=CASE WHEN COALESCE(recovery_attempts,0) >= $1 THEN 'error' ELSE 'queued' END,
+            worker_id=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(),
+            recovery_attempts=COALESCE(recovery_attempts,0)+1,
+            last_error_code=CASE WHEN COALESCE(recovery_attempts,0) >= $1 THEN 'max_recovery_attempts' ELSE 'worker_restarted' END,
+            error_message=CASE WHEN COALESCE(recovery_attempts,0) >= $1 THEN 'Превышено число восстановлений анализа' ELSE 'Worker перезапущен; анализ будет возобновлён' END,
+            completed_at=CASE WHEN COALESCE(recovery_attempts,0) >= $1 THEN NOW() ELSE completed_at END,
+            updated_at=NOW()
+      WHERE status='running' AND (lease_until IS NULL OR lease_until < NOW())
+      RETURNING id, status, job_id`,
+    [MAX_RECOVERY_ATTEMPTS],
+  );
+  recovered.projectAnalyses = projectAnalyses.rowCount || 0;
+
+  const reportSummaries = await db.query(
+    `UPDATE report_drafts
+        SET llm_status=CASE WHEN COALESCE(llm_recovery_attempts,0) >= $1 THEN 'error' ELSE 'queued' END,
+            llm_worker_id=NULL, llm_lease_token=NULL, llm_lease_until=NULL, llm_heartbeat_at=NOW(),
+            llm_recovery_attempts=COALESCE(llm_recovery_attempts,0)+1,
+            llm_last_error_code=CASE WHEN COALESCE(llm_recovery_attempts,0) >= $1 THEN 'max_recovery_attempts' ELSE 'worker_restarted' END,
+            llm_error=CASE WHEN COALESCE(llm_recovery_attempts,0) >= $1 THEN 'Превышено число восстановлений AI summary' ELSE 'Worker перезапущен; AI summary будет возобновлено' END,
+            updated_at=NOW()
+      WHERE llm_status='running' AND (llm_lease_until IS NULL OR llm_lease_until < NOW())
+      RETURNING id, llm_status, llm_job_id`,
+    [MAX_RECOVERY_ATTEMPTS],
+  );
+  recovered.reportSummaries = reportSummaries.rowCount || 0;
+
   return recovered;
 }
 
 async function reconcileParserAndCrawlerJobs(db = dbDefault) {
   let parserQueued = 0;
   let crawlQueued = 0;
+  let projectReportQueued = 0;
   const { rows: parserDispatches } = await db.query(
     `SELECT id, options
        FROM parser_tasks
@@ -373,7 +447,45 @@ async function reconcileParserAndCrawlerJobs(db = dbDefault) {
     }, db);
     if (inserted) crawlQueued += 1;
   }
-  return { parserQueued, crawlQueued };
+  const { rows: analysisRows } = await db.query(
+    `SELECT id, job_id, project_id, range_key, period_from, period_to
+       FROM project_analyses
+      WHERE status='queued' AND job_id IS NOT NULL
+      ORDER BY updated_at NULLS FIRST, created_at
+      LIMIT 100`,
+  );
+  for (const row of analysisRows) {
+    const inserted = await enqueueOutbox({
+      queueName: 'project-analysis',
+      jobName: 'run-analysis',
+      jobId: row.job_id,
+      payload: { analysisId: row.id, jobId: row.job_id },
+    }, db);
+    if (inserted) projectReportQueued += 1;
+  }
+
+  const { rows: summaryRows } = await db.query(
+    `SELECT id, user_id, llm_job_id
+       FROM report_drafts
+      WHERE llm_status='queued' AND llm_job_id IS NOT NULL
+      ORDER BY updated_at NULLS FIRST, created_at
+      LIMIT 100`,
+  );
+  for (const row of summaryRows) {
+    const inserted = await enqueueOutbox({
+      queueName: 'report-summary',
+      jobName: 'run-summary',
+      jobId: row.llm_job_id,
+      payload: { draftId: row.id, userId: row.user_id, jobId: row.llm_job_id, opts: {} },
+    }, db);
+    if (inserted) projectReportQueued += 1;
+  }
+
+  return {
+    parserQueued,
+    crawlQueued,
+    projectReportQueued,
+  };
 }
 
 async function reconcileGenerationTasks(db = dbDefault) {
@@ -501,6 +613,9 @@ module.exports = {
   claimSiteCrawlerTask,
   heartbeatSiteCrawlerTask,
   finishSiteCrawlerTask,
+  claimProjectAnalysis,
+  heartbeatProjectAnalysis,
+  finishProjectAnalysis,
   recoverExpiredWork,
   reconcileParserAndCrawlerJobs,
   reconcileGenerationTasks,

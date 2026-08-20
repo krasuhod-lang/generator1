@@ -16,6 +16,7 @@ const { withUserSlot } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 const MAX_TOPIC_LEN   = 250;
@@ -87,13 +88,14 @@ async function createLinkArticleTask(req, res, next) {
     }
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId = await resolveOwnedProjectId(req.body.project_id, req.user.id);
+    const opportunityId = await resolveOwnedOpportunityId(req.body.opportunity_id, projectId);
 
     const { rows } = await db.query(
       `INSERT INTO link_article_tasks
-          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model, project_id, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', 0)
-       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id, status, progress_pct, created_at`,
-      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel, projectId],
+          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model, project_id, opportunity_id, status, progress_pct)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', 0)
+       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id, opportunity_id, status, progress_pct, created_at`,
+      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel, projectId, opportunityId],
     );
     const task = rows[0];
 

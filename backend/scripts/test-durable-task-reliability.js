@@ -4,7 +4,14 @@ const assert = require('assert');
 
 const reliability = require('../src/services/tasks/reliability');
 const { normalizeUrls } = require('../src/services/parser/parserTaskService');
-const { generationQueue, parserQueue, siteCrawlerQueue, auditQueue } = require('../src/queue/queue');
+const {
+  generationQueue,
+  parserQueue,
+  siteCrawlerQueue,
+  auditQueue,
+  projectAnalysisQueue,
+  reportSummaryQueue,
+} = require('../src/queue/queue');
 
 class FakeDb {
   constructor() {
@@ -63,15 +70,28 @@ async function main() {
   assert.strictEqual(finished.task_id, 'task-1');
 
   const recovered = await reliability.recoverExpiredWork(db);
-  assert.deepStrictEqual(recovered, { tasks: 1, parserTasks: 1, parserItems: 1, crawls: 1 });
+  assert.deepStrictEqual(recovered, {
+    tasks: 1,
+    parserTasks: 1,
+    parserItems: 1,
+    crawls: 1,
+    projectAnalyses: 0,
+    reportSummaries: 0,
+  });
   assert.ok(db.calls.some((call) => call.sql.includes("last_error_code='worker_restarted'")));
 
-  await Promise.all([generationQueue.close(), parserQueue.close(), siteCrawlerQueue.close(), auditQueue.close()]);
+  await Promise.all([
+    generationQueue.close(), parserQueue.close(), siteCrawlerQueue.close(), auditQueue.close(),
+    projectAnalysisQueue.close(), reportSummaryQueue.close(),
+  ]);
   console.log('durable task reliability tests passed');
 }
 
 main().catch(async (error) => {
   console.error(error.stack || error.message);
-  await Promise.allSettled([generationQueue.close(), parserQueue.close(), siteCrawlerQueue.close(), auditQueue.close()]);
+  await Promise.allSettled([
+    generationQueue.close(), parserQueue.close(), siteCrawlerQueue.close(), auditQueue.close(),
+    projectAnalysisQueue.close(), reportSummaryQueue.close(),
+  ]);
   process.exitCode = 1;
 });

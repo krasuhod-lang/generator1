@@ -77,6 +77,9 @@ router.get('/:id/freshness',       auth, c.getFreshness);
 // AI-аналитика
 router.post('/:id/analyze',        auth, analyzeLimiter, c.startAnalysis);
 router.get('/:id/analyses',        auth, c.listAnalyses);
+router.get('/:id/growth',          auth, c.listGrowth);
+router.patch('/:id/growth/:oid',   auth, c.patchGrowth);
+router.post('/:id/growth/:oid/tasks', auth, c.linkGrowthTask);
 router.get('/:id/analyses/:aid',   auth, c.getAnalysis);
 
 // Snapshots GSC (PR 1: персистентность). Сбор без LLM делит лимит с

@@ -33,7 +33,14 @@ const { encryptToken } = require('../services/projects/tokenCrypto');
 const { fetchPerformanceSeries, fetchTopDimensions } = require('../services/projects/gscService');
 const ydxService = require('../services/projects/ydxService');
 const { compareSources } = require('../services/projects/sourceComparison');
-const { processAnalysis, collectSnapshot } = require('../services/projects/analysisRunner');
+const { collectSnapshot } = require('../services/projects/analysisRunner');
+const { enqueueOutbox } = require('../services/tasks/reliability');
+const { makeBullJobId } = require('../queue/jobIds');
+const {
+  listGrowthOpportunities,
+  updateGrowthOpportunity,
+  linkGrowthOpportunityTask,
+} = require('../services/projects/growthOpportunities');
 const { generateShareToken, isValidShareToken } = require('../services/projects/shareToken');
 const {
   VIEW_MODES,
@@ -606,9 +613,70 @@ async function startAnalysis(req, res, next) {
       [project.id, req.user.id, rangeKey, from, to],
     );
     const analysis = rows[0];
-    // Фоновый запуск — не блокируем HTTP-ответ (DeepSeek 30–60 c+).
-    setImmediate(() => { processAnalysis(analysis.id).catch(() => {}); });
-    return res.status(202).json({ analysis });
+    const jobId = makeBullJobId('project-analysis', analysis.id);
+    await db.query(
+      `UPDATE project_analyses SET job_id=$2, updated_at=NOW() WHERE id=$1`,
+      [analysis.id, jobId],
+    );
+    await enqueueOutbox({
+      queueName: 'project-analysis',
+      jobName: 'run-analysis',
+      jobId,
+      payload: { analysisId: analysis.id, jobId },
+    });
+    analysis.job_id = jobId;
+    return res.status(202).json({ analysis, dispatch: 'durable_outbox' });
+  } catch (err) { return next(err); }
+}
+
+async function listGrowth(req, res, next) {
+  try {
+    const accessible = await projectGrants.loadAccessibleProject(req.params.id, req.user.id, db);
+    if (!accessible) return res.status(404).json({ error: 'Проект не найден' });
+    if (!projectGrants.canAct(accessible.access, 'read', 'analyses')) {
+      return res.status(403).json({ error: 'Нет доступа к аналитике проекта' });
+    }
+    const opportunities = await listGrowthOpportunities(accessible.project.id, {
+      status: req.query.status || 'open',
+      limit: req.query.limit,
+    });
+    return res.json({ opportunities, count: opportunities.length });
+  } catch (err) { return next(err); }
+}
+
+async function patchGrowth(req, res, next) {
+  try {
+    const accessible = await projectGrants.loadAccessibleProject(req.params.id, req.user.id, db);
+    if (!accessible) return res.status(404).json({ error: 'Проект не найден' });
+    if (!projectGrants.canAct(accessible.access, 'write', 'analyses')) {
+      return res.status(403).json({ error: 'Нет доступа к изменению точек роста' });
+    }
+    const { rows: owned } = await db.query(
+      `SELECT id FROM project_growth_opportunities WHERE id=$1 AND project_id=$2`,
+      [req.params.oid, accessible.project.id],
+    );
+    if (!owned.length) return res.status(404).json({ error: 'Точка роста не найдена' });
+    const opportunity = await updateGrowthOpportunity(req.params.oid, req.body || {});
+    return res.json({ opportunity });
+  } catch (err) { return next(err); }
+}
+
+async function linkGrowthTask(req, res, next) {
+  try {
+    const accessible = await projectGrants.loadAccessibleProject(req.params.id, req.user.id, db);
+    if (!accessible) return res.status(404).json({ error: 'Проект не найден' });
+    if (!projectGrants.canAct(accessible.access, 'write', 'analyses')) {
+      return res.status(403).json({ error: 'Нет доступа к изменению точек роста' });
+    }
+    const { rows: owned } = await db.query(
+      `SELECT id FROM project_growth_opportunities WHERE id=$1 AND project_id=$2`,
+      [req.params.oid, accessible.project.id],
+    );
+    if (!owned.length) return res.status(404).json({ error: 'Точка роста не найдена' });
+    if (!req.body?.task_id) return res.status(400).json({ error: 'task_id обязателен' });
+    const linked = await linkGrowthOpportunityTask(req.params.oid, req.body.task_id, accessible.project.id);
+    if (!linked) return res.status(404).json({ error: 'Задача проекта не найдена' });
+    return res.json(linked);
   } catch (err) { return next(err); }
 }
 
@@ -621,7 +689,8 @@ async function listAnalyses(req, res, next) {
     }
     const { rows } = await db.query(
       `SELECT id, status, range_key, period_from, period_to, created_at, completed_at,
-              error_message, cost_usd, snapshot_id
+              error_message, cost_usd, snapshot_id, job_id, checkpoint, attempts,
+              recovery_attempts, last_error_code
          FROM project_analyses WHERE project_id=$1 ORDER BY created_at DESC LIMIT 50`,
       [accessible.project.id],
     );
@@ -640,7 +709,8 @@ async function getAnalysis(req, res, next) {
       `SELECT a.id, a.status, a.range_key, a.period_from, a.period_to,
               a.report_markdown, a.gsc_snapshot, a.llm_model, a.cost_usd,
               a.ydx_snapshot, a.ydx_report_markdown, a.synthesis_markdown, a.ranking_factors,
-              a.error_message, a.created_at, a.completed_at, a.snapshot_id
+              a.error_message, a.created_at, a.completed_at, a.snapshot_id, a.job_id,
+              a.checkpoint, a.attempts, a.recovery_attempts, a.last_error_code
          FROM project_analyses a
         WHERE a.id = $1 AND a.project_id = $2`,
       [req.params.aid, req.params.id],
@@ -1353,6 +1423,9 @@ module.exports = {
   compareProjectSources,
   getPerformance,
   startAnalysis,
+  listGrowth,
+  patchGrowth,
+  linkGrowthTask,
   listAnalyses,
   getAnalysis,
   getLeadContext,

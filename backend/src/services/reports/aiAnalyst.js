@@ -393,6 +393,8 @@ function _buildMetricsDigest(data) {
       position: item.position,
     })),
     modules: _buildModulesDigest(data.modules, data.queries),
+    growth_opportunities: _buildOpportunityDigest(data.growth),
+    data_quality: data.data_quality || data.completeness || null,
   };
 }
 
@@ -459,6 +461,24 @@ function _buildModulesDigest(modules, queries) {
       images_non_webp: ta.images_non_webp || 0, broken: ta.broken || 0,
     },
   };
+}
+
+function _buildOpportunityDigest(growth) {
+  const rows = Array.isArray(growth?.opportunities) ? growth.opportunities : [];
+  return rows.slice(0, 12).map((item) => ({
+    id: item.id || item.opportunity_key || null,
+    category: item.category || null,
+    status: item.status || 'open',
+    priority: item.priority || 'medium',
+    title: item.title || null,
+    target: item.target || {},
+    current_metric: item.current_metric || {},
+    impact: item.impact || {},
+    observed_fact: item.observed_fact || null,
+    recommendation: item.recommendation || null,
+    success_metric: item.success_metric || null,
+    evidence: Array.isArray(item.evidence) ? item.evidence.slice(0, 2) : [],
+  }));
 }
 
 function _buildTasksList(data) {
@@ -649,7 +669,7 @@ function _fallbackSummary(brandName, period, digest) {
     executive_summary: parts.join('\n\n'),
     highlights: highlights.length ? highlights : ['За период выполнен запланированный объём работ.'],
     growth_attribution: growth,
-    quick_wins: quickWins,
+    quick_wins: _alignQuickWins(quickWins, digest.growth_opportunities),
     next_month_forecast: nextMonthForecast,
     traffic_value: digest.traffic_value
       ? `Ориентировочная экономия рекламного бюджета за период — около ${Number(digest.traffic_value).toLocaleString('ru-RU')} ₽ по данным Keys.so.`
@@ -744,6 +764,8 @@ async function generateSummary(data, opts = {}) {
     `Период: ${period}`,
     `Все метрики (JSON): ${JSON.stringify(digest)}`,
     `Quick Wins: ${JSON.stringify(digest.quick_wins)}`,
+    `Нормализованные точки роста (source of truth; JSON): ${JSON.stringify(digest.growth_opportunities || [])}`,
+    `Качество данных и полнота источников (JSON): ${JSON.stringify(digest.data_quality || {})}`,
   ];
   if (digest.modules) {
     pass3PromptBase.push(
@@ -784,6 +806,10 @@ async function generateSummary(data, opts = {}) {
     'Опирайся на ДИНАМИКУ последних 3 месяцев (ряды *_trend_3m в метриках) и учитывай report_generated_at / metrics_captured_at — не выдавай неполный или устаревший последний период за спад.',
     'Если по какой-то метрике снижение — предложи гипотезу причины (сезонность, обновление алгоритмов Яндекса/Google, конкуренты) и план возврата к росту. Для роста укажи, за счёт чего он произошёл (новые страницы, CTR, позиции).',
     'Если есть «Сигналы модулей отчёта» — используй их: точки роста Striking Distance (с opportunity_score), разрывы CTR Gap (critical/warning), проблемные страницы Content Health, состояние Off-Page и tech-audit — отрази их в highlights и рекомендациях.',
+    'Точки роста из normalized opportunity ledger — единственный источник конкретных действий. Не создавай новую opportunity, URL, число, причину или прогноз, которых нет во входных данных.',
+    'Разделяй observed_fact и hypothesis: если причина не доказана источником, формулируй её только как гипотезу и укажи, чем её проверить.',
+    'Каждый quick_win должен ссылаться на существующий query/URL из opportunity ledger или quick_wins input; если связи нет, не добавляй quick_win.',
+    'Если source completeness неполная, явно укажи это в executive_summary и не делай выводов о причинах, которые недоступные источники могли бы изменить.',
     'Ответь СТРОГО JSON-объектом, без markdown-обёртки.',
   ].join('\n');
 
@@ -813,7 +839,7 @@ async function generateSummary(data, opts = {}) {
       executive_summary: String(parsed3.executive_summary),
       highlights: parsed3.highlights?.length ? _normalizeStringList(parsed3.highlights, 8) : allHighlights,
       growth_attribution: allGrowth.length ? allGrowth : _applyCanonicalNumbers(_normalizeGrowthAttribution(parsed3.growth_attribution), digest),
-      quick_wins: _normalizeQuickWins(parsed3.quick_wins),
+      quick_wins: _alignQuickWins(_normalizeQuickWins(parsed3.quick_wins), digest.growth_opportunities),
       next_month_forecast: String(parsed3.next_month_forecast || '').trim() || _fallbackSummary(brandName, period, digest).next_month_forecast,
       traffic_value: String(parsed3.traffic_value || parsed2?.traffic_value || '').trim(),
       provider: result3.provider,
@@ -828,7 +854,7 @@ async function generateSummary(data, opts = {}) {
     executive_summary: [parsed1?.traffic_summary || '', parsed2?.visibility_summary || ''].filter(Boolean).join('\n\n') || _fallbackSummary(brandName, period, digest).executive_summary,
     highlights: allHighlights.length ? allHighlights : _fallbackSummary(brandName, period, digest).highlights,
     growth_attribution: allGrowth,
-    quick_wins: _normalizeQuickWins(digest.quick_wins),
+    quick_wins: _alignQuickWins(_normalizeQuickWins(digest.quick_wins), digest.growth_opportunities),
     next_month_forecast: _fallbackSummary(brandName, period, digest).next_month_forecast,
     traffic_value: String(parsed2?.traffic_value || '').trim(),
     provider: result1.provider || result2.provider,
@@ -845,6 +871,31 @@ function _normalizeQuickWins(raw) {
     position: item?.position == null ? null : Number(item.position),
     plan: String(item?.plan || item?.action || '').trim(),
   })).filter((item) => item.query || item.plan).slice(0, 12);
+}
+
+function _alignQuickWins(items, opportunities = []) {
+  const normalized = Array.isArray(items) ? items : [];
+  const ledger = Array.isArray(opportunities) ? opportunities : [];
+  if (!ledger.length) return normalized.slice(0, 12);
+
+  const searchable = (item) => JSON.stringify({
+    title: item.title,
+    target: item.target,
+    observed_fact: item.observed_fact,
+    recommendation: item.recommendation,
+  }).toLowerCase();
+
+  return normalized
+    .map((item) => {
+      const query = String(item.query || '').toLowerCase();
+      const match = ledger.find((opp) => {
+        const haystack = searchable(opp);
+        return (query && haystack.includes(query)) || (!query && item.plan && haystack.includes(String(item.plan).toLowerCase().slice(0, 24)));
+      });
+      return match ? { ...item, opportunity_id: match.id } : null;
+    })
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
 function _normalizeStringList(raw, limit) {
