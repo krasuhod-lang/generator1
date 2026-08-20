@@ -136,6 +136,7 @@ const itemStats = (item) => itemResult(item).stats || item?.stats || {};
 const itemCoverage = (item) => itemResult(item).evidence_coverage || {};
 const itemDiscovery = (item) => itemStats(item).discovery || {};
 const itemSubpageErrors = (item) => itemResult(item).subpage_errors || itemDiscovery(item).subpage_errors || [];
+const itemAiAttemptErrors = (item) => itemStats(item).llm_attempt_errors || [];
 const terminalStatuses = new Set(['done', 'partial', 'error', 'cancelled']);
 
 // ── Действия ──────────────────────────────────────────────────────────────
@@ -688,6 +689,12 @@ onUnmounted(() => {
                   <div v-if="itemResult(item).access?.status_code" class="mt-1">HTTP {{ itemResult(item).access.status_code }}</div>
                   <div v-if="itemSubpageErrors(item).length" class="mt-2 text-amber-300">
                     Ошибок подстраниц: {{ itemSubpageErrors(item).length }}
+                  </div>
+                  <div v-if="itemAiAttemptErrors(item).length" class="mt-2 text-red-300">
+                    AI-попытки:
+                    <span v-for="(entry, idx) in itemAiAttemptErrors(item)" :key="idx" class="block text-[11px]">
+                      {{ entry.attempt }}. {{ entry.stage }} — {{ entry.error }}
+                    </span>
                   </div>
                 </td>
                 <td class="py-3 pr-4 min-w-[260px] whitespace-pre-line text-gray-200">

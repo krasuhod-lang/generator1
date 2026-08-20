@@ -137,7 +137,9 @@ async function callAudit(item) {
     return buildWorkerErrorResult(item, 'llm_error', 'Audit-сервис не вернул структурированные поля', 'empty_structured_result');
   }
   const resultErrorCode = String(result.error_code || '').toLowerCase();
-  if (String(result.status || '').toLowerCase() === 'llm_error'
+  const aiFailureNeedsRetry = result.ai_status === 'failed'
+    && ['dspy_extraction_failed', 'dspy_parse_failed', 'empty_structured_result'].includes(resultErrorCode);
+  if ((String(result.status || '').toLowerCase() === 'llm_error' || aiFailureNeedsRetry)
       && ['dspy_extraction_failed', 'dspy_parse_failed', 'empty_structured_result'].includes(resultErrorCode)) {
     const retryable = new Error(result.error || 'Временная ошибка структурированного ответа DSPy');
     retryable.code = 'AUDIT_LLM_RETRYABLE';

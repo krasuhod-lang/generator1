@@ -163,6 +163,7 @@ async function exportXlsx(req, res) {
       { header: 'Статус доступа к сайту', key: 'access_status', width: 24 },
       { header: 'Код ошибки', key: 'error_code', width: 30 },
       { header: 'Попытки ИИ', key: 'llm_attempts', width: 14 },
+      { header: 'Ошибки AI по попыткам', key: 'llm_attempt_errors', width: 60 },
       { header: 'Код/причина доступа', key: 'access_reason', width: 42 },
       { header: 'Диагностика доступа', key: 'access_diagnostics', width: 50 },
       { header: 'Покрытие доказательствами', key: 'evidence_coverage', width: 30 },
@@ -198,6 +199,9 @@ async function exportXlsx(req, res) {
         : '';
       const evidenceTypes = Object.entries(coverage.evidence_types || {})
         .map(([key, value]) => `${key}=${value}`).join(', ');
+      const llmAttemptErrors = Array.isArray(stats.llm_attempt_errors)
+        ? stats.llm_attempt_errors.map((entry) => `${entry.attempt || '-'}:${entry.stage || 'unknown'} — ${entry.error || ''}`).join('\n')
+        : '';
       const subpageErrorCounts = discovery.subpage_error_counts || {};
       const subpageErrorSummary = Object.entries(subpageErrorCounts)
         .map(([key, value]) => `${key}=${value}`).join(', ');
@@ -236,6 +240,7 @@ async function exportXlsx(req, res) {
         pages_scanned: stats.pages_scanned ?? '',
         error_code: result.error_code || item.error_code || '',
         llm_attempts: stats.llm_attempts ?? '',
+        llm_attempt_errors: llmAttemptErrors,
         access_status: access.status || (result.status === 'blocked' ? 'blocked' : ''),
         access_reason: accessReason,
         access_diagnostics: accessDiagnostics,

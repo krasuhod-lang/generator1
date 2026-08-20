@@ -680,11 +680,13 @@ class TestAiResponseNormalizer(unittest.TestCase):
 class TestParsersClientSegmentation(unittest.TestCase):
     """Client segmentation: новые поля client_segments/works_with и расширенный краул."""
 
-    def test_signature_has_structured_result_contract(self):
+    def test_signature_has_direct_structured_contract(self):
         from . import parsers
-        fields = parsers.ExtractCompanyServices.output_fields
-        self.assertIn("structured_result", fields)
-        instructions = parsers.ExtractCompanyServices.__doc__
+        fields = parsers.ExtractCompanyServicesDirect.output_fields
+        for name in ('contacts_summary', 'about_summary', 'services_list', 'main_focus', 'client_segments', 'works_with'):
+            self.assertIn(name, fields)
+        self.assertNotIn('structured_result', fields)
+        instructions = parsers.ExtractCompanyServicesDirect.__doc__
         self.assertIn('client_segments', instructions)
         self.assertIn('works_with', instructions)
 
@@ -1308,3 +1310,16 @@ class TestParserPartialLifecycle(unittest.TestCase):
         parsers._record_subpage_failure(stats, 'https://example.com/private-2', Res())
         self.assertEqual(stats['subpage_error_counts']['forbidden_403'], 2)
         self.assertEqual(len(stats['subpage_errors']), 2)
+
+
+class TestParserContextAndRecovery(unittest.TestCase):
+    def test_page_aware_context_keeps_each_source_and_tail(self):
+        from . import parsers
+        context = parsers._build_llm_context([
+            {'url': 'https://example.com/', 'text': 'Главная ' + ('A' * 9000) + ' контакты и услуги'},
+            {'url': 'https://example.com/clients', 'text': 'Клиенты: поставщики и заказчики.'},
+        ], max_chars=10000)
+        self.assertIn('https://example.com/', context)
+        self.assertIn('https://example.com/clients', context)
+        self.assertIn('[page text truncated]', context)
+        self.assertIn('контакты и услуги', context)

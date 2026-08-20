@@ -911,6 +911,35 @@ class ExtractCompanyServicesFallback(dspy.Signature):
     works_with = dspy.OutputField(desc="B2B/B2C/B2G и тип клиентов или пустая строка")
 
 
+class ExtractCompanyServicesDirect(dspy.Signature):
+    """
+    Проанализируй факты сайта и верни только значения полей через JSONAdapter.
+    Не используй Markdown, комментарии, пояснения и не выдумывай факты.
+
+    Требования: services_list — максимум 12 конкретных услуг; client_segments —
+    только доказанные категории клиентов в формате «категория — услуга»; works_with
+    — только явный B2B/B2C/B2G или тип клиентов из текста. Если доказательства
+    нет, возвращай [] или пустую строку. Не преобразуй общие слова вроде
+    «клиенты», «партнёры», «специалисты» в конкретную категорию.
+    """
+    website_text = dspy.InputField(
+        desc="Факты страниц сайта с URL-источниками; используй только этот контекст"
+    )
+    contacts_summary = dspy.OutputField(desc="Строка с найденными контактами или пустая строка")
+    about_summary = dspy.OutputField(desc="2-3 проверяемых предложения о компании или пустая строка")
+    services_list = dspy.OutputField(desc="JSON-массив максимум из 12 конкретных услуг или []")
+    main_focus = dspy.OutputField(desc="Одна конкретная специализация или пустая строка")
+    client_segments = dspy.OutputField(desc="JSON-массив строк «категория — услуга» только с доказательствами или []")
+    works_with = dspy.OutputField(desc="Строка B2B/B2C/B2G и тип клиентов только при явном доказательстве или пустая строка")
+
+
+class ExtractClientAudience(dspy.Signature):
+    """Короткий повтор только для нестабильного блока аудитории."""
+    website_text = dspy.InputField(desc="Факты сайта с URL-источниками")
+    client_segments = dspy.OutputField(desc="JSON-массив строк «категория — услуга»; без доказательства []")
+    works_with = dspy.OutputField(desc="B2B/B2C/B2G и тип клиентов; без доказательства пустая строка")
+
+
 class ExtractCompanyServices(dspy.Signature):
     """
     Ты — строгий бизнес-аналитик. Проанализируй текст сайта и верни РОВНО ОДИН
@@ -960,7 +989,7 @@ main_focus (строка), client_segments (массив строк), works_with
 ТЕКСТ САЙТА:
 {website_text[:60000]}
 """.strip()
-    raw = lm(prompt=prompt, temperature=0.1, max_tokens=2200, cache=False)
+    raw = lm(prompt=prompt, temperature=0.0, max_tokens=1800, cache=False)
     normalized = normalize_llm_response(raw)
     if normalized.get("parse_status") == "invalid":
         raise ValueError("raw JSON repair returned an unrecognized response")
@@ -1081,6 +1110,34 @@ def _apply_deterministic_fallback(
         result["data_status"] = "partial"
         result["stats"]["deterministic_fallback_used"] = True
         _append_warning(result, "AI-анализ не завершился; сохранены детерминированные поля из загруженного текста сайта")
+
+
+def _build_llm_context(page_texts: List[Dict[str, str]], max_chars: int = 50000) -> str:
+    """Build a bounded, page-aware context for the model.
+
+    A raw global slice can cut the useful page in the middle and make the model
+    see navigation noise without the source URL. Keep every page represented,
+    cap individual pages, and preserve both beginning and end sections.
+    """
+    chunks: List[str] = []
+    remaining = max_chars
+    for page in page_texts:
+        if remaining <= 0:
+            break
+        page_url = str(page.get("url") or "").strip()
+        text = re.sub(r"\s+", " ", str(page.get("text") or "")).strip()
+        if not text:
+            continue
+        page_budget = min(7000, max(1200, remaining - 80))
+        if len(text) > page_budget:
+            tail = min(1200, page_budget // 4)
+            text = f"{text[:page_budget - tail]} ... [page text truncated] ... {text[-tail:]}"
+        chunk = f"Источник: {page_url}\n{text}".strip()
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
+        chunks.append(chunk)
+        remaining -= len(chunk) + 2
+    return "\n\n".join(chunks)
 
 
 async def parse_url_dspy(
@@ -1266,8 +1323,8 @@ async def parse_url_dspy(
             page_texts.append({"url": page_url, "text": part, "html": h})
             cleaned_parts.append(f"Источник: {page_url}\n{part}")
     clean_text = "\n\n".join(cleaned_parts)
-    # Trim to ~15000-20000 tokens (approx 60000 chars)
-    clean_text = clean_text[:60000]
+    # Build a bounded page-aware context; keep full page_texts for evidence.
+    clean_text = _build_llm_context(page_texts)
     
     result = _base_result(url, title_text, task_id=task_id, item_id=item_id)
     result["stats"]["pages_scanned"] = len(page_texts)
@@ -1322,6 +1379,7 @@ async def parse_url_dspy(
                 _apply_client_fallback(result, "llm_error")
         else:
             result["stats"]["llm_attempts"] = 1
+            result["stats"]["llm_attempt_errors"] = []
             try:
                 # Set up DSPy with DeepSeek model
                 # DeepSeek uses OpenAI compatible API
@@ -1329,12 +1387,13 @@ async def parse_url_dspy(
                     f"openai/{DEEPSEEK_PARSER_MODEL}",
                     api_key=effective_api_key,
                     api_base=DEEPSEEK_API_BASE,
-                    max_tokens=2500,
-                    temperature=0.3
+                    max_tokens=3200,
+                    temperature=0.1
                 )
-                # Use one structured JSON OutputField. The normalizer accepts
-                # both DSPy Prediction attributes and string JSON from that field.
-                extractor = dspy.Predict(ExtractCompanyServices)
+                # Primary path uses direct JSONAdapter fields. The legacy nested
+                # structured_result signature remains supported only for old/raw
+                # responses recovered by the normalizer.
+                extractor = dspy.Predict(ExtractCompanyServicesDirect)
 
                 # DSPy is synchronous; run it outside the event loop and keep the
                 # LM binding request-local where supported by the installed version.
@@ -1354,6 +1413,11 @@ async def parse_url_dspy(
                 result["ai_status"] = "ok"
                      
             except Exception as e:
+                result["stats"].setdefault("llm_attempt_errors", []).append({
+                    "attempt": 1,
+                    "stage": "direct_json_adapter",
+                    "error": f"{e.__class__.__name__}: {str(e)[:240]}",
+                })
                 lm_obj = locals().get("lm")
                 try:
                     recovered = _latest_lm_fields(lm_obj)
@@ -1401,6 +1465,11 @@ async def parse_url_dspy(
                         result["ai_status"] = "recovered"
                         _append_warning(result, "Результат получен после повторной DSPy-попытки с fallback-схемой")
                     except Exception as fallback_error:
+                        result["stats"].setdefault("llm_attempt_errors", []).append({
+                            "attempt": 2,
+                            "stage": "plain_output_fields",
+                            "error": f"{fallback_error.__class__.__name__}: {str(fallback_error)[:240]}",
+                        })
                         try:
                             result["stats"]["llm_attempts"] = 3
                             repaired_fields = _run_raw_json_repair(lm_obj, clean_text)
@@ -1415,6 +1484,11 @@ async def parse_url_dspy(
                             result["ai_status"] = "recovered"
                             _append_warning(result, "Результат восстановлен прямым JSON-запросом после ошибки DSPy-адаптера")
                         except Exception as repair_error:
+                            result["stats"].setdefault("llm_attempt_errors", []).append({
+                                "attempt": 3,
+                                "stage": "raw_json_repair",
+                                "error": f"{repair_error.__class__.__name__}: {str(repair_error)[:240]}",
+                            })
                             logger.exception(f"DSPy extraction failed for {url}")
                             result["ai_status"] = "failed"
                             result["status"] = "llm_error"
