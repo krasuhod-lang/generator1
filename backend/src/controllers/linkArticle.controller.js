@@ -89,13 +89,20 @@ async function createLinkArticleTask(req, res, next) {
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId = await resolveOwnedProjectId(req.body.project_id, req.user.id);
     const opportunityId = await resolveOwnedOpportunityId(req.body.opportunity_id, projectId);
+    const publishedUrl = isValidUrl(body.published_url) ? clipStr(body.published_url, MAX_URL_LEN) : null;
+    const publishedQueries = Array.isArray(body.published_queries)
+      ? body.published_queries.map((q) => clipStr(q, 300)).filter(Boolean).slice(0, 100)
+      : [];
 
     const { rows } = await db.query(
       `INSERT INTO link_article_tasks
-          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model, project_id, opportunity_id, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', 0)
-       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id, opportunity_id, status, progress_pct, created_at`,
-      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel, projectId, opportunityId],
+          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model,
+           project_id, opportunity_id, published_url, published_queries, status, progress_pct)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', 0)
+       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id,
+                 opportunity_id, published_url, published_queries, status, progress_pct, created_at`,
+      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel,
+       projectId, opportunityId, publishedUrl, publishedQueries],
     );
     const task = rows[0];
 

@@ -405,8 +405,11 @@ const start = async () => {
       try {
         const t = require('./src/services/aegis/serpOutcomeTracker');
         t.setDbConnection(db);
+        const measurement = require('./src/services/aegis/serpMeasurementJob');
+        measurement.setDbConnection(db);
+        measurement.startSerpMeasurementScheduler();
       } catch (e) {
-        console.warn('[Server] AEGIS serpOutcomeTracker skipped:', e.message);
+        console.warn('[Server] AEGIS serpOutcomeTracker/measurement skipped:', e.message);
       }
       // 🧪 Experiments loop (B4) — мозг сам ставит себе эксперименты:
       // entropy-sampling страниц + гипотеза → планирует эксперимент,
@@ -501,6 +504,7 @@ const start = async () => {
       if (forceExit.unref) forceExit.unref();
       try {
         await new Promise((resolve) => server.close(() => resolve()));
+        try { require('./src/services/aegis/serpMeasurementJob').stopSerpMeasurementScheduler(); } catch (_) {}
         try { require('./src/services/tasks/reliability').stopReliabilityScheduler(); } catch (_) {}
         try { await require('./src/queue/projectReportWorker').stopProjectReportWorkers(); } catch (_) {}
         try {

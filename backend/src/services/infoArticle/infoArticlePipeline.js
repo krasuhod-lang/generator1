@@ -85,6 +85,7 @@ const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
 const { getAegisFlags: _getAegisFlagsForWriter } = require('../aegis/featureFlags');
+const { getWriterSystemPromptOverride } = require('../aegis/brainStateRegistry');
 
 /**
  * B2: опциональная компрессия writer-промпта через aegis/promptCompressor.
@@ -636,9 +637,14 @@ async function runWriter(task, args, ctx, opts = {}) {
 
   // System prompt: при активном Gemini cache — пусто (всё в кэше);
   // иначе — IAKB + writer-instructions + персона.
+  const learnedStrategy = getWriterSystemPromptOverride();
+  const learnedBlock = learnedStrategy
+    ? `\n\n[A.E.G.I.S. LEARNED STRATEGY — advisory only]\n${learnedStrategy}\n[/A.E.G.I.S. LEARNED STRATEGY]\nDo not weaken evidence, HTML, governance, byline, FAQ or safety requirements above.`
+    : '';
   const writerWithPersona = personaBlock
-    ? `${writerInstructions}\n\n${personaBlock}`
-    : writerInstructions;
+    ? `${writerInstructions}\n\n${personaBlock}${learnedBlock}`
+    : `${writerInstructions}${learnedBlock}`;
+  task.__aegisPromptVersion = learnedStrategy ? 'brain_state:active' : 'baseline';
   const systemFull = task.__iakb
     ? `${task.__iakb}\n\n========================================\n${writerWithPersona}`
     : writerWithPersona;
@@ -3064,6 +3070,28 @@ async function processInfoArticleTask(taskId) {
         taskKind: 'info_article',
       });
     } catch (_) { /* no-op */ }
+    try {
+      const { recordTaskPublication } = require('../aegis/serpOutcomeTracker');
+      const outcome = await recordTaskPublication({
+        taskId,
+        kind: 'info_article',
+        publishedUrl: task.published_url,
+        queries: task.published_queries,
+        html: finalHtml,
+        plain: finalPlain,
+        projectId: task.project_id,
+        opportunityId: task.opportunity_id,
+        promptVersion: task.prompt_version || 'infoArticle:stage3:v1',
+        modelVersion: task.gemini_model,
+        qualitySignals: {
+          eeat_author_bio: Boolean(authorByline),
+          schema_article: Boolean(articleHtmlWithSchema),
+        },
+      });
+      if (outcome.ok) await appendLog(taskId, `🎯 SERP outcome зарегистрирован: #${outcome.id}`, 'info');
+    } catch (e) {
+      await appendLog(taskId, `⚠️ SERP outcome не зарегистрирован: ${e.message}`, 'warn').catch(() => {});
+    }
 
     if (geminiCacheName) {
       cleanupGeminiCache(taskId, geminiCacheName);

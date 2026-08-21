@@ -1250,6 +1250,42 @@ async function runPipeline(task, ctx) {
     log(`Quality gate: непойманное исключение — ${gateErr.message}`, 'warn');
   }
 
+  // Aegis publication instrumentation: classic SEO path тоже входит в
+  // publication→SERP→reward loop, но запись разрешена только при реальном
+  // canonical URL/query set и пройденном quality gate.
+  try {
+    if (qualityGateVerdict?.canPublish && task.published_url && Array.isArray(task.published_queries)
+        && task.published_queries.length > 0) {
+      const { recordTaskPublication } = require('../aegis/serpOutcomeTracker');
+      const finalHtmlForOutcome = s7Result.finalHTML || finalBlocks.join('\n\n');
+      const lsiCoverage = Number(s7Result.globalLSICoverage);
+      const outcome = await recordTaskPublication({
+        taskId,
+        kind: 'seo',
+        publishedUrl: String(task.published_url).trim(),
+        queries: task.published_queries,
+        html: finalHtmlForOutcome,
+        projectId: task.project_id || null,
+        opportunityId: task.opportunity_id || null,
+        promptVersion: task.prompt_version || 'seo:stage3:v1',
+        modelVersion: task.gemini_model || null,
+        baselineMetrics: task.baseline_metrics || {},
+        qualitySignals: {
+          lsi_coverage: Number.isFinite(lsiCoverage)
+            ? (lsiCoverage > 1 ? lsiCoverage / 100 : lsiCoverage)
+            : null,
+          intent_ok: Boolean(stage0Result?.intent_ok ?? true),
+          eeat_citations: Number.isFinite(Number(s7Result.globalEEATScore))
+            ? Number(s7Result.globalEEATScore) / 100
+            : null,
+        },
+      });
+      if (outcome.ok) log(`Aegis: SEO publication outcome queued (${outcome.id})`, 'info');
+    }
+  } catch (aegisErr) {
+    log(`Aegis publication instrumentation skipped: ${aegisErr.message}`, 'warn');
+  }
+
   // Время генерации контента (в секундах)
   const generationTimeSec = Math.round((Date.now() - pipelineStartedAt) / 1000);
 

@@ -124,7 +124,7 @@ test('DSPy: ENV ok + py reachable + dataset enough + есть brain version → 
     envHas: envHasFromMap({ AEGIS_DSPY_ENABLED: 'true', AEGIS_PY_URL: 'http://x' }),
     pyStatusFn: pyOk,
     baselineInfoFn: fakeBaseline({ size: 50000 }),
-    db: fakeDb({ total: 50, lastVersion: { id: 1, sha: 'a', deployed_at: '2026-06-01', improvement_pct: 7, dataset_size: 50 } }),
+    db: fakeDb({ total: 50, lastVersion: { id: 1, sha: 'a', deployed_at: '2026-06-01', improvement_pct: 7, dataset_size: 50, status: 'deployed', artifact_sha: 'a'.repeat(64), artifact_type: 'dspy_compiled', holdout_score: 0.84, evaluation: { holdout_size: 4 }, deployed_by: 'test' } }),
   });
   assert.strictEqual(r.ready_for_first_retrain, true, JSON.stringify(r.issues));
   assert.strictEqual(r.last_brain_version.exists, true);
@@ -163,9 +163,21 @@ test('DSPy: GitHub-секреты всегда упомянуты как info-is
     envHas: envHasFromMap({ AEGIS_DSPY_ENABLED: 'true', AEGIS_PY_URL: 'http://x' }),
     pyStatusFn: pyOk,
     baselineInfoFn: fakeBaseline({ size: 50000 }),
-    db: fakeDb({ total: 50, lastVersion: { id: 1, sha: 'a', deployed_at: '2026-06-01', improvement_pct: 7, dataset_size: 50 } }),
+    db: fakeDb({ total: 50, lastVersion: { id: 1, sha: 'a', deployed_at: '2026-06-01', improvement_pct: 7, dataset_size: 50, status: 'deployed', artifact_sha: 'a'.repeat(64), artifact_type: 'dspy_compiled', holdout_score: 0.84, evaluation: { holdout_size: 4 }, deployed_by: 'test' } }),
   });
   assert.ok(r.issues.some((i) => i.code === 'github_secrets_reminder' && i.level === 'info'));
+});
+
+test('DSPy: candidate rejected → readiness is blocked and status is visible', async () => {
+  const r = await trainingHealth.buildDspySection({
+    flags: fakeFlags(),
+    envHas: envHasFromMap({ AEGIS_DSPY_ENABLED: 'true', AEGIS_PY_URL: 'http://x' }),
+    pyStatusFn: async () => ({ ok: true, body: { last_status: 'candidate_rejected' } }),
+    baselineInfoFn: fakeBaseline({ size: 50000 }),
+    db: fakeDb({ total: 50, lastVersion: { id: 2, status: 'candidate_rejected', deployed_at: '2026-06-02', dataset_size: 50 } }),
+  });
+  assert.strictEqual(r.ready_for_first_retrain, false);
+  assert.ok(r.issues.some((i) => i.code === 'dspy_last_cycle:candidate_rejected'));
 });
 
 // ── RL feedback section (GSC + Яндекс.Вебмастер) ──────────────────

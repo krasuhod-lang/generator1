@@ -33,5 +33,5 @@ neat-python==0.92
 # sentence-transformers==3.3.0       # Локальные эмбеддинги (если без Gemini)
 # ray==2.39.0                        # Ray Cluster (Phase 4)
 # langgraph==0.2.50                  # LangGraph runner / SEO State Machine (иначе — sequential fallback)
-# dspy-ai==2.5.41                    # DSPy MIPROv2 / SEO Drafting Assertions
+dspy-ai==2.5.41                   # DSPy MIPROv2 / SEO Drafting Assertions
 # brian2==2.7.1                      # BioBrain SNN (optional heavy)

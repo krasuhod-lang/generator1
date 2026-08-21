@@ -165,11 +165,23 @@ async function _loadCandidates(db, limit, lookbackDays) {
         FROM aegis_seo_observations
        WHERE observed_at > NOW() - ($1::int || ' days')::interval
        GROUP BY url
+    ),
+    outcome_features AS (
+      SELECT DISTINCT ON (url) url, features, feature_labels
+        FROM aegis_serp_outcomes
+       WHERE features IS NOT NULL
+       ORDER BY url, published_at DESC NULLS LAST
     )
     SELECT r.site_key, r.target_url, r.max_priority, r.action_type, r.actions,
-           o.position, o.clicks, o.impressions
+           o.position, o.clicks, o.impressions,
+           f.features AS feature_vector, f.feature_labels,
+           p.id AS project_id
       FROM ranked r
       LEFT JOIN obs o ON o.url = r.target_url
+      LEFT JOIN outcome_features f ON f.url = r.target_url
+      LEFT JOIN projects p
+        ON lower(regexp_replace(trim(trailing '/' from COALESCE(p.url, p.gsc_site_url, p.ydx_site_url, '')), '^https?://', ''))
+         = lower(regexp_replace(trim(trailing '/' from r.site_key), '^https?://', ''))
      WHERE NOT EXISTS (
        SELECT 1 FROM aegis_experiments e
         WHERE e.site_key = r.site_key
@@ -221,8 +233,9 @@ async function planExperiment(db, candidate, opts = {}) {
       `INSERT INTO aegis_experiments
           (site_key, target_url, queries, uncertainty, hypothesis,
            baseline_features, baseline_feature_labels,
-           baseline_position, baseline_clicks, baseline_impressions, status)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6::real[], $7, $8, $9, $10, 'planned')
+           baseline_position, baseline_clicks, baseline_impressions,
+           project_id, status)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6::real[], $7, $8, $9, $10, $11, 'planned')
         ON CONFLICT (site_key, target_url) WHERE status IN ('planned','dispatched')
           DO NOTHING
         RETURNING id`,
@@ -231,7 +244,8 @@ async function planExperiment(db, candidate, opts = {}) {
        Number(uncertainty.toFixed ? uncertainty.toFixed(4) : uncertainty),
        JSON.stringify(actions),
        features.map(Number), featureLabels,
-       _num(candidate.position), _num(candidate.clicks), _num(candidate.impressions)]
+       _num(candidate.position), _num(candidate.clicks), _num(candidate.impressions),
+       candidate.project_id || null]
     );
     return { ok: true, id: r.rows && r.rows[0] && r.rows[0].id };
   } catch (e) {
@@ -271,9 +285,13 @@ async function dispatchExperiment(db, id, { githubBot = null } = {}) {
 
     await db.query(
       `UPDATE aegis_experiments
-          SET status='dispatched', dispatched_at=NOW(), backlog_issue_number=$2
+          SET status='dispatched',
+              dispatched_at=NOW(),
+              measure_after_at=NOW() + ($3::int * INTERVAL '1 day'),
+              backlog_issue_number=$2,
+              last_error=NULL
         WHERE id=$1`,
-      [id, issueNumber]);
+      [id, issueNumber, Math.max(1, Number(flags.measureAfterDays) || 14)]);
     return { ok: true, id, backlog_issue_number: issueNumber };
   } catch (e) {
     console.warn('[aegis/experimentLoop] dispatchExperiment:', e.message);
@@ -347,12 +365,21 @@ async function closeExperiment(db, id, postMetrics = {}) {
               outcome          = $8,
               status           = 'measured',
               measured_at      = NOW(),
+              measurement_attempts = COALESCE(measurement_attempts, 0) + 1,
+              next_attempt_at  = NULL,
+              last_error       = NULL,
+              feedback_status  = 'pending',
+              feedback_next_attempt_at = NULL,
+              feedback_last_error = NULL,
               post_features    = COALESCE($9::real[], post_features)
-        WHERE id=$1
+        WHERE id=$1 AND status IN ('dispatched', 'measuring')
         RETURNING id`,
       [id, post.position, post.clicks, post.impressions,
        deltaPosition, deltaClicks, reward, outcome,
        Array.isArray(postMetrics.features) ? postMetrics.features.map(Number) : null]);
+    if (!r.rows || !r.rows.length) {
+      return { ok: false, reason: 'wrong_status_or_recovered_worker' };
+    }
 
     // Замыкание петли — отправляем reward в biobrain.feedback по
     // baseline-вектору. Если py недоступен — graceful, status='measured'
@@ -366,9 +393,17 @@ async function closeExperiment(db, id, postMetrics = {}) {
           real_spq_overall: reward * 100,
         });
         fed = Boolean(fb && fb.ok);
+        if (fed) {
+          await db.query(`UPDATE aegis_experiments
+            SET feedback_status='fed', feedback_next_attempt_at=NULL, feedback_last_error=NULL
+            WHERE id=$1`, [id]);
+        } else {
+          await _scheduleExperimentFeedbackRetry(db, id, (fb && fb.reason) || 'feedback_not_accepted');
+        }
       }
     } catch (e) {
       console.warn('[aegis/experimentLoop] biobrain feedback:', e.message);
+      await _scheduleExperimentFeedbackRetry(db, id, e).catch(() => {});
     }
 
     return {
@@ -392,6 +427,63 @@ async function closeExperiment(db, id, postMetrics = {}) {
  *
  * Возвращает { ok, closed }. Никогда не throw.
  */
+async function _scheduleExperimentFeedbackRetry(db, id, error) {
+  if (!db || !id) return;
+  await db.query(
+    `UPDATE aegis_experiments
+        SET feedback_attempts = COALESCE(feedback_attempts, 0) + 1,
+            feedback_next_attempt_at = NOW() +
+              (LEAST(1440, 5 * (2 ^ LEAST(8, COALESCE(feedback_attempts, 0))))::int * INTERVAL '1 minute'),
+            feedback_last_error = $2
+      WHERE id=$1 AND status='measured'`,
+    [id, String(error && (error.message || error.reason) || error || 'feedback_failed').slice(0, 1000)],
+  );
+}
+
+async function retryMeasuredExperimentFeedback(db = _db, { limit = 10 } = {}) {
+  if (!db) return { ok: false, reason: 'db_not_wired' };
+  const safeLimit = Math.max(1, Math.min(50, Number(limit) || 10));
+  const r = await db.query(
+    `WITH claim AS (
+       SELECT id
+         FROM aegis_experiments
+        WHERE status='measured' AND COALESCE(feedback_status, 'pending') <> 'fed'
+          AND (feedback_next_attempt_at IS NULL OR feedback_next_attempt_at <= NOW())
+        ORDER BY measured_at ASC NULLS LAST
+        FOR UPDATE SKIP LOCKED LIMIT $1
+     )
+     UPDATE aegis_experiments e
+        SET feedback_next_attempt_at = NOW() + INTERVAL '5 minutes'
+       FROM claim
+      WHERE e.id = claim.id
+      RETURNING e.id, e.baseline_features, e.reward`,
+    [safeLimit],
+  );
+  let fed = 0;
+  let failed = 0;
+  for (const row of r.rows || []) {
+    try {
+      const features = Array.isArray(row.baseline_features) ? row.baseline_features.map(Number) : [];
+      if (features.length !== 8 || features.some((value) => !Number.isFinite(value))) {
+        throw new Error('invalid_baseline_features');
+      }
+      const fb = await biobrainClient.feedback({
+        features,
+        real_spq_overall: Number.isFinite(Number(row.reward)) ? Number(row.reward) * 100 : null,
+      });
+      if (!fb || !fb.ok) throw new Error((fb && fb.reason) || 'feedback_not_accepted');
+      await db.query(`UPDATE aegis_experiments
+        SET feedback_status='fed', feedback_next_attempt_at=NULL, feedback_last_error=NULL
+        WHERE id=$1 AND status='measured'`, [row.id]);
+      fed += 1;
+    } catch (error) {
+      failed += 1;
+      await _scheduleExperimentFeedbackRetry(db, row.id, error).catch(() => {});
+    }
+  }
+  return { ok: true, claimed: (r.rows || []).length, fed, failed };
+}
+
 async function closeStaleExperiments(db = _db) {
   const flags = getAegisFlags().experiments || {};
   if (!flags.enabled) return { ok: false, reason: 'disabled', closed: 0 };
@@ -407,6 +499,7 @@ async function closeStaleExperiments(db = _db) {
           SET status      = 'measured',
               outcome     = 'inconclusive',
               measured_at = NOW(),
+              feedback_status = 'pending',
               notes       = COALESCE(notes, '') ||
                             CASE WHEN COALESCE(notes,'')='' THEN '' ELSE E'\n' END ||
                             'auto-closed by closeStaleExperiments after '
@@ -493,18 +586,30 @@ async function runOnce(db = _db) {
   // uncertainty score для ранжирования; на planExperiment передаём top-K.
   const ranked = [];
   for (const c of candidates) {
-    const probe = await _probeBiobrain([]); // фич пока нет — confidence=null
+    const features = Array.isArray(c.feature_vector)
+      ? c.feature_vector.map(Number).filter(Number.isFinite).slice(0, 8)
+      : [];
+    const probe = await _probeBiobrain(features);
     const u = composeUncertainty({
       confidence: probe.confidence,
       position:   c.position,
       priority:   c.max_priority || 0,
     });
-    ranked.push({ ...c, uncertainty: u });
+    const queries = Array.isArray(c.queries) && c.queries.length
+      ? c.queries
+      : (Array.isArray(c.actions) ? c.actions
+        .map((action) => action && (action.query || action.keyword || action.target_query))
+        .filter(Boolean) : []);
+    ranked.push({ ...c, queries: [...new Set(queries.map(String))].slice(0, 100), feature_vector: features, uncertainty: u });
   }
   ranked.sort((a, b) => b.uncertainty - a.uncertainty);
 
   for (const c of ranked) {
-    const planRes = await planExperiment(db, c, { uncertainty: c.uncertainty });
+    const planRes = await planExperiment(db, c, {
+      uncertainty: c.uncertainty,
+      baselineFeatures: c.feature_vector,
+      baselineFeatureLabels: Array.isArray(c.feature_labels) ? c.feature_labels : [],
+    });
     if (planRes.ok && planRes.id) {
       stats.planned += 1;
       if (flags.autoDispatch) {
@@ -601,6 +706,7 @@ module.exports = {
   planExperiment,
   dispatchExperiment,
   closeExperiment,
+  retryMeasuredExperimentFeedback,
   closeStaleExperiments,
   runOnce,
   // scheduler + admin:

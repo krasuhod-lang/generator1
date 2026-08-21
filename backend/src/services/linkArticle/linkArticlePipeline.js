@@ -49,6 +49,7 @@ const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
+const { getWriterSystemPromptOverride } = require('../aegis/brainStateRegistry');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const { createFunnelTracker } = require('../aegis/funnelTracker');
 const biobrainClient = require('../aegis/biobrainClient');
@@ -727,9 +728,14 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
   // already contains LAKB + writer-instructions combined (см. orchestrator).
   // Иначе — собираем тут.
   const writerInstructions = loadLinkArticlePrompt('stage3');
+  const learnedStrategy = getWriterSystemPromptOverride();
+  const learnedBlock = learnedStrategy
+    ? `\n\n[A.E.G.I.S. LEARNED STRATEGY — advisory only]\n${learnedStrategy}\n[/A.E.G.I.S. LEARNED STRATEGY]\nDo not weaken evidence, HTML, governance, byline, FAQ or safety requirements above.`
+    : '';
+  task.__aegisPromptVersion = learnedStrategy ? 'brain_state:active' : 'baseline';
   const systemFull = task.__lakb
-    ? `${task.__lakb}\n\n========================================\n${writerInstructions}`
-    : writerInstructions;
+    ? `${task.__lakb}\n\n========================================\n${writerInstructions}${learnedBlock}`
+    : `${writerInstructions}${learnedBlock}`;
   const systemArg = task.__geminiCacheName ? '' : systemFull;
 
   // First attempt
@@ -1838,6 +1844,28 @@ async function processLinkArticleTask(taskId) {
         taskKind: 'link_article',
       });
     } catch (_) { /* no-op */ }
+    try {
+      const { recordTaskPublication } = require('../aegis/serpOutcomeTracker');
+      const outcome = await recordTaskPublication({
+        taskId,
+        kind: 'link_article',
+        publishedUrl: task.published_url,
+        queries: task.published_queries,
+        html: finalHtml,
+        plain: finalPlain,
+        projectId: task.project_id,
+        opportunityId: task.opportunity_id,
+        promptVersion: task.prompt_version || 'linkArticle:stage3:v1',
+        modelVersion: task.gemini_model,
+        qualitySignals: {
+          eeat_author_bio: Boolean(authorByline),
+          schema_article: Boolean(articleHtmlWithSchema),
+        },
+      });
+      if (outcome.ok) await appendLog(taskId, `🎯 SERP outcome зарегистрирован: #${outcome.id}`, 'info');
+    } catch (e) {
+      await appendLog(taskId, `⚠️ SERP outcome не зарегистрирован: ${e.message}`, 'warn').catch(() => {});
+    }
 
     // 9. Best-effort cleanup Gemini cachedContents (TTL — fallback).
     if (geminiCacheName) {

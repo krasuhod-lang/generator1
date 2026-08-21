@@ -43,6 +43,25 @@ async function _datasetCount() {
   } catch (_) { return 0; }
 }
 
+async function _datasetRows(limit = 500) {
+  try {
+    const safeLimit = Math.max(4, Math.min(2000, Number(limit) || 500));
+    const r = await db.query(
+      `SELECT id, article_ref, niche, user_prompt, html_output,
+              quality_score, spq_overall, ppo_weight, model_used, cost_usd
+         FROM aegis_dspy_dataset
+        WHERE user_prompt IS NOT NULL AND html_output IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT $1`,
+      [safeLimit],
+    );
+    return r.rows || [];
+  } catch (e) {
+    console.warn('[aegis/dspyAutoRetrain] dataset rows failed:', e.message);
+    return [];
+  }
+}
+
 async function _lastDeployedAt() {
   try {
     const r = await db.query(
@@ -93,12 +112,31 @@ async function tick() {
       }
     }
 
-    // Условия выполнены — запускаем retrain.
-    const r = await dspy.retrain({ niche: null, dryRun: false });
+    // Условия выполнены — передаём реальные rows, не только count.
+    const realRows = await _datasetRows();
+    const r = await dspy.retrain({ niche: null, dryRun: false, realRows });
+    const body = r && r.body && typeof r.body === 'object' ? r.body : (r || {});
     _telemetry.last_retrain_at = new Date().toISOString();
-    _telemetry.last_retrain_ok = Boolean(r && r.ok);
-    _telemetry.last_retrain_reason = r && r.ok ? 'ok' : String((r && r.reason) || 'retrain_failed');
+    _telemetry.last_retrain_ok = Boolean(r && r.ok && body.last_status === 'deployed');
+    _telemetry.last_retrain_reason = body.last_status === 'deployed'
+      ? 'deployed'
+      : String(body.reason || body.last_status || r.reason || 'retrain_not_deployed');
     _telemetry.next_retrain_eta_sec = minSpacingSec;
+    if (r && r.ok && body.last_status === 'deployed' && body.artifact_path) {
+      await db.query(
+        `INSERT INTO aegis_brain_versions
+          (yaml_path, sha, mean_spq_before, mean_spq_after, improvement_pct,
+           trials_done, dataset_size, cost_usd, deployed_at, notes,
+           status, artifact_sha, artifact_type, holdout_score, evaluation, deployed_by)
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, NULL, NOW(), $7,
+                 'deployed', $8, 'dspy_compiled', $9, $10::jsonb, 'aegis_auto_retrain')`,
+        [body.artifact_path, body.mean_spq_before || null, body.mean_spq_after || null,
+         body.improvement_pct || null, body.max_trials || null, body.dataset_size || null,
+         JSON.stringify({ model: body.model || null, mutation_kind: body.mutation_kind || null }),
+         body.artifact_sha || null, body.mean_spq_after == null ? null : Number(body.mean_spq_after),
+         JSON.stringify({ holdout_size: body.holdout_size || null, reason: 'holdout_gate_passed' })],
+      ).catch((e) => console.warn('[aegis/dspyAutoRetrain] version persist failed:', e.message));
+    }
   } catch (e) {
     _telemetry.last_retrain_ok = false;
     _telemetry.last_retrain_reason = `error:${e.message}`;

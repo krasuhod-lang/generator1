@@ -11,6 +11,7 @@ const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const { buildTaskFormPrefill }  = require('../services/projects/taskFormPrefill');
 const { isBlankRichText }       = require('../utils/stripHtmlTags');
 const { salvageJsonStrings }    = require('../utils/salvageJson');
@@ -151,6 +152,17 @@ function toRichText(val) {
   return toText(val);
 }
 
+function toPublishedQueries(val) {
+  const list = Array.isArray(val) ? val : (typeof val === 'string' ? val.split(/[,\n]/) : []);
+  return [...new Set(list.map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 100);
+}
+
+function toOptionalJson(val) {
+  if (val === undefined || val === null || val === '') return null;
+  if (typeof val === 'string') return val.trim() || null;
+  return JSON.stringify(val);
+}
+
 async function createTask(req, res, next) {
   try {
     const {
@@ -186,6 +198,13 @@ async function createTask(req, res, next) {
       // Сервер валидирует владение и подтягивает контекст из БД, если
       // часть полей формы пустая.
       project_id,
+      published_url,
+      published_queries,
+      prompt_version,
+      model_version,
+      opportunity_id,
+      source_snapshot_id,
+      success_metric,
     } = req.body;
 
     // Для черновика допускаем пустое поле — ставим плейсхолдер
@@ -213,6 +232,9 @@ async function createTask(req, res, next) {
 
     // ТЗ §5: владение проектом валидируется на сервере (не доверяем фронту).
     const projectId = await resolveOwnedProjectId(project_id, req.user.id);
+    const opportunityId = projectId
+      ? await resolveOwnedOpportunityId(opportunity_id, projectId)
+      : null;
 
     // ТЗ §8: серверный fallback из контекста проекта. Если пользователь
     // не заполнил описательные поля (регион, бренд, ЦА, особенности ниши,
@@ -266,7 +288,14 @@ async function createTask(req, res, next) {
          gemini_model,
          source_relevance_report_id,
          project_id,
-         project_context_snapshot
+         project_context_snapshot,
+         published_url,
+         published_queries,
+         prompt_version,
+         model_version,
+         opportunity_id,
+         source_snapshot_id,
+         success_metric
        ) VALUES (
          $1, $2, 'draft',
          $3, $4, $5,
@@ -281,7 +310,14 @@ async function createTask(req, res, next) {
           $25,
           $26,
           $27,
-          $28::jsonb
+          $28::jsonb,
+          $29,
+          $30,
+          $31,
+          $32,
+          $33,
+          $34,
+          $35::jsonb
         ) RETURNING *`,
       [
         req.user.id,
@@ -312,6 +348,13 @@ async function createTask(req, res, next) {
         relevanceReportId,
         projectId,
         projectCtxSnapshot ? JSON.stringify(projectCtxSnapshot) : null,
+        typeof published_url === 'string' ? published_url.trim().slice(0, 2048) || null : null,
+        toPublishedQueries(published_queries),
+        typeof prompt_version === 'string' ? prompt_version.trim().slice(0, 128) || null : null,
+        typeof model_version === 'string' ? model_version.trim().slice(0, 128) || null : null,
+        opportunityId,
+        source_snapshot_id || null,
+        toOptionalJson(success_metric),
       ]
     );
 
@@ -370,6 +413,8 @@ async function updateTask(req, res, next) {
       // сохранении уже созданного черновика (а вместе с ним и контекст
       // проекта в промтах).
       'project_id',
+      'published_url', 'published_queries', 'prompt_version', 'model_version',
+      'opportunity_id', 'source_snapshot_id', 'success_metric',
     ];
 
     const fields = [];
@@ -384,6 +429,8 @@ async function updateTask(req, res, next) {
       'input_target_audience', 'input_project_limits', 'input_page_priorities',
       'input_niche_features', 'input_brand_facts',
     ]);
+    const ARRAY_FIELDS = new Set(['published_queries']);
+    const JSONB_FIELDS = new Set(['success_metric']);
     // Поля с whitelist-валидацией
     const ENUM_FIELDS = { llm_provider: new Set(['gemini', 'grok']) };
 
@@ -393,6 +440,8 @@ async function updateTask(req, res, next) {
         let val = req.body[key];
         if (INT_FIELDS.has(key))  val = parseInt(val) || null;
         else if (JSON_FIELDS.has(key)) val = toText(val);
+        else if (ARRAY_FIELDS.has(key)) val = toPublishedQueries(val);
+        else if (JSONB_FIELDS.has(key)) val = toOptionalJson(val);
         else if (RICH_TEXT_FIELDS.has(key)) val = toRichText(val);
         else if (ENUM_FIELDS[key]) {
           const lc = (val == null ? '' : String(val).toLowerCase().trim());
@@ -407,6 +456,13 @@ async function updateTask(req, res, next) {
           // Владение проектом проверяем на сервере (не доверяем фронту).
           val = await resolveOwnedProjectId(val, req.user.id);
           newProjectId = val;
+        } else if (key === 'opportunity_id') {
+          const projectForOpportunity = newProjectId !== undefined ? newProjectId : task.project_id;
+          val = await resolveOwnedOpportunityId(val, projectForOpportunity);
+        } else if (key === 'published_url') {
+          val = typeof val === 'string' ? val.trim().slice(0, 2048) || null : null;
+        } else if (key === 'prompt_version' || key === 'model_version') {
+          val = typeof val === 'string' ? val.trim().slice(0, 128) || null : null;
         }
         fields.push(`${key} = $${values.length + 1}`);
         values.push(val);

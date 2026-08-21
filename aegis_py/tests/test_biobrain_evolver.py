@@ -75,11 +75,22 @@ def test_buffer_persists_across_instances(tmp_path, monkeypatch):
     importlib.reload(evolver_mod)
 
 
-def test_maybe_evolve_respects_min_buffer():
-    e = BioBrainEvolver(min_buffer_to_evolve=50)
+def test_maybe_evolve_respects_min_buffer(tmp_path, monkeypatch):
+    monkeypatch.setenv("AEGIS_BIOBRAIN_DIR", str(tmp_path))
+    import importlib
+    from aegis_py.app.biobrain import storage as storage_mod
+    from aegis_py.app.biobrain import evolver as evolver_mod
+    importlib.reload(storage_mod)
+    importlib.reload(evolver_mod)
+
+    e = evolver_mod.BioBrainEvolver(min_buffer_to_evolve=50)
     r = e.maybe_evolve()
     assert r["evolved"] is False
     assert r["reason"] == "insufficient_buffer"
+
+    monkeypatch.delenv("AEGIS_BIOBRAIN_DIR", raising=False)
+    importlib.reload(storage_mod)
+    importlib.reload(evolver_mod)
 
 
 def test_predict_returns_attribution_with_feature_labels():

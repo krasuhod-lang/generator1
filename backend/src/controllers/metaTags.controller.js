@@ -87,15 +87,25 @@ async function createMetaTagTask(req, res, next) {
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId = await resolveOwnedProjectId(body.project_id, req.user.id);
     const opportunityId = await resolveOwnedOpportunityId(body.opportunity_id, projectId);
+    const publishedUrl = typeof body.published_url === 'string'
+      && /^https?:\/\//i.test(body.published_url.trim())
+      ? clipStr(body.published_url.trim(), 500)
+      : null;
+    const publishedQueries = Array.isArray(body.published_queries)
+      ? body.published_queries.map((q) => clipStr(q, 300)).filter(Boolean).slice(0, 100)
+      : [];
 
     const { rows } = await db.query(
       `INSERT INTO meta_tag_tasks
          (user_id, name, niche, lr, toponym, brand, phone, summary, price_data, keywords,
-           status, progress_total, llm_provider, gemini_model, project_id, opportunity_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'pending', $11, $12, $13, $14, $15)
-       RETURNING id, name, status, progress_total, llm_provider, gemini_model, project_id, opportunity_id, created_at`,
+           status, progress_total, llm_provider, gemini_model, project_id, opportunity_id,
+           published_url, published_queries)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'pending', $11, $12, $13, $14, $15, $16, $17)
+       RETURNING id, name, status, progress_total, llm_provider, gemini_model, project_id,
+                 opportunity_id, published_url, published_queries, created_at`,
       [req.user.id, name, niche, lr, toponym, brand, phone, summary, priceData,
-        JSON.stringify(keywords), keywords.length, llmProvider, geminiModel, projectId, opportunityId],
+        JSON.stringify(keywords), keywords.length, llmProvider, geminiModel, projectId,
+        opportunityId, publishedUrl, publishedQueries],
     );
     const task = rows[0];
 

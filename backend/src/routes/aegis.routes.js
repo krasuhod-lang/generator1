@@ -13,6 +13,7 @@ const {
   proposeMutation,
   listRuns,
   listBrainVersions,
+  rollbackBrainVersionHandler,
   getMetrics,
   getKillSwitch,
   postKillSwitch,
@@ -60,6 +61,7 @@ router.post('/dspy/retrain',   auth, writeLimiter, triggerDspyRetrain);
 router.post('/mutate/propose', auth, writeLimiter, proposeMutation);
 router.get('/runs',            auth, listRuns);
 router.get('/brain/versions',  auth, listBrainVersions);
+router.post('/brain/versions/:id/rollback', auth, writeLimiter, rollbackBrainVersionHandler);
 
 // Phase 9–13: observability / FinOps / kill switch / routing / backup.
 // /metrics НЕ требует auth — это стандарт для Prometheus-скрейперов.

@@ -18,6 +18,9 @@ import hashlib
 import json
 import os
 import random
+import shutil
+import statistics
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -78,7 +81,8 @@ def status() -> Dict[str, Any]:
     return {
         "last_run_at": None,
         "last_status": "never_ran",
-        "available":   is_available(),
+        "available": is_available(),
+        "ok": False,
         "seeds_total": dspy_seed.count_seeds(),
         "seed_niches": dspy_seed.seed_niches(),
     }
@@ -246,6 +250,158 @@ def apply_mutation(prompt: str, kind: str) -> str:
     return base + suffix_map.get(kind, "")
 
 
+# ── Real DSPy compile/deploy helpers ──────────────────────────────────
+COMPILED_WRITER_PATH = Path(os.environ.get('AEGIS_DSPY_WRITER_ARTIFACT', 'brain_state/compiled_writer.yaml'))
+HISTORY_DIR = Path(os.environ.get('AEGIS_DSPY_HISTORY_DIR', str(COMPILED_WRITER_PATH.parent / 'history')))
+
+
+def _dspy_lm_configure():
+    if not _DSPY_OK:
+        return False, 'dspy_missing'
+    api_key = os.environ.get('DEEPSEEK_API_KEY') or os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        return False, 'dspy_lm_key_missing'
+    try:
+        model = os.environ.get('AEGIS_DSPY_MODEL', 'openai/deepseek-chat')
+        if model.startswith('deepseek/'):
+            model = 'openai/' + model.split('/', 1)[1]
+        elif '/' not in model:
+            model = 'openai/' + model
+        kwargs = {'model': model, 'api_key': api_key}
+        api_base = os.environ.get('DEEPSEEK_API_BASE') or os.environ.get('OPENAI_API_BASE')
+        if api_base:
+            kwargs['api_base'] = api_base.rstrip('/')
+        lm = dspy.LM(**kwargs)
+        if hasattr(dspy, 'configure'):
+            dspy.configure(lm=lm)
+        else:
+            dspy.settings.configure(lm=lm)
+        return True, model
+    except Exception as exc:
+        return False, f'dspy_lm_config_error:{exc.__class__.__name__}'
+
+
+def _dspy_examples(rows):
+    examples = []
+    for row in rows or []:
+        prompt = row.get('user_prompt') or ''
+        context = row.get('ground_truth_context') or prompt
+        output = row.get('html_output') or ''
+        if prompt and output:
+            examples.append(dspy.Example(
+                user_prompt=str(prompt),
+                ground_truth_context=str(context),
+                draft_text=str(output),
+            ).with_inputs('user_prompt', 'ground_truth_context'))
+    return examples
+
+
+def _metric(example, prediction, trace=None):
+    import re
+    expected = set(re.findall(r'[A-Za-zА-Яа-яЁё0-9]{3,}', str(getattr(example, 'draft_text', '')).lower()))
+    actual_text = str(getattr(prediction, 'draft_text', '') or '')
+    actual = set(re.findall(r'[A-Za-zА-Яа-яЁё0-9]{3,}', actual_text.lower()))
+    if not actual:
+        return 0.0
+    overlap = len(expected & actual) / max(1, min(len(expected), 300))
+    html = actual_text.lower()
+    structure = sum(1 for marker in ('<h1', '<h2', '<p', '<ul', '<ol') if marker in html) / 5.0
+    return max(0.0, min(1.0, 0.75 * min(1.0, overlap * 4.0) + 0.25 * structure))
+
+
+def _compile_candidate(trainset, max_trials):
+    class WriterSignature(dspy.Signature):
+        'Generate grounded HTML from the supplied evidence; never invent facts.'
+        user_prompt: str = dspy.InputField(desc='article task and structural constraints')
+        ground_truth_context: str = dspy.InputField(desc='only allowed factual evidence')
+        draft_text: str = dspy.OutputField(desc='valid grounded HTML article')
+
+    class WriterProgram(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.generate = dspy.ChainOfThought(WriterSignature)
+
+        def forward(self, user_prompt, ground_truth_context):
+            return self.generate(user_prompt=user_prompt, ground_truth_context=ground_truth_context)
+
+    program = WriterProgram()
+    trials = max(1, min(50, int(max_trials or 1)))
+    try:
+        from dspy.teleprompt import MIPROv2
+        import inspect
+        params = inspect.signature(MIPROv2).parameters
+        kwargs = {'metric': _metric}
+        if 'auto' in params:
+            kwargs['auto'] = 'light'
+        if 'num_candidates' in params:
+            kwargs['num_candidates'] = min(10, trials)
+        optimizer = MIPROv2(**kwargs)
+    except Exception:
+        from dspy.teleprompt import BootstrapFewShotWithRandomSearch
+        optimizer = BootstrapFewShotWithRandomSearch(
+            metric=_metric,
+            max_bootstrapped_demos=min(4, trials),
+            max_labeled_demos=min(8, trials),
+            num_candidate_programs=min(10, trials),
+        )
+    return optimizer.compile(program, trainset=trainset)
+
+
+def _evaluate_candidate(program, holdout):
+    if not holdout:
+        return 0.0
+    scores = []
+    for example in holdout[:20]:
+        try:
+            prediction = program(
+                user_prompt=example.user_prompt,
+                ground_truth_context=example.ground_truth_context,
+            )
+            scores.append(_metric(example, prediction))
+        except Exception:
+            scores.append(0.0)
+    return round(statistics.mean(scores), 4) if scores else 0.0
+
+
+def _write_compiled_artifact(program, model, before, after, rows, mutation_kind):
+    COMPILED_WRITER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    if COMPILED_WRITER_PATH.exists():
+        stamp = datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+        shutil.copy2(COMPILED_WRITER_PATH, HISTORY_DIR / ('compiled_writer.' + stamp + '.yaml'))
+    generator = getattr(program, 'generate', program)
+    signature = getattr(generator, 'signature', None)
+    instructions = getattr(signature, 'instructions', '') if signature else ''
+    prompt = '\\n\\n'.join([
+        'Use the supplied article evidence as the only source of factual claims.',
+        'Return valid HTML matching the active pipeline contract; never invent numbers, credentials, sources, URLs or guarantees.',
+        str(instructions or '').strip(),
+    ]).strip()
+    if mutation_kind:
+        prompt = apply_mutation(prompt, mutation_kind)
+    content = '\\n'.join([
+        'version: 2',
+        'compiled_at: ' + datetime.datetime.utcnow().isoformat() + 'Z',
+        'mean_spq_before: ' + str(round(before * 100, 3)),
+        'mean_spq_after: ' + str(round(after * 100, 3)),
+        'model: "' + str(model).replace('"', '') + '"',
+        'writer:',
+        '  system_prompt: |',
+    ] + ['    ' + line for line in (prompt.splitlines() or [''])]) + '\\n'
+    digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
+    fd, temp_name = __import__('tempfile').mkstemp(prefix='compiled_writer.', dir=str(COMPILED_WRITER_PATH.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, COMPILED_WRITER_PATH)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    return {'artifact_path': str(COMPILED_WRITER_PATH), 'artifact_sha': digest, 'dataset_size': rows}
+
+
 # ── Основная функция retrain ─────────────────────────────────────────
 def retrain(
     *,
@@ -318,24 +474,67 @@ def retrain(
         "last_status":         status_str,
     }
 
+    if not (real_rows or []):
+        payload.update({'last_status': 'seed_only', 'reason': 'real_dataset_empty'})
+        _save_status(payload)
+        return payload
     if dry_run:
+        payload.update({'last_status': 'planned', 'reason': 'dry_run'})
         _save_status(payload)
         return payload
 
-    # ── РЕАЛЬНАЯ ЛОГИКА — добавляется при подключении dspy-ai + БД. ──
-    # Псевдокод:
-    #   examples = [build_example(r) for r in merged["rows"]]
-    #   metric   = weighted Spq * ppo_weight
-    #   compiled = dspy.MIPROv2(prompt_model=..., metric=metric,
-    #                           num_trials=max_trials).compile(...)
-    #   prompt   = compiled.prompt
-    #   if mutation_applied:
-    #       prompt = apply_mutation(prompt, mutation_kind)
-    #   # дальше — A/B-сравнение vs текущая версия в brain_state и
-    #   # сохранение compiled_writer.yaml при improvement_pct ≥ порога.
-    payload["note"] = (
-        "production retrain requires dspy-ai + psycopg + GEMINI_API_KEY; "
-        "this build returned seed/ε-greedy plan only"
+    configured, model_or_reason = _dspy_lm_configure()
+    if not configured:
+        payload.update({'last_status': 'compile_unavailable', 'reason': model_or_reason})
+        _save_status(payload)
+        return payload
+
+    examples = _dspy_examples(real_rows)
+    if len(examples) < 4:
+        payload.update({'last_status': 'holdout_too_small', 'reason': 'need_at_least_4_real_examples'})
+        _save_status(payload)
+        return payload
+    holdout_size = max(2, min(len(examples) // 5, 20))
+    trainset = examples[:-holdout_size]
+    holdout = examples[-holdout_size:]
+    baseline_values = []
+    for row in (real_rows or [])[-holdout_size:]:
+        try:
+            baseline_values.append(max(0.0, min(1.0, float(row.get('spq_overall', 0)) / 100.0)))
+        except Exception:
+            baseline_values.append(0.0)
+    baseline = round(statistics.mean(baseline_values), 4) if baseline_values else 0.0
+    try:
+        compiled = _compile_candidate(trainset, max_trials)
+        candidate = _evaluate_candidate(compiled, holdout)
+    except Exception as exc:
+        payload.update({'last_status': 'compile_failed', 'reason': f'{exc.__class__.__name__}:{exc}'})
+        _save_status(payload)
+        return payload
+
+    improvement_pct = ((candidate - baseline) / max(0.01, baseline)) * 100.0
+    payload.update({
+        'mean_spq_before': round(baseline * 100, 3),
+        'mean_spq_after': round(candidate * 100, 3),
+        'improvement_pct': round(improvement_pct, 3),
+        'holdout_size': len(holdout),
+        'last_status': 'candidate_rejected',
+    })
+    if candidate <= 0 or improvement_pct < float(min_improvement_pct or 0):
+        payload['reason'] = 'holdout_improvement_below_threshold'
+        _save_status(payload)
+        return payload
+
+    deployed = _write_compiled_artifact(
+        compiled,
+        model_or_reason,
+        baseline,
+        candidate,
+        len(real_rows),
+        mutation_kind,
     )
+    payload.update(deployed)
+    payload['last_status'] = 'deployed'
+    payload['ok'] = True
     _save_status(payload)
     return payload

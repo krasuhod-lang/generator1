@@ -71,7 +71,8 @@ async function _lastBrainVersion(db) {
   if (!db || typeof db.query !== 'function') return { available: false };
   try {
     const r = await db.query(
-      `SELECT id, sha, deployed_at, improvement_pct, dataset_size
+      `SELECT id, sha, deployed_at, improvement_pct, dataset_size,
+              status, artifact_sha, artifact_type, holdout_score, evaluation, deployed_by
          FROM aegis_brain_versions
         WHERE rolled_back_at IS NULL
         ORDER BY deployed_at DESC LIMIT 1`,
@@ -86,6 +87,12 @@ async function _lastBrainVersion(db) {
       deployed_at: row.deployed_at,
       improvement_pct: row.improvement_pct == null ? null : Number(row.improvement_pct),
       dataset_size: row.dataset_size == null ? null : Number(row.dataset_size),
+      status: row.status || 'deployed',
+      artifact_sha: row.artifact_sha || null,
+      artifact_type: row.artifact_type || null,
+      holdout_score: row.holdout_score == null ? null : Number(row.holdout_score),
+      evaluation: row.evaluation || {},
+      deployed_by: row.deployed_by || null,
     };
   } catch (e) {
     return { available: false, error: e.message };
@@ -182,6 +189,14 @@ async function buildDspySection(opts = {}) {
       fix: 'Дождаться накопления реальных генераций или включить cold-start seeds (`dspy.coldStartUseSeeds`).',
     });
   }
+  if (lastVersion.exists && lastVersion.status && lastVersion.status !== 'deployed') {
+    issues.push({
+      level: lastVersion.status === 'candidate_rejected' ? 'warn' : 'error',
+      code: `dspy_last_cycle:${lastVersion.status}`,
+      message: `Последний DSPy cycle имеет статус ${lastVersion.status}, а не deployed.`,
+      fix: 'Проверить py_status, holdout_score, реальные строки датасета и причину отказа; текущий deployed artifact не заменять без holdout improvement.',
+    });
+  }
   if (baselineInfo.exists && baselineInfo.looks_like_baseline_stub
       && lastVersion.available && !lastVersion.exists) {
     issues.push({
@@ -204,7 +219,8 @@ async function buildDspySection(opts = {}) {
   // Готовность к первому retrain: нет error-issues + py доступен + dataset не пустой.
   const blockingErrors = issues.filter((i) => i.level === 'error');
   const datasetReady = datasetStats.available && datasetStats.total_rows >= minRows;
-  const readyForFirstRetrain = blockingErrors.length === 0 && pyReachable === true && datasetReady;
+  const compileReady = !pyStatus || !['compile_unavailable', 'compile_failed', 'candidate_rejected'].includes(pyStatus.last_status);
+  const readyForFirstRetrain = blockingErrors.length === 0 && pyReachable === true && datasetReady && compileReady;
 
   return {
     enabled: Boolean(dspyCfg.enabled),

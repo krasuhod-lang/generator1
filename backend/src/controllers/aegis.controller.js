@@ -33,6 +33,7 @@ const biobrain   = require('../services/aegis/biobrainClient');
 const promptAudit = require('../services/aegis/promptAudit');
 const seoBrain = require('../services/aegis/seoBrain');
 const trainingHealth = require('../services/aegis/trainingHealth');
+const brainVersionRegistry = require('../services/aegis/brainVersionRegistry');
 const { LABEL_READY, LABEL_IN_PROGRESS, LABEL_DONE, LABEL_FAILED } = require('../services/aegis/backlogHooks');
 
 /** GET /api/aegis/status */
@@ -381,7 +382,8 @@ async function listBrainVersions(req, res) {
   try {
     const r = await db.query(
       `SELECT id, yaml_path, sha, mean_spq_before, mean_spq_after,
-              improvement_pct, trials_done, dataset_size, cost_usd, deployed_at
+              improvement_pct, trials_done, dataset_size, cost_usd, deployed_at,
+              status, artifact_sha, artifact_type, holdout_score, evaluation, deployed_by
          FROM aegis_brain_versions
         ORDER BY deployed_at DESC
         LIMIT 50`,
@@ -398,6 +400,18 @@ async function listBrainVersions(req, res) {
   } catch (e) {
     const items = (current && current.available) ? [_baselineBrainVersion(current)] : [];
     res.json({ items, current, warning: e.message });
+  }
+}
+
+/** POST /api/aegis/brain/versions/:id/rollback (admin) */
+async function rollbackBrainVersionHandler(req, res) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+  try {
+    const result = await brainVersionRegistry.rollbackBrainVersion(db, req.params.id, req.user.id || 'admin');
+    if (!result.ok) return res.status(409).json({ error: 'brain_rollback_failed', reason: result.reason });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: 'brain_rollback_failed', reason: e.message });
   }
 }
 
@@ -419,6 +433,11 @@ function _baselineBrainVersion(current) {
     dataset_size: null,
     cost_usd: null,
     deployed_at: current.compiled_at || (current.health && current.health.last_modified) || null,
+    status: 'baseline',
+    artifact_type: 'compiled_writer',
+    holdout_score: null,
+    evaluation: {},
+    deployed_by: 'baseline',
   };
 }
 
@@ -1055,6 +1074,7 @@ async function measureExperimentHandler(req, res) {
   }
 }
 
+module.exports.rollbackBrainVersionHandler = rollbackBrainVersionHandler;
 module.exports.listExperiments         = listExperiments;
 module.exports.runExperimentsNow       = runExperimentsNow;
 module.exports.dispatchExperimentHandler = dispatchExperimentHandler;

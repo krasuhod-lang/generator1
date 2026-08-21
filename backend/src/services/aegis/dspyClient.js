@@ -25,7 +25,7 @@ function _opts() {
   };
 }
 
-async function retrain({ niche = null, dryRun = false } = {}) {
+async function retrain({ niche = null, dryRun = false, realRows = null } = {}) {
   const { base, timeoutMs, enabled, maxTrials, maxCostUsd, minImprovementPct } = _opts();
   if (!enabled) return { ok: false, reason: 'disabled' };
   return http.post(base, '/dspy/retrain', {
@@ -34,6 +34,7 @@ async function retrain({ niche = null, dryRun = false } = {}) {
     max_trials:             maxTrials,
     max_cost_usd:           maxCostUsd,
     min_improvement_pct:    minImprovementPct,
+    real_rows:               Array.isArray(realRows) ? realRows : null,
   }, { timeoutMs });
 }
 

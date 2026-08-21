@@ -539,6 +539,20 @@ async function runMetaTagTaskInner(taskId) {
         userPrompt: `${t.name || ''}\\n${Array.isArray(t.keywords) ? t.keywords.join('\\n') : ''}`,
         promptHash: resolvePromptHash('systemPrompts'),
       });
+      const { recordTaskPublication } = require('../aegis/serpOutcomeTracker');
+      const outcome = await recordTaskPublication({
+        taskId,
+        kind: 'meta_tags',
+        publishedUrl: t.published_url,
+        queries: t.published_queries,
+        html: JSON.stringify(t.results || []),
+        plain: JSON.stringify(t.results || []),
+        projectId: t.project_id,
+        opportunityId: t.opportunity_id,
+        promptVersion: t.prompt_version || 'metaTags:gist:v1',
+        modelVersion: t.gemini_model,
+      });
+      if (outcome.ok) await appendLog(taskId, `🎯 SERP outcome зарегистрирован: #${outcome.id}`, 'info');
     }
   } catch (_e) { /* best-effort */ }
   try {
