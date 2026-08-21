@@ -5,7 +5,10 @@ const { callGemini }   = require('./gemini.adapter');
 const { callGrok }     = require('./grok.adapter');
 const { autoCloseJSON, extractBalancedJson } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
-const { calcCost, estimateTokens } = require('../metrics/priceCalculator');
+const {
+  calculateCostBreakdown,
+  estimateTokens,
+} = require('../metrics/priceCalculator');
 const { getCachedResponse, setCachedResponse } = require('./responseCache');
 const responseCacheModule = require('./responseCache');
 const { withProviderSlot } = require('./rateLimiter');
@@ -294,7 +297,7 @@ function inferPipeline(stageName, pipeline) {
 async function persistStageCall({
   taskId, traceTaskId, pipeline, stageName, callLabel, model, promptSize,
   tokensIn, tokensOut, costUsd, resultJson, startedAt, promptVersion,
-  qualityScore, triggeredRefine,
+  qualityScore, triggeredRefine, pricingMeta,
 }) {
   const completedAt = new Date();
   const traceId = traceTaskId || taskId;
@@ -322,11 +325,20 @@ async function persistStageCall({
     await db.query(
       `INSERT INTO task_stages
          (task_id, stage_name, call_label, status, model_used, prompt_size,
-          tokens_in, tokens_out, cost_usd, result_json, started_at, completed_at)
-       VALUES ($1,$2,$3,'completed',$4,$5,$6,$7,$8,$9,$10,$11)`,
+          tokens_in, tokens_out, cost_usd, result_json, started_at, completed_at,
+          model_tier, pricing_mode, cache_hit_tokens, cache_miss_tokens,
+          thoughts_tokens, input_cost_usd, output_cost_usd)
+       VALUES ($1,$2,$3,'completed',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
       [taskId, stageName, callLabel, model, promptSize,
        tokensIn, tokensOut, costUsd, resultJson ? JSON.stringify(resultJson) : null,
-       startedAt, completedAt]
+       startedAt, completedAt,
+       pricingMeta?.modelTier || model || null,
+       pricingMeta?.pricingMode || null,
+       pricingMeta?.cacheHitTokens || 0,
+       pricingMeta?.cacheMissTokens || 0,
+       pricingMeta?.thoughtsTokens || 0,
+       pricingMeta?.inputCostUsd || 0,
+       pricingMeta?.outputCostUsd || 0]
     );
 
     // Обновляем агрегированные метрики. Каждый провайдер пишет в свою
@@ -497,16 +509,20 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         callOpts.cachedContent = activeCachedContent;
       }
 
-      const result    = await withProviderSlot(adapter, () => callFn(system, prompt, callOpts));
+      const result = await withProviderSlot(adapter, () => callFn(system, prompt, callOpts));
       if (budgetReservation) budgetReservation.commit(result.tokensIn || promptSize);
-      const cacheHit  = adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0;
-      // Для Gemini подмешиваем thoughts/cached токены из usageMetadata в формулу
-      // стоимости. Для DeepSeek/Grok эти поля не существуют → undefined → не влияют.
-      const costUsd   = calcCost(adapter, result.tokensIn, result.tokensOut, {
-        cacheHit,
+      const costModel = adapter === 'deepseek'
+        ? (result.model || model || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro')
+        : adapter;
+      const pricingMeta = calculateCostBreakdown(costModel, result.tokensIn, result.tokensOut, {
+        cacheHit: adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0,
+        cacheHitTokens: result.cacheHitTokens || 0,
+        cacheMissTokens: result.cacheMissTokens,
         thoughtsTokens: result.thoughtsTokens || 0,
-        cachedTokens:   result.cachedTokens   || 0,
+        cachedTokens: result.cachedTokens || 0,
       });
+      const costUsd = pricingMeta.totalUsd;
+      const cacheHit = pricingMeta.cacheHitTokens > 0;
       // Usage фиксируем ДО проверки truncation/JSON: retry после обрезанного
       // ответа тоже является реальным provider-вызовом и должен попасть в budget.
       if (!budgetReservation && providerClass === 'gemini-class' && budgetTaskId) {
@@ -559,8 +575,18 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         tokensIn:   result.tokensIn,
         tokensOut:  result.tokensOut,
         costUsd,
-        resultJson: cacheHit
-          ? Object.assign({}, parsed, { _cacheHitTokens: result.cacheHitTokens })
+        pricingMeta,
+        resultJson: pricingMeta.cacheHitTokens > 0 || pricingMeta.cacheMissTokens > 0
+          ? Object.assign({}, parsed, {
+            _billing: {
+              model: pricingMeta.modelTier,
+              pricing_mode: pricingMeta.pricingMode,
+              cache_hit_tokens: pricingMeta.cacheHitTokens,
+              cache_miss_tokens: pricingMeta.cacheMissTokens,
+              input_cost_usd: pricingMeta.inputCostUsd,
+              output_cost_usd: pricingMeta.outputCostUsd,
+            },
+          })
           : parsed,
         startedAt,
         promptVersion,

@@ -997,10 +997,14 @@ async function getAegisCostBreakdown(req, res, next) {
     const daily = await db.query(
       `SELECT date_trunc('day', created_at)::date          AS day,
               COUNT(*)::int                                AS calls,
-              COALESCE(SUM(cost_usd), 0)::numeric(14,6)    AS cost_usd,
+              COALESCE(SUM(cost_usd), 0)::numeric(18,12) AS cost_usd,
               COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
               COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
               COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
+              COALESCE(SUM(cache_hit_tokens), 0)::bigint   AS cache_hit_tokens,
+              COALESCE(SUM(cache_miss_tokens), 0)::bigint  AS cache_miss_tokens,
+              COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
+              COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd,
               COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits,
               COUNT(*) FILTER (WHERE outcome <> 'ok')::int AS errors
          FROM aegis_llm_usage
@@ -1014,10 +1018,14 @@ async function getAegisCostBreakdown(req, res, next) {
     const byProvider = await db.query(
       `SELECT provider,
               COUNT(*)::int                                AS calls,
-              COALESCE(SUM(cost_usd), 0)::numeric(14,6)    AS cost_usd,
+              COALESCE(SUM(cost_usd), 0)::numeric(18,12) AS cost_usd,
               COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
               COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
               COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
+              COALESCE(SUM(cache_hit_tokens), 0)::bigint   AS cache_hit_tokens,
+              COALESCE(SUM(cache_miss_tokens), 0)::bigint  AS cache_miss_tokens,
+              COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
+              COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd,
               COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits
          FROM aegis_llm_usage
         WHERE created_at >= $1 AND created_at < $2
@@ -1026,13 +1034,36 @@ async function getAegisCostBreakdown(req, res, next) {
       params,
     );
 
-    // 3. Итоги периода.
+    // 3. Разбивка по фактической модели и pricing mode.
+    const byModel = await db.query(
+      `SELECT provider, COALESCE(model, provider) AS model,
+              COALESCE(pricing_mode, 'unknown') AS pricing_mode,
+              COUNT(*)::int AS calls,
+              COALESCE(SUM(cost_usd), 0)::numeric(18,12) AS cost_usd,
+              COALESCE(SUM(tokens_in), 0)::bigint AS tokens_in,
+              COALESCE(SUM(tokens_out), 0)::bigint AS tokens_out,
+              COALESCE(SUM(cache_hit_tokens), 0)::bigint AS cache_hit_tokens,
+              COALESCE(SUM(cache_miss_tokens), 0)::bigint AS cache_miss_tokens,
+              COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
+              COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd
+         FROM aegis_llm_usage
+        WHERE created_at >= $1 AND created_at < $2
+        GROUP BY provider, COALESCE(model, provider), COALESCE(pricing_mode, 'unknown')
+        ORDER BY cost_usd DESC`,
+      params,
+    );
+
+    // 4. Итоги периода.
     const totalsQ = await db.query(
       `SELECT COUNT(*)::int                                AS calls,
-              COALESCE(SUM(cost_usd), 0)::numeric(14,6)    AS cost_usd,
+              COALESCE(SUM(cost_usd), 0)::numeric(18,12) AS cost_usd,
               COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
               COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
               COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
+              COALESCE(SUM(cache_hit_tokens), 0)::bigint   AS cache_hit_tokens,
+              COALESCE(SUM(cache_miss_tokens), 0)::bigint  AS cache_miss_tokens,
+              COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
+              COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd,
               COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits,
               COUNT(*) FILTER (WHERE outcome <> 'ok')::int AS errors
          FROM aegis_llm_usage
@@ -1054,7 +1085,11 @@ async function getAegisCostBreakdown(req, res, next) {
       errors: Number(t.errors) || 0,
       // Доля вызовов с попаданием в кэш и доля закэшированных input-токенов.
       cache_hit_rate_pct: calls ? Number(((Number(t.cache_hits) / calls) * 100).toFixed(1)) : 0,
-      cached_token_pct: tokensIn ? Number(((cachedTokens / tokensIn) * 100).toFixed(1)) : 0,
+      cached_token_pct: tokensIn ? Number(((Number(t.cache_hit_tokens || cachedTokens) / tokensIn) * 100).toFixed(1)) : 0,
+      cache_hit_tokens: Number(t.cache_hit_tokens) || cachedTokens,
+      cache_miss_tokens: Number(t.cache_miss_tokens) || Math.max(0, tokensIn - cachedTokens),
+      input_cost_usd: Number(t.input_cost_usd) || 0,
+      output_cost_usd: Number(t.output_cost_usd) || 0,
     };
 
     return res.json({
@@ -1062,6 +1097,7 @@ async function getAegisCostBreakdown(req, res, next) {
       totals,
       daily: daily.rows,
       by_provider: byProvider.rows,
+      by_model: byModel.rows,
     });
   } catch (err) {
     // Таблицы ещё нет (миграция не применена) — пустой каркас, чтобы админка
@@ -1072,6 +1108,7 @@ async function getAegisCostBreakdown(req, res, next) {
         totals: { calls: 0, cost_usd: 0, tokens_in: 0, tokens_out: 0, cached_tokens: 0, cache_hits: 0, errors: 0, cache_hit_rate_pct: 0, cached_token_pct: 0 },
         daily: [],
         by_provider: [],
+        by_model: [],
         note: 'aegis_llm_usage table not initialized',
       });
     }

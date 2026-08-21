@@ -257,6 +257,31 @@ async function ensureDurableTaskSchema(db = dbDefault) {
     `ALTER TABLE aegis_experiments ADD COLUMN IF NOT EXISTS feedback_last_error TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_aegis_experiments_due ON aegis_experiments(status, measure_after_at, next_attempt_at)`,
     `CREATE INDEX IF NOT EXISTS idx_aegis_experiments_feedback_due ON aegis_experiments(status, feedback_status, feedback_next_attempt_at)`,
+
+    // LLM pricing accuracy (migration 135): actual model/tier, partial cache
+    // split, peak/off-peak mode and high-precision input/output costs.
+    `ALTER TABLE task_stages ADD COLUMN IF NOT EXISTS model_tier VARCHAR(100)`,
+    `ALTER TABLE task_stages ADD COLUMN IF NOT EXISTS pricing_mode VARCHAR(16)`,
+    `ALTER TABLE task_stages ADD COLUMN IF NOT EXISTS cache_hit_tokens BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE task_stages ADD COLUMN IF NOT EXISTS cache_miss_tokens BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE task_stages ADD COLUMN IF NOT EXISTS thoughts_tokens BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE task_stages ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(18,12) NOT NULL DEFAULT 0`,
+    `ALTER TABLE task_stages ADD COLUMN IF NOT EXISTS output_cost_usd NUMERIC(18,12) NOT NULL DEFAULT 0`,
+    `ALTER TABLE task_stages ALTER COLUMN cost_usd TYPE NUMERIC(18,12)`,
+    `ALTER TABLE task_metrics ALTER COLUMN deepseek_cost_usd TYPE NUMERIC(18,12)`,
+    `ALTER TABLE task_metrics ALTER COLUMN gemini_cost_usd TYPE NUMERIC(18,12)`,
+    `ALTER TABLE task_metrics ALTER COLUMN grok_cost_usd TYPE NUMERIC(18,12)`,
+    `ALTER TABLE task_metrics ALTER COLUMN total_cost_usd TYPE NUMERIC(18,12)`,
+    `ALTER TABLE aegis_llm_usage ADD COLUMN IF NOT EXISTS model VARCHAR(100)`,
+    `ALTER TABLE aegis_llm_usage ADD COLUMN IF NOT EXISTS pricing_mode VARCHAR(16)`,
+    `ALTER TABLE aegis_llm_usage ADD COLUMN IF NOT EXISTS cache_hit_tokens BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE aegis_llm_usage ADD COLUMN IF NOT EXISTS cache_miss_tokens BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE aegis_llm_usage ADD COLUMN IF NOT EXISTS thoughts_tokens BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE aegis_llm_usage ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(18,12) NOT NULL DEFAULT 0`,
+    `ALTER TABLE aegis_llm_usage ADD COLUMN IF NOT EXISTS output_cost_usd NUMERIC(18,12) NOT NULL DEFAULT 0`,
+    `ALTER TABLE aegis_llm_usage ALTER COLUMN cost_usd TYPE NUMERIC(18,12)`,
+    `CREATE INDEX IF NOT EXISTS idx_task_stages_model_pricing ON task_stages(model_tier, pricing_mode, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_aegis_llm_usage_model_pricing ON aegis_llm_usage(model, pricing_mode, created_at DESC)`,
   ];
 
   for (const sql of statements) await db.query(sql);

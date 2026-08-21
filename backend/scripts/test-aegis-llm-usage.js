@@ -9,8 +9,9 @@
  *   • recordUsage никогда не бросает (best-effort);
  *   • при выключенном флаге costLog.enabled — no-op (reason: 'disabled');
  *   • при включённом флаге — один параметризованный INSERT с корректной
- *     нормализацией полей (clamp отрицательных токенов, cache_hit из
- *     cachedTokens, обрезка длинных строк, дефолт outcome='ok');
+ *     нормализацией billing-полей (clamp отрицательных токенов, model,
+ *     cache hit/miss split, раздельные input/output costs, обрезка длинных
+ *     строк, дефолт outcome='ok');
  *   • сбой db.query → reason: 'db_error', без исключения наружу.
  *
  * Запуск:  node backend/scripts/test-aegis-llm-usage.js
@@ -80,28 +81,42 @@ function ok(name) { passed += 1; console.log(`  ✓ ${name}`); }
   _calls.length = 0;
   r = await usage.recordUsage({
     provider: 'DeepSeek',
+    model: 'deepseek-v4-flash',
     kind: 'writer',
     tokensIn: 1000,
     tokensOut: 250,
     cachedTokens: 400,
-    costUsd: 0.0123,
+    cacheHitTokens: 400,
+    cacheMissTokens: 600,
+    thoughtsTokens: 0,
+    inputCostUsd: 0.0012,
+    outputCostUsd: 0.0023,
+    costUsd: 0.0035,
+    pricingMode: 'off_peak',
     latencyMs: 1500,
   });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(_calls.length, 1, 'exactly one INSERT');
   const c = _calls[0];
   assert.ok(/INSERT INTO aegis_llm_usage/.test(c.text), 'INSERT statement');
-  assert.ok(/\$1.*\$9/s.test(c.text), 'parameterized ($1..$9)');
+  assert.ok(/\$1.*\$16/s.test(c.text), 'parameterized ($1..$16)');
   const p = c.params;
   assert.strictEqual(p[0], 'deepseek', 'provider lowercased');
-  assert.strictEqual(p[1], 'writer', 'kind');
-  assert.strictEqual(p[2], 'ok', 'default outcome');
-  assert.strictEqual(p[3], 1000, 'tokens_in');
-  assert.strictEqual(p[4], 250, 'tokens_out');
-  assert.strictEqual(p[5], 400, 'cached_tokens');
-  assert.strictEqual(p[6], 0.0123, 'cost_usd');
-  assert.strictEqual(p[7], true, 'cache_hit derived from cachedTokens>0');
-  assert.strictEqual(p[8], 1500, 'latency_ms');
+  assert.strictEqual(p[1], 'deepseek-v4-flash', 'model');
+  assert.strictEqual(p[2], 'writer', 'kind');
+  assert.strictEqual(p[3], 'ok', 'default outcome');
+  assert.strictEqual(p[4], 1000, 'tokens_in');
+  assert.strictEqual(p[5], 250, 'tokens_out');
+  assert.strictEqual(p[6], 400, 'cached_tokens');
+  assert.strictEqual(p[7], 400, 'cache_hit_tokens');
+  assert.strictEqual(p[8], 600, 'cache_miss_tokens');
+  assert.strictEqual(p[9], 0, 'thoughts_tokens');
+  assert.strictEqual(p[10], 0.0012, 'input_cost_usd');
+  assert.strictEqual(p[11], 0.0023, 'output_cost_usd');
+  assert.strictEqual(p[12], 0.0035, 'cost_usd');
+  assert.strictEqual(p[13], 'off_peak', 'pricing_mode');
+  assert.strictEqual(p[14], true, 'cache_hit derived from cachedTokens>0');
+  assert.strictEqual(p[15], 1500, 'latency_ms');
   ok('enabled flag → single parameterized INSERT with normalized fields');
 
   // 3. Нормализация: отрицательные/NaN → 0, нет кэша → cache_hit=false,
@@ -118,14 +133,22 @@ function ok(name) { passed += 1; console.log(`  ✓ ${name}`); }
   assert.strictEqual(r.ok, true);
   const p3 = _calls[0].params;
   assert.strictEqual(p3[0].length, 32, 'provider clamped to 32 chars');
-  assert.strictEqual(p3[2], 'error', 'explicit outcome preserved');
-  assert.strictEqual(p3[3], 0, 'negative tokens_in → 0');
-  assert.strictEqual(p3[4], 0, 'NaN tokens_out → 0');
-  assert.strictEqual(p3[5], 0, 'cached_tokens 0');
-  assert.strictEqual(p3[6], 0, 'negative cost → 0');
-  assert.strictEqual(p3[7], false, 'no cache → cache_hit=false');
-  assert.strictEqual(p3[8], null, 'missing latency → null');
-  ok('field normalization (clamp, outcome, cache_hit, latency null)');
+  assert.strictEqual(p3[1], null, 'missing model → null');
+  assert.strictEqual(p3[2], null, 'missing kind → null');
+  assert.strictEqual(p3[3], 'error', 'explicit outcome preserved');
+  assert.strictEqual(p3[4], 0, 'negative tokens_in → 0');
+  assert.strictEqual(p3[5], 0, 'NaN tokens_out → 0');
+  assert.strictEqual(p3[6], 0, 'cached_tokens 0');
+  assert.strictEqual(p3[7], 0, 'cache_hit_tokens 0');
+  assert.strictEqual(p3[8], 0, 'cache_miss_tokens 0');
+  assert.strictEqual(p3[9], 0, 'thoughts_tokens 0');
+  assert.strictEqual(p3[10], 0, 'input cost 0');
+  assert.strictEqual(p3[11], 0, 'output cost 0');
+  assert.strictEqual(p3[12], 0, 'negative cost → 0');
+  assert.strictEqual(p3[13], null, 'missing pricing mode → null');
+  assert.strictEqual(p3[14], false, 'no cache → cache_hit=false');
+  assert.strictEqual(p3[15], null, 'missing latency → null');
+  ok('field normalization (clamp, outcome, billing fields, latency null)');
 
   // 4. Сбой db.query → reason db_error, без исключения.
   _calls.length = 0;

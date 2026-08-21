@@ -17,7 +17,7 @@
 
 const { callGemini } = require('../llm/gemini.adapter');
 const { callDeepSeek } = require('../llm/deepseek.adapter');
-const { calcCost } = require('../metrics/priceCalculator');
+const { calculateCostBreakdown } = require('../metrics/priceCalculator');
 const llmUsageLog = require('../aegis/llmUsageLog');
 const { getProjectsConfig } = require('./config');
 
@@ -77,11 +77,22 @@ async function _callRaw(provider, system, user, opts) {
     });
     const tIn = resp.tokensIn || 0;
     const tOut = (resp.tokensOut || 0) + (resp.thoughtsTokens || 0);
-    const cost = calcCost('gemini', tIn, resp.tokensOut || 0, {
+    const model = resp.model || g.model || 'gemini';
+    const pricing = calculateCostBreakdown('gemini', tIn, resp.tokensOut || 0, {
       cachedTokens: resp.cachedTokens || 0,
       thoughtsTokens: resp.thoughtsTokens || 0,
     });
-    return { text: resp.text || '', tIn, tOut, cached: resp.cachedTokens || 0, cost, model: resp.model || g.model || 'gemini' };
+    return {
+      text: resp.text || '',
+      tIn,
+      tOut,
+      cached: resp.cachedTokens || 0,
+      cacheHitTokens: pricing.cacheHitTokens,
+      cacheMissTokens: pricing.cacheMissTokens,
+      pricing,
+      cost: pricing.totalUsd,
+      model,
+    };
   }
   // deepseek
   const d = cfg.deepseek || {};
@@ -94,9 +105,22 @@ async function _callRaw(provider, system, user, opts) {
   const tIn = resp.tokensIn || 0;
   const tOut = resp.tokensOut || 0;
   const cached = resp.cacheHitTokens || 0;
-  const costProv = _costProvider('deepseek', opts.model || d.model);
-  const cost = calcCost(costProv, tIn, tOut, { cachedTokens: cached });
-  return { text: resp.text || '', tIn, tOut, cached, cost, model: resp.model || d.model || 'deepseek' };
+  const model = resp.model || opts.model || d.model || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
+  const pricing = calculateCostBreakdown(model, tIn, tOut, {
+    cacheHitTokens: cached,
+    cacheMissTokens: resp.cacheMissTokens,
+  });
+  return {
+    text: resp.text || '',
+    tIn,
+    tOut,
+    cached,
+    cacheHitTokens: pricing.cacheHitTokens,
+    cacheMissTokens: pricing.cacheMissTokens,
+    pricing,
+    cost: pricing.totalUsd,
+    model,
+  };
 }
 
 /**
@@ -122,7 +146,14 @@ async function runAnalyst(system, user, opts = {}) {
         outcome: 'ok',
         tokensIn: r.tIn,
         tokensOut: r.tOut,
-        cachedTokens: r.cached,
+        model: r.model,
+        cachedTokens: r.cacheHitTokens,
+        cacheHitTokens: r.cacheHitTokens,
+        cacheMissTokens: r.cacheMissTokens,
+        thoughtsTokens: r.pricing?.thoughtsTokens || 0,
+        pricingMode: r.pricing?.pricingMode,
+        inputCostUsd: r.pricing?.inputCostUsd,
+        outputCostUsd: r.pricing?.outputCostUsd,
         costUsd: r.cost,
         latencyMs: durationMs,
       });
@@ -163,7 +194,14 @@ async function runAnalystTracked(system, user, opts = {}) {
       outcome: 'ok',
       tokensIn: r.tIn,
       tokensOut: r.tOut,
-      cachedTokens: r.cached,
+      model: r.model,
+      cachedTokens: r.cacheHitTokens,
+      cacheHitTokens: r.cacheHitTokens,
+      cacheMissTokens: r.cacheMissTokens,
+      thoughtsTokens: r.pricing?.thoughtsTokens || 0,
+      pricingMode: r.pricing?.pricingMode,
+      inputCostUsd: r.pricing?.inputCostUsd,
+      outputCostUsd: r.pricing?.outputCostUsd,
       costUsd: r.cost,
       latencyMs: durationMs,
     });

@@ -27,7 +27,7 @@
 
 const { callDeepSeek, DEEPSEEK_DEFAULT_MAX_TOKENS } = require('../llm/deepseek.adapter');
 const { callGemini } = require('../llm/gemini.adapter');
-const { calcCost } = require('../metrics/priceCalculator');
+const { calculateCostBreakdown } = require('../metrics/priceCalculator');
 
 // Верхняя граница maxTokens в обоих адаптерах (валидация бросает выше неё).
 const MAX_OUTPUT_TOKENS_CAP = 32000;
@@ -109,14 +109,16 @@ async function callAnalyticLLM(systemPrompt, userPrompt, options = {}) {
  */
 function analyticCallCost(provider, resp) {
   if (provider === 'deepseek') {
-    return calcCost('deepseek', resp.tokensIn || 0, resp.tokensOut || 0, {
-      cacheHit: (resp.cacheHitTokens || 0) > 0,
+    const pricing = calculateCostBreakdown(resp.model || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro', resp.tokensIn || 0, resp.tokensOut || 0, {
+      cacheHitTokens: resp.cacheHitTokens || 0,
+      cacheMissTokens: resp.cacheMissTokens,
     });
+    return pricing.totalUsd;
   }
-  return calcCost('gemini', resp.tokensIn || 0, resp.tokensOut || 0, {
+  return calculateCostBreakdown('gemini', resp.tokensIn || 0, resp.tokensOut || 0, {
     cachedTokens: resp.cachedTokens || 0,
     thoughtsTokens: resp.thoughtsTokens || 0,
-  });
+  }).totalUsd;
 }
 
 module.exports = {

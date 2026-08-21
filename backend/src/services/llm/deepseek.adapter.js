@@ -121,7 +121,13 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
       tokensOut: usage.completion_tokens   || 0,
       model:     data.model               || model,
       cacheHitTokens: usage.prompt_cache_hit_tokens || 0,
+      cacheMissTokens: usage.prompt_cache_miss_tokens != null
+        ? usage.prompt_cache_miss_tokens
+        : Math.max(0, (usage.prompt_tokens || 0) - (usage.prompt_cache_hit_tokens || 0)),
       reasoningTokens: usage.completion_tokens_details?.reasoning_tokens || 0,
+      // Alias used by shared billing telemetry; DeepSeek output already includes
+      // reasoning tokens in completion_tokens and must not be added twice.
+      thoughtsTokens: 0,
       // finish_reason = 'length' → ответ обрезан лимитом max_tokens (аналог
       // Gemini MAX_TOKENS). Пробрасываем наверх, чтобы вызывающая сторона
       // могла повысить лимит и повторить запрос, а не падать на JSON.parse.
