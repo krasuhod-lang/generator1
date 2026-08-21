@@ -53,11 +53,11 @@ const statusStats = computed(() => {
   if (!userDetail.value) return [];
   const u = userDetail.value;
   return [
-    { label: 'Завершено', count: u.tasks_completed, color: 'bg-green-500' },
-    { label: 'Ошибок',    count: u.tasks_failed,    color: 'bg-red-500' },
-    { label: 'В процессе', count: u.tasks_processing, color: 'bg-yellow-500' },
-    { label: 'В очереди',  count: u.tasks_queued,     color: 'bg-blue-500' },
-    { label: 'Черновики',  count: u.tasks_draft,      color: 'bg-gray-500' },
+    { label: 'Завершено', count: Number(u.tasks_completed) || 0, color: 'bg-green-500' },
+    { label: 'Ошибок',    count: Number(u.tasks_failed) || 0,    color: 'bg-red-500' },
+    { label: 'В процессе', count: Number(u.tasks_processing) || 0, color: 'bg-yellow-500' },
+    { label: 'В очереди',  count: Number(u.tasks_queued) || 0,     color: 'bg-blue-500' },
+    { label: 'Черновики',  count: Number(u.tasks_draft) || 0,      color: 'bg-gray-500' },
   ];
 });
 
@@ -84,6 +84,8 @@ const STATUS_META = {
   failed:     { label: 'Ошибка',       cls: 'bg-red-900 text-red-300' },
   error:      { label: 'Ошибка',       cls: 'bg-red-900 text-red-300' },
   cancelled:  { label: 'Отменена',     cls: 'bg-gray-700 text-gray-400' },
+  partial:    { label: 'Частично',      cls: 'bg-amber-900 text-amber-300' },
+  timeout:    { label: 'Тайм-аут',      cls: 'bg-red-900 text-red-300' },
 };
 
 const MODULE_META = {
@@ -94,6 +96,10 @@ const MODULE_META = {
   info_article:  { label: 'Инфо-статья',       cls: 'bg-amber-900 text-amber-300' },
   relevance:     { label: 'Релевантность',     cls: 'bg-teal-900 text-teal-300' },
   forecaster:    { label: 'Прогнозатор',       cls: 'bg-orange-900 text-orange-300' },
+  serp_b2b:      { label: 'SERP B2B',           cls: 'bg-cyan-900 text-cyan-300' },
+  category_lead: { label: 'Category Lead',      cls: 'bg-lime-900 text-lime-300' },
+  parser:        { label: 'Парсер контента',    cls: 'bg-fuchsia-900 text-fuchsia-300' },
+  site_crawl:   { label: 'Site Crawl',         cls: 'bg-orange-900 text-orange-300' },
 };
 
 function statusMeta(status) {
@@ -122,8 +128,9 @@ function fmtDate(dt) {
 }
 
 function fmtCost(usd) {
-  if (!usd || parseFloat(usd) === 0) return '—';
-  return '$' + parseFloat(usd).toFixed(4);
+  const n = Number(usd);
+  if (!Number.isFinite(n)) return '—';
+  return '$' + n.toFixed(Math.abs(n) < 0.01 ? 6 : 4);
 }
 </script>
 

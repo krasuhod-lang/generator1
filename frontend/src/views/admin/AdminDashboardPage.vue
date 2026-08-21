@@ -15,12 +15,18 @@ const currentPage = ref(1);
 const sortField   = ref('created_at');
 const sortOrder   = ref('desc');
 const pageLimit   = 20;
+const dashboardError = ref(null);
 
 let searchTimer = null;
 
 // ── Загрузка данных ────────────────────────────────────────────────
 onMounted(async () => {
-  await Promise.all([loadUsers(), admin.fetchStats()]);
+  dashboardError.value = null;
+  try {
+    await Promise.all([loadUsers(), admin.fetchStats()]);
+  } catch (e) {
+    dashboardError.value = e.response?.data?.error || e.message || 'Не удалось загрузить административную статистику';
+  }
 });
 
 async function loadUsers() {
@@ -79,8 +85,9 @@ function fmtDate(dt) {
 }
 
 function fmtCost(usd) {
-  if (!usd || parseFloat(usd) === 0) return '—';
-  return '$' + parseFloat(usd).toFixed(4);
+  const n = Number(usd);
+  if (!Number.isFinite(n)) return '—';
+  return '$' + n.toFixed(Math.abs(n) < 0.01 ? 6 : 4);
 }
 
 async function copyPassword(pwd) {
@@ -113,6 +120,9 @@ async function removeUser(u) {
   <AdminLayout>
     <div class="max-w-7xl mx-auto px-6 py-6">
       <h1 class="text-2xl font-bold text-white mb-6">📊 Панель мониторинга</h1>
+      <div v-if="dashboardError" class="bg-red-950/60 border border-red-800 text-red-300 text-sm px-4 py-3 rounded-lg mb-6">
+        {{ dashboardError }}
+      </div>
 
       <!-- Статистика (карточки) -->
       <div v-if="admin.stats" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">

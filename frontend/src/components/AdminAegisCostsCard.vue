@@ -52,6 +52,7 @@ onMounted(load);
 const totals = computed(() => (data.value && data.value.totals) ? data.value.totals : null);
 const daily = computed(() => (data.value && Array.isArray(data.value.daily)) ? data.value.daily : []);
 const byProvider = computed(() => (data.value && Array.isArray(data.value.by_provider)) ? data.value.by_provider : []);
+const byModel = computed(() => (data.value && Array.isArray(data.value.by_model)) ? data.value.by_model : []);
 const note = computed(() => (data.value && data.value.note) ? data.value.note : null);
 
 const maxDailyCost = computed(() => {
@@ -99,7 +100,8 @@ function dayCacheHitPct(row) {
 function dayCachedTokenPct(row) {
   const tin = Number(row.tokens_in) || 0;
   if (!tin) return 0;
-  return Number((((Number(row.cached_tokens) || 0) / tin) * 100).toFixed(1));
+  const cached = Number(row.cache_hit_tokens ?? row.cached_tokens) || 0;
+  return Number(((cached / tin) * 100).toFixed(1));
 }
 </script>
 
@@ -125,13 +127,13 @@ function dayCachedTokenPct(row) {
     <div v-else-if="note" class="text-sm text-gray-500 py-4">
       Учёт расходов Эгиды ещё не инициализирован (таблица aegis_llm_usage пуста).
     </div>
-    <div v-else-if="!daily.length" class="text-sm text-gray-500 py-4">
+    <div v-else-if="!daily.length && !byProvider.length && !byModel.length && !(totals && Number(totals.calls))" class="text-sm text-gray-500 py-4">
       Нет расходов Эгиды за выбранный период.
     </div>
 
     <template v-else>
       <!-- Итоги периода -->
-      <div v-if="totals" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div v-if="totals" class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
         <div class="bg-gray-800/40 rounded-lg p-3">
           <div class="text-lg font-bold text-cyan-300">{{ fmtCost(totals.cost_usd) }}</div>
           <div class="text-xs text-gray-400 mt-1">Стоимость за период</div>
@@ -152,6 +154,14 @@ function dayCachedTokenPct(row) {
           </div>
           <div class="text-xs text-gray-400 mt-1">Токены in / out</div>
         </div>
+        <div class="bg-gray-800/40 rounded-lg p-3">
+          <div class="text-lg font-bold text-cyan-300">{{ fmtCost(totals.input_cost_usd) }}</div>
+          <div class="text-xs text-gray-400 mt-1">Input cost</div>
+        </div>
+        <div class="bg-gray-800/40 rounded-lg p-3">
+          <div class="text-lg font-bold text-violet-300">{{ fmtCost(totals.output_cost_usd) }}</div>
+          <div class="text-xs text-gray-400 mt-1">Output cost</div>
+        </div>
       </div>
 
       <!-- Разбивка по провайдерам -->
@@ -165,6 +175,8 @@ function dayCachedTokenPct(row) {
               <th class="py-2 px-2 font-medium">Токены in</th>
               <th class="py-2 px-2 font-medium">Токены out</th>
               <th class="py-2 px-2 font-medium">Кэш-хиты</th>
+              <th class="py-2 px-2 font-medium">Cache hit / miss tokens</th>
+              <th class="py-2 px-2 font-medium">Input / output cost</th>
             </tr>
           </thead>
           <tbody>
@@ -175,6 +187,37 @@ function dayCachedTokenPct(row) {
               <td class="py-2 px-2 text-gray-400">{{ fmtInt(row.tokens_in) }}</td>
               <td class="py-2 px-2 text-gray-400">{{ fmtInt(row.tokens_out) }}</td>
               <td class="py-2 px-2 text-emerald-400">{{ fmtInt(row.cache_hits) }}</td>
+              <td class="py-2 px-2 text-gray-400 whitespace-nowrap">{{ fmtInt(row.cache_hit_tokens) }} / {{ fmtInt(row.cache_miss_tokens) }}</td>
+              <td class="py-2 px-2 text-gray-400 whitespace-nowrap">{{ fmtCost(row.input_cost_usd) }} / {{ fmtCost(row.output_cost_usd) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Разбивка по фактической модели и режиму тарификации -->
+      <div v-if="byModel.length" class="overflow-x-auto mb-6">
+        <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-2">По моделям и тарифному режиму</h3>
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="border-b border-gray-800 text-left text-gray-400">
+              <th class="py-2 px-2 font-medium">Провайдер</th>
+              <th class="py-2 px-2 font-medium">Модель</th>
+              <th class="py-2 px-2 font-medium">Режим</th>
+              <th class="py-2 px-2 font-medium">Вызовов</th>
+              <th class="py-2 px-2 font-medium">Стоимость</th>
+              <th class="py-2 px-2 font-medium">Hit / miss tokens</th>
+              <th class="py-2 px-2 font-medium">Input / output cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in byModel" :key="`${row.provider}:${row.model}:${row.pricing_mode}`" class="border-b border-gray-800/50">
+              <td class="py-2 px-2 text-gray-300 capitalize">{{ row.provider }}</td>
+              <td class="py-2 px-2 text-white font-mono">{{ row.model }}</td>
+              <td class="py-2 px-2 text-amber-300">{{ row.pricing_mode }}</td>
+              <td class="py-2 px-2 text-gray-300">{{ fmtInt(row.calls) }}</td>
+              <td class="py-2 px-2 text-cyan-300">{{ fmtCost(row.cost_usd) }}</td>
+              <td class="py-2 px-2 text-gray-400">{{ fmtInt(row.cache_hit_tokens) }} / {{ fmtInt(row.cache_miss_tokens) }}</td>
+              <td class="py-2 px-2 text-gray-400">{{ fmtCost(row.input_cost_usd) }} / {{ fmtCost(row.output_cost_usd) }}</td>
             </tr>
           </tbody>
         </table>
@@ -190,6 +233,7 @@ function dayCachedTokenPct(row) {
               <th class="py-2 px-2 font-medium">Вызовов</th>
               <th class="py-2 px-2 font-medium">Токены in / out</th>
               <th class="py-2 px-2 font-medium">Кэш</th>
+              <th class="py-2 px-2 font-medium">Hit / miss tokens</th>
               <th class="py-2 px-2 font-medium">Ошибки</th>
             </tr>
           </thead>
@@ -212,6 +256,9 @@ function dayCachedTokenPct(row) {
                 <span class="text-emerald-400">{{ fmtPct(dayCacheHitPct(row)) }}</span>
                 <span class="text-gray-600 mx-1">·</span>
                 <span class="text-gray-400">{{ fmtPct(dayCachedTokenPct(row)) }} ток.</span>
+              </td>
+              <td class="py-2 px-2 text-gray-400 whitespace-nowrap">
+                {{ fmtInt(row.cache_hit_tokens) }} / {{ fmtInt(row.cache_miss_tokens) }}
               </td>
               <td class="py-2 px-2" :class="(Number(row.errors) || 0) > 0 ? 'text-red-400' : 'text-gray-500'">
                 {{ fmtInt(row.errors) }}

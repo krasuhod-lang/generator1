@@ -163,8 +163,8 @@ export const useAdminStore = defineStore('admin', () => {
     return data; // { tasks, page, perPage, total }
   }
 
-  // Cross-module detail (любой из 7 источников: seo|meta_tag|link_article|
-  // article_topic|info_article|relevance|forecaster)
+  // Cross-module detail (источник валидируется backend whitelist).
+  // Поддерживаются SEO, content modules, B2B, parser и site-crawl.
   async function fetchAdminCrossTask(source, taskId) {
     const { data } = await adminApi.get(`/admin/cross-tasks/${source}/${taskId}`);
     return data; // { task, source, sourceLabel }
@@ -188,7 +188,7 @@ export const useAdminStore = defineStore('admin', () => {
     if (to) q.set('to', to);
     const qs = q.toString();
     const { data } = await adminApi.get(`/admin/aegis-costs${qs ? `?${qs}` : ''}`);
-    return data; // { range, totals, daily, by_provider }
+    return data; // { range, totals, daily, by_provider, by_model }
   }
 
   return {

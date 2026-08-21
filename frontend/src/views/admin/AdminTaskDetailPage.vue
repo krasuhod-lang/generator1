@@ -230,6 +230,9 @@ const universalTitle = computed(() => {
     t.query ||
     t.trend_name ||
     t.niche ||
+    t.category ||
+    t.start_url ||
+    (Array.isArray(t.input_urls) ? t.input_urls[0] : '') ||
     t.source_filename ||
     'Без названия'
   );
@@ -246,6 +249,10 @@ const universalSubtitle = computed(() => {
   if (source === 'info_article')  return [t.topic, t.region].filter(Boolean).join(' · ');
   if (source === 'relevance')     return `LR=${t.lr || ''} · top_n=${t.top_n || ''}`;
   if (source === 'forecaster')    return t.source_filename || '';
+  if (source === 'serp_b2b')      return [t.search_engine, t.region, t.depth_pages].filter(Boolean).join(' · ');
+  if (source === 'category_lead') return t.category || '';
+  if (source === 'parser')        return `${t.total || 0} URL · ${t.progress || 0} обработано`;
+  if (source === 'site_crawl')    return t.start_url || '';
   return '';
 });
 </script>

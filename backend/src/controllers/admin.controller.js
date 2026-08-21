@@ -626,6 +626,40 @@ const TASK_SOURCES = Object.freeze({
     hasCompletedAt: true,
     hasStartedAt: true,
   }),
+  serp_b2b: Object.freeze({
+    table: 'serp_b2b_tasks',
+    label: 'SERP B2B',
+    titleSql: `COALESCE(NULLIF(t.name, ''), NULLIF(t.query, ''), '')`,
+    costSql: `0::numeric`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  category_lead: Object.freeze({
+    table: 'category_lead_tasks',
+    label: 'Category Lead',
+    titleSql: `COALESCE(NULLIF(t.name, ''), NULLIF(t.category, ''), '')`,
+    costSql: `t.cost_usd`,
+    hasCompletedAt: true,
+    hasStartedAt: true,
+  }),
+  parser: Object.freeze({
+    table: 'parser_tasks',
+    label: 'Парсер контента',
+    titleSql: `COALESCE(NULLIF(t.input_urls->>0, ''), 'Parser scan')`,
+    costSql: `0::numeric`,
+    completedAtSql: `t.finished_at`,
+    startedAtSql: `NULL::timestamptz`,
+    errorSql: `t.error`,
+  }),
+  site_crawl: Object.freeze({
+    table: 'site_crawl_tasks',
+    label: 'Site Crawl',
+    titleSql: `COALESCE(NULLIF(t.start_url, ''), 'Site crawl')`,
+    costSql: `0::numeric`,
+    completedAtSql: `t.finished_at`,
+    startedAtSql: `t.started_at`,
+    errorSql: `t.error`,
+  }),
 });
 
 // Кэш списка реально существующих таблиц-источников. Нужен, чтобы один
@@ -672,18 +706,19 @@ async function _existingTaskSourceEntries() {
  * completed_at, started_at, error_message, cost_usd.
  */
 function _sourceSelect(sourceKey, src) {
-  const completed = src.hasCompletedAt ? 't.completed_at' : 'NULL::timestamptz';
-  const started   = src.hasStartedAt   ? 't.started_at'   : 'NULL::timestamptz';
+  const completed = src.completedAtSql || (src.hasCompletedAt ? 't.completed_at' : 'NULL::timestamptz');
+  const started   = src.startedAtSql || (src.hasStartedAt ? 't.started_at' : 'NULL::timestamptz');
+  const errorExpr = src.errorSql || 't.error_message';
   return `
     SELECT
       '${sourceKey}'::text                AS source,
-      t.id::uuid                          AS id,
+      t.id::text                          AS id,
       ${src.titleSql}                     AS title,
       t.status::text                      AS status,
       t.created_at                        AS created_at,
       ${completed}                        AS completed_at,
       ${started}                          AS started_at,
-      t.error_message                     AS error_message,
+      ${errorExpr}                        AS error_message,
       COALESCE(${src.costSql}, 0)::numeric(12,6) AS cost_usd
     FROM ${src.table} t
     WHERE t.user_id = $1
@@ -808,7 +843,9 @@ async function getCrossTaskDetail(req, res, next) {
     if (!src) {
       return res.status(400).json({ error: 'Неизвестный модуль задачи' });
     }
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    const validIntegerId = /^\d+$/.test(id);
+    if (!validUuid && !validIntegerId) {
       return res.status(400).json({ error: 'Некорректный id' });
     }
 
@@ -817,7 +854,7 @@ async function getCrossTaskDetail(req, res, next) {
       `SELECT t.*, u.email AS user_email, u.name AS user_name
          FROM ${src.table} t
          JOIN users u ON u.id = t.user_id
-        WHERE t.id = $1`,
+        WHERE t.id::text = $1`,
       [id],
     );
     if (!rows.length) return res.status(404).json({ error: 'Задача не найдена' });
@@ -1001,8 +1038,8 @@ async function getAegisCostBreakdown(req, res, next) {
               COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
               COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
               COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
-              COALESCE(SUM(cache_hit_tokens), 0)::bigint   AS cache_hit_tokens,
-              COALESCE(SUM(cache_miss_tokens), 0)::bigint  AS cache_miss_tokens,
+              COALESCE(SUM(COALESCE(cache_hit_tokens, cached_tokens)), 0)::bigint AS cache_hit_tokens,
+              COALESCE(SUM(COALESCE(cache_miss_tokens, GREATEST(COALESCE(tokens_in, 0) - COALESCE(cache_hit_tokens, cached_tokens, 0), 0))), 0)::bigint AS cache_miss_tokens,
               COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
               COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd,
               COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits,
@@ -1022,8 +1059,8 @@ async function getAegisCostBreakdown(req, res, next) {
               COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
               COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
               COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
-              COALESCE(SUM(cache_hit_tokens), 0)::bigint   AS cache_hit_tokens,
-              COALESCE(SUM(cache_miss_tokens), 0)::bigint  AS cache_miss_tokens,
+              COALESCE(SUM(COALESCE(cache_hit_tokens, cached_tokens)), 0)::bigint AS cache_hit_tokens,
+              COALESCE(SUM(COALESCE(cache_miss_tokens, GREATEST(COALESCE(tokens_in, 0) - COALESCE(cache_hit_tokens, cached_tokens, 0), 0))), 0)::bigint AS cache_miss_tokens,
               COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
               COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd,
               COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits
@@ -1042,8 +1079,8 @@ async function getAegisCostBreakdown(req, res, next) {
               COALESCE(SUM(cost_usd), 0)::numeric(18,12) AS cost_usd,
               COALESCE(SUM(tokens_in), 0)::bigint AS tokens_in,
               COALESCE(SUM(tokens_out), 0)::bigint AS tokens_out,
-              COALESCE(SUM(cache_hit_tokens), 0)::bigint AS cache_hit_tokens,
-              COALESCE(SUM(cache_miss_tokens), 0)::bigint AS cache_miss_tokens,
+              COALESCE(SUM(COALESCE(cache_hit_tokens, cached_tokens)), 0)::bigint AS cache_hit_tokens,
+              COALESCE(SUM(COALESCE(cache_miss_tokens, GREATEST(COALESCE(tokens_in, 0) - COALESCE(cache_hit_tokens, cached_tokens, 0), 0))), 0)::bigint AS cache_miss_tokens,
               COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
               COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd
          FROM aegis_llm_usage
@@ -1060,8 +1097,8 @@ async function getAegisCostBreakdown(req, res, next) {
               COALESCE(SUM(tokens_in), 0)::bigint          AS tokens_in,
               COALESCE(SUM(tokens_out), 0)::bigint         AS tokens_out,
               COALESCE(SUM(cached_tokens), 0)::bigint      AS cached_tokens,
-              COALESCE(SUM(cache_hit_tokens), 0)::bigint   AS cache_hit_tokens,
-              COALESCE(SUM(cache_miss_tokens), 0)::bigint  AS cache_miss_tokens,
+              COALESCE(SUM(COALESCE(cache_hit_tokens, cached_tokens)), 0)::bigint AS cache_hit_tokens,
+              COALESCE(SUM(COALESCE(cache_miss_tokens, GREATEST(COALESCE(tokens_in, 0) - COALESCE(cache_hit_tokens, cached_tokens, 0), 0))), 0)::bigint AS cache_miss_tokens,
               COALESCE(SUM(input_cost_usd), 0)::numeric(18,12) AS input_cost_usd,
               COALESCE(SUM(output_cost_usd), 0)::numeric(18,12) AS output_cost_usd,
               COUNT(*) FILTER (WHERE cache_hit)::int       AS cache_hits,
@@ -1075,6 +1112,10 @@ async function getAegisCostBreakdown(req, res, next) {
     const calls = Number(t.calls) || 0;
     const tokensIn = Number(t.tokens_in) || 0;
     const cachedTokens = Number(t.cached_tokens) || 0;
+    const hitTokens = t.cache_hit_tokens == null ? cachedTokens : Math.max(0, Number(t.cache_hit_tokens) || 0);
+    const missTokens = t.cache_miss_tokens == null
+      ? Math.max(0, tokensIn - hitTokens)
+      : Math.max(0, Number(t.cache_miss_tokens) || 0);
     const totals = {
       calls,
       cost_usd: Number(t.cost_usd) || 0,
@@ -1085,9 +1126,9 @@ async function getAegisCostBreakdown(req, res, next) {
       errors: Number(t.errors) || 0,
       // Доля вызовов с попаданием в кэш и доля закэшированных input-токенов.
       cache_hit_rate_pct: calls ? Number(((Number(t.cache_hits) / calls) * 100).toFixed(1)) : 0,
-      cached_token_pct: tokensIn ? Number(((Number(t.cache_hit_tokens || cachedTokens) / tokensIn) * 100).toFixed(1)) : 0,
-      cache_hit_tokens: Number(t.cache_hit_tokens) || cachedTokens,
-      cache_miss_tokens: Number(t.cache_miss_tokens) || Math.max(0, tokensIn - cachedTokens),
+      cached_token_pct: tokensIn ? Number(((hitTokens / tokensIn) * 100).toFixed(1)) : 0,
+      cache_hit_tokens: hitTokens,
+      cache_miss_tokens: missTokens,
       input_cost_usd: Number(t.input_cost_usd) || 0,
       output_cost_usd: Number(t.output_cost_usd) || 0,
     };
