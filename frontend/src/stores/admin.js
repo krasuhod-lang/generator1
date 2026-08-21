@@ -191,6 +191,16 @@ export const useAdminStore = defineStore('admin', () => {
     return data; // { range, totals, daily, by_provider, by_model }
   }
 
+  async function fetchStorageAudit() {
+    const { data } = await adminApi.get('/admin/storage');
+    return data;
+  }
+
+  async function cleanupStorage(payload) {
+    const { data } = await adminApi.post('/admin/storage/cleanup', payload);
+    return data;
+  }
+
   return {
     adminToken,
     adminUser,
@@ -215,5 +225,7 @@ export const useAdminStore = defineStore('admin', () => {
     fetchAdminCrossTask,
     fetchFunnels,
     fetchAegisCosts,
+    fetchStorageAudit,
+    cleanupStorage,
   };
 });

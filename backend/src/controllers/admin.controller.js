@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt    = require('jsonwebtoken');
 const db     = require('../config/db');
 const projectGrants = require('../services/projects/projectGrants');
+const storageAdmin = require('../services/maintenance/storageAdmin');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -1158,6 +1159,40 @@ async function getAegisCostBreakdown(req, res, next) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Admin storage audit / cleanup
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getAdminStorageAudit(req, res, next) {
+  try {
+    return res.json(await storageAdmin.getStorageAudit({ db }));
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function cleanupAdminStorage(req, res, next) {
+  try {
+    const body = req.body || {};
+    const dryRun = body.dryRun !== false;
+    const result = await storageAdmin.cleanupStorage({
+      scope: body.scope,
+      olderThanDays: body.olderThanDays,
+      confirm: body.confirm,
+      dryRun,
+      db,
+    });
+    return res.json({
+      ok: true,
+      dry_run: dryRun,
+      result,
+      message: dryRun ? 'Preview выполнен; данные не удалялись' : 'Очистка выполнена',
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Project grants — раздача доступов к проектам через панель администратора
 // (миграция 092, задача 1). Все эндпоинты под /api/admin/projects/.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1330,6 +1365,8 @@ module.exports = {
   getCrossTaskDetail,
   getFunnelBreakdown,
   getAegisCostBreakdown,
+  getAdminStorageAudit,
+  cleanupAdminStorage,
   // Project grants (миграция 092, задача 1)
   listAdminProjects,
   listAdminProjectGrants,

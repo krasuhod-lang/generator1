@@ -220,6 +220,7 @@ app.use((err, req, res, next) => {
 // -----------------------------------------------------------------
 
 const start = async () => {
+  let stopQueuedUserTaskRecovery = null;
   try {
     // Диагностика: критические переменные окружения
     console.log(`[Config] JWT_SECRET: ${process.env.JWT_SECRET === DEFAULT_JWT_SECRET ? 'built-in fallback' : 'custom (from env)'}`);
@@ -328,7 +329,7 @@ const start = async () => {
     // and periodically, with per-user deduplication and the five-slot limit.
     try {
       const { startQueuedUserTaskRecovery, getQueuedUserTaskRecoveryConfig } = require('./src/services/tasks/queuedTaskRecovery');
-      startQueuedUserTaskRecovery(db);
+      stopQueuedUserTaskRecovery = startQueuedUserTaskRecovery(db);
       const recoveryConfig = getQueuedUserTaskRecoveryConfig();
       console.log(`[Server] queued user-task recovery started: interval=${recoveryConfig.intervalMs}ms, batch=${recoveryConfig.batchPerType}`);
     } catch (err) {
@@ -516,6 +517,14 @@ const start = async () => {
       const forceExit = setTimeout(() => process.exit(1), 30000);
       if (forceExit.unref) forceExit.unref();
       try {
+        try { stopQueuedUserTaskRecovery?.(); } catch (_) {}
+        try {
+          const { requeueActiveUserTasksForShutdown } = require('./src/services/tasks/queuedTaskRecovery');
+          const directRecovery = await requeueActiveUserTasksForShutdown(db);
+          console.log('[Server] direct-task shutdown requeue:', directRecovery);
+        } catch (error) {
+          console.warn('[Server] direct-task shutdown requeue skipped:', error.message);
+        }
         await new Promise((resolve) => server.close(() => resolve()));
         try { require('./src/services/aegis/serpMeasurementJob').stopSerpMeasurementScheduler(); } catch (_) {}
         try { require('./src/services/tasks/reliability').stopReliabilityScheduler(); } catch (_) {}

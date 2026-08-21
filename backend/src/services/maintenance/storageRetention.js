@@ -134,6 +134,33 @@ const TABLES = [
     docxCol: null,
     hasImageDir: false,
   },
+  {
+    table: 'parser_tasks',
+    idCol: 'id',
+    successStatuses: ['done'],
+    completedAgeExpr: 'COALESCE(finished_at, updated_at, created_at)',
+    failedAgeExpr: 'COALESCE(updated_at, created_at)',
+    docxCol: null,
+    hasImageDir: false,
+  },
+  {
+    table: 'serp_b2b_tasks',
+    idCol: 'id',
+    successStatuses: ['done'],
+    completedAgeExpr: 'COALESCE(completed_at, updated_at, created_at)',
+    failedAgeExpr: 'COALESCE(updated_at, created_at)',
+    docxCol: null,
+    hasImageDir: false,
+  },
+  {
+    table: 'category_lead_tasks',
+    idCol: 'id',
+    successStatuses: ['done'],
+    completedAgeExpr: 'COALESCE(completed_at, updated_at, created_at)',
+    failedAgeExpr: 'COALESCE(updated_at, created_at)',
+    docxCol: null,
+    hasImageDir: false,
+  },
 ];
 
 function _int(name, dflt, min, max) {
@@ -183,6 +210,7 @@ function _buildSelectSql(desc) {
            )
         OR (
              NOT (status::text = ANY($1))
+             AND status::text NOT IN ('queued', 'processing', 'running', 'pending', 'paused', 'in_progress', 'retrying')
              AND ${desc.failedAgeExpr} < NOW() - ($3 || ' days')::interval
            )
      ORDER BY ${desc.idCol}
@@ -227,15 +255,18 @@ async function sweepTable(desc, cfg, deps = {}) {
       stat.batches += 1;
       stat.scanned += rows.length;
 
-      // 1. Удаляем файлы на диске до удаления строк (best-effort).
-      for (const row of rows) {
-        // eslint-disable-next-line no-await-in-loop
-        const res = await cleanup({
-          taskId: desc.hasImageDir ? row[desc.idCol] : undefined,
-          docxPath: desc.docxCol ? row[desc.docxCol] : undefined,
-        });
-        if (res && res.imageDir) stat.imageDirs += 1;
-        if (res && res.docx) stat.docx += 1;
+      // 1. В обычном режиме удаляем файлы на диске до строк БД.
+      // В dry-run не трогаем ни БД, ни filesystem: это настоящий preview.
+      if (!cfg.dryRun) {
+        for (const row of rows) {
+          // eslint-disable-next-line no-await-in-loop
+          const res = await cleanup({
+            taskId: desc.hasImageDir ? row[desc.idCol] : undefined,
+            docxPath: desc.docxCol ? row[desc.docxCol] : undefined,
+          });
+          if (res && res.imageDir) stat.imageDirs += 1;
+          if (res && res.docx) stat.docx += 1;
+        }
       }
 
       if (cfg.dryRun) {

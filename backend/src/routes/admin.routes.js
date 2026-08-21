@@ -18,6 +18,8 @@ const {
   getCrossTaskDetail,
   getFunnelBreakdown,
   getAegisCostBreakdown,
+  getAdminStorageAudit,
+  cleanupAdminStorage,
   listAdminProjects,
   listAdminProjectGrants,
   createAdminProjectGrant,
@@ -76,6 +78,10 @@ router.get('/funnels',            apiLimiter, adminAuth, getFunnelBreakdown);
 // стоимость USD, доля prompt-кэша). Фильтр периода from/to (aegis_llm_usage,
 // мигр. 055).
 router.get('/aegis-costs',        apiLimiter, adminAuth, getAegisCostBreakdown);
+
+// Storage audit/cleanup: preview по умолчанию, destructive action только с confirm=DELETE.
+router.get('/storage',             apiLimiter, adminAuth, getAdminStorageAudit);
+router.post('/storage/cleanup',    apiLimiter, adminAuth, cleanupAdminStorage);
 
 // ── Project grants (миграция 092, задача 1) ─────────────────────────
 // Раздача доступов к проектам, их анализам и отчётам через панель админа.

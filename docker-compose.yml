@@ -105,6 +105,7 @@ services:
         condition: service_healthy
     volumes:
       - uploads:/app/uploads
+      - image_storage:/app/storage/images
       # brain_state/: compiled_writer.yaml + история DSPy retrain'ов.
       # Bind-mount, чтобы (1) уже существующие yaml-файлы видны контейнеру,
       # (2) DSPy retrain мог писать новые версии и они переживали restart.
@@ -164,6 +165,7 @@ services:
         condition: service_healthy
     volumes:
       - uploads:/app/uploads
+      - image_storage:/app/storage/images
       - ./brain_state:/app/brain_state
       # Skill-файлы (LinguaForensic v3.6 и др.)
       - ./skills:/app/skills:ro
@@ -354,6 +356,8 @@ volumes:
   redis_data:
     driver: local
   uploads:
+    driver: local
+  image_storage:
     driver: local
   aegis_brain_state:
     driver: local

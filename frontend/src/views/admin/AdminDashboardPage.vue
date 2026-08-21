@@ -5,6 +5,7 @@ import { useAdminStore } from '../../stores/admin.js';
 import AdminLayout from '../../components/AdminLayout.vue';
 import AdminFunnelsCard from '../../components/AdminFunnelsCard.vue';
 import AdminAegisCostsCard from '../../components/AdminAegisCostsCard.vue';
+import AdminStorageCard from '../../components/AdminStorageCard.vue';
 
 const router = useRouter();
 const admin  = useAdminStore();
@@ -177,6 +178,9 @@ async function removeUser(u) {
 
       <!-- Расходы Эгиды по дням (токены/стоимость/кэш, фильтр периода) -->
       <AdminAegisCostsCard />
+
+      <!-- Storage audit: диск, PostgreSQL, Redis cache и безопасная очистка -->
+      <AdminStorageCard />
 
       <!-- Поиск -->
       <div class="flex items-center gap-4 mb-4">

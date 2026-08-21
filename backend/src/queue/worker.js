@@ -377,15 +377,77 @@ worker.on('error', (err) => {
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────
-// On SIGTERM/SIGINT, close the worker so BullMQ returns active jobs to the
-// queue instead of leaving them stalled.
+// Requeue work owned by this worker before closing BullMQ. Without this step
+// `docker compose down` leaves rows in processing/running until lease expiry;
+// a fast `up` then looks like a stuck task instead of an immediate resume.
+async function requeueWorkerOwnedTasks() {
+  const recovered = { generation: 0, parserItems: 0, crawls: 0 };
+  try {
+    const generation = await db.query(
+      `UPDATE tasks
+          SET status='queued', bull_job_id=NULL, worker_id=NULL,
+              lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(),
+              last_error_code='worker_shutdown', updated_at=NOW()
+        WHERE worker_id=$1 AND status='processing'
+        RETURNING id`,
+      [WORKER_ID],
+    );
+    recovered.generation = generation.rowCount || 0;
+    const generationIds = generation.rows.map((row) => row.id).filter(Boolean);
+    if (generationIds.length) {
+      await db.query(
+        `DELETE FROM user_task_slot_leases
+          WHERE task_type='generation' AND task_id = ANY($1::uuid[])`,
+        [generationIds],
+      ).catch(() => {});
+    }
+  } catch (error) {
+    console.warn('[Worker] generation shutdown requeue failed:', error.message);
+  }
+
+  try {
+    const parserItems = await db.query(
+      `UPDATE parser_task_items
+          SET status='queued', worker_id=NULL, lease_token=NULL, lease_until=NULL,
+              heartbeat_at=NOW(), next_attempt_at=NOW(),
+              error_code='worker_shutdown',
+              error_message='Worker остановлен; элемент будет возобновлён',
+              updated_at=NOW(), finished_at=NULL
+        WHERE worker_id=$1 AND status='running'
+        RETURNING id`,
+      [WORKER_ID],
+    );
+    recovered.parserItems = parserItems.rowCount || 0;
+  } catch (error) {
+    console.warn('[Worker] parser shutdown requeue failed:', error.message);
+  }
+
+  try {
+    const crawls = await db.query(
+      `UPDATE site_crawl_tasks
+          SET status='queued', worker_id=NULL, lease_token=NULL, lease_until=NULL,
+              heartbeat_at=NOW(), error='Worker остановлен; crawl будет возобновлён',
+              updated_at=NOW(), finished_at=NULL
+        WHERE worker_id=$1 AND status='running'
+        RETURNING id`,
+      [WORKER_ID],
+    );
+    recovered.crawls = crawls.rowCount || 0;
+  } catch (error) {
+    console.warn('[Worker] site-crawl shutdown requeue failed:', error.message);
+  }
+  console.log('[Worker] shutdown recovery:', recovered);
+  return recovered;
+}
+
 async function gracefulShutdown(signal) {
   console.log(`[Worker] ${signal} received — closing all workers gracefully...`);
   try {
+    await requeueWorkerOwnedTasks();
     await Promise.all([
-      worker.close(),
-      parserWorker ? parserWorker.close() : Promise.resolve(),
-      siteCrawlerWorker ? siteCrawlerWorker.close() : Promise.resolve(),
+      worker.close(true),
+      parserWorker ? parserWorker.close(true) : Promise.resolve(),
+      siteCrawlerWorker ? siteCrawlerWorker.close(true) : Promise.resolve(),
     ]);
     console.log('[Worker] All workers closed, active jobs returned to queues');
   } catch (err) {

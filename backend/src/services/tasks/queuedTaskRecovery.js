@@ -20,48 +20,64 @@ const TASK_REGISTRY = Object.freeze([
     kind: 'info_article',
     table: 'info_article_tasks',
     statuses: ['queued'],
+    queueStatus: 'queued',
+    activeStatuses: ['running', 'in_progress'],
     handler: () => require('../infoArticle/infoArticlePipeline').processInfoArticleTask,
   },
   {
     kind: 'link_article',
     table: 'link_article_tasks',
     statuses: ['queued'],
+    queueStatus: 'queued',
+    activeStatuses: ['running', 'in_progress'],
     handler: () => require('../linkArticle/linkArticlePipeline').processLinkArticleTask,
   },
   {
     kind: 'meta_tags',
     table: 'meta_tag_tasks',
     statuses: ['pending', 'queued'],
+    queueStatus: 'queued',
+    activeStatuses: ['processing', 'running', 'in_progress'],
     handler: () => require('../metaTags/pipeline').processMetaTagTask,
   },
   {
     kind: 'article_topics',
     table: 'article_topic_tasks',
     statuses: ['queued', 'pending'],
+    queueStatus: 'queued',
+    activeStatuses: ['processing', 'running', 'in_progress'],
     handler: () => require('../articleTopics/articleTopicsPipeline').processArticleTopicTask,
   },
   {
     kind: 'category_lead',
     table: 'category_lead_tasks',
     statuses: ['queued', 'pending'],
+    queueStatus: 'queued',
+    activeStatuses: ['processing', 'running', 'in_progress'],
     handler: () => require('../categoryLead/pipeline').processCategoryLeadTask,
   },
   {
     kind: 'forecaster',
     table: 'forecaster_tasks',
     statuses: ['queued', 'pending'],
+    queueStatus: 'queued',
+    activeStatuses: ['processing', 'running', 'in_progress'],
     handler: () => require('../forecaster/forecasterPipeline').processForecasterTask,
   },
   {
     kind: 'relevance',
     table: 'relevance_reports',
     statuses: ['queued', 'pending'],
+    queueStatus: 'queued',
+    activeStatuses: ['processing', 'running', 'in_progress'],
     handler: () => require('../relevance/pipeline').processRelevanceReport,
   },
   {
     kind: 'serp_b2b',
     table: 'serp_b2b_tasks',
     statuses: ['queued', 'pending'],
+    queueStatus: 'queued',
+    activeStatuses: ['processing', 'running', 'in_progress'],
     handler: () => require('../serpB2b/pipeline').processSerpB2bTask,
   },
 ]);
@@ -112,8 +128,44 @@ async function recoverQueuedUserTasks(db = dbDefault) {
   }
 }
 
+function stopQueuedUserTaskRecovery() {
+  if (recoveryTimer) {
+    clearInterval(recoveryTimer);
+    recoveryTimer = null;
+  }
+}
+
+/**
+ * Переводит direct-задачи, реально выполнявшиеся в API-процессе, обратно в
+ * queued до SIGTERM. Это исключает ожидание истечения lease после `docker
+ * compose down` и позволяет startup recovery запустить их сразу.
+ */
+async function requeueActiveUserTasksForShutdown(db = dbDefault) {
+  const result = { requeued: 0, byType: {} };
+  for (const spec of TASK_REGISTRY) {
+    if (!Array.isArray(spec.activeStatuses) || spec.activeStatuses.length === 0) continue;
+    try {
+      const { rowCount } = await db.query(
+        `UPDATE ${spec.table}
+            SET status = $1,
+                error_message = 'Задача возвращена в очередь перед перезапуском сервера',
+                updated_at = NOW()
+          WHERE status::text = ANY($2::text[])`,
+        [spec.queueStatus || spec.statuses[0], spec.activeStatuses],
+      );
+      result.byType[spec.kind] = rowCount || 0;
+      result.requeued += rowCount || 0;
+    } catch (error) {
+      if (!/relation .* does not exist/i.test(String(error.message || error))) {
+        console.warn(`[UserTaskRecovery] shutdown requeue ${spec.kind} failed:`, error.message);
+      }
+    }
+  }
+  return result;
+}
+
 function startQueuedUserTaskRecovery(db = dbDefault) {
-  if (recoveryTimer) return () => clearInterval(recoveryTimer);
+  if (recoveryTimer) return () => stopQueuedUserTaskRecovery();
   const tick = () => {
     recoverQueuedUserTasks(db).catch((error) => {
       console.warn('[UserTaskRecovery] tick failed:', error.message);
@@ -122,10 +174,7 @@ function startQueuedUserTaskRecovery(db = dbDefault) {
   setImmediate(tick);
   recoveryTimer = setInterval(tick, RECOVERY_INTERVAL_MS);
   if (recoveryTimer.unref) recoveryTimer.unref();
-  return () => {
-    clearInterval(recoveryTimer);
-    recoveryTimer = null;
-  };
+  return () => stopQueuedUserTaskRecovery();
 }
 
 function getQueuedUserTaskRecoveryConfig() {
@@ -140,5 +189,7 @@ module.exports = {
   TASK_REGISTRY,
   recoverQueuedUserTasks,
   startQueuedUserTaskRecovery,
+  stopQueuedUserTaskRecovery,
+  requeueActiveUserTasksForShutdown,
   getQueuedUserTaskRecoveryConfig,
 };
