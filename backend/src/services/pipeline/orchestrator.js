@@ -120,6 +120,7 @@ const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase'
 const { deriveModuleContext } = require('../../utils/moduleContext');
 const { richTextToPlain, isBlankRichText } = require('../../utils/stripHtmlTags');
 const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
+const { buildEeatContract, validateEeatContract } = require('../eeatAudit/contentContract');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
@@ -581,6 +582,68 @@ async function runPipeline(task, ctx) {
     log(`BRANDCORE/TGA: governance layer skipped (${governanceErr.message})`, 'warn');
   }
 
+  // Единый E-E-A-T 12 / evidence-first contract для классической SEO-ветки.
+  // Строится детерминированно из уже полученных Stage 0–2 артефактов — без
+  // дополнительного LLM-вызова и без раздувания времени генерации.
+  try {
+    task.__eeatContract = buildEeatContract({
+      branch: 'seo',
+      task,
+      targetPageAnalysis,
+      strategy: strategyContext,
+      stage0Result,
+      stage1Result,
+      stage2Result: { taxonomy, stage2Raw, enrichedStage1 },
+      audience: audienceNicheAnalysis,
+      intents: stage1Result,
+      whitespace: stage0Result,
+      outline: taxonomy,
+      lsi: stage2Raw,
+      realtimeResearch: stage0Result,
+      relevanceContext: relevanceReport,
+      governanceReport,
+      moduleContext: task.__moduleContext,
+      author: {
+        name: task.input_author_name,
+        role: task.input_author_role,
+        reviewer: task.input_reviewer_name,
+      },
+      targetScore: EEAT_PQ_TARGET,
+    });
+    log(
+      `E-E-A-T contract: ${task.__eeatContract.evidence.length} evidence, ` +
+      `${task.__eeatContract.entities.length} entities, ${task.__eeatContract.semantic.lsi_required.length} LSI, ` +
+      `risk=${task.__eeatContract.risk_level}, target=${task.__eeatContract.target_score}`,
+      'info',
+    );
+  } catch (contractErr) {
+    task.__eeatContract = null;
+    log(`E-E-A-T contract: сборка пропущена (${contractErr.message})`, 'warn');
+  }
+
+  // DSPy optimizes only the compact writer instructions and degrades safely.
+  if (task.__eeatContract) {
+    try {
+      const { buildPromptSuffix } = require('../projects/dspyClient');
+      const dspySuffix = await buildPromptSuffix('Eeat12ContractAndWriterBrief', {
+        branch: 'seo',
+        risk_level: task.__eeatContract.risk_level,
+        target_score: task.__eeatContract.target_score,
+        metrics: task.__eeatContract.obligations.slice(0, 10),
+        evidence_types: task.__eeatContract.evidence.map((item) => item.evidence_type).slice(0, 12),
+        entity_count: task.__eeatContract.entities.length,
+        lsi_count: task.__eeatContract.semantic.lsi_required.length,
+      });
+      if (dspySuffix) {
+        task.__eeatDspySuffix = dspySuffix.slice(0, 8000);
+        task.__eeatContract.writer_brief += `\\n\\n${task.__eeatDspySuffix}`;
+        task.__eeatContract.markdown += `\\n\\n${task.__eeatDspySuffix}`;
+      }
+    } catch (dspyErr) {
+      log(`DSPy E-E-A-T enhancement пропущен: ${dspyErr.message}`, 'info');
+    }
+  }
+
   try {
     task.__articleKnowledgeBase = buildArticleKnowledgeBase({
       task,
@@ -592,6 +655,7 @@ async function runPipeline(task, ctx) {
       moduleContext:  task.__moduleContext || null,
       projectContextBlock,
       governanceBlock,
+      eeatContract: task.__eeatContract,
     });
     const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
     const akbTokens = estimateTokens(task.__articleKnowledgeBase);
@@ -1014,6 +1078,31 @@ async function runPipeline(task, ctx) {
     s7Result = { finalHTML: finalBlocks.join('\n\n') };
   }
 
+  // ── E-E-A-T 12: deterministic final contract audit ───────────────
+  // LLM Stage 7 остаётся диагностическим судьёй, а этот слой проверяет
+  // доказательства, entities, LSI, table/comparison, authorship и risk rules
+  // программно. Он не делает новый LLM-вызов и поэтому не раздувает runtime.
+  let eeat12Audit = null;
+  try {
+    if (task.__eeatContract) {
+      eeat12Audit = validateEeatContract(
+        s7Result.finalHTML || finalBlocks.join('\\n\\n'),
+        task.__eeatContract,
+      );
+      task.__eeatContractAudit = eeat12Audit;
+      s7Result.eeat12Audit = eeat12Audit;
+      log(
+        `E-E-A-T 12: ${eeat12Audit.overall_score}/10 (target ${eeat12Audit.target_score}), ` +
+        `verdict=${eeat12Audit.verdict}, blockers=${eeat12Audit.blockers.length}, ` +
+        `LSI=${eeat12Audit.checks.lsi.present}/${eeat12Audit.checks.lsi.total}`,
+        eeat12Audit.publish_ready ? 'success' : 'warn',
+      );
+      publish(taskId, { type: 'eeat12_audit', audit: eeat12Audit });
+    }
+  } catch (eeatErr) {
+    log(`E-E-A-T 12 audit пропущен: ${eeatErr.message}`, 'warn');
+  }
+
   // ── Post-Stage 7: «Ограничения проекта → не использовано» ──────────
   // Строим отчёт о входных данных, не вошедших в финальный HTML.
   // Чистый JS, без LLM-вызовов: переиспользуем calculateCoverage (стемминг)
@@ -1194,6 +1283,7 @@ async function runPipeline(task, ctx) {
         currentYear: new Date().getFullYear(),
         evaluatorReport: evaluatorReport || null,
         governanceReport: governanceReport || null,
+        eeat12Audit: eeat12Audit || null,
         tzCompliance: s7Result.tzCompliance || s7Result.globalAudit?.tz_compliance || null,
         informationDelta: Array.isArray(stage0Result?.information_delta)
           ? stage0Result.information_delta
@@ -1205,13 +1295,23 @@ async function runPipeline(task, ctx) {
         },
       },
     });
+    const eeat12Ready = !eeat12Audit || eeat12Audit.publish_ready === true;
+    const eeat12Blockers = eeat12Audit && !eeat12Ready
+      ? (eeat12Audit.blockers.length
+        ? eeat12Audit.blockers
+        : [`E-E-A-T 12 score ${eeat12Audit.overall_score} < ${eeat12Audit.target_score}`])
+      : [];
     qualityGateVerdict = {
-      canPublish: gateResult.canPublish,
+      canPublish: gateResult.canPublish && eeat12Ready,
       ymyl:       gateResult.ymyl,
-      blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+      blockers:   [
+        ...gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+        ...eeat12Blockers.map((item) => ({ name: 'eeat12_contract', verdict: String(item) })),
+      ],
       warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
-      summary:    gateResult.summary,
+      summary:    eeat12Ready ? gateResult.summary : `${gateResult.summary}; E-E-A-T 12 requires refine/manual review`,
       governance: governanceReport || null,
+      eeat12:     eeat12Audit || null,
       lingua_forensic: linguaForensicReport
         ? {
             verdict:          linguaForensicReport.verdict,
@@ -1299,6 +1399,7 @@ async function runPipeline(task, ctx) {
     bm25:               s7Result.bm25                 || {},
     finalHTMLLength:    (s7Result.finalHTML || '').length,
     eeatBreakdown:      s7Result.eeatBreakdown        || null,
+    eeat12Audit:        eeat12Audit                    || null,
     tfIdfDensity:       s7Result.tfIdfDensity          || [],
     unusedInputs:       unusedInputsReport             || null,
     evaluatorReport:    evaluatorReport                || null,

@@ -79,6 +79,7 @@ const {
   buildGistRewriteIssues,
 } = require('./gistAudit');
 const { runEeatAuditCore } = require('../eeatAudit/core');
+const { buildEeatContract, validateEeatContract } = require('../eeatAudit/contentContract');
 const { runQualityEvaluator } = require('../pipeline/stage8');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
@@ -237,8 +238,8 @@ const INFO_ARTICLE_GEMINI_CACHE_TTL_S = (() => {
 
 const INFO_ARTICLE_EEAT_TARGET = (() => {
   const env = parseFloat(process.env.INFO_ARTICLE_EEAT_TARGET);
-  if (Number.isFinite(env) && env > 0 && env <= 10) return env;
-  return EEAT_PQ_TARGET;
+  if (Number.isFinite(env)) return Math.max(7.5, Math.min(9.5, env));
+  return Math.max(7.5, EEAT_PQ_TARGET);
 })();
 
 const INFO_ARTICLE_LSI_TARGET = (() => {
@@ -1787,6 +1788,36 @@ async function processInfoArticleTask(taskId) {
     task.__governanceBlock = governanceBlock;
     await appendLog(taskId, `BRANDCORE/TGA: ${governanceReport.status}; facts=${governanceReport.confirmed_facts}, claims=${governanceReport.confirmed_claims}`, governanceReport.blockers.length ? 'warn' : 'info');
 
+    task.__eeatContract = buildEeatContract({
+      branch: 'info',
+      task,
+      strategy,
+      stage0Result: strategy,
+      stage1Result: intents,
+      stage2Result: outline,
+      audience,
+      intents,
+      whitespace,
+      outline,
+      lsi: lsiSet,
+      realtimeResearch,
+      relevanceContext,
+      governanceReport,
+      author: {
+        name: task.__authorName || task.author_name,
+        role: task.__authorRole || task.author_role,
+        reviewer: task.__reviewerName || task.reviewer_name,
+      },
+      targetScore: INFO_ARTICLE_EEAT_TARGET,
+    });
+    await appendLog(
+      taskId,
+      `🧭 E-E-A-T contract: ${task.__eeatContract.evidence.length} evidence, ` +
+      `${task.__eeatContract.entities.length} entities, ${task.__eeatContract.semantic.lsi_required.length} LSI, ` +
+      `risk=${task.__eeatContract.risk_level}, target=${task.__eeatContract.target_score}`,
+      'info',
+    );
+
     task.__iakb = buildInfoArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
       relevanceSignals,
@@ -1795,7 +1826,30 @@ async function processInfoArticleTask(taskId) {
       audienceResearch: audienceResearchResult.digest,
       realtimeResearch,
       governanceBlock,
+      eeatContract: task.__eeatContract,
     });
+
+    // DSPy optimizes only the compact writer instructions; it never supplies
+    // facts and cannot override evidence/blocker rules from the contract.
+    try {
+      const { buildPromptSuffix } = require('../projects/dspyClient');
+      const dspySuffix = await buildPromptSuffix('Eeat12ContractAndWriterBrief', {
+        branch: 'info',
+        risk_level: task.__eeatContract.risk_level,
+        target_score: task.__eeatContract.target_score,
+        metrics: task.__eeatContract.obligations.slice(0, 10),
+        evidence_types: task.__eeatContract.evidence.map((item) => item.evidence_type).slice(0, 12),
+        entity_count: task.__eeatContract.entities.length,
+        lsi_count: task.__eeatContract.semantic.lsi_required.length,
+      });
+      if (dspySuffix) {
+        task.__eeatDspySuffix = dspySuffix.slice(0, 8000);
+        task.__iakb += `\\n\\n${task.__eeatDspySuffix}`;
+        await appendLog(taskId, '🧠 DSPy: E-E-A-T writer brief усилен few-shot инструкциями', 'info');
+      }
+    } catch (dspyErr) {
+      await appendLog(taskId, `DSPy E-E-A-T enhancement пропущен: ${dspyErr.message}`, 'info');
+    }
     await appendLog(taskId, `🧠 IAKB собрана (${task.__iakb.length} символов)`, 'info');
 
     // 8.5. SERP-evidence grounding (Phase 1 / P0-2). Гейтировано env'ом
@@ -2901,8 +2955,24 @@ async function processInfoArticleTask(taskId) {
     //      Пишем пофичерный журнал (quality_gate_reports) + компактный вердикт
     //      в info_article_tasks.quality_gate. Полностью graceful: gate НИКОГДА
     //      не роняет генерацию и (по требованию заказчика — «помечать, а не
-    //      жёстко блокировать») НЕ меняет status='done', только фиксирует
-    //      canPublish/blockers для UI-бейджа «на ревью».
+        // жёстко блокировать») НЕ меняет status='done', только фиксирует
+    // canPublish/blockers для UI-бейджа «на ревью».
+    let eeat12Audit = null;
+    try {
+      if (task.__eeatContract) {
+        eeat12Audit = validateEeatContract(finalHtml, task.__eeatContract);
+        task.__eeatContractAudit = eeat12Audit;
+        await appendLog(
+          taskId,
+          `E-E-A-T 12: ${eeat12Audit.overall_score}/10 (target ${eeat12Audit.target_score}), ` +
+          `verdict=${eeat12Audit.verdict}, blockers=${eeat12Audit.blockers.length}`,
+          eeat12Audit.publish_ready ? 'ok' : 'warn',
+        );
+        publishEvent(taskId, 'eeat12_audit', { audit: eeat12Audit });
+      }
+    } catch (eeatErr) {
+      await appendLog(taskId, `E-E-A-T 12 audit пропущен: ${eeatErr.message}`, 'warn');
+    }
     let qualityGateVerdict = null;
     try {
       const { qualityGate } = require('../qualityCore');
@@ -2929,6 +2999,7 @@ async function processInfoArticleTask(taskId) {
           intentReport:      qr && qr.intent_verdict,
           topicDiscovery:    qr && qr.topic_discovery,
           governanceReport,
+          eeat12Audit,
           informationDelta:  (whitespace && whitespace.information_delta) || null,
           authorship: {
             byline:   authorByline || task.__authorName || null,
@@ -2937,13 +3008,23 @@ async function processInfoArticleTask(taskId) {
           },
         },
       });
+      const eeat12Ready = !eeat12Audit || eeat12Audit.publish_ready === true;
+      const eeat12Blockers = eeat12Audit && !eeat12Ready
+        ? (eeat12Audit.blockers.length
+          ? eeat12Audit.blockers
+          : [`E-E-A-T 12 score ${eeat12Audit.overall_score} < ${eeat12Audit.target_score}`])
+        : [];
       qualityGateVerdict = {
-        canPublish: gateResult.canPublish,
+        canPublish: gateResult.canPublish && eeat12Ready,
         ymyl:       gateResult.ymyl,
-        blockers:   gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+        blockers:   [
+          ...gateResult.blockers.map((b) => ({ name: b.name, verdict: b.verdict })),
+          ...eeat12Blockers.map((item) => ({ name: 'eeat12_contract', verdict: String(item) })),
+        ],
         warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
-        summary:    gateResult.summary,
+        summary:    eeat12Ready ? gateResult.summary : `${gateResult.summary}; E-E-A-T 12 requires refine/manual review`,
         governance: governanceReport,
+        eeat12:     eeat12Audit,
         lingua_forensic: linguaForensicReport
           ? {
               verdict:          linguaForensicReport.verdict,
@@ -3017,6 +3098,7 @@ async function processInfoArticleTask(taskId) {
             ? { information_delta: whitespace.information_delta || [], coverage_score: whitespace.gist_audit.gist_coverage_score }
             : null),
           eeat_score: eeatAudit && eeatAudit.total_score,
+          eeat12_audit: eeat12Audit,
           eeat_report: eeatAudit,
           lsi_coverage: lsiCov,
           quality_gate: qualityGateVerdict,

@@ -313,6 +313,8 @@ function buildLinkArticleKnowledgeBase({
   realtimeResearch = null,
   // BRANDCORE/TGA: факты, claims, E-E-A-T, границы темы и manual review.
   governanceBlock = '',
+  // Shared E-E-A-T 12 / evidence-first contract.
+  eeatContract = null,
 } = {}) {
   if (!task) return '';
   const header = [
@@ -338,6 +340,7 @@ function buildLinkArticleKnowledgeBase({
 
   const parts = [
     governanceBlock ? `## §0.5 BRANDCORE/TGA governance\n\n${governanceBlock}` : '',
+    eeatContract && eeatContract.markdown ? `## §0.8 E-E-A-T 12 / evidence-first contract\n\n${eeatContract.markdown}` : '',
     sectionTask(task),
     sectionStrategy(strategy),
     sectionRealtime,

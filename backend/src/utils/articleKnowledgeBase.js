@@ -263,6 +263,7 @@ function buildArticleKnowledgeBase(input = {}) {
     relevanceSignals    = null, // Wave 2/3: report.competitor_signals из relevance-pipeline
     projectContextBlock = '',   // ТЗ §5/§8: рендер из projects/projectContextBlock
     governanceBlock      = '',   // BRANDCORE/TGA: единые fact/E-E-A-T/semantic rules
+    eeatContract         = null, // E-E-A-T 12 / evidence-first writer contract
   } = input;
 
   // Реальные тексты аудитории/ниши приходят как сериализованные
@@ -313,8 +314,17 @@ function buildArticleKnowledgeBase(input = {}) {
   // Слой правил, а не фактов: подтверждённые claims, E-E-A-T,
   // семантические границы, ручная проверка и запрет выдуманных данных.
   if (governanceBlock && governanceBlock.trim()) {
-    sections.push('\n## 0.5. BRANDCORE/TGA GOVERNANCE');
+    sections.push('\\n## 0.5 BRANDCORE/TGA GOVERNANCE');
     sections.push(governanceBlock.trim());
+  }
+
+  // ── 0.8 E-E-A-T 12 / evidence-first contract ─────────────────────
+  // Один компактный контракт для writer/refine/audit. Он не добавляет
+  // новый LLM-вызов и не заменяет governance: только связывает evidence,
+  // entities, LSI/TF-IDF/BM25 и обязательные форматные блоки.
+  if (eeatContract && typeof eeatContract.markdown === 'string' && eeatContract.markdown.trim()) {
+    sections.push('\\n## 0.8 E-E-A-T 12 / EVIDENCE-FIRST CONTRACT');
+    sections.push(eeatContract.markdown.trim());
   }
 
   // ── 1. Brand & Offer ─────────────────────────────────────────────

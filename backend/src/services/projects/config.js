@@ -403,7 +403,7 @@ const PROJECTS_CONFIG = deepFreeze({
     timeoutMs: 8000,
     // Имена сигнатур (должны совпадать с aegis_py/app/projects_dspy.py).
     signatures: ['LinkRecommend', 'BlogTopicSuggest', 'EatRecommend',
-      'GeoAeoBoost', 'MetaUplift', 'SchemaSuggest',
+      'GeoAeoBoost', 'MetaUplift', 'SchemaSuggest', 'Eeat12ContractAndWriterBrief',
       // Раздельный анализ источников + сводка закономерностей + ranking-gaps.
       'YandexQueryAnalysis', 'ProjectGrowthSynthesis', 'RankingFactorGaps'],
   },
