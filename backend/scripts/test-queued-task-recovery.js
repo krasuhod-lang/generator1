@@ -1,5 +1,7 @@
 'use strict';
 
+process.env.USER_TASK_GLOBAL_ADMISSION_ENABLED = '0';
+
 const assert = require('assert');
 const Module = require('module');
 const path = require('path');

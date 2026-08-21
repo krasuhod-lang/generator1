@@ -29,6 +29,7 @@ const { createSiteCrawlerWorker } = require('./siteCrawlerWorker');
 const {
   claimGenerationTask: claimGenerationTaskWithProfileSlot,
 } = require('../services/tasks/generationAdmission');
+const { acquireUserTaskSlot } = require('../services/tasks/userTaskAdmission');
 
 // Максимум автоматических возобновлений задачи после ошибки пайплайна.
 // Задача НЕ падает сразу в "failed": воркер сам переставляет её на возобновление
@@ -119,16 +120,41 @@ const worker = new Worker(
     // ── 1. Загрузка задачи ────────────────────────────────────────
     const task = await loadTask(taskId);
 
-    // ── 2. Атомарно claim-им task и профильный slot ─────────────────
+    // ── 2. Атомарно claim-им общий user slot, task и профильный slot ──
     const leaseToken = crypto.randomUUID();
-    const claim = await claimGenerationTaskWithProfileSlot({
+    const globalSlot = await acquireUserTaskSlot({
+      userId: task.user_id,
+      taskType: 'generation',
       taskId,
-      jobId: job.id,
-      leaseToken,
-      workerId: WORKER_ID,
-      leaseSeconds: GENERATOR_LEASE_SECONDS,
+      maxWaitMs: 1000,
     });
+    if (!globalSlot.claimed) {
+      const delayMs = Math.min(30000, 5000 + Number(globalSlot.activeCount || 0) * 1000);
+      try {
+        await job.moveToDelayed(Date.now() + delayMs, job.token);
+        throw new DelayedError();
+      } catch (error) {
+        if (error instanceof DelayedError) throw error;
+        throw Object.assign(new Error('user_task_slot_unavailable'), {
+          code: 'user_task_slot_unavailable',
+        });
+      }
+    }
+    let claim;
+    try {
+      claim = await claimGenerationTaskWithProfileSlot({
+        taskId,
+        jobId: job.id,
+        leaseToken,
+        workerId: WORKER_ID,
+        leaseSeconds: GENERATOR_LEASE_SECONDS,
+      });
+    } catch (error) {
+      await globalSlot.release().catch(() => {});
+      throw error;
+    }
     if (!claim.claimed) {
+      await globalSlot.release().catch(() => {});
       if (claim.reason === 'profile_limit') {
         // Не превращаем нормальное ожидание свободного slot в failed. BullMQ
         // вернет тот же job в delayed, после чего он снова будет проверен.
@@ -291,6 +317,10 @@ const worker = new Worker(
 
       // Пробрасываем, чтобы BullMQ записал job в failed
       throw pipelineErr;
+    } finally {
+      await globalSlot.release().catch((error) => {
+        console.warn(`[Worker][${taskId.substring(0, 8)}] user slot release failed:`, error.message);
+      });
     }
   },
 

@@ -1,7 +1,7 @@
 'use strict';
 
 const dbDefault = require('../../config/db');
-const { scheduleUserTask } = require('../../utils/perUserConcurrency');
+const { scheduleUserTask, isUserTaskScheduled } = require('../../utils/perUserConcurrency');
 
 const RECOVERY_INTERVAL_MS = Math.max(
   10000,
@@ -98,14 +98,12 @@ async function recoverQueuedUserTasks(db = dbDefault) {
       const processTask = spec.handler();
       for (const row of rows) {
         const taskId = String(row.id);
+        const alreadyScheduled = isUserTaskScheduled(spec.kind, taskId);
         const result = scheduleUserTask(row.user_id, spec.kind, taskId, () => processTask(taskId));
-        result
-          .then((outcome) => {
-            if (outcome?.scheduled) launched.push(`${spec.kind}:${taskId}`);
-          })
-          .catch((error) => {
-            console.error(`[UserTaskRecovery] ${spec.kind}/${taskId} failed:`, error.message);
-          });
+        if (!alreadyScheduled) launched.push(`${spec.kind}:${taskId}`);
+        result.catch((error) => {
+          console.error(`[UserTaskRecovery] ${spec.kind}/${taskId} failed:`, error.message);
+        });
       }
     }
     return { launched: launched.length, tasks: launched };

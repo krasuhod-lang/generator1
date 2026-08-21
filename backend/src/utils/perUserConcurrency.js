@@ -46,6 +46,8 @@ const MAX_PER_USER = 5;
 // Состояние per-user: userKey -> { active: number, waiters: Array<resolveFn> }
 // Используем Map, чтобы корректно работать с любыми типами userId
 // (uuid-строка, integer и т.п.) без коллизий ключей.
+const { acquireUserTaskSlot } = require('../services/tasks/userTaskAdmission');
+
 const _state = new Map();
 const _scheduledTasks = new Set();
 
@@ -146,7 +148,18 @@ function scheduleUserTask(userId, taskType, taskId, fn) {
     return Promise.resolve({ scheduled: false, duplicate: true });
   }
   _scheduledTasks.add(key);
-  return withUserSlot(userId, fn)
+  return withUserSlot(userId, async () => {
+    const slot = await acquireUserTaskSlot({
+      userId,
+      taskType: taskType || 'task',
+      taskId,
+    });
+    try {
+      return await fn();
+    } finally {
+      await slot.release();
+    }
+  })
     .then((result) => ({ scheduled: true, result }))
     .finally(() => _scheduledTasks.delete(key));
 }
