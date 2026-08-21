@@ -25,7 +25,7 @@
 
 const db = require('../config/db');
 const { processInfoArticleTask } = require('../services/infoArticle/infoArticlePipeline');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { normalizeCommercialLinks, MAX_COMMERCIAL_LINKS } =
   require('../services/infoArticle/excelParser');
 const sse = require('../services/sse/sseManager');
@@ -219,10 +219,8 @@ async function createInfoArticleTask(req, res, next) {
     );
     const task = rows[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processInfoArticleTask(task.id)).catch((err) => {
-        console.error('[infoArticle] background task failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'info_article', task.id, () => processInfoArticleTask(task.id)).catch((err) => {
+      console.error('[infoArticle] background task failed:', err.message);
     });
 
     return res.status(201).json({

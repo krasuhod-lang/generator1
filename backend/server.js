@@ -322,6 +322,19 @@ const start = async () => {
       console.warn('[Server] Info-article recovery skipped:', err.message);
     }
 
+    // Direct pipelines (info/link/meta/topics/category/forecaster/relevance/
+    // serp-b2b) historically used setImmediate and therefore could remain
+    // queued after an API restart. The shared registry launches them on startup
+    // and periodically, with per-user deduplication and the five-slot limit.
+    try {
+      const { startQueuedUserTaskRecovery, getQueuedUserTaskRecoveryConfig } = require('./src/services/tasks/queuedTaskRecovery');
+      startQueuedUserTaskRecovery(db);
+      const recoveryConfig = getQueuedUserTaskRecoveryConfig();
+      console.log(`[Server] queued user-task recovery started: interval=${recoveryConfig.intervalMs}ms, batch=${recoveryConfig.batchPerType}`);
+    } catch (err) {
+      console.warn('[Server] Queued user-task recovery skipped:', err.message);
+    }
+
     // После рестарта — переводим зависшие position-tracker runs в error
     // и стартуем планировщик авто-съёма (gating через ENV).
     try {

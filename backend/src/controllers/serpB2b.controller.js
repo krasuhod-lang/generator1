@@ -13,7 +13,7 @@
 const db = require('../config/db');
 const { processSerpB2bTask } = require('../services/serpB2b/pipeline');
 const { buildXlsx } = require('../services/serpB2b/xlsxExporter');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 
 const MAX_QUERY_LEN = 200;
@@ -98,11 +98,9 @@ async function createSerpB2bTask(req, res, next) {
     );
     const task = rows[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processSerpB2bTask(task.id)).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error('[serpB2b] background task failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'serp_b2b', task.id, () => processSerpB2bTask(task.id)).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[serpB2b] background task failed:', err.message);
     });
 
     return res.status(201).json({ task });

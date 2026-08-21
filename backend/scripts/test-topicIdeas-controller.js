@@ -39,7 +39,10 @@ const fakeDb = {
 };
 const fakePipeline = { processArticleTopicTask: async () => null };
 const fakeTrends   = { findDuplicateDeepDives: async () => [] };
-const fakeConcurrency = { withUserSlot: (_uid, fn) => fn() };
+const fakeConcurrency = {
+  withUserSlot: (_uid, fn) => fn(),
+  scheduleUserTask: (_uid, _kind, _taskId, fn) => Promise.resolve(fn()).then((result) => ({ scheduled: true, result })),
+};
 
 Module._load = function (request, parent, ...rest) {
   if (request === '../config/db') return fakeDb;

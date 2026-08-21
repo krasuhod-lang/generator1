@@ -39,14 +39,15 @@
  * recovery-механизмов для них нет ни до, ни после.
  */
 
-// Жёстко зашитый лимит по требованию задачи: «максимум 2 задачи параллельно
-// в рамках одного личного кабинета». Сознательно НЕ читается из ENV.
-const MAX_PER_USER = 2;
+// Единое бизнес-правило: максимум 5 любых direct-задач одновременно
+// в рамках одного личного кабинета. Сознательно НЕ читается из ENV.
+const MAX_PER_USER = 5;
 
 // Состояние per-user: userKey -> { active: number, waiters: Array<resolveFn> }
 // Используем Map, чтобы корректно работать с любыми типами userId
 // (uuid-строка, integer и т.п.) без коллизий ключей.
 const _state = new Map();
+const _scheduledTasks = new Set();
 
 function _keyFor(userId) {
   // null/undefined → общий «анонимный» бакет, чтобы не отключать защиту
@@ -136,11 +137,24 @@ async function withUserSlot(userId, fn) {
 }
 
 /**
- * Диагностическая функция — состояние конкретного пользователя.
- *
- * @param {string|number|null|undefined} userId
- * @returns {{active: number, queued: number, max: number}}
+ * Schedule one concrete task through the shared user limiter and deduplicate
+ * controller/recovery launches for the same logical task.
  */
+function scheduleUserTask(userId, taskType, taskId, fn) {
+  const key = `${String(taskType || 'task')}:${String(taskId)}`;
+  if (_scheduledTasks.has(key)) {
+    return Promise.resolve({ scheduled: false, duplicate: true });
+  }
+  _scheduledTasks.add(key);
+  return withUserSlot(userId, fn)
+    .then((result) => ({ scheduled: true, result }))
+    .finally(() => _scheduledTasks.delete(key));
+}
+
+function isUserTaskScheduled(taskType, taskId) {
+  return _scheduledTasks.has(`${String(taskType || 'task')}:${String(taskId)}`);
+}
+
 function getUserSlotStats(userId) {
   const key = _keyFor(userId);
   const st = _state.get(key);
@@ -156,4 +170,6 @@ module.exports = {
   acquireUserSlot,
   withUserSlot,
   getUserSlotStats,
+  scheduleUserTask,
+  isUserTaskScheduled,
 };

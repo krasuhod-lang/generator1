@@ -17,7 +17,7 @@
 
 const db = require('../config/db');
 const { processForecasterTask, runAiReportForTask } = require('../services/forecaster/forecasterPipeline');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const {
   generateShareToken,
@@ -224,10 +224,8 @@ async function createForecasterTask(req, res, next) {
     );
     const task = ins[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processForecasterTask(task.id)).catch((err) => {
-        console.error('[forecaster] background task failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'forecaster', task.id, () => processForecasterTask(task.id)).catch((err) => {
+      console.error('[forecaster] background task failed:', err.message);
     });
 
     return res.status(201).json({ task });
@@ -330,10 +328,8 @@ async function rerunForecasterTask(req, res, next) {
     );
     const task = upd[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processForecasterTask(task.id)).catch((err) => {
-        console.error('[forecaster] rerun task failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'forecaster', task.id, () => processForecasterTask(task.id)).catch((err) => {
+      console.error('[forecaster] rerun task failed:', err.message);
     });
 
     return res.json({ task });

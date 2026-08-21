@@ -13,7 +13,7 @@
 
 const db = require('../config/db');
 const { processMetaTagTask } = require('../services/metaTags/pipeline');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
@@ -109,12 +109,10 @@ async function createMetaTagTask(req, res, next) {
     );
     const task = rows[0];
 
-    // Запускаем фоновую обработку. Любая ошибка ловится внутри pipeline и
-    // сохраняется в БД — здесь only fire-and-forget.
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processMetaTagTask(task.id)).catch((err) => {
-        console.error('[metaTags] background task failed:', err.message);
-      });
+    // Запускаем через единый deduplicated user scheduler. Любая ошибка
+    // сохраняется внутри pipeline и не теряет задачу из БД.
+    scheduleUserTask(req.user.id, 'meta_tags', task.id, () => processMetaTagTask(task.id)).catch((err) => {
+      console.error('[metaTags] background task failed:', err.message);
     });
 
     return res.status(201).json({ task });

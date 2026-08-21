@@ -15,7 +15,7 @@
 
 const db = require('../config/db');
 const { processRelevanceReport } = require('../services/relevance/pipeline');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { health: relevanceHealth, cocoons: relevanceCocoons, cocoonPlan: relevanceCocoonPlan } = require('../services/relevance/pythonClient');
 const rawStorage = require('../services/relevance/rawStorage');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
@@ -98,11 +98,9 @@ async function createReport(req, res, next) {
     );
     const report = rows[0];
 
-    // Fire-and-forget — пайплайн сам пишет статусы и ошибки в БД.
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processRelevanceReport(report.id)).catch((err) => {
-        console.error('[relevance] background pipeline failed:', err.message);
-      });
+    // Единый deduplicated launcher — pipeline сам пишет статусы и ошибки в БД.
+    scheduleUserTask(req.user.id, 'relevance', report.id, () => processRelevanceReport(report.id)).catch((err) => {
+      console.error('[relevance] background pipeline failed:', err.message);
     });
 
     return res.status(201).json({ report });

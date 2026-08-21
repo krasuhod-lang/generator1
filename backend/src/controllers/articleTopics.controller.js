@@ -13,7 +13,7 @@
 const db = require('../config/db');
 const { processArticleTopicTask } = require('../services/articleTopics/articleTopicsPipeline');
 const { findDuplicateDeepDives } = require('../services/articleTopics/articleTopicsTrends');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { buildProjectContext } = require('../services/projects/contextResolver');
@@ -181,10 +181,8 @@ async function createArticleTopicTask(req, res, next) {
     );
     const task = rows[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processArticleTopicTask(task.id)).catch((err) => {
-        console.error('[articleTopics] background task failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'article_topics', task.id, () => processArticleTopicTask(task.id)).catch((err) => {
+      console.error('[articleTopics] background task failed:', err.message);
     });
 
     return res.status(201).json({ task });
@@ -296,10 +294,8 @@ async function createArticleTopicIdeasTask(req, res, next) {
     );
     const task = rows[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processArticleTopicTask(task.id)).catch((err) => {
-        console.error('[articleTopics] topic-ideas background failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'article_topics', task.id, () => processArticleTopicTask(task.id)).catch((err) => {
+      console.error('[articleTopics] topic-ideas background failed:', err.message);
     });
 
     return res.status(201).json({ task });
@@ -372,10 +368,8 @@ async function createArticleTopicDeepDive(req, res, next) {
     );
     const task = rows[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processArticleTopicTask(task.id)).catch((err) => {
-        console.error('[articleTopics] deep-dive failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'article_topics', task.id, () => processArticleTopicTask(task.id)).catch((err) => {
+      console.error('[articleTopics] deep-dive failed:', err.message);
     });
 
     return res.status(201).json({ task });

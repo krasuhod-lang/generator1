@@ -14,7 +14,7 @@
 const db = require('../config/db');
 const { processCategoryLeadTask } = require('../services/categoryLead/pipeline');
 const { getCategoryLeadConfig } = require('../services/categoryLead/config');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { csvCell, csvHeader } = require('../utils/csv');
 
@@ -107,10 +107,8 @@ async function createCategoryLeadTask(req, res, next) {
     );
     const task = rows[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processCategoryLeadTask(task.id)).catch((err) => {
-        console.error('[categoryLead] background task failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'category_lead', task.id, () => processCategoryLeadTask(task.id)).catch((err) => {
+      console.error('[categoryLead] background task failed:', err.message);
     });
 
     return res.status(201).json({ task });

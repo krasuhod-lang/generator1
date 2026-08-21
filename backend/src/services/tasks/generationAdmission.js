@@ -3,7 +3,7 @@
 const dbDefault = require('../../config/db');
 
 const MAX_PROFILE_CONCURRENCY = Math.max(
-  1,
+  5,
   Math.min(50, Number(process.env.GENERATION_MAX_PER_PROFILE) || 5),
 );
 const PROFILE_LOCK_PREFIX = 'generator-profile-slots:';

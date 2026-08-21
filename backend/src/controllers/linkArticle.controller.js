@@ -12,7 +12,7 @@
 
 const db = require('../config/db');
 const { processLinkArticleTask } = require('../services/linkArticle/linkArticlePipeline');
-const { withUserSlot } = require('../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
@@ -106,10 +106,8 @@ async function createLinkArticleTask(req, res, next) {
     );
     const task = rows[0];
 
-    setImmediate(() => {
-      withUserSlot(req.user.id, () => processLinkArticleTask(task.id)).catch((err) => {
-        console.error('[linkArticle] background task failed:', err.message);
-      });
+    scheduleUserTask(req.user.id, 'link_article', task.id, () => processLinkArticleTask(task.id)).catch((err) => {
+      console.error('[linkArticle] background task failed:', err.message);
     });
 
     return res.status(201).json({ task });

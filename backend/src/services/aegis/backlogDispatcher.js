@@ -1,7 +1,7 @@
 'use strict';
 
 const db = require('../../config/db');
-const { withUserSlot } = require('../../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../../utils/perUserConcurrency');
 const { processInfoArticleTask } = require('../infoArticle/infoArticlePipeline');
 const { processLinkArticleTask } = require('../linkArticle/linkArticlePipeline');
 const { processMetaTagTask } = require('../metaTags/pipeline');
@@ -35,10 +35,8 @@ async function _createInfoArticle({ userId, payload, issueNumber }) {
     [userId, payload.query, payload.niche || 'Россия', issueNumber],
   );
   const taskId = rows[0].id;
-  setImmediate(() => {
-    withUserSlot(userId, () => processInfoArticleTask(taskId)).catch((err) => {
-      console.error('[aegis/backlog] info_article failed:', err.message);
-    });
+  scheduleUserTask(userId, 'info_article', taskId, () => processInfoArticleTask(taskId)).catch((err) => {
+    console.error('[aegis/backlog] info_article failed:', err.message);
   });
   return { taskRef: taskId, taskKind: 'info_article' };
 }
@@ -64,10 +62,8 @@ async function _createLinkArticle({ userId, payload, issueNumber }) {
     ],
   );
   const taskId = rows[0].id;
-  setImmediate(() => {
-    withUserSlot(userId, () => processLinkArticleTask(taskId)).catch((err) => {
-      console.error('[aegis/backlog] link_article failed:', err.message);
-    });
+  scheduleUserTask(userId, 'link_article', taskId, () => processLinkArticleTask(taskId)).catch((err) => {
+    console.error('[aegis/backlog] link_article failed:', err.message);
   });
   return { taskRef: taskId, taskKind: 'link_article' };
 }
@@ -91,10 +87,8 @@ async function _createMetaTags({ userId, payload, issueNumber }) {
     ],
   );
   const taskId = rows[0].id;
-  setImmediate(() => {
-    withUserSlot(userId, () => processMetaTagTask(taskId)).catch((err) => {
-      console.error('[aegis/backlog] meta_tags failed:', err.message);
-    });
+  scheduleUserTask(userId, 'meta_tags', taskId, () => processMetaTagTask(taskId)).catch((err) => {
+    console.error('[aegis/backlog] meta_tags failed:', err.message);
   });
   return { taskRef: taskId, taskKind: 'meta_tags' };
 }
@@ -108,10 +102,8 @@ async function _createRelevance({ userId, payload, issueNumber }) {
     [userId, payload.query, payload.lr || '213', payload.top_n || 20, issueNumber],
   );
   const reportId = rows[0].id;
-  setImmediate(() => {
-    withUserSlot(userId, () => processRelevanceReport(reportId)).catch((err) => {
-      console.error('[aegis/backlog] relevance failed:', err.message);
-    });
+  scheduleUserTask(userId, 'relevance', reportId, () => processRelevanceReport(reportId)).catch((err) => {
+    console.error('[aegis/backlog] relevance failed:', err.message);
   });
   return { taskRef: reportId, taskKind: 'relevance' };
 }

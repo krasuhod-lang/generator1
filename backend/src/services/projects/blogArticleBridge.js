@@ -21,7 +21,7 @@
  */
 
 const db = require('../../config/db');
-const { withUserSlot } = require('../../utils/perUserConcurrency');
+const { scheduleUserTask } = require('../../utils/perUserConcurrency');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 
 const MAX_TOPIC_LEN = 250;
@@ -126,13 +126,10 @@ async function generateBlogArticleFromProject(params) {
   );
   const task = rows[0];
 
-  // Запускаем существующий конвейер генерации в фоне (как швейцарские часы —
-  // тот же путь, что и при ручном создании статьи).
+  // Используем тот же deduplicated launcher, что и ручной POST и recovery.
   const { processInfoArticleTask } = require('../infoArticle/infoArticlePipeline');
-  setImmediate(() => {
-    withUserSlot(userId, () => processInfoArticleTask(task.id)).catch((err) => {
-      console.error('[blogArticleBridge] background task failed:', err.message);
-    });
+  scheduleUserTask(userId, 'info_article', task.id, () => processInfoArticleTask(task.id)).catch((err) => {
+    console.error('[blogArticleBridge] background task failed:', err.message);
   });
 
   return { task, company_facts: facts || null };
