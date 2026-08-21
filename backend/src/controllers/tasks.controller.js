@@ -18,6 +18,7 @@ const { salvageJsonStrings }    = require('../utils/salvageJson');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 const { getProfileQueueHealth } = require('../services/tasks/generationAdmission');
 const { resolveQueueReason } = require('../services/tasks/queueDiagnostics');
+const { getUserTaskSlotHealth } = require('../services/tasks/userTaskAdmission');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -586,6 +587,38 @@ async function publishTaskOutboxNow(jobId) {
   }
 }
 
+async function resolveGenerationQueuePresentation(userId, publication) {
+  if (!publication.published) {
+    return {
+      message: 'Задача сохранена; ожидает публикации в BullMQ',
+      queueReason: 'waiting_for_publisher',
+      userSlot: null,
+    };
+  }
+  try {
+    const userSlot = await getUserTaskSlotHealth(userId);
+    if (Number(userSlot.availableSlots) > 0) {
+      return {
+        message: 'Задача принята к немедленному запуску: свободен слот пользователя',
+        queueReason: 'admitted',
+        userSlot,
+      };
+    }
+    return {
+      message: 'Пять слотов пользователя заняты; задача будет запущена автоматически',
+      queueReason: 'user_limit',
+      userSlot,
+    };
+  } catch (error) {
+    console.warn('[StartTask] user slot health unavailable:', error.message);
+    return {
+      message: 'Задача опубликована в BullMQ и будет запущена автоматически',
+      queueReason: 'waiting',
+      userSlot: null,
+    };
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/tasks/:id/start
 // Запустить задачу — добавить в очередь BullMQ
@@ -642,16 +675,16 @@ async function startTask(req, res, next) {
       client.release();
     }
     const publication = await publishTaskOutboxNow(jobId);
+    const presentation = await resolveGenerationQueuePresentation(req.user.id, publication);
 
     return res.json({
-      message: publication.published
-        ? 'Задача опубликована в очередь'
-        : 'Задача сохранена; ожидает публикации в очередь',
+      message: presentation.message,
       jobId,
       taskId: task.id,
       status: 'queued',
       queuePublished: publication.published,
-      queueReason: publication.published ? 'waiting' : 'waiting_for_publisher',
+      queueReason: presentation.queueReason,
+      userSlot: presentation.userSlot,
       queueAttempts: publication.attempts,
       queueError: publication.lastError,
     });
@@ -743,6 +776,7 @@ async function resumeTask(req, res, next) {
       client.release();
     }
     const publication = await publishTaskOutboxNow(jobId);
+    const presentation = await resolveGenerationQueuePresentation(req.user.id, publication);
 
     // SSE-уведомление
     publish(task.id, {
@@ -752,12 +786,11 @@ async function resumeTask(req, res, next) {
     });
 
     return res.json({
-      message:          publication.published
-        ? 'Задача опубликована для возобновления'
-        : 'Задача сохранена; ожидает публикации для возобновления',
+      message:          presentation.message,
       status:           'queued',
       queuePublished:   publication.published,
-      queueReason:      publication.published ? 'waiting' : 'waiting_for_publisher',
+      queueReason:      presentation.queueReason,
+      userSlot:         presentation.userSlot,
       queueAttempts:    publication.attempts,
       queueError:       publication.lastError,
       resumeFromBlock,

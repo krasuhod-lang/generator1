@@ -135,6 +135,25 @@ async function acquireUserTaskSlot({ userId, taskType, taskId, db = dbDefault, m
   }
 }
 
+async function getUserTaskSlotHealth(userId, db = dbDefault) {
+  if (!GLOBAL_ADMISSION_ENABLED) {
+    return { activeCount: 0, availableSlots: MAX_USER_TASKS, maxConcurrent: MAX_USER_TASKS };
+  }
+  await db.query(`DELETE FROM user_task_slot_leases WHERE user_id=$1 AND lease_until <= NOW()`, [userId]);
+  const { rows } = await db.query(
+    `SELECT COUNT(*)::int AS count
+       FROM user_task_slot_leases
+      WHERE user_id=$1 AND lease_until > NOW()`,
+    [userId],
+  );
+  const activeCount = Number(rows[0]?.count || 0);
+  return {
+    activeCount,
+    availableSlots: Math.max(0, MAX_USER_TASKS - activeCount),
+    maxConcurrent: MAX_USER_TASKS,
+  };
+}
+
 async function withUserTaskLease({ userId, taskType, taskId, fn, db = dbDefault, maxWaitMs = 0 }) {
   const slot = await acquireUserTaskSlot({ userId, taskType, taskId, db, maxWaitMs });
   if (!slot.claimed) return { admitted: false, reason: slot.reason, activeCount: slot.activeCount };
@@ -155,5 +174,6 @@ module.exports = {
   acquireUserTaskSlot,
   renewUserTaskSlot,
   releaseUserTaskSlot,
+  getUserTaskSlotHealth,
   withUserTaskLease,
 };
