@@ -177,7 +177,29 @@ _SIGNATURES: Dict[str, Dict[str, Any]] = {
         ),
         "demos": [
             "шаблон product без Offer.price/availability → добавить Offer с "
-            "price, priceCurrency, availability + AggregateRating",
+            "price, priceCurrency, availability + AggregateRating"
+        ],
+    },
+    "Eeat12ContractAndWriterBrief": {
+        "instructions": (
+            "Усиль PAGE_EEAT_CONTRACT, но не создавай факты. Сначала проверь "
+            "evidence_types, risk_level, mandatory entities, LSI и форматные "
+            "обязательства. Writer должен получить короткий execution brief: "
+            "только подтверждённые claims, локальные evidence markers для цифр, "
+            "авторство и reviewer по уровню риска, естественная интеграция LSI "
+            "без keyword stuffing, entity relationships, полезная таблица или "
+            "честное сравнение, ограничения и FAQ. Для low-risk не имитируй "
+            "reviewer; для high/YMYL не пропускай материал без human review. "
+            "Human-like стиль достигается конкретикой, вариативной длиной фраз, "
+            "переходами и редактурой, а не выдуманными кейсами или цитатами. "
+            "Никогда не повышай score за неподтверждённые claims."
+        ),
+        "demos": [
+            "evidence_types=[brand_fact,research_fact], risk=medium, table=true "
+            "→ writer добавляет decision table, связывает обязательные entities "
+            "с H2 и помечает внешний claim ссылкой на evidence; без новой цифры.",
+            "evidence_types=[], risk=ymyl, reviewer=false → verdict=human_review; "
+            "не компенсировать отсутствие доказательств словами эксперт/гарантия."
         ],
     },
 }
@@ -230,6 +252,12 @@ if _DSPY_AVAILABLE:  # pragma: no cover - требует установленн�
         schema_inventory = dspy.InputField(desc="Найденные типы + битые поля по шаблону")
         suggestions = dspy.OutputField(desc="Что добавить/поправить + JSON-LD сниппеты")
 
+    class Eeat12ContractAndWriterBrief(dspy.Signature):  # type: ignore
+        """Компиляция evidence-first E-E-A-T contract в короткий writer brief."""
+
+        contract_context = dspy.InputField(desc="branch, risk, evidence types, entities, LSI, format obligations")
+        writer_brief = dspy.OutputField(desc="Строгий writer brief без новых фактов и с human-review rules")
+
     class YandexQueryAnalysis(dspy.Signature):  # type: ignore
         """Отдельный анализ Яндекс.Вебмастера (поведенческие/коммерч./регион)."""
 
@@ -256,6 +284,7 @@ if _DSPY_AVAILABLE:  # pragma: no cover - требует установленн�
         "GeoAeoBoost": GeoAeoBoost,
         "MetaUplift": MetaUplift,
         "SchemaSuggest": SchemaSuggest,
+        "Eeat12ContractAndWriterBrief": Eeat12ContractAndWriterBrief,
         "YandexQueryAnalysis": YandexQueryAnalysis,
         "ProjectGrowthSynthesis": ProjectGrowthSynthesis,
         "RankingFactorGaps": RankingFactorGaps,
