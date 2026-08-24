@@ -112,7 +112,7 @@ let pollTimer = null;
 onMounted(async () => {
   await store.fetchTasks();
   pollTimer = setInterval(() => {
-    if (store.tasks.some((t) => t.status === 'queued' || t.status === 'running')) {
+    if (store.tasks.some((t) => ['queued', 'running', 'pending', 'processing', 'in_progress'].includes(t.status))) {
       store.fetchTasks();
     }
   }, 5000);
@@ -138,14 +138,16 @@ async function handleDelete(task) {
 function statusBadgeClass(status) {
   switch (status) {
     case 'done':    return 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/60';
-    case 'running': return 'bg-sky-900/40 text-sky-300 border border-sky-800/60 animate-pulse';
-    case 'queued':  return 'bg-amber-900/40 text-amber-300 border border-amber-800/60';
+    case 'running': case 'processing': case 'in_progress': return 'bg-sky-900/40 text-sky-300 border border-sky-800/60 animate-pulse';
+    case 'queued': case 'pending': return 'bg-amber-900/40 text-amber-300 border border-amber-800/60';
+    case 'partial': return 'bg-yellow-900/40 text-yellow-300 border border-yellow-800/60';
+    case 'timeout': return 'bg-orange-900/40 text-orange-300 border border-orange-800/60';
     case 'error':   return 'bg-red-900/40 text-red-300 border border-red-800/60';
     default:        return 'bg-gray-800 text-gray-400 border border-gray-700';
   }
 }
 function statusLabel(s) {
-  return ({ queued: 'В очереди', running: 'Генерация', done: 'Готово', error: 'Ошибка' })[s] || s;
+  return ({ queued: 'В очереди', pending: 'Ожидает слота', running: 'Генерация', processing: 'Обработка', in_progress: 'Выполняется', partial: 'Частично', timeout: 'Тайм-аут', done: 'Готово', error: 'Ошибка' })[s] || s || 'Неизвестно';
 }
 function stageLabel(s) {
   return ({
@@ -169,9 +171,23 @@ function formatDate(d) {
   try { return new Date(d).toLocaleString('ru-RU'); } catch (_) { return String(d); }
 }
 function formatCost(v) {
-  const n = Number(v || 0);
-  if (!Number.isFinite(n)) return '$0.0000';
-  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
+  const n = Number(v ?? 0);
+  if (!Number.isFinite(n)) return '$0.000000';
+  return n < 0.01 ? `$${n.toFixed(6)}` : `$${n.toFixed(2)}`;
+}
+function taskStageLabel(task) {
+  return stageLabel(task?.current_stage || task?.stage || task?.status);
+}
+function taskProgressLabel(task) {
+  const value = Number(task?.progress_pct ?? task?.progress ?? NaN);
+  return Number.isFinite(value) && value >= 0 ? `${Math.max(0, Math.min(100, Math.round(value)))}%` : '';
+}
+function taskQueueLabel(task) {
+  const reason = String(task?.queue_reason || task?.queueReason || '').trim();
+  if (reason === 'user_limit') return 'ожидает свободный слот';
+  if (reason === 'waiting_for_publisher') return 'ожидает публикации job';
+  if (reason === 'admitted') return 'слот свободен';
+  return '';
 }
 
 // ── Детали активной задачи + SSE ────────────────────────────────────
@@ -576,6 +592,14 @@ async function copyMetaField(label, value) {
                 <div class="text-sm text-gray-200 truncate">{{ t.topic }}</div>
                 <div class="text-[11px] text-gray-500 mt-0.5">
                   {{ formatDate(t.created_at) }} · {{ formatCost(t.cost_usd) }}
+                  <span v-if="taskStageLabel(t) && t.status !== 'done' && t.status !== 'error'" class="text-indigo-300">
+                    · {{ taskStageLabel(t) }}
+                  </span>
+                  <span v-if="taskProgressLabel(t)" class="text-sky-300"> · {{ taskProgressLabel(t) }}</span>
+                  <span v-if="taskQueueLabel(t)" class="text-amber-300"> · {{ taskQueueLabel(t) }}</span>
+                </div>
+                <div v-if="t.error_message || t.error" class="text-[11px] text-red-300/90 truncate" :title="t.error_message || t.error">
+                  {{ t.error_message || t.error }}
                 </div>
               </div>
               <span class="text-[11px] px-2 py-0.5 rounded uppercase tracking-wider"

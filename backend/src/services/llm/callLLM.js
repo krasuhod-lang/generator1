@@ -437,6 +437,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     qualityScore  = null,
     triggeredRefine = false,
     responseFormat = null,
+    retryOnTruncation = true,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -534,7 +535,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // автоматически удваиваем лимит и повторяем. Главная причина
       // JSON parse ошибок в outreach emailComposer/nicheExpander.
       const isTruncated = result.finishReason === 'length' || _isJsonTruncated(result.text);
-      if (isTruncated && attempt < retries - 1) {
+      if (isTruncated && retryOnTruncation && attempt < retries - 1) {
         // Когда maxTokens не задан явно, реальный запрос ушёл с дефолтом
         // адаптера (напр. DeepSeek 16000), а не с 1000 — берём его как базу,
         // чтобы удвоение ПОВЫШАЛО лимит, а не понижало его.

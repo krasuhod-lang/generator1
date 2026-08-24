@@ -54,6 +54,8 @@ function _installAxiosMock({ onGet, onPost }) {
     _resetCache();
 
     let postCalls = 0;
+    let curlCalls = 0;
+    let headlessCalls = 0;
     let lastPostHeaders = null;
     _installAxiosMock({
       onGet: async () => ({
@@ -64,6 +66,11 @@ function _installAxiosMock({ onGet, onPost }) {
       }),
       onPost: async (url, body, opts) => {
         postCalls += 1;
+        if (String(url).includes('/fetch_html')) {
+          curlCalls += 1;
+          return { data: { success: false, error_msg: 'synthetic curl fallback miss' } };
+        }
+        headlessCalls += 1;
         lastPostHeaders = opts && opts.headers || null;
         return { data: { html: '<html><body>real content via headless</body></html>' } };
       },
@@ -74,7 +81,9 @@ function _installAxiosMock({ onGet, onPost }) {
     assert.ok(r.html, 'expected html');
     assert.ok(/headless/.test(r.method), `expected headless method, got ${r.method}`);
     assert.ok(/real content via headless/.test(r.html), 'expected headless body');
-    assert.strictEqual(postCalls, 1, 'headless POST called once');
+    assert.strictEqual(curlCalls, 1, 'curl_cffi fallback should be attempted once');
+    assert.strictEqual(headlessCalls, 1, 'headless POST should be called once');
+    assert.strictEqual(postCalls, 2, 'curl fallback + headless escalation expected');
     assert.ok(lastPostHeaders && lastPostHeaders['X-Internal-Token'] === 'TEST_TOKEN_42',
       'X-Internal-Token must be passed through');
     console.log('✓ Cloudflare-marker → headless forced + token forwarded');

@@ -333,7 +333,17 @@ function useTweenedNumber(targetRef, ms = 600) {
   return out;
 }
 
-const tweenedFetched   = useTweenedNumber(computed(() => report.value?.fetched_count || 0));
+const successfulFetchedCount = computed(() => Math.max(0, Number(report.value?.fetched_count || 0)));
+const failedFetchedCount = computed(() => {
+  const list = report.value?.failed_urls;
+  return Array.isArray(list) ? list.length : 0;
+});
+const processedFetchedCount = computed(() => {
+  const total = (report.value?.serp || []).length || 0;
+  return Math.min(total, successfulFetchedCount.value + failedFetchedCount.value);
+});
+const tweenedFetched   = useTweenedNumber(successfulFetchedCount);
+const tweenedProcessed = useTweenedNumber(processedFetchedCount);
 const tweenedSerpTotal = useTweenedNumber(computed(() => (report.value?.serp || []).length || 0));
 const tweenedTokens    = useTweenedNumber(computed(() => stats.value?.total_tokens || 0));
 const tweenedVocab     = useTweenedNumber(computed(() => vocabulary.value.length));
@@ -341,12 +351,22 @@ const tweenedNgrams    = useTweenedNumber(computed(() => ngrams.value.length));
 
 // Цвет «N/20» badge: ≥18 — зелёный, 10–17 — жёлтый, <10 — красный + пульсация.
 const fetchedRatioClass = computed(() => {
-  const n = report.value?.fetched_count || 0;
+  const n = processedFetchedCount.value;
   const total = (report.value?.serp || []).length || 0;
   if (total === 0) return 'text-gray-400 border-gray-600';
   if (n >= 18) return 'text-emerald-300 border-emerald-700/70 bg-emerald-900/20';
   if (n >= 10) return 'text-amber-300 border-amber-700/70 bg-amber-900/20';
   return 'text-red-300 border-red-700/70 bg-red-900/20 animate-pulse';
+});
+
+// Если после запуска достаточно долго не завершился ни один URL, показываем
+// диагностическую подсказку. Это не переводит задачу в error: fetcher ещё может
+// работать, а оператор получает понятный сигнал проверить worker/Fetcher logs.
+const fetchStalled = computed(() => {
+  if (!report.value || report.value.status !== 'fetching') return false;
+  if (processedFetchedCount.value > 0) return false;
+  const started = new Date(report.value.started_at || report.value.created_at || 0).getTime();
+  return Number.isFinite(started) && started > 0 && Date.now() - started > 45_000;
 });
 
 // Скрываемые предупреждения — состояние «закрыли крестик».
@@ -1043,7 +1063,12 @@ function copyTagZone() {
             <span v-if="report?.duration_ms">⏱ {{ formatDuration(report.duration_ms) }}</span>
             <span v-if="report"
                   :class="['inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-semibold transition-colors duration-300', fetchedRatioClass]">
-              🔗 {{ tweenedFetched }}/{{ tweenedSerpTotal }} страниц
+              🔗 обработано {{ tweenedProcessed }}/{{ tweenedSerpTotal }}
+              <span class="opacity-80">· успешно {{ tweenedFetched }}</span>
+              <span v-if="failedFetchedCount" class="opacity-80">· ошибок {{ failedFetchedCount }}</span>
+            </span>
+            <span v-if="fetchStalled" class="text-amber-300 text-[11px]">
+              Нет завершённых URL более 45 секунд — проверьте worker/fetcher
             </span>
           </div>
         </div>

@@ -406,10 +406,50 @@ async function processRelevanceReport(reportId) {
       );
     }
     funnel.step('fetching_pages');
-    await _setStage(reportId, 'fetching_pages', { serp });
+    await _setStage(reportId, 'fetching_pages', {
+      serp,
+      fetched_count: 0,
+      failed_urls: [],
+    });
 
     // ── 2. Скачивание HTML ───────────────────────────────────────────────
-    const fetchRes = await fetchPages(serpForFetch.map((s) => s.url));
+    // Сохраняем checkpoint после каждого завершившегося URL. Ранее fetchPages
+    // возвращал весь batch только в конце, поэтому UI мог честно показывать
+    // `fetching_pages / 0 из 20` даже при работающем worker.
+    const fetchProgress = {
+      successes: 0,
+      failures: [],
+      writeChain: Promise.resolve(),
+    };
+    const persistFetchProgress = ({ result }) => {
+      if (result && result.html) {
+        fetchProgress.successes += 1;
+      } else if (result) {
+        fetchProgress.failures.push({
+          url: result.url,
+          error: result.error || 'unknown',
+          code: result.code || 'unknown',
+          category: result.category || undefined,
+          retries_used: result.retries_used || 0,
+        });
+      }
+      const snapshot = {
+        fetched_count: fetchProgress.successes,
+        failed_urls: fetchProgress.failures.slice(),
+      };
+      // Последовательная запись предотвращает регресс счётчика из-за того,
+      // что несколько URL завершаются одновременно в разных pool workers.
+      fetchProgress.writeChain = fetchProgress.writeChain
+        .then(() => _setStage(reportId, 'fetching_pages', snapshot))
+        .catch((error) => {
+          console.warn(`[relevance ${reportId}] fetch progress checkpoint failed:`, error.message);
+        });
+      return fetchProgress.writeChain;
+    };
+    const fetchRes = await fetchPages(serpForFetch.map((s) => s.url), {
+      onProgress: persistFetchProgress,
+    });
+    await fetchProgress.writeChain;
     let successes = fetchRes.successes;
     let failures = fetchRes.failures;
 
@@ -430,7 +470,25 @@ async function processRelevanceReport(reportId) {
       headlessSecondPass.available = true;
       headlessSecondPass.attempted = failedForRetry.length;
       try {
-        const second = await pageFetcher.fetchHeadlessOnly(failedForRetry.map((f) => f.url));
+        const second = await pageFetcher.fetchHeadlessOnly(failedForRetry.map((f) => f.url), {
+          onProgress: ({ result }) => {
+            // Headless-проход продолжает тот же checkpoint. Успешный URL
+            // учитывается как fetched, а его ошибка — как дополнительный
+            // failure только до финального merge ниже.
+            if (result && result.html) fetchProgress.successes += 1;
+            const snapshot = {
+              fetched_count: fetchProgress.successes,
+              failed_urls: fetchProgress.failures.slice(),
+            };
+            fetchProgress.writeChain = fetchProgress.writeChain
+              .then(() => _setStage(reportId, 'fetching_pages', snapshot))
+              .catch((error) => {
+                console.warn(`[relevance ${reportId}] headless progress checkpoint failed:`, error.message);
+              });
+            return fetchProgress.writeChain;
+          },
+        });
+        await fetchProgress.writeChain;
         if (second.successes.length > 0) {
           const recoveredUrls = new Set(second.successes.map((s) => s.url));
           successes = successes.concat(second.successes);

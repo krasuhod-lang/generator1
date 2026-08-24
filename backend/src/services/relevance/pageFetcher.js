@@ -860,7 +860,9 @@ async function _fetchOneInner(url, opts = {}) {
  * @param {object}   [opts]
  * @param {boolean}  [opts.proxiesEnabled] — включить прокси-ротатор для этого
  *   батча (по умолчанию используется, если задан пул RELEVANCE_PROXY_*).
- * @returns {Promise<{successes: Array<{url, html, method?, retries_used?}>, failures: Array<{url, error, code, retries_used?}>}>}
+ * @param {Function} [opts.onProgress] — callback после каждого URL; ошибки
+ *   callback не прерывают fetch batch.
+ * @returns {Promise<{successes: Array<{url, html, method?, retries_used?}>, failures: Array<{url, error, code, ...}>}>}
  */
 async function fetchPages(urls, opts = {}) {
   const list = (Array.isArray(urls) ? urls : [])
@@ -871,7 +873,38 @@ async function fetchPages(urls, opts = {}) {
     return { successes: [], failures: [] };
   }
 
-  const all = await pMap(list, FETCH_CONCURRENCY, (u) => fetchOne(u, opts));
+  const { onProgress, ...fetchOpts } = opts || {};
+  let completed = 0;
+  const all = await pMap(list, FETCH_CONCURRENCY, async (u, index) => {
+    let result;
+    try {
+      result = await fetchOne(u, fetchOpts);
+    } catch (error) {
+      result = {
+        url: u,
+        error: String(error?.message || error || 'fetch failed').slice(0, 200),
+        code: error?.code || 'fetch_exception',
+        retries_used: 0,
+      };
+    }
+    completed += 1;
+    if (typeof onProgress === 'function') {
+      try {
+        await onProgress({
+          completed,
+          total: list.length,
+          index,
+          url: u,
+          result,
+        });
+      } catch (error) {
+        // Progress persistence is best-effort; one failed DB update must not
+        // cancel the remaining URL fetches.
+        console.warn(`[pageFetcher] progress callback failed for ${u}:`, error.message);
+      }
+    }
+    return result;
+  });
 
   const successes = [];
   const failures  = [];
@@ -917,22 +950,45 @@ async function fetchHeadlessOnly(urls, opts = {}) {
       })),
     };
   }
+  const { onProgress, ...fetchOpts } = opts || {};
   const concurrency = Math.max(1, Math.min(FETCH_CONCURRENCY, 4));
-  const proxiesEnabled = opts && opts.proxiesEnabled;
-  const all = await pMap(list, concurrency, async (u) => {
-    const proxyUrl = _pickProxy(proxiesEnabled);
-    const hh = await _headlessFetch(u, proxyUrl);
-    if (hh && hh.ok && hh.html) {
-      return { url: u, html: hh.html, method: 'headless_second_pass', retries_used: 0 };
+  const proxiesEnabled = fetchOpts && fetchOpts.proxiesEnabled;
+  let completed = 0;
+  const all = await pMap(list, concurrency, async (u, index) => {
+    let result;
+    try {
+      const proxyUrl = _pickProxy(proxiesEnabled);
+      const hh = await _headlessFetch(u, proxyUrl);
+      if (hh && hh.ok && hh.html) {
+        result = { url: u, html: hh.html, method: 'headless_second_pass', retries_used: 0 };
+      } else {
+        result = {
+          url: u,
+          error: (hh && hh.reason) || 'headless_fail: unknown',
+          code: hh && hh.reason && hh.reason.startsWith('headless_unavailable')
+            ? 'headless_unavailable' : 'headless_fail',
+          category: 'headless',
+          retries_used: 0,
+        };
+      }
+    } catch (error) {
+      result = {
+        url: u,
+        error: String(error?.message || error || 'headless fetch failed').slice(0, 200),
+        code: error?.code || 'headless_exception',
+        category: 'headless',
+        retries_used: 0,
+      };
     }
-    return {
-      url: u,
-      error: (hh && hh.reason) || 'headless_fail: unknown',
-      code: hh && hh.reason && hh.reason.startsWith('headless_unavailable')
-        ? 'headless_unavailable' : 'headless_fail',
-      category: 'headless',
-      retries_used: 0,
-    };
+    completed += 1;
+    if (typeof onProgress === 'function') {
+      try {
+        await onProgress({ completed, total: list.length, index, url: u, result });
+      } catch (error) {
+        console.warn(`[pageFetcher] headless progress callback failed for ${u}:`, error.message);
+      }
+    }
+    return result;
   });
   const successes = [];
   const failures = [];
