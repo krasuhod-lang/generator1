@@ -9,6 +9,7 @@ const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
+const { DOCTOR_MAX_WRITER_CONTRACT } = require('../../utils/doctorMaxWriterContract');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
@@ -81,8 +82,8 @@ DO NOT include eeat_self_check, audit_report, or ANY other fields. ONLY html_con
   const recovered = await callLLM(
     llmProvider(task),
     akbSystem(task),
-    recoveryPrompt,
-    geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192 })
+    recoveryPrompt + DOCTOR_MAX_WRITER_CONTRACT,
+    geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192, skipOnBudget: true })
   ).catch(e => {
     log(`Stage 3 recovery: LLM call ОШИБКА — ${e.message}`, 'warn');
     return null;
@@ -311,8 +312,8 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
         const retryResult = await callLLM(
           llmProvider(task),
           akbSystem(task),
-          s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
-          geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens })
+          s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.` + DOCTOR_MAX_WRITER_CONTRACT,
+          geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${i + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens, skipOnBudget: true })
         ).catch(() => null);
 
         if (retryResult?.html_content) {
@@ -500,6 +501,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
 
   // Style & Grounding Contract: лаконичность предложений + строгая опора на AKB.
   s3prompt += STYLE_GROUNDING_CONTRACT;
+  s3prompt += DOCTOR_MAX_WRITER_CONTRACT;
 
   log(`Stage 3 блок ${blockIndex + 1}: промпт ${s3prompt.length} символов (~${Math.round(s3prompt.length / 4)} токенов). Запрос...`, 'info');
 
@@ -527,7 +529,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
         llmProvider(task),
         akbSystem(task),
         s3prompt + `\n\nCRITICAL STRUCTURAL FIXES REQUIRED:\n${issues.join('\n')}\nFix ALL listed issues above in the generated HTML.`,
-        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens })
+        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}" retry`, temperature: 0.35, log, onTokens, skipOnBudget: true })
       ).catch(() => null);
 
       if (retryResult?.html_content) {

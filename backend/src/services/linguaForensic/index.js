@@ -226,7 +226,7 @@ function _normalizeReport(raw) {
  * Режим 2 — полная детекция. Бросает исключение при сбое LLM
  * (перехватывается в runLinguaForensicPass).
  */
-async function detect(articleHtml, { pipeline = 'seo', taskId = null, log = null, onTokens = null } = {}) {
+async function detect(articleHtml, { pipeline = 'seo', taskId = null, log = null, onTokens = null, tokenBudget = undefined } = {}) {
   const skill = loadSkill();
   if (!skill) throw new Error(`Skill-файл LinguaForensic не найден: ${SKILL_PATH}`);
   const domainHint = PIPELINE_DOMAINS[pipeline] || PIPELINE_DOMAINS.seo;
@@ -238,6 +238,8 @@ async function detect(articleHtml, { pipeline = 'seo', taskId = null, log = null
       retries: 2, taskId, stageName: 'linguaforensic',
       callLabel: 'LinguaForensic Detect (Режим 2)',
       temperature: 0.1, onLog: log, onTokens,
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      skipOnBudget: true,
     },
   );
   const report = _normalizeReport(raw);
@@ -253,7 +255,7 @@ async function detect(articleHtml, { pipeline = 'seo', taskId = null, log = null
 async function rewrite(
   articleHtml,
   report,
-  { pipeline = 'seo', taskId = null, log = null, onTokens = null, thresholds, maxStrategy = 'full' } = {},
+  { pipeline = 'seo', taskId = null, log = null, onTokens = null, tokenBudget = undefined, thresholds, maxStrategy = 'full' } = {},
 ) {
   const skill = loadSkill();
   if (!skill) throw new Error(`Skill-файл LinguaForensic не найден: ${SKILL_PATH}`);
@@ -266,6 +268,8 @@ async function rewrite(
       retries: 2, taskId, stageName: 'linguaforensic',
       callLabel: 'LinguaForensic Rewrite (Режим 3)',
       temperature: 0.6, onLog: log, onTokens,
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      skipOnBudget: true,
       maxTokens: 32000,
     },
   );
@@ -305,6 +309,7 @@ async function runLinguaForensicPass(articleHtml, opts = {}) {
     thresholds = STRATEGY_THRESHOLDS,
     maxStrategy = 'full',
     strategySequence = null,
+    tokenBudget = undefined,
   } = opts;
   const logFn = typeof log === 'function' ? log : () => {};
 
@@ -316,7 +321,7 @@ async function runLinguaForensicPass(articleHtml, opts = {}) {
   }
 
   try {
-    let detection = await detect(articleHtml, { pipeline, taskId, log, onTokens });
+    let detection = await detect(articleHtml, { pipeline, taskId, log, onTokens, tokenBudget });
     const robotnessBefore = detection.robotness_score;
     logFn(
       `LinguaForensic v3.6: роботность ${robotnessBefore}%` +
@@ -354,7 +359,7 @@ async function runLinguaForensicPass(articleHtml, opts = {}) {
         'info',
       );
       const res = await rewrite(html, rewriteReport, {
-        pipeline, taskId, log, onTokens, thresholds, maxStrategy,
+        pipeline, taskId, log, onTokens, tokenBudget, thresholds, maxStrategy,
       });
       allChanges.push(res.changes);
       if (!res.accepted) {
@@ -363,7 +368,7 @@ async function runLinguaForensicPass(articleHtml, opts = {}) {
       }
       html = res.html;
       passes += 1;
-      detection = await detect(html, { pipeline, taskId, log, onTokens });
+      detection = await detect(html, { pipeline, taskId, log, onTokens, tokenBudget });
       logFn(`LinguaForensic: после рерайта роботность ${detection.robotness_score}%`, 'info');
       if (detection.robotness_score <= maxRobotness) break;
     }

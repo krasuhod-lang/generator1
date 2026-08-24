@@ -85,6 +85,18 @@ function getTaskBudgetSpent(taskId, adapter = 'gemini') {
   return st ? (st[adapter] || 0) : 0;
 }
 
+/**
+ * Возвращает доступный остаток input-бюджета для provider-класса Gemini/Grok.
+ * Это только локальный preflight; окончательное reservation выполняется
+ * атомарно непосредственно перед HTTP-вызовом.
+ */
+function getTaskBudgetRemaining(taskId, tokenBudget = getConfiguredTaskTokenBudget()) {
+  if (!taskId || !Number.isFinite(tokenBudget)) return Infinity;
+  const st = tokenBudgetState.get(taskId);
+  if (!st) return tokenBudget;
+  return Math.max(0, tokenBudget - Math.max(0, Number(st.gemini) || 0) - Math.max(0, Number(st.reservedGemini) || 0));
+}
+
 function _getBudgetState(taskId) {
   if (!taskId) return null;
   const st = tokenBudgetState.get(taskId) || {
@@ -398,11 +410,14 @@ async function persistStageCall({
  * @param {Function}            [opts.onCacheMiss]  — callback() при HTTP 404 на cachedContent;
  *                                                    после вызова callLLM однократно перезапросит
  *                                                    без cachedContent.
- * @param {number}              [opts.tokenBudget]  — лимит input-токенов на задачу (для Gemini).
+  * @param {number}  [opts.tokenBudget]  — лимит input-токенов на задачу (для Gemini).
  *                                                    Production default — 200000; передайте
  *                                                    Infinity явно для opt-out. При исчерпании —
  *                                                    BudgetExceededError (isDeterministic).
- * @param {string}              [opts.brand]        — наименование бренда из задачи
+ * @param {boolean} [opts.skipOnBudget=false] — для необязательных calls: сделать
+ *                                                    локальный preflight и не отправлять
+ *                                                    запрос, если он не помещается в остаток.
+ * @param {string}  [opts.brand]        — наименование бренда из задачи
  *                                                    (task.brand / brand_name). Используется
  *                                                    в Redis-кэше для изоляции по бренду
  *                                                    (см. responseCache.buildKey) и для
@@ -438,6 +453,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     triggeredRefine = false,
     responseFormat = null,
     retryOnTruncation = true,
+    skipOnBudget = false,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -498,6 +514,16 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     let budgetReservation = null;
     try {
       if (providerClass === 'gemini-class' && Number.isFinite(tokenBudget) && budgetTaskId) {
+        const remaining = getTaskBudgetRemaining(budgetTaskId, tokenBudget);
+        if (skipOnBudget && remaining < promptSize) {
+          const skipError = new BudgetExceededError(
+            `gemini token budget preflight skipped ${callLabel || stageName}: ` +
+            `${Math.round(remaining)}/${tokenBudget} input tokens remaining, ` +
+            `estimated ${promptSize}.`
+          );
+          skipError.silentBudgetSkip = true;
+          throw skipError;
+        }
         budgetReservation = _reserveGeminiBudget(budgetTaskId, tokenBudget, promptSize);
       }
       const callOpts = { temperature, maxTokens, logprobs, responseFormat };
@@ -639,6 +665,10 @@ async function callLLM(adapter, system, prompt, opts = {}) {
                            || err.isGeoBlock        // маркер из gemini.adapter
                            || err.message?.includes('User location is not supported'); // geo-block fallback по тексту
 
+      if (err.silentBudgetSkip) {
+        throw err;
+      }
+
       if (isDeterministic || attempt === retries - 1) {
         log(`${callLabel || stageName} FAILED после ${attempt + 1} попыток: ${err.message}`, 'error');
         throw err;
@@ -664,6 +694,7 @@ module.exports = {
   BudgetExceededError,
   resetTaskBudget,
   getTaskBudgetSpent,
+  getTaskBudgetRemaining,
   getConfiguredTaskTokenBudget,
   DEFAULT_GEMINI_TASK_TOKEN_BUDGET,
   parseJSON,

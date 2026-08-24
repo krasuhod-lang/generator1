@@ -9,6 +9,7 @@ const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 const { EEAT_PQ_TARGET } = require('../../utils/objectiveMetrics');
 const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
+const { DOCTOR_MAX_WRITER_CONTRACT } = require('../../utils/doctorMaxWriterContract');
 const contentPolicy = require('../contentPolicy');
 
 /**
@@ -203,13 +204,14 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       .replace('{{ORIGINAL_HTML}}',    () => currentHTML)
       .replace('{{AUDIT_REPORT}}',     () => JSON.stringify(currentAudit))
       .replace('{{SPECIAL_INSTRUCTION}}', () => specialInstruction)
-      + STYLE_GROUNDING_CONTRACT;
+      + STYLE_GROUNDING_CONTRACT
+      + DOCTOR_MAX_WRITER_CONTRACT;
 
     const s5Result = await callLLM(
       llmProvider(task),
       akbSystem(task),
       s5Prompt,
-      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens })
+      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens, skipOnBudget: true })
     ).catch(e => {
       if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
         budgetSkipped = true;
@@ -302,13 +304,14 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         .replace('{{BRAND_FACTS}}',         () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
         .replace('{{ORIGINAL_HTML}}',       () => currentHTML)
         .replace('{{AUDIT_REPORT}}',        () => JSON.stringify(currentAudit || {}))
-        .replace('{{SPECIAL_INSTRUCTION}}', () => confInstruction);
+        .replace('{{SPECIAL_INSTRUCTION}}', () => confInstruction)
+        + DOCTOR_MAX_WRITER_CONTRACT;
 
       const confResult = await callLLM(
         llmProvider(task),
         akbSystem(task),
         confPrompt,
-        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens })
+        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
         if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;
@@ -348,13 +351,14 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         .replace('{{BRAND_FACTS}}',         () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
         .replace('{{ORIGINAL_HTML}}',       () => currentHTML)
         .replace('{{AUDIT_REPORT}}',        () => '{"mathematical_audit":{"spam_risk_detected":false,"lsi_coverage_percent":85},"pq_score":8,"actionable_next_steps":[]}')
-        .replace('{{SPECIAL_INSTRUCTION}}', () => tfInstruction);
+        .replace('{{SPECIAL_INSTRUCTION}}', () => tfInstruction)
+        + DOCTOR_MAX_WRITER_CONTRACT;
 
       const tfResult = await callLLM(
         llmProvider(task),
         akbSystem(task),
         tfPrompt,
-        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens })
+        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
         if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;

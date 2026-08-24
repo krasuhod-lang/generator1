@@ -575,6 +575,13 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
 
+    // Migration 127 fallback: Stage 7.5 stores GIST/meta-facade output on
+    // tasks. The SQL migration exists for fresh/bootstrap paths, but an old
+    // PostgreSQL volume may not have replayed it; keep startup idempotent.
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seo_title TEXT`);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seo_description TEXT`);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seo_meta JSONB`);
+
     // Migration 005: pause/resume support — add 'pausing' / 'paused' to task_status enum,
     // add pipeline_checkpoint column, and partial index. Idempotent via DO blocks /
     // IF NOT EXISTS. Required because /docker-entrypoint-initdb.d migrations only run

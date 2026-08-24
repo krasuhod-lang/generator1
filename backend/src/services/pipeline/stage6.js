@@ -7,6 +7,7 @@ const { computeSemanticCoverage } = require('../../utils/semanticSimilarity');
 const { LSI_COVERAGE_TARGET }  = require('../../utils/objectiveMetrics');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
+const { DOCTOR_MAX_WRITER_CONTRACT } = require('../../utils/doctorMaxWriterContract');
 
 /**
  * Stage 6: Инъекция LSI — цикл до достижения LSI_COVERAGE_TARGET (≥ 80%),
@@ -92,7 +93,8 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       .replace('{{TARGET_SERVICE}}',() => targetService)
       .replace(/\{\{BRAND_NAME\}\}/g, () => brandName)
       .replace('{{BRAND_FACTS}}',   () => task.__articleKnowledgeBase ? '[См. ARTICLE KNOWLEDGE BASE → §1 Brand & Offer]' : brandFacts)
-      + STYLE_GROUNDING_CONTRACT;
+      + STYLE_GROUNDING_CONTRACT
+      + DOCTOR_MAX_WRITER_CONTRACT;
 
     log(
       `Stage 6 блок ${blockIndex + 1}: инъекция LSI цикл ${loopCount} — ` +
@@ -105,7 +107,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       llmProvider(task),
       akbSystem(task),
       stage6Prompt,
-      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens })
+      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
     ).catch(e => {
       if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
         budgetSkipped = true;

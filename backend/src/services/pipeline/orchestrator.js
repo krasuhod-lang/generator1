@@ -125,6 +125,7 @@ const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adap
 const { resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { buildWriterContext } = require('../../utils/writerContext');
 const { normalizeTz, hasTz } = require('./tzParser');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -732,8 +733,17 @@ async function runPipeline(task, ctx) {
   const maxChars      = parseInt(task.input_max_chars) || 3500;
   const totalTarget   = Math.floor((minChars + maxChars) / 2);
 
-  const s3stage1Json = JSON.stringify(stage1Result);
-  const s3stage2Json = JSON.stringify(stage2Raw || {});
+  // Stage 3 runs once per H2. Keep the complete verified knowledge in AKB,
+  // but pass a bounded deterministic navigation index instead of repeating
+  // the huge raw Stage 1/2 payload on every Gemini call.
+  const writerContext = buildWriterContext(stage1Result, stage2Raw || {}, taxonomy);
+  const s3stage1Json = writerContext.stage1Json;
+  const s3stage2Json = writerContext.stage2Json;
+  log(
+    `Writer context index: Stage1 ${s3stage1Json.length} + Stage2 ${s3stage2Json.length} ` +
+    `символов; полный контекст сохранён в ARTICLE_KNOWLEDGE_BASE.`,
+    'info'
+  );
 
   const stage0Signals = stage0Result ? JSON.stringify({
     content_gaps:              stage0Result.content_gaps              || [],
@@ -1197,7 +1207,7 @@ async function runPipeline(task, ctx) {
     const { runLinguaForensicPass } = require('../linguaForensic');
     const lfResult = await runLinguaForensicPass(
       s7Result.finalHTML || finalBlocks.join('\n\n'),
-      { pipeline: 'seo', taskId, log, onTokens },
+      { pipeline: 'seo', taskId, log, onTokens, tokenBudget: task.__tokenBudget },
     );
     linguaForensicReport = lfResult.report;
     if (lfResult.report?.verdict === 'rewritten') {
@@ -1388,8 +1398,8 @@ async function runPipeline(task, ctx) {
       log(`Quality gate: не удалось сохранить вердикт в БД (${dbErr.message})`, 'warn');
     }
     log(
-      `${gateResult.canPublish ? '✅' : '🚦'} Quality gate: ${gateResult.summary}`,
-      gateResult.canPublish ? 'info' : 'warn',
+      `${qualityGateVerdict.canPublish ? '✅' : '🚦'} Quality gate: ${qualityGateVerdict.summary}`,
+      qualityGateVerdict.canPublish ? 'info' : 'warn',
     );
   } catch (gateErr) {
     log(`Quality gate: непойманное исключение — ${gateErr.message}`, 'warn');
