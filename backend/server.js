@@ -1200,11 +1200,21 @@ async function ensureSchema() {
         failed_urls     JSONB NOT NULL DEFAULT '[]'::jsonb,
         report          JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         started_at      TIMESTAMPTZ,
         completed_at    TIMESTAMPTZ,
         duration_ms     INTEGER
       )
     `);
+    // Migration 137: durable stage heartbeat for direct relevance recovery.
+    // `_setStage` refreshes this timestamp after each SERP/fetch/analyze step;
+    // stale recovery must never rely on `created_at`, which would relaunch a
+    // healthy long-running report.
+    await db.query(`
+      ALTER TABLE relevance_reports
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_updated_at ON relevance_reports (updated_at)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_user_created ON relevance_reports (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_relevance_reports_status ON relevance_reports (status)`);
     await db.query(`ALTER TABLE relevance_reports ADD COLUMN IF NOT EXISTS source TEXT`);

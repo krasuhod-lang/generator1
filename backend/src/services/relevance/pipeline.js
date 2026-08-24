@@ -95,7 +95,7 @@ const DEFAULT_SERP_TARGET = 20;
 const SERP_TOPUP_PAGES = [2, 3, 4, 5, 6, 7, 8, 9];
 
 async function _setStage(reportId, stage, extra = {}) {
-  const sets = ['current_stage = $2'];
+  const sets = ['current_stage = $2', 'updated_at = NOW()'];
   const params = [reportId, stage];
   let i = 3;
   if (extra.status) {
@@ -148,6 +148,7 @@ async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed, ext
       `UPDATE relevance_reports
          SET status='done',
              current_stage='done',
+             updated_at=NOW(),
              report = $2::jsonb,
              completed_at = NOW(),
              duration_ms = $3,
@@ -179,6 +180,7 @@ async function _finishOk(reportId, report, durationMs, rawMeta, dbProcessed, ext
         `UPDATE relevance_reports
            SET status='done',
                current_stage='done',
+               updated_at=NOW(),
                report = $2::jsonb,
                completed_at = NOW(),
                duration_ms = $3,
@@ -213,6 +215,7 @@ async function _finishError(reportId, message) {
     `UPDATE relevance_reports
        SET status='error',
            current_stage='error',
+           updated_at=NOW(),
            error_message = $2,
            completed_at = NOW()
      WHERE id = $1`,

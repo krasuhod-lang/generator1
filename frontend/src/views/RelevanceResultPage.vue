@@ -190,6 +190,8 @@ function formatRawTtl(report) {
   return { expired: false, label };
 }
 
+const ACTIVE_REPORT_STATUSES = ['pending', 'fetching', 'fetching_pages', 'analyzing', 'comparing'];
+
 async function reload() {
   try {
     report.value = await store.getReport(route.params.id);
@@ -204,7 +206,7 @@ async function reload() {
 onMounted(() => {
   reload();
   pollTimer = setInterval(() => {
-    if (report.value && ['pending', 'fetching', 'analyzing'].includes(report.value.status)) {
+    if (report.value && ACTIVE_REPORT_STATUSES.includes(report.value.status)) {
       reload();
     }
   }, 2500);
@@ -363,7 +365,7 @@ const fetchedRatioClass = computed(() => {
 // диагностическую подсказку. Это не переводит задачу в error: fetcher ещё может
 // работать, а оператор получает понятный сигнал проверить worker/Fetcher logs.
 const fetchStalled = computed(() => {
-  if (!report.value || report.value.status !== 'fetching') return false;
+  if (!report.value || !['fetching', 'fetching_pages'].includes(report.value.status)) return false;
   if (processedFetchedCount.value > 0) return false;
   const started = new Date(report.value.started_at || report.value.created_at || 0).getTime();
   return Number.isFinite(started) && started > 0 && Date.now() - started > 45_000;
@@ -874,8 +876,10 @@ function cloudColor(rank, total) {
 function statusBadgeClass(status) {
   switch (status) {
     case 'done':      return 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/60';
-    case 'analyzing': return 'bg-sky-900/40 text-sky-300 border border-sky-800/60 animate-pulse';
-    case 'fetching':  return 'bg-sky-900/40 text-sky-300 border border-sky-800/60 animate-pulse';
+    case 'analyzing':
+    case 'comparing': return 'bg-sky-900/40 text-sky-300 border border-sky-800/60 animate-pulse';
+    case 'fetching':
+    case 'fetching_pages': return 'bg-sky-900/40 text-sky-300 border border-sky-800/60 animate-pulse';
     case 'pending':   return 'bg-amber-900/40 text-amber-300 border border-amber-800/60';
     case 'error':     return 'bg-red-900/40 text-red-300 border border-red-800/60';
     default:          return 'bg-gray-800 text-gray-400 border border-gray-700';
@@ -883,7 +887,8 @@ function statusBadgeClass(status) {
 }
 function statusLabel(status) {
   return ({
-    done: 'Готово', analyzing: 'Анализ', fetching: 'Сбор данных',
+    done: 'Готово', analyzing: 'Анализ', comparing: 'Сравнение',
+    fetching: 'Сбор данных', fetching_pages: 'Сбор страниц',
     pending: 'Ожидает', error: 'Ошибка',
   })[status] || status;
 }
