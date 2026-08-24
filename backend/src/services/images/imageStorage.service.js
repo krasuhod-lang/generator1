@@ -45,8 +45,8 @@ function _ext(mime) {
  * работать без доп. настройки на dev/CI. На проде задаётся
  * IMAGE_PIPELINE_STORAGE_DIR (том под CDN).
  */
-function resolveStorageDir(cfg) {
-  const base = cfg.storageDir || path.join(process.cwd(), 'storage', 'images');
+function resolveStorageDir(cfg = getImageConfig()) {
+  const base = cfg?.storageDir || path.join(process.cwd(), 'storage', 'images');
   return path.isAbsolute(base) ? base : path.join(process.cwd(), base);
 }
 
@@ -54,9 +54,9 @@ function resolveStorageDir(cfg) {
  * Строит публичный URL. Если PUBLIC_BASE_URL не задан — отдаём
  * относительный путь /images/<taskId>/<file>, который сервится статикой.
  */
-function buildPublicUrl(cfg, relPath) {
+function buildPublicUrl(cfg = getImageConfig(), relPath) {
   const rel = relPath.split(path.sep).join('/');
-  if (cfg.publicBaseUrl) return `${cfg.publicBaseUrl}/${rel}`;
+  if (cfg?.publicBaseUrl) return `${cfg.publicBaseUrl}/${rel}`;
   return `/images/${rel}`;
 }
 
