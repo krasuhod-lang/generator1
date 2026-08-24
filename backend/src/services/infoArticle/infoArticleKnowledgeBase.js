@@ -322,6 +322,8 @@ function buildInfoArticleKnowledgeBase({
   governanceBlock = '',
   // Shared E-E-A-T 12 / evidence-first contract.
   eeatContract = null,
+  // Audited prompt-pack handoff: deterministic, bounded and advisory.
+  auditedContentBrief = '',
 } = {}) {
   if (!task) return '';
   const header = [
@@ -413,6 +415,7 @@ function buildInfoArticleKnowledgeBase({
   const parts = [
     governanceBlock ? `## §0.5 BRANDCORE/TGA governance\\n\\n${governanceBlock}` : '',
     eeatContract && eeatContract.markdown ? `## §0.8 E-E-A-T 12 / evidence-first contract\\n\\n${eeatContract.markdown}` : '',
+    auditedContentBrief ? `## §0.9 Audited content logic handoff\\n\\n${auditedContentBrief}` : '',
     sectionTask(task),
     sectionStrategy(strategy),
     sectionRealtime,

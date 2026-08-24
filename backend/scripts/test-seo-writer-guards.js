@@ -7,6 +7,12 @@ const path = require('path');
 const repoRoot = path.resolve(__dirname, '..');
 const { buildWriterContext } = require('../src/utils/writerContext');
 const { DOCTOR_MAX_WRITER_CONTRACT } = require('../src/utils/doctorMaxWriterContract');
+const {
+  buildAuditedContentBrief,
+  analyzeDraftSignals,
+} = require('../src/utils/contentIntelligenceBrief');
+const { buildInfoArticleKnowledgeBase } = require('../src/services/infoArticle/infoArticleKnowledgeBase');
+const { buildLinkArticleKnowledgeBase } = require('../src/services/linkArticle/linkArticleKnowledgeBase');
 
 function check(name, fn) {
   try {
@@ -71,6 +77,51 @@ check('Doctor Max contract is additive and evidence-safe', () => {
   assert(DOCTOR_MAX_WRITER_CONTRACT.includes('LSI'));
   assert(DOCTOR_MAX_WRITER_CONTRACT.includes('не добавляй число'));
   assert(DOCTOR_MAX_WRITER_CONTRACT.toLowerCase().includes('не создавай искусственные'));
+});
+
+const infoBrief = buildAuditedContentBrief({
+  branch: 'info',
+  task: { topic: 'Проверка темы', region: 'ru', brand_facts: 'Подтверждённый факт' },
+  strategy: { article_type_hint: 'how-to', demand_signals: ['signal one'] },
+  intents: { entities: [{ entity: 'Entity A' }], semantic_anchors: ['как выбрать'], user_questions: [{ question: 'Что проверить?' }] },
+  whitespace: { information_delta: ['ограничение и исключение'], article_hierarchy_hints: { must_cover_subtopics: ['критерии выбора'], preferred_formats: ['table'] } },
+  outline: { sections: [{ h2: 'Критерии выбора' }] },
+  lsi: { important: ['term one'], banned: ['term banned'] },
+  audienceResearch: { pains: ['не хватает доказательств'], questions: ['как сравнить'] },
+});
+const linkBrief = buildAuditedContentBrief({
+  branch: 'link',
+  task: { topic: 'Ссылочная тема', region: 'ru' },
+  intents: { entities: [{ entity: 'Entity B' }] },
+  whitespace: { article_hierarchy_hints: { must_cover_subtopics: ['сравнение'] } },
+  structure: { sections: [{ h2: 'Сравнение' }] },
+  gistDelta: { information_delta: ['доказательный пробел'] },
+  competitiveBrief: { competitive_failures: ['нет критериев'], purchase_arguments: ['проверенный аргумент'] },
+});
+check('audited handoff is bounded and branch-aware', () => {
+  assert(infoBrief.length <= 8200);
+  assert(linkBrief.length <= 8200);
+  assert(infoBrief.includes('блоговая статья'));
+  assert(linkBrief.includes('Одна анкорная ссылка'));
+  assert(infoBrief.includes('term one'));
+  assert(linkBrief.includes('проверенный аргумент'));
+});
+check('draft signals detect repetition without claiming authorship', () => {
+  const paragraph = 'Это конкретный абзац с полезным объяснением критериев выбора и ограничений для читателя, который должен принять решение.';
+  const signals = analyzeDraftSignals(`<p>${paragraph}</p><p>${paragraph}</p><p>В современном мире это вводный текст.</p><p>В современном мире это ещё один вводный текст.</p>`, 'критерии выбора');
+  assert.strictEqual(signals.duplicate_paragraphs, 1);
+  assert.strictEqual(signals.banned_intros.length, 1);
+  assert.strictEqual(signals.banned_intros[0].count, 2);
+  assert(!Object.prototype.hasOwnProperty.call(signals, 'ai_probability'));
+});
+check('IAKB and LAKB accept the audited handoff as one section', () => {
+  const task = { topic: 'Тест', brand_facts: 'Факт', anchor_text: 'перейти', anchor_url: 'https://example.com' };
+  const iakb = buildInfoArticleKnowledgeBase({ task, auditedContentBrief: infoBrief });
+  const lakb = buildLinkArticleKnowledgeBase({ task, auditedContentBrief: linkBrief });
+  assert(iakb.includes('§0.9 Audited content logic handoff'));
+  assert(lakb.includes('§0.9 Audited content logic handoff'));
+  assert(iakb.length <= 28 * 1024);
+  assert(lakb.length <= 24 * 1024);
 });
 
 const files = [

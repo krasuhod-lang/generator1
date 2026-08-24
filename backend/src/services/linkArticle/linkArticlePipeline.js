@@ -51,6 +51,11 @@ const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
 const { getWriterSystemPromptOverride } = require('../aegis/brainStateRegistry');
+const {
+  buildAuditedContentBrief,
+  AUDITED_CONTENT_STAGE_POLICY,
+  analyzeDraftSignals,
+} = require('../../utils/contentIntelligenceBrief');
 const { finalizeByTask } = require('../aegis/backlogHooks');
 const { createFunnelTracker } = require('../aegis/funnelTracker');
 const biobrainClient = require('../aegis/biobrainClient');
@@ -400,6 +405,8 @@ async function runStructure(task, audience, intents, whitespace, ctx) {
     `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
     `stage1_intents: ${JSON.stringify(intents).slice(0, 8000)}`,
     `whitespace_hints: ${JSON.stringify(hints).slice(0, 4000)}`,
+    '[AUDITED CONTENT POLICY — additive; keep the full Stage 2 prompt]',
+    AUDITED_CONTENT_STAGE_POLICY,
   ].join('\n');
 
   return callLLM(
@@ -635,6 +642,16 @@ function validateWriterOutput(html, task, structure = null) {
     else if (c > 1) issues.push(`Плейсхолдер <!-- IMAGE_SLOT_${i} --> встречается ${c} раз (должен 1)`);
   }
 
+  // AI-detect/VeriScan-derived diagnostics are advisory signals, not proof of
+  // authorship. Only clear duplication/template repetition becomes an issue.
+  const draftSignals = analyzeDraftSignals(html, task.topic);
+  if (draftSignals.duplicate_paragraphs > 0) {
+    issues.push(`Повторяются полные абзацы: ${draftSignals.duplicate_paragraphs} дублей — перепиши повтор без добавления воды`);
+  }
+  if (draftSignals.banned_intros.reduce((sum, item) => sum + item.count, 0) > 2) {
+    issues.push('Повторяются шаблонные вступления — начни блоки с конкретного ответа, факта или критерия выбора');
+  }
+
   // Hallucination guard
   for (const pat of HALLUCINATION_PATTERNS) {
     if (pat.test(plain)) {
@@ -768,6 +785,7 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
         temperature: 0.45,
         maxTokens: 16384,
         callLabel: 'LinkArticle Stage 3 (corrective)',
+        skipOnBudget: true,
         ...lakbCallOpts(task),
         ...ctx,
       },
@@ -785,6 +803,7 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
     html,
     selfAudit: result?.self_audit || null,
     remainingIssues: issues,
+    naturalnessSignals: analyzeDraftSignals(html, task.topic),
     structuralReport: validateArticleHtmlContract(html, {
       pipeline: 'link',
       outline: structure,
@@ -1280,11 +1299,25 @@ async function processLinkArticleTask(taskId) {
       'info',
     );
 
+    task.__auditedContentBrief = buildAuditedContentBrief({
+      branch: 'link',
+      task,
+      strategy,
+      audience,
+      intents,
+      whitespace,
+      structure,
+      gistDelta,
+      competitiveBrief,
+      realtimeResearch,
+      lsi: structure,
+    });
     task.__lakb = buildLinkArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, structure, competitiveBrief, gistDelta,
       realtimeResearch,
       governanceBlock,
       eeatContract: task.__eeatContract,
+      auditedContentBrief: task.__auditedContentBrief,
     });
 
     // DSPy optimizes only the compact writer instructions; it never supplies

@@ -87,6 +87,11 @@ const { recordQualityLog } = require('../aegis/qualityLogWriter');
 const { resolvePromptHash } = require('../aegis/promptAudit');
 const { getAegisFlags: _getAegisFlagsForWriter } = require('../aegis/featureFlags');
 const { getWriterSystemPromptOverride } = require('../aegis/brainStateRegistry');
+const {
+  buildAuditedContentBrief,
+  AUDITED_CONTENT_STAGE_POLICY,
+  analyzeDraftSignals,
+} = require('../../utils/contentIntelligenceBrief');
 
 /**
  * B2: опциональная компрессия writer-промпта через aegis/promptCompressor.
@@ -438,6 +443,8 @@ async function runOutline(task, audience, intents, whitespace, ctx, relevanceBri
     `stage0_audience: ${JSON.stringify(audience).slice(0, 4000)}`,
     `stage1_intents: ${JSON.stringify(intents).slice(0, 8000)}`,
     `whitespace_hints: ${JSON.stringify(hints).slice(0, 4000)}`,
+    '[AUDITED CONTENT POLICY — additive; keep the full Stage 2 prompt]',
+    AUDITED_CONTENT_STAGE_POLICY,
     ...(gistBrief ? ['', gistBrief] : []),
     ...(relevanceBrief ? ['', relevanceBrief] : []),
   ].join('\n');
@@ -476,7 +483,7 @@ function countOccurrences(haystack, needle) {
  * patterns, expert opinion, FAQ block, and link_plan compliance (ground-truth via
  * auditHtmlAgainstPlan).
  */
-function validateWriterOutput(html, linkPlan, outline = null) {
+function validateWriterOutput(html, linkPlan, outline = null, topic = '') {
   const issues = [];
   if (typeof html !== 'string' || html.trim().length < 600) {
     issues.push('article_html слишком короткий или пустой');
@@ -551,6 +558,17 @@ function validateWriterOutput(html, linkPlan, outline = null) {
     } else if (faqQuestions > 6) {
       issues.push(`В FAQ-блоке найдено ${faqQuestions} вопросов (<h3>) — должно быть 4–6, лишние сократи`);
     }
+  }
+
+  // AI-detect/VeriScan-derived deterministic diagnostics. These are signals,
+  // not proof of authorship: only clear duplication/template repetition is a
+  // corrective issue; no detector-evasion objective is introduced.
+  const draftSignals = analyzeDraftSignals(html, topic);
+  if (draftSignals.duplicate_paragraphs > 0) {
+    issues.push(`Повторяются полные абзацы: ${draftSignals.duplicate_paragraphs} дублей — сохрани смысл, но перепиши повтор`);
+  }
+  if (draftSignals.banned_intros.reduce((sum, item) => sum + item.count, 0) > 2) {
+    issues.push('Повторяются шаблонные вступления — начни блоки с конкретного ответа, факта или критерия выбора');
   }
 
   // hallucination guard
@@ -745,7 +763,7 @@ async function runWriter(task, args, ctx, opts = {}) {
   );
 
   let html = typeof result?.article_html === 'string' ? result.article_html : '';
-  let issues = validateWriterOutput(html, linkPlan, outline);
+  let issues = validateWriterOutput(html, linkPlan, outline, task.topic);
 
   if (issues.length) {
     await appendLog(ctx.taskId, `⚠ Статья не прошла валидацию: ${issues.length} проблем — corrective retry`, 'warn').catch(() => {});
@@ -759,12 +777,13 @@ async function runWriter(task, args, ctx, opts = {}) {
         maxTokens: 16384,
         timeoutMs: 480000,
         callLabel: 'InfoArticle Stage 3 (corrective)',
+        skipOnBudget: true,
         ...iakbCallOpts(task),
         ...ctx,
       },
     );
     const retryHtml = typeof retry?.article_html === 'string' ? retry.article_html : '';
-    const retryIssues = validateWriterOutput(retryHtml, linkPlan, outline);
+    const retryIssues = validateWriterOutput(retryHtml, linkPlan, outline, task.topic);
     if (retryIssues.length < issues.length && retryHtml) {
       html = retryHtml;
       result = retry;
@@ -776,6 +795,7 @@ async function runWriter(task, args, ctx, opts = {}) {
     html,
     selfAudit: result?.self_audit || null,
     remainingIssues: issues,
+    naturalnessSignals: analyzeDraftSignals(html, task.topic),
     structuralReport: validateArticleHtmlContract(html, {
       pipeline: 'info',
       outline,
@@ -1818,6 +1838,19 @@ async function processInfoArticleTask(taskId) {
       'info',
     );
 
+    task.__auditedContentBrief = buildAuditedContentBrief({
+      branch: 'info',
+      task,
+      strategy,
+      audience,
+      intents,
+      whitespace,
+      outline,
+      lsi: lsiSet,
+      gistDelta: gistDeltaArtifact,
+      audienceResearch: audienceResearchResult.digest,
+      realtimeResearch,
+    });
     task.__iakb = buildInfoArticleKnowledgeBase({
       task, strategy, audience, intents, whitespace, outline, lsi: lsiSet, linkPlan: planResult.link_plan,
       relevanceSignals,
@@ -1827,6 +1860,7 @@ async function processInfoArticleTask(taskId) {
       realtimeResearch,
       governanceBlock,
       eeatContract: task.__eeatContract,
+      auditedContentBrief: task.__auditedContentBrief,
     });
 
     // DSPy optimizes only the compact writer instructions; it never supplies
