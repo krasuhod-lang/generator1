@@ -263,11 +263,15 @@ async function exportDocx() {
 }
 
 async function exportPdf() {
-  if (!route.params.id) return;
+  if (!route.params.id || !previewRef.value) return;
   exporting.value = true;
   try {
     await flushTasksBlocks();
-    const blob = await store.exportPdf(route.params.id, { ...viewRange.value });
+    const chartImages = await collectReportChartImages(previewRef.value);
+    const blob = await store.exportPdf(route.params.id, {
+      ...viewRange.value,
+      chart_images: chartImages,
+    });
     downloadBlob(blob, `${(draft.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.pdf`);
   } finally {
     exporting.value = false;

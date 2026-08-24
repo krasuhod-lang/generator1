@@ -117,10 +117,13 @@ async function exportDocx() {
   }
 }
 async function exportPdf() {
+  if (!previewRef.value) return;
   exporting.value = true;
   try {
+    const chartImages = await collectReportChartImages(previewRef.value);
     const { data } = await api.post(`/api/public/report/${route.params.uuid}/export.pdf`, {
       ...viewRange.value,
+      chart_images: chartImages,
     }, { responseType: 'blob' });
     downloadBlob(data, `${(result.value?.title || 'report').replace(/[^\wа-яё-]+/gi, '_')}.pdf`);
   } finally {
