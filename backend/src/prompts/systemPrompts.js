@@ -7661,8 +7661,17 @@ JSON SCHEMA TO RETURN:
   "recommended_material": "string (2-3 фразы о том, что добавить для улучшения)"
 }
 
+COMPACT OUTPUT RULES:
+- Верни ровно один JSON-объект и ничего вне него.
+- Не повторяй HTML_CONTENT и не пиши длинные объяснения.
+- lsi_found, lsi_missing, ngrams_found: максимум 12 строк в каждом массиве.
+- trust_signals_found: максимум 8 строк.
+- criteria_details: максимум 5 объектов; каждое reason — максимум 180 символов.
+- actionable_next_steps: максимум 6 объектов; problem и solution — максимум 180 символов.
+- hcu_verdict.summary: максимум 300 символов.
+- zipf_compliance_notes: максимум 300 символов.
+- Если массив пустой, верни []. Не добавляй дополнительные поля.
 NOW ANALYZE HTML AND RETURN JSON ONLY.`,
-
   stage5: `ROLE: Senior Content Refiner, SEO Remediation Specialist & E-E-A-T Fixer.
 
 MISSION: Устранить проблемы HTML-контента, выявленные на стадии Stage 4, сохранив сильные стороны исходного текста и не ухудшив уже достигнутые KPI.

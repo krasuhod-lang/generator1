@@ -19,8 +19,8 @@ SCORING DIMENSIONS — evaluate EACH and reflect in pq_score (0-10):
    - 0pts: fully abstract, no real-world grounding
 
 2. EXPERTISE (0-2 pts): Does the content demonstrate professional knowledge?
-   - 2pts: expert opinion present (blockquote), professional terminology used correctly
-   - 1pt: shows some domain knowledge but no expert voice
+   - 2pts: evidence-backed method/process, correct terminology, concrete constraints; verified expert quote may strengthen it
+   - 1pt: shows some domain knowledge but lacks sufficient evidence
    - 0pts: generic text, no expertise signals
 
 3. AUTHORITATIVENESS (0-2 pts): Is the publisher/brand identity clear and credible?
@@ -40,7 +40,7 @@ SCORING DIMENSIONS — evaluate EACH and reflect in pq_score (0-10):
 
 TRUST SIGNALS CHECKLIST — mark each found/missing in trust_signals_found:
 - brand_name_visible: бренд/компания упомянуты в тексте
-- expert_opinion: есть blockquote с мнением эксперта
+- expert_opinion: есть только подтверждённая цитата с реальным автором; отсутствие цитаты не является автоматическим провалом
 - specific_data: конкретные цифры/сроки из реальных данных
 - process_description: описан процесс/механизм работы
 - structured_content: есть H3, списки, таблицы
@@ -49,7 +49,7 @@ TRUST SIGNALS CHECKLIST — mark each found/missing in trust_signals_found:
 
 MINIMUM FOR pq_score >= 7.5:
 - Experience >= 1.5
-- Expertise >= 1.5 (expert blockquote strongly recommended)
+- Expertise >= 1.5 (evidence-backed method/process or verified expert quote)
 - Authoritativeness >= 1.5
 - Trustworthiness >= 2.0 (non-negotiable — factual safety is critical)
 - Content Quality >= 1.0
@@ -92,7 +92,17 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
     'deepseek',
     '',
     stage4Prompt,
-    { retries: 3, taskId, stageName: 'stage4', callLabel: `4 E-E-A-T Block ${blockIndex + 1}`, temperature: 0.2, maxTokens: 4000, log, onTokens }
+    {
+      retries: 2,
+      taskId,
+      stageName: 'stage4',
+      callLabel: `4 E-E-A-T Block ${blockIndex + 1}`,
+      temperature: 0.2,
+      maxTokens: 2600,
+      responseFormat: { type: 'json_object' },
+      log,
+      onTokens,
+    }
   );
 
   log(`Stage 4 блок ${blockIndex + 1}: ответ получен. Ключи: [${Object.keys(auditResult || {}).join(', ')}]`, 'info');
@@ -128,7 +138,17 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
     'deepseek',
     '',
     reAuditPrompt,
-    { retries: 2, taskId, stageName: 'stage4', callLabel: `4 Re-audit Block ${blockIndex + 1}`, temperature: 0.2, maxTokens: 4000, log, onTokens }
+    {
+      retries: 1,
+      taskId,
+      stageName: 'stage4',
+      callLabel: `4 Re-audit Block ${blockIndex + 1}`,
+      temperature: 0.2,
+      maxTokens: 2600,
+      responseFormat: { type: 'json_object' },
+      log,
+      onTokens,
+    }
   );
 
   return {

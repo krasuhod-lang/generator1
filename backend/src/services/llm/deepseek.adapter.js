@@ -38,6 +38,7 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     timeoutMs   = 120000,
     logprobs    = false,
     model       = DEEPSEEK_MODEL,
+    responseFormat = null,
   } = options;
 
   // Проверка параметров
@@ -85,6 +86,12 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
     max_tokens: maxTokens,
   };
 
+  // DeepSeek-compatible JSON mode is opt-in so legacy calls keep their
+  // existing response behavior. Stage 4/re-audit use it for compact audits.
+  if (responseFormat && typeof responseFormat === 'object') {
+    body.response_format = responseFormat;
+  }
+
   if (logprobs) {
     body.logprobs = true;
     body.top_logprobs = 3;
@@ -93,7 +100,7 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   const url = `${DEEPSEEK_ENDPOINT}/chat/completions`;
 
   try {
-    const res = await axios.post(url, body, {
+    const requestConfig = {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
@@ -101,7 +108,23 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
         'User-Agent': 'axios/1.7.2'
       },
       timeout: timeoutMs,
-    });
+    };
+
+    let res;
+    try {
+      res = await axios.post(url, body, requestConfig);
+    } catch (firstErr) {
+      // Some DeepSeek-compatible gateways may reject response_format even
+      // though the provider supports regular chat completions. Retry once
+      // without JSON mode; callLLM still applies compact parsing/repair.
+      if (responseFormat && firstErr.response?.status === 400) {
+        const legacyBody = { ...body };
+        delete legacyBody.response_format;
+        res = await axios.post(url, legacyBody, requestConfig);
+      } else {
+        throw firstErr;
+      }
+    }
 
     const data = res.data;
     let text = data.choices?.[0]?.message?.content || '';

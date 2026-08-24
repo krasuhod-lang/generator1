@@ -34,6 +34,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
 
   let currentHTML = htmlContent;
   let loopCount   = 0;
+  let budgetSkipped = false;
   const configuredLoops = parseInt(process.env.SEO_STAGE6_MAX_LOOPS, 10);
   const maxLoops  = Number.isFinite(configuredLoops) && configuredLoops >= 1
     ? Math.min(3, configuredLoops)
@@ -106,7 +107,12 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       stage6Prompt,
       geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens })
     ).catch(e => {
-      log(`Stage 6 блок ${blockIndex + 1} цикл ${loopCount} ОШИБКА: ${e.message}`, 'warn');
+      if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
+        budgetSkipped = true;
+        log(`Stage 6 блок ${blockIndex + 1}: budget_skip — LSI-инъекция пропущена, сохраняем лучший HTML`, 'info');
+      } else {
+        log(`Stage 6 блок ${blockIndex + 1} цикл ${loopCount} ОШИБКА: ${e.message}`, 'warn');
+      }
       return null;
     });
 
@@ -163,9 +169,10 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
   );
 
   return {
-    html:         currentHTML,
+    html:          currentHTML,
     lsiCoverage:  finalCoverage.percent,
     finalCoverage,
+    budgetSkipped,
   };
 }
 

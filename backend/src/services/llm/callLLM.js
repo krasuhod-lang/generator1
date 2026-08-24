@@ -436,6 +436,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     promptVersion = null,
     qualityScore  = null,
     triggeredRefine = false,
+    responseFormat = null,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -498,7 +499,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       if (providerClass === 'gemini-class' && Number.isFinite(tokenBudget) && budgetTaskId) {
         budgetReservation = _reserveGeminiBudget(budgetTaskId, tokenBudget, promptSize);
       }
-      const callOpts = { temperature, maxTokens, logprobs };
+      const callOpts = { temperature, maxTokens, logprobs, responseFormat };
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         callOpts.timeoutMs = timeoutMs;
       }
@@ -664,4 +665,6 @@ module.exports = {
   getTaskBudgetSpent,
   getConfiguredTaskTokenBudget,
   DEFAULT_GEMINI_TASK_TOKEN_BUDGET,
+  parseJSON,
+  _isJsonTruncated,
 };

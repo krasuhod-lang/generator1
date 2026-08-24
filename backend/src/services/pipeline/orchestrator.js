@@ -807,9 +807,26 @@ async function runPipeline(task, ctx) {
         i, blockHtml, lsiMust
       ));
     } catch (e) {
-      log(`Stage 4 блок ${i + 1} ОШИБКА: ${e.message} — пропускаем аудит`, 'warn');
-      await saveContentBlock(taskId, i, block, blockHtml, 0, 0, null);
-      return blockHtml;
+      const fallbackCoverage = calculateCoverage(blockHtml, lsiMust);
+      auditResult = {
+        audit_status: 'unavailable',
+        audit_error: /JSON parse|Unexpected end/i.test(String(e?.message || '')) ? 'json_parse' : 'audit_error',
+        mathematical_audit: {
+          chars_count_actual: blockHtml.length,
+          lsi_coverage_percent: fallbackCoverage.percent,
+          lsi_found: fallbackCoverage.found || [],
+          lsi_missing: fallbackCoverage.missing || [],
+          spam_risk_detected: false,
+        },
+        pq_score: 0,
+        actionable_next_steps: [{
+          problem: 'Технический аудит не вернул разборный JSON',
+          solution: 'Выполнить один компактный повторный audit или передать блок на проверку',
+        }],
+      };
+      pqScore = 0;
+      lsiCovPct = fallbackCoverage.percent;
+      log(`Stage 4 блок ${i + 1}: audit_unavailable (${e.message}) — передаём лучший HTML в контролируемый refine`, 'warn');
     }
 
     const needsRefinement = lsiCovPct < LSI_COVERAGE_TARGET || pqScore < EEAT_PQ_TARGET || auditResult?.mathematical_audit?.spam_risk_detected;
@@ -859,6 +876,9 @@ async function runPipeline(task, ctx) {
         currentHTML  = s5.html;
         currentPQ    = s5.pqScore;
         currentAudit = s5.auditLog;
+        if (s5.budgetSkipped) {
+          publish(taskId, { type: 'budget_skip', stage: 'stage5', blockIndex: i, h2: block.h2 });
+        }
       } catch (e) {
         log(`Stage 5 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 4`, 'warn');
       }
@@ -882,6 +902,9 @@ async function runPipeline(task, ctx) {
       );
       currentHTML     = s6.html;
       lsiCoverageAfter = s6.lsiCoverage;
+      if (s6.budgetSkipped) {
+        publish(taskId, { type: 'budget_skip', stage: 'stage6', blockIndex: i, h2: block.h2 });
+      }
     } catch (e) {
       log(`Stage 6 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 5`, 'warn');
       const cov = calculateCoverage(currentHTML, lsiMust);
@@ -916,6 +939,28 @@ async function runPipeline(task, ctx) {
   // параллельно с генерацией следующих блоков и аудитами предыдущих.
   // Stage 3 (Gemini) и Stage 4-6 (DeepSeek) — разные API, не конкурируют.
   const auditPromises = []; // промисы аудита всех блоков
+  // Stage 3 остаётся последовательным, но дорогой Stage 4–6 audit/refine
+  // ограничен двумя блоками на task. Это предотвращает пиковое reservation
+  // Gemini budget при interleaving и сохраняет параллелизм между DeepSeek-аудитами.
+  const auditQueue = [];
+  let activeAudits = 0;
+  const pumpAuditQueue = () => {
+    while (activeAudits < 2 && auditQueue.length) {
+      const { run, resolve, reject } = auditQueue.shift();
+      activeAudits += 1;
+      Promise.resolve()
+        .then(run)
+        .then(resolve, reject)
+        .finally(() => {
+          activeAudits -= 1;
+          pumpAuditQueue();
+        });
+    }
+  };
+  const scheduleAudit = (run) => new Promise((resolve, reject) => {
+    auditQueue.push({ run, resolve, reject });
+    pumpAuditQueue();
+  });
 
   // Базовый checkpoint (обновляется перед каждым блоком)
   const buildCheckpoint = (blockIndex) => ({
@@ -1010,7 +1055,7 @@ async function runPipeline(task, ctx) {
     const blockCharLimits = { minChars: blockMinChars, maxChars: blockMaxChars };
     auditPromises.push(
       genResult.html
-        ? auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed, blockCharLimits)
+        ? scheduleAudit(() => auditAndRefineBlock(i, genResult.html, block, blockExpertOpinionUsed, blockCharLimits))
         : Promise.resolve(null)
     );
 

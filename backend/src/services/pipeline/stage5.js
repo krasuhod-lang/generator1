@@ -119,6 +119,7 @@ async function runStage5(
   let currentHTML  = htmlContent;
   let currentPQ    = pqScore;
   let currentAudit = auditResult;
+  let budgetSkipped = false;
 
   // Проверяем anti-water и галлюцинации
   const waterPhrases   = checkAntiWater(currentHTML);
@@ -190,7 +191,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
     if (expertOpinionUsed) {
       specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= ${EEAT_PQ_TARGET}. НЕ ДОБАВЛЯЙ <blockquote> — экспертное мнение уже использовано в другом блоке статьи. Демонстрируй Expertise через конкретные данные, терминологию, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
     } else {
-      specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= ${EEAT_PQ_TARGET}. Добавь экспертное мнение (blockquote), конкретные данные, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
+      specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= ${EEAT_PQ_TARGET}. Усиль Expertise через подтверждённые данные, профессиональную терминологию, описанный процесс, критерии выбора, ограничения и H3-структуру. НЕ ДОБАВЛЯЙ blockquote, если в BRAND_FACTS/AUDIT_REPORT нет verified expert evidence с реальным автором и exact_excerpt. Устрани все проблемы из actionable_next_steps.`;
     }
 
     const akbReady = !!task.__articleKnowledgeBase;
@@ -210,9 +211,16 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       s5Prompt,
       geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens })
     ).catch(e => {
-      log(`Stage 5 блок ${blockIndex + 1} итерация ${s5Loop} ОШИБКА: ${e.message}`, 'warn');
+      if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
+        budgetSkipped = true;
+        log(`Stage 5 блок ${blockIndex + 1}: budget_skip — сохраняем лучший HTML без дополнительного refine`, 'info');
+      } else {
+        log(`Stage 5 блок ${blockIndex + 1} итерация ${s5Loop} ОШИБКА: ${e.message}`, 'warn');
+      }
       return null;
     });
+
+    if (budgetSkipped) break;
 
     if (s5Result?.html_content) {
       // Length guard: если итерация раздула HTML за допустимый коридор —
@@ -301,7 +309,13 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         akbSystem(task),
         confPrompt,
         geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens })
-      ).catch(() => null);
+      ).catch((error) => {
+        if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
+          budgetSkipped = true;
+          log(`Блок ${blockIndex + 1}: budget_skip — confidence fix пропущен`, 'info');
+        }
+        return null;
+      });
 
       if (confResult?.html_content) {
         currentHTML = confResult.html_content;
@@ -341,13 +355,19 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         akbSystem(task),
         tfPrompt,
         geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens })
-      ).catch(() => null);
+      ).catch((error) => {
+        if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
+          budgetSkipped = true;
+          log(`Блок ${blockIndex + 1}: budget_skip — TF-IDF fix пропущен`, 'info');
+        }
+        return null;
+      });
 
       if (tfResult?.html_content) currentHTML = tfResult.html_content;
     }
   }
 
-  return { html: currentHTML, pqScore: currentPQ, auditLog: currentAudit };
+  return { html: currentHTML, pqScore: currentPQ, auditLog: currentAudit, budgetSkipped };
 }
 
 module.exports = { runStage5, checkAntiWater, STOP_PHRASES };

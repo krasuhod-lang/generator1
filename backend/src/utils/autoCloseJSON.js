@@ -11,33 +11,55 @@
  * @returns {string}   — JSON-текст с закрытыми скобками
  */
 function autoCloseJSON(str) {
-  let t = str.replace(/,\s*$/, '');
-  let inString  = false;
+  let t = String(str || '');
+  let inString = false;
   let escapeNext = false;
-  const stack   = [];
+  const stack = [];
+  let normalized = '';
 
-  for (let i = 0; i < t.length; i++) {
+  // Scan once so trailing commas are removed only outside strings. A regex
+  // would corrupt legitimate text such as ",}" inside a quoted HTML value.
+  for (let i = 0; i < t.length; i += 1) {
     const char = t[i];
 
-    if (escapeNext) { escapeNext = false; continue; }
-    if (char === '\\') { escapeNext = true; continue; }
-    if (char === '"')  { inString = !inString; continue; }
+    if (escapeNext) {
+      normalized += char;
+      escapeNext = false;
+      continue;
+    }
+    if (char === '\\' && inString) {
+      normalized += char;
+      escapeNext = true;
+      continue;
+    }
+    if (char === '"') {
+      normalized += char;
+      inString = !inString;
+      continue;
+    }
 
+    if (!inString && char === ',') {
+      let j = i + 1;
+      while (j < t.length && /\s/.test(t[j])) j += 1;
+      if (t[j] === '}' || t[j] === ']') continue;
+    }
+
+    normalized += char;
     if (!inString) {
-      if      (char === '{' || char === '[') stack.push(char);
+      if (char === '{' || char === '[') stack.push(char);
       else if (char === '}' && stack[stack.length - 1] === '{') stack.pop();
       else if (char === ']' && stack[stack.length - 1] === '[') stack.pop();
     }
   }
 
-  // Закрываем незакрытую строку
+  t = normalized;
+
+  // A truncation immediately after a backslash leaves an invalid escape. Turn
+  // that dangling slash into a valid literal slash before closing the string.
+  if (inString && escapeNext) t += '\\';
   if (inString) t += '"';
 
-  // Закрываем незакрытые объекты/массивы в обратном порядке
-  while (stack.length) {
-    t += (stack.pop() === '{') ? '}' : ']';
-  }
-
+  while (stack.length) t += (stack.pop() === '{') ? '}' : ']';
   return t;
 }
 
