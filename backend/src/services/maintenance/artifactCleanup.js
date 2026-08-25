@@ -108,6 +108,16 @@ async function removeFile(absPath) {
   }
 }
 
+async function pathExists(absPath) {
+  if (!absPath) return false;
+  try {
+    await fs.promises.access(absPath, fs.constants.F_OK);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /**
  * Удалить исходный DOCX по пути из БД (input_tz_docx_path). Путь трактуется
  * относительно корня backend, если он не абсолютный.
@@ -135,22 +145,26 @@ async function removeUpload(ref) {
  * @param {string}   [opts.docxPath]        — input_tz_docx_path
  * @param {string[]} [opts.uploadRefs]      — ссылки/пути на uploads/report-images
  * @param {object}   [opts.cfg]             — переопределение image-config (тесты)
+ * @param {boolean}  [opts.dryRun]          — только посчитать существующие артефакты
  * @returns {Promise<{imageDir:boolean, docx:boolean, uploads:number}>}
  */
 async function cleanupTaskArtifacts(opts = {}) {
-  const { taskId, docxPath, uploadRefs, cfg = getImageConfig() } = opts;
+  const { taskId, docxPath, uploadRefs, cfg = getImageConfig(), dryRun = false } = opts;
   const result = { imageDir: false, docx: false, uploads: 0 };
 
   if (taskId != null && taskId !== '') {
-    result.imageDir = await removeTaskImageDir(taskId, cfg);
+    const imageDir = taskImageDir(taskId, cfg);
+    result.imageDir = dryRun ? await pathExists(imageDir) : await removeTaskImageDir(taskId, cfg);
   }
   if (docxPath) {
-    result.docx = await removeDocx(docxPath);
+    const absDocx = path.isAbsolute(docxPath) ? docxPath : path.resolve(BACKEND_ROOT, docxPath);
+    result.docx = dryRun ? await pathExists(absDocx) : await removeDocx(docxPath);
   }
   if (Array.isArray(uploadRefs) && uploadRefs.length) {
     for (const ref of uploadRefs) {
+      const uploadPath = resolveUploadPath(ref);
       // eslint-disable-next-line no-await-in-loop
-      if (await removeUpload(ref)) result.uploads += 1;
+      if (dryRun ? await pathExists(uploadPath) : await removeUpload(ref)) result.uploads += 1;
     }
   }
   return result;
@@ -165,5 +179,6 @@ module.exports = {
   taskImageDir,
   removeDir,
   removeFile,
+  pathExists,
   BACKEND_ROOT,
 };

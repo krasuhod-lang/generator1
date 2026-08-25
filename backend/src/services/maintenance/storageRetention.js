@@ -255,18 +255,17 @@ async function sweepTable(desc, cfg, deps = {}) {
       stat.batches += 1;
       stat.scanned += rows.length;
 
-      // 1. В обычном режиме удаляем файлы на диске до строк БД.
-      // В dry-run не трогаем ни БД, ни filesystem: это настоящий preview.
-      if (!cfg.dryRun) {
-        for (const row of rows) {
-          // eslint-disable-next-line no-await-in-loop
-          const res = await cleanup({
-            taskId: desc.hasImageDir ? row[desc.idCol] : undefined,
-            docxPath: desc.docxCol ? row[desc.docxCol] : undefined,
-          });
-          if (res && res.imageDir) stat.imageDirs += 1;
-          if (res && res.docx) stat.docx += 1;
-        }
+      // 1. Сначала считаем/удаляем файловые артефакты. В dry-run cleanup
+      // работает в режиме проверки существования и ничего не удаляет.
+      for (const row of rows) {
+        // eslint-disable-next-line no-await-in-loop
+        const res = await cleanup({
+          taskId: desc.hasImageDir ? row[desc.idCol] : undefined,
+          docxPath: desc.docxCol ? row[desc.docxCol] : undefined,
+          dryRun: !!cfg.dryRun,
+        });
+        if (res && res.imageDir) stat.imageDirs += 1;
+        if (res && res.docx) stat.docx += 1;
       }
 
       if (cfg.dryRun) {

@@ -26,10 +26,10 @@ function _safePath(target) {
 function getKnownStoragePaths() {
   const imageDir = resolveStorageDir();
   return [
-    { key: 'uploads', label: 'Загрузки задач', path: _safePath(path.join(BACKEND_ROOT, 'uploads')), cleanup: true },
-    { key: 'images', label: 'Изображения генераций', path: _safePath(imageDir), cleanup: false },
-    { key: 'brain_state', label: 'Aegis brain state', path: _safePath(path.join(REPO_ROOT, 'brain_state')), cleanup: false },
-    { key: 'backend_tmp', label: 'Backend temporary files', path: _safePath(path.join(BACKEND_ROOT, 'tmp')), cleanup: true },
+    { key: 'uploads', label: 'Загрузки задач', path: _safePath(path.join(BACKEND_ROOT, 'uploads')), cleanup: true, fileCleanup: true },
+    { key: 'images', label: 'Изображения генераций', path: _safePath(imageDir), cleanup: false, fileCleanup: true },
+    { key: 'brain_state', label: 'Aegis brain state', path: _safePath(path.join(REPO_ROOT, 'brain_state')), cleanup: false, fileCleanup: false },
+    { key: 'backend_tmp', label: 'Backend temporary files', path: _safePath(path.join(BACKEND_ROOT, 'tmp')), cleanup: true, fileCleanup: true },
   ];
 }
 
@@ -167,6 +167,7 @@ async function getStorageAudit(deps = {}) {
     database,
     redis,
     cleanup_allowlist: getKnownStoragePaths().filter((entry) => entry.cleanup).map(({ key, label, path: target }) => ({ key, label, path: target })),
+    inventory_roots: getKnownStoragePaths().map(({ key, label, path: target, fileCleanup }) => ({ key, label, path: target, file_cleanup: Boolean(fileCleanup) })),
     warnings: [
       'Не удаляйте pg_data/redis_data напрямую: сначала используйте API cleanup или штатные PostgreSQL/Redis команды.',
       'brain_state намеренно исключён из admin cleanup: это runtime-состояние Aegis.',
@@ -175,7 +176,7 @@ async function getStorageAudit(deps = {}) {
   };
 }
 
-async function walkOldFiles(root, cutoffMs, dryRun) {
+async function walkOldFiles(root, cutoffMs, dryRun, shouldDelete = null) {
   const stat = { scanned: 0, deleted: 0, bytes: 0, dry_run: !!dryRun };
   let entries;
   try { entries = await fs.promises.readdir(root, { withFileTypes: true }); } catch (error) {
@@ -188,7 +189,7 @@ async function walkOldFiles(root, cutoffMs, dryRun) {
     try { info = await fs.promises.lstat(target); } catch (_) { continue; }
     if (info.isSymbolicLink()) continue;
     if (info.isDirectory()) {
-      const child = await walkOldFiles(target, cutoffMs, dryRun);
+      const child = await walkOldFiles(target, cutoffMs, dryRun, shouldDelete);
       stat.scanned += child.scanned; stat.deleted += child.deleted; stat.bytes += child.bytes;
       if (!dryRun) {
         const remain = await fs.promises.readdir(target).catch(() => ['x']);
@@ -198,6 +199,7 @@ async function walkOldFiles(root, cutoffMs, dryRun) {
     }
     stat.scanned += 1;
     if (info.mtimeMs >= cutoffMs) continue;
+    if (shouldDelete && !(await shouldDelete(target))) continue;
     stat.bytes += info.size || 0;
     if (!dryRun) {
       await fs.promises.unlink(target).catch(() => {});
@@ -205,6 +207,256 @@ async function walkOldFiles(root, cutoffMs, dryRun) {
     }
   }
   return stat;
+}
+
+const INVENTORY_MAX_FILES = Math.max(1000, Math.min(500000, Number.parseInt(process.env.STORAGE_INVENTORY_MAX_FILES, 10) || 100000));
+const ACTIVE_TASK_STATUSES = [
+  'pending', 'queued', 'processing', 'running', 'in_progress', 'retrying', 'paused', 'pausing',
+  'fetching', 'fetching_pages', 'analyzing', 'comparing',
+];
+const INVENTORY_TASK_TABLES = ['tasks', 'link_article_tasks', 'info_article_tasks'];
+
+function getInventoryRoot(rootKey) {
+  const entry = getKnownStoragePaths().find((item) => item.key === String(rootKey || '').trim());
+  if (!entry) throw Object.assign(new Error('Неизвестный storage root'), { status: 400 });
+  return entry;
+}
+
+function safeRelativePath(relativePath) {
+  const raw = String(relativePath || '').trim().replace(/\\/g, '/');
+  if (!raw || raw.includes('\0') || raw.startsWith('/') || /^[A-Za-z]:/.test(raw)) return null;
+  const normalized = path.posix.normalize(raw);
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) return null;
+  return normalized;
+}
+
+function resolveInventoryFile(entry, relativePath) {
+  const relative = safeRelativePath(relativePath);
+  if (!relative) throw Object.assign(new Error('Небезопасный relative_path'), { status: 400 });
+  const root = path.resolve(entry.path);
+  const target = path.resolve(root, relative);
+  const check = path.relative(root, target);
+  if (!check || check.startsWith('..') || path.isAbsolute(check)) {
+    throw Object.assign(new Error('Путь выходит за пределы storage root'), { status: 400 });
+  }
+  return { relative, target };
+}
+
+function addDirectoryStat(directoryMap, relativePath, bytes, fileCount) {
+  let current = relativePath;
+  while (true) {
+    const existing = directoryMap.get(current) || { relative_path: current || '.', bytes: 0, file_count: 0, directory_count: 0 };
+    existing.bytes += bytes;
+    existing.file_count += fileCount;
+    directoryMap.set(current, existing);
+    if (!current) break;
+    const parent = path.posix.dirname(current);
+    current = parent === '.' ? '' : parent;
+  }
+}
+
+async function buildInventory(entry, { page = 1, limit = 100, search = '', sort = 'size', order = 'desc' } = {}) {
+  const safePage = Math.max(1, Number.parseInt(page, 10) || 1);
+  const safeLimit = Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 100));
+  const query = String(search || '').trim().toLowerCase();
+  const files = [];
+  const directoryMap = new Map();
+  let scannedFiles = 0;
+  let scannedDirectories = 0;
+  let totalBytes = 0;
+  let truncated = false;
+  const scanErrors = [];
+
+  async function walk(absDir, relativeDir = '') {
+    let entries;
+    try {
+      entries = await fs.promises.readdir(absDir, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') scanErrors.push({ relative_path: relativeDir || '.', error: error.message });
+      return;
+    }
+    for (const dirent of entries) {
+      const relativePath = relativeDir ? path.posix.join(relativeDir, dirent.name) : dirent.name;
+      const absolutePath = path.join(absDir, dirent.name);
+      let stat;
+      try { stat = await fs.promises.lstat(absolutePath); } catch (error) {
+        scanErrors.push({ relative_path: relativePath, error: error.message });
+        continue;
+      }
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        scannedDirectories += 1;
+        const before = directoryMap.get(relativePath) || { relative_path: relativePath, bytes: 0, file_count: 0, directory_count: 0, modified_at: stat.mtime.toISOString() };
+        before.modified_at = stat.mtime.toISOString();
+        directoryMap.set(relativePath, before);
+        await walk(absolutePath, relativePath);
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      scannedFiles += 1;
+      totalBytes += stat.size || 0;
+      addDirectoryStat(directoryMap, relativeDir, stat.size || 0, 1);
+      if (files.length >= INVENTORY_MAX_FILES) {
+        truncated = true;
+        continue;
+      }
+      files.push({
+        relative_path: relativePath,
+        name: dirent.name,
+        bytes: Number(stat.size) || 0,
+        human: formatBytes(stat.size),
+        modified_at: stat.mtime.toISOString(),
+        root_key: entry.key,
+        deletable: Boolean(entry.fileCleanup),
+        protected_reason: entry.fileCleanup ? null : 'Каталог защищён политикой storage',
+      });
+    }
+  }
+
+  await walk(entry.path);
+  const matching = query ? files.filter((item) => item.relative_path.toLowerCase().includes(query)) : files;
+  const direction = String(order).toLowerCase() === 'asc' ? 1 : -1;
+  matching.sort((left, right) => {
+    if (sort === 'modified_at') return direction * (new Date(left.modified_at).getTime() - new Date(right.modified_at).getTime());
+    if (sort === 'name') return direction * left.relative_path.localeCompare(right.relative_path);
+    return direction * (left.bytes - right.bytes);
+  });
+  const offset = (safePage - 1) * safeLimit;
+  const rows = matching.slice(offset, offset + safeLimit);
+  const folders = [...directoryMap.values()]
+    .filter((item) => item.relative_path !== '.')
+    .sort((left, right) => right.bytes - left.bytes)
+    .slice(0, 500)
+    .map((item) => ({ ...item, human: formatBytes(item.bytes), deletable: Boolean(entry.fileCleanup) }));
+
+  return {
+    root: { key: entry.key, label: entry.label, path: entry.path, exists: fs.existsSync(entry.path), deletable: Boolean(entry.fileCleanup) },
+    summary: {
+      bytes: totalBytes,
+      human: formatBytes(totalBytes),
+      file_count: scannedFiles,
+      directory_count: scannedDirectories,
+      truncated,
+      scan_limit: INVENTORY_MAX_FILES,
+      scan_errors: scanErrors,
+    },
+    folders,
+    files: rows,
+    pagination: {
+      page: safePage,
+      limit: safeLimit,
+      total_files: matching.length,
+      has_more: offset + rows.length < matching.length || truncated,
+    },
+  };
+}
+
+async function getStorageInventory({ rootKey = 'uploads', page, limit, search, sort, order } = {}) {
+  const entry = getInventoryRoot(rootKey);
+  return buildInventory(entry, { page, limit, search, sort, order });
+}
+
+async function isActiveTaskId(taskId, db = dbDefault) {
+  if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(String(taskId || ''))) return false;
+  for (const table of INVENTORY_TASK_TABLES) {
+    try {
+      const result = await db.query(
+        `SELECT 1 FROM ${table} WHERE id = $1 AND status::text = ANY($2::text[]) LIMIT 1`,
+        [taskId, ACTIVE_TASK_STATUSES],
+      );
+      if (result.rows.length) return true;
+    } catch (error) {
+      if (!/does not exist|relation .* does not exist/i.test(String(error.message))) throw error;
+    }
+  }
+  return false;
+}
+
+async function getActiveTaskPayloads(db = dbDefault) {
+  const payloads = [];
+  for (const table of INVENTORY_TASK_TABLES) {
+    try {
+      const result = await db.query(
+        `SELECT to_jsonb(${table})::text AS payload
+           FROM ${table}
+          WHERE status::text = ANY($1::text[])`,
+        [ACTIVE_TASK_STATUSES],
+      );
+      for (const row of result.rows || []) {
+        if (row.payload) payloads.push(String(row.payload));
+      }
+    } catch (error) {
+      if (!/does not exist|relation .* does not exist/i.test(String(error.message))) throw error;
+    }
+  }
+  return payloads;
+}
+
+async function isReferencedByActiveTask(rootKey, relativePath, db = dbDefault) {
+  if (rootKey !== 'uploads') return false;
+  const needle = `%${String(relativePath).replace(/[%_\\]/g, (character) => `\\${character}`)}%`;
+  for (const table of INVENTORY_TASK_TABLES) {
+    try {
+      const result = await db.query(
+        `SELECT 1
+           FROM ${table}
+          WHERE status::text = ANY($1::text[])
+            AND to_jsonb(${table})::text ILIKE $2 ESCAPE '\\'
+          LIMIT 1`,
+        [ACTIVE_TASK_STATUSES, needle],
+      );
+      if (result.rows.length) return true;
+    } catch (error) {
+      if (!/does not exist|relation .* does not exist/i.test(String(error.message))) throw error;
+    }
+  }
+  return false;
+}
+
+async function deleteStorageFile({ rootKey, relativePath, confirm, dryRun = false, db = dbDefault } = {}) {
+  const entry = getInventoryRoot(rootKey);
+  if (!entry.fileCleanup) throw Object.assign(new Error('Этот storage root защищён от удаления'), { status: 403 });
+  if (!dryRun && confirm !== 'DELETE') throw Object.assign(new Error('Для удаления требуется confirm=DELETE'), { status: 400 });
+  const resolved = resolveInventoryFile(entry, relativePath);
+  const stat = await fs.promises.lstat(resolved.target).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!stat) throw Object.assign(new Error('Файл не найден'), { status: 404 });
+  if (stat.isSymbolicLink() || !stat.isFile()) throw Object.assign(new Error('Разрешено удалять только обычные файлы'), { status: 400 });
+  const realRoot = _safePath(entry.path);
+  const realTarget = await fs.promises.realpath(resolved.target).catch(() => null);
+  const realRelative = realTarget ? path.relative(realRoot, realTarget) : null;
+  if (!realTarget || !realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+    throw Object.assign(new Error('Файл выходит за пределы storage root'), { status: 400 });
+  }
+
+  const ageMs = Date.now() - stat.mtimeMs;
+  if (ageMs < 15 * 60 * 1000) {
+    throw Object.assign(new Error('Нельзя удалять файл, изменённый менее 15 минут назад'), { status: 409 });
+  }
+  if (entry.key === 'images') {
+    const taskId = resolved.relative.split('/')[0];
+    if (await isActiveTaskId(taskId, db)) {
+      throw Object.assign(new Error('Нельзя удалить файл активной задачи'), { status: 409 });
+    }
+  }
+  if (await isReferencedByActiveTask(entry.key, resolved.relative, db)) {
+    throw Object.assign(new Error('Нельзя удалить файл, используемый активной задачей'), { status: 409 });
+  }
+
+  const result = {
+    root_key: entry.key,
+    relative_path: resolved.relative,
+    bytes: Number(stat.size) || 0,
+    human: formatBytes(stat.size),
+    dry_run: Boolean(dryRun),
+    deleted: false,
+  };
+  if (dryRun) return result;
+  await fs.promises.unlink(resolved.target);
+  result.deleted = true;
+  return result;
 }
 
 async function cleanupStorage({ scope, olderThanDays, confirm, dryRun = false, db = dbDefault } = {}) {
@@ -243,7 +495,16 @@ async function cleanupStorage({ scope, olderThanDays, confirm, dryRun = false, d
   }
   const entry = getKnownStoragePaths().find((item) => item.key === scope);
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  const stats = await walkOldFiles(entry.path, cutoff, dryRun);
+  let shouldDelete = null;
+  if (entry.key === 'uploads') {
+    const activePayloads = await getActiveTaskPayloads(db);
+    shouldDelete = async (target) => {
+      const relative = path.relative(entry.path, target).split(path.sep).join('/');
+      const basename = path.basename(target);
+      return !activePayloads.some((payload) => payload.includes(relative) || payload.includes(basename));
+    };
+  }
+  const stats = await walkOldFiles(entry.path, cutoff, dryRun, shouldDelete);
   return { scope, path: entry.path, older_than_days: days, ...stats };
 }
 
@@ -252,5 +513,11 @@ module.exports = {
   getKnownStoragePaths,
   getStorageAudit,
   cleanupStorage,
+  getStorageInventory,
+  deleteStorageFile,
+  buildInventory,
+  resolveInventoryFile,
+  safeRelativePath,
+  getActiveTaskPayloads,
   walkOldFiles,
 };

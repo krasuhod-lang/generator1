@@ -20,6 +20,8 @@ const {
   getAegisCostBreakdown,
   getAdminStorageAudit,
   cleanupAdminStorage,
+  getAdminStorageInventory,
+  deleteAdminStorageFile,
   listAdminProjects,
   listAdminProjectGrants,
   createAdminProjectGrant,
@@ -81,7 +83,9 @@ router.get('/aegis-costs',        apiLimiter, adminAuth, getAegisCostBreakdown);
 
 // Storage audit/cleanup: preview по умолчанию, destructive action только с confirm=DELETE.
 router.get('/storage',             apiLimiter, adminAuth, getAdminStorageAudit);
-router.post('/storage/cleanup',    apiLimiter, adminAuth, cleanupAdminStorage);
+router.get('/storage/inventory',    apiLimiter, adminAuth, getAdminStorageInventory);
+router.post('/storage/cleanup',     apiLimiter, adminAuth, cleanupAdminStorage);
+router.post('/storage/file/delete', apiLimiter, adminAuth, deleteAdminStorageFile);
 
 // ── Project grants (миграция 092, задача 1) ─────────────────────────
 // Раздача доступов к проектам, их анализам и отчётам через панель админа.

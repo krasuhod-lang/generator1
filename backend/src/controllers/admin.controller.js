@@ -1192,6 +1192,43 @@ async function cleanupAdminStorage(req, res, next) {
   }
 }
 
+async function getAdminStorageInventory(req, res, next) {
+  try {
+    const result = await storageAdmin.getStorageInventory({
+      rootKey: req.query.root,
+      page: req.query.page,
+      limit: req.query.limit,
+      search: req.query.search,
+      sort: req.query.sort,
+      order: req.query.order,
+    });
+    return res.json(result);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function deleteAdminStorageFile(req, res, next) {
+  try {
+    const body = req.body || {};
+    const result = await storageAdmin.deleteStorageFile({
+      rootKey: body.root,
+      relativePath: body.relative_path,
+      confirm: body.confirm,
+      dryRun: body.dryRun !== false,
+      db,
+    });
+    return res.json({
+      ok: true,
+      dry_run: result.dry_run,
+      result,
+      message: result.dry_run ? 'Preview выполнен; файл не удалён' : 'Файл удалён',
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Project grants — раздача доступов к проектам через панель администратора
 // (миграция 092, задача 1). Все эндпоинты под /api/admin/projects/.
@@ -1367,6 +1404,8 @@ module.exports = {
   getAegisCostBreakdown,
   getAdminStorageAudit,
   cleanupAdminStorage,
+  getAdminStorageInventory,
+  deleteAdminStorageFile,
   // Project grants (миграция 092, задача 1)
   listAdminProjects,
   listAdminProjectGrants,

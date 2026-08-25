@@ -201,6 +201,24 @@ export const useAdminStore = defineStore('admin', () => {
     return data;
   }
 
+  async function fetchStorageInventory({ root = 'uploads', page = 1, limit = 100, search = '', sort = 'size', order = 'desc' } = {}) {
+    const query = new URLSearchParams({
+      root,
+      page: String(page),
+      limit: String(limit),
+      sort,
+      order,
+    });
+    if (search) query.set('search', search);
+    const { data } = await adminApi.get(`/admin/storage/inventory?${query.toString()}`);
+    return data;
+  }
+
+  async function deleteStorageFile(payload) {
+    const { data } = await adminApi.post('/admin/storage/file/delete', payload);
+    return data;
+  }
+
   return {
     adminToken,
     adminUser,
@@ -227,5 +245,7 @@ export const useAdminStore = defineStore('admin', () => {
     fetchAegisCosts,
     fetchStorageAudit,
     cleanupStorage,
+    fetchStorageInventory,
+    deleteStorageFile,
   };
 });
