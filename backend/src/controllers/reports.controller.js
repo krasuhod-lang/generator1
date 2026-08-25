@@ -41,7 +41,6 @@ const { resolveViewMode } = require('../services/projects/viewMode');
 const { sanitizeDraft, sanitizeData, sanitizeSummary } = require('../services/reports/viewModeSanitizer');
 const { deepMerge } = require('../services/reports/overridesApplier');
 const { enqueueOutbox } = require('../services/tasks/reliability');
-const { makeBullJobId } = require('../queue/jobIds');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -372,7 +371,22 @@ async function generateSummaryEndpoint(req, res) {
   const draft = await _ownedDraft(req.params.id, req.user.id);
   if (!draft) return _bad(res, 404, 'Черновик не найден');
 
-  const jobId = makeBullJobId('report-summary', draft.id, crypto.randomUUID());
+  const hasActiveSummary = Boolean(draft.llm_job_id)
+    && (draft.llm_status === 'queued'
+      || (draft.llm_status === 'running'
+        && (!draft.llm_lease_until || new Date(draft.llm_lease_until).getTime() > Date.now())));
+  if (hasActiveSummary) {
+    return res.status(202).json({
+      job_id: draft.llm_job_id,
+      status: draft.llm_status,
+      dispatch: 'already_queued',
+    });
+  }
+
+  // report_drafts.llm_job_id is UUID and is also used as BullMQ jobId.
+  // Do not use the human-readable prefixed ID here: PostgreSQL would reject it
+  // before the durable outbox row could be created.
+  const jobId = crypto.randomUUID();
   await db.query(
     `UPDATE report_drafts
         SET llm_status = 'queued', llm_job_id = $3, llm_error = NULL,
