@@ -84,6 +84,11 @@ function _serializeDraft(row) {
     llm_status: row.llm_status,
     llm_generated_at: row.llm_generated_at,
     llm_error: row.llm_error || null,
+    llm_heartbeat_at: row.llm_heartbeat_at || null,
+    llm_lease_until: row.llm_lease_until || null,
+    llm_attempts: Number(row.llm_attempts || 0),
+    llm_recovery_attempts: Number(row.llm_recovery_attempts || 0),
+    llm_last_error_code: row.llm_last_error_code || null,
     analysis_id: row.analysis_id || null,
     snapshot_id: row.snapshot_id || null,
     report_model_version: row.report_model_version || 'reports-v2',
@@ -426,6 +431,11 @@ async function getSummaryStatus(req, res) {
     traffic_value: draft.llm_traffic_value || '',
     next_month_forecast: draft.llm_next_month_forecast || '',
     generated_at: draft.llm_generated_at,
+    heartbeat_at: draft.llm_heartbeat_at || null,
+    lease_until: draft.llm_lease_until || null,
+    attempts: Number(draft.llm_attempts || 0),
+    recovery_attempts: Number(draft.llm_recovery_attempts || 0),
+    error_code: draft.llm_last_error_code || null,
   });
 }
 

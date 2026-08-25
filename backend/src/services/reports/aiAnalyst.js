@@ -678,6 +678,14 @@ function _fallbackSummary(brandName, period, digest) {
   };
 }
 
+function remainingCallTimeout(deadlineAt, fallbackMs = 300000) {
+  const deadline = Number(deadlineAt);
+  if (!Number.isFinite(deadline) || deadline <= 0) return fallbackMs;
+  // Leave a small margin for synthesis and persistence before the outer job
+  // deadline. Adapters receive a bounded timeout instead of waiting forever.
+  return Math.max(1000, Math.min(fallbackMs, deadline - Date.now() - 1000));
+}
+
 async function generateSummary(data, opts = {}) {
   const brandName = String(opts.brandName || data.project?.name || 'Проект');
   const period = String(opts.period || '');
@@ -775,8 +783,14 @@ async function generateSummary(data, opts = {}) {
 
   // Run passes 1 & 2 in parallel
   const [result1, result2] = await Promise.all([
-    runAnalyst(SYSTEM_PROMPT, pass1Prompt, { kind: 'reports_traffic', temperature: 0.3, maxTokens: 1500 }),
-    runAnalyst(SYSTEM_PROMPT, pass2Prompt, { kind: 'reports_visibility', temperature: 0.3, maxTokens: 1500 }),
+    runAnalyst(SYSTEM_PROMPT, pass1Prompt, {
+      kind: 'reports_traffic', temperature: 0.3, maxTokens: 1500,
+      timeoutMs: remainingCallTimeout(opts.deadlineAt),
+    }),
+    runAnalyst(SYSTEM_PROMPT, pass2Prompt, {
+      kind: 'reports_visibility', temperature: 0.3, maxTokens: 1500,
+      timeoutMs: remainingCallTimeout(opts.deadlineAt),
+    }),
   ]);
 
   const parsed1 = result1.verdict === 'ok' ? _safeJson(result1.markdown) : null;
@@ -817,6 +831,7 @@ async function generateSummary(data, opts = {}) {
     kind: 'reports_synthesis',
     temperature: 0.3,
     maxTokens: 2000,
+    timeoutMs: remainingCallTimeout(opts.deadlineAt),
   });
 
   const parsed3 = result3.verdict === 'ok' ? _safeJson(result3.markdown) : null;
@@ -961,4 +976,5 @@ module.exports = {
   _applyCanonicalNumbers,
   _classifyMetric,
   _canonicalNumbers,
+  remainingCallTimeout,
 };

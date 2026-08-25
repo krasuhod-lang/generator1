@@ -41,6 +41,30 @@ const exporting = ref(false);
 // видеть, что увидит клиент по публичной ссылке (с урезанным payload).
 const previewMode = ref('analyst');
 
+const summaryHeartbeatAgeSeconds = computed(() => {
+  const value = summaryStatus.value?.heartbeat_at
+    || draft.value?.llm_heartbeat_at
+    || draft.value?.updated_at;
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+});
+const summaryStale = computed(() => {
+  const status = summaryStatus.value?.status;
+  return (status === 'running' || status === 'queued')
+    && summaryHeartbeatAgeSeconds.value != null
+    && summaryHeartbeatAgeSeconds.value > 120;
+});
+function formatSummaryHeartbeat() {
+  const value = summaryStatus.value?.heartbeat_at
+    || draft.value?.llm_heartbeat_at
+    || draft.value?.updated_at;
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('ru-RU') : '';
+}
+
 let pollTimer = null;
 
 onMounted(async () => {
@@ -52,10 +76,21 @@ async function load() {
   await store.fetchDraft(route.params.id);
   await refreshData();
   if (draft.value?.llm_status === 'running' || draft.value?.llm_status === 'queued') {
+    summaryStatus.value = {
+      status: draft.value.llm_status,
+      error: draft.value.llm_error || null,
+      heartbeat_at: draft.value.llm_heartbeat_at || null,
+      error_code: draft.value.llm_last_error_code || null,
+    };
     startPolling();
   } else {
     summaryStatus.value = draft.value
-      ? { status: draft.value.llm_status || 'idle', error: draft.value.llm_error || null }
+      ? {
+        status: draft.value.llm_status || 'idle',
+        error: draft.value.llm_error || null,
+        heartbeat_at: draft.value.llm_heartbeat_at || null,
+        error_code: draft.value.llm_last_error_code || null,
+      }
       : null;
   }
 }
@@ -121,11 +156,29 @@ async function generateSummary() {
 function startPolling() {
   stopPolling();
   pollTimer = setInterval(async () => {
-    const s = await store.getSummaryStatus(route.params.id);
-    summaryStatus.value = { status: s.status, error: s.error };
-    if (s.status === 'done' || s.status === 'error') {
-      stopPolling();
-      await store.fetchDraft(route.params.id);
+    try {
+      const s = await store.getSummaryStatus(route.params.id);
+      summaryStatus.value = {
+        status: s.status,
+        error: s.error,
+        heartbeat_at: s.heartbeat_at || null,
+        lease_until: s.lease_until || null,
+        attempts: s.attempts || 0,
+        recovery_attempts: s.recovery_attempts || 0,
+        error_code: s.error_code || null,
+      };
+      if (s.status === 'done' || s.status === 'error') {
+        stopPolling();
+        await store.fetchDraft(route.params.id);
+      }
+    } catch (err) {
+      // Не останавливаем polling на одном transient 502/status timeout:
+      // backend job продолжает жить независимо от этого GET-запроса.
+      summaryStatus.value = {
+        ...(summaryStatus.value || {}),
+        status: summaryStatus.value?.status || 'queued',
+        error: `Не удалось обновить статус: ${err.response?.data?.error || err.message || 'временная ошибка'}`,
+      };
     }
   }, 2000);
 }
@@ -394,6 +447,10 @@ function _stateOf(section) {
             </p>
             <p class="src-hint" v-else-if="summaryStatus?.status === 'running' || summaryStatus?.status === 'queued'">
               ⏳ Генерация…
+              <span v-if="formatSummaryHeartbeat()"> Последняя активность: {{ formatSummaryHeartbeat() }}.</span>
+              <span v-if="summaryStale" class="err">
+                Нет heartbeat более {{ summaryHeartbeatAgeSeconds }} сек.; задача будет автоматически восстановлена по timeout/recovery.
+              </span>
             </p>
             <p class="src-hint err" v-else-if="summaryStatus?.status === 'error'">
               Ошибка: {{ summaryStatus.error }}
