@@ -254,6 +254,62 @@ function _isJsonTruncated(text) {
  * Пытается распарсить JSON из сырого текста LLM.
  * Применяет autoCloseJSON при обрыве.
  */
+function salvageQualityJson(text, parseError = null) {
+  const source = String(text || '');
+  if (!source.trim() || !/[{[]/.test(source)) return null;
+
+  const numberAfter = (keys) => {
+    for (const key of keys) {
+      const re = new RegExp(`(?:['\\\"])?${key}(?:['\\\"])?\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`, 'i');
+      const match = source.match(re);
+      if (match) {
+        const n = Number(match[1]);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+    return null;
+  };
+  const score = (value) => {
+    if (value == null) return null;
+    const n = clampPQScore(value);
+    return Number.isFinite(Number(n)) ? Number(n) : null;
+  };
+
+  const pq = score(numberAfter(['pq_score', 'pqscore']));
+  const pageQuality = score(numberAfter(['page_quality_score', 'pagequalityscore']));
+  const lsiCoverage = numberAfter(['lsi_coverage_percent', 'lsi_coverage']);
+  const result = {
+    audit_status: 'partial_json',
+    audit_error: parseError?.message || 'JSON response was incomplete',
+    partial_json: true,
+  };
+
+  if (pq != null) result.pq_score = pq;
+  if (lsiCoverage != null) {
+    result.mathematical_audit = {
+      lsi_coverage_percent: Math.max(0, Math.min(100, lsiCoverage)),
+      spam_risk_detected: /(?:['\\\"])?spam_risk_detected(?:['\\\"])?\\s*:\\s*true/i.test(source),
+    };
+  }
+  if (pageQuality != null) {
+    result.global_audit = { page_quality_score: pageQuality };
+  }
+
+  const criteria = ['experience', 'expertise', 'authoritativeness', 'trustworthiness', 'content_quality'];
+  const breakdown = {};
+  for (const criterion of criteria) {
+    const re = new RegExp(`['\\\"]${criterion}['\\\"]\\s*:\\s*\\{[\\s\\S]{0,600}?['\\\"]score['\\\"]\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`, 'i');
+    const match = source.match(re);
+    if (match) {
+      const n = Number(match[1]);
+      if (Number.isFinite(n)) breakdown[criterion] = { score: Math.max(0, Math.min(2, n)) };
+    }
+  }
+  if (Object.keys(breakdown).length) result.eeat_criteria_breakdown = breakdown;
+  if (pq == null && pageQuality == null && !Object.keys(breakdown).length && lsiCoverage == null) return null;
+  return result;
+}
+
 function parseJSON(text) {
   // Убираем Markdown-обёртку если есть
   let t = text.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -414,6 +470,9 @@ async function persistStageCall({
  *                                                    Production default — 200000; передайте
  *                                                    Infinity явно для opt-out. При исчерпании —
  *                                                    BudgetExceededError (isDeterministic).
+ * @param {boolean} [opts.allowPartialJson=false] — opt-in salvage score fields from
+ *                                                    an incomplete quality-audit JSON;
+ *                                                    disabled for ordinary calls.
  * @param {boolean} [opts.skipOnBudget=false] — для необязательных calls: сделать
  *                                                    локальный preflight и не отправлять
  *                                                    запрос, если он не помещается в остаток.
@@ -453,6 +512,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     triggeredRefine = false,
     responseFormat = null,
     retryOnTruncation = true,
+    allowPartialJson = false,
     skipOnBudget = false,
   } = opts;
 
@@ -573,18 +633,30 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         maxTokens = newMax;
         continue;
       }
-      const parsed    = normalizeKeys(parseJSON(result.text));
+      let parsed;
+      let partialJson = false;
+      try {
+        parsed = normalizeKeys(parseJSON(result.text));
+      } catch (parseError) {
+        if (!allowPartialJson) throw parseError;
+        const salvaged = salvageQualityJson(result.text, parseError);
+        if (!salvaged) throw parseError;
+        parsed = normalizeKeys(salvaged);
+        partialJson = true;
+        log(`${callLabel || stageName}: partial quality JSON salvaged; score fields preserved`, 'warn');
+      }
 
       const cacheNote   = cacheHit ? ` | cache_hit: ${result.cacheHitTokens}` : '';
       const cachedNote  = (adapter === 'gemini' && activeCachedContent) ? ' | gemini_cached' : '';
       // Подсветим thoughts/cached в логе только когда они ненулевые — иначе шум.
       const thoughtsNote = (result.thoughtsTokens || 0) > 0 ? ` | thoughts: ${result.thoughtsTokens}` : '';
+      const partialJsonNote = partialJson ? ' | partial_json' : '';
       const cachedTokNote = (result.cachedTokens   || 0) > 0 ? ` | cached_in: ${result.cachedTokens}` : '';
       // Показываем фактически использованную модель — для удобства сравнения
       // качества разных Gemini-моделей в одной задаче.
       const modelTag = result.model ? ` (${result.model})` : '';
       log(
-        `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote} | $${costUsd.toFixed(6)}`,
+        `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote}${partialJsonNote} | $${costUsd.toFixed(6)}`,
         'success'
       );
 
@@ -699,4 +771,5 @@ module.exports = {
   DEFAULT_GEMINI_TASK_TOKEN_BUDGET,
   parseJSON,
   _isJsonTruncated,
+  salvageQualityJson,
 };

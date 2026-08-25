@@ -66,7 +66,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   try { tfIdfArr = JSON.parse(task.input_tfidf_json || '[]'); } catch { /* ignore */ }
   const tfIdfWeightsStr = JSON.stringify(tfIdfArr.slice(0, 50)); // ограничиваем для промпта
 
-  const s7prompt = SYSTEM_PROMPTS.stage7
+  const s7prompt = `${SYSTEM_PROMPTS.stage7}\n\nGLOBAL AUDIT COMPACT OUTPUT POLICY (additive; keep the full rubric):\n- Return exactly one JSON object. Never repeat FINAL_HTML_CONTENT.\n- Keep overall_verdict and each justification under 300 characters.\n- Keep critical_improvements_needed to at most 8 short items.\n- Keep tfidf_density_report to at most 60 items; computed programmatic density remains the source of truth.\n- If a field cannot be assessed, use null or an empty array; do not invent a value.\n`
     .replace('{{FINAL_HTML}}',        () => fullHTML.substring(0, 30000))
     .replace('{{TARGET_SERVICE}}',    () => targetService)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(allLSI))
@@ -84,7 +84,19 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     'deepseek',
     '',
     s7prompt,
-    { retries: 3, taskId, stageName: 'stage7', callLabel: '7 Global Audit', temperature: 0.2, log, onTokens }
+    {
+      retries: 1,
+      maxTokens: 12000,
+      responseFormat: { type: 'json_object' },
+      retryOnTruncation: false,
+      allowPartialJson: true,
+      taskId,
+      stageName: 'stage7',
+      callLabel: '7 Global Audit',
+      temperature: 0.2,
+      log,
+      onTokens,
+    }
   ).catch(e => {
     log(`Stage 7 ОШИБКА: ${e.message}`, 'error');
     return null;
@@ -92,16 +104,25 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
 
   log(`Stage 7: ответ получен. Ключи: [${Object.keys(s7Result || {}).join(', ')}]`, 'success');
 
-  // Финальный E-E-A-T score — из breakdown (сумма по критериям) или из page_quality_score
-  let globalEEATScore = 0;
+  // Финальный E-E-A-T score — из полного breakdown или page_quality_score.
+  // При partial/unavailable audit не подменяем неизвестный результат нулём.
+  const toScore10 = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(0, Math.min(10, n));
+  };
+  let globalEEATScore = null;
   const eeatBreakdown = s7Result?.eeat_criteria_breakdown;
   if (eeatBreakdown && typeof eeatBreakdown === 'object' && !Array.isArray(eeatBreakdown)) {
-    // Новый формат — объект с ключами experience/expertise/authoritativeness/trustworthiness/content_quality
-    const scores = ['experience', 'expertise', 'authoritativeness', 'trustworthiness', 'content_quality']
-      .map(k => parseFloat(eeatBreakdown[k]?.score) || 0);
-    globalEEATScore = parseFloat(scores.reduce((a, b) => a + b, 0).toFixed(1));
-  } else if (s7Result?.global_audit?.page_quality_score) {
-    globalEEATScore = parseFloat(Number(s7Result.global_audit.page_quality_score).toFixed(1));
+    const criteria = ['experience', 'expertise', 'authoritativeness', 'trustworthiness', 'content_quality'];
+    const scores = criteria.map(k => Number(eeatBreakdown[k]?.score));
+    if (scores.every(score => Number.isFinite(score))) {
+      globalEEATScore = parseFloat(scores.reduce((a, b) => a + b, 0).toFixed(1));
+    }
+  }
+  if (globalEEATScore == null) {
+    const pageQualityScore = toScore10(s7Result?.global_audit?.page_quality_score);
+    if (pageQualityScore != null) globalEEATScore = parseFloat(pageQualityScore.toFixed(1));
   }
 
   // Финальное LSI-покрытие всей страницы
@@ -119,7 +140,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   let tzCompliance = null;
 
   log(
-    `Stage 7: E-E-A-T score=${globalEEATScore}, LSI coverage=${globalLSICoverage}%, ` +
+    `Stage 7: E-E-A-T score=${globalEEATScore == null ? 'не рассчитан' : globalEEATScore}, LSI coverage=${globalLSICoverage}%, ` +
     `BM25=${bm25.score.toFixed(2)} (${bm25.interpretation}), ` +
     `TF-IDF: ${tfIdfDensity.length} терминов, overuse=${tfIdfOveruse}, underuse=${tfIdfUnderuse}`,
     'success'

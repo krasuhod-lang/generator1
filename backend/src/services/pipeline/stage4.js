@@ -99,8 +99,9 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
       stageName: 'stage4',
       callLabel: `4 E-E-A-T Block ${blockIndex + 1}`,
       temperature: 0.2,
-      maxTokens: 8192,
+      maxTokens: 12000,
       responseFormat: { type: 'json_object' },
+      allowPartialJson: true,
       log,
       onTokens,
     }
@@ -108,8 +109,14 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
 
   log(`Stage 4 блок ${blockIndex + 1}: ответ получен. Ключи: [${Object.keys(auditResult || {}).join(', ')}]`, 'info');
 
-  const lsiCovPct = auditResult?.mathematical_audit?.lsi_coverage_percent ?? 0;
-  const pqScore   = auditResult?.pq_score ?? 0;
+  const rawLsiCov = auditResult?.mathematical_audit?.lsi_coverage_percent;
+  const rawPqScore = auditResult?.pq_score;
+  const lsiCovPct = Number.isFinite(Number(rawLsiCov))
+    ? Math.max(0, Math.min(100, Number(rawLsiCov)))
+    : 0;
+  const pqScore = Number.isFinite(Number(rawPqScore))
+    ? Math.max(0, Math.min(10, Number(rawPqScore)))
+    : null;
 
   log(
     `Stage 4 блок ${blockIndex + 1}: LSI ${Math.round(lsiCovPct)}%, PQ-score ${pqScore}, ` +
@@ -146,8 +153,9 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
       stageName: 'stage4',
       callLabel: `4 Re-audit Block ${blockIndex + 1}`,
       temperature: 0.2,
-      maxTokens: 8192,
+      maxTokens: 12000,
       responseFormat: { type: 'json_object' },
+      allowPartialJson: true,
       log,
       onTokens,
     }
@@ -155,8 +163,12 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
 
   return {
     auditResult: result,
-    pqScore:     result?.pq_score ?? 0,
-    lsiCovPct:   result?.mathematical_audit?.lsi_coverage_percent ?? 0,
+    pqScore:     Number.isFinite(Number(result?.pq_score))
+      ? Math.max(0, Math.min(10, Number(result.pq_score)))
+      : null,
+    lsiCovPct:   Number.isFinite(Number(result?.mathematical_audit?.lsi_coverage_percent))
+      ? Math.max(0, Math.min(100, Number(result.mathematical_audit.lsi_coverage_percent)))
+      : 0,
   };
 }
 

@@ -15,6 +15,24 @@ async function run() {
   const truncated = '{"mathematical_audit":{"lsi_coverage_percent":18,"spam_risk_detected":true},"pq_score":1,"actionable_next_steps":[{"problem":"x","solution":"y"';
   const repaired = JSON.parse(autoClose.autoCloseJSON(truncated));
   assert.strictEqual(repaired.pq_score, 1, 'autoCloseJSON must close a truncated audit object');
+
+  const partialStage4 = callLLMReal.salvageQualityJson(
+    '{"mathematical_audit":{"lsi_coverage_percent":63,"spam_risk_detected":false},"pq_score":7.5,"actionable_next_steps":[{"problem":"unfinished',
+    new Error('JSON parse failed after autoCloseJSON'),
+  );
+  assert.strictEqual(partialStage4.pq_score, 7.5, 'partial Stage 4 must preserve PQ');
+  assert.strictEqual(partialStage4.mathematical_audit.lsi_coverage_percent, 63, 'partial Stage 4 must preserve LSI');
+
+  const partialStage7 = callLLMReal.salvageQualityJson(
+    '{"global_audit":{"page_quality_score":8.2},"eeat_criteria_breakdown":{"experience":{"score":1.5}',
+    new Error('JSON parse failed after autoCloseJSON'),
+  );
+  assert.strictEqual(partialStage7.global_audit.page_quality_score, 8.2, 'partial Stage 7 must preserve page quality score');
+  assert.strictEqual(partialStage7.eeat_criteria_breakdown.experience.score, 1.5, 'partial Stage 7 must preserve breakdown score');
+  assert.strictEqual(callLLMReal.salvageQualityJson('{"message":"no score"}'), null, 'unscored partial JSON must stay unknown');
+  assert.strictEqual(callLLMReal.salvageQualityJson('pq_score: 6.4, lsi_coverage_percent: 81'), null, 'unquoted prose without JSON keys must stay unknown');
+  const quotedFallback = callLLMReal.salvageQualityJson('{"pq_score": 6.4, "lsi_coverage_percent": 81');
+  assert.strictEqual(quotedFallback.pq_score, 6.4, 'quoted scalar fields in gateway fallback must be preserved');
   assert.deepStrictEqual(repaired.actionable_next_steps, [{ problem: 'x', solution: 'y' }]);
 
   const nestedTrailing = '{"a":[1,2,],"b":{"c":true,},}';
@@ -30,6 +48,21 @@ async function run() {
   const orchestratorSource = fs.readFileSync(path.join(repoRoot, 'src/services/pipeline/orchestrator.js'), 'utf8');
   assert(orchestratorSource.includes('activeAudits < 2'), 'audit concurrency must be capped at two blocks per task');
   assert(orchestratorSource.includes("type: 'budget_skip'"), 'orchestrator must publish budget_skip diagnostics');
+  assert(orchestratorSource.includes('pq_score: null'), 'unavailable audit must not be persisted as a real zero');
+
+  const stage4Source = fs.readFileSync(path.join(repoRoot, 'src/services/pipeline/stage4.js'), 'utf8');
+  assert(stage4Source.includes('allowPartialJson: true'), 'Stage 4 must salvage score fields from partial JSON');
+  const stage7Source = fs.readFileSync(path.join(repoRoot, 'src/services/pipeline/stage7.js'), 'utf8');
+  assert(stage7Source.includes('responseFormat: { type: \'json_object\' }'), 'Stage 7 must request JSON mode');
+  assert(stage7Source.includes('retryOnTruncation: false'), 'Stage 7 must not double-call on truncation');
+  assert(stage7Source.includes('allowPartialJson: true'), 'Stage 7 must salvage partial score fields');
+
+  const resultPageSource = fs.readFileSync(path.join(repoRoot, '../frontend/src/views/ResultPage.vue'), 'utf8');
+  const resultModalSource = fs.readFileSync(path.join(repoRoot, '../frontend/src/components/ResultModal.vue'), 'utf8');
+  const monitorSource = fs.readFileSync(path.join(repoRoot, '../frontend/src/views/MonitorPage.vue'), 'utf8');
+  assert(resultPageSource.includes('optionalScore(block.pq_score)'), 'ResultPage must not coerce unknown PQ to zero');
+  assert(resultModalSource.includes('blockPqLabel(block.pq_score)'), 'ResultModal must not coerce unknown PQ to zero');
+  assert(monitorSource.includes("msg.pqScore     ?? null"), 'MonitorPage must preserve unknown PQ');
 
   const originalCallModule = require.cache[callLLMPath];
   require.cache[callLLMPath] = {
@@ -86,7 +119,7 @@ async function run() {
 }
 
 run()
-  .then(() => console.log('generation-error-recovery: 8/8 passed'))
+  .then(() => console.log('generation-error-recovery: 14/14 passed'))
   .catch((error) => {
     console.error(error.stack || error.message);
     process.exitCode = 1;

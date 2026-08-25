@@ -118,7 +118,8 @@ async function runStage5(
   const brandName     = (task.input_brand_name || '').trim() || 'Нет данных';
 
   let currentHTML  = htmlContent;
-  let currentPQ    = pqScore;
+  let currentPQ    = Number.isFinite(Number(pqScore)) ? Number(pqScore) : null;
+  const pqLabel = () => currentPQ == null ? 'не рассчитан: audit unavailable/partial' : String(currentPQ);
   let currentAudit = auditResult;
   let budgetSkipped = false;
 
@@ -186,13 +187,13 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
 
   while (s5Loop < s5MaxLoops && needsRefine) {
     s5Loop++;
-    log(`Stage 5 блок ${blockIndex + 1}: рефайн итерация ${s5Loop}/${s5MaxLoops} (PQ ${currentPQ} < ${EEAT_PQ_TARGET}). Запрос...`, 'info');
+    log(`Stage 5 блок ${blockIndex + 1}: рефайн итерация ${s5Loop}/${s5MaxLoops} (PQ ${pqLabel()} < ${EEAT_PQ_TARGET}). Запрос...`, 'info');
 
     let specialInstruction = baseSpecialInstruction;
     if (expertOpinionUsed) {
-      specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= ${EEAT_PQ_TARGET}. НЕ ДОБАВЛЯЙ <blockquote> — экспертное мнение уже использовано в другом блоке статьи. Демонстрируй Expertise через конкретные данные, терминологию, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
+      specialInstruction += ` КРИТИЧНО: PQ-score = ${pqLabel()}/10. Нужно >= ${EEAT_PQ_TARGET}. НЕ ДОБАВЛЯЙ <blockquote> — экспертное мнение уже использовано в другом блоке статьи. Демонстрируй Expertise через конкретные данные, терминологию, H3-структуру. Устрани все проблемы из actionable_next_steps.`;
     } else {
-      specialInstruction += ` КРИТИЧНО: PQ-score = ${currentPQ}/10. Нужно >= ${EEAT_PQ_TARGET}. Усиль Expertise через подтверждённые данные, профессиональную терминологию, описанный процесс, критерии выбора, ограничения и H3-структуру. НЕ ДОБАВЛЯЙ blockquote, если в BRAND_FACTS/AUDIT_REPORT нет verified expert evidence с реальным автором и exact_excerpt. Устрани все проблемы из actionable_next_steps.`;
+      specialInstruction += ` КРИТИЧНО: PQ-score = ${pqLabel()}/10. Нужно >= ${EEAT_PQ_TARGET}. Усиль Expertise через подтверждённые данные, профессиональную терминологию, описанный процесс, критерии выбора, ограничения и H3-структуру. НЕ ДОБАВЛЯЙ blockquote, если в BRAND_FACTS/AUDIT_REPORT нет verified expert evidence с реальным автором и exact_excerpt. Устрани все проблемы из actionable_next_steps.`;
     }
 
     const akbReady = !!task.__articleKnowledgeBase;
@@ -282,7 +283,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
   if (currentPQ >= EEAT_PQ_TARGET) {
     log(`Stage 5 блок ${blockIndex + 1}: PQ ${currentPQ} >= ${EEAT_PQ_TARGET} ✓ (${s5Loop} итераций)`, 'success');
   } else {
-    log(`Stage 5 блок ${blockIndex + 1}: PQ ${currentPQ} после ${s5Loop} итераций — продолжаем с лучшим результатом`, 'warn');
+    log(`Stage 5 блок ${blockIndex + 1}: PQ ${pqLabel()} после ${s5Loop} итераций — продолжаем с лучшим результатом`, 'warn');
   }
 
   // ── Logprob confidence check (DeepSeek only) ──────────────────────

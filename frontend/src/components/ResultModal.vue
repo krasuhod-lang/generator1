@@ -48,7 +48,9 @@ watch(() => [props.visible, props.taskId], async ([vis, id]) => {
 
 // ── Метрики ────────────────────────────────────────────────────────────────
 const lsiCoverage = computed(() => metrics.value?.lsi_coverage  ?? 0);
-const eeatScore   = computed(() => metrics.value?.eeat_score    ?? 0);
+const eeatScore   = computed(() => metrics.value?.eeat_score == null
+  ? (verdict.value?.global_audit?.page_quality_score ?? '—')
+  : metrics.value.eeat_score);
 const bm25Score   = computed(() => metrics.value?.bm25_score    ?? 0);
 
 const deepseekIn   = computed(() => metrics.value?.deepseek_tokens_in  ?? 0);
@@ -96,7 +98,9 @@ const eeatBreakdown = computed(() => {
     return EEAT_CRITERIA_NEW.map(c => ({
       label:         c.label,
       emoji:         c.emoji,
-      score:         parseFloat(src[c.key]?.score) || 0,
+      score:         src[c.key]?.score == null || !Number.isFinite(Number(src[c.key].score))
+        ? null
+        : Number(src[c.key].score),
       maxScore:      c.maxScore,
       justification: src[c.key]?.justification || '',
     }));
@@ -107,7 +111,7 @@ const eeatBreakdown = computed(() => {
     return src.map(c => ({
       label:         c.name || '',
       emoji:         '',
-      score:         parseFloat(c.score) || 0,
+      score: c.score == null || !Number.isFinite(Number(c.score)) ? null : Number(c.score),
       maxScore:      2,
       justification: c.justification || '',
     }));
@@ -117,9 +121,23 @@ const eeatBreakdown = computed(() => {
 });
 
 const eeatTotal = computed(() => {
-  if (!eeatBreakdown.value) return 0;
+  if (!eeatBreakdown.value || eeatBreakdown.value.some(c => c.score == null || !Number.isFinite(c.score))) return null;
   return eeatBreakdown.value.reduce((sum, c) => sum + c.score, 0);
 });
+
+function formatScore(value, digits = 1) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  return Number(value).toFixed(digits);
+}
+
+function blockPqClass(value) {
+  if (value == null || !Number.isFinite(Number(value))) return 'text-gray-500';
+  return Number(value) >= 8 ? 'text-green-400' : Number(value) >= 6 ? 'text-yellow-400' : 'text-red-400';
+}
+
+function blockPqLabel(value) {
+  return formatScore(value, 1);
+}
 
 // TF-IDF density report (программные данные из Stage 7)
 const tfIdfDensity = computed(() => {
@@ -281,8 +299,8 @@ function closeModal() {
                 </div>
                 <div class="card py-3 px-4">
                   <p class="text-xs text-gray-500 uppercase tracking-wide">PQ Score</p>
-                  <p class="text-2xl font-bold mt-1" :class="pqScore >= 8 ? 'text-green-400' : pqScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
-                    {{ pqScore }}<span class="text-base text-gray-600">/10</span>
+                  <p class="text-2xl font-bold mt-1" :class="pqScore == null || pqScore === '—' ? 'text-gray-400' : pqScore >= 8 ? 'text-green-400' : pqScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
+                    {{ formatScore(pqScore, 1) }}<span class="text-base text-gray-600">/10</span>
                   </p>
                 </div>
                 <div class="card py-3 px-4">
@@ -362,8 +380,8 @@ function closeModal() {
                   <div v-if="eeatBreakdown">
                     <div class="flex items-center gap-2 mb-2">
                       <p class="text-xs text-gray-400">E-E-A-T Breakdown</p>
-                      <span class="text-xs font-bold" :class="eeatTotal >= 8 ? 'text-green-400' : eeatTotal >= 6 ? 'text-yellow-400' : 'text-red-400'">
-                        {{ eeatTotal.toFixed(1) }}/10
+                      <span class="text-xs font-bold" :class="eeatTotal == null ? 'text-gray-400' : eeatTotal >= 8 ? 'text-green-400' : eeatTotal >= 6 ? 'text-yellow-400' : 'text-red-400'">
+                        {{ eeatTotal == null ? '—' : eeatTotal.toFixed(1) }}/10
                       </span>
                     </div>
                     <div class="space-y-2">
@@ -373,11 +391,11 @@ function closeModal() {
                           <span class="text-[11px] text-gray-400 w-32 truncate">{{ c.label }}</span>
                           <div class="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
                             <div
-                              :class="['h-full rounded-full transition-all', c.score >= 1.5 ? 'bg-green-500' : c.score >= 1 ? 'bg-yellow-500' : 'bg-red-500']"
-                              :style="{ width: (c.score / c.maxScore * 100) + '%' }"
+                              :class="['h-full rounded-full transition-all', c.score == null ? 'bg-gray-600' : c.score >= 1.5 ? 'bg-green-500' : c.score >= 1 ? 'bg-yellow-500' : 'bg-red-500']"
+                              :style="{ width: c.score == null ? '0%' : (c.score / c.maxScore * 100) + '%' }"
                             />
                           </div>
-                          <span class="text-[11px] font-mono text-gray-300 w-10 text-right">{{ c.score }}/{{ c.maxScore }}</span>
+                          <span class="text-[11px] font-mono text-gray-300 w-10 text-right">{{ formatScore(c.score, 1) }}/{{ c.maxScore }}</span>
                         </div>
                         <p v-if="c.justification" class="text-[10px] text-gray-600 ml-7 mt-0.5 leading-snug group-hover:text-gray-400 transition-colors">
                           {{ c.justification }}
@@ -524,8 +542,8 @@ function closeModal() {
                     <span class="text-xs font-mono" :class="block.lsi_coverage >= 80 ? 'text-green-400' : 'text-yellow-400'">
                       LSI {{ block.lsi_coverage ?? 0 }}%
                     </span>
-                    <span class="text-xs font-mono" :class="block.pq_score >= 8 ? 'text-green-400' : 'text-yellow-400'">
-                      PQ {{ block.pq_score ?? 0 }}
+                    <span class="text-xs font-mono" :class="blockPqClass(block.pq_score)">
+                      PQ {{ blockPqLabel(block.pq_score) }}
                     </span>
                   </div>
                 </div>

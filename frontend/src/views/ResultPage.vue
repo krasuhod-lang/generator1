@@ -65,7 +65,12 @@ onMounted(async () => {
 // поэтому без явного Number(...) последующий `.toFixed(...)` падает с TypeError
 // и вся страница рендерится пустой. Все денежные/метрические поля приводим к Number здесь.
 const lsiCoverage = computed(() => Number(metrics.value?.lsi_coverage ?? 0));
-const eeatScore   = computed(() => Number(metrics.value?.eeat_score   ?? 0));
+const eeatScore   = computed(() => {
+  const metric = metrics.value?.eeat_score;
+  if (metric != null && Number.isFinite(Number(metric))) return Number(metric);
+  const pageScore = verdict.value?.global_audit?.page_quality_score;
+  return pageScore == null ? null : Number(pageScore);
+});
 const bm25Score   = computed(() => Number(metrics.value?.bm25_score   ?? 0));
 const tfidfStatus = computed(() => {
   const s = verdict.value?.global_audit?.tfidf_spam_report;
@@ -105,7 +110,10 @@ const generationTime = computed(() => {
 
 // ── Stage 7: вердикт ──────────────────────────────────────────────────────
 const hcuStatus = computed(() => verdict.value?.global_audit?.hcu_status || '—');
-const pqScore   = computed(() => verdict.value?.global_audit?.page_quality_score ?? '—');
+const pqScore   = computed(() => {
+  const value = verdict.value?.global_audit?.page_quality_score;
+  return value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+});
 const overallVerdict = computed(() => verdict.value?.global_audit?.overall_verdict || '—');
 
 const hcuBadge = computed(() => {
@@ -196,6 +204,13 @@ function exportHtml() {
 function fmt(n, digits = 0) {
   return Number(n).toLocaleString('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
+function optionalScore(value, digits = 1) {
+  return value == null || !Number.isFinite(Number(value)) ? '—' : fmt(value, digits);
+}
+function pqClass(value) {
+  if (value == null || !Number.isFinite(Number(value))) return 'text-gray-500';
+  return Number(value) >= 8 ? 'text-green-400' : Number(value) >= 6 ? 'text-yellow-400' : 'text-red-400';
+}
 </script>
 
 <template>
@@ -271,13 +286,13 @@ function fmt(n, digits = 0) {
         <!-- E-E-A-T Score -->
         <div class="card flex flex-col gap-1">
           <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">E-E-A-T Score</p>
-          <p class="text-3xl font-bold" :class="eeatScore >= 8 ? 'text-green-400' : eeatScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
-            {{ eeatScore }}<span class="text-lg text-gray-600">/10</span>
+          <p class="text-3xl font-bold" :class="eeatScore == null ? 'text-gray-400' : eeatScore >= 8 ? 'text-green-400' : eeatScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
+            {{ optionalScore(eeatScore) }}<span class="text-lg text-gray-600">/10</span>
           </p>
           <div class="h-1.5 bg-gray-800 rounded-full mt-1 overflow-hidden">
             <div class="h-full rounded-full transition-all"
-              :class="eeatScore >= 8 ? 'bg-green-500' : eeatScore >= 6 ? 'bg-yellow-500' : 'bg-red-500'"
-              :style="{ width: (eeatScore / 10 * 100) + '%' }"
+              :class="eeatScore == null ? 'bg-gray-600' : eeatScore >= 8 ? 'bg-green-500' : eeatScore >= 6 ? 'bg-yellow-500' : 'bg-red-500'"
+              :style="{ width: eeatScore == null ? '0%' : (eeatScore / 10 * 100) + '%' }"
             />
           </div>
         </div>
@@ -397,8 +412,8 @@ function fmt(n, digits = 0) {
                 </span>
                 <span class="text-gray-500">
                   PQ
-                  <span :class="block.pq_score >= 8 ? 'text-green-400' : block.pq_score >= 6 ? 'text-yellow-400' : 'text-red-400'">
-                    {{ block.pq_score ?? 0 }}
+                  <span :class="pqClass(block.pq_score)">
+                    {{ optionalScore(block.pq_score) }}
                   </span>
                 </span>
               </div>

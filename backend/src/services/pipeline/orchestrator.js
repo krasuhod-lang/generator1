@@ -828,13 +828,13 @@ async function runPipeline(task, ctx) {
           lsi_missing: fallbackCoverage.missing || [],
           spam_risk_detected: false,
         },
-        pq_score: 0,
+        pq_score: null,
         actionable_next_steps: [{
           problem: 'Технический аудит не вернул разборный JSON',
           solution: 'Выполнить один компактный повторный audit или передать блок на проверку',
         }],
       };
-      pqScore = 0;
+      pqScore = null;
       lsiCovPct = fallbackCoverage.percent;
       log(`Stage 4 блок ${i + 1}: audit_unavailable (${e.message}) — передаём лучший HTML в контролируемый refine`, 'warn');
     }
@@ -927,7 +927,7 @@ async function runPipeline(task, ctx) {
       log(`Блок ${i + 1}: Остались вода-фразы: ${finalWater.join(', ')}`, 'warn');
     }
 
-    log(`Блок ${i + 1} готов. LSI: ${lsiCoverageAfter}%, PQ: ${currentPQ}`, 'success');
+    log(`Блок ${i + 1} готов. LSI: ${lsiCoverageAfter}%, PQ: ${currentPQ == null ? 'не рассчитан' : currentPQ}`, 'success');
 
     // Сохраняем финальный блок в БД
     await saveContentBlock(taskId, i, block, currentHTML, currentPQ, lsiCoverageAfter, currentAudit);
@@ -1450,7 +1450,7 @@ async function runPipeline(task, ctx) {
     taskId,
     blocksGenerated:    finalBlocks.length,
     globalLSICoverage:  s7Result.globalLSICoverage   || 0,
-    globalEEATScore:    s7Result.globalEEATScore      || 0,
+    globalEEATScore:    s7Result.globalEEATScore      ?? null,
     bm25:               s7Result.bm25                 || {},
     finalHTMLLength:    (s7Result.finalHTML || '').length,
     eeatBreakdown:      s7Result.eeatBreakdown        || null,
@@ -1468,7 +1468,7 @@ async function runPipeline(task, ctx) {
   log(
     `Пайплайн завершён. Блоков: ${finalBlocks.length} | ` +
     `LSI: ${s7Result.globalLSICoverage || 0}% | ` +
-    `E-E-A-T: ${s7Result.globalEEATScore || 0} | ` +
+    `E-E-A-T: ${s7Result.globalEEATScore ?? 'не рассчитан'} | ` +
     `BM25: ${s7Result.bm25?.score?.toFixed(2) || '—'} | ` +
     `Время: ${Math.floor(generationTimeSec / 60)}м ${generationTimeSec % 60}с`,
     'success'
