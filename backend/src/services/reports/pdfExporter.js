@@ -118,26 +118,39 @@ function buildReportPdf(payload = {}) {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
 
       const bottom = () => doc.page.height - doc.page.margins.bottom;
+      const resetFlowX = () => {
+        doc.x = doc.page.margins.left;
+      };
       const ensureSpace = (height = 28) => {
         if (doc.y + height > bottom()) doc.addPage();
+        resetFlowX();
       };
       const H = (title, size = 14) => {
+        resetFlowX();
         ensureSpace(size + 30);
-        doc.moveDown(0.55).font(FONT_B).fontSize(size).fillColor('#111827').text(_md(title));
+        resetFlowX();
+        doc.moveDown(0.55).font(FONT_B).fontSize(size).fillColor('#111827').text(_md(title), {
+          width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+          lineGap: 2,
+        });
+        resetFlowX();
         doc.moveDown(0.18);
       };
       const P = (value, opts = {}) => {
         const text = _htmlToPlainText(value);
         if (!text) return;
         ensureSpace(opts.minHeight || 24);
-        doc.font(FONT).fontSize(opts.size || 9.5).fillColor(opts.color || '#1f2937').text(text, {
-          width: opts.width,
+        doc.font(FONT).fontSize(opts.size || 10).fillColor(opts.color || '#1f2937').text(text, {
+          width: opts.width || (doc.page.width - doc.page.margins.left - doc.page.margins.right),
           align: opts.align,
+          lineGap: opts.lineGap == null ? 2 : opts.lineGap,
           continued: false,
         });
+        resetFlowX();
       };
-      const bullet = (value) => P(`•  ${value}`, { minHeight: 17 });
+      const bullet = (value) => P(`•  ${value}`, { minHeight: 17, size: 9.6 });
       const rule = () => {
+        resetFlowX();
         ensureSpace(12);
         const y = doc.y + 2;
         doc.moveTo(doc.page.margins.left, y).lineTo(doc.page.width - doc.page.margins.right, y)
@@ -168,6 +181,7 @@ function buildReportPdf(payload = {}) {
         };
         drawRow(headers, true);
         rows.forEach((row) => drawRow(row, false));
+        resetFlowX();
         doc.moveDown(0.4);
       };
 
@@ -238,7 +252,11 @@ function buildReportPdf(payload = {}) {
           const image = _parseBase64Image(chart.data_url);
           if (!image) return;
           ensureSpace(250);
-          doc.font(FONT_B).fontSize(10.5).fillColor('#111827').text(_md(chart.title || chart.key || 'График'));
+          resetFlowX();
+          doc.font(FONT_B).fontSize(10.5).fillColor('#111827').text(_md(chart.title || chart.key || 'График'), {
+            width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+            lineGap: 2,
+          });
           doc.moveDown(0.15);
           try {
             doc.image(image.buffer, {
@@ -246,6 +264,7 @@ function buildReportPdf(payload = {}) {
               align: 'center',
               valign: 'center',
             });
+            resetFlowX();
             doc.moveDown(0.35);
           } catch (_) {
             P('График не удалось встроить в PDF.', { color: '#6b7280' });

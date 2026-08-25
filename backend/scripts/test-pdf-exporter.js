@@ -51,6 +51,11 @@ function commandText(command, args) {
     assert.match(text, /Открыть материал \(https:\/\/example\.com\/article\)/, 'safe link label and URL must be rendered');
     assert.doesNotMatch(text, /<\/?p>|<\/?ul>|<\/?li>|<a\s|href=/i, 'raw HTML must not leak into PDF text');
 
+    const bbox = commandText('pdftotext', ['-bbox', tmpPath, '-']);
+    const workHeading = bbox.match(/<word xMin="([0-9.]+)"[^>]*>Выполненные<\/word>/);
+    assert.ok(workHeading, 'work heading must be present in PDF bounding boxes');
+    assert.ok(Number(workHeading[1]) <= 52, `work heading must start at the left content edge, got x=${workHeading[1]}`);
+
     for (let page = 1; page <= pages; page += 1) {
       const pageText = commandText('pdftotext', ['-f', String(page), '-l', String(page), '-layout', tmpPath, '-']).trim();
       assert.ok(pageText.length > 20, `page ${page} must not be empty`);
