@@ -11,6 +11,7 @@
 const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
+const { JSDOM } = require('jsdom');
 
 const FONT_DIR = path.join(__dirname, '../../../assets/fonts');
 const FONT_REGULAR = path.join(FONT_DIR, 'DejaVuSans.ttf');
@@ -21,6 +22,66 @@ function _num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 function _ru(v) { return _num(v).toLocaleString('ru-RU'); }
 function _safeHref(v) { return /^https?:\/\//i.test(_text(v)) ? _text(v) : ''; }
 function _md(v) { return _text(v).replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1'); }
+
+const BLOCK_TAGS = new Set([
+  'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'DL', 'DT', 'DD',
+  'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3',
+  'H4', 'H5', 'H6', 'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P',
+  'PRE', 'SECTION', 'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR',
+  'UL',
+]);
+
+function _safeNodeText(node) {
+  return String(node?.textContent || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
+}
+
+/**
+ * Converts the rich HTML stored by the editor into printable text. The PDF
+ * exporter deliberately does not pass markup to PDFKit: PDFKit treats HTML as
+ * literal characters, which produced <p>, <a>, href and <br> in client PDFs.
+ * Links remain useful as `label (URL)` text and lists retain bullet markers.
+ */
+function _htmlToPlainText(value) {
+  const raw = _text(value);
+  if (!raw) return '';
+  if (!/<\/?[a-z][^>]*>/i.test(raw)) return _md(raw);
+
+  let root;
+  try {
+    const dom = new JSDOM(`<div>${raw}</div>`);
+    root = dom.window.document.body.firstElementChild;
+  } catch (_) {
+    return _md(raw.replace(/<[^>]+>/g, ' '));
+  }
+  if (!root) return _md(raw);
+
+  const visit = (node) => {
+    if (!node) return '';
+    if (node.nodeType === 3) return node.textContent || '';
+    if (node.nodeType !== 1) return '';
+    const tag = node.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return '';
+    if (tag === 'BR') return '\n';
+    if (tag === 'HR') return '\n────────────\n';
+    if (tag === 'A') {
+      const label = _safeNodeText(node);
+      const href = _safeHref(node.getAttribute('href'));
+      if (!label) return href;
+      return href && href !== label ? `${label} (${href})` : label;
+    }
+    const content = Array.from(node.childNodes).map(visit).join('');
+    if (tag === 'LI') return `\n• ${content}\n`;
+    if (BLOCK_TAGS.has(tag)) return `\n${content}\n`;
+    return content;
+  };
+
+  return _md(visit(root)
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim());
+}
 
 function _parseBase64Image(dataUrl) {
   const m = String(dataUrl || '').match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/i);
@@ -66,7 +127,7 @@ function buildReportPdf(payload = {}) {
         doc.moveDown(0.18);
       };
       const P = (value, opts = {}) => {
-        const text = _md(value);
+        const text = _htmlToPlainText(value);
         if (!text) return;
         ensureSpace(opts.minHeight || 24);
         doc.font(FONT).fontSize(opts.size || 9.5).fillColor(opts.color || '#1f2937').text(text, {
@@ -100,7 +161,7 @@ function buildReportPdf(payload = {}) {
             doc.rect(x, y, width, rowHeight).fillAndStroke(header ? '#eef2ff' : '#ffffff', '#d1d5db');
             doc.font(header ? FONT_B : FONT).fontSize(header ? 8.5 : 8.2)
               .fillColor(header ? '#3730a3' : '#1f2937')
-              .text(_md(cell), x + 5, y + 7, { width: Math.max(10, width - 10), height: rowHeight - 8, ellipsis: true });
+              .text(_htmlToPlainText(cell).replace(/\n+/g, ' '), x + 5, y + 7, { width: Math.max(10, width - 10), height: rowHeight - 8, ellipsis: true });
             x += width;
           });
           doc.y = y + rowHeight;
@@ -281,16 +342,27 @@ function buildReportPdf(payload = {}) {
       for (let index = 0; index < range.count; index += 1) {
         doc.switchToPage(index);
         const pageNo = index + 1;
-        doc.font(FONT).fontSize(7.5).fillColor('#6b7280')
-          .text('generator1 · SEO report', doc.page.margins.left, doc.page.height - 31, {
-            width: 230,
+        // PDFKit considers the default bottom margin a hard content boundary.
+        // The footer is intentionally inside the physical page, below the
+        // content area, so temporarily disable auto page creation for these
+        // two fixed-position labels. Without this, every footer line could
+        // create a new footer-only page in the exported PDF.
+        const previousBottomMargin = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
+        try {
+          doc.font(FONT).fontSize(7.5).fillColor('#6b7280')
+            .text('generator1 · SEO report', doc.page.margins.left, doc.page.height - 31, {
+              width: 230,
+              lineBreak: false,
+            });
+          doc.text(`Страница ${pageNo} из ${range.count}`, doc.page.width - doc.page.margins.right - 120, doc.page.height - 31, {
+            width: 120,
+            align: 'right',
             lineBreak: false,
           });
-        doc.text(`Страница ${pageNo} из ${range.count}`, doc.page.width - doc.page.margins.right - 120, doc.page.height - 31, {
-          width: 120,
-          align: 'right',
-          lineBreak: false,
-        });
+        } finally {
+          doc.page.margins.bottom = previousBottomMargin;
+        }
       }
 
       doc.end();
