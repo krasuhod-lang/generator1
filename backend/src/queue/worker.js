@@ -26,6 +26,7 @@ const { publish }    = require('../services/sse/sseManager');
 const { runPipeline, PipelinePausedError } = require('../services/pipeline/orchestrator');
 const { createParserWorker } = require('./parserWorker');
 const { createSiteCrawlerWorker } = require('./siteCrawlerWorker');
+const { startProjectReportWorkers, stopProjectReportWorkers } = require('./projectReportWorker');
 const {
   claimGenerationTask: claimGenerationTaskWithProfileSlot,
 } = require('../services/tasks/generationAdmission');
@@ -349,10 +350,18 @@ const worker = new Worker(
 let parserWorker = null;
 let siteCrawlerWorker = null;
 schemaReady
-  .then(() => {
+  .then(async () => {
     parserWorker = createParserWorker();
     siteCrawlerWorker = createSiteCrawlerWorker();
     console.log('[Worker] parser/site-crawler workers started after reliability schema check');
+    try {
+      await startProjectReportWorkers();
+      console.log('[Worker] project-analysis/report-summary workers started after reliability schema check');
+    } catch (error) {
+      // Не блокируем parser/site-crawler из-за временной ошибки запуска
+      // аналитических consumers: durable outbox/recovery повторит обработку.
+      console.error('[Worker] project-analysis/report-summary workers not started:', error.message);
+    }
   })
   .catch((e) => console.error('[Worker] parser/site-crawler workers not started:', e.message));
 
@@ -448,6 +457,7 @@ async function gracefulShutdown(signal) {
       worker.close(true),
       parserWorker ? parserWorker.close(true) : Promise.resolve(),
       siteCrawlerWorker ? siteCrawlerWorker.close(true) : Promise.resolve(),
+      stopProjectReportWorkers(),
     ]);
     console.log('[Worker] All workers closed, active jobs returned to queues');
   } catch (err) {
