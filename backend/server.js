@@ -572,6 +572,23 @@ async function ensureSchema() {
     // могла показывать учётные данные зарегистрированных аккаунтов. Аутентификация
     // продолжает работать через password_hash (bcrypt) — это поле только для просмотра.
     await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_plain TEXT`);
+    // Email verification: legacy users default to verified; new password registrations
+    // explicitly set email_verified=false before issuing a verification code.
+    await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users(email, email_verified)`);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS email_verification_codes (
+        user_id       UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        code_hash     TEXT NOT NULL,
+        expires_at    TIMESTAMPTZ NOT NULL,
+        attempts      INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        last_sent_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        consumed_at   TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_email_verification_expires ON email_verification_codes(expires_at)`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
 

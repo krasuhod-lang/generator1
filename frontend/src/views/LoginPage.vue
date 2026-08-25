@@ -18,6 +18,13 @@ async function submit() {
     await auth.login(email.value, password.value);
     router.push('/dashboard');
   } catch (e) {
+    if (e.response?.data?.pending_verification) {
+      router.push({
+        path: '/register',
+        query: { verify: e.response.data.email || email.value },
+      });
+      return;
+    }
     error.value = e.response?.data?.error || 'Ошибка входа';
   } finally {
     loading.value = false;

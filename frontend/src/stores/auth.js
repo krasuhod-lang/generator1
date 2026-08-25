@@ -2,55 +2,73 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import api from '../api.js';
 
+function readPendingVerification() {
+  try {
+    const raw = sessionStorage.getItem('seo_pending_verification');
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(null);
   const user  = ref(null);
+  const pendingVerification = ref(readPendingVerification());
 
   const isLoggedIn = computed(() => !!token.value);
 
-  // ── Восстановление сессии при перезагрузке страницы ─────────────────────
-  // Вызывается в App.vue → onMounted.
-  // Request interceptor в api.js сам читает localStorage, поэтому здесь
-  // достаточно восстановить реактивный стейт и проверить, жив ли токен.
   async function restoreSession() {
     const saved = localStorage.getItem('seo_token');
     if (!saved) return;
 
     token.value = saved;
-    // Также ставим в defaults как резерв (перед инициализацией interceptor'а)
     api.defaults.headers.common['Authorization'] = `Bearer ${saved}`;
 
     try {
       await fetchMe();
-    } catch (err) {
-      // Токен протух или невалиден — полностью выходим
+    } catch (_) {
       logout();
     }
   }
 
-  // ── Регистрация ──────────────────────────────────────────────────────────
   async function register(email, password, name) {
     const { data } = await api.post('/auth/register', { email, password, name });
+    if (data?.pending_verification) {
+      setPendingVerification(data.email || email, data.retry_after);
+      return data;
+    }
     _applyAuth(data);
     return data;
   }
 
-  // ── Логин ────────────────────────────────────────────────────────────────
   async function login(email, password) {
     const { data } = await api.post('/auth/login', { email, password });
     _applyAuth(data);
     return data;
   }
 
-  // ── Профиль ──────────────────────────────────────────────────────────────
+  async function verifyEmail(email, code) {
+    const { data } = await api.post('/auth/verify-email', { email, code });
+    _applyAuth(data);
+    pendingVerification.value = null;
+    sessionStorage.removeItem('seo_pending_verification');
+    return data;
+  }
+
+  async function resendVerification(email) {
+    const { data } = await api.post('/auth/resend-verification', { email });
+    if (data?.pending_verification || data?.email) {
+      setPendingVerification(data.email || email, data.retry_after);
+    }
+    return data;
+  }
+
   async function fetchMe() {
     const { data } = await api.get('/auth/me');
     user.value = data.user;
   }
 
-  // ── Выход ────────────────────────────────────────────────────────────────
-  // Только чистит стейт — редирект на /login делает вызывающий код
-  // (router guard в router/index.js или 401-interceptor в api.js).
   function logout() {
     token.value = null;
     user.value  = null;
@@ -58,24 +76,34 @@ export const useAuthStore = defineStore('auth', () => {
     delete api.defaults.headers.common['Authorization'];
   }
 
-  // ── Внутренний хелпер: применяем данные после успешного login/register ──
+  function setPendingVerification(email, retryAfter = 60) {
+    pendingVerification.value = {
+      email: String(email || '').trim().toLowerCase(),
+      retryAfter: Number(retryAfter) || 60,
+    };
+    try {
+      sessionStorage.setItem('seo_pending_verification', JSON.stringify(pendingVerification.value));
+    } catch (_) { /* sessionStorage may be unavailable in privacy mode */ }
+  }
+
   function _applyAuth(data) {
-    if (!data.token) throw new Error('Сервер не вернул токен');
+    if (!data?.token) throw new Error('Сервер не вернул токен');
     token.value = data.token;
     user.value  = data.user;
     localStorage.setItem('seo_token', data.token);
-    // Дублируем в defaults — для запросов, которые уйдут до следующего
-    // interceptor-цикла (например, сразу после логина)
     api.defaults.headers.common['Authorization'] = `Bearer ${data.token}`;
   }
 
   return {
     token,
     user,
+    pendingVerification,
     isLoggedIn,
     restoreSession,
     register,
     login,
+    verifyEmail,
+    resendVerification,
     logout,
     fetchMe,
   };

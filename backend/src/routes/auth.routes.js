@@ -6,6 +6,8 @@ const authMiddleware = require('../middleware/auth');
 const {
   register,
   login,
+  verifyEmail,
+  resendVerification,
   logout,
   me,
 } = require('../controllers/auth.controller');
@@ -34,11 +36,33 @@ const registerLimiter = rateLimit({
   message: { error: 'Слишком много регистраций с этого IP. Попробуйте позже.' },
 });
 
+const verifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: parseInt(process.env.AUTH_VERIFY_RATE_LIMIT, 10) || 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много попыток подтверждения. Запросите новый код позже.' },
+});
+
+const resendVerificationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: parseInt(process.env.AUTH_RESEND_RATE_LIMIT, 10) || 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много запросов кодов. Попробуйте позже.' },
+});
+
 // POST /api/auth/register — регистрация (публичный + лимит)
 router.post('/register', registerLimiter, register);
 
 // POST /api/auth/login — логин (публичный + лимит)
 router.post('/login', loginLimiter, login);
+
+// POST /api/auth/verify-email — подтверждение 6-значным кодом
+router.post('/verify-email', verifyLimiter, verifyEmail);
+
+// POST /api/auth/resend-verification — повторная отправка кода
+router.post('/resend-verification', resendVerificationLimiter, resendVerification);
 
 // POST /api/auth/logout — логаут (публичный — клиент просто удаляет токен)
 router.post('/logout', logout);
