@@ -44,21 +44,45 @@ function isValidUrl(url) {
 // ─── GET /api/link-article ─────────────────────────────────────────
 async function listLinkArticleTasks(req, res, next) {
   try {
+    const limitRaw = Number.parseInt(req.query?.limit, 10);
+    const offsetRaw = Number.parseInt(req.query?.offset, 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(1000, Math.max(1, limitRaw)) : 200;
+    const offset = Number.isFinite(offsetRaw) ? Math.min(100000, Math.max(0, offsetRaw)) : 0;
+    const q = clipStr(req.query?.q, 200);
+    const requestedStatus = clipStr(req.query?.status, 40).toLowerCase();
+    const allowedStatuses = new Set(['queued', 'pending', 'running', 'processing', 'in_progress', 'partial', 'timeout', 'done', 'error', 'cancelled']);
+    const where = ['user_id = $1'];
+    const params = [req.user.id];
+    if (q) {
+      params.push(`%${q}%`);
+      where.push(`(topic ILIKE $${params.length} OR COALESCE(anchor_text, '') ILIKE $${params.length} OR COALESCE(anchor_url, '') ILIKE $${params.length})`);
+    }
+    if (allowedStatuses.has(requestedStatus)) {
+      params.push(requestedStatus);
+      where.push(`status::text = $${params.length}`);
+    }
+    const whereSql = where.join(' AND ');
+    const countResult = await db.query(
+      `SELECT COUNT(*)::int AS total FROM link_article_tasks WHERE ${whereSql}`,
+      params,
+    );
+    const listParams = [...params, limit, offset];
     const { rows } = await db.query(
       `SELECT id, topic, anchor_text, anchor_url, output_format, gemini_model,
-               status, progress_pct, current_stage, error_message,
+              status, progress_pct, current_stage, error_message,
               deepseek_tokens_in, deepseek_tokens_out,
               gemini_tokens_in, gemini_tokens_out,
               gemini_image_calls, cost_usd,
               quality_gate,
-              created_at, started_at, completed_at
+              created_at, updated_at, started_at, completed_at
          FROM link_article_tasks
-        WHERE user_id = $1
-        ORDER BY created_at DESC
-        LIMIT 200`,
-      [req.user.id],
+        WHERE ${whereSql}
+        ORDER BY created_at DESC, id DESC
+        LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+      listParams,
     );
-    return res.json({ tasks: rows });
+    const total = Number(countResult.rows[0]?.total || 0);
+    return res.json({ tasks: rows, meta: { total, limit, offset, hasMore: offset + rows.length < total } });
   } catch (err) {
     return next(err);
   }

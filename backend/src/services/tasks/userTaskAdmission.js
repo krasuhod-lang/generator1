@@ -47,7 +47,9 @@ async function tryAcquireUserTaskSlot({ userId, taskType, taskId, db = dbDefault
         [slotToken, LEASE_SECONDS],
       );
       await client.query('COMMIT');
-      return { claimed: true, slotToken, reused: true };
+      // Один и тот же task_id уже выполняется другим процессом. Не передаём
+      // повторному launcher право запускать pipeline и не даём ему release чужого lease.
+      return { claimed: false, reason: 'task_already_leased', slotToken, reused: true };
     }
 
     const count = await client.query(
@@ -109,6 +111,13 @@ async function acquireUserTaskSlot({ userId, taskType, taskId, db = dbDefault, m
   const startedAt = Date.now();
   while (true) {
     const result = await tryAcquireUserTaskSlot({ userId, taskType, taskId, db });
+    if (result.reason === 'task_already_leased') {
+      return {
+        ...result,
+        waitedMs: Date.now() - startedAt,
+        release: async () => {},
+      };
+    }
     if (result.claimed) {
       let released = false;
       const heartbeat = setInterval(() => {

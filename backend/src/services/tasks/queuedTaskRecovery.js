@@ -22,6 +22,7 @@ const TASK_REGISTRY = Object.freeze([
     statuses: ['queued'],
     queueStatus: 'queued',
     activeStatuses: ['running', 'in_progress'],
+    claimColumns: true,
     handler: () => require('../infoArticle/infoArticlePipeline').processInfoArticleTask,
   },
   {
@@ -30,6 +31,7 @@ const TASK_REGISTRY = Object.freeze([
     statuses: ['queued'],
     queueStatus: 'queued',
     activeStatuses: ['running', 'in_progress'],
+    claimColumns: true,
     handler: () => require('../linkArticle/linkArticlePipeline').processLinkArticleTask,
   },
   {
@@ -153,15 +155,20 @@ async function requeueActiveUserTasksForShutdown(db = dbDefault) {
     if (!Array.isArray(spec.activeStatuses) || spec.activeStatuses.length === 0) continue;
     try {
       const activeStages = Array.isArray(spec.activeStages) ? spec.activeStages : [];
+      const claimReset = spec.claimColumns
+        ? 'execution_token = NULL, execution_started_at = NULL,'
+        : '';
       const query = activeStages.length > 0
         ? `UPDATE ${spec.table}
               SET status = $1,
                   error_message = 'Задача возвращена в очередь перед перезапуском сервера',
+                  ${claimReset}
                   updated_at = NOW()
             WHERE (status::text = ANY($2::text[]) OR current_stage::text = ANY($3::text[]))`
         : `UPDATE ${spec.table}
               SET status = $1,
                   error_message = 'Задача возвращена в очередь перед перезапуском сервера',
+                  ${claimReset}
                   updated_at = NOW()
             WHERE status::text = ANY($2::text[])`;
       const params = activeStages.length > 0

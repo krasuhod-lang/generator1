@@ -7,9 +7,35 @@ import ProjectPicker from '../components/ProjectPicker.vue';
 import api from '../api.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useLinkArticleStore } from '../stores/linkArticle.js';
+import { filterAndSortTasks, groupTasksByDate, isTaskActiveStatus } from '../utils/taskHistory.js';
 
 const store = useLinkArticleStore();
 const auth  = useAuthStore();
+
+// История задач: фильтруем локально по уже загруженным server-side страницам.
+const historySearch = ref('');
+const historyStatus = ref('all');
+const historySort = ref('newest');
+const filteredTasks = computed(() => filterAndSortTasks(store.tasks, {
+  search: historySearch.value,
+  status: historyStatus.value,
+  sort: historySort.value,
+}));
+const taskGroups = computed(() => groupTasksByDate(filteredTasks.value));
+const historyStats = computed(() => {
+  const tasks = Array.isArray(store.tasks) ? store.tasks : [];
+  return {
+    total: store.total || tasks.length,
+    done: tasks.filter((task) => task.status === 'done').length,
+    active: tasks.filter((task) => isTaskActiveStatus(task.status)).length,
+    errors: tasks.filter((task) => ['error', 'timeout'].includes(task.status)).length,
+  };
+});
+function clearHistoryFilters() {
+  historySearch.value = '';
+  historyStatus.value = 'all';
+  historySort.value = 'newest';
+}
 
 // ── Форма ────────────────────────────────────────────────────────────
 const form = ref({
@@ -112,7 +138,7 @@ let pollTimer = null;
 onMounted(async () => {
   await store.fetchTasks();
   pollTimer = setInterval(() => {
-    if (store.tasks.some((t) => ['queued', 'running', 'pending', 'processing', 'in_progress'].includes(t.status))) {
+    if (store.tasks.some((t) => isTaskActiveStatus(t.status))) {
       store.fetchTasks();
     }
   }, 5000);
@@ -213,7 +239,7 @@ async function selectTask(id) {
   }
 
   // SSE поток — для running/queued задач
-  if (selectedTask.value && (selectedTask.value.status === 'running' || selectedTask.value.status === 'queued')) {
+  if (selectedTask.value && isTaskActiveStatus(selectedTask.value.status)) {
     openStreamFor(id);
   }
 }
@@ -260,8 +286,13 @@ function openStreamFor(id) {
 // Обновляем полный объект задачи при polling
 watch(() => store.tasks, (arr) => {
   if (!selectedTask.value) return;
-  const fresh = arr.find((t) => t.id === selectedTask.value.id);
-  if (fresh && fresh.status !== selectedTask.value.status) {
+  const fresh = arr.find((t) => String(t.id) === String(selectedTask.value.id));
+  if (fresh && (
+    fresh.status !== selectedTask.value.status
+    || fresh.updated_at !== selectedTask.value.updated_at
+    || fresh.progress_pct !== selectedTask.value.progress_pct
+    || Boolean(fresh.article_html) !== Boolean(selectedTask.value.article_html)
+  )) {
     store.getTask(selectedTask.value.id).then((t) => {
       if (t) selectedTask.value = { ...selectedTask.value, ...t };
     }).catch(() => {});
@@ -571,46 +602,75 @@ async function copyMetaField(label, value) {
           </div>
         </form>
 
-        <!-- ── Лента задач (справа) ── -->
+        <!-- ── Структурированная история задач ── -->
         <div class="card space-y-3 lg:col-span-7">
-          <div class="flex items-center justify-between">
-            <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">📚 Мои задачи</h2>
-            <button class="btn-ghost text-xs" @click="store.fetchTasks()">Обновить</button>
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-base font-bold text-indigo-300 uppercase tracking-wider">📚 Мои задачи</h2>
+              <div class="text-[11px] text-gray-500 mt-1">
+                Всего: {{ historyStats.total }} · Готово: {{ historyStats.done }} · В работе: {{ historyStats.active }} · Ошибки: {{ historyStats.errors }}
+              </div>
+            </div>
+            <button class="btn-ghost text-xs shrink-0" @click="store.fetchTasks()">Обновить</button>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2">
+            <input v-model="historySearch" type="search" class="input text-xs"
+                   placeholder="Поиск по теме, анкору или URL…" aria-label="Поиск задач" />
+            <select v-model="historyStatus" class="input text-xs" aria-label="Фильтр по статусу">
+              <option value="all">Все статусы</option>
+              <option value="active">В работе и очереди</option>
+              <option value="done">Готовые</option>
+              <option value="error">Ошибки и тайм-ауты</option>
+            </select>
+            <select v-model="historySort" class="input text-xs" aria-label="Сортировка задач">
+              <option value="newest">Сначала новые</option>
+              <option value="oldest">Сначала старые</option>
+              <option value="recently_updated">Недавно обновлённые</option>
+            </select>
+          </div>
+          <div v-if="historySearch || historyStatus !== 'all' || historySort !== 'newest'" class="flex items-center justify-between text-[11px] text-gray-500">
+            <span>Показано: {{ filteredTasks.length }} из {{ store.tasks.length }}</span>
+            <button class="underline hover:text-gray-300" @click="clearHistoryFilters">Сбросить фильтры</button>
           </div>
 
           <div v-if="store.loading && store.tasks.length === 0" class="text-sm text-gray-500">Загрузка…</div>
           <div v-else-if="store.tasks.length === 0" class="text-sm text-gray-500">
             Пока нет задач. Заполните форму и нажмите «Сгенерировать».
           </div>
-
-          <ul v-else class="divide-y divide-gray-800 -mx-1">
-            <li v-for="t in store.tasks" :key="t.id"
-                class="px-1 py-2 flex items-center gap-3 cursor-pointer hover:bg-gray-800/40 rounded"
-                :class="{ 'bg-gray-800/50': selectedTask?.id === t.id }"
-                @click="selectTask(t.id)">
-              <div class="flex-1 min-w-0">
-                <div class="text-sm text-gray-200 truncate">{{ t.topic }}</div>
-                <div class="text-[11px] text-gray-500 mt-0.5">
-                  {{ formatDate(t.created_at) }} · {{ formatCost(t.cost_usd) }}
-                  <span v-if="taskStageLabel(t) && t.status !== 'done' && t.status !== 'error'" class="text-indigo-300">
-                    · {{ taskStageLabel(t) }}
-                  </span>
-                  <span v-if="taskProgressLabel(t)" class="text-sky-300"> · {{ taskProgressLabel(t) }}</span>
-                  <span v-if="taskQueueLabel(t)" class="text-amber-300"> · {{ taskQueueLabel(t) }}</span>
-                </div>
-                <div v-if="t.error_message || t.error" class="text-[11px] text-red-300/90 truncate" :title="t.error_message || t.error">
-                  {{ t.error_message || t.error }}
-                </div>
-              </div>
-              <span class="text-[11px] px-2 py-0.5 rounded uppercase tracking-wider"
-                    :class="statusBadgeClass(t.status)">
-                {{ statusLabel(t.status) }}
-              </span>
-              <button class="btn-ghost text-xs px-2"
-                      @click.stop="handleDelete(t)"
-                      title="Удалить">✕</button>
-            </li>
-          </ul>
+          <div v-else-if="filteredTasks.length === 0" class="text-sm text-gray-500">
+            По выбранным фильтрам задач не найдено.
+          </div>
+          <div v-else class="space-y-4">
+            <section v-for="group in taskGroups" :key="group.label">
+              <h3 class="text-[11px] uppercase tracking-wider text-gray-500 border-b border-gray-800 pb-1 mb-1">{{ group.label }}</h3>
+              <ul class="divide-y divide-gray-800 -mx-1">
+                <li v-for="t in group.tasks" :key="t.id"
+                    class="px-1 py-2 flex items-center gap-3 cursor-pointer hover:bg-gray-800/40 rounded"
+                    :class="{ 'bg-gray-800/50': selectedTask?.id === t.id }"
+                    @click="selectTask(t.id)">
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm text-gray-200 truncate">{{ t.topic }}</div>
+                    <div class="text-[11px] text-gray-500 mt-0.5">
+                      {{ formatDate(t.created_at) }} · {{ formatCost(t.cost_usd) }}
+                      <span v-if="taskStageLabel(t) && !['done', 'error'].includes(t.status)" class="text-indigo-300">· {{ taskStageLabel(t) }}</span>
+                      <span v-if="taskProgressLabel(t)" class="text-sky-300">· {{ taskProgressLabel(t) }}</span>
+                      <span v-if="taskQueueLabel(t)" class="text-amber-300">· {{ taskQueueLabel(t) }}</span>
+                      <span v-if="t.anchor_text" class="text-gray-600">· {{ t.anchor_text }}</span>
+                    </div>
+                    <div v-if="t.error_message || t.error" class="text-[11px] text-red-300/90 truncate" :title="t.error_message || t.error">
+                      {{ t.error_message || t.error }}
+                    </div>
+                  </div>
+                  <span class="text-[11px] px-2 py-0.5 rounded uppercase tracking-wider" :class="statusBadgeClass(t.status)">{{ statusLabel(t.status) }}</span>
+                  <button class="btn-ghost text-xs px-2" @click.stop="handleDelete(t)" title="Удалить">✕</button>
+                </li>
+              </ul>
+            </section>
+            <button v-if="store.hasMore && historyStatus === 'all' && !historySearch" class="btn-ghost w-full text-xs" :disabled="store.loading" @click="store.loadMoreTasks()">
+              {{ store.loading ? 'Загрузка…' : 'Показать более старые задачи' }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -633,7 +693,7 @@ async function copyMetaField(label, value) {
         </header>
 
         <!-- Прогресс -->
-        <div v-if="selectedTask.status === 'running' || selectedTask.status === 'queued'" class="space-y-2">
+        <div v-if="isTaskActiveStatus(selectedTask.status)" class="space-y-2">
           <div class="flex justify-between items-center text-xs text-gray-400">
             <span>{{ stageLabel(selectedTask.current_stage) }}</span>
             <span>{{ selectedTask.progress_pct || 0 }}%</span>

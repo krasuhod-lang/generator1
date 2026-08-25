@@ -25,6 +25,7 @@
  */
 
 const db = require('../../config/db');
+const { claimArticleTask } = require('../tasks/articleExecutionClaim');
 const { callLLM, resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { runEeatAuditCore } = require('../eeatAudit/core');
 const { buildEeatContract, validateEeatContract } = require('../eeatAudit/contentContract');
@@ -131,6 +132,7 @@ const LINK_ARTICLE_LF_MAX_PASSES = (() => {
 })();
 
 const IN_PROGRESS = new Set(); // taskId — защита от двойного старта
+const EXECUTION_TOKENS = new Map();
 
 // Текущая стадия per-task (in-memory) — используется, чтобы recordEvent
 // автоматически прикреплял stage к событию без передачи его во все вызовы.
@@ -154,14 +156,19 @@ async function appendLog(taskId, msg, level = 'info') {
 
 async function setStage(taskId, stageName, progressPct) {
   CURRENT_STAGE.set(taskId, stageName);
+  const executionToken = EXECUTION_TOKENS.get(taskId);
   const funnel = FUNNELS.get(taskId);
   if (funnel) { try { funnel.step(stageName); } catch (_e) { /* analytics must not break generation */ } }
   try {
     await db.query(
-      `UPDATE link_article_tasks
-          SET current_stage = $2, progress_pct = $3, updated_at = NOW()
-        WHERE id = $1`,
-      [taskId, stageName, progressPct],
+      executionToken
+        ? `UPDATE link_article_tasks
+              SET current_stage = $2, progress_pct = $3, updated_at = NOW()
+            WHERE id = $1 AND execution_token = $4::uuid`
+        : `UPDATE link_article_tasks
+              SET current_stage = $2, progress_pct = $3, updated_at = NOW()
+            WHERE id = $1`,
+      executionToken ? [taskId, stageName, progressPct, executionToken] : [taskId, stageName, progressPct],
     );
   } catch (err) {
     console.error('[linkArticle] setStage failed:', err.message);
@@ -171,9 +178,14 @@ async function setStage(taskId, stageName, progressPct) {
 
 async function saveStageResult(taskId, column, data) {
   try {
+    const executionToken = EXECUTION_TOKENS.get(taskId);
     await db.query(
-      `UPDATE link_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1`,
-      [taskId, data != null ? JSON.stringify(data) : null],
+      executionToken
+        ? `UPDATE link_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1 AND execution_token = $3::uuid`
+        : `UPDATE link_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1`,
+      executionToken
+        ? [taskId, data != null ? JSON.stringify(data) : null, executionToken]
+        : [taskId, data != null ? JSON.stringify(data) : null],
     );
   } catch (err) {
     console.error(`[linkArticle] saveStageResult(${column}) failed:`, err.message);
@@ -1065,17 +1077,17 @@ async function processLinkArticleTask(taskId) {
   let geminiCacheName = null;
   let funnel = null;
   let topicDiscoveryResult = null;
+  let executionToken = null;
 
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM link_article_tasks WHERE id = $1`,
-      [taskId],
-    );
-    const task = rows[0];
-    if (!task) {
-      console.error(`[linkArticle] task ${taskId} not found`);
+    const claimed = await claimArticleTask({ table: 'link_article_tasks', taskId });
+    if (!claimed) {
+      console.warn(`[linkArticle] task ${taskId} was not claimable; skip duplicate/non-queued run`);
       return;
     }
+    const { task } = claimed;
+    executionToken = claimed.executionToken;
+    EXECUTION_TOKENS.set(taskId, executionToken);
 
     // Общий per-task budget для всех Gemini/Grok writer/refine вызовов.
     task.__tokenBudget = getConfiguredTaskTokenBudget();
@@ -1117,13 +1129,6 @@ async function processLinkArticleTask(taskId) {
       }
     }
 
-    await db.query(
-      `UPDATE link_article_tasks
-          SET status = 'running', started_at = COALESCE(started_at, NOW()),
-              progress_pct = 1, error_message = NULL, updated_at = NOW()
-        WHERE id = $1`,
-      [taskId],
-    );
     publishEvent(taskId, 'status', { status: 'running' });
     await appendLog(taskId, '🚀 Старт генерации ссылочной статьи', 'ok');
 
@@ -1359,8 +1364,8 @@ async function processLinkArticleTask(taskId) {
         task.__geminiCacheName = created.name;
         geminiCacheName = created.name;
         await db.query(
-          `UPDATE link_article_tasks SET gemini_cache_name = $2, updated_at = NOW() WHERE id = $1`,
-          [taskId, created.name],
+          `UPDATE link_article_tasks SET gemini_cache_name = $2, updated_at = NOW() WHERE id = $1 AND execution_token = $3::uuid`,
+          [taskId, created.name, executionToken],
         );
         await appendLog(taskId, `💾 Gemini cachedContents создан (${created.name})`, 'ok');
       } catch (e) {
@@ -1396,8 +1401,8 @@ async function processLinkArticleTask(taskId) {
       await db.query(
         `UPDATE link_article_tasks
             SET eeat_audit = $2, eeat_score = $3, updated_at = NOW()
-          WHERE id = $1`,
-        [taskId, JSON.stringify(eeatAudit), eeatAudit.total_score],
+          WHERE id = $1 AND execution_token = $4::uuid`,
+        [taskId, JSON.stringify(eeatAudit), eeatAudit.total_score, executionToken],
       );
       await appendLog(
         taskId,
@@ -1440,8 +1445,8 @@ async function processLinkArticleTask(taskId) {
             await db.query(
               `UPDATE link_article_tasks
                   SET eeat_audit = $2, eeat_score = $3, updated_at = NOW()
-                WHERE id = $1`,
-              [taskId, JSON.stringify(reaudit), reaudit.total_score],
+                WHERE id = $1 AND execution_token = $4::uuid`,
+              [taskId, JSON.stringify(reaudit), reaudit.total_score, executionToken],
             );
             eeatAudit = reaudit;
             await appendLog(
@@ -1919,7 +1924,7 @@ async function processLinkArticleTask(taskId) {
       await appendLog(taskId, `⚠️ Мета-теги не сгенерированы: ${metaErr.message}`, 'warn');
     }
 
-    await db.query(
+    const finalWrite = await db.query(
       `UPDATE link_article_tasks
           SET article_html             = $2,
               article_plain            = $3,
@@ -1932,15 +1937,23 @@ async function processLinkArticleTask(taskId) {
               progress_pct   = 100,
               current_stage  = 'done',
               completed_at   = NOW(),
+              execution_token = NULL,
+              execution_started_at = NULL,
+              gemini_cache_name = NULL,
               updated_at     = NOW()
-        WHERE id = $1`,
+        WHERE id = $1 AND execution_token = $10::uuid`,
       [
         taskId, finalHtml, finalPlain,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
         linkQualityGateVerdict ? JSON.stringify(linkQualityGateVerdict) : null,
         linkMetaTags ? JSON.stringify(linkMetaTags) : null,
+        executionToken,
       ],
     );
+    if (finalWrite.rowCount !== 1) {
+      console.warn(`[linkArticle] task ${taskId} claim lost before final write; stale result discarded`);
+      return;
+    }
     await appendLog(taskId, '🎉 Ссылочная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
     try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
@@ -1983,7 +1996,7 @@ async function processLinkArticleTask(taskId) {
 
     // 9. Best-effort cleanup Gemini cachedContents (TTL — fallback).
     if (geminiCacheName) {
-      cleanupGeminiCache(taskId, geminiCacheName);
+      cleanupGeminiCache(taskId, geminiCacheName, executionToken);
       geminiCacheName = null;
     }
   } catch (err) {
@@ -1995,9 +2008,11 @@ async function processLinkArticleTask(taskId) {
             SET status = 'error',
                 error_message = $2,
                 completed_at  = NOW(),
+                execution_token = NULL,
+                execution_started_at = NULL,
                 updated_at    = NOW()
-          WHERE id = $1`,
-        [taskId, err.message.slice(0, 1000)],
+          WHERE id = $1 AND execution_token = $3::uuid`,
+        [taskId, err.message.slice(0, 1000), executionToken],
       );
       await appendLog(taskId, `❌ Ошибка: ${err.message}`, 'err');
       publishEvent(taskId, 'status', { status: 'error', error: err.message });
@@ -2013,11 +2028,12 @@ async function processLinkArticleTask(taskId) {
     // На любой ветке (success/error) при наличии «висящего» имени кэша —
     // best-effort удаление; TTL подстрахует, если delete упадёт.
     if (geminiCacheName) {
-      cleanupGeminiCache(taskId, geminiCacheName);
+      cleanupGeminiCache(taskId, geminiCacheName, executionToken);
       geminiCacheName = null;
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    EXECUTION_TOKENS.delete(taskId);
     FUNNELS.delete(taskId);
     // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState
     // в callLLM аккумулирует записи навсегда. См. фикс утечки в
@@ -2031,13 +2047,15 @@ async function processLinkArticleTask(taskId) {
  * и обнуление колонки `gemini_cache_name` в БД. На любой ошибке тихо
  * логируем — TTL подстрахует.
  */
-function cleanupGeminiCache(taskId, cacheName) {
+function cleanupGeminiCache(taskId, cacheName, executionToken = null) {
   if (!cacheName) return;
   deleteCachedContent(cacheName).catch((e) =>
     console.warn(`[linkArticle] deleteCachedContent ${cacheName}: ${e.message}`));
   db.query(
-    `UPDATE link_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
-    [taskId],
+    executionToken
+      ? `UPDATE link_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1 AND execution_token = $2::uuid`
+      : `UPDATE link_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
+    executionToken ? [taskId, executionToken] : [taskId],
   ).catch(() => {});
 }
 
@@ -2051,6 +2069,8 @@ async function recoverStuckLinkArticleTasks() {
       `UPDATE link_article_tasks
           SET status = 'queued',
               error_message = 'Задача возобновлена после обновления системы',
+              execution_token = NULL,
+              execution_started_at = NULL,
               updated_at    = NOW()
         WHERE status = 'running'`,
     );

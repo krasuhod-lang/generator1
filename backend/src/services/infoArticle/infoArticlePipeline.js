@@ -28,6 +28,7 @@
  */
 
 const db = require('../../config/db');
+const { claimArticleTask } = require('../tasks/articleExecutionClaim');
 const { callLLM, resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { loadInfoArticlePrompt } = require('../../prompts/infoArticle');
 const { buildPersonaSystemBlock } = require('../../prompts/infoArticle/personas');
@@ -255,6 +256,7 @@ const INFO_ARTICLE_LSI_TARGET = (() => {
 
 const IN_PROGRESS = new Set();
 const CURRENT_STAGE = new Map();
+const EXECUTION_TOKENS = new Map();
 // Реестр воронок генерации по taskId — setStage() автоматически отмечает
 // переход стадии в funnel.step(). Регистрируется в processInfoArticleTask.
 const FUNNELS = new Map();
@@ -274,14 +276,19 @@ async function appendLog(taskId, msg, level = 'info') {
 
 async function setStage(taskId, stageName, progressPct) {
   CURRENT_STAGE.set(taskId, stageName);
+  const executionToken = EXECUTION_TOKENS.get(taskId);
   const funnel = FUNNELS.get(taskId);
   if (funnel) { try { funnel.step(stageName); } catch (_e) { /* analytics must not break generation */ } }
   try {
     await db.query(
-      `UPDATE info_article_tasks
-          SET current_stage = $2, progress_pct = $3, updated_at = NOW()
-        WHERE id = $1`,
-      [taskId, stageName, progressPct],
+      executionToken
+        ? `UPDATE info_article_tasks
+              SET current_stage = $2, progress_pct = $3, updated_at = NOW()
+            WHERE id = $1 AND execution_token = $4::uuid`
+        : `UPDATE info_article_tasks
+              SET current_stage = $2, progress_pct = $3, updated_at = NOW()
+            WHERE id = $1`,
+      executionToken ? [taskId, stageName, progressPct, executionToken] : [taskId, stageName, progressPct],
     );
   } catch (err) {
     console.error('[infoArticle] setStage failed:', err.message);
@@ -291,9 +298,14 @@ async function setStage(taskId, stageName, progressPct) {
 
 async function saveColumn(taskId, column, data) {
   try {
+    const executionToken = EXECUTION_TOKENS.get(taskId);
     await db.query(
-      `UPDATE info_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1`,
-      [taskId, data != null ? JSON.stringify(data) : null],
+      executionToken
+        ? `UPDATE info_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1 AND execution_token = $3::uuid`
+        : `UPDATE info_article_tasks SET ${column} = $2, updated_at = NOW() WHERE id = $1`,
+      executionToken
+        ? [taskId, data != null ? JSON.stringify(data) : null, executionToken]
+        : [taskId, data != null ? JSON.stringify(data) : null],
     );
     return true;
   } catch (err) {
@@ -1389,11 +1401,17 @@ async function processInfoArticleTask(taskId) {
   IN_PROGRESS.add(taskId);
   let geminiCacheName = null;
   let funnel = null;
+  let executionToken = null;
 
   try {
-    const { rows } = await db.query(`SELECT * FROM info_article_tasks WHERE id = $1`, [taskId]);
-    const task = rows[0];
-    if (!task) { console.error(`[infoArticle] task ${taskId} not found`); return; }
+    const claimed = await claimArticleTask({ table: 'info_article_tasks', taskId });
+    if (!claimed) {
+      console.warn(`[infoArticle] task ${taskId} was not claimable; skip duplicate/non-queued run`);
+      return;
+    }
+    const { task } = claimed;
+    executionToken = claimed.executionToken;
+    EXECUTION_TOKENS.set(taskId, executionToken);
 
     // Общий per-task budget для всех Gemini/Grok writer/refine вызовов.
     task.__tokenBudget = getConfiguredTaskTokenBudget();
@@ -1402,13 +1420,6 @@ async function processInfoArticleTask(taskId) {
     funnel = createFunnelTracker({ kind: 'info_article', taskRef: taskId, userId: task.user_id, niche: task.topic || null });
     FUNNELS.set(taskId, funnel);
 
-    await db.query(
-      `UPDATE info_article_tasks
-          SET status = 'running', started_at = COALESCE(started_at, NOW()),
-              progress_pct = 1, error_message = NULL, updated_at = NOW()
-        WHERE id = $1`,
-      [taskId],
-    );
     publishEvent(taskId, 'status', { status: 'running' });
     await appendLog(taskId, '🚀 Старт генерации информационной статьи в блог', 'ok');
 
@@ -1959,8 +1970,8 @@ async function processInfoArticleTask(taskId) {
         task.__geminiCacheName = created.name;
         geminiCacheName = created.name;
         await db.query(
-          `UPDATE info_article_tasks SET gemini_cache_name = $2, updated_at = NOW() WHERE id = $1`,
-          [taskId, created.name],
+          `UPDATE info_article_tasks SET gemini_cache_name = $2, updated_at = NOW() WHERE id = $1 AND execution_token = $3::uuid`,
+          [taskId, created.name, executionToken],
         );
         await appendLog(taskId, `💾 Gemini cachedContents создан (${created.name})`, 'ok');
       } catch (e) {
@@ -3074,8 +3085,8 @@ async function processInfoArticleTask(taskId) {
         const gistGate = (gateResult.gates || []).find((g) => g.name === 'gistScore');
         if (gistGate && gistGate.score != null) {
           await db.query(
-            'UPDATE info_article_tasks SET gist_score = $1 WHERE id = $2',
-            [gistGate.score, taskId],
+            'UPDATE info_article_tasks SET gist_score = $1, updated_at = NOW() WHERE id = $2 AND execution_token = $3::uuid',
+            [gistGate.score, taskId, executionToken],
           );
         }
       } catch (gsErr) {
@@ -3147,7 +3158,7 @@ async function processInfoArticleTask(taskId) {
       await appendLog(taskId, `⚠ Stage 8 evaluator не выполнился: ${stage8Err.message} — продолжаем`, 'warn');
     }
 
-    await db.query(
+    const finalWrite = await db.query(
       `UPDATE info_article_tasks
           SET article_html             = $2,
               article_plain            = $3,
@@ -3161,14 +3172,22 @@ async function processInfoArticleTask(taskId) {
               progress_pct    = 100,
               current_stage   = 'done',
               completed_at    = NOW(),
+              execution_token = NULL,
+              execution_started_at = NULL,
+              gemini_cache_name = NULL,
               updated_at      = NOW()
-        WHERE id = $1`,
+        WHERE id = $1 AND execution_token = $10::uuid`,
       [
         taskId, finalHtml, finalPlain, seoTitle, seoDescription,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
         qualityGateVerdict ? JSON.stringify(qualityGateVerdict) : null,
+        executionToken,
       ],
     );
+    if (finalWrite.rowCount !== 1) {
+      console.warn(`[infoArticle] task ${taskId} claim lost before final write; stale result discarded`);
+      return;
+    }
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');
     publishEvent(taskId, 'status', { status: 'done' });
     try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
@@ -3210,7 +3229,7 @@ async function processInfoArticleTask(taskId) {
     }
 
     if (geminiCacheName) {
-      cleanupGeminiCache(taskId, geminiCacheName);
+      cleanupGeminiCache(taskId, geminiCacheName, executionToken);
       geminiCacheName = null;
     }
   } catch (err) {
@@ -3218,11 +3237,12 @@ async function processInfoArticleTask(taskId) {
     if (funnel) { try { await funnel.finish({ status: 'failed', error: err }); } catch (_e) { /* no-op */ } }
     try {
       await db.query(
-        `UPDATE info_article_tasks
+          `UPDATE info_article_tasks
             SET status = 'error', error_message = $2,
-                completed_at = NOW(), updated_at = NOW()
-          WHERE id = $1`,
-        [taskId, err.message.slice(0, 1000)],
+                completed_at = NOW(), execution_token = NULL,
+                execution_started_at = NULL, updated_at = NOW()
+          WHERE id = $1 AND execution_token = $3::uuid`,
+        [taskId, err.message.slice(0, 1000), executionToken],
       );
       await appendLog(taskId, `❌ Ошибка: ${err.message}`, 'err');
       publishEvent(taskId, 'status', { status: 'error', error: err.message });
@@ -3236,11 +3256,12 @@ async function processInfoArticleTask(taskId) {
     } catch (_) { /* no-op */ }
   } finally {
     if (geminiCacheName) {
-      cleanupGeminiCache(taskId, geminiCacheName);
+      cleanupGeminiCache(taskId, geminiCacheName, executionToken);
       geminiCacheName = null;
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    EXECUTION_TOKENS.delete(taskId);
     FUNNELS.delete(taskId);
     // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState
     // в callLLM аккумулирует записи для всех когда-либо запущенных задач
@@ -3249,13 +3270,15 @@ async function processInfoArticleTask(taskId) {
   }
 }
 
-function cleanupGeminiCache(taskId, cacheName) {
+function cleanupGeminiCache(taskId, cacheName, executionToken = null) {
   if (!cacheName) return;
   deleteCachedContent(cacheName).catch((e) =>
     console.warn(`[infoArticle] deleteCachedContent ${cacheName}: ${e.message}`));
   db.query(
-    `UPDATE info_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
-    [taskId],
+    executionToken
+      ? `UPDATE info_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1 AND execution_token = $2::uuid`
+      : `UPDATE info_article_tasks SET gemini_cache_name = NULL, updated_at = NOW() WHERE id = $1`,
+    executionToken ? [taskId, executionToken] : [taskId],
   ).catch(() => {});
 }
 
@@ -3265,6 +3288,8 @@ async function recoverStuckInfoArticleTasks() {
       `UPDATE info_article_tasks
           SET status = 'queued',
               error_message = 'Задача возобновлена после обновления системы',
+              execution_token = NULL,
+              execution_started_at = NULL,
               updated_at    = NOW()
         WHERE status = 'running'`,
     );

@@ -154,6 +154,9 @@ function scheduleUserTask(userId, taskType, taskId, fn) {
       taskType: taskType || 'task',
       taskId,
     });
+    if (!slot.claimed) {
+      return { scheduled: false, duplicate: slot.reason === 'task_already_leased', reason: slot.reason };
+    }
     try {
       return await fn();
     } finally {
