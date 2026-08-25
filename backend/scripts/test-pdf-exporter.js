@@ -7,6 +7,12 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { buildReportPdf } = require('../src/services/reports/pdfExporter');
 
+const controllerSource = fs.readFileSync(path.join(__dirname, '..', 'src/controllers/reports.controller.js'), 'utf8');
+const draftPdfStart = controllerSource.indexOf('async function exportDraftPdf');
+const draftPdfEnd = controllerSource.indexOf('async function publicUnlock', draftPdfStart);
+const draftPdfSource = controllerSource.slice(draftPdfStart, draftPdfEnd > draftPdfStart ? draftPdfEnd : undefined);
+const ONE_PIXEL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
 function commandText(command, args) {
   return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
@@ -24,6 +30,7 @@ function commandText(command, args) {
       highlights: ['Первый тезис'],
       next_month_forecast: 'Прогноз без HTML.',
     },
+    chart_images: [{ key: 'gsc', title: 'График динамики Google', data_url: `data:image/png;base64,${ONE_PIXEL_PNG}` }],
     tasks_blocks: [{
       month: '2026-08',
       sections: [{
@@ -46,10 +53,15 @@ function commandText(command, args) {
     assert.ok(Number.isInteger(pages) && pages >= 1 && pages <= 3, `fixture should fit into a small PDF, got ${pages} pages`);
 
     const text = commandText('pdftotext', ['-layout', tmpPath, '-']);
+    assert.match(text, /График динамики Google/, 'chart title must be rendered');
     assert.match(text, /Проверили страницы\./, 'paragraph text must be rendered');
     assert.match(text, /SEO-аудит/, 'list item must be rendered');
     assert.match(text, /Открыть материал \(https:\/\/example\.com\/article\)/, 'safe link label and URL must be rendered');
     assert.doesNotMatch(text, /<\/?p>|<\/?ul>|<\/?li>|<a\s|href=/i, 'raw HTML must not leak into PDF text');
+    const imageList = commandText('pdfimages', ['-list', tmpPath]);
+    assert.match(imageList, /png|image/i, 'chart PNG must be embedded in the PDF');
+    assert.ok(draftPdfStart >= 0, 'draft PDF controller must exist');
+    assert.match(draftPdfSource, /chart_images:\s*Array\.isArray\(req\.body\?\.chart_images\)/, 'draft PDF controller must forward chart_images');
 
     const bbox = commandText('pdftotext', ['-bbox', tmpPath, '-']);
     const workHeading = bbox.match(/<word xMin="([0-9.]+)"[^>]*>Выполненные<\/word>/);
@@ -64,7 +76,7 @@ function commandText(command, args) {
     fs.rmSync(tmpPath, { force: true });
   }
 
-  console.log('pdf exporter regression: 7/7 passed');
+  console.log('pdf exporter regression: 10/10 passed');
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

@@ -828,6 +828,7 @@ async function exportDraftPdf(req, res) {
       data,
       summary: sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode),
       tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
+      chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
       view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/pdf');
