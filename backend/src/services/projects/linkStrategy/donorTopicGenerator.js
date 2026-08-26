@@ -175,7 +175,13 @@ function _buildBusinessContext(project) {
 }
 
 function _buildPrompt({ project, targets }) {
-  const list = targets.map((t, idx) => `${idx + 1}. анкор/запрос: "${t.donor_topic_seed}"`).join('\n');
+  const list = targets.map((t, idx) => {
+    const targetUrl = _clip(t.target_url || '', 180);
+    const intent = _clip(t.intent || (t.commercial ? 'commercial' : 'informational'), 40);
+    const priority = _clip(t.priority || 'medium', 20);
+    const signal = t.competition && t.competition.signal ? t.competition.signal : 'supporting_target';
+    return `${idx + 1}. анкор/запрос: "${t.donor_topic_seed}"; target_url: "${targetUrl}"; intent: ${intent}; priority: ${priority}; evidence: ${signal}`;
+  }).join('\n');
   return [
     `Ты контент-стратег внутреннего инструмента «Темы статей» сайта ${project && project.name ? project.name : ''}.`,
     'Задача: под каждый анкор/поисковый запрос предложить ОДНУ готовую, конкретную',
@@ -184,10 +190,14 @@ function _buildPrompt({ project, targets }) {
     ..._buildBusinessContext(project),
     'СТРОГИЕ ПРАВИЛА (анти-галлюцинации):',
     '— Тема должна раскрывать ИМЕННО смысл анкора/запроса и поисковый интент за ним,',
-    '  и быть релевантной нише бизнеса выше — а не уводить в сторону.',
+    '  учитывать target_url и тип целевой страницы, быть релевантной нише бизнеса выше —',
+    '  а не уводить в сторону. Не меняй целевой URL и не обещай позиционный результат.',
     '— Запрещено выдумывать бренды, числа, цены, гарантии и сущности, которых нет в анкоре.',
     '— Тема — это рабочий заголовок экспертной статьи (как пишет эксперт), а НЕ сам анкор',
-    '  дословно и не «статья про <анкор>». Сделай её конкретной и полезной.',
+    '  дословно и не «статья про <анкор>». Сделай её конкретной и полезной: выбери',
+    '  формат how-to/сравнение/обзор по интенту и добавь измеримый читательский результат.',
+    '— При evidence=striking_distance используй запрос и позицию только как основание',
+    '  приоритета, не выдумывай конкурентов и не называй GSC-метрику доказательством ссылки.',
     '— Пиши на языке анкора (как правило русский).',
     '',
     'ОТДЕЛЬНО к каждой теме обязателен SEO-title и meta-description:',

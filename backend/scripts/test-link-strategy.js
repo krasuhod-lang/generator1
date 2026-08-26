@@ -204,6 +204,34 @@ test('recommendLinks falls back to slug anchor when no GSC query for page', () =
     topPages: [{ key: url, impressions: 50 }], queryPage: [],
   });
   assert.ok(rec.recommendations.length >= 5);
+  assert.ok(rec.recommendations.every((item) => !item.target_url.includes('#rec')));
+});
+
+test('recommendLinks exposes competitive basis, anchor plan and article brief', () => {
+  const url = 'https://aquashop.ru/catalog/nasos';
+  const rec = recommendLinks({
+    project,
+    commercial: { striking_distance: [{
+      query: 'насос для скважины купить', landing_page: url, position: 8,
+      impressions: 1200, intent: 'transactional',
+    }] },
+    linkAudit: {
+      data_source: 'gsc_csv',
+      has_link_data: true,
+      anchors: { distribution: { commercial_pct: 70 }, top_anchor_skew: 0.75 },
+      orphans: [],
+    },
+    topPages: [], queryPage: [],
+  });
+  const first = rec.recommendations[0];
+  assert.strictEqual(rec.competitive_basis.competitor_backlink_data, false);
+  assert.ok(first.anchor_plan, 'anchor plan present');
+  assert.strictEqual(first.anchor_plan.risk, 'diversify');
+  assert.ok(first.anchor_plan.variants.length >= 2);
+  assert.notStrictEqual(first.anchor_plan.recommended_anchor, first.anchor);
+  assert.strictEqual(first.competition.signal, 'striking_distance');
+  assert.strictEqual(first.competition.position, 8);
+  assert.strictEqual(first.article_brief.format, 'практический гид или сравнение');
 });
 
 // ── importLinksCsv ──────────────────────────────────────────────────
@@ -274,6 +302,19 @@ test('enrichDonorTopics fallback makes intent topic instead of raw anchor', asyn
   await enrichDonorTopics({ recommendations: recs, project, llmFn: null });
   assert.strictEqual(recs[0].donor_topic_ready, 'Как провести анализ сайта и найти точки роста в SEO');
   assert.strictEqual(recs[0].donor_topic, wrapDonorTopic(recs[0].donor_topic_ready));
+});
+
+test('enrichDonorTopics prompt receives target, intent and competition evidence', async () => {
+  const recs = _orphanRecs();
+  let prompt = '';
+  await enrichDonorTopics({
+    recommendations: recs,
+    project,
+    llmFn: async (value) => { prompt = value; return 'не json вовсе'; },
+  });
+  assert.ok(prompt.includes('target_url:'), 'target URL is in topic prompt');
+  assert.ok(prompt.includes('evidence:'), 'evidence signal is in topic prompt');
+  assert.ok(prompt.includes('intent:'), 'intent is in topic prompt');
 });
 
 test('enrichDonorTopics with llmFn fills ready topic, still wrapped in format', async () => {

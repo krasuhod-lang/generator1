@@ -39,6 +39,8 @@ async function buildLinkStrategy({ project, commercial, topPages, queryPage, db,
       audit,
       recommendations: recommend.recommendations,
       recommendations_count: recommend.count,
+      commercial_count: recommend.commercial_count,
+      competitive_basis: recommend.competitive_basis,
       donor_topics: donorTopics,
     };
   } catch (err) {

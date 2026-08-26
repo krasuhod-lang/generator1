@@ -20,6 +20,7 @@ const inferred = computed(() => props.linkAudit && props.linkAudit.data_source =
 const anchorCloud = computed(() => (audit.value.anchors && audit.value.anchors.anchor_cloud) || []);
 const targetPages = computed(() => audit.value.target_pages || []);
 const targetPageTotals = computed(() => audit.value.target_page_totals || {});
+const competitiveBasis = computed(() => (props.linkAudit && props.linkAudit.competitive_basis) || {});
 
 function trimUrl(u) {
   if (!u) return '';
@@ -53,15 +54,29 @@ function buyText(r) {
 }
 
 // Строка для копирования одной рекомендации.
+function competitionLabel(signal) {
+  const labels = {
+    striking_distance: 'зона роста 3–20',
+    high_priority_gap: 'приоритетный gap',
+    supporting_target: 'поддерживающая цель',
+  };
+  return labels[signal] || 'сигнал GSC';
+}
 function rowText(r) {
+  const plan = r.anchor_plan || {};
+  const brief = r.article_brief || {};
   const lines = [
     `Купить: ${buyText(r)}`,
-    `Анкор: ${r.anchor}`,
+    `Анкор: ${plan.recommended_anchor || r.anchor}`,
+    `Варианты анкоров: ${(plan.variants || []).join(' | ')}`,
     `Тема статьи донора: ${r.donor_topic}`,
   ];
+  if (brief.format) lines.push(`Формат статьи: ${brief.format}`);
+  if (brief.evidence) lines.push(`Что доказать: ${brief.evidence}`);
   if (r.donor_topic_title) lines.push(`Title: ${r.donor_topic_title}`);
   if (r.donor_topic_description) lines.push(`Description: ${r.donor_topic_description}`);
   if (r.donor_topic_angle) lines.push(`Угол раскрытия: ${r.donor_topic_angle}`);
+  if (r.competition && r.competition.signal) lines.push(`Основание: ${competitionLabel(r.competition.signal)}`);
   lines.push(`Целевой URL: ${r.target_url}`);
   lines.push(`Приоритет: ${prioLabel(r.priority)}`);
   return lines.join('\n');
@@ -69,10 +84,12 @@ function rowText(r) {
 
 // Вся таблица в TSV для вставки в Google Sheets / Excel.
 function copyAll() {
-  const header = ['Что купить', 'Тип анкора', 'Анкор', 'Тема статьи донора', 'Целевой URL', 'Приоритет'];
+  const header = ['Что купить', 'Тип анкора', 'Рекомендуемый анкор', 'Варианты анкоров', 'Формат статьи', 'Тема статьи донора', 'Целевой URL', 'Приоритет'];
   const body = recs.value.map((r) => {
     const b = buyInfo(r);
-    return [b.what, b.kind, r.anchor, r.donor_topic, r.target_url, prioLabel(r.priority)];
+    const plan = r.anchor_plan || {};
+    const brief = r.article_brief || {};
+    return [b.what, b.kind, plan.recommended_anchor || r.anchor, (plan.variants || []).join(' | '), brief.format || '', r.donor_topic, r.target_url, prioLabel(r.priority)];
   });
   return toTsv([header, ...body]);
 }
@@ -90,9 +107,12 @@ function copyAll() {
       Нет выгрузки «Ссылки» из GSC — рекомендации построены по контентному срезу (data_source: inferred).
       Загрузите CSV или Excel «Внешние ссылки», чтобы уточнить анализ доноров и целевых страниц.
     </p>
+    <p v-else-if="competitiveBasis && competitiveBasis.competitor_backlink_data === false" class="text-xs text-gray-400">
+      Рекомендации опираются на собственные GSC-показы/позиции и ссылочный экспорт. Внешние backlink-метрики конкурентов не выдаются GSC и не подменяются догадками.
+    </p>
 
     <div v-if="anchorCloud.length" class="text-sm">
-      <div class="text-xs text-gray-400 mb-1">Анкор-облако</div>
+        <div class="text-xs text-gray-400 mb-1">Анкор-облако</div>
       <div class="flex flex-wrap gap-2">
         <span v-for="a in anchorCloud.slice(0, 12)" :key="a.anchor"
               class="rounded-full bg-gray-800/60 px-2 py-0.5 text-xs">
@@ -148,7 +168,15 @@ function copyAll() {
                 <div class="text-gray-100 font-medium">{{ buyInfo(r).what }} ссылка</div>
                 <div class="text-[11px] text-gray-500">{{ buyInfo(r).kind }}</div>
               </td>
-              <td class="py-1.5 px-2 text-gray-200">{{ r.anchor }}</td>
+              <td class="py-1.5 px-2 text-gray-200">
+                <div class="font-medium">{{ (r.anchor_plan && r.anchor_plan.recommended_anchor) || r.anchor }}</div>
+                <div v-if="r.anchor_plan && r.anchor_plan.variants && r.anchor_plan.variants.length > 1" class="text-[11px] text-gray-500 mt-0.5">
+                  Варианты: {{ r.anchor_plan.variants.slice(0, 4).join(' · ') }}
+                </div>
+                <div v-if="r.anchor_plan && r.anchor_plan.risk === 'diversify'" class="text-[11px] text-amber-300 mt-0.5">
+                  Разбавить профиль; exact-match не ставить подряд
+                </div>
+              </td>
               <td class="py-1.5 px-2 text-gray-300">
                 <div>{{ r.donor_topic }}</div>
                 <div v-if="r.donor_topic_title" class="text-[11px] text-indigo-300 mt-0.5">
@@ -160,9 +188,17 @@ function copyAll() {
                 <div v-if="r.donor_topic_angle" class="text-[11px] text-gray-500 mt-0.5">
                   Угол: {{ r.donor_topic_angle }}
                 </div>
+                <div v-if="r.article_brief" class="text-[11px] text-gray-500 mt-0.5">
+                  {{ r.article_brief.format }} · {{ r.article_brief.angle }}
+                </div>
               </td>
               <td class="py-1.5 px-2 text-indigo-300 break-all">{{ trimUrl(r.target_url) }}</td>
-              <td class="py-1.5 px-2 uppercase" :class="prioClass(r.priority)">{{ prioLabel(r.priority) }}</td>
+              <td class="py-1.5 px-2 uppercase" :class="prioClass(r.priority)">
+                <div>{{ prioLabel(r.priority) }}</div>
+                <div v-if="r.competition" class="text-[10px] normal-case text-gray-500 mt-0.5">
+                  {{ competitionLabel(r.competition.signal) }}<span v-if="r.competition.position"> · #{{ r.competition.position }}</span>
+                </div>
+              </td>
               <td class="py-1.5 pl-2"><CopyButton :text="rowText(r)" /></td>
             </tr>
           </tbody>

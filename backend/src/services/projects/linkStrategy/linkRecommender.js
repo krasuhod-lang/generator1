@@ -100,6 +100,109 @@ function _anchorForUrl(url, topQueryByPage, fallbackQuery) {
   return _anchorVariants(slug)[0];
 }
 
+function _uniqueStrings(values) {
+  const seen = new Set();
+  return values
+    .map((value) => String(value == null ? '' : value).trim())
+    .filter((value) => value && !seen.has(value.toLowerCase()) && seen.add(value.toLowerCase()));
+}
+
+/**
+ * Формирует варианты анкоров из реального GSC query, бренда и URL-контекста.
+ * Exact-match остаётся в списке, но при перекосе профиля получает risk-флаг и
+ * заменяется на более естественный recommended_anchor. Фиксированных «идеальных»
+ * процентов не объявляем: это decision-support, а не обещание алгоритму.
+ */
+function _buildAnchorPlan(rec, project, linkAudit) {
+  const seed = String(rec && (rec.donor_topic_seed || rec.anchor) || '').trim();
+  const site = String((project && (project.gsc_site_url || project.url)) || '').trim();
+  const brand = String((project && project.name) || '').trim();
+  const target = String((rec && rec.target_url) || '').trim();
+  const slug = _hostPath(target).split('/').pop().replace(/[-_]+/g, ' ').trim();
+  const distribution = linkAudit && linkAudit.anchors && linkAudit.anchors.distribution;
+  const commercialPct = Number(distribution && distribution.commercial_pct) || 0;
+  const skew = Number(linkAudit && linkAudit.anchors && linkAudit.anchors.top_anchor_skew) || 0;
+  const diversified = commercialPct >= 45 || skew > 0.6;
+  const isHome = Boolean(site && target && _hostPath(target) === _hostPath(site));
+  const variants = _uniqueStrings([
+    seed,
+    seed ? `${seed} — подробнее` : '',
+    seed ? `как выбрать: ${seed}` : '',
+    slug,
+    brand && isHome ? brand : '',
+    brand && isHome ? `${brand} — официальный сайт` : '',
+    'подробнее',
+    target,
+  ]).slice(0, 7);
+  const recommended = diversified
+    ? (isHome && brand ? brand : variants.find((value) => value.toLowerCase() !== seed.toLowerCase() && value !== target) || seed)
+    : (seed || variants[0] || target);
+  return {
+    recommended_anchor: recommended,
+    recommended_anchor_type: recommended === brand ? 'branded' : (recommended === target ? 'naked' : 'contextual'),
+    variants,
+    profile: { commercial_pct: commercialPct, top_anchor_skew: skew },
+    risk: diversified ? 'diversify' : 'normal',
+    guidance: diversified
+      ? 'Профиль уже содержит повышенную долю коммерческих/повторяющихся анкоров: чередуйте брендовые, contextual и URL-варианты; exact-match не ставьте подряд.'
+      : 'Используйте описательный анкор только там, где он естественно читается в предложении; чередуйте его с брендовым и contextual-вариантами.',
+  };
+}
+
+function _competitionContext(rec) {
+  const position = Number(rec && rec.position);
+  const impressions = Number(rec && rec.impressions) || 0;
+  if (Number.isFinite(position) && position > 0 && position <= 20) {
+    return {
+      signal: 'striking_distance',
+      position,
+      impressions,
+      rationale: 'Страница уже видна в Google Search Console и находится в зоне роста; ссылка имеет измеримую цель.',
+    };
+  }
+  if (rec && rec.priority === 'high') {
+    return {
+      signal: 'high_priority_gap',
+      position: null,
+      impressions,
+      rationale: 'Цель выбрана по коммерческому интенту или ссылочному gap; позиция не была передана в этот recommendation row.',
+    };
+  }
+  return {
+    signal: 'supporting_target',
+    position: Number.isFinite(position) ? position : null,
+    impressions,
+    rationale: 'Вспомогательная цель из текущего GSC/content-среза, без доказанного конкурентного backlink gap.',
+  };
+}
+
+function _articleBrief(rec) {
+  const intent = String((rec && rec.intent) || '').toLowerCase();
+  const commercial = Boolean(rec && rec.commercial);
+  if (intent === 'transactional' || commercial) {
+    return {
+      format: 'практический гид или сравнение',
+      angle: 'Критерии выбора, сценарии применения, ограничения и проверяемые основания для решения.',
+      evidence: 'Сравнительная таблица, чек-лист выбора, источники и честное обозначение ограничений.',
+      link_rule: 'Ссылка должна быть частью полезного объяснения, а не единственной целью статьи.',
+    };
+  }
+  if (intent === 'investigation') {
+    return {
+      format: 'экспертный разбор или обзор',
+      angle: 'Разбор вариантов, рисков и критериев оценки перед принятием решения.',
+      evidence: 'Методика сравнения, практический пример, источники и критерии проверки результата.',
+      link_rule: 'Анкор вписывается в контекст вывода или следующего шага читателя.',
+    };
+  }
+  return {
+    format: 'how-to, чек-лист или объясняющая статья',
+    angle: 'Пошаговое решение задачи читателя с примерами, ошибками и понятным следующим действием.',
+    evidence: 'Пошаговая схема, факты/источники, FAQ и условия применимости рекомендаций.',
+    link_rule: 'Ссылка ставится только в предложении, где она помогает закрыть конкретный информационный gap.',
+  };
+}
+
 /**
  * Карта «нормализованный запрос → лучшая по показам посадочная страница».
  * Нужна, чтобы коммерческий запрос вёл на СВОЮ посадочную, а не на главную:
@@ -179,11 +282,13 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
       anchor: _anchorVariants(s.query)[0],
       anchor_type: 'commercial',
       commercial: true,
+      position: Number(s.position) || null,
+      impressions: Number(s.impressions) || 0,
       intent: s.intent || 'commercial',
       donor_topic_seed: s.query,
       donor_topic: _donorTopic(s.query, target || site),
       target_url: target || site,
-      why: `Коммерческий запрос «${s.query}» на позиции ${s.position} — ссылки добьют в топ.`,
+      why: `Коммерческий запрос «${s.query}» на позиции ${s.position} — релевантные ссылки могут приблизить посадочную к топу.`,
       priority: 'high',
     });
   });
@@ -202,8 +307,9 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
       donor_topic_seed: seed || anchor,
       donor_topic: _donorTopic(seed, o.url),
       target_url: o.url,
+      impressions: Number(o.impressions) || 0,
       why: isCommercial
-        ? `Коммерческая страница (${o.impressions} показов) без входящих ссылок — наращиваем вес.`
+        ? `Коммерческая страница (${o.impressions} показов) без входящих ссылок — проверяем релевантное усиление.`
         : `Информационная страница (${o.impressions} показов) без входящих ссылок — усиливаем после коммерческих.`,
       priority: isCommercial ? 'high' : 'medium',
     });
@@ -244,6 +350,8 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
         donor_topic_seed: seed || anchor,
         donor_topic: _donorTopic(seed, p.key),
         target_url: p.key,
+        impressions: Number(p.impressions) || 0,
+        position: Number(p.position) || null,
         why: isCommercial
           ? `Усиление коммерческой страницы (${p.impressions || 0} показов).`
           : `Расширение ссылочной массы на значимую страницу (${p.impressions || 0} показов).`,
@@ -252,15 +360,29 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
     }
   }
 
-  // 5) Финальный страховочный добор (если совсем мало данных) — на главную.
-  while (recs.length < min && site) {
-    const i = recs.length + 1;
+  // 5) Финальный страховочный добор (если совсем мало данных) — на реальный
+  // canonical URL. Никаких искусственных #rec-путей: они не являются отдельными
+  // посадочными страницами. Конечный список защищает от бесконечного fallback-loop.
+  const fallbackAnchors = _uniqueStrings([
+    project && project.name,
+    'официальный сайт',
+    'подробнее на сайте',
+    'на сайте компании',
+    'сайт компании',
+    'узнать подробнее',
+    site,
+  ]);
+  let fallbackIndex = 0;
+  while (recs.length < min && site && fallbackIndex < fallbackAnchors.length) {
+    const anchor = fallbackAnchors[fallbackIndex];
+    fallbackIndex += 1;
+    const anchorType = anchor === site ? 'naked' : (anchor === (project && project.name) ? 'branded' : 'generic');
     push({
-      anchor: i % 2 === 0 ? (project && project.name) || 'бренд' : 'безанкорный (URL)',
-      anchor_type: i % 2 === 0 ? 'branded' : 'naked',
+      anchor,
+      anchor_type: anchorType,
       commercial: false,
       donor_topic: 'Тематическая статья с упоминанием и ссылкой на сайт',
-      target_url: `${site}#rec${i}`,
+      target_url: site,
       why: 'Базовое расширение ссылочного профиля (мало данных GSC по ссылкам).',
       priority: 'low',
     });
@@ -278,12 +400,27 @@ function recommendLinks({ project, commercial, linkAudit, topPages, queryPage } 
     return pb - pa;
   });
 
+  const recommendations = ordered.map((rec) => ({
+    ...rec,
+    anchor_plan: _buildAnchorPlan(rec, project, linkAudit),
+    competition: _competitionContext(rec),
+    article_brief: _articleBrief(rec),
+  }));
+
   return {
     available: true,
     data_source: (linkAudit && linkAudit.data_source) || 'inferred',
-    recommendations: ordered.slice(0, Math.max(min, ordered.length)),
-    count: ordered.length,
-    commercial_count: ordered.filter((r) => r.commercial).length,
+    recommendations: recommendations.slice(0, Math.max(min, recommendations.length)),
+    count: recommendations.length,
+    commercial_count: recommendations.filter((r) => r.commercial).length,
+    competitive_basis: {
+      own_gsc_search_data: Array.isArray(queryPage) && queryPage.length > 0,
+      own_gsc_link_export: Boolean(linkAudit && linkAudit.has_link_data),
+      competitor_backlink_data: false,
+      serp_competitor_data: false,
+      missing_signals: ['конкурентные доноры', 'их анкоры', 'тематическая релевантность площадки', 'редакционный трафик'],
+      note: 'Конкурентные backlink-метрики не выводятся из GSC: для них нужен отдельный конкурентный export/API. Текущие рекомендации честно опираются на собственные GSC-сигналы и маркируются как такие.',
+    },
   };
 }
 
