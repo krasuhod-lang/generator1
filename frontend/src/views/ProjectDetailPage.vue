@@ -960,8 +960,17 @@ onUnmounted(() => {
           <GscPerformanceChart v-else-if="perf && perf.series.length" :series="perf.series" />
           <div v-else class="text-sm text-gray-500 text-center py-6">Нет данных за выбранный период.</div>
 
-          <!-- AI analyze -->
-          <div class="pt-2 border-t border-gray-800 flex flex-wrap items-center gap-3">
+        </section>
+
+        <!-- AI analysis is source-independent: GSC, Yandex or both. -->
+        <section v-if="gscReady || ydxReady" class="card flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">AI-анализ проекта</h2>
+            <p class="text-xs text-gray-500 mt-1">
+              Анализ использует подключённые источники: {{ gscReady && ydxReady ? 'Google и Яндекс' : (gscReady ? 'Google Search Console' : 'Яндекс.Вебмастер') }}.
+            </p>
+          </div>
+          <div class="flex items-center gap-3">
             <button class="btn-primary !bg-gradient-to-r from-indigo-600 to-fuchsia-600"
                     :disabled="analyzing" @click="runAnalysis">
               🧠 Анализировать показатели проекта
