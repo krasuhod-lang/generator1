@@ -145,6 +145,36 @@ async function ensureDurableTaskSchema(db = dbDefault) {
     `ALTER TABLE shared_reports ADD COLUMN IF NOT EXISTS view_mode VARCHAR(16) NOT NULL DEFAULT 'client'`,
     `ALTER TABLE shared_reports ADD COLUMN IF NOT EXISTS snapshot_id UUID REFERENCES project_snapshots(id) ON DELETE SET NULL`,
     `ALTER TABLE shared_reports ADD COLUMN IF NOT EXISTS report_model_version VARCHAR(64) NOT NULL DEFAULT 'reports-v2'`,
+    `DO $$
+    DECLARE existing_fk TEXT;
+    BEGIN
+      SELECT conname INTO existing_fk FROM pg_constraint
+       WHERE conrelid = 'shared_reports'::regclass
+         AND confrelid = 'report_drafts'::regclass
+         AND contype = 'f' LIMIT 1;
+      IF existing_fk IS NOT NULL AND existing_fk <> 'fk_shared_reports_draft_preserve' THEN
+        EXECUTE format('ALTER TABLE shared_reports DROP CONSTRAINT %I', existing_fk);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_shared_reports_draft_preserve' AND conrelid = 'shared_reports'::regclass) THEN
+        ALTER TABLE shared_reports ADD CONSTRAINT fk_shared_reports_draft_preserve
+          FOREIGN KEY (draft_id) REFERENCES report_drafts(id) ON DELETE RESTRICT;
+      END IF;
+    END $$`,
+    `DO $$
+    DECLARE existing_fk TEXT;
+    BEGIN
+      SELECT conname INTO existing_fk FROM pg_constraint
+       WHERE conrelid = 'shared_reports'::regclass
+         AND confrelid = 'users'::regclass
+         AND contype = 'f' LIMIT 1;
+      IF existing_fk IS NOT NULL AND existing_fk <> 'fk_shared_reports_user_preserve' THEN
+        EXECUTE format('ALTER TABLE shared_reports DROP CONSTRAINT %I', existing_fk);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_shared_reports_user_preserve' AND conrelid = 'shared_reports'::regclass) THEN
+        ALTER TABLE shared_reports ADD CONSTRAINT fk_shared_reports_user_preserve
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT;
+      END IF;
+    END $$`,
 
     `CREATE TABLE IF NOT EXISTS project_growth_opportunities (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

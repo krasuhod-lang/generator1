@@ -343,6 +343,31 @@ function updateTask(i, j, k, key, value) {
   next[i].sections[j].tasks[k][key] = value;
   updateBlocks(next);
 }
+function addSubtask(i, j, k) {
+  const next = cloneBlocks();
+  const task = next[i].sections[j].tasks[k];
+  if (!Array.isArray(task.subtasks)) task.subtasks = [];
+  task.subtasks.push({ title: 'Новая микрозадача', description_html: '' });
+  updateBlocks(next);
+}
+function updateSubtask(i, j, k, l, key, value) {
+  const next = cloneBlocks();
+  const subtasks = next[i].sections[j].tasks[k].subtasks || [];
+  if (subtasks[l]) subtasks[l][key] = value;
+  updateBlocks(next);
+}
+function removeSubtask(i, j, k, l) {
+  const next = cloneBlocks();
+  const subtasks = next[i].sections[j].tasks[k].subtasks || [];
+  subtasks.splice(l, 1);
+  updateBlocks(next);
+}
+function descriptionTarget(next, i, j, k, subtaskIndex = null) {
+  const task = next[i].sections[j].tasks[k];
+  if (subtaskIndex == null) return task;
+  if (!Array.isArray(task.subtasks)) task.subtasks = [];
+  return task.subtasks[subtaskIndex] || task;
+}
 function removeSection(i, j) {
   const next = cloneBlocks();
   next[i].sections.splice(j, 1);
@@ -412,18 +437,29 @@ function safeHtml(value) {
 
 // ── Image upload helpers ───────────────────────────────────────────────────
 const uploadingImage = ref(false);
+const uploadError = ref('');
 
 async function uploadImageFile(file) {
-  if (!file || !file.type.startsWith('image/')) return null;
+  uploadError.value = '';
+  if (!file || !/^image\/(png|jpeg|jpg|gif|webp)$/i.test(file.type || '')) {
+    uploadError.value = 'Разрешены PNG, JPEG, GIF и WebP.';
+    return null;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    uploadError.value = 'Изображение больше 5 МБ. Уменьшите файл и повторите загрузку.';
+    return null;
+  }
   const form = new FormData();
-  form.append('image', file);
+  form.append('image', file, file.name || 'report-image');
   uploadingImage.value = true;
   try {
-    const { data } = await api.post('/reports/upload-image', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-    return resolveUploadUrl(data?.url) || null;
-  } catch {
+    // Не задаём Content-Type вручную: браузер обязан добавить multipart boundary.
+    const { data } = await api.post('/reports/upload-image', form);
+    const url = resolveUploadUrl(data?.url);
+    if (!url) throw new Error('Сервер не вернул URL изображения');
+    return url;
+  } catch (err) {
+    uploadError.value = err.response?.data?.error || err.message || 'Не удалось загрузить изображение';
     return null;
   } finally {
     uploadingImage.value = false;
@@ -446,7 +482,7 @@ function resolveUploadUrl(url) {
   return `${origin}${normalized.startsWith('/') ? '' : '/'}${normalized}`;
 }
 
-async function onDescriptionPaste(ev, i, j, k) {
+async function onDescriptionPaste(ev, i, j, k, subtaskIndex = null) {
   const items = ev.clipboardData?.items;
   if (!items) return;
   for (const item of items) {
@@ -457,24 +493,28 @@ async function onDescriptionPaste(ev, i, j, k) {
       const url = await uploadImageFile(file);
       if (!url) return;
       const next = cloneBlocks();
-      const task = next[i].sections[j].tasks[k];
-      task.description_html = (task.description_html || '') + `\n<img src="${url}" alt="screenshot" style="max-width:100%" />`;
+      const target = descriptionTarget(next, i, j, k, subtaskIndex);
+      target.description_html = (target.description_html || '') + `\n<img src="${url}" alt="screenshot" style="max-width:100%" />`;
       updateBlocks(next);
       return;
     }
   }
 }
-
-async function onFileSelect(ev, i, j, k) {
-  const file = ev.target?.files?.[0];
+async function onFileSelect(ev, i, j, k, subtaskIndex = null) {
+  const input = ev.target;
+  const file = input?.files?.[0];
   if (!file) return;
-  const url = await uploadImageFile(file);
-  if (!url) return;
-  const next = cloneBlocks();
-  const task = next[i].sections[j].tasks[k];
-  task.description_html = (task.description_html || '') + `\n<img src="${url}" alt="${file.name}" style="max-width:100%" />`;
-  updateBlocks(next);
-  ev.target.value = '';
+  try {
+    const url = await uploadImageFile(file);
+    if (!url) return;
+    const next = cloneBlocks();
+    const target = descriptionTarget(next, i, j, k, subtaskIndex);
+    target.description_html = (target.description_html || '') + `\n<img src="${url}" alt="${file.name}" style="max-width:100%" />`;
+    updateBlocks(next);
+  } finally {
+    // Allows retrying the same file after a server/MIME/size error.
+    if (input) input.value = '';
+  }
 }
 
 function formatDateTime(iso) {
@@ -1077,6 +1117,12 @@ function growthTargetLabel(item) {
             <div v-if="readonly">
               <div class="task-title">{{ task.title }}</div>
               <div v-if="task.description_html" class="task-html" v-html="safeHtml(task.description_html)"></div>
+              <div v-if="Array.isArray(task.subtasks) && task.subtasks.length" class="subtasks-list">
+                <div v-for="(subtask, l) in task.subtasks" :key="l" class="subtask-card">
+                  <h5 class="subtask-title">{{ subtask.title || 'Микрозадача' }}</h5>
+                  <div v-if="subtask.description_html" class="task-html subtask-html" v-html="safeHtml(subtask.description_html)"></div>
+                </div>
+              </div>
             </div>
             <div v-else class="editor-grid">
               <input :value="task.title" class="text-input" placeholder="Название задачи" @input="updateTask(i, j, k, 'title', $event.target.value)" />
@@ -1092,14 +1138,36 @@ function growthTargetLabel(item) {
                   @update:model-value="(v) => updateTask(i, j, k, 'description_html', v)"
                 />
               </div>
+              <div v-if="Array.isArray(task.subtasks) && task.subtasks.length" class="subtasks-list">
+                <div v-for="(subtask, l) in task.subtasks" :key="l" class="subtask-card">
+                  <input :value="subtask.title" class="text-input" placeholder="Название микрозадачи" @input="updateSubtask(i, j, k, l, 'title', $event.target.value)" />
+                  <div @paste="onDescriptionPaste($event, i, j, k, l)">
+                    <RichTextInput
+                      :model-value="subtask.description_html || ''"
+                      min-height="90px"
+                      placeholder="Описание микрозадачи"
+                      @update:model-value="(v) => updateSubtask(i, j, k, l, 'description_html', v)"
+                    />
+                  </div>
+                  <div class="task-attach-row">
+                    <label class="attach-btn">
+                      <input type="file" accept="image/*" hidden @change="onFileSelect($event, i, j, k, l)" />
+                      📎 Добавить изображение
+                    </label>
+                    <button type="button" class="small-btn danger" @click="removeSubtask(i, j, k, l)">Удалить микрозадачу</button>
+                  </div>
+                </div>
+              </div>
               <div class="task-attach-row">
                 <label class="attach-btn">
                   <input type="file" accept="image/*" hidden @change="onFileSelect($event, i, j, k)" />
                   📎 Добавить изображение
                 </label>
                 <span v-if="uploadingImage" class="attach-status">Загрузка…</span>
+                <span v-if="uploadError" class="attach-error" role="alert">{{ uploadError }}</span>
               </div>
               <div class="actions-inline">
+                <button type="button" class="small-btn" @click="addSubtask(i, j, k)">+ Микрозадача</button>
                 <button class="small-btn danger" @click="removeTask(i, j, k)">Удалить задачу</button>
               </div>
             </div>
@@ -1217,7 +1285,11 @@ function growthTargetLabel(item) {
 .task-html, .task-preview { white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
 .task-html :deep(a), .task-preview :deep(a) { color: var(--accent); text-decoration: underline; word-break: break-all; }
 .task-html :deep(img), .task-preview :deep(img) { max-width: 100%; height: auto; border-radius: 8px; margin: 8px 0; display: block; }
-.task-attach-row { display: flex; align-items: center; gap: 10px; }
+.subtasks-list { margin: 12px 0 0 18px; padding-left: 14px; border-left: 2px solid color-mix(in srgb, var(--accent) 28%, #d9deea); display: flex; flex-direction: column; gap: 10px; }
+.subtask-card { padding: 10px 12px; border-radius: 12px; background: #fff; border: 1px solid rgba(60,60,67,0.09); }
+.subtask-title { margin: 0 0 6px; color: #475467; font-size: 14px; line-height: 1.35; }
+.subtask-html { font-size: 13px; }
+.task-attach-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .attach-btn {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 6px 12px; border-radius: 10px;
@@ -1227,6 +1299,7 @@ function growthTargetLabel(item) {
 }
 .attach-btn:hover { background: rgba(10,132,255,0.14); }
 .attach-status { font-size: 12px; color: #6e6e73; }
+.attach-error { font-size: 12px; line-height: 1.35; color: #b42318; max-width: 420px; }
 .editor-grid { display: flex; flex-direction: column; gap: 10px; }
 .text-input, .text-area {
   width: 100%;

@@ -28,6 +28,7 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
@@ -41,6 +42,7 @@ const { resolveViewMode } = require('../services/projects/viewMode');
 const { sanitizeDraft, sanitizeData, sanitizeSummary } = require('../services/reports/viewModeSanitizer');
 const { deepMerge } = require('../services/reports/overridesApplier');
 const { enqueueOutbox } = require('../services/tasks/reliability');
+const { detectImageType } = require('../services/reports/reportContent');
 
 const PIN_TOKEN_TTL_S = 6 * 60 * 60; // 6 часов на сессию просмотра отчёта
 
@@ -115,6 +117,8 @@ function _periodLabel(from, to) {
 }
 
 function _summaryPayloadFromDraft(row) {
+  const insights = row.client_insights && typeof row.client_insights === 'object'
+    ? row.client_insights : {};
   return {
     executive_summary: row.llm_summary || '',
     highlights: row.llm_highlights || [],
@@ -124,6 +128,16 @@ function _summaryPayloadFromDraft(row) {
     roadmap: row.llm_roadmap || [],
     traffic_value: row.llm_traffic_value || '',
     next_month_forecast: row.llm_next_month_forecast || '',
+    ai_status: row.llm_status || 'idle',
+    ai_generated_at: row.llm_generated_at || insights.generated_at || null,
+    ai_metadata: {
+      provider: insights.provider || null,
+      model: insights.model || null,
+      tokens_in: Number(insights.tokens_in || 0),
+      tokens_out: Number(insights.tokens_out || 0),
+      generated_at: insights.generated_at || row.llm_generated_at || null,
+      report_model_version: insights.report_model_version || row.report_model_version || 'reports-v2',
+    },
   };
 }
 
@@ -249,6 +263,17 @@ async function updateDraft(req, res) {
 }
 
 async function deleteDraft(req, res) {
+  const { rows: sharedRows } = await db.query(
+    `SELECT uuid, is_active FROM shared_reports WHERE draft_id = $1 AND user_id = $2 ORDER BY created_at ASC`,
+    [req.params.id, req.user.id],
+  );
+  if (sharedRows.length) {
+    return res.status(409).json({
+      error: 'published_report_preserved',
+      message: 'Отчёт с опубликованной ссылкой нельзя удалить. Сначала отзовите ссылку вручную, если это действительно необходимо.',
+      links: sharedRows.map((row) => ({ uuid: row.uuid, is_active: row.is_active })),
+    });
+  }
   const { rowCount } = await db.query(
     `DELETE FROM report_drafts WHERE id = $1 AND user_id = $2`,
     [req.params.id, req.user.id],
@@ -665,7 +690,8 @@ async function _loadShared(uuid) {
     `SELECT s.*, d.title AS draft_title, d.tasks_blocks, d.config,
             d.llm_summary, d.llm_highlights, d.llm_growth, d.llm_quick_wins,
             d.llm_vulnerabilities, d.llm_roadmap, d.llm_traffic_value,
-            d.llm_next_month_forecast,
+            d.llm_next_month_forecast, d.llm_status, d.llm_generated_at,
+            d.client_insights,
             d.date_from, d.date_to,
             d.user_id AS owner_id,
             p.id AS project_id, p.name AS project_name, p.url AS project_url,
@@ -789,6 +815,7 @@ async function exportDraftDocx(req, res) {
       granularity: req.body?.granularity,
       viewMode,
     });
+    const reportSummary = sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode);
     const buffer = await buildReportDocx({
       title: draft.title,
       period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
@@ -797,9 +824,13 @@ async function exportDraftDocx(req, res) {
         url: draft.project_url,
       },
       data,
-      summary: sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode),
+      summary: reportSummary,
       tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
       chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      color_accent: draft.color_accent,
+      ai_status: reportSummary.ai_status,
+      ai_generated_at: reportSummary.ai_generated_at,
+      ai_metadata: reportSummary.ai_metadata,
       view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
@@ -821,14 +852,19 @@ async function exportDraftPdf(req, res) {
       granularity: req.body?.granularity,
       viewMode,
     });
+    const reportSummary = sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode);
     const buffer = await buildReportPdf({
       title: draft.title,
       period: _periodLabel(req.body?.from || draft.date_from, req.body?.to || draft.date_to),
       project: { name: draft.project_name, url: draft.project_url },
       data,
-      summary: sanitizeSummary(_summaryPayloadFromDraft(draft), viewMode),
+      summary: reportSummary,
       tasks_blocks: data.tasks?.blocks || draft.tasks_blocks || [],
       chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      color_accent: draft.color_accent,
+      ai_status: reportSummary.ai_status,
+      ai_generated_at: reportSummary.ai_generated_at,
+      ai_metadata: reportSummary.ai_metadata,
       view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/pdf');
@@ -893,6 +929,10 @@ async function publicExportDocx(req, res) {
       summary,
       tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
       chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      color_accent: sr.color_accent,
+      ai_status: summary.ai_status || sr.llm_status,
+      ai_generated_at: summary.ai_generated_at || sr.llm_generated_at,
+      ai_metadata: summary.ai_metadata,
       view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
@@ -940,6 +980,11 @@ async function publicExportPdf(req, res) {
       data,
       summary,
       tasks_blocks: (sr.mode === 'snapshot' && sr.snapshot_data?.tasks_blocks) || data.tasks?.blocks || sr.tasks_blocks || [],
+      chart_images: Array.isArray(req.body?.chart_images) ? req.body.chart_images : [],
+      color_accent: sr.color_accent,
+      ai_status: summary.ai_status || sr.llm_status,
+      ai_generated_at: summary.ai_generated_at || sr.llm_generated_at,
+      ai_metadata: summary.ai_metadata,
       view_mode: viewMode,
     });
     res.setHeader('Content-Type', 'application/pdf');
@@ -954,13 +999,20 @@ async function publicExportPdf(req, res) {
 async function uploadTaskImage(req, res) {
   try {
     if (!req.file) return _bad(res, 400, 'Файл не загружен');
-    // Return the public URL to the uploaded file. Используем `/api/uploads/...`,
-    // а не «голый» `/uploads/...`: в проде nginx проксирует на backend только
-    // `/api/`, поэтому относительный `/uploads/...` отдаёт SPA/404 и картинка
-    // не отрисовывается. Путь `/api/uploads` смонтирован в server.js.
+    // Проверяем magic bytes после multer: MIME приходит от браузера и не является
+    // достаточным доказательством, что файл действительно изображение.
+    let detectedType = '';
+    try { detectedType = detectImageType(fs.readFileSync(req.file.path)); } catch (_) { detectedType = ''; }
+    if (!detectedType || !['png', 'jpg', 'gif', 'bmp', 'webp'].includes(detectedType)) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
+      return _bad(res, 400, 'Файл не является поддерживаемым изображением');
+    }
+    // Relative `/api/uploads/...` is intentional: production nginx proxies the
+    // /api path to backend, while the named uploads volume survives rebuilds.
     const url = `/api/uploads/report-images/${req.file.filename}`;
-    res.json({ url });
+    res.json({ url, type: detectedType, size: req.file.size });
   } catch (err) {
+    if (req.file?.path) await fs.promises.unlink(req.file.path).catch(() => {});
     return _bad(res, 500, err.message || 'upload_failed');
   }
 }

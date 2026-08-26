@@ -80,7 +80,8 @@ function statusLabel(s) {
             <td>{{ fmtDate(d.updated_at) }}</td>
             <td class="rp-row-actions">
               <button class="btn-link" @click="router.push(`/reports/${d.id}/edit`)">Открыть</button>
-              <button class="btn-link danger" :disabled="removing === d.id" @click="remove(d.id)">Удалить</button>
+              <button v-if="d.status !== 'published'" class="btn-link danger" :disabled="removing === d.id" @click="remove(d.id)">Удалить</button>
+              <span v-else class="protected-label" title="Отчёт защищён опубликованной ссылкой">Ссылка защищена</span>
             </td>
           </tr>
         </tbody>
@@ -128,6 +129,7 @@ function statusLabel(s) {
 .rp-row-actions { display: flex; gap: 12px; justify-content: flex-end; }
 .btn-link { background: none; border: none; color: #0a84ff; cursor: pointer; padding: 4px 6px; font-size: 13px; font-weight: 500; }
 .btn-link:hover { color: #0071e3; }
+.protected-label { color: #03762d; font-size: 12px; white-space: nowrap; }
 .btn-link.danger { color: #d70015; }
 .btn-link:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

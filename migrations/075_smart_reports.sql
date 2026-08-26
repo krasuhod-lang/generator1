@@ -42,8 +42,8 @@ CREATE INDEX IF NOT EXISTS idx_report_drafts_project
 -- 3. Опубликованные ссылки.
 CREATE TABLE IF NOT EXISTS shared_reports (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  draft_id        UUID NOT NULL REFERENCES report_drafts(id) ON DELETE CASCADE,
-  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  draft_id        UUID NOT NULL REFERENCES report_drafts(id) ON DELETE RESTRICT,
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   uuid            VARCHAR(64) NOT NULL UNIQUE,
   mode            VARCHAR(16) NOT NULL DEFAULT 'live'
                   CHECK (mode IN ('snapshot','live')),

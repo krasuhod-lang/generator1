@@ -7,6 +7,7 @@
 
 const path      = require('path');
 const fs        = require('fs');
+const crypto    = require('crypto');
 const express   = require('express');
 const rateLimit = require('express-rate-limit');
 const multer    = require('multer');
@@ -29,8 +30,14 @@ if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
 const imgStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, imgDir),
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase() || '.png';
-    cb(null, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
+    const extByMime = {
+      'image/png': '.png',
+      'image/jpeg': '.jpg',
+      'image/gif': '.gif',
+      'image/webp': '.webp',
+    };
+    const ext = extByMime[file.mimetype] || '.bin';
+    cb(null, `${crypto.randomUUID()}${ext}`);
   },
 });
 const imgUpload = multer({
