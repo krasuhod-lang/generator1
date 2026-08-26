@@ -1968,6 +1968,7 @@ async function ensureSchema() {
         imported_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    await db.query(`ALTER TABLE project_gsc_links ADD COLUMN IF NOT EXISTS referring_sites INTEGER NOT NULL DEFAULT 0`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_project_gsc_links_project ON project_gsc_links (project_id, table_type)`);
 
     // data_source_health — мониторинг свежести данных по внешним источникам

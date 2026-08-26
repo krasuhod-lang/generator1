@@ -462,7 +462,7 @@ function _renderSerpVerificationLines(serpVerification) {
 function _renderLinkStrategyLines(link) {
   if (!link || !link.available) return [];
   const out = ['', '[ССЫЛОЧНАЯ СТРАТЕГИЯ] (раздел 8 — выдай ≥5 рекомендаций)',
-    `data_source: ${link.data_source} (gsc_csv = есть выгрузка GSC; inferred = построено от контента/SERP)`,
+    `data_source: ${link.data_source} (gsc_csv = есть ручная выгрузка GSC CSV или XLSX; inferred = построено от контента/SERP)`,
     `Рекомендации на закупку ссылок (anchor, anchor_type, donor_topic — готовая тема статьи-донора напрямую (рабочий заголовок статьи под анкор, без служебной обёртки), donor_topic_ready/donor_topic_angle — проработанная тема и угол, donor_topic_title — интригующий SEO-title (раскрывает интент, не дублирует тему), donor_topic_description — meta-description, target_url, priority, why):`,
     JSON.stringify((link.recommendations || []).slice(0, 20).map((r) => ({
       anchor: r.anchor,
@@ -482,6 +482,8 @@ function _renderLinkStrategyLines(link) {
       `Анкор-профиль (distribution): ${JSON.stringify(a.anchors && a.anchors.distribution)}`,
       `Предупреждения по анкорам: ${JSON.stringify((a.anchors && a.anchors.warnings) || [])}`,
       `Топ-доноры (host, trust_score, flags): ${JSON.stringify((a.donors || []).slice(0, 15))}`,
+      `Top Target Pages (url, incoming_links, referring_sites): ${JSON.stringify((a.target_pages || []).slice(0, 20))}`,
+      `Итоги целевых страниц: ${JSON.stringify(a.target_page_totals || {})}`,
       `Орфаны — топ-страницы без ссылок (url, impressions): ${JSON.stringify((a.orphans || []).map((o) => ({ url: o.url, impressions: o.impressions })))}`,
       `Проблемы: ${JSON.stringify(a.issues || [])}`);
   }

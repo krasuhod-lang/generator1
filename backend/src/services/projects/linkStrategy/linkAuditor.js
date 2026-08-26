@@ -38,6 +38,19 @@ function auditLinks({ project, links, topPages } = {}) {
   const anchorReport = analyzeAnchors(anchors, brandTokens);
   const donorReport = scoreDonors(sites).slice(0, cfg.topDonors);
   const { linkedSet, orphans } = findOrphanPages(topPages || [], pages);
+  const targetPageRows = pages
+    .filter((p) => p && p.target_page)
+    .map((p) => ({
+      target_page: p.target_page,
+      links: Number(p.links) || 0,
+      referring_sites: Number(p.referring_sites) || 0,
+    }))
+    .sort((a, b) => (b.links - a.links) || (b.referring_sites - a.referring_sites));
+  const targetPageTotals = targetPageRows.reduce((acc, row) => ({
+    target_pages: acc.target_pages + 1,
+    incoming_links: acc.incoming_links + row.links,
+    referring_sites: acc.referring_sites + row.referring_sites,
+  }), { target_pages: 0, incoming_links: 0, referring_sites: 0 });
 
   const issues = [];
   anchorReport.warnings.forEach((w) => issues.push({ kind: 'anchor', message: w }));
@@ -65,10 +78,14 @@ function auditLinks({ project, links, topPages } = {}) {
 
   return {
     available: true,
+    // Сохраняем историческое API-значение gsc_csv для совместимости; оно
+    // означает ручную выгрузку GSC в CSV или XLSX.
     data_source: hasData ? 'gsc_csv' : 'inferred',
     has_link_data: hasData,
     anchors: anchorReport,
     donors: donorReport,
+    target_pages: targetPageRows.slice(0, cfg.topTargetPages),
+    target_page_totals: targetPageTotals,
     orphans: importantOrphans,
     linked_count: linkedSet.size,
     issues,

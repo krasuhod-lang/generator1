@@ -17,6 +17,9 @@ const available = computed(() => props.linkAudit && props.linkAudit.available);
 const recs = computed(() => (props.linkAudit && props.linkAudit.recommendations) || []);
 const audit = computed(() => (props.linkAudit && props.linkAudit.audit) || {});
 const inferred = computed(() => props.linkAudit && props.linkAudit.data_source === 'inferred');
+const anchorCloud = computed(() => (audit.value.anchors && audit.value.anchors.anchor_cloud) || []);
+const targetPages = computed(() => audit.value.target_pages || []);
+const targetPageTotals = computed(() => audit.value.target_page_totals || {});
 
 function trimUrl(u) {
   if (!u) return '';
@@ -85,16 +88,43 @@ function copyAll() {
     </div>
     <p v-if="inferred" class="text-xs text-amber-300/80">
       Нет выгрузки «Ссылки» из GSC — рекомендации построены по контентному срезу (data_source: inferred).
-      Загрузите CSV «Внешние ссылки», чтобы уточнить анализ доноров.
+      Загрузите CSV или Excel «Внешние ссылки», чтобы уточнить анализ доноров и целевых страниц.
     </p>
 
-    <div v-if="audit.anchors && audit.anchors.length" class="text-sm">
+    <div v-if="anchorCloud.length" class="text-sm">
       <div class="text-xs text-gray-400 mb-1">Анкор-облако</div>
       <div class="flex flex-wrap gap-2">
-        <span v-for="a in audit.anchors.slice(0, 12)" :key="a.anchor"
+        <span v-for="a in anchorCloud.slice(0, 12)" :key="a.anchor"
               class="rounded-full bg-gray-800/60 px-2 py-0.5 text-xs">
-          {{ a.anchor }} <span class="text-gray-500">×{{ a.count }}</span>
+          {{ a.anchor }} <span class="text-gray-500">×{{ a.links }}</span>
         </span>
+      </div>
+    </div>
+
+    <div v-if="targetPages.length || targetPageTotals.incoming_links" class="space-y-2">
+      <div class="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+        <span>Top Target Pages</span>
+        <span class="rounded bg-gray-800 px-2 py-0.5">страниц: {{ targetPageTotals.target_pages || targetPages.length }}</span>
+        <span class="rounded bg-gray-800 px-2 py-0.5">входящих ссылок: {{ targetPageTotals.incoming_links || 0 }}</span>
+        <span class="rounded bg-gray-800 px-2 py-0.5">сайтов-доноров: {{ targetPageTotals.referring_sites || 0 }}</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-gray-500 text-left">
+            <tr>
+              <th class="py-1 pr-2">Страница назначения</th>
+              <th class="py-1 px-2">Входящие ссылки</th>
+              <th class="py-1 pl-2">Сайты со ссылками</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in targetPages.slice(0, 10)" :key="p.target_page" class="border-t border-gray-800/60 align-top">
+              <td class="py-1.5 pr-2 text-indigo-300 break-all">{{ trimUrl(p.target_page) }}</td>
+              <td class="py-1.5 px-2 text-gray-200">{{ p.links }}</td>
+              <td class="py-1.5 pl-2 text-gray-200">{{ p.referring_sites }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 

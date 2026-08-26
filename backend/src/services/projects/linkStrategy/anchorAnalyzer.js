@@ -86,14 +86,16 @@ function analyzeAnchors(anchors, brandTokens = []) {
 /**
  * Находит «голые» топ-страницы GSC, на которые нет входящих ссылок (gap).
  * @param {Array} topPages [{key:url, clicks, impressions}]
- * @param {Array} linkedPages [{target_page, links}]
+ * @param {Array} linkedPages [{target_page, links, referring_sites}]
  * @returns {{linked:Set, orphans:Array}}
  */
 function findOrphanPages(topPages, linkedPages) {
   const linkedSet = new Set();
   (linkedPages || []).forEach((p) => {
     const u = _canonPath(p.target_page);
-    if (u) linkedSet.add(u);
+    const links = Number(p && p.links) || 0;
+    const referringSites = Number(p && p.referring_sites) || 0;
+    if (u && (links > 0 || referringSites > 0)) linkedSet.add(u);
   });
   const orphans = (topPages || [])
     .filter((p) => p.key && !linkedSet.has(_canonPath(p.key)))

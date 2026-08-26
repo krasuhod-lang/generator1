@@ -116,11 +116,16 @@ async function uploadLinksCsv() {
     const res = await store.importGscLinks(projectId, csvFile.value);
     const TYPE_RU = { sites: 'доноры', pages: 'целевые страницы', anchors: 'анкоры' };
     const typeRu = TYPE_RU[res?.type] || res?.type || '';
-    flash(`Импортировано (${typeRu}): ${res?.imported ?? 0} из ${res?.parsed ?? 0} строк`);
+    const formatLabel = res?.format === 'xlsx' ? ` Excel${res?.sheet ? `, лист «${res.sheet}»` : ''}` : ' CSV';
+    const metrics = res?.metrics;
+    const metricsLabel = metrics
+      ? `; страниц: ${metrics.target_pages}, входящих ссылок: ${metrics.incoming_links}, сайтов-доноров: ${metrics.referring_sites}`
+      : '';
+    flash(`Импортировано${formatLabel} (${typeRu}): ${res?.imported ?? 0} из ${res?.parsed ?? 0} строк${metricsLabel}`);
     csvFile.value = null;
     if (csvInput.value) csvInput.value.value = '';
   } catch (err) {
-    flash(err.response?.data?.error || 'Не удалось импортировать CSV');
+    flash(err.response?.data?.error || 'Не удалось импортировать CSV/Excel');
   } finally {
     csvUploading.value = false;
   }
@@ -894,15 +899,16 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <!-- Импорт CSV «Ссылки» из GSC (внешние ссылки/доноры/анкоры) -->
+        <!-- Импорт CSV/XLSX «Ссылки» из GSC (внешние ссылки/доноры/анкоры) -->
         <section v-if="gscReady" class="card space-y-2">
-          <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Ссылки из GSC (CSV)</h2>
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-indigo-300">Ссылки из GSC (CSV / Excel)</h2>
           <p class="text-xs text-gray-500">
-            Search Console не отдаёт отчёт «Ссылки» через API. Выгрузите CSV вручную
-            (Ссылки → Экспорт) и загрузите сюда — это включит анализ доноров и анкоров.
+            Search Console не отдаёт отчёт «Ссылки» через API. Выгрузите CSV или Excel
+            (Ссылки → Экспорт) и загрузите сюда — данные доноров, целевых страниц и анкоров
+            будут сохранены и использованы в ссылочном анализе.
           </p>
           <div class="flex items-center gap-2">
-            <input ref="csvInput" type="file" accept=".csv,text/csv" class="text-xs text-gray-300"
+            <input ref="csvInput" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="text-xs text-gray-300"
                    @change="onCsvSelected" />
             <button class="btn-secondary text-xs" :disabled="!csvFile || csvUploading" @click="uploadLinksCsv">
               {{ csvUploading ? 'Загрузка…' : 'Импортировать' }}

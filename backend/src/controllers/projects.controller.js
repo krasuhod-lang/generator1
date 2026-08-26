@@ -1016,7 +1016,7 @@ function _integrationError(res, next, err) {
 // ── Расширение «Анализ GSC» (п.1-8 ТЗ) ──────────────────────────────────
 
 /**
- * POST /:id/gsc-links/import — импорт CSV-выгрузки «Ссылки» из GSC UI.
+ * POST /:id/gsc-links/import — импорт CSV/XLSX-выгрузки «Ссылки» из GSC UI.
  * Принимает multipart-файл (поле "file") ИЛИ сырой CSV в body.csv.
  * Тип таблицы (sites/pages/anchors) определяется автоматически по заголовку.
  */
@@ -1027,26 +1027,53 @@ async function importGscLinks(req, res, next) {
 
     const linkCfg = CFG.linkStrategy || {};
     let csvText = '';
+    let parsed;
+    let format = 'csv';
+    let sheet = null;
     if (req.file && req.file.buffer) {
       if (req.file.size > (linkCfg.importMaxBytes || 5_000_000)) {
         return res.status(413).json({ error: 'Файл слишком большой' });
       }
-      csvText = req.file.buffer.toString('utf8');
+      const filename = String(req.file.originalname || '').toLowerCase();
+      const isXlsx = filename.endsWith('.xlsx')
+        || req.file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const importer = require('../services/projects/linkStrategy/linksImporter');
+      if (isXlsx) {
+        parsed = await importer.importLinksXlsx(req.file.buffer);
+        format = 'xlsx';
+        sheet = parsed.sheet || null;
+      } else {
+        csvText = req.file.buffer.toString('utf8');
+        parsed = importer.importLinksCsv(csvText);
+      }
     } else if (req.body && typeof req.body.csv === 'string') {
       csvText = req.body.csv;
+      const { importLinksCsv } = require('../services/projects/linkStrategy/linksImporter');
+      parsed = importLinksCsv(csvText);
     }
-    if (!csvText.trim()) return res.status(400).json({ error: 'Пустой CSV' });
+    if (!parsed || (!csvText.trim() && format !== 'xlsx')) {
+      return res.status(400).json({ error: 'Пустой файл/CSV' });
+    }
 
-    const { importLinksCsv } = require('../services/projects/linkStrategy/linksImporter');
     const { saveImport } = require('../services/projects/linkStrategy/linksRepo');
-    const parsed = importLinksCsv(csvText);
     if (parsed.type === 'unknown') {
       return res.status(422).json({ error: 'Не удалось определить тип таблицы GSC (sites/pages/anchors)' });
     }
     const saved = await saveImport({
       projectId: project.id, userId: req.user.id, type: parsed.type, rows: parsed.rows,
     });
-    return res.json({ type: parsed.type, imported: saved.inserted, parsed: parsed.count });
+    return res.json({
+      type: parsed.type,
+      format,
+      sheet,
+      imported: saved.inserted,
+      parsed: parsed.count,
+      metrics: parsed.type === 'pages' ? {
+        target_pages: parsed.count,
+        incoming_links: parsed.rows.reduce((sum, row) => sum + (Number(row.links) || 0), 0),
+        referring_sites: parsed.rows.reduce((sum, row) => sum + (Number(row.referring_sites) || 0), 0),
+      } : null,
+    });
   } catch (err) { return next(err); }
 }
 

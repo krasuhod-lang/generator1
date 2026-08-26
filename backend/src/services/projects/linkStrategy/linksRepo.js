@@ -20,10 +20,11 @@ async function saveImport({ projectId, userId, type, rows }, db = dbDefault) {
   for (const r of rows) {
     await db.query(
       `INSERT INTO project_gsc_links
-         (project_id, user_id, table_type, donor, target_page, anchor, links)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+         (project_id, user_id, table_type, donor, target_page, anchor, links, referring_sites)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [projectId, userId || null, type,
-        r.donor || null, r.target_page || null, r.anchor || null, Number(r.links) || 0],
+        r.donor || null, r.target_page || null, r.anchor || null,
+        Number(r.links) || 0, Number(r.referring_sites) || 0],
     );
     inserted += 1;
   }
@@ -39,14 +40,18 @@ async function loadLinks(projectId, db = dbDefault) {
   if (!projectId) return empty;
   try {
     const { rows } = await db.query(
-      `SELECT table_type, donor, target_page, anchor, links
+      `SELECT table_type, donor, target_page, anchor, links, referring_sites
          FROM project_gsc_links WHERE project_id = $1`,
       [projectId],
     );
     const out = { anchors: [], pages: [], sites: [] };
     rows.forEach((r) => {
       if (r.table_type === 'anchors') out.anchors.push({ anchor: r.anchor, links: r.links });
-      else if (r.table_type === 'pages') out.pages.push({ target_page: r.target_page, links: r.links });
+      else if (r.table_type === 'pages') out.pages.push({
+        target_page: r.target_page,
+        links: Number(r.links) || 0,
+        referring_sites: Number(r.referring_sites) || 0,
+      });
       else if (r.table_type === 'sites') out.sites.push({ donor: r.donor, links: r.links });
     });
     return out;

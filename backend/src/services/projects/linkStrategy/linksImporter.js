@@ -14,13 +14,14 @@
  */
 
 const { getProjectsConfig } = require('../config');
+const ExcelJS = require('exceljs');
 
 // Возможные заголовки колонок в локалях GSC (нижний регистр, по подстроке).
 const HEADER_HINTS = {
   donor: ['linking site', 'сайт-источник', 'связывающий сайт', 'ссылающийся сайт',
     'ссылающие сайты', 'top linking sites'],
-  targetPage: ['linked page', 'target page', 'связанная страница', 'целевая страница',
-    'страница, на которую ведут ссылки', 'наиболее связываемые'],
+  targetPage: ['linked page', 'target page', 'destination page', 'связанная страница', 'целевая страница',
+    'страница назначения', 'страница, на которую ведут ссылки', 'наиболее связываемые'],
   anchor: ['linking text', 'anchor', 'текст ссылки', 'анкор', 'связывающий текст'],
   linkCount: ['linking sites', 'links', 'ссылки', 'кол-во ссылок', 'число ссылок',
     'target pages', 'целевые страницы'],
@@ -68,8 +69,20 @@ function _detectDelimiter(src) {
   return semis > commas ? ';' : ',';
 }
 
+function _cellText(value) {
+  if (value == null) return '';
+  if (typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text;
+    if (typeof value.richText === 'object' && Array.isArray(value.richText)) {
+      return value.richText.map((part) => part && part.text || '').join('');
+    }
+    if (value.hyperlink && value.text) return `${value.text} ${value.hyperlink}`;
+  }
+  return String(value);
+}
+
 function _headerMatch(header, hints) {
-  const h = header.map((c) => String(c).toLowerCase().trim());
+  const h = header.map((c) => _cellText(c).toLowerCase().trim());
   return hints.some((hint) => h.some((col) => col.includes(hint)));
 }
 
@@ -85,8 +98,28 @@ function detectTableType(header) {
 }
 
 function _toInt(v) {
-  const n = parseInt(String(v == null ? '' : v).replace(/[^\d]/g, ''), 10);
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.max(0, Math.round(v));
+  const n = parseInt(_cellText(v).replace(/[^\d]/g, ''), 10);
   return Number.isFinite(n) ? n : 0;
+}
+
+function _normalizeMatrix(matrix, cfg) {
+  if (!Array.isArray(matrix) || matrix.length < 2) return { type: 'unknown', rows: [], count: 0 };
+  const header = matrix[0] || [];
+  const type = detectTableType(header);
+  const body = matrix.slice(1, 1 + (cfg.importMaxRows || 20000));
+  const rows = [];
+  for (const rawRow of body) {
+    const r = Array.isArray(rawRow) ? rawRow : [];
+    const c0 = _cellText(r[0]).trim();
+    if (!c0) continue;
+    const links = _toInt(r[1]);
+    if (type === 'anchors') rows.push({ anchor: c0, links });
+    else if (type === 'pages') rows.push({ target_page: c0, links, referring_sites: _toInt(r[2]) });
+    else if (type === 'sites') rows.push({ donor: c0, links });
+    else rows.push({ value: c0, links });
+  }
+  return { type, rows, count: rows.length };
 }
 
 /**
@@ -102,21 +135,29 @@ function importLinksCsv(csvText) {
   const cfg = getProjectsConfig().linkStrategy;
   const matrix = parseCsv(csvText);
   if (matrix.length < 2) return { type: 'unknown', rows: [], count: 0 };
-  const header = matrix[0];
-  const type = detectTableType(header);
-  const body = matrix.slice(1, 1 + (cfg.importMaxRows || 20000));
-
-  const rows = [];
-  for (const r of body) {
-    const c0 = String(r[0] || '').trim();
-    if (!c0) continue;
-    const links = _toInt(r[1] != null ? r[1] : 0);
-    if (type === 'anchors') rows.push({ anchor: c0, links });
-    else if (type === 'pages') rows.push({ target_page: c0, links });
-    else if (type === 'sites') rows.push({ donor: c0, links });
-    else rows.push({ value: c0, links }); // unknown: keep raw
-  }
-  return { type, rows, count: rows.length };
+  return _normalizeMatrix(matrix, cfg);
 }
 
-module.exports = { parseCsv, detectTableType, importLinksCsv, HEADER_HINTS };
+async function importLinksXlsx(buffer) {
+  const cfg = getProjectsConfig().linkStrategy;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+
+  let selected = null;
+  workbook.eachSheet((worksheet) => {
+    if (selected) return;
+    const matrix = [];
+    worksheet.eachRow({ includeEmpty: false }, (row) => {
+      const values = Array.isArray(row.values) ? row.values.slice(1) : [];
+      if (values.some((value) => _cellText(value).trim() !== '')) matrix.push(values);
+    });
+    if (matrix.length >= 2 && detectTableType(matrix[0]) !== 'unknown') {
+      selected = { sheet: worksheet.name, parsed: _normalizeMatrix(matrix, cfg) };
+    }
+  });
+
+  if (!selected) return { type: 'unknown', rows: [], count: 0, sheet: null };
+  return { ...selected.parsed, sheet: selected.sheet, format: 'xlsx' };
+}
+
+module.exports = { parseCsv, importLinksCsv, importLinksXlsx, detectTableType, HEADER_HINTS };
