@@ -602,7 +602,7 @@ async function runYandexPass(project, range) {
 /**
  * @param {string} analysisId  id строки project_analyses (status='queued')
  */
-async function processAnalysis(analysisId, durableContext = null) {
+async function _processAnalysis(analysisId, durableContext = null) {
   let project;
   let range;
   let heartbeatTimer = null;
@@ -891,14 +891,25 @@ async function processAnalysis(analysisId, durableContext = null) {
     // Aegis-петля (best-effort): seoBrain snapshot + training example +
     // biobrain feedback. Любая ошибка — warn и продолжаем.
     if (snapshot && result) {
+      const postProcessTimeoutMs = Math.max(
+        5000,
+        Number(getProjectsConfig().analysisRun?.postProcessTimeoutMs) || 30000,
+      );
       try {
-        await onAnalysisDone(db, {
-          analysisId,
-          project: { ...project, user_id: userId },
-          snapshot,
-          result,
-        });
+        await _withDeadline(
+          () => onAnalysisDone(db, {
+            analysisId,
+            project: { ...project, user_id: userId },
+            snapshot,
+            result,
+          }),
+          postProcessTimeoutMs,
+          'aegisHook',
+          null,
+        );
       } catch (e) {
+        // The report row is already status=done above; Aegis is best-effort and
+        // must never turn a successful analysis into an error after persistence.
         console.warn('[projects/analysisRunner] aegis hook failed:', e.message);
       }
     }
@@ -926,6 +937,25 @@ async function processAnalysis(analysisId, durableContext = null) {
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
+}
+
+async function processAnalysis(analysisId, durableContext = null) {
+  const cfg = getProjectsConfig().analysisRun || {};
+  const timeoutMs = Math.max(5 * 60 * 1000, Number(cfg.totalTimeoutMs) || 55 * 60 * 1000);
+  const timedOut = Symbol('project-analysis-timeout');
+  const result = await _withDeadline(
+    () => _processAnalysis(analysisId, durableContext),
+    timeoutMs,
+    'projectAnalysis',
+    timedOut,
+  );
+  if (result === timedOut) {
+    const error = new Error(`Анализ проекта превысил общий лимит ${Math.round(timeoutMs / 60000)} мин`);
+    error.code = 'analysis_timeout';
+    await _setError(analysisId, error.message, durableContext?.leaseToken).catch(() => {});
+    throw error;
+  }
+  return result;
 }
 
 function _isoDate(d) {

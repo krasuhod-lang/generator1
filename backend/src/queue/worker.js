@@ -27,6 +27,11 @@ const { runPipeline, PipelinePausedError } = require('../services/pipeline/orche
 const { createParserWorker } = require('./parserWorker');
 const { createSiteCrawlerWorker } = require('./siteCrawlerWorker');
 const {
+  startProjectReportWorkers,
+  stopProjectReportWorkers,
+  requeueProjectReportOwnedWork,
+} = require('./projectReportWorker');
+const {
   claimGenerationTask: claimGenerationTaskWithProfileSlot,
 } = require('../services/tasks/generationAdmission');
 const { acquireUserTaskSlot } = require('../services/tasks/userTaskAdmission');
@@ -349,12 +354,27 @@ const worker = new Worker(
 let parserWorker = null;
 let siteCrawlerWorker = null;
 schemaReady
-  .then(() => {
-    parserWorker = createParserWorker();
-    siteCrawlerWorker = createSiteCrawlerWorker();
-    console.log('[Worker] parser/site-crawler workers started after reliability schema check');
+  .then(async () => {
+    try {
+      parserWorker = createParserWorker();
+      console.log('[Worker] parser worker started after reliability schema check');
+    } catch (error) {
+      console.error('[Worker] parser worker not started:', error.message);
+    }
+    try {
+      siteCrawlerWorker = createSiteCrawlerWorker();
+      console.log('[Worker] site-crawler worker started after reliability schema check');
+    } catch (error) {
+      console.error('[Worker] site-crawler worker not started:', error.message);
+    }
+    try {
+      await startProjectReportWorkers();
+      console.log('[Worker] project-analysis/report-summary workers started after reliability schema check');
+    } catch (error) {
+      console.error('[Worker] project-analysis/report-summary workers not started:', error.message);
+    }
   })
-  .catch((e) => console.error('[Worker] parser/site-crawler workers not started:', e.message));
+  .catch((e) => console.error('[Worker] dedicated workers bootstrap failed:', e.message));
 
 // -----------------------------------------------------------------
 // Глобальные события воркера
@@ -443,11 +463,15 @@ async function requeueWorkerOwnedTasks() {
 async function gracefulShutdown(signal) {
   console.log(`[Worker] ${signal} received — closing all workers gracefully...`);
   try {
-    await requeueWorkerOwnedTasks();
+    await Promise.all([
+      requeueWorkerOwnedTasks(),
+      requeueProjectReportOwnedWork(),
+    ]);
     await Promise.all([
       worker.close(true),
       parserWorker ? parserWorker.close(true) : Promise.resolve(),
       siteCrawlerWorker ? siteCrawlerWorker.close(true) : Promise.resolve(),
+      stopProjectReportWorkers(),
     ]);
     console.log('[Worker] All workers closed, active jobs returned to queues');
   } catch (err) {

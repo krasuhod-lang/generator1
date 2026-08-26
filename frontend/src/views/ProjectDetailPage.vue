@@ -541,6 +541,14 @@ function growthPriorityLabel(priority) {
   return ({ critical: 'Критично', high: 'Высокий', medium: 'Средний', low: 'Низкий' }[priority] || 'Средний');
 }
 
+function analysisStatusLabel(status) {
+  return ({ queued: 'в очереди', running: 'выполняется', done: 'завершён', error: 'ошибка' }[status] || status || 'ожидает запуска');
+}
+function analysisStageLabel(analysis) {
+  const stage = analysis?.checkpoint?.stage;
+  return ({ started: 'подготовка', yandex_pass: 'анализ Яндекс.Вебмастера', snapshot_collected: 'сбор данных Google', growth_opportunities: 'расчёт точек роста', synthesis: 'финальная AI-сводка', heartbeat: 'обработка данных' }[stage] || 'обработка данных');
+}
+
 async function runAnalysis() {
   analyzing.value = true;
   currentAnalysis.value = null;
@@ -562,7 +570,7 @@ function pollAnalysis(aid) {
   // Ограничиваем поллинг: без этого при постоянных ошибках запроса статуса
   // (404/500/сеть) страница вечно висела в состоянии «ИИ анализирует…».
   const MAX_FAILS = 10;      // ~30 c подряд неудачных запросов
-  const MAX_TICKS = 1200;    // ~60 минут ожидания анализа
+  const MAX_TICKS = 1100;    // ~55 минут — согласовано с server totalTimeoutMs
   let fails = 0;
   let ticks = 0;
   const tick = async () => {
@@ -1001,10 +1009,16 @@ onUnmounted(() => {
             <div class="h-4 w-2/3 animate-pulse bg-gray-800 rounded"></div>
             <div class="h-4 w-full animate-pulse bg-gray-800 rounded"></div>
             <div class="h-4 w-5/6 animate-pulse bg-gray-800 rounded"></div>
-            <p class="text-xs text-gray-500">Генерация может занять 30–60 секунд…</p>
+            <div class="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+              <span>Статус: {{ analysisStatusLabel(currentAnalysis?.status) }}</span>
+              <span v-if="currentAnalysis?.checkpoint?.stage">· Этап: {{ analysisStageLabel(currentAnalysis) }}</span>
+              <span v-if="currentAnalysis?.checkpoint?.percent != null">· {{ currentAnalysis.checkpoint.percent }}%</span>
+            </div>
+            <p class="text-xs text-gray-500">Анализ выполняется в фоне. Обычно это занимает несколько минут; серверный hard limit — 55 минут. При сетевом сбое задача перейдёт в понятный статус ошибки, а не останется в ожидании навсегда.</p>
           </div>
           <div v-else-if="currentAnalysis?.status === 'error'" class="text-sm text-red-400">
-            Ошибка анализа: {{ currentAnalysis.error_message }}
+            Анализ завершён с ошибкой: {{ currentAnalysis.error_message || 'неизвестная ошибка' }}
+            <span v-if="currentAnalysis?.last_error_code" class="text-xs text-gray-500"> ({{ currentAnalysis.last_error_code }})</span>
           </div>
           <!-- Частичный успех: Google не отдал отчёт, но анализ Яндекса прошёл. -->
           <div v-else-if="currentAnalysis?.status === 'done' && !currentAnalysis.report_markdown"

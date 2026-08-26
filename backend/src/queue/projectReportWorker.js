@@ -101,9 +101,18 @@ async function startProjectReportWorkers() {
       { connection, concurrency: Math.max(1, Number(process.env.REPORT_SUMMARY_WORKER_CONCURRENCY) || 1) },
     );
 
-    for (const worker of [analysisWorker, summaryWorker]) {
+    for (const [name, worker] of [['project-analysis', analysisWorker], ['report-summary', summaryWorker]]) {
       worker.on('error', (error) => {
-        console.error('[ProjectReportWorker] BullMQ error:', error.message);
+        console.error(`[ProjectReportWorker][${name}] BullMQ error:`, error.message);
+      });
+      worker.on('completed', (job) => {
+        console.log(`[ProjectReportWorker][${name}] completed job=${job.id}`);
+      });
+      worker.on('failed', (job, error) => {
+        console.error(`[ProjectReportWorker][${name}] failed job=${job?.id}:`, error.message);
+      });
+      worker.on('stalled', (jobId) => {
+        console.warn(`[ProjectReportWorker][${name}] stalled job=${jobId}`);
       });
     }
 
@@ -115,6 +124,43 @@ async function startProjectReportWorkers() {
   return startPromise;
 }
 
+async function requeueProjectReportOwnedWork() {
+  const recovered = { projectAnalyses: 0, reportSummaries: 0 };
+  try {
+    const analyses = await db.query(
+      `UPDATE project_analyses
+          SET status='queued', worker_id=NULL, lease_token=NULL, lease_until=NULL,
+              heartbeat_at=NOW(), completed_at=NULL,
+              last_error_code='worker_shutdown',
+              error_message='Worker остановлен; анализ будет возобновлён', updated_at=NOW()
+        WHERE worker_id=$1 AND status='running'
+        RETURNING id`,
+      [WORKER_ID],
+    );
+    recovered.projectAnalyses = analyses.rowCount || 0;
+  } catch (error) {
+    console.warn('[ProjectReportWorker] project-analysis shutdown requeue failed:', error.message);
+  }
+
+  try {
+    const summaries = await db.query(
+      `UPDATE report_drafts
+          SET llm_status='queued', llm_worker_id=NULL, llm_lease_token=NULL,
+              llm_lease_until=NULL, llm_heartbeat_at=NOW(),
+              llm_error='Worker остановлен; AI summary будет возобновлено',
+              llm_last_error_code='worker_shutdown', updated_at=NOW()
+        WHERE llm_worker_id=$1 AND llm_status='running'
+        RETURNING id`,
+      [WORKER_ID],
+    );
+    recovered.reportSummaries = summaries.rowCount || 0;
+  } catch (error) {
+    console.warn('[ProjectReportWorker] report-summary shutdown requeue failed:', error.message);
+  }
+  console.log('[ProjectReportWorker] shutdown recovery:', recovered);
+  return recovered;
+}
+
 async function stopProjectReportWorkers() {
   const workers = [analysisWorker, summaryWorker].filter(Boolean);
   analysisWorker = null;
@@ -123,4 +169,8 @@ async function stopProjectReportWorkers() {
   await Promise.all(workers.map((worker) => worker.close().catch(() => {})));
 }
 
-module.exports = { startProjectReportWorkers, stopProjectReportWorkers };
+module.exports = {
+  startProjectReportWorkers,
+  stopProjectReportWorkers,
+  requeueProjectReportOwnedWork,
+};

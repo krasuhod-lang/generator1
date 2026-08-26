@@ -35,6 +35,11 @@ const PROJECTS_CONFIG = deepFreeze({
     stepTimeoutMs: 10 * 60 * 1000,
     // Потолок на весь сбор среза (collectSnapshot) целиком.
     collectTimeoutMs: 40 * 60 * 1000,
+    // Жёсткий бюджет всего одного анализа. Он важнее heartbeat: внешний
+    // провайдер/прокси не может удерживать project_analyses в running часами.
+    totalTimeoutMs: 55 * 60 * 1000,
+    // Aegis hook не должен задерживать уже сохранённый финальный результат.
+    postProcessTimeoutMs: 30 * 1000,
     // Через сколько строка в статусе running/queued считается «зависшей»
     // (например, процесс перезапустили в середине анализа).
     staleAfterMs: 90 * 60 * 1000,
