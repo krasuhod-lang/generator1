@@ -34,7 +34,7 @@ const { fetchPerformanceSeries, fetchTopDimensions } = require('../services/proj
 const ydxService = require('../services/projects/ydxService');
 const { compareSources } = require('../services/projects/sourceComparison');
 const { collectSnapshot } = require('../services/projects/analysisRunner');
-const { enqueueOutbox } = require('../services/tasks/reliability');
+const { enqueueOutbox, publishPendingOutbox } = require('../services/tasks/reliability');
 const { makeBullJobId } = require('../queue/jobIds');
 const {
   listGrowthOpportunities,
@@ -623,6 +623,11 @@ async function startAnalysis(req, res, next) {
       jobName: 'run-analysis',
       jobId,
       payload: { analysisId: analysis.id, jobId },
+    });
+    // Не заставляем новый анализ ждать только recovery scheduler. Публикация
+    // best-effort: Redis outage не ломает API, outbox повторит dispatch.
+    publishPendingOutbox(db, 20).catch((error) => {
+      console.warn('[projects] project-analysis immediate dispatch delayed:', error.message);
     });
     analysis.job_id = jobId;
     return res.status(202).json({ analysis, dispatch: 'durable_outbox' });

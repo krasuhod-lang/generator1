@@ -448,20 +448,51 @@ async function reconcileParserAndCrawlerJobs(db = dbDefault) {
     if (inserted) crawlQueued += 1;
   }
   const { rows: analysisRows } = await db.query(
-    `SELECT id, job_id, project_id, range_key, period_from, period_to
+    `SELECT id, job_id
        FROM project_analyses
-      WHERE status='queued' AND job_id IS NOT NULL
+      WHERE status='queued'
       ORDER BY updated_at NULLS FIRST, created_at
       LIMIT 100`,
   );
+  const liveProjectStates = new Set(['waiting', 'active', 'delayed', 'prioritized', 'waiting-children']);
   for (const row of analysisRows) {
-    const inserted = await enqueueOutbox({
-      queueName: 'project-analysis',
-      jobName: 'run-analysis',
-      jobId: row.job_id,
-      payload: { analysisId: row.id, jobId: row.job_id },
-    }, db);
-    if (inserted) projectReportQueued += 1;
+    let jobId = row.job_id;
+    if (!jobId) {
+      jobId = makeBullJobId('project-analysis', row.id, 'reconcile');
+      await db.query(
+        `UPDATE project_analyses SET job_id=$2, updated_at=NOW() WHERE id=$1 AND status='queued'`,
+        [row.id, jobId],
+      );
+    }
+    const safeJobId = normalizeBullJobId(jobId);
+    const existing = await projectAnalysisQueue.getJob(safeJobId).catch(() => null);
+    const state = existing ? await existing.getState().catch(() => 'unknown') : 'missing';
+    if (existing && liveProjectStates.has(state)) continue;
+    if (existing && (state === 'completed' || state === 'failed')) {
+      await existing.remove().catch(() => {});
+    }
+
+    // published_at мог остаться установленным после Redis restart/flush или
+    // старого worker outage. Если live BullMQ job отсутствует, делаем outbox
+    // снова pending; иначе PostgreSQL считает dispatch завершённым навсегда.
+    const reset = await db.query(
+      `UPDATE generator_task_outbox
+          SET published_at=NULL, available_at=NOW(), attempts=attempts+1,
+              last_error='project_analysis_job_missing_or_terminal'
+        WHERE queue_name='project-analysis' AND job_id=$1`,
+      [safeJobId],
+    );
+    if ((reset.rowCount || 0) === 0) {
+      const inserted = await enqueueOutbox({
+        queueName: 'project-analysis',
+        jobName: 'run-analysis',
+        jobId: safeJobId,
+        payload: { analysisId: row.id, jobId: safeJobId },
+      }, db);
+      if (inserted) projectReportQueued += 1;
+    } else {
+      projectReportQueued += 1;
+    }
   }
 
   const { rows: summaryRows } = await db.query(
