@@ -24,7 +24,7 @@ async function claimArticleTask({ table, taskId, db = dbDefault }) {
             execution_started_at = NOW(),
             updated_at = NOW()
       WHERE id = $1
-        AND status IN ('queued', 'pending')
+        AND status = 'queued'
       RETURNING *`,
     [taskId, executionToken],
   );

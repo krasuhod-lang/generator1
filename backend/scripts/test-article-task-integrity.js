@@ -29,7 +29,8 @@ async function testClaimIsAtomic() {
   assert.ok(claimed, 'first queued task must be claimed');
   assert.match(claimed.executionToken, /^[0-9a-f-]{36}$/i, 'claim token must be UUID');
   assert.equal(claimed.task.id, 'task-1');
-  assert.match(calls[0].sql, /status IN \('queued', 'pending'\)/);
+  assert.match(calls[0].sql, /status = 'queued'/);
+  assert.doesNotMatch(calls[0].sql, /status IN \\('queued', 'pending'\\)/);
   assert.match(calls[0].sql, /execution_token = \$2::uuid/);
 
   const duplicate = await claimArticleTask({
