@@ -1072,6 +1072,10 @@ async function importGscLinks(req, res, next) {
         target_pages: parsed.count,
         incoming_links: parsed.rows.reduce((sum, row) => sum + (Number(row.links) || 0), 0),
         referring_sites: parsed.rows.reduce((sum, row) => sum + (Number(row.referring_sites) || 0), 0),
+      } : parsed.type === 'sites' ? {
+        donors: parsed.count,
+        incoming_link_pages: parsed.rows.reduce((sum, row) => sum + (Number(row.links) || 0), 0),
+        target_pages: parsed.rows.reduce((sum, row) => sum + (Number(row.target_pages) || 0), 0),
       } : null,
     });
   } catch (err) { return next(err); }

@@ -19,7 +19,7 @@ const ExcelJS = require('exceljs');
 // Возможные заголовки колонок в локалях GSC (нижний регистр, по подстроке).
 const HEADER_HINTS = {
   donor: ['linking site', 'сайт-источник', 'связывающий сайт', 'ссылающийся сайт',
-    'ссылающие сайты', 'top linking sites'],
+    'ссылающие сайты', 'top linking sites', 'сайт'],
   targetPage: ['linked page', 'target page', 'destination page', 'связанная страница', 'целевая страница',
     'страница назначения', 'страница, на которую ведут ссылки', 'наиболее связываемые'],
   anchor: ['linking text', 'anchor', 'текст ссылки', 'анкор', 'связывающий текст'],
@@ -91,6 +91,14 @@ function _headerMatch(header, hints) {
  * @returns {'sites'|'pages'|'anchors'|'unknown'}
  */
 function detectTableType(header) {
+  const normalized = (Array.isArray(header) ? header : []).map((c) => _cellText(c).toLowerCase().trim());
+  const first = normalized[0] || '';
+  // GSC exports identify the table primarily by the first column. This avoids
+  // misclassifying Top Linking Sites because its third column is "Target pages".
+  if (HEADER_HINTS.anchor.some((hint) => first.includes(hint))) return 'anchors';
+  if (HEADER_HINTS.targetPage.some((hint) => first.includes(hint))) return 'pages';
+  if (HEADER_HINTS.donor.some((hint) => first.includes(hint))) return 'sites';
+  // Fallback for exports with a decorative/empty first header cell.
   if (_headerMatch(header, HEADER_HINTS.anchor)) return 'anchors';
   if (_headerMatch(header, HEADER_HINTS.targetPage)) return 'pages';
   if (_headerMatch(header, HEADER_HINTS.donor)) return 'sites';
@@ -116,7 +124,7 @@ function _normalizeMatrix(matrix, cfg) {
     const links = _toInt(r[1]);
     if (type === 'anchors') rows.push({ anchor: c0, links });
     else if (type === 'pages') rows.push({ target_page: c0, links, referring_sites: _toInt(r[2]) });
-    else if (type === 'sites') rows.push({ donor: c0, links });
+    else if (type === 'sites') rows.push({ donor: c0, links, target_pages: _toInt(r[2]) });
     else rows.push({ value: c0, links });
   }
   return { type, rows, count: rows.length };

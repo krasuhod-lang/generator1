@@ -29,11 +29,15 @@ function _host(donor) {
 
 /**
  * Оценивает одного донора. relevance — опциональный 0..1 (тематическая близость).
- * @returns {{donor, host, links, trust_score, flags:string[]}}
+ * @returns {{donor, host, links, target_pages, coverage_score, trust_score, flags:string[]}}
  */
 function scoreDonor(row, { relevance = null } = {}) {
   const host = _host(row.donor);
   const links = Number(row.links) || 0;
+  const targetPages = Number(row.target_pages) || 0;
+  const coverageScore = targetPages > 0
+    ? Math.max(0, Math.min(100, Math.round(Math.log2(targetPages + 1) * 20)))
+    : 0;
   const flags = [];
   let score = 40; // базовый
 
@@ -43,6 +47,9 @@ function scoreDonor(row, { relevance = null } = {}) {
   if (TRUSTED_TLDS.some((t) => host.includes(t))) { score += 20; flags.push('trusted_zone'); }
   if (RISKY_HINTS.some((t) => host.includes(t))) { score -= 25; flags.push('risky_host'); }
 
+  if (targetPages >= 5) flags.push('broad_page_coverage');
+  if (targetPages === 0) flags.push('coverage_unknown');
+
   if (relevance != null) {
     score += Math.round((relevance - 0.5) * 30); // ±15 за релевантность
     if (relevance >= 0.6) flags.push('topically_relevant');
@@ -50,7 +57,15 @@ function scoreDonor(row, { relevance = null } = {}) {
   }
 
   score = Math.max(0, Math.min(100, score));
-  return { donor: row.donor, host, links, trust_score: score, flags };
+  return {
+    donor: row.donor,
+    host,
+    links,
+    target_pages: targetPages,
+    coverage_score: coverageScore,
+    trust_score: score,
+    flags,
+  };
 }
 
 /**
@@ -65,7 +80,9 @@ function scoreDonors(donors, opts = {}) {
     const relevance = relMap && relMap.has(host) ? relMap.get(host) : null;
     return scoreDonor(d, { relevance });
   });
-  scored.sort((a, b) => b.trust_score - a.trust_score);
+  scored.sort((a, b) => (b.trust_score - a.trust_score)
+    || (b.links - a.links)
+    || (b.target_pages - a.target_pages));
   return scored;
 }
 

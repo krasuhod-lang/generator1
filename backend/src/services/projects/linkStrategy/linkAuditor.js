@@ -37,6 +37,11 @@ function auditLinks({ project, links, topPages } = {}) {
 
   const anchorReport = analyzeAnchors(anchors, brandTokens);
   const donorReport = scoreDonors(sites).slice(0, cfg.topDonors);
+  const donorTotals = sites.reduce((acc, row) => ({
+    donors: acc.donors + 1,
+    incoming_link_pages: acc.incoming_link_pages + (Number(row.links) || 0),
+    target_pages: acc.target_pages + (Number(row.target_pages) || 0),
+  }), { donors: 0, incoming_link_pages: 0, target_pages: 0 });
   const { linkedSet, orphans } = findOrphanPages(topPages || [], pages);
   const targetPageRows = pages
     .filter((p) => p && p.target_page)
@@ -84,6 +89,7 @@ function auditLinks({ project, links, topPages } = {}) {
     has_link_data: hasData,
     anchors: anchorReport,
     donors: donorReport,
+    donor_totals: donorTotals,
     target_pages: targetPageRows.slice(0, cfg.topTargetPages),
     target_page_totals: targetPageTotals,
     orphans: importantOrphans,

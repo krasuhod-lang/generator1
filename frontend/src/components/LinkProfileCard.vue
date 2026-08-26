@@ -20,6 +20,8 @@ const inferred = computed(() => props.linkAudit && props.linkAudit.data_source =
 const anchorCloud = computed(() => (audit.value.anchors && audit.value.anchors.anchor_cloud) || []);
 const targetPages = computed(() => audit.value.target_pages || []);
 const targetPageTotals = computed(() => audit.value.target_page_totals || {});
+const donors = computed(() => audit.value.donors || []);
+const donorTotals = computed(() => audit.value.donor_totals || {});
 const competitiveBasis = computed(() => (props.linkAudit && props.linkAudit.competitive_basis) || {});
 
 function trimUrl(u) {
@@ -142,6 +144,38 @@ function copyAll() {
               <td class="py-1.5 pr-2 text-indigo-300 break-all">{{ trimUrl(p.target_page) }}</td>
               <td class="py-1.5 px-2 text-gray-200">{{ p.links }}</td>
               <td class="py-1.5 pl-2 text-gray-200">{{ p.referring_sites }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div v-if="donors.length || donorTotals.donors" class="space-y-2">
+      <div class="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+        <span>Top Linking Sites</span>
+        <span class="rounded bg-gray-800 px-2 py-0.5">доноров: {{ donorTotals.donors || donors.length }}</span>
+        <span class="rounded bg-gray-800 px-2 py-0.5">страниц со ссылками: {{ donorTotals.incoming_link_pages || 0 }}</span>
+        <span class="rounded bg-gray-800 px-2 py-0.5">страниц назначения: {{ donorTotals.target_pages || 0 }}</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-gray-500 text-left">
+            <tr>
+              <th class="py-1 pr-2">Сайт-донор</th>
+              <th class="py-1 px-2">Страницы со ссылками</th>
+              <th class="py-1 px-2">Страницы назначения</th>
+              <th class="py-1 pl-2">Оценка</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="d in donors.slice(0, 10)" :key="d.host || d.donor" class="border-t border-gray-800/60 align-top">
+              <td class="py-1.5 pr-2 text-indigo-300 break-all">{{ d.host || d.donor }}</td>
+              <td class="py-1.5 px-2 text-gray-200">{{ d.links || 0 }}</td>
+              <td class="py-1.5 px-2 text-gray-200">{{ d.target_pages || 0 }}</td>
+              <td class="py-1.5 pl-2 text-gray-200">
+                <span>{{ d.trust_score ?? 0 }}/100</span>
+                <span v-if="d.coverage_score" class="text-gray-500"> · coverage {{ d.coverage_score }}</span>
+              </td>
             </tr>
           </tbody>
         </table>
