@@ -1336,7 +1336,7 @@ onUnmounted(() => {
                 </table>
               </div>
 
-              <div class="grid grid-cols-3 gap-3 text-center text-xs">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-center text-xs">
                 <div class="bg-gray-950 border border-gray-800 rounded-lg p-2">
                   <div class="text-gray-500">Общих запросов</div>
                   <div class="text-lg font-bold text-fuchsia-300">{{ comparison.queries.overlap_count }}</div>
@@ -1405,7 +1405,8 @@ onUnmounted(() => {
               Пока нет задач, привязанных к проекту. Создайте новую задачу в разделе модуля
               (Статьи / Мета-теги / Релевантность / Прогноз / SERP-B2B) и выберите этот проект.
             </div>
-            <table v-else class="w-full text-xs">
+            <div v-else class="project-tasks-table-wrap">
+              <table class="w-full text-xs min-w-[680px]">
               <thead class="text-gray-400 uppercase tracking-wider text-[10px]">
                 <tr>
                   <th class="text-left py-2">Тип</th>
@@ -1426,7 +1427,8 @@ onUnmounted(() => {
                   </td>
                 </tr>
               </tbody>
-            </table>
+              </table>
+            </div>
           </section>
         </div>
         <!-- ============ /Вкладка Задачи ============ -->
@@ -1478,7 +1480,7 @@ onUnmounted(() => {
 
       <!-- Toast -->
       <transition name="fade">
-        <div v-if="toast" class="fixed bottom-6 right-6 bg-gray-900 border border-indigo-700 text-indigo-200 px-4 py-2 rounded-lg shadow-lg text-sm z-50">
+        <div v-if="toast" class="project-toast fixed bg-gray-900 border border-indigo-700 text-indigo-200 px-4 py-2 rounded-lg shadow-lg text-sm z-[var(--app-overlay-z)]">
           {{ toast }}
         </div>
       </transition>

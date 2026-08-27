@@ -567,8 +567,10 @@ function _stateOf(section) {
   color-scheme: light;
   color: #1d1d1f;
   border-radius: 22px;
-  padding: 20px;
-  margin: -8px -8px 0;
+  width: 100%;
+  min-width: 0;
+  padding: var(--app-page-top) var(--app-content-gutter) var(--app-page-bottom);
+  margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   letter-spacing: -0.01em;
@@ -577,7 +579,7 @@ function _stateOf(section) {
 .rep-preview-wrap { position: relative; }
 .rep-preview-wrap.is-loading > :not(.rep-preview-overlay) { opacity: 0.55; filter: saturate(0.9); pointer-events: none; transition: opacity 0.15s; }
 .rep-preview-overlay {
-  position: sticky; top: 12px; z-index: 5;
+  position: sticky; top: calc(var(--app-header-h) + 12px); z-index: 5;
   width: max-content; margin: 0 auto 8px;
   background: rgba(10,132,255,0.95); color: #fff;
   padding: 6px 14px; border-radius: 999px; font-size: 12px;

@@ -14,7 +14,7 @@ function handleLogout() {
 <template>
   <div class="min-h-screen bg-gray-950 flex flex-col">
     <!-- Шапка -->
-    <header class="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center justify-between flex-shrink-0">
+    <header class="app-header border-b border-gray-800 bg-gray-900 px-[var(--app-content-gutter)] py-3 flex items-center justify-between gap-4 flex-wrap flex-shrink-0">
       <div class="flex items-center gap-3">
         <svg viewBox="0 0 32 32" class="w-7 h-7" fill="none">
           <rect width="32" height="32" rx="8" fill="#059669"/>
@@ -33,7 +33,7 @@ function handleLogout() {
     </header>
 
     <!-- Контент -->
-    <main class="flex-1">
+    <main class="app-main flex-1 min-w-0">
       <slot />
     </main>
   </div>

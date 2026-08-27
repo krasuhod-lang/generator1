@@ -3,7 +3,19 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --app-header-h: 64px;
+    --app-content-max: 1280px;
+    --app-content-gutter: clamp(16px, 3vw, 32px);
+    --app-page-top: clamp(24px, 3vw, 36px);
+    --app-page-bottom: 56px;
+    --app-section-gap: 24px;
+    --app-overlay-z: 60;
+  }
+
   * { box-sizing: border-box; }
+  html, body, #app { min-width: 320px; min-height: 100%; }
+  body { margin: 0; }
 
   /* Скроллбар под более светлую тему */
   ::-webkit-scrollbar          { width: 8px; height: 8px; }
@@ -13,6 +25,79 @@
 }
 
 @layer components {
+  /* Единый layout-контракт authenticated application. */
+  .app-header {
+    position: sticky;
+    top: 0;
+    z-index: var(--app-overlay-z);
+    min-height: var(--app-header-h);
+  }
+  .app-main {
+    width: 100%;
+    min-width: 0;
+  }
+  .app-alert-container {
+    width: 100%;
+    max-width: var(--app-content-max);
+    margin-inline: auto;
+    padding: 16px var(--app-content-gutter) 0;
+  }
+  .app-page {
+    width: min(100%, var(--app-content-max));
+    margin-inline: auto;
+    padding: var(--app-page-top) var(--app-content-gutter) var(--app-page-bottom);
+  }
+  .app-main > .max-w-7xl,
+  .app-main > .max-w-6xl,
+  .app-main > .max-w-5xl,
+  .app-main > .max-w-4xl {
+    width: 100%;
+    max-width: var(--app-content-max);
+    min-width: 0;
+    margin-inline: auto;
+    padding: var(--app-page-top) var(--app-content-gutter) var(--app-page-bottom);
+  }
+  .app-main > .max-w-7xl > *,
+  .app-main > .max-w-6xl > *,
+  .app-main > .max-w-5xl > *,
+  .app-main > .max-w-4xl > * {
+    min-width: 0;
+  }
+  .app-main > .rep-stage,
+  .app-main > .reports-page,
+  .app-main > .outreach-root,
+  .app-main > .oc-root,
+  .app-main > .tracker-stage,
+  .app-main > .crawler-page,
+  .app-main > .audits-page,
+  .app-main > .aegis {
+    min-width: 0;
+  }
+  .project-tasks-table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .project-toast {
+    left: max(var(--app-content-gutter), env(safe-area-inset-left));
+    right: max(var(--app-content-gutter), env(safe-area-inset-right));
+    bottom: max(24px, env(safe-area-inset-bottom));
+    width: fit-content;
+    max-width: calc(100vw - (2 * var(--app-content-gutter)));
+  }
+
+  @media (max-width: 720px) {
+    :root {
+      --app-header-h: 96px;
+      --app-page-top: 24px;
+      --app-content-gutter: 16px;
+    }
+    header.app-header {
+      column-gap: 12px;
+      row-gap: 8px;
+    }
+  }
+
   /* Кнопки */
   .btn {
     @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm

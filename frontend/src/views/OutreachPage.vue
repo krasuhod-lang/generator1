@@ -315,9 +315,10 @@ onUnmounted(() => {
 
 <style scoped>
 .outreach-root {
-  max-width: 1080px;
+  max-width: var(--app-content-max);
   margin: 0 auto;
-  padding: 24px 20px 60px;
+  width: 100%;
+  padding: var(--app-page-top) var(--app-content-gutter) var(--app-page-bottom);
   color: #f5f5f7;
 }
 .page-header h1 {

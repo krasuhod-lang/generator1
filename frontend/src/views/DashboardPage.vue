@@ -241,7 +241,7 @@ function goPage(next) {
 <template>
   <AppLayout>
     <transition name="fade">
-      <div v-if="errorMsg" class="max-w-7xl mx-auto px-6 pt-4">
+      <div v-if="errorMsg" class="app-alert-container">
         <div class="flex items-start gap-3 bg-red-950/70 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-sm">
           <span class="flex-1">{{ errorMsg }}</span>
           <button class="text-red-500 hover:text-red-300 ml-2" @click="errorMsg = null" aria-label="Закрыть">×</button>

@@ -111,7 +111,7 @@ function handleLogout() {
 <template>
   <div class="min-h-screen bg-gray-950 flex flex-col">
     <!-- Шапка -->
-    <header class="border-b border-gray-800 bg-gray-900 px-6 py-3 flex items-center justify-between gap-4 flex-shrink-0">
+    <header class="app-header border-b border-gray-800 bg-gray-900 px-[var(--app-content-gutter)] py-3 flex items-center justify-between gap-4 flex-wrap flex-shrink-0">
       <div class="flex items-center gap-3 min-w-0">
         <svg viewBox="0 0 32 32" class="w-7 h-7 flex-shrink-0" fill="none">
           <rect width="32" height="32" rx="8" fill="#6366f1"/>
@@ -154,7 +154,7 @@ function handleLogout() {
           >
             <div
               v-if="menuOpen"
-              class="absolute left-0 mt-2 w-72 max-w-[90vw] z-50 rounded-xl border border-gray-700
+              class="absolute left-0 mt-2 w-72 max-w-[90vw] z-[var(--app-overlay-z)] max-h-[calc(100vh-var(--app-header-h)-1rem)] overflow-y-auto rounded-xl border border-gray-700
                      bg-gray-900 shadow-2xl shadow-black/40 p-1.5 grid grid-cols-1 gap-0.5"
             >
               <button
@@ -221,7 +221,7 @@ function handleLogout() {
     </header>
 
     <!-- Контент вкладки -->
-    <main class="flex-1">
+    <main class="app-main flex-1 min-w-0">
       <slot />
     </main>
   </div>

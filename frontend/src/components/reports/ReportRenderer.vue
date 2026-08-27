@@ -949,7 +949,8 @@ function growthTargetLabel(item) {
         <button class="intent-tab" :class="{ active: pageFilter === 'commercial' }" @click="pageFilter = 'commercial'">🛒 Коммерческие ({{ pagesCommercialCount }})</button>
         <button class="intent-tab" :class="{ active: pageFilter === 'informational' }" @click="pageFilter = 'informational'">📚 Информационные ({{ pagesInfoCount }})</button>
       </div>
-      <table class="rep-table pages-table">
+      <div class="rep-table-wrap">
+        <table class="rep-table pages-table">
         <thead>
           <tr>
             <th></th>
@@ -1010,7 +1011,8 @@ function growthTargetLabel(item) {
             </td>
           </tr>
         </tbody>
-      </table>
+        </table>
+      </div>
       <!-- ТЗ #3: пагинация — показываем по 50 строк, кнопка раскрывает следующие 50.
            Скрыта, когда отображены все строки фильтра. -->
       <div v-if="hasMorePages" class="pages-load-more">
@@ -1464,7 +1466,7 @@ function growthTargetLabel(item) {
 .report-nav {
   display: flex; flex-wrap: wrap; gap: 6px;
   background: #fff; border: 1px solid rgba(60,60,67,0.12); border-radius: 14px;
-  padding: 8px 12px; position: sticky; top: 0; z-index: 5;
+  padding: 8px 12px; position: sticky; top: calc(var(--app-header-h) + 12px); z-index: 5;
   box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.04);
 }
 .nav-link {
@@ -1513,7 +1515,8 @@ function growthTargetLabel(item) {
 }
 .intent-tab:hover { background: #f4f6fa; }
 .intent-tab.active { background: var(--accent, #4a6cf7); color: #fff; border-color: var(--accent, #4a6cf7); }
-.rep-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rep-table-wrap { max-width: 100%; overflow-x: auto; }
+.rep-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
 .rep-table th, .rep-table td { padding: 8px 10px; border-bottom: 1px solid #eef0f4; text-align: left; }
 .rep-table th { background: #fafbfd; font-weight: 600; color: #455; }
 .rep-table td.num, .rep-table th.num { text-align: right; font-variant-numeric: tabular-nums; }

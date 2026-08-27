@@ -51,7 +51,8 @@ function statusLabel(s) {
         Пока нет ни одного отчёта. Создайте первый, чтобы собрать данные GSC, Я.Вебмастера и Keys.so в один публичный дашборд.
       </div>
 
-      <table v-else class="rp-table">
+      <div v-else class="rp-table-wrap">
+        <table class="rp-table">
         <thead>
           <tr>
             <th>Название</th>
@@ -85,7 +86,8 @@ function statusLabel(s) {
             </td>
           </tr>
         </tbody>
-      </table>
+        </table>
+      </div>
     </div>
   </AppLayout>
 </template>
@@ -95,7 +97,9 @@ function statusLabel(s) {
   background: #f5f5f7; color: #1d1d1f; color-scheme: light;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "Segoe UI", Roboto, Inter, Arial, sans-serif;
   -webkit-font-smoothing: antialiased; letter-spacing: -0.01em;
-  padding: 28px; max-width: 1200px; margin: -8px auto 0; border-radius: 22px;
+  width: 100%; max-width: var(--app-content-max); margin: 0 auto;
+  padding: var(--app-page-top) var(--app-content-gutter) var(--app-page-bottom);
+  border-radius: 0 0 22px 22px;
 }
 .rp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
 .rp-head h1 { font-size: 30px; margin: 0; font-weight: 700; letter-spacing: -0.03em; color: #1d1d1f; }
@@ -109,8 +113,9 @@ function statusLabel(s) {
 .btn-secondary:hover { background: rgba(60,60,67,0.04); }
 .rp-empty { padding: 60px 24px; text-align: center; color: #6e6e73; border: 1px dashed rgba(60,60,67,0.18); border-radius: 18px; background: #fff; }
 .rp-error { color: #d70015; border-color: rgba(255,59,48,0.4); }
+.rp-table-wrap { max-width: 100%; overflow-x: auto; border-radius: 18px; }
 .rp-table {
-  width: 100%; border-collapse: separate; border-spacing: 0;
+  width: 100%; min-width: 860px; border-collapse: separate; border-spacing: 0;
   background: #fff; border-radius: 18px; overflow: hidden;
   border: 1px solid rgba(60,60,67,0.10);
   box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04);
