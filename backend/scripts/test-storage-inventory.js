@@ -9,6 +9,7 @@ const {
   buildInventory,
   resolveInventoryFile,
   safeRelativePath,
+  getKnownStoragePaths,
 } = require('../src/services/maintenance/storageAdmin');
 
 (async () => {
@@ -30,6 +31,8 @@ const {
     assert.strictEqual(inventory.files[0].relative_path, 'reports/2026/large.pdf');
     assert.strictEqual(inventory.pagination.total_files, 3);
     assert.strictEqual(inventory.pagination.has_more, true);
+    assert.strictEqual(inventory.largest_files[0].relative_path, 'reports/2026/large.pdf');
+    assert.strictEqual(inventory.largest_files[0].bytes, 4096);
     assert.ok(inventory.folders.some((folder) => folder.relative_path === 'reports/2026' && folder.bytes === 4101));
     assert.ok(inventory.folders.some((folder) => folder.relative_path === 'reports' && folder.bytes === 4101));
 
@@ -46,8 +49,13 @@ const {
     assert.throws(() => resolveInventoryFile({ path: root }, '../outside.txt'), /Небезопасный relative_path|Путь выходит/);
     assert.throws(() => resolveInventoryFile({ path: root }, '/etc/passwd'), /Небезопасный relative_path|Путь выходит/);
     assert.strictEqual(resolveInventoryFile({ path: root }, 'reports/2026/large.pdf').relative, 'reports/2026/large.pdf');
+    assert.strictEqual(inventory.largest_files.length, 3);
+    const appRoot = getKnownStoragePaths().find((entry) => entry.key === 'app_root');
+    assert.ok(appRoot && appRoot.fileCleanup === false);
+    assert.notStrictEqual(appRoot.path, '/', 'inventory must never scan the whole container filesystem');
+    assert.ok(appRoot.path.endsWith('generator1') || appRoot.path === '/app');
 
-    console.log('storage inventory regression: 14/14 passed');
+    console.log('storage inventory regression: 18/18 passed');
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
     try {

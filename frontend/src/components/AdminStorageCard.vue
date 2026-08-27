@@ -13,7 +13,7 @@ const inventory = ref(null);
 const scope = ref('tasks');
 const olderThanDays = ref(30);
 const preview = ref(null);
-const inventoryRoot = ref('uploads');
+const inventoryRoot = ref('app_root');
 const inventorySearch = ref('');
 const inventorySort = ref('size');
 const inventoryOrder = ref('desc');
@@ -24,6 +24,7 @@ const tables = computed(() => audit.value?.database?.tables || []);
 const cacheBrands = computed(() => audit.value?.redis?.response_cache?.by_brand_hash || []);
 const inventoryRoots = computed(() => audit.value?.inventory_roots || []);
 const inventoryFiles = computed(() => inventory.value?.files || []);
+const inventoryLargestFiles = computed(() => inventory.value?.largest_files || []);
 const inventoryFolders = computed(() => inventory.value?.folders || []);
 const inventoryPagination = computed(() => inventory.value?.pagination || {});
 
@@ -45,13 +46,21 @@ function fmtDate(value) {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('ru-RU');
 }
 
+function fmtPercent(bytes, total) {
+  const value = Number(bytes) || 0;
+  const whole = Number(total) || 0;
+  if (!whole || !value) return '0%';
+  const pct = (value / whole) * 100;
+  return `${pct >= 10 ? pct.toFixed(1) : pct.toFixed(2)}%`;
+}
+
 async function load() {
   loading.value = true;
   error.value = null;
   try {
     audit.value = await admin.fetchStorageAudit();
     if (!inventoryRoots.value.some((root) => root.key === inventoryRoot.value)) {
-      inventoryRoot.value = inventoryRoots.value[0]?.key || 'uploads';
+      inventoryRoot.value = inventoryRoots.value[0]?.key || 'app_root';
     }
   } catch (e) {
     error.value = e.response?.data?.error || e.message || 'Не удалось получить storage audit';
@@ -155,6 +164,7 @@ onMounted(async () => {
       <div>
         <h2 class="text-lg font-bold text-white">Хранилище и очистка</h2>
         <p class="text-xs text-gray-500 mt-1">Диск, PostgreSQL, Redis-кэш и артефакты задач</p>
+        <p v-if="audit?.storage_visibility?.note" class="text-[11px] text-gray-600 mt-1 max-w-3xl">{{ audit.storage_visibility.note }}</p>
       </div>
       <button class="btn-ghost text-xs" :disabled="loading || actionLoading" @click="load">Обновить</button>
     </div>
@@ -203,11 +213,16 @@ onMounted(async () => {
 
           <div class="overflow-x-auto mb-4">
             <h4 class="text-[11px] text-gray-500 uppercase tracking-wide mb-2">Папки по занимаемому месту</h4>
-            <table class="w-full text-xs"><thead><tr class="border-b border-gray-800 text-left text-gray-500"><th class="py-2 px-2">Относительный путь</th><th class="py-2 px-2">Размер</th><th class="py-2 px-2">Файлов</th></tr></thead><tbody><tr v-for="folder in inventoryFolders.slice(0, 25)" :key="folder.relative_path" class="border-b border-gray-800/40"><td class="py-2 px-2 text-gray-300 font-mono">{{ folder.relative_path }}</td><td class="py-2 px-2 text-cyan-300">{{ folder.human }}</td><td class="py-2 px-2 text-gray-500">{{ folder.file_count }}</td></tr><tr v-if="!inventoryFolders.length"><td colspan="3" class="py-3 text-gray-600">Папки не найдены</td></tr></tbody></table>
+            <table class="w-full text-xs"><thead><tr class="border-b border-gray-800 text-left text-gray-500"><th class="py-2 px-2">Относительный путь</th><th class="py-2 px-2">Размер</th><th class="py-2 px-2">Доля root</th><th class="py-2 px-2">Файлов</th></tr></thead><tbody><tr v-for="folder in inventoryFolders.slice(0, 25)" :key="folder.relative_path" class="border-b border-gray-800/40"><td class="py-2 px-2 text-gray-300 font-mono">{{ folder.relative_path }}</td><td class="py-2 px-2 text-cyan-300">{{ folder.human }}</td><td class="py-2 px-2 text-gray-500">{{ fmtPercent(folder.bytes, inventory.summary?.bytes) }}</td><td class="py-2 px-2 text-gray-500">{{ folder.file_count }}</td></tr><tr v-if="!inventoryFolders.length"><td colspan="4" class="py-3 text-gray-600">Папки не найдены</td></tr></tbody></table>
+          </div>
+
+          <div class="overflow-x-auto mb-4">
+            <h4 class="text-[11px] text-gray-500 uppercase tracking-wide mb-2">Самые тяжёлые файлы</h4>
+            <table class="w-full text-xs"><thead><tr class="border-b border-gray-800 text-left text-gray-500"><th class="py-2 px-2">#</th><th class="py-2 px-2">Файл</th><th class="py-2 px-2">Размер</th><th class="py-2 px-2">Доля root</th><th class="py-2 px-2">Изменён</th></tr></thead><tbody><tr v-for="(file, index) in inventoryLargestFiles.slice(0, 25)" :key="`largest-${file.relative_path}`" class="border-b border-gray-800/40"><td class="py-2 px-2 text-gray-600">{{ index + 1 }}</td><td class="py-2 px-2 text-gray-300 font-mono max-w-[420px] truncate" :title="file.relative_path">{{ file.relative_path }}</td><td class="py-2 px-2 text-cyan-300 whitespace-nowrap">{{ file.human }}</td><td class="py-2 px-2 text-gray-500">{{ fmtPercent(file.bytes, inventory.summary?.bytes) }}</td><td class="py-2 px-2 text-gray-500 whitespace-nowrap">{{ fmtDate(file.modified_at) }}</td></tr><tr v-if="!inventoryLargestFiles.length"><td colspan="5" class="py-3 text-gray-600">Файлы не найдены</td></tr></tbody></table>
           </div>
 
           <div class="overflow-x-auto">
-            <h4 class="text-[11px] text-gray-500 uppercase tracking-wide mb-2">Отдельные документы и файлы</h4>
+            <h4 class="text-[11px] text-gray-500 uppercase tracking-wide mb-2">Файлы с пагинацией</h4>
             <table class="w-full text-xs"><thead><tr class="border-b border-gray-800 text-left text-gray-500"><th class="py-2 px-2">Файл</th><th class="py-2 px-2">Размер</th><th class="py-2 px-2">Изменён</th><th class="py-2 px-2">Действие</th></tr></thead><tbody><tr v-for="file in inventoryFiles" :key="file.relative_path" class="border-b border-gray-800/40"><td class="py-2 px-2 text-gray-300 font-mono max-w-[420px] truncate" :title="file.relative_path">{{ file.relative_path }}</td><td class="py-2 px-2 text-cyan-300 whitespace-nowrap">{{ file.human }}</td><td class="py-2 px-2 text-gray-500 whitespace-nowrap">{{ fmtDate(file.modified_at) }}</td><td class="py-2 px-2 whitespace-nowrap"><button v-if="file.deletable" class="text-red-400 hover:text-red-300 disabled:text-gray-700" :disabled="actionLoading" @click="deleteFile(file)">Удалить</button><span v-else class="text-gray-600" :title="file.protected_reason">Защищён</span></td></tr><tr v-if="!inventoryFiles.length"><td colspan="4" class="py-3 text-gray-600">Файлы не найдены</td></tr></tbody></table>
           </div>
           <div class="flex items-center justify-between mt-3 text-xs text-gray-500"><span>Страница {{ inventoryPagination.page || 1 }}</span><div class="flex gap-2"><button class="btn-ghost text-xs" :disabled="inventoryLoading || inventoryPage <= 1" @click="changePage(-1)">Назад</button><button class="btn-ghost text-xs" :disabled="inventoryLoading || !inventoryPagination.has_more" @click="changePage(1)">Далее</button></div></div>

@@ -13,7 +13,12 @@ const { runStorageRetention } = require('./storageRetention');
 
 const execFileAsync = promisify(execFile);
 const BACKEND_ROOT = path.resolve(__dirname, '../../..');
-const REPO_ROOT = path.resolve(BACKEND_ROOT, '..');
+// In a checkout BACKEND_ROOT is <repo>/backend; Docker copies the backend
+// contents directly to /app. Never fall back to / when deriving inventory root.
+const CHECKOUT_ROOT = path.resolve(BACKEND_ROOT, '..');
+const REPO_ROOT = (fs.existsSync(path.join(CHECKOUT_ROOT, 'frontend')) || fs.existsSync(path.join(CHECKOUT_ROOT, 'migrations')))
+  ? CHECKOUT_ROOT
+  : BACKEND_ROOT;
 
 function _safePath(target) {
   try {
@@ -26,6 +31,7 @@ function _safePath(target) {
 function getKnownStoragePaths() {
   const imageDir = resolveStorageDir();
   return [
+    { key: 'app_root', label: 'Все доступные файлы backend-контейнера', path: _safePath(REPO_ROOT), cleanup: false, fileCleanup: false },
     { key: 'uploads', label: 'Загрузки задач', path: _safePath(path.join(BACKEND_ROOT, 'uploads')), cleanup: true, fileCleanup: true },
     { key: 'images', label: 'Изображения генераций', path: _safePath(imageDir), cleanup: false, fileCleanup: true },
     { key: 'brain_state', label: 'Aegis brain state', path: _safePath(path.join(REPO_ROOT, 'brain_state')), cleanup: false, fileCleanup: false },
@@ -168,6 +174,14 @@ async function getStorageAudit(deps = {}) {
     redis,
     cleanup_allowlist: getKnownStoragePaths().filter((entry) => entry.cleanup).map(({ key, label, path: target }) => ({ key, label, path: target })),
     inventory_roots: getKnownStoragePaths().map(({ key, label, path: target, fileCleanup }) => ({ key, label, path: target, file_cleanup: Boolean(fileCleanup) })),
+    storage_visibility: {
+      scanned_scope: 'backend_container_mounts',
+      note: 'Файловая инвентаризация показывает каталоги, доступные backend-контейнеру. PostgreSQL и Redis дополнительно показываются отдельными логическими метриками.',
+      named_volumes: [
+        { key: 'pg_data', service: 'postgres', physical_scan: false, metric: 'database.database_bytes', reason: 'volume смонтирован только в postgres-контейнер' },
+        { key: 'redis_data', service: 'redis', physical_scan: false, metric: 'redis.used_memory_bytes', reason: 'volume смонтирован только в redis-контейнер' },
+      ],
+    },
     warnings: [
       'Не удаляйте pg_data/redis_data напрямую: сначала используйте API cleanup или штатные PostgreSQL/Redis команды.',
       'brain_state намеренно исключён из admin cleanup: это runtime-состояние Aegis.',
@@ -260,11 +274,25 @@ async function buildInventory(entry, { page = 1, limit = 100, search = '', sort 
   const safeLimit = Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 100));
   const query = String(search || '').trim().toLowerCase();
   const files = [];
+  const largestFiles = [];
   const directoryMap = new Map();
   let scannedFiles = 0;
+  let matchingFiles = 0;
   let scannedDirectories = 0;
   let totalBytes = 0;
   let truncated = false;
+
+  function addLargestFile(file) {
+    const MAX_LARGEST_FILES = 500;
+    if (largestFiles.length < MAX_LARGEST_FILES) {
+      largestFiles.push(file);
+    } else if (file.bytes > largestFiles[largestFiles.length - 1].bytes) {
+      largestFiles[largestFiles.length - 1] = file;
+    } else {
+      return;
+    }
+    largestFiles.sort((left, right) => right.bytes - left.bytes);
+  }
   const scanErrors = [];
 
   async function walk(absDir, relativeDir = '') {
@@ -295,12 +323,9 @@ async function buildInventory(entry, { page = 1, limit = 100, search = '', sort 
       if (!stat.isFile()) continue;
       scannedFiles += 1;
       totalBytes += stat.size || 0;
+      if (query && relativePath.toLowerCase().includes(query)) matchingFiles += 1;
       addDirectoryStat(directoryMap, relativeDir, stat.size || 0, 1);
-      if (files.length >= INVENTORY_MAX_FILES) {
-        truncated = true;
-        continue;
-      }
-      files.push({
+      const fileRecord = {
         relative_path: relativePath,
         name: dirent.name,
         bytes: Number(stat.size) || 0,
@@ -309,7 +334,13 @@ async function buildInventory(entry, { page = 1, limit = 100, search = '', sort 
         root_key: entry.key,
         deletable: Boolean(entry.fileCleanup),
         protected_reason: entry.fileCleanup ? null : 'Каталог защищён политикой storage',
-      });
+      };
+      addLargestFile(fileRecord);
+      if (files.length >= INVENTORY_MAX_FILES) {
+        truncated = true;
+        continue;
+      }
+      files.push(fileRecord);
     }
   }
 
@@ -342,11 +373,13 @@ async function buildInventory(entry, { page = 1, limit = 100, search = '', sort 
     },
     folders,
     files: rows,
+    largest_files: largestFiles.slice(0, 100),
     pagination: {
       page: safePage,
       limit: safeLimit,
-      total_files: matching.length,
-      has_more: offset + rows.length < matching.length || truncated,
+      total_files: query ? matchingFiles : scannedFiles,
+      retained_files: matching.length,
+      has_more: offset + rows.length < (query ? matchingFiles : scannedFiles) || truncated,
     },
   };
 }
