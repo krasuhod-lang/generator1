@@ -225,6 +225,8 @@ function sanitizeData(data, mode) {
         return {
           title: it.title,
           performed_at: it.performed_at,
+          performed_at_ts: it.performed_at_ts || null,
+          performed_at_source: it.performed_at_source || 'legacy_fallback',
           task_type: it.task_type,
           source: it.source,
           client_summary: it.client_summary || null,

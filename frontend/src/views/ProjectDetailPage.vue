@@ -464,6 +464,7 @@ const projectTasks = ref([]);
 const tasksLoading = ref(false);
 const tasksError = ref(null);
 const TASK_TYPE_LABELS = {
+  seo:           'SEO-текст',
   info_article:  'Статья',
   link_article:  'Ссылка',
   meta_tags:     'Мета-теги',
@@ -482,7 +483,16 @@ const TASK_TYPE_ROUTES = {
   serp_b2b:      '/serp-b2b/',
 };
 function taskTypeLabel(t) { return TASK_TYPE_LABELS[t] || t; }
-function taskHref(t) { return (TASK_TYPE_ROUTES[t.type] || '/') + t.id; }
+function taskHref(t) {
+  if (t.type === 'seo') {
+    const status = String(t.status || '').toLowerCase();
+    const suffix = ['completed', 'done', 'finished'].includes(status)
+      ? 'result'
+      : (['queued', 'processing', 'running'].includes(status) ? 'monitor' : 'edit');
+    return `/tasks/${t.id}/${suffix}`;
+  }
+  return (TASK_TYPE_ROUTES[t.type] || '/') + t.id;
+}
 function taskStatusClass(s) {
   const st = String(s || '').toLowerCase();
   if (st === 'completed' || st === 'done' || st === 'finished') return 'bg-emerald-500/20 text-emerald-300';
@@ -490,9 +500,16 @@ function taskStatusClass(s) {
   if (st === 'queued' || st === 'pending') return 'bg-gray-500/20 text-gray-300';
   return 'bg-amber-500/20 text-amber-300';
 }
+function taskDateValue(task) {
+  const status = String(task?.status || '').toLowerCase();
+  return ['completed', 'done', 'finished', 'failed', 'error'].includes(status)
+    ? (task?.completed_at || task?.created_at)
+    : (task?.created_at || task?.updated_at);
+}
+
 function formatDate(iso) {
   if (!iso) return '';
-  try { return new Date(iso).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }); }
+  try { return new Date(iso).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'UTC' }); }
   catch (_) { return iso; }
 }
 async function loadProjectTasks() {
@@ -1403,7 +1420,7 @@ onUnmounted(() => {
                   <td class="py-2 text-gray-400">{{ taskTypeLabel(t.type) }}</td>
                   <td class="py-2 text-gray-200">{{ t.title }}</td>
                   <td class="py-2"><span class="px-2 py-0.5 rounded text-[10px]" :class="taskStatusClass(t.status)">{{ t.status }}</span></td>
-                  <td class="py-2 text-gray-400">{{ formatDate(t.created_at) }}</td>
+                  <td class="py-2 text-gray-400"><span class="block text-[10px] text-gray-600">{{ ['completed', 'done', 'finished'].includes(String(t.status || '').toLowerCase()) ? 'Выполнена' : 'Создана' }}</span>{{ formatDate(taskDateValue(t)) }}</td>
                   <td class="py-2 text-right">
                     <router-link :to="taskHref(t)" class="text-indigo-300 hover:text-indigo-100">открыть →</router-link>
                   </td>

@@ -1352,31 +1352,50 @@ async function listProjectTasks(req, res, next) {
     // COALESCE для title — у разных таблиц основное поле называется
     // по-разному (topic, name, query, anchor_text).
     const segments = [
+      { type: 'seo',          sql: `SELECT id::text, 'seo'::text AS type,
+              COALESCE(input_target_service, title, 'SEO-текст')::text AS title, status::text AS status,
+              created_at, completed_at, archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
+              FROM tasks WHERE project_id = $1 AND user_id = $2` },
       { type: 'info_article',  sql: `SELECT id::text, 'info_article'::text AS type,
-              COALESCE(topic, 'Статья')::text AS title, status::text AS status, created_at
+              COALESCE(topic, 'Статья')::text AS title, status::text AS status,
+              created_at, completed_at, NULL::timestamptz AS archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
               FROM info_article_tasks WHERE project_id = $1 AND user_id = $2` },
       { type: 'link_article',  sql: `SELECT id::text, 'link_article'::text AS type,
-              COALESCE(topic, anchor_text, 'Ссылочная статья')::text AS title, status::text, created_at
+              COALESCE(topic, anchor_text, 'Ссылочная статья')::text AS title, status::text AS status,
+              created_at, completed_at, NULL::timestamptz AS archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
               FROM link_article_tasks WHERE project_id = $1 AND user_id = $2` },
       { type: 'meta_tags',     sql: `SELECT id::text, 'meta_tags'::text AS type,
-              COALESCE(name, 'Мета-теги')::text AS title, status::text, created_at
+              COALESCE(name, 'Мета-теги')::text AS title, status::text AS status,
+              created_at, completed_at, NULL::timestamptz AS archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
               FROM meta_tag_tasks WHERE project_id = $1 AND user_id = $2` },
       { type: 'article_topic', sql: `SELECT id::text, 'article_topic'::text AS type,
-              COALESCE(niche, 'Темы статей')::text AS title, status::text, created_at
+              COALESCE(niche, 'Темы статей')::text AS title, status::text AS status,
+              created_at, completed_at, NULL::timestamptz AS archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
               FROM article_topic_tasks WHERE project_id = $1 AND user_id = $2` },
       { type: 'relevance',     sql: `SELECT id::text, 'relevance'::text AS type,
-              COALESCE(query, 'Релевантность')::text AS title, status::text, created_at
+              COALESCE(query, 'Релевантность')::text AS title, status::text AS status,
+              created_at, completed_at, NULL::timestamptz AS archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
               FROM relevance_reports WHERE project_id = $1 AND user_id = $2` },
       { type: 'forecaster',    sql: `SELECT id::text, 'forecaster'::text AS type,
-              COALESCE(name, 'Прогноз')::text AS title, status::text, created_at
+              COALESCE(name, 'Прогноз')::text AS title, status::text AS status,
+              created_at, completed_at, NULL::timestamptz AS archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
               FROM forecaster_tasks WHERE project_id = $1 AND user_id = $2` },
       { type: 'serp_b2b',      sql: `SELECT id::text, 'serp_b2b'::text AS type,
-              COALESCE(name, query, 'SERP B2B')::text AS title, status::text, created_at
+              COALESCE(name, query, 'SERP B2B')::text AS title, status::text AS status,
+              created_at, completed_at, NULL::timestamptz AS archived_at,
+              COALESCE(completed_at, created_at) AS activity_at
               FROM serp_b2b_tasks WHERE project_id = $1 AND user_id = $2` },
     ];
     const used = filterType ? segments.filter((s) => s.type === filterType) : segments;
     if (!used.length) return res.json({ items: [] });
-    const sql = used.map((s) => s.sql).join(' UNION ALL ') + ' ORDER BY created_at DESC LIMIT 500';
+    const sql = used.map((s) => s.sql).join(' UNION ALL ') + ' ORDER BY activity_at DESC NULLS LAST, created_at DESC LIMIT 500';
     const { rows } = await db.query(sql, [project.id, req.user.id]);
     return res.json({ items: rows });
   } catch (err) {

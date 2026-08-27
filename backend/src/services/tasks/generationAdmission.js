@@ -74,6 +74,7 @@ async function claimGenerationTask({
               lease_until=NOW()+make_interval(secs => $5), heartbeat_at=NOW(),
               last_error_code=NULL, updated_at=NOW()
         WHERE id=$1
+          AND archived_at IS NULL
           AND status IN ('queued','processing')
           AND (status='queued' OR lease_until IS NULL OR lease_until < NOW())
         RETURNING *`,

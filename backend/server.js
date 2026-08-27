@@ -592,6 +592,13 @@ async function ensureSchema() {
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
 
+    // Migration 141: task history integrity. Archiving is soft-only, so a user
+    // cannot accidentally erase the source row that feeds counters/reports.
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_by UUID REFERENCES users(id) ON DELETE SET NULL`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_completion ON tasks (user_id, completed_at DESC NULLS LAST, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tasks_active_archive ON tasks (user_id, status, archived_at) WHERE archived_at IS NULL`);
+
     // Migration 127 fallback: Stage 7.5 stores GIST/meta-facade output on
     // tasks. The SQL migration exists for fresh/bootstrap paths, but an old
     // PostgreSQL volume may not have replayed it; keep startup idempotent.
@@ -2787,6 +2794,8 @@ async function ensureSchema() {
         title           TEXT NOT NULL,
         description     TEXT,
         performed_at    DATE NOT NULL DEFAULT CURRENT_DATE,
+        performed_at_ts TIMESTAMPTZ,
+        performed_at_source VARCHAR(32) NOT NULL DEFAULT 'legacy_fallback',
         source          VARCHAR(16) NOT NULL DEFAULT 'platform_auto'
                         CHECK (source IN ('platform_auto','manual')),
         is_hidden       BOOLEAN NOT NULL DEFAULT FALSE,
@@ -2795,7 +2804,11 @@ async function ensureSchema() {
         created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await db.query(`ALTER TABLE tasks_auto_log ADD COLUMN IF NOT EXISTS performed_at_ts TIMESTAMPTZ`);
+    await db.query(`ALTER TABLE tasks_auto_log ADD COLUMN IF NOT EXISTS performed_at_source VARCHAR(32) NOT NULL DEFAULT 'legacy_fallback'`);
+    await db.query(`UPDATE tasks_auto_log SET performed_at_ts = performed_at::timestamptz WHERE performed_at_ts IS NULL`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_tasks_auto_log_project_perf ON tasks_auto_log (project_id, performed_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_tasks_auto_log_project_perf_ts ON tasks_auto_log (project_id, performed_at DESC, performed_at_ts DESC NULLS LAST)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_tasks_auto_log_type ON tasks_auto_log (project_id, task_type, performed_at DESC)`);
 
     // ─── Migration 076: Position Tracker (XMLStock) ─────────────────────

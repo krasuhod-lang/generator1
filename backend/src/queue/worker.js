@@ -254,8 +254,15 @@ const worker = new Worker(
       if (autoRetries < PIPELINE_AUTO_RETRIES) {
         const attempt = autoRetries + 1;
         try {
-          // Свежий checkpoint (может быть обновлён во время выполнения)
+          // Свежий checkpoint (может быть обновлён во время выполнения).
+          // Архивирование/отмена пользователем имеет приоритет: не создаём
+          // auto-retry и не возвращаем сохранённую задачу в очередь.
           const fresh = await loadTask(taskId);
+          if (fresh.archived_at || fresh.status === 'cancelled') {
+            clearInterval(heartbeatTimer);
+            log(taskId, 'Повторный запуск пропущен: задача уже архивирована', 'info');
+            return;
+          }
           const checkpoint = fresh.pipeline_checkpoint || null;
 
           // Экспоненциальный backoff с потолком 60с

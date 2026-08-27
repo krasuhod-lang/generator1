@@ -78,8 +78,11 @@ export const useTasksStore = defineStore('tasks', () => {
   // ── Удаление задачи ────────────────────────────────────────────────
   async function deleteTask(id) {
     await api.delete(`/tasks/${id}`);
-    tasks.value = tasks.value.filter(t => t.id !== id);
-    if (current.value?.id === id) current.value = null;
+    // Backend performs a soft archive: keep the row in the list so completed
+    // text, JSON history and its actual completion date remain discoverable.
+    const archivedAt = new Date().toISOString();
+    _patchInList(id, { archived_at: archivedAt });
+    if (current.value?.id === id) current.value = { ...current.value, archived_at: archivedAt };
   }
 
   // ── Результат задачи ───────────────────────────────────────────────

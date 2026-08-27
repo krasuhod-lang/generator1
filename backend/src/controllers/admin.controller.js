@@ -188,8 +188,9 @@ async function getUserDetail(req, res, next) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/admin/users/:userId
-// Удаление пользователя. Все связанные данные (задачи, проекты, КП и т.д.)
-// удаляются каскадно по FK ON DELETE CASCADE. Нельзя удалить админа и себя.
+// Удаление пользователя разрешено только для профиля без task history.
+// Контентные задачи и их результаты являются immutable audit history: нельзя
+// каскадно уничтожить их через админский DELETE пользователя.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function deleteUser(req, res, next) {
@@ -209,6 +210,25 @@ async function deleteUser(req, res, next) {
     }
     if (rows[0].role === 'admin') {
       return res.status(400).json({ error: 'Нельзя удалить пользователя с ролью администратора' });
+    }
+
+    const { rows: taskCounts } = await db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks WHERE user_id = $1) AS seo_tasks,
+         (SELECT COUNT(*) FROM info_article_tasks WHERE user_id = $1) AS info_tasks,
+         (SELECT COUNT(*) FROM link_article_tasks WHERE user_id = $1) AS link_tasks,
+         (SELECT COUNT(*) FROM meta_tag_tasks WHERE user_id = $1) AS meta_tasks,
+         (SELECT COUNT(*) FROM article_topic_tasks WHERE user_id = $1) AS topic_tasks`,
+      [userId],
+    );
+    const protectedCounts = taskCounts[0] || {};
+    const protectedTotal = Object.values(protectedCounts).reduce((sum, value) => sum + Number(value || 0), 0);
+    if (protectedTotal > 0) {
+      return res.status(409).json({
+        error: 'Профиль содержит задачи и результаты; удаление заблокировано для сохранения истории',
+        code: 'user_task_history_preserved',
+        counts: protectedCounts,
+      });
     }
 
     await db.query('DELETE FROM users WHERE id = $1', [userId]);
@@ -246,14 +266,14 @@ async function getUserTasks(req, res, next) {
     const { rows } = await db.query(
       `SELECT
          t.id, t.title, t.status, t.input_target_service,
-         t.created_at, t.completed_at, t.started_at,
+         t.created_at, t.completed_at, t.started_at, t.archived_at,
          t.error_message,
          m.lsi_coverage, m.eeat_score, m.total_cost_usd, m.bm25_score,
          (SELECT COUNT(*)::int FROM task_content_blocks WHERE task_id = t.id) AS blocks_count
        FROM tasks t
        LEFT JOIN task_metrics m ON m.task_id = t.id
        WHERE t.user_id = $1
-       ORDER BY t.created_at DESC
+       ORDER BY COALESCE(t.completed_at, t.created_at) DESC, t.id DESC
        LIMIT $2 OFFSET $3`,
       [userId, limit, offset]
     );

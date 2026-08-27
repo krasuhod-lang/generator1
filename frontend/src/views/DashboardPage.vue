@@ -64,11 +64,11 @@ async function handleStart(task) {
 }
 
 async function handleDelete(task) {
-  if (!confirm(`Удалить задачу «${task.title || task.input_target_service || 'без названия'}»?`)) return;
+  if (!confirm(`Переместить задачу «${task.title || task.input_target_service || 'без названия'}» в архив? Результат и история сохранятся.`)) return;
   try {
     await store.deleteTask(task.id);
   } catch (e) {
-    showError(e.response?.data?.error || 'Ошибка удаления');
+    showError(e.response?.data?.error || 'Ошибка архивирования');
   }
 }
 
@@ -92,8 +92,18 @@ function fmtDate(dt) {
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleString('ru-RU', {
     day: '2-digit', month: '2-digit', year: '2-digit',
-    hour: '2-digit', minute: '2-digit',
+    hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
   });
+}
+
+function taskDateValue(task) {
+  const status = String(task?.status || '').toLowerCase();
+  // Для написанного SEO-текста бизнес-дата — фактическое завершение.
+  // Для черновика/очереди updated_at не используется: heartbeat и autosave
+  // не должны переносить задачу в другой день.
+  return ['completed', 'failed', 'cancelled'].includes(status)
+    ? (task?.completed_at || task?.created_at)
+    : (task?.created_at || task?.updated_at);
 }
 
 function dateKey(dt) {
@@ -101,6 +111,15 @@ function dateKey(dt) {
   const date = new Date(dt);
   if (Number.isNaN(date.getTime())) return 'unknown';
   return date.toISOString().slice(0, 10);
+}
+
+function taskDateLabel(task) {
+  return String(task?.status || '').toLowerCase() === 'completed' ? 'Выполнена' : 'Создана';
+}
+
+function statusMetaForTask(task) {
+  if (task?.archived_at) return { label: 'Архив', cls: 'bg-gray-700 text-gray-400' };
+  return statusMeta(task?.status);
 }
 
 function dateLabel(key) {
@@ -136,7 +155,7 @@ function taskType(task) {
 
 function isInPeriod(task) {
   if (periodFilter.value === 'all') return true;
-  const raw = task.created_at || task.updated_at;
+  const raw = taskDateValue(task);
   const date = raw ? new Date(raw) : null;
   if (!date || Number.isNaN(date.getTime())) return false;
   const now = new Date();
@@ -171,8 +190,8 @@ const filteredTasks = computed(() => {
   });
 
   return list.sort((a, b) => {
-    const aTime = new Date(a.created_at || a.updated_at || 0).getTime() || 0;
-    const bTime = new Date(b.created_at || b.updated_at || 0).getTime() || 0;
+    const aTime = new Date(taskDateValue(a) || 0).getTime() || 0;
+    const bTime = new Date(taskDateValue(b) || 0).getTime() || 0;
     if (sortBy.value === 'oldest') return aTime - bTime;
     if (sortBy.value === 'cost') return (Number(b.total_cost_usd) || 0) - (Number(a.total_cost_usd) || 0);
     if (sortBy.value === 'title') return taskTitle(a).localeCompare(taskTitle(b), 'ru');
@@ -186,7 +205,7 @@ const groupedTasks = computed(() => {
   if (groupBy.value === 'none') return [{ key: 'all', label: '', tasks: pagedTasks.value }];
   const groups = new Map();
   for (const task of pagedTasks.value) {
-    const key = groupBy.value === 'month' ? dateKey(task.created_at).slice(0, 7) : dateKey(task.created_at);
+    const key = groupBy.value === 'month' ? dateKey(taskDateValue(task)).slice(0, 7) : dateKey(taskDateValue(task));
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(task);
   }
@@ -302,7 +321,7 @@ function goPage(next) {
       </div>
       <div v-else class="card overflow-hidden p-0">
         <table class="w-full text-sm">
-          <thead><tr class="border-b border-gray-800 text-left"><th class="px-5 py-3 text-gray-500 font-medium w-10">#</th><th class="px-5 py-3 text-gray-500 font-medium">Задача</th><th class="px-5 py-3 text-gray-500 font-medium">Тип</th><th class="px-5 py-3 text-gray-500 font-medium">Статус</th><th class="px-5 py-3 text-gray-500 font-medium">Создана</th><th class="px-5 py-3 text-gray-500 font-medium">Стоимость</th><th class="px-5 py-3 text-gray-500 font-medium text-right">Действия</th></tr></thead>
+          <thead><tr class="border-b border-gray-800 text-left"><th class="px-5 py-3 text-gray-500 font-medium w-10">#</th><th class="px-5 py-3 text-gray-500 font-medium">Задача</th><th class="px-5 py-3 text-gray-500 font-medium">Тип</th><th class="px-5 py-3 text-gray-500 font-medium">Статус</th><th class="px-5 py-3 text-gray-500 font-medium">Дата</th><th class="px-5 py-3 text-gray-500 font-medium">Стоимость</th><th class="px-5 py-3 text-gray-500 font-medium text-right">Действия</th></tr></thead>
           <tbody>
             <template v-for="group in groupedTasks" :key="group.key">
               <tr v-if="group.label" class="bg-gray-900/80"><td colspan="7" class="px-5 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">{{ group.label }}</td></tr>
@@ -310,10 +329,10 @@ function goPage(next) {
                 <td class="px-5 py-3.5 text-gray-600">{{ (page - 1) * pageSize + idx + 1 }}</td>
                 <td class="px-5 py-3.5 max-w-sm"><p class="text-white font-medium truncate">{{ taskTitle(task) }}</p><p v-if="task.lsi_coverage != null || task.eeat_score != null" class="text-xs text-gray-500 mt-0.5">LSI {{ task.lsi_coverage ?? '—' }}% · E‑E‑A‑T {{ task.eeat_score ?? '—' }}</p><p class="text-xs text-gray-600 mt-0.5 font-mono truncate">{{ String(task.id).slice(0, 16) }}<span v-if="String(task.id).length > 16">…</span></p></td>
                 <td class="px-5 py-3.5"><span class="text-xs text-gray-400">{{ taskType(task) }}</span></td>
-                <td class="px-5 py-3.5"><span :class="['badge', statusMeta(task.status).cls]">{{ statusMeta(task.status).label }}</span></td>
-                <td class="px-5 py-3.5 text-gray-400 whitespace-nowrap">{{ fmtDate(task.created_at) }}</td>
+                <td class="px-5 py-3.5"><span :class="['badge', statusMetaForTask(task).cls]">{{ statusMetaForTask(task).label }}</span></td>
+                <td class="px-5 py-3.5 text-gray-400 whitespace-nowrap"><span class="block text-[11px] text-gray-600">{{ taskDateLabel(task) }}</span>{{ fmtDate(taskDateValue(task)) }}</td>
                 <td class="px-5 py-3.5 font-mono text-indigo-400">{{ fmtCost(task.total_cost_usd) }}</td>
-                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="task.status === 'draft' || task.status === 'failed'" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="task.status === 'queued' || task.status === 'processing'" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed'" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Результат</button><RouterLink v-if="task.status === 'draft' || task.status === 'failed'" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Удалить">Удалить</button></div></td>
+                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="!task.archived_at && (task.status === 'queued' || task.status === 'processing')" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed'" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Результат</button><RouterLink v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button v-if="!task.archived_at" @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Переместить в архив">В архив</button></div></td>
               </tr>
             </template>
           </tbody>

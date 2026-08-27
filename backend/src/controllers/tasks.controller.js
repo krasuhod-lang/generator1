@@ -15,7 +15,6 @@ const { resolveOwnedOpportunityId } = require('../services/projects/growthOpport
 const { buildTaskFormPrefill }  = require('../services/projects/taskFormPrefill');
 const { isBlankRichText }       = require('../utils/stripHtmlTags');
 const { salvageJsonStrings }    = require('../utils/salvageJson');
-const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 const { getProfileQueueHealth } = require('../services/tasks/generationAdmission');
 const { resolveQueueReason } = require('../services/tasks/queueDiagnostics');
 const { getUserTaskSlotHealth } = require('../services/tasks/userTaskAdmission');
@@ -111,13 +110,13 @@ async function listTasks(req, res, next) {
       `SELECT
          t.id, t.title, t.status, t.input_target_service,
          t.llm_provider, t.gemini_model,
-         t.created_at, t.completed_at, t.started_at,
+         t.created_at, t.completed_at, t.started_at, t.archived_at,
          t.bull_job_id, t.error_message, t.quality_gate,
          m.lsi_coverage, m.eeat_score, m.total_cost_usd, m.bm25_score
        FROM tasks t
        LEFT JOIN task_metrics m ON m.task_id = t.id
        WHERE t.user_id = $1
-       ORDER BY t.created_at DESC`,
+        ORDER BY COALESCE(t.completed_at, t.created_at) DESC, t.id DESC`,
       [req.user.id]
     );
     return res.json({ tasks: rows });
@@ -388,6 +387,10 @@ async function updateTask(req, res, next) {
   try {
     const task = await loadOwnTask(req.params.id, req.user.id);
 
+    if (task.archived_at) {
+      return res.status(409).json({ error: 'Архивную задачу нельзя редактировать' });
+    }
+
     // Нельзя редактировать задачу в процессе выполнения
     if (task.status === 'processing' || task.status === 'queued') {
       return res.status(409).json({
@@ -628,6 +631,10 @@ async function startTask(req, res, next) {
   try {
     const task = await loadOwnTask(req.params.id, req.user.id);
 
+    if (task.archived_at) {
+      return res.status(409).json({ error: 'Архивную задачу нельзя запустить' });
+    }
+
     // Нельзя запустить уже запущенную / выполняющуюся / завершённую
     if (task.status === 'queued' || task.status === 'processing' || task.status === 'completed') {
       return res.status(409).json({
@@ -660,8 +667,8 @@ async function startTask(req, res, next) {
       await client.query('BEGIN');
       await client.query(
         `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
-                lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
-          WHERE id=$2`, [jobId, task.id]);
+                completed_at=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
+          WHERE id=$2 AND archived_at IS NULL`, [jobId, task.id]);
       await client.query(
         `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
          VALUES ('content-generation','generate',$1,$2::jsonb)
@@ -734,6 +741,10 @@ async function resumeTask(req, res, next) {
   try {
     const task = await loadOwnTask(req.params.id, req.user.id);
 
+    if (task.archived_at) {
+      return res.status(409).json({ error: 'Архивную задачу нельзя возобновить' });
+    }
+
     if (task.status !== 'paused' && task.status !== 'failed') {
       return res.status(409).json({
         error: `Нельзя продолжить задачу в статусе "${task.status}"`,
@@ -761,8 +772,8 @@ async function resumeTask(req, res, next) {
       await client.query('BEGIN');
       await client.query(
         `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
-                lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
-          WHERE id=$2`, [jobId, task.id]);
+                completed_at=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
+          WHERE id=$2 AND archived_at IS NULL`, [jobId, task.id]);
       await client.query(
         `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
          VALUES ('content-generation','generate',$1,$2::jsonb)
@@ -811,9 +822,13 @@ async function resumeTask(req, res, next) {
 async function deleteTask(req, res, next) {
   try {
     const task = await loadOwnTask(req.params.id, req.user.id);
+    if (task.archived_at) return res.status(204).send();
 
+    // Удаление задачи теперь является soft archive. Исходная строка, JSON,
+    // метрики и completion date должны оставаться доступными для истории,
+    // центра задач и отчётов зарегистрированного пользователя.
     // 1. Если задача в очереди или выполняется — отменяем Bull job
-    if ((task.status === 'queued' || task.status === 'processing') && task.bull_job_id) {
+    if (['queued', 'processing', 'pausing'].includes(String(task.status)) && task.bull_job_id) {
       try {
         const job = await generationQueue.getJob(task.bull_job_id);
         if (job) {
@@ -831,13 +846,27 @@ async function deleteTask(req, res, next) {
     // 3. Публикуем событие отмены (для клиентов, успевших поймать)
     publish(task.id, { type: 'cancelled', taskId: task.id });
 
-    // 4. Каскадное удаление из БД (ON DELETE CASCADE покрывает stages, blocks, metrics)
-    await db.query(`DELETE FROM tasks WHERE id = $1 AND user_id = $2`, [task.id, req.user.id]);
+    // 4. Архивируем вместо физического DELETE. Для активной задачи фиксируем
+    // отмену, но completed_at не ставим: отмена не является написанным текстом.
+    const archiveStatus = ['queued', 'processing', 'pausing'].includes(String(task.status))
+      ? 'cancelled'
+      : task.status;
+    await db.query(
+      `UPDATE tasks
+          SET status = $3,
+              archived_at = COALESCE(archived_at, NOW()),
+              archived_by = $2,
+              bull_job_id = NULL,
+              lease_token = NULL,
+              lease_until = NULL,
+              heartbeat_at = NOW(),
+              updated_at = NOW()
+        WHERE id = $1 AND user_id = $2 AND archived_at IS NULL`,
+      [task.id, req.user.id, archiveStatus],
+    );
 
-    // 5. Удаляем файлы задачи с диска: каталог сгенерированных картинок
-    //    storage/images/<taskId> и загруженный DOCX (best-effort, ENOENT игнор).
-    await cleanupTaskArtifacts({ taskId: task.id, docxPath: task.input_tz_docx_path });
-
+    // 5. Артефакты намеренно не удаляем: архивная задача должна оставаться
+    // восстановимой, а её HTML/images/DOCX — доступными в истории.
     return res.status(204).send();
   } catch (err) {
     next(err);

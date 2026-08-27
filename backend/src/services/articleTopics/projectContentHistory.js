@@ -21,11 +21,25 @@ const DEFAULT_LIMIT = 500;
 
 const SOURCE_QUERIES = [
   {
+    source: 'seo_task',
+    sql: `
+      SELECT id AS ref_id,
+             COALESCE(NULLIF(TRIM(input_target_service), ''), NULLIF(TRIM(title), '')) AS title,
+             NULL::text AS h1,
+             NULL::text AS primary_intent, NULL::text AS intent_facet,
+             status::text AS status, COALESCE(completed_at, created_at) AS created_at
+        FROM tasks
+       WHERE project_id = $1 AND user_id = $2
+         AND status::text = ANY($3::text[])
+         AND COALESCE(NULLIF(TRIM(input_target_service), ''), NULLIF(TRIM(title), '')) IS NOT NULL
+    `,
+  },
+  {
     source: 'info_article',
     sql: `
       SELECT id AS ref_id, topic AS title, NULL::text AS h1,
              NULL::text AS primary_intent, NULL::text AS intent_facet,
-             status::text AS status, COALESCE(updated_at, created_at) AS created_at
+             status::text AS status, COALESCE(completed_at, created_at) AS created_at
         FROM info_article_tasks
        WHERE project_id = $1 AND user_id = $2
          AND status::text = ANY($3::text[])
@@ -39,7 +53,7 @@ const SOURCE_QUERIES = [
              COALESCE(NULLIF(topic, ''), NULLIF(anchor_text, '')) AS title,
              NULL::text AS h1,
              NULL::text AS primary_intent, NULL::text AS intent_facet,
-             status::text AS status, COALESCE(updated_at, created_at) AS created_at
+             status::text AS status, COALESCE(completed_at, created_at) AS created_at
         FROM link_article_tasks
        WHERE project_id = $1 AND user_id = $2
          AND status::text = ANY($3::text[])
@@ -51,7 +65,7 @@ const SOURCE_QUERIES = [
     sql: `
       SELECT id AS ref_id, name AS title, NULL::text AS h1,
              NULL::text AS primary_intent, NULL::text AS intent_facet,
-             status::text AS status, created_at AS created_at
+             status::text AS status, COALESCE(completed_at, created_at) AS created_at
         FROM meta_tag_tasks
        WHERE project_id = $1 AND user_id = $2
          AND status::text = ANY($3::text[])
@@ -66,7 +80,7 @@ const SOURCE_QUERIES = [
              NULLIF(TRIM(item->>'h1_variant'), '') AS h1,
              NULLIF(TRIM(item->>'primary_intent'), '') AS primary_intent,
              NULLIF(TRIM(item->>'intent_facet'), '') AS intent_facet,
-             t.status::text AS status, COALESCE(t.updated_at, t.created_at) AS created_at
+             t.status::text AS status, COALESCE(t.completed_at, t.created_at) AS created_at
         FROM article_topic_tasks t
         CROSS JOIN LATERAL jsonb_array_elements(
           CASE WHEN jsonb_typeof(t.topic_ideas_json->'topics') = 'array'
@@ -83,7 +97,7 @@ const SOURCE_QUERIES = [
     sql: `
       SELECT ref_id, title, NULL::text AS h1,
              NULL::text AS primary_intent, NULL::text AS intent_facet,
-             'done'::text AS status, COALESCE(performed_at::timestamptz, created_at) AS created_at
+             'done'::text AS status, COALESCE(performed_at_ts, performed_at::timestamptz, created_at) AS created_at
         FROM tasks_auto_log
        WHERE project_id = $1
          AND (user_id = $2 OR user_id IS NULL)
