@@ -75,18 +75,21 @@ async function runEeatAuditCore({ adapter, system, userText, threshold, callOpti
   ) {
     const chunks = chunkArticleForEeat(chunkOpts.html);
     if (chunks.length >= 2) {
-      const chunkResults = [];
-      for (const ch of chunks) {
+      const chunkResults = new Array(chunks.length);
+      const chunkRetries = Number.isInteger(callOptions?.chunkRetries)
+        ? Math.max(1, Math.min(2, callOptions.chunkRetries))
+        : 1;
+      const chunkConcurrency = Number.isInteger(callOptions?.chunkConcurrency)
+        ? Math.max(1, Math.min(3, callOptions.chunkConcurrency))
+        : 1;
+
+      const runChunk = async (ch, resultIndex) => {
         const chunkUser = chunkOpts.buildChunkUserText(ch);
         const label = `${callOptions?.callLabel || 'EEAT audit'} [chunk ${ch.index + 1}/${chunks.length}]`;
         let audit = null;
         let lastErr = null;
-        // callLLM already owns the provider retry/backoff budget. An outer
-        // retry is optional and defaults to one attempt to avoid multiplying
-        // retries for every chunk in a long article.
-        const chunkRetries = Number.isInteger(callOptions?.chunkRetries)
-          ? Math.max(1, Math.min(2, callOptions.chunkRetries))
-          : 1;
+        // callLLM owns the provider retry/backoff budget. The optional outer
+        // retry is bounded and disabled for the blog pipeline by default.
         for (let attempt = 1; attempt <= chunkRetries && !audit; attempt++) {
           try {
             const r = await callLLM(adapter, system, chunkUser, {
@@ -99,21 +102,29 @@ async function runEeatAuditCore({ adapter, system, userText, threshold, callOpti
             if (attempt < chunkRetries) await new Promise((res) => setTimeout(res, 800 * attempt));
           }
         }
-        if (audit) {
-          chunkResults.push({ chunk: ch, audit });
-        } else {
-          chunkResults.push({
-            chunk: ch,
-            audit: {
-              total_score: 0,
-              verdict: 'refine',
-              issues: [`[chunk ${ch.index + 1}/${chunks.length}] LLM-сбой: ${String(lastErr?.message || 'unknown').slice(0, 200)}`],
-              lsi_coverage_pct: 0,
-              audit_failed: true,
-            },
-          });
+        chunkResults[resultIndex] = audit
+          ? { chunk: ch, audit }
+          : {
+              chunk: ch,
+              audit: {
+                total_score: 0,
+                verdict: 'refine',
+                issues: [`[chunk ${ch.index + 1}/${chunks.length}] LLM-сбой: ${String(lastErr?.message || 'unknown').slice(0, 200)}`],
+                lsi_coverage_pct: 0,
+                audit_failed: true,
+              },
+            };
+      };
+
+      let cursor = 0;
+      const workers = Array.from({ length: Math.min(chunkConcurrency, chunks.length) }, async () => {
+        while (cursor < chunks.length) {
+          const index = cursor;
+          cursor += 1;
+          await runChunk(chunks[index], index);
         }
-      }
+      });
+      await Promise.all(workers);
 
       // Агрегация: сбойные чанки (audit_failed) не тянут средний балл к нулю —
       // score считаем только по успешно проаудированным чанкам, а issues

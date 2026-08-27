@@ -18,6 +18,7 @@ const checks = [
   ['writer uses bounded timeout', /timeoutMs: opts\.writerTimeoutMs \|\| BLOG_WRITER_TIMEOUT_MS/.test(pipeline)],
   ['corrective writer retains a bounded retry', /retries: Math\.min\(2, opts\.writerRetries \|\| BLOG_WRITER_RETRIES\)/.test(pipeline)],
   ['eeat chunk retry is not multiplied', /chunkRetries: 1/.test(pipeline) && /const chunkRetries = Number\.isInteger\(callOptions\?\.chunkRetries\)/.test(fs.readFileSync(path.join(root, 'src/services/eeatAudit/core.js'), 'utf8'))],
+  ['eeat chunk concurrency is bounded', /chunkConcurrency: 2/.test(pipeline) && /const chunkConcurrency = Number\.isInteger\(callOptions\?\.chunkConcurrency\)/.test(fs.readFileSync(path.join(root, 'src/services/eeatAudit/core.js'), 'utf8'))],
   ['target site starts as a promise', /const targetSiteStylePromise = task\.target_site_url/.test(pipeline)],
   ['topic discovery starts as a promise', /const topicDiscoveryPromise = TOPIC_DISCOVERY_ENABLED/.test(pipeline)],
   ['audience research starts independently', /const audienceResearchPromise = resolveAudienceResearch/.test(pipeline)],

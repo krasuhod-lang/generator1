@@ -906,8 +906,11 @@ async function runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx) {
   const callOptions = {
     retries: BLOG_AUDIT_RETRIES,
     // runEeatAuditCore has its own chunk loop. Keep one outer attempt so
-    // callLLM's bounded retry budget is not multiplied per chunk.
+    // callLLM's bounded retry budget is not multiplied per chunk. Two chunks
+    // may be audited concurrently; the global provider slot still protects
+    // the API from an unbounded fan-out.
     chunkRetries: 1,
+    chunkConcurrency: 2,
     timeoutMs: 120000,
     temperature: 0.2,
     callLabel: 'InfoArticle Stage 5 (E-E-A-T audit)',
