@@ -318,15 +318,16 @@ onUnmounted(() => {
   max-width: 1080px;
   margin: 0 auto;
   padding: 24px 20px 60px;
-  color: #1d1d1f;
+  color: #f5f5f7;
 }
 .page-header h1 {
+  color: #ffffff;
   font-size: 28px;
   font-weight: 700;
   margin: 0 0 6px;
 }
 .subtitle {
-  color: #6e6e73;
+  color: #b4b4bd;
   font-size: 15px;
   margin: 0 0 20px;
   max-width: 640px;
@@ -434,13 +435,13 @@ input:focus, select:focus {
 }
 
 .campaigns { margin-top: 8px; }
-.muted { color: #86868b; font-size: 15px; padding: 12px 0; }
+.muted { color: #a1a1aa; font-size: 15px; padding: 12px 0; }
 .empty { text-align: center; padding: 40px 0; }
 
 .campaign-card { padding: 18px 20px; }
 .cc-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .cc-title { display: flex; align-items: center; gap: 10px; }
-.cc-title h3 { margin: 0; font-size: 17px; font-weight: 700; }
+.cc-title h3 { margin: 0; font-size: 17px; font-weight: 700; color: #1d1d1f; }
 .cc-cities { color: #86868b; font-size: 13px; text-align: right; }
 .status-dot {
   width: 10px; height: 10px; border-radius: 50%;

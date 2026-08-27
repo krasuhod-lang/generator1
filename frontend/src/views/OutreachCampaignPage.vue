@@ -474,13 +474,13 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 </script>
 
 <style scoped>
-.oc-root { max-width: 1080px; margin: 0 auto; padding: 20px; color: #1d1d1f; }
+.oc-root { max-width: 1080px; margin: 0 auto; padding: 20px; color: #f5f5f7; }
 .oc-back { margin-bottom: 12px; }
 .oc-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .oc-title { display: flex; align-items: center; gap: 10px; }
-.oc-title h1 { font-size: 24px; font-weight: 700; margin: 0; }
+.oc-title h1 { color: #ffffff; font-size: 24px; font-weight: 700; margin: 0; }
 .oc-controls { display: flex; gap: 8px; }
-.oc-sub { color: #6e6e73; font-size: 14px; margin: 6px 0 18px; }
+.oc-sub { color: #b4b4bd; font-size: 14px; margin: 6px 0 18px; }
 
 .status-dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
 .st-active { background: #34c759; }
@@ -492,7 +492,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 .oc-tabs { display: flex; gap: 4px; border-bottom: 1px solid #e5e5ea; margin-bottom: 18px; }
 .oc-tab {
   background: none; border: none; cursor: pointer;
-  padding: 10px 16px; font-size: 15px; font-weight: 600; color: #6e6e73;
+  padding: 10px 16px; font-size: 15px; font-weight: 600; color: #b4b4bd;
   border-bottom: 2px solid transparent; margin-bottom: -1px;
 }
 .oc-tab.active { color: #0071e3; border-bottom-color: #0071e3; }
@@ -502,7 +502,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
   box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.04);
   padding: 20px; margin-bottom: 18px;
 }
-.card-h { margin: 0 0 14px; font-size: 16px; font-weight: 700; }
+.card-h { margin: 0 0 14px; font-size: 16px; font-weight: 700; color: #1d1d1f; }
 
 .kpi-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 18px; }
 .kpi {
@@ -585,7 +585,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 .btn-secondary { background: #f0f0f2; color: #1d1d1f; }
 .btn-ghost { background: #fff; color: #0071e3; border: 1px solid #d2d2d7; }
 
-.muted { color: #86868b; font-size: 14px; padding: 12px; }
+.muted { color: #a1a1aa; font-size: 14px; padding: 12px; }
 
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,.4);
