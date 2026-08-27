@@ -2848,6 +2848,8 @@ async function processInfoArticleTask(taskId) {
       const lfResult = await runLinguaForensicPass(finalHtml, {
         pipeline: 'info',
         taskId,
+        retries: BLOG_AUDIT_RETRIES,
+        timeoutMs: 120000,
         log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
       });
       linguaForensicReport = lfResult.report;
@@ -3242,6 +3244,8 @@ async function processInfoArticleTask(taskId) {
           quality_gate: qualityGateVerdict,
         },
         task,
+        retries: BLOG_AUDIT_RETRIES,
+        timeoutMs: 120000,
         log: (m, l) => { appendLog(taskId, m, l || 'info').catch(() => {}); },
       });
       if (evaluator && evaluator.composite_quality_score != null) {

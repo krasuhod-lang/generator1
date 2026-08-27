@@ -299,7 +299,19 @@ async function persistEvaluatorReport({ pipeline, taskId, report, compositeScore
   }
 }
 
-async function runQualityEvaluator({ pipeline = 'seo', taskId, articleHtml, articleText, artifacts = {}, task = null, moduleContext = null, log = null, onTokens = null } = {}) {
+async function runQualityEvaluator({
+  pipeline = 'seo',
+  taskId,
+  articleHtml,
+  articleText,
+  artifacts = {},
+  task = null,
+  moduleContext = null,
+  log = null,
+  onTokens = null,
+  retries = 2,
+  timeoutMs = undefined,
+} = {}) {
   const logger = typeof log === 'function' ? log : ((msg, level) => console.log(`[stage8] [${level || 'info'}] ${msg}`));
   if (!isStage8Enabled()) return null;
 
@@ -326,7 +338,8 @@ async function runQualityEvaluator({ pipeline = 'seo', taskId, articleHtml, arti
     const report = await callLLM('deepseek', SYSTEM_PROMPT, buildEvaluatorUserPrompt({
       pipeline, taskId, articleText: text, artifacts: mergedArtifacts, deterministicRubric, task, moduleContext,
     }), {
-      retries: 2,
+      retries,
+      ...(Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
       taskId: pipeline === 'seo' ? taskId : null,
       traceTaskId: pipeline === 'seo' ? null : taskId,
       pipeline,

@@ -33,6 +33,9 @@ const checks = [
   ['SERP keeps per-host pacing', /nextAllowedByHost/.test(serp) && /waitForHost/.test(serp)],
   ['LLM success log exposes duration', llm.includes('const callDurationMs = Math.max(0, Date.now() - startedAt.getTime())')],
   ['LLM failure log exposes duration', llm.includes('const failedDurationMs = Math.max(0, Date.now() - startedAt.getTime())')],
+  ['lingua forensic accepts stage budget', /retries = 2/.test(fs.readFileSync(path.join(root, 'src/services/linguaForensic/index.js'), 'utf8')) && /timeoutMs = undefined/.test(fs.readFileSync(path.join(root, 'src/services/linguaForensic/index.js'), 'utf8'))],
+  ['stage8 accepts stage budget', /retries = 2/.test(fs.readFileSync(path.join(root, 'src/services/pipeline/stage8.js'), 'utf8')) && /Number\.isFinite\(timeoutMs\)/.test(fs.readFileSync(path.join(root, 'src/services/pipeline/stage8.js'), 'utf8'))],
+  ['blog passes budget to post-writer AI', /runLinguaForensicPass\(finalHtml, \{[\s\S]*?retries: BLOG_AUDIT_RETRIES/.test(pipeline) && /runQualityEvaluator\(\{[\s\S]*?retries: BLOG_AUDIT_RETRIES/.test(pipeline)],
 ];
 
 for (const [name, ok] of checks) assert.ok(ok, name);
