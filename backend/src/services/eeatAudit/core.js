@@ -81,9 +81,13 @@ async function runEeatAuditCore({ adapter, system, userText, threshold, callOpti
         const label = `${callOptions?.callLabel || 'EEAT audit'} [chunk ${ch.index + 1}/${chunks.length}]`;
         let audit = null;
         let lastErr = null;
-        // Бесперебойность (Б1+): каждый чанк получает до 2 попыток с
-        // backoff — одиночный LLM-сбой больше не превращается в score=0.
-        for (let attempt = 1; attempt <= 2 && !audit; attempt++) {
+        // callLLM already owns the provider retry/backoff budget. An outer
+        // retry is optional and defaults to one attempt to avoid multiplying
+        // retries for every chunk in a long article.
+        const chunkRetries = Number.isInteger(callOptions?.chunkRetries)
+          ? Math.max(1, Math.min(2, callOptions.chunkRetries))
+          : 1;
+        for (let attempt = 1; attempt <= chunkRetries && !audit; attempt++) {
           try {
             const r = await callLLM(adapter, system, chunkUser, {
               ...callOptions,
@@ -92,7 +96,7 @@ async function runEeatAuditCore({ adapter, system, userText, threshold, callOpti
             audit = normalizeEeatAudit(r, threshold);
           } catch (e) {
             lastErr = e;
-            if (attempt < 2) await new Promise((res) => setTimeout(res, 800 * attempt));
+            if (attempt < chunkRetries) await new Promise((res) => setTimeout(res, 800 * attempt));
           }
         }
         if (audit) {

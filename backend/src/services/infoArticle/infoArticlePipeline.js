@@ -231,6 +231,31 @@ const MAX_PARALLEL_IMAGES = (() => {
   return Number.isFinite(v) && v >= 1 && v <= 5 ? v : 3;
 })();
 
+// Blog latency budget: transient retries are valuable, but the previous global
+// default (6 attempts) multiplied across sequential DeepSeek stages could make
+// one article wait for an hour before reaching the writer. Keep quality stages
+// intact while bounding only this pipeline's retry envelope.
+const BLOG_ANALYSIS_RETRIES = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_ANALYSIS_RETRIES, 10);
+  return Number.isFinite(v) && v >= 1 && v <= 4 ? v : 2;
+})();
+const BLOG_AUDIT_RETRIES = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_AUDIT_RETRIES, 10);
+  return Number.isFinite(v) && v >= 1 && v <= 3 ? v : 2;
+})();
+const BLOG_LSI_RETRIES = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_LSI_RETRIES, 10);
+  return Number.isFinite(v) && v >= 1 && v <= 3 ? v : 2;
+})();
+const BLOG_WRITER_RETRIES = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_WRITER_RETRIES, 10);
+  return Number.isFinite(v) && v >= 1 && v <= 3 ? v : 2;
+})();
+const BLOG_WRITER_TIMEOUT_MS = (() => {
+  const v = parseInt(process.env.INFO_ARTICLE_WRITER_TIMEOUT_MS, 10);
+  return Number.isFinite(v) && v >= 180000 && v <= 600000 ? v : 420000;
+})();
+
 // IMAGE_PRICE_USD пришёл из nanoBananaPro.adapter (см. там — единый
 // источник истины с поддержкой NANO_BANANA_PRO_PRICE_USD env).
 
@@ -256,6 +281,8 @@ const INFO_ARTICLE_LSI_TARGET = (() => {
 
 const IN_PROGRESS = new Set();
 const CURRENT_STAGE = new Map();
+const STAGE_STARTED_AT = new Map();
+const STAGE_DURATIONS = new Map();
 const EXECUTION_TOKENS = new Map();
 // Реестр воронок генерации по taskId — setStage() автоматически отмечает
 // переход стадии в funnel.step(). Регистрируется в processInfoArticleTask.
@@ -275,6 +302,29 @@ async function appendLog(taskId, msg, level = 'info') {
 }
 
 async function setStage(taskId, stageName, progressPct) {
+  const now = Date.now();
+  const previousStage = CURRENT_STAGE.get(taskId);
+  const previousStartedAt = STAGE_STARTED_AT.get(taskId);
+  if (previousStage && previousStartedAt) {
+    const durationMs = Math.max(0, now - previousStartedAt);
+    const durations = STAGE_DURATIONS.get(taskId) || {};
+    durations[previousStage] = (durations[previousStage] || 0) + durationMs;
+    STAGE_DURATIONS.set(taskId, durations);
+    // Telemetry only: persist through the existing event table without adding
+    // another blocking task update. It makes a one-hour job diagnosable from
+    // the task log (queue wait vs LLM/API vs post-processing).
+    recordEvent(
+      taskId,
+      `⏱ Этап ${previousStage}: ${durationMs} мс`,
+      'info',
+      previousStage,
+    ).then((entry) => publishEvent(taskId, 'stage_timing', {
+      stage: previousStage,
+      duration_ms: durationMs,
+      cumulative_ms: durations[previousStage],
+    })).catch(() => {});
+  }
+  STAGE_STARTED_AT.set(taskId, now);
   CURRENT_STAGE.set(taskId, stageName);
   const executionToken = EXECUTION_TOKENS.get(taskId);
   const funnel = FUNNELS.get(taskId);
@@ -389,7 +439,7 @@ async function runPreStrategy(task, ctx) {
     'deepseek',
     loadInfoArticlePrompt('preStage0'),
     user,
-    { retries: 3, temperature: 0.3, callLabel: 'InfoArticle Pre-Stage 0', ...ctx },
+    { retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000, temperature: 0.3, callLabel: 'InfoArticle Pre-Stage 0', ...ctx },
   );
 }
 
@@ -405,7 +455,7 @@ async function runAudience(task, strategy, ctx) {
     'deepseek',
     loadInfoArticlePrompt('stage0'),
     user,
-    { retries: 3, temperature: 0.3, callLabel: 'InfoArticle Stage 0', ...ctx },
+    { retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000, temperature: 0.3, callLabel: 'InfoArticle Stage 0', ...ctx },
   );
 }
 
@@ -422,7 +472,7 @@ async function runIntents(task, strategy, audience, ctx, relevanceBrief = '') {
     'deepseek',
     loadInfoArticlePrompt('stage1'),
     user,
-    { retries: 3, temperature: 0.3, callLabel: 'InfoArticle Stage 1', ...ctx },
+    { retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000, temperature: 0.3, callLabel: 'InfoArticle Stage 1', ...ctx },
   );
 }
 
@@ -440,7 +490,7 @@ async function runWhitespace(task, strategy, audience, ctx, relevanceBrief = '')
     'deepseek',
     loadInfoArticlePrompt('stage1bWS'),
     user,
-    { retries: 3, temperature: 0.35, callLabel: 'InfoArticle Stage 1B (white-space)', ...ctx },
+    { retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000, temperature: 0.35, callLabel: 'InfoArticle Stage 1B (white-space)', ...ctx },
   );
 }
 
@@ -464,7 +514,7 @@ async function runOutline(task, audience, intents, whitespace, ctx, relevanceBri
     'deepseek',
     loadInfoArticlePrompt('stage2'),
     user,
-    { retries: 3, temperature: 0.3, callLabel: 'InfoArticle Stage 2 (outline)', ...ctx },
+    { retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000, temperature: 0.3, callLabel: 'InfoArticle Stage 2 (outline)', ...ctx },
   );
 }
 
@@ -762,12 +812,12 @@ async function runWriter(task, args, ctx, opts = {}) {
     systemArg,
     buildUser(null, opts.priorEeatIssues, opts.priorLinkIssues),
     {
-      retries: 3,
+      retries: opts.writerRetries || BLOG_WRITER_RETRIES,
       temperature: 0.5,
       maxTokens: 16384,
       // Reasoning-модель + 16K токенов ответа — стабильно нужно 3–5 минут.
       // Дефолтный 3-минутный таймаут адаптера регулярно срывал генерацию.
-      timeoutMs: 480000,
+      timeoutMs: opts.writerTimeoutMs || BLOG_WRITER_TIMEOUT_MS,
       callLabel: opts.callLabel || 'InfoArticle Stage 3 (writer)',
       ...iakbCallOpts(task),
       ...ctx,
@@ -784,10 +834,10 @@ async function runWriter(task, args, ctx, opts = {}) {
       systemArg,
       buildUser(issues, opts.priorEeatIssues, opts.priorLinkIssues),
       {
-        retries: 2,
+        retries: Math.min(2, opts.writerRetries || BLOG_WRITER_RETRIES),
         temperature: 0.45,
         maxTokens: 16384,
-        timeoutMs: 480000,
+        timeoutMs: opts.writerTimeoutMs || BLOG_WRITER_TIMEOUT_MS,
         callLabel: 'InfoArticle Stage 3 (corrective)',
         skipOnBudget: true,
         ...iakbCallOpts(task),
@@ -853,7 +903,16 @@ async function runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx) {
 
   // По-старому single-call (back-compat для коротких статей <=8kb).
   // Для длинных — chunked-режим (Б1.1) автоматически срабатывает в core.
-  const callOptions = { retries: 3, temperature: 0.2, callLabel: 'InfoArticle Stage 5 (E-E-A-T audit)', ...ctx };
+  const callOptions = {
+    retries: BLOG_AUDIT_RETRIES,
+    // runEeatAuditCore has its own chunk loop. Keep one outer attempt so
+    // callLLM's bounded retry budget is not multiplied per chunk.
+    chunkRetries: 1,
+    timeoutMs: 120000,
+    temperature: 0.2,
+    callLabel: 'InfoArticle Stage 5 (E-E-A-T audit)',
+    ...ctx,
+  };
   return runEeatAuditCore({
     adapter:    'deepseek',
     system:     loadInfoArticlePrompt('stage5Eeat'),
@@ -891,7 +950,7 @@ async function runLinkAudit(articleHtml, linkPlan, deterministicCheck, ctx) {
       'deepseek',
       loadInfoArticlePrompt('stage5bLink'),
       user,
-      { retries: 2, temperature: 0.2, callLabel: 'InfoArticle Stage 5B (link audit)', ...ctx },
+      { retries: BLOG_AUDIT_RETRIES, timeoutMs: 120000, temperature: 0.2, callLabel: 'InfoArticle Stage 5B (link audit)', ...ctx },
     );
   } catch (_) {
     llm = null;
@@ -940,7 +999,7 @@ async function runGistAudit(task, informationDelta, articleHtml, ctx) {
     'deepseek',
     loadInfoArticlePrompt('stage5cGist'),
     user,
-    { retries: 2, temperature: 0.2, callLabel: 'InfoArticle Stage 5C (GIST audit)', ...ctx },
+    { retries: BLOG_AUDIT_RETRIES, timeoutMs: 120000, temperature: 0.2, callLabel: 'InfoArticle Stage 5C (GIST audit)', ...ctx },
   );
   return normalizeGistAuditReport(raw, delta);
 }
@@ -974,7 +1033,7 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, ima
     'deepseek',
     loadInfoArticlePrompt('stage4Images'),
     user,
-    { retries: 3, temperature: 0.4, callLabel: `InfoArticle Stage 4 (${N} image prompts)`, ...ctx },
+    { retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000, temperature: 0.4, callLabel: `InfoArticle Stage 4 (${N} image prompts)`, ...ctx },
   );
   const prompts = Array.isArray(result?.image_prompts) ? result.image_prompts : [];
   // style_profile — общий для всей статьи выбор визуального стиля/формата
@@ -1530,71 +1589,55 @@ async function processInfoArticleTask(taskId) {
     // площадки и строим style-profile, который уйдёт в IAKB §9c. Graceful:
     // любая ошибка ⇒ null, генерация идёт без стилевого профиля.
     let targetSiteStyle = null;
-    if (task.target_site_url) {
-      try {
-        await appendLog(taskId, `🎨 Анализ сайта-площадки: ${task.target_site_url}…`, 'info');
-        const { analyzeTargetSiteStyle } = require('./targetSiteStyle');
-        targetSiteStyle = await analyzeTargetSiteStyle(task.target_site_url, ctx);
-        if (targetSiteStyle) {
-          await saveColumn(taskId, 'target_site_analysis', targetSiteStyle);
-          await appendLog(
-            taskId,
-            `🎨 Стиль площадки определён: «${String(targetSiteStyle.style_profile?.style_label || targetSiteStyle.style_profile?.tone || '').slice(0, 120)}» (страниц проанализировано: ${targetSiteStyle.sampled_pages.length})` +
-            `${targetSiteStyle.cache_hit ? ' [style-cache hit]' : ''} — уйдёт в IAKB §9c`,
-            'info',
-          );
-        } else {
-          await appendLog(taskId, `⚠ Не удалось проанализировать сайт-площадку — продолжаем без стилевого профиля`, 'warn');
-        }
-      } catch (styleErr) {
-        await appendLog(taskId, `⚠ Анализ площадки: ошибка (${styleErr.message}) — продолжаем без него`, 'warn');
-      }
-    }
-
-    // 0. M-1 Topic Discovery (InfoGapRadar) — до Stage 0, за флагом
-    //    TOPIC_DISCOVERY_ENABLED (default on, fail-open). Собирает реальные
-    //    сигналы спроса/предложения (Reddit Mapper + PAA + Google Trends) и
-    //    вызывает gist_py POST /topic/discover. Результат — в article_meta
-    //    (колонка topic_discovery) для AEGIS Phase 5. Задача 1.3 ТЗ.
-    if (TOPIC_DISCOVERY_ENABLED) {
-      try {
-        const topicDiscovery = require('../topicDiscovery/topicDiscovery.service');
-        const td = await topicDiscovery.runTopicDiscovery({
-          query: task.topic,
-          niche: task.topic || '',
-          serpVerification: relevanceArtifact && relevanceArtifact.serpVerification
-            ? relevanceArtifact.serpVerification
-            : null,
-          log: (m) => { console.log(`[infoArticle:${taskId}] ${m}`); },
-        });
-        await saveColumn(taskId, 'topic_discovery', td);
-        await appendLog(
-          taskId,
-          `🧭 Topic Discovery: state=${td.topic_state}`
-            + `${td.topic_score != null ? ` score=${td.topic_score}` : ''}`
-            + `${td.manual_review ? ' (manual_review)' : ''}`,
-          td.manual_review ? 'warn' : 'ok',
-        );
-        // Abundance → авто-пивот на подтему за флагом TOPIC_AUTO_PIVOT (default off).
-        if (td.topic_state === 'abundance' && td.sub_niche_suggestions.length) {
-          if (TOPIC_AUTO_PIVOT) {
-            await appendLog(
-              taskId,
-              `↪ Abundance: авто-пивот на подтему «${td.sub_niche_suggestions[0]}»`,
-              'ok',
-            );
-          } else {
-            await appendLog(
-              taskId,
-              `⚠ Abundance: рекомендованы подтемы — ${td.sub_niche_suggestions.slice(0, 3).join('; ')}`,
-              'warn',
-            );
+    const targetSiteStylePromise = task.target_site_url
+      ? (async () => {
+          try {
+            await appendLog(taskId, `🎨 Анализ сайта-площадки: ${task.target_site_url}…`, 'info');
+            const { analyzeTargetSiteStyle } = require('./targetSiteStyle');
+            const style = await analyzeTargetSiteStyle(task.target_site_url, {
+              ...ctx,
+              retries: BLOG_ANALYSIS_RETRIES,
+              timeoutMs: 120000,
+            });
+            if (style) {
+              await saveColumn(taskId, 'target_site_analysis', style);
+              await appendLog(
+                taskId,
+                `🎨 Стиль площадки определён: «${String(style.style_profile?.style_label || style.style_profile?.tone || '').slice(0, 120)}» (страниц проанализировано: ${style.sampled_pages.length})` +
+                `${style.cache_hit ? ' [style-cache hit]' : ''} — уйдёт в IAKB §9c`,
+                'info',
+              );
+            } else {
+              await appendLog(taskId, '⚠ Не удалось проанализировать сайт-площадку — продолжаем без стилевого профиля', 'warn');
+            }
+            return style;
+          } catch (styleErr) {
+            await appendLog(taskId, `⚠ Анализ площадки: ошибка (${styleErr.message}) — продолжаем без него`, 'warn');
+            return null;
           }
-        }
-      } catch (tdErr) {
-        await appendLog(taskId, `⚠ Topic Discovery: ошибка (${tdErr.message}) — продолжаем`, 'warn');
-      }
-    }
+        })()
+      : Promise.resolve(null);
+
+    // Topic Discovery не входит в writer input. Запускаем его параллельно с
+    // pre-analysis и сохраняем перед quality gate, где он действительно нужен.
+    const topicDiscoveryPromise = TOPIC_DISCOVERY_ENABLED
+      ? (async () => {
+          try {
+            const topicDiscovery = require('../topicDiscovery/topicDiscovery.service');
+            return await topicDiscovery.runTopicDiscovery({
+              query: task.topic,
+              niche: task.topic || '',
+              serpVerification: relevanceArtifact && relevanceArtifact.serpVerification
+                ? relevanceArtifact.serpVerification
+                : null,
+              log: (m) => { console.log(`[infoArticle:${taskId}] ${m}`); },
+            });
+          } catch (tdErr) {
+            await appendLog(taskId, `⚠ Topic Discovery: ошибка (${tdErr.message}) — продолжаем`, 'warn');
+            return null;
+          }
+        })()
+      : Promise.resolve(null);
 
     // 1. Pre-Stage 0
     await setStage(taskId, 'pre_stage0', 5);
@@ -1692,7 +1735,13 @@ async function processInfoArticleTask(taskId) {
     // 6. Stage 2B LSI synth
     await setStage(taskId, 'stage2b_lsi', 44);
     const { lsi_set: lsiSet, base_seed: lsiBaseSeed, corrective_used: lsiCorrective } =
-      await synthesizeLsiSet({ task, intents, outline, callContext: ctx, relevanceSeed: relevanceLsiSeed });
+      await synthesizeLsiSet({
+        task,
+        intents,
+        outline,
+        callContext: { ...ctx, retries: BLOG_LSI_RETRIES, timeoutMs: 120000 },
+        relevanceSeed: relevanceLsiSeed,
+      });
     await saveColumn(taskId, 'lsi_set', lsiSet);
     await appendLog(
       taskId,
@@ -1716,6 +1765,10 @@ async function processInfoArticleTask(taskId) {
         'info',
       );
     }
+    const audienceResearchPromise = resolveAudienceResearch({
+      task, strategy, audience, intents,
+      ctx: { ...buildCallCtx(taskId, 'audience_research'), retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000 },
+    });
     const planResult = noInterlinking
       ? {
           link_plan: [],
@@ -1724,7 +1777,10 @@ async function processInfoArticleTask(taskId) {
           shortlistByH2: {},
         }
       : await planSemanticLinks({
-          task, outline, links, callContext: ctx,
+          task,
+          outline,
+          links,
+          callContext: { ...ctx, retries: BLOG_ANALYSIS_RETRIES, timeoutMs: 120000 },
         });
     await saveColumn(taskId, 'link_plan', planResult.link_plan);
     await saveColumn(taskId, 'link_plan_meta', {
@@ -1748,10 +1804,7 @@ async function processInfoArticleTask(taskId) {
     // 7.5 Голос аудитории (Reddit Mapper V2 → IAKB §10). Фиче-флаг + A/B +
     // graceful: при выключенном флаге / контрольной A/B-группе / отсутствии
     // сигнала digest=null и §10 просто не рендерится (статья как раньше).
-    const audienceResearchResult = await resolveAudienceResearch({
-      task, strategy, audience, intents,
-      ctx: buildCallCtx(taskId, 'audience_research'),
-    });
+    const audienceResearchResult = await audienceResearchPromise;
     await saveColumn(taskId, 'audience_research', audienceResearchResult.meta);
     {
       const arm = audienceResearchResult.meta || {};
@@ -2025,18 +2078,25 @@ async function processInfoArticleTask(taskId) {
     // Stage 5b пропускается, если link_plan пуст (режим «без перелинковки») —
     // нечего проверять, deterministic-аудит даёт coverage_pct=100.
     await setStage(taskId, 'stage5_audits', 70);
-    const [eeatAudit, linkAuditDet] = await Promise.all([
+    const linkAuditPromise = (async () => {
+      const deterministic = auditHtmlAgainstPlan({ html: articleHtml, link_plan: planResult.link_plan });
+      if (noInterlinking) {
+        return {
+          ...deterministic,
+          semantic_violations: [],
+          audit_notes: 'Режим без перелинковки: link_plan пуст, аудит пропущен.',
+        };
+      }
+      return runLinkAudit(articleHtml, planResult.link_plan, deterministic, ctx)
+        .catch(() => ({ ...deterministic, semantic_violations: [], audit_notes: '' }));
+    })();
+    const [eeatAudit, linkAudit] = await Promise.all([
       runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx).catch((e) => {
         appendLog(taskId, `⚠ E-E-A-T аудит пропущен: ${e.message}`, 'warn').catch(() => {});
         return null;
       }),
-      Promise.resolve(auditHtmlAgainstPlan({ html: articleHtml, link_plan: planResult.link_plan })),
+      linkAuditPromise,
     ]);
-
-    let linkAudit = noInterlinking
-      ? { ...linkAuditDet, semantic_violations: [], audit_notes: 'Режим без перелинковки: link_plan пуст, аудит пропущен.' }
-      : await runLinkAudit(articleHtml, planResult.link_plan, linkAuditDet, ctx)
-          .catch(() => ({ ...linkAuditDet, semantic_violations: [], audit_notes: '' }));
 
     if (eeatAudit) {
       await db.query(
@@ -2994,6 +3054,36 @@ async function processInfoArticleTask(taskId) {
       console.warn(`[infoArticle] JSON-LD build failed: ${schemaErr.message}`);
     }
 
+    // Topic Discovery был запущен параллельно ранним аналитическим стадиям.
+    // Дожидаемся его здесь, перед quality gate: сигнал сохраняется в прежнем
+    // поле, но больше не блокирует старт pre-analysis.
+    if (TOPIC_DISCOVERY_ENABLED) {
+      try {
+        const td = await topicDiscoveryPromise;
+        if (td) {
+          await saveColumn(taskId, 'topic_discovery', td);
+          await appendLog(
+            taskId,
+            `🧭 Topic Discovery: state=${td.topic_state}`
+              + `${td.topic_score != null ? ` score=${td.topic_score}` : ''}`
+              + `${td.manual_review ? ' (manual_review)' : ''}`,
+            td.manual_review ? 'warn' : 'ok',
+          );
+          if (td.topic_state === 'abundance' && Array.isArray(td.sub_niche_suggestions) && td.sub_niche_suggestions.length) {
+            await appendLog(
+              taskId,
+              TOPIC_AUTO_PIVOT
+                ? `↪ Abundance: авто-пивот на подтему «${td.sub_niche_suggestions[0]}»`
+                : `⚠ Abundance: рекомендованы подтемы — ${td.sub_niche_suggestions.slice(0, 3).join('; ')}`,
+              TOPIC_AUTO_PIVOT ? 'ok' : 'warn',
+            );
+          }
+        }
+      } catch (tdErr) {
+        await appendLog(taskId, `⚠ Topic Discovery: ошибка сохранения (${tdErr.message}) — продолжаем`, 'warn');
+      }
+    }
+
     // 14d. Unified Quality Core (Content Gen v2, Фаза 3): единый gate поверх
     //      уже посчитанных отчётов. Собираем сырые отчёты из БД, нормализуем
     //      адаптером collectArtifacts и прогоняем qualityGate.finalize('info').
@@ -3189,6 +3279,14 @@ async function processInfoArticleTask(taskId) {
       return;
     }
     await appendLog(taskId, '🎉 Информационная статья готова', 'ok');
+    const finalStageStartedAt = STAGE_STARTED_AT.get(taskId);
+    if (finalStageStartedAt) {
+      const durationMs = Math.max(0, Date.now() - finalStageStartedAt);
+      const durations = STAGE_DURATIONS.get(taskId) || {};
+      durations.done = (durations.done || 0) + durationMs;
+      STAGE_DURATIONS.set(taskId, durations);
+      recordEvent(taskId, `⏱ Этап done: ${durationMs} мс`, 'info', 'done').catch(() => {});
+    }
     publishEvent(taskId, 'status', { status: 'done' });
     try { await funnel.finish({ status: 'completed' }); } catch (_e) { /* analytics must not break generation */ }
     try {
@@ -3261,6 +3359,8 @@ async function processInfoArticleTask(taskId) {
     }
     IN_PROGRESS.delete(taskId);
     CURRENT_STAGE.delete(taskId);
+    STAGE_STARTED_AT.delete(taskId);
+    STAGE_DURATIONS.delete(taskId);
     EXECUTION_TOKENS.delete(taskId);
     FUNNELS.delete(taskId);
     // Освобождаем учёт токенов для задачи: иначе Map tokenBudgetState

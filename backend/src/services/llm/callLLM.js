@@ -655,8 +655,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // Показываем фактически использованную модель — для удобства сравнения
       // качества разных Gemini-моделей в одной задаче.
       const modelTag = result.model ? ` (${result.model})` : '';
+      const callDurationMs = Math.max(0, Date.now() - startedAt.getTime());
       log(
-        `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote}${partialJsonNote} | $${costUsd.toFixed(6)}`,
+        `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote}${partialJsonNote} | $${costUsd.toFixed(6)} | ${callDurationMs}ms`,
         'success'
       );
 
@@ -742,7 +743,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       }
 
       if (isDeterministic || attempt === retries - 1) {
-        log(`${callLabel || stageName} FAILED после ${attempt + 1} попыток: ${err.message}`, 'error');
+        const failedDurationMs = Math.max(0, Date.now() - startedAt.getTime());
+        log(`${callLabel || stageName} FAILED после ${attempt + 1} попыток: ${err.message} | ${failedDurationMs}ms`, 'error');
         throw err;
       }
 

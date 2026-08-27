@@ -26,6 +26,10 @@ const GOOGLE_SERP_COOLDOWN_MS = (() => {
   const v = parseInt(process.env.GOOGLE_SERP_COOLDOWN_MS, 10);
   return Number.isFinite(v) && v >= 0 && v <= 60000 ? v : 4000;
 })();
+const GOOGLE_SERP_MAX_CONCURRENCY = (() => {
+  const v = parseInt(process.env.GOOGLE_SERP_MAX_CONCURRENCY, 10);
+  return Number.isFinite(v) && v >= 1 && v <= 5 ? v : 3;
+})();
 
 const MIN_WORDS = 300;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -95,31 +99,51 @@ async function fetchGoogleSerpWithContent({
     }
     if (!extract_content) return serp.map((s) => ({ ...s, page_content: '', word_count: 0 }));
 
-    const out = [];
-    for (let i = 0; i < serp.length; i += 1) {
-      const item = serp[i];
-      if (i > 0 && GOOGLE_SERP_COOLDOWN_MS > 0) await sleep(GOOGLE_SERP_COOLDOWN_MS);
-      try {
-        const scraped = await scrapeUrl(item.url, 30000);
-        const pageContent = String(scraped && scraped.markdown || '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        const wordCount = _countWords(pageContent);
-        if (wordCount >= MIN_WORDS) {
-          out.push({
-            url: item.url,
-            serp_title: item.serp_title || scraped.title || '',
-            serp_description: item.serp_description,
-            page_content: pageContent,
-            word_count: wordCount,
-          });
+    // Scrape different hosts concurrently, but keep a per-host cooldown. The
+    // old global serial loop imposed 4s between every URL, so top-10 added up
+    // to ~36s of artificial idle time before any GIST work. Per-host pacing
+    // preserves politeness while allowing independent domains to progress.
+    const nextAllowedByHost = new Map();
+    const waitForHost = async (host) => {
+      const now = Date.now();
+      const scheduled = Math.max(now, nextAllowedByHost.get(host) || 0);
+      nextAllowedByHost.set(host, scheduled + GOOGLE_SERP_COOLDOWN_MS);
+      const delay = scheduled - now;
+      if (delay > 0) await sleep(delay);
+    };
+    const results = new Array(serp.length).fill(null);
+    let cursor = 0;
+    const scrapeOne = async () => {
+      while (cursor < serp.length) {
+        const index = cursor;
+        cursor += 1;
+        const item = serp[index];
+        const host = _hostOf(item.url) || item.url;
+        if (GOOGLE_SERP_COOLDOWN_MS > 0) await waitForHost(host);
+        try {
+          const scraped = await scrapeUrl(item.url, 30000);
+          const pageContent = String(scraped && scraped.markdown || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const wordCount = _countWords(pageContent);
+          if (wordCount >= MIN_WORDS) {
+            results[index] = {
+              url: item.url,
+              serp_title: item.serp_title || scraped.title || '',
+              serp_description: item.serp_description,
+              page_content: pageContent,
+              word_count: wordCount,
+            };
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn(`[fetchGoogleSerp] page skipped ${item.url}: ${e.message}`);
         }
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn(`[fetchGoogleSerp] page skipped ${item.url}: ${e.message}`);
       }
-    }
-    return out;
+    };
+    const workers = Math.min(GOOGLE_SERP_MAX_CONCURRENCY, serp.length);
+    await Promise.all(Array.from({ length: workers }, () => scrapeOne()));
+    return results.filter(Boolean);
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn(`[fetchGoogleSerp] failed-open: ${e.message}`);
@@ -134,4 +158,6 @@ module.exports = {
   _countWords,
   _mapSerpItem,
   _googleOpts,
+  GOOGLE_SERP_COOLDOWN_MS,
+  GOOGLE_SERP_MAX_CONCURRENCY,
 };
