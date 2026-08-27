@@ -82,7 +82,7 @@ class GistPipeline:
         {top10_claims, information_delta, gist_score} — контракт
         gistClient.runGistGapFinder() на стороне Node.
         """
-        result: Dict = {"query": query, "mode": "gap_finder"}
+        result: Dict = {"query": query, "mode": "gap_finder", "degraded": False, "errors": []}
 
         # 1. M1 — страницы конкурентов (готовые тексты приоритетнее скрейпа)
         if pages is None:
@@ -106,21 +106,40 @@ class GistPipeline:
                 logger.warning("M1.5 в gap-finder пропущен: %s", exc)
                 result["core_classification"] = {"llm_skipped": True}
 
-        # 2. M2 — шум top10_claims
+        # 2. M2 — шум top10_claims. Gap Finder is optional for the Node
+        # SEO pipeline: an unavailable internal LLM must not become HTTP 500.
         self._stage("M2")
-        top10_claims = m2_noise.extract_noise(pages, query, self.llm)
+        try:
+            top10_claims = m2_noise.extract_noise(pages, query, self.llm)
+        except Exception as exc:
+            logger.warning("M2 gap finder degraded: %s", exc)
+            top10_claims = []
+            result["degraded"] = True
+            result["errors"].append({"stage": "M2", "message": str(exc)[:240]})
         result["top10_claims"] = top10_claims
+        if pages and not top10_claims:
+            result["degraded"] = True
+            result["errors"].append({"stage": "M2", "message": "No claims extracted from competitor evidence"})
 
         # 3. M3 — information_delta
         self._stage("M3", {"top10_claims_json": top10_claims})
-        gaps = m3_gap.find_gaps(query, target_audience, top10_claims, self.llm)
-        result["information_delta"] = gaps["information_delta"]
-        result["gap_reasoning"] = gaps["gap_reasoning"]
+        try:
+            gaps = m3_gap.find_gaps(query, target_audience, top10_claims, self.llm)
+            information_delta = gaps.get("information_delta", [])
+            gap_reasoning = gaps.get("gap_reasoning", "")
+        except Exception as exc:
+            logger.warning("M3 gap finder degraded: %s", exc)
+            information_delta = []
+            gap_reasoning = "GIST M3 unavailable; continue with Node-side evidence."
+            result["degraded"] = True
+            result["errors"].append({"stage": "M3", "message": str(exc)[:240]})
+        result["information_delta"] = information_delta
+        result["gap_reasoning"] = gap_reasoning
 
         # GIST Score считается по готовой статье (Node Quality Gate);
         # на этапе gap-finder статьи ещё нет.
         result["gist_score"] = None
-        self._stage("DONE", {"information_delta_json": gaps["information_delta"]})
+        self._stage("DONE", {"information_delta_json": information_delta, "degraded": result["degraded"]})
         return result
 
     def run_topic_discovery(

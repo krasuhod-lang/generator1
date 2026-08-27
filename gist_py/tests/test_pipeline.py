@@ -88,6 +88,27 @@ class FakeLLM(LLMClient):
         )
 
 
+class UnavailableLLM(FakeLLM):
+    @property
+    def available(self):
+        return False
+
+    def complete(self, prompt, system="", temperature=0.4):
+        raise RuntimeError("internal LLM unavailable")
+
+
+def test_gap_finder_degrades_without_http_500():
+    pipe = GistPipeline(llm=UnavailableLLM())
+    result = pipe.run_gap_finder(
+        "как выбрать газовый котёл",
+        competitors_text=["текст конкурента " * 100],
+    )
+    assert result["mode"] == "gap_finder"
+    assert result["degraded"] is True
+    assert result["information_delta"] == []
+    assert {item["stage"] for item in result["errors"]} >= {"M2", "M3"}
+
+
 def test_gap_finder_mode_with_node_texts():
     """Режим Gap Finder (Node gistClient): M2+M3 без генерации контента."""
     llm = FakeLLM()

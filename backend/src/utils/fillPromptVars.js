@@ -17,6 +17,16 @@ const { richTextToPlain } = require('./stripHtmlTags');
  * @param {object} task    — строка из таблицы tasks (или объект с теми же полями)
  * @returns {string}       — промпт с подставленными значениями
  */
+const PROMPT_FIELD_MAX_CHARS = 6000;
+
+function compactPromptValue(value, maxChars = PROMPT_FIELD_MAX_CHARS) {
+  const text = richTextToPlain(String(value || ''));
+  if (text.length <= maxChars) return text;
+  const head = Math.max(1500, Math.floor(maxChars * 0.72));
+  const tail = Math.max(500, maxChars - head);
+  return `${text.slice(0, head)}\n[...task field compacted for model context...]\n${text.slice(-tail)}`;
+}
+
 function fillPromptVars(prompt, task) {
   if (!prompt || !task) return prompt || '';
 
@@ -43,7 +53,7 @@ function fillPromptVars(prompt, task) {
   // {{BUSINESS_TYPE}} заполняются позже в stage3.js и здесь не затрагиваются).
   prompt = prompt.replace(/\{\{\s*(input_[a-zA-Z0-9_]+)\s*\}\}/g, (m, key) => {
     if (Object.prototype.hasOwnProperty.call(task, key) && task[key] != null && task[key] !== '') {
-      return richTextToPlain(String(task[key]));
+      return compactPromptValue(task[key]);
     }
     return m;
   });
@@ -79,7 +89,7 @@ function fillPromptVars(prompt, task) {
     {
       // - Целевая аудитория: [описание]
       re: /^(- Целевая аудитория:\s*)\[.*?\]/gm,
-      val: () => richTextToPlain(task.input_target_audience) || '[не указано]',
+      val: () => compactPromptValue(task.input_target_audience) || '[не указано]',
     },
     {
       // - Приоритетная бизнес-цель / Приоритетная цель: [...]
@@ -110,17 +120,17 @@ function fillPromptVars(prompt, task) {
       // - Если есть, ограничения проекта: [...]
       // - Ограничения, если есть: [...]
       re: /^(- (?:Если есть, ограничения проекта|Ограничения(?:,\s*если\s+есть)?):\s*)\[.*?\]/gm,
-      val: () => richTextToPlain(task.input_project_limits) || '[не указано]',
+      val: () => compactPromptValue(task.input_project_limits) || '[не указано]',
     },
     {
       // - Если есть, приоритетные типы страниц: [...]
       re: /^(- Если есть, приоритетные типы страниц:\s*)\[.*?\]/gm,
-      val: () => richTextToPlain(task.input_page_priorities) || '[не указано]',
+      val: () => compactPromptValue(task.input_page_priorities) || '[не указано]',
     },
     {
       // - Если есть, особенности ниши: [...]
       re: /^(- Если есть, особенности ниши:\s*)\[.*?\]/gm,
-      val: () => richTextToPlain(task.input_niche_features) || '[не указано]',
+      val: () => compactPromptValue(task.input_niche_features) || '[не указано]',
     },
     {
       // - Основной продукт / услуга / категории: [список]

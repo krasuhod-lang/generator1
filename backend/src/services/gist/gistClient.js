@@ -20,6 +20,38 @@ const axios = require('axios');
 
 const GIST_URL   = process.env.GIST_SERVICE_URL || 'http://gist:8003';
 const GIST_TOKEN = process.env.GIST_INTERNAL_TOKEN;
+const GIST_MAX_PAGES = 8;
+const GIST_PAGE_CHARS = 6000;
+const GIST_TOTAL_CHARS = 48000;
+
+function _compactEvidence(value, maxChars = GIST_PAGE_CHARS) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  const head = Math.max(1000, Math.floor(maxChars * 0.72));
+  return `${text.slice(0, head)}\n[...competitor evidence compacted...]\n${text.slice(-Math.max(500, maxChars - head))}`;
+}
+
+function _boundedCompetitorTexts(items) {
+  const output = [];
+  let total = 0;
+  for (const item of Array.isArray(items) ? items : []) {
+    const text = _compactEvidence(item);
+    if (!text.trim()) continue;
+    const remaining = GIST_TOTAL_CHARS - total;
+    if (remaining <= 200) break;
+    const bounded = text.length <= remaining ? text : _compactEvidence(text, remaining);
+    output.push(bounded);
+    total += bounded.length;
+    if (output.length >= GIST_MAX_PAGES) break;
+  }
+  return output;
+}
+
+function _isTransientGistError(error) {
+  const status = Number(error?.response?.status || error?.status || 0);
+  return status === 408 || status === 429 || status >= 500
+    || /timeout|network|socket|ECONNRESET|ECONNABORTED/i.test(String(error?.message || ''));
+}
 
 function _headers() {
   const headers = {};
@@ -39,25 +71,38 @@ function _headers() {
  * @returns {Promise<{information_delta: string[], gist_score: number|null, top10_claims: string[]}>}
  */
 async function runGistGapFinder({ keyword, competitors_text, page_type, target_audience } = {}) {
-  const response = await axios.post(
-    `${GIST_URL}/pipeline/run`,
-    {
-      keyword,
-      query: keyword,
-      competitors_text: Array.isArray(competitors_text)
-        ? competitors_text.filter((t) => typeof t === 'string' && t.trim())
-        : undefined,
-      page_type: page_type || '',
-      target_audience: target_audience || '',
-      modules: ['M2', 'M3'],
-    },
-    { headers: _headers(), timeout: 45000 },
-  );
+  const boundedTexts = _boundedCompetitorTexts(competitors_text);
+  let response;
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      response = await axios.post(
+        `${GIST_URL}/pipeline/run`,
+        {
+          keyword,
+          query: keyword,
+          competitors_text: boundedTexts.length ? boundedTexts : undefined,
+          page_type: page_type || '',
+          target_audience: target_audience || '',
+          modules: ['M2', 'M3'],
+        },
+        { headers: _headers(), timeout: 45000 },
+      );
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1 || !_isTransientGistError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  if (!response) throw lastError || new Error('GIST service returned no response');
   const data = response.data || {};
   return {
     information_delta: Array.isArray(data.information_delta) ? data.information_delta : [],
     gist_score:        data.gist_score ?? null,
     top10_claims:      Array.isArray(data.top10_claims) ? data.top10_claims : [],
+    degraded:          data.degraded === true,
+    errors:            Array.isArray(data.errors) ? data.errors.slice(0, 4) : [],
   };
 }
 

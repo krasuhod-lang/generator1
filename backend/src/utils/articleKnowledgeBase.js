@@ -59,6 +59,63 @@ function sliceWords(text, maxWords) {
   return words.slice(0, maxWords).join(' ') + ' …';
 }
 
+const CALL_AKB_MAX_CHARS = 26000;
+const CALL_AKB_SECTION_MAX_CHARS = 2600;
+const CALL_AKB_PRIORITY = [
+  '## 0. КОНТЕКСТ ПРОЕКТА',
+  '## 0.8 E-E-A-T 12 / EVIDENCE-FIRST CONTRACT',
+  '## 1. Brand & Offer',
+  '## 2. Audience Personas',
+  '## 2b. RESEARCH EVIDENCE',
+  '## 5. Strategic Context',
+  '## 6. SERP Reality & Gaps',
+  '## 7. Required Entities',
+  '## 8. Community Voice',
+  '## 10. Hard Constraints',
+  '## 11. Module Context',
+  '## 12. Конкурентные требования',
+];
+
+function _compactAkbSection(section, maxChars = CALL_AKB_SECTION_MAX_CHARS) {
+  const text = String(section || '').trim();
+  if (text.length <= maxChars) return text;
+  const head = Math.floor(maxChars * 0.76);
+  return `${text.slice(0, head)}\n[… AKB section compacted …]\n${text.slice(-Math.max(200, maxChars - head))}`;
+}
+
+/**
+ * Build a bounded call-time AKB without changing the authoritative full AKB.
+ * The full document is still stored and used for Gemini Context Cache; this
+ * compact variant prevents paying/re-sending the same large evidence block for
+ * every H2/refine/audit call when context caching is unavailable or misses.
+ */
+function compactKnowledgeBaseForCalls(fullText, maxChars = CALL_AKB_MAX_CHARS) {
+  const text = String(fullText || '');
+  if (!text || text.length <= maxChars) return text;
+  const chunks = text.split(/(?=\n## )/).map((chunk) => chunk.trim()).filter(Boolean);
+  const header = chunks.shift() || '# ARTICLE KNOWLEDGE BASE';
+  const selected = [];
+  const used = new Set();
+  const choose = (chunk) => {
+    const heading = chunk.split('\n')[0] || '';
+    if (used.has(heading)) return;
+    const compacted = _compactAkbSection(chunk);
+    const projected = [header, ...selected, compacted].join('\n\n');
+    if (projected.length <= maxChars) {
+      selected.push(compacted);
+      used.add(heading);
+    }
+  };
+
+  for (const prefix of CALL_AKB_PRIORITY) {
+    chunks.filter((chunk) => (chunk.split('\n')[0] || '').startsWith(prefix)).forEach(choose);
+  }
+  chunks.forEach(choose);
+
+  const result = [header, ...selected].join('\n\n');
+  return result.length <= maxChars ? result : result.slice(0, maxChars);
+}
+
 /**
  * ensureString — нормализация значения в строку, исключая «undefined»/«null»/«[object Object]».
  */
@@ -626,6 +683,7 @@ function geminiCallOpts(task, extra = {}) {
   // cachedContent — только для Gemini. Для Grok игнорируем (cachedContents
   // у x.ai отсутствует) — callLLM сам пропустит при adapter='grok'.
   if (task?.__geminiCacheName) opts.cachedContent = task.__geminiCacheName;
+  if (task?.__articleKnowledgeBaseForCalls) opts.cacheFallbackSystem = task.__articleKnowledgeBaseForCalls;
   if (task?.__tokenBudget)     opts.tokenBudget   = task.__tokenBudget;
   if (task?.__geminiCacheName) {
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
@@ -644,7 +702,7 @@ function akbSystem(task) {
   // Для Grok нет cachedContent, поэтому всегда передаём AKB как system.
   const provider = (task?.llm_provider || 'gemini').toLowerCase();
   if (provider === 'gemini' && task.__geminiCacheName) return '';
-  return task.__articleKnowledgeBase || '';
+  return task.__articleKnowledgeBaseForCalls || task.__articleKnowledgeBase || '';
 }
 
 /**
@@ -659,6 +717,7 @@ function llmProvider(task) {
 
 module.exports = {
   buildArticleKnowledgeBase,
+  compactKnowledgeBaseForCalls,
   buildStyleCard,
   detectBusinessPreset,
   geminiCallOpts,

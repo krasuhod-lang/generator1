@@ -116,7 +116,7 @@ const { getRelatedEntities } = require('../../utils/knowledgeGraph');
 const { runPreStage0, buildStrategyDigest } = require('./preStage0');
 const { buildUnusedInputsReport } = require('../../utils/unusedInputsReporter');
 const { extractPriceData: extractMetaPriceData } = require('../metaTags/metaGenerator');
-const { buildArticleKnowledgeBase } = require('../../utils/articleKnowledgeBase');
+const { buildArticleKnowledgeBase, compactKnowledgeBaseForCalls } = require('../../utils/articleKnowledgeBase');
 const { deriveModuleContext } = require('../../utils/moduleContext');
 const { richTextToPlain, isBlankRichText } = require('../../utils/stripHtmlTags');
 const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
@@ -660,14 +660,18 @@ async function runPipeline(task, ctx) {
     });
     const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
     const akbTokens = estimateTokens(task.__articleKnowledgeBase);
+    task.__articleKnowledgeBaseForCalls = compactKnowledgeBaseForCalls(task.__articleKnowledgeBase);
+    const callAkbBytes = Buffer.byteLength(task.__articleKnowledgeBaseForCalls, 'utf8');
     log(
       `ARTICLE_KNOWLEDGE_BASE собран: ${akbBytes} байт (~${akbTokens} токенов). ` +
-      `Будет передаваться как Gemini systemInstruction для Stage 3/5/6.`,
+      `Call-time AKB: ${callAkbBytes} байт (~${estimateTokens(task.__articleKnowledgeBaseForCalls)} токенов); ` +
+      `полный контекст сохранён для cache/result, bounded-копия используется при writer/audit calls.`,
       'info'
     );
   } catch (akbErr) {
     log(`ARTICLE_KNOWLEDGE_BASE: ошибка сборки — ${akbErr.message}. Продолжаем без AKB.`, 'warn');
     task.__articleKnowledgeBase = '';
+    task.__articleKnowledgeBaseForCalls = '';
   }
 
   // ── Опционально: Gemini Context Caching API ─────────────────────

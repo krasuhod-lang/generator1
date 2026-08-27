@@ -65,9 +65,14 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   let tfIdfArr = [];
   try { tfIdfArr = JSON.parse(task.input_tfidf_json || '[]'); } catch { /* ignore */ }
   const tfIdfWeightsStr = JSON.stringify(tfIdfArr.slice(0, 50)); // ограничиваем для промпта
+  // The LLM audit only needs a bounded structural sample. Full HTML remains
+  // available below for exact programmatic LSI/TF-IDF calculations.
+  const boundedFinalHtml = fullHTML.length > 30000
+    ? `${fullHTML.slice(0, 25000)}\n<!-- [FINAL_HTML_TRUNCATED_FOR_AUDIT] -->\n${fullHTML.slice(-5000)}`
+    : fullHTML;
 
   const s7prompt = `${SYSTEM_PROMPTS.stage7}\n\nGLOBAL AUDIT COMPACT OUTPUT POLICY (additive; keep the full rubric):\n- Return exactly one JSON object. Never repeat FINAL_HTML_CONTENT.\n- Keep overall_verdict and each justification under 300 characters.\n- Keep critical_improvements_needed to at most 8 short items.\n- Keep tfidf_density_report to at most 60 items; computed programmatic density remains the source of truth.\n- If a field cannot be assessed, use null or an empty array; do not invent a value.\n`
-    .replace('{{FINAL_HTML}}',        () => fullHTML.substring(0, 30000))
+    .replace('{{FINAL_HTML}}',        () => boundedFinalHtml)
     .replace('{{TARGET_SERVICE}}',    () => targetService)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(allLSI))
     .replace(/\{\{BRAND_NAME\}\}/g,   () => (task.input_brand_name || '').trim() || 'Нет данных')
@@ -85,10 +90,10 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     '',
     s7prompt,
     {
-      retries: 1,
-      maxTokens: 12000,
+      retries: 2,
+      maxTokens: 16000,
       responseFormat: { type: 'json_object' },
-      retryOnTruncation: false,
+      retryOnTruncation: true,
       allowPartialJson: true,
       taskId,
       stageName: 'stage7',

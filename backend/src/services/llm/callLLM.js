@@ -37,15 +37,21 @@ const ADAPTER_DEFAULT_MAX_TOKENS = {
 // плодил ретраи. Внешние стадии могут поймать ошибку и решить, что делать
 // (например, пропустить Stage 6 cycle 2/3).
 //
+// Бюджет считается по billable input tokens: Gemini cachedContent входит в
+// provider prompt_tokens, но cached input уже тарифицируется отдельно и не
+// должен повторно блокировать обязательную генерацию каждого H2-блока.
+// Фактические provider tokens и billing metrics при этом сохраняются без
+// изменений.
+//
 // Состояние per-task хранится в Map(taskId → {gemini, deepseek, reservedGemini}).
 // ────────────────────────────────────────────────────────────────────
 
 const tokenBudgetState = new Map(); // taskId → { gemini, deepseek, reservedGemini }
 
 // Без явного лимита runaway-сценарии (Stage 5/6 refine, corrective retry)
-// могли бесконечно наращивать Gemini input spend. 200k — консервативный
-// production default: обычная SEO/info/link задача укладывается в него, а
-// патологическая задача останавливает только необязательные последующие вызовы.
+// могли бесконечно наращивать Gemini input spend. 200k billable input tokens
+// — консервативный production default: обычная SEO/info/link задача укладывается
+// в него, а патологическая задача останавливает только необязательные вызовы.
 const DEFAULT_GEMINI_TASK_TOKEN_BUDGET = 200000;
 
 function getConfiguredTaskTokenBudget() {
@@ -114,6 +120,21 @@ function _accumulateTokens(taskId, adapter, tokensIn) {
   const st = _getBudgetState(taskId);
   st[adapter] = (st[adapter] || 0) + Math.max(0, Number(tokensIn) || 0);
   tokenBudgetState.set(taskId, st);
+}
+
+/**
+ * Tokens used by the budget guard, separate from provider-reported usage.
+ * Gemini cachedContent reports the cached system context inside tokensIn;
+ * it is already represented by cachedTokens and should not consume the same
+ * task budget again. Billing still receives the original tokensIn below.
+ */
+function getBudgetInputTokens(adapter, result, fallback = 0) {
+  const total = Math.max(0, Number(result?.tokensIn) || Number(fallback) || 0);
+  if (adapter === 'gemini') {
+    const cached = Math.min(total, Math.max(0, Number(result?.cachedTokens) || 0));
+    return Math.max(0, total - cached);
+  }
+  return total;
 }
 
 /**
@@ -467,8 +488,10 @@ async function persistStageCall({
  *                                                    после вызова callLLM однократно перезапросит
  *                                                    без cachedContent.
   * @param {number}  [opts.tokenBudget]  — лимит input-токенов на задачу (для Gemini).
- *                                                    Production default — 200000; передайте
- *                                                    Infinity явно для opt-out. При исчерпании —
+ *                                                    Production default — 200000 billable input
+ *                                                    tokens; cached Gemini context не считается
+ *                                                    повторно. Передайте Infinity для opt-out.
+ *                                                    При исчерпании —
  *                                                    BudgetExceededError (isDeterministic).
  * @param {boolean} [opts.allowPartialJson=false] — opt-in salvage score fields from
  *                                                    an incomplete quality-audit JSON;
@@ -511,6 +534,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     qualityScore  = null,
     triggeredRefine = false,
     responseFormat = null,
+    cacheFallbackSystem = null,
     retryOnTruncation = true,
     allowPartialJson = false,
     skipOnBudget = false,
@@ -532,7 +556,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   // дорожке, что и Gemini (платный текстовый провайдер с per-task budget'ом).
   const providerClass = adapter === 'deepseek' ? 'deepseek' : 'gemini-class';
   const startedAt = new Date();
-  const promptSize = estimateTokens(system + prompt);
+  let activeSystem = system;
+  let promptSize = estimateTokens(activeSystem + prompt);
 
   // Budget проверяется после response-cache lookup: cache-hit не вызывает
   // провайдера и не должен блокироваться из-за уже исчерпанного бюджета.
@@ -597,8 +622,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         callOpts.cachedContent = activeCachedContent;
       }
 
-      const result = await withProviderSlot(adapter, () => callFn(system, prompt, callOpts));
-      if (budgetReservation) budgetReservation.commit(result.tokensIn || promptSize);
+      const result = await withProviderSlot(adapter, () => callFn(activeSystem, prompt, callOpts));
+      const budgetInputTokens = getBudgetInputTokens(adapter, result, promptSize);
+      if (budgetReservation) budgetReservation.commit(budgetInputTokens);
       const costModel = adapter === 'deepseek'
         ? (result.model || model || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro')
         : adapter;
@@ -614,7 +640,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // Usage фиксируем ДО проверки truncation/JSON: retry после обрезанного
       // ответа тоже является реальным provider-вызовом и должен попасть в budget.
       if (!budgetReservation && providerClass === 'gemini-class' && budgetTaskId) {
-        _accumulateTokens(budgetTaskId, budgetKey, result.tokensIn || 0);
+        _accumulateTokens(budgetTaskId, budgetKey, budgetInputTokens);
       }
 
       // Если ответ обрезан по max_tokens (детекция: finish_reason=length ИЛИ незакрытый JSON) —
@@ -720,6 +746,11 @@ async function callLLM(adapter, system, prompt, opts = {}) {
           'warn'
         );
         activeCachedContent = null;
+        if (cacheFallbackSystem) {
+          activeSystem = cacheFallbackSystem;
+          promptSize = estimateTokens(activeSystem + prompt);
+          log(`${callLabel || stageName}: cache fallback uses bounded AKB (${activeSystem.length} chars)`, 'info');
+        }
         if (typeof onCacheMiss === 'function') {
           try { onCacheMiss(); } catch (_) { /* no-op */ }
         }
@@ -770,6 +801,7 @@ module.exports = {
   getTaskBudgetSpent,
   getTaskBudgetRemaining,
   getConfiguredTaskTokenBudget,
+  getBudgetInputTokens,
   DEFAULT_GEMINI_TASK_TOKEN_BUDGET,
   parseJSON,
   _isJsonTruncated,

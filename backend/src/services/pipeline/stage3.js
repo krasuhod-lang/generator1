@@ -4,6 +4,61 @@ const { callLLM }           = require('../llm/callLLM');
 const { SYSTEM_PROMPTS }    = require('../../prompts/systemPrompts');
 const db                    = require('../../config/db');
 const { checkObjectiveMetrics, getStructureLimits } = require('../../utils/objectiveMetrics');
+
+const WRITER_CONTEXT_MAX_CHARS = 12000;
+const WRITER_CONTEXT_PRIORITY = [
+  'primary_intent', 'secondary_intents', 'search_intents', 'buyer_journey',
+  'audience_pains', 'audience_personas', 'entities', 'core_entities',
+  'lsi_terms', 'lsi_top', 'ngrams', 'keywords', 'brand_facts', 'proof_assets',
+  'trust_signals', 'competitor_facts', 'content_gaps', 'content_formats',
+  'topic_clusters', 'knowledge_graph', 'faq_bank',
+];
+
+function compactWriterValue(value, depth = 0) {
+  if (typeof value === 'string') {
+    if (value.length <= 900) return value;
+    return `${value.slice(0, 650)}\n[...writer context compacted...]\n${value.slice(-200)}`;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, depth > 1 ? 10 : 24).map((item) => compactWriterValue(item, depth + 1));
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value)
+      .sort(([a], [b]) => {
+        const ai = WRITER_CONTEXT_PRIORITY.indexOf(a);
+        const bi = WRITER_CONTEXT_PRIORITY.indexOf(b);
+        return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+      })
+      .slice(0, depth > 1 ? 32 : 80);
+    return Object.fromEntries(entries.map(([key, item]) => [key, compactWriterValue(item, depth + 1)]));
+  }
+  return value;
+}
+
+function compactWriterJson(value, maxChars = WRITER_CONTEXT_MAX_CHARS) {
+  let serialized;
+  try { serialized = JSON.stringify(compactWriterValue(value)); }
+  catch (_) { return '{}'; }
+  if (serialized.length <= maxChars) return serialized;
+  // A valid JSON object is preferable to a raw string slice. Keep fields in
+  // priority order until the bounded writer context is full.
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const out = {};
+  for (const key of [...WRITER_CONTEXT_PRIORITY, ...Object.keys(source)]) {
+    if (Object.prototype.hasOwnProperty.call(out, key) || source[key] === undefined) continue;
+    const candidate = compactWriterValue(source[key]);
+    const next = JSON.stringify({ ...out, [key]: candidate });
+    if (next.length <= maxChars) out[key] = candidate;
+  }
+  return JSON.stringify(out);
+}
+
+function compactWriterText(value, maxChars = 6000) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  const head = Math.max(1200, Math.floor(maxChars * 0.72));
+  return `${text.slice(0, head)}\n[...writer input compacted...]\n${text.slice(-Math.max(500, maxChars - head))}`;
+}
 const { checkAntiWater }    = require('./stage5');
 const { stripExpertBlockquotes } = require('../../utils/htmlSanitize');
 const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
@@ -202,9 +257,12 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
   const totalTarget   = Math.floor((minChars + maxChars) / 2);
   const structureLimits = getStructureLimits(maxChars);
 
-  // Строим контекст для шаблонов
-  const s3stage1Json = JSON.stringify(stage1Result);
-  const s3stage2Json = JSON.stringify(stage2Raw || {});
+  // Строим bounded context для шаблонов. Полный Stage 1/2 JSON уже
+  // сохранён в task results; writer получает только приоритетные поля, иначе
+  // один и тот же огромный объект повторно съедает бюджет каждого H2.
+  const s3stage1Json = compactWriterJson(stage1Result);
+  const s3stage2Json = compactWriterJson(stage2Raw || {}, 9000);
+  log(`Stage 3 writer context: Stage1 ${s3stage1Json.length} chars, Stage2 ${s3stage2Json.length} chars`, 'info');
 
   // Сжатые сигналы из Stage 0
   const stage0Signals   = stage0Result ? JSON.stringify({
@@ -251,12 +309,12 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
     // Подставляем все плейсхолдеры Stage 3
     const s3prompt = SYSTEM_PROMPTS.stage3
       .replace('{{BUSINESS_TYPE}}',      () => task.input_business_type || 'услуги')
-      .replace('{{NICHE_FEATURES}}',     () => task.input_niche_features || 'Нет данных')
+      .replace('{{NICHE_FEATURES}}',     () => compactWriterText(task.input_niche_features || 'Нет данных'))
       .replace('{{PAGE_H1}}',            () => targetService)
       .replace('{{TARGET_SERVICE}}',     () => targetService)
       .replace('{{MAIN_QUERY}}',         () => targetService)
       .replace('{{REGION}}',             () => region)
-      .replace('{{AUDIENCE}}',           () => task.input_target_audience || 'Широкая аудитория')
+      .replace('{{AUDIENCE}}',           () => compactWriterText(task.input_target_audience || 'Широкая аудитория'))
       .replace(/\{\{BRAND_NAME\}\}/g,    () => (task.input_brand_name || '').trim() || 'Нет данных')
       .replace('{{AUDIENCE_PERSONAS}}',  () => (task.__audiencePersonasText  || 'Нет данных').slice(0, 4000))
       .replace('{{NICHE_DEEP_DIVE}}',    () => (task.__nicheDeepDiveText     || 'Нет данных').slice(0, 4000))
@@ -265,7 +323,7 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       .replace('{{CURRENT_SECTION_JSON}}',() => JSON.stringify(block))
       .replace('{{STAGE1_JSON}}',        () => s3stage1Json)
       .replace('{{STAGE2_JSON}}',        () => s3stage2Json)
-      .replace('{{BRAND_FACTS}}',        () => brandFacts)
+      .replace('{{BRAND_FACTS}}',        () => compactWriterText(brandFacts, 5000))
       .replace('{{KNOWLEDGE_BASE}}',     () => stage0Signals)
       .replace('{{COMPETITOR_SIGNALS}}', () => competitorsData)
       .replace('{{SERVICE_NOTES}}',      () => 'Нет')

@@ -377,17 +377,31 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
 
   while (extractedTaxonomy.length < 4 && s2Attempts < 3) {
     s2Attempts++;
+    let attemptPrompt = stage2Prompt;
     if (s2Attempts > 1) {
-      stage2Prompt += `\n\n[ПОВТОРНЫЙ ЗАПРОС] Предыдущий ответ содержал ${extractedTaxonomy.length} блоков. ` +
-        `Ты ОБЯЗАН создать МИНИМУМ 5-7 независимых H2. ` +
-        `Включи: offer, process, pricing, trust, objection, faq. Верни JSON строго по схеме.`;
+      const retryHint = `\n\n[ПОВТОРНЫЙ ЗАПРОС] Предыдущий ответ содержал ${extractedTaxonomy.length} блоков. ` +
+        `Создай минимум 5-7 независимых H2: offer, process, pricing, trust, objection, faq. ` +
+        `Верни JSON строго по исходной схеме.`;
+      attemptPrompt = `${stage2Prompt}${retryHint}`;
+      if (attemptPrompt.length > STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT && promptTier < 3) {
+        promptTier++;
+        stage2Prompt = buildTaxonomyPrompt(promptTier);
+        attemptPrompt = `${stage2Prompt}${retryHint}`;
+        log(`Stage 2C Taxonomy: retry prompt compacted to tier=${promptTier} (${attemptPrompt.length} chars)`, 'warn');
+      }
+      if (attemptPrompt.length > STAGE2_TAXONOMY_PROMPT_HARD_LIMIT) {
+        const head = Math.floor(STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT * 0.72);
+        const tail = STAGE2_TAXONOMY_PROMPT_SOFT_LIMIT - head;
+        attemptPrompt = `${attemptPrompt.slice(0, head)}\n[RETRY CONTEXT COMPACTED]\n${attemptPrompt.slice(-tail)}`;
+        log(`Stage 2C Taxonomy: retry prompt bounded to ${attemptPrompt.length} chars`, 'warn');
+      }
     }
-    log(`Stage 2 Taxonomy попытка ${s2Attempts}/3...`, 'info');
+    log(`Stage 2 Taxonomy попытка ${s2Attempts}/3 — prompt ${attemptPrompt.length} chars...`, 'info');
 
     stage2Raw = await callLLM(
       'deepseek',
       '',
-      stage2Prompt,
+      attemptPrompt,
       { retries: 2, taskId, stageName: 'stage2', callLabel: `2C Taxonomy attempt ${s2Attempts}`, log, onTokens }
     ).catch(e => {
       log(`Stage 2C Taxonomy ОШИБКА: ${e.message}`, 'error');

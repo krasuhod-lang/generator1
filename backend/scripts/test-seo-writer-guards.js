@@ -137,7 +137,8 @@ check('production paths contain budget guard wiring', () => {
     const source = fs.readFileSync(path.join(repoRoot, relative), 'utf8');
     if (relative.endsWith('stage4.js')) {
       assert(source.includes('responseFormat: { type: \'json_object\' }'));
-      assert(source.includes('retryOnTruncation: false'));
+      assert(source.includes('retryOnTruncation: true'));
+      assert(source.includes('HTML_CONTENT_TRUNCATED_FOR_AUDIT'));
     } else if (!relative.endsWith('orchestrator.js')) {
       assert(source.includes('skipOnBudget'), `${relative} missing guard`);
     }

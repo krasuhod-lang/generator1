@@ -11,6 +11,29 @@ const db                       = require('../../config/db');
  * Определяет, является ли URL собственным сайтом задачи.
  * Простая эвристика: домен совпадает с targetPageUrl.
  */
+const STAGE0_SERP_MAX_COMPETITORS = 8;
+const STAGE0_SERP_PAGE_CHARS = 8000;
+const STAGE0_NICHE_PAGE_CHARS = 5000;
+const STAGE0_RESEARCH_PAGE_CHARS = 7000;
+const STAGE0_GIST_MAX_PAGES = 8;
+const STAGE0_GIST_PAGE_CHARS = 6000;
+
+function compactEvidenceText(value, maxChars) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  const head = Math.max(1000, Math.floor(maxChars * 0.72));
+  const tail = Math.max(500, maxChars - head);
+  return `${text.slice(0, head)}\n[...evidence excerpt compacted...]\n${text.slice(-tail)}`;
+}
+
+function formatCompetitorEvidence(items, pageChars, maxItems = STAGE0_SERP_MAX_COMPETITORS) {
+  return (Array.isArray(items) ? items : [])
+    .filter((item) => item && item.content)
+    .slice(0, maxItems)
+    .map((item) => `URL: ${item.url || ''}\n${compactEvidenceText(item.content, pageChars)}`)
+    .join('\n\n---\n\n');
+}
+
 function isOwnSite(url, targetPageUrl) {
   if (!targetPageUrl) return false;
   try {
@@ -134,7 +157,7 @@ BUSINESS GOAL: ${task.input_business_goal || '[не указано]'}
 MONETIZATION: ${task.input_monetization || '[не указано]'}
 PROJECT LIMITS: ${task.input_project_limits || '[не указано]'}
 PAGE PRIORITIES: ${task.input_page_priorities || '[не указано]'}
-NICHE FEATURES: ${task.input_niche_features || '[не указано]'}${onlyCompetitors.map(c => `URL: ${c.url}\n${c.content.substring(0, 12000)}`).join('\n\n---\n\n')}
+NICHE FEATURES: ${task.input_niche_features || '[не указано]'}${formatCompetitorEvidence(onlyCompetitors, STAGE0_SERP_PAGE_CHARS)}
 ${ownSiteContent ? `
 ===== OUR SITE (ANALYZE WEAKNESSES vs COMPETITORS) =====
 URL: ${ownSiteContent.url}
@@ -167,7 +190,7 @@ MONETIZATION: ${task.input_monetization || '[не указано]'}
 PROJECT LIMITS: ${task.input_project_limits || '[не указано]'}
 PAGE PRIORITIES: ${task.input_page_priorities || '[не указано]'}
 NICHE FEATURES: ${task.input_niche_features || '[не указано]'}
-COMPETITOR CONTENT SUMMARY: ${onlyCompetitors.map(c => c.content.substring(0, 3000)).join(' ')}
+COMPETITOR CONTENT SUMMARY: ${formatCompetitorEvidence(onlyCompetitors, STAGE0_NICHE_PAGE_CHARS)}
 ${ownSiteContent ? `OUR SITE CURRENT STATE: ${ownSiteContent.content.substring(0, 2000)}\n` : ''}
 
 OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_layers (array), topic_clusters (array), competitor_gaps (array), strategic_priorities (array). NO markdown.`;
@@ -179,11 +202,17 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
   // из переданного competitor/SERP контекста. Ни один доступный adapter не
   // является веб-поиском, поэтому unsupported fresh facts отбрасываются.
   const { runGistGapFinder } = require('../gist/gistClient');
-  const scrapedTexts = onlyCompetitors.map(c => c.content).filter(Boolean);
+  // GIST needs representative evidence, not the full cleaned HTML dump. Keep
+  // all selected domains while bounding each body for the optional service.
+  const gistEvidence = onlyCompetitors
+    .filter((c) => c && c.content)
+    .slice(0, STAGE0_GIST_MAX_PAGES)
+    .map((c) => `URL: ${c.url || ''}\n${compactEvidenceText(c.content, STAGE0_GIST_PAGE_CHARS)}`);
+  log(`Stage 0 evidence budget: SERP ${formatCompetitorEvidence(onlyCompetitors, STAGE0_SERP_PAGE_CHARS).length} chars; GIST ${gistEvidence.length} pages/${gistEvidence.join('').length} chars`, 'info');
 
   const researchContext = `Тема: ${task.input_target_service}. Регион: ${task.input_region || 'Россия'}.\n`
     + 'SOURCE EVIDENCE — используй только эти материалы; без подтверждения верни пустой массив:\n'
-    + onlyCompetitors.map(c => `URL: ${c.url || ''}\n${String(c.content || '').substring(0, 10000)}`).join('\n\n---\n\n');
+    + formatCompetitorEvidence(onlyCompetitors, STAGE0_RESEARCH_PAGE_CHARS);
 
   const [serpRealityResult, nicheLandscapeResult, gistSettled, researchResult] = await Promise.all([
     callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
@@ -208,7 +237,7 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
 
     runGistGapFinder({
       keyword: task.input_target_service,
-      competitors_text: scrapedTexts,
+      competitors_text: gistEvidence,
       page_type: 'seo',
       target_audience: task.input_target_audience || '',
     }).then(v => ({ status: 'fulfilled', value: v }))
@@ -242,6 +271,9 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
   const gistTop10Claims = gistSettled.status === 'fulfilled'
     ? gistSettled.value.top10_claims
     : [];
+  if (gistSettled.status === 'fulfilled' && gistSettled.value.degraded) {
+    log(`Stage 0 GIST: optional режим degraded — ${gistSettled.value.errors?.map(e => e.stage).join(', ') || 'LLM unavailable'}; используем Node evidence`, 'warn');
+  }
   if (informationDelta.length) {
     log(`Stage 0 GIST: информационная дельта ${informationDelta.length} тезисов, шум конкурентов ${gistTop10Claims.length} claims`, 'success');
   }

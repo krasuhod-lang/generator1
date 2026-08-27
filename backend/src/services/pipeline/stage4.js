@@ -77,8 +77,13 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
   const nGrams        = task.input_ngrams        || '[]';
   const minChars      = task.input_min_chars     || '1500';
 
+  // Keep the audit prompt bounded: preserve the beginning and ending of the
+  // block while leaving room for a complete JSON quality response.
+  const boundedHtml = String(htmlContent || '').length > 18000
+    ? `${String(htmlContent || '').slice(0, 15000)}\n<!-- [HTML_CONTENT_TRUNCATED_FOR_AUDIT] -->\n${String(htmlContent || '').slice(-3000)}`
+    : String(htmlContent || '');
   const stage4Prompt = (SYSTEM_PROMPTS.stage4 + EEAT_TRUST_ADDENDUM)
-    .replace('{{HTML_CONTENT}}',      () => htmlContent)
+    .replace('{{HTML_CONTENT}}',      () => boundedHtml)
     .replace('{{TARGET_SERVICE}}',    () => targetService)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(lsiMust))
     .replace(/\{\{BRAND_NAME\}\}/g,   () => (task.input_brand_name || '').trim() || 'Нет данных')
@@ -93,13 +98,16 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
     '',
     stage4Prompt,
     {
-      retries: 1,
-      retryOnTruncation: false,
+      // A truncated audit otherwise becomes audit_unavailable and forces PQ=0.
+      // One bounded truncation retry is cheaper than losing the quality signal
+      // and launching uncontrolled downstream refinements.
+      retries: 2,
+      retryOnTruncation: true,
       taskId,
       stageName: 'stage4',
       callLabel: `4 E-E-A-T Block ${blockIndex + 1}`,
       temperature: 0.2,
-      maxTokens: 12000,
+      maxTokens: 16000,
       responseFormat: { type: 'json_object' },
       allowPartialJson: true,
       log,
@@ -133,8 +141,11 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
 async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
   const { log, taskId, onTokens } = ctx;
 
+  const boundedHtml = String(htmlContent || '').length > 18000
+    ? `${String(htmlContent || '').slice(0, 15000)}\n<!-- [HTML_CONTENT_TRUNCATED_FOR_AUDIT] -->\n${String(htmlContent || '').slice(-3000)}`
+    : String(htmlContent || '');
   const reAuditPrompt = SYSTEM_PROMPTS.stage4
-    .replace('{{HTML_CONTENT}}',      () => htmlContent)
+    .replace('{{HTML_CONTENT}}',      () => boundedHtml)
     .replace('{{TARGET_SERVICE}}',    () => task.input_target_service)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(lsiMust))
     .replace(/\{\{BRAND_NAME\}\}/g,   () => (task.input_brand_name || '').trim() || 'Нет данных')
@@ -147,13 +158,13 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
     '',
     reAuditPrompt,
     {
-      retries: 1,
-      retryOnTruncation: false,
+      retries: 2,
+      retryOnTruncation: true,
       taskId,
       stageName: 'stage4',
       callLabel: `4 Re-audit Block ${blockIndex + 1}`,
       temperature: 0.2,
-      maxTokens: 12000,
+      maxTokens: 16000,
       responseFormat: { type: 'json_object' },
       allowPartialJson: true,
       log,

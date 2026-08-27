@@ -54,7 +54,8 @@ async function run() {
   assert(stage4Source.includes('allowPartialJson: true'), 'Stage 4 must salvage score fields from partial JSON');
   const stage7Source = fs.readFileSync(path.join(repoRoot, 'src/services/pipeline/stage7.js'), 'utf8');
   assert(stage7Source.includes('responseFormat: { type: \'json_object\' }'), 'Stage 7 must request JSON mode');
-  assert(stage7Source.includes('retryOnTruncation: false'), 'Stage 7 must not double-call on truncation');
+  assert(stage7Source.includes('retryOnTruncation: true'), 'Stage 7 must recover truncated JSON');
+  assert(stage7Source.includes('FINAL_HTML_TRUNCATED_FOR_AUDIT'), 'Stage 7 must bound audit input');
   assert(stage7Source.includes('allowPartialJson: true'), 'Stage 7 must salvage partial score fields');
 
   const resultPageSource = fs.readFileSync(path.join(repoRoot, '../frontend/src/views/ResultPage.vue'), 'utf8');
