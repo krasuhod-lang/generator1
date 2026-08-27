@@ -36,15 +36,24 @@ function compactProjectSnapshot(ctx) {
 
   // Постепенное сжатие при переполнении.
   const steps = [
-    (s) => { if (s.history?.published_topics) s.history.published_topics = s.history.published_topics.slice(0, 100); },
+    (s) => {
+      if (s.history?.content_history) s.history.content_history = s.history.content_history.slice(0, 80);
+      if (s.history?.published_topics) s.history.published_topics = s.history.published_topics.slice(0, 100);
+    },
     (s) => { if (s.signals?.cannibalization) s.signals.cannibalization = s.signals.cannibalization.slice(0, 15); },
     (s) => { if (s.market?.competitors) s.market.competitors = s.market.competitors.slice(0, 3); },
     (s) => { if (s.brand?.facts) s.brand.facts = s.brand.facts.slice(0, 8).map((f) => String(f).slice(0, 200)); },
-    (s) => { if (s.history?.published_topics) s.history.published_topics = s.history.published_topics.slice(0, 50); },
+    (s) => {
+      if (s.history?.content_history) s.history.content_history = s.history.content_history.slice(0, 30);
+      if (s.history?.published_topics) s.history.published_topics = s.history.published_topics.slice(0, 50);
+    },
     (s) => { if (s.signals?.striking_distance) s.signals.striking_distance = []; },
     (s) => { if (s.history?.recent_meta_titles) s.history.recent_meta_titles = []; },
     (s) => { if (s.signals?.cannibalization) s.signals.cannibalization = s.signals.cannibalization.slice(0, 5); },
-    (s) => { if (s.history?.published_topics) s.history.published_topics = s.history.published_topics.slice(0, 20); },
+    (s) => {
+      if (s.history?.content_history) s.history.content_history = [];
+      if (s.history?.published_topics) s.history.published_topics = s.history.published_topics.slice(0, 20);
+    },
   ];
   for (const step of steps) {
     if (bytes <= MAX_SNAPSHOT_BYTES) break;
@@ -123,7 +132,18 @@ function _compact(ctx) {
       published_topics: _arr(history.published_topics, 150).map((t) => ({
         title: _str(t.topic_title_canon || t.title || t, 200),
         intent_facet: t.intent_facet || null,
+        source_type: t.source_type || null,
+        created_at: t.created_at || null,
       })),
+      content_history: _arr(history.content_history, 150).map((item) => ({
+        title: _str(item.title || item.topic_title_canon || item, 200),
+        h1: _str(item.h1, 200),
+        source_type: item.source_type || null,
+        intent_facet: item.intent_facet || null,
+        created_at: item.created_at || null,
+      })),
+      content_history_sources: _arr(history.content_history_sources, 12).map((s) => _str(s, 80)),
+      content_history_degraded: Boolean(history.content_history_degraded),
       recent_meta_titles: _arr(history.recent_meta_titles, 30).map((m) => _str(m, 200)),
     },
     last_analysis_at: ctx.last_analysis_at || null,

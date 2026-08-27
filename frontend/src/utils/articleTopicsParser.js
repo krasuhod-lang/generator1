@@ -564,6 +564,10 @@ const FORMAT_OK = new Set(
   ['how-to', 'listicle', 'guide', 'comparison', 'case', 'faq'],
 );
 const CONFIDENCE_OK = new Set(['low', 'medium', 'high']);
+const SEARCH_VOLUME_LEVEL_OK = new Set(['low', 'mid', 'high', 'unknown']);
+const DEMAND_SIGNAL_TYPE_OK = new Set(['observed', 'modeled', 'seasonal', 'editorial', 'unknown']);
+const TRAFFIC_ROUTE_OK = new Set(['organic_click', 'ai_citation', 'mixed', 'conversion']);
+const ORIGINALITY_GATE_OK = new Set(['pass', 'needs_first_party_evidence', 'fail']);
 
 // Регексп бескостыльно ловит ## заголовок (с возможным «4.» / «4) » префиксом)
 // и проверяет, содержит ли остаток одно из ключевых слов раздела.
@@ -663,6 +667,22 @@ function _parseTopicCard(sub) {
     difficulty:              _intRange(get('Сложность'), 1, 5),
     uniqueness_angle:        get('Уникальный угол (whitespace)') || get('Уникальный угол') || get('Whitespace') || '',
     why_now:                 get('Why now') || '',
+    geo_potential:            _enumOrNull(get('GEO-потенциал') || get('GEO potential'), new Set(['low', 'medium', 'high'])),
+    ai_answer_trigger:        get('AI-answer trigger') || get('AI answer trigger') || '',
+    intent_user_questions:    _csvList(get('Вопрос пользователя') || get('Intent user questions')),
+    intent_decision_stage:    _enumOrNull(get('Стадия решения') || get('Intent decision stage'), new Set(['tofu', 'mofu', 'bofu'])),
+    intent_serp_features:     _csvList(get('SERP-фичи') || get('Intent SERP features')),
+    expected_search_volume:   _intRange(get('Ожидаемый объём поиска') || get('Expected search volume'), 0, 100000000)
+      ?? _enumOrNull(get('Ожидаемый объём поиска') || get('Expected search volume'), SEARCH_VOLUME_LEVEL_OK),
+    expected_search_volume_level: _enumOrNull(get('Ожидаемый объём поиска') || get('Expected search volume'), SEARCH_VOLUME_LEVEL_OK),
+    demand_signal_type:       _enumOrNull(get('Тип сигнала спроса') || get('Demand signal type'), DEMAND_SIGNAL_TYPE_OK),
+    demand_confidence:        _enumOrNull(get('Уверенность прогноза') || get('Demand confidence'), CONFIDENCE_OK),
+    forecast_horizon_months:   _intRange(get('Горизонт прогноза') || get('Forecast horizon months'), 0, 60),
+    traffic_route:             _enumOrNull(get('Маршрут трафика') || get('Traffic route'), TRAFFIC_ROUTE_OK),
+    demand_evidence:           _csvList(get('Evidence спроса') || get('Demand evidence')),
+    first_party_evidence:      get('First-party evidence') || '',
+    evidence_gap:              get('Evidence gap') || '',
+    originality_gate:          _enumOrNull(get('Originality gate'), ORIGINALITY_GATE_OK),
   };
 }
 
@@ -841,8 +861,13 @@ export function topicsToCsv(topics) {
     // PR-3 — расширенные интенты
     'intent_user_questions', 'intent_pains', 'intent_jobs_to_be_done',
     'intent_decision_stage', 'intent_serp_features',
-    'expected_search_volume', 'lsi_seed',
+    'expected_search_volume', 'expected_search_volume_level', 'lsi_seed',
     'target_audience_segment_detail', 'content_angle', 'cta_suggestion',
+    'demand_signal_type', 'demand_confidence', 'forecast_horizon_months',
+    'traffic_route', 'demand_evidence', 'source_url', 'published_at', 'evidence_count',
+    'likely_answer_surface', 'citation_worthy_claims', 'freshness_review',
+    'first_party_evidence', 'evidence_gap', 'originality_gate',
+    'traffic_potential_score', 'traffic_potential_band',
     // PR-2 — дедуп
     'duplicate_of_task', 'duplicate_of_title',
   ];

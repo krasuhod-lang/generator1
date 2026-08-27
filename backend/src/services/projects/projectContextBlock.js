@@ -84,10 +84,24 @@ function buildProjectContextBlock(ctx, opts = {}) {
   if (gsc.top_intent) intentSummaryParts.push(`GSC top_intent=${gsc.top_intent} (комм. доля ${_pct(gsc.commercial_share)}, бренд ${_pct(gsc.brand_share)})`);
   if (ydx.top_intent) intentSummaryParts.push(`Яндекс top_intent=${ydx.top_intent} (комм. доля ${_pct(ydx.commercial_share)})`);
   const intentSummary = intentSummaryParts.length ? intentSummaryParts.join('; ') : '(нет данных GSC/Яндекс)';
+  const firstPartyQueries = [];
+  for (const item of (Array.isArray(signals.striking_distance) ? signals.striking_distance : []).slice(0, 12)) {
+    const query = item && typeof item === 'object' ? item.query : item;
+    if (!query) continue;
+    const position = item && typeof item === 'object' && (item.position || item.best_position)
+      ? `, position=${item.position || item.best_position}` : '';
+    firstPartyQueries.push(`«${String(query).slice(0, 120)}»${position}`);
+  }
+  const firstPartyQueryText = firstPartyQueries.length
+    ? `GSC/Яндекс: ${firstPartyQueries.join('; ')}`
+    : '(нет query-level first-party signals)';
 
   // Published topics — сжатие под бюджет.
   const publishedRendered = _renderPublishedTopics(history.published_topics, PUBLISHED_BUDGET_CHARS);
   const cannRendered      = _renderCannibalization(signals.cannibalization, CANN_BUDGET_CHARS);
+  const historyCoverage = history.content_history_degraded
+    ? 'degraded: часть legacy-источников недоступна; не считать список полным'
+    : `complete for available sources: ${(history.content_history_sources || []).join(', ') || 'нет завершённых материалов'}`;
 
   const filled = _interpolate(_loadPartial(), {
     BRAND_NAME:          brand.name || project.name || '(не указан)',
@@ -105,7 +119,9 @@ function buildProjectContextBlock(ctx, opts = {}) {
     CONTENT_DISCLAIMERS: disclaimers.length ? disclaimers.join(' | ') : '(нет)',
     COMPETITORS:         competitors.length ? competitors.join(', ') : '(не указаны)',
     INTENT_SUMMARY:      intentSummary,
+    FIRST_PARTY_QUERY_SIGNALS: firstPartyQueryText,
     PUBLISHED_TOPICS_COMPRESSED: publishedRendered,
+    CONTENT_HISTORY_COVERAGE:    historyCoverage,
     CANNIBALIZATION_LIST:        cannRendered,
   });
 
@@ -130,6 +146,7 @@ function _renderPublishedTopics(topics, budget) {
   const enriched = topics.map((t, idx) => ({
     title: String(t.topic_title_canon || t.title || t || '').slice(0, 180),
     intent: t.intent_facet || null,
+    source_type: t.source_type || null,
     ts: t.created_at ? new Date(t.created_at).getTime() : (Date.now() - idx * 1000),
   })).filter((t) => t.title);
 
@@ -155,7 +172,8 @@ function _renderPublishedTopics(topics, budget) {
   let used = 0;
   let dropped = 0;
   for (const t of ordered) {
-    const line = `- ${t.title}${t.intent ? ` (${t.intent})` : ''}`;
+    const source = t.source_type ? ` [${t.source_type}]` : '';
+    const line = `- ${t.title}${t.intent ? ` (${t.intent})` : ''}${source}`;
     if (used + line.length + 1 > budget) { dropped += 1; continue; }
     lines.push(line);
     used += line.length + 1;

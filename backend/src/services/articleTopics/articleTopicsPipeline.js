@@ -35,6 +35,8 @@ const { resolveBrandKey, autoLinkSimilar } = require('./brandAliases');
 const { filterCannibalizingCandidates } = require('./semanticExclusionFilter');
 const { runTopicIdeasResearch, hasTopicResearch, renderTopicResearchBlock } = require('./topicIdeasResearch');
 const { buildProjectContextBlock } = require('../projects/projectContextBlock');
+const { loadProjectContentHistory } = require('./projectContentHistory');
+const { scoreTopicIdeas } = require('./topicDemandScoring');
 const { getQualityFlags } = require('../qualityLayers/featureFlags');
 const { runArticleTopicsEvaluator } = require('./articleTopicsEvaluator');
 const { finalizeByTask } = require('../aegis/backlogHooks');
@@ -265,20 +267,57 @@ async function processArticleTopicTask(taskId) {
       // подтянуть свежий контекст. Слепок предпочтительнее — он зафиксирован
       // на момент INSERT (детерминированный prompt).
       let projectContextBlock = '';
+      let scoringContext = snap && snap.project ? snap : null;
       if (snap && snap.project) {
         projectContextBlock = buildProjectContextBlock(snap, { maxBlockChars: 6000 });
       } else if (task.project_id && task.user_id) {
         try {
           const { buildProjectContext } = require('../projects/contextResolver');
           const ctx = await buildProjectContext(task.project_id, task.user_id);
-          if (ctx) projectContextBlock = buildProjectContextBlock(ctx, { maxBlockChars: 6000 });
+          if (ctx) {
+            scoringContext = ctx;
+            projectContextBlock = buildProjectContextBlock(ctx, { maxBlockChars: 6000 });
+          }
         } catch (e) {
           console.warn(`[articleTopics] late buildProjectContext failed: ${e.message}`);
         }
       }
 
+      // Project-aware history is read at generation time as well as captured
+      // in the snapshot. This closes the race where a new article was written
+      // after the topic task was created.
+      let projectHistory = [];
+      let projectHistoryMeta = { sources: [], degraded: false };
+      if (task.project_id && task.user_id) {
+        try {
+          const loaded = await loadProjectContentHistory({ projectId: task.project_id, userId: task.user_id, limit: 600 });
+          projectHistory = loaded.items || [];
+          projectHistoryMeta = loaded;
+        } catch (historyErr) {
+          console.warn(`[articleTopics] project content history failed for ${taskId}: ${historyErr.message}`);
+        }
+      }
+      const snapshotHistory = snap && snap.history && Array.isArray(snap.history.content_history)
+        ? snap.history.content_history : [];
+      const projectHistoryForExclusion = [...snapshotHistory, ...projectHistory];
+      const historySeen = new Set();
+      const mergedProjectHistory = projectHistoryForExclusion.filter((item) => {
+        const raw = item && (item.title || item.topic_title_canon || item.raw);
+        const canon = canonTitle(raw);
+        if (!canon || historySeen.has(canon)) return false;
+        historySeen.add(canon);
+        return true;
+      });
+
       const excludedTopicsList = _renderExclusionList(
-        [...userTopics, ...cannFromSnap.map((c) => ({ raw: c.query }))],
+        [
+          ...userTopics,
+          ...mergedProjectHistory.map((item) => ({
+            raw: item.title || item.topic_title_canon,
+            kind: 'topic',
+          })),
+          ...cannFromSnap.map((c) => ({ raw: c.query })),
+        ],
         '(нет — генерируй свободно)'
       );
       const excludedClustersList = _renderExclusionList(userClusters, '(нет)');
@@ -333,6 +372,9 @@ async function processArticleTopicTask(taskId) {
         cannibalization: cannFromSnap.length,
         project_context_block_chars: projectContextBlock.length,
       });
+      exclusionSet.history = mergedProjectHistory;
+      task._projectHistoryMeta = projectHistoryMeta;
+      task._projectContextForScoring = scoringContext;
       task._exclusionSet = exclusionSet; // временно — для пост-обработки
     } else {
       // Main-режим: тоже подмешиваем контекст проекта, если есть слепок.
@@ -524,16 +566,24 @@ async function processArticleTopicTask(taskId) {
       try {
         // Обогатим history исключения через brandTopicHistory (если ещё не).
         const ex = task._exclusionSet;
-        if (brandKey && (!ex.history || !ex.history.length)) {
+        if (brandKey) {
           try {
             const hist = await loadHistory(db, { userId: task.user_id, brandKey, lookbackDays: 365, limit: 500 });
-            ex.history = hist || [];
+            const merged = [...(ex.history || []), ...(hist || [])];
+            const seen = new Set();
+            ex.history = merged.filter((item) => {
+              const canon = item && (item.topic_title_canon || item.title || item.raw)
+                ? canonTitle(item.topic_title_canon || item.title || item.raw) : '';
+              if (!canon || seen.has(canon)) return false;
+              seen.add(canon);
+              return true;
+            });
           } catch (_) { /* graceful */ }
         }
         exclusionResult = await filterCannibalizingCandidates(
           topicIdeasJson.topics,
           ex,
-          { /* embeddingFn / llmJudgeFn — пока не инжектим, fallback */ },
+          { thresholds: { jaccardHardThreshold: 0.55 } },
         );
         if (exclusionResult.summary.total_dropped > 0) {
           topicIdeasJson = {
@@ -550,6 +600,25 @@ async function processArticleTopicTask(taskId) {
       } catch (e) {
         console.warn(`[articleTopics] semantic exclusion failed for ${taskId}: ${e.message}`);
       }
+    }
+
+    // Traffic-first deterministic scoring runs after exclusion so only
+    // publishable candidates are ranked for traffic potential.
+    let topicScoringSummary = null;
+    if (task.mode === 'topic_ideas' && topicIdeasJson && Array.isArray(topicIdeasJson.topics)) {
+      const scored = scoreTopicIdeas(topicIdeasJson.topics, task._projectContextForScoring || task.project_context_snapshot || {});
+      topicIdeasJson = {
+        ...topicIdeasJson,
+        topics: scored.topics,
+        topic_count_after_exclusions: scored.topics.length,
+        scoring_version: scored.summary?.scoring_version || 'traffic-demand-v1',
+        traffic_summary: scored.summary,
+        exclusion_summary: {
+          brand_duplicates_dropped: topicsDroppedAsDuplicates,
+          semantic_cannibalization_dropped: exclusionResult?.summary?.total_dropped || 0,
+        },
+      };
+      topicScoringSummary = scored.summary;
     }
 
     // Aegis cross-module hook: фиксируем стадию dedup в общую телеметрию.
@@ -588,6 +657,10 @@ async function processArticleTopicTask(taskId) {
       brand_alias_resolved: brandAliasInfo,
       brand_dedup:          brandDedupStats,
       topics_dropped_as_duplicates: topicsDroppedAsDuplicates,
+      project_content_history_count: task._exclusionSet?.history?.length || 0,
+      project_content_history_sources: task._projectHistoryMeta?.sources || [],
+      project_content_history_degraded: Boolean(task._projectHistoryMeta?.degraded || task.project_context_snapshot?.history?.content_history_degraded),
+      topic_scoring: topicScoringSummary,
       excluded_candidates_summary:  exclusionResult ? exclusionResult.summary : null,
       semantic_filter_degraded:     exclusionResult ? exclusionResult.degraded : null,
       generated_at:      new Date().toISOString(),
@@ -599,8 +672,11 @@ async function processArticleTopicTask(taskId) {
       user_topics:     task._exclusionSet.user_topics || [],
       user_clusters:   task._exclusionSet.user_clusters || [],
       history:         (task._exclusionSet.history || []).slice(0, 50).map((h) => ({
-        topic_title_canon: h.topic_title_canon || null,
-        intent_facet:      h.intent_facet || null,
+        topic_title_canon: h.topic_title_canon || h.canon || null,
+        title: h.title || null,
+        intent_facet: h.intent_facet || null,
+        source_type: h.source_type || null,
+        ref_id: h.ref_id || null,
       })),
       cannibalization: (task._exclusionSet.cannibalization || []).slice(0, 30),
       target_url_h1:   task._exclusionSet.target_url_h1 || null,

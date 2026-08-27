@@ -46,6 +46,12 @@ check('Содержит TOPIC_IDEAS_JSON sentinel', () => {
   assert.match(tmpl, /TOPIC_IDEAS_JSON_START/);
   assert.match(tmpl, /TOPIC_IDEAS_JSON_END/);
 });
+check('Содержит traffic-first forecast contract', () => {
+  assert.match(tmpl, /TRAFFIC-FIRST FORECAST CONTRACT/);
+  for (const field of ['demand_signal_type', 'demand_confidence', 'forecast_horizon_months', 'traffic_route', 'evidence_gap', 'originality_gate']) {
+    assert.match(tmpl, new RegExp(field), `missing ${field}`);
+  }
+});
 check('Содержит {{TOPIC_COUNT}} placeholder', () => {
   assert.match(tmpl, /\{\{TOPIC_COUNT\}\}/);
 });
@@ -68,6 +74,8 @@ check('После рендера НЕТ незаменённых {{...}} (для
     EXCLUDED_TOPICS_LIST:    '(нет — генерируй свободно)',
     EXCLUDED_CLUSTERS_LIST:  '(нет)',
     REALTIME_RESEARCH_BLOCK: '(real-time ресёрч недоступен)',
+    FIRST_PARTY_QUERY_SIGNALS: '(нет query-level first-party signals)',
+    CONTENT_HISTORY_COVERAGE: 'complete for available sources',
   });
   // Не должно остаться плейсхолдеров вообще.
   const leftover = rendered.match(/\{\{[A-Z_]+\}\}/g);
@@ -80,6 +88,8 @@ check('TOPIC_COUNT подставлен буквально (не "{{TOPIC_COUNT}
     NICHE: 'x', REGION: 'y', AUDIENCE: 'z',
     TARGET_URL: 'https://e.com', BRAND_HINT: '-',
     TOPIC_COUNT: '15',
+    FIRST_PARTY_QUERY_SIGNALS: '(нет)',
+    CONTENT_HISTORY_COVERAGE: 'complete',
   });
   // В JSON-блоке топика подставляется как число.
   assert.match(rendered, /"topic_count_requested":\s*15/);

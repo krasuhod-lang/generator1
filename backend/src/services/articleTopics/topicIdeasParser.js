@@ -51,6 +51,12 @@ const CONFIDENCE_OK = new Set(['low', 'medium', 'high']);
 const GEO_POTENTIAL_OK = new Set(['low', 'medium', 'high']);
 const DECISION_STAGE_OK = new Set(['TOFU', 'MOFU', 'BOFU']);
 const DUPLICATE_SOURCE_OK = new Set(['exact', 'fuzzy', 'llm']);
+const SEARCH_VOLUME_LEVEL_OK = new Set(['low', 'mid', 'high', 'unknown']);
+const DEMAND_SIGNAL_TYPE_OK = new Set(['observed', 'modeled', 'seasonal', 'editorial', 'unknown']);
+const TRAFFIC_ROUTE_OK = new Set(['organic_click', 'ai_citation', 'mixed', 'conversion']);
+const ORIGINALITY_GATE_OK = new Set(['pass', 'needs_first_party_evidence', 'fail']);
+const EVIDENCE_TYPE_OK = new Set(['first_party', 'primary', 'editorial', 'community', 'serp', 'seasonal', 'keyword_dataset']);
+const EVIDENCE_STATUS_OK = new Set(['verified', 'unverified', 'inferred']);
 
 function _str(v, max) {
   if (v == null) return '';
@@ -100,6 +106,26 @@ function _strOrArr(v, maxItems, maxLen) {
     return s ? [s] : null;
   }
   return null;
+}
+
+function _normDemandEvidence(v) {
+  if (!Array.isArray(v)) return null;
+  const out = v.map((item) => {
+    if (typeof item === 'string') return _str(item, LIM.mediumStr);
+    if (!item || typeof item !== 'object') return '';
+    const claim = _str(item.claim || item.fact || item.query || item.value, LIM.mediumStr);
+    const sourceUrl = _str(item.source_url || item.url || item.source, LIM.mediumStr);
+    if (!claim && !sourceUrl) return '';
+    return {
+      claim: claim || null,
+      source_url: sourceUrl || null,
+      published_at: _str(item.published_at || item.date || item.publishedAt, 40) || null,
+      evidence_type: _enum(item.evidence_type, EVIDENCE_TYPE_OK) || null,
+      evidence_status: _enum(item.evidence_status || item.status, EVIDENCE_STATUS_OK) || null,
+      confidence: _enum(item.confidence, CONFIDENCE_OK) || 'low',
+    };
+  }).filter(Boolean).slice(0, 8);
+  return out.length ? out : null;
 }
 
 function _intRange(v, min, max) {
@@ -206,6 +232,11 @@ function _normTopic(t) {
   const o = t && typeof t === 'object' ? t : {};
   const title = _str(o.title, LIM.shortStr);
   if (!title) return null;
+  const numericSearchVolume = _intRange(o.expected_search_volume, 0, 100000000);
+  const searchVolumeLevel = _enum(
+    o.expected_search_volume_level || o.search_volume_level || o.expected_search_volume,
+    SEARCH_VOLUME_LEVEL_OK,
+  );
   return {
     title,
     h1_variant:              _str(o.h1_variant, LIM.mediumStr),
@@ -234,10 +265,32 @@ function _normTopic(t) {
     intent_jobs_to_be_done:  _strOrArr(o.intent_jobs_to_be_done || o.jtbd, 12, LIM.mediumStr),
     intent_decision_stage:   _enum(o.intent_decision_stage || o.decision_stage, DECISION_STAGE_OK, false),
     intent_serp_features:    _strOrArr(o.intent_serp_features, 10, LIM.shortStr),
-    expected_search_volume:  _intRange(o.expected_search_volume, 0, 100000000),
+    // Backward-compatible: old outputs may contain a numeric estimate, while
+    // the current contract uses low|mid|high|unknown. Preserve both forms.
+    expected_search_volume:  numericSearchVolume != null ? numericSearchVolume : searchVolumeLevel,
+    expected_search_volume_level: searchVolumeLevel,
     target_audience_segment_detail: _str(o.target_audience_segment_detail, LIM.longStr),
     content_angle:           _str(o.content_angle, LIM.longStr),
     cta_suggestion:          _str(o.cta_suggestion, LIM.mediumStr),
+
+    // Traffic-oriented forecast contract. These remain hypotheses unless
+    // backed by first-party or external demand evidence.
+    demand_signal_type:     _enum(o.demand_signal_type, DEMAND_SIGNAL_TYPE_OK),
+    demand_confidence:      _enum(o.demand_confidence, CONFIDENCE_OK),
+    forecast_horizon_months: _intRange(o.forecast_horizon_months, 0, 60),
+    traffic_route:           _enum(o.traffic_route, TRAFFIC_ROUTE_OK),
+    demand_evidence:         _normDemandEvidence(o.demand_evidence),
+    source_url:               _str(o.source_url, LIM.mediumStr) || null,
+    published_at:             _str(o.published_at, 40) || null,
+    evidence_count:           _intRange(o.evidence_count, 0, 50),
+    likely_answer_surface:    _str(o.likely_answer_surface, LIM.shortStr) || null,
+    citation_worthy_claims:   _strOrArr(o.citation_worthy_claims, 8, LIM.mediumStr),
+    freshness_review:         _str(o.freshness_review, 80) || null,
+    first_party_evidence:    _str(o.first_party_evidence, LIM.longStr),
+    evidence_gap:            _str(o.evidence_gap, LIM.longStr),
+    first_party_evidence_required: typeof o.first_party_evidence_required === 'boolean'
+      ? o.first_party_evidence_required : null,
+    originality_gate:        _enum(o.originality_gate, ORIGINALITY_GATE_OK),
 
     // Passthrough для duplicate_of (заполняется topicDuplicateDetector
     // ПОСЛЕ парсинга; здесь оставляем как опциональное поле).
@@ -342,6 +395,12 @@ module.exports = {
     PRIMARY_INTENT_OK,
     FORMAT_OK,
     CONFIDENCE_OK,
+    SEARCH_VOLUME_LEVEL_OK,
+    DEMAND_SIGNAL_TYPE_OK,
+    TRAFFIC_ROUTE_OK,
+    ORIGINALITY_GATE_OK,
+    EVIDENCE_TYPE_OK,
+    EVIDENCE_STATUS_OK,
     LIM,
   },
 };

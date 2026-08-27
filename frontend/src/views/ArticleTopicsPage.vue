@@ -646,6 +646,23 @@ function createSeoArticleFromTopicIdea(topic) {
       prefill_decision_stage:   topic.intent_decision_stage || '',
       prefill_content_angle:    (topic.content_angle || '').slice(0, 500),
       prefill_cta_suggestion:   (topic.cta_suggestion || '').slice(0, 500),
+      prefill_evidence: (() => {
+        const items = Array.isArray(topic.demand_evidence) ? topic.demand_evidence : [];
+        return items.map((item) => {
+          if (item && typeof item === 'object') {
+            return [item.claim || item.fact || item.query, item.source_url || item.url, item.published_at || item.date]
+              .filter(Boolean).join(' — ');
+          }
+          return String(item || '');
+        }).filter(Boolean).join(' | ').slice(0, 1800);
+      })(),
+      prefill_forecast: [
+        topic.demand_signal_type ? `Сигнал: ${topic.demand_signal_type}` : '',
+        topic.demand_confidence ? `Уверенность: ${topic.demand_confidence}` : '',
+        topic.forecast_horizon_months ? `Горизонт: ${topic.forecast_horizon_months} мес.` : '',
+        topic.traffic_route ? `Маршрут: ${topic.traffic_route}` : '',
+        topic.evidence_gap ? `Пробел: ${topic.evidence_gap}` : '',
+      ].filter(Boolean).join('; ').slice(0, 1000),
     },
   });
 }
@@ -716,6 +733,42 @@ function intentBadge(intent) {
   if (i === 'transactional')  return 'bg-amber-900/40 text-amber-200 border border-amber-700';
   if (i === 'navigational')   return 'bg-violet-900/40 text-violet-200 border border-violet-700';
   return 'bg-gray-800/70 text-gray-300 border border-gray-700';
+}
+
+function demandConfidenceLabel(value) {
+  const v = String(value || '').toLowerCase();
+  if (v === 'high') return 'высокая';
+  if (v === 'medium') return 'средняя';
+  if (v === 'low') return 'низкая';
+  return 'не указана';
+}
+
+function demandSignalLabel(value) {
+  const v = String(value || '').toLowerCase();
+  if (v === 'observed') return 'наблюдаемый';
+  if (v === 'seasonal') return 'сезонный';
+  if (v === 'editorial') return 'редакционный';
+  if (v === 'modeled') return 'модельный';
+  return 'не подтверждён';
+}
+
+function trafficRouteLabel(value) {
+  const v = String(value || '').toLowerCase();
+  if (v === 'conversion') return 'конверсия';
+  if (v === 'ai_citation') return 'AI-цитирование';
+  if (v === 'mixed') return 'смешанный';
+  return 'органический клик';
+}
+
+function formatDemandEvidence(items) {
+  if (!Array.isArray(items)) return '';
+  return items.map((item) => {
+    if (item && typeof item === 'object') {
+      return [item.claim || item.fact || item.query, item.source_url || item.url, item.published_at || item.date]
+        .filter(Boolean).join(' — ');
+    }
+    return String(item || '');
+  }).filter(Boolean).join(' · ');
 }
 
 /**
@@ -1432,6 +1485,17 @@ const sortedTasks = computed(() =>
                   </h3>
                 </div>
 
+                <div v-if="parsedTopicIdeas.json.traffic_summary"
+                     class="rounded-lg bg-indigo-950/40 border border-indigo-800/70 px-3 py-2 text-xs text-indigo-100">
+                  <div class="font-semibold text-indigo-200">Traffic-first приоритизация</div>
+                  <div class="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-indigo-100/80">
+                    <span>Наблюдаемый сигнал: {{ parsedTopicIdeas.json.traffic_summary.measured_signal_topics || 0 }}</span>
+                    <span>Низкая уверенность: {{ parsedTopicIdeas.json.traffic_summary.low_confidence_topics || 0 }}</span>
+                    <span>Нужен first-party evidence: {{ parsedTopicIdeas.json.traffic_summary.originality_gate_topics || 0 }}</span>
+                    <span>Приоритет high: {{ parsedTopicIdeas.json.traffic_summary.traffic_bands?.high || 0 }}</span>
+                  </div>
+                </div>
+
                 <div v-for="(topic, ti) in parsedTopicIdeas.json.topics" :key="ti"
                      class="rounded-xl bg-gray-900/60 p-4 space-y-2 border-l-4 border-indigo-500">
                   <div class="flex items-start justify-between gap-3 flex-wrap">
@@ -1490,6 +1554,26 @@ const sortedTasks = computed(() =>
                               :title="`Сложность ${topic.difficulty}/5`">
                           ⚙ {{ topic.difficulty }}/5
                         </span>
+                        <span v-if="Number.isFinite(topic.traffic_potential_score)"
+                              class="px-2 py-0.5 rounded text-[10px] bg-cyan-900/40 text-cyan-200 border border-cyan-700"
+                              :title="`Потенциал трафика ${topic.traffic_potential_score}/100`">
+                          Трафик {{ topic.traffic_potential_score }}/100
+                        </span>
+                        <span v-if="topic.expected_search_volume || topic.expected_search_volume_level"
+                              class="px-2 py-0.5 rounded text-[10px] bg-blue-900/40 text-blue-200 border border-blue-700"
+                              title="Это оценка модели, а не гарантированный объём показов">
+                          Спрос: {{ topic.expected_search_volume_level || topic.expected_search_volume }}
+                        </span>
+                        <span v-if="topic.demand_confidence || topic.demand_signal_type"
+                              class="px-2 py-0.5 rounded text-[10px] bg-slate-800/80 text-slate-200 border border-slate-700"
+                              :title="`Сигнал: ${demandSignalLabel(topic.demand_signal_type)}`">
+                          Спрос: {{ demandConfidenceLabel(topic.demand_confidence) }}
+                        </span>
+                        <span v-if="Number.isFinite(topic.forecast_horizon_months) && topic.forecast_horizon_months > 0"
+                              class="px-2 py-0.5 rounded text-[10px] bg-violet-900/40 text-violet-200 border border-violet-700"
+                              :title="`Горизонт прогноза: ${topic.forecast_horizon_months} мес.`">
+                          {{ topic.forecast_horizon_months }} мес.
+                        </span>
                       </div>
                     </div>
                     <div class="flex flex-col gap-1.5 items-end">
@@ -1513,6 +1597,25 @@ const sortedTasks = computed(() =>
                   </div>
                   <div v-if="topic.why_now" class="text-xs text-gray-300">
                     <span class="text-gray-500">Why now:</span> {{ topic.why_now }}
+                  </div>
+                  <div v-if="topic.demand_evidence?.length"
+                       class="text-[11px] text-gray-400">
+                    <span class="text-gray-600">Evidence:</span> {{ formatDemandEvidence(topic.demand_evidence) }}
+                  </div>
+                  <div v-if="topic.traffic_route || topic.originality_gate || topic.evidence_gap"
+                       class="text-xs text-gray-300 space-y-1">
+                    <div v-if="topic.traffic_route">
+                      <span class="text-gray-500">Маршрут трафика:</span> {{ trafficRouteLabel(topic.traffic_route) }}
+                    </div>
+                    <div v-if="topic.originality_gate">
+                      <span class="text-gray-500">Оригинальность:</span>
+                      <span :class="topic.originality_gate === 'pass' ? 'text-emerald-300' : 'text-amber-300'">
+                        {{ topic.originality_gate === 'pass' ? 'готово' : 'нужен first-party evidence' }}
+                      </span>
+                    </div>
+                    <div v-if="topic.evidence_gap">
+                      <span class="text-gray-500">Что проверить:</span> {{ topic.evidence_gap }}
+                    </div>
                   </div>
                   <div v-if="topic.key_entities?.length" class="flex flex-wrap gap-1">
                     <span v-for="(e, i) in topic.key_entities" :key="i"

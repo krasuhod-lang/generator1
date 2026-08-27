@@ -132,7 +132,7 @@ function _clip(s, n) {
 function renderTopicResearchBlock(r, opts = {}) {
   const fallback = opts.fallback != null
     ? opts.fallback
-    : '(research evidence недоступен — опирайся на нишу, аудиторию и текущий task context)';
+    : '(real-time ресёрч недоступен — опирайся на нишу, аудиторию и текущий task context)';
   if (!hasTopicResearch(r)) return fallback;
 
   const out = [

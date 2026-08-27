@@ -31,15 +31,17 @@ const db = require('../../config/db');
  * с проектом и пустыми блоками.
  */
 const { deriveBrandTokens } = require('./commercialIntent');
+const { loadProjectContentHistory } = require('../articleTopics/projectContentHistory');
 
 async function buildProjectContext(projectId, userId) {
   const project = await _loadProject(projectId, userId);
   if (!project) return null;
 
-  const [pageSnapshot, lastAnalysis, publishedTopics] = await Promise.all([
+  const [pageSnapshot, lastAnalysis, publishedTopics, projectContentHistory] = await Promise.all([
     _loadLatestPageSnapshot(projectId).catch(() => null),
     _loadLatestAnalysis(projectId).catch(() => null),
     _loadPublishedTopics(project, userId).catch(() => []),
+    loadProjectContentHistory({ projectId, userId, limit: 600 }).catch(() => ({ items: [], sources: [], degraded: true })),
   ]);
 
   const brand = _buildBrand(project, pageSnapshot);
@@ -80,7 +82,22 @@ async function buildProjectContext(projectId, userId) {
       striking_distance: strikingDistance,
     },
     history: {
-      published_topics: publishedTopics,
+      // Keep the legacy brand-history shape, but merge project-scoped content
+      // so every consumer gets the same exclusion set without a schema break.
+      published_topics: [
+        ...publishedTopics,
+        ...(projectContentHistory.items || []).map((item) => ({
+          title: item.title,
+          topic_title_canon: item.canon,
+          intent_facet: item.intent_facet || null,
+          created_at: item.created_at || null,
+          source_type: item.source_type || null,
+          ref_id: item.ref_id || null,
+        })),
+      ],
+      content_history: projectContentHistory.items || [],
+      content_history_sources: projectContentHistory.sources || [],
+      content_history_degraded: Boolean(projectContentHistory.degraded),
       recent_meta_titles: [],
     },
     last_analysis_at: lastAnalysis?.completed_at || lastAnalysis?.created_at || null,
@@ -118,6 +135,10 @@ function computeContextVersion(ctx) {
     m: {
       competitors: ctx.market?.competitors || [],
       top_intent: ctx.market?.top_intent || null,
+    },
+    h: {
+      published_topics_count: Array.isArray(ctx.history?.published_topics) ? ctx.history.published_topics.length : 0,
+      content_history_count: Array.isArray(ctx.history?.content_history) ? ctx.history.content_history.length : 0,
     },
     la: ctx.last_analysis_at ? new Date(ctx.last_analysis_at).toISOString() : null,
   };
@@ -173,7 +194,7 @@ async function _loadLatestAnalysis(projectId) {
   const { rows } = await db.query(
     `SELECT id, completed_at, created_at, gsc_snapshot, ydx_snapshot
        FROM project_analyses
-      WHERE project_id = $1 AND status = 'completed'
+      WHERE project_id = $1 AND status::text = ANY(ARRAY['done', 'completed'])
       ORDER BY completed_at DESC NULLS LAST, created_at DESC
       LIMIT 1`,
     [projectId],

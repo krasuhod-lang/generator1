@@ -51,6 +51,46 @@ REAL-TIME РЕСЁРЧ ИНТЕНТОВ (веб-поиск)
 {{REALTIME_RESEARCH_BLOCK}}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRAFFIC-FIRST FORECAST CONTRACT (ОБЯЗАТЕЛЕН ДЛЯ КАЖДОЙ ТЕМЫ)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Работай по циклу Доктора Макса: Evidence → Hypothesis → Decision → Review.
+Разделяй наблюдаемый сигнал и прогноз модели. Никогда не называй
+expected_search_volume измеренным объёмом, если в evidence нет числового
+источника. Если нет Search Console / keyword dataset / сезонного ряда — ставь
+expected_search_volume=unknown, demand_confidence=low и demand_signal_type=unknown
+или modeled.
+
+Для каждой темы определи:
+- demand_signal_type: observed (есть first-party query/impression/volume),
+  seasonal (есть повторяемая сезонность), editorial (только сигнал публикаций),
+  modeled (обоснованная гипотеза) или unknown;
+- demand_confidence: high разрешён только при наблюдаемом подтверждаемом сигнале,
+  medium — при двух независимых косвенных сигналах, low — при гипотезе;
+- forecast_horizon_months: окно до 60 месяцев; не выдавай «вечный» тренд;
+- traffic_route: organic_click | ai_citation | mixed | conversion;
+- demand_evidence: до 8 конкретных источников/сигналов с датой или честное пустое поле;
+- first_party_evidence и evidence_gap: что владелец сайта может добавить такого,
+  чего нет в типовом AI-рерайте (кейс, измерение, интервью, тест, dataset);
+- originality_gate: pass только при явном оригинальном угле и evidence plan,
+  иначе needs_first_party_evidence.
+
+Приоритизируй темы не по модному слову, а по ожидаемому маршруту к трафику:
+вопрос пользователя → SERP/AI-поверхность → причина перейти к первоисточнику →
+релевантное действие/CTA. У каждой темы должен быть один основной intent,
+один answerable вопрос и понятный следующий шаг.
+
+POLICY ДЛЯ SEO-ПОРТАЛОВ:
+- Searchengines.guru и SEOChat.io — qualitative VoC/issue radar; community-пост
+  не является измеренным спросом и получает low confidence до проверки GSC,
+  keyword dataset или SERP.
+- Search Engine Land, Search Engine Journal и Search Engine Roundtable —
+  editorial/update signals; сохраняй URL и дату, отличай reporting от primary
+  documentation и не обещай ranking/traffic из одной публикации.
+- Официальные данные Google/Яндекс, Search Console/Яндекс Вебмастер,
+  проверенный keyword/SERP dataset и собственная аналитика выше editorial/community
+  сигналов. Если source URL/date не переданы в evidence, не приписывай их теме.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ИСКЛЮЧЕНИЯ (защита от каннибализации)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Темы и кластеры ниже уже закрыты на сайте проекта или явно исключены
@@ -197,6 +237,14 @@ ai_answer_trigger.
   lead-answer в первом абзаце>
 - **Why now**: <одно предложение — почему стоит писать в ближайшие 1–2
   месяца, а не «в принципе когда-нибудь»>
+- **Тип сигнала спроса**: observed | seasonal | editorial | modeled | unknown
+- **Уверенность прогноза**: high | medium | low; high только при подтверждённом data signal
+- **Горизонт прогноза**: <0–60 месяцев>
+- **Маршрут трафика**: organic_click | ai_citation | mixed | conversion
+- **Evidence спроса**: <источник/дата или честно «нет»>
+- **First-party evidence**: <что нужно добавить владельцу сайта>
+- **Evidence gap**: <что пока неизвестно и как проверить>
+- **Originality gate**: pass | needs_first_party_evidence
 
 ## 7. Карта покрытия intent × audience
 
@@ -222,6 +270,9 @@ SELF-AUDIT (молча перед отдачей ответа)
    событие), а не на «актуальность»?
 5. В секции 5 у каждого факта проставлен [confidence: …]?
 6. В отчёте НЕТ запрещённых ANTI-FLUFF оборотов?
+7. Ни один forecast не выдаёт модельную оценку за измеренный объём спроса?
+8. Для каждой темы есть demand_signal_type, demand_confidence, traffic_route и evidence_gap?
+9. Для каждой темы описан оригинальный first-party evidence plan или честно указана его нехватка?
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ФОРМАТ ВЫВОДА
@@ -295,7 +346,22 @@ SELF-AUDIT (молча перед отдачей ответа)
       "expected_search_volume": "low|mid|high|unknown",
       "target_audience_segment_detail": "уточнение сегмента (роль/контекст/триггер)",
       "content_angle": "под каким углом раскрывать тему (1 короткое предложение)",
-      "cta_suggestion": "что предложить читателю в финале (демо / чек-лист / расчёт)"
+      "cta_suggestion": "что предложить читателю в финале (демо / чек-лист / расчёт)",
+      "demand_signal_type": "observed|seasonal|editorial|modeled|unknown",
+      "demand_confidence": "high|medium|low",
+      "forecast_horizon_months": 12,
+      "traffic_route": "organic_click|ai_citation|mixed|conversion",
+      "demand_evidence": [{"claim": "что подтверждено", "source_url": "https://...", "published_at": "YYYY-MM-DD", "evidence_type": "first_party|primary|editorial|community|serp|seasonal|keyword_dataset", "evidence_status": "verified|unverified|inferred", "confidence": "high|medium|low"}],
+      "source_url": "основной URL evidence или пусто",
+      "published_at": "YYYY-MM-DD или пусто",
+      "evidence_count": 0,
+      "likely_answer_surface": "featured_snippet|PAA|AI Overview|AI Mode|organic|unknown",
+      "citation_worthy_claims": ["конкретное утверждение, которое можно проверить"],
+      "freshness_review": "YYYY-MM-DD или условие пересмотра",
+      "first_party_evidence": "кейс / тест / интервью / собственный датасет",
+      "evidence_gap": "что нужно проверить",
+      "first_party_evidence_required": true,
+      "originality_gate": "pass|needs_first_party_evidence|fail"
     }
   ],
   "coverage_map": {
@@ -328,6 +394,10 @@ SELF-AUDIT (молча перед отдачей ответа)
   подборе тем; иначе false.
 - geo_potential — обязателен для каждой темы (high|medium|low); high ставь
   темам с узким вопросом сравнения/troubleshooting/прямого ответа.
+- demand_signal_type, demand_confidence, forecast_horizon_months, traffic_route,
+  demand_evidence, evidence_gap и originality_gate обязательны для каждой темы.
+  Если числового источника спроса нет, expected_search_volume не является
+  измеренным Search Volume и demand_confidence не может быть high.
 - ai_answer_trigger — обязателен для каждой темы: один конкретный вопрос
   (строка), на который статья даст прямой lead-answer в первом абзаце.
 - Не менее 30% тем должны иметь intent_facet=comparison или troubleshooting

@@ -145,6 +145,8 @@ onMounted(() => {
     const decisionStage    = pickStr(q.prefill_decision_stage,     20);
     const contentAngle     = pickStr(q.prefill_content_angle,     500);
     const ctaSuggestion    = pickStr(q.prefill_cta_suggestion,    500);
+    const demandEvidence   = pickStr(q.prefill_evidence,         1800);
+    const forecastBrief    = pickStr(q.prefill_forecast,         1000);
 
     // Собираем brand_facts из всех источников, разделяя ясными метками,
     // чтобы пользователь мог отредактировать каждый блок отдельно.
@@ -166,6 +168,8 @@ onMounted(() => {
       if (intentJobs) lines.push(`Jobs-to-be-done: ${intentJobs}`);
       if (contentAngle) lines.push(`Content angle: ${contentAngle}`);
       if (ctaSuggestion) lines.push(`CTA: ${ctaSuggestion}`);
+      if (demandEvidence) lines.push(`Demand evidence: ${demandEvidence}`);
+      if (forecastBrief) lines.push(`Traffic forecast: ${forecastBrief}`);
       return lines.length ? `# Intent (detailed)\n${lines.join('\n')}` : '';
     })();
     const composed = buildBrandFacts({

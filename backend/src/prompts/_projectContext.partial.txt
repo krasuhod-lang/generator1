@@ -12,7 +12,9 @@
 Обязательные дисклеймеры: {{CONTENT_DISCLAIMERS}}
 Топ-конкуренты: {{COMPETITORS}}
 Сигналы GSC/Яндекс (intent/share): {{INTENT_SUMMARY}}
-Уже опубликованные темы (не повторять, сжатый список): {{PUBLISHED_TOPICS_COMPRESSED}}
+First-party query signals (используй как observed demand, если есть): {{FIRST_PARTY_QUERY_SIGNALS}}
+Уже покрытые темы и материалы проекта (не повторять, сжатый список): {{PUBLISHED_TOPICS_COMPRESSED}}
+Полнота history: {{CONTENT_HISTORY_COVERAGE}}
 Каннибализационные кластеры (тоже не повторять): {{CANNIBALIZATION_LIST}}
 
 ━━ ПРАВИЛА РАЗРЕШЕНИЯ КОНФЛИКТОВ ━━
