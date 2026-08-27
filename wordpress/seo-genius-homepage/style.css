@@ -1,0 +1,10 @@
+/*
+Theme Name: SEO Genius Homepage
+Theme URI: https://example.com/
+Author: SEO Genius
+Description: Premium SEO-first marketing homepage for SEO Genius. The authenticated application remains separate.
+Version: 1.0.0
+Text Domain: seo-genius-homepage
+*/
+
+@import url('./assets/seo-genius-landing.css');

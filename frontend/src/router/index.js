@@ -3,7 +3,7 @@ import { useAuthStore } from '../stores/auth.js';
 import { useAdminStore } from '../stores/admin.js';
 
 const routes = [
-  { path: '/',         redirect: '/dashboard' },
+  { path: '/',         component: () => import('../views/PublicLandingPage.vue'), meta: { public: true } },
   { path: '/login',    component: () => import('../views/LoginPage.vue'),      meta: { guest: true } },
   { path: '/register', component: () => import('../views/RegisterPage.vue'),   meta: { guest: true } },
   { path: '/dashboard',component: () => import('../views/DashboardPage.vue'),  meta: { auth: true } },
