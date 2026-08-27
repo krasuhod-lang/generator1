@@ -13,6 +13,7 @@ const { getCachedResponse, setCachedResponse } = require('./responseCache');
 const responseCacheModule = require('./responseCache');
 const { withProviderSlot } = require('./rateLimiter');
 const { recordTrace } = require('./pipelineTrace');
+const { recordApiRequest } = require('../metrics/adminApiLedger');
 
 // Дефолтный лимит выходных токенов по адаптерам — соответствует значениям
 // по умолчанию внутри самих адаптеров. Используется как fallback в логике
@@ -597,6 +598,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
   for (let attempt = 0; attempt < retries; attempt++) {
     let budgetReservation = null;
+    let apiAttemptStartedAt = null;
+    let ledgerContext = null;
     try {
       if (providerClass === 'gemini-class' && Number.isFinite(tokenBudget) && budgetTaskId) {
         const remaining = getTaskBudgetRemaining(budgetTaskId, tokenBudget);
@@ -622,7 +625,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         callOpts.cachedContent = activeCachedContent;
       }
 
+      apiAttemptStartedAt = new Date();
       const result = await withProviderSlot(adapter, () => callFn(activeSystem, prompt, callOpts));
+      const apiDurationMs = Math.max(0, Date.now() - apiAttemptStartedAt.getTime());
       const budgetInputTokens = getBudgetInputTokens(adapter, result, promptSize);
       if (budgetReservation) budgetReservation.commit(budgetInputTokens);
       const costModel = adapter === 'deepseek'
@@ -637,6 +642,32 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       });
       const costUsd = pricingMeta.totalUsd;
       const cacheHit = pricingMeta.cacheHitTokens > 0;
+      ledgerContext = {
+        provider: adapter,
+        model: result.model || model || (adapter === 'deepseek' ? process.env.DEEPSEEK_MODEL : null) || adapter,
+        pipeline: inferPipeline(stageName, pipeline),
+        stageName,
+        callLabel,
+        taskId,
+        traceTaskId,
+        attempt: attempt + 1,
+        durationMs: apiDurationMs,
+        promptSize,
+        tokensIn: result.tokensIn,
+        tokensOut: result.tokensOut,
+        cachedTokens: result.cachedTokens || 0,
+        cacheHitTokens: pricingMeta.cacheHitTokens || 0,
+        cacheMissTokens: pricingMeta.cacheMissTokens || 0,
+        thoughtsTokens: result.thoughtsTokens || 0,
+        inputCostUsd: pricingMeta.inputCostUsd || 0,
+        outputCostUsd: pricingMeta.outputCostUsd || 0,
+        costUsd,
+        meta: {
+          cache_hit: cacheHit,
+          cached_content: Boolean(activeCachedContent),
+          finish_reason: result.finishReason || null,
+        },
+      };
       // Usage фиксируем ДО проверки truncation/JSON: retry после обрезанного
       // ответа тоже является реальным provider-вызовом и должен попасть в budget.
       if (!budgetReservation && providerClass === 'gemini-class' && budgetTaskId) {
@@ -648,6 +679,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // JSON parse ошибок в outreach emailComposer/nicheExpander.
       const isTruncated = result.finishReason === 'length' || _isJsonTruncated(result.text);
       if (isTruncated && retryOnTruncation && attempt < retries - 1) {
+        recordApiRequest({ ...ledgerContext, requestStatus: 'truncated' }).catch(() => {});
         // Когда maxTokens не задан явно, реальный запрос ушёл с дефолтом
         // адаптера (напр. DeepSeek 16000), а не с 1000 — берём его как базу,
         // чтобы удвоение ПОВЫШАЛО лимит, а не понижало его.
@@ -686,6 +718,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote}${partialJsonNote} | $${costUsd.toFixed(6)} | ${callDurationMs}ms`,
         'success'
       );
+
+      recordApiRequest({ ...ledgerContext, requestStatus: partialJson ? 'partial_json' : 'success' }).catch(() => {});
 
       // Публикуем SSE-событие tokens — фронтенд реактивно обновляет счётчики
       if (onTokens) {
@@ -738,6 +772,33 @@ async function callLLM(adapter, system, prompt, opts = {}) {
 
     } catch (err) {
       if (budgetReservation) budgetReservation.release();
+      if (ledgerContext) {
+        recordApiRequest({
+          ...ledgerContext,
+          requestStatus: 'invalid_response',
+          httpStatus: err.status || null,
+          errorCode: err.code || err.name || 'invalid_response',
+          errorMessage: err.message,
+        }).catch(() => {});
+      } else if (apiAttemptStartedAt) {
+        recordApiRequest({
+          provider: adapter,
+          model: model || (adapter === 'deepseek' ? process.env.DEEPSEEK_MODEL : null) || adapter,
+          pipeline: inferPipeline(stageName, pipeline),
+          stageName,
+          callLabel,
+          taskId,
+          traceTaskId,
+          requestStatus: err.isCacheMiss ? 'cache_miss' : 'failed',
+          httpStatus: err.status || null,
+          attempt: attempt + 1,
+          durationMs: Math.max(0, Date.now() - apiAttemptStartedAt.getTime()),
+          promptSize,
+          errorCode: err.code || err.name || 'provider_error',
+          errorMessage: err.message,
+          meta: { retryable: !(err.isDeterministic || err.isGeoBlock) },
+        }).catch(() => {});
+      }
       // ── Cache miss / expiry: однократная повторная попытка без кэша ──
       if (err.isCacheMiss && activeCachedContent) {
         log(

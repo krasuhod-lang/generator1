@@ -43,12 +43,19 @@
         <!-- ── ОБЗОР ───────────────────────────────────────────── -->
         <section v-show="tab === 'overview'" class="oc-panel">
           <div class="kpi-grid">
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_prospects }}</span><span class="kpi-l">Лидов</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_sent }}</span><span class="kpi-l">Отправлено</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.prospects ?? campaign.total_prospects }}</span><span class="kpi-l">Лидов</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.queued ?? 0 }}</span><span class="kpi-l">В очереди</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.sent ?? campaign.total_sent }}</span><span class="kpi-l">Отправлено</span></div>
             <div class="kpi"><span class="kpi-v">{{ stats?.totals?.open_rate ?? 0 }}%</span><span class="kpi-l">Open rate</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_opened }}</span><span class="kpi-l">Открыто</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_clicked }}</span><span class="kpi-l">Кликов</span></div>
-            <div class="kpi"><span class="kpi-v">{{ campaign.total_replied }}</span><span class="kpi-l">Ответов</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.opened ?? campaign.total_opened }}</span><span class="kpi-l">Открыто</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.clicked ?? campaign.total_clicked }}</span><span class="kpi-l">Кликов</span></div>
+            <div class="kpi"><span class="kpi-v">{{ stats?.totals?.replied ?? campaign.total_replied }}</span><span class="kpi-l">Ответов</span></div>
+            <div class="kpi"><span class="kpi-v">{{ (stats?.totals?.failed ?? 0) + (stats?.totals?.bounced ?? 0) }}</span><span class="kpi-l">Ошибки/bounce</span></div>
+          </div>
+          <div v-if="stats?.diagnostics?.queued_not_sent || stats?.diagnostics?.failed || stats?.diagnostics?.bounced" class="delivery-alert">
+            <strong>Контроль доставки:</strong>
+            в очереди {{ stats.diagnostics.queued_not_sent || 0 }}, ошибок {{ stats.diagnostics.failed || 0 }}, bounce {{ stats.diagnostics.bounced || 0 }}.
+            Поставленные письма не считаются отправленными до подтверждения provider.
           </div>
 
           <div class="card">
@@ -346,13 +353,27 @@ function scoreClass(s) {
 function emailStatusIcon(s) {
   return { queued: '📤', sent: '✅', delivered: '📬', opened: '👁', clicked: '🖱', bounced: '⚠️', complained: '🚫', failed: '❌' }[s] || '•';
 }
-// Простая санитизация превью: показываем только как текст с сохранением
-// переносов — исключаем исполнение потенциально опасного HTML.
+// Безопасный rendered preview: сохраняем inline email design, но удаляем
+// script/event handlers, forms, iframes и небезопасные URL перед v-html.
 function sanitizedPreview(html) {
   if (!html) return '<i>нет превью</i>';
-  const div = document.createElement('div');
-  div.textContent = html;
-  return div.innerHTML.replace(/\n/g, '<br>');
+  const doc = new DOMParser().parseFromString(String(html), 'text/html');
+  doc.querySelectorAll('script, iframe, object, embed, form, style, link, meta, base').forEach((node) => node.remove());
+  doc.querySelectorAll('*').forEach((node) => {
+    [...node.attributes].forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim();
+      if (name.startsWith('on') || name === 'srcdoc' || name === 'formaction') node.removeAttribute(attr.name);
+      if ((name === 'href' || name === 'src' || name === 'xlink:href') && !/^(https?:|mailto:|tel:|data:image\/(?:png|jpe?g|gif|webp);)/i.test(value)) {
+        node.removeAttribute(attr.name);
+      }
+    });
+    if (node.tagName === 'A') {
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
+  return doc.body.innerHTML || '<i>нет превью</i>';
 }
 
 const filteredProspects = computed(() => {
@@ -369,14 +390,17 @@ const chartOption = computed(() => {
   if (!daily || !daily.length) return null;
   return {
     tooltip: { trigger: 'axis' },
-    legend: { data: ['Отправлено', 'Открыто', 'Кликов'], top: 0 },
+    legend: { data: ['Отправлено', 'Доставлено', 'Открыто', 'Кликов', 'Bounce', 'Ошибка'], top: 0 },
     grid: { left: 40, right: 20, top: 40, bottom: 30 },
     xAxis: { type: 'category', data: daily.map((d) => d.day.slice(5)) },
     yAxis: { type: 'value', minInterval: 1 },
     series: [
       { name: 'Отправлено', type: 'line', smooth: true, data: daily.map((d) => d.sent), itemStyle: { color: '#0071e3' } },
+      { name: 'Доставлено', type: 'line', smooth: true, data: daily.map((d) => d.delivered || 0), itemStyle: { color: '#5a9367' } },
       { name: 'Открыто', type: 'line', smooth: true, data: daily.map((d) => d.opened), itemStyle: { color: '#34c759' } },
       { name: 'Кликов', type: 'line', smooth: true, data: daily.map((d) => d.clicked), itemStyle: { color: '#ff9f0a' } },
+      { name: 'Bounce', type: 'line', smooth: true, data: daily.map((d) => d.bounced || 0), itemStyle: { color: '#ff375f' } },
+      { name: 'Ошибка', type: 'line', smooth: true, data: daily.map((d) => d.failed || 0), itemStyle: { color: '#8e8e93' } },
     ],
   };
 });
@@ -490,6 +514,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); });
 .kpi-l { font-size: 12px; color: #86868b; }
 
 .chart { height: 300px; width: 100%; }
+.delivery-alert { margin: -4px 0 18px; padding: 10px 12px; border: 1px solid #f0c36d; border-radius: 10px; background: #fff8e6; color: #795400; font-size: 13px; line-height: 1.5; }
 
 .warmup-progress { display: flex; flex-direction: column; gap: 8px; }
 .wp-track { height: 10px; background: #eef4ff; border-radius: 6px; overflow: hidden; }

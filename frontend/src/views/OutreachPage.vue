@@ -166,11 +166,13 @@
           </div>
 
           <div class="cc-stats">
-            📊 Лидов: <b>{{ c.total_prospects }}</b> ·
-            Отправлено: <b>{{ c.total_sent }}</b> ·
-            Открыто: <b>{{ c.total_opened }}</b> ({{ rate(c.total_opened, c.total_sent) }}%) ·
-            Кликов: <b>{{ c.total_clicked }}</b> ({{ rate(c.total_clicked, c.total_sent) }}%) ·
+            📊 Лидов: <b>{{ c.actual_prospects ?? c.total_prospects }}</b> ·
+            В очереди: <b class="queued-count">{{ c.actual_queued ?? 0 }}</b> ·
+            Отправлено: <b>{{ c.actual_sent ?? c.total_sent }}</b> ·
+            Открыто: <b>{{ c.actual_opened ?? c.total_opened }}</b> ({{ rate(c.actual_opened ?? c.total_opened, c.actual_sent ?? c.total_sent) }}%) ·
+            Кликов: <b>{{ c.actual_clicked ?? c.total_clicked }}</b> ({{ rate(c.actual_clicked ?? c.total_clicked, c.actual_sent ?? c.total_sent) }}%) ·
             Ответов: <b>{{ c.total_replied }}</b>
+            <span v-if="(c.actual_sent ?? c.total_sent) !== c.total_sent" class="counter-drift"> · счётчик синхронизируется</span>
           </div>
 
           <div v-if="c.error_message" class="cc-error">⚠️ {{ c.error_message }}</div>
@@ -452,6 +454,8 @@ input:focus, select:focus {
 .cc-meta { color: #6e6e73; font-size: 13px; margin: 8px 0; }
 .cc-stats { font-size: 14px; color: #1d1d1f; line-height: 1.7; }
 .cc-error { color: #d70015; font-size: 13px; margin-top: 8px; }
+.queued-count { color: #b26a00; }
+.counter-drift { color: #b26a00; font-size: 12px; }
 .cc-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 
 @media (max-width: 720px) {

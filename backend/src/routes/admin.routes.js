@@ -18,6 +18,7 @@ const {
   getCrossTaskDetail,
   getFunnelBreakdown,
   getAegisCostBreakdown,
+  getAdminApiUsage,
   getAdminStorageAudit,
   cleanupAdminStorage,
   getAdminStorageInventory,
@@ -80,6 +81,8 @@ router.get('/funnels',            apiLimiter, adminAuth, getFunnelBreakdown);
 // стоимость USD, доля prompt-кэша). Фильтр периода from/to (aegis_llm_usage,
 // мигр. 055).
 router.get('/aegis-costs',        apiLimiter, adminAuth, getAegisCostBreakdown);
+// Полный model/API ledger: retries, вызовы вне задач и reconciliation.
+router.get('/api-usage',          apiLimiter, adminAuth, getAdminApiUsage);
 
 // Storage audit/cleanup: preview по умолчанию, destructive action только с confirm=DELETE.
 router.get('/storage',             apiLimiter, adminAuth, getAdminStorageAudit);

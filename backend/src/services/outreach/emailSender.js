@@ -82,7 +82,13 @@ async function sendEmail({ emailId, to, subject, html, text, fromEmail, fromName
   //  • List-Unsubscribe + One-Click (RFC 8058) — почтовики (Gmail/Mail.ru)
   //    сильно повышают репутацию отправителям с корректной отпиской.
   //  • X-Email-Id — для внутреннего трекинга.
-  const headers = { 'X-Email-Id': emailId };
+  // Resend idempotency protects the exact email row from duplicate sends when
+  // the provider accepted the request but the response was lost in transit.
+  // The stable DB id is unique per recipient/campaign attempt and remains under
+  // the provider's 256-character key limit.
+  const headers = {
+    'X-Email-Id': emailId,
+  };
   if (unsubscribeUrl) {
     headers['List-Unsubscribe'] = `<${unsubscribeUrl}>`;
     headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
@@ -101,7 +107,11 @@ async function sendEmail({ emailId, to, subject, html, text, fromEmail, fromName
   // Reply-To на реальный ящик, чтобы ответы доходили до отправителя.
   if (replyTo) payload.replyTo = replyTo;
 
-  const { data, error } = await resend.emails.send(payload);
+  // Idempotency-Key должен быть HTTP request option Resend SDK, а не custom
+  // email header: это защищает retry после provider timeout от дубля отправки.
+  const { data, error } = await resend.emails.send(payload, {
+    idempotencyKey: `outreach-email-${emailId}`,
+  });
 
   if (error) throw new Error(`Resend error: ${error.message}`);
 
@@ -113,7 +123,8 @@ async function sendEmail({ emailId, to, subject, html, text, fromEmail, fromName
     [data.id, emailId],
   );
 
-  return { resendId: data.id };
+      return { resendId: data.id };
+
 }
 
 module.exports = { sendEmail, checkCooldown, isUnsubscribed };

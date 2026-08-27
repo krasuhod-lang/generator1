@@ -48,7 +48,7 @@ function startEmailWorkerV2() {
     // ── ЗАЩИТА: письмо ещё актуально? ──────────────────────────────
     // Если строки нет (кампанию удалили / данные сбросили) или статус уже
     // не 'queued' — НЕ отправляем. Тихо завершаем (job completed, без ретрая).
-    const { rows } = await db.query('SELECT status FROM outreach_emails WHERE id = $1', [emailId]);
+    const { rows } = await db.query('SELECT status, attempt_count FROM outreach_emails WHERE id = $1', [emailId]);
     if (!rows.length) {
       console.warn(`[emailQueueV2] пропуск: строки нет в БД (emailId=${emailId}, to=${to})`);
       return { skipped: 'no_row' };
@@ -59,6 +59,14 @@ function startEmailWorkerV2() {
     }
 
     // ── Отправка ────────────────────────────────────────────────────
+    await db.query(
+      `UPDATE outreach_emails
+          SET attempt_count = COALESCE(attempt_count, 0) + 1,
+              last_attempt_at = NOW(),
+              error_message = NULL
+        WHERE id = $1 AND status = 'queued'`,
+      [emailId],
+    );
     try {
       const { resendId } = await sendEmail({
         emailId, to, subject, html, text, fromEmail, fromName, replyTo, unsubscribeUrl,
@@ -70,17 +78,30 @@ function startEmailWorkerV2() {
       );
       return { sent: true };
     } catch (err) {
+      // Постоянные условия (отписка, free provider, cooldown) не имеют
+      // смысла ретраить — это финальный skip. Для transient provider errors
+      // оставляем строку queued: BullMQ сможет выполнить следующую попытку.
+      if (_isSkip(err.message)) {
+        await db.query(
+          `UPDATE outreach_emails SET status = 'failed', failed_at = COALESCE(failed_at, NOW()), error_message = $1 WHERE id = $2 AND status = 'queued'`,
+          [err.message, emailId],
+        );
+        await db.query(
+          `INSERT INTO outreach_logs (campaign_id, level, message, meta)
+           SELECT campaign_id, 'warn', $1, $2 FROM outreach_emails WHERE id = $3`,
+          [`Письмо пропущено (V2) на ${to}: ${err.message}`, JSON.stringify({ error: err.message, permanent: true }), emailId],
+        );
+        return { skipped: err.message };
+      }
       await db.query(
-        `UPDATE outreach_emails SET status = 'failed', error_message = $1 WHERE id = $2`,
+        `UPDATE outreach_emails SET error_message = $1, failed_at = NULL WHERE id = $2 AND status = 'queued'`,
         [err.message, emailId],
       );
       await db.query(
         `INSERT INTO outreach_logs (campaign_id, level, message, meta)
-         SELECT campaign_id, 'error', $1, $2 FROM outreach_emails WHERE id = $3`,
-        [`Ошибка отправки (V2) на ${to}: ${err.message}`, JSON.stringify({ error: err.message }), emailId],
+         SELECT campaign_id, 'warn', $1, $2 FROM outreach_emails WHERE id = $3`,
+        [`Временная ошибка отправки (V2), повторим: ${to}: ${err.message}`, JSON.stringify({ error: err.message, retryable: true }), emailId],
       );
-      // Пропуск (free/cooldown/отписка) — НЕ ретраим (пусто → job completed).
-      if (_isSkip(err.message)) return { skipped: err.message };
       throw err; // настоящую ошибку — ретраим (BullMQ)
     }
   }, {
@@ -91,6 +112,32 @@ function startEmailWorkerV2() {
 
   workerV2.on('error', (err) => {
     console.error('[outreach/emailWorkerV2] error:', err.message);
+  });
+
+  // BullMQ emits `failed` only after all configured attempts are exhausted.
+  // Mark the DB row failed here, not inside the retryable worker catch.
+  workerV2.on('failed', async (job, err) => {
+    const emailId = job?.data?.emailId;
+    if (!emailId) return;
+    try {
+      await db.query(
+        `UPDATE outreach_emails
+            SET status = 'failed', failed_at = COALESCE(failed_at, NOW()), error_message = $1
+          WHERE id = $2 AND status = 'queued'`,
+        [err?.message || 'Email delivery failed after retries', emailId],
+      );
+      await db.query(
+        `INSERT INTO outreach_logs (campaign_id, level, message, meta)
+         SELECT campaign_id, 'error', $1, $2 FROM outreach_emails WHERE id = $3`,
+        [
+          `Отправка окончательно не удалась (V2) на ${job.data.to || 'unknown recipient'}`,
+          JSON.stringify({ error: err?.message || 'unknown', attempts: job.attemptsMade }),
+          emailId,
+        ],
+      );
+    } catch (dbErr) {
+      console.error('[outreach/emailWorkerV2] failed event persistence:', dbErr.message);
+    }
   });
 
   console.log('[outreach] Email worker V2 запущен (отдельная очередь, защита от сирот, лимит 10/час)');

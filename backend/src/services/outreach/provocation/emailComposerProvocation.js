@@ -18,8 +18,8 @@
  * Слово-единица (пациент/клиент/заявка/заказ) приходит из nicheProfile.
  */
 
-const P = 'font-family:Arial,sans-serif;';
-const TEXT = `${P}font-size:14px;color:#333;line-height:1.6;margin:0 0 14px;`;
+const P = 'font-family:Arial,Helvetica,sans-serif;';
+const TEXT = `${P}font-size:14px;color:#333;line-height:1.65;margin:0 0 14px;`;
 
 function _esc(s) {
   return String(s || '')
@@ -127,11 +127,32 @@ function _competitorBlock({ competitors, prospectTraffic, city, sampleQuery, uni
     ? `А ваш сайт — примерно <b>${_num(prospectTraffic)} визитов/мес</b>. Разница в разы. Этот поток идёт к ним, не к вам.`
     : `Ваш сайт — заметно ниже. Этот поток идёт к ним, не к вам.`;
 
+  const gapChart = prospectTraffic && competitors[0]?.traffic_month
+    ? _gapChart(prospectTraffic, competitors[0].traffic_month, competitors[0].domain)
+    : '';
   return `
-<p style="${TEXT}">Когда человек в Яндексе или Google ищет ${q} — <b>первым он видит их сайты, а не ваш</b>. Туда и заходит. Так ваш потенциальный клиент становится их клиентом.</p>
-<p style="${TEXT}">Вот кто стоит <b>выше вас</b>${where} прямо сейчас:</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px;">${rows}</table>
+<p style="${TEXT}">Когда человек в Яндексе или Google ищет ${q} — <b>первым он видит их сайты, а не ваш</b>. Туда и заходит. Так потенциальный клиент может выбрать конкурента ещё до контакта с вами.</p>
+<p style="${TEXT}">Вот кто стоит <b>выше вас</b>${where} по собранному срезу:</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px;width:100%;">${rows}</table>
+${gapChart}
 <p style="${TEXT}">${gap}</p>`;
+}
+
+/** Визуальный график разрыва без внешнего изображения или JS. */
+function _gapChart(prospectTraffic, competitorTraffic, competitorDomain) {
+  const own = Math.max(0, Number(prospectTraffic) || 0);
+  const comp = Math.max(0, Number(competitorTraffic) || 0);
+  const max = Math.max(own, comp, 1);
+  const ownWidth = Math.max(3, Math.round((own / max) * 100));
+  const compWidth = Math.max(3, Math.round((comp / max) * 100));
+  return `
+<div style="margin:0 0 16px;padding:12px 14px;background:#fff;border:1px solid #eadedb;border-radius:8px;">
+  <div style="${P}font-size:12px;color:#777;margin:0 0 8px;">Визуальный срез поискового трафика</div>
+  <div style="${P}font-size:12px;color:#555;margin:5px 0 3px;">Ваш сайт · ${_num(own)} визитов/мес</div>
+  <div style="height:8px;background:#f0e9e7;border-radius:8px;overflow:hidden;"><div style="width:${ownWidth}%;height:8px;background:#aab4c3;border-radius:8px;"></div></div>
+  <div style="${P}font-size:12px;color:#555;margin:10px 0 3px;">${_esc(competitorDomain || 'Конкурент')} · ${_num(comp)} визитов/мес</div>
+  <div style="height:8px;background:#f0e9e7;border-radius:8px;overflow:hidden;"><div style="width:${compWidth}%;height:8px;background:#0071E3;border-radius:8px;"></div></div>
+</div>`;
 }
 
 /**
@@ -192,9 +213,11 @@ function _signature({ senderName, senderCompany, senderSite, senderTelegram }) {
 function buildSubject({ anchorDomain, city, prospectDomain }) {
   let base;
   if (anchorDomain) {
-    base = city ? `${anchorDomain} обходит вас в ${_prep(city)}` : `${anchorDomain} обходит вас в поиске`;
+    base = prospectDomain
+      ? `Проверили выдачу: ${anchorDomain} выше ${prospectDomain}`
+      : `Проверили выдачу: ${anchorDomain} выше в поиске`;
   } else {
-    base = prospectDomain ? `${prospectDomain}: где вы теряете клиентов` : 'Где вы теряете клиентов из поиска';
+    base = prospectDomain ? `${prospectDomain}: разбор поисковой видимости` : 'Разбор поисковой видимости сайта';
   }
   return base.length > 60 ? base.slice(0, 59).trim() + '…' : base;
 }
@@ -238,7 +261,7 @@ function composeProvocationEmailV2(p) {
     : `<p style="${TEXT}">${introFallback}</p>`;
 
   const ctaText = connective.cta
-    || 'Хотите так же? Ответьте на это письмо — пришлём чёткий понятный пошаговый план, как увеличить количество трафика минимум в 2 раза!';
+    || 'Бесплатный видео-аудит сайта: покажем минимум 3 точки роста — в поисковой видимости, структуре страниц и конверсионном пути. Ответьте на это письмо словом «АУДИТ» — пришлём разбор и следующие шаги без обязательств.';
 
   const body = `
 <div style="padding:22px 24px 4px;">
@@ -259,8 +282,12 @@ function composeProvocationEmailV2(p) {
   </div>
 </div>`;
 
+  const preheader = anchorDomain
+    ? `Проверили поисковую выдачу: ${anchorDomain} выше вашего сайта${city ? ` в ${_prep(city)}` : ''}.`
+    : 'Короткий разбор поисковой видимости сайта и три точки роста.';
   const html = `
-<div style="max-width:600px;margin:0 auto;border:1px solid #eee;border-radius:10px;overflow:hidden;background:#fff;">
+<div style="display:none!important;max-height:0;overflow:hidden;opacity:0;color:transparent;">${_esc(preheader)}</div>
+<div role="presentation" style="max-width:600px;margin:0 auto;border:1px solid #e6e8ed;border-radius:12px;overflow:hidden;background:#fff;">
   ${_hero(anchorDomain, city)}${body}${footer}
 </div>`;
 
@@ -274,7 +301,7 @@ function composeProvocationEmailV2(p) {
 function _plainText({ greeting, anchorDomain, city, competitors, prospectTraffic, cases, unit, ctaText, sender, unsubscribeUrl }) {
   const lines = [`${greeting}!`, ''];
   if (anchorDomain) {
-    lines.push(`${anchorDomain} — ваш прямой конкурент${city ? ` в ${_prep(city)}` : ''}, он забирает ваших клиентов из поиска.`, '');
+    lines.push(`${anchorDomain} — ваш прямой конкурент${city ? ` в ${_prep(city)}` : ''}, он выше в поисковой выдаче по собранному срезу.`, '');
   } else {
     lines.push('Разбор вашего сайта: где вы теряете клиентов из поиска.', '');
   }

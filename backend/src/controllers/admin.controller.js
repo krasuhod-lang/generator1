@@ -1179,6 +1179,187 @@ async function getAegisCostBreakdown(req, res, next) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// API usage ledger / anomaly monitoring
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _adminUsageRange(query = {}) {
+  const validDate = (value) => /^\\d{4}-\\d{2}-\\d{2}$/.test(String(value || ''));
+  const now = new Date();
+  const fromDate = validDate(query.from)
+    ? new Date(`${query.from}T00:00:00.000Z`)
+    : new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+  const toDate = validDate(query.to)
+    ? new Date(`${query.to}T00:00:00.000Z`)
+    : now;
+  const toExclusive = validDate(query.to)
+    ? new Date(toDate.getTime() + 24 * 3600 * 1000)
+    : toDate;
+  return {
+    from: Number.isNaN(fromDate.getTime()) ? new Date(now.getTime() - 30 * 24 * 3600 * 1000) : fromDate,
+    to: Number.isNaN(toExclusive.getTime()) ? now : toExclusive,
+  };
+}
+
+function _emptyAdminApiUsage(note = null) {
+  return {
+    range: null,
+    totals: {
+      requests: 0, successful: 0, failed: 0, retries: 0, outside_task: 0,
+      tokens_in: 0, tokens_out: 0, cached_tokens: 0, cache_hit_tokens: 0,
+      cache_miss_tokens: 0, thoughts_tokens: 0, cost_usd: 0,
+      input_cost_usd: 0, output_cost_usd: 0,
+    },
+    daily: [], by_provider: [], by_model: [], by_pipeline: [], anomalies: [],
+    reconciliation: { ledger_cost_usd: 0, task_stage_cost_usd: 0, delta_usd: 0, note: 'no data' },
+    note,
+  };
+}
+
+async function getAdminApiUsage(req, res, next) {
+  const { from, to } = _adminUsageRange(req.query || {});
+  const params = [from, to];
+  try {
+    const [totalsQ, dailyQ, providerQ, modelQ, pipelineQ, anomalyQ, stageQ] = await Promise.all([
+      db.query(
+        `SELECT COUNT(*)::int AS requests,
+                COUNT(*) FILTER (WHERE request_status IN ('success','partial_json'))::int AS successful,
+                COUNT(*) FILTER (WHERE request_status IN ('failed','invalid_response'))::int AS failed,
+                COUNT(*) FILTER (WHERE request_status = 'cache_miss')::int AS cache_misses,
+                COUNT(*) FILTER (WHERE attempt > 1 OR request_status = 'truncated')::int AS retries,
+                COUNT(*) FILTER (WHERE task_id IS NULL AND trace_task_id IS NULL)::int AS outside_task,
+                COUNT(*) FILTER (WHERE (task_id IS NULL) <> (trace_task_id IS NULL))::int AS partial_attribution,
+                COALESCE(SUM(tokens_in),0)::bigint AS tokens_in,
+                COALESCE(SUM(tokens_out),0)::bigint AS tokens_out,
+                COALESCE(SUM(cached_tokens),0)::bigint AS cached_tokens,
+                COALESCE(SUM(cache_hit_tokens),0)::bigint AS cache_hit_tokens,
+                COALESCE(SUM(cache_miss_tokens),0)::bigint AS cache_miss_tokens,
+                COALESCE(SUM(thoughts_tokens),0)::bigint AS thoughts_tokens,
+                COALESCE(SUM(input_cost_usd),0)::numeric(18,12) AS input_cost_usd,
+                COALESCE(SUM(output_cost_usd),0)::numeric(18,12) AS output_cost_usd,
+                COALESCE(SUM(cost_usd),0)::numeric(18,12) AS cost_usd
+           FROM admin_api_request_ledger
+          WHERE created_at >= $1 AND created_at < $2`, params,
+      ),
+      db.query(
+        `SELECT to_char(date_trunc('day', created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+                COUNT(*)::int AS requests,
+                COALESCE(SUM(cost_usd),0)::numeric(18,12) AS cost_usd,
+                COALESCE(SUM(tokens_in),0)::bigint AS tokens_in,
+                COALESCE(SUM(tokens_out),0)::bigint AS tokens_out,
+                COUNT(*) FILTER (WHERE request_status IN ('failed','invalid_response'))::int AS failed,
+                COUNT(*) FILTER (WHERE task_id IS NULL AND trace_task_id IS NULL)::int AS outside_task,
+                COUNT(*) FILTER (WHERE (task_id IS NULL) <> (trace_task_id IS NULL))::int AS partial_attribution
+           FROM admin_api_request_ledger
+          WHERE created_at >= $1 AND created_at < $2
+          GROUP BY date_trunc('day', created_at AT TIME ZONE 'UTC')
+          ORDER BY day ASC`, params,
+      ),
+      db.query(
+        `SELECT provider, COALESCE(model, '—') AS model,
+                COUNT(*)::int AS requests,
+                COUNT(*) FILTER (WHERE request_status IN ('failed','invalid_response'))::int AS failed,
+                COUNT(*) FILTER (WHERE task_id IS NULL AND trace_task_id IS NULL)::int AS outside_task,
+                COUNT(*) FILTER (WHERE (task_id IS NULL) <> (trace_task_id IS NULL))::int AS partial_attribution,
+                COALESCE(SUM(tokens_in),0)::bigint AS tokens_in,
+                COALESCE(SUM(tokens_out),0)::bigint AS tokens_out,
+                COALESCE(SUM(cost_usd),0)::numeric(18,12) AS cost_usd
+           FROM admin_api_request_ledger
+          WHERE created_at >= $1 AND created_at < $2
+          GROUP BY provider, model
+          ORDER BY cost_usd DESC, requests DESC`, params,
+      ),
+      db.query(
+        `SELECT provider, COALESCE(model, '—') AS model,
+                COUNT(*)::int AS requests,
+                COUNT(*) FILTER (WHERE request_status IN ('failed','invalid_response'))::int AS failed,
+                COALESCE(SUM(cost_usd),0)::numeric(18,12) AS cost_usd,
+                COALESCE(SUM(tokens_in),0)::bigint AS tokens_in,
+                COALESCE(SUM(tokens_out),0)::bigint AS tokens_out
+           FROM admin_api_request_ledger
+          WHERE created_at >= $1 AND created_at < $2
+          GROUP BY provider, model
+          ORDER BY cost_usd DESC, requests DESC
+          LIMIT 100`, params,
+      ),
+      db.query(
+        `SELECT COALESCE(pipeline, 'unattributed') AS pipeline,
+                COUNT(*)::int AS requests,
+                COUNT(*) FILTER (WHERE request_status IN ('failed','invalid_response'))::int AS failed,
+                COUNT(*) FILTER (WHERE task_id IS NULL AND trace_task_id IS NULL)::int AS outside_task,
+                COUNT(*) FILTER (WHERE (task_id IS NULL) <> (trace_task_id IS NULL))::int AS partial_attribution,
+                COALESCE(SUM(cost_usd),0)::numeric(18,12) AS cost_usd,
+                COALESCE(SUM(tokens_in),0)::bigint AS tokens_in,
+                COALESCE(SUM(tokens_out),0)::bigint AS tokens_out
+           FROM admin_api_request_ledger
+          WHERE created_at >= $1 AND created_at < $2
+          GROUP BY COALESCE(pipeline, 'unattributed')
+          ORDER BY cost_usd DESC, requests DESC`, params,
+      ),
+      db.query(
+        `SELECT id, created_at, provider, model, pipeline, stage_name, call_label,
+                task_id, trace_task_id, request_status, attempt, duration_ms,
+                tokens_in, tokens_out, cached_tokens, cost_usd,
+                error_code, error_message,
+                CASE
+                  WHEN task_id IS NULL AND trace_task_id IS NULL THEN 'outside_task'
+                  WHEN task_id IS NULL OR trace_task_id IS NULL THEN 'partial_attribution'
+                  WHEN request_status IN ('failed','invalid_response') THEN 'failed'
+                  WHEN request_status = 'cache_miss' THEN 'cache_miss'
+                  WHEN attempt > 1 OR request_status = 'truncated' THEN 'retry'
+                  WHEN cost_usd >= 0.50 THEN 'high_cost'
+                  ELSE 'review'
+                END AS anomaly_type
+           FROM admin_api_request_ledger
+          WHERE created_at >= $1 AND created_at < $2
+            AND (task_id IS NULL OR trace_task_id IS NULL
+                 OR request_status IN ('failed','invalid_response','cache_miss','truncated')
+                 OR attempt > 1 OR cost_usd >= 0.50)
+          ORDER BY created_at DESC
+          LIMIT 100`, params,
+      ),
+      db.query(
+        `SELECT COALESCE(SUM(cost_usd),0)::numeric(18,12) AS task_stage_cost_usd
+           FROM task_stages
+          WHERE completed_at >= $1 AND completed_at < $2`, params,
+      ),
+    ]);
+
+    const raw = totalsQ.rows[0] || {};
+    const num = (value) => Number(value) || 0;
+    const totals = {
+      requests: num(raw.requests), successful: num(raw.successful), failed: num(raw.failed),
+      retries: num(raw.retries), cache_misses: num(raw.cache_misses), outside_task: num(raw.outside_task), partial_attribution: num(raw.partial_attribution),
+      tokens_in: num(raw.tokens_in), tokens_out: num(raw.tokens_out),
+      cached_tokens: num(raw.cached_tokens), cache_hit_tokens: num(raw.cache_hit_tokens),
+      cache_miss_tokens: num(raw.cache_miss_tokens), thoughts_tokens: num(raw.thoughts_tokens),
+      cost_usd: num(raw.cost_usd), input_cost_usd: num(raw.input_cost_usd),
+      output_cost_usd: num(raw.output_cost_usd),
+    };
+    const stageCost = num(stageQ.rows[0]?.task_stage_cost_usd);
+    return res.json({
+      range: { from: from.toISOString(), to: to.toISOString() },
+      totals,
+      daily: dailyQ.rows.map((row) => ({ ...row, requests: num(row.requests), cost_usd: num(row.cost_usd), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), failed: num(row.failed), outside_task: num(row.outside_task), partial_attribution: num(row.partial_attribution) })),
+      by_provider: providerQ.rows.map((row) => ({ ...row, requests: num(row.requests), failed: num(row.failed), outside_task: num(row.outside_task), partial_attribution: num(row.partial_attribution), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), cost_usd: num(row.cost_usd) })),
+      by_model: modelQ.rows.map((row) => ({ ...row, requests: num(row.requests), failed: num(row.failed), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), cost_usd: num(row.cost_usd) })),
+      by_pipeline: pipelineQ.rows.map((row) => ({ ...row, requests: num(row.requests), failed: num(row.failed), outside_task: num(row.outside_task), partial_attribution: num(row.partial_attribution), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), cost_usd: num(row.cost_usd) })),
+      anomalies: anomalyQ.rows.map((row) => ({ ...row, cost_usd: num(row.cost_usd), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), attempt: num(row.attempt) })),
+      reconciliation: {
+        ledger_cost_usd: totals.cost_usd,
+        task_stage_cost_usd: stageCost,
+        delta_usd: Number((totals.cost_usd - stageCost).toFixed(12)),
+        note: 'Ledger is authoritative for every provider attempt; task_stages contains only persisted successful stage calls, so delta exposes retries/failures/cache accounting gaps rather than hiding them.',
+      },
+    });
+  } catch (error) {
+    if (error && /admin_api_request_ledger|task_stages/.test(String(error.message))) {
+      return res.json(_emptyAdminApiUsage('API ledger migration is not initialized yet'));
+    }
+    return next(error);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Admin storage audit / cleanup
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1422,6 +1603,7 @@ module.exports = {
   getCrossTaskDetail,
   getFunnelBreakdown,
   getAegisCostBreakdown,
+  getAdminApiUsage,
   getAdminStorageAudit,
   cleanupAdminStorage,
   getAdminStorageInventory,

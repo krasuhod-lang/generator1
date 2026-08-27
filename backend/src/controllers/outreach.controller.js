@@ -110,7 +110,12 @@ async function listCampaigns(req, res, next) {
               sender_site, sender_telegram,
               status, total_prospects, total_sent, total_opened, total_clicked,
               total_replied, last_run_at, next_run_at, error_message,
-              created_at, updated_at
+              created_at, updated_at,
+              COALESCE((SELECT COUNT(*) FROM outreach_prospects op WHERE op.campaign_id = outreach_campaigns.id), total_prospects)::int AS actual_prospects,
+              COALESCE((SELECT COUNT(*) FROM outreach_emails oe WHERE oe.campaign_id = outreach_campaigns.id AND (oe.sent_at IS NOT NULL OR oe.status IN ('sent','delivered','opened','clicked'))), total_sent)::int AS actual_sent,
+              COALESCE((SELECT COUNT(*) FROM outreach_emails oe WHERE oe.campaign_id = outreach_campaigns.id AND oe.opened_at IS NOT NULL), total_opened)::int AS actual_opened,
+              COALESCE((SELECT COUNT(*) FROM outreach_emails oe WHERE oe.campaign_id = outreach_campaigns.id AND oe.clicked_at IS NOT NULL), total_clicked)::int AS actual_clicked,
+              COALESCE((SELECT COUNT(*) FROM outreach_emails oe WHERE oe.campaign_id = outreach_campaigns.id AND oe.status = 'queued'), 0)::int AS actual_queued
          FROM outreach_campaigns
         WHERE user_id = $1
         ORDER BY created_at DESC
@@ -401,9 +406,12 @@ async function getCampaignStats(req, res, next) {
     // Динамика по дням: отправлено / открыто / кликнуто за последние 30 дней.
     const { rows: daily } = await db.query(
       `SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
-              COUNT(*) FILTER (WHERE e.sent_at::date    = d.day) AS sent,
-              COUNT(*) FILTER (WHERE e.opened_at::date  = d.day) AS opened,
-              COUNT(*) FILTER (WHERE e.clicked_at::date = d.day) AS clicked
+              COUNT(*) FILTER (WHERE (e.sent_at AT TIME ZONE 'UTC')::date    = d.day) AS sent,
+              COUNT(*) FILTER (WHERE (e.delivered_at AT TIME ZONE 'UTC')::date = d.day) AS delivered,
+              COUNT(*) FILTER (WHERE (e.opened_at AT TIME ZONE 'UTC')::date  = d.day) AS opened,
+              COUNT(*) FILTER (WHERE (e.clicked_at AT TIME ZONE 'UTC')::date = d.day) AS clicked,
+              COUNT(*) FILTER (WHERE (e.bounced_at AT TIME ZONE 'UTC')::date = d.day OR (e.status = 'bounced' AND (e.queued_at AT TIME ZONE 'UTC')::date = d.day)) AS bounced,
+              COUNT(*) FILTER (WHERE e.failed_at IS NOT NULL AND (e.failed_at AT TIME ZONE 'UTC')::date = d.day) AS failed
          FROM generate_series(
                 (NOW() - INTERVAL '29 days')::date, NOW()::date, INTERVAL '1 day'
               ) AS d(day)
@@ -422,25 +430,65 @@ async function getCampaignStats(req, res, next) {
       [campaign.id],
     );
 
+    // Источник истины для sent/open/click — timestamps писем, а не
+    // cached counters кампании: queued не равно sent, а webhook может быть
+    // доставлен повторно.
+    const { rows: aggregateRows } = await db.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM outreach_prospects WHERE campaign_id = $1) AS prospects,
+         COUNT(*) FILTER (WHERE sent_at IS NOT NULL OR status IN ('sent','delivered','opened','clicked'))::int AS sent,
+         COUNT(*) FILTER (WHERE delivered_at IS NOT NULL)::int AS delivered,
+         COUNT(*) FILTER (WHERE opened_at IS NOT NULL)::int AS opened,
+         COUNT(*) FILTER (WHERE clicked_at IS NOT NULL)::int AS clicked,
+         COUNT(*) FILTER (WHERE bounced_at IS NOT NULL OR status = 'bounced')::int AS bounced,
+         COUNT(*) FILTER (WHERE status = 'complained')::int AS complained,
+         COUNT(*) FILTER (WHERE status = 'queued')::int AS queued,
+         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+         COUNT(*) FILTER (WHERE replied_at IS NOT NULL)::int AS replied
+       FROM outreach_emails
+      WHERE campaign_id = $1`,
+      [campaign.id],
+    );
+    const aggregate = aggregateRows[0] || {};
+    const sent = Number(aggregate.sent) || 0;
+    const opened = Number(aggregate.opened) || 0;
+    const clicked = Number(aggregate.clicked) || 0;
     const totals = {
-      prospects: campaign.total_prospects,
-      sent: campaign.total_sent,
-      opened: campaign.total_opened,
-      clicked: campaign.total_clicked,
-      replied: campaign.total_replied,
-      open_rate: campaign.total_sent > 0
-        ? +(campaign.total_opened / campaign.total_sent * 100).toFixed(1) : 0,
-      click_rate: campaign.total_sent > 0
-        ? +(campaign.total_clicked / campaign.total_sent * 100).toFixed(1) : 0,
+      prospects: Number(aggregate.prospects) || 0,
+      queued: Number(aggregate.queued) || 0,
+      sent,
+      delivered: Number(aggregate.delivered) || 0,
+      opened,
+      clicked,
+      replied: Number(aggregate.replied) || Number(campaign.total_replied) || 0,
+      bounced: Number(aggregate.bounced) || 0,
+      complained: Number(aggregate.complained) || 0,
+      failed: Number(aggregate.failed) || 0,
+      open_rate: sent > 0 ? +(opened / sent * 100).toFixed(1) : 0,
+      click_rate: sent > 0 ? +(clicked / sent * 100).toFixed(1) : 0,
     };
 
     return res.json({
       totals,
+      diagnostics: {
+        queued_not_sent: totals.queued,
+        failed: totals.failed,
+        bounced: totals.bounced,
+        complained: totals.complained,
+        counter_drift: {
+          sent: Number(campaign.total_sent) !== totals.sent,
+          opened: Number(campaign.total_opened) !== totals.opened,
+          clicked: Number(campaign.total_clicked) !== totals.clicked,
+        },
+      },
       daily: daily.map((d) => ({
         day: d.day,
         sent: parseInt(d.sent, 10) || 0,
+        delivered: parseInt(d.delivered, 10) || 0,
         opened: parseInt(d.opened, 10) || 0,
         clicked: parseInt(d.clicked, 10) || 0,
+        bounced: parseInt(d.bounced, 10) || 0,
+        failed: parseInt(d.failed, 10) || 0,
       })),
       by_status: byStatus,
       warmup_week: campaign.warmup_week,
@@ -518,27 +566,45 @@ async function handleResendEvent(event) {
   const email = rows[0];
   if (!email) return;
 
-  // Обновляем статус и timestamp письма.
+  // Повторный Resend/Svix event не должен повторно увеличивать counters.
+  // Status двигаем только вперёд по delivery state, кроме failed/queued.
+  const rank = { queued: 0, sent: 1, delivered: 2, opened: 3, clicked: 4, bounced: 3, complained: 5, failed: 0 };
+  const nextRank = rank[mapping.status] || 0;
+  let firstTransition = false;
   if (mapping.col) {
-    await db.query(
+    const { rows: updatedRows } = await db.query(
       `UPDATE outreach_emails
-          SET status = $1, ${mapping.col} = COALESCE(${mapping.col}, NOW())
-        WHERE id = $2`,
-      [mapping.status, email.id],
+          SET status = CASE WHEN $1::int > CASE status
+                WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2
+                WHEN 'opened' THEN 3 WHEN 'clicked' THEN 4 WHEN 'bounced' THEN 3
+                WHEN 'complained' THEN 5 ELSE 0 END
+              THEN $2 ELSE status END,
+              ${mapping.col} = COALESCE(${mapping.col}, NOW())
+        WHERE id = $3 AND ${mapping.col} IS NULL
+        RETURNING id`,
+      [nextRank, mapping.status, email.id],
     );
+    firstTransition = updatedRows.length > 0;
   } else {
     await db.query(
-      `UPDATE outreach_emails SET status = $1 WHERE id = $2`,
-      [mapping.status, email.id],
+      `UPDATE outreach_emails
+          SET status = CASE WHEN $1::int > CASE status
+                WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2
+                WHEN 'opened' THEN 3 WHEN 'clicked' THEN 4 WHEN 'bounced' THEN 3
+                WHEN 'complained' THEN 5 ELSE 0 END
+              THEN $2 ELSE status END
+        WHERE id = $3`,
+      [nextRank, mapping.status, email.id],
     );
+    firstTransition = true;
   }
 
-  // Инкрементируем счётчики кампании (только на первом переходе).
+  // Инкрементируем счётчики кампании только на первом timestamp transition.
   const counterCol = {
     'email.opened':  'total_opened',
     'email.clicked': 'total_clicked',
   }[type];
-  if (counterCol) {
+  if (counterCol && firstTransition) {
     await db.query(
       `UPDATE outreach_campaigns SET ${counterCol} = ${counterCol} + 1, updated_at = NOW()
         WHERE id = $1`,
@@ -700,10 +766,11 @@ async function directSend(req, res, next) {
     // Учитываем поставленные письма в счётчике кампании.
     if (queued > 0) {
       await db.query(
-        `UPDATE outreach_campaigns
-            SET total_prospects = total_prospects + $1,
-                last_run_at = NOW(), updated_at = NOW()
-          WHERE id = $2`,
+      `UPDATE outreach_campaigns
+          SET total_prospects = total_prospects + $1,
+              total_queued = COALESCE(total_queued, 0) + $1,
+              last_run_at = NOW(), updated_at = NOW()
+        WHERE id = $2`,
         [queued, campaign.id],
       );
     }

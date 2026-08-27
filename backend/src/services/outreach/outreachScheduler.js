@@ -115,10 +115,12 @@ async function runCampaignCycle(campaign) {
     }
   }
 
-  // 5. Обновляем статистику кампании
+  // 5. Обновляем статистику кампании.
+  // `queued` — это только поставленные в BullMQ письма, а не факт
+  // принятия провайдером. Фактический total_sent считается по sent_at.
   await db.query(
     `UPDATE outreach_campaigns
-        SET total_sent = total_sent + $1,
+        SET total_queued = COALESCE(total_queued, 0) + $1,
             last_run_at = NOW(),
             next_run_at = NOW() + INTERVAL '24 hours',
             updated_at = NOW()
@@ -177,13 +179,13 @@ async function prepareAndQueueEmail(campaign, prospect, opts) {
   // Создаём запись письма в БД
   const { rows: emailRows } = await db.query(
     `INSERT INTO outreach_emails
-       (prospect_id, campaign_id, user_id, recipient_email, recipient_domain, subject, html_preview, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued')
+       (prospect_id, campaign_id, user_id, recipient_email, recipient_domain, subject, html_preview, html_content, text_content, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued')
      RETURNING id`,
     [
       prospect.id, campaign.id, campaign.user_id,
       email, domain,
-      composed.subject, composed.html.slice(0, 500),
+      composed.subject, composed.html.slice(0, 500), composed.html, composed.text,
     ],
   );
   const emailId = emailRows[0].id;
