@@ -14,8 +14,69 @@
  * и для обогащения контекста генерации контента.
  */
 
-const { scrapeUrl }    = require('./scraper');
+const { scrapeUrl, sanitizeUrl } = require('./scraper');
 const { callLLM }      = require('../llm/callLLM');
+
+// Целевая страница не должна ломать весь Stage 0 из-за временного 5xx,
+// редиректа или различий между http/https и www/non-www. Один candidate
+// уже имеет внутренние retries в scrapeUrl; здесь добавляем только небольшой
+// список origin-вариантов, без обхода CAPTCHA/WAF и без бесконечных повторов.
+const TARGET_PAGE_SCRAPE_TIMEOUT_MS = 30000;
+const TARGET_PAGE_MAX_CANDIDATES = 3;
+
+function buildTargetPageCandidates(rawUrl) {
+  const normalized = sanitizeUrl(rawUrl);
+  if (!normalized) return [];
+
+  let parsed;
+  try { parsed = new URL(normalized); } catch (_) { return [normalized]; }
+
+  const candidates = [parsed.toString()];
+  const alternateProtocol = parsed.protocol === 'https:' ? 'http:' : 'https:';
+  const protocolUrl = new URL(parsed.toString());
+  protocolUrl.protocol = alternateProtocol;
+  candidates.push(protocolUrl.toString());
+
+  const host = parsed.hostname.toLowerCase();
+  if (host.startsWith('www.')) {
+    const nonWww = new URL(parsed.toString());
+    nonWww.hostname = host.slice(4);
+    candidates.push(nonWww.toString());
+  } else {
+    const www = new URL(parsed.toString());
+    www.hostname = `www.${host}`;
+    candidates.push(www.toString());
+  }
+
+  return [...new Set(candidates)].slice(0, TARGET_PAGE_MAX_CANDIDATES);
+}
+
+async function scrapeTargetPageWithFallback(rawUrl, log) {
+  const candidates = buildTargetPageCandidates(rawUrl);
+  const failures = [];
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    try {
+      const pageData = await scrapeUrl(candidate, TARGET_PAGE_SCRAPE_TIMEOUT_MS);
+      if (pageData?.markdown && pageData.markdown.length >= 100) {
+        if (i > 0) {
+          log(`Target Page Analyzer: сработал fallback URL ${candidate}`, 'info');
+        }
+        return pageData;
+      }
+      failures.push(`${candidate}: empty_content`);
+    } catch (err) {
+      const detail = String(err?.message || err).replace(/\s+/g, ' ').slice(0, 240);
+      failures.push(`${candidate}: ${detail}`);
+      if (i < candidates.length - 1) {
+        log(`Target Page Analyzer: fallback ${i + 1}/${candidates.length} после ошибки ${candidate}`, 'info');
+      }
+    }
+  }
+
+  throw new Error(`all scrape candidates failed (${failures.join(' | ')})`);
+}
 
 const TARGET_PAGE_ANALYSIS_PROMPT = `Ты — Senior аналитик контента, эксперт по E-E-A-T (Опыт, Экспертность, Авторитетность, Достоверность) и бизнес-разведке. Твоя задача — не сделать «дамп страницы», а провести АНАЛИТИЧЕСКИЙ разбор: за каждым фактом увидеть скрытый смысл, доказательство компетентности или, наоборот, провал доверия.
 
@@ -150,10 +211,11 @@ async function analyzeTargetPage(targetUrl, ctx) {
 
   log(`Target Page Analyzer: парсинг целевой страницы ${url}...`, 'info');
 
-  // Scrape the target page
+  // Scrape the target page. Одна временная 5xx/сетeвая ошибка не должна
+  // завершать Stage 0: helper проверяет ограниченные origin-варианты.
   let pageData;
   try {
-    pageData = await scrapeUrl(url, 25000);
+    pageData = await scrapeTargetPageWithFallback(url, log);
   } catch (err) {
     log(`Target Page Analyzer: ошибка парсинга ${url}: ${err.message}`, 'warn');
     return null;
@@ -208,4 +270,8 @@ async function analyzeTargetPage(targetUrl, ctx) {
   }
 }
 
-module.exports = { analyzeTargetPage };
+module.exports = {
+  analyzeTargetPage,
+  buildTargetPageCandidates,
+  scrapeTargetPageWithFallback,
+};
