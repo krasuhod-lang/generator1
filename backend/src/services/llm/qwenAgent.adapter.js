@@ -15,10 +15,23 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 const { getIntegrationSecret } = require('../integrations/integrationVault');
 const { recordApiRequest } = require('../metrics/adminApiLedger');
 
-const BASE_URL = (
+function normalizeResponsesBaseUrl(raw) {
+  let value = String(raw || '').trim().replace(/\/+$/, '');
+  if (!value) value = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+  // Alibaba's OpenAI-compatible Responses API is served from
+  // /compatible-mode/v1/responses. The older /api/v1 default returns 404 for
+  // this contract, so normalize legacy values instead of silently duplicating
+  // or using the wrong route.
+  value = value.replace(/\/responses$/i, '').replace(/\/chat\/completions$/i, '');
+  value = value.replace(/\/api\/v1$/i, '/compatible-mode/v1');
+  return value.replace(/\/+$/, '');
+}
+
+const BASE_URL = normalizeResponsesBaseUrl(
   process.env.QWEN_RESPONSES_BASE_URL
-  || 'https://dashscope-intl.aliyuncs.com/api/v1'
-).trim().replace(/\/+$/, '');
+  || process.env.DASHSCOPE_BASE_URL
+  || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+);
 const DEFAULT_MODEL = 'qwen3.8-max';
 const DEFAULT_TIMEOUT_MS = 7 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 12000;
@@ -279,6 +292,8 @@ async function runQwenResearchAgent({ task, existingEvidence = '', taskId = null
 
 module.exports = {
   DEFAULT_MODEL,
+  BASE_URL,
+  normalizeResponsesBaseUrl,
   runQwenResearchAgent,
   buildPrompt,
   parseJsonObject,
