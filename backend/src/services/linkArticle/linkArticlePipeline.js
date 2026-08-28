@@ -1177,6 +1177,9 @@ async function processLinkArticleTask(taskId) {
       ? runRealtimeResearch({
           topic: task.topic,
           region: task.region,
+          targetUrl: task.target_url || task.target_site_url || '',
+          taskId,
+          pipeline: 'link_article',
           sourceContext: [
             `Анкор/ссылка: ${task.anchor_text || task.anchor || ''}`,
             `Целевой URL: ${task.target_url || task.target_site_url || ''}`,
@@ -1241,7 +1244,7 @@ async function processLinkArticleTask(taskId) {
       await saveStageResult(taskId, 'realtime_research', realtimeResearch);
       await appendLog(
         taskId,
-        `🔎 Research Evidence (DeepSeek/Gemini): фактов ${realtimeResearch.realtime_facts.length}, ` +
+        `🔎 Research Evidence (${realtimeResearch.research_provider || 'DeepSeek/Gemini'}): фактов ${realtimeResearch.realtime_facts.length}, ` +
         `цитат ${realtimeResearch.expert_quotes.length}, трендов ${realtimeResearch.latest_trends.length}, ` +
         `законы/цены ${realtimeResearch.legal_updates.length} → §2b LAKB`,
         'ok',

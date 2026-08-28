@@ -182,7 +182,16 @@ Existing scraped evidence for cross-checking (not authoritative by itself):
 ${compactEvidence || '[none]'}`;
 }
 
-async function runQwenResearchAgent({ task, existingEvidence = '', taskId = null, log = null, onTokens = null } = {}) {
+async function runQwenResearchAgent({
+  task,
+  existingEvidence = '',
+  taskId = null,
+  log = null,
+  onTokens = null,
+  pipeline = 'seo',
+  stageName = 'stage0',
+  callLabel = 'Stage 0 Qwen Research Agent',
+} = {}) {
   const startedAt = Date.now();
   const apiKey = await getIntegrationSecret('DASHSCOPE_API_KEY');
   if (!apiKey) throw new Error('DASHSCOPE_API_KEY is not configured for Qwen research agent');
@@ -223,8 +232,8 @@ async function runQwenResearchAgent({ task, existingEvidence = '', taskId = null
   } catch (error) {
     const safe = sanitizeError(error);
     await recordApiRequest({
-      provider: 'qwen', model, pipeline: 'seo', stageName: 'stage0',
-      callLabel: 'Stage 0 Qwen Research Agent', taskId, requestStatus: 'error',
+      provider: 'qwen', model, pipeline, stageName,
+      callLabel, taskId, requestStatus: 'error',
       httpStatus: safe.status, durationMs: Date.now() - startedAt,
       promptSize: prompt.length, errorCode: error.code || `HTTP_${safe.status || 'NETWORK'}`,
       errorMessage: safe.message, meta: { tools: ['web_search', 'web_extractor'] },
@@ -239,8 +248,8 @@ async function runQwenResearchAgent({ task, existingEvidence = '', taskId = null
     raw = normalizeResearch(parseJsonObject(text));
   } catch (error) {
     await recordApiRequest({
-      provider: 'qwen', model, pipeline: 'seo', stageName: 'stage0',
-      callLabel: 'Stage 0 Qwen Research Agent', taskId, requestStatus: 'invalid_response',
+      provider: 'qwen', model, pipeline, stageName,
+      callLabel, taskId, requestStatus: 'invalid_response',
       httpStatus: response.status, durationMs: Date.now() - startedAt,
       promptSize: prompt.length, tokensIn: metrics.tokensIn, tokensOut: metrics.tokensOut,
       cachedTokens: metrics.cachedTokens, thoughtsTokens: metrics.reasoningTokens,
@@ -254,9 +263,9 @@ async function runQwenResearchAgent({ task, existingEvidence = '', taskId = null
   const usagePayload = {
     provider: 'qwen',
     model,
-    pipeline: 'seo',
-    stageName: 'stage0',
-    callLabel: 'Stage 0 Qwen Research Agent',
+    pipeline,
+    stageName,
+    callLabel,
     taskId,
     requestStatus: 'success',
     httpStatus: response.status,
@@ -285,7 +294,7 @@ async function runQwenResearchAgent({ task, existingEvidence = '', taskId = null
     });
   }
   if (typeof log === 'function') {
-    log(`Stage 0 Qwen Research Agent: ${raw.sources.length} источников, ${metrics.tokensIn + metrics.tokensOut} токенов`, 'success');
+    log(`${callLabel}: ${raw.sources.length} источников, ${metrics.tokensIn + metrics.tokensOut} токенов`, 'success');
   }
   return { raw, provider: 'qwen', model, usage: metrics };
 }

@@ -17,6 +17,8 @@ const {
   callResearchProvider,
   hasResearchProviderAsync,
 } = require('./researchProvider');
+const { runQwenResearchAgent } = require('./qwenAgent.adapter');
+const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
 
 /**
  * Приводит сырой ответ DeepSeek/Gemini research contract к
@@ -24,13 +26,59 @@ const {
  * @param {object|null} raw
  * @returns {{realtime_facts:Array, expert_quotes:Array, latest_trends:Array, legal_updates:Array}|null}
  */
-function normalizeResearch(raw) {
+function normalizeResearch(raw, meta = {}) {
   if (!raw || typeof raw !== 'object') return null;
+  const sourceOf = (item) => item?.source || item?.source_url || item?.url || '';
+  const normalizeFacts = (items) => (Array.isArray(items) ? items : []).map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return '';
+    return {
+      ...item,
+      fact: item.fact || item.claim || item.statement || item.title || '',
+      value: item.value || item.fact || item.claim || '',
+      source: sourceOf(item),
+      quote: item.quote || item.extract || item.evidence_quote || '',
+    };
+  }).filter(Boolean).slice(0, 30);
+  const normalizeQuotes = (items) => (Array.isArray(items) ? items : []).map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return '';
+    return {
+      ...item,
+      author: item.author || item.speaker || item.expert || '',
+      role: item.role || item.organization || item.position || '',
+      quote: item.quote || item.text || item.extract || '',
+      source: sourceOf(item),
+    };
+  }).filter(Boolean).slice(0, 20);
+  const normalizeTrends = (items) => (Array.isArray(items) ? items : []).map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return '';
+    return {
+      ...item,
+      trend: item.trend || item.title || item.topic || item.claim || '',
+      evidence: item.evidence || item.quote || item.extract || '',
+      source: sourceOf(item),
+    };
+  }).filter(Boolean).slice(0, 20);
+  const normalizeLegal = (items) => (Array.isArray(items) ? items : []).map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return '';
+    return {
+      ...item,
+      topic: item.topic || item.title || item.subject || '',
+      change: item.change || item.description || item.claim || '',
+      source: sourceOf(item),
+    };
+  }).filter(Boolean).slice(0, 20);
   return {
-    realtime_facts: Array.isArray(raw.current_stats)          ? raw.current_stats          : [],
-    expert_quotes:  Array.isArray(raw.expert_quotes)          ? raw.expert_quotes          : [],
-    latest_trends:  Array.isArray(raw.latest_trends)          ? raw.latest_trends          : [],
-    legal_updates:  Array.isArray(raw.legal_or_price_updates) ? raw.legal_or_price_updates : [],
+    realtime_facts: normalizeFacts(raw.current_stats || raw.realtime_facts),
+    expert_quotes: normalizeQuotes(raw.expert_quotes),
+    latest_trends: normalizeTrends(raw.latest_trends),
+    legal_updates: normalizeLegal(raw.legal_or_price_updates || raw.legal_updates),
+    research_provider: meta.provider || raw.research_provider || null,
+    research_model: meta.model || raw.research_model || null,
+    research_providers: meta.providers || raw.research_providers || [],
   };
 }
 
@@ -65,9 +113,27 @@ async function runRealtimeResearch({
   region,
   evidence = '',
   sourceContext = '',
+  targetUrl = '',
+  taskId = null,
+  pipeline = 'info_article',
   callOptions = {},
 } = {}) {
-  if (!topic || !String(topic).trim() || !(await hasResearchProviderAsync())) return null;
+  if (!topic || !String(topic).trim()) return null;
+
+  const qwenEnabled = !['0', 'false', 'no', 'off'].includes(
+    String(process.env.CONTENT_QWEN_RESEARCH_ENABLED || 'true').toLowerCase(),
+  );
+  let qwenConfigured = false;
+  if (qwenEnabled) {
+    try {
+      const qwenInfo = await getIntegrationSecretInfo('DASHSCOPE_API_KEY');
+      qwenConfigured = Boolean(qwenInfo?.configured);
+    } catch (_) {
+      qwenConfigured = false;
+    }
+  }
+  const legacyConfigured = await hasResearchProviderAsync();
+  if (!qwenConfigured && !legacyConfigured) return null;
 
   const synthTask = {
     input_target_service: String(topic),
@@ -79,6 +145,45 @@ async function runRealtimeResearch({
     .filter(Boolean)
     .join('\n\n')
     .slice(0, 30000);
+
+  let qwenResearch = null;
+  if (qwenConfigured) {
+    try {
+      const qwenResult = await runQwenResearchAgent({
+        task: {
+          input_target_service: String(topic),
+          input_target_url: targetUrl || '',
+          input_region: region || '',
+          input_language: 'ru',
+          input_target_audience: String(sourceContext || '').slice(0, 4000),
+          input_business_goal: String(sourceContext || '').slice(0, 4000),
+        },
+        existingEvidence: evidenceBlock,
+        taskId,
+        log: callOptions.log,
+        onTokens: callOptions.onTokens,
+        pipeline,
+        stageName: 'pre_stage0_research',
+        callLabel: `${pipeline === 'link_article' ? 'Link Article' : 'Blog'} Qwen Research Agent`,
+      });
+      qwenResearch = normalizeResearch(qwenResult?.raw, {
+        provider: 'qwen',
+        model: qwenResult?.model || 'qwen3.8-max',
+        providers: ['qwen'],
+      });
+    } catch (qwenError) {
+      if (typeof callOptions.log === 'function') {
+        await callOptions.log(`⚠ Qwen research недоступен: ${qwenError.message} — fallback на DeepSeek/Gemini`, 'warn');
+      }
+    }
+  }
+
+  const qwenEvidence = qwenResearch && hasRealtimeData(qwenResearch)
+    ? JSON.stringify(qwenResearch).slice(0, 24000)
+    : '';
+  const synthesisEvidence = [evidenceBlock, qwenEvidence]
+    .filter(Boolean)
+    .join('\n\nQWEN WEB EVIDENCE (требует проверки):\n\n');
   const context = [
     `Статья/тема: ${topic}. Регион: ${region || 'Россия'}.`,
     'SOURCE EVIDENCE (единственный источник фактов; при отсутствии evidence верни пустые массивы):',
@@ -86,14 +191,23 @@ async function runRealtimeResearch({
   ].join('\n\n');
 
   try {
-    const result = await callResearchProvider({
-      system,
-      prompt: context,
-      callOptions,
-      callLabel: 'Research Evidence',
-      log: callOptions.log,
-    });
-    return result ? normalizeResearch(result.raw) : null;
+    const result = legacyConfigured
+      ? await callResearchProvider({
+          system,
+          prompt: context.replace(evidenceBlock || '[нет переданного evidence]', synthesisEvidence || '[нет переданного evidence]'),
+          callOptions,
+          callLabel: 'Research Evidence (DeepSeek validation)',
+          log: callOptions.log,
+        })
+      : null;
+    if (result) {
+      return normalizeResearch(result.raw, {
+        provider: qwenResearch ? 'qwen+deepseek' : (result.provider || 'deepseek'),
+        model: result.model || null,
+        providers: qwenResearch ? ['qwen', result.provider || 'deepseek'] : [result.provider || 'deepseek'],
+      });
+    }
+    return qwenResearch || null;
   } catch (_) {
     return null;
   }
@@ -118,7 +232,10 @@ function formatList(items, max) {
  */
 function renderRealtimeDataSection(rt, opts = {}) {
   if (!hasRealtimeData(rt)) return '';
-  const heading = opts.heading || '## §2b. RESEARCH EVIDENCE — DeepSeek/Gemini';
+  const providerLabel = rt?.research_providers?.length
+    ? rt.research_providers.join(' + ')
+    : (rt?.research_provider || 'DeepSeek/Gemini');
+  const heading = opts.heading || `## §2b. RESEARCH EVIDENCE — ${providerLabel}`;
 
   const out = [
     heading,

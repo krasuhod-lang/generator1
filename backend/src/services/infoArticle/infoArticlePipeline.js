@@ -1577,6 +1577,9 @@ async function processInfoArticleTask(taskId) {
       ? runRealtimeResearch({
           topic: task.topic,
           region: task.region,
+          targetUrl: task.target_site_url || task.target_url || '',
+          taskId,
+          pipeline: 'info_article',
           sourceContext: [
             `Аудитория: ${task.target_audience || ''}`,
             `Цель бизнеса: ${task.business_goal || ''}`,
@@ -1841,7 +1844,7 @@ async function processInfoArticleTask(taskId) {
       task.__realtimeResearch = realtimeResearch;
       await appendLog(
         taskId,
-        `🔎 Research Evidence (DeepSeek/Gemini): фактов ${realtimeResearch.realtime_facts.length}, ` +
+        `🔎 Research Evidence (${realtimeResearch.research_provider || 'DeepSeek/Gemini'}): фактов ${realtimeResearch.realtime_facts.length}, ` +
         `цитат ${realtimeResearch.expert_quotes.length}, трендов ${realtimeResearch.latest_trends.length}, ` +
         `законы/цены ${realtimeResearch.legal_updates.length} → §2b IAKB`,
         'ok',
