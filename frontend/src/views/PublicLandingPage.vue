@@ -8,7 +8,7 @@ const meta = [
 
 const plans = [
   {
-    name: 'Старт',
+    name: 'Минимальный',
     kicker: 'Для самостоятельного SEO',
     price: '4 990 ₽',
     priceValue: 4990,
