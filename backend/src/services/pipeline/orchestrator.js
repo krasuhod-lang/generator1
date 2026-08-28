@@ -847,7 +847,8 @@ async function runPipeline(task, ctx) {
       log(`Stage 4 блок ${i + 1}: audit_unavailable (${e.message}) — передаём лучший HTML в контролируемый refine`, 'warn');
     }
 
-    const needsRefinement = lsiCovPct < LSI_COVERAGE_TARGET || pqScore < EEAT_PQ_TARGET || auditResult?.mathematical_audit?.spam_risk_detected;
+    const needsLsiRefinement = lsiCovPct != null && lsiCovPct < LSI_COVERAGE_TARGET;
+    const needsRefinement = needsLsiRefinement || pqScore < EEAT_PQ_TARGET || auditResult?.mathematical_audit?.spam_risk_detected;
 
     // Объективные JS-метрики структуры HTML (не зависят от LLM-оценки).
     // Передаём blockCharLimits с допуском ±20% — длина становится триггером рефайна.
@@ -901,32 +902,39 @@ async function runPipeline(task, ctx) {
         log(`Stage 5 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 4`, 'warn');
       }
     } else {
-      log(`Блок ${i + 1}: PQ ${pqScore} ≥ ${EEAT_PQ_TARGET}, LSI ${Math.round(lsiCovPct)}% ≥ ${LSI_COVERAGE_TARGET}% — рефайн не нужен`, 'success');
+      const pqLabel = pqScore == null ? 'PQ n/a' : `PQ ${pqScore} ≥ ${EEAT_PQ_TARGET}`;
+      const lsiLabel = lsiCovPct == null ? 'LSI n/a' : `LSI ${Math.round(lsiCovPct)}% ≥ ${LSI_COVERAGE_TARGET}%`;
+      log(`Блок ${i + 1}: ${pqLabel}, ${lsiLabel} — рефайн не нужен`, 'success');
     }
 
-    // Stage 6: LSI-инъекция (всегда, если покрытие < LSI_COVERAGE_TARGET)
+    // Stage 6: LSI-инъекция только когда у блока есть обязательные LSI.
+    // Пустой target set означает "не применимо", а не 100% покрытие.
     let lsiCoverageAfter = lsiCovPct;
-    // Pause check перед Stage 6: ещё одна точка остановки.
-    if (await checkPauseRequested(taskId)) {
-      log(`Блок ${i + 1}: запрос на паузу — пропускаем Stage 6, сохраняем после Stage 5`, 'warn');
-      await saveContentBlock(taskId, i, block, currentHTML, currentPQ, lsiCovPct, currentAudit);
-      return currentHTML;
-    }
-    try {
-      const s6 = await runStage6(
-        task, stageCtx,
-        i, currentHTML, lsiMust,
-        blockCharLimits
-      );
-      currentHTML     = s6.html;
-      lsiCoverageAfter = s6.lsiCoverage;
-      if (s6.budgetSkipped) {
-        publish(taskId, { type: 'budget_skip', stage: 'stage6', blockIndex: i, h2: block.h2 });
+    if (lsiMust.length === 0) {
+      log(`Блок ${i + 1}: обязательные LSI отсутствуют — Stage 6 не применяется`, 'info');
+    } else {
+      // Pause check перед Stage 6: ещё одна точка остановки.
+      if (await checkPauseRequested(taskId)) {
+        log(`Блок ${i + 1}: запрос на паузу — пропускаем Stage 6, сохраняем после Stage 5`, 'warn');
+        await saveContentBlock(taskId, i, block, currentHTML, currentPQ, lsiCovPct, currentAudit);
+        return currentHTML;
       }
-    } catch (e) {
-      log(`Stage 6 блок ${i + 1} ОШИБКА: ${e.message} — используем HTML после Stage 5`, 'warn');
-      const cov = calculateCoverage(currentHTML, lsiMust);
-      lsiCoverageAfter = cov.percent;
+      try {
+        const s6 = await runStage6(
+          task, stageCtx,
+          i, currentHTML, lsiMust,
+          blockCharLimits
+        );
+        currentHTML      = s6.html;
+        lsiCoverageAfter = s6.lsiCoverage;
+        if (s6.budgetSkipped) {
+          publish(taskId, { type: 'budget_skip', stage: 'stage6', blockIndex: i, h2: block.h2 });
+        }
+      } catch (e) {
+        log(`Блок ${i + 1} Stage 6 ОШИБКА: ${e.message} — используем HTML после Stage 5`, 'warn');
+        const cov = calculateCoverage(currentHTML, lsiMust);
+        lsiCoverageAfter = cov.percent;
+      }
     }
 
     // Проверяем оставшиеся water-фразы

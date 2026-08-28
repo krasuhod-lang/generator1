@@ -207,6 +207,13 @@ function fmt(n, digits = 0) {
 function optionalScore(value, digits = 1) {
   return value == null || !Number.isFinite(Number(value)) ? '—' : fmt(value, digits);
 }
+function coverageLabel(value) {
+  return value == null || !Number.isFinite(Number(value)) ? '—' : `${fmt(value)}%`;
+}
+function coverageClass(value) {
+  if (value == null || !Number.isFinite(Number(value))) return 'text-gray-500';
+  return Number(value) >= 70 ? 'text-green-400' : Number(value) >= 50 ? 'text-yellow-400' : 'text-red-400';
+}
 function pqClass(value) {
   if (value == null || !Number.isFinite(Number(value))) return 'text-gray-500';
   return Number(value) >= 8 ? 'text-green-400' : Number(value) >= 6 ? 'text-yellow-400' : 'text-red-400';
@@ -406,8 +413,8 @@ function pqClass(value) {
               <div class="flex items-center gap-3 text-xs font-mono ml-auto">
                 <span class="text-gray-500">
                   LSI
-                  <span :class="block.lsi_coverage >= 70 ? 'text-green-400' : block.lsi_coverage >= 50 ? 'text-yellow-400' : 'text-red-400'">
-                    {{ block.lsi_coverage ?? 0 }}%
+                  <span :class="coverageClass(block.lsi_coverage)">
+                    {{ coverageLabel(block.lsi_coverage) }}
                   </span>
                 </span>
                 <span class="text-gray-500">

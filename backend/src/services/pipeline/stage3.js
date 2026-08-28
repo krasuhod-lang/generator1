@@ -385,7 +385,10 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
     if ((!stage3Result || !extractHtmlContent(stage3Result)) && block.type === 'faq') {
       log(`FAQ fallback для блока ${i + 1}`, 'warn');
       const faqHtml = buildFaqFallbackHtml(block, stage0Result, targetService);
-      stage3Result = { html_content: faqHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
+      stage3Result = {
+        html_content: faqHtml,
+        audit_report: { coverage_percentage: null, coverage_source: 'faq_fallback', dropped_lsi: [] },
+      };
     }
 
     // Recovery: если LLM вернул JSON без html_content — пробуем восстановить отдельным запросом.
@@ -399,7 +402,10 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
       const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx, task);
       if (recoveredHtml) {
         log(`Stage 3 блок ${i + 1}: recovery успешен (${recoveredHtml.length} символов)`, 'success');
-        stage3Result = { html_content: recoveredHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
+        stage3Result = {
+          html_content: recoveredHtml,
+          audit_report: { coverage_percentage: null, coverage_source: 'recovery_fallback', dropped_lsi: [] },
+        };
       }
     }
 
@@ -412,7 +418,10 @@ async function runStage3(task, ctx, taxonomy, stage0Result, stage1Result, stage2
         'warn'
       );
       const placeholder = buildPlaceholderBlock(block);
-      stage3Result = { html_content: placeholder, audit_report: { coverage_percentage: 0, dropped_lsi: [] } };
+      stage3Result = {
+        html_content: placeholder,
+        audit_report: { coverage_percentage: null, coverage_source: 'placeholder_fallback', dropped_lsi: [] },
+      };
     } else if (!stage3Result.html_content) {
       // Нашли HTML во вложенном поле — нормализуем
       stage3Result.html_content = extractedHtml;
@@ -601,7 +610,10 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
   if ((!stage3Result || !extractHtmlContent(stage3Result)) && block.type === 'faq') {
     log(`FAQ fallback для блока ${blockIndex + 1}`, 'warn');
     const faqHtml = buildFaqFallbackHtml(block, stage0Result, targetService);
-    stage3Result = { html_content: faqHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
+    stage3Result = {
+        html_content: faqHtml,
+        audit_report: { coverage_percentage: null, coverage_source: 'faq_fallback', dropped_lsi: [] },
+      };
   }
 
   // Recovery: если LLM вернул JSON без html_content — пробуем восстановить отдельным запросом.
@@ -614,7 +626,10 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     const recoveredHtml = await recoverHtmlContent(s3prompt, missingKeys, block.h2, ctx, task);
     if (recoveredHtml) {
       log(`Stage 3 блок ${blockIndex + 1}: recovery успешен (${recoveredHtml.length} символов)`, 'success');
-      stage3Result = { html_content: recoveredHtml, audit_report: { coverage_percentage: 50, dropped_lsi: [] } };
+      stage3Result = {
+          html_content: recoveredHtml,
+          audit_report: { coverage_percentage: null, coverage_source: 'recovery_fallback', dropped_lsi: [] },
+        };
     }
   }
 
@@ -627,7 +642,10 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
       'warn'
     );
     const placeholder = buildPlaceholderBlock(block);
-    stage3Result = { html_content: placeholder, audit_report: { coverage_percentage: 0, dropped_lsi: [] } };
+    stage3Result = {
+        html_content: placeholder,
+        audit_report: { coverage_percentage: null, coverage_source: 'placeholder_fallback', dropped_lsi: [] },
+      };
   } else if (!stage3Result.html_content) {
     stage3Result.html_content = extractedHtml;
   }

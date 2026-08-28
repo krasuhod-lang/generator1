@@ -146,7 +146,7 @@ function handleSSEMessage(msg) {
     case 'taxonomy':
       if (Array.isArray(msg.taxonomy)) {
         msg.taxonomy.forEach((b, idx) => {
-          blocks[idx] = { h2: b.h2, status: 'pending', lsi: 0, pq: null, type: b.type };
+          blocks[idx] = { h2: b.h2, status: 'pending', lsi: null, pq: null, type: b.type };
         });
       }
       break;
@@ -155,14 +155,14 @@ function handleSSEMessage(msg) {
       if (blocks[msg.blockIndex]) {
         blocks[msg.blockIndex].status = msg.status || 'writing';
       } else {
-        blocks[msg.blockIndex] = { h2: msg.h2, status: msg.status || 'writing', lsi: 0, pq: null };
+        blocks[msg.blockIndex] = { h2: msg.h2, status: msg.status || 'writing', lsi: null, pq: null };
       }
       break;
 
     case 'block_done':
       if (blocks[msg.blockIndex]) {
         blocks[msg.blockIndex].status = 'done';
-        blocks[msg.blockIndex].lsi    = msg.lsiCoverage ?? 0;
+        blocks[msg.blockIndex].lsi    = msg.lsiCoverage ?? null;
         blocks[msg.blockIndex].pq     = msg.pqScore     ?? null;
       }
       break;
@@ -341,6 +341,10 @@ const BLOCK_STATUS = {
 
 function blockStatus(st) {
   return BLOCK_STATUS[st] || { label: st || '?', cls: 'bg-gray-700 text-gray-400' };
+}
+
+function coverageLabel(value) {
+  return value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value)}%`;
 }
 
 const STAGE_LABELS = {
@@ -615,7 +619,7 @@ onUnmounted(() => {
               <div class="min-w-0">
                 <p class="text-gray-300 truncate">{{ b.h2 }}</p>
                 <p v-if="b.status === 'done'" class="text-gray-600 mt-0.5">
-                  LSI {{ b.lsi }}% · PQ {{ b.pq == null ? '—' : b.pq }}
+                  LSI {{ coverageLabel(b.lsi) }} · PQ {{ b.pq == null ? '—' : b.pq }}
                 </p>
               </div>
             </div>

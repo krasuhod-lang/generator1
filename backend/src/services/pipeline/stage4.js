@@ -2,6 +2,7 @@
 
 const { callLLM }        = require('../llm/callLLM');
 const { SYSTEM_PROMPTS } = require('../../prompts/systemPrompts');
+const { calculateCoverage } = require('../../utils/calculateCoverage');
 
 /**
  * E-E-A-T scoring rubric — добавляется к каждому вызову Stage 4.
@@ -121,15 +122,42 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
 
   const rawLsiCov = auditResult?.mathematical_audit?.lsi_coverage_percent;
   const rawPqScore = auditResult?.pq_score;
-  const lsiCovPct = Number.isFinite(Number(rawLsiCov))
-    ? Math.max(0, Math.min(100, Number(rawLsiCov)))
-    : 0;
+  const lsiTargets = Array.isArray(lsiMust)
+    ? lsiMust.map(term => String(term || '').trim()).filter(Boolean)
+    : [];
+  const deterministicCoverage = lsiTargets.length > 0
+    ? calculateCoverage(htmlContent, lsiTargets)
+    : null;
+  const hasModelLsi = Number.isFinite(Number(rawLsiCov));
+  // LSI is an objective text metric: when targets exist, trust the same
+  // deterministic stem-aware calculation used by Stage 6, not a model-reported
+  // value that may describe the prompt or forget a FAQ term. With no targets,
+  // the correct state is "not applicable", not a fabricated 0% or 100%.
+  const lsiCovPct = deterministicCoverage?.percent ?? null;
   const pqScore = Number.isFinite(Number(rawPqScore))
     ? Math.max(0, Math.min(10, Number(rawPqScore)))
     : null;
 
+  if (deterministicCoverage && hasModelLsi && Math.round(Number(rawLsiCov)) !== deterministicCoverage.percent) {
+    log(
+      `Stage 4 блок ${blockIndex + 1}: audit LSI ${rawLsiCov}% расходится с детерминированными ${deterministicCoverage.percent}% — сохраняем детерминированное значение`,
+      'warn'
+    );
+  } else if (!deterministicCoverage) {
+    log(`Stage 4 блок ${blockIndex + 1}: LSI-цели отсутствуют — покрытие не оценивается`, 'warn');
+  }
+
+  if (deterministicCoverage && auditResult?.mathematical_audit) {
+    auditResult.mathematical_audit = {
+      ...auditResult.mathematical_audit,
+      lsi_coverage_percent: deterministicCoverage.percent,
+      lsi_coverage_source: 'deterministic_html',
+      ...(hasModelLsi ? { lsi_coverage_model_reported_percent: Number(rawLsiCov) } : {}),
+    };
+  }
+
   log(
-    `Stage 4 блок ${blockIndex + 1}: LSI ${Math.round(lsiCovPct)}%, PQ-score ${pqScore}, ` +
+    `Stage 4 блок ${blockIndex + 1}: LSI ${lsiCovPct == null ? 'n/a' : `${Math.round(lsiCovPct)}%`}, PQ-score ${pqScore}, ` +
     `spam_risk: ${auditResult?.mathematical_audit?.spam_risk_detected || false}`,
     'info'
   );
@@ -180,14 +208,33 @@ RE-AUDIT COMPACT MODE:
     }
   );
 
+  const rawLsiCov = result?.mathematical_audit?.lsi_coverage_percent;
+  const lsiTargets = Array.isArray(lsiMust)
+    ? lsiMust.map(term => String(term || '').trim()).filter(Boolean)
+    : [];
+  const deterministicCoverage = lsiTargets.length > 0
+    ? calculateCoverage(htmlContent, lsiTargets)
+    : null;
+
+  if (deterministicCoverage && result?.mathematical_audit) {
+    result.mathematical_audit = {
+      ...result.mathematical_audit,
+      lsi_coverage_percent: deterministicCoverage.percent,
+      lsi_coverage_source: 'deterministic_html',
+      ...(Number.isFinite(Number(rawLsiCov))
+        ? { lsi_coverage_model_reported_percent: Number(rawLsiCov) }
+        : {}),
+    };
+  }
+
   return {
     auditResult: result,
     pqScore:     Number.isFinite(Number(result?.pq_score))
       ? Math.max(0, Math.min(10, Number(result.pq_score)))
       : null,
-    lsiCovPct:   Number.isFinite(Number(result?.mathematical_audit?.lsi_coverage_percent))
-      ? Math.max(0, Math.min(100, Number(result.mathematical_audit.lsi_coverage_percent)))
-      : 0,
+    // Keep the same objective metric after re-audit; rawLsiCov is retained in
+    // auditResult for diagnostics but must not overwrite actual HTML coverage.
+    lsiCovPct:   deterministicCoverage?.percent ?? null,
   };
 }
 
