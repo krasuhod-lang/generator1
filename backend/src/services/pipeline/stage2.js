@@ -522,7 +522,7 @@ OUTPUT JSON SCHEMA:
         retries: 2,
         maxTokens: 8000,
         maxTruncationTokens: 12000,
-        model: process.env.SEO_SEMANTIC_MODEL || 'deepseek-v4-flash',
+        model: 'deepseek-v4-pro',
         taskId,
         stageName: 'stage2',
         callLabel: '2.5 Semantic LSI Routing',

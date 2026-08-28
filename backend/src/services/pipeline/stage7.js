@@ -98,7 +98,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
       allowPartialJson: true,
       taskId,
       stageName: 'stage7',
-      model: process.env.SEO_AUDIT_MODEL || 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
       callLabel: '7 Global Audit',
       temperature: 0.2,
       log,

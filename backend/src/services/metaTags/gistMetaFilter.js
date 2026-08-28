@@ -200,7 +200,7 @@ function _parseJson(text) {
 async function _callAnalyticJson(systemPrompt, userPrompt, usage, opts = {}) {
   const { callDeepSeek } = require('../llm/deepseek.adapter');
   let maxTokens = opts.maxTokens ?? 6000;
-  const analyticModel = opts.model || process.env.SEO_META_ANALYTIC_MODEL || 'deepseek-v4-flash';
+  const analyticModel = 'deepseek-v4-pro';
   let prompt = userPrompt;
   let lastErr = null;
   for (let attempt = 1; attempt <= MAX_PARSE_ATTEMPTS; attempt += 1) {
