@@ -2093,7 +2093,7 @@ async function processInfoArticleTask(taskId) {
       return runLinkAudit(articleHtml, planResult.link_plan, deterministic, ctx)
         .catch(() => ({ ...deterministic, semantic_violations: [], audit_notes: '' }));
     })();
-    const [eeatAudit, linkAudit] = await Promise.all([
+    let [eeatAudit, linkAudit] = await Promise.all([
       runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx).catch((e) => {
         appendLog(taskId, `⚠ E-E-A-T аудит пропущен: ${e.message}`, 'warn').catch(() => {});
         return null;
