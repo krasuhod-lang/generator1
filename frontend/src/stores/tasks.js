@@ -133,7 +133,10 @@ export const useTasksStore = defineStore('tasks', () => {
   // поля + DeepSeek-аналитику ЦА/ниши/фактов. Никаких записей не делает.
   async function fetchRelevancePrefill(reportId) {
     const { data } = await api.get(`/tasks/relevance-prefill/${encodeURIComponent(reportId)}`, {
-      timeout: 120000, // DeepSeek-вызов может занимать до ~90с
+      // Prefill включает один bounded DeepSeek enrichment-вызов. Не оставляем
+      // общий 60s/старый 120s client cap: при больших relevance-отчётах
+      // deterministic-поля уже готовы, но LLM может занять несколько минут.
+      timeout: 360000,
     });
     return data;
   }

@@ -1753,7 +1753,11 @@ async function _runRelevanceLlmEnrichment({ query, lr, ngramsCsv, topVocabulary,
       // brand_facts просим на 10–25 предложений + ещё 4 поля: на 3500 токенах
       // ответ обрезался, JSON не парсился и форма не получала НИ ОДНОГО поля.
       maxTokens:   8000,
-      timeoutMs:   120000,
+      // Enrichment вызывается после готового relevance-отчёта и может
+      // обрабатывать большой competitor digest. Старый 120s cap обрывал
+      // запрос раньше provider/deadline и давал «timeout of 120000ms».
+      timeoutMs:   300000,
+      retries:     1,
     }));
     const raw = (ds.text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     // Сначала — сбалансированный срез (игнорирует мусор после закрывающей
