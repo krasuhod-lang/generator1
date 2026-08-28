@@ -512,7 +512,7 @@ async function persistStageCall({
 async function callLLM(adapter, system, prompt, opts = {}) {
   // maxTokens объявлен через let, т.к. при автодетекции обрезанного JSON
   // мы удваиваем лимит и переприсваиваем значение внутри цикла attempt.
-  let { maxTokens } = opts;
+  let { maxTokens, retryOnTruncation = true } = opts;
   const {
     retries   = 6,
     taskId    = null,
@@ -536,7 +536,10 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     triggeredRefine = false,
     responseFormat = null,
     cacheFallbackSystem = null,
-    retryOnTruncation = true,
+    // Optional per-stage cap for truncation retries. This prevents large
+    // audit JSON calls from doubling to 32K when a compact response was
+    // already requested. Default preserves legacy behavior.
+    maxTruncationTokens = 32000,
     allowPartialJson = false,
     skipOnBudget = false,
   } = opts;
@@ -685,11 +688,19 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         // чтобы удвоение ПОВЫШАЛО лимит, а не понижало его.
         const adapterDefault = ADAPTER_DEFAULT_MAX_TOKENS[adapter] || 1000;
         const curMax = callOpts.maxTokens || maxTokens || adapterDefault;
-        const newMax = Math.min(curMax * 2, 32000);
-        log(`${callLabel || stageName} truncated response (finishReason=${result.finishReason || 'unknown'}, maxTokens=${curMax}), retry ${attempt + 1} with maxTokens=${newMax}`, 'warn');
-        callOpts.maxTokens = newMax;
-        maxTokens = newMax;
-        continue;
+        const retryCap = Math.max(curMax, Number.isFinite(Number(maxTruncationTokens))
+          ? Number(maxTruncationTokens)
+          : 32000);
+        const newMax = Math.min(curMax * 2, retryCap);
+        if (newMax <= curMax) {
+          log(`${callLabel || stageName} truncated response (finishReason=${result.finishReason || 'unknown'}, maxTokens=${curMax}) — retry cap ${retryCap} достигнут`, 'warn');
+          retryOnTruncation = false;
+        } else {
+          log(`${callLabel || stageName} truncated response (finishReason=${result.finishReason || 'unknown'}, maxTokens=${curMax}), retry ${attempt + 1} with maxTokens=${newMax}`, 'warn');
+          callOpts.maxTokens = newMax;
+          maxTokens = newMax;
+          continue;
+        }
       }
       let parsed;
       let partialJson = false;

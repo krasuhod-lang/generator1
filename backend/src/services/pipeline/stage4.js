@@ -105,9 +105,11 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
       retryOnTruncation: true,
       taskId,
       stageName: 'stage4',
+      model: process.env.SEO_AUDIT_MODEL || 'deepseek-v4-flash',
       callLabel: `4 E-E-A-T Block ${blockIndex + 1}`,
       temperature: 0.2,
-      maxTokens: 16000,
+      maxTokens: 12000,
+      maxTruncationTokens: 24000,
       responseFormat: { type: 'json_object' },
       allowPartialJson: true,
       log,
@@ -144,7 +146,11 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
   const boundedHtml = String(htmlContent || '').length > 18000
     ? `${String(htmlContent || '').slice(0, 15000)}\n<!-- [HTML_CONTENT_TRUNCATED_FOR_AUDIT] -->\n${String(htmlContent || '').slice(-3000)}`
     : String(htmlContent || '');
-  const reAuditPrompt = SYSTEM_PROMPTS.stage4
+  const reAuditPrompt = `${SYSTEM_PROMPTS.stage4}
+
+RE-AUDIT COMPACT MODE:
+Это повторная проверка после одной итерации refine. Сохрани точность PQ/LSI/spam, но верни только JSON с полями mathematical_audit, pq_score и actionable_next_steps. Не добавляй eeat_preeval, hcu_verdict, criteria_details или recommended_material. В mathematical_audit оставь chars_count_actual, lsi_coverage_percent, lsi_found, lsi_missing, spam_risk_detected и zipf_compliance_notes. Каждый массив — максимум 12 элементов, каждое actionable поле — максимум 180 символов.
+`
     .replace('{{HTML_CONTENT}}',      () => boundedHtml)
     .replace('{{TARGET_SERVICE}}',    () => task.input_target_service)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(lsiMust))
@@ -162,9 +168,11 @@ async function reAuditBlock(task, ctx, blockIndex, htmlContent, lsiMust) {
       retryOnTruncation: true,
       taskId,
       stageName: 'stage4',
+      model: process.env.SEO_AUDIT_MODEL || 'deepseek-v4-flash',
       callLabel: `4 Re-audit Block ${blockIndex + 1}`,
       temperature: 0.2,
-      maxTokens: 16000,
+      maxTokens: 8000,
+      maxTruncationTokens: 12000,
       responseFormat: { type: 'json_object' },
       allowPartialJson: true,
       log,

@@ -1183,7 +1183,7 @@ async function getAegisCostBreakdown(req, res, next) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function _adminUsageRange(query = {}) {
-  const validDate = (value) => /^\\d{4}-\\d{2}-\\d{2}$/.test(String(value || ''));
+  const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
   const now = new Date();
   const fromDate = validDate(query.from)
     ? new Date(`${query.from}T00:00:00.000Z`)
@@ -1210,7 +1210,11 @@ function _emptyAdminApiUsage(note = null) {
       input_cost_usd: 0, output_cost_usd: 0,
     },
     daily: [], by_provider: [], by_model: [], by_pipeline: [], anomalies: [],
-    reconciliation: { ledger_cost_usd: 0, task_stage_cost_usd: 0, delta_usd: 0, note: 'no data' },
+    data_quality: { ledger_ready: false, ledger_rows: 0, historical_stage_calls: 0, note },
+    reconciliation: {
+      ledger_cost_usd: 0, task_stage_cost_usd: 0, task_stage_calls: 0,
+      task_stage_tokens_in: 0, task_stage_tokens_out: 0, delta_usd: 0, note: 'no data',
+    },
     note,
   };
 }
@@ -1318,7 +1322,10 @@ async function getAdminApiUsage(req, res, next) {
           LIMIT 100`, params,
       ),
       db.query(
-        `SELECT COALESCE(SUM(cost_usd),0)::numeric(18,12) AS task_stage_cost_usd
+        `SELECT COUNT(*)::int AS task_stage_calls,
+                COALESCE(SUM(tokens_in),0)::bigint AS task_stage_tokens_in,
+                COALESCE(SUM(tokens_out),0)::bigint AS task_stage_tokens_out,
+                COALESCE(SUM(cost_usd),0)::numeric(18,12) AS task_stage_cost_usd
            FROM task_stages
           WHERE completed_at >= $1 AND completed_at < $2`, params,
       ),
@@ -1335,8 +1342,19 @@ async function getAdminApiUsage(req, res, next) {
       cost_usd: num(raw.cost_usd), input_cost_usd: num(raw.input_cost_usd),
       output_cost_usd: num(raw.output_cost_usd),
     };
-    const stageCost = num(stageQ.rows[0]?.task_stage_cost_usd);
+    const stageRow = stageQ.rows[0] || {};
+    const stageCalls = num(stageRow.task_stage_calls);
+    const stageCost = num(stageRow.task_stage_cost_usd);
+    const ledgerNote = totals.requests === 0 && stageCalls > 0
+      ? 'API ledger пуст в выбранном периоде, но сохранённые task stages найдены. Показываем legacy-сверку; новые обращения будут записываться в ledger после инициализации схемы.'
+      : null;
     return res.json({
+      data_quality: {
+        ledger_ready: true,
+        ledger_rows: totals.requests,
+        historical_stage_calls: stageCalls,
+        note: ledgerNote,
+      },
       range: { from: from.toISOString(), to: to.toISOString() },
       totals,
       daily: dailyQ.rows.map((row) => ({ ...row, requests: num(row.requests), cost_usd: num(row.cost_usd), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), failed: num(row.failed), outside_task: num(row.outside_task), partial_attribution: num(row.partial_attribution) })),
@@ -1347,13 +1365,27 @@ async function getAdminApiUsage(req, res, next) {
       reconciliation: {
         ledger_cost_usd: totals.cost_usd,
         task_stage_cost_usd: stageCost,
+        task_stage_calls: stageCalls,
+        task_stage_tokens_in: num(stageRow.task_stage_tokens_in),
+        task_stage_tokens_out: num(stageRow.task_stage_tokens_out),
         delta_usd: Number((totals.cost_usd - stageCost).toFixed(12)),
-        note: 'Ledger is authoritative for every provider attempt; task_stages contains only persisted successful stage calls, so delta exposes retries/failures/cache accounting gaps rather than hiding them.',
+        note: ledgerNote || 'Ledger is authoritative for every provider attempt; task_stages contains only persisted successful stage calls, so delta exposes retries/failures/cache accounting gaps rather than hiding them.',
+      },
+      historical_task_stages: {
+        calls: stageCalls,
+        tokens_in: num(stageRow.task_stage_tokens_in),
+        tokens_out: num(stageRow.task_stage_tokens_out),
+        cost_usd: stageCost,
+        approximate: true,
       },
     });
   } catch (error) {
     if (error && /admin_api_request_ledger|task_stages/.test(String(error.message))) {
-      return res.json(_emptyAdminApiUsage('API ledger migration is not initialized yet'));
+      return res.status(503).json({
+        error: 'API usage ledger is not initialized',
+        code: 'API_USAGE_SCHEMA_UNAVAILABLE',
+        note: 'Примените runtime schema bootstrap или migration 142 и повторите запрос.',
+      });
     }
     return next(error);
   }

@@ -13,7 +13,10 @@ async function load() {
   try {
     usage.value = await admin.fetchApiUsage();
   } catch (err) {
-    error.value = err.response?.data?.error || err.message || 'Не удалось загрузить API usage';
+    const payload = err.response?.data;
+    error.value = [payload?.error || err.message || 'Не удалось загрузить API usage', payload?.note]
+      .filter(Boolean)
+      .join(' — ');
   } finally {
     loading.value = false;
   }
@@ -63,6 +66,18 @@ function anomalyClass(type) {
 
 const dailyMax = computed(() => Math.max(0, ...(usage.value?.daily || []).map((row) => Number(row.cost_usd) || 0)));
 const reconciliationDelta = computed(() => Number(usage.value?.reconciliation?.delta_usd) || 0);
+const legacyStageCalls = computed(() => Number(usage.value?.reconciliation?.task_stage_calls) || 0);
+const historical = computed(() => usage.value?.historical_task_stages || {});
+const displayRequests = computed(() => Number(usage.value?.totals?.requests) || Number(historical.value.calls) || 0);
+const displayTokensIn = computed(() => Number(usage.value?.totals?.tokens_in) || Number(historical.value.tokens_in) || 0);
+const displayTokensOut = computed(() => Number(usage.value?.totals?.tokens_out) || Number(historical.value.tokens_out) || 0);
+const displayCost = computed(() => Number(usage.value?.totals?.cost_usd) || Number(historical.value.cost_usd) || 0);
+const ledgerTokenTotal = computed(() => {
+  const totals = usage.value?.totals || {};
+  return (Number(totals.tokens_in) || 0)
+    + (Number(totals.tokens_out) || 0)
+    + (Number(totals.thoughts_tokens) || 0);
+});
 
 onMounted(load);
 </script>
@@ -84,16 +99,23 @@ onMounted(load);
     </div>
 
     <template v-if="usage">
+      <div v-if="usage.data_quality?.note" class="mb-4 rounded-lg border border-amber-800/70 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+        {{ usage.data_quality.note }}
+      </div>
+      <div v-if="usage.historical_task_stages?.approximate && !usage.totals.requests" class="mb-4 rounded-lg border border-cyan-800/70 bg-cyan-950/30 px-3 py-2 text-xs text-cyan-200">
+        Ledger новых API-вызовов пока пуст. Ниже показан исторический учёт из task_stages: {{ fmtNum(historical.calls) }} calls, {{ fmtCost(historical.cost_usd) }}. Эти значения приблизительные и не включают неуспешные provider attempts.
+      </div>
       <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-white">{{ fmtNum(usage.totals.requests) }}</div><div class="text-[11px] text-gray-500">API-запросов</div></div>
+        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-white">{{ fmtNum(displayRequests) }}</div><div class="text-[11px] text-gray-500">API-запросов / stage calls</div></div>
         <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-emerald-400">{{ fmtNum(usage.totals.successful) }}</div><div class="text-[11px] text-gray-500">Успешных</div></div>
         <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-red-400">{{ fmtNum(usage.totals.failed) }}</div><div class="text-[11px] text-gray-500">Ошибок</div></div>
         <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-blue-400">{{ fmtNum(usage.totals.retries) }}</div><div class="text-[11px] text-gray-500">Повторов</div></div>
         <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-amber-300">{{ fmtNum(usage.totals.outside_task) }}</div><div class="text-[11px] text-gray-500">Вне задач</div></div>
         <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-orange-300">{{ fmtNum(usage.totals.partial_attribution) }}</div><div class="text-[11px] text-gray-500">Неполная привязка</div></div>
-        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-cyan-300">{{ fmtNum(usage.totals.tokens_in) }}</div><div class="text-[11px] text-gray-500">Input tokens</div></div>
-        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-violet-300">{{ fmtNum(usage.totals.tokens_out) }}</div><div class="text-[11px] text-gray-500">Output tokens</div></div>
-        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-fuchsia-300">{{ fmtCost(usage.totals.cost_usd) }}</div><div class="text-[11px] text-gray-500">Фактическая стоимость</div></div>
+        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-cyan-300">{{ fmtNum(displayTokensIn) }}</div><div class="text-[11px] text-gray-500">Input tokens</div></div>
+        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-violet-300">{{ fmtNum(displayTokensOut) }}</div><div class="text-[11px] text-gray-500">Output tokens</div></div>
+        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-purple-300">{{ fmtNum(usage.totals.thoughts_tokens) }}</div><div class="text-[11px] text-gray-500">Thinking tokens</div></div>
+        <div class="rounded-lg bg-gray-900/70 p-3"><div class="text-xl font-bold text-fuchsia-300">{{ fmtCost(displayCost) }}</div><div class="text-[11px] text-gray-500">Стоимость / legacy estimate</div></div>
       </div>
 
       <div v-if="usage.totals.outside_task || usage.totals.partial_attribution || usage.totals.failed || Math.abs(reconciliationDelta) > 0.000001" class="mt-4 rounded-lg border border-amber-800/70 bg-amber-950/30 p-3 text-sm text-amber-200">
@@ -150,6 +172,8 @@ onMounted(load);
           <div class="rounded-lg border border-gray-800 bg-gray-900/40 p-3 text-sm space-y-2">
             <div class="flex justify-between"><span class="text-gray-500">API ledger</span><span class="text-fuchsia-300">{{ fmtCost(usage.reconciliation?.ledger_cost_usd) }}</span></div>
             <div class="flex justify-between"><span class="text-gray-500">Сохранённые task stages</span><span class="text-gray-300">{{ fmtCost(usage.reconciliation?.task_stage_cost_usd) }}</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Исторические stage calls</span><span class="text-gray-300">{{ fmtNum(legacyStageCalls) }}</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">Ledger tokens (input + output + thinking)</span><span class="text-gray-300">{{ fmtNum(ledgerTokenTotal) }}</span></div>
             <div class="flex justify-between border-t border-gray-800 pt-2"><span class="text-gray-300">Разница</span><span :class="Math.abs(reconciliationDelta) > 0.000001 ? 'text-amber-300' : 'text-emerald-300'">{{ fmtCost(reconciliationDelta) }}</span></div>
             <p class="text-[11px] text-gray-600">Ledger учитывает каждый provider attempt, включая retry и ошибки. Task stages содержит только успешно сохранённые этапы.</p>
           </div>

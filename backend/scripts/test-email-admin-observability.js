@@ -12,6 +12,8 @@ const scheduler = read('src/services/outreach/outreachScheduler.js');
 const outreachController = read('src/controllers/outreach.controller.js');
 const adminController = read('src/controllers/admin.controller.js');
 const ledger = read('src/services/metrics/adminApiLedger.js');
+const observabilitySchema = read('src/services/metrics/apiObservabilitySchema.js');
+const server = read('server.js');
 const migration = fs.readFileSync(path.resolve(root, '..', 'migrations', '142_outreach_and_api_observability.sql'), 'utf8');
 const adminCard = fs.readFileSync(path.resolve(root, '..', 'frontend/src/components/AdminApiUsageCard.vue'), 'utf8');
 
@@ -32,7 +34,9 @@ const checks = [
   ['ledger is append-only per provider attempt', /INSERT INTO admin_api_request_ledger/.test(ledger) && /attempt/.test(ledger)],
   ['ledger failure is best effort', /observability failure must never fail/.test(ledger) && /return false/.test(ledger)],
   ['migration is additive and has ledger indexes', /CREATE TABLE IF NOT EXISTS admin_api_request_ledger/.test(migration) && /CREATE INDEX/.test(migration)],
-  ['admin UI highlights partial attribution/cache miss', /partial_attribution/.test(adminCard) && /cache_miss/.test(adminCard)],
+  ['existing volumes get runtime ledger bootstrap', /async function ensureApiObservabilitySchema/.test(observabilitySchema) && /CREATE TABLE IF NOT EXISTS admin_api_request_ledger/.test(observabilitySchema) && /ensureApiObservabilitySchema\(\)/.test(server)],
+  ['admin API exposes data quality and task-stage reconciliation', /data_quality:/.test(adminController) && /task_stage_calls/.test(adminController) && /API_USAGE_SCHEMA_UNAVAILABLE/.test(adminController)],
+  ['admin UI highlights partial attribution/cache miss', /partial_attribution/.test(adminCard) && /cache_miss/.test(adminCard) && /Thinking tokens/.test(adminCard)],
 ];
 
 let failures = 0;

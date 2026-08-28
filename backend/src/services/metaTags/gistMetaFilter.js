@@ -41,6 +41,7 @@ const { analyzeSnippets } = require('./snippetAnalyzer');
 const { snippetCtrScore } = require('./ctrScore');
 const { humanizeReviewReason } = require('./metaNotes');
 const { checkKeywordPosition, checkLsiUsage } = require('./semantics');
+const { calculateCostBreakdown } = require('../metrics/priceCalculator');
 
 // Кириллические safe ranges — единая точка правды (metaTags/lengthConfig).
 const {
@@ -67,6 +68,59 @@ function _isReframeEnabled() {
 
 const MAX_PAIR_ATTEMPTS = 3;
 const MAX_PARSE_ATTEMPTS = 3;
+
+function _providerKey(provider) {
+  return String(provider || '').toLowerCase().startsWith('deepseek') ? 'deepseek' : 'gemini';
+}
+
+function _recordUsage(usage, result, provider) {
+  const key = _providerKey(provider || result?.provider);
+  const tokensIn = Number(result?.tokensIn) || 0;
+  const tokensOut = Number(result?.tokensOut) || 0;
+  const thoughtsTokens = Number(result?.thoughtsTokens) || 0;
+  const cachedTokens = Number(result?.cachedTokens ?? result?.cacheHitTokens) || 0;
+  const cacheMissTokens = Number(result?.cacheMissTokens);
+  const breakdown = calculateCostBreakdown(key, tokensIn, tokensOut, {
+    thoughtsTokens,
+    cachedTokens,
+    cacheHitTokens: cachedTokens,
+    ...(Number.isFinite(cacheMissTokens) ? { cacheMissTokens } : {}),
+  });
+  usage.tokensIn += tokensIn;
+  usage.tokensOut += tokensOut;
+  usage.thoughtsTokens += thoughtsTokens;
+  usage.cachedTokens += cachedTokens;
+  usage.calls += 1;
+  if (!usage.model) usage.model = result?.model || '';
+  usage.providers.add(key);
+  const bucket = usage.byProvider[key] || {
+    calls: 0, tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
+    cacheHitTokens: 0, cacheMissTokens: 0,
+    inputCostUsd: 0, outputCostUsd: 0, costUsd: 0,
+  };
+  bucket.calls += 1;
+  bucket.tokensIn += tokensIn;
+  bucket.tokensOut += tokensOut;
+  bucket.thoughtsTokens += thoughtsTokens;
+  bucket.cachedTokens += cachedTokens;
+  bucket.cacheHitTokens += breakdown.cacheHitTokens;
+  bucket.cacheMissTokens += breakdown.cacheMissTokens;
+  bucket.inputCostUsd += breakdown.inputCostUsd;
+  bucket.outputCostUsd += breakdown.outputCostUsd;
+  bucket.costUsd += breakdown.totalUsd;
+  usage.byProvider[key] = bucket;
+}
+
+function _usageMetaFields(usage) {
+  const buckets = usage?.byProvider || {};
+  const values = Object.values(buckets);
+  return {
+    inputCostUsd: values.reduce((sum, item) => sum + (Number(item.inputCostUsd) || 0), 0),
+    outputCostUsd: values.reduce((sum, item) => sum + (Number(item.outputCostUsd) || 0), 0),
+    costUsd: values.reduce((sum, item) => sum + (Number(item.costUsd) || 0), 0),
+    providerUsage: buckets,
+  };
+}
 
 // Подсказка модели при повторной попытке после обрыва/невалидного JSON:
 // просим отдать ПОЛНЫЙ валидный JSON строго по контракту (все скобки закрыты),
@@ -146,6 +200,7 @@ function _parseJson(text) {
 async function _callAnalyticJson(systemPrompt, userPrompt, usage, opts = {}) {
   const { callDeepSeek } = require('../llm/deepseek.adapter');
   let maxTokens = opts.maxTokens ?? 6000;
+  const analyticModel = opts.model || process.env.SEO_META_ANALYTIC_MODEL || 'deepseek-v4-flash';
   let prompt = userPrompt;
   let lastErr = null;
   for (let attempt = 1; attempt <= MAX_PARSE_ATTEMPTS; attempt += 1) {
@@ -158,7 +213,7 @@ async function _callAnalyticJson(systemPrompt, userPrompt, usage, opts = {}) {
     try {
       if (process.env.DEEPSEEK_API_KEY) {
         try {
-          res = await callDeepSeek(systemPrompt, prompt, callOptions);
+          res = await callDeepSeek(systemPrompt, prompt, { ...callOptions, model: analyticModel });
           res.provider = 'deepseek';
         } catch (dsErr) {
           res = await callGemini(systemPrompt, prompt, callOptions);
@@ -168,13 +223,7 @@ async function _callAnalyticJson(systemPrompt, userPrompt, usage, opts = {}) {
         res = await callGemini(systemPrompt, prompt, callOptions);
         res.provider = 'gemini';
       }
-      usage.tokensIn += res.tokensIn || 0;
-      usage.tokensOut += res.tokensOut || 0;
-      usage.thoughtsTokens += res.thoughtsTokens || 0;
-      usage.cachedTokens += res.cachedTokens || 0;
-      usage.calls += 1;
-      if (!usage.model) usage.model = res.model || '';
-      usage.providers.add(res.provider);
+      _recordUsage(usage, res, res.provider);
       return _parseJson(res.text);
     } catch (err) {
       lastErr = err;
@@ -206,13 +255,7 @@ async function _callCopywriterJson(userPrompt, usage, opts = {}) {
         timeoutMs: opts.timeoutMs ?? 90000,
         ...(opts.model ? { model: opts.model } : {}),
       });
-      usage.tokensIn += res.tokensIn || 0;
-      usage.tokensOut += res.tokensOut || 0;
-      usage.thoughtsTokens += res.thoughtsTokens || 0;
-      usage.cachedTokens += res.cachedTokens || 0;
-      usage.calls += 1;
-      if (res.model) usage.model = res.model;
-      usage.providers.add('gemini');
+      _recordUsage(usage, res, 'gemini');
       return _parseJson(res.text);
     } catch (err) {
       lastErr = err;
@@ -791,7 +834,7 @@ async function runGistMetaPipeline({
 }) {
   const usage = {
     tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
-    calls: 0, model: '', providers: new Set(),
+    calls: 0, model: '', providers: new Set(), byProvider: {},
   };
   const notes = [];
   const standaloneExposure = inputs.standalone_exposure === true
@@ -1062,6 +1105,7 @@ async function runGistMetaPipeline({
       cachedTokens: usage.cachedTokens,
       attempts: usage.calls,
       provider: usage.providers.size === 1 ? [...usage.providers][0] : 'mixed',
+      ..._usageMetaFields(usage),
       // Сырой вывод ranker'а держим только в логах/`_meta`: в UI он бесполезен.
       manual_review_reason_raw: manualReviewReason || null,
       pair_attempts: pairAttempts.map((a) => ({
@@ -1102,7 +1146,7 @@ async function _fallbackLinkArticleMeta({
 }) {
   const usage = {
     tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
-    calls: 0, model: '', providers: new Set(),
+    calls: 0, model: '', providers: new Set(), byProvider: {},
   };
   const notes = [
     `⚠️ GIST Meta Filter Pipeline не отработал (${pipelineError ? pipelineError.message : 'нет деталей'}) — пара собрана fallback-вызовом MetaPairAssembler (Steps 8.7–8.8).`,
@@ -1185,6 +1229,7 @@ lead fact. Дополнительно добавь в JSON поле "winner_fact
       cachedTokens: usage.cachedTokens,
       attempts: usage.calls,
       provider: usage.providers.size === 1 ? [...usage.providers][0] : 'mixed',
+      ..._usageMetaFields(usage),
     },
   };
 }
@@ -1288,7 +1333,7 @@ async function _fallbackSerpMeta({
 }) {
   const usage = {
     tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
-    calls: 0, model: '', providers: new Set(),
+    calls: 0, model: '', providers: new Set(), byProvider: {},
   };
   const notes = [
     `⚠️ GIST Meta Filter Pipeline не отработал (${pipelineError ? pipelineError.message : 'нет деталей'}) — пара собрана fallback-вызовом MetaPairAssembler (Steps 8.7–8.8).`,
@@ -1389,6 +1434,7 @@ ${competitorNoiseBlock}${avoidBlock}
       cachedTokens: usage.cachedTokens,
       attempts: usage.calls,
       provider: usage.providers.size === 1 ? [...usage.providers][0] : 'mixed',
+      ..._usageMetaFields(usage),
     },
   };
 }

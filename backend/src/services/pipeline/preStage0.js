@@ -215,7 +215,9 @@ async function runPreStage0(task, ctx, extras = {}) {
   // мы не валим стадию целиком.
   const errors = [];
   const callOpts = {
-    retries:     3,
+    retries:     2,
+    maxTokens:   10000,
+    maxTruncationTokens: 14000,
     taskId,
     stageName:   'pre_stage0',
     temperature: 0.3,

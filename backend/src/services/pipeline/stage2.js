@@ -493,6 +493,9 @@ RULES:
 3. Assign keywords based on SEMANTIC MATCH between the keyword and the H2 topic/intent.
 4. n-grams follow the same rules as LSI keywords.
 5. Return ONLY valid JSON. No markdown. No explanation.
+6. Do not repeat keyword definitions, reasons, commentary or input arrays. Each routing item contains ONLY idx, lsi_must and ngrams.
+7. Use one routing item per section at most. Put every supplied term into exactly one most relevant section; only use unrouted arrays if no valid section exists.
+8. Keep lsi_must and ngrams arrays as compact strings. Never add extra object fields.
 
 OUTPUT JSON SCHEMA:
 {
@@ -515,7 +518,18 @@ OUTPUT JSON SCHEMA:
       'deepseek',
       lsiRoutingSystem,
       lsiRoutingPrompt,
-      { retries: 3, taskId, stageName: 'stage2', callLabel: '2.5 Semantic LSI Routing', temperature: 0.2, log, onTokens }
+      {
+        retries: 2,
+        maxTokens: 8000,
+        maxTruncationTokens: 12000,
+        model: process.env.SEO_SEMANTIC_MODEL || 'deepseek-v4-flash',
+        taskId,
+        stageName: 'stage2',
+        callLabel: '2.5 Semantic LSI Routing',
+        temperature: 0.2,
+        log,
+        onTokens,
+      }
     );
   } catch (e) {
     log(`Stage 2.5 routing error: ${e.message} — fallback to JS routing`, 'warn');

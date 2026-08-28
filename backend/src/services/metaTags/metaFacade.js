@@ -26,7 +26,8 @@
 
 const { snippetCtrScore } = require('./ctrScore');
 const { buildGistSignals, buildArticleSemantics } = require('./metaContext');
-const { calcCost } = require('../metrics/priceCalculator');
+const { calcCost, calculateCostBreakdown } = require('../metrics/priceCalculator');
+const { recordApiRequest } = require('../metrics/adminApiLedger');
 
 const SUMMARY_MAX = 1500;
 
@@ -86,7 +87,7 @@ function buildSummaryFromContent({ html = '', plain = '', brandFacts = '', extra
 function _emptyUsage() {
   return {
     tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
-    cost: 0, model: '', provider: '',
+    inputCostUsd: 0, outputCostUsd: 0, cost: 0, model: '', provider: '',
   };
 }
 
@@ -107,6 +108,22 @@ function _metricsProvider(provider) {
   return _priceModel(provider);
 }
 
+function _usageProviderBuckets(usage = {}) {
+  const raw = usage.providerUsage && typeof usage.providerUsage === 'object'
+    ? Object.entries(usage.providerUsage)
+    : [];
+  if (raw.length) {
+    return raw.map(([provider, bucket]) => ({
+      provider: _metricsProvider(provider),
+      bucket: bucket || {},
+    }));
+  }
+  return [{
+    provider: _metricsProvider(usage.provider),
+    bucket: usage,
+  }];
+}
+
 function _usageFromMeta(meta = {}) {
   const tokensIn = Number(meta.tokensIn) || 0;
   const tokensOut = Number(meta.tokensOut) || 0;
@@ -118,14 +135,24 @@ function _usageFromMeta(meta = {}) {
   const cost = Number(meta.costUsd) > 0
     ? Number(meta.costUsd)
     : calcCost(_priceModel(provider), tokensIn, tokensOut, { thoughtsTokens, cachedTokens });
+  const pricing = calculateCostBreakdown(_priceModel(provider), tokensIn, tokensOut, {
+    thoughtsTokens,
+    cachedTokens,
+  });
+  const hasInputCost = meta.inputCostUsd != null && Number.isFinite(Number(meta.inputCostUsd));
+  const hasOutputCost = meta.outputCostUsd != null && Number.isFinite(Number(meta.outputCostUsd));
   return {
     tokensIn,
     tokensOut,
     thoughtsTokens,
     cachedTokens,
-    cost: Number.isFinite(cost) ? cost : 0,
+    inputCostUsd: hasInputCost ? Math.max(0, Number(meta.inputCostUsd)) : pricing.inputCostUsd,
+    outputCostUsd: hasOutputCost ? Math.max(0, Number(meta.outputCostUsd)) : pricing.outputCostUsd,
+    cost: Number.isFinite(cost) ? cost : pricing.totalUsd,
     model: meta.model || '',
     provider,
+    providerUsage: meta.providerUsage || null,
+    attempts: Number(meta.attempts) || 0,
   };
 }
 
@@ -184,42 +211,84 @@ async function _persistUsage({ pipeline, taskId, usage, source, durationMs }) {
   if (pipeline !== 'seo') return;
   if (!usage.tokensIn && !usage.tokensOut) return;
 
-  const provider = _metricsProvider(usage.provider);
-  const cols = provider === 'deepseek'
-    ? { in: 'deepseek_tokens_in', out: 'deepseek_tokens_out', cost: 'deepseek_cost_usd' }
-    : provider === 'grok'
-      ? { in: 'grok_tokens_in', out: 'grok_tokens_out', cost: 'grok_cost_usd' }
-      : { in: 'gemini_tokens_in', out: 'gemini_tokens_out', cost: 'gemini_cost_usd' };
+  const providerBuckets = _usageProviderBuckets(usage);
 
   try {
     const db = require('../../config/db');
-    await db.query(
-      `INSERT INTO task_metrics (task_id, ${cols.in}, ${cols.out}, ${cols.cost}, total_tokens, total_cost_usd)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (task_id) DO UPDATE SET
-         ${cols.in}     = task_metrics.${cols.in}     + EXCLUDED.${cols.in},
-         ${cols.out}    = task_metrics.${cols.out}    + EXCLUDED.${cols.out},
-         ${cols.cost}   = task_metrics.${cols.cost}   + EXCLUDED.${cols.cost},
-         total_tokens   = task_metrics.total_tokens   + EXCLUDED.total_tokens,
-         total_cost_usd = task_metrics.total_cost_usd + EXCLUDED.total_cost_usd,
-         updated_at     = NOW()`,
-      [
-        taskId, usage.tokensIn, usage.tokensOut, usage.cost,
-        usage.tokensIn + usage.tokensOut, usage.cost,
-      ],
-    );
+    for (const { provider, bucket } of providerBuckets) {
+      const cols = provider === 'deepseek'
+        ? { in: 'deepseek_tokens_in', out: 'deepseek_tokens_out', cost: 'deepseek_cost_usd' }
+        : provider === 'grok'
+          ? { in: 'grok_tokens_in', out: 'grok_tokens_out', cost: 'grok_cost_usd' }
+          : { in: 'gemini_tokens_in', out: 'gemini_tokens_out', cost: 'gemini_cost_usd' };
+      const tokensIn = Number(bucket.tokensIn) || 0;
+      const tokensOut = Number(bucket.tokensOut) || 0;
+      const costUsd = Number(bucket.costUsd) || 0;
+      await db.query(
+        `INSERT INTO task_metrics (task_id, ${cols.in}, ${cols.out}, ${cols.cost}, total_tokens, total_cost_usd)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (task_id) DO UPDATE SET
+           ${cols.in}     = task_metrics.${cols.in}     + EXCLUDED.${cols.in},
+           ${cols.out}    = task_metrics.${cols.out}    + EXCLUDED.${cols.out},
+           ${cols.cost}   = task_metrics.${cols.cost}   + EXCLUDED.${cols.cost},
+           total_tokens   = task_metrics.total_tokens   + EXCLUDED.total_tokens,
+           total_cost_usd = task_metrics.total_cost_usd + EXCLUDED.total_cost_usd,
+           updated_at     = NOW()`,
+        [taskId, tokensIn, tokensOut, costUsd, tokensIn + tokensOut, costUsd],
+      );
+    }
     await db.query(
       `INSERT INTO task_stages
          (task_id, stage_name, call_label, status, model_used, prompt_size,
-          tokens_in, tokens_out, cost_usd, started_at, completed_at)
-       VALUES ($1,$2,$3,'completed',$4,0,$5,$6,$7,NOW(),NOW())`,
+          tokens_in, tokens_out, thoughts_tokens, input_cost_usd, output_cost_usd,
+          cost_usd, started_at, completed_at)
+       VALUES ($1,$2,$3,'completed',$4,0,$5,$6,$7,$8,$9,$10,NOW(),NOW())`,
       [
         taskId, META_STAGE_NAME, `meta:${source || 'unknown'}`,
-        usage.model || provider, usage.tokensIn, usage.tokensOut, usage.cost,
+        usage.model || _metricsProvider(usage.provider), usage.tokensIn, usage.tokensOut,
+        usage.thoughtsTokens, usage.inputCostUsd, usage.outputCostUsd, usage.cost,
       ],
     );
   } catch (err) {
     console.warn(`[metaFacade] persist meta metrics failed: ${err.message}`);
+  }
+
+  // GIST calls adapters directly and therefore bypasses callLLM's provider
+  // ledger hook. Persist one transparent row per provider bucket. The rows are
+  // still aggregate per meta pass, while `aggregated_attempts` preserves the
+  // number of underlying candidate/ranker/copywriter attempts.
+  try {
+    const aggregateAttempts = Math.max(1, Number(usage.attempts) || 1);
+    for (const { provider: bucketProvider, bucket } of providerBuckets) {
+      await recordApiRequest({
+        provider: bucketProvider,
+        model: usage.model || bucketProvider,
+        pipeline,
+        stageName: META_STAGE_NAME,
+        callLabel: `meta:${source || 'unknown'}:${bucketProvider}`,
+        taskId,
+        requestStatus: 'success',
+        attempt: aggregateAttempts,
+        durationMs,
+        tokensIn: Number(bucket.tokensIn) || 0,
+        tokensOut: Number(bucket.tokensOut) || 0,
+        cachedTokens: Number(bucket.cachedTokens) || 0,
+        cacheHitTokens: Number(bucket.cacheHitTokens) || 0,
+        cacheMissTokens: Number(bucket.cacheMissTokens) || 0,
+        thoughtsTokens: Number(bucket.thoughtsTokens) || 0,
+        inputCostUsd: Number(bucket.inputCostUsd) || 0,
+        outputCostUsd: Number(bucket.outputCostUsd) || 0,
+        costUsd: Number(bucket.costUsd) || 0,
+        meta: {
+          source: source || 'unknown',
+          aggregated_attempts: aggregateAttempts,
+          billing_source: 'gist_meta_aggregate',
+          provider_bucket: true,
+        },
+      });
+    }
+  } catch (err) {
+    console.warn(`[metaFacade] API ledger write failed: ${err.message}`);
   }
 }
 

@@ -178,16 +178,24 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
     ? Math.round(blockCharLimits.maxChars * 1.5)
     : Infinity;
 
-  // ── Цикл PQ-рефайна (макс 3 итерации) ──────────────────────────
-  // Запускается, если PQ < EEAT_PQ_TARGET ИЛИ обнаружены naturalness-issues
-  // (роботизированность / тавтологии / SEO-хвосты / переспам ключа).
-  const s5MaxLoops = 3;
+  // ── Цикл PQ-рефайна ─────────────────────────────────────────────
+  // Глубокий repair сохраняем для низкого PQ. Для уже качественного блока,
+  // которому мешает только naturalness/spam, двух итераций достаточно и это
+  // не расходует бюджет на повторный rewrite без measurable quality gain.
+  const configuredMaxLoops = parseInt(process.env.SEO_STAGE5_MAX_LOOPS, 10);
+  const defaultMaxLoops = currentPQ != null && currentPQ < 6 ? 3 : 2;
+  const s5MaxLoops = Number.isFinite(configuredMaxLoops) && configuredMaxLoops >= 1
+    ? Math.min(3, configuredMaxLoops)
+    : defaultMaxLoops;
   let s5Loop = 0;
   let needsRefine = currentPQ < EEAT_PQ_TARGET || !naturalness.passed;
 
   while (s5Loop < s5MaxLoops && needsRefine) {
     s5Loop++;
-    log(`Stage 5 блок ${blockIndex + 1}: рефайн итерация ${s5Loop}/${s5MaxLoops} (PQ ${pqLabel()} < ${EEAT_PQ_TARGET}). Запрос...`, 'info');
+    const refineReasons = [];
+    if (currentPQ == null || currentPQ < EEAT_PQ_TARGET) refineReasons.push(`PQ ${pqLabel()} < ${EEAT_PQ_TARGET}`);
+    if (!naturalness.passed) refineReasons.push('naturalness issues');
+    log(`Stage 5 блок ${blockIndex + 1}: рефайн итерация ${s5Loop}/${s5MaxLoops} (${refineReasons.join('; ') || 'quality repair'}). Запрос...`, 'info');
 
     let specialInstruction = baseSpecialInstruction;
     if (expertOpinionUsed) {
@@ -210,9 +218,9 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
 
     const s5Result = await callLLM(
       llmProvider(task),
-      akbSystem(task),
+      akbSystem(task, { purpose: 'repair' }),
       s5Prompt,
-      geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens, skipOnBudget: true })
+      geminiCallOpts(task, { retries: 2, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens, skipOnBudget: true })
     ).catch(e => {
       if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
         budgetSkipped = true;
@@ -310,9 +318,9 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
 
       const confResult = await callLLM(
         llmProvider(task),
-        akbSystem(task),
+        akbSystem(task, { purpose: 'repair' }),
         confPrompt,
-        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens, skipOnBudget: true })
+        geminiCallOpts(task, { retries: 2, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
         if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;
@@ -357,9 +365,9 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
 
       const tfResult = await callLLM(
         llmProvider(task),
-        akbSystem(task),
+        akbSystem(task, { purpose: 'repair' }),
         tfPrompt,
-        geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
+        geminiCallOpts(task, { retries: 2, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
         if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;

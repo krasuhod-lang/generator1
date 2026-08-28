@@ -661,17 +661,21 @@ async function runPipeline(task, ctx) {
     const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
     const akbTokens = estimateTokens(task.__articleKnowledgeBase);
     task.__articleKnowledgeBaseForCalls = compactKnowledgeBaseForCalls(task.__articleKnowledgeBase);
+    task.__articleKnowledgeBaseForRepair = compactKnowledgeBaseForCalls(task.__articleKnowledgeBase, 16000);
     const callAkbBytes = Buffer.byteLength(task.__articleKnowledgeBaseForCalls, 'utf8');
+    const repairAkbBytes = Buffer.byteLength(task.__articleKnowledgeBaseForRepair, 'utf8');
     log(
       `ARTICLE_KNOWLEDGE_BASE собран: ${akbBytes} байт (~${akbTokens} токенов). ` +
       `Call-time AKB: ${callAkbBytes} байт (~${estimateTokens(task.__articleKnowledgeBaseForCalls)} токенов); ` +
-      `полный контекст сохранён для cache/result, bounded-копия используется при writer/audit calls.`,
+      `repair AKB: ${repairAkbBytes} байт (~${estimateTokens(task.__articleKnowledgeBaseForRepair)} токенов); ` +
+      `полный контекст сохранён для cache/result, bounded-копии используются при writer/repair calls.`,
       'info'
     );
   } catch (akbErr) {
     log(`ARTICLE_KNOWLEDGE_BASE: ошибка сборки — ${akbErr.message}. Продолжаем без AKB.`, 'warn');
     task.__articleKnowledgeBase = '';
     task.__articleKnowledgeBaseForCalls = '';
+    task.__articleKnowledgeBaseForRepair = '';
   }
 
   // ── Опционально: Gemini Context Caching API ─────────────────────
@@ -952,14 +956,19 @@ async function runPipeline(task, ctx) {
   // но аудит каждого блока запускается СРАЗУ после его генерации и работает
   // параллельно с генерацией следующих блоков и аудитами предыдущих.
   // Stage 3 (Gemini) и Stage 4-6 (DeepSeek) — разные API, не конкурируют.
-  const auditPromises = []; // промисы аудита всех блоков
   // Stage 3 остаётся последовательным, но дорогой Stage 4–6 audit/refine
-  // ограничен двумя блоками на task. Это предотвращает пиковое reservation
-  // Gemini budget при interleaving и сохраняет параллелизм между DeepSeek-аудитами.
+  // ограничен тремя блоками на task. Общий provider semaphore остаётся
+  // активным, поэтому wall-clock сокращается без снятия rate limit и без
+  // неограниченного Gemini budget reservation.
+  const auditPromises = []; // промисы аудита всех блоков
+  const configuredAuditConcurrency = parseInt(process.env.SEO_AUDIT_CONCURRENCY, 10);
+  const auditConcurrency = Number.isFinite(configuredAuditConcurrency) && configuredAuditConcurrency >= 1
+    ? Math.min(4, configuredAuditConcurrency)
+    : 3;
   const auditQueue = [];
   let activeAudits = 0;
   const pumpAuditQueue = () => {
-    while (activeAudits < 2 && auditQueue.length) {
+    while (activeAudits < auditConcurrency && auditQueue.length) {
       const { run, resolve, reject } = auditQueue.shift();
       activeAudits += 1;
       Promise.resolve()
@@ -975,6 +984,8 @@ async function runPipeline(task, ctx) {
     auditQueue.push({ run, resolve, reject });
     pumpAuditQueue();
   });
+
+  log(`Stage 4–6 audit concurrency: ${auditConcurrency} блока(ов) одновременно`, 'info');
 
   // Базовый checkpoint (обновляется перед каждым блоком)
   const buildCheckpoint = (blockIndex) => ({

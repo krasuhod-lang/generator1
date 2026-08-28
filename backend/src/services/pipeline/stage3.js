@@ -138,7 +138,7 @@ DO NOT include eeat_self_check, audit_report, or ANY other fields. ONLY html_con
     llmProvider(task),
     akbSystem(task),
     recoveryPrompt + DOCTOR_MAX_WRITER_CONTRACT,
-    geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192, skipOnBudget: true })
+    geminiCallOpts(task, { retries: 2, taskId, stageName: 'stage3', callLabel: `Block "${blockH2}" recovery (missing html_content)`, temperature: 0.3, log, onTokens, maxTokens: 8192, maxTruncationTokens: 12288, skipOnBudget: true })
   ).catch(e => {
     log(`Stage 3 recovery: LLM call ОШИБКА — ${e.message}`, 'warn');
     return null;
@@ -567,7 +567,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     llmProvider(task),
     akbSystem(task),
     s3prompt,
-    geminiCallOpts(task, { retries: 3, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}"`, temperature: 0.45, log, onTokens })
+    geminiCallOpts(task, { retries: 2, maxTokens: 20000, maxTruncationTokens: 24000, taskId, stageName: 'stage3', callLabel: `Block ${blockIndex + 1} "${block.h2}"`, temperature: 0.45, log, onTokens })
   ).catch(e => {
     log(`Stage 3 блок ${blockIndex + 1} ОШИБКА: ${e.message}`, 'error');
     return null;

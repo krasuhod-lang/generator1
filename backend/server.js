@@ -21,6 +21,7 @@ const path       = require('path');
 const { testConnection } = require('./src/config/db');
 const db = require('./src/config/db');
 const { ensureDurableTaskSchema } = require('./src/services/tasks/durableSchema');
+const { ensureApiObservabilitySchema } = require('./src/services/metrics/apiObservabilitySchema');
 
 const authRoutes  = require('./src/routes/auth.routes');
 const tasksRoutes = require('./src/routes/tasks.routes');
@@ -253,6 +254,15 @@ const start = async () => {
     // Runtime-safe reliability schema for existing PostgreSQL volumes. The
     // init scripts run only on a fresh volume, so this must run on every start.
     await ensureDurableTaskSchema();
+    // Migration 142 is initdb-only on fresh volumes; keep the API ledger
+    // available on existing production volumes after a normal restart.
+    try {
+      await ensureApiObservabilitySchema();
+    } catch (err) {
+      // Observability must not prevent generation from starting. The admin
+      // endpoint will surface a visible 503 instead of returning fake zeros.
+      console.error('[Schema] API observability schema unavailable:', err.message);
+    }
 
     // Auto-seed администратора из ENV
     await seedAdmin();

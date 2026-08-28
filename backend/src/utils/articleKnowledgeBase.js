@@ -696,12 +696,16 @@ function geminiCallOpts(task, extra = {}) {
  * Когда Gemini-кэш активен — возвращаем '' (AKB уже в кэше). Для Grok
  * (или когда кэш не используется) — возвращаем сам AKB как system-promt.
  */
-function akbSystem(task) {
+function akbSystem(task, options = {}) {
   if (!task) return '';
   // Если Gemini cache активен И провайдер всё ещё gemini — кэш покрывает AKB.
   // Для Grok нет cachedContent, поэтому всегда передаём AKB как system.
   const provider = (task?.llm_provider || 'gemini').toLowerCase();
   if (provider === 'gemini' && task.__geminiCacheName) return '';
+  const purpose = options?.purpose || 'writer';
+  if (purpose === 'repair' && task.__articleKnowledgeBaseForRepair) {
+    return task.__articleKnowledgeBaseForRepair;
+  }
   return task.__articleKnowledgeBaseForCalls || task.__articleKnowledgeBase || '';
 }
 
