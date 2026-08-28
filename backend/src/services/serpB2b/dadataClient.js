@@ -26,6 +26,7 @@
 
 const axios = require('axios');
 const { isValidInn } = require('./extractors');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const DADATA_URL = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party';
 const DEFAULT_TIMEOUT_MS = 8000;
@@ -52,8 +53,8 @@ function _setCached(inn, value) {
   }
 }
 
-function isDadataEnabled() {
-  return Boolean(process.env.DADATA_API_KEY);
+async function isDadataEnabled() {
+  return Boolean(await getIntegrationSecret('DADATA_API_KEY'));
 }
 
 /**
@@ -75,7 +76,8 @@ function isDadataEnabled() {
  * } | null>}
  */
 async function lookupByInn(inn, opts = {}) {
-  if (!isDadataEnabled()) return null;
+  const apiKey = await getIntegrationSecret('DADATA_API_KEY');
+  if (!apiKey) return null;
   const cleanInn = String(inn || '').replace(/\D+/g, '');
   if (!isValidInn(cleanInn)) return null;
 
@@ -93,7 +95,7 @@ async function lookupByInn(inn, opts = {}) {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Authorization: `Token ${process.env.DADATA_API_KEY}`,
+          Authorization: `Token ${apiKey}`,
         },
         // Не падаем на 4xx/5xx — обрабатываем status вручную.
         validateStatus: () => true,

@@ -30,6 +30,12 @@ const {
   revokeAdminProjectGrant,
   listAdminGrantableUsers,
 } = require('../controllers/admin.controller');
+const {
+  listAdminIntegrationKeys,
+  putAdminIntegrationKey,
+  deleteAdminIntegrationKey,
+  listAdminIntegrationKeyAudit,
+} = require('../controllers/adminIntegrationKeys.controller');
 
 const router = express.Router();
 
@@ -83,6 +89,13 @@ router.get('/funnels',            apiLimiter, adminAuth, getFunnelBreakdown);
 router.get('/aegis-costs',        apiLimiter, adminAuth, getAegisCostBreakdown);
 // Полный model/API ledger: retries, вызовы вне задач и reconciliation.
 router.get('/api-usage',          apiLimiter, adminAuth, getAdminApiUsage);
+
+// Central encrypted integration key vault. Plaintext is accepted only on PUT
+// and is never returned; DELETE removes the DB override and restores env fallback.
+router.get   ('/api-keys',              apiLimiter, adminAuth, listAdminIntegrationKeys);
+router.get   ('/api-keys/audit',        apiLimiter, adminAuth, listAdminIntegrationKeyAudit);
+router.put   ('/api-keys/:envName',     apiLimiter, adminAuth, putAdminIntegrationKey);
+router.delete('/api-keys/:envName',      apiLimiter, adminAuth, deleteAdminIntegrationKey);
 
 // Storage audit/cleanup: preview по умолчанию, destructive action только с confirm=DELETE.
 router.get('/storage',             apiLimiter, adminAuth, getAdminStorageAudit);

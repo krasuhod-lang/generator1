@@ -13,6 +13,7 @@
  */
 
 const { callLLM } = require('./callLLM');
+const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
 
 const ALLOWED_PROVIDERS = new Set(['deepseek', 'gemini']);
 
@@ -47,6 +48,15 @@ function hasResearchProvider() {
   return getResearchProviderOrder().some(_isConfigured);
 }
 
+async function hasResearchProviderAsync() {
+  for (const provider of getResearchProviderOrder()) {
+    const envName = provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'GEMINI_API_KEY';
+    const info = await getIntegrationSecretInfo(envName);
+    if (info.configured) return true;
+  }
+  return false;
+}
+
 /**
  * Calls one structured research provider at a time.
  *
@@ -64,7 +74,9 @@ async function callResearchProvider({
 
   let lastError = null;
   for (const provider of getResearchProviderOrder()) {
-    if (!_isConfigured(provider)) {
+    const envName = provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'GEMINI_API_KEY';
+    const configured = (await getIntegrationSecretInfo(envName)).configured;
+    if (!configured) {
       if (typeof log === 'function') {
         log(`${callLabel}: ${provider} пропущен — ключ не задан`, 'warn');
       }
@@ -98,5 +110,6 @@ module.exports = {
   callResearchProvider,
   getResearchProviderOrder,
   hasResearchProvider,
+  hasResearchProviderAsync,
   isResearchProviderConfigured: _isConfigured,
 };

@@ -30,6 +30,7 @@
  */
 
 const axios = (() => { try { return require('axios'); } catch (_) { return null; } })();
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const BASE_URL = (process.env.KEYS_SO_BASE_URL || 'https://api.keys.so').replace(/\/+$/, '');
 const TIMEOUT_MS = parseInt(process.env.KEYS_SO_TIMEOUT_MS, 10) || 20_000;
@@ -85,10 +86,8 @@ class KeysSoError extends Error {
   }
 }
 
-function _apiKey() {
-  // Совместимость: принимаем оба имени, чтобы пользователю не приходилось
-  // дублировать переменную окружения.
-  const k = process.env.KEYS_SO_API_KEY || process.env.KEYSSO_API_KEY || '';
+async function _apiKey() {
+  const k = await getIntegrationSecret('KEYS_SO_API_KEY');
   if (!k) {
     throw new KeysSoError('KEYS_SO_API_KEY is not configured', 'no_api_key', 503);
   }
@@ -148,7 +147,7 @@ async function _defaultGet(url, { params, headers, timeout }) {
 async function _get(path, params, { httpClient } = {}) {
   const get = httpClient ? httpClient.get.bind(httpClient) : _defaultGet;
   const url = `${BASE_URL}${path}`;
-  const headers = { 'X-Keyso-TOKEN': _apiKey(), Accept: 'application/json' };
+  const headers = { 'X-Keyso-TOKEN': await _apiKey(), Accept: 'application/json' };
   let attempt = 0;
   const maxAttempts = 2;
   let lastErr;

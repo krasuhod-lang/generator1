@@ -25,6 +25,7 @@ const {
   DASHSCOPE_MODEL_DEFAULT,
   _internals,
 } = require('../services/llm/dashscope.adapter');
+const { getIntegrationSecretInfo } = require('../services/integrations/integrationVault');
 
 const router = express.Router();
 
@@ -66,8 +67,9 @@ router.use(dashscopeLimiter);
  * Прокси показывается с маскированным паролем (см. _safeProxyLog в адаптере).
  */
 router.get('/health', auth, async (req, res) => {
-  const apiKeyRaw = (process.env.DASHSCOPE_API_KEY || '').trim();
-  const apiKeyPresent = apiKeyRaw.length > 0;
+  const apiKeyInfo = await getIntegrationSecretInfo('DASHSCOPE_API_KEY');
+  const apiKeyRaw = apiKeyInfo.value || '';
+  const apiKeyPresent = apiKeyInfo.configured;
   // Хвостовые символы — только для отладки оператором, не секрет.
   const apiKeyTail = apiKeyPresent ? apiKeyRaw.slice(-4) : '';
   const proxyUrl = (() => {
@@ -96,6 +98,7 @@ router.get('/health', auth, async (req, res) => {
   const result = {
     backend:    'ok',
     apiKey:     apiKeyPresent,
+    apiKeySource: apiKeyInfo.source,
     apiKeyTail: apiKeyPresent ? `…${apiKeyTail}` : '',
     baseUrl:    DASHSCOPE_BASE_URL,
     model:      DASHSCOPE_MODEL_DEFAULT,
@@ -108,7 +111,7 @@ router.get('/health', auth, async (req, res) => {
   };
 
   if (!apiKeyPresent) {
-    result.error = 'DASHSCOPE_API_KEY не задан в .env';
+    result.error = 'DASHSCOPE_API_KEY не задан ни в admin vault, ни в .env';
     return res.status(500).json(result);
   }
 

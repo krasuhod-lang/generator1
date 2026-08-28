@@ -7,11 +7,13 @@ const { connection, JOB_RETENTION } = require('./queue');
 const { generationQueue } = require('./queue');
 const db             = require('../config/db');
 const { ensureDurableTaskSchema } = require('../services/tasks/durableSchema');
+const { ensureIntegrationVaultSchema } = require('../services/integrations/integrationVaultSchema');
 const schemaReady = (async () => {
   let lastError;
   for (let attempt = 1; attempt <= 20; attempt += 1) {
     try {
       await ensureDurableTaskSchema();
+      await ensureIntegrationVaultSchema();
       return;
     } catch (error) {
       lastError = error;

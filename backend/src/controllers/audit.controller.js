@@ -21,22 +21,25 @@ const crypto  = require('crypto');
 const ExcelJS = require('exceljs');
 const db      = require('../config/db');
 const { assertPublicHost } = require('../services/siteCrawler/ssrfGuard');
+const { getIntegrationSecret } = require('../services/integrations/integrationVault');
 
 const BASE_URL = (process.env.AUDIT_INTERNAL_URL || 'http://audit:8002')
   .trim().replace(/\/$/, '');
-const TOKEN = (process.env.RELEVANCE_INTERNAL_TOKEN || '').trim();
+// RELEVANCE_INTERNAL_TOKEN is resolved from the central admin vault per request
+// with the existing env fallback, so rotation applies without restart.
 const MAX_CONCURRENT_TASKS = 2;
 const AUDIT_RECOVERY_MAX_ATTEMPTS = Math.max(1, Number(process.env.AUDIT_RECOVERY_MAX_ATTEMPTS) || 3);
 
-function _authHeaders() {
-  return TOKEN ? { 'X-Internal-Token': TOKEN } : {};
+async function _authHeaders() {
+  const token = await getIntegrationSecret('RELEVANCE_INTERNAL_TOKEN');
+  return token ? { 'X-Internal-Token': token } : {};
 }
 
 async function _py(method, path, data) {
   const res = await axios({
     method, url: `${BASE_URL}${path}`, data,
     timeout: 30000,
-    headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+    headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) },
     maxContentLength: 256 * 1024 * 1024,
     validateStatus: (s) => s >= 200 && s < 300,
   });

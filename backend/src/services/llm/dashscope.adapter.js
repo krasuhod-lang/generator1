@@ -24,6 +24,7 @@
 
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 // ── Конфигурация ─────────────────────────────────────────────────────────
 // Базовый URL OpenAI-совместимого режима DashScope (международный регион).
@@ -44,13 +45,26 @@ const DASHSCOPE_MODEL_DEFAULT = (process.env.DASHSCOPE_MODEL || 'qwen3.6-plus').
 // сервер успел отдать осмысленное 502, а не получить гонку с фронтом.
 const DEFAULT_TIMEOUT_MS = 240000;
 
-// ── API-ключ: ТОЛЬКО из окружения, без фолбэков ──────────────────────────
+// ── API-ключ: admin vault → env fallback ────────────────────────────────
+// Sync helper сохраняется для старых диагностических callers; реальные
+// внешние запросы используют async vault-first resolver ниже.
 function requireDashscopeApiKey() {
   const k = (process.env.DASHSCOPE_API_KEY || '').trim();
   if (!k) {
     throw new Error(
-      'DASHSCOPE_API_KEY не задан. Добавьте его в .env (см. .env.example) — '
-      + 'ключ нужен для функционала «Сформировать JSON» (Alibaba Model Studio / Qwen).'
+      'DASHSCOPE_API_KEY не задан ни в admin vault, ни в .env — '
+      + 'ключ нужен для Alibaba Model Studio / Qwen.'
+    );
+  }
+  return k;
+}
+
+async function resolveDashscopeApiKey() {
+  const k = await getIntegrationSecret('DASHSCOPE_API_KEY');
+  if (!k) {
+    throw new Error(
+      'DASHSCOPE_API_KEY не задан ни в admin vault, ни в .env — '
+      + 'ключ нужен для Alibaba Model Studio / Qwen.'
     );
   }
   return k;
@@ -193,7 +207,7 @@ async function callDashscope({
     throw new Error('callDashscope: systemPrompt must be a string');
   }
 
-  const apiKey = requireDashscopeApiKey();
+  const apiKey = await resolveDashscopeApiKey();
   const safeModel = (typeof model === 'string' && model.trim()) ? model.trim() : DASHSCOPE_MODEL_DEFAULT;
   const safeTemperature = Number.isFinite(temperature) ? Number(temperature) : 0.1;
   const safeMaxTokens = Number.isFinite(maxTokens) ? Math.floor(Number(maxTokens)) : 16384;
@@ -272,6 +286,7 @@ async function callDashscope({
 module.exports = {
   callDashscope,
   requireDashscopeApiKey,
+  resolveDashscopeApiKey,
   DASHSCOPE_BASE_URL,
   DASHSCOPE_MODEL_DEFAULT,
   // экспортируем для тестов/диагностики

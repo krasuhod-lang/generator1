@@ -1,6 +1,7 @@
 'use strict';
 
 const axios = require('axios');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const DEEPSEEK_ENDPOINT = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1';
 // Все аналитические функции пайплайнов идут через DeepSeek-V4-Pro
@@ -47,10 +48,10 @@ async function callDeepSeek(systemInstruction, userPrompt, options = {}) {
   // timeoutMs = 0 → без ограничения по времени (axios: timeout 0 = disabled)
   if (timeoutMs !== 0 && timeoutMs < 1000) throw new Error('Invalid timeout');
 
-  // API ключ DeepSeek — из переменной окружения
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  // API ключ DeepSeek: admin vault → env fallback.
+  const apiKey = await getIntegrationSecret('DEEPSEEK_API_KEY');
   if (!apiKey) {
-    throw new Error('DEEPSEEK_API_KEY is not set in environment variables');
+    throw new Error('DEEPSEEK_API_KEY is not configured in admin vault or environment');
   }
 
   // ── R1 / reasoner: system prompt → user prompt ─────────────────────

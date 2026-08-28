@@ -3,6 +3,7 @@
 const os = require('os');
 const axios = require('axios');
 const queue = require('./queue');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const AUDIT_URL = process.env.AUDIT_INTERNAL_URL || 'http://audit:8002';
 const WORKER_ID = `${os.hostname()}-${process.pid}-parser-bot`;
@@ -33,7 +34,7 @@ function boolOption(options, names, fallback = false) {
   return fallback;
 }
 
-function buildAuditPayload(item) {
+async function buildAuditPayload(item) {
   const options = item.task?.options || {};
   return {
     urls: [item.normalized_url || item.input_url],
@@ -44,7 +45,7 @@ function buildAuditPayload(item) {
     extract_about: boolOption(options, ['extract_about', 'about']),
     extract_services: boolOption(options, ['extract_services', 'services']),
     extract_clients: boolOption(options, ['extract_clients', 'clients']),
-    api_key: process.env.DEEPSEEK_API_KEY || options.deepseek_api_key || '',
+    api_key: options.deepseek_api_key || '',
   };
 }
 
@@ -104,9 +105,11 @@ function buildWorkerErrorResult(item, status, message, errorCode = '', previousR
 }
 
 async function callAudit(item) {
-  const payload = buildAuditPayload(item);
+  const payload = await buildAuditPayload(item);
+  payload.api_key = (await getIntegrationSecret('DEEPSEEK_API_KEY')) || payload.api_key || '';
+  const relevanceToken = await getIntegrationSecret('RELEVANCE_INTERNAL_TOKEN');
   const response = await axios.post(`${AUDIT_URL}/audit/parsers/extract`, payload, {
-    headers: { 'X-Internal-Token': process.env.RELEVANCE_INTERNAL_TOKEN || '' },
+    headers: relevanceToken ? { 'X-Internal-Token': relevanceToken } : {},
     timeout: Math.max(1000, Math.min(600000, Number(item.task?.options?.request_timeout_ms) || 300000)),
   });
   const result = response.data?.results?.[0];

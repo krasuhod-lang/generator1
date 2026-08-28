@@ -22,6 +22,7 @@ const { testConnection } = require('./src/config/db');
 const db = require('./src/config/db');
 const { ensureDurableTaskSchema } = require('./src/services/tasks/durableSchema');
 const { ensureApiObservabilitySchema } = require('./src/services/metrics/apiObservabilitySchema');
+const { ensureIntegrationVaultSchema } = require('./src/services/integrations/integrationVaultSchema');
 
 const authRoutes  = require('./src/routes/auth.routes');
 const tasksRoutes = require('./src/routes/tasks.routes');
@@ -262,6 +263,15 @@ const start = async () => {
       // Observability must not prevent generation from starting. The admin
       // endpoint will surface a visible 503 instead of returning fake zeros.
       console.error('[Schema] API observability schema unavailable:', err.message);
+    }
+    // Migration 143 is initdb-only on fresh volumes; keep encrypted admin
+    // integration key storage available on existing production volumes.
+    try {
+      await ensureIntegrationVaultSchema();
+    } catch (err) {
+      // The env fallback keeps the application usable, while the admin page
+      // surfaces the schema issue instead of pretending a key was saved.
+      console.error('[Schema] integration secret vault unavailable:', err.message);
     }
 
     // Auto-seed администратора из ENV

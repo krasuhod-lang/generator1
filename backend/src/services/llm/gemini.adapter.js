@@ -1,6 +1,7 @@
 'use strict';
 
-const axios       = require('axios');
+const axios = require('axios');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { getGeminiProfile, buildJsonStrictGuard } = require('./geminiProfiles');
 
@@ -199,6 +200,18 @@ function requireGeminiApiKey() {
   return k;
 }
 
+async function resolveGeminiApiKey() {
+  const key = await getIntegrationSecret('GEMINI_API_KEY');
+  if (!key) {
+    const err = new Error(
+      'GEMINI_API_KEY не задан ни в admin vault, ни в .env — ключ нужен для генерации.'
+    );
+    err.isDeterministic = true;
+    throw err;
+  }
+  return key;
+}
+
 function resolveProxyUrl(suffix = '') {
   // 1. Полная строка (с автонормализацией формата)
   const full = process.env[`GEMINI_PROXY_URL${suffix}`] || '';
@@ -293,7 +306,7 @@ async function testProxyConnectivity() {
     console.warn('[gemini] ⚠ GEMINI_API_KEY не задан — пропускаем тест прокси');
     return;
   }
-  const apiKey = requireGeminiApiKey();
+  const apiKey = await resolveGeminiApiKey();
 
   // Лёгкий запрос — список моделей (не тратит токены)
   const testUrl = `${GEMINI_BASE_URL}?key=${apiKey}`;
@@ -446,7 +459,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   if (timeoutMs !== 0 && timeoutMs < 1000) throw new Error('Invalid timeout');
 
   // API ключ Gemini — только из переменной окружения (без хардкода)
-  const apiKey = requireGeminiApiKey();
+  const apiKey = await resolveGeminiApiKey();
 
   const endpoint = `${GEMINI_BASE_URL}/${model}:generateContent?key=${apiKey}`;
 
@@ -749,7 +762,7 @@ async function streamGenerate(systemInstruction, userPrompt, options = {}) {
     throw new Error('streamGenerate: GEMINI_PROXY не задан');
   }
 
-  const apiKey = requireGeminiApiKey();
+  const apiKey = await resolveGeminiApiKey();
   const endpoint = `${GEMINI_BASE_URL}/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const payload = {
@@ -1076,7 +1089,7 @@ async function createCachedContent({ systemInstruction, ttlSeconds = 900, timeou
     throw new Error('createCachedContent: GEMINI_PROXY не задан');
   }
 
-  const apiKey = requireGeminiApiKey();
+  const apiKey = await resolveGeminiApiKey();
 
   // Endpoint для cachedContents: /v1beta/cachedContents
   // GEMINI_BASE_URL заканчивается на /v1beta/models — отрезаем «/models»
@@ -1141,7 +1154,7 @@ async function deleteCachedContent(cacheName, timeoutMs = 20000) {
   if (!cacheName || typeof cacheName !== 'string') return false;
   if (PROXY_URLS.length === 0) return false;
 
-  const apiKey = requireGeminiApiKey();
+  const apiKey = await resolveGeminiApiKey();
   const baseRoot = GEMINI_BASE_URL.replace(/\/models$/, '');
   const endpoint = `${baseRoot}/${cacheName}?key=${apiKey}`;
 

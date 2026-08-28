@@ -275,7 +275,7 @@ async function _processSite(siteRoot) {
   // Step 3b: Dadata enrichment по ИНН — самый точный источник имени
   // компании. Перезаписывает HTML-извлечённое имя на каноническую форму
   // (full_with_opf), дособирает ОГРН/КПП и статус юрлица.
-  if (row.inn && isDadataEnabled()) {
+  if (row.inn && (await isDadataEnabled())) {
     try {
       const dd = await lookupByInn(row.inn);
       if (dd && dd.name_full_with_opf) {

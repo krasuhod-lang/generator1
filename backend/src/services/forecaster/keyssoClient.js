@@ -47,6 +47,7 @@
 
 const crypto = require('crypto');
 const { getForecasterConfig } = require('./config');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 // ── Region label → keys.so base code ──────────────────────────────────
 //
@@ -318,7 +319,7 @@ async function fetchPhraseSignals({
   const cfg = getForecasterConfig().keysso;
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
 
-  const apiKey = process.env.KEYSSO_API_KEY || process.env.KEYS_SO_API_KEY;
+  const apiKey = await getIntegrationSecret('KEYSSO_API_KEY');
   if (!apiKey) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const dom = _hostFromUrl(domain) || String(domain || '').trim().toLowerCase();

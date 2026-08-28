@@ -13,11 +13,13 @@
  */
 
 const axios = require('axios');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const BASE_URL = (process.env.RELEVANCE_INTERNAL_URL || 'http://relevance:8000')
   .trim().replace(/\/$/, '');
 
-const TOKEN = (process.env.RELEVANCE_INTERNAL_TOKEN || '').trim();
+// Legacy env constant is intentionally not used for outbound calls: the
+// central admin vault resolver below supports live rotation with env fallback.
 
 const ANALYZE_TIMEOUT_MS = (() => {
   const v = parseInt(process.env.RELEVANCE_ANALYZE_TIMEOUT_MS, 10);
@@ -27,8 +29,9 @@ const ANALYZE_TIMEOUT_MS = (() => {
 
 const HEALTH_TIMEOUT_MS = 8000;
 
-function _authHeaders() {
-  return TOKEN ? { 'X-Internal-Token': TOKEN } : {};
+async function _authHeaders() {
+  const token = await getIntegrationSecret('RELEVANCE_INTERNAL_TOKEN');
+  return token ? { 'X-Internal-Token': token } : {};
 }
 
 /**
@@ -46,7 +49,7 @@ async function analyze(payload) {
       payload,
       {
         timeout: ANALYZE_TIMEOUT_MS,
-        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) },
         // Документы могут весить десятки мегабайт — поднимаем лимиты.
         maxBodyLength:    256 * 1024 * 1024,
         maxContentLength: 256 * 1024 * 1024,
@@ -84,7 +87,7 @@ async function cocoons(payload) {
         // Коконы — лёгкая операция (TF-IDF + SVD), но на 20 крупных
         // документах с 5к лемм это ~1-3 секунды. Берём 60s с запасом.
         timeout: 60000,
-        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) },
         maxBodyLength:    64 * 1024 * 1024,
         maxContentLength: 64 * 1024 * 1024,
         validateStatus: (s) => s >= 200 && s < 300,
@@ -140,7 +143,7 @@ async function compare(payload) {
       payload,
       {
         timeout: 60000,
-        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) },
         maxBodyLength:    64 * 1024 * 1024,
         maxContentLength: 64 * 1024 * 1024,
         validateStatus: (s) => s >= 200 && s < 300,
@@ -186,7 +189,7 @@ async function evidence(payload) {
         // потолок таймаута, что и /analyze, чтобы не упереться на тяжёлых
         // страницах.
         timeout: ANALYZE_TIMEOUT_MS,
-        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) },
         maxBodyLength:    256 * 1024 * 1024,
         maxContentLength: 256 * 1024 * 1024,
         validateStatus: (s) => s >= 200 && s < 300,
@@ -209,7 +212,7 @@ async function health() {
   try {
     const res = await axios.get(`${BASE_URL}/health`, {
       timeout: HEALTH_TIMEOUT_MS,
-      headers: _authHeaders(),
+      headers: await _authHeaders(),
       validateStatus: () => true,
     });
     return {
@@ -249,7 +252,7 @@ async function cocoonPlan(payload) {
       {
         // Полностью CPU-bound, без сети — обычно <500ms.
         timeout: 30000,
-        headers: { 'Content-Type': 'application/json', ..._authHeaders() },
+        headers: { 'Content-Type': 'application/json', ...(await _authHeaders()) },
         maxBodyLength:    32 * 1024 * 1024,
         maxContentLength: 32 * 1024 * 1024,
         validateStatus: (s) => s >= 200 && s < 300,

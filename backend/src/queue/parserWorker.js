@@ -4,6 +4,7 @@ const axios = require('axios');
 const { Worker } = require('bullmq');
 const db = require('../config/db');
 const { connection, JOB_RETENTION } = require('./queue');
+const { getIntegrationSecret } = require('../services/integrations/integrationVault');
 const { makeBullJobId } = require('./jobIds');
 const { WORKER_ID, claimParserItem, retryParserItem, finishParserItem, publishPendingOutbox } = require('../services/tasks/reliability');
 const {
@@ -14,12 +15,13 @@ const {
 } = require('../services/parser/parserTaskService');
 
 const AUDIT_URL = (process.env.AUDIT_INTERNAL_URL || 'http://audit:8002').replace(/\/$/, '');
-const INTERNAL_TOKEN = process.env.RELEVANCE_INTERNAL_TOKEN || '';
+// Token is resolved dynamically from the central vault with env fallback.
 const ITEM_MAX_ATTEMPTS = Math.max(1, Number(process.env.PARSER_ITEM_MAX_ATTEMPTS) || 3);
 const RETRY_BASE_MS = Math.max(1000, Number(process.env.PARSER_RETRY_BASE_MS) || 5000);
 
-function auditHeaders() {
-  return INTERNAL_TOKEN ? { 'X-Internal-Token': INTERNAL_TOKEN } : {};
+async function auditHeaders() {
+  const token = await getIntegrationSecret('RELEVANCE_INTERNAL_TOKEN');
+  return token ? { 'X-Internal-Token': token } : {};
 }
 
 async function setParentRunning(taskId) {
@@ -78,10 +80,10 @@ async function processParseUrl(job) {
       extract_about: options.about !== false,
       extract_services: options.services !== false,
       extract_clients: options.clients !== false,
-      api_key: process.env.DEEPSEEK_API_KEY || options.deepseek_api_key || '',
+      api_key: (await getIntegrationSecret('DEEPSEEK_API_KEY')) || options.deepseek_api_key || '',
     };
     const response = await axios.post(`${AUDIT_URL}/audit/parsers/extract`, payload, {
-      headers: { 'Content-Type': 'application/json', ...auditHeaders() },
+      headers: { 'Content-Type': 'application/json', ...(await auditHeaders()) },
       timeout: Math.min(300000, Number(options.site_timeout_ms) || 300000),
       maxContentLength: 256 * 1024 * 1024,
     });

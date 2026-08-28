@@ -21,6 +21,7 @@
  */
 
 const db = require('../config/db');
+const { getIntegrationSecret } = require('../services/integrations/integrationVault');
 
 const MAX_NAME_LEN = 200;
 const MAX_KEYWORD_LEN = 200;
@@ -512,7 +513,7 @@ const RESEND_EVENT_MAP = {
 
 async function resendWebhook(req, res, next) {
   try {
-    const secret = process.env.RESEND_WEBHOOK_SECRET;
+    const secret = await getIntegrationSecret('RESEND_WEBHOOK_SECRET');
     const raw = req.rawBody || (Buffer.isBuffer(req.body) ? req.body : null);
 
     let event;

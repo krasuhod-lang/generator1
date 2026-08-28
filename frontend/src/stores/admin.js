@@ -200,6 +200,31 @@ export const useAdminStore = defineStore('admin', () => {
     return data;
   }
 
+  // ── Central encrypted integration key vault ───────────────────────────
+  async function fetchIntegrationKeys() {
+    const { data } = await adminApi.get('/admin/api-keys');
+    return data;
+  }
+
+  async function saveIntegrationKey(envName, value, enabled = true) {
+    const { data } = await adminApi.put(`/admin/api-keys/${encodeURIComponent(envName)}`, {
+      envName,
+      value,
+      enabled,
+    });
+    return data;
+  }
+
+  async function removeIntegrationKey(envName) {
+    const { data } = await adminApi.delete(`/admin/api-keys/${encodeURIComponent(envName)}`);
+    return data;
+  }
+
+  async function fetchIntegrationKeyAudit() {
+    const { data } = await adminApi.get('/admin/api-keys/audit');
+    return data;
+  }
+
   async function fetchStorageAudit() {
     const { data } = await adminApi.get('/admin/storage');
     return data;
@@ -253,6 +278,10 @@ export const useAdminStore = defineStore('admin', () => {
     fetchFunnels,
     fetchAegisCosts,
     fetchApiUsage,
+    fetchIntegrationKeys,
+    saveIntegrationKey,
+    removeIntegrationKey,
+    fetchIntegrationKeyAudit,
     fetchStorageAudit,
     cleanupStorage,
     fetchStorageInventory,

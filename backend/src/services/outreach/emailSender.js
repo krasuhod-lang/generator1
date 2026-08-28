@@ -7,13 +7,16 @@
 const { Resend } = require('resend');
 const db = require('../../config/db');
 const { FREE_EMAIL_PROVIDERS } = require('./prospectScorer');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 let _resend = null;
-function getResend() {
-  if (!_resend) {
-    const key = process.env.RESEND_API_KEY;
-    if (!key) throw new Error('RESEND_API_KEY не задан в .env');
+let _resendKey = '';
+async function getResend() {
+  const key = await getIntegrationSecret('RESEND_API_KEY');
+  if (!key) throw new Error('RESEND_API_KEY не задан ни в admin vault, ни в .env');
+  if (!_resend || _resendKey !== key) {
     _resend = new Resend(key);
+    _resendKey = key;
   }
   return _resend;
 }
@@ -73,7 +76,7 @@ async function sendEmail({ emailId, to, subject, html, text, fromEmail, fromName
   }
 
   // 4. Отправляем через Resend
-  const resend = getResend();
+  const resend = await getResend();
   const fromAddress = fromName
     ? `${fromName} <${fromEmail}>`
     : fromEmail;

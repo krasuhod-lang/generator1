@@ -15,7 +15,7 @@ const { fillPromptVars } = require('../../utils/fillPromptVars');
 const { SYSTEM_PROMPTS_EXT } = require('../../prompts/systemPrompts');
 const {
   callResearchProvider,
-  hasResearchProvider,
+  hasResearchProviderAsync,
 } = require('./researchProvider');
 
 /**
@@ -67,7 +67,7 @@ async function runRealtimeResearch({
   sourceContext = '',
   callOptions = {},
 } = {}) {
-  if (!topic || !String(topic).trim() || !hasResearchProvider()) return null;
+  if (!topic || !String(topic).trim() || !(await hasResearchProviderAsync())) return null;
 
   const synthTask = {
     input_target_service: String(topic),

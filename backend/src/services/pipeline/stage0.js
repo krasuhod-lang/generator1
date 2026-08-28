@@ -5,6 +5,8 @@ const { scrapeCompetitors }   = require('../parser/scraper');
 const { SYSTEM_PROMPTS_EXT }  = require('../../prompts/systemPrompts');
 const { fillPromptVars }       = require('../../utils/fillPromptVars');
 const { callResearchProvider } = require('../llm/researchProvider');
+const { runQwenResearchAgent } = require('../llm/qwenAgent.adapter');
+const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
 const db                       = require('../../config/db');
 
 /**
@@ -246,13 +248,34 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
         return { status: 'rejected', reason: e };
       }),
 
-    callResearchProvider({
-      system: fillPromptVars(SYSTEM_PROMPTS_EXT.deepseekResearcher, task),
-      prompt: researchContext,
-      callOptions: { taskId, stageName: 'stage0', log, onTokens },
-      callLabel: 'Stage 0 Research Evidence',
-      log,
-    }).catch(e => { log(`Stage 0 Research error: ${e.message}`, 'warn'); return null; }),
+    (async () => {
+      // Qwen 3.8 Max is the only Stage 0 branch with native web tools. If the
+      // shared DashScope key is absent, preserve the existing DeepSeek/Gemini
+      // evidence path instead of making Stage 0 fail.
+      const qwenInfo = await getIntegrationSecretInfo('DASHSCOPE_API_KEY');
+      if (qwenInfo.configured) {
+        try {
+          return await runQwenResearchAgent({
+            task,
+            existingEvidence: researchContext,
+            taskId,
+            log,
+            onTokens,
+          });
+        } catch (e) {
+          log(`Stage 0 Qwen Research Agent error: ${e.message}; fallback на DeepSeek/Gemini`, 'warn');
+        }
+      } else {
+        log('Stage 0 Qwen Research Agent пропущен — DASHSCOPE_API_KEY не настроен', 'warn');
+      }
+      return callResearchProvider({
+        system: fillPromptVars(SYSTEM_PROMPTS_EXT.deepseekResearcher, task),
+        prompt: researchContext,
+        callOptions: { taskId, stageName: 'stage0', log, onTokens },
+        callLabel: 'Stage 0 Research Evidence',
+        log,
+      });
+    })().catch(e => { log(`Stage 0 Research error: ${e.message}`, 'warn'); return null; }),
   ]);
 
   const researchRaw = researchResult?.raw || null;
@@ -302,7 +325,9 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
       expert_quotes:     researchRaw?.expert_quotes          || [],
       latest_trends:     researchRaw?.latest_trends          || [],
       legal_updates:     researchRaw?.legal_or_price_updates || [],
-    };
+      research_sources: researchRaw?.sources                 || [],
+      research_provider: researchResult?.provider            || null,
+  };
   }
 
   // Объединяем результаты
@@ -320,8 +345,10 @@ RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Ми
     // Knowledge Base (§2b RESEARCH EVIDENCE).
     realtime_facts:       researchRaw?.current_stats          || [],
     expert_quotes:        researchRaw?.expert_quotes          || [],
-    latest_trends:        researchRaw?.latest_trends          || [],
-    legal_updates:        researchRaw?.legal_or_price_updates || [],
+    latest_trends:    researchRaw?.latest_trends          || [],
+    legal_updates:    researchRaw?.legal_or_price_updates || [],
+    research_sources: researchRaw?.sources                 || [],
+    research_provider: researchResult?.provider            || null,
   };
 
   // Сохраняем в tasks

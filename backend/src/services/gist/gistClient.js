@@ -18,8 +18,8 @@
 
 const axios = require('axios');
 
-const GIST_URL   = process.env.GIST_SERVICE_URL || 'http://gist:8003';
-const GIST_TOKEN = process.env.GIST_INTERNAL_TOKEN;
+const GIST_URL = process.env.GIST_SERVICE_URL || 'http://gist:8003';
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 const GIST_MAX_PAGES = 8;
 const GIST_PAGE_CHARS = 6000;
 const GIST_TOTAL_CHARS = 48000;
@@ -53,9 +53,10 @@ function _isTransientGistError(error) {
     || /timeout|network|socket|ECONNRESET|ECONNABORTED/i.test(String(error?.message || ''));
 }
 
-function _headers() {
+async function _headers() {
   const headers = {};
-  if (GIST_TOKEN) headers['X-Internal-Token'] = GIST_TOKEN;
+  const token = await getIntegrationSecret('GIST_INTERNAL_TOKEN');
+  if (token) headers['X-Internal-Token'] = token;
   return headers;
 }
 
@@ -86,7 +87,7 @@ async function runGistGapFinder({ keyword, competitors_text, page_type, target_a
           target_audience: target_audience || '',
           modules: ['M2', 'M3'],
         },
-        { headers: _headers(), timeout: 45000 },
+        { headers: await _headers(), timeout: 45000 },
       );
       break;
     } catch (error) {
@@ -128,7 +129,7 @@ async function runTopicDiscovery({ query, trends_data = null, reddit_insights = 
       reddit_insights: reddit_insights || null,
       paa_questions: paa_questions || null,
     },
-    { headers: _headers(), timeout: 45000 },
+    { headers: await _headers(), timeout: 45000 },
   );
   const data = response.data || {};
   const suggestions = Array.isArray(data.sub_niche_suggestions) ? data.sub_niche_suggestions : [];
@@ -151,7 +152,7 @@ async function scanRelevance({ keyword } = {}) {
   const response = await axios.post(
     `${GIST_URL}/relevance/scan`,
     { queries: [keyword] },
-    { headers: _headers(), timeout: 10000 },
+    { headers: await _headers(), timeout: 10000 },
   );
   const first = (response.data && response.data.results && response.data.results[0]) || {};
   return {

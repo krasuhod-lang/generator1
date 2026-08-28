@@ -89,6 +89,7 @@
 
 const { parseForecasterInput } = require('./parser');
 const { getForecasterConfig } = require('./config');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const API_SET   = 'https://arsenkin.ru/api/tools/set';
 const API_CHECK = 'https://arsenkin.ru/api/tools/check';
@@ -149,6 +150,12 @@ function _cfg() {
     wizardToolName: String(process.env.ARSENKIN_WIZARD_TOOL_NAME || '').trim(),
     historyMonths: Math.max(12, Number(getForecasterConfig().forecast?.historyMonths) || 24),
   };
+}
+
+async function _cfgWithVaultToken() {
+  const cfg = _cfg();
+  cfg.token = _sanitizeToken(await getIntegrationSecret('ARSENKIN_API_TOKEN'));
+  return cfg;
 }
 
 // ── Регион: произвольный текст пользователя → Yandex lr ────────────
@@ -1043,7 +1050,7 @@ function _normalizeSerpFeatures(res) {
 }
 
 async function collectCommercialization({ phrases, regionLabel, regionLr = null }) {
-  const cfg = _cfg();
+  const cfg = await _cfgWithVaultToken();
   if (!cfg.commToolName) {
     _logSkipOnce('comm_tool', '[Forecaster] ARSENKIN_COMM_TOOL_NAME не задан — коммерциализация пропущена');
     return null;
@@ -1061,7 +1068,7 @@ async function collectCommercialization({ phrases, regionLabel, regionLr = null 
 }
 
 async function collectSerpFeatures({ phrases, regionLabel, regionLr = null }) {
-  const cfg = _cfg();
+  const cfg = await _cfgWithVaultToken();
   if (!cfg.wizardToolName) {
     _logSkipOnce('wizard_tool', '[Forecaster] ARSENKIN_WIZARD_TOOL_NAME не задан — колдунщики SERP пропущены');
     return null;
@@ -1096,7 +1103,7 @@ async function collectSerpFeatures({ phrases, regionLabel, regionLr = null }) {
  * }>}
  */
 async function collectSeasonality({ phrases, regionLabel, regionLr: regionLrIn = null, onProgress = null }) {
-  const cfg = _cfg();
+  const cfg = await _cfgWithVaultToken();
   if (!cfg.token) return { verdict: 'skipped', reason: 'no_api_key' };
   const list = (Array.isArray(phrases) ? phrases : [])
     .map((p) => String(p || '').trim()).filter(Boolean);
