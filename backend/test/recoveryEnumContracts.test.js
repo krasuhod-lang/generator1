@@ -11,6 +11,10 @@ const reliability = fs.readFileSync(
   path.join(root, 'src/services/tasks/reliability.js'),
   'utf8',
 );
+const metaPipeline = fs.readFileSync(
+  path.join(root, 'src/services/metaTags/pipeline.js'),
+  'utf8',
+);
 
 const metaTagsSpec = queuedRecovery.match(
   /kind: 'meta_tags',[\s\S]*?handler: \(\) => require\('\.\.\/metaTags\/pipeline'\)/,
@@ -22,5 +26,6 @@ assert.match(
   reliability,
   /SET status=\(CASE WHEN COALESCE\(recovery_attempts,0\) >= \$1 THEN 'error' ELSE 'queued' END\)::project_analysis_status/,
 );
+assert.match(metaPipeline, /SET status\s*=\s*'pending'[\s\S]*WHERE status = 'in_progress'/);
 
 console.log('recoveryEnumContracts.test.js: all assertions passed');

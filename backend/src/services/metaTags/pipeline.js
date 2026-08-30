@@ -576,7 +576,7 @@ async function recoverStuckMetaTagTasks() {
   try {
     const { rowCount } = await db.query(
       `UPDATE meta_tag_tasks
-          SET status        = 'queued',
+          SET status        = 'pending',
               error_message = 'Задача возобновлена после обновления системы'
         WHERE status = 'in_progress'`,
     );
