@@ -358,7 +358,7 @@ async function recoverExpiredWork(db = dbDefault) {
 
   const projectAnalyses = await db.query(
     `UPDATE project_analyses
-        SET status=CASE WHEN COALESCE(recovery_attempts,0) >= $1 THEN 'error' ELSE 'queued' END,
+        SET status=(CASE WHEN COALESCE(recovery_attempts,0) >= $1 THEN 'error' ELSE 'queued' END)::project_analysis_status,
             worker_id=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(),
             recovery_attempts=COALESCE(recovery_attempts,0)+1,
             last_error_code=CASE WHEN COALESCE(recovery_attempts,0) >= $1 THEN 'max_recovery_attempts' ELSE 'worker_restarted' END,

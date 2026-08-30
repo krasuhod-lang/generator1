@@ -37,8 +37,10 @@ const TASK_REGISTRY = Object.freeze([
   {
     kind: 'meta_tags',
     table: 'meta_tag_tasks',
-    statuses: ['pending', 'queued'],
-    queueStatus: 'queued',
+    // meta_tag_task_status has no `queued` enum value; pending is the
+    // persisted pre-start state and the only safe recovery target.
+    statuses: ['pending'],
+    queueStatus: 'pending',
     activeStatuses: ['processing', 'running', 'in_progress'],
     handler: () => require('../metaTags/pipeline').processMetaTagTask,
   },
