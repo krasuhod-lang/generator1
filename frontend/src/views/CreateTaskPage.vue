@@ -1109,7 +1109,7 @@ function downloadExampleTZ() {
         </div>
 
         <!-- ── Кнопки ──────────────────────────────────────────────── -->
-        <div class="flex items-center gap-3 pt-2">
+        <div class="app-form-actions flex items-center gap-3 pt-2">
           <button @click="saveDraft" class="btn-secondary" :disabled="saving">
             <svg v-if="saving" class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>

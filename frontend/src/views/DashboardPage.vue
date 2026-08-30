@@ -365,7 +365,8 @@ function goPage(next) {
         <button class="text-indigo-300 text-sm mt-3 hover:text-indigo-200" @click="clearFilters">Сбросить фильтры</button>
       </div>
       <div v-else class="card overflow-hidden p-0">
-        <table class="w-full text-sm">
+        <div class="overflow-x-auto">
+        <table class="w-full min-w-[760px] text-sm">
           <thead><tr class="border-b border-gray-800 text-left"><th class="px-5 py-3 text-gray-500 font-medium w-10">#</th><th class="px-5 py-3 text-gray-500 font-medium">Задача</th><th class="px-5 py-3 text-gray-500 font-medium">Тип</th><th class="px-5 py-3 text-gray-500 font-medium">Статус</th><th class="px-5 py-3 text-gray-500 font-medium">Дата</th><th v-if="!isClient" class="px-5 py-3 text-gray-500 font-medium">Стоимость</th><th class="px-5 py-3 text-gray-500 font-medium text-right">Действия</th></tr></thead>
           <tbody>
             <template v-for="group in groupedTasks" :key="group.key">
@@ -382,6 +383,7 @@ function goPage(next) {
             </template>
           </tbody>
         </table>
+        </div>
         <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-gray-800 px-5 py-3"><span class="text-xs text-gray-600">Показаны {{ (page - 1) * pageSize + 1 }}–{{ Math.min(page * pageSize, filteredTasks.length) }} из {{ filteredTasks.length }}</span><div class="flex items-center gap-2"><button class="btn-secondary text-xs px-3 py-1.5" :disabled="page <= 1" @click="goPage(page - 1)">Назад</button><button class="btn-secondary text-xs px-3 py-1.5" :disabled="page >= pageCount" @click="goPage(page + 1)">Вперёд</button></div></footer>
       </div>
     </div>
