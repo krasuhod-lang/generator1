@@ -33,7 +33,12 @@ const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
-const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
+const {
+  withTaskUsageReservation,
+  isClientRequest,
+  sanitizeTaskForClient,
+  clientVisibilityError,
+} = require('../services/access/entitlementPolicy');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 const MAX_TOPIC_LEN  = 250;
@@ -129,7 +134,10 @@ async function listInfoArticleTasks(req, res, next) {
       listParams,
     );
     const total = Number(countResult.rows[0]?.total || 0);
-    return res.json({ tasks: rows, meta: { total, limit, offset, hasMore: offset + rows.length < total } });
+    return res.json({
+      tasks: isClientRequest(req) ? rows.map(sanitizeTaskForClient) : rows,
+      meta: { total, limit, offset, hasMore: offset + rows.length < total },
+    });
   } catch (err) {
     return next(err);
   }
@@ -257,7 +265,7 @@ async function createInfoArticleTask(req, res, next) {
     });
 
     return res.status(201).json({
-      task,
+      task: isClientRequest(req) ? sanitizeTaskForClient(task) : task,
       normalized: { kept: links.length, dropped, errors: errors.slice(0, 5) },
     });
   } catch (err) {
@@ -275,7 +283,7 @@ async function getInfoArticleTask(req, res, next) {
     if (!rows.length) {
       return res.status(404).json({ error: 'Задача не найдена' });
     }
-    return res.json({ task: rows[0] });
+    return res.json({ task: isClientRequest(req) ? sanitizeTaskForClient(rows[0]) : rows[0] });
   } catch (err) {
     return next(err);
   }
@@ -309,6 +317,7 @@ async function streamInfoArticleTask(req, res, next) {
     if (!rows.length) {
       return res.status(404).json({ error: 'Задача не найдена' });
     }
+    if (isClientRequest(req)) throw clientVisibilityError();
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');

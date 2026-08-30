@@ -20,7 +20,11 @@ const { resolveOwnedProjectId } = require('../services/projects/projectOwnership
 const { buildProjectContext } = require('../services/projects/contextResolver');
 const { compactProjectSnapshot } = require('../services/projects/snapshotCompactor');
 const { canonTitle } = require('../services/articleTopics/brandKey');
-const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
+const {
+  withTaskUsageReservation,
+  isClientRequest,
+  sanitizeTaskForClient,
+} = require('../services/access/entitlementPolicy');
 
 // Лимиты длины — чтобы не дать раздуть промпт неосторожным копипастом
 // и не зацепить лимит входа Gemini-адаптера.
@@ -134,7 +138,7 @@ async function listArticleTopicTasks(req, res, next) {
         LIMIT 200`,
       [req.user.id],
     );
-    return res.json({ tasks: rows });
+    return res.json({ tasks: isClientRequest(req) ? rows.map(sanitizeTaskForClient) : rows });
   } catch (err) {
     return next(err);
   }
@@ -194,7 +198,7 @@ async function createArticleTopicTask(req, res, next) {
       console.error('[articleTopics] background task failed:', err.message);
     });
 
-    return res.status(201).json({ task });
+    return res.status(201).json({ task: isClientRequest(req) ? sanitizeTaskForClient(task) : task });
   } catch (err) {
     return next(err);
   }
@@ -314,7 +318,7 @@ async function createArticleTopicIdeasTask(req, res, next) {
       console.error('[articleTopics] topic-ideas background failed:', err.message);
     });
 
-    return res.status(201).json({ task });
+    return res.status(201).json({ task: isClientRequest(req) ? sanitizeTaskForClient(task) : task });
   } catch (err) {
     return next(err);
   }
@@ -395,7 +399,7 @@ async function createArticleTopicDeepDive(req, res, next) {
       console.error('[articleTopics] deep-dive failed:', err.message);
     });
 
-    return res.status(201).json({ task });
+    return res.status(201).json({ task: isClientRequest(req) ? sanitizeTaskForClient(task) : task });
   } catch (err) {
     return next(err);
   }
@@ -411,7 +415,7 @@ async function getArticleTopicTask(req, res, next) {
     if (!rows.length) {
       return res.status(404).json({ error: 'Задача не найдена' });
     }
-    return res.json({ task: rows[0] });
+    return res.json({ task: isClientRequest(req) ? sanitizeTaskForClient(rows[0]) : rows[0] });
   } catch (err) {
     return next(err);
   }

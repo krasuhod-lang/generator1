@@ -5,6 +5,8 @@ const multer         = require('multer');
 const path           = require('path');
 const rateLimit      = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
+const db = require('../config/db');
+const { ensureAccessProfile } = require('../services/access/entitlementPolicy');
 const {
   listTasks,
   createTask,
@@ -34,8 +36,8 @@ const router = express.Router();
 // authSSE — для SSE-роута: принимает токен из ?token= query param
 // (нативный EventSource не поддерживает заголовки)
 // ─────────────────────────────────────────────────────────────────────────────
-function authSSE(req, res, next) {
-  // Сначала пробуем заголовок, потом query-параметр
+async function authSSE(req, res, next) {
+  // Сначала пробуем заголовок, потом query-параметр.
   const authHeader = req.headers['authorization'];
   const token = (authHeader && authHeader.split(' ')[1]) || req.query.token;
 
@@ -44,8 +46,17 @@ function authSSE(req, res, next) {
   }
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = { id: decoded.id, email: decoded.email };
-    next();
+    const profile = await ensureAccessProfile(decoded.id, db);
+    if (!profile) return res.status(401).json({ error: 'Invalid or expired token' });
+    req.user = {
+      id: decoded.id,
+      email: decoded.email,
+      role: profile.account_role,
+      accountRole: profile.account_role,
+      plan: profile.plan_key,
+      accessStatus: profile.status,
+    };
+    return next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }

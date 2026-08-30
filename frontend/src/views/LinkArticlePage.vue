@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import api from '../api.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useLinkArticleStore } from '../stores/linkArticle.js';
@@ -11,6 +12,7 @@ import { filterAndSortTasks, groupTasksByDate, isTaskActiveStatus } from '../uti
 
 const store = useLinkArticleStore();
 const auth  = useAuthStore();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 // История задач: фильтруем локально по уже загруженным server-side страницам.
 const historySearch = ref('');
@@ -238,13 +240,14 @@ async function selectTask(id) {
     return;
   }
 
-  // SSE поток — для running/queued задач
-  if (selectedTask.value && isTaskActiveStatus(selectedTask.value.status)) {
+  // SSE поток — для running/queued задач; клиенту доступны только статус и результат.
+  if (!isClient.value && selectedTask.value && isTaskActiveStatus(selectedTask.value.status)) {
     openStreamFor(id);
   }
 }
 
 function openStreamFor(id) {
+  if (isClient.value) return;
   try {
     const token = auth.token || localStorage.getItem('seo_token') || '';
     // EventSource не поддерживает заголовки — прокидываем токен в query string;
@@ -514,6 +517,7 @@ async function copyMetaField(label, value) {
         <div>
           <h1 class="text-2xl font-bold text-white flex items-center gap-2">
             🔗 Генератор ссылочной статьи
+            <ToolHelp title="Ссылочная статья" text="Инструмент создаёт статью вокруг заданной темы и естественно размещает целевую ссылку. Укажите точный анкор и URL, чтобы получить готовый материал для публикации." />
           </h1>
           <p class="text-gray-400 text-sm mt-1">
             Статья для внешних площадок (sape / miralinks / gogetlinks) с естественной ссылкой
@@ -652,13 +656,13 @@ async function copyMetaField(label, value) {
                   <div class="flex-1 min-w-0">
                     <div class="text-sm text-gray-200 truncate">{{ t.topic }}</div>
                     <div class="text-[11px] text-gray-500 mt-0.5">
-                      {{ formatDate(t.created_at) }} · {{ formatCost(t.cost_usd) }}
-                      <span v-if="taskStageLabel(t) && !['done', 'error'].includes(t.status)" class="text-indigo-300">· {{ taskStageLabel(t) }}</span>
-                      <span v-if="taskProgressLabel(t)" class="text-sky-300">· {{ taskProgressLabel(t) }}</span>
-                      <span v-if="taskQueueLabel(t)" class="text-amber-300">· {{ taskQueueLabel(t) }}</span>
+                      {{ formatDate(t.created_at) }}<span v-if="!isClient"> · {{ formatCost(t.cost_usd) }}</span>
+                      <span v-if="!isClient && taskStageLabel(t) && !['done', 'error'].includes(t.status)" class="text-indigo-300">· {{ taskStageLabel(t) }}</span>
+                      <span v-if="!isClient && taskProgressLabel(t)" class="text-sky-300">· {{ taskProgressLabel(t) }}</span>
+                      <span v-if="!isClient && taskQueueLabel(t)" class="text-amber-300">· {{ taskQueueLabel(t) }}</span>
                       <span v-if="t.anchor_text" class="text-gray-600">· {{ t.anchor_text }}</span>
                     </div>
-                    <div v-if="t.error_message || t.error" class="text-[11px] text-red-300/90 truncate" :title="t.error_message || t.error">
+                    <div v-if="!isClient && (t.error_message || t.error)" class="text-[11px] text-red-300/90 truncate" :title="t.error_message || t.error">
                       {{ t.error_message || t.error }}
                     </div>
                   </div>
@@ -692,8 +696,12 @@ async function copyMetaField(label, value) {
           </span>
         </header>
 
+        <div v-if="isClient && isTaskActiveStatus(selectedTask.status)" class="rounded-lg border border-indigo-900/60 bg-indigo-950/20 px-4 py-3 text-sm text-indigo-100">
+          {{ selectedTask.status_message || 'Задача выполняется. Готовый результат появится здесь автоматически.' }}
+        </div>
+
         <!-- Прогресс -->
-        <div v-if="isTaskActiveStatus(selectedTask.status)" class="space-y-2">
+        <div v-if="!isClient && isTaskActiveStatus(selectedTask.status)" class="space-y-2">
           <div class="flex justify-between items-center text-xs text-gray-400">
             <span>{{ stageLabel(selectedTask.current_stage) }}</span>
             <span>{{ selectedTask.progress_pct || 0 }}%</span>
@@ -702,7 +710,7 @@ async function copyMetaField(label, value) {
             <div class="bg-indigo-500 h-2 transition-all duration-500"
                  :style="{ width: `${Math.min(100, selectedTask.progress_pct || 0)}%` }"></div>
           </div>
-          <div v-if="streamEvents.length" class="text-[11px] text-gray-500 max-h-28 overflow-auto font-mono leading-tight">
+          <div v-if="!isClient && streamEvents.length" class="text-[11px] text-gray-500 max-h-28 overflow-auto font-mono leading-tight">
             <div v-for="(ev, i) in streamEvents.slice(-8)" :key="i">
               <template v-if="ev.type === 'log'">· {{ ev.msg }}</template>
               <template v-else-if="ev.type === 'stage'">→ {{ stageLabel(ev.stage) }} ({{ ev.progress }}%)</template>
@@ -712,10 +720,11 @@ async function copyMetaField(label, value) {
         </div>
 
         <!-- Ошибка -->
-        <div v-if="selectedTask.status === 'error' && selectedTask.error_message"
+        <div v-if="selectedTask.status === 'error' || selectedTask.status === 'timeout'"
              class="p-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">
           <div class="font-semibold mb-1">Генерация завершилась с ошибкой</div>
-          <div class="text-red-200 text-xs whitespace-pre-wrap">{{ selectedTask.error_message }}</div>
+          <div v-if="isClient" class="text-red-200 text-xs">Попробуйте запустить задачу повторно. Технические детали доступны служебным ролям.</div>
+          <div v-else-if="selectedTask.error_message" class="text-red-200 text-xs whitespace-pre-wrap">{{ selectedTask.error_message }}</div>
         </div>
 
         <!-- Результат -->

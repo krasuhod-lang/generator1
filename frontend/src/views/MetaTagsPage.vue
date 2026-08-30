@@ -5,10 +5,14 @@ import AppLayout from '../components/AppLayout.vue';
 import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import { useMetaTagsStore } from '../stores/metaTags.js';
+import { useAuthStore } from '../stores/auth.js';
 
 const router = useRouter();
 const store  = useMetaTagsStore();
+const auth   = useAuthStore();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 // ── Форма создания задачи ──────────────────────────────────────────
 const form = ref({
@@ -161,6 +165,7 @@ function formatDate(d) {
         <div>
           <h1 class="text-2xl font-bold text-white flex items-center gap-2">
             🏷️ Генератор Мета-тегов
+            <ToolHelp title="Мета-теги" text="Введите поисковые запросы по одному на строку. Для каждого запроса сервис сформирует Title и Description с учётом интента, длины и семантики." />
             <span class="text-xs font-medium text-indigo-400 bg-indigo-950/40 border border-indigo-900 px-2 py-0.5 rounded">DrMax v25</span>
           </h1>
           <p class="text-gray-400 text-sm mt-1">
@@ -309,11 +314,11 @@ function formatDate(d) {
                 <span>📅 {{ formatDate(t.created_at) }}</span>
                 <span>🔑 {{ t.keywords_count }} запросов</span>
                 <span v-if="t.niche" class="truncate">📂 {{ t.niche }}</span>
-                <span v-if="Number(t.total_tokens_in) + Number(t.total_tokens_out) > 0">
+                <span v-if="!isClient && Number(t.total_tokens_in) + Number(t.total_tokens_out) > 0">
                   🧮 {{ (Number(t.total_tokens_in) + Number(t.total_tokens_out)).toLocaleString('ru-RU') }} ток.
                   · <span class="text-emerald-400">${{ Number(t.total_cost_usd).toFixed(4) }}</span>
                 </span>
-                <span v-if="t.error_message" class="text-red-400 truncate" :title="t.error_message">
+                <span v-if="!isClient && t.error_message" class="text-red-400 truncate" :title="t.error_message">
                   ⚠ {{ t.error_message }}
                 </span>
               </div>

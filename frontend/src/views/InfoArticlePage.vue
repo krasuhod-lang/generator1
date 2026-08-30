@@ -6,6 +6,7 @@ import readXlsxFile from 'read-excel-file';
 import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import { useAuthStore } from '../stores/auth.js';
 import { useInfoArticleStore } from '../stores/infoArticle.js';
 import { buildAcfFromHtml } from '../utils/acfDeterministicBuilder.js';
@@ -14,6 +15,7 @@ import { filterAndSortTasks, groupTasksByDate, isTaskActiveStatus } from '../uti
 const store = useInfoArticleStore();
 const auth  = useAuthStore();
 const route = useRoute();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 // История задач: фильтрация локальная, а данные подгружаются server-side страницами.
 const historySearch = ref('');
@@ -630,12 +632,13 @@ async function selectTask(id) {
     alert(err.response?.data?.error || 'Не удалось загрузить задачу');
     return;
   }
-  if (selectedTask.value && isTaskActiveStatus(selectedTask.value.status)) {
+  if (!isClient.value && selectedTask.value && isTaskActiveStatus(selectedTask.value.status)) {
     openStreamFor(id);
   }
 }
 
 function openStreamFor(id) {
+  if (isClient.value) return;
   try {
     const token = auth.token || localStorage.getItem('seo_token') || '';
     // EventSource не поддерживает заголовки — токен идёт через query.
@@ -1138,6 +1141,7 @@ onUnmounted(() => { stopTicker(); });
         <div>
           <h1 class="text-2xl font-bold text-white flex items-center gap-2">
             📰 Генератор информационной статьи в блог
+            <ToolHelp title="Статья для блога" text="Инструмент создаёт готовую экспертную статью. Проект добавляет контекст бизнеса, Excel помогает построить перелинковку, а после завершения материал можно открыть и экспортировать." />
           </h1>
           <p class="text-gray-400 text-sm mt-1">
             При загруженном Excel модель сама подберёт 1–2 семантически точных коммерческих ссылки
@@ -1382,17 +1386,17 @@ onUnmounted(() => { stopTicker(); });
                   <div class="flex-1 min-w-0">
                     <div class="text-sm text-gray-200 truncate">{{ t.topic }}</div>
                     <div class="text-[11px] text-gray-500 mt-0.5">
-                      {{ formatDate(t.created_at) }} · {{ formatCost(t.cost_usd) }}
-                      <span class="font-mono" :class="isTaskActiveStatus(t.status) ? 'text-sky-400' : 'text-gray-500'">
+                      {{ formatDate(t.created_at) }}<span v-if="!isClient"> · {{ formatCost(t.cost_usd) }}</span>
+                      <span v-if="!isClient" class="font-mono" :class="isTaskActiveStatus(t.status) ? 'text-sky-400' : 'text-gray-500'">
                         · ⏱ {{ formatDuration(taskDurationMs(t)) }}
                       </span>
-                      <span v-if="taskStageLabel(t) && !['done', 'error'].includes(t.status)" class="text-indigo-300">· {{ taskStageLabel(t) }}</span>
-                      <span v-if="taskProgressLabel(t)" class="text-sky-300">· {{ taskProgressLabel(t) }}</span>
-                      <span v-if="taskQueueLabel(t)" class="text-amber-300">· {{ taskQueueLabel(t) }}</span>
+                      <span v-if="!isClient && taskStageLabel(t) && !['done', 'error'].includes(t.status)" class="text-indigo-300">· {{ taskStageLabel(t) }}</span>
+                      <span v-if="!isClient && taskProgressLabel(t)" class="text-sky-300">· {{ taskProgressLabel(t) }}</span>
+                      <span v-if="!isClient && taskQueueLabel(t)" class="text-amber-300">· {{ taskQueueLabel(t) }}</span>
                       <span v-if="t.commercial_links_count">· {{ t.commercial_links_count }} ссылок</span>
                       <span v-if="t.eeat_score != null">· E-E-A-T {{ Number(t.eeat_score).toFixed(1) }}</span>
                     </div>
-                    <div v-if="t.error_message || t.error" class="text-[11px] text-red-300/90 truncate" :title="t.error_message || t.error">
+                    <div v-if="!isClient && (t.error_message || t.error)" class="text-[11px] text-red-300/90 truncate" :title="t.error_message || t.error">
                       {{ t.error_message || t.error }}
                     </div>
                   </div>
@@ -1417,17 +1421,23 @@ onUnmounted(() => { stopTicker(); });
             <div class="text-[11px] text-gray-500 mt-0.5">
               Регион: <span class="text-gray-300">{{ selectedTask.region || '—' }}</span>
               · {{ selectedTask.commercial_links_count }} коммерч. ссылок
-              · Стоимость: <span class="text-gray-300">{{ formatCost(liveCost) }}</span>
-              · Время: <span class="font-mono"
-                             :class="isTaskActiveStatus(selectedTask.status) ? 'text-sky-300' : 'text-gray-300'">{{ liveDurationLabel }}</span>
+              <template v-if="!isClient">
+                · Стоимость: <span class="text-gray-300">{{ formatCost(liveCost) }}</span>
+                · Время: <span class="font-mono"
+                               :class="isTaskActiveStatus(selectedTask.status) ? 'text-sky-300' : 'text-gray-300'">{{ liveDurationLabel }}</span>
+              </template>
             </div>
           </div>
           <span class="text-[11px] px-2 py-0.5 rounded uppercase tracking-wider shrink-0"
                 :class="statusBadgeClass(selectedTask.status)">{{ statusLabel(selectedTask.status) }}</span>
         </header>
 
+        <div v-if="isClient && isTaskActiveStatus(selectedTask.status)" class="rounded-lg border border-indigo-900/60 bg-indigo-950/20 px-4 py-3 text-sm text-indigo-100">
+          {{ selectedTask.status_message || 'Задача выполняется. Готовый результат появится здесь автоматически.' }}
+        </div>
+
         <!-- Прогресс -->
-        <div v-if="isTaskActiveStatus(selectedTask.status)" class="space-y-2">
+        <div v-if="!isClient && isTaskActiveStatus(selectedTask.status)" class="space-y-2">
           <div class="flex justify-between items-center text-xs text-gray-400">
             <span>{{ stageLabel(selectedTask.current_stage) }}</span>
             <span class="flex items-center gap-3">
@@ -1439,7 +1449,7 @@ onUnmounted(() => { stopTicker(); });
             <div class="bg-indigo-500 h-2 transition-all duration-500"
                  :style="{ width: `${Math.min(100, selectedTask.progress_pct || 0)}%` }"></div>
           </div>
-          <div v-if="streamEvents.length" class="text-[11px] text-gray-500 max-h-32 overflow-auto font-mono leading-tight">
+          <div v-if="!isClient && streamEvents.length" class="text-[11px] text-gray-500 max-h-32 overflow-auto font-mono leading-tight">
             <div v-for="(ev, i) in streamEvents.slice(-12)" :key="i">
               <template v-if="ev.type === 'log'">· {{ ev.msg }}</template>
               <template v-else-if="ev.type === 'stage'">→ {{ stageLabel(ev.stage) }} ({{ ev.progress }}%)</template>
@@ -1449,10 +1459,11 @@ onUnmounted(() => { stopTicker(); });
         </div>
 
         <!-- Ошибка -->
-        <div v-if="selectedTask.status === 'error' && selectedTask.error_message"
+        <div v-if="selectedTask.status === 'error' || selectedTask.status === 'timeout'"
              class="p-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm">
           <div class="font-semibold mb-1">Генерация завершилась с ошибкой</div>
-          <div class="text-red-200 text-xs whitespace-pre-wrap">{{ selectedTask.error_message }}</div>
+          <div v-if="isClient" class="text-red-200 text-xs">Попробуйте запустить задачу повторно. Технические детали доступны служебным ролям.</div>
+          <div v-else-if="selectedTask.error_message" class="text-red-200 text-xs whitespace-pre-wrap">{{ selectedTask.error_message }}</div>
         </div>
 
         <!-- Результат -->
@@ -1481,6 +1492,7 @@ onUnmounted(() => { stopTicker(); });
                    type="button"
                    class="px-3 py-2 text-xs uppercase tracking-wider border-b-2 transition-colors"
                    :class="activeResultTab === tab.k ? 'border-indigo-500 text-indigo-300' : 'border-transparent text-gray-500 hover:text-gray-300'"
+                   v-if="tab.k !== 'metrics' || !isClient"
                    @click="activeResultTab = tab.k">
               {{ tab.label }}
             </button>
@@ -1746,7 +1758,7 @@ onUnmounted(() => { stopTicker(); });
           </div>
 
           <!-- TAB: Метрики -->
-          <div v-if="activeResultTab === 'metrics'" class="space-y-3">
+          <div v-if="!isClient && activeResultTab === 'metrics'" class="space-y-3">
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div class="bg-gray-950 border border-gray-800 rounded-lg p-3">
                 <div class="text-[10px] uppercase text-gray-500">DeepSeek in</div>

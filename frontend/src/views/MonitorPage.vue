@@ -10,6 +10,7 @@ const route  = useRoute();
 const router = useRouter();
 const store  = useTasksStore();
 const auth   = useAuthStore();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 // ── Модалка результатов ────────────────────────────────────────────────────
 const showResult = ref(false);
@@ -258,6 +259,7 @@ function closeSSE() {
 }
 
 function connectSSE() {
+  if (isClient.value) return;
   closeSSE(); // закрываем предыдущее соединение если было
 
   const token = auth.token || localStorage.getItem('seo_token');
@@ -388,6 +390,7 @@ const queueStatusMessage = computed(() => {
 });
 
 async function loadTaskHealth() {
+  if (isClient.value) return;
   try {
     const { data } = await api.get(`/tasks/${taskId}/health`);
     taskHealth.value = data;
@@ -435,6 +438,17 @@ async function handleResume() {
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 
+const clientStatusLabel = computed(() => ({
+  draft: 'Черновик', queued: 'Принята', processing: 'Выполняется',
+  paused: 'Приостановлена', completed: 'Готово', failed: 'Не завершена',
+}[String(task.value?.status || '').toLowerCase()] || 'Обновляется'));
+const clientStatusClass = computed(() => ({
+  completed: 'bg-green-900 text-green-300',
+  failed: 'bg-red-900 text-red-300',
+  paused: 'bg-orange-900 text-orange-300',
+}[String(task.value?.status || '').toLowerCase()] || 'bg-indigo-900 text-indigo-300'));
+let clientPollTimer = null;
+
 // Track last-seen task_log id — passed to /logs?after= and to SSE reconnects
 // so we don't re-replay history we already have.
 const lastLogId = ref(0);
@@ -461,6 +475,7 @@ function _logRowToEvent(row) {
 }
 
 async function loadHistory() {
+  if (isClient.value) return;
   try {
     const rows = await store.fetchTaskLogs(taskId, { after: lastLogId.value || undefined, limit: 2000 });
     if (!Array.isArray(rows) || !rows.length) return;
@@ -479,6 +494,26 @@ async function loadHistory() {
 
 onMounted(async () => {
   task.value = await store.fetchTask(taskId).catch(() => null);
+  if (isClient.value) {
+    done.value = task.value?.status === 'completed';
+    failed.value = ['failed', 'error'].includes(task.value?.status);
+    paused.value = task.value?.status === 'paused';
+    progress.value = done.value ? 100 : Number(task.value?.progress_pct || 0);
+    clientPollTimer = setInterval(async () => {
+      const fresh = await store.fetchTask(taskId).catch(() => null);
+      if (!fresh) return;
+      task.value = fresh;
+      done.value = fresh.status === 'completed';
+      failed.value = ['failed', 'error'].includes(fresh.status);
+      paused.value = fresh.status === 'paused';
+      progress.value = done.value ? 100 : Number(fresh.progress_pct || 0);
+      if (done.value && clientPollTimer) {
+        clearInterval(clientPollTimer);
+        clientPollTimer = null;
+      }
+    }, 5000);
+    return;
+  }
   // Restore paused state from task status
   if (task.value?.status === 'paused') {
     paused.value = true;
@@ -500,6 +535,10 @@ onUnmounted(() => {
     clearInterval(healthTimer);
     healthTimer = null;
   }
+  if (clientPollTimer) {
+    clearInterval(clientPollTimer);
+    clientPollTimer = null;
+  }
 });
 </script>
 
@@ -515,7 +554,7 @@ onUnmounted(() => {
 
       <!-- LLM-провайдер бейдж -->
       <span
-        v-if="task?.llm_provider"
+        v-if="!isClient && task?.llm_provider"
         class="badge ml-auto"
         :class="task.llm_provider === 'grok' ? 'bg-purple-900 text-purple-300' : 'bg-blue-900 text-blue-300'"
         :title="`Генерация через ${task.llm_provider === 'grok' ? 'xAI Grok' : 'Google Gemini'}`"
@@ -527,7 +566,34 @@ onUnmounted(() => {
       <span v-else class="badge bg-indigo-900 text-indigo-300 animate-pulse" :class="{ 'ml-auto': !task?.llm_provider }">⚙ Выполняется</span>
     </header>
 
-    <main class="max-w-7xl mx-auto px-6 py-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
+    <main v-if="isClient" class="max-w-3xl mx-auto px-6 py-8">
+      <section class="card space-y-5">
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <p class="text-xs uppercase tracking-wide text-gray-500">Статус задачи</p>
+            <h1 class="text-xl font-bold text-white truncate mt-1">{{ task?.title || task?.input_target_service || 'Генерация контента' }}</h1>
+          </div>
+          <span :class="['badge shrink-0', clientStatusClass]">{{ clientStatusLabel }}</span>
+        </div>
+        <div class="rounded-xl border border-indigo-900/60 bg-indigo-950/20 p-4">
+          <p class="text-sm text-indigo-100">{{ task?.status_message || (done ? 'Результат готов.' : 'Статус задачи обновляется автоматически.') }}</p>
+          <div class="mt-4 h-2 rounded-full bg-gray-800 overflow-hidden">
+            <div class="h-full rounded-full bg-indigo-500 transition-all duration-500" :style="{ width: `${Math.min(100, Math.max(0, progress))}%` }" />
+          </div>
+          <div class="flex justify-between mt-2 text-xs text-gray-500"><span>{{ done ? 'Готово' : 'Выполнение' }}</span><span>{{ done ? 100 : Math.round(progress) }}%</span></div>
+        </div>
+        <div v-if="failed" class="rounded-lg border border-red-800/70 bg-red-950/30 px-4 py-3 text-sm text-red-200">
+          Генерацию не удалось завершить. Вернитесь в кабинет и попробуйте повторить запуск.
+        </div>
+        <div class="flex flex-wrap gap-3">
+          <button v-if="done" @click="showResult = true" class="btn-primary">Открыть готовый результат →</button>
+          <RouterLink to="/dashboard" class="btn-secondary">← Вернуться в мои задачи</RouterLink>
+        </div>
+        <p class="text-xs leading-relaxed text-gray-600">В этом режиме отображаются только пользовательский статус и готовый результат. Технические журналы, стоимость и внутренние данные генерации доступны служебным ролям.</p>
+      </section>
+    </main>
+
+    <main v-else class="max-w-7xl mx-auto px-6 py-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
 
       <!-- ── Левая колонка ─────────────────────────────────────────── -->
       <div class="lg:col-span-1 space-y-5">

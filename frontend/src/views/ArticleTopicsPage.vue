@@ -19,7 +19,9 @@ import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import { useArticleTopicsStore } from '../stores/articleTopics.js';
+import { useAuthStore } from '../stores/auth.js';
 import {
   parseMainResult, parseDeepDiveResult,
   parseTopicIdeasResult, formatBrandFactsForInfoArticle,
@@ -28,7 +30,9 @@ import {
 } from '../utils/articleTopicsParser.js';
 
 const store  = useArticleTopicsStore();
+const auth   = useAuthStore();
 const router = useRouter();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 // ── Форма ────────────────────────────────────────────────────────────
 // formMode определяет, какую задачу создавать: 'main' (foresight, как было)
@@ -813,7 +817,7 @@ const sortedTasks = computed(() =>
       <!-- Шапка -->
       <div class="border-b border-gray-800 pb-4">
         <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-          🔮 Темы статей <span class="text-xs font-normal text-gray-500">· foresight forecaster</span>
+          🔮 Темы статей <ToolHelp title="Темы статей" text="Инструмент анализирует нишу, интенты и сигналы будущего спроса. Готовые темы можно передать в генератор статьи с уже собранным контекстом." /> <span class="text-xs font-normal text-gray-500">· foresight forecaster</span>
         </h1>
         <p class="text-gray-400 text-sm mt-1">
           Foresight-анализ ниши: слабые сигналы, emerging-тренды, прогноз поискового спроса
@@ -1044,7 +1048,7 @@ const sortedTasks = computed(() =>
                   </div>
                   <div class="text-[11px] text-gray-500 mt-1">
                     {{ fmtDate(t.created_at) }}
-                    <span v-if="t.cost_usd && Number(t.cost_usd) > 0">
+                    <span v-if="!isClient && t.cost_usd && Number(t.cost_usd) > 0">
                       · ${{ Number(t.cost_usd).toFixed(4) }}
                     </span>
                     <span v-if="evaluatorScore(t)"

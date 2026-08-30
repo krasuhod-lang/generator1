@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/auth.js';
 import { useTasksStore } from '../stores/tasks.js';
 import ResultModal from '../components/ResultModal.vue';
 import AppLayout from '../components/AppLayout.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 
 const router = useRouter();
 const auth = useAuthStore();
@@ -178,6 +179,7 @@ const statusCounts = computed(() => allTasks.value.reduce((acc, task) => {
 }, {}));
 const activeCount = computed(() => (statusCounts.value.processing || 0) + (statusCounts.value.queued || 0));
 const access = computed(() => auth.user?.entitlements || null);
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 const roleLabel = computed(() => ({ admin: 'Администратор', employee: 'Сотрудник', client: 'Клиент' }[auth.user?.role] || 'Пользователь'));
 const planLabel = computed(() => auth.user?.plan_name || auth.user?.plan || 'Бесплатный доступ');
 const accessPeriodLabel = computed(() => {
@@ -274,7 +276,7 @@ function goPage(next) {
       <header class="flex flex-wrap items-start justify-between gap-4 mb-6">
         <div>
           <div class="flex items-center gap-3">
-            <h1 class="text-xl font-bold text-white">Центр задач</h1>
+            <h1 class="text-xl font-bold text-white flex items-center gap-2">Центр задач <ToolHelp title="Центр задач" text="Здесь собраны все ваши генерации. Статус показывает состояние задачи, а кнопка «Результат» открывает готовый материал." /></h1>
             <span class="text-xs text-gray-500">обновление каждые 5 сек.</span>
           </div>
           <p class="text-sm text-gray-500 mt-1">
@@ -326,7 +328,7 @@ function goPage(next) {
           <select v-model="sortBy" class="bg-gray-950/60 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-300 focus:border-indigo-500 focus:outline-none">
             <option value="newest">Сначала новые</option>
             <option value="oldest">Сначала старые</option>
-            <option value="cost">По стоимости</option>
+              <option v-if="!isClient" value="cost">По стоимости</option>
             <option value="title">По названию</option>
           </select>
         </div>
@@ -360,18 +362,18 @@ function goPage(next) {
       </div>
       <div v-else class="card overflow-hidden p-0">
         <table class="w-full text-sm">
-          <thead><tr class="border-b border-gray-800 text-left"><th class="px-5 py-3 text-gray-500 font-medium w-10">#</th><th class="px-5 py-3 text-gray-500 font-medium">Задача</th><th class="px-5 py-3 text-gray-500 font-medium">Тип</th><th class="px-5 py-3 text-gray-500 font-medium">Статус</th><th class="px-5 py-3 text-gray-500 font-medium">Дата</th><th class="px-5 py-3 text-gray-500 font-medium">Стоимость</th><th class="px-5 py-3 text-gray-500 font-medium text-right">Действия</th></tr></thead>
+          <thead><tr class="border-b border-gray-800 text-left"><th class="px-5 py-3 text-gray-500 font-medium w-10">#</th><th class="px-5 py-3 text-gray-500 font-medium">Задача</th><th class="px-5 py-3 text-gray-500 font-medium">Тип</th><th class="px-5 py-3 text-gray-500 font-medium">Статус</th><th class="px-5 py-3 text-gray-500 font-medium">Дата</th><th v-if="!isClient" class="px-5 py-3 text-gray-500 font-medium">Стоимость</th><th class="px-5 py-3 text-gray-500 font-medium text-right">Действия</th></tr></thead>
           <tbody>
             <template v-for="group in groupedTasks" :key="group.key">
-              <tr v-if="group.label" class="bg-gray-900/80"><td colspan="7" class="px-5 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">{{ group.label }}</td></tr>
+              <tr v-if="group.label" class="bg-gray-900/80"><td :colspan="isClient ? 6 : 7" class="px-5 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">{{ group.label }}</td></tr>
               <tr v-for="(task, idx) in group.tasks" :key="task.id" class="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
                 <td class="px-5 py-3.5 text-gray-600">{{ (page - 1) * pageSize + idx + 1 }}</td>
                 <td class="px-5 py-3.5 max-w-sm"><p class="text-white font-medium truncate">{{ taskTitle(task) }}</p><p v-if="task.lsi_coverage != null || task.eeat_score != null" class="text-xs text-gray-500 mt-0.5">LSI {{ task.lsi_coverage ?? '—' }}% · E‑E‑A‑T {{ task.eeat_score ?? '—' }}</p><p class="text-xs text-gray-600 mt-0.5 font-mono truncate">{{ String(task.id).slice(0, 16) }}<span v-if="String(task.id).length > 16">…</span></p></td>
                 <td class="px-5 py-3.5"><span class="text-xs text-gray-400">{{ taskType(task) }}</span></td>
                 <td class="px-5 py-3.5"><span :class="['badge', statusMetaForTask(task).cls]">{{ statusMetaForTask(task).label }}</span></td>
                 <td class="px-5 py-3.5 text-gray-400 whitespace-nowrap"><span class="block text-[11px] text-gray-600">{{ taskDateLabel(task) }}</span>{{ fmtDate(taskDateValue(task)) }}</td>
-                <td class="px-5 py-3.5 font-mono text-indigo-400">{{ fmtCost(task.total_cost_usd) }}</td>
-                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="!task.archived_at && (task.status === 'queued' || task.status === 'processing')" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed'" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Результат</button><RouterLink v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button v-if="!task.archived_at" @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Переместить в архив">В архив</button></div></td>
+                <td v-if="!isClient" class="px-5 py-3.5 font-mono text-indigo-400">{{ fmtCost(task.total_cost_usd) }}</td>
+                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="!isClient && !task.archived_at && (task.status === 'queued' || task.status === 'processing')" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed'" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Результат</button><RouterLink v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button v-if="!task.archived_at" @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Переместить в архив">В архив</button></div></td>
               </tr>
             </template>
           </tbody>

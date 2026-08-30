@@ -18,7 +18,14 @@ const { salvageJsonStrings }    = require('../utils/salvageJson');
 const { getProfileQueueHealth } = require('../services/tasks/generationAdmission');
 const { resolveQueueReason } = require('../services/tasks/queueDiagnostics');
 const { getUserTaskSlotHealth } = require('../services/tasks/userTaskAdmission');
-const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
+const {
+  withTaskUsageReservation,
+  isClientRequest,
+  sanitizeTaskForClient,
+  sanitizeMetricsForClient,
+  sanitizeBlockForClient,
+  clientVisibilityError,
+} = require('../services/access/entitlementPolicy');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -120,7 +127,7 @@ async function listTasks(req, res, next) {
         ORDER BY COALESCE(t.completed_at, t.created_at) DESC, t.id DESC`,
       [req.user.id]
     );
-    return res.json({ tasks: rows });
+    return res.json({ tasks: isClientRequest(req) ? rows.map(sanitizeTaskForClient) : rows });
   } catch (err) {
     next(err);
   }
@@ -359,7 +366,7 @@ async function createTask(req, res, next) {
       ]
     );
 
-    return res.status(201).json({ task: rows[0] });
+    return res.status(201).json({ task: isClientRequest(req) ? sanitizeTaskForClient(rows[0]) : rows[0] });
   } catch (err) {
     next(err);
   }
@@ -373,7 +380,7 @@ async function createTask(req, res, next) {
 async function getTask(req, res, next) {
   try {
     const task = await loadOwnTask(req.params.id, req.user.id);
-    return res.json({ task });
+    return res.json({ task: isClientRequest(req) ? sanitizeTaskForClient(task) : task });
   } catch (err) {
     next(err);
   }
@@ -506,7 +513,7 @@ async function updateTask(req, res, next) {
       values
     );
 
-    return res.json({ task: rows[0] });
+    return res.json({ task: isClientRequest(req) ? sanitizeTaskForClient(rows[0]) : rows[0] });
   } catch (err) {
     next(err);
   }
@@ -516,6 +523,15 @@ async function updateTask(req, res, next) {
 async function getTaskHealth(req, res, next) {
   try {
     const task = await loadOwnTask(req.params.id, req.user.id);
+    if (isClientRequest(req)) {
+      return res.json({
+        task_id: task.id,
+        status: task.status,
+        status_message: sanitizeTaskForClient(task).status_message,
+        updated_at: task.updated_at || null,
+        completed_at: task.completed_at || null,
+      });
+    }
     const heartbeatAgeMs = task.heartbeat_at
       ? Date.now() - new Date(task.heartbeat_at).getTime()
       : null;
@@ -700,6 +716,13 @@ async function startTask(req, res, next) {
     const publication = await publishTaskOutboxNow(jobId);
     const presentation = await resolveGenerationQueuePresentation(req.user.id, publication);
 
+    if (isClientRequest(req)) {
+      return res.json({
+        message: 'Задача принята и будет выполнена автоматически',
+        taskId: task.id,
+        status: 'queued',
+      });
+    }
     return res.json({
       message: presentation.message,
       jobId,
@@ -812,6 +835,13 @@ async function resumeTask(req, res, next) {
       resumeFromBlock,
     });
 
+    if (isClientRequest(req)) {
+      return res.json({
+        message: 'Задача принята и будет продолжена автоматически',
+        taskId: task.id,
+        status: 'queued',
+      });
+    }
     return res.json({
       message:          presentation.message,
       status:           'queued',
@@ -938,8 +968,8 @@ async function getResult(req, res, next) {
         seo_description: task.seo_description || null,
         seo_meta:        task.seo_meta || null,
       },
-      blocks,
-      metrics: metricsRows[0] || null,
+      blocks: isClientRequest(req) ? blocks.map(sanitizeBlockForClient) : blocks,
+      metrics: isClientRequest(req) ? sanitizeMetricsForClient(metricsRows[0]) : (metricsRows[0] || null),
     });
   } catch (err) {
     next(err);
@@ -959,7 +989,7 @@ async function getMetrics(req, res, next) {
       `SELECT * FROM task_metrics WHERE task_id = $1`,
       [req.params.id]
     );
-    return res.json({ metrics: rows[0] || null });
+    return res.json({ metrics: isClientRequest(req) ? sanitizeMetricsForClient(rows[0]) : (rows[0] || null) });
   } catch (err) {
     next(err);
   }
@@ -983,7 +1013,7 @@ async function getBlocks(req, res, next) {
        ORDER BY block_index ASC`,
       [req.params.id]
     );
-    return res.json({ blocks: rows });
+    return res.json({ blocks: isClientRequest(req) ? rows.map(sanitizeBlockForClient) : rows });
   } catch (err) {
     next(err);
   }
@@ -997,6 +1027,7 @@ async function getBlocks(req, res, next) {
 async function getStages(req, res, next) {
   try {
     await loadOwnTask(req.params.id, req.user.id);
+    if (isClientRequest(req)) throw clientVisibilityError();
 
     const { rows } = await db.query(
       `SELECT stage_name, call_label, status, model_used,
@@ -1023,6 +1054,7 @@ async function getStages(req, res, next) {
 async function getTaskLogs(req, res, next) {
   try {
     await loadOwnTask(req.params.id, req.user.id);
+    if (isClientRequest(req)) throw clientVisibilityError();
 
     const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit, 10) || 500));
     const after = (req.query.after || '').trim();
@@ -1069,6 +1101,7 @@ async function streamTask(req, res, next) {
   try {
     // Проверяем, что задача принадлежит пользователю
     const task = await loadOwnTask(req.params.id, req.user.id);
+    if (isClientRequest(req)) throw clientVisibilityError();
 
     // Настраиваем SSE-заголовки
     res.setHeader('Content-Type',  'text/event-stream');

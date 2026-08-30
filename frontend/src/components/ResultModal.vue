@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
 import { useTasksStore } from '../stores/tasks.js';
+import { useAuthStore } from '../stores/auth.js';
 
 const props = defineProps({
   taskId:  { type: String, default: null },
@@ -10,6 +11,8 @@ const props = defineProps({
 const emit = defineEmits(['close']);
 
 const store = useTasksStore();
+const auth = useAuthStore();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 // ── Данные ─────────────────────────────────────────────────────────────────
 const loading  = ref(false);
@@ -312,7 +315,7 @@ function closeModal() {
               </div>
 
               <!-- ══ Токены и стоимость ════════════════════════════════════ -->
-              <div class="card">
+              <div v-if="!isClient" class="card">
                 <p class="text-xs text-gray-500 uppercase tracking-wide mb-3">Расход токенов</p>
                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div class="bg-gray-800 rounded-lg p-3">

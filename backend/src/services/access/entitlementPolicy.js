@@ -137,6 +137,81 @@ function publicLimit(value) {
   return value == null ? null : Number(value);
 }
 
+function isClientRole(role) {
+  return normalizeRole(role) === ROLES.CLIENT;
+}
+
+function isClientRequest(req) {
+  return isClientRole(req?.user?.accountRole || req?.user?.role);
+}
+
+const CLIENT_TASK_SENSITIVE_FIELDS = Object.freeze([
+  'llm_provider', 'llm_model', 'gemini_model', 'model_used',
+  'bull_job_id', 'bullJobId', 'job_id', 'jobId', 'worker_id', 'workerId', 'lease_token', 'leaseToken', 'lease_until', 'leaseUntil', 'heartbeat_at', 'heartbeatAt',
+  'pending_outbox', 'pendingOutbox', 'bull_job_state', 'bullJobState', 'profile_queue', 'profileQueue', 'queue_reason', 'queueReason', 'queue_attempts', 'queueAttempts', 'queue_error', 'queueError',
+  'recovery_attempts', 'recoveryAttempts', 'pipeline_checkpoint', 'pipelineCheckpoint',
+  'deepseek_tokens_in', 'deepseek_tokens_out', 'deepseek_cost_usd',
+  'gemini_tokens_in', 'gemini_tokens_out', 'gemini_cost_usd',
+  'grok_tokens_in', 'grok_tokens_out', 'grok_cost_usd',
+  'total_tokens', 'total_tokens_in', 'total_tokens_out', 'total_cost_usd',
+  'tokens_in', 'tokens_out', 'cost_usd', 'api_cost_usd', 'tokensIn', 'tokensOut', 'costUsd', 'apiCostUsd', 'total_cost', 'totalCost',
+  'prompt_size', 'promptSize', 'error_message', 'last_error', 'lastError', 'internal_error', 'internalError', 'error', 'logs', 'log', 'stage_logs', 'stageLogs', 'debug',
+]);
+
+function clientStatusMessage(status) {
+  const messages = {
+    draft: 'Черновик сохранён.',
+    queued: 'Задача принята и ожидает запуска.',
+    pending: 'Задача принята и ожидает запуска.',
+    processing: 'Генерация выполняется.',
+    running: 'Генерация выполняется.',
+    in_progress: 'Генерация выполняется.',
+    partial: 'Результат формируется.',
+    completed: 'Результат готов.',
+    done: 'Результат готов.',
+    failed: 'Не удалось завершить генерацию. Попробуйте запустить задачу повторно.',
+    error: 'Не удалось завершить генерацию. Попробуйте запустить задачу повторно.',
+    timeout: 'Генерация превысила допустимое время. Попробуйте запустить задачу повторно.',
+    paused: 'Задача приостановлена.',
+    cancelled: 'Задача отменена.',
+  };
+  return messages[String(status || '').toLowerCase()] || 'Статус задачи обновляется.';
+}
+
+function sanitizeTaskForClient(task) {
+  if (!task || typeof task !== 'object') return task;
+  const safe = { ...task };
+  for (const key of CLIENT_TASK_SENSITIVE_FIELDS) delete safe[key];
+  if (safe.status) safe.status_message = clientStatusMessage(safe.status);
+  return safe;
+}
+
+function sanitizeMetricsForClient(metrics) {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const allowed = [
+    'lsi_coverage', 'ngram_coverage', 'tfidf_status', 'eeat_score', 'pq_score',
+    'anti_water_count', 'hallucination_count', 'hcu_status', 'spam_detected',
+  ];
+  return Object.fromEntries(allowed.filter((key) => Object.prototype.hasOwnProperty.call(metrics, key)).map((key) => [key, metrics[key]]));
+}
+
+function sanitizeBlockForClient(block) {
+  if (!block || typeof block !== 'object') return block;
+  const safe = { ...block };
+  delete safe.audit_log_json;
+  delete safe.tokens_in;
+  delete safe.tokens_out;
+  delete safe.cost_usd;
+  return safe;
+}
+
+function clientVisibilityError() {
+  const error = new Error('Технические логи доступны только сотрудникам и администраторам');
+  error.status = 403;
+  error.code = 'technical_visibility_restricted';
+  return error;
+}
+
 async function loadUserProfile(userId, db = dbDefault) {
   const { rows } = await db.query(
     `SELECT u.id, u.email, u.name, u.email_verified, u.created_at, u.role AS legacy_role,
@@ -403,6 +478,8 @@ function getPlanCatalog() {
 module.exports = {
   ROLES, PLAN_KEYS, PROFILE_STATUSES, PLAN_CATALOG, LIMIT_KEYS, RESOURCE_KEYS, TASK_RESOURCE_MAP,
   normalizeRole, normalizePlanKey, sanitizeOverrides, periodKeyFor, effectiveLimits,
+  isClientRole, isClientRequest, clientStatusMessage, sanitizeTaskForClient,
+  sanitizeMetricsForClient, sanitizeBlockForClient, clientVisibilityError,
   loadUserProfile, ensureAccessProfile, getUsage, getUserEntitlements, getPlanCatalog,
   admitUsage, admitTaskUsage, withTaskUsageReservation, withProjectCapacity, commitUsageReservation, releaseUsageReservation, getEffectiveMaxConcurrent,
 };

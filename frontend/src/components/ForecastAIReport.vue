@@ -13,6 +13,7 @@
  * родитель делает POST /api/forecaster/:id/regenerate-report и поллит задачу.
  */
 import { computed } from 'vue';
+import { useAuthStore } from '../stores/auth.js';
 
 const props = defineProps({
   report:        { type: Object, default: null }, // ai_report
@@ -20,6 +21,8 @@ const props = defineProps({
   busy:          { type: Boolean, default: false },
 });
 const emit = defineEmits(['regenerate']);
+const auth = useAuthStore();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 const verdict = computed(() => props.report?.verdict || null);
 const rep = computed(() => (verdict.value === 'ok' ? props.report?.report || null : null));
@@ -157,9 +160,9 @@ const impactBadge = (impact) => {
         <p class="text-sm text-gray-400 italic leading-relaxed">{{ rep.confidence_comment }}</p>
       </div>
 
-      <p class="text-[10px] text-gray-600">
+      <p v-if="!isClient" class="text-[10px] text-gray-600">
         Модель: {{ report.model || '—' }} · in {{ report.tokens_in }} · out {{ report.tokens_out }}
-        · ${{ (report.cost_usd || 0).toFixed(4) }}
+        · ${{ Number(report.cost_usd || 0).toFixed(4) }}
       </p>
     </div>
   </section>

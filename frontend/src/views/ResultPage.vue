@@ -2,10 +2,13 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
+import { useAuthStore } from '../stores/auth.js';
 
 const route  = useRoute();
 const router = useRouter();
 const store  = useTasksStore();
+const auth   = useAuthStore();
+const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 const taskId = route.params.id;
 
@@ -236,6 +239,7 @@ function pqClass(value) {
           Генератор SEO текста
         </span>
         <RouterLink
+          v-if="!isClient"
           :to="`/tasks/${taskId}/copilot`"
           class="text-xs px-3 py-1.5 rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors flex items-center gap-1.5"
         >
@@ -333,7 +337,7 @@ function pqClass(value) {
       </div>
 
       <!-- ══ Ряд 2: Стоимость ═══════════════════════════════════════════ -->
-      <div class="card">
+      <div v-if="!isClient" class="card">
         <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-4">Расход токенов и стоимость</p>
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
 

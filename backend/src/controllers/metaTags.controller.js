@@ -20,7 +20,11 @@ const { resolveOwnedProjectId } = require('../services/projects/projectOwnership
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const { csvCell, csvHeader } = require('../utils/csv');
 const { describeLengthRanges } = require('../services/metaTags/lengthConfig');
-const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
+const {
+  withTaskUsageReservation,
+  isClientRequest,
+  sanitizeTaskForClient,
+} = require('../services/access/entitlementPolicy');
 
 // ─── Валидация входных данных ─────────────────────────────────────
 const MAX_NAME_LEN     = 200;
@@ -58,7 +62,7 @@ async function listMetaTagTasks(req, res, next) {
         ORDER BY created_at DESC`,
       [req.user.id],
     );
-    return res.json({ tasks: rows });
+    return res.json({ tasks: isClientRequest(req) ? rows.map(sanitizeTaskForClient) : rows });
   } catch (err) {
     return next(err);
   }
@@ -125,7 +129,7 @@ async function createMetaTagTask(req, res, next) {
       console.error('[metaTags] background task failed:', err.message);
     });
 
-    return res.status(201).json({ task });
+    return res.status(201).json({ task: isClientRequest(req) ? sanitizeTaskForClient(task) : task });
   } catch (err) {
     return next(err);
   }
@@ -141,7 +145,7 @@ async function getMetaTagTask(req, res, next) {
     if (!rows.length) {
       return res.status(404).json({ error: 'Задача не найдена' });
     }
-    return res.json({ task: rows[0] });
+    return res.json({ task: isClientRequest(req) ? sanitizeTaskForClient(rows[0]) : rows[0] });
   } catch (err) {
     return next(err);
   }
@@ -181,16 +185,19 @@ async function exportMetaTagTaskCsv(req, res, next) {
     const { name, results } = rows[0];
     const items = Array.isArray(results) ? results : [];
 
-    const headers = [
+    const clientView = isClientRequest(req);
+    const resultHeaders = [
       'Keyword', 'Status', 'Intent',
       'Title', 'Title length',
       'Description', 'Description length',
       'Niche analysis', 'Detected year',
       'Title LSI (≥35%)', 'Description LSI (15–35%)',
       'Used important words', 'Missed LSI',
-      'Tokens in', 'Tokens out', 'Cost USD',
-      'Error',
     ];
+    const internalHeaders = [
+      'Tokens in', 'Tokens out', 'Cost USD', 'Error',
+    ];
+    const headers = clientView ? resultHeaders : [...resultHeaders, ...internalHeaders];
 
     const sep = ';'; // Excel в RU-локали ожидает ; как разделитель
     let csv = csvHeader(sep); // BOM + `sep=;` директива для Excel-EN / Sheets
@@ -217,19 +224,20 @@ async function exportMetaTagTaskCsv(req, res, next) {
           csvCell((s.description_mandatory_words || []).join(', ')),
           csvCell((m.used_important_words        || []).join(', ')),
           csvCell(missed.join(', ')),
-          csvCell(meta.tokensIn  || 0),
-          csvCell(meta.tokensOut || 0),
-          csvCell(meta.costUsd != null ? Number(meta.costUsd).toFixed(6) : ''),
-          csvCell(''),
+          ...(clientView ? [] : [
+            csvCell(meta.tokensIn  || 0),
+            csvCell(meta.tokensOut || 0),
+            csvCell(meta.costUsd != null ? Number(meta.costUsd).toFixed(6) : ''),
+            csvCell(''),
+          ]),
         ].join(sep) + '\r\n';
       } else {
         csv += [
           csvCell(it.keyword),
           csvCell('error'),
           csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''),
-          csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''),
-          csvCell(''), csvCell(''), csvCell(''),
-          csvCell(it.error),
+          csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''), csvCell(''),
+          ...(clientView ? [] : [csvCell(''), csvCell(''), csvCell(''), csvCell('')]),
         ].join(sep) + '\r\n';
       }
     }

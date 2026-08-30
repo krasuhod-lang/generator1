@@ -4,6 +4,8 @@ const express   = require('express');
 const rateLimit = require('express-rate-limit');
 const jwt       = require('jsonwebtoken');
 const auth      = require('../middleware/auth');
+const db        = require('../config/db');
+const { ensureAccessProfile } = require('../services/access/entitlementPolicy');
 
 const {
   listInfoArticleTasks,
@@ -20,14 +22,23 @@ const router = express.Router();
  * поэтому для /stream принимаем токен также из query (?token=JWT).
  * Trade-off такой же, как в linkArticle.routes.js (документирован там).
  */
-function sseAuth(req, res, next) {
+async function sseAuth(req, res, next) {
   const hdr = req.headers['authorization'];
   const bearer = hdr && hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
   const token  = bearer || (typeof req.query.token === 'string' ? req.query.token : null);
   if (!token) return res.status(401).json({ error: 'No token provided' });
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = { id: decoded.id, email: decoded.email };
+    const profile = await ensureAccessProfile(decoded.id, db);
+    if (!profile) return res.status(401).json({ error: 'Invalid or expired token' });
+    req.user = {
+      id: decoded.id,
+      email: decoded.email,
+      role: profile.account_role,
+      accountRole: profile.account_role,
+      plan: profile.plan_key,
+      accessStatus: profile.status,
+    };
     return next();
   } catch (_) {
     return res.status(401).json({ error: 'Invalid or expired token' });
