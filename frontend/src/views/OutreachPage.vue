@@ -1,20 +1,20 @@
 <template>
   <AppLayout>
     <div class="outreach-root">
-      <!-- ── Заголовок ───────────────────────────────────────────── -->
-      <header class="page-header">
-        <h1>📨 Рассылка — автоматические email-кампании</h1>
-        <p class="subtitle">
-          Соберите лиды по нише и гео, оцените их по качеству и запустите
-          персонализированную рассылку с прогревом домена.
-        </p>
-      </header>
+      <AppPageHeader
+        eyebrow="Коммуникации"
+        title="Рассылка"
+        description="Соберите лиды по нише и географии, подготовьте персональные письма и управляйте кампанией с безопасным прогревом домена."
+      >
+        <template #title-suffix>
+          <ToolHelp title="Рассылка" text="Сначала задайте нишу, города и данные отправителя. После создания кампании лиды и показатели будут обновляться автоматически." />
+        </template>
+      </AppPageHeader>
 
       <!-- Что уходит адресату -->
-      <div style="margin:0 0 18px;padding:14px 18px;background:#EAF7EE;border:1px solid #58C27D;border-radius:10px;color:#1c6b3a;font-size:14px;line-height:1.5;">
-        ✅ Письмо собирается персонально под каждого лида: прямые конкуренты
-        бизнеса в его городе + разрыв по трафику + ваши кейсы из других городов
-        (в ТОП-10).
+      <div class="outreach-note">
+        <strong>Письмо собирается персонально под каждого лида.</strong>
+        Прямые конкуренты бизнеса в его городе, разрыв по трафику и ваши кейсы из других городов (в ТОП-10).
       </div>
 
       <!-- ── Форма создания кампании ─────────────────────────────── -->
@@ -204,6 +204,8 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import { useOutreachStore } from '../stores/outreach.js';
 
 const store = useOutreachStore();
@@ -463,4 +465,39 @@ input:focus, select:focus {
 @media (max-width: 720px) {
   .form-grid { grid-template-columns: 1fr; }
 }
+
+/* Cabinet UI normalization: the outreach module keeps its behavior but uses
+   the same dark surfaces, controls and readable contrast as the rest of the app. */
+.outreach-root { color: #e5e7eb; }
+  .outreach-root .page-header h1 { color: #f8fafc; font-size: clamp(1.35rem, 1.8vw, 1.75rem); letter-spacing: -0.025em; }
+  .outreach-root .outreach-note {
+    margin: 0 0 18px;
+    padding: 14px 18px;
+    border: 1px solid rgba(16, 185, 129, 0.34);
+    border-radius: 12px;
+    background: rgba(6, 78, 59, 0.22);
+    color: #a7f3d0;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .outreach-root .outreach-note strong { color: #d1fae5; }
+.outreach-root .subtitle { color: #94a3b8; }
+.outreach-root .card { background: rgba(17, 24, 39, 0.76); border: 1px solid rgba(51, 65, 85, 0.74); box-shadow: 0 18px 45px rgba(0, 0, 0, 0.14); }
+.outreach-root .field > label, .outreach-root .radio { color: #cbd5e1; }
+.outreach-root input[type="text"], .outreach-root input[type="number"], .outreach-root select,
+.outreach-root .cities-box { background: #0f172a; color: #f8fafc; border-color: #334155; }
+.outreach-root input::placeholder { color: #64748b; }
+.outreach-root input:focus, .outreach-root select:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18); }
+.outreach-root .hint, .outreach-root .cc-meta, .outreach-root .cc-cities, .outreach-root .muted { color: #94a3b8; }
+.outreach-root .city-chip { background: rgba(79, 70, 229, 0.18); color: #c7d2fe; }
+.outreach-root .chip-x { color: #a5b4fc; }
+.outreach-root .btn-secondary { background: #1f2937; color: #e5e7eb; border-color: #374151; }
+.outreach-root .btn-secondary:hover:not(:disabled) { background: #374151; }
+.outreach-root .btn-ghost { background: transparent; color: #a5b4fc; border-color: #374151; }
+.outreach-root .btn-danger { background: transparent; color: #fca5a5; border-color: #7f1d1d; }
+.outreach-root .warmup-toggle { color: #e5e7eb; }
+.outreach-root .warmup-body { color: #94a3b8; }
+.outreach-root .cc-title h3, .outreach-root .cc-stats { color: #f8fafc; }
+.outreach-root .cc-error { color: #fca5a5; }
+.outreach-root .form-error { color: #fca5a5; }
 </style>

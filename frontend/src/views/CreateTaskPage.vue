@@ -7,6 +7,8 @@ import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import RichTextInput from '../components/RichTextInput.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -702,15 +704,19 @@ function downloadExampleTZ() {
 
 <template>
   <AppLayout>
-    <!-- Подзаголовок -->
-    <div class="border-b border-gray-800 bg-gray-900/30 px-6 py-3 flex items-center gap-4">
-      <RouterLink to="/dashboard" class="btn-ghost text-xs">
-        ← Назад
-      </RouterLink>
-      <span class="text-white font-semibold">{{ isEdit ? 'Редактировать задачу' : 'Новая задача' }}</span>
-    </div>
-
-    <div class="max-w-3xl mx-auto px-6 py-8">
+    <div class="app-page app-page-narrow">
+      <AppPageHeader
+        eyebrow="Создание контента"
+        :title="isEdit ? 'Редактировать задачу' : 'Новая SEO-задача'"
+        description="Заполните обязательные данные, добавьте семантику и факты — остальной контекст пайплайн соберёт автоматически."
+      >
+        <template #title-suffix>
+          <ToolHelp title="SEO-текст" text="Форма задаёт стратегию будущей статьи: H1, бренд, регион, семантика и факты. Черновик можно сохранить без списания генерации; лимит расходуется только после запуска." />
+        </template>
+        <template #actions>
+          <RouterLink to="/dashboard" class="btn-ghost text-xs">← К задачам</RouterLink>
+        </template>
+      </AppPageHeader>
       <div v-if="loading" class="text-center py-20 text-gray-500">Загрузка...</div>
 
       <div v-else class="space-y-3">

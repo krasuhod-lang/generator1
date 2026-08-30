@@ -19,6 +19,8 @@
  */
 import { ref, computed, onUnmounted } from 'vue';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import api from '../api';
 
 const enabled = ref(true);
@@ -343,24 +345,17 @@ onUnmounted(() => {
 
 <template>
   <AppLayout>
-    <div class="max-w-5xl mx-auto px-6 py-8 space-y-6">
-      <!-- Заголовок раздела -->
-      <div class="flex items-end justify-between border-b border-gray-800 pb-4 gap-4 flex-wrap">
-        <div>
-          <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-            ⛏️ Парсеры контента
-            <span
-              class="text-[11px] font-medium text-indigo-300 bg-indigo-950/40 border border-indigo-900 px-2 py-0.5 rounded"
-            >
-              DeepSeek v4 pro
-            </span>
-          </h1>
-          <p class="text-gray-400 text-sm mt-1">
-            Извлечение контактов, описания компании и услуг с чужих сайтов —
-            по своему списку URL или из поисковой выдачи Яндекса.
-          </p>
-        </div>
-      </div>
+    <div class="app-page app-page-narrow space-y-6">
+      <AppPageHeader
+        eyebrow="Исследование"
+        title="Парсеры контента"
+        description="Извлекайте контакты, описание компании, услуги и другие параметры с сайтов по списку URL или из поисковой выдачи."
+      >
+        <template #title-suffix>
+          <span class="text-[11px] font-medium text-indigo-300 bg-indigo-950/40 border border-indigo-900 px-2 py-0.5 rounded-full">DeepSeek v4 pro</span>
+          <ToolHelp title="Парсеры контента" text="Выберите источник и параметры анализа. Если данных на сайте нет, результат явно укажет «не найдено», а не оставит поле непонятно пустым." />
+        </template>
+      </AppPageHeader>
 
       <!-- Переключатель «Включить» -->
       <div class="card">

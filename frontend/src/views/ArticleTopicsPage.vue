@@ -20,6 +20,7 @@ import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
 import { useArticleTopicsStore } from '../stores/articleTopics.js';
 import { useAuthStore } from '../stores/auth.js';
 import {
@@ -813,17 +814,17 @@ const sortedTasks = computed(() =>
 
 <template>
   <AppLayout>
-    <div class="max-w-7xl mx-auto px-6 py-8 space-y-6">
-      <!-- Шапка -->
-      <div class="border-b border-gray-800 pb-4">
-        <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-          🔮 Темы статей <ToolHelp title="Темы статей" text="Инструмент анализирует нишу, интенты и сигналы будущего спроса. Готовые темы можно передать в генератор статьи с уже собранным контекстом." /> <span class="text-xs font-normal text-gray-500">· foresight forecaster</span>
-        </h1>
-        <p class="text-gray-400 text-sm mt-1">
-          Foresight-анализ ниши: слабые сигналы, emerging-тренды, прогноз поискового спроса
-          и Strategic Action Plan. Один проход через Gemini 3.1 Pro Preview ≈ 1–3 минуты на задачу.
-        </p>
-      </div>
+    <div class="app-page space-y-6">
+      <AppPageHeader
+        eyebrow="Исследование и планирование"
+        title="Темы статей"
+        description="Изучите нишу, интенты и сигналы будущего спроса, а затем передайте готовые темы в генератор с собранным контекстом."
+      >
+        <template #title-suffix>
+          <span class="text-xs font-normal text-gray-500">foresight forecaster</span>
+          <ToolHelp title="Темы статей" text="Выберите режим анализа. Результат помогает определить приоритет тем, их поисковый интент и следующий шаг для контент-плана." />
+        </template>
+      </AppPageHeader>
 
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <!-- ── Форма (слева) ── -->

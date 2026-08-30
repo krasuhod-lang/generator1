@@ -6,6 +6,8 @@
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import { useProjectsStore } from '../stores/projects.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 
@@ -83,13 +85,19 @@ async function quickRevoke(p) {
 
 <template>
   <AppLayout>
-    <div class="max-w-5xl mx-auto space-y-6">
-      <header>
-        <h1 class="text-2xl font-bold text-gray-100">🗂 Проекты</h1>
-        <p class="text-sm text-gray-400 mt-1">
-          Управление SEO-проектами, интеграция с Google Search Console и Яндекс.Вебмастером, AI-аналитика DeepSeek.
-        </p>
-      </header>
+    <div class="app-page app-page-narrow space-y-6">
+      <AppPageHeader
+        eyebrow="Контекст и аналитика"
+        title="Проекты"
+        description="Храните сайт, аудиторию, подключения аналитики и результаты съёма позиций в одном рабочем пространстве."
+      >
+        <template #title-suffix>
+          <ToolHelp title="Проекты" text="Проект связывает сайт с контекстом для генерации, отчётами и аналитикой. После создания можно подключить Google Search Console и Яндекс.Вебмастер." />
+        </template>
+        <template #actions>
+          <span class="text-xs text-gray-500">{{ store.projects.length }} проектов</span>
+        </template>
+      </AppPageHeader>
 
       <!-- Форма создания -->
       <section class="card space-y-3">

@@ -6,6 +6,7 @@ import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
 import { useMetaTagsStore } from '../stores/metaTags.js';
 import { useAuthStore } from '../stores/auth.js';
 
@@ -159,21 +160,17 @@ function formatDate(d) {
 
 <template>
   <AppLayout>
-    <div class="max-w-7xl mx-auto px-6 py-8 space-y-8">
-      <!-- Шапка -->
-      <div class="flex items-end justify-between border-b border-gray-800 pb-4">
-        <div>
-          <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-            🏷️ Генератор Мета-тегов
-            <ToolHelp title="Мета-теги" text="Введите поисковые запросы по одному на строку. Для каждого запроса сервис сформирует Title и Description с учётом интента, длины и семантики." />
-            <span class="text-xs font-medium text-indigo-400 bg-indigo-950/40 border border-indigo-900 px-2 py-0.5 rounded">DrMax v25</span>
-          </h1>
-          <p class="text-gray-400 text-sm mt-1">
-            Bulk-генерация Title + Description по выдаче Яндекса (XMLStock) с математическим анализом LSI.
-            <span class="text-gray-500">H1 не формируется по требованию методологии.</span>
-          </p>
-        </div>
-      </div>
+    <div class="app-page space-y-8">
+      <AppPageHeader
+        eyebrow="Создание контента"
+        title="Генератор мета-тегов"
+        description="Сформируйте Title и Description для списка категорий с учётом интента, поисковой выдачи и обязательной семантики."
+      >
+        <template #title-suffix>
+          <span class="text-xs font-medium text-indigo-300 bg-indigo-950/40 border border-indigo-900 px-2 py-0.5 rounded-full">DrMax v25</span>
+          <ToolHelp title="Мета-теги" text="Введите поисковые запросы по одному на строку. Для каждого запроса сервис сформирует Title и Description с учётом интента, длины и семантики." />
+        </template>
+      </AppPageHeader>
 
       <!-- ── Форма создания задачи ── -->
       <form @submit.prevent="handleCreate" class="card space-y-5">

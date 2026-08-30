@@ -6,6 +6,7 @@ import { useTasksStore } from '../stores/tasks.js';
 import ResultModal from '../components/ResultModal.vue';
 import AppLayout from '../components/AppLayout.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
 
 const router = useRouter();
 const auth = useAuthStore();
@@ -272,23 +273,26 @@ function goPage(next) {
       </div>
     </transition>
 
-    <div class="max-w-7xl mx-auto px-6 py-8">
-      <header class="flex flex-wrap items-start justify-between gap-4 mb-6">
-        <div>
-          <div class="flex items-center gap-3">
-            <h1 class="text-xl font-bold text-white flex items-center gap-2">Центр задач <ToolHelp title="Центр задач" text="Здесь собраны все ваши генерации. Статус показывает состояние задачи, а кнопка «Результат» открывает готовый материал." /></h1>
-            <span class="text-xs text-gray-500">обновление каждые 5 сек.</span>
-          </div>
-          <p class="text-sm text-gray-500 mt-1">
+    <div class="app-page">
+      <AppPageHeader
+        eyebrow="Рабочая область"
+        title="Центр задач"
+        description="Все генерации в одном месте: от создания и очереди до готового результата. Обновление статусов выполняется автоматически."
+      >
+        <template #title-suffix>
+          <ToolHelp title="Центр задач" text="Здесь собраны все ваши генерации. Статус показывает состояние задачи, а кнопка «Результат» открывает готовый материал." />
+        </template>
+        <template #actions>
+          <div class="text-xs text-gray-500 mr-1">
             {{ filteredTasks.length }} из {{ allTasks.length }} задач
             <span v-if="activeCount" class="text-indigo-300"> · {{ activeCount }} активных</span>
-          </p>
-        </div>
-        <RouterLink to="/tasks/new" class="btn-primary inline-flex items-center gap-2">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
-          Создать задачу
-        </RouterLink>
-      </header>
+          </div>
+          <RouterLink to="/tasks/new" class="btn-primary inline-flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+            Создать задачу
+          </RouterLink>
+        </template>
+      </AppPageHeader>
 
       <section v-if="access" class="card mb-5 border border-indigo-900/60 bg-indigo-950/20">
         <div class="flex flex-wrap items-start justify-between gap-4">

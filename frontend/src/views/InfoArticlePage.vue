@@ -7,6 +7,7 @@ import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
 import { useAuthStore } from '../stores/auth.js';
 import { useInfoArticleStore } from '../stores/infoArticle.js';
 import { buildAcfFromHtml } from '../utils/acfDeterministicBuilder.js';
@@ -1135,21 +1136,16 @@ onUnmounted(() => { stopTicker(); });
 
 <template>
   <AppLayout>
-    <div class="max-w-7xl mx-auto px-6 py-8 space-y-6">
-      <!-- Шапка -->
-      <div class="flex items-end justify-between border-b border-gray-800 pb-4">
-        <div>
-          <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-            📰 Генератор информационной статьи в блог
-            <ToolHelp title="Статья для блога" text="Инструмент создаёт готовую экспертную статью. Проект добавляет контекст бизнеса, Excel помогает построить перелинковку, а после завершения материал можно открыть и экспортировать." />
-          </h1>
-          <p class="text-gray-400 text-sm mt-1">
-            При загруженном Excel модель сама подберёт 1–2 семантически точных коммерческих ссылки
-            на каждый <code class="text-indigo-300">&lt;h2&gt;</code>. Без Excel — статья создаётся
-            <strong>без перелинковки</strong> (LSI/E-E-A-T/мнение эксперта/FAQ — всё на месте).
-          </p>
-        </div>
-      </div>
+    <div class="app-page space-y-6">
+      <AppPageHeader
+        eyebrow="Создание контента"
+        title="Статья для блога"
+        description="Экспертный материал для информационного трафика. Проект добавляет бизнес-контекст, а Excel — точные ссылки для перелинковки."
+      >
+        <template #title-suffix>
+          <ToolHelp title="Статья для блога" text="Задайте тему, регион и аудиторию. Проект добавляет контекст бизнеса, Excel помогает построить перелинковку, а после завершения материал можно открыть и экспортировать." />
+        </template>
+      </AppPageHeader>
 
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <!-- ── Форма ── -->

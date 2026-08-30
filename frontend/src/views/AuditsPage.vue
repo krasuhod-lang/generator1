@@ -11,6 +11,8 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import api from '../api.js';
 
 const router = useRouter();
@@ -111,15 +113,19 @@ onUnmounted(stopPolling);
 
 <template>
   <AppLayout>
-    <div class="audits-page">
-      <div class="page-head">
-        <div>
-          <h1>Аудиты</h1>
-          <p class="hint">Технический и SEO-аудит сайта: краулинг, 23 типа ошибок,
-            Health Score, дубликаты, страницы-сироты, битые изображения.</p>
-        </div>
-        <router-link class="link-secondary" to="/site-crawler">🕷️ Парсер структуры сайта →</router-link>
-      </div>
+    <div class="audits-page app-page">
+      <AppPageHeader
+        eyebrow="Исследование"
+        title="Аудиты"
+        description="Проверьте техническое состояние сайта: краулинг, Health Score, дубликаты, страницы-сироты и битые изображения."
+      >
+        <template #title-suffix>
+          <ToolHelp title="Аудиты" text="Укажите URL и параметры проверки. После завершения откройте отчёт, чтобы увидеть приоритеты исправлений и конкретные точки роста." />
+        </template>
+        <template #actions>
+          <router-link class="link-secondary" to="/site-crawler">🕷️ Парсер структуры сайта →</router-link>
+        </template>
+      </AppPageHeader>
 
       <section class="card">
         <h2>Запустить аудит</h2>
@@ -264,4 +270,42 @@ button.small   { padding: .15rem .4rem; font-size: .8rem; }
 .sev-high     { background: #fed7aa; color: #7c2d12; }
 .sev-medium   { background: #fef08a; color: #713f12; }
 .sev-low      { background: #e5e7eb; color: #374151; }
+
+/* Единая тёмная тема кабинета. Поведение аудита и его API не меняются. */
+.audits-page { background: transparent; color: #e5e7eb; color-scheme: dark; }
+.audits-page .page-head h1 { color: #f8fafc; }
+.audits-page .hint, .audits-page .muted, .audits-page .small-meta { color: #94a3b8; }
+.audits-page .card, .audits-page .tbl {
+  background: rgba(17, 24, 39, 0.76);
+  border-color: rgba(51, 65, 85, 0.74);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.14);
+}
+.audits-page .card h2 { color: #e5e7eb; }
+.audits-page .url-input, .audits-page .settings-grid input[type="number"] {
+  background: #0f172a;
+  color: #f8fafc;
+  border-color: #334155;
+}
+.audits-page .url-input::placeholder { color: #64748b; }
+.audits-page .url-input:focus, .audits-page .settings-grid input[type="number"]:focus {
+  outline: 2px solid #818cf8;
+  outline-offset: 1px;
+  border-color: #818cf8;
+}
+.audits-page .settings-grid { border-top-color: rgba(51, 65, 85, 0.7); }
+.audits-page .settings-grid label { color: #cbd5e1; }
+.audits-page button { background: #1f2937; color: #e5e7eb; border-color: #374151; }
+.audits-page button:hover:not(:disabled) { background: #374151; }
+.audits-page button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+.audits-page button.primary:hover:not(:disabled) { background: #6366f1; }
+.audits-page button.ghost { background: transparent; }
+.audits-page button.danger { background: transparent; color: #fca5a5; border-color: #7f1d1d; }
+.audits-page .btn-open { color: #a5b4fc; border-color: #6366f1; }
+.audits-page .btn-open:hover { background: rgba(99, 102, 241, 0.12); }
+.audits-page .error { color: #fca5a5; }
+.audits-page .tbl th, .audits-page .tbl td { color: #cbd5e1; border-bottom-color: rgba(51, 65, 85, 0.6); }
+.audits-page .tbl th { background: rgba(15, 23, 42, 0.9); color: #94a3b8; }
+.audits-page .tbl tbody tr:hover td { background: rgba(99, 102, 241, 0.08); }
+.audits-page .tbl td a { color: #a5b4fc; }
+.audits-page .pbar { background: #1f2937; }
 </style>

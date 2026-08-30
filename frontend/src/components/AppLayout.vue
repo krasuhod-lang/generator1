@@ -4,92 +4,111 @@ import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth.js';
 import { useViewModeStore, VIEW_MODES } from '../stores/viewMode.js';
 
-const route  = useRoute();
+const route = useRoute();
 const router = useRouter();
-const auth   = useAuthStore();
+const auth = useAuthStore();
 const viewMode = useViewModeStore();
+
+const sidebarOpen = ref(false);
+const sidebarCollapsed = ref(false);
+const sidebarRef = ref(null);
+
+const NAV_GROUPS = [
+  {
+    label: 'Рабочая область',
+    items: [
+      { key: 'dashboard', label: 'Центр задач', shortLabel: 'Задачи', icon: '⌁', path: '/dashboard', hint: 'Все задачи, статусы и готовые результаты' },
+      { key: 'projects', label: 'Проекты', shortLabel: 'Проекты', icon: '▣', path: '/projects', hint: 'Контекст, позиции и аналитика проектов' },
+      { key: 'reports', label: 'Отчёты', shortLabel: 'Отчёты', icon: '▤', path: '/reports', hint: 'Онлайн-отчёты и публикация результатов' },
+    ],
+  },
+  {
+    label: 'Создание контента',
+    items: [
+      { key: 'seo-text', label: 'SEO-текст', shortLabel: 'SEO', icon: '✦', path: '/tasks/new', hint: 'Текст по техническому заданию' },
+      { key: 'info-article', label: 'Статья для блога', shortLabel: 'Блог', icon: '▥', path: '/info-article', hint: 'Экспертный материал для блога' },
+      { key: 'link-article', label: 'Ссылочная статья', shortLabel: 'Ссылки', icon: '↗', path: '/link-article', hint: 'Материал с анкорами и ссылками' },
+      { key: 'meta-tags', label: 'Мета-теги', shortLabel: 'Мета', icon: '#', path: '/meta-tags', hint: 'Title и Description для категорий' },
+      { key: 'article-topics', label: 'Темы статей', shortLabel: 'Темы', icon: '◈', path: '/article-topics', hint: 'Спрос, интенты и контентные идеи' },
+      { key: 'copilot', label: 'AI-редактор', shortLabel: 'Редактор', icon: '◎', path: '/copilot', hint: 'Редактирование готового материала' },
+    ],
+  },
+  {
+    label: 'Исследование',
+    items: [
+      { key: 'relevance', label: 'Релевантность', shortLabel: 'Релевантность', icon: '⌕', path: '/relevance', hint: 'Выдача, конкуренты и семантика' },
+      { key: 'forecaster', label: 'Прогнозатор', shortLabel: 'Прогноз', icon: '↗', path: '/forecaster', hint: 'Спрос, темы и прогноз развития' },
+      { key: 'parsers', label: 'Парсеры', shortLabel: 'Парсеры', icon: '⌘', path: '/parsers', hint: 'Сбор и анализ данных сайтов' },
+      { key: 'audits', label: 'Аудиты', shortLabel: 'Аудиты', icon: '◌', path: '/audits', hint: 'Технические и SEO-проверки' },
+      { key: 'category-lead', label: 'Lead-text', shortLabel: 'Lead-text', icon: '◇', path: '/category-lead', hint: 'Тексты для категорий и лидов' },
+    ],
+  },
+  {
+    label: 'Коммуникации и данные',
+    items: [
+      { key: 'outreach', label: 'Рассылка', shortLabel: 'Рассылка', icon: '✉', path: '/outreach', hint: 'Email-кампании и лиды' },
+      { key: 'acf-json', label: 'JSON', shortLabel: 'JSON', icon: '{}', path: '/acf-json', hint: 'Структурированные данные' },
+    ],
+  },
+];
+
+const isInternal = computed(() => ['admin', 'employee'].includes(String(auth.user?.role || '').toLowerCase()));
+const visibleGroups = computed(() => NAV_GROUPS.map((group) => ({
+  ...group,
+  items: group.items.filter((item) => item.key !== 'copilot' || isInternal.value),
+})).filter((group) => group.items.length));
+
+const activeKey = computed(() => {
+  const p = String(route.path || '');
+  if (p === '/tasks/new' || /\/tasks\/[^/]+\/edit$/.test(p)) return 'seo-text';
+  if (p === '/dashboard' || /\/tasks\/[^/]+\/(monitor|result|copilot)$/.test(p)) return 'dashboard';
+  if (p.startsWith('/meta-tags')) return 'meta-tags';
+  if (p.startsWith('/link-article')) return 'link-article';
+  if (p.startsWith('/info-article')) return 'info-article';
+  if (p.startsWith('/article-topics')) return 'article-topics';
+  if (p.startsWith('/forecaster') || p.startsWith('/proposals')) return 'forecaster';
+  if (p.startsWith('/category-lead')) return 'category-lead';
+  if (p.startsWith('/parsers')) return 'parsers';
+  if (p.startsWith('/serp-b2b') || p.startsWith('/outreach')) return 'outreach';
+  if (p.startsWith('/site-crawler') || p.startsWith('/audits')) return 'audits';
+  if (p.startsWith('/position-tracker')) return 'projects';
+  if (p.startsWith('/projects')) return 'projects';
+  if (p.startsWith('/reports')) return 'reports';
+  if (p.startsWith('/acf-json')) return 'acf-json';
+  if (p.startsWith('/relevance')) return 'relevance';
+  if (p.startsWith('/copilot')) return 'copilot';
+  return 'dashboard';
+});
+
+const activeItem = computed(() => visibleGroups.value.flatMap((group) => group.items).find((item) => item.key === activeKey.value) || visibleGroups.value[0]?.items[0]);
+const roleLabel = computed(() => ({ admin: 'Администратор', employee: 'Сотрудник', client: 'Клиент' }[String(auth.user?.role || '').toLowerCase()] || 'Пользователь'));
+const planLabel = computed(() => auth.user?.plan_name || auth.user?.plan || 'Бесплатный доступ');
+const showViewModeToggle = computed(() => String(route.path || '').startsWith('/projects'));
 
 function setMode(mode) {
   viewMode.setMode(mode);
 }
 
-// Тумблер «Аналитик/Клиент» имеет смысл ТОЛЬКО в модуле «Проекты»: именно там
-// backend-санитайзер (services/projects/viewMode.js) реально срезает
-// технические поля из ответа по заголовку X-Client-Mode. В остальных модулях
-// кнопка была «мёртвой» и лишь сбивала пользователя, поэтому показываем тумблер
-// строго на маршрутах /projects/*. В отчётах режим клиента задаётся в модалке
-// публикации (shared_reports.view_mode) отдельной кнопкой «🔍 Превью».
-const showViewModeToggle = computed(() => String(route.path || '').startsWith('/projects'));
-
-// «Съём позиций» намеренно убран из верхнего меню: этот раздел живёт внутри
-// модуля «Проекты» (вкладка «📈 Съём позиций» → PositionsSection), поэтому
-// дублировать его отдельной кнопкой не нужно. Маршрут /position-tracker
-// остаётся рабочим для переходов из карточек проектов.
-const TABS = [
-  { key: 'seo-text',       label: 'SEO текст',        icon: '📝', path: '/dashboard' },
-  { key: 'copilot',        label: 'AI-редактор',      icon: '🤖', path: '/copilot' },
-  { key: 'meta-tags',      label: 'Мета-теги',        icon: '🏷️', path: '/meta-tags' },
-  { key: 'link-article',   label: 'Ссылочная статья', icon: '🔗', path: '/link-article' },
-  { key: 'info-article',   label: 'Статья в блог',    icon: '📰', path: '/info-article' },
-  { key: 'article-topics', label: 'Темы статей',      icon: '🔮', path: '/article-topics' },
-  { key: 'forecaster',     label: 'Создать КП',       icon: '📈', path: '/forecaster' },
-  { key: 'category-lead',  label: 'Lead-text',        icon: '🧭', path: '/category-lead' },
-  { key: 'parsers',        label: 'Парсеры',          icon: '⛏️', path: '/parsers' },
-  { key: 'outreach',       label: 'Рассылка',         icon: '📨', path: '/outreach' },
-  { key: 'audits',         label: 'Аудиты',           icon: '🕷️', path: '/audits' },
-  { key: 'projects',       label: 'Проекты',          icon: '🗂️', path: '/projects' },
-  { key: 'reports',        label: 'Отчёты',           icon: '📑', path: '/reports' },
-  { key: 'acf-json',       label: 'JSON',             icon: '🧩', path: '/acf-json' },
-  { key: 'relevance',      label: 'Релевантность',    icon: '📊', path: '/relevance' },
-];
-
-const activeTabKey = computed(() => {
-  const p = route.path;
-  if (p.startsWith('/meta-tags'))      return 'meta-tags';
-  if (p.startsWith('/link-article'))   return 'link-article';
-  if (p.startsWith('/info-article'))   return 'info-article';
-  if (p.startsWith('/article-topics')) return 'article-topics';
-  if (p.startsWith('/forecaster'))     return 'forecaster';
-  if (p.startsWith('/proposals'))      return 'forecaster';
-  if (p.startsWith('/category-lead'))  return 'category-lead';
-  if (p.startsWith('/parsers'))        return 'parsers';
-  if (p.startsWith('/serp-b2b'))       return 'outreach';
-  if (p.startsWith('/outreach'))       return 'outreach';
-  if (p.startsWith('/position-tracker')) return 'position-tracker';
-  if (p.startsWith('/site-crawler'))   return 'audits';
-  if (p.startsWith('/audits'))         return 'audits';
-  if (p.startsWith('/projects'))       return 'projects';
-  if (p.startsWith('/reports'))        return 'reports';
-  if (p.startsWith('/acf-json'))       return 'acf-json';
-  if (p.startsWith('/relevance'))      return 'relevance';
-  if (p.startsWith('/copilot') || /\/tasks\/[^/]+\/copilot/.test(p)) return 'copilot';
-  return 'seo-text';
-});
-
-const activeTab = computed(() =>
-  TABS.find((t) => t.key === activeTabKey.value) || TABS[0]
-);
-
-const menuOpen = ref(false);
-const menuRef  = ref(null);
-
-function toggleMenu() {
-  menuOpen.value = !menuOpen.value;
+function go(item) {
+  sidebarOpen.value = false;
+  router.push(item.path);
 }
 
-function goTab(tab) {
-  menuOpen.value = false;
-  router.push(tab.path);
+function toggleSidebar() {
+  sidebarOpen.value = !sidebarOpen.value;
 }
 
-function handleClickOutside(e) {
-  if (menuRef.value && !menuRef.value.contains(e.target)) {
-    menuOpen.value = false;
-  }
+function handleClickOutside(event) {
+  if (sidebarOpen.value && sidebarRef.value && !sidebarRef.value.contains(event.target)) sidebarOpen.value = false;
 }
 
-function handleEsc(e) {
-  if (e.key === 'Escape') menuOpen.value = false;
+function handleEsc(event) {
+  if (event.key === 'Escape') sidebarOpen.value = false;
+}
+
+function handleLogout() {
+  auth.logout();
+  router.push('/login');
 }
 
 onMounted(() => {
@@ -101,128 +120,152 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', handleClickOutside);
   document.removeEventListener('keydown', handleEsc);
 });
-
-function handleLogout() {
-  auth.logout();
-  router.push('/login');
-}
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-950 flex flex-col">
-    <!-- Шапка -->
-    <header class="app-header border-b border-gray-800 bg-gray-900 px-[var(--app-content-gutter)] py-3 flex items-center justify-between gap-4 flex-wrap flex-shrink-0">
-      <div class="flex items-center gap-3 min-w-0">
-        <svg viewBox="0 0 32 32" class="w-7 h-7 flex-shrink-0" fill="none">
-          <rect width="32" height="32" rx="8" fill="#6366f1"/>
+  <div class="app-shell min-h-screen bg-gray-950 text-gray-100">
+    <div
+      v-if="sidebarOpen"
+      class="app-sidebar-backdrop fixed inset-0 bg-black/60 z-[var(--app-overlay-z)] lg:hidden"
+      aria-hidden="true"
+      @click="sidebarOpen = false"
+    />
+
+    <aside
+      ref="sidebarRef"
+      :class="[
+        'app-sidebar fixed inset-y-0 left-0 z-[calc(var(--app-overlay-z)+1)] flex flex-col',
+        'bg-gray-900 border-r border-gray-800 shadow-2xl shadow-black/30 transition-transform duration-200',
+        'lg:sticky lg:top-0 lg:z-40 lg:h-screen lg:translate-x-0 lg:shadow-none lg:transition-[width]',
+        sidebarOpen ? 'translate-x-0' : '-translate-x-full',
+        sidebarCollapsed ? 'lg:w-[76px]' : 'lg:w-[264px]',
+        'w-[min(86vw,300px)]',
+      ]"
+    >
+      <div class="app-sidebar-brand flex items-center gap-3 px-4 py-4 border-b border-gray-800/80">
+        <svg viewBox="0 0 32 32" class="w-8 h-8 flex-shrink-0" fill="none" aria-hidden="true">
+          <rect width="32" height="32" rx="9" fill="#6366f1"/>
           <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="white" stroke-width="2" stroke-linecap="round"/>
           <circle cx="16" cy="16" r="3" fill="white"/>
           <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
         </svg>
-        <span class="font-bold text-white truncate">SEO Genius <span class="text-indigo-400">v4.0</span></span>
-
-        <!-- Навигация: выпадающее меню (всегда в видимой области) -->
-        <div ref="menuRef" class="relative ml-2 sm:ml-4">
-          <button
-            type="button"
-            @click="toggleMenu"
-            :aria-expanded="menuOpen"
-            class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium
-                   bg-gray-800 hover:bg-gray-700 text-gray-100 border border-gray-700
-                   transition-colors"
-          >
-            <span class="text-base leading-none">{{ activeTab.icon }}</span>
-            <!-- Фиксированная ширина ярлыка: не даём кнопке «прыгать» при смене
-                 активной вкладки (у ярлыков разная длина). -->
-            <span class="hidden sm:inline sm:w-32 truncate text-left">{{ activeTab.label }}</span>
-            <svg
-              class="w-4 h-4 text-gray-400 transition-transform duration-200"
-              :class="{ 'rotate-180': menuOpen }"
-              viewBox="0 0 20 20" fill="currentColor"
-            >
-              <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd"/>
-            </svg>
-          </button>
-
-          <transition
-            enter-active-class="transition ease-out duration-150"
-            enter-from-class="opacity-0 -translate-y-1"
-            enter-to-class="opacity-100 translate-y-0"
-            leave-active-class="transition ease-in duration-100"
-            leave-from-class="opacity-100 translate-y-0"
-            leave-to-class="opacity-0 -translate-y-1"
-          >
-            <div
-              v-if="menuOpen"
-              class="absolute left-0 mt-2 w-72 max-w-[90vw] z-[var(--app-overlay-z)] max-h-[calc(100vh-var(--app-header-h)-1rem)] overflow-y-auto rounded-xl border border-gray-700
-                     bg-gray-900 shadow-2xl shadow-black/40 p-1.5 grid grid-cols-1 gap-0.5"
-            >
-              <button
-                v-for="tab in TABS"
-                :key="tab.key"
-                @click="goTab(tab)"
-                :class="[
-                  'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-left transition-colors',
-                  activeTabKey === tab.key
-                    ? 'bg-indigo-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-800 hover:text-white'
-                ]"
-              >
-                <span class="text-base w-5 text-center">{{ tab.icon }}</span>
-                <span class="truncate">{{ tab.label }}</span>
-              </button>
-            </div>
-          </transition>
+        <div v-if="!sidebarCollapsed" class="min-w-0">
+          <p class="text-sm font-semibold text-white truncate">SEO Genius</p>
+          <p class="text-[11px] text-gray-500 truncate">рабочий кабинет</p>
         </div>
-      </div>
-
-      <div class="flex items-center gap-3 flex-shrink-0">
-        <!--
-          PR-3: тумблер режима «Аналитик/Клиент» (state в PR-2,
-          stores/viewMode.js). При клиентском режиме axios-перехватчик
-          в api.js добавляет заголовок X-Client-Mode: 1, и backend
-          (viewMode.js#resolveViewMode) срезает технические поля из ответа.
-        -->
-        <div
-          v-if="showViewModeToggle"
-          role="group"
-          aria-label="Режим отображения"
-          class="inline-flex items-center rounded-lg border border-gray-700 bg-gray-950 p-0.5 text-xs"
+        <button
+          class="ml-auto hidden lg:inline-flex w-7 h-7 items-center justify-center rounded-lg text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+          :aria-label="sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню'"
+          :title="sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню'"
+          @click="sidebarCollapsed = !sidebarCollapsed"
         >
+          {{ sidebarCollapsed ? '»' : '«' }}
+        </button>
+      </div>
+
+      <nav class="flex-1 overflow-y-auto px-3 py-4 space-y-5" aria-label="Навигация личного кабинета">
+        <section v-for="group in visibleGroups" :key="group.label">
+          <p v-if="!sidebarCollapsed" class="px-3 mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-gray-600">
+            {{ group.label }}
+          </p>
+          <div class="space-y-1">
+            <button
+              v-for="item in group.items"
+              :key="item.key"
+              type="button"
+              :title="sidebarCollapsed ? `${item.label}: ${item.hint}` : item.hint"
+              :class="[
+                'app-nav-item w-full flex items-center gap-3 rounded-xl text-left transition-all duration-150',
+                sidebarCollapsed ? 'justify-center px-2 py-3' : 'px-3 py-2.5',
+                activeKey === item.key
+                  ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/30'
+                  : 'text-gray-400 hover:bg-gray-800/80 hover:text-gray-100',
+              ]"
+              :aria-current="activeKey === item.key ? 'page' : undefined"
+              @click="go(item)"
+            >
+              <span class="app-nav-icon inline-flex h-5 w-5 items-center justify-center text-sm font-semibold" aria-hidden="true">{{ item.icon }}</span>
+              <span v-if="!sidebarCollapsed" class="min-w-0 flex-1 truncate text-[13px] font-medium">{{ item.label }}</span>
+              <span v-if="!sidebarCollapsed && activeKey === item.key" class="w-1.5 h-1.5 rounded-full bg-white/80" aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+      </nav>
+
+      <div class="border-t border-gray-800/80 p-3">
+        <div v-if="!sidebarCollapsed" class="rounded-xl bg-gray-950/60 border border-gray-800 px-3 py-2.5 mb-2">
+          <p class="text-[10px] uppercase tracking-wider text-gray-600">Текущий доступ</p>
+          <p class="mt-1 text-xs font-semibold text-gray-200 truncate">{{ planLabel }}</p>
+          <p class="mt-0.5 text-[11px] text-gray-500 truncate">{{ roleLabel }}</p>
+        </div>
+        <button
+          type="button"
+          class="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
+          :class="sidebarCollapsed ? 'justify-center' : ''"
+          title="Выйти из кабинета"
+          @click="handleLogout"
+        >
+          <span class="text-base" aria-hidden="true">↪</span>
+          <span v-if="!sidebarCollapsed" class="text-[13px] font-medium">Выйти</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="app-shell-main min-w-0 flex-1 flex flex-col min-h-screen">
+      <header class="app-header border-b border-gray-800/90 bg-gray-900/90 backdrop-blur-xl px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-shrink-0">
+        <div class="flex items-center gap-3 min-w-0">
           <button
             type="button"
-            :class="[
-              'px-2.5 py-1 rounded-md font-medium transition-colors',
-              viewMode.isAnalyst
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'text-gray-400 hover:text-gray-200',
-            ]"
-            :aria-pressed="viewMode.isAnalyst"
-            @click="setMode(VIEW_MODES.ANALYST)"
-            data-testid="view-mode-analyst"
-          >Аналитик</button>
-          <button
-            type="button"
-            :class="[
-              'px-2.5 py-1 rounded-md font-medium transition-colors',
-              viewMode.isClient
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'text-gray-400 hover:text-gray-200',
-            ]"
-            :aria-pressed="viewMode.isClient"
-            @click="setMode(VIEW_MODES.CLIENT)"
-            data-testid="view-mode-client"
-          >Клиент</button>
+            class="lg:hidden inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700 transition-colors"
+            aria-label="Открыть навигацию"
+            :aria-expanded="sidebarOpen"
+            @click="toggleSidebar"
+          >
+            <span class="text-lg" aria-hidden="true">☰</span>
+          </button>
+          <div class="min-w-0">
+            <p class="text-[10px] uppercase tracking-[0.16em] text-gray-600 hidden sm:block">SEO Genius · рабочий кабинет</p>
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="text-sm font-semibold text-white truncate">{{ activeItem?.label || 'Центр задач' }}</span>
+              <span class="text-gray-700 hidden sm:inline">/</span>
+              <span class="text-xs text-gray-500 truncate hidden sm:inline">{{ activeItem?.hint }}</span>
+            </div>
+          </div>
         </div>
 
-        <span class="hidden sm:inline text-sm text-gray-400 truncate max-w-[12rem]">{{ auth.user?.name || auth.user?.email }}</span>
-        <button @click="handleLogout" class="btn-ghost text-xs">Выйти</button>
-      </div>
-    </header>
+        <div class="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+          <div
+            v-if="showViewModeToggle"
+            role="group"
+            aria-label="Режим отображения проекта"
+            class="hidden sm:inline-flex items-center rounded-xl border border-gray-700 bg-gray-950 p-0.5 text-xs"
+          >
+            <button
+              type="button"
+              class="px-2.5 py-1.5 rounded-lg font-medium transition-colors"
+              :class="viewMode.isAnalyst ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'"
+              :aria-pressed="viewMode.isAnalyst"
+              @click="setMode(VIEW_MODES.ANALYST)"
+            >Аналитик</button>
+            <button
+              type="button"
+              class="px-2.5 py-1.5 rounded-lg font-medium transition-colors"
+              :class="viewMode.isClient ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'"
+              :aria-pressed="viewMode.isClient"
+              @click="setMode(VIEW_MODES.CLIENT)"
+            >Клиент</button>
+          </div>
+          <div class="hidden md:flex items-center gap-2 rounded-xl border border-gray-800 bg-gray-950/40 px-3 py-2 max-w-[220px]">
+            <span class="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-950 text-xs text-indigo-300" aria-hidden="true">{{ (auth.user?.name || auth.user?.email || 'П').slice(0, 1).toUpperCase() }}</span>
+            <span class="text-xs text-gray-400 truncate">{{ auth.user?.name || auth.user?.email }}</span>
+          </div>
+          <button type="button" class="lg:hidden btn-ghost text-xs" @click="handleLogout">Выйти</button>
+        </div>
+      </header>
 
-    <!-- Контент вкладки -->
-    <main class="app-main flex-1 min-w-0">
-      <slot />
-    </main>
+      <main class="app-main flex-1 min-w-0">
+        <slot />
+      </main>
+    </div>
   </div>
 </template>

@@ -2,6 +2,8 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import { useRelevanceStore } from '../stores/relevance.js';
 import { YANDEX_REGIONS, findRegionByCode } from '../data/yandexRegions.js';
@@ -180,20 +182,17 @@ function formatDuration(ms) {
 
 <template>
   <AppLayout>
-    <div class="max-w-7xl mx-auto px-6 py-8 space-y-8">
-      <!-- Шапка -->
-      <div class="flex items-end justify-between border-b border-gray-800 pb-4">
-        <div>
-          <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-            📊 Анализ релевантности
-            <span class="text-xs font-medium text-indigo-400 bg-indigo-950/40 border border-indigo-900 px-2 py-0.5 rounded">MVP · BM25 + n-граммы</span>
-          </h1>
-          <p class="text-gray-400 text-sm mt-1">
-            Сбор ТОП-20 Яндекса (XMLStock), парсинг страниц, расчёт BM25-словаря и n-грамм.
-            <span class="text-gray-500">Готовый ТЗ для копирайтера в виде таблиц + графиков.</span>
-          </p>
-        </div>
-      </div>
+    <div class="app-page space-y-8">
+      <AppPageHeader
+        eyebrow="Исследование"
+        title="Анализ релевантности"
+        description="Соберите выдачу, проанализируйте страницы конкурентов и получите структурированное ТЗ с BM25, n-граммами, LSI и графиками."
+      >
+        <template #title-suffix>
+          <span class="text-xs font-medium text-indigo-300 bg-indigo-950/40 border border-indigo-900 px-2 py-0.5 rounded-full">BM25 + n-граммы</span>
+          <ToolHelp title="Анализ релевантности" text="Укажите запрос и регион. Сервис соберёт ТОП, найдёт общие термины и подготовит данные для контента. Готовый отчёт можно открыть из истории." />
+        </template>
+      </AppPageHeader>
 
       <!-- ── Форма ── -->
       <form @submit.prevent="handleCreate" class="card space-y-5">

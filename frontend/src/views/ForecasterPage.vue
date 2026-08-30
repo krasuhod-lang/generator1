@@ -11,6 +11,8 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import KpSectionTabs from '../components/KpSectionTabs.vue';
 import { useForecasterStore } from '../stores/forecaster.js';
 import readXlsxFile from 'read-excel-file';
@@ -200,31 +202,27 @@ function statusBadge(s) {
 
 <template>
   <AppLayout>
-    <div class="px-6 pt-6 max-w-7xl mx-auto">
+    <div class="app-page app-page-tabs">
       <KpSectionTabs />
     </div>
-    <div class="p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div class="app-page app-page-wide grid grid-cols-1 lg:grid-cols-2 gap-6">
       <!-- ─── Форма ─────────────────────────────────────────────── -->
       <section class="bg-gray-900 border border-gray-800 rounded-xl p-5">
-        <header class="mb-4">
-          <div class="flex items-center justify-between gap-3">
-            <h1 class="text-xl font-semibold text-gray-100">📈 Прогнозатор</h1>
-          </div>
-          <p class="text-sm text-gray-400 mt-1">
-            Вбейте список ключевых запросов — либо загрузите готовую CSV/XLSX-выгрузку
-            с помесячной частотностью. Система:
-          </p>
-          <ul class="text-sm text-gray-400 mt-2 list-disc pl-5 space-y-0.5">
-            <li>исключит запросы со стоп-словами (бесплатно, скачать, авито, вакансии…),</li>
-            <li>снимет сезонность через Арсенкин — частота в месяц по каждому запросу за последний год,</li>
-            <li>построит график спроса по месяцам и подсветит зоны падения красным,</li>
-            <li>спрогнозирует спрос на 12 месяцев вперёд,</li>
-            <li>оценит <span class="text-gray-300">реалистичный</span> трафик при выходе в ТОП-3 / 5 / 10
-                (с учётом текущего значения, а не «все запросы в ТОП»),</li>
-            <li>отсеет шлак-запросы (детерминированно + AI-разметка причин),</li>
-            <li>сделает выводы и даст рекомендации (DeepSeek).</li>
-          </ul>
-        </header>
+        <AppPageHeader
+          eyebrow="Исследование и прогноз"
+          title="Прогнозатор"
+          description="Загрузите запросы или CSV/XLSX с частотностью, чтобы увидеть сезонность, реалистичный потенциал трафика и прогноз спроса."
+        >
+          <template #title-suffix>
+            <ToolHelp title="Прогнозатор" text="Сервис очищает семантику, анализирует сезонность, оценивает потенциал ТОП-3/5/10 и формирует рекомендации. Результат можно открыть из истории задач." />
+          </template>
+        </AppPageHeader>
+        <ul class="text-sm text-gray-400 mb-4 list-disc pl-5 space-y-0.5">
+          <li>исключит запросы со стоп-словами и объяснит причины фильтрации;</li>
+          <li>снимет сезонность по каждому запросу за последний год;</li>
+          <li>покажет график спроса и прогноз на 12 месяцев;</li>
+          <li>оценит реалистичный трафик при выходе в ТОП-3 / 5 / 10.</li>
+        </ul>
 
         <form @submit.prevent="handleSubmit" class="space-y-3">
           <!-- Переключатель источника -->

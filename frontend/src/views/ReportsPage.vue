@@ -5,6 +5,8 @@
 import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import { useReportsStore } from '../stores/reports.js';
 
 const router = useRouter();
@@ -34,16 +36,19 @@ function statusLabel(s) {
 <template>
   <AppLayout>
     <div class="reports-page">
-      <header class="rp-head">
-        <div>
-          <h1>Отчёты</h1>
-          <p class="rp-sub">Конструктор публичных отчётов для клиентов и инвесторов.</p>
-        </div>
-        <div class="rp-actions">
+      <AppPageHeader
+        eyebrow="Контроль и публикация"
+        title="Отчёты"
+        description="Собирайте данные проекта в единый отчёт, добавляйте AI-аналитику и публикуйте готовый результат по защищённой ссылке."
+      >
+        <template #title-suffix>
+          <ToolHelp title="Отчёты" text="Черновик можно редактировать до публикации. Опубликованные отчёты и их ссылки защищены от удаления из истории." />
+        </template>
+        <template #actions>
           <button class="btn btn-secondary" @click="router.push('/reports/shared')">Опубликованные ссылки</button>
           <button class="btn btn-primary" @click="router.push('/reports/new')">+ Новый отчёт</button>
-        </div>
-      </header>
+        </template>
+      </AppPageHeader>
 
       <div v-if="store.loading" class="rp-empty">Загрузка…</div>
       <div v-else-if="store.error" class="rp-empty rp-error">{{ store.error }}</div>
@@ -136,5 +141,48 @@ function statusLabel(s) {
 .btn-link:hover { color: #0071e3; }
 .protected-label { color: #03762d; font-size: 12px; white-space: nowrap; }
 .btn-link.danger { color: #d70015; }
-.btn-link:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-link:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Общий кабинет: отчёты больше не используют отдельную светлую тему. */
+  .reports-page {
+    background: transparent;
+    color: #e5e7eb;
+    color-scheme: dark;
+  }
+  .reports-page .rp-head h1 { color: #f8fafc; }
+  .reports-page .rp-sub { color: #94a3b8; }
+  .reports-page .rp-empty {
+    color: #94a3b8;
+    background: rgba(17, 24, 39, 0.76);
+    border-color: rgba(51, 65, 85, 0.74);
+  }
+  .reports-page .rp-error { color: #fca5a5; border-color: rgba(127, 29, 29, 0.75); }
+  .reports-page .rp-table {
+    background: rgba(17, 24, 39, 0.76);
+    border-color: rgba(51, 65, 85, 0.74);
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.14);
+  }
+  .reports-page .rp-table th,
+  .reports-page .rp-table td { border-bottom-color: rgba(51, 65, 85, 0.62); }
+  .reports-page .rp-table th { background: rgba(15, 23, 42, 0.9); color: #94a3b8; }
+  .reports-page .rp-table tbody tr:hover { background: rgba(99, 102, 241, 0.08); }
+  .reports-page .rp-link { color: #a5b4fc; }
+  .reports-page .rp-link:hover { color: #c7d2fe; }
+  .reports-page .rp-pill { background: rgba(71, 85, 105, 0.45); color: #cbd5e1; }
+  .reports-page .rp-pill[data-status="published"],
+  .reports-page .rp-pill.ok { background: rgba(5, 150, 105, 0.18); color: #6ee7b7; }
+  .reports-page .rp-pill.err { background: rgba(127, 29, 29, 0.32); color: #fca5a5; }
+  .reports-page .rp-pill.muted { background: transparent; color: #64748b; }
+  .reports-page .btn-primary { background: #4f46e5; color: #fff; }
+  .reports-page .btn-primary:hover { background: #6366f1; }
+  .reports-page .btn-secondary { background: #1f2937; border-color: #374151; color: #e5e7eb; }
+  .reports-page .btn-secondary:hover { background: #374151; }
+  .reports-page .btn-link { color: #a5b4fc; }
+  .reports-page .btn-link:hover { color: #c7d2fe; }
+  .reports-page .btn-link.danger { color: #fca5a5; }
+  .reports-page .protected-label { color: #6ee7b7; }
+  @media (max-width: 720px) {
+    .reports-page .rp-actions { width: 100%; flex-wrap: wrap; }
+    .reports-page .rp-actions .btn { flex: 1 1 auto; }
+  }
 </style>

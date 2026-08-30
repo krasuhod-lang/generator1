@@ -5,6 +5,7 @@ import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
 import api from '../api.js';
 import { useAuthStore } from '../stores/auth.js';
 import { useLinkArticleStore } from '../stores/linkArticle.js';
@@ -511,21 +512,16 @@ async function copyMetaField(label, value) {
 
 <template>
   <AppLayout>
-    <div class="max-w-7xl mx-auto px-6 py-8 space-y-6">
-      <!-- Шапка -->
-      <div class="flex items-end justify-between border-b border-gray-800 pb-4">
-        <div>
-          <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-            🔗 Генератор ссылочной статьи
-            <ToolHelp title="Ссылочная статья" text="Инструмент создаёт статью вокруг заданной темы и естественно размещает целевую ссылку. Укажите точный анкор и URL, чтобы получить готовый материал для публикации." />
-          </h1>
-          <p class="text-gray-400 text-sm mt-1">
-            Статья для внешних площадок (sape / miralinks / gogetlinks) с естественной ссылкой
-            и 3 изображениями от Nano Banana Pro. Изображения встроены в HTML как base64 —
-            копируются вместе с текстом без внешнего хостинга.
-          </p>
-        </div>
-      </div>
+    <div class="app-page space-y-6">
+      <AppPageHeader
+        eyebrow="Создание контента"
+        title="Ссылочная статья"
+        description="Материал для внешней площадки с естественным анкором, целевым URL и готовой HTML-структурой для публикации."
+      >
+        <template #title-suffix>
+          <ToolHelp title="Ссылочная статья" text="Укажите тему, точный анкор и URL. Сервис создаст статью вокруг ссылки; после завершения материал можно открыть, проверить и экспортировать." />
+        </template>
+      </AppPageHeader>
 
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <!-- ── Форма (слева) ── -->
