@@ -18,6 +18,7 @@ const { salvageJsonStrings }    = require('../utils/salvageJson');
 const { getProfileQueueHealth } = require('../services/tasks/generationAdmission');
 const { resolveQueueReason } = require('../services/tasks/queueDiagnostics');
 const { getUserTaskSlotHealth } = require('../services/tasks/userTaskAdmission');
+const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -608,7 +609,7 @@ async function resolveGenerationQueuePresentation(userId, publication) {
       };
     }
     return {
-      message: 'Пять слотов пользователя заняты; задача будет запущена автоматически',
+      message: `${userSlot.maxConcurrent || 5} слотов пользователя заняты; задача будет запущена автоматически`,
       queueReason: 'user_limit',
       userSlot,
     };
@@ -662,24 +663,39 @@ async function startTask(req, res, next) {
     // DB state и outbox создаются атомарно. Если Redis недоступен, publisher
     // повторит queue.add(), а пользователь не потеряет задачу.
     const jobId = makeBullJobId('generation', task.id, 'start', Date.now());
-    const client = await db.getClient();
-    try {
-      await client.query('BEGIN');
-      await client.query(
-        `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
-                completed_at=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
-          WHERE id=$2 AND archived_at IS NULL`, [jobId, task.id]);
-      await client.query(
-        `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
-         VALUES ('content-generation','generate',$1,$2::jsonb)
-         ON CONFLICT (queue_name,job_id) DO NOTHING`,
-        [jobId, JSON.stringify({ taskId: task.id })]);
-      await client.query('COMMIT');
-    } catch (e) {
-      try { await client.query('ROLLBACK'); } catch (_) {}
-      throw e;
-    } finally {
-      client.release();
+    const persistStart = async () => {
+      const client = await db.getClient();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
+                  completed_at=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
+            WHERE id=$2 AND archived_at IS NULL`, [jobId, task.id]);
+        await client.query(
+          `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
+           VALUES ('content-generation','generate',$1,$2::jsonb)
+           ON CONFLICT (queue_name,job_id) DO NOTHING`,
+          [jobId, JSON.stringify({ taskId: task.id })]);
+        await client.query('COMMIT');
+      } catch (e) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+        throw e;
+      } finally {
+        client.release();
+      }
+    };
+    // Draft is the only billable first generation. Retrying a failed/paused
+    // task is recovery and must not consume another commercial unit.
+    if (task.status === 'draft') {
+      await withTaskUsageReservation({
+        userId: req.user.id,
+        taskType: 'seo',
+        taskId: task.id,
+        source: 'seo_start',
+        fn: persistStart,
+      });
+    } else {
+      await persistStart();
     }
     const publication = await publishTaskOutboxNow(jobId);
     const presentation = await resolveGenerationQueuePresentation(req.user.id, publication);

@@ -92,6 +92,14 @@ function fmtCost(usd) {
   return '$' + n.toFixed(Math.abs(n) < 0.01 ? 6 : 4);
 }
 
+function roleLabel(role) {
+  return ({ admin: 'Администратор', employee: 'Сотрудник', client: 'Клиент' }[role] || 'Клиент');
+}
+
+function planLabel(plan) {
+  return ({ trial: 'Бесплатный', minimal: 'Минимальный', medium: 'Средний', pro: 'Про', internal: 'Внутренний' }[plan] || plan || '—');
+}
+
 async function copyPassword(pwd) {
   if (!pwd) return;
   try {
@@ -214,6 +222,8 @@ async function removeUser(u) {
               <th class="py-3 px-3 text-gray-400 font-medium cursor-pointer select-none hover:text-gray-200" @click="handleSort('created_at')">
                 Регистрация {{ sortIcon('created_at') }}
               </th>
+              <th class="py-3 px-3 text-gray-400 font-medium">Доступ</th>
+              <th class="py-3 px-3 text-gray-400 font-medium">Тариф</th>
               <th class="py-3 px-3 text-gray-400 font-medium cursor-pointer select-none hover:text-gray-200" @click="handleSort('tasks_total')">
                 Задач {{ sortIcon('tasks_total') }}
               </th>
@@ -245,6 +255,11 @@ async function removeUser(u) {
               </td>
               <td class="py-3 px-3 text-gray-300">{{ u.name || '—' }}</td>
               <td class="py-3 px-3 text-gray-400">{{ fmtDate(u.created_at) }}</td>
+              <td class="py-3 px-3">
+                <span class="badge bg-indigo-900 text-indigo-200">{{ roleLabel(u.account_role || u.role) }}</span>
+                <span v-if="u.access_status && u.access_status !== 'active'" class="block text-[10px] text-amber-300 mt-1">{{ u.access_status }}</span>
+              </td>
+              <td class="py-3 px-3 text-gray-300">{{ planLabel(u.plan_key) }}</td>
               <td class="py-3 px-3 text-gray-200 font-medium">{{ u.tasks_total }}</td>
               <td class="py-3 px-3 text-green-400">{{ u.tasks_completed }}</td>
               <td class="py-3 px-3 text-red-400">{{ u.tasks_failed }}</td>
@@ -272,9 +287,7 @@ async function removeUser(u) {
               </td>
             </tr>
             <tr v-if="!admin.users.length && !admin.loading">
-              <td colspan="10" class="py-8 text-center text-gray-500">
-                Пользователи не найдены
-              </td>
+              <td colspan="12" class="py-8 text-center text-gray-500">Пользователей нет</td>
             </tr>
           </tbody>
         </table>

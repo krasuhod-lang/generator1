@@ -5,6 +5,11 @@ const jwt    = require('jsonwebtoken');
 const db     = require('../config/db');
 const projectGrants = require('../services/projects/projectGrants');
 const storageAdmin = require('../services/maintenance/storageAdmin');
+const {
+  ROLES, PLAN_KEYS, PROFILE_STATUSES,
+  normalizeRole, normalizePlanKey, sanitizeOverrides,
+  ensureAccessProfile, getUserEntitlements, getPlanCatalog,
+} = require('../services/access/entitlementPolicy');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -111,7 +116,12 @@ async function listUsers(req, res, next) {
          GROUP BY z.user_id
        )
        SELECT
-         u.id, u.email, u.name, u.role, u.created_at,
+         u.id, u.email, u.name, u.role,
+         COALESCE(p.account_role, CASE WHEN u.role='admin' THEN 'admin' ELSE 'client' END) AS account_role,
+         COALESCE(p.plan_key, CASE WHEN u.role='admin' THEN 'internal' ELSE 'trial' END) AS plan_key,
+         COALESCE(p.status, 'active') AS access_status,
+         p.period_end AS access_period_end,
+         u.created_at,
          u.password_plain,
          COALESCE(ut.tasks_total, 0)::int      AS tasks_total,
          COALESCE(ut.tasks_completed, 0)::int  AS tasks_completed,
@@ -121,6 +131,7 @@ async function listUsers(req, res, next) {
          COALESCE(ut.total_cost_usd, 0)::numeric(14,6) AS total_cost_usd
        FROM users u
        LEFT JOIN ut ON ut.user_id = u.id
+       LEFT JOIN user_access_profiles p ON p.user_id = u.id
        ${whereSQL}
        ORDER BY ${sort === 'tasks_total' ? 'tasks_total' : sort === 'total_cost_usd' ? 'total_cost_usd' : `u.${sort}`} ${order}
        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -160,7 +171,12 @@ async function getUserDetail(req, res, next) {
          GROUP BY z.user_id
        )
        SELECT
-         u.id, u.email, u.name, u.role, u.created_at,
+         u.id, u.email, u.name, u.role,
+         COALESCE(p.account_role, CASE WHEN u.role='admin' THEN 'admin' ELSE 'client' END) AS account_role,
+         COALESCE(p.plan_key, CASE WHEN u.role='admin' THEN 'internal' ELSE 'trial' END) AS plan_key,
+         COALESCE(p.status, 'active') AS access_status,
+         p.period_end AS access_period_end,
+         u.created_at,
          u.password_plain,
          COALESCE(ut.tasks_total, 0)::int      AS tasks_total,
          COALESCE(ut.tasks_completed, 0)::int  AS tasks_completed,
@@ -172,6 +188,7 @@ async function getUserDetail(req, res, next) {
          COALESCE(ut.total_cost_usd, 0)::numeric(14,6) AS total_cost_usd
        FROM users u
        LEFT JOIN ut ON ut.user_id = u.id
+       LEFT JOIN user_access_profiles p ON p.user_id = u.id
        WHERE u.id = $1`,
       [userId]
     );
@@ -180,9 +197,140 @@ async function getUserDetail(req, res, next) {
       return res.status(404).json({ error: 'Пользователь не найден' });
     }
 
-    return res.json({ user: rows[0] });
+    const entitlements = await getUserEntitlements(userId, db);
+    return res.json({ user: { ...rows[0], access: entitlements } });
   } catch (err) {
     next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Commercial access management
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function listAccessPlans(req, res) {
+  return res.json({ plans: getPlanCatalog() });
+}
+
+async function getUserAccess(req, res, next) {
+  try {
+    const { userId } = req.params;
+    const access = await getUserEntitlements(userId, db);
+    if (!access) return res.status(404).json({ error: 'Пользователь не найден' });
+    return res.json({ access });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+function parseAccessDate(value, field, fallback = null) {
+  if (value === undefined) return fallback;
+  if (value === null || value === '') return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    const error = new Error(`Некорректная дата ${field}`);
+    error.status = 400;
+    error.code = 'invalid_access_date';
+    throw error;
+  }
+  return date;
+}
+
+async function updateUserAccess(req, res, next) {
+  try {
+    const { userId } = req.params;
+    const body = req.body || {};
+    const currentProfile = await ensureAccessProfile(userId, db);
+    if (!currentProfile) return res.status(404).json({ error: 'Пользователь не найден' });
+
+    const requestedRole = body.role ?? body.account_role;
+    const roleCandidate = requestedRole === undefined
+      ? normalizeRole(currentProfile.account_role, currentProfile.legacy_role)
+      : String(requestedRole).trim().toLowerCase();
+    if (!Object.values(ROLES).includes(roleCandidate)) {
+      return res.status(400).json({ error: 'Роль должна быть admin, employee или client' });
+    }
+    const nextRole = roleCandidate;
+    const requestedPlan = body.plan_key ?? body.plan;
+    const planCandidate = requestedPlan === undefined
+      ? normalizePlanKey(currentProfile.plan_key, nextRole)
+      : String(requestedPlan).trim().toLowerCase();
+    const validPlans = [PLAN_KEYS.TRIAL, PLAN_KEYS.MINIMAL, PLAN_KEYS.MEDIUM, PLAN_KEYS.PRO];
+    if (nextRole === ROLES.CLIENT && !validPlans.includes(planCandidate)) {
+      return res.status(400).json({ error: 'Для клиента доступен только trial, minimal, medium или pro' });
+    }
+    if (nextRole !== ROLES.CLIENT && planCandidate !== PLAN_KEYS.INTERNAL) {
+      return res.status(400).json({ error: 'Для администратора и сотрудника используется internal plan' });
+    }
+    const nextPlan = nextRole === ROLES.CLIENT ? planCandidate : PLAN_KEYS.INTERNAL;
+    const nextStatus = body.status === undefined ? currentProfile.status : String(body.status).trim().toLowerCase();
+    if (!Object.values(PROFILE_STATUSES).includes(nextStatus)) {
+      return res.status(400).json({ error: 'Статус должен быть active, paused или expired' });
+    }
+    const nextOverrides = body.overrides === undefined
+      ? sanitizeOverrides(currentProfile.overrides || {})
+      : sanitizeOverrides(body.overrides);
+
+    let periodStart = parseAccessDate(body.period_start, 'period_start', currentProfile.period_start ? new Date(currentProfile.period_start) : new Date());
+    let periodEnd = parseAccessDate(body.period_end, 'period_end', currentProfile.period_end ? new Date(currentProfile.period_end) : null);
+    if (requestedPlan !== undefined && requestedRole !== undefined && nextRole !== normalizeRole(currentProfile.account_role, currentProfile.legacy_role)) {
+      periodStart = periodStart || new Date();
+    }
+    if (nextRole !== ROLES.CLIENT || nextPlan === PLAN_KEYS.TRIAL) periodEnd = null;
+    if (nextRole === ROLES.CLIENT && nextPlan !== PLAN_KEYS.TRIAL && currentProfile.plan_key !== nextPlan && !periodEnd) {
+      periodStart = body.period_start ? periodStart : new Date();
+      periodEnd = new Date(periodStart.getTime() + 31 * 24 * 60 * 60 * 1000);
+    }
+    if (periodEnd && periodStart && periodEnd.getTime() <= periodStart.getTime()) {
+      return res.status(400).json({ error: 'period_end должна быть позже period_start' });
+    }
+
+    const client = await db.getClient();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(`SELECT id, email, role FROM users WHERE id=$1 FOR UPDATE`, [userId]);
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Пользователь не найден' });
+      }
+      const target = rows[0];
+      if (String(req.user?.id) === String(userId) && nextRole !== ROLES.ADMIN) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Нельзя снять роль администратора с собственной учётной записи' });
+      }
+      if (target.role === 'admin' && nextRole !== ROLES.ADMIN) {
+        const admins = await client.query(`SELECT COUNT(*)::int AS count FROM users WHERE role='admin'`);
+        if (Number(admins.rows[0]?.count || 0) <= 1) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Нельзя снять роль последнего администратора' });
+        }
+      }
+      await client.query(
+        `UPDATE users SET role = CASE WHEN $2='admin' THEN 'admin' ELSE CASE WHEN role='admin' THEN 'user' ELSE role END END WHERE id=$1`,
+        [userId, nextRole],
+      );
+      await client.query(
+        `INSERT INTO user_access_profiles
+           (user_id, account_role, plan_key, status, period_start, period_end, overrides, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           account_role=EXCLUDED.account_role, plan_key=EXCLUDED.plan_key, status=EXCLUDED.status,
+           period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end,
+           overrides=EXCLUDED.overrides, updated_at=NOW()`,
+        [userId, nextRole, nextPlan, nextStatus, periodStart || new Date(), periodEnd, JSON.stringify(nextOverrides)],
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const access = await getUserEntitlements(userId, db);
+    return res.json({ ok: true, access });
+  } catch (err) {
+    return next(err);
   }
 }
 
@@ -1623,6 +1771,9 @@ async function listAdminGrantableUsers(req, res, next) {
 module.exports = {
   adminLogin,
   listUsers,
+  listAccessPlans,
+  getUserAccess,
+  updateUserAccess,
   getUserDetail,
   deleteUser,
   getUserTasks,

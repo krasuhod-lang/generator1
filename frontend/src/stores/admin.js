@@ -103,6 +103,22 @@ export const useAdminStore = defineStore('admin', () => {
     }
   }
 
+  // ── Каталог и access profile пользователя ────────────────────────────
+  async function fetchAccessPlans() {
+    const { data } = await adminApi.get('/admin/access-plans');
+    return data.plans || [];
+  }
+
+  async function fetchUserAccess(userId) {
+    const { data } = await adminApi.get(`/admin/users/${userId}/access`);
+    return data.access;
+  }
+
+  async function updateUserAccess(userId, payload) {
+    const { data } = await adminApi.patch(`/admin/users/${userId}/access`, payload);
+    return data.access;
+  }
+
   // ── Детали пользователя ──────────────────────────────────────────────
   async function fetchUserDetail(userId) {
     const { data } = await adminApi.get(`/admin/users/${userId}`);
@@ -266,6 +282,9 @@ export const useAdminStore = defineStore('admin', () => {
     adminLogin,
     adminLogout,
     fetchUsers,
+    fetchAccessPlans,
+    fetchUserAccess,
+    updateUserAccess,
     fetchUserDetail,
     deleteUser,
     fetchUserTasks,

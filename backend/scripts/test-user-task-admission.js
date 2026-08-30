@@ -11,6 +11,9 @@ const originalLoad = Module._load;
 
 function fakeResult(sql, params) {
   const text = String(sql);
+  if (/FROM users u[\s\S]*user_access_profiles/i.test(text)) {
+    return { rows: [{ id: 'user-1', email: 'test@example.com', role: 'user', legacy_role: 'user', account_role: 'client', plan_key: 'trial', status: 'active', period_start: new Date('2026-01-01T00:00:00Z'), period_end: null, overrides: {} }] };
+  }
   if (/DELETE FROM user_task_slot_leases WHERE user_id/i.test(text)) {
     // Test leases never expire during this deterministic run.
     return { rows: [], rowCount: 0 };
@@ -87,7 +90,7 @@ Module._load = function patchedLoad(request, parent, ...rest) {
     const reused = await admission.acquireUserTaskSlot({
       userId: 'user-1', taskType: 'test', taskId: 'task-0', db: fakeDb,
     });
-    assert.strictEqual(reused.claimed, true);
+    assert.strictEqual(reused.claimed, false);
     assert.strictEqual(reused.reused, true);
     await reused.release();
     await Promise.all(slots.map((slot) => slot.release()));

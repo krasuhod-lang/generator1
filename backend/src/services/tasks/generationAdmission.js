@@ -1,11 +1,11 @@
 'use strict';
 
 const dbDefault = require('../../config/db');
+const { getEffectiveMaxConcurrent } = require('../access/entitlementPolicy');
 
-const MAX_PROFILE_CONCURRENCY = Math.max(
-  5,
-  Math.min(50, Number(process.env.GENERATION_MAX_PER_PROFILE) || 5),
-);
+// Safety ceiling only; effective value is resolved from the same access policy
+// used by user_task_slot_leases.
+const MAX_PROFILE_CONCURRENCY = 50;
 const PROFILE_LOCK_PREFIX = 'generator-profile-slots:';
 
 function profileLockKey(userId) {
@@ -46,6 +46,7 @@ async function claimGenerationTask({
       `SELECT pg_advisory_xact_lock(hashtext($1))`,
       [profileLockKey(task.user_id)],
     );
+    const maxConcurrent = await getEffectiveMaxConcurrent(task.user_id, client);
 
     const activeResult = await client.query(
       `SELECT COUNT(*)::int AS count
@@ -56,14 +57,14 @@ async function claimGenerationTask({
       [task.user_id],
     );
     const activeCount = Number(activeResult.rows[0]?.count || 0);
-    if (activeCount >= MAX_PROFILE_CONCURRENCY) {
+    if (activeCount >= maxConcurrent) {
       await client.query('COMMIT');
       return {
         claimed: false,
         reason: 'profile_limit',
         userId: task.user_id,
         activeCount,
-        maxConcurrent: MAX_PROFILE_CONCURRENCY,
+        maxConcurrent,
       };
     }
 
@@ -88,7 +89,7 @@ async function claimGenerationTask({
         reason: 'lease_not_acquired',
         userId: task.user_id,
         activeCount,
-        maxConcurrent: MAX_PROFILE_CONCURRENCY,
+        maxConcurrent,
       };
     }
     return {
@@ -123,10 +124,11 @@ async function getProfileQueueHealth(userId, taskId = null, db = dbDefault) {
   );
   const row = rows[0] || {};
   const activeCount = Number(row.active_count || 0);
+  const maxConcurrent = await getEffectiveMaxConcurrent(userId, db);
   return {
-    maxConcurrent: MAX_PROFILE_CONCURRENCY,
+    maxConcurrent,
     activeCount,
-    availableSlots: Math.max(0, MAX_PROFILE_CONCURRENCY - activeCount),
+    availableSlots: Math.max(0, maxConcurrent - activeCount),
     queuedCount: Number(row.queued_count || 0),
     queuedBeforeTask: Number(row.queued_before_task || 0),
   };

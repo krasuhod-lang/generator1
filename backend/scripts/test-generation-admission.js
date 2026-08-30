@@ -11,6 +11,9 @@ function makeClient(activeCount = 0) {
   return {
     async query(sql) {
       if (/^BEGIN|^COMMIT|^ROLLBACK/i.test(sql)) return { rows: [] };
+      if (/SELECT u\.id[\s\S]*user_access_profiles/i.test(sql)) {
+        return { rows: [{ id: 'profile-1', email: 'test@example.com', role: 'user', legacy_role: 'user', account_role: 'client', plan_key: 'trial', status: 'active', period_start: new Date('2026-01-01T00:00:00Z'), period_end: null, overrides: {} }] };
+      }
       if (/SELECT id, user_id, status, lease_until/i.test(sql)) {
         return { rows: [{ id: 'task-1', user_id: 'profile-1', status: 'queued', lease_until: null }] };
       }
@@ -32,7 +35,7 @@ function makeDb(activeCount) {
 }
 
 (async () => {
-  assert.strictEqual(MAX_PROFILE_CONCURRENCY, 5);
+  assert.strictEqual(MAX_PROFILE_CONCURRENCY, 50);
   const claimed = await claimGenerationTask({
     taskId: 'task-1', jobId: 'job-1', leaseToken: '00000000-0000-0000-0000-000000000001',
     workerId: 'worker-1', leaseSeconds: 60, db: makeDb(4),

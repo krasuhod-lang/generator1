@@ -177,6 +177,27 @@ const statusCounts = computed(() => allTasks.value.reduce((acc, task) => {
   return acc;
 }, {}));
 const activeCount = computed(() => (statusCounts.value.processing || 0) + (statusCounts.value.queued || 0));
+const access = computed(() => auth.user?.entitlements || null);
+const roleLabel = computed(() => ({ admin: 'Администратор', employee: 'Сотрудник', client: 'Клиент' }[auth.user?.role] || 'Пользователь'));
+const planLabel = computed(() => auth.user?.plan_name || auth.user?.plan || 'Бесплатный доступ');
+const accessPeriodLabel = computed(() => {
+  const end = auth.user?.access_period_end;
+  if (!end) return auth.user?.plan === 'trial' ? 'Пять генераций статей без срока действия' : 'Без ограничения периода';
+  return `до ${new Date(end).toLocaleDateString('ru-RU')}`;
+});
+const accessRows = computed(() => {
+  const rows = auth.user?.plan === 'trial'
+    ? [['article_generations', 'Бесплатные генерации'], ['meta_categories', 'Мета-категории'], ['relevance_runs', 'Релевантность'], ['article_topics', 'Темы статей']]
+    : [['seo_articles', 'SEO-тексты'], ['blog_articles', 'Блог'], ['link_articles', 'Ссылочные статьи'], ['meta_categories', 'Мета-категории'], ['relevance_runs', 'Релевантность'], ['article_topics', 'Темы статей']];
+  return rows.map(([key, label]) => ({
+  key, label,
+  remaining: access.value?.remaining?.[key],
+    limit: access.value?.limits?.[key],
+  }));
+});
+function displayAccessLimit(value) {
+  return value == null ? 'безлимитно' : String(value);
+}
 
 const filteredTasks = computed(() => {
   const needle = search.value.trim().toLowerCase();
@@ -266,6 +287,24 @@ function goPage(next) {
           Создать задачу
         </RouterLink>
       </header>
+
+      <section v-if="access" class="card mb-5 border border-indigo-900/60 bg-indigo-950/20">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="text-xs uppercase tracking-wide text-indigo-300">Доступ аккаунта</p>
+            <h2 class="text-lg font-semibold text-white mt-1">{{ planLabel }}</h2>
+            <p class="text-xs text-gray-400 mt-1">{{ roleLabel }} · {{ accessPeriodLabel }}</p>
+          </div>
+          <span class="rounded-full bg-indigo-900/60 px-3 py-1 text-xs text-indigo-200">{{ auth.user?.access_status === 'active' ? 'Активен' : 'Ограничен' }}</span>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mt-4">
+          <div v-for="row in accessRows" :key="row.key" class="rounded-lg bg-gray-950/40 border border-gray-800 px-3 py-2">
+            <p class="text-[11px] text-gray-500 truncate">{{ row.label }}</p>
+            <p class="text-sm font-semibold text-white mt-1">{{ displayAccessLimit(row.remaining) }}</p>
+            <p class="text-[10px] text-gray-600">из {{ displayAccessLimit(row.limit) }}</p>
+          </div>
+        </div>
+      </section>
 
       <section class="task-toolbar rounded-xl p-4 mb-5 space-y-4">
         <div class="flex flex-col lg:flex-row gap-3">

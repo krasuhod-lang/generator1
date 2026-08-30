@@ -8,6 +8,7 @@ const {
   verifyCode,
   RESEND_COOLDOWN_SECONDS,
 } = require('../services/auth/emailVerification');
+const { ensureAccessProfile, getUserEntitlements } = require('../services/access/entitlementPolicy');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Вспомогательные функции
@@ -29,12 +30,26 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
-function publicUser(user) {
+function publicUser(user, entitlements = null) {
   return {
     id: user.id,
     email: user.email,
     name: user.name,
     email_verified: Boolean(user.email_verified),
+    ...(entitlements ? {
+      role: entitlements.role,
+      plan: entitlements.plan,
+      plan_name: entitlements.planName,
+      access_status: entitlements.status,
+      access_period_start: entitlements.periodStart,
+      access_period_end: entitlements.periodEnd,
+      entitlements: {
+        limits: entitlements.limits,
+        used: entitlements.used,
+        remaining: entitlements.remaining,
+        unlimited: entitlements.unlimited,
+      },
+    } : {}),
   };
 }
 
@@ -108,6 +123,8 @@ async function register(req, res, next) {
       [normalizedEmail, passwordHash, password, name || null]
     );
     const user = rows[0];
+    await ensureAccessProfile(user.id, db);
+    const entitlements = await getUserEntitlements(user.id, db);
 
     try {
       const issued = await issueVerificationCode({
@@ -119,7 +136,7 @@ async function register(req, res, next) {
         pending_verification: true,
         email: user.email,
         retry_after: issued.retryAfter || RESEND_COOLDOWN_SECONDS,
-        user: publicUser({ ...user, email_verified: false }),
+        user: publicUser({ ...user, email_verified: false }, entitlements),
       });
     } catch (mailError) {
       console.error('[auth] verification email delivery failed:', mailError.message);
@@ -127,7 +144,7 @@ async function register(req, res, next) {
         pending_verification: true,
         email: user.email,
         retry_after: RESEND_COOLDOWN_SECONDS,
-        user: publicUser({ ...user, email_verified: false }),
+        user: publicUser({ ...user, email_verified: false }, entitlements),
         warning: 'Аккаунт создан, но код пока не отправлен. Нажмите «Отправить код ещё раз».',
       });
     }
@@ -195,11 +212,13 @@ async function login(req, res, next) {
     }
 
     // Выпускаем JWT
+    await ensureAccessProfile(user.id, db);
+    const entitlements = await getUserEntitlements(user.id, db);
     const token = signToken({ id: user.id, email: user.email });
 
     return res.json({
       token,
-      user: publicUser(user),
+      user: publicUser(user, entitlements),
     });
 
   } catch (err) {
@@ -231,8 +250,10 @@ async function verifyEmail(req, res, next) {
     }
 
     const user = result.user;
+    await ensureAccessProfile(user.id, db);
+    const entitlements = await getUserEntitlements(user.id, db);
     const token = signToken({ id: user.id, email: user.email });
-    return res.json({ token, user: publicUser(user), verified: true });
+    return res.json({ token, user: publicUser(user, entitlements), verified: true });
   } catch (err) {
     next(err);
   }
@@ -297,7 +318,8 @@ async function me(req, res, next) {
     if (!rows.length) {
       return res.status(404).json({ error: 'Пользователь не найден' });
     }
-    return res.json({ user: rows[0] });
+    const entitlements = await getUserEntitlements(rows[0].id, db);
+    return res.json({ user: publicUser(rows[0], entitlements) });
 
   } catch (err) {
     next(err);

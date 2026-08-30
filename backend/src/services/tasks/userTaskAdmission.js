@@ -2,8 +2,10 @@
 
 const crypto = require('crypto');
 const dbDefault = require('../../config/db');
+const { getEffectiveMaxConcurrent } = require('../access/entitlementPolicy');
 
-const MAX_USER_TASKS = 5;
+// Upper safety ceiling only; the effective per-user value is resolved from DB.
+const MAX_USER_TASKS = 50;
 const LEASE_SECONDS = Math.max(30, Number(process.env.USER_TASK_LEASE_SECONDS) || 90);
 const POLL_INTERVAL_MS = Math.max(250, Number(process.env.USER_TASK_SLOT_POLL_MS) || 1000);
 const GLOBAL_ADMISSION_ENABLED = String(process.env.USER_TASK_GLOBAL_ADMISSION_ENABLED || 'true').toLowerCase()
@@ -27,6 +29,7 @@ async function tryAcquireUserTaskSlot({ userId, taskType, taskId, db = dbDefault
   try {
     await client.query('BEGIN');
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [lockKey(userId)]);
+    const maxConcurrent = await getEffectiveMaxConcurrent(userId, client);
     await client.query(
       `DELETE FROM user_task_slot_leases WHERE user_id=$1 AND lease_until <= NOW()`,
       [userId],
@@ -59,13 +62,13 @@ async function tryAcquireUserTaskSlot({ userId, taskType, taskId, db = dbDefault
       [userId],
     );
     const activeCount = Number(count.rows[0]?.count || 0);
-    if (activeCount >= MAX_USER_TASKS) {
+    if (activeCount >= maxConcurrent) {
       await client.query('COMMIT');
       return {
         claimed: false,
         reason: 'user_limit',
         activeCount,
-        maxConcurrent: MAX_USER_TASKS,
+        maxConcurrent,
       };
     }
 
@@ -81,7 +84,7 @@ async function tryAcquireUserTaskSlot({ userId, taskType, taskId, db = dbDefault
       claimed: true,
       slotToken: inserted.rows[0].slot_token,
       activeCount: activeCount + 1,
-      maxConcurrent: MAX_USER_TASKS,
+      maxConcurrent,
     };
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (_) {}
@@ -148,6 +151,7 @@ async function getUserTaskSlotHealth(userId, db = dbDefault) {
   if (!GLOBAL_ADMISSION_ENABLED) {
     return { activeCount: 0, availableSlots: MAX_USER_TASKS, maxConcurrent: MAX_USER_TASKS };
   }
+  const maxConcurrent = await getEffectiveMaxConcurrent(userId, db);
   await db.query(`DELETE FROM user_task_slot_leases WHERE user_id=$1 AND lease_until <= NOW()`, [userId]);
   const { rows } = await db.query(
     `SELECT COUNT(*)::int AS count
@@ -158,8 +162,8 @@ async function getUserTaskSlotHealth(userId, db = dbDefault) {
   const activeCount = Number(rows[0]?.count || 0);
   return {
     activeCount,
-    availableSlots: Math.max(0, MAX_USER_TASKS - activeCount),
-    maxConcurrent: MAX_USER_TASKS,
+    availableSlots: Math.max(0, maxConcurrent - activeCount),
+    maxConcurrent,
   };
 }
 

@@ -11,6 +11,11 @@ const admin  = useAdminStore();
 const userId = route.params.id;
 
 const userDetail   = ref(null);
+const access        = ref(null);
+const plans         = ref([]);
+const accessForm    = ref({ role: 'client', plan_key: 'trial', status: 'active', period_start: '', period_end: '', overrides: {} });
+const accessSaving  = ref(false);
+const accessMessage = ref('');
 const tasks        = ref([]);
 const tasksTotal   = ref(0);
 const currentPage  = ref(1);
@@ -20,11 +25,16 @@ const error        = ref(null);
 
 onMounted(async () => {
   try {
-    const [user, tasksData] = await Promise.all([
+    const [user, tasksData, accessData, planData] = await Promise.all([
       admin.fetchUserDetail(userId),
       admin.fetchUserAllTasks(userId, { page: 1, limit: pageLimit }),
+      admin.fetchUserAccess(userId),
+      admin.fetchAccessPlans(),
     ]);
     userDetail.value = user;
+    access.value = accessData || user.access || null;
+    plans.value = planData || [];
+    syncAccessForm();
     tasks.value      = tasksData.tasks;
     tasksTotal.value = tasksData.total;
   } catch (e) {
@@ -41,6 +51,81 @@ async function loadTasks() {
 }
 
 const totalPages = computed(() => Math.ceil(tasksTotal.value / pageLimit));
+
+const ACCESS_FIELDS = [
+  ['article_generations', 'Бесплатные генерации'],
+  ['seo_articles', 'SEO-тексты'],
+  ['blog_articles', 'Статьи для блога'],
+  ['link_articles', 'Ссылочные статьи'],
+  ['meta_categories', 'Категории мета-тегов'],
+  ['relevance_runs', 'Съёмы релевантности'],
+  ['article_topics', 'Задачи тем статей'],
+  ['projects_reports', 'Проекты и отчёты'],
+  ['max_concurrent', 'Одновременные задачи'],
+];
+
+function toLocalDateTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function syncAccessForm() {
+  if (!access.value) return;
+  const overrides = {};
+  for (const [key] of ACCESS_FIELDS) {
+    if (access.value.overrides && Object.prototype.hasOwnProperty.call(access.value.overrides, key)) {
+      overrides[key] = String(access.value.overrides[key]);
+    }
+  }
+  accessForm.value = {
+    role: access.value.role || 'client',
+    plan_key: access.value.plan || 'trial',
+    status: access.value.status || 'active',
+    period_start: toLocalDateTime(access.value.periodStart),
+    period_end: toLocalDateTime(access.value.periodEnd),
+    overrides,
+  };
+}
+
+function displayLimit(value) {
+  return value == null ? 'Безлимитно' : String(value);
+}
+
+function onRoleChange() {
+  if (accessForm.value.role !== 'client') accessForm.value.plan_key = 'internal';
+  else if (accessForm.value.plan_key === 'internal') accessForm.value.plan_key = 'trial';
+}
+
+async function saveAccess() {
+  accessSaving.value = true;
+  accessMessage.value = '';
+  try {
+    const overrides = {};
+    for (const [key] of ACCESS_FIELDS) {
+      const value = accessForm.value.overrides?.[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') overrides[key] = Number(value);
+    }
+    const payload = {
+      role: accessForm.value.role,
+      plan_key: accessForm.value.plan_key,
+      status: accessForm.value.status,
+      overrides,
+      period_start: accessForm.value.period_start ? new Date(accessForm.value.period_start).toISOString() : null,
+      period_end: accessForm.value.period_end ? new Date(accessForm.value.period_end).toISOString() : null,
+    };
+    access.value = await admin.updateUserAccess(userId, payload);
+    if (userDetail.value) userDetail.value.access = access.value;
+    syncAccessForm();
+    accessMessage.value = 'Права доступа сохранены';
+  } catch (e) {
+    accessMessage.value = e.response?.data?.error || 'Не удалось сохранить права доступа';
+  } finally {
+    accessSaving.value = false;
+  }
+}
 
 function goPage(p) {
   if (p < 1 || p > totalPages.value) return;
@@ -177,7 +262,11 @@ function fmtCost(usd) {
               </div>
               <div>
                 <span class="text-gray-500">Роль:</span>
-                <span class="text-gray-300 ml-1">{{ userDetail.role }}</span>
+                <span class="text-gray-300 ml-1">{{ ({ admin: 'Администратор', employee: 'Сотрудник', client: 'Клиент' }[access?.role || userDetail.account_role || userDetail.role] || 'Клиент') }}</span>
+              </div>
+              <div v-if="access">
+                <span class="text-gray-500">Тариф:</span>
+                <span class="text-gray-300 ml-1">{{ access.planName }}</span>
               </div>
               <div>
                 <span class="text-gray-500">Пароль:</span>
@@ -189,6 +278,86 @@ function fmtCost(usd) {
               </div>
             </div>
           </div>
+        </div>
+
+        <!-- Коммерческий доступ: ручное назначение администратором -->
+        <div v-if="access" class="card mb-6">
+          <div class="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h3 class="text-sm font-medium text-gray-300 uppercase tracking-wide">Коммерческий доступ</h3>
+              <p class="text-xs text-gray-500 mt-1">Платёжный checkout не входит в этот этап: тариф назначается вручную.</p>
+            </div>
+            <span v-if="accessMessage" class="text-xs" :class="accessMessage.includes('сохран') ? 'text-emerald-400' : 'text-red-400'">{{ accessMessage }}</span>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+            <label class="block text-xs text-gray-400">Роль
+              <select v-model="accessForm.role" @change="onRoleChange" class="input mt-1 w-full">
+                <option value="admin">Администратор</option>
+                <option value="employee">Сотрудник</option>
+                <option value="client">Клиент</option>
+              </select>
+            </label>
+            <label class="block text-xs text-gray-400">Тариф
+              <select v-model="accessForm.plan_key" class="input mt-1 w-full">
+                <option v-if="accessForm.role !== 'client'" value="internal">Внутренний доступ</option>
+                <template v-for="plan in plans" :key="plan.key">
+                  <option v-if="accessForm.role === 'client'" :value="plan.key">
+                    {{ plan.name }}{{ plan.priceRub ? ` — ${plan.priceRub.toLocaleString('ru-RU')} ₽/мес.` : '' }}
+                  </option>
+                </template>
+              </select>
+            </label>
+            <label class="block text-xs text-gray-400">Статус
+              <select v-model="accessForm.status" class="input mt-1 w-full">
+                <option value="active">Активен</option>
+                <option value="paused">Пауза</option>
+                <option value="expired">Истёк</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+            <label class="block text-xs text-gray-400">Начало периода
+              <input v-model="accessForm.period_start" type="datetime-local" class="input mt-1 w-full" />
+            </label>
+            <label class="block text-xs text-gray-400">Конец периода (для paid-тарифа)
+              <input v-model="accessForm.period_end" type="datetime-local" class="input mt-1 w-full" />
+            </label>
+          </div>
+
+          <div class="rounded-lg border border-gray-800 bg-gray-900/40 p-3 mb-4">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <h4 class="text-xs font-medium text-gray-300 uppercase tracking-wide">Индивидуальные лимиты</h4>
+                <p class="text-[11px] text-gray-500 mt-1">Пустое поле = лимит тарифа; значения применяются только backend.</p>
+              </div>
+              <span class="text-[11px] text-gray-500">0–50 для concurrency</span>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <label v-for="field in ACCESS_FIELDS" :key="field[0]" class="block text-[11px] text-gray-500">
+                {{ field[1] }}
+                <input v-model="accessForm.overrides[field[0]]" type="number" min="0" :max="field[0] === 'max_concurrent' ? 50 : 1000000" class="input mt-1 w-full text-xs" placeholder="По тарифу" />
+              </label>
+            </div>
+          </div>
+
+          <div class="overflow-x-auto mb-4">
+            <table class="w-full text-xs">
+              <thead><tr class="border-b border-gray-800 text-left"><th class="py-2 text-gray-500">Ресурс</th><th class="py-2 text-gray-500">Использовано</th><th class="py-2 text-gray-500">Лимит</th><th class="py-2 text-gray-500">Остаток</th></tr></thead>
+              <tbody>
+                <tr v-for="field in ACCESS_FIELDS.filter((x) => x[0] !== 'max_concurrent')" :key="field[0]" class="border-b border-gray-800/50">
+                  <td class="py-2 text-gray-300">{{ field[1] }}</td>
+                  <td class="py-2 text-gray-400">{{ access.used?.[field[0]] || 0 }}</td>
+                  <td class="py-2 text-gray-300">{{ displayLimit(access.limits?.[field[0]]) }}</td>
+                  <td class="py-2 text-emerald-300">{{ displayLimit(access.remaining?.[field[0]]) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <button class="btn-primary text-sm" :disabled="accessSaving" @click="saveAccess">
+            {{ accessSaving ? 'Сохраняем…' : 'Сохранить права доступа' }}
+          </button>
         </div>
 
         <!-- Статистика задач: бар -->

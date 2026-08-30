@@ -23,6 +23,7 @@
  *   }
  */
 
+const crypto = require('crypto');
 const db = require('../config/db');
 const { processInfoArticleTask } = require('../services/infoArticle/infoArticlePipeline');
 const { scheduleUserTask } = require('../utils/perUserConcurrency');
@@ -32,6 +33,7 @@ const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
+const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 const MAX_TOPIC_LEN  = 250;
@@ -220,27 +222,34 @@ async function createInfoArticleTask(req, res, next) {
       }
     }
 
-    const { rows } = await db.query(
-      `INSERT INTO info_article_tasks
-         (user_id, topic, region, brand_name, author_name, brand_facts, output_format,
-           commercial_links, commercial_links_filename, commercial_links_count,
-           images_count, source_relevance_report_id,
-           gemini_model, project_id, target_site_url, opportunity_id,
-           published_url, published_queries, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'queued', 0)
-       RETURNING id, topic, region, brand_name, output_format,
-                 commercial_links_filename, commercial_links_count,
-                 images_count, source_relevance_report_id, gemini_model,
-                 project_id, target_site_url, opportunity_id, published_url,
-                 published_queries, status, progress_pct, created_at`,
-      [
-        req.user.id, topic, effRegion, effBrandName || null, authorName || null,
-        effBrandFacts || null, outputFormat,
-        JSON.stringify(links), filename || null, links.length,
-        imagesCount, relevanceReportId, geminiModel, projectId, targetSiteUrl, opportunityId,
-        publishedUrl, publishedQueries,
-      ],
-    );
+    const taskId = crypto.randomUUID();
+    const { rows } = await withTaskUsageReservation({
+      userId: req.user.id,
+      taskType: 'info_article',
+      taskId,
+      source: 'info_article_create',
+      fn: () => db.query(
+        `INSERT INTO info_article_tasks
+           (id, user_id, topic, region, brand_name, author_name, brand_facts, output_format,
+             commercial_links, commercial_links_filename, commercial_links_count,
+             images_count, source_relevance_report_id,
+             gemini_model, project_id, target_site_url, opportunity_id,
+             published_url, published_queries, status, progress_pct)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'queued', 0)
+         RETURNING id, topic, region, brand_name, output_format,
+                   commercial_links_filename, commercial_links_count,
+                   images_count, source_relevance_report_id, gemini_model,
+                   project_id, target_site_url, opportunity_id, published_url,
+                   published_queries, status, progress_pct, created_at`,
+        [
+          taskId, req.user.id, topic, effRegion, effBrandName || null, authorName || null,
+          effBrandFacts || null, outputFormat,
+          JSON.stringify(links), filename || null, links.length,
+          imagesCount, relevanceReportId, geminiModel, projectId, targetSiteUrl, opportunityId,
+          publishedUrl, publishedQueries,
+        ],
+      ),
+    });
     const task = rows[0];
 
     scheduleUserTask(req.user.id, 'info_article', task.id, () => processInfoArticleTask(task.id)).catch((err) => {

@@ -13,12 +13,14 @@
  *   GET    /api/relevance/health        — диагностика связи с Python-сервисом
  */
 
+const crypto = require('crypto');
 const db = require('../config/db');
 const { processRelevanceReport } = require('../services/relevance/pipeline');
 const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const { health: relevanceHealth, cocoons: relevanceCocoons, cocoonPlan: relevanceCocoonPlan } = require('../services/relevance/pythonClient');
 const rawStorage = require('../services/relevance/rawStorage');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
+const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
 const { csvCell, csvHeader } = require('../utils/csv');
 
 const MAX_QUERY_LEN = 200;
@@ -89,13 +91,20 @@ async function createReport(req, res, next) {
     // ТЗ §5: явная привязка задачи к SEO-проекту (опциональная).
     const projectId = await resolveOwnedProjectId(body.project_id, req.user.id);
 
-    const { rows } = await db.query(
-      `INSERT INTO relevance_reports
-         (user_id, query, lr, top_n, status, our_url, exclude_aggregators, project_id)
-       VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
-       RETURNING id, query, lr, top_n, status, our_url, exclude_aggregators, project_id, created_at`,
-      [req.user.id, query, lr, topN, ourUrl, excludeAggregators, projectId],
-    );
+    const reportId = crypto.randomUUID();
+    const { rows } = await withTaskUsageReservation({
+      userId: req.user.id,
+      taskType: 'relevance',
+      taskId: reportId,
+      source: 'relevance_create',
+      fn: () => db.query(
+        `INSERT INTO relevance_reports
+           (id, user_id, query, lr, top_n, status, our_url, exclude_aggregators, project_id)
+         VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8)
+         RETURNING id, query, lr, top_n, status, our_url, exclude_aggregators, project_id, created_at`,
+        [reportId, req.user.id, query, lr, topN, ourUrl, excludeAggregators, projectId],
+      ),
+    });
     const report = rows[0];
 
     // Единый deduplicated launcher — pipeline сам пишет статусы и ошибки в БД.

@@ -27,6 +27,7 @@ const db = require('../config/db');
 const { runPositionRun } = require('../services/positionTracker/runner');
 const analytics = require('../services/positionTracker/analytics');
 const { normalizeHost } = require('../services/positionTracker/xmlstockSerp');
+const { withProjectCapacity } = require('../services/access/entitlementPolicy');
 
 // ── валидация ──────────────────────────────────────────────────────
 
@@ -93,13 +94,16 @@ async function createProject(req, res, next) {
     if (!SCHEDULES.has(schedule)) return res.status(400).json({ error: 'schedule: daily|weekly|manual' });
     if (geo_lr && !REGION_RE.test(geo_lr)) return res.status(400).json({ error: 'geo_lr должен быть числовым кодом региона' });
 
-    const { rows } = await db.query(
-      `INSERT INTO position_projects (user_id, name, domain, engine, geo_lr, geo_loc, device, schedule)
-       VALUES ($1,$2,$3,$4::position_engine,$5,$6,$7::position_device,$8::position_schedule)
-       RETURNING id, name, domain, engine::text AS engine, geo_lr, geo_loc,
-                device::text AS device, schedule::text AS schedule, parent_project_id, created_at`,
-      [req.user.id, name || domain, domain, engine, geo_lr, geo_loc, device, schedule],
-    );
+    const { rows } = await withProjectCapacity({
+      userId: req.user.id,
+      fn: (client) => client.query(
+        `INSERT INTO position_projects (user_id, name, domain, engine, geo_lr, geo_loc, device, schedule)
+         VALUES ($1,$2,$3,$4::position_engine,$5,$6,$7::position_device,$8::position_schedule)
+         RETURNING id, name, domain, engine::text AS engine, geo_lr, geo_loc,
+                  device::text AS device, schedule::text AS schedule, parent_project_id, created_at`,
+        [req.user.id, name || domain, domain, engine, geo_lr, geo_loc, device, schedule],
+      ),
+    });
     res.status(201).json({ project: rows[0] });
   } catch (err) { next(err); }
 }

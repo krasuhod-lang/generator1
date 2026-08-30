@@ -39,9 +39,9 @@
  * recovery-механизмов для них нет ни до, ни после.
  */
 
-// Единое бизнес-правило: максимум 5 любых direct-задач одновременно
-// в рамках одного личного кабинета. Сознательно НЕ читается из ENV.
-const MAX_PER_USER = 5;
+// Локальный guard — только safety ceiling. Реальный per-user лимит
+// разрешается из entitlementPolicy и проверяется DB-backed lease admission.
+const MAX_PER_USER = 50;
 
 // Состояние per-user: userKey -> { active: number, waiters: Array<resolveFn> }
 // Используем Map, чтобы корректно работать с любыми типами userId

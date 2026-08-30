@@ -10,6 +10,7 @@
  *   DELETE /api/link-article/:id           — удалить задачу
  */
 
+const crypto = require('crypto');
 const db = require('../config/db');
 const { processLinkArticleTask } = require('../services/linkArticle/linkArticlePipeline');
 const { scheduleUserTask } = require('../utils/perUserConcurrency');
@@ -17,6 +18,7 @@ const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
+const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
 const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 const MAX_TOPIC_LEN   = 250;
@@ -118,16 +120,23 @@ async function createLinkArticleTask(req, res, next) {
       ? body.published_queries.map((q) => clipStr(q, 300)).filter(Boolean).slice(0, 100)
       : [];
 
-    const { rows } = await db.query(
-      `INSERT INTO link_article_tasks
-          (user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model,
-           project_id, opportunity_id, published_url, published_queries, status, progress_pct)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', 0)
-       RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id,
-                 opportunity_id, published_url, published_queries, status, progress_pct, created_at`,
-      [req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel,
-       projectId, opportunityId, publishedUrl, publishedQueries],
-    );
+    const taskId = crypto.randomUUID();
+    const { rows } = await withTaskUsageReservation({
+      userId: req.user.id,
+      taskType: 'link_article',
+      taskId,
+      source: 'link_article_create',
+      fn: () => db.query(
+        `INSERT INTO link_article_tasks
+            (id, user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model,
+             project_id, opportunity_id, published_url, published_queries, status, progress_pct)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'queued', 0)
+         RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id,
+                   opportunity_id, published_url, published_queries, status, progress_pct, created_at`,
+        [taskId, req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel,
+         projectId, opportunityId, publishedUrl, publishedQueries],
+      ),
+    });
     const task = rows[0];
 
     scheduleUserTask(req.user.id, 'link_article', task.id, () => processLinkArticleTask(task.id)).catch((err) => {

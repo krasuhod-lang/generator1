@@ -57,6 +57,7 @@ const { buildSharedPositionsSection } = require('../services/projects/sharedPosi
 const freshnessService = require('../services/projects/freshnessService');
 const worksService = require('../services/projects/worksService');
 const projectGrants = require('../services/projects/projectGrants');
+const { withProjectCapacity } = require('../services/access/entitlementPolicy');
 
 const CFG = getProjectsConfig();
 
@@ -165,12 +166,15 @@ async function createProject(req, res, next) {
     const audience = _clipAudience(req.body && req.body.audience_description);
     if (!name) return res.status(400).json({ error: 'Название проекта обязательно' });
     if (!url) return res.status(400).json({ error: 'Укажите корректную ссылку на проект (http/https)' });
-    const { rows } = await db.query(
-      `INSERT INTO projects (user_id, name, url, audience_description)
-       VALUES ($1, $2, $3, $4)
-       RETURNING ${PUBLIC_COLUMNS}`,
-      [req.user.id, name, url, audience],
-    );
+    const { rows } = await withProjectCapacity({
+      userId: req.user.id,
+      fn: (client) => client.query(
+        `INSERT INTO projects (user_id, name, url, audience_description)
+         VALUES ($1, $2, $3, $4)
+         RETURNING ${PUBLIC_COLUMNS}`,
+        [req.user.id, name, url, audience],
+      ),
+    });
     await ensureLinkedPositionProject({ ...rows[0], user_id: req.user.id });
     const { rows: finalRows } = await db.query(
       `SELECT ${PUBLIC_COLUMNS} FROM projects WHERE id = $1 AND user_id = $2`,

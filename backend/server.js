@@ -213,6 +213,7 @@ app.use((err, req, res, next) => {
   console.error('[Server Error]', err.stack || err.message);
   res.status(err.status || 500).json({
     error:   err.message || 'Internal Server Error',
+    ...(err.code === 'entitlement_limit' && { code: err.code, details: err.details }),
     ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
   });
 });

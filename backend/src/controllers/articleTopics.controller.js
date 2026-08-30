@@ -10,6 +10,7 @@
  *   DELETE /api/article-topics/:id      — удалить задачу
  */
 
+const crypto = require('crypto');
 const db = require('../config/db');
 const { processArticleTopicTask } = require('../services/articleTopics/articleTopicsPipeline');
 const { findDuplicateDeepDives } = require('../services/articleTopics/articleTopicsTrends');
@@ -19,6 +20,7 @@ const { resolveOwnedProjectId } = require('../services/projects/projectOwnership
 const { buildProjectContext } = require('../services/projects/contextResolver');
 const { compactProjectSnapshot } = require('../services/projects/snapshotCompactor');
 const { canonTitle } = require('../services/articleTopics/brandKey');
+const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
 
 // Лимиты длины — чтобы не дать раздуть промпт неосторожным копипастом
 // и не зацепить лимит входа Gemini-адаптера.
@@ -168,17 +170,24 @@ async function createArticleTopicTask(req, res, next) {
       }
     }
 
-    const { rows } = await db.query(
-      `INSERT INTO article_topic_tasks
-          (user_id, mode, niche, region, horizon, audience, market_stage,
-           search_ecosystem, top_competitors, gemini_model, project_id,
-           project_context_snapshot, status)
-       VALUES ($1, 'main', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, 'queued')
-       RETURNING id, mode, niche, gemini_model, project_id, status, created_at`,
-      [req.user.id, niche, region, horizon, audience, market_stage,
-       search_ecosystem, top_competitors, geminiModel, projectId,
-       projectContextSnapshot ? JSON.stringify(projectContextSnapshot) : null],
-    );
+    const taskId = crypto.randomUUID();
+    const { rows } = await withTaskUsageReservation({
+      userId: req.user.id,
+      taskType: 'article_topics',
+      taskId,
+      source: 'article_topics_main_create',
+      fn: () => db.query(
+        `INSERT INTO article_topic_tasks
+            (id, user_id, mode, niche, region, horizon, audience, market_stage,
+             search_ecosystem, top_competitors, gemini_model, project_id,
+             project_context_snapshot, status)
+         VALUES ($1, $2, 'main', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, 'queued')
+         RETURNING id, mode, niche, gemini_model, project_id, status, created_at`,
+        [taskId, req.user.id, niche, region, horizon, audience, market_stage,
+         search_ecosystem, top_competitors, geminiModel, projectId,
+         projectContextSnapshot ? JSON.stringify(projectContextSnapshot) : null],
+      ),
+    });
     const task = rows[0];
 
     scheduleUserTask(req.user.id, 'article_topics', task.id, () => processArticleTopicTask(task.id)).catch((err) => {
@@ -275,23 +284,30 @@ async function createArticleTopicIdeasTask(req, res, next) {
       },
     };
 
-    const { rows } = await db.query(
-      `INSERT INTO article_topic_tasks
-          (user_id, mode, niche, region, audience,
-           status, topic_count_requested, module_context_used, gemini_model,
-           project_id, project_context_snapshot, exclude_topics)
-       VALUES ($1, 'topic_ideas', $2, $3, $4, 'queued', $5, $6::jsonb, $7,
-               $8, $9::jsonb, $10::jsonb)
-       RETURNING id, mode, niche, status, topic_count_requested, gemini_model,
-                 project_id, created_at`,
-      [
-        req.user.id, niche, region, audience, topicCount,
-        JSON.stringify(initialContext), geminiModel,
-        projectId,
-        projectContextSnapshot ? JSON.stringify(projectContextSnapshot) : null,
-        excludeTopics ? JSON.stringify(excludeTopics) : null,
-      ],
-    );
+    const taskId = crypto.randomUUID();
+    const { rows } = await withTaskUsageReservation({
+      userId: req.user.id,
+      taskType: 'article_topics',
+      taskId,
+      source: 'article_topics_ideas_create',
+      fn: () => db.query(
+        `INSERT INTO article_topic_tasks
+            (id, user_id, mode, niche, region, audience,
+             status, topic_count_requested, module_context_used, gemini_model,
+             project_id, project_context_snapshot, exclude_topics)
+         VALUES ($1, $2, 'topic_ideas', $3, $4, $5, 'queued', $6, $7::jsonb, $8,
+                 $9, $10::jsonb, $11::jsonb)
+         RETURNING id, mode, niche, status, topic_count_requested, gemini_model,
+                   project_id, created_at`,
+        [
+          taskId, req.user.id, niche, region, audience, topicCount,
+          JSON.stringify(initialContext), geminiModel,
+          projectId,
+          projectContextSnapshot ? JSON.stringify(projectContextSnapshot) : null,
+          excludeTopics ? JSON.stringify(excludeTopics) : null,
+        ],
+      ),
+    });
     const task = rows[0];
 
     scheduleUserTask(req.user.id, 'article_topics', task.id, () => processArticleTopicTask(task.id)).catch((err) => {
@@ -356,16 +372,23 @@ async function createArticleTopicDeepDive(req, res, next) {
       }
     }
 
-    const { rows } = await db.query(
-      `INSERT INTO article_topic_tasks
-          (user_id, mode, parent_task_id, niche, region, horizon, audience,
-           market_stage, search_ecosystem, top_competitors, trend_name, gemini_model, status)
-       VALUES ($1, 'deep_dive', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued')
-       RETURNING id, mode, parent_task_id, niche, trend_name, gemini_model, status, created_at`,
-      [req.user.id, parent.id, parent.niche, parent.region, parent.horizon,
-       parent.audience, parent.market_stage, parent.search_ecosystem,
-       parent.top_competitors, trend_name, normalizeGeminiCopywritingModel(parent.gemini_model)],
-    );
+    const taskId = crypto.randomUUID();
+    const { rows } = await withTaskUsageReservation({
+      userId: req.user.id,
+      taskType: 'article_topics',
+      taskId,
+      source: 'article_topics_deep_dive_create',
+      fn: () => db.query(
+        `INSERT INTO article_topic_tasks
+            (id, user_id, mode, parent_task_id, niche, region, horizon, audience,
+             market_stage, search_ecosystem, top_competitors, trend_name, gemini_model, status)
+         VALUES ($1, $2, 'deep_dive', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'queued')
+         RETURNING id, mode, parent_task_id, niche, trend_name, gemini_model, status, created_at`,
+        [taskId, req.user.id, parent.id, parent.niche, parent.region, parent.horizon,
+         parent.audience, parent.market_stage, parent.search_ecosystem,
+         parent.top_competitors, trend_name, normalizeGeminiCopywritingModel(parent.gemini_model)],
+      ),
+    });
     const task = rows[0];
 
     scheduleUserTask(req.user.id, 'article_topics', task.id, () => processArticleTopicTask(task.id)).catch((err) => {

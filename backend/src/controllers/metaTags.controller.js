@@ -11,6 +11,7 @@
  *   GET    /api/meta-tags/:id/export.csv — выгрузка CSV (Excel-совместимый)
  */
 
+const crypto = require('crypto');
 const db = require('../config/db');
 const { processMetaTagTask } = require('../services/metaTags/pipeline');
 const { scheduleUserTask } = require('../utils/perUserConcurrency');
@@ -19,6 +20,7 @@ const { resolveOwnedProjectId } = require('../services/projects/projectOwnership
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const { csvCell, csvHeader } = require('../utils/csv');
 const { describeLengthRanges } = require('../services/metaTags/lengthConfig');
+const { withTaskUsageReservation } = require('../services/access/entitlementPolicy');
 
 // ─── Валидация входных данных ─────────────────────────────────────
 const MAX_NAME_LEN     = 200;
@@ -95,18 +97,26 @@ async function createMetaTagTask(req, res, next) {
       ? body.published_queries.map((q) => clipStr(q, 300)).filter(Boolean).slice(0, 100)
       : [];
 
-    const { rows } = await db.query(
-      `INSERT INTO meta_tag_tasks
-         (user_id, name, niche, lr, toponym, brand, phone, summary, price_data, keywords,
-           status, progress_total, llm_provider, gemini_model, project_id, opportunity_id,
-           published_url, published_queries)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'pending', $11, $12, $13, $14, $15, $16, $17)
-       RETURNING id, name, status, progress_total, llm_provider, gemini_model, project_id,
-                 opportunity_id, published_url, published_queries, created_at`,
-      [req.user.id, name, niche, lr, toponym, brand, phone, summary, priceData,
-        JSON.stringify(keywords), keywords.length, llmProvider, geminiModel, projectId,
-        opportunityId, publishedUrl, publishedQueries],
-    );
+    const taskId = crypto.randomUUID();
+    const { rows } = await withTaskUsageReservation({
+      userId: req.user.id,
+      taskType: 'meta_tags',
+      taskId,
+      units: keywords.length,
+      source: 'meta_tags_create',
+      fn: () => db.query(
+        `INSERT INTO meta_tag_tasks
+           (id, user_id, name, niche, lr, toponym, brand, phone, summary, price_data, keywords,
+             status, progress_total, llm_provider, gemini_model, project_id, opportunity_id,
+             published_url, published_queries)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, 'pending', $12, $13, $14, $15, $16, $17, $18)
+         RETURNING id, name, status, progress_total, llm_provider, gemini_model, project_id,
+                   opportunity_id, published_url, published_queries, created_at`,
+        [taskId, req.user.id, name, niche, lr, toponym, brand, phone, summary, priceData,
+          JSON.stringify(keywords), keywords.length, llmProvider, geminiModel, projectId,
+          opportunityId, publishedUrl, publishedQueries],
+      ),
+    });
     const task = rows[0];
 
     // Запускаем через единый deduplicated user scheduler. Любая ошибка

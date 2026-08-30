@@ -6,6 +6,9 @@ const adminAuth      = require('../middleware/adminAuth');
 const {
   adminLogin,
   listUsers,
+  listAccessPlans,
+  getUserAccess,
+  updateUserAccess,
   getUserDetail,
   deleteUser,
   getUserTasks,
@@ -61,8 +64,11 @@ const apiLimiter = rateLimit({
 router.post('/login', loginLimiter, adminLogin);
 
 // Все остальные — через adminAuth middleware + rate limit
+router.get('/access-plans',       apiLimiter, adminAuth, listAccessPlans);
 router.get('/users',              apiLimiter, adminAuth, listUsers);
 router.get('/users/:userId',      apiLimiter, adminAuth, getUserDetail);
+router.get('/users/:userId/access', apiLimiter, adminAuth, getUserAccess);
+router.patch('/users/:userId/access', apiLimiter, adminAuth, updateUserAccess);
 router.delete('/users/:userId',   apiLimiter, adminAuth, deleteUser);
 router.get('/users/:userId/tasks', apiLimiter, adminAuth, getUserTasks);
 router.get('/users/:userId/all-tasks', apiLimiter, adminAuth, getUserAllTasks);
