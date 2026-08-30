@@ -71,6 +71,10 @@ const routes = [
   // Admin routes
   { path: '/admin/login',     component: () => import('../views/admin/AdminLoginPage.vue'),      meta: { adminGuest: true } },
   { path: '/admin',           component: () => import('../views/admin/AdminDashboardPage.vue'),  meta: { admin: true } },
+  { path: '/admin/users',     component: () => import('../views/admin/AdminUsersPage.vue'),      meta: { admin: true } },
+  { path: '/admin/tasks',     component: () => import('../views/admin/AdminTasksPage.vue'),      meta: { admin: true } },
+  { path: '/admin/usage',     component: () => import('../views/admin/AdminUsagePage.vue'),      meta: { admin: true } },
+  { path: '/admin/storage',   component: () => import('../views/admin/AdminStoragePage.vue'),    meta: { admin: true } },
   { path: '/admin/users/:id', component: () => import('../views/admin/AdminUserDetailPage.vue'), meta: { admin: true } },
   { path: '/admin/tasks/:id', component: () => import('../views/admin/AdminTaskDetailPage.vue'), meta: { admin: true } },
   { path: '/admin/projects',  component: () => import('../views/admin/AdminProjectsPage.vue'),   meta: { admin: true } },
