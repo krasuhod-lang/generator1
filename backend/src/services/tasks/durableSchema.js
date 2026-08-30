@@ -151,6 +151,21 @@ async function ensureDurableTaskSchema(db = dbDefault) {
     `UPDATE audit_tasks SET python_task_id=id::text WHERE python_task_id IS NULL`,
     `CREATE INDEX IF NOT EXISTS idx_audit_tasks_recovery ON audit_tasks(status, lease_until) WHERE status IN ('pending','running')`,
 
+    // Professional audit evidence fields (migration 145). Additive/idempotent.
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS final_url TEXT`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS fetch_status TEXT`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS parse_status TEXT`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS fetch_attempts INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS content_type TEXT`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS x_robots_tag TEXT`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS title_count INTEGER`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS meta_description_count INTEGER`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS canonical_count INTEGER`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS html_lang VARCHAR(32)`,
+    `ALTER TABLE audit_pages ADD COLUMN IF NOT EXISTS has_viewport BOOLEAN`,
+    `CREATE INDEX IF NOT EXISTS idx_audit_pages_task_status ON audit_pages(task_id, status_code, parse_status)`,
+    `CREATE INDEX IF NOT EXISTS idx_audit_pages_task_fetch ON audit_pages(task_id, fetch_status)`,
+
     // Unified Projects -> Reports durable jobs and growth opportunities.
     `ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS job_id TEXT`,
     `ALTER TABLE project_analyses ADD COLUMN IF NOT EXISTS worker_id TEXT`,

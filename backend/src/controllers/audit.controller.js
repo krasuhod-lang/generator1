@@ -241,7 +241,7 @@ async function _persistReport(taskId, pythonTaskId = null) {
   const report = await axios({
     method: 'get', url: `${BASE_URL}/audit/report/${encodeURIComponent(pythonTaskId || taskId)}`,
     timeout: 120000,
-    headers: _authHeaders(),
+    headers: await _authHeaders(),
     maxContentLength: 512 * 1024 * 1024,
     validateStatus: (s) => s >= 200 && s < 300,
   }).then((r) => r.data);
@@ -263,25 +263,33 @@ async function _persistReport(taskId, pythonTaskId = null) {
     const values = [];
     const params = [];
     batch.forEach((p, j) => {
-      const o = j * 16;
-      values.push(`($${o+1},$${o+2},$${o+3},$${o+4},$${o+5},$${o+6},$${o+7},$${o+8},$${o+9},$${o+10},$${o+11},$${o+12},$${o+13},$${o+14},$${o+15},$${o+16})`);
-      const robots = ((p.indexability || {}).meta_robots || '').toLowerCase();
+      const o = j * 28;
+      values.push(`(${Array.from({ length: 28 }, (_, i) => `$${o + i + 1}`).join(',')})`);
+      const indexability = p.indexability || {};
+      const robots = `${indexability.meta_robots || ''} ${indexability.x_robots_tag || ''}`.toLowerCase();
       params.push(
-        taskId, String(p.url || '').slice(0, 4096), p.status_code, p.crawl_depth,
+        taskId, String(p.url || '').slice(0, 4096), String(p.final_url || p.url || '').slice(0, 4096),
+        p.status_code, p.fetch_status || null, p.parse_status || null, Number(p.fetch_attempts) || 0,
+        p.content_type || null, p.x_robots_tag || null, p.crawl_depth,
         p.response_time_ms, p.content_size_bytes,
         ((p.title || {}).text || '').slice(0, 2000), (p.title || {}).length_chars || null,
-        ((p.meta_description || {}).text || '').slice(0, 4000),
+        Number(p.title_count) || null,
+        ((p.meta_description || {}).text || '').slice(0, 4000), Number(p.meta_description_count) || null,
         Array.isArray(p.h1) ? p.h1.length : null,
         p.word_count, p.text_html_ratio, p.content_hash,
         p.is_https === true,
-        !(robots.includes('noindex') || (p.indexability || {}).robots_txt_blocked),
+        !(robots.includes('noindex') || indexability.robots_txt_blocked),
+        indexability.canonical || null, Number(p.canonical_count) || null,
+        p.html_lang || null, p.has_viewport == null ? null : p.has_viewport === true,
         JSON.stringify(p.issues || []),
       );
     });
     await db.query(
-      `INSERT INTO audit_pages (task_id, url, status_code, crawl_depth, response_time_ms,
-              content_size_bytes, title, title_length, meta_description, h1_count,
-              word_count, text_html_ratio, content_hash, is_https, indexable, issues)
+      `INSERT INTO audit_pages (task_id, url, final_url, status_code, fetch_status, parse_status,
+              fetch_attempts, content_type, x_robots_tag, crawl_depth, response_time_ms,
+              content_size_bytes, title, title_length, title_count, meta_description,
+              meta_description_count, h1_count, word_count, text_html_ratio, content_hash,
+              is_https, indexable, canonical, canonical_count, html_lang, has_viewport, issues)
        VALUES ${values.join(',')}
        ON CONFLICT (task_id, url) DO NOTHING`, params);
   }
@@ -350,8 +358,10 @@ const SEVERITY_COLORS = {
   low: 'FFD3D3D3', info: 'FFE0E7FF',
 };
 
-const PAGE_COLUMNS = ['URL','Статус','Глубина','Время ответа (мс)','Размер (байт)','Title',
-  'Длина title','Description','Кол-во H1','Слов','Text/HTML','Hash','HTTPS','Индексируется','Ошибки'];
+const PAGE_COLUMNS = ['URL','Итоговый URL','HTTP','Fetch status','Parse status','Попытки','Content-Type',
+  'X-Robots-Tag','Глубина','Время ответа (мс)','Размер (байт)','Title','Длина title','Title count',
+  'Description','Description count','Кол-во H1','Слов','Text/HTML','Hash','HTTPS','Индексируется',
+  'Canonical','Canonical count','Lang','Viewport','Ошибки'];
 
 // issues страницы: legacy ["code",...] или новый формат [{code,count},...]
 function _issueCodesText(issues) {
@@ -363,19 +373,22 @@ function _issueCodesText(issues) {
 
 function _pageRow(r) {
   return [
-    r.url, r.status_code, r.crawl_depth, r.response_time_ms, r.content_size_bytes,
-    r.title, r.title_length, r.meta_description, r.h1_count, r.word_count,
-    r.text_html_ratio, r.content_hash, r.is_https ? 'да' : 'нет',
-    r.indexable ? 'да' : 'нет',
-    _issueCodesText(r.issues),
+    r.url, r.final_url, r.status_code, r.fetch_status, r.parse_status, r.fetch_attempts,
+    r.content_type, r.x_robots_tag, r.crawl_depth, r.response_time_ms, r.content_size_bytes,
+    r.title, r.title_length, r.title_count, r.meta_description, r.meta_description_count,
+    r.h1_count, r.word_count, r.text_html_ratio, r.content_hash, r.is_https ? 'да' : 'нет',
+    r.indexable ? 'да' : 'нет', r.canonical, r.canonical_count, r.html_lang,
+    r.has_viewport == null ? '—' : (r.has_viewport ? 'да' : 'нет'), _issueCodesText(r.issues),
   ];
 }
 
 async function _loadPagesRows(taskId) {
   const { rows } = await db.query(
-    `SELECT url, status_code, crawl_depth, response_time_ms, content_size_bytes,
-            title, title_length, meta_description, h1_count, word_count,
-            text_html_ratio, content_hash, is_https, indexable, issues
+    `SELECT url, final_url, status_code, fetch_status, parse_status, fetch_attempts,
+            content_type, x_robots_tag, crawl_depth, response_time_ms, content_size_bytes,
+            title, title_length, title_count, meta_description, meta_description_count,
+            h1_count, word_count, text_html_ratio, content_hash, is_https, indexable,
+            canonical, canonical_count, html_lang, has_viewport, issues
        FROM audit_pages WHERE task_id=$1 ORDER BY crawl_depth, url`, [taskId]);
   return rows;
 }
@@ -394,10 +407,32 @@ async function _loadReportJson(taskId) {
   return (rows[0] && rows[0].report) || {};
 }
 
-const ISSUE_COLUMNS = ['URL', 'Ошибка', 'Критичность', 'Описание', 'Как исправить'];
+const ISSUE_COLUMNS = ['URL', 'Код правила', 'Ошибка', 'Критичность', 'Уверенность', 'Доказательство', 'Описание', 'Как исправить'];
+function _issueEvidence(it) {
+  const c = it.context || {};
+  const parts = [];
+  if (c.status_code != null) parts.push(`HTTP ${c.status_code}`);
+  if (c.response_time_ms != null) parts.push(`ответ ${c.response_time_ms} мс`);
+  if (c.content_size_bytes != null) parts.push(`HTML ${Math.round(Number(c.content_size_bytes) / 1024)} КБ`);
+  if (c.content_type) parts.push(String(c.content_type));
+  if (c.parse_status) parts.push(`parse: ${c.parse_status}`);
+  if (c.canonical) parts.push(`canonical: ${c.canonical}`);
+  if (c.robots) parts.push(`robots: ${c.robots}`);
+  if (c.src) parts.push(`ресурс: ${c.src}`);
+  return parts.join(' · ') || 'URL подтверждает правило';
+}
+function _confidenceLabel(context = {}) {
+  const score = Number(context.confidence);
+  if (!Number.isFinite(score)) return 'Проверено правилом';
+  if (score >= 0.99) return 'Подтверждено';
+  if (score >= 0.8) return 'Высокая';
+  if (score >= 0.6) return 'Средняя';
+  return 'Требует проверки';
+}
 function _issueRow(it, defs) {
   const meta = defs[it.issue_code] || {};
-  return [it.page_url, meta.title || it.issue_code, it.severity,
+  return [it.page_url, it.issue_code, meta.title || it.issue_code, it.severity,
+    _confidenceLabel(it.context), _issueEvidence(it),
     meta.description || meta.hint || '', meta.fix || ''];
 }
 
@@ -418,7 +453,22 @@ function _orphanRows(report) {
   return (report.orphan_pages || []).map((u) => [u, 'Добавить внутренние ссылки']);
 }
 
-// Excel «всё» — 5 вкладок: Сводка / Ошибки (подсветка) / Дубликаты / Сироты / Страницы
+function _styleSheet(ws) {
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columnCount } };
+  const header = ws.getRow(1);
+  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
+  header.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+  header.height = 30;
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    row.alignment = { vertical: 'top', wrapText: true };
+  });
+  ws.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+}
+
+// Excel «всё» — 5 вкладок: Сводка / Ошибки / Дубликаты / Сироты / Страницы
 async function _exportXlsx(res, task, section) {
   const wb = new ExcelJS.Workbook();
   const report = await _loadReportJson(task.id);
@@ -426,8 +476,12 @@ async function _exportXlsx(res, task, section) {
 
   const addSummary = () => {
     const ws = wb.addWorksheet('Сводка');
+    ws.addRow(['Показатель', 'Значение']);
     for (const [k, v] of Object.entries(report.summary || {})) ws.addRow([k, _xlsxCell(v)]);
-    ws.columns.forEach((c, i) => { c.width = i === 0 ? 28 : 16; });
+    for (const [k, v] of Object.entries(report.crawl_stats || {})) ws.addRow([`crawl_${k}`, _xlsxCell(v)]);
+    ws.addRow(['audit_version', _xlsxCell(report.audit_version || 'legacy')]);
+    ws.columns.forEach((c, i) => { c.width = i === 0 ? 32 : 24; });
+    _styleSheet(ws);
   };
 
   const addIssues = async () => {
@@ -441,7 +495,8 @@ async function _exportXlsx(res, task, section) {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: color } };
       });
     }
-    ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 30; });
+    ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : (i === 5 ? 48 : 30); });
+    _styleSheet(ws);
   };
 
   const addDuplicates = () => {
@@ -449,6 +504,7 @@ async function _exportXlsx(res, task, section) {
     ws.addRow(DUP_COLUMNS).font = { bold: true };
     for (const r of _duplicateRows(report)) ws.addRow(r.map(_xlsxCell));
     ws.columns.forEach((c, i) => { c.width = i === 1 ? 60 : 20; });
+    _styleSheet(ws);
   };
 
   const addOrphans = () => {
@@ -456,13 +512,15 @@ async function _exportXlsx(res, task, section) {
     ws.addRow(ORPHAN_COLUMNS).font = { bold: true };
     for (const r of _orphanRows(report)) ws.addRow(r.map(_xlsxCell));
     ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 30; });
+    _styleSheet(ws);
   };
 
   const addPages = async () => {
     const ws = wb.addWorksheet('Страницы');
     ws.addRow(PAGE_COLUMNS).font = { bold: true };
     for (const r of await _loadPagesRows(task.id)) ws.addRow(_pageRow(r).map(_xlsxCell));
-    ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : 16; });
+    ws.columns.forEach((c, i) => { c.width = i === 0 ? 60 : (i === 14 ? 42 : 16); });
+    _styleSheet(ws);
   };
 
   if (section === 'issues') await addIssues();

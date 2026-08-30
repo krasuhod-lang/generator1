@@ -261,6 +261,10 @@ async def run_audit(start_url: str, *,
                     "robots_blocked": True,
                     "response_time_ms": None,
                     "content_size_bytes": None,
+                    "content_type": "",
+                    "x_robots_tag": None,
+                    "fetch_attempts": 0,
+                    "parse_status": "robots_blocked",
                     "crawl_depth": depth,
                     "is_https": url.startswith("https://"),
                     "redirect_chain": [],
@@ -287,21 +291,26 @@ async def run_audit(start_url: str, *,
                 "fetch_status": res.fetch_status,
                 "response_time_ms": res.response_time_ms,
                 "content_size_bytes": res.content_size_bytes,
+                "content_type": res.content_type,
+                "x_robots_tag": res.x_robots_tag,
+                "fetch_attempts": res.attempts,
+                "parse_status": "not_attempted",
                 "crawl_depth": depth,
-                "is_https": url.startswith("https://"),
+                "is_https": (res.final_url or url).startswith("https://"),
                 "redirect_chain": res.redirect_chain,
                 "fetch_method": res.method,
                 "error": res.error,
-                "indexability": {
+                    "indexability": {
                     "meta_robots": None,
-                    "x_robots_tag": None,
+                    "x_robots_tag": res.x_robots_tag,
                     "robots_txt_blocked": False,
                     "canonical": None,
                 },
                 "parsed": False,
             }
 
-            if res.html and res.status_code == 200:
+            if res.status_code == 200 and res.html:
+                page["parse_status"] = "running"
                 try:
                     # ТЗ 5: парсинг в пуле потоков с таймаутом, чтобы тяжёлый
                     # HTML не блокировал event loop и волну gather.
@@ -309,10 +318,20 @@ async def run_audit(start_url: str, *,
                     if parsed is not None:
                         idx = parsed.pop("indexability")
                         page["indexability"]["meta_robots"] = idx.get("meta_robots")
+                        page["indexability"]["x_robots_tag"] = res.x_robots_tag
                         page["indexability"]["canonical"] = idx.get("canonical")
                         page.update(parsed)
+                        page["parse_status"] = "ok"
+                    else:
+                        page["parse_status"] = "timeout"
+                        page["error"] = "parse_timeout"
                 except Exception as e:
                     logger.warning("parse failed for %s: %s", url, e)
+                    page["parse_status"] = "error"
+                    page["error"] = f"parse_error: {e.__class__.__name__}"
+            elif res.status_code == 200 and not res.html:
+                page["parse_status"] = "non_html" if res.content_type and "html" not in res.content_type and "xhtml" not in res.content_type else "empty_html"
+                page["error"] = page["parse_status"]
             return page
 
         while queue and len(pages) < max_pages:
@@ -334,6 +353,7 @@ async def run_audit(start_url: str, *,
                     logger.warning("crawl error %s: %s", u, page)
                     page = {"url": u, "status_code": None, "crawl_depth": d,
                             "error": str(page)[:200], "parsed": False,
+                            "parse_status": "crawl_exception",
                             "is_https": u.startswith("https://"),
                             "redirect_chain": [],
                             "indexability": {"meta_robots": None, "x_robots_tag": None,
@@ -434,6 +454,11 @@ async def run_audit(start_url: str, *,
     slim_pages = []
     for url, p in pages.items():
         slim = dict(p)
+        # Keep evidence fields in the persisted report; trim only high-volume lists.
+        for key in ("final_url", "fetch_status", "parse_status", "fetch_attempts", "content_type", "x_robots_tag",
+                    "title_count", "meta_description_count", "canonical_count", "html_lang", "has_viewport"):
+            if key in p:
+                slim[key] = p[key]
         slim["inlinks_count"] = len(p.get("inlinks") or [])
         slim["outlinks_internal_count"] = len(p.get("outlinks_internal") or [])
         slim["outlinks_external_count"] = len(p.get("outlinks_external") or [])
@@ -448,7 +473,21 @@ async def run_audit(start_url: str, *,
 
     return {
         "start_url": start,
+        "audit_version": "2026.08.30",
         "summary": summary,
+        "crawl_stats": {
+            "requested_pages": len(visited),
+            "crawled_pages": len(pages),
+            "parsed_pages": sum(1 for p in pages.values() if p.get("parsed")),
+            "parse_failures": sum(1 for p in pages.values() if p.get("parse_status") in ("timeout", "error", "empty_html", "non_html", "crawl_exception")),
+            "robots_blocked": sum(1 for p in pages.values() if p.get("robots_blocked")),
+            "fetch_errors": sum(1 for p in pages.values() if p.get("fetch_status") not in (None, "ok") and not p.get("robots_blocked")),
+            "non_html_pages": sum(1 for p in pages.values() if p.get("parse_status") == "non_html"),
+            "status_4xx": sum(1 for p in pages.values() if isinstance(p.get("status_code"), int) and 400 <= p.get("status_code") < 500),
+            "status_5xx": sum(1 for p in pages.values() if isinstance(p.get("status_code"), int) and 500 <= p.get("status_code") < 600),
+            "blocked_pages": sum(1 for p in pages.values() if p.get("fetch_status") == "blocked"),
+            "redirected_pages": sum(1 for p in pages.values() if p.get("redirect_chain")),
+        },
         "pages": slim_pages,
         "issues": all_issues,
         "issue_defs": issues_mod.ISSUE_DEFS,

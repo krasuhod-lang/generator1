@@ -13,8 +13,11 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import AppLayout from '../components/AppLayout.vue';
+import AppPageHeader from '../components/AppPageHeader.vue';
+import ToolHelp from '../components/ToolHelp.vue';
 import AuditGraphChart from '../components/AuditGraphChart.vue';
 import IssueAccordion from '../components/IssueAccordion.vue';
+import { copyToClipboard, toTsv } from '../utils/clipboard.js';
 import api from '../api.js';
 
 const route = useRoute();
@@ -34,6 +37,7 @@ const drawerPage = ref(null);
 const compareData = ref(null);   // { current, previous } из /audit/compare/:id
 const compareError = ref(null);
 const orphansCopied = ref(false);
+const copyFeedback = ref('');
 
 const _msg = (e) => e?.response?.data?.error || e?.message || 'Ошибка';
 
@@ -80,9 +84,13 @@ const filteredIssues = computed(() => {
 const accordionGroups = computed(() => {
   const map = new Map();
   for (const i of filteredIssues.value) {
-    if (!map.has(i.code)) map.set(i.code, { code: i.code, severity: i.severity, count: 0, urls: [] });
+    if (!map.has(i.code)) map.set(i.code, { code: i.code, severity: i.severity, count: 0, urls: [], evidence: '', context: {} });
     const g = map.get(i.code);
     g.count += 1;
+    if (!g.evidence && i.context) {
+      g.context = i.context;
+      g.evidence = issueEvidence(i);
+    }
     if (i.page_url && !g.urls.includes(i.page_url)) g.urls.push(i.page_url);
   }
   return [...map.values()];
@@ -92,6 +100,30 @@ const accordionGroups = computed(() => {
 function pageIssueList(p) {
   return (p.issues || []).map((i) =>
     (i && typeof i === 'object') ? i : { code: i, count: 1 });
+}
+function pageIssueCount(p) {
+  return pageIssueList(p).reduce((sum, issue) => sum + (Number(issue.count) || 1), 0);
+}
+function confidenceLabel(context = {}) {
+  const score = Number(context.confidence);
+  if (!Number.isFinite(score)) return 'Проверено правилом';
+  if (score >= 0.99) return 'Подтверждено';
+  if (score >= 0.8) return 'Высокая уверенность';
+  if (score >= 0.6) return 'Средняя уверенность';
+  return 'Требует проверки';
+}
+function issueEvidence(issue) {
+  const c = issue?.context || {};
+  const parts = [];
+  if (c.status_code != null) parts.push(`HTTP ${c.status_code}`);
+  if (c.response_time_ms != null) parts.push(`ответ ${c.response_time_ms} мс`);
+  if (c.content_size_bytes != null) parts.push(`HTML ${Math.round(Number(c.content_size_bytes) / 1024)} КБ`);
+  if (c.content_type) parts.push(String(c.content_type));
+  if (c.parse_status) parts.push(`parse: ${c.parse_status}`);
+  if (c.canonical) parts.push(`canonical: ${c.canonical}`);
+  if (c.robots) parts.push(`robots: ${c.robots}`);
+  if (c.src) parts.push(`ресурс: ${c.src}`);
+  return parts.join(' · ') || 'См. URL и описание правила';
 }
 
 // Хопы цепочки редиректов: legacy строки или {url,status} (БАГФИКС #4)
@@ -186,13 +218,43 @@ function downloadExport(format, section = 'all') {
   const token = localStorage.getItem('seo_token') || '';
   fetch(`/api/audit/export/${taskId}?format=${format}&section=${section}`, {
     headers: { Authorization: 'Bearer ' + token },
-  }).then((r) => r.blob()).then((b) => {
+  }).then(async (r) => {
+    if (!r.ok) {
+      let detail = '';
+      try { detail = (await r.json()).error || ''; } catch (_) {}
+      throw new Error(detail || `Экспорт недоступен (${r.status})`);
+    }
+    return r.blob();
+  }).then((b) => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(b);
     a.download = `audit-${taskId}${section === 'all' ? '' : '-' + section}.${format}`;
     a.click();
-    URL.revokeObjectURL(a.href);
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }).catch((e) => { error.value = _msg(e); });
+}
+
+async function copyIssues() {
+  const rows = [['URL', 'Код', 'Ошибка', 'Критичность', 'Уверенность', 'Доказательство']];
+  for (const issue of filteredIssues.value) {
+    rows.push([issue.page_url || '', issue.code || '', issueTitle(issue.code), issue.severity || '',
+      confidenceLabel(issue.context), issueEvidence(issue)]);
+  }
+  const ok = await copyToClipboard(toTsv(rows));
+  copyFeedback.value = ok ? 'Ошибки скопированы' : 'Не удалось скопировать';
+  setTimeout(() => { copyFeedback.value = ''; }, 2400);
+}
+
+async function copyPages() {
+  const rows = [['URL', 'HTTP', 'Title', 'H1', 'Глубина', 'Время ответа, мс', 'Ошибки']];
+  for (const page of filteredPages.value) {
+    rows.push([page.url || '', page.status_code ?? '', (page.title || {}).text || '',
+      ((page.h1 || [])[0] || {}).text || '', page.crawl_depth ?? '', page.response_time_ms ?? '',
+      pageIssueList(page).map((i) => `${issueTitle(i.code)}${i.count > 1 ? ` x${i.count}` : ''}`).join('; ')]);
+  }
+  const ok = await copyToClipboard(toTsv(rows));
+  copyFeedback.value = ok ? 'Страницы скопированы' : 'Не удалось скопировать';
+  setTimeout(() => { copyFeedback.value = ''; }, 2400);
 }
 
 // ── Публичная ссылка для клиента (ТЗ 9) ──
@@ -274,9 +336,18 @@ onUnmounted(stopPolling);
 <template>
   <AppLayout>
     <div class="audit-report">
-      <div class="crumbs">
-        <router-link to="/audits">← Аудиты</router-link>
-      </div>
+      <AppPageHeader
+        eyebrow="Технический контроль"
+        :title="report ? 'Отчёт аудита' : 'Аудит сайта'"
+        :description="report ? 'Подтверждённые технические сигналы, затронутые страницы и приоритеты исправления.' : 'Краулинг сайта с проверкой доступности, индексации, метаданных, ссылок и структуры.'"
+      >
+        <template #title-suffix>
+          <ToolHelp title="Как читать аудит" text="Сначала проверьте Critical и High, затем откройте страницу или доказательство правила. Информационные сигналы не являются ошибками без дополнительной проверки." />
+        </template>
+        <template #actions>
+          <router-link class="link-secondary" to="/audits">← Все аудиты</router-link>
+        </template>
+      </AppPageHeader>
 
       <div v-if="error" class="error card">{{ error }}</div>
 
@@ -316,6 +387,16 @@ onUnmounted(stopPolling);
             · сирот: {{ (report.graph_stats || {}).orphan_count }}
             · sitemap: {{ report.sitemap_url_count }} URL
           </div>
+          <div v-if="report.crawl_stats" class="crawl-quality">
+            <span>Разобрано: <b>{{ report.crawl_stats.parsed_pages ?? '—' }}</b></span>
+            <span>Ошибки обхода: <b>{{ report.crawl_stats.fetch_errors ?? 0 }}</b></span>
+            <span>Неразобрано: <b>{{ report.crawl_stats.parse_failures ?? 0 }}</b></span>
+            <span>4xx: <b>{{ report.crawl_stats.status_4xx ?? 0 }}</b></span>
+            <span>5xx: <b>{{ report.crawl_stats.status_5xx ?? 0 }}</b></span>
+            <span>Не-HTML: <b>{{ report.crawl_stats.non_html_pages ?? 0 }}</b></span>
+            <span>Заблокировано: <b>{{ report.crawl_stats.blocked_pages ?? 0 }}</b></span>
+            <span>Редиректы: <b>{{ report.crawl_stats.redirected_pages ?? 0 }}</b></span>
+          </div>
         </div>
       </section>
 
@@ -331,9 +412,9 @@ onUnmounted(stopPolling);
           <button :class="{ active: activeTab === 'graph' }" @click="openTab('graph')">Граф</button>
           <button :class="{ active: activeTab === 'compare' }" @click="openTab('compare')">Сравнение</button>
           <button class="export-btn ml-auto" @click="shareReport" :disabled="shareBusy">
-            {{ shareCopied ? '✓ Ссылка скопирована' : '🔗 Поделиться' }}</button>
-          <button class="export-btn" @click="downloadCsv">⬇ CSV</button>
-          <button class="export-btn" @click="downloadExport('xlsx')">⬇ Excel</button>
+            {{ shareCopied ? 'Ссылка скопирована' : 'Поделиться' }}</button>
+          <button class="export-btn" @click="downloadCsv">CSV</button>
+          <button class="export-btn export-primary" @click="downloadExport('xlsx')">Excel — полный отчёт</button>
         </div>
 
         <!-- Обзор: аккордеон ошибок (ТЗ 7) -->
@@ -347,8 +428,10 @@ onUnmounted(stopPolling);
               <option value="">Все типы ошибок</option>
               <option v-for="c in issueCodes" :key="c" :value="c">{{ issueTitle(c) }}</option>
             </select>
-            <span class="muted">Всего: {{ filteredIssues.length }}</span>
-            <button class="export-btn ml-auto" @click="downloadExport('csv', 'issues')">⬇ CSV ошибок</button>
+            <span class="muted">Найдено: {{ filteredIssues.length }}</span>
+            <button class="export-btn" @click="copyIssues">{{ copyFeedback === 'Ошибки скопированы' ? 'Скопировано' : 'Скопировать ошибки' }}</button>
+            <button class="export-btn" @click="downloadExport('csv', 'issues')">CSV ошибок</button>
+            <button class="export-btn export-primary" @click="downloadExport('xlsx', 'issues')">Excel ошибок</button>
           </div>
           <IssueAccordion :groups="accordionGroups" :defs="issueDefs"
                           :duplicates="report.duplicates || {}" @open-url="openPageByUrl" />
@@ -359,8 +442,11 @@ onUnmounted(stopPolling);
           <div class="toolbar">
             <input v-model="pageSearch" placeholder="Поиск по URL / Title…" />
             <span class="muted">{{ filteredPages.length }} стр.</span>
-            <button class="export-btn ml-auto" @click="downloadExport('csv', 'pages')">⬇ CSV страниц</button>
+            <button class="export-btn" @click="copyPages">{{ copyFeedback === 'Страницы скопированы' ? 'Скопировано' : 'Скопировать таблицу' }}</button>
+            <button class="export-btn" @click="downloadExport('csv', 'pages')">CSV страниц</button>
+            <button class="export-btn export-primary" @click="downloadExport('xlsx', 'pages')">Excel страниц</button>
           </div>
+          <div class="table-scroll">
           <table class="tbl small">
             <thead>
               <tr>
@@ -390,6 +476,7 @@ onUnmounted(stopPolling);
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- Дубликаты -->
@@ -397,7 +484,8 @@ onUnmounted(stopPolling);
           <p class="muted" v-if="!duplicateGroups.length">Дубликатов контента не найдено.</p>
           <template v-else>
             <div class="toolbar">
-              <button class="export-btn ml-auto" @click="downloadExport('csv', 'duplicates')">⬇ CSV дублей</button>
+              <button class="export-btn" @click="downloadExport('csv', 'duplicates')">CSV дублей</button>
+              <button class="export-btn export-primary" @click="downloadExport('xlsx', 'duplicates')">Excel дублей</button>
             </div>
             <div v-for="d in duplicateGroups" :key="d.hash" class="dup-group">
               <div class="dup-hash">hash: <code>{{ d.hash }}</code> · {{ d.urls.length }} URL</div>
@@ -417,16 +505,17 @@ onUnmounted(stopPolling);
               <button class="action-btn" @click="copyOrphansForSitemap">
                 {{ orphansCopied ? '✓ Скопировано' : '📋 Добавить в sitemap ТЗ' }}</button>
               <span class="muted">Скопирует список URL для вставки в ТЗ на перелинковку/sitemap</span>
-              <button class="export-btn ml-auto" @click="downloadExport('csv', 'orphans')">⬇ CSV сирот</button>
+              <button class="export-btn" @click="downloadExport('csv', 'orphans')">CSV сирот</button>
+              <button class="export-btn export-primary" @click="downloadExport('xlsx', 'orphans')">Excel сирот</button>
             </div>
-            <table class="tbl small">
+            <div class="table-scroll"><table class="tbl small">
               <thead><tr><th>URL (есть в sitemap, нет в обходе)</th></tr></thead>
               <tbody>
                 <tr v-for="u in report.orphan_pages" :key="u">
                   <td><a :href="u" target="_blank" rel="noopener">{{ u }}</a></td>
                 </tr>
               </tbody>
-            </table>
+            </table></div>
           </template>
         </div>
 
@@ -491,9 +580,13 @@ onUnmounted(stopPolling);
           <button class="drawer-close" @click="drawerPage = null">×</button>
           <h3 class="drawer-url"><a :href="drawerPage.url" target="_blank" rel="noopener">{{ drawerPage.url }}</a></h3>
           <dl class="drawer-dl">
-            <dt>Статус</dt><dd><span :class="statusBadgeClass(drawerPage.status_code)">{{ drawerPage.status_code }}</span></dd>
-            <dt>Время ответа</dt><dd>{{ drawerPage.response_time_ms }} мс</dd>
-            <dt>Размер</dt><dd>{{ drawerPage.content_size_bytes }} байт</dd>
+            <dt>Статус</dt><dd><span :class="statusBadgeClass(drawerPage.status_code)">{{ drawerPage.status_code || '—' }}</span></dd>
+            <dt>Итоговый URL</dt><dd>{{ drawerPage.final_url || drawerPage.url }}</dd>
+            <dt>Fetch / parse</dt><dd>{{ drawerPage.fetch_status || '—' }} / {{ drawerPage.parse_status || '—' }}</dd>
+            <dt>Content-Type</dt><dd>{{ drawerPage.content_type || '—' }}</dd>
+            <dt>Попытки</dt><dd>{{ drawerPage.fetch_attempts ?? '—' }}</dd>
+            <dt>Время ответа</dt><dd>{{ drawerPage.response_time_ms ?? '—' }} мс</dd>
+            <dt>Размер</dt><dd>{{ drawerPage.content_size_bytes ?? '—' }} байт</dd>
             <dt>Глубина</dt><dd>{{ drawerPage.crawl_depth }}</dd>
             <dt>Title</dt><dd>{{ (drawerPage.title || {}).text }} <span class="muted">({{ (drawerPage.title || {}).length_chars }} симв. / ~{{ (drawerPage.title || {}).length_px }}px)</span></dd>
             <dt>Description</dt><dd>{{ (drawerPage.meta_description || {}).text }} <span class="muted">({{ (drawerPage.meta_description || {}).length_chars }} симв.)</span></dd>
@@ -502,6 +595,7 @@ onUnmounted(stopPolling);
             <dt>Text/HTML</dt><dd>{{ drawerPage.text_html_ratio }}</dd>
             <dt>Canonical</dt><dd>{{ (drawerPage.indexability || {}).canonical || '—' }}</dd>
             <dt>Meta robots</dt><dd>{{ (drawerPage.indexability || {}).meta_robots || '—' }}</dd>
+            <dt>X-Robots-Tag</dt><dd>{{ drawerPage.x_robots_tag || (drawerPage.indexability || {}).x_robots_tag || '—' }}</dd>
             <dt>robots.txt</dt><dd>{{ (drawerPage.indexability || {}).robots_txt_blocked ? 'заблокирован' : 'разрешён' }}</dd>
             <dt>Редиректы</dt><dd>{{ redirectChainText(drawerPage.redirect_chain) }}</dd>
             <dt>Входящие ссылки</dt><dd>{{ drawerPage.inlinks_count }}</dd>
@@ -636,4 +730,54 @@ onUnmounted(stopPolling);
 .drawer-dl dt { color: #6b7280; font-weight: 600; }
 .drawer-dl dd { margin: 0; word-break: break-word; }
 .drawer-issue { margin-bottom: .3rem; }
+
+/* Единый кабинетный UI и мобильная устойчивость. */
+.audit-report { color: #e5e7eb; }
+.audit-report .crumbs { display: none; }
+.audit-report .card { background: rgba(17, 24, 39, .78); border-color: rgba(51, 65, 85, .72); box-shadow: 0 18px 45px rgba(0, 0, 0, .14); }
+.audit-report .muted { color: #94a3b8; }
+.audit-report .error { color: #fecaca; }
+.audit-report h2, .audit-report h3 { color: #f8fafc; }
+.audit-report .pbar { background: #1f2937; }
+.audit-report .pbar-fill { background: linear-gradient(90deg, #6366f1, #38bdf8); }
+.audit-report .score-label { color: #94a3b8; }
+.audit-report .score-url { color: #f8fafc; }
+.audit-report .stats-line { color: #94a3b8; }
+.crawl-quality { display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .7rem; }
+.crawl-quality span { padding: .28rem .55rem; border: 1px solid rgba(71, 85, 105, .8); border-radius: 999px; color: #cbd5e1; font-size: .78rem; }
+.crawl-quality b { color: #f8fafc; }
+.audit-report .tabs { border-bottom: 1px solid rgba(51, 65, 85, .65); padding-bottom: .7rem; }
+.audit-report .tabs button { background: #1f2937; color: #cbd5e1; border-color: #374151; }
+.audit-report .tabs button:hover { background: #334155; }
+.audit-report .tabs button.active { background: #4f46e5; color: #fff; border-color: #6366f1; }
+.audit-report .tabs .export-btn, .audit-report .toolbar .export-btn { background: #111827; color: #cbd5e1; border: 1px solid #475569; }
+.audit-report .tabs .export-btn:hover, .audit-report .toolbar .export-btn:hover { background: #1e293b; }
+.audit-report .export-primary { border-color: #6366f1 !important; color: #c7d2fe !important; }
+.audit-report .toolbar input, .audit-report .toolbar select { background: #0f172a; color: #e5e7eb; border-color: #334155; }
+.audit-report .toolbar input::placeholder { color: #64748b; }
+.audit-report .tbl { background: rgba(15, 23, 42, .72); border-color: rgba(51, 65, 85, .74); }
+.audit-report .tbl th, .audit-report .tbl td { color: #cbd5e1; border-bottom-color: rgba(51, 65, 85, .58); }
+.audit-report .tbl th { background: rgba(15, 23, 42, .94); color: #94a3b8; }
+.audit-report .tbl th.sortable:hover, .audit-report .tbl tbody tr:hover td { background: rgba(99, 102, 241, .1); }
+.audit-report .tbl td a, .audit-report .drawer-url a, .audit-report .dup-group a { color: #a5b4fc; }
+.audit-report .sev-counter.sev-low { background: #263244; color: #cbd5e1; }
+.audit-report .sev-counter.sev-info { background: #172554; color: #bfdbfe; }
+.audit-report .drawer { background: #0f172a; color: #e5e7eb; }
+.audit-report .drawer-dl dt { color: #94a3b8; }
+.audit-report .drawer-close { color: #cbd5e1; }
+.table-scroll { width: 100%; overflow-x: auto; }
+.table-scroll .tbl { min-width: 760px; }
+@media (max-width: 760px) {
+  .audit-report { padding: .8rem; }
+  .score-plate { gap: .8rem; }
+  .score-circle-wrap { margin: 0 auto; }
+  .score-meta { min-width: 0; width: 100%; }
+  .sev-counters { gap: .4rem; }
+  .sev-counter { min-width: 72px; padding: .35rem .55rem; }
+  .sev-counter b { font-size: 1.15rem; }
+  .tabs .ml-auto { margin-left: 0; }
+  .tabs { gap: .25rem; }
+  .tabs button, .toolbar .export-btn { font-size: .78rem; }
+  .toolbar input { min-width: 100%; }
+}
 </style>

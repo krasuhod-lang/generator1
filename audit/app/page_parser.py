@@ -147,12 +147,14 @@ def parse_page(url: str, html: str) -> dict:
     """Полный разбор HTML страницы → контентные метрики + ссылки + изображения."""
     soup = BeautifulSoup(html or "", "lxml")
 
+    title_nodes = soup.find_all("title")
     title_text = ""
-    if soup.title and soup.title.string:
-        title_text = re.sub(r"\s+", " ", soup.title.string).strip()
+    if title_nodes and title_nodes[0].string:
+        title_text = re.sub(r"\s+", " ", title_nodes[0].string).strip()
 
+    description_nodes = soup.find_all("meta", attrs={"name": re.compile(r"^description$", re.I)})
     descr_text = ""
-    md = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
+    md = description_nodes[0] if description_nodes else None
     if md and md.get("content"):
         descr_text = re.sub(r"\s+", " ", md["content"]).strip()
 
@@ -164,10 +166,15 @@ def parse_page(url: str, html: str) -> dict:
     # Indexability
     robots_meta = soup.find("meta", attrs={"name": re.compile(r"^robots$", re.I)})
     meta_robots = (robots_meta.get("content") or "").strip() if robots_meta else None
-    canonical_link = soup.find("link", rel=lambda v: v and "canonical" in v)
+    canonical_links = soup.find_all("link", rel=lambda v: v and "canonical" in v)
+    canonical_link = canonical_links[0] if canonical_links else None
     canonical = None
     if canonical_link and canonical_link.get("href"):
         canonical = urljoin(url, canonical_link["href"].strip())
+
+    html_root = soup.find("html")
+    html_lang = (html_root.get("lang") or "").strip() if html_root else ""
+    viewport = soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
 
     hreflang = []
     for link in soup.find_all("link", rel=lambda v: v and "alternate" in v):
@@ -245,6 +252,11 @@ def parse_page(url: str, html: str) -> dict:
             "length_chars": len(title_text),
             "length_px": round(len(title_text) * PX_PER_CHAR),
         },
+        "title_count": len(title_nodes),
+        "meta_description_count": len(description_nodes),
+        "canonical_count": len(canonical_links),
+        "html_lang": html_lang or None,
+        "has_viewport": bool(viewport and viewport.get("content")),
         "meta_description": {
             "text": descr_text,
             "length_chars": len(descr_text),

@@ -61,22 +61,25 @@ function shortHash(h) { return String(h || '').slice(0, 10) + '…'; }
 
 <template>
   <div class="issue-accordion">
-    <div v-for="g in sortedGroups" :key="g.code" class="ia-group">
-      <div class="ia-head" @click="toggle(g.code)">
+      <div v-for="g in sortedGroups" :key="g.code" class="ia-group">
+      <button class="ia-head" type="button" :aria-expanded="expanded.has(g.code)" @click="toggle(g.code)">
         <span class="ia-caret">{{ expanded.has(g.code) ? '▾' : '▸' }}</span>
         <span :class="'ia-sev sev-' + g.severity">{{ SEVERITY_LABELS[g.severity] || g.severity }}</span>
         <b class="ia-title">{{ title(g.code) }}</b>
         <span class="ia-count">{{ g.count }}</span>
         <span class="ia-expand-hint muted">{{ expanded.has(g.code) ? 'Свернуть' : 'Развернуть' }}</span>
-      </div>
+      </button>
 
       <div v-if="expanded.has(g.code)" class="ia-body">
         <p v-if="description(g.code)" class="ia-info">
           <span class="ia-ico">ℹ</span>
           <span><b>Что это:</b> {{ description(g.code) }}</span></p>
         <p v-if="fix(g.code)" class="ia-fix">
-          <span class="ia-ico">💡</span>
-          <span><b>Как исправить:</b> {{ fix(g.code) }}</span></p>
+          <span class="ia-ico">Как исправить</span>
+          <span>{{ fix(g.code) }}</span></p>
+        <p v-if="g.evidence" class="ia-evidence">
+          <span class="ia-ico">Доказательство</span>
+          <span>{{ g.evidence }}<template v-if="g.context && g.context.confidence"> · {{ g.context.confidence >= 0.99 ? 'подтверждено' : 'высокая уверенность' }}</template></span></p>
 
         <!-- Дубликат контента: группы по хешу -->
         <template v-if="g.code === 'duplicate_content' && duplicateGroups.length">
@@ -109,17 +112,30 @@ function shortHash(h) { return String(h || '').slice(0, 10) + '…'; }
 
 <style scoped>
 .ia-group { border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: .5rem; overflow: hidden; }
-.ia-head { display: flex; align-items: center; gap: .55rem; padding: .6rem .75rem; cursor: pointer; }
-.ia-head:hover { background: #f8fafc; }
+.ia-head { width: 100%; display: flex; align-items: center; gap: .55rem; padding: .6rem .75rem; cursor: pointer;
+           border: 0; background: transparent; color: inherit; text-align: left; font: inherit; }
+.ia-head:hover, .ia-head:focus-visible { background: #f8fafc; outline: 2px solid #93c5fd; outline-offset: -2px; }
+:global(.app-shell) .ia-group { border-color: rgba(51, 65, 85, .72); }
+:global(.app-shell) .ia-head { color: #cbd5e1; }
+:global(.app-shell) .ia-head:hover, :global(.app-shell) .ia-head:focus-visible { background: rgba(99, 102, 241, .1); }
+:global(.app-shell) .ia-title { color: #f8fafc; }
+:global(.app-shell) .ia-count { background: #334155; color: #e2e8f0; }
+:global(.app-shell) .ia-body { border-top-color: rgba(51, 65, 85, .72); background: rgba(15, 23, 42, .55); }
+:global(.app-shell) .ia-info { background: rgba(30, 64, 175, .25); color: #dbeafe; }
+:global(.app-shell) .ia-fix { background: rgba(22, 101, 52, .22); color: #dcfce7; }
+:global(.app-shell) .ia-evidence { background: rgba(51, 65, 85, .4); color: #cbd5e1; }
+:global(.app-shell) .ia-urls a { color: #a5b4fc; }
 .ia-caret { color: #2b7cff; width: 1em; }
 .ia-title { color: #111827; }
 .ia-count { background: #eef2f7; color: #475569; border-radius: 8px; padding: 0 .45rem;
             font-size: .78rem; font-weight: 700; }
 .ia-expand-hint { margin-left: auto; font-size: .75rem; }
 .ia-body { border-top: 1px solid #eef2f7; padding: .7rem .9rem; background: #fcfdff; }
-.ia-info, .ia-fix { display: flex; gap: .5rem; margin: 0 0 .5rem; font-size: .85rem; color: #334155; }
+.ia-info, .ia-fix, .ia-evidence { display: flex; gap: .5rem; margin: 0 0 .5rem; font-size: .85rem; color: #334155; }
 .ia-info { background: #eff6ff; border-radius: 6px; padding: .45rem .6rem; }
 .ia-fix  { background: #f0fdf4; border-radius: 6px; padding: .45rem .6rem; }
+.ia-evidence { background: #f8fafc; border-radius: 6px; padding: .45rem .6rem; color: #475569; }
+.ia-evidence .ia-ico { font-weight: 700; }
 .ia-ico { flex: none; }
 .ia-urls { margin: .3rem 0; padding-left: 1.3rem; font-size: .83rem; }
 .ia-urls a { color: #1d4ed8; text-decoration: none; word-break: break-all; }

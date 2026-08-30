@@ -123,6 +123,50 @@ ISSUE_DEFS: Dict[str, Dict[str, str]] = {
                               "description": "Страницу не удалось скачать (таймаут/сетевая ошибка) — робот тоже может её не получить.",
                               "hint": "Страница не скачалась. Проверьте доступность сервера и таймауты.",
                               "fix": "Проверьте доступность сервера, таймауты и блокировки ботов."},
+    "4xx_error":             {"severity": "high", "title": "Ошибка страницы 4xx",
+                              "description": "Внутренняя ссылка ведёт на страницу, которую сервер не отдаёт пользователю или роботу.",
+                              "hint": "Проверьте права доступа, URL и необходимость страницы.",
+                              "fix": "Исправьте URL/права доступа или удалите внутренние ссылки на недоступную страницу."},
+    "parse_failure":          {"severity": "info", "title": "Страница не разобрана",
+                              "description": "Ответ получен, но краулер не смог надёжно извлечь SEO-поля. Это ограничение полноты аудита, а не подтверждённая ошибка страницы.",
+                              "hint": "Повторите проверку с headless-режимом для SPA или проверьте HTML-ответ.",
+                              "fix": "Для JavaScript-сайтов включите headless-режим; для обычных страниц проверьте валидность HTML."},
+    "non_html_document":     {"severity": "info", "title": "Не-HTML документ",
+                              "description": "URL отдаёт не HTML-документ, поэтому title, H1 и мета-теги к нему неприменимы.",
+                              "hint": "Проверьте, должен ли этот URL находиться во внутреннем обходе.",
+                              "fix": "Оставьте документ, если он нужен пользователям, или уберите его из sitemap/внутренних ссылок."},
+    "slow_response":         {"severity": "medium", "title": "Медленный ответ сервера",
+                              "description": "Первый ответ страницы занял больше трёх секунд и может ухудшать обход и пользовательский опыт.",
+                              "hint": "Проверьте TTFB, кеширование, базу данных и серверные зависимости.",
+                              "fix": "Снизьте TTFB: включите кеширование, оптимизируйте запросы и тяжёлые серверные операции."},
+    "large_html":            {"severity": "medium", "title": "Тяжёлый HTML-документ",
+                              "description": "HTML-ответ больше 2 МБ и может замедлять загрузку, обработку и обход страницы.",
+                              "hint": "Проверьте лишнюю разметку, inline-данные и дублирующиеся блоки.",
+                              "fix": "Уберите лишнюю разметку/inline-данные, сожмите ответ и разделите тяжёлые данные."},
+    "missing_viewport":      {"severity": "low", "title": "Нет viewport",
+                              "description": "На странице нет meta viewport, поэтому мобильный браузер может отображать её некорректно.",
+                              "hint": "Добавьте стандартный meta viewport.",
+                              "fix": "Добавьте <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">."},
+    "missing_lang":          {"severity": "low", "title": "Не указан язык страницы",
+                              "description": "У корневого html-элемента нет атрибута lang, что ухудшает доступность и языковую интерпретацию.",
+                              "hint": "Укажите основной язык документа в html[lang].",
+                              "fix": "Добавьте корректный атрибут lang, например lang=\"ru\"."},
+    "multiple_title":        {"severity": "medium", "title": "Несколько Title",
+                              "description": "В HTML найдено несколько тегов title, поэтому поисковику неочевиден основной заголовок документа.",
+                              "hint": "Оставьте один тег title.",
+                              "fix": "Удалите дублирующиеся теги title и оставьте один основной заголовок."},
+    "multiple_description":  {"severity": "low", "title": "Несколько description",
+                              "description": "В HTML найдено несколько meta description, и поисковик может выбрать неожиданный вариант.",
+                              "hint": "Оставьте один meta description.",
+                              "fix": "Удалите дублирующиеся meta description и оставьте один тег."},
+    "multiple_canonical":    {"severity": "medium", "title": "Несколько canonical",
+                              "description": "На странице найдено несколько canonical, поэтому основной URL страницы не определён однозначно.",
+                              "hint": "Оставьте одну canonical-ссылку.",
+                              "fix": "Оставьте один rel=\"canonical\" с URL основной версии страницы."},
+    "noindex_page":          {"severity": "info", "title": "Страница закрыта от индексации",
+                              "description": "Страница содержит noindex в meta robots или X-Robots-Tag. Это информационный сигнал, а не ошибка сам по себе.",
+                              "hint": "Проверьте, намеренно ли страница закрыта от индексации.",
+                              "fix": "Если страницу нужно индексировать, уберите noindex и проверьте robots.txt."},
 }
 
 TITLE_MAX_CHARS = 80
@@ -132,6 +176,8 @@ DESCRIPTION_MIN_CHARS = 180
 LARGE_IMAGE_BYTES = 102400  # 100 KB
 DEEP_PAGE_DEPTH = 4
 LOW_TEXT_RATIO = 0.10
+SLOW_RESPONSE_MS = 3000
+LARGE_HTML_BYTES = 2 * 1024 * 1024
 
 
 def _issue(code: str, page_url: str, context: Optional[dict] = None) -> dict:
@@ -175,11 +221,20 @@ def page_issues(page: dict) -> List[dict]:
     status = page.get("status_code")
 
     if status == 404:
-        issues.append(_issue("404_page", url, {"status_code": status}))
+        issues.append(_issue("404_page", url, {"status_code": status, "confidence": 1.0}))
+    elif status is not None and 400 <= status < 500:
+        issues.append(_issue("4xx_error", url, {"status_code": status, "confidence": 1.0}))
     if status is not None and status >= 500:
-        issues.append(_issue("5xx_error", url, {"status_code": status}))
+        issues.append(_issue("5xx_error", url, {"status_code": status, "confidence": 1.0}))
     if status is None and page.get("error") and not page.get("robots_blocked"):
-        issues.append(_issue("fetch_error", url, {"error": page.get("error")}))
+        issues.append(_issue("fetch_error", url, {"error": page.get("error"), "confidence": 0.8}))
+
+    if page.get("response_time_ms") is not None and page.get("response_time_ms") > SLOW_RESPONSE_MS:
+        issues.append(_issue("slow_response", url, {"response_time_ms": page.get("response_time_ms"), "threshold_ms": SLOW_RESPONSE_MS, "confidence": 0.9}))
+    content_type = str(page.get("content_type") or "").lower()
+    is_html_response = not content_type or "html" in content_type or "xhtml" in content_type
+    if is_html_response and page.get("content_size_bytes") is not None and page.get("content_size_bytes") > LARGE_HTML_BYTES:
+        issues.append(_issue("large_html", url, {"content_size_bytes": page.get("content_size_bytes"), "threshold_bytes": LARGE_HTML_BYTES, "confidence": 0.9}))
 
     chain = page.get("redirect_chain") or []
     # Хопы цепочки могут быть строками (legacy) или {"url","status"} (БАГФИКС #4).
@@ -194,6 +249,16 @@ def page_issues(page: dict) -> List[dict]:
         issues.append(_issue("robots_blocked", url))
         return issues
 
+    # Неполный разбор 200-ответа — отдельный информационный результат.
+    # Не выдаём missing_title/H1 для страницы, которую краулер не смог надёжно разобрать.
+    parse_status = page.get("parse_status")
+    if status == 200 and not page.get("parsed"):
+        if parse_status == "non_html":
+            issues.append(_issue("non_html_document", url, {"content_type": page.get("content_type"), "confidence": 1.0}))
+        elif parse_status in ("timeout", "error", "empty_html", "crawl_exception"):
+            issues.append(_issue("parse_failure", url, {"parse_status": parse_status, "error": page.get("error"), "confidence": 1.0}))
+        return issues
+
     # Контентные проверки имеют смысл только для успешно скачанных HTML.
     if status is None or status != 200 or not page.get("parsed"):
         return issues
@@ -203,10 +268,16 @@ def page_issues(page: dict) -> List[dict]:
     if _external_canonical(page):
         return issues
 
+    robots_value = " ".join(str(v or "") for v in ((page.get("indexability") or {}).get("meta_robots"), (page.get("indexability") or {}).get("x_robots_tag"))).lower()
+    if "noindex" in robots_value:
+        issues.append(_issue("noindex_page", url, {"robots": robots_value[:500], "confidence": 1.0}))
+
     title = (page.get("title") or {}).get("text", "") or ""
     descr = (page.get("meta_description") or {}).get("text", "") or ""
     h1 = page.get("h1") or []
 
+    if page.get("title_count") is not None and page.get("title_count") > 1:
+        issues.append(_issue("multiple_title", url, {"count": page.get("title_count"), "confidence": 1.0}))
     if not title.strip():
         issues.append(_issue("missing_title", url))
     else:
@@ -216,6 +287,8 @@ def page_issues(page: dict) -> List[dict]:
         elif tlen < TITLE_MIN_CHARS:
             issues.append(_issue("title_too_short", url, {"length_chars": tlen}))
 
+    if page.get("meta_description_count") is not None and page.get("meta_description_count") > 1:
+        issues.append(_issue("multiple_description", url, {"count": page.get("meta_description_count"), "confidence": 1.0}))
     if not descr.strip():
         issues.append(_issue("missing_description", url))
     else:
@@ -224,6 +297,13 @@ def page_issues(page: dict) -> List[dict]:
             issues.append(_issue("description_too_long", url, {"length_chars": dlen}))
         elif dlen < DESCRIPTION_MIN_CHARS:
             issues.append(_issue("description_too_short", url, {"length_chars": dlen}))
+
+    if page.get("canonical_count") is not None and page.get("canonical_count") > 1:
+        issues.append(_issue("multiple_canonical", url, {"count": page.get("canonical_count"), "confidence": 1.0}))
+    if "html_lang" in page and page.get("html_lang") in (None, ""):
+        issues.append(_issue("missing_lang", url, {"confidence": 1.0}))
+    if "has_viewport" in page and not page.get("has_viewport"):
+        issues.append(_issue("missing_viewport", url, {"confidence": 1.0}))
 
     if len(h1) == 0:
         issues.append(_issue("missing_h1", url))
@@ -331,12 +411,15 @@ def site_issues(pages: dict, sitemap_urls: set) -> List[dict]:
         canonical = idx.get("canonical")
         if canonical and _norm_url(canonical) != _norm_url(url) and _norm_url(canonical) not in norm_crawled:
             issues.append(_issue("canonical_conflict", url, {"canonical": canonical}))
-        robots = (idx.get("meta_robots") or "").lower()
+        robots = f"{idx.get('meta_robots') or ''} {idx.get('x_robots_tag') or ''}".lower()
         if "noindex" in robots and _norm_url(url) in norm_sitemap:
-            issues.append(_issue("noindex_in_sitemap", url, {"meta_robots": idx.get("meta_robots")}))
+            issues.append(_issue("noindex_in_sitemap", url, {"robots": robots.strip()[:500]}))
 
-    # Сироты
-    for u in find_orphan_pages(norm_sitemap, {_norm_url(x) for x in pages.keys()}):
+    # Сироты: robots-запрещённая страница не является ошибкой перелинковки,
+    # потому что краулер обязан был её пропустить.
+    blocked = {_norm_url(u) for u, p in pages.items() if p.get("robots_blocked")}
+    crawl_urls = {_norm_url(x) for x in pages.keys()} | blocked
+    for u in find_orphan_pages(norm_sitemap, crawl_urls):
         issues.append(_issue("orphan_page", u))
 
     return issues

@@ -1323,3 +1323,47 @@ class TestParserContextAndRecovery(unittest.TestCase):
         self.assertIn('https://example.com/clients', context)
         self.assertIn('[page text truncated]', context)
         self.assertIn('контакты и услуги', context)
+
+
+class TestProfessionalAuditSignals(unittest.TestCase):
+    def test_parse_dom_signals_are_exposed(self):
+        html = '''<html><head>
+          <title>one</title><title>two</title>
+          <meta name="description" content="one"><meta name="description" content="two">
+          <link rel="canonical" href="/one"><link rel="canonical" href="/two">
+        </head><body><h1>Heading</h1></body></html>'''
+        page = page_parser.parse_page("https://example.com/one", html)
+        self.assertEqual(page["title_count"], 2)
+        self.assertEqual(page["meta_description_count"], 2)
+        self.assertEqual(page["canonical_count"], 2)
+        self.assertIsNone(page["html_lang"])
+        self.assertFalse(page["has_viewport"])
+        page.update({"url": "https://example.com/one", "status_code": 200, "response_time_ms": 100,
+                     "content_size_bytes": 500, "indexability": page.pop("indexability")})
+        page["parsed"] = True
+        codes = {item["code"] for item in issues.page_issues(page)}
+        self.assertTrue({"multiple_title", "multiple_description", "multiple_canonical",
+                         "missing_lang", "missing_viewport"} <= codes)
+
+    def test_non_html_and_parse_failure_are_explicit(self):
+        non_html = _page(content_type="application/pdf", parsed=False, parse_status="non_html")
+        self.assertIn("non_html_document", {i["code"] for i in issues.page_issues(non_html)})
+        failed = _page(parsed=False, parse_status="timeout", error="parse_timeout")
+        self.assertIn("parse_failure", {i["code"] for i in issues.page_issues(failed)})
+
+    def test_all_4xx_are_reported(self):
+        self.assertIn("4xx_error", {i["code"] for i in issues.page_issues(_page(status_code=403))})
+        self.assertIn("4xx_error", {i["code"] for i in issues.page_issues(_page(status_code=410))})
+
+    def test_robots_blocked_is_not_orphan(self):
+        pages = {
+            "https://e.com/": _page(url="https://e.com/"),
+            "https://e.com/blocked": _page(url="https://e.com/blocked", robots_blocked=True,
+                                               status_code=None, parsed=False),
+        }
+        site = issues.site_issues(pages, {"https://e.com/blocked"})
+        self.assertNotIn("orphan_page", {item["code"] for item in site})
+
+
+if __name__ == "__main__":
+    unittest.main()

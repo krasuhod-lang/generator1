@@ -191,8 +191,8 @@ def block_reason(html: str, status: int) -> str:
 
 class FetchResult:
     __slots__ = ("url", "final_url", "status_code", "html", "response_time_ms",
-                 "content_size_bytes", "redirect_chain", "error", "method",
-                 "fetch_status", "block_fingerprint")
+                 "content_size_bytes", "content_type", "x_robots_tag", "redirect_chain", "error", "method",
+                 "fetch_status", "block_fingerprint", "attempts")
 
     def __init__(self, url: str):
         self.url = url
@@ -201,11 +201,14 @@ class FetchResult:
         self.html: str = ""
         self.response_time_ms: Optional[int] = None
         self.content_size_bytes: Optional[int] = None
+        self.content_type: str = ""
+        self.x_robots_tag: Optional[str] = None
         self.redirect_chain: list = []
         self.error: Optional[str] = None
         self.method: str = "aiohttp"
         self.fetch_status: str = "ok"  # ok|timeout|connection_error|error|ssrf_blocked
         self.block_fingerprint: dict = {}
+        self.attempts: int = 0
 
 
 async def fetch_page(session: aiohttp.ClientSession, url: str,
@@ -229,14 +232,32 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
     current = url
     try:
         for _hop in range(MAX_REDIRECTS + 1):
-            async with session.get(
-                current,
-                headers=_headers(),
-                allow_redirects=False,
-                timeout=FETCH_TIMEOUT,
-            ) as resp:
-                res.status_code = resp.status
-                if resp.status in (301, 302, 303, 307, 308):
+            # Повторяем только транзитные ошибки сервера/лимита. 404/410/403
+            # являются фактическим результатом страницы и не должны маскироваться.
+            for attempt in range(3):
+                res.attempts += 1
+                async with session.get(
+                    current,
+                    headers=_headers(),
+                    allow_redirects=False,
+                    timeout=FETCH_TIMEOUT,
+                ) as resp:
+                    res.status_code = resp.status
+                    res.content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                    res.x_robots_tag = (resp.headers.get("X-Robots-Tag") or "").strip() or None
+                    if resp.status in (408, 425, 429, 500, 502, 503, 504) and attempt < 2:
+                        retry_after = resp.headers.get("Retry-After")
+                        try:
+                            delay = min(5.0, max(0.25, float(retry_after))) if retry_after else 0.4 * (2 ** attempt)
+                        except (TypeError, ValueError):
+                            delay = 0.4 * (2 ** attempt)
+                        await asyncio.sleep(delay + random.uniform(0.0, 0.15))
+                        continue
+                    break
+                # The async context has been closed; process the final response
+                # through the same redirect/body path below.
+
+            if resp.status in (301, 302, 303, 307, 308):
                     loc = resp.headers.get("Location")
                     if not loc:
                         break
@@ -258,19 +279,27 @@ async def fetch_page(session: aiohttp.ClientSession, url: str,
                         break
                     current = nxt
                     continue
-                body = await resp.content.read(MAX_BODY_BYTES + 1)
-                if len(body) > MAX_BODY_BYTES:
-                    body = body[:MAX_BODY_BYTES]
-                ctype = (resp.headers.get("Content-Type") or "").lower()
-                if "html" in ctype or not ctype:
-                    charset = resp.charset or "utf-8"
-                    try:
-                        res.html = body.decode(charset, errors="replace")
-                    except Exception:
-                        res.html = body.decode("utf-8", errors="replace")
-                res.content_size_bytes = len(body)
-                res.final_url = current
-                break
+            declared_size = resp.headers.get("Content-Length")
+            try:
+                declared_size = int(declared_size) if declared_size else None
+            except (TypeError, ValueError):
+                declared_size = None
+            body = await resp.content.read(MAX_BODY_BYTES + 1)
+            body_size = len(body)
+            if body_size > MAX_BODY_BYTES:
+                body = body[:MAX_BODY_BYTES]
+            if resp.status >= 400:
+                res.fetch_status = "http_error"
+            ctype = res.content_type
+            if "html" in ctype or "xhtml" in ctype or not ctype:
+                charset = resp.charset or "utf-8"
+                try:
+                    res.html = body.decode(charset, errors="replace")
+                except Exception:
+                    res.html = body.decode("utf-8", errors="replace")
+            res.content_size_bytes = max(body_size, declared_size or 0)
+            res.final_url = current
+            break
     except asyncio.TimeoutError:
         res.error = "timeout"
         res.fetch_status = "timeout"
@@ -329,6 +358,8 @@ async def _fetch_headless(res: FetchResult, url: str) -> bool:
     if html:
         res.html = html[: MAX_BODY_BYTES]
         res.content_size_bytes = len(res.html.encode("utf-8"))
+    res.content_type = str(data.get("content_type") or "text/html").split(";", 1)[0].strip().lower()
+    res.x_robots_tag = str(data.get("x_robots_tag") or "").strip() or None
     res.response_time_ms = int((time.monotonic() - started) * 1000)
     res.block_fingerprint = challenge_fingerprint(res.html, res.status_code or 0)
     success = bool(data.get("success")) and not looks_blocked(res.html, res.status_code)
