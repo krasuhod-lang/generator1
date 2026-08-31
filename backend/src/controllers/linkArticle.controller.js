@@ -170,6 +170,10 @@ async function getLinkArticleTask(req, res, next) {
     // Результат задачи пользовательский и изменяемый во время финализации.
     // Не отдаём его через conditional 304: старый Safari/прокси может передать
     // Axios пустой response и UI останется без selectedTask/article HTML.
+    // Результат должен приходить JSON-телом. Не позволяем Express
+    // превратить detail-запрос с If-None-Match в пустой 304.
+    delete req.headers['if-none-match'];
+    delete req.headers['if-modified-since'];
     res.set({
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
       Pragma: 'no-cache',

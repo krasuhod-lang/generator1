@@ -24,8 +24,13 @@ for (const controller of controllers) {
   if (!detail.includes("'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'")) {
     throw new Error(`${controller.name}: detail endpoint must disable cache revalidation`);
   }
-  if (!detail.includes('return res.status(200).json({ task:')) {
+  if (!detail.includes("return res.status(200).json({ task:")) {
     throw new Error(`${controller.name}: detail endpoint must return an explicit 200 JSON response`);
+  }
+  for (const header of ["delete req.headers['if-none-match']", "delete req.headers['if-modified-since']"]) {
+    if (!detail.includes(header)) {
+      throw new Error(`${controller.name}: detail endpoint must clear ${header} before JSON response`);
+    }
   }
 }
 

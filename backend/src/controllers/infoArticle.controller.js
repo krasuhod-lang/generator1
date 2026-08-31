@@ -284,8 +284,11 @@ async function getInfoArticleTask(req, res, next) {
       return res.status(404).json({ error: 'Задача не найдена' });
     }
     // Результат задачи пользовательский и изменяемый во время финализации.
-    // Не отдаём его через conditional 304: старый Safari/прокси может передать
-    // Axios пустой response и UI останется без selectedTask/article HTML.
+    // Express может превратить даже no-store response в 304, если клиент
+    // прислал If-None-Match. Для detail result это недопустимо: UI обязан
+    // получить JSON-тело, поэтому отключаем conditional request на этом пути.
+    delete req.headers['if-none-match'];
+    delete req.headers['if-modified-since'];
     res.set({
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
       Pragma: 'no-cache',
