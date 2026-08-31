@@ -12,6 +12,9 @@ const task = sanitizeTaskForClient({
   id: 'task-1',
   status: 'completed',
   full_html: '<article>готово</article>',
+  article_html: '<h1>Готовая статья</h1>',
+  article_html_with_schema: '<article><h1>Готовая статья</h1></article>',
+  article_plain: 'Готовая статья',
   total_cost_usd: 1.23,
   gemini_tokens_in: 100,
   tokens_out: 200,
@@ -21,6 +24,9 @@ const task = sanitizeTaskForClient({
   queue_reason: 'user_limit',
 });
 assert.equal(task.full_html, '<article>готово</article>');
+assert.equal(task.article_html, '<h1>Готовая статья</h1>');
+assert.equal(task.article_html_with_schema, '<article><h1>Готовая статья</h1></article>');
+assert.equal(task.article_plain, 'Готовая статья');
 assert.equal(task.total_cost_usd, undefined);
 assert.equal(task.gemini_tokens_in, undefined);
 assert.equal(task.tokens_out, undefined);

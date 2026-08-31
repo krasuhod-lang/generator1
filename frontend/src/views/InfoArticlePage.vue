@@ -706,7 +706,7 @@ const acfExpertCount = computed(
 
 function buildArticleJson() {
   acfError.value = '';
-  const html = selectedTask.value?.article_html || '';
+  const html = sanitizedHtml.value || articleSourceHtml.value || '';
   if (!html.trim()) { acfError.value = 'Нет готовой статьи для формирования JSON.'; return; }
   acfBuilding.value = true;
   try {
@@ -753,9 +753,39 @@ watch(() => selectedTask.value?.id, () => {
   acfError.value = '';
 });
 
+const ARTICLE_CONTENT_FIELDS = Object.freeze([
+  // Schema-вариант обычно содержит тот же контент плюс JSON-LD и помогает
+  // восстановить старые задачи, где обычное article_html было пустым/неполным.
+  'article_html_with_schema', 'article_html', 'content_html', 'html', 'article_content', 'content',
+]);
+
+const articleHtmlCandidates = computed(() => {
+  const task = selectedTask.value || {};
+  return ARTICLE_CONTENT_FIELDS
+    .map((key) => task[key])
+    .filter((value) => typeof value === 'string' && value.trim());
+});
+
+const articleSourceHtml = computed(() => articleHtmlCandidates.value[0] || '');
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function plainTextToHtml(value) {
+  const text = String(value ?? '').replace(/\r\n?/g, '\n').trim();
+  if (!text) return '';
+  return text.split(/\n{2,}/).map((paragraph) =>
+    `<p>${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`,
+  ).join('');
+}
+
 const sanitizedHtml = computed(() => {
-  const html = selectedTask.value?.article_html || '';
-  if (!html) return '';
+  const source = articleSourceHtml.value;
+  const plain = selectedTask.value?.article_plain || selectedTask.value?.text || '';
+  if (!source && !plain) return '';
   // ALLOWED_URI_REGEXP допускает data:image/(png|jpeg|jpg|webp);base64,… —
   // это base64-обложка от Nano Banana Pro, которую мы сами генерируем на
   // бэкенде и встраиваем в article_html через embedImages (см.
@@ -768,14 +798,20 @@ const sanitizedHtml = computed(() => {
   // data-URI заканчивается на «,DATA», а не на «:». Старый regex требовал
   // «data:image/png;base64:» и поэтому DOMPurify вырезал ВСЕ картинки —
   // именно из-за этого пользователи раньше не видели обложек статей.
-  return DOMPurify.sanitize(html, {
-    ADD_ATTR: ['target'],
-    ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-  });
+  for (const candidate of articleHtmlCandidates.value) {
+    const cleaned = DOMPurify.sanitize(candidate, {
+      ADD_ATTR: ['target'],
+      ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    });
+    // Один из legacy-вариантов может состоять только из служебной разметки.
+    // Перебираем сохранённые поля, пока не найдём видимый контент.
+    if (cleaned.trim()) return cleaned;
+  }
+  return plainTextToHtml(plain);
 });
 
 async function copyAsHtml() {
-  const rawHtml = selectedTask.value?.article_html;
+  const rawHtml = articleSourceHtml.value || selectedTask.value?.article_plain || '';
   if (!rawHtml) return;
 
   // ТЗ (новое): «Скопировать как HTML» должна копировать статью ЦЕЛИКОМ —
@@ -856,10 +892,8 @@ async function copyAsFormattedText() {
 }
 
 function downloadHtml() {
-  // SEO/GEO 2026: при скачивании предпочитаем версию со встроенными JSON-LD
-  // блоками (article_html_with_schema). На рендер в карточке это не влияет —
-  // он по-прежнему берёт article_html.
-  const html = selectedTask.value?.article_html_with_schema || selectedTask.value?.article_html;
+  // Предпочитаем schema HTML, затем обычный HTML и legacy plain-text.
+  const html = articleSourceHtml.value || plainTextToHtml(selectedTask.value?.article_plain || '');
   if (!html) return;
   const blob = new Blob([
     `<!doctype html>\n<html lang="ru"><head><meta charset="utf-8"><title>${escapeAttr(selectedTask.value.topic)}</title></head><body>${html}</body></html>`,
@@ -1113,7 +1147,7 @@ const linkBadgeClass = computed(() => {
 
 const lsiSet = computed(() => selectedTask.value?.lsi_set || null);
 
-const hasResult = computed(() => !!selectedTask.value?.article_html);
+const hasResult = computed(() => Boolean(articleSourceHtml.value.trim() || String(selectedTask.value?.article_plain || '').trim()));
 
 // Live cost (уже считается на бэкенде после каждой стадии).
 const liveCost = computed(() => Number(selectedTask.value?.cost_usd || 0));
@@ -1612,6 +1646,7 @@ onUnmounted(() => { stopTicker(); });
                      v-html="sanitizedHtml"></article>
           </div>
 
+
           <!-- TAB: JSON (ACF Flexible Content) -->
           <div v-if="activeResultTab === 'json'" class="space-y-3">
             <p class="text-xs text-gray-400 leading-relaxed">
@@ -1790,6 +1825,12 @@ onUnmounted(() => { stopTicker(); });
               </div>
             </div>
           </div>
+        </div>
+
+        <div v-else-if="selectedTask.status === 'done'" class="rounded-lg border border-amber-800/70 bg-amber-950/20 px-4 py-4 text-sm text-amber-100">
+          <div class="font-semibold">Задача завершена, но содержимое ещё не подгрузилось</div>
+          <p class="mt-1 text-xs text-amber-200/80">Обновите данные задачи — готовый HTML и текст будут восстановлены из сохранённого результата, если они доступны на сервере.</p>
+          <button type="button" class="btn-ghost mt-3 border border-amber-700/70" @click="selectTask(selectedTask.id)">Обновить результат</button>
         </div>
       </section>
     </div>
