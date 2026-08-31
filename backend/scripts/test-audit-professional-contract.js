@@ -21,13 +21,14 @@ assert(controller.includes('headers: await _authHeaders()'), 'audit report must 
 assert(controller.includes('const localTaskId = crypto.randomUUID()'), 'audit start must generate a local UUID');
 assert(controller.includes('VALUES ($1::uuid, $2::uuid, $3::varchar, \'running\', $4::jsonb, $5::text'), 'audit start must use explicitly typed independent SQL parameters');
 assert(controller.includes('[localTaskId, userId, parsed.href, JSON.stringify(config), String(py.task_id)]'), 'audit start must bind local UUID and Python text id separately');
-for (const column of ['Код правила', 'Уверенность', 'Доказательство', 'Content-Type', 'Parse status']) {
+for (const column of ['Код правила', 'Уверенность', 'Доказательство', 'Content-Type', 'Parse status', 'Затронутых страниц', 'Фактов']) {
   assert(controller.includes(column), `export missing ${column}`);
 }
 for (const signal of ['title_count', 'meta_description_count', 'canonical_count', 'html_lang', 'has_viewport']) {
   assert(pageParser.includes(signal), `parser missing ${signal}`);
 }
-for (const signal of ['parse_status', 'crawl_stats', 'content_type', 'fetch_attempts']) {
+for (const signal of ['parse_status', 'crawl_stats', 'content_type', 'fetch_attempts', 'issue_occurrences', 'issue_types', 'max_issue_severity', '2026.08.31-impact-v2']) {
   assert(crawler.includes(signal), `crawler missing ${signal}`);
 }
+assert(controller.includes("ws = wb.addWorksheet('Правила')"), 'xlsx must contain rule impact summary');
 console.log('audit professional contract: OK');

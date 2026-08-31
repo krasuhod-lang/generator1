@@ -208,6 +208,15 @@ class TestPageIssues(unittest.TestCase):
     def test_multiple_h1(self):
         self.assertIn("multiple_h1", self.codes(_page(h1=[{"text": "a"}, {"text": "b"}])))
 
+    def test_empty_headings_are_not_counted(self):
+        self.assertNotIn("multiple_h1", self.codes(_page(h1=[{"text": ""}, {"text": "Главный заголовок"}])))
+
+    def test_low_ratio_requires_meaningful_content(self):
+        self.assertNotIn("low_text_ratio", self.codes(_page(
+            text_html_ratio=0.01, clean_text_len=80, content_size_bytes=200000)))
+        self.assertIn("low_text_ratio", self.codes(_page(
+            text_html_ratio=0.01, clean_text_len=500, content_size_bytes=200000)))
+
     def test_mixed_content(self):
         self.assertIn("mixed_content",
                       self.codes(_page(mixed_content=[{"tag": "img", "url": "http://x/i.jpg"}])))
@@ -220,7 +229,8 @@ class TestPageIssues(unittest.TestCase):
 
     def test_deep_page_and_low_ratio(self):
         self.assertIn("deep_page", self.codes(_page(crawl_depth=5)))
-        self.assertIn("low_text_ratio", self.codes(_page(text_html_ratio=0.05)))
+        self.assertIn("low_text_ratio", self.codes(_page(
+            text_html_ratio=0.05, clean_text_len=500, content_size_bytes=200000)))
 
     def test_external_canonical_skips_content_issues(self):
         # ТЗ 3: canonical на другой URL → контентные ошибки не считаются
@@ -275,22 +285,40 @@ class TestSiteIssues(unittest.TestCase):
         iss = issues.site_issues({"https://e.com/a": p}, {"https://e.com/a"})
         self.assertIn("noindex_in_sitemap", {i["code"] for i in iss})
 
+    def test_orphan_is_not_claimed_when_crawl_is_incomplete(self):
+        p = _page(url="https://e.com/a")
+        iss = issues.site_issues(
+            {"https://e.com/a": p},
+            {"https://e.com/a", "https://e.com/not-yet-crawled"},
+            orphan_check_complete=False,
+        )
+        self.assertNotIn("orphan_page", {i["code"] for i in iss})
+
     def test_canonical_conflict(self):
         p = _page(url="https://e.com/a")
         p["indexability"]["canonical"] = "https://other.com/page"
         iss = issues.site_issues({"https://e.com/a": p}, set())
         self.assertIn("canonical_conflict", {i["code"] for i in iss})
 
-    def test_summarize_health_score(self):
-        iss = [{"severity": "critical"}] * 2 + [{"severity": "high"}] * 3 + \
-              [{"severity": "medium"}] * 4 + [{"severity": "low"}] * 10
+    def test_summarize_health_score_uses_unique_pages_and_keeps_occurrences(self):
+        iss = ([{"code": "5xx_error", "severity": "critical", "page_url": "https://e.com/a"}] * 5
+               + [{"code": "missing_h1", "severity": "high", "page_url": "https://e.com/b"}] * 3
+               + [{"code": "missing_description", "severity": "medium", "page_url": "https://e.com/c"}] * 4
+               + [{"code": "title_too_short", "severity": "low", "page_url": "https://e.com/d"}] * 10)
         s = issues.summarize(iss, 100)
-        # 100 - 20 - 9 - 4 - 3 = 64
-        self.assertEqual(s["health_score"], 64)
-        self.assertEqual(s["issues_critical"], 2)
+        # Штраф: (10 + 5 + 2 + 0.5) / 100 * 100 = 17.5 → 82.
+        self.assertEqual(s["health_score"], 82)
+        self.assertEqual(s["issues_critical"], 1)
+        self.assertEqual(s["total_affected_pages"], 4)
+        self.assertEqual(s["total_issue_occurrences"], 22)
+        self.assertEqual(s["issue_groups"][0]["affected_pages"], 1)
+        self.assertEqual(s["issue_groups"][0]["occurrences"], 5)
 
     def test_health_score_floor_zero(self):
-        s = issues.summarize([{"severity": "critical"}] * 50, 10)
+        s = issues.summarize([
+            {"code": "5xx_error", "severity": "critical", "page_url": f"https://e.com/{i}"}
+            for i in range(50)
+        ], 10)
         self.assertEqual(s["health_score"], 0)
 
 

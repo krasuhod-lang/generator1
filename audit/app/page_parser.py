@@ -158,10 +158,18 @@ def parse_page(url: str, html: str) -> dict:
     if md and md.get("content"):
         descr_text = re.sub(r"\s+", " ", md["content"]).strip()
 
-    h1 = [{"text": re.sub(r"\s+", " ", h.get_text(" ", strip=True))[:300]}
-          for h in soup.find_all("h1")]
-    h2 = [{"text": re.sub(r"\s+", " ", h.get_text(" ", strip=True))[:300]}
-          for h in soup.find_all("h2")]
+    # Пустые heading-ноды (частый артефакт шаблона/JS) не являются
+    # фактическими заголовками и не должны создавать multiple_h1.
+    h1 = []
+    for h in soup.find_all("h1"):
+        text = re.sub(r"\s+", " ", h.get_text(" ", strip=True))[:300]
+        if text:
+            h1.append({"text": text})
+    h2 = []
+    for h in soup.find_all("h2"):
+        text = re.sub(r"\s+", " ", h.get_text(" ", strip=True))[:300]
+        if text:
+            h2.append({"text": text})
 
     # Indexability
     robots_meta = soup.find("meta", attrs={"name": re.compile(r"^robots$", re.I)})

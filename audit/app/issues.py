@@ -178,6 +178,8 @@ DEEP_PAGE_DEPTH = 4
 LOW_TEXT_RATIO = 0.10
 SLOW_RESPONSE_MS = 3000
 LARGE_HTML_BYTES = 2 * 1024 * 1024
+MIN_RATIO_TEXT_CHARS = 250
+MIN_RATIO_HTML_BYTES = 10 * 1024
 
 
 def _issue(code: str, page_url: str, context: Optional[dict] = None) -> dict:
@@ -274,7 +276,8 @@ def page_issues(page: dict) -> List[dict]:
 
     title = (page.get("title") or {}).get("text", "") or ""
     descr = (page.get("meta_description") or {}).get("text", "") or ""
-    h1 = page.get("h1") or []
+    h1 = [h for h in (page.get("h1") or [])
+          if str((h or {}).get("text", "")).strip()]
 
     if page.get("title_count") is not None and page.get("title_count") > 1:
         issues.append(_issue("multiple_title", url, {"count": page.get("title_count"), "confidence": 1.0}))
@@ -328,8 +331,20 @@ def page_issues(page: dict) -> List[dict]:
         issues.append(_issue("deep_page", url, {"crawl_depth": depth}))
 
     ratio = page.get("text_html_ratio")
-    if ratio is not None and ratio < LOW_TEXT_RATIO:
-        issues.append(_issue("low_text_ratio", url, {"text_html_ratio": ratio}))
+    clean_text_len = int(page.get("clean_text_len") or 0)
+    html_size = int(page.get("content_size_bytes") or 0)
+    # Отношение текста к HTML — диагностический сигнал, а не самостоятельный
+    # приговор. Не применяем его к коротким документам и маленьким ответам,
+    # где процент нестабилен и часто даёт ложные срабатывания.
+    if (ratio is not None and ratio < LOW_TEXT_RATIO
+            and clean_text_len >= MIN_RATIO_TEXT_CHARS
+            and html_size >= MIN_RATIO_HTML_BYTES):
+        issues.append(_issue("low_text_ratio", url, {
+            "text_html_ratio": ratio,
+            "clean_text_len": clean_text_len,
+            "content_size_bytes": html_size,
+            "confidence": 0.65,
+        }))
 
     return issues
 
@@ -367,9 +382,14 @@ def find_orphan_pages(sitemap_urls: set, bfs_urls: set) -> List[str]:
     return sorted(sitemap_urls - bfs_urls)
 
 
-def site_issues(pages: dict, sitemap_urls: set) -> List[dict]:
+def site_issues(pages: dict, sitemap_urls: set, *, orphan_check_complete: bool = True) -> List[dict]:
     """Cross-page проверки: дубли title/description/контента, canonical,
-    noindex-in-sitemap, сироты."""
+    noindex-in-sitemap и сироты только при полном покрытии обхода.
+
+    При ограничении max_depth/max_pages или незавершённом frontier отсутствие
+    URL в BFS не доказывает, что страница действительно orphan: она могла быть
+    за пределами покрытия. В таком случае правило намеренно пропускается.
+    """
     issues: List[dict] = []
     crawled = {u for u, p in pages.items() if p.get("status_code") is not None}
     norm_crawled = {_norm_url(u) for u in crawled}
@@ -415,31 +435,116 @@ def site_issues(pages: dict, sitemap_urls: set) -> List[dict]:
         if "noindex" in robots and _norm_url(url) in norm_sitemap:
             issues.append(_issue("noindex_in_sitemap", url, {"robots": robots.strip()[:500]}))
 
-    # Сироты: robots-запрещённая страница не является ошибкой перелинковки,
-    # потому что краулер обязан был её пропустить.
-    blocked = {_norm_url(u) for u, p in pages.items() if p.get("robots_blocked")}
-    crawl_urls = {_norm_url(x) for x in pages.keys()} | blocked
-    for u in find_orphan_pages(norm_sitemap, crawl_urls):
-        issues.append(_issue("orphan_page", u))
+    # Сироты можно доказать только после полного обхода: иначе URL из sitemap
+    # за пределами max_depth/max_pages ошибочно превращались в critical/high.
+    if orphan_check_complete:
+        blocked = {_norm_url(u) for u, p in pages.items() if p.get("robots_blocked")}
+        crawl_urls = {_norm_url(x) for x in pages.keys()} | blocked
+        for u in find_orphan_pages(norm_sitemap, crawl_urls):
+            issues.append(_issue("orphan_page", u, {"confidence": 1.0}))
 
     return issues
 
 
+def _issue_groups(issues: List[dict]) -> List[dict]:
+    """Группирует raw findings по правилу без потери occurrences.
+
+    `affected_pages` — число уникальных URL, `occurrences` — число фактов
+    правила (например, 18 изображений без alt на одной странице). Это две
+    разные метрики: первая нужна для приоритизации и Health Score, вторая —
+    для технической работы и экспорта.
+    """
+    groups = {}
+    for issue in issues:
+        code = str(issue.get("code") or "unknown")
+        group = groups.setdefault(code, {
+            "code": code,
+            "severity": issue.get("severity") or ISSUE_DEFS.get(code, {}).get("severity", "info"),
+            "occurrences": 0,
+            "urls": [],
+            "sample_context": {},
+            "confidence_sum": 0.0,
+            "confidence_count": 0,
+        })
+        group["occurrences"] += 1
+        url = str(issue.get("page_url") or "")
+        if url and url not in group["urls"]:
+            group["urls"].append(url)
+        context = issue.get("context") or {}
+        if not group["sample_context"] and context:
+            group["sample_context"] = context
+        confidence = context.get("confidence")
+        try:
+            if confidence is not None:
+                group["confidence_sum"] += float(confidence)
+                group["confidence_count"] += 1
+        except (TypeError, ValueError):
+            pass
+
+    result = []
+    for group in groups.values():
+        group["affected_pages"] = len(group["urls"])
+        if group["confidence_count"]:
+            group["confidence"] = round(group["confidence_sum"] / group["confidence_count"], 3)
+        else:
+            group["confidence"] = None
+        group.pop("confidence_sum", None)
+        group.pop("confidence_count", None)
+        result.append(group)
+    return sorted(result, key=lambda g: (
+        {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}.get(g["severity"], 9),
+        -g["affected_pages"],
+        -g["occurrences"],
+        g["code"],
+    ))
+
+
 def summarize(issues: List[dict], total_pages: int) -> dict:
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for it in issues:
-        sev = it.get("severity")
-        if sev in counts:
-            counts[sev] += 1
-    score = 100.0
-    for sev, n in counts.items():
-        score -= SEVERITY_WEIGHTS[sev] * n
+    """Возвращает impact-based сводку без завышения из-за повторов.
+
+    Для каждой severity считаются уникальные затронутые URL. Повторяющиеся
+    элементы остаются в `total_issue_occurrences` и `issue_groups`, но не
+    обнуляют score сами по себе. Если тестовый/legacy finding не содержит
+    page_url, он считается отдельным synthetic occurrence для совместимости.
+    """
+    groups = _issue_groups(issues)
+    page_severity = {sev: set() for sev in ("critical", "high", "medium", "low", "info")}
+    for index, issue in enumerate(issues):
+        sev = issue.get("severity")
+        if sev not in page_severity:
+            continue
+        page_key = str(issue.get("page_url") or f"__occurrence_{index}")
+        page_severity[sev].add(page_key)
+
+    affected_pages = set()
+    for urls in page_severity.values():
+        affected_pages.update(urls)
+    counts = {sev: len(page_severity[sev]) for sev in page_severity}
+    occurrences = {sev: sum(1 for it in issues if it.get("severity") == sev) for sev in page_severity}
+
+    denominator = max(int(total_pages or 0), 1)
+    # Нормированный impact: один critical на странице заметнее, но 100
+    # повторов одного и того же элемента не должны штрафовать как 100 страниц.
+    page_weights = {"critical": 10.0, "high": 5.0, "medium": 2.0, "low": 0.5}
+    weighted_pages = sum(counts[sev] * weight for sev, weight in page_weights.items())
+    health_score = max(0, min(100, round(100 - (weighted_pages / denominator) * 100)))
+
     return {
-        "total_pages": total_pages,
+        "total_pages": int(total_pages or 0),
+        "total_affected_pages": len(affected_pages),
+        "total_issue_occurrences": len(issues),
+        "unique_issue_types": len(groups),
         "issues_critical": counts["critical"],
         "issues_high": counts["high"],
         "issues_medium": counts["medium"],
         "issues_low": counts["low"],
         "issues_info": counts["info"],
-        "health_score": max(0, round(score)),
+        "issue_occurrences_critical": occurrences["critical"],
+        "issue_occurrences_high": occurrences["high"],
+        "issue_occurrences_medium": occurrences["medium"],
+        "issue_occurrences_low": occurrences["low"],
+        "issue_occurrences_info": occurrences["info"],
+        "health_score": health_score,
+        "score_method": "unique_affected_pages_weighted_by_severity",
+        "issue_groups": groups,
     }

@@ -1,7 +1,7 @@
 <script setup>
 /**
  * AuditGraphChart.vue — force-graph структуры сайта из отчёта аудита (ТЗ 7.2
- * «Граф»). Узел = страница, цвет = глубина краулинга, красный = есть ошибки,
+ * «Граф»). Узел = страница, цвет = максимальная критичность,
  * размер = число входящих ссылок. Клик по узлу — emit('select', url).
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
@@ -22,7 +22,20 @@ const chartEl = ref(null);
 let chart = null;
 let ro = null;
 
-const DEPTH_COLORS = ['#2563eb', '#0ea5e9', '#10b981', '#f59e0b', '#a855f7', '#64748b'];
+const SEVERITY_COLORS = {
+  none: '#64748b',
+  info: '#38bdf8',
+  low: '#94a3b8',
+  medium: '#f59e0b',
+  high: '#f97316',
+  critical: '#ef4444',
+  blocked: '#475569',
+};
+const SEVERITY_LABELS = {
+  none: 'Без ошибок', info: 'Информация', low: 'Low', medium: 'Medium',
+  high: 'High', critical: 'Critical', blocked: 'Закрыто robots.txt',
+};
+const CATEGORY_KEYS = Object.keys(SEVERITY_COLORS);
 
 function _shortLabel(url) {
   try {
@@ -33,22 +46,26 @@ function _shortLabel(url) {
 
 const option = computed(() => {
   const g = props.graph || {};
-  const nodes = (g.nodes || []).map((n) => ({
-    id: n.id,
-    name: _shortLabel(n.id),
-    value: n.id,
-    symbolSize: Math.min(10 + Math.sqrt(Number(n.inlinks) || 0) * 3, 34),
-    category: n.issues > 0 ? DEPTH_COLORS.length : Math.min(Number(n.depth) || 0, DEPTH_COLORS.length - 1),
-    depth: n.depth,
-    issues: n.issues,
-    status_code: n.status_code,
-  }));
+  const nodes = (g.nodes || []).map((n) => {
+    const severity = n.severity || (n.issues > 0 ? 'medium' : 'none');
+    return {
+      id: n.id,
+      name: _shortLabel(n.id),
+      value: n.id,
+      symbolSize: Math.min(10 + Math.sqrt(Number(n.inlinks) || 0) * 3, 34),
+      category: Math.max(0, CATEGORY_KEYS.indexOf(severity)),
+      depth: n.depth,
+      issues: n.issue_count ?? n.issues ?? 0,
+      issue_types: n.issue_types ?? 0,
+      severity,
+      status_code: n.status_code,
+    };
+  });
   const links = (g.edges || []).map(([s, t]) => ({ source: s, target: t }));
-  const categories = DEPTH_COLORS.map((c, i) => ({
-    name: i === DEPTH_COLORS.length - 1 ? `Глубина ${i}+` : `Глубина ${i}`,
-    itemStyle: { color: c },
+  const categories = Object.entries(SEVERITY_COLORS).map(([key, color]) => ({
+    name: SEVERITY_LABELS[key],
+    itemStyle: { color },
   }));
-  categories.push({ name: 'С ошибками', itemStyle: { color: '#dc2626' } });
 
   return {
     backgroundColor: 'transparent',
@@ -56,7 +73,8 @@ const option = computed(() => {
       formatter: (p) => {
         if (p.dataType === 'edge') return `${p.data.source} → ${p.data.target}`;
         const d = p.data || {};
-        return `<b>${d.value}</b><br/>Глубина: ${d.depth}<br/>Ошибок: ${d.issues}<br/>Статус: ${d.status_code || '—'}`;
+        const sev = d.severity || 'none';
+        return `<b>${d.value}</b><br/>Критичность: ${SEVERITY_LABELS[sev] || sev}<br/>Правил: ${d.issue_types || 0}<br/>Фактов: ${d.issues || 0}<br/>Глубина: ${d.depth}<br/>Статус: ${d.status_code || '—'}`;
       },
     },
     legend: { top: 0, textStyle: { fontSize: 11 } },
@@ -67,7 +85,7 @@ const option = computed(() => {
       data: nodes,
       links,
       categories,
-      force: { repulsion: 90, edgeLength: [30, 90], gravity: 0.12, friction: 0.2 },
+      force: { repulsion: 120, edgeLength: [45, 120], gravity: 0.12, friction: 0.2 },
       lineStyle: { color: '#cbd5e1', opacity: 0.6, curveness: 0.05 },
       label: { show: false },
       emphasis: { focus: 'adjacency', label: { show: true, fontSize: 10 } },

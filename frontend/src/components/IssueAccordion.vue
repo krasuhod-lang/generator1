@@ -22,7 +22,7 @@ const emit = defineEmits(['open-url']);
 
 const SEVERITY_LABELS = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low', info: 'Info' };
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-const PREVIEW_LIMIT = 20;
+const PREVIEW_LIMIT = 8;
 
 const expanded = ref(new Set());
 const showAll = ref(new Set());
@@ -66,11 +66,17 @@ function shortHash(h) { return String(h || '').slice(0, 10) + '…'; }
         <span class="ia-caret">{{ expanded.has(g.code) ? '▾' : '▸' }}</span>
         <span :class="'ia-sev sev-' + g.severity">{{ SEVERITY_LABELS[g.severity] || g.severity }}</span>
         <b class="ia-title">{{ title(g.code) }}</b>
-        <span class="ia-count">{{ g.count }}</span>
-        <span class="ia-expand-hint muted">{{ expanded.has(g.code) ? 'Свернуть' : 'Развернуть' }}</span>
+        <span class="ia-impact">{{ g.affected_pages ?? g.count ?? 0 }} стр.</span>
+        <span v-if="g.occurrences != null" class="ia-occurrences">{{ g.occurrences }} фактов</span>
+        <span class="ia-expand-hint muted">{{ expanded.has(g.code) ? 'Свернуть' : 'Подробнее' }}</span>
       </button>
 
       <div v-if="expanded.has(g.code)" class="ia-body">
+        <div class="ia-metrics">
+          <span><b>{{ g.affected_pages ?? g.count ?? 0 }}</b> затронутых страниц</span>
+          <span><b>{{ g.occurrences ?? g.count ?? 0 }}</b> фактов</span>
+          <span v-if="g.confidence != null"><b>{{ Math.round(Number(g.confidence) * 100) }}%</b> средняя уверенность</span>
+        </div>
         <p v-if="description(g.code)" class="ia-info">
           <span class="ia-ico">ℹ</span>
           <span><b>Что это:</b> {{ description(g.code) }}</span></p>
@@ -127,9 +133,13 @@ function shortHash(h) { return String(h || '').slice(0, 10) + '…'; }
 :global(.app-shell) .ia-urls a { color: #a5b4fc; }
 .ia-caret { color: #2b7cff; width: 1em; }
 .ia-title { color: #111827; }
-.ia-count { background: #eef2f7; color: #475569; border-radius: 8px; padding: 0 .45rem;
-            font-size: .78rem; font-weight: 700; }
+.ia-impact { background: rgba(99, 102, 241, .16); color: #c7d2fe; border-radius: 999px; padding: .18rem .5rem;
+              font-size: .75rem; font-weight: 700; white-space: nowrap; }
+.ia-occurrences { color: #94a3b8; font-size: .74rem; white-space: nowrap; }
 .ia-expand-hint { margin-left: auto; font-size: .75rem; }
+.ia-metrics { display: flex; gap: .5rem; flex-wrap: wrap; margin: 0 0 .65rem; }
+.ia-metrics span { border: 1px solid rgba(71, 85, 105, .7); border-radius: 999px; color: #94a3b8; padding: .25rem .5rem; font-size: .76rem; }
+.ia-metrics b { color: #f8fafc; }
 .ia-body { border-top: 1px solid #eef2f7; padding: .7rem .9rem; background: #fcfdff; }
 .ia-info, .ia-fix, .ia-evidence { display: flex; gap: .5rem; margin: 0 0 .5rem; font-size: .85rem; color: #334155; }
 .ia-info { background: #eff6ff; border-radius: 6px; padding: .45rem .6rem; }

@@ -74,7 +74,12 @@ def _export_graph(graph: "nx.DiGraph", pages: Dict[str, dict]) -> dict:
         nodes.append({
             "id": url,
             "depth": p.get("crawl_depth") or 0,
-            "issues": len(p.get("issues") or []),
+            # `issues` сохраняем для старого UI; новые поля разделяют
+            # уникальные правила, occurrences и максимальную критичность.
+            "issues": p.get("issue_occurrences", len(p.get("issues") or [])),
+            "issue_count": p.get("issue_occurrences", len(p.get("issues") or [])),
+            "issue_types": p.get("issue_types", 0),
+            "severity": p.get("max_issue_severity"),
             "status_code": p.get("status_code"),
             "inlinks": graph.in_degree(url) if graph.has_node(url) else 0,
         })
@@ -381,6 +386,15 @@ async def run_audit(start_url: str, *,
             if progress_cb:
                 progress_cb({"crawled": len(pages), "total_found": max(total_found, len(pages))})
 
+        # Если обход упёрся в лимит или пользователь выбрал меньшую глубину,
+        # отсутствие URL в BFS не доказывает orphan. Сохраняем это как часть
+        # crawl quality вместо генерации ложных ошибок.
+        orphan_check_complete = (
+            max_depth >= DEFAULT_MAX_DEPTH
+            and len(pages) < max_pages
+            and not queue
+        )
+
         # 3. HEAD-проверка изображений (только HEAD, потолок MAX_IMAGES_CHECK)
         if check_images:
             seen_imgs: Dict[str, dict] = {}
@@ -420,13 +434,42 @@ async def run_audit(start_url: str, *,
     for url, page in pages.items():
         page_iss = issues_mod.page_issues(page)
         raw_codes[url] = [i["code"] for i in page_iss]
+        page["issue_occurrences"] = len(page_iss)
+        page["issue_types"] = len({i.get("code") for i in page_iss})
+        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        page["max_issue_severity"] = min(
+            (i.get("severity") for i in page_iss),
+            key=lambda s: severity_order.get(s, 9),
+            default=None,
+        )
         all_issues.extend(page_iss)
-    cross = issues_mod.site_issues(pages, sitemap_urls)
+    cross = issues_mod.site_issues(
+        pages,
+        sitemap_urls,
+        orphan_check_complete=orphan_check_complete,
+    )
     # раскидываем cross-page коды по страницам
     for it in cross:
         if it["page_url"] in raw_codes:
             raw_codes[it["page_url"]].append(it["code"])
     all_issues.extend(cross)
+    # После cross-page правил пересчитываем impact-метрики страницы: иначе
+    # граф и таблица могли показывать только ошибки локального parser-а.
+    per_page_issues: Dict[str, list] = {}
+    for issue in all_issues:
+        page_url = issue.get("page_url")
+        if page_url in pages:
+            per_page_issues.setdefault(page_url, []).append(issue)
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    for page_url, page in pages.items():
+        page_issues_all = per_page_issues.get(page_url, [])
+        page["issue_occurrences"] = len(page_issues_all)
+        page["issue_types"] = len({i.get("code") for i in page_issues_all})
+        page["max_issue_severity"] = min(
+            (i.get("severity") for i in page_issues_all),
+            key=lambda s: severity_order.get(s, 9),
+            default=None,
+        )
     # Дедупликация кодов (ТЗ 6): [{"code","count"}] перед сохранением в БД
     for url, codes in raw_codes.items():
         pages[url]["issues"] = issues_mod.deduplicate_issues(codes)
@@ -434,7 +477,7 @@ async def run_audit(start_url: str, *,
     duplicates = issues_mod.find_duplicate_content(pages)
     orphans = issues_mod.find_orphan_pages(
         {issues_mod._norm_url(u) for u in sitemap_urls},
-        {issues_mod._norm_url(u) for u in pages.keys()})
+        {issues_mod._norm_url(u) for u in pages.keys()}) if orphan_check_complete else []
 
     depths = [p.get("crawl_depth") or 0 for p in pages.values()]
     graph_stats = {
@@ -460,6 +503,9 @@ async def run_audit(start_url: str, *,
             if key in p:
                 slim[key] = p[key]
         slim["inlinks_count"] = len(p.get("inlinks") or [])
+        slim["issue_occurrences"] = p.get("issue_occurrences", len(p.get("issues") or []))
+        slim["issue_types"] = p.get("issue_types", len(p.get("issues") or []))
+        slim["max_issue_severity"] = p.get("max_issue_severity")
         slim["outlinks_internal_count"] = len(p.get("outlinks_internal") or [])
         slim["outlinks_external_count"] = len(p.get("outlinks_external") or [])
         slim["images_count"] = len(p.get("images") or [])
@@ -473,7 +519,7 @@ async def run_audit(start_url: str, *,
 
     return {
         "start_url": start,
-        "audit_version": "2026.08.30",
+        "audit_version": "2026.08.31-impact-v2",
         "summary": summary,
         "crawl_stats": {
             "requested_pages": len(visited),
@@ -487,6 +533,7 @@ async def run_audit(start_url: str, *,
             "status_5xx": sum(1 for p in pages.values() if isinstance(p.get("status_code"), int) and 500 <= p.get("status_code") < 600),
             "blocked_pages": sum(1 for p in pages.values() if p.get("fetch_status") == "blocked"),
             "redirected_pages": sum(1 for p in pages.values() if p.get("redirect_chain")),
+            "orphan_check_complete": orphan_check_complete,
         },
         "pages": slim_pages,
         "issues": all_issues,

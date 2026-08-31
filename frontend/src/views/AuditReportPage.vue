@@ -80,20 +80,53 @@ const filteredIssues = computed(() => {
     (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
 });
 
-// Группировка ошибок по коду для аккордеона «Обзор» (ТЗ 7)
+// Группировка ошибок по каноническому backend-контракту. Legacy-отчёты
+// собираются на клиенте по старому raw-массиву без потери совместимости.
 const accordionGroups = computed(() => {
+  const canonical = summary.value.issue_groups;
+  if (Array.isArray(canonical) && canonical.length) {
+    return canonical
+      .filter((g) => (!issueFilterSeverity.value || g.severity === issueFilterSeverity.value)
+        && (!issueFilterCode.value || g.code === issueFilterCode.value))
+      .map((g) => ({
+        ...g,
+        count: Number(g.affected_pages) || (g.urls || []).length,
+        affected_pages: Number(g.affected_pages) || (g.urls || []).length,
+        occurrences: Number(g.occurrences) || Number(g.affected_pages) || 0,
+        urls: Array.isArray(g.urls) ? g.urls : [],
+        context: g.sample_context || {},
+        evidence: issueEvidence({ context: g.sample_context || {} }),
+      }));
+  }
+
   const map = new Map();
   for (const i of filteredIssues.value) {
-    if (!map.has(i.code)) map.set(i.code, { code: i.code, severity: i.severity, count: 0, urls: [], evidence: '', context: {} });
+    if (!map.has(i.code)) map.set(i.code, {
+      code: i.code, severity: i.severity, count: 0, affected_pages: 0,
+      occurrences: 0, urls: [], evidence: '', context: {},
+    });
     const g = map.get(i.code);
     g.count += 1;
+    g.occurrences += 1;
     if (!g.evidence && i.context) {
       g.context = i.context;
       g.evidence = issueEvidence(i);
     }
     if (i.page_url && !g.urls.includes(i.page_url)) g.urls.push(i.page_url);
   }
-  return [...map.values()];
+  return [...map.values()].map((g) => ({ ...g, affected_pages: g.urls.length }));
+});
+
+const filteredIssueStats = computed(() => {
+  const urls = new Set();
+  for (const group of accordionGroups.value) {
+    for (const url of group.urls || []) urls.add(url);
+  }
+  return {
+    groups: accordionGroups.value.length,
+    pages: urls.size,
+    occurrences: accordionGroups.value.reduce((sum, g) => sum + (Number(g.occurrences) || Number(g.count) || 0), 0),
+  };
 });
 
 // issues страницы: legacy ["code"] или новый формат [{code,count}]
@@ -145,7 +178,7 @@ const filteredPages = computed(() => {
   return [...list].sort((a, b) => {
     let va, vb;
     if (key === 'title') { va = (a.title || {}).text || ''; vb = (b.title || {}).text || ''; }
-    else if (key === 'issues') { va = (a.issues || []).length; vb = (b.issues || []).length; }
+    else if (key === 'issues') { va = Number(a.issue_occurrences) || pageIssueCount(a); vb = Number(b.issue_occurrences) || pageIssueCount(b); }
     else { va = a[key]; vb = b[key]; }
     if (va == null) return 1;
     if (vb == null) return -1;
@@ -235,10 +268,21 @@ function downloadExport(format, section = 'all') {
 }
 
 async function copyIssues() {
-  const rows = [['URL', 'Код', 'Ошибка', 'Критичность', 'Уверенность', 'Доказательство']];
-  for (const issue of filteredIssues.value) {
-    rows.push([issue.page_url || '', issue.code || '', issueTitle(issue.code), issue.severity || '',
-      confidenceLabel(issue.context), issueEvidence(issue)]);
+  const rows = [['Код правила', 'Ошибка', 'Критичность', 'Затронутых страниц', 'Фактов', 'Уверенность', 'Пример доказательства']];
+  if (accordionGroups.value.length && summary.value.issue_groups) {
+    for (const group of accordionGroups.value) {
+      rows.push([
+        group.code || '', issueTitle(group.code), group.severity || '',
+        group.affected_pages ?? group.count ?? 0, group.occurrences ?? group.count ?? 0,
+        group.confidence == null ? '—' : `${Math.round(Number(group.confidence) * 100)}%`,
+        group.evidence || issueEvidence({ context: group.context || {} }),
+      ]);
+    }
+  } else {
+    for (const issue of filteredIssues.value) {
+      rows.push([issue.code || '', issueTitle(issue.code), issue.severity || '', issue.page_url || '',
+        1, confidenceLabel(issue.context), issueEvidence(issue)]);
+    }
   }
   const ok = await copyToClipboard(toTsv(rows));
   copyFeedback.value = ok ? 'Ошибки скопированы' : 'Не удалось скопировать';
@@ -246,11 +290,12 @@ async function copyIssues() {
 }
 
 async function copyPages() {
-  const rows = [['URL', 'HTTP', 'Title', 'H1', 'Глубина', 'Время ответа, мс', 'Ошибки']];
+  const rows = [['URL', 'Итоговый URL', 'HTTP', 'Title', 'H1', 'Глубина', 'Время ответа, мс', 'Типов правил', 'Фактов', 'Максимальная критичность']];
   for (const page of filteredPages.value) {
-    rows.push([page.url || '', page.status_code ?? '', (page.title || {}).text || '',
+    rows.push([page.url || '', page.final_url || '', page.status_code ?? '', (page.title || {}).text || '',
       ((page.h1 || [])[0] || {}).text || '', page.crawl_depth ?? '', page.response_time_ms ?? '',
-      pageIssueList(page).map((i) => `${issueTitle(i.code)}${i.count > 1 ? ` x${i.count}` : ''}`).join('; ')]);
+      page.issue_types ?? pageIssueList(page).length, page.issue_occurrences ?? pageIssueCount(page),
+      page.max_issue_severity || '—']);
   }
   const ok = await copyToClipboard(toTsv(rows));
   copyFeedback.value = ok ? 'Страницы скопированы' : 'Не удалось скопировать';
@@ -359,44 +404,53 @@ onUnmounted(stopPolling);
           из ~{{ (status.progress && status.progress.total_found) || '?' }} страниц</p>
       </section>
 
-      <!-- Health Score plate -->
-      <section v-if="report" class="card score-plate">
-        <div class="score-circle-wrap">
-          <svg viewBox="0 0 120 120" class="score-svg">
-            <circle cx="60" cy="60" r="52" fill="none" stroke="#e5e7eb" stroke-width="10" />
-            <circle cx="60" cy="60" r="52" fill="none"
-                    :stroke="scoreColor(summary.health_score)" stroke-width="10"
-                    stroke-linecap="round" :stroke-dasharray="scoreDash"
-                    transform="rotate(-90 60 60)" />
-            <text x="60" y="66" text-anchor="middle" class="score-text"
-                  :fill="scoreColor(summary.health_score)">{{ summary.health_score }}</text>
-          </svg>
-          <div class="score-label">Health Score</div>
+      <!-- Impact-based dashboard -->
+      <section v-if="report" class="card audit-overview">
+        <div class="audit-overview-top">
+          <div class="score-circle-wrap">
+            <svg viewBox="0 0 120 120" class="score-svg">
+              <circle cx="60" cy="60" r="52" fill="none" stroke="#1e293b" stroke-width="10" />
+              <circle cx="60" cy="60" r="52" fill="none"
+                      :stroke="scoreColor(summary.health_score)" stroke-width="10"
+                      stroke-linecap="round" :stroke-dasharray="scoreDash"
+                      transform="rotate(-90 60 60)" />
+              <text x="60" y="66" text-anchor="middle" class="score-text"
+                    :fill="scoreColor(summary.health_score)">{{ summary.health_score ?? '—' }}</text>
+            </svg>
+            <div class="score-label">Health Score</div>
+          </div>
+          <div class="score-meta">
+            <div class="score-url">{{ report.start_url }}</div>
+            <p class="overview-explainer">Оценка основана на доле уникальных страниц с подтверждёнными правилами. Повторные изображения и элементы показываются отдельно и не обнуляют оценку сами по себе.</p>
+            <div class="overview-facts">
+              <span><b>{{ summary.total_pages ?? 0 }}</b> страниц в обходе</span>
+              <span><b>{{ summary.total_affected_pages ?? 0 }}</b> затронуто</span>
+              <span><b>{{ summary.unique_issue_types ?? 0 }}</b> типов правил</span>
+              <span><b>{{ summary.total_issue_occurrences ?? 0 }}</b> фактов</span>
+            </div>
+          </div>
         </div>
-        <div class="score-meta">
-          <div class="score-url">{{ report.start_url }}</div>
-          <div class="sev-counters">
-            <div class="sev-counter sev-critical"><b>{{ summary.issues_critical }}</b><span>Critical</span></div>
-            <div class="sev-counter sev-high"><b>{{ summary.issues_high }}</b><span>High</span></div>
-            <div class="sev-counter sev-medium"><b>{{ summary.issues_medium }}</b><span>Medium</span></div>
-            <div class="sev-counter sev-low"><b>{{ summary.issues_low }}</b><span>Low</span></div>
-            <div v-if="summary.issues_info" class="sev-counter sev-info"><b>{{ summary.issues_info }}</b><span>Info</span></div>
-          </div>
-          <div class="muted stats-line">
-            {{ summary.total_pages }} страниц · средняя глубина {{ (report.graph_stats || {}).avg_depth }}
-            · сирот: {{ (report.graph_stats || {}).orphan_count }}
-            · sitemap: {{ report.sitemap_url_count }} URL
-          </div>
-          <div v-if="report.crawl_stats" class="crawl-quality">
-            <span>Разобрано: <b>{{ report.crawl_stats.parsed_pages ?? '—' }}</b></span>
-            <span>Ошибки обхода: <b>{{ report.crawl_stats.fetch_errors ?? 0 }}</b></span>
-            <span>Неразобрано: <b>{{ report.crawl_stats.parse_failures ?? 0 }}</b></span>
-            <span>4xx: <b>{{ report.crawl_stats.status_4xx ?? 0 }}</b></span>
-            <span>5xx: <b>{{ report.crawl_stats.status_5xx ?? 0 }}</b></span>
-            <span>Не-HTML: <b>{{ report.crawl_stats.non_html_pages ?? 0 }}</b></span>
-            <span>Заблокировано: <b>{{ report.crawl_stats.blocked_pages ?? 0 }}</b></span>
-            <span>Редиректы: <b>{{ report.crawl_stats.redirected_pages ?? 0 }}</b></span>
-          </div>
+
+        <div class="impact-grid">
+          <div class="impact-card impact-critical"><span>Critical · страницы</span><b>{{ summary.issues_critical ?? 0 }}</b><small>{{ summary.issue_occurrences_critical ?? 0 }} фактов</small></div>
+          <div class="impact-card impact-high"><span>High · страницы</span><b>{{ summary.issues_high ?? 0 }}</b><small>{{ summary.issue_occurrences_high ?? 0 }} фактов</small></div>
+          <div class="impact-card impact-medium"><span>Medium · страницы</span><b>{{ summary.issues_medium ?? 0 }}</b><small>{{ summary.issue_occurrences_medium ?? 0 }} фактов</small></div>
+          <div class="impact-card impact-low"><span>Low · страницы</span><b>{{ summary.issues_low ?? 0 }}</b><small>{{ summary.issue_occurrences_low ?? 0 }} фактов</small></div>
+        </div>
+
+        <div v-if="report.crawl_stats" class="crawl-quality">
+          <span>Разобрано <b>{{ report.crawl_stats.parsed_pages ?? 0 }}/{{ report.crawl_stats.crawled_pages ?? summary.total_pages ?? 0 }}</b></span>
+          <span>Fetch errors <b>{{ report.crawl_stats.fetch_errors ?? 0 }}</b></span>
+          <span>Parse failures <b>{{ report.crawl_stats.parse_failures ?? 0 }}</b></span>
+          <span>4xx <b>{{ report.crawl_stats.status_4xx ?? 0 }}</b></span>
+          <span>5xx <b>{{ report.crawl_stats.status_5xx ?? 0 }}</b></span>
+          <span>Не-HTML <b>{{ report.crawl_stats.non_html_pages ?? 0 }}</b></span>
+          <span>Заблокировано <b>{{ report.crawl_stats.blocked_pages ?? 0 }}</b></span>
+          <span>Редиректы <b>{{ report.crawl_stats.redirected_pages ?? 0 }}</b></span>
+          <span v-if="report.crawl_stats.orphan_check_complete === false" class="crawl-warning">Сироты: нужна полная глубина обхода</span>
+        </div>
+        <div class="overview-footer muted">
+          Средняя глубина: {{ (report.graph_stats || {}).avg_depth ?? 0 }} · сироты: {{ (report.graph_stats || {}).orphan_count ?? 0 }} · sitemap: {{ report.sitemap_url_count ?? 0 }} URL
         </div>
       </section>
 
@@ -428,7 +482,7 @@ onUnmounted(stopPolling);
               <option value="">Все типы ошибок</option>
               <option v-for="c in issueCodes" :key="c" :value="c">{{ issueTitle(c) }}</option>
             </select>
-            <span class="muted">Найдено: {{ filteredIssues.length }}</span>
+            <span class="overview-filter-summary"><b>{{ filteredIssueStats.groups }}</b> правил · <b>{{ filteredIssueStats.pages }}</b> страниц · <b>{{ filteredIssueStats.occurrences }}</b> фактов</span>
             <button class="export-btn" @click="copyIssues">{{ copyFeedback === 'Ошибки скопированы' ? 'Скопировано' : 'Скопировать ошибки' }}</button>
             <button class="export-btn" @click="downloadExport('csv', 'issues')">CSV ошибок</button>
             <button class="export-btn export-primary" @click="downloadExport('xlsx', 'issues')">Excel ошибок</button>
@@ -746,6 +800,7 @@ onUnmounted(stopPolling);
 .crawl-quality { display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .7rem; }
 .crawl-quality span { padding: .28rem .55rem; border: 1px solid rgba(71, 85, 105, .8); border-radius: 999px; color: #cbd5e1; font-size: .78rem; }
 .crawl-quality b { color: #f8fafc; }
+.crawl-warning { border-color: rgba(251, 191, 36, .65) !important; color: #fcd34d !important; }
 .audit-report .tabs { border-bottom: 1px solid rgba(51, 65, 85, .65); padding-bottom: .7rem; }
 .audit-report .tabs button { background: #1f2937; color: #cbd5e1; border-color: #374151; }
 .audit-report .tabs button:hover { background: #334155; }
@@ -779,5 +834,32 @@ onUnmounted(stopPolling);
   .tabs { gap: .25rem; }
   .tabs button, .toolbar .export-btn { font-size: .78rem; }
   .toolbar input { min-width: 100%; }
+}
+
+/* Professional audit dashboard */
+.audit-overview { padding: 1.2rem; }
+.audit-overview-top { display: flex; align-items: center; gap: 1.4rem; }
+.overview-explainer { max-width: 760px; margin: .35rem 0 .8rem; color: #94a3b8; line-height: 1.55; font-size: .88rem; }
+.overview-facts { display: flex; gap: .45rem; flex-wrap: wrap; }
+.overview-facts span { padding: .32rem .55rem; border: 1px solid rgba(71, 85, 105, .72); border-radius: 999px; color: #94a3b8; font-size: .78rem; }
+.overview-facts b, .overview-filter-summary b { color: #f8fafc; }
+.impact-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; margin-top: 1.1rem; }
+.impact-card { min-height: 86px; padding: .7rem .8rem; border: 1px solid rgba(71, 85, 105, .65); border-radius: 12px; background: rgba(15, 23, 42, .66); display: flex; flex-direction: column; gap: .15rem; }
+.impact-card span { color: #94a3b8; font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.impact-card b { color: #f8fafc; font-size: 1.65rem; line-height: 1.1; }
+.impact-card small { color: #64748b; font-size: .73rem; }
+.impact-critical { border-color: rgba(248, 113, 113, .55); }
+.impact-high { border-color: rgba(251, 146, 60, .55); }
+.impact-medium { border-color: rgba(250, 204, 21, .45); }
+.impact-low { border-color: rgba(148, 163, 184, .45); }
+.overview-footer { margin-top: .75rem; font-size: .8rem; }
+.overview-filter-summary { color: #94a3b8; font-size: .82rem; margin-right: auto; }
+.audit-report .tabs { row-gap: .45rem; }
+.audit-report .score-label { letter-spacing: .08em; }
+@media (max-width: 760px) {
+  .audit-overview-top { align-items: flex-start; flex-direction: column; }
+  .score-circle-wrap { margin: 0 auto; }
+  .impact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-filter-summary { width: 100%; order: 3; }
 }
 </style>

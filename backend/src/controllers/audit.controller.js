@@ -362,7 +362,7 @@ const SEVERITY_COLORS = {
 const PAGE_COLUMNS = ['URL','Итоговый URL','HTTP','Fetch status','Parse status','Попытки','Content-Type',
   'X-Robots-Tag','Глубина','Время ответа (мс)','Размер (байт)','Title','Длина title','Title count',
   'Description','Description count','Кол-во H1','Слов','Text/HTML','Hash','HTTPS','Индексируется',
-  'Canonical','Canonical count','Lang','Viewport','Ошибки'];
+  'Canonical','Canonical count','Lang','Viewport','Типов правил','Фактов','Ошибки'];
 
 // issues страницы: legacy ["code",...] или новый формат [{code,count},...]
 function _issueCodesText(issues) {
@@ -373,13 +373,18 @@ function _issueCodesText(issues) {
 }
 
 function _pageRow(r) {
+  const list = Array.isArray(r.issues) ? r.issues : [];
+  const types = list.length;
+  const occurrences = list.reduce((sum, issue) => sum + (issue && typeof issue === 'object'
+    ? (Number(issue.count) || 1) : 1), 0);
   return [
     r.url, r.final_url, r.status_code, r.fetch_status, r.parse_status, r.fetch_attempts,
     r.content_type, r.x_robots_tag, r.crawl_depth, r.response_time_ms, r.content_size_bytes,
     r.title, r.title_length, r.title_count, r.meta_description, r.meta_description_count,
     r.h1_count, r.word_count, r.text_html_ratio, r.content_hash, r.is_https ? 'да' : 'нет',
     r.indexable ? 'да' : 'нет', r.canonical, r.canonical_count, r.html_lang,
-    r.has_viewport == null ? '—' : (r.has_viewport ? 'да' : 'нет'), _issueCodesText(r.issues),
+    r.has_viewport == null ? '—' : (r.has_viewport ? 'да' : 'нет'), types, occurrences,
+    _issueCodesText(r.issues),
   ];
 }
 
@@ -409,6 +414,7 @@ async function _loadReportJson(taskId) {
 }
 
 const ISSUE_COLUMNS = ['URL', 'Код правила', 'Ошибка', 'Критичность', 'Уверенность', 'Доказательство', 'Описание', 'Как исправить'];
+const ISSUE_SUMMARY_COLUMNS = ['Код правила', 'Ошибка', 'Критичность', 'Затронутых страниц', 'Фактов', 'Средняя уверенность', 'Пример доказательства'];
 function _issueEvidence(it) {
   const c = it.context || {};
   const parts = [];
@@ -478,10 +484,31 @@ async function _exportXlsx(res, task, section) {
   const addSummary = () => {
     const ws = wb.addWorksheet('Сводка');
     ws.addRow(['Показатель', 'Значение']);
-    for (const [k, v] of Object.entries(report.summary || {})) ws.addRow([k, _xlsxCell(v)]);
+    for (const [k, v] of Object.entries(report.summary || {})) {
+      if (k === 'issue_groups') continue;
+      ws.addRow([k, _xlsxCell(v)]);
+    }
     for (const [k, v] of Object.entries(report.crawl_stats || {})) ws.addRow([`crawl_${k}`, _xlsxCell(v)]);
     ws.addRow(['audit_version', _xlsxCell(report.audit_version || 'legacy')]);
     ws.columns.forEach((c, i) => { c.width = i === 0 ? 32 : 24; });
+    _styleSheet(ws);
+  };
+
+  const addRuleSummary = () => {
+    const ws = wb.addWorksheet('Правила');
+    ws.addRow(ISSUE_SUMMARY_COLUMNS).font = { bold: true };
+    const groups = Array.isArray((report.summary || {}).issue_groups) ? report.summary.issue_groups : [];
+    for (const group of groups) {
+      const meta = defs[group.code] || {};
+      const context = group.sample_context || {};
+      ws.addRow([
+        _xlsxCell(group.code), _xlsxCell(meta.title || group.code), _xlsxCell(group.severity),
+        _xlsxCell(group.affected_pages || 0), _xlsxCell(group.occurrences || 0),
+        _xlsxCell(group.confidence == null ? '—' : `${Math.round(Number(group.confidence) * 100)}%`),
+        _xlsxCell(_issueEvidence({ context })),
+      ]);
+    }
+    ws.columns.forEach((c, i) => { c.width = i === 6 ? 58 : (i === 1 ? 42 : 22); });
     _styleSheet(ws);
   };
 
@@ -528,7 +555,7 @@ async function _exportXlsx(res, task, section) {
   else if (section === 'duplicates') addDuplicates();
   else if (section === 'orphans') addOrphans();
   else if (section === 'pages') await addPages();
-  else { addSummary(); await addIssues(); addDuplicates(); addOrphans(); await addPages(); }
+  else { addSummary(); addRuleSummary(); await addIssues(); addDuplicates(); addOrphans(); await addPages(); }
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="audit-${task.id}${section === 'all' ? '' : '-' + section}.xlsx"`);
