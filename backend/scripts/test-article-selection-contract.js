@@ -47,6 +47,20 @@ for (const view of views) {
   }
 }
 
+const infoSource = fs.readFileSync(
+  path.resolve(__dirname, '../../frontend/src/views/InfoArticlePage.vue'),
+  'utf8',
+);
+const infoFieldsStart = infoSource.indexOf('const ARTICLE_CONTENT_FIELDS');
+const infoFields = infoSource.slice(infoFieldsStart, infoSource.indexOf(']);', infoFieldsStart) + 3);
+if (infoFields.indexOf("'article_html'") < 0
+    || infoFields.indexOf("'article_html'") > infoFields.indexOf("'article_html_with_schema'")) {
+  throw new Error('blog: ordinary article_html must be preferred over schema HTML for preview');
+}
+if (!infoSource.includes('try {\n      const cleaned = DOMPurify.sanitize(candidate')) {
+  throw new Error('blog: sanitizer must fail closed per candidate instead of breaking the whole page');
+}
+
 const linkSource = fs.readFileSync(
   path.resolve(__dirname, '../../frontend/src/views/LinkArticlePage.vue'),
   'utf8',

@@ -791,9 +791,10 @@ watch(() => selectedTask.value?.id, () => {
 });
 
 const ARTICLE_CONTENT_FIELDS = Object.freeze([
-  // Schema-вариант обычно содержит тот же контент плюс JSON-LD и помогает
-  // восстановить старые задачи, где обычное article_html было пустым/неполным.
-  'article_html_with_schema', 'article_html', 'content_html', 'html', 'article_content', 'content',
+  // Для экранного preview сначала используем обычный article_html: schema-версия
+  // может быть заметно тяжелее и содержит служебный JSON-LD. Schema остаётся
+  // fallback для старых сохранённых задач, где обычное поле отсутствует.
+  'article_html', 'article_html_with_schema', 'content_html', 'html', 'article_content', 'content',
 ]);
 
 const articleHtmlCandidates = computed(() => {
@@ -836,13 +837,18 @@ const sanitizedHtml = computed(() => {
   // «data:image/png;base64:» и поэтому DOMPurify вырезал ВСЕ картинки —
   // именно из-за этого пользователи раньше не видели обложек статей.
   for (const candidate of articleHtmlCandidates.value) {
-    const cleaned = DOMPurify.sanitize(candidate, {
-      ADD_ATTR: ['target'],
-      ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-    });
-    // Один из legacy-вариантов может состоять только из служебной разметки.
-    // Перебираем сохранённые поля, пока не найдём видимый контент.
-    if (cleaned.trim()) return cleaned;
+    try {
+      const cleaned = DOMPurify.sanitize(candidate, {
+        ADD_ATTR: ['target'],
+        ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+      });
+      // Один из legacy-вариантов может состоять только из служебной разметки.
+      // Перебираем сохранённые поля, пока не найдём видимый контент.
+      if (cleaned.trim()) return cleaned;
+    } catch (_) {
+      // Повреждённая/чрезмерно сложная legacy-разметка не должна ронять весь
+      // экран. Переходим к следующему сохранённому представлению или plain.
+    }
   }
   return plainTextToHtml(plain);
 });
