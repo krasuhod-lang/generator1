@@ -491,6 +491,13 @@ function taskHref(t) {
       : (['queued', 'processing', 'running'].includes(status) ? 'monitor' : 'edit');
     return `/tasks/${t.id}/${suffix}`;
   }
+  // InfoArticlePage — единый экран списка и результата. Открываем его через
+  // query-параметр, который после загрузки списка вызывает getTask(id).
+  // Маршрута `/info-article/:id` в router нет, поэтому старый URL приводил
+  // к пустому/невыбранному экрану вместо готовой статьи.
+  if (t.type === 'info_article') {
+    return { path: '/info-article', query: { open: String(t.id) } };
+  }
   return (TASK_TYPE_ROUTES[t.type] || '/') + t.id;
 }
 function taskStatusClass(s) {
