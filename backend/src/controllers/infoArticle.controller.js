@@ -48,14 +48,15 @@ const MAX_BRAND_LEN  = 200;
 const MAX_FACTS_LEN  = 4000;
 const MAX_FILENAME_LEN = 250;
 const ALLOWED_FORMATS = ['html', 'formatted_text'];
-// Бизнес-требование: «по изображениям, надо чтобы мы сами указали количество
-// создания изображений. Делается только для статьи в блог». Pipeline сейчас
-// поддерживает 0..6 (см. CHECK constraint миграции 056 + Stage 4 / embedImages).
-//   • 0 — «Не нужны изображения»: pipeline целиком пропускает Stage 4 и
-//     генерацию картинок (см. infoArticlePipeline.js).
-//   • 1..6 — обычная генерация (slot=1 cover + slot=2..N inline).
+// Blog image contract:
+//   • для новых задач cover создаётся всегда;
+//   • inline-изображения добавляются только по явному полю inline_images_count;
+//   • UI предлагает 0..3 inline, поэтому новая задача получает 1..4 total slots;
+//   • legacy images_count сохраняется для старых клиентов/задач (0..6).
 const MIN_IMAGES_COUNT = 0;
 const MAX_IMAGES_COUNT = 6;
+const MIN_INLINE_IMAGES_COUNT = 0;
+const MAX_INLINE_IMAGES_COUNT = 3;
 
 // UUID v4 / любая версия.
 const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -88,6 +89,24 @@ function clampImagesCount(v) {
   if (n < MIN_IMAGES_COUNT) return MIN_IMAGES_COUNT;
   if (n > MAX_IMAGES_COUNT) return MAX_IMAGES_COUNT;
   return n;
+}
+
+function clampInlineImagesCount(v) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return 0;
+  if (n < MIN_INLINE_IMAGES_COUNT) return MIN_INLINE_IMAGES_COUNT;
+  if (n > MAX_INLINE_IMAGES_COUNT) return MAX_INLINE_IMAGES_COUNT;
+  return n;
+}
+
+function resolveImagesCount(body = {}) {
+  // Новое поле явно выражает пользовательское решение по inline-визуалам.
+  // Cover не отключается: total = 1 cover + requested inline.
+  if (Object.prototype.hasOwnProperty.call(body, 'inline_images_count')) {
+    return 1 + clampInlineImagesCount(body.inline_images_count);
+  }
+  // Legacy clients keep their old 0..6 semantics. New UI never sends 0.
+  return clampImagesCount(body.images_count);
 }
 
 // ─── GET /api/info-article ─────────────────────────────────────────
@@ -166,9 +185,9 @@ async function createInfoArticleTask(req, res, next) {
       ? String(body.output_format).toLowerCase()
       : 'html';
     const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
-    // Изображения: 1..6, default 1. Для статьи в блог пользователь сам
-    // указывает количество — см. бизнес-требование (D).
-    const imagesCount  = clampImagesCount(body.images_count);
+    // Новая форма отправляет inline_images_count: cover всегда + 0..3 inline.
+    // Старые клиенты с images_count продолжают работать по legacy-контракту.
+    const imagesCount = resolveImagesCount(body);
     // Опциональная связка с отчётом релевантности — Wave 1 competitor_signals
     // и entity_coverage уйдут в IAKB §9 / __moduleContext (см. server pipeline).
     // Невалидное / чужое / незавершённое id молча превращаем в null.

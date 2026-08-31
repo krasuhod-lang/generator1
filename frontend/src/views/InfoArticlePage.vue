@@ -55,11 +55,11 @@ const form = ref({
   brand_facts:   '',
   output_format: 'html',
   gemini_model:  'gemini-3.1-pro-preview',
-  // Количество генерируемых изображений (0..6, default 1).
-  // 0 — «Не нужны изображения»: backend пропускает генерацию картинок целиком.
-  // По бизнес-требованию: «делается только для статьи в блог» — поле живёт
-  // только здесь. Backend проверяет диапазон ещё раз (см. clampImagesCount).
-  images_count:  1,
+  // Новая семантика: обложка обязательна, inline-изображения опциональны.
+  // Пользователь явно выбирает 0..3 дополнительных изображений по блокам статьи.
+  inline_images_count: 0,
+  // Legacy total сохраняется в payload для старых серверных контрактов.
+  images_count: 1,
   // Опциональная привязка к отчёту релевантности — приходит через query
   // (?prefill_relevance_report_id=…), пользователю не показываем как input.
   source_relevance_report_id: '',
@@ -94,7 +94,23 @@ const DRAFT_KEY = 'info_article_draft_v1';
 onMounted(() => {
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
-    if (raw) Object.assign(form.value, JSON.parse(raw));
+    if (raw) {
+      const draft = JSON.parse(raw);
+      Object.assign(form.value, draft);
+      // Миграция старого draft: images_count был общим total-числом.
+      // В новой форме cover всегда занимает один слот.
+      if (!Object.prototype.hasOwnProperty.call(draft, 'inline_images_count')) {
+        const legacyTotal = parseInt(draft.images_count, 10);
+        form.value.inline_images_count = Number.isFinite(legacyTotal)
+          ? Math.max(0, Math.min(3, legacyTotal - 1))
+          : 0;
+      } else {
+        const inline = parseInt(form.value.inline_images_count, 10);
+        form.value.inline_images_count = Number.isFinite(inline)
+          ? Math.max(0, Math.min(3, inline))
+          : 0;
+      }
+    }
   } catch (_) { /* ignore */ }
   try {
     const pid = localStorage.getItem(PROJECT_ID_LS_KEY);
@@ -429,15 +445,16 @@ async function handleCreate() {
 
   submitting.value = true;
   try {
-    saveDraft();
-    // Клампим images_count в [0..6] на клиенте — backend всё равно проверит,
-    // но так UI сразу показывает корректное значение в drafts. 0 — «Не нужны
-    // изображения». Невалидный ввод (NaN) трактуем как default 1.
-    const parsedImages = parseInt(form.value.images_count, 10);
-    const imagesCount = Number.isFinite(parsedImages)
-      ? Math.max(0, Math.min(6, parsedImages))
-      : 1;
+    // Обложка обязательна. Дополнительные inline-изображения задаются явно
+    // пользователем и ограничены 0..3; backend повторно проверяет диапазон.
+    const parsedInlineImages = parseInt(form.value.inline_images_count, 10);
+    const inlineImagesCount = Number.isFinite(parsedInlineImages)
+      ? Math.max(0, Math.min(3, parsedInlineImages))
+      : 0;
+    const imagesCount = 1 + inlineImagesCount;
+    form.value.inline_images_count = inlineImagesCount;
     form.value.images_count = imagesCount;
+    saveDraft();
     const payload = {
       topic,
       region,
@@ -446,6 +463,7 @@ async function handleCreate() {
       brand_facts:  form.value.brand_facts.trim(),
       output_format: form.value.output_format,
       images_count: imagesCount,
+      inline_images_count: inlineImagesCount,
       gemini_model:  form.value.gemini_model,
       commercial_links: parsedLinks.value,
       commercial_links_filename: fileMeta.value?.name || '',
@@ -1353,30 +1371,28 @@ onUnmounted(() => { stopTicker(); });
               </div>
               <div>
                 <label class="label">
-                  Количество изображений <span class="text-gray-500 text-xs">(0–6, 0 = без изображений)</span>
+                  Изображения статьи <span class="text-gray-500 text-xs">(обложка обязательна)</span>
                 </label>
-                <div class="flex items-center gap-3">
-                  <label class="inline-flex items-center gap-2 cursor-pointer text-sm text-gray-300 select-none">
-                    <input
-                      type="checkbox"
-                      :checked="(form.images_count || 0) === 0"
-                      @change="form.images_count = $event.target.checked ? 0 : 1"
-                      class="accent-indigo-500"
-                    />
-                    Не нужны изображения
+                <div class="flex flex-wrap items-center gap-3">
+                  <span class="text-sm text-indigo-200">1 обложка</span>
+                  <label class="text-sm text-gray-300">
+                    Дополнительные изображения
+                    <select v-model.number="form.inline_images_count" class="input ml-2 w-24 py-1.5">
+                      <option :value="0">0</option>
+                      <option :value="1">1</option>
+                      <option :value="2">2</option>
+                      <option :value="3">3</option>
+                    </select>
                   </label>
-                  <input
-                    type="number"
-                    v-model.number="form.images_count"
-                    min="0" max="6" step="1"
-                    :disabled="(form.images_count || 0) === 0"
-                    class="input w-20 disabled:opacity-50"
-                  />
                   <span class="text-xs text-gray-400">
-                    <template v-if="(form.images_count || 0) === 0">изображения не будут сгенерированы</template>
-                    <template v-else>slot=1 — обложка после &lt;h1&gt;{{ (form.images_count || 1) > 1 ? `; slot=2..${form.images_count} — иллюстрации перед целевыми H2` : '' }}</template>
+                    {{ form.inline_images_count > 0
+                      ? `Всего ${1 + Number(form.inline_images_count)}: обложка + ${form.inline_images_count} по релевантным блокам`
+                      : 'Только обложка: дополнительные изображения не создаются' }}
                   </span>
                 </div>
+                <p class="text-[11px] text-gray-500 mt-1">
+                  Дополнительные изображения будут привязаны к самостоятельным H2-блокам статьи и вставлены перед соответствующими разделами.
+                </p>
               </div>
               <GeminiModelSelector
                 v-model="form.gemini_model"

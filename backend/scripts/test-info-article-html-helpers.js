@@ -62,10 +62,27 @@ test('embedImages — does NOT embed when there is no successful image', () => {
   );
 });
 
-test('embedImages — does NOT double-embed when writer already inserted <img>', () => {
+test('embedImages — mandatory cover is added without removing writer inline image', () => {
   const html = '<h1>X</h1><p>Текст с <img src="x.png"/></p>';
-  const out = embedImages(html, [{ status: 'done', image_base64: 'CC', mime_type: 'image/png', alt_ru: '' }]);
-  assert.strictEqual((out.match(/<img\b/g) || []).length, 1, 'still exactly one <img>');
+  const out = embedImages(html, [{ slot: 1, status: 'done', image_base64: 'CC', mime_type: 'image/png', alt_ru: 'Обложка' }]);
+  assert.strictEqual((out.match(/<img\b/g) || []).length, 2, 'cover + existing inline image');
+  assert.strictEqual((out.match(/info-article-cover/g) || []).length, 1, 'one cover figure');
+});
+test('embedImages — does not duplicate an existing generated cover figure', () => {
+  const html = '<h1>X</h1><figure class="info-article-cover"><img src="existing.png" /></figure><p>Y</p>';
+  const out = embedImages(html, [{ slot: 1, status: 'done', image_base64: 'DD', mime_type: 'image/png', alt_ru: 'Новая обложка' }]);
+  assert.strictEqual((out.match(/info-article-cover/g) || []).length, 1, 'one cover figure');
+  assert.ok(!/data:image\/png;base64,DD/.test(out), 'existing cover is preserved');
+});
+test('embedImages — inserts inline slot before the matching H2', () => {
+  const html = '<h1>X</h1><h2>Как работает механизм</h2><p>Текст.</p>';
+  const out = embedImages(html, [
+    { slot: 1, status: 'done', image_base64: 'EE', mime_type: 'image/png', alt_ru: 'Обложка' },
+    { slot: 2, status: 'done', image_base64: 'FF', mime_type: 'image/jpeg', alt_ru: 'Механизм', section_h2: 'Как работает механизм' },
+  ]);
+  const inlinePos = out.indexOf('data:image/jpeg;base64,FF');
+  const h2Pos = out.indexOf('<h2>Как работает механизм</h2>');
+  assert.ok(inlinePos >= 0 && inlinePos < h2Pos, 'inline figure before matched H2');
 });
 
 test('embedImages — strips leftover IMAGE_SLOT placeholders + empty <p></p>', () => {

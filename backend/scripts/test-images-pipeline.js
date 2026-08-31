@@ -150,6 +150,20 @@ async function main() {
     const chosen = plan.filter((p) => p.slot != null);
     assert.strictEqual(chosen.length, 2); // cover + 1 inline
   });
+  await check('explicit inline=0 keeps mandatory cover only', () => {
+    const plan = planImageIntents({ topic: 'x', sections: SECTIONS, maxImages: 1, maxInlineImages: 3, editorialMode: 'relaxed' });
+    const chosen = plan.filter((p) => p.slot != null);
+    assert.strictEqual(chosen.length, 1);
+    assert.strictEqual(chosen[0].slot, 1);
+    assert.strictEqual(chosen[0].image_intent, 'cover');
+  });
+  await check('explicit inline budget supports at most three contextual slots', () => {
+    const plan = planImageIntents({ topic: 'x', sections: SECTIONS, maxImages: 4, maxInlineImages: 3, editorialMode: 'relaxed' });
+    const chosen = plan.filter((p) => p.slot != null);
+    assert.ok(chosen.length <= 4, 'cover + max 3 inline');
+    assert.strictEqual(chosen[0].slot, 1);
+    assert.ok(new Set(chosen.slice(1).map((p) => p.section_key)).size === chosen.length - 1, 'inline sections unique');
+  });
 
   console.log('imageSceneExtractor');
   await check('extracts objects + anchors, low generic risk', () => {

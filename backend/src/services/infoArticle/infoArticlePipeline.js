@@ -1016,19 +1016,18 @@ async function runImagePromptsGen(task, outline, articleHtml, audience, ctx, ima
     `topic: ${task.topic}`,
     `region: ${task.region || '[не задано]'}`,
     `images_count_required: ${N}`,
+    `inline_images_count_required: ${Math.max(0, N - 1)}`,
     `audience_digest: ${JSON.stringify(audience).slice(0, 2000)}`,
     `stage2_outline: ${JSON.stringify(outline).slice(0, 6000)}`,
     `article_html: ${articleHtml.slice(0, 12000)}`,
     '',
-    // Прокидываем количество прямо в user-промт. Stage 4 system-промт
-    // знает про images_count_required (см. stage4_image_prompts.txt).
-    // Если N=1 — поведение сохраняется (1 cover-слот). Если N>1 — модель
-    // выдаёт slot=1 cover + slot=2..N inline-иллюстрации, привязанные к
-    // конкретным H2 из outline (по target_section_index / section_h2).
-    `Сгенерируй РОВНО ${N} image_prompts.`,
+    // Прокидываем total и явный inline-бюджет прямо в user-промт.
+    // Для новой формы N = 1 cover + inline_images_count. Если N=1, модель
+    // не должна создавать внутренние иллюстрации.
+    `Сгенерируй РОВНО ${N} image_prompts: 1 обязательный cover + ${Math.max(0, N - 1)} inline.`,
     N === 1
-      ? `Это slot=1 cover (как раньше).`
-      : `slot=1 — обложка (как раньше); slot=2..${N} — inline-иллюстрации, ` +
+      ? `Это только slot=1 cover; дополнительных inline-изображений не нужно.`
+      : `slot=1 — обложка; slot=2..${N} — inline-иллюстрации, ` +
         `каждая привязана к УНИКАЛЬНОЙ H2 из stage2_outline (поле section_h2 ` +
         `должно совпадать с outline.sections[i].h2). Не дублируй секции.`,
   ].join('\n');
@@ -1203,8 +1202,9 @@ function embedImages(html, imagePrompts) {
   //     ни один h2 не совпал — слот молча пропускается (остаётся в галерее
   //     отдельно как download-файл, чтобы пользователь мог вставить вручную).
   //
-  // Защита от двойной вставки сохранена для cover: если writer всё-таки
-  // вставил <img>/<figure> в начале статьи — cover повторно не добавляем.
+  // Защита от двойной вставки сохранена только для нашей cover-фигуры.
+  // Наличие любой inline-картинки в теле статьи не должно отменять обязательную
+  // cover после h1.
   let out = String(html || '');
   out = out.replace(/<!--\s*IMAGE_SLOT_\d+\s*-->/gi, '');
   out = out.replace(/<p>\s*<\/p>/gi, '');
@@ -1237,10 +1237,12 @@ function embedImages(html, imagePrompts) {
     return `<figure class="${klass}">${img}${caption}</figure>`;
   };
 
-  // ── 1) Cover (slot=1 / первый). ───────────────────────────────────
-  const cover = ready.find((p) => (p.slot || 1) === 1) || ready[0];
-  const coverIsFirst = cover === ready[0];
-  if (coverIsFirst && !/<img\b|<figure\b/i.test(out)) {
+  // ── 1) Cover (только slot=1). ─────────────────────────────────────
+  // Inline slot не превращаем в обложку, если cover упал: это важно для
+  // честного QA и для корректного соответствия назначению изображения.
+  const cover = ready.find((p) => (p.slot || 1) === 1);
+  const coverAlreadyEmbedded = /<figure\b[^>]*class=["'][^"']*\binfo-article-cover\b/i.test(out);
+  if (cover && !coverAlreadyEmbedded) {
     const figure = buildFigure(cover, 'info-article-cover');
     const h1Re = /<\/h1\s*>/i;
     if (h1Re.test(out)) {
@@ -2539,10 +2541,10 @@ async function processInfoArticleTask(taskId) {
     }
 
     // 12. Stage 4 image prompts
-    // task.images_count приходит из миграции 022 (CHECK 0..6, default 1).
-    //   • 0 — пользователь выбрал «Не нужны изображения» → весь блок
-    //     генерации картинок (Stage 4 + Nano Banana + Image QA) пропускаем.
-    //   • На очень старых задачах поле может отсутствовать → fallback к 1.
+    // task.images_count хранит total slots для обратной совместимости.
+    // Новые задачи получают total = 1 обязательный cover + 0..3 inline.
+    // Legacy task с images_count=0 сохраняет старое поведение и пропускает
+    // изображения; новые формы это значение больше не отправляют.
     const parsedImagesCount = parseInt(task.images_count, 10);
     const imagesCount = Number.isFinite(parsedImagesCount)
       ? Math.max(0, Math.min(6, parsedImagesCount))
