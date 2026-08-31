@@ -18,6 +18,9 @@ for (const field of ['final_url', 'fetch_status', 'parse_status', 'fetch_attempt
   assert(controller.includes(field), `controller missing ${field}`);
 }
 assert(controller.includes('headers: await _authHeaders()'), 'audit report must await internal auth headers');
+assert(controller.includes('const localTaskId = crypto.randomUUID()'), 'audit start must generate a local UUID');
+assert(controller.includes('VALUES ($1::uuid, $2::uuid, $3::varchar, \'running\', $4::jsonb, $5::text'), 'audit start must use explicitly typed independent SQL parameters');
+assert(controller.includes('[localTaskId, userId, parsed.href, JSON.stringify(config), String(py.task_id)]'), 'audit start must bind local UUID and Python text id separately');
 for (const column of ['Код правила', 'Уверенность', 'Доказательство', 'Content-Type', 'Parse status']) {
   assert(controller.includes(column), `export missing ${column}`);
 }

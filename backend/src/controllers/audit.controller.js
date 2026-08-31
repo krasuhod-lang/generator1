@@ -101,12 +101,13 @@ async function startAudit(req, res) {
       return res.status(502).json({ error: 'audit_service_unavailable', detail: String(e.message).slice(0, 200) });
     }
 
+    const localTaskId = crypto.randomUUID();
     const { rows } = await db.query(
       `INSERT INTO audit_tasks
          (id, user_id, url, status, config, python_task_id, started_at, heartbeat_at, updated_at)
-       VALUES ($1, $2, $3, 'running', $4::jsonb, $1, NOW(), NOW(), NOW())
+       VALUES ($1::uuid, $2::uuid, $3::varchar, 'running', $4::jsonb, $5::text, NOW(), NOW(), NOW())
        RETURNING id, status, created_at`,
-      [py.task_id, userId, parsed.href, JSON.stringify(config)],
+      [localTaskId, userId, parsed.href, JSON.stringify(config), String(py.task_id)],
     );
     res.status(201).json({ task_id: rows[0].id, status: 'running', url: parsed.href });
   } catch (e) {
