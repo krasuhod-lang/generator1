@@ -1944,7 +1944,7 @@ async function processLinkArticleTask(taskId) {
               execution_started_at = NULL,
               gemini_cache_name = NULL,
               updated_at     = NOW()
-        WHERE id = $1 AND execution_token = $10::uuid`,
+        WHERE id = $1 AND execution_token = $9::uuid`,
       [
         taskId, finalHtml, finalPlain,
         articleHtmlWithSchema, jsonLdBlocks ? JSON.stringify(jsonLdBlocks) : null, authorByline,
