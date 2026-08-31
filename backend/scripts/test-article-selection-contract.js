@@ -45,6 +45,16 @@ for (const view of views) {
       || source.includes('selectedTaskError.value = err.response?.data?.error')) {
     throw new Error(`${view.name}: selection must not expose raw detail errors in the client UI`);
   }
+
+  if (view.name === 'blog') {
+    if (!source.includes('const resultTabs = Object.freeze([')
+        || !source.includes('<template v-for="tab in resultTabs" :key="tab.k">')) {
+      throw new Error('blog: result tabs must use a template wrapper for conditional rendering');
+    }
+    if (/<button[^>]*v-for="tab in/.test(source) && /<button[^>]*v-if="tab\.k/.test(source)) {
+      throw new Error('blog: v-if and v-for must not share the same button element');
+    }
+  }
 }
 
 const infoSource = fs.readFileSync(

@@ -724,6 +724,13 @@ watch(() => store.tasks, (arr) => {
 
 // ── Result tabs + helpers ────────────────────────────────────────────
 const activeResultTab = ref('article'); // 'article' | 'links' | 'quality' | 'metrics' | 'json'
+const resultTabs = Object.freeze([
+  { k: 'article', label: '📄 Статья' },
+  { k: 'json', label: '🧩 JSON' },
+  { k: 'links', label: '🔗 Перелинковка' },
+  { k: 'quality', label: '🧪 Качество' },
+  { k: 'metrics', label: '💰 Метрики' },
+]);
 const articlePreviewRef = ref(null);
 
 // ── ACF JSON для статьи блога (задача: «Сформировать JSON») ────────────
@@ -1557,20 +1564,15 @@ onUnmounted(() => { stopTicker(); });
 
           <!-- Табы -->
           <div class="border-b border-gray-800 flex gap-1 -mb-px">
-            <button v-for="tab in [
-                     { k: 'article', label: '📄 Статья' },
-                     { k: 'json',    label: '🧩 JSON' },
-                     { k: 'links',   label: '🔗 Перелинковка' },
-                     { k: 'quality', label: '🧪 Качество' },
-                     { k: 'metrics', label: '💰 Метрики' },
-                   ]" :key="tab.k"
-                   type="button"
-                   class="px-3 py-2 text-xs uppercase tracking-wider border-b-2 transition-colors"
-                   :class="activeResultTab === tab.k ? 'border-indigo-500 text-indigo-300' : 'border-transparent text-gray-500 hover:text-gray-300'"
-                   v-if="tab.k !== 'metrics' || !isClient"
-                   @click="activeResultTab = tab.k">
-              {{ tab.label }}
-            </button>
+            <template v-for="tab in resultTabs" :key="tab.k">
+              <button v-if="tab.k !== 'metrics' || !isClient"
+                      type="button"
+                      class="px-3 py-2 text-xs uppercase tracking-wider border-b-2 transition-colors"
+                      :class="activeResultTab === tab.k ? 'border-indigo-500 text-indigo-300' : 'border-transparent text-gray-500 hover:text-gray-300'"
+                      @click="activeResultTab = tab.k">
+                {{ tab.label }}
+              </button>
+            </template>
           </div>
 
           <!-- TAB: Статья -->
