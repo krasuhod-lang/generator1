@@ -37,9 +37,13 @@ assert.match(dashboard, /info_article:[\s\S]*\/info-article/,
   'Dashboard must open blog tasks through the supported query deep-link');
 assert.match(dashboard, /link_article:[\s\S]*\/link-article/,
   'Dashboard must open link tasks through the supported query deep-link');
-assert.match(infoPage, /<iframe[^>]+:srcdoc="sanitizedHtml"/,
-  'blog result must use an isolated srcdoc viewer');
-assert(!/<article[^>]+v-html="sanitizedHtml"/.test(infoPage),
-  'blog result must not inject the large HTML directly into the parent Vue tree');
+assert.match(infoPage, /const sanitizeArticleCandidate = \(candidate\) => DOMPurify\.sanitize/,
+  'blog result must sanitize candidates through a dedicated helper');
+assert.match(infoPage, /const sanitizedHtml = computed\(\(\) =>[\s\S]*sanitizeArticleCandidate\(candidate\)/,
+  'blog result computed viewer must use the safe sanitizer helper');
+assert.match(infoPage, /<article[^>]+v-html="sanitizedHtml"/,
+  'blog result must use the same direct article viewer as the working link page');
+assert(!/<iframe[^>]+:srcdoc="sanitizedHtml"/.test(infoPage),
+  'blog result must not use the incompatible iframe viewer');
 
 console.log('task center and blog viewer contract: OK');

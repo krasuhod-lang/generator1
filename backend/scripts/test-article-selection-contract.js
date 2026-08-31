@@ -57,15 +57,15 @@ if (infoFields.indexOf("'article_html'") < 0
     || infoFields.indexOf("'article_html'") > infoFields.indexOf("'article_html_with_schema'")) {
   throw new Error('blog: ordinary article_html must be preferred over schema HTML for preview');
 }
-if (!infoSource.includes("const sanitizedHtml = ref('')")
-    || !infoSource.includes("const articleRenderState = ref('idle')")
-    || !infoSource.includes('await new Promise((resolve) => setTimeout(resolve, 0))')
+if (!infoSource.includes('const sanitizeArticleCandidate = (candidate) => DOMPurify.sanitize')
+    || !infoSource.includes('const sanitizedHtml = computed(() =>')
     || !infoSource.includes('const cleaned = sanitizeArticleCandidate(candidate)')
     || !infoSource.includes('catch (_)')) {
-  throw new Error('blog: article rendering must be async and fail-safe per candidate');
+  throw new Error('blog: article rendering must use the direct fail-safe sanitizer viewer');
 }
-if (!infoSource.includes('articleRenderState === \'loading\'')) {
-  throw new Error('blog: the result panel must show visible render progress');
+if (!infoSource.includes('<article ref="articlePreviewRef"')
+    || !infoSource.includes('v-html="sanitizedHtml"')) {
+  throw new Error('blog: the result panel must render the sanitized article directly');
 }
 
 const linkSource = fs.readFileSync(

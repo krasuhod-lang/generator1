@@ -820,63 +820,27 @@ function plainTextToHtml(value) {
   ).join('');
 }
 
-// Рендер blog HTML не должен блокировать первый paint страницы: готовые статьи
-// могут содержать 1–4 MB HTML с base64-изображениями. Синхронный DOMPurify в
-// computed ранее мог надолго заморозить весь экран (особенно в mobile WebKit).
-const sanitizedHtml = ref('');
-const articleRenderState = ref('idle'); // idle | loading | ready | empty | error
-let articleRenderSeq = 0;
-
+// Blog result использует тот же проверенный viewer, что и LinkArticlePage:
+// DOMPurify → computed → прямой v-html внутри изолированной карточки. Это
+// важно для совместимости со старыми сохранёнными статьями и текущим UX.
 const sanitizeArticleCandidate = (candidate) => DOMPurify.sanitize(candidate, {
   ADD_ATTR: ['target'],
   ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 });
 
-async function renderSelectedArticle() {
-  const seq = ++articleRenderSeq;
-  const candidates = articleHtmlCandidates.value.slice();
-  const plain = String(selectedTask.value?.article_plain || selectedTask.value?.text || '');
-  sanitizedHtml.value = '';
-  articleRenderState.value = candidates.length || plain.trim() ? 'loading' : 'empty';
-  if (!candidates.length && !plain.trim()) return;
-
-  // Даём Vue отрисовать header/loading, прежде чем обрабатывать большой HTML.
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  if (seq !== articleRenderSeq) return;
-
-  for (const candidate of candidates) {
+const sanitizedHtml = computed(() => {
+  const plain = selectedTask.value?.article_plain || selectedTask.value?.text || '';
+  if (!articleHtmlCandidates.value.length && !String(plain).trim()) return '';
+  for (const candidate of articleHtmlCandidates.value) {
     try {
       const cleaned = sanitizeArticleCandidate(candidate);
-      if (cleaned.trim()) {
-        if (seq !== articleRenderSeq) return;
-        sanitizedHtml.value = cleaned;
-        articleRenderState.value = 'ready';
-        return;
-      }
+      if (cleaned.trim()) return cleaned;
     } catch (_) {
-      // Повреждённая/чрезмерно сложная legacy-разметка не должна ронять весь
-      // экран. Переходим к следующему сохранённому представлению или plain.
+      // Невалидный legacy-вариант не должен скрывать следующий fallback.
     }
-    // Не удерживаем main thread между несколькими legacy-кандидатами.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    if (seq !== articleRenderSeq) return;
   }
-
-  const fallback = plainTextToHtml(plain);
-  if (seq !== articleRenderSeq) return;
-  if (fallback.trim()) {
-    sanitizedHtml.value = fallback;
-    articleRenderState.value = 'ready';
-  } else {
-    articleRenderState.value = 'error';
-  }
-}
-
-watch(
-  () => selectedTask.value,
-  () => { renderSelectedArticle(); },
-  { immediate: true },
-);
+  return plainTextToHtml(plain);
+});
 
 async function copyAsHtml() {
   const rawHtml = articleSourceHtml.value || selectedTask.value?.article_plain || '';
@@ -933,9 +897,8 @@ async function copyAsFormattedText() {
   // Path A (приоритет): selection-based copy через execCommand —
   // обеспечивает корректную вставку в WYSIWYG-редакторы блогов и Word.
   await nextTick();
-  const frame = articlePreviewRef.value;
-  if (!frame) return;
-  const el = frame.contentDocument?.body || frame;
+  const el = articlePreviewRef.value;
+  if (!el) return;
   try {
     const range = document.createRange();
     range.selectNodeContents(el);
@@ -949,8 +912,8 @@ async function copyAsFormattedText() {
   // Path B fallback: ClipboardItem с text/html.
   try {
     if (navigator.clipboard && window.ClipboardItem) {
-      const htmlContent = frame.contentDocument?.body?.innerHTML || sanitizedHtml.value;
-      const plain = selectedTask.value.article_plain || frame.contentDocument?.body?.innerText || '';
+      const htmlContent = el.innerHTML || sanitizedHtml.value;
+      const plain = selectedTask.value.article_plain || el.innerText || '';
       await navigator.clipboard.write([new ClipboardItem({
         'text/html':  new Blob([htmlContent], { type: 'text/html' }),
         'text/plain': new Blob([plain], { type: 'text/plain' }),
@@ -1723,20 +1686,9 @@ onUnmounted(() => { stopTicker(); });
               </div>
             </div>
 
-            <div v-if="articleRenderState === 'loading'" class="rounded-lg border border-indigo-900/60 bg-indigo-950/20 px-3 py-2 text-xs text-indigo-200">
-              Подготавливаем отображение сохранённой статьи…
-            </div>
-            <div v-else-if="articleRenderState === 'error'" role="alert" class="rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs text-red-200">
-              Не удалось отобразить HTML статьи. Попробуйте открыть задачу ещё раз.
-            </div>
-            <div v-if="sanitizedHtml" class="info-article-preview bg-gray-950 border border-gray-800 rounded-lg overflow-hidden">
-              <iframe ref="articlePreviewRef"
-                      :srcdoc="sanitizedHtml"
-                      title="Готовая статья для блога"
-                      class="w-full bg-white"
-                      style="height: 720px; border: 0;"
-                      sandbox="allow-same-origin"></iframe>
-            </div>
+            <article ref="articlePreviewRef"
+                     class="info-article-preview prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
+                     v-html="sanitizedHtml"></article>
           </div>
 
 
