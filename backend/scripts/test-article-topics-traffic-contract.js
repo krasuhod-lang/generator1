@@ -141,6 +141,13 @@ check('project history queries содержат все content sources', () => {
   }
 });
 
+check('tasks_auto_log receives only the parameters used by its SQL', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'articleTopics', 'projectContentHistory.js'), 'utf8');
+  assert.ok(source.includes("source.source === 'tasks_auto_log'"));
+  assert.ok(source.includes('? [this.projectId, this.userId]'));
+  assert.ok(source.includes(': [this.projectId, this.userId, SUCCESS_STATUSES]'));
+});
+
 check('project context accepts current done analysis status', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'projects', 'contextResolver.js'), 'utf8');
   assert.ok(source.includes("status::text = ANY(ARRAY['done', 'completed'])"));

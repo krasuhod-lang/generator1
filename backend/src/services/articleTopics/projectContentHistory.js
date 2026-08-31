@@ -114,7 +114,12 @@ function _clip(value, max = 260) {
 
 async function _readSource(source) {
   try {
-    const { rows } = await db.query(source.sql, [this.projectId, this.userId, SUCCESS_STATUSES]);
+    // tasks_auto_log не имеет status-предиката и использует только $1/$2;
+    // остальные источники фильтруются общим списком успешных статусов через $3.
+    const params = source.source === 'tasks_auto_log'
+      ? [this.projectId, this.userId]
+      : [this.projectId, this.userId, SUCCESS_STATUSES];
+    const { rows } = await db.query(source.sql, params);
     return {
       source: source.source,
       available: true,
