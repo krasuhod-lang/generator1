@@ -68,7 +68,50 @@ onMounted(async () => {
 // поэтому без явного Number(...) последующий `.toFixed(...)` падает с TypeError
 // и вся страница рендерится пустой. Все денежные/метрические поля приводим к Number здесь.
 const lsiCoverage = computed(() => Number(metrics.value?.lsi_coverage ?? 0));
+const canonicalEeat = computed(() => {
+  const gateValue = task.value?.quality_gate?.eeat_canonical;
+  if (gateValue && typeof gateValue === 'object') return gateValue;
+  const score = metrics.value?.eeat_score_12;
+  if (score == null && metrics.value?.eeat_score_12_status == null) return null;
+  return {
+    score: score == null ? null : Number(score),
+    status: metrics.value?.eeat_score_12_status || 'unavailable',
+    coverage: metrics.value?.eeat_score_12_coverage == null ? null : Number(metrics.value.eeat_score_12_coverage),
+    score_version: metrics.value?.eeat_score_12_version || null,
+    components: metrics.value?.eeat_score_12_components || {},
+    criteria_measured: null,
+    criteria_total: 12,
+  };
+});
+const canonicalEeatScore = computed(() => {
+  const value = canonicalEeat.value?.score;
+  return value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+});
+const canonicalEeatStatus = computed(() => canonicalEeat.value?.status || 'unavailable');
+const canonicalEeatCoverage = computed(() => {
+  const value = canonicalEeat.value?.coverage;
+  return value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+});
+const contentQualityScore = computed(() => {
+  const value = metrics.value?.content_quality_score;
+  return value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+});
+const contentQualityStatus = computed(() => metrics.value?.content_quality_status || 'unavailable');
+const publishGate = computed(() => task.value?.quality_gate || null);
+const eeatStatusLabel = computed(() => {
+  const status = canonicalEeatStatus.value;
+  if (status === 'measured') return canonicalEeatCoverage.value == null || canonicalEeatCoverage.value >= 1
+    ? 'измерен полностью' : 'частично измерен';
+  if (status === 'partial') return 'частично измерен';
+  if (status === 'human_review') return 'нужна ручная проверка';
+  return 'не измерен';
+});
+const publishGateLabel = computed(() => {
+  if (!publishGate.value) return 'не рассчитан';
+  return publishGate.value.canPublish === true ? 'готово к публикации' : 'публикация ограничена';
+});
 const eeatScore   = computed(() => {
+  if (canonicalEeatScore.value != null) return canonicalEeatScore.value;
   const metric = metrics.value?.eeat_score;
   if (metric != null && Number.isFinite(Number(metric))) return Number(metric);
   const pageScore = verdict.value?.global_audit?.page_quality_score;
@@ -129,25 +172,36 @@ const hcuBadge = computed(() => {
 
 // 12 E-E-A-T критериев
 const EEAT_CRITERIA = [
-  { key: 'experience',         label: 'Experience'          },
-  { key: 'expertise',          label: 'Expertise'           },
-  { key: 'authoritativeness',  label: 'Authoritativeness'   },
-  { key: 'trustworthiness',    label: 'Trustworthiness'     },
-  { key: 'content_depth',      label: 'Content Depth'       },
-  { key: 'factual_accuracy',   label: 'Factual Accuracy'    },
-  { key: 'source_quality',     label: 'Source Quality'      },
-  { key: 'user_intent',        label: 'User Intent Match'   },
-  { key: 'readability',        label: 'Readability'         },
-  { key: 'uniqueness',         label: 'Uniqueness'          },
-  { key: 'freshness',          label: 'Freshness'           },
-  { key: 'safety',             label: 'Safety'              },
+  { key: 'experience', label: 'Experience' },
+  { key: 'expertise', label: 'Expertise' },
+  { key: 'author_transparency', label: 'Author transparency' },
+  { key: 'reviewer_validation', label: 'Reviewer validation' },
+  { key: 'factual_accuracy', label: 'Factual accuracy' },
+  { key: 'source_transparency', label: 'Source transparency' },
+  { key: 'entity_completeness', label: 'Entity completeness' },
+  { key: 'information_gain', label: 'Information gain' },
+  { key: 'specificity_actionability', label: 'Specificity/actionability' },
+  { key: 'trustworthiness', label: 'Trustworthiness' },
+  { key: 'intent_fit', label: 'Intent fit' },
+  { key: 'freshness_editorial_ux', label: 'Freshness/editorial UX' },
 ];
 
 const eeatDetails = computed(() => {
+  const canonical = canonicalEeat.value?.components;
+  if (canonical && typeof canonical === 'object' && Object.keys(canonical).length) {
+    return EEAT_CRITERIA.map(c => ({
+      label: c.label,
+      score: canonical[c.key]?.score == null ? null : Number(canonical[c.key].score),
+      status: canonical[c.key]?.status || 'unavailable',
+      reason: canonical[c.key]?.reason || '',
+    }));
+  }
   const src = verdict.value?.global_audit?.eeat_breakdown || verdict.value?.eeat_breakdown || {};
   return EEAT_CRITERIA.map(c => ({
     label: c.label,
-    score: src[c.key] ?? 0,
+    score: src[c.key] == null ? null : Number(src[c.key]),
+    status: src[c.key] == null ? 'unavailable' : 'legacy',
+    reason: '',
   }));
 });
 
@@ -294,15 +348,18 @@ function pqClass(value) {
           </div>
         </div>
 
-        <!-- E-E-A-T Score -->
+        <!-- Canonical E-E-A-T 12 -->
         <div class="card flex flex-col gap-1">
-          <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">E-E-A-T Score</p>
+          <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">E-E-A-T 12</p>
           <p class="text-3xl font-bold" :class="eeatScore == null ? 'text-gray-400' : eeatScore >= 8 ? 'text-green-400' : eeatScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
             {{ optionalScore(eeatScore) }}<span class="text-lg text-gray-600">/10</span>
           </p>
+          <p class="text-xs" :class="canonicalEeatStatus === 'measured' ? 'text-green-400' : 'text-amber-400'">
+            {{ eeatStatusLabel }}<span v-if="canonicalEeatCoverage != null"> · {{ Math.round(canonicalEeatCoverage * 100) }}%</span>
+          </p>
           <div class="h-1.5 bg-gray-800 rounded-full mt-1 overflow-hidden">
             <div class="h-full rounded-full transition-all"
-              :class="eeatScore == null ? 'bg-gray-600' : eeatScore >= 8 ? 'bg-green-500' : eeatScore >= 6 ? 'bg-yellow-500' : 'bg-red-500'"
+              :class="eeatScore == null ? 'bg-gray-600' : eeatScore >= 8 ? 'bg-green-500' : eeatScore >= 6 ? 'bg-yellow-500' : 'bg-red-400'"
               :style="{ width: eeatScore == null ? '0%' : (eeatScore / 10 * 100) + '%' }"
             />
           </div>
@@ -333,6 +390,31 @@ function pqClass(value) {
             {{ generationTime || '—' }}
           </p>
           <p class="text-xs text-gray-600 mt-1">Генерация контента</p>
+        </div>
+      </div>
+
+      <!-- Canonical quality summary -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="card">
+          <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">Content Quality</p>
+          <p class="text-2xl font-bold mt-1" :class="contentQualityScore == null ? 'text-gray-400' : contentQualityScore >= 80 ? 'text-green-400' : contentQualityScore >= 60 ? 'text-yellow-400' : 'text-red-400'">
+            {{ contentQualityScore == null ? '—' : Math.round(contentQualityScore) }}<span v-if="contentQualityScore != null" class="text-base text-gray-600">/100</span>
+          </p>
+          <p class="text-xs text-gray-500 mt-1">{{ contentQualityStatus === 'measured' ? 'измерен' : 'неполные данные' }}</p>
+        </div>
+        <div class="card">
+          <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">Publish Gate</p>
+          <p class="text-lg font-semibold mt-2" :class="publishGate?.canPublish ? 'text-green-400' : 'text-amber-400'">
+            {{ publishGateLabel }}
+          </p>
+          <p class="text-xs text-gray-500 mt-1">Отдельно от числового E-E-A-T</p>
+        </div>
+        <div class="card">
+          <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">E-E-A-T coverage</p>
+          <p class="text-2xl font-bold mt-1 text-indigo-300">
+            {{ canonicalEeatCoverage == null ? '—' : Math.round(canonicalEeatCoverage * 100) + '%' }}
+          </p>
+          <p class="text-xs text-gray-500 mt-1">{{ canonicalEeatStatus }}</p>
         </div>
       </div>
 

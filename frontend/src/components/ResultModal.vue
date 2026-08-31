@@ -50,11 +50,32 @@ watch(() => [props.visible, props.taskId], async ([vis, id]) => {
 }, { immediate: true });
 
 // ── Метрики ────────────────────────────────────────────────────────────────
-const lsiCoverage = computed(() => metrics.value?.lsi_coverage  ?? 0);
-const eeatScore   = computed(() => metrics.value?.eeat_score == null
-  ? (verdict.value?.global_audit?.page_quality_score ?? '—')
-  : metrics.value.eeat_score);
-const bm25Score   = computed(() => metrics.value?.bm25_score    ?? 0);
+const lsiCoverage = computed(() => Number(metrics.value?.lsi_coverage ?? 0));
+const canonicalEeat = computed(() => {
+  const gateValue = task.value?.quality_gate?.eeat_canonical;
+  if (gateValue && typeof gateValue === 'object') return gateValue;
+  const score = metrics.value?.eeat_score_12;
+  if (score == null && metrics.value?.eeat_score_12_status == null) return null;
+  return {
+    score: score == null ? null : Number(score),
+    status: metrics.value?.eeat_score_12_status || 'unavailable',
+    coverage: metrics.value?.eeat_score_12_coverage == null ? null : Number(metrics.value.eeat_score_12_coverage),
+    components: metrics.value?.eeat_score_12_components || {},
+  };
+});
+const eeatScore   = computed(() => {
+  const canonical = canonicalEeat.value?.score;
+  if (canonical != null && Number.isFinite(Number(canonical))) return Number(canonical);
+  const legacy = metrics.value?.eeat_score ?? verdict.value?.global_audit?.page_quality_score;
+  return legacy == null || !Number.isFinite(Number(legacy)) ? null : Number(legacy);
+});
+const eeatStatus = computed(() => canonicalEeat.value?.status || 'legacy');
+const eeatCoverage = computed(() => canonicalEeat.value?.coverage == null ? null : Number(canonicalEeat.value.coverage));
+const contentQualityScore = computed(() => {
+  const value = metrics.value?.content_quality_score;
+  return value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+});
+const bm25Score   = computed(() => Number(metrics.value?.bm25_score ?? 0));
 
 const deepseekIn   = computed(() => metrics.value?.deepseek_tokens_in  ?? 0);
 const deepseekOut  = computed(() => metrics.value?.deepseek_tokens_out ?? 0);
@@ -85,26 +106,47 @@ const generationTime = computed(() => {
 
 // E-E-A-T — детальная разбивка из Stage 7 (новый формат: объект с ключами)
 const EEAT_CRITERIA_NEW = [
-  { key: 'experience',         label: 'Experience',         emoji: '🧑‍💼', maxScore: 2 },
-  { key: 'expertise',          label: 'Expertise',          emoji: '🎓', maxScore: 2 },
-  { key: 'authoritativeness',  label: 'Authoritativeness',  emoji: '🏛️', maxScore: 2 },
-  { key: 'trustworthiness',    label: 'Trustworthiness',    emoji: '🛡️', maxScore: 2 },
-  { key: 'content_quality',    label: 'Content Quality',    emoji: '✍️', maxScore: 2 },
+  { key: 'experience', label: 'Experience', emoji: '🧑‍💼', maxScore: 10 },
+  { key: 'expertise', label: 'Expertise', emoji: '🎓', maxScore: 10 },
+  { key: 'author_transparency', label: 'Author transparency', emoji: '✍️', maxScore: 10 },
+  { key: 'reviewer_validation', label: 'Reviewer validation', emoji: '✓', maxScore: 10 },
+  { key: 'factual_accuracy', label: 'Factual accuracy', emoji: '🔎', maxScore: 10 },
+  { key: 'source_transparency', label: 'Source transparency', emoji: '🔗', maxScore: 10 },
+  { key: 'entity_completeness', label: 'Entity completeness', emoji: '◇', maxScore: 10 },
+  { key: 'information_gain', label: 'Information gain', emoji: '＋', maxScore: 10 },
+  { key: 'specificity_actionability', label: 'Specificity/actionability', emoji: '→', maxScore: 10 },
+  { key: 'trustworthiness', label: 'Trustworthiness', emoji: '🛡️', maxScore: 10 },
+  { key: 'intent_fit', label: 'Intent fit', emoji: '◎', maxScore: 10 },
+  { key: 'freshness_editorial_ux', label: 'Freshness/editorial UX', emoji: '◷', maxScore: 10 },
 ];
 
 const eeatBreakdown = computed(() => {
-  const src = verdict.value?.eeat_criteria_breakdown;
-  if (!src || typeof src !== 'object') return null;
+  const src = verdict.value?.eeat_criteria_breakdown
+    || verdict.value?.global_audit?.eeat_breakdown
+    || {};
 
-  // Новый формат — объект с experience/expertise/etc
-  if (src.experience !== undefined || src.expertise !== undefined) {
+  const canonical = canonicalEeat.value?.components;
+  if (canonical && typeof canonical === 'object' && Object.keys(canonical).length) {
     return EEAT_CRITERIA_NEW.map(c => ({
-      label:         c.label,
-      emoji:         c.emoji,
-      score:         src[c.key]?.score == null || !Number.isFinite(Number(src[c.key].score))
-        ? null
-        : Number(src[c.key].score),
-      maxScore:      c.maxScore,
+      label: c.label,
+      emoji: c.emoji,
+      score: canonical[c.key]?.score == null || !Number.isFinite(Number(canonical[c.key].score)) ? null : Number(canonical[c.key].score),
+      maxScore: c.maxScore,
+      status: canonical[c.key]?.status || 'unavailable',
+      justification: canonical[c.key]?.reason || '',
+    }));
+  }
+
+  if (!src || typeof src !== 'object' || !Object.keys(src).length) return null;
+
+  // Legacy Stage 7 format — object with old five fields.
+  if (src.experience !== undefined || src.expertise !== undefined) {
+    return EEAT_CRITERIA_NEW.slice(0, 5).map(c => ({
+      label: c.label,
+      emoji: c.emoji,
+      score: src[c.key]?.score == null || !Number.isFinite(Number(src[c.key].score)) ? null : Number(src[c.key].score),
+      maxScore: c.maxScore,
+      status: src[c.key]?.score == null ? 'unavailable' : 'legacy',
       justification: src[c.key]?.justification || '',
     }));
   }
@@ -124,8 +166,11 @@ const eeatBreakdown = computed(() => {
 });
 
 const eeatTotal = computed(() => {
+  const canonicalScore = canonicalEeat.value?.score;
+  if (canonicalScore != null && Number.isFinite(Number(canonicalScore))) return Number(canonicalScore);
   if (!eeatBreakdown.value || eeatBreakdown.value.some(c => c.score == null || !Number.isFinite(c.score))) return null;
-  return eeatBreakdown.value.reduce((sum, c) => sum + c.score, 0);
+  const total = eeatBreakdown.value.reduce((sum, c) => sum + c.score, 0);
+  return eeatBreakdown.value.length ? total / eeatBreakdown.value.length : null;
 });
 
 function formatScore(value, digits = 1) {
@@ -157,8 +202,9 @@ const lsiDetails = computed(() => {
 });
 
 function eeatBarColor(score) {
-  if (score >= 1.5) return 'bg-green-500';
-  if (score >= 1) return 'bg-yellow-500';
+  if (score == null || !Number.isFinite(Number(score))) return 'bg-gray-600';
+  if (Number(score) >= 8) return 'bg-green-500';
+  if (Number(score) >= 6) return 'bg-yellow-500';
   return 'bg-red-500';
 }
 
@@ -289,9 +335,13 @@ function closeModal() {
                   </p>
                 </div>
                 <div class="card py-3 px-4">
-                  <p class="text-xs text-gray-500 uppercase tracking-wide">E-E-A-T</p>
-                  <p class="text-2xl font-bold mt-1" :class="eeatScore >= 8 ? 'text-green-400' : eeatScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
-                    {{ eeatScore }}<span class="text-base text-gray-600">/10</span>
+                  <p class="text-xs text-gray-500 uppercase tracking-wide">E-E-A-T 12</p>
+                  <p class="text-2xl font-bold mt-1" :class="eeatScore == null ? 'text-gray-400' : eeatScore >= 8 ? 'text-green-400' : eeatScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
+                    {{ eeatScore == null ? '—' : eeatScore.toFixed(2) }}<span class="text-base text-gray-600">/10</span>
+                  </p>
+                  <p class="text-xs mt-1" :class="eeatStatus === 'measured' ? 'text-green-400' : 'text-amber-400'">
+                    {{ eeatStatus === 'measured' ? 'измерен' : eeatStatus === 'partial' ? 'частично измерен' : eeatStatus === 'human_review' ? 'нужна ручная проверка' : 'не измерен' }}
+                    <span v-if="eeatCoverage != null"> · {{ Math.round(eeatCoverage * 100) }}%</span>
                   </p>
                 </div>
                 <div class="card py-3 px-4">
@@ -301,7 +351,7 @@ function closeModal() {
                   </p>
                 </div>
                 <div class="card py-3 px-4">
-                  <p class="text-xs text-gray-500 uppercase tracking-wide">PQ Score</p>
+                  <p class="text-xs text-gray-500 uppercase tracking-wide">Stage 7 PQ</p>
                   <p class="text-2xl font-bold mt-1" :class="pqScore == null || pqScore === '—' ? 'text-gray-400' : pqScore >= 8 ? 'text-green-400' : pqScore >= 6 ? 'text-yellow-400' : 'text-red-400'">
                     {{ formatScore(pqScore, 1) }}<span class="text-base text-gray-600">/10</span>
                   </p>

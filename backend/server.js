@@ -3362,6 +3362,24 @@ async function ensureSchema() {
       console.warn('[ensureSchema] quality_gate verdict column (mig 098) skipped:', e.message);
     }
 
+    // Миграция 146: canonical E-E-A-T/PQ fields. Existing legacy scores and
+    // reports are preserved; these nullable fields only describe new runs.
+    try {
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS eeat_score_12 NUMERIC(4,2)`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS eeat_score_12_status VARCHAR(32)`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS eeat_score_12_coverage NUMERIC(5,4)`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS eeat_score_12_version VARCHAR(64)`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS eeat_score_12_components JSONB`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS content_quality_score NUMERIC(5,2)`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS content_quality_status VARCHAR(32)`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS content_quality_coverage NUMERIC(5,4)`);
+      await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS quality_score_version VARCHAR(64)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_task_metrics_eeat12_status ON task_metrics (eeat_score_12_status)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_task_metrics_quality_score_version ON task_metrics (quality_score_version)`);
+    } catch (e) {
+      console.warn('[ensureSchema] canonical E-E-A-T fields (mig 146) skipped:', e.message);
+    }
+
     // Миграция 114: GIST Score (12-й чекер Quality Gate, ТЗ «GIST Content
     // Logic» §3.2) — метрика покрытия информационной дельты в задачах.
     // См. migrations/114_gist_score.sql.

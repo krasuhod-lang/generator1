@@ -23,6 +23,7 @@ const {
   isClientRequest,
   sanitizeTaskForClient,
   sanitizeMetricsForClient,
+  sanitizeQualityGateForClient,
   sanitizeBlockForClient,
   clientVisibilityError,
 } = require('../services/access/entitlementPolicy');
@@ -120,7 +121,10 @@ async function listTasks(req, res, next) {
          t.llm_provider, t.gemini_model,
          t.created_at, t.completed_at, t.started_at, t.archived_at,
          t.bull_job_id, t.error_message, t.quality_gate,
-         m.lsi_coverage, m.eeat_score, m.total_cost_usd, m.bm25_score
+         m.lsi_coverage, m.eeat_score, m.pq_score, m.total_cost_usd, m.bm25_score,
+         m.eeat_score_12, m.eeat_score_12_status, m.eeat_score_12_coverage,
+         m.eeat_score_12_version, m.content_quality_score, m.content_quality_status,
+         m.content_quality_coverage, m.quality_score_version
        FROM tasks t
        LEFT JOIN task_metrics m ON m.task_id = t.id
        WHERE t.user_id = $1
@@ -967,6 +971,9 @@ async function getResult(req, res, next) {
         seo_title:       task.seo_title || null,
         seo_description: task.seo_description || null,
         seo_meta:        task.seo_meta || null,
+        quality_gate:   isClientRequest(req)
+          ? sanitizeQualityGateForClient(task.quality_gate)
+          : (task.quality_gate || null),
       },
       blocks: isClientRequest(req) ? blocks.map(sanitizeBlockForClient) : blocks,
       metrics: isClientRequest(req) ? sanitizeMetricsForClient(metricsRows[0]) : (metricsRows[0] || null),

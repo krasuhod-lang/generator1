@@ -182,14 +182,42 @@ function sanitizeTaskForClient(task) {
   if (!task || typeof task !== 'object') return task;
   const safe = { ...task };
   for (const key of CLIENT_TASK_SENSITIVE_FIELDS) delete safe[key];
+  if (safe.quality_gate) safe.quality_gate = sanitizeQualityGateForClient(safe.quality_gate);
   if (safe.status) safe.status_message = clientStatusMessage(safe.status);
   return safe;
+}
+
+function sanitizeQualityGateForClient(gate) {
+  if (!gate || typeof gate !== 'object') return null;
+  const canonical = gate.eeat_canonical || gate.eeatCanonical || {};
+  const content = gate.content_quality || {};
+  return {
+    quality_gate_status: gate.quality_gate_status || 'unknown',
+    canPublish: gate.canPublish === true,
+    eeat: {
+      score: canonical.score == null ? null : Number(canonical.score),
+      status: canonical.status || 'unavailable',
+      coverage: canonical.coverage == null ? null : Number(canonical.coverage),
+      score_version: canonical.score_version || null,
+      criteria_measured: canonical.criteria_measured ?? null,
+      criteria_total: canonical.criteria_total ?? null,
+    },
+    content_quality: {
+      score: content.score == null ? null : Number(content.score),
+      status: content.status || 'unavailable',
+      coverage: content.coverage == null ? null : Number(content.coverage),
+    },
+    human_review_required: canonical.status === 'human_review' || gate.canPublish !== true,
+  };
 }
 
 function sanitizeMetricsForClient(metrics) {
   if (!metrics || typeof metrics !== 'object') return null;
   const allowed = [
     'lsi_coverage', 'ngram_coverage', 'tfidf_status', 'eeat_score', 'pq_score',
+    'eeat_score_12', 'eeat_score_12_status', 'eeat_score_12_coverage',
+    'eeat_score_12_version', 'content_quality_score', 'content_quality_status',
+    'content_quality_coverage', 'quality_score_version',
     'anti_water_count', 'hallucination_count', 'hcu_status', 'spam_detected',
   ];
   return Object.fromEntries(allowed.filter((key) => Object.prototype.hasOwnProperty.call(metrics, key)).map((key) => [key, metrics[key]]));
@@ -479,7 +507,7 @@ module.exports = {
   ROLES, PLAN_KEYS, PROFILE_STATUSES, PLAN_CATALOG, LIMIT_KEYS, RESOURCE_KEYS, TASK_RESOURCE_MAP,
   normalizeRole, normalizePlanKey, sanitizeOverrides, periodKeyFor, effectiveLimits,
   isClientRole, isClientRequest, clientStatusMessage, sanitizeTaskForClient,
-  sanitizeMetricsForClient, sanitizeBlockForClient, clientVisibilityError,
+  sanitizeMetricsForClient, sanitizeQualityGateForClient, sanitizeBlockForClient, clientVisibilityError,
   loadUserProfile, ensureAccessProfile, getUsage, getUserEntitlements, getPlanCatalog,
   admitUsage, admitTaskUsage, withTaskUsageReservation, withProjectCapacity, commitUsageReservation, releaseUsageReservation, getEffectiveMaxConcurrent,
 };

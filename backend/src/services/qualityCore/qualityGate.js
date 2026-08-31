@@ -204,12 +204,20 @@ async function runForTask({ pipeline, taskId, raw = {}, opts = {}, persist = tru
     }
     return result;
   } catch (e) {
-    // graceful: gate никогда не должен ломать пайплайн
+    // Graceful for generation, fail-closed for publication. A gate error must
+    // never be represented as a successful publish decision.
+    const errorMessage = e && e.message ? e.message : String(e);
     return {
-      pipeline, ymyl: false, canPublish: true,
-      blockers: [], warnings: [], gates: [],
-      summary: 'quality gate skipped (error)',
-      error: e && e.message ? e.message : String(e),
+      pipeline,
+      ymyl: false,
+      canPublish: false,
+      quality_gate_status: 'error',
+      blockers: [{ name: 'quality_gate_unavailable', verdict: 'error' }],
+      warnings: [],
+      gates: [],
+      summary: 'quality gate unavailable; publication requires review',
+      error_code: 'quality_gate_error',
+      error_message: errorMessage,
     };
   }
 }

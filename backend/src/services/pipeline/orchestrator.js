@@ -121,6 +121,7 @@ const { deriveModuleContext } = require('../../utils/moduleContext');
 const { richTextToPlain, isBlankRichText } = require('../../utils/stripHtmlTags');
 const { runStage8Evaluator, isStage8Enabled } = require('./stage8');
 const { buildEeatContract, validateEeatContract } = require('../eeatAudit/contentContract');
+const { computeCanonicalEeatScore, aggregateBlockQuality, summarizeContentQuality } = require('../qualityLayers/canonicalEeatScore');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
@@ -1116,6 +1117,41 @@ async function runPipeline(task, ctx) {
     throw new Error('Пайплайн: ни один блок не был сгенерирован');
   }
 
+  // Canonical block aggregation uses the persisted block state, so resume paths
+  // and parallel audit completion have one deterministic source of truth.
+  let blockQualityAggregate = null;
+  try {
+    const { rows: qualityBlocks } = await db.query(
+      `SELECT block_index, h2_title, section_type, html_content, lsi_coverage, pq_score, status
+         FROM task_content_blocks
+        WHERE task_id = $1
+        ORDER BY block_index ASC`,
+      [taskId],
+    );
+    const criticalPattern = /faq|вопрос|ответ|метод|источник|доказ|огранич|дисклейм|автор|review|заключ|вывод/i;
+    blockQualityAggregate = aggregateBlockQuality(
+      qualityBlocks.map((row) => ({
+        block_id: `block_${Number(row.block_index) + 1}`,
+        h2: row.h2_title,
+        pq_score: row.pq_score,
+        lsi_coverage: row.lsi_coverage,
+        plain_chars: richTextToPlain(row.html_content || '').length,
+        audit_status: row.status === 'done' && row.pq_score != null ? 'measured' : 'unavailable',
+        critical: Number(row.block_index) === 0 || criticalPattern.test(`${row.section_type || ''} ${row.h2_title || ''}`),
+      })),
+      EEAT_PQ_TARGET,
+    );
+    log(
+      `Canonical block quality: ${blockQualityAggregate.score ?? 'n/a'}/10, `
+      `floor=${blockQualityAggregate.critical_floor ?? 'n/a'}, `
+      `coverage=${Math.round(blockQualityAggregate.coverage * 100)}%, `
+      `status=${blockQualityAggregate.status}`,
+      blockQualityAggregate.status === 'measured' ? 'info' : 'warn',
+    );
+  } catch (blockQualityErr) {
+    log(`Canonical block quality unavailable: ${blockQualityErr.message}`, 'warn');
+  }
+
   // ── Post-processing: enforce single expert blockquote across all blocks ──
   // Safety net for the race condition: audits run in parallel,
   // so multiple blocks may get blockquotes via Stage 5.
@@ -1161,6 +1197,7 @@ async function runPipeline(task, ctx) {
   // доказательства, entities, LSI, table/comparison, authorship и risk rules
   // программно. Он не делает новый LLM-вызов и поэтому не раздувает runtime.
   let eeat12Audit = null;
+  let canonicalEeat = null;
   try {
     if (task.__eeatContract) {
       eeat12Audit = validateEeatContract(
@@ -1179,6 +1216,30 @@ async function runPipeline(task, ctx) {
     }
   } catch (eeatErr) {
     log(`E-E-A-T 12 audit пропущен: ${eeatErr.message}`, 'warn');
+  }
+
+  // Canonical E-E-A-T/PQ is a deterministic presentation/publish contract.
+  // It never replaces the legacy Stage-7 fields used by old reports.
+  try {
+    canonicalEeat = computeCanonicalEeatScore(
+      eeat12Audit,
+      task.__eeatContract || {},
+      null,
+      blockQualityAggregate,
+    );
+    s7Result.eeat_canonical = canonicalEeat;
+    if (s7Result.globalAudit && typeof s7Result.globalAudit === 'object') {
+      s7Result.globalAudit.eeat_canonical = canonicalEeat;
+    }
+    publish(taskId, { type: 'eeat_canonical', audit: canonicalEeat });
+    log(
+      `Canonical E-E-A-T: ${canonicalEeat.score ?? 'n/a'}/10, `
+      `status=${canonicalEeat.status}, coverage=${Math.round(canonicalEeat.coverage * 100)}%, `
+      `publishable=${canonicalEeat.publishable}`,
+      canonicalEeat.publishable ? 'success' : 'warn',
+    );
+  } catch (canonicalErr) {
+    log(`Canonical E-E-A-T: ошибка расчёта (${canonicalErr.message})`, 'warn');
   }
 
   // ── Post-Stage 7: «Ограничения проекта → не использовано» ──────────
@@ -1373,11 +1434,15 @@ async function runPipeline(task, ctx) {
         },
       },
     });
-    const eeat12Ready = !eeat12Audit || eeat12Audit.publish_ready === true;
-    const eeat12Blockers = eeat12Audit && !eeat12Ready
-      ? (eeat12Audit.blockers.length
-        ? eeat12Audit.blockers
-        : [`E-E-A-T 12 score ${eeat12Audit.overall_score} < ${eeat12Audit.target_score}`])
+    const canonicalRequired = !!task.__eeatContract;
+    const eeat12Ready = !canonicalRequired
+      || (canonicalEeat?.status === 'measured' && canonicalEeat.publishable === true);
+    const eeat12Blockers = canonicalRequired && !eeat12Ready
+      ? (canonicalEeat?.hard_gates?.blockers?.length
+        ? canonicalEeat.hard_gates.blockers
+        : (eeat12Audit?.blockers?.length
+          ? eeat12Audit.blockers
+          : ['eeat12_score_unavailable_or_below_target']))
       : [];
     qualityGateVerdict = {
       canPublish: gateResult.canPublish && eeat12Ready,
@@ -1388,8 +1453,16 @@ async function runPipeline(task, ctx) {
       ],
       warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
       summary:    eeat12Ready ? gateResult.summary : `${gateResult.summary}; E-E-A-T 12 requires refine/manual review`,
+      quality_gate_status: gateResult.quality_gate_status || 'measured',
       governance: governanceReport || null,
       eeat12:     eeat12Audit || null,
+      eeat_canonical: canonicalEeat || null,
+      content_quality: summarizeContentQuality(
+        evaluatorReport?.composite_quality_score == null
+          ? null
+          : { overall: evaluatorReport.composite_quality_score, sub: evaluatorReport.rubric || {} },
+        { evaluator_report: evaluatorReport },
+      ),
       lingua_forensic: linguaForensicReport
         ? {
             verdict:          linguaForensicReport.verdict,
@@ -1419,6 +1492,38 @@ async function runPipeline(task, ctx) {
       );
     } catch (dbErr) {
       log(`Quality gate: не удалось сохранить вердикт в БД (${dbErr.message})`, 'warn');
+    }
+    try {
+      const canonical = canonicalEeat || {};
+      const contentQuality = qualityGateVerdict.content_quality || {};
+      await db.query(
+        `UPDATE task_metrics SET
+           eeat_score_12 = $1,
+           eeat_score_12_status = $2,
+           eeat_score_12_coverage = $3,
+           eeat_score_12_version = $4,
+           eeat_score_12_components = $5,
+           content_quality_score = $6,
+           content_quality_status = $7,
+           content_quality_coverage = $8,
+           quality_score_version = $9,
+           updated_at = NOW()
+         WHERE task_id = $10`,
+        [
+          canonical.score ?? null,
+          canonical.status ?? (canonicalRequired ? 'unavailable' : null),
+          canonical.coverage ?? null,
+          canonical.score_version ?? null,
+          JSON.stringify(canonical.components || {}),
+          contentQuality.score ?? null,
+          contentQuality.status ?? null,
+          contentQuality.coverage ?? null,
+          contentQuality.score_version || null,
+          taskId,
+        ],
+      );
+    } catch (metricsErr) {
+      log(`Quality metrics: не удалось сохранить canonical score (${metricsErr.message})`, 'warn');
     }
     log(
       `${qualityGateVerdict.canPublish ? '✅' : '🚦'} Quality gate: ${qualityGateVerdict.summary}`,
