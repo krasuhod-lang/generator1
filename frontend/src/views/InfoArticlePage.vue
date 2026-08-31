@@ -820,38 +820,63 @@ function plainTextToHtml(value) {
   ).join('');
 }
 
-const sanitizedHtml = computed(() => {
-  const source = articleSourceHtml.value;
-  const plain = selectedTask.value?.article_plain || selectedTask.value?.text || '';
-  if (!source && !plain) return '';
-  // ALLOWED_URI_REGEXP допускает data:image/(png|jpeg|jpg|webp);base64,… —
-  // это base64-обложка от Nano Banana Pro, которую мы сами генерируем на
-  // бэкенде и встраиваем в article_html через embedImages (см.
-  // backend/src/services/infoArticle/infoArticlePipeline.js). Sanitize
-  // применяется ИСКЛЮЧИТЕЛЬНО к article_html текущего user_id; никакого
-  // user-controlled HTML через этот sanitize НЕ проходит.
-  //
-  // ВАЖНО: альтернатива data:image/...;base64,… вынесена в ОТДЕЛЬНУЮ ветку
-  // регулярки (без требования закрывающего «:»), потому что реальный
-  // data-URI заканчивается на «,DATA», а не на «:». Старый regex требовал
-  // «data:image/png;base64:» и поэтому DOMPurify вырезал ВСЕ картинки —
-  // именно из-за этого пользователи раньше не видели обложек статей.
-  for (const candidate of articleHtmlCandidates.value) {
+// Рендер blog HTML не должен блокировать первый paint страницы: готовые статьи
+// могут содержать 1–4 MB HTML с base64-изображениями. Синхронный DOMPurify в
+// computed ранее мог надолго заморозить весь экран (особенно в mobile WebKit).
+const sanitizedHtml = ref('');
+const articleRenderState = ref('idle'); // idle | loading | ready | empty | error
+let articleRenderSeq = 0;
+
+const sanitizeArticleCandidate = (candidate) => DOMPurify.sanitize(candidate, {
+  ADD_ATTR: ['target'],
+  ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+});
+
+async function renderSelectedArticle() {
+  const seq = ++articleRenderSeq;
+  const candidates = articleHtmlCandidates.value.slice();
+  const plain = String(selectedTask.value?.article_plain || selectedTask.value?.text || '');
+  sanitizedHtml.value = '';
+  articleRenderState.value = candidates.length || plain.trim() ? 'loading' : 'empty';
+  if (!candidates.length && !plain.trim()) return;
+
+  // Даём Vue отрисовать header/loading, прежде чем обрабатывать большой HTML.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (seq !== articleRenderSeq) return;
+
+  for (const candidate of candidates) {
     try {
-      const cleaned = DOMPurify.sanitize(candidate, {
-        ADD_ATTR: ['target'],
-        ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-      });
-      // Один из legacy-вариантов может состоять только из служебной разметки.
-      // Перебираем сохранённые поля, пока не найдём видимый контент.
-      if (cleaned.trim()) return cleaned;
+      const cleaned = sanitizeArticleCandidate(candidate);
+      if (cleaned.trim()) {
+        if (seq !== articleRenderSeq) return;
+        sanitizedHtml.value = cleaned;
+        articleRenderState.value = 'ready';
+        return;
+      }
     } catch (_) {
       // Повреждённая/чрезмерно сложная legacy-разметка не должна ронять весь
       // экран. Переходим к следующему сохранённому представлению или plain.
     }
+    // Не удерживаем main thread между несколькими legacy-кандидатами.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (seq !== articleRenderSeq) return;
   }
-  return plainTextToHtml(plain);
-});
+
+  const fallback = plainTextToHtml(plain);
+  if (seq !== articleRenderSeq) return;
+  if (fallback.trim()) {
+    sanitizedHtml.value = fallback;
+    articleRenderState.value = 'ready';
+  } else {
+    articleRenderState.value = 'error';
+  }
+}
+
+watch(
+  () => selectedTask.value,
+  () => { renderSelectedArticle(); },
+  { immediate: true },
+);
 
 async function copyAsHtml() {
   const rawHtml = articleSourceHtml.value || selectedTask.value?.article_plain || '';
@@ -1697,6 +1722,12 @@ onUnmounted(() => { stopTicker(); });
               </div>
             </div>
 
+            <div v-if="articleRenderState === 'loading'" class="rounded-lg border border-indigo-900/60 bg-indigo-950/20 px-3 py-2 text-xs text-indigo-200">
+              Подготавливаем отображение сохранённой статьи…
+            </div>
+            <div v-else-if="articleRenderState === 'error'" role="alert" class="rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs text-red-200">
+              Не удалось отобразить HTML статьи. Попробуйте открыть задачу ещё раз.
+            </div>
             <article ref="articlePreviewRef"
                      class="info-article-preview prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
                      v-html="sanitizedHtml"></article>

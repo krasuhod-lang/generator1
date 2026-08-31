@@ -57,8 +57,15 @@ if (infoFields.indexOf("'article_html'") < 0
     || infoFields.indexOf("'article_html'") > infoFields.indexOf("'article_html_with_schema'")) {
   throw new Error('blog: ordinary article_html must be preferred over schema HTML for preview');
 }
-if (!infoSource.includes('try {\n      const cleaned = DOMPurify.sanitize(candidate')) {
-  throw new Error('blog: sanitizer must fail closed per candidate instead of breaking the whole page');
+if (!infoSource.includes("const sanitizedHtml = ref('')")
+    || !infoSource.includes("const articleRenderState = ref('idle')")
+    || !infoSource.includes('await new Promise((resolve) => setTimeout(resolve, 0))')
+    || !infoSource.includes('const cleaned = sanitizeArticleCandidate(candidate)')
+    || !infoSource.includes('catch (_)')) {
+  throw new Error('blog: article rendering must be async and fail-safe per candidate');
+}
+if (!infoSource.includes('articleRenderState === \'loading\'')) {
+  throw new Error('blog: the result panel must show visible render progress');
 }
 
 const linkSource = fs.readFileSync(
