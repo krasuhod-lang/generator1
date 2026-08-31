@@ -89,7 +89,16 @@ async function listLinkArticleTasks(req, res, next) {
       listParams,
     );
     const total = Number(countResult.rows[0]?.total || 0);
-    return res.json({
+    // История задач должна возвращать JSON-тело при каждом обновлении,
+    // даже если браузер прислал If-None-Match от предыдущего ответа.
+    delete req.headers['if-none-match'];
+    delete req.headers['if-modified-since'];
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
+    return res.status(200).json({
       tasks: isClientRequest(req) ? rows.map(sanitizeTaskForClient) : rows,
       meta: { total, limit, offset, hasMore: offset + rows.length < total },
     });

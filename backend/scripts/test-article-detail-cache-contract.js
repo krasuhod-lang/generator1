@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Source-level regression for authenticated article detail responses.
+ * Source-level regression for authenticated article list/detail responses.
  * User-owned mutable results must not be served as conditional 304 responses.
  */
 
@@ -21,17 +21,29 @@ for (const controller of controllers) {
     ? source.slice(detailStart, detailEnd)
     : source;
 
-  if (!detail.includes("'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'")) {
-    throw new Error(`${controller.name}: detail endpoint must disable cache revalidation`);
-  }
-  if (!detail.includes("return res.status(200).json({ task:")) {
-    throw new Error(`${controller.name}: detail endpoint must return an explicit 200 JSON response`);
-  }
-  for (const header of ["delete req.headers['if-none-match']", "delete req.headers['if-modified-since']"]) {
-    if (!detail.includes(header)) {
-      throw new Error(`${controller.name}: detail endpoint must clear ${header} before JSON response`);
+  const listStart = source.indexOf('async function list');
+  const listEnd = source.indexOf('\n// ─── POST', listStart);
+  const list = listStart >= 0 && listEnd >= 0
+    ? source.slice(listStart, listEnd)
+    : source;
+
+  for (const [name, block] of [['list', list], ['detail', detail]]) {
+    if (!block.includes("'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'")) {
+      throw new Error(`${controller.name} ${name}: endpoint must disable cache revalidation`);
     }
+    for (const header of ["delete req.headers['if-none-match']", "delete req.headers['if-modified-since']"]) {
+      if (!block.includes(header)) {
+        throw new Error(`${controller.name} ${name}: endpoint must clear ${header} before JSON response`);
+      }
+    }
+  }
+
+  if (!detail.includes("return res.status(200).json({ task:")) {
+    throw new Error(`${controller.name} detail: endpoint must return an explicit 200 JSON response`);
+  }
+  if (!list.includes('return res.status(200).json({')) {
+    throw new Error(`${controller.name} list: endpoint must return an explicit 200 JSON response`);
   }
 }
 
-console.log('article detail cache contract: OK');
+console.log('article list/detail cache contract: OK');

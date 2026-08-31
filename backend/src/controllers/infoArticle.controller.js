@@ -134,7 +134,16 @@ async function listInfoArticleTasks(req, res, next) {
       listParams,
     );
     const total = Number(countResult.rows[0]?.total || 0);
-    return res.json({
+    // Список используется для восстановления UI и не должен приходить как
+    // conditional 304 без JSON-тела после If-None-Match от браузера.
+    delete req.headers['if-none-match'];
+    delete req.headers['if-modified-since'];
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
+    return res.status(200).json({
       tasks: isClientRequest(req) ? rows.map(sanitizeTaskForClient) : rows,
       meta: { total, limit, offset, hasMore: offset + rows.length < total },
     });
