@@ -933,8 +933,9 @@ async function copyAsFormattedText() {
   // Path A (приоритет): selection-based copy через execCommand —
   // обеспечивает корректную вставку в WYSIWYG-редакторы блогов и Word.
   await nextTick();
-  const el = articlePreviewRef.value;
-  if (!el) return;
+  const frame = articlePreviewRef.value;
+  if (!frame) return;
+  const el = frame.contentDocument?.body || frame;
   try {
     const range = document.createRange();
     range.selectNodeContents(el);
@@ -948,8 +949,8 @@ async function copyAsFormattedText() {
   // Path B fallback: ClipboardItem с text/html.
   try {
     if (navigator.clipboard && window.ClipboardItem) {
-      const htmlContent = el.innerHTML;
-      const plain = selectedTask.value.article_plain || el.innerText || '';
+      const htmlContent = frame.contentDocument?.body?.innerHTML || sanitizedHtml.value;
+      const plain = selectedTask.value.article_plain || frame.contentDocument?.body?.innerText || '';
       await navigator.clipboard.write([new ClipboardItem({
         'text/html':  new Blob([htmlContent], { type: 'text/html' }),
         'text/plain': new Blob([plain], { type: 'text/plain' }),
@@ -1728,9 +1729,14 @@ onUnmounted(() => { stopTicker(); });
             <div v-else-if="articleRenderState === 'error'" role="alert" class="rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs text-red-200">
               Не удалось отобразить HTML статьи. Попробуйте открыть задачу ещё раз.
             </div>
-            <article ref="articlePreviewRef"
-                     class="info-article-preview prose prose-invert max-w-none bg-gray-950 border border-gray-800 rounded-lg p-5 overflow-auto"
-                     v-html="sanitizedHtml"></article>
+            <div v-if="sanitizedHtml" class="info-article-preview bg-gray-950 border border-gray-800 rounded-lg overflow-hidden">
+              <iframe ref="articlePreviewRef"
+                      :srcdoc="sanitizedHtml"
+                      title="Готовая статья для блога"
+                      class="w-full bg-white"
+                      style="height: 720px; border: 0;"
+                      sandbox="allow-same-origin"></iframe>
+            </div>
           </div>
 
 

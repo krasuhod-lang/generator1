@@ -28,6 +28,7 @@ const {
   downloadExampleTZ,
   getRelevancePrefill,
 } = require('../controllers/tasks.controller');
+const { getUserAllTasks } = require('../controllers/admin.controller');
 
 const jwt = require('jsonwebtoken');
 const router = express.Router();
@@ -148,7 +149,8 @@ const logsLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Коллекция задач
-router.get('/',    authMiddleware, listTasks);   // GET  /api/tasks
+router.get('/',    authMiddleware, listTasks);   // GET  /api/tasks (legacy SEO)
+router.get('/all', authMiddleware, getUserAllTasks); // GET /api/tasks/all (all modules)
 router.post('/',   authMiddleware, createTask);  // POST /api/tasks
 
 // Pre-Stage (-1): LLM-извлечение полей из ТЗ (ДОЛЖЕН быть ДО /:id)

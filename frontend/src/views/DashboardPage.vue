@@ -14,6 +14,10 @@ const store = useTasksStore();
 
 const showResult = ref(false);
 const resultTaskId = ref(null);
+const centerTasks = computed(() => store.allTasks);
+const centerLoading = ref(false);
+const centerPage = ref(1);
+const centerError = ref(null);
 const errorMsg = ref(null);
 const search = ref('');
 const statusFilter = ref('all');
@@ -26,9 +30,54 @@ const pageSize = 20;
 let pollTimer = null;
 let errorTimer = null;
 
+const RESULT_ROUTES = Object.freeze({
+  meta_tag: (id) => `/meta-tags/${id}`,
+  info_article: (id) => ({ path: '/info-article', query: { open: String(id) } }),
+  link_article: (id) => ({ path: '/link-article', query: { open: String(id) } }),
+  relevance: (id) => `/relevance/${id}`,
+  forecaster: (id) => `/forecaster/${id}`,
+  category_lead: (id) => `/category-lead/${id}`,
+});
+
+function isLegacySeoTask(task) {
+  return String(task?.source || '') === 'seo';
+}
+
+function canOpenResult(task) {
+  return isLegacySeoTask(task) || typeof RESULT_ROUTES[task?.source] === 'function';
+}
+
 function openResult(task) {
-  resultTaskId.value = task.id;
-  showResult.value = true;
+  if (isLegacySeoTask(task)) {
+    resultTaskId.value = String(task.id);
+    showResult.value = true;
+    return;
+  }
+  const to = RESULT_ROUTES[task?.source]?.(task.id);
+  if (to) router.push(to);
+}
+
+async function refreshCenterTasks({ preserveLoaded = false } = {}) {
+  centerLoading.value = true;
+  centerError.value = null;
+  if (!preserveLoaded) centerPage.value = 1;
+  await store.fetchAllTasks({
+    limit: 200,
+    page: 1,
+    append: preserveLoaded && centerTasks.value.length > 0,
+  });
+  if (store.error) centerError.value = 'Не удалось обновить Центр задач. Попробуйте ещё раз.';
+  centerLoading.value = false;
+}
+
+async function loadMoreCenterTasks() {
+  if (centerLoading.value || !store.allTasksHasMore) return;
+  centerLoading.value = true;
+  centerError.value = null;
+  centerPage.value += 1;
+  await store.fetchAllTasks({ limit: 200, page: centerPage.value, append: true });
+  if (store.error) centerError.value = 'Не удалось загрузить следующую страницу задач.';
+  centerLoading.value = false;
 }
 
 function closeResult() {
@@ -43,8 +92,8 @@ function showError(msg) {
 }
 
 onMounted(async () => {
-  await store.fetchTasks();
-  pollTimer = setInterval(() => store.fetchTasks(), 5000);
+  await refreshCenterTasks();
+  pollTimer = setInterval(() => refreshCenterTasks({ preserveLoaded: true }), 5000);
 });
 
 onUnmounted(() => {
@@ -57,6 +106,7 @@ watch([search, statusFilter, typeFilter, periodFilter, sortBy, groupBy], () => {
 });
 
 async function handleStart(task) {
+  if (!isLegacySeoTask(task)) return;
   try {
     await store.startTask(task.id);
     router.push(`/tasks/${task.id}/monitor`);
@@ -66,6 +116,10 @@ async function handleStart(task) {
 }
 
 async function handleDelete(task) {
+  if (!isLegacySeoTask(task)) {
+    showError('Архивирование этого типа задачи выполняется в его исходном разделе.');
+    return;
+  }
   if (!confirm(`Переместить задачу «${task.title || task.input_target_service || 'без названия'}» в архив? Результат и история сохранятся.`)) return;
   try {
     await store.deleteTask(task.id);
@@ -140,10 +194,11 @@ function fmtCost(usd) {
 }
 
 function taskTitle(task) {
-  return task.title || task.input_target_service || task.topic || task.name || 'Задача без названия';
+  return task.title || task.input_target_service || task.topic || task.name || task.query || task.url || 'Задача без названия';
 }
 
 function taskType(task) {
+  if (task?.source_label) return task.source_label;
   const raw = String(task.task_type || task.type || task.module || task.source || '').toLowerCase();
   if (raw.includes('meta')) return 'Мета-теги';
   if (raw.includes('link')) return 'Ссылочная статья';
@@ -168,7 +223,7 @@ function isInPeriod(task) {
   return date >= start;
 }
 
-const allTasks = computed(() => Array.isArray(store.tasks) ? store.tasks : []);
+const allTasks = computed(() => Array.isArray(centerTasks.value) ? centerTasks.value : []);
 const typeOptions = computed(() => {
   const values = new Set(allTasks.value.map(taskType));
   return Array.from(values).sort((a, b) => a.localeCompare(b, 'ru'));
@@ -277,16 +332,20 @@ function goPage(next) {
       <AppPageHeader
         eyebrow="Рабочая область"
         title="Центр задач"
-        description="Все генерации в одном месте: от создания и очереди до готового результата. Обновление статусов выполняется автоматически."
+        description="Все генерации в одном месте: статьи, SEO-тексты, мета-теги, темы, релевантность, прогнозы и сканирования."
       >
         <template #title-suffix>
           <ToolHelp title="Центр задач" text="Здесь собраны все ваши генерации. Статус показывает состояние задачи, а кнопка «Результат» открывает готовый материал." />
         </template>
         <template #actions>
           <div class="text-xs text-gray-500 mr-1">
-            {{ filteredTasks.length }} из {{ allTasks.length }} задач
+            {{ filteredTasks.length }} из {{ allTasks.length }} загруженных задач
+            <span v-if="store.allTasksTotal > allTasks.length" class="text-gray-600"> · всего {{ store.allTasksTotal }}</span>
             <span v-if="activeCount" class="text-indigo-300"> · {{ activeCount }} активных</span>
           </div>
+          <button class="btn-ghost text-xs" :disabled="centerLoading" @click="refreshCenterTasks">
+            {{ centerLoading ? 'Обновление…' : 'Обновить' }}
+          </button>
           <RouterLink to="/tasks/new" class="btn-primary inline-flex items-center gap-2">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
             Создать задачу
@@ -349,11 +408,12 @@ function goPage(next) {
           <label class="flex items-center gap-2">Группировка
             <select v-model="groupBy" class="bg-gray-950/60 border border-gray-700 rounded px-2 py-1 text-gray-300"><option value="day">По дням</option><option value="month">По месяцам</option><option value="none">Без группировки</option></select>
           </label>
-          <span class="ml-auto">Страница {{ page }} из {{ pageCount }}</span>
+          <span class="ml-auto">Локальная страница {{ page }} из {{ pageCount }}</span>
         </div>
       </section>
 
-      <div v-if="store.loading && !allTasks.length" class="flex items-center justify-center py-20 text-gray-500">Загрузка задач…</div>
+      <div v-if="centerError" class="card mb-5 border border-red-900/60 text-red-300 text-sm">{{ centerError }}</div>
+      <div v-if="centerLoading && !allTasks.length" class="flex items-center justify-center py-20 text-gray-500">Загрузка всех задач…</div>
       <div v-else-if="!allTasks.length" class="card text-center py-16">
         <div class="text-4xl mb-4">—</div>
         <p class="text-gray-400 text-lg font-medium">Задач пока нет</p>
@@ -378,13 +438,13 @@ function goPage(next) {
                 <td class="px-5 py-3.5"><span :class="['badge', statusMetaForTask(task).cls]">{{ statusMetaForTask(task).label }}</span></td>
                 <td class="px-5 py-3.5 text-gray-400 whitespace-nowrap"><span class="block text-[11px] text-gray-600">{{ taskDateLabel(task) }}</span>{{ fmtDate(taskDateValue(task)) }}</td>
                 <td v-if="!isClient" class="px-5 py-3.5 font-mono text-indigo-400">{{ fmtCost(task.total_cost_usd) }}</td>
-                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="!isClient && !task.archived_at && (task.status === 'queued' || task.status === 'processing')" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed'" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Результат</button><RouterLink v-if="!task.archived_at && (task.status === 'draft' || task.status === 'failed')" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button v-if="!task.archived_at" @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Переместить в архив">В архив</button></div></td>
+                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="isLegacySeoTask(task) && !task.archived_at && (task.status === 'draft' || task.status === 'failed')" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="isLegacySeoTask(task) && !isClient && !task.archived_at && (task.status === 'queued' || task.status === 'processing')" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed' && canOpenResult(task)" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Открыть результат</button><RouterLink v-if="isLegacySeoTask(task) && !task.archived_at && (task.status === 'draft' || task.status === 'failed')" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button v-if="isLegacySeoTask(task) && !task.archived_at" @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Переместить в архив">В архив</button></div></td>
               </tr>
             </template>
           </tbody>
         </table>
         </div>
-        <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-gray-800 px-5 py-3"><span class="text-xs text-gray-600">Показаны {{ (page - 1) * pageSize + 1 }}–{{ Math.min(page * pageSize, filteredTasks.length) }} из {{ filteredTasks.length }}</span><div class="flex items-center gap-2"><button class="btn-secondary text-xs px-3 py-1.5" :disabled="page <= 1" @click="goPage(page - 1)">Назад</button><button class="btn-secondary text-xs px-3 py-1.5" :disabled="page >= pageCount" @click="goPage(page + 1)">Вперёд</button></div></footer>
+        <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-gray-800 px-5 py-3"><span class="text-xs text-gray-600">Показаны {{ (page - 1) * pageSize + 1 }}–{{ Math.min(page * pageSize, filteredTasks.length) }} из {{ filteredTasks.length }} загруженных</span><div class="flex items-center gap-2"><button class="btn-secondary text-xs px-3 py-1.5" :disabled="page <= 1" @click="goPage(page - 1)">Назад</button><button class="btn-secondary text-xs px-3 py-1.5" :disabled="page >= pageCount" @click="goPage(page + 1)">Вперёд</button><button v-if="store.allTasksHasMore" class="btn-primary text-xs px-3 py-1.5" :disabled="centerLoading" @click="loadMoreCenterTasks">{{ centerLoading ? 'Загрузка…' : 'Загрузить ещё задачи' }}</button></div></footer>
       </div>
     </div>
 

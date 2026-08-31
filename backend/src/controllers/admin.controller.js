@@ -959,9 +959,11 @@ function _statusUnionSql(entries = Object.entries(TASK_SOURCES)) {
  */
 async function getUserAllTasks(req, res, next) {
   try {
-    const { userId } = req.params;
+    // Один и тот же контроллер используется admin-профилем (userId в URL)
+    // и пользовательским Центром задач (только собственный req.user.id).
+    const userId = req.params.userId || req.user?.id;
     const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
+    const limit  = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 30));
     const offset = (page - 1) * limit;
 
     const userCheck = await db.query(`SELECT id FROM users WHERE id = $1`, [userId]);
@@ -988,8 +990,27 @@ async function getUserAllTasks(req, res, next) {
       [userId],
     );
 
+    const privileged = ['admin', 'employee'].includes(normalizeRole(req.user?.role));
+    const normalizedStatus = (status) => {
+      const value = String(status || '').toLowerCase();
+      if (['completed', 'done'].includes(value)) return 'completed';
+      if (['failed', 'error', 'timeout'].includes(value)) return 'failed';
+      if (['processing', 'running', 'in_progress'].includes(value)) return 'processing';
+      if (['queued', 'pending'].includes(value)) return 'queued';
+      return value || 'unknown';
+    };
+    const safeRows = rows.map((row) => ({
+      ...row,
+      status: normalizedStatus(row.status),
+      source_label: TASK_SOURCES[row.source]?.label || row.source,
+      // Клиенту не отдаются стоимость и техническая ошибка — только тип,
+      // статус, дата и безопасное название задачи.
+      cost_usd: privileged ? row.cost_usd : null,
+      error_message: privileged ? row.error_message : null,
+    }));
+
     return res.json({
-      tasks: rows,
+      tasks: safeRows,
       total: cRows[0]?.total || 0,
       page,
       limit,

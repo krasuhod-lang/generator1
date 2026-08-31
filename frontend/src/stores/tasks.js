@@ -3,7 +3,10 @@ import { ref }         from 'vue';
 import api             from '../api.js';
 
 export const useTasksStore = defineStore('tasks', () => {
-  const tasks   = ref([]);
+  const tasks   = ref([]); // legacy SEO list for generation/editing screens
+  const allTasks = ref([]); // cross-module list for Dashboard only
+  const allTasksTotal = ref(0);
+  const allTasksHasMore = ref(false);
   const current = ref(null);
   const loading = ref(false);
   const error   = ref(null);
@@ -14,9 +17,36 @@ export const useTasksStore = defineStore('tasks', () => {
     error.value   = null;
     try {
       const { data } = await api.get('/tasks');
-      tasks.value = data.tasks;
+      tasks.value = Array.isArray(data?.tasks) ? data.tasks : [];
     } catch (e) {
       error.value = e.response?.data?.error || e.message;
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  // ── Все задачи пользователя (единый Центр задач) ─────────────────
+  async function fetchAllTasks({ limit = 200, page = 1, append = false } = {}) {
+    loading.value = true;
+    error.value = null;
+    try {
+      const { data } = await api.get('/tasks/all', { params: { limit, page } });
+      const incoming = Array.isArray(data?.tasks) ? data.tasks : [];
+      if (append) {
+        const byKey = new Map(allTasks.value.map((task) => [`${task.source}:${task.id}`, task]));
+        for (const task of incoming) byKey.set(`${task.source}:${task.id}`, task);
+        allTasks.value = Array.from(byKey.values()).sort((a, b) =>
+          new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime(),
+        );
+      } else {
+        allTasks.value = incoming;
+      }
+      allTasksTotal.value = Number(data?.total) || allTasks.value.length;
+      allTasksHasMore.value = allTasks.value.length < allTasksTotal.value;
+      return allTasks.value;
+    } catch (e) {
+      error.value = e.response?.data?.error || e.message;
+      return allTasks.value;
     } finally {
       loading.value = false;
     }
@@ -152,8 +182,8 @@ export const useTasksStore = defineStore('tasks', () => {
   }
 
   return {
-    tasks, current, loading, error,
-    fetchTasks, fetchTask, createTask, updateTask,
+    tasks, allTasks, allTasksTotal, allTasksHasMore, current, loading, error,
+    fetchTasks, fetchAllTasks, fetchTask, createTask, updateTask,
     startTask, pauseTask, resumeTask, deleteTask,
     fetchResult, fetchMetrics, fetchTaskLogs, uploadTZ, parseTZWithLLM,
     fetchRelevancePrefill,
