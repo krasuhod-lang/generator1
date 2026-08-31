@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { useRoute } from 'vue-router';
 import DOMPurify from 'dompurify';
 import AppLayout from '../components/AppLayout.vue';
 import GeminiModelSelector from '../components/GeminiModelSelector.vue';
@@ -13,6 +14,7 @@ import { filterAndSortTasks, groupTasksByDate, isTaskActiveStatus } from '../uti
 
 const store = useLinkArticleStore();
 const auth  = useAuthStore();
+const route = useRoute();
 const isClient = computed(() => !auth.user || String(auth.user.role || '').toLowerCase() === 'client');
 
 // История задач: фильтруем локально по уже загруженным server-side страницам.
@@ -140,6 +142,12 @@ async function handleCreate() {
 let pollTimer = null;
 onMounted(async () => {
   await store.fetchTasks();
+  // Deep-link из проекта/центра задач: открываем задачу тем же путём, что и клик.
+  try {
+    const openId = route.query && route.query.open;
+    const id = Array.isArray(openId) ? openId[0] : openId;
+    if (id && typeof id === 'string') await selectTask(id);
+  } catch (_) { /* no-op */ }
   pollTimer = setInterval(() => {
     if (store.tasks.some((t) => isTaskActiveStatus(t.status))) {
       store.fetchTasks();
@@ -155,8 +163,10 @@ async function handleDelete(task) {
   if (!confirm(`Удалить задачу «${task.topic}»? Все результаты будут потеряны.`)) return;
   try {
     await store.deleteTask(task.id);
-    if (selectedTask.value?.id === task.id) {
+    if (String(selectedTask.value?.id || selectedTaskId.value) === String(task.id)) {
       selectedTask.value = null;
+      selectedTaskId.value = '';
+      selectedTaskError.value = '';
       closeStream();
     }
   } catch (err) {
@@ -221,6 +231,7 @@ function taskQueueLabel(task) {
 
 // ── Детали активной задачи + SSE ────────────────────────────────────
 const selectedTask = ref(null);
+const selectedTaskId = ref('');
 const streamEvents = ref([]);
 let   eventSource  = null;
 
@@ -231,21 +242,56 @@ function closeStream() {
   }
 }
 
+const selectedTaskLoading = ref(false);
+const selectedTaskError = ref('');
+const selectedTaskSectionRef = ref(null);
+let selectionRequestSeq = 0;
+
 async function selectTask(id) {
+  const requestSeq = ++selectionRequestSeq;
   closeStream();
   streamEvents.value = [];
-  try {
-    selectedTask.value = await store.getTask(id);
-  } catch (err) {
-    alert(err.response?.data?.error || 'Не удалось загрузить задачу');
-    return;
-  }
+  selectedTaskError.value = '';
+  selectedTaskLoading.value = true;
+  // Не оставляем старую статью на экране, пока открывается новая.
+  selectedTask.value = null;
+  selectedTaskId.value = String(id ?? '');
 
-  // SSE поток — для running/queued задач; клиенту доступны только статус и результат.
-  if (!isClient.value && selectedTask.value && isTaskActiveStatus(selectedTask.value.status)) {
-    openStreamFor(id);
+  try {
+    const task = await store.getTask(id);
+    if (requestSeq !== selectionRequestSeq) return;
+    selectedTask.value = task;
+    if (!task) {
+      selectedTaskError.value = 'Выбранная задача не найдена. Обновите список и попробуйте ещё раз.';
+      return;
+    }
+
+    // Панель результата находится ниже формы и списка. После её появления
+    // переносим пользователя к ней, чтобы клик имел очевидный визуальный эффект.
+    await nextTick();
+    if (requestSeq !== selectionRequestSeq) return;
+    selectedTaskSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // SSE поток — для running/queued задач; клиенту доступны только статус и результат.
+    if (!isClient.value && isTaskActiveStatus(task.status)) {
+      openStreamFor(id);
+    }
+  } catch (_) {
+    if (requestSeq !== selectionRequestSeq) return;
+    selectedTask.value = null;
+    selectedTaskError.value = 'Не удалось открыть задачу. Обновите список и попробуйте ещё раз.';
+  } finally {
+    if (requestSeq === selectionRequestSeq) selectedTaskLoading.value = false;
   }
 }
+
+// Если router меняет query без размонтирования компонента, deep-link всё равно
+// должен открыть новую задачу, а не оставлять старый результат.
+watch(() => route.query.open, (openId, previousOpenId) => {
+  if (openId === previousOpenId) return;
+  const id = Array.isArray(openId) ? openId[0] : openId;
+  if (id && typeof id === 'string') selectTask(id);
+});
 
 function openStreamFor(id) {
   if (isClient.value) return;
@@ -295,7 +341,8 @@ watch(() => store.tasks, (arr) => {
     fresh.status !== selectedTask.value.status
     || fresh.updated_at !== selectedTask.value.updated_at
     || fresh.progress_pct !== selectedTask.value.progress_pct
-    || Boolean(fresh.article_html) !== Boolean(selectedTask.value.article_html)
+    || Boolean(fresh.article_html || fresh.article_html_with_schema || fresh.article_plain)
+      !== Boolean(selectedTask.value.article_html || selectedTask.value.article_html_with_schema || selectedTask.value.article_plain)
   )) {
     store.getTask(selectedTask.value.id).then((t) => {
       if (t) selectedTask.value = { ...selectedTask.value, ...t };
@@ -305,28 +352,50 @@ watch(() => store.tasks, (arr) => {
 
 // ── Preview + Copy ──────────────────────────────────────────────────
 const articlePreviewRef = ref(null);
+const LINK_ARTICLE_CONTENT_FIELDS = Object.freeze([
+  // Новые и legacy-форматы сохранённых результатов. Порядок важен: schema
+  // сохраняет полноценную публикационную HTML-версию, plain — последний fallback.
+  'article_html_with_schema', 'article_html', 'content_html', 'html', 'article_content', 'content',
+]);
+
+const articleHtmlCandidates = computed(() => {
+  const task = selectedTask.value || {};
+  return LINK_ARTICLE_CONTENT_FIELDS
+    .map((key) => task[key])
+    .filter((value) => typeof value === 'string' && value.trim());
+});
+
+const articleSourceHtml = computed(() => articleHtmlCandidates.value[0] || '');
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function plainTextToHtml(value) {
+  const text = String(value ?? '').replace(/\r\n?/g, '\n').trim();
+  if (!text) return '';
+  return text.split(/\n{2,}/).map((paragraph) =>
+    `<p>${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`,
+  ).join('');
+}
 
 const sanitizedHtml = computed(() => {
-  const html = selectedTask.value?.article_html || '';
-  if (!html) return '';
-  // DOMPurify-ALLOWED_URI_REGEXP намеренно допускает data:image/(png|jpeg|jpg|webp);base64,…
-  // для base64 изображений от Nano Banana Pro. Эта конфигурация применяется
-  // ИСКЛЮЧИТЕЛЬНО к article_html, сгенерированной нашим бэкендом и видимой
-  // только владельцу задачи (user_id-check в контроллере). Никакого
-  // user-controlled HTML, который проходил бы через этот sanitize, нет.
-  //
-  // ВАЖНО: data:image/...;base64,… — отдельная ветка регулярки (без
-  // требования закрывающего «:»), потому что реальный data-URI заканчивается
-  // на «,DATA», а не на «:». Старый regex требовал «data:image/png;base64:»
-  // и поэтому DOMPurify вырезал ВСЕ изображения статей.
-  return DOMPurify.sanitize(html, {
-    ADD_ATTR: ['target'],
-    ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-  });
+  const plain = selectedTask.value?.article_plain || selectedTask.value?.text || '';
+  if (!articleHtmlCandidates.value.length && !plain.trim()) return '';
+  for (const candidate of articleHtmlCandidates.value) {
+    const cleaned = DOMPurify.sanitize(candidate, {
+      ADD_ATTR: ['target'],
+      ALLOWED_URI_REGEXP: /^(?:data:image\/(?:png|jpeg|jpg|webp);base64,|(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    });
+    if (cleaned.trim()) return cleaned;
+  }
+  return plainTextToHtml(plain);
 });
 
 async function copyAsHtml() {
-  const html = selectedTask.value?.article_html;
+  const html = articleSourceHtml.value || plainTextToHtml(selectedTask.value?.article_plain || '');
   if (!html) return;
 
   // ВАЖНО: «Скопировать HTML» должна класть в буфер именно ИСХОДНЫЙ HTML
@@ -476,7 +545,9 @@ const eeatBadgeClass = computed(() => {
   return 'border-red-700 bg-red-900/30 text-red-200';
 });
 
-const hasResult = computed(() => !!selectedTask.value?.article_html);
+const hasResult = computed(() => Boolean(
+  articleSourceHtml.value.trim() || String(selectedTask.value?.article_plain || '').trim(),
+));
 
 // ── Мета-теги (GIST Meta Filter, Задача D) ──────────────────────────
 // Контракт metaFacade (source/gist_fact/ctr_score/...). Старые задачи хранят
@@ -611,7 +682,15 @@ async function copyMetaField(label, value) {
                 Всего: {{ historyStats.total }} · Готово: {{ historyStats.done }} · В работе: {{ historyStats.active }} · Ошибки: {{ historyStats.errors }}
               </div>
             </div>
-            <button class="btn-ghost text-xs shrink-0" @click="store.fetchTasks()">Обновить</button>
+              <button class="btn-ghost text-xs shrink-0" @click="store.fetchTasks()">Обновить</button>
+          </div>
+          <div v-if="selectedTaskLoading" role="status" aria-live="polite"
+               class="rounded-lg border border-indigo-800/60 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+            Открываем выбранную задачу и готовим результат…
+          </div>
+          <div v-else-if="selectedTaskError" role="alert"
+               class="rounded-lg border border-red-800/60 bg-red-950/30 px-3 py-2 text-xs text-red-200">
+            {{ selectedTaskError }}
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2">
@@ -647,8 +726,13 @@ async function copyMetaField(label, value) {
               <ul class="divide-y divide-gray-800 -mx-1">
                 <li v-for="t in group.tasks" :key="t.id"
                     class="px-1 py-2 flex items-center gap-3 cursor-pointer hover:bg-gray-800/40 rounded"
-                    :class="{ 'bg-gray-800/50': selectedTask?.id === t.id }"
-                    @click="selectTask(t.id)">
+                    :class="{ 'bg-indigo-950/40 ring-1 ring-inset ring-indigo-700/60': selectedTaskId === String(t.id) }"
+                    :aria-current="selectedTaskId === String(t.id) ? 'true' : undefined"
+                    role="button"
+                    tabindex="0"
+                    @click="selectTask(t.id)"
+                    @keydown.enter.prevent="selectTask(t.id)"
+                    @keydown.space.prevent="selectTask(t.id)">
                   <div class="flex-1 min-w-0">
                     <div class="text-sm text-gray-200 truncate">{{ t.topic }}</div>
                     <div class="text-[11px] text-gray-500 mt-0.5">
@@ -675,7 +759,7 @@ async function copyMetaField(label, value) {
       </div>
 
       <!-- ── Активная задача ── -->
-      <section v-if="selectedTask" class="card space-y-4">
+      <section v-if="selectedTask" ref="selectedTaskSectionRef" class="card space-y-4 scroll-mt-6">
         <header class="flex items-center justify-between gap-3 border-b border-gray-800 pb-3">
           <div class="min-w-0">
             <div class="text-xs text-gray-500">Задача</div>
@@ -805,6 +889,10 @@ async function copyMetaField(label, value) {
               </div>
             </div>
           </div>
+        </div>
+        <div v-else-if="selectedTask.status === 'done'"
+             class="rounded-lg border border-amber-800/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-100">
+          Задача завершена, но готовый текст пока не найден. Обновите список через несколько секунд или обратитесь к администратору.
         </div>
       </section>
     </div>
