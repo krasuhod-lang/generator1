@@ -167,7 +167,15 @@ async function getLinkArticleTask(req, res, next) {
     if (!rows.length) {
       return res.status(404).json({ error: 'Задача не найдена' });
     }
-    return res.json({ task: isClientRequest(req) ? sanitizeTaskForClient(rows[0]) : rows[0] });
+    // Результат задачи пользовательский и изменяемый во время финализации.
+    // Не отдаём его через conditional 304: старый Safari/прокси может передать
+    // Axios пустой response и UI останется без selectedTask/article HTML.
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
+    return res.status(200).json({ task: isClientRequest(req) ? sanitizeTaskForClient(rows[0]) : rows[0] });
   } catch (err) {
     return next(err);
   }
