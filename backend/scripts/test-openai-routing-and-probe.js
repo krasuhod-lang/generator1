@@ -69,9 +69,12 @@ const adminStoreSource = fs.readFileSync(require.resolve('../../frontend/src/sto
 assert(adminStoreSource.includes('probeIntegrationKey,') && adminStoreSource.includes('probeAllIntegrationKeys,'));
 const serverSource = fs.readFileSync(require.resolve('../server.js'), 'utf8');
 const vaultSource = fs.readFileSync(require.resolve('../src/services/integrations/integrationVault.js'), 'utf8');
+const vaultSchemaSource = fs.readFileSync(require.resolve('../src/services/integrations/integrationVaultSchema.js'), 'utf8');
 const auditMigration = fs.readFileSync(require.resolve('../../migrations/148_fix_integration_audit_user_id.sql'), 'utf8');
 assert(vaultSource.includes('admin_user_id TEXT'));
 assert(vaultSource.includes('ALTER COLUMN admin_user_id TYPE TEXT'));
+assert(vaultSchemaSource.includes('admin_user_id TEXT'));
+assert(vaultSchemaSource.includes('ALTER COLUMN admin_user_id TYPE TEXT'));
 assert(auditMigration.includes('ALTER COLUMN admin_user_id TYPE TEXT'));
 assert(serverSource.includes("CHECK (llm_provider IN ('gemini', 'grok', 'openai'))"));
 assert(serverSource.includes('ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS openai_tokens_in'));

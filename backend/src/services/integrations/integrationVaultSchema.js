@@ -28,16 +28,19 @@ async function ensureIntegrationVaultSchema(db = dbDefault) {
       id            BIGSERIAL PRIMARY KEY,
       env_name      TEXT NOT NULL,
       action        TEXT NOT NULL,
-      admin_user_id BIGINT,
+      admin_user_id TEXT,
       masked_value  TEXT,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       meta          JSONB NOT NULL DEFAULT '{}'::jsonb
     )`,
     `ALTER TABLE admin_integration_secret_audit
-       ADD COLUMN IF NOT EXISTS admin_user_id BIGINT,
+       ADD COLUMN IF NOT EXISTS admin_user_id TEXT,
        ADD COLUMN IF NOT EXISTS masked_value TEXT,
        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
        ADD COLUMN IF NOT EXISTS meta JSONB NOT NULL DEFAULT '{}'::jsonb`,
+    `ALTER TABLE admin_integration_secret_audit
+       ALTER COLUMN admin_user_id TYPE TEXT
+       USING admin_user_id::text`,
     `CREATE INDEX IF NOT EXISTS ix_admin_integration_secret_audit_created
        ON admin_integration_secret_audit(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS ix_admin_integration_secret_audit_env
