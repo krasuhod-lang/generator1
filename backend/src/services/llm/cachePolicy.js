@@ -84,7 +84,7 @@ function _byteLen(v) {
  */
 function shouldCacheResponse({ adapter = '', system = '', prompt = '', value = undefined } = {}) {
   const provider = String(adapter || '').toLowerCase();
-  if (!['deepseek', 'gemini', 'grok'].includes(provider)) {
+  if (!['deepseek', 'gemini', 'grok', 'openai'].includes(provider)) {
     return { ok: false, reason: 'unsupported_adapter' };
   }
 

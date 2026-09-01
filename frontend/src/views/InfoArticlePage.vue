@@ -4,7 +4,8 @@ import { useRoute } from 'vue-router';
 import DOMPurify from 'dompurify';
 import readXlsxFile from 'read-excel-file';
 import AppLayout from '../components/AppLayout.vue';
-import GeminiModelSelector from '../components/GeminiModelSelector.vue';
+import LlmProviderSelector from '../components/LlmProviderSelector.vue';
+import LlmModelSelector from '../components/LlmModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
 import AppPageHeader from '../components/AppPageHeader.vue';
@@ -54,6 +55,8 @@ const form = ref({
   author_name:   '',
   brand_facts:   '',
   output_format: 'html',
+  llm_provider:  'gemini',
+  llm_model:     'gemini-3.1-pro-preview',
   gemini_model:  'gemini-3.1-pro-preview',
   // Новая семантика: обложка обязательна, inline-изображения опциональны.
   // Пользователь явно выбирает 0..3 дополнительных изображений по блокам статьи.
@@ -464,6 +467,8 @@ async function handleCreate() {
       output_format: form.value.output_format,
       images_count: imagesCount,
       inline_images_count: inlineImagesCount,
+      llm_provider:  form.value.llm_provider,
+      llm_model:     form.value.llm_model,
       gemini_model:  form.value.gemini_model,
       commercial_links: parsedLinks.value,
       commercial_links_filename: fileMeta.value?.name || '',
@@ -1394,10 +1399,18 @@ onUnmounted(() => { stopTicker(); });
                   Дополнительные изображения будут привязаны к самостоятельным H2-блокам статьи и вставлены перед соответствующими разделами.
                 </p>
               </div>
-              <GeminiModelSelector
-                v-model="form.gemini_model"
+              <LlmProviderSelector
+                v-model="form.llm_provider"
+                :allowed-providers="['gemini', 'openai']"
                 :disabled="submitting"
-                hint="Модель применяется к Gemini-writer этапу этой задачи."
+                hint="GPT можно включить точечно для сложного writer/refine; Gemini остаётся стандартом для блога."
+              />
+              <LlmModelSelector
+                v-model="form.llm_model"
+                :provider="form.llm_provider"
+                :disabled="submitting"
+                class="mt-3"
+                hint="Модель сохраняется вместе с задачей и применяется к writer/refine вызовам."
               />
               <div v-if="form.source_relevance_report_id" class="p-2 rounded bg-emerald-900/20 border border-emerald-800/50 text-xs text-emerald-300">
                 🎯 Подключён отчёт релевантности

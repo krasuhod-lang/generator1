@@ -3,6 +3,7 @@
 const { callDeepSeek, DEEPSEEK_DEFAULT_MAX_TOKENS } = require('./deepseek.adapter');
 const { callGemini }   = require('./gemini.adapter');
 const { callGrok }     = require('./grok.adapter');
+const { callOpenAI }   = require('./openai.adapter');
 const { autoCloseJSON, extractBalancedJson } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const {
@@ -25,6 +26,7 @@ const ADAPTER_DEFAULT_MAX_TOKENS = {
   deepseek:   DEEPSEEK_DEFAULT_MAX_TOKENS, // 16000 (env DEEPSEEK_MAX_TOKENS)
   gemini:     16384,                       // gemini.adapter profile default
   grok:       8192,                       // grok.adapter default
+  openai:     16000,                      // openai.adapter default
 };
 
 // ────────────────────────────────────────────────────────────────────
@@ -97,21 +99,26 @@ function getTaskBudgetSpent(taskId, adapter = 'gemini') {
  * Это только локальный preflight; окончательное reservation выполняется
  * атомарно непосредственно перед HTTP-вызовом.
  */
-function getTaskBudgetRemaining(taskId, tokenBudget = getConfiguredTaskTokenBudget()) {
+function getTaskBudgetRemaining(taskId, tokenBudget = getConfiguredTaskTokenBudget(), adapter = 'gemini') {
   if (!taskId || !Number.isFinite(tokenBudget)) return Infinity;
   const st = tokenBudgetState.get(taskId);
   if (!st) return tokenBudget;
-  return Math.max(0, tokenBudget - Math.max(0, Number(st.gemini) || 0) - Math.max(0, Number(st.reservedGemini) || 0));
+  const key = adapter === 'openai' ? 'openai' : 'gemini';
+  const reservedKey = key === 'openai' ? 'reservedOpenai' : 'reservedGemini';
+  return Math.max(0, tokenBudget - Math.max(0, Number(st[key]) || 0) - Math.max(0, Number(st[reservedKey]) || 0));
 }
 
 function _getBudgetState(taskId) {
   if (!taskId) return null;
   const st = tokenBudgetState.get(taskId) || {
     gemini: 0,
+    openai: 0,
     deepseek: 0,
     reservedGemini: 0,
+    reservedOpenai: 0,
   };
   if (!Number.isFinite(st.reservedGemini)) st.reservedGemini = 0;
+  if (!Number.isFinite(st.reservedOpenai)) st.reservedOpenai = 0;
   tokenBudgetState.set(taskId, st);
   return st;
 }
@@ -131,7 +138,7 @@ function _accumulateTokens(taskId, adapter, tokensIn) {
  */
 function getBudgetInputTokens(adapter, result, fallback = 0) {
   const total = Math.max(0, Number(result?.tokensIn) || Number(fallback) || 0);
-  if (adapter === 'gemini') {
+  if (adapter === 'gemini' || adapter === 'openai') {
     const cached = Math.min(total, Math.max(0, Number(result?.cachedTokens) || 0));
     return Math.max(0, total - cached);
   }
@@ -143,20 +150,22 @@ function getBudgetInputTokens(adapter, result, fallback = 0) {
  * race where several independent Gemini calls all see the same pre-spend.
  * The reservation is released and replaced by actual usage on success.
  */
-function _reserveGeminiBudget(taskId, tokenBudget, estimatedTokens) {
+function _reserveMeteredBudget(taskId, tokenBudget, estimatedTokens, adapter = 'gemini') {
   if (!taskId || !Number.isFinite(tokenBudget)) return null;
+  const key = adapter === 'openai' ? 'openai' : 'gemini';
+  const reservedKey = key === 'openai' ? 'reservedOpenai' : 'reservedGemini';
   const st = _getBudgetState(taskId);
   const estimate = Math.max(1, Math.ceil(Number(estimatedTokens) || 0));
-  const committed = Math.max(0, Number(st.gemini) || 0);
-  const reserved = Math.max(0, Number(st.reservedGemini) || 0);
+  const committed = Math.max(0, Number(st[key]) || 0);
+  const reserved = Math.max(0, Number(st[reservedKey]) || 0);
   if (committed + reserved + estimate > tokenBudget) {
     throw new BudgetExceededError(
-      `gemini token budget exhausted for task ${taskId}: `
+      `${key} token budget exhausted for task ${taskId}: `
       + `${committed + reserved}/${tokenBudget} input tokens reserved. `
-      + 'Skip non-essential calls (Stage 6 cycle, Stage 5 retries) and continue.'
+      + 'Skip non-essential calls and continue.'
     );
   }
-  st.reservedGemini = reserved + estimate;
+  st[reservedKey] = reserved + estimate;
   tokenBudgetState.set(taskId, st);
   let released = false;
   return {
@@ -164,15 +173,15 @@ function _reserveGeminiBudget(taskId, tokenBudget, estimatedTokens) {
       if (released) return;
       released = true;
       const current = _getBudgetState(taskId);
-      current.reservedGemini = Math.max(0, (current.reservedGemini || 0) - estimate);
-      current.gemini = (current.gemini || 0) + Math.max(0, Number(actualTokens) || 0);
+      current[reservedKey] = Math.max(0, (current[reservedKey] || 0) - estimate);
+      current[key] = (current[key] || 0) + Math.max(0, Number(actualTokens) || 0);
       tokenBudgetState.set(taskId, current);
     },
     release() {
       if (released) return;
       released = true;
       const current = _getBudgetState(taskId);
-      current.reservedGemini = Math.max(0, (current.reservedGemini || 0) - estimate);
+      current[reservedKey] = Math.max(0, (current[reservedKey] || 0) - estimate);
       tokenBudgetState.set(taskId, current);
     },
   };
@@ -442,6 +451,8 @@ async function persistStageCall({
       metricsCol = { colIn: 'deepseek_tokens_in', colOut: 'deepseek_tokens_out', colCost: 'deepseek_cost_usd' };
     } else if (model.startsWith('grok')) {
       metricsCol = { colIn: 'grok_tokens_in',     colOut: 'grok_tokens_out',     colCost: 'grok_cost_usd'     };
+    } else if (model.startsWith('gpt-')) {
+      metricsCol = { colIn: 'openai_tokens_in',   colOut: 'openai_tokens_out',   colCost: 'openai_cost_usd'   };
     } else {
       metricsCol = { colIn: 'gemini_tokens_in',   colOut: 'gemini_tokens_out',   colCost: 'gemini_cost_usd'   };
     }
@@ -560,10 +571,12 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     ? callGemini
     : adapter === 'grok'
       ? callGrok
-      : callDeepSeek;
-  // Provider-class для метрик и budget guard'а: Grok идёт по той же
-  // дорожке, что и Gemini (платный текстовый провайдер с per-task budget'ом).
-  const providerClass = adapter === 'deepseek' ? 'deepseek' : 'gemini-class';
+      : adapter === 'openai'
+        ? callOpenAI
+        : callDeepSeek;
+  // Grok/OpenAI/Gemini use the metered per-task input guard; DeepSeek keeps
+  // its separate accounting path for backward compatibility.
+  const providerClass = adapter === 'deepseek' ? 'deepseek' : (adapter === 'openai' ? 'openai' : 'gemini-class');
   const startedAt = new Date();
   let activeSystem = system;
   let promptSize = estimateTokens(activeSystem + prompt);
@@ -610,18 +623,18 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     let apiAttemptStartedAt = null;
     let ledgerContext = null;
     try {
-      if (providerClass === 'gemini-class' && Number.isFinite(tokenBudget) && budgetTaskId) {
-        const remaining = getTaskBudgetRemaining(budgetTaskId, tokenBudget);
+      if ((providerClass === 'gemini-class' || providerClass === 'openai') && Number.isFinite(tokenBudget) && budgetTaskId) {
+        const remaining = getTaskBudgetRemaining(budgetTaskId, tokenBudget, adapter);
         if (skipOnBudget && remaining < promptSize) {
           const skipError = new BudgetExceededError(
-            `gemini token budget preflight skipped ${callLabel || stageName}: ` +
+            `${adapter} token budget preflight skipped ${callLabel || stageName}: ` +
             `${Math.round(remaining)}/${tokenBudget} input tokens remaining, ` +
             `estimated ${promptSize}.`
           );
           skipError.silentBudgetSkip = true;
           throw skipError;
         }
-        budgetReservation = _reserveGeminiBudget(budgetTaskId, tokenBudget, promptSize);
+        budgetReservation = _reserveMeteredBudget(budgetTaskId, tokenBudget, promptSize, adapter);
       }
       const callOpts = { temperature, maxTokens, logprobs, responseFormat };
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
@@ -641,7 +654,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       if (budgetReservation) budgetReservation.commit(budgetInputTokens);
       const costModel = adapter === 'deepseek'
         ? (result.model || model || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro')
-        : adapter;
+        : adapter === 'openai'
+          ? (result.model || model || process.env.OPENAI_MODEL || 'gpt-5')
+          : adapter;
       const pricingMeta = calculateCostBreakdown(costModel, result.tokensIn, result.tokensOut, {
         cacheHit: adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0,
         cacheHitTokens: result.cacheHitTokens || 0,
@@ -675,11 +690,14 @@ async function callLLM(adapter, system, prompt, opts = {}) {
           cache_hit: cacheHit,
           cached_content: Boolean(activeCachedContent),
           finish_reason: result.finishReason || null,
+          usage_source: 'provider_response',
+          pricing_known: pricingMeta.pricingKnown !== false,
+          pricing_source: pricingMeta.pricingSource || null,
         },
       };
       // Usage фиксируем ДО проверки truncation/JSON: retry после обрезанного
       // ответа тоже является реальным provider-вызовом и должен попасть в budget.
-      if (!budgetReservation && providerClass === 'gemini-class' && budgetTaskId) {
+      if (!budgetReservation && (providerClass === 'gemini-class' || providerClass === 'openai') && budgetTaskId) {
         _accumulateTokens(budgetTaskId, budgetKey, budgetInputTokens);
       }
 

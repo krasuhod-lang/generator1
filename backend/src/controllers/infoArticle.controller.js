@@ -31,6 +31,7 @@ const { normalizeCommercialLinks, MAX_COMMERCIAL_LINKS } =
   require('../services/infoArticle/excelParser');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { normalizeProvider, normalizeModel } = require('../services/llm/modelRouting');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const {
@@ -139,10 +140,11 @@ async function listInfoArticleTasks(req, res, next) {
       `SELECT id, topic, region, brand_name, output_format,
               commercial_links_filename, commercial_links_count,
               images_count, source_relevance_report_id,
-              gemini_model,
+              llm_provider, gemini_model, llm_model,
               status, progress_pct, current_stage, error_message,
               deepseek_tokens_in, deepseek_tokens_out,
               gemini_tokens_in, gemini_tokens_out,
+              openai_tokens_in, openai_tokens_out,
               gemini_image_calls, cost_usd, eeat_score,
               quality_gate,
               created_at, updated_at, started_at, completed_at
@@ -184,7 +186,11 @@ async function createInfoArticleTask(req, res, next) {
     const outputFormat = ALLOWED_FORMATS.includes(String(body.output_format || '').toLowerCase())
       ? String(body.output_format).toLowerCase()
       : 'html';
-    const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
+    const provider = normalizeProvider(body.llm_provider, 'gemini');
+    const llmModel = normalizeModel(provider, body.llm_model || body.gemini_model);
+    const geminiModel = provider === 'gemini'
+      ? normalizeGeminiCopywritingModel(llmModel)
+      : normalizeGeminiCopywritingModel(body.gemini_model);
     // Новая форма отправляет inline_images_count: cover всегда + 0..3 inline.
     // Старые клиенты с images_count продолжают работать по legacy-контракту.
     const imagesCount = resolveImagesCount(body);
@@ -269,19 +275,19 @@ async function createInfoArticleTask(req, res, next) {
            (id, user_id, topic, region, brand_name, author_name, brand_facts, output_format,
              commercial_links, commercial_links_filename, commercial_links_count,
              images_count, source_relevance_report_id,
-             gemini_model, project_id, target_site_url, opportunity_id,
+             llm_provider, gemini_model, llm_model, project_id, target_site_url, opportunity_id,
              published_url, published_queries, status, progress_pct)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'queued', 0)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 'queued', 0)
          RETURNING id, topic, region, brand_name, output_format,
                    commercial_links_filename, commercial_links_count,
-                   images_count, source_relevance_report_id, gemini_model,
+                   images_count, source_relevance_report_id, llm_provider, gemini_model, llm_model,
                    project_id, target_site_url, opportunity_id, published_url,
                    published_queries, status, progress_pct, created_at`,
         [
           taskId, req.user.id, topic, effRegion, effBrandName || null, authorName || null,
           effBrandFacts || null, outputFormat,
           JSON.stringify(links), filename || null, links.length,
-          imagesCount, relevanceReportId, geminiModel, projectId, targetSiteUrl, opportunityId,
+          imagesCount, relevanceReportId, provider, geminiModel, llmModel, projectId, targetSiteUrl, opportunityId,
           publishedUrl, publishedQueries,
         ],
       ),

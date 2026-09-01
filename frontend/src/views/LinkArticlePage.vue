@@ -3,7 +3,8 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
 import DOMPurify from 'dompurify';
 import AppLayout from '../components/AppLayout.vue';
-import GeminiModelSelector from '../components/GeminiModelSelector.vue';
+import LlmProviderSelector from '../components/LlmProviderSelector.vue';
+import LlmModelSelector from '../components/LlmModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
 import AppPageHeader from '../components/AppPageHeader.vue';
@@ -49,6 +50,8 @@ const form = ref({
   anchor_url:    '',
   focus_notes:   '',
   output_format: 'html',
+  llm_provider:  'gemini',
+  llm_model:     'gemini-3.1-pro-preview',
   gemini_model:  'gemini-3.1-pro-preview',
 });
 const submitting = ref(false);
@@ -124,6 +127,8 @@ async function handleCreate() {
       anchor_url:    form.value.anchor_url.trim(),
       focus_notes:   form.value.focus_notes.trim(),
       output_format: form.value.output_format,
+      llm_provider:  form.value.llm_provider,
+      llm_model:     form.value.llm_model,
       gemini_model:  form.value.gemini_model,
       project_id:    selectedProjectId.value || null,
     });
@@ -655,10 +660,18 @@ async function copyMetaField(label, value) {
             </p>
           </div>
 
-          <GeminiModelSelector
-            v-model="form.gemini_model"
+          <LlmProviderSelector
+            v-model="form.llm_provider"
+            :allowed-providers="['gemini', 'openai']"
             :disabled="submitting"
-            hint="Модель применяется к Gemini-writer этапу этой задачи."
+            hint="GPT можно включить точечно для сложного writer/refine; Gemini остаётся стандартом для ссылочных статей."
+          />
+          <LlmModelSelector
+            v-model="form.llm_model"
+            :provider="form.llm_provider"
+            :disabled="submitting"
+            class="mt-3"
+            hint="Модель сохраняется вместе с задачей и применяется к writer-вызову."
           />
 
           <div v-if="formError"

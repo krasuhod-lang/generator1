@@ -37,6 +37,8 @@ const {
   listAdminIntegrationKeys,
   putAdminIntegrationKey,
   deleteAdminIntegrationKey,
+  probeAdminIntegrationKey,
+  probeAllAdminIntegrationKeys,
   listAdminIntegrationKeyAudit,
 } = require('../controllers/adminIntegrationKeys.controller');
 
@@ -99,6 +101,8 @@ router.get('/api-usage',          apiLimiter, adminAuth, getAdminApiUsage);
 // Central encrypted integration key vault. Plaintext is accepted only on PUT
 // and is never returned; DELETE removes the DB override and restores env fallback.
 router.get   ('/api-keys',              apiLimiter, adminAuth, listAdminIntegrationKeys);
+router.get   ('/api-keys/probe/all',     apiLimiter, adminAuth, probeAllAdminIntegrationKeys);
+router.get   ('/api-keys/:envName/probe',apiLimiter, adminAuth, probeAdminIntegrationKey);
 router.get   ('/api-keys/audit',        apiLimiter, adminAuth, listAdminIntegrationKeyAudit);
 router.put   ('/api-keys/:envName',     apiLimiter, adminAuth, putAdminIntegrationKey);
 router.delete('/api-keys/:envName',      apiLimiter, adminAuth, deleteAdminIntegrationKey);

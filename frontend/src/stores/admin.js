@@ -236,6 +236,16 @@ export const useAdminStore = defineStore('admin', () => {
     return data;
   }
 
+  async function probeIntegrationKey(envName) {
+    const { data } = await adminApi.get(`/admin/api-keys/${encodeURIComponent(envName)}/probe`);
+    return data;
+  }
+
+  async function probeAllIntegrationKeys() {
+    const { data } = await adminApi.get('/admin/api-keys/probe/all');
+    return data;
+  }
+
   async function fetchIntegrationKeyAudit() {
     const { data } = await adminApi.get('/admin/api-keys/audit');
     return data;
@@ -300,6 +310,8 @@ export const useAdminStore = defineStore('admin', () => {
     fetchIntegrationKeys,
     saveIntegrationKey,
     removeIntegrationKey,
+    probeIntegrationKey,
+    probeAllIntegrationKeys,
     fetchIntegrationKeyAudit,
     fetchStorageAudit,
     cleanupStorage,

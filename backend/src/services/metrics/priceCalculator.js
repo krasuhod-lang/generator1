@@ -50,6 +50,10 @@ const PRICES = {
     input: 2.00 / MILLION,
     output: 6.00 / MILLION,
   },
+  openai_gpt_5_nano: { model: 'gpt-5-nano', input: 0.05 / MILLION, output: 0.40 / MILLION },
+  openai_gpt_5_mini: { model: 'gpt-5-mini', input: 0.25 / MILLION, output: 2.00 / MILLION },
+  openai_gpt_5:      { model: 'gpt-5',      input: 1.25 / MILLION, output: 10.00 / MILLION },
+  openai_gpt_5_5:    { model: 'gpt-5.5',    input: 5.00 / MILLION, output: 30.00 / MILLION },
 };
 
 const GEMINI_SHORT_CONTEXT_LIMIT = 200_000;
@@ -126,6 +130,15 @@ function resolveDeepSeekTier(model) {
   return { key, tier: PRICES[key] };
 }
 
+function normalizeOpenAiPricingKey(model) {
+  const raw = String(model || '').trim().toLowerCase();
+  if (raw === 'gpt-5-nano' || raw.startsWith('gpt-5-nano-')) return 'openai_gpt_5_nano';
+  if (raw === 'gpt-5-mini' || raw.startsWith('gpt-5-mini-')) return 'openai_gpt_5_mini';
+  if (raw === 'gpt-5.5' || raw.startsWith('gpt-5.5-')) return 'openai_gpt_5_5';
+  if (raw === 'gpt-5' || raw.startsWith('gpt-5-')) return 'openai_gpt_5';
+  return null;
+}
+
 /**
  * Returns a transparent cost breakdown. All token quantities are provider-
  * returned counts, and all USD rates are per-token rates derived from the
@@ -162,6 +175,33 @@ function calculateCostBreakdown(model, tokensIn, tokensOut, usage = {}) {
       inputCostUsd,
       outputCostUsd,
       totalUsd: inputCostUsd + outputCostUsd,
+      pricingKnown: true,
+      pricingSource: 'deepseek_model_pricing',
+    };
+  }
+
+  const openAiKey = normalizeOpenAiPricingKey(model);
+  if (openAiKey) {
+    const tier = PRICES[openAiKey];
+    const inputCostUsd = input * tier.input;
+    const outputCostUsd = output * tier.output;
+    return {
+      provider: 'openai',
+      modelTier: tier.model,
+      pricingMode: 'catalog_standard_input_output',
+      inputTokens: input,
+      outputTokens: output,
+      cacheHitTokens: _clampTokens(usage.cachedTokens, input),
+      cacheMissTokens: Math.max(0, input - _clampTokens(usage.cachedTokens, input)),
+      thoughtsTokens,
+      inputRateUsdPer1M: tier.input * MILLION,
+      inputCacheMissRateUsdPer1M: tier.input * MILLION,
+      outputRateUsdPer1M: tier.output * MILLION,
+      inputCostUsd,
+      outputCostUsd,
+      totalUsd: inputCostUsd + outputCostUsd,
+      pricingKnown: true,
+      pricingSource: 'live_model_catalog_snapshot',
     };
   }
 
@@ -190,6 +230,8 @@ function calculateCostBreakdown(model, tokensIn, tokensOut, usage = {}) {
       inputCostUsd,
       outputCostUsd,
       totalUsd: inputCostUsd + outputCostUsd,
+      pricingKnown: true,
+      pricingSource: 'gemini_model_pricing',
     };
   }
 
@@ -215,6 +257,8 @@ function calculateCostBreakdown(model, tokensIn, tokensOut, usage = {}) {
       inputCostUsd: input * inputRate,
       outputCostUsd: output * outputRate,
       totalUsd: input * inputRate + output * outputRate,
+      pricingKnown: true,
+      pricingSource: 'grok_configured_pricing',
     };
   }
 
@@ -230,6 +274,8 @@ function calculateCostBreakdown(model, tokensIn, tokensOut, usage = {}) {
     inputCostUsd: 0,
     outputCostUsd: 0,
     totalUsd: 0,
+    pricingKnown: false,
+    pricingSource: 'unknown_model',
   };
 }
 

@@ -86,11 +86,14 @@ const geminiCost   = computed(() => metrics.value?.gemini_cost_usd     ?? 0);
 const grokIn       = computed(() => metrics.value?.grok_tokens_in      ?? 0);
 const grokOut      = computed(() => metrics.value?.grok_tokens_out     ?? 0);
 const grokCost     = computed(() => metrics.value?.grok_cost_usd       ?? 0);
+const openaiIn     = computed(() => metrics.value?.openai_tokens_in    ?? 0);
+const openaiOut    = computed(() => metrics.value?.openai_tokens_out   ?? 0);
+const openaiCost   = computed(() => metrics.value?.openai_cost_usd     ?? 0);
 const totalTokens  = computed(() =>
-  metrics.value?.total_tokens ?? (Number(deepseekIn.value) + Number(deepseekOut.value) + Number(geminiIn.value) + Number(geminiOut.value) + Number(grokIn.value) + Number(grokOut.value))
+  metrics.value?.total_tokens ?? (Number(deepseekIn.value) + Number(deepseekOut.value) + Number(geminiIn.value) + Number(geminiOut.value) + Number(grokIn.value) + Number(grokOut.value) + Number(openaiIn.value) + Number(openaiOut.value))
 );
 const totalCost = computed(() =>
-  metrics.value?.total_cost_usd ?? (Number(deepseekCost.value) + Number(geminiCost.value) + Number(grokCost.value))
+  metrics.value?.total_cost_usd ?? (Number(deepseekCost.value) + Number(geminiCost.value) + Number(grokCost.value) + Number(openaiCost.value))
 );
 
 // ── Время генерации ────────────────────────────────────────────────────────
@@ -377,6 +380,17 @@ function closeModal() {
                       <span class="text-right text-gray-300">{{ fmt(deepseekOut) }}</span>
                       <span class="text-gray-500">Cost:</span>
                       <span class="text-right text-indigo-300">${{ Number(deepseekCost).toFixed(4) }}</span>
+                    </div>
+                  </div>
+                  <div class="bg-gray-800 rounded-lg p-3">
+                    <p class="text-xs font-semibold text-emerald-300 mb-2">OpenAI / GPT</p>
+                    <div class="grid grid-cols-2 gap-1 text-xs font-mono">
+                      <span class="text-gray-500">In:</span>
+                      <span class="text-right text-gray-300">{{ fmt(openaiIn) }}</span>
+                      <span class="text-gray-500">Out:</span>
+                      <span class="text-right text-gray-300">{{ fmt(openaiOut) }}</span>
+                      <span class="text-gray-500">Cost:</span>
+                      <span class="text-right text-indigo-300">${{ Number(openaiCost).toFixed(4) }}</span>
                     </div>
                   </div>
                   <div class="bg-gray-800 rounded-lg p-3">

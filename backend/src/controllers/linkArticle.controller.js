@@ -16,6 +16,7 @@ const { processLinkArticleTask } = require('../services/linkArticle/linkArticleP
 const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { normalizeProvider, normalizeModel } = require('../services/llm/modelRouting');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const {
@@ -75,10 +76,12 @@ async function listLinkArticleTasks(req, res, next) {
     );
     const listParams = [...params, limit, offset];
     const { rows } = await db.query(
-      `SELECT id, topic, anchor_text, anchor_url, output_format, gemini_model,
+      `SELECT id, topic, anchor_text, anchor_url, output_format,
               status, progress_pct, current_stage, error_message,
+              llm_provider, gemini_model, llm_model,
               deepseek_tokens_in, deepseek_tokens_out,
               gemini_tokens_in, gemini_tokens_out,
+              openai_tokens_in, openai_tokens_out,
               gemini_image_calls, cost_usd,
               quality_gate,
               created_at, updated_at, started_at, completed_at
@@ -118,7 +121,11 @@ async function createLinkArticleTask(req, res, next) {
     const output_format = ALLOWED_FORMATS.includes(String(body.output_format || '').toLowerCase())
       ? String(body.output_format).toLowerCase()
       : 'html';
-    const geminiModel = normalizeGeminiCopywritingModel(body.gemini_model);
+    const provider = normalizeProvider(body.llm_provider, 'gemini');
+    const llmModel = normalizeModel(provider, body.llm_model || body.gemini_model);
+    const geminiModel = provider === 'gemini'
+      ? normalizeGeminiCopywritingModel(llmModel)
+      : normalizeGeminiCopywritingModel(body.gemini_model);
 
     if (topic.length < MIN_TOPIC_LEN) {
       return res.status(400).json({ error: `Тема статьи должна быть не короче ${MIN_TOPIC_LEN} символов` });
@@ -145,13 +152,13 @@ async function createLinkArticleTask(req, res, next) {
       source: 'link_article_create',
       fn: () => db.query(
         `INSERT INTO link_article_tasks
-            (id, user_id, topic, anchor_text, anchor_url, focus_notes, output_format, gemini_model,
-             project_id, opportunity_id, published_url, published_queries, status, progress_pct)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'queued', 0)
-         RETURNING id, topic, anchor_text, anchor_url, output_format, gemini_model, project_id,
+            (id, user_id, topic, anchor_text, anchor_url, focus_notes, output_format,
+             llm_provider, gemini_model, llm_model, project_id, opportunity_id, published_url, published_queries, status, progress_pct)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'queued', 0)
+         RETURNING id, topic, anchor_text, anchor_url, output_format, llm_provider, gemini_model, llm_model, project_id,
                    opportunity_id, published_url, published_queries, status, progress_pct, created_at`,
-        [taskId, req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format, geminiModel,
-         projectId, opportunityId, publishedUrl, publishedQueries],
+        [taskId, req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format,
+         provider, geminiModel, llmModel, projectId, opportunityId, publishedUrl, publishedQueries],
       ),
     });
     const task = rows[0];

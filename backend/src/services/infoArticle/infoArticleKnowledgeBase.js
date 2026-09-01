@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { resolveTaskModel } = require('../llm/modelRouting');
 
 /**
  * infoArticleKnowledgeBase — IAKB (аналог LAKB для генератора инфо-статьи).
@@ -514,15 +515,18 @@ function renderRelevanceContextSection(ctx) {
 
 function iakbSystem(task) {
   if (!task) return '';
-  if (task.__geminiCacheName) return '';
+  const { provider } = resolveTaskModel(task, 'gemini');
+  if (provider === 'gemini' && task.__geminiCacheName) return '';
   return task.__iakb || '';
 }
 
 function iakbCallOpts(task, extra = {}) {
   const opts = { ...extra };
-  opts.model = normalizeGeminiCopywritingModel(task?.gemini_model);
+  const { provider, model } = resolveTaskModel(task, 'gemini');
+  if (provider === 'gemini') opts.model = normalizeGeminiCopywritingModel(model);
+  else if (provider === 'openai') opts.model = model;
   if (task && task.__tokenBudget !== undefined) opts.tokenBudget = task.__tokenBudget;
-  if (task?.__geminiCacheName) {
+  if (provider === 'gemini' && task?.__geminiCacheName) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
     // Счётчик переиспользований Gemini cachedContent в рамках задачи.
@@ -544,6 +548,10 @@ function iakbCallOpts(task, extra = {}) {
   return opts;
 }
 
+function llmProvider(task) {
+  return resolveTaskModel(task, 'gemini').provider;
+}
+
 function pointer(label) {
   return `[См. IAKB → ${label}]`;
 }
@@ -561,6 +569,7 @@ module.exports = {
   buildInfoArticleKnowledgeBase,
   iakbSystem,
   iakbCallOpts,
+  llmProvider,
   pointer,
   pointerOrJson,
   MAX_IAKB_CHARS,

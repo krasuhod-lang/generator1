@@ -50,6 +50,7 @@ const LIMITS = Object.freeze({
   deepseek:   _readLimit('DEEPSEEK_MAX_CONCURRENT', 8),
   gemini:     _readLimit('GEMINI_MAX_CONCURRENT',   6),
   grok:       _readLimit('XAI_MAX_CONCURRENT',      4),
+  openai:     _readLimit('OPENAI_MAX_CONCURRENT',   4),
 });
 
 const QUEUE_WARN_MS = _readLimit('LLM_QUEUE_WARN_MS', 5000);
@@ -59,6 +60,7 @@ const _state = {
   deepseek:   { active: 0, waiters: [] },
   gemini:     { active: 0, waiters: [] },
   grok:       { active: 0, waiters: [] },
+  openai:     { active: 0, waiters: [] },
 };
 
 /**
@@ -144,7 +146,7 @@ async function withProviderSlot(provider, fn) {
  * Диагностическая функция — текущая загрузка провайдеров.
  * Полезна для admin endpoint'а или health-check.
  *
- * @returns {{deepseek: object, gemini: object, grok: object, limits: object}}
+ * @returns {{deepseek: object, gemini: object, grok: object, openai: object, limits: object}}
  */
 function getStats() {
   return {
@@ -152,6 +154,7 @@ function getStats() {
     deepseek: { active: _state.deepseek.active, queued: _state.deepseek.waiters.length },
     gemini:   { active: _state.gemini.active,   queued: _state.gemini.waiters.length },
     grok:     { active: _state.grok.active,     queued: _state.grok.waiters.length },
+    openai:   { active: _state.openai.active,   queued: _state.openai.waiters.length },
   };
 }
 

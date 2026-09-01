@@ -33,12 +33,13 @@ const resuming = ref(false);  // запрос на resume отправлен
 const tokens = reactive({
   deepseekIn:  0, deepseekOut:  0, deepseekCost:  0,
   geminiIn:    0, geminiOut:    0, geminiCost:    0,
+  openaiIn:    0, openaiOut:    0, openaiCost:    0,
 });
 const totalCost = computed(() =>
-  (tokens.deepseekCost + tokens.geminiCost).toFixed(4)
+  (tokens.deepseekCost + tokens.geminiCost + tokens.openaiCost).toFixed(4)
 );
 const totalTokens = computed(() =>
-  tokens.deepseekIn + tokens.deepseekOut + tokens.geminiIn + tokens.geminiOut
+  tokens.deepseekIn + tokens.deepseekOut + tokens.geminiIn + tokens.geminiOut + tokens.openaiIn + tokens.openaiOut
 );
 
 // ── Блоки H2 ───────────────────────────────────────────────────────────────
@@ -178,6 +179,10 @@ function handleSSEMessage(msg) {
         tokens.geminiIn   += msg.tokensIn  || 0;
         tokens.geminiOut  += msg.tokensOut || 0;
         tokens.geminiCost += msg.cost      || 0;
+      } else if (msg.model === 'openai') {
+        tokens.openaiIn   += msg.tokensIn  || 0;
+        tokens.openaiOut  += msg.tokensOut || 0;
+        tokens.openaiCost += msg.cost      || 0;
       }
       break;
 
@@ -556,9 +561,9 @@ onUnmounted(() => {
       <span
         v-if="!isClient && task?.llm_provider"
         class="badge ml-auto"
-        :class="task.llm_provider === 'grok' ? 'bg-purple-900 text-purple-300' : 'bg-blue-900 text-blue-300'"
-        :title="`Генерация через ${task.llm_provider === 'grok' ? 'xAI Grok' : 'Google Gemini'}`"
-      >{{ task.llm_provider === 'grok' ? 'Grok' : 'Gemini' }}</span>
+        :class="task.llm_provider === 'grok' ? 'bg-purple-900 text-purple-300' : task.llm_provider === 'openai' ? 'bg-emerald-900 text-emerald-300' : 'bg-blue-900 text-blue-300'"
+        :title="`Генерация через ${task.llm_provider === 'grok' ? 'xAI Grok' : task.llm_provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini'}`"
+      >{{ task.llm_provider === 'grok' ? 'Grok' : task.llm_provider === 'openai' ? 'GPT' : 'Gemini' }}</span>
 
       <!-- Статус-бейдж -->
       <span v-if="done"   class="badge bg-green-900 text-green-300" :class="{ 'ml-auto': !task?.llm_provider }">✓ Завершено</span>
@@ -655,6 +660,19 @@ onUnmounted(() => {
               <span class="text-right text-gray-300">{{ tokens.geminiOut.toLocaleString() }}</span>
               <span class="text-gray-500">Cost:</span>
               <span class="text-right text-indigo-300">${{ tokens.geminiCost.toFixed(4) }}</span>
+            </div>
+          </div>
+
+          <!-- OpenAI / GPT -->
+          <div class="bg-gray-800 rounded-lg p-3">
+            <p class="text-xs font-semibold text-emerald-300 mb-1.5">OpenAI / GPT</p>
+            <div class="grid grid-cols-2 gap-1 text-xs font-mono">
+              <span class="text-gray-500">In:</span>
+              <span class="text-right text-gray-300">{{ tokens.openaiIn.toLocaleString() }}</span>
+              <span class="text-gray-500">Out:</span>
+              <span class="text-right text-gray-300">{{ tokens.openaiOut.toLocaleString() }}</span>
+              <span class="text-gray-500">Cost:</span>
+              <span class="text-right text-indigo-300">${{ tokens.openaiCost.toFixed(4) }}</span>
             </div>
           </div>
 

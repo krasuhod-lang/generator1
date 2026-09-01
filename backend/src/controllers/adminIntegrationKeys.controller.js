@@ -5,6 +5,7 @@ const {
   upsertIntegrationSecret,
   removeIntegrationSecret,
 } = require('../services/integrations/integrationVault');
+const { probeIntegrationKey, probeAllIntegrationKeys } = require('../services/integrations/integrationKeyProbe');
 const db = require('../config/db');
 
 function errorStatus(error) {
@@ -53,6 +54,25 @@ async function deleteAdminIntegrationKey(req, res) {
   }
 }
 
+async function probeAdminIntegrationKey(req, res) {
+  try {
+    const result = await probeIntegrationKey(req.params.envName);
+    res.json({ result });
+  } catch (error) {
+    const status = errorStatus(error);
+    res.status(status).json({ error: status === 400 ? error.message : 'Не удалось проверить ключ интеграции' });
+  }
+}
+
+async function probeAllAdminIntegrationKeys(req, res) {
+  try {
+    res.json(await probeAllIntegrationKeys());
+  } catch (error) {
+    console.error('[AdminIntegrationKeys] probe all failed:', error.message);
+    res.status(500).json({ error: 'Не удалось проверить ключи интеграций' });
+  }
+}
+
 async function listAdminIntegrationKeyAudit(req, res) {
   try {
     const { rows } = await db.query(
@@ -72,5 +92,7 @@ module.exports = {
   listAdminIntegrationKeys,
   putAdminIntegrationKey,
   deleteAdminIntegrationKey,
+  probeAdminIntegrationKey,
+  probeAllAdminIntegrationKeys,
   listAdminIntegrationKeyAudit,
 };

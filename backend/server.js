@@ -612,6 +612,11 @@ async function ensureSchema() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_email_verification_expires ON email_verification_codes(expires_at)`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_target_url TEXT`);
     await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_model TEXT`);
+    await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS openai_tokens_in BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS openai_tokens_out BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE task_metrics ADD COLUMN IF NOT EXISTS openai_cost_usd NUMERIC(18,12) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE task_metrics ALTER COLUMN total_cost_usd TYPE NUMERIC(18,12) USING total_cost_usd::numeric`);
 
     // Migration 141: task history integrity. Archiving is soft-only, so a user
     // cannot accidentally erase the source row that feeds counters/reports.
@@ -824,42 +829,29 @@ async function ensureSchema() {
     // Whitelisted значения: 'gemini' | 'grok' (см. callLLM.js routing).
     await db.query(`ALTER TABLE tasks                     ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
     await db.query(`ALTER TABLE meta_tag_tasks            ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
+    await db.query(`ALTER TABLE link_article_tasks        ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
+    await db.query(`ALTER TABLE info_article_tasks        ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
     await db.query(`ALTER TABLE editor_copilot_sessions   ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
     await db.query(`ALTER TABLE editor_copilot_operations ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
     await db.query(`
       DO $$
       BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'tasks_llm_provider_check'
-        ) THEN
-          ALTER TABLE tasks
-            ADD CONSTRAINT tasks_llm_provider_check
-            CHECK (llm_provider IN ('gemini', 'grok'));
-        END IF;
+        ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_llm_provider_check;
+        ALTER TABLE tasks ADD CONSTRAINT tasks_llm_provider_check
+          CHECK (llm_provider IN ('gemini', 'grok', 'openai'));
 
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'meta_tag_tasks_llm_provider_check'
-        ) THEN
-          ALTER TABLE meta_tag_tasks
-            ADD CONSTRAINT meta_tag_tasks_llm_provider_check
-            CHECK (llm_provider IN ('gemini', 'grok'));
-        END IF;
+        ALTER TABLE meta_tag_tasks DROP CONSTRAINT IF EXISTS meta_tag_tasks_llm_provider_check;
+        ALTER TABLE meta_tag_tasks ADD CONSTRAINT meta_tag_tasks_llm_provider_check
+          CHECK (llm_provider IN ('gemini', 'grok', 'openai'));
 
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'editor_copilot_sessions_llm_provider_check'
-        ) THEN
-          ALTER TABLE editor_copilot_sessions
-            ADD CONSTRAINT editor_copilot_sessions_llm_provider_check
-            CHECK (llm_provider IN ('gemini', 'grok'));
-        END IF;
+        ALTER TABLE editor_copilot_sessions DROP CONSTRAINT IF EXISTS editor_copilot_sessions_llm_provider_check;
+        ALTER TABLE editor_copilot_sessions ADD CONSTRAINT editor_copilot_sessions_llm_provider_check
+          CHECK (llm_provider IN ('gemini', 'grok', 'openai'));
 
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'editor_copilot_operations_llm_provider_check'
-        ) THEN
-          ALTER TABLE editor_copilot_operations
-            ADD CONSTRAINT editor_copilot_operations_llm_provider_check
-            CHECK (llm_provider IN ('gemini', 'grok'));
-        END IF;
+        ALTER TABLE editor_copilot_operations DROP CONSTRAINT IF EXISTS editor_copilot_operations_llm_provider_check;
+        ALTER TABLE editor_copilot_operations ADD CONSTRAINT editor_copilot_operations_llm_provider_check
+          CHECK (llm_provider IN ('gemini', 'grok', 'openai'));
+
       END$$;
     `);
     // ─── Migration 012: Link Article Generator ───────────────────────
@@ -911,7 +903,13 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_user_created ON link_article_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_link_article_status       ON link_article_tasks (status)`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS llm_model TEXT`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS openai_tokens_in BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS openai_tokens_out BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS openai_cost_usd NUMERIC(18,12) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE link_article_tasks ALTER COLUMN cost_usd TYPE NUMERIC(18,12) USING cost_usd::numeric`);
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS source TEXT`);
     await db.query(`ALTER TABLE link_article_tasks ADD COLUMN IF NOT EXISTS aegis_issue_number INTEGER`);
 
@@ -1171,8 +1169,25 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_user_created ON info_article_tasks (user_id, created_at DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_info_article_status       ON info_article_tasks (status)`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(16) NOT NULL DEFAULT 'gemini'`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS gemini_model TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview'`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS llm_model TEXT`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS openai_tokens_in BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS openai_tokens_out BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS openai_cost_usd NUMERIC(18,12) NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE info_article_tasks ALTER COLUMN cost_usd TYPE NUMERIC(18,12) USING cost_usd::numeric`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS source TEXT`);
+    await db.query(`
+      DO $$
+      BEGIN
+        ALTER TABLE link_article_tasks DROP CONSTRAINT IF EXISTS link_article_tasks_llm_provider_check;
+        ALTER TABLE link_article_tasks ADD CONSTRAINT link_article_tasks_llm_provider_check
+          CHECK (llm_provider IN ('gemini', 'grok', 'openai'));
+        ALTER TABLE info_article_tasks DROP CONSTRAINT IF EXISTS info_article_tasks_llm_provider_check;
+        ALTER TABLE info_article_tasks ADD CONSTRAINT info_article_tasks_llm_provider_check
+          CHECK (llm_provider IN ('gemini', 'grok', 'openai'));
+      END$$;
+    `);
     // Migration 101: анализ сайта-площадки публикации (стилистика и формат).
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS target_site_url      TEXT`);
     await db.query(`ALTER TABLE info_article_tasks ADD COLUMN IF NOT EXISTS target_site_analysis JSONB`);

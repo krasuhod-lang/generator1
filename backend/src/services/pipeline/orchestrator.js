@@ -126,6 +126,7 @@ const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adap
 const { resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { estimateTokens } = require('../metrics/priceCalculator');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { resolveTaskModel } = require('../llm/modelRouting');
 const { buildWriterContext } = require('../../utils/writerContext');
 const { buildContentHandoffManifest, renderManifestMarkdown } = require('../../utils/contentHandoffManifest');
 const { normalizeTz, hasTz } = require('./tzParser');
@@ -720,7 +721,7 @@ async function runPipeline(task, ctx) {
   // Skip Gemini cachedContents API for non-Gemini providers (Grok не имеет
   // серверного context-cache; LLM_RESPONSE_CACHE_ENABLED Redis-кэш покрывает
   // Grok отдельно через callLLM).
-  const _provider = (task?.llm_provider || 'gemini').toString().toLowerCase();
+  const { provider: _provider, model: _selectedModel } = resolveTaskModel(task, 'gemini');
   if (
     _provider === 'gemini' &&
     process.env.GEMINI_CONTEXT_CACHE_ENABLED === 'true' &&
@@ -732,7 +733,7 @@ async function runPipeline(task, ctx) {
       const cache = await createCachedContent({
         systemInstruction: task.__articleKnowledgeBase,
         ttlSeconds:        ttl,
-        model:             normalizeGeminiCopywritingModel(task.gemini_model),
+        model:             normalizeGeminiCopywritingModel(_selectedModel),
       });
       task.__geminiCacheName = cache.name;
       log(`Gemini cachedContent создан: ${cache.name} (TTL ${cache.ttlSeconds}s).`, 'success');
@@ -1380,7 +1381,9 @@ async function runPipeline(task, ctx) {
           (task.__audiencePersonasText || '').slice(0, 500),
         ].filter(Boolean).join('\n\n').slice(0, 1500),
         governanceBlock,
-        gemini_model: task.gemini_model || '',
+        llm_provider: _provider,
+        llm_model: _selectedModel || '',
+        gemini_model: _provider === 'gemini' ? (_selectedModel || '') : '',
         standalone_exposure: false,
       },
       ctx: { taskId, log, onTokens },
@@ -1591,7 +1594,7 @@ async function runPipeline(task, ctx) {
         projectId: task.project_id || null,
         opportunityId: task.opportunity_id || null,
         promptVersion: task.prompt_version || 'seo:stage3:v1',
-        modelVersion: task.gemini_model || null,
+        modelVersion: _selectedModel || null,
         baselineMetrics: task.baseline_metrics || {},
         qualitySignals: {
           lsi_coverage: Number.isFinite(lsiCoverage)

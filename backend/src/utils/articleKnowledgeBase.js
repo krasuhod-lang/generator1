@@ -21,6 +21,7 @@
 
 const { buildStrategyDigest } = require('../services/pipeline/preStage0');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { resolveTaskModel, normalizeProvider } = require('../services/llm/modelRouting');
 
 // ────────────────────────────────────────────────────────────────────
 // Константы лимитов секций (в словах) — подобраны так, чтобы AKB
@@ -696,16 +697,15 @@ function buildArticleKnowledgeBase(input = {}) {
  */
 function geminiCallOpts(task, extra = {}) {
   const opts = { ...extra };
-  const provider = (task?.llm_provider || 'gemini').toString().toLowerCase().trim();
-  if (provider !== 'grok') {
-    opts.model = normalizeGeminiCopywritingModel(task?.gemini_model);
-  }
-  // cachedContent — только для Gemini. Для Grok игнорируем (cachedContents
-  // у x.ai отсутствует) — callLLM сам пропустит при adapter='grok'.
-  if (task?.__geminiCacheName) opts.cachedContent = task.__geminiCacheName;
+  const { provider, model } = resolveTaskModel(task, 'gemini');
+  if (provider === 'gemini') opts.model = normalizeGeminiCopywritingModel(model);
+  else if (provider === 'openai') opts.model = model;
+  // Gemini cachedContent is intentionally disabled for OpenAI/Grok. The
+  // positional AKB remains available to those providers as normal context.
+  if (provider === 'gemini' && task?.__geminiCacheName) opts.cachedContent = task.__geminiCacheName;
   if (task?.__articleKnowledgeBaseForCalls) opts.cacheFallbackSystem = task.__articleKnowledgeBaseForCalls;
-  if (task?.__tokenBudget)     opts.tokenBudget   = task.__tokenBudget;
-  if (task?.__geminiCacheName) {
+  if (task?.__tokenBudget) opts.tokenBudget = task.__tokenBudget;
+  if (provider === 'gemini' && task?.__geminiCacheName) {
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
   }
   return opts;
@@ -719,8 +719,8 @@ function geminiCallOpts(task, extra = {}) {
 function akbSystem(task, options = {}) {
   if (!task) return '';
   // Если Gemini cache активен И провайдер всё ещё gemini — кэш покрывает AKB.
-  // Для Grok нет cachedContent, поэтому всегда передаём AKB как system.
-  const provider = (task?.llm_provider || 'gemini').toLowerCase();
+  // Для OpenAI/Grok cachedContent нет, поэтому всегда передаём AKB как system.
+  const provider = normalizeProvider(task?.llm_provider || 'gemini');
   if (provider === 'gemini' && task.__geminiCacheName) return '';
   const purpose = options?.purpose || 'writer';
   if (purpose === 'repair' && task.__articleKnowledgeBaseForRepair) {
@@ -731,12 +731,11 @@ function akbSystem(task, options = {}) {
 
 /**
  * llmProvider — нормализованный провайдер для задачи.
- * Возвращает 'gemini' (default) или 'grok'. Используется как первый
+ * Возвращает provider из общего allowlist. Используется как первый
  * аргумент callLLM() во всех Stage-вызовах текстовой генерации.
  */
 function llmProvider(task) {
-  const p = (task?.llm_provider || 'gemini').toString().toLowerCase().trim();
-  return p === 'grok' ? 'grok' : 'gemini';
+  return resolveTaskModel(task, 'gemini').provider;
 }
 
 module.exports = {

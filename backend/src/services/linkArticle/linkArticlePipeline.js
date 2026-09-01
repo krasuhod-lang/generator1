@@ -43,6 +43,7 @@ const {
   buildLinkArticleKnowledgeBase,
   lakbCallOpts,
   pointerOrJson,
+  llmProvider,
 } = require('./linkArticleKnowledgeBase');
 const { createCachedContent, deleteCachedContent } = require('../llm/gemini.adapter');
 const { runRealtimeResearch, hasRealtimeData } = require('../llm/realtimeResearch');
@@ -766,11 +767,11 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
   const systemFull = task.__lakb
     ? `${task.__lakb}\n\n========================================\n${writerInstructions}${learnedBlock}`
     : `${writerInstructions}${learnedBlock}`;
-  const systemArg = task.__geminiCacheName ? '' : systemFull;
+  const systemArg = (task.__geminiCacheName && llmProvider(task) === 'gemini') ? '' : systemFull;
 
   // First attempt
   let result = await callLLM(
-    'gemini',
+    llmProvider(task),
     systemArg,
     buildUser(null),
     {
@@ -789,7 +790,7 @@ async function runWriter(task, audience, intents, structure, whitespace, ctx, op
   if (issues.length) {
     await appendLog(ctx.taskId, `⚠ Статья не прошла валидацию: ${issues.length} проблем — делаем корректировочный прогон`, 'warn');
     const retry = await callLLM(
-      'gemini',
+      llmProvider(task),
       systemArg,
       buildUser(issues),
       {
@@ -1351,7 +1352,7 @@ async function processLinkArticleTask(taskId) {
     }
     await appendLog(taskId, `🧠 LAKB собрана (${task.__lakb.length} символов)`, 'info');
 
-    if (LINK_ARTICLE_GEMINI_CACHE_ENABLED) {
+    if (LINK_ARTICLE_GEMINI_CACHE_ENABLED && llmProvider(task) === 'gemini') {
       try {
         const writerInstructions = loadLinkArticlePrompt('stage3');
         // Gemini cachedContents требует ≥ 4096 input-токенов. Объединяем
@@ -1362,7 +1363,7 @@ async function processLinkArticleTask(taskId) {
         const created = await createCachedContent({
           systemInstruction: cacheText,
           ttlSeconds: LINK_ARTICLE_GEMINI_CACHE_TTL_S,
-          model: normalizeGeminiCopywritingModel(task.gemini_model),
+          model: normalizeGeminiCopywritingModel(task.llm_model || task.gemini_model),
         });
         task.__geminiCacheName = created.name;
         geminiCacheName = created.name;
@@ -1547,7 +1548,7 @@ async function processLinkArticleTask(taskId) {
     try {
       const { computeQualityScore } = require('../qualityLayers/qualityScore');
       const { rows: [t] } = await db.query(
-        `SELECT eeat_audit, gemini_model,
+        `SELECT eeat_audit, llm_provider, llm_model, gemini_model,
                 total_cost_usd, total_tokens_in, total_tokens_out,
                 started_at
            FROM link_article_tasks
@@ -1558,10 +1559,11 @@ async function processLinkArticleTask(taskId) {
         const elapsedMs = t.started_at
           ? Date.now() - new Date(t.started_at).getTime()
           : null;
+        const modelUsed = t.llm_model || (t.llm_provider === 'gemini' ? t.gemini_model : t.llm_provider) || task.llm_model || null;
         const quality = computeQualityScore(
           { eeat_audit: t.eeat_audit },
           {
-            model_used:         t.gemini_model,
+            model_used:         modelUsed,
             cost_usd:           Number(t.total_cost_usd)   || 0,
             tokens_in:          Number(t.total_tokens_in)  || 0,
             tokens_out:         Number(t.total_tokens_out) || 0,
@@ -1578,7 +1580,7 @@ async function processLinkArticleTask(taskId) {
             htmlOutput: articleHtml || '',
             qualityScore: quality,
             feedbackMetrics: null,
-            modelUsed: quality.model_used || t.gemini_model || null,
+            modelUsed: quality.model_used || modelUsed || null,
             costUsd: Number(t.total_cost_usd) || 0,
             userId: task.user_id || null,
             promptHash: resolvePromptHash('linkArticle/stage3_writer'),
@@ -1589,7 +1591,7 @@ async function processLinkArticleTask(taskId) {
             niche: null,
             qualityScore: quality,
             reports: { eeat_audit: t.eeat_audit },
-            modelUsed: quality.model_used || t.gemini_model || null,
+            modelUsed: quality.model_used || modelUsed || null,
             costUsd: Number(t.total_cost_usd) || 0,
             iterations: 1,
             taskRef: taskId,

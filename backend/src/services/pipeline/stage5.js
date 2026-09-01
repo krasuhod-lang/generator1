@@ -226,7 +226,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       s5Prompt,
       geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens, skipOnBudget: true })
     ).catch(e => {
-      if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
+      if (e?.isBudgetExceeded || /(?:gemini|openai) token budget exhausted/i.test(String(e?.message || ''))) {
         budgetSkipped = true;
         log(`Stage 5 блок ${blockIndex + 1}: budget_skip — сохраняем лучший HTML без дополнительного refine`, 'info');
       } else {
@@ -361,7 +361,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         confPrompt,
         geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
-        if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
+        if (error?.isBudgetExceeded || /(?:gemini|openai) token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;
           log(`Блок ${blockIndex + 1}: budget_skip — confidence fix пропущен`, 'info');
         }
@@ -408,7 +408,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         tfPrompt,
         geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
-        if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
+        if (error?.isBudgetExceeded || /(?:gemini|openai) token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;
           log(`Блок ${blockIndex + 1}: budget_skip — TF-IDF fix пропущен`, 'info');
         }

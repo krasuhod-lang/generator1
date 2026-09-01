@@ -10,6 +10,7 @@ const { publishPendingOutbox } = require('../services/tasks/reliability');
 const { closeTask, getClientCount } = require('../services/sse/sseManager');
 const { publish }         = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
+const { normalizeProvider, normalizeModel } = require('../services/llm/modelRouting');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const { buildTaskFormPrefill }  = require('../services/projects/taskFormPrefill');
@@ -118,7 +119,7 @@ async function listTasks(req, res, next) {
     const { rows } = await db.query(
       `SELECT
          t.id, t.title, t.status, t.input_target_service,
-         t.llm_provider, t.gemini_model,
+         t.llm_provider, t.gemini_model, t.llm_model,
          t.created_at, t.completed_at, t.started_at, t.archived_at,
          t.bull_job_id, t.error_message, t.quality_gate,
          m.lsi_coverage, m.eeat_score, m.pq_score, m.total_cost_usd, m.bm25_score,
@@ -201,6 +202,7 @@ async function createTask(req, res, next) {
       input_max_chars,
       input_target_url,
       llm_provider,
+      llm_model,
       gemini_model,
       // Опциональная привязка к отчёту релевантности (миграция 022).
       // Если задано — orchestrator подгружает report.competitor_signals
@@ -229,11 +231,13 @@ async function createTask(req, res, next) {
       return res.status(400).json({ error: 'Макс. символов должно быть больше мин.' });
     }
 
-    // Whitelist для LLM-провайдера. Невалидное значение → fallback к 'gemini'.
-    const provider = (typeof llm_provider === 'string' && llm_provider.toLowerCase().trim() === 'grok')
-      ? 'grok'
-      : 'gemini';
-    const geminiModel = normalizeGeminiCopywritingModel(gemini_model);
+    // Provider/model are normalized server-side. Legacy gemini_model remains
+    // populated for old readers; the generic llm_model stores GPT selection.
+    const provider = normalizeProvider(llm_provider, 'gemini');
+    const selectedModel = normalizeModel(provider, llm_model || gemini_model);
+    const geminiModel = provider === 'gemini'
+      ? normalizeGeminiCopywritingModel(selectedModel)
+      : normalizeGeminiCopywritingModel(gemini_model);
 
     // source_relevance_report_id: принимаем только валидный UUID, который
     // принадлежит текущему пользователю и завершился успешно. Невалидный/
@@ -298,6 +302,7 @@ async function createTask(req, res, next) {
          input_target_url,
          llm_provider,
          gemini_model,
+         llm_model,
          source_relevance_report_id,
          project_id,
          project_context_snapshot,
@@ -322,14 +327,15 @@ async function createTask(req, res, next) {
           $25,
           $26,
           $27,
-          $28::jsonb,
-          $29,
+          $28,
+          $29::jsonb,
           $30,
           $31,
           $32,
           $33,
           $34,
-          $35::jsonb
+          $35,
+          $36::jsonb
         ) RETURNING *`,
       [
         req.user.id,
@@ -357,6 +363,7 @@ async function createTask(req, res, next) {
         toText(input_target_url),
         provider,
         geminiModel,
+        selectedModel,
         relevanceReportId,
         projectId,
         projectCtxSnapshot ? JSON.stringify(projectCtxSnapshot) : null,
@@ -422,6 +429,7 @@ async function updateTask(req, res, next) {
       'input_min_chars', 'input_max_chars',
       'input_target_url',
       'llm_provider',
+      'llm_model',
       'gemini_model',
       'source_relevance_report_id',
       // ТЗ §5/§8: привязка к проекту редактируемого черновика. Раньше поля
@@ -448,7 +456,7 @@ async function updateTask(req, res, next) {
     const ARRAY_FIELDS = new Set(['published_queries']);
     const JSONB_FIELDS = new Set(['success_metric']);
     // Поля с whitelist-валидацией
-    const ENUM_FIELDS = { llm_provider: new Set(['gemini', 'grok']) };
+    const ENUM_FIELDS = { llm_provider: new Set(['gemini', 'grok', 'openai']) };
 
     let newProjectId;
     for (const key of ALLOWED) {
@@ -468,6 +476,9 @@ async function updateTask(req, res, next) {
           val = await resolveOwnedRelevanceReportId(val, req.user.id);
         } else if (key === 'gemini_model') {
           val = normalizeGeminiCopywritingModel(val);
+        } else if (key === 'llm_model') {
+          const provider = normalizeProvider(req.body.llm_provider || task.llm_provider, 'gemini');
+          val = normalizeModel(provider, val);
         } else if (key === 'project_id') {
           // Владение проектом проверяем на сервере (не доверяем фронту).
           val = await resolveOwnedProjectId(val, req.user.id);

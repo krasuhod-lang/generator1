@@ -47,6 +47,7 @@ const {
   buildInfoArticleKnowledgeBase,
   iakbCallOpts,
   pointerOrJson,
+  llmProvider,
 } = require('./infoArticleKnowledgeBase');
 const { synthesizeLsiSet, measureLsiCoverageInHtml, measureLsiCoverageSemantic } = require('./lsiPipeline');
 const { runRealtimeResearch, hasRealtimeData } = require('../llm/realtimeResearch');
@@ -808,7 +809,7 @@ async function runWriter(task, args, ctx, opts = {}) {
 
   // First attempt
   let result = await callLLM(
-    'gemini',
+    llmProvider(task),
     systemArg,
     buildUser(null, opts.priorEeatIssues, opts.priorLinkIssues),
     {
@@ -830,7 +831,7 @@ async function runWriter(task, args, ctx, opts = {}) {
   if (issues.length) {
     await appendLog(ctx.taskId, `⚠ Статья не прошла валидацию: ${issues.length} проблем — corrective retry`, 'warn').catch(() => {});
     const retry = await callLLM(
-      'gemini',
+      llmProvider(task),
       systemArg,
       buildUser(issues, opts.priorEeatIssues, opts.priorLinkIssues),
       {
@@ -2001,7 +2002,7 @@ async function processInfoArticleTask(taskId) {
       }
     }
 
-    if (INFO_ARTICLE_GEMINI_CACHE_ENABLED) {
+    if (INFO_ARTICLE_GEMINI_CACHE_ENABLED && llmProvider(task) === 'gemini') {
       try {
         const writerInstructions = loadInfoArticlePrompt('stage3');
         // Включаем персону в Gemini cached prefix, чтобы тон writer'а
@@ -2026,7 +2027,7 @@ async function processInfoArticleTask(taskId) {
         const created = await createCachedContent({
           systemInstruction: cacheText,
           ttlSeconds: INFO_ARTICLE_GEMINI_CACHE_TTL_S,
-          model: normalizeGeminiCopywritingModel(task.gemini_model),
+          model: normalizeGeminiCopywritingModel(task.llm_model || task.gemini_model),
         });
         task.__geminiCacheName = created.name;
         geminiCacheName = created.name;
@@ -2743,7 +2744,7 @@ async function processInfoArticleTask(taskId) {
         `SELECT eeat_audit, readability_report, intent_verdict,
                 fact_check_report, plagiarism_report, lsi_report,
                 lsi_overdose_report, validation_report, image_qa_report,
-                gemini_model,
+                llm_provider, llm_model, gemini_model,
                 total_cost_usd, total_tokens_in, total_tokens_out,
                 started_at
            FROM info_article_tasks
@@ -2754,6 +2755,7 @@ async function processInfoArticleTask(taskId) {
         const elapsedMs = t.started_at
           ? Date.now() - new Date(t.started_at).getTime()
           : null;
+        const modelUsed = t.llm_model || (t.llm_provider === 'gemini' ? t.gemini_model : t.llm_provider) || task.llm_model || null;
         const quality = computeQualityScore(
           {
             eeat_audit:          t.eeat_audit,
@@ -2767,7 +2769,7 @@ async function processInfoArticleTask(taskId) {
             image_qa_report:     t.image_qa_report,
           },
           {
-            model_used:         t.gemini_model,
+            model_used:         modelUsed,
             cost_usd:           Number(t.total_cost_usd)   || 0,
             tokens_in:          Number(t.total_tokens_in)  || 0,
             tokens_out:         Number(t.total_tokens_out) || 0,
@@ -2784,7 +2786,7 @@ async function processInfoArticleTask(taskId) {
             htmlOutput: articleHtml || '',
             qualityScore: quality,
             feedbackMetrics: null,
-            modelUsed: quality.model_used || t.gemini_model || null,
+            modelUsed: quality.model_used || modelUsed || null,
             costUsd: Number(t.total_cost_usd) || 0,
             userId: task.user_id || null,
             promptHash: resolvePromptHash('infoArticle/stage3_writer'),
@@ -2804,7 +2806,7 @@ async function processInfoArticleTask(taskId) {
               validation_report:   t.validation_report,
               image_qa_report:     t.image_qa_report,
             },
-            modelUsed: quality.model_used || t.gemini_model || null,
+            modelUsed: quality.model_used || modelUsed || null,
             costUsd: Number(t.total_cost_usd) || 0,
             iterations: 1,
             taskRef: taskId,

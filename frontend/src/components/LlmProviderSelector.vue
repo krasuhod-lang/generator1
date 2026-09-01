@@ -32,8 +32,8 @@
  * LlmProviderSelector — общий компонент выбора LLM-провайдера для
  * генератора SEO-статей, мета-тегов и AI-Copilot редактора.
  *
- * Контракт: v-model:modelValue → 'gemini' | 'grok'.
- * Невалидные значения сверху корректируются к 'gemini' через emit.
+ * Контракт: v-model:modelValue → 'gemini' | 'grok' | 'openai'.
+ * Опциональный allowedProviders ограничивает набор для legacy callers.
  *
  * Цены — справочные (на момент апреля 2026, чтобы пользователь видел
  * порядок). Точные значения считаются на бэке через priceCalculator.
@@ -44,10 +44,11 @@ const props = defineProps({
   modelValue: { type: String, default: 'gemini' },
   disabled:   { type: Boolean, default: false },
   hint:       { type: String, default: '' },
+  allowedProviders: { type: Array, default: () => ['gemini', 'grok'] },
 });
 const emit = defineEmits(['update:modelValue']);
 
-const OPTIONS = [
+const ALL_OPTIONS = [
   {
     value: 'gemini',
     label: 'Gemini',
@@ -66,12 +67,22 @@ const OPTIONS = [
       'и экспериментов. Не поддерживает кэш контекста, дороже Gemini, требует ' +
       'отдельный XAI_API_KEY на сервере.',
   },
+  {
+    value: 'openai',
+    label: 'OpenAI / GPT',
+    priceHint: '$1.25–$30 / 1M ток.',
+    tooltip:
+      'GPT-5 и GPT-5.5 применяются точечно для сложного аудита и финального quality gate. ' +
+      'Требует OPENAI_API_KEY в админском хранилище.',
+  },
 ];
 
-// нормализуем значение наверх — если пришло «не gemini/grok», правим к gemini
+const OPTIONS = computed(() => ALL_OPTIONS.filter((item) => props.allowedProviders.includes(item.value)));
+const allowed = computed(() => new Set(props.allowedProviders));
+
 const model = computed({
-  get: () => (props.modelValue === 'grok' ? 'grok' : 'gemini'),
-  set: (v) => emit('update:modelValue', v === 'grok' ? 'grok' : 'gemini'),
+  get: () => allowed.value.has(props.modelValue) ? props.modelValue : (props.allowedProviders[0] || 'gemini'),
+  set: (v) => emit('update:modelValue', allowed.value.has(v) ? v : (props.allowedProviders[0] || 'gemini')),
 });
 
 // Уникальный suffix для name атрибута radio — нужен только для DOM-группировки
@@ -81,9 +92,9 @@ let _uidCounter = 0;
 const uid = `s${++_uidCounter}`;
 
 onMounted(() => {
-  // Если родитель прислал что-то невалидное — корректируем 1 раз
-  if (props.modelValue !== 'gemini' && props.modelValue !== 'grok') {
-    emit('update:modelValue', 'gemini');
+  // Если родитель прислал что-то невалидное — корректируем 1 раз.
+  if (!props.allowedProviders.includes(props.modelValue)) {
+    emit('update:modelValue', props.allowedProviders[0] || 'gemini');
   }
 });
 </script>

@@ -7,6 +7,9 @@ const admin = useAdminStore();
 const loading = ref(true);
 const saving = ref(null);
 const removing = ref(null);
+const probing = ref(null);
+const probingAll = ref(false);
+const health = ref({});
 const error = ref('');
 const notice = ref('');
 const secrets = ref([]);
@@ -42,6 +45,23 @@ function sourceClass(item) {
   if (item.source === 'env') return 'text-blue-300 bg-blue-950/50 border-blue-800';
   if (item.source === 'disabled') return 'text-gray-400 bg-gray-900 border-gray-700';
   return 'text-amber-300 bg-amber-950/40 border-amber-800';
+}
+
+function healthLabel(item) {
+  const result = health.value[item.envName];
+  if (!result) return item.configured ? 'Не проверен' : 'Нет ключа';
+  if (result.status === 'active') return 'Ключ активен';
+  if (result.status === 'not_configured') return 'Не настроен';
+  if (result.status === 'configured_unprobed' || result.status === 'unsupported') return 'Проверка недоступна';
+  if (result.status === 'timeout') return 'Тайм-аут проверки';
+  return 'Ключ не подтверждён';
+}
+
+function healthClass(item) {
+  const result = health.value[item.envName];
+  if (result?.active === true) return 'text-emerald-300 bg-emerald-950/50 border-emerald-800';
+  if (result?.active === false) return 'text-red-300 bg-red-950/40 border-red-800';
+  return 'text-gray-400 bg-gray-900 border-gray-700';
 }
 
 async function load() {
@@ -82,6 +102,32 @@ async function save(item) {
   }
 }
 
+async function probe(item) {
+  probing.value = item.envName;
+  error.value = '';
+  try {
+    const data = await admin.probeIntegrationKey(item.envName);
+    health.value = { ...health.value, [item.envName]: data.result || {} };
+  } catch (e) {
+    error.value = e.response?.data?.error || e.message || 'Не удалось проверить ключ';
+  } finally {
+    probing.value = null;
+  }
+}
+
+async function probeAll() {
+  probingAll.value = true;
+  error.value = '';
+  try {
+    const data = await admin.probeAllIntegrationKeys();
+    health.value = Object.fromEntries((data.results || []).map((item) => [item.envName, item]));
+  } catch (e) {
+    error.value = e.response?.data?.error || e.message || 'Не удалось проверить ключи';
+  } finally {
+    probingAll.value = false;
+  }
+}
+
 async function removeOverride(item) {
   if (item.source !== 'vault') return;
   if (!window.confirm(`Удалить override для «${item.label}»?\n\nПосле этого система вернётся к значению из .env, если оно задано.`)) return;
@@ -116,9 +162,14 @@ onMounted(load);
             Значения шифруются на сервере и никогда не отображаются целиком.
           </p>
         </div>
-        <button type="button" class="btn-ghost" :disabled="loading" @click="load">
-          {{ loading ? 'Обновляем…' : 'Обновить' }}
-        </button>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" class="btn-ghost" :disabled="loading" @click="load">
+            {{ loading ? 'Обновляем…' : 'Обновить' }}
+          </button>
+          <button type="button" class="btn-primary" :disabled="probingAll || loading" @click="probeAll">
+            {{ probingAll ? 'Проверяем ключи…' : 'Проверить все ключи' }}
+          </button>
+        </div>
       </div>
 
       <div class="rounded-xl border border-amber-800/70 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
@@ -155,6 +206,9 @@ onMounted(load);
                     <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="sourceClass(item)">
                       {{ sourceLabel(item) }}
                     </span>
+                    <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="healthClass(item)">
+                      {{ healthLabel(item) }}
+                    </span>
                   </div>
                   <p class="mt-1 text-sm text-gray-400">{{ item.description }}</p>
                   <p class="mt-2 font-mono text-xs text-gray-600">{{ item.envName }}</p>
@@ -163,6 +217,7 @@ onMounted(load);
                   <div v-if="item.configured" class="font-mono text-gray-300">{{ item.masked || '••••••••••••' }}</div>
                   <div v-else class="text-amber-400">Не настроен</div>
                   <div class="mt-1">Ротация: {{ fmtDate(item.last_rotated_at) }}</div>
+                  <div v-if="health[item.envName]?.latencyMs" class="mt-1">Проверка: {{ health[item.envName].latencyMs }} мс</div>
                 </div>
               </div>
 
@@ -182,6 +237,14 @@ onMounted(load);
                   @click="save(item)"
                 >
                   {{ saving === item.envName ? 'Сохраняем…' : 'Сохранить ключ' }}
+                </button>
+                <button
+                  type="button"
+                  class="btn-ghost whitespace-nowrap text-cyan-300"
+                  :disabled="probing === item.envName || !item.configured"
+                  @click="probe(item)"
+                >
+                  {{ probing === item.envName ? 'Проверяем…' : 'Проверить ключ' }}
                 </button>
                 <button
                   v-if="item.source === 'vault'"

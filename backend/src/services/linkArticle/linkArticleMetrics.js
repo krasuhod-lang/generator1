@@ -31,9 +31,12 @@ const db = require('../../config/db');
  */
 function _columnsFor(adapter) {
   if (adapter === 'deepseek') {
-    return { in: 'deepseek_tokens_in', out: 'deepseek_tokens_out' };
+    return { in: 'deepseek_tokens_in', out: 'deepseek_tokens_out', cost: null };
   }
-  return { in: 'gemini_tokens_in', out: 'gemini_tokens_out' };
+  if (adapter === 'openai') {
+    return { in: 'openai_tokens_in', out: 'openai_tokens_out', cost: 'openai_cost_usd' };
+  }
+  return { in: 'gemini_tokens_in', out: 'gemini_tokens_out', cost: null };
 }
 
 async function recordTextTokens(taskId, adapter, tokensIn, tokensOut, costUsd) {
@@ -44,9 +47,10 @@ async function recordTextTokens(taskId, adapter, tokensIn, tokensOut, costUsd) {
           SET ${col.in}  = ${col.in}  + $2,
               ${col.out} = ${col.out} + $3,
               cost_usd   = cost_usd   + $4,
+              ${col.cost ? `${col.cost} = ${col.cost} + $4,` : ''}
               updated_at = NOW()
         WHERE id = $1`,
-      [taskId, tokensIn || 0, tokensOut || 0, Number(costUsd || 0).toFixed(6)],
+      [taskId, tokensIn || 0, tokensOut || 0, Number(costUsd || 0)],
     );
   } catch (err) {
     console.error('[linkArticleMetrics] recordTextTokens failed:', err.message);

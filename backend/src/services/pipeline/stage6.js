@@ -111,7 +111,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       stage6Prompt,
       geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
     ).catch(e => {
-      if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
+      if (e?.isBudgetExceeded || /(?:gemini|openai) token budget exhausted/i.test(String(e?.message || ''))) {
         budgetSkipped = true;
         log(`Stage 6 блок ${blockIndex + 1}: budget_skip — LSI-инъекция пропущена, сохраняем лучший HTML`, 'info');
       } else {

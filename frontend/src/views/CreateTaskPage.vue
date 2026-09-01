@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useTasksStore } from '../stores/tasks.js';
 import AppLayout from '../components/AppLayout.vue';
 import LlmProviderSelector from '../components/LlmProviderSelector.vue';
-import GeminiModelSelector from '../components/GeminiModelSelector.vue';
+import LlmModelSelector from '../components/LlmModelSelector.vue';
 import RichTextInput from '../components/RichTextInput.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import AppPageHeader from '../components/AppPageHeader.vue';
@@ -47,7 +47,8 @@ const form = reactive({
   input_max_chars:       3500,
   input_target_url:      '',   // URL целевой страницы
   title:                 '',
-  llm_provider:          'gemini', // 'gemini' | 'grok' (см. backend/services/llm/grok.adapter.js)
+  llm_provider:          'gemini',
+  llm_model:             'gemini-3.1-pro-preview',
   gemini_model:          'gemini-3.1-pro-preview',
   // Связка с отчётом релевантности — заполняется при переходе из
   // /relevance/:id, бэкенд по этому id вытащит entity_coverage и
@@ -1091,16 +1092,17 @@ function downloadExampleTZ() {
         <div class="card px-5 py-4">
           <LlmProviderSelector
             v-model="form.llm_provider"
+            :allowed-providers="['gemini', 'openai', 'grok']"
             :disabled="saving"
-            hint="Выберите движок генерации. Применяется ко всем стадиям пайплайна (Stage 3/5/6) и AI-Copilot редактору после создания задачи."
+            hint="GPT применяйте точечно для сложного quality/audit; Gemini остаётся writer-моделью по умолчанию."
           />
-          <div v-if="form.llm_provider === 'gemini'" class="mt-4">
-            <GeminiModelSelector
-              v-model="form.gemini_model"
-              :disabled="saving"
-              hint="Выбор сохраняется в задаче и применяется ко всем Gemini-вызовам копирайтинга."
-            />
-          </div>
+          <LlmModelSelector
+            v-model="form.llm_model"
+            :provider="form.llm_provider"
+            :disabled="saving"
+            class="mt-4"
+            hint="Выбор модели сохраняется в задаче; legacy Gemini field синхронизируется для старых обработчиков."
+          />
         </div>
 
         <!-- ── Ошибка ──────────────────────────────────────────────── -->

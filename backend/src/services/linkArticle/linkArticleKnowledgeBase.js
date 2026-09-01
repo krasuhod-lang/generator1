@@ -27,6 +27,7 @@
  */
 
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
+const { resolveTaskModel } = require('../llm/modelRouting');
 
 const MAX_LAKB_CHARS = 24 * 1024;   // 24 КБ — fits под Gemini cachedContents min-token порог + наш типовой системный промпт.
 const MAX_FIELD_LEN  = 1500;        // обрезка длинных JSON-блоков
@@ -370,7 +371,8 @@ function buildLinkArticleKnowledgeBase({
  */
 function lakbSystem(task) {
   if (!task) return '';
-  if (task.__geminiCacheName) return '';
+  const { provider } = resolveTaskModel(task, 'gemini');
+  if (provider === 'gemini' && task.__geminiCacheName) return '';
   return task.__lakb || '';
 }
 
@@ -381,9 +383,11 @@ function lakbSystem(task) {
  */
 function lakbCallOpts(task, extra = {}) {
   const opts = { ...extra };
-  opts.model = normalizeGeminiCopywritingModel(task?.gemini_model);
+  const { provider, model } = resolveTaskModel(task, 'gemini');
+  if (provider === 'gemini') opts.model = normalizeGeminiCopywritingModel(model);
+  else if (provider === 'openai') opts.model = model;
   if (task && task.__tokenBudget !== undefined) opts.tokenBudget = task.__tokenBudget;
-  if (task?.__geminiCacheName) {
+  if (provider === 'gemini' && task?.__geminiCacheName) {
     opts.cachedContent = task.__geminiCacheName;
     opts.onCacheMiss = () => { task.__geminiCacheName = null; };
     // Счётчик переиспользований Gemini cachedContent — для итогового
@@ -399,6 +403,10 @@ function lakbCallOpts(task, extra = {}) {
  * pointer — короткая ссылка на раздел LAKB. Используется в user-prompt'е
  * вместо полного JSON-блока, если LAKB активен.
  */
+function llmProvider(task) {
+  return resolveTaskModel(task, 'gemini').provider;
+}
+
 function pointer(label) {
   return `[См. LAKB → ${label}]`;
 }
@@ -420,6 +428,7 @@ module.exports = {
   buildLinkArticleKnowledgeBase,
   lakbSystem,
   lakbCallOpts,
+  llmProvider,
   pointer,
   pointerOrJson,
   MAX_LAKB_CHARS,

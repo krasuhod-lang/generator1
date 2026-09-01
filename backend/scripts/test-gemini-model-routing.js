@@ -90,15 +90,15 @@ for (const rel of filesToCheck) {
 
 // ── 3. Проверка, что normalize применяется в ключевых точках ─────────
 const wireSites = [
-  ['src/services/infoArticle/infoArticlePipeline.js', /model:\s*normalizeGeminiCopywritingModel\(task\.gemini_model\)/],
-  ['src/services/linkArticle/linkArticlePipeline.js', /model:\s*normalizeGeminiCopywritingModel\(task\.gemini_model\)/],
+  ['src/services/infoArticle/infoArticlePipeline.js', /normalizeGeminiCopywritingModel\(task\.llm_model \|\| task\.gemini_model\)/],
+  ['src/services/linkArticle/linkArticlePipeline.js', /normalizeGeminiCopywritingModel\(task\.llm_model \|\| task\.gemini_model\)/],
   ['src/services/metaTags/metaGenerator.js',          /normalizeGeminiCopywritingModel\(inputs && inputs\.gemini_model\)/],
   ['src/services/articleTopics/articleTopicsPipeline.js', /normalizeGeminiCopywritingModel\(task\.gemini_model\)/],
-  ['src/services/pipeline/orchestrator.js',           /normalizeGeminiCopywritingModel\(task\.gemini_model\)/],
+  ['src/services/pipeline/orchestrator.js',           /normalizeGeminiCopywritingModel\(_selectedModel\)/],
 ];
 for (const [rel, re] of wireSites) {
   const src = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
-  ok(`${rel} wires normalize(task.gemini_model) into callOptions`, re.test(src));
+  ok(`${rel} wires selected model into callOptions`, re.test(src));
 }
 
 // ── 4. Проверка, что callLLM логирует модель ─────────────────────────

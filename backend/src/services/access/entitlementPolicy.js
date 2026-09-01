@@ -153,6 +153,7 @@ const CLIENT_TASK_SENSITIVE_FIELDS = Object.freeze([
   'deepseek_tokens_in', 'deepseek_tokens_out', 'deepseek_cost_usd',
   'gemini_tokens_in', 'gemini_tokens_out', 'gemini_cost_usd',
   'grok_tokens_in', 'grok_tokens_out', 'grok_cost_usd',
+  'openai_tokens_in', 'openai_tokens_out', 'openai_cost_usd',
   'total_tokens', 'total_tokens_in', 'total_tokens_out', 'total_cost_usd',
   'tokens_in', 'tokens_out', 'cost_usd', 'api_cost_usd', 'tokensIn', 'tokensOut', 'costUsd', 'apiCostUsd', 'total_cost', 'totalCost',
   'prompt_size', 'promptSize', 'error_message', 'last_error', 'lastError', 'internal_error', 'internalError', 'error', 'logs', 'log', 'stage_logs', 'stageLogs', 'debug',
@@ -183,6 +184,11 @@ function sanitizeTaskForClient(task) {
   const safe = { ...task };
   for (const key of CLIENT_TASK_SENSITIVE_FIELDS) delete safe[key];
   if (safe.quality_gate) safe.quality_gate = sanitizeQualityGateForClient(safe.quality_gate);
+  if (safe.quality_score && typeof safe.quality_score === 'object' && !Array.isArray(safe.quality_score)) {
+    const quality = { ...safe.quality_score };
+    for (const key of CLIENT_TASK_SENSITIVE_FIELDS) delete quality[key];
+    safe.quality_score = quality;
+  }
   if (safe.status) safe.status_message = clientStatusMessage(safe.status);
   return safe;
 }
