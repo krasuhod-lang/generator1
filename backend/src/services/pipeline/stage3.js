@@ -65,6 +65,7 @@ const { runNaturalnessChecks }   = require('../../utils/naturalnessCheck');
 const { geminiCallOpts, akbSystem, llmProvider } = require('../../utils/articleKnowledgeBase');
 const { STYLE_GROUNDING_CONTRACT } = require('../../utils/styleGroundingContract');
 const { DOCTOR_MAX_WRITER_CONTRACT } = require('../../utils/doctorMaxWriterContract');
+const { buildBlockHandoffPrompt } = require('../../utils/contentHandoffManifest');
 
 /**
  * structuralPreCheck — проверяет базовые E-E-A-T структурные требования блока.
@@ -500,7 +501,7 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
     blockTargetChars, blockMinChars, blockMaxChars, stage0Result,
     expertOpinionUsed, previousContext, previousH2s,
     serviceNotes, offerDetails, proofAssets,
-    blockEntitiesStr, structureLimits,
+    blockEntitiesStr, structureLimits, contentHandoffManifest,
   } = genContext;
 
   log(`Генерация блока [${blockIndex + 1}/${totalBlocks}]: ${block.h2}...`, 'info');
@@ -565,6 +566,11 @@ async function generateSingleBlock(task, ctx, block, blockIndex, totalBlocks, ge
   if (blockEntitiesStr) {
     s3prompt += `\n\nKNOWLEDGE GRAPH ENTITIES (related to this H2 section):\n${blockEntitiesStr}\nNaturally weave these entities into the content where semantically appropriate. Do NOT force-insert — only use if they enrich the section.`;
   }
+
+  // Deterministic handoff: block-specific verified facts/claims/semantic terms.
+  // This is intentionally compact and does not duplicate the full AKB.
+  const handoffPrompt = buildBlockHandoffPrompt(contentHandoffManifest, { ...block, index: blockIndex });
+  if (handoffPrompt) s3prompt += handoffPrompt;
 
   // Style & Grounding Contract: лаконичность предложений + строгая опора на AKB.
   s3prompt += STYLE_GROUNDING_CONTRACT;

@@ -121,6 +121,10 @@ async function runStage5(
   let currentPQ    = Number.isFinite(Number(pqScore)) ? Number(pqScore) : null;
   const pqLabel = () => currentPQ == null ? 'не рассчитан: audit unavailable/partial' : String(currentPQ);
   let currentAudit = auditResult;
+  let bestHTML = currentHTML;
+  let bestPQ = currentPQ;
+  let bestAudit = currentAudit;
+  let lastCandidateMeasured = true;
   let budgetSkipped = false;
 
   // Проверяем anti-water и галлюцинации
@@ -220,7 +224,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       llmProvider(task),
       akbSystem(task, { purpose: 'repair' }),
       s5Prompt,
-      geminiCallOpts(task, { retries: 2, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens, skipOnBudget: true })
+      geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 PQ Refine Block ${blockIndex + 1} iter ${s5Loop}`, temperature: 0.35, log, onTokens, skipOnBudget: true })
     ).catch(e => {
       if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
         budgetSkipped = true;
@@ -234,6 +238,9 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
     if (budgetSkipped) break;
 
     if (s5Result?.html_content) {
+      const previousHTML = currentHTML;
+      const previousPQ = currentPQ;
+      const previousAudit = currentAudit;
       // Length guard: если итерация раздула HTML за допустимый коридор —
       // отвергаем результат и оставляем предыдущий best-so-far.
       // Без этого Stage 5 раздувает блок в 3-4 раза за 1 итерацию (см. логи: 2177 → 7523).
@@ -247,6 +254,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         break;
       }
       currentHTML = s5Result.html_content;
+      lastCandidateMeasured = false;
       log(`Stage 5 блок ${blockIndex + 1}: итерация ${s5Loop} — HTML ${currentHTML.length} символов. Повторный аудит...`, 'success');
 
       // Повторная проверка naturalness после рефайна (без LLM-вызова, мгновенно)
@@ -270,6 +278,23 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
           if (reAudit?.pqScore !== undefined) {
             currentPQ    = reAudit.pqScore;
             currentAudit = reAudit.auditResult;
+            lastCandidateMeasured = true;
+            if (previousPQ != null && currentPQ != null && currentPQ < previousPQ - 0.5) {
+              currentHTML = previousHTML;
+              currentPQ = previousPQ;
+              currentAudit = previousAudit;
+              log(
+                `Stage 5 блок ${blockIndex + 1}: кандидат отклонён — PQ ${reAudit.pqScore} заметно ниже предыдущего ${previousPQ}; восстановлен best-so-far`,
+                'warn'
+              );
+              needsRefine = false;
+              break;
+            }
+            if (currentPQ != null && (bestPQ == null || currentPQ > bestPQ)) {
+              bestHTML = currentHTML;
+              bestPQ = currentPQ;
+              bestAudit = currentAudit;
+            }
             log(
               `Stage 5 блок ${blockIndex + 1}: повторный аудит — PQ ${currentPQ}`,
               currentPQ >= EEAT_PQ_TARGET ? 'success' : 'warn'
@@ -286,6 +311,20 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
       log(`Stage 5 блок ${blockIndex + 1}: html_content не получен (итерация ${s5Loop}). Ключи: [${Object.keys(s5Result || {}).join(', ')}]`, 'warn');
       break;
     }
+  }
+
+  if (!lastCandidateMeasured && bestPQ != null && currentHTML !== bestHTML) {
+    currentHTML = bestHTML;
+    currentPQ = bestPQ;
+    currentAudit = bestAudit;
+    log(`Stage 5 блок ${blockIndex + 1}: непроверенный последний кандидат отклонён — сохранён best-so-far PQ ${bestPQ}`, 'warn');
+  }
+
+  if (bestPQ != null && currentPQ != null && currentPQ < bestPQ) {
+    currentHTML = bestHTML;
+    currentPQ = bestPQ;
+    currentAudit = bestAudit;
+    log(`Stage 5 блок ${blockIndex + 1}: best-so-far восстановлен — PQ ${bestPQ}`, 'info');
   }
 
   if (currentPQ >= EEAT_PQ_TARGET) {
@@ -320,7 +359,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         llmProvider(task),
         akbSystem(task, { purpose: 'repair' }),
         confPrompt,
-        geminiCallOpts(task, { retries: 2, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens, skipOnBudget: true })
+        geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 Confidence Fix Block ${blockIndex + 1}`, temperature: 0.3, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
         if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;
@@ -367,7 +406,7 @@ LENGTH CONTROL (КРИТИЧНО — нарушение = откат итера�
         llmProvider(task),
         akbSystem(task, { purpose: 'repair' }),
         tfPrompt,
-        geminiCallOpts(task, { retries: 2, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
+        geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage5', callLabel: `5 TF-IDF Fix Block ${blockIndex + 1}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
       ).catch((error) => {
         if (error?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(error?.message || ''))) {
           budgetSkipped = true;

@@ -28,12 +28,30 @@ async function run(name, fn) {
     deepseek: process.env.DEEPSEEK_API_KEY,
     gemini: process.env.GEMINI_API_KEY,
   };
+  const getSecretInfoFn = (envName) => ({
+    configured: Boolean(String(process.env[envName] || '').trim()),
+  });
 
   try {
     await run('provider order defaults to DeepSeek then Gemini', async () => {
       delete process.env.RESEARCH_PRIMARY_PROVIDER;
       delete process.env.RESEARCH_FALLBACK_PROVIDER;
       assert.deepStrictEqual(getResearchProviderOrder(), ['deepseek', 'gemini']);
+    });
+
+    await run('unconfigured providers are skipped without a call', async () => {
+      delete process.env.DEEPSEEK_API_KEY;
+      delete process.env.GEMINI_API_KEY;
+      let called = false;
+      const result = await callResearchProvider({
+        system: 'system',
+        prompt: 'prompt',
+        callFn: async () => { called = true; return {}; },
+        getSecretInfoFn,
+      });
+      assert.strictEqual(result, null);
+      assert.strictEqual(called, false);
+      assert.strictEqual(hasResearchProvider(), false);
     });
 
     await run('DeepSeek success does not call Gemini', async () => {
@@ -49,6 +67,7 @@ async function run(name, fn) {
           calls.push(provider);
           return { provider, ok: true };
         },
+        getSecretInfoFn,
       });
       assert.strictEqual(result.provider, 'deepseek');
       assert.deepStrictEqual(calls, ['deepseek']);
@@ -64,23 +83,10 @@ async function run(name, fn) {
           if (provider === 'deepseek') throw new Error('test failure');
           return { provider, ok: true };
         },
+        getSecretInfoFn,
       });
       assert.strictEqual(result.provider, 'gemini');
       assert.deepStrictEqual(calls, ['deepseek', 'gemini']);
-    });
-
-    await run('unconfigured providers are skipped without a call', async () => {
-      delete process.env.DEEPSEEK_API_KEY;
-      delete process.env.GEMINI_API_KEY;
-      let called = false;
-      const result = await callResearchProvider({
-        system: 'system',
-        prompt: 'prompt',
-        callFn: async () => { called = true; return {}; },
-      });
-      assert.strictEqual(result, null);
-      assert.strictEqual(called, false);
-      assert.strictEqual(hasResearchProvider(), false);
     });
   } finally {
     if (saved.primary === undefined) delete process.env.RESEARCH_PRIMARY_PROVIDER;

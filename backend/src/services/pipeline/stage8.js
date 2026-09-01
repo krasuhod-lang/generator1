@@ -338,7 +338,9 @@ async function runQualityEvaluator({
     const report = await callLLM('deepseek', SYSTEM_PROMPT, buildEvaluatorUserPrompt({
       pipeline, taskId, articleText: text, artifacts: mergedArtifacts, deterministicRubric, task, moduleContext,
     }), {
-      retries,
+      retries: Math.min(Number(retries) || 1, 2),
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
       ...(Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
       taskId: pipeline === 'seo' ? taskId : null,
       traceTaskId: pipeline === 'seo' ? null : taskId,

@@ -218,7 +218,11 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
 
   const [serpRealityResult, nicheLandscapeResult, gistSettled, researchResult] = await Promise.all([
     callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {
-      retries:   3,
+      retries: 1,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
+      maxTokens: 12000,
+      maxTruncationTokens: 16000,
       taskId,
       stageName: 'stage0',
       callLabel: 'SERP Reality Check',
@@ -228,7 +232,11 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
     }).catch(e => { log(`Stage 0 Call 1 error: ${e.message}`, 'warn'); return null; }),
 
     callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.nicheLandscape, task), nicheLandscapeContext, {
-      retries:   3,
+      retries: 1,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
+      maxTokens: 12000,
+      maxTruncationTokens: 16000,
       taskId,
       stageName: 'stage0',
       callLabel: 'Niche Landscape',
@@ -271,7 +279,17 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
       return callResearchProvider({
         system: fillPromptVars(SYSTEM_PROMPTS_EXT.deepseekResearcher, task),
         prompt: researchContext,
-        callOptions: { taskId, stageName: 'stage0', log, onTokens },
+        callOptions: {
+          taskId,
+          stageName: 'stage0',
+          log,
+          onTokens,
+          retries: 1,
+          repairOnJsonError: true,
+          repairMaxTokens: 4096,
+          maxTokens: 12000,
+          maxTruncationTokens: 16000,
+        },
         callLabel: 'Stage 0 Research Evidence',
         log,
       });
@@ -313,7 +331,16 @@ JSON SCHEMA: {"competitor_facts":[{"fact":"string","source_url":"string","catego
 RULES: 1. competitor_facts — ТОЛЬКО реальные числа. 2. Минимум 5 записей в каждом массиве. OUTPUT: JSON ONLY.`;
 
     const fallbackResult = await callLLM('deepseek', fallbackSystem, fallbackPrompt, {
-      retries: 3, taskId, stageName: 'stage0', callLabel: 'Fallback Analysis', log, onTokens,
+      retries: 1,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
+      maxTokens: 12000,
+      maxTruncationTokens: 16000,
+      taskId,
+      stageName: 'stage0',
+      callLabel: 'Fallback Analysis',
+      log,
+      onTokens,
     }).catch(() => null);
 
     if (!fallbackResult) throw new Error('Stage 0: все запросы вернули ошибки');

@@ -34,6 +34,8 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
   const brandName     = (task.input_brand_name || '').trim() || 'Нет данных';
 
   let currentHTML = htmlContent;
+  let bestHTML = htmlContent;
+  let bestCoverage = calculateCoverage(htmlContent, lsiMust);
   let loopCount   = 0;
   let budgetSkipped = false;
   const configuredLoops = parseInt(process.env.SEO_STAGE6_MAX_LOOPS, 10);
@@ -107,7 +109,7 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
       llmProvider(task),
       akbSystem(task, { purpose: 'repair' }),
       stage6Prompt,
-      geminiCallOpts(task, { retries: 2, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
+      geminiCallOpts(task, { retries: 1, repairOnJsonError: true, repairMaxTokens: 8192, maxTokens: 12288, maxTruncationTokens: 16384, taskId, stageName: 'stage6', callLabel: `6 LSI Inject Block ${blockIndex + 1} cycle ${loopCount}`, temperature: 0.2, log, onTokens, skipOnBudget: true })
     ).catch(e => {
       if (e?.isBudgetExceeded || /gemini token budget exhausted/i.test(String(e?.message || ''))) {
         budgetSkipped = true;
@@ -131,9 +133,22 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
         );
         break;
       }
-      currentHTML = stage6Result.html_content;
-      const nextCoverage = calculateCoverage(currentHTML, lsiMust);
+      const candidateHTML = stage6Result.html_content;
+      const nextCoverage = calculateCoverage(candidateHTML, lsiMust);
       const coverageGain = nextCoverage.percent - coverage.percent;
+      if (nextCoverage.percent <= coverage.percent) {
+        currentHTML = bestHTML;
+        log(
+          `Stage 6 блок ${blockIndex + 1}: кандидат отклонён — coverage ${coverage.percent}% → ${nextCoverage.percent}% без положительного прироста; сохранён best-so-far`,
+          'warn'
+        );
+        break;
+      }
+      currentHTML = candidateHTML;
+      if (nextCoverage.percent > bestCoverage.percent) {
+        bestHTML = currentHTML;
+        bestCoverage = nextCoverage;
+      }
       log(
         `Stage 6 блок ${blockIndex + 1}: цикл ${loopCount} завершён, `
         + `HTML ${currentHTML.length} символов, coverage ${coverage.percent}% → ${nextCoverage.percent}% `
@@ -162,7 +177,11 @@ async function runStage6(task, ctx, blockIndex, htmlContent, lsiMust, blockCharL
     }
   }
 
-  // Финальное измерение покрытия
+  // Финальное измерение покрытия: никогда не возвращаем rewrite хуже best-so-far.
+  const finalBeforeRollback = calculateCoverage(currentHTML, lsiMust);
+  if (finalBeforeRollback.percent < bestCoverage.percent) {
+    currentHTML = bestHTML;
+  }
   const finalCoverage = calculateCoverage(currentHTML, lsiMust);
   log(
     `Блок ${blockIndex + 1} — финальное LSI покрытие: ${finalCoverage.percent}% ` +

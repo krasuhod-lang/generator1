@@ -3,6 +3,7 @@
 const { callLLM }        = require('../llm/callLLM');
 const { SYSTEM_PROMPTS } = require('../../prompts/systemPrompts');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
+const { buildBlockHandoffPrompt } = require('../../utils/contentHandoffManifest');
 
 /**
  * E-E-A-T scoring rubric — добавляется к каждому вызову Stage 4.
@@ -83,7 +84,11 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
   const boundedHtml = String(htmlContent || '').length > 18000
     ? `${String(htmlContent || '').slice(0, 15000)}\n<!-- [HTML_CONTENT_TRUNCATED_FOR_AUDIT] -->\n${String(htmlContent || '').slice(-3000)}`
     : String(htmlContent || '');
-  const stage4Prompt = (SYSTEM_PROMPTS.stage4 + EEAT_TRUST_ADDENDUM)
+  const handoffPrompt = buildBlockHandoffPrompt(
+    task.__contentHandoffManifest,
+    { h2: task.__contentHandoffManifest?.blocks?.[blockIndex]?.h2 || '', index: blockIndex, lsi_must: lsiMust }
+  );
+  const stage4Prompt = (SYSTEM_PROMPTS.stage4 + EEAT_TRUST_ADDENDUM + handoffPrompt)
     .replace('{{HTML_CONTENT}}',      () => boundedHtml)
     .replace('{{TARGET_SERVICE}}',    () => targetService)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(lsiMust))
@@ -102,7 +107,9 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
       // A truncated audit otherwise becomes audit_unavailable and forces PQ=0.
       // One bounded truncation retry is cheaper than losing the quality signal
       // and launching uncontrolled downstream refinements.
-      retries: 2,
+      retries: 1,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
       retryOnTruncation: true,
       taskId,
       stageName: 'stage4',
@@ -192,7 +199,9 @@ RE-AUDIT COMPACT MODE:
     '',
     reAuditPrompt,
     {
-      retries: 2,
+      retries: 1,
+      repairOnJsonError: true,
+      repairMaxTokens: 3072,
       retryOnTruncation: true,
       taskId,
       stageName: 'stage4',

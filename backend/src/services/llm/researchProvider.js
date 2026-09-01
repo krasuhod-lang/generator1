@@ -69,13 +69,14 @@ async function callResearchProvider({
   callLabel = 'Research',
   log = null,
   callFn = callLLM,
+  getSecretInfoFn = getIntegrationSecretInfo,
 } = {}) {
   if (!String(system || '').trim() || !String(prompt || '').trim()) return null;
 
   let lastError = null;
   for (const provider of getResearchProviderOrder()) {
     const envName = provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'GEMINI_API_KEY';
-    const configured = (await getIntegrationSecretInfo(envName)).configured;
+    const configured = (await getSecretInfoFn(envName)).configured;
     if (!configured) {
       if (typeof log === 'function') {
         log(`${callLabel}: ${provider} пропущен — ключ не задан`, 'warn');
@@ -84,9 +85,13 @@ async function callResearchProvider({
     }
 
     try {
+      const configuredRetries = Number(callOptions.retries);
+      const retries = Number.isFinite(configuredRetries)
+        ? Math.max(0, Math.min(2, Math.floor(configuredRetries)))
+        : 1;
       const raw = await callFn(provider, system, prompt, {
         ...callOptions,
-        retries: 2,
+        retries,
         temperature: callOptions.temperature ?? 0.2,
         callLabel: `${callLabel} (${provider})`,
       });

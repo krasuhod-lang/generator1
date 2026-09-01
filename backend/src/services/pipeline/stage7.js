@@ -71,7 +71,10 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     ? `${fullHTML.slice(0, 25000)}\n<!-- [FINAL_HTML_TRUNCATED_FOR_AUDIT] -->\n${fullHTML.slice(-5000)}`
     : fullHTML;
 
-  const s7prompt = `${SYSTEM_PROMPTS.stage7}\n\nGLOBAL AUDIT COMPACT OUTPUT POLICY (additive; keep the full rubric):\n- Return exactly one JSON object. Never repeat FINAL_HTML_CONTENT.\n- Keep overall_verdict and each justification under 300 characters.\n- Keep critical_improvements_needed to at most 8 short items.\n- Keep tfidf_density_report to at most 60 items; computed programmatic density remains the source of truth.\n- If a field cannot be assessed, use null or an empty array; do not invent a value.\n`
+  const handoffSummary = task.__contentHandoffManifestMarkdown
+    ? `\n\nVERIFIED CONTENT HANDOFF SUMMARY (source of truth; do not invent unsupported claims):\n${String(task.__contentHandoffManifestMarkdown).slice(0, 8000)}`
+    : '';
+  const s7prompt = `${SYSTEM_PROMPTS.stage7}${handoffSummary}\n\nGLOBAL AUDIT COMPACT OUTPUT POLICY (additive; keep the full rubric):\n- Return exactly one JSON object. Never repeat FINAL_HTML_CONTENT.\n- Keep overall_verdict and each justification under 300 characters.\n- Keep critical_improvements_needed to at most 8 short items.\n- Keep tfidf_density_report to at most 60 items; computed programmatic density remains the source of truth.\n- If a field cannot be assessed, use null or an empty array; do not invent a value.\n`
     .replace('{{FINAL_HTML}}',        () => boundedFinalHtml)
     .replace('{{TARGET_SERVICE}}',    () => targetService)
     .replace('{{ORIGINAL_LSI_MUST}}', () => JSON.stringify(allLSI))
@@ -90,7 +93,9 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     '',
     s7prompt,
     {
-      retries: 2,
+      retries: 1,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
       maxTokens: 12000,
       maxTruncationTokens: 24000,
       responseFormat: { type: 'json_object' },
@@ -206,8 +211,8 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   );
 
   // Обновляем tasks: сохраняем финальный HTML и отчёт Stage 7 (с программными данными)
-  if (tzCompliance) {
-    await db.query(
+  const contentUpdate = tzCompliance
+    ? await db.query(
       `UPDATE tasks SET
          stage7_result  = $1,
          full_html      = $2,
@@ -215,9 +220,8 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
          updated_at     = NOW()
        WHERE id = $4`,
       [JSON.stringify(enrichedResult), fullHTML, JSON.stringify(tzCompliance), taskId]
-    );
-  } else {
-    await db.query(
+    )
+    : await db.query(
       `UPDATE tasks SET
          stage7_result = $1,
          full_html     = $2,
@@ -225,6 +229,9 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
        WHERE id = $3`,
       [JSON.stringify(enrichedResult), fullHTML, taskId]
     );
+
+  if (!contentUpdate || Number(contentUpdate.rowCount) < 1) {
+    throw new Error('Stage 7 persistence did not update the task row');
   }
 
   log('<strong>Генерация и аудит полностью завершены!</strong>', 'success');
@@ -239,6 +246,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     tfIdfDensity,
     eeatBreakdown:     eeatBreakdown || null,
     tzCompliance,
+    contentSaved: true,
   };
 }
 

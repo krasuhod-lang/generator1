@@ -194,12 +194,15 @@ const worker = new Worker(
 
     try {
       // ── 3. Пайплайн Stage 0 → Stage 7 ────────────────────────────
-      await runPipeline(task, {
+      const pipelineResult = await runPipeline(task, {
         log:        (msg, level) => log(taskId, msg, level),
         progress:   (pct, stage) => progress(taskId, pct, stage),
         job,
         resumeFrom: job.data.resumeFrom || null,
       });
+      if (pipelineResult?.contentSaved !== true) {
+        throw new Error('Pipeline completed without persisted content (full_html)');
+      }
 
       // ── 4. Завершение ─────────────────────────────────────────────
       await updateTask(taskId, {

@@ -500,6 +500,9 @@ async function persistStageCall({
  * @param {boolean} [opts.skipOnBudget=false] — для необязательных calls: сделать
  *                                                    локальный preflight и не отправлять
  *                                                    запрос, если он не помещается в остаток.
+ * @param {boolean} [opts.repairOnJsonError=false] — один bounded repair-вызов при
+ *                                                    JSON parse failure вместо полного повторного промпта.
+ * @param {number}  [opts.repairMaxTokens=4096] — cap ответа JSON repair.
  * @param {string}  [opts.brand]        — наименование бренда из задачи
  *                                                    (task.brand / brand_name). Используется
  *                                                    в Redis-кэше для изоляции по бренду
@@ -542,6 +545,8 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     maxTruncationTokens = 32000,
     allowPartialJson = false,
     skipOnBudget = false,
+    repairOnJsonError = false,
+    repairMaxTokens = 4096,
   } = opts;
 
   const logCallback = onLog || optLog;
@@ -569,6 +574,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
   // Локальная копия cachedContent — может «сгореть» при cache miss.
   // Только для Gemini; Grok не поддерживает cachedContent.
   let activeCachedContent = adapter === 'gemini' ? cachedContent : null;
+  let jsonRepairUsed = false;
 
   // ── Детерминированный response cache (Redis) ─────────────────────
   // Ключ: sha256(adapter + model + system + prompt + temperature + maxTokens).
@@ -704,15 +710,58 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       }
       let parsed;
       let partialJson = false;
+      let jsonRepaired = false;
       try {
         parsed = normalizeKeys(parseJSON(result.text));
       } catch (parseError) {
-        if (!allowPartialJson) throw parseError;
-        const salvaged = salvageQualityJson(result.text, parseError);
-        if (!salvaged) throw parseError;
-        parsed = normalizeKeys(salvaged);
-        partialJson = true;
-        log(`${callLabel || stageName}: partial quality JSON salvaged; score fields preserved`, 'warn');
+        if (repairOnJsonError && !jsonRepairUsed) {
+          jsonRepairUsed = true;
+          const rawResponse = String(result.text || '');
+          const boundedResponse = rawResponse.length > 16000
+            ? `${rawResponse.slice(0, 12000)}\\n[… response compacted …]\\n${rawResponse.slice(-3500)}`
+            : rawResponse;
+          const repairPrompt = [
+            'Return ONLY valid JSON. Repair the malformed model response below.',
+            'Preserve every recoverable field and value; do not invent or summarize data.',
+            'Do not wrap the JSON in Markdown fences or add commentary.',
+            `Original task: ${callLabel || stageName}`,
+            'MALFORMED_RESPONSE:',
+            boundedResponse,
+          ].join('\\n\\n');
+          log(`${callLabel || stageName}: JSON parse failed — bounded repair (maxTokens=${repairMaxTokens})`, 'warn');
+          try {
+            parsed = await callLLM(
+              adapter,
+              cacheFallbackSystem || system || 'Return valid JSON only.',
+              repairPrompt,
+              {
+                ...opts,
+                retries: 1,
+                retryOnTruncation: false,
+                repairOnJsonError: false,
+                allowPartialJson: false,
+                maxTokens: repairMaxTokens,
+                maxTruncationTokens: repairMaxTokens,
+                cachedContent: null,
+                cacheFallbackSystem: null,
+                onCacheMiss: null,
+                callLabel: `${callLabel || stageName} JSON repair`,
+              }
+            );
+            jsonRepaired = true;
+          } catch (repairError) {
+            parseError.isDeterministic = true;
+            parseError.message = `JSON parse failed after bounded repair: ${repairError.message}`;
+            throw parseError;
+          }
+        } else {
+          if (!allowPartialJson) throw parseError;
+          const salvaged = salvageQualityJson(result.text, parseError);
+          if (!salvaged) throw parseError;
+          parsed = normalizeKeys(salvaged);
+          partialJson = true;
+          log(`${callLabel || stageName}: partial quality JSON salvaged; score fields preserved`, 'warn');
+        }
       }
 
       const cacheNote   = cacheHit ? ` | cache_hit: ${result.cacheHitTokens}` : '';
@@ -720,17 +769,21 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // Подсветим thoughts/cached в логе только когда они ненулевые — иначе шум.
       const thoughtsNote = (result.thoughtsTokens || 0) > 0 ? ` | thoughts: ${result.thoughtsTokens}` : '';
       const partialJsonNote = partialJson ? ' | partial_json' : '';
+      const repairNote = jsonRepaired ? ' | repaired_json' : '';
       const cachedTokNote = (result.cachedTokens   || 0) > 0 ? ` | cached_in: ${result.cachedTokens}` : '';
       // Показываем фактически использованную модель — для удобства сравнения
       // качества разных Gemini-моделей в одной задаче.
       const modelTag = result.model ? ` (${result.model})` : '';
       const callDurationMs = Math.max(0, Date.now() - startedAt.getTime());
       log(
-        `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote}${partialJsonNote} | $${costUsd.toFixed(6)} | ${callDurationMs}ms`,
+        `${callLabel || stageName}${modelTag} ✓ — ${result.tokensIn}↑ ${result.tokensOut}↓ токенов${thoughtsNote}${cachedTokNote}${cacheNote}${cachedNote}${partialJsonNote}${repairNote} | $${costUsd.toFixed(6)} | ${callDurationMs}ms`,
         'success'
       );
 
-      recordApiRequest({ ...ledgerContext, requestStatus: partialJson ? 'partial_json' : 'success' }).catch(() => {});
+      recordApiRequest({
+        ...ledgerContext,
+        requestStatus: partialJson ? 'partial_json' : (jsonRepaired ? 'repaired_json' : 'success'),
+      }).catch(() => {});
 
       // Публикуем SSE-событие tokens — фронтенд реактивно обновляет счётчики
       if (onTokens) {

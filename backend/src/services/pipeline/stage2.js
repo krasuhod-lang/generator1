@@ -402,7 +402,18 @@ OUTPUT: Return JSON with recommended_formats (array), format_priority_order (arr
       'deepseek',
       '',
       attemptPrompt,
-      { retries: 2, taskId, stageName: 'stage2', callLabel: `2C Taxonomy attempt ${s2Attempts}`, log, onTokens }
+      {
+        retries: 1,
+        repairOnJsonError: true,
+        repairMaxTokens: 4096,
+        maxTokens: 12000,
+        maxTruncationTokens: 16000,
+        taskId,
+        stageName: 'stage2',
+        callLabel: `2C Taxonomy attempt ${s2Attempts}`,
+        log,
+        onTokens,
+      }
     ).catch(e => {
       log(`Stage 2C Taxonomy ОШИБКА: ${e.message}`, 'error');
       // Если DeepSeek-адаптер всё равно отверг по длине (например, повторное
@@ -519,7 +530,9 @@ OUTPUT JSON SCHEMA:
       lsiRoutingSystem,
       lsiRoutingPrompt,
       {
-        retries: 2,
+        retries: 1,
+        repairOnJsonError: true,
+        repairMaxTokens: 3072,
         maxTokens: 8000,
         maxTruncationTokens: 12000,
         model: 'deepseek-v4-pro',

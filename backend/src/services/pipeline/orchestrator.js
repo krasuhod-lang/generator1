@@ -127,6 +127,7 @@ const { resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLL
 const { estimateTokens } = require('../metrics/priceCalculator');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { buildWriterContext } = require('../../utils/writerContext');
+const { buildContentHandoffManifest, renderManifestMarkdown } = require('../../utils/contentHandoffManifest');
 const { normalizeTz, hasTz } = require('./tzParser');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,11 +206,12 @@ async function runPipeline(task, ctx) {
   // Не оборачиваем — иначе каждое сообщение будет отправлено дважды
 
   // onTokens — публикует SSE-событие {type:"tokens"} после каждого LLM-вызова
-  // Фронтенд обновляет счётчики DeepSeek/Gemini в реальном времени
+  // Staff/admin monitor может обновлять счётчики DeepSeek/Gemini/Qwen в реальном времени; client-safe API их не отдаёт.
   const onTokens = (model, tokensIn, tokensOut, costUsd) => {
+    const provider = typeof model === 'object' ? model.provider : model;
     publish(taskId, {
       type:      'tokens',
-      model:     model === 'gemini' ? 'gemini' : 'deepseek',
+      model:     provider === 'gemini' ? 'gemini' : (provider === 'qwen' ? 'qwen' : 'deepseek'),
       tokensIn,
       tokensOut,
       cost:      costUsd,
@@ -513,6 +515,36 @@ async function runPipeline(task, ctx) {
     task.__moduleContext = null;
   }
 
+  // ── CONTENT HANDOFF MANIFEST ───────────────────────────────────────
+  // Единый детерминированный контракт между аналитикой и writer/audits.
+  // Он не вызывает LLM и делает потери facts/entities/LSI/intent видимыми.
+  try {
+    task.__contentHandoffManifest = buildContentHandoffManifest({
+      task,
+      stage0Result,
+      stage1Result,
+      stage2Result: { taxonomy, stage2Raw, enrichedStage1 },
+      relevanceReport,
+      targetPageAnalysis,
+      strategyContext,
+    });
+    task.__contentHandoffManifestMarkdown = renderManifestMarkdown(task.__contentHandoffManifest, 12000);
+    const counts = task.__contentHandoffManifest.validation.counts;
+    log(
+      `Content Handoff Manifest: status=${task.__contentHandoffManifest.validation.status}; ` +
+      `facts=${counts.facts}, claims=${counts.claims}, entities=${counts.entities}, ` +
+      `intents=${counts.intents}, LSI=${counts.lsi}, ngrams=${counts.ngrams}, blocks=${counts.blocks}` +
+      (task.__contentHandoffManifest.validation.warnings.length
+        ? `; warnings=${task.__contentHandoffManifest.validation.warnings.join(',')}`
+        : ''),
+      task.__contentHandoffManifest.validation.warnings.length ? 'warn' : 'success',
+    );
+  } catch (handoffErr) {
+    task.__contentHandoffManifest = null;
+    task.__contentHandoffManifestMarkdown = '';
+    log(`Content Handoff Manifest: ошибка сборки — ${handoffErr.message}. Продолжаем с legacy handoff.`, 'warn');
+  }
+
   // ── ARTICLE_KNOWLEDGE_BASE (AKB) ─────────────────────────────────
   // Один детерминированный документ, который собирает всё «сырое знание»
   // (Pre-Stage 0 + Stage 0 + Stage 1 + target page + audience-niche).
@@ -658,6 +690,7 @@ async function runPipeline(task, ctx) {
       projectContextBlock,
       governanceBlock,
       eeatContract: task.__eeatContract,
+      contentHandoffManifest: task.__contentHandoffManifest,
     });
     const akbBytes  = Buffer.byteLength(task.__articleKnowledgeBase, 'utf8');
     const akbTokens = estimateTokens(task.__articleKnowledgeBase);
@@ -1074,6 +1107,7 @@ async function runPipeline(task, ctx) {
       expertOpinionUsed, previousContext, previousH2s: generatedH2s.join(' | '),
       serviceNotes, offerDetails, proofAssets,
       blockEntitiesStr, structureLimits,
+      contentHandoffManifest: task.__contentHandoffManifest,
     });
 
     // Обновляем контекст для генерации следующего блока
@@ -1453,7 +1487,13 @@ async function runPipeline(task, ctx) {
       ],
       warnings:   gateResult.warnings.map((w) => ({ name: w.name, verdict: w.verdict })),
       summary:    eeat12Ready ? gateResult.summary : `${gateResult.summary}; E-E-A-T 12 requires refine/manual review`,
+      // Разделяем технические состояния: completion pipeline, persistence контента
+      // и quality gate не являются одним boolean. Эти поля нужны staff/admin
+      // для диагностики; client sanitizer возвращает только безопасный gate summary.
+      pipeline_completed: true,
+      content_saved: true,
       quality_gate_status: gateResult.quality_gate_status || 'measured',
+      publishable: gateResult.canPublish && eeat12Ready,
       governance: governanceReport || null,
       eeat12:     eeat12Audit || null,
       eeat_canonical: canonicalEeat || null,

@@ -64,6 +64,7 @@ const CALL_AKB_SECTION_MAX_CHARS = 2600;
 const CALL_AKB_PRIORITY = [
   '## 0. КОНТЕКСТ ПРОЕКТА',
   '## 0.8 E-E-A-T 12 / EVIDENCE-FIRST CONTRACT',
+  '## 0.9 CONTENT HANDOFF MANIFEST',
   '## 1. Brand & Offer',
   '## 2. Audience Personas',
   '## 2b. RESEARCH EVIDENCE',
@@ -321,6 +322,7 @@ function buildArticleKnowledgeBase(input = {}) {
     projectContextBlock = '',   // ТЗ §5/§8: рендер из projects/projectContextBlock
     governanceBlock      = '',   // BRANDCORE/TGA: единые fact/E-E-A-T/semantic rules
     eeatContract         = null, // E-E-A-T 12 / evidence-first writer contract
+    contentHandoffManifest = null, // deterministic Stage 0-2 handoff contract
   } = input;
 
   // Реальные тексты аудитории/ниши приходят как сериализованные
@@ -382,6 +384,24 @@ function buildArticleKnowledgeBase(input = {}) {
   if (eeatContract && typeof eeatContract.markdown === 'string' && eeatContract.markdown.trim()) {
     sections.push('\\n## 0.8 E-E-A-T 12 / EVIDENCE-FIRST CONTRACT');
     sections.push(eeatContract.markdown.trim());
+  }
+
+  // ── 0.9 CONTENT HANDOFF MANIFEST ─────────────────────────────────
+  // Единый versioned handoff для writer/refine/audit. В нём сохраняются
+  // provenance/counts и explicit warnings, поэтому отсутствие фактов/LSI
+  // нельзя принять за нормальный пустой контекст.
+  if (contentHandoffManifest && typeof contentHandoffManifest === 'object') {
+    try {
+      const { renderManifestMarkdown } = require('./contentHandoffManifest');
+      const manifestText = renderManifestMarkdown(contentHandoffManifest, 12000);
+      if (manifestText.trim()) {
+        sections.push('\\n## 0.9 CONTENT HANDOFF MANIFEST — SOURCE OF TRUTH');
+        sections.push('Используй только проверенные факты и связи ниже. При отсутствии доказательства claim не добавляй. Статус partial означает, что отсутствующие данные нельзя считать подтверждёнными.');
+        sections.push(manifestText);
+      }
+    } catch (_) {
+      // graceful: базовый AKB и legacy sections остаются доступны
+    }
   }
 
   // ── 1. Brand & Offer ─────────────────────────────────────────────

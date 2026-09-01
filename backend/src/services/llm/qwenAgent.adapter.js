@@ -33,9 +33,11 @@ const BASE_URL = normalizeResponsesBaseUrl(
   || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
 );
 const DEFAULT_MODEL = 'qwen3.8-max';
-const DEFAULT_TIMEOUT_MS = 7 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 90 * 1000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 12000;
 const MAX_INPUT_CHARS = 70000;
+const QWEN_CIRCUIT_COOLDOWN_MS = 10 * 60 * 1000;
+let qwenCircuitOpenUntil = 0;
 
 function normalizeProxyUrl(raw) {
   if (!raw || typeof raw !== 'string') return '';
@@ -191,9 +193,26 @@ async function runQwenResearchAgent({
   pipeline = 'seo',
   stageName = 'stage0',
   callLabel = 'Stage 0 Qwen Research Agent',
+  apiKeyOverride = null,
+  requestFn = null,
+  recordFn = recordApiRequest,
 } = {}) {
   const startedAt = Date.now();
-  const apiKey = await getIntegrationSecret('DASHSCOPE_API_KEY');
+  if (Date.now() < qwenCircuitOpenUntil) {
+    const remainingMs = qwenCircuitOpenUntil - Date.now();
+    if (typeof log === 'function') {
+      log(`${callLabel}: Qwen circuit breaker открыт ещё ${Math.ceil(remainingMs / 1000)}с — используем fallback`, 'warn');
+    }
+    await recordFn({
+      provider: 'qwen', model: String(process.env.QWEN_RESEARCH_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL,
+      pipeline, stageName, callLabel, taskId, requestStatus: 'circuit_open',
+      httpStatus: null, durationMs: 0, promptSize: 0,
+      errorCode: 'qwen_circuit_open', errorMessage: 'Qwen research circuit breaker is open',
+      meta: { cooldown_ms: QWEN_CIRCUIT_COOLDOWN_MS },
+    });
+    throw new Error('Qwen research circuit breaker is open; fallback required');
+  }
+  const apiKey = apiKeyOverride || await getIntegrationSecret('DASHSCOPE_API_KEY');
   if (!apiKey) throw new Error('DASHSCOPE_API_KEY is not configured for Qwen research agent');
 
   const model = String(process.env.QWEN_RESEARCH_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
@@ -220,7 +239,8 @@ async function runQwenResearchAgent({
 
   let response;
   try {
-    response = await axios.post(`${BASE_URL}/responses`, body, {
+    const post = requestFn || ((url, payload, options) => axios.post(url, payload, options));
+    response = await post(`${BASE_URL}/responses`, body, {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
@@ -231,7 +251,8 @@ async function runQwenResearchAgent({
     });
   } catch (error) {
     const safe = sanitizeError(error);
-    await recordApiRequest({
+    qwenCircuitOpenUntil = Date.now() + QWEN_CIRCUIT_COOLDOWN_MS;
+    await recordFn({
       provider: 'qwen', model, pipeline, stageName,
       callLabel, taskId, requestStatus: 'error',
       httpStatus: safe.status, durationMs: Date.now() - startedAt,
@@ -247,7 +268,8 @@ async function runQwenResearchAgent({
   try {
     raw = normalizeResearch(parseJsonObject(text));
   } catch (error) {
-    await recordApiRequest({
+    qwenCircuitOpenUntil = Date.now() + QWEN_CIRCUIT_COOLDOWN_MS;
+    await recordFn({
       provider: 'qwen', model, pipeline, stageName,
       callLabel, taskId, requestStatus: 'invalid_response',
       httpStatus: response.status, durationMs: Date.now() - startedAt,
@@ -285,13 +307,10 @@ async function runQwenResearchAgent({
       billing: metrics.providerCostUsd > 0 ? 'provider_reported' : 'not_reported_by_provider',
     },
   };
-  await recordApiRequest(usagePayload);
+  qwenCircuitOpenUntil = 0;
+  await recordFn(usagePayload);
   if (typeof onTokens === 'function') {
-    onTokens({
-      provider: 'qwen', model,
-      tokensIn: metrics.tokensIn, tokensOut: metrics.tokensOut,
-      totalTokens: metrics.totalTokens, costUsd: metrics.providerCostUsd,
-    });
+    onTokens('qwen', metrics.tokensIn, metrics.tokensOut, metrics.providerCostUsd);
   }
   if (typeof log === 'function') {
     log(`${callLabel}: ${raw.sources.length} источников, ${metrics.tokensIn + metrics.tokensOut} токенов`, 'success');

@@ -105,7 +105,11 @@ NO markdown. NO extra text.`;
   // Запускаем параллельно — Promise.all с индивидуальным catch
   const [entityResult, intentResult, communityResult] = await Promise.all([
     callLLM('deepseek', filledEntity, entityContext, {
-      retries:   3,
+      retries:   2,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
+      maxTokens: 12000,
+      maxTruncationTokens: 16000,
       taskId,
       stageName: 'stage1',
       callLabel: 'Entity Landscape',
@@ -115,7 +119,11 @@ NO markdown. NO extra text.`;
     }).catch(e => { log(`Stage 1A Entity ОШИБКА: ${e.message}`, 'error'); return null; }),
 
     callLLM('deepseek', filledIntent, intentContext, {
-      retries:   3,
+      retries:   2,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
+      maxTokens: 12000,
+      maxTruncationTokens: 16000,
       taskId,
       stageName: 'stage1',
       callLabel: 'Commercial Intent',
@@ -125,7 +133,11 @@ NO markdown. NO extra text.`;
     }).catch(e => { log(`Stage 1B Intent ОШИБКА: ${e.message}`, 'error'); return null; }),
 
     callLLM('deepseek', filledCommunity, communityContext, {
-      retries:   3,
+      retries:   2,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
+      maxTokens: 12000,
+      maxTruncationTokens: 16000,
       taskId,
       stageName: 'stage1',
       callLabel: 'Community Voice',

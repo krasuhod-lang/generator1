@@ -46,7 +46,8 @@ async function run() {
   assert(deepseekSource.includes('delete legacyBody.response_format'), 'DeepSeek adapter must have JSON mode fallback');
 
   const orchestratorSource = fs.readFileSync(path.join(repoRoot, 'src/services/pipeline/orchestrator.js'), 'utf8');
-  assert(orchestratorSource.includes('activeAudits < 2'), 'audit concurrency must be capped at two blocks per task');
+  assert(orchestratorSource.includes('activeAudits < auditConcurrency'), 'audit concurrency must be bounded by the configured per-task cap');
+  assert(orchestratorSource.includes('Math.min(4, configuredAuditConcurrency)'), 'audit concurrency must have a hard upper bound');
   assert(orchestratorSource.includes("type: 'budget_skip'"), 'orchestrator must publish budget_skip diagnostics');
   assert(orchestratorSource.includes('pq_score: null'), 'unavailable audit must not be persisted as a real zero');
 
