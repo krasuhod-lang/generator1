@@ -6,7 +6,7 @@ import AppPageHeader from '../components/AppPageHeader.vue';
 import ToolHelp from '../components/ToolHelp.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import { useRelevanceStore } from '../stores/relevance.js';
-import { YANDEX_REGIONS, findRegionByCode } from '../data/yandexRegions.js';
+import { YANDEX_REGIONS, findRegionByCode, regionParentLabel } from '../data/yandexRegions.js';
 
 const router = useRouter();
 const store  = useRelevanceStore();
@@ -24,21 +24,22 @@ const regionDropdown = ref(false);     // открыт ли список
 const regionInputRef = ref(null);
 
 const filteredRegions = computed(() => {
-  const q = regionQuery.value.trim().toLowerCase();
-  if (!q) return YANDEX_REGIONS.slice(0, 200); // show first 200
-  const out = [];
-  for (const r of YANDEX_REGIONS) {
-    if (r.name.toLowerCase().includes(q) || String(r.code).includes(q)) {
-      out.push(r);
-      if (out.length >= 200) break;
-    }
-  }
-  return out;
+  const q = regionQuery.value.trim().toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
+  if (!q) return YANDEX_REGIONS;
+  return YANDEX_REGIONS.filter((r) => {
+    const name = String(r.name || '').toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
+    return name.includes(q) || String(r.code).includes(q);
+  });
 });
+
+const russianCityCount = computed(() => YANDEX_REGIONS.filter((r) => r.level === 'city').length);
+const russianRegionCount = computed(() => YANDEX_REGIONS.filter((r) => r.level === 'region').length);
 
 const currentRegionLabel = computed(() => {
   const r = findRegionByCode(form.value.lr);
-  return r ? `${r.name} (lr=${r.code})` : `lr=${form.value.lr}`;
+  if (!r) return `lr=${form.value.lr}`;
+  const parent = regionParentLabel(r);
+  return `${r.name}${parent ? ` — ${parent}` : ''} (lr=${r.code})`;
 });
 
 function pickRegion(region) {
@@ -53,6 +54,7 @@ function regionGroupColor(group) {
     case 'Область':   return 'text-sky-300';
     case 'Республика':return 'text-emerald-300';
     case 'Край':      return 'text-fuchsia-300';
+    case 'Район':     return 'text-violet-300';
     case 'Город':     return 'text-gray-300';
     default:          return 'text-gray-400';
   }
@@ -222,6 +224,9 @@ function formatDuration(ms) {
           </div>
           <div data-region-picker class="relative">
             <label class="label">Регион Яндекса (lr)</label>
+            <p class="text-[11px] text-gray-500 mt-1 mb-2">
+              Россия: {{ russianRegionCount }} регионов и {{ russianCityCount }} городов. Можно искать по названию или lr-коду.
+            </p>
             <button type="button"
                     @click="regionDropdown = !regionDropdown"
                     class="input text-left flex items-center justify-between gap-2 w-full">
@@ -246,6 +251,7 @@ function formatDuration(ms) {
                   <span class="truncate">
                     <span :class="regionGroupColor(r.group)" class="text-[10px] uppercase tracking-wider mr-1.5">{{ r.group }}</span>
                     <span class="text-gray-100">{{ r.name }}</span>
+                    <span v-if="r.level === 'city' && regionParentLabel(r)" class="text-gray-500 ml-1">· {{ regionParentLabel(r) }}</span>
                   </span>
                   <span class="text-gray-500 tabular-nums flex-shrink-0">lr={{ r.code }}</span>
                 </li>

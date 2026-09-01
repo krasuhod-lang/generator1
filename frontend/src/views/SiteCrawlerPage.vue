@@ -12,7 +12,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, h, defineComponent } from 'vue';
 import AppLayout from '../components/AppLayout.vue';
 import api from '../api.js';
-import { YANDEX_REGIONS, findRegionByCode } from '../data/yandexRegions.js';
+import { YANDEX_REGIONS, findRegionByCode, regionParentLabel } from '../data/yandexRegions.js';
 
 // Рекурсивный компонент UrlTreeNode — стилизованное «дерево сайта» (задача B).
 // Узел несёт: segment, fullUrl, isVirtual, title, h1, description, status,
@@ -136,18 +136,18 @@ const cannForm = ref({
 const regionQuery    = ref('');
 const regionDropdown = ref(false);
 const filteredRegions = computed(() => {
-  const q = regionQuery.value.trim().toLowerCase();
-  if (!q) return YANDEX_REGIONS.slice(0, 200);
-  const out = [];
-  for (const r of YANDEX_REGIONS) {
-    if (r.name.toLowerCase().includes(q) || String(r.code).includes(q)) out.push(r);
-    if (out.length >= 200) break;
-  }
-  return out;
+  const q = regionQuery.value.trim().toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
+  if (!q) return YANDEX_REGIONS;
+  return YANDEX_REGIONS.filter((r) => {
+    const name = String(r.name || '').toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
+    return name.includes(q) || String(r.code).includes(q);
+  });
 });
 const currentRegionLabel = computed(() => {
   const r = findRegionByCode(cannForm.value.lr);
-  return r ? `${r.name} (lr=${r.code})` : `lr=${cannForm.value.lr}`;
+  if (!r) return `lr=${cannForm.value.lr}`;
+  const parent = regionParentLabel(r);
+  return `${r.name}${parent ? ` — ${parent}` : ''} (lr=${r.code})`;
 });
 function pickRegion(region) {
   cannForm.value.lr = String(region.code);
@@ -155,7 +155,12 @@ function pickRegion(region) {
   regionDropdown.value = false;
 }
 function regionGroupColor(group) {
-  return group === 'Округ' ? '#7c3aed' : group === 'Область' ? '#0891b2' : '#16a34a';
+  if (group === 'Округ') return '#7c3aed';
+  if (group === 'Область') return '#0891b2';
+  if (group === 'Край') return '#c026d3';
+  if (group === 'Республика') return '#16a34a';
+  if (group === 'Район') return '#8b5cf6';
+  return '#64748b';
 }
 
 const form = ref({
@@ -741,7 +746,9 @@ onUnmounted(() => { stopPolling(); stopCannPolling(); });
                   <ul>
                     <li v-for="r in filteredRegions" :key="r.code" @click="pickRegion(r)">
                       <span class="region-dot" :style="{ background: regionGroupColor(r.group) }"></span>
-                      {{ r.name }} <span class="muted">lr={{ r.code }}</span>
+                      {{ r.name }}
+                      <span v-if="r.level === 'city' && regionParentLabel(r)" class="muted">· {{ regionParentLabel(r) }}</span>
+                      <span class="muted">lr={{ r.code }}</span>
                     </li>
                   </ul>
                 </div>
