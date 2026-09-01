@@ -28,6 +28,7 @@ const db = require('../../config/db');
 const { claimArticleTask } = require('../tasks/articleExecutionClaim');
 const { callLLM, resetTaskBudget, getConfiguredTaskTokenBudget } = require('../llm/callLLM');
 const { runEeatAuditCore } = require('../eeatAudit/core');
+const { resolveQualityRoute, callQualityModel } = require('../llm/qualityModelRouting');
 const { buildEeatContract, validateEeatContract } = require('../eeatAudit/contentContract');
 const { runQualityEvaluator } = require('../pipeline/stage8');
 const { loadLinkArticlePrompt } = require('../../prompts/linkArticle');
@@ -845,12 +846,34 @@ async function runEeatAudit(task, audience, intents, articleHtml, ctx) {
     `article_html: ${articleHtml.slice(0, 14000)}`,
   ].join('\n');
 
+  const qualityRoute = await resolveQualityRoute({ stage: 'block' });
+  if (typeof ctx?.log === 'function') {
+    ctx.log(`LinkArticle Stage 5 E-E-A-T route=${qualityRoute.provider}/${qualityRoute.model} (${qualityRoute.source})`, 'info');
+  }
   return runEeatAuditCore({
-    adapter:   'deepseek',
+    adapter:   qualityRoute.provider,
     system:    loadLinkArticlePrompt('stage5Eeat'),
     userText:  user,
     threshold: LINK_ARTICLE_EEAT_TARGET,
-    callOptions: { retries: 3, temperature: 0.2, callLabel: 'LinkArticle Stage 5 (E-E-A-T audit)', ...ctx },
+    callOptions: {
+      retries: 1,
+      temperature: 0.2,
+      repairOnJsonError: true,
+      repairMaxTokens: 4096,
+      retryOnTruncation: true,
+      maxTokens: 12000,
+      maxTruncationTokens: 24000,
+      callLabel: 'LinkArticle Stage 5 (E-E-A-T audit)',
+      ...ctx,
+      callModel: (adapter, system, prompt, options) => callQualityModel({
+        callLLM,
+        route: qualityRoute,
+        system,
+        prompt,
+        options,
+        log: ctx?.log,
+      }),
+    },
     // chunkOpts намеренно не передаём: link-article короче (≤ ~6kb обычно),
     // и историческое поведение «один LLM-вызов» сохранено для обратной
     // совместимости с существующими E-E-A-T логами и метриками link-article.

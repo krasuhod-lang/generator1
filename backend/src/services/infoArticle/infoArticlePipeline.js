@@ -83,6 +83,7 @@ const {
 const { runEeatAuditCore } = require('../eeatAudit/core');
 const { buildEeatContract, validateEeatContract } = require('../eeatAudit/contentContract');
 const { runQualityEvaluator } = require('../pipeline/stage8');
+const { resolveQualityRoute, callQualityModel } = require('../llm/qualityModelRouting');
 const { buildLsiDigestByWeight } = require('./eeatChunker');
 const { recordTrainingExample } = require('../aegis/datasetWriter');
 const { recordQualityLog } = require('../aegis/qualityLogWriter');
@@ -904,6 +905,7 @@ async function runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx) {
 
   // По-старому single-call (back-compat для коротких статей <=8kb).
   // Для длинных — chunked-режим (Б1.1) автоматически срабатывает в core.
+  const qualityRoute = await resolveQualityRoute({ stage: 'block' });
   const callOptions = {
     retries: BLOG_AUDIT_RETRIES,
     // runEeatAuditCore has its own chunk loop. Keep one outer attempt so
@@ -916,9 +918,20 @@ async function runEeatAudit(task, audience, intents, lsiSet, articleHtml, ctx) {
     temperature: 0.2,
     callLabel: 'InfoArticle Stage 5 (E-E-A-T audit)',
     ...ctx,
+    callModel: (adapter, system, prompt, options) => callQualityModel({
+      callLLM,
+      route: qualityRoute,
+      system,
+      prompt,
+      options,
+      log: ctx?.log,
+    }),
   };
+  if (typeof ctx?.log === 'function') {
+    ctx.log(`InfoArticle Stage 5 E-E-A-T route=${qualityRoute.provider}/${qualityRoute.model} (${qualityRoute.source})`, 'info');
+  }
   return runEeatAuditCore({
-    adapter:    'deepseek',
+    adapter:    qualityRoute.provider,
     system:     loadInfoArticlePrompt('stage5Eeat'),
     userText:   buildUserText(articleHtml.slice(0, 14000)), // single-call back-compat
     threshold:  INFO_ARTICLE_EEAT_TARGET,

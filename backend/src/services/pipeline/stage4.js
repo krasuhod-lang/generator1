@@ -4,6 +4,7 @@ const { callLLM }        = require('../llm/callLLM');
 const { SYSTEM_PROMPTS } = require('../../prompts/systemPrompts');
 const { calculateCoverage } = require('../../utils/calculateCoverage');
 const { buildBlockHandoffPrompt } = require('../../utils/contentHandoffManifest');
+const { resolveQualityRoute, callQualityModel } = require('../llm/qualityModelRouting');
 
 /**
  * E-E-A-T scoring rubric — добавляется к каждому вызову Stage 4.
@@ -62,7 +63,7 @@ IF pq_score < 7.5: populate actionable_next_steps with SPECIFIC HTML fixes to re
 
 /**
  * Stage 4: E-E-A-T аудит одного блока.
- * Адаптер: deepseek.
+ * Адаптер: GPT quality route (GPT при наличии ключа, DeepSeek fallback).
  *
  * @param {object}   task          — строка tasks из БД
  * @param {object}   ctx           — { log, progress, taskId }
@@ -97,13 +98,15 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
     .replace('{{ORIGINAL_NGRAMS}}',   () => nGrams)
     .replace('{{TARGET_CHAR_COUNT}}', () => String(minChars));
 
-  log(`Stage 4 блок ${blockIndex + 1}: E-E-A-T аудит, промпт ${stage4Prompt.length} символов...`, 'info');
+  const qualityRoute = await resolveQualityRoute({ stage: 'block' });
+  log(`Stage 4 блок ${blockIndex + 1}: E-E-A-T аудит, промпт ${stage4Prompt.length} символов, route=${qualityRoute.provider}/${qualityRoute.model} (${qualityRoute.source})...`, 'info');
 
-  const auditResult = await callLLM(
-    'deepseek',
-    '',
-    stage4Prompt,
-    {
+  const auditResult = await callQualityModel({
+    callLLM,
+    route: qualityRoute,
+    system: '',
+    prompt: stage4Prompt,
+    options: {
       // A truncated audit otherwise becomes audit_unavailable and forces PQ=0.
       // One bounded truncation retry is cheaper than losing the quality signal
       // and launching uncontrolled downstream refinements.
@@ -113,7 +116,6 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
       retryOnTruncation: true,
       taskId,
       stageName: 'stage4',
-      model: 'deepseek-v4-pro',
       callLabel: `4 E-E-A-T Block ${blockIndex + 1}`,
       temperature: 0.2,
       maxTokens: 12000,
@@ -122,8 +124,9 @@ async function runStage4(task, ctx, blockIndex, htmlContent, lsiMust) {
       allowPartialJson: true,
       log,
       onTokens,
-    }
-  );
+    },
+    log,
+  });
 
   log(`Stage 4 блок ${blockIndex + 1}: ответ получен. Ключи: [${Object.keys(auditResult || {}).join(', ')}]`, 'info');
 
@@ -194,18 +197,20 @@ RE-AUDIT COMPACT MODE:
     .replace('{{ORIGINAL_NGRAMS}}',   () => task.input_ngrams      || '[]')
     .replace('{{TARGET_CHAR_COUNT}}', () => String(task.input_min_chars || '1500'));
 
-  const result = await callLLM(
-    'deepseek',
-    '',
-    reAuditPrompt,
-    {
+  const qualityRoute = await resolveQualityRoute({ stage: 'reAudit' });
+  log(`Stage 4 re-audit блока ${blockIndex + 1}: route=${qualityRoute.provider}/${qualityRoute.model} (${qualityRoute.source})`, 'info');
+  const result = await callQualityModel({
+    callLLM,
+    route: qualityRoute,
+    system: '',
+    prompt: reAuditPrompt,
+    options: {
       retries: 1,
       repairOnJsonError: true,
       repairMaxTokens: 3072,
       retryOnTruncation: true,
       taskId,
       stageName: 'stage4',
-      model: 'deepseek-v4-pro',
       callLabel: `4 Re-audit Block ${blockIndex + 1}`,
       temperature: 0.2,
       maxTokens: 8000,
@@ -214,8 +219,9 @@ RE-AUDIT COMPACT MODE:
       allowPartialJson: true,
       log,
       onTokens,
-    }
-  );
+    },
+    log,
+  });
 
   const rawLsiCov = result?.mathematical_audit?.lsi_coverage_percent;
   const lsiTargets = Array.isArray(lsiMust)

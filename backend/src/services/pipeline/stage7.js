@@ -7,6 +7,7 @@ const { calculateBM25 }  = require('../metrics/bm25');
 const db                 = require('../../config/db');
 const { hasTz }          = require('./tzParser');
 const { checkTzCompliance } = require('./tzComplianceChecker');
+const { resolveQualityRoute, callQualityModel } = require('../llm/qualityModelRouting');
 
 /**
  * computeTfIdfDensity — программный подсчёт TF-IDF плотности по финальному HTML.
@@ -82,17 +83,20 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
     .replace('{{BRAND_FACTS}}',       () => brandFacts)
     .replace('{{TFIDF_WEIGHTS}}',     () => tfIdfWeightsStr);
 
+  const qualityRoute = await resolveQualityRoute({ stage: 'global' });
   log(
     `Stage 7: Глобальный аудит — промпт ${s7prompt.length} символов, ` +
-    `HTML ${fullHTML.length} символов, LSI ${allLSI.length} слов, TF-IDF терминов ${tfIdfArr.length}...`,
+    `HTML ${fullHTML.length} символов, LSI ${allLSI.length} слов, TF-IDF терминов ${tfIdfArr.length}, ` +
+    `route=${qualityRoute.provider}/${qualityRoute.model} (${qualityRoute.source})...`,
     'info'
   );
 
-  const s7Result = await callLLM(
-    'deepseek',
-    '',
-    s7prompt,
-    {
+  const s7Result = await callQualityModel({
+    callLLM,
+    route: qualityRoute,
+    system: '',
+    prompt: s7prompt,
+    options: {
       retries: 1,
       repairOnJsonError: true,
       repairMaxTokens: 4096,
@@ -103,13 +107,13 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
       allowPartialJson: true,
       taskId,
       stageName: 'stage7',
-      model: 'deepseek-v4-pro',
       callLabel: '7 Global Audit',
       temperature: 0.2,
       log,
       onTokens,
-    }
-  ).catch(e => {
+    },
+    log,
+  }).catch(e => {
     log(`Stage 7 ОШИБКА: ${e.message}`, 'error');
     return null;
   });

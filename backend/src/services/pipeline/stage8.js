@@ -11,6 +11,7 @@
 
 const { recordTrace } = require('../llm/pipelineTrace');
 const db = require('../../config/db');
+const { resolveQualityRoute, callQualityModel } = require('../llm/qualityModelRouting');
 
 const PROMPT_VERSION = 'v1';
 const WEIGHTS = {
@@ -335,22 +336,31 @@ async function runQualityEvaluator({
     logger('Stage 8 Evaluator: запуск composite quality rubric...', 'info');
     const startedAt = Date.now();
     const { callLLM } = require('../llm/callLLM');
-    const report = await callLLM('deepseek', SYSTEM_PROMPT, buildEvaluatorUserPrompt({
-      pipeline, taskId, articleText: text, artifacts: mergedArtifacts, deterministicRubric, task, moduleContext,
-    }), {
-      retries: Math.min(Number(retries) || 1, 2),
-      repairOnJsonError: true,
-      repairMaxTokens: 4096,
-      ...(Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
-      taskId: pipeline === 'seo' ? taskId : null,
-      traceTaskId: pipeline === 'seo' ? null : taskId,
-      pipeline,
-      stageName: 'stage8',
-      callLabel: 'Quality Evaluator',
-      promptVersion: PROMPT_VERSION,
-      temperature: 0.1,
+    const route = await resolveQualityRoute({ stage: 'stage8' });
+    logger(`Stage 8 Evaluator route=${route.provider}/${route.model} (${route.source})`, 'info');
+    const report = await callQualityModel({
+      callLLM,
+      route,
+      system: SYSTEM_PROMPT,
+      prompt: buildEvaluatorUserPrompt({
+        pipeline, taskId, articleText: text, artifacts: mergedArtifacts, deterministicRubric, task, moduleContext,
+      }),
+      options: {
+        retries: Math.min(Number(retries) || 1, 2),
+        repairOnJsonError: true,
+        repairMaxTokens: 4096,
+        ...(Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+        taskId: pipeline === 'seo' ? taskId : null,
+        traceTaskId: pipeline === 'seo' ? null : taskId,
+        pipeline,
+        stageName: 'stage8',
+        callLabel: 'Quality Evaluator',
+        promptVersion: PROMPT_VERSION,
+        temperature: 0.1,
+        log: logger,
+        onTokens,
+      },
       log: logger,
-      onTokens,
     });
 
     if (!report || typeof report !== 'object') {
@@ -383,7 +393,7 @@ async function runQualityEvaluator({
 
     if (taskId) await persistEvaluatorReport({ pipeline, taskId, report: finalReport, compositeScore });
     await recordTrace({
-      stage: 'stage8_quality', pipeline, taskId, model: 'deepseek', promptVersion: PROMPT_VERSION,
+      stage: 'stage8_quality', pipeline, taskId, model: route.model, promptVersion: PROMPT_VERSION,
       durationMs: finalReport.elapsed_ms, qualityScore: compositeScore,
     });
 
@@ -414,15 +424,23 @@ async function runPairwiseComparison({ pipeline = 'seo', taskId, sectionTitle, v
   try {
     const prompt = `section_title: ${sectionTitle || '—'}\n\nrubric_context:\n${safeStringify(rubricContext || {}, 4000)}\n\nVARIANT A:\n${stripHtml(variantA || '').slice(0, 6000)}\n\nVARIANT B:\n${stripHtml(variantB || '').slice(0, 6000)}\n\nСравни варианты и верни JSON.`;
     const { callLLM } = require('../llm/callLLM');
-    const raw = await callLLM('deepseek', PAIRWISE_SYSTEM_PROMPT, prompt, {
-      retries: 2,
-      taskId: pipeline === 'seo' ? taskId : null,
-      traceTaskId: pipeline === 'seo' ? null : taskId,
-      pipeline,
-      stageName: 'stage8_pairwise',
-      callLabel: 'Stage 8 Pairwise',
-      promptVersion: PROMPT_VERSION,
-      temperature: 0.1,
+    const route = await resolveQualityRoute({ stage: 'stage8' });
+    const raw = await callQualityModel({
+      callLLM,
+      route,
+      system: PAIRWISE_SYSTEM_PROMPT,
+      prompt,
+      options: {
+        retries: 2,
+        taskId: pipeline === 'seo' ? taskId : null,
+        traceTaskId: pipeline === 'seo' ? null : taskId,
+        pipeline,
+        stageName: 'stage8_pairwise',
+        callLabel: 'Stage 8 Pairwise',
+        promptVersion: PROMPT_VERSION,
+        temperature: 0.1,
+      },
+      log: (message) => console.warn(`[stage8] ${message}`),
     });
     const normalized = normalizePairwiseResult(raw);
     const winnerScore = normalized.winner === 'a'
@@ -431,7 +449,7 @@ async function runPairwiseComparison({ pipeline = 'seo', taskId, sectionTitle, v
         ? normalized.scores.b
         : firstNumber(normalized.scores.a, normalized.scores.b);
     await recordTrace({
-      stage: 'stage8_pairwise', pipeline, taskId, model: 'deepseek', promptVersion: PROMPT_VERSION,
+      stage: 'stage8_pairwise', pipeline, taskId, model: route.model, promptVersion: PROMPT_VERSION,
       durationMs: Date.now() - startedAt, qualityScore: winnerScore,
     });
     return normalized;

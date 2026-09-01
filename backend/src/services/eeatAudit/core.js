@@ -65,6 +65,10 @@ function normalizeEeatAudit(raw, threshold = 7.5) {
  * @returns {Promise<object>}          — нормализованный аудит-объект
  */
 async function runEeatAuditCore({ adapter, system, userText, threshold, callOptions, chunkOpts }) {
+  const options = callOptions && typeof callOptions === 'object' ? callOptions : {};
+  const callModel = typeof options.callModel === 'function' ? options.callModel : callLLM;
+  const { callModel: _injectedCallModel, ...llmOptions } = options;
+
   // Chunked-режим (Б1)
   if (
     EEAT_CHUNKED_ENABLED
@@ -76,24 +80,24 @@ async function runEeatAuditCore({ adapter, system, userText, threshold, callOpti
     const chunks = chunkArticleForEeat(chunkOpts.html);
     if (chunks.length >= 2) {
       const chunkResults = new Array(chunks.length);
-      const chunkRetries = Number.isInteger(callOptions?.chunkRetries)
-        ? Math.max(1, Math.min(2, callOptions.chunkRetries))
+      const chunkRetries = Number.isInteger(llmOptions?.chunkRetries)
+        ? Math.max(1, Math.min(2, llmOptions.chunkRetries))
         : 1;
-      const chunkConcurrency = Number.isInteger(callOptions?.chunkConcurrency)
-        ? Math.max(1, Math.min(3, callOptions.chunkConcurrency))
+      const chunkConcurrency = Number.isInteger(llmOptions?.chunkConcurrency)
+        ? Math.max(1, Math.min(3, llmOptions.chunkConcurrency))
         : 1;
 
       const runChunk = async (ch, resultIndex) => {
         const chunkUser = chunkOpts.buildChunkUserText(ch);
-        const label = `${callOptions?.callLabel || 'EEAT audit'} [chunk ${ch.index + 1}/${chunks.length}]`;
+        const label = `${llmOptions?.callLabel || 'EEAT audit'} [chunk ${ch.index + 1}/${chunks.length}]`;
         let audit = null;
         let lastErr = null;
         // callLLM owns the provider retry/backoff budget. The optional outer
         // retry is bounded and disabled for the blog pipeline by default.
         for (let attempt = 1; attempt <= chunkRetries && !audit; attempt++) {
           try {
-            const r = await callLLM(adapter, system, chunkUser, {
-              ...callOptions,
+            const r = await callModel(adapter, system, chunkUser, {
+              ...llmOptions,
               callLabel: attempt === 1 ? label : `${label} retry`,
             });
             audit = normalizeEeatAudit(r, threshold);
@@ -158,7 +162,7 @@ async function runEeatAuditCore({ adapter, system, userText, threshold, callOpti
   }
 
   // Single-call режим (back-compat).
-  const raw = await callLLM(adapter, system, userText, callOptions);
+  const raw = await callModel(adapter, system, userText, llmOptions);
   return normalizeEeatAudit(raw, threshold);
 }
 
