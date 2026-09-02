@@ -1,5 +1,7 @@
 'use strict';
 
+const { recordProviderResponse, recordProviderFailure } = require('../metrics/providerAttemptAccounting');
+
 /**
  * metaTags/gistMetaFilter — GIST Meta Filter Pipeline (Задача D).
  *
@@ -203,6 +205,7 @@ async function _callAnalyticJson(systemPrompt, userPrompt, usage, opts = {}) {
   const analyticModel = 'deepseek-v4-pro';
   let prompt = userPrompt;
   let lastErr = null;
+  let lastProvider = null;
   for (let attempt = 1; attempt <= MAX_PARSE_ATTEMPTS; attempt += 1) {
     const callOptions = {
       temperature: opts.temperature ?? 0.3,
@@ -213,20 +216,49 @@ async function _callAnalyticJson(systemPrompt, userPrompt, usage, opts = {}) {
     try {
       if (process.env.DEEPSEEK_API_KEY) {
         try {
+          lastProvider = 'deepseek';
           res = await callDeepSeek(systemPrompt, prompt, { ...callOptions, model: analyticModel });
           res.provider = 'deepseek';
         } catch (dsErr) {
+          await recordProviderFailure({
+            provider: 'deepseek',
+            model: analyticModel,
+            taskId: usage._accounting?.taskId || null,
+            traceTaskId: usage._accounting?.traceTaskId || usage._accounting?.taskId || null,
+            pipeline: usage._accounting?.pipeline || 'meta',
+            stageName: usage._accounting?.stageName || 'gist_analytic',
+            callLabel: usage._accounting?.callLabel || 'GIST analytic DeepSeek',
+            attempt,
+            promptSize: Math.ceil((systemPrompt.length + prompt.length) / 4),
+            error: dsErr,
+            meta: { direct_adapter: true, fallback: 'gemini' },
+          });
+          lastProvider = 'gemini';
           res = await callGemini(systemPrompt, prompt, callOptions);
           res.provider = 'gemini';
         }
       } else {
+        lastProvider = 'gemini';
         res = await callGemini(systemPrompt, prompt, callOptions);
         res.provider = 'gemini';
       }
+      await recordProviderResponse({
+        provider: res.provider,
+        result: res,
+        taskId: usage._accounting?.taskId || null,
+        traceTaskId: usage._accounting?.traceTaskId || usage._accounting?.taskId || null,
+        pipeline: usage._accounting?.pipeline || 'meta',
+        stageName: usage._accounting?.stageName || 'gist_analytic',
+        callLabel: usage._accounting?.callLabel || 'GIST analytic JSON',
+        attempt,
+        promptSize: Math.ceil((systemPrompt.length + prompt.length) / 4),
+        meta: { direct_adapter: true, parse_status: 'pending' },
+      });
       _recordUsage(usage, res, res.provider);
       return _parseJson(res.text);
     } catch (err) {
       lastErr = err;
+      if (res?.provider) lastProvider = res.provider;
       if (attempt < MAX_PARSE_ATTEMPTS) {
         if (_isTruncation(res, err)) {
           maxTokens = Math.min(Math.round(maxTokens * 1.5), MAX_TOKENS_CEILING);
@@ -234,6 +266,20 @@ async function _callAnalyticJson(systemPrompt, userPrompt, usage, opts = {}) {
         prompt = userPrompt + JSON_REPAIR_HINT;
       }
     }
+  }
+  if (lastErr) {
+    await recordProviderFailure({
+      provider: lastProvider || (process.env.DEEPSEEK_API_KEY ? 'deepseek' : 'gemini'),
+      model: lastProvider === 'deepseek' ? analyticModel : null,
+      taskId: usage._accounting?.taskId || null,
+      traceTaskId: usage._accounting?.traceTaskId || usage._accounting?.taskId || null,
+      pipeline: usage._accounting?.pipeline || 'meta',
+      stageName: usage._accounting?.stageName || 'gist_analytic',
+      callLabel: usage._accounting?.callLabel || 'GIST analytic JSON',
+      attempt: MAX_PARSE_ATTEMPTS,
+      error: lastErr,
+      meta: { direct_adapter: true, parse_failed: true },
+    });
   }
   throw lastErr;
 }
@@ -255,6 +301,18 @@ async function _callCopywriterJson(userPrompt, usage, opts = {}) {
         timeoutMs: opts.timeoutMs ?? 90000,
         ...(opts.model ? { model: opts.model } : {}),
       });
+      await recordProviderResponse({
+        provider: 'gemini',
+        result: res,
+        taskId: usage._accounting?.taskId || null,
+        traceTaskId: usage._accounting?.traceTaskId || usage._accounting?.taskId || null,
+        pipeline: usage._accounting?.pipeline || 'meta',
+        stageName: usage._accounting?.stageName || 'gist_copywriter',
+        callLabel: usage._accounting?.callLabel || 'GIST copywriter JSON',
+        attempt,
+        promptSize: Math.ceil((PAIR_ASSEMBLER_SYSTEM.length + prompt.length) / 4),
+        meta: { direct_adapter: true, parse_status: 'pending' },
+      });
       _recordUsage(usage, res, 'gemini');
       return _parseJson(res.text);
     } catch (err) {
@@ -266,6 +324,20 @@ async function _callCopywriterJson(userPrompt, usage, opts = {}) {
         prompt = userPrompt + JSON_REPAIR_HINT;
       }
     }
+  }
+  if (lastErr) {
+    await recordProviderFailure({
+      provider: 'gemini',
+      model: opts.model || null,
+      taskId: usage._accounting?.taskId || null,
+      traceTaskId: usage._accounting?.traceTaskId || usage._accounting?.taskId || null,
+      pipeline: usage._accounting?.pipeline || 'meta',
+      stageName: usage._accounting?.stageName || 'gist_copywriter',
+      callLabel: usage._accounting?.callLabel || 'GIST copywriter JSON',
+      attempt: MAX_PARSE_ATTEMPTS,
+      error: lastErr,
+      meta: { direct_adapter: true, parse_failed: true },
+    });
   }
   throw lastErr;
 }
@@ -835,6 +907,13 @@ async function runGistMetaPipeline({
   const usage = {
     tokensIn: 0, tokensOut: 0, thoughtsTokens: 0, cachedTokens: 0,
     calls: 0, model: '', providers: new Set(), byProvider: {},
+    _accounting: {
+      taskId: options.taskId || null,
+      traceTaskId: options.traceTaskId || options.taskId || null,
+      pipeline: options.pipeline || 'meta',
+      stageName: options.stageName || 'gist_meta',
+      callLabel: options.callLabel || 'GIST meta generation',
+    },
   };
   const notes = [];
   const standaloneExposure = inputs.standalone_exposure === true
@@ -1263,6 +1342,8 @@ async function generateLinkArticleMeta({
   intentContract = null,
   gistSignals = null,
   semantics = {},
+  taskId = null,
+  traceTaskId = null,
 } = {}) {
   const excerpt = String(articlePlain || '').replace(/\s+/g, ' ').trim().slice(0, 6000);
   const pipelineArgs = {
@@ -1287,8 +1368,17 @@ async function generateLinkArticleMeta({
       standalone_exposure: true,
       pageAngle: anchorText ? `Статья подводит к переходу по анкору «${anchorText}»` : '',
       governanceBlock,
+      taskId,
+      traceTaskId: traceTaskId || taskId,
     },
-    options: { copywriterModel: geminiModel || undefined },
+    options: {
+      copywriterModel: geminiModel || undefined,
+      taskId,
+      traceTaskId: traceTaskId || taskId,
+      pipeline: 'link_meta',
+      stageName: 'gist_link_meta',
+      callLabel: 'GIST link meta generation',
+    },
   };
 
   let lastErr = null;

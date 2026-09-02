@@ -145,6 +145,7 @@ async function processCategoryLeadTask(taskId) {
     const inputs = task.inputs && typeof task.inputs === 'object' ? task.inputs : {};
     const category = _str(task.category) || _str(inputs.category);
     const options = inputs.options && typeof inputs.options === 'object' ? inputs.options : {};
+    const llmOptions = { ...options, taskId, traceTaskId: taskId };
 
     // ── Контекст проекта (defence-in-depth) ────────────────────────
     // Если на форме был выбран gsc_project_id, на сервере тоже подтягиваем
@@ -235,13 +236,13 @@ async function processCategoryLeadTask(taskId) {
     // ── Проход 1 — Lead-text ───────────────────────────────────────
     funnel.step('lead_text_pass');
     const lead = await generateLeadText({
-      category, filtersText, intentsText, options,
+      category, filtersText, intentsText, options: llmOptions,
     });
 
     // ── Проход 2 — Facet optimizer ─────────────────────────────────
     funnel.step('facet_pass');
     const facet = await generateFacetOptimization({
-      category, filtersText, semanticCoreText, options,
+      category, filtersText, semanticCoreText, options: llmOptions,
     });
 
     // ── [D] Мост к мета-тегам ──────────────────────────────────────

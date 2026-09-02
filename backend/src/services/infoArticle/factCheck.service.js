@@ -58,6 +58,7 @@ const MAX_SEMANTIC_CLAIMS = 30;   // LLM-аудит текстовых факт�
 //   умолчанию из env, чтобы аннотировать semantic-отчёт для quality gate.
 const semanticFactcheckPolicy = require('./semanticFactcheckPolicy');
 const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
+const { recordProviderResponse, recordProviderFailure } = require('../metrics/providerAttemptAccounting');
 
 // «Сильные» сигналы — наличие хотя бы одного делает предложение претендентом
 // в claim'ы. Не путать с «токенами для верификации» — те уже извлекаются ниже.
@@ -523,11 +524,25 @@ async function verifySemanticClaims(claims, evidenceResult, opts = {}) {
       claims: list.map((c) => ({ id: c.id, text: c.text })),
       evidence,
     }, null, 2);
+    const startedAt = Date.now();
     const res = await callDeepSeek(systemInstruction, userPrompt, {
       temperature: opts.temperature ?? 0,
       maxTokens: opts.maxTokens ?? 3000,
       timeoutMs: opts.timeoutMs ?? 90000,
       ...(opts.model ? { model: opts.model } : {}),
+    });
+    await recordProviderResponse({
+      provider: 'deepseek',
+      result: res,
+      taskId: opts.taskId || null,
+      traceTaskId: opts.traceTaskId || opts.taskId || null,
+      pipeline: opts.pipeline || 'info',
+      stageName: opts.stageName || 'semantic_factcheck',
+      callLabel: opts.callLabel || 'Semantic fact-check',
+      durationMs: Math.max(0, Date.now() - startedAt),
+      promptSize: Math.ceil((systemInstruction.length + userPrompt.length) / 4),
+      onAttemptUsage: opts.onAttemptUsage,
+      meta: { parser: 'semantic_factcheck', parse_status: 'pending' },
     });
     const parsed = _parseSemanticJson(res && res.text);
     const byId = new Map(parsed.map((r) => [Number(r && r.id), r]));
@@ -545,6 +560,17 @@ async function verifySemanticClaims(claims, evidenceResult, opts = {}) {
     out.semanticSkipped = false;
     return out;
   } catch (err) {
+    await recordProviderFailure({
+      provider: 'deepseek',
+      model: opts.model || null,
+      taskId: opts.taskId || null,
+      traceTaskId: opts.traceTaskId || opts.taskId || null,
+      pipeline: opts.pipeline || 'info',
+      stageName: opts.stageName || 'semantic_factcheck',
+      callLabel: opts.callLabel || 'Semantic fact-check',
+      error: err,
+      meta: { parser: 'semantic_factcheck' },
+    });
     return _semanticSkipped(list, err && err.message ? err.message : String(err));
   }
 }

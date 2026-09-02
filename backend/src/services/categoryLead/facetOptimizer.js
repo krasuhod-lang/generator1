@@ -14,6 +14,7 @@ const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { loadCategoryLeadPrompt, fillTemplate } = require('../../prompts/categoryLead');
 const { parseLlmJson } = require('./jsonParse');
 const { getCategoryLeadConfig } = require('./config');
+const { recordProviderResponse, recordProviderFailure } = require('../metrics/providerAttemptAccounting');
 
 const SYSTEM_INSTRUCTION =
   'Ты — Senior E-commerce SEO Architect. Отвечай строго валидным JSON по схеме '
@@ -81,12 +82,44 @@ async function generateFacetOptimization({ category, filtersText, semanticCoreTe
     SEMANTIC_CORE: semanticCoreText,
   });
 
-  const callRes = await callGemini(SYSTEM_INSTRUCTION, userPrompt, {
-    temperature: cfg.temperature,
-    maxTokens: cfg.maxTokens,
-    timeoutMs: cfg.timeoutMs,
-    model: normalizeGeminiCopywritingModel(options.gemini_model),
-  });
+  const startedAt = Date.now();
+  let callRes;
+  try {
+    callRes = await callGemini(SYSTEM_INSTRUCTION, userPrompt, {
+      temperature: cfg.temperature,
+      maxTokens: cfg.maxTokens,
+      timeoutMs: cfg.timeoutMs,
+      model: normalizeGeminiCopywritingModel(options.gemini_model),
+    });
+    await recordProviderResponse({
+      provider: 'gemini',
+      result: callRes,
+      taskId: options.taskId || null,
+      traceTaskId: options.traceTaskId || options.taskId || null,
+      pipeline: 'category_lead',
+      stageName: 'category_lead_facet',
+      callLabel: 'Category lead facet optimizer',
+      durationMs: Math.max(0, Date.now() - startedAt),
+      promptSize: Math.ceil((SYSTEM_INSTRUCTION.length + userPrompt.length) / 4),
+      onAttemptUsage: options.onAttemptUsage,
+      meta: { direct_adapter: true, pass: 'facet_optimizer' },
+    });
+  } catch (error) {
+    await recordProviderFailure({
+      provider: 'gemini',
+      model: normalizeGeminiCopywritingModel(options.gemini_model),
+      taskId: options.taskId || null,
+      traceTaskId: options.traceTaskId || options.taskId || null,
+      pipeline: 'category_lead',
+      stageName: 'category_lead_facet',
+      callLabel: 'Category lead facet optimizer',
+      durationMs: Math.max(0, Date.now() - startedAt),
+      promptSize: Math.ceil((SYSTEM_INSTRUCTION.length + userPrompt.length) / 4),
+      error,
+      meta: { direct_adapter: true, pass: 'facet_optimizer' },
+    });
+    throw error;
+  }
 
   const parsed = parseLlmJson(callRes.text);
   const result = normalizeFacetResult(parsed);

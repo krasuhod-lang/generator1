@@ -19,6 +19,8 @@ const { callGemini } = require('../llm/gemini.adapter');
 const { callDeepSeek } = require('../llm/deepseek.adapter');
 const { calculateCostBreakdown } = require('../metrics/priceCalculator');
 const llmUsageLog = require('../aegis/llmUsageLog');
+const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
+const { recordProviderResponse, recordProviderFailure } = require('../metrics/providerAttemptAccounting');
 const { getProjectsConfig } = require('./config');
 
 function _hasGemini() {
@@ -43,9 +45,29 @@ function resolveProvider() {
   // want === 'deepseek'
   if (_hasDeepSeek()) return 'deepseek';
   if (_hasGemini()) return 'gemini';
-  return null;
+    return null;
 }
 
+async function resolveProviderAsync() {
+  const cfg = getProjectsConfig().analyzer || {};
+  const want = cfg.provider === 'deepseek' ? 'deepseek' : 'gemini';
+  let gemini = false;
+  let deepseek = false;
+  try {
+    const [geminiInfo, deepseekInfo] = await Promise.all([
+      getIntegrationSecretInfo('GEMINI_API_KEY'),
+      getIntegrationSecretInfo('DEEPSEEK_API_KEY'),
+    ]);
+    gemini = Boolean(geminiInfo && geminiInfo.configured);
+    deepseek = Boolean(deepseekInfo && deepseekInfo.configured);
+  } catch (_) {
+    // Preserve the old environment fallback if vault access is unavailable.
+    gemini = _hasGemini();
+    deepseek = _hasDeepSeek();
+  }
+  if (want === 'gemini') return gemini ? 'gemini' : (deepseek ? 'deepseek' : null);
+  return deepseek ? 'deepseek' : (gemini ? 'gemini' : null);
+}
 /** Имя провайдера для cost-аналитики (priceCalculator/llmUsageLog). */
 function _costProvider(provider, model) {
   if (provider === 'gemini') return 'gemini';
@@ -132,13 +154,35 @@ async function _callRaw(provider, system, user, opts) {
  * @param {object} [opts]   { kind, temperature, maxTokens, timeoutMs, model }
  */
 async function runAnalyst(system, user, opts = {}) {
-  const provider = resolveProvider();
+  const provider = await resolveProviderAsync();
   if (!provider) return { verdict: 'skipped', reason: 'no_api_key' };
   const kind = opts.kind || 'project_seo_analysis';
   const t0 = Date.now();
   try {
     const r = await _callRaw(provider, system, user, opts);
     const durationMs = Date.now() - t0;
+    await recordProviderResponse({
+      provider,
+      result: {
+        model: r.model,
+        tokensIn: r.tIn,
+        tokensOut: r.tOut,
+        cachedTokens: r.cached,
+        cacheHitTokens: r.cacheHitTokens,
+        cacheMissTokens: r.cacheMissTokens,
+        pricing: r.pricing,
+        cost: r.cost,
+      },
+      taskId: opts.taskId || null,
+      traceTaskId: opts.traceTaskId || opts.analysisId || null,
+      pipeline: opts.pipeline || 'projects',
+      stageName: opts.stageName || 'project_llm_analysis',
+      callLabel: opts.callLabel || kind,
+      durationMs,
+      promptSize: Math.ceil((String(system || '').length + String(user || '').length) / 4),
+      onAttemptUsage: opts.onAttemptUsage,
+      meta: { kind, direct_adapter: true },
+    });
     try {
       llmUsageLog.recordUsage({
         provider: _costProvider(provider, r.model),
@@ -169,6 +213,19 @@ async function runAnalyst(system, user, opts = {}) {
       duration_ms: durationMs,
     };
   } catch (err) {
+    await recordProviderFailure({
+      provider,
+      model: opts.model || null,
+      taskId: opts.taskId || null,
+      traceTaskId: opts.traceTaskId || opts.analysisId || null,
+      pipeline: opts.pipeline || 'projects',
+      stageName: opts.stageName || 'project_llm_analysis',
+      callLabel: opts.callLabel || kind,
+      durationMs: Date.now() - t0,
+      promptSize: Math.ceil((String(system || '').length + String(user || '').length) / 4),
+      error: err,
+      meta: { kind, direct_adapter: true },
+    });
     try {
       llmUsageLog.recordUsage({ provider: _costProvider(provider), kind, outcome: 'error' });
     } catch (_) { /* no-op */ }
@@ -181,12 +238,52 @@ async function runAnalyst(system, user, opts = {}) {
  * метрики. Бросает при ошибке (ловит вызывающий, как в прежнем коде).
  */
 async function runAnalystTracked(system, user, opts = {}) {
-  const provider = resolveProvider();
+  const provider = await resolveProviderAsync();
   if (!provider) throw new Error('no_api_key');
   const kind = opts.kind || 'project_seo_analysis';
   const t0 = Date.now();
-  const r = await _callRaw(provider, system, user, opts);
+  let r;
+  try {
+    r = await _callRaw(provider, system, user, opts);
+  } catch (error) {
+    await recordProviderFailure({
+      provider,
+      model: opts.model || null,
+      taskId: opts.taskId || null,
+      traceTaskId: opts.traceTaskId || opts.analysisId || null,
+      pipeline: opts.pipeline || 'projects',
+      stageName: opts.stageName || 'project_llm_analysis_tracked',
+      callLabel: opts.callLabel || kind,
+      durationMs: Date.now() - t0,
+      promptSize: Math.ceil((String(system || '').length + String(user || '').length) / 4),
+      error,
+      meta: { kind, direct_adapter: true, tracked: true },
+    });
+    throw error;
+  }
   const durationMs = Date.now() - t0;
+  await recordProviderResponse({
+    provider,
+    result: {
+      model: r.model,
+      tokensIn: r.tIn,
+      tokensOut: r.tOut,
+      cachedTokens: r.cached,
+      cacheHitTokens: r.cacheHitTokens,
+      cacheMissTokens: r.cacheMissTokens,
+      pricing: r.pricing,
+      cost: r.cost,
+    },
+    taskId: opts.taskId || null,
+    traceTaskId: opts.traceTaskId || opts.analysisId || null,
+    pipeline: opts.pipeline || 'projects',
+    stageName: opts.stageName || 'project_llm_analysis_tracked',
+    callLabel: opts.callLabel || kind,
+    durationMs,
+    promptSize: Math.ceil((String(system || '').length + String(user || '').length) / 4),
+    onAttemptUsage: opts.onAttemptUsage,
+    meta: { kind, direct_adapter: true, tracked: true },
+  });
   try {
     llmUsageLog.recordUsage({
       provider: _costProvider(provider, r.model),
@@ -223,10 +320,16 @@ function analystAvailable() {
   return resolveProvider() != null;
 }
 
+async function analystAvailableAsync() {
+  return (await resolveProviderAsync()) != null;
+}
+
 module.exports = {
   runAnalyst,
   runAnalystTracked,
   resolveProvider,
+  resolveProviderAsync,
   analystAvailable,
+  analystAvailableAsync,
   _stripFence,
 };

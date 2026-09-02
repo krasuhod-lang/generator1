@@ -16,6 +16,7 @@ const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const { loadCategoryLeadPrompt, fillTemplate } = require('../../prompts/categoryLead');
 const { parseLlmJson } = require('./jsonParse');
 const { getCategoryLeadConfig } = require('./config');
+const { recordProviderResponse, recordProviderFailure } = require('../metrics/providerAttemptAccounting');
 
 const SYSTEM_INSTRUCTION =
   'Ты — Senior UX-SEO Strategist. Отвечай строго валидным JSON по схеме из '
@@ -95,12 +96,44 @@ async function generateLeadText({ category, filtersText, intentsText, options = 
     YEAR: String(new Date().getFullYear()),
   });
 
-  const callRes = await callGemini(SYSTEM_INSTRUCTION, userPrompt, {
-    temperature: cfg.temperature,
-    maxTokens: cfg.maxTokens,
-    timeoutMs: cfg.timeoutMs,
-    model: normalizeGeminiCopywritingModel(options.gemini_model),
-  });
+  const startedAt = Date.now();
+  let callRes;
+  try {
+    callRes = await callGemini(SYSTEM_INSTRUCTION, userPrompt, {
+      temperature: cfg.temperature,
+      maxTokens: cfg.maxTokens,
+      timeoutMs: cfg.timeoutMs,
+      model: normalizeGeminiCopywritingModel(options.gemini_model),
+    });
+    await recordProviderResponse({
+      provider: 'gemini',
+      result: callRes,
+      taskId: options.taskId || null,
+      traceTaskId: options.traceTaskId || options.taskId || null,
+      pipeline: 'category_lead',
+      stageName: 'category_lead_text',
+      callLabel: 'Category lead text',
+      durationMs: Math.max(0, Date.now() - startedAt),
+      promptSize: Math.ceil((SYSTEM_INSTRUCTION.length + userPrompt.length) / 4),
+      onAttemptUsage: options.onAttemptUsage,
+      meta: { direct_adapter: true, pass: 'lead_text' },
+    });
+  } catch (error) {
+    await recordProviderFailure({
+      provider: 'gemini',
+      model: normalizeGeminiCopywritingModel(options.gemini_model),
+      taskId: options.taskId || null,
+      traceTaskId: options.traceTaskId || options.taskId || null,
+      pipeline: 'category_lead',
+      stageName: 'category_lead_text',
+      callLabel: 'Category lead text',
+      durationMs: Math.max(0, Date.now() - startedAt),
+      promptSize: Math.ceil((SYSTEM_INSTRUCTION.length + userPrompt.length) / 4),
+      error,
+      meta: { direct_adapter: true, pass: 'lead_text' },
+    });
+    throw error;
+  }
 
   const parsed = parseLlmJson(callRes.text);
   const result = normalizeLeadResult(parsed);

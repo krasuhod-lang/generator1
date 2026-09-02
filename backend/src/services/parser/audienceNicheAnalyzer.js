@@ -28,6 +28,7 @@
  */
 
 const { callLLM } = require('../llm/callLLM');
+const { normalizeAudienceNicheAnalysis } = require('../../utils/analysisResultNormalizer');
 
 // ── Лимиты длины строк для подстановки в промпты ────────────────────
 // Используются и в promptBuilder, и при формировании входного контекста
@@ -410,17 +411,19 @@ async function analyzeAudienceAndNiche(task, ctx, extra = {}) {
       return null;
     }
 
-    const personas = Array.isArray(result.audience_personas) ? result.audience_personas.length : 0;
-    const insights = Array.isArray(result.niche_deep_dive)   ? result.niche_deep_dive.length   : 0;
-    const terms    = Array.isArray(result.niche_terminology) ? result.niche_terminology.length : 0;
+    const normalizedResult = normalizeAudienceNicheAnalysis(result);
+    const personas = normalizedResult.audience_personas.length;
+    const insights = normalizedResult.niche_deep_dive.length;
+    const terms    = normalizedResult.niche_terminology.length;
 
     log(
       `Audience & Niche Analyzer: персон ${personas}, инсайтов ниши ${insights}, ` +
-      `терминов ${terms}, тон: ${result.content_voice?.tone || '—'}`,
+      `терминов ${terms}, тон: ${normalizedResult.content_voice?.tone || '—'}, ` +
+      `completeness=${normalizedResult.data_completeness.status}`,
       'success'
     );
 
-    return result;
+    return normalizedResult;
   } catch (err) {
     // Технический сбой аналитического JSON не должен обнулять весь контекст
     // задачи. Возвращаем минимальный evidence-safe fallback без выдуманных
@@ -433,4 +436,5 @@ async function analyzeAudienceAndNiche(task, ctx, extra = {}) {
 module.exports = {
   analyzeAudienceAndNiche,
   serializeAnalysisForPrompt,
+  normalizeAudienceNicheAnalysis,
 };

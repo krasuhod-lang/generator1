@@ -18,7 +18,7 @@
 
 const llmUsageLog = require('../aegis/llmUsageLog');
 const { getProjectsConfig } = require('./config');
-const { runAnalyst, runAnalystTracked, analystAvailable } = require('./llmAnalyst');
+const { runAnalyst, runAnalystTracked, analystAvailableAsync } = require('./llmAnalyst');
 
 const SYSTEM_PROMPT = [
   'Ты — Senior SEO-аналитик с 10+ годами опыта в поисковом продвижении.',
@@ -642,13 +642,20 @@ function _providerName(model) {
  * LLM-провайдер выбирается в llmAnalyst (по умолчанию Gemini 3.1 Pro,
  * фолбэк — DeepSeek-reasoner).
  */
-async function runProjectAnalysis(payload) {
+async function runProjectAnalysis(payload, attribution = {}) {
   const cfg = getProjectsConfig().deepseek;
   if (!cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!analystAvailable()) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!(await analystAvailableAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const userPrompt = _buildUserPrompt(payload);
-  const res = await runAnalyst(SYSTEM_PROMPT, userPrompt, { kind: 'project_seo_analysis' });
+  const res = await runAnalyst(SYSTEM_PROMPT, userPrompt, {
+    kind: 'project_seo_analysis',
+    traceTaskId: attribution.analysisId || null,
+    analysisId: attribution.analysisId || null,
+    pipeline: 'projects',
+    stageName: 'project_seo_analysis',
+    callLabel: 'Project SEO analysis',
+  });
   return res;
 }
 
@@ -682,10 +689,17 @@ function _buildMapUserPrompt(chunk) {
   ].join('\n');
 }
 
-async function _callDeepSeekTracked(system, user, cfg, kind) {
+async function _callDeepSeekTracked(system, user, cfg, kind, attribution = {}) {
   // cfg сохранён в сигнатуре для совместимости; параметры берёт llmAnalyst из
   // config.analyzer (Gemini) или config.deepseek (фолбэк).
-  return runAnalystTracked(system, user, { kind });
+  return runAnalystTracked(system, user, {
+    kind,
+    traceTaskId: attribution.analysisId || null,
+    analysisId: attribution.analysisId || null,
+    pipeline: 'projects',
+    stageName: kind,
+    callLabel: kind,
+  });
 }
 
 /**
@@ -694,12 +708,12 @@ async function _callDeepSeekTracked(system, user, cfg, kind) {
  * (reduce). Включается в analysisRunner при большом объёме данных.
  * Graceful: при провале map-reduce откатывается на обычный runProjectAnalysis.
  */
-async function runProjectAnalysisBatched(payload) {
+async function runProjectAnalysisBatched(payload, attribution = {}) {
   const cfg = getProjectsConfig();
   const dcfg = cfg.deepseek;
   const bcfg = cfg.batch;
   if (!dcfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!analystAvailable()) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!(await analystAvailableAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const slice = {
     topQueries: (payload.top && payload.top.topQueries) || [],
@@ -707,13 +721,13 @@ async function runProjectAnalysisBatched(payload) {
   };
   const chunks = buildChunks(slice, bcfg);
   // Слишком мало порций — нет смысла в map-reduce, обычный путь.
-  if (chunks.length < 2) return runProjectAnalysis(payload);
+  if (chunks.length < 2) return runProjectAnalysis(payload, attribution);
 
   try {
     let mapTokIn = 0; let mapTokOut = 0; let mapCost = 0;
     const mapFn = async (chunk) => {
       const r = await _callDeepSeekTracked(
-        MAP_SYSTEM_PROMPT, _buildMapUserPrompt(chunk), dcfg, 'project_seo_analysis_map',
+        MAP_SYSTEM_PROMPT, _buildMapUserPrompt(chunk), dcfg, 'project_seo_analysis_map', attribution,
       );
       mapTokIn += r.tIn; mapTokOut += r.tOut; mapCost += r.cost;
       const text = _stripFence(r.text).trim();
@@ -736,7 +750,7 @@ async function runProjectAnalysisBatched(payload) {
         poolLines.join('\n\n'),
       ].join('\n');
       const r = await _callDeepSeekTracked(
-        SYSTEM_PROMPT, reduceUser, dcfg, 'project_seo_analysis_reduce',
+        SYSTEM_PROMPT, reduceUser, dcfg, 'project_seo_analysis_reduce', attribution,
       );
       return r;
     };
@@ -764,7 +778,7 @@ async function runProjectAnalysisBatched(payload) {
     try {
       llmUsageLog.recordUsage({ provider: _providerName(dcfg.model), kind: 'project_seo_analysis_batched', outcome: 'error' });
     } catch (_) { /* no-op */ }
-    return runProjectAnalysis(payload);
+    return runProjectAnalysis(payload, attribution);
   }
 }
 

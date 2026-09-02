@@ -545,7 +545,7 @@ async function _setError(analysisId, message, leaseToken = null) {
  *
  * @returns {Promise<{snapshot, payload, report, status, reason}>}
  */
-async function runYandexPass(project, range) {
+async function runYandexPass(project, range, attribution = {}) {
   const out = { snapshot: null, payload: null, report: null, status: 'skipped', reason: null };
   const acfg = getProjectsConfig().analyzer;
   if (!acfg || !acfg.yandex || !acfg.yandex.enabled) {
@@ -574,7 +574,7 @@ async function runYandexPass(project, range) {
   }
 
   try {
-    const yr = await runYandexAnalysis(out.payload);
+    const yr = await runYandexAnalysis(out.payload, attribution);
     if (yr && yr.verdict === 'ok' && yr.markdown) {
       out.report = yr.markdown;
       out.status = 'ok';
@@ -684,7 +684,7 @@ async function _processAnalysis(analysisId, durableContext = null) {
     // Запускаем до сбора GSC и не зависим от его результата: проект может быть
     // подключён только к Яндексу, а сбой Google не должен «съедать» отчёт по
     // Яндексу (раньше при ошибке GSC/LLM анализ завершался до этого блока).
-    const ydxPass = await runYandexPass(project, range);
+    const ydxPass = await runYandexPass(project, range, { analysisId });
     await checkpoint({ stage: 'yandex_pass', percent: 15 });
     const ydxSnapshot = ydxPass.snapshot;
     const ydxPayload = ydxPass.payload;
@@ -784,8 +784,8 @@ async function _processAnalysis(analysisId, durableContext = null) {
       const useBatch = shouldBatch(workload, batchCfg);
 
       result = useBatch
-        ? await runProjectAnalysisBatched(payload)
-        : await runProjectAnalysis(payload);
+        ? await runProjectAnalysisBatched(payload, { analysisId })
+        : await runProjectAnalysis(payload, { analysisId });
 
       if (result.verdict !== 'ok') {
         // Понятная формулировка вместо технического «skipped: no_api_key» —
@@ -838,6 +838,7 @@ async function _processAnalysis(analysisId, durableContext = null) {
           rankingFactors,
           gscSnapshot: snapshot,
           ydxSnapshot: ydxSnapshot,
+          analysisId,
         });
         if (syn && (syn.markdown || syn.verdict === 'ok')) synthesisMarkdown = syn.markdown || null;
       } catch (e) {

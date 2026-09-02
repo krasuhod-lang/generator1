@@ -696,7 +696,14 @@ async function generateDrMaxMeta({ keyword, semantics, serpData, inputs }) {
     semantics: semantics || {},
     serpData: serpData || [],
     inputs: safeInputs,
-    options: { copywriterModel },
+    options: {
+      copywriterModel,
+      taskId: safeInputs.taskId || safeInputs.task_id || null,
+      traceTaskId: safeInputs.traceTaskId || safeInputs.taskId || safeInputs.task_id || null,
+      pipeline: 'meta',
+      stageName: 'gist_meta',
+      callLabel: 'GIST meta generation',
+    },
   });
 
   // Легаси-поля для metaStages / pageMetaAudit / UI.

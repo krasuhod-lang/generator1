@@ -16,7 +16,7 @@
  * RankingFactorGaps. Provider — Gemini 3.1 Pro (llmAnalyst). Не бросает.
  */
 
-const { runAnalyst, analystAvailable } = require('./llmAnalyst');
+const { runAnalyst, analystAvailableAsync } = require('./llmAnalyst');
 const { buildPromptSuffix } = require('./dspyClient');
 const { renderRankingFactorsLines } = require('./rankingFactors');
 
@@ -185,7 +185,7 @@ function _buildUserPrompt({ project, gscReport, ydxReport, gscPerformance, ydxPe
  */
 async function runSynthesis(payload) {
   const rf = payload.rankingFactors || null;
-  if (!analystAvailable()) {
+  if (!(await analystAvailableAsync())) {
     return {
       verdict: 'skipped',
       reason: 'no_api_key',
@@ -204,7 +204,14 @@ async function runSynthesis(payload) {
   } catch (_) { dspySuffix = ''; }
 
   const userPrompt = _buildUserPrompt({ ...payload, dspySuffix });
-  const res = await runAnalyst(SYSTEM_PROMPT, userPrompt, { kind: 'project_seo_analysis_synthesis' });
+  const res = await runAnalyst(SYSTEM_PROMPT, userPrompt, {
+    kind: 'project_seo_analysis_synthesis',
+    traceTaskId: payload.analysisId || null,
+    analysisId: payload.analysisId || null,
+    pipeline: 'projects',
+    stageName: 'project_seo_analysis_synthesis',
+    callLabel: 'Project SEO synthesis',
+  });
   return { ...res, ranking_factors: rf };
 }
 

@@ -47,12 +47,18 @@ function _parse(text) {
 /** @returns {Promise<Array|null>} массив вердиктов по кластерам или null. */
 async function explain(clusters, opts = {}) {
   if (!clusters || !clusters.length) return null;
-  if (!llm.analystAvailable()) return null;
+  if (!(await llm.analystAvailableAsync())) return null;
   // Ограничиваем контекст — не больше 20 кластеров за раз.
   const slice = clusters.slice(0, 20);
   const res = await llm.runAnalyst(SYSTEM, _buildUser(slice), {
     kind: 'cannibalization_explain',
     maxTokens: opts.maxTokens || 1500,
+    taskId: opts.taskId || null,
+    traceTaskId: opts.traceTaskId || null,
+    pipeline: opts.pipeline || 'projects',
+    stageName: opts.stageName || 'cannibalization_explain',
+    callLabel: opts.callLabel || 'Cannibalization explainer',
+    onAttemptUsage: opts.onAttemptUsage,
   });
   if (!res || res.verdict !== 'ok') return null;
   return _parse(res.markdown);

@@ -345,6 +345,8 @@ async function generateMetaForContent({
     intentContract: context.intentContract || context.intent_contract || null,
     llm_provider: context.llm_provider || 'gemini',
     gemini_model: context.gemini_model || '',
+    taskId: ctx.taskId || context.taskId || null,
+    traceTaskId: ctx.traceTaskId || context.traceTaskId || ctx.taskId || context.taskId || null,
   };
 
   // Детерминированно готовим GIST-контракт из финальной страницы до SERP
@@ -437,6 +439,8 @@ async function generateMetaForContent({
         articleType: context.articleType || 'link',
         intentContract: inputs.intentContract,
         gistSignals: inputs.gistSignals,
+        taskId: inputs.taskId,
+        traceTaskId: inputs.traceTaskId,
         semantics: context.semantics && Object.keys(context.semantics).length
           ? context.semantics : inputs.articleSemantics,
       });

@@ -2354,6 +2354,12 @@ async function processInfoArticleTask(taskId) {
           try {
             factCheck = await runSemanticFactCheck(articleHtml, task.__serpEvidence, {
               niche: task.topic || task.region || '',
+              taskId,
+              traceTaskId: taskId,
+              pipeline: 'info',
+              stageName: 'semantic_factcheck',
+              callLabel: 'Semantic fact-check',
+              onAttemptUsage: ctx.onAttemptUsage,
             });
           } catch (_semanticErr) {
             factCheck = runFactCheck(articleHtml, task.__serpEvidence);

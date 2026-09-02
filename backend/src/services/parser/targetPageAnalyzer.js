@@ -16,6 +16,7 @@
 
 const { scrapeUrl, sanitizeUrl } = require('./scraper');
 const { callLLM }      = require('../llm/callLLM');
+const { normalizeTargetPageAnalysis } = require('../../utils/analysisResultNormalizer');
 
 // Целевая страница не должна ломать весь Stage 0 из-за временного 5xx,
 // редиректа или различий между http/https и www/non-www. Один candidate
@@ -255,15 +256,18 @@ async function analyzeTargetPage(targetUrl, ctx) {
       return null;
     }
 
+    const normalizedResult = normalizeTargetPageAnalysis(analysisResult);
     log(
       `Target Page Analyzer: анализ завершён. ` +
-      `Бренд: ${analysisResult.brand_name || 'не определён'}, ` +
-      `Регион: ${analysisResult.detected_region || 'не определён'}, ` +
-      `Тип бизнеса: ${analysisResult.detected_business_type || 'не определён'}`,
+      `Бренд: ${normalizedResult.brand_name || 'не определён'}, ` +
+      `Регион: ${normalizedResult.detected_region || 'не определён'}, ` +
+      `Тип бизнеса: ${normalizedResult.detected_business_type || 'не определён'}; ` +
+      `client_segments=${normalizedResult.client_segments.length ? 'найдены' : 'не обнаружены'}, ` +
+      `works_with=${normalizedResult.works_with.length ? 'найдены' : 'не обнаружены'}`,
       'success'
     );
 
-    return analysisResult;
+    return normalizedResult;
   } catch (err) {
     log(`Target Page Analyzer: AI-анализ ошибка: ${err.message}`, 'warn');
     return null;
@@ -274,4 +278,5 @@ module.exports = {
   analyzeTargetPage,
   buildTargetPageCandidates,
   scrapeTargetPageWithFallback,
+  normalizeTargetPageAnalysis,
 };

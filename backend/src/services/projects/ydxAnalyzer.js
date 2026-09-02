@@ -14,7 +14,7 @@
  * (llmAnalyst), фолбэк DeepSeek. Никогда не бросает.
  */
 
-const { runAnalyst, analystAvailable } = require('./llmAnalyst');
+const { runAnalyst, analystAvailableAsync } = require('./llmAnalyst');
 const { buildPromptSuffix } = require('./dspyClient');
 
 const SYSTEM_PROMPT = [
@@ -139,8 +139,8 @@ function _buildUserPrompt({ project, range, performance, topQueries, brandSplit,
  * Запускает анализ Яндекса. Возвращает нормализованный результат llmAnalyst.
  * Никогда не бросает.
  */
-async function runYandexAnalysis(payload) {
-  if (!analystAvailable()) return { verdict: 'skipped', reason: 'no_api_key' };
+async function runYandexAnalysis(payload, attribution = {}) {
+  if (!(await analystAvailableAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
   let dspySuffix = '';
   try {
     dspySuffix = await buildPromptSuffix('YandexQueryAnalysis', {
@@ -150,7 +150,14 @@ async function runYandexAnalysis(payload) {
   } catch (_) { dspySuffix = ''; }
 
   const userPrompt = _buildUserPrompt({ ...payload, dspySuffix });
-  return runAnalyst(SYSTEM_PROMPT, userPrompt, { kind: 'project_seo_analysis_yandex' });
+  return runAnalyst(SYSTEM_PROMPT, userPrompt, {
+    kind: 'project_seo_analysis_yandex',
+    traceTaskId: attribution.analysisId || null,
+    analysisId: attribution.analysisId || null,
+    pipeline: 'projects',
+    stageName: 'project_seo_analysis_yandex',
+    callLabel: 'Yandex project SEO analysis',
+  });
 }
 
 module.exports = { runYandexAnalysis, SYSTEM_PROMPT, _buildUserPrompt };

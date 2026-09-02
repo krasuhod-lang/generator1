@@ -21,6 +21,7 @@ const path = require('path');
 const db   = require('../../config/db');
 const { callGemini } = require('../llm/gemini.adapter');
 const { calcCost }   = require('../metrics/priceCalculator');
+const { recordProviderResponse, recordProviderFailure } = require('../metrics/providerAttemptAccounting');
 const { normalizeGeminiCopywritingModel } = require('../llm/geminiModels');
 const {
   extractTrendsJsonBlock,
@@ -401,13 +402,44 @@ async function processArticleTopicTask(taskId) {
     // 300 секунд — потолок для одного non-streaming Gemini-вызова в адаптере.
     // 16384 output-токенов хватает на длинный markdown-отчёт (~50 KB текста).
     funnel.step('llm_generation');
-    const result = await callGemini(SYSTEM_INSTRUCTION, userPrompt, {
-      temperature: 0.7,
-      maxTokens:   16384,
-      timeoutMs:   300000,
-      plainText:   true,
-      model:       normalizeGeminiCopywritingModel(task.gemini_model),
-    });
+    const topicCallStartedAt = Date.now();
+    let result;
+    try {
+      result = await callGemini(SYSTEM_INSTRUCTION, userPrompt, {
+        temperature: 0.7,
+        maxTokens:   16384,
+        timeoutMs:   300000,
+        plainText:   true,
+        model:       normalizeGeminiCopywritingModel(task.gemini_model),
+      });
+      await recordProviderResponse({
+        provider: 'gemini',
+        result,
+        taskId,
+        traceTaskId: taskId,
+        pipeline: 'article_topics',
+        stageName: task.mode === 'deep_dive' ? 'topic_deep_dive' : 'topic_main',
+        callLabel: task.mode === 'deep_dive' ? 'Topic deep dive' : 'Topic demand analysis',
+        durationMs: Math.max(0, Date.now() - topicCallStartedAt),
+        promptSize: Math.ceil((SYSTEM_INSTRUCTION.length + userPrompt.length) / 4),
+        meta: { direct_adapter: true, mode: task.mode || 'main' },
+      });
+    } catch (error) {
+      await recordProviderFailure({
+        provider: 'gemini',
+        model: normalizeGeminiCopywritingModel(task.gemini_model),
+        taskId,
+        traceTaskId: taskId,
+        pipeline: 'article_topics',
+        stageName: task.mode === 'deep_dive' ? 'topic_deep_dive' : 'topic_main',
+        callLabel: task.mode === 'deep_dive' ? 'Topic deep dive' : 'Topic demand analysis',
+        durationMs: Math.max(0, Date.now() - topicCallStartedAt),
+        promptSize: Math.ceil((SYSTEM_INSTRUCTION.length + userPrompt.length) / 4),
+        error,
+        meta: { direct_adapter: true, mode: task.mode || 'main' },
+      });
+      throw error;
+    }
 
     if (!result || !result.text || !result.text.trim()) {
       throw new Error('Gemini вернул пустой ответ');
