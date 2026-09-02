@@ -744,6 +744,11 @@ const TASK_SOURCES = Object.freeze({
     label: 'SEO-текст',
     titleSql: `COALESCE(NULLIF(t.title, ''), t.input_target_service, '')`,
     costSql: `(SELECT total_cost_usd FROM task_metrics WHERE task_id = t.id)`,
+    activityAtSql: `CASE WHEN COALESCE(t.content_stale, FALSE) THEN COALESCE(t.updated_at, t.created_at) ELSE COALESCE(t.completed_at, t.last_started_at, t.updated_at, t.created_at) END`,
+    updatedAtSql: 't.updated_at',
+    archivedAtSql: 't.archived_at',
+    lastStartedAtSql: 't.last_started_at',
+    contentStaleSql: 't.content_stale',
     hasCompletedAt: true,
     hasStartedAt: true,
   }),
@@ -760,6 +765,9 @@ const TASK_SOURCES = Object.freeze({
     label: 'Ссылочная статья',
     titleSql: `COALESCE(NULLIF(t.topic, ''), '')`,
     costSql: `t.cost_usd`,
+    updatedAtSql: 't.updated_at',
+    archivedAtSql: 't.archived_at',
+    lastStartedAtSql: 't.started_at',
     hasCompletedAt: true,
     hasStartedAt: true,
   }),
@@ -776,6 +784,9 @@ const TASK_SOURCES = Object.freeze({
     label: 'Инфо-статья',
     titleSql: `COALESCE(NULLIF(t.topic, ''), '')`,
     costSql: `t.cost_usd`,
+    updatedAtSql: 't.updated_at',
+    archivedAtSql: 't.archived_at',
+    lastStartedAtSql: 't.started_at',
     hasCompletedAt: true,
     hasStartedAt: true,
   }),
@@ -872,12 +883,21 @@ async function _existingTaskSourceEntries() {
 /**
  * Собирает один SELECT для UNION ALL по конкретному источнику.
  * Возвращает нормализованные колонки: source, id, title, status, created_at,
- * completed_at, started_at, error_message, cost_usd.
+ * completed_at, started_at, activity_at, error_message, cost_usd.
  */
 function _sourceSelect(sourceKey, src) {
   const completed = src.completedAtSql || (src.hasCompletedAt ? 't.completed_at' : 'NULL::timestamptz');
   const started   = src.startedAtSql || (src.hasStartedAt ? 't.started_at' : 'NULL::timestamptz');
   const errorExpr = src.errorSql || 't.error_message';
+  const archived = src.archivedAtSql || 'NULL::timestamptz';
+  const lastStarted = src.lastStartedAtSql || 'NULL::timestamptz';
+  const contentStale = src.contentStaleSql || 'FALSE';
+  const updated = src.updatedAtSql || 't.created_at';
+  const activityAt = src.activityAtSql || `CASE
+    WHEN t.status::text IN ('completed', 'done', 'failed', 'error', 'cancelled')
+      THEN COALESCE(${completed}, ${updated}, t.created_at)
+    ELSE COALESCE(${started}, ${updated}, t.created_at)
+  END`;
   return `
     SELECT
       '${sourceKey}'::text                AS source,
@@ -887,6 +907,10 @@ function _sourceSelect(sourceKey, src) {
       t.created_at                        AS created_at,
       ${completed}                        AS completed_at,
       ${started}                          AS started_at,
+      ${lastStarted}                      AS last_started_at,
+      ${contentStale}                     AS content_stale,
+      ${activityAt}                       AS activity_at,
+      ${archived}                         AS archived_at,
       ${errorExpr}                        AS error_message,
       COALESCE(${src.costSql}, 0)::numeric(12,6) AS cost_usd
     FROM ${src.table} t
@@ -955,7 +979,7 @@ function _statusUnionSql(entries = Object.entries(TASK_SOURCES)) {
 /**
  * GET /api/admin/users/:userId/all-tasks?page=&limit=
  * Список задач пользователя со ВСЕХ модулей — UNION ALL по 7 таблицам.
- * Сортировка по created_at DESC. Пагинация серверная.
+ * Сортировка по activity_at DESC с fallback на created_at. Пагинация серверная.
  */
 async function getUserAllTasks(req, res, next) {
   try {
@@ -979,7 +1003,7 @@ async function getUserAllTasks(req, res, next) {
     const { rows } = await db.query(
       `WITH all_tasks AS ( ${unionSql} )
        SELECT * FROM all_tasks
-       ORDER BY created_at DESC NULLS LAST
+       ORDER BY activity_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
        LIMIT $2 OFFSET $3`,
       [userId, limit, offset],
     );

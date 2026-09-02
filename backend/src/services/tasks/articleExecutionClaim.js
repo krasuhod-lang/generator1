@@ -1,3 +1,5 @@
+'use strict';
+
 const crypto = require('crypto');
 const dbDefault = require('../../config/db');
 
@@ -18,6 +20,7 @@ async function claimArticleTask({ table, taskId, db = dbDefault }) {
     `UPDATE ${table}
         SET status = 'running',
             started_at = COALESCE(started_at, NOW()),
+            last_started_at = NOW(),
             progress_pct = 1,
             error_message = NULL,
             execution_token = $2::uuid,

@@ -66,7 +66,7 @@ function testProductionGuards() {
 
   for (const [name, source] of [['info pipeline', info], ['link pipeline', link]]) {
     assert.match(source, /claimArticleTask/);
-    assert.match(source, /execution_token = \$10::uuid/);
+    assert.match(source, /execution_token = \$(?:9|10)::uuid/);
     assert.match(source, /claim lost before final write/);
     assert.match(source, /execution_token = NULL/);
   }

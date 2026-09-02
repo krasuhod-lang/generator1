@@ -120,7 +120,7 @@ async function listTasks(req, res, next) {
       `SELECT
          t.id, t.title, t.status, t.input_target_service,
          t.llm_provider, t.gemini_model, t.llm_model,
-         t.created_at, t.completed_at, t.started_at, t.archived_at,
+         t.created_at, t.updated_at, t.completed_at, t.started_at, t.last_started_at, t.archived_at, t.content_stale,
          t.bull_job_id, t.error_message, t.quality_gate,
          m.lsi_coverage, m.eeat_score, m.pq_score, m.total_cost_usd, m.bm25_score,
          m.eeat_score_12, m.eeat_score_12_status, m.eeat_score_12_coverage,
@@ -129,7 +129,7 @@ async function listTasks(req, res, next) {
        FROM tasks t
        LEFT JOIN task_metrics m ON m.task_id = t.id
        WHERE t.user_id = $1
-        ORDER BY COALESCE(t.completed_at, t.created_at) DESC, t.id DESC`,
+        ORDER BY COALESCE(t.completed_at, t.last_started_at, t.updated_at, t.created_at) DESC, t.id DESC`,
       [req.user.id]
     );
     return res.json({ tasks: isClientRequest(req) ? rows.map(sanitizeTaskForClient) : rows });
@@ -417,6 +417,21 @@ async function updateTask(req, res, next) {
       });
     }
 
+    // Completed + сохранённый HTML — это уже готовый результат. Раньше любой
+    // PATCH (включая автосохранение формы перед стартом) безусловно переводил
+    // такую задачу в draft, из-за чего результат исчезал из completed-фильтра.
+    // Разрешаем downgrade только при явно запрошенном повторном запуске.
+    const hasSavedResult = Boolean(
+      String(task.full_html || '').trim() || task.stage7_result,
+    );
+    const explicitReopen = req.body?.reopen === true;
+    if (task.status === 'completed' && hasSavedResult && !explicitReopen) {
+      return res.status(409).json({
+        code: 'completed_task_reopen_required',
+        error: 'Завершённая задача с сохранённым результатом защищена. Для изменения сначала запустите её повторно.',
+      });
+    }
+
     // Разрешённые поля для обновления
     const ALLOWED = [
       'title',
@@ -522,7 +537,13 @@ async function updateTask(req, res, next) {
 
     const { rows } = await db.query(
       `UPDATE tasks
-       SET ${fields.join(', ')}, updated_at = NOW(), status = 'draft'
+       SET ${fields.join(', ')},
+           updated_at = NOW(),
+           status = 'draft',
+           content_stale = CASE
+             WHEN COALESCE(full_html, '') <> '' OR stage7_result IS NOT NULL THEN TRUE
+             ELSE content_stale
+           END
        WHERE id = $1 AND user_id = $2
        RETURNING *`,
       values
@@ -667,8 +688,11 @@ async function startTask(req, res, next) {
       return res.status(409).json({ error: 'Архивную задачу нельзя запустить' });
     }
 
-    // Нельзя запустить уже запущенную / выполняющуюся / завершённую
-    if (task.status === 'queued' || task.status === 'processing' || task.status === 'completed') {
+    // Нельзя повторно запустить уже queued/processing. Завершённую задачу
+    // разрешаем запустить только после изменения входных данных: старый
+    // результат остаётся доступным до успешного нового Stage 7.
+    if (task.status === 'queued' || task.status === 'processing' ||
+        (task.status === 'completed' && !task.content_stale)) {
       return res.status(409).json({
         error: `Задача уже в статусе "${task.status}"`,
       });
@@ -698,10 +722,16 @@ async function startTask(req, res, next) {
       const client = await db.getClient();
       try {
         await client.query('BEGIN');
-        await client.query(
+        const startUpdate = await client.query(
           `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
-                  completed_at=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
-            WHERE id=$2 AND archived_at IS NULL`, [jobId, task.id]);
+                  completed_at=NULL, last_started_at=NOW(),
+                  content_stale=CASE WHEN COALESCE(full_html, '') <> '' THEN TRUE ELSE FALSE END,
+                  lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
+            WHERE id=$2 AND archived_at IS NULL
+              AND (status IN ('draft','failed','paused') OR (status='completed' AND content_stale=TRUE))`, [jobId, task.id]);
+        if (!startUpdate?.rowCount) {
+          throw Object.assign(new Error('task_start_race'), { code: 'task_start_race' });
+        }
         await client.query(
           `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
            VALUES ('content-generation','generate',$1,$2::jsonb)
@@ -750,6 +780,9 @@ async function startTask(req, res, next) {
       queueError: publication.lastError,
     });
   } catch (err) {
+    if (err.code === 'task_start_race') {
+      return res.status(409).json({ error: 'Статус задачи изменился. Обновите список задач и повторите действие.' });
+    }
     // BullMQ бросает если jobId уже занят
     if (err.message?.includes('Job') && err.message?.includes('already')) {
       return res.status(409).json({ error: 'Задача уже в очереди' });
@@ -824,10 +857,16 @@ async function resumeTask(req, res, next) {
     const client = await db.getClient();
     try {
       await client.query('BEGIN');
-      await client.query(
+      const resumeUpdate = await client.query(
         `UPDATE tasks SET status='queued', bull_job_id=$1, error_message=NULL,
-                completed_at=NULL, lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
-          WHERE id=$2 AND archived_at IS NULL`, [jobId, task.id]);
+                completed_at=NULL, last_started_at=NOW(),
+                content_stale=CASE WHEN COALESCE(full_html, '') <> '' THEN TRUE ELSE content_stale END,
+                lease_token=NULL, lease_until=NULL, heartbeat_at=NOW(), updated_at=NOW()
+          WHERE id=$2 AND archived_at IS NULL
+            AND status IN ('paused','failed')`, [jobId, task.id]);
+      if (!resumeUpdate?.rowCount) {
+        throw Object.assign(new Error('task_resume_race'), { code: 'task_resume_race' });
+      }
       await client.query(
         `INSERT INTO generator_task_outbox (queue_name,job_name,job_id,payload)
          VALUES ('content-generation','generate',$1,$2::jsonb)
@@ -868,6 +907,9 @@ async function resumeTask(req, res, next) {
       resumeFromBlock,
     });
   } catch (err) {
+    if (err.code === 'task_start_race' || err.code === 'task_resume_race') {
+      return res.status(409).json({ error: 'Статус задачи изменился. Обновите список задач и повторите действие.' });
+    }
     if (err.message?.includes('Job') && err.message?.includes('already')) {
       return res.status(409).json({ error: 'Задача уже в очереди' });
     }

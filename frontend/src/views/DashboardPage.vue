@@ -146,35 +146,55 @@ function fmtDate(dt) {
   if (!dt) return '—';
   const date = new Date(dt);
   if (Number.isNaN(date.getTime())) return '—';
+  // API timestamps are UTC ISO strings; render in the browser's local
+  // timezone so a task started after local midnight stays on today's date.
   return date.toLocaleString('ru-RU', {
     day: '2-digit', month: '2-digit', year: '2-digit',
-    hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
+    hour: '2-digit', minute: '2-digit',
   });
 }
 
 function taskDateValue(task) {
   const status = String(task?.status || '').toLowerCase();
-  // Для написанного SEO-текста бизнес-дата — фактическое завершение.
-  // Для черновика/очереди updated_at не используется: heartbeat и autosave
-  // не должны переносить задачу в другой день.
-  return ['completed', 'failed', 'cancelled'].includes(status)
-    ? (task?.completed_at || task?.created_at)
-    : (task?.created_at || task?.updated_at);
+  // created_at — неизменная дата создания и не должна определять день
+  // повторного запуска. Для SEO backend отдаёт last_started_at; для остальных
+  // модулей используется started_at. Heartbeat не участвует в группировке.
+  if (['completed', 'failed', 'cancelled'].includes(status)) {
+    return task?.content_stale
+      ? (task?.updated_at || task?.completed_at || task?.created_at)
+      : (task?.completed_at || task?.activity_at || task?.created_at);
+  }
+  if (['queued', 'processing', 'paused', 'pausing', 'running', 'pending'].includes(status)) {
+    return task?.last_started_at || task?.started_at || task?.activity_at || task?.created_at;
+  }
+  return task?.updated_at || task?.activity_at || task?.created_at;
 }
 
 function dateKey(dt) {
   if (!dt) return 'unknown';
   const date = new Date(dt);
   if (Number.isNaN(date.getTime())) return 'unknown';
-  return date.toISOString().slice(0, 10);
+  // Do not derive the day through toISOString(): that converts local time
+  // back to UTC and moves e.g. 00:30 MSK into the previous calendar day.
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function taskDateLabel(task) {
-  return String(task?.status || '').toLowerCase() === 'completed' ? 'Выполнена' : 'Создана';
+  const status = String(task?.status || '').toLowerCase();
+  if (status === 'completed' && !task?.content_stale) return 'Выполнена';
+  if (['queued', 'processing', 'paused', 'pausing', 'running'].includes(status)) return 'Запущена';
+  if (task?.content_stale) return 'Изменена';
+  return 'Создана';
 }
 
 function statusMetaForTask(task) {
   if (task?.archived_at) return { label: 'Архив', cls: 'bg-gray-700 text-gray-400' };
+  if (task?.content_stale && ['completed', 'done'].includes(String(task?.status || '').toLowerCase())) {
+    return { label: 'Нужен перезапуск', cls: 'bg-amber-900/40 text-amber-300 border border-amber-800/60' };
+  }
   return statusMeta(task?.status);
 }
 
@@ -438,7 +458,7 @@ function goPage(next) {
                 <td class="px-5 py-3.5"><span :class="['badge', statusMetaForTask(task).cls]">{{ statusMetaForTask(task).label }}</span></td>
                 <td class="px-5 py-3.5 text-gray-400 whitespace-nowrap"><span class="block text-[11px] text-gray-600">{{ taskDateLabel(task) }}</span>{{ fmtDate(taskDateValue(task)) }}</td>
                 <td v-if="!isClient" class="px-5 py-3.5 font-mono text-indigo-400">{{ fmtCost(task.total_cost_usd) }}</td>
-                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="isLegacySeoTask(task) && !task.archived_at && (task.status === 'draft' || task.status === 'failed')" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="isLegacySeoTask(task) && !isClient && !task.archived_at && (task.status === 'queued' || task.status === 'processing')" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed' && canOpenResult(task)" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Открыть результат</button><RouterLink v-if="isLegacySeoTask(task) && !task.archived_at && (task.status === 'draft' || task.status === 'failed')" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button v-if="isLegacySeoTask(task) && !task.archived_at" @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Переместить в архив">В архив</button></div></td>
+                <td class="px-5 py-3.5"><div class="flex items-center gap-1.5 justify-end flex-wrap"><button v-if="isLegacySeoTask(task) && !task.archived_at && (task.status === 'draft' || task.status === 'failed' || (task.status === 'completed' && task.content_stale))" @click="handleStart(task)" class="btn-primary text-xs px-3 py-1.5">Запустить</button><RouterLink v-if="isLegacySeoTask(task) && !isClient && !task.archived_at && (task.status === 'queued' || task.status === 'processing')" :to="`/tasks/${task.id}/monitor`" class="btn-secondary text-xs px-3 py-1.5">Мониторинг</RouterLink><button v-if="task.status === 'completed' && canOpenResult(task)" @click="openResult(task)" class="btn-primary text-xs px-3 py-1.5">Открыть результат</button><RouterLink v-if="isLegacySeoTask(task) && !task.archived_at && (task.status === 'draft' || task.status === 'failed' || (task.status === 'completed' && task.content_stale))" :to="`/tasks/${task.id}/edit`" class="btn-secondary text-xs px-3 py-1.5">Изменить</RouterLink><button v-if="isLegacySeoTask(task) && !task.archived_at" @click="handleDelete(task)" class="btn-danger text-xs px-3 py-1.5" title="Переместить в архив">В архив</button></div></td>
               </tr>
             </template>
           </tbody>

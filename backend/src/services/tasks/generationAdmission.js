@@ -71,6 +71,7 @@ async function claimGenerationTask({
     const claimedResult = await client.query(
       `UPDATE tasks
           SET status='processing', started_at=COALESCE(started_at,NOW()),
+              last_started_at=NOW(),
               bull_job_id=$2, worker_id=$3, lease_token=$4::uuid,
               lease_until=NOW()+make_interval(secs => $5), heartbeat_at=NOW(),
               last_error_code=NULL, updated_at=NOW()

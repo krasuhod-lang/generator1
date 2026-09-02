@@ -61,6 +61,9 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
   const brandFacts    = task.input_brand_facts || 'Нет данных';
 
   const fullHTML = allBlocks.join('\n\n');
+  if (!String(fullHTML || '').trim()) {
+    throw new Error('Stage 7 persistence refused empty final HTML');
+  }
 
   // TF-IDF данные из задачи
   let tfIdfArr = [];
@@ -220,6 +223,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
       `UPDATE tasks SET
          stage7_result  = $1,
          full_html      = $2,
+         content_stale  = FALSE,
          tz_compliance  = $3,
          updated_at     = NOW()
        WHERE id = $4`,
@@ -229,6 +233,7 @@ async function runStage7(task, ctx, allBlocks, allLSI) {
       `UPDATE tasks SET
          stage7_result = $1,
          full_html     = $2,
+         content_stale = FALSE,
          updated_at    = NOW()
        WHERE id = $3`,
       [JSON.stringify(enrichedResult), fullHTML, taskId]

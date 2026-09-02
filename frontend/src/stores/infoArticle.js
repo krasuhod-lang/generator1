@@ -32,8 +32,8 @@ export const useInfoArticleStore = defineStore('infoArticle', {
           const byId = new Map(this.tasks.map((task) => [String(task.id), task]));
           for (const task of incoming) byId.set(String(task.id), task);
           this.tasks = Array.from(byId.values()).sort((a, b) => {
-            const ad = Date.parse(a.updated_at || a.created_at || '') || 0;
-            const bd = Date.parse(b.updated_at || b.created_at || '') || 0;
+            const ad = Date.parse(a.activity_at || a.completed_at || a.started_at || a.updated_at || a.created_at || '') || 0;
+            const bd = Date.parse(b.activity_at || b.completed_at || b.started_at || b.updated_at || b.created_at || '') || 0;
             return bd - ad;
           });
           this.listLimit = Math.min(MAX_HISTORY, this.listLimit + PAGE_SIZE);
@@ -68,8 +68,10 @@ export const useInfoArticleStore = defineStore('infoArticle', {
 
     async deleteTask(id) {
       await api.delete(`/info-article/${id}`);
-      this.tasks = this.tasks.filter((t) => String(t.id) !== String(id));
-      this.total = Math.max(0, this.total - 1);
+      const archivedAt = new Date().toISOString();
+      this.tasks = this.tasks.map((t) => String(t.id) === String(id)
+        ? { ...t, archived_at: archivedAt }
+        : t);
     },
   },
 });

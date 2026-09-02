@@ -165,7 +165,7 @@ onUnmounted(() => {
 });
 
 async function handleDelete(task) {
-  if (!confirm(`Удалить задачу «${task.topic}»? Все результаты будут потеряны.`)) return;
+  if (!confirm(`Переместить задачу «${task.topic}» в архив? Текст, изображения и история сохранятся.`)) return;
   try {
     await store.deleteTask(task.id);
     if (String(selectedTask.value?.id || selectedTaskId.value) === String(task.id)) {
@@ -179,7 +179,8 @@ async function handleDelete(task) {
   }
 }
 
-function statusBadgeClass(status) {
+function statusBadgeClass(status, task = null) {
+  if (task?.archived_at) return 'bg-gray-800 text-gray-400 border border-gray-700';
   switch (status) {
     case 'done':    return 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/60';
     case 'running': case 'processing': case 'in_progress': return 'bg-sky-900/40 text-sky-300 border border-sky-800/60 animate-pulse';
@@ -190,7 +191,8 @@ function statusBadgeClass(status) {
     default:        return 'bg-gray-800 text-gray-400 border border-gray-700';
   }
 }
-function statusLabel(s) {
+function statusLabel(s, task = null) {
+  if (task?.archived_at) return 'В архиве';
   return ({ queued: 'В очереди', pending: 'Ожидает слота', running: 'Генерация', processing: 'Обработка', in_progress: 'Выполняется', partial: 'Частично', timeout: 'Тайм-аут', done: 'Готово', error: 'Ошибка' })[s] || s || 'Неизвестно';
 }
 function stageLabel(s) {
@@ -759,8 +761,8 @@ async function copyMetaField(label, value) {
                       {{ t.error_message || t.error }}
                     </div>
                   </div>
-                  <span class="text-[11px] px-2 py-0.5 rounded uppercase tracking-wider" :class="statusBadgeClass(t.status)">{{ statusLabel(t.status) }}</span>
-                  <button class="btn-ghost text-xs px-2" @click.stop="handleDelete(t)" title="Удалить">✕</button>
+                  <span class="text-[11px] px-2 py-0.5 rounded uppercase tracking-wider" :class="statusBadgeClass(t.status, t)">{{ statusLabel(t.status, t) }}</span>
+                  <button v-if="!t.archived_at" class="btn-ghost text-xs px-2" @click.stop="handleDelete(t)" title="В архив">✕</button>
                 </li>
               </ul>
             </section>

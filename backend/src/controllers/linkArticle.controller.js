@@ -25,7 +25,6 @@ const {
   sanitizeTaskForClient,
   clientVisibilityError,
 } = require('../services/access/entitlementPolicy');
-const { cleanupTaskArtifacts } = require('../services/maintenance/artifactCleanup');
 
 const MAX_TOPIC_LEN   = 250;
 const MIN_TOPIC_LEN   = 5;
@@ -84,10 +83,10 @@ async function listLinkArticleTasks(req, res, next) {
               openai_tokens_in, openai_tokens_out,
               gemini_image_calls, cost_usd,
               quality_gate,
-              created_at, updated_at, started_at, completed_at
+              created_at, updated_at, started_at, last_started_at, completed_at, archived_at
          FROM link_article_tasks
         WHERE ${whereSql}
-        ORDER BY created_at DESC, id DESC
+        ORDER BY COALESCE(completed_at, last_started_at, started_at, updated_at, created_at) DESC, id DESC
         LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
       listParams,
     );
@@ -205,15 +204,19 @@ async function getLinkArticleTask(req, res, next) {
 async function deleteLinkArticleTask(req, res, next) {
   try {
     const { rowCount } = await db.query(
-      `DELETE FROM link_article_tasks WHERE id = $1 AND user_id = $2`,
+      `UPDATE link_article_tasks
+          SET archived_at = COALESCE(archived_at, NOW()),
+              archived_by = $2,
+              updated_at = NOW()
+        WHERE id = $1 AND user_id = $2 AND archived_at IS NULL`,
       [req.params.id, req.user.id],
     );
     if (rowCount === 0) {
-      return res.status(404).json({ error: 'Задача не найдена' });
+      return res.status(404).json({ error: 'Задача не найдена или уже архивирована' });
     }
-    // Чистим файлы задачи с диска (каталог картинок storage/images/<id>).
-    await cleanupTaskArtifacts({ taskId: req.params.id });
-    return res.json({ ok: true });
+    // Артефакты не удаляем: архив сохраняет готовый текст, изображения и
+    // историю. Полное удаление — отдельная административная операция.
+    return res.json({ ok: true, archived: true });
   } catch (err) {
     return next(err);
   }

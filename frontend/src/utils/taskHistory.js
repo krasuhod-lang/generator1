@@ -11,7 +11,13 @@ export function isTaskActiveStatus(status) {
 }
 
 export function taskTimestamp(task, field = 'created_at') {
-  const value = task?.[field] || (field === 'created_at' ? task?.updated_at : task?.created_at);
+  const activity = task?.activity_at
+    || task?.last_started_at
+    || task?.started_at
+    || (task?.content_stale ? task?.updated_at : task?.completed_at)
+    || task?.updated_at
+    || task?.created_at;
+  const value = field === 'created_at' ? activity : (task?.[field] || activity);
   const parsed = Date.parse(value || '');
   return Number.isFinite(parsed) ? parsed : 0;
 }
@@ -66,7 +72,14 @@ export function groupTasksByDate(tasks) {
   const groups = [];
   const byLabel = new Map();
   for (const task of Array.isArray(tasks) ? tasks : []) {
-    const label = taskGroupLabel(task?.created_at || task?.updated_at);
+    const label = taskGroupLabel(
+      task?.activity_at
+      || task?.last_started_at
+      || task?.started_at
+      || (task?.content_stale ? task?.updated_at : task?.completed_at)
+      || task?.updated_at
+      || task?.created_at,
+    );
     let group = byLabel.get(label);
     if (!group) {
       group = { label, tasks: [] };

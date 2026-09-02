@@ -645,7 +645,7 @@ async function handleDocxUpload(e) {
 }
 
 // Сохранить черновик
-async function saveDraft({ silent = false } = {}) {
+async function saveDraft({ silent = false, reopen = false } = {}) {
   saving.value = true;
   error.value  = '';
   try {
@@ -654,6 +654,7 @@ async function saveDraft({ silent = false } = {}) {
     // ТЗ §5/§8: пробрасываем выбранный проект (бэкенд снимет project_context_snapshot
     // и подтянет недостающие поля из buildProjectContext). null = «без проекта».
     payload.project_id = selectedProjectId.value || null;
+    if (reopen) payload.reopen = true;
 
     if (isEdit.value) {
       await store.updateTask(route.params.id, payload);
@@ -670,7 +671,8 @@ async function saveDraft({ silent = false } = {}) {
 
 // Запустить задачу
 async function startTask() {
-  await saveDraft();
+  // Explicit start is the only action allowed to reopen a completed result.
+  await saveDraft({ reopen: true });
   if (error.value) return;
   const id = isEdit.value ? route.params.id : store.current?.id;
   if (!id) return;

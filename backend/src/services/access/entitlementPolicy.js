@@ -189,7 +189,12 @@ function sanitizeTaskForClient(task) {
     for (const key of CLIENT_TASK_SENSITIVE_FIELDS) delete quality[key];
     safe.quality_score = quality;
   }
-  if (safe.status) safe.status_message = clientStatusMessage(safe.status);
+  if (safe.status) {
+    safe.status_message = clientStatusMessage(safe.status);
+    if (safe.content_stale && ['completed', 'done'].includes(String(safe.status).toLowerCase())) {
+      safe.status_message = 'Результат сохранён, но входные данные изменены. Запустите генерацию повторно.';
+    }
+  }
   return safe;
 }
 

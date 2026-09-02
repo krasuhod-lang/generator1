@@ -36,7 +36,8 @@ export const useTasksStore = defineStore('tasks', () => {
         const byKey = new Map(allTasks.value.map((task) => [`${task.source}:${task.id}`, task]));
         for (const task of incoming) byKey.set(`${task.source}:${task.id}`, task);
         allTasks.value = Array.from(byKey.values()).sort((a, b) =>
-          new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime(),
+          new Date(b.activity_at || b.last_started_at || b.started_at || b.updated_at || b.created_at || 0).getTime()
+          - new Date(a.activity_at || a.last_started_at || a.started_at || a.updated_at || a.created_at || 0).getTime(),
         );
       } else {
         allTasks.value = incoming;
@@ -86,8 +87,16 @@ export const useTasksStore = defineStore('tasks', () => {
   // ── Запуск задачи ──────────────────────────────────────────────────
   async function startTask(id) {
     const { data } = await api.post(`/tasks/${id}/start`);
-    // Обновляем статус в списке
-    _patchInList(id, { status: 'queued' });
+    // The backend has persisted last_started_at before returning. Reflect the
+    // same activity immediately so the task cannot appear under yesterday
+    // while the next polling request is still pending.
+    const activityAt = new Date().toISOString();
+    _patchInList(id, {
+      status: 'queued',
+      last_started_at: activityAt,
+      activity_at: activityAt,
+      updated_at: activityAt,
+    });
     return data;
   }
 
@@ -101,7 +110,13 @@ export const useTasksStore = defineStore('tasks', () => {
   // ── Возобновление задачи (кнопка "Продолжить") ────────────────────
   async function resumeTask(id) {
     const { data } = await api.post(`/tasks/${id}/resume`);
-    _patchInList(id, { status: 'queued' });
+    const activityAt = new Date().toISOString();
+    _patchInList(id, {
+      status: 'queued',
+      last_started_at: activityAt,
+      activity_at: activityAt,
+      updated_at: activityAt,
+    });
     return data;
   }
 
