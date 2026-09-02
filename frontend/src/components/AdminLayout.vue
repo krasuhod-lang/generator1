@@ -60,7 +60,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown));
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-950 text-gray-100">
+  <div class="admin-shell min-h-screen bg-gray-950 text-gray-100">
     <div
       v-if="sidebarOpen"
       class="fixed inset-0 z-[65] bg-black/70 backdrop-blur-sm lg:hidden"
@@ -69,16 +69,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown));
     />
 
     <aside
+      id="admin-navigation"
       class="fixed inset-y-0 left-0 z-[70] flex w-[286px] -translate-x-full flex-col border-r border-gray-800/90 bg-gray-950/95 shadow-2xl shadow-black/40 backdrop-blur-xl transition-transform duration-200 ease-out lg:translate-x-0"
       :class="{ 'translate-x-0': sidebarOpen }"
       aria-label="Навигация администратора"
     >
       <div class="flex min-h-[76px] items-center justify-between border-b border-gray-800/80 px-5">
         <router-link to="/admin" class="flex min-w-0 items-center gap-3" @click="closeSidebar">
-          <span class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-lg font-bold text-gray-950 shadow-lg shadow-emerald-500/20">S</span>
+          <span class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-brand text-lg font-bold text-white shadow-lg shadow-brand/20">S</span>
           <span class="min-w-0">
-            <span class="block truncate text-sm font-semibold text-white">SEO Genius</span>
-            <span class="block text-[11px] font-medium uppercase tracking-[0.18em] text-emerald-400">Admin console</span>
+            <span class="block truncate text-sm font-semibold text-white">SeoMST</span>
+            <span class="block text-[11px] font-medium uppercase tracking-[0.18em] text-brand-light">Admin console</span>
           </span>
         </router-link>
         <button
@@ -99,21 +100,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown));
               v-for="item in group.items"
               :key="item.to"
               :to="item.to"
-              class="group flex items-center gap-3 rounded-xl px-3 py-3 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70"
-              :class="isActive(item) ? 'bg-emerald-500/10 text-white ring-1 ring-inset ring-emerald-500/20' : 'text-gray-400 hover:bg-gray-900 hover:text-gray-100'"
+              class="group flex items-center gap-3 rounded-xl px-3 py-3 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-light/70"
+              :class="isActive(item) ? 'bg-brand/10 text-white ring-1 ring-inset ring-brand/20' : 'text-gray-400 hover:bg-gray-900 hover:text-gray-100'"
               :aria-current="isActive(item) ? 'page' : undefined"
               @click="closeSidebar"
             >
               <span
                 class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-base transition-colors"
-                :class="isActive(item) ? 'bg-emerald-400 text-gray-950' : 'bg-gray-900 text-gray-500 group-hover:text-emerald-300'"
+                :class="isActive(item) ? 'bg-brand text-white' : 'bg-gray-900 text-gray-500 group-hover:text-brand-light'"
                 aria-hidden="true"
               >{{ item.icon }}</span>
               <span class="min-w-0 flex-1">
                 <span class="block truncate text-sm font-medium">{{ item.label }}</span>
-                <span class="mt-0.5 block truncate text-[11px]" :class="isActive(item) ? 'text-emerald-300/70' : 'text-gray-600 group-hover:text-gray-500'">{{ item.description }}</span>
+                <span class="mt-0.5 block truncate text-[11px]" :class="isActive(item) ? 'text-brand-light/70' : 'text-gray-600 group-hover:text-gray-500'">{{ item.description }}</span>
               </span>
-              <span v-if="isActive(item)" class="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
+              <span v-if="isActive(item)" class="h-1.5 w-1.5 rounded-full bg-brand-light" aria-hidden="true" />
             </router-link>
           </div>
         </div>
@@ -121,7 +122,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown));
 
       <div class="border-t border-gray-800/80 p-4">
         <div class="flex items-center gap-3 rounded-xl bg-gray-900/70 p-3">
-          <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-indigo-500/20 text-sm font-semibold text-indigo-300">A</span>
+          <span class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-brand/20 text-sm font-semibold text-brand-light">A</span>
           <div class="min-w-0 flex-1">
             <p class="truncate text-xs font-medium text-gray-200">{{ admin.adminUser?.email || 'Администратор' }}</p>
             <p class="mt-0.5 text-[11px] text-gray-600">Полный доступ</p>
@@ -138,13 +139,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown));
             type="button"
             class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-gray-800 bg-gray-900 text-lg text-gray-300 transition hover:border-gray-700 hover:bg-gray-800 lg:hidden"
             aria-label="Открыть меню"
+            aria-controls="admin-navigation"
             :aria-expanded="sidebarOpen"
             @click="sidebarOpen = true"
           >
             ☰
           </button>
           <div class="min-w-0">
-            <p class="hidden text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-400/80 sm:block">Административный контур</p>
+            <p class="hidden text-[10px] font-semibold uppercase tracking-[0.2em] text-brand-light/80 sm:block">Административный контур</p>
             <h1 class="truncate text-base font-semibold text-white sm:text-lg">{{ currentNav?.label || 'Панель управления' }}</h1>
           </div>
         </div>

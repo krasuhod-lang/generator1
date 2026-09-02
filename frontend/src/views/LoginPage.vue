@@ -33,10 +33,10 @@ async function submit() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-950 flex">
+  <div class="auth-shell min-h-screen bg-gray-950 flex">
     <!-- Левая «обложка» сервиса -->
     <aside
-      class="hidden lg:flex flex-col justify-between w-1/2 relative overflow-hidden
+      class="auth-aside hidden lg:flex flex-col justify-between w-1/2 relative overflow-hidden
              bg-gradient-to-br from-indigo-700 via-indigo-800 to-gray-950 p-12 text-white"
     >
       <!-- декоративные пятна -->
@@ -44,13 +44,13 @@ async function submit() {
       <div class="pointer-events-none absolute bottom-0 -left-24 w-96 h-96 rounded-full bg-fuchsia-500/10 blur-3xl"></div>
 
       <div class="relative flex items-center gap-3">
-        <svg viewBox="0 0 32 32" class="w-9 h-9" fill="none" aria-label="SEO Genius">
+        <svg viewBox="0 0 32 32" class="auth-brand-mark w-9 h-9" fill="none" aria-label="SeoMST">
           <rect width="32" height="32" rx="8" fill="white"/>
           <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="#4f46e5" stroke-width="2" stroke-linecap="round"/>
           <circle cx="16" cy="16" r="3" fill="#4f46e5"/>
           <path d="M22 22l4 4" stroke="#4f46e5" stroke-width="2.5" stroke-linecap="round"/>
         </svg>
-        <span class="text-2xl font-bold tracking-tight">SEO Genius</span>
+        <span class="text-2xl font-bold tracking-tight">SeoMST</span>
       </div>
 
       <div class="relative max-w-md">
@@ -77,56 +77,67 @@ async function submit() {
         </ul>
       </div>
 
-      <p class="relative text-sm text-indigo-200/70">© SEO Genius · v4.0</p>
+      <p class="relative text-sm text-indigo-200/70">© SeoMST · рабочее пространство для SEO-команд</p>
     </aside>
 
     <!-- Правая часть — форма входа -->
-    <div class="flex-1 flex items-center justify-center px-4 py-10">
+    <div class="auth-form-column flex-1 flex items-center justify-center px-4 py-10">
       <div class="w-full max-w-sm">
         <!-- Logo (для мобильных, где обложка скрыта) -->
         <div class="text-center mb-8 lg:hidden">
           <div class="inline-flex items-center gap-2 mb-2">
-            <svg viewBox="0 0 32 32" class="w-8 h-8" fill="none" aria-label="SEO Genius">
+            <svg viewBox="0 0 32 32" class="auth-brand-mark w-8 h-8" fill="none" aria-label="SeoMST">
               <rect width="32" height="32" rx="8" fill="#6366f1"/>
               <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="white" stroke-width="2" stroke-linecap="round"/>
               <circle cx="16" cy="16" r="3" fill="white"/>
               <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
             </svg>
-            <span class="text-xl font-bold text-white">SEO Genius</span>
+            <span class="text-xl font-bold text-white">SeoMST</span>
           </div>
-          <p class="text-gray-500 text-sm">v4.0 — AI Content Platform</p>
+          <p class="text-gray-500 text-sm">AI SEO workspace</p>
         </div>
 
-        <div class="card">
+        <div class="auth-card card">
           <h1 class="text-xl font-semibold text-white mb-1">С возвращением 👋</h1>
           <p class="text-sm text-gray-400 mb-6">Войдите, чтобы продолжить работу</p>
 
           <form @submit.prevent="submit" class="space-y-4">
             <div>
-              <label class="label">Email</label>
+              <label for="login-email" class="label">Email</label>
               <input
+                id="login-email"
                 v-model="email"
                 type="email"
+                inputmode="email"
+                autocapitalize="none"
                 class="input"
                 placeholder="you@example.com"
                 required
                 autocomplete="email"
+                :aria-invalid="Boolean(error)"
+                aria-describedby="login-error"
               />
             </div>
             <div>
-              <label class="label">Пароль</label>
+              <label for="login-password" class="label">Пароль</label>
               <input
+                id="login-password"
                 v-model="password"
                 type="password"
                 class="input"
                 placeholder="••••••••"
                 required
                 autocomplete="current-password"
+                :aria-invalid="Boolean(error)"
+                aria-describedby="login-error"
               />
             </div>
 
             <div
               v-if="error"
+              id="login-error"
+              role="alert"
+              aria-live="polite"
               class="bg-red-950 border border-red-800 text-red-400 text-sm px-3 py-2 rounded-lg"
             >
               {{ error }}

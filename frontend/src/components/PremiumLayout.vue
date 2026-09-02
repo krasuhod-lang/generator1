@@ -20,7 +20,7 @@
  * в `tailwind.config.js` в PR-3 (slate-900/800 фон, brand-indigo акцент,
  * tabular-nums для цифр).
  */
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth.js';
 import { useViewModeStore, VIEW_MODES } from '../stores/viewMode.js';
@@ -49,6 +49,7 @@ const auth = useAuthStore();
 const viewMode = useViewModeStore();
 
 const collapsed = ref(false);
+const sidebarOpen = ref(false);
 
 const activeKey = computed(() => {
   const p = route.path;
@@ -57,8 +58,20 @@ const activeKey = computed(() => {
 });
 
 function go(item) {
+  sidebarOpen.value = false;
   router.push(item.path);
 }
+
+function closeSidebar() {
+  sidebarOpen.value = false;
+}
+
+function handleKeydown(event) {
+  if (event.key === 'Escape') closeSidebar();
+}
+
+onMounted(() => window.addEventListener('keydown', handleKeydown));
+onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown));
 
 function setMode(mode) {
   viewMode.setMode(mode);
@@ -76,13 +89,22 @@ function handleLogout() {
 </script>
 
 <template>
-  <div class="min-h-screen flex bg-surface-base text-gray-100 font-sans">
+  <div class="premium-shell min-h-screen flex bg-surface-base text-gray-100 font-sans">
+    <div
+      v-if="sidebarOpen"
+      class="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+      aria-hidden="true"
+      @click="closeSidebar"
+    />
+
     <!-- Sidebar -->
     <aside
+      id="premium-navigation"
       :class="[
-        'flex-shrink-0 border-r border-surface-muted bg-surface-raised',
-        'flex flex-col transition-[width] duration-200 ease-out',
-        collapsed ? 'w-16' : 'w-60',
+        'fixed inset-y-0 left-0 z-50 flex-shrink-0 border-r border-surface-muted bg-surface-raised',
+        'flex w-60 -translate-x-full flex-col transition-[width,transform] duration-200 ease-out lg:static lg:z-auto lg:translate-x-0',
+        collapsed ? 'lg:w-16' : 'lg:w-60',
+        sidebarOpen ? 'translate-x-0' : '',
       ]"
     >
       <div class="px-4 py-4 flex items-center gap-2.5">
@@ -92,13 +114,12 @@ function handleLogout() {
           <circle cx="16" cy="16" r="3" fill="white" />
           <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round" />
         </svg>
-        <span v-if="!collapsed" class="font-semibold text-white truncate">SEO Genius</span>
+        <span v-if="!collapsed" class="font-semibold text-white truncate">SeoMST</span>
       </div>
 
       <nav class="flex-1 px-2 py-2 space-y-0.5" aria-label="Premium navigation">
         <button
           v-for="item in nav"
-          :key="item.key"
           type="button"
           @click="go(item)"
           :class="[
@@ -116,7 +137,7 @@ function handleLogout() {
 
       <button
         type="button"
-        class="m-2 px-2 py-1.5 rounded-md text-xs text-gray-400 hover:text-gray-100 hover:bg-surface-muted/40 transition-colors flex items-center justify-center gap-2"
+        class="m-2 hidden px-2 py-1.5 rounded-md text-xs text-gray-400 hover:text-gray-100 hover:bg-surface-muted/40 transition-colors items-center justify-center gap-2 lg:flex"
         @click="collapsed = !collapsed"
         :aria-label="collapsed ? 'Развернуть сайдбар' : 'Свернуть сайдбар'"
       >
@@ -129,10 +150,18 @@ function handleLogout() {
     <div class="flex-1 flex flex-col min-w-0">
       <!-- Topbar -->
       <header
-        class="border-b border-surface-muted bg-surface-raised/80 backdrop-blur px-6 py-3
+        class="border-b border-surface-muted bg-surface-raised/80 backdrop-blur px-4 py-3 sm:px-6
                flex items-center justify-between gap-4 flex-shrink-0"
       >
         <div class="min-w-0 flex items-center gap-3">
+          <button
+            type="button"
+            class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-surface-muted bg-surface-base text-lg text-gray-300 transition hover:border-brand-light/50 hover:text-white lg:hidden"
+            aria-label="Открыть меню"
+            aria-controls="premium-navigation"
+            :aria-expanded="sidebarOpen"
+            @click="sidebarOpen = true"
+          >☰</button>
           <slot name="title">
             <span class="text-sm font-semibold text-gray-200 truncate">Премиум-дашборд</span>
           </slot>

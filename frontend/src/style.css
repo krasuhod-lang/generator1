@@ -15,7 +15,16 @@
 
   * { box-sizing: border-box; }
   html, body, #app { min-width: 320px; min-height: 100%; }
-  body { margin: 0; }
+  body {
+    margin: 0;
+    background: var(--ui-bg);
+    color: var(--ui-text);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    text-rendering: optimizeLegibility;
+  }
+
+  button, input, select, textarea { font: inherit; }
+  ::selection { background: rgba(124, 131, 255, 0.32); color: #fff; }
 
   /* Скроллбар под более светлую тему */
   ::-webkit-scrollbar          { width: 8px; height: 8px; }
@@ -273,5 +282,226 @@
     @apply font-sans tabular-nums;
     font-variant-numeric: tabular-nums lining-nums;
     font-feature-settings: 'tnum' 1, 'lnum' 1;
+  }
+
+  /* SeoMST visual system: one restrained ink/surface palette for client and admin. */
+  :root {
+    --ui-bg: #0a1020;
+    --ui-bg-soft: #0e172a;
+    --ui-surface: rgba(19, 30, 53, 0.88);
+    --ui-surface-strong: #16233e;
+    --ui-surface-muted: #1d2c49;
+    --ui-border: rgba(137, 157, 198, 0.2);
+    --ui-border-strong: rgba(137, 157, 198, 0.34);
+    --ui-text: #f4f7ff;
+    --ui-muted: #a2b0c8;
+    --ui-subtle: #71809e;
+    --ui-brand: #7c83ff;
+    --ui-brand-light: #aab0ff;
+    --ui-brand-strong: #6467f2;
+    --ui-brand-soft: rgba(124, 131, 255, 0.14);
+    --ui-success: #62d7b0;
+    --ui-warning: #f2be68;
+    --ui-danger: #ff7d91;
+    --ui-radius: 16px;
+    --ui-shadow: 0 22px 60px rgba(1, 6, 18, 0.28);
+  }
+
+  .app-shell,
+  .app-shell-main,
+  .app-main,
+  .premium-shell,
+  .admin-shell,
+  .auth-shell {
+    background: var(--ui-bg) !important;
+    color: var(--ui-text);
+    overflow-x: hidden;
+  }
+
+  .app-nav-item,
+  .admin-shell nav a,
+  .premium-shell nav button {
+    min-height: 44px;
+  }
+
+  .app-sidebar,
+  .admin-shell aside,
+  .premium-shell aside {
+    background: rgba(13, 22, 40, 0.96) !important;
+    border-color: var(--ui-border) !important;
+  }
+
+  .app-header,
+  .admin-shell .app-header,
+  .premium-shell header {
+    background: rgba(13, 22, 40, 0.84) !important;
+    border-color: var(--ui-border) !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
+  }
+
+  .app-page,
+  .app-main > .max-w-7xl,
+  .app-main > .max-w-6xl,
+  .app-main > .max-w-5xl,
+  .app-main > .max-w-4xl {
+    padding-top: clamp(22px, 3vw, 36px);
+    padding-bottom: clamp(36px, 5vw, 64px);
+  }
+
+  .app-page-heading {
+    align-items: center;
+    margin-bottom: clamp(20px, 3vw, 28px);
+  }
+
+  .app-page-heading h1 {
+    color: var(--ui-text);
+    font-weight: 700;
+  }
+
+  .app-page-heading p { color: var(--ui-muted); }
+  .app-page-kicker { color: var(--ui-brand); }
+
+  .card,
+  .app-surface {
+    background: var(--ui-surface) !important;
+    border: 1px solid var(--ui-border) !important;
+    border-radius: var(--ui-radius) !important;
+    box-shadow: var(--ui-shadow) !important;
+  }
+
+  .btn {
+    min-height: 42px;
+    border-radius: 11px;
+    border: 1px solid transparent;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    transition: transform 160ms ease, background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--ui-brand-strong), var(--ui-brand)) !important;
+    box-shadow: 0 10px 24px rgba(100, 103, 242, 0.2);
+  }
+  .btn-primary:hover:not(:disabled) { box-shadow: 0 14px 30px rgba(100, 103, 242, 0.3); }
+  .btn-secondary {
+    background: rgba(29, 44, 73, 0.82) !important;
+    border-color: var(--ui-border) !important;
+  }
+  .btn-secondary:hover:not(:disabled) { background: var(--ui-surface-muted) !important; border-color: var(--ui-border-strong) !important; }
+  .btn-ghost { color: var(--ui-muted) !important; }
+  .btn-ghost:hover:not(:disabled) { background: var(--ui-brand-soft) !important; color: var(--ui-text) !important; }
+
+  .input,
+  .textarea {
+    min-height: 44px;
+    background: rgba(9, 16, 31, 0.7) !important;
+    border-color: var(--ui-border-strong) !important;
+    border-radius: 11px !important;
+    color: var(--ui-text) !important;
+  }
+  .input::placeholder,
+  .textarea::placeholder { color: var(--ui-subtle) !important; }
+  .input:focus,
+  .textarea:focus {
+    border-color: var(--ui-brand) !important;
+    box-shadow: 0 0 0 3px rgba(124, 131, 255, 0.16) !important;
+  }
+  .label { color: var(--ui-muted) !important; letter-spacing: 0.1em; }
+
+  .badge {
+    min-height: 26px;
+    border: 1px solid rgba(137, 157, 198, 0.2);
+  }
+
+  .auth-shell {
+    min-height: 100svh;
+    background: radial-gradient(circle at 10% 10%, rgba(124, 131, 255, 0.16), transparent 32%), var(--ui-bg) !important;
+  }
+  .auth-aside {
+    background: radial-gradient(circle at 78% 22%, rgba(124, 131, 255, 0.26), transparent 30%), linear-gradient(145deg, #262c8f 0%, #3435a3 38%, #0a1020 100%) !important;
+  }
+  .auth-form-column {
+    padding: clamp(20px, 5vw, 64px);
+  }
+  .auth-card {
+    width: 100%;
+    max-width: 430px;
+    padding: clamp(22px, 3vw, 32px) !important;
+    border-color: rgba(137, 157, 198, 0.27) !important;
+    background: rgba(19, 30, 53, 0.9) !important;
+  }
+  .auth-card form { gap: 18px; }
+  .auth-card .btn-primary { min-height: 48px; }
+  .auth-brand-mark { box-shadow: 0 14px 32px rgba(124, 131, 255, 0.22); }
+
+  .admin-shell .btn-ghost { color: var(--ui-muted) !important; }
+
+  .admin-page { max-width: 1440px; }
+  .admin-page-heading { padding-bottom: 4px; }
+  .admin-page-heading > div:first-child { min-width: min(100%, 34rem); }
+  .admin-page-heading > div:last-child { flex-shrink: 0; }
+  .admin-integration-card { overflow: hidden; }
+  .admin-health-meta { min-width: 180px; }
+  .admin-action-row { align-items: stretch; }
+  .admin-action-row .input { min-width: 220px; }
+  .admin-notice { line-height: 1.55; }
+  .data-table th { color: var(--ui-subtle); font-weight: 600; }
+  .data-table td, .data-table th { border-color: var(--ui-border) !important; }
+
+  .admin-shell main,
+  .premium-shell main { min-width: 0; }
+
+  .admin-shell .app-main > *,
+  .premium-shell main > *,
+  .app-main > * { min-width: 0; }
+
+  .app-page table,
+  .admin-shell table,
+  .premium-shell table { max-width: 100%; }
+
+  .app-page img,
+  .admin-shell img,
+  .premium-shell img { max-width: 100%; height: auto; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  @media (max-width: 1023px) {
+    .auth-aside { display: none !important; }
+    .auth-form-column { min-height: 100svh; }
+  }
+
+  @media (max-width: 640px) {
+    .app-page,
+    .app-main > .max-w-7xl,
+    .app-main > .max-w-6xl,
+    .app-main > .max-w-5xl,
+    .app-main > .max-w-4xl {
+      padding-right: 14px;
+      padding-left: 14px;
+    }
+    .app-page-heading { align-items: stretch; }
+    .app-page-heading > div:last-child { width: 100%; }
+    .app-page-heading > div:last-child > * { flex: 1 1 auto; }
+    .admin-page { padding-right: 14px !important; padding-left: 14px !important; }
+    .admin-page-heading { align-items: stretch; }
+    .admin-page-heading > div:first-child,
+    .admin-page-heading > div:last-child { width: 100%; }
+    .admin-health-meta { min-width: 0; flex-basis: 100%; text-align: left; }
+    .admin-action-row > .input,
+    .admin-action-row > .btn,
+    .admin-action-row > button { width: 100%; min-width: 0; justify-content: center; }
+    .admin-form-actions { width: 100%; }
+    .app-form-actions { margin-right: -8px; margin-left: -8px; }
+    .auth-form-column { padding: 16px; align-items: flex-start; padding-top: max(20px, env(safe-area-inset-top)); }
+    .auth-card { margin-top: 8px; border-radius: 18px !important; }
+    .auth-card .input { min-height: 48px; }
+    .auth-card .btn { min-height: 50px; }
   }
 }

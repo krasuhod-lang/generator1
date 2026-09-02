@@ -170,10 +170,10 @@ onMounted(load);
 
 <template>
   <AdminLayout>
-    <div class="max-w-7xl mx-auto px-6 py-6 space-y-6">
-      <div class="flex flex-wrap items-start justify-between gap-4">
+    <div class="admin-page max-w-7xl mx-auto px-6 py-6 space-y-6">
+      <div class="admin-page-heading flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p class="text-xs uppercase tracking-[0.18em] text-emerald-400 font-semibold">Control plane</p>
+          <p class="text-xs uppercase tracking-[0.18em] text-brand-light font-semibold">Control plane</p>
           <h1 class="text-2xl font-bold text-white mt-1">API ключи и интеграции</h1>
           <p class="text-sm text-gray-400 mt-2 max-w-3xl">
             Единый реестр секретов для AI-моделей, поиска, рассылок и внутренних сервисов.
@@ -190,16 +190,16 @@ onMounted(load);
         </div>
       </div>
 
-      <div class="rounded-xl border border-amber-800/70 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+      <div class="admin-notice rounded-xl border border-amber-800/70 bg-amber-950/30 px-4 py-3 text-sm text-amber-200" role="note">
         <strong>Безопасность:</strong> новое значение передаётся только по защищённому admin API,
         сохраняется в AES-256-GCM и не попадает в ответ, логи или audit trail. Удаление override
         возвращает использование ключа из `.env`, если он там задан.
       </div>
 
-      <div v-if="error" class="rounded-xl border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
+      <div v-if="error" class="admin-notice rounded-xl border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300" role="alert" aria-live="polite">
         {{ error }}
       </div>
-      <div v-if="notice" class="rounded-xl border border-emerald-800 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-300">
+      <div v-if="notice" class="admin-notice rounded-xl border border-emerald-800 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-300" role="status" aria-live="polite">
         {{ notice }}
       </div>
 
@@ -215,7 +215,7 @@ onMounted(load);
             <article
               v-for="item in group.items"
               :key="item.envName"
-              class="rounded-xl border border-gray-800 bg-gray-900/70 p-4 shadow-lg shadow-black/10"
+              class="admin-integration-card card p-4"
             >
               <div class="flex flex-wrap items-start justify-between gap-4">
                 <div class="min-w-0">
@@ -231,7 +231,7 @@ onMounted(load);
                   <p class="mt-1 text-sm text-gray-400">{{ item.description }}</p>
                   <p class="mt-2 font-mono text-xs text-gray-600">{{ item.envName }}</p>
                 </div>
-                <div class="text-right text-xs text-gray-500">
+                <div class="admin-health-meta text-right text-xs text-gray-500">
                   <div v-if="item.configured" class="font-mono text-gray-300">{{ item.masked || '••••••••••••' }}</div>
                   <div v-else class="text-amber-400">Не настроен</div>
                   <div class="mt-1">Ротация: {{ fmtDate(item.last_rotated_at) }}</div>
@@ -243,7 +243,7 @@ onMounted(load);
                 </div>
               </div>
 
-              <div class="mt-4 flex flex-col lg:flex-row gap-2">
+              <div class="admin-action-row mt-4 flex flex-col lg:flex-row gap-2">
                 <input
                   v-model="draftValues[item.envName]"
                   type="password"
@@ -283,7 +283,7 @@ onMounted(load);
         </section>
       </template>
 
-      <section class="card overflow-x-auto">
+      <section class="admin-history-card card overflow-x-auto">
         <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div>
             <h2 class="font-semibold text-white">История ротаций</h2>
@@ -291,7 +291,7 @@ onMounted(load);
           </div>
           <span class="text-xs text-gray-600">Последние 100 событий</span>
         </div>
-        <table class="w-full min-w-[680px] text-sm">
+        <table class="data-table w-full min-w-[680px] text-sm">
           <thead>
             <tr class="border-b border-gray-800 text-left text-gray-500">
               <th class="px-3 py-2 font-medium">Дата</th>

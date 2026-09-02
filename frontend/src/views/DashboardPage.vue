@@ -332,9 +332,9 @@ function goPage(next) {
 <style scoped>
 .fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
-.task-toolbar { background: rgba(17, 24, 39, 0.55); border: 1px solid rgba(55, 65, 81, 0.8); }
+.task-toolbar { background: var(--ui-surface); border: 1px solid var(--ui-border); box-shadow: var(--ui-shadow); }
 .filter-chip { transition: background-color 0.15s ease, color 0.15s ease; }
-.filter-chip.active { background: rgba(79, 70, 229, 0.25); color: #c7d2fe; border-color: rgba(99, 102, 241, 0.6); }
+.filter-chip.active { background: var(--ui-brand-soft); color: var(--ui-brand-light, #aab0ff); border-color: rgba(124, 131, 255, 0.6); }
 </style>
 
 <template>

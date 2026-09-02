@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted } from 'vue';
 
 const meta = [
-  { name: 'description', content: 'SEO Genius — AI-платформа для исследования спроса, генерации экспертного SEO-контента и роста органического трафика в Google и Яндексе.' },
+  { name: 'description', content: 'SeoMST — AI-платформа для исследования спроса, генерации экспертного SEO-контента и роста органического трафика в Google и Яндексе.' },
   { name: 'robots', content: 'index,follow,max-image-preview:large' },
 ];
 
@@ -49,7 +49,7 @@ const faqs = [
     answer: 'После регистрации доступны 5 бесплатных генераций без банковской карты. После использования бесплатного доступа можно выбрать месячную подписку под объём контента и количество проектов.',
   },
   {
-    question: 'Что такое лимиты в SEO Genius?',
+    question: 'Что такое лимиты в SeoMST?',
     answer: 'Лимиты — это понятный ресурс для работы AI-инструментов: исследований, анализа, генерации контента и подготовки отчётов. Пакет подбирается под объём задач и количество проектов.',
   },
   {
@@ -58,7 +58,7 @@ const faqs = [
   },
   {
     question: 'Чем платформа отличается от обычного AI-копирайтера?',
-    answer: 'SEO Genius работает не только с текстом. Система связывает исследование ниши, факты, доказательства, E-E-A-T, LSI, структуру, контроль качества, проекты и отчётность в единый процесс.',
+    answer: 'SeoMST работает не только с текстом. Система связывает исследование ниши, факты, доказательства, E-E-A-T, LSI, структуру, контроль качества, проекты и отчётность в единый процесс.',
   },
   {
     question: 'Нужно ли менять рабочий процесс команды?',
@@ -81,7 +81,7 @@ function setMeta(name, content) {
 }
 
 onMounted(() => {
-  document.title = 'SEO Genius — AI-платформа для SEO-контента и роста трафика';
+  document.title = 'SeoMST — AI-платформа для SEO-контента и роста трафика';
   meta.forEach(({ name, content }) => setMeta(name, content));
 
   schemaScript = document.createElement('script');
@@ -90,7 +90,7 @@ onMounted(() => {
   schemaScript.textContent = JSON.stringify({
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
-    name: 'SEO Genius',
+    name: 'SeoMST',
     applicationCategory: 'BusinessApplication',
     operatingSystem: 'Web',
     description: 'AI-платформа для исследования спроса, генерации экспертного SEO-контента и роста органического трафика.',
@@ -127,11 +127,11 @@ onBeforeUnmount(() => {
 
     <header class="landing-header">
       <div class="landing-container nav-inner">
-        <RouterLink to="/" class="brand-lockup" aria-label="SEO Genius — на главную">
+        <RouterLink to="/" class="brand-lockup" aria-label="SeoMST — на главную">
           <span class="brand-mark" aria-hidden="true">
             <span></span><span></span><span></span>
           </span>
-          <span class="brand-wordmark">SEO <b>GENIUS</b></span>
+          <span class="brand-wordmark">SeoMST</span>
         </RouterLink>
 
         <nav class="desktop-nav" aria-label="Основная навигация">
@@ -153,7 +153,7 @@ onBeforeUnmount(() => {
         <div class="hero-copy">
           <div class="eyebrow"><span class="eyebrow-dot"></span> AI SEO OS для команд, которые растут</div>
           <h1>Создавайте контент, который <em>превращает поиск в рост.</em></h1>
-          <p class="hero-lead">SEO Genius объединяет исследование спроса, экспертную генерацию и аналитику в один управляемый pipeline — от первого запроса до понятного результата.</p>
+          <p class="hero-lead">SeoMST объединяет исследование спроса, экспертную генерацию и аналитику в один управляемый pipeline — от первого запроса до понятного результата.</p>
           <div class="hero-actions">
             <RouterLink to="/register" class="button button-primary">Получить 5 генераций бесплатно <span>↗</span></RouterLink>
             <a href="#platform" class="button button-ghost">Посмотреть платформу <span class="play-icon">▶</span></a>
@@ -161,11 +161,11 @@ onBeforeUnmount(() => {
           <div class="hero-note"><span class="note-check">✓</span> <strong>5 бесплатных генераций</strong> на старте <span class="note-separator">·</span> Без банковской карты <span class="note-separator">·</span> Далее — подписка</div>
         </div>
 
-        <div class="hero-visual" aria-label="Пример рабочей панели SEO Genius">
+        <div class="hero-visual" aria-label="Пример рабочей панели SeoMST">
           <div class="visual-orbit orbit-a"></div>
           <div class="visual-orbit orbit-b"></div>
           <div class="dashboard-window">
-            <div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span class="window-title">SEO Genius / Executive view</span><span class="window-menu">•••</span></div>
+            <div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span class="window-title">SeoMST / Executive view</span><span class="window-menu">•••</span></div>
             <div class="window-body">
               <div class="dash-topline"><div><span class="dash-caption">ОРГАНИЧЕСКИЙ РОСТ</span><strong>+38.4%</strong><small>за последние 90 дней <b>↗</b></small></div><span class="dash-period">90 дней⌄</span></div>
               <div class="chart-area">
@@ -202,7 +202,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section id="workflow" class="workflow-section section-pad">
-      <div class="landing-container workflow-inner"><div class="workflow-copy"><div class="eyebrow muted-eyebrow">Как работает система</div><h2>Сложная работа.<br /><span>Простой путь.</span></h2><p>Вы задаёте направление — SEO Genius связывает исследование, генерацию, контроль и аналитику в понятную последовательность.</p><RouterLink to="/register" class="button button-primary">Запустить первый проект <span>↗</span></RouterLink></div><div class="steps-list"><div class="step-item"><span class="step-index">01</span><div><h3>Опишите задачу</h3><p>Техническое задание, ниша, аудитория и бизнес-цель.</p></div><span class="step-arrow">↗</span></div><div class="step-item active-step"><span class="step-index">02</span><div><h3>Получите AI-исследование</h3><p>Спрос, intent, entities, конкуренты и точки дифференциации.</p></div><span class="step-arrow">↗</span></div><div class="step-item"><span class="step-index">03</span><div><h3>Создайте контент</h3><p>SEO-текст, блог, ссылочная статья или мета-теги.</p></div><span class="step-arrow">↗</span></div><div class="step-item"><span class="step-index">04</span><div><h3>Измеряйте рост</h3><p>Отчёт, рекомендации и следующий приоритет.</p></div><span class="step-arrow">↗</span></div></div></div>
+      <div class="landing-container workflow-inner"><div class="workflow-copy"><div class="eyebrow muted-eyebrow">Как работает система</div><h2>Сложная работа.<br /><span>Простой путь.</span></h2><p>Вы задаёте направление — SeoMST связывает исследование, генерацию, контроль и аналитику в понятную последовательность.</p><RouterLink to="/register" class="button button-primary">Запустить первый проект <span>↗</span></RouterLink></div><div class="steps-list"><div class="step-item"><span class="step-index">01</span><div><h3>Опишите задачу</h3><p>Техническое задание, ниша, аудитория и бизнес-цель.</p></div><span class="step-arrow">↗</span></div><div class="step-item active-step"><span class="step-index">02</span><div><h3>Получите AI-исследование</h3><p>Спрос, intent, entities, конкуренты и точки дифференциации.</p></div><span class="step-arrow">↗</span></div><div class="step-item"><span class="step-index">03</span><div><h3>Создайте контент</h3><p>SEO-текст, блог, ссылочная статья или мета-теги.</p></div><span class="step-arrow">↗</span></div><div class="step-item"><span class="step-index">04</span><div><h3>Измеряйте рост</h3><p>Отчёт, рекомендации и следующий приоритет.</p></div><span class="step-arrow">↗</span></div></div></div>
     </section>
 
     <section id="plans" class="plans-section section-pad">
@@ -219,13 +219,13 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section class="proof-section section-pad"><div class="landing-container proof-panel"><div class="proof-panel-copy"><div class="eyebrow">Данные → решения → рост</div><h2>Ваш SEO-процесс<br />может быть <em>собранным.</em></h2><p>Вместо десятков вкладок — одна система, где каждая задача связана с проектом, контекстом и измеримым результатом.</p><div class="proof-quote"><span class="quote-mark">“</span><p>Наконец-то контент создаётся не «по ощущениям», а по понятному плану.</p><small>— команда SEO Genius</small></div></div><div class="proof-metrics"><div><strong>01</strong><span>Соберите<br />первый проект</span></div><div><strong>02</strong><span>Сформируйте<br />семантическое ядро</span></div><div><strong>03</strong><span>Публикуйте<br />с уверенностью</span></div><div class="metric-accent"><strong>∞</strong><span>Повторяйте<br />цикл роста</span></div></div></div></section>
+    <section class="proof-section section-pad"><div class="landing-container proof-panel"><div class="proof-panel-copy"><div class="eyebrow">Данные → решения → рост</div><h2>Ваш SEO-процесс<br />может быть <em>собранным.</em></h2><p>Вместо десятков вкладок — одна система, где каждая задача связана с проектом, контекстом и измеримым результатом.</p><div class="proof-quote"><span class="quote-mark">“</span><p>Наконец-то контент создаётся не «по ощущениям», а по понятному плану.</p><small>— команда SeoMST</small></div></div><div class="proof-metrics"><div><strong>01</strong><span>Соберите<br />первый проект</span></div><div><strong>02</strong><span>Сформируйте<br />семантическое ядро</span></div><div><strong>03</strong><span>Публикуйте<br />с уверенностью</span></div><div class="metric-accent"><strong>∞</strong><span>Повторяйте<br />цикл роста</span></div></div></div></section>
 
     <section id="faq" class="faq-section section-pad"><div class="landing-container faq-inner"><div class="faq-heading"><div class="eyebrow muted-eyebrow">Ответы без мелкого шрифта</div><h2>Частые<br /><span>вопросы.</span></h2></div><div class="faq-list"><details v-for="(faq, index) in faqs" :key="faq.question" :open="index === 0"><summary><span>{{ faq.question }}</span><b>+</b></summary><p>{{ faq.answer }}</p></details></div></div></section>
 
     <section class="final-cta-section"><div class="landing-container final-cta"><div class="final-glow"></div><div class="eyebrow">Следующий шаг — за вами</div><h2>Создайте контент,<br /><em>который работает.</em></h2><p>Начните с первого проекта и соберите свой SEO-процесс в одной системе.</p><RouterLink to="/register" class="button button-light">Начать бесплатно <span>↗</span></RouterLink></div></section>
 
-    <footer class="landing-footer"><div class="landing-container footer-inner"><RouterLink to="/" class="brand-lockup"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span class="brand-wordmark">SEO <b>GENIUS</b></span></RouterLink><span class="footer-copy">AI-платформа для контента, который ранжируется.</span><div class="footer-links"><a href="#platform">Платформа</a><a href="#plans">Лимиты</a><RouterLink to="/login">Войти</RouterLink></div><span class="footer-year">© 2026 SEO Genius</span></div></footer>
+    <footer class="landing-footer"><div class="landing-container footer-inner"><RouterLink to="/" class="brand-lockup"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span class="brand-wordmark">SeoMST</span></RouterLink><span class="footer-copy">AI-платформа для контента, который ранжируется.</span><div class="footer-links"><a href="#platform">Платформа</a><a href="#plans">Лимиты</a><RouterLink to="/login">Войти</RouterLink></div><span class="footer-year">© 2026 SeoMST</span></div></footer>
   </main>
 </template>
 

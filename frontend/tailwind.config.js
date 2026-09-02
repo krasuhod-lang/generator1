@@ -13,10 +13,10 @@ export default {
     extend: {
       colors: {
         brand: {
-          DEFAULT: '#6366f1', // indigo-500
-          dark:    '#4f46e5', // indigo-600
-          light:   '#a5b4fc', // indigo-300
-          indigo:  '#6366f1', // brand-indigo — акцентный цвет premium UI
+          DEFAULT: '#7c83ff', // SeoMST brand accent
+          dark:    '#6467f2', // SeoMST strong accent
+          light:   '#aab0ff', // SeoMST accessible light accent
+          indigo:  '#7c83ff', // brand-indigo — акцентный цвет premium UI
         },
         // Status / trend tokens из ТЗ §6.1 — модули отчёта (Striking Distance,
         // CTR Gap, Content Health) подсвечивают точки роста этими цветами.
@@ -33,9 +33,9 @@ export default {
         // Premium dashboard surface (ТЗ §6.2): глубокий slate-фон для тёмной
         // темы, поверх которого ложатся карточки KPI и таймлайн работ.
         surface: {
-          base:   '#0f172a', // slate-900 — фон страницы
-          raised: '#1e293b', // slate-800 — фон карточек
-          muted:  '#334155', // slate-700 — borders/dividers
+          base:   '#0a1020', // SeoMST ink background
+          raised: '#131e35', // SeoMST raised surface
+          muted:  '#1d2c49', // SeoMST borders/dividers
         },
         // Чуть более светлая и приятная сине-серая палитра.
         // Переопределяет стандартный `gray`, который используется по всему

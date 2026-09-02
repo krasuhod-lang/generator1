@@ -123,7 +123,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell min-h-screen bg-gray-950 text-gray-100">
+  <div class="app-shell authenticated-shell min-h-screen bg-gray-950 text-gray-100">
     <div
       v-if="sidebarOpen"
       class="app-sidebar-backdrop fixed inset-0 bg-black/60 z-[var(--app-overlay-z)] lg:hidden"
@@ -133,6 +133,7 @@ onBeforeUnmount(() => {
 
     <aside
       ref="sidebarRef"
+      id="client-navigation"
       :class="[
         'app-sidebar fixed inset-y-0 left-0 z-[calc(var(--app-overlay-z)+1)] flex flex-col',
         'bg-gray-900 border-r border-gray-800 shadow-2xl shadow-black/30 transition-transform duration-200',
@@ -144,13 +145,13 @@ onBeforeUnmount(() => {
     >
       <div class="app-sidebar-brand flex items-center gap-3 px-4 py-4 border-b border-gray-800/80">
         <svg viewBox="0 0 32 32" class="w-8 h-8 flex-shrink-0" fill="none" aria-hidden="true">
-          <rect width="32" height="32" rx="9" fill="#6366f1"/>
+          <rect width="32" height="32" rx="9" fill="#7c83ff"/>
           <path d="M8 16a8 8 0 1 1 10.6 7.6" stroke="white" stroke-width="2" stroke-linecap="round"/>
           <circle cx="16" cy="16" r="3" fill="white"/>
           <path d="M22 22l4 4" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
         </svg>
         <div v-if="!sidebarCollapsed" class="min-w-0">
-          <p class="text-sm font-semibold text-white truncate">SEO Genius</p>
+          <p class="text-sm font-semibold text-white truncate">SeoMST</p>
           <p class="text-[11px] text-gray-500 truncate">рабочий кабинет</p>
         </div>
         <button
@@ -178,7 +179,7 @@ onBeforeUnmount(() => {
                 'app-nav-item w-full flex items-center gap-3 rounded-xl text-left transition-all duration-150',
                 sidebarCollapsed ? 'justify-center px-2 py-3' : 'px-3 py-2.5',
                 activeKey === item.key
-                  ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/30'
+                  ? 'bg-brand text-white shadow-lg shadow-brand/20'
                   : 'text-gray-400 hover:bg-gray-800/80 hover:text-gray-100',
               ]"
               :aria-current="activeKey === item.key ? 'page' : undefined"
@@ -218,13 +219,14 @@ onBeforeUnmount(() => {
             type="button"
             class="lg:hidden inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700 transition-colors"
             aria-label="Открыть навигацию"
+            aria-controls="client-navigation"
             :aria-expanded="sidebarOpen"
             @click="toggleSidebar"
           >
             <span class="text-lg" aria-hidden="true">☰</span>
           </button>
           <div class="min-w-0">
-            <p class="text-[10px] uppercase tracking-[0.16em] text-gray-600 hidden sm:block">SEO Genius · рабочий кабинет</p>
+            <p class="text-[10px] uppercase tracking-[0.16em] text-gray-600 hidden sm:block">SeoMST · рабочий кабинет</p>
             <div class="flex items-center gap-2 min-w-0">
               <span class="text-sm font-semibold text-white truncate">{{ activeItem?.label || 'Центр задач' }}</span>
               <span class="text-gray-700 hidden sm:inline">/</span>
@@ -243,20 +245,20 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="px-2.5 py-1.5 rounded-lg font-medium transition-colors"
-              :class="viewMode.isAnalyst ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'"
+              :class="viewMode.isAnalyst ? 'bg-brand text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'"
               :aria-pressed="viewMode.isAnalyst"
               @click="setMode(VIEW_MODES.ANALYST)"
             >Аналитик</button>
             <button
               type="button"
               class="px-2.5 py-1.5 rounded-lg font-medium transition-colors"
-              :class="viewMode.isClient ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'"
+              :class="viewMode.isClient ? 'bg-brand text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'"
               :aria-pressed="viewMode.isClient"
               @click="setMode(VIEW_MODES.CLIENT)"
             >Клиент</button>
           </div>
           <div class="hidden md:flex items-center gap-2 rounded-xl border border-gray-800 bg-gray-950/40 px-3 py-2 max-w-[220px]">
-            <span class="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-950 text-xs text-indigo-300" aria-hidden="true">{{ (auth.user?.name || auth.user?.email || 'П').slice(0, 1).toUpperCase() }}</span>
+            <span class="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-brand/15 text-xs text-brand-light" aria-hidden="true">{{ (auth.user?.name || auth.user?.email || 'П').slice(0, 1).toUpperCase() }}</span>
             <span class="text-xs text-gray-400 truncate">{{ auth.user?.name || auth.user?.email }}</span>
           </div>
           <button type="button" class="lg:hidden btn-ghost text-xs" @click="handleLogout">Выйти</button>

@@ -178,7 +178,7 @@ function fmtDate(iso) {
 
     <footer class="pr-footer">
       <span>{{ clientName || projectName }}</span>
-      <span>SEO Genius • {{ generatedHuman }}</span>
+      <span>SeoMST • {{ generatedHuman }}</span>
     </footer>
   </article>
 </template>
