@@ -5,7 +5,12 @@ const {
   upsertIntegrationSecret,
   removeIntegrationSecret,
 } = require('../services/integrations/integrationVault');
-const { probeIntegrationKey, probeAllIntegrationKeys } = require('../services/integrations/integrationKeyProbe');
+const {
+  probeAndPersistIntegrationKey,
+  probeAllIntegrationKeys,
+  clearProbeResult,
+  listProbeResults,
+} = require('../services/integrations/integrationKeyProbe');
 const db = require('../config/db');
 
 function errorStatus(error) {
@@ -15,8 +20,31 @@ function errorStatus(error) {
 
 async function listAdminIntegrationKeys(req, res) {
   try {
-    const secrets = await listIntegrationSecrets();
-    res.json({ secrets, generatedAt: new Date().toISOString() });
+    const [secrets, probes] = await Promise.all([
+      listIntegrationSecrets(),
+      listProbeResults(),
+    ]);
+    const probesByName = new Map(probes.map((probe) => [probe.env_name, probe]));
+    const enriched = secrets.map((secret) => {
+      const probe = probesByName.get(secret.envName);
+      const secretUpdated = secret.updated_at ? new Date(secret.updated_at).getTime() : 0;
+      const probeChecked = probe?.checked_at ? new Date(probe.checked_at).getTime() : 0;
+      return {
+        ...secret,
+        last_probe: probe && (!secretUpdated || probeChecked >= secretUpdated)
+          ? {
+              status: probe.status,
+              active: probe.active,
+              probeSupported: probe.probe_supported,
+              httpStatus: probe.http_status,
+              latencyMs: probe.latency_ms,
+              message: probe.message,
+              checkedAt: probe.checked_at,
+            }
+          : null,
+      };
+    });
+    res.json({ secrets: enriched, generatedAt: new Date().toISOString() });
   } catch (error) {
     console.error('[AdminIntegrationKeys] list failed:', error.message);
     res.status(500).json({ error: 'Не удалось загрузить реестр интеграций' });
@@ -32,6 +60,7 @@ async function putAdminIntegrationKey(req, res) {
       enabled,
       adminUserId: req.user?.id || null,
     });
+    await clearProbeResult(req.params.envName);
     res.status(200).json({ success: true, secret });
   } catch (error) {
     const status = errorStatus(error);
@@ -46,6 +75,7 @@ async function deleteAdminIntegrationKey(req, res) {
       envName: req.params.envName,
       adminUserId: req.user?.id || null,
     });
+    await clearProbeResult(req.params.envName);
     res.json({ success: true, result });
   } catch (error) {
     const status = errorStatus(error);
@@ -56,7 +86,7 @@ async function deleteAdminIntegrationKey(req, res) {
 
 async function probeAdminIntegrationKey(req, res) {
   try {
-    const result = await probeIntegrationKey(req.params.envName);
+    const result = await probeAndPersistIntegrationKey(req.params.envName);
     res.json({ result });
   } catch (error) {
     const status = errorStatus(error);

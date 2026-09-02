@@ -15,7 +15,7 @@
  *     продолжает работу.
  */
 
-const { callAnalyticLLM, hasAnalyticLLMKey, analyticCallCost } = require('./analyticLLM');
+const { callAnalyticLLM, hasAnalyticLLMKeyAsync, analyticCallCost } = require('./analyticLLM');
 const { getForecasterConfig } = require('./config');
 
 /**
@@ -297,7 +297,7 @@ async function runDeepSeekAnalysis(payload) {
   if (!cfg.enabled) {
     return { verdict: 'skipped', reason: 'feature_disabled' };
   }
-  if (!hasAnalyticLLMKey()) {
+  if (!(await hasAnalyticLLMKeyAsync())) {
     return { verdict: 'skipped', reason: 'no_api_key' };
   }
 
@@ -404,7 +404,7 @@ function _safeParseJsonArray(text) {
 async function runDeepSeekJunkRefine({ candidates, targetUrl } = {}) {
   const cfg = getForecasterConfig().deepseek;
   if (!cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!(await hasAnalyticLLMKeyAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
   const list = Array.isArray(candidates) ? candidates : [];
   if (list.length === 0) return { verdict: 'skipped', reason: 'no_candidates' };
 
@@ -513,7 +513,7 @@ function _vangaSystemPrompt(cfg) {
 async function runVangaSummary({ unifiedForecast, sovForecast, trafficEstimate, monthlySummary, targetUrl, mainQuery, leadsSummary, opportunities, expertReports, semanticDistribution } = {}) {
   const cfg = getForecasterConfig().vanga;
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!(await hasAnalyticLLMKeyAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const uf = (unifiedForecast && unifiedForecast.verdict === 'ok') ? unifiedForecast : null;
   const ctx = {
@@ -708,7 +708,7 @@ async function _runExpert({ expertKey, system, userPrompt, parser }) {
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'advanced_disabled' };
   const ex = cfg.experts[expertKey];
   if (!ex || !ex.enabled) return { verdict: 'skipped', reason: 'expert_disabled' };
-  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!(await hasAnalyticLLMKeyAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
 
   try {
     const t0 = Date.now();

@@ -45,6 +45,28 @@ async function ensureIntegrationVaultSchema(db = dbDefault) {
        ON admin_integration_secret_audit(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS ix_admin_integration_secret_audit_env
        ON admin_integration_secret_audit(env_name, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS admin_integration_key_probe_results (
+      env_name        TEXT PRIMARY KEY,
+      status          TEXT NOT NULL,
+      active          BOOLEAN,
+      probe_supported BOOLEAN NOT NULL DEFAULT FALSE,
+      http_status     INTEGER,
+      latency_ms      INTEGER,
+      message         TEXT,
+      checked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `ALTER TABLE admin_integration_key_probe_results
+       ADD COLUMN IF NOT EXISTS status TEXT,
+       ADD COLUMN IF NOT EXISTS active BOOLEAN,
+       ADD COLUMN IF NOT EXISTS probe_supported BOOLEAN NOT NULL DEFAULT FALSE,
+       ADD COLUMN IF NOT EXISTS http_status INTEGER,
+       ADD COLUMN IF NOT EXISTS latency_ms INTEGER,
+       ADD COLUMN IF NOT EXISTS message TEXT,
+       ADD COLUMN IF NOT EXISTS checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    `CREATE INDEX IF NOT EXISTS ix_admin_key_probe_checked
+       ON admin_integration_key_probe_results(checked_at DESC)`,
   ];
   for (const sql of statements) await db.query(sql);
   console.log('[Schema] admin integration secret vault ready');

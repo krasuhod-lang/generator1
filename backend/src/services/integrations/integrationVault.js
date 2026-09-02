@@ -158,6 +158,19 @@ async function ensureIntegrationVaultSchema(db = dbDefault) {
        ON admin_integration_secret_audit(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS ix_admin_integration_secret_audit_env
        ON admin_integration_secret_audit(env_name, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS admin_integration_key_probe_results (
+      env_name        TEXT PRIMARY KEY,
+      status          TEXT NOT NULL,
+      active          BOOLEAN,
+      probe_supported BOOLEAN NOT NULL DEFAULT FALSE,
+      http_status     INTEGER,
+      latency_ms      INTEGER,
+      message         TEXT,
+      checked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS ix_admin_key_probe_checked
+       ON admin_integration_key_probe_results(checked_at DESC)`,
   ];
   for (const sql of statements) await db.query(sql);
   console.log('[Schema] admin integration secret vault ready');
@@ -177,21 +190,27 @@ async function listIntegrationSecrets({ db = dbDefault } = {}) {
   }
 
   const byName = new Map(rows.map((row) => [row.env_name, row]));
-  return INTEGRATION_CATALOG.map((item) => {
+  return Promise.all(INTEGRATION_CATALOG.map(async (item) => {
     const row = byName.get(item.envName);
-    const envInfo = row
-      ? { value: row.is_enabled === false ? '' : '__vault__', source: row.is_enabled === false ? 'disabled' : 'vault', configured: row.is_enabled !== false }
-      : envFallback(item.envName);
+    // Resolve the effective value through the same path as real provider calls.
+    // This prevents a stale/corrupt/disabled vault row from disagreeing with
+    // the probe result or from showing a false "configured" state.
+    const effective = row?.is_enabled === false
+      ? envFallback(item.envName)
+      : await readSecret(item.envName, db);
+    const source = row?.is_enabled === false
+      ? (effective.source === 'env' ? 'env' : 'disabled')
+      : effective.source;
     return {
       ...item,
-      configured: Boolean(envInfo.value),
-      source: envInfo.source,
-      masked: envInfo.value && envInfo.value !== '__vault__' ? maskSecret(envInfo.value) : (envInfo.source === 'vault' ? '••••••••••••' : null),
+      configured: Boolean(effective.value),
+      source,
+      masked: effective.value ? maskSecret(effective.value) : null,
       is_enabled: row ? row.is_enabled !== false : true,
       last_rotated_at: row?.last_rotated_at || null,
       updated_at: row?.updated_at || null,
     };
-  });
+  }));
 }
 
 async function auditSecret({ envName, action, adminUserId = null, maskedValue = null, meta = {}, db = dbDefault }) {

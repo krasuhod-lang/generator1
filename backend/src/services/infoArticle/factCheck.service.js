@@ -57,6 +57,7 @@ const MAX_SEMANTIC_CLAIMS = 30;   // LLM-аудит текстовых факт�
 //   ретраев, метрики) — в semanticFactcheckPolicy.js. Здесь читаем режим по
 //   умолчанию из env, чтобы аннотировать semantic-отчёт для quality gate.
 const semanticFactcheckPolicy = require('./semanticFactcheckPolicy');
+const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
 
 // «Сильные» сигналы — наличие хотя бы одного делает предложение претендентом
 // в claim'ы. Не путать с «токенами для верификации» — те уже извлекаются ниже.
@@ -503,8 +504,9 @@ async function verifySemanticClaims(claims, evidenceResult, opts = {}) {
     empty.semanticSkipped = false;
     return empty;
   }
-  if (!process.env.DEEPSEEK_API_KEY) {
-    return _semanticSkipped(list, 'DEEPSEEK_API_KEY is not set');
+  const deepseekInfo = await getIntegrationSecretInfo('DEEPSEEK_API_KEY');
+  if (!deepseekInfo.configured) {
+    return _semanticSkipped(list, 'DEEPSEEK_API_KEY is not configured');
   }
 
   try {

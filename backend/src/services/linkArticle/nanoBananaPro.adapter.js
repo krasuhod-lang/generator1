@@ -32,6 +32,7 @@ const {
   normalizeProxyUrl,
   getGeminiProxyUrls,
 } = require('../llm/gemini.adapter');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const IMAGE_MODEL = process.env.LINK_ARTICLE_IMAGE_MODEL || 'gemini-3-pro-image-preview';
 const GEMINI_BASE_URL =
@@ -65,6 +66,16 @@ function requireGeminiApiKey() {
     throw new Error(
       'GEMINI_API_KEY не задан — Nano Banana Pro не может сгенерировать изображение. ' +
       'Добавьте ключ в .env.'
+    );
+  }
+  return k;
+}
+
+async function resolveGeminiApiKey() {
+  const k = await getIntegrationSecret('GEMINI_API_KEY');
+  if (!k) {
+    throw new Error(
+      'GEMINI_API_KEY не задан ни в admin vault, ни в .env — Nano Banana Pro не может сгенерировать изображение.'
     );
   }
   return k;
@@ -158,7 +169,7 @@ async function generateImage(prompt, opts = {}) {
   }
   const { negativePrompt = '', timeoutMs = 180000 } = opts;
 
-  const apiKey = requireGeminiApiKey();
+  const apiKey = await resolveGeminiApiKey();
   const agent  = buildProxyAgent();
   if (!agent) {
     throw new Error(

@@ -31,6 +31,7 @@
 
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { getIntegrationSecret } = require('../integrations/integrationVault');
 
 const XAI_BASE_URL = (process.env.XAI_BASE_URL || 'https://api.x.ai/v1').replace(/\/$/, '');
 // Default — рассуждающая (reasoning) версия Grok-4. Переопределяется
@@ -58,6 +59,14 @@ function requireXaiApiKey() {
       'XAI_API_KEY не задан. Добавьте его в .env (см. .env.example) — ' +
       'ключ нужен для вызовов Grok при llm_provider=grok.'
     );
+  }
+  return k;
+}
+
+async function resolveXaiApiKey() {
+  const k = await getIntegrationSecret('XAI_API_KEY');
+  if (!k) {
+    throw new Error('XAI_API_KEY не задан ни в admin vault, ни в .env — ключ нужен для вызовов Grok.');
   }
   return k;
 }
@@ -218,7 +227,7 @@ async function callGrok(systemInstruction, userPrompt, options = {}) {
   if (maxTokens < 1 || maxTokens > 32000) throw new Error('Invalid maxTokens');
   if (timeoutMs < 1000 || timeoutMs > 300000) throw new Error('Invalid timeout');
 
-  const apiKey = requireXaiApiKey();
+  const apiKey = await resolveXaiApiKey();
 
   // ── messages ───────────────────────────────────────────────────────
   // JSON-strict guard — тот же подход, что у Gemini: вписываем в system,
@@ -477,4 +486,4 @@ async function streamGenerateGrok(systemInstruction, userPrompt, options = {}) {
   };
 }
 
-module.exports = { callGrok, streamGenerateGrok, XAI_MODEL };
+module.exports = { callGrok, streamGenerateGrok, XAI_MODEL, resolveXaiApiKey };

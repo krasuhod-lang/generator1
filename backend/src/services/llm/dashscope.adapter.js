@@ -15,9 +15,9 @@
  *   }
  *
  * Безопасность ключа:
- *   - DASHSCOPE_API_KEY читается ИСКЛЮЧИТЕЛЬНО из process.env.
- *   - Хардкод/обфускация запрещены (см. requireDashscopeApiKey ниже и аналогичный
- *     паттерн в gemini.adapter.js → requireGeminiApiKey).
+ *   - Реальные внешние вызовы используют admin vault → env fallback.
+ *   - Хардкод/обфускация запрещены; legacy-синхронный helper ниже оставлен только
+ *     для старых диагностических callers и не является runtime resolver.
  *   - Заголовок Authorization и сам ключ НИКОГДА не попадают в логи —
  *     ни в console.log, ни в текст ошибки. См. _sanitizeAxiosError.
  */
@@ -48,6 +48,7 @@ const DEFAULT_TIMEOUT_MS = 240000;
 // ── API-ключ: admin vault → env fallback ────────────────────────────────
 // Sync helper сохраняется для старых диагностических callers; реальные
 // внешние запросы используют async vault-first resolver ниже.
+// Legacy synchronous helper; callDashscope uses resolveDashscopeApiKey() below.
 function requireDashscopeApiKey() {
   const k = (process.env.DASHSCOPE_API_KEY || '').trim();
   if (!k) {

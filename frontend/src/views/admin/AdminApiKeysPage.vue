@@ -52,27 +52,45 @@ function healthLabel(item) {
   if (!result) return item.configured ? 'Не проверен' : 'Нет ключа';
   if (result.status === 'active') return 'Ключ активен';
   if (result.status === 'not_configured') return 'Не настроен';
-  if (result.status === 'configured_unprobed' || result.status === 'unsupported') return 'Проверка недоступна';
+  if (result.status === 'configured_unprobed' || result.status === 'unsupported') return 'Безопасная проверка не выполняется';
+  if (result.status === 'rate_limited') return 'Лимит health-проверки';
   if (result.status === 'timeout') return 'Тайм-аут проверки';
+  if (result.status === 'inactive') return 'Ключ отклонён';
+  if (result.status === 'rejected') return 'Запрос отклонён';
+  if (result.status === 'unreachable') return 'Провайдер недоступен';
   return 'Ключ не подтверждён';
+}
+
+function healthMessage(item) {
+  const result = health.value[item.envName];
+  if (!result) return item.configured ? 'Проверка ещё не запускалась' : 'Ключ не задан';
+  return result.message || 'Нет дополнительного описания';
 }
 
 function healthClass(item) {
   const result = health.value[item.envName];
   if (result?.active === true) return 'text-emerald-300 bg-emerald-950/50 border-emerald-800';
-  if (result?.active === false) return 'text-red-300 bg-red-950/40 border-red-800';
+  if (result?.status === 'inactive' || result?.status === 'rejected') return 'text-red-300 bg-red-950/40 border-red-800';
+  if (result?.status === 'rate_limited' || result?.status === 'timeout' || result?.status === 'unreachable') return 'text-amber-300 bg-amber-950/40 border-amber-800';
   return 'text-gray-400 bg-gray-900 border-gray-700';
 }
 
 async function load() {
   loading.value = true;
   error.value = '';
+  // A saved/rotated key must never inherit the previous key's health result.
+  health.value = {};
   try {
     const [keyData, auditData] = await Promise.all([
       admin.fetchIntegrationKeys(),
       admin.fetchIntegrationKeyAudit(),
     ]);
     secrets.value = keyData.secrets || [];
+    health.value = Object.fromEntries(
+      secrets.value
+        .filter((item) => item.last_probe)
+        .map((item) => [item.envName, item.last_probe]),
+    );
     audit.value = auditData.audit || [];
   } catch (e) {
     error.value = e.response?.data?.error || e.message || 'Не удалось загрузить API keys';
@@ -206,7 +224,7 @@ onMounted(load);
                     <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="sourceClass(item)">
                       {{ sourceLabel(item) }}
                     </span>
-                    <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="healthClass(item)">
+                    <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="healthClass(item)" :title="healthMessage(item)">
                       {{ healthLabel(item) }}
                     </span>
                   </div>
@@ -218,6 +236,10 @@ onMounted(load);
                   <div v-else class="text-amber-400">Не настроен</div>
                   <div class="mt-1">Ротация: {{ fmtDate(item.last_rotated_at) }}</div>
                   <div v-if="health[item.envName]?.latencyMs" class="mt-1">Проверка: {{ health[item.envName].latencyMs }} мс</div>
+                  <div v-if="health[item.envName]?.checkedAt" class="mt-1">Проверено: {{ fmtDate(health[item.envName].checkedAt) }}</div>
+                  <div v-if="health[item.envName]?.message" class="mt-1 max-w-xs text-right text-gray-600" :title="health[item.envName].message">
+                    {{ health[item.envName].message }}
+                  </div>
                 </div>
               </div>
 
@@ -241,10 +263,10 @@ onMounted(load);
                 <button
                   type="button"
                   class="btn-ghost whitespace-nowrap text-cyan-300"
-                  :disabled="probing === item.envName || !item.configured"
+                  :disabled="probing === item.envName || !item.configured || health[item.envName]?.probeSupported === false"
                   @click="probe(item)"
                 >
-                  {{ probing === item.envName ? 'Проверяем…' : 'Проверить ключ' }}
+                  {{ probing === item.envName ? 'Проверяем…' : (health[item.envName]?.probeSupported === false ? 'Нет безопасной проверки' : 'Проверить ключ') }}
                 </button>
                 <button
                   v-if="item.source === 'vault'"

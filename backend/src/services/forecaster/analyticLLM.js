@@ -28,6 +28,7 @@
 const { callDeepSeek, DEEPSEEK_DEFAULT_MAX_TOKENS } = require('../llm/deepseek.adapter');
 const { callGemini } = require('../llm/gemini.adapter');
 const { calculateCostBreakdown } = require('../metrics/priceCalculator');
+const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
 
 // Верхняя граница maxTokens в обоих адаптерах (валидация бросает выше неё).
 const MAX_OUTPUT_TOKENS_CAP = 32000;
@@ -38,7 +39,25 @@ const TRUNCATION_RETRIES = 2;
 const TRUNCATED_FINISH_REASONS = new Set(['length', 'MAX_TOKENS']);
 
 function hasAnalyticLLMKey() {
+  // Backward-compatible synchronous check for legacy callers. New async
+  // execution paths use hasAnalyticLLMKeyAsync() below so vault-only keys work.
   return Boolean(process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY);
+}
+
+async function hasAnalyticLLMKeyAsync() {
+  const [deepseek, gemini] = await Promise.all([
+    getIntegrationSecretInfo('DEEPSEEK_API_KEY'),
+    getIntegrationSecretInfo('GEMINI_API_KEY'),
+  ]);
+  return Boolean(deepseek.configured || gemini.configured);
+}
+
+async function providerAvailability() {
+  const [deepseek, gemini] = await Promise.all([
+    getIntegrationSecretInfo('DEEPSEEK_API_KEY'),
+    getIntegrationSecretInfo('GEMINI_API_KEY'),
+  ]);
+  return { deepseek: Boolean(deepseek.configured), gemini: Boolean(gemini.configured) };
 }
 
 /**
@@ -52,8 +71,9 @@ function isTruncatedResponse(resp) {
 }
 
 async function _callOnce(systemPrompt, userPrompt, options) {
-  const hasDeepSeek = Boolean(process.env.DEEPSEEK_API_KEY);
-  const hasGemini   = Boolean(process.env.GEMINI_API_KEY);
+  const available = await providerAvailability();
+  const hasDeepSeek = available.deepseek;
+  const hasGemini   = available.gemini;
 
   if (hasDeepSeek) {
     try {
@@ -70,8 +90,9 @@ async function _callOnce(systemPrompt, userPrompt, options) {
 }
 
 async function callAnalyticLLM(systemPrompt, userPrompt, options = {}) {
-  const hasDeepSeek = Boolean(process.env.DEEPSEEK_API_KEY);
-  const hasGemini   = Boolean(process.env.GEMINI_API_KEY);
+  const available = await providerAvailability();
+  const hasDeepSeek = available.deepseek;
+  const hasGemini   = available.gemini;
 
   if (!hasDeepSeek && !hasGemini) {
     throw new Error('No LLM API key configured (DEEPSEEK_API_KEY / GEMINI_API_KEY)');
@@ -124,6 +145,7 @@ function analyticCallCost(provider, resp) {
 module.exports = {
   callAnalyticLLM,
   hasAnalyticLLMKey,
+  hasAnalyticLLMKeyAsync,
   analyticCallCost,
   isTruncatedResponse,
   MAX_OUTPUT_TOKENS_CAP,

@@ -11,7 +11,7 @@
  * Graceful: любой сбой → verdict 'skipped'/'error', детальные выводы остаются.
  * ИЗОЛЯЦИЯ: новый модуль, существующий анализ не меняет.
  */
-const { callAnalyticLLM, analyticCallCost, hasAnalyticLLMKey } = require('./analyticLLM');
+const { callAnalyticLLM, analyticCallCost, hasAnalyticLLMKeyAsync } = require('./analyticLLM');
 
 /** Надёжный разбор JSON из ответа модели (с обрезкой мусора вокруг {...}). */
 function _safeParse(text) {
@@ -93,7 +93,7 @@ async function humanizeConclusionsV2(ds, opts = {}) {
   if (!ds || ds.verdict !== 'ok') {
     return { verdict: 'skipped', reason: 'no_analysis' };
   }
-  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!(await hasAnalyticLLMKeyAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
   const input = _buildInput(ds);
   if (!input.trim()) return { verdict: 'skipped', reason: 'empty_analysis' };
 

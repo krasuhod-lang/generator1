@@ -20,7 +20,7 @@
  * пользователя (POST /api/forecaster/:id/regenerate-report).
  */
 
-const { callAnalyticLLM, hasAnalyticLLMKey, analyticCallCost } = require('./analyticLLM');
+const { callAnalyticLLM, hasAnalyticLLMKeyAsync, analyticCallCost } = require('./analyticLLM');
 const { getForecasterConfig } = require('./config');
 
 const SYSTEM_PROMPT = [
@@ -185,7 +185,7 @@ function _normalizeReport(raw) {
 async function generateForecastReport(task, llmProvider = null) {
   const cfg = getForecasterConfig().report;
   if (!cfg || !cfg.enabled) return { verdict: 'skipped', reason: 'feature_disabled' };
-  if (!hasAnalyticLLMKey()) return { verdict: 'skipped', reason: 'no_api_key' };
+  if (!(await hasAnalyticLLMKeyAsync())) return { verdict: 'skipped', reason: 'no_api_key' };
 
   const ctx = _buildContext(task);
   const userPrompt = [

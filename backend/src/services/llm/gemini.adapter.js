@@ -182,9 +182,9 @@ function normalizeProxyUrl(raw) {
 // идут напрямую (или падают с network error в локациях, где Gemini API
 // недоступен — это явный сигнал админу настроить .env).
 
-// Gemini API key загружается ИСКЛЮЧИТЕЛЬНО из process.env.GEMINI_API_KEY
-// (см. .env / docker-compose env_file). Хардкод запрещён — Google Secret Scanning
-// автоматически отзывает ключи, найденные в публичных репозиториях.
+// Gemini API key resolves admin vault first, then process.env.GEMINI_API_KEY
+// as backward-compatible fallback. Plaintext stays server-side; hardcoding is
+// forbidden because provider secret scanning can revoke exposed keys.
 function requireGeminiApiKey() {
   const k = (process.env.GEMINI_API_KEY || '').trim();
   if (!k) {
@@ -300,13 +300,15 @@ function logProxyDiagnostics() {
 async function testProxyConnectivity() {
   if (PROXY_URLS.length === 0) return;
 
-  // Если ключ не задан — пропускаем проверку прокси (сам сервис всё равно
-  // упадёт с понятной ошибкой при первой генерации).
-  if (!(process.env.GEMINI_API_KEY || '').trim()) {
+  // Vault-first resolver is the same source used by real Gemini calls.
+  // Do not gate this check on process.env: an admin may rotate the key live.
+  let apiKey;
+  try {
+    apiKey = await resolveGeminiApiKey();
+  } catch (error) {
     console.warn('[gemini] ⚠ GEMINI_API_KEY не задан — пропускаем тест прокси');
     return;
   }
-  const apiKey = await resolveGeminiApiKey();
 
   // Лёгкий запрос — список моделей (не тратит токены)
   const testUrl = `${GEMINI_BASE_URL}?key=${apiKey}`;
@@ -458,7 +460,7 @@ async function callGemini(systemInstruction, userPrompt, options = {}) {
   // timeoutMs = 0 → без ограничения по времени (axios: timeout 0 = disabled)
   if (timeoutMs !== 0 && timeoutMs < 1000) throw new Error('Invalid timeout');
 
-  // API ключ Gemini — только из переменной окружения (без хардкода)
+  // API key resolves vault-first through resolveGeminiApiKey (no hardcoding).
   const apiKey = await resolveGeminiApiKey();
 
   const endpoint = `${GEMINI_BASE_URL}/${model}:generateContent?key=${apiKey}`;

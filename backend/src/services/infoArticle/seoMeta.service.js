@@ -17,6 +17,7 @@
 'use strict';
 
 const { callLLM } = require('../llm/callLLM');
+const { getIntegrationSecretInfo } = require('../integrations/integrationVault');
 
 const TITLE_MIN = 70;
 const TITLE_MAX = 80;
@@ -101,7 +102,8 @@ async function generateSeoMeta(p = {}) {
   const { topic = '', region = '', brand = '', articleHtml = '', articlePlain = '', ctx = {} } = p;
   const fallback = deterministicMeta({ topic, brand, articleHtml, articlePlain });
 
-  if (!process.env.DEEPSEEK_API_KEY) {
+  const deepseekInfo = await getIntegrationSecretInfo('DEEPSEEK_API_KEY');
+  if (!deepseekInfo.configured) {
     return { ...fallback, source: 'deterministic_no_key' };
   }
 
