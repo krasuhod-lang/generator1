@@ -14,6 +14,7 @@ const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { getIntegrationSecret } = require('../integrations/integrationVault');
 const { recordApiRequest } = require('../metrics/adminApiLedger');
+const db = require('../../config/db');
 
 function normalizeResponsesBaseUrl(raw) {
   let value = String(raw || '').trim().replace(/\/+$/, '');
@@ -115,6 +116,29 @@ function normalizeResearch(raw) {
     legal_or_price_updates: asArray(raw?.legal_or_price_updates),
     sources: asArray(raw?.sources),
   };
+}
+
+async function persistQwenTaskMetrics(taskId, tokensIn, tokensOut, costUsd) {
+  if (!taskId) return;
+  try {
+    await db.query(
+      `INSERT INTO task_metrics
+         (task_id, qwen_tokens_in, qwen_tokens_out, qwen_cost_usd, total_tokens, total_cost_usd)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (task_id) DO UPDATE SET
+         qwen_tokens_in = task_metrics.qwen_tokens_in + EXCLUDED.qwen_tokens_in,
+         qwen_tokens_out = task_metrics.qwen_tokens_out + EXCLUDED.qwen_tokens_out,
+         qwen_cost_usd = task_metrics.qwen_cost_usd + EXCLUDED.qwen_cost_usd,
+         total_tokens = task_metrics.total_tokens + EXCLUDED.total_tokens,
+         total_cost_usd = task_metrics.total_cost_usd + EXCLUDED.total_cost_usd,
+         updated_at = NOW()`,
+      [taskId, Number(tokensIn) || 0, Number(tokensOut) || 0, Number(costUsd) || 0,
+        (Number(tokensIn) || 0) + (Number(tokensOut) || 0), Number(costUsd) || 0],
+    );
+  } catch (error) {
+    // The append-only ledger remains authoritative if the legacy aggregate is unavailable.
+    console.error('[qwenAgent] failed to persist Qwen task metrics:', error.message);
+  }
 }
 
 function usageMetrics(data) {
@@ -269,9 +293,10 @@ async function runQwenResearchAgent({
     raw = normalizeResearch(parseJsonObject(text));
   } catch (error) {
     qwenCircuitOpenUntil = Date.now() + QWEN_CIRCUIT_COOLDOWN_MS;
+    await persistQwenTaskMetrics(taskId, metrics.tokensIn, metrics.tokensOut, metrics.providerCostUsd);
     await recordFn({
-      provider: 'qwen', model, pipeline, stageName,
-      callLabel, taskId, requestStatus: 'invalid_response',
+      provider: 'qwen', model, pipeline, stageName, callLabel, taskId, requestStatus: 'invalid_response',
+
       httpStatus: response.status, durationMs: Date.now() - startedAt,
       promptSize: prompt.length, tokensIn: metrics.tokensIn, tokensOut: metrics.tokensOut,
       cachedTokens: metrics.cachedTokens, thoughtsTokens: metrics.reasoningTokens,
@@ -308,6 +333,7 @@ async function runQwenResearchAgent({
     },
   };
   qwenCircuitOpenUntil = 0;
+  await persistQwenTaskMetrics(taskId, metrics.tokensIn, metrics.tokensOut, metrics.providerCostUsd);
   await recordFn(usagePayload);
   if (typeof onTokens === 'function') {
     onTokens('qwen', metrics.tokensIn, metrics.tokensOut, metrics.providerCostUsd);

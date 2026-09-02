@@ -14,6 +14,12 @@ const task = {
   input_region: 'Москва',
   input_raw_lsi: 'теплообменник\nсервисный центр\nпроверка давления',
   input_ngrams: 'диагностика котла,проверка давления',
+  input_genre: 'практическая экспертная инструкция',
+  input_tone: 'дружески-экспертный',
+  input_complexity: 'средняя',
+  input_professional_level: 'практик отрасли',
+  input_target_audience: 'Владельцы частных домов и управляющие объектами',
+  current_law_required: true,
   tz_json: JSON.stringify({
     h1_required: 'Диагностика отопительного оборудования в Москве',
     h2_required: ['Когда нужна диагностика', 'Стоимость работ'],
@@ -95,11 +101,18 @@ assert.ok(manifest.semantic.ngrams_required.includes('обслуживание �
 assert.ok(manifest.semantic.ngrams_required.includes('диагностика котла'));
 assert.strictEqual(manifest.blocks.length, 2);
 assert.ok(manifest.blocks[0].lsi_must.includes('теплообменник'));
+assert.strictEqual(manifest.requirements.writing_profile.genre, 'практическая экспертная инструкция');
+assert.strictEqual(manifest.requirements.writing_profile.tone, 'дружески-экспертный');
+assert.ok(manifest.requirements.writing_profile.audience.includes('Владельцы частных домов'));
+assert.strictEqual(manifest.requirements.freshness.required, true);
+assert.strictEqual(manifest.requirements.freshness.jurisdiction, 'Москва');
 
 const blockPrompt = buildBlockHandoffPrompt(manifest, { index: 0, h2: 'Когда нужна диагностика' });
 assert.match(blockPrompt, /CONTENT HANDOFF MANIFEST/);
 assert.match(blockPrompt, /теплообменник/);
 assert.match(blockPrompt, /never invent/i);
+assert.match(blockPrompt, /freshness/);
+assert.match(blockPrompt, /практическая экспертная инструкция/);
 
 const markdown = renderManifestMarkdown(manifest);
 assert.match(markdown, /facts=/);
@@ -109,6 +122,7 @@ assert.match(markdown, /Block map/);
 const unavailable = buildContentHandoffManifest({ task: { input_target_service: 'Тема' } });
 assert.strictEqual(unavailable.validation.status, 'partial');
 assert.ok(unavailable.validation.warnings.includes('no_verified_facts'));
+assert.strictEqual(unavailable.requirements.freshness.required, false);
 assert.deepStrictEqual(unavailable.facts, []);
 
 console.log('content handoff manifest contract: OK');

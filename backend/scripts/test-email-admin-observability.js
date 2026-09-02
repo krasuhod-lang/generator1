@@ -15,6 +15,7 @@ const ledger = read('src/services/metrics/adminApiLedger.js');
 const observabilitySchema = read('src/services/metrics/apiObservabilitySchema.js');
 const server = read('server.js');
 const migration = fs.readFileSync(path.resolve(root, '..', 'migrations', '142_outreach_and_api_observability.sql'), 'utf8');
+const ledgerIndexMigration = fs.readFileSync(path.resolve(root, '..', 'migrations', '151_api_ledger_task_indexes.sql'), 'utf8');
 const adminCard = fs.readFileSync(path.resolve(root, '..', 'frontend/src/components/AdminApiUsageCard.vue'), 'utf8');
 
 const checks = [
@@ -36,7 +37,10 @@ const checks = [
   ['migration is additive and has ledger indexes', /CREATE TABLE IF NOT EXISTS admin_api_request_ledger/.test(migration) && /CREATE INDEX/.test(migration)],
   ['existing volumes get runtime ledger bootstrap', /async function ensureApiObservabilitySchema/.test(observabilitySchema) && /CREATE TABLE IF NOT EXISTS admin_api_request_ledger/.test(observabilitySchema) && /ensureApiObservabilitySchema\(\)/.test(server)],
   ['admin API exposes data quality and task-stage reconciliation', /data_quality:/.test(adminController) && /task_stage_calls/.test(adminController) && /API_USAGE_SCHEMA_UNAVAILABLE/.test(adminController)],
+  ['admin API exposes ledger-authoritative per-task usage', /by_task/.test(adminController) && /COALESCE\(task_id, trace_task_id\)/.test(adminController) && /meta->>'pricing_known'/.test(adminController)],
+  ['runtime and migration bootstrap task-reference indexes and pipeline traces', /ix_admin_api_ledger_task_ref/.test(observabilitySchema) && /CREATE TABLE IF NOT EXISTS pipeline_traces/.test(observabilitySchema) && /ix_admin_api_ledger_task_ref/.test(ledgerIndexMigration)],
   ['admin UI highlights partial attribution/cache miss', /partial_attribution/.test(adminCard) && /cache_miss/.test(adminCard) && /Thinking tokens/.test(adminCard)],
+  ['admin UI renders per-task cost rows', /Расход по задачам/.test(adminCard) && /row\.task_ref/.test(adminCard) && /pricing_unknown/.test(adminCard)],
 ];
 
 let failures = 0;

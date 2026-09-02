@@ -32,6 +32,7 @@ const { normalizeCommercialLinks, MAX_COMMERCIAL_LINKS } =
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { normalizeProvider, normalizeModel } = require('../services/llm/modelRouting');
+const { normalizeWritingProfile } = require('../utils/writingProfile');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const {
@@ -191,6 +192,12 @@ async function createInfoArticleTask(req, res, next) {
     const geminiModel = provider === 'gemini'
       ? normalizeGeminiCopywritingModel(llmModel)
       : normalizeGeminiCopywritingModel(body.gemini_model);
+    const writingProfile = normalizeWritingProfile(body.writing_profile_json || body.writing_profile, {
+      genre: body.genre,
+      tone: body.tone,
+      language: body.language || 'ru',
+      audience: body.audience,
+    });
     // Новая форма отправляет inline_images_count: cover всегда + 0..3 inline.
     // Старые клиенты с images_count продолжают работать по legacy-контракту.
     const imagesCount = resolveImagesCount(body);
@@ -276,19 +283,19 @@ async function createInfoArticleTask(req, res, next) {
              commercial_links, commercial_links_filename, commercial_links_count,
              images_count, source_relevance_report_id,
              llm_provider, gemini_model, llm_model, project_id, target_site_url, opportunity_id,
-             published_url, published_queries, status, progress_pct)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 'queued', 0)
+             published_url, published_queries, writing_profile_json, status, progress_pct)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::jsonb, 'queued', 0)
          RETURNING id, topic, region, brand_name, output_format,
                    commercial_links_filename, commercial_links_count,
                    images_count, source_relevance_report_id, llm_provider, gemini_model, llm_model,
                    project_id, target_site_url, opportunity_id, published_url,
-                   published_queries, status, progress_pct, created_at`,
+                   published_queries, writing_profile_json, status, progress_pct, created_at`,
         [
           taskId, req.user.id, topic, effRegion, effBrandName || null, authorName || null,
           effBrandFacts || null, outputFormat,
           JSON.stringify(links), filename || null, links.length,
           imagesCount, relevanceReportId, provider, geminiModel, llmModel, projectId, targetSiteUrl, opportunityId,
-          publishedUrl, publishedQueries,
+          publishedUrl, publishedQueries, JSON.stringify(writingProfile),
         ],
       ),
     });

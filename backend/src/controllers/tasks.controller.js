@@ -15,6 +15,7 @@ const { resolveOwnedProjectId } = require('../services/projects/projectOwnership
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const { buildTaskFormPrefill }  = require('../services/projects/taskFormPrefill');
 const { isBlankRichText }       = require('../utils/stripHtmlTags');
+const { normalizeWritingProfile } = require('../utils/writingProfile');
 const { salvageJsonStrings }    = require('../utils/salvageJson');
 const { getProfileQueueHealth } = require('../services/tasks/generationAdmission');
 const { resolveQueueReason } = require('../services/tasks/queueDiagnostics');
@@ -219,6 +220,8 @@ async function createTask(req, res, next) {
       opportunity_id,
       source_snapshot_id,
       success_metric,
+      writing_profile_json,
+      writing_profile,
     } = req.body;
 
     // Для черновика допускаем пустое поле — ставим плейсхолдер
@@ -238,6 +241,12 @@ async function createTask(req, res, next) {
     const geminiModel = provider === 'gemini'
       ? normalizeGeminiCopywritingModel(selectedModel)
       : normalizeGeminiCopywritingModel(gemini_model);
+    const writingProfile = normalizeWritingProfile(writing_profile_json || writing_profile, {
+      business_type: input_business_type,
+      site_type: input_site_type,
+      language: input_language,
+      audience: input_target_audience,
+    });
 
     // source_relevance_report_id: принимаем только валидный UUID, который
     // принадлежит текущему пользователю и завершился успешно. Невалидный/
@@ -312,7 +321,8 @@ async function createTask(req, res, next) {
          model_version,
          opportunity_id,
          source_snapshot_id,
-         success_metric
+         success_metric,
+         writing_profile_json
        ) VALUES (
          $1, $2, 'draft',
          $3, $4, $5,
@@ -335,7 +345,8 @@ async function createTask(req, res, next) {
           $33,
           $34,
           $35,
-          $36::jsonb
+          $36::jsonb,
+          $37::jsonb
         ) RETURNING *`,
       [
         req.user.id,
@@ -374,6 +385,7 @@ async function createTask(req, res, next) {
         opportunityId,
         source_snapshot_id || null,
         toOptionalJson(success_metric),
+        JSON.stringify(writingProfile),
       ]
     );
 
@@ -453,7 +465,7 @@ async function updateTask(req, res, next) {
       // проекта в промтах).
       'project_id',
       'published_url', 'published_queries', 'prompt_version', 'model_version',
-      'opportunity_id', 'source_snapshot_id', 'success_metric',
+      'opportunity_id', 'source_snapshot_id', 'success_metric', 'writing_profile_json',
     ];
 
     const fields = [];
@@ -469,7 +481,7 @@ async function updateTask(req, res, next) {
       'input_niche_features', 'input_brand_facts',
     ]);
     const ARRAY_FIELDS = new Set(['published_queries']);
-    const JSONB_FIELDS = new Set(['success_metric']);
+    const JSONB_FIELDS = new Set(['success_metric', 'writing_profile_json']);
     // Поля с whitelist-валидацией
     const ENUM_FIELDS = { llm_provider: new Set(['gemini', 'grok', 'openai']) };
 
@@ -485,6 +497,13 @@ async function updateTask(req, res, next) {
         else if (ENUM_FIELDS[key]) {
           const lc = (val == null ? '' : String(val).toLowerCase().trim());
           val = ENUM_FIELDS[key].has(lc) ? lc : 'gemini';
+        } else if (key === 'writing_profile_json') {
+          val = JSON.stringify(normalizeWritingProfile(val, {
+            business_type: task.input_business_type,
+            site_type: task.input_site_type,
+            language: task.input_language,
+            audience: task.input_target_audience,
+          }));
         } else if (key === 'source_relevance_report_id') {
           // Та же owner-валидация, что и в createTask. Невалидное id → null
           // (не падаем 400). Чужой/несуществующий/недоделанный отчёт также → null.

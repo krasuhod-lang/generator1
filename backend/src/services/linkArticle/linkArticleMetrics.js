@@ -36,6 +36,9 @@ function _columnsFor(adapter) {
   if (adapter === 'openai') {
     return { in: 'openai_tokens_in', out: 'openai_tokens_out', cost: 'openai_cost_usd' };
   }
+  if (adapter === 'qwen') {
+    return { in: 'qwen_tokens_in', out: 'qwen_tokens_out', cost: 'qwen_cost_usd' };
+  }
   return { in: 'gemini_tokens_in', out: 'gemini_tokens_out', cost: null };
 }
 

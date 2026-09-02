@@ -37,7 +37,7 @@ const checks = [
   ['stage 3 writer truncation is bounded', /maxTokens: 20000/.test(stage3) && /maxTruncationTokens: 24000/.test(stage3) && /retries: 2/.test(stage3)],
   ['stage 4 audit retries have a bounded output cap', /maxTruncationTokens: 24000/.test(stage4) && /maxTokens: 12000/.test(stage4)],
   ['stage 2.5 uses DeepSeek V4 Pro', /model: 'deepseek-v4-pro'/.test(read('src/services/pipeline/stage2.js')) && !/SEO_SEMANTIC_MODEL|deepseek-v4-flash/.test(read('src/services/pipeline/stage2.js'))],
-  ['stage 4 and stage 7 use DeepSeek V4 Pro', (stage4.match(/model: 'deepseek-v4-pro'/g) || []).length >= 2 && /model: 'deepseek-v4-pro'/.test(stage7) && !/SEO_AUDIT_MODEL|deepseek-v4-flash/.test(stage4 + stage7)],
+  ['stage 4 and stage 7 use automatic GPT quality routing with DeepSeek fallback', /callQualityModel/.test(stage4) && /callQualityModel/.test(stage7) && /qualityModelRouting/.test(stage4 + stage7) && /resolveQualityRoute/.test(stage4 + stage7) && /deepseek-v4-pro/.test(read('src/services/llm/qualityModelRouting.js'))],
   ['GIST analytics uses DeepSeek V4 Pro', /const analyticModel = 'deepseek-v4-pro'/.test(gistMetaFilter) && !/SEO_META_ANALYTIC_MODEL|deepseek-v4-flash/.test(gistMetaFilter)],
   ['stage 4 re-audit uses compact output mode', /RE-AUDIT COMPACT MODE/.test(stage4) && /maxTokens: 8000/.test(stage4)],
   ['stage 5 repair calls use bounded output and one retry-safe repair', /maxTokens: 12288/.test(stage5) && /maxTruncationTokens: 16384/.test(stage5) && /retries: 1/.test(stage5) && /repairOnJsonError: true/.test(stage5)],

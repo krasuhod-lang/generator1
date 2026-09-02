@@ -8,6 +8,7 @@ import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import LlmModelSelector from '../components/LlmModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import WritingProfileFields from '../components/WritingProfileFields.vue';
 import AppPageHeader from '../components/AppPageHeader.vue';
 import { useAuthStore } from '../stores/auth.js';
 import { useInfoArticleStore } from '../stores/infoArticle.js';
@@ -58,6 +59,15 @@ const form = ref({
   llm_provider:  'gemini',
   llm_model:     'gemini-3.1-pro-preview',
   gemini_model:  'gemini-3.1-pro-preview',
+  writing_profile_json: {
+    genre: '',
+    tone: '',
+    complexity: '',
+    professional_level: '',
+    voice_notes: '',
+    freshness_required: false,
+    current_law_required: false,
+  },
   // Новая семантика: обложка обязательна, inline-изображения опциональны.
   // Пользователь явно выбирает 0..3 дополнительных изображений по блокам статьи.
   inline_images_count: 0,
@@ -470,6 +480,7 @@ async function handleCreate() {
       llm_provider:  form.value.llm_provider,
       llm_model:     form.value.llm_model,
       gemini_model:  form.value.gemini_model,
+      writing_profile_json: form.value.writing_profile_json,
       commercial_links: parsedLinks.value,
       commercial_links_filename: fileMeta.value?.name || '',
     };
@@ -1365,6 +1376,11 @@ onUnmounted(() => { stopTicker(); });
                 <textarea v-model="form.brand_facts" rows="3" class="textarea" maxlength="4000"
                           placeholder="Например: 7 лет на рынке, методика Cambridge, школы в 4 городах…"></textarea>
               </div>
+              <WritingProfileFields
+                v-model="form.writing_profile_json"
+                :disabled="submitting"
+                class="mt-2"
+              />
               <div>
                 <label class="label">Формат вывода</label>
                 <div class="flex gap-4 text-sm text-gray-300">

@@ -7,6 +7,7 @@ import LlmProviderSelector from '../components/LlmProviderSelector.vue';
 import LlmModelSelector from '../components/LlmModelSelector.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import WritingProfileFields from '../components/WritingProfileFields.vue';
 import AppPageHeader from '../components/AppPageHeader.vue';
 import api from '../api.js';
 import { useAuthStore } from '../stores/auth.js';
@@ -53,6 +54,15 @@ const form = ref({
   llm_provider:  'gemini',
   llm_model:     'gemini-3.1-pro-preview',
   gemini_model:  'gemini-3.1-pro-preview',
+  writing_profile_json: {
+    genre: '',
+    tone: '',
+    complexity: '',
+    professional_level: '',
+    voice_notes: '',
+    freshness_required: false,
+    current_law_required: false,
+  },
 });
 const submitting = ref(false);
 const formError  = ref(null);
@@ -130,6 +140,7 @@ async function handleCreate() {
       llm_provider:  form.value.llm_provider,
       llm_model:     form.value.llm_model,
       gemini_model:  form.value.gemini_model,
+      writing_profile_json: form.value.writing_profile_json,
       project_id:    selectedProjectId.value || null,
     });
     await store.fetchTasks();
@@ -662,7 +673,13 @@ async function copyMetaField(label, value) {
             </p>
           </div>
 
-          <LlmProviderSelector
+                        <WritingProfileFields
+                v-model="form.writing_profile_json"
+                :disabled="submitting"
+                class="mt-2"
+              />
+              <LlmProviderSelector
+
             v-model="form.llm_provider"
             :allowed-providers="['gemini', 'openai']"
             :disabled="submitting"

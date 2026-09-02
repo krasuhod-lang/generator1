@@ -17,6 +17,7 @@ const { scheduleUserTask } = require('../utils/perUserConcurrency');
 const sse = require('../services/sse/sseManager');
 const { normalizeGeminiCopywritingModel } = require('../services/llm/geminiModels');
 const { normalizeProvider, normalizeModel } = require('../services/llm/modelRouting');
+const { normalizeWritingProfile } = require('../utils/writingProfile');
 const { resolveOwnedProjectId } = require('../services/projects/projectOwnership');
 const { resolveOwnedOpportunityId } = require('../services/projects/growthOpportunities');
 const {
@@ -125,6 +126,12 @@ async function createLinkArticleTask(req, res, next) {
     const geminiModel = provider === 'gemini'
       ? normalizeGeminiCopywritingModel(llmModel)
       : normalizeGeminiCopywritingModel(body.gemini_model);
+    const writingProfile = normalizeWritingProfile(body.writing_profile_json || body.writing_profile, {
+      genre: body.genre,
+      tone: body.tone,
+      language: body.language || 'ru',
+      audience: body.audience,
+    });
 
     if (topic.length < MIN_TOPIC_LEN) {
       return res.status(400).json({ error: `Тема статьи должна быть не короче ${MIN_TOPIC_LEN} символов` });
@@ -152,12 +159,13 @@ async function createLinkArticleTask(req, res, next) {
       fn: () => db.query(
         `INSERT INTO link_article_tasks
             (id, user_id, topic, anchor_text, anchor_url, focus_notes, output_format,
-             llm_provider, gemini_model, llm_model, project_id, opportunity_id, published_url, published_queries, status, progress_pct)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'queued', 0)
+             llm_provider, gemini_model, llm_model, project_id, opportunity_id, published_url, published_queries, writing_profile_json, status, progress_pct)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, 'queued', 0)
          RETURNING id, topic, anchor_text, anchor_url, output_format, llm_provider, gemini_model, llm_model, project_id,
-                   opportunity_id, published_url, published_queries, status, progress_pct, created_at`,
+                   opportunity_id, published_url, published_queries, writing_profile_json, status, progress_pct, created_at`,
         [taskId, req.user.id, topic, anchor_text, anchor_url, focus_notes, output_format,
-         provider, geminiModel, llmModel, projectId, opportunityId, publishedUrl, publishedQueries],
+         provider, geminiModel, llmModel, projectId, opportunityId, publishedUrl, publishedQueries,
+         JSON.stringify(writingProfile)],
       ),
     });
     const task = rows[0];

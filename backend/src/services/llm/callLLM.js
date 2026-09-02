@@ -393,6 +393,50 @@ function inferPipeline(stageName, pipeline) {
   return 'seo';
 }
 
+async function persistTaskAttemptMetrics({ taskId, model, tokensIn, tokensOut, costUsd }) {
+  if (!taskId) return;
+  const normalizedModel = String(model || '').toLowerCase();
+  let metricsCol;
+  if (normalizedModel.startsWith('deepseek')) {
+    metricsCol = { colIn: 'deepseek_tokens_in', colOut: 'deepseek_tokens_out', colCost: 'deepseek_cost_usd' };
+  } else if (normalizedModel.startsWith('grok')) {
+    metricsCol = { colIn: 'grok_tokens_in', colOut: 'grok_tokens_out', colCost: 'grok_cost_usd' };
+  } else if (normalizedModel.startsWith('gpt-')) {
+    metricsCol = { colIn: 'openai_tokens_in', colOut: 'openai_tokens_out', colCost: 'openai_cost_usd' };
+  } else if (normalizedModel.startsWith('qwen')) {
+    metricsCol = { colIn: 'qwen_tokens_in', colOut: 'qwen_tokens_out', colCost: 'qwen_cost_usd' };
+  } else {
+    metricsCol = { colIn: 'gemini_tokens_in', colOut: 'gemini_tokens_out', colCost: 'gemini_cost_usd' };
+  }
+  try {
+    await db.query(
+      `INSERT INTO task_metrics (task_id, ${metricsCol.colIn}, ${metricsCol.colOut}, ${metricsCol.colCost}, total_tokens, total_cost_usd)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (task_id) DO UPDATE SET
+         ${metricsCol.colIn}   = task_metrics.${metricsCol.colIn}   + EXCLUDED.${metricsCol.colIn},
+         ${metricsCol.colOut}  = task_metrics.${metricsCol.colOut}  + EXCLUDED.${metricsCol.colOut},
+         ${metricsCol.colCost} = task_metrics.${metricsCol.colCost} + EXCLUDED.${metricsCol.colCost},
+         total_tokens          = task_metrics.total_tokens          + EXCLUDED.total_tokens,
+         total_cost_usd        = task_metrics.total_cost_usd        + EXCLUDED.total_cost_usd,
+         updated_at            = NOW()`,
+      [taskId, Number(tokensIn) || 0, Number(tokensOut) || 0, Number(costUsd) || 0,
+        (Number(tokensIn) || 0) + (Number(tokensOut) || 0), Number(costUsd) || 0],
+    );
+  } catch (dbErr) {
+    // Usage ledger остаётся отдельным источником истины; ошибка агрегата
+    // не должна останавливать генерацию.
+    console.error('[callLLM] Failed to persist task usage metrics:', dbErr.message);
+  }
+}
+
+async function safeRecordApiRequest(payload) {
+  try {
+    await recordApiRequest(payload);
+  } catch (_) {
+    // Ledger is best-effort at call time; reconciliation exposes missing rows.
+  }
+}
+
 async function persistStageCall({
   taskId, traceTaskId, pipeline, stageName, callLabel, model, promptSize,
   tokensIn, tokensOut, costUsd, resultJson, startedAt, promptVersion,
@@ -440,35 +484,6 @@ async function persistStageCall({
        pricingMeta?.outputCostUsd || 0]
     );
 
-    // Обновляем агрегированные метрики. Каждый провайдер пишет в свою
-    // тройку колонок:
-    //   - DeepSeek    → deepseek_tokens_in/out/cost_usd
-    //   - Grok (x.ai) → grok_tokens_in/out/cost_usd
-    //   - Gemini      → gemini_tokens_in/out/cost_usd
-    // До migration 011 Grok сваливался в gemini_*; теперь — отдельно.
-    let metricsCol;
-    if (model.startsWith('deepseek')) {
-      metricsCol = { colIn: 'deepseek_tokens_in', colOut: 'deepseek_tokens_out', colCost: 'deepseek_cost_usd' };
-    } else if (model.startsWith('grok')) {
-      metricsCol = { colIn: 'grok_tokens_in',     colOut: 'grok_tokens_out',     colCost: 'grok_cost_usd'     };
-    } else if (model.startsWith('gpt-')) {
-      metricsCol = { colIn: 'openai_tokens_in',   colOut: 'openai_tokens_out',   colCost: 'openai_cost_usd'   };
-    } else {
-      metricsCol = { colIn: 'gemini_tokens_in',   colOut: 'gemini_tokens_out',   colCost: 'gemini_cost_usd'   };
-    }
-
-    await db.query(
-      `INSERT INTO task_metrics (task_id, ${metricsCol.colIn}, ${metricsCol.colOut}, ${metricsCol.colCost}, total_tokens, total_cost_usd)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (task_id) DO UPDATE SET
-         ${metricsCol.colIn}   = task_metrics.${metricsCol.colIn}   + EXCLUDED.${metricsCol.colIn},
-         ${metricsCol.colOut}  = task_metrics.${metricsCol.colOut}  + EXCLUDED.${metricsCol.colOut},
-         ${metricsCol.colCost} = task_metrics.${metricsCol.colCost} + EXCLUDED.${metricsCol.colCost},
-         total_tokens          = task_metrics.total_tokens          + EXCLUDED.total_tokens,
-         total_cost_usd        = task_metrics.total_cost_usd        + EXCLUDED.total_cost_usd,
-         updated_at            = NOW()`,
-      [taskId, tokensIn, tokensOut, costUsd, tokensIn + tokensOut, costUsd]
-    );
   } catch (dbErr) {
     // Не прерываем пайплайн из-за ошибки записи метрик
     console.error('[callLLM] Failed to persist stage metrics:', dbErr.message);
@@ -514,6 +529,7 @@ async function persistStageCall({
  * @param {boolean} [opts.repairOnJsonError=false] — один bounded repair-вызов при
  *                                                    JSON parse failure вместо полного повторного промпта.
  * @param {number}  [opts.repairMaxTokens=4096] — cap ответа JSON repair.
+ * @param {Function} [opts.onAttemptUsage] — callback for every provider response before parse/acceptance.
  * @param {string}  [opts.brand]        — наименование бренда из задачи
  *                                                    (task.brand / brand_name). Используется
  *                                                    в Redis-кэше для изоляции по бренду
@@ -535,6 +551,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
     onLog      = null,
     log: optLog = null,  // stages передают { log } — принимаем оба варианта
     onTokens   = null,   // callback(model, tokensIn, tokensOut, costUsd) — для SSE
+    onAttemptUsage = null, // every provider response, before parse/acceptance
     temperature,
     timeoutMs,
     logprobs = false,
@@ -701,12 +718,33 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         _accumulateTokens(budgetTaskId, budgetKey, budgetInputTokens);
       }
 
+      // Provider usage is authoritative for task cost even when the response
+      // later fails JSON parsing or is retried after truncation. Persist once
+      // before every parse/acceptance branch; successful task_stages persistence
+      // intentionally does not update task_metrics again.
+      if (onAttemptUsage) {
+        try {
+          await Promise.resolve(onAttemptUsage(adapter, ledgerContext.tokensIn, ledgerContext.tokensOut, ledgerContext.costUsd, {
+            attempt: ledgerContext.attempt,
+            finishReason: ledgerContext.meta.finish_reason,
+            usageSource: ledgerContext.meta.usage_source,
+          }));
+        } catch (_) { /* metrics callback must not break generation */ }
+      }
+      await persistTaskAttemptMetrics({
+        taskId: budgetTaskId === taskId ? taskId : null,
+        model: ledgerContext.model,
+        tokensIn: ledgerContext.tokensIn,
+        tokensOut: ledgerContext.tokensOut,
+        costUsd: ledgerContext.costUsd,
+      });
+
       // Если ответ обрезан по max_tokens (детекция: finish_reason=length ИЛИ незакрытый JSON) —
       // автоматически удваиваем лимит и повторяем. Главная причина
       // JSON parse ошибок в outreach emailComposer/nicheExpander.
       const isTruncated = result.finishReason === 'length' || _isJsonTruncated(result.text);
       if (isTruncated && retryOnTruncation && attempt < retries - 1) {
-        recordApiRequest({ ...ledgerContext, requestStatus: 'truncated' }).catch(() => {});
+        await safeRecordApiRequest({ ...ledgerContext, requestStatus: 'truncated' });
         // Когда maxTokens не задан явно, реальный запрос ушёл с дефолтом
         // адаптера (напр. DeepSeek 16000), а не с 1000 — берём его как базу,
         // чтобы удвоение ПОВЫШАЛО лимит, а не понижало его.
@@ -798,10 +836,10 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         'success'
       );
 
-      recordApiRequest({
+      await safeRecordApiRequest({
         ...ledgerContext,
         requestStatus: partialJson ? 'partial_json' : (jsonRepaired ? 'repaired_json' : 'success'),
-      }).catch(() => {});
+      });
 
       // Публикуем SSE-событие tokens — фронтенд реактивно обновляет счётчики
       if (onTokens) {
@@ -810,8 +848,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         } catch (_) { /* не прерываем пайплайн */ }
       }
 
-      // Сохраняем метрики асинхронно, не блокируем пайплайн
-      persistStageCall({
+      // Ждём фиксации task stage/metrics до возврата результата, чтобы
+      // completion не опережал usage и стоимость в панели администратора.
+      await persistStageCall({
         taskId, traceTaskId, pipeline, stageName, callLabel,
         model:      result.model,
         promptSize,
@@ -835,7 +874,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         promptVersion,
         qualityScore,
         triggeredRefine,
-      }).catch(() => {}); // ошибки уже логируются внутри
+      }); // ошибки уже логируются внутри
 
       if (result.logprobs) {
         Object.defineProperty(parsed, '__logprobs', {

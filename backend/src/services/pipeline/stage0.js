@@ -19,6 +19,11 @@ const STAGE0_NICHE_PAGE_CHARS = 5000;
 const STAGE0_RESEARCH_PAGE_CHARS = 7000;
 const STAGE0_GIST_MAX_PAGES = 8;
 const STAGE0_GIST_PAGE_CHARS = 6000;
+const STAGE0_SERP_TOTAL_CHARS = 32000;
+const STAGE0_NICHE_TOTAL_CHARS = 24000;
+const STAGE0_RESEARCH_TOTAL_CHARS = 28000;
+const STAGE0_GIST_TOTAL_CHARS = 24000;
+const STAGE0_STRATEGY_TOTAL_CHARS = 12000;
 
 function compactEvidenceText(value, maxChars) {
   const text = String(value || '');
@@ -28,12 +33,29 @@ function compactEvidenceText(value, maxChars) {
   return `${text.slice(0, head)}\n[...evidence excerpt compacted...]\n${text.slice(-tail)}`;
 }
 
-function formatCompetitorEvidence(items, pageChars, maxItems = STAGE0_SERP_MAX_COMPETITORS) {
-  return (Array.isArray(items) ? items : [])
-    .filter((item) => item && item.content)
-    .slice(0, maxItems)
-    .map((item) => `URL: ${item.url || ''}\n${compactEvidenceText(item.content, pageChars)}`)
-    .join('\n\n---\n\n');
+function buildEvidenceItems(items, pageChars, maxItems, maxTotalChars) {
+  const result = [];
+  let used = 0;
+  for (const item of (Array.isArray(items) ? items : [])) {
+    if (result.length >= maxItems || !item || !item.content) continue;
+    const prefix = `URL: ${item.url || ''}\n`;
+    const remaining = maxTotalChars - used - prefix.length;
+    if (remaining < 256) break;
+    const entry = `${prefix}${compactEvidenceText(item.content, Math.min(pageChars, remaining))}`;
+    result.push(entry.slice(0, remaining + prefix.length));
+    used += result[result.length - 1].length + (result.length > 1 ? 4 : 0);
+    if (used >= maxTotalChars) break;
+  }
+  return result;
+}
+
+function formatCompetitorEvidence(
+  items,
+  pageChars,
+  maxItems = STAGE0_SERP_MAX_COMPETITORS,
+  maxTotalChars = STAGE0_SERP_TOTAL_CHARS,
+) {
+  return buildEvidenceItems(items, pageChars, maxItems, maxTotalChars).join('\n\n---\n\n');
 }
 
 function isOwnSite(url, targetPageUrl) {
@@ -67,8 +89,22 @@ async function runStage0(task, ctx) {
     .map(u => u.trim())
     .filter(Boolean);
   if (!rawUrls.length) {
-    log('Stage 0: URL конкурентов не указаны — пропускаем парсинг', 'warn');
-    return null;
+    log('Stage 0: URL конкурентов не указаны — пропускаем конкурентный скан без ошибки', 'warn');
+    return {
+      stage_status: 'skipped',
+      skip_reason: 'no_competitor_urls',
+      competitor_scan: { status: 'skipped', requested: 0, successful: 0, failed: 0 },
+      realtime_facts: [],
+      research_evidence: [],
+      research_sources: [],
+      competitor_facts: [],
+      claims: [],
+      information_delta: [],
+      core_entities: [],
+      search_intents: [],
+      latest_trends: [],
+      legal_updates: [],
+    };
   }
 
   // Парсим все страницы параллельно
@@ -140,13 +176,32 @@ async function runStage0(task, ctx) {
 
   // Strategy context digest (Pre-Stage 0). Если не было — пусто.
   // Не модифицируем «жёсткий» system-промпт, расширяем только user-prompt.
-  const strategyDigest = (task.__strategyDigest || '').trim();
+  const strategyDigest = compactEvidenceText((task.__strategyDigest || '').trim(), STAGE0_STRATEGY_TOTAL_CHARS);
   const strategyAppendix = strategyDigest
     ? `\n\n===== STRATEGY CONTEXT (Pre-Stage 0) =====
 Используй карту ниши, портфель возможностей и карту спроса как фундамент:
 не генерируй ландшафт с нуля — валидируй и углубляй приведённые ниже сигналы.
 ${strategyDigest}\n`
     : '';
+
+  const serpEvidence = formatCompetitorEvidence(
+    onlyCompetitors,
+    STAGE0_SERP_PAGE_CHARS,
+    STAGE0_SERP_MAX_COMPETITORS,
+    STAGE0_SERP_TOTAL_CHARS,
+  );
+  const nicheEvidence = formatCompetitorEvidence(
+    onlyCompetitors,
+    STAGE0_NICHE_PAGE_CHARS,
+    STAGE0_SERP_MAX_COMPETITORS,
+    STAGE0_NICHE_TOTAL_CHARS,
+  );
+  const researchEvidence = formatCompetitorEvidence(
+    onlyCompetitors,
+    STAGE0_RESEARCH_PAGE_CHARS,
+    STAGE0_SERP_MAX_COMPETITORS,
+    STAGE0_RESEARCH_TOTAL_CHARS,
+  );
 
   const serpRealityContext = `${strategyAppendix}
 ===== COMPETITOR CONTENT DATA (TOP-4 COMPETITORS ONLY) =====
@@ -159,7 +214,7 @@ BUSINESS GOAL: ${task.input_business_goal || '[не указано]'}
 MONETIZATION: ${task.input_monetization || '[не указано]'}
 PROJECT LIMITS: ${task.input_project_limits || '[не указано]'}
 PAGE PRIORITIES: ${task.input_page_priorities || '[не указано]'}
-NICHE FEATURES: ${task.input_niche_features || '[не указано]'}${formatCompetitorEvidence(onlyCompetitors, STAGE0_SERP_PAGE_CHARS)}
+NICHE FEATURES: ${task.input_niche_features || '[не указано]'}${serpEvidence}
 ${ownSiteContent ? `
 ===== OUR SITE (ANALYZE WEAKNESSES vs COMPETITORS) =====
 URL: ${ownSiteContent.url}
@@ -192,7 +247,7 @@ MONETIZATION: ${task.input_monetization || '[не указано]'}
 PROJECT LIMITS: ${task.input_project_limits || '[не указано]'}
 PAGE PRIORITIES: ${task.input_page_priorities || '[не указано]'}
 NICHE FEATURES: ${task.input_niche_features || '[не указано]'}
-COMPETITOR CONTENT SUMMARY: ${formatCompetitorEvidence(onlyCompetitors, STAGE0_NICHE_PAGE_CHARS)}
+COMPETITOR CONTENT SUMMARY: ${nicheEvidence}
 ${ownSiteContent ? `OUR SITE CURRENT STATE: ${ownSiteContent.content.substring(0, 2000)}\n` : ''}
 
 OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_layers (array), topic_clusters (array), competitor_gaps (array), strategic_priorities (array). NO markdown.`;
@@ -206,15 +261,17 @@ OUTPUT: Return ONLY valid JSON enriching with: niche_segments (array), demand_la
   const { runGistGapFinder } = require('../gist/gistClient');
   // GIST needs representative evidence, not the full cleaned HTML dump. Keep
   // all selected domains while bounding each body for the optional service.
-  const gistEvidence = onlyCompetitors
-    .filter((c) => c && c.content)
-    .slice(0, STAGE0_GIST_MAX_PAGES)
-    .map((c) => `URL: ${c.url || ''}\n${compactEvidenceText(c.content, STAGE0_GIST_PAGE_CHARS)}`);
-  log(`Stage 0 evidence budget: SERP ${formatCompetitorEvidence(onlyCompetitors, STAGE0_SERP_PAGE_CHARS).length} chars; GIST ${gistEvidence.length} pages/${gistEvidence.join('').length} chars`, 'info');
+  const gistEvidence = buildEvidenceItems(
+    onlyCompetitors,
+    STAGE0_GIST_PAGE_CHARS,
+    STAGE0_GIST_MAX_PAGES,
+    STAGE0_GIST_TOTAL_CHARS,
+  );
+  log(`Stage 0 evidence budget: SERP ${serpEvidence.length} chars; GIST ${gistEvidence.length} pages/${gistEvidence.join('').length} chars`, 'info');
 
   const researchContext = `Тема: ${task.input_target_service}. Регион: ${task.input_region || 'Россия'}.\n`
     + 'SOURCE EVIDENCE — используй только эти материалы; без подтверждения верни пустой массив:\n'
-    + formatCompetitorEvidence(onlyCompetitors, STAGE0_RESEARCH_PAGE_CHARS);
+    + researchEvidence;
 
   const [serpRealityResult, nicheLandscapeResult, gistSettled, researchResult] = await Promise.all([
     callLLM('deepseek', fillPromptVars(SYSTEM_PROMPTS_EXT.serpRealityCheck, task), serpRealityContext, {

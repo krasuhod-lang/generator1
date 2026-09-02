@@ -1402,7 +1402,7 @@ function _emptyAdminApiUsage(note = null) {
       cache_miss_tokens: 0, thoughts_tokens: 0, cost_usd: 0,
       input_cost_usd: 0, output_cost_usd: 0,
     },
-    daily: [], by_provider: [], by_model: [], by_pipeline: [], anomalies: [],
+    daily: [], by_provider: [], by_model: [], by_pipeline: [], by_task: [], anomalies: [],
     data_quality: { ledger_ready: false, ledger_rows: 0, historical_stage_calls: 0, note },
     reconciliation: {
       ledger_cost_usd: 0, task_stage_cost_usd: 0, task_stage_calls: 0,
@@ -1416,13 +1416,13 @@ async function getAdminApiUsage(req, res, next) {
   const { from, to } = _adminUsageRange(req.query || {});
   const params = [from, to];
   try {
-    const [totalsQ, dailyQ, providerQ, modelQ, pipelineQ, anomalyQ, stageQ] = await Promise.all([
+    const [totalsQ, dailyQ, providerQ, modelQ, pipelineQ, taskQ, anomalyQ, stageQ] = await Promise.all([
       db.query(
         `SELECT COUNT(*)::int AS requests,
-                COUNT(*) FILTER (WHERE request_status IN ('success','partial_json'))::int AS successful,
+                COUNT(*) FILTER (WHERE request_status IN ('success','partial_json','repaired_json'))::int AS successful,
                 COUNT(*) FILTER (WHERE request_status IN ('failed','invalid_response'))::int AS failed,
                 COUNT(*) FILTER (WHERE request_status = 'cache_miss')::int AS cache_misses,
-                COUNT(*) FILTER (WHERE attempt > 1 OR request_status = 'truncated')::int AS retries,
+                COUNT(*) FILTER (WHERE attempt > 1 OR request_status IN ('truncated','repaired_json'))::int AS retries,
                 COUNT(*) FILTER (WHERE task_id IS NULL AND trace_task_id IS NULL)::int AS outside_task,
                 COUNT(*) FILTER (WHERE (task_id IS NULL) <> (trace_task_id IS NULL))::int AS partial_attribution,
                 COALESCE(SUM(tokens_in),0)::bigint AS tokens_in,
@@ -1493,6 +1493,26 @@ async function getAdminApiUsage(req, res, next) {
           ORDER BY cost_usd DESC, requests DESC`, params,
       ),
       db.query(
+        `SELECT COALESCE(task_id, trace_task_id) AS task_ref,
+                COALESCE(pipeline, 'unattributed') AS pipeline,
+                COUNT(*)::int AS requests,
+                COUNT(*) FILTER (WHERE request_status IN ('success','partial_json','repaired_json'))::int AS successful,
+                COUNT(*) FILTER (WHERE request_status IN ('failed','invalid_response'))::int AS failed,
+                COUNT(*) FILTER (WHERE attempt > 1 OR request_status IN ('truncated','repaired_json'))::int AS retries,
+                COALESCE(SUM(tokens_in),0)::bigint AS tokens_in,
+                COALESCE(SUM(tokens_out),0)::bigint AS tokens_out,
+                COALESCE(SUM(thoughts_tokens),0)::bigint AS thoughts_tokens,
+                COALESCE(SUM(cost_usd),0)::numeric(18,12) AS cost_usd,
+                COUNT(*) FILTER (WHERE COALESCE(meta->>'pricing_known', 'true') = 'false')::int AS pricing_unknown,
+                MAX(created_at) AS last_call_at
+           FROM admin_api_request_ledger
+          WHERE created_at >= $1 AND created_at < $2
+            AND COALESCE(task_id, trace_task_id) IS NOT NULL
+          GROUP BY COALESCE(task_id, trace_task_id), COALESCE(pipeline, 'unattributed')
+          ORDER BY cost_usd DESC, requests DESC
+          LIMIT 100`, params,
+      ),
+      db.query(
         `SELECT id, created_at, provider, model, pipeline, stage_name, call_label,
                 task_id, trace_task_id, request_status, attempt, duration_ms,
                 tokens_in, tokens_out, cached_tokens, cost_usd,
@@ -1509,7 +1529,7 @@ async function getAdminApiUsage(req, res, next) {
            FROM admin_api_request_ledger
           WHERE created_at >= $1 AND created_at < $2
             AND (task_id IS NULL OR trace_task_id IS NULL
-                 OR request_status IN ('failed','invalid_response','cache_miss','truncated')
+                 OR request_status IN ('failed','invalid_response','cache_miss','truncated','repaired_json')
                  OR attempt > 1 OR cost_usd >= 0.50)
           ORDER BY created_at DESC
           LIMIT 100`, params,
@@ -1554,6 +1574,18 @@ async function getAdminApiUsage(req, res, next) {
       by_provider: providerQ.rows.map((row) => ({ ...row, requests: num(row.requests), failed: num(row.failed), outside_task: num(row.outside_task), partial_attribution: num(row.partial_attribution), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), cost_usd: num(row.cost_usd) })),
       by_model: modelQ.rows.map((row) => ({ ...row, requests: num(row.requests), failed: num(row.failed), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), cost_usd: num(row.cost_usd) })),
       by_pipeline: pipelineQ.rows.map((row) => ({ ...row, requests: num(row.requests), failed: num(row.failed), outside_task: num(row.outside_task), partial_attribution: num(row.partial_attribution), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), cost_usd: num(row.cost_usd) })),
+      by_task: taskQ.rows.map((row) => ({
+        ...row,
+        requests: num(row.requests),
+        successful: num(row.successful),
+        failed: num(row.failed),
+        retries: num(row.retries),
+        tokens_in: num(row.tokens_in),
+        tokens_out: num(row.tokens_out),
+        thoughts_tokens: num(row.thoughts_tokens),
+        cost_usd: num(row.cost_usd),
+        pricing_unknown: num(row.pricing_unknown),
+      })),
       anomalies: anomalyQ.rows.map((row) => ({ ...row, cost_usd: num(row.cost_usd), tokens_in: num(row.tokens_in), tokens_out: num(row.tokens_out), attempt: num(row.attempt) })),
       reconciliation: {
         ledger_cost_usd: totals.cost_usd,

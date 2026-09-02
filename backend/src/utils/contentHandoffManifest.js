@@ -15,6 +15,7 @@ const MAX_LSI = 120;
 const MAX_NGRAMS = 80;
 const MAX_BLOCKS = 24;
 const MAX_TEXT = 800;
+const { normalizeWritingProfile } = require('./writingProfile');
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -199,6 +200,54 @@ function normalizeBlocks(taxonomy) {
   }));
 }
 
+function getWritingProfile(task) {
+  return normalizeWritingProfile(task?.writing_profile_json || task?.writing_profile, {
+    genre: task?.input_genre || task?.content_genre || task?.genre || task?.writing_genre,
+    tone: task?.input_tone || task?.tone || task?.tone_of_voice || task?.content_tone,
+    complexity: task?.input_complexity || task?.complexity || task?.reading_level,
+    professional_level: task?.input_professional_level || task?.professional_level || task?.expertise_level,
+    business_type: task?.input_business_type,
+    site_type: task?.input_site_type,
+    language: task?.input_language || 'ru',
+    audience: task?.input_target_audience,
+    voice_notes: task?.__contentVoiceText,
+  });
+}
+
+function getFreshnessPolicy(task, region) {
+  const profile = normalizeWritingProfile(task?.writing_profile_json || task?.writing_profile, {
+    language: task?.input_language || 'ru',
+    business_type: task?.input_business_type,
+    site_type: task?.input_site_type,
+    audience: task?.input_target_audience,
+  });
+  const haystack = [
+    task?.input_project_limits,
+    task?.input_niche_features,
+    task?.input_business_goal,
+    task?.input_target_service,
+    task?.freshness_requirement,
+    task?.current_law_required,
+    task?.regulatory_context,
+    profile.genre,
+    profile.voice_notes,
+  ].filter(Boolean).join(' ');
+  const required = profile.freshness_required
+    || profile.current_law_required
+    || task?.freshness_required === true
+    || task?.current_law_required === true
+    || /(актуальн|текущ|сегодня|на\s+дату|нововвед|изменени[ея].{0,24}(закон|правил|тариф|норм)|законодатель|регулятор)/i.test(haystack);
+  return {
+    required,
+    as_of: required ? new Date().toISOString().slice(0, 10) : null,
+    jurisdiction: compact(task?.legal_jurisdiction || region || 'Россия', 120) || 'Россия',
+    source_date_required: required,
+    rule: required
+      ? 'Для актуальных правовых/регуляторных/коммерческих утверждений использовать только датированные подтверждённые источники; при отсутствии свежего источника утверждение исключить или отправить на human review.'
+      : 'Актуальность не заявлена во входном ТЗ; не добавлять текущие даты, законы, тарифы или нововведения без источника.',
+  };
+}
+
 function getTzRequirements(task) {
   let tz = task?.tz_json;
   if (typeof tz === 'string') {
@@ -227,6 +276,9 @@ function buildContentHandoffManifest({
   strategyContext = null,
 } = {}) {
   const tz = getTzRequirements(task);
+  const region = compact(task.input_region, 120) || 'Россия';
+  const writingProfile = getWritingProfile(task);
+  const freshness = getFreshnessPolicy(task, region);
   const facts = [
     ...normalizeEvidence(stage0Result?.realtime_facts, 'stage0.realtime_facts', MAX_FACTS),
     ...normalizeEvidence(stage0Result?.research_evidence, 'stage0.research_evidence', MAX_FACTS),
@@ -285,7 +337,7 @@ function buildContentHandoffManifest({
     source_contract: {
       task_id: text(task.id) || null,
       target_service: compact(task.input_target_service, 240) || null,
-      region: compact(task.input_region, 120) || 'Россия',
+      region,
       source_relevance_report_id: text(task.source_relevance_report_id) || null,
       strategy_available: !!strategyContext,
       target_page_available: !!targetPageAnalysis,
@@ -296,6 +348,8 @@ function buildContentHandoffManifest({
       forbidden_terms: tz.forbidden,
       min_words: tz.min_words,
       max_words: tz.max_words,
+      writing_profile: writingProfile,
+      freshness,
     },
     facts,
     claims_to_prove: claims,
@@ -331,6 +385,8 @@ function buildContentHandoffManifest({
       lsi_required: manifest.semantic.lsi_required.slice(0, 80),
       ngrams_required: manifest.semantic.ngrams_required.slice(0, 50),
     },
+    writing_profile: manifest.requirements.writing_profile,
+    freshness: manifest.requirements.freshness,
     blocks: manifest.blocks,
     validation: manifest.validation,
   });
@@ -363,8 +419,10 @@ function buildBlockHandoffPrompt(manifest, block) {
       ngrams_required: manifest.semantic.ngrams_required.slice(0, 50),
     },
     requirements: manifest.requirements,
+    writing_profile: manifest.requirements.writing_profile,
+    freshness: manifest.requirements.freshness,
   };
-  return `\n\nCONTENT HANDOFF MANIFEST (verified, block-scoped):\n${JSON.stringify(payload)}\nDo not introduce a numeric, legal, medical, commercial, product or competitor claim unless it is supported by FACTS/CLAIMS above or by the supplied project context. Preserve intent and use routed terms naturally; never force repetitions.`;
+  return `\n\nCONTENT HANDOFF MANIFEST (verified, block-scoped):\n${JSON.stringify(payload)}\nDo not introduce a numeric, legal, medical, commercial, product or competitor claim unless it is supported by FACTS/CLAIMS above or by the supplied project context. Preserve the supplied genre, tone and audience. For freshness-sensitive topics, use only dated verified sources; otherwise omit the current-law/current-date claim or mark it for human review. Preserve intent and use routed terms naturally; never force repetitions.`;
 }
 
 function renderManifestMarkdown(manifest, maxChars = 12000) {
@@ -374,6 +432,8 @@ function renderManifestMarkdown(manifest, maxChars = 12000) {
     `Status: ${manifest.validation.status}; warnings: ${manifest.validation.warnings.join(', ') || 'none'}`,
     `Coverage: facts=${manifest.validation.counts.facts}, claims=${manifest.validation.counts.claims}, entities=${manifest.validation.counts.entities}, intents=${manifest.validation.counts.intents}, LSI=${manifest.validation.counts.lsi}, ngrams=${manifest.validation.counts.ngrams}, blocks=${manifest.validation.counts.blocks}`,
     `Требования ТЗ: H1=${manifest.requirements.h1 || 'нет'}; H2=${manifest.requirements.required_h2.join(' | ') || 'нет'}; forbidden=${manifest.requirements.forbidden_terms.join(', ') || 'нет'}`,
+    `Профиль текста: жанр=${manifest.requirements.writing_profile.genre || 'не задан'}; тон=${manifest.requirements.writing_profile.tone || 'не задан'}; язык=${manifest.requirements.writing_profile.language}; аудитория=${manifest.requirements.writing_profile.audience || 'не задан'}`,
+    `Актуальность: required=${manifest.requirements.freshness.required}; as_of=${manifest.requirements.freshness.as_of || 'не требуется'}; jurisdiction=${manifest.requirements.freshness.jurisdiction}`,
     `LSI: ${manifest.semantic.lsi_required.join(', ') || 'нет'}`,
     `N-граммы: ${manifest.semantic.ngrams_required.join(', ') || 'нет'}`,
     'Проверенные факты:',

@@ -9,6 +9,7 @@ import RichTextInput from '../components/RichTextInput.vue';
 import ProjectPicker from '../components/ProjectPicker.vue';
 import AppPageHeader from '../components/AppPageHeader.vue';
 import ToolHelp from '../components/ToolHelp.vue';
+import WritingProfileFields from '../components/WritingProfileFields.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -49,7 +50,16 @@ const form = reactive({
   title:                 '',
   llm_provider:          'gemini',
   llm_model:             'gemini-3.1-pro-preview',
-  gemini_model:          'gemini-3.1-pro-preview',
+    gemini_model:             'gemini-3.1-pro-preview',
+  writing_profile_json: {
+    genre: '',
+    tone: '',
+    complexity: '',
+    professional_level: '',
+    voice_notes: '',
+    freshness_required: false,
+    current_law_required: false,
+  },
   // Связка с отчётом релевантности — заполняется при переходе из
   // /relevance/:id, бэкенд по этому id вытащит entity_coverage и
   // competitor_signals и вольёт их в __moduleContext / AKB §11.
@@ -830,6 +840,11 @@ function downloadExampleTZ() {
                 <option value="expert brand">Expert Brand</option>
               </select>
             </div>
+            <WritingProfileFields
+              v-model="form.writing_profile_json"
+              :disabled="saving || loading || llmUploading"
+              class="mt-1"
+            />
             <div>
               <label class="label">Тип сайта</label>
               <select v-model="form.input_site_type" class="input">

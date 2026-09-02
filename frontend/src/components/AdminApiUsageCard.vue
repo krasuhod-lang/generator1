@@ -181,6 +181,32 @@ onMounted(load);
       </div>
 
       <div class="mt-5">
+        <div class="flex items-center justify-between gap-3 mb-3">
+          <div>
+            <h3 class="text-sm font-medium text-gray-300">Расход по задачам</h3>
+            <p class="text-[11px] text-gray-600 mt-1">Ledger-authoritative: включает успешные вызовы, retry, repair и provider errors с usage.</p>
+          </div>
+          <span class="text-[11px] text-gray-600">{{ fmtNum((usage.by_task || []).length) }} групп</span>
+        </div>
+        <div v-if="usage.by_task?.length" class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead><tr class="border-b border-gray-800 text-left text-gray-500"><th class="py-2 pr-3">Task</th><th class="py-2 pr-3">Pipeline</th><th class="py-2 pr-3">Запросы</th><th class="py-2 pr-3">Tokens</th><th class="py-2 pr-3">Retry/ошибки</th><th class="py-2">Стоимость</th></tr></thead>
+            <tbody>
+              <tr v-for="row in usage.by_task" :key="`${row.task_ref}-${row.pipeline}`" class="border-b border-gray-900 text-gray-300">
+                <td class="py-2 pr-3 font-mono text-gray-400">{{ shortId(row.task_ref) }}</td>
+                <td class="py-2 pr-3">{{ row.pipeline || '—' }}</td>
+                <td class="py-2 pr-3">{{ fmtNum(row.requests) }}</td>
+                <td class="py-2 pr-3">{{ fmtNum((Number(row.tokens_in) || 0) + (Number(row.tokens_out) || 0) + (Number(row.thoughts_tokens) || 0)) }}</td>
+                <td class="py-2 pr-3"><span :class="row.failed ? 'text-red-300' : 'text-gray-400'">{{ fmtNum(row.failed) }}</span><span class="text-gray-600"> / {{ fmtNum(row.retries) }}</span></td>
+                <td class="py-2 text-fuchsia-300">{{ fmtCost(row.cost_usd) }}<span v-if="row.pricing_unknown" class="text-amber-300 ml-1" title="Есть вызовы с неизвестным тарифом">?</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="text-sm text-gray-500">Привязанных обращений за период нет.</div>
+      </div>
+
+      <div class="mt-5">
         <h3 class="text-sm font-medium text-gray-300 mb-3">Аномальные обращения</h3>
         <div class="overflow-x-auto">
           <table class="w-full text-xs">

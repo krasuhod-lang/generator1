@@ -419,7 +419,10 @@ function buildCallCtx(taskId, stageName) {
     traceTaskId: taskId,
     log: (msg, level = 'info') => appendLog(taskId, msg, level).catch(() => {}),
     onTokens: (adapter, tIn, tOut, cost) => {
-      recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
+      publishEvent(taskId, 'tokens', { adapter, tokensIn: tIn || 0, tokensOut: tOut || 0, costUsd: Number(cost || 0) });
+    },
+    onAttemptUsage: (adapter, tIn, tOut, cost, meta = {}) => {
+      recordTextTokens(taskId, adapter, tIn, tOut, cost, { attempt: true, ...meta }).catch(() => {});
     },
   };
 }
@@ -1871,6 +1874,7 @@ async function processInfoArticleTask(taskId) {
 
     // BRANDCORE/TGA: единый governance-контекст для блоговой статьи.
     const { buildGovernanceReport, renderGovernanceBlock } = require('../contentGovernance');
+    const { renderWritingProfileBlock } = require('../../utils/writingProfile');
     const governanceSemanticContext = {
       entities: intents?.entities || [],
       intents: intents?.subintents || intents?.intents || [],
@@ -1883,13 +1887,14 @@ async function processInfoArticleTask(taskId) {
       projectContext: task.project_context_snapshot || null,
       semanticContext: governanceSemanticContext,
     });
-    const governanceBlock = renderGovernanceBlock({
+    const governanceRulesBlock = renderGovernanceBlock({
       report: governanceReport,
       contentType: 'info',
       task,
       projectContext: task.project_context_snapshot || null,
       semanticContext: governanceSemanticContext,
     });
+    const governanceBlock = `${governanceRulesBlock}\n\n${renderWritingProfileBlock(task.writing_profile_json)}`;
     task.__governanceReport = governanceReport;
     task.__governanceBlock = governanceBlock;
     await appendLog(taskId, `BRANDCORE/TGA: ${governanceReport.status}; facts=${governanceReport.confirmed_facts}, claims=${governanceReport.confirmed_claims}`, governanceReport.blockers.length ? 'warn' : 'info');
@@ -2923,7 +2928,10 @@ async function processInfoArticleTask(taskId) {
           // (у info_article_tasks нет FK на task_metrics), поэтому фасаду
           // запрещаем писать в task_metrics: только pipeline_traces.
           onTokens: (adapter, tIn, tOut, cost) => {
-            recordTextTokens(taskId, adapter, tIn, tOut, cost).catch(() => {});
+            publishEvent(taskId, 'tokens', { adapter, tokensIn: tIn || 0, tokensOut: tOut || 0, costUsd: Number(cost || 0) });
+          },
+          onAttemptUsage: (adapter, tIn, tOut, cost, meta = {}) => {
+            recordTextTokens(taskId, adapter, tIn, tOut, cost, { attempt: true, ...meta }).catch(() => {});
           },
         },
       });

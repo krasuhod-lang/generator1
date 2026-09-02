@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../../config/db');
+let traceTableUnavailable = false;
 
 function normalizeInt(value) {
   const n = Number(value);
@@ -32,6 +33,9 @@ async function recordTrace({
   triggeredRefine = false,
 } = {}) {
   if (!taskId && !stage) return null;
+  // The trace table is optional telemetry. Once its absence is confirmed,
+  // stop retrying the same failing INSERT until the process restarts.
+  if (traceTableUnavailable) return null;
   try {
     await db.query(
       `INSERT INTO pipeline_traces
@@ -52,7 +56,12 @@ async function recordTrace({
       ],
     );
   } catch (err) {
-    console.warn(`[pipelineTrace] recordTrace failed: ${err.message}`);
+    if (/relation\s+[\"']?pipeline_traces[\"']?\s+does not exist/i.test(String(err?.message || ''))) {
+      traceTableUnavailable = true;
+      console.warn('[pipelineTrace] optional table pipeline_traces is unavailable; disabling trace writes for this process');
+    } else {
+      console.warn(`[pipelineTrace] recordTrace failed: ${err.message}`);
+    }
   }
   return null;
 }

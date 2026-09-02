@@ -93,6 +93,7 @@ function _buildStageUser(stageKey, { brief, master, redditMaterials }) {
  * @param {string}   [opts.provider='deepseek'] — LLM-провайдер для всех этапов
  * @param {Function} [opts.log]             — (msg, level) => void
  * @param {Function} [opts.onTokens]        — (model, tIn, tOut, cost) => void (SSE/метрики Эгиды)
+ * @param {Function} [opts.onAttemptUsage]  — every provider response for authoritative task reconciliation
  * @param {string[]} [opts.stages]          — подмножество ключей этапов (по умолчанию все)
  * @param {number}   [opts.retries=3]
  * @returns {Promise<{ master, digest, validation, stagesRun, errors, promptHashes }>}
@@ -137,6 +138,7 @@ async function runRedditMapperPipeline(input = {}, opts = {}) {
           stageName: `reddit_mapper_${stage.key}`,
           log: (m, l) => log(m, l),
           onTokens: opts.onTokens || null,
+          onAttemptUsage: opts.onAttemptUsage || null,
         },
       );
 

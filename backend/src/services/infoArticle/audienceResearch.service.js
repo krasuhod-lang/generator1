@@ -207,6 +207,7 @@ async function resolveAudienceResearch(args = {}, deps = {}) {
           provider: cfg.provider,
           log: ctx && typeof ctx.log === 'function' ? ctx.log : undefined,
           onTokens: ctx && typeof ctx.onTokens === 'function' ? ctx.onTokens : undefined,
+          onAttemptUsage: ctx && typeof ctx.onAttemptUsage === 'function' ? ctx.onAttemptUsage : undefined,
         },
       );
       digest = res && res.digest ? res.digest : null;
