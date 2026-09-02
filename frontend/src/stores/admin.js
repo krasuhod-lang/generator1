@@ -2,6 +2,30 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import axios from 'axios';
 
+function readStoredAdminToken() {
+  try {
+    return localStorage.getItem('seo_admin_token');
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeStoredAdminToken(value) {
+  try {
+    localStorage.setItem('seo_admin_token', value);
+  } catch (_) {
+    // Сессия сохраняется в памяти до закрытия вкладки.
+  }
+}
+
+function clearStoredAdminToken() {
+  try {
+    localStorage.removeItem('seo_admin_token');
+  } catch (_) {
+    // Storage может быть заблокирован мобильным браузером.
+  }
+}
+
 const adminApi = axios.create({
   baseURL: '/api',
   timeout: 60_000,
@@ -27,7 +51,7 @@ adminApi.interceptors.response.use(
     const status = error.response?.status;
     const url = error.config?.url || '';
     if ((status === 401 || status === 403) && !url.includes('/admin/login')) {
-      localStorage.removeItem('seo_admin_token');
+      clearStoredAdminToken();
       try {
         const { default: router } = await import('../router/index.js');
         if (!window.location.pathname.endsWith('/admin/login')) {
@@ -45,7 +69,7 @@ adminApi.interceptors.response.use(
 
 
 export const useAdminStore = defineStore('admin', () => {
-  const adminToken = ref(null);
+  const adminToken = ref(readStoredAdminToken());
   const adminUser  = ref(null);
   const users      = ref([]);
   const usersTotal = ref(0);
@@ -57,7 +81,7 @@ export const useAdminStore = defineStore('admin', () => {
 
   // ── Восстановление сессии ────────────────────────────────────────────
   function restoreSession() {
-    const saved = localStorage.getItem('seo_admin_token');
+    const saved = readStoredAdminToken();
     if (saved) {
       adminToken.value = saved;
     }
@@ -68,7 +92,7 @@ export const useAdminStore = defineStore('admin', () => {
     const { data } = await adminApi.post('/admin/login', { email, password });
     adminToken.value = data.token;
     adminUser.value  = data.user;
-    localStorage.setItem('seo_admin_token', data.token);
+    writeStoredAdminToken(data.token);
     return data;
   }
 
@@ -76,7 +100,7 @@ export const useAdminStore = defineStore('admin', () => {
   function adminLogout() {
     adminToken.value = null;
     adminUser.value  = null;
-    localStorage.removeItem('seo_admin_token');
+    clearStoredAdminToken();
   }
 
   // ── Список пользователей ─────────────────────────────────────────────

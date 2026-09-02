@@ -22,6 +22,10 @@ const adminLayout = read('src/components/AdminLayout.vue');
 const premiumLayout = read('src/components/PremiumLayout.vue');
 const dashboard = read('src/views/DashboardPage.vue');
 const adminKeys = read('src/views/admin/AdminApiKeysPage.vue');
+const landing = read('src/views/PublicLandingPage.vue');
+const authStore = read('src/stores/auth.js');
+const adminStore = read('src/stores/admin.js');
+const api = read('src/api.js');
 const vite = read('vite.config.js');
 
 for (const token of ['--ui-bg:', '--ui-surface:', '--ui-border:', '--ui-brand:', '--ui-brand-light:', '--ui-radius:']) {
@@ -44,6 +48,14 @@ expectIncludes(adminLayout, 'SeoMST', 'admin shell brand');
 expectIncludes(premiumLayout, 'SeoMST', 'premium shell brand');
 expectIncludes(dashboard, 'var(--ui-surface)', 'task-center surface token');
 expectIncludes(adminKeys, 'admin-action-row', 'admin key mobile actions');
+expectIncludes(landing, '.nav-login { display: inline-flex;', 'mobile login hit-area');
+expectIncludes(landing, '.footer-links a { display: inline-flex;', 'mobile footer hit-area');
+expectIncludes(authStore, 'const token = ref(readStoredToken());', 'client pre-router token hydration');
+expectIncludes(authStore, 'function writeStoredToken(value)', 'client safe token storage');
+expectIncludes(adminStore, 'const adminToken = ref(readStoredAdminToken());', 'admin pre-router token hydration');
+expectIncludes(adminStore, 'function writeStoredAdminToken(value)', 'admin safe token storage');
+expectIncludes(api, 'function readStoredToken()', 'API safe token storage');
+expectIncludes(api, 'function clearStoredToken()', 'API safe token cleanup');
 expectIncludes(index, 'SeoMST —', 'document brand metadata');
 assert.doesNotMatch(vite, /allowedHosts|host:\s*['"]0\.0\.0\.0['"]/, 'audit-only Vite exposure must not ship');
 
@@ -51,4 +63,4 @@ const brandResidue = [index, login, register, adminLogin, appLayout, adminLayout
   .some((source) => /SEO Genius|SEO GENIUS|SEO <b>GENIUS/.test(source));
 assert.equal(brandResidue, false, 'legacy visible SEO Genius brand must not remain in audited surfaces');
 
-console.log('SEOMST_UI_CONTRACT_OK checks=24');
+console.log('SEOMST_UI_CONTRACT_OK checks=32');

@@ -2,6 +2,30 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import api from '../api.js';
 
+function readStoredToken() {
+  try {
+    return localStorage.getItem('seo_token');
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeStoredToken(value) {
+  try {
+    localStorage.setItem('seo_token', value);
+  } catch (_) {
+    // Текущая сессия остаётся в памяти, даже если storage недоступен.
+  }
+}
+
+function clearStoredToken() {
+  try {
+    localStorage.removeItem('seo_token');
+  } catch (_) {
+    // Нечего очищать, если storage заблокирован браузером.
+  }
+}
+
 function readPendingVerification() {
   try {
     const raw = sessionStorage.getItem('seo_pending_verification');
@@ -12,14 +36,18 @@ function readPendingVerification() {
 }
 
 export const useAuthStore = defineStore('auth', () => {
-  const token = ref(null);
+  const token = ref(readStoredToken());
   const user  = ref(null);
   const pendingVerification = ref(readPendingVerification());
 
   const isLoggedIn = computed(() => !!token.value);
 
+  if (token.value) {
+    api.defaults.headers.common['Authorization'] = `Bearer ${token.value}`;
+  }
+
   async function restoreSession() {
-    const saved = localStorage.getItem('seo_token');
+    const saved = readStoredToken();
     if (!saved) return;
 
     token.value = saved;
@@ -72,7 +100,7 @@ export const useAuthStore = defineStore('auth', () => {
   function logout() {
     token.value = null;
     user.value  = null;
-    localStorage.removeItem('seo_token');
+    clearStoredToken();
     delete api.defaults.headers.common['Authorization'];
   }
 
@@ -90,7 +118,7 @@ export const useAuthStore = defineStore('auth', () => {
     if (!data?.token) throw new Error('Сервер не вернул токен');
     token.value = data.token;
     user.value  = data.user;
-    localStorage.setItem('seo_token', data.token);
+    writeStoredToken(data.token);
     api.defaults.headers.common['Authorization'] = `Bearer ${data.token}`;
   }
 

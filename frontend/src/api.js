@@ -10,6 +10,22 @@
  */
 import axios from 'axios';
 
+function readStoredToken() {
+  try {
+    return localStorage.getItem('seo_token');
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearStoredToken() {
+  try {
+    localStorage.removeItem('seo_token');
+  } catch (_) {
+    // В приватном режиме storage может быть недоступен.
+  }
+}
+
 const api = axios.create({
   baseURL: '/api',
   timeout: 60_000,
@@ -20,7 +36,7 @@ const api = axios.create({
 // Подставляем свежий токен из localStorage перед КАЖДЫМ запросом.
 // Это важно: даже если Pinia-стор ещё не восстановлен, заголовок будет верным.
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('seo_token');
+  const token = readStoredToken();
   if (token) {
     config.headers['Authorization'] = `Bearer ${token}`;
   }
@@ -59,7 +75,7 @@ api.interceptors.response.use(
 
     if (error.response?.status === 401) {
       // Удаляем протухший токен
-      localStorage.removeItem('seo_token');
+      clearStoredToken();
       delete api.defaults.headers.common['Authorization'];
 
       // Сбрасываем Pinia-стор без circular dependency:
