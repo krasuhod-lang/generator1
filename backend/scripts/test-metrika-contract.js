@@ -83,4 +83,10 @@ const merged = _internal.mergeMetricBodies([
 assert.deepStrictEqual(merged.metrics, ['ym:s:visits', 'ym:s:goal101reaches', 'ym:s:goal202reaches']);
 assert.deepStrictEqual(merged.body.data[0].metrics, [20, 2, 1]);
 assert.strictEqual(_internal.goalReaches({ metrics: [2, 1] }, ['ym:s:goal101reaches', 'ym:s:goal202reaches']), 3);
-console.log('METRIKA_CONTRACT_OK checks=37');
+const firstBatch = _internal.metricBatchParams({ sort: '-ym:s:visits' }, ['ym:s:visits'], ['ym:s:goal101reaches'], 0);
+assert.strictEqual(firstBatch.params.sort, '-ym:s:visits');
+assert.deepStrictEqual(firstBatch.metrics, ['ym:s:visits', 'ym:s:goal101reaches']);
+const laterBatch = _internal.metricBatchParams({ sort: '-ym:s:visits' }, ['ym:s:visits'], ['ym:s:goal202reaches'], 1);
+assert.strictEqual(laterBatch.params.sort, undefined);
+assert.deepStrictEqual(laterBatch.metrics, ['ym:s:goal202reaches']);
+console.log('METRIKA_CONTRACT_OK checks=42');

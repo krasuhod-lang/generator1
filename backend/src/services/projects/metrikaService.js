@@ -172,6 +172,16 @@ async function requestReport(token, params) {
   }
 }
 
+function metricBatchParams(baseParams, baseMetrics, batch, index) {
+  const metrics = index === 0 ? [...baseMetrics, ...batch] : batch;
+  const params = { ...baseParams, metrics: metrics.join(',') };
+  // Later goal-only batches do not contain visits, so the original sort by
+  // visits is invalid for Yandex Metrica (error 4012). Source rows are sorted
+  // by visits after all batches are merged.
+  if (index > 0 && params.sort) delete params.sort;
+  return { params, metrics };
+}
+
 async function requestMetricBatches(token, baseParams, baseMetrics, goalIds) {
   const goalMetrics = goalIds.map(goalMetricName).filter(Boolean);
   const batches = chunk(goalMetrics, MAX_GOAL_METRICS_PER_REQUEST);
@@ -182,8 +192,8 @@ async function requestMetricBatches(token, baseParams, baseMetrics, goalIds) {
   // every goal batch would multiply visits/users/pageviews after merging.
   for (let index = 0; index < batches.length; index += 1) {
     const batch = batches[index];
-    const metrics = index === 0 ? [...baseMetrics, ...batch] : batch;
-    const body = await requestReport(token, { ...baseParams, metrics: metrics.join(',') });
+    const { params, metrics } = metricBatchParams(baseParams, baseMetrics, batch, index);
+    const body = await requestReport(token, params);
     results.push({ body, metrics });
   }
   const merged = mergeMetricBodies(results);
@@ -432,5 +442,6 @@ module.exports = {
     mergeMetricBodies,
     goalReaches,
     requestMetricBatches,
+    metricBatchParams,
   },
 };
