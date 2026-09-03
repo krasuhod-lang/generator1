@@ -34,7 +34,11 @@ const jwt = require('jsonwebtoken');
 
 const db = require('../config/db');
 const { aggregateForDraft, invalidateProjectCache } = require('../services/reports/dataAggregator');
-const { generateSummary } = require('../services/reports/aiAnalyst');
+const {
+  generateSummary,
+  _buildWorkDigest,
+  _fallbackWorkSummary,
+} = require('../services/reports/aiAnalyst');
 const tasksLog = require('../services/reports/tasksAutoLog');
 const { buildReportDocx } = require('../services/reports/docxExporter');
 const { buildReportPdf } = require('../services/reports/pdfExporter');
@@ -128,6 +132,7 @@ function _summaryPayloadFromDraft(row) {
     roadmap: row.llm_roadmap || [],
     traffic_value: row.llm_traffic_value || '',
     next_month_forecast: row.llm_next_month_forecast || '',
+    work_summary: insights.work_summary || null,
     ai_status: row.llm_status || 'idle',
     ai_generated_at: row.llm_generated_at || insights.generated_at || null,
     ai_metadata: {
@@ -789,6 +794,28 @@ async function publicGet(req, res) {
       captured_at: new Date().toISOString(),
     };
   }
+
+  // Work summary хранится отдельно внутри client_insights. Подмешиваем её
+  // после snapshot/live ветки, чтобы новая сводка появилась и в старых
+  // опубликованных snapshots, не переписывая snapshot_data и tasks_blocks.
+  const persistedWorkSummary = sr.client_insights
+    && typeof sr.client_insights === 'object'
+    ? sr.client_insights.work_summary
+    : null;
+  const taskBlocksForSummary = Array.isArray(payload.tasks_blocks) && payload.tasks_blocks.length
+    ? payload.tasks_blocks
+    : (payload.data?.tasks?.blocks || []);
+  const fallbackWorkSummary = _fallbackWorkSummary(
+    _buildWorkDigest({ tasks: {
+      blocks: taskBlocksForSummary,
+      items: payload.data?.tasks?.items || [],
+    } }),
+    _periodLabel(reqFrom || winFrom, reqTo || winTo),
+  );
+  payload.summary = {
+    ...(payload.summary || {}),
+    work_summary: persistedWorkSummary || payload.summary?.work_summary || fallbackWorkSummary,
+  };
 
   // Инкремент счётчика просмотров (best-effort, не блокирует ответ).
   db.query(

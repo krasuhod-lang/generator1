@@ -493,7 +493,8 @@ function _stateOf(section) {
           </div>
 
           <div class="rep-card">
-            <h3>AI-резюме</h3>
+            <h3>AI-резюме и сводка работ</h3>
+            <p class="src-hint">Включает краткое описание выполненного за период и группировку работ по неделям, если даты доступны.</p>
             <p class="src-hint" v-if="summaryStatus?.status === 'done'">
               ✓ Готово {{ draft.llm_generated_at ? new Date(draft.llm_generated_at).toLocaleString('ru-RU') : '' }}
             </p>

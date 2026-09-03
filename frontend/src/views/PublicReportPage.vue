@@ -37,6 +37,7 @@ const TAB_DEFINITIONS = [
   { id: 'search', label: 'Поиск', description: 'GSC · Яндекс · Keys.so', icon: '↗' },
   { id: 'pages', label: 'Страницы', description: 'URL и запросы', icon: '▦' },
   { id: 'tasks', label: 'Работы', description: 'Задачи и результаты', icon: '✓' },
+  { id: 'work-summary', label: 'Сводка работ', description: 'Что сделано по неделям', icon: '✦' },
   { id: 'insights', label: 'AI-анализ', description: 'Причины и следующие шаги', icon: '◎' },
 ];
 const activeTab = ref('overview');
@@ -57,6 +58,12 @@ const availableTabs = computed(() => {
     if (tab.id === 'overview' || tab.id === 'tasks') return true;
     if (tab.id === 'search') return Boolean(data.gsc || data.ywm || data.keys_so || data.position);
     if (tab.id === 'pages') return hasPageBreakdown(data);
+    if (tab.id === 'work-summary') {
+      const work = summary.work_summary;
+      return Boolean(work && (work.overview
+        || (Array.isArray(work.weeks) && work.weeks.length)
+        || (Array.isArray(work.period_points) && work.period_points.length)));
+    }
     if (tab.id === 'insights') {
       return Boolean(summary.executive_summary
         || (Array.isArray(summary.growth_attribution) && summary.growth_attribution.length)
@@ -261,6 +268,7 @@ async function exportPdf() {
           <ReportRenderer
             :data="result.payload?.data"
             :summary="result.payload?.summary || {}"
+            :work-summary="result.payload?.summary?.work_summary || null"
             :tasks-blocks="result.payload?.tasks_blocks || []"
             :title="result.title"
             :period="result.period"
@@ -343,7 +351,7 @@ async function exportPdf() {
 .public-tabs-heading > div { display: flex; flex-direction: column; gap: 2px; }
 .public-tabs-kicker { color: #86868b; font-size: 9px; font-weight: 800; letter-spacing: .14em; }
 .public-tabs-current { color: #0a84ff; font-size: 12px; font-weight: 700; }
-.public-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.public-tabs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .public-tab {
   min-height: 64px;
   display: flex;
@@ -413,14 +421,17 @@ async function exportPdf() {
 
 @media (min-width: 375px) { .public-page { padding: 20px 14px; } }
 @media (min-width: 768px) { .public-page { padding: 40px 20px; } }
+@media (max-width: 960px) {
+  .public-tabs { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+  .public-tab { flex: 0 0 174px; }
+}
 @media (max-width: 720px) {
   .range-grid { grid-template-columns: 1fr; }
   .public-toolbar { flex-direction: column; gap: 8px; }
   .toolbar-actions { justify-content: stretch; }
   .tool-btn { flex: 1; text-align: center; }
   .public-tabs-shell { top: 8px; padding: 9px; border-radius: 15px; }
-  .public-tabs { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
-  .public-tab { flex: 0 0 164px; min-height: 58px; padding: 9px 10px; }
+  .public-tab { flex-basis: 164px; min-height: 58px; padding: 9px 10px; }
 }
 @media (max-width: 480px) {
   .public-tabs-heading { padding-bottom: 7px; }

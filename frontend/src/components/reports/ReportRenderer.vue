@@ -33,6 +33,10 @@ const props = defineProps({
   // Значение `all` сохраняет прежний режим редактора без изменений.
   activeTab:   { type: String, default: 'all' },
   showAnchorNav: { type: Boolean, default: true },
+  // Отдельная AI-сводка выполненных работ. Хранится в client_insights и
+  // является только presentation-данными: tasksBlocks остаётся источником
+  // оригинальных работ и не изменяется.
+  workSummary: { type: Object, default: null },
 });
 const emit = defineEmits(['update:tasksBlocks', 'override:update', 'override:reset', 'update:chart']);
 
@@ -305,6 +309,56 @@ const quickWinsItems = computed(() => (
 ));
 
 const normalizedTasks = computed(() => normalizeBlocks(props.tasksBlocks));
+
+const selectedWorkMonth = ref(0);
+const workMonthTabs = computed(() => normalizedTasks.value.map((month, index) => ({
+  index,
+  month: month?.month || 'Без месяца',
+  label: formatWorkMonth(month?.month),
+  sections: Array.isArray(month?.sections) ? month.sections.length : 0,
+  tasks: countTasks(month),
+  completed: countCompleted(month),
+})));
+const displayedWorkMonths = computed(() => {
+  // Публичная вкладка «Работы» использует второй уровень навигации — месяц.
+  // В редакторе activeTab=all, поэтому полный массив и прежние индексы CRUD
+  // остаются без изменений.
+  if (!props.readonly || props.activeTab !== 'tasks' || !normalizedTasks.value.length) {
+    return normalizedTasks.value;
+  }
+  return [normalizedTasks.value[Math.min(selectedWorkMonth.value, normalizedTasks.value.length - 1)]];
+});
+
+watch(workMonthTabs, (tabs) => {
+  if (!tabs.length) {
+    selectedWorkMonth.value = 0;
+    return;
+  }
+  if (selectedWorkMonth.value >= tabs.length) selectedWorkMonth.value = tabs.length - 1;
+}, { immediate: true });
+
+function selectWorkMonth(index) {
+  const next = Number(index);
+  if (Number.isInteger(next) && next >= 0 && next < workMonthTabs.value.length) selectedWorkMonth.value = next;
+}
+
+function formatWorkMonth(value) {
+  if (!value || value === 'Без месяца') return value || 'Без месяца';
+  const match = String(value).match(/^(\\d{4})-(\\d{2})/);
+  if (!match) return String(value);
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, 1);
+  return date.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+}
+
+function isSafeExternalUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function formatTaskDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || '');
+  return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+}
 
 function taskItems(section) {
   return Array.isArray(section?.tasks) ? section.tasks : [];
@@ -699,19 +753,23 @@ watch(pageSize, (n) => { if (visiblePages.value < n) visiblePages.value = n; });
 // чтобы длинный список не превращался в «полотно».
 const collapsedMonths = ref(new Set());
 const collapsedSections = ref(new Set());
+function renderedMonthIndex(i) {
+  return props.readonly && props.activeTab === 'tasks' ? selectedWorkMonth.value : i;
+}
 function toggleMonth(i) {
+  const key = renderedMonthIndex(i);
   const next = new Set(collapsedMonths.value);
-  if (next.has(i)) next.delete(i); else next.add(i);
+  if (next.has(key)) next.delete(key); else next.add(key);
   collapsedMonths.value = next;
 }
-function isMonthCollapsed(i) { return collapsedMonths.value.has(i); }
+function isMonthCollapsed(i) { return collapsedMonths.value.has(renderedMonthIndex(i)); }
 function toggleSection(i, j) {
-  const key = `${i}:${j}`;
+  const key = `${renderedMonthIndex(i)}:${j}`;
   const next = new Set(collapsedSections.value);
   if (next.has(key)) next.delete(key); else next.add(key);
   collapsedSections.value = next;
 }
-function isSectionCollapsed(i, j) { return collapsedSections.value.has(`${i}:${j}`); }
+function isSectionCollapsed(i, j) { return collapsedSections.value.has(`${renderedMonthIndex(i)}:${j}`); }
 
 function formatPct(v) {
   return v == null ? '—' : `${v}%`;
@@ -1159,13 +1217,72 @@ function growthTargetLabel(item) {
       </ul>
     </section>
 
+    <section v-if="workSummary" v-show="tabVisible('work-summary')" id="report-work-summary" class="rblk work-summary-card">
+      <div class="ai-section-heading">
+        <div>
+          <span class="ai-kicker">СВОДКА РАБОТ</span>
+          <h2>Что сделано за период</h2>
+        </div>
+        <span class="ai-order-note">{{ workSummary.source === 'gemini' ? 'Gemini 3.1 Pro Preview · по журналу' : 'Фактический журнал · AI-сводка ещё не запускалась' }}</span>
+      </div>
+      <div v-if="workSummary.overview" class="work-summary-overview" v-html="renderRichText(workSummary.overview)"></div>
+      <div v-if="Array.isArray(workSummary.weeks) && workSummary.weeks.length" class="work-summary-weeks">
+        <article v-for="(week, weekIndex) in workSummary.weeks" :key="`work-week-${weekIndex}`" class="work-summary-week">
+          <div class="work-summary-week-heading">
+            <span class="work-summary-week-number">{{ String(weekIndex + 1).padStart(2, '0') }}</span>
+            <div>
+              <span class="work-summary-week-label">{{ week.week || 'Период' }}</span>
+              <h3>{{ week.title || 'Выполненные работы' }}</h3>
+            </div>
+          </div>
+          <ul v-if="Array.isArray(week.bullets) && week.bullets.length" class="work-summary-bullets">
+            <li v-for="(bullet, bulletIndex) in week.bullets" :key="`work-bullet-${weekIndex}-${bulletIndex}`">{{ bullet }}</li>
+          </ul>
+        </article>
+      </div>
+      <div v-if="Array.isArray(workSummary.period_points) && workSummary.period_points.length" class="work-summary-points">
+        <span class="work-summary-label">Ключевые тезисы периода</span>
+        <ul class="list"><li v-for="(point, pointIndex) in workSummary.period_points" :key="`work-point-${pointIndex}`">{{ point }}</li></ul>
+      </div>
+      <div v-if="Array.isArray(workSummary.next_steps) && workSummary.next_steps.length" class="work-summary-next">
+        <span class="work-summary-label">Следующие шаги</span>
+        <ul class="list"><li v-for="(step, stepIndex) in workSummary.next_steps" :key="`work-step-${stepIndex}`">{{ step }}</li></ul>
+      </div>
+    </section>
+
     <section v-show="tabVisible('tasks')" id="report-tasks" class="rblk">
       <div class="tasks-head">
         <h2>Выполненные работы</h2>
         <button v-if="!readonly" class="small-btn" @click="addMonth">+ Месяц</button>
       </div>
+      <div v-if="readonly && activeTab === 'tasks' && workMonthTabs.length" class="work-month-tabs-shell" aria-label="Месяцы выполненных работ">
+        <div class="work-month-tabs-heading">
+          <div>
+            <span class="work-month-tabs-kicker">ПЕРИОД РАБОТ</span>
+            <strong>Выберите месяц</strong>
+          </div>
+          <span class="work-month-tabs-current">{{ workMonthTabs[selectedWorkMonth]?.label || 'Без месяца' }}</span>
+        </div>
+        <div class="work-month-tabs" role="tablist" aria-label="Месяцы выполненных работ">
+          <button
+            v-for="tab in workMonthTabs"
+            :key="`work-month-${tab.index}`"
+            type="button"
+            role="tab"
+            class="work-month-tab"
+            :class="{ active: selectedWorkMonth === tab.index }"
+            :aria-selected="selectedWorkMonth === tab.index"
+            :aria-controls="'work-month-panel'"
+            :tabindex="selectedWorkMonth === tab.index ? 0 : -1"
+            @click="selectWorkMonth(tab.index)"
+          >
+            <span class="work-month-tab-date">{{ tab.label }}</span>
+            <span class="work-month-tab-meta">{{ tab.sections }} разд. · {{ tab.completed }}/{{ tab.tasks }} готово</span>
+          </button>
+        </div>
+      </div>
       <div v-if="!normalizedTasks.length" class="empty">Пока нет блоков работ.</div>
-      <div v-for="(monthBlock, i) in normalizedTasks" :key="i" class="month-card">
+      <div v-for="(monthBlock, i) in displayedWorkMonths" :key="i" class="month-card" :id="readonly && activeTab === 'tasks' ? 'work-month-panel' : undefined">
         <div class="month-head">
           <button type="button" class="collapse-btn" :aria-expanded="!isMonthCollapsed(i)" @click="toggleMonth(i)">
             {{ isMonthCollapsed(i) ? '▸' : '▾' }}
@@ -1201,7 +1318,9 @@ function growthTargetLabel(item) {
                 <span class="task-checkmark" :data-done="task.completed === true" aria-hidden="true">{{ task.completed === true ? '✓' : '○' }}</span>
                 <span>{{ task.title }}</span>
               </div>
+              <div v-if="task.date" class="task-date">{{ formatTaskDate(task.date) }}</div>
               <div v-if="task.description_html" class="task-html" v-html="safeHtml(task.description_html)"></div>
+              <a v-if="isSafeExternalUrl(task.link)" class="task-result-link" :href="task.link" target="_blank" rel="noopener noreferrer">Открыть результат <span aria-hidden="true">↗</span></a>
               <div v-if="Array.isArray(task.subtasks) && task.subtasks.length" class="subtasks-list">
                 <div v-for="(subtask, l) in task.subtasks" :key="l" class="subtask-card">
                   <h5 class="subtask-title task-title-with-check"><span class="task-checkmark" :data-done="subtask.completed === true" aria-hidden="true">{{ subtask.completed === true ? '✓' : '○' }}</span><span>{{ subtask.title || 'Микрозадача' }}</span></h5>
@@ -1389,8 +1508,11 @@ function growthTargetLabel(item) {
 .tasks-head, .month-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .month-card { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .section-card { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-.task-card { padding: 12px; background: #fff; }
-.task-title { font-weight: 600; margin-bottom: 6px; }
+.task-card { padding: 16px 18px; background: #fff; border: 1px solid rgba(60,60,67,0.08); border-radius: 14px; box-shadow: 0 3px 12px rgba(15,23,42,0.035); }
+.task-title { font-weight: 650; margin-bottom: 6px; color: #1d1d1f; }
+.task-date { margin: -2px 0 8px 28px; color: #86868b; font-size: 12px; }
+.task-result-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 11px; padding: 8px 11px; border-radius: 9px; background: rgba(10,132,255,0.08); color: var(--accent); font-size: 12px; font-weight: 650; text-decoration: none; overflow-wrap: anywhere; }
+.task-result-link:hover { background: rgba(10,132,255,0.14); text-decoration: underline; }
 .task-title-with-check { display:flex; align-items:flex-start; gap:8px; }
 .task-checkmark { display:inline-grid; place-items:center; width:20px; height:20px; flex:none; border-radius:6px; color:#98a2b3; background:#f2f4f7; font-size:13px; font-weight:800; }
 .task-checkmark[data-done="true"] { color:#047857; background:#d1fae5; }
@@ -1403,6 +1525,33 @@ function growthTargetLabel(item) {
 .subtask-card { padding: 10px 12px; border-radius: 12px; background: #fff; border: 1px solid rgba(60,60,67,0.09); }
 .subtask-title { margin: 0 0 6px; color: #475467; font-size: 14px; line-height: 1.35; }
 .subtask-html { font-size: 13px; }
+.work-month-tabs-shell { margin: 0 0 14px; padding: 14px; border: 1px solid rgba(10,132,255,0.13); border-radius: 16px; background: linear-gradient(135deg, rgba(10,132,255,0.055), rgba(255,255,255,0.9)); }
+.work-month-tabs-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.work-month-tabs-heading > div { display: flex; flex-direction: column; gap: 2px; }
+.work-month-tabs-kicker, .work-summary-label { color: #86868b; font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.work-month-tabs-heading strong { font-size: 15px; color: #1d1d1f; }
+.work-month-tabs-current { color: var(--accent); font-size: 12px; font-weight: 700; }
+.work-month-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 4px; scrollbar-width: thin; }
+.work-month-tab { flex: 0 0 auto; min-width: 176px; display: flex; flex-direction: column; align-items: flex-start; gap: 5px; padding: 11px 13px; border: 1px solid rgba(60,60,67,0.12); border-radius: 12px; background: rgba(255,255,255,0.82); color: #3a3a3c; cursor: pointer; text-align: left; transition: border-color .15s, background .15s, box-shadow .15s, transform .15s; }
+.work-month-tab:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 45%, #d9deea); }
+.work-month-tab.active { border-color: color-mix(in srgb, var(--accent) 58%, #d9deea); background: #fff; box-shadow: 0 5px 16px rgba(10,132,255,0.12); color: var(--accent); }
+.work-month-tab:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 24%, transparent); outline-offset: 2px; }
+.work-month-tab-date { font-weight: 750; font-size: 14px; text-transform: capitalize; }
+.work-month-tab-meta { color: #86868b; font-size: 11px; line-height: 1.35; }
+.work-month-tab.active .work-month-tab-meta { color: color-mix(in srgb, var(--accent) 70%, #667085); }
+.work-summary-card { overflow: hidden; }
+.work-summary-overview { margin-top: 4px; padding: 15px 16px; border-radius: 14px; background: linear-gradient(135deg, rgba(10,132,255,0.08), rgba(10,132,255,0.025)); color: #293241; line-height: 1.65; }
+.work-summary-weeks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.work-summary-week { padding: 15px; border: 1px solid rgba(60,60,67,0.10); border-radius: 14px; background: #fbfbfd; }
+.work-summary-week-heading { display: flex; gap: 11px; align-items: flex-start; }
+.work-summary-week-number { display: inline-grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; border-radius: 9px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 800; }
+.work-summary-week-label { display: block; color: #86868b; font-size: 11px; }
+.work-summary-week h3 { margin: 4px 0 0; color: #1d1d1f; font-size: 15px; line-height: 1.3; }
+.work-summary-bullets { margin: 12px 0 0 39px; padding-left: 16px; color: #3a3a3c; font-size: 13px; line-height: 1.55; }
+.work-summary-bullets li + li { margin-top: 7px; }
+.work-summary-points, .work-summary-next { margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(60,60,67,0.09); }
+.work-summary-points .list, .work-summary-next .list { margin-top: 8px; }
+.work-summary-next { color: #245c45; }
 .task-attach-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .description-editor-dropzone { min-width: 0; }
 .attach-btn {
@@ -1522,6 +1671,13 @@ function growthTargetLabel(item) {
   .ai-section-heading { flex-direction:column; gap:5px; }
   .ai-order-note { white-space:normal; }
   .ai-subsection { padding:10px; }
+  .work-summary-weeks { grid-template-columns: 1fr; }
+  .work-month-tabs-shell { margin-left: -2px; margin-right: -2px; }
+  .work-month-tab { min-width: 158px; min-height: 64px; }
+}
+@media (max-width: 480px) {
+  .work-month-tabs-heading { align-items: flex-start; flex-direction: column; }
+  .work-summary-week { padding: 13px; }
 }
 .growth-facts {
   margin: 0;

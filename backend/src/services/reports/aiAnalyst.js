@@ -481,9 +481,161 @@ function _buildOpportunityDigest(growth) {
   }));
 }
 
+function _stripTaskHtml(value) {
+  return String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p\s*>/gi, '\n')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _isoDate(value) {
+  if (!value) return '';
+  const raw = String(value);
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : '';
+}
+
+function _isoWeekLabel(dateValue) {
+  const date = new Date(`${dateValue}T12:00:00Z`);
+  if (!dateValue || Number.isNaN(date.getTime())) return '';
+  const day = date.getUTCDay() || 7;
+  const monday = new Date(date);
+  monday.setUTCDate(date.getUTCDate() - day + 1);
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return `${fmt(monday)} — ${fmt(sunday)}`;
+}
+
+function _buildWorkDigest(data = {}) {
+  const sourceItems = [];
+  const flatItems = Array.isArray(data.tasks?.items) ? data.tasks.items : [];
+  if (flatItems.length) {
+    flatItems.forEach((item) => sourceItems.push({ ...item, section: item.section || item.task_type || 'Работы' }));
+  } else {
+    const blocks = Array.isArray(data.tasks?.blocks) ? data.tasks.blocks : [];
+    blocks.forEach((monthBlock) => {
+      (monthBlock?.sections || []).forEach((section) => {
+        (section?.tasks || []).forEach((task) => sourceItems.push({
+          ...task,
+          section: section.title || 'Работы',
+          performed_at: task.performed_at || task.date || (String(monthBlock.month || '').match(/^\d{4}-\d{2}/) ? `${String(monthBlock.month).slice(0, 7)}-01` : ''),
+        }));
+      });
+    });
+  }
+
+  const items = sourceItems.slice(0, 120).map((item, index) => {
+    const date = _isoDate(item.performed_at || item.date || item.created_at);
+    const title = _stripTaskHtml(item.title || item.name || 'Без названия').slice(0, 240);
+    const description = _stripTaskHtml(item.description || item.description_html || item.client_summary || '').slice(0, 600);
+    const rawLink = String(item.link || item.url || '').trim();
+    const link = /^https?:\/\//i.test(rawLink) ? rawLink.slice(0, 1000) : '';
+    return {
+      id: String(item.id || `work-${index + 1}`),
+      title,
+      description,
+      section: _stripTaskHtml(item.section || item.task_type || 'Работы').slice(0, 120),
+      date,
+      month: date ? date.slice(0, 7) : 'Без месяца',
+      week: _isoWeekLabel(date),
+      link,
+    };
+  }).filter((item) => item.title);
+
+  const weeks = new Map();
+  for (const item of items) {
+    const key = item.week || `month:${item.month}`;
+    if (!weeks.has(key)) weeks.set(key, { label: item.week || item.month, item_ids: [], items: [] });
+    const group = weeks.get(key);
+    group.item_ids.push(item.id);
+    group.items.push({ id: item.id, title: item.title, section: item.section, date: item.date, link: item.link });
+  }
+
+  return {
+    total: items.length,
+    months: Array.from(new Set(items.map((item) => item.month))),
+    weeks: Array.from(weeks.values()),
+    items,
+  };
+}
+
+function _fallbackWorkSummary(workDigest, period = '') {
+  const items = Array.isArray(workDigest?.items) ? workDigest.items : [];
+  const sections = Array.from(new Set(items.map((item) => item.section).filter(Boolean))).slice(0, 8);
+  const weeks = (workDigest?.weeks || []).slice(0, 12).map((group) => ({
+    week: group.label,
+    title: sections.length ? sections.slice(0, 3).join(' · ') : 'Выполненные работы',
+    bullets: group.items.slice(0, 8).map((item) => item.title),
+    source_ids: group.item_ids.slice(0, 12),
+  }));
+  return {
+    period: String(period || ''),
+    overview: items.length
+      ? `За период ${period || 'отчёта'} в журнале зафиксированы работы по направлениям: ${sections.join(', ') || 'работа с проектом'}. Ниже они сгруппированы по неделям, где даты доступны.`
+      : 'За выбранный период в отчёте пока нет зафиксированных работ.',
+    weeks,
+    period_points: items.slice(0, 6).map((item) => item.title),
+    next_steps: [],
+    source: 'data',
+  };
+}
+
+function _normalizeWorkSummary(raw, workDigest, period = '') {
+  const fallback = _fallbackWorkSummary(workDigest, period);
+  if (!raw || typeof raw !== 'object') return fallback;
+  const ids = new Set((workDigest?.items || []).map((item) => item.id));
+  const weeks = Array.isArray(raw.weeks) ? raw.weeks.slice(0, 12).map((group) => ({
+    week: _stripTaskHtml(group?.week || group?.label || '').slice(0, 80),
+    title: _stripTaskHtml(group?.title || 'Выполненные работы').slice(0, 180),
+    bullets: Array.isArray(group?.bullets) ? group.bullets.map((item) => _stripTaskHtml(item).slice(0, 300)).filter(Boolean).slice(0, 8) : [],
+    source_ids: Array.isArray(group?.source_ids) ? group.source_ids.map(String).filter((id) => ids.has(id)).slice(0, 12) : [],
+  })).filter((group) => group.week || group.title || group.bullets.length) : [];
+  const overview = _stripTaskHtml(raw.overview || raw.summary || '').slice(0, 1600);
+  if (!overview && !weeks.length) return fallback;
+  return {
+    period: _stripTaskHtml(raw.period || period).slice(0, 160),
+    overview: overview || fallback.overview,
+    weeks: weeks.length ? weeks : fallback.weeks,
+    period_points: Array.isArray(raw.period_points) ? raw.period_points.map((item) => _stripTaskHtml(item).slice(0, 300)).filter(Boolean).slice(0, 8) : fallback.period_points,
+    next_steps: Array.isArray(raw.next_steps) ? raw.next_steps.map((item) => _stripTaskHtml(item).slice(0, 300)).filter(Boolean).slice(0, 6) : [],
+    source: 'gemini',
+  };
+}
+
+function _buildWorkPromptDigest(workDigest) {
+  return {
+    total: Number(workDigest?.total || 0),
+    months: Array.isArray(workDigest?.months) ? workDigest.months.slice(0, 24) : [],
+    weeks: (workDigest?.weeks || []).slice(0, 24).map((group) => ({
+      label: group.label,
+      item_ids: Array.isArray(group.item_ids) ? group.item_ids.slice(0, 16) : [],
+      items: (group.items || []).slice(0, 16).map((item) => {
+        const source = (workDigest?.items || []).find((candidate) => candidate.id === item.id);
+        return {
+          id: item.id,
+          title: item.title,
+          description: source?.description || '',
+          section: item.section,
+          date: item.date,
+          link: item.link,
+        };
+      }),
+    })),
+  };
+}
+
 function _buildTasksList(data) {
-  const items = (data.tasks?.items || []).slice(0, 30);
-  return items.map((it) => `• ${it.title} (${it.task_type}, ${it.performed_at})`).join('\n');
+  const digest = _buildWorkDigest(data);
+  return digest.items.slice(0, 30)
+    .map((it) => `• ${it.title} (${it.section}, ${it.date || it.month})`)
+    .join('\\n');
 }
 
 function _safeJson(text) {
@@ -690,6 +842,8 @@ async function generateSummary(data, opts = {}) {
   const brandName = String(opts.brandName || data.project?.name || 'Проект');
   const period = String(opts.period || '');
   const digest = _buildMetricsDigest(data);
+  const workDigest = _buildWorkDigest(data);
+  const workPromptDigest = _buildWorkPromptDigest(workDigest);
   const tasksList = _buildTasksList(data);
 
   // ── Pass 1: Анализ трафика (GSC + Яндекс.Вебмастер + задачи) ───────────
@@ -774,6 +928,7 @@ async function generateSummary(data, opts = {}) {
     `Quick Wins: ${JSON.stringify(digest.quick_wins)}`,
     `Нормализованные точки роста (source of truth; JSON): ${JSON.stringify(digest.growth_opportunities || [])}`,
     `Качество данных и полнота источников (JSON): ${JSON.stringify(digest.data_quality || {})}`,
+    `Фактический журнал выполненных работ для отдельной сводки (JSON): ${JSON.stringify(workPromptDigest)}`,
   ];
   if (digest.modules) {
     pass3PromptBase.push(
@@ -798,7 +953,12 @@ async function generateSummary(data, opts = {}) {
 
   // If both LLM calls failed, use fallback
   if (!parsed1 && !parsed2) {
-    return { ...(_fallbackSummary(brandName, period, digest)), provider: result1.verdict, model: result1.model || null };
+    return {
+      ...(_fallbackSummary(brandName, period, digest)),
+      work_summary: _fallbackWorkSummary(workDigest, period),
+      provider: result1.verdict,
+      model: result1.model || null,
+    };
   }
 
   // Build context from passes 1 & 2 for synthesis
@@ -814,7 +974,8 @@ async function generateSummary(data, opts = {}) {
     '  "highlights": ["3-5 ярких тезисов про рост"],',
     '  "quick_wins": [{query, position, plan}],',
     '  "next_month_forecast": "1-2 предложения — качественный прогноз направления роста на следующий месяц на основе текущей динамики",',
-    '  "traffic_value": "1-2 предложения"',
+    '  "traffic_value": "1-2 предложения",',
+    '  "work_summary": {"overview":"2-4 предложения о реально выполненном за период","weeks":[{"week":"YYYY-MM-DD — YYYY-MM-DD или месяц","title":"направление","bullets":["тезис только по source item"],"source_ids":["id из work digest"]}],"period_points":["тезисы только по журналу"],"next_steps":["только если прямо следуют из описаний работ"]}',
     '}',
     'Используй ТОЛЬКО числа, которые есть во входных данных — не считай и не выдумывай собственные значения. НЕ упоминай количество выполненных задач. executive_summary должен учитывать и Яндекс, и Google.',
     'Опирайся на ДИНАМИКУ последних 3 месяцев (ряды *_trend_3m в метриках) и учитывай report_generated_at / metrics_captured_at — не выдавай неполный или устаревший последний период за спад.',
@@ -824,6 +985,9 @@ async function generateSummary(data, opts = {}) {
     'Разделяй observed_fact и hypothesis: если причина не доказана источником, формулируй её только как гипотезу и укажи, чем её проверить.',
     'Каждый quick_win должен ссылаться на существующий query/URL из opportunity ledger или quick_wins input; если связи нет, не добавляй quick_win.',
     'Если source completeness неполная, явно укажи это в executive_summary и не делай выводов о причинах, которые недоступные источники могли бы изменить.',
+    'Для work_summary группируй работы по календарным неделям только если у source item есть дата; если дат нет, используй период/месяц и не выдумывай недели.',
+    'В work_summary используй только названия, описания и ссылки из work digest. Не добавляй выполненные действия, URL или результаты, которых нет во входных данных. source_ids должны быть только существующими id из work digest.',
+    'Если журнал пуст, верни work_summary.overview о том, что за период нет зафиксированных работ, а weeks/period_points/next_steps оставь пустыми.',
     'Ответь СТРОГО JSON-объектом, без markdown-обёртки.',
   ].join('\n');
 
@@ -857,6 +1021,7 @@ async function generateSummary(data, opts = {}) {
       quick_wins: _alignQuickWins(_normalizeQuickWins(parsed3.quick_wins), digest.growth_opportunities),
       next_month_forecast: String(parsed3.next_month_forecast || '').trim() || _fallbackSummary(brandName, period, digest).next_month_forecast,
       traffic_value: String(parsed3.traffic_value || parsed2?.traffic_value || '').trim(),
+      work_summary: _normalizeWorkSummary(parsed3.work_summary, workDigest, period),
       provider: result3.provider,
       model: result3.model,
       tokens_in: (result1.tokens_in || 0) + (result2.tokens_in || 0) + (result3.tokens_in || 0),
@@ -872,6 +1037,7 @@ async function generateSummary(data, opts = {}) {
     quick_wins: _alignQuickWins(_normalizeQuickWins(digest.quick_wins), digest.growth_opportunities),
     next_month_forecast: _fallbackSummary(brandName, period, digest).next_month_forecast,
     traffic_value: String(parsed2?.traffic_value || '').trim(),
+    work_summary: _normalizeWorkSummary(parsed3?.work_summary, workDigest, period),
     provider: result1.provider || result2.provider,
     model: result1.model || result2.model,
     tokens_in: (result1.tokens_in || 0) + (result2.tokens_in || 0),
@@ -973,6 +1139,10 @@ module.exports = {
   _buildMetricsDigest,
   _safeJson,
   _normalizeGrowthAttribution,
+  _buildWorkDigest,
+  _buildWorkPromptDigest,
+  _fallbackWorkSummary,
+  _normalizeWorkSummary,
   _applyCanonicalNumbers,
   _classifyMetric,
   _canonicalNumbers,

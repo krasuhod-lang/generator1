@@ -150,7 +150,7 @@ async function runReportSummaryJob({ draftId, userId, jobId, opts = {} }, databa
       await heartbeat({ stage: currentStage, percent: 35 });
       const generated = await generateSummary(aggregated, {
         brandName: draft.project_name,
-        period: periodLabel(draft.date_from, draft.date_to),
+        period: periodLabel(opts.from || draft.date_from, opts.to || draft.date_to),
         deadlineAt,
       });
       return { data: aggregated, summary: generated };
@@ -199,6 +199,7 @@ async function runReportSummaryJob({ draftId, userId, jobId, opts = {} }, databa
           tokens_in: summary.tokens_in || 0,
           tokens_out: summary.tokens_out || 0,
           report_model_version: draft.report_model_version || 'reports-v2',
+          ...(summary.work_summary ? { work_summary: summary.work_summary } : {}),
         }),
         JSON.stringify(data?.data_quality || data?.completeness || {}),
         opts.leaseToken,
