@@ -49,9 +49,10 @@ assert(aggregator.includes('context_hash'), 'dataAggregator must emit determinis
 assert(aggregator.includes('forecast: null'), 'dataAggregator must not expose naive forecast');
 assert(controller.includes('ai_notice'), 'public controller must expose stale/not-bound AI notice');
 assert(controller.includes('function _reportTitle'), 'public controller must derive title from applied period');
+assert(controller.includes('title: payload.title'), 'public response must return derived payload title');
 assert(sanitizer.includes('ai_snapshot_id'), 'client sanitizer must hide AI context diagnostics');
 assert(read('frontend/src/views/PublicReportPage.vue').includes('requestSeq'), 'public page must reject stale range responses');
 assert(read('frontend/src/views/PublicReportPage.vue').includes('router.replace'), 'public page must persist tab/range state in URL');
 assert(aiAnalyst.includes('evidence-first SEO'), 'report AI must use evidence-first system policy');
 assert(aiAnalyst.includes("next_month_forecast: ''"), 'report AI must not publish unvalidated forecast');
-console.log('REPORT_BOARD_CONTRACT_OK checks=32');
+console.log('REPORT_BOARD_CONTRACT_OK checks=33');

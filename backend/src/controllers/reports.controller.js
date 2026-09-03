@@ -867,8 +867,8 @@ async function publicGet(req, res) {
     uuid: sr.uuid,
     mode: sr.mode,
     view_mode: viewMode,
-    title: sr.draft_title,
-    period: _periodLabel(req.query?.from || sr.date_from, req.query?.to || sr.date_to),
+    title: payload.title || _reportTitle(sr.project_name, appliedFrom, appliedTo, sr.draft_title),
+    period: payload.period || _periodLabel(appliedFrom, appliedTo),
     project: {
       name: sr.project_name,
       url: sr.project_url,
