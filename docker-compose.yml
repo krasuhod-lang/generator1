@@ -48,8 +48,8 @@ services:
       --appendfsync everysec
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
+    # Redis доступен только внутри Compose-сети; внешний порт намеренно не публикуется.
+    # Backend и worker используют redis://redis:6379 по внутреннему DNS.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
