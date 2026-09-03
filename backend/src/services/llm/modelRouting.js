@@ -2,7 +2,8 @@
 
 const GEMINI_MODELS = new Set(['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.5-flash']);
 const OPENAI_MODELS = new Set(['gpt-5-mini', 'gpt-5', 'gpt-5.5']);
-const PROVIDERS = new Set(['gemini', 'grok', 'openai']);
+const MANUS_MODELS = new Set(['manus-agent-max', 'manus-agent-standard', 'manus-agent-lite']);
+const PROVIDERS = new Set(['gemini', 'grok', 'openai', 'manus']);
 const DEFAULT_PROVIDER = 'gemini';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.1-pro-preview';
 const DEFAULT_OPENAI_MODEL = 'gpt-5';
@@ -29,6 +30,10 @@ function normalizeModel(provider, value) {
   // Grok adapter keeps its configured model/endpoint and historically did not
   // consume the Gemini model field. Never pass a stale Gemini ID to x.ai.
   if (normalizedProvider === 'grok') return null;
+  if (normalizedProvider === 'manus') {
+    const model = String(value || '').trim().toLowerCase();
+    return MANUS_MODELS.has(model) ? model : 'manus-agent-max';
+  }
   return String(value || '').trim().slice(0, 160) || null;
 }
 
@@ -42,6 +47,7 @@ function providerForModel(model, fallback = DEFAULT_PROVIDER) {
   const value = String(model || '').trim().toLowerCase();
   if (OPENAI_MODELS.has(value) || /^gpt-5(?:\.|$)/.test(value)) return 'openai';
   if (GEMINI_MODELS.has(value) || value.startsWith('gemini-')) return 'gemini';
+  if (MANUS_MODELS.has(value) || value.startsWith('manus-')) return 'manus';
   return normalizeProvider(fallback);
 }
 
@@ -55,15 +61,17 @@ function isOpenAiProvider(provider) {
 
 function modelChoices() {
   return {
-    providers: ['gemini', 'openai', 'grok'],
+    providers: ['gemini', 'openai', 'grok', 'manus'],
     gemini: [...GEMINI_MODELS],
     openai: [...OPENAI_MODELS],
+    manus: [...MANUS_MODELS],
   };
 }
 
 module.exports = {
   GEMINI_MODELS,
   OPENAI_MODELS,
+  MANUS_MODELS,
   PROVIDERS,
   DEFAULT_PROVIDER,
   DEFAULT_GEMINI_MODEL,

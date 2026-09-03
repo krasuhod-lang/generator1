@@ -51,6 +51,7 @@ const LIMITS = Object.freeze({
   gemini:     _readLimit('GEMINI_MAX_CONCURRENT',   6),
   grok:       _readLimit('XAI_MAX_CONCURRENT',      4),
   openai:     _readLimit('OPENAI_MAX_CONCURRENT',   4),
+  manus:      _readLimit('MANUS_MAX_CONCURRENT',    2),
 });
 
 const QUEUE_WARN_MS = _readLimit('LLM_QUEUE_WARN_MS', 5000);
@@ -61,6 +62,7 @@ const _state = {
   gemini:     { active: 0, waiters: [] },
   grok:       { active: 0, waiters: [] },
   openai:     { active: 0, waiters: [] },
+  manus:      { active: 0, waiters: [] },
 };
 
 /**
@@ -155,6 +157,7 @@ function getStats() {
     gemini:   { active: _state.gemini.active,   queued: _state.gemini.waiters.length },
     grok:     { active: _state.grok.active,     queued: _state.grok.waiters.length },
     openai:   { active: _state.openai.active,   queued: _state.openai.waiters.length },
+    manus:    { active: _state.manus.active,    queued: _state.manus.waiters.length },
   };
 }
 

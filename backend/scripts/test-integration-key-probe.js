@@ -23,6 +23,21 @@ async function main() {
   process.env.GEMINI_API_KEY = 'gemini-probe-test-key';
   process.env.RELEVANCE_INTERNAL_TOKEN = 'relevance-probe-test-token';
   process.env.SERPER_API_KEY = 'serper-probe-test-key';
+  process.env.MANUS_API_KEY = 'manus-probe-test-key';
+
+  let manusRequest;
+  const manus = await probeIntegrationKey('MANUS_API_KEY', {
+    db: emptyVaultDb,
+    request: async (config) => {
+      manusRequest = config;
+      return { status: 200, data: { ok: true } };
+    },
+  });
+  assert.strictEqual(manus.status, 'active');
+  assert.strictEqual(manus.active, true);
+  assert.strictEqual(manusRequest.headers['x-manus-api-key'], 'manus-probe-test-key');
+  assert(manusRequest.url.endsWith('/v2/skill.list'));
+  assert.strictEqual(manusRequest.responseType, 'stream');
 
   let openaiRequest;
   const openai = await probeIntegrationKey('OPENAI_API_KEY', {
@@ -153,6 +168,7 @@ async function main() {
   delete process.env.GEMINI_API_KEY;
   delete process.env.RELEVANCE_INTERNAL_TOKEN;
   delete process.env.SERPER_API_KEY;
+  delete process.env.MANUS_API_KEY;
   console.log('INTEGRATION_KEY_PROBE_OK');
 }
 

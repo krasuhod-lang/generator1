@@ -24,6 +24,14 @@ assert.strictEqual(selectQualityRoute({ stage: 'global', openaiConfigured: true 
 assert.strictEqual(selectQualityRoute({ stage: 'block', openaiConfigured: false }).provider, 'deepseek');
 assert.strictEqual(selectQualityRoute({ stage: 'block', openaiConfigured: false, providerOverride: 'openai' }).source, 'openai_unconfigured_fallback');
 assert.strictEqual(selectQualityRoute({ stage: 'block', openaiConfigured: true, providerOverride: 'deepseek' }).source, 'forced_deepseek');
+const manusBlock = selectQualityRoute({ stage: 'block', openaiConfigured: true, manusConfigured: true });
+assert.deepStrictEqual(manusBlock, {
+  provider: 'manus',
+  model: 'manus-agent-max',
+  source: 'vault_manus',
+});
+assert.strictEqual(selectQualityRoute({ stage: 'block', manusConfigured: false, providerOverride: 'manus' }).source, 'manus_unconfigured_fallback');
+assert.strictEqual(selectQualityRoute({ stage: 'block', openaiConfigured: true, manusConfigured: true, providerOverride: 'openai' }).provider, 'openai');
 
 (async () => {
   const calls = [];
@@ -43,6 +51,25 @@ assert.strictEqual(selectQualityRoute({ stage: 'block', openaiConfigured: true, 
   assert.deepStrictEqual(calls.map((item) => item.provider), ['openai', 'deepseek']);
   assert.strictEqual(calls[0].model, 'gpt-5');
   assert.strictEqual(calls[1].model, 'deepseek-v4-pro');
+
+  const manusCalls = [];
+  const manusResult = await callQualityModel({
+    callLLM: async (provider, system, prompt, options) => {
+      manusCalls.push({ provider, model: options.model });
+      if (provider === 'manus') throw new Error('synthetic Manus provider failure');
+      return { ok: true };
+    },
+    route: manusBlock,
+    system: 'system',
+    prompt: 'prompt',
+    options: { retries: 1, callLabel: 'quality' },
+    log: () => {},
+  });
+  assert.deepStrictEqual(manusResult, { ok: true });
+  assert.deepStrictEqual(manusCalls, [
+    { provider: 'manus', model: 'manus-agent-max' },
+    { provider: 'deepseek', model: 'deepseek-v4-pro' },
+  ]);
 
   assert.match(stage4Source, /resolveQualityRoute\(\{ stage: 'block' \}\)/);
   assert.match(stage4Source, /callQualityModel\(\{/);

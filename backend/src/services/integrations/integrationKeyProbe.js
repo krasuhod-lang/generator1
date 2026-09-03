@@ -24,6 +24,8 @@ function endpointFor(envName) {
     }
     case 'XAI_API_KEY':
       return { method: 'get', url: `${base('XAI_BASE_URL', 'https://api.x.ai/v1')}/models`, auth: 'bearer' };
+    case 'MANUS_API_KEY':
+      return { method: 'get', url: 'https://api.manus.ai/v2/skill.list', auth: 'manus_api_key' };
     case 'DASHSCOPE_API_KEY':
       return { method: 'get', url: `${base('DASHSCOPE_BASE_URL', 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1')}/models`, auth: 'bearer' };
     case 'RESEND_API_KEY':
@@ -158,6 +160,7 @@ async function probeIntegrationKey(envName, { timeoutMs = DEFAULT_TIMEOUT_MS, re
     let url = target.url;
     if (target.auth === 'bearer') headers.Authorization = `Bearer ${info.value}`;
     if (target.auth === 'oauth') headers.Authorization = `OAuth ${info.value}`;
+    if (target.auth === 'manus_api_key') headers['x-manus-api-key'] = info.value;
     if (target.auth === 'internal_header') headers['X-Internal-Token'] = info.value;
     if (target.auth === 'gemini_query') params.key = info.value;
     if (target.auth === 'query_serpapi') params.api_key = info.value;

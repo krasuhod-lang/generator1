@@ -22,6 +22,7 @@ const INTEGRATION_CATALOG = Object.freeze([
   { envName: 'DASHSCOPE_API_KEY', label: 'Qwen / Alibaba Model Studio', group: 'AI-модели', description: 'Qwen 3.8 Max и DashScope-интеграции' },
   { envName: 'DEEPSEEK_API_KEY', label: 'DeepSeek', group: 'AI-модели', description: 'DeepSeek V4 Pro для аналитики и quality-аудитов' },
   { envName: 'OPENAI_API_KEY', label: 'OpenAI / GPT', group: 'AI-модели', description: 'GPT-5 / GPT-5.5 для точечных audit и финального quality gate' },
+  { envName: 'MANUS_API_KEY', label: 'Manus API', group: 'AI-модели', description: 'Manus AI agent для research/quality stages вместо GPT' },
   { envName: 'GEMINI_API_KEY', label: 'Google Gemini', group: 'AI-модели', description: 'Gemini 3.1 Pro для генерации и редакторских этапов' },
   { envName: 'XAI_API_KEY', label: 'xAI / Grok', group: 'AI-модели', description: 'Необязательный альтернативный provider' },
   { envName: 'GIST_INTERNAL_TOKEN', label: 'GIST Content Logic', group: 'Внутренние сервисы', description: 'Внутренний токен Node → GIST' },

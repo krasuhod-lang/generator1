@@ -4,6 +4,7 @@ const { callDeepSeek, DEEPSEEK_DEFAULT_MAX_TOKENS } = require('./deepseek.adapte
 const { callGemini }   = require('./gemini.adapter');
 const { callGrok }     = require('./grok.adapter');
 const { callOpenAI }   = require('./openai.adapter');
+const { callManus }    = require('./manus.adapter');
 const { autoCloseJSON, extractBalancedJson } = require('../../utils/autoCloseJSON');
 const db               = require('../../config/db');
 const {
@@ -27,6 +28,7 @@ const ADAPTER_DEFAULT_MAX_TOKENS = {
   gemini:     16384,                       // gemini.adapter profile default
   grok:       8192,                       // grok.adapter default
   openai:     16000,                      // openai.adapter default
+  manus:      16000,                      // Manus agent output contract default
 };
 
 // ────────────────────────────────────────────────────────────────────
@@ -590,10 +592,16 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       ? callGrok
       : adapter === 'openai'
         ? callOpenAI
-        : callDeepSeek;
+        : adapter === 'manus'
+          ? callManus
+          : callDeepSeek;
   // Grok/OpenAI/Gemini use the metered per-task input guard; DeepSeek keeps
-  // its separate accounting path for backward compatibility.
-  const providerClass = adapter === 'deepseek' ? 'deepseek' : (adapter === 'openai' ? 'openai' : 'gemini-class');
+  // its separate accounting path for backward compatibility. Manus has its
+  // own async task lifecycle and provider-side usage contract, so it is not
+  // placed into the Gemini token guard until real usage fields are available.
+  const providerClass = adapter === 'deepseek'
+    ? 'deepseek'
+    : (adapter === 'openai' ? 'openai' : (adapter === 'manus' ? 'manus' : 'gemini-class'));
   const startedAt = new Date();
   let activeSystem = system;
   let promptSize = estimateTokens(activeSystem + prompt);
@@ -673,7 +681,9 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         ? (result.model || model || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro')
         : adapter === 'openai'
           ? (result.model || model || process.env.OPENAI_MODEL || 'gpt-5')
-          : adapter;
+          : adapter === 'manus'
+            ? (result.model || model || 'manus-agent')
+            : adapter;
       const pricingMeta = calculateCostBreakdown(costModel, result.tokensIn, result.tokensOut, {
         cacheHit: adapter === 'deepseek' && (result.cacheHitTokens || 0) > 0,
         cacheHitTokens: result.cacheHitTokens || 0,
@@ -703,14 +713,19 @@ async function callLLM(adapter, system, prompt, opts = {}) {
         inputCostUsd: pricingMeta.inputCostUsd || 0,
         outputCostUsd: pricingMeta.outputCostUsd || 0,
         costUsd,
-        meta: {
+                  meta: {
           cache_hit: cacheHit,
           cached_content: Boolean(activeCachedContent),
           finish_reason: result.finishReason || null,
-          usage_source: 'provider_response',
+          usage_source: result.usageSource || 'provider_response',
           pricing_known: pricingMeta.pricingKnown !== false,
           pricing_source: pricingMeta.pricingSource || null,
+          ...(adapter === 'manus' ? {
+            manus_task_id: result.manusTaskId || null,
+            provider_request_id: result.requestId || null,
+          } : {}),
         },
+
       };
       // Usage фиксируем ДО проверки truncation/JSON: retry после обрезанного
       // ответа тоже является реальным provider-вызовом и должен попасть в budget.
@@ -743,7 +758,7 @@ async function callLLM(adapter, system, prompt, opts = {}) {
       // автоматически удваиваем лимит и повторяем. Главная причина
       // JSON parse ошибок в outreach emailComposer/nicheExpander.
       const isTruncated = result.finishReason === 'length' || _isJsonTruncated(result.text);
-      if (isTruncated && retryOnTruncation && attempt < retries - 1) {
+      if (isTruncated && retryOnTruncation && adapter !== 'manus' && attempt < retries - 1) {
         await safeRecordApiRequest({ ...ledgerContext, requestStatus: 'truncated' });
         // Когда maxTokens не задан явно, реальный запрос ушёл с дефолтом
         // адаптера (напр. DeepSeek 16000), а не с 1000 — берём его как базу,
