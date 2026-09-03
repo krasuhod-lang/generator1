@@ -3597,6 +3597,10 @@ async function ensureSchema() {
     `);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_parser_tasks_user_status ON parser_tasks(user_id, status)`);
 
+    // Migration 131: optional Yandex Metrica counter binding for reports.
+    // Несекретный counter ID хранится у проекта; OAuth token остаётся только в encrypted integration vault.
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS yandex_metrika_counter_id TEXT`);
+
     // Migration 130: durable parser-bot queue with per-URL retry/heartbeat/resume.
     await db.query(`
       CREATE TABLE IF NOT EXISTS parser_scan_tasks (

@@ -11,6 +11,7 @@ import { useRoute, useRouter } from 'vue-router';
 import api from '../api.js';
 import AppLayout from '../components/AppLayout.vue';
 import GscPerformanceChart from '../components/GscPerformanceChart.vue';
+import ReportTrendChart from '../components/reports/ReportTrendChart.vue';
 import MarkdownView from '../components/MarkdownView.vue';
 import CommercialInsights from '../components/CommercialInsights.vue';
 import AnalyticsExtras from '../components/AnalyticsExtras.vue';
@@ -81,6 +82,9 @@ const ydxSitesLoading = ref(false);
 const ydxPerf = ref(null);
 const ydxPerfLoading = ref(false);
 const ydxPerfError = ref('');
+const metrikaPerf = ref(null);
+const metrikaPerfLoading = ref(false);
+const metrikaPerfError = ref('');
 
 // Сопоставление источников (GSC ↔ Яндекс) + рекомендации
 const comparison = ref(null);
@@ -161,6 +165,7 @@ const brandingForm = ref({
   color_accent: '#0a84ff',
   keys_so_domain: '',
   keys_so_region: 'msk',
+  yandex_metrika_counter_id: '',
 });
 const brandingSaving = ref(false);
 function _projectDomainHint(p) {
@@ -176,6 +181,7 @@ function _syncBrandingFromProject() {
     color_accent: project.value.color_accent || '#0a84ff',
     keys_so_domain: project.value.keys_so_domain || _projectDomainHint(project.value),
     keys_so_region: project.value.keys_so_region || 'msk',
+    yandex_metrika_counter_id: project.value.yandex_metrika_counter_id || '',
   };
 }
 async function saveBranding() {
@@ -187,6 +193,7 @@ async function saveBranding() {
       color_accent: brandingForm.value.color_accent || null,
       keys_so_domain: brandingForm.value.keys_so_domain || null,
       keys_so_region: brandingForm.value.keys_so_region || 'msk',
+      yandex_metrika_counter_id: brandingForm.value.yandex_metrika_counter_id || null,
     });
     if (updated) {
       project.value = { ...project.value, ...updated };
@@ -202,6 +209,18 @@ async function saveBranding() {
 
 const gscReady = computed(() => project.value?.gsc_connected && project.value?.gsc_site_url);
 const ydxReady = computed(() => project.value?.ydx_connected && project.value?.ydx_site_url);
+const metrikaReady = computed(() => Boolean(project.value?.yandex_metrika_counter_id));
+const metrikaChart = computed(() => {
+  const series = Array.isArray(metrikaPerf.value?.series) ? metrikaPerf.value.series : [];
+  if (!series.length) return null;
+  return {
+    labels: series.map((row) => row.date),
+    datasets: [
+      { label: 'Визиты', color: '#38bdf8', data: series.map((row) => Number(row.visits) || 0) },
+      { label: 'Конверсии', color: '#34d399', data: series.map((row) => Number(row.conversions) || 0) },
+    ],
+  };
+});
 
 // Коммерческий срез из снапшота последнего/открытого анализа.
 const commercialData = computed(() => currentAnalysis.value?.gsc_snapshot?.commercial || null);
@@ -280,6 +299,9 @@ async function load() {
     }
     if (gscReady.value) {
       await loadPerformance();
+    }
+    if (activeTab.value === 'metrika' && metrikaReady.value) {
+      await loadMetrikaPerformance();
     }
     // Анализ загружаем при любом подключённом источнике: Яндекс.Вебмастер
     // анализируется отдельно и не требует Google Search Console.
@@ -373,6 +395,22 @@ async function disconnectYdx() {
   } catch (_) { /* no-op */ }
 }
 
+async function loadMetrikaPerformance() {
+  if (!project.value?.yandex_metrika_counter_id) {
+    metrikaPerf.value = null;
+    return;
+  }
+  metrikaPerfLoading.value = true;
+  metrikaPerfError.value = '';
+  try {
+    metrikaPerf.value = await store.getMetrikaPerformance(projectId, rangeParams());
+  } catch (err) {
+    metrikaPerfError.value = err.response?.data?.error || 'Не удалось получить данные Яндекс.Метрики';
+  } finally {
+    metrikaPerfLoading.value = false;
+  }
+}
+
 async function loadYdxPerformance() {
   if (!ydxReady.value) return;
   ydxPerfLoading.value = true;
@@ -408,6 +446,9 @@ function switchTab(tab) {
   activeTab.value = tab;
   if (tab === 'ydx' && ydxReady.value && !ydxPerf.value && !ydxPerfLoading.value) {
     loadYdxPerformance();
+  }
+  if (tab === 'metrika' && project.value?.yandex_metrika_counter_id && !metrikaPerf.value && !metrikaPerfLoading.value) {
+    loadMetrikaPerformance();
   }
   if (tab === 'compare' && !comparison.value && !compareLoading.value) {
     loadComparison();
@@ -454,6 +495,7 @@ async function loadPerformance() {
 
 function _reloadActive() {
   if (activeTab.value === 'ydx') return loadYdxPerformance();
+  if (activeTab.value === 'metrika') return loadMetrikaPerformance();
   if (activeTab.value === 'compare') return loadComparison();
   if (activeTab.value === 'tasks') return loadProjectTasks();
   return loadPerformance();
@@ -769,7 +811,7 @@ onMounted(() => {
   // Deep-link на конкретную вкладку (используется из ProjectsPage / PositionTrackerPage
   // для входа сразу в раздел «Съём позиций»).
   if (typeof route.query.tab === 'string'
-      && ['gsc', 'ydx', 'compare', 'positions', 'tasks'].includes(route.query.tab)) {
+      && ['gsc', 'ydx', 'compare', 'metrika', 'positions', 'tasks'].includes(route.query.tab)) {
     activeTab.value = route.query.tab;
   }
   load();
@@ -845,15 +887,28 @@ onUnmounted(() => {
                 <option v-for="r in KEYS_SO_REGIONS" :key="r.v" :value="r.v">{{ r.l }}</option>
               </select>
             </label>
+            <label class="block md:col-span-2">
+              <span class="text-xs text-gray-400">ID счётчика Яндекс.Метрики</span>
+              <input v-model="brandingForm.yandex_metrika_counter_id" class="input mt-1" inputmode="numeric"
+                     pattern="[0-9]{1,20}" maxlength="20" placeholder="Например, 12345678" />
+              <span class="text-[11px] text-gray-500">Сначала сохраните OAuth token «Яндекс.Метрика» в разделе «Админка → API-ключи», затем укажите ID счётчика. В public report попадут только агрегаты.</span>
+            </label>
           </div>
           <div class="flex items-center justify-between gap-2">
-            <span v-if="project.keys_so_domain" class="text-xs text-emerald-300">
-              ✓ Подключён домен <b>{{ project.keys_so_domain }}</b>
-              ({{ project.keys_so_region || 'msk' }})
-            </span>
-            <span v-else class="text-xs text-amber-300">
-              Не подключено — отчёт не получит данные Keys.so
-            </span>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span v-if="project.keys_so_domain" class="text-xs text-emerald-300">
+                ✓ Подключён домен <b>{{ project.keys_so_domain }}</b>
+                ({{ project.keys_so_region || 'msk' }})
+              </span>
+              <span v-if="project.yandex_metrika_counter_id" class="text-xs text-emerald-300">
+                ✓ Метрика: счётчик {{ project.yandex_metrika_counter_id }}
+              </span>
+              <span v-else class="text-xs text-gray-500">Метрика не настроена для проекта</span>
+            </div>
+                          <span v-if="!project.keys_so_domain" class="text-xs text-amber-300">
+                Не подключено — отчёт не получит данные Keys.so
+              </span>
+
             <button class="btn-primary" :disabled="brandingSaving" @click="saveBranding">
               {{ brandingSaving ? 'Сохранение…' : 'Сохранить' }}
             </button>
@@ -881,6 +936,13 @@ onUnmounted(() => {
                   :class="activeTab === 'compare' ? 'border-fuchsia-500 text-fuchsia-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
                   @click="switchTab('compare')">
             Сравнение и рекомендации
+          </button>
+          <button type="button"
+                  class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
+                  :class="activeTab === 'metrika' ? 'border-sky-500 text-sky-200' : 'border-transparent text-gray-400 hover:text-gray-200'"
+                  @click="switchTab('metrika')">
+            Яндекс.Метрика
+            <span v-if="project.yandex_metrika_counter_id" class="ml-1 text-emerald-400">●</span>
           </button>
           <button type="button"
                   class="px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors"
@@ -1255,6 +1317,37 @@ onUnmounted(() => {
           </section>
         </div>
         <!-- ============ /Вкладка Яндекс.Вебмастер ============ -->
+
+        <!-- ============ Вкладка: Яндекс.Метрика ============ -->
+        <div v-show="activeTab === 'metrika'" class="space-y-5">
+          <section class="card space-y-3">
+            <div class="flex items-center justify-between gap-3">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-sky-300">Яндекс.Метрика</h2>
+              <span v-if="metrikaReady" class="text-xs text-emerald-300">● Счётчик привязан</span>
+            </div>
+            <p class="text-xs text-gray-400">Статистика строится по выбранному счётчику и периоду. В публичный отчёт передаются только агрегированные данные и таблица источников.</p>
+            <div v-if="!metrikaReady" class="text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded p-3">
+              Укажите ID счётчика в карточке «Бренд и источники отчётов». OAuth token сохраните в «Админка → API-ключи» под ключом «Яндекс.Метрика».
+            </div>
+            <div v-else-if="metrikaPerfLoading" class="h-24 animate-pulse bg-gray-900/60 rounded-lg"></div>
+            <div v-else-if="metrikaPerfError" class="text-sm text-red-400">{{ metrikaPerfError }}</div>
+            <template v-else-if="metrikaPerf">
+              <div v-if="metrikaPerf.totals" class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-3"><div class="text-[11px] uppercase text-gray-500">Визиты</div><div class="text-xl font-bold text-sky-300">{{ Number(metrikaPerf.totals.visits || 0).toLocaleString('ru') }}</div></div>
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-3"><div class="text-[11px] uppercase text-gray-500">Пользователи</div><div class="text-xl font-bold text-indigo-300">{{ Number(metrikaPerf.totals.users || 0).toLocaleString('ru') }}</div></div>
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-3"><div class="text-[11px] uppercase text-gray-500">Конверсии</div><div class="text-xl font-bold text-emerald-300">{{ Number(metrikaPerf.totals.conversions || 0).toLocaleString('ru') }}</div></div>
+                <div class="bg-gray-950 border border-gray-800 rounded-lg p-3"><div class="text-[11px] uppercase text-gray-500">Конверсия</div><div class="text-xl font-bold text-amber-300">{{ Number(metrikaPerf.totals.conversion_rate || 0).toFixed(2) }}%</div></div>
+              </div>
+              <ReportTrendChart v-if="metrikaChart" :labels="metrikaChart.labels" :datasets="metrikaChart.datasets" />
+              <div v-if="metrikaPerf.sources?.length" class="overflow-x-auto">
+                <h3 class="text-sm font-semibold text-gray-200 mb-2">Источники трафика</h3>
+                <table class="w-full text-sm"><thead><tr class="text-left text-xs text-gray-500 border-b border-gray-800"><th class="py-2 pr-3">Источник</th><th class="py-2 px-3 text-right">Визиты</th><th class="py-2 px-3 text-right">Пользователи</th><th class="py-2 px-3 text-right">Конверсии</th><th class="py-2 pl-3 text-right">Конверсия</th></tr></thead><tbody><tr v-for="row in metrikaPerf.sources" :key="row.source" class="border-b border-gray-800/60"><td class="py-2 pr-3">{{ row.source }}</td><td class="py-2 px-3 text-right">{{ Number(row.visits || 0).toLocaleString('ru') }}</td><td class="py-2 px-3 text-right">{{ Number(row.users || 0).toLocaleString('ru') }}</td><td class="py-2 px-3 text-right text-emerald-300">{{ Number(row.conversions || 0).toLocaleString('ru') }}</td><td class="py-2 pl-3 text-right">{{ Number(row.conversion_rate || 0).toFixed(2) }}%</td></tr></tbody></table>
+              </div>
+              <div v-if="metrikaPerf.status === 'empty'" class="text-sm text-gray-500 text-center py-6">За выбранный период данных Метрики нет.</div>
+            </template>
+          </section>
+        </div>
+        <!-- ============ /Вкладка Яндекс.Метрика ============ -->
 
         <!-- ============ Вкладка: Сравнение и рекомендации ============ -->
         <div v-show="activeTab === 'compare'" class="space-y-5">

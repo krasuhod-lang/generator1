@@ -66,6 +66,7 @@ router.get('/:id/ydx/sites',        auth, c.listYdxSites);
 router.post('/:id/ydx/select-site', auth, c.selectYdxSite);
 router.delete('/:id/ydx',           auth, c.disconnectYdx);
 router.get('/:id/ydx/performance',  auth, c.getYdxPerformance);
+router.get('/:id/metrika/performance', auth, c.getMetrikaPerformance);
 
 // Сопоставление источников (GSC ↔ Яндекс.Вебмастер) + рекомендации
 router.get('/:id/compare',          auth, c.compareProjectSources);

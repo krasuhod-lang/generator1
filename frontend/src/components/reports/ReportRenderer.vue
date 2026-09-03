@@ -37,6 +37,9 @@ const props = defineProps({
   // является только presentation-данными: tasksBlocks остаётся источником
   // оригинальных работ и не изменяется.
   workSummary: { type: Object, default: null },
+  // PublicReportPage может вынести проектную шапку выше toolbar/tabs.
+  // В редакторе default=true сохраняет прежнюю разметку.
+  showHeader: { type: Boolean, default: true },
 });
 const emit = defineEmits(['update:tasksBlocks', 'override:update', 'override:reset', 'update:chart']);
 
@@ -126,6 +129,7 @@ const navItems = computed(() => {
   if (props.data?.gsc) items.push({ id: 'gsc', label: 'GSC' });
   if (props.data?.ywm) items.push({ id: 'ywm', label: 'Яндекс' });
   if (props.data?.keys_so) items.push({ id: 'keys-so', label: 'Keys.so' });
+  if (props.data?.metrika?.status === 'ready') items.push({ id: 'metrika', label: 'Метрика' });
   if (hasAnyPages.value) items.push({ id: 'pages', label: 'Страницы' });
   items.push({ id: 'tasks', label: 'Работы' });
   if (props.summary?.growth_attribution?.length || props.summary?.highlights?.length) {
@@ -274,6 +278,37 @@ const reportContextPeriod = computed(() => {
   if (!period?.start || !period?.end) return '';
   return `${period.start} — ${period.end}`;
 });
+function formatTrafficMetric(totalsForSection, metric) {
+  if (!totalsForSection) return '—';
+  if (metric === 'ctr') return totalsForSection.ctr == null ? '—' : `${Number(totalsForSection.ctr).toFixed(2)}%`;
+  return formatNum(totalsForSection[metric]);
+}
+function trafficMetricCards(section, sourceLabel) {
+  const totalsForSection = metricTotals(section);
+  if (!totalsForSection) return [];
+  return [
+    { label: `${sourceLabel} клики`, value: formatNum(totalsForSection.clicks) },
+    { label: `${sourceLabel} показы`, value: formatNum(totalsForSection.impressions) },
+    { label: `${sourceLabel} CTR`, value: formatTrafficMetric(totalsForSection, 'ctr') },
+  ];
+}
+
+const metrikaChart = computed(() => {
+  const section = props.data?.metrika;
+  const series = Array.isArray(section?.series) ? section.series : [];
+  if (!series.length) return null;
+  return {
+    labels: series.map((row) => row.date),
+    datasets: [
+      { label: 'Визиты', color: '#0a84ff', data: series.map((row) => Number(row.visits) || 0) },
+      { label: 'Конверсии', color: '#10b981', data: series.map((row) => Number(row.conversions) || 0) },
+    ],
+    annotations: props.data?.tasks?.annotations || [],
+    showSecondAxis: false,
+    range: section.range || null,
+  };
+});
+
 function metricMethod(label) {
   if (/CTR/i.test(label)) return 'Клики ÷ показы × 100%; округление до двух знаков.';
   if (/позици/i.test(label)) return 'Среднее значение, полученное источником за применённый период.';
@@ -736,6 +771,19 @@ const queriesSection = computed(() => props.data?.queries || null);
 // Движок для топ-страниц. Срез по страницам отдаёт только Google (GSC);
 // Яндекс.Вебмастер не предоставляет page-разрез — вкладка информирует об этом.
 const pagesEngine = ref('google');
+watch(queriesSection, (q) => {
+  const pages = q?.pages || {};
+  if (!pages.google?.length && pages.yandex?.length) pagesEngine.value = 'yandex';
+  else if (pages.google?.length) pagesEngine.value = 'google';
+}, { immediate: true });
+const pageSourceLabel = computed(() => {
+  const source = queriesSection.value?.page_sources?.[pagesEngine.value];
+  if (source) return source;
+  return pagesEngine.value === 'yandex'
+    ? 'Яндекс.Вебмастер · топ-запросы без URL-среза'
+    : 'Google Search Console · топ-страницы по URL';
+});
+const pageRowsAreUrls = computed(() => pagesEngine.value === 'google');
 // Фильтр по интенту страницы: все / коммерческие / информационные.
 const pageFilter = ref('all');
 // Раскрытые страницы (показываем список запросов под URL).
@@ -866,7 +914,7 @@ function growthTargetLabel(item) {
 
 <template>
   <div class="report-renderer" :style="{ '--accent': accent, '--accent-bg': accentBg }">
-    <section class="rblk header">
+    <section v-if="showHeader" class="rblk header">
       <div class="header-main">
         <img v-if="project?.logo_url" :src="project.logo_url" :alt="project.name" class="logo" />
         <div>
@@ -1038,6 +1086,11 @@ function growthTargetLabel(item) {
         За выбранный период данных нет.
       </div>
       <ReportTrendChart v-else :labels="gscChart.labels" :datasets="gscChart.datasets" :annotations="gscChart.annotations" :show-second-axis="gscChart.showSecondAxis" :range="gscChart.range" :normalized-index="gscChart.normalizedIndex" />
+      <div v-if="metricTotals(data?.gsc)" class="traffic-summary-strip" aria-label="Итоги Google Search Console">
+        <div v-for="card in trafficMetricCards(data?.gsc, 'Google')" :key="card.label" class="traffic-summary-item">
+          <span>{{ card.label }}</span><strong>{{ card.value }}</strong>
+        </div>
+      </div>
     </section>
 
     <!-- Яндекс.Вебмастер -->
@@ -1061,6 +1114,34 @@ function growthTargetLabel(item) {
         За выбранный период данных нет.
       </div>
       <ReportTrendChart v-else :labels="ywmChart.labels" :datasets="ywmChart.datasets" :annotations="ywmChart.annotations" :show-second-axis="ywmChart.showSecondAxis" :range="ywmChart.range" :normalized-index="ywmChart.normalizedIndex" />
+      <div v-if="metricTotals(data?.ywm)" class="traffic-summary-strip" aria-label="Итоги Яндекс.Вебмастер">
+        <div v-for="card in trafficMetricCards(data?.ywm, 'Яндекс')" :key="card.label" class="traffic-summary-item">
+          <span>{{ card.label }}</span><strong>{{ card.value }}</strong>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="data?.metrika" v-show="tabVisible('metrika')" id="report-metrika" class="rblk" data-report-chart="metrika" data-report-chart-title="Яндекс.Метрика">
+      <div class="chart-head">
+        <h2>Яндекс.Метрика</h2>
+        <span v-if="data.metrika.status === 'ready'" class="source-ready-badge">Подключено</span>
+      </div>
+      <p class="chart-desc">Визиты, пользователи и конверсии по всем целям за применённый период. Источники трафика — ниже.</p>
+      <div v-if="data.metrika.status === 'error'" class="section-error"><span class="error-icon">⚠️</span> Не удалось получить данные Яндекс.Метрики.</div>
+      <div v-else-if="data.metrika.status !== 'ready'" class="section-empty">Яндекс.Метрика не настроена для этого проекта. Добавьте OAuth token в «Админка → API-ключи» и ID счётчика в настройках проекта.</div>
+      <template v-else>
+        <ReportTrendChart v-if="metrikaChart" :labels="metrikaChart.labels" :datasets="metrikaChart.datasets" :annotations="metrikaChart.annotations" :show-second-axis="metrikaChart.showSecondAxis" :range="metrikaChart.range" />
+        <div v-if="data.metrika.totals" class="traffic-summary-strip" aria-label="Итоги Яндекс.Метрики">
+          <div class="traffic-summary-item"><span>Визиты</span><strong>{{ formatNum(data.metrika.totals.visits) }}</strong></div>
+          <div class="traffic-summary-item"><span>Пользователи</span><strong>{{ formatNum(data.metrika.totals.users) }}</strong></div>
+          <div class="traffic-summary-item"><span>Конверсии</span><strong>{{ formatNum(data.metrika.totals.conversions) }}</strong></div>
+          <div class="traffic-summary-item"><span>Конверсия</span><strong>{{ formatPct(data.metrika.totals.conversion_rate) }}</strong></div>
+        </div>
+        <div v-if="data.metrika.sources?.length" class="metrika-sources-block">
+          <div class="chart-head"><h3>Источники трафика</h3><span class="chart-desc">Визиты · пользователи · конверсии</span></div>
+          <div class="rep-table-wrap"><table class="rep-table pages-table"><thead><tr><th>Источник</th><th class="num">Визиты</th><th class="num">Пользователи</th><th class="num">Конверсии</th><th class="num">Конверсия</th></tr></thead><tbody><tr v-for="row in data.metrika.sources" :key="row.source"><td>{{ row.source }}</td><td class="num">{{ formatNum(row.visits) }}</td><td class="num">{{ formatNum(row.users) }}</td><td class="num">{{ formatNum(row.conversions) }}</td><td class="num">{{ formatPct(row.conversion_rate) }}</td></tr></tbody></table></div>
+        </div>
+      </template>
     </section>
 
     <!-- Keys.so -->
@@ -1127,11 +1208,9 @@ function growthTargetLabel(item) {
     >
       <h2>Топ-страницы и запросы</h2>
       <p class="chart-desc">
-        До {{ queriesSection?.pages_limit || 50 }} строк по кликам. Для Google — топ-страницы
-        (Тип определяется по структуре URL; при отсутствии маркеров — по большинству
-        запросов страницы). Для Яндекса показываем топ-запросы: Webmaster API не отдаёт
-        срез по URL. Нажмите на строку Google, чтобы развернуть запросы, по которым
-        продвигается страница.
+        До {{ queriesSection?.pages_limit || 50 }} строк по кликам. Источник: {{ pageSourceLabel }}.
+        <template v-if="pageRowsAreUrls">Тип страницы определяется по структуре URL и подтверждается запросами; нажмите строку, чтобы раскрыть запросы.</template>
+        <template v-else>Строки Яндекса — это запросы, а не URL: API Яндекс.Вебмастера не отдаёт page-разрез.</template>
       </p>
       <!-- Движок: Google (есть page-разрез) / Яндекс (нет page-разреза) -->
       <div class="keys-engine-toggle">
@@ -1140,7 +1219,8 @@ function growthTargetLabel(item) {
       </div>
       <!-- Фильтр по интенту страницы -->
       <div class="intent-tabs">
-        <button class="intent-tab" :class="{ active: pageFilter === 'all' }" @click="pageFilter = 'all'">Все ({{ enginePages.length }})</button>
+                  <button class="intent-tab" :class="{ active: pageFilter === 'all' }" @click="pageFilter = 'all'">Все ({{ enginePages.length }})</button>
+
         <button class="intent-tab" :class="{ active: pageFilter === 'commercial' }" @click="pageFilter = 'commercial'">🛒 Коммерческие ({{ pagesCommercialCount }})</button>
         <button class="intent-tab" :class="{ active: pageFilter === 'informational' }" @click="pageFilter = 'informational'">📚 Информационные ({{ pagesInfoCount }})</button>
       </div>
@@ -1985,7 +2065,26 @@ function growthTargetLabel(item) {
 .pages-load-btn:hover { background: #f5f8ff; }
 .pages-load-counter { font-size: 11px; color: #99a; }
 
+/* Traffic totals and Metrika source report */
+.traffic-summary-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.traffic-summary-item { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 10px 12px; border: 1px solid rgba(60,60,67,0.10); border-radius: 12px; background: rgba(248,248,250,0.76); }
+.traffic-summary-item span { color: #6e6e73; font-size: 11px; }
+.traffic-summary-item strong { color: #1d1d1f; font-size: 15px; font-variant-numeric: tabular-nums; }
+.source-ready-badge { padding: 4px 9px; border-radius: 999px; background: rgba(16,185,129,.12); color: #047857; font-size: 11px; font-weight: 700; }
+.metrika-sources-block { margin-top: 18px; }
+.metrika-sources-block .chart-head { margin-bottom: 8px; }
+.metrika-sources-block .chart-head h3 { margin: 0; font-size: 16px; }
+.metrika-sources-block .chart-desc { margin: 0; }
+
 /* Сворачивание блоков работ */
 .collapse-btn { width: 22px; height: 22px; border: none; background: none; color: #6e6e73; font-size: 13px; cursor: pointer; padding: 0; flex-shrink: 0; }
 .collapse-count { font-size: 11px; color: #99a; margin-left: auto; white-space: nowrap; }
+@media (max-width: 720px) {
+  .traffic-summary-strip { grid-template-columns: 1fr 1fr; }
+  .traffic-summary-item { flex-direction: column; align-items: flex-start; gap: 3px; }
+}
+@media (max-width: 480px) {
+  .traffic-summary-strip { grid-template-columns: 1fr; }
+}
+
 </style>

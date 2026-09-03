@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const db = require('../../config/db');
 const gscService = require('../projects/gscService');
 const ydxService = require('../projects/ydxService');
+const metrikaService = require('../projects/metrikaService');
 const { loadCachedSeries, loadCurrent, syncDomain } = require('./keysSoSync');
 const tasksLog = require('./tasksAutoLog');
 const { forecastMetric } = require('./forecastEngine');
@@ -849,22 +850,27 @@ function _summarizeCommercial(queries) {
 }
 
 async function _queriesSection(project, from, to) {
-  if (!project.gsc_connected || !project.gsc_site_url) {
+  const hasGsc = Boolean(project.gsc_connected && project.gsc_site_url);
+  const hasYandex = Boolean(project.ydx_connected && project.ydx_site_url);
+  if (!hasGsc && !hasYandex) {
     return { connected: false, status: 'empty', reason: 'not_connected',
       top_queries_commercial: [], top_queries_informational: [], top_queries_other: [],
-      top_pages_commercial: [], top_pages_informational: [], summary: null };
+      top_pages_commercial: [], top_pages_informational: [],
+      pages: { google: [], yandex: [] }, total: { google: 0, yandex: 0 }, summary: null };
   }
   try {
-    const [{ topQueries, topPages }, queryPage] = await Promise.all([
-      // ТЗ #3: live-эндпоинт отчёта обязан ограничить fetch у источника
-      // через gsc.liveRowLimit (см. memory «projects source fetch limits»).
-      // По умолчанию fetchTopDimensions берёт rowLimit=0 (unlimited), что
-      // на мегасайтах создаёт огромный отклик GSC до отчёта.
-      gscService.fetchTopDimensions(project, { from, to }, { rowLimit: getProjectsConfig().gsc.liveRowLimit }),
-      // queryPage срез нужен для классификации страниц по доле commercial-кликов.
-      // Если упадёт — fallback: страницы без разбиения по intent.
-      _safeFetchQueryPage(project, from, to),
-    ]);
+    const [{ topQueries, topPages }, queryPage] = hasGsc
+      ? await Promise.all([
+        // ТЗ #3: live-эндпоинт отчёта обязан ограничить fetch у источника
+        // через gsc.liveRowLimit (см. memory «projects source fetch limits»).
+        // По умолчанию fetchTopDimensions берёт rowLimit=0 (unlimited), что
+        // на мегасайтах создаёт огромный отклик GSC до отчёта.
+        gscService.fetchTopDimensions(project, { from, to }, { rowLimit: getProjectsConfig().gsc.liveRowLimit }),
+        // queryPage срез нужен для классификации страниц по доле commercial-кликов.
+        // Если упадёт — fallback: страницы без разбиения по intent.
+        _safeFetchQueryPage(project, from, to),
+      ])
+      : [{ topQueries: [], topPages: [] }, []];
     const brandTokens = deriveBrandTokens({ name: project.name, siteUrl: project.gsc_site_url, url: project.url });
     const classified = _classifyQueries(topQueries, brandTokens);
     const split = _splitQueries(classified);
@@ -895,19 +901,23 @@ async function _queriesSection(project, from, to) {
     // отчёте видит, по каким запросам сайт показывается в Яндексе. Если
     // Яндекс не подключён, секция остаётся пустой.
     const pagesGoogle = _buildPagesWithQueries(topPages, queryPage, 'google', brandTokens);
-    const yandexQueries = await _safeFetchYandexQueries(project, from, to);
+    const yandexQueries = hasYandex ? await _safeFetchYandexQueries(project, from, to) : [];
     const pagesYandex = _buildYandexQueriesAsPages(yandexQueries, brandTokens);
 
     return {
       connected: true,
-      status: topQueries.length ? 'ready' : 'empty',
-      reason: topQueries.length ? null : 'no_rows',
+      status: (topQueries.length || yandexQueries.length) ? 'ready' : 'empty',
+      reason: (topQueries.length || yandexQueries.length) ? null : 'no_rows',
       top_queries_commercial: split.commercial,
       top_queries_informational: split.informational,
       top_queries_other: split.other,
       top_pages_commercial: pagesCommercial,
       top_pages_informational: pagesInformational,
       pages: { google: pagesGoogle, yandex: pagesYandex },
+      page_sources: {
+        google: pagesGoogle.length ? 'Google Search Console URL report' : 'not_available',
+        yandex: pagesYandex.length ? 'Yandex Webmaster query report (URL breakdown unavailable)' : 'not_available',
+      },
       // ТЗ #3: бэк отдаёт страницы целиком (до hard-cap), UI режет на page_size.
       page_size: PAGE_SIZE,
       page_hard_cap: PAGES_HARD_CAP,
@@ -925,6 +935,7 @@ async function _queriesSection(project, from, to) {
       top_queries_commercial: [], top_queries_informational: [], top_queries_other: [],
       top_pages_commercial: [], top_pages_informational: [],
       pages: { google: [], yandex: [] },
+      page_sources: { google: 'not_available', yandex: 'not_available' },
       page_size: PAGE_SIZE,
       page_hard_cap: PAGES_HARD_CAP,
       total: { google: 0, yandex: 0 },
@@ -1177,6 +1188,26 @@ async function _modulesSection(project, from, to, config) {
   }
 }
 
+async function _metrikaSection(project, from, to, granularity) {
+  try {
+    return await metrikaService.fetchReport(project, { from, to }, { granularity });
+  } catch (err) {
+    console.error('[reports][metrika] section failed:', err.message);
+    return {
+      connected: true,
+      status: 'error',
+      reason: 'source_failed',
+      error: err.message || 'metrika_failed',
+      counter_id: metrikaService.normalizeCounterId(project?.yandex_metrika_counter_id) || null,
+      range: { from, to },
+      series: [],
+      totals: null,
+      sources: [],
+      goal_scope: 'all_goals',
+    };
+  }
+}
+
 async function _loadFreshnessMap(projectId) {
   try {
     const arr = await freshnessService.getProjectFreshness(projectId);
@@ -1222,7 +1253,7 @@ async function aggregateForDraft(draft, opts = {}) {
     : dataCache.cached(sectionCacheKey(kind, extra), loader));
 
   const modulesConfigHash = dataCache.makeKey([draft.config?.modules || {}]);
-  const [gsc, ywm, keysSo, position, tasks, queries, modules] = await Promise.all([
+  const [gsc, ywm, keysSo, position, tasks, queries, modules, metrika] = await Promise.all([
     wrap('gsc', () => _gscSection(project, from, to, granularity, freshnessMap)),
     wrap('ywm', () => _ydxSection(project, from, to, granularity, freshnessMap)),
     wrap('keysSo', () => _keysSoSection(project, from, to, freshnessMap)),
@@ -1231,6 +1262,7 @@ async function aggregateForDraft(draft, opts = {}) {
     _tasksSection(project.id, from, to, granularity, draft.tasks_blocks, { includeHidden: opts.includeHidden }),
     wrap('queries', () => _queriesSection(project, from, to)),
     wrap('modules', () => _modulesSection(project, from, to, draft.config), modulesConfigHash),
+    wrap('metrika', () => _metrikaSection(project, from, to, granularity)),
   ]);
 
   // Сводный статус интеграций — нужен для UI-баннеров и для PDF footnote
@@ -1250,6 +1282,7 @@ async function aggregateForDraft(draft, opts = {}) {
     { id: 'tasks', label: 'Работы', status: tasks.status, reason: tasks.reason, last_sync_at: null, core: false },
     { id: 'modules', label: 'Модули', status: modules.status, reason: modules.reason, last_sync_at: null, core: false },
     { id: 'queries', label: 'Топ-запросы', status: queries.status, reason: queries.reason, last_sync_at: null, core: false },
+    { id: 'metrika', label: 'Яндекс.Метрика', status: metrika.status, reason: metrika.reason, last_sync_at: metrika.generated_at || null, core: false },
   ];
   const coreIntegrations = integrations.filter((i) => i.core);
   const completeness = {
@@ -1301,6 +1334,7 @@ async function aggregateForDraft(draft, opts = {}) {
       updated_at: growthOpportunities[0]?.updated_at || null,
     },
     queries,
+    metrika,
     integrations,
     completeness,
     data_quality: {

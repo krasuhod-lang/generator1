@@ -17,6 +17,8 @@ test('Google+Яндекс клики → main_kpi суммируется, delta 
   const data = {
     gsc: {
       totals: { clicks: 600, impressions: 10000, ctr: 6 },
+      prev_totals_complete: { clicks: 200 },
+      comparison: { status: 'available' },
       series: [
         { date: '2026-01-01', clicks: 100 },
         { date: '2026-02-01', clicks: 100 },
@@ -26,6 +28,8 @@ test('Google+Яндекс клики → main_kpi суммируется, delta 
     },
     ywm: {
       totals: { clicks: 400, impressions: 5000 },
+      prev_totals_complete: { clicks: 100 },
+      comparison: { status: 'available' },
       series: [
         { date: '2026-01-01', clicks: 50 },
         { date: '2026-02-01', clicks: 50 },
@@ -40,10 +44,10 @@ test('Google+Яндекс клики → main_kpi суммируется, delta 
   assert.strictEqual(h.main_kpi.unit, 'клик.');
   assert.ok(h.main_kpi.source.includes('Google'));
   assert.ok(h.main_kpi.source.includes('Яндекс'));
-  // prev sum = (100+50)+(100+50) = 300; curr = (200+150)+(200+150) = 700; delta +400 +133.3%
+  // Explicit previous totals = 200 + 100 = 300; current totals = 600 + 400 = 1000; delta +700 (+233.3%).
   assert.strictEqual(h.delta.direction, 'up');
-  assert.strictEqual(h.delta.abs, 400);
-  assert.strictEqual(h.delta.pct, 133.3);
+  assert.strictEqual(h.delta.abs, 700);
+  assert.strictEqual(h.delta.pct, 233.3);
   assert.ok(/Клики из поиска/.test(h.change_summary));
   assert.ok(/выросли/i.test(h.change_summary));
 });
@@ -96,7 +100,7 @@ test('secondary_kpis: <=4 элементов, не дублирует main_kpi',
 
 test('top_achievements: highlights имеют приоритет, потом delta', () => {
   const data = {
-    gsc: { totals: { clicks: 200 }, series: [
+    gsc: { totals: { clicks: 200 }, prev_totals_complete: { clicks: 100 }, comparison: { status: 'available' }, series: [
       { date: '2026-01-01', clicks: 50 }, { date: '2026-02-01', clicks: 150 },
     ] },
   };

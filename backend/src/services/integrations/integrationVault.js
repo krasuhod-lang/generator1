@@ -36,6 +36,7 @@ const INTEGRATION_CATALOG = Object.freeze([
   { envName: 'GOOGLE_API_KEY', label: 'Google API', group: 'Внешние API', description: 'Общий Google API key' },
   { envName: 'GOOGLE_CLIENT_SECRET', label: 'Google OAuth', group: 'Внешние API', description: 'OAuth client secret для Search Console' },
   { envName: 'YANDEX_CLIENT_SECRET', label: 'Yandex OAuth', group: 'Внешние API', description: 'OAuth client secret для Яндекс-сервисов' },
+  { envName: 'YANDEX_METRIKA_OAUTH_TOKEN', label: 'Яндекс.Метрика', group: 'Аналитика', description: 'OAuth token для статистики, целей и источников Яндекс.Метрики' },
   { envName: 'DADATA_API_KEY', label: 'DaData', group: 'Внешние API', description: 'Необязательное обогащение юридических лиц' },
 ]);
 

@@ -32,6 +32,7 @@ const ydx = require('../services/projects/ydxClient');
 const { encryptToken } = require('../services/projects/tokenCrypto');
 const { fetchPerformanceSeries, fetchTopDimensions } = require('../services/projects/gscService');
 const ydxService = require('../services/projects/ydxService');
+const metrikaService = require('../services/projects/metrikaService');
 const { compareSources } = require('../services/projects/sourceComparison');
 const { collectSnapshot } = require('../services/projects/analysisRunner');
 const { enqueueOutbox, publishPendingOutbox } = require('../services/tasks/reliability');
@@ -70,6 +71,12 @@ function _clipAudience(v) {
   const s = String(v).slice(0, CFG.limits.audienceMax).trim();
   return s || null;
 }
+function _sanitizeMetrikaCounterId(v) {
+  if (v == null) return null;
+  const value = String(v).trim();
+  return /^\d{1,20}$/.test(value) ? value : null;
+}
+
 function _sanitizeUrl(v) {
   const raw = String(v || '').trim();
   if (!raw) return '';
@@ -133,7 +140,7 @@ function _sanitizeKeysSoRegion(v) {
 // Публичная (безопасная) проекция строки проекта — без *_enc токенов.
 const PUBLIC_COLUMNS = `
   id, name, url, audience_description,
-  logo_url, color_accent, keys_so_domain, keys_so_region,
+  logo_url, color_accent, keys_so_domain, keys_so_region, yandex_metrika_counter_id,
   gsc_connected, gsc_site_url, gsc_available_sites,
   (gsc_refresh_token_enc IS NOT NULL) AS gsc_has_refresh,
   ydx_connected, ydx_site_url, ydx_available_sites,
@@ -262,14 +269,18 @@ async function updateProject(req, res, next) {
     const keysSoRegion = 'keys_so_region' in body
       ? (_sanitizeKeysSoRegion(body.keys_so_region) || (body.keys_so_region == null ? null : existing.keys_so_region))
       : existing.keys_so_region;
+    const metrikaCounterId = 'yandex_metrika_counter_id' in body
+      ? _sanitizeMetrikaCounterId(body.yandex_metrika_counter_id)
+      : existing.yandex_metrika_counter_id;
     if (!name) return res.status(400).json({ error: 'Название проекта обязательно' });
     if (!url) return res.status(400).json({ error: 'Укажите корректную ссылку на проект' });
     const { rows } = await db.query(
       `UPDATE projects SET name=$2, url=$3, audience_description=$4,
               logo_url=$5, color_accent=$6, keys_so_domain=$7, keys_so_region=$8,
+              yandex_metrika_counter_id=$9,
               updated_at=NOW()
         WHERE id=$1 RETURNING ${PUBLIC_COLUMNS}`,
-      [existing.id, name, url, audience, logoUrl, accent, keysSoDomain, keysSoRegion],
+      [existing.id, name, url, audience, logoUrl, accent, keysSoDomain, keysSoRegion, metrikaCounterId],
     );
     await syncLinkedPositionProject({
       id: existing.id,
@@ -510,6 +521,24 @@ async function getYdxPerformance(req, res, next) {
     }
     const range = _rangeFromQuery(req.query);
     const data = await ydxService.fetchPerformanceSeries(project, range);
+    return res.json(data);
+  } catch (err) {
+    return _integrationError(res, next, err);
+  }
+}
+
+// GET /:id/metrika/performance — данные Яндекс.Метрики для project dashboard.
+async function getMetrikaPerformance(req, res, next) {
+  try {
+    const project = await _loadOwned(req.params.id, req.user.id);
+    if (!project) return res.status(404).json({ error: 'Проект не найден' });
+    const rangeInput = _rangeFromQuery(req.query);
+    const range = rangeInput.from && rangeInput.to
+      ? rangeInput
+      : metrikaService.resolveRange(rangeInput);
+    const data = await metrikaService.fetchReport(project, range, {
+      granularity: req.query.granularity || 'month',
+    });
     return res.json(data);
   } catch (err) {
     return _integrationError(res, next, err);
@@ -1479,6 +1508,7 @@ module.exports = {
   selectYdxSite,
   disconnectYdx,
   getYdxPerformance,
+  getMetrikaPerformance,
   compareProjectSources,
   getPerformance,
   startAnalysis,

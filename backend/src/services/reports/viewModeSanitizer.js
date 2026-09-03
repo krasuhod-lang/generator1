@@ -156,6 +156,46 @@ function _sanitizeGrowthOpportunity(item) {
   };
 }
 
+function _sanitizeMetrikaBlock(metrika) {
+  if (!_isObj(metrika)) return metrika;
+  return {
+    connected: metrika.connected !== false,
+    status: metrika.status || 'empty',
+    reason: metrika.reason || null,
+    counter_id: metrika.counter_id || null,
+    range: _isObj(metrika.range) ? {
+      from: metrika.range.from || null,
+      to: metrika.range.to || null,
+    } : null,
+    granularity: metrika.granularity || null,
+    series: Array.isArray(metrika.series) ? metrika.series.slice(0, 370).map((row) => ({
+      date: row?.date || null,
+      visits: Number(row?.visits) || 0,
+      users: Number(row?.users) || 0,
+      pageviews: Number(row?.pageviews) || 0,
+      conversions: Number(row?.conversions) || 0,
+      bounce_rate: row?.bounce_rate == null ? null : Number(row.bounce_rate),
+      conversion_rate: Number(row?.conversion_rate) || 0,
+    })) : [],
+    totals: _isObj(metrika.totals) ? {
+      visits: Number(metrika.totals.visits) || 0,
+      users: Number(metrika.totals.users) || 0,
+      pageviews: Number(metrika.totals.pageviews) || 0,
+      conversions: Number(metrika.totals.conversions) || 0,
+      bounce_rate: metrika.totals.bounce_rate == null ? null : Number(metrika.totals.bounce_rate),
+      conversion_rate: Number(metrika.totals.conversion_rate) || 0,
+    } : null,
+    sources: Array.isArray(metrika.sources) ? metrika.sources.slice(0, 100).map((row) => ({
+      source: row?.source || 'Неизвестный источник',
+      visits: Number(row?.visits) || 0,
+      users: Number(row?.users) || 0,
+      conversions: Number(row?.conversions) || 0,
+      conversion_rate: Number(row?.conversion_rate) || 0,
+    })) : [],
+    goal_scope: metrika.goal_scope || 'all_goals',
+  };
+}
+
 function _sanitizeGrowthBlock(growth) {
   if (!_isObj(growth)) return growth;
   const opportunities = Array.isArray(growth.opportunities)
@@ -215,6 +255,7 @@ function sanitizeData(data, mode) {
   }
   if (_isObj(copy.modules)) copy.modules = _sanitizeModulesBlock(copy.modules);
   if (_isObj(copy.growth)) copy.growth = _sanitizeGrowthBlock(copy.growth);
+  if (_isObj(copy.metrika)) copy.metrika = _sanitizeMetrikaBlock(copy.metrika);
   // tasks.items в client mode не должны содержать description (HTML с внутренними
   // пометками) — оставим только client-safe поля.
   if (_isObj(copy.tasks) && Array.isArray(copy.tasks.items)) {
@@ -266,5 +307,6 @@ module.exports = {
     _sanitizeSection,
     _sanitizeGrowthBlock,
     _sanitizeGrowthOpportunity,
+    _sanitizeMetrikaBlock,
   },
 };

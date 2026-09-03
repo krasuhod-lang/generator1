@@ -83,6 +83,10 @@ export const useProjectsStore = defineStore('projects', {
       const { data } = await api.get(`/projects/${id}/ydx/performance`, { params });
       return data || null;
     },
+    async getMetrikaPerformance(id, params) {
+      const { data } = await api.get(`/projects/${id}/metrika/performance`, { params });
+      return data || null;
+    },
 
     // ── Сопоставление источников (GSC ↔ Яндекс) + рекомендации ───────
     async compareSources(id, params) {

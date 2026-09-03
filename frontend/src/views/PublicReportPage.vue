@@ -38,6 +38,7 @@ const TAB_DEFINITIONS = [
   { id: 'overview', label: 'Обзор', description: 'Итоги и точки роста', icon: '⌂' },
   { id: 'search', label: 'Поиск', description: 'GSC · Яндекс · Keys.so', icon: '↗' },
   { id: 'pages', label: 'Страницы', description: 'URL и запросы', icon: '▦' },
+  { id: 'metrika', label: 'Метрика', description: 'Визиты · конверсии', icon: '◒' },
   { id: 'tasks', label: 'Работы', description: 'Задачи и результаты', icon: '✓' },
   { id: 'work-summary', label: 'Сводка работ', description: 'Что сделано по неделям', icon: '✦' },
   { id: 'insights', label: 'AI-анализ', description: 'Причины и следующие шаги', icon: '◎' },
@@ -60,6 +61,7 @@ const availableTabs = computed(() => {
     if (tab.id === 'overview' || tab.id === 'tasks') return true;
     if (tab.id === 'search') return Boolean(data.gsc || data.ywm || data.keys_so || data.position);
     if (tab.id === 'pages') return hasPageBreakdown(data);
+    if (tab.id === 'metrika') return Boolean(data.metrika && (data.metrika.status === 'ready' || data.metrika.counter_id));
     if (tab.id === 'work-summary') {
       const work = summary.work_summary;
       return Boolean(work && (work.overview
@@ -234,6 +236,23 @@ async function exportPdf() {
     <div v-else-if="result" class="public-shell"
          :style="{ '--accent': result.project?.color_accent || '#0071e3' }">
       <div class="public-inner">
+        <section class="public-project-header" aria-label="Информация о проекте">
+          <div class="public-project-brand">
+            <div v-if="result.project?.logo_url" class="public-project-logo-wrap">
+              <img :src="result.project.logo_url" :alt="result.project.name || 'Логотип проекта'" class="public-project-logo" />
+            </div>
+            <div v-else class="public-project-logo-fallback" aria-hidden="true">{{ (result.project?.name || 'П').slice(0, 1).toUpperCase() }}</div>
+            <div class="public-project-copy">
+              <span class="public-project-kicker">SEO-ОТЧЁТ</span>
+              <h1>{{ result.project?.name || result.title || 'Отчёт проекта' }}</h1>
+              <a v-if="result.project?.url" :href="result.project.url" target="_blank" rel="noopener noreferrer">{{ result.project.url }}</a>
+            </div>
+          </div>
+          <div class="public-project-meta">
+            <span class="public-project-period">{{ result.period || 'Период не указан' }}</span>
+            <span class="public-project-status" :class="{ snapshot: result.mode !== 'live' }">{{ result.mode === 'live' ? 'Live' : 'Снимок' }}</span>
+          </div>
+        </section>
         <div class="public-toolbar">
           <div class="range-grid">
             <input v-model="viewRange.from" type="date" />
@@ -249,7 +268,7 @@ async function exportPdf() {
         <nav v-if="availableTabs.length > 1" class="public-tabs-shell" aria-label="Разделы отчёта">
           <div class="public-tabs-heading">
             <div>
-              <span class="public-tabs-kicker">REPORT BOARD</span>
+              <span class="public-tabs-kicker">ПУБЛИЧНЫЙ ОТЧЁТ</span>
               <strong>Раздел отчёта</strong>
             </div>
             <span class="public-tabs-current">{{ activeTabLabel }}</span>
@@ -290,6 +309,7 @@ async function exportPdf() {
             :captured-at="result.payload?.captured_at"
             :chart-config="result.payload?.config?.charts || {}"
             :active-tab="activeTab"
+            :show-header="false"
             :show-anchor-nav="false"
             :readonly="true" />
           <!-- ТЗ #1: локальный оверлей при applyRange — отчёт остаётся
@@ -324,6 +344,24 @@ async function exportPdf() {
 .public-shell { max-width: 1080px; margin: 0 auto; }
 .public-inner { display: flex; flex-direction: column; gap: 16px; }
 .public-footer { text-align: center; padding: 16px 0 36px; color: #86868b; font-size: 12px; letter-spacing: 0.02em; }
+.public-project-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 20px 22px; background: #fff; border: 1px solid rgba(60,60,67,0.12);
+  border-radius: 18px; box-shadow: 0 8px 24px rgba(15,23,42,0.06);
+}
+.public-project-brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.public-project-logo-wrap, .public-project-logo-fallback { width: 56px; height: 56px; flex: 0 0 56px; border-radius: 16px; overflow: hidden; }
+.public-project-logo { width: 100%; height: 100%; display: block; object-fit: contain; background: #f7f7f8; }
+.public-project-logo-fallback { display: grid; place-items: center; background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 86%, #fff), var(--accent)); color: #fff; font-size: 26px; font-weight: 800; }
+.public-project-copy { min-width: 0; }
+.public-project-kicker { display: block; margin-bottom: 4px; color: #86868b; font-size: 10px; font-weight: 800; letter-spacing: .14em; }
+.public-project-copy h1 { margin: 0; color: #1d1d1f; font-size: clamp(22px, 3vw, 32px); line-height: 1.05; font-weight: 760; letter-spacing: -.035em; }
+.public-project-copy a { display: inline-block; max-width: min(62vw, 620px); margin-top: 6px; overflow: hidden; color: #6e6e73; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
+.public-project-copy a:hover { color: var(--accent); text-decoration: underline; }
+.public-project-meta { display: flex; align-items: flex-end; flex-direction: column; gap: 9px; flex: 0 0 auto; }
+.public-project-period { color: #6e6e73; font-size: 13px; white-space: nowrap; }
+.public-project-status { padding: 6px 10px; border-radius: 999px; background: rgba(10,132,255,.10); color: #0a63c7; font-size: 12px; font-weight: 750; }
+.public-project-status.snapshot { background: rgba(107,114,128,.12); color: #4b5563; }
 .public-toolbar {
   display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   background: #fff; border: 1px solid rgba(60,60,67,0.12); border-radius: 16px; padding: 12px;
@@ -438,6 +476,11 @@ async function exportPdf() {
   .public-tab { flex: 0 0 174px; }
 }
 @media (max-width: 720px) {
+  .public-project-header { align-items: flex-start; flex-direction: column; padding: 16px; gap: 12px; }
+  .public-project-logo-wrap, .public-project-logo-fallback { width: 48px; height: 48px; flex-basis: 48px; border-radius: 14px; }
+  .public-project-copy h1 { font-size: 23px; }
+  .public-project-copy a { max-width: calc(100vw - 120px); }
+  .public-project-meta { width: 100%; align-items: flex-start; flex-direction: row; justify-content: space-between; }
   .range-grid { grid-template-columns: 1fr; }
   .public-toolbar { flex-direction: column; gap: 8px; }
   .toolbar-actions { justify-content: stretch; }

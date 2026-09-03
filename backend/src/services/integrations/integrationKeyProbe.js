@@ -28,6 +28,8 @@ function endpointFor(envName) {
       return { method: 'get', url: `${base('DASHSCOPE_BASE_URL', 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1')}/models`, auth: 'bearer' };
     case 'RESEND_API_KEY':
       return { method: 'get', url: 'https://api.resend.com/api-keys', auth: 'bearer' };
+    case 'YANDEX_METRIKA_OAUTH_TOKEN':
+      return { method: 'get', url: 'https://api-metrika.yandex.net/management/v1/counters', auth: 'oauth' };
     case 'RELEVANCE_INTERNAL_TOKEN': {
       const url = `${base('RELEVANCE_INTERNAL_URL', 'http://relevance:8000')}/health`;
       return { method: 'get', url, auth: 'internal_header' };
@@ -155,6 +157,7 @@ async function probeIntegrationKey(envName, { timeoutMs = DEFAULT_TIMEOUT_MS, re
     const params = {};
     let url = target.url;
     if (target.auth === 'bearer') headers.Authorization = `Bearer ${info.value}`;
+    if (target.auth === 'oauth') headers.Authorization = `OAuth ${info.value}`;
     if (target.auth === 'internal_header') headers['X-Internal-Token'] = info.value;
     if (target.auth === 'gemini_query') params.key = info.value;
     if (target.auth === 'query_serpapi') params.api_key = info.value;
