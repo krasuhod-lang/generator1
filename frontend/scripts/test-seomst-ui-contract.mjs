@@ -52,7 +52,9 @@ expectIncludes(premiumLayout, 'SeoMST', 'premium shell brand');
 expectIncludes(dashboard, 'var(--ui-surface)', 'task-center surface token');
 expectIncludes(adminKeys, 'admin-action-row', 'admin key mobile actions');
 expectIncludes(landing, '.nav-login { display: inline-flex;', 'mobile login hit-area');
+expectIncludes(landing, '.nav-actions .button-small { min-height: 44px;', 'mobile header CTA hit-area');
 expectIncludes(landing, '.footer-links a { display: inline-flex;', 'mobile footer hit-area');
+expectIncludes(landing, "Promise.allSettled([import('./LoginPage.vue'), import('./RegisterPage.vue')])", 'landing auth chunk prefetch');
 expectIncludes(authStore, 'const token = ref(readStoredToken());', 'client pre-router token hydration');
 expectIncludes(authStore, 'function writeStoredToken(value)', 'client safe token storage');
 expectIncludes(adminStore, 'const adminToken = ref(readStoredAdminToken());', 'admin pre-router token hydration');
@@ -66,4 +68,4 @@ const brandResidue = [index, login, register, adminLogin, appLayout, adminLayout
   .some((source) => /SEO Genius|SEO GENIUS|SEO <b>GENIUS/.test(source));
 assert.equal(brandResidue, false, 'legacy visible SEO Genius brand must not remain in audited surfaces');
 
-console.log('SEOMST_UI_CONTRACT_OK checks=35');
+console.log('SEOMST_UI_CONTRACT_OK checks=37');
