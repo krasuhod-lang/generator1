@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const db = require('../../config/db');
 const gscService = require('../projects/gscService');
 const ydxService = require('../projects/ydxService');
@@ -257,6 +258,28 @@ function _bucketOf(dateStr, granularity) {
     return dt.toISOString().slice(0, 10);
   }
   return `${y}-${mo}-${d}`;
+}
+
+function _hash(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
+}
+
+function _comparisonContext(from, to, sections = {}) {
+  const previous = _prevWindowOf(from, to);
+  const comparisonStatuses = Object.values(sections)
+    .map((section) => section?.comparison?.status)
+    .filter(Boolean);
+  const status = comparisonStatuses.length && comparisonStatuses.every((item) => item === 'available')
+    ? 'available'
+    : comparisonStatuses.includes('available')
+      ? 'partial'
+      : 'no_comparison';
+  return {
+    status,
+    current: { from, to },
+    previous,
+    policy: previous ? 'same_length_preceding_window' : 'unavailable',
+  };
 }
 
 function _periodWindow(from, to) {
@@ -523,6 +546,11 @@ async function _gscSection(project, from, to, granularity, freshnessMap) {
       totals: data.totals || null,
       totals_complete: completePeriods.totals_complete,
       prev_totals_complete: completePeriods.prev_totals_complete,
+      comparison: {
+        status: completePeriods.prev_totals_complete ? 'available' : 'no_comparison',
+        current: { from, to, totals: completePeriods.totals_complete || data.totals || null },
+        previous: prevWindow ? { ...prevWindow, totals: completePeriods.prev_totals_complete || null } : null,
+      },
       // Доп. range (см. _alignSeriesToRange): expected_buckets/actual_from/has_gaps
       // нужны фронту, чтобы честно отрисовать «дырки» и подписать «источник
       // вернул данные с DD.MM.YYYY». data.range остаётся для PDF/совместимости.
@@ -576,6 +604,11 @@ async function _ydxSection(project, from, to, granularity, freshnessMap) {
       totals: data.totals || null,
       totals_complete: completePeriods.totals_complete,
       prev_totals_complete: completePeriods.prev_totals_complete,
+      comparison: {
+        status: completePeriods.prev_totals_complete ? 'available' : 'no_comparison',
+        current: { from, to, totals: completePeriods.totals_complete || data.totals || null },
+        previous: prevWindow ? { ...prevWindow, totals: completePeriods.prev_totals_complete || null } : null,
+      },
       range: { ...(data.range || {}), ...range },
     };
   } catch (err) {
@@ -993,6 +1026,7 @@ async function _keysSoSection(project, from, to, freshnessMap) {
       status: hasRows ? 'ready' : 'empty',
       reason: hasRows ? null : 'no_rows',
       last_sync_at,
+      comparison: { status: 'not_available', current: { from, to }, previous: null },
       series: yandex.series,
       current: yandex.current,
       range: yandex.range,
@@ -1282,16 +1316,40 @@ async function aggregateForDraft(draft, opts = {}) {
     },
     view_mode: viewMode,
     traffic_value: _buildTrafficValue(keysSo, gsc, ywm),
-    forecast: _buildForecast(gsc, keysSo),
+    // Forecast remains available to analyst diagnostics for compatibility, but
+    // is explicitly marked unsupported for client publication until a validated
+    // forecasting module supplies a basis, interval and confidence metadata.
+    forecast: null,
     generated_at: new Date().toISOString(),
   };
+
+  const reportContext = {
+    project_id: project.id,
+    period: { start: from, end: to, granularity },
+    comparison: _comparisonContext(from, to, { gsc, ywm }),
+    filters_hash: _hash({ from, to, granularity }),
+    timezone_policy: 'provider_calendar_dates',
+    source_freshness: {
+      gsc: gsc.last_sync_at || null,
+      yandex_webmaster: ywm.last_sync_at || null,
+      keys_so: keysSo.last_sync_at || null,
+    },
+    schema_version: 'report.v1',
+  };
+  reportContext.context_hash = _hash({ project_id: project.id, report_context: reportContext });
+  payload.report_context = reportContext;
+  payload.snapshot_id = _hash({
+    project_id: project.id,
+    report_context: reportContext,
+    gsc, ywm, keysSo, position, tasks, queries, modules,
+  });
 
   // Sprint 2: client-first headline (главный KPI, что изменилось, top-3
   // достижения/риска). Чисто детерминированный блок над уже собранным
   // payload — не зависит от LLM. Безопасно для client mode по построению
   // (не содержит технических полей).
   try {
-    payload.headline = buildHeadline(payload, draft?.summary || draft?.llm_summary || null);
+    payload.headline = buildHeadline(payload, draft?.summary || draft?.llm_summary || null, reportContext);
   } catch (err) {
     console.error('[reports][headline] build failed:', err.message);
     payload.headline = null;

@@ -120,6 +120,12 @@ function _periodLabel(from, to) {
   return `${fmt(from)} — ${fmt(to)}`;
 }
 
+function _reportTitle(projectName, from, to, fallback = '') {
+  const range = _periodLabel(from, to);
+  if (projectName && range) return `Отчёт ${projectName} · ${range}`;
+  return fallback || (projectName ? `Отчёт ${projectName}` : 'Отчёт');
+}
+
 function _summaryPayloadFromDraft(row) {
   const insights = row.client_insights && typeof row.client_insights === 'object'
     ? row.client_insights : {};
@@ -135,6 +141,8 @@ function _summaryPayloadFromDraft(row) {
     work_summary: insights.work_summary || null,
     ai_status: row.llm_status || 'idle',
     ai_generated_at: row.llm_generated_at || insights.generated_at || null,
+    ai_snapshot_id: insights.snapshot_id || null,
+    ai_context_hash: insights.context_hash || null,
     ai_metadata: {
       provider: insights.provider || null,
       model: insights.model || null,
@@ -795,13 +803,44 @@ async function publicGet(req, res) {
     };
   }
 
+  // P0: title/period всегда отражают применённый диапазон, а не старый draft title.
+  const appliedFrom = payload.data?.report_context?.period?.start || reqFrom || winFrom;
+  const appliedTo = payload.data?.report_context?.period?.end || reqTo || winTo;
+  payload.title = _reportTitle(sr.project_name, appliedFrom, appliedTo, payload.title || sr.draft_title);
+  payload.period = _periodLabel(appliedFrom, appliedTo);
+
+  // P0: AI вывод имеет смысл только для того же нормализованного контекста.
+  // Старые публикации без context_hash и результаты другого диапазона не
+  // маскируются под актуальную аналитику — числа и фактические работы остаются
+  // доступными, а AI-блок получает безопасное stale-состояние.
+  const storedInsights = sr.client_insights && typeof sr.client_insights === 'object'
+    ? sr.client_insights : {};
+  const calculatedContextHash = payload.data?.report_context?.context_hash || null;
+  const storedContextHash = storedInsights.context_hash || null;
+  if (viewMode === 'client' && (
+    !storedContextHash || !calculatedContextHash || storedContextHash !== calculatedContextHash
+  )) {
+    payload.summary = {
+      ...(payload.summary || {}),
+      executive_summary: '',
+      highlights: [],
+      growth_attribution: [],
+      quick_wins: [],
+      vulnerabilities: [],
+      roadmap: [],
+      traffic_value: '',
+      next_month_forecast: '',
+      ai_status: storedContextHash ? 'stale' : 'not_bound',
+      ai_notice: storedContextHash
+        ? 'AI-анализ относится к другому снимку или периоду и скрыт до обновления.'
+        : 'AI-анализ ещё не привязан к проверенному снимку этого периода.',
+    };
+  }
+
   // Work summary хранится отдельно внутри client_insights. Подмешиваем её
   // после snapshot/live ветки, чтобы новая сводка появилась и в старых
   // опубликованных snapshots, не переписывая snapshot_data и tasks_blocks.
-  const persistedWorkSummary = sr.client_insights
-    && typeof sr.client_insights === 'object'
-    ? sr.client_insights.work_summary
-    : null;
+  const persistedWorkSummary = storedInsights.work_summary || null;
   const taskBlocksForSummary = Array.isArray(payload.tasks_blocks) && payload.tasks_blocks.length
     ? payload.tasks_blocks
     : (payload.data?.tasks?.blocks || []);

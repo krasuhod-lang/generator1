@@ -73,6 +73,22 @@ function _formatDeltaLabel(d, opts = {}) {
   return `${abs} (${pctSign}${d.pct}%)`;
 }
 
+function _effectiveTotals(section) {
+  if (!section || typeof section !== 'object') return null;
+  return section.totals_complete || section.totals || null;
+}
+
+function _comparisonStatus(section) {
+  if (!section || typeof section !== 'object') return 'missing_current';
+  if (section.comparison?.status) return section.comparison.status;
+  return section.prev_totals_complete ? 'available' : 'no_comparison';
+}
+
+function _contextComparison(data) {
+  const comparison = data?.report_context?.comparison || data?.period?.comparison || null;
+  return comparison && typeof comparison === 'object' ? comparison : null;
+}
+
 /* ─── KPI selection ─────────────────────────────────────────────────────── */
 
 /**
@@ -85,8 +101,10 @@ function _formatDeltaLabel(d, opts = {}) {
  *   5) position.summary.top10
  */
 function _pickMainKpi(data) {
-  const gscClicks = _num(data?.gsc?.totals?.clicks);
-  const ywmClicks = _num(data?.ywm?.totals?.clicks);
+  const gsc = _effectiveTotals(data?.gsc);
+  const ywm = _effectiveTotals(data?.ywm);
+  const gscClicks = gsc?.clicks == null ? 0 : _num(gsc.clicks);
+  const ywmClicks = ywm?.clicks == null ? 0 : _num(ywm.clicks);
   const total = gscClicks + ywmClicks;
   if (total > 0) {
     const sources = [];
@@ -99,15 +117,15 @@ function _pickMainKpi(data) {
       source: sources.join(' + ') || 'поиск',
     };
   }
-  const visibility = _num(
-    data?.keys_so?.yandex?.current?.visibility ?? data?.keys_so?.current?.visibility,
-  );
-  if (visibility > 0) {
-    return { label: 'Видимость в Keys.so', value: visibility, unit: '%', source: 'Keys.so' };
+  const visibility = data?.keys_so?.yandex?.current?.visibility ?? data?.keys_so?.current?.visibility;
+  if (visibility != null && Number.isFinite(Number(visibility))) {
+    // Keys.so visibility is not assumed to be a percentage. The unit comes
+    // from the provider and must not be invented in a client headline.
+    return { label: 'Видимость в Keys.so', value: Number(visibility), unit: '', source: 'Keys.so' };
   }
-  const top10 = _num(data?.position?.summary?.top10);
-  if (top10 > 0) {
-    return { label: 'Запросов в ТОП-10', value: top10, unit: '', source: 'Съём позиций' };
+  const top10 = data?.position?.summary?.top10;
+  if (top10 != null && Number.isFinite(Number(top10))) {
+    return { label: 'Запросов в ТОП-10', value: Number(top10), unit: '', source: 'Съём позиций' };
   }
   return null;
 }
@@ -119,42 +137,42 @@ function _pickMainKpi(data) {
 function _pickMainDelta(data, mainKpi) {
   if (!mainKpi) return null;
   if (mainKpi.label === 'Клики из поиска') {
-    const gscSeries = data?.gsc?.series || [];
-    const ywmSeries = data?.ywm?.series || [];
-    // Сшиваем по дате — клиенту важна суммарная динамика, не источниковая.
-    const map = new Map();
-    for (const r of gscSeries) map.set(r.date, (map.get(r.date) || 0) + _num(r.clicks));
-    for (const r of ywmSeries) map.set(r.date, (map.get(r.date) || 0) + _num(r.clicks));
-    const combined = Array.from(map.entries())
-      .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-      .map(([date, clicks]) => ({ date, clicks }));
-    const split = _splitHalf(combined);
-    if (!split) return null;
-    return _delta(_sumKey(split.prev, 'clicks'), _sumKey(split.curr, 'clicks'));
+    const sections = [data?.gsc, data?.ywm].filter((section) => _effectiveTotals(section));
+    if (!sections.length || sections.some((section) => _comparisonStatus(section) !== 'available')) {
+      return { abs: 0, pct: null, direction: 'unknown', status: 'no_comparison' };
+    }
+    const current = sections.reduce((sum, section) => sum + _num(_effectiveTotals(section)?.clicks), 0);
+    const previous = sections.reduce((sum, section) => sum + _num(section.prev_totals_complete?.clicks), 0);
+    const delta = _delta(previous, current);
+    return { ...delta, status: 'available' };
   }
   if (mainKpi.label === 'Видимость в Keys.so') {
-    const series = data?.keys_so?.yandex?.series || data?.keys_so?.series || [];
-    const split = _splitHalf(series);
-    if (!split) return null;
-    const avg = (arr) => {
-      const xs = arr.map((r) => _num(r.visibility)).filter((v) => v > 0);
-      if (!xs.length) return 0;
-      return xs.reduce((a, b) => a + b, 0) / xs.length;
-    };
-    return _delta(avg(split.prev), avg(split.curr));
+    const section = data?.keys_so?.yandex || data?.keys_so;
+    if (_comparisonStatus(section) !== 'available') {
+      return { abs: 0, pct: null, direction: 'unknown', status: 'no_comparison' };
+    }
+    const current = _num(section.current?.visibility);
+    const previous = _num(section.prev_totals_complete?.visibility ?? section.comparison?.previous?.visibility);
+    return { ..._delta(previous, current), status: 'available' };
   }
-  return null;
+  return { abs: 0, pct: null, direction: 'unknown', status: 'no_comparison' };
 }
 
-function _changeSummary(mainKpi, delta) {
+function _changeSummary(mainKpi, delta, comparison) {
   if (!mainKpi) return 'За период данных по основным метрикам нет.';
   const valueLbl = `${_formatNumberRu(mainKpi.value)}${mainKpi.unit ? ' ' + mainKpi.unit : ''}`;
-  if (!delta || delta.direction === 'stable' || delta.abs === 0) {
-    return `${mainKpi.label}: ${valueLbl}. Динамика стабильная.`;
+  if (!delta || delta.status === 'no_comparison' || delta.direction === 'unknown') {
+    return `${mainKpi.label}: ${valueLbl}. Нет данных для сравнения с предыдущим периодом.`;
+  }
+  if (delta.direction === 'stable' || delta.abs === 0) {
+    return `${mainKpi.label}: ${valueLbl}. Без изменений относительно сопоставимого периода.`;
   }
   const verb = delta.direction === 'up' ? 'выросли' : 'снизились';
   const tag = _formatDeltaLabel(delta, { unit: mainKpi.unit });
-  return `${mainKpi.label}: ${valueLbl}. ${capitalize(verb)} на ${tag} к предыдущему периоду.`;
+  const dates = comparison?.previous?.from && comparison?.previous?.to
+    ? ` (${comparison.previous.from} — ${comparison.previous.to})`
+    : '';
+  return `${mainKpi.label}: ${valueLbl}. ${capitalize(verb)} на ${tag} к сопоставимому периоду${dates}.`;
 }
 
 function capitalize(s) {
@@ -282,16 +300,21 @@ function _completenessNote(data) {
 
 /* ─── Public API ────────────────────────────────────────────────────────── */
 
-function buildHeadline(data, summary = null) {
+function buildHeadline(data, summary = null, context = null) {
   const safeData = data && typeof data === 'object' ? data : {};
   const mainKpi = _pickMainKpi(safeData);
   const delta = _pickMainDelta(safeData, mainKpi);
+  const comparison = context?.comparison || _contextComparison(safeData);
+  const publicDelta = delta && delta.status === 'no_comparison'
+    ? { ...delta, label: '' }
+    : (delta ? { ...delta, label: _formatDeltaLabel(delta, { unit: mainKpi?.unit }) } : null);
   return {
     main_kpi: mainKpi,
-    delta: delta ? { ...delta, label: _formatDeltaLabel(delta, { unit: mainKpi?.unit }) } : null,
-    change_summary: _changeSummary(mainKpi, delta),
+    delta: publicDelta,
+    comparison,
+    change_summary: _changeSummary(mainKpi, delta, comparison),
     secondary_kpis: _secondaryKpis(safeData, mainKpi),
-    top_achievements: _topAchievements(safeData, summary, delta),
+    top_achievements: _topAchievements(safeData, summary, delta?.status === 'no_comparison' ? null : delta),
     top_risks: _topRisks(safeData, summary, delta),
     completeness_note: _completenessNote(safeData),
   };

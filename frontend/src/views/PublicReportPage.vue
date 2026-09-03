@@ -4,7 +4,7 @@
  * Не требует авторизации. Использует raw axios (без bearer).
  */
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 import ReportRenderer from '../components/reports/ReportRenderer.vue';
 import PinGate from '../components/reports/PinGate.vue';
@@ -12,7 +12,9 @@ import GranularityToggle from '../components/reports/GranularityToggle.vue';
 import { collectReportChartImages, downloadBlob } from '../utils/reportExport.js';
 
 const route = useRoute();
+const router = useRouter();
 const loading = ref(true);
+let requestSeq = 0;
 // ТЗ #1: при applyRange меняем только данные, не «мигаем» всем отчётом.
 // refreshing — отдельный флаг, который рисует локальный оверлей над уже
 // отображённым ReportRenderer, чтобы клиент видел старые графики до
@@ -40,7 +42,7 @@ const TAB_DEFINITIONS = [
   { id: 'work-summary', label: 'Сводка работ', description: 'Что сделано по неделям', icon: '✦' },
   { id: 'insights', label: 'AI-анализ', description: 'Причины и следующие шаги', icon: '◎' },
 ];
-const activeTab = ref('overview');
+const activeTab = ref(typeof route.query.tab === 'string' ? route.query.tab : 'overview');
 
 function hasPageBreakdown(data) {
   const q = data?.queries;
@@ -76,6 +78,7 @@ const activeTabLabel = computed(() => availableTabs.value.find((tab) => tab.id =
 function selectTab(id) {
   if (!availableTabs.value.some((tab) => tab.id === id)) return;
   activeTab.value = id;
+  router.replace({ query: { ...route.query, tab: id } }).catch(() => {});
   // Не скроллим при каждом клике: вкладочный board должен оставаться на
   // текущем экране, особенно на мобильном устройстве.
 }
@@ -107,9 +110,17 @@ watch(availableTabs, (tabs) => {
 const api = axios.create({ withCredentials: true, timeout: 30000 });
 
 async function load() {
+  const seq = ++requestSeq;
   loading.value = true; error.value = null; needPin.value = false; expired.value = false;
   try {
-    const { data } = await api.get(`/api/public/report/${route.params.uuid}`);
+    const { data } = await api.get(`/api/public/report/${route.params.uuid}`, {
+      params: {
+        from: typeof route.query.from === 'string' ? route.query.from : undefined,
+        to: typeof route.query.to === 'string' ? route.query.to : undefined,
+        granularity: typeof route.query.granularity === 'string' ? route.query.granularity : undefined,
+      },
+    });
+    if (seq !== requestSeq) return;
     result.value = data;
     if (data?.payload?.data?.period) {
       viewRange.value = {
@@ -119,6 +130,7 @@ async function load() {
       };
     }
   } catch (err) {
+    if (seq !== requestSeq) return;
     if (err.response?.status === 403 && err.response?.data?.error === 'password_required') {
       needPin.value = true;
     } else if (err.response?.status === 410) {
@@ -132,26 +144,26 @@ async function load() {
       error.value = err.response?.data?.error || err.message || 'Ошибка';
     }
   } finally {
-    loading.value = false;
+    if (seq === requestSeq) loading.value = false;
   }
 }
 
 onMounted(load);
 
 async function applyRange() {
-  // ТЗ-фикс #6: даже в snapshot-режиме разрешаем клиенту менять период и
-  // гранулярность. Бэкенд для snapshot переагрегирует данные с клампом по
-  // окну публикации (см. publicGet ниже). Раньше тут был ранний `return`,
-  // из-за чего тулбар на опубликованной ссылке не работал.
-  // ТЗ #1: используем refreshing вместо loading, чтобы старая версия
-  // отчёта оставалась на экране, а сверху появлялся лёгкий оверлей с
-  // прогрессом — без «миганий» всего полотна.
+  // Snapshot/live client may narrow the published window; only the latest
+  // request is allowed to replace the report, so A→B→C cannot finish out of order.
+  const seq = ++requestSeq;
   refreshing.value = true;
+  const applied = { ...viewRange.value };
+  router.replace({ query: { ...route.query, ...applied, tab: activeTab.value } }).catch(() => {});
   try {
-    const { data } = await api.get(`/api/public/report/${route.params.uuid}`, { params: viewRange.value });
-    result.value = data;
+    const { data } = await api.get(`/api/public/report/${route.params.uuid}`, { params: applied });
+    if (seq === requestSeq) result.value = data;
+  } catch (err) {
+    if (seq === requestSeq) error.value = err.response?.data?.error || err.message || 'Не удалось обновить период';
   } finally {
-    refreshing.value = false;
+    if (seq === requestSeq) refreshing.value = false;
   }
 }
 

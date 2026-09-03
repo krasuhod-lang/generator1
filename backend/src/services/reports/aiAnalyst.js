@@ -18,28 +18,27 @@
 
 const { runAnalyst } = require('../projects/llmAnalyst');
 
-const SYSTEM_PROMPT = `Ты — SEO-аналитик, который готовит ежемесячный отчёт для инвесторов и топ-менеджмента. Твоя главная задача — убедительно показать прогресс и рост проекта. Пиши профессионально, уверенно, позитивно, но без жаргона.
+const SYSTEM_PROMPT = `Ты — evidence-first SEO-аналитик, который готовит проверяемый клиентский отчёт для руководителя. Пиши профессионально, ясно и нейтрально: сначала факты и границы данных, затем осторожная интерпретация и конкретное действие. Нельзя улучшать впечатление за счёт искажения данных.
 
 ГЛАВНОЕ ПРАВИЛО ПО ЦИФРАМ:
 Ты НЕ считаешь и НЕ придумываешь числа. Все числовые показатели (абсолютные значения, дельты, проценты, тренды) уже посчитаны математически из итогов графиков и подставляются в отчёт автоматически. Твоя задача — ТОЛЬКО текстовый анализ: тезисно объяснить закономерности и связи (например, «сайт вырос по видимости → выросли клики»), привязать динамику к выполненным работам. Опирайся исключительно на числа, переданные тебе во входных данных, и никогда не выдумывай значения, которых там нет. В полях delta_value/delta_pct можешь оставлять пустые строки — система подставит корректные значения сама.
 
-КЛЮЧЕВЫЕ ПРАВИЛА ТОНА:
-1. В executive_summary и highlights — подчёркивай ИСКЛЮЧИТЕЛЬНО положительные тренды, достижения, рекорды и прогресс. Связывай каждый рост с конкретными выполненными работами команды. Даже если рост небольшой — подай его как значимый результат («стабильный прирост», «уверенная положительная динамика»).
-2. Если по какой-то метрике есть снижение — упомяни его КРАТКО и ВСКОЛЬЗЬ (не более 1 предложения), сразу переведи фокус на причину и план восстановления. Никогда не акцентируй внимание на негативе.
-3. В growth_attribution анализируй КАЖДУЮ метрику ОТДЕЛЬНО как отдельный график. Пиши ТЕЗИСНО: что произошло с показателем и почему, какие закономерности прослеживаются, за счёт каких работ. Числа в delta_value/delta_pct подставит система — не выдумывай их. Если есть снижение — сформулируй мягко как «корректировка» или «стабилизация после пикового периода» и укажи конкретный план действий для возврата к росту.
-4. Обязательно показывай ДИНАМИКУ НА ПРОТЯЖЕНИИ ПОСЛЕДНИХ 3 МЕСЯЦЕВ: используй помесячные ряды (поля *_trend_3m) — опиши, как двигался показатель от месяца к месяцу (например, «третий месяц подряд восходящий тренд», «после стабилизации во втором месяце — ускорение в третьем»), а не только сравнение последнего месяца с предыдущим.
-4a. Обязательно учитывай ДАТУ ФОРМИРОВАНИЯ ОТЧЁТА (report_generated_at) и ДАТУ СЪЁМА ПОКАЗАТЕЛЕЙ по каждому источнику (metrics_captured_at). Если данные сняты заметно раньше даты отчёта или последний месяц ещё не завершён — не трактуй неполный/устаревший последний период как спад; ориентируйся на завершённые месяцы из *_trend_3m.
-5. Обязательно выделяй **жирным шрифтом** (двойными звёздочками markdown) ключевые тезисы, чтобы они сразу бросались в глаза при чтении.
-6. Если метрика снизилась, обязательно предложи гипотезу причины: сезонность спроса, обновление алгоритмов Яндекса/Google или усиление давления конкурентов. Формулируй причину нейтрально и сразу давай план возврата к росту.
-7. Чётко указывай, за счёт чего произошёл рост: вывод новых страниц, улучшение CTR сниппетов, рост позиций по кластерам, расширение семантики или технические доработки. Привязывай рост к конкретным выполненным работам.
-8. НЕ упоминай количество выполненных задач и не считай их — это не показатель для отчёта. Работы упоминай качественно (какие направления велись), но без чисел «выполнено N задач».
+КЛЮЧЕВЫЕ ПРАВИЛА ДОКАЗАТЕЛЬНОГО АНАЛИЗА:
+1. Начинай с наблюдаемого факта, периода, источника и единицы измерения. Не подменяй отсутствие сравнения словом «стабильно».
+2. Показывай рост и снижение симметрично. Снижение нельзя скрывать или смягчать словами «корректировка», если это не подтверждено контекстом.
+3. Причину связывай с работой только при наличии прямого source/evidence. Иначе используй явную маркировку «гипотеза» и напиши, каким источником её можно проверить.
+4. Учитывай report_context, report_generated_at, metrics_captured_at и только завершённые периоды. Неполный или устаревший период не используй как основу для вывода о снижении.
+5. Дельты, проценты, направления и единицы не считай самостоятельно: они приходят из validated digest. Если previous/current нет, оставь поля пустыми.
+6. Не создавай прогнозы, ожидаемые цифры, revenue/traffic claims или причинные выводы, которых нет во входных данных. Поле forecast используй только как проверяемый следующий шаг; next_month_forecast оставляй пустым, если нет validated forecast-модуля.
+7. Не упоминай количество выполненных задач как KPI. Работы описывай только по фактическому журналу и существующим source_ids.
+8. Выделяй ключевые факты **жирным шрифтом** только в рамках данных, которые действительно подтверждены входом.
 
 Отвечай строго JSON-объектом без префиксов и текста до/после, без markdown-обёртки.
 
 Ожидаемый формат ответа:
 {
-  "executive_summary": "3 абзаца на русском, разделённые \\n\\n. Первый абзац — главное достижение периода с конкретными цифрами роста. Второй — ключевые факторы роста и связь с выполненными работами. Третий — уверенный прогноз и направление дальнейшего развития.",
-  "highlights": ["Каждый буллит начинается с конкретной цифры роста: «+25% кликов из Google (с 1200 до 1500)», «Рост видимости на +0.15 п.п.», «+48 новых запросов в ТОП-10»"],
+  "executive_summary": "2-3 абзаца на русском: 1) факты и полнота периода, 2) подтверждённые изменения и отдельно помеченные гипотезы, 3) следующий проверяемый шаг без прогноза, если он не подтверждён входом.",
+  "highlights": ["2-5 кратких фактов или изменений с числами только из входных данных; при отсутствии сравнения явно укажи это"],
   "growth_attribution": [
     {
       "metric": "Название метрики (например: «Клики из Google», «Показы в Google», «Клики из Яндекса», «Показы в Яндексе», «Видимость Keys.so», «Запросы в ТОП-10»)",
@@ -48,12 +47,12 @@ const SYSTEM_PROMPT = `Ты — SEO-аналитик, который готов�
       "delta_pct": "оставь пустым — система подставит процентное изменение сама",
       "attribution": "Что именно из выполненных работ повлияло на динамику этой метрики — тезисно, привяжи к направлениям работ (1–2 предложения). Если метрика снизилась — предложи гипотезу причины (сезонность спроса, обновление алгоритмов Яндекса/Google, давление конкурентов) и укажи, что это временное явление.",
       "conclusion": "Позитивный аналитический вывод: что динамика этой метрики значит для бизнеса проекта. Если снижение — сформулируй как «точка роста» с конкретным планом (1 предложение).",
-      "forecast": "Уверенный прогноз развития на 1–3 месяца (1 предложение, без выдуманных цифр).",
-      "weak_zones": "Точки усиления для ещё большего роста — не критика, а возможности (1 предложение)."
+      "forecast": "Следующий проверяемый шаг или пустая строка; не прогнозируй будущие значения.",
+      "weak_zones": "Подтверждённая зона внимания из входных данных или пустая строка."
     }
   ],
   "quick_wins": [{"query":"", "position": 12, "plan": ""}],
-  "next_month_forecast": "string (1-2 предложения — качественный прогноз направления роста на следующий месяц на основе текущей динамики)",
+  "next_month_forecast": "пустая строка, если во входе нет validated forecast с базой/интервалом/уверенностью",
   "traffic_value": "1-2 предложения про сэкономленный бюджет клиента"
 }
 
@@ -62,9 +61,9 @@ const SYSTEM_PROMPT = `Ты — SEO-аналитик, который готов�
 - Если данные Keys.so есть по обеим ПС (Яндекс и Google), анализируй их ОТДЕЛЬНО — это разные поисковые системы с разной выдачей.
 - Поля trend_direction, delta_value и delta_pct оставляй пустыми — их подставит система из математически посчитанных чисел. Ты только пишешь текстовый анализ.
 - Пиши тезисно и указывай, ЗА СЧЁТ ЧЕГО менялась метрика (новые страницы, CTR, позиции), не выдумывая чисел.
-- Если метрика снизилась — начинай с нейтральной ГИПОТЕЗЫ причины (сезонность, обновление алгоритмов Яндекса/Google, конкуренты) и сразу давай план действий.
-- Для quick_wins используй запросы на позициях 11-15.
-- Для next_month_forecast дай конкретный прогноз роста на следующий месяц с ожидаемыми цифрами на основе текущей динамики.
+- Если метрика снизилась, сначала укажи сам факт и границы сравнения; причину называй только как гипотезу при отсутствии прямого evidence и укажи способ проверки.
+- Для quick_wins используй только запросы на позициях 11-15 из входных данных.
+- Для next_month_forecast верни пустую строку: этот продуктовый отчёт не публикует неподтверждённые прогнозы.
 - Если данных по метрике нет — не выдумывай, просто пропусти её.`;
 
 // ── Линейная регрессия по ряду графика ─────────────────────────────────────
@@ -291,6 +290,31 @@ function _completeMonths(input) {
  * полный месяц» даёт ложные минусы). Возвращает массив
  * [{ month: 'YYYY-MM', value }] от старого к новому.
  */
+function _effectiveTotals(section) {
+  if (!section || typeof section !== 'object') return null;
+  return section.totals_complete || section.totals || null;
+}
+
+function _comparisonMetric(section, key) {
+  if (!section || typeof section !== 'object') return null;
+  const currentTotals = _effectiveTotals(section);
+  const previousTotals = section.prev_totals_complete || section.comparison?.previous?.totals || null;
+  const current = currentTotals?.[key];
+  const previous = previousTotals?.[key];
+  if (current == null || previous == null || !Number.isFinite(Number(current)) || !Number.isFinite(Number(previous))) return null;
+  const first = Number(previous);
+  const last = Number(current);
+  const delta = last - first;
+  const pct = first > 0 ? (delta / first) * 100 : null;
+  return {
+    first,
+    last,
+    delta,
+    pct: pct != null && Number.isFinite(pct) && Math.abs(pct) <= PCT_UNRELIABLE_CAP ? pct : null,
+    dir: delta > 0 ? 'up' : (delta < 0 ? 'down' : 'stable'),
+  };
+}
+
 function _seriesTrend(input, key = 'clicks', maxPoints = 3) {
   const src = _completeMonths(input);
   if (!Array.isArray(src) || !src.length) return [];
@@ -301,22 +325,24 @@ function _seriesTrend(input, key = 'clicks', maxPoints = 3) {
 }
 
 function _buildMetricsDigest(data) {
-  // Дельты считаем регрессией по всему ряду графика (панель «Динамика за
-  // период»), а не сравнением «последний полный месяц vs предыдущий».
-  const gscClicksDelta = _regressAttr(data.gsc, 'clicks');
-  const gscImprDelta = _regressAttr(data.gsc, 'impressions');
-  const ywmClicksDelta = _regressAttr(data.ywm, 'clicks');
-  const ywmImprDelta = _regressAttr(data.ywm, 'impressions');
+  // P0: дельта — только по explicit comparable totals, а не по половинам
+  // видимого ряда/регрессии. Регрессия остаётся только диагностикой графика.
+  const gscClicksDelta = _comparisonMetric(data.gsc, 'clicks');
+  const gscImprDelta = _comparisonMetric(data.gsc, 'impressions');
+  const ywmClicksDelta = _comparisonMetric(data.ywm, 'clicks');
+  const ywmImprDelta = _comparisonMetric(data.ywm, 'impressions');
   // Яндекс Keys.so (по умолчанию — top-level series/current для обратной совместимости)
   const ydxSeries = data.keys_so?.yandex?.series || data.keys_so?.series || [];
   const ydxCurrent = data.keys_so?.yandex?.current || data.keys_so?.current || null;
-  const visDelta = _regressAttr(ydxSeries, 'visibility');
-  const top10Delta = _regressAttr(ydxSeries, 'keywords_top10');
+  // Keys.so не отдаёт в текущем report contract explicit previous totals;
+  // поэтому не выводим проценты, рассчитанные из неполного ряда.
+  const visDelta = null;
+  const top10Delta = null;
   // Google Keys.so
   const gglSeries = data.keys_so?.google?.series || [];
   const gglCurrent = data.keys_so?.google?.current || null;
-  const gglVisDelta = _regressAttr(gglSeries, 'visibility');
-  const gglTop10Delta = _regressAttr(gglSeries, 'keywords_top10');
+  const gglVisDelta = null;
+  const gglTop10Delta = null;
   const tasks = data.tasks || {};
 
   // Даты для контекста анализа: когда сформирован отчёт и когда сняты
@@ -333,25 +359,25 @@ function _buildMetricsDigest(data) {
   };
 
   return {
-    gsc_clicks: data.gsc?.totals?.clicks || 0,
+    gsc_clicks: _effectiveTotals(data.gsc)?.clicks || 0,
     gsc_clicks_delta_pct: _round1(gscClicksDelta?.pct ?? null),
     gsc_clicks_prev: gscClicksDelta?.first ?? null,
     gsc_clicks_last: gscClicksDelta?.last ?? null,
     gsc_clicks_dir: gscClicksDelta?.dir ?? null,
     gsc_clicks_trend_3m: _seriesTrend(data.gsc, 'clicks'),
-    gsc_impressions: data.gsc?.totals?.impressions || 0,
+    gsc_impressions: _effectiveTotals(data.gsc)?.impressions || 0,
     gsc_impressions_delta_pct: _round1(gscImprDelta?.pct ?? null),
     gsc_impressions_prev: gscImprDelta?.first ?? null,
     gsc_impressions_last: gscImprDelta?.last ?? null,
     gsc_impressions_dir: gscImprDelta?.dir ?? null,
     gsc_impressions_trend_3m: _seriesTrend(data.gsc, 'impressions'),
-    ywm_clicks: data.ywm?.totals?.clicks || 0,
+    ywm_clicks: _effectiveTotals(data.ywm)?.clicks || 0,
     ywm_clicks_delta_pct: _round1(ywmClicksDelta?.pct ?? null),
     ywm_clicks_prev: ywmClicksDelta?.first ?? null,
     ywm_clicks_last: ywmClicksDelta?.last ?? null,
     ywm_clicks_dir: ywmClicksDelta?.dir ?? null,
     ywm_clicks_trend_3m: _seriesTrend(data.ywm, 'clicks'),
-    ywm_impressions: data.ywm?.totals?.impressions || 0,
+    ywm_impressions: _effectiveTotals(data.ywm)?.impressions || 0,
     ywm_impressions_delta_pct: _round1(ywmImprDelta?.pct ?? null),
     ywm_impressions_prev: ywmImprDelta?.first ?? null,
     ywm_impressions_last: ywmImprDelta?.last ?? null,
@@ -383,7 +409,7 @@ function _buildMetricsDigest(data) {
     keys_so_google_top3: gglCurrent?.top3 ?? null,
     tasks_total: tasks.total_generated || 0,
     tasks_by_type: tasks.by_type || {},
-    forecast_clicks_3m: data.forecast?.gsc_clicks?.forecast || null,
+    forecast_clicks_3m: null,
     traffic_value: data.traffic_value?.estimated_savings || null,
     position_top10: data.position?.summary?.top10 || 0,
     report_generated_at: dateContext.report_generated_at,
@@ -702,9 +728,7 @@ function _fallbackSummary(brandName, period, digest) {
         ? `Рост кликов на ${_pctStr(delta)} обусловлен работой команды по направлениям: ${taskMix}. Контентная программа и оптимизация мета-тегов дают прямое увеличение CTR в выдаче.`
         : `Динамика обусловлена работой команды по направлениям: ${taskMix}. Контентная программа наполняет сайт релевантными страницами, оптимизация мета-тегов улучшает CTR в выдаче.`,
       conclusion: `Текущий уровень — ${digest.gsc_clicks.toLocaleString('ru-RU')} кликов за период.`,
-      forecast: digest.forecast_clicks_3m && digest.forecast_clicks_3m.length
-        ? `Прогноз на ближайшие 3 месяца: ${digest.forecast_clicks_3m.map((v) => Math.round(v).toLocaleString('ru-RU')).join(' → ')} кликов при сохранении текущего темпа работ.`
-        : 'При сохранении текущего темпа работ ожидается продолжение положительной динамики в ближайшие 1–3 месяца.',
+      forecast: 'Проверить динамику кликов в следующем полном периоде после обновления данных.',
       weak_zones: 'Точка роста — масштабирование контентной программы и проработка страниц на позициях 11–20 для быстрого выхода в ТОП-10.',
     });
   }
@@ -719,7 +743,7 @@ function _fallbackSummary(brandName, period, digest) {
         ? `Рост объёма показов на ${_pctStr(delta)} — результат расширения семантического ядра и появления новых ранжирующихся страниц.`
         : 'Объём показов поддерживается за счёт индексации новых страниц и расширения охвата в поисковой выдаче.',
       conclusion: `За период — ${digest.gsc_impressions.toLocaleString('ru-RU')} показов в Google.`,
-      forecast: 'Рост показов создаёт базу для дальнейшего увеличения кликов и трафика.',
+      forecast: 'Проверить CTR и клики по страницам с высоким числом показов в следующем полном периоде.',
       weak_zones: 'Потенциал — увеличение CTR по запросам с высоким объёмом показов через доработку title и description.',
     });
   }
@@ -734,7 +758,7 @@ function _fallbackSummary(brandName, period, digest) {
         ? `Рост на ${_pctStr(delta)} поддерживается технической оптимизацией и работой над поведенческими факторами.`
         : 'Динамика поддерживается технической оптимизацией и работой над поведенческими факторами.',
       conclusion: `За период собрано ${digest.ywm_clicks.toLocaleString('ru-RU')} кликов из Яндекса.`,
-      forecast: 'Ожидается дальнейший прирост по мере индексации новых страниц.',
+      forecast: 'Проверить индексацию новых страниц и их клики в следующем полном периоде.',
       weak_zones: 'Зона развития — низкочастотные региональные запросы и усиление внутренней перелинковки.',
     });
   }
@@ -749,7 +773,7 @@ function _fallbackSummary(brandName, period, digest) {
         ? `Рост показов на ${_pctStr(delta)} связан с расширением семантического охвата и индексацией нового контента.`
         : 'Охват поддерживается за счёт текущего контента и расширения семантического ядра.',
       conclusion: `За период — ${digest.ywm_impressions.toLocaleString('ru-RU')} показов в Яндексе.`,
-      forecast: 'Увеличение показов — индикатор роста охвата; это база для роста кликов в следующих периодах.',
+      forecast: 'Сопоставить изменение показов с CTR в следующем полном периоде.',
       weak_zones: 'Потенциал — проработка коммерческих запросов с высоким объёмом показов для увеличения конверсии в клики.',
     });
   }
@@ -763,8 +787,8 @@ function _fallbackSummary(brandName, period, digest) {
       attribution: delta != null && delta > 0
         ? `Рост видимости на ${_pctStr(delta)} связан с появлением новых ранжирующихся страниц и улучшением позиций после оптимизации мета-тегов и ссылочной работы.`
         : 'Видимость поддерживается за счёт текущих ранжирующихся страниц и ссылочного профиля.',
-      conclusion: `Текущая видимость в Яндексе — ${(Number(digest.keys_so_visibility_current) * 100).toFixed(2)}%; запросов в ТОП-10: ${digest.keys_so_top10 ?? '—'}.`,
-      forecast: 'При сохранении темпа публикации и линкбилдинга видимость продолжит укрепляться.',
+      conclusion: `Текущий индекс видимости в Яндексе — ${Number(digest.keys_so_visibility_current).toFixed(2)}; запросов в ТОП-10: ${digest.keys_so_top10 ?? '—'}.`,
+      forecast: 'Проверить динамику видимости и ТОП-10 после следующего обновления Keys.so.',
       weak_zones: 'Зона развития — запросы в striking distance (позиции 11–20) и кластеры с отставанием по контенту.',
     });
   }
@@ -778,8 +802,8 @@ function _fallbackSummary(brandName, period, digest) {
       attribution: delta != null && delta > 0
         ? `Рост видимости в Google на ${_pctStr(delta)} обусловлен индексацией новых страниц и улучшением позиций по ключевым кластерам.`
         : 'Видимость в Google поддерживается за счёт текущих ранжирующихся страниц.',
-      conclusion: `Текущая видимость в Google — ${(Number(digest.keys_so_google_visibility_current) * 100).toFixed(2)}%; запросов в ТОП-10: ${digest.keys_so_google_top10 ?? '—'}.`,
-      forecast: 'Ожидается дальнейшее укрепление позиций в Google при сохранении темпа контентной и ссылочной работы.',
+      conclusion: `Текущий индекс видимости в Google — ${Number(digest.keys_so_google_visibility_current).toFixed(2)}; запросов в ТОП-10: ${digest.keys_so_google_top10 ?? '—'}.`,
+      forecast: 'Проверить позиции и видимость Google после следующего обновления Keys.so.',
       weak_zones: 'Точка роста — оптимизация страниц на позициях 11–20 в Google для быстрого выхода в ТОП-10.',
     });
   }
@@ -791,7 +815,7 @@ function _fallbackSummary(brandName, period, digest) {
       delta_pct: '',
       attribution: 'Текущая динамика обеспечена комплексной работой команды: контентная программа, оптимизация мета-тегов, ссылочная и техническая работа.',
       conclusion: 'Проект стабильно развивается по основным SEO-направлениям.',
-      forecast: 'При сохранении текущего темпа работ ожидается продолжение положительной динамики в ближайшие 1–3 месяца.',
+      forecast: 'Проверить основные метрики в следующем полном периоде.',
       weak_zones: 'Точка роста — расширение семантического ядра и системная работа со страницами на границе ТОП-10 (позиции 11–20).',
     });
   }
@@ -802,28 +826,17 @@ function _fallbackSummary(brandName, period, digest) {
     plan: 'Усилить релевантность страницы, расширить сниппет и внутреннюю перелинковку, чтобы дожать запрос в ТОП-10.',
   }));
 
-  // Детерминированный прогноз на следующий месяц на основе текущей динамики
-  // кликов (Google приоритетно, затем Яндекс). Без вранья — экстраполируем
-  // наблюдаемый темп прироста и формулируем осторожно.
-  const forecastDeltaPct = digest.gsc_clicks_delta_pct ?? digest.ywm_clicks_delta_pct ?? null;
-  const forecastBase = digest.gsc_clicks_last || digest.ywm_clicks_last || 0;
-  let nextMonthForecast;
-  if (forecastDeltaPct != null && forecastDeltaPct > 0) {
-    const projected = forecastBase ? Math.round(forecastBase * (1 + forecastDeltaPct / 100)) : null;
-    nextMonthForecast = projected
-      ? `При сохранении текущего темпа ожидаем прирост трафика ещё на ~${forecastDeltaPct}% в следующем месяце — ориентировочно до ${projected.toLocaleString('ru-RU')} кликов.`
-      : `При сохранении текущего темпа ожидаем прирост трафика ещё на ~${forecastDeltaPct}% в следующем месяце.`;
-  } else {
-    nextMonthForecast = 'В следующем месяце ожидаем закрепление достигнутых результатов и умеренный рост за счёт дожатия запросов из зоны 11–15 в ТОП-10 и вывода новых страниц.';
-  }
+  // Неподтверждённая экстраполяция больше не публикуется. Валидированный
+  // forecast-модуль может быть подключён отдельным контрактом позже.
+  const nextMonthForecast = '';
 
   return {
     executive_summary: parts.join('\n\n'),
     highlights: highlights.length ? highlights : ['За период выполнен запланированный объём работ.'],
     growth_attribution: growth,
     quick_wins: _alignQuickWins(quickWins, digest.growth_opportunities),
-    next_month_forecast: nextMonthForecast,
-    traffic_value: digest.traffic_value
+      next_month_forecast: nextMonthForecast,
+      traffic_value: digest.traffic_value
       ? `Ориентировочная экономия рекламного бюджета за период — около ${Number(digest.traffic_value).toLocaleString('ru-RU')} ₽ по данным Keys.so.`
       : '',
     fallback: true,
@@ -1019,7 +1032,7 @@ async function generateSummary(data, opts = {}) {
       highlights: parsed3.highlights?.length ? _normalizeStringList(parsed3.highlights, 8) : allHighlights,
       growth_attribution: allGrowth.length ? allGrowth : _applyCanonicalNumbers(_normalizeGrowthAttribution(parsed3.growth_attribution), digest),
       quick_wins: _alignQuickWins(_normalizeQuickWins(parsed3.quick_wins), digest.growth_opportunities),
-      next_month_forecast: String(parsed3.next_month_forecast || '').trim() || _fallbackSummary(brandName, period, digest).next_month_forecast,
+      next_month_forecast: '',
       traffic_value: String(parsed3.traffic_value || parsed2?.traffic_value || '').trim(),
       work_summary: _normalizeWorkSummary(parsed3.work_summary, workDigest, period),
       provider: result3.provider,
@@ -1035,7 +1048,7 @@ async function generateSummary(data, opts = {}) {
     highlights: allHighlights.length ? allHighlights : _fallbackSummary(brandName, period, digest).highlights,
     growth_attribution: allGrowth,
     quick_wins: _alignQuickWins(_normalizeQuickWins(digest.quick_wins), digest.growth_opportunities),
-    next_month_forecast: _fallbackSummary(brandName, period, digest).next_month_forecast,
+    next_month_forecast: '',
     traffic_value: String(parsed2?.traffic_value || '').trim(),
     work_summary: _normalizeWorkSummary(parsed3?.work_summary, workDigest, period),
     provider: result1.provider || result2.provider,

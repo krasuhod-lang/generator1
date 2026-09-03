@@ -95,6 +95,18 @@ const hasYandexKeys = computed(() => {
   return _engineHasSeries(k?.yandex?.series) || _engineHasSeries(k?.series);
 });
 
+// Client-first chart mode: one metric at a time is the default. This keeps
+// units readable on mobile and avoids a misleading mixed-axis chart.
+const trafficMetric = ref('clicks');
+const trafficMetricOptions = [
+  { id: 'clicks', label: 'Клики' },
+  { id: 'impressions', label: 'Показы' },
+  { id: 'ctr', label: 'CTR' },
+];
+function trafficMetricLabel() {
+  return trafficMetricOptions.find((item) => item.id === trafficMetric.value)?.label || 'Клики';
+}
+
 // --- Section state helpers ---
 function sectionState(section) {
   if (!section) return 'empty';
@@ -173,12 +185,14 @@ const gscChart = computed(() => {
     labels: series.map((r) => r.date),
     datasets: [
       // null-значения сохраняем как null, чтобы график рисовал «дырки» вместо плоского нуля.
-      { label: 'Клики', color: accent.value, data: series.map((r) => r.clicks != null ? Number(r.clicks) : null) },
-      { label: 'Показы', color: '#8b95a7', data: series.map((r) => r.impressions != null ? Number(r.impressions) : null) },
-      { label: 'CTR', color: '#10b981', data: series.map((r) => r.ctr != null ? Number(r.ctr) : null), yAxisID: 'y2' },
+      trafficMetric.value === 'impressions'
+        ? { label: 'Показы', color: '#8b95a7', data: series.map((r) => r.impressions != null ? Number(r.impressions) : null) }
+        : trafficMetric.value === 'ctr'
+          ? { label: 'CTR', color: '#10b981', data: series.map((r) => r.ctr != null ? Number(r.ctr) : null) }
+          : { label: 'Клики', color: accent.value, data: series.map((r) => r.clicks != null ? Number(r.clicks) : null) },
     ],
     annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
-    showSecondAxis: true,
+    showSecondAxis: false,
     range,
     normalizedIndex: series.findIndex((r) => r && r.is_normalized === true),
   };
@@ -194,12 +208,14 @@ const ywmChart = computed(() => {
   return {
     labels: series.map((r) => r.date),
     datasets: [
-      { label: 'Клики (Яндекс)', color: '#ff5a3c', data: series.map((r) => r.clicks != null ? Number(r.clicks) : null) },
-      { label: 'Показы (Яндекс)', color: '#ffb38a', data: series.map((r) => r.impressions != null ? Number(r.impressions) : null) },
-      { label: 'CTR', color: '#ef4444', data: series.map((r) => r.ctr != null ? Number(r.ctr) : null), yAxisID: 'y2' },
+      trafficMetric.value === 'impressions'
+        ? { label: 'Показы (Яндекс)', color: '#ffb38a', data: series.map((r) => r.impressions != null ? Number(r.impressions) : null) }
+        : trafficMetric.value === 'ctr'
+          ? { label: 'CTR', color: '#ef4444', data: series.map((r) => r.ctr != null ? Number(r.ctr) : null) }
+          : { label: 'Клики (Яндекс)', color: '#ff5a3c', data: series.map((r) => r.clicks != null ? Number(r.clicks) : null) },
     ],
     annotations: partial ? [...taskAnnotations, partial] : taskAnnotations,
-    showSecondAxis: true,
+    showSecondAxis: false,
     range,
     normalizedIndex: series.findIndex((r) => r && r.is_normalized === true),
   };
@@ -244,16 +260,40 @@ const keysChart = computed(() => {
   };
 });
 
+function metricTotals(section) {
+  if (!section || typeof section !== 'object') return null;
+  // Client board shows completed-period totals when the backend supplied them;
+  // the chart still keeps the full requested series including a partial tail.
+  if (isClient.value && section.totals_complete) return section.totals_complete;
+  return section.totals || section.totals_complete || null;
+}
+
+const reportContext = computed(() => props.data?.report_context || null);
+const reportContextPeriod = computed(() => {
+  const period = reportContext.value?.period;
+  if (!period?.start || !period?.end) return '';
+  return `${period.start} — ${period.end}`;
+});
+function metricMethod(label) {
+  if (/CTR/i.test(label)) return 'Клики ÷ показы × 100%; округление до двух знаков.';
+  if (/позици/i.test(label)) return 'Среднее значение, полученное источником за применённый период.';
+  if (/видимост/i.test(label)) return 'Индекс видимости Keys.so; единица источника не преобразуется в проценты.';
+  if (/ТОП/i.test(label)) return 'Количество запросов, которое вернул подключённый источник.';
+  if (/показы/i.test(label)) return 'Сумма показов за выбранный завершённый период.';
+  if (/клики/i.test(label)) return 'Сумма кликов за выбранный завершённый период.';
+  return 'Значение из подключённого источника за применённый период.';
+}
+
 const totals = computed(() => {
   const out = [];
-  const g = props.data?.gsc?.totals;
+  const g = metricTotals(props.data?.gsc);
   if (g) {
     out.push({ label: 'Google клики', value: Number(g.clicks || 0).toLocaleString('ru-RU'), raw: g.clicks, path: 'gsc.totals.clicks', type: 'int' });
     out.push({ label: 'Google показы', value: Number(g.impressions || 0).toLocaleString('ru-RU'), raw: g.impressions, path: 'gsc.totals.impressions', type: 'int' });
     out.push({ label: 'Google CTR', value: g.ctr != null ? `${Number(g.ctr).toFixed(2)}%` : '—', raw: g.ctr, path: 'gsc.totals.ctr', type: 'float' });
     out.push({ label: 'Google ср. позиция', value: g.position != null ? Number(g.position).toFixed(1) : '—', raw: g.position, path: 'gsc.totals.position', type: 'float' });
   }
-  const y = props.data?.ywm?.totals;
+  const y = metricTotals(props.data?.ywm);
   if (y) {
     out.push({ label: 'Яндекс клики', value: Number(y.clicks || 0).toLocaleString('ru-RU'), raw: y.clicks, path: 'ywm.totals.clicks', type: 'int' });
     out.push({ label: 'Яндекс показы', value: Number(y.impressions || 0).toLocaleString('ru-RU'), raw: y.impressions, path: 'ywm.totals.impressions', type: 'int' });
@@ -363,14 +403,34 @@ function formatTaskDate(value) {
 function taskItems(section) {
   return Array.isArray(section?.tasks) ? section.tasks : [];
 }
+const TASK_STATUS_META = {
+  done: { label: 'Выполнено', icon: '✓' },
+  in_progress: { label: 'В работе', icon: '◐' },
+  blocked: { label: 'Есть ошибка', icon: '!' },
+  unknown: { label: 'Статус не уточнён', icon: '?' },
+};
+function taskStatus(task) {
+  const raw = String(task?.status || task?.state || '').toLowerCase();
+  if (task?.completed === true || ['done', 'completed', 'success'].includes(raw)) return 'done';
+  if (['in_progress', 'running', 'queued', 'pending', 'processing'].includes(raw)) return 'in_progress';
+  if (['blocked', 'error', 'failed', 'failure'].includes(raw)) return 'blocked';
+  return 'unknown';
+}
+function taskStatusLabel(task) { return TASK_STATUS_META[taskStatus(task)].label; }
+function taskStatusIcon(task) { return TASK_STATUS_META[taskStatus(task)].icon; }
+function taskResultUrl(task) {
+  const value = task?.link || task?.url || task?.result_url || task?.resultUrl;
+  return isSafeExternalUrl(value) ? value : '';
+}
+function taskDateValue(task) { return task?.date || task?.performed_at || task?.performed_at_ts || ''; }
 function countTasks(month) {
   return (month?.sections || []).reduce((total, section) => total + taskItems(section).length, 0);
 }
 function countCompleted(month) {
-  return (month?.sections || []).reduce((total, section) => total + taskItems(section).filter((task) => task?.completed === true).length, 0);
+  return (month?.sections || []).reduce((total, section) => total + taskItems(section).filter((task) => taskStatus(task) === 'done').length, 0);
 }
 function countSectionCompleted(section) {
-  return taskItems(section).filter((task) => task?.completed === true).length;
+  return taskItems(section).filter((task) => taskStatus(task) === 'done').length;
 }
 
 function normalizeBlocks(blocks) {
@@ -821,6 +881,18 @@ function growthTargetLabel(item) {
       </div>
     </section>
 
+    <section v-if="reportContext" v-show="tabVisible('overview')" class="period-context" aria-label="Контекст отчёта">
+      <div class="period-context-main">
+        <span class="period-context-kicker">ПРИМЕНЁННЫЙ ПЕРИОД</span>
+        <strong>{{ reportContextPeriod }}</strong>
+      </div>
+      <div class="period-context-meta">
+        <span>Даты источников: календарные даты провайдера</span>
+        <span v-if="reportContext.comparison?.previous">Сравнение: {{ reportContext.comparison.previous.from }} — {{ reportContext.comparison.previous.to }}</span>
+        <span v-else>Сравнение: недоступно</span>
+      </div>
+    </section>
+
     <!-- Anchor navigation -->
     <nav class="report-nav" v-if="showAnchorNav && navItems.length > 1">
       <button v-for="item in navItems" :key="item.id"
@@ -922,6 +994,10 @@ function growthTargetLabel(item) {
               @reset="onOverrideReset"
             />
           </div>
+          <details v-if="isClient" class="metric-method">
+            <summary>Как считается</summary>
+            <span>{{ metricMethod(t.label) }}</span>
+          </details>
         </div>
       </div>
     </section>
@@ -933,6 +1009,14 @@ function growthTargetLabel(item) {
       </ul>
     </section>
 
+    <div v-if="(gscChart || ywmChart) && tabVisible('search')" class="metric-switcher" role="group" aria-label="Метрика графиков трафика">
+      <span class="metric-switcher-label">Показать на графиках:</span>
+      <button v-for="option in trafficMetricOptions" :key="option.id" type="button" class="metric-switcher-btn" :class="{ active: trafficMetric === option.id }" @click="trafficMetric = option.id">
+        {{ option.label }}
+      </button>
+      <span class="metric-switcher-current">{{ trafficMetricLabel() }}</span>
+    </div>
+
     <!-- Google Search Console -->
     <section v-if="!readonly || chartVisible('gsc')" v-show="tabVisible('search')" id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
       <div class="chart-head">
@@ -942,7 +1026,7 @@ function growthTargetLabel(item) {
           <span>Показывать клиенту</span>
         </label>
       </div>
-      <p class="chart-desc">Клики, показы и CTR из органической выдачи Google за выбранный период.</p>
+      <p class="chart-desc">{{ trafficMetricLabel() }} из органической выдачи Google за выбранный период.</p>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.gsc) === 'error'" class="section-error">
         <span class="error-icon">⚠️</span> Ошибка загрузки данных GSC: {{ sectionError(data?.gsc) }}
@@ -965,7 +1049,7 @@ function growthTargetLabel(item) {
           <span>Показывать клиенту</span>
         </label>
       </div>
-      <p class="chart-desc">Клики, показы и CTR из Яндекс.Вебмастер за выбранный период.</p>
+      <p class="chart-desc">{{ trafficMetricLabel() }} из Яндекс.Вебмастер за выбранный период.</p>
       <div v-if="loading" class="skeleton-chart" />
       <div v-else-if="sectionState(data?.ywm) === 'error'" class="section-error">
         <span class="error-icon">⚠️</span> Ошибка загрузки данных Яндекс: {{ sectionError(data?.ywm) }}
@@ -1313,17 +1397,18 @@ function growthTargetLabel(item) {
           </div>
 
           <div v-show="!isSectionCollapsed(i, j)" v-for="(task, k) in section.tasks" :key="k" class="task-card">
-            <div v-if="readonly">
+              <div v-if="readonly">
               <div class="task-title task-title-with-check">
-                <span class="task-checkmark" :data-done="task.completed === true" aria-hidden="true">{{ task.completed === true ? '✓' : '○' }}</span>
+                <span class="task-checkmark" :data-done="taskStatus(task) === 'done'" :data-status="taskStatus(task)" aria-hidden="true">{{ taskStatusIcon(task) }}</span>
                 <span>{{ task.title }}</span>
+                <span class="task-status-badge" :data-status="taskStatus(task)">{{ taskStatusLabel(task) }}</span>
               </div>
-              <div v-if="task.date" class="task-date">{{ formatTaskDate(task.date) }}</div>
+              <div v-if="taskDateValue(task)" class="task-date">{{ formatTaskDate(taskDateValue(task)) }}</div>
               <div v-if="task.description_html" class="task-html" v-html="safeHtml(task.description_html)"></div>
-              <a v-if="isSafeExternalUrl(task.link)" class="task-result-link" :href="task.link" target="_blank" rel="noopener noreferrer">Открыть результат <span aria-hidden="true">↗</span></a>
+              <a v-if="taskResultUrl(task)" class="task-result-link" :href="taskResultUrl(task)" target="_blank" rel="noopener noreferrer">Открыть результат <span aria-hidden="true">↗</span></a>
               <div v-if="Array.isArray(task.subtasks) && task.subtasks.length" class="subtasks-list">
                 <div v-for="(subtask, l) in task.subtasks" :key="l" class="subtask-card">
-                  <h5 class="subtask-title task-title-with-check"><span class="task-checkmark" :data-done="subtask.completed === true" aria-hidden="true">{{ subtask.completed === true ? '✓' : '○' }}</span><span>{{ subtask.title || 'Микрозадача' }}</span></h5>
+                  <h5 class="subtask-title task-title-with-check"><span class="task-checkmark" :data-done="taskStatus(subtask) === 'done'" :data-status="taskStatus(subtask)" aria-hidden="true">{{ taskStatusIcon(subtask) }}</span><span>{{ subtask.title || 'Микрозадача' }}</span><span class="task-status-badge" :data-status="taskStatus(subtask)">{{ taskStatusLabel(subtask) }}</span></h5>
                   <div v-if="subtask.description_html" class="task-html subtask-html" v-html="safeHtml(subtask.description_html)"></div>
                 </div>
               </div>
@@ -1442,6 +1527,23 @@ function growthTargetLabel(item) {
   padding: 20px;
   box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04);
 }
+.period-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, #dfe5ee);
+  border-radius: 14px;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 7%, #fff), #fff);
+}
+.period-context-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.period-context-kicker { color: #7a8798; font-size: 10px; font-weight: 800; letter-spacing: .11em; }
+.period-context-main strong { color: #172033; font-size: 14px; }
+.period-context-meta { display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end; color: #64748b; font-size: 11px; line-height: 1.35; }
+.metric-method { margin-top: 9px; color: #64748b; font-size: 11px; line-height: 1.4; }
+.metric-method summary { cursor: pointer; color: #526176; font-weight: 650; }
+.metric-method span { display: block; padding-top: 5px; }
 .header {
   display: flex;
   justify-content: space-between;
@@ -1477,6 +1579,33 @@ function growthTargetLabel(item) {
 .ai-subsection .growth-row { background:rgba(255,255,255,.78); }
 .forecast-card { background: linear-gradient(135deg, #e8f7ee 0%, #ffffff 100%); }
 .forecast-text { line-height: 1.7; font-size: 1.02rem; }
+.metric-switcher {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid rgba(60,60,67,0.12);
+  border-radius: 14px;
+  background: #fff;
+}
+.metric-switcher-label { color: #526176; font-size: 12px; font-weight: 650; margin-right: 2px; }
+.metric-switcher-btn {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid rgba(60,60,67,0.14);
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #526176;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+.metric-switcher-btn:hover { border-color: color-mix(in srgb, var(--accent) 30%, #dfe5ee); color: var(--accent); }
+.metric-switcher-btn:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 22%, transparent); outline-offset: 2px; }
+.metric-switcher-btn.active { border-color: color-mix(in srgb, var(--accent) 32%, #dfe5ee); background: color-mix(in srgb, var(--accent) 10%, #fff); color: var(--accent); }
+.metric-switcher-current { margin-left: auto; color: #8792a2; font-size: 11px; }
 .keys-engine-toggle {
   display: inline-flex; gap: 0; border-radius: 10px; overflow: hidden;
   border: 1px solid rgba(60,60,67,0.15); margin-bottom: 12px;
@@ -1499,6 +1628,26 @@ function growthTargetLabel(item) {
   border-radius: 16px;
   background: #fbfbfd;
 }
+.task-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.task-status-badge[data-status="done"] { background: #e9f8ef; color: #167344; }
+.task-status-badge[data-status="in_progress"] { background: #eaf2ff; color: #245bb5; }
+.task-status-badge[data-status="blocked"] { background: #fff0f0; color: #b42318; }
+.task-status-badge[data-status="unknown"] { background: #f1f3f5; color: #64748b; }
+.task-checkmark[data-status="in_progress"] { color: #245bb5; }
+.task-checkmark[data-status="blocked"] { color: #b42318; }
+.task-checkmark[data-status="unknown"] { color: #8792a2; }
 .total-card { padding: 14px; }
 .t-label { color: #6e6e73; font-size: 12px; margin-bottom: 6px; }
 .t-value { font-size: 20px; font-weight: 700; }
@@ -1757,6 +1906,9 @@ function growthTargetLabel(item) {
 .nav-link:hover { background: rgba(10,132,255,0.08); color: #0a84ff; }
 @media (max-width: 720px) {
   .header, .header-main, .month-head, .tasks-head { flex-direction: column; align-items: flex-start; }
+  .period-context { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .period-context-meta { justify-content: flex-start; }
+
   .rep-title { font-size: 24px; }
   .totals-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
   .total-card { padding: 10px; }
@@ -1784,6 +1936,8 @@ function growthTargetLabel(item) {
   .totals-grid { grid-template-columns: 1fr; }
   .report-nav { padding: 6px 8px; gap: 4px; }
   .nav-link { padding: 6px 10px; font-size: 11px; }
+  .metric-switcher { align-items: flex-start; }
+  .metric-switcher-current { width: 100%; margin-left: 0; }
 }
 
 /* ТЗ §4: вкладки и таблицы коммерческих/информационных запросов */

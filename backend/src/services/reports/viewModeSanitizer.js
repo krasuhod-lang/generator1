@@ -243,7 +243,10 @@ function sanitizeData(data, mode) {
  */
 function sanitizeSummary(summary, mode) {
   if (!_isObj(summary) || !_isClient(mode)) return summary;
-  return _stripKeys(summary, ['llm_meta', 'token_usage', 'ai_metadata', 'debug', 'prompt', 'raw_response']);
+  return _stripKeys(summary, [
+    'llm_meta', 'token_usage', 'ai_metadata', 'ai_snapshot_id', 'ai_context_hash',
+    'report_context', 'debug', 'prompt', 'raw_response',
+  ]);
 }
 
 module.exports = {

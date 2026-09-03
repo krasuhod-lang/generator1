@@ -47,9 +47,25 @@ const mainKpiDisplay = computed(() => {
 const deltaDisplay = computed(() => {
   const d = props.headline?.delta;
   if (!d) return null;
+  const comparable = d.status === 'available' && Boolean(d.label);
   return {
-    direction: d.direction || 'stable',
-    label:     d.label || '',
+    direction: comparable && ['up', 'down', 'stable'].includes(d.direction) ? d.direction : 'unknown',
+    label: comparable ? d.label : 'Сравнение недоступно',
+    comparable,
+  };
+});
+
+function dateRange(value) {
+  if (!value?.from || !value?.to) return '';
+  return `${value.from} — ${value.to}`;
+}
+const comparisonDisplay = computed(() => {
+  const c = props.headline?.comparison;
+  if (!c?.current) return null;
+  return {
+    current: dateRange(c.current),
+    previous: dateRange(c.previous),
+    status: c.status || 'no_comparison',
   };
 });
 </script>
@@ -57,7 +73,7 @@ const deltaDisplay = computed(() => {
 <template>
   <section v-if="show" class="exec-headline" :class="{ 'exec-headline--client': isClient }"
            :style="{ '--accent': accent }"
-           aria-label="Executive Headline">
+           aria-label="Главный показатель отчёта">
     <div class="exec-headline__top">
       <div class="exec-headline__kpi" v-if="mainKpiDisplay">
         <div class="exec-headline__kpi-label">{{ mainKpiDisplay.label }}</div>
@@ -68,15 +84,21 @@ const deltaDisplay = computed(() => {
       </div>
       <div v-if="deltaDisplay" class="exec-headline__delta"
            :class="`exec-headline__delta--${deltaDisplay.direction}`">
-        <span class="arrow" aria-hidden="true">
+        <span v-if="deltaDisplay.comparable" class="arrow" aria-hidden="true">
           {{ deltaDisplay.direction === 'up' ? '▲' : deltaDisplay.direction === 'down' ? '▼' : '·' }}
         </span>
-        <span class="delta-label">{{ deltaDisplay.label || '—' }}</span>
-        <span class="delta-cap">vs. предыдущему периоду</span>
+        <span class="delta-label">{{ deltaDisplay.label }}</span>
+        <span v-if="deltaDisplay.comparable" class="delta-cap">к сопоставимому периоду</span>
       </div>
     </div>
 
     <p v-if="headline.change_summary" class="exec-headline__summary">{{ headline.change_summary }}</p>
+
+    <div v-if="comparisonDisplay" class="exec-headline__context" role="note">
+      <span>Период: {{ comparisonDisplay.current }}</span>
+      <span v-if="comparisonDisplay.previous">Сравнение: {{ comparisonDisplay.previous }}</span>
+      <span v-else>Сравнение: нет сопоставимого периода</span>
+    </div>
 
     <div v-if="headline.secondary_kpis && headline.secondary_kpis.length" class="exec-headline__sec">
       <div v-for="(k, i) in headline.secondary_kpis" :key="i" class="exec-headline__sec-item">
@@ -164,11 +186,21 @@ const deltaDisplay = computed(() => {
 }
 .exec-headline__delta--up    { background: #dcfce7; color: #15803d; }
 .exec-headline__delta--down  { background: #fee2e2; color: #b91c1c; }
+.exec-headline__delta--unknown { background: #f1f5f9; color: #64748b; }
 .exec-headline__delta .delta-cap {
   font-weight: 400;
   font-size: 12px;
   color: inherit;
   opacity: 0.75;
+}
+.exec-headline__context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: -4px 0 18px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
 }
 .exec-headline__summary {
   font-size: 16px;
