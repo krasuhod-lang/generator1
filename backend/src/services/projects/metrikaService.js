@@ -6,7 +6,9 @@ const { getIntegrationSecret } = require('../integrations/integrationVault');
 const BASE_URL = 'https://api-metrika.yandex.net';
 const TIMEOUT_MS = 20_000;
 const MAX_SOURCE_ROWS = 100;
-const MAX_GOAL_METRICS_PER_REQUEST = 40;
+// Metrica stat/v1/data accepts at most 20 metrics per request. Keep room
+// for the four daily base metrics (or two source metrics).
+const MAX_GOAL_METRICS_PER_REQUEST = 16;
 
 function normalizeCounterId(value) {
   const raw = String(value == null ? '' : value).trim();
