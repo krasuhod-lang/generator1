@@ -478,7 +478,10 @@ async function uploadImageFile(file) {
     if (!url) throw new Error('Сервер не вернул URL изображения');
     return url;
   } catch (err) {
-    uploadError.value = err.response?.data?.error || err.message || 'Не удалось загрузить изображение';
+    const status = Number(err.response?.status || 0);
+    uploadError.value = status === 413
+      ? 'Изображение слишком большое для загрузки. Максимальный размер — 5 МБ.'
+      : err.response?.data?.error || err.message || 'Не удалось загрузить изображение';
     return null;
   } finally {
     uploadingImage.value = false;

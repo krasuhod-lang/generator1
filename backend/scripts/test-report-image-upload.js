@@ -16,6 +16,7 @@ const routes = read('backend/src/routes/reports.routes.js');
 const controller = read('backend/src/controllers/reports.controller.js');
 const server = read('backend/server.js');
 const reportsStore = read('frontend/src/stores/reports.js');
+const frontendNginx = read('frontend/docker-nginx.conf');
 
 assert(api.includes("config.data instanceof FormData"), 'FormData request detection is missing');
 assert(api.includes("delete config.headers['Content-Type']"), 'JSON Content-Type is not removed for multipart uploads');
@@ -26,13 +27,16 @@ assert(renderer.includes('@paste.capture="onDescriptionPaste'), 'paste capture l
 assert(renderer.includes('@drop.capture="onDescriptionDrop'), 'drop capture listener is missing');
 assert(renderer.includes("form.append('image', file"), 'multipart field must be named image');
 assert(renderer.includes("file.size > 5 * 1024 * 1024"), 'client-side image size guard is missing');
+assert(renderer.includes("status === 413"), '413 upload handling is missing');
+assert(renderer.includes('Максимальный размер — 5 МБ.'), '413 upload message must explain the configured limit');
 assert(renderer.includes("resolveUploadUrl(data?.url)"), 'returned upload URL is not normalized');
 assert(renderer.includes("/api/uploads/"), 'API upload URL compatibility is missing');
 assert(routes.includes("path.join(__dirname, '../../uploads/report-images')"), 'upload directory must be the persistent backend uploads directory');
 assert(routes.includes("limits: { fileSize: 5 * 1024 * 1024 }"), 'server-side image size limit is missing');
+assert(frontendNginx.includes('client_max_body_size 6m;'), 'frontend proxy upload limit must exceed the 5 MB backend file limit');
 assert(routes.includes("imgUpload.single('image')"), 'server-side multipart field mismatch');
 assert(controller.includes("const url = `/api/uploads/report-images/${req.file.filename}`"), 'controller must return the served API upload URL');
 assert(server.includes("app.use('/api/uploads', express.static(uploadsDir))"), 'API upload static serving is missing');
 assert(reportsStore.includes('/tasks-blocks'), 'task blocks persistence endpoint is missing');
 
-console.log('REPORT_IMAGE_UPLOAD_CONTRACT_OK checks=18');
+console.log('REPORT_IMAGE_UPLOAD_CONTRACT_OK checks=21');
