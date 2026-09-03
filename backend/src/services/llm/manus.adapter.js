@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const { getIntegrationSecret } = require('../integrations/integrationVault');
+const { manusTransportAttempts, proxyRequired } = require('./manus.transport');
 
 const MANUS_BASE_URL = String(process.env.MANUS_API_BASE_URL || 'https://api.manus.ai').replace(/\/+$/, '');
 const DEFAULT_AGENT_PROFILE = ['standard', 'lite', 'max'].includes(String(process.env.MANUS_AGENT_PROFILE || '').trim().toLowerCase())
@@ -185,6 +186,7 @@ async function createTask(apiKey, content, options) {
   try {
     const response = await axios.post(`${MANUS_BASE_URL}/v2/task.create`, body, {
       headers: apiHeaders(apiKey),
+      ...options.transport,
       timeout: options.timeoutMs,
     });
     const payload = response.data || {};
@@ -199,11 +201,12 @@ async function createTask(apiKey, content, options) {
   }
 }
 
-async function listMessages(apiKey, taskId, timeoutMs) {
+async function listMessages(apiKey, taskId, timeoutMs, transport = {}) {
   try {
     const response = await axios.get(`${MANUS_BASE_URL}/v2/task.listMessages`, {
       headers: apiHeaders(apiKey),
       params: { task_id: taskId, order: 'asc', limit: 100 },
+      ...transport,
       timeout: Math.min(timeoutMs, 60_000),
     });
     return response.data || {};
@@ -229,16 +232,36 @@ async function callManus(systemInstruction, userPrompt, options = {}) {
     : DEFAULT_TIMEOUT_MS;
   const startedAt = Date.now();
   const apiKey = await resolveManusApiKey();
-  const created = await createTask(apiKey, content, {
-    timeoutMs: Math.min(timeoutMs, 60_000),
-    agentProfile: options.agentProfile,
-    projectId: options.projectId,
-    structuredOutputSchema: options.structuredOutputSchema,
-  });
+  const transports = manusTransportAttempts();
+  if (proxyRequired() && !transports.some((item) => item.proxyUrl)) {
+    const error = new Error('MANUS proxy is required but no MANUS/GEMINI proxy is configured');
+    error.isDeterministic = true;
+    throw error;
+  }
+  let created = null;
+  let selectedTransport = null;
+  let lastCreateError = null;
+  for (const transport of transports) {
+    try {
+      created = await createTask(apiKey, content, {
+        timeoutMs: Math.min(timeoutMs, 60_000),
+        agentProfile: options.agentProfile,
+        projectId: options.projectId,
+        structuredOutputSchema: options.structuredOutputSchema,
+        transport: transport.config,
+      });
+      selectedTransport = transport;
+      break;
+    } catch (error) {
+      lastCreateError = error;
+      if (error?.isDeterministic || transports.length === 1) throw error;
+    }
+  }
+  if (!created || !selectedTransport) throw lastCreateError || new Error('Manus task creation failed');
   let lastPayload = {};
   let status = '';
   while (Date.now() - startedAt < timeoutMs) {
-    lastPayload = await listMessages(apiKey, created.taskId, timeoutMs);
+    lastPayload = await listMessages(apiKey, created.taskId, timeoutMs, selectedTransport.config);
     status = extractStatus(lastPayload);
     if (status === 'error') {
       const error = new Error('Manus agent task failed');
@@ -299,7 +322,7 @@ module.exports = {
   MANUS_BASE_URL,
   DEFAULT_AGENT_PROFILE,
   DEFAULT_TIMEOUT_MS,
-  _internals: {
+    _internals: {
     apiHeaders,
     safeProviderMessage,
     extractTaskId,

@@ -27,6 +27,7 @@ async function main() {
   let createdBody;
   let pollCount = 0;
   process.env.MANUS_API_KEY = 'manus-contract-key';
+  process.env.MANUS_PROXY_URL = 'proxy-user:proxy-pass:203.0.113.10:8080';
   axios.post = async (url, body, config) => {
     createdBody = { url, body, config };
     return { status: 200, data: { ok: true, request_id: 'req_1', task_id: 'task_1' } };
@@ -50,6 +51,8 @@ async function main() {
     assert.strictEqual(result.tokensIn, 0);
     assert.strictEqual(createdBody.body.message.content.includes('SYSTEM INSTRUCTIONS'), true);
     assert.strictEqual(createdBody.body.message.connectors, undefined);
+    assert.strictEqual(createdBody.config.proxy, false);
+    assert.ok(createdBody.config.httpsAgent);
     assert.strictEqual(createdBody.body.interactive_mode, false);
     assert.strictEqual(createdBody.body.hide_in_task_list, true);
     console.log('MANUS_ADAPTER_CONTRACT_OK checks=16');
@@ -57,6 +60,7 @@ async function main() {
     axios.post = originalPost;
     axios.get = originalGet;
     delete process.env.MANUS_API_KEY;
+    delete process.env.MANUS_PROXY_URL;
   }
 }
 

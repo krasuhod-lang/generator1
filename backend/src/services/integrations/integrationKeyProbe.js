@@ -8,6 +8,7 @@ const {
   getIntegrationSecretInfo,
   normalizeName,
 } = require('./integrationVault');
+const { manusTransportAttempts } = require('../llm/manus.transport');
 
 const DEFAULT_TIMEOUT_MS = 10000;
 
@@ -112,6 +113,9 @@ function resolveGeminiProbeProxyUrls() {
 }
 
 function probeTransports(target) {
+  if (target.auth === 'manus_api_key') {
+    return manusTransportAttempts().map((item) => item.config);
+  }
   if (target.auth !== 'gemini_query') return [{}];
   const proxies = resolveGeminiProbeProxyUrls();
   if (!proxies.length) return [{}];
@@ -192,7 +196,7 @@ async function probeIntegrationKey(envName, { timeoutMs = DEFAULT_TIMEOUT_MS, re
         lastFailure = safeFailure({ response: { status: httpStatus } });
         // Authentication rejection is independent of the selected proxy; do not
         // send the same secret through all backup routes after 401/403.
-        if (httpStatus === 401 || httpStatus === 403 || target.auth !== 'gemini_query') {
+        if (httpStatus === 401 || httpStatus === 403 || (target.auth !== 'gemini_query' && target.auth !== 'manus_api_key')) {
           return { ...baseResult, ...lastFailure, probeSupported: true, httpStatus, latencyMs: Date.now() - startedAt };
         }
       } catch (error) {
