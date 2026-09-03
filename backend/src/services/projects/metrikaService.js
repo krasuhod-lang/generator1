@@ -6,6 +6,7 @@ const { getIntegrationSecret } = require('../integrations/integrationVault');
 const BASE_URL = 'https://api-metrika.yandex.net';
 const TIMEOUT_MS = 20_000;
 const MAX_SOURCE_ROWS = 100;
+const MAX_GOAL_METRICS_PER_REQUEST = 40;
 
 function normalizeCounterId(value) {
   const raw = String(value == null ? '' : value).trim();
@@ -46,6 +47,79 @@ function responseRows(body) {
   return Array.isArray(body?.data) ? body.data : [];
 }
 
+function normalizeGoalId(value) {
+  const raw = String(value == null ? '' : value).trim();
+  return /^\d{1,20}$/.test(raw) ? raw : '';
+}
+
+function goalMetricName(goalId) {
+  const id = normalizeGoalId(goalId);
+  return id ? `ym:s:goal${id}reaches` : '';
+}
+
+function goalIdsFromBody(body) {
+  const rows = Array.isArray(body?.goals) ? body.goals : (Array.isArray(body) ? body : []);
+  return [...new Set(rows.map((goal) => normalizeGoalId(goal?.id ?? goal?.goal_id ?? goal)))]
+    .filter(Boolean);
+}
+
+async function requestGoals(token, counterId) {
+  const response = await axios.get(`${BASE_URL}/management/v1/counter/${counterId}/goals`, {
+    timeout: TIMEOUT_MS,
+    headers: {
+      Authorization: `OAuth ${token}`,
+      Accept: 'application/json',
+      'User-Agent': 'SeoMST/1.0 report-metrika',
+    },
+    validateStatus: (status) => status >= 200 && status < 300,
+  });
+  return goalIdsFromBody(response.data || {});
+}
+
+function chunk(values, size) {
+  const output = [];
+  for (let i = 0; i < values.length; i += size) output.push(values.slice(i, i + size));
+  return output.length ? output : [[]];
+}
+
+function mergeMetricBodies(results) {
+  const metricNames = [...new Set(results.flatMap((item) => item.metrics || []))];
+  const byDimension = new Map();
+  for (const item of results) {
+    const metrics = item.metrics || [];
+    for (const row of responseRows(item.body)) {
+      const key = dimensionValue(row);
+      if (!key) continue;
+      const current = byDimension.get(key) || {
+        dimensions: Array.isArray(row.dimensions) ? row.dimensions : [{ name: key }],
+        values: new Map(),
+      };
+      metrics.forEach((name, index) => {
+        if (!name) return;
+        current.values.set(name, (current.values.get(name) || 0) + asNumber(row?.metrics?.[index]));
+      });
+      byDimension.set(key, current);
+    }
+  }
+  return {
+    body: {
+      data: [...byDimension.values()].map((entry) => ({
+        dimensions: entry.dimensions,
+        metrics: metricNames.map((name) => entry.values.get(name) || 0),
+      })),
+    },
+    metrics: metricNames,
+  };
+}
+
+function goalReaches(row, metrics) {
+  return metrics.reduce((sum, name, index) => (
+    /^ym:s:goal\d+reaches$/.test(String(name))
+      ? sum + asNumber(row?.metrics?.[index])
+      : sum
+  ), 0);
+}
+
 function dimensionValue(row, index = 0) {
   const item = Array.isArray(row?.dimensions) ? row.dimensions[index] : null;
   return String(item?.name ?? item?.id ?? item?.value ?? '').trim();
@@ -70,6 +144,18 @@ async function requestReport(token, params) {
   return response.data || {};
 }
 
+async function requestMetricBatches(token, baseParams, baseMetrics, goalIds) {
+  const goalMetrics = goalIds.map(goalMetricName).filter(Boolean);
+  const batches = chunk(goalMetrics, MAX_GOAL_METRICS_PER_REQUEST);
+  const results = await Promise.all(batches.map(async (batch) => {
+    const metrics = [...baseMetrics, ...batch];
+    const body = await requestReport(token, { ...baseParams, metrics: metrics.join(',') });
+    return { body, metrics };
+  }));
+  const merged = mergeMetricBodies(results);
+  return { body: merged.body, metrics: merged.metrics };
+}
+
 function mapDailyRows(body, metrics) {
   return responseRows(body)
     .map((row) => {
@@ -77,8 +163,8 @@ function mapDailyRows(body, metrics) {
       const users = metricValue(row, metrics, 'ym:s:users');
       const pageviews = metricValue(row, metrics, 'ym:s:pageviews');
       const bounceRate = metricValue(row, metrics, 'ym:s:bounceRate');
-      const conversions = metricValue(row, metrics, 'ym:ev:anyGoalReaches');
-      const conversionRate = metricValue(row, metrics, 'ym:ev:anyGoalConversionRate');
+      const conversions = goalReaches(row, metrics);
+      const conversionRate = visits ? round((conversions / visits) * 100) : 0;
       return {
         date: dimensionValue(row),
         visits,
@@ -86,7 +172,7 @@ function mapDailyRows(body, metrics) {
         pageviews,
         bounce_rate: round(bounceRate),
         conversions,
-        conversion_rate: round(conversionRate),
+        conversion_rate: conversionRate,
       };
     })
     .filter((row) => row.date);
@@ -94,13 +180,17 @@ function mapDailyRows(body, metrics) {
 
 function mapSourceRows(body, metrics) {
   return responseRows(body)
-    .map((row) => ({
-      source: dimensionValue(row),
-      visits: metricValue(row, metrics, 'ym:s:visits'),
-      users: metricValue(row, metrics, 'ym:s:users'),
-      conversions: metricValue(row, metrics, 'ym:ev:anyGoalReaches'),
-      conversion_rate: round(metricValue(row, metrics, 'ym:ev:anyGoalConversionRate')),
-    }))
+    .map((row) => {
+      const visits = metricValue(row, metrics, 'ym:s:visits');
+      const conversions = goalReaches(row, metrics);
+      return {
+        source: dimensionValue(row),
+        visits,
+        users: metricValue(row, metrics, 'ym:s:users'),
+        conversions,
+        conversion_rate: visits ? round((conversions / visits) * 100) : 0,
+      };
+    })
     .filter((row) => row.source)
     .sort((a, b) => (b.visits - a.visits) || (b.conversions - a.conversions))
     .slice(0, MAX_SOURCE_ROWS);
@@ -214,45 +304,54 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
     };
   }
 
-  const dailyMetrics = [
+  const dailyBaseMetrics = [
     'ym:s:visits',
     'ym:s:users',
     'ym:s:pageviews',
     'ym:s:bounceRate',
-    'ym:ev:anyGoalReaches',
-    'ym:ev:anyGoalConversionRate',
   ];
-  const sourceMetrics = [
+  const sourceBaseMetrics = [
     'ym:s:visits',
     'ym:s:users',
-    'ym:ev:anyGoalReaches',
-    'ym:ev:anyGoalConversionRate',
   ];
+  // The Metrica API requires a concrete goal ID for goal metrics. There is no
+  // supported `ym:ev:anyGoal*` wildcard in stat/v1/data, so discover goals
+  // first and add one `ym:s:goal<ID>reaches` metric per actual goal.
+  let goalIds = [];
+  try {
+    goalIds = await requestGoals(token, counterId);
+  } catch (error) {
+    // Traffic remains useful when goals are unavailable or the account has no
+    // goal-management permission. Do not turn this optional block into a 400.
+    goalIds = [];
+  }
 
-  const [dailyBody, sourceBody] = await Promise.all([
-    requestReport(token, {
+  const [dailyResult, sourceResult] = await Promise.all([
+    requestMetricBatches(token, {
       id: counterId,
       date1,
       date2,
       lang: 'ru',
       dimensions: 'ym:s:date',
-      metrics: dailyMetrics.join(','),
       limit: 10_000,
       accuracy: 'full',
-    }),
-    requestReport(token, {
+    }, dailyBaseMetrics, goalIds),
+    requestMetricBatches(token, {
       id: counterId,
       date1,
       date2,
       lang: 'ru',
       dimensions: 'ym:s:trafficSource',
-      metrics: sourceMetrics.join(','),
       limit: MAX_SOURCE_ROWS,
       accuracy: 'full',
       sort: '-ym:s:visits',
-    }),
+    }, sourceBaseMetrics, goalIds),
   ]);
 
+  const dailyBody = dailyResult.body;
+  const dailyMetrics = dailyResult.metrics;
+  const sourceBody = sourceResult.body;
+  const sourceMetrics = sourceResult.metrics;
   const dailyRows = mapDailyRows(dailyBody, dailyMetrics);
   const series = aggregateSeries(dailyRows, granularity);
   return {
@@ -265,7 +364,8 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
     series,
     totals: aggregateTotals(dailyRows),
     sources: mapSourceRows(sourceBody, sourceMetrics),
-    goal_scope: 'all_goals',
+    goal_scope: goalIds.length ? 'all_goals' : 'none_or_unavailable',
+    goal_count: goalIds.length,
     generated_at: new Date().toISOString(),
   };
 }
@@ -279,5 +379,11 @@ module.exports = {
     mapSourceRows,
     aggregateSeries,
     aggregateTotals,
+    normalizeGoalId,
+    goalMetricName,
+    goalIdsFromBody,
+    mergeMetricBodies,
+    goalReaches,
+    requestMetricBatches,
   },
 };

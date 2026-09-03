@@ -73,10 +73,10 @@ assert(projectsController.includes('yandex_metrika_counter_id'), 'project contro
 assert(projectsRoutes.includes("/:id/metrika/performance"), 'projects routes must expose Metrika performance endpoint');
 assert(projectsPage.includes('getMetrikaPerformance'), 'project dashboard must load Metrika data');
 assert(projectsPage.includes('ID счётчика Яндекс.Метрики'), 'project settings must expose Metrika counter ID');
-assert(metrikaService.includes('ym:ev:anyGoalReaches'), 'Metrika adapter must request official all-goals conversion metric');
+assert(metrikaService.includes('goalMetricName') && metrikaService.includes('goal${id}reaches'), 'Metrika adapter must derive supported goal-specific conversion metrics');
 assert(metrikaService.includes('ym:s:trafficSource'), 'Metrika adapter must request traffic-source dimension');
 assert(integrationVault.includes('YANDEX_METRIKA_OAUTH_TOKEN'), 'integration vault must catalog Metrika token');
 assert(keyProbe.includes('YANDEX_METRIKA_OAUTH_TOKEN'), 'admin key probe must validate Metrika token');
 assert(aiAnalyst.includes('evidence-first SEO'), 'report AI must use evidence-first system policy');
 assert(aiAnalyst.includes("next_month_forecast: ''"), 'report AI must not publish unvalidated forecast');
-console.log('REPORT_BOARD_CONTRACT_OK checks=50');
+console.log('REPORT_BOARD_CONTRACT_OK checks=51');
