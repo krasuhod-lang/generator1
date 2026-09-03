@@ -44,6 +44,9 @@ expectIncludes(register, 'id="register-email"', 'register email association');
 expectIncludes(register, 'id="verification-code"', 'verification input');
 expectIncludes(adminLogin, 'id="admin-login-email"', 'admin email association');
 expectIncludes(appLayout, 'SeoMST', 'client shell brand');
+expectIncludes(appLayout, 'min-h-0 flex-1 overflow-y-auto', 'client mobile drawer scroll containment');
+expectIncludes(appLayout, 'const menuButtonRef = ref(null);', 'client mobile menu trigger ref');
+expectIncludes(appLayout, '!menuButtonRef.value?.contains(event.target)', 'outside-click trigger guard');
 expectIncludes(adminLayout, 'SeoMST', 'admin shell brand');
 expectIncludes(premiumLayout, 'SeoMST', 'premium shell brand');
 expectIncludes(dashboard, 'var(--ui-surface)', 'task-center surface token');
@@ -63,4 +66,4 @@ const brandResidue = [index, login, register, adminLogin, appLayout, adminLayout
   .some((source) => /SEO Genius|SEO GENIUS|SEO <b>GENIUS/.test(source));
 assert.equal(brandResidue, false, 'legacy visible SEO Genius brand must not remain in audited surfaces');
 
-console.log('SEOMST_UI_CONTRACT_OK checks=32');
+console.log('SEOMST_UI_CONTRACT_OK checks=35');

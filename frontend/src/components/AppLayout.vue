@@ -12,6 +12,7 @@ const viewMode = useViewModeStore();
 const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(false);
 const sidebarRef = ref(null);
+const menuButtonRef = ref(null);
 
 const NAV_GROUPS = [
   {
@@ -99,7 +100,12 @@ function toggleSidebar() {
 }
 
 function handleClickOutside(event) {
-  if (sidebarOpen.value && sidebarRef.value && !sidebarRef.value.contains(event.target)) sidebarOpen.value = false;
+  if (
+    sidebarOpen.value
+    && sidebarRef.value
+    && !sidebarRef.value.contains(event.target)
+    && !menuButtonRef.value?.contains(event.target)
+  ) sidebarOpen.value = false;
 }
 
 function handleEsc(event) {
@@ -164,7 +170,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <nav class="flex-1 overflow-y-auto px-3 py-4 space-y-5" aria-label="Навигация личного кабинета">
+      <nav class="min-h-0 flex-1 overflow-y-auto px-3 py-4 space-y-5" aria-label="Навигация личного кабинета">
         <section v-for="group in visibleGroups" :key="group.label">
           <p v-if="!sidebarCollapsed" class="px-3 mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-gray-600">
             {{ group.label }}
@@ -217,6 +223,7 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-3 min-w-0">
           <button
             type="button"
+            ref="menuButtonRef"
             class="lg:hidden inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700 transition-colors"
             aria-label="Открыть навигацию"
             aria-controls="client-navigation"
