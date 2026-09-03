@@ -41,6 +41,16 @@ const exporting = ref(false);
 // видеть, что увидит клиент по публичной ссылке (с урезанным payload).
 const previewMode = ref('analyst');
 
+// Редактор AI-аналитики: текстовые выводы можно корректировать вручную,
+// а числовые KPI и evidence остаются source-controlled в data/overrides.
+const aiSummaryEdit = ref('');
+const aiHighlightsEdit = ref('');
+const aiTrafficValueEdit = ref('');
+const aiForecastEdit = ref('');
+const aiDirty = ref(false);
+const aiSaving = ref(false);
+let aiInitial = false;
+
 const summaryHeartbeatAgeSeconds = computed(() => {
   const value = summaryStatus.value?.heartbeat_at
     || draft.value?.llm_heartbeat_at
@@ -108,6 +118,11 @@ async function refreshData() {
 // чтобы backend-санитайзер срезал технические поля.
 watch(previewMode, () => { refreshData(); });
 
+function scrollToReportSection(id) {
+  const element = document.getElementById(id);
+  if (element) element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 const titleEdit = ref('');
 const dateFromEdit = ref('');
 const dateToEdit = ref('');
@@ -120,6 +135,12 @@ watch(draft, (d) => {
   dateFromEdit.value = d.date_from;
   dateToEdit.value = d.date_to;
   viewRange.value = { from: d.date_from, to: d.date_to, granularity: d.config?.granularity || 'month' };
+  aiSummaryEdit.value = d.llm_summary || '';
+  aiHighlightsEdit.value = Array.isArray(d.llm_highlights) ? d.llm_highlights.join('\n') : String(d.llm_highlights || '');
+  aiTrafficValueEdit.value = d.llm_traffic_value || '';
+  aiForecastEdit.value = d.llm_next_month_forecast || '';
+  aiInitial = true;
+  setTimeout(() => { aiDirty.value = false; }, 0);
   initial = true;
   // mark not dirty
   setTimeout(() => { dirty.value = false; }, 0);
@@ -127,6 +148,9 @@ watch(draft, (d) => {
 
 watch([titleEdit, dateFromEdit, dateToEdit], () => {
   if (initial) dirty.value = true;
+});
+watch([aiSummaryEdit, aiHighlightsEdit, aiTrafficValueEdit, aiForecastEdit], () => {
+  if (aiInitial) aiDirty.value = true;
 });
 
 async function saveMeta() {
@@ -138,6 +162,24 @@ async function saveMeta() {
   });
   dirty.value = false;
   await refreshData();
+}
+
+async function saveAiEdits() {
+  if (!route.params.id || !draft.value || aiSaving.value) return;
+  aiSaving.value = true;
+  try {
+    const payload = {
+      llm_summary: aiSummaryEdit.value.trim() || null,
+      llm_highlights: aiHighlightsEdit.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).slice(0, 8),
+      llm_traffic_value: aiTrafficValueEdit.value.trim() || null,
+      llm_next_month_forecast: aiForecastEdit.value.trim() || null,
+    };
+    await store.patchSummary(route.params.id, payload);
+    if (store.current) Object.assign(store.current, payload);
+    aiDirty.value = false;
+  } finally {
+    aiSaving.value = false;
+  }
 }
 
 async function generateSummary() {
@@ -285,6 +327,10 @@ async function publish() {
 async function flushSummary() {
   const d = draft.value;
   if (!d) return;
+  if (aiDirty.value) {
+    await saveAiEdits();
+    return;
+  }
   const payload = {
     llm_summary: d.llm_summary ?? null,
     llm_highlights: d.llm_highlights ?? [],
@@ -384,12 +430,18 @@ function _stateOf(section) {
     <div v-else-if="!draft" class="rep-loading">Отчёт не найден.</div>
     <div v-else class="rep-editor">
       <header class="rep-head">
-        <button class="back-btn" @click="router.push('/reports')">← К списку</button>
+        <button type="button" class="back-btn" @click="router.push('/reports')">← К списку</button>
         <div class="rep-status-line">
           <span class="rep-status-pill" :data-status="draft.status">{{ draft.status }}</span>
           <span class="rep-project-info">{{ draft.project_name }}</span>
         </div>
       </header>
+      <nav v-if="data" class="rep-quick-nav" aria-label="Навигация по отчёту">
+        <button type="button" @click="scrollToReportSection('report-summary')">KPI</button>
+        <button v-if="draft.llm_summary" type="button" @click="scrollToReportSection('report-executive-summary')">AI-выводы</button>
+        <button type="button" @click="scrollToReportSection('report-tasks')">Работы</button>
+        <button v-if="data.growth?.opportunities?.length" type="button" @click="scrollToReportSection('report-growth')">Точки роста</button>
+      </nav>
 
       <div class="rep-grid">
         <!-- LEFT PANEL -->
@@ -459,6 +511,26 @@ function _stateOf(section) {
                     :disabled="summaryStatus?.status === 'running' || summaryStatus?.status === 'queued'"
                     @click="generateSummary">
               Сгенерировать
+            </button>
+            <div class="ai-edit-divider">
+              <span>Редактор выводов</span>
+              <span class="edit-note">Только текстовые выводы</span>
+            </div>
+            <label>Краткий вывод
+              <textarea v-model="aiSummaryEdit" class="editor-textarea" rows="6" placeholder="Сначала достижения и подтверждённые изменения, затем причины и следующий шаг."></textarea>
+            </label>
+            <label>Главные достижения
+              <textarea v-model="aiHighlightsEdit" class="editor-textarea" rows="4" placeholder="Один тезис на строку"></textarea>
+            </label>
+            <label>Traffic Value
+              <textarea v-model="aiTrafficValueEdit" class="editor-textarea" rows="2" placeholder="Только подтверждённая формулировка"></textarea>
+            </label>
+            <label>Прогноз на следующий месяц
+              <textarea v-model="aiForecastEdit" class="editor-textarea" rows="3" placeholder="Осторожный прогноз на основе данных"></textarea>
+            </label>
+            <p class="src-hint">Числовые KPI, источники и evidence не редактируются этим блоком.</p>
+            <button type="button" class="btn btn-secondary" :disabled="!aiDirty || aiSaving" @click="saveAiEdits">
+              {{ aiSaving ? 'Сохранение…' : (aiDirty ? 'Сохранить AI-выводы' : 'AI-выводы сохранены') }}
             </button>
           </div>
 
@@ -590,6 +662,9 @@ function _stateOf(section) {
 .back-btn { background: none; border: none; color: #0071e3; cursor: pointer; font-size: 14px; padding: 0; font-weight: 500; }
 .back-btn:hover { color: #0a84ff; }
 .rep-status-line { display: flex; align-items: center; gap: 10px; }
+.rep-quick-nav { display:flex; gap:7px; flex-wrap:wrap; margin:0 0 14px; padding:7px; border:1px solid rgba(60,60,67,.10); border-radius:13px; background:rgba(255,255,255,.72); position:sticky; top:8px; z-index:4; }
+.rep-quick-nav button { min-height:36px; padding:7px 12px; border:1px solid rgba(60,60,67,.12); border-radius:9px; color:#424245; background:#fff; cursor:pointer; font-size:12px; font-weight:600; }
+.rep-quick-nav button:hover { border-color:rgba(10,132,255,.30); color:#0a84ff; background:rgba(10,132,255,.06); }
 .rep-status-pill {
   padding: 4px 12px; border-radius: 999px; background: rgba(60,60,67,0.08);
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
@@ -647,6 +722,10 @@ function _stateOf(section) {
 .src-hint.err { color: #d70015; }
 .src-hint a { color: #0a84ff; }
 .src-err { color: #d70015; font-size: 12px; }
+.ai-edit-divider { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:8px; border-top:1px solid rgba(60,60,67,.10); color:#424245; font-size:12px; font-weight:650; }
+.edit-note { color:#8a8a8f; font-size:10px; font-weight:500; }
+.editor-textarea { width:100%; min-height:0; resize:vertical; padding:10px 12px; border:1px solid rgba(60,60,67,.18); border-radius:10px; background:#fff; color:#1d1d1f; font:inherit; font-size:13px; line-height:1.45; }
+.editor-textarea:focus { outline:none; border-color:#0a84ff; box-shadow:0 0 0 3px rgba(10,132,255,.15); }
 .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(8px); }
 .modal {
   background: #fff; padding: 28px; border-radius: 18px;
@@ -672,7 +751,46 @@ function _stateOf(section) {
 @media (max-width: 480px) {
   .rep-stage { padding: 10px; border-radius: 10px; }
   .rep-card { padding: 14px; border-radius: 12px; }
+  .rep-card .btn { min-height: 44px; }
+  .rep-quick-nav { top:4px; overflow-x:auto; flex-wrap:nowrap; }
+  .rep-quick-nav button { flex:none; }
+  .ai-edit-divider { align-items:flex-start; flex-direction:column; gap:3px; }
   .modal { min-width: auto; max-width: calc(100vw - 32px); padding: 20px; border-radius: 14px; }
   .rep-head { gap: 10px; }
 }
+
+/* SeoMST board theme: editor controls stay in the product shell, while
+ * ReportRenderer remains a high-contrast document preview. */
+.rep-stage { background:transparent; color:#e8ecf5; color-scheme:dark; }
+.rep-stage .rep-loading { color:#aab5c8; }
+.rep-stage .back-btn { color:#a5b4fc; min-height:40px; }
+.rep-stage .back-btn:hover { color:#c7d2fe; }
+.rep-stage .rep-project-info { color:#94a3b8; }
+.rep-stage .rep-status-pill { color:#cbd5e1; background:rgba(71,85,105,.45); }
+.rep-stage .rep-status-pill[data-status="published"] { color:#86efac; background:rgba(5,150,105,.18); }
+.rep-stage .rep-card { background:rgba(15,23,42,.76); border-color:rgba(71,85,105,.66); box-shadow:0 14px 34px rgba(2,6,23,.15); }
+.rep-stage .rep-card h3 { color:#94a3b8; }
+.rep-stage .rep-card label { color:#cbd5e1; }
+.rep-stage .rep-card input, .rep-stage .rep-card select, .rep-stage .editor-textarea { background:#111827; border-color:rgba(100,116,139,.46); color:#f8fafc; }
+.rep-stage .rep-card input::placeholder, .rep-stage .editor-textarea::placeholder { color:#718096; }
+.rep-stage .rep-card input:focus, .rep-stage .rep-card select:focus, .rep-stage .editor-textarea:focus { border-color:#818cf8; box-shadow:0 0 0 3px rgba(129,140,248,.14); }
+.rep-stage .btn-secondary { color:#e5e7eb; background:rgba(255,255,255,.05); border-color:rgba(100,116,139,.42); }
+.rep-stage .btn-secondary:hover { background:rgba(255,255,255,.10); }
+.rep-stage .src-label, .rep-stage .src-hint { color:#aab5c8; }
+.rep-stage .src-state { color:#cbd5e1; background:rgba(71,85,105,.42); }
+.rep-stage .src-state[data-tag="ok"] { color:#86efac; background:rgba(5,150,105,.18); }
+.rep-stage .src-state[data-tag="err"] { color:#fca5a5; background:rgba(127,29,29,.32); }
+.rep-stage .src-state[data-tag="off"] { color:#94a3b8; background:rgba(71,85,105,.30); }
+.rep-stage .src-state[data-tag="empty"] { color:#fcd34d; background:rgba(146,64,14,.28); }
+.rep-stage .src-connect, .rep-stage .src-hint a { color:#a5b4fc; }
+.rep-stage .src-connect:hover, .rep-stage .src-hint a:hover { color:#e0e7ff; }
+.rep-stage .src-err, .rep-stage .src-hint.err { color:#fca5a5; }
+.rep-stage .preview-toggle .seg-btn { color:#cbd5e1; background:#111827; border-color:rgba(100,116,139,.42); }
+.rep-stage .preview-toggle .seg-btn.active { color:#fff; background:rgba(99,102,241,.55); border-color:rgba(165,180,252,.50); }
+.rep-stage .ai-edit-divider { color:#e5e7eb; border-top-color:rgba(71,85,105,.62); }
+.rep-stage .edit-note { color:#94a3b8; }
+.rep-stage .rep-quick-nav { background:rgba(15,23,42,.88); border-color:rgba(71,85,105,.68); box-shadow:0 10px 24px rgba(2,6,23,.16); }
+.rep-stage .rep-quick-nav button { color:#cbd5e1; background:#111827; border-color:rgba(100,116,139,.44); }
+.rep-stage .rep-quick-nav button:hover { color:#e0e7ff; border-color:rgba(165,180,252,.5); background:rgba(99,102,241,.22); }
+@media (max-width: 480px) { .rep-stage .rep-side { min-width:0; } .rep-stage .rep-card { min-width:0; } }
 </style>

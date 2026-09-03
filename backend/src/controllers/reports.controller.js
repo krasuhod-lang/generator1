@@ -171,9 +171,18 @@ async function listDrafts(req, res) {
   const { rows } = await db.query(
     `SELECT d.id, d.project_id, p.name AS project_name, p.url AS project_url,
             d.title, d.date_from, d.date_to, d.status,
-            d.llm_status, d.llm_generated_at, d.created_at, d.updated_at
+            d.llm_status, d.llm_generated_at, d.created_at, d.updated_at,
+            sr.uuid AS shared_uuid, sr.is_active AS shared_is_active,
+            sr.view_count AS shared_view_count, sr.created_at AS shared_created_at
        FROM report_drafts d
        JOIN projects p ON p.id = d.project_id
+       LEFT JOIN LATERAL (
+         SELECT uuid, is_active, view_count, created_at
+           FROM shared_reports
+          WHERE draft_id = d.id AND user_id = d.user_id
+          ORDER BY created_at ASC
+          LIMIT 1
+       ) sr ON TRUE
       WHERE d.user_id = $1
       ORDER BY d.created_at DESC
       LIMIT $2 OFFSET $3`,
@@ -519,10 +528,10 @@ async function publishDraft(req, res) {
     `SELECT sr.id, sr.uuid
        FROM shared_reports sr
        JOIN report_drafts d ON d.id = sr.draft_id
-      WHERE d.project_id = $1 AND sr.user_id = $2
+      WHERE sr.draft_id = $1 AND sr.user_id = $2
       ORDER BY sr.created_at ASC
       LIMIT 1`,
-    [draft.project_id, req.user.id],
+    [draft.id, req.user.id],
   );
 
   let shared;

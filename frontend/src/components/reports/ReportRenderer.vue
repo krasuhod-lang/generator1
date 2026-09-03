@@ -282,6 +282,12 @@ const growthItems = computed(() => {
   })).filter((g) => g.metric || g.attribution || g.conclusion || g.forecast || g.weak_zones);
 });
 
+const attentionGrowthItems = computed(() => growthItems.value.filter((item) => {
+  const direction = item.trend_direction.toLowerCase();
+  return direction === 'down' || (!['up', 'stable'].includes(direction) && item.weak_zones);
+}));
+const positiveGrowthItems = computed(() => growthItems.value.filter((item) => !attentionGrowthItems.value.includes(item)));
+
 const quickWinsItems = computed(() => (
   Array.isArray(props.summary?.quick_wins) && props.summary.quick_wins.length
     ? props.summary.quick_wins
@@ -289,6 +295,19 @@ const quickWinsItems = computed(() => (
 ));
 
 const normalizedTasks = computed(() => normalizeBlocks(props.tasksBlocks));
+
+function taskItems(section) {
+  return Array.isArray(section?.tasks) ? section.tasks : [];
+}
+function countTasks(month) {
+  return (month?.sections || []).reduce((total, section) => total + taskItems(section).length, 0);
+}
+function countCompleted(month) {
+  return (month?.sections || []).reduce((total, section) => total + taskItems(section).filter((task) => task?.completed === true).length, 0);
+}
+function countSectionCompleted(section) {
+  return taskItems(section).filter((task) => task?.completed === true).length;
+}
 
 function normalizeBlocks(blocks) {
   if (!Array.isArray(blocks) || !blocks.length) return [];
@@ -1025,48 +1044,73 @@ function growthTargetLabel(item) {
       </div>
     </section>
 
+    <section v-if="summary?.executive_summary" id="report-executive-summary" class="rblk ai-summary-card">
+      <div class="ai-section-heading">
+        <div>
+          <span class="ai-kicker">AI-АНАЛИТИКА</span>
+          <h2>Краткий вывод по периоду</h2>
+        </div>
+        <span class="ai-order-note">Сначала результат · затем действие</span>
+      </div>
+      <div class="ai-summary-text" v-html="renderRichText(summary.executive_summary)"></div>
+    </section>
+
     <section v-if="growthItems.length" id="report-ai-analysis" class="rblk">
-      <h2>Анализ показателей</h2>
-      <div class="growth-rows">
-        <article
-          v-for="(item, idx) in growthItems"
-          :key="idx"
-          class="growth-row"
-          :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }"
-        >
-          <div class="growth-metric">
-            <div class="growth-metric-label">Показатель</div>
-            <h3 class="growth-metric-name">{{ item.metric || 'Метрика' }}</h3>
-            <div v-if="item.delta_pct || item.delta_value" class="growth-trend">
-              <span
-                v-if="item.delta_pct"
-                class="trend-badge"
-                :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }"
-              >
-                <span class="trend-arrow">{{ item.trend_direction === 'up' ? '↑' : (item.trend_direction === 'down' ? '↓' : '→') }}</span>
-                {{ item.delta_pct }}
-              </span>
-              <span v-if="item.delta_value" class="trend-abs">{{ item.delta_value }}</span>
+      <div class="ai-section-heading">
+        <div>
+          <span class="ai-kicker">ДИНАМИКА И ПРИЧИНЫ</span>
+          <h2>Анализ показателей</h2>
+        </div>
+      </div>
+
+      <div v-if="positiveGrowthItems.length" class="ai-subsection ai-subsection--positive">
+        <div class="ai-subsection-title"><span class="ai-subsection-icon">↑</span><h3>Что уже работает</h3><span>{{ positiveGrowthItems.length }} показ.</span></div>
+        <div class="growth-rows">
+          <article v-for="(item, idx) in positiveGrowthItems" :key="`positive-${idx}`" class="growth-row" :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }">
+            <div class="growth-metric">
+              <div class="growth-metric-label">Показатель</div>
+              <h3 class="growth-metric-name">{{ item.metric || 'Метрика' }}</h3>
+              <div v-if="item.delta_pct || item.delta_value" class="growth-trend">
+                <span v-if="item.delta_pct" class="trend-badge" :class="{ up: item.trend_direction === 'up', down: item.trend_direction === 'down', stable: item.trend_direction === 'stable' }">
+                  <span class="trend-arrow">{{ item.trend_direction === 'up' ? '↑' : (item.trend_direction === 'down' ? '↓' : '→') }}</span>{{ item.delta_pct }}
+                </span>
+                <span v-if="item.delta_value" class="trend-abs">{{ item.delta_value }}</span>
+              </div>
             </div>
-          </div>
-          <div class="growth-details">
-            <p v-if="item.attribution" class="growth-attribution">{{ item.attribution }}</p>
-            <dl v-if="item.conclusion || item.forecast || item.weak_zones" class="growth-facts">
-              <div v-if="item.conclusion" class="growth-fact">
-                <dt class="growth-fact-label conclusion">Вывод</dt>
-                <dd class="growth-fact-value">{{ item.conclusion }}</dd>
+            <div class="growth-details">
+              <p v-if="item.attribution" class="growth-attribution"><strong>Что повлияло:</strong> {{ item.attribution }}</p>
+              <dl v-if="item.conclusion || item.forecast || item.weak_zones" class="growth-facts">
+                <div v-if="item.conclusion" class="growth-fact"><dt class="growth-fact-label conclusion">Вывод</dt><dd class="growth-fact-value">{{ item.conclusion }}</dd></div>
+                <div v-if="item.forecast" class="growth-fact"><dt class="growth-fact-label forecast">Следующий шаг</dt><dd class="growth-fact-value">{{ item.forecast }}</dd></div>
+                <div v-if="item.weak_zones" class="growth-fact"><dt class="growth-fact-label weak">Потенциал</dt><dd class="growth-fact-value">{{ item.weak_zones }}</dd></div>
+              </dl>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <div v-if="attentionGrowthItems.length" class="ai-subsection ai-subsection--attention">
+        <div class="ai-subsection-title"><span class="ai-subsection-icon">!</span><h3>Что требует внимания</h3><span>{{ attentionGrowthItems.length }} показ.</span></div>
+        <div class="growth-rows">
+          <article v-for="(item, idx) in attentionGrowthItems" :key="`attention-${idx}`" class="growth-row down">
+            <div class="growth-metric">
+              <div class="growth-metric-label">Показатель</div>
+              <h3 class="growth-metric-name">{{ item.metric || 'Метрика' }}</h3>
+              <div v-if="item.delta_pct || item.delta_value" class="growth-trend">
+                <span v-if="item.delta_pct" class="trend-badge down"><span class="trend-arrow">↓</span>{{ item.delta_pct }}</span>
+                <span v-if="item.delta_value" class="trend-abs">{{ item.delta_value }}</span>
               </div>
-              <div v-if="item.forecast" class="growth-fact">
-                <dt class="growth-fact-label forecast">Прогноз</dt>
-                <dd class="growth-fact-value">{{ item.forecast }}</dd>
-              </div>
-              <div v-if="item.weak_zones" class="growth-fact">
-                <dt class="growth-fact-label weak">Точки роста</dt>
-                <dd class="growth-fact-value">{{ item.weak_zones }}</dd>
-              </div>
-            </dl>
-          </div>
-        </article>
+            </div>
+            <div class="growth-details">
+              <p v-if="item.attribution" class="growth-attribution"><strong>Причина / гипотеза:</strong> {{ item.attribution }}</p>
+              <dl v-if="item.conclusion || item.forecast || item.weak_zones" class="growth-facts">
+                <div v-if="item.conclusion" class="growth-fact"><dt class="growth-fact-label conclusion">Вывод</dt><dd class="growth-fact-value">{{ item.conclusion }}</dd></div>
+                <div v-if="item.weak_zones" class="growth-fact"><dt class="growth-fact-label weak">Что исправить</dt><dd class="growth-fact-value">{{ item.weak_zones }}</dd></div>
+                <div v-if="item.forecast" class="growth-fact"><dt class="growth-fact-label forecast">Как проверить</dt><dd class="growth-fact-value">{{ item.forecast }}</dd></div>
+              </dl>
+            </div>
+          </article>
+        </div>
       </div>
     </section>
 
@@ -1094,8 +1138,9 @@ function growthTargetLabel(item) {
           </button>
           <input v-if="!readonly" :value="monthBlock.month" class="text-input month-input" @input="updateMonth(i, $event.target.value)" />
           <h3 v-else @click="toggleMonth(i)" style="cursor:pointer">{{ monthBlock.month }}</h3>
-          <span class="collapse-count">{{ (monthBlock.sections || []).length }} разд.</span>
-          <div v-if="!readonly" class="actions-inline">
+            <span class="collapse-count">{{ (monthBlock.sections || []).length }} разд.</span>
+            <span v-if="countTasks(monthBlock)" class="progress-count">{{ countCompleted(monthBlock) }}/{{ countTasks(monthBlock) }} готово</span>
+            <div v-if="!readonly" class="actions-inline">
             <button class="small-btn" @click="addSection(i)">+ Раздел</button>
             <button class="small-btn danger" @click="removeMonth(i)">Удалить</button>
           </div>
@@ -1109,6 +1154,7 @@ function growthTargetLabel(item) {
             <input v-if="!readonly" :value="section.title" class="text-input" @input="updateSection(i, j, $event.target.value)" />
             <h4 v-else @click="toggleSection(i, j)" style="cursor:pointer">{{ section.title }}</h4>
             <span class="collapse-count">{{ (section.tasks || []).length }} задач</span>
+            <span v-if="section.tasks?.length" class="progress-count">{{ countSectionCompleted(section) }}/{{ section.tasks.length }} готово</span>
             <div v-if="!readonly" class="actions-inline">
               <button class="small-btn" @click="addTask(i, j)">+ Задача</button>
               <button class="small-btn danger" @click="removeSection(i, j)">Удалить раздел</button>
@@ -1117,17 +1163,21 @@ function growthTargetLabel(item) {
 
           <div v-show="!isSectionCollapsed(i, j)" v-for="(task, k) in section.tasks" :key="k" class="task-card">
             <div v-if="readonly">
-              <div class="task-title">{{ task.title }}</div>
+              <div class="task-title task-title-with-check">
+                <span class="task-checkmark" :data-done="task.completed === true" aria-hidden="true">{{ task.completed === true ? '✓' : '○' }}</span>
+                <span>{{ task.title }}</span>
+              </div>
               <div v-if="task.description_html" class="task-html" v-html="safeHtml(task.description_html)"></div>
               <div v-if="Array.isArray(task.subtasks) && task.subtasks.length" class="subtasks-list">
                 <div v-for="(subtask, l) in task.subtasks" :key="l" class="subtask-card">
-                  <h5 class="subtask-title">{{ subtask.title || 'Микрозадача' }}</h5>
+                  <h5 class="subtask-title task-title-with-check"><span class="task-checkmark" :data-done="subtask.completed === true" aria-hidden="true">{{ subtask.completed === true ? '✓' : '○' }}</span><span>{{ subtask.title || 'Микрозадача' }}</span></h5>
                   <div v-if="subtask.description_html" class="task-html subtask-html" v-html="safeHtml(subtask.description_html)"></div>
                 </div>
               </div>
             </div>
             <div v-else class="editor-grid">
               <input :value="task.title" class="text-input" placeholder="Название задачи" @input="updateTask(i, j, k, 'title', $event.target.value)" />
+              <label class="task-check-input"><input type="checkbox" :checked="task.completed === true" @change="updateTask(i, j, k, 'completed', $event.target.checked)" /> <span>Задача выполнена</span></label>
               <!-- ТЗ-фикс #5: вместо «голой» textarea используем WYSIWYG-редактор
                    (TipTap, тот же что в CreateTaskPage). Поддерживает жирный/
                    курсив/списки/ссылки. Вставка изображений из буфера и через
@@ -1143,6 +1193,7 @@ function growthTargetLabel(item) {
               <div v-if="Array.isArray(task.subtasks) && task.subtasks.length" class="subtasks-list">
                 <div v-for="(subtask, l) in task.subtasks" :key="l" class="subtask-card">
                   <input :value="subtask.title" class="text-input" placeholder="Название микрозадачи" @input="updateSubtask(i, j, k, l, 'title', $event.target.value)" />
+                  <label class="task-check-input"><input type="checkbox" :checked="subtask.completed === true" @change="updateSubtask(i, j, k, l, 'completed', $event.target.checked)" /> <span>Микрозадача выполнена</span></label>
                   <div @paste="onDescriptionPaste($event, i, j, k, l)">
                     <RichTextInput
                       :model-value="subtask.description_html || ''"
@@ -1249,6 +1300,22 @@ function growthTargetLabel(item) {
   font-size: 12px; font-weight: 600;
 }
 .summary-text { white-space: pre-wrap; line-height: 1.7; }
+.ai-summary-card { background: linear-gradient(135deg, #f4f5ff 0%, #ffffff 72%); border-color: rgba(99,102,241,.18); }
+.ai-section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
+.ai-kicker { display:block; margin-bottom:5px; color:var(--accent); font-size:10px; font-weight:800; letter-spacing:.14em; }
+.ai-section-heading h2 { margin:0; }
+.ai-order-note { color:#6b7280; font-size:12px; white-space:nowrap; }
+.ai-summary-text { color:#27324a; font-size:15px; line-height:1.72; }
+.ai-summary-text :deep(strong) { color:#1e1b4b; font-weight:750; }
+.ai-subsection { margin-top:16px; padding:14px; border:1px solid rgba(60,60,67,.10); border-radius:16px; }
+.ai-subsection--positive { background:linear-gradient(135deg, rgba(236,253,245,.72), rgba(255,255,255,.9)); border-color:rgba(16,185,129,.16); }
+.ai-subsection--attention { background:linear-gradient(135deg, rgba(255,247,237,.72), rgba(255,255,255,.9)); border-color:rgba(245,158,11,.22); }
+.ai-subsection-title { display:flex; align-items:center; gap:8px; margin-bottom:12px; }
+.ai-subsection-title h3 { margin:0; font-size:15px; }
+.ai-subsection-title > span:last-child { margin-left:auto; color:#6b7280; font-size:11px; }
+.ai-subsection-icon { display:grid; place-items:center; width:24px; height:24px; border-radius:8px; color:#047857; background:rgba(16,185,129,.13); font-weight:800; }
+.ai-subsection--attention .ai-subsection-icon { color:#b45309; background:rgba(245,158,11,.16); }
+.ai-subsection .growth-row { background:rgba(255,255,255,.78); }
 .forecast-card { background: linear-gradient(135deg, #e8f7ee 0%, #ffffff 100%); }
 .forecast-text { line-height: 1.7; font-size: 1.02rem; }
 .keys-engine-toggle {
@@ -1284,6 +1351,11 @@ function growthTargetLabel(item) {
 .section-card { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .task-card { padding: 12px; background: #fff; }
 .task-title { font-weight: 600; margin-bottom: 6px; }
+.task-title-with-check { display:flex; align-items:flex-start; gap:8px; }
+.task-checkmark { display:inline-grid; place-items:center; width:20px; height:20px; flex:none; border-radius:6px; color:#98a2b3; background:#f2f4f7; font-size:13px; font-weight:800; }
+.task-checkmark[data-done="true"] { color:#047857; background:#d1fae5; }
+.task-check-input { display:flex !important; flex-direction:row !important; align-items:center; gap:7px; color:#667085 !important; font-size:12px !important; cursor:pointer; }
+.task-check-input input { width:16px; height:16px; accent-color:var(--accent); }
 .task-html, .task-preview { white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
 .task-html :deep(a), .task-preview :deep(a) { color: var(--accent); text-decoration: underline; word-break: break-all; }
 .task-html :deep(img), .task-preview :deep(img) { max-width: 100%; height: auto; border-radius: 8px; margin: 8px 0; display: block; }
@@ -1398,6 +1470,12 @@ function growthTargetLabel(item) {
   font-size: 14px;
   line-height: 1.55;
   color: #3a3a3c;
+}
+.ai-subsection--attention .growth-attribution { color:#7c2d12; }
+@media (max-width: 680px) {
+  .ai-section-heading { flex-direction:column; gap:5px; }
+  .ai-order-note { white-space:normal; }
+  .ai-subsection { padding:10px; }
 }
 .growth-facts {
   margin: 0;

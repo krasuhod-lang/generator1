@@ -68,7 +68,8 @@ async function saveEdit() {
         </div>
       </header>
 
-      <table v-if="store.shared.length" class="sr-table">
+      <div v-if="store.shared.length" class="sr-table-scroll">
+      <table class="sr-table">
         <thead>
           <tr>
             <th>Отчёт</th>
@@ -101,6 +102,7 @@ async function saveEdit() {
           </tr>
         </tbody>
       </table>
+      </div>
       <div v-else class="empty">Ещё ничего не опубликовано.</div>
 
       <div v-if="editing" class="modal-back" @click.self="editing = null">
@@ -182,5 +184,28 @@ async function saveEdit() {
 .btn-primary:hover { background: #0071e3; }
 .btn-secondary { background: rgba(60,60,67,0.06); color: #1d1d1f; }
 .btn-secondary:hover { background: rgba(60,60,67,0.10); }
-.err { color: #d70015; font-size: 12px; }
+  .err { color: #d70015; font-size: 12px; }
+  .sr-page { max-width:var(--app-content-max); margin:0 auto; padding:var(--app-page-top) var(--app-content-gutter) var(--app-page-bottom); background:transparent; color:#e8ecf5; color-scheme:dark; }
+  .sr-head h1 { color:#f8fafc; }
+  .sr-table-scroll { width:100%; overflow-x:auto; border-radius:18px; -webkit-overflow-scrolling:touch; }
+  .sr-table { min-width:760px; background:rgba(15,23,42,.76); border-color:rgba(71,85,105,.66); box-shadow:0 14px 34px rgba(2,6,23,.15); }
+  .sr-table th, .sr-table td { color:#e5e7eb; border-bottom-color:rgba(71,85,105,.56); }
+  .sr-table th { background:rgba(15,23,42,.92); color:#94a3b8; }
+  .sr-table tbody tr:hover { background:rgba(99,102,241,.08); }
+  .sr-link, .btn-link, .back-btn { color:#a5b4fc; }
+  .sr-link:hover, .btn-link:hover, .back-btn:hover { color:#e0e7ff; }
+  .rp-pill[data-active="true"] { color:#86efac; background:rgba(5,150,105,.18); }
+  .rp-pill:not([data-active="true"]) { color:#fca5a5; background:rgba(127,29,29,.3); }
+  .empty { color:#aab5c8; background:rgba(15,23,42,.62); border-color:rgba(100,116,139,.5); }
+  .modal { background:#111827; color:#e5e7eb; border:1px solid rgba(100,116,139,.5); }
+  .modal label { color:#cbd5e1; }
+  .lbl { color:#94a3b8; }
+  .modal input { background:#0f172a; border-color:rgba(100,116,139,.46); color:#f8fafc; }
+  .modal-actions .btn { min-height:44px; }
+  @media (max-width:640px) {
+    .sr-head h1 { font-size:24px; }
+    .sr-table-scroll { margin-inline:-2px; width:calc(100% + 4px); }
+    .sr-table { min-width:720px; }
+    .actions { flex-wrap:wrap; }
+  }
 </style>
