@@ -79,7 +79,10 @@ function manusTransportAttempts(env = process.env) {
 }
 
 function proxyRequired(env = process.env) {
-  return String(env.MANUS_PROXY_REQUIRED || '').trim().toLowerCase() === 'true';
+  const raw = String(env.MANUS_PROXY_REQUIRED || '').trim().toLowerCase();
+  // Manus must not silently bypass the configured outbound route. Explicitly
+  // setting MANUS_PROXY_REQUIRED=false is the only opt-out for local recovery.
+  return raw !== 'false';
 }
 
 module.exports = {

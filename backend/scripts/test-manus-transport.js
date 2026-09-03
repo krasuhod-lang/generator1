@@ -39,6 +39,6 @@ assert.strictEqual(manusTransportAttempts(geminiEnv).length, 1);
 assert.ok(manusTransportAttempts(geminiEnv)[0].config.httpsAgent);
 assert.strictEqual(proxyRequired({ MANUS_PROXY_REQUIRED: 'true' }), true);
 assert.strictEqual(proxyRequired({ MANUS_PROXY_REQUIRED: 'false' }), false);
-assert.strictEqual(proxyRequired({}), false);
+assert.strictEqual(proxyRequired({}), true);
 
 console.log('MANUS_TRANSPORT_CONTRACT_OK checks=9');
