@@ -3,7 +3,7 @@
  * PublicReportPage — публичная read-only страница отчёта на /r/:uuid.
  * Не требует авторизации. Использует raw axios (без bearer).
  */
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import axios from 'axios';
 import ReportRenderer from '../components/reports/ReportRenderer.vue';
@@ -29,6 +29,73 @@ const pinLength = ref(4); // адаптируется по длине ввода
 const viewRange = ref({ from: '', to: '', granularity: 'month' });
 const exporting = ref(false);
 const previewRef = ref(null);
+
+// Вкладки — presentation-layer публичного board. Они не меняют URL,
+// payload, режим live/snapshot или постоянную ссылку отчёта.
+const TAB_DEFINITIONS = [
+  { id: 'overview', label: 'Обзор', description: 'Итоги и точки роста', icon: '⌂' },
+  { id: 'search', label: 'Поиск', description: 'GSC · Яндекс · Keys.so', icon: '↗' },
+  { id: 'pages', label: 'Страницы', description: 'URL и запросы', icon: '▦' },
+  { id: 'tasks', label: 'Работы', description: 'Задачи и результаты', icon: '✓' },
+  { id: 'insights', label: 'AI-анализ', description: 'Причины и следующие шаги', icon: '◎' },
+];
+const activeTab = ref('overview');
+
+function hasPageBreakdown(data) {
+  const q = data?.queries;
+  if (!q) return false;
+  const pages = q.pages || {};
+  return Object.values(pages).some((rows) => Array.isArray(rows) && rows.length > 0)
+    || (Array.isArray(q.top_pages_commercial) && q.top_pages_commercial.length > 0)
+    || (Array.isArray(q.top_pages_informational) && q.top_pages_informational.length > 0);
+}
+
+const availableTabs = computed(() => {
+  const data = result.value?.payload?.data || {};
+  const summary = result.value?.payload?.summary || {};
+  return TAB_DEFINITIONS.filter((tab) => {
+    if (tab.id === 'overview' || tab.id === 'tasks') return true;
+    if (tab.id === 'search') return Boolean(data.gsc || data.ywm || data.keys_so || data.position);
+    if (tab.id === 'pages') return hasPageBreakdown(data);
+    if (tab.id === 'insights') {
+      return Boolean(summary.executive_summary
+        || (Array.isArray(summary.growth_attribution) && summary.growth_attribution.length)
+        || (Array.isArray(summary.quick_wins) && summary.quick_wins.length));
+    }
+    return false;
+  });
+});
+const activeTabLabel = computed(() => availableTabs.value.find((tab) => tab.id === activeTab.value)?.label || 'Обзор');
+function selectTab(id) {
+  if (!availableTabs.value.some((tab) => tab.id === id)) return;
+  activeTab.value = id;
+  // Не скроллим при каждом клике: вкладочный board должен оставаться на
+  // текущем экране, особенно на мобильном устройстве.
+}
+
+function focusTab(id) {
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-report-tab="${id}"]`)?.focus();
+  });
+}
+
+function onTabsKeydown(event) {
+  const ids = availableTabs.value.map((tab) => tab.id);
+  const current = ids.indexOf(activeTab.value);
+  if (current < 0 || !['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  let next = current;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (current + 1) % ids.length;
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (current - 1 + ids.length) % ids.length;
+  if (event.key === 'Home') next = 0;
+  if (event.key === 'End') next = ids.length - 1;
+  selectTab(ids[next]);
+  focusTab(ids[next]);
+}
+
+watch(availableTabs, (tabs) => {
+  if (!tabs.some((tab) => tab.id === activeTab.value)) activeTab.value = tabs[0]?.id || 'overview';
+}, { immediate: true });
 
 const api = axios.create({ withCredentials: true, timeout: 30000 });
 
@@ -160,7 +227,37 @@ async function exportPdf() {
             <button class="tool-btn" :disabled="exporting" @click="exportPdf">{{ exporting ? 'Экспорт…' : 'Скачать .pdf' }}</button>
           </div>
         </div>
-        <div ref="previewRef" class="public-preview">
+        <nav v-if="availableTabs.length > 1" class="public-tabs-shell" aria-label="Разделы отчёта">
+          <div class="public-tabs-heading">
+            <div>
+              <span class="public-tabs-kicker">REPORT BOARD</span>
+              <strong>Раздел отчёта</strong>
+            </div>
+            <span class="public-tabs-current">{{ activeTabLabel }}</span>
+          </div>
+          <div class="public-tabs" role="tablist" aria-label="Навигация по разделам" @keydown="onTabsKeydown">
+            <button
+              v-for="tab in availableTabs"
+              :key="tab.id"
+              type="button"
+              role="tab"
+              class="public-tab"
+              :class="{ active: activeTab === tab.id }"
+              :aria-selected="activeTab === tab.id"
+              :aria-controls="'report-panel'"
+              :tabindex="activeTab === tab.id ? 0 : -1"
+              :data-report-tab="tab.id"
+              @click="selectTab(tab.id)"
+            >
+              <span class="public-tab-icon" aria-hidden="true">{{ tab.icon }}</span>
+              <span class="public-tab-copy">
+                <span>{{ tab.label }}</span>
+                <small>{{ tab.description }}</small>
+              </span>
+            </button>
+          </div>
+        </nav>
+        <div id="report-panel" ref="previewRef" class="public-preview" role="tabpanel" :aria-label="activeTabLabel">
           <ReportRenderer
             :data="result.payload?.data"
             :summary="result.payload?.summary || {}"
@@ -172,6 +269,8 @@ async function exportPdf() {
             view-mode="client"
             :captured-at="result.payload?.captured_at"
             :chart-config="result.payload?.config?.charts || {}"
+            :active-tab="activeTab"
+            :show-anchor-nav="false"
             :readonly="true" />
           <!-- ТЗ #1: локальный оверлей при applyRange — отчёт остаётся
                видимым (старые графики «затухают»), сверху индикатор. -->
@@ -220,6 +319,71 @@ async function exportPdf() {
 .tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ТЗ #1: локальный лоадер только в зоне отчёта (без миганий всей страницы). */
+.public-tabs-shell {
+  position: sticky;
+  top: 12px;
+  z-index: 7;
+  padding: 11px;
+  border: 1px solid rgba(60,60,67,0.12);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.88);
+  box-shadow: 0 8px 26px rgba(15,23,42,0.08);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.public-tabs-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 5px 9px;
+  color: #1d1d1f;
+  font-size: 13px;
+}
+.public-tabs-heading > div { display: flex; flex-direction: column; gap: 2px; }
+.public-tabs-kicker { color: #86868b; font-size: 9px; font-weight: 800; letter-spacing: .14em; }
+.public-tabs-current { color: #0a84ff; font-size: 12px; font-weight: 700; }
+.public-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.public-tab {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid rgba(60,60,67,0.11);
+  border-radius: 14px;
+  background: rgba(248,248,250,0.88);
+  color: #424245;
+  text-align: left;
+  cursor: pointer;
+  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.public-tab:hover { background: #fff; border-color: rgba(10,132,255,0.25); }
+.public-tab:focus-visible { outline: 3px solid rgba(10,132,255,0.25); outline-offset: 2px; }
+.public-tab:active { transform: scale(.985); }
+.public-tab.active {
+  border-color: rgba(10,132,255,0.30);
+  background: linear-gradient(135deg, rgba(10,132,255,0.12), rgba(255,255,255,0.98));
+  box-shadow: 0 5px 16px rgba(10,132,255,0.12);
+  color: #0a63c7;
+}
+.public-tab-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  background: rgba(60,60,67,0.08);
+  color: #6e6e73;
+  font-size: 16px;
+  font-weight: 700;
+}
+.public-tab.active .public-tab-icon { background: #0a84ff; color: #fff; }
+.public-tab-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.public-tab-copy > span { font-size: 13px; font-weight: 750; white-space: nowrap; }
+.public-tab-copy small { color: #86868b; font-size: 10px; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.public-tab.active .public-tab-copy small { color: #4b77a8; }
 .public-preview { position: relative; }
 .public-refresh-overlay {
   position: absolute;
@@ -254,6 +418,15 @@ async function exportPdf() {
   .public-toolbar { flex-direction: column; gap: 8px; }
   .toolbar-actions { justify-content: stretch; }
   .tool-btn { flex: 1; text-align: center; }
+  .public-tabs-shell { top: 8px; padding: 9px; border-radius: 15px; }
+  .public-tabs { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+  .public-tab { flex: 0 0 164px; min-height: 58px; padding: 9px 10px; }
+}
+@media (max-width: 480px) {
+  .public-tabs-heading { padding-bottom: 7px; }
+  .public-tab { flex-basis: 148px; }
+  .public-tab-copy > span { font-size: 12px; }
+  .public-tab-copy small { font-size: 9px; }
 }
 @media (max-width: 480px) {
   .public-page { padding: 10px 8px; }

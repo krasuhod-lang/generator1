@@ -29,6 +29,10 @@ const props = defineProps({
   // ТЗ-правка: видимость графиков в клиентском борде. { gsc, ywm, keys, position }.
   // По умолчанию график виден. В режиме редактирования показываем переключатель.
   chartConfig: { type: Object, default: () => ({}) },
+  // Публичный board может показывать один логический раздел за раз.
+  // Значение `all` сохраняет прежний режим редактора без изменений.
+  activeTab:   { type: String, default: 'all' },
+  showAnchorNav: { type: Boolean, default: true },
 });
 const emit = defineEmits(['update:tasksBlocks', 'override:update', 'override:reset', 'update:chart']);
 
@@ -39,6 +43,12 @@ function chartVisible(id) {
 }
 function toggleChart(id) {
   emit('update:chart', id, !chartVisible(id));
+}
+
+// Вкладочная навигация — только presentation-layer. Она не меняет payload,
+// API, состояние отчёта или порядок сохранения tasks_blocks.
+function tabVisible(id) {
+  return props.activeTab === 'all' || props.activeTab === id;
 }
 
 // ТЗ §6: бейджи «изменено вручную» по карте overrides_meta из черновика.
@@ -754,7 +764,7 @@ function growthTargetLabel(item) {
     </section>
 
     <!-- Anchor navigation -->
-    <nav class="report-nav" v-if="navItems.length > 1">
+    <nav class="report-nav" v-if="showAnchorNav && navItems.length > 1">
       <button v-for="item in navItems" :key="item.id"
               class="nav-link" @click="scrollTo(item.id)">{{ item.label }}</button>
     </nav>
@@ -779,11 +789,11 @@ function growthTargetLabel(item) {
 
     <!-- Sprint 2: Executive Headline (client-first). Источник — data.headline,
          собирается в backend/src/services/reports/headlineBuilder.js. -->
-    <ExecutiveHeadline :headline="data?.headline"
+    <ExecutiveHeadline v-show="tabVisible('overview')" :headline="data?.headline"
                        :view-mode="viewMode"
                        :accent="accent" />
 
-    <section v-if="growthOpportunities.length" id="report-growth" class="rblk growth-overview">
+    <section v-if="growthOpportunities.length" v-show="tabVisible('overview')" id="report-growth" class="rblk growth-overview">
       <div class="growth-overview-head">
         <div>
           <h2>Точки роста</h2>
@@ -817,17 +827,17 @@ function growthTargetLabel(item) {
       </div>
     </section>
 
-    <section v-if="summary?.next_month_forecast" id="report-forecast" class="rblk forecast-card">
+    <section v-if="summary?.next_month_forecast" v-show="tabVisible('overview')" id="report-forecast" class="rblk forecast-card">
       <h2>📈 Прогноз роста на следующий месяц</h2>
       <p class="forecast-text" v-html="nextMonthForecastHtml"></p>
     </section>
 
-    <section v-if="summary?.traffic_value || data?.traffic_value?.label" class="rblk savings-card">
+    <section v-if="summary?.traffic_value || data?.traffic_value?.label" v-show="tabVisible('overview')" class="rblk savings-card">
       <h2>SEO Traffic Value</h2>
       <p>{{ summary?.traffic_value || data?.traffic_value?.label }}</p>
     </section>
 
-    <section v-if="totals.length" id="report-summary" class="rblk">
+    <section v-if="totals.length" v-show="tabVisible('overview')" id="report-summary" class="rblk">
       <h2>Ключевые показатели</h2>
       <div v-if="noCompleteMonths" class="period-warning">
         ⚠️ Недостаточно полных месяцев в выбранном периоде — KPI и % роста рассчитываются по неполным данным.
@@ -858,7 +868,7 @@ function growthTargetLabel(item) {
       </div>
     </section>
 
-    <section v-if="summary?.highlights?.length" class="rblk">
+    <section v-if="summary?.highlights?.length" v-show="tabVisible('overview')" class="rblk">
       <h2>Главные достижения</h2>
       <ul class="list">
         <li v-for="(item, idx) in summary.highlights" :key="idx">{{ typeof item === 'string' ? item : `${item.title || ''} ${item.detail || ''}`.trim() }}</li>
@@ -866,7 +876,7 @@ function growthTargetLabel(item) {
     </section>
 
     <!-- Google Search Console -->
-    <section v-if="!readonly || chartVisible('gsc')" id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
+    <section v-if="!readonly || chartVisible('gsc')" v-show="tabVisible('search')" id="report-gsc" class="rblk" data-report-chart="gsc" data-report-chart-title="Google Search Console">
       <div class="chart-head">
         <h2>Google Search Console</h2>
         <label v-if="!readonly" class="chart-toggle">
@@ -889,7 +899,7 @@ function growthTargetLabel(item) {
     </section>
 
     <!-- Яндекс.Вебмастер -->
-    <section v-if="!readonly || chartVisible('ywm')" id="report-ywm" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
+    <section v-if="!readonly || chartVisible('ywm')" v-show="tabVisible('search')" id="report-ywm" class="rblk" data-report-chart="ywm" data-report-chart-title="Яндекс.Вебмастер">
       <div class="chart-head">
         <h2>Яндекс.Вебмастер</h2>
         <label v-if="!readonly" class="chart-toggle">
@@ -912,7 +922,7 @@ function growthTargetLabel(item) {
     </section>
 
     <!-- Keys.so -->
-    <section v-if="!readonly || chartVisible('keys')" id="report-keys-so" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
+    <section v-if="!readonly || chartVisible('keys')" v-show="tabVisible('search')" id="report-keys-so" class="rblk" data-report-chart="keys" data-report-chart-title="Видимость Keys.so">
       <div class="chart-head">
         <h2>Видимость в поиске (Keys.so)</h2>
         <label v-if="!readonly" class="chart-toggle">
@@ -948,7 +958,7 @@ function growthTargetLabel(item) {
       <ReportTrendChart v-else :labels="keysChart.labels" :datasets="keysChart.datasets" :annotations="keysChart.annotations" :show-second-axis="keysChart.showSecondAxis" :range="keysChart.range" />
     </section>
 
-    <section v-if="(!readonly || chartVisible('position')) && data?.position?.connected && data?.position?.series?.length" class="rblk" data-report-chart="position" data-report-chart-title="Динамика позиций">
+    <section v-if="(!readonly || chartVisible('position')) && data?.position?.connected && data?.position?.series?.length" v-show="tabVisible('search')" class="rblk" data-report-chart="position" data-report-chart-title="Динамика позиций">
       <div class="chart-head">
         <h2>Динамика позиций</h2>
         <label v-if="!readonly" class="chart-toggle">
@@ -969,6 +979,7 @@ function growthTargetLabel(item) {
          было невозможно. -->
     <section
       v-if="hasAnyPages"
+      v-show="tabVisible('pages')"
       id="report-pages"
       class="rblk"
     >
@@ -1067,7 +1078,7 @@ function growthTargetLabel(item) {
       </div>
     </section>
 
-    <section v-if="summary?.executive_summary" id="report-executive-summary" class="rblk ai-summary-card">
+    <section v-if="summary?.executive_summary" v-show="tabVisible('insights')" id="report-executive-summary" class="rblk ai-summary-card">
       <div class="ai-section-heading">
         <div>
           <span class="ai-kicker">AI-АНАЛИТИКА</span>
@@ -1078,7 +1089,7 @@ function growthTargetLabel(item) {
       <div class="ai-summary-text" v-html="renderRichText(summary.executive_summary)"></div>
     </section>
 
-    <section v-if="growthItems.length" id="report-ai-analysis" class="rblk">
+    <section v-if="growthItems.length" v-show="tabVisible('insights')" id="report-ai-analysis" class="rblk">
       <div class="ai-section-heading">
         <div>
           <span class="ai-kicker">ДИНАМИКА И ПРИЧИНЫ</span>
@@ -1137,7 +1148,7 @@ function growthTargetLabel(item) {
       </div>
     </section>
 
-    <section v-if="quickWinsItems.length" class="rblk">
+    <section v-if="quickWinsItems.length" v-show="tabVisible('insights')" class="rblk">
       <h2>Quick Wins</h2>
       <ul class="list">
         <li v-for="(item, idx) in quickWinsItems" :key="idx">
@@ -1148,7 +1159,7 @@ function growthTargetLabel(item) {
       </ul>
     </section>
 
-    <section id="report-tasks" class="rblk">
+    <section v-show="tabVisible('tasks')" id="report-tasks" class="rblk">
       <div class="tasks-head">
         <h2>Выполненные работы</h2>
         <button v-if="!readonly" class="small-btn" @click="addMonth">+ Месяц</button>

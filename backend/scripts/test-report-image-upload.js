@@ -17,6 +17,7 @@ const controller = read('backend/src/controllers/reports.controller.js');
 const server = read('backend/server.js');
 const reportsStore = read('frontend/src/stores/reports.js');
 const frontendNginx = read('frontend/docker-nginx.conf');
+const publicReport = read('frontend/src/views/PublicReportPage.vue');
 
 assert(api.includes("config.data instanceof FormData"), 'FormData request detection is missing');
 assert(api.includes("delete config.headers['Content-Type']"), 'JSON Content-Type is not removed for multipart uploads');
@@ -38,5 +39,15 @@ assert(routes.includes("imgUpload.single('image')"), 'server-side multipart fiel
 assert(controller.includes("const url = `/api/uploads/report-images/${req.file.filename}`"), 'controller must return the served API upload URL');
 assert(server.includes("app.use('/api/uploads', express.static(uploadsDir))"), 'API upload static serving is missing');
 assert(reportsStore.includes('/tasks-blocks'), 'task blocks persistence endpoint is missing');
+assert(renderer.includes("activeTab:   { type: String, default: 'all' }"), 'ReportRenderer activeTab compatibility prop is missing');
+assert(renderer.includes('showAnchorNav: { type: Boolean, default: true }'), 'ReportRenderer anchor-nav compatibility prop is missing');
+assert(renderer.includes("v-show=\"tabVisible('search')\""), 'search tab must hide/show sections without destroying chart DOM');
+assert(renderer.includes("v-show=\"tabVisible('pages')\""), 'pages tab visibility is missing');
+assert(renderer.includes("v-show=\"tabVisible('tasks')\""), 'tasks tab visibility is missing');
+assert(publicReport.includes('TAB_DEFINITIONS'), 'public report tab definitions are missing');
+assert(publicReport.includes('role=\"tablist\"'), 'accessible tablist is missing');
+assert(publicReport.includes('role=\"tabpanel\"'), 'accessible tabpanel is missing');
+assert(publicReport.includes(':show-anchor-nav=\"false\"'), 'public board must replace anchor nav with tabs');
+assert(publicReport.includes('collectReportChartImages'), 'public export functions must remain wired');
 
-console.log('REPORT_IMAGE_UPLOAD_CONTRACT_OK checks=21');
+console.log('REPORT_IMAGE_UPLOAD_CONTRACT_OK checks=31');
