@@ -501,23 +501,43 @@ function resolveUploadUrl(url) {
   return `${origin}${normalized.startsWith('/') ? '' : '/'}${normalized}`;
 }
 
+function clipboardImageFile(ev) {
+  const items = Array.from(ev.clipboardData?.items || []);
+  const imageItem = items.find((item) => String(item.type || '').toLowerCase().startsWith('image/'));
+  if (imageItem) return imageItem.getAsFile();
+  const files = Array.from(ev.clipboardData?.files || []);
+  return files.find((file) => String(file.type || '').toLowerCase().startsWith('image/')) || null;
+}
+
+function droppedImageFile(ev) {
+  const files = Array.from(ev.dataTransfer?.files || []);
+  return files.find((file) => String(file.type || '').toLowerCase().startsWith('image/')) || null;
+}
+
+async function insertUploadedImage(file, i, j, k, subtaskIndex = null, alt = 'screenshot') {
+  const url = await uploadImageFile(file);
+  if (!url) return false;
+  const next = cloneBlocks();
+  const target = descriptionTarget(next, i, j, k, subtaskIndex);
+  const safeAlt = String(alt || 'screenshot').replace(/["<>]/g, '').slice(0, 120) || 'screenshot';
+  target.description_html = (target.description_html || '') + `\n<img src="${url}" alt="${safeAlt}" style="max-width:100%" />`;
+  updateBlocks(next);
+  return true;
+}
+
 async function onDescriptionPaste(ev, i, j, k, subtaskIndex = null) {
-  const items = ev.clipboardData?.items;
-  if (!items) return;
-  for (const item of items) {
-    if (item.type.startsWith('image/')) {
-      ev.preventDefault();
-      const file = item.getAsFile();
-      if (!file) return;
-      const url = await uploadImageFile(file);
-      if (!url) return;
-      const next = cloneBlocks();
-      const target = descriptionTarget(next, i, j, k, subtaskIndex);
-      target.description_html = (target.description_html || '') + `\n<img src="${url}" alt="screenshot" style="max-width:100%" />`;
-      updateBlocks(next);
-      return;
-    }
-  }
+  const file = clipboardImageFile(ev);
+  if (!file) return; // Keep normal text/HTML paste behavior for non-image clipboard data.
+  ev.preventDefault();
+  await insertUploadedImage(file, i, j, k, subtaskIndex, 'clipboard screenshot');
+}
+
+async function onDescriptionDrop(ev, i, j, k, subtaskIndex = null) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const file = droppedImageFile(ev);
+  if (!file) return;
+  await insertUploadedImage(file, i, j, k, subtaskIndex, file.name || 'dropped screenshot');
 }
 async function onFileSelect(ev, i, j, k, subtaskIndex = null) {
   const input = ev.target;
@@ -1182,7 +1202,10 @@ function growthTargetLabel(item) {
                    (TipTap, тот же что в CreateTaskPage). Поддерживает жирный/
                    курсив/списки/ссылки. Вставка изображений из буфера и через
                    кнопку 📎 ниже работают по-прежнему — апдейтим description_html. -->
-              <div @paste="onDescriptionPaste($event, i, j, k)">
+              <div class="description-editor-dropzone"
+                   @paste.capture="onDescriptionPaste($event, i, j, k)"
+                   @dragover.prevent
+                   @drop.capture="onDescriptionDrop($event, i, j, k)">
                 <RichTextInput
                   :model-value="task.description_html || ''"
                   min-height="120px"
@@ -1194,7 +1217,10 @@ function growthTargetLabel(item) {
                 <div v-for="(subtask, l) in task.subtasks" :key="l" class="subtask-card">
                   <input :value="subtask.title" class="text-input" placeholder="Название микрозадачи" @input="updateSubtask(i, j, k, l, 'title', $event.target.value)" />
                   <label class="task-check-input"><input type="checkbox" :checked="subtask.completed === true" @change="updateSubtask(i, j, k, l, 'completed', $event.target.checked)" /> <span>Микрозадача выполнена</span></label>
-                  <div @paste="onDescriptionPaste($event, i, j, k, l)">
+                  <div class="description-editor-dropzone"
+                       @paste.capture="onDescriptionPaste($event, i, j, k, l)"
+                       @dragover.prevent
+                       @drop.capture="onDescriptionDrop($event, i, j, k, l)">
                     <RichTextInput
                       :model-value="subtask.description_html || ''"
                       min-height="90px"
@@ -1363,7 +1389,8 @@ function growthTargetLabel(item) {
 .subtask-card { padding: 10px 12px; border-radius: 12px; background: #fff; border: 1px solid rgba(60,60,67,0.09); }
 .subtask-title { margin: 0 0 6px; color: #475467; font-size: 14px; line-height: 1.35; }
 .subtask-html { font-size: 13px; }
-.task-attach-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.task-attach-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.description-editor-dropzone { min-width: 0; }
 .attach-btn {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 6px 12px; border-radius: 10px;
@@ -1373,7 +1400,12 @@ function growthTargetLabel(item) {
 }
 .attach-btn:hover { background: rgba(10,132,255,0.14); }
 .attach-status { font-size: 12px; color: #6e6e73; }
-.attach-error { font-size: 12px; line-height: 1.35; color: #b42318; max-width: 420px; }
+.attach-error { font-size: 12px; line-height: 1.35; color: #b42318; max-width: 420px; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .task-attach-row { align-items: flex-start; }
+  .attach-btn { min-height: 44px; padding: 10px 14px; }
+  .attach-status, .attach-error { flex: 1 1 100%; }
+}
 .editor-grid { display: flex; flex-direction: column; gap: 10px; }
 .text-input, .text-area {
   width: 100%;

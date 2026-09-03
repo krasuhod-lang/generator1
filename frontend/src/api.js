@@ -36,6 +36,15 @@ const api = axios.create({
 // Подставляем свежий токен из localStorage перед КАЖДЫМ запросом.
 // Это важно: даже если Pinia-стор ещё не восстановлен, заголовок будет верным.
 api.interceptors.request.use((config) => {
+  // FormData must keep the browser-generated multipart boundary. The axios
+  // instance has a JSON default for regular API calls, so remove it for file
+  // uploads instead of sending a misleading application/json header.
+  if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+    if (config.headers) {
+      delete config.headers['Content-Type'];
+      delete config.headers['content-type'];
+    }
+  }
   const token = readStoredToken();
   if (token) {
     config.headers['Authorization'] = `Bearer ${token}`;
