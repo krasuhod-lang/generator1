@@ -9,6 +9,8 @@ const MAX_SOURCE_ROWS = 100;
 // Metrica stat/v1/data accepts at most 20 metrics per request. Keep room
 // for the four daily base metrics (or two source metrics).
 const MAX_GOAL_METRICS_PER_REQUEST = 16;
+const MAX_429_RETRIES = 2;
+const RETRY_429_DELAY_MS = 2_000;
 
 function normalizeCounterId(value) {
   const raw = String(value == null ? '' : value).trim();
@@ -133,27 +135,38 @@ function metricValue(row, metrics, name) {
 }
 
 async function requestReport(token, params) {
-  const response = await axios.get(`${BASE_URL}/stat/v1/data`, {
-    timeout: TIMEOUT_MS,
-    headers: {
-      Authorization: `OAuth ${token}`,
-      Accept: 'application/json',
-      'User-Agent': 'SeoMST/1.0 report-metrika',
-    },
-    params,
-    validateStatus: (status) => status >= 200 && status < 300,
-  });
-  return response.data || {};
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const response = await axios.get(`${BASE_URL}/stat/v1/data`, {
+        timeout: TIMEOUT_MS,
+        headers: {
+          Authorization: `OAuth ${token}`,
+          Accept: 'application/json',
+          'User-Agent': 'SeoMST/1.0 report-metrika',
+        },
+        params,
+        validateStatus: (status) => status >= 200 && status < 300,
+      });
+      return response.data || {};
+    } catch (error) {
+      const status = Number(error?.response?.status) || 0;
+      if (status !== 429 || attempt >= MAX_429_RETRIES) throw error;
+      await new Promise((resolve) => setTimeout(resolve, RETRY_429_DELAY_MS * (attempt + 1)));
+    }
+  }
 }
 
 async function requestMetricBatches(token, baseParams, baseMetrics, goalIds) {
   const goalMetrics = goalIds.map(goalMetricName).filter(Boolean);
   const batches = chunk(goalMetrics, MAX_GOAL_METRICS_PER_REQUEST);
-  const results = await Promise.all(batches.map(async (batch) => {
+  const results = [];
+  // Metrica limits concurrent requests per user. Keep all goal batches
+  // sequential; this is slower but prevents a valid report from becoming 429.
+  for (const batch of batches) {
     const metrics = [...baseMetrics, ...batch];
     const body = await requestReport(token, { ...baseParams, metrics: metrics.join(',') });
-    return { body, metrics };
-  }));
+    results.push({ body, metrics });
+  }
   const merged = mergeMetricBodies(results);
   return { body: merged.body, metrics: merged.metrics };
 }
@@ -328,27 +341,25 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
     goalIds = [];
   }
 
-  const [dailyResult, sourceResult] = await Promise.all([
-    requestMetricBatches(token, {
-      id: counterId,
-      date1,
-      date2,
-      lang: 'ru',
-      dimensions: 'ym:s:date',
-      limit: 10_000,
-      accuracy: 'full',
-    }, dailyBaseMetrics, goalIds),
-    requestMetricBatches(token, {
-      id: counterId,
-      date1,
-      date2,
-      lang: 'ru',
-      dimensions: 'ym:s:trafficSource',
-      limit: MAX_SOURCE_ROWS,
-      accuracy: 'full',
-      sort: '-ym:s:visits',
-    }, sourceBaseMetrics, goalIds),
-  ]);
+  const dailyResult = await requestMetricBatches(token, {
+    id: counterId,
+    date1,
+    date2,
+    lang: 'ru',
+    dimensions: 'ym:s:date',
+    limit: 10_000,
+    accuracy: 'full',
+  }, dailyBaseMetrics, goalIds);
+  const sourceResult = await requestMetricBatches(token, {
+    id: counterId,
+    date1,
+    date2,
+    lang: 'ru',
+    dimensions: 'ym:s:trafficSource',
+    limit: MAX_SOURCE_ROWS,
+    accuracy: 'full',
+    sort: '-ym:s:visits',
+  }, sourceBaseMetrics, goalIds);
 
   const dailyBody = dailyResult.body;
   const dailyMetrics = dailyResult.metrics;
