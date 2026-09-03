@@ -1190,7 +1190,10 @@ async function _modulesSection(project, from, to, config) {
 
 async function _metrikaSection(project, from, to, granularity) {
   try {
-    return await metrikaService.fetchReport(project, { from, to }, { granularity });
+    return await metrikaService.fetchReport(project, { from, to }, {
+      granularity: project?.yandex_metrika_granularity || granularity,
+      trafficSource: project?.yandex_metrika_traffic_source || 'organic',
+    });
   } catch (err) {
     console.error('[reports][metrika] section failed:', err.message);
     return {
@@ -1200,6 +1203,8 @@ async function _metrikaSection(project, from, to, granularity) {
       error: err.message || 'metrika_failed',
       counter_id: metrikaService.normalizeCounterId(project?.yandex_metrika_counter_id) || null,
       range: { from, to },
+      granularity: project?.yandex_metrika_granularity || granularity || 'month',
+      traffic_source: { key: project?.yandex_metrika_traffic_source || 'organic', label: 'Поисковый трафик' },
       series: [],
       totals: null,
       sources: [],

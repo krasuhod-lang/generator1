@@ -76,6 +76,16 @@ function _sanitizeMetrikaCounterId(v) {
   const value = String(v).trim();
   return /^\d{1,20}$/.test(value) ? value : null;
 }
+const METRIKA_TRAFFIC_SOURCES = new Set(['all', 'organic', 'yandex', 'google']);
+const METRIKA_GRANULARITIES = new Set(['day', 'week', 'month']);
+function _sanitizeMetrikaTrafficSource(v) {
+  const value = String(v == null ? '' : v).trim().toLowerCase();
+  return METRIKA_TRAFFIC_SOURCES.has(value) ? value : 'organic';
+}
+function _sanitizeMetrikaGranularity(v) {
+  const value = String(v == null ? '' : v).trim().toLowerCase();
+  return METRIKA_GRANULARITIES.has(value) ? value : 'month';
+}
 
 function _sanitizeUrl(v) {
   const raw = String(v || '').trim();
@@ -141,6 +151,7 @@ function _sanitizeKeysSoRegion(v) {
 const PUBLIC_COLUMNS = `
   id, name, url, audience_description,
   logo_url, color_accent, keys_so_domain, keys_so_region, yandex_metrika_counter_id,
+  yandex_metrika_traffic_source, yandex_metrika_granularity,
   gsc_connected, gsc_site_url, gsc_available_sites,
   (gsc_refresh_token_enc IS NOT NULL) AS gsc_has_refresh,
   ydx_connected, ydx_site_url, ydx_available_sites,
@@ -272,15 +283,23 @@ async function updateProject(req, res, next) {
     const metrikaCounterId = 'yandex_metrika_counter_id' in body
       ? _sanitizeMetrikaCounterId(body.yandex_metrika_counter_id)
       : existing.yandex_metrika_counter_id;
+    const metrikaTrafficSource = 'yandex_metrika_traffic_source' in body
+      ? _sanitizeMetrikaTrafficSource(body.yandex_metrika_traffic_source)
+      : (existing.yandex_metrika_traffic_source || 'organic');
+    const metrikaGranularity = 'yandex_metrika_granularity' in body
+      ? _sanitizeMetrikaGranularity(body.yandex_metrika_granularity)
+      : (existing.yandex_metrika_granularity || 'month');
     if (!name) return res.status(400).json({ error: 'Название проекта обязательно' });
     if (!url) return res.status(400).json({ error: 'Укажите корректную ссылку на проект' });
     const { rows } = await db.query(
       `UPDATE projects SET name=$2, url=$3, audience_description=$4,
               logo_url=$5, color_accent=$6, keys_so_domain=$7, keys_so_region=$8,
               yandex_metrika_counter_id=$9,
+              yandex_metrika_traffic_source=$10,
+              yandex_metrika_granularity=$11,
               updated_at=NOW()
         WHERE id=$1 RETURNING ${PUBLIC_COLUMNS}`,
-      [existing.id, name, url, audience, logoUrl, accent, keysSoDomain, keysSoRegion, metrikaCounterId],
+      [existing.id, name, url, audience, logoUrl, accent, keysSoDomain, keysSoRegion, metrikaCounterId, metrikaTrafficSource, metrikaGranularity],
     );
     await syncLinkedPositionProject({
       id: existing.id,
@@ -537,7 +556,8 @@ async function getMetrikaPerformance(req, res, next) {
       ? rangeInput
       : metrikaService.resolveRange(rangeInput);
     const data = await metrikaService.fetchReport(project, range, {
-      granularity: req.query.granularity || 'month',
+      granularity: req.query.granularity || project.yandex_metrika_granularity || 'month',
+      trafficSource: req.query.traffic_source || project.yandex_metrika_traffic_source || 'organic',
     });
     return res.json(data);
   } catch (err) {

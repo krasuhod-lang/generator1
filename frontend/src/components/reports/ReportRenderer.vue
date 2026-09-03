@@ -293,6 +293,8 @@ function trafficMetricCards(section, sourceLabel) {
   ];
 }
 
+const metrikaSourceLabel = computed(() => props.data?.metrika?.traffic_source?.label || 'Поисковый трафик');
+const metrikaGranularityLabel = computed(() => ({ day: 'по дням', week: 'по неделям', month: 'по месяцам' }[props.data?.metrika?.granularity] || 'по месяцам'));
 const metrikaChart = computed(() => {
   const section = props.data?.metrika;
   const series = Array.isArray(section?.series) ? section.series : [];
@@ -1126,7 +1128,7 @@ function growthTargetLabel(item) {
         <h2>Яндекс.Метрика</h2>
         <span v-if="data.metrika.status === 'ready'" class="source-ready-badge">Подключено</span>
       </div>
-      <p class="chart-desc">Визиты, пользователи и конверсии по всем целям за применённый период. Источники трафика — ниже.</p>
+      <p class="chart-desc">Визиты, пользователи и конверсии по всем целям за применённый период. Срез: <strong>{{ metrikaSourceLabel }}</strong>, детализация: <strong>{{ metrikaGranularityLabel }}</strong>.</p>
       <div v-if="data.metrika.status === 'error'" class="section-error"><span class="error-icon">⚠️</span> Не удалось получить данные Яндекс.Метрики.</div>
       <div v-else-if="data.metrika.status !== 'ready'" class="section-empty">Яндекс.Метрика не настроена для этого проекта. Добавьте OAuth token в «Админка → API-ключи» и ID счётчика в настройках проекта.</div>
       <template v-else>
@@ -1138,7 +1140,7 @@ function growthTargetLabel(item) {
           <div class="traffic-summary-item"><span>Конверсия</span><strong>{{ formatPct(data.metrika.totals.conversion_rate) }}</strong></div>
         </div>
         <div v-if="data.metrika.sources?.length" class="metrika-sources-block">
-          <div class="chart-head"><h3>Источники трафика</h3><span class="chart-desc">Визиты · пользователи · конверсии</span></div>
+          <div class="chart-head"><h3>{{ metrikaSourceLabel }}</h3><span class="chart-desc">Визиты · пользователи · конверсии</span></div>
           <div class="rep-table-wrap"><table class="rep-table pages-table"><thead><tr><th>Источник</th><th class="num">Визиты</th><th class="num">Пользователи</th><th class="num">Конверсии</th><th class="num">Конверсия</th></tr></thead><tbody><tr v-for="row in data.metrika.sources" :key="row.source"><td>{{ row.source }}</td><td class="num">{{ formatNum(row.visits) }}</td><td class="num">{{ formatNum(row.users) }}</td><td class="num">{{ formatNum(row.conversions) }}</td><td class="num">{{ formatPct(row.conversion_rate) }}</td></tr></tbody></table></div>
         </div>
       </template>

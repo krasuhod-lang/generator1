@@ -43,6 +43,7 @@ const props = defineProps({
   // из неполного (текущего) месяца до конца месяца. Отрисовываем её полым
   // маркером-«кольцом» и подписью, чтобы клиент понимал, что это прогноз.
   normalizedIndex: { type: Number, default: -1 },
+  dark: { type: Boolean, default: false },
 });
 
 // Порог «абсурдного» процента (совпадает с backend aiAnalyst.PCT_UNRELIABLE_CAP):
@@ -340,7 +341,7 @@ function _fmtPct(v) {
 </script>
 
 <template>
-  <div class="report-trend-chart" @mouseleave="onLeave">
+  <div class="report-trend-chart" :class="{ 'is-dark': dark }" @mouseleave="onLeave">
     <!-- ТЗ #1: баннер «нет истории раньше DD.MM.YYYY», когда источник
          (например, новый GSC-проект) вернул данные позже запрошенного from. -->
     <div v-if="sourceStartNotice" class="chart-source-notice">
@@ -350,19 +351,19 @@ function _fmtPct(v) {
       <div class="chart-canvas">
       <svg :viewBox="`0 0 ${width} ${height}`" class="w-full h-auto" preserveAspectRatio="none">
       <!-- Y grid -->
-      <g class="grid" stroke="rgba(0,0,0,0.06)" stroke-width="1">
+      <g class="grid" :stroke="dark ? 'rgba(148,163,184,0.22)' : 'rgba(100,116,139,0.18)'" stroke-width="1">
         <line v-for="(t,i) in ticksY" :key="`gy${i}`" :x1="PAD.l" :x2="width - PAD.r" :y1="t.y" :y2="t.y" />
       </g>
       <!-- Y axis labels (left) -->
-      <g class="ylabels" font-size="10" fill="rgba(0,0,0,0.55)" font-family="-apple-system, sans-serif">
+      <g class="ylabels" font-size="10" :fill="dark ? '#cbd5e1' : '#526173'" font-family="-apple-system, sans-serif">
         <text v-for="(t,i) in ticksY" :key="`yl${i}`" :x="PAD.l - 6" :y="t.y + 3" text-anchor="end">{{ t.label }}</text>
       </g>
       <!-- Y axis labels (right, %) -->
-      <g v-if="showSecondAxis" font-size="10" fill="#6e5dc6" font-family="-apple-system, sans-serif">
+      <g v-if="showSecondAxis" font-size="10" :fill="dark ? '#c4b5fd' : '#6e5dc6'" font-family="-apple-system, sans-serif">
         <text v-for="(t,i) in ticksY2" :key="`y2l${i}`" :x="width - PAD.r + 6" :y="t.y + 3" text-anchor="start">{{ t.label }}</text>
       </g>
       <!-- X labels -->
-      <g class="xlabels" font-size="10" fill="rgba(0,0,0,0.55)" font-family="-apple-system, sans-serif">
+      <g class="xlabels" font-size="10" :fill="dark ? '#cbd5e1' : '#526173'" font-family="-apple-system, sans-serif">
         <text v-for="(t,i) in xLabels" :key="`x${i}`" :x="t.x" :y="height - PAD.b + 16" text-anchor="middle">{{ t.label }}</text>
       </g>
       <g v-if="chartAnnotations.length">
@@ -408,7 +409,7 @@ function _fmtPct(v) {
       <template v-if="hoverIndex >= 0 && hoverIndex < labels.length">
         <line :x1="xFor(hoverIndex)" :x2="xFor(hoverIndex)"
               :y1="PAD.t" :y2="PAD.t + innerH"
-              stroke="rgba(0,0,0,0.15)" stroke-width="1" stroke-dasharray="3,3" />
+              :stroke="dark ? 'rgba(226,232,240,0.34)' : 'rgba(15,23,42,0.18)'" stroke-width="1" stroke-dasharray="3,3" />
         <template v-for="(ds, di) in datasets" :key="`dot${di}`">
           <circle v-if="!hiddenSeries.has(di) && ds.data?.[hoverIndex] != null && Number.isFinite(ds.data[hoverIndex])"
                   :cx="xFor(hoverIndex)"
@@ -567,8 +568,8 @@ function _fmtPct(v) {
   position: absolute;
   top: 8px;
   transform: translateX(-50%);
-  background: rgba(255,255,255,0.96);
-  border: 1px solid rgba(60,60,67,0.12);
+  background: var(--chart-tooltip-bg, rgba(255,255,255,0.96));
+  border: 1px solid var(--chart-tooltip-border, rgba(60,60,67,0.12));
   border-radius: 12px;
   padding: 10px 14px;
   font-size: 12px;
@@ -579,7 +580,7 @@ function _fmtPct(v) {
   backdrop-filter: blur(8px);
 }
 .tooltip-date {
-  font-weight: 600; margin-bottom: 6px; color: #1d1d1f;
+  font-weight: 600; margin-bottom: 6px; color: var(--chart-tooltip-text, #1d1d1f);
 }
 .tooltip-row {
   display: flex; align-items: center; gap: 6px;
@@ -588,6 +589,18 @@ function _fmtPct(v) {
 .tooltip-dot {
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
 }
-.tooltip-label { color: #6e6e73; flex: 1; }
-.tooltip-value { font-weight: 600; color: #1d1d1f; }
+.tooltip-label { color: var(--chart-tooltip-muted, #526173); flex: 1; }
+.tooltip-value { font-weight: 600; color: var(--chart-tooltip-text, #1d1d1f); }
+.report-trend-chart.is-dark {
+  --chart-tooltip-bg: rgba(15, 23, 42, 0.98);
+  --chart-tooltip-border: rgba(148, 163, 184, 0.32);
+  --chart-tooltip-text: #f8fafc;
+  --chart-tooltip-muted: #cbd5e1;
+}
+.report-trend-chart.is-dark .trend-side { border-color: rgba(148, 163, 184, .22); }
+.report-trend-chart.is-dark .trend-side-title { color: #cbd5e1; }
+.report-trend-chart.is-dark .trend-label { color: #f8fafc; }
+.report-trend-chart.is-dark .trend-abs { color: #cbd5e1; }
+.report-trend-chart.is-dark .chart-range-caption { color: #cbd5e1; }
+.report-trend-chart.is-dark .chart-normalized-note { color: #fbbf24; }
 </style>

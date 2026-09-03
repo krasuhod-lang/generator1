@@ -12,6 +12,22 @@ const MAX_GOAL_METRICS_PER_REQUEST = 16;
 const MAX_429_RETRIES = 2;
 const RETRY_429_DELAY_MS = 2_000;
 
+const TRAFFIC_SOURCE_CONFIG = Object.freeze({
+  all: Object.freeze({ key: 'all', label: 'Весь трафик', dimension: 'ym:s:trafficSource', filter: '' }),
+  organic: Object.freeze({ key: 'organic', label: 'Поисковый трафик', dimension: 'ym:s:searchEngine', filter: "ym:s:trafficSource=='organic'" }),
+  yandex: Object.freeze({ key: 'yandex', label: 'Поиск Яндекса', dimension: 'ym:s:searchEngine', filter: "ym:s:trafficSource=='organic' AND ym:s:searchEngine=='yandex'" }),
+  google: Object.freeze({ key: 'google', label: 'Поиск Google', dimension: 'ym:s:searchEngine', filter: "ym:s:trafficSource=='organic' AND ym:s:searchEngine=='google'" }),
+});
+
+function normalizeTrafficSource(value, fallback = 'organic') {
+  const key = String(value == null ? '' : value).trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(TRAFFIC_SOURCE_CONFIG, key) ? key : fallback;
+}
+
+function trafficSourceConfig(value, fallback = 'organic') {
+  return TRAFFIC_SOURCE_CONFIG[normalizeTrafficSource(value, fallback)];
+}
+
 function normalizeCounterId(value) {
   const raw = String(value == null ? '' : value).trim();
   if (!raw) return '';
@@ -162,8 +178,11 @@ async function requestMetricBatches(token, baseParams, baseMetrics, goalIds) {
   const results = [];
   // Metrica limits concurrent requests per user. Keep all goal batches
   // sequential; this is slower but prevents a valid report from becoming 429.
-  for (const batch of batches) {
-    const metrics = [...baseMetrics, ...batch];
+  // Base metrics are requested only in the first batch. Repeating them in
+  // every goal batch would multiply visits/users/pageviews after merging.
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index];
+    const metrics = index === 0 ? [...baseMetrics, ...batch] : batch;
     const body = await requestReport(token, { ...baseParams, metrics: metrics.join(',') });
     results.push({ body, metrics });
   }
@@ -272,8 +291,10 @@ function aggregateTotals(rows) {
   };
 }
 
-async function fetchReport(project, range, { granularity = 'month' } = {}) {
+async function fetchReport(project, range, { granularity = 'month', trafficSource = null } = {}) {
   const counterId = normalizeCounterId(project?.yandex_metrika_counter_id);
+  const normalizedGranularity = ['day', 'week', 'month'].includes(String(granularity)) ? String(granularity) : 'month';
+  const source = trafficSourceConfig(trafficSource || project?.yandex_metrika_traffic_source || 'organic');
   if (!counterId) {
     return {
       connected: false,
@@ -281,10 +302,12 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
       reason: 'counter_not_configured',
       counter_id: null,
       range: { from: range?.from || null, to: range?.to || null },
+      granularity: normalizedGranularity,
+      traffic_source: { key: source.key, label: source.label },
       series: [],
       totals: null,
       sources: [],
-      goal_scope: 'all_goals',
+      goal_scope: 'none_or_unavailable',
     };
   }
 
@@ -296,10 +319,12 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
       reason: 'token_not_configured',
       counter_id: counterId,
       range: { from: range?.from || null, to: range?.to || null },
+      granularity: normalizedGranularity,
+      traffic_source: { key: source.key, label: source.label },
       series: [],
       totals: null,
       sources: [],
-      goal_scope: 'all_goals',
+      goal_scope: 'none_or_unavailable',
     };
   }
 
@@ -312,10 +337,12 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
       reason: 'invalid_range',
       counter_id: counterId,
       range: { from: date1 || null, to: date2 || null },
+      granularity: normalizedGranularity,
+      traffic_source: { key: source.key, label: source.label },
       series: [],
       totals: null,
       sources: [],
-      goal_scope: 'all_goals',
+      goal_scope: 'none_or_unavailable',
     };
   }
 
@@ -341,6 +368,7 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
     goalIds = [];
   }
 
+  const sourceParams = source.filter ? { filters: source.filter } : {};
   const dailyResult = await requestMetricBatches(token, {
     id: counterId,
     date1,
@@ -349,16 +377,19 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
     dimensions: 'ym:s:date',
     limit: 10_000,
     accuracy: 'full',
+    ...sourceParams,
   }, dailyBaseMetrics, goalIds);
   const sourceResult = await requestMetricBatches(token, {
     id: counterId,
     date1,
     date2,
     lang: 'ru',
-    dimensions: 'ym:s:trafficSource',
+    dimensions: source.dimension,
+    metrics: undefined,
     limit: MAX_SOURCE_ROWS,
     accuracy: 'full',
     sort: '-ym:s:visits',
+    ...sourceParams,
   }, sourceBaseMetrics, goalIds);
 
   const dailyBody = dailyResult.body;
@@ -366,14 +397,15 @@ async function fetchReport(project, range, { granularity = 'month' } = {}) {
   const sourceBody = sourceResult.body;
   const sourceMetrics = sourceResult.metrics;
   const dailyRows = mapDailyRows(dailyBody, dailyMetrics);
-  const series = aggregateSeries(dailyRows, granularity);
+  const series = aggregateSeries(dailyRows, normalizedGranularity);
   return {
     connected: true,
     status: series.length || responseRows(sourceBody).length ? 'ready' : 'empty',
     reason: series.length || responseRows(sourceBody).length ? null : 'no_rows',
     counter_id: counterId,
     range: { from: date1, to: date2 },
-    granularity,
+    granularity: normalizedGranularity,
+    traffic_source: { key: source.key, label: source.label },
     series,
     totals: aggregateTotals(dailyRows),
     sources: mapSourceRows(sourceBody, sourceMetrics),
@@ -394,6 +426,8 @@ module.exports = {
     aggregateTotals,
     normalizeGoalId,
     goalMetricName,
+    normalizeTrafficSource,
+    trafficSourceConfig,
     goalIdsFromBody,
     mergeMetricBodies,
     goalReaches,

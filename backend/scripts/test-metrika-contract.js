@@ -1,7 +1,11 @@
 'use strict';
 
 const assert = require('assert');
-const { _internal, normalizeCounterId, resolveRange } = require('../src/services/projects/metrikaService');
+const {
+  _internal,
+  normalizeCounterId,
+  resolveRange,
+} = require('../src/services/projects/metrikaService');
 
 const metrics = [
   'ym:s:visits',
@@ -54,6 +58,20 @@ assert.deepStrictEqual(_internal.goalIdsFromBody({ goals: [{ id: 101 }, { id: '1
 assert.strictEqual(normalizeCounterId('12345678'), '12345678');
 assert.strictEqual(normalizeCounterId('abc'), '');
 assert.strictEqual(normalizeCounterId('123456789012345678901'), '');
+assert.strictEqual(_internal.normalizeTrafficSource('organic'), 'organic');
+assert.strictEqual(_internal.normalizeTrafficSource('Yandex'), 'yandex');
+assert.strictEqual(_internal.normalizeTrafficSource('google'), 'google');
+assert.strictEqual(_internal.normalizeTrafficSource('unknown'), 'organic');
+assert.deepStrictEqual(_internal.trafficSourceConfig('organic'), {
+  key: 'organic', label: 'Поисковый трафик', dimension: 'ym:s:searchEngine', filter: "ym:s:trafficSource=='organic'",
+});
+assert.deepStrictEqual(_internal.trafficSourceConfig('yandex'), {
+  key: 'yandex', label: 'Поиск Яндекса', dimension: 'ym:s:searchEngine', filter: "ym:s:trafficSource=='organic' AND ym:s:searchEngine=='yandex'",
+});
+const daySeries = _internal.aggregateSeries(rows, 'day');
+assert.deepStrictEqual(daySeries.map((row) => row.date), ['2026-04-01', '2026-04-02']);
+const weekSeries = _internal.aggregateSeries(rows, 'week');
+assert.deepStrictEqual(weekSeries.map((row) => row.date), ['2026-03-30']);
 const resolved = resolveRange({ days: 28 });
 assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(resolved.from));
 assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(resolved.to));
@@ -65,4 +83,4 @@ const merged = _internal.mergeMetricBodies([
 assert.deepStrictEqual(merged.metrics, ['ym:s:visits', 'ym:s:goal101reaches', 'ym:s:goal202reaches']);
 assert.deepStrictEqual(merged.body.data[0].metrics, [20, 2, 1]);
 assert.strictEqual(_internal.goalReaches({ metrics: [2, 1] }, ['ym:s:goal101reaches', 'ym:s:goal202reaches']), 3);
-console.log('METRIKA_CONTRACT_OK checks=25');
+console.log('METRIKA_CONTRACT_OK checks=37');

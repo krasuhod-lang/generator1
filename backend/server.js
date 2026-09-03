@@ -3600,6 +3600,8 @@ async function ensureSchema() {
     // Migration 131: optional Yandex Metrica counter binding for reports.
     // Несекретный counter ID хранится у проекта; OAuth token остаётся только в encrypted integration vault.
     await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS yandex_metrika_counter_id TEXT`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS yandex_metrika_traffic_source TEXT`);
+    await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS yandex_metrika_granularity TEXT`);
 
     // Migration 130: durable parser-bot queue with per-URL retry/heartbeat/resume.
     await db.query(`

@@ -85,6 +85,19 @@ const ydxPerfError = ref('');
 const metrikaPerf = ref(null);
 const metrikaPerfLoading = ref(false);
 const metrikaPerfError = ref('');
+const METRIKA_TRAFFIC_SOURCES = [
+  { value: 'organic', label: 'Поисковый трафик' },
+  { value: 'yandex', label: 'Поиск Яндекса' },
+  { value: 'google', label: 'Поиск Google' },
+  { value: 'all', label: 'Весь трафик' },
+];
+const METRIKA_GRANULARITIES = [
+  { value: 'day', label: 'По дням' },
+  { value: 'week', label: 'По неделям' },
+  { value: 'month', label: 'По месяцам' },
+];
+const metrikaTrafficSource = ref('organic');
+const metrikaGranularity = ref('month');
 
 // Сопоставление источников (GSC ↔ Яндекс) + рекомендации
 const comparison = ref(null);
@@ -183,6 +196,8 @@ function _syncBrandingFromProject() {
     keys_so_region: project.value.keys_so_region || 'msk',
     yandex_metrika_counter_id: project.value.yandex_metrika_counter_id || '',
   };
+  metrikaTrafficSource.value = project.value.yandex_metrika_traffic_source || 'organic';
+  metrikaGranularity.value = project.value.yandex_metrika_granularity || 'month';
 }
 async function saveBranding() {
   if (!project.value) return;
@@ -194,6 +209,8 @@ async function saveBranding() {
       keys_so_domain: brandingForm.value.keys_so_domain || null,
       keys_so_region: brandingForm.value.keys_so_region || 'msk',
       yandex_metrika_counter_id: brandingForm.value.yandex_metrika_counter_id || null,
+      yandex_metrika_traffic_source: metrikaTrafficSource.value,
+      yandex_metrika_granularity: metrikaGranularity.value,
     });
     if (updated) {
       project.value = { ...project.value, ...updated };
@@ -215,10 +232,11 @@ const metrikaChart = computed(() => {
   if (!series.length) return null;
   return {
     labels: series.map((row) => row.date),
-    datasets: [
-      { label: 'Визиты', color: '#38bdf8', data: series.map((row) => Number(row.visits) || 0) },
+      datasets: [
+      { label: `Визиты · ${metrikaPerf.value?.traffic_source?.label || 'Поисковый трафик'}`, color: '#38bdf8', data: series.map((row) => Number(row.visits) || 0) },
       { label: 'Конверсии', color: '#34d399', data: series.map((row) => Number(row.conversions) || 0) },
     ],
+    range: metrikaPerf.value?.range || null,
   };
 });
 
@@ -395,6 +413,19 @@ async function disconnectYdx() {
   } catch (_) { /* no-op */ }
 }
 
+function metrikaParams() {
+  return {
+    ...rangeParams(),
+    traffic_source: metrikaTrafficSource.value,
+    granularity: metrikaGranularity.value,
+  };
+}
+
+async function saveMetrikaSettings() {
+  await saveBranding();
+  await loadMetrikaPerformance();
+}
+
 async function loadMetrikaPerformance() {
   if (!project.value?.yandex_metrika_counter_id) {
     metrikaPerf.value = null;
@@ -403,7 +434,7 @@ async function loadMetrikaPerformance() {
   metrikaPerfLoading.value = true;
   metrikaPerfError.value = '';
   try {
-    metrikaPerf.value = await store.getMetrikaPerformance(projectId, rangeParams());
+    metrikaPerf.value = await store.getMetrikaPerformance(projectId, metrikaParams());
   } catch (err) {
     metrikaPerfError.value = err.response?.data?.error || 'Не удалось получить данные Яндекс.Метрики';
   } finally {
@@ -1326,6 +1357,29 @@ onUnmounted(() => {
               <span v-if="metrikaReady" class="text-xs text-emerald-300">● Счётчик привязан</span>
             </div>
             <p class="text-xs text-gray-400">Статистика строится по выбранному счётчику и периоду. В публичный отчёт передаются только агрегированные данные и таблица источников.</p>
+            <div class="metrika-settings-panel">
+              <div>
+                <div class="metrika-settings-title">Настройки отображения</div>
+                <div class="metrika-settings-hint">По умолчанию выбран поисковый трафик — самый полезный срез для SEO-отчёта.</div>
+              </div>
+              <div class="metrika-settings-grid">
+                <label class="block">
+                  <span class="text-xs text-gray-400">Источник трафика</span>
+                  <select v-model="metrikaTrafficSource" class="input mt-1">
+                    <option v-for="item in METRIKA_TRAFFIC_SOURCES" :key="item.value" :value="item.value">{{ item.label }}</option>
+                  </select>
+                </label>
+                <label class="block">
+                  <span class="text-xs text-gray-400">Детализация графика</span>
+                  <select v-model="metrikaGranularity" class="input mt-1">
+                    <option v-for="item in METRIKA_GRANULARITIES" :key="item.value" :value="item.value">{{ item.label }}</option>
+                  </select>
+                </label>
+                <button type="button" class="btn-primary metrika-apply-btn" :disabled="brandingSaving || metrikaPerfLoading || !metrikaReady" @click="saveMetrikaSettings">
+                  {{ brandingSaving || metrikaPerfLoading ? 'Применяем…' : 'Применить и сохранить' }}
+                </button>
+              </div>
+            </div>
             <div v-if="!metrikaReady" class="text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded p-3">
               Укажите ID счётчика в карточке «Бренд и источники отчётов». OAuth token сохраните в «Админка → API-ключи» под ключом «Яндекс.Метрика».
             </div>
@@ -1338,9 +1392,13 @@ onUnmounted(() => {
                 <div class="bg-gray-950 border border-gray-800 rounded-lg p-3"><div class="text-[11px] uppercase text-gray-500">Конверсии</div><div class="text-xl font-bold text-emerald-300">{{ Number(metrikaPerf.totals.conversions || 0).toLocaleString('ru') }}</div></div>
                 <div class="bg-gray-950 border border-gray-800 rounded-lg p-3"><div class="text-[11px] uppercase text-gray-500">Конверсия</div><div class="text-xl font-bold text-amber-300">{{ Number(metrikaPerf.totals.conversion_rate || 0).toFixed(2) }}%</div></div>
               </div>
-              <ReportTrendChart v-if="metrikaChart" :labels="metrikaChart.labels" :datasets="metrikaChart.datasets" />
+              <div v-if="metrikaPerf.traffic_source" class="metrika-active-filter">
+                <span>График: <strong>{{ metrikaPerf.traffic_source.label }}</strong></span>
+                <span>Детализация: <strong>{{ METRIKA_GRANULARITIES.find((item) => item.value === metrikaPerf.granularity)?.label || 'По месяцам' }}</strong></span>
+              </div>
+              <ReportTrendChart v-if="metrikaChart" :labels="metrikaChart.labels" :datasets="metrikaChart.datasets" :range="metrikaChart.range" :show-second-axis="false" dark />
               <div v-if="metrikaPerf.sources?.length" class="overflow-x-auto">
-                <h3 class="text-sm font-semibold text-gray-200 mb-2">Источники трафика</h3>
+                <h3 class="text-sm font-semibold text-gray-200 mb-2">{{ metrikaPerf.traffic_source?.label || 'Источники трафика' }}</h3>
                 <table class="w-full text-sm"><thead><tr class="text-left text-xs text-gray-500 border-b border-gray-800"><th class="py-2 pr-3">Источник</th><th class="py-2 px-3 text-right">Визиты</th><th class="py-2 px-3 text-right">Пользователи</th><th class="py-2 px-3 text-right">Конверсии</th><th class="py-2 pl-3 text-right">Конверсия</th></tr></thead><tbody><tr v-for="row in metrikaPerf.sources" :key="row.source" class="border-b border-gray-800/60"><td class="py-2 pr-3">{{ row.source }}</td><td class="py-2 px-3 text-right">{{ Number(row.visits || 0).toLocaleString('ru') }}</td><td class="py-2 px-3 text-right">{{ Number(row.users || 0).toLocaleString('ru') }}</td><td class="py-2 px-3 text-right text-emerald-300">{{ Number(row.conversions || 0).toLocaleString('ru') }}</td><td class="py-2 pl-3 text-right">{{ Number(row.conversion_rate || 0).toFixed(2) }}%</td></tr></tbody></table>
               </div>
               <div v-if="metrikaPerf.status === 'empty'" class="text-sm text-gray-500 text-center py-6">За выбранный период данных Метрики нет.</div>
@@ -1591,4 +1649,20 @@ onUnmounted(() => {
 <style scoped>
 .fade-enter-active, .fade-leave-active { transition: opacity 0.25s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+.metrika-settings-panel {
+  padding: 14px;
+  border: 1px solid rgba(56, 189, 248, .22);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(15, 23, 42, .78), rgba(30, 41, 59, .62));
+}
+.metrika-settings-title { color: #e2e8f0; font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.metrika-settings-hint { margin-top: 4px; color: #94a3b8; font-size: .72rem; line-height: 1.45; }
+.metrika-settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; margin-top: 12px; }
+.metrika-apply-btn { min-height: 42px; white-space: nowrap; }
+.metrika-active-filter { display: flex; flex-wrap: wrap; gap: 8px 18px; color: #94a3b8; font-size: .75rem; }
+.metrika-active-filter strong { color: #e2e8f0; font-weight: 700; }
+@media (max-width: 720px) {
+  .metrika-settings-grid { grid-template-columns: 1fr; }
+  .metrika-apply-btn { width: 100%; }
+}
 </style>

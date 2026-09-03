@@ -55,6 +55,8 @@ assert(headline.includes('comparison'), 'headline must return comparison context
 assert(aggregator.includes('context_hash'), 'dataAggregator must emit deterministic context hash');
 assert(aggregator.includes('forecast: null'), 'dataAggregator must not expose naive forecast');
 assert(controller.includes('ai_notice'), 'public controller must expose stale/not-bound AI notice');
+assert(read('backend/server.js').includes('yandex_metrika_traffic_source'), 'schema bootstrap must add Metrika source setting idempotently');
+assert(read('backend/server.js').includes('yandex_metrika_granularity'), 'schema bootstrap must add Metrika granularity idempotently');
 assert(controller.includes('function _reportTitle'), 'public controller must derive title from applied period');
 assert(controller.includes('title: payload.title'), 'public response must return derived payload title');
 assert(sanitizer.includes('ai_snapshot_id'), 'client sanitizer must hide AI context diagnostics');
@@ -75,8 +77,17 @@ assert(projectsPage.includes('getMetrikaPerformance'), 'project dashboard must l
 assert(projectsPage.includes('ID счётчика Яндекс.Метрики'), 'project settings must expose Metrika counter ID');
 assert(metrikaService.includes('goalMetricName') && metrikaService.includes('goal${id}reaches'), 'Metrika adapter must derive supported goal-specific conversion metrics');
 assert(metrikaService.includes('ym:s:trafficSource'), 'Metrika adapter must request traffic-source dimension');
+assert(metrikaService.includes("ym:s:searchEngine"), 'Metrika adapter must support search-engine dimension');
+assert(metrikaService.includes("ym:s:trafficSource=='organic'"), 'Metrika adapter must filter organic traffic explicitly');
+assert(metrikaService.includes('traffic_source'), 'Metrika adapter must expose selected traffic source metadata');
+assert(projectsPage.includes('METRIKA_TRAFFIC_SOURCES'), 'project dashboard must expose Metrika traffic source settings');
+assert(projectsPage.includes('METRIKA_GRANULARITIES'), 'project dashboard must expose Metrika granularity settings');
+assert(projectsPage.includes('yandex_metrika_traffic_source'), 'project controller/store must persist Metrika source setting');
+assert(projectsPage.includes('yandex_metrika_granularity'), 'project controller/store must persist Metrika granularity setting');
+assert(renderer.includes('metrikaSourceLabel'), 'public report must label selected Metrika source');
+assert(read('frontend/src/components/reports/ReportTrendChart.vue').includes("dark: { type: Boolean"), 'trend chart must support contrast-safe dark axes');
 assert(integrationVault.includes('YANDEX_METRIKA_OAUTH_TOKEN'), 'integration vault must catalog Metrika token');
 assert(keyProbe.includes('YANDEX_METRIKA_OAUTH_TOKEN'), 'admin key probe must validate Metrika token');
 assert(aiAnalyst.includes('evidence-first SEO'), 'report AI must use evidence-first system policy');
 assert(aiAnalyst.includes("next_month_forecast: ''"), 'report AI must not publish unvalidated forecast');
-console.log('REPORT_BOARD_CONTRACT_OK checks=51');
+console.log('REPORT_BOARD_CONTRACT_OK checks=61');
