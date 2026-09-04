@@ -542,43 +542,48 @@ function stripH1FromHtml(html) {
 // Для JSON-вкладки это создаёт сразу несколько проблем:
 //   • LLM-режим: тело base64 регулярно > 200 КБ — HTTPS-прокси режут запрос
 //     с 413 Payload Too Large (см. обработчик 413 ниже в callDashscope);
-//   • детерминированный режим: <figure> попадает во «вступительную» секцию
-//     до первого <h2> и через nodesToHtml/outerHTML целиком сваливается в
-//     blocks[0].text как огромный data: URI — JSON раздувается, а WordPress
-//     ACF-админка ломается;
-//   • findMissingPhrases считает alt/контекст обложки «потерянным», блокируя
-//     применение JSON.
-// Поэтому ДО любой дальнейшей обработки удаляем все <figure> с потомком <img>
-// и одиночные <img>. Обложка уже привязана к посту WordPress'ом отдельно
-// (featured image), внутри Flexible Content её дублировать не требуется.
+//   • детерминированный режим: media-узел с data: URI раздувает JSON и может
+//     сломать ACF-админку;
+//   • служебный alt не должен считаться пользовательским текстом, но
+//     <figcaption> и обычные текстовые узлы терять нельзя.
+// Поэтому ДО дальнейшей обработки удаляем только img/source/media-части.
+// Сам figure/picture раскрываем, сохраняя текстовые дочерние узлы. Обложка
+// уже привязана к посту WordPress отдельно (featured image), поэтому саму
+// картинку внутри Flexible Content не дублируем.
 // Ремуверы:
-//   • <figure …>…<img …>…</figure>      — типовой кейс info-article-cover.
-//   • <figure …>…</figure>                 — без <img> (картинки нет, оставлять
-//                                            пустую figure с подписью бессмысленно
-//                                            для ACF-блоков).
-//   • <img …>                              — одиночный (на случай, если writer
-//                                            вставил картинку без figure).
-//   • <picture>…</picture>                 — современный аналог <img>.
+//   • <figure …>…<img …>…</figure>      — media удаляется, caption сохраняется.
+//   • <picture>…</picture>              — source/img удаляются, fallback-текст
+//                                        сохраняется.
+//   • <img …> / <source …>              — standalone media-узлы удаляются.
 function stripInlineMediaFromHtml(html) {
   if (!html) return '';
   let out = String(html);
-  // <figure …>…</figure> (нежадный, поддержка многострочности через [\s\S]).
-  // ВАЖНО: один вызов replace не справится с вложенными <figure> (их в наших
-  // HTML не бывает), но цикл с лимитом — страховка от бесконечного хвоста
-  // на каком-то экзотическом вводе.
+  // Удаляем media-узлы, но сохраняем текстовые узлы figure, включая
+  // <figcaption>. Ранее удалялся весь figure целиком, из-за чего подпись
+  // могла исчезнуть ещё до детерминированной упаковки JSON.
   for (let i = 0; i < 10; i += 1) {
-    const next = out.replace(/<figure\b[^>]*>[\s\S]*?<\/figure\s*>/gi, '');
+    const next = out.replace(/<figure\b[^>]*>([\s\S]*?)<\/figure\s*>/gi, (_match, inner) => {
+      let preserved = String(inner || '');
+      preserved = preserved.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
+      preserved = preserved.replace(/<img\b[^>]*\/?\s*>/gi, '');
+      return preserved;
+    });
     if (next === out) break;
     out = next;
   }
-  // <picture>…</picture> — аналогично.
+  // Для standalone picture сохраняем fallback-текст, если он есть.
   for (let i = 0; i < 10; i += 1) {
-    const next = out.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
+    const next = out.replace(/<picture\b[^>]*>([\s\S]*?)<\/picture\s*>/gi, (_match, inner) => {
+      let preserved = String(inner || '');
+      preserved = preserved.replace(/<source\b[^>]*\/?\s*>/gi, '');
+      preserved = preserved.replace(/<img\b[^>]*\/?\s*>/gi, '');
+      return preserved;
+    });
     if (next === out) break;
     out = next;
   }
-  // Одиночные/самозакрывающиеся <img …>.
-  out = out.replace(/<img\b[^>]*\/?>/gi, '');
+  // Одиночные/самозакрывающиеся img-элементы не являются текстом.
+  out = out.replace(/<img\b[^>]*\/?\s*>/gi, '');
   return out;
 }
 
@@ -1620,6 +1625,23 @@ function validateHeadingOrder(inputHtml, outputArray) {
 // Возвращает первый `choice` в OpenAI-совместимом формате
 // ({ message: { content }, finish_reason }). Сам прокси-роут живёт в
 // backend/src/routes/acfJson.routes.js и держит API-ключ Alibaba на сервере.
+function describeProviderFailure(error) {
+  const message = String(error?.message || error || '');
+  if (/Arrearage|overdue[- ]?payment|account is not in good standing|access denied/i.test(message)) {
+    return 'DashScope отклонил запрос из-за статуса аккаунта или оплаты (Arrearage).';
+  }
+  if (/Ошибка DashScope (401|403)|authentication or permission failed|unauthorized|forbidden/i.test(message)) {
+    return 'DashScope отклонил запрос: ключ недействителен или не имеет нужных прав.';
+  }
+  return '';
+}
+
+function pushWarningOnce(job, warning) {
+  if (!job || !warning) return;
+  if (!Array.isArray(job.warnings)) job.warnings = [];
+  if (!job.warnings.includes(warning)) job.warnings.push(warning);
+}
+
 async function callLlm({ systemPrompt, userPrompt }) {
   let response;
   try {
@@ -1915,6 +1937,11 @@ function addJob() {
     // детерминированный режим при сбое LLM-классификатора). Массив, чтобы
     // в будущем было куда копить разные диагностические сообщения.
     warnings:     [],
+    // Если провайдер вернул постоянную ошибку (например Arrearage),
+    // сохраняем причину и больше не повторяем заведомо бесполезные вызовы
+    // внутри этой JSON-задачи. Исходный HTML при этом продолжает собираться
+    // детерминированно без потерь.
+    providerIssue: '',
   };
   // Новые задачи — наверх списка, чтобы пользователь сразу видел свежесозданное.
   jobs.value.unshift(job);
@@ -1957,6 +1984,7 @@ function retryJob(jobId) {
   j.tokensOut  = 0;
   j.costRub    = 0;
   j.warnings   = [];
+  j.providerIssue = '';
   runQueue();
 }
 
@@ -2122,6 +2150,7 @@ async function runJob(job) {
 
     // ── Шаг 2: LLM-классификация acf_fc_layout по каждой секции ────────
     let layoutHints = null;
+    let llmBlockedReason = '';
     try {
       job.progress = 'LLM-классификатор: анализ секций…';
       const { hints, tokensIn, tokensOut } = await classifySectionsViaLLM(descriptors);
@@ -2132,9 +2161,18 @@ async function runJob(job) {
     } catch (classifyErr) {
       // Сбой классификатора (сеть/таймаут/невалидный JSON) НЕ блокирует
       // сборку: программный билдер сам выберет тип блока через эвристику.
+      // Постоянный отказ провайдера дополнительно отключает последующие
+      // LLM-fallback-вызовы этой же задачи — повторять Arrearage/401/403
+      // для каждой секции бессмысленно и только создаёт шум.
       console.warn('[AcfJson] LLM-классификатор упал, фолбэк на эвристику билдера:', classifyErr);
-      if (!Array.isArray(job.warnings)) job.warnings = [];
-      job.warnings.push(
+      const providerIssue = describeProviderFailure(classifyErr);
+      if (providerIssue) {
+        llmBlockedReason = providerIssue;
+        job.providerIssue = providerIssue;
+        pushWarningOnce(job, `${providerIssue} JSON продолжен программно; исходный текст секций не изменён.`);
+      }
+      pushWarningOnce(
+        job,
         `LLM-классификатор недоступен (${classifyErr.message || classifyErr}). `
         + 'Тип блока для каждой секции выбран встроенной эвристикой.'
       );
@@ -2175,6 +2213,19 @@ async function runJob(job) {
 
       if (!broken) continue;
 
+      // ── Детерминированный fallback после постоянной ошибки провайдера ──
+      // Не отправляем следующие секции в DashScope после Arrearage/401/403.
+      // buildRawSectionFallback кладёт полный sectionHtml в text без срезов.
+      if (llmBlockedReason) {
+        sec.blocks = buildRawSectionFallback(sec.sectionHtml);
+        pushWarningOnce(
+          job,
+          `Секция ${i + 1} из ${sections.length}: собрана программно после отказа LLM. `
+          + 'Исходный текст сохранён дословно.'
+        );
+        continue;
+      }
+
       // ── LLM-фолбэк на одну секцию ────────────────────────────────────
       job.progress = `LLM-фолбэк: секция ${i + 1} из ${sections.length}…`;
       try {
@@ -2197,6 +2248,12 @@ async function runJob(job) {
           `Секция ${i + 1} собрана LLM-фолбэком (программная упаковка не справилась).`
         );
       } catch (sectionErr) {
+        const providerIssue = describeProviderFailure(sectionErr);
+        if (providerIssue) {
+          llmBlockedReason = providerIssue;
+          job.providerIssue = providerIssue;
+          pushWarningOnce(job, `${providerIssue} Остальные секции будут собраны программно без повторных запросов.`);
+        }
         // LLM-фолбэк тоже не справился. Раньше это обрывало ВСЮ задачу,
         // и пользователь не получал ничего. Теперь — graceful fallback:
         // вставляем «сырой» blocks-блок с полным sectionHtml. Это гарантирует
@@ -2253,7 +2310,7 @@ async function runJob(job) {
     }
 
     // ── Шаг 5: склейка + глобальная пост-чистка + финальная валидация ──
-    const finalArray = [];
+    let finalArray = [];
     for (const sec of sections) {
       for (const b of sec.blocks) finalArray.push(b);
     }
@@ -2261,17 +2318,38 @@ async function runJob(job) {
 
     // Финальная сквозная валидация на всём HTML — страховка от того, что
     // postCleanupAcfArray случайно удалит фрагмент. В норме здесь всегда 0.
-    // Если что-то всё же зафиксировано — это ВНУТРЕННЯЯ ошибка постпроцессора
-    // (например, дедупликатор отрезал «лишнее»), но контент секций уже
-    // был сохранён через raw-фолбэк выше: лучше отдать пользователю JSON
-    // с warning, чем обрывать задачу.
-    const outPlain        = outputPlainText(finalArray);
-    const missing         = findMissingPhrases(html, outPlain);
-    const missingHeadings = findMissingHeadings(html, finalArray);
-    const levelMismatches = findHeadingLevelMismatches(html, finalArray);
-    // Phase 2 / С3.1+С3.2: дополнительные структурные валидаторы.
-    const duplicates      = findDuplicatedBlocks(finalArray);
-    const orderViolations = validateHeadingOrder(html, finalArray);
+    let outPlain        = outputPlainText(finalArray);
+    let missing         = findMissingPhrases(html, outPlain);
+    let missingHeadings = findMissingHeadings(html, finalArray);
+    let levelMismatches = findHeadingLevelMismatches(html, finalArray);
+    let duplicates      = findDuplicatedBlocks(finalArray);
+    let orderViolations = validateHeadingOrder(html, finalArray);
+
+    // Если после всех преобразований реально не найден текст/заголовок или
+    // нарушена иерархия, не отдаём потенциально усечённый результат. Полные
+    // снимки секций всё ещё лежат в `sections[].sectionHtml`; пересобираем
+    // итог из них одним универсальным blocks-блоком на секцию. Это безопаснее
+    // любого дополнительного LLM-запроса: модель не получает возможность
+    // дописать, перефразировать или обрезать исходник.
+    const preservationBroken = missing.length || missingHeadings.length || levelMismatches.length;
+    if (preservationBroken) {
+      finalArray = [];
+      for (const sec of sections) {
+        for (const block of buildRawSectionFallback(sec.sectionHtml)) finalArray.push(block);
+      }
+      postCleanupAcfArray(finalArray);
+      outPlain        = outputPlainText(finalArray);
+      missing         = findMissingPhrases(html, outPlain);
+      missingHeadings = findMissingHeadings(html, finalArray);
+      levelMismatches = findHeadingLevelMismatches(html, finalArray);
+      duplicates      = findDuplicatedBlocks(finalArray);
+      orderViolations = validateHeadingOrder(html, finalArray);
+      pushWarningOnce(
+        job,
+        'Финальная проверка обнаружила риск потери контента; все секции пересобраны программно из исходных HTML-снимков без LLM. Проверьте только визуальный тип блоков.'
+      );
+    }
+
     if (missing.length || missingHeadings.length || levelMismatches.length
         || duplicates.length || orderViolations.length) {
       const sampleP = missing.slice(0, 3).map((m) => `«${m}»`).join('; ');
@@ -2291,10 +2369,9 @@ async function runJob(job) {
           .join('; ');
         parts.push(`порядок h3 в секции (${orderViolations.length}): ${sampleO}`);
       }
-      if (!Array.isArray(job.warnings)) job.warnings = [];
-      job.warnings.push(
-        `Финальная пост-валидация JSON выявила потери, которые не были зафиксированы пер-секционной проверкой: ${parts.join('; ')}. `
-        + `Это внутренняя ошибка постпроцессора — JSON отдан как есть, но рекомендуется проверить указанные фрагменты вручную.`
+      pushWarningOnce(
+        job,
+        `Финальная пост-валидация JSON выявила проблемы: ${parts.join('; ')}. Проверьте результат вручную.`
       );
       console.warn('[AcfJson] post-validation issues:', { missing, missingHeadings, levelMismatches });
     }

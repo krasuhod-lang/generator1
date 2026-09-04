@@ -115,17 +115,32 @@ function stripH1(html) {
 function stripInlineMedia(html) {
   if (!html) return '';
   let out = String(html);
+  // Удаляем только media-узлы, но сохраняем текстовые узлы figure,
+  // прежде всего <figcaption>. Прежняя реализация удаляла весь <figure>
+  // целиком и могла потерять подпись/описание, хотя в JSON запрещено
+  // терять текст.
   for (let i = 0; i < 10; i += 1) {
-    const next = out.replace(/<figure\b[^>]*>[\s\S]*?<\/figure\s*>/gi, '');
+    const next = out.replace(/<figure\b[^>]*>([\s\S]*?)<\/figure\s*>/gi, (_match, inner) => {
+      let preserved = String(inner || '');
+      preserved = preserved.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
+      preserved = preserved.replace(/<img\b[^>]*\/?\s*>/gi, '');
+      return preserved;
+    });
     if (next === out) break;
     out = next;
   }
+  // Для самостоятельного picture сохраняем fallback-текст, если он есть.
   for (let i = 0; i < 10; i += 1) {
-    const next = out.replace(/<picture\b[^>]*>[\s\S]*?<\/picture\s*>/gi, '');
+    const next = out.replace(/<picture\b[^>]*>([\s\S]*?)<\/picture\s*>/gi, (_match, inner) => {
+      let preserved = String(inner || '');
+      preserved = preserved.replace(/<source\b[^>]*\/?\s*>/gi, '');
+      preserved = preserved.replace(/<img\b[^>]*\/?\s*>/gi, '');
+      return preserved;
+    });
     if (next === out) break;
     out = next;
   }
-  out = out.replace(/<img\b[^>]*\/?>/gi, '');
+  out = out.replace(/<img\b[^>]*\/?\s*>/gi, '');
   return out;
 }
 
@@ -354,16 +369,13 @@ function stripLeadingNumber(s) {
   return rest;
 }
 
-// Поле text/content имеет ограниченную ширину в ACF-UI WordPress'а:
-// длинные ярлыки переносятся уродливо и плохо читаются в админке. 90 —
-// эмпирический предел: помещается в одну строку при типичной ширине поля
-// и оставляет запас под суффикс «…».
-const TITLE_MAX_LEN = 90;
+// ВАЖНО: title — часть переносимого контента, а не только визуальный ярлык.
+// Раньше здесь стоял лимит 90 символов, из-за которого длинный <h2>
+// физически обрезался и затем попадал в JSON с «…». Поля ACF способны
+// принять полную строку, поэтому builder никогда не сокращает заголовки.
 function shortTitle(h2Node, fallback) {
   const raw = nodeText(h2Node) || fallback || '';
-  let s = stripLeadingNumber(raw);
-  if (s.length > TITLE_MAX_LEN) s = s.slice(0, TITLE_MAX_LEN - 1).trimEnd() + '…';
-  return s;
+  return stripLeadingNumber(raw);
 }
 
 // (Хелпер h2ToHtml удалён вместе с механизмом «sibling-h2».)
@@ -537,7 +549,10 @@ function _extractStepLikeItems(body) {
           titleStr = full.slice(0, dotIdx).trim();
           textHtml = `<p>${li.innerHTML}</p>`;
         } else {
-          titleStr = full.length > 60 ? full.slice(0, 60).trim() + '…' : full;
+          // Не сокращаем title: раньше длинный пункт терял хвост в поле
+          // items[].title. Полный HTML пункта также сохраняется в textHtml,
+          // поэтому ни слова/числа/артикулы не зависят от длины title.
+          titleStr = full;
           textHtml = `<p>${li.innerHTML}</p>`;
         }
       }
